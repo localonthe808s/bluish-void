@@ -7867,7 +7867,7 @@ function dayRangeAround(d, days){
       "&temperature_unit=fahrenheit" +
       "&windspeed_unit=mph" +
       "&precipitation_unit=inch" +
-      "&hourly=temperature_2m,apparent_temperature,relativehumidity_2m,precipitation_probability,precipitation,cloudcover,windspeed_10m,windgusts_10m,wind_direction_10m,visibility,pressure_msl,uv_index,weathercode,snowfall,rain" +
+      "&hourly=temperature_2m,apparent_temperature,relativehumidity_2m,dewpoint_2m,precipitation_probability,precipitation,cloudcover,windspeed_10m,windgusts_10m,wind_direction_10m,visibility,pressure_msl,uv_index,weathercode,snowfall,rain" +
       "&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,sunrise,sunset,uv_index_max,windspeed_10m_max,windgusts_10m_max,snowfall_sum,rain_sum,wind_direction_10m_dominant,showers_sum" +
       "&forecast_days=10";
 
@@ -7917,6 +7917,41 @@ function dayRangeAround(d, days){
 
           setText(locMetaEl, "Updated " + fmt12NoSuffixFromDate(now));
           if (tempEl) tempEl.style.opacity = "1";
+
+          // ── STORE GLOBALLY FOR TOOLTIP LIVE INSIGHTS ──
+          window._wxHourly = hourly;
+          window._wxDaily = daily;
+          window._wxNearestIdx = nearestIndex;
+          window._wxCurrent = {
+            temp: temp,
+            feels: feelsVal,
+            rh: typeof rh === "number" ? Math.round(rh) : null,
+            wind: typeof windSpd === "number" ? Math.round(windSpd) : null,
+            gust: typeof gust === "number" ? Math.round(gust) : null,
+            pressure: typeof sp === "number" ? sp : null,
+            uv: typeof uvNow === "number" ? uvNow : null,
+            dewpoint: hourly.dewpoint_2m ? Math.round(hourly.dewpoint_2m[nearestIndex]) : null,
+            cloudCover: hourly.cloudcover ? Math.round(hourly.cloudcover[nearestIndex]) : null,
+            visibility: hourly.visibility ? hourly.visibility[nearestIndex] : null,
+            precipProb: hourly.precipitation_probability ? hourly.precipitation_probability[nearestIndex] : null,
+            precip: hourly.precipitation ? hourly.precipitation[nearestIndex] : null,
+            snow: hourly.snowfall ? hourly.snowfall[nearestIndex] : null,
+            rain: hourly.rain ? hourly.rain[nearestIndex] : null,
+            weatherCode: hourly.weathercode ? hourly.weathercode[nearestIndex] : null,
+            windDir: hourly.wind_direction_10m ? hourly.wind_direction_10m[nearestIndex] : null,
+            hiToday: daily.temperature_2m_max ? Math.round(daily.temperature_2m_max[0]) : null,
+            loToday: daily.temperature_2m_min ? Math.round(daily.temperature_2m_min[0]) : null,
+            sunrise: daily.sunrise ? daily.sunrise[0] : null,
+            sunset: daily.sunset ? daily.sunset[0] : null,
+            // Pressure tendency — check 3hrs ago
+            pressureTrend: (function(){
+              if (!hourly.pressure_msl || nearestIndex < 3) return null;
+              var now3 = hourly.pressure_msl[nearestIndex];
+              var ago3 = hourly.pressure_msl[nearestIndex - 3];
+              if (typeof now3 !== 'number' || typeof ago3 !== 'number') return null;
+              return +(now3 - ago3).toFixed(1);
+            })()
+          };
 
           // Today hi/lo
           var hi = daily.temperature_2m_max[0];
@@ -9025,6 +9060,10 @@ var moonUrl = "https://svs.gsfc.nasa.gov/vis/a000000/a005100/a005187/frames/730x
                 swKp.textContent = kpVal.toFixed(1);
                 swG.textContent = gScale ? String(gScale) : "G0";
                 swVis.textContent = visLabel(auroraVisibilityPctFromKp(kpVal, LOCATION.lat));
+                // Cache globally
+                if (!window._swData) window._swData = {};
+                window._swData.kp = kpVal;
+                window._swData.gScale = gScale ? String(gScale) : "G0";
               }
             } catch(e2){}
           })
@@ -9041,20 +9080,134 @@ var moonUrl = "https://svs.gsfc.nasa.gov/vis/a000000/a005100/a005187/frames/730x
         if (plasma && plasma.length > 1){
           var ph = plasma[0];
           var speedIdx = ph.indexOf("speed");
+          var densIdx = ph.indexOf("density");
           var last = plasma[plasma.length-1];
           var spd = speedIdx >= 0 ? parseFloat(last[speedIdx]) : NaN;
+          var den = densIdx >= 0 ? parseFloat(last[densIdx]) : NaN;
           if (!isNaN(spd)) swWind.textContent = Math.round(spd) + " km/s";
+          // Cache globally
+          if (!window._swData) window._swData = {};
+          window._swData.speed = !isNaN(spd) ? Math.round(spd) : null;
+          window._swData.density = !isNaN(den) ? den : null;
         }
 
         if (mag && mag.length > 1){
           var mh = mag[0];
           var bzIdx = mh.indexOf("bz_gsm");
+          var btIdx = mh.indexOf("bt");
+          var bxIdx = mh.indexOf("bx_gsm");
+          var byIdx = mh.indexOf("by_gsm");
           var lastm = mag[mag.length-1];
           var bz = bzIdx >= 0 ? parseFloat(lastm[bzIdx]) : NaN;
+          var bt = btIdx >= 0 ? parseFloat(lastm[btIdx]) : NaN;
+          var bx = bxIdx >= 0 ? parseFloat(lastm[bxIdx]) : NaN;
+          var by = byIdx >= 0 ? parseFloat(lastm[byIdx]) : NaN;
           if (!isNaN(bz)) swBz.textContent = (bz >= 0 ? "+" : "") + bz.toFixed(1) + " nT";
+          // Cache globally
+          if (!window._swData) window._swData = {};
+          window._swData.bz = !isNaN(bz) ? bz : null;
+          window._swData.bt = !isNaN(bt) ? bt : null;
+          window._swData.bx = !isNaN(bx) ? bx : null;
+          window._swData.by = !isNaN(by) ? by : null;
         }
       } catch(e){}
     });
+
+    // ── GOES X-RAY FLUX (real-time flare detection) ──
+    fetchWithTimeout("https://services.swpc.noaa.gov/json/goes/primary/xrays-6-hour.json", null, 12000)
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        try {
+          if (!data || data.length < 2) return;
+          if (!window._swData) window._swData = {};
+          // data[0] is header, rest are time series
+          // Find the latest short-wavelength (0.05-0.4nm) and long (0.1-0.8nm) flux
+          var latest = data[data.length - 1];
+          var flux = parseFloat(latest.flux);
+          var energy = latest.energy || '';
+          if (!isNaN(flux) && energy.indexOf('0.1-0.8') >= 0) {
+            window._swData.xrayFlux = flux;
+            // Classify flare level
+            if (flux >= 1e-4) window._swData.xrayClass = 'X' + (flux / 1e-4).toFixed(1);
+            else if (flux >= 1e-5) window._swData.xrayClass = 'M' + (flux / 1e-5).toFixed(1);
+            else if (flux >= 1e-6) window._swData.xrayClass = 'C' + (flux / 1e-6).toFixed(1);
+            else if (flux >= 1e-7) window._swData.xrayClass = 'B' + (flux / 1e-7).toFixed(1);
+            else window._swData.xrayClass = 'A';
+          }
+          // Also get long-wavelength for the same timestamp
+          // Scan backwards for peak flux in last 6 hours
+          var peakFlux = 0, peakClass = 'A';
+          for (var xi = 1; xi < data.length; xi++) {
+            var xf = parseFloat(data[xi].flux);
+            var xe = data[xi].energy || '';
+            if (!isNaN(xf) && xe.indexOf('0.1-0.8') >= 0 && xf > peakFlux) {
+              peakFlux = xf;
+            }
+          }
+          if (peakFlux >= 1e-4) peakClass = 'X' + (peakFlux / 1e-4).toFixed(1);
+          else if (peakFlux >= 1e-5) peakClass = 'M' + (peakFlux / 1e-5).toFixed(1);
+          else if (peakFlux >= 1e-6) peakClass = 'C' + (peakFlux / 1e-6).toFixed(1);
+          else if (peakFlux >= 1e-7) peakClass = 'B' + (peakFlux / 1e-7).toFixed(1);
+          window._swData.xrayPeak6hr = peakFlux;
+          window._swData.xrayPeakClass = peakClass;
+        } catch(e){}
+      }).catch(function(){});
+
+    // ── SWPC ALERTS & NOTIFICATIONS (CME watches, solar flare alerts, geomag warnings) ──
+    fetchWithTimeout("https://services.swpc.noaa.gov/products/alerts.json", null, 12000)
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        try {
+          if (!data || !data.length) return;
+          if (!window._swData) window._swData = {};
+          window._swData.spaceAlerts = [];
+          // Parse last 24 hrs of alerts
+          var now = Date.now();
+          for (var ai = data.length - 1; ai >= Math.max(0, data.length - 50); ai--) {
+            var a = data[ai];
+            var issued = a.issue_datetime ? new Date(a.issue_datetime).getTime() : 0;
+            if (now - issued > 86400000) continue; // >24hr old, skip
+            var msg = (a.message || '').substring(0, 300);
+            var product = a.product_id || '';
+            // Categorize
+            var alertObj = { msg: msg, product: product, time: a.issue_datetime };
+            if (/X-ray|flare|FLR/i.test(msg)) alertObj.type = 'flare';
+            else if (/CME|coronal mass/i.test(msg)) alertObj.type = 'cme';
+            else if (/geomagnetic|K-index|Kp/i.test(msg)) alertObj.type = 'geomag';
+            else if (/solar wind|shock/i.test(msg)) alertObj.type = 'wind';
+            else if (/radio|blackout|HF/i.test(msg)) alertObj.type = 'radio';
+            else alertObj.type = 'other';
+            window._swData.spaceAlerts.push(alertObj);
+          }
+        } catch(e){}
+      }).catch(function(){});
+
+    // ── SOLAR EVENT REPORTS (recent flares, CMEs, filament eruptions) ──
+    fetchWithTimeout("https://services.swpc.noaa.gov/json/edited_events.json", null, 12000)
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        try {
+          if (!data || !data.length) return;
+          if (!window._swData) window._swData = {};
+          window._swData.solarEvents = [];
+          // Last 48 hours of events
+          var now = Date.now();
+          for (var si = data.length - 1; si >= Math.max(0, data.length - 100); si--) {
+            var ev = data[si];
+            var evTime = ev.begin_datetime ? new Date(ev.begin_datetime).getTime() : 0;
+            if (now - evTime > 172800000) continue; // >48hr
+            window._swData.solarEvents.push({
+              type: ev.type || '',
+              classType: ev.classtype || '',
+              begin: ev.begin_datetime || '',
+              end: ev.end_datetime || '',
+              region: ev.active_region || '',
+              location: ev.location || '',
+              freq: ev.frequency || ''
+            });
+          }
+        } catch(e){}
+      }).catch(function(){});
   }
 
   /* =========================================================
@@ -10907,8 +11060,491 @@ var moonUrl = "https://svs.gsfc.nasa.gov/vis/a000000/a005100/a005187/frames/730x
     if (!wasActive) {
       // Inject live data for aurora popup
       if (id === 'aurora-popup') injectLiveAuroraData(popup);
+      // Inject live solar wind data for other space popups
+      if (id === 'lasco-c3-popup' || id === 'lasco-c2-popup') injectLiveLascoData(popup);
+      if (id === 'pfss-popup') injectLivePfssData(popup);
+      if (id === 'suvi-popup') injectLiveSuviData(popup);
+      if (id === 'enlil-popup') injectLiveEnlilData(popup);
+      if (id === 'geo-popup') injectLiveGeoData(popup);
       popup.classList.add('active');
     }
+  }
+
+  // ── SHARED: Observing conditions cross-reference for space widgets ──
+  function buildObservingConditions(context) {
+    var wx = window._wxCurrent;
+    if (!wx) return '';
+    var out = '';
+    var isDark = (function(){ if (!wx.sunrise || !wx.sunset) return null; var now = new Date(); var sr = new Date(wx.sunrise); var ss = new Date(wx.sunset); return now < sr || now > ss; })();
+    var clear = wx.cloudCover != null && wx.cloudCover < 25;
+    var partlyCloudy = wx.cloudCover != null && wx.cloudCover >= 25 && wx.cloudCover < 60;
+    var overcast = wx.cloudCover != null && wx.cloudCover >= 80;
+    var goodVis = wx.visibility != null && wx.visibility > 8000;
+    var foggy = wx.rh != null && wx.rh > 95 && wx.visibility != null && wx.visibility < 3000;
+
+    out += '<div style="background:rgba(120,160,255,.06);border-radius:6px;padding:6px 8px;margin-top:6px;border-left:2px solid rgba(120,160,255,.4);">';
+    out += '<div style="font-weight:600;font-size:.54rem;color:#78a0ff;margin-bottom:3px;">🔗 SKY CONDITIONS AT YOUR LOCATION</div>';
+    out += '<div style="display:grid;grid-template-columns:auto 1fr;gap:1px 8px;font-size:.50rem;">';
+    if (wx.cloudCover != null) out += '<span style="opacity:.7;">Cloud cover:</span><span>' + wx.cloudCover + '%' + (clear ? ' <span style="color:#4f8;">✓ Clear</span>' : overcast ? ' <span style="color:#f44;">✗ Overcast</span>' : partlyCloudy ? ' <span style="color:#f90;">◐ Partly cloudy</span>' : '') + '</span>';
+    if (isDark != null) out += '<span style="opacity:.7;">Daylight:</span><span>' + (isDark ? '<span style="color:#4f8;">🌙 Dark — observing window open</span>' : '<span style="color:#f90;">☀ Daylight — ' + context + ' not visible</span>') + '</span>';
+    if (wx.visibility != null) { var vm = (wx.visibility * 0.000621371).toFixed(1); out += '<span style="opacity:.7;">Visibility:</span><span>' + vm + ' mi' + (goodVis ? '' : foggy ? ' <span style="color:#f44;">(foggy)</span>' : ' <span style="color:#f90;">(hazy)</span>') + '</span>'; }
+    if (wx.precipProb != null && wx.precipProb > 40) out += '<span style="opacity:.7;">Precip prob:</span><span style="color:#f90;">' + wx.precipProb + '% — may interfere</span>';
+    out += '</div>';
+
+    // Verdict
+    out += '<div style="font-size:.50rem;margin-top:3px;">';
+    if (isDark && clear && goodVis) out += '<span style="color:#4f8;font-weight:600;">✓ Excellent observing conditions right now for ' + context + '.</span>';
+    else if (isDark && clear) out += '<span style="color:#4f8;">Good observing conditions — dark and clear.</span>';
+    else if (isDark && partlyCloudy) out += '<span style="color:#f90;">Partial clouds — look for gaps. ' + context + ' may be visible through breaks.</span>';
+    else if (isDark && overcast) out += '<span style="color:#f44;">Overcast skies block ' + context + ' viewing. Monitor cloud cover forecast for clear windows.</span>';
+    else if (isDark === false && clear) out += 'Clear skies but still daylight. ' + context + ' observing begins after sunset' + (wx.sunset ? ' (' + new Date(wx.sunset).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + ' local)' : '') + '.';
+    else if (isDark === false) out += 'Daylight + clouds. Check forecast for clear skies after dark for ' + context + ' viewing.';
+    else out += 'Check cloud cover and darkness for observing feasibility.';
+    out += '</div></div>';
+    return out;
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // SOLAR EVENT CHAIN — Builds a narrative of where we are in the
+  // sunspot → flare → CME → propagation → impact → aurora sequence
+  // Each popup gets told its role AND the current state of ALL stages
+  // ══════════════════════════════════════════════════════════════════
+  function buildSolarChain(stage) {
+    var sw = window._swData || {};
+    var out = '';
+    var hasXray = sw.xrayClass != null;
+    var hasAlerts = sw.spaceAlerts && sw.spaceAlerts.length > 0;
+    var hasEvents = sw.solarEvents && sw.solarEvents.length > 0;
+
+    // ── Detect what's happening at each stage ──
+    var chain = {};
+
+    // STAGE 1: Flare activity (X-ray flux)
+    chain.flareActive = false;
+    chain.flareClass = sw.xrayClass || null;
+    chain.flarePeak = sw.xrayPeakClass || null;
+    if (hasXray) {
+      var fc = sw.xrayClass.charAt(0);
+      if (fc === 'M' || fc === 'X') chain.flareActive = true;
+    }
+    // Check event reports for recent flares
+    chain.recentFlares = [];
+    chain.recentCMEs = [];
+    chain.recentFilaments = [];
+    if (hasEvents) {
+      sw.solarEvents.forEach(function(ev) {
+        if (/FLA|XRA/i.test(ev.type)) chain.recentFlares.push(ev);
+        if (/CME/i.test(ev.type)) chain.recentCMEs.push(ev);
+        if (/FIL|DSF/i.test(ev.type)) chain.recentFilaments.push(ev);
+      });
+    }
+    // Check SWPC alerts for CME/flare notifications
+    chain.cmeWatch = false;
+    chain.flareAlert = false;
+    chain.geomagWatch = false;
+    if (hasAlerts) {
+      sw.spaceAlerts.forEach(function(a) {
+        if (a.type === 'cme') chain.cmeWatch = true;
+        if (a.type === 'flare') chain.flareAlert = true;
+        if (a.type === 'geomag') chain.geomagWatch = true;
+      });
+    }
+
+    // STAGE 2: CME in progress
+    chain.cmeDetected = chain.recentCMEs.length > 0 || chain.cmeWatch;
+
+    // STAGE 3: Solar wind shows impact
+    chain.impactInProgress = (sw.speed > 500 && sw.density > 8) || (sw.speed > 600 && sw.density > 5);
+    chain.shockDetected = sw.speed > 600 && sw.density > 15;
+
+    // STAGE 4: Geomagnetic response
+    chain.stormActive = sw.kp != null && sw.kp >= 5;
+    chain.substormLikely = sw.bz != null && sw.bz <= -10;
+    chain.reconnectionActive = sw.bz != null && sw.bz <= -5;
+
+    // ── Determine the chain narrative based on which stage we're in ──
+    // Find the "hottest" stage
+    var chainPhase = 'quiet';
+    if (chain.stormActive || chain.shockDetected) chainPhase = 'impact';
+    else if (chain.impactInProgress) chainPhase = 'arrival';
+    else if (chain.cmeDetected && chain.flareActive) chainPhase = 'eruption';
+    else if (chain.flareActive || chain.recentFlares.length > 0) chainPhase = 'flare';
+    else if (chain.recentFilaments.length > 0) chainPhase = 'filament';
+
+    // Don't show chain panel if nothing interesting
+    if (chainPhase === 'quiet' && !hasXray) return '';
+
+    out += '<div style="background:rgba(167,139,250,.08);border-radius:6px;padding:6px 8px;margin-top:6px;border-left:2px solid rgba(167,139,250,.5);">';
+    out += '<div style="font-weight:600;font-size:.54rem;color:#a78bfa;margin-bottom:4px;">☀→🌊→🧲→🌌 SOLAR EVENT CHAIN</div>';
+
+    // Visual chain status bar
+    var stages = [
+      { id: 'source', icon: '☀', label: 'Sun', active: chain.flareActive || chain.recentFlares.length > 0 },
+      { id: 'eruption', icon: '💥', label: 'Flare/CME', active: chain.cmeDetected || chain.flareActive },
+      { id: 'transit', icon: '🌊', label: 'Transit', active: chain.cmeDetected && !chain.impactInProgress },
+      { id: 'impact', icon: '💨', label: 'Impact', active: chain.impactInProgress || chain.shockDetected },
+      { id: 'geomag', icon: '🧲', label: 'Storm', active: chain.stormActive || chain.reconnectionActive },
+      { id: 'aurora', icon: '🌌', label: 'Aurora', active: chain.stormActive && sw.kp >= 5 }
+    ];
+    out += '<div style="display:flex;gap:2px;margin-bottom:5px;font-size:.44rem;">';
+    stages.forEach(function(s) {
+      var bg = s.active ? 'rgba(167,139,250,.3)' : 'rgba(255,255,255,.05)';
+      var col = s.active ? '#a78bfa' : 'rgba(255,255,255,.35)';
+      var glow = (s.id === stage) ? 'box-shadow:0 0 6px rgba(167,139,250,.5);' : '';
+      var border = (s.id === stage) ? 'border:1px solid #a78bfa;' : 'border:1px solid transparent;';
+      out += '<div style="flex:1;text-align:center;padding:2px 1px;border-radius:4px;background:' + bg + ';color:' + col + ';' + glow + border + '">';
+      out += s.icon + '<br>' + s.label;
+      out += '</div>';
+    });
+    out += '</div>';
+
+    // ── Stage-specific narrative ──
+    out += '<div style="font-size:.50rem;">';
+
+    if (stage === 'source') {
+      // SUVI / PFSS — what's the flare potential?
+      if (hasXray) out += '<b>X-ray flux:</b> ' + sw.xrayClass + ' (6hr peak: ' + (sw.xrayPeakClass || '?') + '). ';
+      if (chain.flareActive) {
+        out += '<span style="color:#f90;">Active flaring detected. </span>';
+        if (chain.recentFlares.length > 0) {
+          var rf = chain.recentFlares[0];
+          out += 'Recent: ' + (rf.classType || 'unknown class') + ' from region ' + (rf.region || '?') + '. ';
+        }
+        out += 'Watch for bright active regions — any complex ones near disk center could launch an Earth-directed CME. <b>Next step:</b> Check LASCO C2 for eruption within 30-60 min of a flare.';
+      } else if (chain.recentFlares.length > 0) {
+        var rf2 = chain.recentFlares[0];
+        out += 'Recent flare: ' + (rf2.classType || '?') + ' from AR ' + (rf2.region || '?') + '. Region may still be capable of further activity. Monitor for increasing brightness/complexity on SUVI.';
+      } else {
+        out += 'No significant flaring. Look for bright yellow regions (active regions) on SUVI thematic map and complex closed-loop structures on PFSS. Sheared fields = higher flare potential.';
+      }
+      if (chain.recentFilaments.length > 0) {
+        out += '<br><span style="color:#e67e22;">Filament eruption detected</span> — check LASCO for associated CME. Filaments carry massive plasma + magnetic field.';
+      }
+    }
+
+    else if (stage === 'eruption') {
+      // LASCO C2/C3 — connecting flares to CMEs
+      if (chain.flareActive || chain.recentFlares.length > 0) {
+        if (hasXray) out += '<b>Current X-ray:</b> ' + sw.xrayClass + '. ';
+        if (chain.recentFlares.length > 0) {
+          var rf3 = chain.recentFlares[0];
+          out += '<b>Source:</b> ' + (rf3.classType || '?') + ' flare from AR ' + (rf3.region || '?') + (rf3.location ? ' at ' + rf3.location : '') + '. ';
+          if (rf3.location && /[NS]\d+[EW]\d+/i.test(rf3.location)) {
+            var locMatch = rf3.location.match(/([EW])(\d+)/i);
+            if (locMatch) {
+              var dir = locMatch[1].toUpperCase();
+              var deg = parseInt(locMatch[2]);
+              if (dir === 'W' && deg < 45) out += '<span style="color:#f44;">EARTH-FACING — any CME from this location is aimed at us.</span> ';
+              else if (dir === 'E' && deg < 30) out += '<span style="color:#f90;">Near disk center — moderate Earth-impact probability.</span> ';
+              else if (deg > 60) out += 'Near the limb — CME likely directed away from Earth. ';
+            }
+          }
+        }
+        out += '<b>Look for:</b> Bright expanding arc/bubble in C2 within 30-60 min of flare. Halo CME (expands around entire disk) = aimed at Earth. Track into C3 for speed estimate.';
+      }
+      if (chain.cmeWatch) {
+        out += '<br><span style="color:#f44;">⚠ SWPC has issued a CME watch.</span> Check Enlil for modeled arrival time.';
+      }
+      if (chain.recentCMEs.length > 0) {
+        out += '<br><b>Recent CMEs:</b> ' + chain.recentCMEs.length + ' in last 48hr. ';
+      }
+      if (!chain.flareActive && !chain.cmeDetected) {
+        out += 'No active eruptions. Scan for faint expanding structures — slow CMEs can be hard to see but still impact Earth. Compare consecutive frames.';
+      }
+    }
+
+    else if (stage === 'transit') {
+      // Enlil — CME propagation
+      if (chain.cmeDetected) {
+        out += '<span style="color:#f90;"><b>CME in transit.</b></span> ';
+        if (chain.recentFlares.length > 0) {
+          var rf4 = chain.recentFlares[0];
+          out += 'Source: ' + (rf4.classType || '?') + ' flare. ';
+        }
+        out += 'The Enlil model shows the CME as a bright blob propagating through the heliosphere. Track its leading edge toward the green dot (Earth). ';
+        out += '<b>Arrival estimate:</b> Fast CMEs (>1000 km/s in LASCO) arrive in 15-24 hours. Moderate (500-1000) in 2-3 days. Slow (<500) in 3-4 days. ';
+        out += '<b>Next step:</b> Watch DSCOVR real-time data for sudden speed/density jump = CME arrival at L1.';
+      }
+      if (chain.cmeWatch) {
+        out += '<br><span style="color:#f44;">SWPC CME watch active — arrival expected within the next 24-48 hours based on Enlil modeling.</span>';
+      }
+      if (!chain.cmeDetected) {
+        out += 'No CMEs currently tracked. The Enlil spiral pattern shows background solar wind. Coronal hole streams appear as fast-wind sectors (brighter colors) in the spiral.';
+      }
+    }
+
+    else if (stage === 'impact') {
+      // DSCOVR / Geospace — CME hitting Earth
+      if (chain.shockDetected) {
+        out += '<span style="color:#f44;"><b>⚠ INTERPLANETARY SHOCK DETECTED.</b> Speed ' + (sw.speed || '?') + ' km/s, density ' + (sw.density ? sw.density.toFixed(1) : '?') + ' p/cm³. This is likely a CME impact. </span>';
+        out += 'The magnetosphere is being compressed. ';
+        if (chain.reconnectionActive) out += '<span style="color:#f44;">Bz is strongly south (' + sw.bz.toFixed(1) + ' nT) — <b>magnetic reconnection active</b>. Energy pouring into magnetosphere. Expect rapid aurora intensification.</span>';
+        else if (sw.bz > 0) out += 'Bz is currently north — magnetosphere holding. If Bz turns south in the CME magnetic cloud (often happens hours after initial shock), aurora will erupt rapidly.';
+      } else if (chain.impactInProgress) {
+        out += '<b>Elevated solar wind:</b> Speed ' + (sw.speed || '?') + ' km/s. ';
+        if (sw.density > 8) out += 'High density (' + sw.density.toFixed(1) + ' p/cm³) suggests CME material or CIR compression. ';
+        if (chain.reconnectionActive) out += 'Bz south (' + sw.bz.toFixed(1) + ' nT) — aurora likely at Kp ' + (sw.kp || '?') + '.';
+      }
+      if (chain.flareActive) {
+        out += '<br><b>Upstream:</b> Active flaring continues. Additional CMEs could compound the current event.';
+      }
+    }
+
+    else if (stage === 'geomag') {
+      // Magnetosphere response
+      if (chain.stormActive) {
+        out += '<span style="color:#f44;"><b>GEOMAGNETIC STORM IN PROGRESS</b> (Kp ' + sw.kp.toFixed(1) + ', ' + (sw.gScale || '?') + '). </span>';
+        if (chain.shockDetected) out += 'Driven by CME impact. ';
+        else if (sw.speed > 500) out += 'Driven by high-speed solar wind. ';
+        if (chain.reconnectionActive) out += 'Active reconnection (Bz ' + sw.bz.toFixed(1) + ' nT) — substorm breakups producing bright aurora.';
+      } else if (chain.reconnectionActive) {
+        out += 'Bz is southward (' + sw.bz.toFixed(1) + ' nT) — magnetic energy loading into magnetotail. Substorm aurora likely even without formal storm threshold.';
+      }
+      if (chain.geomagWatch) out += '<br><span style="color:#f90;">SWPC geomagnetic storm watch active.</span>';
+    }
+
+    else if (stage === 'aurora') {
+      // Aurora — the end result
+      if (chain.stormActive) {
+        out += '<b>Storm driving aurora:</b> ';
+        if (chain.shockDetected) out += 'CME impact → ';
+        else if (sw.speed > 500) out += 'Fast solar wind → ';
+        if (chain.reconnectionActive) out += 'Reconnection active → ';
+        out += 'Kp ' + sw.kp.toFixed(1) + ' (' + (sw.gScale || '?') + '). ';
+        out += 'The entire chain is active from source to aurora.';
+      }
+      if (chain.cmeWatch && !chain.stormActive) {
+        out += 'CME approaching — aurora possible when it arrives. Watch DSCOVR for the speed/density jump.';
+      }
+      if (chain.flareActive && !chain.stormActive && !chain.cmeWatch) {
+        out += 'Active flaring on the Sun. If an Earth-directed CME was launched, aurora could follow in 1-3 days. Check LASCO and Enlil.';
+      }
+    }
+
+    else {
+      // Quiet — still show X-ray level as baseline monitoring
+      if (hasXray) {
+        out += '<b>X-ray background:</b> ' + sw.xrayClass + ' (6hr peak: ' + (sw.xrayPeakClass || '?') + '). ';
+        var fc2 = (sw.xrayClass || 'A').charAt(0);
+        if (fc2 === 'C') out += 'Low-level C-class activity — minor active regions present. Watch for escalation to M-class.';
+        else if (fc2 === 'B' || fc2 === 'A') out += 'Background level. No significant activity. Good time to learn the baseline appearance of each widget.';
+      }
+    }
+
+    out += '</div></div>';
+    return out;
+  }
+
+  // ── LIVE INJECTION: LASCO C2/C3 ──
+  function injectLiveLascoData(popup) {
+    var sw = window._swData;
+    if (!sw) return;
+    var live = '<div style="background:rgba(255,255,255,.08);border-radius:8px;padding:8px 10px;margin:10px 0;border-left:3px solid ';
+    var speed = sw.speed, bz = sw.bz, den = sw.density, kp = sw.kp;
+
+    // Assess CME arrival state
+    var cmeArrival = false;
+    if (speed > 600 && den > 10) cmeArrival = true;
+    var col = cmeArrival ? '#f44' : (speed > 500 ? '#f90' : '#4a9');
+    var label = cmeArrival ? 'POSSIBLE CME IN PROGRESS' : (speed > 500 ? 'ELEVATED SOLAR WIND' : 'QUIET');
+
+    live += col + ';">';
+    live += '<div style="font-weight:700;font-size:.62rem;color:' + col + ';margin-bottom:4px;">📡 REAL-TIME SPACE WEATHER — ' + label + '</div>';
+    live += '<div style="display:grid;grid-template-columns:auto 1fr;gap:2px 8px;font-size:.52rem;">';
+    if (speed != null) live += '<span style="opacity:.7;">Solar wind:</span><span>' + speed + ' km/s</span>';
+    if (den != null) live += '<span style="opacity:.7;">Density:</span><span>' + den.toFixed(1) + ' p/cm³</span>';
+    if (bz != null) live += '<span style="opacity:.7;">IMF Bz:</span><span>' + (bz >= 0 ? '+' : '') + bz.toFixed(1) + ' nT</span>';
+    if (kp != null) live += '<span style="opacity:.7;">Kp index:</span><span>' + kp.toFixed(1) + '</span>';
+    live += '</div>';
+
+    if (cmeArrival) {
+      live += '<div style="color:#f44;font-size:.52rem;margin-top:4px;">⚠ High speed + elevated density suggests a CME or strong CIR may be impacting Earth now. Look at the coronagraph for any halo CMEs in the last 1-3 days that could be the source. Check Enlil for arrival confirmation.</div>';
+    } else if (speed > 500) {
+      live += '<div style="font-size:.52rem;margin-top:4px;">Solar wind speed is elevated — likely a coronal hole high-speed stream or CME glancing blow. Watch for new CMEs in the coronagraph expanding toward Earth. Any halo CME you see now would arrive in 1-3 days.</div>';
+    } else {
+      live += '<div style="font-size:.52rem;margin-top:4px;">Background solar wind is nominal. Any new CMEs visible in the coronagraph would take 1-4 days to reach Earth depending on speed. Fast halo CMEs (crossing the C3 field in <1 hour) can arrive in under 24 hours.</div>';
+    }
+    live += '</div>';
+    // Cross-reference: if a CME is in progress or solar wind elevated, note aurora potential + sky conditions
+    if (cmeArrival || speed > 500) {
+      live += buildObservingConditions('aurora from CME/solar wind impact');
+    }
+    live += buildSolarChain('eruption');
+
+    var html = popup.innerHTML;
+    var insertAfter = html.indexOf('Update cadence:');
+    if (insertAfter > 0) {
+      var lineEnd = html.indexOf('.', insertAfter);
+      if (lineEnd > 0) {
+        popup.innerHTML = html.substring(0, lineEnd + 1) + '<br><br>' + live + html.substring(lineEnd + 1);
+        return;
+      }
+    }
+    popup.innerHTML = html + '<br><br>' + live;
+  }
+
+  // ── LIVE INJECTION: SDO PFSS ──
+  function injectLivePfssData(popup) {
+    var sw = window._swData;
+    if (!sw) return;
+    var live = '<div style="background:rgba(255,255,255,.08);border-radius:8px;padding:8px 10px;margin:10px 0;border-left:3px solid ';
+    var speed = sw.speed, kp = sw.kp;
+    var chStream = speed > 500;
+
+    var col = chStream ? '#f90' : '#4a9';
+    live += col + ';">';
+    live += '<div style="font-weight:700;font-size:.62rem;color:' + col + ';margin-bottom:4px;">📡 CORONAL HOLE WIND CHECK — ' + (chStream ? 'ELEVATED WIND DETECTED' : 'BACKGROUND') + '</div>';
+    live += '<div style="font-size:.52rem;">';
+    if (speed != null) live += 'Current solar wind: <b>' + speed + ' km/s</b>. ';
+    if (chStream) {
+      live += 'Elevated speed suggests a <span class="k">coronal hole high-speed stream (CH HSS)</span> is currently reaching Earth. Look for large dark regions with open (green) field lines near or just past disk center on the PFSS image — that\'s likely the source. ';
+      live += 'This stream will persist for 2-3 days as the coronal hole rotates past Earth\'s connection point on the Parker spiral.';
+    } else {
+      live += 'No coronal hole stream detected. Look for dark regions with green/magenta open field lines on the image. If a large coronal hole with green (Earth-directed) lines is approaching disk center, expect elevated solar wind in 2-4 days.';
+    }
+    if (kp != null && kp >= 4) live += '<br><br>Current Kp ' + kp.toFixed(1) + ' indicates active geomagnetic conditions — likely driven by what you see on this chart.';
+    live += '</div></div>';
+    if (chStream || (kp != null && kp >= 4)) {
+      live += buildObservingConditions('aurora from coronal hole stream');
+    }
+    live += buildSolarChain('source');
+
+    var html = popup.innerHTML;
+    popup.innerHTML = html + '<br><br>' + live;
+  }
+
+  // ── LIVE INJECTION: SUVI ──
+  function injectLiveSuviData(popup) {
+    var sw = window._swData;
+    if (!sw) return;
+    var live = '<div style="background:rgba(255,255,255,.08);border-radius:8px;padding:8px 10px;margin:10px 0;border-left:3px solid ';
+    var kp = sw.kp, speed = sw.speed, bz = sw.bz;
+    var geoActive = kp != null && kp >= 4;
+
+    var col = geoActive ? '#f90' : '#4a9';
+    live += col + ';">';
+    live += '<div style="font-weight:700;font-size:.62rem;color:' + col + ';margin-bottom:4px;">📡 SOLAR ACTIVITY STATUS</div>';
+    live += '<div style="display:grid;grid-template-columns:auto 1fr;gap:2px 8px;font-size:.52rem;">';
+    if (kp != null) live += '<span style="opacity:.7;">Kp index:</span><span>' + kp.toFixed(1) + ' (' + sw.gScale + ')</span>';
+    if (speed != null) live += '<span style="opacity:.7;">Solar wind:</span><span>' + speed + ' km/s</span>';
+    if (bz != null) live += '<span style="opacity:.7;">IMF Bz:</span><span>' + (bz >= 0 ? '+' : '') + bz.toFixed(1) + ' nT</span>';
+    live += '</div>';
+    live += '<div style="font-size:.52rem;margin-top:4px;">';
+    if (geoActive) {
+      live += 'Geomagnetic activity elevated. Cross-reference with the thematic map: <b style="color:#2ecc71;">green regions (coronal holes)</b> near disk center likely driving the current wind, and <b style="color:#f1c40f;">yellow regions (active regions)</b> could produce flares that create additional CMEs.';
+    } else {
+      live += 'Quiet conditions. Monitor <b style="color:#f1c40f;">yellow/bright regions</b> for flare potential and <b style="color:#2ecc71;">green regions</b> approaching disk center for upcoming CH HSS activity. <b style="color:#e67e22;">Orange prominences</b> on the limb could erupt as CMEs.';
+    }
+    live += '</div></div>';
+    if (geoActive) {
+      live += buildObservingConditions('aurora from active solar conditions');
+    }
+    live += buildSolarChain('source');
+
+    var html = popup.innerHTML;
+    popup.innerHTML = html + '<br><br>' + live;
+  }
+
+  // ── LIVE INJECTION: WSA-ENLIL ──
+  function injectLiveEnlilData(popup) {
+    var sw = window._swData;
+    if (!sw) return;
+    var live = '<div style="background:rgba(255,255,255,.08);border-radius:8px;padding:8px 10px;margin:10px 0;border-left:3px solid ';
+    var speed = sw.speed, den = sw.density, bz = sw.bz, kp = sw.kp, bt = sw.bt;
+
+    // Dynamic pressure = 1.6726e-6 * density * speed^2 (in nPa when density in p/cm³, speed in km/s)
+    var dynPres = (speed != null && den != null) ? (1.6726e-6 * den * speed * speed).toFixed(1) : null;
+    var isDisturbed = (speed > 500 && den > 8) || (kp != null && kp >= 5);
+
+    var col = isDisturbed ? '#f44' : (speed > 450 ? '#f90' : '#4a9');
+    live += col + ';">';
+    live += '<div style="font-weight:700;font-size:.62rem;color:' + col + ';margin-bottom:4px;">📡 MEASURED vs MODELED — DSCOVR L1 DATA</div>';
+    live += '<div style="display:grid;grid-template-columns:auto 1fr;gap:2px 8px;font-size:.52rem;">';
+    if (speed != null) live += '<span style="opacity:.7;">Measured speed:</span><span>' + speed + ' km/s</span>';
+    if (den != null) live += '<span style="opacity:.7;">Measured density:</span><span>' + den.toFixed(1) + ' p/cm³</span>';
+    if (dynPres) live += '<span style="opacity:.7;">Dynamic pressure:</span><span>' + dynPres + ' nPa</span>';
+    if (bt != null) live += '<span style="opacity:.7;">IMF Bt:</span><span>' + bt.toFixed(1) + ' nT (total field)</span>';
+    if (bz != null) live += '<span style="opacity:.7;">IMF Bz:</span><span>' + (bz >= 0 ? '+' : '') + bz.toFixed(1) + ' nT</span>';
+    live += '</div>';
+    live += '<div style="font-size:.52rem;margin-top:4px;">';
+    live += '<b>Compare these measured values with the Enlil model\'s prediction:</b> ';
+    if (isDisturbed) {
+      live += 'Current conditions are disturbed — either a CME impact or strong CIR is hitting Earth. The Enlil animation should show a bright structure at Earth\'s position right now. If it doesn\'t, the model missed this event or underpredicted its strength. ';
+      if (bz != null && bz <= -10) live += '<br><span style="color:#f44;">Bz is strongly southward — remember Enlil does NOT predict Bz. The actual storm impact is more severe than the model could have shown.</span>';
+    } else {
+      live += 'Conditions are relatively quiet. Compare with Enlil to see if any structures (CMEs or CIRs) are approaching Earth in the coming hours/days. The model\'s speed and density predictions should roughly match these measured values during quiet periods.';
+    }
+    live += '</div></div>';
+    if (isDisturbed) {
+      live += buildObservingConditions('aurora during geomagnetic disturbance');
+    }
+    live += buildSolarChain('transit');
+
+    var html = popup.innerHTML;
+    var insertAfter = html.indexOf('Update cadence:');
+    if (insertAfter > 0) {
+      var lineEnd = html.indexOf('.', insertAfter);
+      if (lineEnd > 0) {
+        popup.innerHTML = html.substring(0, lineEnd + 1) + '<br><br>' + live + html.substring(lineEnd + 1);
+        return;
+      }
+    }
+    popup.innerHTML = html + '<br><br>' + live;
+  }
+
+  // ── LIVE INJECTION: GEOSPACE MAGNETOSPHERE ──
+  function injectLiveGeoData(popup) {
+    var sw = window._swData;
+    if (!sw) return;
+    var live = '<div style="background:rgba(255,255,255,.08);border-radius:8px;padding:8px 10px;margin:10px 0;border-left:3px solid ';
+    var speed = sw.speed, den = sw.density, bz = sw.bz, kp = sw.kp, bt = sw.bt;
+    var dynPres = (speed != null && den != null) ? (1.6726e-6 * den * speed * speed) : null;
+
+    // Estimate magnetopause standoff distance (Shue et al. 1998 simplified)
+    var mpDist = null;
+    if (dynPres != null && dynPres > 0) {
+      mpDist = (11.4 * Math.pow(dynPres, -1/6.6)).toFixed(1);
+    }
+
+    var isStorm = kp != null && kp >= 5;
+    var isSubstorm = bz != null && bz <= -5 && speed > 400;
+    var col = isStorm ? '#f44' : (isSubstorm ? '#f90' : '#4a9');
+    var label = isStorm ? 'GEOMAGNETIC STORM' : (isSubstorm ? 'SUBSTORM LIKELY' : 'QUIET');
+
+    live += col + ';">';
+    live += '<div style="font-weight:700;font-size:.62rem;color:' + col + ';margin-bottom:4px;">📡 MAGNETOSPHERE STATUS — ' + label + '</div>';
+    live += '<div style="display:grid;grid-template-columns:auto 1fr;gap:2px 8px;font-size:.52rem;">';
+    if (speed != null) live += '<span style="opacity:.7;">Solar wind:</span><span>' + speed + ' km/s</span>';
+    if (dynPres != null) live += '<span style="opacity:.7;">Ram pressure:</span><span>' + dynPres.toFixed(1) + ' nPa</span>';
+    if (mpDist) live += '<span style="opacity:.7;">Est. magnetopause:</span><span>~' + mpDist + ' R<sub>E</sub> ' + (parseFloat(mpDist) < 7 ? '<span style="color:#f44;">(SEVERELY COMPRESSED)</span>' : parseFloat(mpDist) < 9 ? '<span style="color:#f90;">(compressed)</span>' : '<span style="color:#4f8;">(normal)</span>') + '</span>';
+    if (bz != null) live += '<span style="opacity:.7;">IMF Bz:</span><span>' + (bz >= 0 ? '+' : '') + bz.toFixed(1) + ' nT ' + (bz <= -10 ? '<span style="color:#f44;">(reconnecting)</span>' : bz <= -5 ? '<span style="color:#f90;">(coupling)</span>' : bz >= 0 ? '<span style="color:#4f8;">(shielded)</span>' : '') + '</span>';
+    if (kp != null) live += '<span style="opacity:.7;">Kp:</span><span>' + kp.toFixed(1) + ' (' + sw.gScale + ')</span>';
+    live += '</div>';
+    live += '<div style="font-size:.52rem;margin-top:4px;">';
+    if (isStorm) {
+      live += '<b>What to see in the simulation:</b> Look for strong dayside compression (magnetopause pushed close to Earth on the sunward/left side) and an energized, glowing magnetotail on the nightside. The velocity plot should show intense red tones in the magnetosheath. ';
+      if (bz != null && bz <= -10) live += 'With Bz strongly south, magnetic reconnection is opening the dayside magnetopause — energy is flooding into the system. Expect substorm aurora breakups on the nightside.';
+    } else if (isSubstorm) {
+      live += '<b>What to see in the simulation:</b> Watch the magnetotail (right side). Southward Bz is loading energy into the tail, stretching it thin. When it snaps back (tail reconnection), you\'ll see a sudden brightening and contraction — that\'s a substorm onset, which produces rapid aurora intensification at high latitudes.';
+    } else {
+      live += '<b>What to see in the simulation:</b> Conditions are relatively quiet. The bow shock should be at a normal standoff distance (~13-15 R<sub>E</sub>), the magnetopause at ~10 R<sub>E</sub>, and the tail should be relaxed. Compare: during storms, the bow shock can be pushed in to ~8 R<sub>E</sub> and the magnetopause to ~6 R<sub>E</sub>.';
+    }
+    live += '</div></div>';
+    if (isStorm || isSubstorm) {
+      live += buildObservingConditions('aurora from magnetospheric activity');
+    }
+    live += buildSolarChain('geomag');
+
+    var html = popup.innerHTML;
+    var insertAfter = html.indexOf('Update cadence:');
+    if (insertAfter > 0) {
+      var lineEnd = html.indexOf('.', insertAfter);
+      if (lineEnd > 0) {
+        popup.innerHTML = html.substring(0, lineEnd + 1) + '<br><br>' + live + html.substring(lineEnd + 1);
+        return;
+      }
+    }
+    popup.innerHTML = html + '<br><br>' + live;
   }
 
   function injectLiveAuroraData(popup) {
@@ -10973,6 +11609,9 @@ var moonUrl = "https://svs.gsfc.nasa.gov/vis/a000000/a005100/a005187/frames/730x
       else live += 'Current Kp is ' + (minKpNeeded - kpNum).toFixed(0) + ' point' + (minKpNeeded - kpNum > 1 ? 's' : '') + ' below your threshold.';
     }
     live += '</div></div>';
+    // Aurora is THE most important popup for observing conditions cross-reference
+    live += buildObservingConditions('aurora');
+    live += buildSolarChain('aurora');
 
     // Find the first <br> after opening <b> tag and insert live data after the source line
     var existingHTML = popup.innerHTML;
@@ -11634,12 +12273,836 @@ var moonUrl = "https://svs.gsfc.nasa.gov/vis/a000000/a005100/a005187/frames/730x
     return live + content;
   }
 
+  // ── LIVE PRODUCT CONTEXT INJECTION FOR PRODUCT TOOLTIPS ──
+  function injectLiveProductContext(id, content) {
+    var wx = window._wxCurrent;
+    var alerts = window._nwsAlerts || [];
+    var sw = window._swData || {};
+    if (!wx) return content;
+
+    var live = '';
+    var S = function(l){ return '<div style="background:rgba(255,255,255,.08);border-radius:8px;padding:8px 10px;margin-bottom:10px;border-left:3px solid ' + l; };
+    var E = '</div>';
+    var G = '<div style="display:grid;grid-template-columns:auto 1fr;gap:2px 8px;font-size:.52rem;">';
+    var GE = '</div>';
+    var XS = '<div style="background:rgba(120,160,255,.06);border-radius:6px;padding:6px 8px;margin-top:6px;border-left:2px solid rgba(120,160,255,.4);font-size:.50rem;color:rgba(255,255,255,.85);">';
+
+    // Cross-reference builder: synthesizes all available data into unified insight lines
+    // Each product appends its own, but we build shared assessments here
+    var geoStorm = sw.kp != null && sw.kp >= 5;
+    var geoActive = sw.kp != null && sw.kp >= 4;
+    var bzSouth = sw.bz != null && sw.bz <= -5;
+    var highSolarWind = sw.speed != null && sw.speed > 500;
+    var lat = LOCATION ? LOCATION.lat : 40;
+    var auroraVisLat = sw.kp != null ? (sw.kp >= 8 ? 35 : sw.kp >= 6 ? 42 : sw.kp >= 5 ? 48 : sw.kp >= 4 ? 55 : 65) : 99;
+    var canSeeAurora = lat >= auroraVisLat - 5; // within range
+    var clearSky = wx.cloudCover != null && wx.cloudCover < 30;
+    var overcast = wx.cloudCover != null && wx.cloudCover >= 80;
+    var goodVis = wx.visibility != null && wx.visibility > 8000;
+    var isDark = (function(){ if (!wx.sunrise || !wx.sunset) return null; var now = new Date(); var sr = new Date(wx.sunrise); var ss = new Date(wx.sunset); return now < sr || now > ss; })();
+    var severeWx = wx.precip > 0.5 || (wx.gust != null && wx.gust >= 58) || (wx.weatherCode >= 95);
+    var convectiveEnv = wx.dewpoint != null && wx.temp != null && wx.dewpoint >= 55 && wx.temp >= 75;
+    var strongShear = wx.gust != null && wx.gust >= 35;
+    var winterPrecip = wx.temp != null && wx.temp <= 34 && wx.precipProb > 30;
+    var fogRisk = wx.temp != null && wx.dewpoint != null && (wx.temp - wx.dewpoint) <= 3 && (wx.wind == null || wx.wind < 8);
+
+    // Helpers
+    function windDirLabel(deg) {
+      if (deg == null) return null;
+      var dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+      return dirs[Math.round(deg / 22.5) % 16];
+    }
+    function wxCodeLabel(c) {
+      if (c == null) return null;
+      if (c === 0) return 'Clear sky';
+      if (c <= 3) return ['Mainly clear','Partly cloudy','Overcast'][c-1];
+      if (c === 45 || c === 48) return 'Fog' + (c === 48 ? ' (depositing rime)' : '');
+      if (c >= 51 && c <= 55) return 'Drizzle';
+      if (c === 56 || c === 57) return 'Freezing drizzle';
+      if (c >= 61 && c <= 65) return ['Light rain','Moderate rain','Heavy rain'][Math.min(Math.floor((c-61)/2),2)];
+      if (c === 66 || c === 67) return 'Freezing rain';
+      if (c >= 71 && c <= 75) return ['Light snow','Moderate snow','Heavy snow'][Math.min(Math.floor((c-71)/2),2)];
+      if (c === 77) return 'Snow grains';
+      if (c >= 80 && c <= 82) return 'Rain showers';
+      if (c === 85 || c === 86) return 'Snow showers';
+      if (c === 95) return 'Thunderstorm';
+      if (c === 96 || c === 99) return 'Thunderstorm with hail';
+      return 'Code ' + c;
+    }
+    function approxDbz(rate) {
+      if (rate == null || rate <= 0) return null;
+      var mmhr = rate * 25.4;
+      var z = 200 * Math.pow(mmhr, 1.6);
+      return Math.round(10 * Math.log10(z));
+    }
+    function pressTrend(t) {
+      if (t == null) return '';
+      if (t <= -3) return ' <span style="color:#f44;">▼▼ RAPIDLY FALLING (' + t.toFixed(1) + ' mb/3hr)</span>';
+      if (t <= -1.5) return ' <span style="color:#f90;">▼ falling (' + t.toFixed(1) + ' mb/3hr)</span>';
+      if (t < -0.3) return ' <span style="opacity:.8;">↘ slowly falling (' + t.toFixed(1) + ')</span>';
+      if (t <= 0.3) return ' <span style="color:#4f8;">→ steady</span>';
+      if (t < 1.5) return ' <span style="opacity:.8;">↗ slowly rising (+' + t.toFixed(1) + ')</span>';
+      if (t < 3) return ' <span style="color:#4f8;">▲ rising (+' + t.toFixed(1) + ' mb/3hr)</span>';
+      return ' <span style="color:#4f8;">▲▲ RAPIDLY RISING (+' + t.toFixed(1) + ' mb/3hr)</span>';
+    }
+    var wDir = windDirLabel(wx.windDir);
+    var wxLabel = wxCodeLabel(wx.weatherCode);
+    var ktsWind = wx.wind != null ? Math.round(wx.wind * 0.868976) : null;
+    var ktsGust = wx.gust != null ? Math.round(wx.gust * 0.868976) : null;
+    function filterAlerts(keywords) {
+      return alerts.filter(function(a) {
+        var al = a.toLowerCase();
+        for (var i = 0; i < keywords.length; i++) { if (al.indexOf(keywords[i]) >= 0) return true; }
+        return false;
+      });
+    }
+
+    // ── REFLECTIVITY PRODUCTS (differentiated per product) ──
+    if (id === 'fcast-tab-sim' || id === 'fcast-tab-maxref' || id === 'fcast-tab-radar1km') {
+      var col = '#4a9', label = 'DRY';
+      if (wx.precip > 0.5) { col = '#f44'; label = 'HEAVY PRECIP'; }
+      else if (wx.precip > 0.1) { col = '#f90'; label = 'MODERATE PRECIP'; }
+      else if (wx.precip > 0.01) { col = '#cc0'; label = 'LIGHT PRECIP'; }
+      else if (wx.precipProb > 60) { col = '#78a0ff'; label = 'PRECIP LIKELY SOON'; }
+      live += S(col + ';">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:' + col + ';margin-bottom:4px;">📡 YOUR LOCATION — ' + label + '</div>';
+      live += G;
+      if (wxLabel) live += '<span style="opacity:.7;">Conditions:</span><span><b>' + wxLabel + '</b></span>';
+      if (wx.precip != null) { var dbz = approxDbz(wx.precip); live += '<span style="opacity:.7;">Precip rate:</span><span>' + wx.precip.toFixed(2) + ' in/hr' + (dbz ? ' (~' + dbz + ' dBZ)' : '') + '</span>'; }
+      if (wx.snow > 0) live += '<span style="opacity:.7;">Snowfall:</span><span>' + wx.snow.toFixed(2) + ' in/hr</span>';
+      if (wx.precipProb != null) live += '<span style="opacity:.7;">Precip prob:</span><span>' + wx.precipProb + '%</span>';
+      if (wx.cloudCover != null) live += '<span style="opacity:.7;">Cloud cover:</span><span>' + wx.cloudCover + '%</span>';
+      if (wx.rh != null) live += '<span style="opacity:.7;">Humidity:</span><span>' + wx.rh + '%</span>';
+      if (wx.wind != null && wDir) live += '<span style="opacity:.7;">Wind:</span><span>' + wDir + ' ' + wx.wind + ' mph' + (wx.gust > wx.wind + 5 ? ' (G' + wx.gust + ')' : '') + '</span>';
+      live += GE;
+      if (id === 'fcast-tab-sim') {
+        if (wx.precip > 0) live += '<div style="font-size:.52rem;margin-top:4px;"><b>Model verification:</b> Getting ' + wx.precip.toFixed(2) + ' in/hr right now. Compare the model\'s current-hour sim radar against this — if placement and intensity match, trust the forecast hours. If 50+ mi off or missing your precip, discount later hours.</div>';
+        else if (wx.precipProb > 60 && wx.cloudCover > 70) live += '<div style="font-size:.52rem;margin-top:4px;">Heavy cloud cover + high precip probability — primed. Watch for returns developing near you in the next frames.</div>';
+      } else if (id === 'fcast-tab-maxref') {
+        live += '<div style="font-size:.52rem;margin-top:4px;"><b>Elevated core check:</b> ';
+        if (wx.precip > 0.3 && wx.dewpoint >= 55) live += 'Active precip with rich moisture (Td ' + wx.dewpoint + '°F). Max ref 10-15+ dBZ above composite = hail cores suspended in updrafts.';
+        else if (wx.precip > 0) live += 'Compare max ref to composite at your location. Higher max ref with lower composite = precip aloft hasn\'t reached surface yet.';
+        else live += 'When storms develop, max ref spikes before surface returns increase — early warning of intensification.';
+        live += '</div>';
+      } else {
+        live += '<div style="font-size:.52rem;margin-top:4px;"><b>Surface truth:</b> ';
+        if (wx.rh < 40) live += 'Very dry air (' + wx.rh + '% RH) — virga conditions. Composite may show returns but 1km will be blank where precip evaporates.';
+        else if (wx.precip > 0) live += 'What 1km shows is what you feel. Current rate: ' + wx.precip.toFixed(2) + ' in/hr at the ground.';
+        else live += 'No surface precip. 1km cuts through elevated returns and virga to show only what reaches the ground.';
+        live += '</div>';
+      }
+      var precipAlerts = filterAlerts(['flood','storm','rain','thunder','tornado','hurricane']);
+      if (precipAlerts.length > 0) live += '<div style="color:#f44;font-size:.52rem;margin-top:4px;font-weight:600;">🚨 Active: ' + precipAlerts.join(', ') + '</div>';
+      live += E;
+    }
+
+    // ── ECHO TOPS ──
+    if (id === 'fcast-tab-echotop') {
+      var lat = LOCATION ? LOCATION.lat : 40;
+      var now = new Date(); var month = now.getMonth();
+      var tropHeight = lat > 50 ? (month >= 5 && month <= 8 ? '38,000–42,000' : '28,000–35,000') : lat > 35 ? (month >= 5 && month <= 8 ? '42,000–48,000' : '35,000–42,000') : '48,000–55,000';
+      live += S('#78a0ff;">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:#78a0ff;margin-bottom:4px;">🌡️ TROPOPAUSE & INSTABILITY</div>';
+      live += G;
+      live += '<span style="opacity:.7;">Est. tropopause:</span><span><b>' + tropHeight + ' ft</b> (lat ' + lat.toFixed(1) + '°, ' + ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][month] + ')</span>';
+      if (wx.temp != null) live += '<span style="opacity:.7;">Surface temp:</span><span>' + wx.temp + '°F</span>';
+      if (wx.dewpoint != null) live += '<span style="opacity:.7;">Dewpoint:</span><span>' + wx.dewpoint + '°F</span>';
+      if (wx.cloudCover != null) live += '<span style="opacity:.7;">Cloud cover:</span><span>' + wx.cloudCover + '%</span>';
+      live += GE;
+      live += '<div style="font-size:.52rem;margin-top:4px;">';
+      if (wx.dewpoint >= 60 && wx.temp >= 80) live += '<span style="color:#f44;">Rich moisture + high temps — extreme instability. Expect echo tops easily 50,000+ ft. Any storm with rapidly rising tops is almost certainly severe.</span>';
+      else if (wx.dewpoint >= 50 && wx.temp >= 70) live += 'Moderate instability. Echo tops 35,000–45,000 ft with organized convection. Tops exceeding ' + tropHeight.split('–')[0] + ' ft = severe potential.';
+      else if (wx.temp < 50) live += 'Cool conditions limit convective depth. Tops generally below 30,000 ft. Elevated tops suggest dynamic forcing — frontal lift or shortwave interaction.';
+      else live += 'Echo tops exceeding the tropopause are <span class="k">overshooting tops</span>. Rising tops = intensifying. Collapsing tops = weakening or downburst risk.';
+      live += '</div>' + E;
+    }
+
+    // ── PRECIP TYPE ──
+    if (id === 'fcast-tab-ptype') {
+      var isWinterPx = (wx.snow > 0 || (wx.weatherCode >= 66 && wx.weatherCode <= 77));
+      live += S((isWinterPx ? '#4af' : wx.temp != null && wx.temp <= 36 ? '#f90' : '#78a0ff') + ';">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:' + (isWinterPx ? '#4af' : '#78a0ff') + ';margin-bottom:4px;">🌡️ PRECIPITATION PHASE</div>';
+      live += G;
+      if (wxLabel) live += '<span style="opacity:.7;">Current wx:</span><span><b>' + wxLabel + '</b></span>';
+      if (wx.temp != null) live += '<span style="opacity:.7;">Surface temp:</span><span>' + wx.temp + '°F</span>';
+      if (wx.dewpoint != null) live += '<span style="opacity:.7;">Dewpoint:</span><span>' + wx.dewpoint + '°F</span>';
+      if (wx.pressure != null) live += '<span style="opacity:.7;">Pressure:</span><span>' + Math.round(wx.pressure) + ' mb' + pressTrend(wx.pressureTrend) + '</span>';
+      if (wx.snow > 0) live += '<span style="opacity:.7;">Snowfall now:</span><span style="color:#4af;">' + wx.snow.toFixed(2) + ' in/hr</span>';
+      if (wx.rain > 0) live += '<span style="opacity:.7;">Rainfall now:</span><span>' + wx.rain.toFixed(2) + ' in/hr</span>';
+      if (wx.wind != null && wDir) live += '<span style="opacity:.7;">Wind:</span><span>' + wDir + ' ' + wx.wind + ' mph</span>';
+      live += GE;
+      live += '<div style="font-size:.52rem;margin-top:4px;">';
+      if (wx.temp != null) {
+        if (wx.temp <= 28) live += '<span style="color:#4af;">❄️ Well below freezing — all precip is snow/ice.</span>';
+        else if (wx.temp <= 34) live += '<span style="color:#f90;">⚠ <b>Critical zone</b> (' + wx.temp + '°F) — on the rain/snow line. 1–2°F determines everything. Hardest forecast in meteorology.</span>';
+        else if (wx.temp <= 38 && wx.precipProb > 30) live += 'Cool surface. If a warm nose exists at 850mb, freezing rain/sleet is possible. Check 850mb temp and 850-700mb thickness.';
+        else if (wx.temp > 38) live += 'Above freezing — rain at your location. Rain/snow line is north or at higher elevations.';
+      }
+      live += '</div>';
+      var winterAlerts = filterAlerts(['winter','ice','freez','snow','blizzard','sleet']);
+      if (winterAlerts.length > 0) live += '<div style="color:#4af;font-size:.52rem;margin-top:4px;font-weight:600;">❄️ Active: ' + winterAlerts.join(', ') + '</div>';
+      live += E;
+    }
+
+    // ── PRECIPITATION TOTALS (timescale-differentiated) ──
+    if (id === 'fcast-tab-ptot' || id === 'fcast-tab-precip1hr' || id === 'fcast-tab-precip6hr' || id === 'fcast-tab-precip24hr') {
+      var floodAlerts = filterAlerts(['flood']);
+      live += S((floodAlerts.length > 0 ? '#f44' : '#78a0ff') + ';">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:' + (floodAlerts.length > 0 ? '#f44' : '#78a0ff') + ';margin-bottom:4px;">' + (floodAlerts.length > 0 ? '🚨 FLOOD CONTEXT' : '💧 PRECIPITATION CONTEXT') + '</div>';
+      live += G;
+      if (wxLabel) live += '<span style="opacity:.7;">Current wx:</span><span><b>' + wxLabel + '</b></span>';
+      if (wx.precip != null) live += '<span style="opacity:.7;">Rate now:</span><span>' + wx.precip.toFixed(2) + ' in/hr' + (wx.precip > 0.5 ? ' <span style="color:#f44;">(heavy)</span>' : wx.precip > 0.1 ? ' <span style="color:#f90;">(moderate)</span>' : '') + '</span>';
+      if (wx.rh != null) live += '<span style="opacity:.7;">Humidity:</span><span>' + wx.rh + '%' + (wx.rh > 85 ? ' — soils near saturation' : '') + '</span>';
+      if (wx.pressure != null) live += '<span style="opacity:.7;">Pressure:</span><span>' + Math.round(wx.pressure) + ' mb' + pressTrend(wx.pressureTrend) + '</span>';
+      live += GE;
+      live += '<div style="font-size:.52rem;margin-top:4px;">';
+      if (id === 'fcast-tab-precip1hr') {
+        if (wx.precip > 0.5) live += '<span style="color:#f44;">Current rate (' + wx.precip.toFixed(2) + ' in/hr) exceeds urban drainage capacity (~0.50"/hr). Flash flooding likely if sustained. Step frame-by-frame to find the heaviest hour.</span>';
+        else live += 'Step frame-by-frame to pinpoint peak hourly intensity. Rate jumps from 0.15 to 0.50+ in/hr can trigger flash flooding within minutes.';
+      } else if (id === 'fcast-tab-precip6hr') {
+        live += 'Compare 6-hr totals against Flash Flood Guidance (FFG). QPF exceeding FFG = flash flooding expected. ';
+        if (wx.rh > 85) live += 'Saturated soils lower effective FFG — flooding starts at lower thresholds.';
+      } else if (id === 'fcast-tab-precip24hr') {
+        live += 'Compare against NOAA Atlas 14 recurrence intervals. ';
+        if (wx.precip > 0.25) live += 'Current rate sustained = ' + (wx.precip * 24).toFixed(1) + '" in 24 hrs' + (wx.precip * 24 > 6 ? ' — exceeds most regional major flood benchmarks.' : '.');
+      } else {
+        if (wx.pressureTrend != null && wx.pressureTrend <= -2) live += '<span style="color:#f90;">Rapidly falling pressure — intensifying system. Totals may increase in later model runs.</span>';
+        else live += 'Track storm total vs terrain capacity. Urban areas struggle at 2–3"; arid terrain at 1–2"; eastern mountains at 4–6".';
+      }
+      live += '</div>';
+      if (floodAlerts.length > 0) live += '<div style="color:#f44;font-size:.52rem;margin-top:4px;font-weight:600;">🚨 ' + floodAlerts.join(', ') + '</div>';
+      live += E;
+    }
+
+    // ── SNOW ACCUMULATION ──
+    if (id === 'fcast-tab-snow') {
+      live += S('#4af;">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:#4af;margin-bottom:4px;">❄️ SNOW CONDITIONS</div>';
+      live += G;
+      if (wxLabel) live += '<span style="opacity:.7;">Current wx:</span><span><b>' + wxLabel + '</b></span>';
+      if (wx.temp != null) live += '<span style="opacity:.7;">Surface temp:</span><span>' + wx.temp + '°F</span>';
+      if (wx.wind != null && wDir) live += '<span style="opacity:.7;">Wind:</span><span>' + wDir + ' ' + wx.wind + ' mph' + (wx.gust > 25 ? ' <span style="color:#f90;">(G' + wx.gust + ' — blowing snow risk)</span>' : '') + '</span>';
+      if (wx.snow > 0) live += '<span style="opacity:.7;">Snowfall now:</span><span style="color:#4af;font-weight:600;">' + wx.snow.toFixed(2) + ' in/hr</span>';
+      live += GE;
+      live += '<div style="font-size:.52rem;margin-top:4px;">';
+      if (wx.temp != null) {
+        var slr = wx.temp <= 10 ? '15–20:1' : wx.temp <= 20 ? '13–16:1' : wx.temp <= 28 ? '10–13:1' : wx.temp <= 32 ? '8–10:1' : '5–8:1';
+        var slrDesc = wx.temp <= 10 ? 'ultra-light powder, drifts easily' : wx.temp <= 20 ? 'dry fluffy' : wx.temp <= 28 ? 'average, good packing' : wx.temp <= 32 ? 'wet/heavy — strains trees & lines' : 'very wet, minimal accumulation';
+        live += '<b>SLR at ' + wx.temp + '°F:</b> <span class="k">' + slr + '</span> (' + slrDesc + '). Ex: 0.5" liquid × ' + slr.split('–')[0] + ' = ' + (0.5 * parseInt(slr)).toFixed(0) + '" snow. ';
+        if (wx.temp > 35) live += '<span style="color:#f90;">Above freezing — rain, not snow.</span>';
+      }
+      if (wx.gust > 30 && wx.temp < 35) live += '<br><span style="color:#f90;">⚠ Gusts ' + wx.gust + ' mph + snow = blowing/drifting. Visibility drops even after snow stops. Drifts 3–5x snowfall in open areas.</span>';
+      if (wx.snow > 0.5) live += '<br><span style="color:#f44;">Heavy rate (' + wx.snow.toFixed(2) + ' in/hr) — roads impassable in 30–60 min. Near-zero visibility.</span>';
+      live += '</div>';
+      var wA = filterAlerts(['winter','snow','blizzard','ice']);
+      if (wA.length > 0) live += '<div style="color:#4af;font-size:.52rem;margin-top:4px;font-weight:600;">❄️ Active: ' + wA.join(', ') + '</div>';
+      live += E;
+    }
+
+    // ── CAPE / INSTABILITY ──
+    if (id === 'fcast-tab-bestcape' || id === 'fcast-tab-cape') {
+      live += S('#f90;">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:#f90;margin-bottom:4px;">⚡ INSTABILITY INGREDIENTS</div>';
+      live += G;
+      if (wx.temp != null) live += '<span style="opacity:.7;">Temp:</span><span>' + wx.temp + '°F</span>';
+      if (wx.dewpoint != null) live += '<span style="opacity:.7;">Dewpoint:</span><span>' + wx.dewpoint + '°F' + (wx.dewpoint >= 65 ? ' <span style="color:#f44;">RICH</span>' : wx.dewpoint >= 55 ? ' <span style="color:#f90;">moderate</span>' : '') + '</span>';
+      if (wx.temp != null && wx.dewpoint != null) live += '<span style="opacity:.7;">T-Td spread:</span><span>' + (wx.temp - wx.dewpoint) + '°F' + ((wx.temp - wx.dewpoint) > 30 ? ' (very dry — microburst risk)' : (wx.temp - wx.dewpoint) < 5 ? ' (low cloud base)' : '') + '</span>';
+      if (wx.wind != null && wDir) live += '<span style="opacity:.7;">Sfc wind:</span><span>' + wDir + ' ' + wx.wind + ' mph (' + ktsWind + ' kt)</span>';
+      if (wx.gust != null) live += '<span style="opacity:.7;">Gusts:</span><span>' + wx.gust + ' mph (' + ktsGust + ' kt)</span>';
+      if (wx.uv != null && wx.uv > 5) live += '<span style="opacity:.7;">UV index:</span><span>' + wx.uv.toFixed(1) + (wx.uv > 8 ? ' <span style="color:#f44;">(extreme heating)</span>' : ' (strong heating)') + '</span>';
+      live += GE;
+      live += '<div style="font-size:.52rem;margin-top:4px;">';
+      if (wx.dewpoint >= 65 && wx.temp >= 85) live += '<span style="color:#f44;">🔥 <b>Explosive.</b> Td ' + wx.dewpoint + '° + ' + wx.temp + '°F = 3,000–5,000+ J/kg CAPE possible. ' + (wx.gust > 25 ? 'Gusty winds suggest shear — supercells/tornadoes likely.' : 'Check helicity for shear to determine convective mode.') + '</span>';
+      else if (wx.dewpoint >= 60 && wx.temp >= 80) live += '<b>High instability.</b> CAPE 2,000–3,500 J/kg if uncapped. ' + (wx.gust > 25 ? 'Surface gusts (' + wx.gust + ' mph) indicate shear — organized supercells more likely than pulse.' : 'Check helicity to assess convective mode.');
+      else if (wx.dewpoint >= 55 && wx.temp >= 70) live += 'Moderate instability. CAPE 1,000–2,000 J/kg. Isolated severe possible with trigger (front, dryline, outflow).';
+      else if (wx.dewpoint < 40) live += 'Dry low levels (Td ' + wx.dewpoint + '°F). Surface CAPE minimal. MUCAPE may show elevated instability above frontal boundaries. Dry air enhances microburst potential.';
+      else live += 'Cool/marginal conditions. Any convection needs strong dynamic forcing.';
+      live += '</div>';
+      var sA = filterAlerts(['tornado','severe','thunder']);
+      if (sA.length > 0) live += '<div style="color:#f44;font-size:.52rem;margin-top:4px;font-weight:600;">🚨 Active: ' + sA.join(', ') + '</div>';
+      live += E;
+    }
+
+    // ── HELICITY / UPDRAFT HELICITY (always shows) ──
+    if (id === 'fcast-tab-helicity' || id === 'fcast-tab-updraft') {
+      var isH = (id === 'fcast-tab-helicity');
+      live += S('#f90;">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:#f90;margin-bottom:4px;">' + (isH ? '🌀 SHEAR ENVIRONMENT' : '🌪️ ROTATION ENVIRONMENT') + '</div>';
+      live += G;
+      if (wx.wind != null && wDir) live += '<span style="opacity:.7;">Sfc wind:</span><span>' + wDir + ' ' + wx.wind + ' mph (' + ktsWind + ' kt)</span>';
+      if (wx.gust != null) live += '<span style="opacity:.7;">Gusts:</span><span>' + wx.gust + ' mph (' + ktsGust + ' kt)' + (wx.gust >= 40 ? ' <span style="color:#f90;">STRONG</span>' : '') + '</span>';
+      if (wx.dewpoint != null) live += '<span style="opacity:.7;">Dewpoint:</span><span>' + wx.dewpoint + '°F</span>';
+      if (wx.pressure != null) live += '<span style="opacity:.7;">MSLP:</span><span>' + Math.round(wx.pressure) + ' mb' + pressTrend(wx.pressureTrend) + '</span>';
+      live += GE;
+      live += '<div style="font-size:.52rem;margin-top:4px;">';
+      if (isH) {
+        if (wx.gust >= 40) live += '<span style="color:#f44;"><b>Strong shear</b> (' + wx.gust + ' mph gusts). SRH >200 m²/s² likely. Tornado-favorable if CAPE >1,000 J/kg.</span>';
+        else if (wx.gust >= 25) live += '<b>Moderate shear</b> (gusts ' + wx.gust + ' mph). SRH 100–200 m²/s² expected. With CAPE >1,500 J/kg, organized supercells can produce tornadoes.';
+        else live += 'Light surface winds. Helicity depends on full 0–3km profile — the model may show shear aloft not visible at the surface.' + (wx.windDir != null && wx.windDir >= 130 && wx.windDir <= 200 ? ' Southerly surface flow + backed winds aloft = classic tornado setup.' : '');
+      } else {
+        if (wx.dewpoint >= 60 && wx.gust >= 30) live += '<span style="color:#f44;">Rich moisture + strong shear = prime rotation environment. UH >75 m²/s² = supercells. >150 m²/s² = intense mesocyclones, high tornado probability.</span>';
+        else if (wx.dewpoint >= 50 && wx.gust >= 20) live += 'Moderate environment. Long continuous UH tracks = persistent rotating storms. Short blips = brief spin-ups.';
+        else live += 'Limited instability/shear. Watch for isolated UH maxima near boundaries where local shear is enhanced.';
+      }
+      live += '</div>';
+      var sA2 = filterAlerts(['tornado','severe']);
+      if (sA2.length > 0) live += '<div style="color:#f44;font-size:.52rem;margin-top:4px;font-weight:600;">🌪️ Active: ' + sA2.join(', ') + '</div>';
+      live += E;
+    }
+
+    // ── WIND & MSLP ──
+    if (id === 'fcast-tab-wind') {
+      live += S('#78a0ff;">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:#78a0ff;margin-bottom:4px;">🌬️ SURFACE WIND & PRESSURE</div>';
+      live += G;
+      if (wx.wind != null && wDir) live += '<span style="opacity:.7;">Wind:</span><span>' + wDir + ' ' + wx.wind + ' mph (' + ktsWind + ' kt) — barb: ' + Math.floor(ktsWind/10) + ' line' + (Math.floor(ktsWind/10) !== 1 ? 's' : '') + (ktsWind%10 >= 5 ? '+half' : '') + '</span>';
+      if (wx.gust != null) live += '<span style="opacity:.7;">Gusts:</span><span>' + wx.gust + ' mph (' + ktsGust + ' kt)</span>';
+      if (wx.pressure != null) live += '<span style="opacity:.7;">MSLP:</span><span>' + Math.round(wx.pressure) + ' mb (' + (wx.pressure * 0.029529983).toFixed(2) + ' inHg)' + pressTrend(wx.pressureTrend) + '</span>';
+      live += GE;
+      live += '<div style="font-size:.52rem;margin-top:4px;">';
+      if (wx.pressureTrend != null && wx.pressureTrend <= -3) live += '<span style="color:#f44;">⚠ <b>Rapidly falling pressure</b> — strong low approaching/deepening. Isobars tightly packed near you on the model. Expect winds to increase significantly.</span>';
+      else if (wx.pressureTrend != null && wx.pressureTrend >= 3) live += '<span style="color:#4f8;">Rapidly rising pressure — storm departing. Initial gusty winds then diminishing.</span>';
+      else if (wx.pressure < 1000) live += 'Low pressure — active cyclone. Look for tightly packed isobars and counterclockwise flow on the model.';
+      else if (wx.pressure > 1025) live += 'Strong high pressure. Clockwise flow, calm conditions.';
+      else live += 'Find your location on the model and note isobar spacing. Tighter = stronger gradient = stronger winds.';
+      live += '</div>';
+      var wA2 = filterAlerts(['wind','gale','hurricane','tropical']);
+      if (wA2.length > 0) live += '<div style="color:#f90;font-size:.52rem;margin-top:4px;font-weight:600;">🌬️ Active: ' + wA2.join(', ') + '</div>';
+      live += E;
+    }
+
+    // ── HUMIDITY ──
+    if (id === 'fcast-tab-rh' || id === 'fcast-tab-gfs500rh') {
+      live += S('#78a0ff;">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:#78a0ff;margin-bottom:4px;">💧 MOISTURE PROFILE</div>';
+      live += G;
+      if (wx.rh != null) live += '<span style="opacity:.7;">Surface RH:</span><span>' + wx.rh + '%</span>';
+      if (wx.temp != null) live += '<span style="opacity:.7;">Temp:</span><span>' + wx.temp + '°F</span>';
+      if (wx.dewpoint != null) live += '<span style="opacity:.7;">Dewpoint:</span><span>' + wx.dewpoint + '°F</span>';
+      if (wx.temp != null && wx.dewpoint != null) live += '<span style="opacity:.7;">T-Td spread:</span><span>' + (wx.temp - wx.dewpoint) + '°F' + ((wx.temp - wx.dewpoint) <= 3 ? ' <span style="color:#4af;">(fog/clouds at surface)</span>' : '') + '</span>';
+      if (wx.cloudCover != null) live += '<span style="opacity:.7;">Cloud cover:</span><span>' + wx.cloudCover + '%</span>';
+      if (wx.visibility != null) live += '<span style="opacity:.7;">Visibility:</span><span>' + (wx.visibility * 0.000621371).toFixed(1) + ' mi</span>';
+      live += GE;
+      live += '<div style="font-size:.52rem;margin-top:4px;">';
+      if (wx.rh > 95) live += '<span style="color:#4af;">Near-saturation (' + wx.rh + '%). Fog/drizzle likely. If 700mb is also >80%, moisture is deep — persistent clouds and precip.</span>';
+      else if (wx.rh > 80) live += 'High humidity. If 700mb is also wet, precip supported. If 700mb is dry while surface is moist, a cap exists — instability present but suppressed.';
+      else if (wx.rh > 50) live += 'Moderate moisture. Compare with 700mb RH — both 50–80% = light precip possible. 700mb much drier = strong cap.';
+      else if (wx.rh > 30) live += 'Dry air. If 700mb also dry, fair skies. Dry surface under moist mid-levels = enhanced downdraft potential (microbursts).';
+      else live += '<span style="color:#f90;">Very dry (' + wx.rh + '%). Extreme fire risk. Any precip will evaporate (virga). Dry lightning = wildfire ignition scenario.</span>';
+      live += '</div>';
+      var fA = filterAlerts(['fire','red flag']);
+      if (fA.length > 0) live += '<div style="color:#f44;font-size:.52rem;margin-top:4px;font-weight:600;">🔥 Active: ' + fA.join(', ') + '</div>';
+      live += E;
+    }
+
+    // ── TEMPERATURE ──
+    if (id === 'fcast-tab-temp' || id === 'fcast-tab-wndtemp' || id === 'fcast-tab-gfs850temp' || id === 'fcast-tab-850temp') {
+      var is850 = (id === 'fcast-tab-gfs850temp' || id === 'fcast-tab-850temp');
+      live += S('#78a0ff;">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:#78a0ff;margin-bottom:4px;">🌡️ ' + (is850 ? '850mb THERMAL CONTEXT' : 'SURFACE THERMAL STATE') + '</div>';
+      live += G;
+      if (wx.temp != null) live += '<span style="opacity:.7;">Surface temp:</span><span>' + wx.temp + '°F</span>';
+      if (wx.feels != null && wx.feels !== wx.temp) live += '<span style="opacity:.7;">Feels like:</span><span>' + wx.feels + '°F (' + (wx.feels < wx.temp ? 'wind chill' : 'heat index') + ')</span>';
+      if (wx.dewpoint != null) live += '<span style="opacity:.7;">Dewpoint:</span><span>' + wx.dewpoint + '°F</span>';
+      if (wx.hiToday != null && wx.loToday != null) live += '<span style="opacity:.7;">Today range:</span><span>' + wx.loToday + '° → ' + wx.hiToday + '° (swing: ' + (wx.hiToday - wx.loToday) + '°F)</span>';
+      if (wx.wind != null && wDir) live += '<span style="opacity:.7;">Wind:</span><span>' + wDir + ' ' + wx.wind + ' mph</span>';
+      live += GE;
+      live += '<div style="font-size:.52rem;margin-top:4px;">';
+      if (is850) {
+        live += '<b>850mb ≈ 5,000 ft AGL.</b> ';
+        if (wx.temp <= 32) live += 'Surface below freezing. If 850mb is above 0°C while surface is cold = warm nose = <b>freezing rain/sleet</b> potential.';
+        else if (wx.temp >= 80) live += 'Warm surface confirms deep warm layer supporting convective instability.';
+        else live += '850mb temp advection reveals frontal positions — sharp gradients mark warm/cold fronts.';
+      } else {
+        if (wx.feels != null && Math.abs(wx.temp - wx.feels) > 10) live += '<span style="color:#f90;">Feels-like spread ' + Math.abs(wx.temp - wx.feels) + '°F. Impact is significantly ' + (wx.feels < wx.temp ? 'colder — frostbite risk' : 'hotter — heat illness risk') + ' than the map shows.</span>';
+        else live += 'Watch for frontal gradients — where temp changes 10–20°F over short distance marks a front. Compare with wind shifts on Wind & MSLP.';
+      }
+      live += '</div>';
+      var hcA = filterAlerts(['heat','cold','chill','freeze','frost','excessive']);
+      if (hcA.length > 0) live += '<div style="color:#f90;font-size:.52rem;margin-top:4px;font-weight:600;">🌡️ Active: ' + hcA.join(', ') + '</div>';
+      live += E;
+    }
+
+    // ── VISIBILITY / CEILING ──
+    if (id === 'fcast-tab-vis' || id === 'fcast-tab-ceiling') {
+      var isCeil = (id === 'fcast-tab-ceiling');
+      live += S('#78a0ff;">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:#78a0ff;margin-bottom:4px;">' + (isCeil ? '☁️ CEILING CONDITIONS' : '👁️ VISIBILITY CONDITIONS') + '</div>';
+      live += G;
+      if (wx.visibility != null) { var visMi = (wx.visibility * 0.000621371).toFixed(1); var visCat = visMi > 3 ? 'VFR' : visMi > 1 ? 'MVFR' : visMi > 0.5 ? 'IFR' : 'LIFR'; var visCol = visCat === 'VFR' ? '#4f8' : visCat === 'MVFR' ? '#78a0ff' : visCat === 'IFR' ? '#f90' : '#f44'; live += '<span style="opacity:.7;">Visibility:</span><span>' + visMi + ' mi <span style="color:' + visCol + ';font-weight:600;">(' + visCat + ')</span></span>'; }
+      if (wx.cloudCover != null) live += '<span style="opacity:.7;">Clouds:</span><span>' + wx.cloudCover + '%' + (wx.cloudCover >= 87 ? ' (overcast)' : wx.cloudCover >= 62 ? ' (broken)' : wx.cloudCover >= 37 ? ' (scattered)' : ' (few/clear)') + '</span>';
+      if (wx.temp != null && wx.dewpoint != null) live += '<span style="opacity:.7;">T-Td spread:</span><span>' + (wx.temp - wx.dewpoint) + '°F' + ((wx.temp - wx.dewpoint) <= 3 ? ' <span style="color:#f90;">⚠ FOG LIKELY</span>' : '') + '</span>';
+      if (wx.wind != null && wDir) live += '<span style="opacity:.7;">Wind:</span><span>' + wDir + ' ' + wx.wind + ' mph</span>';
+      live += GE;
+      live += '<div style="font-size:.52rem;margin-top:4px;">';
+      if (wx.temp != null && wx.dewpoint != null && (wx.temp - wx.dewpoint) <= 3) {
+        if (wx.wind < 5) live += '<span style="color:#f90;">⚠ <b>Radiation fog setup:</b> T-Td ' + (wx.temp - wx.dewpoint) + '°F + calm winds. Dense fog likely' + (wx.sunrise ? ', thickening until sunrise then burning off by mid-morning.' : '.') + '</span>';
+        else live += 'Low T-Td spread with wind suggests low stratus (ceiling 200–1,000 ft) rather than ground fog.';
+      } else if (isCeil) {
+        if (wx.cloudCover >= 87) live += 'Overcast — ceiling height critical for aviation and mountain visibility.';
+        else if (wx.cloudCover < 30) live += 'Clear/few clouds — ceiling unrestricted.';
+      } else {
+        if (wx.rh > 90) live += 'High humidity — haze reducing visibility even without fog/precip.';
+        else if (wx.precipProb > 60) live += 'Precip approaching. Heavy rain visibility <1 mi; heavy snow <¼ mi.';
+      }
+      live += '</div>';
+      var fogA = filterAlerts(['fog','visibility']);
+      if (fogA.length > 0) live += '<div style="color:#f90;font-size:.52rem;margin-top:4px;font-weight:600;">🌫️ Active: ' + fogA.join(', ') + '</div>';
+      live += E;
+    }
+
+    // ── LIGHTNING ──
+    if (id === 'fcast-tab-lightning') {
+      live += S('#ff0;">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:#ff0;margin-bottom:4px;">⚡ THUNDERSTORM ENVIRONMENT</div>';
+      live += G;
+      if (wxLabel) live += '<span style="opacity:.7;">Current wx:</span><span><b>' + wxLabel + '</b>' + (wx.weatherCode >= 95 ? ' <span style="color:#ff0;font-weight:600;">⚡ ACTIVE TSTORM</span>' : '') + '</span>';
+      if (wx.temp != null) live += '<span style="opacity:.7;">Temp:</span><span>' + wx.temp + '°F</span>';
+      if (wx.dewpoint != null) live += '<span style="opacity:.7;">Dewpoint:</span><span>' + wx.dewpoint + '°F</span>';
+      if (wx.rh != null) live += '<span style="opacity:.7;">RH:</span><span>' + wx.rh + '%</span>';
+      if (wx.wind != null && wDir) live += '<span style="opacity:.7;">Wind:</span><span>' + wDir + ' ' + wx.wind + ' mph</span>';
+      live += GE;
+      live += '<div style="font-size:.52rem;margin-top:4px;">';
+      if (wx.weatherCode >= 95) live += '<span style="color:#ff0;font-weight:600;">⚡ Active thunderstorm! Compare model lightning placement with actual strikes to verify accuracy.</span>';
+      else if (wx.dewpoint >= 65 && wx.temp >= 85) live += '<span style="color:#f44;">🔥 Extreme lightning potential. Td ' + wx.dewpoint + '° + ' + wx.temp + '°F = prolific charge separation. 10,000+ flashes/hr possible.</span>';
+      else if (wx.dewpoint >= 60 && wx.temp >= 80) live += 'High lightning potential — rich moisture + strong heating.';
+      else if (wx.rh < 30 && wx.temp > 80) live += '<span style="color:#f90;">⚠ <b>Dry lightning risk.</b> RH ' + wx.rh + '% — any thunder produces lightning without surface rain. #1 wildfire ignition cause. Watch for lightning threat areas NOT overlapping precip.</span>';
+      else if (wx.dewpoint >= 50 && wx.temp >= 70) live += 'Moderate convective potential.';
+      else live += 'Limited thermodynamic support. Needs strong dynamic forcing for any lightning.';
+      live += '</div>';
+      var tA = filterAlerts(['thunder','tornado','severe','lightning']);
+      if (tA.length > 0) live += '<div style="color:#f44;font-size:.52rem;margin-top:4px;font-weight:600;">⚡ Active: ' + tA.join(', ') + '</div>';
+      live += E;
+    }
+
+    // ── 10mb STRATOSPHERE ──
+    if (id === 'fcast-tab-10mb') {
+      var now = new Date(); var m = now.getMonth(); var isWinter = (m >= 10 || m <= 2);
+      live += S('#a78bfa;">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:#a78bfa;margin-bottom:4px;">🌀 POLAR VORTEX</div>';
+      live += '<div style="font-size:.52rem;">';
+      if (isWinter) {
+        live += '<b>Winter</b> — vortex active. ' + (wx.pressure != null && wx.pressure < 1005 ? 'Your low surface pressure (' + Math.round(wx.pressure) + ' mb) may reflect vortex-influenced jet pattern. ' : '');
+        live += 'SSW now would cause 2–6 week pattern disruption through ' + ['Jan','Feb','Mar','Apr','May'][Math.min(m <= 2 ? m + 1 : m - 9, 4)] + '. Look for: tight circle = strong/stable; elongated = blocking risk; split = major SSW.';
+      } else live += '<b>Warm season</b> — vortex weak/absent. This chart is most diagnostic Nov–Mar.';
+      live += '</div>' + E;
+    }
+
+    // ── JET STREAM / 250mb ──
+    if (id === 'fcast-tab-jet' || id === 'fcast-tab-250wind') {
+      live += S('#a78bfa;">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:#a78bfa;margin-bottom:4px;">🌀 JET STREAM COUPLING</div>';
+      live += G;
+      if (wx.pressure != null) live += '<span style="opacity:.7;">MSLP:</span><span>' + Math.round(wx.pressure) + ' mb' + pressTrend(wx.pressureTrend) + '</span>';
+      if (wx.wind != null && wDir) live += '<span style="opacity:.7;">Sfc wind:</span><span>' + wDir + ' ' + wx.wind + ' mph (' + ktsWind + ' kt)</span>';
+      if (wx.cloudCover != null) live += '<span style="opacity:.7;">Clouds:</span><span>' + wx.cloudCover + '%</span>';
+      live += GE;
+      live += '<div style="font-size:.52rem;margin-top:4px;">';
+      if (wx.pressure < 1000) live += '<span style="color:#f44;">Very low pressure (' + Math.round(wx.pressure) + ' mb) — active cyclone. The jet streak\'s <b>right entrance</b> or <b>left exit</b> should be overhead, providing divergence deepening this low.</span>';
+      else if (wx.pressureTrend != null && wx.pressureTrend <= -2) live += '<span style="color:#f90;">Rapidly falling pressure — approaching jet streak divergence driving intensification.</span>';
+      else if (wx.pressure > 1020) live += 'High pressure — you\'re in a convergent quadrant (left entrance/right exit) with subsidence maintaining the ridge.';
+      else {
+        live += 'Find jet streak cores (>80 kt). Right entrance + left exit = divergence = storms. Left entrance + right exit = convergence = fair.';
+        if (wx.windDir != null) live += ' Surface ' + wDir + ' wind — compare with upper flow for veering (warm advection) or backing (cold advection).';
+      }
+      live += '</div>' + E;
+    }
+
+    // ── 500mb WIND ──
+    if (id === 'fcast-tab-gfs500wind') {
+      live += S('#78a0ff;">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:#78a0ff;margin-bottom:4px;">🧭 STEERING FLOW</div>';
+      live += G;
+      if (wx.pressure != null) live += '<span style="opacity:.7;">MSLP:</span><span>' + Math.round(wx.pressure) + ' mb' + pressTrend(wx.pressureTrend) + '</span>';
+      if (wx.wind != null && wDir) live += '<span style="opacity:.7;">Sfc wind:</span><span>' + wDir + ' ' + wx.wind + ' mph</span>';
+      if (wx.precipProb != null) live += '<span style="opacity:.7;">Precip prob:</span><span>' + wx.precipProb + '%</span>';
+      live += GE;
+      live += '<div style="font-size:.52rem;margin-top:4px;">';
+      if (wx.pressure < 1005) live += 'Nearby cyclone. Surface lows move at 50–75% of 500mb speed in the 500mb flow direction.' + (wx.pressureTrend <= -2 ? ' <span style="color:#f90;">Rapid deepening — strong 500mb forcing.</span>' : '');
+      else if (wx.precipProb > 50) live += 'Weather approaching. Weak 500mb flow (<25 kt) = stalling/flood risk. Strong (>50 kt) = fast-moving, brief.';
+      else live += '<20 kt = stalling/cutoff risk. 25–50 kt = normal. >50 kt = fast progressive pattern.' + (wx.cloudCover < 30 ? ' Clear skies confirm benign flow regime.' : '');
+      live += '</div>' + E;
+    }
+
+    // ── 500mb VORTICITY / HEIGHTS ──
+    if (id === 'fcast-tab-500vort' || id === 'fcast-tab-500mb') {
+      live += S('#78a0ff;">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:#78a0ff;margin-bottom:4px;">🌀 SYNOPTIC DIAGNOSIS</div>';
+      live += G;
+      if (wx.pressure != null) live += '<span style="opacity:.7;">MSLP:</span><span>' + Math.round(wx.pressure) + ' mb' + pressTrend(wx.pressureTrend) + '</span>';
+      if (wx.cloudCover != null) live += '<span style="opacity:.7;">Clouds:</span><span>' + wx.cloudCover + '%</span>';
+      if (wx.precipProb != null) live += '<span style="opacity:.7;">Precip prob:</span><span>' + wx.precipProb + '%</span>';
+      if (wx.wind != null && wDir) live += '<span style="opacity:.7;">Sfc wind:</span><span>' + wDir + ' ' + wx.wind + ' mph</span>';
+      live += GE;
+      live += '<div style="font-size:.52rem;margin-top:4px;">';
+      if (wx.pressure < 1005 && wx.precipProb > 50) live += '<span style="color:#f90;"><b>Active weather.</b> Low MSLP + high precip prob = PVA zone. A vort max is near/overhead on the map.' + (wx.pressureTrend <= -2 ? ' Rapid deepening confirms strong upper forcing.' : '') + '</span>';
+      else if (wx.cloudCover > 80 && wx.precipProb > 30) live += 'Overcast with precip likely. Shortwave approaching — look upstream on the map.';
+      else if (wx.cloudCover < 25 && wx.pressure > 1015) live += 'Clear + high pressure = ridge axis or NVA (subsidence) zone. Heights high on the 500mb chart at your location.';
+      else live += 'Animate vort maxes to track weather drivers. Each one triggers a surface event as it crosses your longitude.';
+      live += '</div>' + E;
+    }
+
+    // ── 850mb VORTICITY ──
+    if (id === 'fcast-tab-gfs850vort') {
+      live += S('#78a0ff;">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:#78a0ff;margin-bottom:4px;">🌀 LOW-LEVEL SPIN</div>';
+      live += G;
+      if (wx.pressure != null) live += '<span style="opacity:.7;">MSLP:</span><span>' + Math.round(wx.pressure) + ' mb' + pressTrend(wx.pressureTrend) + '</span>';
+      if (wx.wind != null && wDir) live += '<span style="opacity:.7;">Sfc wind:</span><span>' + wDir + ' ' + wx.wind + ' mph (' + ktsWind + ' kt)</span>';
+      if (wx.gust != null) live += '<span style="opacity:.7;">Gusts:</span><span>' + wx.gust + ' mph (' + ktsGust + ' kt)</span>';
+      live += GE;
+      live += '<div style="font-size:.52rem;margin-top:4px;">';
+      if (wx.pressure < 1005) live += '850mb vort maxima track with surface lows. MSLP ' + Math.round(wx.pressure) + ' mb — look for an 850mb vort max stacked near/west of the surface low. ';
+      if (wx.gust > 30) live += 'Strong gusts (' + wx.gust + ' mph) + 850mb vorticity enhances tornado efficiency in convective environments. ';
+      var n2 = new Date(), m2 = n2.getMonth();
+      if (m2 >= 10 || m2 <= 2) live += '<span style="color:#4af;">❄️ Winter: Heaviest snow falls along and north of the 850mb vort max track.</span>';
+      else if (m2 >= 3 && m2 <= 5) live += 'Spring: 850mb vort + dryline + low-level jet = classic severe/tornado setup.';
+      else live += '850mb vort tracks correspond to frontal waves and mesolow development that focus convection.';
+      live += '</div>' + E;
+    }
+
+    // ── 4-PANEL COMPOSITE ──
+    if (id === 'fcast-tab-gfs4panel') {
+      live += S('#a78bfa;">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:#a78bfa;margin-bottom:4px;">📊 ATMOSPHERIC STATE</div>';
+      live += G;
+      if (wxLabel) live += '<span style="opacity:.7;">Wx:</span><span><b>' + wxLabel + '</b></span>';
+      if (wx.pressure != null) live += '<span style="opacity:.7;">MSLP:</span><span>' + Math.round(wx.pressure) + ' mb' + pressTrend(wx.pressureTrend) + '</span>';
+      if (wx.temp != null) live += '<span style="opacity:.7;">Temp:</span><span>' + wx.temp + '°F' + (wx.feels != null && wx.feels !== wx.temp ? ' (feels ' + wx.feels + '°)' : '') + '</span>';
+      if (wx.dewpoint != null) live += '<span style="opacity:.7;">Td:</span><span>' + wx.dewpoint + '°F</span>';
+      if (wx.wind != null && wDir) live += '<span style="opacity:.7;">Wind:</span><span>' + wDir + ' ' + wx.wind + (wx.gust > wx.wind + 5 ? ' G' + wx.gust : '') + ' mph</span>';
+      if (wx.cloudCover != null) live += '<span style="opacity:.7;">Clouds:</span><span>' + wx.cloudCover + '%</span>';
+      if (wx.precipProb != null) live += '<span style="opacity:.7;">Precip:</span><span>' + wx.precipProb + '%' + (wx.precip > 0 ? ' (' + wx.precip.toFixed(2) + ' in/hr)' : '') + '</span>';
+      live += GE;
+      live += '<div style="font-size:.52rem;margin-top:4px;"><b>Vertical phasing:</b> ';
+      if (wx.pressure < 1005 && wx.precipProb > 50) live += '<span style="color:#f90;">Active system. Check if 850mb vort, 500mb trough, and 200mb divergence are stacked. <b>Tilted</b> = still intensifying. <b>Stacked</b> = peaking/weakening.</span>';
+      else if (wx.pressureTrend <= -2) live += '<span style="color:#f90;">Falling pressure. Look for approaching 850mb warm advection → 500mb shortwave → 200mb divergence alignment.</span>';
+      else live += 'Check pattern: jet position (200mb), shortwave location (500mb), thermal advection (850mb). Next weather change arrives when these features phase over your location.';
+      live += '</div>' + E;
+    }
+
+    // ── THICKNESS ──
+    if (id === 'fcast-tab-lowthick' || id === 'fcast-tab-midthick') {
+      var isLow = (id === 'fcast-tab-lowthick');
+      live += S('#4af;">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:#4af;margin-bottom:4px;">' + (isLow ? '❄️ RAIN/SNOW LINE' : '🌡️ WARM NOSE / ICE CHECK') + '</div>';
+      live += G;
+      if (wx.temp != null) live += '<span style="opacity:.7;">Surface temp:</span><span>' + wx.temp + '°F</span>';
+      if (wx.dewpoint != null) live += '<span style="opacity:.7;">Dewpoint:</span><span>' + wx.dewpoint + '°F</span>';
+      if (wx.precipProb != null) live += '<span style="opacity:.7;">Precip prob:</span><span>' + wx.precipProb + '%</span>';
+      if (wx.snow > 0) live += '<span style="opacity:.7;">Snow now:</span><span style="color:#4af;">' + wx.snow.toFixed(2) + ' in/hr</span>';
+      if (wx.rain > 0) live += '<span style="opacity:.7;">Rain now:</span><span>' + wx.rain.toFixed(2) + ' in/hr</span>';
+      if (wx.pressure != null) live += '<span style="opacity:.7;">Pressure:</span><span>' + Math.round(wx.pressure) + ' mb' + pressTrend(wx.pressureTrend) + '</span>';
+      live += GE;
+      live += '<div style="font-size:.52rem;margin-top:4px;">';
+      if (isLow) {
+        if (wx.temp <= 28) live += 'Below freezing — thickness below 1,300m. All snow.';
+        else if (wx.temp <= 34) live += '<span style="color:#f90;">⚠ <b>Critical zone</b> (' + wx.temp + '°F). Near the 1,300m thickness line. A 50-mile shift changes everything — rain vs snow. Watch animation for line movement.</span>';
+        else if (wx.temp <= 40) live += 'Cool. If thickness drops during the event (cold advection), the rain/snow line can shift south to include you.';
+        else live += 'Above threshold — rain at your location. Track where 1,300m intersects precip for the rain/snow boundary.';
+      } else {
+        if (wx.temp <= 34 && wx.precipProb > 30) live += '<span style="color:#f44;">⚠ <b>ICE STORM CHECK.</b> Surface ' + wx.temp + '°F + precip likely. If 850-700mb thickness is elevated (warm nose), snow melts aloft then refreezes on contact = FREEZING RAIN. Thin warm layer = sleet. Deep warm layer = freezing rain. Most dangerous winter precip type.</span>';
+        else if (wx.temp <= 38 && wx.precipProb > 20) live += 'Cool surface + approaching precip. Monitor for incoming warm nose — warm front overrunning cold surface air creates the ice storm profile.';
+        else live += 'Thickness advection reveals frontal structure. Warming = warm front approach. Cooling = cold front passage.';
+      }
+      live += '</div>';
+      var wA3 = filterAlerts(['winter','ice','freez','snow','blizzard','sleet']);
+      if (wA3.length > 0) live += '<div style="color:#4af;font-size:.52rem;margin-top:4px;font-weight:600;">❄️ Active: ' + wA3.join(', ') + '</div>';
+      live += E;
+    }
+
+    // ── MAX WIND GUST ──
+    if (id === 'fcast-tab-maxwind') {
+      var gC = wx.gust > 57 ? '#f44' : wx.gust > 39 ? '#f90' : '#78a0ff';
+      live += S(gC + ';">\n');
+      live += '<div style="font-weight:700;font-size:.62rem;color:' + gC + ';margin-bottom:4px;">🌬️ WIND DAMAGE ASSESSMENT</div>';
+      live += G;
+      if (wx.wind != null && wDir) live += '<span style="opacity:.7;">Sustained:</span><span>' + wDir + ' ' + wx.wind + ' mph (' + ktsWind + ' kt)</span>';
+      if (wx.gust != null) { live += '<span style="opacity:.7;">Gusts:</span><span>' + wx.gust + ' mph (' + ktsGust + ' kt)'; if (wx.gust >= 58) live += ' <span style="color:#f44;font-weight:600;">⚠ SEVERE (≥58 mph)</span>'; else if (wx.gust >= 40) live += ' <span style="color:#f90;">damaging</span>'; live += '</span>'; }
+      if (wx.wind > 0 && wx.gust != null) { var gr = (wx.gust / wx.wind).toFixed(1); live += '<span style="opacity:.7;">Gust factor:</span><span>' + gr + 'x' + (gr > 2.0 ? ' (convective outflow/terrain)' : gr > 1.5 ? ' (gusty)' : ' (steady gradient)') + '</span>'; }
+      if (wx.pressure != null) live += '<span style="opacity:.7;">MSLP:</span><span>' + Math.round(wx.pressure) + ' mb' + pressTrend(wx.pressureTrend) + '</span>';
+      live += GE;
+      live += '<div style="font-size:.52rem;margin-top:4px;">';
+      if (wx.gust >= 58) live += '<span style="color:#f44;"><b>Severe threshold exceeded.</b> Current gusts meet NWS warning criteria. If model shows lower values now, future peaks are also underestimated — apply correction.</span>';
+      else if (wx.gust >= 40) live += 'Damaging gusts. Compare model current-hour values with observations to calibrate trust in future peak predictions.';
+      else if (wx.pressureTrend <= -3) live += '<span style="color:#f90;">Rapidly falling pressure — gradient tightening. Even with modest current gusts, model peak forecasts may verify or exceed.</span>';
+      else live += 'Compare model current-hour max gust with observations. Model accuracy now calibrates trust in later forecasts.';
+      live += '</div>';
+      var wA4 = filterAlerts(['wind','gale','hurricane','tropical']);
+      if (wA4.length > 0) live += '<div style="color:#f44;font-size:.52rem;margin-top:4px;font-weight:600;">🌬️ Active: ' + wA4.join(', ') + '</div>';
+      live += E;
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // WEATHER EVENT CHAINS — like the solar chain, each product knows
+    // its role in active meteorological sequences and cross-references
+    // upstream causes and downstream consequences
+    // ══════════════════════════════════════════════════════════════
+    if (live) {
+      var xref = '';
+      // Product → chain role mapping
+      var upperAir = ['fcast-tab-jet','fcast-tab-250wind','fcast-tab-gfs500wind','fcast-tab-500vort','fcast-tab-500mb','fcast-tab-gfs850vort','fcast-tab-10mb','fcast-tab-gfs4panel'];
+      var surface = ['fcast-tab-wind','fcast-tab-temp','fcast-tab-wndtemp'];
+      var instability = ['fcast-tab-bestcape','fcast-tab-cape','fcast-tab-echotop'];
+      var shear = ['fcast-tab-helicity','fcast-tab-updraft'];
+      var precip = ['fcast-tab-sim','fcast-tab-maxref','fcast-tab-radar1km','fcast-tab-ptype','fcast-tab-ptot','fcast-tab-precip1hr','fcast-tab-precip6hr','fcast-tab-precip24hr'];
+      var winterProducts = ['fcast-tab-ptype','fcast-tab-lowthick','fcast-tab-midthick','fcast-tab-snow','fcast-tab-gfs850temp','fcast-tab-850temp'];
+      var moistureProducts = ['fcast-tab-rh','fcast-tab-gfs500rh','fcast-tab-vis','fcast-tab-ceiling'];
+      var isUpper = upperAir.indexOf(id) >= 0;
+      var isSurface = surface.indexOf(id) >= 0;
+      var isInstability = instability.indexOf(id) >= 0;
+      var isShear = shear.indexOf(id) >= 0;
+      var isPrecip = precip.indexOf(id) >= 0;
+      var isWinter = winterProducts.indexOf(id) >= 0;
+      var isMoisture = moistureProducts.indexOf(id) >= 0;
+
+      // ════════════════════════════════════════════
+      // CHAIN 1: SEVERE WEATHER (convective)
+      // Jet → Surface setup → CAPE → Shear → Storms → Hazards
+      // ════════════════════════════════════════════
+      if (convectiveEnv || severeWx || (wx.weatherCode >= 95)) {
+        var sevStages = [
+          { icon: '🌀', label: 'Jet/Upper', active: wx.pressureTrend != null && wx.pressureTrend <= -1.5 },
+          { icon: '💨', label: 'Surface', active: wx.wind > 10 || (wx.pressureTrend != null && Math.abs(wx.pressureTrend) >= 1.5) },
+          { icon: '🔥', label: 'CAPE', active: convectiveEnv },
+          { icon: '🌪️', label: 'Shear', active: strongShear },
+          { icon: '⛈️', label: 'Storms', active: wx.weatherCode >= 80 || wx.precip > 0.1 },
+          { icon: '⚠', label: 'Hazards', active: severeWx }
+        ];
+        var sevActive = sevStages.filter(function(s){ return s.active; }).length;
+
+        if (sevActive >= 2 || convectiveEnv) {
+          xref += '<div style="margin-bottom:6px;">';
+          xref += '<div style="font-weight:600;font-size:.50rem;color:#f90;margin-bottom:3px;">⛈️ SEVERE WEATHER CHAIN</div>';
+          xref += '<div style="display:flex;gap:1px;margin-bottom:4px;font-size:.40rem;">';
+          sevStages.forEach(function(s) {
+            var myStage = (isUpper && s.label.indexOf('Jet')>=0) || (isSurface && s.label==='Surface') || (isInstability && s.label==='CAPE') || (isShear && s.label==='Shear') || (isPrecip && s.label==='Storms') || (id==='fcast-tab-lightning' && s.label==='Hazards') || (id==='fcast-tab-maxwind' && s.label==='Hazards');
+            var bg = s.active ? 'rgba(255,153,0,.25)' : 'rgba(255,255,255,.05)';
+            var col = s.active ? '#f90' : 'rgba(255,255,255,.3)';
+            var bdr = myStage ? 'border:1px solid #f90;box-shadow:0 0 4px rgba(255,153,0,.4);' : 'border:1px solid transparent;';
+            xref += '<div style="flex:1;text-align:center;padding:2px;border-radius:3px;background:' + bg + ';color:' + col + ';' + bdr + '">' + s.icon + '<br>' + s.label + '</div>';
+          });
+          xref += '</div>';
+
+          // Narrative for THIS product's position in the chain
+          if (isUpper) {
+            xref += 'You\'re viewing the <b>forcing mechanism</b>. ';
+            if (wx.pressureTrend <= -2) xref += 'Falling pressure confirms active upper forcing. ';
+            xref += '<b>Downstream:</b> Check CAPE for instability buildup → helicity for shear → reflectivity for storm initiation.';
+          } else if (isSurface) {
+            xref += 'You\'re at the <b>surface setup</b> stage. ';
+            if (wDir && wx.windDir >= 130 && wx.windDir <= 200) xref += 'Southerly flow importing moisture + warmth. ';
+            xref += '<b>Upstream:</b> Jet/vorticity provide forcing. <b>Downstream:</b> CAPE shows if instability is realized → helicity determines storm mode.';
+          } else if (isInstability) {
+            xref += 'You\'re viewing <b>fuel</b> for convection. ';
+            if (convectiveEnv) xref += 'Td ' + wx.dewpoint + '°F + T ' + wx.temp + '°F = significant instability. ';
+            if (strongShear) xref += '<span style="color:#f44;"><b>Cross-check:</b> Surface gusts ' + wx.gust + ' mph confirm shear → supercell environment. STP likely elevated.</span>';
+            else xref += '<b>Critical check:</b> Helicity/updraft helicity determines organized (supercell) vs scattered (pulse) mode.';
+          } else if (isShear) {
+            xref += 'You\'re viewing the <b>organization mechanism</b>. ';
+            if (convectiveEnv) xref += '<span style="color:#f44;">Instability IS present (Td ' + wx.dewpoint + '°F). CAPE × shear = <b>Significant Tornado Parameter</b>. </span>';
+            else xref += 'Instability check: ';
+            if (convectiveEnv && strongShear) xref += 'ALL INGREDIENTS PRESENT. Watch reflectivity for storm initiation and echo tops for rapid growth.';
+            else if (convectiveEnv) xref += 'Fuel present, needs shear increase for organized storms.';
+          } else if (isPrecip || id === 'fcast-tab-echotop') {
+            xref += 'You\'re seeing the <b>result</b> of the upstream chain. ';
+            if (severeWx) xref += '<span style="color:#f44;">Severe conditions active. </span>';
+            if (convectiveEnv && strongShear) xref += 'Environment is loaded — any new storm in this profile should be treated as potentially severe.';
+            xref += ' <b>Check:</b> Lightning for electrical hazards → max wind for damaging gust forecasts.';
+          } else if (id === 'fcast-tab-lightning' || id === 'fcast-tab-maxwind') {
+            xref += '<b>Hazard product.</b> ';
+            if (convectiveEnv && strongShear) xref += 'The full ingredient chain is active: jet forcing + surface moisture + CAPE + shear. These hazards are a direct result of that chain.';
+            else if (wx.weatherCode >= 95) xref += 'Active thunderstorms producing hazards. Check upstream products to assess if environment supports continuation/intensification.';
+          }
+          xref += '</div>';
+        }
+      }
+
+      // ════════════════════════════════════════════
+      // CHAIN 2: WINTER STORM
+      // Upper trough → Surface low → Moisture → Thermal profile → Precip type → Accumulation
+      // ════════════════════════════════════════════
+      if (winterPrecip || (wx.snow > 0) || (wx.temp != null && wx.temp <= 36 && wx.precipProb > 40)) {
+        var winStages = [
+          { icon: '🌀', label: 'Trough', active: wx.pressureTrend != null && wx.pressureTrend <= -1.5 },
+          { icon: '🌬️', label: 'Sfc Low', active: wx.pressure != null && wx.pressure < 1008 },
+          { icon: '💧', label: 'Moisture', active: wx.rh != null && wx.rh > 70 },
+          { icon: '🌡️', label: 'Thermal', active: wx.temp != null && wx.temp <= 36 },
+          { icon: '❄', label: 'Type', active: wx.snow > 0 || (wx.weatherCode >= 66 && wx.weatherCode <= 77) },
+          { icon: '📏', label: 'Accum', active: wx.snow > 0.1 }
+        ];
+        var winActive = winStages.filter(function(s){ return s.active; }).length;
+
+        if (winActive >= 2) {
+          xref += '<div style="margin-bottom:6px;">';
+          xref += '<div style="font-weight:600;font-size:.50rem;color:#4af;margin-bottom:3px;">❄️ WINTER STORM CHAIN</div>';
+          xref += '<div style="display:flex;gap:1px;margin-bottom:4px;font-size:.40rem;">';
+          winStages.forEach(function(s) {
+            var myStage = (isUpper && s.label==='Trough') || (id==='fcast-tab-wind' && s.label==='Sfc Low') || (isMoisture && s.label==='Moisture') || ((id==='fcast-tab-gfs850temp'||id==='fcast-tab-850temp'||id==='fcast-tab-lowthick'||id==='fcast-tab-midthick') && s.label==='Thermal') || (id==='fcast-tab-ptype' && s.label==='Type') || (id==='fcast-tab-snow' && s.label==='Accum');
+            var bg = s.active ? 'rgba(68,170,255,.2)' : 'rgba(255,255,255,.05)';
+            var col = s.active ? '#4af' : 'rgba(255,255,255,.3)';
+            var bdr = myStage ? 'border:1px solid #4af;box-shadow:0 0 4px rgba(68,170,255,.4);' : 'border:1px solid transparent;';
+            xref += '<div style="flex:1;text-align:center;padding:2px;border-radius:3px;background:' + bg + ';color:' + col + ';' + bdr + '">' + s.icon + '<br>' + s.label + '</div>';
+          });
+          xref += '</div>';
+
+          if (isUpper) {
+            xref += '<b>Forcing:</b> Upper trough drives the surface low. <b>Check:</b> 850mb temp for warm nose → thickness for rain/snow line → precip type for what actually falls.';
+          } else if (id === 'fcast-tab-wind') {
+            xref += 'Surface low organizes the storm. <b>Wind field:</b> heaviest precip typically north/northwest of the low center. Blowing snow risk if gusts >25 mph.';
+          } else if (isMoisture) {
+            xref += 'Moisture feeds the storm. Deep-layer saturation → steady precip. Dry air aloft with moist surface → enhanced snowfall rates from dendritic growth zone.';
+          } else if (id === 'fcast-tab-gfs850temp' || id === 'fcast-tab-850temp' || id === 'fcast-tab-lowthick' || id === 'fcast-tab-midthick') {
+            xref += '<b>CRITICAL STAGE.</b> The thermal profile determines everything: ';
+            if (wx.temp <= 28) xref += 'well below freezing → all snow.';
+            else if (wx.temp <= 34) xref += '<span style="color:#f90;">MARGINAL (' + wx.temp + '°F). Check 850mb for warm nose (freezing rain) and 1000-850mb thickness for rain/snow line.</span>';
+            else xref += 'above freezing → rain at surface. Check if cooling is expected.';
+          } else if (id === 'fcast-tab-ptype') {
+            xref += '<b>Upstream determines this:</b> 850mb temp sets warm/cold nose → thickness shows the layer depth → this product shows the model\'s verdict. <b>Verify:</b> Compare with thickness — disagreements flag model uncertainty.';
+          } else if (id === 'fcast-tab-snow') {
+            xref += 'End of the chain. <b>Verify upstream:</b> Precip type confirms snow reaches surface. Thickness confirms no warm nose. Multiply QPF by snow-liquid ratio at current temp for expected depth.';
+          } else if (isPrecip) {
+            xref += '<b>Winter context:</b> Returns could be rain, snow, or ice. Check precip type + thickness to decode what\'s actually falling at the surface.';
+          }
+          xref += '</div>';
+        }
+      }
+
+      // ════════════════════════════════════════════
+      // CHAIN 3: FLOOD EVENT
+      // Antecedent moisture → Moisture transport → Forcing → Heavy rain → Exceeds capacity → Flooding
+      // ════════════════════════════════════════════
+      if ((wx.precip > 0.25 && wx.precipProb > 60) || (wx.precip > 0.5) || (filterAlerts(['flood']).length > 0)) {
+        var fldStages = [
+          { icon: '💧', label: 'Soil', active: wx.rh != null && wx.rh > 80 },
+          { icon: '🌊', label: 'Transport', active: wx.rh > 70 && (wx.wind > 15 || (wx.dewpoint != null && wx.dewpoint >= 60)) },
+          { icon: '🌀', label: 'Forcing', active: wx.pressureTrend != null && wx.pressureTrend <= -1.5 },
+          { icon: '🌧️', label: 'Rain', active: wx.precip > 0.1 },
+          { icon: '📊', label: 'Capacity', active: wx.precip > 0.3 },
+          { icon: '🚨', label: 'Flood', active: filterAlerts(['flood']).length > 0 || wx.precip > 0.5 }
+        ];
+        var fldActive = fldStages.filter(function(s){ return s.active; }).length;
+
+        if (fldActive >= 3 || filterAlerts(['flood']).length > 0) {
+          xref += '<div style="margin-bottom:6px;">';
+          xref += '<div style="font-weight:600;font-size:.50rem;color:#f44;margin-bottom:3px;">🌊 FLOOD EVENT CHAIN</div>';
+          xref += '<div style="display:flex;gap:1px;margin-bottom:4px;font-size:.40rem;">';
+          fldStages.forEach(function(s) {
+            var myStage = (isMoisture && s.label==='Soil') || ((id==='fcast-tab-gfs500wind'||id==='fcast-tab-jet') && s.label==='Transport') || (isUpper && s.label==='Forcing') || ((id==='fcast-tab-precip1hr'||id==='fcast-tab-sim') && s.label==='Rain') || ((id==='fcast-tab-precip6hr'||id==='fcast-tab-precip24hr'||id==='fcast-tab-ptot') && s.label==='Capacity');
+            var bg = s.active ? 'rgba(255,68,68,.2)' : 'rgba(255,255,255,.05)';
+            var col = s.active ? '#f44' : 'rgba(255,255,255,.3)';
+            var bdr = myStage ? 'border:1px solid #f44;box-shadow:0 0 4px rgba(255,68,68,.4);' : 'border:1px solid transparent;';
+            xref += '<div style="flex:1;text-align:center;padding:2px;border-radius:3px;background:' + bg + ';color:' + col + ';' + bdr + '">' + s.icon + '<br>' + s.label + '</div>';
+          });
+          xref += '</div>';
+
+          if (id === 'fcast-tab-precip1hr') xref += '<b>Flash flood timescale.</b> Rate >0.50"/hr overwhelms urban drainage. Compare 1hr totals vs Flash Flood Guidance (FFG).';
+          else if (id === 'fcast-tab-precip6hr' || id === 'fcast-tab-precip24hr') xref += '<b>Accumulation timescale.</b> Compare vs FFG and Atlas 14 recurrence intervals. Saturated soils (' + (wx.rh > 80 ? 'RH ' + wx.rh + '% — YES' : 'check antecedent moisture') + ') lower effective thresholds.';
+          else if (id === 'fcast-tab-ptot') xref += '<b>Storm total.</b> Track against terrain capacity: urban ~2-3", arid ~1-2", mountains ~4-6". ' + (wx.pressureTrend <= -2 ? 'Deepening cyclone may increase totals in later runs.' : '');
+          else if (isUpper || id === 'fcast-tab-gfs500wind') xref += 'Steering flow determines storm motion. <b>Stalling risk:</b> <20 kt 500mb flow = extended heavy rain over same area = flood catastrophe.';
+          else if (isMoisture) xref += 'Saturated soils can\'t absorb more. All additional rain → runoff → flooding. Check precip totals for expected amounts.';
+          else if (isPrecip) xref += 'Compare model precip with current rate (' + wx.precip.toFixed(2) + ' in/hr). ' + (wx.precip > 0.5 ? '<span style="color:#f44;">Current rate exceeds flash flood thresholds.</span>' : '');
+          xref += '</div>';
+        }
+      }
+
+      // ════════════════════════════════════════════
+      // CHAIN 4: FIRE WEATHER
+      // Drought → Heat → Low RH → Wind → Dry lightning → Fire
+      // ════════════════════════════════════════════
+      if ((wx.rh != null && wx.rh < 30 && wx.temp > 75) || (wx.rh < 20) || filterAlerts(['fire','red flag']).length > 0) {
+        var fireStages = [
+          { icon: '🏜️', label: 'Dry', active: wx.rh != null && wx.rh < 30 },
+          { icon: '🌡️', label: 'Heat', active: wx.temp > 80 },
+          { icon: '💨', label: 'Wind', active: wx.gust > 20 },
+          { icon: '⚡', label: 'Ignition', active: convectiveEnv && wx.rh < 30 },
+          { icon: '🔥', label: 'Fire', active: filterAlerts(['fire','red flag']).length > 0 }
+        ];
+        var fireActive = fireStages.filter(function(s){ return s.active; }).length;
+
+        if (fireActive >= 2) {
+          xref += '<div style="margin-bottom:6px;">';
+          xref += '<div style="font-weight:600;font-size:.50rem;color:#f44;margin-bottom:3px;">🔥 FIRE WEATHER CHAIN</div>';
+          xref += '<div style="display:flex;gap:1px;margin-bottom:4px;font-size:.40rem;">';
+          fireStages.forEach(function(s) {
+            var myStage = (isMoisture && s.label==='Dry') || ((id==='fcast-tab-temp'||id==='fcast-tab-wndtemp') && s.label==='Heat') || (id==='fcast-tab-wind'||id==='fcast-tab-maxwind') && s.label==='Wind' || (id==='fcast-tab-lightning' && s.label==='Ignition');
+            var bg = s.active ? 'rgba(255,68,68,.2)' : 'rgba(255,255,255,.05)';
+            var col = s.active ? '#f44' : 'rgba(255,255,255,.3)';
+            var bdr = myStage ? 'border:1px solid #f44;box-shadow:0 0 4px rgba(255,68,68,.4);' : 'border:1px solid transparent;';
+            xref += '<div style="flex:1;text-align:center;padding:2px;border-radius:3px;background:' + bg + ';color:' + col + ';' + bdr + '">' + s.icon + '<br>' + s.label + '</div>';
+          });
+          xref += '</div>';
+
+          if (id === 'fcast-tab-lightning') xref += '<span style="color:#f44;"><b>DRY LIGHTNING = #1 wildfire ignition cause.</b> RH ' + (wx.rh || '?') + '% — precipitation evaporates before reaching the ground. Lightning reaches surface but rain doesn\'t. Every bolt is a potential fire start.</span>';
+          else if (isMoisture) xref += '<b>Fuel moisture:</b> RH ' + (wx.rh || '?') + '% — fine fuels (grass, brush) are critically dry. Fire spread rate increases exponentially below 25% RH. Check wind for spread potential, lightning for ignition risk.';
+          else if (id === 'fcast-tab-wind' || id === 'fcast-tab-maxwind') xref += '<b>Spread vector:</b> Wind drives fire direction and speed. Gusts ' + (wx.gust || '?') + ' mph in these conditions = rapid fire expansion. Check humidity for fuel dryness, lightning for ignition.';
+          else if (id === 'fcast-tab-temp' || id === 'fcast-tab-wndtemp') xref += 'Heat drives fuel curing and atmospheric instability for dry thunderstorms. Higher temps = lower RH = drier fuels. Check RH product for actual moisture levels.';
+          else xref += 'Fire weather conditions present. RH ' + (wx.rh || '?') + '%, gusts ' + (wx.gust || '?') + ' mph. Check lightning for dry thunderstorm risk.';
+          xref += '</div>';
+        }
+      }
+
+      // ════════════════════════════════════════════
+      // CHAIN 5: FOG/VISIBILITY EVENT
+      // Moisture → Cooling → Light winds → Fog → Low ceilings → Impacts
+      // ════════════════════════════════════════════
+      if (fogRisk || (wx.visibility != null && wx.visibility < 3000) || (wx.rh > 95)) {
+        xref += '<div style="margin-bottom:6px;">';
+        xref += '<div style="font-weight:600;font-size:.50rem;color:#8ba;margin-bottom:3px;">🌫️ FOG/VISIBILITY CHAIN</div>';
+        var fogType = (wx.wind < 5 && isDark !== false) ? 'Radiation fog' : (wx.wind >= 5 && wx.wind < 15) ? 'Advection fog' : 'Low stratus/fog';
+        xref += '<b>' + fogType + ' conditions.</b> ';
+        if (id === 'fcast-tab-temp' || id === 'fcast-tab-wndtemp') xref += 'T-Td spread ' + (wx.temp != null && wx.dewpoint != null ? (wx.temp - wx.dewpoint) + '°F' : '?') + ' — <b>check visibility/ceiling</b> products for spatial extent and model forecast for fog dissipation timing.';
+        else if (isMoisture) xref += 'Surface saturation driving fog formation. Check wind product — calm winds = dense ground fog, 5-15 mph = advection fog, >15 mph = fog lifts to low stratus.';
+        else if (id === 'fcast-tab-vis' || id === 'fcast-tab-ceiling') xref += '<b>Upstream:</b> Temperature/dewpoint convergence (T-Td ' + (wx.temp != null && wx.dewpoint != null ? (wx.temp - wx.dewpoint) + '°F' : '?') + ') and calm winds (' + (wx.wind || '?') + ' mph) are the ingredients.' + (wx.sunrise ? ' Sunrise: ' + new Date(wx.sunrise).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) + ' — radiation fog typically burns off 2-3 hr after.' : '');
+        else if (isPrecip) xref += '<span style="color:#f90;">Fog may produce faint radar returns mimicking light drizzle.</span> Verify with visibility product before interpreting as real precipitation.';
+        else xref += 'Monitor T-Td spread and wind for fog evolution.';
+        xref += '</div>';
+      }
+
+      // ════════════════════════════════════════════
+      // SPACE WEATHER → WEATHER PRODUCTS (always check)
+      // ════════════════════════════════════════════
+      if (geoStorm) {
+        if (id === 'fcast-tab-lightning' || isPrecip) {
+          xref += '<div style="margin-bottom:4px;"><span style="color:#a78bfa;">☀ <b>Geomagnetic storm</b> (Kp ' + sw.kp + '). Lightning detection networks and satellite data assimilation may have reduced accuracy.</span></div>';
+        }
+      }
+      if (canSeeAurora && geoActive) {
+        if (id === 'fcast-tab-vis' || id === 'fcast-tab-ceiling') {
+          if (clearSky && isDark) xref += '<div style="margin-bottom:4px;"><span style="color:#4f8;">🌌 <b>Aurora possible!</b> Kp ' + sw.kp + ', clear dark skies — look north!</span></div>';
+          else if (overcast) xref += '<div style="margin-bottom:4px;"><span style="color:#f90;">🌌 Aurora possible (Kp ' + sw.kp + ') but overcast skies block the view.</span></div>';
+        }
+      }
+      if (id === 'fcast-tab-10mb' && highSolarWind) {
+        xref += '<div style="margin-bottom:4px;"><span style="color:#a78bfa;">☀ <b>Active solar wind</b> (' + sw.speed + ' km/s). Energetic particle precipitation can affect stratospheric ozone chemistry in extreme events.</span></div>';
+      }
+
+      // Render
+      if (xref) {
+        live += XS;
+        live += '<div style="font-weight:600;font-size:.54rem;color:#78a0ff;margin-bottom:4px;">🔗 EVENT CHAINS</div>';
+        live += xref;
+        live += E;
+      }
+    }
+
+    if (!live) return content;
+    var firstBreak = content.indexOf('<br><br>');
+    if (firstBreak > 0) {
+      return content.substring(0, firstBreak + 8) + live + content.substring(firstBreak + 8);
+    }
+    return live + content;
+  }
+
   function showRadarTooltip(id, anchor){
     if (!radarInfoData[id] || !radarTooltip) return;
     var content = radarInfoData[id];
     // Inject live model state for model tooltips
     var isModel = id.indexOf('fcast-model-') === 0;
     if (isModel) content = injectLiveModelState(id, content);
+    // Inject live product context for product tab tooltips
+    var isProduct = id.indexOf('fcast-tab-') === 0;
+    if (isProduct) content = injectLiveProductContext(id, content);
     radarTooltip.innerHTML = content;
     radarTooltip.style.display = 'block';
     // Determine if this is a left-panel (model) or right-panel (product) icon
@@ -14664,6 +16127,9 @@ function initNowMicroTabs(){
           return 80;
         }
         features.sort(function(a, b){ return alertPriority(a) - alertPriority(b); });
+        
+        // ── Cache alerts globally for tooltip live insights ──
+        window._nwsAlerts = features.map(function(f){ return f.properties.event || 'Alert'; });
         
         // Also check SPC tornado outlook for user's location
         checkSPCTornadoRisk(function(spcAlert){
