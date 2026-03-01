@@ -672,8 +672,10 @@
     font-size: 10px !important;
     line-height: 1.5 !important;
     min-width: 160px;
-    max-width: 260px;
+    max-width: 340px;
     opacity: 1 !important;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
   }
   .hz-tooltip::before { border-top-color: rgba(8,8,20,.94) !important; }
   .hz-card-head {
@@ -3801,7 +3803,7 @@
   #hazard-tabs .geo-tab[data-hazard="flood"].active{ background:rgba(6,182,212,.25); color:#22d3ee; box-shadow:inset 0 0 12px rgba(6,182,212,.15); }
 
   /* Badge pills */
-  .hazard-badge{
+  #hazard-tabs .geo-tab .hazard-badge{
     display:inline-flex;
     align-items:center;
     justify-content:center;
@@ -3814,6 +3816,9 @@
     letter-spacing:0;
     margin-left:4px;
     vertical-align:middle;
+  }
+  #hazard-tabs .geo-tab .hazard-badge:empty{
+    display:none;
   }
   #hazard-tabs .geo-tab[data-hazard="fire"] .hazard-badge{ background:rgba(249,115,22,.2); color:#fb923c; }
   #hazard-tabs .geo-tab[data-hazard="tornado"] .hazard-badge{ background:rgba(239,68,68,.2); color:#f87171; }
@@ -29779,7 +29784,7 @@ function initNowMicroTabs(){
       if(!el) return;
       if(count > 0){
         el.textContent = count.toLocaleString();
-        el.style.display = '';
+        el.style.display = 'inline-flex';
         el.style.width = '';
         el.style.height = '';
         el.style.minWidth = '';
@@ -30885,6 +30890,262 @@ function initNowMicroTabs(){
   var outlookLayers = { fire: null, tornado: null, flood: null };
   var outlookActiveDay = { fire: 'off', tornado: 'off', flood: 'off' };
 
+  // ── ERO Popup Enrichment Helpers ──
+  // Point-in-polygon (ray casting)
+  function eroPointInPoly(lat, lon, coords) {
+    var inside = false;
+    for (var r = 0; r < coords.length; r++) {
+      var ring = coords[r];
+      for (var i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        var xi = ring[i][1], yi = ring[i][0], xj = ring[j][1], yj = ring[j][0];
+        if (((yi > lon) !== (yj > lon)) && (lat < (xj - xi) * (lon - yi) / (yj - yi) + xi)) inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  // Historical rarity context
+  var eroRarityContext = {
+    'HIGH RISK': 'HIGH is the rarest ERO category — issued only ~4 times per year on average. When WPC issues HIGH, they have very high confidence in widespread, life-threatening flooding. This is a "drop everything and prepare" outlook.',
+    'MODERATE RISK': 'MODERATE is issued ~15-20 times per year. It signals high confidence in significant flash flooding over a concentrated area. Historically, ~80% of flash flood fatalities occur within MODERATE+ risk areas.',
+    'SLIGHT RISK': 'SLIGHT is issued several times monthly during active seasons. ~40% of flash flood events occur within SLIGHT risk areas. Take seriously if you live near creeks, rivers, or low-lying roads.',
+    'MARGINAL RISK': 'MARGINAL is the most common ERO category, issued frequently during warm months. While most MARGINAL areas don\'t flood, isolated spots can still see dangerous water rises — especially where soil is saturated.',
+    'OUTLOOK AREA': ''
+  };
+
+  // Build enriched ERO popup
+  function buildEROPopup(feature, riskName, riskColor, riskDesc, dayStr) {
+    var props = feature.properties || {};
+    var tt = '';
+
+    // Header
+    tt += '<div class="hz-card-head"><div class="hz-accent" style="background:'+riskColor+';"></div><span style="color:'+riskColor+';">EXCESSIVE RAINFALL OUTLOOK \u00b7 ' + dayStr.toUpperCase() + '</span></div>';
+    tt += '<div style="display:flex;align-items:center;gap:5px;margin:3px 0;">';
+    tt += '<span style="font-size:.85rem;font-weight:800;color:' + riskColor + ';">' + riskName + '</span>';
+    tt += '</div>';
+    tt += '<div style="font-size:.72rem;color:#ccc;line-height:1.35;margin-bottom:4px;">' + riskDesc + '</div>';
+
+    // ── Inside zone detection ──
+    try {
+      var uLat = LOCATION ? LOCATION.lat : null;
+      var uLon = LOCATION ? LOCATION.lon : null;
+      if (uLat && uLon && feature.geometry) {
+        var geom = feature.geometry;
+        var isInside = false;
+        if (geom.type === 'Polygon') isInside = eroPointInPoly(uLat, uLon, geom.coordinates);
+        else if (geom.type === 'MultiPolygon') {
+          for (var mp = 0; mp < geom.coordinates.length; mp++) { if (eroPointInPoly(uLat, uLon, geom.coordinates[mp])) { isInside = true; break; } }
+        }
+        if (isInside) {
+          tt += '<div style="padding:3px 6px;background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.4);border-radius:4px;margin:4px 0;">';
+          tt += '<span style="font-size:.75rem;font-weight:800;color:#f87171;">\u26a0 YOUR LOCATION IS INSIDE THIS RISK AREA</span>';
+          tt += '</div>';
+        }
+      }
+    } catch(e) {}
+
+    // ── Historical rarity ──
+    var rarity = eroRarityContext[riskName] || '';
+    if (rarity) {
+      tt += '<div style="font-size:.65rem;color:#aaa;line-height:1.3;margin:4px 0;padding:3px 5px;background:rgba(255,255,255,.04);border-radius:3px;border-left:2px solid ' + riskColor + ';">';
+      tt += '<span style="font-weight:700;color:#ccc;">HISTORICAL CONTEXT:</span> ' + rarity;
+      tt += '</div>';
+    }
+
+    // ── Local time conversion ──
+    var valid = props.VALID || props.valid || '';
+    var expire = props.EXPIRE || props.expire || '';
+    if (valid && valid.length >= 12) {
+      try {
+        var vDate = new Date(Date.UTC(parseInt(valid.substring(0,4)), parseInt(valid.substring(4,6))-1, parseInt(valid.substring(6,8)), parseInt(valid.substring(8,10)), parseInt(valid.substring(10,12))));
+        var eDate = expire.length >= 12 ? new Date(Date.UTC(parseInt(expire.substring(0,4)), parseInt(expire.substring(4,6))-1, parseInt(expire.substring(6,8)), parseInt(expire.substring(8,10)), parseInt(expire.substring(10,12)))) : null;
+        var vLocal = vDate.toLocaleString('en-US', {weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit', timeZoneName:'short'});
+        var eLocal = eDate ? eDate.toLocaleString('en-US', {weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit', timeZoneName:'short'}) : '';
+
+        tt += '<div style="font-size:.65rem;color:#999;margin-top:3px;border-top:1px solid rgba(255,255,255,.08);padding-top:3px;">';
+        tt += '<span style="font-weight:700;color:#bbb;">VALID PERIOD:</span><br>';
+        tt += vLocal;
+        if (eLocal) tt += ' \u2192 ' + eLocal;
+
+        // Timing guidance
+        if (eDate) {
+          var now = new Date();
+          var hrsToStart = (vDate - now) / 3600000;
+          var hrsToEnd = (eDate - now) / 3600000;
+          var vHourLocal = vDate.getHours();
+          var eHourLocal = eDate.getHours();
+          tt += '<br><span style="color:'+riskColor+';font-weight:700;">';
+          if (hrsToStart > 0 && hrsToStart < 6) tt += 'Begins within ' + Math.ceil(hrsToStart) + ' hours';
+          else if (hrsToStart <= 0 && hrsToEnd > 0) tt += 'ACTIVE NOW';
+          else if (hrsToStart > 0 && hrsToStart < 24) tt += 'Starts today';
+          else if (hrsToStart >= 24 && hrsToStart < 48) tt += 'Starts tomorrow';
+          else tt += 'Starts in ' + Math.round(hrsToStart/24) + ' days';
+          // Day vs night guidance
+          if (vHourLocal >= 18 || vHourLocal < 6 || eHourLocal >= 18 || eHourLocal < 6) {
+            tt += ' \u00b7 Includes overnight hours \u2014 flash floods deadliest after dark';
+          }
+          tt += '</span>';
+        }
+        tt += '</div>';
+      } catch(e) {
+        // Fallback to UTC display
+        tt += '<div style="font-size:.65rem;color:#888;margin-top:3px;">' + valid.substring(4,6)+'/'+valid.substring(6,8)+' '+valid.substring(8,10)+':'+valid.substring(10,12)+'Z</div>';
+      }
+    }
+
+    // ── Cross-reference: nearby flood gauges ──
+    try {
+      var gauges = window._floodGauges || [];
+      if (gauges.length > 0 && feature.geometry) {
+        var geom = feature.geometry;
+        var gaugesInside = gauges.filter(function(g) {
+          if (geom.type === 'Polygon') return eroPointInPoly(g.lat, g.lon, geom.coordinates);
+          if (geom.type === 'MultiPolygon') {
+            for (var mp = 0; mp < geom.coordinates.length; mp++) { if (eroPointInPoly(g.lat, g.lon, geom.coordinates[mp])) return true; }
+          }
+          return false;
+        });
+        var elevated = gaugesInside.filter(function(g) { return g.status === 'major' || g.status === 'moderate' || g.status === 'minor' || g.status === 'action'; });
+        if (gaugesInside.length > 0) {
+          tt += '<div style="font-size:.65rem;color:#aaa;margin-top:3px;border-top:1px solid rgba(255,255,255,.08);padding-top:3px;">';
+          tt += '<span style="font-weight:700;color:#22d3ee;">\ud83c\udf0a RIVER GAUGES IN THIS AREA:</span> ' + gaugesInside.length + ' monitored';
+          if (elevated.length > 0) {
+            var majC = elevated.filter(function(g){return g.status==='major';}).length;
+            var modC = elevated.filter(function(g){return g.status==='moderate';}).length;
+            var minC = elevated.filter(function(g){return g.status==='minor';}).length;
+            var actC = elevated.filter(function(g){return g.status==='action';}).length;
+            tt += '<br><span style="color:#f87171;font-weight:700;">' + elevated.length + ' ALREADY ELEVATED</span>';
+            if (majC) tt += ' \u00b7 <span style="color:#9333ea;">' + majC + ' major</span>';
+            if (modC) tt += ' \u00b7 <span style="color:#ef4444;">' + modC + ' moderate</span>';
+            if (minC) tt += ' \u00b7 <span style="color:#f97316;">' + minC + ' minor</span>';
+            if (actC) tt += ' \u00b7 <span style="color:#eab308;">' + actC + ' action</span>';
+            tt += '<br><span style="color:#f87171;">Ground already saturated \u2014 additional rainfall will cause rapid rises</span>';
+          } else {
+            tt += '<br><span style="color:#84cc16;">All gauges currently at normal levels</span>';
+          }
+          tt += '</div>';
+        }
+      }
+    } catch(e) {}
+
+    // ── Cross-reference: SPC convective outlook overlap ──
+    try {
+      if (outlookLayers['tornado'] && outlookLayers['tornado'].getLayers) {
+        var spcLayers = outlookLayers['tornado'].getLayers();
+        if (spcLayers.length > 0) {
+          tt += '<div style="font-size:.65rem;color:#aaa;margin-top:3px;border-top:1px solid rgba(255,255,255,.08);padding-top:3px;">';
+          tt += '<span style="font-weight:700;color:#f97316;">\u26a1 SPC CONVECTIVE OUTLOOK ALSO ACTIVE</span>';
+          tt += '<br>Thunderstorms in this area may produce heavy rainfall AND severe weather simultaneously. Storm-training and slow-moving supercells amplify flash flood risk.';
+          tt += '</div>';
+        }
+      }
+    } catch(e) {}
+
+    // Footer
+    tt += '<div class="hz-card-footer">WPC Excessive Rainfall Outlook \u00b7 NOAA</div>';
+    return tt;
+  }
+
+  // Build enriched CPC Precipitation Outlook popup
+  function buildCPCPopup(feature, riskName, riskColor, riskDesc, rangeStr) {
+    var props = feature.properties || {};
+    var tt = '';
+
+    // Header
+    tt += '<div class="hz-card-head"><div class="hz-accent" style="background:'+riskColor+';"></div><span style="color:'+riskColor+';">CPC PRECIPITATION OUTLOOK \u00b7 ' + rangeStr.toUpperCase() + '</span></div>';
+    tt += '<div style="display:flex;align-items:center;gap:5px;margin:3px 0;">';
+    tt += '<span style="font-size:.85rem;font-weight:800;color:' + riskColor + ';">' + riskName + '</span>';
+    tt += '</div>';
+    tt += '<div style="font-size:.72rem;color:#ccc;line-height:1.35;margin-bottom:4px;">' + riskDesc + '</div>';
+
+    // ── Inside zone detection ──
+    try {
+      var uLat = LOCATION ? LOCATION.lat : null;
+      var uLon = LOCATION ? LOCATION.lon : null;
+      if (uLat && uLon && feature.geometry) {
+        var geom = feature.geometry;
+        var isInside = false;
+        if (geom.type === 'Polygon') isInside = eroPointInPoly(uLat, uLon, geom.coordinates);
+        else if (geom.type === 'MultiPolygon') {
+          for (var mp = 0; mp < geom.coordinates.length; mp++) { if (eroPointInPoly(uLat, uLon, geom.coordinates[mp])) { isInside = true; break; } }
+        }
+        if (isInside) {
+          var insideColor = riskName.indexOf('BELOW') >= 0 ? '#f97316' : riskName.indexOf('ABOVE') >= 0 ? '#06b6d4' : '#84cc16';
+          tt += '<div style="padding:3px 6px;background:'+insideColor+'18;border:1px solid '+insideColor+'55;border-radius:4px;margin:4px 0;">';
+          tt += '<span style="font-size:.75rem;font-weight:800;color:'+insideColor+';">YOUR LOCATION IS INSIDE THIS OUTLOOK</span>';
+          tt += '</div>';
+        }
+      }
+    } catch(e) {}
+
+    // ── Probability data if available ──
+    var prob = parseFloat(props.prob || props.PROB || props.Prob || 0);
+    if (prob > 0) {
+      tt += '<div style="font-size:.65rem;color:#aaa;margin:4px 0;padding:3px 5px;background:rgba(255,255,255,.04);border-radius:3px;border-left:2px solid ' + riskColor + ';">';
+      tt += '<span style="font-weight:700;color:#ccc;">PROBABILITY:</span> ' + prob + '% chance of exceeding the median precipitation for this period';
+      tt += '</div>';
+    }
+
+    // ── What this means practically ──
+    var practicalCtx = '';
+    if (riskName.indexOf('MUCH ABOVE') >= 0) {
+      practicalCtx = 'Expect significantly wetter than average conditions. Rivers may run high, soil saturation increases flood vulnerability. Plan for persistent rain and possible travel disruptions.';
+    } else if (riskName.indexOf('ABOVE') >= 0) {
+      practicalCtx = 'Wetter than average conditions favored. Cumulative rainfall over the period may stress drainage systems. Check river forecasts if near waterways.';
+    } else if (riskName.indexOf('BELOW') >= 0) {
+      practicalCtx = 'Drier than average conditions expected. Beneficial for drying saturated areas, but may worsen drought where already dry. Wildfire risk may increase with drying vegetation.';
+    } else if (riskName.indexOf('NEAR NORMAL') >= 0) {
+      practicalCtx = 'No strong signal for departure from climatological averages. Expect typical precipitation patterns for this time of year.';
+    }
+    if (practicalCtx) {
+      tt += '<div style="font-size:.65rem;color:#aaa;margin:4px 0;padding:3px 5px;background:rgba(255,255,255,.04);border-radius:3px;border-left:2px solid ' + riskColor + ';">';
+      tt += '<span style="font-weight:700;color:#ccc;">WHAT THIS MEANS:</span> ' + practicalCtx;
+      tt += '</div>';
+    }
+
+    // ── Cross-reference: nearby flood gauges ──
+    try {
+      var gauges = window._floodGauges || [];
+      if (gauges.length > 0 && feature.geometry && riskName.indexOf('ABOVE') >= 0) {
+        var geom = feature.geometry;
+        var gaugesInside = gauges.filter(function(g) {
+          if (geom.type === 'Polygon') return eroPointInPoly(g.lat, g.lon, geom.coordinates);
+          if (geom.type === 'MultiPolygon') {
+            for (var mp = 0; mp < geom.coordinates.length; mp++) { if (eroPointInPoly(g.lat, g.lon, geom.coordinates[mp])) return true; }
+          }
+          return false;
+        });
+        var elevated = gaugesInside.filter(function(g) { return g.status === 'major' || g.status === 'moderate' || g.status === 'minor' || g.status === 'action'; });
+        if (elevated.length > 0) {
+          tt += '<div style="font-size:.65rem;color:#aaa;margin-top:3px;border-top:1px solid rgba(255,255,255,.08);padding-top:3px;">';
+          tt += '<span style="font-weight:700;color:#f87171;">\ud83c\udf0a ' + elevated.length + ' RIVER GAUGES ALREADY ELEVATED</span> in this outlook area';
+          tt += '<br><span style="color:#f87171;">Above-normal precip on saturated ground amplifies flood risk</span>';
+          tt += '</div>';
+        }
+      }
+    } catch(e) {}
+
+    // ── Cross-reference: ERO overlap ──
+    try {
+      if (outlookLayers['flood'] && outlookLayers['flood'] !== null) {
+        // If there's also a near-term ERO active, note the compound signal
+        tt += '<div style="font-size:.65rem;color:#aaa;margin-top:3px;border-top:1px solid rgba(255,255,255,.08);padding-top:3px;">';
+        tt += '<span style="font-weight:700;color:#22d3ee;">\ud83d\udcc5 EXTENDED OUTLOOK</span>';
+        tt += '<br>CPC outlooks show multi-day precipitation trends. Check ERO Day 1-3 for specific flash flood timing. Use together: ERO for "when and where" + CPC for "how wet overall."';
+        tt += '</div>';
+      }
+    } catch(e) {}
+
+    // ── Climatological context ──
+    tt += '<div style="font-size:.6rem;color:#777;margin-top:3px;border-top:1px solid rgba(255,255,255,.06);padding-top:2px;">';
+    tt += 'CPC outlooks use ensemble model guidance, soil moisture analysis, and teleconnection patterns (MJO, ENSO) to forecast precipitation departures from the 1991-2020 climatological mean.';
+    tt += '</div>';
+
+    // Footer
+    tt += '<div class="hz-card-footer">CPC ' + rangeStr + ' Precipitation Outlook \u00b7 NOAA</div>';
+    return tt;
+  }
+
   // Layer ID mapping from NOAA MapServer docs
   var outlookEndpoints = {
     fire: {
@@ -31001,13 +31262,36 @@ function initNowMicroTabs(){
             },
             onEachFeature: function(feature, lyr){
               var props = feature.properties || {};
-              var label = props.LABEL || props.label || props.idp_source || 'Outlook';
-              lyr.bindTooltip(
-                '<div class="hz-card-head"><div class="hz-accent" style="background:#06b6d4;"></div><span style="color:#06b6d4;">ERO Days 3-5</span></div>' +
-                '<div class="hz-card-row"><span class="hz-label">Risk</span><span class="hz-val" style="color:#fff;">' + label + '</span></div>' +
-                '<div class="hz-card-footer">WPC Excessive Rainfall Outlook</div>',
-                { className:'hz-tooltip' }
-              );
+              var label = (props.outlook || props.LABEL || props.label || props.idp_source || '').toLowerCase();
+              var dn = props.dn || props.DN || 0;
+              var riskName, riskColor, riskDesc;
+              if (dn >= 4 || label.indexOf('high') >= 0) { riskName = 'HIGH RISK'; riskColor = '#9333ea'; riskDesc = 'High confidence in life-threatening flash flooding. Extreme rainfall rates expected. This is a rare, dangerous outlook — issued only a few times per year.'; }
+              else if (dn >= 3 || label.indexOf('moderate') >= 0) { riskName = 'MODERATE RISK'; riskColor = '#ef4444'; riskDesc = 'Significant flash flooding likely over a broad area. Rainfall rates may exceed 2-3\"/hr. Urban flooding and dangerous river rises expected.'; }
+              else if (dn >= 2 || label.indexOf('slight') >= 0) { riskName = 'SLIGHT RISK'; riskColor = '#f97316'; riskDesc = 'Flash flooding possible, especially in poor-drainage and low-lying areas. Localized rainfall could exceed flash flood guidance.'; }
+              else if (dn >= 1 || label.indexOf('marginal') >= 0) { riskName = 'MARGINAL RISK'; riskColor = '#eab308'; riskDesc = 'Limited flash flood risk. Brief heavy rainfall may cause localized ponding or minor urban flooding in susceptible areas.'; }
+              else { riskName = 'OUTLOOK AREA'; riskColor = '#06b6d4'; riskDesc = 'Precipitation hazard area identified by WPC for the extended period.'; }
+
+              // Get day from product field
+              var dayStr = 'Days 3-5';
+              var product = props.product || '';
+              if (product.indexOf('Day 3') >= 0) dayStr = 'Day 3';
+              else if (product.indexOf('Day 4') >= 0) dayStr = 'Day 4';
+              else if (product.indexOf('Day 5') >= 0) dayStr = 'Day 5';
+
+              // Override valid/expire from actual fields for buildEROPopup
+              if (props.start_time && !props.VALID) {
+                var st = new Date(props.start_time);
+                var et = props.end_time ? new Date(props.end_time) : null;
+                if (!isNaN(st.getTime())) {
+                  props.VALID = st.getUTCFullYear().toString() + String(st.getUTCMonth()+1).padStart(2,'0') + String(st.getUTCDate()).padStart(2,'0') + String(st.getUTCHours()).padStart(2,'0') + String(st.getUTCMinutes()).padStart(2,'0');
+                }
+                if (et && !isNaN(et.getTime())) {
+                  props.EXPIRE = et.getUTCFullYear().toString() + String(et.getUTCMonth()+1).padStart(2,'0') + String(et.getUTCDate()).padStart(2,'0') + String(et.getUTCHours()).padStart(2,'0') + String(et.getUTCMinutes()).padStart(2,'0');
+                }
+              }
+
+              var tt = buildEROPopup(feature, riskName, riskColor, riskDesc, dayStr);
+              lyr.bindTooltip(tt, { sticky: true, className: 'hz-tooltip', maxWidth: 340 });
             }
           });
           outlookLayers[hazType] = layer;
@@ -31086,7 +31370,8 @@ function initNowMicroTabs(){
             else { riskName = 'THUNDERSTORM'; riskColor = '#60a5fa'; riskDesc = 'General thunderstorm activity expected.'; }
             outlookColor = riskColor;
           } else if (hazType === 'flood') {
-            var flabel = (p.LABEL || p.label || p.cat || p.Cat || p.CAT || '').toString().toLowerCase();
+            var flabel = (p.outlook || p.LABEL || p.label || p.cat || p.Cat || p.CAT || '').toString().toLowerCase();
+            var fdn = p.dn || p.DN || 0;
             if (isCPC) {
               // CPC probabilistic outlook — above/below/near normal precip
               if (flabel.indexOf('much above') >= 0 || flabel.indexOf('ec') >= 0) { riskName = 'MUCH ABOVE NORMAL'; riskColor = '#06b6d4'; riskDesc = 'Precipitation expected to be well above climatological averages. Enhanced flood risk from extended wet period.'; }
@@ -31098,12 +31383,18 @@ function initNowMicroTabs(){
                 riskName = prob > 0 ? prob + '% PROBABILITY' : 'OUTLOOK AREA'; riskColor = '#06b6d4'; riskDesc = 'CPC extended precipitation probability area.';
               }
             } else {
-              // WPC ERO risk levels
-              if (flabel.indexOf('high') >= 0) { riskName = 'HIGH RISK'; riskColor = '#9333ea'; riskDesc = 'High confidence in life-threatening flash flooding. Extreme rainfall rates expected. This is a rare, dangerous outlook.'; }
-              else if (flabel.indexOf('moderate') >= 0) { riskName = 'MODERATE RISK'; riskColor = '#ef4444'; riskDesc = 'Significant flash flooding likely. Rainfall rates may exceed 2-3 inches per hour. Urban and river flooding expected.'; }
-              else if (flabel.indexOf('slight') >= 0) { riskName = 'SLIGHT RISK'; riskColor = '#f97316'; riskDesc = 'Flash flooding possible in spots, especially in poor-drainage and low-lying areas.'; }
-              else if (flabel.indexOf('marginal') >= 0) { riskName = 'MARGINAL RISK'; riskColor = '#eab308'; riskDesc = 'Limited flash flood risk. Brief heavy rainfall may cause localized ponding or minor flooding.'; }
+              // WPC ERO risk levels - check both label text and dn numeric value
+              if (fdn >= 4 || flabel.indexOf('high') >= 0) { riskName = 'HIGH RISK'; riskColor = '#9333ea'; riskDesc = 'High confidence in life-threatening flash flooding. Extreme rainfall rates expected. This is a rare, dangerous outlook.'; }
+              else if (fdn >= 3 || flabel.indexOf('moderate') >= 0) { riskName = 'MODERATE RISK'; riskColor = '#ef4444'; riskDesc = 'Significant flash flooding likely. Rainfall rates may exceed 2-3 inches per hour. Urban and river flooding expected.'; }
+              else if (fdn >= 2 || flabel.indexOf('slight') >= 0) { riskName = 'SLIGHT RISK'; riskColor = '#f97316'; riskDesc = 'Flash flooding possible in spots, especially in poor-drainage and low-lying areas.'; }
+              else if (fdn >= 1 || flabel.indexOf('marginal') >= 0) { riskName = 'MARGINAL RISK'; riskColor = '#eab308'; riskDesc = 'Limited flash flood risk. Brief heavy rainfall may cause localized ponding or minor flooding.'; }
               else { riskName = 'AREA'; riskColor = '#06b6d4'; riskDesc = 'Precipitation hazard area identified.'; }
+              // Inject start/end times for buildEROPopup if available
+              if (p.start_time && !valid) {
+                var _st = new Date(p.start_time), _et = p.end_time ? new Date(p.end_time) : null;
+                if (!isNaN(_st.getTime())) { valid = _st.getUTCFullYear().toString()+String(_st.getUTCMonth()+1).padStart(2,'0')+String(_st.getUTCDate()).padStart(2,'0')+String(_st.getUTCHours()).padStart(2,'0')+String(_st.getUTCMinutes()).padStart(2,'0'); p.VALID = valid; }
+                if (_et && !isNaN(_et.getTime())) { expire = _et.getUTCFullYear().toString()+String(_et.getUTCMonth()+1).padStart(2,'0')+String(_et.getUTCDate()).padStart(2,'0')+String(_et.getUTCHours()).padStart(2,'0')+String(_et.getUTCMinutes()).padStart(2,'0'); p.EXPIRE = expire; }
+              }
             }
             outlookColor = riskColor;
           }
@@ -31120,6 +31411,17 @@ function initNowMicroTabs(){
           }
 
           // Build rich tooltip
+          if (hazType === 'flood' && !isCPC) {
+            // Use enriched ERO popup with cross-referencing
+            var eroDay = day === 'd1' ? 'Day 1' : day === 'd2' ? 'Day 2' : 'Day ' + day.replace('d','');
+            var tt = buildEROPopup(feature, riskName, riskColor, riskDesc, eroDay);
+            lyr.bindTooltip(tt, { sticky: true, className: 'hz-tooltip', maxWidth: 340 });
+          } else if (hazType === 'flood' && isCPC) {
+            // Enriched CPC precipitation outlook popup
+            var cpcRange = layerId === '_cpc610' ? '6-10 Day' : '8-14 Day';
+            var tt = buildCPCPopup(feature, riskName, riskColor, riskDesc, cpcRange);
+            lyr.bindTooltip(tt, { sticky: true, className: 'hz-tooltip', maxWidth: 340 });
+          } else {
           var tt = '';
           tt += '<div class="hz-card-head"><div class="hz-accent" style="background:'+outlookColor+';"></div><span style="color:'+outlookColor+';">' + typeLabels[hazType].toUpperCase() + ' OUTLOOK</span></div>';
           tt += '<div style="display:flex;align-items:center;gap:5px;margin:3px 0;">';
@@ -31149,6 +31451,7 @@ function initNowMicroTabs(){
           tt += '<div class="hz-card-footer">' + dayLabels[day] + ' \u00b7 SPC · NOAA</div>';
 
           lyr.bindTooltip(tt, { sticky: true, className: 'hz-tooltip', maxWidth: 320 });
+          }
         }
       });
 
@@ -39893,7 +40196,7 @@ function initNowMicroTabs(){
             window._prefetchedNIFC = d;
             SH.ok('nifc');
             var el = document.getElementById('hazard-badge-fire');
-            if(el){ el.textContent = d.features.length.toLocaleString(); el.style.display = ''; }
+            if(el){ el.textContent = d.features.length.toLocaleString(); el.style.display = 'inline-flex'; }
             // Set _activeFires early so smoke intel can precompute
             if (!window._activeFires || window._activeFires.length === 0) {
               var fires = d.features || [];
@@ -39921,7 +40224,7 @@ function initNowMicroTabs(){
             window._prefetchedQuakes = d;
             SH.ok('usgs-eq');
             var el = document.getElementById('hazard-badge-quake');
-            if(el){ el.textContent = d.features.length.toLocaleString(); el.style.display = ''; }
+            if(el){ el.textContent = d.features.length.toLocaleString(); el.style.display = 'inline-flex'; }
             window._quakeFeatures = d.features;
           }
         }).catch(function(){});
@@ -39934,7 +40237,7 @@ function initNowMicroTabs(){
           var count = Math.max(0, lines.length - 1);
           window._prefetchedTornCSV = t;
           var el = document.getElementById('hazard-badge-tornado');
-          if(el && count > 0){ el.textContent = count.toLocaleString(); el.style.display = ''; }
+          if(el && count > 0){ el.textContent = count.toLocaleString(); el.style.display = 'inline-flex'; }
           window._tornadoCount = count;
         }).catch(function(){});
 
@@ -39945,7 +40248,7 @@ function initNowMicroTabs(){
           if(d && d.features){
             window._prefetchedFlood = d;
             var el = document.getElementById('hazard-badge-flood');
-            if(el && d.features.length > 0){ el.textContent = d.features.length.toLocaleString(); el.style.display = ''; }
+            if(el && d.features.length > 0){ el.textContent = d.features.length.toLocaleString(); el.style.display = 'inline-flex'; }
             window._floodGaugesAboveNormal = d.features.length;
           }
         }).catch(function(){});
