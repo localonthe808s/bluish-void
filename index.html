@@ -6791,6 +6791,18 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
   }
 
   function clamp(n, a, b){ return Math.max(a, Math.min(b, n)); }
+
+  // ── Staleness gate: prevents redundant refetches from overlapping intervals ──
+  window._lastFetchTime = {};
+  function shouldRefetch(key, minIntervalMs){
+    var now = Date.now();
+    if(!window._lastFetchTime[key] || (now - window._lastFetchTime[key]) > minIntervalMs){
+      window._lastFetchTime[key] = now;
+      return true;
+    }
+    return false;
+  }
+
   function setText(el, txt){ if (el) el.textContent = (txt == null ? "" : String(txt)); }
 
   // Reliable YYYY-MM-DD string for a Date in the dashboard's timezone
@@ -29543,19 +29555,38 @@ function initNowMicroTabs(){
 
   /* Unified hazard map tab switching */
   function switchHazardTab(tab){
-    // If map hasn't been initialized yet, clicking a tab counts as engaging
+    // If map hasn't been initialized yet, any tab click fully engages the widget
     if (!window._hazardInited) {
       window._hazardInited = true;
-      var prev = document.getElementById('hazard-preview-img');
       try { initUnifiedHazardMap(); } catch(e){ console.error('hazard init', e); }
       setTimeout(function(){ try { initGeologyMaps(); } catch(e){} }, 200);
+      // Dismiss ALL guards — user has engaged, no more barriers
       var guard = document.getElementById('hazard-scroll-guard');
       if (guard) guard.classList.remove('visible');
+      if(window.dismissMapGuard) window.dismissMapGuard();
       // Show fire overlays
       var fireOvInit = document.getElementById('hazard-fire-overlays');
       if (fireOvInit) fireOvInit.style.display = '';
+    } else {
+      // Map already inited — still dismiss scroll guard on any tab click
+      if(window.dismissMapGuard) window.dismissMapGuard();
     }
     hazardActiveTab = tab;
+
+    // ── LAZY TAB DATA INIT ──
+    // Each tab's heavy data (markers, layers, overlays) loads on first switch.
+    // Badge counts are already live from boot prefetch — this only gates map layers.
+    if (window._hazardTabLoaded && !window._hazardTabLoaded[tab]) {
+      window._hazardTabLoaded[tab] = true;
+      try {
+        if (tab === 'tornado') initTornadoData();
+        else if (tab === 'quake') initQuakeData();
+        else if (tab === 'alerts') initAlertsData();
+        else if (tab === 'flood') initFloodData();
+        else if (tab === 'fire' && !window._hazardTabLoaded.fire) initFireData();
+      } catch(e) { console.error('Lazy init ' + tab + ':', e); }
+    }
+
     var allTabs = document.querySelectorAll('#hazard-tabs .geo-tab');
     for(var i=0;i<allTabs.length;i++){
       if(allTabs[i].getAttribute('data-hazard')===tab) allTabs[i].classList.add('active');
@@ -30048,6 +30079,9 @@ function initNowMicroTabs(){
   }
 
   function loadNWSAlerts(){
+    // Skip if alerts were just fetched (3-min interval can overlap with manual calls)
+    if(!shouldRefetch('nws-alerts', 2.5 * 60 * 1000)) return;
+
     var pill = document.getElementById('alerts-status-pill');
     // Get alerts for the visible area — use state-level for broader coverage
     var bounds = hazardMap.getBounds();
@@ -30292,12 +30326,51 @@ function initNowMicroTabs(){
   }
 
   function loadFloodGaugesAHPS(forecastHr){
+    // Skip redundant refetch if same params were just loaded (10-min interval overlap)
+    var floodCacheKey = 'flood-' + floodScope + '-' + forecastHr;
+    if(!shouldRefetch(floodCacheKey, 8 * 60 * 1000) && !window._prefetchedFlood) return;
+
+    // ── Use boot-prefetched flood GeoJSON if available (initial obs load only) ──
+    if (window._prefetchedFlood && forecastHr === 'obs' && floodScope === 'nearby') {
+      var gj = window._prefetchedFlood;
+      window._prefetchedFlood = null; // free memory
+      // Convert GeoJSON features → ArcGIS format for renderFloodGauges
+      var converted = (gj.features || []).map(function(f){
+        var p = f.properties || {};
+        var coords = f.geometry && f.geometry.coordinates;
+        return {
+          attributes: {
+            gaugelid: p.gaugelid || p.nws_lid || p.lid || '',
+            location: p.location || p.name || '',
+            waterbody: p.waterbody || '',
+            status: p.status || p.flood_status || '',
+            observed: p.observed || p.obs_value || null,
+            units: p.units || 'ft',
+            action: p.action || null,
+            flood: p.flood || null,
+            moderate: p.moderate || null,
+            major: p.major || null,
+            obstime: p.obstime || p.obs_time || null,
+            url: p.url || null
+          },
+          geometry: coords ? { x: coords[0], y: coords[1] } : null
+        };
+      }).filter(function(f){ return f.geometry; });
+      if (converted.length > 0) {
+        SH.ok('ahps');
+        renderFloodGauges(converted, forecastHr);
+        return;
+      }
+      // Fall through to normal fetch if conversion yielded nothing
+    }
+
     var layerId = AHPS_LAYERS[forecastHr] != null ? AHPS_LAYERS[forecastHr] : 0;
     var lat = LOCATION.lat, lon = LOCATION.lon;
     var baseUrl = AHPS_BASE + '/' + layerId + '/query?outFields=gaugelid,location,waterbody,status,observed,units,action,flood,moderate,major,obstime,url&outSR=4326&f=json';
 
     if(floodScope === 'conus'){
-      // Tile CONUS into geographic quadrants to bypass server record limits
+      // Sequential waterfall: fetch one quadrant at a time, render progressively
+      // This avoids 4 simultaneous 20s-timeout fetches competing for connections
       var quads = [
         { name:'NW', bbox:'-130,38,-95,52' },
         { name:'NE', bbox:'-95,38,-65,52' },
@@ -30305,24 +30378,31 @@ function initNowMicroTabs(){
         { name:'SE', bbox:'-95,24,-65,38' }
       ];
       var allFeatures = [];
-      var pending = quads.length;
-      quads.forEach(function(q){
+      var quadIdx = 0;
+
+      function fetchNextQuad(){
+        if(quadIdx >= quads.length){
+          console.log('AHPS CONUS: loaded ' + allFeatures.length + ' gauges from 4 quadrants');
+          SH.ok('ahps');
+          renderFloodGauges(allFeatures, forecastHr);
+          return;
+        }
+        var q = quads[quadIdx];
+        quadIdx++;
         var qurl = baseUrl + '&geometry=' + q.bbox + '&geometryType=esriGeometryEnvelope&spatialRel=esriSpatialRelIntersects&inSR=4326&where=1%3D1&resultRecordCount=3000';
         fetchWithTimeout(qurl, null, 20000)
           .then(function(r){ return r.json(); })
           .then(function(data){
-            if(data && data.features) allFeatures = allFeatures.concat(data.features);
-          })
-          .catch(function(e){ console.warn('AHPS quad ' + q.name + ' failed:', e); })
-          .finally(function(){
-            pending--;
-            if(pending === 0){
-              console.log('AHPS CONUS: loaded ' + allFeatures.length + ' gauges from 4 quadrants');
-              SH.ok('ahps');
+            if(data && data.features){
+              allFeatures = allFeatures.concat(data.features);
+              // Progressive render: show what we have so far
               renderFloodGauges(allFeatures, forecastHr);
             }
-          });
-      });
+          })
+          .catch(function(e){ console.warn('AHPS quad ' + q.name + ' failed:', e); })
+          .finally(fetchNextQuad);
+      }
+      fetchNextQuad();
       return;
     }
 
@@ -34055,11 +34135,14 @@ function initNowMicroTabs(){
       scrollWheelZoom: false
     });
 
-    // ── Scroll guard: visible on load, click to dismiss and enable map ──
-    // Re-engages when user clicks outside the map so scrolling works normally
+    // ── Scroll guard: protects page scrolling, but never blocks map interaction ──
+    // Dismisses on any click within the hazard widget (map body, tabs, overlays).
+    // Re-engages scroll-zoom lock when user clicks outside, but the guard overlay
+    // is invisible and non-blocking — only scroll-zoom is disabled.
     (function(){
       var guard = document.getElementById('hazard-scroll-guard');
       var mapActive = false;
+      var widget = document.getElementById('hazard-widget');
 
       function dismiss(){
         if(guard) guard.classList.remove('visible');
@@ -34069,7 +34152,9 @@ function initNowMicroTabs(){
 
       function reengage(){
         if(!mapActive) return;
-        if(guard) guard.classList.add('visible');
+        // Only disable scroll-zoom — do NOT show the visible guard overlay
+        // once the map has been initialized. The guard overlay is only for
+        // the very first interaction before init.
         if(hazardMap) hazardMap.scrollWheelZoom.disable();
         mapActive = false;
       }
@@ -34083,9 +34168,16 @@ function initNowMicroTabs(){
         if(e.ctrlKey || e.metaKey) dismiss();
       });
 
-      // Re-engage guard when clicking anywhere outside the map container
+      // Any click within the hazard widget (tabs, overlays, etc.) also dismisses
+      if(widget){
+        widget.addEventListener('click', function(){
+          if(!mapActive) dismiss();
+        });
+      }
+
+      // Re-engage scroll-zoom lock when clicking outside the widget
       document.addEventListener('click', function(e){
-        if(mapActive && !container.contains(e.target)){
+        if(mapActive && widget && !widget.contains(e.target)){
           reengage();
         }
       });
@@ -34112,10 +34204,11 @@ function initNowMicroTabs(){
     baseTiles.on('tileerror', function(e){
       var tile = e.tile;
       var src = tile._originalSrc || tile.src;
-      if(!tile._retried && src.includes('arcgisonline')){
-        tile._retried = true;
+      var retries = tile._retryCount || 0;
+      if(retries < 2 && src.includes('arcgisonline')){
+        tile._retryCount = retries + 1;
         tile._originalSrc = src;
-        setTimeout(function(){ tile.src = src; }, 2000);
+        setTimeout(function(){ tile.src = src; }, 2000 * Math.pow(2, retries));
       }
     });
 
@@ -34165,23 +34258,26 @@ function initNowMicroTabs(){
 
     // Location marker removed for cleaner map
 
-    // Init all data loaders
+    // ── LAZY TAB INIT: only load the active tab's heavy data ──
+    // Badge counts are already populated by the boot prefetch (Tier 2),
+    // so tabs show counts immediately. Map layers load on first switch.
+    window._hazardTabLoaded = {};
+
+    // Fire is the default tab — init it now
     initFireData();
-    initTornadoData();
-    initQuakeData();
-    initAlertsData();
-    initFloodData();
+    window._hazardTabLoaded.fire = true;
 
     // Set initial tab state
     window._hazardTabInitializing = true;
     switchHazardTab('fire');
     setTimeout(function(){ window._hazardTabInitializing = false; }, 2000);
-    // Re-apply after data loads (markers load async)
+    // Re-apply after fire data loads (markers load async)
     setTimeout(function(){ switchHazardTab(hazardActiveTab); }, 5000);
     setTimeout(function(){ switchHazardTab(hazardActiveTab); }, 12000);
   }
 
   function destroyHazardMaps(){
+    window._hazardTabLoaded = {};
     if (lightningMap){ lightningMap.remove(); lightningMap = null; }
     if (hazardMap){ hazardMap.remove(); hazardMap = null; fireMap = null; tornadoMap = null; quakeMap = null; }
     if (bedrockMap){ bedrockMap.remove(); bedrockMap = null; }
@@ -34586,6 +34682,9 @@ function initNowMicroTabs(){
   }
 
   function loadTornadoReports(){
+    // Skip if just loaded (guards against interval + switchHazardTab overlap)
+    if(!shouldRefetch('tornado-reports', 8 * 60 * 1000) && !window._prefetchedTornCSV) return;
+
     if(!tornadoLayerGroup && tornadoMap){
       tornadoLayerGroup = L.layerGroup().addTo(tornadoMap);
     }
@@ -34611,12 +34710,32 @@ function initNowMicroTabs(){
     }
 
     var fetched = 0;
-    dates.forEach(function(dateObj){
+
+    function fetchDay(dateObj, delay){
+      setTimeout(function(){
       var url = 'https://www.spc.noaa.gov/climo/reports/' + dateObj.str + '_rpts_torn.csv';
+      var isToday = (dateObj.str === dates[0].str);
       // Today uses a different URL
-      if (dateObj.str === dates[0].str){
+      if (isToday){
         url = 'https://www.spc.noaa.gov/climo/reports/today_torn.csv';
       }
+
+      // ── Use boot-prefetched today CSV if available ──
+      if (isToday && window._prefetchedTornCSV) {
+        var csv = window._prefetchedTornCSV;
+        window._prefetchedTornCSV = null; // free memory
+        var reports = parseTornadoCSV(csv);
+        totalCount += reports.length;
+        reports.forEach(function(r){ r.dateLabel = dateObj.label; });
+        allReports = allReports.concat(reports);
+        plotTornadoes(reports, dateObj.label);
+        fetched++;
+        if (fetched === dates.length){
+          finalizeTornado(allReports, totalCount, statusEl, liveEl, yearCountEl, listEl, rangeLabel);
+        }
+        return; // skip fetch for today
+      }
+
       fetch(url).then(function(r){ return r.text(); }).then(function(csv){
         var reports = parseTornadoCSV(csv);
         totalCount += reports.length;
@@ -34633,7 +34752,13 @@ function initNowMicroTabs(){
           finalizeTornado(allReports, totalCount, statusEl, liveEl, yearCountEl, listEl, rangeLabel);
         }
       });
-    });
+      }, delay);
+    }
+
+    // Today first (0ms), then stagger historical days 400ms apart
+    for (var di = 0; di < dates.length; di++){
+      fetchDay(dates[di], di === 0 ? 0 : 400 * di);
+    }
 
     // Also fetch yearly total from SPC filtered reports (Jan 1 to now)
     loadTornadoYearCount(yearCountEl);
@@ -34991,20 +35116,39 @@ function initNowMicroTabs(){
     };
     fireLegend.addTo(hazardMap);
 
-    // Load smoke and fire data
-    loadSmokeLayer();
-    loadHRRRSmokeOverlay();
+    // ── Chain smoke & outlook off fire data completion ──
+    // Set up callback BEFORE loading fire data to prevent race condition
+    // where prefetched NIFC + fast CWFIS/FIRMS could complete synchronously
+    window._onFireDataReady = function(){
+      window._onFireDataReady = null; // one-shot
+      loadSmokeLayer();
+      setTimeout(loadHRRRSmokeOverlay, 600);
+      setTimeout(fetchTerrainIntelligence, 1200);
+      setTimeout(function(){ switchHazardOutlook('fire','d1'); }, 300);
+    };
+    // Safety fallback: if fire data takes >12s, load smoke anyway
+    setTimeout(function(){
+      if(!window._fireDataReady){
+        console.warn('Fire data slow — loading smoke layers anyway');
+        loadSmokeLayer();
+        loadHRRRSmokeOverlay();
+        switchHazardOutlook('fire','d1');
+      }
+    }, 12000);
+
+    // Load fire markers — smoke & overlays chain after dots render
     loadFireData();
-    fetchTerrainIntelligence(); // ← Terrain analysis for smoke dispersion
+
     setInterval(loadFireData, 24 * 60 * 60 * 1000);
-    // Auto-load fire weather outlook TODAY
-    setTimeout(function(){ switchHazardOutlook('fire','d1'); }, 1500);
   }
 
   // Keep old function name for backward compat
   function initFireMap(){ initFireData(); }
 
   function loadFireData(){
+    // Guard against redundant calls (e.g. triple switchHazardTab at init)
+    if(!shouldRefetch('fire-data', 10 * 60 * 1000) && !window._prefetchedNIFC) return;
+
     var statusPill = document.getElementById("fire-status-pill");
 
     // ═══════════════════════════════════════════════════════════
@@ -35022,25 +35166,15 @@ function initNowMicroTabs(){
     var allFires = [];
     var sourcesLoaded = 0;
     var totalSources = 3;
+    var markersPlotted = 0; // track how many fires already have markers
 
-    function onSourceComplete() {
-      sourcesLoaded++;
-      if (sourcesLoaded < totalSources) return;
-
-      // ── All sources loaded — merge and display ──
-      var rxCount = allFires.filter(function(f){ var t = (f.properties.IncidentTypeCategory || f.properties.IncidentType || '').toString().toUpperCase(); return t.indexOf('RX') >= 0 || t.indexOf('PRESCRIBED') >= 0 || t.indexOf('USE') >= 0; }).length;
-      var usCount = allFires.filter(function(f){ return f.properties._country === 'US'; }).length;
-      var caCount = allFires.filter(function(f){ return f.properties._country === 'CA'; }).length;
-      var satCount = allFires.filter(function(f){ return f.properties._country === 'SAT'; }).length;
-      var wfCount = usCount - rxCount;
-      // Track satellite-only Canadian detections separately for UI context
-      var caSatCount = allFires.filter(function(f){ return f.properties._country === 'CA' && f.properties._satellite; }).length;
-      window._caSatOnlyCount = caSatCount;
-
-      allFires.forEach(function(fire) {
+    // ── Plot markers for newly added fires (progressive rendering) ──
+    function plotNewFireMarkers(){
+      for(var fi = markersPlotted; fi < allFires.length; fi++){
+        var fire = allFires[fi];
         var coords = fire.geometry && fire.geometry.coordinates;
         var props = fire.properties || {};
-        if (!coords) return;
+        if (!coords) continue;
 
         var lat = coords[1], lon = coords[0];
         var name = props.IncidentName || props.FireName || props._name || 'Unknown';
@@ -35057,21 +35191,17 @@ function initNowMicroTabs(){
         // Size/color by acres + country distinction + prescribed vs wildfire
         var radius, color;
         if (isPrescribed) {
-          // Prescribed/controlled burns: green tones
           if (acres >= 10000) { radius = 5.5; color = '#15803d'; }
           else if (acres >= 1000) { radius = 4; color = '#22c55e'; }
           else { radius = 2.5; color = '#4ade80'; }
         } else if (country === 'CA') {
-          // Canadian fires: red tones with maple leaf distinction
           if (acres >= 50000) { radius = 7; color = '#991b1b'; }
           else if (acres >= 10000) { radius = 5.5; color = '#b91c1c'; }
           else if (acres >= 1000) { radius = 4; color = '#ef4444'; }
           else { radius = 2.5; color = '#f87171'; }
         } else if (country === 'SAT') {
-          // FIRMS satellite hotspots: small orange dots
           radius = 1.8; color = '#fb923c';
         } else {
-          // US fires: existing orange/amber scheme
           if (acres >= 50000) { radius = 7; color = '#7f1d1d'; }
           else if (acres >= 10000) { radius = 5.5; color = '#dc2626'; }
           else if (acres >= 1000) { radius = 4; color = '#f97316'; }
@@ -35108,7 +35238,35 @@ function initNowMicroTabs(){
         marker.bindPopup(fHtml, { closeButton: false, className: 'hz-popup', maxWidth: 260 });
 
         fireMarkers.push(marker);
-      });
+      }
+      markersPlotted = allFires.length;
+    }
+
+    function onSourceComplete() {
+      sourcesLoaded++;
+
+      // ── Progressive: plot this source's markers immediately ──
+      plotNewFireMarkers();
+
+      // Signal fire data ready after FIRST source renders (NIFC)
+      // so smoke/outlook can start loading while CWFIS/FIRMS trickle in
+      if(sourcesLoaded === 1 && allFires.length > 0){
+        window._fireDataReady = true;
+        requestAnimationFrame(function(){
+          if(typeof window._onFireDataReady === 'function') window._onFireDataReady();
+        });
+      }
+
+      if (sourcesLoaded < totalSources) return;
+
+      // ── All sources loaded — finalize stats and UI ──
+      var rxCount = allFires.filter(function(f){ var t = (f.properties.IncidentTypeCategory || f.properties.IncidentType || '').toString().toUpperCase(); return t.indexOf('RX') >= 0 || t.indexOf('PRESCRIBED') >= 0 || t.indexOf('USE') >= 0; }).length;
+      var usCount = allFires.filter(function(f){ return f.properties._country === 'US'; }).length;
+      var caCount = allFires.filter(function(f){ return f.properties._country === 'CA'; }).length;
+      var satCount = allFires.filter(function(f){ return f.properties._country === 'SAT'; }).length;
+      var wfCount = usCount - rxCount;
+      var caSatCount = allFires.filter(function(f){ return f.properties._country === 'CA' && f.properties._satellite; }).length;
+      window._caSatOnlyCount = caSatCount;
 
       // Update status pill
       if (statusPill) {
@@ -35142,6 +35300,14 @@ function initNowMicroTabs(){
       buildFireDropdown(allFires);
 
       console.log('Fire data loaded: ' + usCount + ' US, ' + caCount + ' CA, ' + satCount + ' FIRMS hotspots');
+
+      // ── If _onFireDataReady hasn't fired yet (e.g. NIFC had 0 results), fire it now ──
+      if(!window._fireDataReady){
+        window._fireDataReady = true;
+        requestAnimationFrame(function(){
+          if(typeof window._onFireDataReady === 'function') window._onFireDataReady();
+        });
+      }
     }
 
     // ═══ SOURCE 1: NIFC (US) ═══
@@ -38126,12 +38292,33 @@ function initNowMicroTabs(){
   }
 
   function loadQuakeData(){
+    // Skip if data was just fetched (prevents overlapping interval + manual calls)
+    if(!shouldRefetch('quakes', 4 * 60 * 1000) && !window._prefetchedQuakes) return;
+
     var liveEl = document.getElementById("quake-live");
     var url = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson";
+
+    // ── Use boot-prefetched data if available (avoids redundant fetch) ──
+    if (window._prefetchedQuakes) {
+      var prefetched = window._prefetchedQuakes;
+      window._prefetchedQuakes = null; // free memory
+      renderQuakeData(prefetched);
+      return;
+    }
 
     fetchWithTimeout(url, null, 15000)
       .then(function(r){ return r.json(); })
       .then(function(data){
+        renderQuakeData(data);
+      })
+      .catch(function(err){
+        SH.fail('usgs-eq', function(){ loadQuakeData(); });
+        console.warn('USGS quake fetch failed:', err);
+      });
+  }
+
+  function renderQuakeData(data){
+    var liveEl = document.getElementById("quake-live");
         var quakes = data && data.features;
         
         if (!quakes || quakes.length === 0){
@@ -38352,10 +38539,6 @@ function initNowMicroTabs(){
         };
 
         if (liveEl) liveEl.textContent = "• LIVE";
-      })
-      .catch(function(){
-        if (liveEl) liveEl.textContent = "• OFFLINE";
-      });
   }
 
   // Keep old name for compat
