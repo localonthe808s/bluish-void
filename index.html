@@ -7588,6 +7588,8 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
   // ── Tab switcher (exposed globally so onclick can reach it) ──
   window.switchCiraTab = function(tab) {
     _currentTab = tab;
+    // Restore GOES satellite view when switching back to LIVE from radar
+    if(tab==='goes' && typeof switchFcastRange === 'function' && typeof fcastState !== 'undefined' && fcastState.range !== 'clouds') switchFcastRange('clouds');
     // Update top-right attribution label
     var srcLink = document.getElementById('fcast-source-link');
     if(srcLink){
@@ -25601,14 +25603,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   var goesCurrentSector = (LOCATION && LOCATION.goes && LOCATION.goes.sector) || 'ne';
   var goesCurrentBand = 'GEOCOLOR';
   var goesAnimState = {
-    currentFrame: 0,
-    nextFrame: 1,
-    blendProgress: 0,
+    position: 0,    // continuous playhead across all frames
     lastTime: 0,
-    frameDuration: 1200, // ms per frame crossfade - long smooth blend
-    pauseAtFrame: 100,   // minimal pause - nearly continuous flow
-    phase: 'blend', // 'blend' or 'pause'
-    pauseElapsed: 0,
     playing: true
   };
 
@@ -25699,8 +25695,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     fetchGoesFrames().then(function(){ preloadGoesImages(); });
   }
 
+  var _goesIsFetching = false;
   function fetchGoesFrames(){
     if (!goesLiveEl) return Promise.resolve();
+    if (_goesIsFetching) return Promise.resolve();
+    _goesIsFetching = true;
 
     var goesSat = goesCurrentSat;
     var goesSector = goesCurrentSector;
@@ -25740,11 +25739,17 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         } else {
           SH.fail('goes', fetchGoesFrames);
           goesLiveEl.textContent = "• OFFLINE";
+          var overlay = document.getElementById('goes-loading-overlay');
+          if (overlay) { overlay.style.opacity = '0'; setTimeout(function(){ overlay.style.display = 'none'; }, 600); }
         }
+        _goesIsFetching = false;
       })
       .catch(function(){
         SH.fail('goes', fetchGoesFrames);
         goesLiveEl.textContent = "• OFFLINE";
+        var overlay = document.getElementById('goes-loading-overlay');
+        if (overlay) { overlay.style.opacity = '0'; setTimeout(function(){ overlay.style.display = 'none'; }, 600); }
+        _goesIsFetching = false;
       });
   }
 
@@ -25759,11 +25764,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (loadText) loadText.textContent = 'CHASING CLOUDS 0/' + total;
     if (goesLiveEl) goesLiveEl.textContent = "• LOADING 0%";
 
-    // Progressive loading: load first batch fast, start animation,
-    // then quietly fetch remaining frames in background batches.
-    var INITIAL_BATCH = Math.min(6, total);   // enough to start smooth animation
-    var BG_BATCH_SIZE = 3;                     // background: 3 at a time (won't choke other requests)
+    var INITIAL_BATCH = Math.min(6, total);
+    var BG_BATCH_SIZE = 3;
     var animStarted = false;
+    var safetyTimer = null;
 
     function updateProgress(){
       loaded++;
@@ -25773,6 +25777,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (loaded === total){
         if (goesLiveEl) goesLiveEl.textContent = "• LIVE";
         if (loadText) loadText.textContent = '';
+        // Rebuild stream with all frames — cancel old loop first
+        if (animStarted) {
+          if (goesAnimId) { cancelAnimationFrame(goesAnimId); goesAnimId = null; }
+          startGoesCanvasAnim();
+        }
       }
     }
 
@@ -25785,7 +25794,6 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       goesImages[i] = img;
     }
 
-    // Phase 1: Load initial batch, then start animation immediately
     var initialLoaded = 0;
     for (var i = 0; i < INITIAL_BATCH; i++){
       (function(idx){
@@ -25793,9 +25801,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           initialLoaded++;
           if (initialLoaded >= INITIAL_BATCH && !animStarted){
             animStarted = true;
+            if (safetyTimer) { clearTimeout(safetyTimer); safetyTimer = null; }
             if (overlay) { overlay.style.opacity = '0'; setTimeout(function(){ overlay.style.display = 'none'; }, 600); }
             startGoesCanvasAnim();
-            // Phase 2: Load remaining frames in small background batches
             loadBackgroundBatch(INITIAL_BATCH);
           }
         });
@@ -25812,7 +25820,6 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           loadFrame(idx, function(){
             batchDone++;
             if (batchDone >= batchSize){
-              // Small delay between batches to keep bandwidth available for other requests
               setTimeout(function(){ loadBackgroundBatch(end); }, 100);
             }
           });
@@ -25820,8 +25827,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       }
     }
 
-    // Safety: if initial batch takes >8s, start animation with whatever we have
-    setTimeout(function(){
+    // Safety: if initial batch takes >8s, start with whatever we have
+    safetyTimer = setTimeout(function(){
+      safetyTimer = null;
       if (!animStarted && loaded > 0){
         animStarted = true;
         if (overlay) { overlay.style.opacity = '0'; setTimeout(function(){ overlay.style.display = 'none'; }, 600); }
@@ -25858,80 +25866,104 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (goesAnimId) cancelAnimationFrame(goesAnimId);
 
     var s = goesAnimState;
-    s.currentFrame = 0;
-    s.nextFrame = 1;
-    s.blendProgress = 0;
+    s.position = 0;
     s.lastTime = 0;
-    s.phase = 'pause';
-    s.pauseElapsed = 0;
     s.playing = true;
 
     var ctx = goesCanvas.getContext('2d');
+    if (typeof window._goesSleeping === 'undefined') window._goesSleeping = false;
 
-    // Global flag set by sleep/wake system
-    window._goesSleeping = false;
-    var _goesLastFrameTime = 0;
+    var STEPS = 10;
+    // Free previous stream canvases
+    if (window._goesStream) {
+      window._goesStream.length = 0;
+    }
+    window._goesStream = [];
+    var stream = window._goesStream;
+    var streamReady = false;
+    var _goesLastStreamFrame = -1;
 
-    function animate(timestamp){
-      if (!s.playing || window._goesSleeping) { goesAnimId = requestAnimationFrame(animate); return; }
-
-      // Throttle to ~15fps (66ms) — crossfade doesn't need 60fps
-      if (timestamp - _goesLastFrameTime < 60) { goesAnimId = requestAnimationFrame(animate); return; }
-      _goesLastFrameTime = timestamp;
+    function buildStream(){
+      var n = goesImages.length;
+      if (n < 2) { streamReady = true; return; }
 
       var rect = goesCanvas.getBoundingClientRect();
-      var dpr = window.devicePixelRatio || 1;
-      if (goesCanvas.width !== Math.round(rect.width * dpr) || goesCanvas.height !== Math.round(rect.height * dpr)){
-        goesCanvas.width = Math.round(rect.width * dpr);
-        goesCanvas.height = Math.round(rect.height * dpr);
+      var w = Math.round(rect.width);
+      var h = Math.round(rect.height);
+      var comp = document.createElement('canvas');
+      comp.width = w;
+      comp.height = h;
+      var cctx = comp.getContext('2d');
+      stream.length = 0;
+      var pair = 0;
+
+      function processPair(){
+        if (pair >= n) {
+          streamReady = true;
+          comp = null; cctx = null;
+          return;
+        }
+        var imgA = goesImages[pair];
+        var imgB = goesImages[(pair + 1) % n];
+        for (var step = 0; step < STEPS; step++){
+          var blend = step / STEPS;
+          cctx.globalAlpha = 1;
+          cctx.clearRect(0, 0, w, h);
+          drawGoesFrame(cctx, imgA, w, h);
+          if (blend > 0) {
+            cctx.globalAlpha = blend;
+            drawGoesFrame(cctx, imgB, w, h);
+            cctx.globalAlpha = 1;
+          }
+          var snap = document.createElement('canvas');
+          snap.width = w;
+          snap.height = h;
+          snap.getContext('2d').drawImage(comp, 0, 0);
+          stream.push(snap);
+        }
+        pair++;
+        if (pair % 3 === 0) { setTimeout(processPair, 0); }
+        else { processPair(); }
       }
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      var w = rect.width, h = rect.height;
+      processPair();
+    }
+
+    buildStream();
+
+    // Playback — single drawImage, no compositing
+    function animate(timestamp){
+      if (!s.playing || window._goesSleeping) { goesAnimId = requestAnimationFrame(animate); return; }
+      if (!streamReady || stream.length === 0) { goesAnimId = requestAnimationFrame(animate); return; }
 
       if (!s.lastTime) s.lastTime = timestamp;
       var dt = timestamp - s.lastTime;
       s.lastTime = timestamp;
-      // Cap dt to avoid jumps when tab is hidden
       if (dt > 200) dt = 16;
 
+      var total = stream.length;
       var n = goesImages.length;
 
-      if (s.phase === 'pause'){
-        s.pauseElapsed += dt;
-        // Draw current frame fully
-        ctx.globalAlpha = 1;
-        drawGoesFrame(ctx, goesImages[s.currentFrame], w, h);
+      // ~65ms per stream frame → ~650ms per source frame
+      s.position += dt / 65;
+      if (s.position >= total) s.position -= total;
 
-        if (s.pauseElapsed >= s.pauseAtFrame){
-          s.phase = 'blend';
-          s.blendProgress = 0;
+      var frame = Math.floor(s.position) % total;
+
+      if (frame !== _goesLastStreamFrame) {
+        _goesLastStreamFrame = frame;
+
+        var rect = goesCanvas.getBoundingClientRect();
+        var pw = Math.round(rect.width);
+        var ph = Math.round(rect.height);
+        if (goesCanvas.width !== pw || goesCanvas.height !== ph){
+          goesCanvas.width = pw;
+          goesCanvas.height = ph;
+          ctx = goesCanvas.getContext('2d');
         }
-      } else {
-        // Crossfade blend
-        s.blendProgress += dt / s.frameDuration;
-        if (s.blendProgress >= 1) s.blendProgress = 1;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.drawImage(stream[frame], 0, 0, pw, ph);
 
-        // Linear blend for continuous smooth flow
-        var t = s.blendProgress;
-        var ease = t;
-
-        // Draw current frame
-        ctx.globalAlpha = 1;
-        drawGoesFrame(ctx, goesImages[s.currentFrame], w, h);
-        // Blend next frame on top
-        ctx.globalAlpha = ease;
-        drawGoesFrame(ctx, goesImages[s.nextFrame], w, h);
-        ctx.globalAlpha = 1;
-
-        // Update frame counter
-        if (goesFrameEl) goesFrameEl.textContent = (s.currentFrame+1) + "/" + n;
-
-        if (s.blendProgress >= 1){
-          s.currentFrame = s.nextFrame;
-          s.nextFrame = (s.nextFrame + 1) % n;
-          s.phase = 'pause';
-          s.pauseElapsed = 0;
-        }
+        if (goesFrameEl) goesFrameEl.textContent = Math.floor(frame / STEPS + 1) + "/" + n;
       }
 
       goesAnimId = requestAnimationFrame(animate);
@@ -27216,6 +27248,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   }
 
   // Preload next frame in background
+  var _fcastPreloadImg = null;
   function preloadNextFrame(){
     var fhrs = getActiveFhrs();
     if (!fhrs || fhrs.length === 0) return;
@@ -27231,8 +27264,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       url = buildFcastUrl(nextIdx);
       fcastState.idx = oldIdx;
     }
-    var pre = new Image();
-    pre.src = url;
+    if (!_fcastPreloadImg) _fcastPreloadImg = new Image();
+    _fcastPreloadImg.src = url;
   }
 
   function fcastRadarTogglePlay(){
@@ -27770,11 +27803,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     
     updateFcastBadge();
     
-    // Scroll fade for left and right panels
+    // Scroll fade for left and right panels (remove old listeners to prevent pile-up)
     ['fcast-left-panel','fcast-right-panel'].forEach(function(id){
       var panel = document.getElementById(id);
       if (!panel) return;
-      panel.addEventListener('scroll', function(){
+      if (panel._fcastScrollFn) panel.removeEventListener('scroll', panel._fcastScrollFn);
+      panel._fcastScrollFn = function(){
         var atBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 8;
         if (atBottom) {
           panel.style.webkitMaskImage = 'none';
@@ -27783,7 +27817,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           panel.style.webkitMaskImage = 'linear-gradient(to bottom, black 0%, black 94%, transparent 100%)';
           panel.style.maskImage = 'linear-gradient(to bottom, black 0%, black 94%, transparent 100%)';
         }
-      });
+      };
+      panel.addEventListener('scroll', panel._fcastScrollFn);
     });
   }
 
@@ -32273,6 +32308,18 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         if (matchedArea && typeof switchFcastArea === 'function') {
           try { switchFcastArea(matchedArea); } catch(e){}
         }
+      }
+      // Clean up existing GOES animation before restarting
+      if (typeof goesAnimId !== 'undefined' && goesAnimId) { cancelAnimationFrame(goesAnimId); goesAnimId = null; }
+      if (typeof goesRefreshTimer !== 'undefined' && goesRefreshTimer) { clearInterval(goesRefreshTimer); goesRefreshTimer = null; }
+      goesFrames = [];
+      goesImages = [];
+      goesIdx = 0;
+      // Clear forecast playback state
+      if (typeof fcastState !== 'undefined') {
+        if (fcastState.timer) { clearInterval(fcastState.timer); fcastState.timer = null; }
+        fcastState.playing = false;
+        fcastState.idx = 0;
       }
       startGoesAutoplay();
       updateSolarMini();
@@ -37283,6 +37330,7 @@ function initNowMicroTabs(){
           }
         });
         nationalRadarLayers = [];
+        _nationalRadarActiveLayer = null;
         
         nationalRadarIndex = apiData.radar.past.length - 1;
         showNationalRadarFrame(nationalRadarIndex);
@@ -48132,15 +48180,27 @@ function initNowMicroTabs(){
       'goes': {
         el: function(){ return document.getElementById('goes-canvas'); },
         sleeping: false,
+        _savedRefresh: false,
         sleep: function(){
           if (this.sleeping) return;
           this.sleeping = true;
           window._goesSleeping = true;
+          // Stop animation loop and refresh timer while off-screen
+          if (typeof goesAnimId !== 'undefined' && goesAnimId) { cancelAnimationFrame(goesAnimId); goesAnimId = null; }
+          if (typeof goesRefreshTimer !== 'undefined' && goesRefreshTimer) { clearInterval(goesRefreshTimer); goesRefreshTimer = null; this._savedRefresh = true; }
         },
         wake: function(){
           if (!this.sleeping) return;
           this.sleeping = false;
           window._goesSleeping = false;
+          // Restart animation and refresh
+          try {
+            if (typeof startGoesCanvasAnim !== 'undefined' && typeof goesImages !== 'undefined' && goesImages.length > 1) startGoesCanvasAnim();
+            if (this._savedRefresh && typeof fetchGoesFrames !== 'undefined') {
+              goesRefreshTimer = setInterval(function(){ fetchGoesFrames().then(function(){ preloadGoesImages(); }); }, 5 * 60 * 1000);
+              this._savedRefresh = false;
+            }
+          } catch(e){}
         }
       },
 
