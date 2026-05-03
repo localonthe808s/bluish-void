@@ -27844,23 +27844,154 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (oppInfo) h += '<div style="background:rgba(255,180,0,.12);border:1px solid rgba(255,180,0,.25);border-radius:6px;padding:4px 8px;font-size:8.5px;color:#ffa;font-weight:600;margin-bottom:6px;">'+oppInfo+'</div>';
 
     // Live position
+    // ── Moon visual helpers ──
+    // moonPhaseSvg — draws the actual current moon phase as an SVG disc
+    // with cream-lit portion and dark shadow side. Uses the standard
+    // two-arc terminator approach (outer half-circle + inner half-
+    // ellipse). Phase φ ∈ [0,1]: 0=new, 0.5=full, 1=new again.
+    var moonPhaseSvg = function(phase, size) {
+      size = size || 64;
+      var R = size/2 - 2, cx = size/2, cy = size/2;
+      var theta = phase * 2 * Math.PI;
+      var cosT = Math.cos(theta);
+      var illum = (1 - cosT) / 2;
+      var rx = R * Math.abs(cosT);
+      var s = '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" style="display:block;">';
+      // Soft glow ring for full(ish) moons
+      if (illum > 0.5) {
+        s += '<circle cx="'+cx+'" cy="'+cy+'" r="'+(R+1)+'" fill="rgba(255,240,200,'+(0.18*illum).toFixed(2)+')" filter="blur(2px)"/>';
+      }
+      // Dark side base
+      s += '<circle cx="'+cx+'" cy="'+cy+'" r="'+R+'" fill="#1a1d2c"/>';
+      var litFill = 'url(#mpLit-'+Math.round(phase*1000)+')';
+      s += '<defs><radialGradient id="mpLit-'+Math.round(phase*1000)+'" cx="50%" cy="40%" r="55%">'+
+        '<stop offset="0%" stop-color="#fffbe8"/>'+
+        '<stop offset="60%" stop-color="#e8dec4"/>'+
+        '<stop offset="100%" stop-color="#a8a292"/>'+
+      '</radialGradient></defs>';
+      if (illum > 0.99) {
+        s += '<circle cx="'+cx+'" cy="'+cy+'" r="'+R+'" fill="'+litFill+'"/>';
+      } else if (illum > 0.005) {
+        var topY = cy - R, botY = cy + R;
+        var waxing = phase < 0.5;
+        var outerSweep = waxing ? 1 : 0;
+        var innerSweep = waxing ? (illum < 0.5 ? 0 : 1) : (illum < 0.5 ? 1 : 0);
+        var d = 'M '+cx+' '+topY+
+                ' A '+R+' '+R+' 0 0 '+outerSweep+' '+cx+' '+botY+
+                ' A '+rx.toFixed(2)+' '+R+' 0 0 '+innerSweep+' '+cx+' '+topY+' Z';
+        s += '<path d="'+d+'" fill="'+litFill+'"/>';
+      }
+      // Subtle craters (decorative, lit side only)
+      if (illum > 0.15) {
+        s += '<circle cx="'+(cx-R*0.25)+'" cy="'+(cy-R*0.15)+'" r="'+(R*0.10).toFixed(1)+'" fill="rgba(120,110,100,0.18)"/>';
+        s += '<circle cx="'+(cx+R*0.30)+'" cy="'+(cy+R*0.20)+'" r="'+(R*0.07).toFixed(1)+'" fill="rgba(120,110,100,0.16)"/>';
+        s += '<circle cx="'+(cx+R*0.05)+'" cy="'+(cy+R*0.40)+'" r="'+(R*0.05).toFixed(1)+'" fill="rgba(120,110,100,0.15)"/>';
+      }
+      s += '</svg>';
+      return s;
+    };
+
+    // synodicCycleBar — horizontal bar showing position in the 29.5-day
+    // synodic cycle with milestone markers (New / 1Q / Full / LQ).
+    var synodicCycleBar = function(phase, daysToNew) {
+      var s = '<div style="position:relative;margin:6px 0 14px;">';
+      // Track
+      s += '<div style="position:relative;height:8px;border-radius:4px;background:linear-gradient(90deg,#222 0%,#666 22%,#a8a292 50%,#666 78%,#222 100%);">';
+      // Milestone tick marks
+      [0, 0.25, 0.5, 0.75, 1].forEach(function(p) {
+        s += '<div style="position:absolute;left:'+(p*100).toFixed(2)+'%;top:-2px;bottom:-2px;width:1px;background:rgba(43,34,244,0.35);transform:translateX(-50%);"></div>';
+      });
+      // Current marker
+      s += '<div style="position:absolute;left:'+(phase*100).toFixed(2)+'%;top:-4px;bottom:-4px;width:3px;background:#3344cc;border-radius:2px;box-shadow:0 0 0 2px rgba(255,255,255,0.85),0 2px 6px rgba(43,34,244,0.4);transform:translateX(-50%);"></div>';
+      s += '</div>';
+      // Phase milestone labels
+      s += '<div style="display:flex;justify-content:space-between;font-size:8.5px;font-weight:700;color:rgba(43,34,244,.55);margin-top:5px;letter-spacing:.04em;">'+
+        '<span>NEW</span><span>1Q</span><span>FULL</span><span>LQ</span><span>NEW</span>'+
+      '</div>';
+      s += '</div>';
+      return s;
+    };
+
+    // skyPositionDome — small dome diagram showing altitude × direction
+    // (azimuth) of the moon, with horizon line. Uses inline SVG.
+    var skyPositionDome = function(alt, az) {
+      if (alt == null) return '';
+      var W = 130, H = 80;
+      var cx = W/2, cy = H - 8;
+      var R = 56;
+      var s = '<svg width="'+W+'" height="'+H+'" viewBox="0 0 '+W+' '+H+'" style="display:block;margin:6px auto 4px;">';
+      // Dome arc (horizon)
+      s += '<path d="M '+(cx-R)+' '+cy+' A '+R+' '+R+' 0 0 1 '+(cx+R)+' '+cy+'" fill="rgba(43,34,244,0.04)" stroke="rgba(43,34,244,0.18)" stroke-width="1"/>';
+      // Horizon baseline
+      s += '<line x1="'+(cx-R-4)+'" y1="'+cy+'" x2="'+(cx+R+4)+'" y2="'+cy+'" stroke="rgba(43,34,244,0.35)" stroke-width="1"/>';
+      // Altitude grid (30°, 60°)
+      [30, 60].forEach(function(a) {
+        var ar = R * (1 - a/90);
+        s += '<path d="M '+(cx-ar)+' '+cy+' A '+ar+' '+ar+' 0 0 1 '+(cx+ar)+' '+cy+'" fill="none" stroke="rgba(43,34,244,0.08)" stroke-width="0.6"/>';
+      });
+      // N/E/S/W labels (W=left edge, E=right edge, S=at center... but az
+      // 180=south. Project: azimuth → x position using sin(az) compressed
+      // into the visible hemisphere. For the dome looking SOUTH (typical),
+      // East = right, West = left.)
+      s += '<text x="'+(cx-R-6)+'" y="'+(cy+8)+'" font-size="8" font-weight="700" fill="rgba(43,34,244,.5)" style="fill:rgba(43,34,244,.5);">W</text>';
+      s += '<text x="'+(cx+R+6)+'" y="'+(cy+8)+'" font-size="8" font-weight="700" fill="rgba(43,34,244,.5)" style="fill:rgba(43,34,244,.5);text-anchor:end;">E</text>';
+      s += '<text x="'+cx+'" y="'+(cy+8)+'" text-anchor="middle" font-size="8" font-weight="700" fill="rgba(43,34,244,.5)" style="fill:rgba(43,34,244,.5);">S</text>';
+      // Compute moon position
+      var altClamp = Math.max(-10, Math.min(90, alt));
+      // Azimuth: 0=N, 90=E, 180=S, 270=W. Map to dome x (S-facing):
+      // az=180 → x=cx (center), az=90 → x=cx+R (east), az=270 → x=cx-R (west)
+      var azRad = (az || 180) * Math.PI / 180;
+      // Project to ground: x = -sin(az) gives negative for N (out of view)
+      // Use sin(az - 180) so az=180 → 0, az=90 → -1 (west? hmm)
+      // Actually: az=180 should map to 0 (center, south facing); az=90 (east) → +1; az=270 (west) → -1
+      var xFrac = Math.sin((az - 180) * Math.PI / 180);
+      var altFrac = altClamp / 90;
+      var px = cx + xFrac * R * Math.cos(altClamp * Math.PI / 180);
+      var py = cy - Math.sin(altClamp * Math.PI / 180) * R;
+      // Moon dot
+      var dotR = 5;
+      var dotCol = altClamp >= 0 ? '#3344cc' : 'rgba(43,34,244,0.3)';
+      s += '<circle cx="'+px.toFixed(1)+'" cy="'+py.toFixed(1)+'" r="'+dotR+'" fill="'+dotCol+'" stroke="#fff" stroke-width="1.5"/>';
+      // Altitude tick label inside dome
+      s += '<text x="'+(px+8)+'" y="'+(py+3)+'" font-size="9" font-weight="700" fill="'+dotCol+'" style="fill:'+dotCol+';">'+Math.round(altClamp)+'\u00b0</text>';
+      s += '</svg>';
+      return s;
+    };
+
     if (liveAlt !== null) {
       h += FS('Right Now');
+      // Sky dome diagram — only for moon (other planets reuse the
+      // generic gL rows which fit the existing layouts).
+      if (planetKey === 'moon') {
+        h += skyPositionDome(liveAlt, liveAz);
+      }
       h += gL('Altitude', liveAlt + '\u00b0 ' + (liveAlt > 0 ? '(' + liveQuality + ')' : '(below horizon)'));
       h += gL('Direction', liveDir + ' (' + liveAz + '\u00b0)');
       h += gL('Trend', liveTrend.charAt(0).toUpperCase() + liveTrend.slice(1));
       if (liveElong !== null && planetKey !== 'moon') h += gL('Elongation', liveElong + '\u00b0 from Sun');
     }
 
+
     // Moon-specific: Phase & Illumination section
     if (moonPhaseInfo) {
       h += FS('Lunar Phase');
-      h += gL('Phase', moonPhaseInfo.name);
-      h += gL('Illumination', moonPhaseInfo.illum + '%');
+      // Phase visualization — actual SVG moon disc + key facts on right
+      var phaseFloat = (moonPhaseInfo.angle || 0) / 360;
+      h += '<div style="display:flex;align-items:center;gap:14px;margin:6px 0;">';
+      h += moonPhaseSvg(phaseFloat, 72);
+      h += '<div style="flex:1;">'+
+        '<div style="font-size:14px;font-weight:900;color:#3344cc;line-height:1.1;">'+moonPhaseInfo.name+'</div>'+
+        '<div style="font-size:10px;color:rgba(43,34,244,.55);margin-top:3px;">'+
+          moonPhaseInfo.illum+'% illuminated \u00b7 '+(moonPhaseInfo.waxing?'Waxing':'Waning')+
+        '</div>'+
+        (moonPhaseInfo.daysToNew > 0 ? '<div style="font-size:9.5px;color:rgba(43,34,244,.5);margin-top:2px;">Next New Moon in ~'+moonPhaseInfo.daysToNew+' days</div>' : '') +
+        (moonPhaseInfo.daysToFull > 0 ? '<div style="font-size:9.5px;color:rgba(43,34,244,.5);margin-top:2px;">Next Full Moon in ~'+moonPhaseInfo.daysToFull+' days</div>' : '') +
+      '</div>';
+      h += '</div>';
+      // Synodic cycle progression bar
+      h += synodicCycleBar(phaseFloat, moonPhaseInfo.daysToNew);
+      // Compact data row
       h += gL('Phase angle', moonPhaseInfo.angle + '\u00b0');
-      h += gL('Cycle', moonPhaseInfo.waxing ? 'Waxing (growing)' : 'Waning (shrinking)');
-      if (moonPhaseInfo.daysToFull > 0) h += gL('Full Moon', 'in ~' + moonPhaseInfo.daysToFull + ' days');
-      if (moonPhaseInfo.daysToNew > 0) h += gL('New Moon', 'in ~' + moonPhaseInfo.daysToNew + ' days');
       if (liveElong !== null) h += gL('Elongation from Sun', liveElong + '\u00b0');
       // Observing impact
       var moonImpact = '';
@@ -27892,13 +28023,131 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     // Physical data
     if (pd.isMoon) {
       h += FS('Quick Facts');
-      h += gL('Diameter', pd.diameter.toLocaleString() + ' mi');
-      h += gL('Gravity', pd.gravity || 'N/A');
-      h += gL('Avg distance', '238,855 mi');
-      h += gL('Orbital period', pd.yearLen);
-      h += gL('Synodic month', pd.dayLen);
-      h += gL('Brightest', 'mag ' + pd.maxMag);
-      h += gL('Angular size', pd.angSizeRange);
+
+      // ── Earth ↔ Moon size + distance comparison ──
+      // Earth-diameter is 7918 mi; Moon 2159 mi (~27% of Earth). Moon
+      // sits at 238,855 mi from Earth's center = ~30 Earth-diameters
+      // away. The diagram packs both relationships into one image.
+      var emW = 308, emH = 78;
+      var earthR = 18;            // px in the diagram
+      var moonR = earthR * 2159 / 7918;  // ~4.9 px → use min 5 for visibility
+      moonR = Math.max(5, moonR);
+      // Visual distance is compressed (real ratio = ~30 doesn't fit), so
+      // we squash it to fit the canvas while keeping it clearly "far".
+      var earthCx = 32, moonCx = emW - 32;
+      var ems = '<svg width="100%" viewBox="0 0 '+emW+' '+emH+'" preserveAspectRatio="xMidYMid meet" style="display:block;background:linear-gradient(180deg,#0a0820 0%,#1a1840 100%);border-radius:8px;margin:6px 0 4px;">';
+      // Earth (with subtle ocean/land tint)
+      ems += '<defs><radialGradient id="emEarth" cx="35%" cy="35%" r="60%">'+
+        '<stop offset="0%" stop-color="#88c0e8"/>'+
+        '<stop offset="50%" stop-color="#3a78c8"/>'+
+        '<stop offset="100%" stop-color="#1a3868"/>'+
+      '</radialGradient></defs>';
+      ems += '<circle cx="'+earthCx+'" cy="'+(emH/2)+'" r="'+earthR+'" fill="url(#emEarth)"/>';
+      ems += '<text x="'+earthCx+'" y="'+(emH-6)+'" text-anchor="middle" font-size="9" font-weight="700" fill="rgba(255,255,255,.7)" style="fill:rgba(255,255,255,.7);">Earth</text>';
+      ems += '<text x="'+earthCx+'" y="11" text-anchor="middle" font-size="7" font-weight="600" fill="rgba(255,255,255,.45)" style="fill:rgba(255,255,255,.45);">7,918 mi</text>';
+      // Moon (cream)
+      ems += '<defs><radialGradient id="emMoon" cx="40%" cy="35%" r="55%">'+
+        '<stop offset="0%" stop-color="#fffbe8"/>'+
+        '<stop offset="60%" stop-color="#d8d2bc"/>'+
+        '<stop offset="100%" stop-color="#888070"/>'+
+      '</radialGradient></defs>';
+      ems += '<circle cx="'+moonCx+'" cy="'+(emH/2)+'" r="'+moonR+'" fill="url(#emMoon)"/>';
+      ems += '<text x="'+moonCx+'" y="'+(emH-6)+'" text-anchor="middle" font-size="9" font-weight="700" fill="rgba(255,255,255,.7)" style="fill:rgba(255,255,255,.7);">Moon</text>';
+      ems += '<text x="'+moonCx+'" y="11" text-anchor="middle" font-size="7" font-weight="600" fill="rgba(255,255,255,.45)" style="fill:rgba(255,255,255,.45);">2,159 mi · 27% of Earth</text>';
+      // Connecting line
+      ems += '<line x1="'+(earthCx+earthR+2)+'" y1="'+(emH/2)+'" x2="'+(moonCx-moonR-2)+'" y2="'+(emH/2)+'" stroke="rgba(255,255,255,.25)" stroke-width="1" stroke-dasharray="2 3"/>';
+      // Distance label centered
+      ems += '<text x="'+(emW/2)+'" y="'+(emH/2-6)+'" text-anchor="middle" font-size="9" font-weight="700" fill="rgba(255,255,255,.85)" style="fill:rgba(255,255,255,.85);">238,855 mi</text>';
+      ems += '<text x="'+(emW/2)+'" y="'+(emH/2+9)+'" text-anchor="middle" font-size="7" font-weight="600" fill="rgba(255,255,255,.45)" style="fill:rgba(255,255,255,.45);">~30 Earth-diameters</text>';
+      ems += '</svg>';
+      h += ems;
+      h += '<div style="font-size:9px;text-align:center;color:rgba(43,34,244,.55);margin:-2px 0 6px;font-weight:600;">Distance compressed for clarity · sizes to scale</div>';
+
+      // ── Brightness scale (mag) — moon vs sun, planets, stars ──
+      h += '<div style="margin:8px 0 14px;">';
+      h += '<div style="font-size:9px;font-weight:700;color:rgba(43,34,244,.55);letter-spacing:.04em;margin-bottom:4px;">APPARENT BRIGHTNESS</div>';
+      // Magnitude scale: lower = brighter. Range -27 (sun) to +6 (naked-eye limit)
+      var magMin = -27, magMax = 6;
+      var magToPct = function(m) { return ((m - magMin) / (magMax - magMin)) * 100; };
+      h += '<div style="position:relative;height:10px;border-radius:5px;background:linear-gradient(90deg,#ffe680 0%,#ffd060 8%,#cccccc 35%,#99a8c8 65%,#3344cc 100%);">';
+      // Moon marker (mag -12.7)
+      var moonMag = parseFloat(pd.maxMag) || -12.7;
+      var moonMagPct = magToPct(moonMag);
+      h += '<div style="position:absolute;left:'+moonMagPct.toFixed(2)+'%;top:-3px;bottom:-3px;width:3px;background:#3344cc;border-radius:2px;box-shadow:0 0 0 2px #fff;transform:translateX(-50%);"></div>';
+      // Reference markers: Sun, Venus, Sirius
+      [{m:-26.7, l:'Sun', col:'#cc8822'},
+       {m:-4.5, l:'Venus', col:'#cc8822'},
+       {m:-1.5, l:'Sirius', col:'rgba(43,34,244,.55)'},
+       {m:0, l:'Vega', col:'rgba(43,34,244,.45)'}].forEach(function(ref) {
+        var rp = magToPct(ref.m);
+        h += '<div style="position:absolute;left:'+rp.toFixed(2)+'%;top:0;bottom:0;width:1px;background:rgba(43,34,244,.30);transform:translateX(-50%);"></div>';
+      });
+      h += '</div>';
+      // Labels above scale (sun, moon, etc.)
+      h += '<div style="position:relative;font-size:7.5px;font-weight:700;height:12px;margin-top:3px;">'+
+        '<span style="position:absolute;left:'+magToPct(-26.7).toFixed(2)+'%;transform:translateX(-50%);color:#cc8822;">☀ Sun</span>'+
+        '<span style="position:absolute;left:'+moonMagPct.toFixed(2)+'%;transform:translateX(-50%);color:#3344cc;font-weight:900;">🌕 Moon '+moonMag.toFixed(1)+'</span>'+
+        '<span style="position:absolute;left:'+magToPct(-4.5).toFixed(2)+'%;transform:translateX(-50%);color:rgba(43,34,244,.55);">Venus</span>'+
+        '<span style="position:absolute;left:'+magToPct(0).toFixed(2)+'%;transform:translateX(-50%);color:rgba(43,34,244,.4);">0</span>'+
+      '</div>';
+      // Scale endpoints
+      h += '<div style="display:flex;justify-content:space-between;font-size:7.5px;font-weight:700;color:rgba(43,34,244,.4);margin-top:14px;letter-spacing:.04em;"><span>-27 BRIGHTEST</span><span>0</span><span>+6 NAKED EYE LIMIT</span></div>';
+      h += '</div>';
+
+      // ── Gravity bar (% of Earth) ──
+      h += '<div style="margin:8px 0;">';
+      h += '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;">'+
+        '<span style="font-size:9px;font-weight:700;color:rgba(43,34,244,.55);letter-spacing:.04em;">GRAVITY</span>'+
+        '<span style="font-size:11px;font-weight:900;color:#3344cc;">17% of Earth · jump 6× higher</span>'+
+      '</div>';
+      h += '<div style="display:flex;align-items:center;gap:8px;">';
+      // Earth bar (full)
+      h += '<div style="flex:1;height:8px;background:rgba(43,34,244,.05);border-radius:4px;overflow:hidden;">';
+      h += '<div style="height:100%;width:100%;background:linear-gradient(90deg,#3344cc,#3a78c8);border-radius:4px;"></div>';
+      h += '</div>';
+      h += '<div style="font-size:9px;font-weight:700;color:rgba(43,34,244,.45);min-width:42px;">Earth</div>';
+      h += '</div>';
+      h += '<div style="display:flex;align-items:center;gap:8px;margin-top:3px;">';
+      h += '<div style="flex:1;height:8px;background:rgba(43,34,244,.05);border-radius:4px;overflow:hidden;">';
+      h += '<div style="height:100%;width:17%;background:linear-gradient(90deg,#a8a292,#888070);border-radius:4px;"></div>';
+      h += '</div>';
+      h += '<div style="font-size:9px;font-weight:700;color:#888070;min-width:42px;">Moon</div>';
+      h += '</div>';
+      h += '</div>';
+
+      // ── Angular size: Moon vs Sun (the famous coincidence) ──
+      h += '<div style="margin:8px 0 6px;">';
+      h += '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;">'+
+        '<span style="font-size:9px;font-weight:700;color:rgba(43,34,244,.55);letter-spacing:.04em;">ANGULAR SIZE</span>'+
+        '<span style="font-size:10px;font-weight:700;color:rgba(43,34,244,.65);">'+pd.angSizeRange+' arcmin</span>'+
+      '</div>';
+      // Moon and Sun side-by-side at apparent size — both look ~30 arcmin
+      // from Earth (this coincidence is why we get total solar eclipses!)
+      h += '<div style="display:flex;align-items:center;justify-content:center;gap:18px;padding:10px;background:rgba(43,34,244,.04);border-radius:8px;">';
+      h += '<div style="text-align:center;"><div style="width:38px;height:38px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#fffbe8,#a8a292);margin:0 auto;"></div><div style="font-size:9px;font-weight:700;color:rgba(43,34,244,.7);margin-top:4px;">Moon</div><div style="font-size:8px;color:rgba(43,34,244,.45);">~31 arcmin</div></div>';
+      h += '<div style="font-size:14px;font-weight:900;color:rgba(43,34,244,.45);">≈</div>';
+      h += '<div style="text-align:center;"><div style="width:38px;height:38px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#fff5d8,#e8a040);margin:0 auto;box-shadow:0 0 12px rgba(255,180,80,.4);"></div><div style="font-size:9px;font-weight:700;color:rgba(43,34,244,.7);margin-top:4px;">Sun</div><div style="font-size:8px;color:rgba(43,34,244,.45);">~32 arcmin</div></div>';
+      h += '</div>';
+      h += '<div style="font-size:9.5px;text-align:center;color:rgba(43,34,244,.55);margin-top:5px;">From Earth, Moon and Sun appear nearly the same size — the cosmic coincidence behind total solar eclipses.</div>';
+      h += '</div>';
+
+      // ── Orbital period vs synodic month (the 2-day difference explained) ──
+      h += '<div style="margin:8px 0 6px;">';
+      h += '<div style="font-size:9px;font-weight:700;color:rgba(43,34,244,.55);letter-spacing:.04em;margin-bottom:4px;">ORBIT</div>';
+      h += '<div style="display:flex;gap:6px;">';
+      h += '<div style="flex:1;padding:6px 8px;background:rgba(43,34,244,.04);border-radius:6px;border-left:3px solid #88aaee;">'+
+        '<div style="font-size:14px;font-weight:900;color:#3344cc;line-height:1.1;">27.3<span style="font-size:9px;font-weight:700;"> days</span></div>'+
+        '<div style="font-size:9px;font-weight:700;color:#88aaee;letter-spacing:.04em;margin-top:2px;">SIDEREAL</div>'+
+        '<div style="font-size:9px;color:rgba(43,34,244,.55);line-height:1.3;margin-top:2px;">One orbit relative to fixed stars</div>'+
+      '</div>';
+      h += '<div style="flex:1;padding:6px 8px;background:rgba(43,34,244,.04);border-radius:6px;border-left:3px solid #cc8822;">'+
+        '<div style="font-size:14px;font-weight:900;color:#3344cc;line-height:1.1;">29.5<span style="font-size:9px;font-weight:700;"> days</span></div>'+
+        '<div style="font-size:9px;font-weight:700;color:#cc8822;letter-spacing:.04em;margin-top:2px;">SYNODIC</div>'+
+        '<div style="font-size:9px;color:rgba(43,34,244,.55);line-height:1.3;margin-top:2px;">New moon to next new moon (Earth has moved)</div>'+
+      '</div>';
+      h += '</div>';
+      h += '</div>';
+
     } else {
       h += FS('Quick Facts');
       h += gL('Diameter', pd.diameter.toLocaleString() + ' mi');
@@ -27916,18 +28165,106 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       h += gL('Angular size', pd.angSizeRange);
     }
 
-    // Interesting facts — shuffled each build so revisiting feels fresh
+    // Visual cards with thematic icons + color-coded left borders.
+    // Mini-illustrations for facts with strong visual potential.
     h += FS('Did You Know');
-    h += '<div style="font-size:9px;color:rgba(255,255,255,.65);line-height:1.55;">';
     (function(){
       var facts = pd.facts.slice();
       for (var i = facts.length - 1; i > 0; i--) {
         var j = Math.floor(Math.random() * (i + 1));
         var t = facts[i]; facts[i] = facts[j]; facts[j] = t;
       }
-      facts.forEach(function(f) { h += '\u2022 ' + f + '<br>'; });
+      var themeFor = function(f) {
+        var s = f.toLowerCase();
+        if (/eclipse.*solar|solar eclipse|400.*larger|same size/.test(s))     return { icon:'\u2600\ufe0f', col:'#cc8822' };
+        if (/lunar eclipse|blood red|red sunlight/.test(s))                   return { icon:'\ud83c\udf12', col:'#cc4422' };
+        if (/footprint|erosion|micrometeorite/.test(s))                       return { icon:'\ud83d\udc63', col:'#888070' };
+        if (/temperature|hot|cold|underground|noon|260|boil/.test(s))         return { icon:'\ud83c\udf21\ufe0f', col:'#cc4422' };
+        if (/sky.*black|stars.*visible|atmosphere.*scatter/.test(s))          return { icon:'\u2728', col:'#3344cc' };
+        if (/volcano|lava|magma/.test(s))                                     return { icon:'\ud83c\udf0b', col:'#cc4422' };
+        if (/radio|signal|wavelength|far side.*quiet/.test(s))                return { icon:'\ud83d\udce1', col:'#338855' };
+        if (/glass|regolith|sharp|surface.*coat/.test(s))                     return { icon:'\u2728', col:'#aa99cc' };
+        if (/moonquake|tremor|seismic|vibration|rings like a bell/.test(s))   return { icon:'\u3030\ufe0f', col:'#cc8822' };
+        if (/planets.*fit|empty space|gap between|239,000/.test(s))           return { icon:'\ud83d\udccf', col:'#3344cc' };
+        if (/receding|moving away|drift/.test(s))                             return { icon:'\u2197\ufe0f', col:'#88a8c8' };
+        if (/tidal|lock|same face|always shows/.test(s))                      return { icon:'\ud83d\udd04', col:'#5566cc' };
+        if (/orbit|sidereal|synodic|cycle|period/.test(s))                    return { icon:'\ud83d\udd03', col:'#88aaee' };
+        if (/dust|powder|loose/.test(s))                                      return { icon:'\ud83c\udf2b\ufe0f', col:'#888070' };
+        if (/water|ice|frozen/.test(s))                                       return { icon:'\u2744\ufe0f', col:'#88aaee' };
+        if (/astronaut|apollo|mission|landed/.test(s))                        return { icon:'\ud83d\ude80', col:'#3344cc' };
+        if (/age|billion|formed|origin|created/.test(s))                      return { icon:'\u23f3', col:'#a8a292' };
+        if (/gravity|weight|mass/.test(s))                                    return { icon:'\u2696\ufe0f', col:'#3344cc' };
+        if (/spin|rotate|rotation/.test(s))                                   return { icon:'\ud83d\udd01', col:'#88aaee' };
+        return { icon:'\ud83c\udf19', col:'#3344cc' };
+      };
+      var miniViz = function(f) {
+        var s = f.toLowerCase();
+        // "All planets fit between Earth and Moon" — visual scale
+        if (/all\s*\d?\s*other\s*planets.*fit/.test(s) || /side[- ]by[- ]side/.test(s) || /fit between/.test(s)) {
+          return '<div style="display:flex;align-items:center;justify-content:center;gap:3px;margin:8px 0 2px;padding:8px;background:linear-gradient(90deg,#0a0820,#1a1840);border-radius:6px;">'+
+            '<div style="width:18px;height:18px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#88c0e8,#1a3868);box-shadow:0 0 4px rgba(100,160,220,.5);" title="Earth"></div>'+
+            '<div style="font-size:8px;color:rgba(255,255,255,.5);">|</div>'+
+            '<div style="width:5px;height:5px;border-radius:50%;background:#9a9a9a;" title="Mercury"></div>'+
+            '<div style="width:14px;height:14px;border-radius:50%;background:#e8c08a;" title="Venus"></div>'+
+            '<div style="width:7px;height:7px;border-radius:50%;background:#cc4422;" title="Mars"></div>'+
+            '<div style="width:36px;height:36px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#e8c4a0,#8a5a3a);" title="Jupiter"></div>'+
+            '<div style="width:30px;height:30px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#e8d8a8,#aa8856);" title="Saturn"></div>'+
+            '<div style="width:13px;height:13px;border-radius:50%;background:#a0d8d8;" title="Uranus"></div>'+
+            '<div style="width:13px;height:13px;border-radius:50%;background:#4488cc;" title="Neptune"></div>'+
+            '<div style="font-size:8px;color:rgba(255,255,255,.5);">|</div>'+
+            '<div style="width:5px;height:5px;border-radius:50%;background:#d8d2bc;" title="Moon"></div>'+
+          '</div>'+
+          '<div style="font-size:8.5px;text-align:center;color:rgba(43,34,244,.5);font-style:italic;margin-top:0;">Earth \u00b7 7 planets \u00b7 Moon (relative sizes)</div>';
+        }
+        // Lunar eclipse: Earth refracting red light to Moon
+        if (/lunar eclipse|blood red|red sunlight|earth.*atmosphere.*bend/.test(s)) {
+          return '<svg width="100%" viewBox="0 0 280 60" preserveAspectRatio="xMidYMid meet" style="display:block;background:#0a0820;border-radius:6px;margin:8px 0 2px;">'+
+            '<defs><radialGradient id="leSun-'+Math.round(Math.random()*1e5)+'" cx="50%" cy="50%" r="50%">'+
+              '<stop offset="0%" stop-color="#fff5d8"/><stop offset="60%" stop-color="#e8a040"/><stop offset="100%" stop-color="#cc6622"/>'+
+            '</radialGradient></defs>'+
+            '<circle cx="22" cy="30" r="14" fill="#e8a040"/>'+
+            '<text x="22" y="54" text-anchor="middle" font-size="7" fill="rgba(255,255,255,.6)" style="fill:rgba(255,255,255,.6);">Sun</text>'+
+            '<circle cx="140" cy="30" r="9" fill="#3a78c8"/>'+
+            '<circle cx="140" cy="30" r="11" fill="none" stroke="rgba(255,80,60,.5)" stroke-width="1.5"/>'+
+            '<text x="140" y="54" text-anchor="middle" font-size="7" fill="rgba(255,255,255,.6)" style="fill:rgba(255,255,255,.6);">Earth</text>'+
+            '<line x1="36" y1="30" x2="129" y2="30" stroke="rgba(255,200,140,.5)" stroke-width="0.7"/>'+
+            '<path d="M 145 25 Q 180 18 210 24 Q 235 28 250 28" stroke="rgba(255,80,60,.7)" stroke-width="1" fill="none"/>'+
+            '<path d="M 145 35 Q 180 42 210 36 Q 235 32 250 32" stroke="rgba(255,80,60,.7)" stroke-width="1" fill="none"/>'+
+            '<circle cx="252" cy="30" r="6" fill="#aa3322"/>'+
+            '<text x="252" y="54" text-anchor="middle" font-size="7" fill="rgba(255,80,60,.85)" style="fill:rgba(255,80,60,.85);">Moon</text>'+
+          '</svg>'+
+          '<div style="font-size:8.5px;text-align:center;color:rgba(43,34,244,.5);font-style:italic;margin-top:0;">Earth\u2019s atmosphere refracts red sunlight into its shadow</div>';
+        }
+        // Surface 260°F vs underground -4°F
+        if ((/lunar noon|260.*\u00b0?f|260.*f/.test(s) && /-4|underground|2 ?feet/.test(s)) || /surface.*hot.*underground/.test(s)) {
+          return '<div style="display:flex;align-items:center;gap:8px;margin:8px 0 2px;padding:6px 8px;background:rgba(43,34,244,.04);border-radius:6px;">'+
+            '<div style="flex:1;text-align:center;padding:6px;background:linear-gradient(180deg,#cc4422 0%,#cc8822 100%);border-radius:4px;color:#fff;">'+
+              '<div style="font-size:8px;font-weight:700;letter-spacing:.04em;opacity:.85;">SURFACE NOON</div>'+
+              '<div style="font-size:14px;font-weight:900;line-height:1.1;">260\u00b0F</div>'+
+            '</div>'+
+            '<div style="font-size:14px;font-weight:900;color:rgba(43,34,244,.4);">\u2193</div>'+
+            '<div style="flex:1;text-align:center;padding:6px;background:linear-gradient(180deg,#88aaee 0%,#3344cc 100%);border-radius:4px;color:#fff;">'+
+              '<div style="font-size:8px;font-weight:700;letter-spacing:.04em;opacity:.85;">2 FT DEEP</div>'+
+              '<div style="font-size:14px;font-weight:900;line-height:1.1;">-4\u00b0F</div>'+
+            '</div>'+
+          '</div>';
+        }
+        return '';
+      };
+      h += '<div style="display:flex;flex-direction:column;gap:6px;margin:4px 0;">';
+      facts.forEach(function(f) {
+        var th = themeFor(f);
+        var viz = miniViz(f);
+        h += '<div style="display:flex;align-items:flex-start;gap:8px;padding:8px 10px 8px 8px;background:rgba(43,34,244,.03);border-radius:7px;border-left:3px solid '+th.col+';">'+
+          '<div style="font-size:16px;line-height:1.2;flex-shrink:0;width:20px;text-align:center;">'+th.icon+'</div>'+
+          '<div style="flex:1;min-width:0;">'+
+            '<div style="font-size:11px;color:rgba(43,34,244,.78);line-height:1.5;">'+f+'</div>'+
+            (viz ? viz : '')+
+          '</div>'+
+        '</div>';
+      });
+      h += '</div>';
     })();
-    h += '</div>';
 
     // ── CROSS-SECTION SVG ──
     var pi = PLANET_INTERIOR[planetKey];
