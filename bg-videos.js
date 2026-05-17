@@ -1,5 +1,5 @@
 // Single source of truth for background video URLs.
-// Loaded by both / (random pick on each refresh) and /cloudstation/ (cycle via arrows).
+// Loaded by both / (random pick on each refresh) and /void/ (cycle via arrows).
 // To add a new video: upload to R2, then append its URL to this array.
 var BG_VIDEOS = [
   'https://cdn.bluishvoid.com/bvbg01.mp4',
