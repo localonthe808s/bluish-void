@@ -11187,6 +11187,42 @@ if (illum <= 2) illum = 0;
         results.push(result);
         continue;
       }
+
+      // REQUIREMENT 3: Actual rain falling (not just probability) - rainbows
+      // form from sunlight refracting through rain DROPLETS in the air right
+      // now. A 50% chance of rain does not put droplets in the air. Only narrow
+      // exception is the transition window - rain just ended, residual droplets
+      // can still produce a bow as the sun breaks through.
+      var hasActiveRain  = rain > 0.01 || precip > 0.01;
+      var hasRecentRain  = prevRain > 0.05 || prevPrecip > 0.05;
+      var rainTransition = !hasActiveRain && hasRecentRain && cloud !== null && (prevCloud === null || cloud <= prevCloud);
+      if (!hasActiveRain && !rainTransition) {
+        result.factors.push('No active rain - rainbow needs droplets in the air right now');
+        results.push(result);
+        continue;
+      }
+      // REQUIREMENT 4: Sun must actually reach the rain - total cloud >= 85%
+      // is broad overcast and the sun will not break through. Even at less,
+      // if LOW cloud >= 80% the sun is blocked by stratus/fog. Open-Meteo's
+      // cloud_cover_low / _mid let us check the layered geometry instead of
+      // just relying on the total %.
+      var lowCloud = hourlyData.cloud_cover_low ? hourlyData.cloud_cover_low[i] : null;
+      var midCloud = hourlyData.cloud_cover_mid ? hourlyData.cloud_cover_mid[i] : null;
+      if (cloud !== null && cloud >= 85) {
+        result.factors.push('Fully overcast ('+cloud+'%) - no direct sunlight reaching the rain');
+        results.push(result);
+        continue;
+      }
+      if (lowCloud !== null && lowCloud >= 80) {
+        result.factors.push('Low cloud deck ('+lowCloud+'%) blocking direct sunlight');
+        results.push(result);
+        continue;
+      }
+      if (lowCloud !== null && midCloud !== null && (lowCloud + midCloud * 0.6) >= 100) {
+        result.factors.push('Stacked low + mid cloud blocking the sun');
+        results.push(result);
+        continue;
+      }
       
       // ── TEMPERATURE CHECK (ZhaoSu model: temp > 8°C / 46°F) ──
       var coldPenalty = 0;
@@ -11263,8 +11299,11 @@ if (illum <= 2) illum = 0;
       }
       
       if (isTransition) {
-        precipScore = 35;
-        if (postStorm) precipScore += 10;
+        // Transition was scoring 35 unconditionally, which single-handedly
+        // tripped LIKELY badges on every drizzle taper. Now requires the sky
+        // also to be clearing (sun finding a break) for the full bonus.
+        precipScore = (transType === 'breaking' || (cloud !== null && cloud < 70)) ? 28 : 16;
+        if (postStorm) precipScore += 8;
       } else if (hasLiquid && rain >= 0.15) {
         precipScore = 22;
         result.factors.push('Moderate-heavy rain ('+rain.toFixed(2)+' in/hr)');
@@ -11282,14 +11321,12 @@ if (illum <= 2) illum = 0;
         result.type = 'fogbow';
         result.factors.push('Heavy mist \u2014 fogbow possible');
         result.colorSaturation = 15;
-      } else if (wCode >= 80 && wCode <= 82) {
-        // Shower codes but precip might be 0 this hour
-        precipScore = 10;
-        result.factors.push('Shower activity nearby');
-      } else if (pp >= 50) {
-        precipScore = 5;
-        result.factors.push(pp+'% rain chance \u2014 possible if showers develop');
       } else {
+        // wCode shower flags and pp >= 50 alone no longer trigger a rainbow
+        // score. The hard requirement above (active rain or recent rain in
+        // transition) already filtered out the false-positive cases; if we
+        // got here without liquid/fog/mist, there's literally no droplets to
+        // refract sunlight through.
         result.factors.push('No moisture for refraction');
         results.push(result);
         continue;
@@ -25281,7 +25318,10 @@ function dayRangeAround(d, days){
           if (rDate.getDate() !== dayLocal.getDate()) continue;
           var rHour = rb.hour;
           
-          if (rb.score >= 30) {
+          // Window-detection threshold raised 30 → 45 to match the per-hour
+          // gate below. Was producing windows that opened on the bare-pp / lax
+          // cloud scoring; now requires meaningful confluence of conditions.
+          if (rb.score >= 45) {
             if (!currentWindow) {
               currentWindow = { startHour: rHour, endHour: rHour, peakScore: rb.score, peakHour: rHour, type: rb.type, direction: rb.direction };
             } else {
@@ -25316,7 +25356,11 @@ function dayRangeAround(d, days){
                 hrScore = rbResults[rs].score; break;
               }
             }
-            if (hrScore < 30) continue;
+            // Threshold raised 30 → 45. Score 30 was producing badges on most
+            // overcast days because the lax score components (pp-only, default
+            // cloud, transition) cleared 30 trivially. 45 requires multiple
+            // genuine conditions to align.
+            if (hrScore < 45) continue;
             if (hCols2[colIdx2].querySelector('.rainbow-marker')) continue;
             
             var opac = Math.min(0.25, hrScore / 400 + 0.05);
@@ -25343,7 +25387,11 @@ function dayRangeAround(d, days){
           if (startCol >= 0 && startCol < hCols2.length) {
             var spanCols = endCol - startCol + 1;
             var typeName = (win.type === 'fogbow') ? 'FOGBOW' : (win.type === 'moonbow') ? 'MOONBOW' : (win.type === 'glory') ? 'GLORY' : 'RAINBOW';
-            var statusWord = win.peakScore >= 50 ? 'LIKELY' : 'POSSIBLE';
+            // LIKELY threshold raised 50 → 70. Score >= 50 was hitting on any
+            // afternoon shower scenario; LIKELY should mean multiple aligned
+            // optical conditions (sun under 30°, active rain, partial cloud,
+            // and one of: post-storm clearing / sunset-window / convective).
+            var statusWord = win.peakScore >= 70 ? 'LIKELY' : 'POSSIBLE';
             
             var colWidth = _hColWidths[startCol] || 50;
             var spanWidth = spanCols * colWidth;
