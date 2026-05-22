@@ -8538,6 +8538,8 @@ body > #dynamic-alert-modal {
                 <span class="meta-item"><span class="meta-key">Golden PM</span> <span class="meta-val" id="tl-golden-pm">--</span></span>
                 <span class="meta-item"><span class="meta-key">Daylight</span> <span class="meta-val" id="tl-daylight">--</span></span>
                 <span class="meta-item"><span class="meta-val" id="tl-daylight-change">--</span></span>
+                <span class="meta-item" id="tl-peak-rain-item" style="display:none;"><span class="meta-key">Peak Rain</span> <span class="meta-val" id="tl-peak-rain">--</span></span>
+                <span class="meta-item" id="tl-drain-item" style="display:none;"><span class="meta-key">Drainage</span> <span class="meta-val" id="tl-drain">--</span></span>
               </div>
             </div>
 
@@ -23876,10 +23878,19 @@ function dayRangeAround(d, days){
     // Render weather row with animated icons (every 3 hours)
     if (tlWeatherRow && hourly && hourly.time){
       var weatherHtml = "";
-      
+
       var isMobile = window.innerWidth <= 768;
       var hStep = isMobile ? 3 : 1;
-      for (var h = 0; h < 24; h += hStep){
+      // Drainage capacity (in/hr) — the rate above which the local sewer/stormwater
+      // system can't keep up, so rainfall accumulates as flash flooding. NYC's
+      // stormwater standard is 1.75 in/hr (per Mayor Mamdani's statement after the
+      // 2026-05-20 storm where actual rates hit ~6 in/hr in Queens / Brooklyn).
+      // Could later become location-aware; for now we use NYC's threshold as the
+      // default since most users are NYC-area.
+      var _drainCap = 1.75;
+      // Track peak rate across the day so we can surface it in the header meta.
+      var _peakRate = 0;
+      var _peakHour = -1;
         var targetHour = new Date(dayLocal.getFullYear(), dayLocal.getMonth(), dayLocal.getDate(), h, 0, 0, 0);
         
         // Find matching index in hourly data
@@ -24016,6 +24027,18 @@ function dayRangeAround(d, days){
         } else if (hPrecipAmt > 0){
           hPrecipStr = 'MIN';
         }
+
+        // Track peak rate (rain only — snow handled separately by snowfall rate, not flooding)
+        if (hPrecipAmt > _peakRate) { _peakRate = hPrecipAmt; _peakHour = h; }
+        // Drainage-threshold marker: when this hour's rate exceeds capacity, append a
+        // 🌊 emoji and override color to deep red regardless of the generic precip class
+        // above (heavy/extreme thresholds are climate-aware, but DRAINAGE is what causes
+        // flash flooding — totally separate concept).
+        var _floodMark = '';
+        if (hPrecipAmt >= _drainCap) {
+          _floodMark = ' <span style="font-size:.55rem;" title="Exceeds drainage capacity '+_drainCap+'\"/hr by '+(hPrecipAmt/_drainCap).toFixed(1)+'× — flash flood risk">🌊</span>';
+          hPrecipColor = "rgba(220,40,40,1)";  // urgent red
+        }
         
         weatherHtml += '<div class="' + hourClass + '">' +
           '<span class="today-tl-weather-time">' + timeLabel + '</span>' +
@@ -24025,11 +24048,42 @@ function dayRangeAround(d, days){
           '<span style="font-size:.55rem;font-weight:600;color:' + windColor + ';display:block;text-align:center;width:100%;text-transform:uppercase;letter-spacing:.3px;">' + windStr + '</span>' +
           '<span style="font-size:.5rem;font-weight:600;color:' + windDirColor + ';display:block;text-align:center;width:100%;letter-spacing:.3px;">' + windDirStr + '</span>' +
           '<span class="today-tl-weather-precip ' + precipClass + '">' + precip + '%</span>' +
-          (hPrecipStr ? '<span style="font-size:.6rem;font-weight:800;color:' + hPrecipColor + ';display:block;text-align:center;width:100%;letter-spacing:.03em;text-shadow:0 0 8px ' + hPrecipColor + ',0 0 16px ' + hPrecipColor + ';">' + hPrecipStr + '</span>' : '') +
+          (hPrecipStr ? '<span style="font-size:.6rem;font-weight:800;color:' + hPrecipColor + ';display:block;text-align:center;width:100%;letter-spacing:.03em;text-shadow:0 0 8px ' + hPrecipColor + ',0 0 16px ' + hPrecipColor + ';">' + hPrecipStr + _floodMark + '</span>' : '') +
         '</div>';
       }
       
       tlWeatherRow.innerHTML = weatherHtml;
+
+      // Populate the Peak Rain + Drainage meta items in the timeline header.
+      // Hidden when there's no measurable precip — the row stays clean on dry days.
+      try {
+        var _peakItem  = document.getElementById('tl-peak-rain-item');
+        var _peakVal   = document.getElementById('tl-peak-rain');
+        var _drainItem = document.getElementById('tl-drain-item');
+        var _drainVal  = document.getElementById('tl-drain');
+        if (_peakItem && _peakVal && _drainItem && _drainVal) {
+          if (_peakRate >= 0.05) {
+            var _hr12 = _peakHour === 0 ? '12 AM'
+                       : _peakHour < 12 ? _peakHour + ' AM'
+                       : _peakHour === 12 ? '12 PM'
+                       : (_peakHour - 12) + ' PM';
+            var _ratio = _peakRate / _drainCap;
+            var _color = _ratio >= 2     ? 'rgba(255,40,40,1)'
+                       : _ratio >= 1     ? 'rgba(255,140,40,1)'
+                       : 'rgba(80,200,120,1)';
+            _peakVal.textContent = _peakRate.toFixed(2) + '"/hr · ' + _hr12;
+            _peakVal.style.color = _color;
+            _peakVal.style.fontWeight = '800';
+            _peakItem.style.display = '';
+            _drainVal.textContent = _drainCap.toFixed(2) + '"/hr';
+            _drainVal.title = 'Drainage capacity — rate above which the local stormwater system can\'t keep up. NYC standard: 1.75 in/hr.';
+            _drainItem.style.display = '';
+          } else {
+            _peakItem.style.display = 'none';
+            _drainItem.style.display = 'none';
+          }
+        }
+      } catch(e){}
 
       // ── HOURLY DETAIL POPUPS ──
       // Add click handlers to each hourly column for detailed weather insight
