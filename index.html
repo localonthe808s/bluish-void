@@ -29404,6 +29404,11 @@ function dayRangeAround(d, days){
       })
       .then(function(data){
         try{
+          // Stale-location guard: if the user switched location while this fetch was
+          // in flight, abandon the result rather than rendering the wrong city's data
+          // (or mutating LOCATION.elevation with the old location's elevation).
+          if (loc.lat !== LOCATION.lat || loc.lon !== LOCATION.lon) return;
+
           var hourly = data && data.hourly;
           var daily  = data && data.daily;
 
@@ -41771,6 +41776,20 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       // location's atmospherics.
       window._cloudIntel = null;
       window._lastGHRenderKey = null;
+
+      // Tear down hazard widget state for the previous location: stops blitzortung
+      // WebSocket + reconnect timer, hydro/national-radar refresh timers, ResizeObserver,
+      // pending idle prefetch, layer groups, and the maps themselves. Without this they
+      // accumulate across location switches and keep refreshing the old location's data.
+      // If the user had already engaged with the hazard widget, re-init synchronously
+      // so they don't see an empty panel.
+      var _hzWasInited = window._hazardInited;
+      try { destroyHazardMaps(); } catch(e){ console.error('destroyHazardMaps:', e); }
+      window._hazardInited = false;
+      if (_hzWasInited) {
+        try { initHazardMaps(); window._hazardInited = true; }
+        catch(e){ console.error('post-switch hazard re-init:', e); }
+      }
       
       // Update location name display with loading state
       if (locNameEl) { locNameEl.textContent = newLoc.name; locNameEl.classList.remove("pulse-hint"); }
@@ -47858,8 +47877,15 @@ function initNowMicroTabs(){
         if (!window._hazardTabLoaded.tornado) { window._hazardTabLoaded.tornado = true; initTornadoData(); }
       } catch(e) { console.error('Hazard prefetch:', e); }
     };
-    if ('requestIdleCallback' in window) requestIdleCallback(_hzPrefetch, { timeout: 4000 });
-    else setTimeout(_hzPrefetch, 2500);
+    // Store the handle so destroyHazardMaps() (called on location switch) can cancel
+    // before it fires — otherwise it'd init the old location's tabs after the switch.
+    if ('requestIdleCallback' in window) {
+      window._hzPrefetchIsIdle = true;
+      window._hzPrefetchId = requestIdleCallback(function(){ window._hzPrefetchId = null; _hzPrefetch(); }, { timeout: 4000 });
+    } else {
+      window._hzPrefetchIsIdle = false;
+      window._hzPrefetchId = setTimeout(function(){ window._hzPrefetchId = null; _hzPrefetch(); }, 2500);
+    }
   }
 
   function destroyHazardMaps(){
@@ -47891,6 +47917,15 @@ function initNowMicroTabs(){
     blitzortungStrikes = [];
     if (blitzortungWs){ try { blitzortungWs.close(); } catch(e){} blitzortungWs = null; }
     if (blitzortungReconnectTimer){ clearTimeout(blitzortungReconnectTimer); blitzortungReconnectTimer = null; }
+    // Stop watching the (now-detached) hazard-map element for resize.
+    if (window._hazardMapResizeObs){ try { window._hazardMapResizeObs.disconnect(); } catch(e){} window._hazardMapResizeObs = null; }
+    // Cancel any pending hazard-tab prefetch that hasn't fired yet — it would otherwise
+    // init the old location's tabs and start their refresh intervals.
+    if (window._hzPrefetchId != null){
+      if (window._hzPrefetchIsIdle && typeof cancelIdleCallback === 'function') cancelIdleCallback(window._hzPrefetchId);
+      else clearTimeout(window._hzPrefetchId);
+      window._hzPrefetchId = null;
+    }
   }
 // ============ LIGHTNING MAP ============
   var blitzortungWs = null;
