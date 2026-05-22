@@ -12219,7 +12219,14 @@ function dayRangeAround(d, days){
     return Math.floor((d - start) / 86400000) + 1;
   }
 
+  // Single-slot memo: renderTodayTimeline (and similar batches) calls solarEventTimeLocal
+  // 12+ times in a row with the same dayLocal, and each call invokes _solarTerms(dayLocal).
+  // Keying by getTime() handles back-to-back calls for the same day-noon Date without
+  // growing unboundedly (newer day overwrites).
+  var _solarTermsLastKey = 0, _solarTermsLastVal = null;
   function _solarTerms(dLocal){
+    var k = dLocal.getTime();
+    if (k === _solarTermsLastKey && _solarTermsLastVal) return _solarTermsLastVal;
     var doy = _dayOfYearLocal(dLocal);
     var hr  = dLocal.getHours() + dLocal.getMinutes()/60 + dLocal.getSeconds()/3600;
     var gamma = 2 * Math.PI / 365 * (doy - 1 + (hr - 12) / 24);
@@ -12242,7 +12249,9 @@ function dayRangeAround(d, days){
       0.002697 * Math.cos(3 * gamma) +
       0.00148  * Math.sin(3 * gamma);
 
-    return { eqtime:eqtime, decl:decl };
+    _solarTermsLastKey = k;
+    _solarTermsLastVal = { eqtime:eqtime, decl:decl };
+    return _solarTermsLastVal;
   }
 
   function _minsLocal(d){ return d.getHours()*60 + d.getMinutes() + d.getSeconds()/60; }
@@ -20794,7 +20803,9 @@ function dayRangeAround(d, days){
           var nowS = Math.floor(Date.now()/1000);
           var times = [];
           for (var ti=0; ti<10; ti++) times.push(nowS + ti*120);
-          fetch('https://api.wheretheiss.at/v1/satellites/25544/positions?timestamps='+times.join(',')+'&units=kilometers')
+          // fetchWithTimeout (not bare fetch) so a hung request doesn't leave a stuck
+          // promise — the .catch at the end already handles network errors silently.
+          fetchWithTimeout('https://api.wheretheiss.at/v1/satellites/25544/positions?timestamps='+times.join(',')+'&units=kilometers', null, 10000)
             .then(function(r){ return r.json(); })
             .then(function(arr){
               if (!Array.isArray(arr) || !arr.length) return;
@@ -30060,12 +30071,14 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             // Only run once per data load
             if (window._nwsVerifyRunning) return;
             window._nwsVerifyRunning = true;
-            // Find nearest station first
-            fetch(window._nwsStationsUrl, { headers: { 'Accept': 'application/geo+json' } })
+            // Find nearest station first. fetchWithTimeout (not bare fetch) + a .catch
+            // that resets the running flag — otherwise a hung request leaves
+            // _nwsVerifyRunning=true forever, blocking all future verification attempts.
+            fetchWithTimeout(window._nwsStationsUrl, { headers: { 'Accept': 'application/geo+json' } }, 12000)
             .then(function(r){ return r.json(); })
             .then(function(stData){
               var features = stData && stData.features;
-              if (!features || !features.length) return;
+              if (!features || !features.length) { window._nwsVerifyRunning = false; return; }
               var stationId = features[0].properties.stationIdentifier;
               // Build time window: today local midnight → now, in UTC
               var nowLocal = new Date();
@@ -30075,7 +30088,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
               var endUTC = new Date(nowLocal.getTime() + 3600000).toISOString(); // now + 1h buffer
               var obsUrl = 'https://api.weather.gov/stations/' + stationId +
                 '/observations?start=' + startUTC + '&end=' + endUTC + '&limit=50';
-              return fetch(obsUrl, { headers: { 'Accept': 'application/geo+json' } });
+              return fetchWithTimeout(obsUrl, { headers: { 'Accept': 'application/geo+json' } }, 12000);
             })
             .then(function(r){ if(r) return r.json(); })
             .then(function(obsData){
