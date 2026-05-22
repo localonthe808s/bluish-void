@@ -19574,30 +19574,35 @@ function dayRangeAround(d, days){
               var _bMode=isNowNight?'night':(isNowGolden?'golden':'day');
               var _sr=window._ghGetSkyRefs();
               if(_sr){
-                // Day mode uses a vertical gradient (white at building tops, dark below
-                // building base line) so the city path's ground rectangle doesn't render
-                // white along with the buildings. Night/golden stay as solid fills since
-                // their dark colors already work for both buildings and ground.
-                // Defined once at module level (idempotent — checks for existing element).
-                if (_bMode === 'day' && !document.getElementById('ghBldgDayGradL')) {
-                  var _svgRoot = document.getElementById('golden-sky-svg');
-                  if (_svgRoot) {
-                    var _defs = _svgRoot.querySelector('defs');
-                    if (!_defs) { _defs = document.createElementNS('http://www.w3.org/2000/svg','defs'); _svgRoot.insertBefore(_defs, _svgRoot.firstChild); }
-                    ['ghBldgDayGradL','ghBldgDayGradR'].forEach(function(gid){
-                      if (document.getElementById(gid)) return;
+                // Day + golden use vertical gradients with sharp transition at the building
+                // base line. Above transition = building color. Below = transparent so the
+                // city path's ground rectangle doesn't bleed into the area below the panel.
+                // Building base line is around y=118 in path coords ≈ 30% of path bbox.
+                if (!window._ghEnsureBldgGrads) {
+                  window._ghEnsureBldgGrads = function() {
+                    var svgRoot = document.getElementById('golden-sky-svg');
+                    if (!svgRoot) return;
+                    var defs = svgRoot.querySelector('defs');
+                    if (!defs) { defs = document.createElementNS('http://www.w3.org/2000/svg','defs'); svgRoot.insertBefore(defs, svgRoot.firstChild); }
+                    [
+                      {id:'ghBldgDayGradL',    top:'rgb(245,245,245)'},
+                      {id:'ghBldgDayGradR',    top:'rgb(245,245,245)'},
+                      {id:'ghBldgGoldenGradL', top:'rgb(42,38,42)'},
+                      {id:'ghBldgGoldenGradR', top:'rgb(40,38,42)'}
+                    ].forEach(function(spec){
+                      if (document.getElementById(spec.id)) return;
                       var g2 = document.createElementNS('http://www.w3.org/2000/svg','linearGradient');
-                      g2.setAttribute('id', gid);
+                      g2.setAttribute('id', spec.id);
                       g2.setAttribute('x1','0'); g2.setAttribute('y1','0');
                       g2.setAttribute('x2','0'); g2.setAttribute('y2','1');
-                      // City path bbox is roughly y=80 (top of tallest tower) to y=210 (bottom).
-                      // Ground line where buildings meet "street" is around y=118 ≈ 29% from top.
-                      // Sharp transition at 30% — buildings white, ground dark below.
+                      // Two stops at 30%: same color above = solid building fill, fully
+                      // transparent below = ground area invisible. The path's stroke still
+                      // draws the bottom rectangle outline but fill is transparent there.
                       [
-                        ['0%',   'rgb(245,245,245)', 0.95],
-                        ['30%',  'rgb(245,245,245)', 0.95],
-                        ['30%',  'rgb(60,65,75)',    0.95],
-                        ['100%', 'rgb(40,45,55)',    0.95]
+                        ['0%',   spec.top,                    0.95],
+                        ['30%',  spec.top,                    0.95],
+                        ['30%',  spec.top,                    0],
+                        ['100%', spec.top,                    0]
                       ].forEach(function(s){
                         var st = document.createElementNS('http://www.w3.org/2000/svg','stop');
                         st.setAttribute('offset', s[0]);
@@ -19605,15 +19610,22 @@ function dayRangeAround(d, days){
                         st.setAttribute('stop-opacity', s[2]);
                         g2.appendChild(st);
                       });
-                      _defs.appendChild(g2);
+                      defs.appendChild(g2);
                     });
-                  }
+                  };
                 }
+                window._ghEnsureBldgGrads();
                 _sr.pathsL.forEach(function(p,i){
                   var v=window._ghBldgPaint(i,_bMode);
-                  var fillVal = (_bMode==='day') ? 'url(#ghBldgDayGradL)' : v.fill;
+                  var fillVal;
+                  if (_bMode==='day')         fillVal = 'url(#ghBldgDayGradL)';
+                  else if (_bMode==='golden') fillVal = 'url(#ghBldgGoldenGradL)';
+                  else                        fillVal = v.fill;
                   p.setAttribute('fill', fillVal);
-                  p.setAttribute('stroke',v.stroke);
+                  // Stroke also goes transparent for the bottom portion via the same
+                  // gradient logic — set stroke to none so the rectangle outline below
+                  // buildings doesn't draw as a visible line.
+                  p.setAttribute('stroke', (_bMode==='day' || _bMode==='golden') ? 'none' : v.stroke);
                   p.setAttribute('stroke-width','0.6');
                   p.setAttribute('stroke-linejoin','round');
                 });
@@ -19648,7 +19660,14 @@ function dayRangeAround(d, days){
               var fcBldg='rgba(40,38,42,.94)';
               var _sr2=window._ghGetSkyRefs();
               if(_sr2){
-                _sr2.pathsR.forEach(function(p,i){var v=window._ghBldgPaint(i,'golden');p.setAttribute('fill',v.fill);p.setAttribute('stroke',v.stroke);p.setAttribute('stroke-width','0.6');p.setAttribute('stroke-linejoin','round');});
+                if (window._ghEnsureBldgGrads) window._ghEnsureBldgGrads();
+                _sr2.pathsR.forEach(function(p,i){
+                  var v=window._ghBldgPaint(i,'golden');
+                  p.setAttribute('fill','url(#ghBldgGoldenGradR)');
+                  p.setAttribute('stroke','none');
+                  p.setAttribute('stroke-width','0.6');
+                  p.setAttribute('stroke-linejoin','round');
+                });
                 // Windows at golden hour: warm amber/orange dominant, some white
                 var fcWinColors=[
                   {r:255,g:200,b:100}, // warm amber
@@ -58160,11 +58179,15 @@ function initNowMicroTabs(){
           // Forecast panel (right) is always golden hour by design — don't let live tick repaint it as day.
           [['L',nowMode],['R','golden']].forEach(function(pair){
             var suf=pair[0], mode=pair[1];
+            if (window._ghEnsureBldgGrads) window._ghEnsureBldgGrads();
             _sr3['paths'+suf].forEach(function(p,i){
               var v=window._ghBldgPaint(i,mode);
-              var fillVal = (mode==='day') ? 'url(#ghBldgDayGrad'+suf+')' : v.fill;
+              var fillVal, strokeVal = v.stroke;
+              if (mode==='day')         { fillVal = 'url(#ghBldgDayGrad'+suf+')';    strokeVal = 'none'; }
+              else if (mode==='golden') { fillVal = 'url(#ghBldgGoldenGrad'+suf+')'; strokeVal = 'none'; }
+              else                      { fillVal = v.fill; }
               p.setAttribute('fill', fillVal);
-              p.setAttribute('stroke',v.stroke);
+              p.setAttribute('stroke', strokeVal);
             });
             _sr3['rects'+suf].forEach(function(r,i){r.setAttribute('fill','rgba(255,220,100,'+(i%2===0?wBr:wDm).toFixed(2)+')');});
             _sr3['circles'+suf].forEach(function(c){c.setAttribute('fill','rgba(255,50,50,'+bcnA.toFixed(2)+')');});
