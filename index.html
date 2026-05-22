@@ -25386,18 +25386,23 @@ function dayRangeAround(d, days){
         });
       })();
 
-      // ── FLASH FLOOD column markers ─────────────────────────────────────────
+      // ── RAIN INTENSITY column markers (HEAVY RAIN + FLASH FLOOD) ────────────
       // Mirrors the warm-front / rainbow badge pattern. Walks the hourly precip
-      // array, finds windows where rate >= drainage capacity (1.75"/hr default —
-      // NYC stormwater spec), and adds a column band + badge to flag those hours
-      // as flash-flood risk. Skipped on dry/light days entirely.
+      // array, finds windows where rate exceeds heavy-rain threshold, and adds
+      // a column band + badge. Two tiers:
+      //   • HEAVY RAIN: rate >= 0.30"/hr (orange band + badge)
+      //   • FLASH FLOOD: rate >= 1.75"/hr (NYC drainage cap) — supersedes the
+      //     heavy tier, urgent red band + badge.
+      // Windows are detected by walking hours-above-heavy-threshold; the badge
+      // tier is decided by the peak rate WITHIN that window.
       (function(){
         if (!hourly || !hourly.time || !hourly.precipitation) return;
         var hCols3 = tlWeatherRow.querySelectorAll('.today-tl-weather-hour');
         if (!hCols3 || !hCols3.length) return;
-        var DRAIN_CAP = 1.75;  // in/hr — see comment elsewhere on this constant
-        // Find windows of hours-above-capacity (consecutive hours so a single
-        // multi-hour storm gets ONE badge spanning the burst, not N badges).
+        var DRAIN_CAP   = 1.75;  // in/hr — flash flood threshold (NYC drainage spec)
+        var HEAVY_THRESH = 0.30; // in/hr — heavy rain threshold (per _precipThresholds.heavy)
+        // Find windows of hours-above-heavy-threshold (consecutive hours so a
+        // single multi-hour storm gets ONE badge spanning the burst, not N).
         var windows = [];
         var cur = null;
         var hIsMobile = window.innerWidth <= 768;
@@ -25411,7 +25416,7 @@ function dayRangeAround(d, days){
           }
           var fprecip = (fmIdx >= 0) ? (hourly.precipitation[fmIdx] || 0) : 0;
           var colIdxF = hIsMobile ? Math.round(fh/hStep3) : fh;
-          if (fprecip >= DRAIN_CAP && colIdxF >= 0 && colIdxF < hCols3.length) {
+          if (fprecip >= HEAVY_THRESH && colIdxF >= 0 && colIdxF < hCols3.length) {
             if (!cur) cur = {startCol: colIdxF, endCol: colIdxF, peakRate: fprecip, peakHour: fh};
             else {
               cur.endCol = colIdxF;
@@ -25428,67 +25433,105 @@ function dayRangeAround(d, days){
         for (var _ffi = 0; _ffi < hCols3.length; _ffi++) _ffColWidths[_ffi] = (hCols3[_ffi] && hCols3[_ffi].offsetWidth) || 50;
 
         windows.forEach(function(w){
-          // Column band (red wash across hours that exceed drainage)
+          // Tier decided by the window's PEAK rate
+          var isFlood = w.peakRate >= DRAIN_CAP;
+          var tier = isFlood ? {
+            cls: 'flashflood-marker',
+            badgeCls: 'flashflood-badge',
+            band: 'rgba(220,40,40,.18)',
+            badgeBg: 'linear-gradient(135deg,rgba(240,60,60,.95),rgba(180,20,20,.95))',
+            badgeBorder: 'rgba(255,150,150,.45)',
+            badgeShadow: 'rgba(220,40,40,.4)',
+            label: '⚠ FLASH FLOOD',
+            subline: w.peakRate.toFixed(2)+'"/hr · '+(w.peakRate/DRAIN_CAP).toFixed(1)+'× DRAIN',
+            popupAccent: 'rgba(255,120,120,1)',
+            popupBg: 'rgba(20,8,8,.96)',
+            popupBorder: 'rgba(220,40,40,.4)',
+            popupTitle: '⚠ Flash Flood Risk',
+            popupClose: 'rgba(255,200,200,.7)'
+          } : {
+            cls: 'heavyrain-marker',
+            badgeCls: 'heavyrain-badge',
+            band: 'rgba(255,140,40,.16)',
+            badgeBg: 'linear-gradient(135deg,rgba(255,150,50,.95),rgba(220,100,20,.95))',
+            badgeBorder: 'rgba(255,200,140,.45)',
+            badgeShadow: 'rgba(255,140,40,.35)',
+            label: 'HEAVY RAIN',
+            subline: w.peakRate.toFixed(2)+'"/hr · peak',
+            popupAccent: 'rgba(255,180,80,1)',
+            popupBg: 'rgba(28,18,8,.96)',
+            popupBorder: 'rgba(255,140,40,.4)',
+            popupTitle: 'Heavy Rain',
+            popupClose: 'rgba(255,220,180,.7)'
+          };
+          // Column band wash across the window's hours
           for (var cc = w.startCol; cc <= w.endCol; cc++) {
-            if (!hCols3[cc] || hCols3[cc].querySelector('.flashflood-marker')) continue;
-            var ffMarker = document.createElement('div');
-            ffMarker.className = 'flashflood-marker';
-            ffMarker.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:14;pointer-events:none;overflow:visible;';
-            var ffBand = document.createElement('div');
-            ffBand.style.cssText = 'position:absolute;top:0;left:0;width:100%;bottom:-20px;background:rgba(220,40,40,.18);border-radius:10px;';
-            ffMarker.appendChild(ffBand);
+            if (!hCols3[cc] || hCols3[cc].querySelector('.'+tier.cls)) continue;
+            var marker = document.createElement('div');
+            marker.className = tier.cls;
+            marker.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:14;pointer-events:none;overflow:visible;';
+            var band = document.createElement('div');
+            band.style.cssText = 'position:absolute;top:0;left:0;width:100%;bottom:-20px;background:'+tier.band+';border-radius:10px;';
+            marker.appendChild(band);
             hCols3[cc].style.position = 'relative';
             hCols3[cc].style.overflow = 'visible';
-            hCols3[cc].appendChild(ffMarker);
+            hCols3[cc].appendChild(marker);
           }
-          // Badge — single badge spanning the whole window like the rainbow pattern
+          // Badge — single badge spanning the whole window
           var spanCols = w.endCol - w.startCol + 1;
           var startColEl = hCols3[w.startCol];
           if (!startColEl) return;
-          // If a frontal or rainbow marker shares the column, push our badge higher
-          // so the labels don't pile up on each other.
+          // Collision: stack higher if a warm-front / rainbow already shares a nearby column
           var hasOtherBadge = false;
           for (var oc = Math.max(0, w.startCol - 1); oc <= Math.min(hCols3.length - 1, w.endCol + 1); oc++) {
             if (hCols3[oc] && (hCols3[oc].querySelector('.frontal-marker') || hCols3[oc].querySelector('.rainbow-marker'))) { hasOtherBadge = true; break; }
           }
-          var ffTop = hasOtherBadge ? '-62px' : '-34px';
+          var topPos = hasOtherBadge ? '-62px' : '-34px';
           var colWidth = _ffColWidths[w.startCol] || 50;
           var spanWidth = spanCols * colWidth;
-          var ffBadge = document.createElement('div');
           var posStyle = (spanCols <= 1)
-            ? 'position:absolute;top:'+ffTop+';left:50%;transform:translateX(-50%);'
-            : 'position:absolute;top:'+ffTop+';left:0;width:'+spanWidth+'px;box-sizing:border-box;';
-          ffBadge.className = 'flashflood-badge';
-          ffBadge.style.cssText = posStyle +
-            'background:linear-gradient(135deg,rgba(240,60,60,.95),rgba(180,20,20,.95));' +
-            'border:1px solid rgba(255,150,150,.45);' +
+            ? 'position:absolute;top:'+topPos+';left:50%;transform:translateX(-50%);'
+            : 'position:absolute;top:'+topPos+';left:0;width:'+spanWidth+'px;box-sizing:border-box;';
+          var badge = document.createElement('div');
+          badge.className = tier.badgeCls;
+          badge.style.cssText = posStyle +
+            'background:'+tier.badgeBg+';' +
+            'border:1px solid '+tier.badgeBorder+';' +
             'color:#fff;font-family:system-ui,-apple-system,sans-serif;' +
             'padding:4px 10px;border-radius:5px;white-space:nowrap;text-align:center;' +
-            'box-shadow:0 2px 8px rgba(220,40,40,.4),0 1px 3px rgba(0,0,0,.3);z-index:21;' +
+            'box-shadow:0 2px 8px '+tier.badgeShadow+',0 1px 3px rgba(0,0,0,.3);z-index:21;' +
             'pointer-events:auto;cursor:pointer;line-height:1.15;';
-          var ratio = w.peakRate / DRAIN_CAP;
-          ffBadge.innerHTML =
-            '<div style="font-size:7.5px;font-weight:800;letter-spacing:.06em;">⚠ FLASH FLOOD</div>' +
-            '<div style="font-size:6.5px;font-weight:600;letter-spacing:.03em;opacity:.85;">'+w.peakRate.toFixed(2)+'"/hr · '+ratio.toFixed(1)+'× DRAIN</div>';
-          // Click → simple insight popup
-          (function(win){
-            ffBadge.onclick = function(e){
+          badge.innerHTML =
+            '<div style="font-size:7.5px;font-weight:800;letter-spacing:.06em;">'+tier.label+'</div>' +
+            '<div style="font-size:6.5px;font-weight:600;letter-spacing:.03em;opacity:.85;">'+tier.subline+'</div>';
+          // Click → tier-specific popup
+          (function(win, t){
+            badge.onclick = function(e){
               e.stopPropagation();
-              // Reuse the hazard insight backdrop pattern if available; otherwise
-              // a minimal inline popup near the badge.
-              var existing = document.getElementById('flashflood-insight-popup');
+              var existing = document.getElementById('rain-insight-popup');
               if (existing) { existing.remove(); return; }
-              var rect = ffBadge.getBoundingClientRect();
+              var rect = badge.getBoundingClientRect();
               var p = document.createElement('div');
-              p.id = 'flashflood-insight-popup';
-              p.style.cssText = 'position:fixed;top:'+(rect.bottom+8)+'px;left:'+Math.max(8,rect.left-80)+'px;z-index:9999;max-width:340px;background:rgba(20,8,8,.96);backdrop-filter:blur(20px);border:1px solid rgba(220,40,40,.4);border-radius:10px;padding:14px 16px;color:#fff;font-family:system-ui,-apple-system,sans-serif;font-size:11.5px;line-height:1.45;box-shadow:0 8px 40px rgba(0,0,0,.5);';
+              p.id = 'rain-insight-popup';
+              p.style.cssText = 'position:fixed;top:'+(rect.bottom+8)+'px;left:'+Math.max(8,rect.left-80)+'px;z-index:9999;max-width:340px;background:'+t.popupBg+';backdrop-filter:blur(20px);border:1px solid '+t.popupBorder+';border-radius:10px;padding:14px 16px;color:#fff;font-family:system-ui,-apple-system,sans-serif;font-size:11.5px;line-height:1.45;box-shadow:0 8px 40px rgba(0,0,0,.5);';
               var hr12 = win.peakHour === 0 ? '12 AM' : win.peakHour < 12 ? win.peakHour+' AM' : win.peakHour === 12 ? '12 PM' : (win.peakHour-12)+' PM';
+              var body;
+              if (win.peakRate >= DRAIN_CAP) {
+                var ratio = win.peakRate / DRAIN_CAP;
+                body =
+                  '<div style="margin-bottom:10px;">Peak rainfall rate <b>'+win.peakRate.toFixed(2)+'"/hr</b> at <b>'+hr12+'</b> exceeds the city\'s stormwater drainage capacity of '+DRAIN_CAP.toFixed(2)+'"/hr by <b>'+ratio.toFixed(1)+'×</b>.</div>' +
+                  '<div style="margin-bottom:8px;opacity:.85;">When rain falls faster than the sewer system can absorb, water pools on streets and floods low-lying areas. This is what caused the May 20 2026 Queens / Brooklyn flooding (rates hit ~6"/hr against the same 1.75"/hr capacity).</div>' +
+                  '<div style="opacity:.65;font-size:10.5px;">Avoid basement-level travel, underpasses, and storm-drain-adjacent roads during the burst window.</div>';
+              } else {
+                body =
+                  '<div style="margin-bottom:10px;">Peak rainfall rate <b>'+win.peakRate.toFixed(2)+'"/hr</b> at <b>'+hr12+'</b>. Heavy rain category (0.30"+/hr).</div>' +
+                  '<div style="margin-bottom:8px;opacity:.85;">Brief reduced visibility, slick roads, ponding at low spots, but generally within drainage capacity ('+DRAIN_CAP.toFixed(2)+'"/hr). If rates intensify another 5-6×, expect flash flooding.</div>' +
+                  '<div style="opacity:.65;font-size:10.5px;">Allow extra travel time; hydroplane risk on highway speeds.</div>';
+              }
               p.innerHTML =
-                '<div style="font-size:11px;font-weight:800;letter-spacing:.08em;color:rgba(255,120,120,1);text-transform:uppercase;margin-bottom:6px;">⚠ Flash Flood Risk</div>' +
-                '<div style="margin-bottom:10px;">Peak rainfall rate <b>'+win.peakRate.toFixed(2)+'"/hr</b> at <b>'+hr12+'</b> exceeds the city\'s stormwater drainage capacity of '+DRAIN_CAP.toFixed(2)+'"/hr by <b>'+ratio.toFixed(1)+'×</b>.</div>' +
-                '<div style="margin-bottom:8px;opacity:.85;">When rain falls faster than the sewer system can absorb, water pools on streets and floods low-lying areas. This is what caused the May 20 2026 Queens / Brooklyn flooding (rates hit ~6"/hr against the same 1.75"/hr capacity).</div>' +
-                '<div style="opacity:.65;font-size:10.5px;">Avoid basement-level travel, underpasses, and storm-drain-adjacent roads during the burst window.</div>' +
-                '<div style="text-align:right;margin-top:10px;"><span onclick="document.getElementById(\'flashflood-insight-popup\').remove()" style="cursor:pointer;font-size:10px;color:rgba(255,200,200,.7);">CLOSE ✕</span></div>';
+                '<div style="font-size:11px;font-weight:800;letter-spacing:.08em;color:'+t.popupAccent+';text-transform:uppercase;margin-bottom:6px;">'+t.popupTitle+'</div>' +
+                body +
+                '<div style="text-align:right;margin-top:10px;"><span onclick="document.getElementById(\'rain-insight-popup\').remove()" style="cursor:pointer;font-size:10px;color:'+t.popupClose+';">CLOSE ✕</span></div>';
               document.body.appendChild(p);
               setTimeout(function(){
                 document.addEventListener('click', function dismiss(ev){
@@ -25496,10 +25539,10 @@ function dayRangeAround(d, days){
                 });
               }, 50);
             };
-          })(w);
+          })(w, tier);
           startColEl.style.position = 'relative';
           startColEl.style.overflow = 'visible';
-          startColEl.appendChild(ffBadge);
+          startColEl.appendChild(badge);
         });
       })();
 
