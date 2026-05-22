@@ -7633,12 +7633,18 @@ body > #dynamic-alert-modal {
 </head>
 <body>
 
-<video class="bg-video" id="bgVideo" autoplay muted loop playsinline preload="auto"></video>
+<video class="bg-video" id="bgVideo" autoplay muted loop playsinline preload="metadata"></video>
 <script src="/bg-videos.js"></script>
 <script>
   // Random pick from the shared BG_VIDEOS list on each page load.
+  // Skip the ~200MB bg video download on slow/data-saver connections; the page still works
+  // fine without it (background just falls back to the CSS color).
   (function () {
     const v = document.getElementById('bgVideo');
+    const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    const et = conn && conn.effectiveType;
+    const slow = et === 'slow-2g' || et === '2g' || et === '3g';
+    if (slow || (conn && conn.saveData)) return;
     v.src = BG_VIDEOS[Math.floor(Math.random() * BG_VIDEOS.length)];
   })();
 </script>
@@ -42151,15 +42157,25 @@ function initNowMicroTabs(){
 
     if(!hazardMap) return;
 
-    // Ensure map recalculates size after tab switch (especially on mobile)
-    setTimeout(function(){ if(hazardMap) hazardMap.invalidateSize(); }, 100);
-    // Extra invalidations for mobile: when the hz-overview-active class
-    // toggles, the widget body resizes (map shows or hides), which
-    // Leaflet doesn't always pick up at 100ms. Re-fire at 300ms and
-    // 600ms so the first tab switch lays out correctly without needing
-    // a second click.
-    setTimeout(function(){ if(hazardMap) hazardMap.invalidateSize(); }, 300);
-    setTimeout(function(){ if(hazardMap) hazardMap.invalidateSize(); }, 600);
+    // Map recalc on tab switch — was 3 staggered setTimeouts (100/300/600ms) to catch
+    // mobile layout shifts from the hz-overview-active class toggling display on
+    // #hazard-map. Replaced with a ResizeObserver on the map element + rAF-debounced
+    // invalidateSize so Leaflet recomputes exactly when the container actually changes
+    // size, no more, no less.
+    if (!window._hazardMapResizeObs && typeof ResizeObserver !== 'undefined') {
+      var _hzInvRaf = null;
+      window._hazardMapResizeObs = new ResizeObserver(function(){
+        if (_hzInvRaf) cancelAnimationFrame(_hzInvRaf);
+        _hzInvRaf = requestAnimationFrame(function(){
+          if (hazardMap) hazardMap.invalidateSize();
+          _hzInvRaf = null;
+        });
+      });
+      if (hazardMapEl) window._hazardMapResizeObs.observe(hazardMapEl);
+    } else if (typeof ResizeObserver === 'undefined') {
+      // Fallback for very old browsers without ResizeObserver.
+      setTimeout(function(){ if(hazardMap) hazardMap.invalidateSize(); }, 250);
+    }
 
     // Fire layer group
     if(window._fireLayerGroup){
@@ -47824,6 +47840,22 @@ function initNowMicroTabs(){
     // Re-apply after fire data loads (markers load async)
     setTimeout(function(){ if(hazardActiveTab !== 'overview') switchHazardTab(hazardActiveTab); }, 5000);
     setTimeout(function(){ if(hazardActiveTab !== 'overview') switchHazardTab(hazardActiveTab); }, 7000);
+
+    // Prefetch the other hazard tabs' data on idle so the first tab switch is instant
+    // instead of a 2–5s wait. Sets _hazardTabLoaded[tab]=true so the lazy-init in
+    // switchHazardTab won't re-fire. Hurricane skipped — it's season-gated and has its
+    // own map. Each initX function creates its layer group and starts a refresh interval;
+    // the layer isn't actually added to the map until the user switches to that tab.
+    var _hzPrefetch = function(){
+      try {
+        if (!window._hazardTabLoaded.alerts)  { window._hazardTabLoaded.alerts  = true; initAlertsData();  }
+        if (!window._hazardTabLoaded.flood)   { window._hazardTabLoaded.flood   = true; initFloodData();   }
+        if (!window._hazardTabLoaded.quake)   { window._hazardTabLoaded.quake   = true; initQuakeData();   }
+        if (!window._hazardTabLoaded.tornado) { window._hazardTabLoaded.tornado = true; initTornadoData(); }
+      } catch(e) { console.error('Hazard prefetch:', e); }
+    };
+    if ('requestIdleCallback' in window) requestIdleCallback(_hzPrefetch, { timeout: 4000 });
+    else setTimeout(_hzPrefetch, 2500);
   }
 
   function destroyHazardMaps(){
