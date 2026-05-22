@@ -15172,7 +15172,8 @@ function dayRangeAround(d, days){
               var t = i / nBumps;
               var px = leftX + t * (rightX - leftX);
               // Parabolic arc — center bumps highest, edges lowest
-              var arc = 1 - Math.pow(2*t - 1, 2);
+              var _arcK = 2*t - 1;
+              var arc = 1 - _arcK*_arcK;
               // Bump-height profile (preview-lab tuned): edges 0.75×h, middle
               // 0.95-1.13×h. Range 1.5× → rounded cauliflower. Old formula
               // h*(0.7+R*0.4)*arc + h*0.3 gave 0.3×h edges + 1.0-1.4×h middle
@@ -15180,28 +15181,35 @@ function dayRangeAround(d, days){
               var bumpH = h * (0.20 + R()*0.18) * arc + h * 0.75;
               pts.push({ x: px, y: by - bumpH });
             }
-            // Build path
-            var d = 'M ' + leftX.toFixed(1) + ' ' + by.toFixed(1);
-            // Left side curves up to first bump
-            d += ' Q ' + (leftX - w*0.05).toFixed(1) + ' ' + (by - h*0.4).toFixed(1) +
-                 ' ' + leftX.toFixed(1) + ' ' + (by - h*0.6).toFixed(1);
-            d += ' Q ' + (leftX + w*0.1).toFixed(1) + ' ' + (pts[0].y - h*0.1).toFixed(1) +
-                 ' ' + pts[0].x.toFixed(1) + ' ' + pts[0].y.toFixed(1);
+            // Build path — array push + join avoids re-allocating the d string on every
+            // segment. For a cloud with ~12 bumps that's ~16 segments × 8 toFixed calls
+            // each = ~128 intermediate string allocations dropped per cloud per render.
+            var _dp = [
+              'M ', leftX.toFixed(1), ' ', by.toFixed(1),
+              // Left side curves up to first bump
+              ' Q ', (leftX - w*0.05).toFixed(1), ' ', (by - h*0.4).toFixed(1),
+              ' ',   leftX.toFixed(1),            ' ', (by - h*0.6).toFixed(1),
+              ' Q ', (leftX + w*0.1).toFixed(1),  ' ', (pts[0].y - h*0.1).toFixed(1),
+              ' ',   pts[0].x.toFixed(1),         ' ', pts[0].y.toFixed(1)
+            ];
             // Bumpy top — shallow valleys (h*0.10) so bumps merge into rounded
             // cauliflower instead of pointy peaks (was h*0.25 → triangular).
             for (var i = 1; i < pts.length; i++) {
               var prev = pts[i-1], curr = pts[i];
               var midX = (prev.x + curr.x) / 2;
               var midY = (prev.y + curr.y) / 2 + h * 0.10;
-              d += ' Q ' + midX.toFixed(1) + ' ' + midY.toFixed(1) +
-                   ' ' + curr.x.toFixed(1) + ' ' + curr.y.toFixed(1);
+              _dp.push(' Q ', midX.toFixed(1), ' ', midY.toFixed(1),
+                       ' ',   curr.x.toFixed(1), ' ', curr.y.toFixed(1));
             }
             // Right side curves down to base
-            d += ' Q ' + (rightX - w*0.1).toFixed(1) + ' ' + (pts[pts.length-1].y - h*0.1).toFixed(1) +
-                 ' ' + rightX.toFixed(1) + ' ' + (by - h*0.6).toFixed(1);
-            d += ' Q ' + (rightX + w*0.05).toFixed(1) + ' ' + (by - h*0.4).toFixed(1) +
-                 ' ' + rightX.toFixed(1) + ' ' + by.toFixed(1);
-            d += ' Z';
+            _dp.push(
+              ' Q ', (rightX - w*0.1).toFixed(1),  ' ', (pts[pts.length-1].y - h*0.1).toFixed(1),
+              ' ',   rightX.toFixed(1),            ' ', (by - h*0.6).toFixed(1),
+              ' Q ', (rightX + w*0.05).toFixed(1), ' ', (by - h*0.4).toFixed(1),
+              ' ',   rightX.toFixed(1),            ' ', by.toFixed(1),
+              ' Z'
+            );
+            var d = _dp.join('');
             // Return both the path string AND the bump points so callers can
             // render lit/shadow detail aligned to the silhouette geometry.
             return { d: d, bumps: pts };
@@ -25071,7 +25079,13 @@ function dayRangeAround(d, days){
           }
         }
         if (currentWindow) rbWindows.push(currentWindow);
-        
+
+        // Cache column widths up-front. Reading offsetWidth inside the per-window loop
+        // (after the style.position/overflow writes) forces a synchronous layout each
+        // iteration; columns have fixed grid sizing so widths are stable across the loop.
+        var _hColWidths = new Array(hCols2.length);
+        for (var _hi = 0; _hi < hCols2.length; _hi++) _hColWidths[_hi] = (hCols2[_hi] && hCols2[_hi].offsetWidth) || 50;
+
         rbWindows.forEach(function(win) {
           for (var rh2 = win.startHour; rh2 <= win.endHour; rh2++) {
             var colIdx2 = rh2;
@@ -25112,7 +25126,7 @@ function dayRangeAround(d, days){
             var typeName = (win.type === 'fogbow') ? 'FOGBOW' : (win.type === 'moonbow') ? 'MOONBOW' : (win.type === 'glory') ? 'GLORY' : 'RAINBOW';
             var statusWord = win.peakScore >= 50 ? 'LIKELY' : 'POSSIBLE';
             
-            var colWidth = hCols2[startCol].offsetWidth || 50;
+            var colWidth = _hColWidths[startCol] || 50;
             var spanWidth = spanCols * colWidth;
             
             var rbBadge = document.createElement('div');
@@ -57942,44 +57956,55 @@ function initNowMicroTabs(){
   initWidgetPopups();
 
 
-  // Voyager 1 live distance updater
-  setInterval(function(){
-    if(document.hidden) return;
-    var bullets = document.querySelectorAll('.bullet');
-    var voyagerBullet = null;
-    bullets.forEach(function(b){
-      var name = b.querySelector('.bname');
-      if (name && name.textContent.indexOf('VOYAGER 1') > -1) voyagerBullet = b;
-    });
-    if (!voyagerBullet) return;
-    var bsub = voyagerBullet.querySelector('.bsub');
-    if (!bsub) return;
-      var now = new Date();
-      var refDate = new Date(Date.UTC(2025, 0, 1, 0, 0, 0));
-      var refDistanceMiles = 15215899826.1;
-      var speedMph = 38210.55;
-      var msSinceRef = now.getTime() - refDate.getTime();
-      var hoursSinceRef = msSinceRef / (1000 * 60 * 60);
-      var currentMiles = refDistanceMiles + (hoursSinceRef * speedMph);
-      var milesFormatted = Math.floor(currentMiles).toLocaleString();
-      var currentAU = currentMiles / 92955807.3;
-      var lightSeconds = currentAU * 499.004784;
+  // Voyager 1 live distance updater. All constants hoisted out of the 10s tick,
+  // bullet element + sub-elements memoized after first DOM scan so we don't
+  // querySelectorAll('.bullet') + linear-search by name every tick.
+  (function(){
+    var REF_DATE_MS = Date.UTC(2025, 0, 1, 0, 0, 0);
+    var REF_DISTANCE_MI = 15215899826.1;
+    var SPEED_MPH = 38210.55;
+    var SPEED_FMT = SPEED_MPH.toLocaleString();
+    var AU_MI = 92955807.3;
+    var LIGHT_SEC_PER_AU = 499.004784;
+    var LAUNCH_MS = Date.UTC(1977, 8, 5, 12, 56, 0);
+    var MS_PER_HOUR = 3600000;
+    var MS_PER_DAY = 86400000;
+    var MS_PER_MONTH = MS_PER_DAY * 30.44;
+    var MS_PER_YEAR = MS_PER_DAY * 365.25;
+    var voyagerBullet = null, bsub = null, btime = null;
+    var _findBullet = function(){
+      var bullets = document.querySelectorAll('.bullet');
+      for (var i = 0; i < bullets.length; i++) {
+        var name = bullets[i].querySelector('.bname');
+        if (name && name.textContent.indexOf('VOYAGER 1') > -1) return bullets[i];
+      }
+      return null;
+    };
+    setInterval(function(){
+      if (document.hidden) return;
+      if (!voyagerBullet || !voyagerBullet.isConnected) {
+        voyagerBullet = _findBullet();
+        if (!voyagerBullet) return;
+        bsub  = voyagerBullet.querySelector('.bsub');
+        btime = voyagerBullet.querySelector('.btime');
+      }
+      if (!bsub) return;
+      var nowMs = Date.now();
+      var hoursSinceRef = (nowMs - REF_DATE_MS) / MS_PER_HOUR;
+      var currentMiles = REF_DISTANCE_MI + hoursSinceRef * SPEED_MPH;
+      var lightSeconds = (currentMiles / AU_MI) * LIGHT_SEC_PER_AU;
       var lightHours = Math.floor(lightSeconds / 3600);
-      var lightMins = Math.floor((lightSeconds % 3600) / 60);
-      var lightTimeStr = lightHours + "h " + lightMins + "m";
-      var launchDate = new Date(Date.UTC(1977, 8, 5, 12, 56, 0));
-      var missionMs = now.getTime() - launchDate.getTime();
-      var missionYears = Math.floor(missionMs / (1000 * 60 * 60 * 24 * 365.25));
-      var missionMonths = Math.floor((missionMs % (1000 * 60 * 60 * 24 * 365.25)) / (1000 * 60 * 60 * 24 * 30.44));
-      var missionDays = Math.floor((missionMs % (1000 * 60 * 60 * 24 * 30.44)) / (1000 * 60 * 60 * 24));
-      var missionStr = missionYears + "y " + missionMonths + "m " + missionDays + "d";
-      bsub.textContent = "Interstellar space • Local Interstellar Cloud • " + milesFormatted + " mi • Light delay " + lightTimeStr + " • " + speedMph.toLocaleString() + " mph";
-      
-      // Update mission time in btime
-      var voyagerTime = voyagerBullet.querySelector('.btime');
-      if (voyagerTime) voyagerTime.textContent = missionStr + " in flight";
-
-  }, 10000);
+      var lightMins  = Math.floor((lightSeconds % 3600) / 60);
+      var missionMs = nowMs - LAUNCH_MS;
+      var missionYears  = Math.floor(missionMs / MS_PER_YEAR);
+      var missionMonths = Math.floor((missionMs % MS_PER_YEAR) / MS_PER_MONTH);
+      var missionDays   = Math.floor((missionMs % MS_PER_MONTH) / MS_PER_DAY);
+      bsub.textContent = "Interstellar space • Local Interstellar Cloud • " +
+        Math.floor(currentMiles).toLocaleString() + " mi • Light delay " +
+        lightHours + "h " + lightMins + "m • " + SPEED_FMT + " mph";
+      if (btime) btime.textContent = missionYears + "y " + missionMonths + "m " + missionDays + "d in flight";
+    }, 10000);
+  })();
 
 
   // refresh cadences
@@ -58032,7 +58057,8 @@ function initNowMicroTabs(){
       var sky;
       if(typeof window._SKY_DB!=='undefined'){
         var SKY_DB=window._SKY_DB;
-        var dbKeys=Object.keys(SKY_DB).map(Number).sort(function(a,b){return a-b;});
+        // Sorted-key list is stable for the lifetime of the page — hoist out of the 30s tick.
+        var dbKeys=window._SKY_DBKeys || (window._SKY_DBKeys=Object.keys(SKY_DB).map(Number).sort(function(a,b){return a-b;}));
         var csa=Math.max(dbKeys[0],Math.min(dbKeys[dbKeys.length-1],sa));
         var loK=dbKeys[0],hiK=dbKeys[dbKeys.length-1];
         for(var ki=0;ki<dbKeys.length-1;ki++){if(csa>=dbKeys[ki]&&csa<=dbKeys[ki+1]){loK=dbKeys[ki];hiK=dbKeys[ki+1];break;}}
