@@ -13652,12 +13652,46 @@ function dayRangeAround(d, days){
     var score = 0, maxS = 0;
     var bd2 = []; // breakdown
 
+    // Sun-blocked detection — mirrors the preview-side logic. Reads the
+    // forecast-panel classification produced by classifyClouds (stored on
+    // window._cloudIntel by the render loop). When the sun's optical path to
+    // the observer is blocked by Altostratus opacus / Nimbostratus / a thick
+    // Cirrostratus veil over substantial mid cloud / or a saturated mid+high
+    // canopy, every "sky color" bonus becomes meaningless and the score is
+    // hard-capped at POOR (25). Raw-value fallback covers the case where the
+    // classifier hasn't run yet on first popup open.
+    var _sunBlockedB = false;
+    var _cIntel = window._cloudIntel && window._cloudIntel.forecast;
+    if (_cIntel && _cIntel.length) {
+      for (var _bi = 0; _bi < _cIntel.length; _bi++) {
+        var _bt = _cIntel[_bi];
+        var _bvs = _bt.varieties || [];
+        var _bvOpac = false;
+        for (var _bvi = 0; _bvi < _bvs.length; _bvi++) { if ((_bvs[_bvi]||'').indexOf('opacus') >= 0) { _bvOpac = true; break; } }
+        if (_bt.genus === 'Altostratus' && (_bt.species === 'opacus' || _bvOpac)) _sunBlockedB = true;
+        if (_bt.genus === 'Nimbostratus') _sunBlockedB = true;
+        if (_bt.genus === 'Cirrostratus' && (_bt.species === 'nebulosus' || _bvOpac) && (gh.cM||0) > 50) _sunBlockedB = true;
+      }
+    }
+    if (!_sunBlockedB && ((gh.cM||0) >= 85 || ((gh.cM||0) >= 70 && (gh.cH||0) >= 60))) _sunBlockedB = true;
+
     // 1. Mid/High cloud canvas — 25pts
+    // mhAvg ≥ 90 = saturated canopy (no canvas, just a wall — zero pts).
+    // mhAvg ≥ 80 = nearly saturated, give a token 4 pts but no real canvas reward.
+    // The original formula's "mhAvg≥10 → 12" was the source of the 100/100 sky
+    // scoring 12/25 instead of being penalized.
     maxS += 25;
     if (gh.cM !== null || gh.cH !== null) {
       var mc = gh.cM||0, hc = gh.cH||0, mhAvg = (mc+hc)/2;
-      var cs = mhAvg>=30&&mhAvg<=70 ? 25 : mhAvg>=20&&mhAvg<=80 ? 19 : mhAvg>=10 ? 12 : mhAvg<10 ? 8 : 4;
-      score+=cs; bd2.push({l:'Cloud canvas (mid+high)',v:cs,m:25,n:mc+'% mid / '+hc+'% high'});
+      var cs;
+      if (mhAvg >= 90) cs = 0;
+      else if (mhAvg >= 80) cs = 4;
+      else if (mhAvg>=30&&mhAvg<=70) cs = 25;
+      else if (mhAvg>=20&&mhAvg<=80) cs = 19;
+      else if (mhAvg>=10) cs = 12;
+      else cs = 8;
+      var _csN = mc+'% mid / '+hc+'% high' + (mhAvg>=90 ? ' (saturated)' : '');
+      score+=cs; bd2.push({l:'Cloud canvas (mid+high)',v:cs,m:25,n:_csN});
     }
 
     // 2. Western horizon (low cloud blocking) — 18pts
@@ -13670,34 +13704,46 @@ function dayRangeAround(d, days){
     }
 
     // 3. Aerosol/particle enhancement — 15pts
+    // Mie scattering of aerosols only enhances sunset color when direct
+    // sunlight actually reaches the aerosol layer. Under a sun-blocked
+    // canopy (As opacus / Ns / saturated mid+high), it contributes nothing.
     maxS += 15;
-    var aerScore = 5; // baseline
-    var aerNote = '';
-    if (gh.vis !== null) {
-      if (gh.vis >= 3 && gh.vis <= 8) { aerScore = 10; aerNote = gh.vis+'mi vis'; }
-      else if (gh.vis >= 2 && gh.vis <= 12) { aerScore = 8; aerNote = gh.vis+'mi vis'; }
-      else if (gh.vis > 12) { aerScore = 5; aerNote = gh.vis+'mi (crystal clear)'; }
-      else { aerScore = 3; aerNote = gh.vis+'mi (foggy)'; }
+    var aerScore, aerNote;
+    if (_sunBlockedB) {
+      aerScore = 0; aerNote = 'sun obscured by mid/high deck';
+    } else {
+      aerScore = 5;
+      aerNote = '';
+      if (gh.vis !== null) {
+        if (gh.vis >= 3 && gh.vis <= 8) { aerScore = 10; aerNote = gh.vis+'mi vis'; }
+        else if (gh.vis >= 2 && gh.vis <= 12) { aerScore = 8; aerNote = gh.vis+'mi vis'; }
+        else if (gh.vis > 12) { aerScore = 5; aerNote = gh.vis+'mi (crystal clear)'; }
+        else { aerScore = 3; aerNote = gh.vis+'mi (foggy)'; }
+      }
+      var pm25Score = pm25AtGold || pm25Now;
+      if (pm25Score && pm25Score > 12 && pm25Score < 65) {
+        aerScore = Math.min(15, aerScore + Math.round((pm25Score - 12) / 8));
+        aerNote += (aerNote ? ' + ' : '') + 'PM2.5:' + Math.round(pm25Score) + (pm25AtGold ? '@GH' : '');
+      }
+      if (smokeBoost.active && smokeBoost.level !== 'trace') {
+        aerScore = Math.min(15, aerScore + 3);
+        aerNote += (aerNote ? ' + ' : '') + 'smoke';
+      }
+      if (blhTrap) { aerScore = Math.min(15, aerScore + 2); aerNote += ' + shallow BL'; }
+      if (dustAlert) { aerScore = Math.min(15, aerScore + 3); aerNote += ' + dust advisory'; }
     }
-    // PM2.5/smoke boost — use forecast at golden hour if available
-    var pm25Score = pm25AtGold || pm25Now;
-    if (pm25Score && pm25Score > 12 && pm25Score < 65) {
-      aerScore = Math.min(15, aerScore + Math.round((pm25Score - 12) / 8));
-      aerNote += (aerNote ? ' + ' : '') + 'PM2.5:' + Math.round(pm25Score) + (pm25AtGold ? '@GH' : '');
-    }
-    if (smokeBoost.active && smokeBoost.level !== 'trace') {
-      aerScore = Math.min(15, aerScore + 3);
-      aerNote += (aerNote ? ' + ' : '') + 'smoke';
-    }
-    if (blhTrap) { aerScore = Math.min(15, aerScore + 2); aerNote += ' + shallow BL'; }
-    if (dustAlert) { aerScore = Math.min(15, aerScore + 3); aerNote += ' + dust advisory'; }
     score+=aerScore; bd2.push({l:'Aerosol enhancement',v:aerScore,m:15,n:aerNote||'--'});
 
     // 4. Humidity scatter — 12pts
+    // Rayleigh scattering by humidified air only shifts horizon color when
+    // sunlight passes through it. Gated on sun visibility (same reason as #3).
     maxS += 12;
     if (gh.rh !== null) {
-      var hs = gh.rh>=40&&gh.rh<=70 ? 12 : gh.rh>=30&&gh.rh<=80 ? 9 : gh.rh>80 ? 6 : 5;
-      score+=hs; bd2.push({l:'Humidity Rayleigh boost',v:hs,m:12,n:gh.rh+'%'+(gh.dp!==null?' (dp '+gh.dp+'\u00b0)':'')});
+      var hs;
+      if (_sunBlockedB) hs = 0;
+      else hs = gh.rh>=40&&gh.rh<=70 ? 12 : gh.rh>=30&&gh.rh<=80 ? 9 : gh.rh>80 ? 6 : 5;
+      var _hsN = gh.rh+'%'+(gh.dp!==null?' (dp '+gh.dp+'\u00b0)':'') + (_sunBlockedB?' \u2014 sun blocked':'');
+      score+=hs; bd2.push({l:'Humidity Rayleigh boost',v:hs,m:12,n:_hsN});
     }
 
     // 5. No precipitation — 10pts
@@ -13729,16 +13775,21 @@ function dayRangeAround(d, days){
     score+=pfS; bd2.push({l:'Post-front/storm bonus',v:pfS,m:8,n:pfNote});
 
     // 8. Upper-level dynamics — 4pts
+    // Jet-stream cirrus only contributes to a sunset when it's actually
+    // VISIBLE \u2014 i.e. not hidden behind a lower opacus deck.
     maxS += 4;
     var ulS = 1;
     var ulNote = '';
-    if (jetCirrus) { ulS = 4; ulNote = 'Jet '+gh.w300+'mph \u2192 cirrus streaks'; }
+    if (_sunBlockedB) { ulS = 0; ulNote = 'Cirrus hidden by lower deck'; }
+    else if (jetCirrus) { ulS = 4; ulNote = 'Jet '+gh.w300+'mph \u2192 cirrus streaks'; }
     else if (gh.w300 !== null && gh.w300 > 40) { ulS = 3; ulNote = 'Moderate jet '+gh.w300+'mph'; }
     else if (gh.w300 !== null) { ulS = 1; ulNote = 'Light upper winds '+gh.w300+'mph'; }
     score+=ulS; bd2.push({l:'Upper-level dynamics',v:ulS,m:4,n:ulNote||'--'});
 
-    // Normalize
+    // Normalize, then hard-cap when sun is blocked. The cap is the final
+    // word \u2014 sky physically cannot render warm color through an opacus deck.
     var finalScore = maxS > 0 ? Math.round(score / maxS * 100) : 50;
+    if (_sunBlockedB) finalScore = Math.min(finalScore, 25);
     var scoreLabel, scoreColor, scoreEmoji;
     if (finalScore >= 85) { scoreLabel='EPIC'; scoreColor='#ff4444'; scoreEmoji='\ud83d\udd25'; }
     else if (finalScore >= 70) { scoreLabel='EXCELLENT'; scoreColor='#ff6633'; scoreEmoji='\ud83c\udf05'; }
@@ -13748,8 +13799,12 @@ function dayRangeAround(d, days){
     else { scoreLabel='UNLIKELY'; scoreColor='rgba(43,34,244,.6)'; scoreEmoji='\ud83c\udf27\ufe0f'; }
 
     // ── PEAK ORANGE ──
-    var peakStart = ssDate ? new Date(ssDate.getTime() - 15*60000) : null;
-    var peakEnd = ssDate ? new Date(ssDate.getTime() - 4*60000) : null;
+    // Peak Orange window unified with the right-panel label (was sunset−15 to
+    // sunset−4, all pre-sunset). Photographic peak warmth straddles the moment:
+    // sun altitude ~+1° down to ~−3°, which is roughly sunset−10 to sunset+5.
+    // Cutting at sunset−4 missed the climax.
+    var peakStart = ssDate ? new Date(ssDate.getTime() - 10*60000) : null;
+    var peakEnd = ssDate ? new Date(ssDate.getTime() + 5*60000) : null;
 
     // ── SKY COLOR TIMELINE SVG ──
     var buildSkyTimeline = function() {
@@ -13934,7 +13989,25 @@ function dayRangeAround(d, days){
     var signals = [];
     if (gh.cT !== null) {
       var cL2=gh.cL||0, cM2=gh.cM||0, cH2=gh.cH||0;
-      if (gh.precip && gh.precip > 0.05) {
+      // Sun-blocked branch runs FIRST \u2014 otherwise the cascade falls through
+      // to "Mixed cloud pattern, quality depends on timing of gaps" for the
+      // saturated-overcast case (cM=100, cH=100, cL=0) and then the smoke /
+      // humidity / BLH modifiers append optimistic warm-tone language for a
+      // sky that physically can't render any color at all.
+      if (_sunBlockedB) {
+        var _whyParts = [];
+        if (_cIntel) {
+          for (var _wpi=0; _wpi<_cIntel.length; _wpi++) {
+            var _wpt = _cIntel[_wpi];
+            if (_wpt.genus === 'Altostratus' && _wpt.species === 'opacus') _whyParts.push('Altostratus opacus');
+            else if (_wpt.genus === 'Nimbostratus') _whyParts.push('Nimbostratus');
+            else if (_wpt.genus === 'Cirrostratus' && _wpt.species === 'nebulosus') _whyParts.push('Cirrostratus nebulosus');
+          }
+        }
+        var _whyText = _whyParts.length ? _whyParts.join(' + ') : 'saturated mid/high cloud deck';
+        prediction = _whyText + ' covers the sky \u2014 no direct sunlight reaches the western horizon, so no golden-hour color is visible. Smoke / aerosol / Rayleigh effects would normally enhance warm tones but require the sun to be visible first.';
+        signals.push('\u2601\ufe0f Sun obscured by '+_whyText.toLowerCase());
+      } else if (gh.precip && gh.precip > 0.05) {
         prediction = 'Active precipitation will wash out most color.';
         if (pressTrend==='rising'||cloudClearing) prediction += ' However, clearing conditions are developing \u2014 if skies open in the final 20 minutes, post-storm light can be spectacular.';
       } else if (cL2>70 && !cloudClearing) {
@@ -13960,15 +14033,19 @@ function dayRangeAround(d, days){
       } else {
         prediction = 'Mixed cloud pattern. Quality depends on timing of gaps. Watch the west in the final 20 minutes.';
       }
-      // Modifiers
-      if (smokeBoost.active && smokeBoost.level !== 'trace') {
+      // Modifiers \u2014 these enhance an already-visible sunset. When sun is
+      // blocked they're misleading (smoke is real but you won't see its
+      // color through the deck), so gate on !_sunBlockedB.
+      if (!_sunBlockedB && smokeBoost.active && smokeBoost.level !== 'trace') {
         prediction += ' Wildfire smoke in the atmosphere will intensify reds and oranges through enhanced Mie scattering \u2014 expect deeper, more saturated warm tones.';
         signals.push('\ud83d\udca8 Smoke transport active');
+      } else if (_sunBlockedB && smokeBoost.active && smokeBoost.level !== 'trace') {
+        signals.push('\ud83d\udca8 Smoke present (not visible \u2014 sun blocked)');
       }
-      if (gh.rh && gh.rh > 65 && (!gh.precip || gh.precip <= 0)) {
+      if (!_sunBlockedB && gh.rh && gh.rh > 65 && (!gh.precip || gh.precip <= 0)) {
         prediction += ' Elevated humidity enhances Rayleigh scattering, deepening warm tones.';
       }
-      if (blhTrap && pm25Now && pm25Now > 15) {
+      if (!_sunBlockedB && blhTrap && pm25Now && pm25Now > 15) {
         prediction += ' Shallow boundary layer (' + gh.blh + 'm) is trapping aerosols near the surface, boosting scattering intensity.';
         signals.push('\ud83c\udf2b\ufe0f Boundary layer trapping ('+gh.blh+'m)');
       }
@@ -14586,7 +14663,7 @@ function dayRangeAround(d, days){
         window._ghTimingCache = { start:ghStart, end:ghEnd, isPM:isPM, isAm:ghIsAm, sunEvent:ghSunEvent };
 
         // ── Gather forecast data at golden hour window ──
-        var fc = {cT:0,cL:0,cM:0,cH:0,rh:0,pr:0,vis:99999,temp:50,snow:0,cape:0,blh:0,fzl:0,w500:0,w700:0,w300:0,wd300:0,wd500:0,wd700:0,li:0,wc:0,dp:0,n:0};
+        var fc = {cT:0,cL:0,cM:0,cH:0,rh:0,pr:0,vis:0,temp:0,snow:0,cape:0,blh:0,fzl:0,w500:0,w700:0,w300:0,wd300:0,wd500:0,wd700:0,li:0,wc:0,dp:0,n:0};
         var cn = {cT:0,cL:0,cM:0,cH:0,rh:0,pr:0,vis:99999,temp:50,snow:0,cape:0,blh:0,fzl:0,w500:0,w700:0,w300:0,wd300:0,wd500:0,wd700:0,li:0,wc:0,dp:0,n:0};
         // Use FULL hourly data for forecast (tomorrow's GH may be outside sliced day)
         var _ghHourly = window._hourlyData || hourly;
@@ -14607,6 +14684,17 @@ function dayRangeAround(d, days){
           // hour AFTER golden hour — e.g. a 5:53-6:47 GH pulled in a 7:00
           // sample with 47% clouds, polluting the "clear" forecast with
           // phantom stratocumulus.
+          //
+          // Aggregation rules:
+          //   sum→avg : cT, cL, cM, cH, rh, pr, snow, vis, temp, dp, fzl
+          //   max     : cape, blh, w300, w500, w700  (peak/worst-case)
+          //   min     : li                            (most-unstable hour)
+          //   closest : wc, wd300, wd500, wd700       (categorical / compass — can't average)
+          // _closestGHIdx tracks the GH sample whose midpoint is nearest the sun event.
+          // _closestNowIdx tracks the sample whose start is nearest "now" (≤30 min away).
+          var _closestGHIdx = -1, _closestGHDelta = Infinity;
+          var _ghAnchorT = ghSunEvent ? ghSunEvent.getTime() : (ghStart && ghEnd ? (ghStart.getTime()+ghEnd.getTime())/2 : 0);
+          var _closestNowIdx = -1, _closestNowDelta = Infinity;
           for (var qi=0;qi<_ghHourly.time.length;qi++) {
             var qt=new Date(_ghHourly.time[qi]);
             var qtEnd=new Date(qt.getTime() + 3600000);
@@ -14617,51 +14705,68 @@ function dayRangeAround(d, days){
               fc.cH+=(_ghHourly.cloud_cover_high?_ghHourly.cloud_cover_high[qi]:0)||0;
               fc.rh+=(_ghHourly.relativehumidity_2m?_ghHourly.relativehumidity_2m[qi]:0)||0;
               fc.pr+=(_ghHourly.precipitation?_ghHourly.precipitation[qi]:0)||0;
-              fc.vis=Math.min(fc.vis,(_ghHourly.visibility?_ghHourly.visibility[qi]:99999)||99999);
-              fc.temp=(_ghHourly.temperature_2m?_ghHourly.temperature_2m[qi]:50)||50;
+              fc.vis+=(_ghHourly.visibility?_ghHourly.visibility[qi]:0)||0;
+              fc.temp+=(_ghHourly.temperature_2m?_ghHourly.temperature_2m[qi]:0)||0;
               fc.snow+=(_ghHourly.snowfall?_ghHourly.snowfall[qi]:0)||0;
               fc.cape=Math.max(fc.cape,(_ghHourly.cape?_ghHourly.cape[qi]:0)||0);
               fc.blh=Math.max(fc.blh,(_ghHourly.boundary_layer_height?_ghHourly.boundary_layer_height[qi]:0)||0);
-              fc.fzl=(_ghHourly.freezinglevel_height?_ghHourly.freezinglevel_height[qi]:3000)||3000;
+              fc.fzl+=(_ghHourly.freezinglevel_height?_ghHourly.freezinglevel_height[qi]:0)||0;
               fc.w500=Math.max(fc.w500,(_ghHourly.windspeed_500hPa?_ghHourly.windspeed_500hPa[qi]:0)||0);
               fc.w700=Math.max(fc.w700,(_ghHourly.windspeed_700hPa?_ghHourly.windspeed_700hPa[qi]:0)||0);
               fc.w300=Math.max(fc.w300,(_ghHourly.windspeed_300hPa?_ghHourly.windspeed_300hPa[qi]:0)||0);
-              // Wind direction (degrees, meteorological): drives cloud-field orientation
-              fc.wd300=(_ghHourly.winddirection_300hPa?_ghHourly.winddirection_300hPa[qi]:0)||0;
-              fc.wd500=(_ghHourly.winddirection_500hPa?_ghHourly.winddirection_500hPa[qi]:0)||0;
-              fc.wd700=(_ghHourly.winddirection_700hPa?_ghHourly.winddirection_700hPa[qi]:0)||0;
               fc.li=Math.min(fc.li,(_ghHourly.lifted_index?_ghHourly.lifted_index[qi]:99)||99);
-              fc.wc=(_ghHourly.weathercode?_ghHourly.weathercode[qi]:0)||0;
-              fc.dp=(_ghHourly.dewpoint_2m?_ghHourly.dewpoint_2m[qi]:0)||0;
+              fc.dp+=(_ghHourly.dewpoint_2m?_ghHourly.dewpoint_2m[qi]:0)||0;
               fc.n++;
+              // Closest-to-sun-event tracking (sample midpoint vs sun event)
+              var _ghD = Math.abs(qt.getTime() + 1800000 - _ghAnchorT);
+              if (_ghD < _closestGHDelta) { _closestGHDelta = _ghD; _closestGHIdx = qi; }
             }
-            if (Math.abs(qt-now)<1800000 && cn.n===0) {
-              cn.cT=(_ghHourly.cloudcover?_ghHourly.cloudcover[qi]:0)||0;
-              cn.cL=(_ghHourly.cloud_cover_low?_ghHourly.cloud_cover_low[qi]:0)||0;
-              cn.cM=(_ghHourly.cloud_cover_mid?_ghHourly.cloud_cover_mid[qi]:0)||0;
-              cn.cH=(_ghHourly.cloud_cover_high?_ghHourly.cloud_cover_high[qi]:0)||0;
-              cn.rh=(_ghHourly.relativehumidity_2m?_ghHourly.relativehumidity_2m[qi]:0)||0;
-              cn.pr=(_ghHourly.precipitation?_ghHourly.precipitation[qi]:0)||0;
-              cn.vis=(_ghHourly.visibility?_ghHourly.visibility[qi]:99999)||99999;
-              cn.temp=(_ghHourly.temperature_2m?_ghHourly.temperature_2m[qi]:50)||50;
-              cn.snow=(_ghHourly.snowfall?_ghHourly.snowfall[qi]:0)||0;
-              cn.cape=(_ghHourly.cape?_ghHourly.cape[qi]:0)||0;
-              cn.blh=(_ghHourly.boundary_layer_height?_ghHourly.boundary_layer_height[qi]:0)||0;
-              cn.fzl=(_ghHourly.freezinglevel_height?_ghHourly.freezinglevel_height[qi]:3000)||3000;
-              cn.w500=(_ghHourly.windspeed_500hPa?_ghHourly.windspeed_500hPa[qi]:0)||0;
-              cn.w700=(_ghHourly.windspeed_700hPa?_ghHourly.windspeed_700hPa[qi]:0)||0;
-              cn.w300=(_ghHourly.windspeed_300hPa?_ghHourly.windspeed_300hPa[qi]:0)||0;
-              cn.wd300=(_ghHourly.winddirection_300hPa?_ghHourly.winddirection_300hPa[qi]:0)||0;
-              cn.wd500=(_ghHourly.winddirection_500hPa?_ghHourly.winddirection_500hPa[qi]:0)||0;
-              cn.wd700=(_ghHourly.winddirection_700hPa?_ghHourly.winddirection_700hPa[qi]:0)||0;
-              cn.li=(_ghHourly.lifted_index?_ghHourly.lifted_index[qi]:99)||99;
-              cn.wc=(_ghHourly.weathercode?_ghHourly.weathercode[qi]:0)||0;
-              cn.dp=(_ghHourly.dewpoint_2m?_ghHourly.dewpoint_2m[qi]:0)||0;
-              cn.n=1;
-            }
+            var _nowD = Math.abs(qt - now);
+            if (_nowD <= 1800000 && _nowD < _closestNowDelta) { _closestNowDelta = _nowD; _closestNowIdx = qi; }
+          }
+          // Snapshot fields for fc — wind direction is a compass heading (averaging
+          // wraps around 360°) and weathercode is categorical. Use the sample whose
+          // midpoint is closest to the actual sun event (sunset/sunrise) — that is
+          // the hour whose state matters most for the peak-orange moment.
+          if (_closestGHIdx >= 0) {
+            var _gi = _closestGHIdx;
+            fc.wc = (_ghHourly.weathercode?_ghHourly.weathercode[_gi]:0)||0;
+            fc.wd300 = (_ghHourly.winddirection_300hPa?_ghHourly.winddirection_300hPa[_gi]:0)||0;
+            fc.wd500 = (_ghHourly.winddirection_500hPa?_ghHourly.winddirection_500hPa[_gi]:0)||0;
+            fc.wd700 = (_ghHourly.winddirection_700hPa?_ghHourly.winddirection_700hPa[_gi]:0)||0;
+          }
+          // Fill cn from the hourly sample closest to "now" (was first-match within
+          // ±30 min — which silently picked the earlier of two equidistant samples).
+          if (_closestNowIdx >= 0) {
+            var _ni = _closestNowIdx;
+            cn.cT=(_ghHourly.cloudcover?_ghHourly.cloudcover[_ni]:0)||0;
+            cn.cL=(_ghHourly.cloud_cover_low?_ghHourly.cloud_cover_low[_ni]:0)||0;
+            cn.cM=(_ghHourly.cloud_cover_mid?_ghHourly.cloud_cover_mid[_ni]:0)||0;
+            cn.cH=(_ghHourly.cloud_cover_high?_ghHourly.cloud_cover_high[_ni]:0)||0;
+            cn.rh=(_ghHourly.relativehumidity_2m?_ghHourly.relativehumidity_2m[_ni]:0)||0;
+            cn.pr=(_ghHourly.precipitation?_ghHourly.precipitation[_ni]:0)||0;
+            cn.vis=(_ghHourly.visibility?_ghHourly.visibility[_ni]:99999)||99999;
+            cn.temp=(_ghHourly.temperature_2m?_ghHourly.temperature_2m[_ni]:50)||50;
+            cn.snow=(_ghHourly.snowfall?_ghHourly.snowfall[_ni]:0)||0;
+            cn.cape=(_ghHourly.cape?_ghHourly.cape[_ni]:0)||0;
+            cn.blh=(_ghHourly.boundary_layer_height?_ghHourly.boundary_layer_height[_ni]:0)||0;
+            cn.fzl=(_ghHourly.freezinglevel_height?_ghHourly.freezinglevel_height[_ni]:3000)||3000;
+            cn.w500=(_ghHourly.windspeed_500hPa?_ghHourly.windspeed_500hPa[_ni]:0)||0;
+            cn.w700=(_ghHourly.windspeed_700hPa?_ghHourly.windspeed_700hPa[_ni]:0)||0;
+            cn.w300=(_ghHourly.windspeed_300hPa?_ghHourly.windspeed_300hPa[_ni]:0)||0;
+            cn.wd300=(_ghHourly.winddirection_300hPa?_ghHourly.winddirection_300hPa[_ni]:0)||0;
+            cn.wd500=(_ghHourly.winddirection_500hPa?_ghHourly.winddirection_500hPa[_ni]:0)||0;
+            cn.wd700=(_ghHourly.winddirection_700hPa?_ghHourly.winddirection_700hPa[_ni]:0)||0;
+            cn.li=(_ghHourly.lifted_index?_ghHourly.lifted_index[_ni]:99)||99;
+            cn.wc=(_ghHourly.weathercode?_ghHourly.weathercode[_ni]:0)||0;
+            cn.dp=(_ghHourly.dewpoint_2m?_ghHourly.dewpoint_2m[_ni]:0)||0;
+            cn.n=1;
           }
         }
-        if(fc.n>0){fc.cT/=fc.n;fc.cL/=fc.n;fc.cM/=fc.n;fc.cH/=fc.n;fc.rh/=fc.n;fc.pr/=fc.n;fc.snow/=fc.n;}
+        if(fc.n>0){
+          fc.cT/=fc.n;fc.cL/=fc.n;fc.cM/=fc.n;fc.cH/=fc.n;fc.rh/=fc.n;fc.pr/=fc.n;fc.snow/=fc.n;
+          fc.vis/=fc.n;fc.temp/=fc.n;fc.dp/=fc.n;fc.fzl/=fc.n;
+        }
         fc.visMi=Math.round(fc.vis/1000*0.621371*10)/10;
         cn.visMi=Math.round(cn.vis/1000*0.621371*10)/10;
 
@@ -19176,6 +19281,44 @@ function dayRangeAround(d, days){
         // Store for use elsewhere (popups, labels)
         window._cloudIntel = { now: cnTypes, forecast: fcTypes, cnData: cn, fcData: fc, nowAtmo: cnTypes._atmo, fcAtmo: fcTypes._atmo };
 
+        // ── Unified cloud-type flags ──
+        // Computed once from classifier output and shared by the palette, score,
+        // optics callouts, and narrative. Previously each consumer had its own
+        // ad-hoc detection — leading to the case where the smoky palette painted
+        // fire-orange behind an As opacus deck that the score correctly capped
+        // at POOR. One source of truth, multiple readers.
+        var _ghCloudFlags = {
+          csVeil:false, asOpacus:false, nsLayer:false, cbAnvil:false,
+          cuPhotogenic:false, scPerlucidus:false, scOpacus:false, sunBlocked:false
+        };
+        if (fcTypes && fcTypes.length) {
+          for (var _cfi = 0; _cfi < fcTypes.length; _cfi++) {
+            var _cft = fcTypes[_cfi];
+            var _cfvs = _cft.varieties || [];
+            var _cfvOpac = false, _cfvPerlu = false;
+            for (var _cfvi = 0; _cfvi < _cfvs.length; _cfvi++) {
+              var _cfv = (_cfvs[_cfvi]||'').toString();
+              if (_cfv.indexOf('opacus') >= 0) _cfvOpac = true;
+              if (_cfv.indexOf('perlucidus') >= 0) _cfvPerlu = true;
+            }
+            if (_cft.genus === 'Cirrostratus' && (_cft.species === 'nebulosus' || _cfvOpac)) _ghCloudFlags.csVeil = true;
+            if (_cft.genus === 'Altostratus'  && (_cft.species === 'opacus'    || _cfvOpac)) _ghCloudFlags.asOpacus = true;
+            if (_cft.genus === 'Nimbostratus')  _ghCloudFlags.nsLayer = true;
+            if (_cft.genus === 'Cumulonimbus' && _cft.species === 'capillatus') _ghCloudFlags.cbAnvil = true;
+            if (_cft.genus === 'Cumulus' && (_cft.species === 'humilis' || _cft.species === 'mediocris' || _cft.species === 'congestus')) _ghCloudFlags.cuPhotogenic = true;
+            if (_cft.genus === 'Stratocumulus') {
+              if (_cfvPerlu) _ghCloudFlags.scPerlucidus = true;
+              if (_cfvOpac)  _ghCloudFlags.scOpacus = true;
+            }
+          }
+        }
+        _ghCloudFlags.sunBlocked = _ghCloudFlags.asOpacus || _ghCloudFlags.nsLayer ||
+          (_ghCloudFlags.csVeil && (fc.cM||0) > 50) ||
+          ((fc.cM||0) >= 85) ||
+          ((fc.cM||0) >= 70 && (fc.cH||0) >= 60);
+        window._ghCloudFlags = _ghCloudFlags;
+        window._ghSunBlocked = _ghCloudFlags.sunBlocked;
+
         // Render into SVG — must insert into clip-path groups, not SVG root
         var ghSvg = document.getElementById('golden-sky-svg');
         if (ghSvg) {
@@ -19190,7 +19333,23 @@ function dayRangeAround(d, days){
           var fcIsGolden = fc.n > 0;
           // Cloud rendering moved after saNow calculation for correct night detection
         }
-        var pm25V = parseFloat((document.getElementById('pm25-val')||{}).textContent) || 0;
+        // PM2.5 averaged across the golden-hour window (forecast at GH, not current).
+        // Falls back to the current PM2.5 DOM reading when forecast AQ data isn't
+        // loaded yet. The popup uses the same logic — preview was reading "now"
+        // and missing smoke that was forecast to drift in by sunset.
+        var _aqData = window._aqData || {};
+        var _pm25AtGH = null;
+        if (_aqData.hourly && _aqData.hourly.pm2_5 && _aqData.hourly.time && ghStart && ghEnd) {
+          var _aqSum=0, _aqN=0;
+          for (var _ai=0; _ai<_aqData.hourly.time.length; _ai++) {
+            var _at = new Date(_aqData.hourly.time[_ai]);
+            if (_at >= ghStart && _at <= ghEnd && typeof _aqData.hourly.pm2_5[_ai] === 'number') {
+              _aqSum += _aqData.hourly.pm2_5[_ai]; _aqN++;
+            }
+          }
+          if (_aqN > 0) _pm25AtGH = _aqSum / _aqN;
+        }
+        var pm25V = _pm25AtGH != null ? _pm25AtGH : (parseFloat((document.getElementById('pm25-val')||{}).textContent) || 0);
         var hasSmoke = smokeI.transportActive || pm25V > 20;
 
         // ── Sun altitude now ──
@@ -19237,7 +19396,12 @@ function dayRangeAround(d, days){
           }
         };
         var _palKey = 'clean';
-        if (hasSmoke || pm25V > 35) _palKey = 'smoky';
+        // Sun-blocked short-circuit must run first — smoke can be present in the
+        // atmosphere but the user won't see its warm tones through an opacus
+        // deck. Without this, the panel painted fire-orange under tonight's
+        // overcast despite the score correctly calling POOR.
+        if (_ghCloudFlags.sunBlocked) _palKey = 'overcast';
+        else if (hasSmoke || pm25V > 35) _palKey = 'smoky';
         else if (fc.cL > 60 || fc.cT > 80) _palKey = 'overcast';
         else if (window._ghScoreIntel && window._ghScoreIntel.cloudClearing && window._ghScoreIntel.presRising) _palKey = 'clearing';
         else if (fc.rh > 65 && fc.visMi < 12) _palKey = 'hazy';
@@ -19277,7 +19441,7 @@ function dayRangeAround(d, days){
 
         // ── FRONTAL / TREND DETECTION (for scoring) ──
         var _qFrontal=false, _qFrontalType=null, _qFrontalHrs=0;
-        var _qCloudClearing=false, _qPostConvective=false, _qPresRising=false;
+        var _qCloudClearing=false, _qPostConvective=false, _qPresRising=false, _qCloudBuilding=false;
         var _qPreCL=null, _qPreCT=null, _qPreCAPE=null, _qPrePr=null;
         if(fc.n>0&&_ghHourly&&_ghHourly.time&&ghStart){
           // Scan 4h before golden hour for pre-GH conditions
@@ -19298,6 +19462,12 @@ function dayRangeAround(d, days){
             _qPreCAPE=Math.round(_preCAPE/_preN);_qPrePr=Math.round(_prePr/_preN*10)/10;
             // Cloud clearing: pre-GH had >60% cloud, GH forecast is 20+ pts lower
             if(_qPreCT>60&&fc.cT<_qPreCT-20) _qCloudClearing=true;
+            // Cloud building: pre-GH was relatively clear, cloud building 30+ pts
+            // into GH. Mirror of clearing — classical warm-front cloud sequence
+            // (Ci → Cs → As → Ns over hours). Doesn't always mean a bad sunset on
+            // its own (first cirrus arriving can be epic), so applied as a penalty
+            // only when the buildup ends in substantial mid cloud (see score block).
+            if(_qPreCT<40 && fc.cT>_qPreCT+30) _qCloudBuilding=true;
             // Post-convective: CAPE spent (high before, low at GH)
             if(_qPreCAPE>500&&fc.cape<200) _qPostConvective=true;
           }
@@ -19333,7 +19503,8 @@ function dayRangeAround(d, days){
         }
         // Store for use in reasons/labels
         window._ghScoreIntel={frontal:_qFrontal,frontalType:_qFrontalType,frontalHrs:_qFrontalHrs,
-          cloudClearing:_qCloudClearing,postConvective:_qPostConvective,presRising:_qPresRising};
+          cloudClearing:_qCloudClearing,postConvective:_qPostConvective,presRising:_qPresRising,
+          cloudBuilding:_qCloudBuilding};
 
         // ── SCORE ──
         var qs = 50;
@@ -19381,16 +19552,71 @@ function dayRangeAround(d, days){
           if(_qPostConvective&&fc.cL<50) _syn+=10;
           else if(_qPostConvective) _syn+=6;
           qs += Math.min(18, _syn);
+
+          // ── Type-aware modifiers (consume classifyClouds output) ──
+          // Detection happens once earlier (window._ghCloudFlags). The raw
+          // cH/cM/cL% bins in the score above can't distinguish photogenic
+          // species from sky-killing ones — these modifiers correct that.
+          var _F = window._ghCloudFlags || {};
+          // Cs nebulosus/opacus: high-cloud reward is wrong — it's a diffuser, not a canvas
+          if(_F.csVeil) qs-=10;
+          // As opacus: gray sheet blocking the sun — dominant overcast failure mode
+          if(_F.asOpacus) qs-=12;
+          // Cb capillatus with horizon breaks: anvil/mammatus backlight is top-tier
+          // sunset material. Partially offset the rain penalty when CAPE confirms a
+          // real thunderstorm and the storm isn't covering the western horizon.
+          if(_F.cbAnvil && fc.cL<60 && fc.cape>2000) qs+=12;
+          // Cu humilis/mediocris/congestus: classifier's "★ classic golden hour"
+          // species. The raw low-cloud penalty above docks them as if they were
+          // Sc opacus. Base +8 when sun is visible and cL is moderate, with an
+          // additional bump for high-based Cu (cloud base = LCL from temp/dp).
+          // A 6000+ ft base barely obstructs the western horizon at low sun
+          // angle — the penalty above over-counts those.
+          if(_F.cuPhotogenic && !_F.sunBlocked && fc.cL<60) {
+            qs += 8;
+            var _baseFt = (fcTypes && fcTypes._atmo) ? fcTypes._atmo.cloudBaseFt : 0;
+            if (_baseFt > 6000) qs += 4;
+            else if (_baseFt > 4000) qs += 2;
+          }
+          // Sc variety: perlucidus (gaps) catches crepuscular rays; opacus
+          // (no gaps) is a wall. Both register as "Sc" in cL%, only varieties
+          // distinguish them.
+          if(_F.scPerlucidus && !_F.sunBlocked) qs+=5;
+          if(_F.scOpacus) qs-=6;
+          // Cloud-building INTO golden hour (warm-front signature) — opposite
+          // of the existing "clearing" branch in the synoptic bundle. When cT
+          // is climbing toward a thick mid layer, the pre-As pattern often
+          // looks bad even before the score's other checks fire.
+          if(_qCloudBuilding && fc.cM>50) qs-=6;
         }
         qs=Math.max(5,Math.min(100,Math.round(qs)));
+        // Hard cap: sun-blocked sky physically can't render warm color regardless of
+        // every other condition. Applied after clamp so the cap is the final word.
+        if(window._ghSunBlocked) qs=Math.min(qs, 25);
         var ql,qc;
-        if(qs>=80){ql='EPIC';qc='#ff4444';}else if(qs>=65){ql='EXCELLENT';qc='#ff6633';}else if(qs>=50){ql='GOOD';qc='#e8a954';}else if(qs>=35){ql='FAIR';qc='#bbaa55';}else if(qs>=20){ql='POOR';qc='#888';}else{ql='UNLIKELY';qc='#666';}
-        if(prevEl){prevEl.textContent=ql+' '+ghSunLabel.toUpperCase();prevEl.style.color=qc;}
+        // Bucket cutoffs aligned with the deep-dive popup (was 80/65/50/35/20 here,
+        // 85/70/55/40/25 in the popup — same data could ship as GOOD on the card and
+        // FAIR in the popup). Picked the popup's more-conservative set.
+        if(qs>=85){ql='EPIC';qc='#ff4444';}else if(qs>=70){ql='EXCELLENT';qc='#ff6633';}else if(qs>=55){ql='GOOD';qc='#e8a954';}else if(qs>=40){ql='FAIR';qc='#bbaa55';}else if(qs>=25){ql='POOR';qc='#888';}else{ql='UNLIKELY';qc='#666';}
+        if(prevEl){
+          // No-data fallback: when no hourly samples overlapped the GH window, qs
+          // sat at base 50 and silently displayed "GOOD". Show an em-dash instead.
+          if(fc.n===0){ prevEl.textContent='— '+ghSunLabel.toUpperCase(); prevEl.style.color='rgba(255,255,255,.4)'; }
+          else { prevEl.textContent=ql+' '+ghSunLabel.toUpperCase(); prevEl.style.color=qc; }
+        }
 
         // ── SCENARIO ──
         var sc=1;
         var isNight = (saNow<-6&&now>ssDate)||(saNow<-6&&now<srDate);
-        if(fc.n>0&&fc.pr>0.1&&fc.snow>0) sc=15;
+        // Sun-blocked short-circuit. FG[sc] writes the same ghFc* gradient
+        // stops the palette wrote earlier — FG runs second and wins. Without
+        // this, a saturated overcast can still pick a warm-bottomed scenario
+        // (e.g. sc=7 includes #706050 in its lower stops) and render warm
+        // tones the user can't actually see. sc=10 is the heavy-overcast
+        // scenario with all cool grey stops — the right visual for "no
+        // golden hour reaches the horizon."
+        if(_ghCloudFlags && _ghCloudFlags.sunBlocked && fc.n>0) sc=10;
+        else if(fc.n>0&&fc.pr>0.1&&fc.snow>0) sc=15;
         else if(fc.n>0&&fc.pr>0.1) sc=14;
         else if(fc.n>0&&fc.visMi<1) sc=17;
         else if(fc.n>0&&fc.cL>85) sc=10;
@@ -20624,21 +20850,25 @@ function dayRangeAround(d, days){
                        hint: isPM ? 'clear ocean horizon, watch last 2 sec'
                                   : 'clear ocean horizon, watch first 2 sec'};
             }
-            // Belt of Venus: PM only, after sunset, low cloud opposite sun
-            // Window is sun-altitude -2\u00b0 to -6\u00b0, ~5\u201325 min after sunset
-            else if(isPM && _opCL<35){
+            // Belt of Venus: PM only, ~5\u201325 min after sunset, requires sunlight
+            // reaching the eastern horizon UNobstructed by a mid/high deck (the pink
+            // band is sunlit-still atmosphere; an opacus layer above kills it).
+            else if(isPM && _opCL<35 && _opCM<70 && _opCH<70 && !window._ghSunBlocked){
               var _bvS=new Date(ghSunEvent.getTime()+5*60000);
               var _bvE=new Date(ghSunEvent.getTime()+25*60000);
               _opPick={lbl:'BELT OF VENUS '+fmt12s(_bvS)+'\u2013'+fmt12s(_bvE),
                        col:'rgba(232,180,200,.85)', hint:'look E (opposite sun)'};
             }
-            // Sun pillar: cold air + cirrostratus + sun near horizon
-            else if(_opTC<2 && _opCH>30 && _opCH<80){
+            // Sun pillar: cold air + cirrostratus + sun near horizon, but requires
+            // the sun column itself to be visible (no thick mid-deck or low overcast).
+            else if(_opTC<2 && _opCH>30 && _opCH<80 && _opCL<30 && _opCM<50 && !window._ghSunBlocked){
               _opPick={lbl:'SUN PILLAR LIKELY',col:'rgba(255,200,140,.85)',
                        hint:'vertical column above sun'};
             }
-            // Circumzenithal arc: cirrus + sun altitude < 32\u00b0 (always true at golden hour)
-            else if(_opCH>25 && _opCH<70 && _opCL<25 && _opTC<10){
+            // Circumzenithal arc: needs the cirrus layer overhead, NOT a mid-cloud
+            // sheet between the cirrus and the observer (refraction path requires
+            // direct line-of-sight to the ice crystals).
+            else if(_opCH>25 && _opCH<70 && _opCL<25 && _opCM<40 && _opTC<10 && !window._ghSunBlocked){
               _opPick={lbl:'CIRCUMZENITHAL ARC',col:'rgba(180,200,255,.85)',
                        hint:'look straight up \u2014 "smile in sky"'};
             }
