@@ -11,4 +11,5 @@ var BG_VIDEOS = [
   'https://cdn.bluishvoid.com/bvbg07.mp4',
   'https://cdn.bluishvoid.com/bvbg08.mp4',
   'https://cdn.bluishvoid.com/bvbg09.mp4',
+  'https://cdn.bluishvoid.com/bvbg10.mp4',
 ];
