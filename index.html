@@ -48985,7 +48985,15 @@ function initNowMicroTabs(){
           // null leak into .toFixed() calls and throw.
           var parsed = rows.map(function(rr){
             var date = rr[0] || '';
-            var energy = parseFloat(rr[1]);
+            // CNEOS fields: energy (rr[1]) = radiated flash in joules×10^10;
+            // impact-e (rr[2]) = calculated kinetic impact energy in kt TNT.
+            // The kt TNT value is what people care about — fall back to a
+            // computed kt from the radiated value if impact-e is missing
+            // (1 kt TNT = 4.184e12 J, so kt = radiatedJ / 4.184e12).
+            var radiatedE = parseFloat(rr[1]);        // ×10^10 J
+            var impactKt = parseFloat(rr[2]);         // kt TNT
+            var energy = isFinite(impactKt) ? impactKt
+              : (isFinite(radiatedE) ? (radiatedE * 1e10) / 4.184e12 : NaN);
             var latNum = parseFloat(rr[3]);
             var lonNum = parseFloat(rr[5]);
             var lat = isFinite(latNum) ? latNum * (rr[4]==='S'?-1:1) : NaN;
@@ -48994,9 +49002,9 @@ function initNowMicroTabs(){
             var alt = parseFloat(rr[7]);
             var dateShort = date.replace(/^(\d{4})-(\d{2})-(\d{2}).*/, '$2/$3');
             var energyStr = isFinite(energy)
-              ? (energy >= 1 ? energy.toFixed(1)+' kt' : (energy*1000).toFixed(0)+' t TNT')
+              ? (energy >= 1 ? energy.toFixed(2)+' kt' : (energy*1000).toFixed(0)+' t TNT')
               : '';
-            return { date: date, dateShort: dateShort, energy: energy, energyStr: energyStr, lat: lat, lon: lon, vel: vel, alt: alt };
+            return { date: date, dateShort: dateShort, energy: energy, energyStr: energyStr, radiatedE: radiatedE, lat: lat, lon: lon, vel: vel, alt: alt };
           });
           var markersData = parsed.filter(function(p){ return isFinite(p.lat) && isFinite(p.lon); });
 
@@ -49253,7 +49261,8 @@ function initNowMicroTabs(){
           if (typeof L !== 'undefined' && typeof hazardMap !== 'undefined' && hazardMap) {
             if (!window._fireballLayerGroup) window._fireballLayerGroup = L.layerGroup();
             window._fireballLayerGroup.clearLayers();
-            markersData.forEach(function(m){
+            var popupLoc = (typeof LOCATION !== 'undefined') ? LOCATION : null;
+            markersData.forEach(function(m, mIdx){
               var energySafe = isFinite(m.energy) && m.energy > 0 ? m.energy : 0.01;
               var radius = Math.max(4, Math.min(18, 4 + Math.log10(energySafe * 1000 + 1) * 2.5));
               var marker = L.circleMarker([m.lat, m.lon], {
@@ -49264,15 +49273,79 @@ function initNowMicroTabs(){
                 fillOpacity: 0.55,
                 opacity: 0.9
               });
-              var popupHtml = '<div style="font-family:system-ui,sans-serif;font-size:11px;line-height:1.45;">'+
-                '<div style="font-weight:900;color:#a16207;letter-spacing:.04em;text-transform:uppercase;margin-bottom:3px;">☄️ Bolide</div>'+
-                '<div><b>'+m.date+'</b></div>'+
-                (m.energyStr ? '<div>Energy: <b>'+m.energyStr+'</b></div>' : '')+
-                (isFinite(m.vel) ? '<div>Velocity: '+m.vel.toFixed(1)+' km/s</div>' : '')+
-                (isFinite(m.alt) ? '<div>Altitude: '+m.alt.toFixed(0)+' km</div>' : '')+
-                '<div style="margin-top:4px;opacity:.55;font-size:9px;">NASA/JPL CNEOS</div>'+
+
+              // ── Derived info ─────────────────────────────────────────────
+              // Time ago — '11 days ago' / '3 weeks ago'
+              var ago = '';
+              if (m.date) {
+                var t = new Date(m.date.replace(' ', 'T') + 'Z');
+                if (!isNaN(t.getTime())) {
+                  var diffDays = Math.floor((Date.now() - t.getTime()) / 86400000);
+                  if (diffDays < 1) ago = 'today';
+                  else if (diffDays === 1) ago = '1 day ago';
+                  else if (diffDays < 14) ago = diffDays + ' days ago';
+                  else if (diffDays < 60) ago = Math.round(diffDays/7) + ' weeks ago';
+                  else ago = Math.round(diffDays/30) + ' months ago';
+                }
+              }
+
+              // Hiroshima comparison (Hiroshima ≈ 15 kt). Skip for trace events.
+              var hiroRef = '';
+              if (isFinite(m.energy) && m.energy >= 0.1) {
+                var hPct = (m.energy / 15) * 100;
+                if (hPct >= 100) hiroRef = (m.energy/15).toFixed(1) + '× Hiroshima';
+                else if (hPct >= 5) hiroRef = '~' + hPct.toFixed(0) + '% of Hiroshima';
+                else hiroRef = '<5% of Hiroshima';
+              }
+
+              // Velocity class — coarse cosmic-origin hint.
+              var velClass = '';
+              if (isFinite(m.vel)) {
+                if (m.vel < 15) velClass = 'slow / asteroidal';
+                else if (m.vel < 30) velClass = 'typical';
+                else if (m.vel < 42) velClass = 'fast / cometary';
+                else velClass = 'hyperbolic / interstellar?';
+              }
+
+              // Radiated energy in scientific notation
+              var radiatedStr = '';
+              if (isFinite(m.radiatedE) && m.radiatedE > 0) {
+                radiatedStr = m.radiatedE.toFixed(1) + ' × 10¹⁰ J';
+              }
+
+              // Distance from user
+              var distStr = '';
+              if (popupLoc && popupLoc.lat != null) {
+                var dLat = m.lat - popupLoc.lat;
+                var dLon = (m.lon - popupLoc.lon) * Math.cos(popupLoc.lat * Math.PI / 180);
+                var miles = Math.round(Math.sqrt(dLat*dLat + dLon*dLon) * 69);
+                distStr = '~' + miles.toLocaleString() + ' mi from you';
+              }
+
+              var placeId = 'fb-popup-place-' + mIdx;
+              var popupHtml = '<div style="font-family:system-ui,sans-serif;font-size:11px;line-height:1.5;min-width:180px;">'+
+                '<div style="font-weight:900;color:#a16207;letter-spacing:.05em;text-transform:uppercase;margin-bottom:4px;font-size:11px;">☄️ Bolide</div>'+
+                '<div style="font-weight:600;">'+m.date+(ago ? '<span style="opacity:.55;font-weight:400;"> · '+ago+'</span>' : '')+'</div>'+
+                '<div style="margin-top:5px;"><span style="color:#666;">Yield:</span> <b style="color:#a16207;">'+(m.energyStr || '—')+'</b>'+
+                  (hiroRef ? '<div style="font-size:10px;opacity:.7;margin-top:1px;">'+hiroRef+'</div>' : '')+
+                '</div>'+
+                (isFinite(m.vel) ? '<div style="margin-top:3px;"><span style="color:#666;">Velocity:</span> <b>'+m.vel.toFixed(1)+' km/s</b><span style="opacity:.55;font-size:10px;"> · '+velClass+'</span></div>' : '')+
+                (isFinite(m.alt) ? '<div style="margin-top:3px;"><span style="color:#666;">Altitude:</span> <b>'+m.alt.toFixed(0)+' km</b></div>' : '')+
+                (radiatedStr ? '<div style="margin-top:3px;"><span style="color:#666;">Radiated:</span> '+radiatedStr+'</div>' : '')+
+                '<div style="margin-top:3px;color:#666;">Location: <span id="'+placeId+'" style="color:#333;">'+
+                  Math.abs(m.lat).toFixed(2)+'°'+(m.lat>=0?'N':'S')+' '+Math.abs(m.lon).toFixed(2)+'°'+(m.lon>=0?'E':'W')+
+                '</span></div>'+
+                (distStr ? '<div style="font-size:10px;opacity:.65;margin-top:2px;">'+distStr+'</div>' : '')+
+                '<div style="margin-top:6px;padding-top:4px;border-top:1px solid rgba(0,0,0,.08);opacity:.5;font-size:9px;letter-spacing:.04em;text-transform:uppercase;">NASA/JPL CNEOS</div>'+
                 '</div>';
               marker.bindPopup(popupHtml);
+              marker.on('popupopen', function(){
+                fbGeocode(m.lat, m.lon).then(function(name){
+                  if (!name) return;
+                  var el = document.getElementById(placeId);
+                  if (el) el.textContent = name;
+                });
+              });
               window._fireballLayerGroup.addLayer(marker);
             });
             if (hazardActiveTab === 'fireballs' && !hazardMap.hasLayer(window._fireballLayerGroup)) {
