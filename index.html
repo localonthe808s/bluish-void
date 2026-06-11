@@ -49046,16 +49046,51 @@ function initNowMicroTabs(){
           var fbY2 = 'rgba(202,138,4,.6)';
           var fbY3 = 'rgba(202,138,4,.45)';
 
+          // Reverse-geocode helper: lat/lon → "Town, State" or "Country" via
+          // Nominatim, with persistent localStorage cache. New lookups happen
+          // async after the initial paint so the card never blocks waiting on
+          // OSM.
+          var fbGeocode = function(lat, lon){
+            if (!isFinite(lat) || !isFinite(lon)) return Promise.resolve(null);
+            var cacheKey = 'bv_revgeo_' + lat.toFixed(2) + '_' + lon.toFixed(2);
+            try {
+              var cached = localStorage.getItem(cacheKey);
+              if (cached) return Promise.resolve(cached);
+            } catch(e) {}
+            var url = 'https://nominatim.openstreetmap.org/reverse?lat=' + lat + '&lon=' + lon + '&format=json&zoom=10&addressdetails=1&accept-language=en';
+            return fetch(url)
+              .then(function(r){ return r.ok ? r.json() : null; })
+              .then(function(d){
+                if (!d) return null;
+                var addr = d.address || {};
+                var place = addr.city || addr.town || addr.village || addr.hamlet || addr.suburb || addr.county;
+                var region = addr.state || addr.region || '';
+                var country = addr.country || '';
+                var name;
+                if (place && region) name = place + ', ' + region;
+                else if (place && country) name = place + ', ' + country;
+                else if (region && country) name = region + ', ' + country;
+                else if (place) name = place;
+                else if (country) name = country;
+                else if (d.display_name) name = d.display_name.split(',').slice(0, 2).join(',').trim();
+                else name = 'Open ocean';
+                try { localStorage.setItem(cacheKey, name); } catch(e){}
+                return name;
+              })
+              .catch(function(){ return null; });
+          };
+
           var fbHtml = '';
           if (parsed.length) {
-            // Recent detections — top 4 newest
+            // Recent detections — top 4 newest. Place spans get stable IDs so
+            // the async geocode pass can swap coords → name in place.
             fbHtml += Hl('RECENT DETECTIONS', fbY);
-            parsed.slice(0, 4).forEach(function(p){
+            parsed.slice(0, 4).forEach(function(p, idx){
               var rhs = p.energyStr || '—';
-              if (p.lat != null && isFinite(p.lat) && p.lon != null && isFinite(p.lon)) {
-                rhs += ' <span style="color:rgba(30,30,50,.42);font-weight:500;">· '
-                  + Math.abs(p.lat).toFixed(1)+'°'+(p.lat>=0?'N':'S')+' '
-                  + Math.abs(p.lon).toFixed(1)+'°'+(p.lon>=0?'E':'W')+'</span>';
+              if (isFinite(p.lat) && isFinite(p.lon)) {
+                var fallback = Math.abs(p.lat).toFixed(1)+'°'+(p.lat>=0?'N':'S')+' '
+                  + Math.abs(p.lon).toFixed(1)+'°'+(p.lon>=0?'E':'W');
+                rhs += ' <span id="fb-place-'+idx+'" style="color:rgba(30,30,50,.42);font-weight:500;">· '+fallback+'</span>';
               }
               fbHtml += Rl(p.dateShort, rhs);
             });
@@ -49100,6 +49135,26 @@ function initNowMicroTabs(){
           }
           fbHtml += '<div style="text-align:right;font-size:.42rem;color:rgba(30,30,50,.25);margin-top:3px;">Updated '+new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})+'</div>';
           detailEl.innerHTML = fbHtml;
+
+          // Async reverse-geocode pass: swap each row's coord fallback for the
+          // resolved place name as it comes back. Staggered 800ms per request
+          // to stay polite with Nominatim's 1 req/sec policy; cached coords
+          // hit instantly without the stagger.
+          parsed.slice(0, 4).forEach(function(p, idx){
+            if (!isFinite(p.lat) || !isFinite(p.lon)) return;
+            var cacheKey = 'bv_revgeo_' + p.lat.toFixed(2) + '_' + p.lon.toFixed(2);
+            var pre = null;
+            try { pre = localStorage.getItem(cacheKey); } catch(e){}
+            var apply = function(name){
+              if (!name) return;
+              var el = document.getElementById('fb-place-' + idx);
+              if (el) el.textContent = '· ' + name;
+            };
+            if (pre) { apply(pre); return; }
+            setTimeout(function(){
+              fbGeocode(p.lat, p.lon).then(apply);
+            }, idx * 800);
+          });
 
           // Build the hazard-map layer of point markers — circle radius scales with
           // log(energy) so a 0.05 kt and a 50 kt event don't render at the same size.
