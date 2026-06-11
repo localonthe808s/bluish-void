@@ -48942,6 +48942,17 @@ function initNowMicroTabs(){
         { url: 'https://corsproxy.io/?', wrap: false },
         { url: 'https://api.allorigins.win/get?url=', wrap: true }
       ];
+      // localStorage cache so the panel survives proxy hiccups. Fresh: render
+      // cached data directly. Stale-on-error: if the fetch chain fails entirely
+      // but a cached payload exists, use it rather than showing 'try later'.
+      var FB_CACHE_KEY = 'bv_fireballs_cache_v1';
+      var FB_FRESH_MS = 30 * 60 * 1000;
+      var fbReadCache = function(){
+        try { return JSON.parse(localStorage.getItem(FB_CACHE_KEY) || 'null'); } catch(e) { return null; }
+      };
+      var fbWriteCache = function(data){
+        try { localStorage.setItem(FB_CACHE_KEY, JSON.stringify({ data: data, fetchedAt: Date.now() })); } catch(e) {}
+      };
       var fbFetch = function(idx){
         idx = idx || 0;
         if (idx >= FB_PROXIES.length) return Promise.reject(new Error('all proxies failed'));
@@ -48954,9 +48965,7 @@ function initNowMicroTabs(){
           .then(function(d){ return p.wrap ? JSON.parse(d.contents) : d; })
           .catch(function(){ return fbFetch(idx + 1); });
       };
-      fbFetch()
-        .then(function(data){
-          console.log('[FB] raw response:', data);
+      var fbRender = function(data){
           if (!data || !data.data) {
             detailEl.innerHTML = '<span style="opacity:.5;">No fireball data available</span>';
             if (countEl) countEl.textContent = '0';
@@ -49122,9 +49131,30 @@ function initNowMicroTabs(){
             console.error('[FB] render error:', renderErr);
             detailEl.innerHTML = '<span style="opacity:.55;color:#a16207;">Render error: '+(renderErr && renderErr.message ? renderErr.message : String(renderErr))+'</span>';
           }
+      };
+
+      // Fresh cache shortcut — if we have a recent successful response, render
+      // immediately and skip the proxy round-trip entirely.
+      var fbCached = fbReadCache();
+      if (fbCached && fbCached.data && (Date.now() - fbCached.fetchedAt) < FB_FRESH_MS) {
+        fbRender(fbCached.data);
+        return;
+      }
+
+      fbFetch()
+        .then(function(data){
+          fbWriteCache(data);
+          fbRender(data);
         })
         .catch(function(e){
           console.warn('[FB] fetch failed (all proxies)', e);
+          // Stale cache fallback — better to show day-old fireball data than
+          // an error message when the proxies are intermittent.
+          if (fbCached && fbCached.data) {
+            console.log('[FB] using stale cache from', new Date(fbCached.fetchedAt).toISOString());
+            fbRender(fbCached.data);
+            return;
+          }
           detailEl.innerHTML = '<span style="opacity:.5;color:#a16207;">CNEOS fetch failed — try later</span>';
           if (countEl) countEl.textContent = '?';
         });
