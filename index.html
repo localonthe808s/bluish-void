@@ -48947,12 +48947,11 @@ function initNowMicroTabs(){
           if (badgeEl) badgeEl.textContent = rows.length > 0 ? rows.length : '';
           if (summaryEl) summaryEl.textContent = rows.length === 0
             ? 'No bolides detected this window'
-            : 'Bolide detections (US Gov sensors) · click for list';
+            : 'Bolide detections (US Gov sensors)';
           if (dotEl) dotEl.classList.toggle('hz-dot-green', rows.length === 0);
-          var html = '';
-          var markersData = [];
-          rows.slice(0, 30).forEach(function(rr){
-            // fields: date, energy(kt), impact-e, lat, lat-dir, lon, lon-dir, alt(km), vel(km/s)
+
+          // Parse all rows first so we can compute summary stats + build markers
+          var parsed = rows.map(function(rr){
             var date = rr[0] || '';
             var energy = parseFloat(rr[1]);
             var lat = rr[3] != null && rr[3] !== '' ? parseFloat(rr[3]) * (rr[4]==='S'?-1:1) : null;
@@ -48963,21 +48962,76 @@ function initNowMicroTabs(){
             var energyStr = isFinite(energy)
               ? (energy >= 1 ? energy.toFixed(1)+' kt' : (energy*1000).toFixed(0)+' t TNT')
               : '';
-            var locStr = (lat != null && lon != null && isFinite(lat) && isFinite(lon))
-              ? Math.abs(lat).toFixed(1)+'°'+(lat>=0?'N':'S')+' '+Math.abs(lon).toFixed(1)+'°'+(lon>=0?'E':'W')
-              : '';
-            var velStr = isFinite(vel) ? vel.toFixed(1)+' km/s' : '';
-            html += '<div style="display:flex;gap:8px;align-items:baseline;padding:3px 0;border-bottom:1px solid rgba(250,204,21,.07);flex-wrap:wrap;">';
-            html += '<span style="color:#a16207;font-weight:800;min-width:42px;">'+dateShort+'</span>';
-            if (energyStr) html += '<span style="color:rgba(30,30,50,.78);font-weight:700;">'+energyStr+'</span>';
-            if (locStr) html += '<span style="color:rgba(30,30,50,.55);font-size:.6rem;">'+locStr+'</span>';
-            if (velStr) html += '<span style="color:rgba(30,30,50,.42);font-size:.56rem;margin-left:auto;">'+velStr+'</span>';
-            html += '</div>';
-            if (lat != null && lon != null && isFinite(lat) && isFinite(lon)) {
-              markersData.push({ lat: lat, lon: lon, date: date, dateShort: dateShort, energy: energy, energyStr: energyStr, vel: vel, alt: alt });
-            }
+            return { date: date, dateShort: dateShort, energy: energy, energyStr: energyStr, lat: lat, lon: lon, vel: vel, alt: alt };
           });
-          detailEl.innerHTML = html || '<span style="opacity:.5;">No bolides in window</span>';
+          var markersData = parsed.filter(function(p){ return p.lat != null && p.lon != null && isFinite(p.lat) && isFinite(p.lon); });
+
+          // Local helpers matching the other hazard cards (the dashboard refresh
+          // scope's H/R aren't accessible here, so replicate the styling).
+          var Hl = function(t, c){
+            return '<div style="color:'+c+';font-weight:700;margin:5px 0 2px;font-size:.52rem;letter-spacing:.07em;display:flex;align-items:center;gap:3px;"><span style="font-size:.48rem;opacity:.5;">'+(t.charAt(0)==='¶'?'▲':t.indexOf('SUMMARY')>=0?'∑':t.indexOf('CONTEXT')>=0?'ℹ':'•')+'</span>'+t+'</div>';
+          };
+          var Rl = function(lbl, val){
+            return '<div style="display:flex;justify-content:space-between;align-items:baseline;padding:3.5px 0;border-bottom:1px solid rgba(30,30,50,.06);font-size:.7rem;gap:8px;"><span style="color:rgba(30,30,50,.55);white-space:nowrap;">'+lbl+'</span><span style="color:rgba(30,30,50,.82);font-weight:600;text-align:right;">'+val+'</span></div>';
+          };
+          var fbY = 'rgba(202,138,4,.85)';
+          var fbY2 = 'rgba(202,138,4,.6)';
+          var fbY3 = 'rgba(202,138,4,.45)';
+
+          var fbHtml = '';
+          if (parsed.length) {
+            // Recent detections — top 4 newest
+            fbHtml += Hl('RECENT DETECTIONS', fbY);
+            parsed.slice(0, 4).forEach(function(p){
+              var rhs = p.energyStr || '—';
+              if (p.lat != null && isFinite(p.lat) && p.lon != null && isFinite(p.lon)) {
+                rhs += ' <span style="color:rgba(30,30,50,.42);font-weight:500;">· '
+                  + Math.abs(p.lat).toFixed(1)+'°'+(p.lat>=0?'N':'S')+' '
+                  + Math.abs(p.lon).toFixed(1)+'°'+(p.lon>=0?'E':'W')+'</span>';
+              }
+              fbHtml += Rl(p.dateShort, rhs);
+            });
+
+            // 30-day summary stats
+            fbHtml += Hl('30D SUMMARY', fbY2);
+            var energies = parsed.map(function(p){ return p.energy; }).filter(isFinite);
+            var velocities = parsed.map(function(p){ return p.vel; }).filter(isFinite);
+            var maxE = energies.length ? Math.max.apply(null, energies) : 0;
+            var avgE = energies.length ? energies.reduce(function(a,b){return a+b;},0)/energies.length : 0;
+            var maxV = velocities.length ? Math.max.apply(null, velocities) : 0;
+            var maxEEvent = parsed.filter(function(p){ return p.energy === maxE; })[0];
+            var fmtE = function(e){ return e >= 1 ? e.toFixed(2)+' kt' : (e*1000).toFixed(0)+' t TNT'; };
+            fbHtml += Rl('Total detections', parsed.length);
+            if (maxE > 0) fbHtml += Rl('Largest', '<span style="color:#a16207;font-weight:700">'+fmtE(maxE)+'</span>'+(maxEEvent ? ' @ '+maxEEvent.dateShort : ''));
+            if (energies.length) fbHtml += Rl('Avg energy', fmtE(avgE));
+            if (maxV > 0) fbHtml += Rl('Peak velocity', maxV.toFixed(1)+' km/s');
+
+            // Nearest to user (if location is known and any bolide has coords)
+            var _fbLoc = (typeof LOCATION !== 'undefined') ? LOCATION : null;
+            if (_fbLoc && _fbLoc.lat != null && markersData.length) {
+              var nearest = markersData.reduce(function(best, m){
+                var d = Math.sqrt(Math.pow(m.lat-_fbLoc.lat,2)+Math.pow(m.lon-_fbLoc.lon,2));
+                return d < best.d ? { d: d, m: m } : best;
+              }, { d: Infinity, m: null });
+              if (nearest.m) {
+                var miles = Math.round(nearest.d * 69);
+                fbHtml += Rl('Nearest to you', nearest.m.dateShort + ' · <span style="color:rgba(30,30,50,.55);">~'+miles+' mi</span>');
+              }
+            }
+
+            // Context — what CNEOS is and what counts
+            fbHtml += Hl('CONTEXT', fbY3);
+            fbHtml += Rl('Source', 'NASA / JPL CNEOS');
+            fbHtml += Rl('Sensors', 'US Govt classified network');
+            fbHtml += Rl('Detection floor', '~0.05 kt TNT (~5 GJ)');
+          } else {
+            fbHtml += Hl('NO DETECTIONS', fbY3);
+            fbHtml += Rl('Status', '<span style="color:#16a34a">No bolides this window</span>');
+            fbHtml += Rl('Window', '30 days');
+            fbHtml += Rl('Source', 'NASA / JPL CNEOS');
+          }
+          fbHtml += '<div style="text-align:right;font-size:.42rem;color:rgba(30,30,50,.25);margin-top:3px;">Updated '+new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})+'</div>';
+          detailEl.innerHTML = fbHtml;
 
           // Build the hazard-map layer of point markers — circle radius scales with
           // log(energy) so a 0.05 kt and a 50 kt event don't render at the same size.
