@@ -9771,6 +9771,37 @@ body > #dynamic-alert-modal {
               }
               return 9;
             }
+            // Curated dark-sky destinations (fallback when no ≤B3 park is nearby).
+            // NE-weighted since dark spots can be far from East-Coast metros, plus a
+            // national spread so it works anywhere. Bortle is sampled live for each.
+            var CURATED=[
+              {name:'Cherry Springs State Park, PA', lat:41.664, lon:-77.816},
+              {name:'Susquehannock State Forest, PA', lat:41.62, lon:-77.90},
+              {name:'Allegheny National Forest, PA', lat:41.63, lon:-78.95},
+              {name:'Adirondack Park (Tupper Lake), NY', lat:44.236, lon:-74.464},
+              {name:'Adirondack High Peaks, NY', lat:44.11, lon:-73.92},
+              {name:'Katahdin Woods & Waters, ME', lat:45.93, lon:-68.62},
+              {name:'Acadia National Park, ME', lat:44.339, lon:-68.273},
+              {name:'Moosehead Lake, ME', lat:45.62, lon:-69.66},
+              {name:'North Maine Woods (Aroostook)', lat:46.6, lon:-69.0},
+              {name:'Northeast Kingdom, VT', lat:44.72, lon:-71.93},
+              {name:'Green Mountain NF, VT', lat:43.66, lon:-72.93},
+              {name:'White Mountain NF, NH', lat:44.10, lon:-71.40},
+              {name:'Spruce Knob (Monongahela NF), WV', lat:38.70, lon:-79.53},
+              {name:'Shenandoah National Park, VA', lat:38.53, lon:-78.43},
+              {name:'Cape Cod National Seashore, MA', lat:41.93, lon:-69.98},
+              {name:'Headlands Dark Sky Park, MI', lat:45.77, lon:-84.78},
+              {name:'Boundary Waters, MN', lat:47.90, lon:-91.40},
+              {name:'Big Bend National Park, TX', lat:29.25, lon:-103.25},
+              {name:'Cosmic Campground, NM', lat:33.48, lon:-108.92},
+              {name:'Natural Bridges NM, UT', lat:37.60, lon:-110.01},
+              {name:'Great Basin National Park, NV', lat:38.98, lon:-114.30},
+              {name:'Death Valley National Park, CA', lat:36.51, lon:-116.94}
+            ];
+            function sampleList(list, i, done){
+              if(i>=list.length){ done(); return; }
+              sampleBortle(list[i].lat, list[i].lon, function(sqm){ list[i].bortle = (sqm!=null)? bortleDecimal(sqm) : null; sampleList(list, i+1, done); });
+            }
             function buildLegend(){
               var el=document.getElementById('darksky-legend'); if(!el||el._built) return; el._built=true;
               var h='';
@@ -9884,13 +9915,15 @@ body > #dynamic-alert-modal {
               function renderParks(list){
                 var rowsEl = document.getElementById('darksky-parks-rows');
                 if (!rowsEl) return;
-                if (!list.length){ rowsEl.innerHTML='<div style="font-size:.44rem;color:rgba(30,30,50,.4);">None within ~200 km</div>'; return; }
+                if (!list.length){ rowsEl.innerHTML='<div style="font-size:.44rem;color:rgba(30,30,50,.4);">Searching…</div>'; return; }
                 var h='';
                 list.forEach(function(p){
-                  var bc = BORTLE[Math.max(1,Math.min(9,Math.round(p.bortle)))-1].col;
+                  var bnum = (p.bortle!=null) ? p.bortle.toFixed(1) : '?';
+                  var bidx = (p.bortle!=null) ? Math.max(1,Math.min(9,Math.round(p.bortle))) : 3;
+                  var bc = BORTLE[bidx-1].col;
                   h+='<div class="ds-park" data-lat="'+p.lat+'" data-lon="'+p.lon+'" style="cursor:pointer;padding:2px 0;border-top:1px solid rgba(30,30,50,.07);">'
                     +'<div style="font-size:.46rem;font-weight:700;color:rgba(30,30,50,.8);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:160px;">'+p.name+'</div>'
-                    +'<div style="font-size:.42rem;color:rgba(30,30,50,.5);">'+Math.round(p.dist)+' mi '+p.dir+' · <b style="color:'+bc+';">Bortle '+p.bortle.toFixed(1)+'</b></div></div>';
+                    +'<div style="font-size:.42rem;color:rgba(30,30,50,.5);">'+Math.round(p.dist)+' mi '+p.dir+' · <b style="color:'+bc+';">Bortle '+bnum+'</b></div></div>';
                 });
                 rowsEl.innerHTML=h;
                 var rows=rowsEl.querySelectorAll('.ds-park');
@@ -9899,6 +9932,24 @@ body > #dynamic-alert-modal {
               function findDarkParks(lat, lon){
                 var rowsEl=document.getElementById('darksky-parks-rows');
                 if (rowsEl) rowsEl.innerHTML='<div style="font-size:.44rem;color:rgba(30,30,50,.4);">Searching…</div>';
+                var cosL=Math.cos(lat*Math.PI/180);
+                var wDirs=['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+                function distOf(plat,plon){ var dLat=plat-lat, dLon=(plon-lon)*cosL; return Math.sqrt(dLat*dLat+dLon*dLon)*69; }
+                function dirOf(plat,plon){ var x=Math.sin((plon-lon)*Math.PI/180)*Math.cos(plat*Math.PI/180); var y=Math.cos(lat*Math.PI/180)*Math.sin(plat*Math.PI/180)-Math.sin(lat*Math.PI/180)*Math.cos(plat*Math.PI/180)*Math.cos((plon-lon)*Math.PI/180); var br=Math.atan2(x,y)*180/Math.PI; if(br<0)br+=360; return wDirs[Math.round(br/22.5)%16]; }
+                // Always end with 3 options: nearby ≤B3 parks first, then the nearest
+                // curated dark-sky destinations (even if far) to fill any gaps.
+                function fillCurated(results){
+                  if (results.length>=3){ renderParks(results.slice(0,3)); return; }
+                  var have={}; results.forEach(function(r){ have[r.name]=1; });
+                  var cur=CURATED.filter(function(p){ return !have[p.name]; })
+                    .map(function(p){ return {name:p.name, lat:p.lat, lon:p.lon, dist:distOf(p.lat,p.lon), dir:dirOf(p.lat,p.lon)}; })
+                    .sort(function(a,b){ return a.dist-b.dist; }).slice(0,12);
+                  sampleList(cur, 0, function(){
+                    cur.forEach(function(p){ if(results.length<3 && p.bortle!=null && p.bortle<=3.0 && results.indexOf(p)<0) results.push(p); });
+                    cur.forEach(function(p){ if(results.length<3 && results.indexOf(p)<0) results.push(p); }); // ensure 3, even if >B3
+                    renderParks(results.slice(0,3));
+                  });
+                }
                 var Rm=200000;
                 var Q='[out:json][timeout:25];('
                   +'way["boundary"="protected_area"](around:'+Rm+','+lat+','+lon+');'
@@ -9911,21 +9962,16 @@ body > #dynamic-alert-modal {
                 fetch('https://proxy.bluishvoid.com/?url='+encodeURIComponent(target))
                   .then(function(r){ return r.json(); })
                   .then(function(data){
-                    var els=(data&&data.elements)||[], seen={}, cands=[], cosL=Math.cos(lat*Math.PI/180);
-                    var wDirs=['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+                    var els=(data&&data.elements)||[], seen={}, cands=[];
                     els.forEach(function(e){
                       var t=e.tags||{}, c=e.center||(e.type==='node'?{lat:e.lat,lon:e.lon}:null);
                       if(!t.name||!c||seen[t.name]) return; seen[t.name]=1;
-                      var dLat=c.lat-lat, dLon=(c.lon-lon)*cosL, dist=Math.sqrt(dLat*dLat+dLon*dLon)*69;
-                      var bx=Math.sin((c.lon-lon)*Math.PI/180)*Math.cos(c.lat*Math.PI/180);
-                      var by=Math.cos(lat*Math.PI/180)*Math.sin(c.lat*Math.PI/180)-Math.sin(lat*Math.PI/180)*Math.cos(c.lat*Math.PI/180)*Math.cos((c.lon-lon)*Math.PI/180);
-                      var br=Math.atan2(bx,by)*180/Math.PI; if(br<0)br+=360;
-                      cands.push({name:t.name, lat:c.lat, lon:c.lon, dist:dist, dir:wDirs[Math.round(br/22.5)%16]});
+                      cands.push({name:t.name, lat:c.lat, lon:c.lon, dist:distOf(c.lat,c.lon), dir:dirOf(c.lat,c.lon)});
                     });
                     cands.sort(function(a,b){ return a.dist-b.dist; });
                     var results=[];
                     function step(i){
-                      if (results.length>=3 || i>=cands.length || i>=45){ renderParks(results); return; }
+                      if (results.length>=3 || i>=cands.length || i>=45){ fillCurated(results); return; }
                       var p=cands[i];
                       sampleBortle(p.lat, p.lon, function(sqm){
                         if (sqm!=null){ var bd=bortleDecimal(sqm); if (bd<=3.0){ p.bortle=bd; results.push(p); } }
@@ -9934,7 +9980,7 @@ body > #dynamic-alert-modal {
                     }
                     step(0);
                   })
-                  .catch(function(){ if (rowsEl) rowsEl.innerHTML='<div style="font-size:.44rem;color:rgba(30,30,50,.4);">Unavailable</div>'; });
+                  .catch(function(){ fillCurated([]); });
               }
               // Long-press anywhere to read estimated Bortle at that point.
               // (Plain click / double-click are left alone so double-click still zooms.)
