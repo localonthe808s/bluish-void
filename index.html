@@ -9712,6 +9712,8 @@ body > #dynamic-alert-modal {
                 <div style="position:absolute;bottom:10px;right:10px;z-index:700;padding:7px 9px;border-radius:9px;background:rgba(255,255,255,.62);backdrop-filter:blur(14px) saturate(120%);-webkit-backdrop-filter:blur(14px) saturate(120%);font-family:system-ui,sans-serif;pointer-events:none;box-shadow:0 4px 16px rgba(43,34,244,.14),inset 0 1px 0 rgba(255,255,255,.5);">
                   <div style="font-size:.48rem;font-weight:800;letter-spacing:.07em;color:rgba(30,30,50,.5);text-transform:uppercase;margin-bottom:4px;">Bortle Scale <span style="opacity:.6;font-weight:600;">· est.</span></div>
                   <div id="darksky-legend" style="display:flex;flex-direction:column;gap:1px;"></div>
+                  <div style="font-size:.46rem;font-weight:800;letter-spacing:.06em;color:rgba(30,30,50,.5);text-transform:uppercase;margin:6px 0 3px;border-top:1px solid rgba(30,30,50,.12);padding-top:5px;">Darkest parks nearby <span style="opacity:.6;font-weight:600;">≤ B3</span></div>
+                  <div id="darksky-parks-rows" style="pointer-events:auto;display:flex;flex-direction:column;gap:1px;max-width:165px;"></div>
                   <div style="font-size:.42rem;color:rgba(30,30,50,.4);margin-top:5px;border-top:1px solid rgba(30,30,50,.12);padding-top:4px;">Long-press map for any point</div>
                 </div>
               </div>
@@ -9798,35 +9800,37 @@ body > #dynamic-alert-modal {
               box.style.borderLeftColor=b.col;
               box.style.display='block';
             }
+            // Tile-canvas cache so sampling many points (e.g. nearby parks, which
+            // mostly share one z6 tile) is cheap. ?cors → distinct cache key always
+            // fetched WITH CORS so canvas reads aren't tainted by the map's tiles.
+            var _dsTiles = {};
+            function tileCanvas(z,x,y,cb){
+              var key=z+'_'+x+'_'+y, hit=_dsTiles[key];
+              if(hit){ cb(hit==='err'?null:hit); return; }
+              var img=new Image(); img.crossOrigin='anonymous';
+              img.onload=function(){ try{ var c=document.createElement('canvas'); c.width=1024;c.height=1024; var ctx=c.getContext('2d'); ctx.drawImage(img,0,0); _dsTiles[key]={ctx:ctx}; cb(_dsTiles[key]); }catch(e){ _dsTiles[key]='err'; cb(null); } };
+              img.onerror=function(){ _dsTiles[key]='err'; cb(null); };
+              img.src='https://djlorenz.github.io/astronomy/image_tiles/tiles2024/tile_'+z+'_'+x+'_'+y+'.png?cors';
+            }
             // Sample the Lorenz 2024 overlay pixel at lat/lon → estimated zenith SQM.
-            // Tiles are 1024px standard slippy tiles at native zoom 8; GitHub Pages
-            // serves them with CORS so canvas reads aren't tainted.
             function sampleBortle(lat, lon, cb){
               try {
                 var z=6, n=Math.pow(2,z); // tiles2024 reliably exists to z6; 1024px tiles ≈ z8 detail
-                var xt=(lon+180)/360*n;
-                var latR=lat*Math.PI/180;
+                var xt=(lon+180)/360*n, latR=lat*Math.PI/180;
                 var yt=(1-Math.log(Math.tan(latR)+1/Math.cos(latR))/Math.PI)/2*n;
                 var x=Math.floor(xt), y=Math.floor(yt);
                 var px=Math.floor((xt-x)*1024), py=Math.floor((yt-y)*1024);
-                var img=new Image(); img.crossOrigin='anonymous';
-                img.onload=function(){
+                tileCanvas(z,x,y,function(tc){
+                  if(!tc){ cb(null); return; }
                   try {
-                    var c=document.createElement('canvas'); c.width=1024; c.height=1024;
-                    var ctx=c.getContext('2d'); ctx.drawImage(img,0,0);
                     var x0=Math.max(0,Math.min(1021,px-1)), y0=Math.max(0,Math.min(1021,py-1));
-                    var d=ctx.getImageData(x0,y0,3,3).data;
+                    var d=tc.ctx.getImageData(x0,y0,3,3).data;
                     var R=0,G=0,B=0,A=0,cnt=0;
                     for(var i=0;i<d.length;i+=4){ R+=d[i];G+=d[i+1];B+=d[i+2];A+=d[i+3];cnt++; }
                     R/=cnt;G/=cnt;B/=cnt;A/=cnt;
-                    var sqm = (A<50) ? 21.95 : pixelToSQM(R,G,B);
-                    cb(sqm);
+                    cb((A<50) ? 21.95 : pixelToSQM(R,G,B));
                   } catch(e){ cb(null); }
-                };
-                img.onerror=function(){ cb(null); };
-                // ?cors → distinct cache key always fetched WITH CORS, so the
-                // canvas read is never tainted by a non-CORS tile the map cached.
-                img.src='https://djlorenz.github.io/astronomy/image_tiles/tiles2024/tile_'+z+'_'+x+'_'+y+'.png?cors';
+                });
               } catch(e){ cb(null); }
             }
 
@@ -9865,6 +9869,73 @@ body > #dynamic-alert-modal {
               setTimeout(function(){ try { map.invalidateSize(); } catch(e){} }, 300);
               // Estimate Bortle at the user's location from the overlay pixel
               if (loc) sampleBortle(loc.lat, loc.lon, function(sqm){ if (sqm != null) setBortleStat(sqm, 'Your Location'); });
+              // Nearest named parks/protected areas with Bortle ≤ 3.0
+              if (loc) findDarkParks(loc.lat, loc.lon);
+
+              function flyToPoint(la, lo){
+                map.flyTo([la, lo], 8);
+                sampleBortle(la, lo, function(sqm){
+                  if (sqm == null) return;
+                  setBortleStat(sqm, 'Selected Point');
+                  if (window._darkSkyClickMarker) window._darkSkyClickMarker.setLatLng([la, lo]);
+                  else window._darkSkyClickMarker = L.circleMarker([la, lo], { radius:5, color:'#fff', weight:2, fillColor:'#facc15', fillOpacity:.95 }).addTo(map);
+                });
+              }
+              function renderParks(list){
+                var rowsEl = document.getElementById('darksky-parks-rows');
+                if (!rowsEl) return;
+                if (!list.length){ rowsEl.innerHTML='<div style="font-size:.44rem;color:rgba(30,30,50,.4);">None within ~200 km</div>'; return; }
+                var h='';
+                list.forEach(function(p){
+                  var bc = BORTLE[Math.max(1,Math.min(9,Math.round(p.bortle)))-1].col;
+                  h+='<div class="ds-park" data-lat="'+p.lat+'" data-lon="'+p.lon+'" style="cursor:pointer;padding:2px 0;border-top:1px solid rgba(30,30,50,.07);">'
+                    +'<div style="font-size:.46rem;font-weight:700;color:rgba(30,30,50,.8);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:160px;">'+p.name+'</div>'
+                    +'<div style="font-size:.42rem;color:rgba(30,30,50,.5);">'+Math.round(p.dist)+' mi '+p.dir+' · <b style="color:'+bc+';">Bortle '+p.bortle.toFixed(1)+'</b></div></div>';
+                });
+                rowsEl.innerHTML=h;
+                var rows=rowsEl.querySelectorAll('.ds-park');
+                for(var i=0;i<rows.length;i++){ (function(row){ row.addEventListener('click', function(){ flyToPoint(parseFloat(row.getAttribute('data-lat')), parseFloat(row.getAttribute('data-lon'))); }); })(rows[i]); }
+              }
+              function findDarkParks(lat, lon){
+                var rowsEl=document.getElementById('darksky-parks-rows');
+                if (rowsEl) rowsEl.innerHTML='<div style="font-size:.44rem;color:rgba(30,30,50,.4);">Searching…</div>';
+                var Rm=200000;
+                var Q='[out:json][timeout:25];('
+                  +'way["boundary"="protected_area"](around:'+Rm+','+lat+','+lon+');'
+                  +'way["leisure"="nature_reserve"](around:'+Rm+','+lat+','+lon+');'
+                  +'way["boundary"="national_park"](around:'+Rm+','+lat+','+lon+');'
+                  +'rel["boundary"="protected_area"](around:'+Rm+','+lat+','+lon+');'
+                  +'rel["leisure"="nature_reserve"](around:'+Rm+','+lat+','+lon+');'
+                  +');out center tags 250;';
+                var target='https://overpass-api.de/api/interpreter?data='+encodeURIComponent(Q);
+                fetch('https://proxy.bluishvoid.com/?url='+encodeURIComponent(target))
+                  .then(function(r){ return r.json(); })
+                  .then(function(data){
+                    var els=(data&&data.elements)||[], seen={}, cands=[], cosL=Math.cos(lat*Math.PI/180);
+                    var wDirs=['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+                    els.forEach(function(e){
+                      var t=e.tags||{}, c=e.center||(e.type==='node'?{lat:e.lat,lon:e.lon}:null);
+                      if(!t.name||!c||seen[t.name]) return; seen[t.name]=1;
+                      var dLat=c.lat-lat, dLon=(c.lon-lon)*cosL, dist=Math.sqrt(dLat*dLat+dLon*dLon)*69;
+                      var bx=Math.sin((c.lon-lon)*Math.PI/180)*Math.cos(c.lat*Math.PI/180);
+                      var by=Math.cos(lat*Math.PI/180)*Math.sin(c.lat*Math.PI/180)-Math.sin(lat*Math.PI/180)*Math.cos(c.lat*Math.PI/180)*Math.cos((c.lon-lon)*Math.PI/180);
+                      var br=Math.atan2(bx,by)*180/Math.PI; if(br<0)br+=360;
+                      cands.push({name:t.name, lat:c.lat, lon:c.lon, dist:dist, dir:wDirs[Math.round(br/22.5)%16]});
+                    });
+                    cands.sort(function(a,b){ return a.dist-b.dist; });
+                    var results=[];
+                    function step(i){
+                      if (results.length>=3 || i>=cands.length || i>=45){ renderParks(results); return; }
+                      var p=cands[i];
+                      sampleBortle(p.lat, p.lon, function(sqm){
+                        if (sqm!=null){ var bd=bortleDecimal(sqm); if (bd<=3.0){ p.bortle=bd; results.push(p); } }
+                        step(i+1);
+                      });
+                    }
+                    step(0);
+                  })
+                  .catch(function(){ if (rowsEl) rowsEl.innerHTML='<div style="font-size:.44rem;color:rgba(30,30,50,.4);">Unavailable</div>'; });
+              }
               // Long-press anywhere to read estimated Bortle at that point.
               // (Plain click / double-click are left alone so double-click still zooms.)
               (function(){
