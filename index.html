@@ -9699,11 +9699,19 @@ body > #dynamic-alert-modal {
                   <button class="geo-tab active" style="flex:1;padding:6px 8px;border-radius:7px;background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.35);font-family:system-ui,sans-serif;font-size:.66rem;line-height:1;font-weight:900;letter-spacing:.14em;text-transform:uppercase;color:#fff;cursor:default;display:flex;align-items:center;justify-content:center;gap:5px;">🌌 DARK SKY</button>
                 </div>
                 <div id="darksky-map" style="width:100%;height:100%;background:#0a0a1a;position:absolute;top:0;left:0;right:0;bottom:0;"></div>
-                <!-- Brightness legend -->
-                <div style="position:absolute;bottom:10px;left:10px;z-index:700;padding:7px 9px;border-radius:8px;background:rgba(10,10,26,.7);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);font-family:system-ui,sans-serif;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.3);">
-                  <div style="font-size:.5rem;font-weight:800;letter-spacing:.06em;color:rgba(255,255,255,.6);text-transform:uppercase;margin-bottom:4px;">Artificial Sky Brightness</div>
-                  <div style="width:170px;height:8px;border-radius:4px;background:linear-gradient(90deg,#1a1a2e,#1d4ed8,#16a34a,#eab308,#f97316,#ef4444,#f8fafc);"></div>
-                  <div style="display:flex;justify-content:space-between;font-size:.46rem;font-weight:700;color:rgba(255,255,255,.45);margin-top:2px;"><span>Pristine</span><span>Rural</span><span>Suburban</span><span>City</span></div>
+                <!-- Your-location Bortle stat (filled by JS) -->
+                <div id="darksky-bortle" style="position:absolute;top:42px;left:10px;z-index:700;min-width:118px;padding:7px 11px;border-radius:9px;background:rgba(10,10,26,.74);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);font-family:system-ui,sans-serif;pointer-events:none;box-shadow:0 2px 10px rgba(0,0,0,.35);border-left:3px solid #888;display:none;">
+                  <div style="font-size:.46rem;font-weight:800;letter-spacing:.07em;color:rgba(255,255,255,.5);text-transform:uppercase;margin-bottom:2px;">Your Location</div>
+                  <div style="display:flex;align-items:baseline;gap:6px;">
+                    <span id="darksky-bortle-num" style="font-size:1.15rem;font-weight:900;color:#fff;line-height:1;">—</span>
+                    <span id="darksky-bortle-name" style="font-size:.55rem;font-weight:700;color:rgba(255,255,255,.72);"></span>
+                  </div>
+                  <div id="darksky-bortle-sub" style="font-size:.46rem;color:rgba(255,255,255,.42);margin-top:2px;"></div>
+                </div>
+                <!-- Full Bortle scale legend -->
+                <div style="position:absolute;bottom:10px;right:10px;z-index:700;padding:7px 9px;border-radius:9px;background:rgba(10,10,26,.74);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);font-family:system-ui,sans-serif;pointer-events:none;box-shadow:0 2px 10px rgba(0,0,0,.35);">
+                  <div style="font-size:.48rem;font-weight:800;letter-spacing:.07em;color:rgba(255,255,255,.55);text-transform:uppercase;margin-bottom:4px;">Bortle Scale <span style="opacity:.6;font-weight:600;">· est.</span></div>
+                  <div id="darksky-legend" style="display:flex;flex-direction:column;gap:1px;"></div>
                 </div>
               </div>
             </div>
@@ -9711,6 +9719,86 @@ body > #dynamic-alert-modal {
           <script>
           (function(){
             var inited = false;
+
+            // Bortle classes: representative zenith SQM (mag/arcsec²) + display color.
+            var BORTLE = [
+              {n:1, name:'Excellent dark-sky', short:'Excellent dark', col:'#0b1026', sqm:21.95},
+              {n:2, name:'Truly dark', short:'Truly dark', col:'#243352', sqm:21.80},
+              {n:3, name:'Rural', short:'Rural', col:'#2563eb', sqm:21.55},
+              {n:4, name:'Rural/suburban', short:'Rural/suburban', col:'#16a34a', sqm:21.10},
+              {n:5, name:'Suburban', short:'Suburban', col:'#eab308', sqm:20.30},
+              {n:6, name:'Bright suburban', short:'Bright suburban', col:'#f97316', sqm:19.40},
+              {n:7, name:'Suburban/urban', short:'Suburban/urban', col:'#ef4444', sqm:18.60},
+              {n:8, name:'City', short:'City', col:'#d946ef', sqm:18.00},
+              {n:9, name:'Inner-city', short:'Inner-city', col:'#f8fafc', sqm:17.30}
+            ];
+            // Approximate Lorenz overlay colormap colors → representative SQM,
+            // for nearest-color classification of a sampled pixel.
+            var REF = [
+              {r:16,g:16,b:28, sqm:21.95},{r:70,g:75,b:120, sqm:21.70},{r:90,g:95,b:255, sqm:21.50},
+              {r:40,g:175,b:120, sqm:21.10},{r:235,g:220,b:90, sqm:20.30},{r:240,g:150,b:70, sqm:19.40},
+              {r:240,g:80,b:80, sqm:18.60},{r:225,g:110,b:200, sqm:18.00},{r:245,g:245,b:245, sqm:17.30}
+            ];
+            function bortleFromSQM(s){
+              if(s>=21.75) return 1; if(s>=21.50) return 2; if(s>=21.25) return 3;
+              if(s>=20.50) return 4; if(s>=19.50) return 5; if(s>=18.75) return 6;
+              if(s>=18.00) return 7; if(s>=17.50) return 8; return 9;
+            }
+            function buildLegend(){
+              var el=document.getElementById('darksky-legend'); if(!el||el._built) return; el._built=true;
+              var h='';
+              BORTLE.forEach(function(b){
+                h+='<div style="display:flex;align-items:center;gap:5px;" title="Bortle '+b.n+' — '+b.name+' (SQM ~'+b.sqm.toFixed(1)+' mag/arcsec²)">'
+                  +'<span style="width:11px;height:11px;border-radius:3px;flex-shrink:0;background:'+b.col+';border:1px solid rgba(255,255,255,.18);"></span>'
+                  +'<span style="font-size:.46rem;color:rgba(255,255,255,.6);white-space:nowrap;"><b style="color:rgba(255,255,255,.85);">'+b.n+'</b> '+b.short+'</span></div>';
+              });
+              el.innerHTML=h;
+            }
+            function setBortleStat(sqm){
+              var n=bortleFromSQM(sqm), b=BORTLE[n-1];
+              var box=document.getElementById('darksky-bortle');
+              var num=document.getElementById('darksky-bortle-num');
+              var nm=document.getElementById('darksky-bortle-name');
+              var sub=document.getElementById('darksky-bortle-sub');
+              if(!box) return;
+              if(num) num.textContent='Bortle '+n;
+              if(nm) nm.textContent=b.name;
+              if(sub) sub.textContent='≈ SQM '+sqm.toFixed(1)+' mag · est.';
+              box.style.borderLeftColor=b.col;
+              box.style.display='block';
+            }
+            // Sample the Lorenz 2024 overlay pixel at lat/lon → estimated zenith SQM.
+            // Tiles are 1024px standard slippy tiles at native zoom 8; GitHub Pages
+            // serves them with CORS so canvas reads aren't tainted.
+            function sampleBortle(lat, lon, cb){
+              try {
+                var z=8, n=Math.pow(2,z);
+                var xt=(lon+180)/360*n;
+                var latR=lat*Math.PI/180;
+                var yt=(1-Math.log(Math.tan(latR)+1/Math.cos(latR))/Math.PI)/2*n;
+                var x=Math.floor(xt), y=Math.floor(yt);
+                var px=Math.floor((xt-x)*1024), py=Math.floor((yt-y)*1024);
+                var img=new Image(); img.crossOrigin='anonymous';
+                img.onload=function(){
+                  try {
+                    var c=document.createElement('canvas'); c.width=1024; c.height=1024;
+                    var ctx=c.getContext('2d'); ctx.drawImage(img,0,0);
+                    var x0=Math.max(0,Math.min(1021,px-1)), y0=Math.max(0,Math.min(1021,py-1));
+                    var d=ctx.getImageData(x0,y0,3,3).data;
+                    var R=0,G=0,B=0,A=0,cnt=0;
+                    for(var i=0;i<d.length;i+=4){ R+=d[i];G+=d[i+1];B+=d[i+2];A+=d[i+3];cnt++; }
+                    R/=cnt;G/=cnt;B/=cnt;A/=cnt;
+                    var sqm;
+                    if(A<50){ sqm=21.95; }
+                    else { var best=0,bd=1e9; for(var k=0;k<REF.length;k++){var rr=R-REF[k].r,gg=G-REF[k].g,bb=B-REF[k].b,dd=rr*rr+gg*gg+bb*bb; if(dd<bd){bd=dd;best=k;}} sqm=REF[best].sqm; }
+                    cb(sqm);
+                  } catch(e){ cb(null); }
+                };
+                img.onerror=function(){ cb(null); };
+                img.src='https://djlorenz.github.io/astronomy/image_tiles/tiles2024/tile_'+z+'_'+x+'_'+y+'.png';
+              } catch(e){ cb(null); }
+            }
+
             function initDarkSky(){
               if (inited) return;
               var el = document.getElementById('darksky-map');
@@ -9741,11 +9829,14 @@ body > #dynamic-alert-modal {
               }
               window._darkSkyMap = map;
               setTimeout(function(){ try { map.invalidateSize(); } catch(e){} }, 300);
+              // Estimate Bortle at the user's location from the overlay pixel
+              if (loc) sampleBortle(loc.lat, loc.lon, function(sqm){ if (sqm != null) setBortleStat(sqm); });
             }
             window.initDarkSkyMap = initDarkSky;
             function arm(){
               var w = document.getElementById('darksky-widget');
               if (!w) return;
+              buildLegend();
               if ('IntersectionObserver' in window) {
                 var io = new IntersectionObserver(function(ents){
                   ents.forEach(function(e){ if (e.isIntersecting) { initDarkSky(); io.disconnect(); } });
