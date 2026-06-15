@@ -60342,9 +60342,71 @@ function initNowMicroTabs(){
         }).catch(function(){});
     }
 
+    // Fireballs: the only overview card not wired into the early prefetch +
+    // _hzDashUpdate path — it otherwise waits for the deferred (~6s) hazard-map
+    // init's idle prefetch, so it loads much later than the others. Fetch + render
+    // its card here, map-independent, like the rest. The full initFireballsData()
+    // (map markers + geocoded place names) still runs later and upgrades the card;
+    // both share the bv_fireballs_cache_v1 cache.
+    function _prefetchFireballs(){
+      var detailEl=document.getElementById('hz-dash-fireballs-detail');
+      var countEl=document.getElementById('hz-dash-fireballs-count');
+      var badgeEl=document.getElementById('hazard-badge-fireballs');
+      var summaryEl=document.getElementById('hz-summary-fireballs');
+      var dotEl=document.getElementById('hz-dot-fireballs');
+      if(!detailEl) return;
+      var dateMin=new Date(Date.now()-30*86400000).toISOString().slice(0,10);
+      var apiUrl='https://ssd-api.jpl.nasa.gov/fireball.api?date-min='+dateMin+'&sort=-date&limit=50';
+      var proxies=[{u:'https://proxy.bluishvoid.com/?url=',w:false},{u:'https://api.codetabs.com/v1/proxy?quest=',w:false},{u:'https://corsproxy.io/?',w:false},{u:'https://api.allorigins.win/get?url=',w:true}];
+      var go=function(i){
+        if(i>=proxies.length) return Promise.reject(0);
+        var p=proxies[i];
+        return fetch(p.u+encodeURIComponent(apiUrl)).then(function(r){if(!r.ok)throw 0;return r.json();}).then(function(d){return p.w?JSON.parse(d.contents):d;}).catch(function(){return go(i+1);});
+      };
+      var render=function(d){
+        var rows=(d&&d.data)||[];
+        if(countEl) countEl.textContent=rows.length;
+        if(badgeEl&&rows.length){ badgeEl.textContent=rows.length; badgeEl.style.display='inline-flex'; }
+        if(summaryEl) summaryEl.textContent=rows.length?'Bolide detections (US Gov sensors)':'No bolides detected this window';
+        if(dotEl) dotEl.classList.toggle('hz-dot-green', rows.length===0);
+        if(!rows.length){ detailEl.innerHTML='<span style="opacity:.5;">No bolides detected this window</span>'; return; }
+        var parsed=rows.map(function(rr){
+          var date=rr[0]||''; var impactKt=parseFloat(rr[2]); var rad=parseFloat(rr[1]);
+          var e=isFinite(impactKt)?impactKt:(isFinite(rad)?(rad*1e10)/4.184e12:NaN);
+          var latN=parseFloat(rr[3]), lonN=parseFloat(rr[5]);
+          var lat=isFinite(latN)?latN*(rr[4]==='S'?-1:1):NaN, lon=isFinite(lonN)?lonN*(rr[6]==='W'?-1:1):NaN;
+          return {dateShort:date.replace(/^(\d{4})-(\d{2})-(\d{2}).*/,'$2/$3'), e:e, eStr:isFinite(e)?(e>=1?e.toFixed(2)+' kt':(e*1000).toFixed(0)+' t TNT'):'—', lat:lat, lon:lon, vel:parseFloat(rr[8])};
+        });
+        var INK='rgba(30,30,50,.82)', MUT='rgba(30,30,50,.5)', Y='#a16207';
+        var H=function(t){return '<div style="color:'+Y+';font-weight:700;margin:5px 0 2px;font-size:.52rem;letter-spacing:.07em;">'+t+'</div>';};
+        var R=function(c,t){return '<div style="display:flex;justify-content:space-between;align-items:baseline;padding:3.5px 0;border-bottom:1px solid rgba(30,30,50,.06);font-size:.7rem;gap:8px;"><span style="color:'+MUT+';white-space:nowrap;">'+c+'</span><span style="color:'+INK+';font-weight:600;text-align:right;">'+t+'</span></div>';};
+        var h='', latest=parsed[0];
+        h+=H('LATEST'); h+=R(latest.dateShort, latest.eStr);
+        var byE=parsed.filter(function(p){return isFinite(p.e);}).sort(function(a,b){return b.e-a.e;});
+        if(byE.length>1){ h+=H('TOP BY ENERGY'); byE.slice(0,3).forEach(function(p){ h+=R(p.dateShort, p.eStr); }); }
+        var es=parsed.map(function(p){return p.e;}).filter(isFinite); var vs=parsed.map(function(p){return p.vel;}).filter(isFinite);
+        var tot=es.reduce(function(a,b){return a+b;},0); var pk=vs.length?Math.max.apply(null,vs):0;
+        var fmt=function(e){return e>=1?e.toFixed(1)+' kt':(e*1000).toFixed(0)+' t TNT';};
+        h+=H('30D SUMMARY'); h+=R('Total detections', rows.length);
+        if(tot>0) h+=R('Total energy', fmt(tot));
+        if(pk>0) h+=R('Peak velocity', pk.toFixed(1)+' km/s');
+        var loc=(typeof LOCATION!=='undefined')?LOCATION:null;
+        var wc=parsed.filter(function(p){return isFinite(p.lat)&&isFinite(p.lon);});
+        if(loc&&loc.lat!=null&&wc.length){
+          var nr=wc.reduce(function(b,m){var dd=Math.sqrt(Math.pow(m.lat-loc.lat,2)+Math.pow(m.lon-loc.lon,2));return dd<b.d?{d:dd,m:m}:b;},{d:Infinity,m:null});
+          if(nr.m) h+=R('Nearest to you', nr.m.dateShort+' · ~'+Math.round(nr.d*69)+' mi');
+        }
+        h+='<div style="text-align:right;font-size:.42rem;color:rgba(30,30,50,.25);margin-top:3px;">NASA / JPL CNEOS</div>';
+        detailEl.innerHTML=h;
+      };
+      // Instant fill from fresh cache, then refresh from the network.
+      try{ var c=JSON.parse(localStorage.getItem('bv_fireballs_cache_v1')||'null'); if(c&&c.data&&(Date.now()-c.fetchedAt)<1800000) render(c.data); }catch(e){}
+      go(0).then(function(d){ if(d&&d.data){ try{localStorage.setItem('bv_fireballs_cache_v1',JSON.stringify({data:d,fetchedAt:Date.now()}));}catch(e){} window._prefetchedFireballs=d; render(d); } }).catch(function(){});
+    }
+
     // Stagger: 2 at boot, then 2 more after 1.5s, last after 3s
     setTimeout(function(){ _prefetchFire(); _prefetchTornado(); }, 1500);
-    setTimeout(function(){ _prefetchQuakes(); _prefetchFlood(); }, 3000);
+    setTimeout(function(){ _prefetchQuakes(); _prefetchFlood(); _prefetchFireballs(); }, 3000);
 
     // ─── AUTO-REVEAL SPACE WIDGETS: stagger after critical path ───
     // Remove covers and init space widgets automatically so they load
