@@ -12823,6 +12823,15 @@ function dayRangeAround(d, days){
       popup.style.zIndex = '9999';
       document.body.appendChild(popup);
     } catch(e) { console.error('mountPopupOnBody error:', e); document.body.appendChild(popup); }
+    // Mobile Back-gesture: close this side-panel popup instead of reloading
+    // the page. Arm one history entry and route the backdrop tap through the
+    // disarm path so the history stack stays in sync (see _bvArmBack docs).
+    var _bvClose = function(){
+      try { if (popup && popup.parentNode) popup.remove(); } catch(_){}
+      try { if (bd && bd.parentNode) bd.remove(); } catch(_){}
+    };
+    if (bd) bd.onclick = function(){ _bvClose(); if (window._bvDisarmBack) window._bvDisarmBack(); };
+    if (window._bvArmBack) window._bvArmBack(_bvClose);
   };
 
   // Helper: add scroll-more glow to popup
@@ -26782,7 +26791,7 @@ function dayRangeAround(d, days){
               ev.stopPropagation();
               var old = document.getElementById('frontal-insight-popup');
               var oldBd = document.getElementById('frontal-insight-backdrop');
-              if (old) { old.remove(); if(oldBd) oldBd.remove(); return; }
+              if (old) { old.remove(); if(oldBd) oldBd.remove(); if (window._bvDisarmBack) window._bvDisarmBack(); return; }
 
               var rect = ev.target.getBoundingClientRect();
               var bd = document.createElement('div');
@@ -26824,7 +26833,7 @@ function dayRangeAround(d, days){
               ev.stopPropagation();
               var old = document.getElementById('frontal-insight-popup');
               var oldBd = document.getElementById('frontal-insight-backdrop');
-              if (old) { old.remove(); if(oldBd) oldBd.remove(); return; }
+              if (old) { old.remove(); if(oldBd) oldBd.remove(); if (window._bvDisarmBack) window._bvDisarmBack(); return; }
               var bd = document.createElement('div');
               bd.id = 'frontal-insight-backdrop';
               bd.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:9998;';
@@ -33612,6 +33621,43 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     }, true);
   }
 
+  // ── Mobile Back-gesture closes popups instead of reloading the page ──────
+  // The dashboard runs as a Wix HTML-embed iframe (and standalone is an SPA),
+  // so without a history entry to pop, the device Back button / edge-swipe
+  // unwinds the real page and reloads the whole dashboard. We push one
+  // throwaway history entry whenever a popup opens so Back just closes the
+  // popup — matching the × / Esc / backdrop dismiss on desktop. All three
+  // popup systems (insight, widget, alert) funnel through here.
+  window._bvBackArmed     = false; // is our sentinel history entry on the stack?
+  window._bvBackPopping   = false; // inside a Back-driven close (popstate)?
+  window._bvBackReplacing = false; // closing one popup only to open another?
+  window._bvBackClose     = null;  // close fn for the currently-open popup
+  window._bvArmBack = function(closeFn){
+    if (typeof closeFn === 'function') window._bvBackClose = closeFn;
+    if (window._bvBackArmed) return;            // reuse the single entry across replaces
+    try { history.pushState({ bvModal: true }, ''); window._bvBackArmed = true; } catch(_){}
+  };
+  window._bvDisarmBack = function(){
+    // A popup was dismissed by something OTHER than Back. Consume our sentinel
+    // so the history stack stays clean. Skipped during a Back-driven close (the
+    // entry is already gone) and during an in-place replace (the next popup
+    // reuses the same entry, so we must not pop it).
+    if (window._bvBackPopping || window._bvBackReplacing) return;
+    window._bvBackClose = null;
+    if (!window._bvBackArmed) return;
+    window._bvBackArmed = false;
+    try { history.back(); } catch(_){}
+  };
+  window.addEventListener('popstate', function(){
+    if (!window._bvBackArmed) return;           // sentinel already consumed → let it navigate
+    window._bvBackArmed = false;
+    window._bvBackPopping = true;
+    var fn = window._bvBackClose;
+    window._bvBackClose = null;
+    try { if (typeof fn === 'function') fn(); } catch(_){}
+    window._bvBackPopping = false;
+  });
+
   // Centralised close: removes popup + backdrop + unlocks page scroll.
   window._closePlanetPopup = function(){
     var _pp = document.getElementById('planet-insight-popup');
@@ -33622,6 +33668,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (_bd) _bd.remove();
     document.documentElement.classList.remove('planet-modal-open');
     document.body.classList.remove('planet-modal-open');
+    window._bvDisarmBack();
   };
 
   // Shared modal shell used by showPlanetInsight (indirectly via the planet flow)
@@ -33630,7 +33677,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   // planet popup), splits it into tabs by `tabMap(sectionTitle)`, and renders
   // it inside the same centred light-frosted-glass modal as the planets.
   window._openInsightModal = function(config) {
+    window._bvBackReplacing = true;
     if (document.getElementById('planet-insight-popup')) window._closePlanetPopup();
+    window._bvBackReplacing = false;
 
     var bd = document.createElement('div');
     bd.id = 'planet-insight-backdrop';
@@ -33747,6 +33796,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     (document.getElementById('cloud-soundscape-root') || document.body).appendChild(bd);
     document.documentElement.classList.add('planet-modal-open');
     document.body.classList.add('planet-modal-open');
+    window._bvArmBack(window._closePlanetPopup);
     if (typeof addScrollFade === 'function') addScrollFade(pp);
     // Wix iframe is auto-resized to content height, so its viewport != user's
     // visible area. Backdrop is position:absolute (in document flow) and we
@@ -34038,7 +34088,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     try {
     var tlCard = document.getElementById('today-timeline-card');
     // Use the centralised close so classes are cleared cleanly if an exception happens mid-build.
+    window._bvBackReplacing = true;
     if (document.getElementById('planet-insight-popup')) window._closePlanetPopup();
+    window._bvBackReplacing = false;
 
     // Fast path: reuse cached HTML for this planet within TTL.
     // Live position drifts slowly (~0.25°/min); 1 min cache is barely visible.
@@ -34061,6 +34113,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       (document.getElementById('cloud-soundscape-root') || document.body).appendChild(_bd);
       document.documentElement.classList.add('planet-modal-open');
       document.body.classList.add('planet-modal-open');
+      window._bvArmBack(window._closePlanetPopup);
       if (typeof addScrollFade === 'function') addScrollFade(_pp);
       requestAnimationFrame(function(){ try { _pp.scrollIntoView({block:'center', inline:'nearest'}); } catch(_){} });
       return;
@@ -35053,6 +35106,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     // visible portion (root creates its own stacking context via isolation:isolate).
     (document.getElementById('cloud-soundscape-root') || document.body).appendChild(bd);
     document.body.classList.add('planet-modal-open');
+    window._bvArmBack(window._closePlanetPopup);
     addScrollFade(pp);
     requestAnimationFrame(function(){ try { pp.scrollIntoView({block:'center', inline:'nearest'}); } catch(_){} });
     } catch(err) { console.error('Planet insight error:', err); }
@@ -37593,7 +37647,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (ev) ev.stopPropagation();
     var old = document.getElementById('geo-insight-popup');
     var oldBd = document.getElementById('geo-insight-backdrop');
-    if (old) { old.remove(); if(oldBd) oldBd.remove(); return; }
+    if (old) { old.remove(); if(oldBd) oldBd.remove(); if (window._bvDisarmBack) window._bvDisarmBack(); return; }
 
     updateGeoInsight();
 
@@ -37831,7 +37885,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     pp.innerHTML = '<div style="padding:10px 12px;">' + h + '</div>';
     var cb = document.createElement('div');
     cb.style.cssText = 'position:sticky;top:0;text-align:right;';
-    cb.innerHTML = '<span style="color:rgba(255,255,255,.4);font-size:16px;cursor:pointer;padding:2px 4px;" onclick="this.closest(\'#geo-insight-popup\').remove();document.getElementById(\'geo-insight-backdrop\').remove();">\u00d7</span>';
+    cb.innerHTML = '<span style="color:rgba(255,255,255,.4);font-size:16px;cursor:pointer;padding:2px 4px;" onclick="this.closest(\'#geo-insight-popup\').remove();document.getElementById(\'geo-insight-backdrop\').remove();if(window._bvDisarmBack)window._bvDisarmBack();">\u00d7</span>';
     pp.insertBefore(cb, pp.firstChild);
     bd.onclick = function(){ pp.remove(); bd.remove(); };
     document.body.appendChild(bd);
@@ -59791,6 +59845,7 @@ function initNowMicroTabs(){
     el.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.88);z-index:99999;padding:24px;box-sizing:border-box;overflow:auto;';
     if (el.parentNode !== document.body) document.body.appendChild(el);
     el.classList.add("active");
+    window._bvArmBack(closeWidgetModal);
     el.scrollIntoView({behavior:'smooth', block:'center'});
   }
 
@@ -59968,6 +60023,7 @@ function initNowMicroTabs(){
     widgetModal.classList.remove("active");
     document.documentElement.style.overflow = '';
     document.body.style.overflow = '';
+    window._bvDisarmBack();
     setTimeout(function(){ if (widgetModalBody) { widgetModalBody.innerHTML = ""; widgetModalBody.className = "widget-modal-body"; } }, 300);
   }
 
@@ -61421,12 +61477,14 @@ function openAlertModal(feature){
   modal.onclick = function(e){ if(e.target === modal) closeAlertModal(); };
   document.body.appendChild(modal);
   document.body.style.overflow = 'hidden';
+  if (window._bvArmBack) window._bvArmBack(closeAlertModal);
   modal.scrollIntoView({behavior:'smooth', block:'center'});
 }
 
 function closeAlertModal(){
   var modal = document.getElementById('dynamic-alert-modal');
   if (modal){ modal.remove(); document.documentElement.style.overflow = ''; document.body.style.overflow = ''; }
+  if (window._bvDisarmBack) window._bvDisarmBack();
 }
 
 // Duplicate keydown listener removed — already registered at line 50607
