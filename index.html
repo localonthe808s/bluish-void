@@ -60823,38 +60823,44 @@ function initNowMicroTabs(){
       loadPollen();
     }, 800);
 
-    // ─── Clouds/Radar widget: heavy init (no cover) ───
+    // ─── Clouds/Radar + GFS: heaviest init ───
     setTimeout(function(){
-      // The clouds/radar widget is the heaviest part of startup: the GOES "live
-      // clouds" loop (preloads many satellite frames), the Leaflet national
-      // radar map, and the forecast-radar options UI — all synchronous. Running
-      // them at boot blocked the main thread mid-render on mobile ("loads
-      // halfway, chokes on live radar, then loads the rest"). On mobile, defer
-      // the whole bundle until the widget nears the viewport (rootMargin head
-      // start; safety fallback so it never stays blank), and run the three
-      // pieces across separate frames so no single one janks the thread.
-      var _crStarted = false;
-      var _startCloudsRadar = function(){
-        if (_crStarted) return; _crStarted = true;
+      // These are the most main-thread-blocking inits: the GOES "live clouds"
+      // loop, the Leaflet national-radar map, the forecast-radar options UI,
+      // and the GFS/polar-vortex frames. The clouds/radar widget sits high on
+      // the mobile layout, so a viewport gate fires immediately and doesn't
+      // help — the synchronous init still froze mid-render ("chokes on live
+      // radar, the rest takes longer"). On mobile, instead run this bundle
+      // AFTER window 'load', during main-thread idle, and spread each piece
+      // across its own idle slice so the rest of the site renders first and
+      // these fill in last. Desktop keeps the eager boot load.
+      var _hvStarted = false;
+      var _startHeavy = function(){
+        if (_hvStarted) return; _hvStarted = true;
         var tasks = [
           function(){ try { startGoesAutoplay(); } catch(e){} },
           function(){ try { initFcastWidgets(); } catch(e){} },
-          function(){ try { initNationalRadarMap(); } catch(e){} }
+          function(){ try { initNationalRadarMap(); } catch(e){} },
+          function(){ try { initGfsWidget(); } catch(e){} }
         ];
-        (function next(){ if (!tasks.length) return; tasks.shift()(); setTimeout(next, 0); })();
+        var step = function(){
+          if (!tasks.length) return;
+          tasks.shift()();
+          if ('requestIdleCallback' in window) requestIdleCallback(step, { timeout: 2000 });
+          else setTimeout(step, 80);
+        };
+        step();
       };
-      var _crw = document.getElementById('clouds-radar-widget');
-      if (window.matchMedia('(max-width:768px)').matches && _crw && 'IntersectionObserver' in window) {
-        var _crIO = new IntersectionObserver(function(ents){
-          if (ents.some(function(e){ return e.isIntersecting; })) { _crIO.disconnect(); _startCloudsRadar(); }
-        }, { rootMargin: '800px' });
-        _crIO.observe(_crw);
-        setTimeout(function(){ try { _crIO.disconnect(); } catch(_){} _startCloudsRadar(); }, 20000);
+      if (window.matchMedia('(max-width:768px)').matches) {
+        var _deferHeavy = function(){
+          if ('requestIdleCallback' in window) requestIdleCallback(_startHeavy, { timeout: 4000 });
+          else setTimeout(_startHeavy, 1200);
+        };
+        if (document.readyState === 'complete') _deferHeavy();
+        else window.addEventListener('load', _deferHeavy);
       } else {
-        _startCloudsRadar();
+        _startHeavy();
       }
-      // GFS / polar-vortex is a separate widget — keep it on the boot path.
-      try { initGfsWidget(); } catch(e){}
     }, 1200);
 
     // ─── Pre-init hazard map so tiles are cached before user clicks ───
