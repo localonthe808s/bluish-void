@@ -36,6 +36,75 @@
       }).catch(function(){ return null; });
     } catch(e){}
   })();
+
+  /* ── Shared CORS-proxy fetcher: race + last-good cache + per-attempt timeout.
+     Replaces the per-widget sequential proxy chains, which waited for a slow
+     or dead proxy to time out before trying the next. Strategy:
+       1. Try the cached best proxy (or direct) first — one request.
+       2. On failure, race the remaining proxies in parallel; first to resolve
+          wins and is cached (localStorage) so subsequent fetches + future
+          visits go straight to the known-good proxy.
+     bvProxyJSON returns the TARGET's parsed JSON (allorigins wrap handled). */
+  (function(){
+    var PROXIES = [
+      { p:'',                                         wrap:false }, // direct
+      { p:'https://proxy.bluishvoid.com/?url=',       wrap:false },
+      { p:'https://api.codetabs.com/v1/proxy?quest=', wrap:false },
+      { p:'https://corsproxy.io/?',                   wrap:false },
+      { p:'https://api.allorigins.win/get?url=',      wrap:true  }
+    ];
+    var LS = 'bv_best_proxy_v1';
+    function getBest(){ try { return localStorage.getItem(LS); } catch(e){ return null; } }
+    function setBest(p){ try { localStorage.setItem(LS, p); } catch(e){} }
+    function timedFetch(u, ms){
+      var ctl = ('AbortController' in window) ? new AbortController() : null;
+      var t = setTimeout(function(){ if (ctl) ctl.abort(); }, ms || 9000);
+      return fetch(u, ctl ? { signal: ctl.signal } : undefined).then(
+        function(r){ clearTimeout(t); return r; },
+        function(e){ clearTimeout(t); throw e; }
+      );
+    }
+    function attempt(entry, target, ms){
+      var u = entry.p ? entry.p + encodeURIComponent(target) : target;
+      return timedFetch(u, ms).then(function(r){
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      }).then(function(d){
+        if (entry.wrap) {
+          if (d && typeof d.contents === 'string') return JSON.parse(d.contents);
+          throw new Error('empty wrap');
+        }
+        return d;
+      });
+    }
+    window.bvProxyJSON = function(target, opts){
+      opts = opts || {};
+      var ms = opts.timeout || 9000;
+      var list = PROXIES.slice();
+      if (opts.noDirect) list = list.filter(function(e){ return e.p !== ''; });
+      var b = getBest();
+      if (b != null) {
+        for (var i = 0; i < list.length; i++) {
+          if (list[i].p === b) { list.unshift(list.splice(i, 1)[0]); break; }
+        }
+      }
+      var first = list[0], rest = list.slice(1);
+      return attempt(first, target, ms)
+        .then(function(d){ setBest(first.p); return d; })
+        .catch(function(){
+          if (!rest.length) return Promise.reject(new Error('all proxies failed'));
+          return new Promise(function(resolve, reject){
+            var pending = rest.length, done = false;
+            rest.forEach(function(entry){
+              attempt(entry, target, ms).then(
+                function(d){ if (done) return; done = true; setBest(entry.p); resolve(d); },
+                function(){ if (--pending === 0 && !done) reject(new Error('all proxies failed')); }
+              );
+            });
+          });
+        });
+    };
+  })();
 </script>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="preload" href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400;0,6..96,100;1,6..96,400&display=swap" as="style" onload="this.onload=null;this.rel='stylesheet'">
@@ -10576,24 +10645,8 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
     // Try multiple CORS proxies — allorigins.win has been intermittently
     // 408ing and CORS-blocked, corsproxy.io 403s. codetabs is the most
     // reliable from this origin.
-    var GOES_PROXIES = [
-      { url: 'https://proxy.bluishvoid.com/?url=', wrap: false },
-      { url: 'https://api.codetabs.com/v1/proxy?quest=', wrap: false },
-      { url: 'https://corsproxy.io/?', wrap: false },
-      { url: 'https://api.allorigins.win/get?url=', wrap: true }
-    ];
-    var fetchViaProxy = function(rawUrl, idx){
-      idx = idx || 0;
-      if (idx >= GOES_PROXIES.length) return Promise.reject(new Error('all proxies failed'));
-      var p = GOES_PROXIES[idx];
-      return fetch(p.url + encodeURIComponent(rawUrl))
-        .then(function(r){
-          if (!r.ok) throw new Error('HTTP '+r.status);
-          return r.json();
-        })
-        .then(function(d){ return p.wrap ? JSON.parse(d.contents) : d; })
-        .catch(function(){ return fetchViaProxy(rawUrl, idx+1); });
-    };
+    // Uses the shared race+cache proxy fetcher (bvProxyJSON).
+    var fetchViaProxy = function(rawUrl){ return window.bvProxyJSON(rawUrl); };
     sectors.forEach(function(s){
       var rawUrl = SLIDER+s.sat+'/'+s.sector+'/geocolor/latest_times.json';
       fetchViaProxy(rawUrl)
@@ -10622,21 +10675,7 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
     // (satlib.cira.colostate.edu is sometimes CORS-strict from
     // third-party origins like Wix iframes).
     var lodUrl = SATLIB+'lod?per_page=72&orderby=date&order=desc&_embed';
-    var lodProxies = [
-      '',
-      'https://proxy.bluishvoid.com/?url=',
-      'https://api.codetabs.com/v1/proxy?quest=',
-      'https://corsproxy.io/?'
-    ];
-    var fetchLodViaProxy = function(idx){
-      idx = idx || 0;
-      if (idx >= lodProxies.length) return Promise.reject(new Error('all proxies failed'));
-      var u = idx === 0 ? lodUrl : lodProxies[idx] + encodeURIComponent(lodUrl);
-      return fetch(u).then(function(r){
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        return r.json();
-      }).catch(function(){ return fetchLodViaProxy(idx + 1); });
-    };
+    var fetchLodViaProxy = function(){ return window.bvProxyJSON(lodUrl, { timeout: 12000 }); };
     fetchLodViaProxy()
       .then(function(posts){
         if(!posts||!posts.length){
@@ -31011,22 +31050,9 @@ function dayRangeAround(d, days){
 
     // Try several CORS proxies in sequence. corsproxy.io has been
     // returning 403 from this origin; codetabs is more reliable.
-    var WX_PROXIES = [
-      'https://proxy.bluishvoid.com/?url=',
-      'https://api.codetabs.com/v1/proxy?quest=',
-      'https://corsproxy.io/?',
-      'https://api.allorigins.win/raw?url='
-    ];
-    var tryViaProxy = function(idx){
-      idx = idx || 0;
-      if (idx >= WX_PROXIES.length) return Promise.reject(new Error('all proxies failed'));
-      var proxied = WX_PROXIES[idx] + encodeURIComponent(url);
-      console.log('[Weather] retrying via', WX_PROXIES[idx]);
-      return fetchWithTimeout(proxied, null, 12000).then(function(r){
-        if (!r.ok) throw new Error('proxy HTTP ' + r.status);
-        return r.json();
-      }).catch(function(){ return tryViaProxy(idx + 1); });
-    };
+    // Shared race+cache proxy fetcher. noDirect: the direct attempt already
+    // happened above (directFetch), so skip it here and go straight to proxies.
+    var tryViaProxy = function(){ return window.bvProxyJSON(url, { timeout: 12000, noDirect: true }); };
 
     var directFetch;
     if (window._earlyWxFetch && window._earlyWxUrl === url) {
@@ -49734,12 +49760,6 @@ function initNowMicroTabs(){
       // is intermittent.
       var dateMin = new Date(Date.now() - 30*86400000).toISOString().slice(0,10);
       var apiUrl = 'https://ssd-api.jpl.nasa.gov/fireball.api?date-min=' + dateMin + '&sort=-date&limit=50';
-      var FB_PROXIES = [
-        { url: 'https://proxy.bluishvoid.com/?url=', wrap: false },
-        { url: 'https://api.codetabs.com/v1/proxy?quest=', wrap: false },
-        { url: 'https://corsproxy.io/?', wrap: false },
-        { url: 'https://api.allorigins.win/get?url=', wrap: true }
-      ];
       // localStorage cache so the panel survives proxy hiccups. Fresh: render
       // cached data directly. Stale-on-error: if the fetch chain fails entirely
       // but a cached payload exists, use it rather than showing 'try later'.
@@ -49751,18 +49771,7 @@ function initNowMicroTabs(){
       var fbWriteCache = function(data){
         try { localStorage.setItem(FB_CACHE_KEY, JSON.stringify({ data: data, fetchedAt: Date.now() })); } catch(e) {}
       };
-      var fbFetch = function(idx){
-        idx = idx || 0;
-        if (idx >= FB_PROXIES.length) return Promise.reject(new Error('all proxies failed'));
-        var p = FB_PROXIES[idx];
-        return fetch(p.url + encodeURIComponent(apiUrl))
-          .then(function(r){
-            if (!r.ok) throw new Error('HTTP ' + r.status);
-            return r.json();
-          })
-          .then(function(d){ return p.wrap ? JSON.parse(d.contents) : d; })
-          .catch(function(){ return fbFetch(idx + 1); });
-      };
+      var fbFetch = function(){ return window.bvProxyJSON(apiUrl, { timeout: 12000 }); };
       var fbRender = function(data){
           if (!data || !data.data) {
             detailEl.innerHTML = '<span style="opacity:.5;">No fireball data available</span>';
