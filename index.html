@@ -36892,41 +36892,47 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           .catch(function(){});
       });
 
-    Promise.all([
-      fetchWithTimeout("https://services.swpc.noaa.gov/products/solar-wind/plasma-5-minute.json", null, 12000).then(function(r){return r.json();}).catch(function(){return null;}),
-      fetchWithTimeout("https://services.swpc.noaa.gov/products/solar-wind/mag-5-minute.json", null, 12000).then(function(r){return r.json();}).catch(function(){return null;})
-    ]).then(function(all){
+    // ── Solar wind: prefer the new SWPC RTSW 1-minute feeds, which auto-select
+    // the *active* L1 spacecraft — now SOLAR-1 (operational 2026-06-10),
+    // replacing legacy ACE/DSCOVR. Falls back to the legacy 5-minute product
+    // feeds if RTSW is unavailable. window._swData keeps the same fields, so all
+    // downstream readouts are unchanged; we just add ._swData.source. ──
+    function _rtswPick(arr){
+      // RTSW rows are objects with {active, source, time_tag, ...}. Prefer the
+      // newest row flagged active (the operational primary); else newest overall.
+      if (!Array.isArray(arr) || !arr.length) return null;
+      var best = null, bestActive = null;
+      for (var i=0;i<arr.length;i++){
+        var r = arr[i]; if (!r || !r.time_tag) continue;
+        if (!best || r.time_tag > best.time_tag) best = r;
+        if (r.active && (!bestActive || r.time_tag > bestActive.time_tag)) bestActive = r;
+      }
+      return bestActive || best;
+    }
+    function _swSrcLabel(s){
+      return ({ SOLAR1:'SOLAR-1', DSCOVR:'DSCOVR', ACE:'ACE', IMAP:'IMAP' })[s] || (s || '');
+    }
+    function _applyLegacySolarWind(plasma, mag){
       try{
-        var plasma = all[0], mag = all[1];
-
         if (plasma && plasma.length > 1){
-          var ph = plasma[0];
-          var speedIdx = ph.indexOf("speed");
-          var densIdx = ph.indexOf("density");
+          var ph = plasma[0], speedIdx = ph.indexOf("speed"), densIdx = ph.indexOf("density");
           var last = plasma[plasma.length-1];
           var spd = speedIdx >= 0 ? parseFloat(last[speedIdx]) : NaN;
           var den = densIdx >= 0 ? parseFloat(last[densIdx]) : NaN;
           if (!isNaN(spd)) swWind.textContent = Math.round(spd) + " km/s";
-          // Cache globally
           if (!window._swData) window._swData = {};
           window._swData.speed = !isNaN(spd) ? Math.round(spd) : null;
           window._swData.density = !isNaN(den) ? den : null;
           SH.ok('swpc-plasma');
         }
-
         if (mag && mag.length > 1){
-          var mh = mag[0];
-          var bzIdx = mh.indexOf("bz_gsm");
-          var btIdx = mh.indexOf("bt");
-          var bxIdx = mh.indexOf("bx_gsm");
-          var byIdx = mh.indexOf("by_gsm");
+          var mh = mag[0], bzIdx = mh.indexOf("bz_gsm"), btIdx = mh.indexOf("bt"), bxIdx = mh.indexOf("bx_gsm"), byIdx = mh.indexOf("by_gsm");
           var lastm = mag[mag.length-1];
           var bz = bzIdx >= 0 ? parseFloat(lastm[bzIdx]) : NaN;
           var bt = btIdx >= 0 ? parseFloat(lastm[btIdx]) : NaN;
           var bx = bxIdx >= 0 ? parseFloat(lastm[bxIdx]) : NaN;
           var by = byIdx >= 0 ? parseFloat(lastm[byIdx]) : NaN;
           if (!isNaN(bz)) swBz.textContent = (bz >= 0 ? "+" : "") + bz.toFixed(1) + " nT";
-          // Cache globally
           if (!window._swData) window._swData = {};
           window._swData.bz = !isNaN(bz) ? bz : null;
           window._swData.bt = !isNaN(bt) ? bt : null;
@@ -36935,6 +36941,41 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           try { updateConditionsBriefing(); } catch(e){}
         }
       } catch(e){}
+    }
+    function _fetchLegacySolarWind(){
+      Promise.all([
+        fetchWithTimeout("https://services.swpc.noaa.gov/products/solar-wind/plasma-5-minute.json", null, 12000).then(function(r){return r.json();}).catch(function(){return null;}),
+        fetchWithTimeout("https://services.swpc.noaa.gov/products/solar-wind/mag-5-minute.json", null, 12000).then(function(r){return r.json();}).catch(function(){return null;})
+      ]).then(function(leg){ _applyLegacySolarWind(leg[0], leg[1]); });
+    }
+
+    Promise.all([
+      fetchWithTimeout("https://services.swpc.noaa.gov/json/rtsw/rtsw_wind_1m.json", null, 12000).then(function(r){return r.json();}).catch(function(){return null;}),
+      fetchWithTimeout("https://services.swpc.noaa.gov/json/rtsw/rtsw_mag_1m.json", null, 12000).then(function(r){return r.json();}).catch(function(){return null;})
+    ]).then(function(all){
+      try{
+        var windRow = _rtswPick(all[0]), magRow = _rtswPick(all[1]);
+        var ok = false;
+        if (!window._swData) window._swData = {};
+        if (windRow && windRow.proton_speed != null){
+          var spd = parseFloat(windRow.proton_speed), den = parseFloat(windRow.proton_density);
+          if (!isNaN(spd)){ swWind.textContent = Math.round(spd) + " km/s"; window._swData.speed = Math.round(spd); ok = true; }
+          window._swData.density = !isNaN(den) ? den : null;
+          if (windRow.source) window._swData.source = _swSrcLabel(windRow.source);
+          SH.ok('swpc-plasma');
+        }
+        if (magRow && magRow.bz_gsm != null){
+          var bz = parseFloat(magRow.bz_gsm), bt = parseFloat(magRow.bt), bx = parseFloat(magRow.bx_gsm), by = parseFloat(magRow.by_gsm);
+          if (!isNaN(bz)){ swBz.textContent = (bz >= 0 ? "+" : "") + bz.toFixed(1) + " nT"; ok = true; }
+          window._swData.bz = !isNaN(bz) ? bz : null;
+          window._swData.bt = !isNaN(bt) ? bt : null;
+          window._swData.bx = !isNaN(bx) ? bx : null;
+          window._swData.by = !isNaN(by) ? by : null;
+          if (magRow.source && !window._swData.source) window._swData.source = _swSrcLabel(magRow.source);
+          try { updateConditionsBriefing(); } catch(e){}
+        }
+        if (!ok) _fetchLegacySolarWind(); // RTSW empty → legacy fallback
+      } catch(e){ _fetchLegacySolarWind(); }
     });
 
     // ── GOES X-RAY FLUX (real-time flare detection) ──
@@ -41388,6 +41429,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (!isNaN(kpNum)) {
       if (kpNum >= minKpNeeded) live += '<b style="color:#4f8;">Current Kp meets your threshold — check for clear dark skies!</b>';
       else live += 'Current Kp is ' + (minKpNeeded - kpNum).toFixed(0) + ' point' + (minKpNeeded - kpNum > 1 ? 's' : '') + ' below your threshold.';
+    }
+    if (window._swData && window._swData.source) {
+      live += '<div style="font-size:.5rem;opacity:.65;margin-top:5px;">📡 Real-time solar wind via <b>' + window._swData.source + '</b> at the L1 point (SWPC RTSW — auto-selects the active spacecraft; SOLAR-1 is now operational, replacing legacy ACE/DSCOVR).</div>';
     }
     live += '</div></div>';
     // Sky-conditions/observing-quality block intentionally omitted from the
