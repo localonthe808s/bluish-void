@@ -1053,6 +1053,11 @@
     opacity:1 !important;
     pointer-events:auto !important;
   }
+  /* Engaged state — brand blue pill that toggles the map back to locked */
+  #hazard-scroll-guard[data-state="active"] .guard-box {
+    background:rgba(43,34,244,.86) !important;
+    border-color:rgba(150,160,255,.4) !important;
+  }
   #hazard-scroll-guard .guard-box {
     display:flex;
     align-items:center;
@@ -9217,10 +9222,10 @@ body > #dynamic-alert-modal {
                 })();
                 </script>
                 <div id="hazard-map" style="width:100%;height:100%;background:transparent;position:absolute;top:0;left:0;right:0;bottom:0;"></div>
-                <div id="hazard-scroll-guard" onclick="if(window.dismissMapGuard)dismissMapGuard();">
+                <div id="hazard-scroll-guard" data-state="locked" onclick="if(window._hazardToggleMap)_hazardToggleMap();">
                   <div class="guard-box">
-                    <div class="guard-title">INTERACT WITH MAP</div>
-                    <div class="guard-sub">Click to enable · ⌘ scroll to zoom</div>
+                    <div class="guard-title">TAP TO INTERACT</div>
+                    <div class="guard-sub">Pan &amp; zoom the map</div>
                   </div>
                 </div>
                 <!-- HAZARD OVERVIEW DASHBOARD -->
@@ -45283,9 +45288,8 @@ function initNowMicroTabs(){
       window._hazardInited = true;
       try { initUnifiedHazardMap(); } catch(e){ console.error('hazard init', e); }
       setTimeout(function(){ try { initGeologyMaps(); } catch(e){} }, 200);
-      // Dismiss ALL guards — user has engaged, no more barriers
-      var guard = document.getElementById('hazard-scroll-guard');
-      if (guard) guard.classList.remove('visible');
+      // Map just inited — clear the desktop wheel-lock; on mobile the guard
+      // pill stays as the "tap to interact" hint (synced at the end below).
       if(window.dismissMapGuard) window.dismissMapGuard();
       // Show fire overlays
       var fireOvInit = document.getElementById('hazard-fire-overlays');
@@ -45442,6 +45446,10 @@ function initNowMicroTabs(){
       // Fallback for very old browsers without ResizeObserver.
       setTimeout(function(){ if(hazardMap) hazardMap.invalidateSize(); }, 250);
     }
+
+    // Keep the mobile "tap to interact" guard pill in sync with the active view
+    // (visible over map tabs, hidden for the lightning/hurricane non-map views).
+    if(window._hazardSyncGuard) window._hazardSyncGuard();
 
     // Fire layer group
     if(window._fireLayerGroup){
@@ -50955,71 +50963,99 @@ function initNowMicroTabs(){
       var mapActive = false;
       var widget = document.getElementById('hazard-widget');
 
-      function dismiss(){
-        if(guard) guard.classList.remove('visible');
-        if(hazardMap) {
+      function renderGuard(){
+        if(!guard) return;
+        var t = guard.querySelector('.guard-title'), s = guard.querySelector('.guard-sub');
+        if(mapActive){
+          guard.setAttribute('data-state','active');
+          if(t) t.textContent = '✓ MAP ACTIVE';
+          if(s) s.textContent = 'Tap to lock & scroll';
+        } else {
+          guard.setAttribute('data-state','locked');
+          if(t) t.textContent = 'TAP TO INTERACT';
+          if(s) s.textContent = 'Pan & zoom the map';
+        }
+      }
+
+      // Engage = map becomes fully interactive. On mobile this enables one-finger
+      // drag, so it must ONLY be triggered by an explicit tap on the MAP itself
+      // (or the guard pill) — never by tab clicks, or single-finger swipes would
+      // hijack page scroll. touchZoom (pinch) is always on regardless.
+      function engage(){
+        if(mapActive) return;
+        mapActive = true;
+        if(hazardMap){
           hazardMap.scrollWheelZoom.enable();
-          // On mobile, dragging / doubleClickZoom / tap stay gated
-          // behind the explicit tap so single-finger gestures don't
-          // hijack page scroll. touchZoom stays always-on so two-
-          // finger pinch always works.
-          if (isMobile) {
+          if(isMobile){
             hazardMap.dragging.enable();
             hazardMap.doubleClickZoom.enable();
-            if (hazardMap.tap) hazardMap.tap.enable();
+            if(hazardMap.tap) hazardMap.tap.enable();
           }
         }
-        mapActive = true;
+        if(isMobile && guard){ guard.classList.add('visible'); renderGuard(); } // becomes the "tap to lock" pill
+        else if(guard){ guard.classList.remove('visible'); }
       }
 
-      function reengage(){
+      function lock(){
         if(!mapActive) return;
-        if(hazardMap) {
+        mapActive = false;
+        if(hazardMap){
           hazardMap.scrollWheelZoom.disable();
-          if (isMobile) {
+          if(isMobile){
             hazardMap.dragging.disable();
             hazardMap.doubleClickZoom.disable();
-            if (hazardMap.tap) hazardMap.tap.disable();
+            if(hazardMap.tap) hazardMap.tap.disable();
           }
         }
-        mapActive = false;
+        if(isMobile && guard){ guard.classList.add('visible'); renderGuard(); } // back to the "tap to interact" hint
       }
 
-      window.dismissMapGuard = function(){
-        dismiss();
+      // Tabs / other code call this to clear barriers. On mobile it must NOT
+      // engage drag (keeps page-scroll safe) — only a map tap / the pill do that.
+      window.dismissMapGuard = function(){ if(!isMobile) engage(); };
+      window._hazardEngageMap = engage;
+      window._hazardLockMap = lock;
+      window._hazardToggleMap = function(){ if(mapActive) lock(); else engage(); };
+      // Re-show or hide the guard pill to match the active view (called at the
+      // end of switchHazardTab): visible over a map tab on mobile, hidden for
+      // the lightning/hurricane non-map views.
+      window._hazardSyncGuard = function(){
+        if(!guard) return;
+        if(!isMobile){ guard.classList.remove('visible'); return; }
+        var mapEl = document.getElementById('hazard-map');
+        var shown = mapEl && mapEl.style.visibility !== 'hidden';
+        if(shown){ renderGuard(); guard.classList.add('visible'); }
+        else guard.classList.remove('visible');
       };
 
-      container.addEventListener('click', function(e){ e.stopPropagation(); dismiss(); });
-      container.addEventListener('wheel', function(e){
-        if(e.ctrlKey || e.metaKey) dismiss();
-      });
+      // Explicit map tap = engage roaming (also enables ⌘/ctrl wheel-zoom).
+      container.addEventListener('click', function(e){ e.stopPropagation(); engage(); });
+      container.addEventListener('wheel', function(e){ if(e.ctrlKey || e.metaKey) engage(); });
 
-      // Any click within the hazard widget (tabs, overlays, etc.) also dismisses
-      if(widget){
-        widget.addEventListener('click', function(){
-          if(!mapActive) dismiss();
-        });
+      // Desktop only: clicking anywhere in the widget enables wheel-zoom. On
+      // mobile this is deliberately NOT wired so tab clicks never enable drag.
+      if(widget && !isMobile){
+        widget.addEventListener('click', function(){ if(!mapActive) engage(); });
       }
 
-      // Re-engage scroll-zoom lock when clicking outside the widget
+      // Re-lock when clicking outside the widget
       document.addEventListener('click', function(e){
-        if(mapActive && widget && !widget.contains(e.target)){
-          reengage();
-        }
+        if(mapActive && widget && !widget.contains(e.target)) lock();
       });
-      // Also re-engage when scrolling outside the map area
+      // Re-lock when the map scrolls mostly out of view
       var _mapScrollTick = false;
       document.addEventListener('scroll', function(){
         if(!mapActive || _mapScrollTick) return;
         _mapScrollTick = true;
         requestAnimationFrame(function(){
           var rect = container.getBoundingClientRect();
-          if(rect.bottom < 100 || rect.top > window.innerHeight - 100){
-            reengage();
-          }
+          if(rect.bottom < 100 || rect.top > window.innerHeight - 100) lock();
           _mapScrollTick = false;
         });
       }, {passive:true});
+
+      // Mobile: show the "tap to interact" hint as soon as the map is ready.
+      if(isMobile && guard){ renderGuard(); guard.classList.add('visible'); }
     })();
 
     // Satellite basemap
@@ -62522,9 +62558,7 @@ function initNowMicroTabs(){
         // Show overlay controls now that map is active
         var fireOv = document.getElementById('hazard-fire-overlays');
         if (fireOv) fireOv.style.display = '';
-        // Dismiss the scroll guard now that the map exists
-        var guard = document.getElementById('hazard-scroll-guard');
-        if (guard) guard.classList.remove('visible');
+        // Guard pill is managed by initUnifiedHazardMap (mobile: tap-to-interact).
       }
       hw.addEventListener('click', initHazardOnClick, true);
     })();
