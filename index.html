@@ -53168,12 +53168,18 @@ function initNowMicroTabs(){
 
     // ── Plot markers for newly added fires (progressive rendering) ──
     function plotNewFireMarkers(){
+      // A chunked pass already in flight will pick up newly-added fires itself
+      // (it re-checks allFires.length each chunk), so don't start a second loop.
+      if (window._firePlotting) return;
       var _hzMapIsMobile = window.matchMedia('(max-width:768px)').matches;
-      for(var fi = markersPlotted; fi < allFires.length; fi++){
+      // Batch on mobile so a large hotspot dump (~1k VIIRS) doesn't block the
+      // main thread in one synchronous pass — plot in chunks across frames.
+      var CHUNK = _hzMapIsMobile ? 150 : 100000;
+      function plotOne(fi){
         var fire = allFires[fi];
         var coords = fire.geometry && fire.geometry.coordinates;
         var props = fire.properties || {};
-        if (!coords) continue;
+        if (!coords) return;
 
         var lat = coords[1], lon = coords[0];
         var name = props.IncidentName || props.FireName || props._name || 'Unknown';
@@ -53231,7 +53237,15 @@ function initNowMicroTabs(){
 
         fireMarkers.push(marker);
       }
-      markersPlotted = allFires.length;
+      function runChunk(){
+        var end = Math.min(markersPlotted + CHUNK, allFires.length);
+        for(var fi = markersPlotted; fi < end; fi++){ plotOne(fi); }
+        markersPlotted = end;
+        if(markersPlotted < allFires.length){ requestAnimationFrame(runChunk); }
+        else { window._firePlotting = false; }
+      }
+      window._firePlotting = true;
+      runChunk();
     }
 
     function onSourceComplete() {
@@ -60310,6 +60324,11 @@ function initNowMicroTabs(){
         var nearbyCount = 0;
         var significantCount = 0;
         var totalCount = 0;
+        // Mobile perf: quake markers are DOM divIcons. On phones make them
+        // non-interactive and skip the per-quake tooltip build (incl. the
+        // induced-seismicity scan over ~40 zones) — the earthquake detail panel
+        // below the map already carries this. Markers + counts still render.
+        var _qIsMobile = window.matchMedia('(max-width:768px)').matches;
 
         // Plot ALL global quakes (no magnitude floor)
         for (var i = 0; i < quakes.length; i++){
@@ -60354,6 +60373,7 @@ function initNowMicroTabs(){
           else sz = 5;
 
           var marker = L.marker([lat, lon], {
+            interactive: !_qIsMobile,
             icon: L.divIcon({
               className: '',
               html: '<div style="width:'+sz+'px;height:'+sz+'px;background:'+color+';border:none;transform:rotate(45deg);box-shadow:0 0 4px '+color+';"></div>',
@@ -60364,6 +60384,7 @@ function initNowMicroTabs(){
           if(window._quakeLayerGroup) window._quakeLayerGroup.addLayer(marker);
           else marker.addTo(quakeMap);
 
+          if(!_qIsMobile){
           var place = props.place || "Unknown";
           var time = props.time ? timeAgo(new Date(props.time)) : "";
           var distMi = Math.round(dist);
@@ -60434,6 +60455,7 @@ function initNowMicroTabs(){
           if(distMi < 10000) qtt += '<div class="hz-card-row"><span class="hz-label">Distance</span><span class="hz-val">'+distMi.toLocaleString()+' mi away</span></div>';
           if(time) qtt += '<div class="hz-card-footer">'+time+' · USGS</div>';
           marker.bindTooltip(qtt, { permanent: false, className: 'hz-tooltip', direction: 'top', offset: [0, -4] });
+          }
 
           quakeMarkers.push(marker);
         }
