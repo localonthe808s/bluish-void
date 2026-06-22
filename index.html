@@ -5172,13 +5172,13 @@
     stroke: #fde047;
     stroke-width: 2.6;
   }
-  /* Tornado overview card pulses red when a tornado happened in the last hour */
-  @keyframes hz-tornado-recent {
+  /* Any hazard overview card flashes red when an event occurred in the last hour */
+  @keyframes hz-recent-pulse {
     0%, 100% { box-shadow: 0 0 0 1px rgba(239,68,68,.4), 0 0 8px 0 rgba(239,68,68,.22); }
     50%      { box-shadow: 0 0 0 2px rgba(239,68,68,.85), 0 0 22px 4px rgba(239,68,68,.55); }
   }
-  .hz-dash-card.hz-tornado-recent {
-    animation: hz-tornado-recent 1.25s ease-in-out infinite;
+  .hz-dash-card.hz-recent-pulse {
+    animation: hz-recent-pulse 1.25s ease-in-out infinite;
     border-color: rgba(239,68,68,.65) !important;
   }
   .leaflet-overlay-pane .spc-pulse {
@@ -52390,7 +52390,7 @@ function initNowMicroTabs(){
       tornadoMarkers.push(marker);
     });
     _pulseLatestTornadoes();
-    _pulseTornadoOverviewIfRecent();
+    _pulseHazardRecency();
   }
 
   // Highlight only the single most-recent tornado report (pulse + yellow trim)
@@ -52417,26 +52417,55 @@ function initNowMicroTabs(){
   // tornado occurred within the last hour. Uses map markers' timestamps when
   // available, else the prefetched today_torn reports (so it works on the
   // overview before the map is opened). Re-checked on a 60s interval below.
-  function _pulseTornadoOverviewIfRecent(){
+  // Flash any hazard overview card whose latest event occurred in the last hour.
+  function _pulseHazardRecency(){
     try {
-      var latest = 0, now = Date.now();
+      var now = Date.now(), HOUR = 3600000, latest = {};
+
+      // Tornado — map markers' timestamps, else prefetched today_torn reports.
+      var torT = 0;
       if (tornadoMarkers && tornadoMarkers.length){
-        tornadoMarkers.forEach(function(mk){ if (mk._torTs && mk._torTs > latest) latest = mk._torTs; });
+        tornadoMarkers.forEach(function(mk){ if (mk._torTs && mk._torTs > torT) torT = mk._torTs; });
       } else {
         (window._tornadoReports || []).forEach(function(r){
           if (!r || !r.time || r.time.length < 4) return;
           var t = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate(),
                            parseInt(r.time.slice(0,2),10), parseInt(r.time.slice(2,4),10));
           if (t > now) t -= 86400000; // most-recent-past occurrence of that UTC time
-          if (t > latest) latest = t;
+          if (t > torT) torT = t;
         });
       }
-      var recent = latest > 0 && (now - latest) < 3600000;
-      var cards = document.querySelectorAll('.hz-dash-card[data-hz="tornado"]');
-      for (var i=0;i<cards.length;i++) cards[i].classList.toggle('hz-tornado-recent', recent);
+      latest.tornado = torT;
+
+      // Earthquake — USGS properties.time (epoch ms). Significant only (M4.0+),
+      // since micro-quakes happen worldwide every few minutes.
+      var qT = 0;
+      (window._quakeFeatures || []).forEach(function(f){
+        var p = f && f.properties;
+        if (!p || !p.time || (p.mag || 0) < 4.0) return;
+        if (p.time > qT) qT = p.time;
+      });
+      latest.quake = qT;
+
+      // Fire — newest NIFC discovery time (satellite hotspots lack one, so the
+      // constant FIRMS detections don't trigger it).
+      var fT = 0;
+      (window._activeFires || []).forEach(function(x){
+        var d = x && x.properties && (x.properties.FireDiscoveryDateTime || x.properties.CreateDate);
+        if (!d) return;
+        var t = new Date(d).getTime();
+        if (t && t > fT) fT = t;
+      });
+      latest.fire = fT;
+
+      Object.keys(latest).forEach(function(hz){
+        var recent = latest[hz] > 0 && (now - latest[hz]) < HOUR;
+        var cards = document.querySelectorAll('.hz-dash-card[data-hz="' + hz + '"]');
+        for (var i=0;i<cards.length;i++) cards[i].classList.toggle('hz-recent-pulse', recent);
+      });
     } catch(e){}
   }
-  if (!window._tornRecentTimer) window._tornRecentTimer = setInterval(_pulseTornadoOverviewIfRecent, 60000);
+  if (!window._hazRecencyTimer) window._hazRecencyTimer = setInterval(_pulseHazardRecency, 60000);
 
   function loadTornadoReports(){
     // Skip if just loaded (guards against interval + switchHazardTab overlap)
@@ -62528,6 +62557,7 @@ function initNowMicroTabs(){
               var fires = d.features || [];
               fires.forEach(function(f){ if(f.properties) f.properties._country = 'US'; });
               window._activeFires = fires;
+              if (typeof _pulseHazardRecency === 'function') _pulseHazardRecency();
             }
             function tryPrecomputeSmoke(){
               if(window._wxCurrent && window._wxHourly && window._wxNearestIdx != null && window._activeFires && window._activeFires.length > 0){
@@ -62587,6 +62617,7 @@ function initNowMicroTabs(){
             var el = document.getElementById('hazard-badge-quake');
             if(el){ el.textContent = d.features.length.toLocaleString(); el.style.display = 'inline-flex'; }
             window._quakeFeatures = d.features;
+            if (typeof _pulseHazardRecency === 'function') _pulseHazardRecency();
             try{ window._hzDashUpdate && window._hzDashUpdate(); }catch(e){}
           }
         }).catch(function(){});
@@ -62618,7 +62649,7 @@ function initNowMicroTabs(){
             window._tornadoLocations = locs;
             // Don't clobber the richer objects the full tornado loader builds later
             if(!(window._tornadoReports && window._tornadoReports.length)) window._tornadoReports = preReports;
-            if (typeof _pulseTornadoOverviewIfRecent === 'function') _pulseTornadoOverviewIfRecent();
+            if (typeof _pulseHazardRecency === 'function') _pulseHazardRecency();
           }
           try{ window._hzDashUpdate && window._hzDashUpdate(); }catch(e){}
         }).catch(function(){});
