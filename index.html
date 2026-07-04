@@ -23365,28 +23365,41 @@ function dayRangeAround(d, days){
         var loc = window.LOCATION || {};
         fetchWithTimeout(su, null, 10000).then(function(r){ return r.json(); })
           .then(function(d){
-            var st = d && d.features && d.features[0] && d.features[0].properties && d.features[0].properties.stationIdentifier;
-            if (!st) throw new Error('no station');
-            return fetchWithTimeout('https://api.weather.gov/stations/' + st + '/observations/latest', null, 10000)
-              .then(function(r){ return r.json(); })
-              .then(function(o){ return { st: st, o: o }; });
+            // Sample up to FIVE nearby stations, not one: an ASOS ceilometer
+            // is a point sensor (only sees cloud passing directly overhead)
+            // and reports CLR for anything above ~12k ft — scattered cumulus
+            // that misses one beam usually catches another ~10mi away
+            // (2026-07-04: LGA+TEB read CLR while NYC/JFK/EWR all saw SCT+).
+            var sts = ((d && d.features) || []).slice(0, 5).map(function(f){
+              return f.properties && f.properties.stationIdentifier;
+            }).filter(Boolean);
+            if (!sts.length) throw new Error('no station');
+            return Promise.all(sts.map(function(st){
+              return fetchWithTimeout('https://api.weather.gov/stations/' + st + '/observations/latest', null, 10000)
+                .then(function(r){ return r.json(); })
+                .catch(function(){ return null; });
+            })).then(function(os){ return { sts: sts, os: os }; });
           })
           .then(function(res){
-            var p = res.o && res.o.properties; if (!p) return;
             var AMT = { FEW:15, SCT:44, BKN:75, OVC:95, VV:100 };
-            var low=0, mid=0, high=0, seen=false;
-            (p.cloudLayers || []).forEach(function(l){
-              seen = true;
-              var pct = AMT[(l.amount || '').toUpperCase()] || 0;
-              var base = (l.base && l.base.value != null) ? l.base.value : 0; // meters AGL
-              if (base < 2000) low = Math.max(low, pct);
-              else if (base < 6000) mid = Math.max(mid, pct);
-              else high = Math.max(high, pct);
+            var low=0, mid=0, high=0, seen=false, newest=0, used=[];
+            res.os.forEach(function(o, oi){
+              var p = o && o.properties; if (!p) return;
+              var ts = p.timestamp ? new Date(p.timestamp).getTime() : 0;
+              if (!ts || Date.now() - ts > 2 * 3600000) return; // stale
+              var had = false;
+              (p.cloudLayers || []).forEach(function(l){
+                had = true;
+                var pct = AMT[(l.amount || '').toUpperCase()] || 0;
+                var base = (l.base && l.base.value != null) ? l.base.value : 0; // meters AGL
+                if (base < 2000) low = Math.max(low, pct);
+                else if (base < 6000) mid = Math.max(mid, pct);
+                else high = Math.max(high, pct);
+              });
+              if (had){ seen = true; newest = Math.max(newest, ts); used.push(res.sts[oi]); }
             });
-            if (!seen) return; // station reports no layer data — don't blend
-            var ts = p.timestamp ? new Date(p.timestamp).getTime() : Date.now();
-            if (Date.now() - ts > 2 * 3600000) return; // stale observation
-            window._obsClouds = { low:low, mid:mid, high:high, ts:ts, lat:loc.lat, lon:loc.lon, station:res.st };
+            if (!seen) return; // no station reported layer data — don't blend
+            window._obsClouds = { low:low, mid:mid, high:high, ts:newest, lat:loc.lat, lon:loc.lon, station:used.join('+') };
             // re-render the golden hour panel with the blended sky (debounced)
             window._lastGHRenderKey = null;
             clearTimeout(window._ghObsRefreshTo);
