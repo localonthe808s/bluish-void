@@ -11217,24 +11217,34 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
   window.LOCATION = LOCATION; // expose to non-IIFE consumers (detectLandscape, etc.)
   var TZ = LOCATION.tz;
 
-  // Derive US state code + nearest observation station from coordinates
-  (function(){
+  // Derive US state code + nearest observation station from coordinates.
+  // Re-runs on every location change via loadWeatherForLocation — the
+  // original one-shot ran at parse with the default NYC LOCATION, leaving
+  // the state + station list stale for custom/restored locations (temp
+  // verification and observed-cloud blending hit NYC stations everywhere).
+  window._refreshNwsPoint = function(){
     try {
-      fetch('https://api.weather.gov/points/' + LOCATION.lat.toFixed(4) + ',' + LOCATION.lon.toFixed(4))
+      var key = LOCATION.lat.toFixed(4) + ',' + LOCATION.lon.toFixed(4);
+      if (window._nwsPointFor === key) return; // already have this point
+      window._nwsPointFor = key;
+      window._nwsStationsUrl = null;
+      fetch('https://api.weather.gov/points/' + key)
         .then(function(r){ return r.json(); })
         .then(function(d){
           if(d && d.properties){
             if(d.properties.relativeLocation && d.properties.relativeLocation.properties){
               window._userState = d.properties.relativeLocation.properties.state || 'NY';
             }
-            // Save observation stations URL for NWS temp verification
+            // Save observation stations URL for NWS temp verification + obs clouds
             if(d.properties.observationStations){
               window._nwsStationsUrl = d.properties.observationStations;
+              if (typeof window._fetchObsClouds === 'function') window._fetchObsClouds(0);
             }
           }
-        }).catch(function(){});
+        }).catch(function(){ window._nwsPointFor = null; });
     } catch(e){}
-  })();
+  };
+  window._refreshNwsPoint();
 
   /* =========================================================
      UTILITIES
@@ -21165,6 +21175,22 @@ function dayRangeAround(d, days){
           return types;
         }
         // Classify clouds for both panels
+        // ── OBSERVED-SKY BLEND (NOW panel only) ──
+        // METARs see the real sky; the model routinely misses small summer
+        // convective cloud (e.g. 9% model vs SCT observed). Take
+        // max(model, observed) per band: observations can ADD cloud the
+        // model missed, but can't erase model-only high cirrus (stations
+        // rarely report layers above ~12k ft). Forecast side stays model.
+        try{
+          var _oc=window._obsClouds;
+          if(_oc && Date.now()-_oc.ts < 90*60000 &&
+             Math.abs(_oc.lat-LOCATION.lat)<1 && Math.abs(_oc.lon-LOCATION.lon)<1){
+            cn.cL=Math.max(cn.cL||0,_oc.low||0);
+            cn.cM=Math.max(cn.cM||0,_oc.mid||0);
+            cn.cH=Math.max(cn.cH||0,_oc.high||0);
+            cn.cT=Math.max(cn.cT||0,cn.cL,cn.cM,cn.cH);
+          }
+        }catch(e){}
         var cnTypes = classifyClouds(cn);
         var fcTypes = classifyClouds(fc);
 
@@ -23212,6 +23238,53 @@ function dayRangeAround(d, days){
     // Daylight readout lives in the NOW header, below the SUN line
     var ghND=document.getElementById('ghNowDaylight');
     if(ghND) ghND.textContent='DAYLIGHT '+daylightHours+'H '+daylightMins+'M'+(tlDaylightChange&&tlDaylightChange.textContent?' '+tlDaylightChange.textContent:'');
+
+    // ── OBSERVED CLOUD LAYERS (nearest NWS station METAR, one-time init) ──
+    // Feeds the observed-sky blend in the golden hour engine: FEW≈15%,
+    // SCT≈44%, BKN≈75%, OVC≈95%, bucketed low/mid/high by base altitude.
+    if (!window._obsCloudsInit) {
+      window._obsCloudsInit = true;
+      window._fetchObsClouds = function(retries){
+        retries = retries == null ? 10 : retries;
+        var su = window._nwsStationsUrl;
+        if (!su){ if (retries > 0) setTimeout(function(){ window._fetchObsClouds(retries-1); }, 1500); return; }
+        var loc = window.LOCATION || {};
+        fetchWithTimeout(su, null, 10000).then(function(r){ return r.json(); })
+          .then(function(d){
+            var st = d && d.features && d.features[0] && d.features[0].properties && d.features[0].properties.stationIdentifier;
+            if (!st) throw new Error('no station');
+            return fetchWithTimeout('https://api.weather.gov/stations/' + st + '/observations/latest', null, 10000)
+              .then(function(r){ return r.json(); })
+              .then(function(o){ return { st: st, o: o }; });
+          })
+          .then(function(res){
+            var p = res.o && res.o.properties; if (!p) return;
+            var AMT = { FEW:15, SCT:44, BKN:75, OVC:95, VV:100 };
+            var low=0, mid=0, high=0, seen=false;
+            (p.cloudLayers || []).forEach(function(l){
+              seen = true;
+              var pct = AMT[(l.amount || '').toUpperCase()] || 0;
+              var base = (l.base && l.base.value != null) ? l.base.value : 0; // meters AGL
+              if (base < 2000) low = Math.max(low, pct);
+              else if (base < 6000) mid = Math.max(mid, pct);
+              else high = Math.max(high, pct);
+            });
+            if (!seen) return; // station reports no layer data — don't blend
+            var ts = p.timestamp ? new Date(p.timestamp).getTime() : Date.now();
+            if (Date.now() - ts > 2 * 3600000) return; // stale observation
+            window._obsClouds = { low:low, mid:mid, high:high, ts:ts, lat:loc.lat, lon:loc.lon, station:res.st };
+            // re-render the golden hour panel with the blended sky (debounced)
+            window._lastGHRenderKey = null;
+            clearTimeout(window._ghObsRefreshTo);
+            window._ghObsRefreshTo = setTimeout(function(){
+              try{ if (typeof tlRenderForOffset === 'function') tlRenderForOffset(); }catch(e){}
+            }, 800);
+          })
+          .catch(function(){});
+      };
+      window._fetchObsClouds();
+      setInterval(function(){ if (!document.hidden) window._fetchObsClouds(0); }, 15 * 60000);
+    }
 
     // ── ISS PASS PREDICTION (one-time init, periodic refresh) ──
     // Fetches 10 ISS positions over the next 20 min from api.wheretheiss.at,
@@ -31520,6 +31593,10 @@ function dayRangeAround(d, days){
     if (!locNameEl) return;
 
     setText(locNameEl, loc.name);
+
+    // Keep the NWS point (state + observation stations) tracking the
+    // current location; no-ops when coordinates haven't changed.
+    if (typeof window._refreshNwsPoint === 'function') window._refreshNwsPoint();
 
     // Auto-populate geo metadata for landscape detection if not set by search
     if(!window._geoMeta || !window._geoMeta.population){
