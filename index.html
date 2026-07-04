@@ -37943,35 +37943,61 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     var indexUrl = "https://www.star.nesdis.noaa.gov/GOES/sector_band.php?band=" + goesBand + "&sat=" + goesSat + "&sector=" + goesSector + "&length=" + goesLength;
     goesLiveEl.textContent = "• LOADING";
 
-    // NESDIS's index page can take 10-15s under load (2026-07-04: consistently
-    // 10.5-13.5s), which blew the old 12s direct timeout and flipped the widget
-    // to OFFLINE while the imagery CDN was fine. Go through the edge cache
-    // first (star.nesdis is allowlisted, 300s TTL + stale-on-error, one slow
-    // fetch warms it for every visitor), fall back to a patient direct fetch.
-    return fetchWithTimeout("https://proxy.bluishvoid.com/?url=" + encodeURIComponent(indexUrl), null, 15000)
-      .catch(function(){ return fetchWithTimeout(indexUrl, null, 25000); })
-      .then(function(r){ return r.text(); })
-      .then(function(html){
-        var goesNum = goesSat === "G18" ? "GOES18" : "GOES19";
-        var re = new RegExp("https://cdn\\.star\\.nesdis\\.noaa\\.gov/" + goesNum + "/ABI/SECTOR/" + goesSector + "/" + goesBand + "/[^\"' ]+\\.jpg", "gi");
-    
+    var goesNum = goesSat === "G18" ? "GOES18" : "GOES19";
+    var dirUrl = "https://cdn.star.nesdis.noaa.gov/" + goesNum + "/ABI/SECTOR/" + goesSector + "/" + goesBand + "/";
+
+    // PRIMARY: the imagery CDN serves its own directory listing with
+    // Access-Control-Allow-Origin:* in ~0.5s — no need to scrape the
+    // sector_band.php page (which has been hanging 10-30s+ under load,
+    // 2026-07-04). Prefer the 1200x1200 rendition (what sector_band.php
+    // embedded); if a band doesn't offer it, take the most numerous size.
+    function frameUrlsFromDir(){
+      return fetchWithTimeout(dirUrl, null, 10000)
+        .then(function(r){ return r.text(); })
+        .then(function(html){
+          var re = new RegExp('href="(\\d{11}_' + goesNum + '-ABI-' + goesSector + '-' + goesBand + '-(\\d+x\\d+)\\.jpg)"', 'g');
+          var buckets = {}, m;
+          while ((m = re.exec(html)) !== null){
+            (buckets[m[2]] = buckets[m[2]] || []).push(m[1]);
+          }
+          var sizes = Object.keys(buckets);
+          if (!sizes.length) throw new Error('empty CDN dir listing');
+          var size = buckets['1200x1200'] ? '1200x1200' :
+            sizes.sort(function(a,b){ return buckets[b].length - buckets[a].length; })[0];
+          var files = buckets[size];
+          files.sort(); // fixed-width timestamp prefix sorts chronologically
+          return files.slice(-goesLength).map(function(f){ return dirUrl + f; });
+        });
+    }
+
+    // FALLBACK: old sector_band.php scrape — edge proxy first, then a
+    // patient direct fetch.
+    function frameUrlsFromIndexPage(){
+      return fetchWithTimeout("https://proxy.bluishvoid.com/?url=" + encodeURIComponent(indexUrl), null, 15000)
+        .catch(function(){ return fetchWithTimeout(indexUrl, null, 25000); })
+        .then(function(r){ return r.text(); })
+        .then(function(html){
+          var re = new RegExp("https://cdn\\.star\\.nesdis\\.noaa\\.gov/" + goesNum + "/ABI/SECTOR/" + goesSector + "/" + goesBand + "/[^\"' ]+\\.jpg", "gi");
+          var matches = html.match(re) || [];
+          var seen = Object.create(null), uniq = [];
+          for (var i=0;i<matches.length;i++){
+            if (seen[matches[i]]) continue;
+            seen[matches[i]] = true;
+            uniq.push(matches[i]);
+          }
+          return uniq.slice(-goesLength);
+        });
+    }
+
+    return frameUrlsFromDir()
+      .catch(function(){ return frameUrlsFromIndexPage(); })
+      .then(function(uniq){
         var goesSubEl = document.getElementById("fcast-source-link");
         var sectorNames = { ne:'NORTHEAST',se:'SOUTHEAST',umv:'UPPER MISS VALLEY',cgl:'GREAT LAKES',smv:'SOUTH MISS VALLEY',sp:'SOUTH PLAINS',nr:'NORTHERN ROCKIES',sr:'SOUTHERN ROCKIES',eus:'EAST COAST',car:'CARIBBEAN',gm:'GULF',pr:'PUERTO RICO',taw:'TROPICAL ATLANTIC',can:'CANADA',pnw:'PACIFIC NW',psw:'PACIFIC SW',wus:'WEST US',np:'NORTH PACIFIC',ep:'EAST PACIFIC',mex:'MEXICO',cam:'CENTRAL AMERICA',nsa:'SOUTH AMERICA N',ssa:'SOUTH AMERICA S' };
         var bandNames = { GEOCOLOR:'GEOCOLOR',AirMass:'AIR MASS',Sandwich:'SANDWICH',DayNightCloudMicroCombo:'CLOUD MICRO',FireTemperature:'FIRE TEMP',Dust:'DUST',EXTENT3:'GLM LIGHTNING',DMW:'MOTION WINDS','01':'B1 BLUE','02':'B2 RED','03':'B3 VEGGIE','04':'B4 CIRRUS','05':'B5 SNOW/ICE','06':'B6 CLOUD','07':'B7 SHORTWAVE IR','08':'B8 UPPER WV','09':'B9 MID WV','10':'B10 LOWER WV','11':'B11 CLOUD PHASE','12':'B12 OZONE','13':'B13 CLEAN IR','14':'B14 LONGWAVE','15':'B15 DIRTY IR','16':'B16 CO2' };
         var satName = goesSat === "G18" ? "GOES-18" : "GOES-19";
         var sectorLabel = window.matchMedia('(max-width:768px)').matches ? goesSector.toUpperCase() : (sectorNames[goesSector] || goesSector.toUpperCase());
         if (goesSubEl && fcastState.range === 'clouds') goesSubEl.textContent = "NESDIS/STAR GOES | " + sectorLabel + " • " + (bandNames[goesBand] || goesBand);
-
-        var matches = html.match(re) || [];
-        var seen = Object.create(null);
-        var uniq = [];
-
-        for (var i=0;i<matches.length;i++){
-          var u = matches[i];
-          if (seen[u]) continue;
-          seen[u] = true;
-          uniq.push(u);
-        }
 
         if (uniq.length){
           goesFrames = uniq.slice(-goesLength);
