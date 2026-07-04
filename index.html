@@ -38055,25 +38055,31 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (loadText) loadText.textContent = 'CHASING CLOUDS 0/' + total;
     if (goesLiveEl) goesLiveEl.textContent = "• LOADING 0%";
 
-    var INITIAL_BATCH = Math.min(6, total);
-    var BG_BATCH_SIZE = 3;
-    var animStarted = false;
-    var safetyTimer = null;
+    // Load EVERY frame behind the loader, then start playback once — the old
+    // flow started playing after the first 6 frames and streamed the rest in
+    // mid-loop, which is why the animation stuttered vs the source site.
+    var started = false;
+    var stallTimer = null;
+
+    function startWhenReady(){
+      if (started) return;
+      started = true;
+      if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
+      // Drop failed frames so playback never draws a blank image
+      goesImages = goesImages.filter(function(im){ return im && im.complete && im.naturalWidth; });
+      if (goesLiveEl) goesLiveEl.textContent = goesImages.length ? "• LIVE" : "• OFFLINE";
+      if (loadText) loadText.textContent = '';
+      hideGoesOverlay();
+      if (goesAnimId) { cancelAnimationFrame(goesAnimId); goesAnimId = null; }
+      startGoesCanvasAnim();
+    }
 
     function updateProgress(){
       loaded++;
       var pct = Math.round(loaded/total*100);
-      if (goesLiveEl) goesLiveEl.textContent = animStarted ? "• LIVE " + pct + "%" : "• LOADING " + pct + "%";
+      if (goesLiveEl) goesLiveEl.textContent = "• LOADING " + pct + "%";
       if (loadText) loadText.textContent = 'CHASING CLOUDS ' + loaded + '/' + total;
-      if (loaded === total){
-        if (goesLiveEl) goesLiveEl.textContent = "• LIVE";
-        if (loadText) loadText.textContent = '';
-        // Rebuild stream with all frames — cancel old loop first
-        if (animStarted) {
-          if (goesAnimId) { cancelAnimationFrame(goesAnimId); goesAnimId = null; }
-          startGoesCanvasAnim();
-        }
-      }
+      if (loaded >= total) startWhenReady();
     }
 
     function loadFrame(i, cb){
@@ -38085,49 +38091,26 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       goesImages[i] = img;
     }
 
-    var initialLoaded = 0;
-    for (var i = 0; i < INITIAL_BATCH; i++){
-      (function(idx){
-        loadFrame(idx, function(){
-          initialLoaded++;
-          if (initialLoaded >= INITIAL_BATCH && !animStarted){
-            animStarted = true;
-            if (safetyTimer) { clearTimeout(safetyTimer); safetyTimer = null; }
-            hideGoesOverlay();
-            startGoesCanvasAnim();
-            loadBackgroundBatch(INITIAL_BATCH);
-          }
-        });
-      })(i);
-    }
-
-    function loadBackgroundBatch(startIdx){
-      if (startIdx >= total) return;
-      var end = Math.min(startIdx + BG_BATCH_SIZE, total);
-      var batchDone = 0;
-      var batchSize = end - startIdx;
+    // Parallel-load in small batches — keeps the CDN polite and the
+    // CHASING CLOUDS counter ticking smoothly.
+    var BATCH = 6;
+    function loadBatch(startIdx){
+      if (startIdx >= total || started) return;
+      var end = Math.min(startIdx + BATCH, total);
+      var done = 0;
       for (var j = startIdx; j < end; j++){
         (function(idx){
           loadFrame(idx, function(){
-            batchDone++;
-            if (batchDone >= batchSize){
-              setTimeout(function(){ loadBackgroundBatch(end); }, 100);
-            }
+            done++;
+            if (done >= end - startIdx) loadBatch(end);
           });
         })(j);
       }
     }
+    loadBatch(0);
 
-    // Safety: if initial batch takes >8s, start with whatever we have
-    safetyTimer = setTimeout(function(){
-      safetyTimer = null;
-      if (!animStarted && loaded > 0){
-        animStarted = true;
-        hideGoesOverlay();
-        startGoesCanvasAnim();
-        loadBackgroundBatch(INITIAL_BATCH);
-      }
-    }, 8000);
+    // Stall guard: if the CDN hangs, start with whatever finished after 20s
+    stallTimer = setTimeout(startWhenReady, 20000);
   }
 
   function drawGoesFrame(ctx, img, w, h){
@@ -38164,68 +38147,30 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     var ctx = goesCanvas.getContext('2d');
     if (typeof window._goesSleeping === 'undefined') window._goesSleeping = false;
 
-    var STEPS = 10;
-    // Free previous stream canvases
-    if (window._goesStream) {
-      window._goesStream.length = 0;
-    }
-    window._goesStream = [];
-    var stream = window._goesStream;
-    var streamReady = false;
-    var _goesLastStreamFrame = -1;
-
-    function buildStream(){
-      var n = goesImages.length;
-      if (n < 2) { streamReady = true; return; }
-
-      var rect = goesCanvas.getBoundingClientRect();
-      var w = Math.round(rect.width);
-      var h = Math.round(rect.height);
-      var comp = document.createElement('canvas');
-      comp.width = w;
-      comp.height = h;
-      var cctx = comp.getContext('2d');
-      stream.length = 0;
-      var pair = 0;
-
-      function processPair(){
-        if (pair >= n - 1) {
-          streamReady = true;
-          comp = null; cctx = null;
-          return;
-        }
-        var imgA = goesImages[pair];
-        var imgB = goesImages[pair + 1];
-        for (var step = 0; step < STEPS; step++){
-          var blend = step / STEPS;
-          cctx.globalAlpha = 1;
-          cctx.clearRect(0, 0, w, h);
-          drawGoesFrame(cctx, imgA, w, h);
-          if (blend > 0) {
-            cctx.globalAlpha = blend;
-            drawGoesFrame(cctx, imgB, w, h);
-            cctx.globalAlpha = 1;
-          }
-          var snap = document.createElement('canvas');
-          snap.width = w;
-          snap.height = h;
-          snap.getContext('2d').drawImage(comp, 0, 0);
-          stream.push(snap);
-        }
-        pair++;
-        if (pair % 3 === 0) { setTimeout(processPair, 0); }
-        else { processPair(); }
-      }
-      processPair();
-    }
-
-    buildStream();
-
-    // Playback — forward only with hold on last frame + subtle opacity dip on reset
-    var HOLD_MS = 2000;       // hold last frame 2s
-    var DIP_MS = 200;         // opacity dip duration
+    // Plain flipbook, matching the source site's player: frames are fully
+    // preloaded behind the loading overlay, so draw each real satellite frame
+    // in sequence. (The old pipeline pre-rendered every frame pair into 10
+    // synthesized crossfade canvases — 300+ offscreen canvases per loop — and
+    // played those, which is why the loop crawled compared to NESDIS's site.)
+    var FRAME_MS = 150;       // per-frame display time ~ source-site pace
+    var HOLD_MS = 2000;       // hold last frame 2s (source player pauses too)
+    var DIP_MS = 200;         // opacity dip duration on loop restart
     var holdStart = 0;
     var dipPhase = 0;         // 0=normal, 1=holding, 2=dipping-down, 3=dipping-up
+    var _goesLastDrawnFrame = -1;
+
+    function drawFrameN(frame){
+      var pw = window._goesDisplaySize.w || goesCanvas.width;
+      var ph = window._goesDisplaySize.h || goesCanvas.height;
+      if (goesCanvas.width !== pw || goesCanvas.height !== ph){
+        goesCanvas.width = pw;
+        goesCanvas.height = ph;
+        ctx = goesCanvas.getContext('2d');
+      }
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, pw, ph);
+      drawGoesFrame(ctx, goesImages[frame], pw, ph);
+    }
 
     function animate(timestamp){
       // Always keep this closure as the latest resume target.
@@ -38233,19 +38178,16 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       // Full pause (no rAF reschedule) when tab is hidden or canvas off-screen.
       if (document.hidden || !window._goesCanvasVisible) { return; }
       if (!s.playing || window._goesSleeping) { goesAnimId = requestAnimationFrame(animate); return; }
-      if (!streamReady || stream.length === 0) { goesAnimId = requestAnimationFrame(animate); return; }
 
       if (!s.lastTime) s.lastTime = timestamp;
       var dt = timestamp - s.lastTime;
       s.lastTime = timestamp;
       if (dt > 200) dt = 16;
 
-      var total = stream.length;
       var n = goesImages.length;
 
       // Handle hold + dip at end of loop
       if (dipPhase === 1) {
-        // Holding on last frame
         if (timestamp - holdStart >= HOLD_MS) {
           dipPhase = 2;
           holdStart = timestamp;
@@ -38254,13 +38196,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         return;
       }
       if (dipPhase === 2) {
-        // Dipping opacity down
         var dipProg = Math.min((timestamp - holdStart) / DIP_MS, 1);
         goesCanvas.style.opacity = 1 - (dipProg * 0.15);
         if (dipProg >= 1) {
-          // Jump to frame 0
           s.position = 0;
-          _goesLastStreamFrame = -1;
+          _goesLastDrawnFrame = -1;
           dipPhase = 3;
           holdStart = timestamp;
         }
@@ -38268,7 +38208,6 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         return;
       }
       if (dipPhase === 3) {
-        // Dipping opacity back up
         var upProg = Math.min((timestamp - holdStart) / DIP_MS, 1);
         goesCanvas.style.opacity = 0.85 + (upProg * 0.15);
         if (upProg >= 1) {
@@ -38279,46 +38218,26 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         return;
       }
 
-      // Normal forward playback — 20ms per crossfade step × STEPS(10) =
-      // ~200ms per satellite frame, matching the NESDIS site player's pace
-      // (65 made each frame linger ~650ms and the loop feel like slow motion).
-      s.position += dt / 20;
+      // Normal forward playback — one real frame per FRAME_MS
+      s.position += dt / FRAME_MS;
 
       // Reached the end — draw final frame, then enter hold phase
-      if (s.position >= total) {
-        s.position = total - 1;
-        var pw = window._goesDisplaySize.w || goesCanvas.width;
-        var ph = window._goesDisplaySize.h || goesCanvas.height;
-        if (goesCanvas.width !== pw || goesCanvas.height !== ph){
-          goesCanvas.width = pw; goesCanvas.height = ph;
-          ctx = goesCanvas.getContext('2d');
-        }
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.drawImage(stream[total - 1], 0, 0, pw, ph);
+      if (s.position >= n) {
+        s.position = n - 1;
+        drawFrameN(n - 1);
         if (goesFrameEl) goesFrameEl.textContent = n + "/" + n;
-        _goesLastStreamFrame = total - 1;
+        _goesLastDrawnFrame = n - 1;
         dipPhase = 1;
         holdStart = timestamp;
         goesAnimId = requestAnimationFrame(animate);
         return;
       }
 
-      var frame = Math.floor(s.position) % total;
-
-      if (frame !== _goesLastStreamFrame) {
-        _goesLastStreamFrame = frame;
-
-        var pw = window._goesDisplaySize.w || goesCanvas.width;
-        var ph = window._goesDisplaySize.h || goesCanvas.height;
-        if (goesCanvas.width !== pw || goesCanvas.height !== ph){
-          goesCanvas.width = pw;
-          goesCanvas.height = ph;
-          ctx = goesCanvas.getContext('2d');
-        }
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.drawImage(stream[frame], 0, 0, pw, ph);
-
-        if (goesFrameEl) goesFrameEl.textContent = Math.floor(frame / STEPS + 1) + "/" + n;
+      var frame = Math.floor(s.position) % n;
+      if (frame !== _goesLastDrawnFrame) {
+        _goesLastDrawnFrame = frame;
+        drawFrameN(frame);
+        if (goesFrameEl) goesFrameEl.textContent = (frame + 1) + "/" + n;
       }
 
       goesAnimId = requestAnimationFrame(animate);
