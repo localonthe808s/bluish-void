@@ -39396,6 +39396,27 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     return h.toString().padStart(2, '0');
   }
 
+  // Day boundaries in the VIEWED location's timezone (LOCATION.tz), not the
+  // browser's — so REST OF DAY / TOMORROW windows follow the city on screen.
+  // Derived by subtracting the location's elapsed time-of-day from now (no
+  // offset tables; DST-safe except mid-transition). Falls back to
+  // browser-local midnight if the tz string is invalid.
+  function fcastDayBounds(){
+    var now = new Date();
+    try {
+      var tz = (typeof LOCATION !== 'undefined' && LOCATION.tz) || TZ;
+      var p = {};
+      new Intl.DateTimeFormat('en-US', {timeZone: tz, hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false})
+        .formatToParts(now).forEach(function(x){ p[x.type] = x.value; });
+      var sinceMidnight = ((+p.hour % 24) * 3600 + (+p.minute) * 60 + (+p.second)) * 1000;
+      var todayStart = now.getTime() - sinceMidnight;
+      return { now: now, todayEnd: todayStart + 86400000, tomorrowEnd: todayStart + 172800000 };
+    } catch(e){
+      var end = new Date(now); end.setHours(24,0,0,0);
+      return { now: now, todayEnd: end.getTime(), tomorrowEnd: end.getTime() + 86400000 };
+    }
+  }
+
   function getActiveFhrs(){
     // LIVE mode: 10 frames from Ridge radar (9=oldest, 0=newest)
     if (fcastState.range === 'live') return ['9','8','7','6','5','4','3','2','1','0'];
@@ -39423,28 +39444,28 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
 
     // Apply range filter to ALL models
     if (fcastState.range === 'today'){
-      // REST OF DAY: frames from now through local midnight
+      // REST OF DAY: frames from now through midnight in the viewed location's tz
       var cycleHourT = parseInt(fcastState.cycle, 10);
-      var nowT = new Date();
+      var boundsT = fcastDayBounds();
+      var nowT = boundsT.now;
       var cycleDateT = new Date(Date.UTC(nowT.getUTCFullYear(), nowT.getUTCMonth(), nowT.getUTCDate(), cycleHourT));
       if (cycleDateT > nowT) cycleDateT.setUTCDate(cycleDateT.getUTCDate() - 1);
-      var todayEnd = new Date(nowT); todayEnd.setHours(24,0,0,0);
       var minHT = Math.max(1, Math.floor((nowT.getTime() - cycleDateT.getTime()) / 3600000));
-      var maxHT = Math.ceil((todayEnd.getTime() - cycleDateT.getTime()) / 3600000);
+      var maxHT = Math.ceil((boundsT.todayEnd - cycleDateT.getTime()) / 3600000);
       var resultT = allFhrs.filter(function(f){ var h = parseInt(f,10); return h >= minHT && h <= maxHT; });
       // Late night / sparse model fhrs can leave the window empty — fall back to the first 24h
       if (resultT.length === 0) resultT = allFhrs.filter(function(f){ return parseInt(f,10) <= 24; });
       return resultT;
     }
     if (fcastState.range === 'tomorrow'){
+      // TOMORROW: the viewed location's next calendar day (midnight to midnight in LOCATION.tz)
       var cycleHour = parseInt(fcastState.cycle, 10);
-      var now = new Date();
+      var bounds = fcastDayBounds();
+      var now = bounds.now;
       var cycleDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), cycleHour));
       if (cycleDate > now) cycleDate.setUTCDate(cycleDate.getUTCDate() - 1);
-      var tomorrowStart = new Date(now); tomorrowStart.setDate(tomorrowStart.getDate() + 1); tomorrowStart.setHours(0,0,0,0);
-      var tomorrowEnd = new Date(tomorrowStart); tomorrowEnd.setDate(tomorrowEnd.getDate() + 1);
-      var minH = Math.max(1, Math.ceil((tomorrowStart.getTime() - cycleDate.getTime()) / 3600000));
-      var maxH = Math.ceil((tomorrowEnd.getTime() - cycleDate.getTime()) / 3600000);
+      var minH = Math.max(1, Math.ceil((bounds.todayEnd - cycleDate.getTime()) / 3600000));
+      var maxH = Math.ceil((bounds.tomorrowEnd - cycleDate.getTime()) / 3600000);
       var result = allFhrs.filter(function(f){ var h = parseInt(f,10); return h >= minH && h <= maxH; });
       if (result.length === 0) result = allFhrs.filter(function(f){ return parseInt(f,10) <= 48; });
       return result;
