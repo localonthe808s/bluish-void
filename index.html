@@ -11243,6 +11243,11 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
               window._nwsStationsUrl = d.properties.observationStations;
               if (typeof window._fetchObsClouds === 'function') window._fetchObsClouds(0);
             }
+            // Gridpoint raw-data URL — feeds the sunset-score NWS cross-check
+            if(d.properties.forecastGridData){
+              window._nwsGridUrl = d.properties.forecastGridData;
+              if (typeof window._fetchNwsSky === 'function') window._fetchNwsSky(0);
+            }
           }
         }).catch(function(){ window._nwsPointFor = null; });
     } catch(e){}
@@ -21540,6 +21545,43 @@ function dayRangeAround(d, days){
         // Hard cap: sun-blocked sky physically can't render warm color regardless of
         // every other condition. Applied after clamp so the cap is the final word.
         if(window._ghSunBlocked) qs=Math.min(qs, 25);
+        // ── NWS FORECAST CROSS-CHECK ──
+        // Open-Meteo's cloud fields miss convection its own CAPE predicts
+        // (2026-07-04: 0% cloud all evening while NWS had "t-storms likely,
+        // mostly cloudy" at golden hour). Blend the human-forecast gridpoint:
+        // thunder / high precip probability in the GH window caps the score;
+        // heavy NWS sky cover the model doesn't see drags it down. The
+        // reason string surfaces in the forecast panel's reason lines.
+        window._ghNwsAdj=null;
+        try{
+          var _ns=window._nwsSky;
+          if(_ns && Date.now()-_ns.fetchedAt<3*3600000 && ghStart && ghEnd &&
+             Math.abs(_ns.lat-LOCATION.lat)<1 && Math.abs(_ns.lon-LOCATION.lon)<1){
+            var _nsT0=ghStart.getTime()-30*60000, _nsT1=ghEnd.getTime()+30*60000;
+            var _nsCov=[],_nsPop=0,_nsThun=false;
+            for(var _ni=0;_ni<_ns.hours.length;_ni++){
+              var _nh=_ns.hours[_ni];
+              if(_nh.t<_nsT0||_nh.t>_nsT1) continue;
+              if(_nh.sky!=null)_nsCov.push(_nh.sky);
+              if(_nh.pop!=null)_nsPop=Math.max(_nsPop,_nh.pop);
+              if(_nh.thunder)_nsThun=true;
+            }
+            if(_nsCov.length){
+              var _nsAvg=_nsCov.reduce(function(a,b){return a+b;},0)/_nsCov.length;
+              var _fcT=Math.max(fc.cL||0,fc.cM||0,fc.cH||0);
+              var _adj=0,_why='';
+              if(_nsThun&&_nsPop>=50){ _adj=Math.min(0,35-qs); _why='NWS: t-storms likely at golden hour ('+Math.round(_nsPop)+'% precip)'; }
+              else if(_nsPop>=60){ _adj=Math.min(0,40-qs); _why='NWS: precip likely ('+Math.round(_nsPop)+'%)'; }
+              else if(_nsPop>=40){ _adj=-12; _why='NWS: '+Math.round(_nsPop)+'% precip chance'; }
+              else if(_nsAvg>=75&&_fcT<30){ _adj=Math.min(0,45-qs); _why='NWS: mostly cloudy ('+Math.round(_nsAvg)+'% sky) vs clear model'; }
+              else if(_nsAvg>=60&&_fcT<25){ _adj=-10; _why='NWS: considerable cloud ('+Math.round(_nsAvg)+'% sky)'; }
+              if(_adj!==0){
+                qs=Math.max(5,qs+_adj);
+                window._ghNwsAdj={adj:_adj,why:_why,pop:Math.round(_nsPop),sky:Math.round(_nsAvg),thunder:_nsThun};
+              }
+            }
+          }
+        }catch(e){}
         var ql,qc;
         // Bucket cutoffs aligned with the deep-dive popup (was 80/65/50/35/20 here,
         // 85/70/55/40/25 in the popup — same data could ship as GOOD on the card and
@@ -23097,6 +23139,8 @@ function dayRangeAround(d, days){
           if(fcHighType&&fc.cH>=20&&fc.cH<=60&&fc.cL<10) R.push(fcHighType.abbr+' adding pastel streaks');
           if(fc.rh>80) R.push('High humidity muting colors');
           if(fc.cL<15&&fc.cT>15) R.push('Clear western horizon');
+          // NWS cross-check verdict leads \u2014 it's the reason the score moved
+          if(window._ghNwsAdj) R.unshift(window._ghNwsAdj.why);
           if(R.length===0) R.push(fc.cT<10?'Clear sky \u2014 narrow horizon band':'Moderate conditions');
           var fR1=document.getElementById('ghFcReason1'),fR2=document.getElementById('ghFcReason2'),fR3=document.getElementById('ghFcReason3');
           var rC=qs>=65?'rgba(255,180,100,.35)':'rgba(255,255,255,.25)';
@@ -23315,6 +23359,54 @@ function dayRangeAround(d, days){
       };
       window._fetchObsClouds();
       setInterval(function(){ if (!document.hidden) window._fetchObsClouds(0); }, 15 * 60000);
+
+      // ── NWS GRIDPOINT SKY/PRECIP (feeds the sunset-score cross-check) ──
+      // Parses skyCover + probabilityOfPrecipitation + weather (thunder)
+      // from the raw gridpoint into an hourly array. validTime durations
+      // (e.g. PT6H, P1D) are expanded so every covered hour gets a value.
+      window._fetchNwsSky = function(retries){
+        retries = retries == null ? 10 : retries;
+        var gu = window._nwsGridUrl;
+        if (!gu){ if (retries > 0) setTimeout(function(){ window._fetchNwsSky(retries-1); }, 1500); return; }
+        var loc = window.LOCATION || {};
+        fetchWithTimeout(gu, { headers: { 'Accept': 'application/geo+json' } }, 12000)
+          .then(function(r){ return r.json(); })
+          .then(function(d){
+            var p = d && d.properties; if (!p) return;
+            var byHour = {};
+            function expand(values, apply){
+              (values || []).forEach(function(v){
+                var m = /^(.+?)\/P(?:(\d+)D)?(?:T(?:(\d+)H)?)?/.exec(v.validTime || '');
+                if (!m) return;
+                var t0 = new Date(m[1]).getTime(); if (isNaN(t0)) return;
+                var hrs = (parseInt(m[2] || 0, 10) * 24) + parseInt(m[3] || 0, 10) || 1;
+                for (var h = 0; h < Math.min(hrs, 48); h++){
+                  var key = t0 + h * 3600000;
+                  byHour[key] = byHour[key] || { t: key };
+                  apply(byHour[key], v.value);
+                }
+              });
+            }
+            expand(p.skyCover && p.skyCover.values, function(o, val){ o.sky = val; });
+            expand(p.probabilityOfPrecipitation && p.probabilityOfPrecipitation.values, function(o, val){ o.pop = val; });
+            expand(p.weather && p.weather.values, function(o, val){
+              if ((val || []).some(function(w){ return /thunder/i.test(w.weather || ''); })) o.thunder = true;
+            });
+            var hours = Object.keys(byHour).map(function(k){ return byHour[k]; });
+            hours.sort(function(a,b){ return a.t - b.t; });
+            if (!hours.length) return;
+            window._nwsSky = { hours: hours, fetchedAt: Date.now(), lat: loc.lat, lon: loc.lon };
+            // refresh the golden hour panel with the cross-checked score
+            window._lastGHRenderKey = null;
+            clearTimeout(window._ghNwsRefreshTo);
+            window._ghNwsRefreshTo = setTimeout(function(){
+              try{ if (typeof tlRenderForOffset === 'function') tlRenderForOffset(); }catch(e){}
+            }, 900);
+          })
+          .catch(function(){});
+      };
+      window._fetchNwsSky();
+      setInterval(function(){ if (!document.hidden) window._fetchNwsSky(0); }, 30 * 60000);
     }
 
     // ── ISS PASS PREDICTION (one-time init, periodic refresh) ──
