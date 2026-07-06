@@ -23901,6 +23901,20 @@ function dayRangeAround(d, days){
       window._fetchObsClouds();
       setInterval(function(){ if (!document.hidden) window._fetchObsClouds(0); }, 15 * 60000);
 
+      // Look up the NWS gridpoint hour bucket covering a timestamp (validated
+      // for freshness + location). Returns {sky,pop,thunder} or null. Used to
+      // blend NWS precip/thunder into the hourly strip + rain line — the global
+      // model misses fast convection the NWS (HRRR + forecasters) catches.
+      window._nwsHourAt = function(ts){
+        var ns = window._nwsSky, loc = window.LOCATION || {};
+        if (!ns || !ns.hours || !ns.hours.length) return null;
+        if (Date.now() - ns.fetchedAt > 3 * 3600000) return null;
+        if (Math.abs(ns.lat - loc.lat) > 1 || Math.abs(ns.lon - loc.lon) > 1) return null;
+        var hr = Math.floor(ts / 3600000) * 3600000;
+        for (var i = 0; i < ns.hours.length; i++){ if (ns.hours[i].t === hr) return ns.hours[i]; }
+        return null;
+      };
+
       // ── NWS GRIDPOINT SKY/PRECIP (feeds the sunset-score cross-check) ──
       // Parses skyCover + probabilityOfPrecipitation + weather (thunder)
       // from the raw gridpoint into an hourly array. validTime durations
@@ -26973,8 +26987,16 @@ function dayRangeAround(d, days){
           temp = Math.round(hourly.temperature_2m[matchIdx]) + "°";
           precip = hourly.precipitation_probability ? (hourly.precipitation_probability[matchIdx] || 0) : 0;
           weatherCode = hourly.weathercode ? (hourly.weathercode[matchIdx] || 0) : 0;
+          // Blend NWS gridpoint (HRRR + forecasters): take the higher precip %,
+          // and upgrade to a thunderstorm icon when NWS forecasts thunder — the
+          // global model routinely under-forecasts approaching convection.
+          var _nwsHr = (typeof window._nwsHourAt === 'function') ? window._nwsHourAt(targetHour.getTime()) : null;
+          if (_nwsHr){
+            if (typeof _nwsHr.pop === 'number') precip = Math.max(precip, _nwsHr.pop);
+            if (_nwsHr.thunder && weatherCode < 95) weatherCode = 95; // thunderstorm
+          }
         }
-        
+
         // Get precip amounts for this hour
         var hPrecipAmt = (matchIdx >= 0 && hourly.precipitation) ? (hourly.precipitation[matchIdx] || 0) : 0;
         var hSnowAmt = (matchIdx >= 0 && hourly.snowfall) ? (hourly.snowfall[matchIdx] || 0) : 0;
@@ -32834,11 +32856,19 @@ function dayRangeAround(d, days){
           // Peak precip probability over the REMAINING hours of today (the
           // daily max included hours already past); window named in the value.
           var _popMax = null, _rainStartAt = null, _rainLastAt = null, _rainEnded = false, _burstAt = null, _burstAmt = 0;
+          var _anyThunder = false, _maxCape = 0;   // convection signals for the storm flag
           if (hourly && hourly.precipitation_probability && hourly.time){
             var _tdy2 = localDateStr(new Date());
             for (var _pi2 = nearestIndex; _pi2 < hourly.time.length; _pi2++){
               if (String(hourly.time[_pi2]).slice(0,10) !== _tdy2) break;
               var _pp2 = hourly.precipitation_probability[_pi2];
+              // blend NWS pop (catches convection the global model misses)
+              var _nwsRp = (typeof window._nwsHourAt === 'function') ? window._nwsHourAt(new Date(hourly.time[_pi2]).getTime()) : null;
+              if (_nwsRp){
+                if (typeof _nwsRp.pop === 'number' && (_pp2 == null || _nwsRp.pop > _pp2)) _pp2 = _nwsRp.pop;
+                if (_nwsRp.thunder) _anyThunder = true;
+              }
+              if (hourly.cape && hourly.cape[_pi2] != null && hourly.cape[_pi2] > _maxCape) _maxCape = hourly.cape[_pi2];
               if (_pp2 != null && (_popMax == null || _pp2 > _popMax)) _popMax = _pp2;
               var _amt2 = hourly.precipitation ? hourly.precipitation[_pi2] : null;
               // an hour "rains" with a measurable amount or ≥50% odds
@@ -32875,7 +32905,14 @@ function dayRangeAround(d, days){
               _rainTimeStr += ' · BURST ' + _fmtHr(_burstAt);
             }
           }
-          setText(forecastRowEl, (_popMax != null ? ("REST OF DAY · MAX " + Math.round(_popMax) + "%" + _rainTimeStr) : "--"));
+          // Storm-potential flag — the global model's low PoP can hide an
+          // approaching line. Trust NWS thunder outright; otherwise flag high
+          // instability (CAPE) that just needs a trigger (front, heating).
+          var _stormFlag = '';
+          if (_anyThunder) _stormFlag = ' · ⚡ STORMS POSSIBLE';
+          else if (_maxCape >= 1500) _stormFlag = ' · ⚡ STORM RISK (UNSTABLE)';
+          else if (_maxCape >= 800 && (_popMax || 0) >= 20) _stormFlag = ' · ⚡ STORM POTENTIAL';
+          setText(forecastRowEl, (_popMax != null ? ("REST OF DAY · MAX " + Math.round(_popMax) + "%" + _rainTimeStr + _stormFlag) : "--"));
 
           // Weather icon/text (current hourly code, not daily summary)
           var currentWxCode = hourly.weathercode ? hourly.weathercode[nearestIndex] : daily.weathercode[0];
