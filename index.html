@@ -23962,6 +23962,72 @@ function dayRangeAround(d, days){
       };
       window._fetchNwsSky();
       setInterval(function(){ if (!document.hidden) window._fetchNwsSky(0); }, 30 * 60000);
+
+      // ── RADAR NOWCAST ── "rain in ~X min" from ACTUAL radar echoes.
+      // RainViewer's free API has no forecast frames, so we extrapolate: sample
+      // the latest radar at the location AND upstream along the steering wind
+      // (500/700hPa), then estimate arrival from the storm's speed. Tiles are
+      // CORS-open so we can read the pixel's alpha (precip present) client-side.
+      window._nowcastStr = window._nowcastStr || '';
+      window._radarNowcast = function(){
+        try {
+          var loc = window.LOCATION; if (!loc || loc.lat == null) return;
+          var hy = window._wxHourly, ni = window._wxNearestIdx || 0;
+          var pick = function(a){ return (a && a[ni] != null) ? a[ni] : null; };
+          var dir = pick(hy && hy.winddirection_500hPa); if (dir == null) dir = pick(hy && hy.winddirection_700hPa); if (dir == null) dir = pick(hy && hy.wind_direction_10m); if (dir == null) dir = 270;
+          var spd = pick(hy && hy.windspeed_700hPa); if (spd == null) spd = pick(hy && hy.windspeed_500hPa); if (spd == null) spd = pick(hy && hy.windspeed_10m); if (spd == null) spd = 25;
+          var stormMph = Math.max(12, spd * 0.85);   // cells drift ~ the mean wind
+          var z = 7, ts = 256, R = 6371;
+          var dest = function(la0, lo0, brg, dk){
+            var br = brg*Math.PI/180, la = la0*Math.PI/180, lo = lo0*Math.PI/180, dr = dk/R;
+            var la2 = Math.asin(Math.sin(la)*Math.cos(dr) + Math.cos(la)*Math.sin(dr)*Math.cos(br));
+            var lo2 = lo + Math.atan2(Math.sin(br)*Math.sin(dr)*Math.cos(la), Math.cos(dr) - Math.sin(la)*Math.sin(la2));
+            return { lat: la2*180/Math.PI, lon: ((lo2*180/Math.PI + 540) % 360) - 180 };
+          };
+          var tilePx = function(lo, la){
+            var n = Math.pow(2, z), xf = (lo+180)/360*n, lr = la*Math.PI/180;
+            var yf = (1 - Math.log(Math.tan(lr) + 1/Math.cos(lr))/Math.PI)/2*n;
+            var xt = Math.floor(xf), yt = Math.floor(yf);
+            return { xt: xt, yt: yt, px: Math.min(ts-1, Math.max(0, Math.floor((xf-xt)*ts))), py: Math.min(ts-1, Math.max(0, Math.floor((yf-yt)*ts))) };
+          };
+          fetch('https://api.rainviewer.com/public/weather-maps.json')
+            .then(function(r){ return r.json(); })
+            .then(function(data){
+              var host = data.host, past = data.radar && data.radar.past;
+              if (!host || !past || !past.length){ window._nowcastStr = ''; return; }
+              var frame = past[past.length - 1];
+              var pts = [0,6,12,18,24,32,40,50,60,72].map(function(dk){ var p = dest(loc.lat, loc.lon, dir, dk); var tp = tilePx(p.lon, p.lat); tp.dk = dk; return tp; });
+              var tk = {}; pts.forEach(function(p){ tk[p.xt+'_'+p.yt] = 1; });
+              var keys = Object.keys(tk), rem = keys.length, loaded = {};
+              if (!rem) return;
+              var finish = function(){
+                var aAt = function(p){ var d = loaded[p.xt+'_'+p.yt]; return d ? d[(p.py*ts + p.px)*4 + 3] : 0; };
+                var here = aAt(pts[0]) > 35, arr = null;
+                for (var i = 1; i < pts.length; i++){ if (aAt(pts[i]) > 35){ arr = pts[i].dk; break; } }
+                var s = '';
+                if (here) s = '🌧 RAINING NOW · ';
+                else if (arr != null){
+                  var mins = Math.round((arr / (stormMph * 1.60934)) * 60);
+                  if (mins <= 6) s = '🌧 RAIN ARRIVING · ';
+                  else if (mins <= 90) s = '🌧 RAIN IN ~' + mins + ' MIN · ';
+                }
+                window._nowcastStr = s;
+                var el = document.getElementById('forecast-row');
+                if (el) el.textContent = s + (window._rainBaseStr != null ? window._rainBaseStr : '');
+              };
+              keys.forEach(function(k){
+                var pp = k.split('_'), img = new Image();
+                img.crossOrigin = 'anonymous';
+                img.onload = function(){ try{ var c = document.createElement('canvas'); c.width = ts; c.height = ts; var cx = c.getContext('2d'); cx.drawImage(img, 0, 0); loaded[k] = cx.getImageData(0, 0, ts, ts).data; }catch(e){ loaded[k] = null; } if (--rem === 0) finish(); };
+                img.onerror = function(){ loaded[k] = null; if (--rem === 0) finish(); };
+                img.src = host + frame.path + '/' + ts + '/' + z + '/' + pp[0] + '/' + pp[1] + '/2/0_0.png';
+              });
+            })
+            .catch(function(){ window._nowcastStr = ''; });
+        } catch(e){}
+      };
+      window._radarNowcast();
+      setInterval(function(){ if (!document.hidden) window._radarNowcast(); }, 4 * 60000);
     }
 
     // ── ISS PASS PREDICTION (one-time init, periodic refresh) ──
@@ -32912,7 +32978,10 @@ function dayRangeAround(d, days){
           if (_anyThunder) _stormFlag = ' · ⚡ STORMS POSSIBLE';
           else if (_maxCape >= 1500) _stormFlag = ' · ⚡ STORM RISK (UNSTABLE)';
           else if (_maxCape >= 800 && (_popMax || 0) >= 20) _stormFlag = ' · ⚡ STORM POTENTIAL';
-          setText(forecastRowEl, (_popMax != null ? ("REST OF DAY · MAX " + Math.round(_popMax) + "%" + _rainTimeStr + _stormFlag) : "--"));
+          window._rainBaseStr = (_popMax != null ? ("REST OF DAY · MAX " + Math.round(_popMax) + "%" + _rainTimeStr + _stormFlag) : "--");
+          setText(forecastRowEl, (window._nowcastStr || '') + window._rainBaseStr);
+          // refresh the radar nowcast against the current location + wind
+          try { if (typeof window._radarNowcast === 'function') window._radarNowcast(); } catch(e){}
 
           // Weather icon/text (current hourly code, not daily summary)
           var currentWxCode = hourly.weathercode ? hourly.weathercode[nearestIndex] : daily.weathercode[0];
