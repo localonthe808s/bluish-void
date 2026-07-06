@@ -12150,6 +12150,13 @@ function heroEmojiSize(url){
 // drainage tolerate more (~2.5"), dense old-sewer cities ~1.75" (NYC spec).
 // Already-saturated topsoil lowers it (rain becomes runoff).
 function floodRateThreshold(lat, lon, soilMoisture){
+  // Prefer the authoritative NWS 1-hour Flash Flood Guidance (per-point, from the
+  // RFCs) when we have a fresh value nearby. It's the real "rain in 1hr that
+  // floods HERE". Coverage is patchy, so fall back to the regional model below.
+  var ffg = window._ffgThreshold;
+  if (ffg && ffg.inches > 0 && Math.abs(ffg.lat - lat) < 0.6 && Math.abs(ffg.lon - lon) < 0.6 && (Date.now() - ffg.at) < 60 * 60000){
+    return ffg.inches;
+  }
   var base = 1.75;  // dense-urban default (NYC combined sewers)
   if ((lat > 19 && lat < 22 && lon > -161 && lon < -154) || (lat > 17 && lat < 19 && lon > -68 && lon < -65) || (lat > 12 && lat < 15 && lon > 144 && lon < 146)) base = 2.0; // tropical islands
   else if (lat < 35 && lon > -105 && lon < -80) base = 2.5;               // Gulf / Deep South
@@ -12166,6 +12173,50 @@ function floodRateThreshold(lat, lon, soilMoisture){
   }
   return base;
 }
+
+// Fetch the NWS RFC 1-hour Flash Flood Guidance for a point (mm → inches) via
+// the CORS proxy; cache it and re-apply the rain-risk flag when it arrives.
+window._fetchFFG = function(lat, lon){
+  try {
+    if (lat == null || !window.bvProxyJSON) return;
+    var geom = encodeURIComponent(JSON.stringify({ x: lon, y: lat, spatialReference: { wkid: 4326 } }));
+    var ext = encodeURIComponent((lon-0.2) + ',' + (lat-0.2) + ',' + (lon+0.2) + ',' + (lat+0.2));
+    var url = 'https://mapservices.weather.noaa.gov/raster/rest/services/precip/rfc_gridded_ffg/MapServer/identify' +
+              '?geometry=' + geom + '&geometryType=esriGeometryPoint&sr=4326&layers=all:3&tolerance=2' +
+              '&mapExtent=' + ext + '&imageDisplay=400,400,96&returnGeometry=false&f=json';
+    window.bvProxyJSON(url, { timeout: 12000 }).then(function(d){
+      try {
+        var r = d && d.results;
+        if (r && r.length){
+          var v = parseFloat(r[0].attributes['Service Pixel Value']);   // grid is mm
+          if (isFinite(v) && v > 0){
+            var inches = v / 25.4;
+            if (inches >= 0.4 && inches <= 5){
+              window._ffgThreshold = { inches: inches, lat: lat, lon: lon, at: Date.now() };
+              if (typeof window._recomputeRainRisk === 'function') window._recomputeRainRisk();
+            }
+          }
+        }
+      } catch(e){}
+    }).catch(function(){});
+  } catch(e){}
+};
+
+// Recompute the flash-flood / storm risk flag from stored inputs and re-render
+// the rain line. Called by the weather render AND by the async FFG fetch so a
+// late FFG value updates the line without a full re-render.
+window._recomputeRainRisk = function(){
+  var fi = window._floodInputs; if (!fi) return;
+  var cap = floodRateThreshold(fi.lat, fi.lon, fi.soil);
+  var flag = '';
+  if (fi.burst >= cap) flag = ' · 🌊 FLASH FLOOD RISK · ' + fi.burst.toFixed(1) + '"/HR EXCEEDS DRAINAGE';
+  else if (fi.thunder) flag = ' · ⚡ STORMS POSSIBLE';
+  else if (fi.cape >= 1500) flag = ' · ⚡ STORM RISK (UNSTABLE)';
+  else if (fi.cape >= 800 && (fi.popMax || 0) >= 20) flag = ' · ⚡ STORM POTENTIAL';
+  window._rainWindowStr = (window._rainTimeStr || '') + flag;
+  var el = document.getElementById('forecast-row');
+  if (el) el.textContent = (window._nowcastStr ? window._nowcastStr : (window._rainChanceStr || '')) + window._rainWindowStr;
+};
 
   /* =========================================================
      MOON (approx)
@@ -33061,24 +33112,18 @@ function dayRangeAround(d, days){
               _rainTimeStr += ' · BURST ' + _fmtHr(_burstAt);
             }
           }
-          // Risk flag — flash flood takes precedence: a burst raining faster than
-          // the LOCAL drainage+soil can handle overwhelms it and floods streets.
-          // Threshold is location-tuned (arid ~1"/hr, Gulf ~2.5", urban ~1.75") and
-          // lowered when the topsoil is already saturated. Below it, storm flags.
+          // Risk flag — flash flood takes precedence (see _recomputeRainRisk). The
+          // threshold is location-tuned: NWS per-point Flash Flood Guidance when
+          // available, else a regional+soil model. Inputs are stored so a late FFG
+          // fetch can re-apply the flag without a full re-render.
           var _soilM = hourly.soil_moisture_0_to_1cm ? hourly.soil_moisture_0_to_1cm[nearestIndex] : null;
-          var DRAIN_CAP = floodRateThreshold(LOCATION.lat, LOCATION.lon, _soilM);
-          var _stormFlag = '';
-          if (_burstAmt >= DRAIN_CAP) _stormFlag = ' · 🌊 FLASH FLOOD RISK · ' + _burstAmt.toFixed(1) + '"/HR EXCEEDS DRAINAGE';
-          else if (_anyThunder) _stormFlag = ' · ⚡ STORMS POSSIBLE';
-          else if (_maxCape >= 1500) _stormFlag = ' · ⚡ STORM RISK (UNSTABLE)';
-          else if (_maxCape >= 800 && (_popMax || 0) >= 20) _stormFlag = ' · ⚡ STORM POTENTIAL';
-          // Chance ("REST OF DAY · MAX %") vs window (UNTIL/FROM/BURST + storm flag)
-          // kept separate: live radar replaces the chance when it's active.
+          window._floodInputs = { lat: LOCATION.lat, lon: LOCATION.lon, soil: _soilM, burst: _burstAmt, cape: _maxCape, thunder: _anyThunder, popMax: _popMax };
           window._rainChanceStr = (_popMax != null ? ("REST OF DAY · MAX " + Math.round(_popMax) + "%") : "--");
-          window._rainWindowStr = (_popMax != null ? (_rainTimeStr + _stormFlag) : "");
-          if (forecastRowEl) forecastRowEl.textContent = (window._nowcastStr ? window._nowcastStr : window._rainChanceStr) + window._rainWindowStr;
-          // refresh the radar nowcast against the current location + wind
+          window._rainTimeStr = (_popMax != null ? _rainTimeStr : "");
+          window._recomputeRainRisk();   // builds _rainWindowStr + sets the line
+          // refresh the radar nowcast + the per-point flash-flood guidance
           try { if (typeof window._radarNowcast === 'function') window._radarNowcast(); } catch(e){}
+          try { if (typeof window._fetchFFG === 'function') window._fetchFFG(LOCATION.lat, LOCATION.lon); } catch(e){}
 
           // Weather icon/text (current hourly code, not daily summary)
           var currentWxCode = hourly.weathercode ? hourly.weathercode[nearestIndex] : daily.weathercode[0];
