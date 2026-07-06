@@ -12144,6 +12144,29 @@ function heroEmojiSize(url){
   return 210;
 }
 
+// Location-tuned flash-flood RATE threshold (in/hr): the rainfall rate that
+// overwhelms local drainage + soil. Mirrors the precip-threshold regions —
+// arid/baked ground floods at low rates (~1"/hr), Gulf/flat regions with big
+// drainage tolerate more (~2.5"), dense old-sewer cities ~1.75" (NYC spec).
+// Already-saturated topsoil lowers it (rain becomes runoff).
+function floodRateThreshold(lat, lon, soilMoisture){
+  var base = 1.75;  // dense-urban default (NYC combined sewers)
+  if ((lat > 19 && lat < 22 && lon > -161 && lon < -154) || (lat > 17 && lat < 19 && lon > -68 && lon < -65) || (lat > 12 && lat < 15 && lon > 144 && lon < 146)) base = 2.0; // tropical islands
+  else if (lat < 35 && lon > -105 && lon < -80) base = 2.5;               // Gulf / Deep South
+  else if (lat > 25 && lat < 35 && lon > -125 && lon < -105) base = 1.0;  // Desert Southwest
+  else if (lat > 35 && lat < 49 && lon > -125 && lon < -118) base = 1.6;  // Pacific NW
+  else if (lat > 32 && lat < 42 && lon > -122 && lon < -115) base = 1.1;  // CA/NV arid
+  else if (lat > 35 && lat < 49 && lon > -105 && lon < -80) base = 1.9;   // Midwest/Plains
+  // else Northeast / default → 1.75
+  var sm = (typeof soilMoisture === 'number') ? soilMoisture : null;
+  if (sm != null){
+    if (sm >= 0.40) base *= 0.72;        // saturated — all rain runs off
+    else if (sm >= 0.32) base *= 0.85;   // near-saturated
+    else if (sm <= 0.10) base *= 0.95;   // bone dry — a little absorption
+  }
+  return base;
+}
+
   /* =========================================================
      MOON (approx)
      ========================================================= */
@@ -24040,9 +24063,10 @@ function dayRangeAround(d, days){
                 if (here){
                   var durMin = bandEndKm != null ? Math.round((bandEndKm / stormKmH) * 60) : null;
                   var kind = durMin == null ? '' : (durMin <= 12 ? 'BRIEF SHOWER' : durMin <= 35 ? '~' + durMin + ' MIN LEFT' : 'STEADY');
-                  // radar rate exceeding drainage (~1.75"/hr ≈ 44mm/hr) = live flood
-                  // risk the model may have missed
-                  var floodNow = tiers[0] && tiers[0].mm >= 44;
+                  // radar rate exceeding LOCAL drainage = live flood risk the
+                  // model may have missed (threshold location-tuned + soil-adjusted)
+                  var _sm = hy && hy.soil_moisture_0_to_1cm ? hy.soil_moisture_0_to_1cm[ni] : null;
+                  var floodNow = tiers[0] && tiers[0].mm >= floodRateThreshold(loc.lat, loc.lon, _sm) * 25.4;
                   txt = (floodNow ? '🌊 FLASH FLOOD · ' : '') + lbl + ' RAIN NOW' + (kind ? ' · ' + kind : '');
                 } else if (arr != null){
                   var mins = Math.round((arr / stormKmH) * 60);
@@ -33038,10 +33062,11 @@ function dayRangeAround(d, days){
             }
           }
           // Risk flag — flash flood takes precedence: a burst raining faster than
-          // the city's storm sewers can drain (1.75"/hr, NYC spec — same threshold
-          // as the timeline's FLASH FLOOD markers) overwhelms the pipes and floods
-          // streets. Below that, fall back to the storm-potential flags.
-          var DRAIN_CAP = 1.75;   // in/hr
+          // the LOCAL drainage+soil can handle overwhelms it and floods streets.
+          // Threshold is location-tuned (arid ~1"/hr, Gulf ~2.5", urban ~1.75") and
+          // lowered when the topsoil is already saturated. Below it, storm flags.
+          var _soilM = hourly.soil_moisture_0_to_1cm ? hourly.soil_moisture_0_to_1cm[nearestIndex] : null;
+          var DRAIN_CAP = floodRateThreshold(LOCATION.lat, LOCATION.lon, _soilM);
           var _stormFlag = '';
           if (_burstAmt >= DRAIN_CAP) _stormFlag = ' · 🌊 FLASH FLOOD RISK · ' + _burstAmt.toFixed(1) + '"/HR EXCEEDS DRAINAGE';
           else if (_anyThunder) _stormFlag = ' · ⚡ STORMS POSSIBLE';
