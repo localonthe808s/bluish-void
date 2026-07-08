@@ -38689,6 +38689,65 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   window._solarLeft = 'pfss';
   window._solarRight = 'thematic';
   window._solarLastKey = 'pfss';
+
+  // ── SUVI live playback ────────────────────────────────────────────────
+  // The six EUV wavelength channels (94–304 Å) publish recent-frame animation
+  // lists at SWPC (CORS-open, ~359 frames each). Cycle a channel's frames
+  // through its <img> so the corona churns like a video — same idea as the
+  // aurora/GOES players. Only the visible wavelength plays; PFSS / thematic /
+  // magnetogram / white-light / synoptic / far-side have no such feed and stay
+  // static. Each frame is preloaded before the visible swap, so no flicker.
+  var _suviAnim = { w:null, imgId:null, frames:[], idx:0, timer:null, refresh:null, playing:false, pre:null, token:0 };
+  function _suviFrameUrl(w){ return 'https://services.swpc.noaa.gov/products/animations/suvi-primary-' + w + '.json'; }
+  function _suviBuild(data){
+    // Thin the ~359 raw frames (each ~0.6 MB) to ~48 evenly spaced → a smooth
+    // ~6s loop at a sane ~30 MB/channel instead of ~46 MB. Loads only while the
+    // channel is actively viewed, then browser-cached.
+    var stepN = Math.max(1, Math.ceil(data.length / 48)), out = [];
+    for (var i=0; i<data.length; i+=stepN){ out.push('https://services.swpc.noaa.gov' + data[i].url); }
+    return out;
+  }
+  function stopSuviAnim(){
+    _suviAnim.playing = false;
+    if (_suviAnim.timer){ clearTimeout(_suviAnim.timer); _suviAnim.timer = null; }
+    if (_suviAnim.refresh){ clearInterval(_suviAnim.refresh); _suviAnim.refresh = null; }
+    _suviAnim.w = null; _suviAnim.imgId = null;
+  }
+  function playSuviAnim(w, imgId){
+    if (_suviAnim.playing && _suviAnim.w === w && _suviAnim.imgId === imgId) return; // already running
+    stopSuviAnim();
+    var myToken = ++_suviAnim.token;   // guards overlapping fetches on fast tab-hopping
+    _suviAnim.w = w; _suviAnim.imgId = imgId;
+    if (!_suviAnim.pre) _suviAnim.pre = new Image();
+    fetch(_suviFrameUrl(w))
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        if (myToken !== _suviAnim.token || !data || !data.length) return;
+        _suviAnim.frames = _suviBuild(data); _suviAnim.idx = 0; _suviAnim.playing = true;
+        _suviStep(myToken);
+        _suviAnim.refresh = setInterval(function(){
+          if (document.hidden || _suviAnim.token !== myToken) return;
+          fetch(_suviFrameUrl(w)).then(function(r){ return r.json(); }).then(function(d){
+            if (_suviAnim.token === myToken && d && d.length) _suviAnim.frames = _suviBuild(d);
+          }).catch(function(){});
+        }, 5 * 60 * 1000);
+      })
+      .catch(function(){ /* leave the static latest.png that's already showing */ });
+  }
+  function _suviStep(myToken){
+    if (myToken !== _suviAnim.token || !_suviAnim.playing) return;
+    var el = document.getElementById(_suviAnim.imgId);
+    // Advance only when the tab is foregrounded and this channel is the visible
+    // one (opacity 1) — a hidden tab or switched-away channel shouldn't do work.
+    if (!document.hidden && el && el.style.opacity !== '0' && _suviAnim.frames.length){
+      var next = _suviAnim.frames[_suviAnim.idx];
+      _suviAnim.pre.onload = function(){ if (_suviAnim.token === myToken) el.src = next; };
+      _suviAnim.pre.src = next;   // preload → cached → the visible swap is instant
+      _suviAnim.idx = (_suviAnim.idx + 1) % _suviAnim.frames.length;
+    }
+    _suviAnim.timer = setTimeout(function(){ _suviStep(myToken); }, 130);
+  }
+
   window.switchSolarView = function(key){
     var m = _solarMap[key] ? key : 'pfss', cfg = _solarMap[m], panel = cfg.panel || 'left';
     window._solarLastKey = m;
@@ -38701,6 +38760,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (cfg.url && im && !im.getAttribute('data-loaded')){ im.src = cfg.url + '?cb=' + Date.now(); im.setAttribute('data-loaded','1'); }
     if (cfg.far){ loadFarsideLatest(im); }
     (panel === 'right' ? _solarRightImgs : _solarLeftImgs).forEach(function(id){ var el=document.getElementById(id); if(el) el.style.opacity = (id===cfg.img)?'1':'0'; });
+    // Live playback follows the left panel: the six SUVI wavelengths churn like
+    // video; any other left view stops the loop on its static latest frame.
+    if (panel === 'left'){ if (cfg.w) playSuviAnim(cfg.w, cfg.img); else stopSuviAnim(); }
     var pb = document.getElementById(panel === 'right' ? 'solar-right-badge' : 'solar-left-badge'); if(pb) pb.textContent = cfg.badge;
     var a=document.getElementById('solar-src'); if(a){ a.href = cfg.src || '#'; a.textContent = cfg.srcText; }
     // Synoptic date stepper follows the right panel.
