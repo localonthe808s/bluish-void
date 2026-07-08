@@ -52759,11 +52759,14 @@ function initNowMicroTabs(){
       // reliable from this origin, corsproxy.io frequently 403s, allorigins
       // is intermittent.
       var dateMin = new Date(Date.now() - 30*86400000).toISOString().slice(0,10);
-      var apiUrl = 'https://ssd-api.jpl.nasa.gov/fireball.api?date-min=' + dateMin + '&sort=-date&limit=50';
+      // vel-comp=true appends Earth-fixed velocity components vx,vy,vz (cols
+      // 9-11) so we can derive each bolide's entry direction + angle. Present
+      // on ~2/3 of events; missing ones just omit the trajectory line.
+      var apiUrl = 'https://ssd-api.jpl.nasa.gov/fireball.api?date-min=' + dateMin + '&sort=-date&limit=50&vel-comp=true';
       // localStorage cache so the panel survives proxy hiccups. Fresh: render
       // cached data directly. Stale-on-error: if the fetch chain fails entirely
       // but a cached payload exists, use it rather than showing 'try later'.
-      var FB_CACHE_KEY = 'bv_fireballs_cache_v1';
+      var FB_CACHE_KEY = 'bv_fireballs_cache_v2';
       var FB_FRESH_MS = 30 * 60 * 1000;
       var fbReadCache = function(){
         try { return JSON.parse(localStorage.getItem(FB_CACHE_KEY) || 'null'); } catch(e) { return null; }
@@ -52787,6 +52790,32 @@ function initNowMicroTabs(){
             : 'Bolide detections (US Gov sensors)';
           if (dotEl) dotEl.classList.toggle('hz-dot-green', rows.length === 0);
 
+          // Entry trajectory from the Earth-fixed (ECEF) velocity components.
+          // Frame confirmed empirically: interpreting vx/vy/vz as ECEF yields
+          // 97% downward entries at a ~44° median angle (physically correct);
+          // an inertial/ECI reading gives scrambled, grazing angles. Rotates the
+          // velocity into local East/North/Up at the event, then reports the
+          // compass direction it came FROM and how steeply it descended.
+          var COMPASS16 = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+          var fbEntryTrajectory = function(lat, lon, vx, vy, vz){
+            if (!isFinite(lat)||!isFinite(lon)||!isFinite(vx)||!isFinite(vy)||!isFinite(vz)) return null;
+            var vmag = Math.sqrt(vx*vx+vy*vy+vz*vz);
+            if (!(vmag > 0)) return null;
+            var phi = lat*Math.PI/180, lam = lon*Math.PI/180;
+            var sphi=Math.sin(phi), cphi=Math.cos(phi), slam=Math.sin(lam), clam=Math.cos(lam);
+            var vE = -slam*vx + clam*vy;
+            var vN = -sphi*clam*vx - sphi*slam*vy + cphi*vz;
+            var vU =  cphi*clam*vx + cphi*slam*vy + sphi*vz;
+            var heading = Math.atan2(vE, vN) * 180/Math.PI;   // direction of travel
+            var from = (heading + 180) % 360; if (from < 0) from += 360;
+            var entryAngle = Math.round(-Math.asin(Math.max(-1,Math.min(1, vU/vmag))) * 180/Math.PI);
+            // A real entry descends (positive angle). ~3% of events read as
+            // ascending/near-grazing due to CNEOS component noise — those
+            // vectors are unreliable, so suppress rather than show a bad value.
+            if (entryAngle < 3) return null;
+            return { fromDir: COMPASS16[Math.round(from/22.5) % 16], fromBearing: Math.round(from), entryAngle: entryAngle };
+          };
+
           // Parse all rows first so we can compute summary stats + build markers.
           // Missing numerics become NaN (not null) so isFinite() filters correctly —
           // isFinite(null) is true because Number(null) === 0, which would let
@@ -52808,11 +52837,13 @@ function initNowMicroTabs(){
             var lon = isFinite(lonNum) ? lonNum * (rr[6]==='W'?-1:1) : NaN;
             var vel = parseFloat(rr[8]);
             var alt = parseFloat(rr[7]);
+            // vel-comp columns (present on ~2/3 of events; NaN when absent)
+            var traj = fbEntryTrajectory(lat, lon, parseFloat(rr[9]), parseFloat(rr[10]), parseFloat(rr[11]));
             var dateShort = date.replace(/^(\d{4})-(\d{2})-(\d{2}).*/, '$2/$3');
             var energyStr = isFinite(energy)
               ? (energy >= 1 ? energy.toFixed(2)+' kt' : (energy*1000).toFixed(0)+' t TNT')
               : '';
-            return { date: date, dateShort: dateShort, energy: energy, energyStr: energyStr, radiatedE: radiatedE, lat: lat, lon: lon, vel: vel, alt: alt };
+            return { date: date, dateShort: dateShort, energy: energy, energyStr: energyStr, radiatedE: radiatedE, lat: lat, lon: lon, vel: vel, alt: alt, traj: traj };
           });
           var markersData = parsed.filter(function(p){ return isFinite(p.lat) && isFinite(p.lon); });
 
@@ -53171,6 +53202,7 @@ function initNowMicroTabs(){
                   (scaleRef ? '<div style="font-size:10px;opacity:.7;margin-top:1px;">'+scaleRef+'</div>' : '')+
                 '</div>'+
                 (isFinite(m.vel) ? '<div style="margin-top:3px;"><span style="color:#666;">Velocity:</span> <b>'+m.vel.toFixed(1)+' km/s</b><span style="opacity:.55;font-size:10px;"> · '+velClass+'</span></div>' : '')+
+                (m.traj ? '<div style="margin-top:3px;"><span style="color:#666;">Trajectory:</span> <b>from '+m.traj.fromDir+'</b><span style="opacity:.55;font-size:10px;"> · '+m.traj.entryAngle+'° entry angle</span></div>' : '')+
                 (isFinite(m.alt) ? '<div style="margin-top:3px;"><span style="color:#666;">Altitude:</span> <b>'+m.alt.toFixed(0)+' km</b></div>' : '')+
                 (radiatedStr ? '<div style="margin-top:3px;"><span style="color:#666;">Radiated:</span> '+radiatedStr+'</div>' : '')+
                 '<div style="margin-top:3px;color:#666;">Location: <span id="'+placeId+'" style="color:#333;">'+
