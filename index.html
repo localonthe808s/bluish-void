@@ -21722,6 +21722,14 @@ function dayRangeAround(d, days){
             cn.cH=Math.max(cn.cH||0,_oc.high||0);
             cn.cT=Math.max(cn.cT||0,cn.cL,cn.cM,cn.cH);
           }
+          // Multi-model median consensus — raises a band the single model missed,
+          // independent of whether a station reported (works where METAR is sparse).
+          if(typeof window._cloudCon === 'function'){
+            cn.cL=Math.max(cn.cL||0, window._cloudCon('low'));
+            cn.cM=Math.max(cn.cM||0, window._cloudCon('mid'));
+            cn.cH=Math.max(cn.cH||0, window._cloudCon('high'));
+            cn.cT=Math.max(cn.cT||0, cn.cL, cn.cM, cn.cH);
+          }
         }catch(e){}
         // ── NWS STORM OVERRIDE (forecast panel) ──
         // The score cross-check caps the number, but the SKY still rendered
@@ -23992,6 +24000,54 @@ function dayRangeAround(d, days){
       window._fetchObsClouds();
       setInterval(function(){ if (!document.hidden) window._fetchObsClouds(0); }, 15 * 60000);
 
+      // ── MULTI-MODEL CLOUD CONSENSUS ──
+      // The single best_match model routinely misses low stratus (GFS read 12%
+      // under a 95% OVC while ICON read 89%). Poll ICON + ECMWF + GFS and take
+      // the MEDIAN per band for the current hour — robust to any one model's
+      // miss, without the false overcast a naive max would produce. Blended
+      // (max) with the observed-METAR value at each display site, like _obsClouds.
+      window._fetchCloudConsensus = function(retries){
+        retries = retries == null ? 8 : retries;
+        var loc = window.LOCATION || {};
+        if (loc.lat == null){ if (retries > 0) setTimeout(function(){ window._fetchCloudConsensus(retries-1); }, 1500); return; }
+        var url = 'https://api.open-meteo.com/v1/forecast?latitude=' + loc.lat + '&longitude=' + loc.lon +
+          '&hourly=cloud_cover_low,cloud_cover_mid,cloud_cover_high' +
+          '&models=icon_seamless,ecmwf_ifs025,gfs_seamless&forecast_days=1&timezone=GMT';
+        fetchWithTimeout(url, null, 12000).then(function(r){ return r.json(); })
+          .then(function(d){
+            var h = d && d.hourly; if (!h || !h.time || !h.time.length) return;
+            var now = Date.now(), idx = 0;
+            for (var i = 0; i < h.time.length; i++){ if (new Date(h.time[i] + 'Z').getTime() <= now) idx = i; else break; }
+            var models = ['icon_seamless','ecmwf_ifs025','gfs_seamless'];
+            var med = function(band){
+              var xs = [];
+              for (var m = 0; m < models.length; m++){
+                var arr = h['cloud_cover_' + band + '_' + models[m]];
+                var v = arr ? arr[idx] : null;
+                if (typeof v === 'number') xs.push(v);
+              }
+              if (!xs.length) return null;
+              xs.sort(function(a,b){ return a - b; });
+              var n = xs.length;
+              return n % 2 ? xs[(n-1)/2] : Math.round((xs[n/2-1] + xs[n/2]) / 2);
+            };
+            var lo = med('low'), mi = med('mid'), hi = med('high');
+            if (lo == null && mi == null && hi == null) return;
+            window._cloudConsensus = { low: lo||0, mid: mi||0, high: hi||0, ts: Date.now(), lat: loc.lat, lon: loc.lon };
+          })
+          .catch(function(){});
+      };
+      // Median model-consensus for a band (0 if stale/absent/off-location), so a
+      // display can max() it in without under-calling when the main model missed.
+      window._cloudCon = function(band){
+        var c = window._cloudConsensus, loc = window.LOCATION || {};
+        if (!c || (Date.now() - c.ts) > 90*60000) return 0;
+        if (loc.lat == null || Math.abs(c.lat - loc.lat) > 1 || Math.abs(c.lon - loc.lon) > 1) return 0;
+        return c[band] || 0;
+      };
+      window._fetchCloudConsensus();
+      setInterval(function(){ if (!document.hidden) window._fetchCloudConsensus(0); }, 15 * 60000);
+
       // Look up the NWS gridpoint hour bucket covering a timestamp (validated
       // for freshness + location). Returns {sky,pop,thunder} or null. Used to
       // blend NWS precip/thunder into the hourly strip + rain line — the global
@@ -24466,6 +24522,8 @@ function dayRangeAround(d, days){
           if (_ocb && (Date.now()-_ocb.ts) < 90*60000 && Math.abs(_ocb.lat-LOCATION.lat)<1 && Math.abs(_ocb.lon-LOCATION.lon)<1){
             aL = Math.max(aL, Math.round(_ocb.low||0)); aM = Math.max(aM, Math.round(_ocb.mid||0)); aH = Math.max(aH, Math.round(_ocb.high||0));
           }
+          // multi-model median consensus (raises a band the single model missed)
+          if (typeof window._cloudCon === 'function'){ aL = Math.max(aL, window._cloudCon('low')); aM = Math.max(aM, window._cloudCon('mid')); aH = Math.max(aH, window._cloudCon('high')); }
         } catch(e){}
         // Get current wind at each layer for shear arrows
         var _ni = nearestIndex != null ? nearestIndex : (window._wxNearestIdx || 0);
@@ -29683,6 +29741,8 @@ function dayRangeAround(d, days){
         if (_oc && (Date.now() - _oc.ts) < 90*60000 && Math.abs(_oc.lat - LOCATION.lat) < 1 && Math.abs(_oc.lon - LOCATION.lon) < 1){
           _nc = Math.max(_nc || 0, _oc.low || 0, _oc.mid || 0, _oc.high || 0);
         }
+        // multi-model median consensus (fills in when the single model under-called)
+        if (typeof window._cloudCon === 'function') _nc = Math.max(_nc || 0, window._cloudCon('low'), window._cloudCon('mid'), window._cloudCon('high'));
       } catch(e){}
       var _view = _nc == null ? ''
         : _nc <= 20 ? 'Clear skies' + _over + ' right now — good for stargazing.'
