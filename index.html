@@ -26718,6 +26718,9 @@ function dayRangeAround(d, days){
           window._tlBLM={1:7.8,2:7.3,3:6.8,4:6.1,5:5.6,6:5.1,7:4.6,8:4.2,9:4.0};
           window._tlLimMag=function(sa,b){if(sa>-4)return -99;var d=window._tlBLM[b]||5.6;var twi=Math.max(0,Math.min(1,(sa+18)/14));return d-twi*(d-0.2);};
           window._tlStarCol=function(h){return h<0.14?'#bcd0ff':h<0.5?'#eef2ff':h<0.82?'#fff3df':'#ffd9ad';};
+          // value noise (Milky Way mottling/dust lanes) + naked-eye Messier catalog
+          window._tlNoise=function(x,y){var xi=Math.floor(x),yi=Math.floor(y),xf=x-xi,yf=y-yi,u=xf*xf*(3-2*xf),v=yf*yf*(3-2*yf),hh=function(a,b){var n=Math.sin(a*127.1+b*311.7)*43758.5453;return n-Math.floor(n);},A=hh(xi,yi),B=hh(xi+1,yi),C=hh(xi,yi+1),D=hh(xi+1,yi+1);return A+(B-A)*u+(C-A)*v+(A-B-C+D)*u*v;};
+          window._tlMessier=[{n:'M31',t:'gal',x:.88,y:.30,s:1.5,c:'218,222,238',v:3.4},{n:'M42',t:'neb',x:.12,y:.60,s:1.2,c:'232,150,158',v:4.0},{n:'M45',t:'clu',x:.82,y:.20,s:1.1,c:'175,198,255',v:1.6},{n:'M7',t:'clu',x:.95,y:.80,s:1.0,c:'200,212,242',v:3.3},{n:'M22',t:'glo',x:.06,y:.66,s:0.9,c:'228,220,198',v:5.1},{n:'M13',t:'glo',x:.18,y:.42,s:0.85,c:'228,226,210',v:5.8},{n:'M8',t:'neb',x:.93,y:.68,s:1.0,c:'224,150,150',v:6.0}];
           // per-day conditions (from hourly arrays) + temporal interpolation
           window._tlBuildCond=function(day,hourly){
             var a={cL:[],cM:[],cH:[],pr:[],rh:[],vis:[],sn:[]},pk=function(A,i){return (i>=0&&A&&A[i]!=null)?A[i]:null;};
@@ -26743,7 +26746,7 @@ function dayRangeAround(d, days){
               var bands=S.bands,cvs=S.cvs;
               var cw=bands.clientWidth||bands.offsetWidth||360, ch=bands.clientHeight||bands.offsetHeight||300;
               if(cw<2||ch<2) return;
-              var W=Math.min(cw,560)|0, H=Math.min(ch,460)|0; cvs.width=W; cvs.height=H;
+              var W=Math.min(cw,900)|0, H=Math.min(ch,640)|0; cvs.width=W; cvs.height=H;
               var ctx=cvs.getContext('2d'), day=S.day, lat=S.lat, lon=S.lon;
               var terms=_solarTerms(day), noon=solarNoonLocal(day,lat,lon);
               var latR=rad(lat), decl=terms.decl, noonH=noon.getHours()+noon.getMinutes()/60+noon.getSeconds()/3600;
@@ -26752,48 +26755,85 @@ function dayRangeAround(d, days){
               var t0=0,t1=24;
               if(isMob&&(window._tlDayOffset||0)===0){var nH=(new Date()).getHours()+(new Date()).getMinutes()/60;t0=nH-4;t1=nH+4;if(t0<0){t1-=t0;t0=0;}if(t1>24){t0-=(t1-24);t1=24;}t0=Math.max(0,t0);t1=Math.min(24,t1);}
               var COND=window._tlBuildCond(day,S.hourly), pos=[0,0.30,0.58,0.80,1.0];
-              var img=ctx.createImageData(W,H),data=img.data,altCol=new Float32Array(W);
+              var altCol=new Float32Array(W), SUB=4;
+              // ── SKY GRADIENT — GPU createLinearGradient with OKLab sub-stops (fast;
+              //    the screen-res noise overlay handles banding). altCol[] caches the
+              //    sun altitude per column for the star/deep-sky layers below.
               for(var x=0;x<W;x++){
                 var hr=t0+(t1-t0)*(x/(W-1)),sa=altOf(hr);altCol[x]=sa;
                 var col=window._tlSkyColors(sa,window._tlCondAt(COND,hr),hr>noonH);
-                var L0=_hOk(col[0]),L1=_hOk(col[1]),L2=_hOk(col[2]),L3=_hOk(col[3]),labs=[L0,L1,L2,L3,L3];
-                for(var y=0;y<H;y++){
-                  var fy=y/(H-1),i=0;while(i<3&&fy>pos[i+1])i++;
-                  var sp=pos[i+1]-pos[i],tt=sp<=0?0:(fy-pos[i])/sp;tt=tt*tt*(3-2*tt);
-                  var A=labs[i],B=labs[i+1];
-                  var rgb=_okR(A[0]+(B[0]-A[0])*tt,A[1]+(B[1]-A[1])*tt,A[2]+(B[2]-A[2])*tt);
-                  var z1=Math.sin(x*12.9898+y*78.233)*43758.5453,z2=Math.sin(x*39.346+y*11.135)*24634.6345;
-                  var dd=((z1-Math.floor(z1))+(z2-Math.floor(z2))-1)*1.4,ix=(y*W+x)*4;
-                  data[ix]=_cB(rgb[0]+dd);data[ix+1]=_cB(rgb[1]+dd);data[ix+2]=_cB(rgb[2]+dd);data[ix+3]=255;
-                }
+                var La=[_hOk(col[0]),_hOk(col[1]),_hOk(col[2]),_hOk(col[3]),_hOk(col[3])];
+                var g=ctx.createLinearGradient(0,0,0,H);
+                for(var gi=0;gi<pos.length-1;gi++){var A=La[gi],B=La[gi+1];for(var gk=(gi===0?0:1);gk<=SUB;gk++){var gt=gk/SUB,ge=gt*gt*(3-2*gt),rr=_okR(A[0]+(B[0]-A[0])*ge,A[1]+(B[1]-A[1])*ge,A[2]+(B[2]-A[2])*ge),gp=Math.max(0,Math.min(1,pos[gi]+(pos[gi+1]-pos[gi])*gt));g.addColorStop(gp,'rgb('+Math.round(_cB(rr[0]))+','+Math.round(_cB(rr[1]))+','+Math.round(_cB(rr[2]))+')');}}
+                ctx.fillStyle=g;ctx.fillRect(x,0,1,H);
               }
-              ctx.putImageData(img,0,0);
-              // Default to a bright/urban class until the real Bortle is sampled, so
-              // city users don't briefly get a full starfield.
+              var scaleS=Math.max(0.85,Math.min(1.4,W/900));
+              // Real Bortle if the DARK SKY sampler has returned; else a bright/urban default.
               var bort=(window._locBortle!=null)?Math.max(1,Math.min(9,Math.round(window._locBortle))):7;
-              // Bortle thins the actual COUNT (fraction of the pool kept), not just
-              // the faintness — NYC (8) shows ~a dozen, a dark site shows a field.
+              // ── MILKY WAY — diffuse tilted band (glow + granular stars + dust lanes),
+              //    dark skies only (Bortle ≤3) and deep night.
+              var mwS=bort<=1?1:bort<=2?0.55:bort<=3?0.25:0;
+              if(mwS>0){
+                var mr=_mul(9137), bandY=function(fx){return 0.44-0.17*fx+0.045*Math.sin(fx*6.6+1.0);}, halfW=0.16;
+                ctx.save();ctx.globalCompositeOperation='lighter';
+                for(var mi=0;mi<900;mi++){
+                  var fx=mr(),gs=(mr()+mr()+mr()-1.5)/1.5,srr=mr(),brr=mr();
+                  var mh=t0+(t1-t0)*fx,msa=altOf(mh),nd=Math.max(0,Math.min(1,(-13-msa)/7));if(nd<0.06)continue;
+                  var mc=window._tlCondAt(COND,mh),mcf=Math.max(0,1-(mc.cL*0.92+mc.cM*0.45+mc.cH*0.22)/100);if(mcf<0.05)continue;
+                  var yy=bandY(fx)+gs*halfW;if(yy<0.02||yy>0.98)continue;
+                  var nz=window._tlNoise(fx*24,yy*9),lane=Math.max(0,nz-0.30),prof=Math.exp(-gs*gs*1.7),core=1+1.4*Math.exp(-((fx-0.86)*(fx-0.86))/0.004);
+                  var ma=mwS*nd*mcf*prof*lane*core*(0.02+0.04*brr);if(ma<0.003)continue;
+                  var r2=(4+9*srr)*scaleS*1.6,px=fx*W,py=yy*H,grd=ctx.createRadialGradient(px,py,0,px,py,r2);
+                  grd.addColorStop(0,'rgba(206,202,194,'+Math.min(0.16,ma)+')');grd.addColorStop(1,'rgba(206,202,194,0)');
+                  ctx.fillStyle=grd;ctx.beginPath();ctx.arc(px,py,r2,0,6.2832);ctx.fill();
+                }
+                for(var mj=0;mj<2600;mj++){
+                  var fx2=mr(),gs2=(mr()+mr()+mr()-1.5)/1.5,br2=mr(),hu=mr();
+                  var mh2=t0+(t1-t0)*fx2,msa2=altOf(mh2),nd2=Math.max(0,Math.min(1,(-13-msa2)/7));if(nd2<0.1)continue;
+                  var mc2=window._tlCondAt(COND,mh2),mcf2=Math.max(0,1-(mc2.cL*0.92+mc2.cM*0.45+mc2.cH*0.22)/100);if(mcf2<0.05)continue;
+                  var yy2=bandY(fx2)+gs2*halfW;if(yy2<0.02||yy2>0.98)continue;
+                  var nz2=window._tlNoise(fx2*24,yy2*9),lane2=Math.max(0,nz2-0.30),prof2=Math.exp(-gs2*gs2*2.0);
+                  var ma2=mwS*nd2*mcf2*prof2*lane2*(0.35+0.65*br2);if(ma2<0.04)continue;
+                  ctx.globalAlpha=Math.min(0.75,ma2);ctx.fillStyle=hu<0.12?'#cdd6ff':hu>0.9?'#ffe6d6':'#e6e4ee';
+                  ctx.beginPath();ctx.arc(fx2*W,yy2*H,(0.45+0.5*br2)*scaleS,0,6.2832);ctx.fill();
+                }
+                ctx.restore();
+              }
+              // ── STARS — crisp cores + diffraction spikes; Bortle sets count, twilight sets timing, cloud hides.
               var _DENS={1:0.85,2:0.6,3:0.4,4:0.24,5:0.15,6:0.09,7:0.055,8:0.035,9:0.022};
               var dens=_DENS[bort]||0.09, stars=window._tlStars;
               if(stars){
                 ctx.save();
                 for(var si=0;si<stars.length;si++){
                   var st=stars[si];
-                  if(st.d>dens) continue;                                          // count gate (Bortle)
+                  if(st.d>dens) continue;
                   var col2=Math.min(W-1,Math.max(0,Math.round(st.x*(W-1)))),ssa=altCol[col2];
-                  var darkness=Math.max(0,Math.min(1,(-4-ssa)/14)); if(darkness<=0) continue;   // still twilight/day
-                  var appear=Math.max(0,Math.min(1,(st.mag+1.5)/9.3));             // faint stars need a darker sky
-                  var timing=Math.max(0,Math.min(1,(darkness-appear*0.85)/0.3)); if(timing<=0) continue;  // brightest first
+                  var darkness=Math.max(0,Math.min(1,(-4-ssa)/14)); if(darkness<=0) continue;
+                  var appear=Math.max(0,Math.min(1,(st.mag+1.5)/9.3));
+                  var timing=Math.max(0,Math.min(1,(darkness-appear*0.85)/0.3)); if(timing<=0) continue;
                   var sc=window._tlCondAt(COND,t0+(t1-t0)*st.x),cf=Math.max(0,1-(sc.cL*0.92+sc.cM*0.45+sc.cH*0.22)/100); if(cf<=0.02) continue;
                   var bri=Math.max(0.15,Math.min(1,0.3+0.7*(4-st.mag)/6));
                   var aa=timing*bri*(0.75+0.5*st.tw)*cf;
                   if(st.y>0.82)aa*=Math.max(0,(1-st.y)/0.18);
                   if(st.y<0.02||aa<0.05) continue;
-                  var px=st.x*W,py=st.y*H,sz=(st.mag<0?2.3:st.mag<1.5?1.6:st.mag<3?1.15:0.8)*(W/560);
-                  ctx.globalAlpha=Math.min(1,aa); ctx.fillStyle=st.mag<1.6?window._tlStarCol(st.hue):'#eef2ff';
-                  ctx.beginPath();ctx.arc(px,py,sz,0,6.2832);ctx.fill();
-                  if(st.mag<0.4){ctx.globalAlpha=Math.min(1,aa)*0.22;ctx.beginPath();ctx.arc(px,py,sz*2.8,0,6.2832);ctx.fill();}
+                  var px=st.x*W,py=st.y*H,g1=Math.min(1,aa),coreR=(st.mag<-0.2?1.9:st.mag<1.2?1.4:st.mag<3?1.0:0.75)*scaleS;
+                  ctx.fillStyle=st.mag<1.8?window._tlStarCol(st.hue):'#f2f5ff';
+                  ctx.globalAlpha=g1;ctx.beginPath();ctx.arc(px,py,coreR,0,6.2832);ctx.fill();
+                  if(st.mag<1.2){ctx.globalAlpha=g1*0.16;ctx.beginPath();ctx.arc(px,py,coreR*2.1,0,6.2832);ctx.fill();var spk=(st.mag<-0.2?7:4.5)*scaleS;ctx.globalAlpha=g1*0.45;ctx.strokeStyle=ctx.fillStyle;ctx.lineWidth=Math.max(0.6,0.7*scaleS);ctx.beginPath();ctx.moveTo(px-spk,py);ctx.lineTo(px+spk,py);ctx.moveTo(px,py-spk);ctx.lineTo(px,py+spk);ctx.stroke();}
                 }
+                ctx.restore();
+              }
+              // ── MESSIER — naked-eye deep-sky fuzzies (gated by the Bortle limiting mag).
+              var lim=window._tlBLM[bort]||5.6, MS=window._tlMessier;
+              for(var oi=0;oi<MS.length;oi++){
+                var o=MS[oi];if(o.v>lim-0.3)continue;
+                var oh=t0+(t1-t0)*o.x,osa=altOf(oh),ond=Math.max(0,Math.min(1,(-8-osa)/10));if(ond<=0.06)continue;
+                var oc=window._tlCondAt(COND,oh),ocf=Math.max(0,1-(oc.cL*0.92+oc.cM*0.45+oc.cH*0.22)/100);if(ocf<0.05)continue;
+                var oa=ond*ocf*Math.min(1,0.45+(lim-o.v)*0.14),opx=o.x*W,opy=o.y*H,oR=14*o.s*scaleS;
+                ctx.save();ctx.globalCompositeOperation='lighter';
+                if(o.t==='clu'){var r3=_mul((o.x*1000)|0);for(var ok=0;ok<8;ok++){var an=r3()*6.2832,rd=r3()*oR*0.85;ctx.globalAlpha=oa*(0.5+0.5*r3());ctx.fillStyle='rgb('+o.c+')';ctx.beginPath();ctx.arc(opx+Math.cos(an)*rd,opy+Math.sin(an)*rd,1.1*scaleS,0,6.2832);ctx.fill();}}
+                else if(o.t==='gal'){ctx.translate(opx,opy);ctx.rotate(o.x*3.2);ctx.scale(2.0,0.72);var gg=ctx.createRadialGradient(0,0,0,0,0,oR);gg.addColorStop(0,'rgba('+o.c+','+(oa*0.5)+')');gg.addColorStop(1,'rgba('+o.c+',0)');ctx.fillStyle=gg;ctx.beginPath();ctx.arc(0,0,oR,0,6.2832);ctx.fill();}
+                else{var gg2=ctx.createRadialGradient(opx,opy,0,opx,opy,oR);gg2.addColorStop(0,'rgba('+o.c+','+(oa*(o.t==='glo'?0.6:0.42))+')');gg2.addColorStop(o.t==='glo'?0.28:0.5,'rgba('+o.c+','+(oa*0.22)+')');gg2.addColorStop(1,'rgba('+o.c+',0)');ctx.fillStyle=gg2;ctx.beginPath();ctx.arc(opx,opy,oR,0,6.2832);ctx.fill();}
                 ctx.restore();
               }
             }catch(e){}
