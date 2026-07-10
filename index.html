@@ -2576,6 +2576,11 @@
     border-radius:16px;
     overflow:hidden;
   }
+  /* Canvas 2D sky (DB-driven altitude colours + condition desaturation + stars)
+     plus a screen-resolution noise overlay that dithers away 8-bit banding. */
+  .today-tl-sky-bands canvas.tl-sky2d{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+  .today-tl-sky-bands .tl-sky-noise{ position:absolute; inset:0; pointer-events:none; opacity:.05; mix-blend-mode:overlay;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
 
   .today-tl-sky-band{
     height:100%;
@@ -10918,7 +10923,7 @@ body > #dynamic-alert-modal {
               setTimeout(function(){ try { map.invalidateSize(); } catch(e){} }, 300);
               var _locName = (typeof LOCATION !== 'undefined' && LOCATION && LOCATION.name) ? LOCATION.name : 'Your location';
               // Estimate Bortle at the user's location from the overlay pixel
-              if (loc) sampleBortle(loc.lat, loc.lon, function(sqm){ if (sqm != null) setBortleStat(sqm, _locName, loc.lat, loc.lon); });
+              if (loc) sampleBortle(loc.lat, loc.lon, function(sqm){ if (sqm != null){ setBortleStat(sqm, _locName, loc.lat, loc.lon); try{ window._locBortle = bortleDecimal(sqm); if (window._tlPaintSky) window._tlPaintSky(); }catch(e){} } });
               // Nearest named parks/protected areas with Bortle ≤ 3.0
               if (loc) findDarkParks(loc.lat, loc.lon);
 
@@ -26459,7 +26464,9 @@ function dayRangeAround(d, days){
 
     // Render sky gradient bands — continuous gradient based on sunrise/sunset position
     // Enhanced with: seasonal intensity, humidity tinting, cloud-aware golden hour
-    if (tlSkyBands){
+    // ── LEGACY horizontal-gradient sky-bands — DISABLED. Replaced by the canvas
+    //    2D sky + stars engine in the block immediately after this one. ──
+    if (false && tlSkyBands){
       var srPct = pctForTime(srDate);
       var ssPct = pctForTime(ssDate);
       
@@ -26646,6 +26653,145 @@ function dayRangeAround(d, days){
         }
       }
       tlSkyBands.innerHTML = '<div style="position:absolute;top:0;left:0;right:0;bottom:0;background:' + gradientStr + ';' + _bandZoom + '"></div>';
+    }
+
+    // ── CANVAS 2D SKY + STARS ──────────────────────────────────────────────
+    // Paints the panel backdrop as a real vertical sky (zenith→horizon) swept
+    // across the day: colours from _SKY_DB by true sun altitude, continuous
+    // cloud/precip/humidity desaturation, richer dusk, OKLab per-pixel + dither,
+    // and Bortle/cloud-aware stars that fade in through twilight. Desktop spans
+    // the full day (aligned to the 24 columns); mobile zooms to an ~8h window
+    // centred on now (the columns auto-centre on now too).
+    if (tlSkyBands){
+      try {
+        var _cvs = tlSkyBands.querySelector('canvas.tl-sky2d');
+        if (!_cvs){
+          tlSkyBands.innerHTML = '';
+          _cvs = document.createElement('canvas'); _cvs.className = 'tl-sky2d';
+          tlSkyBands.appendChild(_cvs);
+          var _ovN = document.createElement('div'); _ovN.className = 'tl-sky-noise'; tlSkyBands.appendChild(_ovN);
+        }
+        // Snapshot the state the painter needs so a resize can repaint the same day.
+        window._tlSky = { bands: tlSkyBands, cvs: _cvs, day: new Date(dayLocal), hourly: hourly, lat: LOCATION.lat, lon: LOCATION.lon };
+
+        if (!window._tlSkyInit){
+          window._tlSkyInit = 1;
+          // colour helpers
+          var _h2r=function(h){return [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];};
+          var _r2h=function(r,g,b){return '#'+((1<<24)+(Math.round(r)<<16)+(Math.round(g)<<8)+Math.round(b)).toString(16).slice(1);};
+          var _lx=function(a,b,t){t=t<0?0:t>1?1:t;var A=_h2r(a),B=_h2r(b);return _r2h(A[0]+(B[0]-A[0])*t,A[1]+(B[1]-A[1])*t,A[2]+(B[2]-A[2])*t);};
+          var _bl=function(base,tgt,t){return [_lx(base[0],tgt[0],t),_lx(base[1],tgt[1],t),_lx(base[2],tgt[2],t),_lx(base[3],tgt[3],t)];};
+          var _s2l=function(u){u/=255;return u<=0.04045?u/12.92:Math.pow((u+0.055)/1.055,2.4);};
+          var _l2s=function(u){var v=u<=0.0031308?12.92*u:1.055*Math.pow(u<0?0:u,1/2.4)-0.055;return v*255;};
+          var _hOk=function(h){var R=_s2l(parseInt(h.slice(1,3),16)),G=_s2l(parseInt(h.slice(3,5),16)),B=_s2l(parseInt(h.slice(5,7),16));var l=Math.cbrt(0.4122214708*R+0.5363325363*G+0.0514459929*B),m=Math.cbrt(0.2119034982*R+0.6806995451*G+0.1073969566*B),s=Math.cbrt(0.0883024619*R+0.2817188376*G+0.6299787005*B);return [0.2104542553*l+0.7936177850*m-0.0040720468*s,1.9779984951*l-2.4285922050*m+0.4505937099*s,0.0259040371*l+0.7827717662*m-0.8086757660*s];};
+          var _okR=function(L,A,Bb){var l_=L+0.3963377774*A+0.2158037573*Bb,m_=L-0.1055613458*A-0.0638541728*Bb,s_=L-0.0894841775*A-1.2914855480*Bb;var l=l_*l_*l_,m=m_*m_*m_,s=s_*s_*s_;return [_l2s(4.0767416621*l-3.3077115913*m+0.2309699292*s),_l2s(-1.2684380046*l+2.6097574011*m-0.3413193965*s),_l2s(-0.0041960863*l-0.7034186147*m+1.7076147010*s)];};
+          var _cB=function(v){return v<0?0:v>255?255:v;};
+          var _sm=function(e0,e1,x){var t=(x-e0)/(e1-e0);t=t<0?0:t>1?1:t;return t*t*(3-2*t);};
+          // sky colour engine (port of the lab)
+          window._tlSkyColors=function(sa,c,isEve){
+            var DB=window._SKY_DB; if(!DB) return ['#0a0820','#12103a','#1a1848','#20204a'];
+            var K=window._tlDBK; if(!K){K=Object.keys(DB).map(Number).sort(function(a,b){return a-b;});window._tlDBK=K;}
+            var cL=c.cL||0,cM=c.cM||0,cH=c.cH||0,rh=c.rh==null?50:c.rh,visMi=(c.vis==null?30000:c.vis)/1609.34,pr=c.pr||0,sn=c.sn||0;
+            var cl=Math.max(K[0],Math.min(K[K.length-1],sa)),lo=K[0],hi=K[K.length-1];
+            for(var k=0;k<K.length-1;k++){if(cl>=K[k]&&cl<=K[k+1]){lo=K[k];hi=K[k+1];break;}}
+            var g1=DB[String(lo)],g2=DB[String(hi)],t=(hi===lo)?0:(cl-lo)/(hi-lo);
+            var sky=[_lx(g1[0],g2[0],t),_lx(g1[1],g2[1],t),_lx(g1[2],g2[2],t),_lx(g1[3],g2[3],t)];
+            var gO=['#404858','#4a5468','#546070','#586478'],gM=['#3a4a68','#4a5a78','#506080','#586888'],dg=_sm(-3,4,sa);
+            if(sn>0){sky=_bl(sky,['#586878','#6a7888','#7a8898','#8890a0'],Math.min(0.8,sn/2));}
+            else{var ca=_sm(20,100,cL),ra=Math.max(0,Math.min(1,pr/1.2));sky=_bl(sky,_bl(gM,gO,ca),Math.min(0.85,ca*0.68+ra*0.18));}
+            sky=_bl(sky,['#3a4868','#4a5a80','#5a6a90','#5a7090'],Math.min(0.35,_sm(30,100,cM)*0.35)*dg);
+            sky=_bl(sky,['#4a6098','#5a70a8','#6a80b0','#6888b0'],Math.min(0.25,_sm(25,100,cH)*0.25)*dg);
+            sky=_bl(sky,['#3a5890','#4a6898','#5a78a0','#6888a8'],Math.min(0.30,_sm(65,100,rh)*0.30)*_sm(1,6,sa));
+            sky=_bl(sky,['#586878','#687888','#788890','#889098'],Math.min(0.50,_sm(8,0,visMi)*0.50)*dg);
+            var nh=Math.max(0,1-Math.abs(sa-1)/9);
+            var cat=nh*Math.max(0,1-Math.abs((cM+cH)/2-55)/55)*(1-_sm(90,100,cL));
+            if(cat>0.02){sky[3]=_lx(sky[3],isEve?'#ff5a26':'#ff7a34',cat*0.34);sky[2]=_lx(sky[2],isEve?'#ff8a54':'#ffab62',cat*0.30);sky[1]=_lx(sky[1],'#c86e92',cat*0.20);}
+            var dk=_sm(82,100,cL)*Math.max(0,1-Math.abs(sa)/4);
+            if(dk>0.02){sky[3]=_lx(sky[3],isEve?'#a8663f':'#b0784a',dk*0.55);sky[2]=_lx(sky[2],'#8a6c58',dk*0.30);}
+            if(isEve){var w=sa>=-1?Math.max(0,1-(sa+1)/9):Math.max(0,1+(sa+1)/11);if(w>0){sky[3]=_lx(sky[3],'#e85226',w*0.40);sky[2]=_lx(sky[2],'#c0586a',w*0.27);sky[1]=_lx(sky[1],'#5a3a70',w*0.13);}}
+            if(isEve){var wP=Math.max(0,1-Math.abs(sa+5)/5);sky[2]=_lx(sky[2],'#4a2858',wP*0.22);sky[3]=_lx(sky[3],'#5a3058',wP*0.22);var wB=Math.max(0,1-Math.abs(sa+3)/4);sky[0]=_lx(sky[0],'#3a2a55',wB*0.22);sky[1]=_lx(sky[1],'#8a5a82',wB*0.26);}
+            return sky;
+          };
+          // stars
+          var _mul=function(a){return function(){a|=0;a=a+0x6D2B79F5|0;var t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};};
+          (function(){var r=_mul(20260709),arr=[];for(var i=0;i<2200;i++){arr.push({x:r(),y:r(),mag:-1.5+9.5*Math.pow(r(),0.42),tw:r(),hue:r()});}window._tlStars=arr;})();
+          window._tlBLM={1:7.8,2:7.3,3:6.8,4:6.1,5:5.6,6:5.1,7:4.6,8:4.2,9:4.0};
+          window._tlLimMag=function(sa,b){if(sa>-4)return -99;var d=window._tlBLM[b]||5.6;var twi=Math.max(0,Math.min(1,(sa+18)/14));return d-twi*(d-0.2);};
+          window._tlStarCol=function(h){return h<0.14?'#bcd0ff':h<0.5?'#eef2ff':h<0.82?'#fff3df':'#ffd9ad';};
+          // per-day conditions (from hourly arrays) + temporal interpolation
+          window._tlBuildCond=function(day,hourly){
+            var a={cL:[],cM:[],cH:[],pr:[],rh:[],vis:[],sn:[]},pk=function(A,i){return (i>=0&&A&&A[i]!=null)?A[i]:null;};
+            for(var h=0;h<24;h++){
+              var tg=new Date(day.getFullYear(),day.getMonth(),day.getDate(),h,0,0,0),ix=-1;
+              if(hourly&&hourly.time){for(var q=0;q<hourly.time.length;q++){var dq=new Date(hourly.time[q]);if(dq.getFullYear()===tg.getFullYear()&&dq.getMonth()===tg.getMonth()&&dq.getDate()===tg.getDate()&&dq.getHours()===h){ix=q;break;}}}
+              var cc=pk(hourly&&hourly.cloudcover,ix);
+              a.cL[h]=pk(hourly&&hourly.cloud_cover_low,ix); if(a.cL[h]==null)a.cL[h]=cc!=null?cc:0;
+              a.cM[h]=pk(hourly&&hourly.cloud_cover_mid,ix); if(a.cM[h]==null)a.cM[h]=0;
+              a.cH[h]=pk(hourly&&hourly.cloud_cover_high,ix); if(a.cH[h]==null)a.cH[h]=0;
+              a.pr[h]=pk(hourly&&hourly.precipitation,ix)||0;
+              a.rh[h]=pk(hourly&&hourly.relativehumidity_2m,ix); if(a.rh[h]==null)a.rh[h]=50;
+              a.vis[h]=pk(hourly&&hourly.visibility,ix); if(a.vis[h]==null)a.vis[h]=30000;
+              a.sn[h]=pk(hourly&&hourly.snowfall,ix)||0;
+            }
+            return a;
+          };
+          window._tlCondAt=function(A,hf){var b=Math.floor(hf),f=hf-b,i0=((b%24)+24)%24,i1=(i0+1)%24,L=function(x,y){return x+(y-x)*f;};return {cL:L(A.cL[i0],A.cL[i1]),cM:L(A.cM[i0],A.cM[i1]),cH:L(A.cH[i0],A.cH[i1]),pr:L(A.pr[i0],A.pr[i1]),rh:L(A.rh[i0],A.rh[i1]),vis:L(A.vis[i0],A.vis[i1]),sn:L(A.sn[i0],A.sn[i1])};};
+          // the painter
+          window._tlPaintSky=function(){
+            try{
+              var S=window._tlSky; if(!S||!S.bands||!S.cvs) return;
+              var bands=S.bands,cvs=S.cvs;
+              var cw=bands.clientWidth||bands.offsetWidth||360, ch=bands.clientHeight||bands.offsetHeight||300;
+              if(cw<2||ch<2) return;
+              var W=Math.min(cw,560)|0, H=Math.min(ch,460)|0; cvs.width=W; cvs.height=H;
+              var ctx=cvs.getContext('2d'), day=S.day, lat=S.lat, lon=S.lon;
+              var terms=_solarTerms(day), noon=solarNoonLocal(day,lat,lon);
+              var latR=rad(lat), decl=terms.decl, noonH=noon.getHours()+noon.getMinutes()/60+noon.getSeconds()/3600;
+              var altOf=function(hr){var ha=(hr-noonH)*15;var s=Math.sin(latR)*Math.sin(decl)+Math.cos(latR)*Math.cos(decl)*Math.cos(rad(ha));return deg(Math.asin(s<-1?-1:s>1?1:s));};
+              var isMob=window.matchMedia&&window.matchMedia('(max-width:768px)').matches;
+              var t0=0,t1=24;
+              if(isMob&&(window._tlDayOffset||0)===0){var nH=(new Date()).getHours()+(new Date()).getMinutes()/60;t0=nH-4;t1=nH+4;if(t0<0){t1-=t0;t0=0;}if(t1>24){t0-=(t1-24);t1=24;}t0=Math.max(0,t0);t1=Math.min(24,t1);}
+              var COND=window._tlBuildCond(day,S.hourly), pos=[0,0.30,0.58,0.80,1.0];
+              var img=ctx.createImageData(W,H),data=img.data,altCol=new Float32Array(W);
+              for(var x=0;x<W;x++){
+                var hr=t0+(t1-t0)*(x/(W-1)),sa=altOf(hr);altCol[x]=sa;
+                var col=window._tlSkyColors(sa,window._tlCondAt(COND,hr),hr>noonH);
+                var L0=_hOk(col[0]),L1=_hOk(col[1]),L2=_hOk(col[2]),L3=_hOk(col[3]),labs=[L0,L1,L2,L3,L3];
+                for(var y=0;y<H;y++){
+                  var fy=y/(H-1),i=0;while(i<3&&fy>pos[i+1])i++;
+                  var sp=pos[i+1]-pos[i],tt=sp<=0?0:(fy-pos[i])/sp;tt=tt*tt*(3-2*tt);
+                  var A=labs[i],B=labs[i+1];
+                  var rgb=_okR(A[0]+(B[0]-A[0])*tt,A[1]+(B[1]-A[1])*tt,A[2]+(B[2]-A[2])*tt);
+                  var z1=Math.sin(x*12.9898+y*78.233)*43758.5453,z2=Math.sin(x*39.346+y*11.135)*24634.6345;
+                  var dd=((z1-Math.floor(z1))+(z2-Math.floor(z2))-1)*1.4,ix=(y*W+x)*4;
+                  data[ix]=_cB(rgb[0]+dd);data[ix+1]=_cB(rgb[1]+dd);data[ix+2]=_cB(rgb[2]+dd);data[ix+3]=255;
+                }
+              }
+              ctx.putImageData(img,0,0);
+              var bort=(window._locBortle!=null)?Math.max(1,Math.min(9,Math.round(window._locBortle))):6;
+              var stars=window._tlStars;
+              if(stars){
+                ctx.save();
+                for(var si=0;si<stars.length;si++){
+                  var st=stars[si],col2=Math.min(W-1,Math.max(0,Math.round(st.x*(W-1)))),ssa=altCol[col2];
+                  var vis=window._tlLimMag(ssa,bort),mg=vis-st.mag; if(mg<=0) continue;
+                  var sc=window._tlCondAt(COND,t0+(t1-t0)*st.x),cf=Math.max(0,1-(sc.cL*0.92+sc.cM*0.45+sc.cH*0.22)/100); if(cf<=0.02) continue;
+                  var fd=Math.min(1,mg/1.3),intr=Math.min(1,0.30+0.55*Math.max(0,(3-st.mag))/4.5),aa=fd*intr*(0.7+0.55*st.tw)*cf;
+                  if(st.y>0.82)aa*=Math.max(0,(1-st.y)/0.18);
+                  if(st.y<0.02||aa<0.04) continue;
+                  var px=st.x*W,py=st.y*H,sz=(st.mag<0?2.4:st.mag<1.5?1.7:st.mag<3?1.2:0.85)*(W/560);
+                  ctx.globalAlpha=Math.min(1,aa); ctx.fillStyle=st.mag<1.6?window._tlStarCol(st.hue):'#eef2ff';
+                  ctx.beginPath();ctx.arc(px,py,sz,0,6.2832);ctx.fill();
+                  if(st.mag<0.8){ctx.globalAlpha=Math.min(1,aa)*0.22;ctx.beginPath();ctx.arc(px,py,sz*2.8,0,6.2832);ctx.fill();}
+                }
+                ctx.restore();
+              }
+            }catch(e){}
+          };
+          var _tlRT=null; window.addEventListener('resize',function(){clearTimeout(_tlRT);_tlRT=setTimeout(function(){if(window._tlPaintSky)window._tlPaintSky();},200);});
+        }
+        window._tlPaintSky();
+      } catch(e){}
     }
 
     // Render planet tracks
