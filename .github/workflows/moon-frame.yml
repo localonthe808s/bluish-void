@@ -1,0 +1,47 @@
+name: Refresh moon frame
+
+# Keeps cdn.bluishvoid.com/moon/current.jpg pointed at the current NASA SVS
+# "Dial-A-Moon 2026" hourly frame, self-hosted on R2 so the site's hero moon
+# never depends on NASA's (repeatedly lapsing) TLS certificate.
+#
+# Requires three repo secrets (Settings → Secrets and variables → Actions):
+#   R2_ACCOUNT_ID          – Cloudflare account id (the R2 S3 endpoint host)
+#   R2_ACCESS_KEY_ID       – R2 API token access key (write to bluishvoid-bg)
+#   R2_SECRET_ACCESS_KEY   – R2 API token secret
+
+on:
+  schedule:
+    - cron: '17 */4 * * *'   # every 4 hours (moon phase/libration changes slowly)
+  workflow_dispatch: {}       # allow manual runs
+
+concurrency:
+  group: moon-frame
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch current Dial-A-Moon frame and upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          # frame = hour-of-year (UTC) since 2026-01-01, 1..8760 — matches the site's formula
+          FRAME=$(python3 -c "import datetime; s=datetime.datetime(2026,1,1,tzinfo=datetime.timezone.utc); h=int((datetime.datetime.now(datetime.timezone.utc)-s).total_seconds()//3600); print(str(((h%8760)+8760)%8760+1).zfill(4))")
+          echo "Fetching frame $FRAME"
+          # -k: NASA's cert is often expired; we validate the payload instead
+          curl -fsSk --retry 3 --retry-delay 5 -o moon.jpg \
+            "https://svs.gsfc.nasa.gov/vis/a000000/a005100/a005187/frames/730x730_1x1_30p/moon.${FRAME}.jpg"
+          # sanity-check it's a real JPEG of plausible size before publishing
+          file moon.jpg | grep -q 'JPEG'
+          test "$(stat -c%s moon.jpg)" -gt 10000
+          aws s3 cp moon.jpg "s3://bluishvoid-bg/moon/current.jpg" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --content-type "image/jpeg" \
+            --cache-control "public, max-age=21600" \
+            --only-show-errors
+          echo "Published moon/current.jpg (frame $FRAME)"
