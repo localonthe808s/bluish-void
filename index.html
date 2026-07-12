@@ -65414,7 +65414,7 @@ function initNowMicroTabs(){
 
 
   // refresh cadences
-  setInterval(function(){ loadWeatherForLocation(LOCATION); }, 10 * 60 * 1000);
+  setInterval(function(){ if (document.hidden) return; loadWeatherForLocation(LOCATION); }, 10 * 60 * 1000);
 
   // ── Shared sun color function (used by both main render + live tick) ──
   window._ghSunColor = function(sa) {
@@ -66332,8 +66332,12 @@ function initNowMicroTabs(){
     })();
 
     // ─── REFRESH INTERVALS (set up once, not duplicated) ───
-    setInterval(updateSolarMini, 5 * 60 * 1000);
-    setInterval(loadAirQuality, 15 * 60 * 1000);
+    // All skip their fetch while the tab is hidden (desktop + mobile) so a
+    // backgrounded tab doesn't keep burning bandwidth/CPU/battery/API quota;
+    // the visibilitychange handler below catches up on return. (Matches the
+    // Pollen guard pattern right beneath this.)
+    setInterval(function(){ if (!document.hidden) updateSolarMini(); }, 5 * 60 * 1000);
+    setInterval(function(){ if (!document.hidden) loadAirQuality(); }, 15 * 60 * 1000);
     // Pollen is a DAILY forecast, so hourly is plenty (was 15 min). Skip the
     // refresh while the tab is hidden — a backgrounded tab left open all day
     // shouldn't burn the Pollen API free quota (5k calls/mo) on data nobody's
@@ -66345,8 +66349,28 @@ function initNowMicroTabs(){
       // the tab doesn't spam calls but you also don't stare at stale pollen.
       if (!window._pollenLastLoad || (Date.now() - window._pollenLastLoad) > 60 * 60 * 1000) loadPollen();
     });
-    setInterval(loadWeatherAlerts, 5 * 60 * 1000);
+    setInterval(function(){ if (!document.hidden) loadWeatherAlerts(); }, 5 * 60 * 1000);
     setInterval(function(){ if (tornadoMap && hazardActiveTab === 'tornado') loadTornadoReports(); }, 10 * 60 * 1000);
+
+    // Catch-up on return: when the tab comes back after being hidden long enough
+    // that a guarded interval above would have fired, refresh those sources once
+    // (staggered ~150ms so we don't fire a request burst). Only refresh a source
+    // if we were away at least its own interval — a quick tab-flick refreshes
+    // nothing. Desktop parity with the mobile pause-when-hidden behavior.
+    var _bgHiddenAt = 0;
+    document.addEventListener('visibilitychange', function(){
+      if (document.hidden){ _bgHiddenAt = Date.now(); return; }
+      if (!_bgHiddenAt) return;
+      var away = Date.now() - _bgHiddenAt;
+      _bgHiddenAt = 0;
+      if (away < 60 * 1000) return;   // quick flick — nothing to catch up
+      var jobs = [];
+      if (away >= 5 * 60 * 1000){ jobs.push(function(){ try{ updateSolarMini(); }catch(e){} });
+                                  jobs.push(function(){ try{ loadWeatherAlerts(); }catch(e){} }); }
+      if (away >= 10 * 60 * 1000) jobs.push(function(){ try{ loadWeatherForLocation(LOCATION); }catch(e){} });
+      if (away >= 15 * 60 * 1000) jobs.push(function(){ try{ loadAirQuality(); }catch(e){} });
+      jobs.forEach(function(fn, i){ setTimeout(fn, i * 150); });
+    });
 
     // ─── SOURCE HEALTH: Register all data sources ───
     // HAZARDS widget
