@@ -9237,6 +9237,49 @@ function heroFogPanel(vbH){
     <g class="an-fog" filter="url(#${f})">${bands}</g>`;
 }
 function heroSun(){ return glow('255,168,74',0.82,124,H_CX,90.5) + sun(H_CX,90.5,60); }
+/* approximate solar altitude NOW (deg) — good to ~1-2° (ignores equation of time),
+   plenty for art. Self-contained: the app's _solarTerms lives in another closure. */
+function _sunAltNow(lat,lon){
+  const d=new Date(), rad=Math.PI/180;
+  const n=Math.floor((d - new Date(Date.UTC(d.getUTCFullYear(),0,0)))/864e5);
+  const decl=-23.44*Math.cos(rad*(360/365)*(n+10));
+  const solT=d.getUTCHours()+d.getUTCMinutes()/60+lon/15;
+  const ha=(solT-12)*15;
+  const s=Math.sin(rad*lat)*Math.sin(rad*decl)+Math.cos(rad*lat)*Math.cos(rad*decl)*Math.cos(rad*ha);
+  return Math.asin(Math.max(-1,Math.min(1,s)))/rad;
+}
+/* CLEAR-DAY SUN that knows the hour and the air:
+   - altitude (live for today, midday pose for other days): low sun = big warm
+     amber glow + refraction squash; high sun = tight pale-gold blaze
+   - haze from live AQI/PM2.5: milky veil over the disc, wider dimmer glow
+   - UV (selected day's max): a hot thin rim when the index bites */
+function heroSunClear(cx,cy,r){
+  const today=(window._tlDayOffset||0)===0;
+  let alt=45;
+  try{ if(today && window.LOCATION) alt=_sunAltNow(LOCATION.lat,LOCATION.lon); }catch(_){}
+  const t=Math.max(0,Math.min(1,alt/40));
+  let haze=0;
+  try{ if(today && window._aqData && window._aqData.current){ const c=window._aqData.current; haze=Math.max((c.us_aqi||0)/150,(c.pm2_5||0)/55); } }catch(_){}
+  haze=Math.max(0,Math.min(1,haze));
+  let uv=0;
+  try{ const di=(window._tlBaseDay||0)+(window._tlDayOffset||0); const u=window._dailyData&&window._dailyData.uv_index_max; if(u&&u[di]!=null) uv=u[di]; }catch(_){}
+  const uvF=Math.max(0,Math.min(1,uv/9));
+  const lerp=(a,b,k)=>a+(b-a)*k;
+  const gr=[255,Math.round(lerp(122,186,t)),Math.round(lerp(40,96,t))].join(',');
+  const gRad=r*lerp(2.5,1.7,t)*(1+haze*0.5);
+  const gA=(0.9-0.25*haze)*lerp(1,0.8,t);
+  const squash=(today && alt<7)?0.94:1;
+  // disc + overlays share the refraction squash so nothing detaches at low sun
+  let inner=sun(cx,cy,r);
+  const tintCol=t<0.5?'255,110,30':'255,250,235';
+  const tintA=t<0.5?(0.42*(1-t*2)):(0.16*(t-0.5)*2);
+  if(tintA>0.02){ const tg=uid();
+    inner+=`<defs><radialGradient id="${tg}" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="rgba(${tintCol},${tintA.toFixed(2)})"/><stop offset="78%" stop-color="rgba(${tintCol},${(tintA*0.7).toFixed(2)})"/><stop offset="100%" stop-color="rgba(${tintCol},0)"/></radialGradient></defs><circle cx="${cx}" cy="${cy}" r="${r+1}" fill="url(#${tg})"/>`; }
+  if(haze>0.08){ const hg=uid();
+    inner+=`<defs><radialGradient id="${hg}" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="rgba(226,224,218,${(haze*0.5).toFixed(2)})"/><stop offset="100%" stop-color="rgba(226,224,218,${(haze*0.28).toFixed(2)})"/></radialGradient></defs><circle cx="${cx}" cy="${cy}" r="${(r*1.06).toFixed(1)}" fill="url(#${hg})"/>`; }
+  if(uvF>0.3) inner+=`<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="rgba(255,246,220,${(0.15+uvF*0.4).toFixed(2)})" stroke-width="1.1"/>`;
+  return glow(gr,gA,gRad,cx,cy)+`<g transform="translate(${cx},${cy}) scale(1,${squash}) translate(${-cx},${-cy})">`+inner+`</g>`;
+}
 /* clear-day sun in its own 130px box, so it can be left-anchored to mirror the moon */
 function heroSunBox(){ return `<svg class="ic-hero" viewBox="0 0 130 130" width="130" height="130" style="overflow:visible" xmlns="http://www.w3.org/2000/svg">${glow('255,168,74',0.82,82,65,65)}${sun(65,65,65)}</svg>`; }
 /* one hero shooting star — bright head + tapering trail, streaks down-right */
@@ -9383,7 +9426,7 @@ function heroState(code, night){
 /* returns inner SVG content in a 660x215 coordinate space (no moon) */
 function heroInner(state, vbH){
   switch(state){
-    case 'clear-day':   return sun(95,90.5,64);
+    case 'clear-day':   return heroSunClear(95,90.5,64);
     case 'clear-night': return _stripSvg(heroNightFull());
     case 'overcast':    return _stripSvg(heroDeckFull());
     case 'fog':         return heroFogPanel(vbH||215);
@@ -9484,7 +9527,7 @@ window._updateHeroWx = function(code, night){
         try{ _srand(_hash('herosun|'+code)); }catch(_){}
         var _sunWrap = document.createElement('div');
         _sunWrap.className = 'hero-sun-svg';
-        _sunWrap.innerHTML = '<svg viewBox="0 0 130 130" width="165" height="165" style="display:block;overflow:visible" xmlns="http://www.w3.org/2000/svg">'+ sun(65,65,63) +'</svg>';
+        _sunWrap.innerHTML = '<svg viewBox="0 0 130 130" width="165" height="165" style="display:block;overflow:visible" xmlns="http://www.w3.org/2000/svg">'+ heroSunClear(65,65,63) +'</svg>';
         _heroIcon.appendChild(_sunWrap);
       }
       document.documentElement.classList.remove('wx-night-panel');
