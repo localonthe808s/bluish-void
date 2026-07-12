@@ -8418,10 +8418,15 @@ body > #dynamic-alert-modal {
      lightning, not a flickering tube) */
   @keyframes ic-strike{ 0%,100%{ opacity:.22; } 5%{ opacity:1; } 12%{ opacity:.82; } 30%{ opacity:.22; } }
   .an-strike{ animation:ic-strike 3.2s ease-out infinite; }
-  /* hero bolts: INVISIBLE between strikes (no faint threads hanging around),
-     then a hard double-flash like a real return stroke + restrike */
-  @keyframes ic-strike-h{ 0%,100%{ opacity:0; } 2%{ opacity:1; } 5%{ opacity:.28; } 7%{ opacity:.95; } 13%{ opacity:.5; } 20%{ opacity:0; } }
+  /* hero bolts — full strike sequence: a DIM STEPPED LEADER draws down the
+     channel (0→1.6% of the cycle), then the bright RETURN STROKE flashes,
+     dims, RESTRIKES, and dies. Invisible between strikes. */
+  @keyframes ic-strike-h{ 0%{ opacity:0; } 0.4%{ opacity:.42; } 1.8%{ opacity:.46; } 2.3%{ opacity:1; } 5%{ opacity:.25; } 7%{ opacity:.92; } 12%{ opacity:.45; } 19%,100%{ opacity:0; } }
   .an-strike-h{ animation:ic-strike-h 4s linear infinite; }
+  /* the leader propagation itself: every bolt path draws top-to-bottom via
+     dashoffset during the leader phase (same duration/delay as its group) */
+  @keyframes ic-leader{ 0%{ stroke-dashoffset:100; } 1.6%{ stroke-dashoffset:0; } 100%{ stroke-dashoffset:0; } }
+  .bolt-lead{ stroke-dasharray:100; animation-name:ic-leader; animation-timing-function:linear; animation-iteration-count:infinite; }
   /* flash-flood pool: water FILLS UP from below the rain line (one-shot rise,
      holds), then the surface bobs gently forever */
   @keyframes ic-flood-rise{ from{ transform:translateY(36px); } to{ transform:translateY(0); } }
@@ -9088,18 +9093,36 @@ function _hLightning(x,y,height,segH,jit,depth,out,hbias){
   }
   out.push({d:'M'+pts.map(p=>p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' L'), depth});
 }
-function _hOneBolt(x0,y0,gl,dl,dur,h){
+function _hOneBolt(x0,y0,ids,dl,dur,h){
   // segment length scales with bolt height (~11 segments regardless) — long bolts
   // get LONG straight runs with sharp kinks, not a uniform ripple that reads as string
   const out=[]; _hLightning(x0,y0, h, Math.max(8.4, h/11), _rnd(9,12), 0, out, 0);
-  let glow='', core='';
-  out.forEach(sg=>{ const w = sg.depth===0?2.6:sg.depth===1?1.4:0.8;
-    core += `<path d="${sg.d}" fill="none" stroke="#f4f9ff" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round"/>`;
-    glow += `<path d="${sg.d}" fill="none" stroke="#a9c8ff" stroke-width="${(w+3).toFixed(1)}" stroke-linecap="round" stroke-linejoin="round"/>`; });
-  return `<g class="an-strike-h" style="animation-delay:-${dl.toFixed(2)}s;animation-duration:${dur.toFixed(2)}s"><g filter="url(#${gl})" opacity="0.8">${glow}</g>${core}</g>`;
+  const sync=`animation-duration:${dur.toFixed(2)}s;animation-delay:-${dl.toFixed(2)}s`;
+  let core='', gin='', gout='';
+  out.forEach(sg=>{
+    // width + opacity taper by depth: bold main channel, thin fading branches
+    const w = sg.depth===0?2.6:sg.depth===1?1.25:0.7;
+    const op = sg.depth===0?1:sg.depth===1?0.8:0.55;
+    const P=(sw,col,o)=>`<path d="${sg.d}" pathLength="100" class="bolt-lead" style="${sync}" fill="none" stroke="${col}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" opacity="${o}"/>`;
+    core+=P(w,'#f6faff',op);
+    gin +=P((w+2.2).toFixed(1),'#aac6ff',op);
+    gout+=P((w+5.5).toFixed(1),'#7a95ff',(op*0.7).toFixed(2));
+  });
+  const main=out[out.length-1];                          // depth-0 channel is pushed last
+  // taper: the upper ~38% of the main channel runs HOT and thick (near the cloud)
+  const pts=main.d.split(' L');
+  const up=pts.slice(0,Math.max(3,Math.floor(pts.length*0.38))).join(' L');
+  core+=`<path d="${up}" pathLength="100" class="bolt-lead" style="${sync}" fill="none" stroke="#ffffff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round" opacity=".9"/>`;
+  // strike-point ground flash (extended bolts reach the line) + the cloud base
+  // lighting up from within — both flash with the group
+  const mt=main.d.match(/L([\d.\-]+) ([\d.\-]+)$/);
+  const tx=mt?parseFloat(mt[1]):x0, ty=mt?parseFloat(mt[2]):y0+h;
+  const ground=(H_BOLTY>0)?`<ellipse cx="${tx.toFixed(1)}" cy="${ty.toFixed(1)}" rx="30" ry="7" fill="url(#${ids.gf})"/>`:'';
+  const cloudGlow=`<ellipse cx="${x0.toFixed(1)}" cy="${(y0+4).toFixed(1)}" rx="90" ry="26" fill="url(#${ids.cg})"/>`;
+  return `<g class="an-strike-h" style="${sync}">${cloudGlow}<g filter="url(#${ids.glo})" opacity="0.6">${gout}</g><g filter="url(#${ids.gl})" opacity="0.85">${gin}</g>${core}${ground}</g>`;
 }
 function heroBolt(){
-  const gl=uid(), n = _rand()<0.5?3:4;
+  const ids={gl:uid(), glo:uid(), gf:uid(), cg:uid()}, n = _rand()<0.5?3:4;
   const x0=30, x1=450, zone=(x1-x0)/n;
   let s='';
   for(let k=0;k<n;k++){
@@ -9109,9 +9132,14 @@ function heroBolt(){
     // padding); default row-bound hero keeps the original short bolts
     const len = H_BOLTY > 0 ? Math.max(46, H_BOLTY - y - _rnd(0,8)) : _rnd(46,56);
     // long cycles + wide stagger: bolts strike one at a time out of darkness
-    s += _hOneBolt(x, y, gl, _rnd(0,5), _rnd(3.6,5.6), len);
+    s += _hOneBolt(x, y, ids, _rnd(0,5), _rnd(3.6,5.6), len);
   }
-  return `<defs><filter id="${gl}" x="-60%" y="-30%" width="220%" height="175%"><feGaussianBlur stdDeviation="1.6"/></filter></defs>${s}`;
+  return `<defs>
+    <filter id="${ids.gl}" x="-80%" y="-30%" width="260%" height="170%"><feGaussianBlur stdDeviation="1.3"/></filter>
+    <filter id="${ids.glo}" x="-120%" y="-40%" width="340%" height="190%"><feGaussianBlur stdDeviation="4.2"/></filter>
+    <radialGradient id="${ids.gf}" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#eef4ff" stop-opacity=".9"/><stop offset="45%" stop-color="#a8c2ff" stop-opacity=".4"/><stop offset="100%" stop-color="#a8c2ff" stop-opacity="0"/></radialGradient>
+    <radialGradient id="${ids.cg}" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#dfe8ff" stop-opacity=".55"/><stop offset="55%" stop-color="#b9c8f4" stop-opacity=".22"/><stop offset="100%" stop-color="#b9c8f4" stop-opacity="0"/></radialGradient>
+  </defs>${s}`;
 }
 /* FLASH-FLOOD POOL — translucent water body across the panel bottom with a wavy
    surface + crest highlight. Drawn in the svg ROOT space (full 660, not the +90
