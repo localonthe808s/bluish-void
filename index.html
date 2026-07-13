@@ -8490,6 +8490,10 @@ body > #dynamic-alert-modal {
   .an-murflock{ transform-box:fill-box; transform-origin:center; animation:ic-murflock 11s ease-in-out infinite alternate; }
   @keyframes ic-murb{ from{ transform:translate(0,0); } to{ transform:translate(var(--mx),var(--my)); } }
   .an-murb{ animation-name:ic-murb; animation-timing-function:ease-in-out; animation-iteration-count:infinite; animation-direction:alternate; }
+  /* flock fade-in: boot-time layout settling can force an early rebuild — the
+     birds appear 0.8s after the LAST build, so those restarts happen unseen */
+  @keyframes ic-heroin{ from{ opacity:0; } to{ opacity:1; } }
+  .an-heroin{ animation:ic-heroin 1.4s ease-out .8s backwards; }
   .an-glow{ transform-box:fill-box; transform-origin:center; animation:ic-breathe 4.5s ease-in-out infinite alternate; }
   @keyframes ic-fog{ 0%{ transform:translateX(-1.6px); } 100%{ transform:translateX(1.6px); } }
   .an-fog{ transform-box:fill-box; transform-origin:center; animation:ic-fog 6s ease-in-out infinite alternate; }
@@ -9384,7 +9388,7 @@ function heroDayPanel(W,H){
     const wingG=(i%3===0)?`<g class="an-murflap" style="animation-duration:${_rnd(0.45,0.85).toFixed(2)}s;animation-delay:-${_rnd(0,0.8).toFixed(2)}s">${wing}</g>`:wing;
     flock+=`<g transform="translate(${bx.toFixed(1)},${by.toFixed(1)})"><g class="an-murb" style="animation-duration:${_rnd(2.6,6.4).toFixed(2)}s;animation-delay:-${_rnd(0,6).toFixed(2)}s;--mx:${_rnd(-12,12).toFixed(1)}px;--my:${_rnd(-8,8).toFixed(1)}px"><g transform="rotate(${rot}) scale(${bs.toFixed(2)})"><ellipse cx="0" cy="0" rx="0.55" ry="0.34" fill="rgba(25,38,60,${op})"/>${wingG}</g></g></g>`;
   }
-  s+=`<g transform="translate(${(W*0.5).toFixed(0)},${fy.toFixed(0)})"><g class="an-murfly" style="--mw:${W}px;--mh:${H}px;animation-duration:${MDUR}s;animation-delay:${mdl}s"><g class="an-murflock">${flock}</g></g></g>`;
+  s+=`<g class="an-heroin" transform="translate(${(W*0.5).toFixed(0)},${fy.toFixed(0)})"><g class="an-murfly" style="--mw:${W}px;--mh:${H}px;animation-duration:${MDUR}s;animation-delay:${mdl}s"><g class="an-murflock">${flock}</g></g></g>`;
   return `<svg class="ic-hero" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg">${s}</svg>`;
 }
 /* CLEAR-DAY SUN that knows the hour and the air:
@@ -9706,27 +9710,38 @@ window._updateHeroWx = function(code, night){
         ? 'linear-gradient(to bottom,black calc(100% - 150px),rgba(0,0,0,.75) calc(100% - 95px),rgba(0,0,0,.38) calc(100% - 45px),transparent)'
         : 'linear-gradient(to bottom,black calc(100% - 46px),transparent)';
       var _hmask = '-webkit-mask-image:'+_hmaskG+';mask-image:'+_hmaskG+';';
-      hw.style.cssText = 'position:absolute;left:0;right:0;top:0;height:'+H+'px;z-index:0;pointer-events:none;overflow:hidden;border-radius:16px 16px 0 0;'+_hbg+_hmask;
+      // background transition: the sky colour can shift between renders (colour
+      // engine coming up after the fallback, sun altitude moving) — glide, don't pop
+      hw.style.cssText = 'position:absolute;left:0;right:0;top:0;height:'+H+'px;z-index:0;pointer-events:none;overflow:hidden;border-radius:16px 16px 0 0;transition:background 1.2s ease;'+_hbg+_hmask;
       document.documentElement.classList.add('wx-full-panel');
       var _sbW = Math.round(sb.getBoundingClientRect().width) || 660;
+      // clear-day rebuild guards (shared with the rAF re-measure below):
+      // _cdOk — is the existing svg reusable for this width/height? _cdBuild —
+      // rebuild and stamp the sig the check reads.
+      var _cdOk = function(el,w,h){
+        var m = el && el.getAttribute ? /^cd\|(\d+)x(\d+)$/.exec(el.getAttribute('data-cd-sig')||'') : null;
+        return !!(m && +m[1]===w && Math.abs(h-+m[2]) <= (+m[2])*0.12);
+      };
+      var _cdBuild = function(el,w,h){
+        el.innerHTML = heroDayPanel(w,h);
+        if(el.firstElementChild) el.firstElementChild.setAttribute('data-cd-sig','cd|'+w+'x'+h);
+      };
       if(st==='clear-night'){
         hw.innerHTML = heroNightPanel(H) + '<div class="hero-scrim-night"></div>';
         document.documentElement.classList.add('wx-night-panel');
       } else if(st==='clear-day'){
         // full clear-day takeover: transparent atmosphere panel (1:1 px space,
         // nothing distorts) over the day-arc + the circular column sun.
-        // Rebuild ONLY when the panel size changed: every innerHTML rebuild
-        // restarts the flock/envelope/flap CSS animations from frame zero
-        // (only the jet + orbit are wall-clock-locked), so the site's frequent
-        // hero re-renders made the murmuration visibly jump every tick. The
-        // sig lives on the emitted svg itself, so any other state overwriting
-        // the layer naturally invalidates it.
-        var _cdSig = 'cd|'+_sbW+'x'+H;
-        var _cdCur = hw.firstElementChild && hw.firstElementChild.getAttribute && hw.firstElementChild.getAttribute('data-cd-sig');
-        if(_cdCur !== _cdSig){
-          hw.innerHTML = heroDayPanel(_sbW, H);
-          if(hw.firstElementChild) hw.firstElementChild.setAttribute('data-cd-sig', _cdSig);
-        }
+        // Rebuilds are EXPENSIVE: every innerHTML rebuild restarts the
+        // flock/envelope/flap CSS animations from frame zero (only the jet +
+        // orbit are wall-clock-locked). So: (a) skip identical rebuilds via a
+        // sig on the emitted svg (other states overwriting invalidate it
+        // naturally), and (b) TOLERATE height drift — same width and built
+        // height within 12% keeps the svg and lets it stretch
+        // (preserveAspectRatio=none; all vertical geometry is H-proportional).
+        // Boot's async layout settling then costs at most ONE rebuild instead
+        // of restarting the flock on every re-measure.
+        if(!_cdOk(hw.firstElementChild, _sbW, H)) _cdBuild(hw, _sbW, H);
         _injectSun();
       } else {
         // day cloud/overcast deck fills the panel; scrim keeps the top text legible
@@ -9739,7 +9754,7 @@ window._updateHeroWx = function(code, night){
         if(Math.abs(H2 - (parseInt(_hw.style.height,10)||0)) > 3){
           _hw.style.height = H2 + 'px';
           if(_st==='clear-night') _hw.innerHTML = heroNightPanel(H2) + '<div class="hero-scrim-night"></div>';
-          else if(_st==='clear-day'){ _hw.innerHTML = heroDayPanel(_w, H2); if(_hw.firstElementChild) _hw.firstElementChild.setAttribute('data-cd-sig','cd|'+_w+'x'+H2); }
+          else if(_st==='clear-day'){ if(!_cdOk(_hw.firstElementChild,_w,H2)) _cdBuild(_hw,_w,H2); }
         }
       }catch(e){} }); })(hw,st,_sbW);
     } else if(st==='clear-day'){
