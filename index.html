@@ -8584,7 +8584,7 @@ body > #dynamic-alert-modal {
   #panel-hero-row > .hero-moon{ position:relative; z-index:3; }
   /* desktop uses the procedural layer; mobile keeps the Meteocons <img> for now */
   @media (min-width:769px){ #panel-hero-row #cond-icon{ display:none !important; } }
-  @media (max-width:768px){ #hero-wx{ display:none !important; } }
+  @media (max-width:768px){ #hero-wx, #hero-skybg{ display:none !important; } }
   /* clear-day sun: centred in the left icon column (mirrors the moon); desktop only */
   #panel-hero-row .hero-icon .hero-sun-svg{ display:flex; align-items:center; justify-content:center; position:relative; z-index:2; transform:translateY(52px); }  /* match the moon column's 52px drop */
   @media (max-width:768px){ #panel-hero-row .hero-icon .hero-sun-svg{ display:none !important; } }
@@ -9769,8 +9769,69 @@ window._updateHeroWx = function(code, night){
     var fullDay = (st==='overcast' || st==='cloudy');
     var sb = (row.closest && row.closest('.today-tl-sky-bar')) || null;
     var _skyBands = sb ? sb.querySelector('.today-tl-sky-bands') : null;
-    if(_skyBands){ _skyBands.style.display = ''; _skyBands.style.webkitMaskImage = ''; _skyBands.style.maskImage = ''; }   // day-arc shows full-height by default; the full-panel branch re-masks it below
+    if(_skyBands){ _skyBands.style.display = ''; _skyBands.style.webkitMaskImage = ''; _skyBands.style.maskImage = ''; }   // day-arc shows full-height by default; the full-panel + partly-day branches re-mask it below
+    var _skybg = sb ? sb.querySelector('#hero-skybg') : null;
+    if(_skybg) _skybg.style.display = 'none';                     // only partly-day shows it (below)
     document.documentElement.classList.remove('wx-night-panel','wx-full-panel');
+    // ---- shared panel-backdrop helpers (full-panel heroes + the partly-day skybg) ----
+    // panel height: sky-bar top down to just below the RAIN LINE — the bars/line sit ON
+    // the backdrop (z-index:5) and the hourly day-arc only takes over below the rain line
+    var _panelH = function(){
+      var sbT = sb.getBoundingClientRect().top, t = null;
+      var _rl = sb.querySelector('#sky-precip-chip');
+      if(_rl){ var rr = _rl.getBoundingClientRect(); if(rr.height>0) t = rr.bottom + 2; }
+      var _pt = t==null ? sb.querySelector('#today-tl-planet-tracks') : null;
+      if(_pt){ var r = _pt.getBoundingClientRect(); if(r.height>0) t = r.top; }
+      if(t==null){ var _rs = sb.querySelector('#sky-riseset-strip'); if(_rs) t = _rs.getBoundingClientRect().bottom + 8; }
+      if(t==null) t = row.getBoundingClientRect().bottom;
+      var h = Math.round(t - sbT);
+      return h>0 ? h : (sb.clientHeight || (row.offsetTop + row.offsetHeight));
+    };
+    // eased fade over the backdrop's last 150px — the blend starts in the
+    // planet-bars zone and finishes at the layer's bottom edge
+    var _hmaskG = 'linear-gradient(to bottom,black calc(100% - 150px),rgba(0,0,0,.75) calc(100% - 95px),rgba(0,0,0,.38) calc(100% - 45px),transparent)';
+    var _hmask = '-webkit-mask-image:'+_hmaskG+';mask-image:'+_hmaskG+';';
+    // CROSSFADE with the day-arc: the backdrop fades OUT over its last 150px and
+    // the sky-bands fade IN across the same band — above it the hourly gradient
+    // contributes NOTHING, so its bright midday/sunrise columns can't bleed up
+    var _abMask = function(hh){
+      if(!_skyBands) return;
+      var m = 'linear-gradient(to bottom, transparent '+Math.max(0,hh-150)+'px, black '+Math.max(0,hh-4)+'px)';
+      _skyBands.style.webkitMaskImage = m; _skyBands.style.maskImage = m;
+    };
+    // the sky's CURRENT vertical gradient — zenith→horizon from the day-arc's own
+    // colour engine (_tlSkyColors) at the live sun altitude — so the panel shows the
+    // sky as it looks NOW, not the 24h timeline (whose night edges + sunrise band
+    // read as stripes). Other days: midday pose, like the sun.
+    var _curSkyBg = function(){
+      var _dcols = null;
+      try{
+        var _dToday = (window._tlDayOffset||0)===0;
+        var _dAlt = 45;
+        if(_dToday && window.LOCATION) _dAlt = _sunAltNow(LOCATION.lat, LOCATION.lon);
+        var _dEve = _dToday && (new Date()).getHours() >= 12;
+        if(window._tlSkyColors) _dcols = window._tlSkyColors(_dAlt, {}, _dEve);
+      }catch(_){}
+      if(!_dcols) _dcols = ['#2d63b8','#4a7fd0','#6f9de0','#a8c6ee'];   // colour engine not up yet
+      return 'background:linear-gradient(to bottom,'+_dcols[0]+' 0%,'+_dcols[1]+' 42%,'+_dcols[2]+' 72%,'+_dcols[3]+' 100%);';
+    };
+    // PARTLY day keeps its row-bound cloud, but the panel behind it gets the same
+    // opaque current-sky backdrop as clear-day — without it the day-arc's night
+    // edges + sunrise bands read as stripes behind the cloud
+    if(st==='partly' && !night && sb){
+      if(!_skybg){
+        _skybg = document.createElement('div'); _skybg.id = 'hero-skybg';
+        sb.insertBefore(_skybg, _skyBands ? _skyBands.nextSibling : sb.firstChild);
+      }
+      var _setSkybg = function(hh){
+        _skybg.style.cssText = 'position:absolute;left:0;right:0;top:0;height:'+hh+'px;z-index:0;pointer-events:none;border-radius:16px 16px 0 0;transition:background 1.2s ease;'+_curSkyBg()+_hmask;
+        _abMask(hh);
+      };
+      _setSkybg(_panelH());
+      document.documentElement.classList.add('wx-full-panel');
+      // re-measure once after layout settles (rain line populates async)
+      requestAnimationFrame(function(){ try{ _setSkybg(_panelH()); }catch(e){} });
+    }
     // circular column sun that MIRRORS the moon (1:1, never stretched) — used by
     // both the full clear-day panel and the row-bound fallback
     var _injectSun = function(){
@@ -9790,24 +9851,9 @@ window._updateHeroWx = function(code, night){
       // UNDER the nav/summary/row content (which follow it in the DOM)
       var _sbands = sb.querySelector('.today-tl-sky-bands');
       sb.insertBefore(hw, _sbands ? _sbands.nextSibling : sb.firstChild);
-      // Hero covers the PANEL only — it STOPS just above the planet-visibility bars (the
-      // moon bar is the first one), so those bars + rain line + hour columns all sit on the
-      // day-arc gradient. Anchor to the planet-tracks top; fall back to the rise-set row's
-      // bottom (the flex row's own box clips the overflowing riseset, so row.bottom is short).
-      // ALL full-panel heroes run past the planet bars to just below the RAIN
-      // LINE — the bars/line sit ON them (they're z-index:5) and the hourly
-      // day-arc gradient only takes over below the rain line.
-      var _panelH = function(){
-        var sbT = sb.getBoundingClientRect().top, t = null;
-        var _rl = sb.querySelector('#sky-precip-chip');
-        if(_rl){ var rr = _rl.getBoundingClientRect(); if(rr.height>0) t = rr.bottom + 2; }
-        var _pt = t==null ? sb.querySelector('#today-tl-planet-tracks') : null;
-        if(_pt){ var r = _pt.getBoundingClientRect(); if(r.height>0) t = r.top; }
-        if(t==null){ var _rs = sb.querySelector('#sky-riseset-strip'); if(_rs) t = _rs.getBoundingClientRect().bottom + 8; }
-        if(t==null) t = row.getBoundingClientRect().bottom;
-        var h = Math.round(t - sbT);
-        return h>0 ? h : (sb.clientHeight || (row.offsetTop + row.offsetHeight));
-      };
+      // Hero covers the PANEL only — it runs past the planet bars to just below the
+      // RAIN LINE (see the shared _panelH above); the hourly day-arc gradient only
+      // takes over below the rain line.
       var H = _panelH();
       // Clear-night gets a clean dark-night backdrop so its starfield "takes over" the panel
       // sky WITHOUT the day-arc gradient clashing through it — but the day-arc stays VISIBLE
@@ -9824,34 +9870,11 @@ window._updateHeroWx = function(code, night){
         // the day-arc's 24h banding read as stripes). Overcast/cloudy decks
         // stay TRANSPARENT over the day-arc — same look as always, they just
         // run down to the rain line now like the clear heroes.
-        var _dcols = null;
-        try{
-          var _dToday = (window._tlDayOffset||0)===0;
-          var _dAlt = 45;                                   // other days: midday pose, like the sun
-          if(_dToday && window.LOCATION) _dAlt = _sunAltNow(LOCATION.lat, LOCATION.lon);
-          var _dEve = _dToday && (new Date()).getHours() >= 12;
-          if(window._tlSkyColors) _dcols = window._tlSkyColors(_dAlt, {}, _dEve);
-        }catch(_){}
-        if(!_dcols) _dcols = ['#2d63b8','#4a7fd0','#6f9de0','#a8c6ee'];   // colour engine not up yet
-        _hbg = 'background:linear-gradient(to bottom,'+_dcols[0]+' 0%,'+_dcols[1]+' 42%,'+_dcols[2]+' 72%,'+_dcols[3]+' 100%);';
+        _hbg = _curSkyBg();
       }
-      // every full-panel hero runs past the rain line now, so all of them get
-      // the taller eased fade — the blend starts in the planet-bars zone and
-      // finishes at the layer's bottom edge
-      var _hmaskG = 'linear-gradient(to bottom,black calc(100% - 150px),rgba(0,0,0,.75) calc(100% - 95px),rgba(0,0,0,.38) calc(100% - 45px),transparent)';
-      var _hmask = '-webkit-mask-image:'+_hmaskG+';mask-image:'+_hmaskG+';';
       // background transition: the sky colour can shift between renders (colour
       // engine coming up after the fallback, sun altitude moving) — glide, don't pop
       hw.style.cssText = 'position:absolute;left:0;right:0;top:0;height:'+H+'px;z-index:0;pointer-events:none;overflow:hidden;border-radius:16px 16px 0 0;transition:background 1.2s ease;'+_hbg+_hmask;
-      // CROSSFADE with the day-arc: the hero fades OUT over its last 150px and
-      // the sky-bands fade IN across the same band — above it the hourly
-      // gradient contributes NOTHING, so its bright midday/sunrise columns
-      // can't bleed up through the hero's fade into the panel
-      var _abMask = function(hh){
-        if(!_skyBands) return;
-        var m = 'linear-gradient(to bottom, transparent '+Math.max(0,hh-150)+'px, black '+Math.max(0,hh-4)+'px)';
-        _skyBands.style.webkitMaskImage = m; _skyBands.style.maskImage = m;
-      };
       _abMask(H);
       document.documentElement.classList.add('wx-full-panel');
       var _sbW = Math.round(sb.getBoundingClientRect().width) || 660;
