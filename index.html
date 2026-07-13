@@ -13829,18 +13829,22 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
   function isNightTime(){
     // Real sun times when we have them: the hero holds its DAY face until
     // ~25 min past sunset and flips back ~25 min before sunrise (roughly
-    // civil twilight). The old fixed 6/20-hour cutoff went "night" at 8 PM
-    // with the sun still up.
+    // civil twilight). ALL wall-clock math is in the VIEWED location's zone:
+    // the daily ISO strings are already location-local, and "now" is converted
+    // via Intl — parsing the strings with new Date() reads them as the
+    // browser's zone, which broke remote locations (LA from the east coast).
     try{
       var dd = window._wxDaily || window._dailyData;
       if (dd && dd.time && dd.sunrise && dd.sunset){
-        var ti = dd.time.indexOf(localDateStr(new Date()));
-        if (ti >= 0){
-          var sr = new Date(dd.sunrise[ti]), ss = new Date(dd.sunset[ti]);
-          if (!isNaN(sr) && !isNaN(ss)){
-            var now = Date.now(), PAD = 25*60*1000;
-            return now < sr.getTime() - PAD || now > ss.getTime() + PAD;
-          }
+        var g = {};
+        new Intl.DateTimeFormat('en-CA',{timeZone:(window.LOCATION && LOCATION.tz) || undefined,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false})
+          .formatToParts(new Date()).forEach(function(p){ g[p.type] = p.value; });
+        var ti = dd.time.indexOf(g.year + '-' + g.month + '-' + g.day);
+        if (ti >= 0 && dd.sunrise[ti] && dd.sunset[ti]){
+          var nowMin = (+g.hour % 24) * 60 + (+g.minute);
+          var srMin = +dd.sunrise[ti].slice(11,13) * 60 + +dd.sunrise[ti].slice(14,16);
+          var ssMin = +dd.sunset[ti].slice(11,13) * 60 + +dd.sunset[ti].slice(14,16);
+          return nowMin < srMin - 25 || nowMin > ssMin + 25;
         }
       }
     }catch(e){}
@@ -28575,11 +28579,16 @@ function dayRangeAround(d, days){
               var W=Math.min(cw,900)|0, H=Math.min(ch,640)|0; cvs.width=W; cvs.height=H;
               var ctx=cvs.getContext('2d'), day=S.day, lat=S.lat, lon=S.lon;
               var terms=_solarTerms(day), noon=solarNoonLocal(day,lat,lon);
-              var latR=rad(lat), decl=terms.decl, noonH=noon.getHours()+noon.getMinutes()/60+noon.getSeconds()/3600;
+              // wall-clock hour of a real instant in the VIEWED location's timezone —
+              // the hour columns are location-local, but Date#getHours is the BROWSER's
+              // wall clock, which slid the whole sky sideways for remote locations
+              // (LA viewed from the east coast showed darkness until the 8-9AM columns)
+              var _wallH=function(d){ try{ var q={},pp=new Intl.DateTimeFormat('en-US',{timeZone:(window.LOCATION&&LOCATION.tz)||undefined,hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}).formatToParts(d); pp.forEach(function(z){q[z.type]=z.value;}); return (+q.hour%24)+(+q.minute)/60+(+q.second)/3600; }catch(e){ return d.getHours()+d.getMinutes()/60+d.getSeconds()/3600; } };
+              var latR=rad(lat), decl=terms.decl, noonH=_wallH(noon);
               var altOf=function(hr){var ha=(hr-noonH)*15;var s=Math.sin(latR)*Math.sin(decl)+Math.cos(latR)*Math.cos(decl)*Math.cos(rad(ha));return deg(Math.asin(s<-1?-1:s>1?1:s));};
               var isMob=window.matchMedia&&window.matchMedia('(max-width:768px)').matches;
               var t0=0,t1=24;
-              if(isMob&&(window._tlDayOffset||0)===0){var nH=(new Date()).getHours()+(new Date()).getMinutes()/60;t0=nH-4;t1=nH+4;if(t0<0){t1-=t0;t0=0;}if(t1>24){t0-=(t1-24);t1=24;}t0=Math.max(0,t0);t1=Math.min(24,t1);}
+              if(isMob&&(window._tlDayOffset||0)===0){var nH=_wallH(new Date());t0=nH-4;t1=nH+4;if(t0<0){t1-=t0;t0=0;}if(t1>24){t0-=(t1-24);t1=24;}t0=Math.max(0,t0);t1=Math.min(24,t1);}
               var COND=window._tlBuildCond(day,S.hourly), pos=[0,0.30,0.58,0.80,1.0];
               var altCol=new Float32Array(W), SUB=4;
               // ── SKY GRADIENT — GPU createLinearGradient with OKLab sub-stops (fast;
@@ -65611,10 +65620,15 @@ function initNowMicroTabs(){
         var _sunCol = 'rgba(255,183,94,.95)', _moonCol = 'rgba(188,178,244,.95)';
         var _cell = function(lbl, t, col){ return '<div class="rs-cell"><span class="rs-lbl">' + lbl + '</span><span class="rs-time" style="color:' + col + ';">' + t + '</span></div>'; };
         var _cells = [];
-        var _dR = (data.daily && data.daily.sunrise) ? new Date(data.daily.sunrise[0]) : null;
-        var _dS = (data.daily && data.daily.sunset) ? new Date(data.daily.sunset[0]) : null;
-        if (_dR && !isNaN(_dR)) _cells.push(_cell('Sunrise', _fmtT(_dR), _sunCol));
-        if (_dS && !isNaN(_dS)) _cells.push(_cell('Sunset', _fmtT(_dS), _sunCol));
+        // sunrise/sunset ISO strings are ALREADY the location's wall clock
+        // (Open-Meteo timezone=<loc>) — format the string directly. Parsing
+        // with new Date() reads them as the BROWSER's zone and _fmtT re-shifts
+        // into TZ = double conversion (LA showed sunrise 2:53 AM from the east coast).
+        var _fmtIso12 = function(iso){ if(!iso || iso.length < 16) return null; var h = +iso.slice(11,13), m = iso.slice(14,16), ap = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12; return h + ':' + m + ' ' + ap; };
+        var _dRs = (data.daily && data.daily.sunrise) ? _fmtIso12(data.daily.sunrise[0]) : null;
+        var _dSs = (data.daily && data.daily.sunset) ? _fmtIso12(data.daily.sunset[0]) : null;
+        if (_dRs) _cells.push(_cell('Sunrise', _dRs, _sunCol));
+        if (_dSs) _cells.push(_cell('Sunset', _dSs, _sunCol));
         if (typeof moonRaDec === 'function' && typeof altAz === 'function' && window.LOCATION) {
           var _d0 = new Date(_selNoon.getFullYear(), _selNoon.getMonth(), _selNoon.getDate(), 0, 0, 0, 0);
           var _al = function(t){ var rd = moonRaDec(t); return altAz(rd.ra, rd.dec, t, LOCATION.lat, LOCATION.lon).alt; };
