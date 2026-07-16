@@ -59786,15 +59786,37 @@ function initNowMicroTabs(){
         // Store features for sidebar smoke info
         window._hmsFeatures = data.features;
 
-        smokeGeoJsonLayer = L.geoJSON(data, {
+        // FLATTEN per density: HMS emits one polygon per analysis window, so
+        // the same plume stacks 3-4 deep and the fills compound to a solid
+        // blob that hides the terrain. Merging each density into ONE
+        // MultiPolygon makes overlaps fill exactly once (fillRule nonzero —
+        // Leaflet's evenodd default would punch holes where windows overlap),
+        // so the core stays at its intended opacity. Heavy draws last, over
+        // Medium over Light. 100+ paths collapse to 3.
+        var _densOrder = ["Light", "Medium", "Heavy"];
+        var _mergedFeats = [];
+        _densOrder.forEach(function(d){
+          var coords = [];
+          data.features.forEach(function(f){
+            if (!f.geometry || ((f.properties && f.properties.Density) || "Light") !== d) return;
+            if (f.geometry.type === "Polygon") coords.push(f.geometry.coordinates);
+            else if (f.geometry.type === "MultiPolygon") coords.push.apply(coords, f.geometry.coordinates);
+          });
+          if (coords.length) _mergedFeats.push({ type: "Feature", properties: { Density: d },
+            geometry: { type: "MultiPolygon", coordinates: coords } });
+        });
+
+        smokeGeoJsonLayer = L.geoJSON({ type: "FeatureCollection", features: _mergedFeats }, {
           pane: 'smokeHms',
           style: function(feature){
             var density = feature.properties.Density || "Light";
-            return densityStyles[density] || densityStyles["Light"];
+            var st = densityStyles[density] || densityStyles["Light"];
+            st.fillRule = 'nonzero';
+            return st;
           }
         }).addTo(fireMap);
-        
-        console.log("HMS Smoke: Loaded " + data.features.length + " real smoke polygons");
+
+        console.log("HMS Smoke: Loaded " + data.features.length + " polygons, flattened to " + _mergedFeats.length + " density layers");
         updateSmokePill("hms");
       })
       .catch(function(err){
