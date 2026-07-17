@@ -67468,15 +67468,26 @@ function initNowMicroTabs(){
           var e=isFinite(impactKt)?impactKt:(isFinite(rad)?(rad*1e10)/4.184e12:NaN);
           var latN=parseFloat(rr[3]), lonN=parseFloat(rr[5]);
           var lat=isFinite(latN)?latN*(rr[4]==='S'?-1:1):NaN, lon=isFinite(lonN)?lonN*(rr[6]==='W'?-1:1):NaN;
-          return {dateShort:date.replace(/^\d{2}(\d{2})-(\d{2})-(\d{2}).*/,'$2/$3/$1'), e:e, eStr:isFinite(e)?(e>=1?e.toFixed(2)+' kt':(e*1000).toFixed(0)+' t TNT'):'—', lat:lat, lon:lon, vel:parseFloat(rr[8])};
+          return {dateShort:date.replace(/^\d{4}-(\d{2})-(\d{2}).*/,'$1/$2'), e:e, eStr:isFinite(e)?(e>=1?e.toFixed(2)+' kt':(e*1000).toFixed(0)+' t TNT'):'—', lat:lat, lon:lon, vel:parseFloat(rr[8])};
         });
+        // Location names next to each date, like the other hazard cards. The
+        // rows render immediately with a lat/lon fallback; Nominatim reverse
+        // lookups (same cache keys the fireballs tab uses) fill names in after.
+        var _geoJobs=[], _gid=0;
+        var _placeSpan=function(p){
+          if(!isFinite(p.lat)||!isFinite(p.lon)) return '';
+          var fb=Math.abs(p.lat).toFixed(0)+'\u00b0'+(p.lat>=0?'N':'S')+' '+Math.abs(p.lon).toFixed(0)+'\u00b0'+(p.lon>=0?'E':'W');
+          var id='hzfb-p-'+(_gid++);
+          _geoJobs.push({id:id,lat:p.lat,lon:p.lon});
+          return ' \u00b7 <span id="'+id+'">'+fb+'</span>';
+        };
         var INK='rgba(30,30,50,.82)', MUT='rgba(30,30,50,.5)', Y='#a16207';
         var H=function(t){return '<div style="color:'+Y+';font-weight:700;margin:5px 0 2px;font-size:.52rem;letter-spacing:.07em;">'+t+'</div>';};
         var R=function(c,t){return '<div style="display:flex;justify-content:space-between;align-items:baseline;padding:3.5px 0;border-bottom:1px solid rgba(30,30,50,.06);font-size:.7rem;gap:8px;"><span style="color:'+MUT+';white-space:nowrap;">'+c+'</span><span style="color:'+INK+';font-weight:600;text-align:right;">'+t+'</span></div>';};
         var h='', latest=parsed[0];
-        h+=H('LATEST'); h+=R(latest.dateShort, latest.eStr);
+        h+=H('LATEST'); h+=R(latest.dateShort+_placeSpan(latest), latest.eStr);
         var byE=parsed.filter(function(p){return isFinite(p.e);}).sort(function(a,b){return b.e-a.e;});
-        if(byE.length>1){ h+=H('TOP BY ENERGY'); byE.slice(0,3).forEach(function(p){ h+=R(p.dateShort, p.eStr); }); }
+        if(byE.length>1){ h+=H('TOP BY ENERGY'); byE.slice(0,3).forEach(function(p){ h+=R(p.dateShort+_placeSpan(p), p.eStr); }); }
         var es=parsed.map(function(p){return p.e;}).filter(isFinite); var vs=parsed.map(function(p){return p.vel;}).filter(isFinite);
         var tot=es.reduce(function(a,b){return a+b;},0); var pk=vs.length?Math.max.apply(null,vs):0;
         var fmt=function(e){return e>=1?e.toFixed(1)+' kt':(e*1000).toFixed(0)+' t TNT';};
@@ -67491,6 +67502,27 @@ function initNowMicroTabs(){
         }
         h+='<div style="text-align:right;font-size:.42rem;color:rgba(30,30,50,.25);margin-top:3px;">NASA / JPL CNEOS</div>';
         detailEl.innerHTML=h;
+        // Fill in reverse-geocoded names (staggered for Nominatim's rate limit;
+        // shares the fireballs tab's bv_revgeo_v3 cache so repeats are instant)
+        _geoJobs.forEach(function(j, ji){
+          var run=function(){
+            var el=document.getElementById(j.id); if(!el) return;
+            var key='bv_revgeo_v3_'+j.lat.toFixed(2)+'_'+j.lon.toFixed(2);
+            try{ var c=localStorage.getItem(key); if(c){ el.textContent=c; return; } }catch(e){}
+            fetch('https://nominatim.openstreetmap.org/reverse?lat='+j.lat+'&lon='+j.lon+'&format=json&zoom=10&addressdetails=1&accept-language=en')
+              .then(function(r){return r.ok?r.json():null;})
+              .then(function(d){
+                if(!d) return;
+                var a=d.address||{}, state=a.state||a.region||'', country=a.country||'', cc=(a.country_code||'').toLowerCase();
+                var name = cc==='us' ? ((state?state.replace(/[\s\-]/g,'').substring(0,4).toUpperCase()+', ':'')+'US')
+                         : (state&&country ? state+', '+country : (country||state||null));
+                if(!name) return;   // over open ocean — keep the lat/lon fallback
+                try{ localStorage.setItem(key,name); }catch(e){}
+                var el2=document.getElementById(j.id); if(el2) el2.textContent=name;
+              }).catch(function(){});
+          };
+          setTimeout(run, ji*700);
+        });
       };
       // Instant fill from fresh cache, then refresh from the network.
       try{ var c=JSON.parse(localStorage.getItem('bv_fireballs_cache_v1')||'null'); if(c&&c.data&&(Date.now()-c.fetchedAt)<1800000) render(c.data); }catch(e){}
