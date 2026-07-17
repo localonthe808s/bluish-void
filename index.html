@@ -13468,10 +13468,26 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
     fetchGoesTimestamps(); // still run for potential future use
   }
 
+  // Defer the whole CIRA init (the satlib LOD listing alone is ~1.6 MB) until
+  // the clouds/radar card approaches the viewport — same gate the GOES
+  // autoplay bundle uses. Falls back to boot-time init without IO.
+  var _ciraInited = false;
+  function _ciraInit(){ if (_ciraInited) return; _ciraInited = true; try { init(); } catch(e){} }
+  function _ciraArm(){
+    var crw = document.getElementById('clouds-radar-widget');
+    if (crw && 'IntersectionObserver' in window){
+      var lodIO = new IntersectionObserver(function(ents){
+        if (ents.some(function(e){ return e.isIntersecting; })){ lodIO.disconnect(); _ciraInit(); }
+      }, { rootMargin: '600px 0px' });
+      lodIO.observe(crw);
+    } else {
+      _ciraInit();
+    }
+  }
   if(document.readyState==='loading'){
-    document.addEventListener('DOMContentLoaded',init);
+    document.addEventListener('DOMContentLoaded',_ciraArm);
   }else{
-    setTimeout(init,0);
+    setTimeout(_ciraArm,0);
   }
 
   // Preload planet images after the page settles so they're browser-cached before
@@ -67142,15 +67158,10 @@ function initNowMicroTabs(){
     // connection/CPU and starving the widgets the user was scrolling to. Skip
     // it on mobile and let the IntersectionObserver init the hazard map only
     // when its widget actually approaches the viewport.
-    if (!window.matchMedia('(max-width:768px)').matches) {
-      setTimeout(function(){
-        if (!window._hazardInited) {
-          window._hazardInited = true;
-          try { initUnifiedHazardMap(); } catch(e){ console.error('hazard pre-init', e); }
-          setTimeout(function(){ try { initGeologyMaps(); } catch(e){} }, 500);
-        }
-      }, 6000);
-    }
+    // (Desktop 6s hazard pre-warm removed: it pulled the FIRMS CSV, SPC report
+    // history, Leaflet tiles, and two maps at boot for a widget far below the
+    // fold. The lazy-init IntersectionObserver near the end of the page now
+    // runs on ALL viewports and inits the hazard maps on approach instead.)
 
     // ─── Hazard badge counts: fetch on boot (no map needed) ───
     // Also prefetch full fire + quake GeoJSON so map init is fast
@@ -67353,28 +67364,39 @@ function initNowMicroTabs(){
     setTimeout(function(){ _prefetchFire(); _prefetchTornado(); }, _hzM ? 8000 : 1500);
     setTimeout(function(){ _prefetchQuakes(); _prefetchFlood(); _prefetchFireballs(); }, _hzM ? 11000 : 3000);
 
-    // ─── AUTO-REVEAL SPACE WIDGETS: stagger after critical path ───
-    // Remove covers and init space widgets automatically so they load
-    // without user interaction. Staggered to avoid saturating connections.
+    // ─── AUTO-REVEAL SPACE WIDGETS: when their card approaches the viewport ───
+    // Was time-based (desktop revealed all five AT BOOT — "desktop has the
+    // bandwidth"), which front-loaded ~50 MB of SWPC frame stacks before the
+    // user ever scrolled. Same gate as the clouds/radar bundle above: each
+    // widget reveals as its cover nears the viewport (600px early, so the
+    // loader is usually gone by arrival). Click-to-reveal still works first.
     (function autoRevealSpace(){
       var spaceWidgets = ['solarwind','solar','corona','aurora','geospace'];
-      // Desktop has the bandwidth — reveal immediately so there's no "Tap to
-      // load" gate. Mobile keeps the staggered lazy reveal to save data.
       var isMobile = !!(window.matchMedia && window.matchMedia('(max-width:768px)').matches);
-      var delay = isMobile ? 4000 : 0; // mobile: 4s after boot (weather+GOES loaded); desktop: now
-      var stagger = isMobile ? 1200 : 0; // mobile: 1.2s between widgets; desktop: all at once
-
-      spaceWidgets.forEach(function(section, i){
-        setTimeout(function(){
-          if (window._revealedSections[section]) return; // already revealed by user click
+      var reveal = function(section){
+        if (window._revealedSections[section]) return; // already revealed by user click
+        var cover = document.querySelector('.widget-cover[data-cover="' + section + '"]');
+        if (cover) {
+          // Desktop: show the water-cycle loader in place of the cover while
+          // the widget loads. Mobile: original tap-to-load removal.
+          window._revealWidget(section, cover, { asLoader: !isMobile });
+        }
+      };
+      if ('IntersectionObserver' in window){
+        spaceWidgets.forEach(function(section){
           var cover = document.querySelector('.widget-cover[data-cover="' + section + '"]');
-          if (cover) {
-            // Desktop: show the water-cycle loader in place of the cover while
-            // the widget loads. Mobile: original tap-to-load removal.
-            window._revealWidget(section, cover, { asLoader: !isMobile });
-          }
-        }, delay + i * stagger);
-      });
+          if (!cover) return;
+          var io = new IntersectionObserver(function(ents){
+            if (ents.some(function(e){ return e.isIntersecting; })){ io.disconnect(); reveal(section); }
+          }, { rootMargin: '600px 0px' });
+          io.observe(cover);
+        });
+      } else {
+        // No IntersectionObserver: the old staggered auto-reveal
+        spaceWidgets.forEach(function(section, i){
+          setTimeout(function(){ reveal(section); }, 4000 + i * 1200);
+        });
+      }
     })();
 
     // ─── Hazard widget: click ANYWHERE on it to init ───
@@ -69113,13 +69135,14 @@ function closeAlertModal(){
 </script>
 
 <script>
-  /* ========== MOBILE PERF: lazy-init the hazard map ========== */
-  /* Don't load Leaflet tiles + ArcGIS feature layers + USGS quake feed
-     etc until the hazard widget actually scrolls into view. Saves the
-     initial page-load network/CPU storm on phones where the user might
-     never scroll there at all. */
+  /* ========== PERF: lazy-init the hazard map (all viewports) ========== */
+  /* Don't load Leaflet tiles + ArcGIS feature layers + USGS quake feed +
+     FIRMS/SPC data until the hazard widget actually approaches the
+     viewport. Saves the initial page-load network/CPU storm for users who
+     never scroll there. (Was mobile-only; the desktop boot pre-warm that
+     covered desktop is gone.) Badge counts still come from the boot
+     prefetches — they don't need the maps. */
   (function(){
-    if (!window.matchMedia('(max-width: 768px)').matches) return;
     if (!('IntersectionObserver' in window)) return;
     var widget = document.getElementById('hazard-widget');
     if (!widget) return;
@@ -69136,7 +69159,7 @@ function closeAlertModal(){
           if (fireOv) fireOv.style.display = '';
         }
       });
-    }, { rootMargin: '200px' });  // start init slightly before the widget enters
+    }, { rootMargin: '500px 0px' });  // start init well before the widget enters (maps take a moment)
     io.observe(widget);
   })();
 </script>
