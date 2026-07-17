@@ -41286,10 +41286,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   var _suviAnim = { w:null, imgId:null, frames:[], idx:0, timer:null, refresh:null, playing:false, pre:null, token:0 };
   function _suviFrameUrl(w){ return 'https://services.swpc.noaa.gov/products/animations/suvi-primary-' + w + '.json'; }
   function _suviBuild(data){
-    // Thin the ~359 raw frames (each ~0.6 MB) to ~48 evenly spaced → a smooth
-    // ~6s loop at a sane ~30 MB/channel instead of ~46 MB. Loads only while the
-    // channel is actively viewed, then browser-cached.
-    var stepN = Math.max(1, Math.ceil(data.length / 48)), out = [];
+    // Thin the ~359 raw frames (each ~1.1 MB) to ~24 evenly spaced — the step
+    // delay below doubles to match, so the loop still spans the same ~6s and
+    // the same real-time window, at ~27 MB/channel instead of ~55 MB. Loads
+    // only while the channel is actively viewed, then browser-cached.
+    var stepN = Math.max(1, Math.ceil(data.length / 24)), out = [];
     for (var i=0; i<data.length; i+=stepN){ out.push('https://services.swpc.noaa.gov' + data[i].url); }
     return out;
   }
@@ -41331,7 +41332,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       _suviAnim.pre.src = next;   // preload → cached → the visible swap is instant
       _suviAnim.idx = (_suviAnim.idx + 1) % _suviAnim.frames.length;
     }
-    _suviAnim.timer = setTimeout(function(){ _suviStep(myToken); }, 130);
+    _suviAnim.timer = setTimeout(function(){ _suviStep(myToken); }, 260);   // 2× the old 130ms — half the frames, same loop duration
   }
 
   // Autoplay everywhere (mobile + desktop): the selected wavelength plays, and
@@ -42497,11 +42498,19 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       { id: "geo-pre-img", liveId: "geo-pre-live", jsonUrl: "https://services.swpc.noaa.gov/products/animations/geospace/pressure.json" }
     ];
     
+    // Only ONE dial is visible at a time (the tabs stack the three imgs and
+    // opacity-toggle them), but all three used to fetch + preload + cycle from
+    // init — ~36 MB and three 150ms steppers for one visible image. Register a
+    // starter per dial instead: init() starts only the active tab's dial, and
+    // switchGeoTab starts the others on first visit. window-scoped registry so
+    // switchGeoTab can reach it regardless of closure layout.
+    window._geoDialStart = {};
     geoWidgets.forEach(function(w){
       var imgEl = document.getElementById(w.id);
       var liveEl = document.getElementById(w.liveId);
       if (!imgEl) return;
-      
+      var modeKey = w.id === 'geo-vel-img' ? 'velocity' : w.id === 'geo-den-img' ? 'density' : 'pressure';
+
       var frames = [];
       var frameIndex = 0;
       var animInterval = null;
@@ -42583,7 +42592,6 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       
       function startAnimation(){
         if (liveEl) liveEl.textContent = "• LIVE";
-        var modeKey = w.id === 'geo-vel-img' ? 'velocity' : w.id === 'geo-den-img' ? 'density' : 'pressure';
         var activeTab = (typeof geoCurrentTab !== 'undefined') ? geoCurrentTab : 'velocity';
         imgEl.style.opacity = (modeKey === activeTab) ? "1" : "0";
         frameIndex = 0;
@@ -42591,18 +42599,30 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         if (animInterval) clearInterval(animInterval);
         animInterval = setInterval(function(){
           if (document.hidden || (window._bvzSleep||{}).geo) return;   // background tab or scrolled off-screen
+          // Frozen while another tab's dial is showing — no point decoding a
+          // frame into an opacity-0 img; resumes on the next tick after switch.
+          if (modeKey !== ((typeof geoCurrentTab !== 'undefined') ? geoCurrentTab : 'velocity')) return;
           imgEl.src = frames[frameIndex];
-          if (modeKey === ((typeof geoCurrentTab !== 'undefined') ? geoCurrentTab : 'velocity')) updateGeoTime(frames[frameIndex]);
+          updateGeoTime(frames[frameIndex]);
           frameIndex = (frameIndex + 1) % frames.length;
         }, frameDelay);
       }
-      
-      // Initial load
-      fetchFrames();
-      
-      // Refresh frame list every 5 min (will pick up new model runs)
-      setInterval(function(){ if (document.hidden || (window._bvzSleep||{}).geo) return; fetchFrames(); }, 5 * 60 * 1000);
+
+      // Starter: first call fetches frames + arms the 5-min refresh; later
+      // calls no-op. init() runs it for the active tab; switchGeoTab for others.
+      var _dialStarted = false;
+      window._geoDialStart[modeKey] = function(){
+        if (_dialStarted) return; _dialStarted = true;
+        fetchFrames();
+        // Refresh frame list every 5 min (will pick up new model runs)
+        setInterval(function(){ if (document.hidden || (window._bvzSleep||{}).geo) return; fetchFrames(); }, 5 * 60 * 1000);
+      };
     });
+
+    // Load only the visible tab's dial now (velocity by default)
+    var _geoAct = (typeof geoCurrentTab === 'string') ? geoCurrentTab : 'velocity';
+    if (window._geoDialStart[_geoAct]) window._geoDialStart[_geoAct]();
+    else if (window._geoDialStart.velocity) window._geoDialStart.velocity();
   }
 
   /* Geospace tab switching + live insight engine */
@@ -42632,6 +42652,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     for(var k = 0; k < keys.length; k++){
       if(geoImgs[keys[k]]) geoImgs[keys[k]].style.opacity = (!isMag && keys[k] === mode) ? '1' : '0';
     }
+    // Dials load lazily per tab — first visit to a tab fetches its frames
+    if (!isMag && window._geoDialStart && window._geoDialStart[mode]) window._geoDialStart[mode]();
     // GOES magnetometer (Hp) chart vs the CCMC model cut-plane images.
     if (isMag){ var gt=document.getElementById('geo-time'); if(gt) gt.style.display='none'; }
     var magLd = document.getElementById('geo-mag-loading');
