@@ -9818,10 +9818,12 @@ function _smokeVeil(day, w, h){
   var o1 = hv ? (day ? 0.5 : 0.62) : (day ? 0.32 : 0.42);
   var o2 = hv ? (day ? 0.72 : 0.86) : (day ? 0.5 : 0.62);
   var gid = 'hzSmkV' + (day ? 'd' : 'n');   // day/night ids differ; duplicate same-id defs are identical
-  return '<defs><linearGradient id="' + gid + '" x1="0" y1="0" x2="0" y2="1">'
+  // wrapped in a group so the clear-day sig check can add/remove the veil
+  // in place instead of rebuilding the whole panel (rebuild = flock restart)
+  return '<g class="hz-smk-veil"><defs><linearGradient id="' + gid + '" x1="0" y1="0" x2="0" y2="1">'
     + '<stop offset="0" stop-color="' + top + '" stop-opacity="' + o1 + '"/>'
     + '<stop offset="1" stop-color="' + bot + '" stop-opacity="' + o2 + '"/></linearGradient></defs>'
-    + '<rect x="-40" y="-40" width="' + ((w || 660) + 80) + '" height="' + ((h || 220) + 80) + '" fill="url(#' + gid + ')"/>';
+    + '<rect x="-40" y="-40" width="' + ((w || 660) + 80) + '" height="' + ((h || 220) + 80) + '" fill="url(#' + gid + ')"/></g>';
 }
 
 /* returns inner SVG content in a 660x215 coordinate space (no moon) */
@@ -10023,13 +10025,24 @@ window._updateHeroWx = function(code, night){
       var _cdOk = function(el,w,h){
         var m = el && el.getAttribute ? /^cd\|(\d+)x(\d+)\|s(\d)$/.exec(el.getAttribute('data-cd-sig')||'') : null;
         if(!m) return false;
-        var smkNow = ((window._hmsSmokeOverhead||{}).density==='medium'||(window._hmsSmokeOverhead||{}).density==='heavy') ? 1 : 0;
-        if(+m[3] !== smkNow) return false;   // smoke veil state changed — rebuild
         // tolerate drift in BOTH axes (svg stretches): boot settling nudges the
         // width too (scrollbar, fonts) and an exact-match check meant several
         // rebuilds = several flock restarts in the first seconds
         var bw=+m[1], bh=+m[2];
-        return Math.abs(w-bw) <= Math.max(8, bw*0.025) && Math.abs(h-bh) <= bh*0.12;
+        if(!(Math.abs(w-bw) <= Math.max(8, bw*0.025) && Math.abs(h-bh) <= bh*0.12)) return false;
+        // Smoke veil state changed? Patch the veil node in place — a full
+        // rebuild for a static overlay restarted the flock (one of the boot
+        // "bird restarts" when the HMS reading resolved).
+        var smkNow = ((window._hmsSmokeOverhead||{}).density==='medium'||(window._hmsSmokeOverhead||{}).density==='heavy') ? 1 : 0;
+        if(+m[3] !== smkNow){
+          try{
+            var v = el.querySelector('.hz-smk-veil');
+            if(smkNow && !v) el.insertAdjacentHTML('beforeend', _smokeVeil(true, bw, bh));
+            else if(!smkNow && v) v.remove();
+            el.setAttribute('data-cd-sig','cd|'+bw+'x'+bh+'|s'+smkNow);
+          }catch(e){ return false; }
+        }
+        return true;
       };
       var _cdBuild = function(el,w,h){
         el.innerHTML = heroDayPanel(w,h);
@@ -10053,7 +10066,28 @@ window._updateHeroWx = function(code, night){
         // (preserveAspectRatio=none; all vertical geometry is H-proportional).
         // Boot's async layout settling then costs at most ONE rebuild instead
         // of restarting the flock on every re-measure.
-        if(!_cdOk(hw.firstElementChild, _sbW, H)) _cdBuild(hw, _sbW, H);
+        if(!_cdOk(hw.firstElementChild, _sbW, H)){
+          if(!window._cdFirstBuildDone){
+            // First clear-day build of the session: WAIT for layout to settle
+            // (350ms + double rAF) and build ONCE at the final size — the old
+            // build→re-measure→rebuild sequence read as the flock restarting.
+            // The sun injects immediately; the birds enter once, slightly later.
+            if(!window._cdBuildPending){
+              window._cdBuildPending = true;
+              setTimeout(function(){ requestAnimationFrame(function(){ requestAnimationFrame(function(){
+                window._cdBuildPending = false; window._cdFirstBuildDone = true;
+                try{
+                  var H3 = _panelH(); var w3 = Math.round(sb.getBoundingClientRect().width) || 660;
+                  hw.style.height = H3 + 'px'; _abMask(H3);
+                  if(!_cdOk(hw.firstElementChild, w3, H3)) _cdBuild(hw, w3, H3);
+                  _injectSun();
+                }catch(e){}
+              }); }); }, 350);
+            }
+          } else {
+            _cdBuild(hw, _sbW, H);
+          }
+        }
         _injectSun();
       } else {
         // day cloud/overcast deck fills the panel; scrim keeps the top text legible
@@ -10067,7 +10101,7 @@ window._updateHeroWx = function(code, night){
           _hw.style.height = H2 + 'px';
           _abMask(H2);
           if(_st==='clear-night') _hw.innerHTML = heroNightPanel(H2) + '<div class="hero-scrim-night"></div>';
-          else if(_st==='clear-day'){ if(!_cdOk(_hw.firstElementChild,_w,H2)) _cdBuild(_hw,_w,H2); }
+          else if(_st==='clear-day'){ if(!window._cdBuildPending && !_cdOk(_hw.firstElementChild,_w,H2)) _cdBuild(_hw,_w,H2); }
         }
       }catch(e){} }); })(hw,st,_sbW);
     } else if(st==='clear-day'){
