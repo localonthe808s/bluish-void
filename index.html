@@ -59476,6 +59476,25 @@ function initNowMicroTabs(){
 
     if(plumes.length === 0) return;
 
+    // Per-plume reject boxes (degrees). The per-pixel loops below tested
+    // EVERY pixel against EVERY plume (13 Bezier samples + fbm noise each) —
+    // measured multi-second renders during big smoke events, re-triggered on
+    // every pan/zoom. A generous box per plume (source→ctrl→end path padded
+    // by 5× max spread, min 55mi to cover the source-glow radius; haze dome
+    // gets its own radius) skips the vast majority of (pixel, plume) pairs
+    // while keeping the math identical inside the box.
+    plumes.forEach(function(pl){
+      var cosL = Math.cos(pl.fLat * Math.PI / 180) || 1e-6;
+      var padMi = Math.max(55, (pl.maxSpreadMi || 30) * 5 + 25);
+      var latPad = padMi / 69, lonPad = padMi / (69 * cosL);
+      pl.bbMinLat = Math.min(pl.fLat, pl.ctrlLat, pl.eLat) - latPad;
+      pl.bbMaxLat = Math.max(pl.fLat, pl.ctrlLat, pl.eLat) + latPad;
+      pl.bbMinLon = Math.min(pl.fLon, pl.ctrlLon, pl.eLon) - lonPad;
+      pl.bbMaxLon = Math.max(pl.fLon, pl.ctrlLon, pl.eLon) + lonPad;
+      var hazeMi = Math.max(25, Math.min(100, 15 + Math.sqrt(pl.acres || 100) * 1.5));
+      pl.hzLatPad = hazeMi / 69; pl.hzLonPad = hazeMi / (69 * cosL);
+    });
+
     // ── Compute geo bounds with padding ──
     var padDeg = 8.0;
     var minLat = Math.min.apply(null, allLats) - padDeg;
@@ -59514,8 +59533,18 @@ function initNowMicroTabs(){
     var degPerPxX = geoDeltaLon / cW;
     var degPerPxY = geoDeltaLat / cH;
 
-    // ── Per-pixel accumulation ──
-    for(var py = 0; py < cH; py++){
+    // ── Per-pixel accumulation — sliced across tasks ──
+    // Worst-case events still cost real compute; slicing rows through
+    // setTimeout keeps each task short (UI stays responsive), and the token
+    // lets a newer render supersede a stale in-flight one (pan/zoom spam).
+    var _tok = (window._smokeRenderTok = (window._smokeRenderTok || 0) + 1);
+    var _ROWS = 30, _computeMs = 0;
+    var py = 0;
+    function _smokeRowSlice(){
+    if(_tok !== window._smokeRenderTok) return;   // superseded by a newer render
+    var _sliceT0 = performance.now();
+    var _yEnd = Math.min(cH, py + _ROWS);
+    for(; py < _yEnd; py++){
       var pLat = maxLat - py * degPerPxY;
       for(var px = 0; px < cW; px++){
         var pLon = minLon + px * degPerPxX;
@@ -59524,6 +59553,7 @@ function initNowMicroTabs(){
 
         for(var pi = 0; pi < plumes.length; pi++){
           var pl = plumes[pi];
+          if(pLat < pl.bbMinLat || pLat > pl.bbMaxLat || pLon < pl.bbMinLon || pLon > pl.bbMaxLon) continue;
           var cosLat = Math.cos(pl.fLat * Math.PI / 180);
 
           // ── Source glow — radial around fire origin ──
@@ -59728,6 +59758,7 @@ function initNowMicroTabs(){
           var firesSeen = {}; // dedupe fires (surface+elevated share same source)
           for(var hi = 0; hi < plumes.length; hi++){
             var hp = plumes[hi];
+            if(pLat < hp.fLat - hp.hzLatPad || pLat > hp.fLat + hp.hzLatPad || pLon < hp.fLon - hp.hzLonPad || pLon > hp.fLon + hp.hzLonPad) continue;
             var fKey = Math.round(hp.fLat*100) + ',' + Math.round(hp.fLon*100);
             if(firesSeen[fKey]) continue;
             firesSeen[fKey] = true;
@@ -59870,7 +59901,14 @@ function initNowMicroTabs(){
         pixels[idx + 3] = a;
       }
     }
+    _computeMs += performance.now() - _sliceT0;
+    if(py < cH){ setTimeout(_smokeRowSlice, 0); return; }
+    _smokeFinish();
+    }
+    _smokeRowSlice();
 
+    function _smokeFinish(){
+    if(_tok !== window._smokeRenderTok) return;
     ctx.putImageData(imgData, 0, 0);
 
     // ── Multi-pass soft blur for photorealistic smoke edges ──
@@ -59892,7 +59930,7 @@ function initNowMicroTabs(){
     b2Ctx.filter = 'none';
 
     // ── Performance guard: auto-reduce resolution if render is slow ──
-    var _smokeRenderMs = performance.now() - _smokeRenderStart;
+    var _smokeRenderMs = _computeMs;
     if (_smokeRenderMs > 200 && !window._smokeRenderSlow) {
       window._smokeRenderSlow = true;
       console.log('Smoke render: ' + Math.round(_smokeRenderMs) + 'ms — reducing resolution for next render');
@@ -59922,6 +59960,7 @@ function initNowMicroTabs(){
           _smokeRenderTimer = setTimeout(renderSmokeTransport, 300);
         }
       });
+    }
     }
   }
 
