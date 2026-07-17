@@ -57470,9 +57470,11 @@ function initNowMicroTabs(){
       // (it re-checks allFires.length each chunk), so don't start a second loop.
       if (window._firePlotting) return;
       var _hzMapIsMobile = window.matchMedia('(max-width:768px)').matches;
-      // Batch on mobile so a large hotspot dump (~1k VIIRS) doesn't block the
-      // main thread in one synchronous pass — plot in chunks across frames.
-      var CHUNK = _hzMapIsMobile ? 150 : 100000;
+      // Batch so a large hotspot dump (~10k VIIRS) doesn't block the main
+      // thread in one synchronous pass — plot in chunks across frames.
+      // Desktop previously plotted everything in ONE pass (CHUNK 100000),
+      // which put the whole marker build into a single long task.
+      var CHUNK = _hzMapIsMobile ? 150 : 1500;
       function plotOne(fi){
         var fire = allFires[fi];
         var coords = fire.geometry && fire.geometry.coordinates;
@@ -57707,18 +57709,38 @@ function initNowMicroTabs(){
 
     function parseFirmsHotspots(features, source) {
       var added = 0;
+      // Dedupe via a spatial grid. The old per-hotspot allFires.some() scan
+      // was quadratic — ~10k hotspots each walking the ever-growing array
+      // (tens of millions of sqrt calls, ~2.3s of main-thread time measured
+      // on the tab-open path). Agency fires don't change during this pass,
+      // so bucket them once into 0.5° cells and test each hotspot against
+      // only its 3×3 cell neighborhood (20 mi ≈ 0.29°).
+      var GRID = 0.5, _cells = {};
+      allFires.forEach(function(f){
+        var fc = f.geometry && f.geometry.coordinates;
+        if (!fc || (f.properties && f.properties._country === 'SAT')) return;
+        var k = Math.floor(fc[1] / GRID) + '_' + Math.floor(fc[0] / GRID);
+        (_cells[k] = _cells[k] || []).push(fc);
+      });
+      var LIM2 = (20 / 69) * (20 / 69);   // 20 mi in squared degrees (same math as before)
       features.forEach(function(hs) {
         var coords = hs.geometry && hs.geometry.coordinates;
         if (!coords) return;
         var hsLat = coords[1], hsLon = coords[0];
 
         // Deduplicate: skip hotspots within 20mi of existing NIFC/CWFIS fire
-        var nearExisting = allFires.some(function(f) {
-          var fc = f.geometry && f.geometry.coordinates;
-          if (!fc || f.properties._country === 'SAT') return false;
-          var d = Math.sqrt(Math.pow(fc[1] - hsLat, 2) + Math.pow(fc[0] - hsLon, 2)) * 69;
-          return d < 20;
-        });
+        var nearExisting = false;
+        var gy = Math.floor(hsLat / GRID), gx = Math.floor(hsLon / GRID);
+        for (var dy = -1; dy <= 1 && !nearExisting; dy++){
+          for (var dx = -1; dx <= 1 && !nearExisting; dx++){
+            var arr = _cells[(gy + dy) + '_' + (gx + dx)];
+            if (!arr) continue;
+            for (var ci = 0; ci < arr.length; ci++){
+              var dLa = arr[ci][1] - hsLat, dLo = arr[ci][0] - hsLon;
+              if (dLa * dLa + dLo * dLo < LIM2){ nearExisting = true; break; }
+            }
+          }
+        }
         if (nearExisting) return;
 
         var props = hs.properties || {};
