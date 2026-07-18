@@ -70224,6 +70224,19 @@ function closeAlertModal(){
     var la = lat * Math.PI/180;
     return Math.asin(Math.sin(la)*Math.sin(decl) + Math.cos(la)*Math.cos(decl)*Math.cos(ha)) * 180/Math.PI;
   }
+  function eveningCrossing(target, doy, lat, lon, tzOffH){
+    var best = null;
+    for (var m = 660; m <= 1439; m += 2){          // local 11:00 -> midnight
+      var d = Math.abs(sunAltDeg(m, doy, lat, lon, tzOffH) - target);
+      if (best === null || d < best.d) best = {d:d, m:m};
+    }
+    if (!best) return null;
+    for (var f = Math.max(660,best.m-3); f <= best.m+3; f += 0.25){
+      var d2 = Math.abs(sunAltDeg(f, doy, lat, lon, tzOffH) - target);
+      if (d2 < best.d) best = {d:d2, m:f};
+    }
+    return best.d > 3 ? null : best.m;
+  }
   function morningCrossing(target, doy, lat, lon, tzOffH){
     var best = null;
     for (var m = 0; m <= 780; m += 2){            // search local 00:00–13:00
@@ -70251,7 +70264,9 @@ function closeAlertModal(){
       astro:    morningCrossing(-18, doy, lat, lon, tzOffH),
       nautical: morningCrossing(-12, doy, lat, lon, tzOffH),
       civil:    morningCrossing(-6,  doy, lat, lon, tzOffH),
-      sunrise:  morningCrossing(-0.833, doy, lat, lon, tzOffH)
+      sunrise:  morningCrossing(-0.833, doy, lat, lon, tzOffH),
+      sunset:   eveningCrossing(-0.833, doy, lat, lon, tzOffH),
+      dusk:     eveningCrossing(-6, doy, lat, lon, tzOffH)
     };
     _bvSol = sol;
     renderTimeline(sol, []);
@@ -70566,19 +70581,6 @@ function closeAlertModal(){
   // every detection's `behavior` field is null. So label recordings by the
   // light they were sung in, which is real and meaningful (dawn song vs a
   // midday contact call), instead of by the listening box's nickname.
-  function songContext(mins){
-    var S = _bvSol || {};
-    if (S.astro != null && mins < S.astro) return 'Night song';
-    if (S.civil != null && mins < S.civil) return 'Dawn chorus';
-    if (S.sunrise != null && mins < S.sunrise) return 'First light';
-    if (S.sunrise != null && mins < S.sunrise + 120) return 'Early morning';
-    if (mins < 720) return 'Morning';
-    if (mins < 900) return 'Midday';
-    if (mins < 1080) return 'Afternoon';
-    if (mins < 1260) return 'Evening';
-    return 'Night song';
-  }
-
   // ── XENO-CANTO REFERENCE CALLS ──
   // BirdNET tells us WHICH bird; xeno-canto's human-tagged archive tells us
   // WHAT it's doing — song, dawn song, alarm call, begging, flight call.
@@ -70617,19 +70619,22 @@ function closeAlertModal(){
       (recs || []).forEach(function(r){
         var t = xcType(r); if (!t || !r.file) return;
         if (!byType[t]) byType[t] = [];
-        if (byType[t].length < 1) byType[t].push(r);        // one exemplar per type
+        if (byType[t].length < 2) byType[t].push(r);        // up to two exemplars per type
       });
       var types = XC_ORDER.filter(function(t){ return byType[t]; });
       if (!types.length){ box.innerHTML = '<div style="font-size:.6rem;color:rgba(43,34,244,.45);padding:4px 0;">No reference recordings.</div>'; return; }
-      box.innerHTML = types.map(function(t){
-        var r = byType[t][0];
+      var rows = [];
+      types.forEach(function(t){ byType[t].forEach(function(r, k){ rows.push([t, r, k]); }); });
+      box.innerHTML = rows.slice(0, 10).map(function(row){
+        var t = row[0], r = row[1], dup = row[2] > 0;
         var lic = String(r.lic || '');
         var licName = /by-nc-sa/.test(lic) ? 'CC BY-NC-SA' : /by-nc-nd/.test(lic) ? 'CC BY-NC-ND'
                     : /by-nc/.test(lic) ? 'CC BY-NC' : /by-sa/.test(lic) ? 'CC BY-SA'
                     : /publicdomain|zero/.test(lic) ? 'CC0' : 'CC';
         return '<div style="display:flex;align-items:center;gap:9px;padding:5px 0;border-bottom:1px solid rgba(43,34,244,.07);">'
           + '<div style="flex:0 0 132px;min-width:0;">'
-          +   '<div style="font-size:.6rem;font-weight:800;color:rgba(43,34,244,.85);">' + esc(t) + '</div>'
+          +   '<div style="font-size:.62rem;font-weight:800;color:' + (dup ? 'rgba(43,34,244,.5)' : 'rgba(43,34,244,.85)') + ';">'
+          +     esc(dup ? '\u21b3 another' : t) + '</div>'
           +   '<div style="font-size:.5rem;font-weight:700;color:rgba(43,34,244,.42);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
           +     esc(r.length || '') + ' \u00b7 ' + esc(r.rec || '') + '</div>'
           + '</div>'
@@ -70782,72 +70787,13 @@ function closeAlertModal(){
         var sp = ((j.data||{}).species) || {};
         var det = (((j.data||{}).detections||{}).nodes) || [];
 
-        // Pick the best take per TIME-OF-DAY context first — a dawn song, a
-        // midday call and a night song are actually different vocalisations,
-        // whereas six clips from six boxes at 6am are the same bird doing the
-        // same thing. Remaining slots fill with the next-best distinct
-        // station so a quiet species still shows several recordings.
-        var rows2 = [];
-        det.forEach(function(d){
-          var sc = d.soundscape || {}; if (!sc.url) return;
-          var t = String(d.timestamp||''); if (t.length < 16) return;
-          var mins = +t.slice(11,13)*60 + +t.slice(14,16);
-          rows2.push({ url:sc.url, a:sc.startTime, b:sc.endTime, t:t, mins:mins, conf:d.confidence||0, sc:d.score||0,
-                       st:String((d.station||{}).name||'station').replace('BirdNET-Pi - ',''),
-                       ctx: songContext(mins) });
-        });
-        // score tracks signal strength; confidence breaks ties
-        rows2.sort(function(x,y){ return (y.sc - x.sc) || (y.conf - x.conf); });
-        var clips = [], usedCtx = {}, usedUrl = {}, usedSt = {};
-        rows2.forEach(function(r){                       // pass 1: one per context
-          if (usedCtx[r.ctx] || usedUrl[r.url]) return;
-          usedCtx[r.ctx] = usedUrl[r.url] = usedSt[r.st] = 1; clips.push(r);
-        });
-        rows2.forEach(function(r){                       // pass 2: other stations
-          if (clips.length >= 5 || usedUrl[r.url] || usedSt[r.st]) return;
-          usedUrl[r.url] = usedSt[r.st] = 1; clips.push(r);
-        });
-        clips = clips.sort(function(x,y){ return (y.sc - x.sc) || (y.conf - x.conf); }).slice(0, 5);
-        clips.sort(function(x,y){ return x.mins - y.mins; });   // read as a day's progression
 
         var h = '';
         // ── species notes, split into themed groups ──
         if (sp.wikipediaSummary) h += speciesNotes(sp.wikipediaSummary);
         // ── calls, one per listening station ──
-        h += FSB('Calls through the day');
-        if (!clips.length){
-          h += '<div style="font-size:.62rem;color:rgba(43,34,244,.5);padding:4px 0;">No recordings in the last 7 days.</div>';
-        }
-        // scroller: ~3.5 rows visible so the modal stays short even when a
-        // popular bird is heard at a dozen stations
-        h += '<div style="max-height:210px;overflow-y:auto;overscroll-behavior:contain;'
-          + 'border:1px solid rgba(43,34,244,.09);border-radius:8px;padding:0 8px;background:rgba(43,34,244,.02);">';
-        clips.forEach(function(c){
-          var A = (c.a != null ? Math.max(0, c.a - 0.4) : null);   // small pre-roll
-          var B = (c.b != null ? c.b + 0.4 : null);                 // so the call isn't clipped
-          var d = c.t.slice(5,10).replace('-','/'), tm = c.t.slice(11,16);
-          var today = c.t.slice(0,10) === (new Date()).toISOString().slice(0,10);
-          h += '<div style="display:flex;align-items:center;gap:9px;padding:5px 0;border-bottom:1px solid rgba(43,34,244,.07);">'
-            + '<div style="flex:0 0 132px;min-width:0;">'
-            + '<div style="font-size:.6rem;font-weight:800;color:rgba(43,34,244,.85);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
-            + esc(c.ctx) + '</div>'
-            + '<div style="font-size:.5rem;font-weight:700;color:rgba(43,34,244,.42);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
-            + esc(tm) + ' \u00b7 ' + (today ? 'today' : esc(d)) + ' \u00b7 ' + Math.round((c.conf||0)*100) + '% match</div></div>'
-            + '<div class="bw-player">'
-            +   '<button class="bw-pbtn" type="button" aria-label="Play call">'
-            +     '<svg viewBox="0 0 24 24" class="bw-ico-play"><path d="M8 5.5v13l11-6.5z"/></svg>'
-            +     '<svg viewBox="0 0 24 24" class="bw-ico-pause"><path d="M8 5.5h3.2v13H8zM12.8 5.5H16v13h-3.2z"/></svg>'
-            +   '</button>'
-            +   '<div class="bw-track"><div class="bw-fill"></div></div>'
-            +   '<span class="bw-elapsed">0:00</span>'
-            +   '<audio class="bw-clip" crossorigin="anonymous" preload="metadata"'
-            +     (A != null ? ' data-a="' + A + '" data-b="' + B + '"' : '')
-            +     ' src="' + esc(c.url) + '"></audio>'
-            + '</div></div>';
-        });
-        h += '</div>';
         // ── reference calls (xeno-canto, filled in async) ──
-        h += FSB('Reference calls \u00b7 by type');
+        h += FSB('Sounds this bird makes');
         h += '<div id="bw-xc"><div style="font-size:.6rem;color:rgba(43,34,244,.45);padding:4px 0;">loading\u2026</div></div>';
 
         // ── references, inline ──
@@ -70870,7 +70816,6 @@ function closeAlertModal(){
         var live = '';
         if (firstM) live += '<div><span>FIRST SONG</span><span>' + hhmm(+firstM) + '</span></div>';
         if (todayCt) live += '<div><span>CALLS TODAY</span><span>' + todayCt + '</span></div>';
-        live += '<div><span>RECORDINGS</span><span>' + clips.length + '</span></div>';
 
         window._openInsightModal({
           title: sp.commonName || name || 'Bird',
