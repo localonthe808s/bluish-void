@@ -10431,6 +10431,8 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
 #birds-widget .bw-legend i{width:12px;height:12px;border-radius:50%;display:inline-block;flex-shrink:0;}
 /* species + rare lists */
 #birds-widget .bw-row{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid rgba(43,34,244,.07);}
+#birds-widget .bw-clickable{cursor:pointer;border-radius:6px;transition:background .12s;}
+#birds-widget .bw-clickable:hover{background:rgba(43,34,244,.055);}
 #birds-widget .bw-row:last-child{border-bottom:none;}
 #birds-widget .bw-th{width:26px;height:26px;border-radius:50%;object-fit:cover;flex-shrink:0;background:rgba(43,34,244,.06);}
 #birds-widget .bw-nm{flex:1;min-width:0;font-size:.6rem;font-weight:800;color:rgba(43,34,244,.85);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
@@ -70219,10 +70221,12 @@ function closeAlertModal(){
     return best.d > 3 ? null : best.m;            // no crossing (polar day/night)
   }
 
+  var _bvLat = 40.744, _bvLon = -73.919;
   function build(){
     var loc = window.LOCATION || {};
     var lat = typeof loc.lat === 'number' ? loc.lat : 40.744;
     var lon = typeof loc.lon === 'number' ? loc.lon : -73.919;
+    _bvLat = lat; _bvLon = lon;
     var now = new Date();
     var tzOffH = -now.getTimezoneOffset()/60;
     var doy = Math.floor((now - new Date(now.getFullYear(),0,0)) / 86400000);
@@ -70250,7 +70254,7 @@ function closeAlertModal(){
     var q = '{ detections(first: 500, ne: {lat: '+(lat+box)+', lon: '+(lon+box)+'}, sw: {lat: '+(lat-box)+', lon: '+(lon-box)+'}, '
           + 'classifications: ["avian"], confidenceGte: 0.5, timeOfDayGte: '+gte+', timeOfDayLte: '+lte+', '
           + 'period: {from: "'+ymd+'", to: "'+ymd+'"}) '
-          + '{ nodes { timestamp species { commonName scientificName thumbnailUrl } station { id name } } } }';
+          + '{ nodes { timestamp species { id commonName scientificName thumbnailUrl } station { id name } } } }';
     return fetch(BW_URL, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({query:q})})
       .then(function(r){ return r.json(); })
       .then(function(j){ return (((j.data||{}).detections||{}).nodes)||[]; });
@@ -70263,7 +70267,7 @@ function closeAlertModal(){
       var mins = +t.slice(11,13)*60 + +t.slice(14,16);
       counts[sp] = (counts[sp]||0) + 1;
       if (!first[sp] || mins < first[sp].m)
-        first[sp] = { m:mins, name:sp, sci:(n.species||{}).scientificName||'',
+        first[sp] = { m:mins, name:sp, sid2:(n.species||{}).id||'', sci:(n.species||{}).scientificName||'',
                       thumb:(n.species||{}).thumbnailUrl||'', st:((n.station||{}).name||''), sid:((n.station||{}).id||'') };
     });
     return Object.keys(first).map(function(k){ var r=first[k]; r.count=counts[k]; return r; })
@@ -70375,7 +70379,8 @@ function closeAlertModal(){
       var f = famOf(r.sci);
       if (!seenFam[f.fam]){ seenFam[f.fam] = 1; fams.push(f); }
       var sz = (9 + 14*Math.sqrt((r.count||1)/mx)).toFixed(1);   // may overhang the 14px bar
-      h += '<div class="bw-dot" style="left:'+pct(r.m)+'%;top:27px;width:'+sz+'px;height:'+sz+'px;background:'+f.col+'" '
+      h += '<div class="bw-dot" style="left:'+pct(r.m)+'%;top:27px;width:'+sz+'px;height:'+sz+'px;background:'+f.col+';cursor:pointer;pointer-events:auto;" '
+         + 'data-sid="'+esc(r.sid2||'')+'" data-nm="'+esc(r.name)+'" '
          + 'title="'+esc(r.name)+' \u2014 '+esc(f.fam)+' \u2014 first song '+hhmm(r.m)+', '+(r.count||0)+' calls"></div>';
     });
     // NOW ticker — only while the current time actually falls inside the
@@ -70393,6 +70398,12 @@ function closeAlertModal(){
       }).join('') + '</div>';
     }
     tl.innerHTML = h;
+    tl.querySelectorAll('.bw-dot[data-sid]').forEach(function(el){
+      el.addEventListener('click', function(ev){
+        ev.stopPropagation();
+        openBirdPopup(el.getAttribute('data-sid'), el.getAttribute('data-nm'));
+      });
+    });
   }
 
   function loadBirdWeather(lat, lon, sol){
@@ -70466,12 +70477,18 @@ function closeAlertModal(){
       renderTimeline(sol, rows);
       placeFirstSongCue(f.m, f.name);
       $('bw-heard').innerHTML = rows.slice(0,6).map(function(r){
-        return '<div class="bw-row">'
+        return '<div class="bw-row bw-clickable" data-sid="'+esc(r.sid2||'')+'" data-nm="'+esc(r.name)+'">'
           + (r.thumb ? '<img class="bw-th" src="'+esc(r.thumb)+'" alt="" loading="lazy">' : '<div class="bw-th"></div>')
           + '<div class="bw-nm">'+esc(r.name)+'<i>'+esc(r.sci)+'</i></div>'
           + '<div class="bw-tm">'+hhmm(r.m)+'</div>'
           + '<div class="bw-ct">'+r.count+'</div></div>';
       }).join('');
+      $('bw-heard').querySelectorAll('.bw-clickable').forEach(function(el){
+        el.addEventListener('click', function(ev){
+          ev.stopPropagation();
+          openBirdPopup(el.getAttribute('data-sid'), el.getAttribute('data-nm'));
+        });
+      });
     }
     walk(start, []);
     nightLine();
@@ -70519,6 +70536,91 @@ function closeAlertModal(){
     }
     inject();
     setInterval(function(){ if (!document.hidden) inject(); }, 30000);
+  }
+
+  // ── SPECIES POPUP ──
+  // Click a bird in "heard nearby today" → its calls + facts. Reuses the
+  // site's shared insight modal so it matches the planet/hourly popups.
+  // Audio: BirdWeather soundscapes are FLAC w/ CORS *, and each detection
+  // marks the 3s window the bird was heard in — a #t=start,end media
+  // fragment makes <audio> play just that slice instead of the full 9s.
+  window._bvBirdPopup = openBirdPopup;
+  function openBirdPopup(sid, name){
+    if (!window._openInsightModal) return;
+    var q = '{ '
+      + (sid ? 'species(id: '+JSON.stringify(String(sid))+') { commonName scientificName imageUrl imageCredit imageLicense wikipediaSummary wikipediaUrl ebirdUrl mlUrl birdweatherUrl } ' : '')
+      + (sid ? 'detections(first: 40, speciesId: '+JSON.stringify(String(sid))+', ne: {lat: '+(_bvLat+0.45)+', lon: '+(_bvLon+0.45)+'}, sw: {lat: '+(_bvLat-0.45)+', lon: '+(_bvLon-0.45)+'}, confidenceGte: 0.65, period: {count: 7, unit: "day"}) '
+              + '{ nodes { timestamp confidence station { name } soundscape { url startTime endTime duration } } }' : '')
+      + ' }';
+    fetch(BW_URL, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({query:q})})
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        var sp = ((j.data||{}).species) || {};
+        var det = (((j.data||{}).detections||{}).nodes) || [];
+        var h = '';
+
+        // ── CALLS ── one row per distinct recording, newest first
+        var seen = {}, clips = [];
+        det.forEach(function(d){
+          var sc = d.soundscape || {}; if (!sc.url || seen[sc.url]) return;
+          seen[sc.url] = 1; clips.push({ url:sc.url, a:sc.startTime, b:sc.endTime,
+            t:String(d.timestamp||''), conf:d.confidence, st:((d.station||{}).name||'') });
+        });
+        h += FSB('Recent calls nearby');
+        if (!clips.length) h += '<div style="font-size:.62rem;color:rgba(43,34,244,.5);padding:4px 0;">No recordings in the last 7 days.</div>';
+        clips.slice(0,8).forEach(function(c){
+          var frag = (c.a != null && c.b != null) ? '#t=' + c.a + ',' + c.b : '';
+          var when = c.t.length > 15 ? (c.t.slice(5,10).replace('-','/') + ' ' + c.t.slice(11,16)) : '';
+          h += '<div style="padding:6px 0;border-bottom:1px solid rgba(43,34,244,.08);">'
+            + '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px;">'
+            + '<span style="font-size:.62rem;font-weight:800;color:rgba(43,34,244,.8);">' + esc(when) + '</span>'
+            + '<span style="font-size:.55rem;font-weight:700;color:rgba(43,34,244,.45);">' + esc(String(c.st).replace('BirdNET-Pi - ','')) + ' · ' + Math.round((c.conf||0)*100) + '%</span></div>'
+            + '<audio controls preload="none" style="width:100%;height:30px;" src="' + esc(c.url + frag) + '"></audio></div>';
+        });
+
+        // ── ABOUT ──
+        if (sp.wikipediaSummary){
+          h += FSB('About');
+          h += '<div style="font-size:.63rem;line-height:1.6;color:rgba(43,34,244,.75);">' + esc(sp.wikipediaSummary) + '</div>';
+        }
+        if (sp.imageCredit){
+          h += '<div style="font-size:.5rem;color:rgba(43,34,244,.4);margin-top:6px;">Photo: ' + sp.imageCredit + (sp.imageLicense ? ' · ' + esc(sp.imageLicense) : '') + '</div>';
+        }
+
+        // ── MORE ──
+        var links = [['Wikipedia', sp.wikipediaUrl], ['eBird', sp.ebirdUrl],
+                     ['Macaulay Library (more recordings)', sp.mlUrl], ['BirdWeather', sp.birdweatherUrl]]
+                    .filter(function(l){ return l[1]; });
+        if (links.length){
+          h += FSB('More');
+          links.forEach(function(l){
+            h += '<div style="padding:3px 0;"><a href="' + esc(l[1]) + '" target="_blank" rel="noopener" '
+              + 'style="font-size:.63rem;font-weight:700;color:#2b22f4;text-decoration:underline;text-underline-offset:2px;">' + esc(l[0]) + '</a></div>';
+          });
+        }
+
+        window._openInsightModal({
+          title: sp.commonName || name || 'Bird',
+          subtitle: sp.scientificName || '',
+          heroImg: sp.imageUrl || '',
+          h: h,
+          centered: true,
+          tabDefs: [{ id:'calls', label:'CALLS' }, { id:'about', label:'ABOUT' }, { id:'more', label:'MORE' }],
+          tabMap: function(t){
+            var x = (t||'').toLowerCase();
+            if (x.indexOf('about') > -1) return 1;
+            if (x.indexOf('more') > -1) return 2;
+            return 0;
+          },
+          footer: 'BirdWeather · BirdNET · audio CC BY-NC-SA'
+        });
+      })
+      .catch(function(){});
+  }
+  // section header in the shape _openInsightModal splits tabs on
+  function FSB(t){
+    return '<div style="font-weight:800;font-size:9px;color:#2b22f4;text-transform:uppercase;letter-spacing:.04em;'
+         + 'margin-top:8px;margin-bottom:4px;padding-bottom:3px;border-bottom:1px solid rgba(43,34,244,.12);">' + t + '</div>';
   }
 
   function loadEbird(lat, lon){
