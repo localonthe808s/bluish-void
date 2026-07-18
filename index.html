@@ -10412,17 +10412,12 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
 #birds-widget .bw-dot.r{background:#d94f3d;}
 #birds-widget .bw-dot.b{background:#4a90e2;}
 #birds-widget .bw-first{position:absolute;top:51px;font-size:.44rem;font-weight:800;color:#2b22f4;transform:translateX(-50%);white-space:nowrap;}
-/* full-width twilight bar across the bottom of the widget */
-#birds-widget .bw-tl{position:relative;height:60px;margin:2px 14px 8px;}
-#birds-widget .bw-bar{position:absolute;left:0;right:0;top:20px;height:14px;border-radius:7px;
   background:linear-gradient(90deg,#0a1226 0%,#152142 16%,#2a3560 32%,#4a4a7a 48%,#8a6a86 62%,#d98d5c 76%,#f2b45e 88%,#ffd98a 100%);
   box-shadow:inset 0 0 0 1px rgba(43,34,244,.12);}
 #birds-widget .bw-band{position:absolute;top:20px;height:14px;background:rgba(255,255,255,.18);
   border-left:1.5px dashed rgba(255,255,255,.7);border-right:1.5px dashed rgba(255,255,255,.7);}
 #birds-widget .bw-tick{position:absolute;top:15px;width:1.5px;height:24px;background:rgba(43,34,244,.3);}
-#birds-widget .bw-tlab{position:absolute;top:0;font-size:.42rem;font-weight:800;letter-spacing:.03em;
   color:rgba(43,34,244,.5);transform:translateX(-50%);white-space:nowrap;text-align:center;line-height:1.3;}
-#birds-widget .bw-tlab b{display:block;font-size:.48rem;color:rgba(43,34,244,.78);}
 /* one dot per species at its first song — AREA scales with how much it sang */
 #birds-widget .bw-dot{position:absolute;border-radius:50%;background:#c8871f;transform:translate(-50%,-50%);
   box-shadow:0 0 0 1.4px rgba(255,255,255,.95),0 1px 4px rgba(20,25,80,.35);}
@@ -10705,6 +10700,10 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
                 <div class="today-tl-bar-row" id="today-tl-pollen-row" style="display:none;">
                   <div class="today-tl-bar-label" id="today-tl-pollen-label" style="top:0;bottom:0;display:flex;flex-direction:column;align-items:flex-start;gap:0;line-height:1;"></div>
                   <div class="today-tl-bar-track cloud" id="today-tl-pollen-track" style="flex-direction:column;"></div>
+                </div>
+                <div class="today-tl-bar-row" id="today-tl-bird-row" style="display:none;">
+                  <div class="today-tl-bar-label" id="today-tl-bird-label">BIRDS</div>
+                  <div class="today-tl-bar-track cloud" id="today-tl-bird-track" style="position:relative;overflow:visible;"></div>
                 </div>
               </div>
               
@@ -11695,7 +11694,6 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
                     <div id="bw-rare"><div class="bw-empty">loading…</div></div>
                   </div>
                 </div>
-                <div class="bw-tl" id="bw-tl"></div>
               </div>
               <div class="hz-card-footer" style="padding:6px 14px 10px;">BirdWeather · BirdNET (Cornell Lab / Chemnitz) · eBird (Cornell Lab of Ornithology) · twilight from solar position</div>
             </div>
@@ -70230,7 +70228,6 @@ function closeAlertModal(){
       civil:    morningCrossing(-6,  doy, lat, lon, tzOffH),
       sunrise:  morningCrossing(-0.833, doy, lat, lon, tzOffH)
     };
-    renderTimeline(sol, []);
     loadBirdWeather(lat, lon, sol);
     loadEbird(lat, lon);
     return sol;
@@ -70268,33 +70265,37 @@ function closeAlertModal(){
              .sort(function(a,b){ return a.m - b.m; });
   }
 
-  // Dots are one-per-species at that species' first song; the AREA scales
-  // with its detection count, so a bar full of robins reads as such. (The
-  // old rotating yellow/red/blue carried no meaning at all.)
-  function renderTimeline(sol, rows){
-    var tl = $('bw-tl'); if (!tl) return;
-    if (sol.astro == null || sol.sunrise == null){ tl.innerHTML = ''; return; }
-    var T0 = sol.astro - 20, T1 = sol.sunrise + 50, span = (T1 - T0) || 1;
-    var pct = function(m){ return Math.max(0, Math.min(100, ((m - T0)/span)*100)); };
-    var h = '<div class="bw-bar"></div>';
-    if (sol.nautical != null)
-      h += '<div class="bw-band" style="left:'+pct(sol.nautical)+'%;width:'+(pct(sol.sunrise)-pct(sol.nautical))+'%"></div>';
-    [['astro','ASTRO'],['nautical','NAUT'],['civil','CIVIL'],['sunrise','SUNRISE']].forEach(function(p){
-      var m = sol[p[0]]; if (m == null) return;
-      h += '<div class="bw-tick" style="left:'+pct(m)+'%"></div>';
-      h += '<div class="bw-tlab" style="left:'+pct(m)+'%">'+p[1]+'<b>'+hhmm(m)+'</b></div>';
-    });
+  // ── BIRD ROW on the today timeline ──
+  // Lives in the same stacked-bar rail as Kp / cloud / pressure / pollen so
+  // it shares their 24h axis (and the orange NOW line crosses it too). The
+  // chorus window is drawn as a twilight-tinted segment; each species gets
+  // a dot at its first song, sized by how much it sang.
+  function renderTodayBirdBar(sol, rows){
+    var row = document.getElementById('today-tl-bird-row');
+    var track = document.getElementById('today-tl-bird-track');
+    var label = document.getElementById('today-tl-bird-label');
+    if (!row || !track) return;
+    var pct = function(m){ return Math.max(0, Math.min(100, (m/1440)*100)); };
+    var h = '';
+    if (sol.astro != null && sol.sunrise != null){
+      var L = pct(sol.astro), W = pct(sol.sunrise) - L;
+      h += '<div style="position:absolute;left:'+L+'%;width:'+W+'%;top:0;bottom:0;'
+         + 'background:linear-gradient(90deg,#16264a 0%,#2a3560 30%,#8a6a86 62%,#e0a35c 100%);"></div>';
+      if (sol.civil != null)
+        h += '<div style="position:absolute;left:'+pct(sol.civil)+'%;top:0;bottom:0;width:1px;background:rgba(255,255,255,.5);"></div>';
+    }
     var mx = rows.reduce(function(a,r){ return Math.max(a, r.count||1); }, 1);
     rows.forEach(function(r){
-      var sz = (6 + 10*Math.sqrt((r.count||1)/mx)).toFixed(1);
-      h += '<div class="bw-dot" style="left:'+pct(r.m)+'%;top:27px;width:'+sz+'px;height:'+sz+'px" '
-         + 'title="'+esc(r.name)+' — first song '+hhmm(r.m)+', '+(r.count||0)+' calls"></div>';
+      var sz = (4 + 7*Math.sqrt((r.count||1)/mx)).toFixed(1);
+      h += '<div title="'+esc(r.name)+' — first song '+hhmm(r.m)+', '+(r.count||0)+' calls" '
+         + 'style="position:absolute;left:'+pct(r.m)+'%;top:50%;width:'+sz+'px;height:'+sz+'px;'
+         + 'margin-left:'+(-sz/2)+'px;margin-top:'+(-sz/2)+'px;border-radius:50%;background:#f2c23a;'
+         + 'box-shadow:0 0 0 1.2px rgba(255,255,255,.9),0 1px 3px rgba(10,15,50,.45);"></div>';
     });
-    if (rows.length){
-      h += '<div class="bw-first" style="left:'+pct(rows[0].m)+'%">\u25B2 onset</div>';
-      h += '<div class="bw-key">dot size = calls logged</div>';
-    }
-    tl.innerHTML = h;
+    track.innerHTML = h;
+    row.style.display = '';
+    if (label && rows.length)
+      label.innerHTML = 'BIRDS <span style="font-size:.52rem;font-weight:700;opacity:.85">' + hhmm(rows[0].m).replace(' ','').toLowerCase() + '</span>';
   }
 
   function loadBirdWeather(lat, lon, sol){
@@ -70360,7 +70361,7 @@ function closeAlertModal(){
         $('bw-delta').textContent = dm > 0 ? dm + ' min before civil dawn'
                                   : dm < 0 ? Math.abs(dm) + ' min after civil dawn' : 'at civil dawn';
       }
-      renderTimeline(sol, rows);
+      renderTodayBirdBar(sol, rows);
       placeFirstSongCue(f.m, f.name);
       $('bw-heard').innerHTML = rows.slice(0,6).map(function(r){
         return '<div class="bw-row">'
