@@ -10391,6 +10391,13 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
    notable sightings. Both non-commercial — attribution in the footer. */
 #birds-widget .bw-wrap{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr) minmax(0,.9fr);gap:16px;padding:10px 10px 4px;}
 @media (max-width:900px){ #birds-widget .bw-wrap{grid-template-columns:1fr;gap:14px;} }
+#birds-widget .bw-migwrap{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:10px 10px 4px;}
+@media (max-width:900px){ #birds-widget .bw-migwrap{grid-template-columns:1fr;gap:14px;} }
+#birds-widget .bw-migfoot{padding:2px 10px 10px;font-size:.46rem;font-weight:700;letter-spacing:.04em;
+  color:rgba(43,34,244,.42);line-height:1.5;}
+#birds-widget .bw-migloc{font-size:.46rem;font-weight:600;color:rgba(43,34,244,.45);white-space:nowrap;overflow:hidden;}
+#birds-widget .bw-arrtag{font-size:.44rem;font-weight:800;letter-spacing:.05em;color:#1a8a4a;}
+#birds-widget .bw-deptag{font-size:.44rem;font-weight:800;letter-spacing:.05em;color:rgba(43,34,244,.38);}
 #birds-widget .bw-lab{font-size:.5rem;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:#f97316;margin-bottom:5px;}
 /* headline */
 #birds-widget .bw-hero{display:flex;flex-direction:column;align-items:stretch;gap:9px;}
@@ -11523,6 +11530,7 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
                       <div style="display:flex;align-items:baseline;gap:12px;">
                         <button type="button" class="bw-tab active" data-bwtab="dawn">DAWN CHORUS</button>
                         <button type="button" class="bw-tab" data-bwtab="dusk">DUSK &amp; NIGHT</button>
+                        <button type="button" class="bw-tab" data-bwtab="mig">MIGRATION</button>
                       </div>
                       <div id="birds-sources" style="font-size:.58rem;font-weight:700;letter-spacing:.06em;color:rgba(43,34,244,.52);">
                         <a class="widget-sub" href="https://app.birdweather.com" target="_blank" rel="noopener" style="text-decoration:none;color:inherit;font-size:inherit;letter-spacing:inherit;">BIRDWEATHER</a> ·
@@ -11591,6 +11599,19 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
                     </div>
                   </div>
                   <div class="bw-tl" id="bwd-tl"></div>
+                </div>
+                <div class="bw-panel" data-bwpanel="mig" hidden>
+                  <div class="bw-migwrap">
+                    <div>
+                      <div class="bw-lab">Just arrived</div>
+                      <div id="bw-arr" class="bw-list"><div class="bw-empty">loading…</div></div>
+                    </div>
+                    <div>
+                      <div class="bw-lab">No longer reported</div>
+                      <div id="bw-dep" class="bw-list"><div class="bw-empty">loading…</div></div>
+                    </div>
+                  </div>
+                  <div id="bw-migfoot" class="bw-migfoot"></div>
                 </div>
                   </div>
               </div>
@@ -70366,6 +70387,11 @@ function closeAlertModal(){
           b.classList.toggle('active', b === btn); });
         document.querySelectorAll('#birds-widget .bw-panel').forEach(function(pnl){
           pnl.hidden = pnl.getAttribute('data-bwpanel') !== want; });
+        // migration costs 8 eBird calls — only pay for it if the tab is opened
+        if (want === 'mig' && !window._bwMigLoaded){
+          window._bwMigLoaded = 1;
+          loadMigration(_bvLat, _bvLon);
+        }
       });
     });
     return sol;
@@ -71748,6 +71774,141 @@ function closeAlertModal(){
     return '<div style="font-weight:900;font-size:10px;color:#2b22f4;text-transform:uppercase;letter-spacing:.05em;margin-top:12px;margin-bottom:5px;padding-bottom:4px;border-bottom:1px solid rgba(43,34,244,.16);">' + t + '</div>';
   }
 
+  // eBird hotspot names carry parentheticals, "--" sub-sites and raw
+  // coordinates; trim to something that fits one line, never an ellipsis
+  function shortLocName(s){
+    s = String(s||'').replace(/\s*\(.*$/, '')
+                     .replace(/,?\s+[A-Za-z .]*US-[A-Z]{2}\b.*$/, '').trim();
+    if (s.length > 34) s = s.split('--')[0].trim();
+    if (s.length > 34) s = s.split(',')[0].trim();
+    if (s.length > 34){ s = s.slice(0, 34); s = s.slice(0, s.lastIndexOf(' ') > 12 ? s.lastIndexOf(' ') : 34); }
+    return s;
+  }
+
+  // ── MIGRATION: arrivals & departures ──
+  // eBird's recent-observations feed only reports each species' LATEST
+  // sighting, so "what is new" has to be built by differencing two windows.
+  // Both windows are pulled for the same COUNTY (not a radius) so the areas
+  // are identical and a species can't look new just because the circle moved:
+  //   recent   = last 7 days
+  //   baseline = the same 7-day stretch four weeks earlier, day by day
+  // In / not-in the baseline gives arrivals and departures respectively.
+  function ebGet(url){
+    return fetch(url, {headers:{'x-ebirdapitoken': EBIRD_KEY}})
+      .then(function(r){ return r.ok ? r.json() : []; }).catch(function(){ return []; });
+  }
+  function ymd(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+
+  function loadMigration(lat, lon){
+    var arrEl = $('bw-arr'), depEl = $('bw-dep'), foot = $('bw-migfoot');
+    if (!arrEl) return;
+    // county code: eBird's historic feed is region-based, and the FCC census
+    // lookup is the CORS-open way from coordinates to a county FIPS
+    fetch('https://geo.fcc.gov/api/census/area?lat='+lat.toFixed(4)+'&lon='+lon.toFixed(4)+'&format=json')
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        var res = ((j||{}).results||[])[0] || {};
+        var fips = String(res.county_fips||''), st = res.state_code||'';
+        if (fips.length !== 5 || !st) throw new Error('no county');
+        var reg = 'US-'+st+'-'+fips.slice(2);
+        var ck = 'bvmig:' + reg + ':' + ymd(new Date());
+        var cached = null;
+        try{ cached = JSON.parse(sessionStorage.getItem(ck) || 'null'); }catch(e){}
+        if (cached) return renderMigration(cached, res.county_name||'', foot);
+        var now = new Date();
+        var recentUrl = 'https://api.ebird.org/v2/data/obs/'+reg+'/recent?back=7&cat=species&maxResults=1000';
+        var baseUrls = [];
+        for (var off = 28; off <= 34; off++){
+          var d = new Date(now.getTime() - off*86400000);
+          baseUrls.push('https://api.ebird.org/v2/data/obs/'+reg+'/historic/'
+            + d.getFullYear()+'/'+(d.getMonth()+1)+'/'+d.getDate()+'?cat=species&maxResults=1000&rank=mrec');
+        }
+        return Promise.all([ebGet(recentUrl)].concat(baseUrls.map(ebGet))).then(function(all){
+          var rec = all[0] || [];
+          var baseNames = {};
+          all.slice(1).forEach(function(day){
+            (day||[]).forEach(function(o){ if (o && o.comName) baseNames[o.comName] = 1; });
+          });
+          var recNames = {};
+          var arrived = [], departed = [], baseRows = {};
+          rec.forEach(function(o){
+            if (!o || !o.comName || recNames[o.comName]) return;
+            recNames[o.comName] = 1;
+            if (!baseNames[o.comName]) arrived.push(o);
+          });
+          all.slice(1).forEach(function(day){
+            (day||[]).forEach(function(o){
+              if (!o || !o.comName || recNames[o.comName] || baseRows[o.comName]) return;
+              baseRows[o.comName] = 1; departed.push(o);
+            });
+          });
+          var payload = { arrived: arrived, departed: departed,
+                          nRec: Object.keys(recNames).length, nBase: Object.keys(baseNames).length };
+          try{ sessionStorage.setItem(ck, JSON.stringify(payload)); }catch(e){}
+          renderMigration(payload, res.county_name||'', foot);
+        });
+      })
+      .catch(function(){
+        arrEl.innerHTML = '<div class="bw-empty">Migration data unavailable.</div>';
+        if (depEl) depEl.innerHTML = '<div class="bw-empty">Migration data unavailable.</div>';
+      });
+  }
+
+  function renderMigration(d, countyName, foot){
+    migList('bw-arr', d.arrived, 'arr', 'Nothing new this week.');
+    migList('bw-dep', d.departed, 'dep', 'Nothing has dropped off.');
+    if (foot){
+      foot.innerHTML = esc((countyName ? countyName + ' · ' : ''))
+        + 'Last 7 days (' + d.nRec + ' species) vs the same week four weeks ago (' + d.nBase + '). '
+        + 'A species listed here is one eBird observers reported in one window and not the other — '
+        + 'arrivals are the stronger signal; a quiet resident can slip off the second list without going anywhere.';
+    }
+  }
+
+  // Rows share the rare-list shape: placeholder, then one batched BirdWeather
+  // query fills thumbnails and species ids so a click opens the full popup.
+  function migList(id, rows, kind, emptyMsg){
+    var el = $(id); if (!el) return;
+    rows = (rows||[]).slice(0, 14);
+    if (!rows.length){ el.innerHTML = '<div class="bw-empty">'+esc(emptyMsg)+'</div>'; return; }
+    el.innerHTML = rows.map(function(o, i){
+      var dt = String(o.obsDt||'').slice(5,10).replace('-','/');
+      return '<div class="bw-row bw-clickable" id="bw-mg-'+kind+'-'+i+'" data-sci="'+esc(o.sciName||'')+'" data-nm="'+esc(o.comName||'')+'">'
+        + '<div class="bw-th" style="mask-image:none;-webkit-mask-image:none;background:rgba(43,34,244,.06);border-radius:6px;"></div>'
+        + '<div style="flex:1;min-width:0;">'
+        + '<div class="'+(kind==='arr'?'bw-arrtag':'bw-deptag')+'">'+(kind==='arr'?'▲ NEW':'▼ GONE QUIET')+'</div>'
+        + '<div class="bw-rare" style="color:'+(kind==='arr'?'#1a8a4a':'rgba(43,34,244,.62)')+'">'+esc(o.comName||'')+'</div>'
+        + '<div class="bw-raresci">'+esc(o.sciName||'')+'</div>'
+        + '<div class="bw-migloc">'+esc(shortLocName(o.locName))+'</div></div>'
+        + '<div class="bw-ct">'+esc(dt)+'</div></div>';
+    }).join('');
+    el.querySelectorAll('.bw-clickable').forEach(function(row){
+      row.addEventListener('click', function(ev){
+        ev.stopPropagation();
+        openBirdPopup(row.getAttribute('data-sid') || '', row.getAttribute('data-nm'), null, null,
+                      row.getAttribute('data-sci'), row.querySelector('.bw-th'));
+      });
+    });
+    var q = '{ ' + rows.map(function(o, i){
+      return 's'+i+': species(scientificName: '+JSON.stringify(String(o.sciName||''))+') { id thumbnailUrl }';
+    }).join(' ') + ' }';
+    fetch(BW_URL, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({query:q})})
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        var data = (j||{}).data || {};
+        rows.forEach(function(o, i){
+          var sp = data['s'+i]; if (!sp) return;
+          var row = document.getElementById('bw-mg-'+kind+'-'+i); if (!row) return;
+          if (sp.id) row.setAttribute('data-sid', sp.id);
+          if (sp.thumbnailUrl){
+            var im = document.createElement('img');
+            im.className = 'bw-th'; im.alt = ''; im.loading = 'lazy'; im.src = sp.thumbnailUrl;
+            row.replaceChild(im, row.firstChild);
+          }
+        });
+      }).catch(function(){});
+  }
+
   function loadEbird(lat, lon){
     var url = 'https://api.ebird.org/v2/data/obs/geo/recent/notable?lat='+lat.toFixed(3)+'&lng='+lon.toFixed(3)
             + '&dist=25&back=7&maxResults=40';
@@ -71763,14 +71924,7 @@ function closeAlertModal(){
         var rrows = out.slice(0,12);
         // eBird hotspot names carry parentheticals, "--" sub-sites and raw
         // coordinates; trim to something that fits on one line, no ellipsis
-        function shortLoc(s){
-          s = String(s||'').replace(/\s*\(.*$/, '')
-                           .replace(/,?\s+[A-Za-z .]*US-[A-Z]{2}\b.*$/, '').trim();
-          if (s.length > 34) s = s.split('--')[0].trim();
-          if (s.length > 34) s = s.split(',')[0].trim();
-          if (s.length > 34){ s = s.slice(0, 34); s = s.slice(0, s.lastIndexOf(' ') > 12 ? s.lastIndexOf(' ') : 34); }
-          return s;
-        }
+        var shortLoc = shortLocName;
         $('bw-rare').innerHTML = rrows.map(function(o, i){
           var dt = String(o.obsDt||'').slice(5,10).replace('-','/');
           return '<div class="bw-row bw-clickable" id="bw-rr-'+i+'" data-sci="'+esc(o.sciName||'')+'" data-nm="'+esc(o.comName)+'">'
