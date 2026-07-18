@@ -70221,7 +70221,7 @@ function closeAlertModal(){
     return best.d > 3 ? null : best.m;            // no crossing (polar day/night)
   }
 
-  var _bvLat = 40.744, _bvLon = -73.919;
+  var _bvLat = 40.744, _bvLon = -73.919, _bvSol = null;
   function build(){
     var loc = window.LOCATION || {};
     var lat = typeof loc.lat === 'number' ? loc.lat : 40.744;
@@ -70236,6 +70236,7 @@ function closeAlertModal(){
       civil:    morningCrossing(-6,  doy, lat, lon, tzOffH),
       sunrise:  morningCrossing(-0.833, doy, lat, lon, tzOffH)
     };
+    _bvSol = sol;
     renderTimeline(sol, []);
     loadBirdWeather(lat, lon, sol);
     loadEbird(lat, lon);
@@ -70544,12 +70545,29 @@ function closeAlertModal(){
   // Audio: BirdWeather soundscapes are FLAC w/ CORS *, and each detection
   // marks the 3s window the bird was heard in — a #t=start,end media
   // fragment makes <audio> play just that slice instead of the full 9s.
+  // BirdWeather/BirdNET identify the species, not the vocalisation type —
+  // every detection's `behavior` field is null. So label recordings by the
+  // light they were sung in, which is real and meaningful (dawn song vs a
+  // midday contact call), instead of by the listening box's nickname.
+  function songContext(mins){
+    var S = _bvSol || {};
+    if (S.astro != null && mins < S.astro) return 'Night song';
+    if (S.civil != null && mins < S.civil) return 'Dawn chorus';
+    if (S.sunrise != null && mins < S.sunrise) return 'First light';
+    if (S.sunrise != null && mins < S.sunrise + 120) return 'Early morning';
+    if (mins < 720) return 'Morning';
+    if (mins < 900) return 'Midday';
+    if (mins < 1080) return 'Afternoon';
+    if (mins < 1260) return 'Evening';
+    return 'Night song';
+  }
+
   window._bvBirdPopup = openBirdPopup;
   function openBirdPopup(sid, name, firstM, todayCt){
     if (!window._openInsightModal) return;
     var q = '{ '
       + (sid ? 'species(id: '+JSON.stringify(String(sid))+') { commonName scientificName imageUrl imageCredit imageLicense wikipediaSummary wikipediaUrl ebirdUrl mlUrl birdweatherUrl } ' : '')
-      + (sid ? 'detections(first: 60, speciesId: '+JSON.stringify(String(sid))+', ne: {lat: '+(_bvLat+0.45)+', lon: '+(_bvLon+0.45)+'}, sw: {lat: '+(_bvLat-0.45)+', lon: '+(_bvLon-0.45)+'}, confidenceGte: 0.65, period: {count: 7, unit: "day"}) '
+      + (sid ? 'detections(first: 200, speciesId: '+JSON.stringify(String(sid))+', ne: {lat: '+(_bvLat+0.45)+', lon: '+(_bvLon+0.45)+'}, sw: {lat: '+(_bvLat-0.45)+', lon: '+(_bvLon-0.45)+'}, confidenceGte: 0.65, period: {count: 90, unit: "day"}) '
               + '{ nodes { timestamp confidence station { name } soundscape { url startTime endTime } } }' : '')
       + ' }';
     fetch(BW_URL, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({query:q})})
@@ -70558,19 +70576,31 @@ function closeAlertModal(){
         var sp = ((j.data||{}).species) || {};
         var det = (((j.data||{}).detections||{}).nodes) || [];
 
-        // One clip per STATION, keeping that station's most confident take.
-        // A flat newest-first list returned the same bird at the same box
-        // three times in one minute — that's one call, not three.
-        var best = {};
+        // Pick the best take per TIME-OF-DAY context first — a dawn song, a
+        // midday call and a night song are actually different vocalisations,
+        // whereas six clips from six boxes at 6am are the same bird doing the
+        // same thing. Remaining slots fill with the next-best distinct
+        // station so a quiet species still shows several recordings.
+        var rows2 = [];
         det.forEach(function(d){
           var sc = d.soundscape || {}; if (!sc.url) return;
-          var st = String((d.station||{}).name || 'station').replace('BirdNET-Pi - ','');
-          if (!best[st] || (d.confidence||0) > (best[st].conf||0))
-            best[st] = { url:sc.url, a:sc.startTime, b:sc.endTime, t:String(d.timestamp||''),
-                         conf:d.confidence, st:st };
+          var t = String(d.timestamp||''); if (t.length < 16) return;
+          var mins = +t.slice(11,13)*60 + +t.slice(14,16);
+          rows2.push({ url:sc.url, a:sc.startTime, b:sc.endTime, t:t, mins:mins, conf:d.confidence||0,
+                       st:String((d.station||{}).name||'station').replace('BirdNET-Pi - ',''),
+                       ctx: songContext(mins) });
         });
-        var clips = Object.keys(best).map(function(k){ return best[k]; })
-                      .sort(function(x,y){ return (y.conf||0) - (x.conf||0); }).slice(0,12);
+        rows2.sort(function(x,y){ return y.conf - x.conf; });
+        var clips = [], usedCtx = {}, usedUrl = {}, usedSt = {};
+        rows2.forEach(function(r){                       // pass 1: one per context
+          if (usedCtx[r.ctx] || usedUrl[r.url]) return;
+          usedCtx[r.ctx] = usedUrl[r.url] = usedSt[r.st] = 1; clips.push(r);
+        });
+        rows2.forEach(function(r){                       // pass 2: other stations
+          if (clips.length >= 12 || usedUrl[r.url] || usedSt[r.st]) return;
+          usedUrl[r.url] = usedSt[r.st] = 1; clips.push(r);
+        });
+        clips.sort(function(x,y){ return x.mins - y.mins; });   // read as a day's progression
 
         var h = '';
         // ── context first, in one short paragraph ──
@@ -70579,7 +70609,7 @@ function closeAlertModal(){
             + esc(sp.wikipediaSummary) + '</div>';
         }
         // ── calls, one per listening station ──
-        h += FSB('Recordings nearby \u00b7 one per station');
+        h += FSB('Calls through the day');
         if (!clips.length){
           h += '<div style="font-size:.62rem;color:rgba(43,34,244,.5);padding:4px 0;">No recordings in the last 7 days.</div>';
         }
@@ -70594,9 +70624,9 @@ function closeAlertModal(){
           h += '<div style="display:flex;align-items:center;gap:9px;padding:5px 0;border-bottom:1px solid rgba(43,34,244,.07);">'
             + '<div style="flex:0 0 132px;min-width:0;">'
             + '<div style="font-size:.6rem;font-weight:800;color:rgba(43,34,244,.85);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
-            + esc(c.st) + '</div>'
-            + '<div style="font-size:.5rem;font-weight:700;color:rgba(43,34,244,.42);white-space:nowrap;">'
-            + (today ? 'today' : esc(d)) + ' ' + esc(tm) + ' \u00b7 ' + Math.round((c.conf||0)*100) + '%</div></div>'
+            + esc(c.ctx) + '</div>'
+            + '<div style="font-size:.5rem;font-weight:700;color:rgba(43,34,244,.42);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+            + esc(tm) + ' \u00b7 ' + (today ? 'today' : esc(d)) + ' \u00b7 ' + Math.round((c.conf||0)*100) + '% match</div></div>'
             + '<audio controls preload="none" style="flex:1;min-width:0;height:28px;" src="' + esc(c.url + frag) + '"></audio></div>';
         });
         h += '</div>';
@@ -70620,7 +70650,7 @@ function closeAlertModal(){
         var live = '';
         if (firstM) live += '<div><span>FIRST SONG</span><span>' + hhmm(+firstM) + '</span></div>';
         if (todayCt) live += '<div><span>CALLS TODAY</span><span>' + todayCt + '</span></div>';
-        live += '<div><span>STATIONS</span><span>' + clips.length + ' nearby</span></div>';
+        live += '<div><span>RECORDINGS</span><span>' + clips.length + '</span></div>';
 
         window._openInsightModal({
           title: sp.commonName || name || 'Bird',
