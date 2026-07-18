@@ -70197,6 +70197,7 @@ function closeAlertModal(){
 (function(){
   if (window.__bvBirdsInit) return; window.__bvBirdsInit = 1;
   var EBIRD_KEY = '822u237ioa78';
+  var XC_KEY = '70c01f641f6035ffc34849b5821f1de9dab92745';   // xeno-canto v3, non-commercial
   var BW_URL = 'https://app.birdweather.com/graphql';
 
   function $(id){ return document.getElementById(id); }
@@ -70578,6 +70579,89 @@ function closeAlertModal(){
     return 'Night song';
   }
 
+  // ── XENO-CANTO REFERENCE CALLS ──
+  // BirdNET tells us WHICH bird; xeno-canto's human-tagged archive tells us
+  // WHAT it's doing — song, dawn song, alarm call, begging, flight call.
+  // Short clips only (len:1-30): recordings are uncompressed WAV with no
+  // range support, so a 2-minute take is a 13MB download.
+  var XC_ORDER = ['Song','Dawn song','Subsong','Call','Alarm call','Scold','Begging call','Flight call','Wing whistle'];
+  function xcType(rec){
+    var t = String(rec.type || '').toLowerCase(), st = String(rec.stage || '').toLowerCase();
+    if (/beg/.test(t) || /nestling|juven/.test(st)) return 'Begging call';
+    if (/dawn song/.test(t))  return 'Dawn song';
+    if (/alarm/.test(t))      return 'Alarm call';
+    if (/scold/.test(t))      return 'Scold';
+    if (/subsong/.test(t))    return 'Subsong';
+    if (/flight call/.test(t))return 'Flight call';
+    if (/wing/.test(t))       return 'Wing whistle';
+    if (/song/.test(t))       return 'Song';
+    if (/call/.test(t))       return 'Call';
+    return '';
+  }
+  function loadXenoCalls(sci){
+    var box = document.getElementById('bw-xc');
+    if (!box) return;
+    if (!sci){ box.innerHTML = ''; return; }
+    var url = 'https://xeno-canto.org/api/3/recordings?query='
+            + encodeURIComponent('sp:"' + sci + '" q:A len:1-30') + '&key=' + XC_KEY;
+    fetch(url).then(function(r){ return r.json(); }).then(function(j){
+      var recs = (j && j.recordings) || [];
+      if (!recs.length){                                   // widen: allow B-grade
+        return fetch('https://xeno-canto.org/api/3/recordings?query='
+               + encodeURIComponent('sp:"' + sci + '" len:1-40') + '&key=' + XC_KEY)
+               .then(function(r){ return r.json(); }).then(function(j2){ return (j2 && j2.recordings) || []; });
+      }
+      return recs;
+    }).then(function(recs){
+      var byType = {};
+      (recs || []).forEach(function(r){
+        var t = xcType(r); if (!t || !r.file) return;
+        if (!byType[t]) byType[t] = [];
+        if (byType[t].length < 1) byType[t].push(r);        // one exemplar per type
+      });
+      var types = XC_ORDER.filter(function(t){ return byType[t]; });
+      if (!types.length){ box.innerHTML = '<div style="font-size:.6rem;color:rgba(43,34,244,.45);padding:4px 0;">No reference recordings.</div>'; return; }
+      box.innerHTML = types.map(function(t){
+        var r = byType[t][0];
+        var lic = String(r.lic || '');
+        var licName = /by-nc-sa/.test(lic) ? 'CC BY-NC-SA' : /by-nc-nd/.test(lic) ? 'CC BY-NC-ND'
+                    : /by-nc/.test(lic) ? 'CC BY-NC' : /by-sa/.test(lic) ? 'CC BY-SA'
+                    : /publicdomain|zero/.test(lic) ? 'CC0' : 'CC';
+        return '<div style="display:flex;align-items:center;gap:9px;padding:5px 0;border-bottom:1px solid rgba(43,34,244,.07);">'
+          + '<div style="flex:0 0 132px;min-width:0;">'
+          +   '<div style="font-size:.6rem;font-weight:800;color:rgba(43,34,244,.85);">' + esc(t) + '</div>'
+          +   '<div style="font-size:.5rem;font-weight:700;color:rgba(43,34,244,.42);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+          +     esc(r.length || '') + ' \u00b7 ' + esc(r.rec || '') + '</div>'
+          + '</div>'
+          + '<div class="bw-player">'
+          +   '<button class="bw-pbtn" type="button" aria-label="Play ' + esc(t) + '">'
+          +     '<svg viewBox="0 0 24 24" class="bw-ico-play"><path d="M8 5.5v13l11-6.5z"/></svg>'
+          +     '<svg viewBox="0 0 24 24" class="bw-ico-pause"><path d="M8 5.5h3.2v13H8zM12.8 5.5H16v13h-3.2z"/></svg>'
+          +   '</button>'
+          +   '<div class="bw-track"><div class="bw-fill"></div></div>'
+          +   '<span class="bw-elapsed">0:00</span>'
+          +   '<audio class="bw-xcclip" crossorigin="anonymous" preload="none" src="' + esc(r.file) + '"></audio>'
+          + '</div>'
+          + '<a href="https://xeno-canto.org/' + esc(r.id) + '" target="_blank" rel="noopener" '
+          +   'style="flex:0 0 auto;font-size:.46rem;font-weight:700;color:rgba(43,34,244,.42);text-decoration:underline;">'
+          +   esc(licName) + '</a>'
+          + '</div>';
+      }).join('');
+      // same transport + normalisation as the local clips
+      box.querySelectorAll('audio.bw-xcclip').forEach(function(el){
+        var dur = 0;
+        el.addEventListener('loadedmetadata', function(){ dur = el.duration || 0; });
+        el.addEventListener('play', function(){
+          boostClip(el);
+          document.querySelectorAll('#planet-insight-popup audio').forEach(function(o){ if (o !== el && !o.paused) o.pause(); });
+        });
+        wirePlayer(el, 0, 30);
+      });
+    }).catch(function(){
+      box.innerHTML = '<div style="font-size:.6rem;color:rgba(43,34,244,.45);padding:4px 0;">Reference calls unavailable.</div>';
+    });
+  }
+
   // Wikipedia summaries arrive as one dense block. Split into sentences,
   // drop hunting/quarry material (this is a birdsong panel, not a shooting
   // guide), then bucket what remains into themed groups so it reads as
@@ -70762,6 +70846,10 @@ function closeAlertModal(){
             + '</div></div>';
         });
         h += '</div>';
+        // ── reference calls (xeno-canto, filled in async) ──
+        h += FSB('Reference calls \u00b7 by type');
+        h += '<div id="bw-xc"><div style="font-size:.6rem;color:rgba(43,34,244,.45);padding:4px 0;">loading\u2026</div></div>';
+
         // ── references, inline ──
         var links = [['Wikipedia', sp.wikipediaUrl], ['eBird', sp.ebirdUrl],
                      ['Macaulay Library', sp.mlUrl], ['BirdWeather', sp.birdweatherUrl]]
@@ -70795,6 +70883,7 @@ function closeAlertModal(){
           tabMap: function(){ return 0; },
           footer: 'BirdWeather \u00b7 BirdNET \u00b7 audio CC BY-NC-SA'
         });
+        loadXenoCalls(sp.scientificName || '');
         // clamp each player to its detection window
         setTimeout(function(){
           document.querySelectorAll('#planet-insight-popup audio.bw-clip').forEach(function(el){
