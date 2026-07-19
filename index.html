@@ -8139,6 +8139,8 @@ body > #dynamic-alert-modal {
 /* rain line = a STANDALONE full-width line sitting BELOW the planet-visibility tracks and
    directly ABOVE the hour columns / front markers (inserted into #today-tl-hinner, which is
    display:contents on desktop so this flows full-width between the tracks and the hours). */
+#forecast-row.rain-flood{ color:#c2410c !important; font-weight:800 !important; }
+#forecast-row.rain-flood-warn{ color:#b91c1c !important; font-weight:900 !important; }
 #sky-precip-chip{ display:flex; flex-wrap:wrap; justify-content:center; gap:3px 16px; padding:6px 12px 6px; position:relative; z-index:5; width:100%; grid-column:1 / -1; box-sizing:border-box; }
 /* mobile: the hourly wrapper scrolls horizontally — pin the rain line to the viewport so it
    stays a full-width, non-scrolling row instead of being dragged into the 24h scroll. */
@@ -14789,6 +14791,43 @@ function heroEmojiSize(url){
 // drainage tolerate more (~2.5"), dense old-sewer cities ~1.75" (NYC spec).
 // Already-saturated topsoil lowers it (rain becomes runoff).
 function floodRateThreshold(lat, lon, soilMoisture){
+
+  // ── NWS FLOOD ALERTS OUTRANK THE MODEL ON THE RAIN LINE ────────────────
+  // 2026-07-18 post-mortem: 1.62" fell on Central Park with 1.03" in the noon
+  // hour, and the model had forecast 0.09" for the whole day — an 18x miss,
+  // with its peak placed ten hours late. Global models parameterise convection
+  // and physically cannot resolve a training cell, so no model change fixes
+  // this. A human forecaster can: NWS had a Flood Watch out at 02:27, nine
+  // hours before the rain, then Flash Flood Warnings from 11:53. Those alerts
+  // were already being fetched for the hazard widget — they just never reached
+  // the rain line, so a trace of model drizzle outranked a flash flood warning.
+  window._floodAlertStr = function(){
+    var a = window._nwsAlerts || [], best = null;
+    for (var i = 0; i < a.length; i++){
+      var ev = String((a[i] && a[i].event) || '');
+      if (!/flood/i.test(ev)) continue;
+      var r = /flash flood (warning|statement)/i.test(ev) ? 4
+            : /warning/i.test(ev) ? 3
+            : /advisory/i.test(ev) ? 2
+            : /watch/i.test(ev) ? 1 : 0;
+      if (r && (!best || r > best.r)) best = { r:r, label:ev.toUpperCase() };
+    }
+    return best ? { txt:'\uD83C\uDF0A ' + best.label + ' \u00b7 ', rank:best.r } : null;
+  };
+  // one place that assembles the rain line, so the two writers cannot drift
+  window._applyRainLine = function(nowcastTxt){
+    var el = document.getElementById('forecast-row'); if (!el) return;
+    var fa = window._floodAlertStr();
+    var t = nowcastTxt || '';
+    // the radar's own flash-flood flag is redundant next to an NWS warning,
+    // and the NWS wording is the authoritative one
+    if (fa && fa.rank >= 3) t = t.replace(/^\uD83C\uDF0A FLASH FLOOD \u00b7 /, '');
+    el.textContent = (fa ? fa.txt : '')
+      + (t ? t : (window._rainChanceStr || ''))
+      + (window._rainWindowStr || '');
+    el.classList.toggle('rain-flood', !!fa);
+    el.classList.toggle('rain-flood-warn', !!(fa && fa.rank >= 3));
+  };
   // Prefer the authoritative NWS 1-hour Flash Flood Guidance (per-point, from the
   // RFCs) when we have a fresh value nearby. It's the real "rain in 1hr that
   // floods HERE". Coverage is patchy, so fall back to the regional model below.
@@ -14856,7 +14895,7 @@ window._recomputeRainRisk = function(){
   else if (fi.cape >= 800 && (fi.popMax || 0) >= 20) flag = ' · ⚡ STORM POTENTIAL';
   window._rainWindowStr = (window._rainTimeStr || '') + flag;
   var el = document.getElementById('forecast-row');
-  if (el) el.textContent = (window._nowcastStr ? window._nowcastStr : (window._rainChanceStr || '')) + window._rainWindowStr;
+  window._applyRainLine(window._nowcastStr);
 };
 
   /* =========================================================
@@ -26988,7 +27027,7 @@ function dayRangeAround(d, days){
                 var el = document.getElementById('forecast-row');
                 // Live radar (when active) REPLACES the "REST OF DAY · MAX %" chance;
                 // the rain window (UNTIL/BURST) + storm flag always trail.
-                if (el) el.textContent = (txt ? txt : (window._rainChanceStr || '')) + (window._rainWindowStr || '');
+                window._applyRainLine(txt);
                 // (radar icons removed — kept text only) hide any leftover markers
                 ['rd-lead-dot','rd-spin-left','rd-spin-right'].forEach(function(id){ var e = document.getElementById(id); if (e) e.style.display = 'none'; });
 
@@ -66104,6 +66143,7 @@ function initNowMicroTabs(){
         features.sort(function(a, b){ return alertPriority(a) - alertPriority(b); });
         
         // ── Cache alerts globally for tooltip live insights ──
+        // repaint the rain line once alerts land — it renders before this returns
         window._nwsAlerts = features.map(function(f){
           var p = f.properties || {};
           return {
@@ -66116,6 +66156,9 @@ function initNowMicroTabs(){
             instruction: p.instruction || ''
           };
         });
+        // the rain line is drawn before this resolves — repaint it now that a
+        // Flood Watch/Warning may need to override the model's number
+        try{ if (window._applyRainLine) window._applyRainLine(window._nowcastStr); }catch(e){}
         
         // Also check SPC tornado outlook for user's location
         checkSPCTornadoRisk(function(spcAlert){
