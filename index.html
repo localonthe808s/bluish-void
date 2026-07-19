@@ -60663,6 +60663,17 @@ function initNowMicroTabs(){
 
     var degPerPxX = geoDeltaLon / cW;
     var degPerPxY = geoDeltaLat / cH;
+    // Rows are spaced in MERCATOR, not in degrees. This canvas is handed to
+    // L.imageOverlay with lat/lon corner bounds, and Leaflet stretches it
+    // between those corners on a Web Mercator map — so a raster drawn with
+    // rows linear in latitude lands progressively off its true position,
+    // pushing the plume away from the fire that produced it. The bounds span
+    // 16deg+ of latitude (padDeg is 8), which is plenty for that to show.
+    // Longitude needs no correction: Mercator is linear in x.
+    var _mercY = function(la){ return Math.log(Math.tan(Math.PI/4 + la*Math.PI/360)); };
+    var _invMercY = function(y){ return (2*Math.atan(Math.exp(y)) - Math.PI/2) * 180/Math.PI; };
+    var _yTop = _mercY(Math.min(85, maxLat)), _yBot = _mercY(Math.max(-85, minLat));
+    var _mercPerPxY = (_yTop - _yBot) / cH;
 
     // ── Per-pixel accumulation — sliced across tasks ──
     // Worst-case events still cost real compute; slicing rows through
@@ -60676,7 +60687,7 @@ function initNowMicroTabs(){
     var _sliceT0 = performance.now();
     var _yEnd = Math.min(cH, py + _ROWS);
     for(; py < _yEnd; py++){
-      var pLat = maxLat - py * degPerPxY;
+      var pLat = _invMercY(_yTop - py * _mercPerPxY);
       for(var px = 0; px < cW; px++){
         var pLon = minLon + px * degPerPxX;
         var totalDensity = 0;
@@ -63224,8 +63235,18 @@ function initNowMicroTabs(){
         if (Math.abs(ext.xmax - ext.xmin) < 0.01) return;
 
         var bounds = [[ext.ymin, ext.xmin], [ext.ymax, ext.xmax]];
-        var surgeUrl = baseUrl + 'export?bbox=' + ext.xmin + ',' + ext.ymin + ',' + ext.xmax + ',' + ext.ymax +
-          '&layers=show:' + layerId + '&size=1024,768&format=png32&transparent=true&f=image&bboxSR=4326&imageSR=4326';
+        // Same rule as the flood overlays: request in the map's own CRS. A 4326
+        // render stretched onto Mercator drifts vertically across a surge
+        // footprint that can span several degrees of latitude.
+        var _sgSW = L.CRS.EPSG3857.project(L.latLng(ext.ymin, ext.xmin));
+        var _sgNE = L.CRS.EPSG3857.project(L.latLng(ext.ymax, ext.xmax));
+        // and size it to the bbox's real shape — a fixed 1024x768 skewed any
+        // footprint that was not 4:3
+        var _sgAsp = Math.abs((_sgNE.x - _sgSW.x) / Math.max(1e-6, (_sgNE.y - _sgSW.y)));
+        var _sgW = 1024, _sgH = Math.max(64, Math.round(1024 / (_sgAsp || 1)));
+        if (_sgH > 1024){ _sgH = 1024; _sgW = Math.max(64, Math.round(1024 * _sgAsp)); }
+        var surgeUrl = baseUrl + 'export?bbox=' + _sgSW.x + ',' + _sgSW.y + ',' + _sgNE.x + ',' + _sgNE.y +
+          '&layers=show:' + layerId + '&size=' + _sgW + ',' + _sgH + '&format=png32&transparent=true&f=image&bboxSR=3857&imageSR=3857';
 
         var surgeOverlay = L.imageOverlay(surgeUrl, bounds, {
           opacity: 0.7, pane: 'hz-track', interactive: false
