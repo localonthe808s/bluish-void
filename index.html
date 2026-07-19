@@ -12745,6 +12745,10 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
                       <div id="floodnet-status" style="font-size:.44rem;font-weight:800;color:#0891b2;letter-spacing:.03em;line-height:1.35;margin-bottom:4px;">LOADING SENSORS…</div>
                       <div id="floodnet-detail" style="font-size:.36rem;font-weight:500;color:rgba(43,34,244,.68);line-height:1.45;"></div>
                       <div id="floodnet-toggle" style="margin-top:6px;padding:4px 0;border-radius:8px;border:1px solid rgba(6,182,212,.35);background:rgba(6,182,212,.12);font-size:.4rem;font-weight:700;color:#0891b2;cursor:pointer;text-align:center;user-select:none;">SENSORS ON</div>
+                      <div style="display:flex;gap:3px;margin-top:4px;">
+                        <div id="floodnet-area-near" onclick="floodNetArea('near')" style="flex:1;padding:4px 0;border-radius:8px;border:1px solid rgba(6,182,212,.35);background:rgba(6,182,212,.12);font-size:.4rem;font-weight:700;color:#0891b2;cursor:pointer;text-align:center;user-select:none;">NEARBY</div>
+                        <div id="floodnet-area-city" onclick="floodNetArea('city')" style="flex:1;padding:4px 0;border-radius:8px;border:1px solid rgba(43,34,244,.10);background:rgba(255,255,255,.4);font-size:.4rem;font-weight:700;color:rgba(43,34,244,.55);cursor:pointer;text-align:center;user-select:none;">ALL NYC</div>
+                      </div>
                     </div><div style="background:rgba(255,255,255,.62);backdrop-filter:blur(20px);border-radius:14px;padding:8px 10px;border:1px solid rgba(43,34,244,.10);box-shadow:0 0 40px rgba(43,34,244,.035),0 6px 24px rgba(15,23,42,.12);">
                       <div style="display:flex;align-items:center;gap:6px;margin-bottom:5px;"><span style="width:3px;height:10px;background:#2B22F4;border-radius:2px;"></span><span style="font-size:.36rem;color:rgba(43,34,244,.45);font-weight:800;letter-spacing:.1em;">VIEW</span></div>
                       <div style="display:flex; gap:3px;">
@@ -52413,7 +52417,7 @@ function initNowMicroTabs(){
   }
 
   window._floodNetLayer = null;
-  var fnSensorsOn = true, fnRows = [], fnNames = {};
+  var fnSensorsOn = true, fnRows = [], fnNames = {}, fnArea = 'near';
 
   // Depth tiers. FloodNet reports millimetres; a sensor reading dead 0 is the
   // normal dry state, not a fault, so 0 must still render as a live sensor.
@@ -52537,7 +52541,8 @@ function initNowMicroTabs(){
       // A dry reading is a real measurement, so say how many are actually
       // reporting — "all clear" means nothing without the sample size.
       var freshest = live.length ? Math.min.apply(null, live.map(function(r){ return r.ageMin; })) : null;
-      de.innerHTML = live.length + ' of ' + fnRows.length + ' nearby sensors reporting'
+      de.innerHTML = live.length + ' of ' + fnRows.length
+        + (fnArea === 'city' ? ' sensors citywide reporting' : ' nearby sensors reporting')
         + (freshest != null ? ', newest ' + (freshest < 1 ? 'seconds' : Math.round(freshest) + ' min') + ' old' : '')
         + '. Measured depth at the curb, not a forecast.';
     }
@@ -52560,9 +52565,43 @@ function initNowMicroTabs(){
       tg.style.color = fnSensorsOn ? '#0891b2' : 'rgba(43,34,244,.7)';
       fnDrawSensors();
     };
-    var load = function(){
-      fnQuery('{ deployments_within_radius(args:{lat:' + lat.toFixed(4) + ', lon:' + lon.toFixed(4)
-            + ', radius_meters:12000}, limit:150){ deployment_id name location } }')
+    window.floodNetArea = function(area){
+      if (area === fnArea) return;
+      fnArea = area;
+      ['near','city'].forEach(function(a){
+        var b = document.getElementById('floodnet-area-' + a);
+        if (!b) return;
+        var on = a === area;
+        b.style.borderColor = on ? 'rgba(6,182,212,.35)' : 'rgba(43,34,244,.10)';
+        b.style.background  = on ? 'rgba(6,182,212,.12)' : 'rgba(255,255,255,.4)';
+        b.style.color       = on ? '#0891b2' : 'rgba(43,34,244,.55)';
+      });
+      var st = document.getElementById('floodnet-status');
+      if (st) st.textContent = 'LOADING SENSORS\u2026';
+      load(function(){
+        if (!hazardMap || !fnRows.length) return;
+        if (area === 'city'){
+          // Frame the network by its real extent rather than a guessed zoom —
+          // the sensors run 40.47-40.90 N, -74.21 to -73.58 W.
+          var la = fnRows.map(function(r){ return r.lat; });
+          var lo = fnRows.map(function(r){ return r.lon; });
+          hazardMap.flyToBounds([[Math.min.apply(null,la), Math.min.apply(null,lo)],
+                                 [Math.max.apply(null,la), Math.max.apply(null,lo)]],
+                                { padding:[24,24], duration:0.8, maxZoom:13 });
+        } else {
+          hazardMap.flyTo([LOCATION.lat, LOCATION.lon], 12, { duration:0.8 });
+        }
+      });
+    };
+    var load = function(done){
+      // 'near' = a 12 km circle round the user; 'city' = the whole network.
+      // 40 km from mid-city reaches every one of the 428 deployments (the
+      // farthest sits 33.7 km out), so the city view is genuinely complete.
+      var city = fnArea === 'city';
+      var qLat = city ? 40.7300 : lat, qLon = city ? -73.9400 : lon;
+      var rad  = city ? 40000 : 12000, lim = city ? 600 : 150;
+      fnQuery('{ deployments_within_radius(args:{lat:' + qLat.toFixed(4) + ', lon:' + qLon.toFixed(4)
+            + ', radius_meters:' + rad + '}, limit:' + lim + '){ deployment_id name location } }')
         .then(function(d){
           var deps = (d && d.deployments_within_radius) || [];
           if (!deps.length) return;
@@ -52587,7 +52626,7 @@ function initNowMicroTabs(){
           var snap = function(lo, hi){
             return fnQuery('{ depth_data(where:{_and:[{deployment_id:{_in:[' + ids + ']}},'
                          + '{time:{_gte:"' + lo + '"}}' + (hi ? ',{time:{_lte:"' + hi + '"}}' : '') + ']},'
-                         + ' distinct_on:deployment_id, order_by:[{deployment_id:asc},{time:desc}], limit:200)'
+                         + ' distinct_on:deployment_id, order_by:[{deployment_id:asc},{time:desc}], limit:' + lim + ')'
                          + '{ deployment_id time depth_proc_mm } }');
           };
           return Promise.all([snap(since, null), snap(bLo, bHi)])
@@ -52612,6 +52651,7 @@ function initNowMicroTabs(){
               });
               fnDrawSensors();
               fnPaintPanel();
+              if (typeof done === 'function') done();
             });
         }).catch(function(){
           var st = document.getElementById('floodnet-status');
