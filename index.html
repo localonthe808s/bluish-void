@@ -70735,22 +70735,45 @@ function closeAlertModal(){
     // Chorus onset = first song at/after ASTRONOMICAL dawn. Walking further
     // back just surfaces nocturnal flight calls (Wood Duck, owls) — real
     // detections, but not the chorus — so those get their own line instead.
-    function walk(from, acc){
-      if (from >= stop || from > nowMin){ tail(acc, from); return; }
-      var to = from + 20;
-      bwQuery(lat, lon, BOX, toHHMM(from), toHHMM(to), ymd).then(function(ns){
-        if (!ns.length) { walk(to, acc); return; }
-        tail(acc.concat(ns), from);
-      }).catch(function(){ tail(acc, from); });
+    //
+    // Onset has to be found slice by slice because `detections` returns the
+    // NEWEST 500 and nothing older: ask for the whole morning at once and the
+    // early birds are the ones dropped, so the first song reads hours late.
+    // The slices used to be walked one after another, each waiting on the
+    // last — measured at ~4.4s per hop, so a quiet dawn spent 20s+ before the
+    // card could paint. They are all fired at once now. The probes ask for a
+    // single row with no species payload, so a whole morning of them costs
+    // less than one real query, and the two full queries that follow (the
+    // onset slice, kept separate so the cap cannot swallow it, plus the rest
+    // of the morning) run as a pair. Two round trips, whatever the season.
+    function probe(from, to){
+      var q = '{ detections(first: 1, ne: {lat: '+(lat+BOX)+', lon: '+(lon+BOX)+'}, '
+            + 'sw: {lat: '+(lat-BOX)+', lon: '+(lon-BOX)+'}, classifications: ["avian"], '
+            + 'confidenceGte: 0.5, timeOfDayGte: '+toHHMM(from)+', timeOfDayLte: '+toHHMM(to)+', '
+            + 'period: {from: "'+ymd+'", to: "'+ymd+'"}) { nodes { timestamp } } }';
+      return fetch(BW_URL, {method:'POST', headers:{'content-type':'application/json'},
+                            body: JSON.stringify({query:q})})
+        .then(function(r){ return r.json(); })
+        .then(function(j){ return ((((j||{}).data||{}).detections||{}).nodes||[]).length > 0; })
+        .catch(function(){ return false; });
     }
-      // fill out the species list from the rest of the morning (capped is fine
-    // here — we only need names, and earliest-seen wins on merge)
-    function tail(acc, from){
-      var early = tallyFirsts(acc);
-      bwQuery(lat, lon, BOX, toHHMM(from + 20), toHHMM(stop), ymd)
-        .then(function(rest){ finish(early, tallyFirsts(rest)); })
-        .catch(function(){ finish(early, []); });
-    }
+
+    var slices = [];
+    for (var t0 = start; t0 < stop && t0 <= nowMin; t0 += 20) slices.push(t0);
+    if (!slices.length){ finish([], []); return; }
+
+    Promise.all(slices.map(function(t){ return probe(t, t + 20); })).then(function(hits){
+      var i = hits.indexOf(true);
+      if (i < 0){ finish([], []); return; }          // nothing sung yet today
+      var from = slices[i];
+      // onset slice in full, and the remainder of the morning, together
+      Promise.all([
+        bwQuery(lat, lon, BOX, toHHMM(from), toHHMM(from + 20), ymd).catch(function(){ return []; }),
+        bwQuery(lat, lon, BOX, toHHMM(from + 20), toHHMM(stop), ymd).catch(function(){ return []; })
+      ]).then(function(res){
+        finish(tallyFirsts(res[0] || []), tallyFirsts(res[1] || []));
+      }).catch(function(){ finish([], []); });
+    }).catch(function(){ finish([], []); });
 
     function finish(early, rest){
       var merged = {};
@@ -70803,7 +70826,6 @@ function closeAlertModal(){
         });
       });
     }
-    walk(start, []);
   }
 
 
