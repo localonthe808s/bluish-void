@@ -10415,6 +10415,8 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
 @media (max-width:900px){ #birds-widget .bw-migwrap{grid-template-columns:1fr;gap:14px;} }
 #birds-widget .bw-migfoot{padding:2px 10px 10px;font-size:.46rem;font-weight:700;letter-spacing:.04em;
   color:rgba(43,34,244,.42);line-height:1.5;}
+#birds-widget .bw-seenhead{font-size:.44rem;font-weight:800;letter-spacing:.07em;text-transform:uppercase;
+  color:rgba(43,34,244,.38);padding:9px 0 4px;margin-top:3px;border-top:1px solid rgba(43,34,244,.10);}
 #birds-widget .bw-migloc{font-size:.46rem;font-weight:600;color:rgba(43,34,244,.45);white-space:nowrap;overflow:hidden;}
 #birds-widget .bw-arrtag{font-size:.44rem;font-weight:800;letter-spacing:.05em;color:#1a8a4a;}
 #birds-widget .bw-deptag{font-size:.44rem;font-weight:800;letter-spacing:.05em;color:rgba(43,34,244,.38);}
@@ -70403,6 +70405,7 @@ function closeAlertModal(){
     renderTimeline(sol, []);
     loadBirdWeather(lat, lon, sol);
     loadEbird(lat, lon);
+    loadSeenNearby(lat, lon);
     // Supplementary context, and three aggregate calls — don't spend them on
     // visitors who never scroll this far. One-shot observer, same shape as the
     // radar's heavy-load gate; falls back to a timer where it isn't supported.
@@ -70805,8 +70808,10 @@ function closeAlertModal(){
         // night-herons, the odd woodpecker — so the card shows the last bird
         // actually heard instead of an empty frame, plus when song is due.
         preDawnHero(sol);
-        $('bw-heard').innerHTML = '<div class="bw-empty">Nothing since midnight — '
+        window._bwHeardNames = {};
+        $('bw-heard').innerHTML = '<div class="bw-empty">No song picked up by a microphone yet — '
           + 'the night’s calls are under MIGRATION.</div>';
+        renderSeenNearby();
         return;
       }
       var f = rows[0];
@@ -70829,12 +70834,15 @@ function closeAlertModal(){
       renderTimeline(sol, rows);
       wireHero('bw-hero-hit', f);
       placeFirstSongCue(f.m, f.name);
+      window._bwHeardNames = {};
+      rows.forEach(function(r){ window._bwHeardNames[r.name] = 1; });
       $('bw-heard').innerHTML = rows.slice(0,12).map(function(r){
         return '<div class="bw-row bw-clickable" data-sid="'+esc(r.sid2||'')+'" data-nm="'+esc(r.name)+'" data-m="'+r.m+'" data-ct="'+(r.count||0)+'">'
           + (r.thumb ? '<img class="bw-th" src="'+esc(r.thumb)+'" alt="" loading="lazy">' : '<div class="bw-th" style="mask-image:none;-webkit-mask-image:none;background:rgba(43,34,244,.06);border-radius:6px;"></div>')
           + '<div class="bw-nm"><span class="bw-tm">'+hhmm(r.m)+'</span>'+esc(r.name)+'<i>'+esc(r.sci)+'</i></div>'
           + '<div class="bw-ct">'+r.count+'</div></div>';
       }).join('');
+      renderSeenNearby();
       $('bw-heard').querySelectorAll('.bw-clickable').forEach(function(el){
         el.addEventListener('click', function(ev){
           ev.stopPropagation();
@@ -72122,6 +72130,85 @@ function closeAlertModal(){
     el.innerHTML = '<b>' + phase + '</b> — ' + note
       + (sp && psp ? ', with ' + sp + ' species detected this week against ' + psp + ' at the peak' : '')
       + '.' + tail;
+  }
+
+  // ── SEEN NEARBY (eBird) ──
+  // The microphones hear a handful of species; eBird observers report a
+  // hundred-odd in the same area. Those records are worth showing, but NOT
+  // with their timestamps: eBird gives the time the CHECKLIST began, not the
+  // moment the bird was detected, so a 5:39 record means a person arrived at
+  // 5:39. Putting that on a chorus timeline whose whole axis is "when did
+  // this species first sing" would quietly corrupt it. So these rows carry a
+  // place instead of a time, and never appear as dots on the bar.
+  var _bwSeen = null;
+  function loadSeenNearby(lat, lon){
+    var url = 'https://api.ebird.org/v2/data/obs/geo/recent?lat='+lat.toFixed(3)+'&lng='+lon.toFixed(3)
+            + '&dist=25&back=1&maxResults=200';
+    var ck = 'bvseen:' + lat.toFixed(2) + ',' + lon.toFixed(2), fresh = null;
+    try{
+      var c = JSON.parse(sessionStorage.getItem(ck) || 'null');
+      if (c && (Date.now() - c.t) < 1800000) fresh = c.j;
+    }catch(e){}
+    (fresh ? Promise.resolve(fresh)
+           : fetch(url, {headers:{'x-ebirdapitoken': EBIRD_KEY}})
+               .then(function(r){ return r.ok ? r.json() : []; })
+               .then(function(j){
+                 try{ sessionStorage.setItem(ck, JSON.stringify({t:Date.now(), j:j})); }catch(e){}
+                 return j;
+               }))
+      .then(function(j){ _bwSeen = j || []; renderSeenNearby(); })
+      .catch(function(){ _bwSeen = []; });
+  }
+
+  function renderSeenNearby(){
+    var el = $('bw-heard');
+    if (!el || !_bwSeen || window._bwHeardNames == null) return;
+    if (el.querySelector('.bw-seenhead')) return;              // already appended
+    var heard = window._bwHeardNames || {};
+    // public hotspots only: eBird's private locations are people's homes, and
+    // they arrive as "27th St, New York US-NY (40.6593,-73.9992)" or "my yard".
+    // Those do not belong on a public dashboard, and the hotspot names are the
+    // recognisable ones anyway — Hudson River Park, Alley Pond, Plumb Beach.
+    var rows = _bwSeen.filter(function(o){
+      return o && o.comName && !o.locationPrivate && !heard[o.comName];
+    }).slice(0, 12);
+    if (!rows.length) return;
+    var h = '<div class="bw-seenhead">Also reported nearby &middot; eBird</div>'
+      + rows.map(function(o, i){
+          return '<div class="bw-row bw-clickable" id="bw-sn-'+i+'" data-sci="'+esc(o.sciName||'')+'" data-nm="'+esc(o.comName)+'">'
+            + '<div class="bw-th" style="mask-image:none;-webkit-mask-image:none;background:rgba(43,34,244,.06);border-radius:6px;"></div>'
+            + '<div style="flex:1;min-width:0;">'
+            +   '<div class="bw-rare" style="color:rgba(43,34,244,.85)">'+esc(o.comName)+'</div>'
+            +   '<div class="bw-raresci">'+esc(o.sciName||'')+'</div>'
+            +   '<div class="bw-migloc">'+esc(shortLocName(o.locName))+'</div></div></div>';
+        }).join('');
+    if (el.querySelector('.bw-empty')) el.innerHTML = h; else el.insertAdjacentHTML('beforeend', h);
+    el.querySelectorAll('[id^="bw-sn-"]').forEach(function(row){
+      row.addEventListener('click', function(ev){
+        ev.stopPropagation();
+        openBirdPopup(row.getAttribute('data-sid') || '', row.getAttribute('data-nm'), null, null,
+                      row.getAttribute('data-sci'), row.querySelector('.bw-th'));
+      });
+    });
+    // thumbnails + ids in one batched lookup, as the rare list does
+    var q = '{ ' + rows.map(function(o, i){
+      return 's'+i+': species(scientificName: '+JSON.stringify(String(o.sciName||''))+') { id thumbnailUrl }';
+    }).join(' ') + ' }';
+    fetch(BW_URL, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({query:q})})
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        var d = (j||{}).data || {};
+        rows.forEach(function(o, i){
+          var sp = d['s'+i], row = document.getElementById('bw-sn-'+i);
+          if (!sp || !row) return;
+          if (sp.id) row.setAttribute('data-sid', sp.id);
+          if (sp.thumbnailUrl){
+            var im = document.createElement('img');
+            im.className = 'bw-th'; im.alt = ''; im.loading = 'lazy'; im.src = sp.thumbnailUrl;
+            row.replaceChild(im, row.firstChild);
+          }
+        });
+      }).catch(function(){});
   }
 
   // ── SEASONAL STATUS (GBIF) ──
