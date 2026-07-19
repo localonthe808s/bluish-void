@@ -70492,7 +70492,7 @@ function closeAlertModal(){
     var groups = [
       ['Thrushes',     '#d9603f', 'Turdus Sialia Catharus Hylocichla Ixoreus'],
       ['Cardinals',    '#cc2f4a', 'Cardinalis Pheucticus Piranga Passerina Spiza'],
-      ['New World sparrows','#b08a3e','Melospiza Zonotrichia Spizella Passerculus Pipilo Junco Ammodramus Peucaea Pooecetes'],
+      ['New World sparrows','#b08a3e','Melospiza Zonotrichia Spizella Passerculus Pipilo Junco Ammodramus Ammospiza Peucaea Pooecetes Passerella Chondestes'],
       ['Old World sparrows','#8a6b4f','Passer'],
       ['Jays & crows', '#2f6fd0', 'Cyanocitta Corvus Perisoreus'],
       ['Chickadees & titmice','#6b7a8f','Baeolophus Poecile'],
@@ -70954,24 +70954,33 @@ function closeAlertModal(){
       $('bwd-heard').innerHTML = '<div class="bw-empty">Dusk data unavailable.</div>';
     });
 
-    // overnight: midnight -> astronomical dawn, high bar (the small hours are
-    // where BirdNET's false positives live — see the night-singer note)
-    bwQuery(lat, lon, BOX, 0, toHHMM(sol.astro != null ? sol.astro : 200), nightYmd, 0.7).then(function(all){
+    // Overnight, at a high bar — the small hours are where BirdNET's false
+    // positives live. This used to start at midnight, which left anything
+    // calling between astronomical dusk and midnight in no list at all: the
+    // dusk query stops AT astronomical dusk. Two queries now, either side of
+    // midnight, so the night is continuous and every bird that called is
+    // here — including the migrants the MIGRATION tab shows overhead.
+    var lateStart = (sol.duskAstro != null ? sol.duskAstro : 1320);
+    Promise.all([
+      bwQuery(lat, lon, BOX, toHHMM(lateStart), 2359, evYmd, 0.7).catch(function(){ return []; }),
+      bwQuery(lat, lon, BOX, 0, toHHMM(sol.astro != null ? sol.astro : 200), nightYmd, 0.7)
+    ]).then(function(res){
+      var all = (res[0] || []).concat(res[1] || []);
       var ns = all.filter(function(n){ return (n.confidence||0) >= 0.85; });
-      // (evening detections after astronomical dusk are picked up by the
-      //  dusk-side query below and merged in)
       var first = {}, counts = {};
       ns.forEach(function(n){
         var sp = (n.species||{}).commonName; if (!sp) return;
         var t = String(n.timestamp||''); if (t.length < 16) return;
         var mins = +t.slice(11,13)*60 + +t.slice(14,16);
         counts[sp] = (counts[sp]||0) + 1;
-        if (!first[sp] || mins < first[sp].m)
+        // the night runs across midnight, so 23:00 must read as EARLIER than
+        // 03:00 — compare on minutes-since-18:00, not minutes-since-midnight
+        if (!first[sp] || nightKey(mins) < nightKey(first[sp].m))
           first[sp] = { m:mins, name:sp, sci:(n.species||{}).scientificName||'', sid2:(n.species||{}).id||'',
                         thumb:(n.species||{}).thumbnailUrl||'' };
       });
       var rows = Object.keys(first).map(function(k){ var r = first[k]; r.count = counts[k]; return r; })
-                   .sort(function(a,b){ return a.m - b.m; });
+                   .sort(function(a,b){ return nightKey(a.m) - nightKey(b.m); });
       if (!rows.length){
         $('bwd-night').innerHTML = '<div class="bw-empty">Silent overnight \u2014 nothing above 85% confidence.</div>';
         return;
@@ -72328,6 +72337,23 @@ function closeAlertModal(){
       + '</div>';
   }
 
+  // Which families actually migrate at night. Songbirds, shorebirds, rails,
+  // waterfowl and herons cross in the dark and call as they go — those calls
+  // are what a ground microphone picks up overhead. Owls, jays, woodpeckers
+  // and swifts are either resident night-callers or daytime migrants, so
+  // their 2am detections are local birds, not passage. Family is as fine as
+  // this can get honestly: a Northern Flicker really does migrate at night,
+  // but so little separates it from the resident Downy on a single call that
+  // the whole family is better left out than let through on a guess.
+  var NOCT_FAM = {
+    'Thrushes':1, 'Warblers':1, 'New World sparrows':1, 'Cardinals':1, 'Vireos':1,
+    'Cuckoos':1, 'Flycatchers':1, 'Shorebirds':1, 'Rails & coots':1, 'Waterfowl':1,
+    'Herons & egrets':1, 'Blackbirds & orioles':1, 'Kinglets & gnatcatchers':1,
+    'Nuthatches & creepers':1, 'Mimids':1, 'Nightjars':1
+  };
+
+  function nightKey(m){ return (m + 360) % 1440; }   // minutes since 18:00
+
   // ── OVERHEAD LAST NIGHT ──
   // Most songbirds migrate in the dark and call as they go, so a ground
   // microphone hears the flight overhead. This is the counterpart to the
@@ -72362,14 +72388,21 @@ function closeAlertModal(){
         by[nm].n++;
         // 22:00-05:00 wraps midnight — sort by hours since 18:00 so late
         // evening reads as earlier than the small hours, not later
-        var norm = function(m){ return (m + 360) % 1440; };
-        if (norm(mins) < norm(by[nm].first)) by[nm].first = mins;
-        if (norm(mins) > norm(by[nm].last))  by[nm].last  = mins;
+        if (nightKey(mins) < nightKey(by[nm].first)) by[nm].first = mins;
+        if (nightKey(mins) > nightKey(by[nm].last))  by[nm].last  = mins;
       });
-      var rows = Object.keys(by).map(function(k){ return by[k]; })
-                   .sort(function(a,b){ return b.n - a.n; });
+      var all_rows = Object.keys(by).map(function(k){ return by[k]; });
+      // keep only families that genuinely cross at night — the rest are local
+      // birds that happened to call, and they belong on the DUSK & NIGHT tab
+      var local = 0;
+      var rows = all_rows.filter(function(r){
+        if (NOCT_FAM[famOf(r.sci).fam]) return true;
+        local++; return false;
+      }).sort(function(a,b){ return b.n - a.n; });
       if (!rows.length){
-        el.innerHTML = '<div class="bw-empty">Nothing above 85% confidence overnight.</div>';
+        el.innerHTML = '<div class="bw-empty">No nocturnal migrants detected overnight'
+          + (local ? ' — the ' + local + ' species heard were resident night-callers, listed under DUSK &amp; NIGHT' : '')
+          + '.</div>';
         return;
       }
       // plausibility pass: is this species even here this month?
@@ -72414,9 +72447,10 @@ function closeAlertModal(){
               +   '<div class="bw-raresci">' + esc(r.sci) + '</div></div>'
               + '<div class="bw-ct">' + r.n + '</div></div>';
           }).join('')
-          + (dropped ? '<div class="bw-nightnote">' + dropped + ' species'
-              + ' dropped as out of season here this month — overnight identifications'
-              + ' are the least reliable BirdNET makes.</div>' : '');
+          + '<div class="bw-nightnote">Species from families that migrate at night'
+          + (local ? ' — ' + local + ' resident night-caller' + (local>1?'s are':' is') + ' listed under DUSK &amp; NIGHT instead' : '')
+          + (dropped ? '. ' + dropped + ' dropped as out of season here this month' : '')
+          + '.</div>';
           el.querySelectorAll('.bw-clickable').forEach(function(row){
             row.addEventListener('click', function(ev){
               ev.stopPropagation();
