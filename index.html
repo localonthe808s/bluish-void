@@ -51324,20 +51324,46 @@ function initNowMicroTabs(){
   // 'LAST 24H' in one and computed in the other, and the flood card was
   // FloodNet-aware in one and gauges-only in the other. Whichever ran last won,
   // so the same card flipped between two answers. Both now read from here.
-  // Reverse-geocode cache bumped v3 -> v4: v3 entries were written by two
-  // renderers that disagreed over water, so an ocean fireball could be stuck
-  // cached as raw coordinates. Drop the superseded keys rather than leave them
-  // in localStorage forever — each bump would otherwise strand another set.
+  // Reverse-geocode cache bumped to v5. v3 entries were written by two
+  // renderers that disagreed over water (ocean hits could stick as raw
+  // coordinates); v4 entries cached the flat 'Open ocean' label that the basin
+  // names now replace. Drop superseded keys rather than leave them in
+  // localStorage forever — each bump would otherwise strand another set.
   (function(){
     try{
       var kill = [];
       for (var i = 0; i < localStorage.length; i++){
         var k = localStorage.key(i);
-        if (k && /^bv_revgeo_v[123]_/.test(k)) kill.push(k);
+        if (k && /^bv_revgeo_v[1234]_/.test(k)) kill.push(k);
       }
       kill.forEach(function(k){ try{ localStorage.removeItem(k); }catch(e){} });
     }catch(e){}
   })();
+
+  // Name the ocean a fireball fell into. Nominatim returns an empty address
+  // over water, and most of Earth is water, so without this a third of the
+  // card reads "Open ocean". No extra lookups — purely lat/lon.
+  // The Atlantic/Pacific divide cannot be a single meridian: the Americas sit
+  // between them in the north, so 42N 70.5W (off Massachusetts) is Atlantic
+  // while 42S 70.5W is Pacific. Bands are per hemisphere — Cape Agulhas (20E),
+  // Cape Horn (70W) and Australia (147E) in the south, with a wider western
+  // Atlantic in the north to take in the Gulf and Caribbean.
+  window._fbOceanName = function(lat, lon){
+    if (lat == null || lon == null || !isFinite(lat) || !isFinite(lon)) return 'Open ocean';
+    var L = ((lon + 180) % 360 + 360) % 360 - 180;
+    if (lat <= -60)  return 'Southern Ocean';
+    if (lat >= 66.5) return 'Arctic Ocean';
+    if (lat >= 0){
+      if (L >= -100 && L < 20)  return 'N Atlantic';
+      if (L >= 120 || L < -100) return 'N Pacific';
+      if (L >= 20 && L < 120 && lat < 30) return 'Indian Ocean';
+    } else {
+      if (L >= -70 && L < 20)   return 'S Atlantic';
+      if (L >= 147 || L < -70)  return 'S Pacific';
+      if (L >= 20 && L < 147)   return 'Indian Ocean';
+    }
+    return 'Open ocean';   // inland seas and anything the bands miss
+  };
 
   window._hzCardStats = function(){
     var al = window._hazardAlerts || [];
@@ -57467,7 +57493,7 @@ function initNowMicroTabs(){
           var fbGeocode = function(lat, lon){
             if (!isFinite(lat) || !isFinite(lon)) return Promise.resolve(null);
             // v3 cache key: US gets MASS, US — non-US spells out state + country
-            var cacheKey = 'bv_revgeo_v4_' + lat.toFixed(2) + '_' + lon.toFixed(2);
+            var cacheKey = 'bv_revgeo_v5_' + lat.toFixed(2) + '_' + lon.toFixed(2);
             try {
               var cached = localStorage.getItem(cacheKey);
               if (cached) return Promise.resolve(cached);
@@ -57495,7 +57521,7 @@ function initNowMicroTabs(){
                 } else if (d.display_name) {
                   name = d.display_name.split(',')[0].trim();
                 } else {
-                  name = 'Open ocean';
+                  name = window._fbOceanName ? window._fbOceanName(lat, lon) : 'Open ocean';
                 }
                 try { localStorage.setItem(cacheKey, name); } catch(e){}
                 return name;
@@ -57727,7 +57753,7 @@ function initNowMicroTabs(){
           // hit instantly without the stagger.
           parsed.slice(0, 4).forEach(function(p, idx){
             if (!isFinite(p.lat) || !isFinite(p.lon)) return;
-            var cacheKey = 'bv_revgeo_v4_' + p.lat.toFixed(2) + '_' + p.lon.toFixed(2);
+            var cacheKey = 'bv_revgeo_v5_' + p.lat.toFixed(2) + '_' + p.lon.toFixed(2);
             var pre = null;
             try { pre = localStorage.getItem(cacheKey); } catch(e){}
             var apply = function(name){
@@ -69459,11 +69485,11 @@ function initNowMicroTabs(){
         h+='<div style="text-align:right;font-size:.42rem;color:rgba(30,30,50,.25);margin-top:3px;">NASA / JPL CNEOS</div>';
         detailEl.innerHTML=h;
         // Fill in reverse-geocoded names (staggered for Nominatim's rate limit;
-        // shares the fireballs tab's bv_revgeo_v4 cache so repeats are instant)
+        // shares the fireballs tab's bv_revgeo_v5 cache so repeats are instant)
         _geoJobs.forEach(function(j, ji){
           var run=function(){
             var el=document.getElementById(j.id); if(!el) return;
-            var key='bv_revgeo_v4_'+j.lat.toFixed(2)+'_'+j.lon.toFixed(2);
+            var key='bv_revgeo_v5_'+j.lat.toFixed(2)+'_'+j.lon.toFixed(2);
             try{ var c=localStorage.getItem(key); if(c){ el.textContent=c; return; } }catch(e){}
             fetch('https://nominatim.openstreetmap.org/reverse?lat='+j.lat+'&lon='+j.lon+'&format=json&zoom=10&addressdetails=1&accept-language=en')
               .then(function(r){return r.ok?r.json():null;})
@@ -69480,7 +69506,7 @@ function initNowMicroTabs(){
                          : (state&&country ? state+', '+country
                          : (country || state
                          || (d.display_name ? String(d.display_name).split(',')[0].trim() : '')
-                         || 'Open ocean'));
+                         || (window._fbOceanName ? window._fbOceanName(j.lat, j.lon) : 'Open ocean')));
                 try{ localStorage.setItem(key,name); }catch(e){}
                 var el2=document.getElementById(j.id); if(el2) el2.textContent=name;
               }).catch(function(){});
