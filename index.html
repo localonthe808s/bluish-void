@@ -14979,6 +14979,72 @@ function floodRateThreshold(lat, lon, soilMoisture){
             since: first.start_time
           };
           try{ if (window._applyRainLine) window._applyRainLine(window._nowcastStr); }catch(e){}
+
+          // ── HOW DEEP, AND STILL RISING? ────────────────────────────────
+          // Depth is only meaningful per sensor. Raw millimetres cannot be
+          // trusted or compared: some units carry a permanent offset (two sat
+          // at ~45mm every hour of a dry week) and the stream throws occasional
+          // one-sample spikes into the hundreds. So depth is read ONLY at
+          // sensors an event already flagged, measured as a RISE above that
+          // same sensor's own floor in the window, from a median of its recent
+          // readings rather than its newest one. An offset cancels; a spike is
+          // outvoted; a real flood still reads true — Utopia Pkwy climbed 0 to
+          // 29" over 17 one-minute samples on 2026-07-18.
+          var evIds = ev.slice(0, 8).map(function(e){ return JSON.stringify(e.deployment_id); }).join(',');
+          var dSince = new Date(Date.now() - 90*60000).toISOString().slice(0,19);
+          // newest-first: with a row cap, ascending order silently drops the
+          // CURRENT readings and every sensor looks dry.
+          fnQuery('{ depth_data(where:{deployment_id:{_in:[' + evIds + ']}, time:{_gte:"' + dSince + '"}},'
+                + ' order_by:{time:desc}, limit:700){ deployment_id time depth_proc_mm } }')
+            .then(function(dd){
+              var rows = (dd && dd.depth_data) || [];
+              if (!rows.length) return;
+              var per = {}, tNow = Date.now();
+              rows.forEach(function(r){
+                var ts = new Date(r.time + (/[Zz+]/.test(r.time) ? '' : 'Z')).getTime();
+                (per[r.deployment_id] = per[r.deployment_id] || []).push(
+                  { age: (tNow - ts)/60000, d: r.depth_proc_mm || 0 });
+              });
+              var med = function(a){
+                var b = a.slice().sort(function(x,y){ return x-y; });
+                return b.length ? b[Math.floor(b.length/2)] : 0;
+              };
+              var best = null;
+              Object.keys(per).forEach(function(k){
+                var v = per[k];                       // newest first
+                var pick = function(lo, hi){
+                  return v.filter(function(x){ return x.age >= lo && x.age < hi; })
+                          .map(function(x){ return x.d; });
+                };
+                var nowD = med(pick(0, 6));           // spike-proof current depth
+                // Trend is now vs ~12 min ago. Two failure modes were measured
+                // against Saturday's traces: comparing against the window START
+                // says "rising" straight through the drain-down (the window
+                // opens on dry ground), and a 20-min lookback still called 18:00Z
+                // rising while Utopia Pkwy fell from 29" to 9". Twelve minutes
+                // catches the turn and softens to HOLDING when it is ambiguous —
+                // during a flood, a false "still rising" is the worst thing to say.
+                var thenD = med(pick(9, 16));
+                var floor = Math.min.apply(null, v.map(function(x){ return x.d; }));
+                var rise = nowD - floor;
+                if (rise < 25) return;                // under an inch is not news
+                if (!best || rise > best.rise){
+                  // Needs a real gap: comparing two medians that merely tie
+                  // reads as "still rising" while the water is plainly draining.
+                  var trend = !pick(9, 16).length ? ''            // nothing to compare against yet
+                            : nowD > thenD + 5 ? 'STILL RISING'
+                            : nowD < thenD - 5 ? 'RECEDING' : 'HOLDING';
+                  best = { rise: rise, trend: trend,
+                           name: String((byId[k] || {}).name || '').replace(/^[A-Z]{1,2}\s*-\s*/, '') };
+                }
+              });
+              if (best && window._floodNetNow){
+                window._floodNetNow.depthIn = best.rise / 25.4;
+                window._floodNetNow.trend = best.trend;
+                window._floodNetNow.place = best.name || window._floodNetNow.place;
+                try{ if (window._applyRainLine) window._applyRainLine(window._nowcastStr); }catch(e){}
+              }
+            }).catch(function(){});
         }).catch(function(){});
     };
     if (near) return withSensors(near);
@@ -15115,7 +15181,9 @@ function floodRateThreshold(lat, lon, soilMoisture){
     var fn = window._floodNetNow, fnTxt = '';
     if (fn && fn.count){
       fnTxt = 'WATER ON THE STREET \u00b7 ' + fn.count + ' SENSOR' + (fn.count > 1 ? 'S' : '')
-            + (fn.place ? ' \u00b7 ' + fn.place.toUpperCase() : '') + ' \u00b7 ';
+            + (fn.depthIn >= 1 ? ' \u00b7 ' + Math.round(fn.depthIn) + '\u2033 DEEP' : '')
+            + (fn.place ? ' \u00b7 ' + fn.place.toUpperCase() : '')
+            + (fn.depthIn >= 1 && fn.trend ? ' \u00b7 ' + fn.trend : '') + ' \u00b7 ';
     }
     var tideNote = '';
     if (fa && /flood/i.test(fa.txt) && window._nextHighTide){
@@ -52193,9 +52261,10 @@ function initNowMicroTabs(){
 
   // Depth tiers. FloodNet reports millimetres; a sensor reading dead 0 is the
   // normal dry state, not a fault, so 0 must still render as a live sensor.
-  function fnTier(mm, flooded, stale){
+  // mm here is a RISE above the sensor's own dry floor, never a raw reading.
+  function fnTier(mm, stale){
     if (stale)            return { c:'#94a3b8', r:3, label:'NO RECENT REPORT' };
-    if (flooded || mm >= 152) return { c:'#9333ea', r:9, label:'FLOODING' };
+    if (mm >= 152)        return { c:'#9333ea', r:9, label:'FLOODING' };
     if (mm >= 51)         return { c:'#ef4444', r:7, label:'DEEP WATER' };
     if (mm >= 13)         return { c:'#f97316', r:6, label:'WATER POOLING' };
     if (mm > 0)           return { c:'#eab308', r:5, label:'TRACE WATER' };
@@ -52207,7 +52276,7 @@ function initNowMicroTabs(){
     window._floodNetLayer.clearLayers();
     if (!fnSensorsOn) return;
     fnRows.forEach(function(row){
-      var t = fnTier(row.mm, row.flooded, row.stale);
+      var t = fnTier(row.mm, row.stale);
       var m = L.circleMarker([row.lat, row.lon], {
         radius: t.r, fillColor: t.c, fillOpacity: row.stale ? 0.45 : 0.9,
         color: t.c, weight: row.stale ? 1 : 0, opacity: row.stale ? 0.5 : 0
@@ -52222,7 +52291,8 @@ function initNowMicroTabs(){
         + '<div class="hz-card-row"><span class="hz-label">Corner</span><span class="hz-val" style="max-width:150px;text-align:right;">' + row.name + '</span></div>'
         + (row.stale ? ''
            : '<div class="hz-card-row"><span class="hz-label">Water depth</span><span class="hz-val" style="color:' + t.c + ';">'
-             + (row.mm > 0 ? row.mm + ' mm (' + (row.mm/25.4).toFixed(1) + '″)' : 'none') + '</span></div>'
+             + (row.mm > 0 ? row.mm + ' mm (' + (row.mm/25.4).toFixed(1) + '″) above normal' : 'none') + '</span></div>'
+             + (row.base > 0 ? '<div class="hz-card-row"><span class="hz-label">Sensor floor</span><span class="hz-val" style="font-size:8.5px;">reads ' + row.base + ' mm when dry</span></div>' : '')
              + '<div class="hz-card-row"><span class="hz-label">Measured</span><span class="hz-val">' + age + '</span></div>')
         + '<div class="hz-card-footer">FloodNet NYC · street-level sensor</div>',
         { className:'hz-popup', maxWidth:280 });
@@ -52237,8 +52307,8 @@ function initNowMicroTabs(){
     var st = document.getElementById('floodnet-status');
     var de = document.getElementById('floodnet-detail');
     var live = fnRows.filter(function(r){ return !r.stale; });
-    var wet  = live.filter(function(r){ return r.mm > 0 || r.flooded; });
-    var deep = live.filter(function(r){ return r.flooded || r.mm >= 51; });
+    var wet  = live.filter(function(r){ return r.mm > 0; });
+    var deep = live.filter(function(r){ return r.mm >= 51; });
     if (!fnRows.length){ if (st) st.textContent = 'NO SENSORS IN RANGE'; return; }
     if (st){
       st.textContent = deep.length ? 'WATER ON THE STREET · ' + deep.length + ' SENSOR' + (deep.length>1?'S':'')
@@ -52286,22 +52356,39 @@ function initNowMicroTabs(){
           });
           var ids = deps.map(function(x){ return JSON.stringify(x.deployment_id); }).join(',');
           var since = new Date(Date.now() - 3*3600000).toISOString().slice(0,19);
+          // Two snapshots, because a raw depth reading means nothing on its own:
+          // some sensors carry a permanent offset (two sat at ~45mm through a
+          // dry week) and would otherwise draw "water pooling" under a blue sky.
+          // Subtracting each sensor's own reading from 6h ago cancels the offset
+          // and leaves only water that actually arrived. flood_detected is not
+          // used: it is a Float, not a flag, and sat at 0 through the worst
+          // flood of the year — the field is vestigial.
+          var bHi = new Date(Date.now() - 6*3600000).toISOString().slice(0,19);
+          var bLo = new Date(Date.now() - 9*3600000).toISOString().slice(0,19);
           // distinct_on collapses the stream to the newest row per sensor —
           // without it this returns thousands of readings for a handful of them.
-          return fnQuery('{ depth_data(where:{deployment_id:{_in:[' + ids + ']}, time:{_gte:"' + since + '"}},'
-                       + ' distinct_on:deployment_id, order_by:[{deployment_id:asc},{time:desc}], limit:200)'
-                       + '{ deployment_id time depth_proc_mm flood_detected } }')
-            .then(function(dd){
-              var rows = (dd && dd.depth_data) || {}, latest = {};
-              (rows.length ? rows : []).forEach(function(r){ latest[r.deployment_id] = r; });
+          var snap = function(lo, hi){
+            return fnQuery('{ depth_data(where:{_and:[{deployment_id:{_in:[' + ids + ']}},'
+                         + '{time:{_gte:"' + lo + '"}}' + (hi ? ',{time:{_lte:"' + hi + '"}}' : '') + ']},'
+                         + ' distinct_on:deployment_id, order_by:[{deployment_id:asc},{time:desc}], limit:200)'
+                         + '{ deployment_id time depth_proc_mm } }');
+          };
+          return Promise.all([snap(since, null), snap(bLo, bHi)])
+            .then(function(res){
+              var dd = res[0], bb = res[1];
+              var rows = (dd && dd.depth_data) || [], latest = {}, base = {};
+              ((bb && bb.depth_data) || []).forEach(function(r){ base[r.deployment_id] = r.depth_proc_mm || 0; });
+              rows.forEach(function(r){ latest[r.deployment_id] = r; });
               var now = Date.now();
               fnRows = deps.filter(function(x){ return geo[x.deployment_id]; }).map(function(x){
                 var r = latest[x.deployment_id], c = geo[x.deployment_id];
                 var t = r ? new Date(r.time + (/[Zz+]/.test(r.time) ? '' : 'Z')).getTime() : null;
+                var raw = r && r.depth_proc_mm != null ? Math.round(r.depth_proc_mm) : 0;
+                var bl = base[x.deployment_id] != null ? Math.round(base[x.deployment_id]) : 0;
                 return {
                   lat: c[1], lon: c[0], name: fnNames[x.deployment_id] || 'NYC sensor',
-                  mm: r && r.depth_proc_mm != null ? Math.round(r.depth_proc_mm) : 0,
-                  flooded: !!(r && r.flood_detected),
+                  mm: Math.max(0, raw - bl),   // water that actually arrived
+                  raw: raw, base: bl,
                   stale: !r, ageMin: t ? (now - t)/60000 : 1e9
                 };
               });
