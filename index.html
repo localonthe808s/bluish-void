@@ -37158,6 +37158,77 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
               0&&console.log('[NWS Verify] Skipped:', e.message || e);
             });
           })();
+
+          // ── YESTERDAY, AS RECORDED ───────────────────────────────────────
+          // Open-Meteo's "past" hours are model ANALYSIS, not observations, so
+          // the day view can be confidently wrong about a day that already
+          // happened. 2026-07-18 is the case in point: the analysis carried
+          // 0.16" for NYC and the summary called it balmy under clear skies,
+          // while the station recorded 1.28" with 1.03" of that inside the
+          // noon hour, under flash flood warnings. A finished day should not
+          // be a guess, so yesterday's precipitation is overwritten with what
+          // was actually measured.
+          (function verifyPastPrecip(){
+            if (!hourly || !hourly.time || !daily || !daily.time) return;
+            if (window._pastObserved || window._pastPrecipRunning) return;
+            if (!window._nwsStationsUrl){
+              window._pastPrecipTries = (window._pastPrecipTries || 0) + 1;
+              if (window._pastPrecipTries < 12) setTimeout(verifyPastPrecip, 2000);
+              return;
+            }
+            window._pastPrecipRunning = true;
+            var yLocal = new Date(Date.now() - 86400000);
+            var yStr = localDateStr(yLocal);
+            fetchWithTimeout(window._nwsStationsUrl, { headers:{ 'Accept':'application/geo+json' } }, 12000)
+              .then(function(r){ return r.json(); })
+              .then(function(st){
+                var fs = st && st.features;
+                if (!fs || !fs.length) throw new Error('no station');
+                var id = fs[0].properties.stationIdentifier;
+                var s0 = new Date(yLocal); s0.setHours(0,0,0,0);
+                var startUTC = new Date(s0.getTime() - 6*3600000).toISOString();
+                var endUTC   = new Date(s0.getTime() + 30*3600000).toISOString();
+                return fetchWithTimeout('https://api.weather.gov/stations/' + id
+                  + '/observations?start=' + startUTC + '&end=' + endUTC + '&limit=200',
+                  { headers:{ 'Accept':'application/geo+json' } }, 15000)
+                  .then(function(r){ return r.json(); })
+                  .then(function(o){ return { id:id, feats:(o && o.features) || [] }; });
+              })
+              .then(function(res){
+                // METAR repeats "precip in the last hour" several times an hour,
+                // so summing every record double-counts badly — it turns a 1.28"
+                // day into 3.05". One value per clock hour is the accumulation.
+                var byHour = {}, any = false;
+                res.feats.forEach(function(f){
+                  var pr = f.properties || {};
+                  var v = (pr.precipitationLastHour || {}).value;
+                  if (v == null || !pr.timestamp) return;
+                  var d = new Date(pr.timestamp);
+                  if (localDateStr(d) !== yStr) return;
+                  var k = d.getHours();
+                  byHour[k] = Math.max(byHour[k] || 0, v);
+                  any = true;
+                });
+                if (!any) return;
+                var total = 0;
+                Object.keys(byHour).forEach(function(k){ total += byHour[k]; });
+                var inches = total / 25.4, wrote = 0;
+                for (var i = 0; i < hourly.time.length; i++){
+                  if (String(hourly.time[i]).slice(0,10) !== yStr) continue;
+                  var hh = parseInt(String(hourly.time[i]).slice(11,13), 10);
+                  if (hourly.precipitation) hourly.precipitation[i] = (byHour[hh] || 0) / 25.4;
+                  wrote++;
+                }
+                for (var di = 0; di < daily.time.length; di++){
+                  if (daily.time[di] === yStr && daily.precipitation_sum){
+                    daily.precipitation_sum[di] = inches; break;
+                  }
+                }
+                window._pastObserved = { date:yStr, station:res.id, inches:inches, hours:wrote };
+              })
+              .catch(function(){})
+              .then(function(){ window._pastPrecipRunning = false; });
+          })();
           var phaseFrac = approximateMoonPhase(new Date());
           var mi = moonInfo(phaseFrac);
           
