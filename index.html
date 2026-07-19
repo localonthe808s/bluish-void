@@ -71698,6 +71698,8 @@ function closeAlertModal(){
         }
         // ── species notes, split into themed groups ──
         if (sp.wikipediaSummary) h += speciesNotes(sp.wikipediaSummary);
+        // ── seasonal status (GBIF, filled in async) ──
+        h += '<div id="bw-season"></div>';
         // ── odd & wonderful: species facts, or its family's if unlisted ──
         var fam = famOf(sp.scientificName || sciName || '');
         var spf = SP_FUN[sp.commonName || name || ''], famf = spf ? null : FAM_FUN[fam.fam];
@@ -71750,6 +71752,7 @@ function closeAlertModal(){
           footer: 'BirdWeather \u00b7 BirdNET \u00b7 audio CC BY-NC-SA'
         });
         hideBirdLoader();
+        loadSeasonality(sp.scientificName || sciName || '');
         loadXenoCalls(sp.scientificName || '');
         loadWikiPhoto(sp.wikipediaUrl || '', sp.imageCredit || '', sp.imageLicense || '');
         // clamp each player to its detection window
@@ -71799,6 +71802,102 @@ function closeAlertModal(){
     if (s.length > 34) s = s.split(',')[0].trim();
     if (s.length > 34){ s = s.slice(0, 34); s = s.slice(0, s.lastIndexOf(' ') > 12 ? s.lastIndexOf(' ') : 34); }
     return s;
+  }
+
+  // ── SEASONAL STATUS (GBIF) ──
+  // Whether a bird is here year-round, only for the summer, only for the
+  // winter, or just passing through — derived from the monthly distribution
+  // of GBIF occurrence records in a box around the user rather than assumed
+  // from a hardcoded latitude, so it stays true wherever the site is viewed.
+  // Raw counts are NOT usable directly: birding effort peaks in May, which
+  // gives every resident a fake spring bump. Dividing by the all-birds count
+  // for the same month cancels that out (a cardinal then reads correctly flat).
+  var GB_URL = 'https://api.gbif.org/v1/occurrence/search';
+  var MON = ['J','F','M','A','M','J','J','A','S','O','N','D'];
+  var MONTH_NAME = ['January','February','March','April','May','June',
+                    'July','August','September','October','November','December'];
+  function gbifBox(){
+    return '&decimalLatitude=' + (_bvLat-0.45).toFixed(2) + ',' + (_bvLat+0.45).toFixed(2)
+         + '&decimalLongitude=' + (_bvLon-0.45).toFixed(2) + ',' + (_bvLon+0.45).toFixed(2);
+  }
+  function gbifMonths(qs, ck, cb){
+    var cached = null;
+    try{ cached = JSON.parse(sessionStorage.getItem(ck) || 'null'); }catch(e){}
+    if (cached) return cb(cached);
+    fetch(GB_URL + '?' + qs + gbifBox() + '&facet=month&facetLimit=12&limit=0')
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(j){
+        if (!j) return cb(null);
+        var m = [0,0,0,0,0,0,0,0,0,0,0,0];
+        ((j.facets||[]).filter(function(f){ return f.field === 'MONTH'; })[0]||{counts:[]})
+          .counts.forEach(function(c){ var i = parseInt(c.name,10) - 1; if (i>=0 && i<12) m[i] = c.count; });
+        var out = { m:m, total:j.count||0 };
+        try{ sessionStorage.setItem(ck, JSON.stringify(out)); }catch(e){}
+        cb(out);
+      }).catch(function(){ cb(null); });
+  }
+
+  function loadSeasonality(sci){
+    var box = $('bw-season'); if (!box || !sci) return;
+    var bk = _bvLat.toFixed(1) + ',' + _bvLon.toFixed(1);
+    gbifMonths('classKey=212', 'bvgbifeff:' + bk, function(eff){
+      gbifMonths('scientificName=' + encodeURIComponent(sci), 'bvgbif:' + sci + ':' + bk, function(sp){
+        if (!sp || !sp.total || !eff){ box.innerHTML = ''; return; }
+        // relative abundance per month, effort-corrected then scaled to peak
+        var rel = sp.m.map(function(v, i){ return eff.m[i] ? v / eff.m[i] : 0; });
+        var pk = Math.max.apply(null, rel) || 1;
+        var share = rel.map(function(v){ return v / pk; });
+        // A month counts as "present" only if it clears BOTH bars: a real
+        // share of the effort-corrected peak, and a meaningful slice of the
+        // species' own records. The second test matters — June and July have
+        // the least birding, so dividing by tiny effort turns a handful of
+        // stragglers into a fake summer (it read Blackpoll Warbler, a pure
+        // passage migrant, as a summer visitor off 1.6% of its records).
+        var here = share.map(function(v, i){
+          return v >= 0.08 && sp.m[i] / Math.max(sp.total, 1) >= 0.02;
+        });
+        var any = function(idx){ return idx.some(function(i){ return here[i]; }); };
+        var winter = any([11,0,1]), summer = any([5,6]), spring = any([3,4]), fall = any([8,9]);
+        var status = (winter && summer) ? 'Year-round resident'
+                   : (summer && !winter) ? 'Summer visitor'
+                   : (winter && !summer) ? 'Winter visitor'
+                   : (spring && fall)    ? 'Passage migrant'
+                   :                       'Scarce or irregular';
+        // describe the run of months it is actually present, wrapping the year
+        var idxs = []; for (var i = 0; i < 12; i++) if (here[i]) idxs.push(i);
+        var span = '';
+        if (idxs.length && idxs.length < 12){
+          var start = idxs[0];
+          if (here[11] && here[0]){                       // wraps new year
+            var s2 = 11; while (here[(s2 - 1 + 12) % 12] && s2 > 0) s2--;
+            var e2 = 0;  while (here[(e2 + 1) % 12] && e2 < 11) e2++;
+            start = s2; span = MONTH_NAME[s2] + ' to ' + MONTH_NAME[e2];
+          } else {
+            span = MONTH_NAME[idxs[0]] + ' to ' + MONTH_NAME[idxs[idxs.length-1]];
+          }
+        } else if (idxs.length === 12) span = 'every month';
+        var peakM = share.indexOf(1);
+        var now = new Date().getMonth();
+        var bars = share.map(function(v, i){
+          var hgt = Math.max(2, Math.round(v * 26));
+          var c = i === now ? '#f97316' : here[i] ? 'rgba(43,34,244,.55)' : 'rgba(43,34,244,.14)';
+          return '<div style="display:flex;flex-direction:column;align-items:center;gap:2px;">'
+            + '<div style="width:100%;height:26px;display:flex;align-items:flex-end;">'
+            +   '<div style="width:100%;height:'+hgt+'px;background:'+c+';border-radius:2px 2px 0 0;"></div></div>'
+            + '<div style="font-size:.4rem;font-weight:800;color:'+(i===now?'#f97316':'rgba(43,34,244,.35)')+';">'+MON[i]+'</div>'
+            + '</div>';
+        }).join('');
+        box.innerHTML = FSB('When it is here')
+          + '<div style="font-size:.7rem;font-weight:800;color:#2b22f4;">' + status + '</div>'
+          + '<div style="font-size:.62rem;line-height:1.5;color:rgba(43,34,244,.75);margin:2px 0 7px;">'
+          +   (span === 'every month' ? 'Recorded here in every month of the year'
+                                      : 'Recorded here from ' + span)
+          +   (peakM >= 0 ? ', peaking in ' + MONTH_NAME[peakM] : '') + '.</div>'
+          + '<div style="display:grid;grid-template-columns:repeat(12,1fr);gap:3px;align-items:end;">' + bars + '</div>'
+          + '<div style="font-size:.44rem;font-weight:700;color:rgba(43,34,244,.38);margin-top:5px;">'
+          +   'Share of records by month within ~50 km, corrected for how much birding happens in each month · GBIF</div>';
+      });
+    });
   }
 
   // ── TONIGHT'S FLIGHT CONDITIONS ──
