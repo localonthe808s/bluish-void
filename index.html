@@ -13121,6 +13121,8 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
                     <div><span id="darksky-bortle-num" style="font-size:1.15rem;font-weight:900;color:rgba(43,34,244,.9);line-height:1;">—</span></div>
                     <div id="darksky-bortle-name" style="font-size:.5rem;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:rgba(43,34,244,.55);margin-top:2px;"></div>
                   </div>
+                  <!-- moonlight for tonight: the variable Bortle cannot capture -->
+                  <div id="darksky-moon" style="display:none;font-size:.46rem;font-weight:600;line-height:1.5;color:rgba(43,34,244,.6);margin:5px 0 8px;pointer-events:auto;"></div>
                   <div class="ds-scale-head" style="font-size:.48rem;font-weight:800;letter-spacing:.07em;color:rgba(43,34,244,.5);text-transform:uppercase;margin-bottom:4px;">Bortle Scale <span style="opacity:.6;font-weight:600;">· est.</span></div>
                   <div id="darksky-legend" style="display:flex;flex-direction:column;gap:1px;"></div>
                   <div class="ds-parks-head" style="font-size:.46rem;font-weight:800;letter-spacing:.06em;color:rgba(255,255,255,.75);text-transform:uppercase;margin:6px 0 3px;border-top:1px solid rgba(43,34,244,.12);padding-top:5px;">Darkest parks nearby <span style="opacity:.6;font-weight:600;">≤ B3</span></div>
@@ -13283,6 +13285,69 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
               });
               el.innerHTML=h;
             }
+            // ── MOONLIGHT: the variable the Bortle number cannot see ──────────
+            // Light pollution is fixed for a location; the moon is not, and on a
+            // bright night it washes out more sky than the ground glow does. The
+            // ephemeris for it was already here (moonRaDec + altAz, same pair the
+            // rise/set strip uses) — the stargazing panel just never asked.
+            // What matters is not the phase alone but whether the moon is ABOVE
+            // THE HORIZON while it is properly dark, so this scans tonight in
+            // 20-minute steps and reports the dark window that is actually left.
+            function moonTonight(lat, lon){
+              if (typeof moonRaDec !== 'function' || typeof altAz !== 'function') return null;
+              var phase = (window._moonPhase != null) ? window._moonPhase
+                        : (typeof approximateMoonPhase === 'function' ? approximateMoonPhase(new Date()) : null);
+              if (phase == null || typeof moonInfo !== 'function') return null;
+              var info = moonInfo(phase), illum = info.illum;
+              // walk from tonight's dusk to tomorrow's dawn
+              var t = new Date(); t.setHours(21, 0, 0, 0);
+              var end = new Date(t.getTime() + 9 * 3600 * 1000);   // 21:00 -> 06:00
+              // Track TRANSITIONS, not merely "was it ever up". Taking the first
+              // sample where the moon is above the horizon reports the scan's own
+              // start time as a moonrise — it said "rises around 9:00pm" every
+              // night, when in fact the moon was already up and about to set.
+              var anyUp = false, anyDown = false, upAtStart = null, prevUp = null;
+              var setsAt = null, risesAt = null;
+              for (var x = new Date(t); x <= end; x = new Date(x.getTime() + 20*60000)){
+                var rd = moonRaDec(x), isUp = deg(altAz(rd.ra, rd.dec, x, lat, lon).alt) > 0;
+                if (isUp) anyUp = true; else anyDown = true;
+                if (upAtStart === null) upAtStart = isUp;
+                else if (prevUp !== null && prevUp !== isUp){
+                  if (prevUp && !isUp && setsAt == null) setsAt = new Date(x);
+                  if (!prevUp && isUp && risesAt == null) risesAt = new Date(x);
+                }
+                prevUp = isUp;
+              }
+              return { illum: illum, name: info.name, icon: info.icon,
+                       up: anyUp, allNight: anyUp && !anyDown, downAllNight: !anyUp,
+                       upAtStart: upAtStart, setsAt: setsAt, risesAt: risesAt };
+            }
+            function renderMoonFactor(lat, lon){
+              var el = document.getElementById('darksky-moon'); if (!el) return;
+              var m = moonTonight(lat, lon);
+              if (!m){ el.style.display = 'none'; return; }
+              var fmt = function(d){
+                var h = d.getHours(), mm = String(d.getMinutes()).padStart(2,'0');
+                return ((h % 12) || 12) + ':' + mm + (h >= 12 ? 'pm' : 'am');
+              };
+              // a thin crescent barely matters; a gibbous moon ends deep-sky viewing
+              var harm = m.downAllNight ? 0 : m.illum >= 70 ? 3 : m.illum >= 35 ? 2 : m.illum >= 12 ? 1 : 0;
+              var verdict, col;
+              if (harm === 0){ verdict = m.downAllNight ? 'never rises tonight — dark all night' : 'a sliver of moon, effectively dark'; col = '#1a8a4a'; }
+              else if (harm === 1){ verdict = 'faint moonlight, most targets still fine'; col = '#1a8a4a'; }
+              else if (harm === 2){ verdict = 'moonlight washes out faint objects'; col = '#c47f16'; }
+              else { verdict = 'too bright for deep sky — planets and the moon only'; col = '#c0392b'; }
+              // the useful half of the answer: when the sky actually goes dark
+              var when = '';
+              if (m.downAllNight)   when = ' Below the horizon all night.';
+              else if (m.allNight)  when = ' Up all night.';
+              else if (m.setsAt)    when = ' Dark after it sets, around ' + fmt(m.setsAt) + '.';
+              else if (m.risesAt)   when = ' Dark until it rises, around ' + fmt(m.risesAt) + '.';
+              el.style.display = '';
+              el.innerHTML = '<span style="font-size:.62rem;">' + m.icon + '</span> '
+                + '<b style="color:' + col + ';">' + m.illum + '% moon</b> \u00b7 ' + m.name
+                + ' \u2014 ' + verdict + '.' + when;
+            }
             function setBortleStat(sqm, head, la, lo){
               var dec=bortleDecimal(sqm);
               var n=Math.max(1,Math.min(9,Math.round(dec)));
@@ -13300,6 +13365,7 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
               box.style.borderLeftColor=b.col;
               box.style.display='';  // reveal; layout (block desktop / flex-row mobile) is left to CSS
               if(la!=null && lo!=null) box._ll=[la,lo];
+              try{ if(la!=null && lo!=null) renderMoonFactor(la, lo); }catch(e){}
             }
             // Tile-canvas cache so sampling many points (e.g. nearby parks, which
             // mostly share one z6 tile) is cheap. ?cors → distinct cache key always
