@@ -51311,7 +51311,39 @@ function initNowMicroTabs(){
   }
 
   /* Hazard tab badge counts — Today / Week / Year for each type */
+  // ── ONE SOURCE OF TRUTH FOR THE DASHBOARD CARDS ────────────────────────
+  // updateHazardBadges and _hzDashUpdate both write hz-dash-*-count and
+  // hz-dash-*-label, and they had drifted: the tornado label was hardcoded
+  // 'LAST 24H' in one and computed in the other, and the flood card was
+  // FloodNet-aware in one and gauges-only in the other. Whichever ran last won,
+  // so the same card flipped between two answers. Both now read from here.
+  window._hzCardStats = function(){
+    var al = window._hazardAlerts || [];
+    var torW = al.filter(function(a){
+      return (a.event || '').toLowerCase().indexOf('tornado warning') >= 0; }).length;
+    var tc = window._tornadoCount || (window._tornadoReports || []).length;
+    var fn = window._floodNetNow, fnFiring = !!(fn && fn.count >= 2);
+    var gauges = window._floodGaugesAboveNormal || 0;
+    return {
+      fire: (window._activeFires || []).filter(function(x){
+              return x && x.properties && x.properties._country !== 'SAT'; }).length,
+      quake: (window._quakeFeatures || []).length,
+      hurricane: (window._activeStorms || []).length,
+      // count tornadoes, never fall through to unrelated alert totals
+      tornado: tc || torW,
+      tornadoLabel: tc ? (tc > 1 ? 'REPORTS TODAY' : 'REPORT TODAY')
+                       : (torW ? 'ACTIVE WARNINGS' : 'NONE TODAY'),
+      // measured street water outranks the gauge count for NYC
+      flood: fnFiring ? fn.count : gauges,
+      floodLabel: fnFiring ? 'STREET SENSORS WET' : 'ACTIVE WATCHES'
+    };
+  };
+
   function updateHazardBadges(){
+    // Badges and cards must not disagree — same numbers, one source.
+    // Guarded: _hzCardStats is an assignment, so a caller that fires before the
+    // IIFE reaches it would otherwise take the whole badge pass down with it.
+    var _cs = (window._hzCardStats ? window._hzCardStats() : {});
     var now = Date.now();
     var day = 86400000;
 
@@ -51384,22 +51416,22 @@ function initNowMicroTabs(){
     // FIRES — badge shows confirmed wildfires only (not SAT hotspots)
     var fires = (window._activeFires || []).filter(function(f){ return f && f.properties && f.properties._country !== 'SAT'; });
     var largeFires = fires.filter(function(f){ return ((f.properties.DailyAcres) || (f.properties.GISAcres) || 0) >= 10000; });
-    setBadge('hazard-badge-fire', fires.length, 'fire');
+    setBadge('hazard-badge-fire', _cs.fire, 'fire');
     setTabAlert('fire', largeFires.length > 0);
     setTabLabel('fire', largeFires.length > 0 ? 'WILDFIRES' : 'WILDFIRE');
 
     // QUAKES (24h feed)
     var quakes = window._quakeFeatures || [];
     var sigQuakes = quakes.filter(function(q){ return q.properties && q.properties.mag >= 5.0; });
-    setBadge('hazard-badge-quake', quakes.length, 'quake');
+    setBadge('hazard-badge-quake', _cs.quake, 'quake');
     setTabAlert('quake', sigQuakes.length > 0);
     setTabLabel('quake', sigQuakes.length > 0 ? 'EARTHQUAKES' : 'EARTHQUAKE');
 
     // TORNADOES
     var tCount = window._tornadoCount || (window._tornadoReports || []).length;
     var hasSPCOutlook = (typeof tornadoOutlookLayers !== 'undefined' && tornadoOutlookLayers.length > 0);
-    setBadge('hazard-badge-tornado', tCount, 'tornado');
-    setTabAlert('tornado', tCount > 0 || hasSPCOutlook);
+    setBadge('hazard-badge-tornado', _cs.tornado, 'tornado');
+    setTabAlert('tornado', _cs.tornado > 0 || hasSPCOutlook);
     setTabLabel('tornado', tCount > 0 ? 'TORNADOES' : (hasSPCOutlook ? 'TORNADO RISK' : 'TORNADO'));
 
     // ALERTS
@@ -51419,7 +51451,7 @@ function initNowMicroTabs(){
     // FloodNet is the only input that can fire this tab for NYC.
     var _fnNow = window._floodNetNow;
     var fnFiring = !!(_fnNow && _fnNow.count >= 2);   // 2+ sensors, never a lone artifact
-    setBadge('hazard-badge-flood', fnFiring ? _fnNow.count : floodCount, 'flood');
+    setBadge('hazard-badge-flood', _cs.flood, 'flood');
     var floodFiring = floodMajor > 0 || floodCount >= 10 || fnFiring;
     setTabAlert('flood', floodFiring);
     // When flooding is actually firing, rename the generic PRECIP tab to FLOODS.
@@ -51429,14 +51461,13 @@ function initNowMicroTabs(){
     // Detail content is managed by _hzDashUpdate — don't overwrite it here
     try {
       var _ds = function(id,v){ var e=document.getElementById(id); if(e) e.textContent=String(v); };
-      _ds('hz-dash-fire-count', fires.length);
-      _ds('hz-dash-quake-count', quakes.length);
-      _ds('hz-dash-tornado-count', tCount);
-      _ds('hz-dash-tornado-label', 'LAST 24H');
-      _ds('hz-dash-flood-count', fnFiring ? _fnNow.count : floodCount);
-      _ds('hz-dash-flood-label', fnFiring ? 'STREET SENSORS WET' : 'ACTIVE WATCHES');
-      var hCount = window._activeStorms ? window._activeStorms.length : 0;
-      _ds('hz-dash-hurricane-count', hCount);
+      _ds('hz-dash-fire-count', _cs.fire);
+      _ds('hz-dash-quake-count', _cs.quake);
+      _ds('hz-dash-tornado-count', _cs.tornado);
+      _ds('hz-dash-tornado-label', _cs.tornadoLabel);
+      _ds('hz-dash-flood-count', _cs.flood);
+      _ds('hz-dash-flood-label', _cs.floodLabel);
+      _ds('hz-dash-hurricane-count', _cs.hurricane);
     } catch(dashErr){ console.error('Dashboard update:', dashErr); }
 
     // ── Sync unified status pills ──
@@ -70328,7 +70359,7 @@ function closeAlertModal(){
       // Wildfire count = agency/cluster fires only; raw satellite detections
       // aren't "wildfires" (with FIRMS fully merged they pushed this row to 10k+)
       var wfF=(usF+caF)-rxF;
-      _d('hz-dash-fire-count',f.filter(function(x){return x.properties&&x.properties._country!=='SAT';}).length);
+      _d('hz-dash-fire-count', (window._hzCardStats ? window._hzCardStats().fire : 0));
       var fd='';
       try {
       if(f.length){
@@ -70396,7 +70427,7 @@ function closeAlertModal(){
 
       // ── EARTHQUAKE ──
       var q=window._quakeFeatures||[];
-      _d('hz-dash-quake-count',q.length);
+      _d('hz-dash-quake-count', (window._hzCardStats ? window._hzCardStats().quake : 0));
       var qd='';
       try {
       if(q.length){
@@ -70461,10 +70492,9 @@ function closeAlertModal(){
       // them on 2026-07-19: small craft advisories, heat, air quality) and
       // printed it under the TORNADOES heading. A tornado card counts
       // tornadoes: reports logged today, else live tornado warnings, else zero.
-      var torCount = tc || torW;
-      _d('hz-dash-tornado-count', torCount);
-      _d('hz-dash-tornado-label', tc ? (tc>1?'REPORTS TODAY':'REPORT TODAY')
-                                    : torW ? 'ACTIVE WARNINGS' : 'NONE TODAY');
+      var _cs = (window._hzCardStats ? window._hzCardStats() : {});
+      _d('hz-dash-tornado-count', _cs.tornado);
+      _d('hz-dash-tornado-label', _cs.tornadoLabel);
       var td='';
       if(torW||torA||svrW||svrA){
         td+=H('⚠ ACTIVE WARNINGS','rgba(239,68,68,.85)');
@@ -70598,8 +70628,9 @@ function closeAlertModal(){
       var totalG=(window._floodGauges||[]).length;
       var flW=al.filter(function(a){var e=(a.event||'').toLowerCase();return e.indexOf('flood')>=0;}).length;
       var ffW=al.filter(function(a){return(a.event||'').toLowerCase().indexOf('flash flood')>=0;}).length;
-      _d('hz-dash-flood-count',fc);
-      _d('hz-dash-flood-label','ACTIVE WATCHES');
+      var _csF = (window._hzCardStats ? window._hzCardStats() : {});
+      _d('hz-dash-flood-count', _csF.flood);
+      _d('hz-dash-flood-label', _csF.floodLabel);
       var fld='';
 
       // ── LOCAL PRECIPITATION FORECAST ──
@@ -70860,7 +70891,7 @@ function closeAlertModal(){
       // ── HURRICANE ──
       try {
       var hc=window._activeStorms?window._activeStorms.length:0;
-      _d('hz-dash-hurricane-count',hc);
+      _d('hz-dash-hurricane-count', (window._hzCardStats ? window._hzCardStats().hurricane : 0));
       var hd='';
       var hMo=new Date().getMonth();
       if(hc&&window._activeStorms){
