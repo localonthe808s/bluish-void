@@ -12719,6 +12719,16 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
                   <!-- ═══ LEFT SIDE STACKED CONTROL PANEL (ink theme) ═══ -->
                   <div style="position:absolute; top:56px; left:8px; z-index:1000; display:flex; flex-direction:column; gap:6px; font-family:system-ui,sans-serif; width:250px; max-height:calc(100% - 72px); overflow-y:auto; scrollbar-width:none; padding-right:4px;">
 
+                    <!-- GROUP 0: HOMETOWN — FLOODNET NYC. Hidden by default; the
+                         FloodNet module unhides it only inside the five boroughs,
+                         where the city runs real street-level depth sensors. -->
+                    <div id="floodnet-panel" style="display:none;background:rgba(255,255,255,.62);backdrop-filter:blur(20px);border-radius:14px;padding:8px 10px;border:1px solid rgba(6,182,212,.28);box-shadow:0 0 40px rgba(6,182,212,.06),0 6px 24px rgba(15,23,42,.12);">
+                      <div style="display:flex;align-items:center;gap:6px;margin-bottom:5px;"><span style="width:3px;height:10px;background:#0891b2;border-radius:2px;"></span><span style="font-size:.36rem;color:#0891b2;font-weight:800;letter-spacing:.1em;">HOMETOWN · FLOODNET NYC</span></div>
+                      <div id="floodnet-status" style="font-size:.44rem;font-weight:800;color:#0891b2;letter-spacing:.03em;line-height:1.35;margin-bottom:4px;">LOADING SENSORS…</div>
+                      <div id="floodnet-detail" style="font-size:.36rem;font-weight:500;color:rgba(43,34,244,.68);line-height:1.45;"></div>
+                      <div id="floodnet-toggle" style="margin-top:6px;padding:4px 0;border-radius:8px;border:1px solid rgba(6,182,212,.35);background:rgba(6,182,212,.12);font-size:.4rem;font-weight:700;color:#0891b2;cursor:pointer;text-align:center;user-select:none;">SENSORS ON</div>
+                    </div>
+
                     <!-- GROUP 1: VIEW -->
                     <div style="background:rgba(255,255,255,.62);backdrop-filter:blur(20px);border-radius:14px;padding:8px 10px;border:1px solid rgba(43,34,244,.10);box-shadow:0 0 40px rgba(43,34,244,.035),0 6px 24px rgba(15,23,42,.12);">
                       <div style="display:flex;align-items:center;gap:6px;margin-bottom:5px;"><span style="width:3px;height:10px;background:#2B22F4;border-radius:2px;"></span><span style="font-size:.36rem;color:rgba(43,34,244,.45);font-weight:800;letter-spacing:.1em;">VIEW</span></div>
@@ -14936,13 +14946,8 @@ function floodRateThreshold(lat, lon, soilMoisture){
   // going under at 11:32-11:49, minutes before the 11:53 Flash Flood Warning,
   // with streets still wet past 16:00.
   // Open GraphQL, no key. NYC only, so it bails immediately anywhere else.
-  var FLOODNET_URL = 'https://api.floodnet.nyc/v1/graphql';
-  function fnQuery(q){
-    return fetch(FLOODNET_URL, { method:'POST', headers:{'content-type':'application/json'},
-                                 body: JSON.stringify({ query:q }) })
-      .then(function(r){ return r.ok ? r.json() : null; })
-      .then(function(j){ return (j && j.data) || null; });
-  }
+  // fnQuery lives at the top level of this IIFE (see the FloodNet map module)
+  // so both the rain line and the flood tab can reach it.
   function loadFloodNet(lat, lon){
     // the network only exists in New York City
     if (!(lat > 40.40 && lat < 41.10 && lon > -74.35 && lon < -73.60)) return;
@@ -52011,6 +52016,7 @@ function initNowMicroTabs(){
     if(!hazardMap) return;
     window._floodLayerGroup = L.layerGroup().addTo(hazardMap);
     loadFloodGaugesAHPS('obs');
+    try{ initFloodNet(); }catch(e){}
     loadSigRiverFloodOutlook();
     setTimeout(function(){ switchHazardOutlook('flood','d1'); }, 200);
     setInterval(function(){ if(hazardActiveTab === 'flood') loadFloodGaugesAHPS(floodForecastHour); }, 10 * 60 * 1000);
@@ -52167,6 +52173,157 @@ function initNowMicroTabs(){
         console.warn('AHPS fetch failed, falling back to USGS IV:', e);
         loadFloodGaugesUSGS();
       });
+  }
+
+  // ── FLOODNET NYC — STREET SENSORS ON THE FLOOD MAP ─────────────────────
+  // The hometown view. Everything else on this tab is a river gauge or a model
+  // outlook; these are ~428 city sensors measuring depth at street corners, the
+  // only inputs here that read the water where people actually walk. Off-radius
+  // users never see the panel — it stays display:none and no request is made.
+  function fnQuery(q){
+    return fetch('https://api.floodnet.nyc/v1/graphql',
+                 { method:'POST', headers:{'content-type':'application/json'},
+                   body: JSON.stringify({ query:q }) })
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(j){ return (j && j.data) || null; });
+  }
+
+  window._floodNetLayer = null;
+  var fnSensorsOn = true, fnRows = [], fnNames = {};
+
+  // Depth tiers. FloodNet reports millimetres; a sensor reading dead 0 is the
+  // normal dry state, not a fault, so 0 must still render as a live sensor.
+  function fnTier(mm, flooded, stale){
+    if (stale)            return { c:'#94a3b8', r:3, label:'NO RECENT REPORT' };
+    if (flooded || mm >= 152) return { c:'#9333ea', r:9, label:'FLOODING' };
+    if (mm >= 51)         return { c:'#ef4444', r:7, label:'DEEP WATER' };
+    if (mm >= 13)         return { c:'#f97316', r:6, label:'WATER POOLING' };
+    if (mm > 0)           return { c:'#eab308', r:5, label:'TRACE WATER' };
+    return { c:'#22d3ee', r:4, label:'DRY' };
+  }
+
+  function fnDrawSensors(){
+    if (!window._floodNetLayer) return;
+    window._floodNetLayer.clearLayers();
+    if (!fnSensorsOn) return;
+    fnRows.forEach(function(row){
+      var t = fnTier(row.mm, row.flooded, row.stale);
+      var m = L.circleMarker([row.lat, row.lon], {
+        radius: t.r, fillColor: t.c, fillOpacity: row.stale ? 0.45 : 0.9,
+        color: t.c, weight: row.stale ? 1 : 0, opacity: row.stale ? 0.5 : 0
+      });
+      if (t.label === 'FLOODING') m.setStyle({ className:'flood-pulse' });
+      var age = row.stale ? '' : (row.ageMin < 1 ? 'just now'
+              : row.ageMin < 60 ? Math.round(row.ageMin) + ' min ago'
+              : (row.ageMin/60).toFixed(1) + ' h ago');
+      m.bindPopup(
+        '<div class="hz-card-head"><div class="hz-accent" style="background:' + t.c + ';"></div>'
+        + '<span style="color:' + t.c + ';">' + t.label + '</span></div>'
+        + '<div class="hz-card-row"><span class="hz-label">Corner</span><span class="hz-val" style="max-width:150px;text-align:right;">' + row.name + '</span></div>'
+        + (row.stale ? ''
+           : '<div class="hz-card-row"><span class="hz-label">Water depth</span><span class="hz-val" style="color:' + t.c + ';">'
+             + (row.mm > 0 ? row.mm + ' mm (' + (row.mm/25.4).toFixed(1) + '″)' : 'none') + '</span></div>'
+             + '<div class="hz-card-row"><span class="hz-label">Measured</span><span class="hz-val">' + age + '</span></div>')
+        + '<div class="hz-card-footer">FloodNet NYC · street-level sensor</div>',
+        { className:'hz-popup', maxWidth:280 });
+      window._floodNetLayer.addLayer(m);
+    });
+  }
+
+  function fnPaintPanel(){
+    var panel = document.getElementById('floodnet-panel');
+    if (!panel) return;
+    panel.style.display = '';
+    var st = document.getElementById('floodnet-status');
+    var de = document.getElementById('floodnet-detail');
+    var live = fnRows.filter(function(r){ return !r.stale; });
+    var wet  = live.filter(function(r){ return r.mm > 0 || r.flooded; });
+    var deep = live.filter(function(r){ return r.flooded || r.mm >= 51; });
+    if (!fnRows.length){ if (st) st.textContent = 'NO SENSORS IN RANGE'; return; }
+    if (st){
+      st.textContent = deep.length ? 'WATER ON THE STREET · ' + deep.length + ' SENSOR' + (deep.length>1?'S':'')
+                     : wet.length  ? 'TRACE WATER · ' + wet.length + ' SENSOR' + (wet.length>1?'S':'')
+                     : 'ALL CLEAR · STREETS DRY';
+      st.style.color = deep.length ? '#9333ea' : wet.length ? '#f97316' : '#0891b2';
+    }
+    if (de){
+      // A dry reading is a real measurement, so say how many are actually
+      // reporting — "all clear" means nothing without the sample size.
+      var freshest = live.length ? Math.min.apply(null, live.map(function(r){ return r.ageMin; })) : null;
+      de.innerHTML = live.length + ' of ' + fnRows.length + ' nearby sensors reporting'
+        + (freshest != null ? ', newest ' + (freshest < 1 ? 'seconds' : Math.round(freshest) + ' min') + ' old' : '')
+        + '. Measured depth at the curb, not a forecast.';
+    }
+  }
+
+  function fnInNYC(){
+    return LOCATION && LOCATION.lat > 40.40 && LOCATION.lat < 41.10
+        && LOCATION.lon > -74.35 && LOCATION.lon < -73.60;
+  }
+  function initFloodNet(){
+    if (window._floodNetLayer) return;      // initFloodData can re-enter; one layer only
+    if (!fnInNYC()) return;
+    var lat = LOCATION.lat, lon = LOCATION.lon;
+    window._floodNetLayer = L.layerGroup().addTo(hazardMap);
+    var tg = document.getElementById('floodnet-toggle');
+    if (tg) tg.onclick = function(){
+      fnSensorsOn = !fnSensorsOn;
+      tg.textContent = fnSensorsOn ? 'SENSORS ON' : 'SENSORS OFF';
+      tg.style.background = fnSensorsOn ? 'rgba(6,182,212,.12)' : 'rgba(255,255,255,.4)';
+      tg.style.color = fnSensorsOn ? '#0891b2' : 'rgba(43,34,244,.7)';
+      fnDrawSensors();
+    };
+    var load = function(){
+      fnQuery('{ deployments_within_radius(args:{lat:' + lat.toFixed(4) + ', lon:' + lon.toFixed(4)
+            + ', radius_meters:12000}, limit:150){ deployment_id name location } }')
+        .then(function(d){
+          var deps = (d && d.deployments_within_radius) || [];
+          if (!deps.length) return;
+          var geo = {};
+          deps.forEach(function(x){
+            fnNames[x.deployment_id] = String(x.name || '').replace(/^[A-Z]{1,2}\s*-\s*/, '');
+            if (x.location && x.location.coordinates) geo[x.deployment_id] = x.location.coordinates;
+          });
+          var ids = deps.map(function(x){ return JSON.stringify(x.deployment_id); }).join(',');
+          var since = new Date(Date.now() - 3*3600000).toISOString().slice(0,19);
+          // distinct_on collapses the stream to the newest row per sensor —
+          // without it this returns thousands of readings for a handful of them.
+          return fnQuery('{ depth_data(where:{deployment_id:{_in:[' + ids + ']}, time:{_gte:"' + since + '"}},'
+                       + ' distinct_on:deployment_id, order_by:[{deployment_id:asc},{time:desc}], limit:200)'
+                       + '{ deployment_id time depth_proc_mm flood_detected } }')
+            .then(function(dd){
+              var rows = (dd && dd.depth_data) || {}, latest = {};
+              (rows.length ? rows : []).forEach(function(r){ latest[r.deployment_id] = r; });
+              var now = Date.now();
+              fnRows = deps.filter(function(x){ return geo[x.deployment_id]; }).map(function(x){
+                var r = latest[x.deployment_id], c = geo[x.deployment_id];
+                var t = r ? new Date(r.time + (/[Zz+]/.test(r.time) ? '' : 'Z')).getTime() : null;
+                return {
+                  lat: c[1], lon: c[0], name: fnNames[x.deployment_id] || 'NYC sensor',
+                  mm: r && r.depth_proc_mm != null ? Math.round(r.depth_proc_mm) : 0,
+                  flooded: !!(r && r.flood_detected),
+                  stale: !r, ageMin: t ? (now - t)/60000 : 1e9
+                };
+              });
+              fnDrawSensors();
+              fnPaintPanel();
+            });
+        }).catch(function(){
+          var st = document.getElementById('floodnet-status');
+          if (st){ st.textContent = 'SENSORS UNAVAILABLE'; document.getElementById('floodnet-panel').style.display = ''; }
+        });
+    };
+    load();
+    setInterval(function(){
+      if (!fnInNYC()){                       // user moved off the hometown
+        fnRows = [];
+        if (window._floodNetLayer) window._floodNetLayer.clearLayers();
+        var pn = document.getElementById('floodnet-panel');
+        if (pn) pn.style.display = 'none';
+        return;
+      }
+      if (hazardActiveTab === 'flood') load();
+    }, 5 * 60 * 1000);
   }
 
   function renderFloodGauges(features, forecastHr, isFinal){
