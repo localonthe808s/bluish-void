@@ -10406,7 +10406,10 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
 #birds-widget .bw-fstat b{display:block;font-size:.44rem;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:rgba(43,34,244,.45);}
 #birds-widget .bw-fstat span{font-size:.7rem;font-weight:800;color:rgba(43,34,244,.85);}
 #birds-widget .bw-fstat i{font-style:normal;font-size:.46rem;font-weight:700;color:rgba(43,34,244,.42);margin-left:3px;}
-#birds-widget .bw-migwrap{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:10px 10px 4px;}
+#birds-widget .bw-migwrap{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;padding:10px 10px 4px;}
+@media (max-width:1100px){ #birds-widget .bw-migwrap{grid-template-columns:1fr 1fr;} }
+#birds-widget .bw-nightt{font-size:.5rem;font-weight:800;color:#6f5bd0;letter-spacing:.03em;}
+#birds-widget .bw-nightnote{font-size:.44rem;font-weight:700;color:rgba(43,34,244,.38);padding:6px 2px 0;line-height:1.45;}
 @media (max-width:900px){ #birds-widget .bw-migwrap{grid-template-columns:1fr;gap:14px;} }
 #birds-widget .bw-migfoot{padding:2px 10px 10px;font-size:.46rem;font-weight:700;letter-spacing:.04em;
   color:rgba(43,34,244,.42);line-height:1.5;}
@@ -11619,6 +11622,10 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
                 <div class="bw-panel" data-bwpanel="mig" hidden>
                   <div id="bw-flight" class="bw-flight"></div>
                   <div class="bw-migwrap">
+                    <div>
+                      <div class="bw-lab">Overhead last night</div>
+                      <div id="bw-night" class="bw-list"><div class="bw-empty">loading…</div></div>
+                    </div>
                     <div>
                       <div class="bw-lab">Just arrived</div>
                       <div id="bw-arr" class="bw-list"><div class="bw-empty">loading…</div></div>
@@ -70410,6 +70417,7 @@ function closeAlertModal(){
           renderFlight();          // cheap + local: refresh every time it opens
           if (!window._bwMigLoaded){
             window._bwMigLoaded = 1;
+            loadNightCalls();
             loadMigration(_bvLat, _bvLon);
           }
         }
@@ -72104,6 +72112,109 @@ function closeAlertModal(){
       +   stat('Rain chance', Math.round(f.pp), '%')
       +   stat('Cloud', Math.round(f.cloud), '%')
       + '</div>';
+  }
+
+  // ── OVERHEAD LAST NIGHT ──
+  // Most songbirds migrate in the dark and call as they go, so a ground
+  // microphone hears the flight overhead. This is the counterpart to the
+  // forecast panel: conditions say whether birds SHOULD have moved, this
+  // says what actually did.
+  //
+  // BirdNET is unreliable at night — a low bar returns nonsense (a July
+  // query pulled Eurasian Moorhen, which does not occur here). Two gates:
+  //   1. confidence >= 0.85, which cut a sample night from 22 species to 10
+  //   2. every survivor is checked against its GBIF monthly distribution and
+  //      dropped if this month is not part of its year here. On the sample
+  //      night that caught Nelson's Sparrow — 0.0% of local July records.
+  // Filtered counts are reported rather than hidden.
+  function loadNightCalls(){
+    var el = $('bw-night'); if (!el) return;
+    var now = new Date();
+    var lastNight = new Date(now.getTime() - 86400000);
+    var pair = now.getHours() < 5 ? [lastNight, now] : [now, new Date(now.getTime() + 86400000)];
+    // the night spans midnight, so it takes two day-scoped queries
+    Promise.all([
+      bwQuery(_bvLat, _bvLon, 0.45, 2200, 2359, ymd(pair[0]), 0.85),
+      bwQuery(_bvLat, _bvLon, 0.45,    0,  500, ymd(pair[1]), 0.85)
+    ]).then(function(res){
+      var all = (res[0]||[]).concat(res[1]||[]);
+      var by = {};
+      all.forEach(function(n){
+        var s = n.species || {}, nm = s.commonName; if (!nm) return;
+        var t = String(n.timestamp||''); if (t.length < 16) return;
+        var mins = +t.slice(11,13)*60 + +t.slice(14,16);
+        if (!by[nm]) by[nm] = { name:nm, sci:s.scientificName||'', sid:s.id||'',
+                                thumb:s.thumbnailUrl||'', n:0, first:mins, last:mins };
+        by[nm].n++;
+        // 22:00-05:00 wraps midnight — sort by hours since 18:00 so late
+        // evening reads as earlier than the small hours, not later
+        var norm = function(m){ return (m + 360) % 1440; };
+        if (norm(mins) < norm(by[nm].first)) by[nm].first = mins;
+        if (norm(mins) > norm(by[nm].last))  by[nm].last  = mins;
+      });
+      var rows = Object.keys(by).map(function(k){ return by[k]; })
+                   .sort(function(a,b){ return b.n - a.n; });
+      if (!rows.length){
+        el.innerHTML = '<div class="bw-empty">Nothing above 85% confidence overnight.</div>';
+        return;
+      }
+      // plausibility pass: is this species even here this month?
+      rows = rows.slice(0, 12);
+      var month = now.getMonth(), keep = [], dropped = 0, pending = rows.length;
+      var bk = _bvLat.toFixed(1) + ',' + _bvLon.toFixed(1);
+      gbifMonths('classKey=212', 'bvgbifeff:' + bk, function(eff){
+        rows.forEach(function(r){
+          if (!r.sci || !eff){ keep.push(r); if (!--pending) paint(); return; }
+          gbifMonths('scientificName=' + encodeURIComponent(r.sci), 'bvgbif:' + r.sci + ':' + bk, function(sp){
+            if (sp && sp.total){
+              var rel = sp.m.map(function(v,i){ return eff.m[i] ? v/eff.m[i] : 0; });
+              var pk = Math.max.apply(null, rel) || 1;
+              // 1% floor here, against the classifier's 2%: that one has to
+              // name a season, this only has to answer "could it be here at
+              // all this month". At 2% a Great Horned Owl — resident, just
+              // under-reported in midsummer — was being thrown out.
+              var plausible = (rel[month]/pk) >= 0.08 && (sp.m[month]/sp.total) >= 0.01;
+              if (plausible) keep.push(r); else dropped++;
+            } else {
+              // lookup failed or the name is unknown to GBIF: keep it. A
+              // third-party outage should not delete real detections, and
+              // silence is worse than an occasional odd row.
+              keep.push(r);
+            }
+            if (!--pending) paint();
+          });
+        });
+        function paint(){
+          keep.sort(function(a,b){ return b.n - a.n; });
+          if (!keep.length){
+            el.innerHTML = '<div class="bw-empty">Nothing convincing overnight.</div>';
+            return;
+          }
+          el.innerHTML = keep.slice(0,10).map(function(r){
+            return '<div class="bw-row bw-clickable" data-sid="'+esc(r.sid)+'" data-nm="'+esc(r.name)+'" data-sci="'+esc(r.sci)+'">'
+              + (r.thumb ? '<img class="bw-th" src="'+esc(r.thumb)+'" alt="" loading="lazy">'
+                         : '<div class="bw-th" style="mask-image:none;-webkit-mask-image:none;background:rgba(43,34,244,.06);border-radius:6px;"></div>')
+              + '<div style="flex:1;min-width:0;">'
+              +   '<div class="bw-nightt">' + hhmm(r.first) + (r.last !== r.first ? ' – ' + hhmm(r.last) : '') + '</div>'
+              +   '<div class="bw-rare" style="color:rgba(43,34,244,.85)">' + esc(r.name) + '</div>'
+              +   '<div class="bw-raresci">' + esc(r.sci) + '</div></div>'
+              + '<div class="bw-ct">' + r.n + '</div></div>';
+          }).join('')
+          + (dropped ? '<div class="bw-nightnote">' + dropped + ' species'
+              + ' dropped as out of season here this month — overnight identifications'
+              + ' are the least reliable BirdNET makes.</div>' : '');
+          el.querySelectorAll('.bw-clickable').forEach(function(row){
+            row.addEventListener('click', function(ev){
+              ev.stopPropagation();
+              openBirdPopup(row.getAttribute('data-sid'), row.getAttribute('data-nm'), null, null,
+                            row.getAttribute('data-sci'), row.querySelector('.bw-th'));
+            });
+          });
+        }
+      });
+    }).catch(function(){
+      el.innerHTML = '<div class="bw-empty">Overnight data unavailable.</div>';
+    });
   }
 
   // ── MIGRATION: arrivals & departures ──
