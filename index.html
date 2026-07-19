@@ -52271,6 +52271,62 @@ function initNowMicroTabs(){
     return { c:'#22d3ee', r:4, label:'DRY' };
   }
 
+  // ── DEPTH TRACE ────────────────────────────────────────────────────────
+  // Drawn on popup open, one sensor at a time (~22 KB for 6h at 1/min). The
+  // shape is the whole point: Saturday's flood sensors show a near-vertical
+  // wall then a slow drain, which no summary number conveys.
+  var fnTraceCache = {};
+  function fnSpark(rows){
+    if (!rows || rows.length < 2) return '<div style="font-size:8.5px;opacity:.5;padding:4px 0;">No trace available</div>';
+    var pts = rows.map(function(r){
+      return { t: new Date(r.time + (/[Zz+]/.test(r.time) ? '' : 'Z')).getTime(),
+               d: r.depth_proc_mm || 0 };
+    }).sort(function(a,b){ return a.t - b.t; });
+    var floor = Math.min.apply(null, pts.map(function(p){ return p.d; }));
+    var rise = pts.map(function(p){ return p.d - floor; });
+    var peak = Math.max.apply(null, rise);
+    var t0 = pts[0].t, t1 = pts[pts.length-1].t, span = Math.max(1, t1 - t0);
+    var W = 244, H = 46, PAD = 3;
+    // Fixed 25mm (1") floor on the y-scale so a dry sensor renders as a flat
+    // line instead of amplifying millimetre noise into a mountain range.
+    var yMax = Math.max(peak, 25);
+    var xOf = function(t){ return PAD + (t - t0) / span * (W - 2*PAD); };
+    var yOf = function(v){ return H - PAD - (v / yMax) * (H - 2*PAD); };
+    var d = '', i;
+    for (i = 0; i < pts.length; i++) d += (i ? 'L' : 'M') + xOf(pts[i].t).toFixed(1) + ' ' + yOf(rise[i]).toFixed(1);
+    var col = peak >= 152 ? '#9333ea' : peak >= 51 ? '#ef4444' : peak >= 13 ? '#f97316' : peak > 0 ? '#eab308' : '#22d3ee';
+    var area = d + 'L' + xOf(t1).toFixed(1) + ' ' + (H-PAD) + 'L' + xOf(t0).toFixed(1) + ' ' + (H-PAD) + 'Z';
+    var last = rise[rise.length-1];
+    var hrs = Math.round(span/3600000);
+    return '<div style="margin:5px 0 2px;">'
+      + '<svg width="' + W + '" height="' + H + '" style="display:block;overflow:visible;">'
+      + '<line x1="' + PAD + '" y1="' + (H-PAD) + '" x2="' + (W-PAD) + '" y2="' + (H-PAD) + '" stroke="rgba(43,34,244,.18)" stroke-width="1"/>'
+      + '<path d="' + area + '" fill="' + col + '" opacity=".14"/>'
+      + '<path d="' + d + '" fill="none" stroke="' + col + '" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>'
+      + '<circle cx="' + xOf(t1).toFixed(1) + '" cy="' + yOf(last).toFixed(1) + '" r="2.2" fill="' + col + '"/>'
+      + '</svg>'
+      + '<div style="display:flex;justify-content:space-between;font-size:8px;opacity:.55;margin-top:1px;">'
+      + '<span>' + hrs + 'h ago</span>'
+      + '<span>' + (peak > 0 ? 'peak ' + peak + ' mm (' + (peak/25.4).toFixed(1) + '″)' : 'no water in ' + hrs + 'h') + '</span>'
+      + '<span>now</span></div></div>';
+  }
+
+  function fnLoadTrace(depId, el){
+    if (!el || el.getAttribute('data-loaded')) return;
+    el.setAttribute('data-loaded', '1');
+    if (fnTraceCache[depId]){ el.innerHTML = fnSpark(fnTraceCache[depId]); return; }
+    var since = new Date(Date.now() - 6*3600000).toISOString().slice(0,19);
+    // newest-first so the row cap drops the oldest samples, never the current
+    fnQuery('{ depth_data(where:{_and:[{deployment_id:{_eq:' + JSON.stringify(depId) + '}},'
+          + '{time:{_gte:"' + since + '"}}]}, order_by:{time:desc}, limit:400)'
+          + '{ time depth_proc_mm } }')
+      .then(function(d){
+        var rows = (d && d.depth_data) || [];
+        fnTraceCache[depId] = rows;
+        el.innerHTML = fnSpark(rows);
+      }).catch(function(){ el.innerHTML = '<div style="font-size:8.5px;opacity:.5;">Trace unavailable</div>'; });
+  }
+
   function fnDrawSensors(){
     if (!window._floodNetLayer) return;
     window._floodNetLayer.clearLayers();
@@ -52294,8 +52350,13 @@ function initNowMicroTabs(){
              + (row.mm > 0 ? row.mm + ' mm (' + (row.mm/25.4).toFixed(1) + '″) above normal' : 'none') + '</span></div>'
              + (row.base > 0 ? '<div class="hz-card-row"><span class="hz-label">Sensor floor</span><span class="hz-val" style="font-size:8.5px;">reads ' + row.base + ' mm when dry</span></div>' : '')
              + '<div class="hz-card-row"><span class="hz-label">Measured</span><span class="hz-val">' + age + '</span></div>')
+        + (row.stale ? '' : '<div class="fn-spark" style="min-height:52px;"><div style="font-size:8.5px;opacity:.5;padding:8px 0;">Loading trace…</div></div>')
         + '<div class="hz-card-footer">FloodNet NYC · street-level sensor</div>',
         { className:'hz-popup', maxWidth:280 });
+      if (!row.stale) m.on('popupopen', function(e){
+        var host = e.popup.getElement();
+        fnLoadTrace(row.id, host && host.querySelector('.fn-spark'));
+      });
       window._floodNetLayer.addLayer(m);
     });
   }
@@ -52386,6 +52447,7 @@ function initNowMicroTabs(){
                 var raw = r && r.depth_proc_mm != null ? Math.round(r.depth_proc_mm) : 0;
                 var bl = base[x.deployment_id] != null ? Math.round(base[x.deployment_id]) : 0;
                 return {
+                  id: x.deployment_id,
                   lat: c[1], lon: c[0], name: fnNames[x.deployment_id] || 'NYC sensor',
                   mm: Math.max(0, raw - bl),   // water that actually arrived
                   raw: raw, base: bl,
