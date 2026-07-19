@@ -14927,6 +14927,65 @@ function floodRateThreshold(lat, lon, soilMoisture){
     if (document.title !== t) document.title = t;    // guard: avoid title churn
   };
 
+  // ── FLOODNET NYC — WATER MEASURED ON THE STREET ────────────────────────
+  // 428 sensors across the five boroughs reporting actual depth at street
+  // level. This is the only source here that is not an estimate: the model was
+  // 18x wrong on 2026-07-18, the gauge gives one number for Central Park, and
+  // an alert covers a whole county — FloodNet says "this corner has water on it
+  // right now". On that Saturday it logged 95 flood events, a burst of sensors
+  // going under at 11:32-11:49, minutes before the 11:53 Flash Flood Warning,
+  // with streets still wet past 16:00.
+  // Open GraphQL, no key. NYC only, so it bails immediately anywhere else.
+  var FLOODNET_URL = 'https://api.floodnet.nyc/v1/graphql';
+  function fnQuery(q){
+    return fetch(FLOODNET_URL, { method:'POST', headers:{'content-type':'application/json'},
+                                 body: JSON.stringify({ query:q }) })
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(j){ return (j && j.data) || null; });
+  }
+  function loadFloodNet(lat, lon){
+    // the network only exists in New York City
+    if (!(lat > 40.40 && lat < 41.10 && lon > -74.35 && lon < -73.60)) return;
+    var ck = 'bvfnsensors:' + lat.toFixed(2) + ',' + lon.toFixed(2), near = null;
+    try{ near = JSON.parse(sessionStorage.getItem(ck) || 'null'); }catch(e){}
+    var withSensors = function(list){
+      if (!list || !list.length) return;
+      var byId = {};
+      list.forEach(function(d){ byId[d.deployment_id] = d; });
+      var ids = list.map(function(d){ return JSON.stringify(d.deployment_id); }).join(',');
+      // an event with no end_time is still running — water is on the ground now
+      // 12h window is load-bearing, not cosmetic: a couple of events never get
+      // an end_time (two sat open at 25h and 48h when this was written), so
+      // trusting end_time alone would latch "water on the street" on forever.
+      // Real floods close in ~0.9h median, 25h max, so 12h loses nothing.
+      var since = new Date(Date.now() - 12*3600000).toISOString().slice(0,19);
+      fnQuery('{ flood_events(where:{deployment_id:{_in:[' + ids + ']}, '
+            + 'end_time:{_is_null:true}, start_time:{_gte:"' + since + '"}}, '
+            + 'order_by:{start_time:desc}, limit:20){ deployment_id start_time event_confidence } }')
+        .then(function(d){
+          var ev = (d && d.flood_events) || [];
+          // low-confidence rows are the network's own noise floor
+          ev = ev.filter(function(e){ return (e.event_confidence == null) || e.event_confidence >= 0.5; });
+          if (!ev.length){ window._floodNetNow = null; return; }
+          var first = ev[ev.length - 1], dep = byId[ev[0].deployment_id] || {};
+          window._floodNetNow = {
+            count: ev.length,
+            place: String(dep.name || '').replace(/^[A-Z]{1,2}\s*-\s*/, ''),   // strip the borough prefix
+            since: first.start_time
+          };
+          try{ if (window._applyRainLine) window._applyRainLine(window._nowcastStr); }catch(e){}
+        }).catch(function(){});
+    };
+    if (near) return withSensors(near);
+    fnQuery('{ deployments_within_radius(args:{lat:' + lat.toFixed(4) + ', lon:' + lon.toFixed(4)
+          + ', radius_meters:8000}, limit:80){ deployment_id name } }')
+      .then(function(d){
+        var list = (d && d.deployments_within_radius) || [];
+        try{ sessionStorage.setItem(ck, JSON.stringify(list)); }catch(e){}
+        withSensors(list);
+      }).catch(function(){});
+  }
+
   // ── TIDES (NOAA CO-OPS) ────────────────────────────────────────────────
   // Coastal cities flood far worse when heavy rain lands near high tide: the
   // storm drains discharge to the harbour, and when the harbour is high they
@@ -15046,6 +15105,13 @@ function floodRateThreshold(lat, lon, soilMoisture){
     // Compound flooding: rain draining into an already-high harbour is the
     // difference between wet streets and water indoors. Only worth saying when
     // a flood alert is actually live — a high tide on a dry day is just a tide.
+    // Sensors in the street outrank every model, gauge and county-wide alert
+    // on this line — it is the one input that is measured where you stand.
+    var fn = window._floodNetNow, fnTxt = '';
+    if (fn && fn.count){
+      fnTxt = 'WATER ON THE STREET \u00b7 ' + fn.count + ' SENSOR' + (fn.count > 1 ? 'S' : '')
+            + (fn.place ? ' \u00b7 ' + fn.place.toUpperCase() : '') + ' \u00b7 ';
+    }
     var tideNote = '';
     if (fa && /flood/i.test(fa.txt) && window._nextHighTide){
       var ht = window._nextHighTide(3);
@@ -15057,11 +15123,11 @@ function floodRateThreshold(lat, lon, soilMoisture){
     // the radar's own flash-flood flag is redundant next to an NWS warning,
     // and the NWS wording is the authoritative one
     if (fa && fa.r >= 4) t = t.replace(/^\uD83C\uDF0A FLASH FLOOD \u00b7 /, '');
-    el.textContent = (fa ? fa.txt : '')
+    el.textContent = fnTxt + (fa ? fa.txt : '')
       + (t ? t : (window._rainChanceStr || ''))
       + (window._rainWindowStr || '') + tideNote;
     el.classList.toggle('rain-flood', !!fa);
-    el.classList.toggle('rain-flood-warn', !!(fa && fa.r >= 4));
+    el.classList.toggle('rain-flood-warn', !!fnTxt || !!(fa && fa.r >= 4));
   };
   // Prefer the authoritative NWS 1-hour Flash Flood Guidance (per-point, from the
   // RFCs) when we have a fresh value nearby. It's the real "rain in 1hr that
@@ -66624,6 +66690,7 @@ function initNowMicroTabs(){
         try{ if (window._applyRainLine) window._applyRainLine(window._nowcastStr); }catch(e){}
         try{ if (window._applyTabAlert) window._applyTabAlert(); }catch(e){}
         try{ if (!window._tideData) loadTides(LOCATION.lat, LOCATION.lon); }catch(e){}
+        try{ loadFloodNet(LOCATION.lat, LOCATION.lon); }catch(e){}
         
         // Also check SPC tornado outlook for user's location
         checkSPCTornadoRisk(function(spcAlert){
