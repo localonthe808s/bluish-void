@@ -70806,6 +70806,7 @@ function closeAlertModal(){
     loadBirdWeather(lat, lon, sol);
     loadEbird(lat, lon);
     loadSeenNearby(lat, lon);
+    placeLastSongCueIfDue(lat, lon, sol);   // no-op until this evening is over
     // Supplementary context, and three aggregate calls — don't spend them on
     // visitors who never scroll this far. One-shot observer, same shape as the
     // radar's heavy-load gate; falls back to a timer where it isn't supported.
@@ -71258,26 +71259,34 @@ function closeAlertModal(){
   // positioned marker appended to the matching hour column, with a stacked
   // badge above it. Re-injected on a timer because the weather row is
   // rebuilt on day switches / live ticks, which drops our node.
-  function placeFirstSongCue(mins, name){
-    window._bvFirstSong = { m: mins, name: name };
+  // Two cues share this: FIRST SONG at dawn and LAST SONG at dusk. They must
+  // carry DIFFERENT marker classes — the "already placed" guard is what stops
+  // the 30s re-injection duplicating them, and a shared class would let
+  // whichever landed first block the other permanently.
+  function placeSongCue(kind, mins, name){
+    var isLast = (kind === 'last');
+    var CLS = isLast ? 'birdsong-marker-last' : 'birdsong-marker';
+    var COL = isLast ? '#6f5bd0' : '#c8871f';
+    var LBL = isLast ? 'LAST SONG' : 'FIRST SONG';
+    if (isLast) window._bvLastSong = { m: mins, name: name };
+    else window._bvFirstSong = { m: mins, name: name };
     function inject(){
       try{
         var row = document.getElementById('today-tl-weather-row');
         if (!row) return;
         var cols = row.querySelectorAll('.today-tl-weather-hour');
         if (!cols.length) return;
-        if (row.querySelector('.birdsong-marker')) return;      // already placed
+        if (row.querySelector('.' + CLS)) return;               // already placed
         var hr = Math.floor(mins/60);
         // mobile compresses 24h into fewer columns — map proportionally
         var idx = cols.length >= 24 ? hr : Math.round(hr * (cols.length - 1) / 23);
         if (idx < 0 || idx >= cols.length) return;
-        var COL = '#c8871f';
         // the hour column is position:static, so an absolute child resolves
         // against the whole strip and lands at its centre — a 3:42 AM first
         // song was rendering at noon. Same fix the frontal badges already use.
         if (getComputedStyle(cols[idx]).position === 'static') cols[idx].style.position = 'relative';
         var marker = document.createElement('div');
-        marker.className = 'birdsong-marker';
+        marker.className = CLS;
         marker.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:15;pointer-events:none;overflow:visible;';
         var band = document.createElement('div');
         band.style.cssText = 'position:absolute;top:0;left:0;width:100%;bottom:-20px;background:'+COL+';opacity:.1;border-radius:10px;';
@@ -71290,8 +71299,8 @@ function closeAlertModal(){
           + 'letter-spacing:.4px;text-align:center;line-height:1.1;z-index:20;white-space:nowrap;'
           + 'box-shadow:0 1px 4px rgba(0,0,0,.3),0 0 8px '+COL+'44;text-shadow:0 1px 1px rgba(0,0,0,.3);'
           + 'pointer-events:auto;cursor:default;';
-        badge.title = name + ' — first song ' + hhmm(mins);
-        badge.textContent = 'FIRST SONG';
+        badge.title = name + ' \u2014 ' + (isLast ? 'last song ' : 'first song ') + hhmm(mins);
+        badge.textContent = LBL;
         marker.appendChild(badge);
         cols[idx].appendChild(marker);
       }catch(e){}
@@ -71299,6 +71308,29 @@ function closeAlertModal(){
     inject();
     setInterval(function(){ if (!document.hidden) inject(); }, 30000);
   }
+  function placeFirstSongCue(mins, name){ placeSongCue('first', mins, name); }
+
+  // LAST SONG only exists once the evening is over — before dusk, today has no
+  // last song yet, so nothing is placed. One small query, fired only after
+  // astronomical dusk, rather than waking the whole (lazy) dusk loader.
+  function placeLastSongCueIfDue(lat, lon, sol){
+    if (!sol || sol.duskAstro == null || sol.sunset == null) return;
+    var now = new Date(), nowMin = now.getHours()*60 + now.getMinutes();
+    if (nowMin < sol.duskAstro) return;                 // the day is not done singing
+    var ymdNow = ymd(now);
+    bwQuery(lat, lon, 0.15, toHHMM(Math.max(0, sol.sunset - 90)), toHHMM(sol.duskAstro), ymdNow, 0.7)
+      .then(function(all){
+        var ns = (all || []).filter(function(n){ return (n.confidence||0) >= 0.85; });
+        var best = null;
+        ns.forEach(function(n){
+          var t = String(n.timestamp||''); if (t.length < 16) return;
+          var m = +t.slice(11,13)*60 + +t.slice(14,16);
+          if (!best || m > best.m) best = { m:m, name:(n.species||{}).commonName || 'Bird' };
+        });
+        if (best) placeSongCue('last', best.m, best.name);
+      }).catch(function(){});
+  }
+
 
   // ── DUSK & NIGHT ──
   // Mirror of the dawn panel. Note the date logic: through the morning and
