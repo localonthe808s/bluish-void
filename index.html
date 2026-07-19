@@ -10391,6 +10391,9 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
    notable sightings. Both non-commercial — attribution in the footer. */
 #birds-widget .bw-wrap{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr) minmax(0,.9fr);gap:16px;padding:10px 10px 4px;}
 @media (max-width:900px){ #birds-widget .bw-wrap{grid-template-columns:1fr;gap:14px;} }
+#birds-widget .bw-seasonnote{padding:2px 10px 10px;font-size:.5rem;font-weight:600;letter-spacing:.02em;
+  color:rgba(43,34,244,.5);line-height:1.55;}
+#birds-widget .bw-seasonnote b{font-weight:900;color:#f97316;letter-spacing:.05em;text-transform:uppercase;font-size:.48rem;}
 #birds-widget .bw-flight{margin:10px 10px 0;padding:11px 13px;border-radius:11px;
   background:rgba(43,34,244,.045);border:1px solid rgba(43,34,244,.10);}
 #birds-widget .bw-flight-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;}
@@ -11581,6 +11584,7 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
   </div>
                 </div>
                     <div class="bw-tl" id="bw-tl"></div>
+                    <div id="bw-season-note" class="bw-seasonnote"></div>
                 </div>
                 <div class="bw-panel" data-bwpanel="dusk" hidden>
                   <div class="bw-wrap">
@@ -70392,6 +70396,7 @@ function closeAlertModal(){
     loadBirdWeather(lat, lon, sol);
     loadEbird(lat, lon);
     loadDusk(lat, lon, sol);
+    setTimeout(loadChorusSeason, 1200);   // supplementary context, not critical path
     document.querySelectorAll('#birds-widget .bw-tab').forEach(function(btn){
       btn.addEventListener('click', function(ev){
         ev.stopPropagation();
@@ -71802,6 +71807,90 @@ function closeAlertModal(){
     if (s.length > 34) s = s.split(',')[0].trim();
     if (s.length > 34){ s = s.slice(0, 34); s = s.slice(0, s.lastIndexOf(' ') > 12 ? s.lastIndexOf(' ') : 34); }
     return s;
+  }
+
+  // ── WHERE THE CHORUS IS IN ITS SEASON ──
+  // A July dawn is not a May dawn: song collapses after the peak as birds
+  // moult and territories break up. Measured for this area, the week of 2026-07-19
+  // ran at 5,900 detections per station against 12,200 in mid-May — 48% —
+  // with 150 species singing versus 191. Presenting the thinner chorus with
+  // the same framing as the peak overstates it, so the widget says where in
+  // the season it is, computed live rather than assumed:
+  //   now vs last week  → direction
+  //   now vs peak week  → how loud the year gets, as a fraction
+  // Uses the aggregate `counts` query, which is immune to the 500-row cap on
+  // `detections`. Four calls, cached for the day.
+  function bwCounts(from, to, cb){
+    var box = 0.4;
+    var q = '{ counts(classifications: ["avian"], '
+      + 'ne: {lat: ' + (_bvLat+box).toFixed(3) + ', lon: ' + (_bvLon+box).toFixed(3) + '}, '
+      + 'sw: {lat: ' + (_bvLat-box).toFixed(3) + ', lon: ' + (_bvLon-box).toFixed(3) + '}, '
+      + 'period: {from: ' + JSON.stringify(from) + ', to: ' + JSON.stringify(to) + '}) '
+      + '{ detections species stations } }';
+    fetch(BW_URL, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({query:q})})
+      .then(function(r){ return r.json(); })
+      .then(function(j){ cb((((j||{}).data)||{}).counts || null); })
+      .catch(function(){ cb(null); });
+  }
+
+  function loadChorusSeason(){
+    var el = $('bw-season-note'); if (!el) return;
+    var ck = 'bvchorus:' + _bvLat.toFixed(1) + ',' + _bvLon.toFixed(1) + ':' + ymd(new Date());
+    var cached = null;
+    try{ cached = JSON.parse(sessionStorage.getItem(ck) || 'null'); }catch(e){}
+    if (cached) return renderChorusSeason(cached);
+    var day = 86400000, now = new Date();
+    var wk = function(endOffsetDays){
+      var e = new Date(now.getTime() - endOffsetDays*day);
+      return [ymd(new Date(e.getTime() - 6*day)), ymd(e)];
+    };
+    // the loudest week of the year: mid-May north of the equator, mid-November
+    // south of it, where the breeding season sits half a year away
+    var y = now.getFullYear();
+    var peak = _bvLat >= 0 ? [y+'-05-11', y+'-05-17'] : [y+'-11-09', y+'-11-15'];
+    // if that week has not happened yet, last year's is the honest reference
+    if (new Date(peak[1]).getTime() > now.getTime()){
+      peak = _bvLat >= 0 ? [(y-1)+'-05-11', (y-1)+'-05-17'] : [(y-1)+'-11-09', (y-1)+'-11-15'];
+    }
+    var t = wk(0), l = wk(7);
+    var got = {};
+    var done = function(){
+      if (got.now === undefined || got.last === undefined || got.peak === undefined) return;
+      try{ sessionStorage.setItem(ck, JSON.stringify(got)); }catch(e){}
+      renderChorusSeason(got);
+    };
+    bwCounts(t[0], t[1], function(c){ got.now  = c; done(); });
+    bwCounts(l[0], l[1], function(c){ got.last = c; done(); });
+    bwCounts(peak[0], peak[1], function(c){ got.peak = c; done(); });
+  }
+
+  function renderChorusSeason(g){
+    var el = $('bw-season-note'); if (!el) return;
+    var per = function(c){ return c && c.stations ? c.detections / c.stations : 0; };
+    var n = per(g.now), l = per(g.last), p = per(g.peak);
+    if (!n || !p){ el.innerHTML = ''; return; }
+    var pct = Math.round(100 * n / p);
+    var rising = l ? n > l * 1.05 : false, falling = l ? n < l * 0.95 : false;
+    var phase, note;
+    if (pct >= 85){ phase = 'Peak chorus'; note = 'song is at its loudest of the year'; }
+    else if (pct >= 60){
+      phase = rising ? 'Building toward peak' : 'Just past peak';
+      note = 'running at ' + pct + '% of the year’s high';
+    } else if (pct >= 30){
+      phase = rising ? 'Building' : 'Past peak, thinning';
+      note = 'running at ' + pct + '% of the year’s high'
+           + (falling ? ' and still falling week to week' : '');
+    } else {
+      phase = 'Off-season quiet';
+      note = 'at ' + pct + '% of the year’s high — most of what you hear now is contact calls, not full song';
+    }
+    var sp = (g.now && g.now.species) || 0, psp = (g.peak && g.peak.species) || 0;
+    var tail = falling && pct < 85
+      ? ' Song fades through midsummer as birds moult and territories break up.'
+      : rising && pct < 85 ? ' Song builds through spring as territories are claimed.' : '';
+    el.innerHTML = '<b>' + phase + '</b> — ' + note
+      + (sp && psp ? ', with ' + sp + ' species detected this week against ' + psp + ' at the peak' : '')
+      + '.' + tail;
   }
 
   // ── SEASONAL STATUS (GBIF) ──
