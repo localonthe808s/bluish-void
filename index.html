@@ -52427,35 +52427,62 @@ function initNowMicroTabs(){
       var self = this;
       this._debouncedUpdate = function(){ clearTimeout(self._updateTimer); self._updateTimer = setTimeout(function(){ self._update(); }, 250); };
       map.on('moveend zoomend resize', this._debouncedUpdate, this);
+      // keep the existing image glued to the ground while its replacement loads
+      this._repos = function(){ self._reposition(); };
+      map.on('zoom zoomanim move viewreset', this._repos, this);
       this._update();
     },
     onRemove: function(map){
       if(this._imgEl && this._imgEl.parentNode) this._imgEl.parentNode.removeChild(this._imgEl);
       map.off('moveend zoomend resize', this._debouncedUpdate, this);
+      if (this._repos) map.off('zoom zoomanim move viewreset', this._repos, this);
       clearTimeout(this._updateTimer);
+    },
+    // Re-anchors the CURRENT image to the bounds it was requested for. It used
+    // to move only on moveend/zoomend, so through a zoom it sat at the wrong
+    // scale and lagged the basemap — the visible "not anchored".
+    _reposition: function(){
+      if(!this._map || !this._imgEl || !this._imgBounds) return;
+      var tl = this._map.latLngToLayerPoint(this._imgBounds.getNorthWest());
+      var br = this._map.latLngToLayerPoint(this._imgBounds.getSouthEast());
+      L.DomUtil.setPosition(this._imgEl, tl);
+      this._imgEl.style.width  = (br.x - tl.x) + 'px';
+      this._imgEl.style.height = (br.y - tl.y) + 'px';
     },
     _update: function(){
       if(!this._map) return;
       var bounds = this._map.getBounds();
       var size = this._map.getSize();
-      var bbox = bounds.getWest()+','+bounds.getSouth()+','+bounds.getEast()+','+bounds.getNorth();
-      var w = Math.min(size.x, 2048);
-      var h = Math.min(size.y, 2048);
+      // Request in the MAP'S OWN projection. bboxSR/imageSR=4326 made ArcGIS
+      // render an equirectangular image that was then stretched onto a Web
+      // Mercator viewport — features drift vertically, worse zoomed out and
+      // worse at higher latitude, which is why the misalignment came and went
+      // rather than being constant.
+      var _sw = L.CRS.EPSG3857.project(bounds.getSouthWest());
+      var _ne = L.CRS.EPSG3857.project(bounds.getNorthEast());
+      var bbox = _sw.x+','+_sw.y+','+_ne.x+','+_ne.y;
+      // Clamp to the server limit but KEEP the aspect ratio: clamping each axis
+      // on its own returns an image shaped differently to the box it is
+      // stretched into, skewing every feature off its true position.
+      var w = size.x, h = size.y;
+      if (w > 2048 || h > 2048){
+        var _k = Math.min(2048 / w, 2048 / h);
+        w = Math.max(1, Math.round(w * _k));
+        h = Math.max(1, Math.round(h * _k));
+      }
+      // anchor to the bounds this image is FOR, not to wherever the map has
+      // drifted to by the time it arrives
+      this._imgBounds = bounds;
       var url;
       if(this._isImage){
-        url = this._url + '/exportImage?bbox='+bbox+'&bboxSR=4326&imageSR=4326&size='+w+','+h+'&format=png32&transparent=true&f=image';
+        url = this._url + '/exportImage?bbox='+bbox+'&bboxSR=3857&imageSR=3857&size='+w+','+h+'&format=png32&transparent=true&f=image';
         if(this._renderingRule) url += '&renderingRule='+encodeURIComponent(JSON.stringify(this._renderingRule));
       } else {
-        url = this._url + '/export?bbox='+bbox+'&bboxSR=4326&imageSR=4326&size='+w+','+h+'&dpi=96&format=png32&transparent=true&f=image';
+        url = this._url + '/export?bbox='+bbox+'&bboxSR=3857&imageSR=3857&size='+w+','+h+'&dpi=96&format=png32&transparent=true&f=image';
         if(this._layers) url += '&layers=show:'+this._layers;
       }
       this._imgEl.src = url;
-      // Position image to match map bounds
-      var topLeft = this._map.latLngToLayerPoint(bounds.getNorthWest());
-      var bottomRight = this._map.latLngToLayerPoint(bounds.getSouthEast());
-      L.DomUtil.setPosition(this._imgEl, topLeft);
-      this._imgEl.style.width = (bottomRight.x - topLeft.x) + 'px';
-      this._imgEl.style.height = (bottomRight.y - topLeft.y) + 'px';
+      this._reposition();
     }
   });
 
