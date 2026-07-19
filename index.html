@@ -70807,6 +70807,7 @@ function closeAlertModal(){
     loadEbird(lat, lon);
     loadSeenNearby(lat, lon);
     placeLastSongCueIfDue(lat, lon, sol);   // no-op until this evening is over
+    watchDayNavForCues(lat, lon, sol);       // yesterday's cues load when you step back
     // Supplementary context, and three aggregate calls — don't spend them on
     // visitors who never scroll this far. One-shot observer, same shape as the
     // radar's heavy-load gate; falls back to a timer where it isn't supported.
@@ -71259,188 +71260,146 @@ function closeAlertModal(){
   // positioned marker appended to the matching hour column, with a stacked
   // badge above it. Re-injected on a timer because the weather row is
   // rebuilt on day switches / live ticks, which drops our node.
-  // Two cues share this: FIRST SONG at dawn and LAST SONG at dusk. They must
-  // carry DIFFERENT marker classes — the "already placed" guard is what stops
-  // the 30s re-injection duplicating them, and a shared class would let
-  // whichever landed first block the other permanently.
-  function placeSongCue(kind, mins, name){
+  // ── SONG CUES ON THE TODAY STRIP ──────────────────────────────────────
+  // FIRST SONG at dawn, LAST SONG at dusk. Both are keyed BY DATE: the strip
+  // is a day browser, so a cue must belong to the day on screen. Without that
+  // the markers simply re-injected onto whatever day was showing, and stepping
+  // back to yesterday put today's 3:42 AM cue on yesterday's timeline.
+  var _songCues = {};                     // 'YYYY-MM-DD' -> {first:{m,name}, last:{m,name}}
+  function _cueDateStr(){
+    var d = new Date();
+    d.setDate(d.getDate() + (window._tlDayOffset || 0));
+    return ymd(d);
+  }
+  function _placeCueMarker(cols, kind, mins, name, ds){
     var isLast = (kind === 'last');
     var CLS = isLast ? 'birdsong-marker-last' : 'birdsong-marker';
     var COL = isLast ? '#6f5bd0' : '#c8871f';
-    var LBL = isLast ? 'LAST SONG' : 'FIRST SONG';
-    if (isLast) window._bvLastSong = { m: mins, name: name };
-    else window._bvFirstSong = { m: mins, name: name };
-    function inject(){
-      try{
-        var row = document.getElementById('today-tl-weather-row');
-        if (!row) return;
-        var cols = row.querySelectorAll('.today-tl-weather-hour');
-        if (!cols.length) return;
-        if (row.querySelector('.' + CLS)) return;               // already placed
-        var hr = Math.floor(mins/60);
-        // mobile compresses 24h into fewer columns — map proportionally
-        var idx = cols.length >= 24 ? hr : Math.round(hr * (cols.length - 1) / 23);
-        if (idx < 0 || idx >= cols.length) return;
-        // the hour column is position:static, so an absolute child resolves
-        // against the whole strip and lands at its centre — a 3:42 AM first
-        // song was rendering at noon. Same fix the frontal badges already use.
-        if (getComputedStyle(cols[idx]).position === 'static') cols[idx].style.position = 'relative';
-        var marker = document.createElement('div');
-        marker.className = CLS;
-        marker.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:15;pointer-events:none;overflow:visible;';
-        var band = document.createElement('div');
-        band.style.cssText = 'position:absolute;top:0;left:0;width:100%;bottom:-20px;background:'+COL+';opacity:.1;border-radius:10px;';
-        marker.appendChild(band);
-        var badge = document.createElement('div');
-        // stacks flush ON TOP of the frontal badges (those sit at -30px and run
-        // ~15px tall) — one single-line label, no gap between the two
-        badge.style.cssText = 'position:absolute;top:-45px;left:50%;transform:translateX(-50%);'
-          + 'background:'+COL+';color:#fff;font-size:7.5px;font-weight:800;padding:3px 10px;border-radius:5px;'
-          + 'letter-spacing:.4px;text-align:center;line-height:1.1;z-index:20;white-space:nowrap;'
-          + 'box-shadow:0 1px 4px rgba(0,0,0,.3),0 0 8px '+COL+'44;text-shadow:0 1px 1px rgba(0,0,0,.3);'
-          + 'pointer-events:auto;cursor:default;';
-        badge.title = name + ' \u2014 ' + (isLast ? 'last song ' : 'first song ') + hhmm(mins);
-        badge.textContent = LBL;
-        marker.appendChild(badge);
-        cols[idx].appendChild(marker);
-      }catch(e){}
-    }
-    inject();
-    setInterval(function(){ if (!document.hidden) inject(); }, 30000);
+    var hr = Math.floor(mins/60);
+    // mobile compresses 24h into fewer columns — map proportionally
+    var idx = cols.length >= 24 ? hr : Math.round(hr * (cols.length - 1) / 23);
+    if (idx < 0 || idx >= cols.length) return;
+    // the hour column is position:static, so an absolute child resolves against
+    // the whole strip and lands at its centre — a 3:42 AM cue rendered at noon.
+    if (getComputedStyle(cols[idx]).position === 'static') cols[idx].style.position = 'relative';
+    var marker = document.createElement('div');
+    marker.className = CLS;
+    marker.setAttribute('data-day', ds);
+    marker.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:15;pointer-events:none;overflow:visible;';
+    var band = document.createElement('div');
+    band.style.cssText = 'position:absolute;top:0;left:0;width:100%;bottom:-20px;background:'+COL+';opacity:.1;border-radius:10px;';
+    marker.appendChild(band);
+    var badge = document.createElement('div');
+    badge.style.cssText = 'position:absolute;top:-45px;left:50%;transform:translateX(-50%);'
+      + 'background:'+COL+';color:#fff;font-size:7.5px;font-weight:800;padding:3px 10px;border-radius:5px;'
+      + 'letter-spacing:.4px;text-align:center;line-height:1.1;z-index:20;white-space:nowrap;'
+      + 'box-shadow:0 1px 4px rgba(0,0,0,.3),0 0 8px '+COL+'44;text-shadow:0 1px 1px rgba(0,0,0,.3);'
+      + 'pointer-events:auto;cursor:default;';
+    badge.title = name + ' \u2014 ' + (isLast ? 'last song ' : 'first song ') + hhmm(mins);
+    badge.textContent = isLast ? 'LAST SONG' : 'FIRST SONG';
+    marker.appendChild(badge);
+    cols[idx].appendChild(marker);
   }
-  function placeFirstSongCue(mins, name){ placeSongCue('first', mins, name); }
+  function injectSongCues(){
+    try{
+      var row = document.getElementById('today-tl-weather-row'); if (!row) return;
+      var cols = row.querySelectorAll('.today-tl-weather-hour'); if (!cols.length) return;
+      var ds = _cueDateStr(), want = _songCues[ds] || {};
+      ['first','last'].forEach(function(kind){
+        var cls = kind === 'last' ? 'birdsong-marker-last' : 'birdsong-marker';
+        var have = row.querySelector('.' + cls), cue = want[kind];
+        // right day already drawn? leave it. otherwise clear and redraw.
+        if (have && have.getAttribute('data-day') === ds && cue) return;
+        if (have && have.parentNode) have.parentNode.removeChild(have);
+        if (cue) _placeCueMarker(cols, kind, cue.m, cue.name, ds);
+      });
+    }catch(e){}
+  }
+  function registerSongCue(kind, dateStr, mins, name){
+    if (!_songCues[dateStr]) _songCues[dateStr] = {};
+    _songCues[dateStr][kind] = { m:mins, name:name };
+    if (kind === 'first') window._bvFirstSong = { m:mins, name:name };
+    else window._bvLastSong = { m:mins, name:name };
+    injectSongCues();
+  }
+  function placeFirstSongCue(mins, name){ registerSongCue('first', ymd(new Date()), mins, name); }
+  // 5s, not 30s: the strip rebuilds on every day change and the cue has to
+  // follow promptly, otherwise a stale day's badge lingers on screen
+  setInterval(function(){ if (!document.hidden) injectSongCues(); }, 5000);
 
-  // LAST SONG only exists once the evening is over — before dusk, today has no
-  // last song yet, so nothing is placed. One small query, fired only after
-  // astronomical dusk, rather than waking the whole (lazy) dusk loader.
-  function placeLastSongCueIfDue(lat, lon, sol){
-    if (!sol || sol.duskAstro == null || sol.sunset == null) return;
-    var now = new Date(), nowMin = now.getHours()*60 + now.getMinutes();
-    if (nowMin < sol.duskAstro) return;                 // the day is not done singing
-    var ymdNow = ymd(now);
-    bwQuery(lat, lon, 0.15, toHHMM(Math.max(0, sol.sunset - 90)), toHHMM(sol.duskAstro), ymdNow, 0.7)
-      .then(function(all){
-        var ns = (all || []).filter(function(n){ return (n.confidence||0) >= 0.85; });
+  // ── SONG TIMES FOR ANY DAY ────────────────────────────────────────────
+  // Onset has to be found slice-by-slice for the same reason the chorus loader
+  // does it: `detections` returns the newest 500 and nothing older, so a single
+  // wide query drops the early birds and reports first song hours late. The
+  // probes ask for one row with no species payload, so a whole morning of them
+  // costs less than one real query.
+  function fetchSongCuesFor(lat, lon, sol, date){
+    var ds = ymd(date);
+    if (_songCues[ds] && _songCues[ds].first) return;
+    if (!sol || sol.astro == null || sol.sunrise == null) return;
+    var BOX = 0.15;
+    var probe = function(from, to){
+      var q = '{ detections(first: 1, ne: {lat: '+(lat+BOX)+', lon: '+(lon+BOX)+'}, '
+            + 'sw: {lat: '+(lat-BOX)+', lon: '+(lon-BOX)+'}, classifications: ["avian"], '
+            + 'confidenceGte: 0.5, timeOfDayGte: '+toHHMM(from)+', timeOfDayLte: '+toHHMM(to)+', '
+            + 'period: {from: "'+ds+'", to: "'+ds+'"}) { nodes { timestamp } } }';
+      return fetch(BW_URL, {method:'POST', headers:{'content-type':'application/json'},
+                            body: JSON.stringify({query:q})})
+        .then(function(r){ return r.json(); })
+        .then(function(j){ return ((((j||{}).data||{}).detections||{}).nodes||[]).length > 0; })
+        .catch(function(){ return false; });
+    };
+    var slices = [];
+    for (var t0 = sol.astro; t0 < sol.sunrise + 60; t0 += 20) slices.push(t0);
+    Promise.all(slices.map(function(t){ return probe(t, t + 20); })).then(function(hits){
+      var i = hits.indexOf(true); if (i < 0) return;
+      var from = slices[i];
+      bwQuery(lat, lon, BOX, toHHMM(from), toHHMM(from + 20), ds, 0.5).then(function(ns){
         var best = null;
-        ns.forEach(function(n){
+        (ns || []).forEach(function(n){
           var t = String(n.timestamp||''); if (t.length < 16) return;
           var m = +t.slice(11,13)*60 + +t.slice(14,16);
-          if (!best || m > best.m) best = { m:m, name:(n.species||{}).commonName || 'Bird' };
+          if (!best || m < best.m) best = { m:m, name:(n.species||{}).commonName || 'Bird' };
         });
-        if (best) placeSongCue('last', best.m, best.name);
+        if (best) registerSongCue('first', ds, best.m, best.name);
       }).catch(function(){});
+    }).catch(function(){});
+    // last song: one query over that day's evening, high bar
+    if (sol.sunset != null && sol.duskAstro != null){
+      bwQuery(lat, lon, BOX, toHHMM(Math.max(0, sol.sunset - 90)), toHHMM(sol.duskAstro), ds, 0.7)
+        .then(function(all){
+          var best = null;
+          (all || []).filter(function(n){ return (n.confidence||0) >= 0.85; }).forEach(function(n){
+            var t = String(n.timestamp||''); if (t.length < 16) return;
+            var m = +t.slice(11,13)*60 + +t.slice(14,16);
+            if (!best || m > best.m) best = { m:m, name:(n.species||{}).commonName || 'Bird' };
+          });
+          if (best) registerSongCue('last', ds, best.m, best.name);
+        }).catch(function(){});
+    }
+  }
+  // today's last song only exists once the evening is over
+  function placeLastSongCueIfDue(lat, lon, sol){
+    if (!sol || sol.duskAstro == null) return;
+    var now = new Date();
+    if (now.getHours()*60 + now.getMinutes() < sol.duskAstro) return;
+    fetchSongCuesFor(lat, lon, sol, now);
+  }
+  // stepping back a day pulls that day's real times, once
+  function watchDayNavForCues(lat, lon, sol){
+    var last = null;
+    setInterval(function(){
+      if (document.hidden) return;
+      var off = window._tlDayOffset || 0;
+      if (off === last) return;
+      last = off;
+      if (off >= 0) return;                       // future days have no record
+      if (off < -6) return;                       // beyond BirdWeather's useful range
+      var d = new Date(); d.setDate(d.getDate() + off);
+      fetchSongCuesFor(lat, lon, sol, d);
+    }, 1500);
   }
 
-
-  // ── DUSK & NIGHT ──
-  // Mirror of the dawn panel. Note the date logic: through the morning and
-  // afternoon, today's dusk hasn't happened yet, so the most recent
-  // completed evening is YESTERDAY's — and the night that follows it runs
-  // into today's small hours. Two queries, two dates.
-  function ymdOf(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
-  function loadDusk(lat, lon, sol){
-    var BOX = 0.15, now = new Date();
-    var nowMin = now.getHours()*60 + now.getMinutes();
-    var evDate = new Date(now);
-    var finished = (sol.duskAstro != null && nowMin >= sol.duskAstro);
-    if (!finished) evDate.setDate(evDate.getDate() - 1);      // last completed evening
-    var nightDate = new Date(evDate); nightDate.setDate(nightDate.getDate() + 1);
-    var evYmd = ymdOf(evDate), nightYmd = ymdOf(nightDate);
-    var evStart = Math.max(0, (sol.sunset != null ? sol.sunset : 1200) - 90);
-
-    // dusk window: sunset-90 -> midnight
-    var evEnd = (sol.duskAstro != null ? sol.duskAstro : 1380);
-    bwQuery(lat, lon, BOX, toHHMM(evStart), toHHMM(evEnd), evYmd, 0.7).then(function(all){
-      var ns = all.filter(function(n){ return (n.confidence||0) >= 0.85; });
-      var last = {}, counts = {};
-      ns.forEach(function(n){
-        var sp = (n.species||{}).commonName; if (!sp) return;
-        var t = String(n.timestamp||''); if (t.length < 16) return;
-        var mins = +t.slice(11,13)*60 + +t.slice(14,16);
-        counts[sp] = (counts[sp]||0) + 1;
-        if (!last[sp] || mins > last[sp].m)
-          last[sp] = { m:mins, name:sp, sci:(n.species||{}).scientificName||'', sid2:(n.species||{}).id||'',
-                       thumb:(n.species||{}).thumbnailUrl||'' };
-      });
-      var rows = Object.keys(last).map(function(k){ var r = last[k]; r.count = counts[k]; return r; })
-                   .sort(function(a,b){ return b.m - a.m; });          // latest first
-      if (!rows.length){
-        $('bwd-sp').textContent = 'nothing detected at dusk';
-        $('bwd-heard').innerHTML = '<div class="bw-empty">No detections that evening.</div>';
-        renderDuskBar(sol, []);
-        return;
-      }
-      var f = rows[0];
-      $('bwd-time').innerHTML = hhmmHero(f.m);
-      $('bwd-sp').textContent = f.name;
-      $('bwd-sci').textContent = f.sci;
-      heroPhoto(f.sid2, $('bwd-heroimg'), f.thumb);
-      if (sol.dusk != null){
-        var dm = Math.round(f.m - sol.dusk);
-        $('bwd-delta').textContent = dm > 0 ? dm + ' min after civil dusk'
-                                   : dm < 0 ? Math.abs(dm) + ' min before civil dusk' : 'at civil dusk';
-      }
-      $('bwd-when').textContent = finished ? 'tonight' : 'last night \u00b7 ' + evYmd.slice(5).replace('-','/');
-      renderDuskBar(sol, rows);
-      wireHero('bwd-hero-hit', f);
-      $('bwd-heard').innerHTML = rows.slice(0,12).map(function(r){
-        return '<div class="bw-row bw-clickable" data-sid="'+esc(r.sid2||'')+'" data-nm="'+esc(r.name)+'" data-m="'+r.m+'" data-ct="'+(r.count||0)+'">'
-          + (r.thumb ? '<img class="bw-th" src="'+esc(r.thumb)+'" alt="" loading="lazy">' : '<div class="bw-th" style="mask-image:none;-webkit-mask-image:none;background:rgba(43,34,244,.06);border-radius:6px;"></div>')
-          + '<div class="bw-nm"><span class="bw-tm">'+hhmm(r.m)+'</span>'+esc(r.name)+'<i>'+esc(r.sci)+'</i></div>'
-          + '<div class="bw-ct">'+r.count+'</div></div>';
-      }).join('');
-      $('bwd-heard').querySelectorAll('.bw-clickable').forEach(function(el){
-        el.addEventListener('click', function(ev){ ev.stopPropagation();
-          openBirdPopup(el.getAttribute('data-sid'), el.getAttribute('data-nm'), el.getAttribute('data-m'), el.getAttribute('data-ct'), null, el.querySelector('.bw-th')); });
-      });
-    }).catch(function(){
-      $('bwd-sp').textContent = 'unavailable';
-      $('bwd-heard').innerHTML = '<div class="bw-empty">Dusk data unavailable.</div>';
-    });
-
-    // Overnight, at a high bar — the small hours are where BirdNET's false
-    // positives live. This used to start at midnight, which left anything
-    // calling between astronomical dusk and midnight in no list at all: the
-    // dusk query stops AT astronomical dusk. Two queries now, either side of
-    // midnight, so the night is continuous and every bird that called is
-    // here — including the migrants the MIGRATION tab shows overhead.
-    var lateStart = (sol.duskAstro != null ? sol.duskAstro : 1320);
-    Promise.all([
-      bwQuery(lat, lon, BOX, toHHMM(lateStart), 2359, evYmd, 0.7).catch(function(){ return []; }),
-      bwQuery(lat, lon, BOX, 0, toHHMM(sol.astro != null ? sol.astro : 200), nightYmd, 0.7)
-    ]).then(function(res){
-      var all = (res[0] || []).concat(res[1] || []);
-      var ns = all.filter(function(n){ return (n.confidence||0) >= 0.85; });
-      var first = {}, counts = {};
-      ns.forEach(function(n){
-        var sp = (n.species||{}).commonName; if (!sp) return;
-        var t = String(n.timestamp||''); if (t.length < 16) return;
-        var mins = +t.slice(11,13)*60 + +t.slice(14,16);
-        counts[sp] = (counts[sp]||0) + 1;
-        // the night runs across midnight, so 23:00 must read as EARLIER than
-        // 03:00 — compare on minutes-since-18:00, not minutes-since-midnight
-        if (!first[sp] || nightKey(mins) < nightKey(first[sp].m))
-          first[sp] = { m:mins, name:sp, sci:(n.species||{}).scientificName||'', sid2:(n.species||{}).id||'',
-                        thumb:(n.species||{}).thumbnailUrl||'' };
-      });
-      var rows = Object.keys(first).map(function(k){ var r = first[k]; r.count = counts[k]; return r; })
-                   .sort(function(a,b){ return nightKey(a.m) - nightKey(b.m); });
-      if (!rows.length){
-        $('bwd-night').innerHTML = '<div class="bw-empty">Silent overnight \u2014 nothing above 85% confidence.</div>';
-        return;
-      }
-      $('bwd-night').innerHTML = rows.slice(0,12).map(function(r){
-        return '<div class="bw-row bw-clickable" data-sid="'+esc(r.sid2||'')+'" data-nm="'+esc(r.name)+'" data-m="'+r.m+'" data-ct="'+(r.count||0)+'">'
-          + (r.thumb ? '<img class="bw-th" src="'+esc(r.thumb)+'" alt="" loading="lazy">' : '<div class="bw-th" style="mask-image:none;-webkit-mask-image:none;background:rgba(43,34,244,.06);border-radius:6px;"></div>')
-          + '<div class="bw-nm"><span class="bw-tm">'+hhmm(r.m)+'</span>'+esc(r.name)+'<i>'+esc(r.sci)+'</i></div>'
-          + '<div class="bw-ct">'+r.count+'</div></div>';
-      }).join('');
-      $('bwd-night').querySelectorAll('.bw-clickable').forEach(function(el){
-        el.addEventListener('click', function(ev){ ev.stopPropagation();
-          openBirdPopup(el.getAttribute('data-sid'), el.getAttribute('data-nm'), el.getAttribute('data-m'), el.getAttribute('data-ct'), null, el.querySelector('.bw-th')); });
-      });
-    }).catch(function(){ $('bwd-night').innerHTML = '<div class="bw-empty">Unavailable.</div>'; });
-  }
 
   // evening twilight bar — same construction as the dawn one, ramp reversed
   function renderDuskBar(sol, rows){
