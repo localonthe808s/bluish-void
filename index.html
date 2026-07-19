@@ -70452,7 +70452,7 @@ function closeAlertModal(){
     var q = '{ detections(first: 500, ne: {lat: '+(lat+box)+', lon: '+(lon+box)+'}, sw: {lat: '+(lat-box)+', lon: '+(lon-box)+'}, '
           + 'classifications: ["avian"], confidenceGte: '+(conf == null ? 0.5 : conf)+', timeOfDayGte: '+gte+', timeOfDayLte: '+lte+', '
           + 'period: {from: "'+ymd+'", to: "'+ymd+'"}) '
-          + '{ nodes { timestamp confidence species { id commonName scientificName thumbnailUrl imageUrl wikipediaUrl } station { id name } } } }';
+          + '{ nodes { timestamp confidence species { id commonName scientificName thumbnailUrl } station { id name } } } }';
     return fetch(BW_URL, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({query:q})})
       .then(function(r){ return r.json(); })
       .then(function(j){
@@ -70469,7 +70469,7 @@ function closeAlertModal(){
       counts[sp] = (counts[sp]||0) + 1;
       if (!first[sp] || mins < first[sp].m)
         first[sp] = { m:mins, name:sp, sid2:(n.species||{}).id||'', sci:(n.species||{}).scientificName||'',
-                      thumb:(n.species||{}).thumbnailUrl||'', big:(n.species||{}).imageUrl||'', wiki:(n.species||{}).wikipediaUrl||'', st:((n.station||{}).name||''), sid:((n.station||{}).id||'') };
+                      thumb:(n.species||{}).thumbnailUrl||'', st:((n.station||{}).name||''), sid:((n.station||{}).id||'') };
     });
     return Object.keys(first).map(function(k){ var r=first[k]; r.count=counts[k]; return r; })
              .sort(function(a,b){ return a.m - b.m; });
@@ -70768,9 +70768,7 @@ function closeAlertModal(){
       $('bw-time').innerHTML = hhmmHero(f.m);
       $('bw-sp').textContent = f.name;
       $('bw-sci').textContent = f.sci;
-      if (f.big || f.thumb) $('bw-heroimg').src = f.big || f.thumb;
-      fitPhoto($('bw-heroimg'));
-      if (f.wiki) upgradePhoto($('bw-heroimg'), f.wiki);
+      heroPhoto(f.sid2, $('bw-heroimg'), f.thumb);
       var sub = $('birds-sub');
       if (sub && f.st){
         var nm = String(f.st).replace('BirdNET-Pi - ','');
@@ -70874,8 +70872,7 @@ function closeAlertModal(){
         counts[sp] = (counts[sp]||0) + 1;
         if (!last[sp] || mins > last[sp].m)
           last[sp] = { m:mins, name:sp, sci:(n.species||{}).scientificName||'', sid2:(n.species||{}).id||'',
-                       thumb:(n.species||{}).thumbnailUrl||'', big:(n.species||{}).imageUrl||'',
-                       wiki:(n.species||{}).wikipediaUrl||'' };
+                       thumb:(n.species||{}).thumbnailUrl||'' };
       });
       var rows = Object.keys(last).map(function(k){ var r = last[k]; r.count = counts[k]; return r; })
                    .sort(function(a,b){ return b.m - a.m; });          // latest first
@@ -70889,9 +70886,7 @@ function closeAlertModal(){
       $('bwd-time').innerHTML = hhmmHero(f.m);
       $('bwd-sp').textContent = f.name;
       $('bwd-sci').textContent = f.sci;
-      if (f.big || f.thumb) $('bwd-heroimg').src = f.big || f.thumb;
-      fitPhoto($('bwd-heroimg'));
-      if (f.wiki) upgradePhoto($('bwd-heroimg'), f.wiki);
+      heroPhoto(f.sid2, $('bwd-heroimg'), f.thumb);
       if (sol.dusk != null){
         var dm = Math.round(f.m - sol.dusk);
         $('bwd-delta').textContent = dm > 0 ? dm + ' min after civil dusk'
@@ -71367,16 +71362,37 @@ function closeAlertModal(){
       $('bw-time').innerHTML = hhmmHero(mins);
       $('bw-sp').textContent = s.commonName || '';
       $('bw-sci').textContent = s.scientificName || '';
-      var img = $('bw-heroimg');
-      if (img && (s.imageUrl || s.thumbnailUrl)){
-        img.src = s.imageUrl || s.thumbnailUrl;
-        fitPhoto(img);
-        if (s.wikipediaUrl) upgradePhoto(img, s.wikipediaUrl);
-      }
+      heroPhoto(s.id, $('bw-heroimg'), s.thumbnailUrl);
       var del = $('bw-delta');
       if (del) del.textContent = 'latest call before dawn';
       wireHero('bw-hero-hit', { sid2:s.id||'', name:s.commonName||'', m:mins, count:0, sci:s.scientificName||'' });
     }).catch(function(){});
+  }
+
+  // The full-size photo and Wikipedia link are only ever needed for the ONE
+  // hero bird, but they were being returned for all 500 detections in every
+  // query — 86 KB of URLs per call, ~340 KB a page load. The list rows use the
+  // thumbnail that already comes back; the hero fetches its own, once, cached.
+  function heroPhoto(sid, img, thumb){
+    if (!img) return;
+    if (thumb){ img.src = thumb; fitPhoto(img); }
+    if (!sid) return;
+    var ck = 'bvherophoto:' + sid, c = null;
+    try{ c = JSON.parse(sessionStorage.getItem(ck) || 'null'); }catch(e){}
+    var apply = function(o){
+      if (!o) return;
+      if (o.imageUrl){ img.src = o.imageUrl; fitPhoto(img); }
+      if (o.wikipediaUrl) upgradePhoto(img, o.wikipediaUrl);
+    };
+    if (c) return apply(c);
+    fetch(BW_URL, {method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({query:'{ species(id: ' + JSON.stringify(String(sid)) + ') { imageUrl wikipediaUrl } }'})})
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        var o = (((j||{}).data)||{}).species || null;
+        if (o){ try{ sessionStorage.setItem(ck, JSON.stringify(o)); }catch(e){} }
+        apply(o);
+      }).catch(function(){});
   }
 
   // the big first/last-song bird opens its popup too
@@ -72425,8 +72441,21 @@ function closeAlertModal(){
   function loadEbird(lat, lon){
     var url = 'https://api.ebird.org/v2/data/obs/geo/recent/notable?lat='+lat.toFixed(3)+'&lng='+lon.toFixed(3)
             + '&dist=25&back=7&maxResults=40';
-    fetch(url, {headers:{'x-ebirdapitoken': EBIRD_KEY}})
-      .then(function(r){ return r.ok ? r.json() : []; })
+    // Notable sightings cover the past week and barely move hour to hour,
+    // while eBird is the slowest and most rate-limited source here — so a
+    // reload inside half an hour reuses the answer instead of asking again.
+    var ck = 'bvrare:' + lat.toFixed(2) + ',' + lon.toFixed(2), fresh = null;
+    try{
+      var c = JSON.parse(sessionStorage.getItem(ck) || 'null');
+      if (c && (Date.now() - c.t) < 1800000) fresh = c.j;
+    }catch(e){}
+    (fresh ? Promise.resolve(fresh)
+           : fetch(url, {headers:{'x-ebirdapitoken': EBIRD_KEY}})
+               .then(function(r){ return r.ok ? r.json() : []; })
+               .then(function(j){
+                 try{ sessionStorage.setItem(ck, JSON.stringify({t:Date.now(), j:j})); }catch(e){}
+                 return j;
+               }))
       .then(function(j){
         var seen = {}, out = [];
         (j||[]).forEach(function(o){
