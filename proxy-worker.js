@@ -54,6 +54,14 @@ const CACHE_RULES = {
   'kauai.ccmc.gsfc.nasa.gov':     300,
   'api.nasa.gov':                 300,
   'ssd-api.jpl.nasa.gov':         1800,
+  // ── ISS live position (fast-moving; short TTL) ──
+  // open-notify is http-only + no CORS, so the browser must reach it through
+  // this worker. api.wheretheiss.at is the richer source (adds altitude/
+  // velocity) but let its TLS cert expire 2026-07-19; listed so the card
+  // upgrades back to it automatically once they renew. 10s: the ISS moves
+  // ~4.6 mi/sec, and the card refetches on that cadence.
+  'api.open-notify.org':          10,
+  'api.wheretheiss.at':           10,
   // ── quasi-static imagery (1 hour+) ──
   'sdo.gsfc.nasa.gov':            3600,
   'svs.gsfc.nasa.gov':            3600,
