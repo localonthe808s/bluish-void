@@ -38175,7 +38175,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             
             // ISS LIVE TRACKER with next pass estimation
             (function(){
-              var issApiUrl = "https://api.wheretheiss.at/v1/satellites/25544";
+              // (fetch now goes through _issFetch below, not this URL directly)
               
               function haversineMi(lat1, lon1, lat2, lon2){
                 var R = 3959;
@@ -38197,12 +38197,41 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                 return dirs[Math.round(b/22.5)%16];
               }
               
+              // Resilient ISS position fetch. Primary source api.wheretheiss.at
+              // let its TLS cert expire 2026-07-19 — the browser hard-fails the
+              // fetch and every CORS proxy rejects the expired cert too, so the
+              // whole card silently vanished. This tries wheretheiss FIRST (so
+              // the card upgrades back to real altitude/velocity the moment they
+              // renew), then falls back to open-notify (position only; altitude
+              // and velocity are standard LEO values that barely vary). Both go
+              // through the shared proxy racer so a single dead proxy can't sink
+              // it. Returns the wheretheiss shape either way, so nothing
+              // downstream changes.
+              var _issVia = function(url){
+                return (window.bvProxyJSON
+                          ? window.bvProxyJSON(url, { timeout: 4500 })
+                          : fetch(url).then(function(r){ return r.json(); }));
+              };
+              function _issFetch(){
+                return _issVia('https://api.wheretheiss.at/v1/satellites/25544')
+                  .then(function(d){
+                    if(!d || d.latitude == null) throw new Error('bad wheretheiss');
+                    return d;   // already {latitude,longitude,altitude(km),velocity(km/h),visibility}
+                  })
+                  .catch(function(){
+                    return _issVia('http://api.open-notify.org/iss-now.json').then(function(d){
+                      var pnt = d && (d.iss_position || d);
+                      if(!pnt || pnt.latitude == null) throw new Error('no ISS position');
+                      return { latitude:+pnt.latitude, longitude:+pnt.longitude,
+                               altitude:408, velocity:27600, visibility:'tracking' };
+                    });
+                  });
+              }
               var ORBIT_PERIOD_MIN = 92.68;
               var ISS_INCL = 51.6;
               var issLat = 0, issLon = 0, issAlt = 254, issSpeed = 17150;
 
-              fetch(issApiUrl)
-                .then(function(r){ return r.json(); })
+              _issFetch()
                 .then(function(data){
                   var issLat = data.latitude;
                   var issLon = data.longitude;
@@ -38304,7 +38333,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                     '<div class="se-countdown"><span id="iss-dir">' + (isNearby ? 'LOOK UP!' : 'MILES · ' + dirStr) + '</span></div>' +
                     '<div class="se-detail"><span id="iss-speed">' + issSpeed.toLocaleString() + '</span> MPH<br>ALT <span id="iss-alt">' + issAlt + '</span> MI</div>' +
                     '<div class="se-extra">EXPEDITION 74 · 7 CREW<br>CREW-12 + SOYUZ MS-28</div>' +
-                    '<div class="se-tip">' + visibility.toUpperCase() + (passStr ? '<br>' + passStr.replace(' • ','').toUpperCase() : '') + '</div>' +
+                    '<div class="se-tip">' + (visibility||'TRACKING').toUpperCase() + (passStr ? '<br>' + passStr.replace(' • ','').toUpperCase() : '') + '</div>' +
                     '</div>';
                   
                   if(spaceEventsBulletsEl){
@@ -38323,7 +38352,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
               issLive.velLat = ISS_INCL * Math.cos(phase) * (2 * Math.PI / orbitSec);
 
               setInterval(function(){
-                fetch(issApiUrl).then(function(r){return r.json();}).then(function(d){
+                _issFetch().then(function(d){
                   issLive.lat = d.latitude;
                   issLive.lon = d.longitude;
                   issLive.alt = Math.round(d.altitude * 0.621371);
