@@ -10244,29 +10244,45 @@ window._updateHeroWx = function(code, night){
     // Three blind fixes missed this; the stack will name the real trigger.
     if(!window._heroDbgObs && /[?&]herodebug/.test(location.search)){
       window._heroDbgObs = 1;
+      var hwEl = document.getElementById('hero-wx');
+      var HD = function(tag, extra){ console.log('[hero-dbg] '+Math.round(performance.now())+'ms  '+tag+(extra?'  '+extra:'')); };
       try{
+        // childList = rebuild/reinsert ; attributes = class/style/display change
         new MutationObserver(function(muts){
-          console.log('%c[hero-reset] #hero-wx children mutated','color:#c00;font-weight:700',
-            { t: Math.round(performance.now())+'ms', adds: muts.reduce(function(a,m){return a+m.addedNodes.length;},0) },
-            new Error('mutation stack').stack);
-        }).observe(document.getElementById('hero-wx'), { childList:true });
+          muts.forEach(function(m){
+            if(m.type === 'childList') HD('#hero-wx CHILDLIST', 'added='+m.addedNodes.length+' removed='+m.removedNodes.length);
+            else HD('#hero-wx ATTR '+m.attributeName, 'now="'+(hwEl.getAttribute(m.attributeName)||'').slice(0,60)+'"');
+          });
+        }).observe(hwEl, { childList:true, attributes:true });
+        // watch the SKY-BAR parent: catches #hero-wx being removed/re-added, and
+        // a class toggle on an ancestor (wx-hero-paused lives on <html>).
+        if(hwEl.parentNode) new MutationObserver(function(muts){
+          muts.forEach(function(m){
+            for(var i=0;i<m.removedNodes.length;i++) if(m.removedNodes[i]===hwEl) HD('#hero-wx REMOVED from parent');
+            for(var j=0;j<m.addedNodes.length;j++) if(m.addedNodes[j]===hwEl) HD('#hero-wx RE-ADDED to parent');
+          });
+        }).observe(hwEl.parentNode, { childList:true });
+        // <html> class changes (wx-hero-paused, wx-full-panel, …)
+        new MutationObserver(function(muts){
+          muts.forEach(function(m){ HD('<html> class', '"'+document.documentElement.className+'"'); });
+        }).observe(document.documentElement, { attributes:true, attributeFilter:['class'] });
       }catch(e){}
-      // restart detector: an-murfly currentTime should climb monotonically
-      // (mod its duration); a drop of >2s that isn't a wrap = a restart.
-      var _lastCt = -1;
+      // restart detector — logs the FULL animation snapshot flat
+      var _lastCt = -1, _lastEl = null;
       setInterval(function(){
         try{
           var el = document.querySelector('#hero-wx .an-murfly');
           var an = el && el.getAnimations && el.getAnimations()[0];
-          if(!an) return;
-          var ct = an.currentTime || 0;
-          if(_lastCt >= 0 && ct < _lastCt - 2000 && _lastCt < (an.effect.getTiming().duration - 2000)){
-            console.log('%c[hero-reset] FLOCK RESTARTED','color:#c00;font-weight:900;font-size:14px',
-              { t: Math.round(performance.now())+'ms', from: Math.round(_lastCt)+'ms', to: Math.round(ct)+'ms' });
+          if(!an){ _lastCt = -1; return; }
+          var ct = +an.currentTime || 0, dur = +an.effect.getTiming().duration || 56000;
+          var elChanged = (_lastEl && el !== _lastEl);
+          if(_lastCt >= 0 && ct < _lastCt - 2000 && _lastCt < (dur - 2000)){
+            HD('FLOCK RESTARTED', 'from='+Math.round(_lastCt)+'ms to='+Math.round(ct)+'ms playState='+an.playState
+               +' delay='+Math.round(an.effect.getTiming().delay)+'ms elementSwapped='+!!elChanged);
           }
-          _lastCt = ct;
+          _lastCt = ct; _lastEl = el;
         }catch(e){}
-      }, 250);
+      }, 200);
     }
     if(!window._heroPauseObs){
       window._heroPauseObs = 1;
@@ -10401,7 +10417,16 @@ window._updateHeroWx = function(code, night){
       // insert right AFTER the sky-bands gradient so the hero paints OVER the sky but
       // UNDER the nav/summary/row content (which follow it in the DOM)
       var _sbands = sb.querySelector('.today-tl-sky-bands');
-      sb.insertBefore(hw, _sbands ? _sbands.nextSibling : sb.firstChild);
+      // Re-inserting a DOM node RESTARTS its CSS animations. This line ran on
+      // every _updateHeroWx call, so any later call — even one that doesn't
+      // rebuild (birdsong resolving, a data refresh, whatever re-runs the hero)
+      // — silently moved #hero-wx and restarted the whole murmuration. That is
+      // the "birds restart once bird song loads" with NO rebuild and NO
+      // innerHTML change in the debug log. Only insert when it is not already
+      // in the right spot.
+      var _hwTarget = _sbands ? _sbands.nextSibling : sb.firstChild;
+      var _hwPlaced = (hw.parentNode === sb) && (_sbands ? _sbands.nextSibling === hw : sb.firstChild === hw);
+      if(!_hwPlaced) sb.insertBefore(hw, _hwTarget);
       // Hero covers the PANEL only — it runs past the planet bars to just below the
       // RAIN LINE (see the shared _panelH above); the hourly day-arc gradient only
       // takes over below the rain line.
@@ -10433,12 +10458,8 @@ window._updateHeroWx = function(code, night){
       // ?herodebug=1 logs every clear-day (re)build with why it happened, so a
       // "the birds reloaded again" report can be answered from the console
       // instead of guessed at. Costs nothing when the flag is absent.
-      var _cdLog = function(what, extra){
-        try{
-          if(!/[?&]herodebug/.test(location.search)) return;
-          console.log('%c[hero] ' + what, 'color:#0891b2;font-weight:700',
-            Object.assign({ t: Math.round(performance.now()) + 'ms' }, extra || {}));
-        }catch(e){}
+      var _cdLog = function(what){
+        try{ if(/[?&]herodebug/.test(location.search)) console.log('[hero-dbg] '+Math.round(performance.now())+'ms  '+what); }catch(e){}
       };
       // _cdOk — is the existing svg reusable for this width/height? _cdBuild —
       // rebuild and stamp the sig the check reads.
@@ -10507,9 +10528,7 @@ window._updateHeroWx = function(code, night){
         _tmp.innerHTML = heroDayPanel(w,h);
         var _nu = _tmp.firstElementChild;
         if(!_nu) return;
-        _cdLog('BUILD', { size: w + 'x' + h,
-                          prevSig: (_old && _old.getAttribute && _old.getAttribute('data-cd-sig')) || 'none',
-                          settled: !!window._cdFirstBuildDone });
+        _cdLog('BUILD  size='+w+'x'+h+'  prevSig='+((_old && _old.getAttribute && _old.getAttribute('data-cd-sig')) || 'none')+'  settled='+!!window._cdFirstBuildDone);
         _nu.setAttribute('data-cd-sig','cd|'+w+'x'+h+'|s'+_smk);
         if(_old && _old.getAttribute && _old.getAttribute('data-cd-sig')){
           // SOFT swap: the panel height settles asynchronously (the rain line
