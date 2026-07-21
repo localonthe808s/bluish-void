@@ -520,14 +520,22 @@ async function fetchLiveTumblrPosts() {
   // wasted bandwidth (≤20 small JSON 404s) is well worth the latency drop.
   const PAGE = 20;
   const MAX_PAGES = 20; // 400 posts hard cap — generous headroom
-  const fetchPage = (offset) => {
-    const url = `https://api.tumblr.com/v2/blog/${TUMBLR_BLOG}/posts/audio?api_key=${TUMBLR_API_KEY}&limit=${PAGE}&offset=${offset}`;
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 8000);
-    return fetch(url, { signal: ctrl.signal })
-      .then(r => { clearTimeout(t); return r.ok ? r.json() : null; })
-      .catch(() => { clearTimeout(t); return null; });
-  };
+  // JSONP, not fetch(): api.tumblr.com sends no Access-Control-Allow-Origin
+  // header (verified 2026-07-21), so fetch() rejects in every browser and the
+  // queue sat empty at "No tracks yet". JSONP is Tumblr's supported browser
+  // transport — same request, same public read-only key, resolves null on
+  // error/timeout to match the old shape.
+  let jsonpSeq = 0;
+  const fetchPage = (offset) => new Promise((resolve) => {
+    const cb = '__bvTumblrCb' + (++jsonpSeq);
+    const s = document.createElement('script');
+    const t = setTimeout(() => cleanup(null), 8000);
+    function cleanup(val){ clearTimeout(t); try{ delete window[cb]; }catch(e){} s.remove(); resolve(val); }
+    window[cb] = (data) => cleanup(data);
+    s.onerror = () => cleanup(null);
+    s.src = `https://api.tumblr.com/v2/blog/${TUMBLR_BLOG}/posts/audio?api_key=${TUMBLR_API_KEY}&limit=${PAGE}&offset=${offset}&jsonp=${cb}`;
+    document.head.appendChild(s);
+  });
   try {
     const pages = await Promise.all(
       Array.from({ length: MAX_PAGES }, (_, i) => fetchPage(i * PAGE))
