@@ -401,7 +401,9 @@
 
 <div class="queue" id="queuePanel" role="listbox" aria-label="Queue"></div>
 
-<script src="https://w.soundcloud.com/player/api.js"></script>
+<!-- SoundCloud Widget API is loaded LAZILY on first play (see ensureScApi) so
+     the player iframe + its Comscore/scorecardresearch beacon never load until
+     the user clicks play. Preconnects above keep that first click snappy. -->
 <script src="/bg-videos.js"></script>
 <script>
 // pick one wave color per page load
@@ -567,7 +569,23 @@ let scWidget = null;
 let scReady = false;
 let scPlaying = false;
 let scPendingPlay = false;
+let scLoadedForCursor = false;   // has the SC player iframe been loaded for the current track?
+let scApiLoading = false;        // is the lazy SC Widget API script in flight?
 const audioFrame = document.getElementById('audioFrame');
+
+// Lazy-load the SoundCloud Widget API on first play. Loading it (and the player
+// iframe) is what pulls in scorecardresearch/Comscore + w.soundcloud cookies, so
+// we hold off until the user actually clicks play. tryBindSc already polls for
+// `typeof SC`, so binding just waits for this to arrive.
+function ensureScApi() {
+  if (window.SC && window.SC.Widget) return;
+  if (scApiLoading) return;
+  scApiLoading = true;
+  const s = document.createElement('script');
+  s.src = 'https://w.soundcloud.com/player/api.js';
+  s.async = true;
+  document.head.appendChild(s);
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -617,6 +635,7 @@ function teardownSc() {
   scReady = false;
   scPlaying = false;
   scPendingPlay = false;
+  scLoadedForCursor = false;
   $("scPlay").textContent = "▶";
   $("scPlay").setAttribute("aria-label", "Play");
 }
@@ -692,11 +711,16 @@ function loadCurrentEmbed() {
   startLoading();
 
   if (embed.platform === 'soundcloud') {
-    // Immediate caption-link fallback while oEmbed fetches
-    fillScStripFromCaption(post);
+    // CLICK-TO-LOAD: show the custom strip (art/title/play) from public oEmbed
+    // metadata only. The actual player iframe — and its scorecardresearch/Comscore
+    // beacon — is NOT loaded until the user clicks play (see ensureScLoaded).
+    fillScStripFromCaption(post);   // immediate caption-link fallback while oEmbed fetches
     $("scArt").style.backgroundImage = '';
+    audioFrame.src = '';            // make sure no SC player iframe is live
+    scLoadedForCursor = false;
 
-    // Authoritative metadata via oEmbed (title, author, thumbnail) — runs in parallel
+    // Authoritative metadata via oEmbed (title, author, thumbnail) — metadata
+    // endpoint only, no player/tracker. Runs in parallel.
     fetchScOembed(embed).then(data => {
       if (!data) return;
       const rawTitle = data.title || '';
@@ -712,46 +736,8 @@ function loadCurrentEmbed() {
       if (data.thumbnail_url) $("scArt").style.backgroundImage = `url("${data.thumbnail_url}")`;
     });
 
-    // Bind once both the iframe AND SC.Widget API are available (defer-load tolerant)
-    let bindAttempts = 0;
-    const tryBindSc = () => {
-      if ($("pill").dataset.platform !== 'soundcloud') return;
-      if (scWidget) return;
-      if (typeof SC !== 'undefined' && SC.Widget && audioFrame.src) {
-        try {
-          scWidget = SC.Widget(audioFrame);
-          console.log('[bv] SC.Widget bound to iframe');
-          scWidget.bind(SC.Widget.Events.READY, () => {
-            scReady = true;
-            console.log('[bv] SC READY — track loaded & ready to play');
-            endLoading();
-            if (scPendingPlay) { scPendingPlay = false; playSc(); }
-          });
-          scWidget.bind(SC.Widget.Events.FINISH, () => pauseSc());
-          if (SC.Widget.Events.ERROR) {
-            scWidget.bind(SC.Widget.Events.ERROR, (e) => {
-              console.error('[bv] SC ERROR', e);
-            });
-          }
-          return;
-        } catch (e) {
-          console.warn('[bv] SC bind threw, retrying', e);
-        }
-      }
-      if (++bindAttempts > 80) {
-        console.warn('[bv] SC bind gave up after 4s — SC.Widget never became available?',
-          { scLoaded: typeof SC, hasWidget: !!(typeof SC !== 'undefined' && SC.Widget), src: audioFrame.src });
-        return;
-      }
-      setTimeout(tryBindSc, 50);
-    };
-    audioFrame.addEventListener('load', () => {
-      if (loadId === _audioLoadId) tryBindSc();
-    }, { once: true });
-    requestAnimationFrame(() => {
-      audioFrame.src = buildScUrl(embed);
-      tryBindSc(); // start polling now in case onload races SC's script load
-    });
+    // Nothing is loading yet — the strip is ready and waiting for a play click.
+    endLoading();
   } else if (embed.platform === 'bandcamp') {
     deferAssignSrc(buildBcUrl(embed), loadId);
   } else {
@@ -759,10 +745,65 @@ function loadCurrentEmbed() {
   }
 }
 
+// Load the SC player iframe + bind the widget for the CURRENT track. Called on
+// first play click (click-to-load) — this is the point scorecardresearch loads.
+function ensureScLoaded() {
+  if (scLoadedForCursor) return;
+  scLoadedForCursor = true;
+  const post = queue[cursor];
+  const embed = post && post.embeds[0];
+  if (!embed || embed.platform !== 'soundcloud') return;
+  const loadId = _audioLoadId;
+  ensureScApi();      // lazy-load the Widget API script now
+  startLoading();
+
+  // Bind once both the iframe AND SC.Widget API are available (defer-load tolerant)
+  let bindAttempts = 0;
+  const tryBindSc = () => {
+    if ($("pill").dataset.platform !== 'soundcloud') return;
+    if (scWidget) return;
+    if (typeof SC !== 'undefined' && SC.Widget && audioFrame.src) {
+      try {
+        scWidget = SC.Widget(audioFrame);
+        console.log('[bv] SC.Widget bound to iframe');
+        scWidget.bind(SC.Widget.Events.READY, () => {
+          scReady = true;
+          console.log('[bv] SC READY — track loaded & ready to play');
+          endLoading();
+          if (scPendingPlay) { scPendingPlay = false; playSc(); }
+        });
+        scWidget.bind(SC.Widget.Events.FINISH, () => pauseSc());
+        if (SC.Widget.Events.ERROR) {
+          scWidget.bind(SC.Widget.Events.ERROR, (e) => {
+            console.error('[bv] SC ERROR', e);
+          });
+        }
+        return;
+      } catch (e) {
+        console.warn('[bv] SC bind threw, retrying', e);
+      }
+    }
+    if (++bindAttempts > 100) {
+      console.warn('[bv] SC bind gave up — SC.Widget never became available?',
+        { scLoaded: typeof SC, hasWidget: !!(typeof SC !== 'undefined' && SC.Widget), src: audioFrame.src });
+      return;
+    }
+    setTimeout(tryBindSc, 50);
+  };
+  audioFrame.addEventListener('load', () => {
+    if (loadId === _audioLoadId) tryBindSc();
+  }, { once: true });
+  requestAnimationFrame(() => {
+    audioFrame.src = buildScUrl(embed);
+    tryBindSc(); // start polling now in case onload races SC's script load
+  });
+}
+
 function playSc() {
   // iOS Safari requires play() inside the user-gesture handler. The SC Widget
   // API queues commands until the player is READY, so we don't need to gate
   // on scReady — gating dropped the gesture context and silently failed on iOS.
+  if (!scLoadedForCursor) ensureScLoaded();   // first click loads the player
   if (!scWidget) {
     console.log('[bv] playSc deferred — scWidget not bound yet');
     scPendingPlay = true;
