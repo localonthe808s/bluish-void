@@ -45507,6 +45507,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   // frame/basemap contain-fit for the same 3857 bbox, so everything aligns.
   var _cityOv = window._cityOv = {
     timer:null, ws:null, wsHost:0, strikes:[], alerts:[], lastAlerts:0,
+    fn:null, lastFn:0,
     X0:-8304434, Y0:4909634, X1:-8170851, Y1:5027103, ASPECT:1.1372
   };
   function _cityOvMerc(lon, lat){
@@ -45534,6 +45535,24 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         });
       }).catch(function(){});
   }
+  function _cityOvFetchFloodNet(){
+    _cityOv.lastFn = Date.now();
+    var since = new Date(Date.now() - 12*3600000).toISOString().slice(0,19);
+    fetch('https://api.floodnet.nyc/v1/graphql', { method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({ query:'{ flood_events(where:{_and:[{start_time:{_gte:"' + since + '"}},{event_confidence:{_gte:0.5}}]}, order_by:{start_time:desc}, limit:200){ deployment_id end_time } }' }) })
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(j){
+        var evs = (j && j.data && j.data.flood_events) || [];
+        var now = Date.now(), act = {};
+        evs.forEach(function(e){
+          // active = still open (12h bound guards stuck events) or drained <30min ago
+          var open = !e.end_time || (new Date(e.end_time + (/[Zz+]/.test(e.end_time) ? '' : 'Z')).getTime() > now - 30*60000);
+          if (open) act[e.deployment_id] = 1;
+        });
+        _cityOv.fn = { active: Object.keys(act).length, t: now };
+      }).catch(function(){});
+  }
+
   // Blitzortung public feed: LZW-style dictionary decode of each frame.
   function _cityOvLzw(b){
     var e={}, d=b.split(''), c=d[0], f=c, g=[c], o=256, k;
@@ -45613,6 +45632,30 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       ctx.stroke();
       ctx.shadowBlur=0; ctx.globalAlpha=1;
     });
+    // ── FLOODNET chip — measured street water (events-triggered, see
+    // bluish-floodnet: depth quantifies, events trigger). Top-left corner.
+    try{
+      if (_cityOv.fn){
+        var wet = _cityOv.fn.active;
+        var fLbl = wet > 0 ? ('WATER ON THE STREET \u00b7 ' + wet + ' SENSOR' + (wet > 1 ? 'S' : '')) : 'STREETS DRY';
+        var fCol = wet > 0 ? '#c084fc' : '#7dd3fc';
+        var fx0 = ox + 12, fy0 = oy + 12, fw0 = wet > 0 ? 196 : 118, fh0 = 30;
+        ctx.fillStyle = 'rgba(8,12,22,.74)';
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(fx0, fy0, fw0, fh0, 7); else ctx.rect(fx0, fy0, fw0, fh0);
+        ctx.fill();
+        ctx.fillStyle = fCol;
+        ctx.beginPath(); ctx.arc(fx0 + 15, fy0 + fh0/2, 4, 0, 6.2832); ctx.fill();
+        if (wet > 0){ ctx.shadowColor = fCol; ctx.shadowBlur = 8; ctx.beginPath(); ctx.arc(fx0 + 15, fy0 + fh0/2, 4, 0, 6.2832); ctx.fill(); ctx.shadowBlur = 0; }
+        ctx.fillStyle = 'rgba(255,255,255,.95)';
+        ctx.font = '700 10px system-ui, sans-serif';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(fLbl, fx0 + 26, fy0 + fh0/2 - 5);
+        ctx.fillStyle = 'rgba(255,255,255,.5)';
+        ctx.font = '600 7.5px system-ui, sans-serif';
+        ctx.fillText('FLOODNET \u00b7 MEASURED', fx0 + 26, fy0 + fh0/2 + 7);
+      }
+    }catch(e){}
     // ── STORM MOTION chip — same steering picks as _radarNowcast:
     // 500hPa direction (else 700/10m), 700hPa speed (else 500/10m, mph),
     // cells drift ~85% of the mean wind. Arrow points TOWARD motion.
@@ -45662,12 +45705,13 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         try{
           if (document.hidden) return;
           if (Date.now() - _cityOv.lastAlerts > 120000) _cityOvFetchAlerts();
+          if (Date.now() - _cityOv.lastFn > 300000) _cityOvFetchFloodNet();
           if (!_cityOv.ws) _cityOvConnect();
           _cityOvDraw();
         }catch(e){ console.error('city overlay tick:', e && e.message, e && e.stack); }
       }, 1500);
     }
-    _cityOvFetchAlerts(); _cityOvConnect(); _cityOvDraw();
+    _cityOvFetchAlerts(); _cityOvFetchFloodNet(); _cityOvConnect(); _cityOvDraw();
   }
   function _cityOvStop(){
     var cv = document.getElementById('fcast-city-overlay');
