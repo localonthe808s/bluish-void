@@ -12352,6 +12352,10 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
                   <img id="fcast-city-basemap-under" alt="" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:100%;height:100%;object-fit:contain;object-position:center center;z-index:0;pointer-events:none;" />
                   <img id="fcast-city-basemap" alt="" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:100%;height:100%;object-fit:contain;object-position:center center;z-index:3;opacity:.85;mix-blend-mode:screen;pointer-events:none;" />
                   <canvas id="fcast-city-overlay" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:100%;height:100%;z-index:4;pointer-events:none;"></canvas>
+                  <div id="fcast-city-prod" style="display:none;position:absolute;top:10px;right:10px;z-index:5;gap:4px;">
+                    <button onclick="window._citySetProduct&&_citySetProduct('bref')" id="fcast-city-prod-bref" style="padding:4px 10px;border-radius:7px;border:none;background:rgba(43,34,244,.85);color:#fff;font-size:.5rem;font-weight:800;letter-spacing:.06em;cursor:pointer;font-family:system-ui,sans-serif;">REFLECTIVITY</button>
+                    <button onclick="window._citySetProduct&&_citySetProduct('bvel')" id="fcast-city-prod-bvel" style="padding:4px 10px;border-radius:7px;border:none;background:rgba(8,12,22,.6);color:rgba(255,255,255,.75);font-size:.5rem;font-weight:800;letter-spacing:.06em;cursor:pointer;font-family:system-ui,sans-serif;">VELOCITY</button>
+                  </div>
                   <div id="fcast-city-attrib" style="display:none;position:absolute;right:8px;bottom:6px;z-index:5;font-size:8px;letter-spacing:.02em;color:rgba(30,30,50,.6);background:rgba(255,255,255,.6);padding:1px 6px;border-radius:4px;font-family:system-ui,sans-serif;">© OpenStreetMap · © CARTO · NOAA KOKX super-res · ⚡ Blitzortung.org</div>
                   <img id="fcast-radar-img" alt="" style="width:100%;height:100%;object-fit:contain;object-position:center center;filter:invert(1) hue-rotate(180deg) contrast(1.2) saturate(1.5);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2;opacity:0;transition:opacity .35s ease;" />
                   <img id="fcast-radar-img-b" alt="" style="width:100%;height:100%;object-fit:contain;object-position:center center;filter:invert(1) hue-rotate(180deg) contrast(1.2) saturate(1.5);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:1;opacity:0;" />
@@ -45740,6 +45744,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       bm.style.display = on ? 'block' : 'none';
     }
     if (at) at.style.display = on ? 'block' : 'none';
+    var pr = document.getElementById('fcast-city-prod');
+    if (pr) pr.style.display = on ? 'flex' : 'none';
     ['fcast-radar-img','fcast-radar-img-b'].forEach(function(id){
       var im = document.getElementById(id); if (im) im.style.filter = _radarImgFilter();
     });
@@ -45750,7 +45756,21 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   // available scan (CORS *, ~19KB). During storms the VCP runs ~2-min scans,
   // so a fixed 4-min grid both skips scans and mislabels frames. Frames pin
   // to exact scan times; labels show the real clock time.
-  window._cityScanTimes = window._cityScanTimes || null;
+  window._cityScanTimes = window._cityScanTimes || null;   // {bref:[ms...], bvel:[ms...]}
+  window._cityProduct = window._cityProduct || 'bref';
+  window._citySetProduct = function(prod){
+    if (prod !== 'bref' && prod !== 'bvel') return;
+    window._cityProduct = prod;
+    ['bref','bvel'].forEach(function(pk){
+      var b = document.getElementById('fcast-city-prod-' + pk);
+      if (!b) return;
+      var on = pk === prod;
+      b.style.background = on ? 'rgba(43,34,244,.85)' : 'rgba(8,12,22,.6)';
+      b.style.color = on ? '#fff' : 'rgba(255,255,255,.75)';
+    });
+    lastGoodSrc = '';
+    loadFcastRadar();
+  };
   var _cityScansLast = 0;
   function _cityFetchScanTimes(){
     _cityScansLast = Date.now();
@@ -45758,20 +45778,24 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       .then(function(r){ return r.ok ? r.text() : null; })
       .then(function(x){
         if (!x) return;
-        var li = x.indexOf('<Name>kokx_sr_bref</Name>');
-        if (li < 0) return;
-        var di = x.indexOf('<Dimension name="time"', li);
-        var de = x.indexOf('</Dimension>', di);
-        if (di < 0 || de < 0) return;
-        var list = x.slice(x.indexOf('>', di) + 1, de).split(',');
-        var ts = list.map(function(s){ return Date.parse(s.trim()); })
-                     .filter(function(t){ return isFinite(t) && t < Date.now() + 300000; })
-                     .sort(function(a,b){ return a - b; });
-        if (ts.length) window._cityScanTimes = ts;
+        var out = {};
+        ['bref','bvel'].forEach(function(prod){
+          var li = x.indexOf('<Name>kokx_sr_' + prod + '</Name>');
+          if (li < 0) return;
+          var di = x.indexOf('<Dimension name="time"', li);
+          var de = x.indexOf('</Dimension>', di);
+          if (di < 0 || de < 0) return;
+          var ts = x.slice(x.indexOf('>', di) + 1, de).split(',')
+            .map(function(s){ return Date.parse(s.trim()); })
+            .filter(function(t){ return isFinite(t) && t < Date.now() + 300000; })
+            .sort(function(a,b){ return a - b; });
+          if (ts.length) out[prod] = ts;
+        });
+        if (out.bref || out.bvel) window._cityScanTimes = out;
       }).catch(function(){});
   }
   window._cityScanLabel = function(frameNum){
-    var ts = window._cityScanTimes;
+    var ts = window._cityScanTimes && window._cityScanTimes[window._cityProduct || 'bref'];
     if (!ts || !ts.length) return null;
     var i = ts.length - 1 - frameNum;
     if (i < 0) i = 0;
@@ -45783,8 +45807,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   function _liveFrameUrl(region, fhr){
     if (fcastState.area === 'city-nyc'){
       if (Date.now() - _cityScansLast > 120000) _cityFetchScanTimes();
+      var prod = window._cityProduct || 'bref';
       var t;
-      var sc = window._cityScanTimes;
+      var sc = window._cityScanTimes && window._cityScanTimes[prod];
       if (sc && sc.length){
         var si = sc.length - 1 - parseInt(fhr, 10);
         t = new Date(sc[si < 0 ? 0 : si]).toISOString();   // exact scan — honest + cache-stable
@@ -45796,7 +45821,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var ch = Math.max(400, Math.min(1000, (ic && ic.clientHeight) || 600));
       var cw = Math.round(ch * 1.1372);   // bbox aspect
       return 'https://opengeo.ncep.noaa.gov/geoserver/kokx/ows?service=WMS&version=1.1.0&request=GetMap'
-        + '&layers=kokx_sr_bref&styles=&bbox=-8304434,4909634,-8170851,5027103'
+        + '&layers=kokx_sr_' + prod + '&styles=&bbox=-8304434,4909634,-8170851,5027103'
         + '&width=' + cw + '&height=' + ch + '&srs=EPSG:3857&format=image/png&transparent=true'
         + '&time=' + encodeURIComponent(t);
     }
