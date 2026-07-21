@@ -27755,6 +27755,11 @@ function dayRangeAround(d, days){
       window._issInit = true;
       window._issNextPass = null;
       window._fetchIssPass = function(){
+        // Pass prediction only exists on wheretheiss (/positions); it has no
+        // open-notify fallback. Skip it while wheretheiss is known-dead so it
+        // doesn't fire a guaranteed cert failure every 5 min. The live tracker
+        // still shows a next-pass estimate from orbital mechanics.
+        if(window._issWheDown && (Date.now() - window._issWheDown) < 900000) return;
         try {
           var nowS = Math.floor(Date.now()/1000);
           var times = [];
@@ -38295,20 +38300,28 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                           ? window.bvProxyJSON(url, { timeout: 4500 })
                           : fetch(url).then(function(r){ return r.json(); }));
               };
+              var _issOpenNotify = function(){
+                return _issVia('http://api.open-notify.org/iss-now.json').then(function(d){
+                  var pnt = d && (d.iss_position || d);
+                  if(!pnt || pnt.latitude == null) throw new Error('no ISS position');
+                  return { latitude:+pnt.latitude, longitude:+pnt.longitude,
+                           altitude:408, velocity:27600, visibility:'tracking' };
+                });
+              };
               function _issFetch(){
+                // wheretheiss carries the richer data (altitude/velocity) but its
+                // cert is expired. Once it fails, skip it for 15 min and go
+                // straight to open-notify — otherwise it re-fails ~4 proxied
+                // requests on every 10s update. A probe after the cooldown still
+                // auto-upgrades the moment they renew.
+                if(window._issWheDown && (Date.now() - window._issWheDown) < 900000) return _issOpenNotify();
                 return _issVia('https://api.wheretheiss.at/v1/satellites/25544')
                   .then(function(d){
                     if(!d || d.latitude == null) throw new Error('bad wheretheiss');
-                    return d;   // already {latitude,longitude,altitude(km),velocity(km/h),visibility}
+                    window._issWheDown = 0;
+                    return d;   // {latitude,longitude,altitude(km),velocity(km/h),visibility}
                   })
-                  .catch(function(){
-                    return _issVia('http://api.open-notify.org/iss-now.json').then(function(d){
-                      var pnt = d && (d.iss_position || d);
-                      if(!pnt || pnt.latitude == null) throw new Error('no ISS position');
-                      return { latitude:+pnt.latitude, longitude:+pnt.longitude,
-                               altitude:408, velocity:27600, visibility:'tracking' };
-                    });
-                  });
+                  .catch(function(){ window._issWheDown = Date.now(); return _issOpenNotify(); });
               }
               var ORBIT_PERIOD_MIN = 92.68;
               var ISS_INCL = 51.6;
