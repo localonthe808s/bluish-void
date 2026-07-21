@@ -118,7 +118,9 @@
       { p:'',                                         wrap:false }, // direct
       { p:'https://proxy.bluishvoid.com/?url=',       wrap:false },
       { p:'https://api.codetabs.com/v1/proxy?quest=', wrap:false },
-      { p:'https://corsproxy.io/?',                   wrap:false },
+      // corsproxy.io removed 2026-07-20: it went paid-only and now 403s every
+      // request, so it only ever lost the race while adding latency + console
+      // noise. Our own worker (proxy.bluishvoid.com, above) is the reliable one.
       { p:'https://api.allorigins.win/get?url=',      wrap:true  }
     ];
     var LS = 'bv_best_proxy_v1';
@@ -38432,8 +38434,15 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
               var phase = Math.asin(Math.max(-1, Math.min(1, issLat / ISS_INCL)));
               issLive.velLat = ISS_INCL * Math.cos(phase) * (2 * Math.PI / orbitSec);
 
-              setInterval(function(){
+              // Back off when the source is persistently down. This updater sits
+              // OUTSIDE the initial fetch's .then(), so with the ISS API dead
+              // (expired cert) it was re-racing ~4 failing proxies every 10s
+              // forever — pure network + main-thread churn, and console spam.
+              // Stop after 3 straight failures; a page reload re-tries, and it
+              // resumes cleanly the moment a fetch succeeds.
+              var _issUpdFails = 0, _issUpdTimer = setInterval(function(){
                 _issFetch().then(function(d){
+                  _issUpdFails = 0;
                   issLive.lat = d.latitude;
                   issLive.lon = d.longitude;
                   issLive.alt = Math.round(d.altitude * 0.621371);
@@ -38441,7 +38450,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                   issLive.lastFetch = Date.now();
                   var ph = Math.asin(Math.max(-1, Math.min(1, issLive.lat / ISS_INCL)));
                   issLive.velLat = ISS_INCL * Math.cos(ph) * (2 * Math.PI / orbitSec);
-                }).catch(function(){});
+                }).catch(function(){ if (++_issUpdFails >= 3) clearInterval(_issUpdTimer); });
               }, 10000);
 
               // Interpolate position every 1s for smooth distance updates
