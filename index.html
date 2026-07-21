@@ -45746,10 +45746,52 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (on) _cityOvStart(); else _cityOvStop();
   };
 
+  // ── Real KOKX scan times (city view): the WMS capabilities list every
+  // available scan (CORS *, ~19KB). During storms the VCP runs ~2-min scans,
+  // so a fixed 4-min grid both skips scans and mislabels frames. Frames pin
+  // to exact scan times; labels show the real clock time.
+  window._cityScanTimes = window._cityScanTimes || null;
+  var _cityScansLast = 0;
+  function _cityFetchScanTimes(){
+    _cityScansLast = Date.now();
+    fetch('https://opengeo.ncep.noaa.gov/geoserver/kokx/ows?service=WMS&request=GetCapabilities')
+      .then(function(r){ return r.ok ? r.text() : null; })
+      .then(function(x){
+        if (!x) return;
+        var li = x.indexOf('<Name>kokx_sr_bref</Name>');
+        if (li < 0) return;
+        var di = x.indexOf('<Dimension name="time"', li);
+        var de = x.indexOf('</Dimension>', di);
+        if (di < 0 || de < 0) return;
+        var list = x.slice(x.indexOf('>', di) + 1, de).split(',');
+        var ts = list.map(function(s){ return Date.parse(s.trim()); })
+                     .filter(function(t){ return isFinite(t) && t < Date.now() + 300000; })
+                     .sort(function(a,b){ return a - b; });
+        if (ts.length) window._cityScanTimes = ts;
+      }).catch(function(){});
+  }
+  window._cityScanLabel = function(frameNum){
+    var ts = window._cityScanTimes;
+    if (!ts || !ts.length) return null;
+    var i = ts.length - 1 - frameNum;
+    if (i < 0) i = 0;
+    var d = new Date(ts[i]);
+    var hh = d.getHours() % 12 || 12, mm = ('0' + d.getMinutes()).slice(-2);
+    return hh + ':' + mm + (d.getHours() < 12 ? ' AM' : ' PM') + ' SCAN';
+  };
+
   function _liveFrameUrl(region, fhr){
     if (fcastState.area === 'city-nyc'){
-      var mins = parseInt(fhr, 10) * 4;
-      var t = new Date(Math.floor(Date.now()/240000)*240000 - mins*60000).toISOString();
+      if (Date.now() - _cityScansLast > 120000) _cityFetchScanTimes();
+      var t;
+      var sc = window._cityScanTimes;
+      if (sc && sc.length){
+        var si = sc.length - 1 - parseInt(fhr, 10);
+        t = new Date(sc[si < 0 ? 0 : si]).toISOString();   // exact scan — honest + cache-stable
+      } else {
+        var mins = parseInt(fhr, 10) * 4;
+        t = new Date(Math.floor(Date.now()/240000)*240000 - mins*60000).toISOString();
+      }
       var ic = document.getElementById('fcast-img-container');
       var ch = Math.max(400, Math.min(1000, (ic && ic.clientHeight) || 600));
       var cw = Math.round(ch * 1.1372);   // bbox aspect
@@ -45872,6 +45914,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     // LIVE mode: show relative time
     if (fcastState.range === 'live'){
       var frameNum = parseInt(fhrs[fhrIdx], 10);
+      if (fcastState.area === 'city-nyc' && window._cityScanLabel){
+        var sl = window._cityScanLabel(frameNum);
+        if (sl) return 'LIVE RADAR · ' + sl;
+      }
       if (frameNum === 0) return 'LIVE RADAR · NOW';
       var minsAgo = frameNum * 2; // ~2 min per frame
       return 'LIVE RADAR · ~' + minsAgo + ' MIN AGO';
@@ -45924,7 +45970,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       url = _liveFrameUrl(region, frameNum);
       if (label){
         var n = parseInt(frameNum, 10);
-        label.textContent = n === 0 ? 'NOW' : '~' + (n * 2) + ' MIN AGO';
+        var sl2 = (fcastState.area === 'city-nyc' && window._cityScanLabel) ? window._cityScanLabel(n) : null;
+        label.textContent = sl2 ? sl2 : (n === 0 ? 'NOW' : '~' + (n * 2) + ' MIN AGO');
       }
     } else {
       url = buildFcastUrl(fcastState.idx);
