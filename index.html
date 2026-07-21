@@ -12351,7 +12351,8 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
                        both object-fit contain → pixel-aligned). Lazy src, shown only in city view. -->
                   <img id="fcast-city-basemap-under" alt="" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:100%;height:100%;object-fit:contain;object-position:center center;z-index:0;pointer-events:none;" />
                   <img id="fcast-city-basemap" alt="" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:100%;height:100%;object-fit:contain;object-position:center center;z-index:3;opacity:.85;mix-blend-mode:screen;pointer-events:none;" />
-                  <div id="fcast-city-attrib" style="display:none;position:absolute;right:8px;bottom:6px;z-index:5;font-size:8px;letter-spacing:.02em;color:rgba(30,30,50,.6);background:rgba(255,255,255,.6);padding:1px 6px;border-radius:4px;font-family:system-ui,sans-serif;">© OpenStreetMap · © CARTO · NOAA KOKX super-res</div>
+                  <canvas id="fcast-city-overlay" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:100%;height:100%;z-index:4;pointer-events:none;"></canvas>
+                  <div id="fcast-city-attrib" style="display:none;position:absolute;right:8px;bottom:6px;z-index:5;font-size:8px;letter-spacing:.02em;color:rgba(30,30,50,.6);background:rgba(255,255,255,.6);padding:1px 6px;border-radius:4px;font-family:system-ui,sans-serif;">© OpenStreetMap · © CARTO · NOAA KOKX super-res · ⚡ Blitzortung.org</div>
                   <img id="fcast-radar-img" alt="" style="width:100%;height:100%;object-fit:contain;object-position:center center;filter:invert(1) hue-rotate(180deg) contrast(1.2) saturate(1.5);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2;opacity:0;transition:opacity .35s ease;" />
                   <img id="fcast-radar-img-b" alt="" style="width:100%;height:100%;object-fit:contain;object-position:center center;filter:invert(1) hue-rotate(180deg) contrast(1.2) saturate(1.5);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:1;opacity:0;" />
                   <div id="fcast-loading" style="position:absolute;top:0;left:0;right:0;bottom:0;z-index:2;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;pointer-events:none;transition:opacity .3s;">
@@ -45501,6 +45502,138 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     return 'invert(1) hue-rotate(180deg) contrast(1.2) saturate(1.5)';
   }
 
+  // ── THE CITY overlays: NWS warning polygons + live Blitzortung strikes ──
+  // Drawn on a canvas over the WMS frames (z4). Geometry mapping mirrors the
+  // frame/basemap contain-fit for the same 3857 bbox, so everything aligns.
+  var _cityOv = {
+    timer:null, ws:null, wsHost:0, strikes:[], alerts:[], lastAlerts:0,
+    X0:-8304434, Y0:4909634, X1:-8170851, Y1:5027103, ASPECT:1.1372
+  };
+  function _cityOvMerc(lon, lat){
+    var R = 6378137;
+    return [lon*Math.PI/180*R, Math.log(Math.tan(Math.PI/4 + lat*Math.PI/360))*R];
+  }
+  function _cityOvColor(ev){
+    ev = (ev||'').toLowerCase();
+    if (ev.indexOf('tornado') >= 0) return '#ff4040';
+    if (ev.indexOf('severe thunderstorm') >= 0) return '#ffb52e';
+    if (ev.indexOf('flash flood') >= 0) return '#35d06a';
+    if (ev.indexOf('marine') >= 0) return '#3aa8ff';
+    return 'rgba(255,255,255,.7)';
+  }
+  function _cityOvFetchAlerts(){
+    _cityOv.lastAlerts = Date.now();
+    fetch('https://api.weather.gov/alerts/active?status=actual&message_type=alert&area=NY,NJ,CT')
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(d){
+        if (!d || !d.features) return;
+        _cityOv.alerts = d.features.filter(function(f){
+          var ev = (f.properties && f.properties.event || '').toLowerCase();
+          return f.geometry && /warning/.test(ev) &&
+            /tornado|severe thunderstorm|flash flood|special marine/.test(ev);
+        });
+      }).catch(function(){});
+  }
+  // Blitzortung public feed: LZW-style dictionary decode of each frame.
+  function _cityOvLzw(b){
+    var e={}, d=b.split(''), c=d[0], f=c, g=[c], o=256, k;
+    for (var i=1;i<d.length;i++){
+      var cc=d[i].charCodeAt(0);
+      k = 256>cc ? d[i] : (e[cc] ? e[cc] : f+c);
+      g.push(k); c=k.charAt(0); e[o++]=f+c; f=k;
+    }
+    return g.join('');
+  }
+  function _cityOvConnect(){
+    if (_cityOv.ws) return;
+    var hosts=['wss://ws1.blitzortung.org/','wss://ws7.blitzortung.org/','wss://ws8.blitzortung.org/'];
+    var url = hosts[_cityOv.wsHost % hosts.length];
+    try{
+      var ws = new WebSocket(url);
+      _cityOv.ws = ws;
+      ws.onopen = function(){ try{ ws.send(JSON.stringify({a:111})); }catch(e){} };
+      ws.onmessage = function(m){
+        try{
+          var s = JSON.parse(_cityOvLzw(m.data));
+          if (typeof s.lat !== 'number' || typeof s.lon !== 'number') return;
+          if (s.lat < 39.8 || s.lat > 41.6 || s.lon < -75.2 || s.lon > -72.8) return;
+          _cityOv.strikes.push({ lat:s.lat, lon:s.lon, t:Date.now() });
+          if (_cityOv.strikes.length > 400) _cityOv.strikes.splice(0, 100);
+        }catch(e){}
+      };
+      ws.onclose = ws.onerror = function(){
+        if (_cityOv.ws === ws){ _cityOv.ws = null; _cityOv.wsHost++; }
+      };
+    }catch(e){ _cityOv.ws = null; _cityOv.wsHost++; }
+  }
+  function _cityOvDraw(){
+    var cv = document.getElementById('fcast-city-overlay');
+    if (!cv) return;
+    var W = cv.clientWidth, H = cv.clientHeight;
+    if (!W || !H) return;
+    var dpr = window.devicePixelRatio || 1;
+    if (cv.width !== Math.round(W*dpr) || cv.height !== Math.round(H*dpr)){ cv.width = Math.round(W*dpr); cv.height = Math.round(H*dpr); }
+    var ctx = cv.getContext('2d');
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    ctx.clearRect(0,0,W,H);
+    var bw = Math.min(W, H*_cityOv.ASPECT), bh = bw/_cityOv.ASPECT;
+    var ox=(W-bw)/2, oy=(H-bh)/2;
+    var px = function(lon,lat){
+      var m=_cityOvMerc(lon,lat);
+      return [ox + (m[0]-_cityOv.X0)/(_cityOv.X1-_cityOv.X0)*bw,
+              oy + (_cityOv.Y1-m[1])/(_cityOv.Y1-_cityOv.Y0)*bh];
+    };
+    _cityOv.alerts.forEach(function(f){
+      var g=f.geometry, polys = g.type==='Polygon' ? [g.coordinates] : (g.type==='MultiPolygon' ? g.coordinates : []);
+      var col=_cityOvColor(f.properties.event);
+      polys.forEach(function(poly){
+        (poly||[]).forEach(function(ring){
+          if (!ring || ring.length<3) return;
+          ctx.beginPath();
+          ring.forEach(function(c,i){ var p=px(c[0],c[1]); if(i)ctx.lineTo(p[0],p[1]); else ctx.moveTo(p[0],p[1]); });
+          ctx.closePath();
+          ctx.fillStyle=col; ctx.globalAlpha=.07; ctx.fill(); ctx.globalAlpha=1;
+          ctx.lineWidth=2.5; ctx.strokeStyle=col;
+          ctx.shadowColor=col; ctx.shadowBlur=7; ctx.stroke(); ctx.shadowBlur=0;
+        });
+      });
+    });
+    var now=Date.now();
+    _cityOv.strikes = _cityOv.strikes.filter(function(s){ return now-s.t < 600000; });
+    _cityOv.strikes.forEach(function(s){
+      var age=(now-s.t)/600000, a=1-age;
+      var p=px(s.lon,s.lat), r = age<.05 ? 7 : 3.5;
+      ctx.globalAlpha = Math.max(.12, a);
+      ctx.strokeStyle = age<.05 ? '#ffffff' : '#ffd76a';
+      ctx.lineWidth = age<.05 ? 2.2 : 1.4;
+      ctx.shadowColor='#ffd76a'; ctx.shadowBlur= age<.05 ? 10 : 4;
+      ctx.beginPath();
+      ctx.moveTo(p[0]-r,p[1]); ctx.lineTo(p[0]+r,p[1]);
+      ctx.moveTo(p[0],p[1]-r); ctx.lineTo(p[0],p[1]+r);
+      ctx.stroke();
+      ctx.shadowBlur=0; ctx.globalAlpha=1;
+    });
+  }
+  function _cityOvStart(){
+    var cv = document.getElementById('fcast-city-overlay');
+    if (cv) cv.style.display = 'block';
+    if (!_cityOv.timer){
+      _cityOv.timer = setInterval(function(){
+        if (document.hidden) return;
+        if (Date.now() - _cityOv.lastAlerts > 120000) _cityOvFetchAlerts();
+        if (!_cityOv.ws) _cityOvConnect();
+        _cityOvDraw();
+      }, 1500);
+    }
+    _cityOvFetchAlerts(); _cityOvConnect(); _cityOvDraw();
+  }
+  function _cityOvStop(){
+    var cv = document.getElementById('fcast-city-overlay');
+    if (cv){ cv.style.display = 'none'; var c=cv.getContext('2d'); c && c.clearRect(0,0,cv.width,cv.height); }
+    if (_cityOv.timer){ clearInterval(_cityOv.timer); _cityOv.timer = null; }
+    if (_cityOv.ws){ try{ _cityOv.ws.close(); }catch(e){} _cityOv.ws = null; }
+  }
+
   window._syncCityBasemap = function(){
     var on = fcastState.range === 'live' && fcastState.area === 'city-nyc';
     var bm = document.getElementById('fcast-city-basemap');
@@ -45518,6 +45651,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     ['fcast-radar-img','fcast-radar-img-b'].forEach(function(id){
       var im = document.getElementById(id); if (im) im.style.filter = _radarImgFilter();
     });
+    if (on) _cityOvStart(); else _cityOvStop();
   };
 
   function _liveFrameUrl(region, fhr){
