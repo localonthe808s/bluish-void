@@ -50800,9 +50800,35 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         return cityAliases[lower] || q;
       }
 
+      // The Open-Meteo geocoder matches PLACE NAMES only — a "City, State"
+      // query like "Afton, Virginia" returns ZERO results. Split any trailing
+      // ", region" off so we search the bare name and use the region to RANK
+      // instead. (Fixes small towns that exist in the DB but lose the name to a
+      // bigger city in another state — e.g. Afton VA has no population value so
+      // it sank below Afton MN/WY/OK and never reached the top-5 dropdown.)
+      function parsePlaceRegion(raw){
+        var region = '', name = (raw || '').trim();
+        var ci = name.lastIndexOf(',');
+        if (ci > 0){ region = name.slice(ci + 1).trim().toLowerCase(); name = name.slice(0, ci).trim(); }
+        return { name: name, region: region };
+      }
+      function _regionMatch(r, region){
+        if (!region) return false;
+        var a1 = (r.admin1 || '').toLowerCase();
+        if (a1 && (a1 === region || a1.indexOf(region) === 0)) return true;
+        // 2-letter US state abbreviation ("va") → full name via _stateFull
+        if (region.length === 2 && typeof window._stateFull === 'function'){
+          var full = (window._stateFull(region.toUpperCase()) || '').toLowerCase();
+          if (full && full === a1) return true;
+        }
+        var cc = (r.country_code || '').toLowerCase(), cn = (r.country || '').toLowerCase();
+        return cn === region || cc === region;
+      }
+
       // Autocomplete on typing
       searchInput.addEventListener('input', function(){
-        var q = expandCityAlias(searchInput.value.trim());
+        var pr = parsePlaceRegion(searchInput.value);
+        var q = expandCityAlias(pr.name);
         clearTimeout(suggestDebounce);
         if (q.length < 2){ hideSuggestions(); return; }
         suggestDebounce = setTimeout(function(){
@@ -50810,18 +50836,20 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             .then(function(r){ return r.json(); })
             .then(function(data){
               if (!data.results || !data.results.length){ hideSuggestions(); return; }
-              // Re-rank: name-starts-with > name-contains > alternate-name match,
-              // ties broken by population descending. This bubbles up the place
-              // the user actually typed (e.g. "Sunnyside, NY" pop 49k beats
-              // alternate-name matches like "Fort Sumner, NM" pop 932).
+              // Re-rank: a matched ", region" wins outright, then name-starts-with
+              // > name-contains > alternate-name match, ties broken by population
+              // descending. So "Afton, Virginia" surfaces Afton VA (pop unknown)
+              // above the bigger Aftons, and "Sunnyside, NY" (pop 49k) beats
+              // alternate-name matches like "Fort Sumner, NM".
               var ql = q.toLowerCase();
               var ranked = data.results.slice().map(function(r){
                 var nl = (r.name || '').toLowerCase();
                 var tier = 2;
                 if (nl.indexOf(ql) === 0) tier = 0;
                 else if (nl.indexOf(ql) >= 0) tier = 1;
-                return { r: r, tier: tier, pop: r.population || 0 };
+                return { r: r, tier: tier, pop: r.population || 0, rm: _regionMatch(r, pr.region) };
               }).sort(function(a, b){
+                if (a.rm !== b.rm) return a.rm ? -1 : 1;
                 if (a.tier !== b.tier) return a.tier - b.tier;
                 return b.pop - a.pop;
               }).map(function(x){ return x.r; });
@@ -50853,17 +50881,25 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           } else if (suggestResults.length > 0){
             pickSuggestion(suggestResults[0]);
           } else {
-            var q = expandCityAlias(searchInput.value.trim());
+            var _pr = parsePlaceRegion(searchInput.value);
+            var q = expandCityAlias(_pr.name);
             if (!q) return;
             searchInput.disabled = true;
             searchInput.placeholder = "Searching...";
-            fetch("https://geocoding-api.open-meteo.com/v1/search?name=" + encodeURIComponent(q) + "&count=1&language=en&format=json")
+            // With a ", region" typed, pull 10 and pick the region match; else 1.
+            var _cnt = _pr.region ? 10 : 1;
+            fetch("https://geocoding-api.open-meteo.com/v1/search?name=" + encodeURIComponent(q) + "&count=" + _cnt + "&language=en&format=json")
               .then(function(r){ return r.json(); })
               .then(function(data){
                 searchInput.disabled = false;
                 searchInput.placeholder = "LOOK UP HERE";
                 if (data.results && data.results.length > 0){
                   var r = data.results[0];
+                  if (_pr.region){
+                    for (var _i = 0; _i < data.results.length; _i++){
+                      if (_regionMatch(data.results[_i], _pr.region)){ r = data.results[_i]; break; }
+                    }
+                  }
                   resolveAndSwitch(Math.round(r.latitude*10000)/10000, Math.round(r.longitude*10000)/10000, r.name || "Custom", r.timezone || null);
                   searchInput.value = "";
                 } else {
