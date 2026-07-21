@@ -12347,6 +12347,10 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
                 </div>
                 <!-- GOES loads on boot, no cover -->
                 <div id="fcast-img-container" style="position:absolute;top:0;left:0;right:0;bottom:0;overflow:hidden;display:none;">
+                  <!-- THE CITY basemap: static carto crop of the exact WMS bbox (same aspect,
+                       both object-fit contain → pixel-aligned). Lazy src, shown only in city view. -->
+                  <img id="fcast-city-basemap" alt="" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:100%;height:100%;object-fit:contain;object-position:center center;z-index:1;" />
+                  <div id="fcast-city-attrib" style="display:none;position:absolute;right:8px;bottom:6px;z-index:5;font-size:8px;letter-spacing:.02em;color:rgba(30,30,50,.6);background:rgba(255,255,255,.6);padding:1px 6px;border-radius:4px;font-family:system-ui,sans-serif;">© OpenStreetMap · © CARTO · NOAA KOKX super-res</div>
                   <img id="fcast-radar-img" alt="" style="width:100%;height:100%;object-fit:contain;object-position:center center;filter:invert(1) hue-rotate(180deg) contrast(1.2) saturate(1.5);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2;opacity:0;transition:opacity .35s ease;" />
                   <img id="fcast-radar-img-b" alt="" style="width:100%;height:100%;object-fit:contain;object-position:center center;filter:invert(1) hue-rotate(180deg) contrast(1.2) saturate(1.5);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:1;opacity:0;" />
                   <div id="fcast-loading" style="position:absolute;top:0;left:0;right:0;bottom:0;z-index:2;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;pointer-events:none;transition:opacity .3s;">
@@ -45473,6 +45477,42 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     return allFhrs.filter(function(f){ return parseInt(f,10) <= maxH; });
   }
 
+  // THE CITY live frames come from the NWS opengeo WMS — KOKX SUPER-RES base
+  // reflectivity rendered natively for the NYC bbox (EPSG:3857, matching the
+  // static nyc-basemap.jpg crop) instead of upscaling the 600x550 RIDGE GIF.
+  // fhr 0-9 maps to ~4-min-spaced scan times (geoserver snaps to real scans).
+  // THE CITY basemap + attribution show exactly when city-nyc live frames do;
+  // also drops the invert filter if the imgs haven't been through
+  // switchFcastArea yet (entering live with the city pre-selected).
+  window._syncCityBasemap = function(){
+    var on = fcastState.range === 'live' && fcastState.area === 'city-nyc';
+    var bm = document.getElementById('fcast-city-basemap');
+    var at = document.getElementById('fcast-city-attrib');
+    if (bm){
+      if (on && !bm.getAttribute('src')) bm.src = '/nyc-basemap.jpg';
+      bm.style.display = on ? 'block' : 'none';
+    }
+    if (at) at.style.display = on ? 'block' : 'none';
+    if (on) ['fcast-radar-img','fcast-radar-img-b'].forEach(function(id){
+      var im = document.getElementById(id); if (im) im.style.filter = 'none';
+    });
+  };
+
+  function _liveFrameUrl(region, fhr){
+    if (fcastState.area === 'city-nyc'){
+      var mins = parseInt(fhr, 10) * 4;
+      var t = new Date(Math.floor(Date.now()/240000)*240000 - mins*60000).toISOString();
+      var ic = document.getElementById('fcast-img-container');
+      var ch = Math.max(400, Math.min(1000, (ic && ic.clientHeight) || 600));
+      var cw = Math.round(ch * 1.1372);   // bbox aspect
+      return 'https://opengeo.ncep.noaa.gov/geoserver/kokx/ows?service=WMS&version=1.1.0&request=GetMap'
+        + '&layers=kokx_sr_bref&styles=&bbox=-8304434,4909634,-8170851,5027103'
+        + '&width=' + cw + '&height=' + ch + '&srs=EPSG:3857&format=image/png&transparent=true'
+        + '&time=' + encodeURIComponent(t);
+    }
+    return 'https://radar.weather.gov/ridge/standard/' + region + '_' + fhr + '.gif?cb=' + Math.floor(Date.now()/60000);
+  }
+
   function buildFcastUrl(fhrIdx){
     var fhrs = getActiveFhrs();
     var fhr = fhrs[fhrIdx] || '0';
@@ -45480,7 +45520,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     // LIVE mode: use NOAA Ridge radar
     if (fcastState.range === 'live'){
       var region = fcastState.area === 'city-nyc' ? 'KOKX' : (fcastState.area === 'local' ? ((typeof LOCATION !== 'undefined' && LOCATION.radar) || 'KOKX') : (RIDGE_AREA_MAP[fcastState.area] || 'CONUS'));  // THE CITY is pinned to KOKX — nearest-station picks KDIX for NYC coords
-      return 'https://radar.weather.gov/ridge/standard/' + region + '_' + fhr + '.gif?cb=' + Math.floor(Date.now()/60000);
+      return _liveFrameUrl(region, fhr);
     }
 
     var area = fcastState.area;
@@ -45633,7 +45673,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (fcastState.range === 'live'){
       var region = fcastState.area === 'city-nyc' ? 'KOKX' : (fcastState.area === 'local' ? ((typeof LOCATION !== 'undefined' && LOCATION.radar) || 'KOKX') : (RIDGE_AREA_MAP[fcastState.area] || 'CONUS'));  // THE CITY is pinned to KOKX — nearest-station picks KDIX for NYC coords
       var frameNum = fhrs[fcastState.idx] || '0';
-      url = 'https://radar.weather.gov/ridge/standard/' + region + '_' + frameNum + '.gif?cb=' + Math.floor(Date.now()/60000);
+      url = _liveFrameUrl(region, frameNum);
       if (label){
         var n = parseInt(frameNum, 10);
         label.textContent = n === 0 ? 'NOW' : '~' + (n * 2) + ' MIN AGO';
@@ -45760,7 +45800,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (fcastState.range === 'live'){
       var region = fcastState.area === 'city-nyc' ? 'KOKX' : (fcastState.area === 'local' ? ((typeof LOCATION !== 'undefined' && LOCATION.radar) || 'KOKX') : (RIDGE_AREA_MAP[fcastState.area] || 'CONUS'));  // THE CITY is pinned to KOKX — nearest-station picks KDIX for NYC coords
       var frameNum = fhrs[nextIdx] || '0';
-      url = 'https://radar.weather.gov/ridge/standard/' + region + '_' + frameNum + '.gif?cb=' + Math.floor(Date.now()/60000);
+      url = _liveFrameUrl(region, frameNum);
     } else {
       var oldIdx = fcastState.idx;
       fcastState.idx = nextIdx;
@@ -46086,6 +46126,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     var prevRange = fcastState.range;
     fcastState.range = range;
     fcastState.idx = 0;
+    if (window._syncCityBasemap) window._syncCityBasemap();   // hides the NYC basemap off the live+city combo
     _frameDotCount = 0; // force dot rebuild
     // Clear stale images to prevent flash of previous mode
     var imgA = document.getElementById('fcast-radar-img');
@@ -46297,11 +46338,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var namerBtn = document.getElementById('fcast-area-namer');
       if (namerBtn) namerBtn.style.display = 'none';
       updateAreaSubLabels(liveAreas);
-      // Entering live with THE CITY already selected: re-apply its zoom
-      if (fcastState.area === 'city-nyc' && window._applyCityRadarZoom){
-        requestAnimationFrame(window._applyCityRadarZoom);
-        setTimeout(window._applyCityRadarZoom, 400);
-      }
+      if (window._syncCityBasemap) window._syncCityBasemap();
     } else {
       // Fallback area if current area isn't valid for current model
       var cfg = modelAreaConfig[fcastState.model] || {areas:['conus'], default:'conus'};
@@ -46649,48 +46686,13 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var img = document.getElementById(id);
       if (!img) return;
       img.style.objectFit = fitMode;
-      if (isLiveArea) img.style.filter = 'invert(1) hue-rotate(180deg) contrast(1.1) saturate(1.4) brightness(0.95)';
-      if (!isCityZoom){
-        // restore the BASE centering transform — the imgs are positioned
-        // top:50%/left:50% and rely on this translate; '' breaks all views
-        img.style.transform = 'translate(-50%,-50%)';
-        img.style.transformOrigin = '';
-      }
+      // THE CITY frames are the WMS super-res render — native NYC bbox, real
+      // NWS reflectivity palette, so no zoom transform and no invert filter.
+      if (isLiveArea) img.style.filter = isCityZoom ? 'none' : 'invert(1) hue-rotate(180deg) contrast(1.1) saturate(1.4) brightness(0.95)';
+      img.style.transform = 'translate(-50%,-50%)';   // base centering — the imgs sit at top/left 50%
+      img.style.transformOrigin = '';
     });
-    if (isCityZoom){
-      // THE CITY: zoom the 600x550 KOKX standard frame onto NYC. The "New
-      // York" label sits at (148,303) = (24.6%, 55.0%) of the frame (measured
-      // 2026-07-21). contain-fit maps frame->element deterministically —
-      // BUT only once the container has real dimensions: measuring during the
-      // range switch caught a 0/fallback size and centered Poughkeepsie.
-      // Compute lazily (rAF + settle retry + resize) from live dims.
-      if (!window._applyCityRadarZoom){
-        window._applyCityRadarZoom = function(){
-          ['fcast-radar-img','fcast-radar-img-b'].forEach(function(id2){
-            var im2 = document.getElementById(id2);
-            if (!im2) return;
-            if (fcastState.area !== 'city-nyc' || fcastState.range !== 'live'){
-              // restore the base centering translate (imgs sit at top/left 50%)
-              im2.style.transform = 'translate(-50%,-50%)'; im2.style.transformOrigin = ''; return;
-            }
-            var W = im2.clientWidth, H = im2.clientHeight;
-            if (!W || !H) return;   // still hidden — the retry paths re-invoke
-            var s2 = Math.min(W/600, H/550), dw = 600*s2, dh = 550*s2;
-            var ox = (W-dw)/2 + 0.246*dw, oy = (H-dh)/2 + 0.550*dh;
-            im2.style.transformOrigin = ox.toFixed(1) + 'px ' + oy.toFixed(1) + 'px';
-            // COMPOSE with the base -50% centering translate — overwriting it
-            // displaced the whole img box to the lower-right quadrant (the
-            // half-empty container + NNW-of-city centering bug).
-            im2.style.transform = 'translate(-50%,-50%) translate(' + (W/2-ox).toFixed(1) + 'px,' + (H/2-oy).toFixed(1) + 'px) scale(2.4)';
-          });
-        };
-        window.addEventListener('resize', function(){
-          if (fcastState.area === 'city-nyc') window._applyCityRadarZoom();
-        });
-      }
-      requestAnimationFrame(window._applyCityRadarZoom);
-      setTimeout(window._applyCityRadarZoom, 400);
-    }
+    if (window._syncCityBasemap) window._syncCityBasemap();
     // Reset frame dots for new area
     updateFrameIndicator();
     updateFcastBadge();
