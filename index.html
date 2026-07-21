@@ -33079,6 +33079,7 @@ function dayRangeAround(d, days){
     var tempMin = 999, tempMax = -999, tempMinHr = null, tempMaxHr = null;
     var snowTotal = 0, windDirStart = null, windDirEnd = null;
     var nightCloudAvg = null, nightCloudSamples = 0, nightCloudSum = 0;
+    var stormRuns = [], _sRun = null, _cPrev1 = 0, _cPrev2 = 0;
 
     try {
     if(hourly && hourly.time){
@@ -33100,6 +33101,26 @@ function dayRangeAround(d, days){
           precipType = (t != null && t <= 33) ? 'snow' : (t != null && t <= 36) ? 'mix' : 'rain';
         }
         if(precip > precipPeak){ precipPeak = precip; precipPeakHr = fdt; }
+        // Storm hours → contiguous runs, each carrying its rain total
+        // (inches — precipitation_unit=inch) and peak pop. WMO 95/96/99 alone
+        // is NOT enough: Open-Meteo's blend routinely codes convection as
+        // plain heavy rain (2026-07-21: 2700 J/kg CAPE + a 1.7"/hr cell coded
+        // 65), so high CAPE + rain signals count as storm hours too.
+        var wcT = hourly.weathercode ? hourly.weathercode[fi] : null;
+        var capeT = hourly.cape ? (hourly.cape[fi] || 0) : 0;
+        var capeNear = Math.max(capeT, _cPrev1, _cPrev2);   // cells rain AFTER cape collapses
+        _cPrev2 = _cPrev1; _cPrev1 = capeT;
+        if((wcT === 95 || wcT === 96 || wcT === 99)
+           || (capeT >= 1500 && pp >= 40)
+           || ((precip || 0) >= 0.2 && capeNear >= 1000)){
+          if(_sRun && fi === _sRun.endIdx + 1){
+            _sRun.endIdx = fi; _sRun.end = fdt; _sRun.rain += (precip || 0);
+            _sRun.pp = Math.max(_sRun.pp, pp || 0); _sRun.maxHr = Math.max(_sRun.maxHr, precip || 0);
+          } else {
+            _sRun = { startIdx: fi, endIdx: fi, start: fdt, end: fdt, rain: (precip || 0), pp: (pp || 0), maxHr: (precip || 0) };
+            stormRuns.push(_sRun);
+          }
+        }
         if(snow) snowTotal += snow;
         if(wg > windPeak){ windPeak = wg; windPeakHr = fdt; }
         if(t != null && t > tempMax){ tempMax = Math.round(t); tempMaxHr = fdt; }
@@ -33238,7 +33259,33 @@ function dayRangeAround(d, days){
     }
 
     // ── Part 3: Precip + wind forecast from hourly scan ──
-    if(!hasAlerts && precipStart && !wx.precip && !wx.snow && !wx.rain){
+    // Thunderstorm passages — convective cells routinely ride in UNDER the
+    // 60% probability gate of the generic onset clause below, so the summary
+    // stayed silent on storm days. Say WHEN the cells pass and HOW MUCH rain
+    // they carry. Skipped when an NWS thunderstorm alert exists (the alert
+    // already leads the summary); other alerts (heat etc.) don't gag it.
+    var _alertTstorm = alerts.some(function(a){ return /thunderstorm/i.test(a.event || ''); });
+    var _stormCoversOnset = precipStart && stormRuns.some(function(r){
+      return precipStart >= r.start && precipStart <= new Date(r.end.getTime() + 3600000);
+    });
+    if(stormRuns.length && !_alertTstorm){
+      var _fh = function(h){ h = ((h % 24) + 24) % 24; return (h % 12 || 12) + (h < 12 ? ' AM' : ' PM'); };
+      var _runTxt = function(r){
+        var t = r.startIdx === r.endIdx ? 'around ' + _fh(r.start.getHours())
+              : 'between ' + _fh(r.start.getHours()) + ' and ' + _fh(r.end.getHours() + 1);
+        if(r.start.getDate() !== now.getDate()) t += ' tomorrow';
+        return t;
+      };
+      var ppMax = stormRuns.reduce(function(a, r){ return Math.max(a, r.pp); }, 0);
+      var rainTot = stormRuns.reduce(function(a, r){ return a + r.rain; }, 0);
+      var hrMax = stormRuns.reduce(function(a, r){ return Math.max(a, r.maxHr); }, 0);
+      s += ' ' + (ppMax >= 70 ? 'Thunderstorms expected ' : ppMax >= 40 ? 'Scattered thunderstorms could pass ' : 'Isolated thunderstorms could pass ')
+         + stormRuns.slice(0, 2).map(_runTxt).join(', and again ');
+      if(rainTot >= 0.1) s += ', dropping around ' + (rainTot >= 1 ? rainTot.toFixed(1) : rainTot.toFixed(2)) + '" of rain';
+      else if(rainTot > 0) s += ' with little more than a brief shower';
+      s += hrMax >= 0.2 ? ' — brief downpours possible.' : '.';
+    }
+    if(!hasAlerts && precipStart && !wx.precip && !wx.snow && !wx.rain && !_stormCoversOnset){
       var ptName = precipType === 'snow' ? 'Snow' : precipType === 'mix' ? 'A wintry mix' : 'Rain';
       s += ' ' + ptName + ' moves in ' + futureTimeWord(precipStart);
       if(precipType === 'snow' && snowTotal > 0){
