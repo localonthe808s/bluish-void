@@ -45474,7 +45474,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (fcastState.range === 'live'){
       // THE CITY long loop: 20 real scans (~40 min at storm cadence) — WMS
       // archives plenty; RIDGE views stay at 10 frames.
-      if (fcastState.area === 'city-nyc' && window._cityLongLoop){
+      if ((fcastState.area === 'city-nyc' || (fcastState.area === 'local' && window._localWmsOn)) && window._cityLongLoop){
         var lf = []; for (var li2 = 19; li2 >= 0; li2--) lf.push(String(li2));
         return lf;
       }
@@ -45551,7 +45551,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       // City: full-strength reflectivity — the TRANSLUCENT BASEMAP sits ON TOP
       // (z3, opacity .5), so streets ghost over the echoes. Per-img opacity is
       // wrong here: two 0.72 frames overlap mid-crossfade and pulse bright.
-      if (fcastState.area === 'city-nyc') return 'none';
+      if (fcastState.area === 'city-nyc' || (fcastState.area === 'local' && window._localWmsOn)) return 'none';
       return 'invert(1) hue-rotate(180deg) contrast(1.1) saturate(1.4) brightness(0.95)';
     }
     return 'invert(1) hue-rotate(180deg) contrast(1.2) saturate(1.5)';
@@ -45579,7 +45579,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   }
   function _cityOvFetchAlerts(){
     _cityOv.lastAlerts = Date.now();
-    fetch('https://api.weather.gov/alerts/active?status=actual&message_type=alert&area=NY,NJ,CT')
+    // city: tri-state; local: the viewed location's state (best available
+    // scope — alerts from a neighboring state at the box edge may be missed)
+    var _aArea = fcastState.area === 'city-nyc' ? 'NY,NJ,CT' : ((window._userState || 'NY'));
+    _cityOv.alertsArea = _aArea;
+    fetch('https://api.weather.gov/alerts/active?status=actual&message_type=alert&area=' + _aArea)
       .then(function(r){ return r.ok ? r.json() : null; })
       .then(function(d){
         if (!d || !d.features) return;
@@ -45636,7 +45640,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         try{
           var s = JSON.parse(_cityOvLzw(m.data));
           if (typeof s.lat !== 'number' || typeof s.lon !== 'number') return;
-          if (s.lat < 39.8 || s.lat > 41.6 || s.lon < -75.2 || s.lon > -72.8) return;
+          var abx = _activeWmsBox();
+          if (!abx) return;
+          if (s.lat < abx.s - 0.6 || s.lat > abx.n + 0.6 || s.lon < abx.w - 0.7 || s.lon > abx.e + 0.7) return;
           _cityOv.strikes.push({ lat:s.lat, lon:s.lon, t:Date.now() });
           if (_cityOv.strikes.length > 400) _cityOv.strikes.splice(0, 100);
         }catch(e){}
@@ -45656,12 +45662,14 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     var ctx = cv.getContext('2d');
     ctx.setTransform(dpr,0,0,dpr,0,0);
     ctx.clearRect(0,0,W,H);
-    var bw = Math.min(W, H*_cityOv.ASPECT), bh = bw/_cityOv.ASPECT;
+    var bx = _activeWmsBox();
+    if (!bx) return;
+    var bw = Math.min(W, H*bx.ASPECT), bh = bw/bx.ASPECT;
     var ox=(W-bw)/2, oy=(H-bh)/2;
     var px = function(lon,lat){
       var m=_cityOvMerc(lon,lat);
-      return [ox + (m[0]-_cityOv.X0)/(_cityOv.X1-_cityOv.X0)*bw,
-              oy + (_cityOv.Y1-m[1])/(_cityOv.Y1-_cityOv.Y0)*bh];
+      return [ox + (m[0]-bx.X0)/(bx.X1-bx.X0)*bw,
+              oy + (bx.Y1-m[1])/(bx.Y1-bx.Y0)*bh];
     };
     _cityOv.alerts.forEach(function(f){
       var g=f.geometry, polys = g.type==='Polygon' ? [g.coordinates] : (g.type==='MultiPolygon' ? g.coordinates : []);
@@ -45696,7 +45704,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     // ── FLOODNET chip — measured street water (events-triggered, see
     // bluish-floodnet: depth quantifies, events trigger). Top-left corner.
     try{
-      if (_cityOv.fn){
+      if (fcastState.area === 'city-nyc' && _cityOv.fn){
         var wet = _cityOv.fn.active;
         var fLbl = wet > 0 ? ('WATER ON THE STREET \u00b7 ' + wet + ' SENSOR' + (wet > 1 ? 'S' : '')) : 'STREETS DRY';
         var fCol = wet > 0 ? '#c084fc' : '#7dd3fc';
@@ -45765,14 +45773,15 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       _cityOv.timer = setInterval(function(){
         try{
           if (document.hidden) return;
-          if (Date.now() - _cityOv.lastAlerts > 120000) _cityOvFetchAlerts();
-          if (Date.now() - _cityOv.lastFn > 300000) _cityOvFetchFloodNet();
+          var _wantArea = fcastState.area === 'city-nyc' ? 'NY,NJ,CT' : ((window._userState || 'NY'));
+          if (Date.now() - _cityOv.lastAlerts > 120000 || _cityOv.alertsArea !== _wantArea) _cityOvFetchAlerts();
+          if (fcastState.area === 'city-nyc' && Date.now() - _cityOv.lastFn > 300000) _cityOvFetchFloodNet();
           if (!_cityOv.ws) _cityOvConnect();
           _cityOvDraw();
         }catch(e){ console.error('city overlay tick:', e && e.message, e && e.stack); }
       }, 1500);
     }
-    _cityOvFetchAlerts(); _cityOvFetchFloodNet(); _cityOvConnect(); _cityOvDraw();
+    _cityOvFetchAlerts(); if (fcastState.area === 'city-nyc') _cityOvFetchFloodNet(); _cityOvConnect(); _cityOvDraw();
   }
   function _cityOvStop(){
     var cv = document.getElementById('fcast-city-overlay');
@@ -45782,19 +45791,34 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   }
 
   window._syncCityBasemap = function(){
-    var on = fcastState.range === 'live' && fcastState.area === 'city-nyc';
+    // mode: 'city' (static NYC asset) | 'local' (per-station stitched map) | null
+    var mode = null, lbox = null;
+    if (fcastState.range === 'live'){
+      if (fcastState.area === 'city-nyc') mode = 'city';
+      else if (fcastState.area === 'local' && window._localWmsOn){ mode = 'local'; lbox = _localBox(); }
+    }
+    var on = mode !== null;
     var bm = document.getElementById('fcast-city-basemap');
     var bmU = document.getElementById('fcast-city-basemap-under');
-    if (bmU){
-      if (on && !bmU.getAttribute('src')) bmU.src = '/nyc-basemap.jpg?v=2';
-      bmU.style.display = on ? 'block' : 'none';
+    var setSrc = function(u){ [bm, bmU].forEach(function(el){ if (el && el.getAttribute('src') !== u) el.src = u; }); };
+    var show = function(v){ [bm, bmU].forEach(function(el){ if (el) el.style.display = v ? 'block' : 'none'; }); };
+    if (!on) show(false);
+    else if (mode === 'city'){ setSrc('/nyc-basemap.jpg?v=2'); show(true); }
+    else {
+      var cached = window._staBasemap[lbox.sid];
+      if (cached){ setSrc(cached); show(true); }
+      else {
+        show(false);   // radar plays on the plain backdrop while tiles stitch (~1s)
+        _stitchBasemap(lbox, function(u){
+          if (u && fcastState.range === 'live' && fcastState.area === 'local'){ setSrc(u); show(true); }
+        });
+      }
     }
     var at = document.getElementById('fcast-city-attrib');
-    if (bm){
-      if (on && !bm.getAttribute('src')) bm.src = '/nyc-basemap.jpg?v=2';   // v2 = dark_all restyle
-      bm.style.display = on ? 'block' : 'none';
+    if (at){
+      at.style.display = on ? 'block' : 'none';
+      if (on) at.textContent = '\u00a9 OpenStreetMap \u00b7 \u00a9 CARTO \u00b7 NOAA ' + (mode === 'city' ? 'KOKX' : _radarStationId().toUpperCase()) + ' super-res \u00b7 \u26a1 Blitzortung.org';
     }
-    if (at) at.style.display = on ? 'block' : 'none';
     ['fcast-city-prod','fcast-city-prod-m'].forEach(function(pid){
       var pr = document.getElementById(pid);
       if (!pr) return;
@@ -45809,11 +45833,76 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (on) _cityOvStart(); else _cityOvStop();
   };
 
+  // ── WMS view configs: THE CITY (fixed NYC box) and LOCAL (dynamic box
+  // centered on the assigned NEXRAD station — every station has the same
+  // super-res layers on the opengeo geoserver, so the whole city stack
+  // generalizes; only FloodNet stays NYC).
+  function _radarStationId(){ return ((typeof LOCATION !== 'undefined' && LOCATION.radar) || 'KOKX').toLowerCase(); }
+  function _mercXY(lon, lat){ var R = 6378137; return [lon*Math.PI/180*R, Math.log(Math.tan(Math.PI/4 + lat*Math.PI/360))*R]; }
+  var _staBoxCache = {};
+  function _localBox(){
+    var sid = _radarStationId();
+    if (_staBoxCache[sid]) return _staBoxCache[sid];
+    var st = null;
+    try{ RADAR_SITES.forEach(function(s2){ if (s2.id.toLowerCase() === sid) st = s2; }); }catch(e){}
+    var la = st ? st.lat : ((typeof LOCATION !== 'undefined' && LOCATION.lat) || 40.7);
+    var lo = st ? st.lon : ((typeof LOCATION !== 'undefined' && LOCATION.lon) || -74);
+    var dLon = 2.3, dLat = 1.7;
+    var a = _mercXY(lo - dLon, la - dLat), b = _mercXY(lo + dLon, la + dLat);
+    var box = { sid: sid, w: lo-dLon, s: la-dLat, e: lo+dLon, n: la+dLat, X0: a[0], Y0: a[1], X1: b[0], Y1: b[1] };
+    box.ASPECT = (box.X1 - box.X0) / (box.Y1 - box.Y0);
+    _staBoxCache[sid] = box;
+    return box;
+  }
+  function _cityBoxCfg(){ return { sid:'kokx', w:-74.60, s:40.30, e:-73.40, n:41.10, X0:-8304434, Y0:4909634, X1:-8170851, Y1:5027103, ASPECT:1.1372 }; }
+  function _activeWmsBox(){
+    if (fcastState.range !== 'live') return null;
+    if (fcastState.area === 'city-nyc') return _cityBoxCfg();
+    if (fcastState.area === 'local' && window._localWmsOn) return _localBox();
+    return null;
+  }
+  // Client-stitched dark basemap for arbitrary station boxes (carto tiles are
+  // CORS *, so the canvas stays untainted). ~12 tiles at z8, cached per station.
+  window._staBasemap = window._staBasemap || {};
+  function _stitchBasemap(box, cb){
+    if (window._staBasemap[box.sid]){ cb(window._staBasemap[box.sid]); return; }
+    try{
+      var Z = 8, n2 = Math.pow(2, Z), R = 6378137, PI = Math.PI;
+      var tx0 = (box.X0 + PI*R)/(2*PI*R)*n2, tx1 = (box.X1 + PI*R)/(2*PI*R)*n2;
+      var ty0 = (PI*R - box.Y1)/(2*PI*R)*n2, ty1 = (PI*R - box.Y0)/(2*PI*R)*n2;
+      var xa = Math.floor(tx0), xb = Math.floor(tx1), ya = Math.floor(ty0), yb = Math.floor(ty1);
+      var W = Math.round((tx1-tx0)*256), H = Math.round((ty1-ty0)*256);
+      if (W < 10 || H < 10 || W > 4000 || H > 4000){ cb(null); return; }
+      var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+      var ctx2 = cv.getContext('2d'); ctx2.fillStyle = '#0b0e14'; ctx2.fillRect(0, 0, W, H);
+      var total = (xb-xa+1)*(yb-ya+1), done = 0, failed = 0;
+      var fin = function(){
+        try{
+          if (failed > total * 0.2){ cb(null); return; }
+          var u = cv.toDataURL('image/jpeg', 0.82);
+          window._staBasemap[box.sid] = u; cb(u);
+        }catch(e){ cb(null); }
+      };
+      for (var tx = xa; tx <= xb; tx++){
+        for (var ty = ya; ty <= yb; ty++){
+          (function(tx2, ty2){
+            var im2 = new Image(); im2.crossOrigin = 'anonymous';
+            im2.onload = function(){ try{ ctx2.drawImage(im2, Math.round((tx2-tx0)*256), Math.round((ty2-ty0)*256)); }catch(e){} if (++done === total) fin(); };
+            im2.onerror = function(){ failed++; if (++done === total) fin(); };
+            im2.src = 'https://' + 'abcd'[(tx2+ty2)%4] + '.basemaps.cartocdn.com/dark_all/' + Z + '/' + tx2 + '/' + ty2 + '.png';
+          })(tx, ty);
+        }
+      }
+    }catch(e){ cb(null); }
+  }
+
   // ── Real KOKX scan times (city view): the WMS capabilities list every
   // available scan (CORS *, ~19KB). During storms the VCP runs ~2-min scans,
   // so a fixed 4-min grid both skips scans and mislabels frames. Frames pin
   // to exact scan times; labels show the real clock time.
-  window._cityScanTimes = window._cityScanTimes || null;   // {bref:[ms...], bvel:[ms...]}
+  window._cityScanTimes = window._cityScanTimes || null;   // legacy alias (kokx)
+  window._staScans = window._staScans || {};               // sid -> {bref:[ms...], bvel:[ms...]}
+  var _staScansLast = {};
   window._cityProduct = window._cityProduct || 'bref';
   window._cityLongLoop = false;
   window._cityToggleLongLoop = function(){
@@ -45848,16 +45937,15 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     lastGoodSrc = '';
     loadFcastRadar();
   };
-  var _cityScansLast = 0;
-  function _cityFetchScanTimes(){
-    _cityScansLast = Date.now();
-    fetch('https://opengeo.ncep.noaa.gov/geoserver/kokx/ows?service=WMS&request=GetCapabilities')
+  function _fetchScanTimes(sid){
+    _staScansLast[sid] = Date.now();
+    fetch('https://opengeo.ncep.noaa.gov/geoserver/' + sid + '/ows?service=WMS&request=GetCapabilities')
       .then(function(r){ return r.ok ? r.text() : null; })
       .then(function(x){
         if (!x) return;
         var out = {};
         ['bref','bvel'].forEach(function(prod){
-          var li = x.indexOf('<Name>kokx_sr_' + prod + '</Name>');
+          var li = x.indexOf('<Name>' + sid + '_sr_' + prod + '</Name>');
           if (li < 0) return;
           var di = x.indexOf('<Dimension name="time"', li);
           var de = x.indexOf('</Dimension>', di);
@@ -45868,11 +45956,22 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             .sort(function(a,b){ return a - b; });
           if (ts.length) out[prod] = ts;
         });
-        if (out.bref || out.bvel) window._cityScanTimes = out;
+        if (out.bref || out.bvel){
+          window._staScans[sid] = out;
+          if (sid === 'kokx') window._cityScanTimes = out;
+          // LOCAL upgrades to WMS the moment its station's scans land
+          if (fcastState.range === 'live' && fcastState.area === 'local' && sid === _radarStationId()){
+            window._localWmsOn = true;
+            if (radarWideAreas.indexOf('local') < 0) radarWideAreas.push('local');
+            if (window._syncCityBasemap) window._syncCityBasemap();
+            try{ loadFcastRadar(); }catch(e){}
+          }
+        }
       }).catch(function(){});
   }
   window._cityScanLabel = function(frameNum){
-    var ts = window._cityScanTimes && window._cityScanTimes[window._cityProduct || 'bref'];
+    var bx = _activeWmsBox(); if (!bx) return null;
+    var ts = window._staScans[bx.sid] && window._staScans[bx.sid][window._cityProduct || 'bref'];
     if (!ts || !ts.length) return null;
     var i = ts.length - 1 - frameNum;
     if (i < 0) i = 0;
@@ -45882,25 +45981,35 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   };
 
   function _liveFrameUrl(region, fhr){
-    if (fcastState.area === 'city-nyc'){
-      if (Date.now() - _cityScansLast > 120000) _cityFetchScanTimes();
+    var isCity = fcastState.area === 'city-nyc';
+    var isLocal = fcastState.area === 'local';
+    if (isCity || isLocal){
+      var sid = isCity ? 'kokx' : _radarStationId();
+      if (!_staScansLast[sid] || Date.now() - _staScansLast[sid] > 120000) _fetchScanTimes(sid);
       var prod = window._cityProduct || 'bref';
-      var t;
-      var sc = window._cityScanTimes && window._cityScanTimes[prod];
-      if (sc && sc.length){
-        var si = sc.length - 1 - parseInt(fhr, 10);
-        t = new Date(sc[si < 0 ? 0 : si]).toISOString();   // exact scan — honest + cache-stable
-      } else {
-        var mins = parseInt(fhr, 10) * 4;
-        t = new Date(Math.floor(Date.now()/240000)*240000 - mins*60000).toISOString();
+      var scans = window._staScans[sid] && window._staScans[sid][prod];
+      // LOCAL falls back to RIDGE until its station's scan list arrives —
+      // the WMS view needs real scan times AND the contain-fit/basemap sync
+      // that _fetchScanTimes flips on. THE CITY keeps its 4-min-grid fallback.
+      if (isLocal && !scans){ window._localWmsOn = false; }
+      else {
+        var wbox = isCity ? _cityBoxCfg() : _localBox();
+        var t;
+        if (scans && scans.length){
+          var si = scans.length - 1 - parseInt(fhr, 10);
+          t = new Date(scans[si < 0 ? 0 : si]).toISOString();   // exact scan — honest + cache-stable
+        } else {
+          var mins = parseInt(fhr, 10) * 4;
+          t = new Date(Math.floor(Date.now()/240000)*240000 - mins*60000).toISOString();
+        }
+        var ic = document.getElementById('fcast-img-container');
+        var ch = Math.max(400, Math.min(1000, (ic && ic.clientHeight) || 600));
+        var cw = Math.round(ch * wbox.ASPECT);
+        return 'https://opengeo.ncep.noaa.gov/geoserver/' + sid + '/ows?service=WMS&version=1.1.0&request=GetMap'
+          + '&layers=' + sid + '_sr_' + prod + '&styles=&bbox=' + Math.round(wbox.X0) + ',' + Math.round(wbox.Y0) + ',' + Math.round(wbox.X1) + ',' + Math.round(wbox.Y1)
+          + '&width=' + cw + '&height=' + ch + '&srs=EPSG:3857&format=image/png&transparent=true'
+          + '&time=' + encodeURIComponent(t);
       }
-      var ic = document.getElementById('fcast-img-container');
-      var ch = Math.max(400, Math.min(1000, (ic && ic.clientHeight) || 600));
-      var cw = Math.round(ch * 1.1372);   // bbox aspect
-      return 'https://opengeo.ncep.noaa.gov/geoserver/kokx/ows?service=WMS&version=1.1.0&request=GetMap'
-        + '&layers=kokx_sr_' + prod + '&styles=&bbox=-8304434,4909634,-8170851,5027103'
-        + '&width=' + cw + '&height=' + ch + '&srs=EPSG:3857&format=image/png&transparent=true'
-        + '&time=' + encodeURIComponent(t);
     }
     return 'https://radar.weather.gov/ridge/standard/' + region + '_' + fhr + '.gif?cb=' + Math.floor(Date.now()/60000);
   }
