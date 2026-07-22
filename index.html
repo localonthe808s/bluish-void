@@ -73483,9 +73483,15 @@ function closeAlertModal(){
     var hav = function(la1,lo1,la2,lo2){ var p=Math.PI/180;
       var a=Math.sin((la2-la1)*p/2), b=Math.sin((lo2-lo1)*p/2);
       return 2*3959*Math.asin(Math.sqrt(a*a + Math.cos(la1*p)*Math.cos(la2*p)*b*b)); };
-    var batch = function(stamps){
+    var batch = function(stamps, attempt){
       return fetch('https://api.wheretheiss.at/v1/satellites/25544/positions?timestamps=' + stamps.join(',') + '&units=miles')
-        .then(function(r){ return r.ok ? r.json() : []; }).catch(function(){ return []; });
+        .then(function(r){ return r.ok ? r.json() : Promise.reject(r.status); })
+        .catch(function(){
+          if (attempt >= 2) return [];
+          // 429s under concurrency — back off and retry this batch twice
+          return new Promise(function(res){ setTimeout(res, 900 * ((attempt || 0) + 1)); })
+            .then(function(){ return batch(stamps, (attempt || 0) + 1); });
+        });
     };
     // pooled fetches (3 concurrent, small stagger) — the sequential version
     // took ~25s to first badge, which read as "not working"
@@ -73494,7 +73500,7 @@ function closeAlertModal(){
         var i = 0, active = 0;
         var next = function(){
           if (i >= groups.length && active === 0) return resolve(out);
-          while (active < 3 && i < groups.length){
+          while (active < 2 && i < groups.length){
             (function(g){
               active++;
               setTimeout(function(){
@@ -73510,7 +73516,11 @@ function closeAlertModal(){
       });
     };
     var groups = []; for (var i = 0; i < coarse.length; i += 10) groups.push(coarse.slice(i, i + 10));
+    var expectedCoarse = coarse.length;
     seq(groups, []).then(function(pts){
+      // a rate-limited sweep loses whole batches — caching a partial day
+      // silently drops passes (live: 10:40 PM vanished). Retry later instead.
+      if (pts.length < expectedCoarse * 0.9){ delete _issPassCache[ds]; return; }
       pts.sort(function(a,b){ return a[0]-b[0]; });
       var cands = [];
       for (var k = 1; k < pts.length - 1; k++){
@@ -73522,7 +73532,9 @@ function closeAlertModal(){
       var fine = [];
       cands.slice(0, 5).forEach(function(t0){ for (var m = -10; m < 10; m++) fine.push(t0 + m*60); });
       var fg = []; for (var j = 0; j < fine.length; j += 10) fg.push(fine.slice(j, j + 10));
+      var expectedFine = fine.length;
       return seq(fg, []).then(function(fp){
+        if (fp.length < expectedFine * 0.9){ delete _issPassCache[ds]; return; }
         var best = {};
         fp.forEach(function(pr){
           var key = Math.round(pr[0]/1200);
