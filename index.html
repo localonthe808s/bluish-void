@@ -45804,6 +45804,17 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (_cityOv.ws){ try{ _cityOv.ws.close(); }catch(e){} _cityOv.ws = null; }
   }
 
+  // Boot-idle prewarm: scan lists + local basemap ready BEFORE the radar tab
+  // is ever opened, so LOCAL (the default area) paints WMS on first entry.
+  setTimeout(function(){
+    try{
+      _fetchScanTimes('conus');
+      _fetchScanTimes(_radarStationId());
+      if (typeof LOCATION !== 'undefined' && LOCATION.lat > 40.40 && LOCATION.lat < 41.10 && LOCATION.lon > -74.35 && LOCATION.lon < -73.60) _fetchScanTimes('kokx');
+      _stitchBasemap(_localBox(), function(){});
+    }catch(e){}
+  }, 4000);
+
   window._syncCityBasemap = function(){
     // mode: 'city' (static NYC asset) | 'local' (per-station stitched map) | null
     var mode = null, lbox = null;
@@ -46040,8 +46051,18 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       // LOCAL falls back to RIDGE until its station's scan list arrives —
       // the WMS view needs real scan times AND the contain-fit/basemap sync
       // that _fetchScanTimes flips on. THE CITY keeps its 4-min-grid fallback.
-      if (isLocal && !scans){ window._localWmsOn = false; }
-      else if (isConus && !scans){ window._conusWmsOn = false; }
+      if (isLocal && !scans){
+        window._localWmsOn = false;
+        // LOCAL is the tab's default area, so its first paint races the scan
+        // fetch — hold the loading state briefly instead of flashing the
+        // inverted RIDGE fallback, but fall back for real if the geoserver
+        // is slow/dead (>6s since the fetch started)
+        if (_staScansLast[sid] && Date.now() - _staScansLast[sid] < 6000) return '';
+      }
+      else if (isConus && !scans){
+        window._conusWmsOn = false;
+        if (_staScansLast[sid] && Date.now() - _staScansLast[sid] < 6000) return '';
+      }
       else {
         // flags must flip HERE too: with prewarmed scans the fetch callback
         // ran while another area was active, so it never set them — frames
@@ -46254,6 +46275,13 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (!back || !front) return;
     var loader = document.getElementById('fcast-loading');
     if (loader && !lastGoodSrc) loader.style.opacity = '1';
+    if (!url){
+      // WMS mode holding for its scan list — the _fetchScanTimes callback
+      // calls loadFcastRadar again when it lands; retry on a timer as backup
+      if (loader) loader.style.opacity = '1';
+      setTimeout(function(){ if (fcastState.range === 'live') loadFcastRadar(); }, 900);
+      return;
+    }
 
     // Copy filter style from current mode
     back.style.filter = _radarImgFilter();
@@ -46366,6 +46394,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var region = fcastState.area === 'city-nyc' ? 'KOKX' : (fcastState.area === 'local' ? ((typeof LOCATION !== 'undefined' && LOCATION.radar) || 'KOKX') : (RIDGE_AREA_MAP[fcastState.area] || 'CONUS'));  // THE CITY is pinned to KOKX — nearest-station picks KDIX for NYC coords
       var frameNum = fhrs[nextIdx] || '0';
       url = _liveFrameUrl(region, frameNum);
+      if (!url) return;
     } else {
       var oldIdx = fcastState.idx;
       fcastState.idx = nextIdx;
