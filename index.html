@@ -73487,11 +73487,26 @@ function closeAlertModal(){
       return fetch('https://api.wheretheiss.at/v1/satellites/25544/positions?timestamps=' + stamps.join(',') + '&units=miles')
         .then(function(r){ return r.ok ? r.json() : []; }).catch(function(){ return []; });
     };
+    // pooled fetches (3 concurrent, small stagger) — the sequential version
+    // took ~25s to first badge, which read as "not working"
     var seq = function(groups, out){
-      if (!groups.length) return Promise.resolve(out);
-      return batch(groups[0]).then(function(d){
-        (d || []).forEach(function(pt){ out.push([pt.timestamp, hav(LOCATION.lat, LOCATION.lon, pt.latitude, pt.longitude)]); });
-        return new Promise(function(res){ setTimeout(res, 350); }).then(function(){ return seq(groups.slice(1), out); });
+      return new Promise(function(resolve){
+        var i = 0, active = 0;
+        var next = function(){
+          if (i >= groups.length && active === 0) return resolve(out);
+          while (active < 3 && i < groups.length){
+            (function(g){
+              active++;
+              setTimeout(function(){
+                batch(g).then(function(d){
+                  (d || []).forEach(function(pt){ out.push([pt.timestamp, hav(LOCATION.lat, LOCATION.lon, pt.latitude, pt.longitude)]); });
+                  active--; next();
+                });
+              }, 120);
+            })(groups[i++]);
+          }
+        };
+        next();
       });
     };
     var groups = []; for (var i = 0; i < coarse.length; i += 10) groups.push(coarse.slice(i, i + 10));
@@ -73500,7 +73515,9 @@ function closeAlertModal(){
       var cands = [];
       for (var k = 1; k < pts.length - 1; k++){
         // 10-min sampling can sit far off the true minimum — generous gate
-        if (pts[k][1] < 1300 && pts[k][1] <= pts[k-1][1] && pts[k][1] <= pts[k+1][1]) cands.push(pts[k][0]);
+        // gate must cover the worst 10-min-grid phase: a 50-mi pass sampled
+        // ±5 min off its minimum reads ~1500 mi (ISS ground speed ~286 mi/min)
+        if (pts[k][1] < 1650 && pts[k][1] <= pts[k-1][1] && pts[k][1] <= pts[k+1][1]) cands.push(pts[k][0]);
       }
       var fine = [];
       cands.slice(0, 5).forEach(function(t0){ for (var m = -10; m < 10; m++) fine.push(t0 + m*60); });
@@ -73547,14 +73564,35 @@ function closeAlertModal(){
     marker.setAttribute('data-day', ds);
     marker.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:15;pointer-events:none;overflow:visible;';
     var badge = document.createElement('div');
-    badge.style.cssText = 'position:absolute;top:-45px;left:50%;transform:translateX(-50%);'
-      + 'background:' + COL + ';color:#fff;font-size:7.5px;font-weight:800;padding:3px 10px;border-radius:5px;'
-      + 'letter-spacing:.4px;text-align:center;line-height:1.1;z-index:20;white-space:nowrap;'
-      + 'box-shadow:0 1px 4px rgba(0,0,0,.3),0 0 8px ' + COL + '44;text-shadow:0 1px 1px rgba(0,0,0,.3);'
+    badge.style.cssText = 'position:absolute;top:-64px;left:50%;transform:translateX(-50%);'
+      + 'display:flex;flex-direction:column;align-items:center;gap:2px;z-index:20;'
       + 'pointer-events:auto;cursor:default;';
     var hh = Math.floor(mins/60) % 12 || 12, mm = ('0' + mins % 60).slice(-2), ap = mins < 720 ? 'AM' : 'PM';
     badge.title = 'ISS passes nearly overhead ~' + hh + ':' + mm + ' ' + ap + ' \u00b7 closest ' + mi + ' mi from directly above';
-    badge.textContent = '\ud83d\udef0 ISS ' + hh + ':' + mm + ap;
+    // icon row: clone the space-event card's ISS artwork (gradient url() refs
+    // resolve against the ORIGINAL card's defs, so the clone renders fully);
+    // emoji fallback if that card didn't build
+    var ic = document.createElement('div');
+    ic.style.cssText = 'width:34px;height:26px;display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 1px 3px rgba(0,0,0,.55));';
+    var srcSvg = null;
+    document.querySelectorAll('.se-name').forEach(function(n){
+      if ((n.textContent || '').trim() === 'ISS TRACKER'){
+        var s = n.parentNode && n.parentNode.querySelector('.se-icon svg');
+        if (s) srcSvg = s;
+      }
+    });
+    if (srcSvg){
+      var cl = srcSvg.cloneNode(true);
+      cl.setAttribute('width', '34'); cl.setAttribute('height', '26');
+      cl.removeAttribute('style');
+      ic.appendChild(cl);
+    } else { ic.textContent = '\ud83d\udef0'; ic.style.fontSize = '15px'; }
+    var tm = document.createElement('div');
+    tm.style.cssText = 'background:' + COL + ';color:#fff;font-size:7.5px;font-weight:800;padding:2px 8px;'
+      + 'border-radius:5px;letter-spacing:.4px;white-space:nowrap;line-height:1.1;'
+      + 'box-shadow:0 1px 4px rgba(0,0,0,.3),0 0 8px ' + COL + '44;text-shadow:0 1px 1px rgba(0,0,0,.3);';
+    tm.textContent = hh + ':' + mm + ap;
+    badge.appendChild(ic); badge.appendChild(tm);
     marker.appendChild(badge);
     cols[idx].appendChild(marker);
   }
@@ -73577,7 +73615,7 @@ function closeAlertModal(){
   }
   window._injectIssPassMarkers = injectIssPassMarkers;
   setInterval(function(){ if (!document.hidden) injectIssPassMarkers(); }, 8000);
-  setTimeout(injectIssPassMarkers, 4000);
+  setTimeout(injectIssPassMarkers, 1200);   // early kick — compute starts on first call
 
 
   // ── SONG TIMES FOR ANY DAY ────────────────────────────────────────────
