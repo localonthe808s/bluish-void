@@ -73455,6 +73455,121 @@ function closeAlertModal(){
   // follow promptly, otherwise a stale day's badge lingers on screen
   setInterval(function(){ if (!document.hidden) injectSongCues(); }, 5000);
 
+  // ── ISS PASS MARKERS on the today strip ───────────────────────────────
+  // A forecast marker, not a live one: a violet badge over the hour the ISS
+  // passes nearly overhead (<500 mi ground miss — the same threshold as the
+  // live NOW chip and the ISS card's LOOK UP! state). Passes are computed
+  // from wheretheiss /positions TLE propagation: 10-min coarse sweep of the
+  // local day, then 1-min refinement around each candidate minimum, cached
+  // in localStorage per day+location (~25 small calls once per day).
+  var _issPassCache = {};
+  function _issPassKey(ds){ return 'bv_iss_passes_v1_' + ds + '_' + (window.LOCATION ? LOCATION.lat.toFixed(1) + '_' + LOCATION.lon.toFixed(1) : '0'); }
+  function _issComputePasses(ds){
+    if (_issPassCache[ds]) return;
+    _issPassCache[ds] = [];   // in-flight marker; empty = no passes is also a valid answer
+    try{
+      var cached = localStorage.getItem(_issPassKey(ds));
+      if (cached){ _issPassCache[ds] = JSON.parse(cached); injectIssPassMarkers(); return; }
+      // purge other days' keys
+      for (var ki = localStorage.length - 1; ki >= 0; ki--){
+        var kk = localStorage.key(ki);
+        if (kk && kk.indexOf('bv_iss_passes_v1_') === 0 && kk.indexOf('bv_iss_passes_v1_' + ds) !== 0) localStorage.removeItem(kk);
+      }
+    }catch(e){}
+    var d0 = new Date(); d0.setHours(0,0,0,0);
+    var start = Math.floor(d0.getTime()/1000);
+    var coarse = [];
+    for (var t = start; t < start + 86400; t += 600) coarse.push(t);
+    var hav = function(la1,lo1,la2,lo2){ var p=Math.PI/180;
+      var a=Math.sin((la2-la1)*p/2), b=Math.sin((lo2-lo1)*p/2);
+      return 2*3959*Math.asin(Math.sqrt(a*a + Math.cos(la1*p)*Math.cos(la2*p)*b*b)); };
+    var batch = function(stamps){
+      return fetch('https://api.wheretheiss.at/v1/satellites/25544/positions?timestamps=' + stamps.join(',') + '&units=miles')
+        .then(function(r){ return r.ok ? r.json() : []; }).catch(function(){ return []; });
+    };
+    var seq = function(groups, out){
+      if (!groups.length) return Promise.resolve(out);
+      return batch(groups[0]).then(function(d){
+        (d || []).forEach(function(pt){ out.push([pt.timestamp, hav(LOCATION.lat, LOCATION.lon, pt.latitude, pt.longitude)]); });
+        return new Promise(function(res){ setTimeout(res, 350); }).then(function(){ return seq(groups.slice(1), out); });
+      });
+    };
+    var groups = []; for (var i = 0; i < coarse.length; i += 10) groups.push(coarse.slice(i, i + 10));
+    seq(groups, []).then(function(pts){
+      pts.sort(function(a,b){ return a[0]-b[0]; });
+      var cands = [];
+      for (var k = 1; k < pts.length - 1; k++){
+        // 10-min sampling can sit far off the true minimum — generous gate
+        if (pts[k][1] < 1300 && pts[k][1] <= pts[k-1][1] && pts[k][1] <= pts[k+1][1]) cands.push(pts[k][0]);
+      }
+      var fine = [];
+      cands.slice(0, 5).forEach(function(t0){ for (var m = -10; m < 10; m++) fine.push(t0 + m*60); });
+      var fg = []; for (var j = 0; j < fine.length; j += 10) fg.push(fine.slice(j, j + 10));
+      return seq(fg, []).then(function(fp){
+        var best = {};
+        fp.forEach(function(pr){
+          var key = Math.round(pr[0]/1200);
+          if (!best[key] || pr[1] < best[key][1]) best[key] = pr;
+        });
+        var passes = [];
+        Object.keys(best).forEach(function(bk){
+          var pr = best[bk];
+          if (pr[1] < 500){
+            var dt = new Date(pr[0]*1000);
+            passes.push({ m: dt.getHours()*60 + dt.getMinutes(), mi: Math.round(pr[1]) });
+          }
+        });
+        passes.sort(function(a,b){ return a.m - b.m; });
+        _issPassCache[ds] = passes;
+        try{ localStorage.setItem(_issPassKey(ds), JSON.stringify(passes)); }catch(e){}
+        injectIssPassMarkers();
+      });
+    }).catch(function(){});
+  }
+  function _placeIssMarker(cols, mins, mi, ds){
+    var COL = '#6d28d9';
+    var hr = Math.floor(mins/60);
+    var idx = cols.length >= 24 ? hr : Math.round(hr * (cols.length - 1) / 23);
+    if (idx < 0 || idx >= cols.length) return;
+    if (getComputedStyle(cols[idx]).position === 'static') cols[idx].style.position = 'relative';
+    var marker = document.createElement('div');
+    marker.className = 'iss-pass-marker';
+    marker.setAttribute('data-day', ds);
+    marker.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:15;pointer-events:none;overflow:visible;';
+    var badge = document.createElement('div');
+    badge.style.cssText = 'position:absolute;top:-45px;left:50%;transform:translateX(-50%);'
+      + 'background:' + COL + ';color:#fff;font-size:7.5px;font-weight:800;padding:3px 10px;border-radius:5px;'
+      + 'letter-spacing:.4px;text-align:center;line-height:1.1;z-index:20;white-space:nowrap;'
+      + 'box-shadow:0 1px 4px rgba(0,0,0,.3),0 0 8px ' + COL + '44;text-shadow:0 1px 1px rgba(0,0,0,.3);'
+      + 'pointer-events:auto;cursor:default;';
+    var hh = Math.floor(mins/60) % 12 || 12, mm = ('0' + mins % 60).slice(-2), ap = mins < 720 ? 'AM' : 'PM';
+    badge.title = 'ISS passes nearly overhead ~' + hh + ':' + mm + ' ' + ap + ' \u00b7 closest ' + mi + ' mi from directly above';
+    badge.textContent = '\ud83d\udef0 ISS ' + hh + ':' + mm + ap;
+    marker.appendChild(badge);
+    cols[idx].appendChild(marker);
+  }
+  function injectIssPassMarkers(){
+    try{
+      var row = document.getElementById('today-tl-weather-row'); if (!row) return;
+      if ((window._tlDayOffset || 0) !== 0){
+        row.querySelectorAll('.iss-pass-marker').forEach(function(n){ n.remove(); });
+        return;
+      }
+      var cols = row.querySelectorAll('.today-tl-weather-hour'); if (!cols.length) return;
+      var ds = ymd(new Date());
+      var passes = _issPassCache[ds];
+      if (passes == null){ _issComputePasses(ds); return; }
+      var have = row.querySelectorAll('.iss-pass-marker');
+      if (have.length === passes.length && have.length && have[0].getAttribute('data-day') === ds) return;
+      have.forEach(function(n){ n.remove(); });
+      passes.forEach(function(pp){ _placeIssMarker(cols, pp.m, pp.mi, ds); });
+    }catch(e){}
+  }
+  window._injectIssPassMarkers = injectIssPassMarkers;
+  setInterval(function(){ if (!document.hidden) injectIssPassMarkers(); }, 8000);
+  setTimeout(injectIssPassMarkers, 4000);
+
+
   // ── SONG TIMES FOR ANY DAY ────────────────────────────────────────────
   // Onset has to be found slice-by-slice for the same reason the chorus loader
   // does it: `detections` returns the newest 500 and nothing older, so a single
