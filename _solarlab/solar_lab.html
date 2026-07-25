@@ -202,12 +202,6 @@
     font-size:.66rem;font-weight:600;line-height:1.5;color:rgba(43,34,244,.62);
   }
   #tonight-summary b{color:rgba(43,34,244,.85);font-weight:800;}
-  #night-facts{
-    display:flex;justify-content:center;flex-wrap:wrap;gap:4px 14px;
-    font-size:.58rem;font-weight:700;letter-spacing:.04em;
-    color:rgba(43,34,244,.55);margin-bottom:6px;
-  }
-  #night-facts .nf b{color:rgba(43,34,244,.8);}
   #tl-wrap{max-width:660px;margin:0 auto;}
   .tl-axis{
     display:flex;justify-content:space-between;
@@ -263,7 +257,6 @@
     /* the note is desktop nicety, not information */
     #tonight-panel .e2{ display:none; }
     #tonight-summary{ font-size:.6rem; line-height:1.45; }
-    #night-facts{ font-size:.54rem; gap:2px 9px; }
 
     /* panels join the flow between map and footer instead of covering the map */
     /* in flow they no longer cover the map — but #stage is flex:1, so left
@@ -2265,7 +2258,12 @@ function buildPhotoRow(){
     document.getElementById('hud').appendChild(row);
   }
   row.innerHTML = '';
-  var win = findDarkWindow(curMs);
+  /* The panel is headed TONIGHT and sits above a summary about tonight, so it
+     is pinned to the real clock. Playback moves the MAP; it must not move what
+     the words describe — that was the whole reason the old facts line appeared
+     to wander as the animation ran. */
+  var NOW = Date.now();
+  var win = findDarkWindow(NOW);
   if (!win) return;
   var sunset = win.sunset, sunrise = win.sunrise, STEP = 10*60000;
   /* the site's planet row: photo circles with tonight status, Moon included */
@@ -2293,11 +2291,28 @@ function buildPhotoRow(){
     row.appendChild(item);
   });
 }
+/* The summary shown in the widget = the page's briefing sentence (or, running
+   standalone, the lab's own) followed by tonight's observing conditions. Kept
+   in one function so the host pushing new text and the panel rebuilding both
+   produce exactly the same string. */
+function escHtml(t){
+  return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function composeSummary(labSentence){
+  var base = (window.self !== window.top)
+    ? (window._hostSummary ? escHtml(window._hostSummary) : '')
+    : (labSentence || '');
+  var night = window._nightSentence || '';
+  return base ? (base + (night ? ' ' + night : '')) : night;
+}
 function buildTonightPanel(){
-  ngLastDay = Math.floor(curMs/86400000);
+  ngLastDay = Math.floor(Date.now()/86400000);   // real day, not the map's
   var panel = document.getElementById('tonight-panel');
   var STEP = 10*60000;
-  var win = findDarkWindow(curMs);
+  /* pinned to the real clock: playback moves the MAP, never what the words
+     describe (the old facts line appeared to wander as the animation ran) */
+  var NOW = Date.now();
+  var win = findDarkWindow(NOW);
   if (!win){ panel.innerHTML = ''; ngSunset = ngSunrise = null; return; }
   var sunset = win.sunset, sunrise = win.sunrise;
   /* seasonal context: the solstice extremes, recomputed once per year */
@@ -2355,18 +2370,29 @@ function buildTonightPanel(){
   }
   var hrs = Math.floor(span/3600000), mins = Math.round((span%3600000)/60000);
   var showersTonight = (typeof METEOR_SHOWERS !== 'undefined')
-    ? METEOR_SHOWERS.filter(function(sh){ return showerActive(sh, curMs); }) : [];
+    ? METEOR_SHOWERS.filter(function(sh){ return showerActive(sh, NOW); }) : [];
 
-  var facts = document.createElement('div');
-  facts.id = 'night-facts';
-  var fbits = ['<span class="nf"><b>' + hrs + 'h ' + mins + 'm</b> of true dark</span>',
-               '<span class="nf">Moon <b>' + moonTxt + '</b></span>'];
-  if (darkFrom !== null && darkFrom > sunset + STEP)
-    fbits.push('<span class="nf">moonless <b>' + fmtT(darkFrom) + ' – ' + fmtT(sunrise) + '</b></span>');
+  /* Folded into the summary rather than shown as its own line: one sentence
+     about tonight reads better than a row of chips, and there is then only one
+     thing on screen that can go stale. */
+  var nightBits = '<b>' + hrs + 'h ' + mins + 'm</b> of true dark';
+  if (mFirst === null) nightBits += ', with no Moon up at all';
+  else if (darkFrom !== null && darkFrom > sunset + STEP)
+    nightBits += '; a <b>' + pct + '% ' + moonPhaseName(mp.illum, mp.waxing) +
+                 '</b> Moon sets at <b>' + fmtT(darkFrom) + '</b>, leaving <b>' +
+                 fmtT(darkFrom) + ' – ' + fmtT(sunrise) + '</b> moonless';
+  else if (mFirst > sunset + STEP)
+    nightBits += '; a <b>' + pct + '% ' + moonPhaseName(mp.illum, mp.waxing) +
+                 '</b> Moon rises at <b>' + fmtT(mFirst) + '</b>';
+  else
+    nightBits += ', though a <b>' + pct + '% ' + moonPhaseName(mp.illum, mp.waxing) +
+                 '</b> Moon is up all night';
+  var nightSentence = 'Tonight brings ' + nightBits + '.';
   if (showersTonight.length)
-    fbits.push('<span class="nf"><b>' + showersTonight.map(function(sh){ return sh.name; }).join(', ') +
-               '</b> active</span>');
-  facts.innerHTML = fbits.join('');
+    nightSentence += ' The <b>' +
+      showersTonight.map(function(sh){ return sh.name; }).join('</b> and <b>') +
+      '</b> ' + (showersTonight.length > 1 ? 'are' : 'is') + ' active.';
+  window._nightSentence = nightSentence;
 
   /* ---- the space summary. On the live site this text is already built by the
      briefing engine into #space-summary-text (below the planet row); moving it
@@ -2391,10 +2417,8 @@ function buildTonightPanel(){
   /* Standalone, the lab writes its own summary from local astronomy. Embedded,
      the site's briefing engine has a far richer one (cloud cover, aurora, space
      notes) and posts it in — so leave the slot to it rather than overwriting. */
-  if (window.self === window.top) sum.innerHTML = sen + '.';
-  else if (window._hostSummary) sum.textContent = window._hostSummary;
+  sum.innerHTML = composeSummary(window.self === window.top ? sen + '.' : null);
   panel.appendChild(sum);
-  panel.appendChild(facts);
 
   /* No per-planet timeline here: the site's TODAY view already draws exactly
      this (#today-tl-planet-tracks, a bar per planet across the day) at the top
@@ -3166,7 +3190,7 @@ if (window.self !== window.top){
     if (e.data.solarSummary !== undefined){
       window._hostSummary = e.data.solarSummary;
       var el2 = document.getElementById('tonight-summary');
-      if (el2) el2.textContent = window._hostSummary;
+      if (el2) el2.innerHTML = composeSummary(null);
       return;
     }
     if (e.data.solarVisible !== undefined){
