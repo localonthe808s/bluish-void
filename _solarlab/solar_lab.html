@@ -1401,7 +1401,7 @@ var MISSIONS = [
   {id:'pioneer11', name:'PIONEER 11', c:'#c9a3e8',
    events:[{d:'1973-04-05', body:'earth', l:'Launch'},
            {d:'1974-12-02', body:'jupiter', l:'Jupiter flyby'},
-           {d:'1979-09-01', body:'saturn', l:'First Saturn flyby', revs:1}],
+           {d:'1979-09-01', body:'saturn', l:'First Saturn flyby'}],
    dep:{lon:291, r:42, l:'Departs toward Scutum'},
    sum:'First spacecraft to Saturn — its 1979 pass scouted the route Voyager 2 would fly. Used Jupiter\'s gravity to climb across the solar system. Last contact 1995.'},
   {id:'voyager2', name:'VOYAGER 2', c:'#7fd4c1',
@@ -1424,14 +1424,16 @@ var MISSIONS = [
            {d:'1990-12-08', body:'earth', l:'Earth flyby 1'},
            {d:'1992-12-08', body:'earth', l:'Earth flyby 2', revs:1},
            {d:'1995-12-07', body:'jupiter', l:'Jupiter orbit insertion'}],
+   ended:{d:'2003-09-21', body:'jupiter'},
    sum:'First Jupiter orbiter (1995–2003). Flew the looping Venus–Earth–Earth gravity-assist cruise, dropped a probe into Jupiter\'s atmosphere, and found evidence of Europa\'s ocean — then was deliberately plunged into Jupiter to protect it.'},
   {id:'cassini', name:'CASSINI', c:'#a3c9f2',
    events:[{d:'1997-10-15', body:'earth', l:'Launch (VVEJGA cruise)'},
            {d:'1998-04-26', body:'venus', l:'Venus flyby 1'},
-           {d:'1999-06-24', body:'venus', l:'Venus flyby 2', revs:1},
+           {d:'1999-06-24', body:'venus', l:'Venus flyby 2'},
            {d:'1999-08-18', body:'earth', l:'Earth flyby'},
            {d:'2000-12-30', body:'jupiter', l:'Jupiter flyby'},
            {d:'2004-07-01', body:'saturn', l:'Saturn orbit insertion'}],
+   ended:{d:'2017-09-15', body:'saturn'},
    sum:'Two Venus swings, an Earth kiss and a Jupiter boost to reach Saturn. Orbited 13 years, landed Huygens on Titan, found Enceladus\' geysers — and ended in the 2017 Grand Finale plunge into Saturn itself.'},
   {id:'newhorizons', name:'NEW HORIZONS', c:'#cfe08a',
    events:[{d:'2006-01-19', body:'earth', l:'Launch — fastest ever'},
@@ -1444,6 +1446,7 @@ var MISSIONS = [
    events:[{d:'2011-08-05', body:'earth', l:'Launch'},
            {d:'2013-10-09', body:'earth', l:'Earth flyby', revs:1},
            {d:'2016-07-04', body:'jupiter', l:'Jupiter orbit insertion'}],
+   live:'jupiter',
    sum:'Solar-powered Jupiter orbiter — looped back for an Earth gravity assist two years after launch. Orbiting Jupiter since July 4, 2016; rewrote the planet\'s interior (the dilute core) and shot the JunoCam images the site\'s popups use.'}
 ];
 
@@ -1489,6 +1492,154 @@ function craftDist(id, ms){
   var c = CRAFT_NOW[id];
   if (!c) return null;
   return c.r + c.auYr * ((ms - CRAFT_EPOCH) / 31557600000);
+}
+
+/* =========================================================================
+   FLIGHT-PATH GEOMETRY
+
+   The legs used to be straight ramps in (longitude, radius) — Archimedean
+   spirals that swept the same angle per unit time wherever the craft was,
+   and that wrapped the interstellar legs a third of the way round the Sun.
+   Both are solved now instead of sketched:
+
+     cruise legs — a Lambert solve on the two real waypoint dates. Given both
+       endpoints and the true flight time there is exactly one conic that
+       connects them, so the arc drawn IS the transfer orbit (projected into
+       the ecliptic), not an impression of one.
+     escape legs — past the last gravity assist the craft is on a hyperbola
+       with nothing acting on it, so angular momentum h = r²·dθ/dt is fixed
+       while the radial speed settles at v∞. That makes dθ/d(1/r) constant:
+       the trajectory does nearly all of its turning just after the flyby and
+       then runs dead straight outward. Voyager 1 no longer curls round the
+       sky on its way to 171 AU — it leaves Saturn and goes.
+
+   Multi-rev legs (the VEEGA/VVEJGA phasing loops, flagged revs: in the table)
+   keep the original sweep: those are deliberate loops, and a 0-rev Lambert
+   cannot express them.
+   ========================================================================= */
+var MU_SUN = 2.959122082855911e-4;      // AU³/day², heliocentric
+
+/* Stumpff functions, series-expanded near zero where the closed forms lose
+   all their precision to cancellation. */
+function stumpffC(z){
+  if (z > 1e-6){ return (1 - Math.cos(Math.sqrt(z))) / z; }
+  if (z < -1e-6){ return (Math.cosh(Math.sqrt(-z)) - 1) / (-z); }
+  return 0.5 - z/24 + z*z/720;
+}
+function stumpffS(z){
+  if (z > 1e-6){ var q = Math.sqrt(z); return (q - Math.sin(q)) / (q*q*q); }
+  if (z < -1e-6){ var s = Math.sqrt(-z); return (Math.sinh(s) - s) / (s*s*s); }
+  return 1/6 - z/120 + z*z/5040;
+}
+/* flight time for a trial universal variable z; null where y goes negative
+   (the trial orbit cannot reach the second radius) */
+function _lambertT(z, A, r1, r2){
+  var C = stumpffC(z);
+  if (!(C > 0)) return null;
+  var S = stumpffS(z);
+  var y = r1 + r2 + A*(z*S - 1)/Math.sqrt(C);
+  if (!(y > 0)) return null;
+  var x = Math.sqrt(y/C);
+  var t = (x*x*x*S + A*Math.sqrt(y))/Math.sqrt(MU_SUN);
+  return isFinite(t) ? {t:t, y:y} : null;
+}
+/* Universal-variable Lambert (Bate–Mueller–White, as laid out in Vallado),
+   2D because the map is a top-down ecliptic projection. Returns the transfer
+   conic as {p, e, peri} — semi-latus rectum, eccentricity and the longitude
+   of periapsis — or null when the geometry is degenerate or the flight time
+   is unreachable in one sweep, in which case the caller draws the sketch. */
+function lambert2D(r1, lon1, r2, lon2, dtDays, dNuDeg){
+  if (!(dtDays > 0) || !(r1 > 0) || !(r2 > 0)) return null;
+  var dNu = dNuDeg*DEG;
+  if (dNu < 1e-4 || dNu > 2*Math.PI - 1e-4) return null;
+  var A = Math.sqrt(r1*r2*(1 + Math.cos(dNu)));
+  if (dNu > Math.PI) A = -A;
+  if (!(Math.abs(A) > 1e-12)) return null;
+  /* Bracket the flight time. t(z) climbs with z, so walk outward from the
+     parabolic case at z=0 rather than probing the ends: at the z=4π² limit
+     both C(z) and (zS−1) go to zero together and the expression for y is 0/0,
+     which is where Voyager 2's Uranus→Neptune leg and New Horizons' run out
+     to Arrokoth were failing — the fastest, flattest arcs on the map. */
+  var LIM = 4*Math.PI*Math.PI - 1e-4;
+  var t0 = _lambertT(0, A, r1, r2);
+  var lo, hi, guard = 0, probe;
+  if (t0 && t0.t < dtDays){
+    lo = 0; hi = 0.5;                               // slower than parabolic
+    while (guard++ < 90){
+      probe = _lambertT(hi, A, r1, r2);
+      if (probe && probe.t >= dtDays) break;
+      lo = hi;
+      if (hi >= LIM) return null;                   // unreachable in one sweep
+      hi = Math.min(LIM, hi*1.7);
+    }
+    if (!probe || probe.t < dtDays) return null;
+  } else {
+    /* Faster than parabolic, so the answer is at z<0 — but only down to the
+       point where y turns negative, below which the trial orbit cannot reach
+       the second radius at all. That floor can sit very close to zero (it is
+       at z≈-0.25 for Voyager 2's Uranus→Neptune leg), so walk down gently and
+       stop AT the floor: an invalid z is the fast side of the bracket, which
+       is exactly how the bisection below already reads it. */
+    hi = 0; lo = -0.125;
+    while (guard++ < 90){
+      probe = _lambertT(lo, A, r1, r2);
+      if (!probe || probe.t <= dtDays) break;
+      hi = lo; lo *= 2;
+      if (lo < -1e8) return null;
+    }
+  }
+  for (var i=0;i<120;i++){
+    var z = (lo + hi)/2;
+    var tm = _lambertT(z, A, r1, r2);
+    if (!tm || tm.t < dtDays) lo = z; else hi = z;
+  }
+  var fin = _lambertT((lo + hi)/2, A, r1, r2);
+  if (!fin) return null;
+  var f = 1 - fin.y/r1, g = A*Math.sqrt(fin.y/MU_SUN);
+  if (!isFinite(g) || Math.abs(g) < 1e-12) return null;
+  var R1x = r1*Math.cos(lon1*DEG), R1y = r1*Math.sin(lon1*DEG);
+  var R2x = r2*Math.cos(lon2*DEG), R2y = r2*Math.sin(lon2*DEG);
+  var V1x = (R2x - f*R1x)/g, V1y = (R2y - f*R1y)/g;
+  var v2 = V1x*V1x + V1y*V1y, rv = R1x*V1x + R1y*V1y;
+  var ex = ((v2 - MU_SUN/r1)*R1x - rv*V1x)/MU_SUN;
+  var ey = ((v2 - MU_SUN/r1)*R1y - rv*V1y)/MU_SUN;
+  var e = Math.sqrt(ex*ex + ey*ey);
+  var h = R1x*V1y - R1y*V1x;
+  var p = h*h/MU_SUN;
+  if (!(p > 0) || !isFinite(e) || !(h > 0)) return null;
+  return {p:p, e:e, peri: e > 1e-8 ? ((Math.atan2(ey, ex)/DEG)%360+360)%360 : lon1};
+}
+/* Walk the solved conic from the first waypoint through the swept angle.
+   Bails if the arc would run into a hyperbola's asymptote — the fallback
+   sketch is better than a path shooting off to infinity. */
+function conicLegPts(orb, lon1, dNuDeg, steps){
+  var nu1 = lon1 - orb.peri, out = [];
+  for (var k=0;k<=steps;k++){
+    var nu = nu1 + dNuDeg*k/steps;
+    var den = 1 + orb.e*Math.cos(nu*DEG);
+    if (!(den > 0.02)) return null;
+    out.push([orb.p/den, orb.peri + nu]);
+  }
+  return out;
+}
+/* The outbound leg of an escaping craft: θ is linear in 1/r (see the header
+   note), so stepping uniformly in 1/r gives uniform angular steps AND packs
+   the samples into the bend right after the flyby, where all the shape is. */
+function escapeLegPts(r1, lon1, r2, lon2, steps){
+  /* SIGNED shortest arc, not the prograde wrap the cruise legs use. A craft
+     coasting out on a hyperbola turns by a bounded amount and then stops
+     turning, so the small delta is always the real one — New Horizons now
+     sits half a degree BEHIND its Arrokoth longitude, and wrapping that
+     prograde sent it 359° back around the Kuiper belt to get there. */
+  var dl = ((lon2 - lon1) % 360 + 540) % 360 - 180;
+  var i1 = 1/r1, i2 = 1/r2, span = i1 - i2;
+  var K = Math.abs(span) < 1e-9 ? 0 : dl/span;
+  var out = [];
+  for (var k=1;k<=steps;k++){
+    var inv = i1 + (i2 - i1)*(k/steps);
+    out.push([1/inv, lon1 + K*(i1 - inv)]);
+  }
+  return out;
 }
 /* =========================================================================
    BELTS — the main asteroid belt and the Kuiper belt, the two places the
@@ -1631,22 +1782,67 @@ function buildBelts(){
   });
 }
 
+/* map coordinates for a [r AU, lon deg] sample */
+function missionXY(p){
+  var R = rScale(p[0], null), th = p[1]*DEG;
+  return [R*Math.cos(th), -R*Math.sin(th)];
+}
+/* One cruise leg as [r, lon] samples: the solved transfer conic where Lambert
+   converges, otherwise the original prograde ramp. Legs flagged revs: keep the
+   ramp on purpose — those are the phasing loops, which a single-sweep solve
+   cannot express. */
+function missionLegPts(ms, i, evs){
+  var a = evs[i], b = evs[i+1], ev = ms.events[i+1];
+  var dLon = ((b.lon - a.lon) % 360 + 360) % 360;
+  var revs = ev.revs || 0;
+  if (!revs){
+    var dt = (Date.parse(ev.d + 'T00:00:00Z') -
+              Date.parse(ms.events[i].d + 'T00:00:00Z')) / 86400000;
+    var orb = lambert2D(a.r, a.lon, b.r, b.lon, dt, dLon);
+    if (orb){
+      var arc = conicLegPts(orb, a.lon, dLon, Math.max(28, Math.ceil(dLon/2)));
+      if (arc) return arc;
+    }
+  }
+  var sweep = dLon + 360*revs;
+  var steps = Math.max(16, Math.ceil(sweep/4)), out = [];
+  for (var k=0;k<=steps;k++)
+    out.push([a.r + (b.r-a.r)*k/steps, a.lon + sweep*k/steps]);
+  return out;
+}
+/* small chevrons along a polyline so each path reads as a direction of travel
+   rather than an undated squiggle */
+function missionArrows(xy, frac, col, parent){
+  var seg = [], total = 0, i;
+  for (i=1;i<xy.length;i++){
+    var L = Math.hypot(xy[i][0]-xy[i-1][0], xy[i][1]-xy[i-1][1]);
+    total += L; seg.push(total);
+  }
+  if (!(total > 0)) return;
+  frac.forEach(function(f){
+    var want = total*f, j = 0;
+    while (j < seg.length-1 && seg[j] < want) j++;
+    var p0 = xy[j], p1 = xy[j+1] || xy[j];
+    var ang = Math.atan2(p1[1]-p0[1], p1[0]-p0[0])/DEG;
+    mk('path',{d:'M-3.2,-2.4 L2.6,0 L-3.2,2.4 Z', fill:col, opacity:.7,
+               transform:'translate('+p1[0].toFixed(1)+','+p1[1].toFixed(1)+
+                         ') rotate('+ang.toFixed(1)+')',
+               'pointer-events':'none'}, parent);
+  });
+}
+
 function buildMissionPaths(){
   gMissions.innerHTML = '';
   if (viewMode === 'moons') return;
+  var labels = [];        // collected across missions, spread apart at the end
   MISSIONS.forEach(function(ms){
-    var pts = [];
     var evs = ms.events.map(missionEventPos);
+    var rl = [];          // whole path in [r, lon], joints de-duplicated
     for (var i=0;i<evs.length-1;i++){
-      var a = evs[i], b = evs[i+1];
-      var dLon = ((b.lon - a.lon) % 360 + 360) % 360 + 360*(ms.events[i+1].revs||0);
-      var steps = Math.max(16, Math.ceil(dLon/4));
-      for (var k=(i?1:0);k<=steps;k++){
-        var lon = a.lon + dLon*k/steps, r = a.r + (b.r-a.r)*k/steps;
-        var R = rScale(r, null), th = lon*DEG;
-        pts.push([R*Math.cos(th), -R*Math.sin(th)]);
-      }
+      var leg = missionLegPts(ms, i, evs);
+      rl = rl.concat(i ? leg.slice(1) : leg);
     }
+    var cruiseEnd = rl.length;          // where the flown-plan part stops
     var nowAU = craftDist(ms.id, curMs), nowLon = null;
     if (ms.dep){
       var last = evs[evs.length-1];
@@ -1655,36 +1851,69 @@ function buildMissionPaths(){
       var depLon = (nowAU !== null) ? CRAFT_NOW[ms.id].lon : ms.dep.lon;
       var depR   = (nowAU !== null) ? nowAU : ms.dep.r;
       nowLon = depLon;
-      var dl = ((depLon - last.lon) % 360 + 360) % 360;
-      var dsteps = Math.max(12, Math.ceil(dl/4));
-      for (var k2=1;k2<=dsteps;k2++){
-        var lon2 = last.lon + dl*k2/dsteps, r2 = last.r + (depR-last.r)*k2/dsteps;
-        var R2 = rScale(r2, null), th2 = lon2*DEG;
-        pts.push([R2*Math.cos(th2), -R2*Math.sin(th2)]);
-      }
+      rl = rl.concat(escapeLegPts(last.r, last.lon, depR, depLon,
+                                  Math.max(40, Math.ceil(depR/2))));
     }
+    var pts = rl.map(missionXY);
     var d = pts.map(function(p,idx){ return (idx?'L':'M')+p[0].toFixed(1)+','+p[1].toFixed(1); }).join('');
     var gm = mk('g',{'data-mission':ms.id, display:(missionVis[ms.id]?'':'none')},gMissions);
-    mk('path',{d:d,fill:'none',stroke:ms.c,'stroke-width':1.1,'stroke-opacity':.65,
+    /* a wide, faint pass under the dashes lifts each path out of the tangle
+       of orbit rings without making the line itself heavier */
+    mk('path',{d:d,fill:'none',stroke:ms.c,'stroke-width':3.2,'stroke-opacity':.10,
+               'vector-effect':'non-scaling-stroke','pointer-events':'none'},gm);
+    mk('path',{d:d,fill:'none',stroke:ms.c,'stroke-width':1.1,'stroke-opacity':.7,
                'stroke-dasharray':'5 4','vector-effect':'non-scaling-stroke',
                'pointer-events':'none'},gm);
+    missionArrows(pts.slice(0, cruiseEnd), [0.4, 0.8], ms.c, gm);
+    if (pts.length > cruiseEnd + 2) missionArrows(pts.slice(cruiseEnd), [0.5], ms.c, gm);
+    /* waypoint vocabulary: where it left from, where it flew past, where it
+       stopped and stayed */
     evs.forEach(function(e2,idx){
-      var R3 = rScale(e2.r, null), th3 = e2.lon*DEG;
-      mk('circle',{cx:(R3*Math.cos(th3)).toFixed(1),cy:(-R3*Math.sin(th3)).toFixed(1),
-                   r:2,fill:ms.c,opacity:.9,'pointer-events':'none'},gm);
+      var q = missionXY([e2.r, e2.lon]), lab = (ms.events[idx].l || '').toLowerCase();
+      var arrived = lab.indexOf('insertion') !== -1;
+      if (idx === 0){
+        mk('circle',{cx:q[0].toFixed(1),cy:q[1].toFixed(1),r:2.6,fill:'none',
+                     stroke:ms.c,'stroke-width':1.1,'vector-effect':'non-scaling-stroke',
+                     opacity:.9,'pointer-events':'none'},gm);
+      } else {
+        mk('circle',{cx:q[0].toFixed(1),cy:q[1].toFixed(1),r:2,fill:ms.c,
+                     opacity:.9,'pointer-events':'none'},gm);
+        if (arrived)
+          mk('circle',{cx:q[0].toFixed(1),cy:q[1].toFixed(1),r:5,fill:'none',
+                       stroke:ms.c,'stroke-width':.8,'vector-effect':'non-scaling-stroke',
+                       opacity:.5,'pointer-events':'none'},gm);
+      }
     });
+    /* Missions that are over end on a cross, so the map distinguishes the
+       craft still flying from the ones that stopped. It goes where the craft
+       actually died — the planet's position on the END date, which is a long
+       way round from the arrival waypoint after 13 years in orbit. */
+    if (!ms.dep && ms.ended){
+      var ep = planetPos(ms.ended.body, Date.parse(ms.ended.d + 'T00:00:00Z'));
+      var q2 = missionXY([ep.r, ep.lon]);
+      mk('path',{d:'M-3.4,-3.4 L3.4,3.4 M-3.4,3.4 L3.4,-3.4', stroke:ms.c,
+                 'stroke-width':1.2,'vector-effect':'non-scaling-stroke',opacity:.85,
+                 transform:'translate('+q2[0].toFixed(1)+','+q2[1].toFixed(1)+')',
+                 'pointer-events':'none'},gm);
+      labels.push({g:gm, c:ms.c, x:q2[0], y:q2[1],
+                   t:ms.name + ' · ENDED ' + ms.ended.d.slice(0,4)});
+    }
     if (nowAU !== null && nowLon !== null){
-      var Rn = rScale(nowAU, null), thn = nowLon*DEG;
-      var nx = Rn*Math.cos(thn), ny = -Rn*Math.sin(thn);
+      var np = missionXY([nowAU, nowLon]), nx = np[0], ny = np[1];
       mk('circle',{cx:nx.toFixed(1),cy:ny.toFixed(1),r:3.4,fill:ms.c,
                    'pointer-events':'none'},gm);
       mk('circle',{cx:nx.toFixed(1),cy:ny.toFixed(1),r:7,fill:'none',stroke:ms.c,
                    'stroke-width':.8,opacity:.45,'pointer-events':'none'},gm);
-      var lt = mk('text',{x:(nx + (nx<0?-10:10)).toFixed(1), y:(ny+3).toFixed(1),
-        'text-anchor': nx<0?'end':'start',
-        style:'font-size:8.5px;font-weight:800;letter-spacing:.08em;fill:'+ms.c+
-              ';pointer-events:none;user-select:none;'},gm);
-      lt.textContent = ms.name + ' · ' + Math.round(nowAU) + ' AU';
+      labels.push({g:gm, c:ms.c, x:nx, y:ny, t:ms.name + ' · ' + Math.round(nowAU) + ' AU'});
+    } else if (ms.live){
+      /* still working, but parked at a planet rather than running away */
+      var lp = planetPos(ms.live, curMs), lq = missionXY([lp.r, lp.lon]);
+      mk('circle',{cx:lq[0].toFixed(1),cy:lq[1].toFixed(1),r:3.4,fill:ms.c,
+                   'pointer-events':'none'},gm);
+      mk('circle',{cx:lq[0].toFixed(1),cy:lq[1].toFixed(1),r:7,fill:'none',stroke:ms.c,
+                   'stroke-width':.8,opacity:.45,'pointer-events':'none'},gm);
+      labels.push({g:gm, c:ms.c, x:lq[0], y:lq[1],
+                   t:ms.name + ' · ' + ms.live.toUpperCase()});
     }
     var hitp = mk('path',{d:d,fill:'none',stroke:'transparent','stroke-width':9,
                           'vector-effect':'non-scaling-stroke',style:'cursor:pointer;'},gm);
@@ -1703,6 +1932,29 @@ function buildMissionPaths(){
       clearTimeout(pendingPopup);
       var cx = ev.clientX, cy = ev.clientY;
       pendingPopup = setTimeout(function(){ openMissionPopup(ms, {clientX:cx, clientY:cy}); }, 280);
+    });
+  });
+  /* Three of the five escaping craft sit within 7° of each other, so their
+     tags landed on top of one another. Lay them out per side of the map,
+     nudging each one clear of the previous — the leader line keeps every tag
+     tied to its own dot. */
+  ['L','R'].forEach(function(side){
+    var col = labels.filter(function(L){ return (L.x < 0) === (side === 'L'); })
+                    .sort(function(a,b){ return a.y - b.y; });
+    var prev = -1e9;
+    col.forEach(function(L){
+      var ly = Math.max(L.y, prev + 15);
+      prev = ly;
+      var lx = L.x + (side === 'L' ? -11 : 11);
+      if (Math.abs(ly - L.y) > 2)
+        mk('path',{d:'M'+L.x.toFixed(1)+','+L.y.toFixed(1)+' L'+lx.toFixed(1)+','+ly.toFixed(1),
+                   stroke:L.c,'stroke-width':.6,'stroke-opacity':.45,fill:'none',
+                   'vector-effect':'non-scaling-stroke','pointer-events':'none'}, L.g);
+      var el = mk('text',{x:lx.toFixed(1), y:(ly+3).toFixed(1),
+        'text-anchor': side === 'L' ? 'end' : 'start',
+        style:'font-size:8.5px;font-weight:800;letter-spacing:.08em;fill:'+L.c+
+              ';pointer-events:none;user-select:none;'}, L.g);
+      el.textContent = L.t;
     });
   });
 }
@@ -1763,7 +2015,7 @@ function openMissionPopup(ms, ev){
     title: ms.name,
     subtitle: 'NASA mission trajectory',
     h: h,
-    footer: 'Waypoints: real flyby dates via the lab ephemeris · connecting arcs are stylised transfer sweeps'
+    footer: 'Waypoints: real flyby dates via the lab ephemeris · cruise arcs are Lambert-solved transfer conics · phasing loops stylised'
   });
   requestAnimationFrame(function(){
     var pp = document.getElementById('planet-insight-popup');
