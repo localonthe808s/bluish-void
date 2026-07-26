@@ -332,6 +332,10 @@ Measured on 2026-07-26: R2 stored `Cache-Control: public, max-age=900` and the
 edge served `max-age=14400`. The moon's `max-age=3600` is raised to 14400 the
 same way, while the `immutable` assets (moons/, asteroids/) pass through
 untouched. So anything that must refresh faster than 4 hours cannot rely on the
-header alone — it needs a rotating query string or a zone change. **This affects
-`moon/current.jpg` today**: it is republished every 4 hours but browsers may
-hold it for 4, so the hero moon can lag a cycle.
+header alone — it needs a rotating query string or a zone change.
+
+The site's hero moon was never affected: index.html already appends
+`?v=<hour-of-year>` to `moon/current.jpg` for exactly this reason, and the
+day-nav frames carry their own `_vq`. The lab's planet row did lack it and now
+uses the same hourly index. (An earlier draft of this note claimed the hero
+moon was stale — it was not.)
