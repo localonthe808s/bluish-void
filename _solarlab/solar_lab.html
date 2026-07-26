@@ -851,6 +851,24 @@ var swarmLabels = [];    // the "+93 more moons" tags, which ride a scaled group
      the same gradient fits whatever radius each star gets. The result holds up
      zoomed in (a glowing point, not a coin) and is unchanged at a distance. */
   var starGrad = {};
+  /* Coarse spatial index of the drawn stars, so a constellation line can find
+     the star at each of its vertices and stop at the edge of its glow rather
+     than being drawn straight through it. The IAU line data and the HYG
+     catalogue agree to a fraction of a unit but are not bit-identical, hence a
+     nearest-within-tolerance lookup rather than an exact key. */
+  var starGrid = {}, STAR_GRID = 6;
+  function starRadiusAt(x, y){
+    var gx = Math.floor(x/STAR_GRID), gy = Math.floor(y/STAR_GRID), best = 0, bd = 9;
+    for (var i=-1;i<=1;i++) for (var j=-1;j<=1;j++){
+      var cell = starGrid[(gx+i) + '|' + (gy+j)];
+      if (!cell) continue;
+      for (var k=0;k<cell.length;k++){
+        var dx = cell[k][0]-x, dy = cell[k][1]-y, d = dx*dx + dy*dy;
+        if (d < bd){ bd = d; best = cell[k][2]; }
+      }
+    }
+    return best;
+  }
   ['#a8c2ff','#e6eeff','#fff4e2','#ffe2b4','#ffc990'].forEach(function(col, ci){
     var rg = mk('radialGradient',{id:'stg'+ci},defs);
     mk('stop',{offset:'0%',  'stop-color':'#ffffff','stop-opacity':'1'},rg);
@@ -883,6 +901,9 @@ var swarmLabels = [];    // the "+93 more moons" tags, which ride a scaled group
                  transform:'translate('+cx+','+cy+')'},g);
     mk('circle',{cx:cx,cy:cy,r:R.toFixed(2),
                  fill:starGrad[col],opacity:op.toFixed(2)},g);
+    /* index it so the constellation lines can stop at its edge */
+    var gk = Math.floor(p[0]/STAR_GRID) + '|' + Math.floor(p[1]/STAR_GRID);
+    (starGrid[gk] || (starGrid[gk] = [])).push([p[0], p[1], R]);
   });
 
   /* constellation stick figures — IAU line data projected like the stars,
@@ -918,6 +939,9 @@ var swarmLabels = [];    // the "+93 more moons" tags, which ride a scaled group
     Her:{n:'Hercules',b:'Kornephoros',z:0,t:'The kneeling strongman. M13, the Great Globular Cluster — 300,000 ancient stars — hangs on his hip.'},
     And:{n:'Andromeda',b:'Alpheratz',z:0,t:'The chained princess. The Andromeda Galaxy here is the farthest thing human eyes can see unaided — 2.5 million light-years.'}
   };
+  /* one place for the figure colour — the long-press highlight resets to it */
+  var CON_STROKE = 'rgba(158,188,232,.22)';
+  window._conStroke = CON_STROKE;
   window._conPaths = {};
   window._conInfoGet = function(id){ return CON_INFO[id]; };
   /* the recognizable set: zodiac + household names — the full 60 reads as a web */
@@ -928,17 +952,34 @@ var swarmLabels = [];    // the "+93 more moons" tags, which ride a scaled group
     if (!CON_KEEP[c.id]) return;
     window._conPaths[c.id] = [];
     c.l.forEach(function(seg){
-      var d2 = '';
-      seg.forEach(function(pt, i){
-        var p = skyXY(pt[0], pt[1]);
-        d2 += (i ? 'L' : 'M') + p[0].toFixed(1) + ',' + p[1].toFixed(1);
-      });
-      window._conPaths[c.id].push(
-        mk('path',{d:d2,fill:'none',stroke:'rgba(150,180,225,.16)','stroke-width':.8,
+      var pts = seg.map(function(pt){ return skyXY(pt[0], pt[1]); });
+      /* Draw each span as its own subpath, clipped short of the star at either
+         end. Centre-to-centre lines ran straight through the discs, which was
+         tolerable when a star was a flat dot and is not now that it is a glow —
+         the figure should hang between the stars, not skewer them. */
+      var d2 = '', full = '';
+      for (var i=0;i<pts.length;i++){
+        full += (i ? 'L' : 'M') + pts[i][0].toFixed(1) + ',' + pts[i][1].toFixed(1);
+        if (i === 0) continue;
+        var a = pts[i-1], b = pts[i];
+        var dx = b[0]-a[0], dy = b[1]-a[1], len = Math.sqrt(dx*dx + dy*dy);
+        if (!(len > 0)) continue;
+        var ga = (starRadiusAt(a[0], a[1]) || 0.9) + 1.1;
+        var gb = (starRadiusAt(b[0], b[1]) || 0.9) + 1.1;
+        if (len <= ga + gb + 1.2) continue;      // neighbours too close to bother
+        var ux = dx/len, uy = dy/len;
+        d2 += 'M' + (a[0]+ux*ga).toFixed(1) + ',' + (a[1]+uy*ga).toFixed(1) +
+              'L' + (b[0]-ux*gb).toFixed(1) + ',' + (b[1]-uy*gb).toFixed(1);
+      }
+      if (d2) window._conPaths[c.id].push(
+        mk('path',{d:d2,fill:'none',stroke:CON_STROKE,'stroke-width':.9,
                    'stroke-linecap':'round','stroke-linejoin':'round',
+                   'vector-effect':'non-scaling-stroke',
                    'pointer-events':'none'},gCon));
-      /* long-press target: a fat invisible stroke over the figure */
-      var hit = mk('path',{d:d2,fill:'none',stroke:'transparent','stroke-width':14,
+      /* long-press target: a fat invisible stroke over the WHOLE figure, gaps
+         included, so the join at each star is still grabbable */
+      var hit = mk('path',{d:full,fill:'none',stroke:'transparent','stroke-width':14,
+                           'vector-effect':'non-scaling-stroke',
                            'pointer-events':'stroke'},gCon);
       attachConLongPress(hit, c.id);
     });
@@ -2328,7 +2369,7 @@ function openConstellationPopup(id, ev){
   /* light the figure up while you read */
   (window._conPaths[id] || []).forEach(function(p2){
     p2.setAttribute('stroke', 'rgba(200,220,255,.6)');
-    setTimeout(function(){ p2.setAttribute('stroke', 'rgba(150,180,225,.16)'); }, 8000);
+    setTimeout(function(){ p2.setAttribute('stroke', window._conStroke); }, 8000);
   });
   var C = '#7fb2ff';
   var FS = function(t){return '<div style="font-weight:800;font-size:9px;color:'+C+';text-transform:uppercase;letter-spacing:.04em;margin-top:8px;margin-bottom:4px;padding-bottom:3px;border-bottom:1px solid rgba(43,34,244,.10);">'+t+'</div>';};
