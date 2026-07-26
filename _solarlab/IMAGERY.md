@@ -339,3 +339,26 @@ The site's hero moon was never affected: index.html already appends
 day-nav frames carry their own `_vq`. The lab's planet row did lack it and now
 uses the same hourly index. (An earlier draft of this note claimed the hero
 moon was stale — it was not.)
+
+## Spacecraft photos (mission layer + popups, 2026-07-26)
+
+Real photographs of the flight hardware — never artist's concepts (same rule as
+Psyche). All NASA, public domain, found via images-api.nasa.gov, `~medium`
+assets recompressed to ≤900 px q82 and rehosted at `cdn.bluishvoid.com/craft/`.
+One file serves both the popup hero and the zoomed-in disc on the mission line.
+
+| mission | nasa_id | what it shows |
+|---|---|---|
+| voyager1 | PIA21732 | Voyager in vibration testing, JPL, Nov 1976 (color) |
+| voyager2 | PIA21743 | Voyager 2 encapsulation, KSC, Aug 1977 |
+| pioneer10 | ARC-1973-AC73-9019 | final assembly at TRW, 1973 (grey scan matte auto-cropped) |
+| pioneer11 | KSC-73P-0116 | between its fairing halves, Cape Kennedy AO Building, 1973 |
+| galileo | s34-72-070 | craft + IUS departing Atlantis's payload bay, 18 Oct 1989 |
+| cassini | KSC-97PC1350 | full stack with Huygens attached, PHSF, 1997 |
+| newhorizons | KSC-05pd2579 | mating to its Boeing third stage, PHSF, 2005 |
+| juno | KSC-2011-3830 | solar-array deployment test, Astrotech, 2011 |
+
+Traps hit while choosing: `KSC-05pd2555` is the ROCKET STAGE alone (the craft
+is not in frame), and `KSC-97pc402` is only Cassini's propulsion module —
+read the description, not the title, before trusting a KSC id. Pioneer G =
+Pioneer 11 and Pioneer F = Pioneer 10 in Ames/KSC archive naming.
