@@ -340,25 +340,30 @@ day-nav frames carry their own `_vq`. The lab's planet row did lack it and now
 uses the same hourly index. (An earlier draft of this note claimed the hero
 moon was stale — it was not.)
 
-## Spacecraft photos (mission layer + popups, 2026-07-26)
+## Spacecraft images (mission layer + popups, 2026-07-26)
 
-Real photographs of the flight hardware — never artist's concepts (same rule as
-Psyche). All NASA, public domain, found via images-api.nasa.gov, `~medium`
-assets recompressed to ≤900 px q82 and rehosted at `cdn.bluishvoid.com/craft/`.
-One file serves both the popup hero and the zoomed-in disc on the mission line.
+The spacecraft BODY as it looks in flight. First attempt used clean-room /
+assembly photographs (PIA21732, KSC-97PC1350, ...) — REJECTED by the user:
+"you can't scroll into the edge of the solar system to see a photo of a lab."
+The porthole at the craft's position must show the machine itself.
 
-| mission | nasa_id | what it shows |
+Now: NASA's official transparent model renders from Wikimedia Commons (all
+tagged Public domain, NASA source), trimmed to content, square-padded 12%,
+≤800px webp with alpha, rehosted at `cdn.bluishvoid.com/craft/*.webp`.
+Transparency matters — the map's own sky shows behind the craft inside the
+clipped porthole. One file serves the popup hero and the zoomed map disc.
+
+| mission | Commons file | note |
 |---|---|---|
-| voyager1 | PIA21732 | Voyager in vibration testing, JPL, Nov 1976 (color) |
-| voyager2 | PIA21743 | Voyager 2 encapsulation, KSC, Aug 1977 |
-| pioneer10 | ARC-1973-AC73-9019 | final assembly at TRW, 1973 (grey scan matte auto-cropped) |
-| pioneer11 | KSC-73P-0116 | between its fairing halves, Cape Kennedy AO Building, 1973 |
-| galileo | s34-72-070 | craft + IUS departing Atlantis's payload bay, 18 Oct 1989 |
-| cassini | KSC-97PC1350 | full stack with Huygens attached, PHSF, 1997 |
-| newhorizons | KSC-05pd2579 | mating to its Boeing third stage, PHSF, 2005 |
-| juno | KSC-2011-3830 | solar-array deployment test, Astrotech, 2011 |
+| voyager1/2 | Voyager spacecraft model.png | same render both — identical hardware |
+| galileo | Galileo spacecraft model.png | |
+| cassini | Cassini spacecraft model.png | |
+| newhorizons | New Horizons spacecraft model 1.png | |
+| juno | Juno spacecraft model 1.png | |
+| pioneer10/11 | An artist's impression of a Pioneer spacecraft on its way to interstellar space.jpg | pre-CGI craft, no model render exists; classic NASA painting cropped square to the craft (1600,850)-(3000,2250), opaque |
 
-Traps hit while choosing: `KSC-05pd2555` is the ROCKET STAGE alone (the craft
-is not in frame), and `KSC-97pc402` is only Cassini's propulsion module —
-read the description, not the title, before trusting a KSC id. Pioneer G =
-Pioneer 11 and Pioneer F = Pioneer 10 in Ames/KSC archive naming.
+The Pioneers are the honest exception to the no-artist's-concept rule: the
+craft body is drawn accurately and nothing better exists — same reasoning as
+Nereid's 4% disc, inverted. Lab code: CRAFT_IMG + craftPhoto()/
+ensureCraftPhotos() (lazy, svg.zoomed gate); the colored dot swaps out at
+zoom via `.craft-dot` so it doesn't peek through the transparent renders.
