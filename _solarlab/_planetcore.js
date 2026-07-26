@@ -375,6 +375,10 @@
     if (_pp) _pp.remove();
 
     if (_bd) _bd.remove();
+    if (window._bvPopupEsc){
+      document.removeEventListener('keydown', window._bvPopupEsc);
+      window._bvPopupEsc = null;
+    }
     document.documentElement.classList.remove('planet-modal-open');
     document.body.classList.remove('planet-modal-open');
     window._bvDisarmBack();
@@ -506,7 +510,14 @@
 
     bd.onclick = function(){ window._closePlanetPopup(); };
     pp.addEventListener('click', function(e){ e.stopPropagation(); });
-    var escHandler = function(e){ if (e.key === 'Escape') { window._closePlanetPopup(); document.removeEventListener('keydown', escHandler); } };
+    /* The handler used to detach itself only inside the Escape branch, so it
+       survived every other way of closing — the x, the backdrop, the back
+       gesture — and one stale keydown listener accumulated on document per
+       popup opened. Each closure pinned its popup and backdrop nodes too.
+       Parking it here lets _closePlanetPopup detach it however it was closed. */
+    if (window._bvPopupEsc) document.removeEventListener('keydown', window._bvPopupEsc);
+    var escHandler = function(e){ if (e.key === 'Escape') window._closePlanetPopup(); };
+    window._bvPopupEsc = escHandler;
     document.addEventListener('keydown', escHandler);
 
     bd.appendChild(pp);
@@ -804,6 +815,124 @@
       console.warn('_tabifyPlanetInsight failed:', e);
     }
   }
+
+  /* ── "View in the solar system" ────────────────────────────────────────
+     The TODAY planet bars already open a planet's detail popup. This adds the
+     onward jump: send the solar-system widget to that planet and scroll to it.
+     The widget is a separate embed, so the button only appears when the embed
+     is actually on the page — no dead control before it ships. */
+  window.bvSolarWidget = function(){
+    return document.querySelector('iframe[data-solar-system], iframe[src*="solar_lab"]');
+  };
+  window.bvSolarFocus = function(planetKey){
+    var f = window.bvSolarWidget();
+    if (!f) return false;
+    try { f.contentWindow.postMessage({solarFocus: planetKey}, '*'); } catch(e){ return false; }
+    if (window._closePlanetPopup) window._closePlanetPopup();
+    (f.closest('.widget') || f).scrollIntoView({behavior:'smooth', block:'center'});
+    return true;
+  };
+  function _bvAddSolarJump(planetKey, color){
+    if (!window.bvSolarWidget()) return;                 // widget not embedded yet
+    var pop = document.getElementById('planet-insight-popup');
+    if (!pop || pop.querySelector('.bv-solar-jump')) return;
+    var b = document.createElement('button');
+    b.className = 'bv-solar-jump';
+    b.textContent = 'VIEW IN THE SOLAR SYSTEM';
+    b.style.cssText = 'display:block;margin:10px auto 2px;padding:7px 14px;border-radius:999px;' +
+      'border:1px solid rgba(43,34,244,.25);background:rgba(43,34,244,.06);color:#2B22F4;' +
+      'font-size:.62rem;font-weight:800;letter-spacing:.1em;cursor:pointer;font-family:inherit;';
+    b.addEventListener('click', function(){ window.bvSolarFocus(planetKey); });
+    (pop.querySelector('.planet-hero') ? pop : pop).appendChild(b);
+  }
+  window._bvAddSolarJump = _bvAddSolarJump;
+
+  /* solar-system tab bar → the embedded map, and back again when the map
+     switches itself (e.g. a jump-to-planet from the TODAY bars) */
+  (function(){
+    function frame(){ return document.getElementById('solar-frame'); }
+    function wire(){
+      var bar = document.getElementById('solar-tab-bar');
+      if (!bar || bar._wired) return;
+      bar._wired = true;
+      bar.querySelectorAll('.solar-tab').forEach(function(b){
+        b.addEventListener('click', function(){
+          bar.querySelectorAll('.solar-tab').forEach(function(x){ x.classList.toggle('active', x === b); });
+          var f = frame();
+          if (f && f.contentWindow)
+            f.contentWindow.postMessage({solarTab: b.getAttribute('data-tab')}, '*');
+        });
+      });
+      window.addEventListener('message', function(e){
+        if (!e.data || !e.data.solarTabChanged) return;
+        bar.querySelectorAll('.solar-tab').forEach(function(x){
+          x.classList.toggle('active', x.getAttribute('data-tab') === e.data.solarTabChanged);
+        });
+      });
+    }
+    /* Only let the map run while it is actually on screen — otherwise autoplay
+       walks the date away from today and the summary + planet line below it
+       stop matching, and it burns a rAF loop nobody is looking at. */
+    /* The space summary belongs INSIDE the widget's footer card, not floating
+       on the page background beneath it. The briefing engine still writes
+       #space-summary-text as before; we mirror that text into the map's own
+       summary slot and hide the standalone block. A MutationObserver keeps it
+       in sync when the briefing re-runs. */
+    function pushSummary(){
+      var src = document.getElementById('space-summary-text'), f = frame();
+      if (!src || !f || !f.contentWindow) return;
+      var txt = (src.textContent || '').trim();
+      if (!txt) return;
+      f.contentWindow.postMessage({solarSummary: txt}, '*');
+      var box = document.getElementById('space-summary');
+      if (box) box.style.display = 'none';
+    }
+    window.bvPushSolarSummary = pushSummary;
+    function watchSummary(){
+      var src = document.getElementById('space-summary-text');
+      if (!src || src._watched) return;
+      src._watched = true;
+      pushSummary();
+      new MutationObserver(pushSummary).observe(src, {childList:true, characterData:true, subtree:true});
+    }
+    function watch(){
+      var w = document.getElementById('solar-widget'), f = frame();
+      if (!w || !f || !window.IntersectionObserver) return;
+      new IntersectionObserver(function(es){
+        es.forEach(function(en){
+          if (f.contentWindow)
+            f.contentWindow.postMessage({solarVisible: en.isIntersecting}, '*');
+        });
+      }, {threshold: 0.05}).observe(w);
+    }
+    function boot(){
+      wire(); watch();
+      /* the briefing writes the summary well after load, and the iframe needs a
+         moment too — poll briefly, then let the observer take over */
+      var tries = 0;
+      var iv = setInterval(function(){
+        watchSummary();
+        var src = document.getElementById('space-summary-text');
+        if ((src && (src.textContent||'').trim()) || ++tries > 40) clearInterval(iv);
+      }, 900);
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+    else boot();
+  })();
+
+  window._bvWrapSolarJump = function(){
+    if (window._bvSolarJumpWrapped || typeof window.showPlanetInsight !== 'function') return;
+    window._bvSolarJumpWrapped = true;
+    var _orig = window.showPlanetInsight;
+    window.showPlanetInsight = function(key, color, ev){
+      var r = _orig.apply(this, arguments);
+      requestAnimationFrame(function(){ try { _bvAddSolarJump(key, color); } catch(e){} });
+      return r;
+    };
+  };
+  if (document.readyState === 'loading')
+    document.addEventListener('DOMContentLoaded', window._bvWrapSolarJump);
+  else window._bvWrapSolarJump();
 
   function showPlanetInsight(planetKey, color, ev) {
     try {
@@ -1820,7 +1949,14 @@
     pp.addEventListener('click', function(e){ e.stopPropagation(); });
 
     // Close on Escape
-    var escHandler = function(e){ if (e.key === 'Escape') { window._closePlanetPopup(); document.removeEventListener('keydown', escHandler); } };
+    /* The handler used to detach itself only inside the Escape branch, so it
+       survived every other way of closing — the x, the backdrop, the back
+       gesture — and one stale keydown listener accumulated on document per
+       popup opened. Each closure pinned its popup and backdrop nodes too.
+       Parking it here lets _closePlanetPopup detach it however it was closed. */
+    if (window._bvPopupEsc) document.removeEventListener('keydown', window._bvPopupEsc);
+    var escHandler = function(e){ if (e.key === 'Escape') window._closePlanetPopup(); };
+    window._bvPopupEsc = escHandler;
     document.addEventListener('keydown', escHandler);
 
     bd.appendChild(pp);
