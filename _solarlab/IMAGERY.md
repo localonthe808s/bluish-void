@@ -213,8 +213,8 @@ Ceres (2015); nobody has been to the other four.
 
 | body | photo? | source | licence | in the map |
 |---|---|---|---|---|
-| Ceres | yes, sharp | Dawn **PIA21906** 1280², disc fills 100% | PD | **used** |
-| Vesta | yes, sharp | Dawn **PIA14317** 1024², fills 91% (no `~medium`) | PD | **used** |
+| Ceres | yes, sharp | Dawn **PIA21906** 1280², disc fills 100% | PD | **used**, rehosted |
+| Vesta | yes, sharp | Dawn **PIA14317** 1024², fills 91% (no `~medium`) | PD | **used**, rehosted |
 | Pallas | resolved blob | ESO VLT/SPHERE, in `eso2114a` mosaic | CC BY 4.0 | procedural rock |
 | Hygiea | resolved blob | ESO `eso1918a` (own release) | CC BY 4.0 | procedural rock |
 | Juno | resolved blob | `eso2114a` mosaic | CC BY 4.0 | procedural rock |
@@ -242,3 +242,23 @@ Ceres fx .4986 fy .4986 fr .5000 ar 1 · Vesta fx .5389 fy .5056 fr .4931 ar 1.
 Both Dawn frames are lit from +x, but `rockLit` puts +x AWAY from the Sun, so
 the photo-backed pair carry a 180° offset. Rotating is the honest fix —
 mirroring would put Occator's bright spots on the wrong side of Ceres.
+
+### Rehosted (2026-07-26)
+
+Both now served from R2 rather than hotlinked, per the serving guidance above:
+
+    cdn.bluishvoid.com/asteroids/ceres.jpg   512x512, 61KB
+    cdn.bluishvoid.com/asteroids/vesta.jpg   512x512, 64KB
+
+Uploaded with `rclone copy <f> r2:bluishvoid-bg/asteroids/ --s3-no-check-bucket`
+plus `--header-upload "Cache-Control: public, max-age=31536000, immutable"`.
+
+512px is deliberate, not arbitrary: the map's zoom floor is MIN_W = 1000/16, so
+Ceres tops out at 86px across (173px at 2x DPR) and Vesta at 64px. 512 leaves
+3x headroom. The pair went 425KB -> 123KB.
+
+Resizing does not disturb the crop table — fx/fy/fr are fractions of width, and
+both re-measured identical after the downscale.
+
+**The 23 moon photos are still hotlinked** from images-assets.nasa.gov and are
+the obvious next candidates for the same treatment.
