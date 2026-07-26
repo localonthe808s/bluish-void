@@ -9,6 +9,16 @@
   :root{
     --ink:#eaf0fa; --ink-dim:#8fa0bd; --accent:#7fb2ff;
     --panel:rgba(16,24,44,.72); --line:rgba(140,170,220,.18);
+    /* Label families. Everything on the map used to be the same blue-grey, so
+       a name told you nothing about what kind of thing it named. Three tiers
+       now, brightest for the things the map is actually about:
+         planets  — cool near-white, the subject
+         sky      — lilac, the fixed background (galaxies, nebulae, clusters,
+                    named stars): far away, and not what you are steering by
+         rock     — warm amber, the small bodies (big asteroids + both belts) */
+    --lbl-planet:rgba(219,232,255,.92);
+    --lbl-sky:rgba(183,168,238,.62);
+    --lbl-rock:rgba(233,194,138,.8);
   }
   *{box-sizing:border-box;margin:0;padding:0;}
   html,body{height:100%;}
@@ -135,7 +145,7 @@
   .orbit{fill:none;stroke:rgba(150,180,230,.22);stroke-width:1;vector-effect:non-scaling-stroke;display:none;}
   .moon-orbit{display:none;}
   .planet-label{
-    font-size:10px;font-weight:700;letter-spacing:.12em;fill:var(--ink-dim);
+    font-size:10px;font-weight:700;letter-spacing:.12em;fill:var(--lbl-planet);
     text-anchor:middle;pointer-events:none;user-select:none;
   }
   .planet-hit{cursor:pointer;}
@@ -763,6 +773,8 @@ function starColor(bv){
   return '#ffc990';                  // red-orange
 }
 var gSky = null;
+var skyLabels = [];      // fixed star/DSO names — obstacles for the declutter pass
+var swarmLabels = [];    // the "+93 more moons" tags, which ride a scaled group
 (function realSky(){
   var g = mk('g',{});
   gSky = g;
@@ -960,8 +972,9 @@ var gSky = null;
         placed.push({x:bx, y:by, w:w, h:h});
         var t2 = mk('text',{x:L.x.toFixed(1), y:opts[oi].toFixed(1), 'text-anchor':'middle',
           style:'font-size:5.5px;font-weight:700;letter-spacing:.1em;' +
-                'fill:rgba(170,185,215,.5);pointer-events:none;user-select:none;'},gDso);
+                'fill:var(--lbl-sky);pointer-events:none;user-select:none;'},gDso);
         t2.textContent = L.nm;
+        skyLabels.push(t2);
         return;
       }
     });
@@ -985,8 +998,9 @@ var gSky = null;
   NAMED_STARS.forEach(function(n){
     var p = skyXY(n[0], n[1]);
     var t = mk('text',{x:p[0].toFixed(1),y:(p[1]+9).toFixed(1),'text-anchor':'middle',
-      style:'font-size:6.5px;font-weight:600;letter-spacing:.1em;fill:rgba(160,180,215,.5);pointer-events:none;user-select:none;'},g);
+      style:'font-size:6.5px;font-weight:600;letter-spacing:.1em;fill:var(--lbl-sky);pointer-events:none;user-select:none;'},g);
     t.textContent = n[2];
+    skyLabels.push(t);
   });
 
 })();
@@ -1155,6 +1169,7 @@ PLANETS.forEach(function(p){
       var xt = mk('text',{x:(sys.bubble[1]+7)*Math.cos(-.6),y:(sys.bubble[1]+7)*Math.sin(-.6)+2,
         style:'font-size:5.5px;font-weight:700;letter-spacing:.08em;fill:rgba(150,170,205,.55);pointer-events:none;'},gSwarm);
       xt.textContent = '+' + sys.extra;
+      swarmLabels.push(xt);
     }
   }
   var hit = mk('circle',{cx:0,cy:0,r:(p.id==='saturn'?p.size+14:p.size+8),fill:'transparent',class:'planet-hit'},g);
@@ -1176,7 +1191,8 @@ PLANETS.forEach(function(p){
     });
   }
   nodes[p.id] = {g:g, orbit:orbit, hit:hit, gMoons:gMoons, gMoonHits:gMoonHits,
-                 moonDefs:moonDefs, gSwarm:gSwarm, bubble:sys ? sys.bubble : null};
+                 moonDefs:moonDefs, gSwarm:gSwarm, bubble:sys ? sys.bubble : null,
+                 label:label, size:p.size};
 
   if (p.accent){
     /* short delay so a double-click zooms instead of opening the popup */
@@ -1233,8 +1249,12 @@ function applyView(){
   var bv = baseView();
   document.getElementById('btn-zoom-reset').style.display = view.w < bv.w - 1 ? '' : 'none';
   var zoomedIn = view.w <= BASE_VIEW.w/2;
+  var wasZoomed = svg.classList.contains('zoomed');
   svg.classList.toggle('zoomed', zoomedIn);
   if (zoomedIn) ensureMoonPhotos();      // same threshold that makes moons clickable
+  /* crossing the zoom threshold adds or removes the asteroid names, so the
+     layout has to be redone right away rather than at the next render */
+  if (wasZoomed !== zoomedIn && typeof declutterLabels === 'function') declutterLabels();
 }
 function animateView(tx, ty, tw){
   var f = {x:view.x, y:view.y, w:view.w}, t0 = performance.now();
@@ -1388,6 +1408,152 @@ function render(){
   if (tonightOn) updateNightCone();
   if (missionsOn) refreshMissionsForDate();
   if (Math.floor(curMs/86400000) !== showersLastDay) buildShowers();
+  declutterLabels();
+}
+
+/* ── label declutter ───────────────────────────────────────────────────────
+   Every label is drawn in user units and the whole map scales with the
+   viewBox, so a collision is zoom-invariant: two names that overlap overlap at
+   every magnification, and you cannot zoom out of one. They collided plenty —
+   VENUS over EARTH when the two are near conjunction, CERES over ASTEROID BELT
+   because the belt name sits at a fixed point on the ring, VESTA over PALLAS
+   whenever those two line up.
+
+   So after the positions are set, walk the labels in priority order and give
+   each one the first candidate offset that is clear of everything already
+   placed. All of it is plain arithmetic in user units — text extents are
+   measured once and cached, since none of these strings ever change. */
+var _lblExtent = {};
+function labelExtent(el, key){
+  var e = _lblExtent[key];
+  if (!e){
+    var b;
+    try { b = el.getBBox(); } catch(err){ return null; }
+    if (!b || !b.width) return null;               // not rendered yet
+    e = _lblExtent[key] = {w:b.width, h:b.height || 7};
+  }
+  return e;
+}
+function declutterLabels(){
+  /* Tuned by sweeping 160 dates: a generous pad rejects candidate slots that
+     were actually fine, so labels fall back to their overlapping default and
+     asteroid names get dropped for nothing. 0.6-0.8 minimised both. */
+  var PAD = 0.8, taken = [], i;
+  function free(x, y, w, h){
+    for (i=0;i<taken.length;i++){
+      var q = taken[i];
+      if (x - PAD < q.x + q.w && x + w + PAD > q.x &&
+          y - PAD < q.y + q.h && y + h + PAD > q.y) return false;
+    }
+    return true;
+  }
+  /* The star and galaxy names are fixed and were placed by their own pass at
+     build time, so they are obstacles rather than participants: the things
+     that move route around the sky, not the other way round. Their group is
+     scaled when MISSIONS pulls the camera back, so scale their boxes to match. */
+  var skyK = missionsOn ? (WIDE_VIEW.w / BASE_VIEW.w) : 1;
+  skyLabels.forEach(function(el, si){
+    var ext = labelExtent(el, 's:' + si);
+    if (!ext) return;
+    var sx = parseFloat(el.getAttribute('x')) * skyK;
+    var sy = parseFloat(el.getAttribute('y')) * skyK;
+    if (!isFinite(sx) || !isFinite(sy)) return;
+    /* getBBox is in the group's own units, so the extents scale with it too */
+    var sw = ext.w * skyK, sh = ext.h * skyK;
+    taken.push({x:sx - sw/2, y:sy - sh*0.8, w:sw, h:sh});
+  });
+  /* The bodies are obstacles too, not just the other names — otherwise a label
+     that has dodged every neighbouring label lands squarely across a planet's
+     globe instead, which is how MARS ended up written over Earth. The Sun
+     carries its glow, so it blocks a wider box than its disc. */
+  PLANETS.forEach(function(p){
+    var nd = nodes[p.id], pos = lastPos[p.id];
+    if (!nd || !pos || nd.g.getAttribute('display') === 'none') return;
+    var R = rScale(pos.r, p.id), th = pos.lon*DEG;
+    var px = R*Math.cos(th), py = -R*Math.sin(th), sz = nd.size;
+    taken.push({x:px - sz, y:py - sz, w:sz*2, h:sz*2});
+  });
+  taken.push({x:-26, y:-26, w:52, h:52});          // the Sun and its glow
+  if (bigAstNodes && viewMode === 'compressed' && svg.classList.contains('zoomed')){
+    bigAstNodes.forEach(function(nd){
+      var p3 = astPos(nd.o, curMs), R3 = rScale(p3.r, null), rr3 = nd.rr;
+      taken.push({x:R3*Math.cos(p3.lon) - rr3, y:-R3*Math.sin(p3.lon) - rr3,
+                  w:rr3*2, h:rr3*2});
+    });
+  }
+  /* one entry per label: where its object is, how big the text is, and the
+     offsets it is allowed to take, best first */
+  var items = [];
+  PLANETS.forEach(function(p){
+    var nd = nodes[p.id], pos = lastPos[p.id];
+    if (!nd || !nd.label || !pos) return;
+    if (nd.g.getAttribute('display') === 'none') return;
+    var ext = labelExtent(nd.label, 'p:' + p.id);
+    if (!ext) return;
+    var R = rScale(pos.r, p.id), th = pos.lon*DEG;
+    var sz = nd.size, half = ext.w/2;
+    items.push({
+      el:nd.label, prio:3, keep:true, ext:ext,
+      ax:R*Math.cos(th), ay:-R*Math.sin(th),
+      alts:[{x:0, y:-(sz+9)}, {x:0, y:sz+13},
+            {x:sz + 5 + half, y:3}, {x:-(sz + 5 + half), y:3}]
+    });
+  });
+  beltLabels.forEach(function(bl, bi){
+    var ext = labelExtent(bl.el, 'b:' + bi);
+    if (!ext) return;
+    /* the belt name has to stay on its ring, so its choices are angles around
+       it rather than offsets from a point */
+    var alts = [];
+    [90, 106, 74, 122, 58, 138, 42, 154, 26].forEach(function(deg){
+      var a = deg*DEG;
+      alts.push({x:bl.R*Math.cos(a), y:-bl.R*Math.sin(a)});
+    });
+    items.push({el:bl.el, prio:2, keep:true, ext:ext, ax:0, ay:0, alts:alts});
+  });
+  if (bigAstNodes && viewMode === 'compressed' && svg.classList.contains('zoomed')){
+    bigAstNodes.forEach(function(nd, ai){
+      if (!nd.lbl) return;
+      var ext = labelExtent(nd.lbl, 'a:' + ai);
+      if (!ext) return;
+      var p2 = astPos(nd.o, curMs), R2 = rScale(p2.r, null);
+      var half2 = ext.w/2, rr = nd.rr;
+      /* astPos gives longitude in radians, and the map's y runs the other way */
+      items.push({
+        el:nd.lbl, prio:1, keep:false, ext:ext,
+        ax:R2*Math.cos(p2.lon), ay:-R2*Math.sin(p2.lon),
+        alts:[{x:0, y:-rr-3.5}, {x:0, y:rr+6},
+              {x:rr + 3 + half2, y:1.5}, {x:-(rr + 3 + half2), y:1.5}]
+      });
+    });
+  }
+  items.sort(function(a, b){ return b.prio - a.prio; });
+  items.forEach(function(it){
+    var w = it.ext.w, h = it.ext.h, chosen = null;
+    for (var k=0;k<it.alts.length;k++){
+      var o = it.alts[k];
+      /* text-anchor is middle and y is the baseline, so the box hangs left and
+         up from the anchor point */
+      var bx = it.ax + o.x - w/2, by = it.ay + o.y - h*0.8;
+      if (free(bx, by, w, h)){ chosen = {o:o, x:bx, y:by}; break; }
+    }
+    if (!chosen){
+      /* nothing clear: a planet keeps its name and accepts the overlap, an
+         asteroid drops out rather than printing over someone else */
+      if (it.keep){
+        var o0 = it.alts[0];
+        chosen = {o:o0, x:it.ax + o0.x - w/2, y:it.ay + o0.y - h*0.8};
+      } else {
+        if (it.el.getAttribute('display') !== 'none') it.el.setAttribute('display', 'none');
+        return;
+      }
+    }
+    taken.push({x:chosen.x, y:chosen.y, w:w, h:h});
+    if (it.el.getAttribute('display') === 'none') it.el.removeAttribute('display');
+    var nx = chosen.o.x.toFixed(1), ny = chosen.o.y.toFixed(1);
+    if (it.el.getAttribute('x') !== nx) it.el.setAttribute('x', nx);
+    if (it.el.getAttribute('y') !== ny) it.el.setAttribute('y', ny);
+  });
 }
 /* The five escaping craft keep going while you scrub. Their distance is
    extrapolated from curMs, so the outbound legs, the marker dots and the AU
@@ -1819,9 +1985,9 @@ function buildBigAsteroids(){
     }
     var t = mk('text',{class:'ast-label', y:(-rr-3.5).toFixed(1), 'text-anchor':'middle',
       style:'font-size:5px;font-weight:700;letter-spacing:.12em;' +
-            'fill:rgba(205,190,165,.75);pointer-events:none;user-select:none;'},g);
+            'fill:var(--lbl-rock);pointer-events:none;user-select:none;'},g);
     t.textContent = o.n;
-    return {o:o, g:g, rg:rg};
+    return {o:o, g:g, rg:rg, lbl:t, rr:rr};
   });
 }
 function renderBigAsteroids(){
@@ -1837,11 +2003,13 @@ function renderBigAsteroids(){
     nd.rg.setAttribute('transform', 'rotate(' + (-p2.lon*180/Math.PI).toFixed(1) + ')');
   });
 }
+var beltLabels = [];
 function buildBelts(){
   if (beltsBuiltFor === viewMode) return;          // only the scale can change it
   beltsBuiltFor = viewMode;
   buildBigAsteroids();
   gBelts.innerHTML = '';
+  beltLabels = [];
   BELTS.forEach(function(b){
     var rnd = metRnd('belt/' + b.id);
     for (var i=0;i<b.n;i++){
@@ -1874,8 +2042,9 @@ function buildBelts(){
     var Rl = rScale(b.a0 + (b.a1-b.a0)*b.lp, null);
     var tl = mk('text',{x:0, y:(-Rl).toFixed(1), 'text-anchor':'middle',
       style:'font-size:6.5px;font-weight:700;letter-spacing:.18em;' +
-            'fill:rgba(175,190,215,.42);pointer-events:none;user-select:none;'},gBelts);
+            'fill:var(--lbl-rock);opacity:.62;pointer-events:none;user-select:none;'},gBelts);
     tl.textContent = b.label;
+    beltLabels.push({el:tl, R:Rl});
   });
 }
 
