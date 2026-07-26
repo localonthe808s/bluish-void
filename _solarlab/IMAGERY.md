@@ -262,3 +262,49 @@ both re-measured identical after the downscale.
 
 **The 23 moon photos are still hotlinked** from images-assets.nasa.gov and are
 the obvious next candidates for the same treatment.
+
+## Moons rehosted (2026-07-26) — and where each one came from
+
+All 23 moved from images-assets.nasa.gov to `cdn.bluishvoid.com/moons/<name>.jpg`.
+The NASA IDs lived only inside those URLs, so they are recorded here —
+this table IS the provenance now. All public domain (NASA/JPL et al).
+
+| moon | NASA id | served as |
+|---|---|---|
+| Moon | `GSFC_20171208_Archive_e001861` | `moons/moon.jpg` |
+| Phobos | `PIA10368` | `moons/phobos.jpg` |
+| Deimos | `PIA17350` | `moons/deimos.jpg` |
+| Io | `PIA00583` | `moons/io.jpg` |
+| Europa | `PIA19048` | `moons/europa.jpg` |
+| Ganymede | `PIA24681` | `moons/ganymede.jpg` |
+| Callisto | `PIA03456` | `moons/callisto.jpg` |
+| Mimas | `PIA12570` | `moons/mimas.jpg` |
+| Enceladus | `PIA07800` | `moons/enceladus.jpg` |
+| Tethys | `PIA19636` | `moons/tethys.jpg` |
+| Dione | `PIA06163` | `moons/dione.jpg` |
+| Rhea | `PIA06578` | `moons/rhea.jpg` |
+| Titan | `PIA06230` | `moons/titan.jpg` |
+| Hyperion | `PIA08349` | `moons/hyperion.jpg` |
+| Iapetus | `PIA08384` | `moons/iapetus.jpg` |
+| Miranda | `PIA00042` | `moons/miranda.jpg` |
+| Ariel | `PIA00041` | `moons/ariel.jpg` |
+| Umbriel | `PIA00040` | `moons/umbriel.jpg` |
+| Titania | `PIA00036` | `moons/titania.jpg` |
+| Oberon | `PIA00034` | `moons/oberon.jpg` |
+| Proteus | `PIA00062` | `moons/proteus.jpg` |
+| Triton | `PIA00317` | `moons/triton.jpg` |
+| Nereid | `PIA00054` | `moons/nereid.jpg` |
+
+Each was downscaled to what the map can actually show rather than to a fixed
+size: needed source width = (moon's drawn diameter at max zoom, 2x DPR) / (2·fr),
+since a moon whose disc fills only part of its frame must start larger to end up
+the same size on screen. Nereid needs the widest source (346px) despite being
+the smallest moon, because its disc is 11% of its frame.
+
+Sizes run 200–448px. **2426KB → 287KB, 88% smaller.** Uploaded with
+`rclone copy . r2:bluishvoid-bg/moons/ --s3-no-check-bucket` plus
+`--header-upload "Cache-Control: public, max-age=31536000, immutable"`.
+
+`moon_crops.json` is unchanged and did not need to be: fx/fy/fr are fractions of
+width. Every one of the 23 was re-measured after the downscale and drifted by at
+most 0.003.
