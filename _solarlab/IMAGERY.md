@@ -309,32 +309,29 @@ Sizes run 200–448px. **2426KB → 287KB, 88% smaller.** Uploaded with
 width. Every one of the 23 was re-measured after the downscale and drifted by at
 most 0.003.
 
-## Sun rehosted (2026-07-26)
+## Sun — deliberately NOT rehosted (decided 2026-07-26)
 
-`cdn.bluishvoid.com/sun/current.jpg`, republished every 30 min by
-`.github/workflows/sun-frame.yml` (same three R2_* secrets as the moon job).
-Source unchanged: SDO AIA 171 Å `latest_512_0171.jpg`, public domain, courtesy
-NASA/SDO and the AIA/EVE/HMI teams. Not downscaled — unlike the moons, the map
-can draw the Sun larger than 512px at full zoom, and 512 is already SDO's small
-variant at 56KB.
+It was briefly mirrored to `cdn.bluishvoid.com/sun/current.jpg` on a 30-minute
+job, and that was reverted. The Sun is the one image on the map whose value is
+being live: a flare shows in AIA 171 within minutes, and the mirror put it up
+to 45 minutes behind (30-min job + 15-min cache bucket). Outage resilience is
+not worth that here. It stays hotlinked from
+`sdo.gsfc.nasa.gov/assets/img/latest/latest_512_0171.jpg`.
 
-**The zone rewrites short Cache-Control values up to 4 hours.** Measured: R2
-stores `max-age=900` and the edge serves `max-age=14400`; the moon's 3600 is
-raised the same way, while `immutable` assets pass through untouched. A fixed
-URL would therefore sit in the browser cache long past the next refresh and
-make a half-hourly job pointless. The lab requests the frame with a 15-minute
-rotating query string instead, which sidesteps it without a zone change. If
-either cadence changes, keep the two in step.
+Same reasoning applies to index.html's space-widget panels (PFSS, magnetogram,
+white light): they poll every 5 minutes and are labelled "• LIVE". GitHub
+Actions cron has a 5-minute floor and scheduled runs are routinely delayed
+beyond it, so a snapshot job cannot honestly feed them. If those ever need
+insulating from GSFC outages, the tool is the existing Cloudflare Worker
+(proxy.bluishvoid.com) as a short-TTL pass-through cache — resilience without
+staleness — not an R2 snapshot. They already fall back AIA → SOHO → PFSS.
 
-The job refuses to publish a frame that is not a 512×512 JPEG with real
-contrast — SDO serves placeholders and truncated frames during downlink gaps,
-and pushing one would blank the Sun until the next run. Guards verified against
-a good frame, a flat one and a wrong-sized one.
+### Worth keeping from the attempt: the zone raises short cache TTLs
 
-The lab still falls back to sdo.gsfc.nasa.gov directly if the mirror 404s, and
-only removes the image if that fails too.
-
-**Still hotlinked:** index.html's space widget uses SDO for the PFSS,
-magnetogram (`latest_512_HMIB.jpg`) and white-light (`latest_512_HMIIC.jpg`)
-panels. Those are crossfade players with their own refresh logic, so they were
-left alone here.
+Measured on 2026-07-26: R2 stored `Cache-Control: public, max-age=900` and the
+edge served `max-age=14400`. The moon's `max-age=3600` is raised to 14400 the
+same way, while the `immutable` assets (moons/, asteroids/) pass through
+untouched. So anything that must refresh faster than 4 hours cannot rely on the
+header alone — it needs a rotating query string or a zone change. **This affects
+`moon/current.jpg` today**: it is republished every 4 hours but browsers may
+hold it for 4, so the hero moon can lag a cycle.
