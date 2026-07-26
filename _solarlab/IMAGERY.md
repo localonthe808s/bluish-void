@@ -58,6 +58,7 @@ credits in code comments + visible where license requires).
 - **Milky Way band**: the repo's ESO/Brunier panorama could be warped along the
   projected galactic circle (segment-and-rotate like the hero uses), CC BY 4.0.
 - **Comets/asteroids** (future): OSIRIS-REx Bennu (PD); Rosetta 67P is ESA CC BY-SA (viral).
+  For the six BIG_ASTEROIDS specifically, see the audit below.
 
 ## Meteor showers (researched 2026-07-24)
 
@@ -204,3 +205,40 @@ Moon gets from the R2 snapshot.
   underneath as the fallback and the image only fades in on success.
 - Production: snapshot to R2 on a schedule like the moon, rather than hotlinking
   GSFC — same reasoning as the Sun (`cdn.bluishvoid.com/sun/current.jpg`).
+
+## Big asteroids — which have real photographs (audited 2026-07-26)
+
+The split is simply which ones we have visited. Dawn orbited Vesta (2011) and
+Ceres (2015); nobody has been to the other four.
+
+| body | photo? | source | licence | in the map |
+|---|---|---|---|---|
+| Ceres | yes, sharp | Dawn **PIA21906** 1280², disc fills 100% | PD | **used** |
+| Vesta | yes, sharp | Dawn **PIA14317** 1024², fills 91% (no `~medium`) | PD | **used** |
+| Pallas | resolved blob | ESO VLT/SPHERE, in `eso2114a` mosaic | CC BY 4.0 | procedural rock |
+| Hygiea | resolved blob | ESO `eso1918a` (own release) | CC BY 4.0 | procedural rock |
+| Juno | resolved blob | `eso2114a` mosaic | CC BY 4.0 | procedural rock |
+| Psyche | **none exists** | NASA holds only artist's concepts | — | procedural rock |
+
+**Psyche has no photograph.** `images-api` returns 100 hits and every one is an
+illustration (PIA24896, PIA24472, "A Metal-Rich World (Artist's Concept)"). The
+spacecraft arrives 2029. These must never be used as photos.
+
+The four un-visited ones stay procedural on purpose: a smeared 30-pixel
+telescope blob beside a sharp Dawn portrait reads as a rendering fault rather
+than as honesty about what has been seen. The ESO mosaic is also an
+infographic — blue background, sizing ring, baked captions — so using it means
+cropping and keying each panel, i.e. a derivative, allowed under CC BY 4.0 with
+visible credit: *ESO/M. Kornmesser/Vernazza et al./MISTRAL algorithm (ONERA/CNRS)*.
+
+**Two candidates that look right and are not** (same trap as Callisto's PIA03455):
+`PIA22660` is Ceres with a cutaway interior diagram over it, and `PIA16632` is a
+Vesta polar topographic map with axes and a colour bar. Both score high on
+"disc fills frame".
+
+Measured crops (same method as the moons):
+Ceres fx .4986 fy .4986 fr .5000 ar 1 · Vesta fx .5389 fy .5056 fr .4931 ar 1.
+
+Both Dawn frames are lit from +x, but `rockLit` puts +x AWAY from the Sun, so
+the photo-backed pair carry a 180° offset. Rotating is the honest fix —
+mirroring would put Occator's bright spots on the wrong side of Ceres.

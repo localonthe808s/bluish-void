@@ -2182,6 +2182,34 @@ var BELTS = [
 ];
 var beltsBuiltFor = null;
 var bigAstNodes = null;
+/* Of the six big asteroids the map draws, exactly two have ever been visited:
+   Dawn orbited Vesta in 2011 and Ceres in 2015, so those two have real
+   close-up photographs. Nobody has been to Pallas, Hygiea, Juno or Psyche —
+   the best images of those are ground-based VLT/SPHERE blobs a few tens of
+   pixels across, and Psyche has no photograph at all (NASA's library holds
+   only artist's concepts; the spacecraft arrives in 2029). So those four keep
+   the procedural rock: a smeared telescope blob sitting next to a sharp
+   portrait would read as a rendering fault rather than as honesty about what
+   we have seen.
+
+   Crops measured the same way the moons are (build_moon_crops.py): fx/fy is
+   the disc centre and fr its radius, both as fractions of image width. */
+var AST_IMG = {
+  CERES:{u:'https://images-assets.nasa.gov/image/PIA21906/PIA21906~medium.jpg',
+         fx:0.4986, fy:0.4986, fr:0.5000, ar:1, round:true},
+  /* PIA14317 has no ~medium — older Photojournal items often do not */
+  VESTA:{u:'https://images-assets.nasa.gov/image/PIA14317/PIA14317~orig.jpg',
+         fx:0.5389, fy:0.5056, fr:0.4931, ar:1, round:false}
+};
+/* furthest any vertex of a rock silhouette gets from its centre */
+function pathMaxR(d){
+  var n = d.match(/-?\d+(?:\.\d+)?/g) || [], mx = 0;
+  for (var i=0;i+1<n.length;i+=2){
+    var r = Math.sqrt(+n[i]*+n[i] + +n[i+1]*+n[i+1]);
+    if (r > mx) mx = r;
+  }
+  return mx || 1;
+}
 function buildBigAsteroids(){
   if (bigAstNodes) return;
   bigAstNodes = BIG_ASTEROIDS.map(function(o){
@@ -2192,18 +2220,53 @@ function buildBigAsteroids(){
     /* inner group carries the sun-facing rotation, updated every frame as it
        orbits — the outer group only translates */
     var rg = mk('g',{},g);
-    mk('path',{d:rockPath(rnd, rr), fill:'url(#rockLit)'},rg);
+    /* keep the silhouette: it is the fallback if the photo never loads, and
+       Vesta's photo is clipped to this exact outline */
+    var dPath = rockPath(rnd, rr);
+    var rockG = mk('g',{},rg);
+    mk('path',{d:dPath, fill:'url(#rockLit)'},rockG);
     for (var q=0;q<3;q++){
       var pa = rnd()*Math.PI*2, pd = rr*(0.12 + rnd()*0.4);
       mk('circle',{cx:(pd*Math.cos(pa)).toFixed(2), cy:(pd*Math.sin(pa)).toFixed(2),
                    r:(rr*(0.1 + rnd()*0.15)).toFixed(2),
-                   fill:'#000', opacity:(0.14 + rnd()*0.13).toFixed(2)},rg);
+                   fill:'#000', opacity:(0.14 + rnd()*0.13).toFixed(2)},rockG);
+    }
+    var ph = AST_IMG[o.n], astImg = null;
+    if (ph){
+      /* Ceres is round enough to be a dwarf planet, so it gets a circle;
+         Vesta is genuinely lumpy and is clipped to its own silhouette. */
+      var cid = 'astclip-' + o.n.toLowerCase();
+      var cp = mk('clipPath',{id:cid}, defs);
+      if (ph.round) mk('circle',{cx:0, cy:0, r:rr.toFixed(2)}, cp);
+      else mk('path',{d:dPath}, cp);
+      /* Same sizing the moons use: whichever is larger, the width that makes
+         the disc fill the clip or the width that simply covers it, so a frame
+         where the body sits off-centre crops into surface instead of letting
+         black sky leak in at the edge. */
+      /* Size against what the clip actually reaches, not against rr. The rock
+         silhouette is lumpy and its peaks run up to ~24% past rr, so sizing on
+         rr left those peaks outside the photographed body and the frame's
+         black sky showed through them as wedges. */
+      /* fr is measured from a BOUNDING box, so it is the body's widest reach;
+         Vesta's limb comes closer than that where it is concave, and a lump
+         landing there still caught black sky. Non-round clips take a margin so
+         the silhouette sits comfortably inside the real body — cropping a
+         little into the surface is invisible, leaking sky is not. */
+      var clipR = ph.round ? rr : pathMaxR(dPath)*1.16;
+      var iw = Math.max(clipR/ph.fr,
+                        clipR/Math.min(ph.fx, 1-ph.fx),
+                        clipR/(ph.ar*Math.min(ph.fy, 1-ph.fy)));
+      var ih = iw*ph.ar;
+      astImg = mk('image',{x:(-ph.fx*iw).toFixed(2), y:(-ph.fy*ih).toFixed(2),
+                    width:iw.toFixed(2), height:ih.toFixed(2),
+                    'clip-path':'url(#'+cid+')',
+                    preserveAspectRatio:'none', opacity:0},rg);
     }
     var t = mk('text',{class:'ast-label', y:(-rr-3.5).toFixed(1), 'text-anchor':'middle',
       style:'font-size:5px;font-weight:700;letter-spacing:.12em;' +
             'fill:var(--lbl-rock);pointer-events:none;user-select:none;'},g);
     t.textContent = o.n;
-    return {o:o, g:g, rg:rg, lbl:t, rr:rr};
+    return {o:o, g:g, rg:rg, rock:rockG, lbl:t, rr:rr, img:astImg, lit:ph ? 180 : 0};
   });
 }
 function renderBigAsteroids(){
@@ -2215,8 +2278,13 @@ function renderBigAsteroids(){
     var p2 = astPos(nd.o, curMs), R = rScale(p2.r, null);
     nd.g.setAttribute('transform', 'translate(' + (R*Math.cos(p2.lon)).toFixed(1) +
                       ',' + (-R*Math.sin(p2.lon)).toFixed(1) + ')');
-    /* keep the lit limb pointed at the Sun as it goes round */
-    nd.rg.setAttribute('transform', 'rotate(' + (-p2.lon*180/Math.PI).toFixed(1) + ')');
+    /* Keep the lit limb pointed at the Sun as it goes round. rockLit is built
+       with +x facing AWAY from the Sun, but both Dawn photographs happen to be
+       lit from +x, so those two carry a half-turn offset. Rotating is the
+       honest fix; mirroring would put Occator's bright spots on the wrong side
+       of Ceres. */
+    nd.rg.setAttribute('transform',
+      'rotate(' + (-p2.lon*180/Math.PI + nd.lit).toFixed(1) + ')');
   });
 }
 var beltLabels = [];
@@ -3910,6 +3978,20 @@ var moonPhotosOn = false;
 function ensureMoonPhotos(){
   if (moonPhotosOn) return;
   moonPhotosOn = true;
+  /* the two asteroid portraits ride the same zoom gate: at full view they are
+     three pixels across and not worth 400KB */
+  if (bigAstNodes) bigAstNodes.forEach(function(nd){
+    var u = AST_IMG[nd.o.n] && AST_IMG[nd.o.n].u;
+    if (!u || !nd.img) return;
+    nd.img.addEventListener('error', function(){ nd.img.remove(); nd.img = null; });
+    /* only stand the rock down once the photograph is actually on screen, so a
+       dead URL leaves the silhouette rather than a hole */
+    nd.img.addEventListener('load', function(){
+      if (nd.rock) nd.rock.setAttribute('display', 'none');
+    });
+    nd.img.setAttribute('href', u);
+    nd.img.setAttribute('opacity', 1);
+  });
   PLANETS.forEach(function(p){
     var nd = nodes[p.id];
     if (!nd || !nd.moonDefs) return;
