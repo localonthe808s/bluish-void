@@ -367,3 +367,14 @@ craft body is drawn accurately and nothing better exists — same reasoning as
 Nereid's 4% disc, inverted. Lab code: CRAFT_IMG + craftPhoto()/
 ensureCraftPhotos() (lazy, svg.zoomed gate); the colored dot swaps out at
 zoom via `.craft-dot` so it doesn't peek through the transparent renders.
+
+## Interstellar visitors (b96d3c6)
+
+Porthole at the moving marker + popup hero, same lazy `data-craft-src` pattern
+as the spacecraft. `cdn.bluishvoid.com/iso/*.webp`, 800px squares.
+
+| object | source | license |
+|---|---|---|
+| 1i | ESO artist's impression (M. Kornmesser) — 'Oumuamua was NEVER resolved by any telescope; captioned as artist's impression in the popup footer | CC BY 4.0, credit required and present |
+| 2i | Hubble, Dec 2019 (2019-53-4578, hubblesite) | public domain |
+| 3i | Hubble, 21 Jul 2025 (heic2509a, esahubble) — the Nov 2025 frame was rejected: visible WFC3 mosaic seams | CC BY 4.0 (NASA/ESA/D. Jewitt) |
