@@ -378,3 +378,12 @@ as the spacecraft. `cdn.bluishvoid.com/iso/*.webp`, 800px squares.
 | 1i | ESO artist's impression (M. Kornmesser) — 'Oumuamua was NEVER resolved by any telescope; captioned as artist's impression in the popup footer | CC BY 4.0, credit required and present |
 | 2i | Hubble, Dec 2019 (2019-53-4578, hubblesite) | public domain |
 | 3i | Hubble, 21 Jul 2025 (heic2509a, esahubble) — the Nov 2025 frame was rejected: visible WFC3 mosaic seams | CC BY 4.0 (NASA/ESA/D. Jewitt) |
+
+## Active-mission renders (FLYING NOW popups)
+
+Same craft-body-render rule as the historical missions. All six are Public
+domain on Commons — including JUICE and BepiColombo, whose usual ESA renders
+are CC BY-SA (avoided): these two come from NASA's own "spacecraft icons"
+toolkit renders instead. Files: Commons "X spacecraft model.png" for Parker /
+Europa Clipper / Lucy / Psyche / JUICE / BepiColombo → trimmed, square-padded,
+800px webp at cdn.bluishvoid.com/craft/{parker,clipper,lucy,psyche,juice,bepi}.webp.
