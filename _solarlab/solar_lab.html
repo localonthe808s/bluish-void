@@ -1712,6 +1712,12 @@ function applyView(){
     for (var zi = 0; zi < zls.length; zi++)
       zls[zi].classList.toggle('active', zls[zi].getAttribute('data-zl') === lvl);
   }
+  /* One-finger touches: at full view they stay with the browser, so the page
+     scrolls normally over the widget; once zoomed in they pan the map (the
+     pointer handlers below already do the work — 'none' just stops the
+     browser stealing the gesture). Two-finger pinch is claimed separately
+     by the touchstart handler regardless of this value. */
+  svg.style.touchAction = (view.w < baseView().w - 1) ? 'none' : 'manipulation';
   var zoomedIn = view.w <= BASE_VIEW.w/2;
   var wasZoomed = svg.classList.contains('zoomed');
   svg.classList.toggle('zoomed', zoomedIn);
@@ -1784,6 +1790,64 @@ svg.addEventListener('dblclick', function(ev){
   var pt = svgPoint(ev);
   zoomAt(pt.x, pt.y, ev.shiftKey ? 0.5 : 2);
 });
+
+/* ── touch: pinch to zoom, two-finger pan, double-tap ────────────────────
+   The map had no touch story at all — on a phone the only way in was the
+   zoom ladder. Same model as the hazard map: pinch is always live (two
+   fingers are preventDefault'd so the page never scrolls or viewport-zooms
+   mid-gesture), single touches never hijack page scroll at full view. */
+var pinch = null, tapAt = null;
+function tDist(t){ return Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY); }
+function tMid(t){ return {clientX:(t[0].clientX + t[1].clientX)/2, clientY:(t[0].clientY + t[1].clientY)/2}; }
+svg.addEventListener('touchstart', function(ev){
+  if (ev.touches.length !== 2) return;
+  ev.preventDefault();
+  panning = false;
+  clearTimeout(pendingPopup); hideTip();
+  pinch = {d: tDist(ev.touches), mid: tMid(ev.touches)};
+}, {passive:false});
+svg.addEventListener('touchmove', function(ev){
+  if (!pinch || ev.touches.length !== 2) return;
+  ev.preventDefault();
+  var d = tDist(ev.touches), m = tMid(ev.touches), bv = baseView();
+  var w = Math.min(bv.w, Math.max(MIN_W, view.w * pinch.d / Math.max(d, 1)));
+  /* scale about the fingers' midpoint so the spot between them stays put */
+  var k = w / view.w, p = svgPoint(m);
+  view.x = p.x - (p.x - view.x) * k;
+  view.y = p.y - (p.y - view.y) * k;
+  view.w = w;
+  /* two-finger drift = pan */
+  var r = svg.getBoundingClientRect();
+  var upp = view.w / Math.min(r.width, r.height);
+  view.x -= (m.clientX - pinch.mid.clientX) * upp;
+  view.y -= (m.clientY - pinch.mid.clientY) * upp;
+  view.x = Math.min(bv.x + bv.w - view.w, Math.max(bv.x, view.x));
+  view.y = Math.min(bv.y + bv.w - view.w, Math.max(bv.y, view.y));
+  applyView();
+  pinch.d = d; pinch.mid = m;
+}, {passive:false});
+svg.addEventListener('touchend', function(ev){
+  if (pinch){
+    ev.preventDefault();                       // no tail-end click → no popup
+    if (ev.touches.length < 2) pinch = null;
+    tapAt = null;
+    return;
+  }
+  /* double-tap = ×2 in at the tap, mirroring desktop dblclick. 280ms window
+     matches the popup grace delay so the second tap lands before it fires. */
+  if (ev.touches.length || ev.changedTouches.length !== 1 || didPan) return;
+  var t = ev.changedTouches[0], now = Date.now();
+  if (tapAt && now - tapAt[0] < 280 &&
+      Math.hypot(t.clientX - tapAt[1], t.clientY - tapAt[2]) < 30){
+    ev.preventDefault();
+    clearTimeout(pendingPopup); hideTip();
+    var tp = svgPoint(t);
+    zoomAt(tp.x, tp.y, 2);
+    tapAt = null;
+  } else {
+    tapAt = [now, t.clientX, t.clientY];
+  }
+}, {passive:false});
 /* The zoom ladder: named scales instead of relative steps (user 2026-07-26 —
    "MOONS / PLANETARY / SOLAR SYSTEM / INTERSTELLAR instead of FULL / ½").
    MOONS keeps the current centre so laddering in stays on what you were
