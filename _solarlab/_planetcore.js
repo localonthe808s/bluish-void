@@ -1204,7 +1204,15 @@
       // Phase visualization — actual SVG moon disc + key facts on right
       var phaseFloat = (moonPhaseInfo.angle || 0) / 360;
       h += '<div style="display:flex;align-items:center;gap:14px;margin:6px 0;">';
-      h += moonPhaseSvg(phaseFloat, 72);
+      // The REAL Moon, photographed at today's exact phase and libration —
+      // the same self-hosted NASA SVS frame the hero moon uses (user: no
+      // drawings for our own Moon). The drawn disc is only the onerror
+      // fallback now.
+      var _mvq = (window._moonPreload && window._moonPreload.frameStr) ? ('?v=' + window._moonPreload.frameStr) : '';
+      h += '<img src="https://cdn.bluishvoid.com/moon/current.jpg' + _mvq + '" alt="" ' +
+        'style="width:128px;height:128px;border-radius:50%;flex-shrink:0;object-fit:cover;box-shadow:0 6px 22px rgba(20,30,80,.35);" ' +
+        'onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'block\';">';
+      h += '<div style="display:none;flex-shrink:0;">' + moonPhaseSvg(phaseFloat, 72) + '</div>';
       h += '<div style="flex:1;">'+
         '<div style="font-size:14px;font-weight:900;color:#3344cc;line-height:1.1;">'+moonPhaseInfo.name+'</div>'+
         '<div style="font-size:10px;color:rgba(43,34,244,.55);margin-top:3px;">'+
@@ -1226,7 +1234,7 @@
       else if (moonPhaseInfo.illum < 60) moonImpact = '\u26a0\ufe0f Moderate light pollution — focus on bright targets';
       else if (moonPhaseInfo.illum < 85) moonImpact = '\u26a0\ufe0f Significant moonlight — galaxies & nebulae washed out';
       else moonImpact = '\u274c Full Moon — deep-sky observing very difficult. Focus on Moon, planets, doubles';
-      h += '<div style="font-size:8.5px;color:rgba(255,255,255,.5);margin-top:4px;line-height:1.4;padding:4px 6px;background:rgba(255,255,255,.04);border-radius:4px;">' + moonImpact + '</div>';
+      h += '<div style="font-size:8.5px;color:rgba(43,34,244,.6);margin-top:4px;line-height:1.4;padding:4px 6px;background:rgba(43,34,244,.04);border-radius:4px;">' + moonImpact + '</div>';
 
       // Best features to observe tonight
       h += FS('Tonight\'s Terminator');
@@ -1241,7 +1249,7 @@
       else if (termDay <= 22) features = ['Rupes Recta (Straight Wall) in shadow', 'Copernicus in dramatic relief', 'Montes Apenninus sunset'];
       else if (termDay <= 26) features = ['Mare Crisium last light', 'Eastern limb features', 'Earthshine on dark limb'];
       else features = ['Thin crescent — Earthshine dramatic', 'Da Vinci glow on unlit portion', 'Best viewed just before sunrise'];
-      h += '<div style="font-size:9px;color:rgba(255,255,255,.6);line-height:1.5;">';
+      h += '<div style="font-size:9px;color:rgba(43,34,244,.62);line-height:1.5;">';
       features.forEach(function(f) { h += '\u2022 ' + f + '<br>'; });
       h += '</div>';
     }
