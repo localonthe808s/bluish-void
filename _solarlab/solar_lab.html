@@ -1839,6 +1839,35 @@ document.addEventListener('keydown', function(e){
   }
 });
 
+/* The site's popups (planets, the Moon) always describe RIGHT NOW — live
+   altitude, phase, trend — while the map may be scrubbed years away. Rather
+   than rebuilding the whole popup engine around arbitrary dates, say so:
+   when the map is >36h from now, a notice bar tops the popup naming the
+   map's date. The lab-owned popups (missions, visitors) already use the
+   map date and say so in their own rows. */
+(function(){
+  var _spi = window.showPlanetInsight;
+  if (!_spi) return;
+  window.showPlanetInsight = function(){
+    var r = _spi.apply(this, arguments);
+    if (Math.abs(curMs - Date.now()) > 36*3600000){
+      requestAnimationFrame(function(){
+        var pp = document.getElementById('planet-insight-popup');
+        if (!pp || pp.querySelector('.map-date-note')) return;
+        var n = document.createElement('div');
+        n.className = 'map-date-note';
+        n.style.cssText = 'margin:10px 16px 0;padding:6px 10px;border-radius:8px;' +
+          'background:rgba(43,34,244,.07);font-size:9px;font-weight:700;' +
+          'letter-spacing:.05em;color:rgba(43,34,244,.7);text-align:center;';
+        n.textContent = 'SKY DATA SHOWS TONIGHT \u2014 THE MAP IS SCRUBBED TO ' +
+          new Date(curMs).toLocaleDateString('en-US',
+            {month:'short', day:'numeric', year:'numeric'}).toUpperCase();
+        pp.insertBefore(n, pp.firstChild);
+      });
+    }
+    return r;
+  };
+})();
 /* Open the site's real planet-insight popup (extracted in _planetcore.js).
    The site positions it near the click and page-scrolls it into view; this
    page can't scroll, so clamp the popup inside the viewport after open. */
@@ -3072,12 +3101,40 @@ function buildMissionPaths(){
      tags landed on top of one another. Lay them out per side of the map,
      nudging each one clear of the previous — the leader line keeps every tag
      tied to its own dot. */
+  /* the edge tags share space with the scaled sky names (ALTAIR sat under
+     NEW HORIZONS' tag) — collect the sky label boxes once and slide any
+     colliding tag just below the name it would cover */
+  var skyK2 = skyScaleK();
+  var skyBoxes = [];
+  skyLabels.forEach(function(sEl, si2){
+    var ext2 = labelExtent(sEl, 's:' + si2);
+    if (!ext2) return;
+    var sbx = parseFloat(sEl.getAttribute('x')) * skyK2;
+    var sby = parseFloat(sEl.getAttribute('y')) * skyK2;
+    if (!isFinite(sbx) || !isFinite(sby)) return;
+    skyBoxes.push({x: sbx, y: sby, w: ext2.w * skyK2, h: ext2.h * skyK2});
+  });
   ['L','R'].forEach(function(side){
     var col = labels.filter(function(L){ return (L.x < 0) === (side === 'L'); })
                     .sort(function(a,b){ return a.y - b.y; });
     var prev = -1e9;
     col.forEach(function(L){
       var ly = Math.max(L.y, prev + 15);
+      var lxProbe = L.x + (side === 'L' ? -11 : 11);
+      var tx0 = side === 'R' ? lxProbe : lxProbe - 135;
+      var tx1 = side === 'R' ? lxProbe + 135 : lxProbe;
+      var guard2 = 0, hit2 = true;
+      while (hit2 && guard2++ < 12){
+        hit2 = false;
+        for (var sbi = 0; sbi < skyBoxes.length; sbi++){
+          var sb = skyBoxes[sbi];
+          if (tx0 < sb.x + sb.w/2 && tx1 > sb.x - sb.w/2 &&
+              Math.abs(ly - sb.y) < sb.h*0.7 + 6){
+            ly = sb.y + sb.h*0.7 + 7; hit2 = true;
+          }
+        }
+        if (ly < prev + 15){ ly = prev + 15; hit2 = true; }
+      }
       prev = ly;
       var lx = L.x + (side === 'L' ? -11 : 11);
       if (Math.abs(ly - L.y) > 2)
@@ -4547,7 +4604,7 @@ var ACTIVE_MISSIONS = [
 ];
 var activeOn = false, activeBuilt = false;
 var activeNodes = {};                        // id -> {dot, label}
-var jwstNode = null;
+var jwstNode = null, jwstLabel = null;
 function buildActivePaths(){
   if (activeBuilt) return;
   activeBuilt = true;
@@ -4588,27 +4645,53 @@ function buildActivePaths(){
   /* JWST: a point, not a path — Sun–Earth L2 keeps pace with Earth */
   jwstNode = mk('g',{'pointer-events':'none'},gActive);
   mk('path',{d:'M0,-4 L4,0 L0,4 L-4,0 Z', fill:'#e8e2ff', stroke:'#fff','stroke-width':.5},jwstNode);
-  var jl = mk('text',{y:-9,'text-anchor':'middle',
-    style:'font-size:.72em;font-weight:800;letter-spacing:.08em;fill:#e8e2ff;pointer-events:none;user-select:none;'},jwstNode);
-  jl.textContent = 'JWST · L2';
+  /* absolute, not a child of the moving group — so it can join the label
+     separation pass with the six craft labels */
+  jwstLabel = mk('text',{'text-anchor':'middle',
+    style:'font-size:.72em;font-weight:800;letter-spacing:.08em;fill:#c8bce8;pointer-events:none;user-select:none;'},gActive);
+  jwstLabel.textContent = 'JWST · L2';
   updateActiveMarkers();
 }
 function updateActiveMarkers(){
+  var labs = [];
   ACTIVE_MISSIONS.forEach(function(o){
     var nd = activeNodes[o.id];
     if (!nd) return;
     var p = cometPos(o, curMs);
     var q2 = missionXY([p.r, p.lon]);
     nd.dot.setAttribute('cx', q2[0].toFixed(1)); nd.dot.setAttribute('cy', q2[1].toFixed(1));
-    nd.label.setAttribute('x', q2[0].toFixed(1)); nd.label.setAttribute('y', (q2[1]-7).toFixed(1));
     nd.label.textContent = o.nm + ' · ' + p.rTrue.toFixed(2) + ' AU';
+    labs.push({el: nd.label, x: q2[0], y: q2[1] - 7});
   });
   if (jwstNode && lastPos.earth){
     var ep3 = lastPos.earth;
     var jr = rScale(ep3.r + 0.01, 'earth'), jth = ep3.lon*DEG;
-    jwstNode.setAttribute('transform', 'translate(' + (jr*Math.cos(jth)).toFixed(1) +
-                          ',' + (-jr*Math.sin(jth)).toFixed(1) + ')');
+    var jx = jr*Math.cos(jth), jy = -jr*Math.sin(jth);
+    jwstNode.setAttribute('transform', 'translate(' + jx.toFixed(1) + ',' + jy.toFixed(1) + ')');
+    if (jwstLabel) labs.push({el: jwstLabel, x: jx, y: jy - 9});
   }
+  /* Several orbits pass Earth's neighbourhood, so labels pile up there on
+     some dates. Sort by height and push any label that would sit on an
+     already-placed one just below it — dots stay put, only names shuffle. */
+  labs.sort(function(a, b){ return a.y - b.y; });
+  /* gaps in label units, not fixed ones — the em text is ~16 units tall at
+     base zoom and scales with lblScale, so the step must too */
+  var _lk = lblScale(), gapY = 17*_lk, spanX = 115*_lk;
+  var placed = [];
+  labs.forEach(function(L){
+    var y = L.y, guard = 0, moved = true;
+    while (moved && guard++ < 20){
+      moved = false;
+      for (var i = 0; i < placed.length; i++){
+        if (Math.abs(L.x - placed[i].x) < spanX && Math.abs(y - placed[i].y) < gapY){
+          y = placed[i].y + gapY; moved = true;
+        }
+      }
+    }
+    placed.push({x: L.x, y: y});
+    L.el.setAttribute('x', L.x.toFixed(1));
+    L.el.setAttribute('y', y.toFixed(1));
+  });
 }
 function updateActiveVisibility(){
   var show = activeOn && viewMode !== 'moons' && !tonightOn;
