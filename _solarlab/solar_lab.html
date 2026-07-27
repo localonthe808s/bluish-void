@@ -138,18 +138,14 @@
   #zoom-back{
     display:flex;align-items:center;gap:2px;
     background:rgba(43,34,244,.07);border:1px solid rgba(43,34,244,.15);
-    border-radius:999px;padding:2px 4px 2px 12px;
-  }
-  #zoom-back .zb-label{
-    font-size:.62rem;font-weight:800;letter-spacing:.06em;color:#2B22F4;margin-right:7px;
+    border-radius:999px;padding:2px 4px;
   }
   #zoom-back button{
-    border:none;background:transparent;padding:3px 10px;font-size:.68rem;line-height:1.15;
-    border-radius:999px;color:#2B22F4;font-weight:800;letter-spacing:.06em;
+    border:none;background:transparent;padding:3px 10px;font-size:.62rem;line-height:1.15;
+    border-radius:999px;color:#2B22F4;font-weight:800;letter-spacing:.05em;
   }
   #zoom-back button:hover{background:rgba(43,34,244,.14);}
-  #zoom-back #btn-zoom-half{font-size:.85rem;padding:2px 9px;}
-  #zoom-back .zb-div{width:1px;height:14px;background:rgba(43,34,244,.22);}
+  #zoom-back .zl.active{background:rgba(43,34,244,.14);box-shadow:inset 0 0 0 1px rgba(43,34,244,.25);}
   /* Date picker. The native one that showPicker() opens is browser chrome —
      square corners, system greys, no way to theme it — so this is our own:
      ink on white, rounded, and opening upward because the control bar sits at
@@ -534,11 +530,11 @@
   <div id="viewtabs">
     <button class="vtab active" data-tab="compressed">SOLAR SYSTEM</button>
   </div>
-  <div id="zoom-back" style="display:none" title="zoom back out">
-    <span class="zb-label">ZOOM BACK</span>
-    <button id="btn-zoom-half" title="zoom out one step">&#189;</button>
-    <span class="zb-div"></span>
-    <button id="btn-zoom-reset" title="back to the whole system">FULL</button>
+  <div id="zoom-back" title="jump between view scales">
+    <button class="zl" data-zl="moons" title="close enough to see the moons">MOONS</button>
+    <button class="zl" data-zl="planetary" title="the Sun's neighbourhood, out past Jupiter">PLANETARY</button>
+    <button class="zl" data-zl="solar" title="the whole system">SOLAR SYSTEM</button>
+    <button class="zl" data-zl="inter" title="out to where the craft and visitors are">INTERSTELLAR</button>
   </div>
   <div id="night-slider-wrap" style="display:none">
     <span id="ns-set" title="sunset"></span>
@@ -1622,8 +1618,10 @@ var WIDE_VIEW = EMBEDDED ? {x:-1120, y:-1220, w:2240} : {x:-1120, y:-1120, w:224
    frame the system rendered small; 1000 is the tighter crop, with the top
    headroom trimmed to match so the widget tab bar still clears the orbits. */
 var TONIGHT_VIEW = EMBEDDED ? {x:-500, y:-545, w:1000} : {x:-500, y:-500, w:1000};
-/* either far-field layer pulls the camera back to the interstellar frame */
-function wideOn(){ return missionsOn || isoOn; }
+/* either far-field layer pulls the camera back to the interstellar frame —
+   or the user parks the view there from the zoom ladder */
+var frameWide = false;
+function wideOn(){ return missionsOn || isoOn || frameWide; }
 function baseView(){
   return wideOn() ? WIDE_VIEW : (tonightOn ? TONIGHT_VIEW : BASE_VIEW);
 }
@@ -1680,7 +1678,13 @@ function applyView(){
   if (gSky) gSky.style.fontSize = skyFont;
   if (typeof gShowers !== 'undefined' && gShowers) gShowers.style.fontSize = skyFont;
   var bv = baseView();
-  document.getElementById('zoom-back').style.display = view.w < bv.w - 1 ? '' : 'none';
+  var zbEl = document.getElementById('zoom-back');
+  if (zbEl){
+    var lvl = view.w < 300 ? 'moons' : view.w < 800 ? 'planetary' : view.w < 1600 ? 'solar' : 'inter';
+    var zls = zbEl.querySelectorAll('.zl');
+    for (var zi = 0; zi < zls.length; zi++)
+      zls[zi].classList.toggle('active', zls[zi].getAttribute('data-zl') === lvl);
+  }
   var zoomedIn = view.w <= BASE_VIEW.w/2;
   var wasZoomed = svg.classList.contains('zoomed');
   svg.classList.toggle('zoomed', zoomedIn);
@@ -1753,18 +1757,28 @@ svg.addEventListener('dblclick', function(ev){
   var pt = svgPoint(ev);
   zoomAt(pt.x, pt.y, ev.shiftKey ? 0.5 : 2);
 });
-document.getElementById('btn-zoom-reset').addEventListener('click', function(){
-  var bvr = baseView(); animateView(bvr.x, bvr.y, bvr.w);
-});
-/* One step back out: double the frame about its own centre, so whatever you
-   were looking at stays where it is instead of the view snapping to the Sun.
-   Stops at the full view rather than overshooting past it. */
-document.getElementById('btn-zoom-half').addEventListener('click', function(){
-  var bvh = baseView();
-  var cx = view.x + view.w/2, cy = view.y + view.w/2;
-  var w = Math.min(bvh.w, view.w*2);
-  if (w >= bvh.w - 1){ animateView(bvh.x, bvh.y, bvh.w); return; }
-  animateView(cx - w/2, cy - w/2, w);
+/* The zoom ladder: named scales instead of relative steps (user 2026-07-26 —
+   "MOONS / PLANETARY / SOLAR SYSTEM / INTERSTELLAR instead of FULL / ½").
+   MOONS keeps the current centre so laddering in stays on what you were
+   looking at; the system frames centre themselves. INTERSTELLAR parks the
+   view in the wide frame via frameWide, so the sky backdrop scales and the
+   clamps agree (bare WIDE_VIEW dimensions left the sky corners empty). */
+document.querySelectorAll('#zoom-back .zl').forEach(function(b){
+  b.addEventListener('click', function(){
+    var lvl = b.getAttribute('data-zl');
+    frameWide = (lvl === 'inter');
+    applySkyScale();
+    if (lvl === 'moons'){
+      var wM = 130, cxM = view.x + view.w/2, cyM = view.y + view.w/2;
+      animateView(cxM - wM/2, cyM - wM/2, wM);
+    } else if (lvl === 'planetary'){
+      animateView(-300, -300, 600);
+    } else {
+      var bvl = (lvl === 'inter') ? WIDE_VIEW : (tonightOn ? TONIGHT_VIEW : BASE_VIEW);
+      animateView(bvl.x, bvl.y, bvl.w);
+    }
+    render();
+  });
 });
 document.addEventListener('keydown', function(e){
   if (e.key === 'Escape' && !document.getElementById('planet-insight-popup') && view.w < baseView().w - 1){
@@ -3827,6 +3841,7 @@ function updateNightVisibility(){
      select (entry already cleared the layers via enterSolarSystemFrame) */
   var lr = document.getElementById('hud-row2');
   if (lr) lr.style.display = show ? 'none' : '';
+  document.getElementById('zoom-back').style.display = show ? 'none' : '';
   document.getElementById('btn-today').classList.toggle('active', tonightOn);
   if (!show){
     PLANETS.forEach(function(p){ nodes[p.id].g.setAttribute('opacity', 1); });
@@ -4560,6 +4575,7 @@ function enterSolarSystemFrame(){
   if (missionsOn){ missionsOn = false; updateMissionVisibility(); }
   if (isoOn){ isoOn = false; updateIsoVisibility(); }
   if (activeOn){ activeOn = false; updateActiveVisibility(); }
+  frameWide = false;
   applySkyScale();
   settleFrame();
 }
