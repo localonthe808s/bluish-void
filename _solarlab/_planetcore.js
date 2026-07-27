@@ -1233,6 +1233,7 @@
       else if (moonPhaseInfo.illum < 30) moonImpact = '\u2705 Good for deep-sky — crescent Moon sets early';
       else if (moonPhaseInfo.illum < 60) moonImpact = '\u26a0\ufe0f Moderate light pollution — focus on bright targets';
       else if (moonPhaseInfo.illum < 85) moonImpact = '\u26a0\ufe0f Significant moonlight — galaxies & nebulae washed out';
+      else if (moonPhaseInfo.illum < 96) moonImpact = '\u26a0\ufe0f Bright gibbous Moon — deep-sky washed out. Best: the Moon itself, planets, double stars';
       else moonImpact = '\u274c Full Moon — deep-sky observing very difficult. Focus on Moon, planets, doubles';
       h += '<div style="font-size:8.5px;color:rgba(43,34,244,.6);margin-top:4px;line-height:1.4;padding:4px 6px;background:rgba(43,34,244,.04);border-radius:4px;">' + moonImpact + '</div>';
 
