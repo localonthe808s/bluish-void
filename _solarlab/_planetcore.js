@@ -1662,23 +1662,42 @@
           svg += '<circle cx="'+cx+'" cy="'+cy+'" r="'+midR+'" fill="none" stroke="rgba(255,130,40,.55)" stroke-width="'+thickness+'" opacity=".35"/>';
         }
       }
-      // Crater decorations on the outermost layer for rocky bodies
-      if (/mercury|moon|mars/.test(planetKey)) {
-        var _cr = [
-          {a:-2.5, d:0.92, r:1.3}, {a:-2.0, d:0.88, r:0.9},
-          {a:-1.55, d:0.95, r:1.1}, {a:-0.8, d:0.91, r:0.8},
-          {a:-0.2, d:0.94, r:1.0}, {a:0.5, d:0.88, r:0.7},
-          {a:1.1, d:0.92, r:1.1}, {a:1.7, d:0.9, r:0.9},
-          {a:2.15, d:0.87, r:1.0}, {a:2.55, d:0.93, r:0.8},
-          {a:-2.85, d:0.9, r:0.7}
-        ];
-        _cr.forEach(function(c){
-          var ccx = cx + Math.cos(c.a) * svgR * c.d;
-          var ccy = cy + Math.sin(c.a) * svgR * c.d;
-          svg += '<circle cx="'+ccx.toFixed(2)+'" cy="'+ccy.toFixed(2)+'" r="'+c.r+'" fill="rgba(0,0,0,.28)"/>';
-          svg += '<circle cx="'+(ccx-c.r*0.25).toFixed(2)+'" cy="'+(ccy-c.r*0.25).toFixed(2)+'" r="'+(c.r*0.5)+'" fill="rgba(255,255,255,.15)"/>';
-        });
+      // ── Cutaway shell: the planet's REAL photographed surface wraps the
+      // sphere, with a 110° bite opened toward the labels so the drawn
+      // interior shows through — real outside, inferred inside, which is
+      // exactly the epistemic status of every layer diagram. The old drawn
+      // crater decorations went with this: the photo carries the surface.
+      var _cutA1 = -55*Math.PI/180, _cutA2 = 55*Math.PI/180;
+      var _sx1 = cx + svgR*Math.cos(_cutA2), _sy1 = cy + svgR*Math.sin(_cutA2);
+      var _sx2 = cx + svgR*Math.cos(_cutA1), _sy2 = cy + svgR*Math.sin(_cutA1);
+      var _surfD = 'M '+cx+' '+cy+' L '+_sx1.toFixed(2)+' '+_sy1.toFixed(2)
+                 + ' A '+svgR+' '+svgR+' 0 1 1 '+_sx2.toFixed(2)+' '+_sy2.toFixed(2)+' Z';
+      var _icSurfImg = ({
+        mercury:'https://cdn.bluishvoid.com/planet-8fc30b7a.jpg',
+        venus:'https://cdn.bluishvoid.com/planet-2e98fa2c.jpg',
+        mars:'https://cdn.bluishvoid.com/planet-35430401.jpg',
+        jupiter:'https://cdn.bluishvoid.com/planet-b52f3e86.jpg',
+        saturn:'https://cdn.bluishvoid.com/planet-4d8062c8.jpg',
+        uranus:'https://cdn.bluishvoid.com/planet-6b856012.jpg',
+        neptune:'https://cdn.bluishvoid.com/planet-bbbcf8f2.jpg'
+      })[planetKey]
+        || ((planetKey === 'moon' && window._moonPreload && window._moonPreload.loaded) ? window._moonPreload.url : '');
+      if (_icSurfImg) {
+        /* Saturn's strip photo is a narrow globe between dark ring-shadow
+           bands — zoom past them; the rest are full-bleed discs at 1x */
+        var _icZ = (planetKey === 'saturn') ? 1.45 : 1.0;
+        var _icHalf = svgR*_icZ;
+        svg += '<clipPath id="ic-cut"><path d="'+_surfD+'"/></clipPath>'
+             + '<image href="'+_icSurfImg+'" x="'+(cx-_icHalf).toFixed(1)+'" y="'+(cy-_icHalf).toFixed(1)+'" width="'+(_icHalf*2).toFixed(1)+'" height="'+(_icHalf*2).toFixed(1)+'"'
+             + ' preserveAspectRatio="xMidYMid slice" clip-path="url(#ic-cut)"/>';
+      } else {
+        svg += '<path d="'+_surfD+'" fill="'+pi.layers[pi.layers.length-1].color+'" opacity=".92"/>';
       }
+      // cut faces: lit upper edge, shadowed lower edge, and the shell's lip
+      svg += '<line x1="'+cx+'" y1="'+cy+'" x2="'+_sx2.toFixed(2)+'" y2="'+_sy2.toFixed(2)+'" stroke="rgba(255,255,255,.35)" stroke-width="1.1"/>'
+           + '<line x1="'+cx+'" y1="'+cy+'" x2="'+_sx1.toFixed(2)+'" y2="'+_sy1.toFixed(2)+'" stroke="rgba(0,0,0,.38)" stroke-width="1.4"/>'
+           + '<path d="M '+_sx2.toFixed(2)+' '+_sy2.toFixed(2)+' A '+svgR+' '+svgR+' 0 0 1 '+_sx1.toFixed(2)+' '+_sy1.toFixed(2)+'"'
+           + ' fill="none" stroke="rgba(0,0,0,.32)" stroke-width="2.2" opacity=".55"/>';
 
       // 3D sphere lighting overlay
       svg += '<circle cx="'+cx+'" cy="'+cy+'" r="'+svgR+'" fill="url(#ic-sphere)" pointer-events="none"/>';
@@ -1695,10 +1714,15 @@
         var totalPct = 0; for(var k=0;k<=li;k++) totalPct+=pi.layers[k].pct;
         var innerPct = totalPct - layer.pct;
         var midR = svgR * (totalPct + innerPct) / 200;
-        // Anchor on layer mid-radius arc, on RIGHT side, at closest point to label's y
-        var dy = Math.max(-midR, Math.min(midR, ly - cy));
-        var anchorY = cy + dy;
-        var anchorX = cx + Math.sqrt(Math.max(0, midR*midR - dy*dy));
+        // Anchor inside the cutaway bite: dots march diagonally through the
+        // opening — innermost layer near the top of the bite, outermost near
+        // the bottom. Radius and angle increase together, so leaders never
+        // cross, and every dot sits on exposed interior rather than under
+        // the photographed shell.
+        var _nL = pi.layers.length;
+        var _angL = ((_nL > 1) ? (-45 + 90*li/(_nL-1)) : 0) * Math.PI/180;
+        var anchorX = cx + midR*Math.cos(_angL);
+        var anchorY = cy + midR*Math.sin(_angL);
         svg += '<line x1="'+anchorX.toFixed(2)+'" y1="'+anchorY.toFixed(2)+'" x2="'+labelX+'" y2="'+ly+'" stroke="'+layer.color+'" stroke-width=".45" opacity=".55"/>';
         svg += '<circle cx="'+anchorX.toFixed(2)+'" cy="'+anchorY.toFixed(2)+'" r="1.1" fill="'+layer.color+'"/>';
         svg += '<rect x="'+labelX+'" y="'+(ly-4.5)+'" width="8" height="8" rx="1.5" fill="'+layer.color+'" opacity=".9"/>';
