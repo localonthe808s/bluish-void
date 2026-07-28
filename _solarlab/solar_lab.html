@@ -48,7 +48,9 @@
     color:var(--ink); overflow:hidden;
     display:flex;flex-direction:column;height:100vh;
   }
-  #stage{position:relative;flex:1;min-height:0;order:1;}
+  /* overflow:hidden — the gesture preview scales #map with a CSS transform,
+     which would otherwise paint past the stage over the HUD/footer */
+  #stage{position:relative;flex:1;min-height:0;order:1;overflow:hidden;}
   /* #map ONLY — a bare `svg` selector here once blew every inline SVG inside
      the popups to container size (14px material swatches rendered as giant
      polka-dot circles, the moon-phase disc went full-width). Popup SVGs size
@@ -1726,9 +1728,11 @@ function applyView(){
      layout has to be redone right away rather than at the next render */
   if (wasZoomed !== zoomedIn && typeof declutterLabels === 'function') declutterLabels();
 }
+var animTok = 0;   // bumping this cancels an in-flight fly-to (gestures do)
 function animateView(tx, ty, tw){
-  var f = {x:view.x, y:view.y, w:view.w}, t0 = performance.now();
+  var f = {x:view.x, y:view.y, w:view.w}, t0 = performance.now(), tok = ++animTok;
   function step(now){
+    if (tok !== animTok) return;
     var k = Math.min(1, (now-t0)/260);
     k = 1 - Math.pow(1-k, 3);                       // ease-out cubic
     view.x = f.x + (tx-f.x)*k; view.y = f.y + (ty-f.y)*k; view.w = f.w + (tw-f.w)*k;
@@ -1750,6 +1754,39 @@ function svgPoint(ev){
   pt.x = ev.clientX; pt.y = ev.clientY;
   return pt.matrixTransform(svg.getScreenCTM().inverse());
 }
+/* ── gesture preview ──────────────────────────────────────────────────────
+   A live pinch/drag paints with a CSS transform on the svg instead of
+   rewriting the viewBox each move: a viewBox write re-lays-out and repaints
+   the whole map (starfield, orbits, every label) and was unusably laggy on
+   phones. The transform is compositor-only; the real viewBox commits once,
+   at gesture end — label sizing, moon photos and the ladder state snap
+   correct there. `view` itself is kept honest the whole time, only the
+   painting is deferred. */
+var gBase = null;   // the committed view the transform is measured against
+function gestureStart(){
+  animTok++;                                  // a gesture cancels a fly-to
+  var r = svg.getBoundingClientRect(), side = Math.min(r.width, r.height);
+  gBase = {x:view.x, y:view.y, w:view.w, r:r, side:side,
+           ox:(r.width - side)/2, oy:(r.height - side)/2};
+}
+function gesturePreview(){
+  if (!gBase) return;
+  /* solve transform T so svg point X lands where the desired view puts it:
+     committed px/unit cs, desired scale s = w0/w →
+     E = s·E0 + t with t = origin·(1−s) + s·cs·(x0 − x) */
+  var s = gBase.w / view.w, cs = gBase.side / gBase.w;
+  var tx = gBase.ox*(1 - s) + s*cs*(gBase.x - view.x);
+  var ty = gBase.oy*(1 - s) + s*cs*(gBase.y - view.y);
+  svg.style.transformOrigin = '0 0';
+  svg.style.transform = 'translate(' + tx.toFixed(2) + 'px,' + ty.toFixed(2) +
+                        'px) scale(' + s.toFixed(4) + ')';
+}
+function gestureEnd(){
+  if (!gBase) return;
+  gBase = null;
+  svg.style.transform = '';
+  applyView();
+}
 /* ── drag to pan (once zoomed in) ─────────────────────────────────────── */
 var panning = false, panStartPx = null, panStartView = null, didPan = false;
 svg.addEventListener('pointerdown', function(ev){
@@ -1757,11 +1794,13 @@ svg.addEventListener('pointerdown', function(ev){
   panning = true; didPan = false;
   panStartPx = [ev.clientX, ev.clientY];
   panStartView = {x: view.x, y: view.y};
+  gestureStart();
 });
 window.addEventListener('pointermove', function(ev){
-  if (!panning) return;
-  var r = svg.getBoundingClientRect();
-  var unitsPerPx = view.w / Math.min(r.width, r.height);
+  if (!panning || pinch) return;
+  var unitsPerPx = gBase ? gBase.w / gBase.side
+                         : view.w / Math.min(svg.getBoundingClientRect().width,
+                                             svg.getBoundingClientRect().height);
   var dx = (ev.clientX - panStartPx[0]) * unitsPerPx;
   var dy = (ev.clientY - panStartPx[1]) * unitsPerPx;
   if (Math.hypot(ev.clientX - panStartPx[0], ev.clientY - panStartPx[1]) > 6){
@@ -1772,11 +1811,23 @@ window.addEventListener('pointermove', function(ev){
   var bvp = baseView();
   view.x = Math.min(bvp.x + bvp.w - view.w, Math.max(bvp.x, panStartView.x - dx));
   view.y = Math.min(bvp.y + bvp.w - view.w, Math.max(bvp.y, panStartView.y - dy));
-  applyView();
+  gesturePreview();
 });
 window.addEventListener('pointerup', function(){
   panning = false;
   svg.style.cursor = '';
+  if (!pinch) gestureEnd();   // a lifted pinch finger must not commit mid-pinch
+});
+/* a system gesture can cancel touches mid-stream — never leave the preview
+   transform stranded */
+window.addEventListener('pointercancel', function(){
+  panning = false; pinch = null;
+  svg.style.cursor = '';
+  gestureEnd();
+});
+svg.addEventListener('touchcancel', function(){
+  panning = false; pinch = null;
+  gestureEnd();
 });
 /* a real drag swallows the tail-end click so planets/moons don't pop open */
 svg.addEventListener('click', function(ev){
@@ -1804,32 +1855,34 @@ svg.addEventListener('touchstart', function(ev){
   ev.preventDefault();
   panning = false;
   clearTimeout(pendingPopup); hideTip();
-  pinch = {d: tDist(ev.touches), mid: tMid(ev.touches)};
+  gestureStart();
+  /* anchor = the svg point under the fingers' midpoint at gesture start;
+     everything below is cumulative against gBase, so no CTM/rect reads and
+     no drift while the preview transform is up */
+  var m = tMid(ev.touches), cs = gBase.side / gBase.w;
+  pinch = {d: tDist(ev.touches),
+           X: gBase.x + (m.clientX - gBase.r.left - gBase.ox)/cs,
+           Y: gBase.y + (m.clientY - gBase.r.top  - gBase.oy)/cs};
 }, {passive:false});
 svg.addEventListener('touchmove', function(ev){
   if (!pinch || ev.touches.length !== 2) return;
   ev.preventDefault();
   var d = tDist(ev.touches), m = tMid(ev.touches), bv = baseView();
-  var w = Math.min(bv.w, Math.max(MIN_W, view.w * pinch.d / Math.max(d, 1)));
-  /* scale about the fingers' midpoint so the spot between them stays put */
-  var k = w / view.w, p = svgPoint(m);
-  view.x = p.x - (p.x - view.x) * k;
-  view.y = p.y - (p.y - view.y) * k;
+  var w = Math.min(bv.w, Math.max(MIN_W, gBase.w * pinch.d / Math.max(d, 1)));
+  /* keep the anchor under the midpoint — since the anchor follows the
+     fingers, two-finger pan falls out of the same equation */
+  var upp = w / gBase.side;
   view.w = w;
-  /* two-finger drift = pan */
-  var r = svg.getBoundingClientRect();
-  var upp = view.w / Math.min(r.width, r.height);
-  view.x -= (m.clientX - pinch.mid.clientX) * upp;
-  view.y -= (m.clientY - pinch.mid.clientY) * upp;
-  view.x = Math.min(bv.x + bv.w - view.w, Math.max(bv.x, view.x));
-  view.y = Math.min(bv.y + bv.w - view.w, Math.max(bv.y, view.y));
-  applyView();
-  pinch.d = d; pinch.mid = m;
+  view.x = Math.min(bv.x + bv.w - w, Math.max(bv.x,
+             pinch.X - (m.clientX - gBase.r.left - gBase.ox)*upp));
+  view.y = Math.min(bv.y + bv.w - w, Math.max(bv.y,
+             pinch.Y - (m.clientY - gBase.r.top  - gBase.oy)*upp));
+  gesturePreview();
 }, {passive:false});
 svg.addEventListener('touchend', function(ev){
   if (pinch){
     ev.preventDefault();                       // no tail-end click → no popup
-    if (ev.touches.length < 2) pinch = null;
+    if (ev.touches.length < 2){ pinch = null; gestureEnd(); }
     tapAt = null;
     return;
   }
