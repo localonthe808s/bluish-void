@@ -51,6 +51,13 @@
   /* overflow:hidden — the gesture preview scales #map with a CSS transform,
      which would otherwise paint past the stage over the HUD/footer */
   #stage{position:relative;flex:1;min-height:0;order:1;overflow:hidden;}
+  /* ── TAP TO INTERACT guard (touch devices) — mirrors the hazard map pill ── */
+  #solar-tap-guard{position:absolute;left:0;right:0;bottom:18px;z-index:40;display:none;justify-content:center;pointer-events:none;}
+  #solar-tap-guard.visible{display:flex;}
+  #solar-tap-guard .guard-box{display:flex;align-items:center;gap:10px;padding:10px 24px;border-radius:10px;background:rgba(234,88,12,.9);border:1px solid rgba(255,180,100,.35);box-shadow:0 0 40px rgba(234,88,12,.2),0 6px 24px rgba(0,0,0,.4);pointer-events:auto;cursor:pointer;}
+  #solar-tap-guard[data-state="active"] .guard-box{background:rgba(43,34,244,.86);border-color:rgba(150,160,255,.4);}
+  #solar-tap-guard .guard-title{font-family:system-ui,-apple-system,sans-serif;font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:#fff;}
+  #solar-tap-guard .guard-sub{font-family:system-ui,-apple-system,sans-serif;font-size:9px;font-weight:500;letter-spacing:.03em;color:rgba(255,255,255,.65);border-left:1px solid rgba(255,255,255,.25);padding-left:10px;}
   /* #map ONLY — a bare `svg` selector here once blew every inline SVG inside
      the popups to container size (14px material swatches rendered as giant
      polka-dot circles, the moon-phase disc went full-width). Popup SVGs size
@@ -554,7 +561,7 @@
   </div>
 </div>
 
-<div id="stage"><svg id="map" viewBox="-500 -500 1000 1000" preserveAspectRatio="xMidYMid meet"></svg></div>
+<div id="stage"><svg id="map" viewBox="-500 -500 1000 1000" preserveAspectRatio="xMidYMid meet"></svg><div id="solar-tap-guard" data-state="locked"><div class="guard-box"><div class="guard-title">TAP TO INTERACT</div><div class="guard-sub">Pan &amp; zoom the map</div></div></div></div>
 <div id="missions-panel" style="display:none"></div>
 <div id="tonight-panel" style="display:none"></div>
 <div id="tip"></div>
@@ -1714,12 +1721,13 @@ function applyView(){
     for (var zi = 0; zi < zls.length; zi++)
       zls[zi].classList.toggle('active', zls[zi].getAttribute('data-zl') === lvl);
   }
-  /* One-finger touches: at full view they stay with the browser, so the page
-     scrolls normally over the widget; once zoomed in they pan the map (the
-     pointer handlers below already do the work — 'none' just stops the
-     browser stealing the gesture). Two-finger pinch is claimed separately
-     by the touchstart handler regardless of this value. */
-  svg.style.touchAction = (view.w < baseView().w - 1) ? 'none' : 'manipulation';
+  /* One-finger touches: at full view (or while the TAP TO INTERACT guard is
+     locked) they stay with the browser, so the page scrolls normally over
+     the widget; once engaged and zoomed in they pan the map (the pointer
+     handlers below already do the work — 'none' just stops the browser
+     stealing the gesture). Two-finger pinch is claimed separately by the
+     touchstart handler regardless of this value. */
+  svg.style.touchAction = (mapActive && view.w < baseView().w - 1) ? 'none' : 'manipulation';
   var zoomedIn = view.w <= BASE_VIEW.w/2;
   var wasZoomed = svg.classList.contains('zoomed');
   svg.classList.toggle('zoomed', zoomedIn);
@@ -1790,7 +1798,7 @@ function gestureEnd(){
 /* ── drag to pan (once zoomed in) ─────────────────────────────────────── */
 var panning = false, panStartPx = null, panStartView = null, didPan = false;
 svg.addEventListener('pointerdown', function(ev){
-  if (ev.button !== 0 || view.w >= baseView().w - 1) return;
+  if (!mapActive || ev.button !== 0 || view.w >= baseView().w - 1) return;
   panning = true; didPan = false;
   panStartPx = [ev.clientX, ev.clientY];
   panStartView = {x: view.x, y: view.y};
@@ -1828,6 +1836,41 @@ window.addEventListener('pointercancel', function(){
 svg.addEventListener('touchcancel', function(){
   panning = false; pinch = null;
   gestureEnd();
+});
+
+/* ── TAP TO INTERACT guard (touch devices) — hazard-map model ─────────────
+   Pinch is always live (two fingers never conflict with page scroll), but
+   one-finger map pan and drag only engage after an explicit tap on the map
+   or the pill, so swipes over the widget never hijack scrolling. The pill
+   toggles: orange TAP TO INTERACT ↔ blue MAP ACTIVE / tap to lock. */
+var touchUI = window.matchMedia && window.matchMedia('(pointer:coarse)').matches;
+var mapActive = !touchUI;                     // mouse/trackpad: always interactive
+var guardEl = document.getElementById('solar-tap-guard');
+function renderGuard(){
+  if (!guardEl) return;
+  if (!touchUI){ guardEl.classList.remove('visible'); return; }
+  guardEl.classList.add('visible');
+  var t = guardEl.querySelector('.guard-title'), s = guardEl.querySelector('.guard-sub');
+  if (mapActive){
+    guardEl.setAttribute('data-state', 'active');
+    if (t) t.textContent = '✓ MAP ACTIVE';
+    if (s) s.textContent = 'Tap to lock & scroll';
+  } else {
+    guardEl.setAttribute('data-state', 'locked');
+    if (t) t.textContent = 'TAP TO INTERACT';
+    if (s) s.textContent = 'Pan & zoom the map';
+  }
+}
+renderGuard();
+if (guardEl) guardEl.addEventListener('click', function(ev){
+  ev.stopPropagation();
+  mapActive = !mapActive;
+  renderGuard();
+  applyView();          // re-evaluates the touch-action gate
+});
+/* explicit tap on the map itself also engages (matches the hazard map) */
+if (touchUI) svg.addEventListener('click', function(){
+  if (!mapActive){ mapActive = true; renderGuard(); applyView(); }
 });
 /* a real drag swallows the tail-end click so planets/moons don't pop open */
 svg.addEventListener('click', function(ev){
