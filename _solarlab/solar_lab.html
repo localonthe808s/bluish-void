@@ -508,6 +508,14 @@
   /* the radiant point itself breathes very slightly, off the streaks' phase */
   @keyframes solar-met-core{ 0%,100%{opacity:.45;} 50%{opacity:.85;} }
   .met-core{ animation:solar-met-core 3.6s ease-in-out infinite; }
+  /* Perf: keep the map's compositor layer alive between gestures (no
+     re-rasterize hiccup on touch-down), and freeze the meteor shimmer while
+     a gesture/fly-to preview is live — animated children force the big SVG
+     layer to re-rasterize every animation frame mid-gesture. */
+  #map{ will-change: transform; }
+  svg.gesturing .met-streak,
+  svg.gesturing .met-streak .met-head,
+  svg.gesturing .met-core{ animation-play-state: paused; }
 </style>
 </head>
 <body>
@@ -1739,14 +1747,20 @@ function applyView(){
 }
 var animTok = 0;   // bumping this cancels an in-flight fly-to (gestures do)
 function animateView(tx, ty, tw){
+  /* Fly-tos (zoom ladder, double-tap, Escape, frame changes) paint through
+     the same compositor transform as pinch/drag — animating the viewBox
+     itself repainted the whole SVG (starfield + orbits + every label) each
+     of the ~15 frames, which is what made moving between zoom levels choppy
+     on phones. One real repaint now, at the end of the glide. */
+  gestureStart();          // commits any live preview, cancels a prior fly-to
   var f = {x:view.x, y:view.y, w:view.w}, t0 = performance.now(), tok = ++animTok;
   function step(now){
     if (tok !== animTok) return;
     var k = Math.min(1, (now-t0)/260);
     k = 1 - Math.pow(1-k, 3);                       // ease-out cubic
     view.x = f.x + (tx-f.x)*k; view.y = f.y + (ty-f.y)*k; view.w = f.w + (tw-f.w)*k;
-    applyView();
-    if (k < 1) requestAnimationFrame(step);
+    if (k < 1){ gesturePreview(); requestAnimationFrame(step); }
+    else gestureEnd();
   }
   requestAnimationFrame(step);
 }
@@ -1773,7 +1787,11 @@ function svgPoint(ev){
    painting is deferred. */
 var gBase = null;   // the committed view the transform is measured against
 function gestureStart(){
+  if (gBase) gestureEnd();  // a gesture atop a live preview (e.g. pinch during
+                            // a fly-to): commit first so gBase always
+                            // describes the actually-committed viewBox
   animTok++;                                  // a gesture cancels a fly-to
+  svg.classList.add('gesturing');             // pauses meteor shimmer (CSS)
   var r = svg.getBoundingClientRect(), side = Math.min(r.width, r.height);
   gBase = {x:view.x, y:view.y, w:view.w, r:r, side:side,
            ox:(r.width - side)/2, oy:(r.height - side)/2};
@@ -1793,6 +1811,7 @@ function gesturePreview(){
 function gestureEnd(){
   if (!gBase) return;
   gBase = null;
+  svg.classList.remove('gesturing');
   svg.style.transform = '';
   applyView();
 }
