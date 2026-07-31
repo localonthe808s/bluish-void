@@ -1,0 +1,65 @@
+name: Refresh SUVI 304 nav thumbnail
+
+# Keeps cdn.bluishvoid.com/solar/suvi304.jpg current: a 256px crop-ready JPEG of
+# the GOES SUVI 304 Å composite, used as the SOLAR IMAGER icon in the nav rail.
+#
+# Why self-host at all: SWPC only publishes the composite at full size, and every
+# frame is ~1.17 MB. That is fine for the widget (which loads it on demand) but
+# absurd for a 32px nav icon on mobile — this republishes it at ~12 KB, 95x
+# smaller, which is all a 32px porthole needs even at 3x DPR.
+#
+# Uses the same three repo secrets as moon-frame.yml:
+#   R2_ACCOUNT_ID          – Cloudflare account id (the R2 S3 endpoint host)
+#   R2_ACCESS_KEY_ID       – R2 API token access key (write to bluishvoid-bg)
+#   R2_SECRET_ACCESS_KEY   – R2 API token secret
+
+on:
+  schedule:
+    - cron: '43 * * * *'    # hourly; SUVI posts every ~4 min but the sun's
+                            # appearance at 32px changes far slower than that
+  workflow_dispatch: {}
+
+concurrency:
+  group: suvi-frame
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch the SUVI 304 composite, downscale, upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          curl -fsS --retry 3 --retry-delay 5 -o suvi.png \
+            "https://services.swpc.noaa.gov/images/animations/suvi/primary/304/latest.png"
+          file suvi.png | grep -q 'PNG'
+          test "$(stat -c%s suvi.png)" -gt 100000
+          python3 - <<'PY'
+          from PIL import Image
+          im = Image.open('suvi.png').convert('RGB').resize((256, 256), Image.LANCZOS)
+          im.save('suvi304.jpg', quality=86, optimize=True)
+          PY
+          # sanity-check the result before publishing: a real JPEG, plausible size,
+          # and actually the orange 304 disc rather than a blank/black frame
+          file suvi304.jpg | grep -q 'JPEG'
+          test "$(stat -c%s suvi304.jpg)" -gt 4000
+          python3 - <<'PY'
+          from PIL import Image
+          import numpy as np, sys
+          a = np.asarray(Image.open('suvi304.jpg')).astype(float)
+          mid = a[64:192, 64:192].reshape(-1, 3).mean(axis=0)
+          # the disc centre should be bright and red-dominant
+          if mid[0] < 90 or mid[0] <= mid[2]:
+              sys.exit('centre looks wrong (mean RGB %s) — refusing to publish' % mid.round(1))
+          PY
+          aws s3 cp suvi304.jpg "s3://bluishvoid-bg/solar/suvi304.jpg" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --content-type "image/jpeg" \
+            --cache-control "public, max-age=1800" \
+            --only-show-errors
+          echo "Published solar/suvi304.jpg ($(stat -c%s suvi304.jpg) bytes)"
