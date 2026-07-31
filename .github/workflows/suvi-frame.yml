@@ -1,12 +1,14 @@
-name: Refresh SUVI 304 nav thumbnail
+name: Refresh solar nav thumbnails
 
-# Keeps cdn.bluishvoid.com/solar/suvi304.jpg current: a 256px crop-ready JPEG of
-# the GOES SUVI 304 Å composite, used as the SOLAR IMAGER icon in the nav rail.
+# Keeps two nav-rail icons current on cdn.bluishvoid.com:
+#   solar/suvi304.jpg  – GOES SUVI 304 Å composite       (SOLAR IMAGER)
+#   solar/enlil.jpg    – WSA-ENLIL ecliptic density disc  (SOLAR WIND)
 #
-# Why self-host at all: SWPC only publishes the composite at full size, and every
-# frame is ~1.17 MB. That is fine for the widget (which loads it on demand) but
-# absurd for a 32px nav icon on mobile — this republishes it at ~12 KB, 95x
-# smaller, which is all a 32px porthole needs even at 3x DPR.
+# Why self-host: SWPC publishes the SUVI composite at ~1.17 MB and ENLIL only
+# inside a 960x600 four-panel dashboard. Both are fine for the widgets, which
+# load them on demand, but absurd for 32px nav icons on mobile. This republishes
+# each at 256px / ~13 KB — all a porthole needs even at 3x DPR — and crops ENLIL
+# down to just its ecliptic disc.
 #
 # Uses the same three repo secrets as moon-frame.yml:
 #   R2_ACCOUNT_ID          – Cloudflare account id (the R2 S3 endpoint host)
@@ -63,3 +65,50 @@ jobs:
             --cache-control "public, max-age=1800" \
             --only-show-errors
           echo "Published solar/suvi304.jpg ($(stat -c%s suvi304.jpg) bytes)"
+
+      - name: Crop the ENLIL ecliptic disc, upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          curl -fsS --retry 3 --retry-delay 5 -o enlil.jpg \
+            "https://services.swpc.noaa.gov/images/animations/enlil/latest.jpg"
+          file enlil.jpg | grep -q 'JPEG'
+          python3 - <<'PY'
+          from PIL import Image
+          import numpy as np, sys
+          im = Image.open('enlil.jpg').convert('RGB')
+          a = np.asarray(im).astype(int)
+          sat = a.max(axis=2) - a.min(axis=2)
+          mask = (sat > 60) & (a.max(axis=2) > 60)
+          # top-left panel = plasma density in the ecliptic plane. x>=55 skips the
+          # colour-bar strip, which would otherwise drag the centre left and leave a
+          # black sliver in the crop.
+          sub = mask[:310, 55:330]
+          ys, xs = np.where(sub)
+          if len(ys) < 5000:
+              sys.exit('ENLIL panel not found (%d coloured px) — refusing to publish' % len(ys))
+          xs = xs + 55
+          cx, cy = np.median(xs), np.median(ys)
+          r = np.percentile(np.hypot(xs - cx, ys - cy), 98)
+          side = r * 2 / 1.44                      # inscribed square, with margin
+          crop = im.crop((int(cx - side/2), int(cy - side/2),
+                          int(cx + side/2), int(cy + side/2))).resize((256, 256), Image.LANCZOS)
+          # no black corners may survive the circular mask
+          b = np.asarray(crop.convert('L')).astype(float)
+          yy, xx = np.mgrid[0:256, 0:256]
+          ring = (np.hypot(xx - 128, yy - 128) >= 115)
+          if b[ring].mean() < 60:
+              sys.exit('crop edge is dark (%.0f) — refusing to publish' % b[ring].mean())
+          crop.save('enlil_icon.jpg', quality=88, optimize=True)
+          PY
+          test "$(stat -c%s enlil_icon.jpg)" -gt 4000
+          aws s3 cp enlil_icon.jpg "s3://bluishvoid-bg/solar/enlil.jpg" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --content-type "image/jpeg" \
+            --cache-control "public, max-age=1800" \
+            --only-show-errors
+          echo "Published solar/enlil.jpg ($(stat -c%s enlil_icon.jpg) bytes)"
