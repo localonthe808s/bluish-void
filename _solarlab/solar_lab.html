@@ -2084,6 +2084,22 @@ function openPlanetPopup(p, ev){
 var curMs = Date.now();
 var lastPos = {};
 
+/* An orbit's shape does not change as the animation plays — only the planet's
+   position on it does. This was rebuilding a 181-point path string for all 8
+   planets on EVERY frame (~1,450 trig+string ops, then 8 full SVG path
+   re-parses), which is most of why playback stuttered on a phone. The shape
+   only actually changes with the view mode or, over centuries, with orbital
+   drift, so cache on those. */
+var _orbCache = {};
+function orbitPathCached(body){
+  var T = centuriesSinceJ2000(curMs);
+  var key = viewMode + '|' + Math.round(T*20);      // ~5-year buckets
+  var c = _orbCache[body];
+  if (c && c.key === key) return c.d;
+  var d = orbitPath(body);
+  _orbCache[body] = { key:key, d:d };
+  return d;
+}
 function orbitPath(body){
   var T = centuriesSinceJ2000(curMs);
   var a = el(body,T,'a'), e = el(body,T,'e'), w = el(body,T,'w')*DEG;
@@ -2099,11 +2115,16 @@ function orbitPath(body){
   return d + 'Z';
 }
 
+var _lastDayStr = null, _lastHeavyBuild = 0;
 function render(){
-  document.getElementById('hud-date').textContent =
-    new Date(curMs).toISOString().slice(0,10);
-  document.getElementById('date-pick').value =
-    new Date(curMs).toISOString().slice(0,10);
+  /* two toISOString() allocations and two DOM writes per frame, for a string
+     that changes once per simulated day */
+  var _ds = new Date(curMs).toISOString().slice(0,10);
+  if (_ds !== _lastDayStr){
+    _lastDayStr = _ds;
+    document.getElementById('hud-date').textContent = _ds;
+    document.getElementById('date-pick').value = _ds;
+  }
   PLANETS.forEach(function(p){
     var pos = planetPos(p.id, curMs);
     lastPos[p.id] = pos;
@@ -2111,7 +2132,8 @@ function render(){
     var lon = pos.lon*DEG;
     nodes[p.id].g.setAttribute('transform',
       'translate(' + (R*Math.cos(lon)).toFixed(2) + ',' + (-R*Math.sin(lon)).toFixed(2) + ')');
-    nodes[p.id].orbit.setAttribute('d', orbitPath(p.id));
+    var _od = orbitPathCached(p.id);
+    if (nodes[p.id]._odCache !== _od){ nodes[p.id].orbit.setAttribute('d', _od); nodes[p.id]._odCache = _od; }
     if (moonsVisible() && nodes[p.id].moonDefs){
       var days = curMs/86400000 - 10957.5;           // days since J2000
       nodes[p.id].moonDefs.forEach(function(md){
@@ -2132,7 +2154,12 @@ function render(){
   renderBigAsteroids();
   /* the photo row is tab-independent, so it cannot ride the night loop */
   var _day = Math.floor(curMs/86400000);
-  if (_day !== photoLastDay){
+  if (_day !== photoLastDay && (!playing || (performance.now() - _lastHeavyBuild) > 8000)){
+    /* At the default speed a simulated day passes every ~2s, and rebuilding
+       these two panels is a full DOM teardown — that was the visible hitch in
+       playback. While playing, do it at most every 8s; setPlaying(false) runs
+       one final build so a paused map is never stale. */
+    _lastHeavyBuild = performance.now();
     photoLastDay = _day;
     buildPhotoRow();
     /* the panel used to rebuild only inside the night loop, which never runs
@@ -5088,6 +5115,10 @@ function step(now){
   if (!playing) return;
   if (stepLast != null){
     var dt = now - stepLast;
+    /* A dropped frame used to advance the simulation by its full length, so a
+       200ms stall moved every planet four frames' worth in one paint — the jump
+       you see rather than the frame you miss. */
+    if (dt > 50) dt = 50;
     if (tonightOn){
       /* TONIGHT loops tonight itself: sunset → sunrise at 1 sim-hour per
          second (Earth's daily rotation), then repeats. The date stays put. */
@@ -5113,6 +5144,8 @@ function step(now){
 function setPlaying(on){
   if (playing === on) return;
   playing = on;
+  // leaving playback: catch up whatever the throttle skipped
+  if (!on){ try{ photoLastDay = null; buildPhotoRow(); buildTonightPanel(); }catch(_){} }
   var b = document.getElementById('btn-play');
   b.textContent = on ? '❚❚ PAUSE' : '▶ PLAY';
   b.classList.toggle('active', on);
