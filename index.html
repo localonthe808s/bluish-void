@@ -45924,22 +45924,29 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var ov = document.createElement('div');
       ov.id = 'goes-zoom-overlay';
       ov.style.cssText = 'position:fixed;inset:0;z-index:100000;display:flex;align-items:center;'
-        + 'justify-content:center;background:rgba(6,8,16,.93);padding:26px;cursor:zoom-out;'
+        + 'justify-content:center;background:rgba(6,8,16,.93);padding:26px;'
         + 'opacity:0;transition:opacity .18s ease;';
       var band = (typeof goesCurrentBand !== 'undefined' ? goesCurrentBand : '') || '';
       var sect = (typeof goesCurrentSector !== 'undefined' ? goesCurrentSector : '') || '';
       ov.innerHTML =
-        '<div style="position:relative;max-width:min(92vw,1200px);max-height:92vh;display:flex;'
-        + 'flex-direction:column;gap:8px;cursor:default;" id="goes-zoom-box">'
-        +   '<img id="goes-zoom-img" src="' + u.hi + '" alt="GOES ' + band + ' ' + sect + '" '
-        +     'style="max-width:100%;max-height:84vh;object-fit:contain;border-radius:10px;'
-        +     'background:#0a0d16;box-shadow:0 24px 80px rgba(0,0,0,.6);">'
+        '<div style="position:relative;max-width:min(94vw,1400px);max-height:94vh;display:flex;'
+        + 'flex-direction:column;gap:8px;" id="goes-zoom-box">'
+        +   '<div id="goes-zoom-vp" style="position:relative;overflow:hidden;border-radius:10px;'
+        +     'background:#0a0d16;box-shadow:0 24px 80px rgba(0,0,0,.6);cursor:zoom-in;'
+        +     'touch-action:none;max-height:86vh;">'
+        +     '<img id="goes-zoom-img" src="' + u.hi + '" alt="GOES ' + band + ' ' + sect + '" '
+        +       'draggable="false" style="display:block;max-width:100%;max-height:86vh;'
+        +       'object-fit:contain;transform-origin:0 0;will-change:transform;user-select:none;">'
+        +   '</div>'
         +   '<div style="display:flex;justify-content:space-between;align-items:center;gap:14px;'
         +     'font:600 .62rem/1.4 system-ui;color:rgba(255,255,255,.75);letter-spacing:.04em;">'
         +     '<span>' + band.toUpperCase() + ' \u00b7 ' + sect.toUpperCase() + ' \u00b7 '
         +       _goesFrameStamp(u.lo) + '</span>'
-        +     '<a href="' + u.hi + '" target="_blank" rel="noopener" '
-        +       'style="color:rgba(160,190,255,.95);text-decoration:none;">DOWNLOAD FULL SIZE \u2197</a>'
+        +     '<span style="display:flex;gap:16px;align-items:center;">'
+        +       '<span id="goes-zoom-level" style="opacity:.55;">1.0\u00d7 \u00b7 SCROLL OR PINCH TO ZOOM</span>'
+        +       '<a href="' + u.hi + '" target="_blank" rel="noopener" '
+        +         'style="color:rgba(160,190,255,.95);text-decoration:none;">DOWNLOAD FULL SIZE \u2197</a>'
+        +     '</span>'
         +   '</div>'
         + '</div>'
         + '<div id="goes-zoom-x" style="position:absolute;top:16px;right:20px;width:34px;height:34px;'
@@ -45947,19 +45954,100 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         +   'align-items:center;justify-content:center;font:400 20px/1 system-ui;cursor:pointer;">\u00d7</div>';
       document.body.appendChild(ov);
       requestAnimationFrame(function(){ ov.style.opacity = '1'; });
-      // the 2400 may not exist for every band — fall back without a broken frame
+
       var im = document.getElementById('goes-zoom-img');
+      var vp = document.getElementById('goes-zoom-vp');
+      var lvl = document.getElementById('goes-zoom-level');
       im.onerror = function(){ this.onerror = null; this.src = u.lo; };
+
+      /* ZOOM + PAN. The 2400px frame holds far more detail than it can show at
+         fit-to-window, so the viewer scales it about the cursor rather than
+         just displaying it bigger. Pan is clamped to the image so it can never
+         be dragged off into empty space. */
+      var sc = 1, tx = 0, ty = 0, MAXSC = 8;
+      var apply = function(){
+        // keep the image covering the viewport at every scale
+        var vw = vp.clientWidth, vh = vp.clientHeight;
+        var iw = im.clientWidth * sc, ih = im.clientHeight * sc;
+        tx = iw <= vw ? (vw - iw)/2 : Math.min(0, Math.max(vw - iw, tx));
+        ty = ih <= vh ? (vh - ih)/2 : Math.min(0, Math.max(vh - ih, ty));
+        im.style.transform = 'translate(' + tx.toFixed(1) + 'px,' + ty.toFixed(1) + 'px) scale(' + sc.toFixed(3) + ')';
+        if (lvl) lvl.textContent = sc.toFixed(1) + '\u00d7' + (sc > 1.02 ? ' \u00b7 DRAG TO PAN \u00b7 DOUBLE-CLICK TO RESET' : ' \u00b7 SCROLL OR PINCH TO ZOOM');
+        vp.style.cursor = sc > 1.02 ? 'grab' : 'zoom-in';
+      };
+      var zoomAt = function(cx, cy, factor){
+        var next = Math.min(MAXSC, Math.max(1, sc * factor));
+        if (next === sc) return;
+        // hold the point under the cursor still
+        tx = cx - (cx - tx) * (next / sc);
+        ty = cy - (cy - ty) * (next / sc);
+        sc = next;
+        apply();
+      };
+      im.addEventListener('load', apply);
+      vp.addEventListener('wheel', function(e){
+        e.preventDefault();
+        var r = vp.getBoundingClientRect();
+        // trackpad pinch arrives as ctrl+wheel; both paths zoom
+        var f = Math.pow(1.0022, -e.deltaY * (e.ctrlKey ? 2.4 : 1));
+        zoomAt(e.clientX - r.left, e.clientY - r.top, f);
+      }, {passive:false});
+      vp.addEventListener('dblclick', function(e){
+        var r = vp.getBoundingClientRect();
+        if (sc > 1.02){ sc = 1; apply(); }
+        else zoomAt(e.clientX - r.left, e.clientY - r.top, 2.5);
+      });
+      // drag to pan (mouse and touch), and two-finger pinch on touch
+      var pts = {}, lastMid = null, lastDist = 0;
+      vp.addEventListener('pointerdown', function(e){
+        vp.setPointerCapture(e.pointerId);
+        pts[e.pointerId] = {x:e.clientX, y:e.clientY};
+        if (sc > 1.02) vp.style.cursor = 'grabbing';
+      });
+      vp.addEventListener('pointermove', function(e){
+        if (!pts[e.pointerId]) return;
+        var ids = Object.keys(pts);
+        var prev = pts[e.pointerId];
+        pts[e.pointerId] = {x:e.clientX, y:e.clientY};
+        var r = vp.getBoundingClientRect();
+        if (ids.length === 1){
+          if (sc <= 1.02) return;
+          tx += e.clientX - prev.x; ty += e.clientY - prev.y;
+          apply();
+        } else if (ids.length >= 2){
+          var a = pts[ids[0]], b = pts[ids[1]];
+          var d = Math.hypot(a.x-b.x, a.y-b.y);
+          var mid = {x:(a.x+b.x)/2 - r.left, y:(a.y+b.y)/2 - r.top};
+          if (lastDist){
+            zoomAt(mid.x, mid.y, d / lastDist);
+            if (lastMid){ tx += mid.x - lastMid.x; ty += mid.y - lastMid.y; apply(); }
+          }
+          lastDist = d; lastMid = mid;
+        }
+      });
+      var endPt = function(e){
+        delete pts[e.pointerId];
+        if (Object.keys(pts).length < 2){ lastDist = 0; lastMid = null; }
+        if (sc > 1.02) vp.style.cursor = 'grab';
+      };
+      ['pointerup','pointercancel','pointerleave'].forEach(function(ev){ vp.addEventListener(ev, endPt); });
+
       var close = function(){
         ov.style.opacity = '0';
         setTimeout(function(){ if (ov.parentNode) ov.remove(); }, 180);
         document.removeEventListener('keydown', onKey);
       };
-      var onKey = function(e){ if (e.key === 'Escape') close(); };
+      var onKey = function(e){
+        if (e.key === 'Escape') close();
+        else if (e.key === '0'){ sc = 1; apply(); }
+        else if (e.key === '+' || e.key === '='){ zoomAt(vp.clientWidth/2, vp.clientHeight/2, 1.4); }
+        else if (e.key === '-'){ zoomAt(vp.clientWidth/2, vp.clientHeight/2, 1/1.4); }
+      };
       document.addEventListener('keydown', onKey);
       ov.addEventListener('click', function(e){
         if (e.target === ov || e.target.id === 'goes-zoom-x') close();
       });
+      apply();
     }catch(e){}
   };
 
