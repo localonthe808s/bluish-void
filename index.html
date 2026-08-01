@@ -9723,6 +9723,7 @@ const _HERO_UNIFORM = /^(partly|drizzle|rain|rain-heavy|freezing|snow|sleet|stor
 const H_VB_W=480, H_VB_H=215, H_CX=H_VB_W/2;   // svg viewBox (wide enough for the widened cloud; tall enough to reach the times line)
 let   H_KY=4.15;                                // vertical scale — body height matches the moon band
 let   H_FALLK=1;                                // extended-fall duration multiplier (--hero-fall / 48). Snow uses it fully (gentle drift), drizzle/sleet-flakes use sqrt (medium); rain/freezing/hail ignore it — same ~1s cycle over the long distance = real-life fast drops
+let   _HERO_NIGHT=false;                        // set by weatherHeroSVG for scenes that tint by day/night
 let   H_BOLTY=0;                                // bolt strike bottom (viewBox y) when the layer is extended; 0 = default short bolts
 /* Where the precip cloud sits in a tall (matched) canvas, as a fraction of it.
    The scene is drawn for a 215-unit box with the cloud centred at y=90.5, so on
@@ -10449,28 +10450,47 @@ function heroSVG(state, vbH){
   }
   return `<svg class="ic-hero" viewBox="0 0 ${H_VB_W} ${H_VB_H}" width="${H_VB_W}" height="${H_VB_H}" xmlns="http://www.w3.org/2000/svg">${inner}</svg>`;
 }
-/* OVERCAST HERO — a single deck stretched edge-to-edge (full mock width), body in
-   the moon band; rendered as a full-width layer BEHIND the moon */
-function heroDeckFull(){
-  const W=660, bandTop=-22, bandH=185;   // deck extended to full ceiling (top clipped off-frame)
-  // The deck silhouette's highest lobe is a central dome (SHAPES.deck
-  // [50,49,15,6]) with its flanks sitting lower at y58, so a single pass leaves
-  // the UPPER CORNERS open — obvious once the shape is stretched across 660
-  // units (user). Fixed with extra passes rather than by editing SHAPES.deck,
-  // which the hourly icons share: one wider pass riding higher behind the main
-  // deck, plus a smaller pass pushed into each top corner. Same art, so the
-  // ceiling stays rolling instead of turning into a flat lid.
-  const pass = (kx, ky, dx, dy, seed, op) => {
-    const sx=(W/86)*kx, sy=(bandH/30)*ky;
-    const tx=W/2-50*sx+dx, ty=(bandTop+bandH/2)-56*sy+dy;
-    return `<g opacity="${op}" transform="translate(${tx.toFixed(1)},${ty.toFixed(1)}) scale(${sx.toFixed(3)},${sy.toFixed(3)})">${cloud(0,0,1,'grey',seed,'deck')}</g>`;
-  };
-  return `<svg class="ic-hero" viewBox="0 0 ${W} 181" preserveAspectRatio="none" width="100%" height="181" xmlns="http://www.w3.org/2000/svg">`
-       + pass(1.22, 0.92,    0, -26, 17, 0.90)     // wide pass, riding high behind
-       + pass(0.66, 0.74, -210, -34, 21, 0.90)     // top-left corner
-       + pass(0.66, 0.74,  210, -32, 26, 0.90)     // top-right corner
-       + pass(1,    1,       0,   0,  8, 1)        // the deck itself, unchanged
-       + `</svg>`;
+/* OVERCAST HERO — the ceiling, drawn to the canvas it is given.
+   It used to compose for a fixed 215-unit box and rely on preserveAspectRatio
+   ="none" to fill the panel, which on a phone meant a 2.97x vertical stretch:
+   every lobe (and its blur radius) pulled to triple height, so the deck read as
+   a soft grey wall instead of a cloud base. Now it takes vbH and lays the same
+   art out at EQUAL px-per-unit on both axes.
+   Covering a tall box without stretching needs more ceiling, not a taller one,
+   so it is built the way the sky renderer builds distance: an unbroken wash
+   (overcast means no sky shows) modulated by rows of lobes that recede — each
+   row smaller, flatter and hazier than the one above, structure dissolving into
+   featureless haze past the middle, which is how a deck actually reads when you
+   look from overhead out to the horizon. */
+function _deckPass(cx, cy, s, f, seed, variant, op){
+  const tx = (cx - 50*s).toFixed(1), ty = (cy - 56*s*f).toFixed(1);
+  return `<g opacity="${op}" transform="translate(${tx},${ty}) scale(${s.toFixed(3)},${(s*f).toFixed(3)})">`
+       + cloud(0,0,1,variant,seed,'deck') + `</g>`;
+}
+function heroDeckFull(vbH, night){
+  const W=660, H=vbH||215, g=uid();
+  const top   = night ? '#2b3450' : '#8e98a8';
+  const mid   = night ? '#3b465f' : '#aab4c2';
+  const horiz = night ? '#55617c' : '#d3dce7';
+  let s = `<defs><linearGradient id="${g}" x1="0" y1="0" x2="0" y2="1">`
+        + `<stop offset="0%" stop-color="${top}"/><stop offset="52%" stop-color="${mid}"/>`
+        + `<stop offset="100%" stop-color="${horiz}"/></linearGradient></defs>`
+        + `<rect x="0" y="0" width="${W}" height="${H}" fill="url(#${g})"/>`;
+  // scale · flatten · y (fraction of canvas) · tint · seed · opacity · passes
+  const ROWS = [
+    [9.4, 1.00, -0.04, 'dark',   8, 1.00, 1],   // directly overhead, off the top edge
+    [5.0, 0.78,  0.34, 'dark',  17, 0.86, 1],
+    [2.9, 0.62,  0.56, 'grey',  21, 0.62, 2],
+    [1.7, 0.50,  0.72, 'white', 26, 0.38, 3]    // last legible structure before haze
+  ];
+  ROWS.forEach(function(r){
+    const sc=r[0], f=r[1], y=H*r[2], n=r[6];
+    for(let i=0;i<n;i++){
+      const cx = n===1 ? W/2 : W*(i+0.5)/n + (i%2?-20:20);
+      s += _deckPass(cx, y, sc, f, r[4]+i*3, r[3], r[5]);
+    }
+  });
+  return `<svg class="ic-hero" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" width="100%" height="${H}" xmlns="http://www.w3.org/2000/svg">${s}</svg>`;
 }
 /* CLOUDY HERO — the puffy wide-low cloud rendered as a behind-moon layer so its
    right side tucks a little behind the moon (fuller than the icon-column version) */
@@ -10558,7 +10578,7 @@ function heroInner(state, vbH){
       return (_mobCD ? '' : _heroPlane(-40,58,700,30,1.2,1)) + _smokeVeil(true);
     }
     case 'clear-night': return _stripSvg(heroNightFull())+_smokeVeil(false);
-    case 'overcast':    return _stripSvg(heroDeckFull());
+    case 'overcast':    return _stripSvg(heroDeckFull(vbH||215, _HERO_NIGHT));
     case 'fog':         return heroFogPanel(vbH||215);
     case 'cloudy':      return _stripSvg(heroCloudBehind('white'));
     /* heroSVG scenes are built in a 480-wide space (cloud centred at H_CX=240);
@@ -10581,6 +10601,7 @@ function weatherHeroSVG(code, isNight, vbH){
   try{
     _srand(_hash('hero|'+code+'|'+(isNight?1:0)));
     var st = heroState(code, !!isNight);
+    _HERO_NIGHT = !!isNight;   // heroInner's scenes take (state, vbH) only
     // vbH: taller viewBox at the SAME px-per-unit scale (the host box grows with
     // it), so the y<215 art doesn't move — it just gains room for longer falls.
     return '<svg viewBox="0 0 660 '+(vbH||215)+'" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">'+heroInner(st, vbH)+'</svg>';
@@ -11015,20 +11036,36 @@ window._updateHeroWx = function(code, night){
         }
         _injectSun();
       } else {
-        // day cloud/overcast deck fills the panel; scrim keeps the top text legible
-        hw.innerHTML = weatherHeroSVG(code, night) + '<div class="hero-scrim"></div>';
+        // day cloud/overcast deck fills the panel; scrim keeps the top text legible.
+        // OVERCAST composes against the canvas it is handed, so give it one shaped
+        // like the box (equal px-per-unit) instead of the fixed 215 the box used to
+        // stretch 2.97x on a phone. CLOUDY still composes for 215 and would bunch
+        // into the top of a taller canvas, so it keeps the old behaviour until it
+        // gets the same treatment.
+        var _vbFull = 215;
+        if(st==='overcast'){
+          var _wFull = Math.round(sb.getBoundingClientRect().width) || _sbW || 660;
+          if(_wFull > 40 && H > 40) _vbFull = Math.max(180, Math.min(1600, Math.round(H * 660 / _wFull)));
+        }
+        hw.innerHTML = weatherHeroSVG(code, night, _vbFull) + '<div class="hero-scrim"></div>';
       }
       // Re-measure once after layout settles (the rise-set row / rain line populate async, so
       // the first measurement can be short). Resize + re-render the hero to the final height.
-      (function(_hw,_st,_w){ requestAnimationFrame(function(){ try{
+      (function(_hw,_st,_w,_code,_night){ requestAnimationFrame(function(){ try{
         var H2 = _panelH();
         if(Math.abs(H2 - (parseInt(_hw.style.height,10)||0)) > 3){
           _hw.style.height = H2 + 'px';
           _abMask(H2);
           if(_st==='clear-night') _hw.innerHTML = heroNightPanel(H2) + '<div class="hero-scrim-night"></div>';
           else if(_st==='clear-day'){ if(window._cdFirstBuildDone && !window._cdBuildPending && !_cdOk(_hw.firstElementChild,_w,H2)) _cdBuild(_hw,_w,H2); }
+          // OVERCAST's canvas IS its height — resizing the box without re-rendering
+          // would stretch the ceiling again, which is the bug this replaced.
+          else if(_st==='overcast' && _w > 40){
+            _hw.innerHTML = weatherHeroSVG(_code, _night, Math.max(180, Math.min(1600, Math.round(H2 * 660 / _w))))
+                          + '<div class="hero-scrim"></div>';
+          }
         }
-      }catch(e){} }); })(hw,st,_sbW);
+      }catch(e){} }); })(hw,st,_sbW,code,night);
     } else if(st==='clear-day'){
       // fallback (no sky-bar found): row-bound, column sun only
       if(hw.parentNode !== row) row.insertBefore(hw, row.firstChild);
