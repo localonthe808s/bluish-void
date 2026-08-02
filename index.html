@@ -9245,6 +9245,48 @@ body > #dynamic-alert-modal {
      so nothing rebuilds or jumps on the way back. Wall-clock-anchored pieces
      (the jet, the flock orbit) re-anchor on their next render anyway. */
   .bv-asleep, .bv-asleep * { animation-play-state: paused !important; }
+  /* SOLAR MAP LOADER — four planets on their own orbits, each a single
+     composited rotation, so the loader costs nothing while the map behind it is
+     parsing. Colours are the map's own accents: Mars #C44D2A, Saturn #F0C75E,
+     Earth-blue #4AA3DF, Uranus #8ECAE6. */
+  #solar-widget{ position:relative; }
+  #solar-loading{
+    position:absolute; inset:0; z-index:6; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:14px;
+    background:radial-gradient(ellipse at 50% 45%, #0d1430 0%, #070a18 70%);
+    border-radius:inherit;
+  }
+  #solar-loading[hidden]{ display:none; }
+  #solar-loading.sl-out{ opacity:0; transition:opacity .45s ease; pointer-events:none; }
+  .sl-sys{ position:relative; width:86px; height:86px; }
+  .sl-sun{
+    position:absolute; left:50%; top:50%; width:11px; height:11px; margin:-5.5px 0 0 -5.5px;
+    border-radius:50%; background:radial-gradient(circle at 38% 34%, #fff3c4, #f6a83a 60%, #d8761c);
+    box-shadow:0 0 10px rgba(246,168,58,.75), 0 0 22px rgba(246,168,58,.35);
+  }
+  .sl-orb{ position:absolute; inset:0; border-radius:50%; animation:sl-spin linear infinite; }
+  .sl-orb::before{
+    content:''; position:absolute; inset:0; border-radius:50%;
+    border:1px solid rgba(150,180,230,.13);
+  }
+  .sl-orb > i{
+    position:absolute; top:50%; left:100%; width:var(--d,7px); height:var(--d,7px);
+    margin:calc(var(--d,7px) / -2) 0 0 calc(var(--d,7px) / -2);
+    border-radius:50%; background:var(--c); box-shadow:0 0 7px var(--c);
+  }
+  /* Four orbits, four periods — near a 1 : 1.6 : 2.4 : 3.4 ratio so they never
+     line up again while you wait. The negative delays matter as much: without
+     them all four start at 0 degrees and the loader's first frame is a straight
+     line of planets, which is exactly the moment most people see. */
+  .sl-o1{ inset:31px; animation-duration:1.9s; animation-delay:-.62s; }   .sl-o1 > i{ --d:5px; }
+  .sl-o2{ inset:21px; animation-duration:3.1s; animation-delay:-2.10s; }   .sl-o2 > i{ --d:7px; }
+  .sl-o3{ inset:11px; animation-duration:4.6s; animation-delay:-1.15s; }   .sl-o3 > i{ --d:6px; }
+  .sl-o4{ inset:1px;  animation-duration:6.5s; animation-delay:-4.55s; }   .sl-o4 > i{ --d:8px; }
+  @keyframes sl-spin{ from{ transform:rotate(0deg); } to{ transform:rotate(360deg); } }
+  .sl-text{
+    font:700 .55rem/1 system-ui,sans-serif; letter-spacing:.06em;
+    color:rgba(255,255,255,.7); text-transform:uppercase;
+  }
   /* MAP FOCUS. While the solar map is playing, everything else on the page
      holds still. It is one main thread: with the page animating, the map's
      frame times measured 17ms median but 32ms at p95 and 67ms at worst — the
@@ -14081,6 +14123,22 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
                   <iframe id="solar-frame" data-solar-system
                           src="_solarlab/solar_lab.html"
                           title="Solar system map" loading="lazy"></iframe>
+                  <!-- Shown only if the map takes more than 250ms to draw. It is a
+                       lazy-loaded 322KB document that builds real ephemeris, a star
+                       catalogue and 23 moons before anything appears — quick on a warm
+                       cache (measured 244ms), much longer on a phone's first visit.
+                       Four planets in the map's own accent colours: Mars, Saturn,
+                       Earth-blue and Neptune. -->
+                  <div id="solar-loading" hidden>
+                    <div class="sl-sys" aria-hidden="true">
+                      <span class="sl-sun"></span>
+                      <span class="sl-orb sl-o1"><i style="--c:#C44D2A"></i></span>
+                      <span class="sl-orb sl-o2"><i style="--c:#F0C75E"></i></span>
+                      <span class="sl-orb sl-o3"><i style="--c:#4AA3DF"></i></span>
+                      <span class="sl-orb sl-o4"><i style="--c:#8ECAE6"></i></span>
+                    </div>
+                    <div class="sl-text">PLOTTING THE PLANETS...</div>
+                  </div>
                 </div>
 
                 <div class="bullets" id="space-events-bullets"></div>
@@ -42445,6 +42503,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         });
       });
       window.addEventListener('message', function(e){
+        if (e.data && e.data.solarReady){ _solarLoaderDone(); return; }
         if (e.data && typeof e.data.solarPlaying === 'boolean'){
           document.documentElement.classList.toggle('bv-mapfocus', e.data.solarPlaying);
           /* the GOES flipbook is a canvas rAF, so a CSS pause cannot reach it —
@@ -42483,11 +42542,38 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       pushSummary();
       new MutationObserver(pushSummary).observe(src, {childList:true, characterData:true, subtree:true});
     }
+    /* The loader only earns its place if the wait is real: it appears after
+       250ms and is removed when the map reports it has drawn, or after 12s if
+       that message never comes (a failed iframe should not leave a spinner
+       running forever). */
+    var _slTimer = null, _slFail = null, _slShown = false;
+    window._solarLoaderDone = function(){
+      clearTimeout(_slTimer); clearTimeout(_slFail);
+      var el = document.getElementById('solar-loading');
+      if (!el || el.hidden) { if (el) el.hidden = true; return; }
+      el.classList.add('sl-out');
+      setTimeout(function(){ el.hidden = true; el.classList.remove('sl-out'); }, 460);
+    };
+    function _solarLoaderArm(){
+      var el = document.getElementById('solar-loading');
+      if (!el || _slShown) return;
+      _slShown = true;
+      _slTimer = setTimeout(function(){
+        try{
+          var w = frame() && frame().contentWindow;
+          if (w && w.nodes && Object.keys(w.nodes).length) return;   // already drawn
+        }catch(_){}
+        el.hidden = false;
+      }, 250);
+      _slFail = setTimeout(window._solarLoaderDone, 12000);
+    }
+
     function watch(){
       var w = document.getElementById('solar-widget'), f = frame();
       if (!w || !f || !window.IntersectionObserver) return;
       new IntersectionObserver(function(es){
         es.forEach(function(en){
+          if (en.isIntersecting) _solarLoaderArm();
           if (f.contentWindow)
             f.contentWindow.postMessage({solarVisible: en.isIntersecting}, '*');
         });
