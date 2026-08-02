@@ -64,6 +64,19 @@
      polka-dot circles, the moon-phase disc went full-width). Popup SVGs size
      themselves by their own width/height attributes. */
   #map{width:100%;height:100%;display:block;cursor:default;user-select:none;-webkit-user-select:none;}
+  /* THE STATIC SKY LIVES IN ITS OWN <svg>. One SVG is one paint region, so
+     with the starfield, constellations and belts in #map every planet step
+     re-recorded all 15,389 nodes: measured 33 fps uncapped at 1600x1100, i.e.
+     the map could not reach 60 however fast the machine. Those 14,013 nodes
+     never change while the map plays (0 mutations observed over 4s), so they
+     move to a sibling that paints once. #map keeps 1,374 nodes and the same
+     scene measures 155 fps — the same 4.6x at 1000x760, so this is display-list
+     recording cost, not fill rate.
+     Promotion is NOT what does it: will-change on the group measured 33.8 fps,
+     because Chrome will not give an SVG sub-element its own layer. It has to
+     become a separate <svg>. */
+  #sky{position:absolute;left:0;top:0;width:100%;height:100%;display:block;
+       pointer-events:none;}
 
   /* ---- header / controls ---- */
   #hud{
@@ -258,7 +271,9 @@
   .moon-orbit{display:none;}
   /* Every label on the map, in the site's display serif. One rule rather than
      touching each inline style. */
-  #map text{ font-family:'QelliaRegular','Bodoni Moda',Georgia,serif; }
+  /* #sky too: the star, constellation and belt names moved there with gSky and
+     gBelts, and would otherwise fall back to the default serif. */
+  #map text, #sky text{ font-family:'QelliaRegular','Bodoni Moda',Georgia,serif; }
   .planet-label{
     font-size:.85em;font-weight:700;letter-spacing:.12em;fill:var(--lbl-planet);
     text-anchor:middle;pointer-events:none;user-select:none;
@@ -330,6 +345,8 @@
   #missions-panel .mrow .chip{width:16px;height:3px;border-radius:2px;flex-shrink:0;}
   /* the big-asteroid names would be noise at full view; they appear at the same
      zoom that makes moons clickable */
+  /* .ast-label is only ever created in gBigAst and charonG, both of which stay
+     in #map — the sky split does not touch these. */
   #map .ast-label{ display:none; }
   #map.zoomed .ast-label{ display:block; }
   /* TONIGHT panel. The old layout repeated "from X until dawn · highest Y"
@@ -519,7 +536,7 @@
      re-rasterize hiccup on touch-down), and freeze the meteor shimmer while
      a gesture/fly-to preview is live — animated children force the big SVG
      layer to re-rasterize every animation frame mid-gesture. */
-  #map{ will-change: transform; }
+  #map, #sky{ will-change: transform; }
   svg.gesturing .met-streak,
   svg.gesturing .met-streak .met-head,
   svg.gesturing .met-core{ animation-play-state: paused; }
@@ -577,7 +594,7 @@
   </div>
 </div>
 
-<div id="stage"><svg id="map" viewBox="-500 -500 1000 1000" preserveAspectRatio="xMidYMid meet"></svg><div id="solar-tap-guard" data-state="locked"><div class="guard-box"><div class="guard-title">TAP TO INTERACT</div><div class="guard-sub">Pan &amp; zoom the map</div></div></div></div>
+<div id="stage"><svg id="sky" viewBox="-500 -500 1000 1000" preserveAspectRatio="xMidYMid meet" aria-hidden="true"></svg><svg id="map" viewBox="-500 -500 1000 1000" preserveAspectRatio="xMidYMid meet"></svg><div id="solar-tap-guard" data-state="locked"><div class="guard-box"><div class="guard-title">TAP TO INTERACT</div><div class="guard-sub">Pan &amp; zoom the map</div></div></div></div>
 <div id="missions-panel" style="display:none"></div>
 <div id="tonight-panel" style="display:none"></div>
 <div id="tip"></div>
@@ -950,6 +967,27 @@ function rScale(rAU, body){
    ========================================================================= */
 var NS='http://www.w3.org/2000/svg';
 var svg = document.getElementById('map');
+/* The static backdrop's own viewport. It sits behind #map at the same size and
+   viewBox, so anything drawn into it lands exactly where it did when it was a
+   group inside #map — but it is a separate paint region, so a moving planet no
+   longer forces the starfield to be re-recorded. Everything sky-fixed goes here
+   (gSky, gShowers, gNight, gBelts), in the order they had inside #map, so the
+   stacking is unchanged. */
+var skySvg = document.getElementById('sky');
+/* Mirror the camera onto the backdrop. Every write is compared first: setting
+   an attribute to the value it already holds still invalidates in Blink, and
+   this runs on every gesture frame. */
+function skySync(){
+  if (!skySvg) return;
+  var vb = svg.getAttribute('viewBox');
+  if (skySvg.getAttribute('viewBox') !== vb) skySvg.setAttribute('viewBox', vb);
+  if (skySvg.style.fontSize !== svg.style.fontSize) skySvg.style.fontSize = svg.style.fontSize;
+  if (skySvg.style.transform !== svg.style.transform) skySvg.style.transform = svg.style.transform;
+  if (skySvg.style.transformOrigin !== svg.style.transformOrigin)
+    skySvg.style.transformOrigin = svg.style.transformOrigin;
+  skySvg.classList.toggle('zoomed', svg.classList.contains('zoomed'));
+  skySvg.classList.toggle('gesturing', svg.classList.contains('gesturing'));
+}
 function mk(tag,attrs,parent){
   var n=document.createElementNS(NS,tag);
   for(var k in attrs) n.setAttribute(k,attrs[k]);
@@ -1035,7 +1073,7 @@ var gSky = null;
 var skyLabels = [];      // fixed star/DSO names — obstacles for the declutter pass
 var swarmLabels = [];    // the "+93 more moons" tags, which ride a scaled group
 (function realSky(){
-  var g = mk('g',{});
+  var g = mk('g',{},skySvg);
   gSky = g;
   /* Milky Way — the REAL ESO/S. Brunier all-sky panorama (CC BY 4.0, alpha-baked
      repo asset) warped along the projected galactic circle. The 1800×279 strip
@@ -1427,10 +1465,10 @@ var swarmLabels = [];    // the "+93 more moons" tags, which ride a scaled group
 
 })();
 
-var gShowers = mk('g',{display:'none'}); // meteor-shower radiants: sky layer, under the veil
+var gShowers = mk('g',{display:'none'},skySvg); // meteor-shower radiants: sky layer, under the veil
 var showerLabels = [];                   // radiant names, rebuilt each day
-var gNight = mk('g',{display:'none'});   // tonight's sky cone: under orbits/planets
-var gBelts = mk('g',{'pointer-events':'none'});  // asteroid + Kuiper belts
+var gNight = mk('g',{display:'none'},skySvg);   // tonight's sky cone: under orbits/planets
+var gBelts = mk('g',{'pointer-events':'none'},skySvg);  // asteroid + Kuiper belts
 var gBigAst = mk('g',{});                        // Ceres & the other large bodies
 var gOrbits = mk('g',{});
 var gMissions = mk('g',{display:'none'});   // flight paths: above orbits, below planets
@@ -1774,6 +1812,7 @@ function applyView(){
   /* crossing the zoom threshold adds or removes the asteroid names, so the
      layout has to be redone right away rather than at the next render */
   if (wasZoomed !== zoomedIn && typeof declutterLabels === 'function') declutterLabels();
+  skySync();
 }
 var animTok = 0;   // bumping this cancels an in-flight fly-to (gestures do)
 function animateView(tx, ty, tw){
@@ -1822,6 +1861,7 @@ function gestureStart(){
                             // describes the actually-committed viewBox
   animTok++;                                  // a gesture cancels a fly-to
   svg.classList.add('gesturing');             // pauses meteor shimmer (CSS)
+  skySync();
   var r = svg.getBoundingClientRect(), side = Math.min(r.width, r.height);
   gBase = {x:view.x, y:view.y, w:view.w, r:r, side:side,
            ox:(r.width - side)/2, oy:(r.height - side)/2};
@@ -1837,12 +1877,14 @@ function gesturePreview(){
   svg.style.transformOrigin = '0 0';
   svg.style.transform = 'translate(' + tx.toFixed(2) + 'px,' + ty.toFixed(2) +
                         'px) scale(' + s.toFixed(4) + ')';
+  skySync();          // the backdrop rides the same compositor transform
 }
 function gestureEnd(){
   if (!gBase) return;
   gBase = null;
   svg.classList.remove('gesturing');
   svg.style.transform = '';
+  skySync();
   applyView();
 }
 /* ── drag to pan (once zoomed in) ─────────────────────────────────────── */
