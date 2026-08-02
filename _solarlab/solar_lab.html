@@ -1551,7 +1551,18 @@ PLANETS.forEach(function(p){
          transform. That matters because the photo is clipped to a circle at
          the group's ORIGIN, which lets every moon of the same radius share a
          single clipPath instead of needing 23 moving ones. */
-      var mg  = mk('g',{'pointer-events':'none'},gMoons);
+      /* Three nested groups so playback can be composited. Paused, all three
+         are identity transforms and mg carries the exact Kepler translate
+         exactly as before — nothing about the still frame changes. Playing,
+         orbG spins about the planet centre, posG holds the moon out at its
+         display radius, and cntG unspins so a moon's PHOTO stays upright while
+         its orbit turns. Rotations are transform-only animations with matching
+         keyframe lists, so they run on the compositor and stay smooth however
+         slowly the page itself paints. */
+      var orbG = mk('g',{},gMoons);
+      var posG = mk('g',{},orbG);
+      var cntG = mk('g',{},posG);
+      var mg  = mk('g',{'pointer-events':'none'},cntG);
       var dot = mk('circle',{r:m.r,fill:m.c},mg);
       var tt  = mk('title',{},dot); tt.textContent = m.n;
       /* scale so the measured disc exactly fills the clip circle, and offset
@@ -1577,7 +1588,8 @@ PLANETS.forEach(function(p){
                     preserveAspectRatio:'none', opacity:0},mg);
       /* rdView is the radius actually drawn — applyMoonScale() rewrites it when
          the system has to be squeezed into the compressed layout */
-      return {m:m, rd:rd, rdView:rd, e:e, om:om, dot:dot, orb:orb, g:mg, img:img};
+      return {m:m, rd:rd, rdView:rd, e:e, om:om, dot:dot, orb:orb, g:mg, img:img,
+              orbG:orbG, posG:posG, cntG:cntG};
     });
     if (sys.extra){
       /* the rest of the known moons — small irregulars, shown as a faint
@@ -2146,7 +2158,11 @@ function render(){
         var yo = rdv*Math.sqrt(1-md.e*md.e)*Math.sin(E);
         var co = Math.cos(md.om), so = Math.sin(md.om);
         var mx = (xo*co - yo*so).toFixed(2), my = (-(xo*so + yo*co)).toFixed(2);
-        md.g.setAttribute('transform', 'translate('+mx+','+my+')');
+        /* While playing, the dot's position comes from the composited rotation
+           — writing a transform here every frame would fight it and put the
+           stepping straight back. The hit target still tracks the exact Kepler
+           position, which stays in phase with the rotation, so taps land. */
+        if (!playing) md.g.setAttribute('transform', 'translate('+mx+','+my+')');
         if (md.hit){ md.hit.setAttribute('cx', mx); md.hit.setAttribute('cy', my); }
       });
     }
@@ -5149,6 +5165,61 @@ function step(now){
   stepLast = now;
   rafId = requestAnimationFrame(step);
 }
+/* ===== MOON MOTION =====================================================
+   A moon's period maps to very little wall-clock time: at the default half a
+   day per second Phobos laps Mars in 0.64s, which is ~19 degrees of arc per
+   frame at 30fps — it hops rather than orbits, and no amount of making the
+   maths faster helps, because the limit is how many frames the phone paints.
+   (Measured: all 23 moons together cost 0.05ms per frame.)
+   So while playing, the motion is handed to the compositor as a plain rotation,
+   which is smooth at any frame rate. The cost is that the orbit is treated as a
+   circle for the duration; these eccentricities run 0.0001-0.03, well under a
+   pixel here. Pausing restores the exact Kepler positions. */
+(function(){
+  var st = document.createElement('style');
+  st.textContent =
+    '@keyframes mo-orbit { from { transform: rotate(0deg); } to { transform: rotate(-360deg); } }' +
+    '@keyframes mo-orbit-cnt { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }';
+  document.head.appendChild(st);
+})();
+function _moonCssOff(){
+  PLANETS.forEach(function(p){
+    var nd = nodes[p.id]; if (!nd || !nd.moonDefs) return;
+    nd.moonDefs.forEach(function(md){
+      if (!md.orbG) return;
+      md.orbG.style.animation = ''; md.orbG.style.transform = '';
+      md.cntG.style.animation = ''; md.cntG.style.transform = '';
+      md.posG.style.transform = '';
+    });
+  });
+}
+function _moonCssSync(){
+  if (!playing) { _moonCssOff(); return; }
+  var speed = +document.getElementById('speed').value || 0.5;
+  var days  = curMs/86400000 - 10957.5;
+  PLANETS.forEach(function(p){
+    var nd = nodes[p.id]; if (!nd || !nd.moonDefs) return;
+    nd.moonDefs.forEach(function(md){
+      if (!md.orbG) return;
+      var per = md.m.p;                       // negative = retrograde (Triton)
+      var dur = Math.abs(per) / speed;        // seconds of wall clock per orbit
+      if (!isFinite(dur) || dur <= 0) return;
+      var R   = md.rdView || md.rd;
+      // screen angle now, matching the exact path with e treated as 0
+      var Mdeg = moonPhase(md.m) + 360*days/per;
+      var A = -(((Mdeg + md.om/DEG) % 360) + 360) % 360;      // 0..-360
+      var frac = (per < 0) ? (1 - (-A/360)) : (-A/360);        // where in the loop
+      var delay = -(frac * dur);
+      md.posG.style.transform = 'translate(' + R.toFixed(1) + 'px, 0px)';
+      md.g.setAttribute('transform', '');                      // position comes from posG now
+      var dir = (per < 0) ? 'reverse' : 'normal';
+      md.orbG.style.animation = 'mo-orbit ' + dur.toFixed(3) + 's linear ' + delay.toFixed(3) + 's infinite ' + dir;
+      md.cntG.style.animation = 'mo-orbit-cnt ' + dur.toFixed(3) + 's linear ' + delay.toFixed(3) + 's infinite ' + dir;
+    });
+  });
+}
+window._moonCssSync = _moonCssSync;
+
 function setPlaying(on){
   if (playing === on) return;
   playing = on;
@@ -5157,9 +5228,10 @@ function setPlaying(on){
   var b = document.getElementById('btn-play');
   b.textContent = on ? '❚❚ PAUSE' : '▶ PLAY';
   b.classList.toggle('active', on);
-  if (on){ stepLast = null; _dtSmooth = 0; playAnchor = curMs; rafId = requestAnimationFrame(step); }
-  else cancelAnimationFrame(rafId);
+  if (on){ stepLast = null; _dtSmooth = 0; playAnchor = curMs; rafId = requestAnimationFrame(step); _moonCssSync(); }
+  else { cancelAnimationFrame(rafId); _moonCssOff(); render(); }
 }
+document.getElementById('speed').addEventListener('change', function(){ _moonCssResync(); });
 document.getElementById('btn-play').addEventListener('click', function(){
   var on = !playing;
   if (on) userStarted = true;          // from here on, auto-resume is allowed
@@ -5394,6 +5466,9 @@ function ensureMoonPhotos(){
     });
   });
 }
+/* rd/rdView, the speed and the date all feed the composited timing, so any of
+   them changing means the rotations have to be re-issued. */
+function _moonCssResync(){ try{ if (playing) _moonCssSync(); }catch(_){} }
 function applyMoonScale(){
   var full = (viewMode === 'moons');
   /* mean-orbit radii, so the fit is stable as the date scrubs */
@@ -5429,6 +5504,7 @@ function applyMoonScale(){
       nd.swarmK = k < 0.999 ? k : 1;      // declutter needs it to size the tag
     }
   });
+  _moonCssResync();
 }
 /* Jump straight to a planet. Called from outside the widget — the site's TODAY
    planet strip offers "view in the solar system" and posts {solarFocus:id} —
@@ -5477,6 +5553,7 @@ function setViewTab(tab){
      this has to come after it, same ordering trap as the boot autoplay */
   if (!tonightOn && userStarted) setPlaying(true);
   render();
+  _moonCssResync();
 }
 document.querySelectorAll('#viewtabs .vtab').forEach(function(b){
   b.addEventListener('click', function(){ setViewTab(b.getAttribute('data-tab')); });
