@@ -18493,6 +18493,74 @@ function dayRangeAround(d, days){
     } catch(e) { console.error('anchorPopupToRect error:', e); }
   };
 
+  // ── TIMELINE BADGE LAYOUT ─────────────────────────────────────────────
+  // One pass that lays out every badge floating above the hour strip — warm/
+  // cold front, rainbow, heavy rain, flash flood, water-on-street, first/last
+  // song. Each family used to pick its own `top` and check a different subset
+  // of its siblings for collisions (five pairwise rules that didn't compose:
+  // water-on-street and heavy rain both resolved to -62px and drew on top of
+  // each other, and the song cue checked nothing at all).
+  //
+  // Instead: collect them all, sort by severity, and pack into lanes — a badge
+  // joins the lowest lane where it doesn't horizontally overlap something
+  // already there, so neighbouring columns share a lane when they fit and only
+  // stack when they must. The badge float zone is the row's top padding, and
+  // it grows to whatever the tallest stack needs, so the badges never climb
+  // above the row's top border into the rain line. Growing the padding pushes
+  // the strip down inside its own card; nothing above it moves.
+  //
+  // Idempotent: recomputes every top from scratch, so it can be called after
+  // each injection (several arrive async) without compounding.
+  window._bvLayoutTlBadges = function() {
+    try {
+      var row = document.getElementById('today-tl-weather-row');
+      if (!row) return;
+      var els = row.querySelectorAll('.tl-badge');
+      if (!els.length) { row.style.paddingTop = ''; return; }   // back to the CSS default
+      var GUTTER = 3;    // between lanes
+      var CLEAR  = 4;    // between the lowest badge and the column below it
+      var BLEED  = 4;    // horizontal breathing room when testing for overlap
+      var items = [];
+      for (var i = 0; i < els.length; i++) {
+        var r = els[i].getBoundingClientRect();
+        if (!r.height) continue;                                 // not laid out yet
+        items.push({ el: els[i], l: r.left, r: r.right, h: r.height,
+                     sev: +(els[i].getAttribute('data-sev') || 0) });
+      }
+      if (!items.length) return;
+      // most severe first, so it takes the lane closest to its column
+      items.sort(function(a, b) { return b.sev - a.sev || a.l - b.l; });
+      var lanes = [];
+      items.forEach(function(it) {
+        for (var li = 0; li < lanes.length; li++) {
+          var clash = false;
+          for (var k = 0; k < lanes[li].items.length; k++) {
+            var o = lanes[li].items[k];
+            if (it.l < o.r + BLEED && o.l < it.r + BLEED) { clash = true; break; }
+          }
+          if (!clash) { lanes[li].items.push(it); lanes[li].h = Math.max(lanes[li].h, it.h); it.lane = li; return; }
+        }
+        lanes.push({ items: [it], h: it.h });
+        it.lane = lanes.length - 1;
+      });
+      var offs = [], base = CLEAR;
+      for (var li2 = 0; li2 < lanes.length; li2++) { offs[li2] = base; base += lanes[li2].h + GUTTER; }
+      items.forEach(function(it) {
+        // `top` resolves against the column (or its marker, which spans the
+        // column) — negative lifts the badge into the row's top padding.
+        var t = '-' + Math.round(offs[it.lane] + it.h) + 'px';
+        if (it.el.style.top !== t) it.el.style.top = t;
+        if (it.el.style.bottom !== 'auto') it.el.style.bottom = 'auto';
+      });
+      var need = Math.ceil(base - GUTTER + 6);                    // + a little headroom
+      // Write only on a real change: injectSongCues re-runs this every 5s, and
+      // an identical assignment still dirties style on the row that owns the
+      // strip. Same reason the badge tops above are only touched when they move.
+      var pad = Math.max(46, need) + 'px';
+      if (row.style.paddingTop !== pad) row.style.paddingTop = pad;
+    } catch (e) { console.error('_bvLayoutTlBadges error:', e); }
+  };
+
   // Helper: add scroll-more glow to popup
   window.addScrollFade = function(el) {
     setTimeout(function(){
@@ -34656,7 +34724,10 @@ function dayRangeAround(d, days){
           var _fWords = frontLabel.split(' ');
           var _fRow1 = '<span style="font-size:8px;margin-right:1px;">' + frontIcon + '</span>' + _fWords[0];
           var _fRow2 = _fWords.length > 1 ? _fWords.slice(1).join(' ') : '';
-          badge.style.cssText = 'position:absolute;top:-30px;left:50%;transform:translateX(-50%);' +
+          badge.className = 'tl-badge';
+          badge.setAttribute('data-sev', '2');
+          // top is a pre-layout default only — _bvLayoutTlBadges assigns the real one
+          badge.style.cssText = 'position:absolute;top:-34px;left:50%;transform:translateX(-50%);' +
             'background:' + frontColor + ';color:#fff;font-size:7.5px;font-weight:800;' +
             'padding:3px 8px;border-radius:5px;letter-spacing:.4px;text-align:center;line-height:1.1;' +
             'box-shadow:0 1px 4px rgba(0,0,0,.3),0 0 8px ' + frontColor + '44;z-index:20;' +
@@ -34785,6 +34856,7 @@ function dayRangeAround(d, days){
           hourCols[colIdx].style.overflow = 'visible';
           hourCols[colIdx].style.cursor = 'pointer';
           hourCols[colIdx].appendChild(marker);
+          if (window._bvLayoutTlBadges) window._bvLayoutTlBadges();
 
           // Also attach click to the entire column for easier tapping
           hourCols[colIdx].addEventListener('click', (function(html, col) {
@@ -34922,19 +34994,16 @@ function dayRangeAround(d, days){
             var spanWidth = spanCols * colWidth;
             
             var rbBadge = document.createElement('div');
-            // Check if a frontal marker exists nearby — if so, shift rainbow up to avoid overlap
-            var hasFrontalNearby = false;
-            for (var fc = Math.max(0, startCol - 1); fc <= Math.min(hCols2.length - 1, endCol + 1); fc++) {
-              if (hCols2[fc] && hCols2[fc].querySelector('.frontal-marker')) { hasFrontalNearby = true; break; }
-            }
-            var rbTopPos = hasFrontalNearby ? '-48px' : '-34px';
-            
+            rbBadge.className = 'tl-badge';
+            rbBadge.setAttribute('data-sev', '1');
+
             // Single column: centered over column, natural width
             // Multi column: stretch to fill the full span
+            // (top is a pre-layout default — _bvLayoutTlBadges assigns the real one)
             var posStyle = (spanCols <= 1)
-              ? 'position:absolute;top:' + rbTopPos + ';left:50%;transform:translateX(-50%);'
-              : 'position:absolute;top:' + rbTopPos + ';left:0;width:' + spanWidth + 'px;box-sizing:border-box;';
-            
+              ? 'position:absolute;top:-34px;left:50%;transform:translateX(-50%);'
+              : 'position:absolute;top:-34px;left:0;width:' + spanWidth + 'px;box-sizing:border-box;';
+
             rbBadge.style.cssText = posStyle +
               'background:linear-gradient(135deg,rgba(255,140,50,.92),rgba(255,90,20,.92));' +
               'border:1px solid rgba(255,200,120,.35);' +
@@ -34957,6 +35026,7 @@ function dayRangeAround(d, days){
             }
           }
         });
+        if (window._bvLayoutTlBadges) window._bvLayoutTlBadges();
       })();
 
       // ── MEASURED STREET FLOODING column markers (FloodNet, NYC) ────────────
@@ -35026,17 +35096,13 @@ function dayRangeAround(d, days){
           if (!startEl) return;
           var spanCols = endCol - startCol + 1;
           var cw = (cols[startCol] && cols[startCol].offsetWidth) || 50;
-          // sit below the predicted-rain badges so the two never overlap
+          // top is a pre-layout default — _bvLayoutTlBadges packs the lanes
           var pos = (spanCols <= 1)
             ? 'position:absolute;top:-34px;left:50%;transform:translateX(-50%);'
             : 'position:absolute;top:-34px;left:0;width:' + (spanCols*cw) + 'px;box-sizing:border-box;';
-          var hasRainBadge = false;
-          for (var oc = Math.max(0, startCol-1); oc <= Math.min(cols.length-1, endCol+1); oc++){
-            if (cols[oc] && (cols[oc].querySelector('.flashflood-badge') || cols[oc].querySelector('.frontal-marker'))) { hasRainBadge = true; break; }
-          }
-          if (hasRainBadge) pos = pos.replace('top:-34px', 'top:-62px');
           var badge = document.createElement('div');
-          badge.className = 'fnstreet-badge';
+          badge.className = 'fnstreet-badge tl-badge';
+          badge.setAttribute('data-sev', '4');
           badge.style.cssText = pos +
             'background:linear-gradient(135deg,rgba(168,85,247,.95),rgba(109,40,217,.95));' +
             'border:1px solid rgba(216,180,254,.45);color:#fff;' +
@@ -35075,6 +35141,7 @@ function dayRangeAround(d, days){
           startEl.style.position = 'relative';
           startEl.style.overflow = 'visible';
           startEl.appendChild(badge);
+          if (window._bvLayoutTlBadges) window._bvLayoutTlBadges();   // arrives async, after the rest
         };
         if (window._fnDayCache[dayKey]) return paint(window._fnDayCache[dayKey]);
         // Cached per date: this row rebuilds on the 30s live tick, and an
@@ -35147,7 +35214,6 @@ function dayRangeAround(d, days){
         var _ffColWidths = new Array(hCols3.length);
         for (var _ffi = 0; _ffi < hCols3.length; _ffi++) _ffColWidths[_ffi] = (hCols3[_ffi] && hCols3[_ffi].offsetWidth) || 50;
 
-        var anyStacked = false;
         windows.forEach(function(w){
           // Tier decided by the window's PEAK rate
           var isFlood = w.peakRate >= DRAIN_CAP;
@@ -35197,20 +35263,15 @@ function dayRangeAround(d, days){
           var spanCols = w.endCol - w.startCol + 1;
           var startColEl = hCols3[w.startCol];
           if (!startColEl) return;
-          // Collision: stack higher if a warm-front / rainbow already shares a nearby column
-          var hasOtherBadge = false;
-          for (var oc = Math.max(0, w.startCol - 1); oc <= Math.min(hCols3.length - 1, w.endCol + 1); oc++) {
-            if (hCols3[oc] && (hCols3[oc].querySelector('.frontal-marker') || hCols3[oc].querySelector('.rainbow-marker'))) { hasOtherBadge = true; break; }
-          }
-          var topPos = hasOtherBadge ? '-62px' : '-34px';
-          if (hasOtherBadge) anyStacked = true;
+          // top is a pre-layout default — _bvLayoutTlBadges packs the lanes
           var colWidth = _ffColWidths[w.startCol] || 50;
           var spanWidth = spanCols * colWidth;
           var posStyle = (spanCols <= 1)
-            ? 'position:absolute;top:'+topPos+';left:50%;transform:translateX(-50%);'
-            : 'position:absolute;top:'+topPos+';left:0;width:'+spanWidth+'px;box-sizing:border-box;';
+            ? 'position:absolute;top:-34px;left:50%;transform:translateX(-50%);'
+            : 'position:absolute;top:-34px;left:0;width:'+spanWidth+'px;box-sizing:border-box;';
           var badge = document.createElement('div');
-          badge.className = tier.badgeCls;
+          badge.className = tier.badgeCls + ' tl-badge';
+          badge.setAttribute('data-sev', isFlood ? '5' : '3');
           badge.style.cssText = posStyle +
             'background:'+tier.badgeBg+';' +
             'border:1px solid '+tier.badgeBorder+';' +
@@ -35261,12 +35322,11 @@ function dayRangeAround(d, days){
           startColEl.style.overflow = 'visible';
           startColEl.appendChild(badge);
         });
-        // Mobile: the weather row's 46px top padding IS the badge float zone —
-        // a -34px badge fits inside it. Only the stacked -62px tier pokes 16px
-        // above the row into the rain line; give just that case the missing
-        // clearance (62 + 8 breathing - 46 = 24px). Anything more opens a
-        // visible dead gap under the rain line (2026-07-21 screenshot).
-        if (hIsMobile && _chipEl && anyStacked) _chipEl.style.marginBottom = '24px';
+        // The badge float zone now sizes itself (_bvLayoutTlBadges grows the
+        // row's top padding to fit the tallest stack), so nothing ever climbs
+        // past the row's top border and the rain line needs no extra clearance.
+        // The old fix pushed the rain line up by 24px whenever a badge stacked.
+        if (window._bvLayoutTlBadges) window._bvLayoutTlBadges();
       })();
 
     // Position NOW marker
@@ -77064,7 +77124,10 @@ function closeAlertModal(){
     band.style.cssText = 'position:absolute;top:0;left:0;width:100%;bottom:-20px;background:'+COL+';opacity:.1;border-radius:10px;';
     marker.appendChild(band);
     var badge = document.createElement('div');
-    badge.style.cssText = 'position:absolute;top:-45px;left:50%;transform:translateX(-50%);'
+    badge.className = 'tl-badge';
+    badge.setAttribute('data-sev', '0');
+    // top is a pre-layout default — _bvLayoutTlBadges assigns the real one
+    badge.style.cssText = 'position:absolute;top:-34px;left:50%;transform:translateX(-50%);'
       + 'background:'+COL+';color:#fff;font-size:7.5px;font-weight:800;padding:3px 10px;border-radius:5px;'
       + 'letter-spacing:.4px;text-align:center;line-height:1.1;z-index:20;white-space:nowrap;'
       + 'box-shadow:0 1px 4px rgba(0,0,0,.3),0 0 8px '+COL+'44;text-shadow:0 1px 1px rgba(0,0,0,.3);'
@@ -77108,6 +77171,7 @@ function closeAlertModal(){
     });
     marker.appendChild(badge);
     cols[idx].appendChild(marker);
+    if (window._bvLayoutTlBadges) window._bvLayoutTlBadges();
   }
   function injectSongCues(){
     try{
@@ -77122,6 +77186,8 @@ function closeAlertModal(){
         if (have && have.parentNode) have.parentNode.removeChild(have);
         if (cue) _placeCueMarker(cols, kind, cue.m, cue.name, ds, cue.ex);
       });
+      // also covers the removal path above: a cue dropping off shrinks the zone
+      if (window._bvLayoutTlBadges) window._bvLayoutTlBadges();
     }catch(e){}
   }
   function registerSongCue(kind, dateStr, mins, name, ex){
