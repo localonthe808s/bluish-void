@@ -16,6 +16,24 @@
   }
   function daysSinceJ2000(date){ return julianDay(date) - 2451545.0; }
 
+  /* Paul Schlyter's orbital elements, RE-REFERRED TO J2000.
+
+     They are published for epoch 1999 Dec 31.0 UT (JD 2451543.5) and are meant
+     to be evaluated with his day number, which is 0 there. This file has always
+     fed them daysSinceJ2000 instead — a day number that is 0 at JD 2451545.0,
+     1.5 days later — so every body was placed 1.5 days ahead of itself. The
+     Moon covers 19.8° in that time and was the visible casualty (measured 20.1°
+     against JPL Horizons, on the wrong side of Earth in the solar map); the Sun
+     ran 1.5° out, dragging sunrise/sunset ~3 min, and Mercury 6.1°.
+
+     Rather than thread a second day number through fourteen call sites, each
+     constant term absorbs 1.5 days of its own rate: X0' = X0 + 1.5·X1, which is
+     the same elements referred to J2000, so daysSinceJ2000 is now telling the
+     truth and every caller is correct at once. Only N, w and M moved — the
+     shift is below the stated precision of every i, a and e here.
+
+     Cross-check: the Moon's mean anomaly comes out at 134.96289°, and Meeus's
+     J2000 value, already sitting in moonDistKm below, is 134.9633964°. */
   var ORB = {
     sun:     { w:[282.940471,4.70935E-5], a:[1,0],        e:[0.016709,-1.151E-9], M:[357.525400,0.9856002585] },
     mercury: { N:[48.331349,3.24587E-5], i:[7.0047,5.00E-8], w:[29.124115,1.01444E-5], a:[0.387098,0], e:[0.205635,5.59E-10], M:[174.794702,4.0923344368] },
@@ -596,6 +614,10 @@
     document.body.classList.add('planet-modal-open');
     window._bvArmBack(window._closePlanetPopup);
     if (typeof addScrollFade === 'function') addScrollFade(pp);
+    // Anything that needs a live element rather than an HTML string — e.g. the
+    // Cloud Analysis sky panel, which is painted by the hero's SVG cloud
+    // renderer once its <g> exists.
+    if (typeof config.onMount === 'function') { try { config.onMount(pp); } catch(e){ console.warn('onMount failed:', e); } }
     // Wix iframe is auto-resized to content height, so its viewport != user's
     // visible area. Backdrop is position:absolute (in document flow) and we
     // delegate to the parent frame to scroll the popup into view.
@@ -938,6 +960,14 @@
         });
       });
       window.addEventListener('message', function(e){
+        if (e.data && e.data.solarReady){ _solarLoaderDone(); return; }
+        if (e.data && typeof e.data.solarPlaying === 'boolean'){
+          document.documentElement.classList.toggle('bv-mapfocus', e.data.solarPlaying);
+          /* the GOES flipbook is a canvas rAF, so a CSS pause cannot reach it —
+             it has its own sleep flag */
+          try{ window._goesSleeping = e.data.solarPlaying ? true : false; }catch(_){}
+          return;
+        }
         if (!e.data || !e.data.solarTabChanged) return;
         bar.querySelectorAll('.solar-tab').forEach(function(x){
           x.classList.toggle('active', x.getAttribute('data-tab') === e.data.solarTabChanged);
@@ -969,11 +999,38 @@
       pushSummary();
       new MutationObserver(pushSummary).observe(src, {childList:true, characterData:true, subtree:true});
     }
+    /* The loader only earns its place if the wait is real: it appears after
+       250ms and is removed when the map reports it has drawn, or after 12s if
+       that message never comes (a failed iframe should not leave a spinner
+       running forever). */
+    var _slTimer = null, _slFail = null, _slShown = false;
+    window._solarLoaderDone = function(){
+      clearTimeout(_slTimer); clearTimeout(_slFail);
+      var el = document.getElementById('solar-loading');
+      if (!el || el.hidden) { if (el) el.hidden = true; return; }
+      el.classList.add('sl-out');
+      setTimeout(function(){ el.hidden = true; el.classList.remove('sl-out'); }, 460);
+    };
+    function _solarLoaderArm(){
+      var el = document.getElementById('solar-loading');
+      if (!el || _slShown) return;
+      _slShown = true;
+      _slTimer = setTimeout(function(){
+        try{
+          var w = frame() && frame().contentWindow;
+          if (w && w.nodes && Object.keys(w.nodes).length) return;   // already drawn
+        }catch(_){}
+        el.hidden = false;
+      }, 250);
+      _slFail = setTimeout(window._solarLoaderDone, 12000);
+    }
+
     function watch(){
       var w = document.getElementById('solar-widget'), f = frame();
       if (!w || !f || !window.IntersectionObserver) return;
       new IntersectionObserver(function(es){
         es.forEach(function(en){
+          if (en.isIntersecting) _solarLoaderArm();
           if (f.contentWindow)
             f.contentWindow.postMessage({solarVisible: en.isIntersecting}, '*');
         });
@@ -1076,6 +1133,11 @@
       // Moon-specific: compute phase & illumination
       if (planetKey === 'moon') {
         var sunLon2 = sunEcliptic(sunD2).lon;
+        /* This carried its own copy of the lunar elements and summed them as
+           N + w + M — the MEAN longitude, with no Kepler solve and no
+           perturbations, so the illumination it printed could sit ~7° of phase
+           off the Moon the rest of the page was drawing. It uses the one real
+           lunar position now. */
         var moonLon = moonEcl(now).lon;
         var phaseAngle = fixAngle(moonLon - deg(sunLon2));
         var illum = Math.round((1 - Math.cos(rad(phaseAngle))) / 2 * 100);
@@ -1141,6 +1203,57 @@
 
     // Live position
     // ── Moon visual helpers ──
+    /* Photographed bodies, not drawings. The Moon is the same self-hosted NASA
+       SVS frame the hero uses; Earth is Apollo 17's Blue Marble (AS17-148-22727,
+       NASA, public domain) cropped so the disc fills its square frame; the Sun
+       is the live GOES-19 SUVI 304A disc.
+       _MOON_FILL: the SVS frame pads the disc — measured 646px of Moon in a
+       730px frame, so it needs 1.13x to reach the edge of a circular crop.
+       Without it the crop shows the photo's own black surround as a ring around
+       the Moon (user). A little over the measured value because apparent size
+       swings with perigee/apogee.
+       _SUN_FILL: the SUVI frame is 78% disc and carries a caption strip along
+       the bottom; zooming past it crops the caption out of a circular clip. */
+    /* On window, not a local var: these are used from nested builders too
+       (miniViz, the interior cutaway), and a plain var in this scope has been
+       unreachable from a nested render in this file before. */
+    var _IMG_MOON = window._IMG_MOON = 'https://cdn.bluishvoid.com/moon/current.jpg';
+    var _IMG_EARTH = window._IMG_EARTH = 'https://cdn.bluishvoid.com/planet-earth.jpg';
+    var _IMG_SUN = window._IMG_SUN = 'https://cdn.bluishvoid.com/solar/suvi304.jpg';
+    var _MOON_FILL = window._MOON_FILL = 1.16, _SUN_FILL = window._SUN_FILL = 1.46;
+    /* Every planet's disc, already on the CDN for the timeline legend. */
+    window._IMG_PLANET = {
+      mercury:'https://cdn.bluishvoid.com/planet-8fc30b7a.jpg',
+      venus:'https://cdn.bluishvoid.com/planet-2e98fa2c.jpg',
+      mars:'https://cdn.bluishvoid.com/planet-35430401.jpg',
+      jupiter:'https://cdn.bluishvoid.com/planet-b52f3e86.jpg',
+      saturn:'https://cdn.bluishvoid.com/planet-4d8062c8.jpg',
+      uranus:'https://cdn.bluishvoid.com/planet-6b856012.jpg',
+      neptune:'https://cdn.bluishvoid.com/planet-bbbcf8f2.jpg'
+    };
+    /* A fixed star pattern — same every render, so nothing twinkles or reshuffles
+       when the popup redraws. Plain LCG rather than Math.random for exactly that
+       reason. */
+    var _starField = window._starField = function(w, h, n, seed){
+      var st = seed || 7, out = '';
+      var nx = function(){ st = (st * 1103515245 + 12345) & 0x7fffffff; return st / 0x7fffffff; };
+      for (var i = 0; i < n; i++){
+        var x = nx() * w, y = nx() * h, r = 0.25 + nx() * 0.85, op = 0.22 + nx() * 0.55;
+        out += '<circle cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) + '" r="' + r.toFixed(2) +
+               '" fill="#fff" opacity="' + op.toFixed(2) + '"/>';
+      }
+      return out;
+    };
+    /* A photographed body as a circular SVG image. The clip is a circle of the
+       drawn radius; the image is laid down `fill`x larger and re-centred, so the
+       disc reaches the clip edge instead of sitting inside its own padding. */
+    var _photoDisc = function(href, cx, cy, r, fill, id){
+      var d = r * 2 * (fill || 1);
+      return '<clipPath id="' + id + '"><circle cx="' + cx + '" cy="' + cy + '" r="' + r + '"/></clipPath>' +
+             '<image href="' + href + '" x="' + (cx - d / 2).toFixed(2) + '" y="' + (cy - d / 2).toFixed(2) +
+             '" width="' + d.toFixed(2) + '" height="' + d.toFixed(2) +
+             '" preserveAspectRatio="xMidYMid slice" clip-path="url(#' + id + ')"/>';
+    };
     // moonPhaseSvg — draws the actual current moon phase as an SVG disc
     // with cream-lit portion and dark shadow side. Uses the standard
     // two-arc terminator approach (outer half-circle + inner half-
@@ -1279,9 +1392,17 @@
       // drawings for our own Moon). The drawn disc is only the onerror
       // fallback now.
       var _mvq = (window._moonPreload && window._moonPreload.frameStr) ? ('?v=' + window._moonPreload.frameStr) : '';
-      h += '<img src="https://cdn.bluishvoid.com/moon/current.jpg' + _mvq + '" alt="" ' +
-        'style="width:128px;height:128px;border-radius:50%;flex-shrink:0;object-fit:cover;box-shadow:0 6px 22px rgba(20,30,80,.35);" ' +
-        'onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'block\';">';
+      /* Wrapped and over-scaled rather than dropped straight into a round
+         border-radius: the SVS frame pads the disc (646px of Moon in 730px), so
+         a plain circular crop shows the photo's own black surround as a ring
+         (user). The wrapper does the clipping, the image is blown up past the
+         padding. */
+      h += '<div style="width:128px;height:128px;border-radius:50%;flex-shrink:0;overflow:hidden;' +
+        'box-shadow:0 6px 22px rgba(20,30,80,.35);">' +
+        '<img src="' + _IMG_MOON + _mvq + '" alt="" ' +
+        'style="width:100%;height:100%;object-fit:cover;display:block;transform:scale(' + _MOON_FILL + ');" ' +
+        'onerror="this.parentNode.style.display=\'none\';this.parentNode.nextElementSibling.style.display=\'block\';">' +
+        '</div>';
       h += '<div style="display:none;flex-shrink:0;">' + moonPhaseSvg(phaseFloat, 72) + '</div>';
       h += '<div style="flex:1;">'+
         '<div style="font-size:14px;font-weight:900;color:#3344cc;line-height:1.1;">'+moonPhaseInfo.name+'</div>'+
@@ -1333,37 +1454,31 @@
       // Earth-diameter is 7918 mi; Moon 2159 mi (~27% of Earth). Moon
       // sits at 238,855 mi from Earth's center = ~30 Earth-diameters
       // away. The diagram packs both relationships into one image.
-      var emW = 308, emH = 78;
-      var earthR = 18;            // px in the diagram
-      var moonR = earthR * 2159 / 7918;  // ~4.9 px → use min 5 for visibility
-      moonR = Math.max(5, moonR);
-      // Visual distance is compressed (real ratio = ~30 doesn't fit), so
-      // we squash it to fit the canvas while keeping it clearly "far".
-      var earthCx = 32, moonCx = emW - 32;
-      var ems = '<svg width="100%" viewBox="0 0 '+emW+' '+emH+'" preserveAspectRatio="xMidYMid meet" style="display:block;background:linear-gradient(180deg,#0a0820 0%,#1a1840 100%);border-radius:8px;margin:6px 0 4px;">';
-      // Earth (with subtle ocean/land tint)
-      ems += '<defs><radialGradient id="emEarth" cx="35%" cy="35%" r="60%">'+
-        '<stop offset="0%" stop-color="#88c0e8"/>'+
-        '<stop offset="50%" stop-color="#3a78c8"/>'+
-        '<stop offset="100%" stop-color="#1a3868"/>'+
+      var emW = 308, emH = 92;
+      var earthR = 21;                          // px in the diagram
+      var moonR = Math.max(6, earthR * 2159 / 7918);   // ~5.7px -> honest 27%
+      // Visual distance is compressed (the real ~30 Earth-diameters does not
+      // fit), so it is squashed to the canvas while still reading as "far".
+      var earthCx = 34, moonCx = emW - 34;
+      var ems = '<svg class="bv-skypanel" width="100%" viewBox="0 0 '+emW+' '+emH+'" preserveAspectRatio="xMidYMid meet" style="display:block;border-radius:8px;margin:6px 0 4px;">';
+      // Real sky behind them rather than a blue gradient (user).
+      ems += '<defs><radialGradient id="emSky" cx="50%" cy="45%" r="75%">'+
+        '<stop offset="0%" stop-color="#0d1026"/><stop offset="100%" stop-color="#04060f"/>'+
       '</radialGradient></defs>';
-      ems += '<circle cx="'+earthCx+'" cy="'+(emH/2)+'" r="'+earthR+'" fill="url(#emEarth)"/>';
-      ems += '<text x="'+earthCx+'" y="'+(emH-6)+'" text-anchor="middle" font-size="9" font-weight="700" fill="rgba(255,255,255,.7)" style="fill:rgba(255,255,255,.7);">Earth</text>';
-      ems += '<text x="'+earthCx+'" y="11" text-anchor="middle" font-size="7" font-weight="600" fill="rgba(255,255,255,.45)" style="fill:rgba(255,255,255,.45);">7,918 mi</text>';
-      // Moon (cream)
-      ems += '<defs><radialGradient id="emMoon" cx="40%" cy="35%" r="55%">'+
-        '<stop offset="0%" stop-color="#fffbe8"/>'+
-        '<stop offset="60%" stop-color="#d8d2bc"/>'+
-        '<stop offset="100%" stop-color="#888070"/>'+
-      '</radialGradient></defs>';
-      ems += '<circle cx="'+moonCx+'" cy="'+(emH/2)+'" r="'+moonR+'" fill="url(#emMoon)"/>';
-      ems += '<text x="'+moonCx+'" y="'+(emH-6)+'" text-anchor="middle" font-size="9" font-weight="700" fill="rgba(255,255,255,.7)" style="fill:rgba(255,255,255,.7);">Moon</text>';
-      ems += '<text x="'+moonCx+'" y="11" text-anchor="middle" font-size="7" font-weight="600" fill="rgba(255,255,255,.45)" style="fill:rgba(255,255,255,.45);">2,159 mi · 27% of Earth</text>';
-      // Connecting line
-      ems += '<line x1="'+(earthCx+earthR+2)+'" y1="'+(emH/2)+'" x2="'+(moonCx-moonR-2)+'" y2="'+(emH/2)+'" stroke="rgba(255,255,255,.25)" stroke-width="1" stroke-dasharray="2 3"/>';
-      // Distance label centered
-      ems += '<text x="'+(emW/2)+'" y="'+(emH/2-6)+'" text-anchor="middle" font-size="9" font-weight="700" fill="rgba(255,255,255,.85)" style="fill:rgba(255,255,255,.85);">238,855 mi</text>';
-      ems += '<text x="'+(emW/2)+'" y="'+(emH/2+9)+'" text-anchor="middle" font-size="7" font-weight="600" fill="rgba(255,255,255,.45)" style="fill:rgba(255,255,255,.45);">~30 Earth-diameters</text>';
+      ems += '<rect width="'+emW+'" height="'+emH+'" fill="url(#emSky)"/>';
+      ems += _starField(emW, emH, 70, 20260802);
+      // Connecting line, drawn first so the discs sit on top of it
+      ems += '<line x1="'+(earthCx+earthR+3)+'" y1="'+(emH/2)+'" x2="'+(moonCx-moonR-3)+'" y2="'+(emH/2)+'" stroke="rgba(255,255,255,.28)" stroke-width="1" stroke-dasharray="2 3"/>';
+      ems += _photoDisc(_IMG_EARTH, earthCx, emH/2, earthR, 1.0, 'emEarthC');
+      ems += _photoDisc(_IMG_MOON, moonCx, emH/2, moonR, _MOON_FILL, 'emMoonC');
+      ems += '<text x="'+earthCx+'" y="'+(emH-7)+'" text-anchor="middle" font-size="9" font-weight="700" fill="rgba(255,255,255,.8)" style="fill:rgba(255,255,255,.8);">Earth</text>';
+      ems += '<text x="'+earthCx+'" y="12" text-anchor="middle" font-size="7" font-weight="600" fill="rgba(255,255,255,.5)" style="fill:rgba(255,255,255,.5);">7,918 mi</text>';
+      ems += '<text x="'+moonCx+'" y="'+(emH-7)+'" text-anchor="middle" font-size="9" font-weight="700" fill="rgba(255,255,255,.8)" style="fill:rgba(255,255,255,.8);">Moon</text>';
+      /* anchored to the frame edge, not to the disc: centred on the Moon this
+         caption ran past the right edge and lost its last characters. */
+      ems += '<text x="'+(emW-4)+'" y="12" text-anchor="end" font-size="7" font-weight="600" fill="rgba(255,255,255,.5)" style="fill:rgba(255,255,255,.5);">2,159 mi \u00b7 27% of Earth</text>';
+      ems += '<text x="'+(emW/2)+'" y="'+(emH/2-6)+'" text-anchor="middle" font-size="9.5" font-weight="700" fill="rgba(255,255,255,.9)" style="fill:rgba(255,255,255,.9);">238,855 mi</text>';
+      ems += '<text x="'+(emW/2)+'" y="'+(emH/2+9)+'" text-anchor="middle" font-size="7" font-weight="600" fill="rgba(255,255,255,.5)" style="fill:rgba(255,255,255,.5);">~30 Earth-diameters</text>';
       ems += '</svg>';
       h += ems;
       h += '<div style="font-size:9px;text-align:center;color:rgba(43,34,244,.55);margin:-2px 0 6px;font-weight:600;">Distance compressed for clarity · sizes to scale</div>';
@@ -1428,10 +1543,27 @@
       '</div>';
       // Moon and Sun side-by-side at apparent size — both look ~30 arcmin
       // from Earth (this coincidence is why we get total solar eclipses!)
-      h += '<div style="display:flex;align-items:center;justify-content:center;gap:18px;padding:10px;background:rgba(43,34,244,.04);border-radius:8px;">';
-      h += '<div style="text-align:center;"><div style="width:38px;height:38px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#fffbe8,#a8a292);margin:0 auto;"></div><div style="font-size:9px;font-weight:700;color:rgba(43,34,244,.7);margin-top:4px;">Moon</div><div style="font-size:8px;color:rgba(43,34,244,.45);">~31 arcmin</div></div>';
-      h += '<div style="font-size:14px;font-weight:900;color:rgba(43,34,244,.45);">≈</div>';
-      h += '<div style="text-align:center;"><div style="width:38px;height:38px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#fff5d8,#e8a040);margin:0 auto;box-shadow:0 0 12px rgba(255,180,80,.4);"></div><div style="font-size:9px;font-weight:700;color:rgba(43,34,244,.7);margin-top:4px;">Sun</div><div style="font-size:8px;color:rgba(43,34,244,.45);">~32 arcmin</div></div>';
+      /* Photographed, on the same night sky as the distance diagram above so the
+         two read as a pair. The Sun is the live SUVI 304A disc; both are
+         over-scaled inside a round crop so neither shows its frame padding. */
+      var asDisc = function(href, fill, glow){
+        return '<div style="width:44px;height:44px;border-radius:50%;margin:0 auto;overflow:hidden;' +
+               (glow ? 'box-shadow:0 0 14px rgba(255,170,70,.45);' : 'box-shadow:0 2px 10px rgba(0,0,0,.45);') + '">' +
+               '<img src="' + href + '" alt="" style="width:100%;height:100%;object-fit:cover;display:block;' +
+               'transform:scale(' + fill + ');">' +
+               '</div>';
+      };
+      h += '<div class="bv-skypanel" style="display:flex;align-items:center;justify-content:center;gap:18px;padding:12px 10px;' +
+        'border-radius:8px;position:relative;overflow:hidden;background:radial-gradient(120% 100% at 50% 40%,#0d1026,#04060f);">';
+      h += '<svg viewBox="0 0 300 90" preserveAspectRatio="none" style="position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;">' +
+        _starField(300, 90, 55, 771103) + '</svg>';
+      h += '<div style="text-align:center;position:relative;">' + asDisc(_IMG_MOON, _MOON_FILL, false) +
+        '<div style="font-size:9px;font-weight:700;color:rgba(255,255,255,.85);margin-top:5px;">Moon</div>' +
+        '<div style="font-size:8px;color:rgba(255,255,255,.5);">~31 arcmin</div></div>';
+      h += '<div style="font-size:14px;font-weight:900;color:rgba(255,255,255,.5);position:relative;">\u2248</div>';
+      h += '<div style="text-align:center;position:relative;">' + asDisc(_IMG_SUN, _SUN_FILL, true) +
+        '<div style="font-size:9px;font-weight:700;color:rgba(255,255,255,.85);margin-top:5px;">Sun</div>' +
+        '<div style="font-size:8px;color:rgba(255,255,255,.5);">~32 arcmin</div></div>';
       h += '</div>';
       h += '<div style="font-size:9.5px;text-align:center;color:rgba(43,34,244,.55);margin-top:5px;">From Earth, Moon and Sun appear nearly the same size — the cosmic coincidence behind total solar eclipses.</div>';
       h += '</div>';
@@ -1506,37 +1638,74 @@
         var s = f.toLowerCase();
         // "All planets fit between Earth and Moon" — visual scale
         if (/all\s*\d?\s*other\s*planets.*fit/.test(s) || /side[- ]by[- ]side/.test(s) || /fit between/.test(s)) {
-          return '<div style="display:flex;align-items:center;justify-content:center;gap:3px;margin:8px 0 2px;padding:8px;background:linear-gradient(90deg,#0a0820,#1a1840);border-radius:6px;">'+
-            '<div style="width:18px;height:18px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#88c0e8,#1a3868);box-shadow:0 0 4px rgba(100,160,220,.5);" title="Earth"></div>'+
-            '<div style="font-size:8px;color:rgba(255,255,255,.5);">|</div>'+
-            '<div style="width:5px;height:5px;border-radius:50%;background:#9a9a9a;" title="Mercury"></div>'+
-            '<div style="width:14px;height:14px;border-radius:50%;background:#e8c08a;" title="Venus"></div>'+
-            '<div style="width:7px;height:7px;border-radius:50%;background:#cc4422;" title="Mars"></div>'+
-            '<div style="width:36px;height:36px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#e8c4a0,#8a5a3a);" title="Jupiter"></div>'+
-            '<div style="width:30px;height:30px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#e8d8a8,#aa8856);" title="Saturn"></div>'+
-            '<div style="width:13px;height:13px;border-radius:50%;background:#a0d8d8;" title="Uranus"></div>'+
-            '<div style="width:13px;height:13px;border-radius:50%;background:#4488cc;" title="Neptune"></div>'+
-            '<div style="font-size:8px;color:rgba(255,255,255,.5);">|</div>'+
-            '<div style="width:5px;height:5px;border-radius:50%;background:#d8d2bc;" title="Moon"></div>'+
+          /* Photographed, like the diagrams on the FACTS tab. The point of this
+             one is relative size, so the diameters are unchanged — only the
+             fill went from a flat colour to the body itself. Discs are
+             background-image so each can carry its own zoom: the Moon frame
+             pads its disc and would otherwise show a black rim. */
+          var _pl = window._IMG_PLANET || {};
+          var _disc = function(px, href, zoom, title){
+            return '<div title="' + title + '" style="width:' + px + 'px;height:' + px + 'px;border-radius:50%;' +
+              'flex-shrink:0;overflow:hidden;position:relative;box-shadow:0 0 5px rgba(0,0,0,.5);">' +
+              '<img src="' + href + '" alt="" style="width:100%;height:100%;object-fit:cover;display:block;' +
+              'transform:scale(' + (zoom || 1) + ');">' +
+              '</div>';
+          };
+          return '<div class="bv-skypanel" style="display:flex;align-items:center;justify-content:center;gap:3px;margin:8px 0 2px;' +
+            'padding:10px 8px;border-radius:6px;position:relative;overflow:hidden;' +
+            'background:radial-gradient(120% 100% at 50% 45%,#0d1026,#04060f);">'+
+            '<svg viewBox="0 0 300 56" preserveAspectRatio="none" style="position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;">' +
+              (window._starField ? window._starField(300, 56, 44, 4242) : '') + '</svg>' +
+            '<div style="position:relative;display:flex;align-items:center;gap:3px;">' +
+            _disc(20, window._IMG_EARTH, 1, 'Earth')+
+            '<div style="font-size:8px;color:rgba(255,255,255,.45);">|</div>'+
+            _disc(5,  _pl.mercury, 1, 'Mercury')+
+            _disc(14, _pl.venus,   1, 'Venus')+
+            _disc(7,  _pl.mars,    1, 'Mars')+
+            _disc(36, _pl.jupiter, 1, 'Jupiter')+
+            /* Saturn's frame is a narrow globe between ring-shadow bands — the
+               same 1.45x the interior cutaway uses to get past them. */
+            _disc(30, _pl.saturn,  1.45, 'Saturn')+
+            _disc(13, _pl.uranus,  1, 'Uranus')+
+            _disc(13, _pl.neptune, 1, 'Neptune')+
+            '<div style="font-size:8px;color:rgba(255,255,255,.45);">|</div>'+
+            _disc(5, window._IMG_MOON, window._MOON_FILL, 'Moon')+
+            '</div>'+
           '</div>'+
           '<div style="font-size:8.5px;text-align:center;color:rgba(43,34,244,.5);font-style:italic;margin-top:0;">Earth \u00b7 7 planets \u00b7 Moon (relative sizes)</div>';
         }
         // Lunar eclipse: Earth refracting red light to Moon
         if (/lunar eclipse|blood red|red sunlight|earth.*atmosphere.*bend/.test(s)) {
-          return '<svg width="100%" viewBox="0 0 280 60" preserveAspectRatio="xMidYMid meet" style="display:block;background:#0a0820;border-radius:6px;margin:8px 0 2px;">'+
-            '<defs><radialGradient id="leSun-'+Math.round(Math.random()*1e5)+'" cx="50%" cy="50%" r="50%">'+
-              '<stop offset="0%" stop-color="#fff5d8"/><stop offset="60%" stop-color="#e8a040"/><stop offset="100%" stop-color="#cc6622"/>'+
+          /* Photographed bodies on a star field, matching the FACTS diagrams.
+             The Moon keeps a red wash over the photo rather than a flat red
+             dot — the fact being illustrated is that it turns red, so the
+             surface has to still read as the Moon underneath. */
+          var _ph = function(href, cx2, cy2, r2, zoom, id){
+            var d2 = r2 * 2 * (zoom || 1);
+            return '<clipPath id="' + id + '"><circle cx="' + cx2 + '" cy="' + cy2 + '" r="' + r2 + '"/></clipPath>' +
+                   '<image href="' + href + '" x="' + (cx2 - d2 / 2).toFixed(2) + '" y="' + (cy2 - d2 / 2).toFixed(2) +
+                   '" width="' + d2.toFixed(2) + '" height="' + d2.toFixed(2) +
+                   '" preserveAspectRatio="xMidYMid slice" clip-path="url(#' + id + ')"/>';
+          };
+          var _lid = 'le' + Math.round(Math.random() * 1e6);
+          return '<svg class="bv-skypanel" width="100%" viewBox="0 0 280 60" preserveAspectRatio="xMidYMid meet" style="display:block;border-radius:6px;margin:8px 0 2px;">'+
+            '<defs><radialGradient id="sky-'+_lid+'" cx="50%" cy="45%" r="80%">'+
+              '<stop offset="0%" stop-color="#0d1026"/><stop offset="100%" stop-color="#04060f"/>'+
             '</radialGradient></defs>'+
-            '<circle cx="22" cy="30" r="14" fill="#e8a040"/>'+
-            '<text x="22" y="54" text-anchor="middle" font-size="7" fill="rgba(255,255,255,.6)" style="fill:rgba(255,255,255,.6);">Sun</text>'+
-            '<circle cx="140" cy="30" r="9" fill="#3a78c8"/>'+
-            '<circle cx="140" cy="30" r="11" fill="none" stroke="rgba(255,80,60,.5)" stroke-width="1.5"/>'+
-            '<text x="140" y="54" text-anchor="middle" font-size="7" fill="rgba(255,255,255,.6)" style="fill:rgba(255,255,255,.6);">Earth</text>'+
+            '<rect width="280" height="60" fill="url(#sky-'+_lid+')"/>'+
+            (window._starField ? window._starField(280, 60, 46, 90210) : '') +
             '<line x1="36" y1="30" x2="129" y2="30" stroke="rgba(255,200,140,.5)" stroke-width="0.7"/>'+
             '<path d="M 145 25 Q 180 18 210 24 Q 235 28 250 28" stroke="rgba(255,80,60,.7)" stroke-width="1" fill="none"/>'+
             '<path d="M 145 35 Q 180 42 210 36 Q 235 32 250 32" stroke="rgba(255,80,60,.7)" stroke-width="1" fill="none"/>'+
-            '<circle cx="252" cy="30" r="6" fill="#aa3322"/>'+
-            '<text x="252" y="54" text-anchor="middle" font-size="7" fill="rgba(255,80,60,.85)" style="fill:rgba(255,80,60,.85);">Moon</text>'+
+            _ph(window._IMG_SUN, 22, 30, 14, window._SUN_FILL, 'sun-'+_lid)+
+            '<circle cx="22" cy="30" r="14" fill="none" stroke="rgba(255,190,90,.35)" stroke-width="1"/>'+
+            '<text x="22" y="54" text-anchor="middle" font-size="7" fill="rgba(255,255,255,.7)" style="fill:rgba(255,255,255,.7);">Sun</text>'+
+            _ph(window._IMG_EARTH, 140, 30, 9, 1, 'ear-'+_lid)+
+            '<circle cx="140" cy="30" r="11" fill="none" stroke="rgba(255,80,60,.5)" stroke-width="1.5"/>'+
+            '<text x="140" y="54" text-anchor="middle" font-size="7" fill="rgba(255,255,255,.7)" style="fill:rgba(255,255,255,.7);">Earth</text>'+
+            _ph(window._IMG_MOON, 252, 30, 6, window._MOON_FILL, 'mn-'+_lid)+
+            '<circle cx="252" cy="30" r="6" fill="rgba(190,45,25,.55)"/>'+
+            '<text x="252" y="54" text-anchor="middle" font-size="7" fill="rgba(255,120,95,.9)" style="fill:rgba(255,120,95,.9);">Moon</text>'+
           '</svg>'+
           '<div style="font-size:8.5px;text-align:center;color:rgba(43,34,244,.5);font-style:italic;margin-top:0;">Earth\u2019s atmosphere refracts red sunlight into its shadow</div>';
         }
@@ -1747,7 +1916,11 @@
       if (_icSurfImg) {
         /* Saturn's strip photo is a narrow globe between dark ring-shadow
            bands — zoom past them; the rest are full-bleed discs at 1x */
-        var _icZ = (planetKey === 'saturn') ? 1.45 : 1.0;
+        /* Saturn's strip photo is a narrow globe between dark ring-shadow bands;
+           the Moon's SVS frame pads its disc with black. Both need zooming past
+           their surround or the cutaway shows a rim instead of a surface. */
+        var _icZ = (planetKey === 'saturn') ? 1.45
+                 : (planetKey === 'moon') ? (window._MOON_FILL || 1.16) : 1.0;
         var _icHalf = svgR*_icZ;
         svg += '<clipPath id="ic-cut"><path d="'+_surfD+'"/></clipPath>'
              + '<image href="'+_icSurfImg+'" x="'+(cx-_icHalf).toFixed(1)+'" y="'+(cy-_icHalf).toFixed(1)+'" width="'+(_icHalf*2).toFixed(1)+'" height="'+(_icHalf*2).toFixed(1)+'"'
