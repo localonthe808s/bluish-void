@@ -904,166 +904,6 @@
     }
   }
 
-  /* ── "View in the solar system" ────────────────────────────────────────
-     The TODAY planet bars already open a planet's detail popup. This adds the
-     onward jump: send the solar-system widget to that planet and scroll to it.
-     The widget is a separate embed, so the button only appears when the embed
-     is actually on the page — no dead control before it ships. */
-  window.bvSolarWidget = function(){
-    return document.querySelector('iframe[data-solar-system], iframe[src*="solar_lab"]');
-  };
-  window.bvSolarFocus = function(planetKey){
-    var f = window.bvSolarWidget();
-    if (!f) return false;
-    try { f.contentWindow.postMessage({solarFocus: planetKey}, '*'); } catch(e){ return false; }
-    if (window._closePlanetPopup) window._closePlanetPopup();
-    (f.closest('.widget') || f).scrollIntoView({behavior:'smooth', block:'center'});
-    return true;
-  };
-  function _bvAddSolarJump(planetKey, color){
-    if (!window.bvSolarWidget()) return;                 // widget not embedded yet
-    var pop = document.getElementById('planet-insight-popup');
-    if (!pop || pop.querySelector('.bv-solar-jump')) return;
-    var b = document.createElement('button');
-    b.className = 'bv-solar-jump';
-    b.textContent = 'VIEW IN THE SOLAR SYSTEM';
-    b.style.cssText = 'display:block;margin:10px auto 2px;padding:7px 14px;border-radius:999px;' +
-      'border:1px solid rgba(43,34,244,.25);background:rgba(43,34,244,.06);color:#2B22F4;' +
-      'font-size:.62rem;font-weight:800;letter-spacing:.1em;cursor:pointer;font-family:inherit;';
-    b.addEventListener('click', function(){
-      /* the popup's job is done — close it so the flight to the planet is
-         visible instead of blurred behind the modal (user 2026-07-27) */
-      var _pp = document.getElementById('planet-insight-popup');
-      if (_pp) _pp.remove();
-      var _bd = document.getElementById('planet-insight-backdrop');
-      if (_bd) _bd.remove();
-      window.bvSolarFocus(planetKey);
-    });
-    (pop.querySelector('.planet-hero') ? pop : pop).appendChild(b);
-  }
-  window._bvAddSolarJump = _bvAddSolarJump;
-
-  /* solar-system tab bar → the embedded map, and back again when the map
-     switches itself (e.g. a jump-to-planet from the TODAY bars) */
-  (function(){
-    function frame(){ return document.getElementById('solar-frame'); }
-    function wire(){
-      var bar = document.getElementById('solar-tab-bar');
-      if (!bar || bar._wired) return;
-      bar._wired = true;
-      bar.querySelectorAll('.solar-tab').forEach(function(b){
-        b.addEventListener('click', function(){
-          bar.querySelectorAll('.solar-tab').forEach(function(x){ x.classList.toggle('active', x === b); });
-          var f = frame();
-          if (f && f.contentWindow)
-            f.contentWindow.postMessage({solarTab: b.getAttribute('data-tab')}, '*');
-        });
-      });
-      window.addEventListener('message', function(e){
-        if (e.data && e.data.solarReady){ _solarLoaderDone(); return; }
-        if (e.data && typeof e.data.solarPlaying === 'boolean'){
-          document.documentElement.classList.toggle('bv-mapfocus', e.data.solarPlaying);
-          /* the GOES flipbook is a canvas rAF, so a CSS pause cannot reach it —
-             it has its own sleep flag */
-          try{ window._goesSleeping = e.data.solarPlaying ? true : false; }catch(_){}
-          return;
-        }
-        if (!e.data || !e.data.solarTabChanged) return;
-        bar.querySelectorAll('.solar-tab').forEach(function(x){
-          x.classList.toggle('active', x.getAttribute('data-tab') === e.data.solarTabChanged);
-        });
-      });
-    }
-    /* Only let the map run while it is actually on screen — otherwise autoplay
-       walks the date away from today and the summary + planet line below it
-       stop matching, and it burns a rAF loop nobody is looking at. */
-    /* The space summary belongs INSIDE the widget's footer card, not floating
-       on the page background beneath it. The briefing engine still writes
-       #space-summary-text as before; we mirror that text into the map's own
-       summary slot and hide the standalone block. A MutationObserver keeps it
-       in sync when the briefing re-runs. */
-    function pushSummary(){
-      var src = document.getElementById('space-summary-text'), f = frame();
-      if (!src || !f || !f.contentWindow) return;
-      var txt = (src.textContent || '').trim();
-      if (!txt) return;
-      f.contentWindow.postMessage({solarSummary: txt}, '*');
-      var box = document.getElementById('space-summary');
-      if (box) box.style.display = 'none';
-    }
-    window.bvPushSolarSummary = pushSummary;
-    function watchSummary(){
-      var src = document.getElementById('space-summary-text');
-      if (!src || src._watched) return;
-      src._watched = true;
-      pushSummary();
-      new MutationObserver(pushSummary).observe(src, {childList:true, characterData:true, subtree:true});
-    }
-    /* The loader only earns its place if the wait is real: it appears after
-       250ms and is removed when the map reports it has drawn, or after 12s if
-       that message never comes (a failed iframe should not leave a spinner
-       running forever). */
-    var _slTimer = null, _slFail = null, _slShown = false;
-    window._solarLoaderDone = function(){
-      clearTimeout(_slTimer); clearTimeout(_slFail);
-      var el = document.getElementById('solar-loading');
-      if (!el || el.hidden) { if (el) el.hidden = true; return; }
-      el.classList.add('sl-out');
-      setTimeout(function(){ el.hidden = true; el.classList.remove('sl-out'); }, 460);
-    };
-    function _solarLoaderArm(){
-      var el = document.getElementById('solar-loading');
-      if (!el || _slShown) return;
-      _slShown = true;
-      _slTimer = setTimeout(function(){
-        try{
-          var w = frame() && frame().contentWindow;
-          if (w && w.nodes && Object.keys(w.nodes).length) return;   // already drawn
-        }catch(_){}
-        el.hidden = false;
-      }, 250);
-      _slFail = setTimeout(window._solarLoaderDone, 12000);
-    }
-
-    function watch(){
-      var w = document.getElementById('solar-widget'), f = frame();
-      if (!w || !f || !window.IntersectionObserver) return;
-      new IntersectionObserver(function(es){
-        es.forEach(function(en){
-          if (en.isIntersecting) _solarLoaderArm();
-          if (f.contentWindow)
-            f.contentWindow.postMessage({solarVisible: en.isIntersecting}, '*');
-        });
-      }, {threshold: 0.05}).observe(w);
-    }
-    function boot(){
-      wire(); watch();
-      /* the briefing writes the summary well after load, and the iframe needs a
-         moment too — poll briefly, then let the observer take over */
-      var tries = 0;
-      var iv = setInterval(function(){
-        watchSummary();
-        var src = document.getElementById('space-summary-text');
-        if ((src && (src.textContent||'').trim()) || ++tries > 40) clearInterval(iv);
-      }, 900);
-    }
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
-    else boot();
-  })();
-
-  window._bvWrapSolarJump = function(){
-    if (window._bvSolarJumpWrapped || typeof window.showPlanetInsight !== 'function') return;
-    window._bvSolarJumpWrapped = true;
-    var _orig = window.showPlanetInsight;
-    window.showPlanetInsight = function(key, color, ev){
-      var r = _orig.apply(this, arguments);
-      requestAnimationFrame(function(){ try { _bvAddSolarJump(key, color); } catch(e){} });
-      return r;
-    };
-  };
-  if (document.readyState === 'loading')
-    document.addEventListener('DOMContentLoaded', window._bvWrapSolarJump);
-  else window._bvWrapSolarJump();
 
   function showPlanetInsight(planetKey, color, ev) {
     try {
@@ -2280,7 +2120,11 @@
     (document.getElementById('cloud-soundscape-root') || document.body).appendChild(bd);
     document.body.classList.add('planet-modal-open');
     window._bvArmBack(window._closePlanetPopup);
-    addScrollFade(pp);
+    /* guarded like the other two call sites in this file: showPlanetInsight is
+       extracted into the solar lab, which has no addScrollFade, and the bare
+       call threw into the catch below on every popup it opened — losing the
+       scrollIntoView on the next line. No-op here, where the function exists. */
+    if (typeof addScrollFade === 'function') addScrollFade(pp);
     requestAnimationFrame(function(){ try { pp.scrollIntoView({block:'center', inline:'nearest'}); } catch(_){} });
     } catch(err) { console.error('Planet insight error:', err); }
   }

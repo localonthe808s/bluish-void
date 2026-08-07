@@ -35,6 +35,21 @@ def cut(label, start_anchor, end_anchor, include_end=True):
         e += len(end_anchor)
     return html[s:e]
 
+def drop(label, text, start_anchor, end_anchor):
+    """Remove a span from an already-cut slab.
+
+    The popup slab is one contiguous run of index.html, so anything the site
+    happens to keep in the middle of it comes along. Some of that is host-page
+    code the lab has no use for. Exits loudly rather than silently shipping the
+    wrong bytes if either anchor moves."""
+    s = text.find(start_anchor)
+    if s < 0:
+        sys.exit('drop anchor not found: %s (start of %s)' % (start_anchor[:40], label))
+    e = text.find(end_anchor, s)
+    if e < 0:
+        sys.exit('drop anchor not found: %s (end of %s)' % (end_anchor[:40], label))
+    return text[:s] + text[e + len(end_anchor):]
+
 # ---- JS ----
 astro = cut('astro math',
             '  function rad(d){',
@@ -42,6 +57,16 @@ astro = cut('astro math',
 popup = cut('popup stack',
             '  var PLANET_INTERIOR=',
             '  window.showPlanetInsight = showPlanetInsight;')
+# The host page's side of the solar-system embed: bvSolarWidget/bvSolarFocus,
+# the "VIEW IN THE SOLAR SYSTEM" button and the wrapper that installs it, and
+# the tab-bar/loader IIFE with its IntersectionObserver and summary poller.
+# All of it addresses an <iframe> holding the map — which, in the lab, is the
+# page itself, so none of it can work there. It was inert (wire() and watch()
+# both bail on the missing DOM), but _bvAddSolarJump calls bvSolarWidget() and
+# threw into a swallowing catch on every popup the lab opened.
+popup = drop('host-side solar embed', popup,
+             '  /* ── "View in the solar system" ─',
+             '  else window._bvWrapSolarJump();\n')
 showers = cut('meteor showers',
               '  var METEOR_SHOWERS = [',
               '\n  ];')
