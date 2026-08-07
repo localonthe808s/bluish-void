@@ -2177,6 +2177,48 @@ function orbitPath(body){
 }
 
 var _lastDayStr = null, _lastHeavyBuild = 0;
+/* ── which clock the moons run on ──────────────────────────────────────────
+   Two clocks drive this map and only one of them is ever moving. On SOLAR
+   SYSTEM it is curMs, walked forward by the speed select in days per second.
+   On TONIGHT curMs is parked on today's date and the motion lives in tNight,
+   which loops sunset→sunrise at one simulated HOUR per second. Everything
+   moon-related used to read curMs and the speed select regardless, so on
+   TONIGHT the moons kept orbiting at half a day per second — 12× the rate of
+   the clock, the cone and the sky beside them. Io lapped Jupiter every 3.5s of
+   a night that takes ~9s to play. */
+function moonEpochMs(){ return (tonightOn && tNight != null) ? tNight : curMs; }
+function moonDaysPerSec(){
+  if (tonightOn) return 1/24;                 // the night loop's 1 sim-hour/s
+  return (+document.getElementById('speed').value) || 0.5;
+}
+/* Kepler positions for every visible moon, off whichever clock is live. Split
+   out of render() because TONIGHT scrubbing never calls render() — it goes
+   through updateNightLoop(), which now drives this directly. */
+function renderMoons(){
+  if (!moonsVisible()) return;
+  var days = moonEpochMs()/86400000 - 10957.5;   // days since J2000
+  PLANETS.forEach(function(p){
+    var nd = nodes[p.id];
+    if (!nd || !nd.moonDefs) return;
+    nd.moonDefs.forEach(function(md){
+      /* Kepler motion: mean anomaly → eccentric anomaly → focus-centred
+         position in the periapsis frame, rotated by ω (screen y flipped) */
+      var Mdeg = moonPhase(md.m) + 360*days/md.m.p;
+      var E = keplerE((((Mdeg % 360)+540)%360 - 180)*DEG, md.e);
+      var rdv = md.rdView || md.rd;
+      var xo = rdv*(Math.cos(E) - md.e);
+      var yo = rdv*Math.sqrt(1-md.e*md.e)*Math.sin(E);
+      var co = Math.cos(md.om), so = Math.sin(md.om);
+      var mx = (xo*co - yo*so).toFixed(2), my = (-(xo*so + yo*co)).toFixed(2);
+      /* While playing, the dot's position comes from the composited rotation
+         — writing a transform here every frame would fight it and put the
+         stepping straight back. The hit target still tracks the exact Kepler
+         position, which stays in phase with the rotation, so taps land. */
+      if (!playing) md.g.setAttribute('transform', 'translate('+mx+','+my+')');
+      if (md.hit){ md.hit.setAttribute('cx', mx); md.hit.setAttribute('cy', my); }
+    });
+  });
+}
 function render(){
   /* two toISOString() allocations and two DOM writes per frame, for a string
      that changes once per simulated day */
@@ -2195,27 +2237,8 @@ function render(){
       'translate(' + (R*Math.cos(lon)).toFixed(2) + ',' + (-R*Math.sin(lon)).toFixed(2) + ')');
     var _od = orbitPathCached(p.id);
     if (nodes[p.id]._odCache !== _od){ nodes[p.id].orbit.setAttribute('d', _od); nodes[p.id]._odCache = _od; }
-    if (moonsVisible() && nodes[p.id].moonDefs){
-      var days = curMs/86400000 - 10957.5;           // days since J2000
-      nodes[p.id].moonDefs.forEach(function(md){
-        /* Kepler motion: mean anomaly → eccentric anomaly → focus-centred
-           position in the periapsis frame, rotated by ω (screen y flipped) */
-        var Mdeg = moonPhase(md.m) + 360*days/md.m.p;
-        var E = keplerE((((Mdeg % 360)+540)%360 - 180)*DEG, md.e);
-        var rdv = md.rdView || md.rd;
-        var xo = rdv*(Math.cos(E) - md.e);
-        var yo = rdv*Math.sqrt(1-md.e*md.e)*Math.sin(E);
-        var co = Math.cos(md.om), so = Math.sin(md.om);
-        var mx = (xo*co - yo*so).toFixed(2), my = (-(xo*so + yo*co)).toFixed(2);
-        /* While playing, the dot's position comes from the composited rotation
-           — writing a transform here every frame would fight it and put the
-           stepping straight back. The hit target still tracks the exact Kepler
-           position, which stays in phase with the rotation, so taps land. */
-        if (!playing) md.g.setAttribute('transform', 'translate('+mx+','+my+')');
-        if (md.hit){ md.hit.setAttribute('cx', mx); md.hit.setAttribute('cy', my); }
-      });
-    }
   });
+  renderMoons();
   renderBigAsteroids();
   /* the photo row is tab-independent, so it cannot ride the night loop */
   var _day = Math.floor(curMs/86400000);
@@ -4437,6 +4460,9 @@ function updateNightLoop(){
     var alt = planetAltAt(p.id, tNight);
     nodes[p.id].g.setAttribute('opacity', alt > 8 ? 1 : alt > 0 ? .9 : .75);
   });
+  /* paused, this is the only thing that runs when the night slider moves, so
+     the moons would sit at curMs's configuration all night without it */
+  if (!playing) renderMoons();
 }
 function hideNightLoop(){
   tNight = null;
@@ -5196,8 +5222,13 @@ function step(now){
       /* TONIGHT loops tonight itself: sunset → sunrise at 1 sim-hour per
          second (Earth's daily rotation), then repeats. The date stays put. */
       if (ngSunset){
-        tNight = (tNight == null || tNight >= ngSunrise) ? ngSunset : tNight + dt*3600;
+        /* the loop's wrap back to sunset is a jump in the moons' clock too —
+           the composited rotations are running free, so they have to be
+           re-issued from the new phase or they drift out of the night */
+        var _wrap = (tNight == null || tNight >= ngSunrise);
+        tNight = _wrap ? ngSunset : tNight + dt*3600;
         updateNightLoop();
+        if (_wrap) _moonCssResync();
       }
     } else {
       /* other views: days of simulation per second of wall clock */
@@ -5244,8 +5275,24 @@ function _moonCssOff(){
 }
 function _moonCssSync(){
   if (!playing) { _moonCssOff(); return; }
-  var speed = +document.getElementById('speed').value || 0.5;
-  var days  = curMs/86400000 - 10957.5;
+  var speed = moonDaysPerSec();           // TONIGHT runs an hour a second
+  var days  = moonEpochMs()/86400000 - 10957.5;
+  /* The negative delay below assumes the animation starts NOW. Re-issuing the
+     shorthand does not restart one that is already running — the name list is
+     unchanged, so the browser keeps the old start time and just re-reads the
+     delay, leaving the moon parked at a phase for some earlier instant.
+     (Measured: a re-sync mid-run put Io 167° from where the date says it is.)
+     Every re-sync therefore clears the animations and flushes style once, so
+     all 23 restart from the phase computed here. */
+  PLANETS.forEach(function(p){
+    var nd = nodes[p.id]; if (!nd || !nd.moonDefs) return;
+    nd.moonDefs.forEach(function(md){
+      if (!md.orbG) return;
+      md.orbG.style.animation = 'none';
+      md.cntG.style.animation = 'none';
+    });
+  });
+  void document.body.offsetWidth;         // one forced reflow for the whole set
   PLANETS.forEach(function(p){
     var nd = nodes[p.id]; if (!nd || !nd.moonDefs) return;
     nd.moonDefs.forEach(function(md){
@@ -5337,6 +5384,7 @@ document.getElementById('btn-today').addEventListener('click', function(){
   settleFrame();
   ngLastDay = null;
   render();
+  _moonCssResync();          // the two tabs run the moons at different rates
 });
 /* FLYING NOW stays in the planetary frame — everything it draws lives inside
    Lucy's 5.7 AU aphelion, so no camera move. */
