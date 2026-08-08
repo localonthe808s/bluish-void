@@ -30103,12 +30103,35 @@ function dayRangeAround(d, days){
             if (g > 120 && r < 195 && b < 175) return { l:'MODERATE', mm:3 };        // green
             return { l:'LIGHT', mm:1 };                                              // blue/teal
           };
+          // Tile pixel reader. getImageData on a fresh canvas forced a
+          // synchronous decode+raster per tile — across the ~13-frame
+          // accumulation loop that piled into recurring 500-775ms main-thread
+          // stalls (profiled: getImageData dominated idle long tasks).
+          // createImageBitmap decodes off the main thread, one reused
+          // willReadFrequently canvas keeps the readback on CPU.
+          if (!window._nowcastTileCanvas){ window._nowcastTileCanvas = document.createElement('canvas'); window._nowcastTileCanvas.width = ts; window._nowcastTileCanvas.height = ts; }
           var loadTilePixels = function(url, cb){
             var img = new Image(); img.crossOrigin = 'anonymous';
-            img.onload = function(){ try{ var c = document.createElement('canvas'); c.width = ts; c.height = ts; var cx = c.getContext('2d'); cx.drawImage(img, 0, 0); cb(cx.getImageData(0, 0, ts, ts).data); }catch(e){ cb(null); } };
+            var read = function(src){
+              try{
+                var cx = window._nowcastTileCanvas.getContext('2d', { willReadFrequently: true });
+                cx.clearRect(0, 0, ts, ts);
+                cx.drawImage(src, 0, 0);
+                cb(cx.getImageData(0, 0, ts, ts).data);
+              }catch(e){ cb(null); }
+            };
+            img.onload = function(){
+              if (window.createImageBitmap){
+                createImageBitmap(img).then(function(bmp){ read(bmp); try{ bmp.close(); }catch(e){} }, function(){ read(img); });
+              } else read(img);
+            };
             img.onerror = function(){ cb(null); };
             img.src = url;
           };
+          // Supersede token: a 4-min tick (or location switch) that starts a
+          // new run invalidates any still-loading tiles from the previous one.
+          var _ncTok = (window._nowcastTok = (window._nowcastTok || 0) + 1);
+          var _ncLive = function(){ return _ncTok === window._nowcastTok; };
           (window._rvMapsFetch ? window._rvMapsFetch()
             : fetch('https://api.rainviewer.com/public/weather-maps.json').then(function(r){ return r.json(); }))
             .then(function(data){
@@ -30190,15 +30213,23 @@ function dayRangeAround(d, days){
                   if (pe && show > 0.0005) pe.textContent = (show < 0.01 ? show.toFixed(3) : show.toFixed(2)) + ' in';
                 };
                 frs.forEach(function(fr, j){
-                  loadTilePixels(host + fr.path + '/' + ts + '/' + z + '/' + lt.xt + '/' + lt.yt + '/2/0_0.png', function(d){
-                    if (d){ var t = tier([d[(lt.py*ts + lt.px)*4], d[(lt.py*ts + lt.px)*4+1], d[(lt.py*ts + lt.px)*4+2], d[(lt.py*ts + lt.px)*4+3]]); rates[j] = t ? t.mm : 0; } else rates[j] = 0;
-                    if (--rem2 === 0) accDone();
-                  });
+                  // staggered so ~13 decode+read callbacks don't land in one task
+                  setTimeout(function(){
+                    if (!_ncLive()) return;
+                    loadTilePixels(host + fr.path + '/' + ts + '/' + z + '/' + lt.xt + '/' + lt.yt + '/2/0_0.png', function(d){
+                      if (!_ncLive()) return;
+                      if (d){ var t = tier([d[(lt.py*ts + lt.px)*4], d[(lt.py*ts + lt.px)*4+1], d[(lt.py*ts + lt.px)*4+2], d[(lt.py*ts + lt.px)*4+3]]); rates[j] = t ? t.mm : 0; } else rates[j] = 0;
+                      if (--rem2 === 0) accDone();
+                    });
+                  }, j * 40);
                 });
               };
-              keys.forEach(function(k){
+              keys.forEach(function(k, ki){
                 var pp = k.split('_');
-                loadTilePixels(host + frame.path + '/' + ts + '/' + z + '/' + pp[0] + '/' + pp[1] + '/2/0_0.png', function(d){ loaded[k] = d; if (--rem === 0) finish(); });
+                setTimeout(function(){
+                  if (!_ncLive()) return;
+                  loadTilePixels(host + frame.path + '/' + ts + '/' + z + '/' + pp[0] + '/' + pp[1] + '/2/0_0.png', function(d){ if (!_ncLive()) return; loaded[k] = d; if (--rem === 0) finish(); });
+                }, ki * 30);
               });
             })
             .catch(function(){ window._nowcastStr = ''; });
