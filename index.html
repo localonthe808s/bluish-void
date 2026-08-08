@@ -54681,7 +54681,10 @@ function initNowMicroTabs(){
       var kill = [];
       for (var i = 0; i < localStorage.length; i++){
         var k = localStorage.key(i);
-        if (k && /^bv_revgeo_v[12345]_/.test(k)) kill.push(k);
+        // purge any revgeo cache generation below the current one (v6) — the
+        // old hardcoded v[12345] list stranded every newer retired generation
+        var _rgm = k && k.match(/^bv_revgeo_v(\d+)_/);
+        if (_rgm && parseInt(_rgm[1], 10) < 6) kill.push(k);
       }
       kill.forEach(function(k){ try{ localStorage.removeItem(k); }catch(e){} });
     }catch(e){}
@@ -69756,6 +69759,12 @@ function initNowMicroTabs(){
   }
 
   function renderQuakeData(data){
+    // Clear old markers first — every other hazard loader does this, but quake
+    // didn't: each 5-min refresh stacked all ~250-450 markers on top of the
+    // previous set (invisible — duplicates overlay exactly — but ~10-15 MB/hr
+    // and pan/zoom jank with the tab open, and >24h-old quakes never left).
+    if (window._quakeLayerGroup) window._quakeLayerGroup.clearLayers();
+    quakeMarkers = [];
     var liveEl = document.getElementById("quake-live");
         var quakes = data && data.features;
         
@@ -72731,7 +72740,8 @@ function initNowMicroTabs(){
     // init's idle prefetch, so it loads much later than the others. Fetch + render
     // its card here, map-independent, like the rest. The full initFireballsData()
     // (map markers + geocoded place names) still runs later and upgrades the card;
-    // both share the bv_fireballs_cache_v1 cache.
+    // both share the fireballs tab's bv_fireballs_cache_v2 cache (same
+    // {data, fetchedAt} shape; the old v1 twin stored the identical feed twice).
     function _prefetchFireballs(){
       var detailEl=document.getElementById('hz-dash-fireballs-detail');
       var countEl=document.getElementById('hz-dash-fireballs-count');
@@ -72825,8 +72835,9 @@ function initNowMicroTabs(){
         });
       };
       // Instant fill from fresh cache, then refresh from the network.
-      try{ var c=JSON.parse(localStorage.getItem('bv_fireballs_cache_v1')||'null'); if(c&&c.data&&(Date.now()-c.fetchedAt)<1800000) render(c.data); }catch(e){}
-      window._fbApiFetch().then(function(d){ if(d&&d.data){ try{localStorage.setItem('bv_fireballs_cache_v1',JSON.stringify({data:d,fetchedAt:Date.now()}));}catch(e){} window._prefetchedFireballs=d; render(d); } }).catch(function(){});
+      try{ localStorage.removeItem('bv_fireballs_cache_v1'); }catch(e){} // retired duplicate key
+      try{ var c=JSON.parse(localStorage.getItem('bv_fireballs_cache_v2')||'null'); if(c&&c.data&&(Date.now()-c.fetchedAt)<1800000) render(c.data); }catch(e){}
+      window._fbApiFetch().then(function(d){ if(d&&d.data){ try{localStorage.setItem('bv_fireballs_cache_v2',JSON.stringify({data:d,fetchedAt:Date.now()}));}catch(e){} render(d); } }).catch(function(){});
     }
 
     // Heavy hazard GeoJSON prefetches (US + up to 5000 Canadian fires, quakes,
@@ -76380,7 +76391,17 @@ function closeAlertModal(){
     img._bvApplyFit = apply;
     if (img.complete && img.naturalWidth) apply();
     img.addEventListener('load', apply);
-    window.addEventListener('resize', apply);
+    // ONE delegated resize listener for all fitted imgs — the old per-img
+    // window listener was never removed, so every new species/hero image
+    // (per location switch or card open) pinned its predecessor in memory.
+    if (!window._bwFitResizeWired) {
+      window._bwFitResizeWired = true;
+      window.addEventListener('resize', function(){
+        document.querySelectorAll('#birds-widget img').forEach(function(im){
+          if (im._bvApplyFit) im._bvApplyFit();
+        });
+      });
+    }
   }
 
   // shared hi-res swap: BirdWeather's largest image is a ~40KB crop, so
