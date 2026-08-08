@@ -30109,8 +30109,8 @@ function dayRangeAround(d, days){
             img.onerror = function(){ cb(null); };
             img.src = url;
           };
-          fetch('https://api.rainviewer.com/public/weather-maps.json')
-            .then(function(r){ return r.json(); })
+          (window._rvMapsFetch ? window._rvMapsFetch()
+            : fetch('https://api.rainviewer.com/public/weather-maps.json').then(function(r){ return r.json(); }))
             .then(function(data){
               var host = data.host, past = data.radar && data.radar.past;
               if (!host || !past || !past.length){ window._nowcastStr = ''; return; }
@@ -61526,8 +61526,7 @@ function initNowMicroTabs(){
   function loadNationalRadarFrames(){
     if (!nationalRadarMap) return;
 
-    fetch('https://api.rainviewer.com/public/weather-maps.json')
-      .then(function(response){ return response.json(); })
+    window._rvMapsFetch()
       .then(function(apiData){
         if (!apiData.radar || !apiData.radar.past || apiData.radar.past.length === 0) return;
         
@@ -62000,12 +61999,8 @@ function initNowMicroTabs(){
       // proxy. Order matches the rest of this file: codetabs is the most
       // reliable from this origin, corsproxy.io frequently 403s, allorigins
       // is intermittent.
-      var dateMin = new Date(Date.now() - 365*86400000).toISOString().slice(0,10);
-      // vel-comp=true appends Earth-fixed velocity components vx,vy,vz (cols
-      // 9-11) so we can derive each bolide's entry direction + angle. Present
-      // on ~2/3 of events; missing ones just omit the trajectory line.
-      var apiUrl = 'https://ssd-api.jpl.nasa.gov/fireball.api?date-min=' + dateMin + '&sort=-date&limit=200&vel-comp=true';
-      // localStorage cache so the panel survives proxy hiccups. Fresh: render
+      // URL (incl. vel-comp=true for entry trajectories) lives in the shared
+      // fbApiFetch. localStorage cache so the panel survives proxy hiccups. Fresh: render
       // cached data directly. Stale-on-error: if the fetch chain fails entirely
       // but a cached payload exists, use it rather than showing 'try later'.
       var FB_CACHE_KEY = 'bv_fireballs_cache_v2';
@@ -62016,7 +62011,7 @@ function initNowMicroTabs(){
       var fbWriteCache = function(data){
         try { localStorage.setItem(FB_CACHE_KEY, JSON.stringify({ data: data, fetchedAt: Date.now() })); } catch(e) {}
       };
-      var fbFetch = function(){ return window.bvProxyJSON(apiUrl, { timeout: 12000 }); };
+      var fbFetch = function(){ return window._fbApiFetch(); }; // shared with the hazard dash card
       var fbRender = function(data){
           if (!data || !data.data) {
             detailEl.innerHTML = '<span style="opacity:.5;">No fireball data available</span>';
@@ -62747,11 +62742,58 @@ function initNowMicroTabs(){
     }).catch(function(){});
   }
 
+  // Shared SPC outlook fetch with a 30-min TTL. The full-CONUS GeoJSON was
+  // fetched cold from four call sites — including every 5 minutes from the
+  // alerts refresh — and twice back-to-back on tornado-tab init. The outlook
+  // updates a handful of times a day; one cached promise per layer covers
+  // everyone (and dedupes in-flight requests for free). Failures evict so a
+  // bad fetch isn't cached for 30 minutes.
+  // Shared RainViewer frame-index fetch — the radar nowcast (4-min tick) and
+  // the national radar loop (5-min tick) each pulled weather-maps.json on
+  // their own timers. 2-min TTL keeps both fresh (RainViewer publishes a new
+  // frame every ~5 min) with one request; evict on failure.
+  function rvMapsFetch(){
+    var now = Date.now();
+    if (window._rvMapsP && (now - (window._rvMapsTs || 0)) < 2 * 60 * 1000) return window._rvMapsP;
+    window._rvMapsTs = now;
+    window._rvMapsP = fetch('https://api.rainviewer.com/public/weather-maps.json').then(function(r){ return r.json(); });
+    window._rvMapsP.catch(function(){ window._rvMapsTs = 0; });
+    return window._rvMapsP;
+  }
+  window._rvMapsFetch = rvMapsFetch; // the nowcast lives in an earlier closure
+
+  // Shared CNEOS fireball fetch — the fireballs tab and the hazard dash card
+  // both pulled the same 12-month feed at boot (the card via its own
+  // hand-rolled proxy chain). One promise, 30-min TTL, evict on failure.
+  // vel-comp=true appends vx/vy/vz after the base columns, so consumers that
+  // ignore them are unaffected.
+  function fbApiFetch(){
+    var now = Date.now();
+    if (window._fbApiP && (now - (window._fbApiTs || 0)) < 30 * 60 * 1000) return window._fbApiP;
+    var dateMin = new Date(now - 365 * 86400000).toISOString().slice(0, 10);
+    window._fbApiTs = now;
+    window._fbApiP = window.bvProxyJSON('https://ssd-api.jpl.nasa.gov/fireball.api?date-min=' + dateMin + '&sort=-date&limit=200&vel-comp=true', { timeout: 12000 });
+    window._fbApiP.catch(function(){ window._fbApiTs = 0; });
+    return window._fbApiP;
+  }
+  window._fbApiFetch = fbApiFetch; // callers live in other closures
+
+  var _spcOtlkCache = {};
+  function fetchSPCOutlook(layer){
+    var e = _spcOtlkCache[layer];
+    if (e && (Date.now() - e.ts) < 30 * 60 * 1000) return e.p;
+    var p = fetch('https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/SPC_wx_outlks/MapServer/' + layer + '/query?where=1%3D1&outFields=*&f=geojson')
+      .then(function(r){ return r.json(); });
+    _spcOtlkCache[layer] = { ts: Date.now(), p: p };
+    p.catch(function(){ if (_spcOtlkCache[layer] && _spcOtlkCache[layer].p === p) delete _spcOtlkCache[layer]; });
+    return p;
+  }
+  window._fetchSPCOutlook = fetchSPCOutlook; // callers live in other closures
+
   function checkSPCLocalZoom(){
     // If SPC has tornado risk >= 5% for user's area, zoom in moderately
     if (!tornadoMap) return;
-    var url = 'https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/SPC_wx_outlks/MapServer/3/query?where=1%3D1&outFields=*&f=geojson';
-    fetch(url).then(function(r){ return r.json(); }).then(function(data){
+    window._fetchSPCOutlook(3).then(function(data){
       if (!data.features) return;
       for (var i = 0; i < data.features.length; i++){
         var label = (data.features[i].properties.LABEL || '').toString();
@@ -62767,8 +62809,7 @@ function initNowMicroTabs(){
   function loadSPCTornadoOutlook(){
     if (!tornadoMap) return;
     // Layer 3 = Day 1 Probabilistic Tornado Outlook
-    var url = 'https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/SPC_wx_outlks/MapServer/3/query?where=1%3D1&outFields=*&f=geojson';
-    fetch(url).then(function(r){ return r.json(); }).then(function(data){
+    window._fetchSPCOutlook(3).then(function(data){
       if (!data.features || data.features.length === 0) return;
       L.geoJSON(data, {
         style: function(feature){
@@ -71731,12 +71772,11 @@ function initNowMicroTabs(){
   
   // Check if user location is within SPC tornado outlook polygons
   function checkSPCTornadoRisk(callback){
-    var spcUrl = 'https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/SPC_wx_outlks/MapServer/3/query?where=1%3D1&outFields=*&f=geojson';
-    var catUrl = 'https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/SPC_wx_outlks/MapServer/1/query?where=1%3D1&outFields=*&f=geojson';
-    // Fetch both layers in parallel
+    // Both layers via the shared 30-min cache — this runs from the 5-minute
+    // alerts refresh and was refetching the full CONUS GeoJSON every tick.
     Promise.all([
-      fetch(spcUrl).then(function(r){ return r.json(); }),
-      fetch(catUrl).then(function(r){ return r.json(); })
+      window._fetchSPCOutlook(3),
+      window._fetchSPCOutlook(1)
     ]).then(function(results){
       var data = results[0];
       var catData = results[1];
@@ -74215,13 +74255,6 @@ function initNowMicroTabs(){
       // 12-month window: CNEOS bolide detections are sparse (often zero in
       // 30 days), which left this card chronically empty.
       var dateMin=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
-      var apiUrl='https://ssd-api.jpl.nasa.gov/fireball.api?date-min='+dateMin+'&sort=-date&limit=200';
-      var proxies=[{u:'https://proxy.bluishvoid.com/?url=',w:false},{u:'https://api.codetabs.com/v1/proxy?quest=',w:false},{u:'https://corsproxy.io/?',w:false},{u:'https://api.allorigins.win/get?url=',w:true}];
-      var go=function(i){
-        if(i>=proxies.length) return Promise.reject(0);
-        var p=proxies[i];
-        return fetch(p.u+encodeURIComponent(apiUrl)).then(function(r){if(!r.ok)throw 0;return r.json();}).then(function(d){return p.w?JSON.parse(d.contents):d;}).catch(function(){return go(i+1);});
-      };
       var render=function(d){
         var rows=(d&&d.data)||[];
         if(countEl) countEl.textContent=rows.length;
@@ -74306,7 +74339,7 @@ function initNowMicroTabs(){
       };
       // Instant fill from fresh cache, then refresh from the network.
       try{ var c=JSON.parse(localStorage.getItem('bv_fireballs_cache_v1')||'null'); if(c&&c.data&&(Date.now()-c.fetchedAt)<1800000) render(c.data); }catch(e){}
-      go(0).then(function(d){ if(d&&d.data){ try{localStorage.setItem('bv_fireballs_cache_v1',JSON.stringify({data:d,fetchedAt:Date.now()}));}catch(e){} window._prefetchedFireballs=d; render(d); } }).catch(function(){});
+      window._fbApiFetch().then(function(d){ if(d&&d.data){ try{localStorage.setItem('bv_fireballs_cache_v1',JSON.stringify({data:d,fetchedAt:Date.now()}));}catch(e){} window._prefetchedFireballs=d; render(d); } }).catch(function(){});
     }
 
     // Heavy hazard GeoJSON prefetches (US + up to 5000 Canadian fires, quakes,
