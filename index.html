@@ -10418,6 +10418,10 @@ window._updateHeroWx = function(code, night){
     if(!_fullPanel && sb){
       var _sceneG = _sceneSky();
       if(_sceneG){
+        // measure BEFORE inserting the skybg div — the height depends on the
+        // rain line / planet tracks, not on the absolutely-positioned skybg,
+        // and reading after the insert forced an extra full-document layout
+        var _hh0 = _panelH();
         if(!_skybg){
           _skybg = document.createElement('div'); _skybg.id = 'hero-skybg';
           sb.insertBefore(_skybg, _skyBands ? _skyBands.nextSibling : sb.firstChild);
@@ -10426,7 +10430,7 @@ window._updateHeroWx = function(code, night){
           _skybg.style.cssText = 'position:absolute;left:0;right:0;top:0;height:'+hh+'px;z-index:0;pointer-events:none;border-radius:16px 16px 0 0;transition:background 1.2s ease;background:'+_sceneG+';'+_hmask;
           _abMask(hh);
         };
-        _setSkybg(_panelH());
+        _setSkybg(_hh0);
         document.documentElement.classList.add('wx-full-panel');
         // re-measure once after layout settles (rain line populates async)
         requestAnimationFrame(function(){ try{ _setSkybg(_panelH()); }catch(e){} });
@@ -34412,8 +34416,13 @@ function dayRangeAround(d, days){
           // the bars' scale depends on the strip's content width, which changes
           // with viewport and on rotate
           try{ if(window._tlSyncBarTracks) window._tlSyncBarTracks(); }catch(_){}
+          // debounced: resize fires in bursts and each sync forces layout
+          var _tsbRt;
           window.addEventListener('resize', function(){
-            try{ if(window._tlSyncBarTracks) window._tlSyncBarTracks(); }catch(_){}
+            clearTimeout(_tsbRt);
+            _tsbRt = setTimeout(function(){
+              try{ if(window._tlSyncBarTracks) window._tlSyncBarTracks(); }catch(_){}
+            }, 150);
           }, {passive:true});
         }
         if ((window._tlDayOffset || 0) !== 0){ strip.scrollLeft = 0; return; }
@@ -49134,6 +49143,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (panel._fcastScrollFn) panel.removeEventListener('scroll', panel._fcastScrollFn);
       panel._fcastScrollFn = function(){
         var atBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 8;
+        // write only on state CHANGE — this fires per scroll event and the
+        // mask rewrite invalidated style every tick of a fling
+        if (atBottom === panel._fcastAtBottom) return;
+        panel._fcastAtBottom = atBottom;
         if (atBottom) {
           panel.style.webkitMaskImage = 'none';
           panel.style.maskImage = 'none';
@@ -49142,7 +49155,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           panel.style.maskImage = 'linear-gradient(to bottom, black 0%, black 94%, transparent 100%)';
         }
       };
-      panel.addEventListener('scroll', panel._fcastScrollFn);
+      panel.addEventListener('scroll', panel._fcastScrollFn, {passive:true});
     });
   }
 
@@ -71269,13 +71282,19 @@ function initNowMicroTabs(){
       // UNSCROLLED position: add the current scroll back in
       colsLeft += strip.scrollLeft;
       var scrolling = strip.scrollWidth > strip.clientWidth + 2;
+      // Read ALL track rects before writing any style: the old per-iteration
+      // read-after-write forced a full reflow per track (~4-8 per call, and
+      // this runs 2-3x per render + on resize).
+      var trLefts = [];
+      for(var p=0;p<inners.length;p++){
+        trLefts[p] = scrolling ? inners[p].parentNode.getBoundingClientRect().left : 0;
+      }
       for(var n=0;n<inners.length;n++){
         var el = inners[n];
         if(scrolling){
           // The offset is per TRACK: each sits a few px inside the scroller's
           // left edge, and measuring against the scroller left every bar a
           // constant 6px out. Same distance from the track's own left edge.
-          var tr = el.parentNode.getBoundingClientRect();
           el.style.width = w + 'px';
           // flex:none, never a basis. The cloud and pollen tracks are COLUMN flex
           // containers, so a flex-basis sizes the main axis — height — and the
@@ -71283,7 +71302,7 @@ function initNowMicroTabs(){
           // blocks for all H/M/L levels").
           el.style.flex = 'none';
           el.style.height = '100%';
-          el.style.marginLeft = Math.round(colsLeft - tr.left) + 'px';
+          el.style.marginLeft = Math.round(colsLeft - trLefts[n]) + 'px';
         } else {
           el.style.width = ''; el.style.flex = ''; el.style.height = ''; el.style.marginLeft = '';
         }
@@ -75652,16 +75671,21 @@ function closeAlertModal(){
       var row = document.getElementById('today-tl-weather-row'); if (!row) return;
       var cols = row.querySelectorAll('.today-tl-weather-hour'); if (!cols.length) return;
       var ds = _cueDateStr(), want = _songCues[ds] || {};
+      var changed = false;
       ['first','last'].forEach(function(kind){
         var cls = kind === 'last' ? 'birdsong-marker-last' : 'birdsong-marker';
         var have = row.querySelector('.' + cls), cue = want[kind];
         // right day already drawn? leave it. otherwise clear and redraw.
         if (have && have.getAttribute('data-day') === ds && cue) return;
-        if (have && have.parentNode) have.parentNode.removeChild(have);
-        if (cue) _placeCueMarker(cols, kind, cue.m, cue.name, ds, cue.ex);
+        if (have && have.parentNode) { have.parentNode.removeChild(have); changed = true; }
+        if (cue) { _placeCueMarker(cols, kind, cue.m, cue.name, ds, cue.ex); changed = true; }
       });
-      // also covers the removal path above: a cue dropping off shrinks the zone
-      if (window._bvLayoutTlBadges) window._bvLayoutTlBadges();
+      // Covers the removal-only path (a cue dropping off shrinks the zone) —
+      // placement already relayouts inside _placeCueMarker. Skipping the call
+      // when NOTHING changed matters: this runs every 5s, and the badge
+      // layouter's rect reads forced a full-document layout each tick, the
+      // profiled source of the sporadic ~1.3s stalls.
+      if (changed && window._bvLayoutTlBadges) window._bvLayoutTlBadges();
     }catch(e){}
   }
   function registerSongCue(kind, dateStr, mins, name, ex){
