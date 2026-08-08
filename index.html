@@ -15020,12 +15020,25 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
       SH._updateWidget(s.widget);
     },
 
+    DEAD_AFTER: 10,           // consecutive failures before the slow lane
+    DEAD_RETRY_MS: 10 * 60 * 1000,
+
+    _retryDelay: function(s) {
+      // After DEAD_AFTER straight failures the source is 'dead': keep probing,
+      // but every 10 minutes instead of every 60 seconds — the old cap retried
+      // dead sources forever at 60 s. ok() already treats 'dead' as
+      // recoverable, so it comes back the moment a probe succeeds.
+      if (s.failCount >= SH.DEAD_AFTER) return SH.DEAD_RETRY_MS;
+      return SH.BACKOFF[Math.min(s.failCount - 1, SH.BACKOFF.length - 1)];
+    },
+
     fail: function(id, retryFn) {
       var s = SH.sources[id]; if (!s) return;
-      s.status = 'retry'; s.failCount = Math.min(s.failCount + 1, SH.BACKOFF.length);
+      s.failCount = s.failCount + 1;
+      s.status = s.failCount >= SH.DEAD_AFTER ? 'dead' : 'retry';
       s.retryFn = retryFn || s.retryFn;
-      var delay = SH.BACKOFF[Math.min(s.failCount - 1, SH.BACKOFF.length - 1)];
-      console.log('%c[SH] ✗ ' + s.name + ' failed (retry #' + s.failCount + ' in ' + (delay/1000) + 's)', 'color:#f97316');
+      var delay = SH._retryDelay(s);
+      console.log('%c[SH] ✗ ' + s.name + ' failed (retry #' + s.failCount + ' in ' + (delay/1000) + 's' + (s.status === 'dead' ? ', slow lane' : '') + ')', 'color:#f97316');
       SH._scheduleRetry(id);
       SH._updateWidget(s.widget);
     },
@@ -15033,10 +15046,12 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
     _scheduleRetry: function(id) {
       var s = SH.sources[id]; if (!s || !s.retryFn) return;
       if (s.retryTimer) clearTimeout(s.retryTimer);
-      var delay = SH.BACKOFF[Math.min(s.failCount - 1, SH.BACKOFF.length - 1)];
+      var delay = SH._retryDelay(s);
       s._nextRetry = Date.now() + delay;
       s.retryTimer = setTimeout(function() {
         s.retryTimer = null;
+        // don't burn retries in a hidden tab — push the probe out instead
+        if (document.hidden) { SH._scheduleRetry(id); return; }
         try { s.retryFn(); } catch(e) { console.error('SH retry error:', id, e); }
       }, delay);
     },
@@ -39908,7 +39923,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                           : fetch(url).then(function(r){ return r.json(); }));
               };
               var _issOpenNotify = function(){
-                return _issVia('http://api.open-notify.org/iss-now.json').then(function(d){
+                // noDirect: open-notify is http-only, so the racer's direct
+                // attempt is always mixed-content-blocked on this https page
+                // (guaranteed console error); only the proxies can reach it.
+                return (window.bvProxyJSON
+                          ? window.bvProxyJSON('http://api.open-notify.org/iss-now.json', { timeout: 4500, noDirect: true })
+                          : _issVia('http://api.open-notify.org/iss-now.json')).then(function(d){
                   var pnt = d && (d.iss_position || d);
                   if(!pnt || pnt.latitude == null) throw new Error('no ISS position');
                   return { latitude:+pnt.latitude, longitude:+pnt.longitude,
@@ -62070,7 +62090,16 @@ function initNowMicroTabs(){
     var todayStr = yy + String(now.getMonth()+1).padStart(2,'0') + String(now.getDate()).padStart(2,'0');
     var cacheKey = 'tornYearCache_' + fullYear;
     var cached = null;
-    try { cached = JSON.parse(sessionStorage.getItem(cacheKey)); } catch(e){}
+    // localStorage, not sessionStorage: past-day reports are history, and the
+    // session-scoped cache meant every new tab re-pulled ~220 per-day CSVs.
+    // SPC can add late filings for a few days, so the last 3 days always
+    // refetch (and are never cached) — a returning visitor costs ~3 requests.
+    try { cached = JSON.parse(localStorage.getItem(cacheKey)); } catch(e){}
+    var recentDays = {};
+    for (var rd = 0; rd < 3; rd++){
+      var rdt = new Date(now); rdt.setDate(rdt.getDate() - rd);
+      recentDays[String(rdt.getFullYear()).slice(-2) + String(rdt.getMonth()+1).padStart(2,'0') + String(rdt.getDate()).padStart(2,'0')] = true;
+    }
 
     // Restore cached state: past-day counts + top reports
     var totalYear = 0;
@@ -62079,7 +62108,7 @@ function initNowMicroTabs(){
     if (cached && cached.days) {
       cachedDays = cached.days;
       Object.keys(cachedDays).forEach(function(ds){
-        if (ds === todayStr) return; // always re-fetch today
+        if (recentDays[ds]) return; // revision window — always re-fetch
         var entry = cachedDays[ds];
         totalYear += entry.count;
         (entry.tops || []).forEach(function(r){
@@ -62107,7 +62136,7 @@ function initNowMicroTabs(){
         var dd = String(d).padStart(2,'0');
         var dateStr = yy + mm + dd;
         var dateLabel = m + '/' + d + '/' + fullYear;
-        if (dateStr === todayStr || !cachedDays[dateStr]) {
+        if (recentDays[dateStr] || !cachedDays[dateStr]) {
           daysToFetch.push({ str: dateStr, label: dateLabel, isToday: dateStr === todayStr });
         }
       }
@@ -62119,7 +62148,8 @@ function initNowMicroTabs(){
     var pendingCount = daysToFetch.length;
 
     function saveCache(){
-      try { sessionStorage.setItem(cacheKey, JSON.stringify({ days: cachedDays })); } catch(e){}
+      try { localStorage.setItem(cacheKey, JSON.stringify({ days: cachedDays })); } catch(e){}
+      try { localStorage.removeItem('tornYearCache_' + (fullYear - 1)); } catch(e){} // drop last year's blob
     }
 
     function fetchDayYear(dayObj, delay){
@@ -62145,7 +62175,7 @@ function initNowMicroTabs(){
               tornadoTopReports.sort(function(a,b){ return efRank(b.scale) - efRank(a.scale); });
             }
           });
-          if (!dayObj.isToday) {
+          if (!recentDays[dayObj.str]) {
             cachedDays[dayObj.str] = { count: reports.length, tops: dayTops.map(function(r){ return {scale:r.scale,location:r.location,state:r.state,lat:r.lat,lon:r.lon,dateLabel:r.dateLabel}; }) };
           }
           if (yearCountEl) yearCountEl.textContent = totalYear.toLocaleString();
