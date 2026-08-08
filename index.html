@@ -14219,8 +14219,10 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
                 try { map.setView([lc.lat, lc.lon], map.getZoom()); } catch(e){}
                 var nm2 = lc.name || 'Your location';
                 try {
+                  var _epH = window._locEpoch || 0;
                   sampleBortle(lc.lat, lc.lon, function(sqm){
                     if (sqm == null) return;
+                    if (_epH !== (window._locEpoch || 0)) return; // superseded by a newer switch
                     setBortleStat(sqm, nm2, lc.lat, lc.lon);
                     try { window._locBortle = bortleDecimal(sqm); if (window._tlPaintSky) window._tlPaintSky(); } catch(e){}
                   });
@@ -14230,7 +14232,8 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
               setTimeout(function(){ try { map.invalidateSize(); } catch(e){} }, 300);
               var _locName = (typeof LOCATION !== 'undefined' && LOCATION && LOCATION.name) ? LOCATION.name : 'Your location';
               // Estimate Bortle at the user's location from the overlay pixel
-              if (loc) sampleBortle(loc.lat, loc.lon, function(sqm){ if (sqm != null){ setBortleStat(sqm, _locName, loc.lat, loc.lon); try{ window._locBortle = bortleDecimal(sqm); if (window._tlPaintSky) window._tlPaintSky(); }catch(e){} } });
+              var _epB = window._locEpoch || 0;
+              if (loc) sampleBortle(loc.lat, loc.lon, function(sqm){ if (sqm != null && _epB === (window._locEpoch || 0)){ setBortleStat(sqm, _locName, loc.lat, loc.lon); try{ window._locBortle = bortleDecimal(sqm); if (window._tlPaintSky) window._tlPaintSky(); }catch(e){} } });
               // Nearest named parks/protected areas with Bortle ≤ 3.0
               if (loc) findDarkParks(loc.lat, loc.lon);
 
@@ -14266,6 +14269,7 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
                 for(var i=0;i<rows.length;i++){ (function(row){ row.addEventListener('click', function(){ flyToPoint(parseFloat(row.getAttribute('data-lat')), parseFloat(row.getAttribute('data-lon')), row.getAttribute('data-name')); }); })(rows[i]); }
               }
               function findDarkParks(lat, lon){
+                var _ep = window._locEpoch || 0;  // stale guard: Overpass can take 25s
                 var rowsEl=document.getElementById('darksky-parks-rows');
                 if (rowsEl) rowsEl.innerHTML='<div style="font-size:.44rem;color:rgba(255,255,255,.55);">Searching…</div>';
                 var cosL=Math.cos(lat*Math.PI/180);
@@ -14275,6 +14279,7 @@ window.WXI = { small: weatherIconSVG, hero: weatherHeroSVG, icon: icon, smallSta
                 // Always end with 3 options: nearby ≤B3 parks first, then the nearest
                 // curated dark-sky destinations (even if far) to fill any gaps.
                 function fillCurated(results){
+                  if (_ep !== (window._locEpoch || 0)) return; // stale-location resolve
                   if (results.length>=7){ renderParks(results.slice(0,7)); return; }
                   var have={}; results.forEach(function(r){ have[r.name]=1; });
                   var cur=CURATED.filter(function(p){ return !have[p.name]; })
@@ -14973,6 +14978,12 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
       fetch('https://api.weather.gov/points/' + key)
         .then(function(r){ return r.json(); })
         .then(function(d){
+          // Stale-location guard: if the user switched cities while this was
+          // in flight, this resolve would poison _userState/_nwsStationsUrl/
+          // _nwsGridUrl AND trigger obs-cloud fetches that tag the OLD city's
+          // METAR with the NEW city's coords — abandon instead.
+          var nowKey = LOCATION.lat.toFixed(4) + ',' + LOCATION.lon.toFixed(4);
+          if (nowKey !== key) return;
           if(d && d.properties){
             if(d.properties.relativeLocation && d.properties.relativeLocation.properties){
               window._userState = d.properties.relativeLocation.properties.state || 'NY';
@@ -15665,6 +15676,7 @@ function floodRateThreshold(lat, lon, soilMoisture){
   // fnQuery lives at the top level of this IIFE (see the FloodNet map module)
   // so both the rain line and the flood tab can reach it.
   function loadFloodNet(lat, lon){
+    var _ep = window._locEpoch || 0;          // stale-location guard epoch
     // the network only exists in New York City
     if (!(lat > 40.40 && lat < 41.10 && lon > -74.35 && lon < -73.60)) return;
     var ck = 'bvfnsensors:' + lat.toFixed(2) + ',' + lon.toFixed(2), near = null;
@@ -15684,6 +15696,8 @@ function floodRateThreshold(lat, lon, soilMoisture){
             + 'end_time:{_is_null:true}, start_time:{_gte:"' + since + '"}}, '
             + 'order_by:{start_time:desc}, limit:20){ deployment_id start_time event_confidence } }')
         .then(function(d){
+          // stale resolve after a switch must not re-pin NYC's street flooding
+          if (_ep !== (window._locEpoch || 0)) return;
           var ev = (d && d.flood_events) || [];
           // low-confidence rows are the network's own noise floor
           ev = ev.filter(function(e){ return (e.event_confidence == null) || e.event_confidence >= 0.5; });
@@ -15802,6 +15816,7 @@ function floodRateThreshold(lat, lon, soilMoisture){
     return km > 120 ? null : best.st;        // inland: no tide worth reporting
   }
   function loadTides(lat, lon){
+    var _ep = window._locEpoch || 0;          // stale-location guard epoch
     var st = nearestTideStation(lat, lon);
     if (!st) return;                          // not coastal — skip entirely
     var _d = new Date();
@@ -15822,6 +15837,9 @@ function floodRateThreshold(lat, lon, soilMoisture){
         var pr = j && j.predictions;
         if (!pr || !pr.length) return;
         try{ sessionStorage.setItem(ck, JSON.stringify(pr)); }catch(e){}
+        // a switch mid-flight would re-pin the OLD harbour's tides (nothing
+        // clears _tideData again after switchLocation's clear)
+        if (_ep !== (window._locEpoch || 0)) return;
         window._tideData = { id:st.id, hilo:pr.map(_tideRow) };
         try{ if (window._applyRainLine) window._applyRainLine(window._nowcastStr); }catch(e){}
       }).catch(function(){});
@@ -36651,6 +36669,7 @@ function dayRangeAround(d, days){
 
 
   function loadAirQuality(){
+    var _ep = window._locEpoch || 0;   // stale-location guard epoch
     var aqiEl = document.getElementById("aqi-val");
     var pm25El = document.getElementById("pm25-val");
     var pm10El = document.getElementById("pm10-val");
@@ -36667,6 +36686,7 @@ function dayRangeAround(d, days){
       .then(function(r){ return r.json(); })
       .then(function(data){
         try{
+          if (_ep !== (window._locEpoch || 0)) return; // stale-location resolve
           var current = data && data.current;
           if (!current) return;
 
@@ -36726,6 +36746,7 @@ function dayRangeAround(d, days){
   }
 
   function loadPollen(){
+    var _ep = window._locEpoch || 0;   // stale-location guard epoch
     window._pollenLastLoad = Date.now();
     var treeEl = document.getElementById("pollen-tree");
     var grassEl = document.getElementById("pollen-grass");
@@ -36740,6 +36761,7 @@ function dayRangeAround(d, days){
       .then(function(r){ return r.json(); })
       .then(function(data){
         try {
+          if (_ep !== (window._locEpoch || 0)) return; // stale-location resolve
           if (!data || !data.dailyInfo) return;
           window._pollenData = data;
           var day = data.dailyInfo[0];
@@ -45953,6 +45975,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (_goesIsFetching) return Promise.resolve();
     _goesIsFetching = true;
 
+    var _epG = window._locEpoch || 0;   // stale-sector guard: switch changes the sector
     var goesSat = goesCurrentSat;
     var goesSector = goesCurrentSector;
     var goesBand = goesCurrentBand;
@@ -46019,6 +46042,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         if (goesSubEl && fcastState.range === 'clouds') goesSubEl.textContent = "NESDIS/STAR GOES | " + sectorLabel + " • " + (bandNames[goesBand] || goesBand);
 
         if (uniq.length){
+          // Old sector's fetch resolved after a switch: drop it. Deliberately
+          // does NOT touch _goesIsFetching — switchLocation already reset it,
+          // and clearing here could unlock a duplicate while the NEW sector's
+          // fetch is still in flight.
+          if (_epG !== (window._locEpoch || 0)) return;
           goesFrames = uniq.slice(-goesLength);
           goesIdx = 0;
           goesLiveEl.textContent = "• LIVE";
@@ -53964,6 +53992,17 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       LOCATION = newLoc;
       window.LOCATION = LOCATION;
       TZ = newLoc.tz;
+      // Location epoch: bumped on every switch. In-flight fetches capture it
+      // at start and compare at resolve — a stale resolve from the previous
+      // city must never paint into the new city's UI (the audited race class).
+      window._locEpoch = (window._locEpoch || 0) + 1;
+      // Clear location-scoped state a stale resolve could otherwise re-pin:
+      window._tideData = null;
+      window._floodNetNow = null;
+      window._hmsSmokeOverhead = null;  // old city's smoke must not tint the new summary/hero
+      window._terrainIntel = null;
+      try { _terrainFetched = false; } catch(e){}   // module var — new city refetches terrain intel
+      try { _goesIsFetching = false; } catch(e){}   // module var — old sector's in-flight fetch must not swallow the new one
       window._geoMeta = null; // Reset for fresh landscape detection
       // Invalidate cloud-render caches so the new location's clouds are recomputed
       // from fresh weather data instead of briefly painting with the previous
@@ -63115,6 +63154,7 @@ function initNowMicroTabs(){
     if (_terrainFetched) return;
     _terrainFetched = true;
 
+    var _ep = window._locEpoch || 0;   // stale-location guard epoch
     var lat = LOCATION.lat, lon = LOCATION.lon;
     var cosLat = Math.cos(lat * Math.PI / 180);
 
@@ -63441,6 +63481,7 @@ function initNowMicroTabs(){
     }
 
     intel.description = desc.trim();
+    if (_ep !== (window._locEpoch || 0)) return; // superseded by a switch; switchLocation reset _terrainFetched
     window._terrainIntel = intel;
     0&&console.log('[Terrain Intel]', intel.terrainClass,
       '| elev:', intel.userElevationFt + 'ft',
@@ -70374,6 +70415,8 @@ function initNowMicroTabs(){
     fetchWithTimeout(url, null, 12000)
       .then(function(r){ return r.json(); })
       .then(function(d){
+        // stale-location guard: never store one city's smoke under another's key
+        if (key !== LOCATION.lat.toFixed(3) + ',' + LOCATION.lon.toFixed(3)) return;
         var feats = (d && d.features) || [];
         var rank = { Light: 1, Medium: 2, Heavy: 3 }, best = 0;
         var nowMs = Date.now();
@@ -70421,10 +70464,14 @@ function initNowMicroTabs(){
     }
     
     var url = "https://api.weather.gov/alerts/active?point=" + LOCATION.lat + "," + LOCATION.lon;
+    var _ep = window._locEpoch || 0;   // stale-location guard epoch
     
     fetchWithTimeout(url, null, 12000)
       .then(function(r){ return r.json(); })
       .then(function(data){
+        // a pre-switch tick resolving late must not paint the old city's
+        // warnings into the new city's panel/rain line
+        if (_ep !== (window._locEpoch || 0)) return;
         var features = data && data.features;
         if (!features) features = [];
         
@@ -75404,6 +75451,9 @@ function closeAlertModal(){
     }).catch(function(){ finish([], []); });
 
     function finish(early, rest){
+      // stale-location guard: a switch mid-flight must not paint the old
+      // city's dawn chorus (or plant its FIRST SONG cue on the hour strip)
+      if (lat !== _bvLat || lon !== _bvLon) return;
       var merged = {};
       early.concat(rest).forEach(function(r){
         var e = merged[r.name];
@@ -77007,7 +77057,7 @@ function closeAlertModal(){
                  try{ sessionStorage.setItem(ck, JSON.stringify({t:Date.now(), j:j})); }catch(e){}
                  return j;
                }))
-      .then(function(j){ _bwSeen = j || []; renderSeenNearby(); })
+      .then(function(j){ if (lat !== _bvLat || lon !== _bvLon) return; _bwSeen = j || []; renderSeenNearby(); })
       .catch(function(){ _bwSeen = []; });
   }
 
@@ -77630,6 +77680,8 @@ function closeAlertModal(){
                  return j;
                }))
       .then(function(j){
+        // stale-location guard — eBird is the slowest feed here
+        if (lat !== _bvLat || lon !== _bvLon) return;
         var seen = {}, out = [];
         (j||[]).forEach(function(o){
           if (!o || !o.comName || seen[o.comName]) return;
