@@ -69385,13 +69385,16 @@ function initNowMicroTabs(){
 
   // Fetch geology for earthquake map long-press — renders into the below-map
   // geology subview (#quake-geo-readout), not a floating map popup.
+  // Own cache (not geologyCache): this one keeps the response's refs block for
+  // the source citation, and the other geology maps cache bare unit arrays
+  // under the same lat/lng keys.
+  var quakeGeoCache = {};
   function fetchGeologyForQuakeMap(lat, lng, latlng){
     var cacheKey = lat.toFixed(4) + ',' + lng.toFixed(4);
     var out = document.getElementById('quake-geo-readout');
 
-    // Check cache first
-    if (geologyCache[cacheKey]){
-      showQuakeGeologyPopup(geologyCache[cacheKey], latlng || L.latLng(lat, lng));
+    if (quakeGeoCache[cacheKey]){
+      showQuakeGeologyPopup(quakeGeoCache[cacheKey].units, latlng || L.latLng(lat, lng), quakeGeoCache[cacheKey].refs);
       return;
     }
 
@@ -69402,8 +69405,8 @@ function initNowMicroTabs(){
       .then(function(r){ return r.json(); })
       .then(function(data){
         if (data && data.success && data.success.data && data.success.data.length > 0){
-          geologyCache[cacheKey] = data.success.data;
-          showQuakeGeologyPopup(data.success.data, latlng || L.latLng(lat, lng));
+          quakeGeoCache[cacheKey] = { units: data.success.data, refs: data.success.refs || {} };
+          showQuakeGeologyPopup(data.success.data, latlng || L.latLng(lat, lng), data.success.refs || {});
         } else if (out){
           out.innerHTML = '<div style="text-align:center;font-size:.68rem;font-weight:600;color:rgba(43,34,244,.75);padding:6px 0;">No mapped unit at that point &mdash; try another spot.</div>';
         }
@@ -69606,55 +69609,147 @@ function initNowMicroTabs(){
     }
   })();
 
+  // ── Geologic timescale (ICS 2023 boundary ages, Ma) for the quake-tab
+  // geology readout. Eras and periods are derived from the unit's numeric age
+  // span — the API only names the finest interval (stage/epoch).
+  var GEO_ERAS = [
+    ['Cenozoic', 0, 66], ['Mesozoic', 66, 251.9], ['Paleozoic', 251.9, 538.8],
+    ['Proterozoic', 538.8, 2500], ['Archean', 2500, 4031], ['Hadean', 4031, 4600]
+  ];
+  var GEO_PERIODS = [
+    ['Quaternary', 0, 2.58, 'the ice ages and the rise of humans'],
+    ['Neogene', 2.58, 23.03, 'spreading grasslands, apes and early hominins'],
+    ['Paleogene', 23.03, 66, 'mammals diversifying after the dinosaur extinction'],
+    ['Cretaceous', 66, 145, 'the last dinosaurs and the first flowering plants'],
+    ['Jurassic', 145, 201.4, 'giant sauropods and the first birds'],
+    ['Triassic', 201.4, 251.9, 'the first dinosaurs and the first mammals'],
+    ['Permian', 251.9, 298.9, 'Pangaea deserts, ending in the Great Dying'],
+    ['Carboniferous', 298.9, 358.9, 'vast coal swamps and giant insects'],
+    ['Devonian', 358.9, 419.2, 'the age of fishes and the first forests'],
+    ['Silurian', 419.2, 443.8, 'life first moving onto land'],
+    ['Ordovician', 443.8, 485.4, 'trilobite seas and the first reefs'],
+    ['Cambrian', 485.4, 538.8, 'the Cambrian explosion of animal life'],
+    ['Ediacaran', 538.8, 635, 'the first large soft-bodied life'],
+    ['Cryogenian', 635, 720, 'Snowball Earth glaciations'],
+    ['Tonian', 720, 1000, 'the first supercontinent breakups'],
+    ['Proterozoic', 1000, 2500, 'a microbial world as oxygen built up'],
+    ['Archean', 2500, 4031, 'the earliest single-celled life'],
+    ['Hadean', 4031, 4600, 'a molten young Earth']
+  ];
+  // Names whose [start, end] range overlaps the unit's t_age..b_age span
+  function geoSpanNames(table, t, b){
+    var out = [];
+    table.forEach(function(e){ if (t < e[2] && b > e[1] && out.indexOf(e[0]) === -1) out.push(e[0]); });
+    return out;
+  }
+  // One side of an age range, spelled out ("269", "780 thousand")
+  function geoAgeNum(ma){
+    if (ma >= 100) return String(Math.round(ma));
+    if (ma >= 1) return String(Math.round(ma * 10) / 10);
+    return Math.round(ma * 1000) + ' thousand';
+  }
+  function geoAgeSentence(t, b){
+    var tMil = t >= 1, bMil = b >= 1;
+    if (t === 0) return 'within the last ' + geoAgeNum(b) + (bMil ? ' million' : '') + ' years';
+    if (tMil === bMil) return geoAgeNum(t) + ' – ' + geoAgeNum(b) + (bMil ? ' million' : '') + ' years ago';
+    return geoAgeNum(t) + ' – ' + geoAgeNum(b) + ' million years ago';
+  }
+  function geoSpanSentence(t, b){
+    var d = b - t;
+    if (d <= 0) return '';
+    if (d >= 10) return 'a span of about ' + Math.round(d) + ' million years';
+    if (d >= 1) return 'a span of about ' + Math.round(d * 10) / 10 + ' million years';
+    return 'a span of about ' + Math.round(d * 1000) + ' thousand years';
+  }
+  // "Major:{limestone,dolostone}, Minor:{shale}, Incidental:{chert}" → prose
+  function geoLithReadable(lith){
+    if (!lith) return '';
+    if (typeof lith !== 'string'){
+      if (!lith.length) return '';
+      return lith.slice().sort(function(a,b){ return (b.prop||0) - (a.prop||0); })
+        .map(function(l){ var pct = l.prop ? ' ' + Math.round(l.prop*100) + '%' : ''; return (l.name || l) + pct; })
+        .join(', ');
+    }
+    if (lith.indexOf('{') === -1) return lith;
+    var parts = [];
+    lith.replace(/(\w+):\{([^}]*)\}/g, function(_, grade, items){
+      var list = items.split(',').map(function(s){ return s.trim(); }).filter(Boolean).join(', ');
+      if (!list) return '';
+      var g = grade.toLowerCase();
+      if (g === 'major') parts.push('mostly ' + list);
+      else if (g === 'minor') parts.push('minor ' + list);
+      else if (g === 'incidental') parts.push('traces of ' + list);
+      else parts.push(g.charAt(0).toUpperCase() + g.slice(1) + ': ' + list);
+      return '';
+    });
+    return parts.length ? parts.join(' · ') : lith;
+  }
+
   // Renders the long-press geology result into the below-map subview.
   // (Was an L.popup floating at the press point — kept the name for the callers.)
-  function showQuakeGeologyPopup(units, latlng){
+  function showQuakeGeologyPopup(units, latlng, refs){
     var out = document.getElementById('quake-geo-readout');
     if (!out || !units || units.length === 0) return;
 
     var unit = units[0];
-    var name = unit.strat_name || unit.name || "Unknown";
+    var name = unit.strat_name || unit.name || "Unknown unit";
 
     var unitNames = units.slice(0, 3).map(function(u){ return u.strat_name || u.name || "Unnamed"; });
     var moreText = units.length > 3 ? " +" + (units.length - 3) : "";
 
-    // Age info
-    var ageStr = "";
+    // Named interval straight from the API — the finest resolution it gives
+    var stageStr = "";
     if (unit.b_int_name && unit.t_int_name){
-      if (unit.b_int_name === unit.t_int_name){
-        ageStr = unit.b_int_name;
-      } else {
-        ageStr = unit.t_int_name + " - " + unit.b_int_name;
+      stageStr = unit.b_int_name === unit.t_int_name ? unit.b_int_name
+        : unit.t_int_name + " – " + unit.b_int_name;
+    }
+    // Era / period derived from the numeric span
+    var hasAges = (unit.t_age != null && unit.b_age != null);
+    var eras = [], periods = [], lifeThen = "";
+    if (hasAges){
+      eras = geoSpanNames(GEO_ERAS, unit.t_age, unit.b_age);
+      periods = geoSpanNames(GEO_PERIODS, unit.t_age, unit.b_age);
+      var mid = (unit.t_age + unit.b_age) / 2;
+      for (var gi = 0; gi < GEO_PERIODS.length; gi++){
+        if (mid >= GEO_PERIODS[gi][1] && mid < GEO_PERIODS[gi][2]){ lifeThen = GEO_PERIODS[gi][3]; break; }
       }
     }
-    var numericAge = "";
-    if (unit.t_age != null && unit.b_age != null){
-      numericAge = Math.round(unit.t_age) + " - " + Math.round(unit.b_age) + " Ma";
-    }
-    // The subview has room the old 180px popup didn't — include lithology + description.
-    // The map API returns lith as a plain STRING; only the column API sends the
-    // {name, prop} array. Handle both — the array path once threw on the string
-    // and the .catch mislabeled good data as "lookup failed".
-    var liths = "";
-    if (typeof unit.lith === 'string'){
-      liths = unit.lith;
-    } else if (unit.lith && unit.lith.length){
-      liths = unit.lith.slice().sort(function(a,b){ return (b.prop||0) - (a.prop||0); })
-        .map(function(l){ var pct = l.prop ? " " + Math.round(l.prop*100) + "%" : ""; return (l.name || l) + pct; })
-        .join(", ");
-    }
+
+    var liths = geoLithReadable(unit.lith);
     var coord = latlng ? latlng.lat.toFixed(3) + ", " + latlng.lng.toFixed(3) : "";
+    var swatch = unit.color ? '<span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:' + unit.color + ';border:1px solid rgba(30,30,50,.25);vertical-align:baseline;margin-right:2px;"></span>' : '';
+    var refText = (refs && unit.source_id != null && refs[unit.source_id]) ? String(refs[unit.source_id]).trim() : '';
+
+    var pill = function(label, val, ink, bg){
+      return '<span style="color:' + ink + ';font-weight:700;background:' + bg + ';border-radius:8px;padding:1px 8px;white-space:nowrap;">'
+        + '<span style="font-size:.4rem;font-weight:800;letter-spacing:.08em;opacity:.65;">' + label + '</span> ' + val + '</span>';
+    };
+    var timeRow = '';
+    if (eras.length) timeRow += pill('ERA', eras.join(' – '), '#7d4a9e', 'rgba(125,74,158,.12)');
+    if (periods.length) timeRow += ' ' + pill('PERIOD', periods.join(' – '), '#047857', 'rgba(5,150,105,.12)');
+    if (stageStr) timeRow += ' ' + pill('STAGE', stageStr, 'rgba(43,34,244,.8)', 'rgba(43,34,244,.08)');
+
+    var ageSentence = '';
+    if (hasAges){
+      ageSentence = 'Formed ' + geoAgeSentence(unit.t_age, unit.b_age);
+      var span = geoSpanSentence(unit.t_age, unit.b_age);
+      if (span) ageSentence += ' — ' + span;
+      if (lifeThen) ageSentence += ', a time of ' + lifeThen;
+      ageSentence += '.';
+    }
 
     out.innerHTML =
       '<div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">' +
-        '<span style="color:rgba(43,34,244,.95);font-weight:800;font-size:.62rem;">' + name + '</span>' +
-        (ageStr ? '<span style="color:#047857;font-weight:700;background:rgba(5,150,105,.12);border-radius:8px;padding:1px 7px;">' + ageStr + '</span>' : '') +
-        (numericAge ? '<span style="color:#7d4a9e;font-weight:700;background:rgba(125,74,158,.12);border-radius:8px;padding:1px 7px;">' + numericAge + '</span>' : '') +
+        '<span style="color:rgba(43,34,244,.95);font-weight:800;font-size:.62rem;">' + swatch + ' ' + name + '</span>' +
         (coord ? '<span style="color:rgba(30,30,50,.35);font-weight:600;">' + coord + '</span>' : '') +
       '</div>' +
-      '<div style="color:rgba(43,34,244,.6);margin-top:2px;">' + unitNames.join(" > ") + moreText + '</div>' +
+      (timeRow ? '<div style="display:flex;align-items:baseline;gap:2px;flex-wrap:wrap;margin-top:3px;">' + timeRow + '</div>' : '') +
+      (ageSentence ? '<div style="color:rgba(30,30,50,.65);margin-top:3px;">' + ageSentence + '</div>' : '') +
+      '<div style="color:rgba(43,34,244,.6);margin-top:2px;">' + unitNames.join(" › ") + moreText + '</div>' +
       (liths ? '<div style="color:rgba(30,30,50,.6);margin-top:2px;"><b style="color:rgba(30,30,50,.45);font-size:.45rem;letter-spacing:.06em;">LITHOLOGY</b> ' + liths + '</div>' : '') +
-      (unit.descrip ? '<div style="color:rgba(30,30,50,.55);margin-top:2px;">' + unit.descrip + '</div>' : '');
+      (unit.descrip ? '<div style="color:rgba(30,30,50,.55);margin-top:2px;">' + unit.descrip + '</div>' : '') +
+      (unit.comments ? '<div style="color:rgba(30,30,50,.5);margin-top:2px;font-style:italic;">' + unit.comments + '</div>' : '') +
+      (refText ? '<div style="color:rgba(30,30,50,.4);margin-top:4px;font-size:.42rem;line-height:1.5;"><b style="letter-spacing:.06em;">MAP SOURCE</b> ' + refText + '</div>' : '');
   }
 
   // Helper: time ago
