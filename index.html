@@ -69397,6 +69397,7 @@ function initNowMicroTabs(){
 
     if (quakeGeoCache[cacheKey]){
       showQuakeGeologyPopup(quakeGeoCache[cacheKey].units, latlng || L.latLng(lat, lng), quakeGeoCache[cacheKey].refs);
+      fetchFossilsForQuakeMap(lat, lng);
       return;
     }
 
@@ -69409,6 +69410,7 @@ function initNowMicroTabs(){
         if (data && data.success && data.success.data && data.success.data.length > 0){
           quakeGeoCache[cacheKey] = { units: data.success.data, refs: data.success.refs || {} };
           showQuakeGeologyPopup(data.success.data, latlng || L.latLng(lat, lng), data.success.refs || {});
+          fetchFossilsForQuakeMap(lat, lng);
         } else if (out){
           out.innerHTML = '<div style="text-align:center;font-size:.68rem;font-weight:600;color:rgba(43,34,244,.75);padding:6px 0;">No mapped unit at that point &mdash; try another spot.</div>';
         }
@@ -69753,7 +69755,85 @@ function initNowMicroTabs(){
       (liths ? '<div style="color:rgba(30,30,50,.6);margin-top:2px;"><b style="color:rgba(30,30,50,.45);font-size:.45rem;letter-spacing:.06em;">LITHOLOGY</b> ' + liths + '</div>' : '') +
       (unit.descrip ? '<div style="color:rgba(30,30,50,.55);margin-top:2px;">' + unit.descrip + '</div>' : '') +
       (unit.comments ? '<div style="color:rgba(30,30,50,.5);margin-top:2px;font-style:italic;">' + unit.comments + '</div>' : '') +
+      '<div id="quake-geo-fossils" style="margin-top:4px;"></div>' +
       (refText ? '<div style="color:rgba(30,30,50,.4);margin-top:4px;font-size:.42rem;line-height:1.5;"><b style="letter-spacing:.06em;">MAP SOURCE</b> ' + refText + '</div>' : '');
+  }
+
+  // ── FOSSILS near the pressed point — Paleobiology Database (paleobiodb.org).
+  // CORS-open, keyless. Queried as a ±0.25° box (~20 mi) around the press.
+  var quakeFossilCache = {};
+  var PBDB_FRIENDLY = {
+    'Cephalopoda':'cephalopods','Bivalvia':'bivalves','Gastropoda':'gastropods',
+    'Trilobita':'trilobites','Brachiopoda':'brachiopods','Anthozoa':'corals',
+    'Crinoidea':'crinoids','Blastoidea':'blastoids','Echinoidea':'sea urchins',
+    'Ostracoda':'ostracods','Mammalia':'mammals','Reptilia':'reptiles',
+    'Chondrichthyes':'sharks & rays','Actinopterygii':'ray-finned fish','Osteichthyes':'bony fish',
+    'Aves':'birds','Amphibia':'amphibians','Insecta':'insects',
+    'Foraminifera':'forams','Bryozoa':'bryozoans','Porifera':'sponges',
+    'Conodonta':'conodonts','Graptolithina':'graptolites',
+    'Saurischia':'dinosaurs','Ornithischia':'dinosaurs','Testudines':'turtles','Crocodylia':'crocodilians',
+    'Magnoliopsida':'flowering plants','Pinopsida':'conifers','Polypodiopsida':'ferns'
+  };
+  function fetchFossilsForQuakeMap(lat, lng){
+    var key = lat.toFixed(2) + ',' + lng.toFixed(2);
+    if (quakeFossilCache[key]){ renderQuakeFossils(quakeFossilCache[key]); return; }
+    var el0 = document.getElementById('quake-geo-fossils');
+    if (el0) el0.innerHTML = '<span style="color:rgba(30,30,50,.4);">Checking the Paleobiology Database&hellip;</span>';
+    var box = 0.25;
+    var qs = 'lngmin=' + (lng-box).toFixed(3) + '&lngmax=' + (lng+box).toFixed(3)
+           + '&latmin=' + (lat-box).toFixed(3) + '&latmax=' + (lat+box).toFixed(3);
+    Promise.all([
+      fetchWithTimeout('https://paleobiodb.org/data1.2/occs/list.json?' + qs + '&show=class&limit=500', null, 12000).then(function(r){ return r.json(); }),
+      fetchWithTimeout('https://paleobiodb.org/data1.2/colls/list.json?' + qs + '&limit=200', null, 12000).then(function(r){ return r.json(); })
+    ]).then(function(res){
+      var data = {
+        occs: (res[0] && res[0].records) || [],
+        colls: (res[1] && res[1].records) || [],
+        capped: ((res[0] && res[0].records) || []).length >= 500
+      };
+      quakeFossilCache[key] = data;
+      renderQuakeFossils(data);
+    }).catch(function(){
+      var e2 = document.getElementById('quake-geo-fossils');
+      if (e2) e2.innerHTML = '<span style="color:rgba(30,30,50,.4);">Paleobiology Database unreachable.</span>';
+    });
+  }
+  function renderQuakeFossils(data){
+    var el = document.getElementById('quake-geo-fossils');
+    if (!el) return;
+    var FL = '<b style="color:rgba(30,30,50,.45);font-size:.45rem;letter-spacing:.06em;">FOSSILS</b> ';
+    if (!data.occs.length && !data.colls.length){
+      el.innerHTML = FL + '<span style="color:rgba(30,30,50,.5);">none recorded within ~20 miles in the Paleobiology Database.</span>';
+      return;
+    }
+    var counts = {};
+    data.occs.forEach(function(o){
+      var g = PBDB_FRIENDLY[o.cll] || PBDB_FRIENDLY[o.odl] || PBDB_FRIENDLY[o.phl] || (o.cll || o.phl || 'other groups').toLowerCase();
+      counts[g] = (counts[g] || 0) + 1;
+    });
+    var top = Object.keys(counts).sort(function(a,b){ return counts[b] - counts[a]; }).slice(0, 3);
+    var nColl = data.colls.length;
+    if (!nColl){ var s = {}; data.occs.forEach(function(o){ s[o.cid] = 1; }); nColl = Object.keys(s).length; }
+    var occN = data.capped ? '500+' : String(data.occs.length);
+    var line = occN + ' fossil occurrence' + (data.occs.length === 1 ? '' : 's')
+      + ' in ' + nColl + ' collection' + (nColl === 1 ? '' : 's') + ' within ~20 miles'
+      + (top.length ? ' — ' + top.join(', ') : '') + '.';
+    // Richest collections, linked to their PBDB pages (dedupe repeated formation labels)
+    var seen = {}, links = [];
+    data.colls.slice().sort(function(a,b){ return (b.noc||0) - (a.noc||0); }).forEach(function(c){
+      if (links.length >= 3) return;
+      var id = String(c.oid || '').replace('col:', '');
+      if (!id) return;
+      var label = c.sfm ? c.sfm + ' Fm' : (c.nam || 'Collection ' + id);
+      if (label.length > 38) label = label.slice(0, 36) + '…';
+      if (seen[label]) return;
+      seen[label] = 1;
+      var meta = (c.noc ? c.noc + ' fossils' : '') + (c.oei ? (c.noc ? ', ' : '') + c.oei : '');
+      links.push('<a href="https://paleobiodb.org/classic/basicCollectionSearch?collection_no=' + id + '" target="_blank" rel="noopener" style="color:rgba(43,34,244,.8);font-weight:700;text-decoration:underline;text-decoration-color:rgba(43,34,244,.35);">' + label + '</a>'
+        + (meta ? ' <span style="color:rgba(30,30,50,.4);">(' + meta + ')</span>' : ''));
+    });
+    el.innerHTML = FL + '<span style="color:rgba(30,30,50,.6);">' + line + '</span>'
+      + (links.length ? '<div style="margin-top:1px;color:rgba(30,30,50,.5);">' + links.join(' · ') + '</div>' : '');
   }
 
   // Helper: time ago
