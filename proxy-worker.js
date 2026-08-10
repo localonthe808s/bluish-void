@@ -46,6 +46,8 @@ const CACHE_RULES = {
   'api.weather.gov':              300,
   'water.noaa.gov':               300,
   'www.nhc.noaa.gov':             600,
+  // ATCF a-deck model tracks (spaghetti) — no CORS upstream
+  'ftp.nhc.noaa.gov':             600,
   'www.spc.noaa.gov':             600,
   'www.wpc.ncep.noaa.gov':        600,
   'www.cpc.ncep.noaa.gov':        600,

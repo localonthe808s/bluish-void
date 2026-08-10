@@ -67207,9 +67207,12 @@ function initNowMicroTabs(){
     // Source 3: Retry Source 1 after 2s delay (transient failures)
     // Fallback: Synthetic spread
 
+    // ftp.nhc.noaa.gov sends no CORS header — direct fetches ALWAYS failed
+    // (every past render was the synthetic fallback). Route through our worker.
+    var _atcfUrl = 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://ftp.nhc.noaa.gov/atcf/aid_public/a' + atcfId + '.dat');
     var sources = [
-      { url: 'https://ftp.nhc.noaa.gov/atcf/aid_public/a' + atcfId + '.dat', label: 'FTP plain', delay: 0 },
-      { url: 'https://ftp.nhc.noaa.gov/atcf/aid_public/a' + atcfId + '.dat', label: 'FTP retry', delay: 2500 },
+      { url: _atcfUrl, label: 'proxy', delay: 0 },
+      { url: _atcfUrl, label: 'proxy retry', delay: 2500 },
     ];
 
     var attemptIdx = 0;
@@ -67364,6 +67367,49 @@ function initNowMicroTabs(){
     // Build legend from actually-rendered models
     _buildModelTrackLegend(renderedModels, false);
   }
+
+  // ── INVEST SPAGHETTI — pre-named systems. Scans the ATCF directory for
+  // invest a-decks (al90-99/ep90-99) modified in the last 48h, matches each
+  // latest-cycle position to a plotted disturbance, and renders its real
+  // model tracks. Same worker route as the named-storm path.
+  window._hzFetchInvestSpag = function(){
+    clearTimeout(window._hzInvestT);
+    window._hzInvestT = setTimeout(function(){
+      if (!_hurricaneMap) return;
+      // drop previously drawn invest layers
+      (window._investSpagLayers || []).forEach(function(l){ try{ _hurricaneMap.removeLayer(l); }catch(e){} });
+      window._investSpagLayers = [];
+      var dists = (window._hzSystems || {}).dists || [];
+      if (!dists.length) return;
+      var listUrl = 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://ftp.nhc.noaa.gov/atcf/aid_public/');
+      fetchWithTimeout(listUrl, null, 15000).then(function(r){ return r.text(); }).then(function(html){
+        var re = /a((?:al|ep)9\d\d{4})\.dat<\/a>\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2})/g, m, cands = [];
+        var yr = String(new Date().getFullYear());
+        while ((m = re.exec(html))) {
+          if (m[1].indexOf(yr) === -1) continue;
+          var age = Date.now() - new Date(m[2].replace(' ', 'T') + ':00Z').getTime();
+          if (age < 48 * 3600 * 1000) cands.push(m[1]);
+        }
+        cands.slice(0, 3).forEach(function(id){
+          var u = 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://ftp.nhc.noaa.gov/atcf/aid_public/a' + id + '.dat');
+          fetchWithTimeout(u, null, 15000).then(function(r){ return r.text(); }).then(function(text){
+            var parsed = _parseATCFaDeck(text, id);
+            var techs = Object.keys(parsed || {});
+            if (techs.length < 2) return;
+            // latest-cycle origin = the lowest-tau point of any model
+            var p0 = null;
+            techs.forEach(function(tk){ var p = parsed[tk][0]; if (p && (!p0 || (p.tau || 0) < (p0.tau || 0))) p0 = p; });
+            if (!p0) return;
+            var near = dists.some(function(d){ return isFinite(d.lat) && Math.abs(d.lat - p0.lat) < 4.5 && Math.abs(d.lon - p0.lon) < 4.5; });
+            if (!near) return;
+            var before = _spaghettiLayers.length;
+            _renderRealModelTracks(parsed, 'INVEST ' + id.slice(0, 4).toUpperCase());
+            window._investSpagLayers = (window._investSpagLayers || []).concat(_spaghettiLayers.slice(before));
+          }).catch(function(){});
+        });
+      }).catch(function(){});
+    }, 3000);
+  };
 
   // ── Build model track legend (shared by real and synthetic) ──
   function _buildModelTrackLegend(modelList, isSynthetic) {
@@ -68751,6 +68797,7 @@ function initNowMicroTabs(){
           });
           if (window._hzRenderSystemsLine) window._hzRenderSystemsLine();
           if (window._hzFetchModelOutlook) window._hzFetchModelOutlook();
+          if (window._hzFetchInvestSpag) window._hzFetchInvestSpag();
         });
       }).catch(function(e){ console.warn('GTWO 2-day points fetch failed:', e); })
       .finally(_fetch7dPoints);
@@ -68802,6 +68849,7 @@ function initNowMicroTabs(){
           });
           if (window._hzRenderSystemsLine) window._hzRenderSystemsLine();
           if (window._hzFetchModelOutlook) window._hzFetchModelOutlook();
+          if (window._hzFetchInvestSpag) window._hzFetchInvestSpag();
         });
       }).catch(function(e){ console.warn('GTWO 7-day points fetch failed:', e); });
     }
