@@ -1267,6 +1267,13 @@
   #hurricane-subview #hz-atlantic-status { max-width: none !important; padding: 0; }
   #hurricane-subview #hz-data-fresh { column-span: all; }
   #hurricane-subview #hz-view-list button { flex: 1 1 170px; }
+  /* Marker pulse when its CURRENT SYSTEMS row is clicked */
+  @keyframes hz-marker-ping {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.25); }
+  }
+  .hz-marker-ping { animation: hz-marker-ping 1s ease-in-out 3; transform-origin: center; }
+
   /* Season insight (former map INSIGHT panel) — display:contents like the
      summary, so its .hz-sect groups pack into the same wrap row as the
      season stats. One continuous panel, no divider. */
@@ -59582,9 +59589,37 @@ function initNowMicroTabs(){
       }
 
       // ── ENSO / CLIMATE DRIVERS ──
-      var ensoPhase = 'NEUTRAL (Transitioning)';
-      var ensoColor = '#64748b';
-      var ensoImpact = 'Near-normal wind shear expected over the MDR. Neutral ENSO typically supports average-to-slightly-above-average Atlantic seasons.';
+      // ENSO state from NOAA CPC ONI (latest 3-month anomaly), refreshed every
+      // 6h via the proxy worker; the neutral copy is the pre-fetch fallback
+      var enso = window._hzEnso;
+      if (!window._hzEnsoAt || Date.now() - window._hzEnsoAt > 21600000) {
+        window._hzEnsoAt = Date.now();
+        try {
+          fetchWithTimeout('https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt'), null, 12000)
+            .then(function(r){ return r.text(); })
+            .then(function(t){
+              var rows = t.trim().split('\n');
+              var last = rows[rows.length - 1].trim().split(/\s+/); // SEAS YR TOTAL ANOM
+              var anom = parseFloat(last[3]);
+              if (isFinite(anom)) {
+                window._hzEnso = { anom: anom, seas: last[0], yr: last[1] };
+                if (typeof updateHazardInsight === 'function') updateHazardInsight();
+              }
+            }).catch(function(){});
+        } catch(e){}
+      }
+      var ensoPhase, ensoColor, ensoImpact;
+      var oniTag = enso ? ' (ONI ' + (enso.anom > 0 ? '+' : '') + enso.anom.toFixed(1) + ', ' + enso.seas + ' ' + enso.yr + ')' : '';
+      if (enso && enso.anom >= 0.5) {
+        ensoPhase = 'EL NIÑO' + oniTag; ensoColor = '#c2410c';
+        ensoImpact = 'Enhanced Atlantic wind shear — typically suppresses Atlantic hurricane activity.';
+      } else if (enso && enso.anom <= -0.5) {
+        ensoPhase = 'LA NIÑA' + oniTag; ensoColor = '#0e7490';
+        ensoImpact = 'Reduced Atlantic shear — favors above-average Atlantic hurricane activity.';
+      } else {
+        ensoPhase = 'NEUTRAL' + oniTag; ensoColor = '#64748b';
+        ensoImpact = 'Near-normal wind shear expected over the MDR. Neutral ENSO typically supports average-to-slightly-above-average Atlantic seasons.';
+      }
       var amoPhase = 'POSITIVE (Warm)';
       var amoColor = '#f97316';
       var amoImpact = 'Warm AMO suppresses Atlantic shear and elevates SSTs basin-wide, contributing to the hyperactive era since 1995.';
@@ -59608,34 +59643,62 @@ function initNowMicroTabs(){
       h += '<button onclick="_hzShowLatestOutlook()" style="margin-top:2px;padding:5px 10px;border-radius:8px;border:1px solid transparent;background:rgba(167,139,250,.30);color:rgba(43,34,244,.65);font-size:.52rem;font-weight:800;cursor:pointer;letter-spacing:.06em;font-family:system-ui,sans-serif;">LATEST NHC OUTLOOK</button>';
       h += '</div>';
 
-      // ── CURRENT ATMOSPHERIC CONDITIONS (from wx data) ──
-      if (wx && wx.wind != null) {
-        h += '<div class="hz-sect">' + SH('ATMOSPHERIC ENVIRONMENT', '#0e7490');
-        var shear = null;
-        if (wx.wind300spd != null) {
-          shear = Math.round(Math.abs((wx.wind300spd * 1.944) - wx.wind)); // rough kt difference
-        }
-        if (shear != null) {
-          var shearLvl = shear < 10 ? 'LOW' : shear < 20 ? 'MODERATE' : 'HIGH';
-          var shearCol = shear < 10 ? '#059669' : shear < 20 ? '#b45309' : '#ef4444';
-          var shearNote = shear < 10 ? 'Favorable for TC development and intensification' : shear < 20 ? 'Marginal — some shear-induced tilt possible' : 'Hostile — would disrupt any developing vortex';
-          h += LB('WIND SHEAR', shearLvl + ' (' + shear + ' kt) — ' + shearNote, shearCol);
-        }
-        if (wx.dewpoint != null) {
-          var dpC = Math.round((wx.dewpoint - 32) * 5/9);
-          var moistNote = wx.dewpoint >= 70 ? 'Deep moisture present — tropical air mass in place' : wx.dewpoint >= 60 ? 'Adequate atmospheric moisture' : 'Dry mid-levels — unfavorable for deep convection';
-          h += LB('MOISTURE', 'Dewpoint ' + wx.dewpoint + '°F (' + dpC + '°C) — ' + moistNote, wx.dewpoint >= 70 ? '#059669' : '#64748b');
-        }
-        if (wx.cape != null) {
-          var capeNote = wx.cape > 2000 ? 'Explosive deep convection possible' : wx.cape > 1000 ? 'Moderate instability' : wx.cape > 500 ? 'Weak instability' : 'Stable — limited convective potential';
-          h += LB('CAPE', wx.cape + ' J/kg — ' + capeNote, wx.cape > 1000 ? '#b45309' : '#64748b');
-        }
-        if (wx.pressureTrend != null) {
-          var ptNote = wx.pressureTrend < -3 ? 'Rapid pressure fall — active synoptic forcing' : wx.pressureTrend < -1 ? 'Falling — system approaching' : wx.pressureTrend > 2 ? 'Rising — high pressure building' : 'Steady';
-          h += LB('PRESSURE TREND', (wx.pressureTrend > 0 ? '+' : '') + wx.pressureTrend + ' mb/3hr · ' + ptNote, wx.pressureTrend < -3 ? '#f97316' : '#64748b');
-        }
-        h += '</div>';
+      // ── MDR ENVIRONMENT — basin conditions sampled across 10–20°N Atlantic
+      // (the old version showed the USER'S local shear/CAPE, which says
+      // nothing about tropical cyclone genesis)
+      var env = window._hzMdrEnv;
+      if (!window._hzMdrEnvAt || Date.now() - window._hzMdrEnvAt > 1800000) {
+        window._hzMdrEnvAt = Date.now();
+        try {
+          fetchWithTimeout('https://api.open-meteo.com/v1/forecast?latitude=12.5,15,12.5&longitude=-55,-45,-35&hourly=windspeed_850hPa,winddirection_850hPa,windspeed_300hPa,winddirection_300hPa,relativehumidity_700hPa&forecast_days=1&timezone=UTC&windspeed_unit=kn', null, 12000)
+            .then(function(r){ return r.json(); })
+            .then(function(res){
+              var list = Array.isArray(res) ? res : [res];
+              var hh = new Date().toISOString().slice(0, 13);
+              var shears = [], rhs = [];
+              list.forEach(function(loc){
+                var H = loc && loc.hourly; if (!H || !H.time) return;
+                var idx = -1;
+                for (var k = 0; k < H.time.length; k++) { if (H.time[k].slice(0, 13) === hh) { idx = k; break; } }
+                if (idx < 0) idx = Math.min(12, H.time.length - 1);
+                var toUV = function(spd, dir){ var r = dir * Math.PI / 180; return [-spd * Math.sin(r), -spd * Math.cos(r)]; };
+                var s8 = H.windspeed_850hPa && H.windspeed_850hPa[idx], d8 = H.winddirection_850hPa && H.winddirection_850hPa[idx];
+                var s3 = H.windspeed_300hPa && H.windspeed_300hPa[idx], d3 = H.winddirection_300hPa && H.winddirection_300hPa[idx];
+                if (s8 != null && s3 != null && d8 != null && d3 != null) {
+                  var a = toUV(s8, d8), b = toUV(s3, d3);
+                  shears.push(Math.sqrt(Math.pow(b[0] - a[0], 2) + Math.pow(b[1] - a[1], 2)));
+                }
+                var rh = H.relativehumidity_700hPa && H.relativehumidity_700hPa[idx];
+                if (rh != null) rhs.push(rh);
+              });
+              if (shears.length) {
+                var avg = function(arr){ return arr.reduce(function(x, y){ return x + y; }, 0) / arr.length; };
+                window._hzMdrEnv = { shear: Math.round(avg(shears)), rh700: rhs.length ? Math.round(avg(rhs)) : null };
+                if (typeof updateHazardInsight === 'function') updateHazardInsight();
+              }
+            }).catch(function(){});
+        } catch(e){}
       }
+      h += '<div class="hz-sect">' + SH('MDR ENVIRONMENT (10–20°N)', '#0e7490');
+      if (env) {
+        var shLvl = env.shear < 15 ? 'LOW' : env.shear < 25 ? 'MODERATE' : 'HIGH';
+        var shCol = env.shear < 15 ? '#059669' : env.shear < 25 ? '#b45309' : '#ef4444';
+        var shNote = env.shear < 15 ? 'Favorable for development and intensification' : env.shear < 25 ? 'Marginal — shear-induced tilt possible' : 'Hostile — would disrupt developing systems';
+        h += LB('DEEP-LAYER SHEAR', shLvl + ' (' + env.shear + ' kt, 850–300mb) — ' + shNote, shCol);
+        if (env.rh700 != null) {
+          var rhNote = env.rh700 >= 55 ? 'Moist mid-levels — supportive of deep convection' : env.rh700 >= 40 ? 'Drier mid-levels — possible SAL influence' : 'Dry mid-levels — SAL likely suppressing convection';
+          h += LB('MID-LEVEL MOISTURE', env.rh700 + '% RH at 700mb — ' + rhNote, env.rh700 >= 55 ? '#059669' : env.rh700 >= 40 ? '#b45309' : '#c2410c');
+        }
+      } else {
+        h += '<div style="font-size:.52rem;color:rgba(30,30,50,.55);line-height:1.5;margin-bottom:3px;">Sampling the Main Development Region…</div>';
+      }
+      var mdrS = window._hzMdrSst;
+      if (mdrS && mdrS.avg != null) {
+        var sstV = parseFloat(mdrS.avg);
+        h += LB('SEA SURFACE', mdrS.avg + '°C across the belt — ' + (sstV >= 26 ? 'above' : 'below') + ' the 26°C genesis threshold', sstV >= 26 ? '#c2410c' : '#0e7490');
+      }
+      h += '<div style="font-size:.44rem;color:rgba(43,34,244,.4);margin-top:2px;font-weight:500;">Basin mean of 3 points across the tropical Atlantic · Open-Meteo</div>';
+      h += '</div>';
 
       // ── GENESIS FACTORS — what conditions matter ──
       h += '<div class="hz-sect">' + SH('TC GENESIS REQUIREMENTS', '#059669');
@@ -68283,23 +68346,25 @@ function initNowMicroTabs(){
     var svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:auto;display:block;">';
 
     // Background bar
-    svg += '<rect x="0" y="' + barY + '" width="' + W + '" height="' + barH + '" rx="4" fill="rgba(255,255,255,.06)"/>';
+    svg += '<rect x="0" y="' + barY + '" width="' + W + '" height="' + barH + '" rx="4" fill="rgba(43,34,244,.08)"/>';
 
     // Current ACE fill
-    svg += '<rect x="0" y="' + barY + '" width="' + (W * currentPct / 100) + '" height="' + barH + '" rx="4" fill="' + barColor + '" opacity="0.7"/>';
+    var fillW = W * currentPct / 100;
+    svg += '<rect x="0" y="' + barY + '" width="' + fillW + '" height="' + barH + '" rx="4" fill="' + barColor + '" opacity="0.7"/>';
 
     // Climatological pace marker (dashed line)
     var paceX = W * pacePctBar / 100;
-    svg += '<line x1="' + paceX + '" y1="' + (barY - 2) + '" x2="' + paceX + '" y2="' + (barY + barH + 2) + '" stroke="rgba(255,255,255,.5)" stroke-width="1.5" stroke-dasharray="2 1"/>';
-    svg += '<text x="' + paceX + '" y="' + (barY - 3) + '" fill="rgba(255,255,255,.4)" font-size="5" font-family="system-ui" text-anchor="middle">pace</text>';
+    svg += '<line x1="' + paceX + '" y1="' + (barY - 2) + '" x2="' + paceX + '" y2="' + (barY + barH + 2) + '" stroke="rgba(30,30,50,.45)" stroke-width="1.5" stroke-dasharray="2 1"/>';
+    svg += '<text x="' + paceX + '" y="' + (barY - 3) + '" fill="rgba(30,30,50,.55)" font-size="6.5" font-family="system-ui" text-anchor="middle">pace</text>';
 
     // Season average marker (solid thin line)
     var avgX = W * avgPctBar / 100;
-    svg += '<line x1="' + avgX + '" y1="' + barY + '" x2="' + avgX + '" y2="' + (barY + barH) + '" stroke="rgba(196,181,253,.4)" stroke-width="1"/>';
-    svg += '<text x="' + avgX + '" y="' + (barY + barH + 7) + '" fill="rgba(196,181,253,.35)" font-size="4.5" font-family="system-ui" text-anchor="middle">avg (' + avgACE + ')</text>';
+    svg += '<line x1="' + avgX + '" y1="' + barY + '" x2="' + avgX + '" y2="' + (barY + barH) + '" stroke="rgba(43,34,244,.4)" stroke-width="1"/>';
+    svg += '<text x="' + avgX + '" y="' + (barY + barH + 9) + '" fill="rgba(43,34,244,.5)" font-size="6" font-family="system-ui" text-anchor="middle">avg (' + avgACE + ')</text>';
 
-    // Current value label
-    svg += '<text x="' + Math.max(15, W * currentPct / 100) + '" y="' + (barY + barH / 2 + 2) + '" fill="rgba(0,0,0,.7)" font-size="6" font-weight="bold" font-family="system-ui" text-anchor="middle">' + currentACE + '</text>';
+    // Current value label — outside the fill when there's room, inside otherwise
+    var valInside = fillW > W - 24;
+    svg += '<text x="' + (valInside ? fillW - 5 : fillW + 5) + '" y="' + (barY + barH / 2 + 2.5) + '" fill="' + (valInside ? '#fff' : 'rgba(30,30,50,.85)') + '" font-size="7.5" font-weight="bold" font-family="system-ui" text-anchor="' + (valInside ? 'end' : 'start') + '">' + currentACE + '</text>';
 
     svg += '</svg>';
     return { svg: svg, paceLabel: paceLabel, barColor: barColor, paceACE: Math.round(paceACE) };
@@ -68530,8 +68595,18 @@ function initNowMicroTabs(){
                 else cur.push(ln);
               });
               if (cur.length) paras.push(cur.join(' '));
+              // Issuance stamp lives in the boilerplate header paragraph
+              // ("...NWS National Hurricane Center Miami FL 800 PM EDT Mon Aug 11 2026")
+              var issued = null;
+              if (paras.length && /Tropical Weather Outlook/i.test(paras[0])) {
+                var im2 = paras[0].match(/(\d{3,4}\s*(?:AM|PM)\s+[A-Z]{3,4}\s+[A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+\d{4})/);
+                if (im2) issued = im2[1];
+                paras = paras.slice(1); // drop the boilerplate from the modal body
+              }
               window._hzTwoFull = window._hzTwoFull || {};
               window._hzTwoFull[entry.label] = paras;
+              window._hzTwoIssued = window._hzTwoIssued || {};
+              window._hzTwoIssued[entry.label] = issued;
             }
           } catch(e) {}
           if (text == null) {
@@ -68611,7 +68686,7 @@ function initNowMicroTabs(){
     var S = window._hzSystems || {};
     var rows = [];
     var row = function(ink, name, badge, mid, stats, key){
-      return '<div ' + (key ? 'data-hz-dist="' + key + '" ' : '') + 'style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;padding:2.5px 6px;margin:0 -6px;border-radius:8px;transition:background .4s,box-shadow .4s;font-family:system-ui,sans-serif;">'
+      return '<div ' + (key ? 'data-hz-dist="' + key + '" onclick="_hzFlyToDist(this.dataset.hzDist)" title="View on map" ' : '') + 'style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;padding:2.5px 6px;margin:0 -6px;border-radius:8px;transition:background .4s,box-shadow .4s;font-family:system-ui,sans-serif;' + (key ? 'cursor:pointer;' : '') + '">'
         + '<span style="width:7px;height:7px;border-radius:50%;background:' + ink + ';flex:none;align-self:center;"></span>'
         + '<b style="color:' + ink + ';letter-spacing:.04em;font-size:.6rem;">' + name + '</b>'
         + (badge || '')
@@ -68666,15 +68741,46 @@ function initNowMicroTabs(){
     el._hzFlashT = setTimeout(function(){ el.style.background = ''; el.style.boxShadow = ''; }, 2400);
   };
 
+  // Clicking a CURRENT SYSTEMS row flies the map to that disturbance and
+  // pulses its marker (reverse of the marker-click → row flash)
+  window._hzFlyToDist = function(key){
+    if (!key) return;
+    var p = String(key).split('_'), lat = parseFloat(p[0]), lon = parseFloat(p[1]);
+    if (!isFinite(lat) || !isFinite(lon)) return;
+    var map = (typeof _hurricaneMap !== 'undefined') ? _hurricaneMap : null;
+    if (!map) return;
+    try { map.flyTo([lat, lon], Math.max(map.getZoom(), 5), { duration: 1.1 }); } catch(e){}
+    var markers = (typeof _hurricaneLayerObjs !== 'undefined' && _hurricaneLayerObjs.disturbanceMarkers) || [];
+    markers.forEach(function(m){
+      try {
+        var ll = m.getLatLng();
+        // Animate the icon's inner div — Leaflet owns transform on _icon
+        // itself (translate3d positioning), so scaling it would move the marker
+        var inner = m._icon && m._icon.firstElementChild;
+        if (Math.abs(ll.lat - lat) < 0.15 && Math.abs(ll.lng - lon) < 0.15 && inner) {
+          inner.classList.remove('hz-marker-ping');
+          void inner.offsetWidth; // restart the animation
+          inner.classList.add('hz-marker-ping');
+          setTimeout(function(){ try { inner.classList.remove('hz-marker-ping'); } catch(e){} }, 3200);
+        }
+      } catch(e){}
+    });
+  };
+
   // LATEST NHC OUTLOOK button — full Tropical Weather Outlook text in the
   // shared insight modal (text parsed from the advisory RSS by _fetchNHCAdvisoryText)
   window._hzShowLatestOutlook = function(){
     var F = window._hzTwoFull || {};
-    var h = '';
+    var I = window._hzTwoIssued || {};
+    var h = '', firstIssued = null;
     [['ATL', 'ATLANTIC'], ['EPAC', 'EAST PACIFIC']].forEach(function(b){
       var paras = F[b[0]];
       if (!paras || !paras.length) return;
       h += '<div style="font-size:.44rem;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:rgba(43,34,244,.5);margin:10px 0 4px;">' + b[1] + '</div>';
+      if (I[b[0]]) {
+        if (!firstIssued) firstIssued = I[b[0]];
+        h += '<div style="font-size:.44rem;color:rgba(43,34,244,.45);font-weight:600;margin-bottom:5px;">Issued ' + I[b[0]] + '</div>';
+      }
       paras.forEach(function(p){
         h += '<div style="font-size:.5rem;color:rgba(30,30,50,.78);line-height:1.65;margin-bottom:7px;">' + p + '</div>';
       });
@@ -68682,7 +68788,7 @@ function initNowMicroTabs(){
     if (!h) h = '<div style="font-size:.5rem;color:rgba(30,30,50,.6);line-height:1.6;padding:8px 0;">Outlook text hasn’t loaded yet — the NHC feed is still on its way. Try again in a few seconds.</div>';
     if (window._openInsightModal) window._openInsightModal({
       title: 'TROPICAL WEATHER OUTLOOK',
-      subtitle: 'NHC · LATEST ISSUANCE',
+      subtitle: firstIssued ? 'NHC · ISSUED ' + firstIssued.toUpperCase() : 'NHC · LATEST ISSUANCE',
       centered: true,
       h: h,
       footer: '<a href="https://www.nhc.noaa.gov/gtwo.php" target="_blank" rel="noopener" style="color:rgba(43,34,244,.5);text-decoration:none;">nhc.noaa.gov</a> · Issued 4x daily'
@@ -69118,7 +69224,11 @@ function initNowMicroTabs(){
       var daysToPeak = Math.ceil((peakDate - now) / 86400000);
       countdownText = daysToPeak + ' days to peak season (Aug 20)';
     } else if (month <= 10 && (month < 10 || day <= 10)) {
-      countdownText = 'Peak season active (Aug 20 – Oct 10)';
+      // The phase line below already says "PEAK SEASON · Aug 20 – Oct 10" —
+      // give the countdown a non-duplicate job: days of peak remaining
+      var peakEnd = new Date(year, 9, 10); // Oct 10
+      var peakDaysLeft = Math.max(0, Math.ceil((peakEnd - now) / 86400000));
+      countdownText = peakDaysLeft + ' days of peak season remain';
     } else {
       var endDate = new Date(year, 10, 30); // Nov 30
       var daysLeft = Math.ceil((endDate - now) / 86400000);
