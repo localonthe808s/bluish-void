@@ -173,6 +173,8 @@
         <stop offset="100%" stop-color="#5f96e0" stop-opacity="0"/>
       </radialGradient>
       <clipPath id="earthClip"><circle r="46"/></clipPath>
+      <clipPath id="spClipF"><circle r="8"/></clipPath>
+      <clipPath id="spClipC"><circle r="6.5"/></clipPath>
       <radialGradient id="sunCore">
         <stop offset="0%"  stop-color="#fffdf4"/>
         <stop offset="55%" stop-color="#ffe9b0"/>
@@ -198,6 +200,7 @@
     <g id="gRings"></g>
     <g id="gJunk"></g>
     <g id="gSats"></g>
+    <g id="gSprites" display="none"></g>
     <g id="gMoon"></g>
     <g id="gEarth"></g>
   </svg>
@@ -567,6 +570,7 @@ function openAboutPopup(){
     _row('STARLINK', 'SAMPLED 400 OF ~11,000') +
     _row('DEBRIS', 'EVERY TRACKED FRAGMENT OF THE 4 BIG EVENTS + BRIGHT ROCKET BODIES') +
     _row('JUNK LEDGER', 'CELESTRAK SATCAT') +
+    _row('ZOOM SPRITES', 'NOAA / USSF / NASA RENDERS · PUBLIC DOMAIN (VIA WIKIMEDIA COMMONS + NASA IMAGES)') +
     '</div>';
   popupEl.classList.add('open');
 }
@@ -717,10 +721,28 @@ function satInfo(s){
     if (SAT_RULES[i][0].test(s.nm)) return SAT_RULES[i][1](s.nm, s);
   return {sub:'ON ORBIT', story:'A working satellite from the public catalog.'};
 }
+/* zoom-gated photo bubbles for the named/data birds — PD renders (NOAA /
+   USSF / NASA via Wikimedia Commons + NASA image library), circle-clipped
+   like the solar map's moon photos, hrefs attached on first zoom-in */
+var SPRITE_URL = {
+  'ISS (ZARYA)': 'https://images-assets.nasa.gov/image/s132e012208/s132e012208~small.jpg',
+  'HST':         'https://images-assets.nasa.gov/image/s125e012033/s125e012033~small.jpg'
+};
+var SPR_GOES = 'https://upload.wikimedia.org/wikipedia/commons/thumb/e/e3/GOES-R_Spacecraft_on_Night_Sky_%2814398636554%29.jpg/330px-GOES-R_Spacecraft_on_Night_Sky_%2814398636554%29.jpg';
+var SPR_GPS  = 'https://upload.wikimedia.org/wikipedia/commons/thumb/4/49/GPS_Block_IIIA.jpg/330px-GPS_Block_IIIA.jpg';
+var SPR_TDRS = 'https://upload.wikimedia.org/wikipedia/commons/thumb/4/43/TDRS-L.jpg/330px-TDRS-L.jpg';
+function spriteFor(nm){
+  if (SPRITE_URL[nm]) return SPRITE_URL[nm];
+  if (/^GOES 1[6-9]$/.test(nm)) return SPR_GOES;
+  if (/^GPS /.test(nm)) return SPR_GPS;
+  if (/^TDRS /.test(nm)) return SPR_TDRS;
+  return null;
+}
 var fleet = [];
 (function(){
   if (typeof TLE === 'undefined') return;
   var g = document.getElementById('gSats');
+  var gSpr = document.getElementById('gSprites');
   Object.keys(TLE).forEach(function(grp){
     var st = GROUP_STYLE[grp];
     if (!st) return;                                    // debris handled above
@@ -765,6 +787,21 @@ var fleet = [];
         rec.lab.textContent = feat;
         rec.hit = mk('circle', {r:10, fill:'rgba(0,0,0,0)', style:'cursor:pointer;'}, g);
       }
+      if (feat || canClick){
+        var su = spriteFor(t[0]);
+        if (su){
+          var SR = feat ? 8 : 6.5;
+          var sg = mk('g', {style: canClick ? 'cursor:pointer;' : ''}, gSpr);
+          mk('circle', {r:SR, fill:'#0a1122'}, sg);
+          mk('image', {'data-src':su, x:-SR, y:-SR, width:SR*2, height:SR*2,
+                       preserveAspectRatio:'xMidYMid slice',
+                       'clip-path':'url(#' + (feat ? 'spClipF' : 'spClipC') + ')'}, sg);
+          mk('circle', {r:SR, fill:'none', stroke:st.c, 'stroke-width':.8, opacity:.9,
+                        'vector-effect':'non-scaling-stroke'}, sg);
+          if (canClick) sg.addEventListener('click', function(){ openSatPopup(rec); });
+          rec.spr = sg;
+        }
+      }
       if (canClick)
         [rec.el, rec.lab, rec.hit].forEach(function(n){
           if (n) n.addEventListener('click', function(){ openSatPopup(rec); });
@@ -786,7 +823,10 @@ function renderFleet(ms){
       f.el.setAttribute('cx', p[0].toFixed(1));
       f.el.setAttribute('cy', p[1].toFixed(1));
     }
-    if (f.lab){ f.lab.setAttribute('x', p[0].toFixed(1)); f.lab.setAttribute('y', (p[1]-8).toFixed(1)); }
+    if (f.spr && spritesOn)
+      f.spr.setAttribute('transform', 'translate(' + p[0].toFixed(1) + ',' + p[1].toFixed(1) + ')');
+    if (f.lab){ f.lab.setAttribute('x', p[0].toFixed(1));
+                f.lab.setAttribute('y', (p[1] - (spritesOn && f.spr ? 12.5 : 8)).toFixed(1)); }
     if (f.hit){ f.hit.setAttribute('cx', p[0].toFixed(1)); f.hit.setAttribute('cy', p[1].toFixed(1)); }
   }
 }
@@ -830,6 +870,7 @@ function applyView(){
   var rb = document.getElementById('btn-reset-view');
   if (rb) rb.style.display = view.w < BASE_VB.w - 1 ? '' : 'none';
   svgEl.style.cursor = view.w < BASE_VB.w - 1 ? 'grab' : '';
+  syncSprites();
 }
 function clampView(){
   view.w = Math.min(BASE_VB.w, Math.max(MIN_W, view.w));
@@ -843,6 +884,20 @@ function svgPoint(ev){
   var sc = Math.min(r.width/vw, r.height/vh);
   var ox = (r.width - vw*sc)/2, oy = (r.height - vh*sc)/2;
   return [view.x + (ev.clientX - r.left - ox)/sc, view.y + (ev.clientY - r.top - oy)/sc];
+}
+var spritesOn = false, spritesLoaded = false;
+function syncSprites(){
+  var on = view.w <= BASE_VB.w / 2;
+  if (on === spritesOn) return;
+  spritesOn = on;
+  document.getElementById('gSprites').setAttribute('display', on ? '' : 'none');
+  if (on && !spritesLoaded){
+    spritesLoaded = true;
+    document.querySelectorAll('#gSprites image').forEach(function(im){
+      if (!im.getAttribute('href')) im.setAttribute('href', im.getAttribute('data-src'));
+    });
+  }
+  if (on) renderFleet(curMs);
 }
 var camTok = 0;
 function animateView(tx, ty, tw){
