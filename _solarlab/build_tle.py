@@ -8,7 +8,8 @@ Usage: curl the groups to /tmp first (or run the curls below), then run this.
 
 Starlink is ~11k objects; the lab shows an every-Nth sample (~400) and
 reports the true total. Per-sat record (mean elements, enough for a lab
-propagation): [name, epoch_ms, mean_motion rev/day, ecc, inc, raan, argp, ma].
+propagation): [name, epoch_ms, mean_motion rev/day, ecc, inc, raan, argp,
+ma, launch_year (from OBJECT_ID intl designator)].
 """
 import json, os, sys, datetime
 
@@ -22,7 +23,8 @@ def rec(s):
     return [s["OBJECT_NAME"].strip(), int(ep.timestamp()*1000),
             round(s["MEAN_MOTION"], 8), round(s["ECCENTRICITY"], 7),
             round(s["INCLINATION"], 4), round(s["RA_OF_ASC_NODE"], 4),
-            round(s["ARG_OF_PERICENTER"], 4), round(s["MEAN_ANOMALY"], 4)]
+            round(s["ARG_OF_PERICENTER"], 4), round(s["MEAN_ANOMALY"], 4),
+            int(s["OBJECT_ID"][:4]) if s.get("OBJECT_ID") else None]
 
 out, totals = {}, {}
 for g in GROUPS:
