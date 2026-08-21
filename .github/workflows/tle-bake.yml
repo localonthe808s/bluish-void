@@ -1,0 +1,80 @@
+name: Rebake satellite catalog
+
+# Keeps _solarlab/_tle.js (the EARTH VIEW's satellite + debris snapshot)
+# fresh. Mean elements drift within weeks and the SATCAT debris ledger ages,
+# so a weekly rebake from CelesTrak keeps the map honest. CelesTrak sends no
+# CORS headers, which is why this is a bake and not a client fetch.
+# Data: U.S. Space Force catalog (USG work), redistributed by CelesTrak.
+
+on:
+  schedule:
+    - cron: '23 6 * * 1'   # Mondays 06:23 UTC — weekly is enough for mean elements
+  workflow_dispatch: {}     # allow manual runs
+
+concurrency:
+  group: tle-bake
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  rebake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download CelesTrak GP groups + SATCAT
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/tledata
+          for g in stations visual gps-ops geo starlink \
+                   cosmos-2251-debris iridium-33-debris fengyun-1c-debris cosmos-1408-debris; do
+            curl -fsS --retry 3 --retry-delay 20 \
+              "https://celestrak.org/NORAD/elements/gp.php?GROUP=$g&FORMAT=json" \
+              -o "/tmp/tledata/tle_$g.json"
+            sleep 3   # be polite — CelesTrak rate-limits aggressive clients
+          done
+          curl -fsS --retry 3 --retry-delay 20 \
+            "https://celestrak.org/pub/satcat.csv" -o /tmp/tledata/satcat.csv
+
+      - name: Sanity-check the downloads
+        run: |
+          set -euo pipefail
+          # Each group must parse as a JSON list with a plausible floor —
+          # an outage page or empty body must never reach the baker.
+          python3 - <<'EOF'
+          import json, sys
+          floors = {"stations": 5, "visual": 50, "gps-ops": 25, "geo": 300,
+                    "starlink": 5000, "cosmos-2251-debris": 200,
+                    "iridium-33-debris": 100, "fengyun-1c-debris": 1000,
+                    "cosmos-1408-debris": 1}
+          for g, floor in floors.items():
+              d = json.load(open(f"/tmp/tledata/tle_{g}.json"))
+              assert isinstance(d, list) and len(d) >= floor, f"{g}: {len(d)} < {floor}"
+              print(f"{g}: {len(d)} OK")
+          rows = open("/tmp/tledata/satcat.csv").readline()
+          assert "OBJECT_TYPE" in rows and "DECAY_DATE" in rows, "satcat header wrong"
+          EOF
+          test "$(stat -c%s /tmp/tledata/satcat.csv)" -gt 1000000
+
+      - name: Bake _tle.js
+        run: |
+          set -euo pipefail
+          python3 _solarlab/build_tle.py /tmp/tledata
+          # the baked file must still be a plausible size (currently ~356 KB)
+          SIZE=$(stat -c%s _solarlab/_tle.js)
+          test "$SIZE" -gt 200000 && test "$SIZE" -lt 2000000
+          echo "baked _tle.js ($SIZE bytes)"
+
+      - name: Commit if changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet _solarlab/_tle.js; then
+            echo "no change"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add _solarlab/_tle.js
+          git commit -m "Rebake _tle.js from CelesTrak (scheduled)"
+          git push
