@@ -498,7 +498,8 @@ var junkSats = {}, junkPaths = {}, rbSats = [];
       return ci === 0
         ? mk('path', {fill:'none', stroke:col, 'stroke-width':c.w,
                       'stroke-linecap':'butt', 'stroke-opacity':c.op, 'pointer-events':'none'}, gj)
-        : mk('path', {fill:col, 'fill-opacity':c.op, stroke:'none', 'pointer-events':'none'}, gj);
+        : mk('path', {fill:col, 'fill-opacity':c.op, stroke:'none', 'fill-rule':'evenodd',
+                      'pointer-events':'none'}, gj);
     });
   });
 })();
@@ -538,13 +539,25 @@ function renderJunk(ms){
       var p = junkXY(s2, ms), q = junkXY(s2, ms + 50000);
       var dx = q[0] - p[0], dy = q[1] - p[1], L = Math.hypot(dx, dy);
       if (L > 40){ d[cls].push('M' + p[0].toFixed(1) + ' ' + p[1].toFixed(1) + 'l.6 .2'); continue; }
-      var cap = cls === 2 ? 7 : 11;
+      /* the junkyard catalog: shape picked per piece (seeded), then the
+         piece's length capped per shape so mufflers run long and nuts stay
+         chunky. Silhouettes live in the motion frame: (u,v) = p + u·motion
+         + v·perp, v in fractions of the final length. */
+      var shape, cap, mn;
+      if (cls === 0){ var t0 = jit(i, 23); shape = t0 < 0.85 ? 'swarf' : 'spring'; cap = 11; mn = 1.6; }
+      else if (cls === 1){
+        var t1 = jit(i, 23);
+        shape = t1 < 0.3 ? 'bolt' : t1 < 0.6 ? 'screw' : t1 < 0.8 ? 'hammer' : 'nut';
+        cap = shape === 'nut' ? 5 : 9; mn = shape === 'nut' ? 3 : 2.2;
+      } else {
+        var t2 = jit(i, 29);
+        shape = t2 < 0.28 ? 'plate' : t2 < 0.52 ? 'pipe' : t2 < 0.78 ? 'muffler' : 'saw';
+        cap = shape === 'muffler' ? 14 : shape === 'saw' ? 12 : shape === 'pipe' ? 10 : 7;
+        mn = shape === 'muffler' || shape === 'saw' ? 5 : 2.2;
+      }
       if (L > cap){ dx *= cap/L; dy *= cap/L; L = cap; }
-      if (L < 1.6){ dx *= 1.6/Math.max(L, .01); dy *= 1.6/Math.max(L, .01); L = 1.6; }
+      if (L < mn){ dx *= mn/Math.max(L, .01); dy *= mn/Math.max(L, .01); L = mn; }
       var px = -dy / L, py = dx / L;                    // unit perpendicular
-      var P = 'M' + p[0].toFixed(1) + ' ' + p[1].toFixed(1);
-      /* hardware silhouettes: point (u,v) = p + u·motion + v·perp (v in
-         fractions of the piece's length) */
       var pt = function(u, v){
         return (p[0] + u*dx + v*px*L).toFixed(1) + ' ' + (p[1] + u*dy + v*py*L).toFixed(1);
       };
@@ -553,28 +566,60 @@ function renderJunk(ms){
         for (var k2 = 1; k2 < pts.length; k2++) o += 'L' + pt(pts[k2][0], pts[k2][1]);
         return o + 'z';
       };
-      if (cls === 0){
-        d[0].push(P + 'l' + dx.toFixed(1) + ' ' + dy.toFixed(1));
-      } else if (cls === 1){
-        if (jit(i, 23) < 0.5){
-          /* bolt: flat head, square-ended shaft */
+      switch (shape){
+        case 'swarf':
+          d[0].push('M' + p[0].toFixed(1) + ' ' + p[1].toFixed(1) +
+                    'l' + dx.toFixed(1) + ' ' + dy.toFixed(1));
+          break;
+        case 'spring':
+          /* coiled offcut: a little zigzag */
+          d[0].push('M' + pt(0, 0) + 'L' + pt(.25, .14) + 'L' + pt(.5, -.14) +
+                    'L' + pt(.75, .14) + 'L' + pt(1, 0));
+          break;
+        case 'bolt':
           d[1].push(poly([[0,-.20],[.30,-.20],[.30,-.085],[1,-.085],
                           [1,.085],[.30,.085],[.30,.20],[0,.20]]));
-        } else {
-          /* screw: head + shaft tapering to a point */
+          break;
+        case 'screw':
           d[1].push(poly([[0,-.19],[.26,-.19],[.26,-.08],[.84,-.08],[1,0],
                           [.84,.08],[.26,.08],[.26,.19],[0,.19]]));
-        }
-      } else {
-        if (jit(i, 29) < 0.45){
-          /* pipe segment: long tube with angle-cut ends */
+          break;
+        case 'hammer':
+          /* handle with a cross head at the far end */
+          d[1].push(poly([[0,-.055],[.66,-.055],[.66,-.26],[.94,-.26],
+                          [.94,.26],[.66,.26],[.66,.055],[0,.055]]));
+          break;
+        case 'nut':
+          /* hexagon with a bore — evenodd carves the hole */
+          var hex = function(r){
+            var o2 = [];
+            for (var a2 = 0; a2 < 6; a2++){
+              var th2 = a2 * Math.PI/3 + (i % 6) * 0.17;
+              o2.push([0.5 + r*Math.cos(th2), r*Math.sin(th2)]);
+            }
+            return o2;
+          };
+          d[1].push(poly(hex(0.42)) + poly(hex(0.18)));
+          break;
+        case 'pipe':
           var sk = (i % 2 ? 1 : -1) * (0.04 + jit(i, 31) * 0.05);
           d[2].push(poly([[0.03,-.11],[.97,-.11 - sk],[1,.11 - sk],[0,.11]]));
-        } else {
-          /* torn plate chip */
+          break;
+        case 'muffler':
+          /* inlet pipe, fat drum, outlet pipe */
+          d[2].push(poly([[0,-.045],[.22,-.045],[.25,-.13],[.75,-.13],
+                          [.78,-.045],[1,-.045],[1,.045],[.78,.045],
+                          [.75,.13],[.25,.13],[.22,.045],[0,.045]]));
+          break;
+        case 'saw':
+          /* handle, long blade, toothed underside */
+          d[2].push(poly([[0,-.13],[.13,-.15],[.16,-.09],[1,-.03],[1,.02],
+                          [.86,.05],[.83,.11],[.7,.06],[.67,.12],[.54,.07],
+                          [.51,.13],[.38,.08],[.35,.14],[.2,.09],[.13,.13],[0,.13]]));
+          break;
+        default:
           var w1 = 0.28 + jit(i, 17) * 0.2, w2 = 0.12 + jit(i, 19) * 0.18;
-          d[2].push(poly([[0,0],[.42,w1],[1,0],[.62,-w2]]));
-        }
+          d[2].push(poly([[0,0],[.36,w1],[.64,w1*0.55],[1,.06],[.66,-w2],[.3,-w2*1.25]]));
       }
     }
     for (var c = 0; c < 3; c++) junkPaths[grp][c].setAttribute('d', d[c].join(''));
