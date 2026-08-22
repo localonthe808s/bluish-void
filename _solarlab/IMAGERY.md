@@ -407,3 +407,11 @@ Zoom-gated renders replacing the L1/L2 diamonds, same gSprites stack.
 Both from the Commons NASA spacecraft-model series (public domain,
 pre-cut transparency): "JWST spacecraft model 1.png" → sprites/jwst.png,
 "DSCOVR spacecraft model.png" → sprites/dscovr.png. Trimmed + resized only.
+
+## Chandra (EARTH VIEW, sprites/)
+
+Featured bird like Hubble; zoom sprite + popup hero both =
+sprites/chandra.png, from Commons "Chandra X-ray Observatory spacecraft
+model.png" (NASA model series, public domain, pre-cut transparency),
+trimmed + resized only. Baked by CATNR=25867 (name "CXO", e~0.77 — the
+high-e branch in junkXY runs 16 Kepler passes for it).

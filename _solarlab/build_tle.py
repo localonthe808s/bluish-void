@@ -39,16 +39,19 @@ for g in GROUPS:
         d = [d[int(i*step)] for i in range(CAP[g])]
     out[g] = [rec(s) for s in d]
 
-# Vanguard 1 (NORAD 5, oldest object in orbit) is too faint for the `visual`
-# group, so it rides in via a one-off CATNR fetch:
-#   curl "https://celestrak.org/NORAD/elements/gp.php?CATNR=5&FORMAT=json" -o /tmp/tle_vanguard.json
-# Appended to `visual` (the earth view's famous-junk sprites key on its name).
-vg = os.path.join(SRC, "tle_vanguard.json")
-if os.path.exists(vg):
-    for s in json.load(open(vg)):
-        if not any(r[0] == s["OBJECT_NAME"].strip() for r in out["visual"]):
-            out["visual"].append(rec(s))
-            totals["visual"] += 1
+# Famous one-offs too faint (or too odd) for the `visual` group ride in via
+# CATNR fetches, appended to `visual` (the earth view keys on their names):
+#   Vanguard 1 (NORAD 5, oldest object in orbit)
+#     curl ".../gp.php?CATNR=5&FORMAT=json" -o /tmp/tle_vanguard.json
+#   Chandra / CXO (NORAD 25867, 64-hour HEO, e~0.77)
+#     curl ".../gp.php?CATNR=25867&FORMAT=json" -o /tmp/tle_chandra.json
+for extra in ["tle_vanguard.json", "tle_chandra.json"]:
+    fp = os.path.join(SRC, extra)
+    if os.path.exists(fp):
+        for s in json.load(open(fp)):
+            if not any(r[0] == s["OBJECT_NAME"].strip() for r in out["visual"]):
+                out["visual"].append(rec(s))
+                totals["visual"] += 1
 
 # SATCAT ledger (satcat.csv in SRC): honest totals by type + per-event
 # ever/still-up counts, so the junk view can say what decayed.
