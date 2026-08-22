@@ -400,3 +400,10 @@ among the junk layer at their real catalog orbits (`JUNK_IMG` in earth_lab).
 
 Atlas Centaur 2 (1963, also in the bake) has no cleanly-keyable PD
 photograph of the stage — it stays an anonymous streak on purpose.
+
+## L-point sprites (EARTH VIEW, sprites/)
+
+Zoom-gated renders replacing the L1/L2 diamonds, same gSprites stack.
+Both from the Commons NASA spacecraft-model series (public domain,
+pre-cut transparency): "JWST spacecraft model 1.png" → sprites/jwst.png,
+"DSCOVR spacecraft model.png" → sprites/dscovr.png. Trimmed + resized only.
