@@ -387,3 +387,16 @@ are CC BY-SA (avoided): these two come from NASA's own "spacecraft icons"
 toolkit renders instead. Files: Commons "X spacecraft model.png" for Parker /
 Europa Clipper / Lucy / Psyche / JUICE / BepiColombo → trimmed, square-padded,
 800px webp at cdn.bluishvoid.com/craft/{parker,clipper,lucy,psyche,juice,bepi}.webp.
+
+## Famous junk photo sprites (EARTH VIEW, sprites/)
+
+Real photographs of famous debris, alpha-cut and floating (not tappable)
+among the junk layer at their real catalog orbits (`JUNK_IMG` in earth_lab).
+
+| object | source | license |
+|---|---|---|
+| VANGUARD 1 (NORAD 5, baked by CATNR fetch — too faint for the visual group) | NASA/NRL Vanguard 1 satellite photo (Commons "Vanguard 1.jpg"), pale-blue backdrop chroma-keyed → sprites/vanguard.png | public domain |
+| THOR AGENA D R/B | NASA s66-46124 — the Agena Target Docking Vehicle photographed from Gemini X (same Agena-D vehicle family), black sky luminance-keyed, Gemini nose/boom erased → sprites/agena.png | public domain |
+
+Atlas Centaur 2 (1963, also in the bake) has no cleanly-keyable PD
+photograph of the stage — it stays an anonymous streak on purpose.
