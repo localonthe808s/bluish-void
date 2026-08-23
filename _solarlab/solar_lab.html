@@ -4029,6 +4029,7 @@ function openIsoPopup(o, ev){
    ========================================================================= */
 /* opens on SOLAR SYSTEM; TONIGHT is a tab you choose (user 2026-07-25) */
 var tonightOn = false;
+var tNightLive = false;   // hand follows the real clock until the user touches it
 var GLARE_DEG = 25;
 /* zone tints: match the TONIGHT panel wording */
 var NG_COL = {eve:'#ffcf8a', mid:'#bcd8ff', morn:'#9fe8e0', glare:'#ff9a8a'};
@@ -4204,6 +4205,19 @@ var ngAllLbl = mk('text',{class:'night-label','text-anchor':'middle',display:'no
 mk('textPath',{href:'#ngAllLblArc',startOffset:'50%'},ngAllLbl).textContent = 'TONIGHT';
 var ngAllTitle = mk('title',{},ngAllCone);
 ngAllTitle.textContent = 'every hour of tonight in one picture — tap to toggle';
+/* the Moon on the map: real geocentric direction from Earth, real phase,
+   lit side facing the Sun (which sits at the map origin), dimming below
+   the horizon like the planets do */
+var tvMoon = mk('g',{display:'none','pointer-events':'none'},gNight);
+mk('circle',{r:9, fill:'#e9e5da'},tvMoon);
+var tvMoonDark = mk('path',{fill:'rgba(10,14,32,.93)'},tvMoon);
+var tvMoonLbl = mk('text',{class:'night-label','text-anchor':'middle',y:24,
+  style:'font-size:.62em;letter-spacing:.12em;fill:rgba(228,236,252,.8);'},tvMoon);
+tvMoonLbl.textContent = 'MOON';
+/* the sky-stage caption under the clock: what the colour you are looking
+   at is called */
+var ngStage = mk('text',{'text-anchor':'middle','pointer-events':'none',display:'none',
+  style:'font-size:.5em;font-weight:850;letter-spacing:.16em;fill:rgba(190,205,240,.6);user-select:none;'},gNight);
 
 function nightSector(ex, ey, a1, a2, r1, r2){
   var span = ((a2 - a1) % 360 + 360) % 360;
@@ -4512,9 +4526,16 @@ function buildTonightPanel(){
              dec: wd ? nightSpanDeg(wd) : null};
   }
   /* if we're inside the night right now, the hand starts at NOW — a 4 AM
-     visitor lands at their own 4 AM sky, not the replay from dusk */
+     visitor lands at their own 4 AM sky, not the replay from dusk. A hand
+     the user parked (scrub, pause) is kept where they left it. */
   ngSunset = sunset; ngSunrise = sunrise;
-  tNight = (NOW >= sunset && NOW <= sunrise) ? NOW : null;
+  if (tNight != null && tNight >= sunset && tNight <= sunrise){
+    /* keep it */
+  } else if (NOW >= sunset && NOW <= sunrise){
+    tNight = NOW; tNightLive = true;
+  } else {
+    tNight = null;
+  }
   ngLamSet = zenithLam(sunset); ngLamRise = zenithLam(sunrise);
   document.getElementById('ns-set').textContent = fmtT(sunset);
   document.getElementById('ns-rise').textContent = fmtT(sunrise);
@@ -4590,6 +4611,22 @@ function buildTonightPanel(){
   if (conj.pp) facts.push({k:'Conjunction', v: conjLabel(conj.pp, NOW)});
   if (conj.mp) facts.push({k:'Moon pass', v: conjLabel(conj.mp, NOW)});
   window._nightFacts = facts;
+  /* mark the moonless stretch on the slider track — the '5 genuinely dark
+     hours' become a place to aim the thumb */
+  (function(){
+    var sl = document.getElementById('night-slider');
+    var base = 'linear-gradient(90deg,#ff9d42 0%,#3a3468 22%,#0a0f26 50%,#3a3468 78%,#9fc4ef 100%)';
+    var ov = null;
+    if (mFirst !== null && mLast < sunrise - STEP){
+      var f1 = ((mLast - sunset)/span*100).toFixed(1);
+      ov = 'linear-gradient(90deg,rgba(0,0,0,0) 0% ' + f1 + '%,rgba(3,6,22,.55) ' + f1 + '% 100%)';
+    } else if (mFirst !== null && mFirst > sunset + STEP){
+      var f2 = ((mFirst - sunset)/span*100).toFixed(1);
+      ov = 'linear-gradient(90deg,rgba(3,6,22,.55) 0% ' + f2 + '%,rgba(0,0,0,0) ' + f2 + '% 100%)';
+    }
+    sl.style.background = ov ? ov + ',' + base : base;
+    sl.title = ov ? 'scrub tonight — the deep band is the moonless dark' : 'scrub tonight';
+  })();
 
   /* ---- the space summary. On the live site this text is already built by the
      briefing engine into #space-summary-text (below the planet row); moving it
@@ -4646,6 +4683,35 @@ function _maxAltTonight(id){
   }
   return (_mxCache[k] = best);
 }
+/* dark-side path for a lit fraction f, lit side toward +x (rotated at the
+   Sun afterwards); r fixed at the glyph radius */
+function phaseDark(f){
+  var r = 9, a = r * (1 - 2*f), sweep = a >= 0 ? 1 : 0;
+  return 'M0 ' + (-r) + 'A' + r + ' ' + r + ' 0 0 0 0 ' + r +
+         'A' + Math.abs(a).toFixed(2) + ' ' + r + ' 0 0 ' + sweep + ' 0 ' + (-r) + 'Z';
+}
+function tvMoonUpdate(ex, ey){
+  var rd = moonRaDec(new Date(tNight));
+  var mLon = eclFromEqu(rd.ra/DEG, rd.dec/DEG).lon;
+  var mAlt = moonAltAt(tNight);
+  var ph = moonPhaseAt(tNight);
+  var mx = ex + 170*Math.cos(mLon*DEG), my = ey - 170*Math.sin(mLon*DEG);
+  /* lit side faces the Sun — the Sun is the map's origin */
+  var toSun = Math.atan2(-my, -mx) * 180/Math.PI;
+  tvMoon.setAttribute('transform', 'translate(' + mx.toFixed(1) + ',' + my.toFixed(1) + ')');
+  tvMoonDark.setAttribute('transform', 'rotate(' + toSun.toFixed(1) + ')');
+  tvMoonDark.setAttribute('d', phaseDark(ph.illum));
+  tvMoon.setAttribute('opacity', mAlt > 8 ? 1 : mAlt > 0 ? .9 : .45);
+  tvMoon.removeAttribute('display');
+  return {mLon: mLon, mAlt: mAlt, ph: ph};
+}
+function skyStageName(sa, moonUp, illum){
+  if (sa > -0.833) return 'DAYLIGHT';
+  if (sa > -6)  return 'CIVIL TWILIGHT';
+  if (sa > -12) return 'NAUTICAL TWILIGHT';
+  if (sa > -18) return 'ASTRONOMICAL TWILIGHT';
+  return (moonUp && illum > 0.15) ? 'MOONLIT NIGHT' : 'TRUE DARK';
+}
 function updateNightLoop(){
   if (!lastPos.earth || tNight == null) return;
   /* ALL NIGHT: the timeless portrait on purpose — every hour of tonight
@@ -4657,7 +4723,11 @@ function updateNightLoop(){
       window._coneStatic();
       moonGlow.setAttribute('opacity', 0);
       if (window._mwG) window._mwG.setAttribute('opacity', .5);
+      gShowers.style.opacity = '';
+      ngStage.setAttribute('display','none');
     }
+    var e9 = lastPos.earth, eR9 = rScale(e9.r,'earth'), et9 = e9.lon*DEG;
+    tvMoonUpdate(eR9*Math.cos(et9), -eR9*Math.sin(et9));
   } else {
   /* the sky's colour follows the loop clock: dusk glow fades to full dark
      by midnight, dawn blooms back before sunrise. (_coneForSunAlt had been
@@ -4670,21 +4740,23 @@ function updateNightLoop(){
     /* moonlight + the Milky Way's answer to it: a risen bright moon lays a
        silver wash toward itself and mutes the band; once it sets (tonight's
        own MOONLESS window) the band breathes back up in the true dark */
-    var mAlt = moonAltAt(tNight);
-    var ph = moonPhaseAt(tNight);
+    var e0 = lastPos.earth, eR0 = rScale(e0.r, 'earth'), eth0 = e0.lon*DEG;
+    var ex0 = eR0*Math.cos(eth0), ey0 = -eR0*Math.sin(eth0);
+    var mi = tvMoonUpdate(ex0, ey0);
+    var mAlt = mi.mAlt, ph = mi.ph, mLon = mi.mLon;
     var dkTw = Math.max(0, Math.min(1, (-saNow - 8) / 6));
     var altFac = Math.max(0, Math.min(1, mAlt / 25));
-    var mrd = moonRaDec(new Date(tNight));
-    var mLon = eclFromEqu(mrd.ra/DEG, mrd.dec/DEG).lon;
-    var e0 = lastPos.earth, eR0 = rScale(e0.r, 'earth'), eth0 = e0.lon*DEG;
     moonGlow.setAttribute('transform',
-      'translate(' + (eR0*Math.cos(eth0)).toFixed(1) + ',' + (-eR0*Math.sin(eth0)).toFixed(1) +
+      'translate(' + ex0.toFixed(1) + ',' + ey0.toFixed(1) +
       ') rotate(' + (-mLon).toFixed(2) + ')');
     moonGlow.setAttribute('opacity', (ph.illum * 0.34 * altFac * dkTw).toFixed(3));
-    if (window._mwG){
-      var mwFac = (0.25 + 0.75 * dkTw) * (1 - 0.5 * ph.illum * altFac);
-      window._mwG.setAttribute('opacity', (0.5 * mwFac).toFixed(3));
-    }
+    var skyQ = dkTw * (1 - 0.5 * ph.illum * altFac);
+    if (window._mwG) window._mwG.setAttribute('opacity', (0.5 * (0.25 + 0.75 * dkTw) * (1 - 0.5 * ph.illum * altFac)).toFixed(3));
+    /* radiant names breathe with sky quality — a shower is only a shower
+       in the dark */
+    gShowers.style.opacity = (0.35 + 0.65 * skyQ).toFixed(3);
+    ngStage.textContent = skyStageName(saNow, mAlt > 0, ph.illum);
+    ngStage.removeAttribute('display');
   }
   }
   var e = lastPos.earth;
@@ -4758,6 +4830,8 @@ function updateNightLoop(){
   ngClock.setAttribute('y', (ey + 34).toFixed(1));
   ngClock.textContent = fmtT(tNight);
   ngClock.removeAttribute('display');
+  ngStage.setAttribute('x', ex.toFixed(1));
+  ngStage.setAttribute('y', (ey + 49).toFixed(1));
   document.getElementById('hud-time').textContent = fmtT(tNight);
   if (ngSunrise > ngSunset)
     document.getElementById('night-slider').value =
@@ -4790,6 +4864,9 @@ function hideNightLoop(){
   }
   ngAllCone.setAttribute('display','none');
   ngAllLbl.setAttribute('display','none');
+  tvMoon.setAttribute('display','none');
+  ngStage.setAttribute('display','none');
+  gShowers.style.opacity = '';
   ngWin.setAttribute('display','none');
   ngGhostDec.setAttribute('display','none');
   ngGhostJun.setAttribute('display','none');
@@ -5669,7 +5746,7 @@ function setPlaying(on){
   var b = document.getElementById('btn-play');
   b.textContent = on ? '❚❚ PAUSE' : '▶ PLAY';
   b.classList.toggle('active', on);
-  if (on){ stepLast = null; _dtSmooth = 0; playAnchor = curMs; rafId = requestAnimationFrame(step); _moonCssSync(); }
+  if (on){ tNightLive = false; stepLast = null; _dtSmooth = 0; playAnchor = curMs; rafId = requestAnimationFrame(step); _moonCssSync(); }
   else { cancelAnimationFrame(rafId); _moonCssOff(); render(); }
   document.documentElement.classList.toggle('map-playing', on);
   /* Tell the host page. Measured in place at phone size: the map holds 65fps
@@ -5696,6 +5773,7 @@ function updateNsNow(){
 document.getElementById('night-slider').addEventListener('input', function(){
   if (!ngSunset) return;
   setPlaying(false);
+  tNightLive = false;
   tNight = ngSunset + (this.value/1000) * (ngSunrise - ngSunset);
   updateNightLoop();
 });
@@ -5718,6 +5796,13 @@ function toggleAllNight(ev){
 }
 ngAllCone.addEventListener('click', toggleAllNight);
 ngAllLbl.addEventListener('click', toggleAllNight);
+/* while the hand is still the auto-anchored 'now', it follows the real
+   clock — one nudge a minute, never after the user scrubs or plays */
+setInterval(function(){
+  if (!tNightLive || !tonightOn || playing || tNight == null || !ngSunset) return;
+  var n = Date.now();
+  if (n >= ngSunset && n <= ngSunrise){ tNight = n; updateNightLoop(); }
+}, 60000);
 document.getElementById('btn-back').addEventListener('click', function(){ curMs -= 30*86400000; playAnchor = curMs; render(); });
 document.getElementById('btn-fwd').addEventListener('click', function(){ curMs += 30*86400000; playAnchor = curMs; render(); });
 /* TONIGHT is the local-sky view: it always opens at solar-system scale. The
