@@ -4312,7 +4312,15 @@ var ngAllGrad = mk('radialGradient',{id:'ngAllGrad',gradientUnits:'userSpaceOnUs
 var ngAg1 = mk('stop',{offset:'0.16','stop-color':'#dfe8fa','stop-opacity':.11},ngAllGrad);
 var ngAg2 = mk('stop',{offset:'0.5','stop-color':'#dfe8fa','stop-opacity':.05},ngAllGrad);
 mk('stop',{offset:'1','stop-color':'#dfe8fa','stop-opacity':0},ngAllGrad);
-var ngAllCone = mk('path',{fill:'url(#ngAllGrad)',display:'none',filter:'url(#ngAllSoft)',style:'cursor:pointer;'},gNight);
+var ngAllCone = mk('path',{fill:'url(#ngAllGrad)',display:'none',filter:'url(#ngAllSoft)',style:'cursor:pointer;opacity:0;transition:opacity .9s ease;'},gNight);
+/* show/hide with a cross-fade: display flips only on the first show and
+   the reflow between display and opacity lets the transition run */
+function ngAllShow(el, on){
+  if (on){
+    if (el.getAttribute('display') === 'none'){ el.removeAttribute('display'); void el.getBoundingClientRect(); }
+    el.style.opacity = 1; el.style.pointerEvents = '';
+  } else { el.style.opacity = 0; el.style.pointerEvents = 'none'; }
+}
 /* the night dial (white meridian arch, seasonal ghost arcs, orange hand
    and tick) was removed 2026-08-23 — user: it read as a horizon it was not;
    the clock text alone (orange) now marks the loop minute */
@@ -4375,7 +4383,7 @@ mk('path',{id:'ngAllLblArc',fill:'none'},defs);
 var ngAllLbl = mk('text',{class:'night-label','text-anchor':'middle',display:'none',
   style:'font-size:1em;font-weight:850;letter-spacing:.22em;fill:rgba(228,238,255,.9);' +
         'paint-order:stroke;stroke:rgba(6,10,26,.75);stroke-width:.22em;stroke-linejoin:round;' +
-        'cursor:pointer;user-select:none;'},gNight);
+        'cursor:pointer;user-select:none;opacity:0;transition:opacity .9s ease;'},gNight);
 mk('textPath',{href:'#ngAllLblArc',startOffset:'50%'},ngAllLbl).textContent = 'TONIGHT';
 var ngAllTitle = mk('title',{},ngAllCone);
 ngAllTitle.textContent = 'every hour of tonight in one picture — tap to toggle';
@@ -5008,7 +5016,7 @@ function buildTonightPanel(){
    The bright arc is the half of the ecliptic directions above the observer's
    horizon (zenith ± 90°, zenith from local sidereal time); planets brighten
    when they are genuinely up at that minute. */
-var _lastConeSa = null, _nsAllNight = false, _allNightPainted = false, _mxCache = {};
+var _lastConeSa = null, _lastConeLam = 0, _nsAllNight = false, _allNightPainted = false, _mxCache = {};
 /* a planet's best altitude across tonight's window — the ALL NIGHT view
    lights everything that rises at ANY point, not just at the hand's minute */
 function _maxAltTonight(id){
@@ -5071,9 +5079,14 @@ function updateNightLoop(){
      by midnight, dawn blooms back before sunrise. (_coneForSunAlt had been
      defined but never called — the timeless portrait showed at 4 AM.)
      Recolouring is 360 slices, so only when the sun moved ≥0.4°. */
-  var saNow = sunAltAt(tNight);
-  if (_lastConeSa === null || Math.abs(saNow - _lastConeSa) > 0.25){
-    _lastConeSa = saNow;
+  var saNow = sunAltAt(tNight), lamNow = zenithLam(tNight);
+  /* recolour when the Sun moved ≥0.25° OR the sky turned ≥0.5°: the veil's
+     horizon shade follows the turning sky, and around midnight the Sun's
+     altitude sits still for many minutes — gating on it alone froze the
+     shade and then jumped it (user: "things move and fade in steps") */
+  if (_lastConeSa === null || Math.abs(saNow - _lastConeSa) > 0.25 ||
+      Math.abs(((lamNow - _lastConeLam) % 360 + 540) % 360 - 180) > 0.5){
+    _lastConeSa = saNow; _lastConeLam = lamNow;
     var nightF = (ngSunrise > ngSunset) ? (tNight - ngSunset)/(ngSunrise - ngSunset) : 0.5;
     window._coneForSunAlt(saNow, nightF, tNight);
     /* moonlight + the Milky Way's answer to it: a risen bright moon lays a
@@ -5119,7 +5132,7 @@ function updateNightLoop(){
   if (_nsAllNight || sunAltAt(tNight) <= -8){
     ngAllGrad.setAttribute('cx', ex.toFixed(1)); ngAllGrad.setAttribute('cy', ey.toFixed(1));
     ngAllCone.setAttribute('d', nightSector(ex, ey, ngLamSet, ngLamSet + span, AR2, 620));
-    ngAllCone.removeAttribute('display');
+    ngAllShow(ngAllCone, true);
     /* the label seeks the stretch of arch where text reads horizontally —
        the circle's top (bearing 90) if tonight's span contains it, else the
        bottom (270), else the span's middle. Centred at mid-night it could
@@ -5133,10 +5146,10 @@ function updateNightLoop(){
     document.getElementById('ngAllLblArc').setAttribute('d', bottom
       ? 'M' + pt(mB - 60) + ' A' + rL + ' ' + rL + ' 0 0 0 ' + pt(mB + 60)
       : 'M' + pt(mB + 60) + ' A' + rL + ' ' + rL + ' 0 0 1 ' + pt(mB - 60));
-    ngAllLbl.removeAttribute('display');
+    ngAllShow(ngAllLbl, true);
   } else {
-    ngAllCone.setAttribute('display','none');
-    ngAllLbl.setAttribute('display','none');
+    ngAllShow(ngAllCone, false);
+    ngAllShow(ngAllLbl, false);
   }
   ngClock.setAttribute('x', ex.toFixed(1));
   ngClock.setAttribute('y', (ey + 34).toFixed(1));
@@ -5152,7 +5165,10 @@ function updateNightLoop(){
   PLANETS.forEach(function(p){
     if (p.id === 'earth' || !lastPos[p.id]) return;
     var alt = _nsAllNight ? _maxAltTonight(p.id) : planetAltAt(p.id, tNight);
-    nodes[p.id].g.setAttribute('opacity', alt > 8 ? 1 : alt > 0 ? .9 : .75);
+    /* a smooth ramp from .72 below the horizon to 1 at 8° up — the old
+       .75/.9/1 steps made every planet blink as it rose */
+    var tq = Math.max(0, Math.min(1, alt/8));
+    nodes[p.id].g.setAttribute('opacity', (0.72 + 0.28*tq*tq*(3 - 2*tq)).toFixed(3));
   });
   /* This is the only thing that runs during the night loop — render() does not
      — so it owns the moons here: their configuration while the slider is
