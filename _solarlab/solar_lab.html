@@ -4118,7 +4118,7 @@ var gCone = mk('g',{'pointer-events':'none',filter:'url(#coneSoft)'},gNight);
     var el2 = mk('path',{d:'M0,0L'+(R*Math.cos(a1)).toFixed(1)+','+(R*Math.sin(a1)).toFixed(1)+
                  'L'+(R*Math.cos(a2)).toFixed(1)+','+(R*Math.sin(a2)).toFixed(1)+'Z',
                fill:'#000','fill-opacity':0},gCone);
-    window._coneSlices.push({el:el2, mid:Math.abs(a + WID/2), eve:(a + WID/2) < 0});
+    window._coneSlices.push({el:el2, mid:Math.abs(a + WID/2), ang:a + WID/2, eve:(a + WID/2) < 0});
   }
   function coneAlphaFor(sa){
     if (sa >= 0) return 0.92;   // two overlapping layers → ~0.95 combined: opaque day, no stars/figures peeking
@@ -4126,23 +4126,72 @@ var gCone = mk('g',{'pointer-events':'none',filter:'url(#coneSoft)'},gNight);
     var t = -sa/18;
     return (1 - t*t*(3 - 2*t)) * 0.92;
   }
-  function recolorCone(saFn){
+  /* The engine is piecewise-linear between altitude keys 1–2° apart, and
+     the fan maps only ~11° of altitude across 180° of angle — so every key
+     became a crease laid out as a radial seam, and the evening/morning
+     switch (a boolean per side) drew a hard line down the Sun axis; the
+     recording read as pie wedges. Sample the engine densely once, smooth
+     it along altitude (σ 1.2°) into two tables, and blend dusk↔dawn
+     continuously — by angle in the timeless portrait, by how far the
+     night has run in the loop. Measured: adjacent-slice jumps 24 → <2 RGB
+     units, slope creases 150 → single digits. */
+  var SA0 = -20, SA1 = 60, SAS = 0.25, SAN = Math.round((SA1 - SA0)/SAS) + 1;
+  function buildTable(eve){
+    var raw = [], i, k;
+    for (i = 0; i < SAN; i++){
+      var c = window._tlSkyColorsFn(SA0 + i*SAS, {}, eve);
+      raw.push(_h2r(_lx(c[1], c[2], 0.5)));
+    }
+    var sig = 1.2/SAS, R = Math.ceil(sig*2.5), K = [], ks = 0;
+    for (k = -R; k <= R; k++){ var w = Math.exp(-0.5*k*k/(sig*sig)); K.push(w); ks += w; }
+    var out = [];
+    for (i = 0; i < SAN; i++){
+      var r = 0, g = 0, b = 0;
+      for (k = -R; k <= R; k++){
+        var j = Math.max(0, Math.min(SAN - 1, i + k)), wk = K[k + R]/ks;
+        r += raw[j][0]*wk; g += raw[j][1]*wk; b += raw[j][2]*wk;
+      }
+      out.push([r, g, b]);
+    }
+    return out;
+  }
+  var tabEve = null, tabMorn = null;
+  function tabAt(tab, sa){
+    var x = (Math.max(SA0, Math.min(SA1, sa)) - SA0)/SAS, i = Math.floor(x), t = x - i;
+    if (i >= SAN - 1) return tab[SAN - 1];
+    var a = tab[i], b = tab[i + 1];
+    return [a[0] + (b[0]-a[0])*t, a[1] + (b[1]-a[1])*t, a[2] + (b[2]-a[2])*t];
+  }
+  /* saFn(mid) → altitude for a slice; evFn(slice) → 0..1 evening weight */
+  function recolorCone(saFn, evFn){
+    if (!tabEve){ tabEve = buildTable(true); tabMorn = buildTable(false); }
     window._coneSlices.forEach(function(s){
       var sa = saFn(s.mid);
       var alpha = coneAlphaFor(sa);
       if (alpha < 0.003){ s.el.setAttribute('fill-opacity', 0); return; }
-      var cols = window._tlSkyColorsFn(sa, {}, s.eve);
-      s.el.setAttribute('fill', _lx(cols[1], cols[2], 0.5));
+      var w = evFn(s), e = tabAt(tabEve, sa), m = tabAt(tabMorn, sa);
+      s.el.setAttribute('fill', _r2h(e[0]*w + m[0]*(1-w), e[1]*w + m[1]*(1-w), e[2]*w + m[2]*(1-w)));
       s.el.setAttribute('fill-opacity', alpha.toFixed(4));
     });
   }
-  window._coneStatic = function(){ recolorCone(function(mid){ return 90 - mid; }); };
+  /* timeless portrait: dusk colours on the evening half, dawn on the
+     morning half, crossing over smoothly through both axes (sin of the
+     signed angle) instead of flipping at them */
+  window._coneStatic = function(){
+    recolorCone(function(mid){ return 90 - mid; },
+                function(s){ return 0.5 - 0.5*Math.sin(s.ang*DEG); });
+  };
   /* toward-the-Sun bias: the sky nearest the (below-horizon) Sun keeps its
-     glow longest — dusk lingers west, dawn arrives east */
-  window._coneForSunAlt = function(saSun){
+     glow longest — dusk lingers west, dawn arrives east. nightF = how far
+     tonight has run, 0 at sunset → 1 at sunrise: the whole sky is dusk-
+     coloured early, dawn-coloured late, easing between through the middle */
+  window._coneForSunAlt = function(saSun, nightF){
+    var f = (typeof nightF === 'number') ? Math.max(0, Math.min(1, nightF)) : 0.5;
+    var u = Math.max(0, Math.min(1, (f - 0.3)/0.4)), evW = 1 - u*u*(3 - 2*u);
     /* cosine falloff: zero slope at the axis, so the glow has no sharp
        centreline — the linear ramp drew a visible cusp down the beam */
-    recolorCone(function(mid){ return saSun + 11 * (0.5 + 0.5*Math.cos(mid*DEG)); });
+    recolorCone(function(mid){ return saSun + 11 * (0.5 + 0.5*Math.cos(mid*DEG)); },
+                function(){ return evW; });
   };
   window._coneStatic();
 })();
@@ -4922,9 +4971,10 @@ function updateNightLoop(){
      defined but never called — the timeless portrait showed at 4 AM.)
      Recolouring is 360 slices, so only when the sun moved ≥0.4°. */
   var saNow = sunAltAt(tNight);
-  if (_lastConeSa === null || Math.abs(saNow - _lastConeSa) > 0.4){
+  if (_lastConeSa === null || Math.abs(saNow - _lastConeSa) > 0.25){
     _lastConeSa = saNow;
-    window._coneForSunAlt(saNow);
+    var nightF = (ngSunrise > ngSunset) ? (tNight - ngSunset)/(ngSunrise - ngSunset) : 0.5;
+    window._coneForSunAlt(saNow, nightF);
     /* moonlight + the Milky Way's answer to it: a risen bright moon lays a
        silver wash toward itself and mutes the band; once it sets (tonight's
        own MOONLESS window) the band breathes back up in the true dark */
