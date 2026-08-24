@@ -4098,7 +4098,18 @@ var moonGlow = mk('path',{
 /* the whole slice fan runs under a gentle blur: it dissolves the 1-degree
    mach bands and lets every colour boundary breathe — broad gradients are
    untouched at this radius */
-var gCone = mk('g',{'pointer-events':'none',filter:'url(#coneSoft)'},gNight);
+/* The fan's transparency lives in a MASK, not in per-slice fill-opacity:
+   translucent slices overlapping at every degree leave an antialiased
+   hairline of different alpha along each edge, and the blur smears those
+   360 hairlines into bands that beat against the pixel grid — radial
+   "bars" at a few-degree period (the user's recording; isolated by
+   forcing one colour: bars stayed; removing the blur: bars gone). Opaque
+   slices leave no hairline (the top slice simply covers its neighbour),
+   and the mask's slices are opaque greys, so neither layer has one. */
+var coneMask = mk('mask',{id:'coneAlpha',maskUnits:'userSpaceOnUse',x:-1600,y:-1600,width:3200,height:3200,
+  style:'color-interpolation:sRGB;mask-type:luminance'},defs);
+var gConeMask = mk('g',{filter:'url(#coneSoft)'},coneMask);
+var gCone = mk('g',{'pointer-events':'none',filter:'url(#coneSoft)',mask:'url(#coneAlpha)'},gNight);
 (function(){
   /* DAYTIME: within the glare zone the sky is simply blue — near-opaque wash
      that hides the stars in that direction, then a smoothstep twilight fade
@@ -4115,10 +4126,20 @@ var gCone = mk('g',{'pointer-events':'none',filter:'url(#coneSoft)'},gNight);
   window._coneSlices = [];
   for (var a = -180; a < 180; a += STEP){
     var a1 = a*DEG, a2 = (a+WID)*DEG, R = 1500;
-    var el2 = mk('path',{d:'M0,0L'+(R*Math.cos(a1)).toFixed(1)+','+(R*Math.sin(a1)).toFixed(1)+
-                 'L'+(R*Math.cos(a2)).toFixed(1)+','+(R*Math.sin(a2)).toFixed(1)+'Z',
-               fill:'#000','fill-opacity':0},gCone);
-    window._coneSlices.push({el:el2, mid:Math.abs(a + WID/2), ang:a + WID/2, eve:(a + WID/2) < 0});
+    var dPath = 'M0,0L'+(R*Math.cos(a1)).toFixed(1)+','+(R*Math.sin(a1)).toFixed(1)+
+                'L'+(R*Math.cos(a2)).toFixed(1)+','+(R*Math.sin(a2)).toFixed(1)+'Z';
+    var el2 = mk('path',{d:dPath, fill:'#000'},gCone);
+    var mel = mk('path',{d:dPath, fill:'#000'},gConeMask);
+    /* per-slice dither: a fixed sub-unit offset per channel, added before
+       the hex rounding. Across the fan the colour changes by only ~1 unit
+       per several degrees, so without it whole runs of slices round to the
+       same hex and then step together — a long coherent radial edge, the
+       "bars" of 8-bit banding. Jittered, each step breaks into 1° fragments
+       and the blur averages them into sub-unit precision. Seeded, so the
+       pattern is stable frame to frame. */
+    var h = (a + 180) * 2654435761 >>> 0;
+    var dR = ((h & 255)/255) - 0.5, dG = (((h >> 8) & 255)/255) - 0.5, dB = (((h >> 16) & 255)/255) - 0.5;
+    window._coneSlices.push({el:el2, mel:mel, mid:Math.abs(a + WID/2), ang:a + WID/2, eve:(a + WID/2) < 0, dR:dR, dG:dG, dB:dB});
   }
   function coneAlphaFor(sa){
     if (sa >= 0) return 0.92;   // two overlapping layers → ~0.95 combined: opaque day, no stars/figures peeking
@@ -4168,10 +4189,14 @@ var gCone = mk('g',{'pointer-events':'none',filter:'url(#coneSoft)'},gNight);
     window._coneSlices.forEach(function(s){
       var sa = saFn(s.mid);
       var alpha = coneAlphaFor(sa);
-      if (alpha < 0.003){ s.el.setAttribute('fill-opacity', 0); return; }
+      /* the mask slice is an opaque grey = the alpha (sRGB luminance). The
+         old translucent slices overlapped in pairs, so what showed was
+         1−(1−α)² — keep that curve or every twilight comes out dimmer */
+      var gv = _cB((1 - (1 - alpha)*(1 - alpha))*255 + s.dR);
+      s.mel.setAttribute('fill', _r2h(gv, gv, gv));
+      if (alpha < 0.003) return;
       var w = evFn(s), e = tabAt(tabEve, sa), m = tabAt(tabMorn, sa);
-      s.el.setAttribute('fill', _r2h(e[0]*w + m[0]*(1-w), e[1]*w + m[1]*(1-w), e[2]*w + m[2]*(1-w)));
-      s.el.setAttribute('fill-opacity', alpha.toFixed(4));
+      s.el.setAttribute('fill', _r2h(_cB(e[0]*w + m[0]*(1-w) + s.dR), _cB(e[1]*w + m[1]*(1-w) + s.dG), _cB(e[2]*w + m[2]*(1-w) + s.dB)));
     });
   }
   /* timeless portrait: dusk colours on the evening half, dawn on the
