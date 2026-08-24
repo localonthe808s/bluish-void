@@ -4142,10 +4142,13 @@ var gCone = mk('g',{'pointer-events':'none',filter:'url(#coneSoft)',mask:'url(#c
     window._coneSlices.push({el:el2, mel:mel, mid:Math.abs(a + WID/2), ang:a + WID/2, eve:(a + WID/2) < 0, dR:dR, dG:dG, dB:dB});
   }
   function coneAlphaFor(sa){
-    if (sa >= 0) return 0.92;   // two overlapping layers → ~0.95 combined: opaque day, no stars/figures peeking
+    /* 0.92 stacked to ~0.99 (opaque day). The twilight fade is capped a
+       little lower now so the stars show through the glow and the bright
+       sector sits closer to the dark one */
+    if (sa >= 0) return 0.92;
     if (sa <= -18) return 0;
     var t = -sa/18;
-    return (1 - t*t*(3 - 2*t)) * 0.92;
+    return (1 - t*t*(3 - 2*t)) * 0.80;
   }
   /* The engine is piecewise-linear between altitude keys 1–2° apart, and
      the fan maps only ~11° of altitude across 180° of angle — so every key
@@ -4183,21 +4186,46 @@ var gCone = mk('g',{'pointer-events':'none',filter:'url(#coneSoft)',mask:'url(#c
     var a = tab[i], b = tab[i + 1];
     return [a[0] + (b[0]-a[0])*t, a[1] + (b[1]-a[1])*t, a[2] + (b[2]-a[2])*t];
   }
-  /* saFn(mid) → altitude for a slice; evFn(slice) → 0..1 evening weight */
+  /* saFn(mid) → altitude for a slice; evFn(slice) → 0..1 evening weight.
+     The per-slice colours are then smoothed AROUND the fan (circular
+     Gaussian, σ 12° of angle) before they're painted: the engine's dusk
+     palette turns peach → pink → purple → navy inside a few degrees of
+     altitude, and the fan laid those out as distinct bands with visible
+     borders (user: "too separated and contrasted"). Bleeding each band
+     into its neighbours keeps the sunward-to-dark sweep but loses the
+     borders; the mask alpha is smoothed the same way so the fan's dark
+     edge is a fade, not a rim. */
+  var SM_SIG = 30, SM_R = 75, SM_K = [], SM_KS = 0, SM_PULL = 0.2;
+  for (var sk = -SM_R; sk <= SM_R; sk++){ var swt = Math.exp(-0.5*sk*sk/(SM_SIG*SM_SIG)); SM_K.push(swt); SM_KS += swt; }
   function recolorCone(saFn, evFn){
     if (!tabEve){ tabEve = buildTable(true); tabMorn = buildTable(false); }
-    window._coneSlices.forEach(function(s){
-      var sa = saFn(s.mid);
-      var alpha = coneAlphaFor(sa);
-      /* the mask slice is an opaque grey = the alpha (sRGB luminance). The
-         old translucent slices overlapped in pairs, so what showed was
+    var S = window._coneSlices, n = S.length, raw = new Array(n), i, k;
+    for (i = 0; i < n; i++){
+      var s = S[i], sa = saFn(s.mid), alpha = coneAlphaFor(sa);
+      /* the old translucent slices overlapped in pairs, so what showed was
          1−(1−α)² — keep that curve or every twilight comes out dimmer */
-      var gv = _cB((1 - (1 - alpha)*(1 - alpha))*255 + s.dR);
-      s.mel.setAttribute('fill', _r2h(gv, gv, gv));
-      if (alpha < 0.003) return;
       var w = evFn(s), e = tabAt(tabEve, sa), m = tabAt(tabMorn, sa);
-      s.el.setAttribute('fill', _r2h(_cB(e[0]*w + m[0]*(1-w) + s.dR), _cB(e[1]*w + m[1]*(1-w) + s.dG), _cB(e[2]*w + m[2]*(1-w) + s.dB)));
-    });
+      raw[i] = [e[0]*w + m[0]*(1-w), e[1]*w + m[1]*(1-w), e[2]*w + m[2]*(1-w), 1 - (1 - alpha)*(1 - alpha)];
+    }
+    /* the fan's alpha-weighted mean colour — every slice is pulled part of
+       the way toward it, so the brightest and darkest sectors sit closer
+       together (contrast, not just borders, read as "separated") */
+    var mr = 0, mg = 0, mb = 0, ma = 0;
+    for (i = 0; i < n; i++){ var q0 = raw[i]; mr += q0[0]*q0[3]; mg += q0[1]*q0[3]; mb += q0[2]*q0[3]; ma += q0[3]; }
+    if (ma > 0){ mr /= ma; mg /= ma; mb /= ma; }
+    for (i = 0; i < n; i++){
+      var r = 0, g = 0, b = 0, a = 0;
+      for (k = -SM_R; k <= SM_R; k++){
+        var q = raw[(i + k + n) % n], wk = SM_K[k + SM_R]/SM_KS;
+        r += q[0]*wk; g += q[1]*wk; b += q[2]*wk; a += q[3]*wk;
+      }
+      r += (mr - r)*SM_PULL; g += (mg - g)*SM_PULL; b += (mb - b)*SM_PULL;
+      var s2 = S[i], gv = _cB(a*255 + s2.dR);
+      /* the mask slice is an opaque grey = the alpha (sRGB luminance) */
+      s2.mel.setAttribute('fill', _r2h(gv, gv, gv));
+      if (a < 0.003) continue;
+      s2.el.setAttribute('fill', _r2h(_cB(r + s2.dR), _cB(g + s2.dG), _cB(b + s2.dB)));
+    }
   }
   /* timeless portrait: dusk colours on the evening half, dawn on the
      morning half, crossing over smoothly through both axes (sin of the
@@ -4234,7 +4262,7 @@ var ngMidLine = mk('line',{stroke:'rgba(190,210,255,.35)','stroke-width':1,
    the night into one sky. Warm-tinted while active. */
 var coneSoft = mk('filter',{id:'coneSoft',filterUnits:'userSpaceOnUse',
                             x:-1700,y:-1700,width:3400,height:3400},defs);
-mk('feGaussianBlur',{stdDeviation:9},coneSoft);
+mk('feGaussianBlur',{stdDeviation:16},coneSoft);
 var ngAllSoft = mk('filter',{id:'ngAllSoft',filterUnits:'userSpaceOnUse',
                              x:-1700,y:-1700,width:3400,height:3400},defs);
 mk('feGaussianBlur',{stdDeviation:16},ngAllSoft);
