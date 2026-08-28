@@ -33746,9 +33746,16 @@ function dayRangeAround(d, days){
           if (!ids.length) { delete window._fnRunDepth[key]; return; }
           var isoLo = new Date(lo - 20*60000).toISOString().slice(0,19);
           var isoHi = new Date(Math.min(hi + 60000, nowMs + 5*60000)).toISOString().slice(0,19);   // clock-in-2080 trap
-          fnQuery('{ depth_data(where:{deployment_id:{_in:' + JSON.stringify(ids) + '}, time:{_gte:"' + isoLo + '", _lte:"' + isoHi + '"}},'
-                + ' order_by:{time:desc}, limit:9000){ deployment_id time depth_proc_mm } }')
-            .then(function(d){
+          Promise.all([
+            fnQuery('{ depth_data(where:{deployment_id:{_in:' + JSON.stringify(ids) + '}, time:{_gte:"' + isoLo + '", _lte:"' + isoHi + '"}},'
+                  + ' order_by:{time:desc}, limit:9000){ deployment_id time depth_proc_mm } }'),
+            // where each sensor stands: FloodNet's own address fields (borough,
+            // neighborhood) plus the cross-street name ("SI - Grimsby St/ Mapleton Ave")
+            fnQuery('{ deployments(where:{deployment_id:{_in:' + JSON.stringify(ids) + '}})'
+                  + '{ deployment_id name sensor_address_borough sensor_address_neighborhood } }').catch(function(){ return null; })
+          ]).then(function(res){
+              var d = res[0], dep = {};
+              ((res[1] && res[1].deployments) || []).forEach(function(x){ dep[x.deployment_id] = x; });
               var rows = (d && d.depth_data) || [];
               var by = {};
               rows.forEach(function(rw){
@@ -33774,7 +33781,25 @@ function dayRangeAround(d, days){
               var ks = Object.keys(best); if (!ks.length) { delete window._fnRunDepth[key]; return; }
               var peakIn = 0, over4 = 0, over12 = 0;
               ks.forEach(function(k){ var inch = best[k]/25.4; peakIn = Math.max(peakIn, inch); if (inch >= 4) over4++; if (inch >= 12) over12++; });
-              var stats = { peakIn:peakIn, n:ks.length, over4:over4, over12:over12,
+              var sensors = ks.map(function(k){
+                var x = dep[k] || {};
+                var nm = String(x.name || '').replace(/^[A-Z]{1,2}\s*-\s*/, '').replace(/\s*\/\s*/g, ' / ').trim();
+                return { id:k, name:nm, boro:x.sensor_address_borough || '', hood:x.sensor_address_neighborhood || '', inch:best[k]/25.4 };
+              }).sort(function(x,y){ return y.inch - x.inch; });
+              // boroughs ranked by sensor count (deepest first on ties); the
+              // top one is "dominant" when it holds 60%+ of the sensors — a
+              // Staten Island flood with one straggler each in the Bronx and
+              // Queens is a Staten Island flood, not "3 BOROUGHS"
+              var bc = {}, boros = [], hoods = [];
+              sensors.forEach(function(x){ if (x.boro){ if (!bc[x.boro]){ bc[x.boro] = 0; boros.push(x.boro); } bc[x.boro]++; } });
+              boros.sort(function(x,y){ return bc[y] - bc[x]; });
+              var withBoro = sensors.filter(function(x){ return x.boro; }).length;
+              var mainBoro = boros.length && bc[boros[0]] >= 0.6 * withBoro ? boros[0] : null;
+              sensors.forEach(function(x){
+                if (mainBoro && x.boro !== mainBoro) return;
+                var hh = x.hood || x.boro; if (hh && hoods.indexOf(hh) < 0) hoods.push(hh);
+              });
+              var stats = { peakIn:peakIn, n:ks.length, over4:over4, over12:over12, sensors:sensors, boros:boros, hoods:hoods, mainBoro:mainBoro,
                             tier: peakIn >= 12 ? 'MAJOR FLOODING' : peakIn >= 4 ? 'MINOR FLOODING' : 'PUDDLING' };
               window._fnRunDepth[key] = stats;
               cb(stats);
@@ -33784,7 +33809,9 @@ function dayRangeAround(d, days){
         var fnBadgeHTML = function(total, stats){
           return '<div style="font-size:7.5px;font-weight:800;letter-spacing:.06em;">◆ ' + (stats ? stats.tier : 'WATER ON STREET') + '</div>'
             + '<div style="font-size:6.5px;font-weight:600;letter-spacing:.03em;opacity:.85;">'
-            + total + ' SENSOR' + (total > 1 ? 'S' : '') + ' · ' + (stats ? 'PEAK ' + fnIn(stats.peakIn) : 'MEASURED') + '</div>';
+            + total + ' SENSOR' + (total > 1 ? 'S' : '')
+            + (stats && stats.boros && stats.boros.length ? ' · ' + (stats.mainBoro ? stats.mainBoro.toUpperCase() + (stats.boros.length > 1 ? ' +' + (stats.boros.length - 1) : '') : stats.boros.length + ' BOROUGHS') : '')
+            + ' · ' + (stats ? 'PEAK ' + fnIn(stats.peakIn) : 'MEASURED') + '</div>';
         };
         var paintRun = function(startCol, endCol, total, stats){
           if (!document.body.contains(cols[0])) return;
@@ -33852,11 +33879,33 @@ function dayRangeAround(d, days){
                    : st.over4 ? ', <b>' + st.over4 + '</b> sensor' + (st.over4 > 1 ? 's' : '') + ' over the curb line' : '')
                 + (st.n < total ? ' (' + st.n + ' of ' + total + ' sensors returned depth)' : '') + '.';
             }
+            var whereHTML = '';
+            if (st && st.sensors && st.sensors.length){
+              var esc2 = function(t){ return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;'); };
+              var joinAnd = function(arr){ return arr.length <= 1 ? arr.join('') : arr.slice(0,-1).join(', ') + ' and ' + arr[arr.length-1]; };
+              var placeLine;
+              if (st.mainBoro){
+                var others = st.boros.filter(function(b2){ return b2 !== st.mainBoro; });
+                placeLine = (others.length ? 'mostly ' : '') + joinAnd(st.hoods.slice(0,5)) + (st.hoods.length > 5 ? ' and more' : '')
+                  + (st.hoods[0] !== st.mainBoro ? ', ' + st.mainBoro : '')
+                  + (others.length ? ' · also ' + joinAnd(others) : '');
+              } else placeLine = joinAnd(st.boros);
+              whereHTML = '<div style="margin-bottom:6px;"><b>Where:</b> ' + esc2(placeLine) + '.</div>'
+                + '<div style="margin-bottom:10px;font-size:10.5px;line-height:1.5;">';
+              st.sensors.slice(0,6).forEach(function(x){
+                whereHTML += '<div style="display:flex;justify-content:space-between;gap:10px;">'
+                  + '<span>' + esc2(x.name || x.id) + (x.hood ? ' <span style="color:rgba(30,30,50,.55);">· ' + esc2(x.hood) + (st.boros.length > 1 && x.boro ? ', ' + esc2(x.boro) : '') + '</span>' : '') + '</span>'
+                  + '<span style="color:#5c4026;font-weight:700;white-space:nowrap;">' + (x.inch < 1 ? '&lt;1 in' : Math.round(x.inch) + ' in') + '</span></div>';
+              });
+              if (st.sensors.length > 6) whereHTML += '<div style="color:rgba(30,30,50,.55);">+ ' + (st.sensors.length - 6) + ' more sensor' + (st.sensors.length - 6 > 1 ? 's' : '') + '</div>';
+              whereHTML += '</div>';
+            }
             pp.innerHTML =
               '<div style="font-size:11px;font-weight:800;letter-spacing:.08em;color:#5c4026;text-transform:uppercase;margin-bottom:6px;">◆ ' + tierWord + '</div>'
               + '<div style="margin-bottom:' + (depthLine ? '6' : '10') + 'px;">New York City street sensors measured standing water from <b>' + h12(startCol)
               + '</b> to <b>' + h12(endCol) + '</b> at <b>' + total + '</b> sensor' + (total > 1 ? 's' : '') + '.</div>'
-              + (depthLine ? '<div style="margin-bottom:10px;">' + depthLine + '</div>' : '')
+              + (depthLine ? '<div style="margin-bottom:' + (whereHTML ? '6' : '10') + 'px;">' + depthLine + '</div>' : '')
+              + whereHTML
               + '<div style="margin-bottom:8px;font-size:10.5px;color:rgba(30,30,50,.72);line-height:1.5;">'
               + '<b style="color:#5c4026;">PUDDLING</b> under 4 in · <b style="color:#5c4026;">MINOR</b> 4–12 in, the city’s nuisance-flooding line (a curb is about 6 in) · '
               + '<b style="color:#5c4026;">MAJOR</b> a foot or more, the city’s deep-flooding line — enough to stall cars and enter basements.</div>'
