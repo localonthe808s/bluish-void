@@ -33712,13 +33712,85 @@ function dayRangeAround(d, days){
           }
           runs.push(run);
           runs.forEach(function(r){
-            var tot = 0;
-            for (var h = r[0]; h <= r[r.length-1]; h++) tot += (byHour[h] || []).length;
-            if (tot >= 5) paintRun(r[0], r[r.length-1], tot);
+            var runEvs = [];
+            for (var h = r[0]; h <= r[r.length-1]; h++) runEvs = runEvs.concat(byHour[h] || []);
+            if (runEvs.length < 5) return;
+            // count SENSORS, not events — one flapping unit used to inflate the number
+            var ids = {}; runEvs.forEach(function(e){ if (e.deployment_id) ids[e.deployment_id] = 1; });
+            var nSensors = Object.keys(ids).length || runEvs.length;
+            paintRun(r[0], r[r.length-1], nSensors, null);
+            fetchRunDepth(r[0], runEvs, function(stats){
+              if (stats) paintRun(r[0], r[r.length-1], nSensors, stats);
+            });
           });
         };
-        var paintRun = function(startCol, endCol, total){
+        // Severity comes from depth_data: each sensor's RISE above its own dry
+        // floor (median of the readings just before its event), read at the
+        // 95th percentile so one-sample spikes don't count. Raw depth_proc_mm
+        // is never used on its own — some units sit at a permanent offset.
+        window._fnRunDepth = window._fnRunDepth || {};
+        var fetchRunDepth = function(runStart, runEvs, cb){
+          var key = dayKey + ':' + runStart;
+          if (window._fnRunDepth[key]) return cb(window._fnRunDepth[key]);
+          if (window._fnRunDepth[key] === null) return;           // in flight / failed
+          window._fnRunDepth[key] = null;
+          var ids = [], lo = Infinity, hi = 0, nowMs = Date.now();
+          runEvs.forEach(function(e){
+            if (!e.deployment_id) return;
+            if (ids.indexOf(e.deployment_id) < 0) ids.push(e.deployment_id);
+            var st = new Date(e.start_time + (/[Zz+]/.test(e.start_time) ? '' : 'Z')).getTime();
+            var en = e.end_time ? new Date(e.end_time + (/[Zz+]/.test(e.end_time) ? '' : 'Z')).getTime() : nowMs;
+            e._st = st; e._en = Math.min(en, nowMs);
+            lo = Math.min(lo, st); hi = Math.max(hi, e._en);
+          });
+          if (!ids.length) { delete window._fnRunDepth[key]; return; }
+          var isoLo = new Date(lo - 20*60000).toISOString().slice(0,19);
+          var isoHi = new Date(Math.min(hi + 60000, nowMs + 5*60000)).toISOString().slice(0,19);   // clock-in-2080 trap
+          fnQuery('{ depth_data(where:{deployment_id:{_in:' + JSON.stringify(ids) + '}, time:{_gte:"' + isoLo + '", _lte:"' + isoHi + '"}},'
+                + ' order_by:{time:desc}, limit:9000){ deployment_id time depth_proc_mm } }')
+            .then(function(d){
+              var rows = (d && d.depth_data) || [];
+              var by = {};
+              rows.forEach(function(rw){
+                if (rw.depth_proc_mm == null) return;
+                var t = new Date(rw.time + (/[Zz+]/.test(rw.time) ? '' : 'Z')).getTime();
+                (by[rw.deployment_id] = by[rw.deployment_id] || []).push({ t:t, mm:rw.depth_proc_mm });
+              });
+              Object.keys(by).forEach(function(k){ by[k].sort(function(x,y){ return x.t - y.t; }); });
+              var med = function(arr){ var q = arr.slice().sort(function(x,y){ return x-y; }); var m = q.length >> 1; return q.length % 2 ? q[m] : (q[m-1]+q[m])/2; };
+              var best = {};                                        // deployment_id -> peak rise (mm)
+              runEvs.forEach(function(e){
+                var rs = by[e.deployment_id]; if (!rs) return;
+                var pre = [], win = [];
+                rs.forEach(function(x){ if (x.t < e._st) pre.push(x.mm); else if (x.t <= e._en) win.push(x.mm); });
+                if (!win.length) return;
+                pre = pre.slice(-15);
+                var floor = pre.length ? med(pre) : Math.min.apply(null, win);
+                var w = win.slice().sort(function(x,y){ return x-y; });
+                var p95 = w.length > 2 ? w[Math.floor(w.length*0.95)] : w[w.length-1];
+                var rise = Math.max(0, p95 - floor);
+                if (!(best[e.deployment_id] >= rise)) best[e.deployment_id] = rise;
+              });
+              var ks = Object.keys(best); if (!ks.length) { delete window._fnRunDepth[key]; return; }
+              var peakIn = 0, over4 = 0, over12 = 0;
+              ks.forEach(function(k){ var inch = best[k]/25.4; peakIn = Math.max(peakIn, inch); if (inch >= 4) over4++; if (inch >= 12) over12++; });
+              var stats = { peakIn:peakIn, n:ks.length, over4:over4, over12:over12,
+                            tier: peakIn >= 12 ? 'MAJOR FLOODING' : peakIn >= 4 ? 'MINOR FLOODING' : 'PUDDLING' };
+              window._fnRunDepth[key] = stats;
+              cb(stats);
+            }).catch(function(){ delete window._fnRunDepth[key]; });
+        };
+        var fnIn = function(v){ return v < 1 ? 'UNDER 1 IN' : Math.round(v) + ' IN'; };
+        var fnBadgeHTML = function(total, stats){
+          return '<div style="font-size:7.5px;font-weight:800;letter-spacing:.06em;">◆ ' + (stats ? stats.tier : 'WATER ON STREET') + '</div>'
+            + '<div style="font-size:6.5px;font-weight:600;letter-spacing:.03em;opacity:.85;">'
+            + total + ' SENSOR' + (total > 1 ? 'S' : '') + ' · ' + (stats ? 'PEAK ' + fnIn(stats.peakIn) : 'MEASURED') + '</div>';
+        };
+        var paintRun = function(startCol, endCol, total, stats){
           if (!document.body.contains(cols[0])) return;
+          // depth arrived for a badge already on screen: upgrade it in place
+          var have = cols[startCol] && cols[startCol].querySelector('.fnstreet-badge');
+          if (have){ have._fnStats = stats || have._fnStats; have.innerHTML = fnBadgeHTML(total, have._fnStats); return; }
           for (var c = startCol; c <= endCol; c++){
             if (!cols[c] || cols[c].querySelector('.fnstreet-marker')) continue;
             var mk = document.createElement('div');
@@ -33756,9 +33828,8 @@ function dayRangeAround(d, days){
             'font-family:system-ui,-apple-system,sans-serif;padding:4px 10px;border-radius:5px;' +
             'white-space:nowrap;text-align:center;box-shadow:0 2px 8px rgba(74,50,30,.45),0 1px 3px rgba(0,0,0,.3);' +
             'z-index:20;pointer-events:auto;cursor:pointer;line-height:1.15;';
-          badge.innerHTML = '<div style="font-size:7.5px;font-weight:800;letter-spacing:.06em;">◆ WATER ON STREET</div>'
-            + '<div style="font-size:6.5px;font-weight:600;letter-spacing:.03em;opacity:.85;">'
-            + total + ' SENSOR' + (total > 1 ? 'S' : '') + ' · MEASURED</div>';
+          badge._fnStats = stats || null;
+          badge.innerHTML = fnBadgeHTML(total, badge._fnStats);
           badge.onclick = function(e){
             e.stopPropagation();
             var ex = document.getElementById('rain-insight-popup');
@@ -33771,11 +33842,25 @@ function dayRangeAround(d, days){
               + 'border:1px solid rgba(92,64,38,.28);border-radius:10px;padding:14px 16px;color:rgba(30,30,50,.85);'
               + 'font-family:system-ui,-apple-system,sans-serif;font-size:11.5px;line-height:1.45;box-shadow:0 8px 32px rgba(20,20,60,.18),0 0 0 1px rgba(43,34,244,.04);';
             var h12 = function(h){ return h === 0 ? '12 AM' : h < 12 ? h + ' AM' : h === 12 ? '12 PM' : (h-12) + ' PM'; };
+            var st = badge._fnStats;
+            var tierWord = st ? st.tier : 'Water On The Street';
+            var depthLine = '';
+            if (st){
+              var inTxt = function(v){ return v < 1 ? 'under an inch' : Math.round(v) + ' in'; };
+              depthLine = 'Deepest water: <b>' + inTxt(st.peakIn) + '</b> above the pavement'
+                + (st.over12 ? ', <b>' + st.over12 + '</b> sensor' + (st.over12 > 1 ? 's' : '') + ' a foot or more'
+                   : st.over4 ? ', <b>' + st.over4 + '</b> sensor' + (st.over4 > 1 ? 's' : '') + ' over the curb line' : '')
+                + (st.n < total ? ' (' + st.n + ' of ' + total + ' sensors returned depth)' : '') + '.';
+            }
             pp.innerHTML =
-              '<div style="font-size:11px;font-weight:800;letter-spacing:.08em;color:#5c4026;text-transform:uppercase;margin-bottom:6px;">◆ Water On The Street</div>'
-              + '<div style="margin-bottom:10px;">New York City street sensors measured standing water from <b>' + h12(startCol)
-              + '</b> to <b>' + h12(endCol) + '</b>, across <b>' + total + '</b> flood event' + (total > 1 ? 's' : '') + '.</div>'
-              + '<div style="margin-bottom:8px;color:rgba(30,30,50,.72);">Unlike the rainfall badges on this row, this is not a forecast or a threshold — FloodNet sensors mounted at street level recorded the water directly.</div>'
+              '<div style="font-size:11px;font-weight:800;letter-spacing:.08em;color:#5c4026;text-transform:uppercase;margin-bottom:6px;">◆ ' + tierWord + '</div>'
+              + '<div style="margin-bottom:' + (depthLine ? '6' : '10') + 'px;">New York City street sensors measured standing water from <b>' + h12(startCol)
+              + '</b> to <b>' + h12(endCol) + '</b> at <b>' + total + '</b> sensor' + (total > 1 ? 's' : '') + '.</div>'
+              + (depthLine ? '<div style="margin-bottom:10px;">' + depthLine + '</div>' : '')
+              + '<div style="margin-bottom:8px;font-size:10.5px;color:rgba(30,30,50,.72);line-height:1.5;">'
+              + '<b style="color:#5c4026;">PUDDLING</b> under 4 in · <b style="color:#5c4026;">MINOR</b> 4–12 in, the city’s nuisance-flooding line (a curb is about 6 in) · '
+              + '<b style="color:#5c4026;">MAJOR</b> a foot or more, the city’s deep-flooding line — enough to stall cars and enter basements.</div>'
+              + '<div style="margin-bottom:8px;color:rgba(30,30,50,.72);">Unlike the rainfall badges on this row, this is not a forecast or a threshold — FloodNet sensors mounted at street level recorded the water directly. Depth is each sensor’s rise above its own dry reading, so a unit that always reads a little high doesn’t count.</div>'
               + '<div style="color:rgba(30,30,50,.58);font-size:10.5px;">Open the FLOODS hazard tab for per-sensor depth traces.</div>'
               + '<div style="text-align:right;margin-top:10px;"><span onclick="document.getElementById(\'rain-insight-popup\').remove()" style="cursor:pointer;font-size:10px;color:rgba(92,64,38,.75);">CLOSE ✕</span></div>';
             document.body.appendChild(pp);
@@ -33803,7 +33888,7 @@ function dayRangeAround(d, days){
                    .toISOString().slice(0,19);
         fnQuery('{ flood_events(where:{_and:[{start_time:{_gte:"' + lo + '"}},{start_time:{_lte:"' + hi + '"}},'
               + '{event_confidence:{_gte:0.5}}]}, order_by:{start_time:asc}, limit:200)'
-              + '{ start_time event_confidence } }')
+              + '{ start_time end_time deployment_id event_confidence } }')
           .then(function(d){
             var evs = (d && d.flood_events) || [];
             window._fnDayCache[dayKey] = evs;
