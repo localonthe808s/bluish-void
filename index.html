@@ -76337,6 +76337,9 @@ function closeAlertModal(){
         if (have && have.parentNode) { have.parentNode.removeChild(have); changed = true; }
         if (cue) { _placeCueMarker(cols, kind, cue.m, cue.name, ds, cue.ex); changed = true; }
       });
+      // Eclipse START / MAX / END badges ride the same pass (same day-keying,
+      // same 5s follow-the-day cadence); it reports whether anything moved.
+      try{ if (_injectEclipseCues(row, cols)) changed = true; }catch(e){}
       // Covers the removal-only path (a cue dropping off shrinks the zone) —
       // placement already relayouts inside _placeCueMarker. Skipping the call
       // when NOTHING changed matters: this runs every 5s, and the badge
@@ -76358,6 +76361,170 @@ function closeAlertModal(){
   // 5s, not 30s: the strip rebuilds on every day change and the cue has to
   // follow promptly, otherwise a stale day's badge lingers on screen
   setInterval(function(){ if (!document.hidden) injectSongCues(); }, 5000);
+
+  // ── ECLIPSE CUES ON THE TODAY STRIP ──────────────────────────────────
+  // Rare timed sky events get START / MAX / END badges on the hour strip,
+  // built like FIRST/LAST SONG. Lunar eclipses only for now: their contacts
+  // happen at the same instant everywhere, so a small table of greatest-
+  // eclipse times (NASA GSFC canon, TD-ΔT → UT, rounded to the minute) is
+  // enough — every badge is gated on the Moon being above the horizon at that
+  // instant for the current location. Penumbral-only eclipses are left out
+  // (invisible to the eye). Solar eclipses are NOT here: their timing is
+  // location-specific (Besselian elements) and needs its own calculation.
+  var _LUNAR_ECLIPSES = [
+    // g = greatest eclipse (UT); pm = umbral (partial) phase length, min;
+    // tm = total phase length, min (0 = partial eclipse); mag = umbral magnitude
+    { g:'2026-03-03T11:34:00Z', pm:207, tm:58,  mag:1.151 },
+    { g:'2026-08-28T04:13:00Z', pm:198, tm:0,   mag:0.930 },
+    { g:'2028-01-12T04:13:00Z', pm:56,  tm:0,   mag:0.066 },
+    { g:'2028-07-06T18:20:00Z', pm:141, tm:0,   mag:0.389 },
+    { g:'2028-12-31T16:52:00Z', pm:209, tm:71,  mag:1.246 },
+    { g:'2029-06-26T03:22:00Z', pm:220, tm:102, mag:1.844 },
+    { g:'2029-12-20T22:42:00Z', pm:213, tm:54,  mag:1.117 },
+    { g:'2030-06-15T18:33:00Z', pm:144, tm:0,   mag:0.502 }
+  ];
+  // Wall-clock parts of a UTC instant in the LOCATION's zone — not the
+  // browser's. The strip's columns are the location's hours.
+  function _eclLocalParts(d){
+    var tz = (window.LOCATION && window.LOCATION.tz) || (typeof TZ === 'string' ? TZ : null);
+    var o = { y:d.getFullYear(), mo:d.getMonth()+1, d:d.getDate(), h:d.getHours(), mi:d.getMinutes() };
+    if (tz){
+      try{
+        var parts = new Intl.DateTimeFormat('en-US', { timeZone:tz, hour12:false, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' }).formatToParts(d);
+        var m = {}; parts.forEach(function(pt){ m[pt.type] = pt.value; });
+        o = { y:+m.year, mo:+m.month, d:+m.day, h:(+m.hour) % 24, mi:+m.minute };
+      }catch(e){}
+    }
+    o.ds = o.y + '-' + String(o.mo).padStart(2,'0') + '-' + String(o.d).padStart(2,'0');
+    o.mins = o.h*60 + o.mi;
+    var h12 = o.h % 12 || 12;
+    o.t12 = h12 + ':' + String(o.mi).padStart(2,'0') + (o.h >= 12 ? ' PM' : ' AM');
+    return o;
+  }
+  // Moon altitude (deg) at a UTC instant for the current location, via the
+  // astro core's exported moonRaDec/altAz (radians). null if unavailable.
+  function _eclMoonAlt(d){
+    try{
+      var L = window.LOCATION;
+      if (!L || typeof window.moonRaDec !== 'function' || typeof window.altAz !== 'function') return null;
+      var rd = window.moonRaDec(d);
+      return window.altAz(rd.ra, rd.dec, d, L.lat, L.lon).alt * 180 / Math.PI;
+    }catch(e){ return null; }
+  }
+  // Contacts for one eclipse: partial start / max / partial end (+ totality
+  // for the popup). Partial phase treated as symmetric about greatest — true
+  // to within a minute or two.
+  function _eclContacts(ec){
+    var g = new Date(ec.g).getTime(), half = ec.pm*30000;
+    var c = { start:new Date(g-half), max:new Date(g), end:new Date(g+half), ec:ec };
+    if (ec.tm){ var th = ec.tm*30000; c.tStart = new Date(g-th); c.tEnd = new Date(g+th); }
+    return c;
+  }
+  function _eclipseHTML(c, kind){
+    var ec = c.ec, total = ec.tm > 0;
+    var ink = '#9a3412';
+    var FS = function(t){ return '<div style="font-weight:800;font-size:9px;color:'+ink+';text-transform:uppercase;letter-spacing:.04em;margin-top:8px;margin-bottom:4px;padding-bottom:3px;border-bottom:1px solid rgba(154,52,18,.15);">'+t+'</div>'; };
+    var gL = function(l,v){ return '<div class="hz-card-row"><span class="hz-label">'+l+'</span><span class="hz-val">'+v+'</span></div>'; };
+    var T = function(d){ return '<span style="color:'+ink+';font-weight:700;">'+_eclLocalParts(d).t12+'</span>'; };
+    var altMax = _eclMoonAlt(c.max);
+    var name = (window.LOCATION && window.LOCATION.name) || 'here';
+    var h = '<div style="font-size:11px;font-weight:800;color:'+ink+';letter-spacing:.02em;">' + (total ? 'TOTAL' : 'PARTIAL') + ' LUNAR ECLIPSE</div>';
+    h += '<div style="font-size:9px;color:rgba(30,30,50,.6);margin-top:2px;">' + (kind === 'start' ? 'The Moon enters Earth’s shadow' : kind === 'max' ? 'Deepest point of the eclipse' : 'The Moon leaves Earth’s shadow') + '</div>';
+    h += FS('Timeline · ' + name);
+    h += gL('Partial begins', T(c.start));
+    if (total) h += gL('Totality', T(c.tStart) + ' – ' + T(c.tEnd));
+    h += gL('Maximum', T(c.max));
+    h += gL('Partial ends', T(c.end));
+    h += FS('Circumstances');
+    h += gL('Umbral magnitude', '<span style="color:'+ink+';">' + ec.mag.toFixed(2) + '</span>');
+    h += gL('Moon in shadow', '<span style="color:'+ink+';">' + (total ? '100%' : Math.round(Math.min(1, ec.mag)*100) + '%') + '</span>');
+    if (altMax != null) h += gL('Moon altitude at max', '<span style="color:'+ink+';">' + Math.round(altMax) + '°</span>');
+    h += FS('What you’ll see');
+    h += '<div style="font-size:9px;color:rgba(30,30,50,.68);line-height:1.55;">'
+      + (total
+        ? '• <b>Colour:</b> during totality the Moon turns copper-red — sunlight bent through Earth’s atmosphere, every sunrise and sunset at once.<br>'
+        : '• <b>Shape:</b> a dark bite grows across the Moon, deepest at maximum, then recedes. The shadowed part often glows faintly red.<br>')
+      + '• <b>Gear:</b> naked eye is enough; binoculars show the shadow edge. Safe to look at, unlike a solar eclipse.<br>'
+      + '• <b>Timing:</b> these instants are the same worldwide — only whether the Moon is up changes by place.'
+      + '</div>';
+    h += '<div style="font-size:8px;color:rgba(30,30,50,.5);margin-top:8px;">NASA GSFC eclipse canon · times rounded to the minute</div>';
+    return h;
+  }
+  function _placeEclipseMarker(cols, c, kind, d, ds){
+    var COL = '#9a3412';
+    var lp = _eclLocalParts(d);
+    var hr = Math.floor(lp.mins/60);
+    var idx = cols.length >= 24 ? hr : Math.round(hr * (cols.length - 1) / 23);
+    if (idx < 0 || idx >= cols.length) return;
+    if (getComputedStyle(cols[idx]).position === 'static') cols[idx].style.position = 'relative';
+    var marker = document.createElement('div');
+    marker.className = 'eclipse-marker';
+    marker.setAttribute('data-day', ds);
+    marker.setAttribute('data-kind', kind);
+    marker.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:15;pointer-events:none;overflow:visible;';
+    var band = document.createElement('div');
+    band.style.cssText = 'position:absolute;top:0;left:0;width:100%;bottom:-20px;background:'+COL+';opacity:.1;border-radius:10px;';
+    marker.appendChild(band);
+    var badge = document.createElement('div');
+    badge.className = 'tl-badge';
+    badge.setAttribute('data-sev', '1');
+    badge.style.cssText = 'position:absolute;top:-34px;left:50%;transform:translateX(-50%);'
+      + 'background:'+COL+';color:#fff;font-size:7.5px;font-weight:800;padding:3px 10px;border-radius:5px;'
+      + 'letter-spacing:.4px;text-align:center;line-height:1.1;z-index:20;white-space:nowrap;'
+      + 'box-shadow:0 1px 4px rgba(0,0,0,.3),0 0 8px '+COL+'44;text-shadow:0 1px 1px rgba(0,0,0,.3);'
+      + 'pointer-events:auto;cursor:pointer;';
+    badge.textContent = kind === 'start' ? 'ECLIPSE STARTS' : kind === 'max' ? 'ECLIPSE MAX' : 'ECLIPSE ENDS';
+    badge.addEventListener('click', function(ev){
+      ev.stopPropagation();
+      var old = document.getElementById('songcue-insight-popup');
+      var oldBd = document.getElementById('songcue-insight-backdrop');
+      if (old){ old.remove(); if (oldBd) oldBd.remove(); if (window._bvDisarmBack) window._bvDisarmBack(); return; }
+      var rect = ev.currentTarget.getBoundingClientRect();
+      var bd = document.createElement('div');
+      bd.id = 'songcue-insight-backdrop';
+      bd.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:9998;';
+      var pp = document.createElement('div');
+      pp.id = 'songcue-insight-popup';
+      pp.style.cssText = 'position:absolute;right:8px;top:8px;width:280px;max-height:70vh;overflow-y:auto;scrollbar-width:none;'
+        + 'background:rgba(255,255,255,.85);backdrop-filter:blur(16px) saturate(150%);-webkit-backdrop-filter:blur(16px) saturate(150%);'
+        + 'border:1px solid rgba(43,34,244,.12);border-radius:10px;padding:0;z-index:9999;'
+        + 'box-shadow:0 8px 32px rgba(20,20,60,.18),0 0 0 1px rgba(43,34,244,.04);font-family:system-ui,sans-serif;color:rgba(30,30,50,.85);';
+      pp.innerHTML = '<div style="padding:10px 12px;">' + _eclipseHTML(c, kind)
+        + '<div class="hz-card-footer">Lunar eclipse · ' + _eclLocalParts(c.max).t12 + ' maximum</div></div>';
+      bd.onclick = function(){ pp.remove(); bd.remove(); };
+      document.body.appendChild(bd);
+      var tlCard = document.getElementById('today-timeline-card');
+      if (window.mountPopupOnBody && tlCard) window.mountPopupOnBody(pp, bd, tlCard);
+      else document.body.appendChild(pp);
+      if (window.anchorPopupToRect) window.anchorPopupToRect(pp, rect, 10);
+      if (window.addScrollFade) window.addScrollFade(pp);
+    });
+    marker.appendChild(badge);
+    cols[idx].appendChild(marker);
+  }
+  // Returns true when the strip's eclipse markers changed (caller relayouts).
+  function _injectEclipseCues(row, cols){
+    var ds = _cueDateStr();
+    var want = [];
+    for (var i = 0; i < _LUNAR_ECLIPSES.length; i++){
+      var c = _eclContacts(_LUNAR_ECLIPSES[i]);
+      [['start', c.start], ['max', c.max], ['end', c.end]].forEach(function(kd){
+        if (_eclLocalParts(kd[1]).ds !== ds) return;
+        var alt = _eclMoonAlt(kd[1]);
+        if (alt != null && alt <= 0) return;          // Moon below the horizon here
+        want.push({ kind:kd[0], d:kd[1], c:c });
+      });
+    }
+    var have = row.querySelectorAll('.eclipse-marker');
+    var same = have.length === want.length;
+    if (same) for (var k = 0; k < have.length; k++){
+      if (have[k].getAttribute('data-day') !== ds || have[k].getAttribute('data-kind') !== want[k].kind){ same = false; break; }
+    }
+    if (same) return false;
+    for (var r = 0; r < have.length; r++) if (have[r].parentNode) have[r].parentNode.removeChild(have[r]);
+    want.forEach(function(w){ _placeEclipseMarker(cols, w.c, w.kind, w.d, ds); });
+    return true;
+  }
 
 
   // ── SONG TIMES FOR ANY DAY ────────────────────────────────────────────
