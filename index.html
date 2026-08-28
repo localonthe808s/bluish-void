@@ -56092,7 +56092,7 @@ function initNowMicroTabs(){
         var a = p.a || {};
         window._floodGauges.push({
           lat: p.lat, lon: p.lon, gage: a.observed != null ? parseFloat(a.observed) : null,
-          name: a.location || 'Unknown', waterbody: a.waterbody || '', status: p.status, gaugeId: a.gaugelid || '',
+          name: a.location || 'Unknown', waterbody: a.waterbody || '', status: p.status, gaugeId: a.gaugelid || '', obsAt: a.obstime || null,
           action: a.action ? parseFloat(a.action) : null, flood: a.flood ? parseFloat(a.flood) : null,
           moderate: a.moderate ? parseFloat(a.moderate) : null, major: a.major ? parseFloat(a.major) : null
         });
@@ -56238,7 +56238,7 @@ function initNowMicroTabs(){
 
         window._floodLayerGroup.addLayer(marker);
         window._floodGauges.push({
-          lat: p.lat, lon: p.lon, gage: observed, name: location, waterbody: waterbody,
+          lat: p.lat, lon: p.lon, gage: observed, name: location, waterbody: waterbody, obsAt: a.obstime || null,
           status: status, gaugeId: gaugeId, action: a.action ? parseFloat(a.action) : null,
           flood: a.flood ? parseFloat(a.flood) : null, moderate: a.moderate ? parseFloat(a.moderate) : null,
           major: a.major ? parseFloat(a.major) : null
@@ -57879,6 +57879,38 @@ function initNowMicroTabs(){
             out.sensors = { total: total, peakIn: peak, open: stillWet, hoods: list };
           });
         }).catch(function(){}));
+    }
+
+    // ── flood-prone corners: 90 days of FloodNet events by sensor, cached a day ──
+    if (inNYC && typeof fnQuery === 'function'){
+      var hk = 'bv_fn_hist_v1', hc = null;
+      try{ hc = JSON.parse(localStorage.getItem(hk) || 'null'); }catch(e){}
+      if (hc && hc.at && Date.now() - hc.at < 24*3600000 && hc.key === key){ out.prone = hc.list; }
+      else {
+        var lo90 = new Date(Date.now() - 90*86400000).toISOString().slice(0,19);
+        var hi90 = new Date(Date.now() + 5*60000).toISOString().slice(0,19);
+        jobs.push(fnQuery('{ flood_events(where:{_and:[{start_time:{_gte:"' + lo90 + '"}},{start_time:{_lte:"' + hi90 + '"}},{event_confidence:{_gte:0.5}}]}, limit:3000){ deployment_id } }')
+          .then(function(d){
+            var cnt = {};
+            ((d && d.flood_events) || []).forEach(function(e){ if (e.deployment_id) cnt[e.deployment_id] = (cnt[e.deployment_id] || 0) + 1; });
+            var ids = Object.keys(cnt).sort(function(a, b){ return cnt[b] - cnt[a]; }).slice(0, 40);
+            if (!ids.length){ out.prone = []; return; }
+            return fnQuery('{ deployments(where:{deployment_id:{_in:' + JSON.stringify(ids) + '}}){ deployment_id name location sensor_address_borough sensor_address_neighborhood } }')
+              .then(function(dd){
+                var list = [];
+                ((dd && dd.deployments) || []).forEach(function(x){
+                  if (x.sensor_address_borough === 'Staten Island') return;
+                  var c = x.location && x.location.coordinates; if (!c) return;
+                  var mi = _lwMiles(lat, lon, c[1], c[0]); if (mi > 20) return;
+                  list.push({ id: x.deployment_id, name: String(x.name || '').replace(/^[A-Z]{1,2}\s*-\s*/, '').replace(/\s*\/\s*/g, ' / ').trim(),
+                              hood: x.sensor_address_neighborhood || '', boro: x.sensor_address_borough || '', n: cnt[x.deployment_id] || 0, mi: mi, lat: c[1], lon: c[0] });
+                });
+                list.sort(function(a, b){ return b.n - a.n; });
+                out.prone = list.slice(0, 10);
+                try{ localStorage.setItem(hk, JSON.stringify({ at: Date.now(), key: key, list: out.prone })); }catch(e){}
+              });
+          }).catch(function(){}));
+      }
     }
 
     // ── next high tide vs NWS coastal-flood thresholds ──
@@ -59641,6 +59673,8 @@ function initNowMicroTabs(){
 
       // ── LOCAL WATER — full-width lead block ──
       try{ loadLocalWater(); }catch(e){}
+      var _lwLocalAlerts = [], _lwRain = null;      // filled below, read by FLOOD LEVEL
+      var ageTxt = function(t){ if (!t) return ''; var m = (Date.now() - (typeof t === 'number' ? t : new Date(t).getTime())) / 60000; if (!(m >= 0)) return ''; return m < 60 ? Math.round(m) + 'm ago' : m < 48*60 ? Math.round(m/60) + 'h ago' : Math.round(m/1440) + 'd ago'; };
       (function(){
         var lw = window._localWater;
         var L = window.LOCATION || {};
@@ -59672,6 +59706,7 @@ function initNowMicroTabs(){
             rb += '<span style="flex:1;min-width:0;"><span style="color:rgba(30,30,50,.9);font-weight:600;">' + g.name + '</span>' + (g.river ? ' <span style="color:rgba(30,30,50,.5);">· ' + g.river + '</span>' : '') + '<span style="color:rgba(30,30,50,.45);"> · ' + Math.round(g.dist) + ' mi</span>'
                + (tr || crest || vs ? '<span style="font-size:.42rem;color:rgba(30,30,50,.55);"> · ' + [tr, crest, vs].filter(Boolean).join(' · ') + '</span>' : '') + '</span>';
             rb += '<span style="color:' + col + ';font-weight:800;font-size:.48rem;white-space:nowrap;">' + stage + '</span>';
+            var ag = ageTxt(g.obsAt); if (ag) rb += '<span style="color:rgba(30,30,50,.4);font-size:.4rem;white-space:nowrap;flex:none;">' + ag + '</span>';
             rb += '</div>';
           });
           rb += '</div>';
@@ -59699,6 +59734,18 @@ function initNowMicroTabs(){
           body += blk('STREET SENSORS · NYC', QN('Loading FloodNet…'));
         }
 
+        // FLOOD-PRONE CORNERS — where the street sensors have fired most, last 90 days
+        if (lw && lw.prone && lw.prone.length){
+          var pb = '<div style="display:flex;flex-direction:column;gap:1px;">';
+          lw.prone.slice(0, 7).forEach(function(c){
+            pb += '<div onclick="_hazFlyTo(' + c.lat + ',' + c.lon + ',14)" class="quake-item" style="display:flex;align-items:center;gap:6px;padding:2px 3px;cursor:pointer;border-radius:4px;font-size:.48rem;line-height:1.3;">'
+               + '<span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><span style="color:rgba(30,30,50,.9);font-weight:600;">' + c.name + '</span>' + (c.hood ? ' <span style="color:rgba(30,30,50,.5);">· ' + c.hood + '</span>' : '') + '<span style="color:rgba(30,30,50,.45);"> · ' + Math.round(c.mi) + ' mi</span></span>'
+               + '<span style="color:#5a4f42;font-weight:800;font-size:.48rem;white-space:nowrap;">' + c.n + ' event' + (c.n > 1 ? 's' : '') + '</span></div>';
+          });
+          pb += '</div>' + QN('Sensors that flooded most often in the last 90 days · FloodNet');
+          body += blk('FLOOD-PRONE CORNERS · 90 DAYS', pb);
+        }
+
         // RAIN NOW — strip (user): headline + the hour / 3 h / 24 h / peak-rate cells
         var hy = window._wxHourly, ni = window._wxNearestIdx || 0;
         var rate = (hy && hy.precipitation && hy.precipitation[ni] != null) ? hy.precipitation[ni] : null;
@@ -59708,6 +59755,7 @@ function initNowMicroTabs(){
         var peakNext = 0; if (hy && hy.precipitation){ for (var k4 = ni+1; k4 <= ni+24 && k4 < hy.precipitation.length; k4++) peakNext = Math.max(peakNext, hy.precipitation[k4] || 0); }
         var nc = String(window._nowcastStr || '').replace(/[^\x20-\x7E·—]/g, '').trim();
         var ncCol = nc ? (/FLASH|HEAVY|INTENSE/.test(nc) ? '#ef4444' : /RAIN NOW/.test(nc) ? '#0e7490' : '#2B22F4') : '#16a34a';
+        _lwRain = { rate: rate, last3: last3, nxt3: nxt3, nc: nc };
         var rainStrip = STRIP('RAIN NOW', SB(nc || 'NO RAIN ON RADAR', ncCol)
           + (rate != null ? SI('this hour', rate.toFixed(2) + '"', rate >= 1.75 ? '#ef4444' : rate >= 0.5 ? '#f97316' : null) : '')
           + SI('last 3 h', last3.toFixed(2) + '"', last3 >= 1.5 ? '#ef4444' : last3 >= 0.75 ? '#f97316' : null)
@@ -59756,6 +59804,7 @@ function initNowMicroTabs(){
           try{ walk(g.coordinates); }catch(err){ return; }
           if (L.lat >= minLa - 0.35 && L.lat <= maxLa + 0.35 && L.lon >= minLo - 0.45 && L.lon <= maxLo + 0.45) near.push(a);
         });
+        _lwLocalAlerts = near;
         if (near.length){
           var ab = '';
           near.slice(0, 3).forEach(function(a){
@@ -59783,51 +59832,58 @@ function initNowMicroTabs(){
         + SI('action', fs.action || 0, '#ca8a04') + SI('normal', fs.normal || 0, '#16a34a')
         + '<span style="font-size:.42rem;color:rgba(30,30,50,.45);">' + (fs.total || 0) + ' monitored · ' + fhrLabel + ' · NWS AHPS + USGS</span>');
 
-      // ── FLOOD LEVEL (situational synthesis) ──
-      var flThreat = 0;
-      flThreat += (fs.major||0) * 5;
-      flThreat += (fs.moderate||0) * 3;
-      flThreat += (fs.minor||0) * 2;
-      flThreat += (fs.action||0) * 1;
-      if(wx.soilMoisture != null && wx.soilMoisture > 0.4) flThreat += 3; else if(wx.soilMoisture != null && wx.soilMoisture > 0.25) flThreat += 1;
-      if(wx.precipTotal != null && wx.precipTotal > 1.5) flThreat += 3; else if(wx.precipTotal != null && wx.precipTotal > 0.5) flThreat += 1;
-      if(wx.precipProb != null && wx.precipProb > 80) flThreat += 2; else if(wx.precipProb != null && wx.precipProb > 50) flThreat += 1;
-      if(wx.cape != null && wx.cape > 1500 && wx.precipProb > 40) flThreat += 2;
-      if(wx.pressureTrend != null && wx.pressureTrend <= -2) flThreat += 1;
-      var flAlertsCt = (window._hazardAlerts||[]).filter(function(a){ return (a.event||'').toLowerCase().indexOf('flood')>=0; }).length;
-      if(flAlertsCt > 0) flThreat += 3;
-      if(wx.weatherCode >= 95) flThreat += 2;
-      if(wx.next6hrMaxPrecipProb != null && wx.next6hrMaxPrecipProb > 80) flThreat += 1;
-      if(isSpringTide && elevated.length > 0) flThreat += 1;
-      var largeFires = (window._activeFires||[]).filter(function(f){ return (f.acres||0) >= 5000; });
-      if(largeFires.length > 0 && wx.precipProb > 30) flThreat += 1;
-      var fnNow = window._floodNetNow || null;
-      if(fnNow && fnNow.count >= 5) flThreat += 2; else if(fnNow) flThreat += 1;
-
+      // ── FLOOD LEVEL — LOCAL signals only, each one named ──
+      // National gauge counts do not score here: three closed-basin lakes in
+      // North Dakota were making New York read MAJOR FLOOD.
+      var lw0 = window._localWater || null;
+      var flThreat = 0, flDrivers = [];
+      var lg = (lw0 && lw0.gauges) || [];
+      var lgFlood = lg.filter(function(g){ return g.status && g.status.priority >= 3; });
+      var lgAct = lg.filter(function(g){ return g.status && g.status.priority === 2; });
+      var lgRisingTo = lg.filter(function(g){ return g.fcstStatus && g.fcstStatus.priority >= 3 && !(g.status && g.status.priority >= 3); });
+      var lgLakes = function(g){ return /lake/i.test((g.name || '') + ' ' + (g.river || '')) && g.flood == null; };
+      lgFlood = lgFlood.filter(function(g){ return !lgLakes(g); });
+      if(lgFlood.length){ var w = 0; lgFlood.forEach(function(g){ w += g.status.priority >= 5 ? 5 : g.status.priority === 4 ? 3 : 2; }); w = Math.min(8, w); flThreat += w; flDrivers.push(lgFlood.length + ' gauge' + (lgFlood.length > 1 ? 's' : '') + ' flooding within 40 mi (' + lgFlood.slice(0,2).map(function(g){ return g.name; }).join(', ') + ')'); }
+      if(lgAct.length){ flThreat += Math.min(2, lgAct.length); flDrivers.push(lgAct.length + ' at action stage (' + lgAct[0].name + ')'); }
+      if(lgRisingTo.length){ flThreat += Math.min(4, lgRisingTo.length * 2); flDrivers.push(lgRisingTo.length + ' forecast to reach flood stage (' + lgRisingTo[0].name + ')'); }
+      var fnS = lw0 && lw0.sensors;
+      if(fnS && fnS.total){
+        var fw = fnS.peakIn >= 12 ? 5 : fnS.peakIn >= 4 ? 3 : 1; if (fnS.open) fw += 1; flThreat += fw;
+        flDrivers.push('street sensors: ' + (fnS.peakIn >= 12 ? 'major' : fnS.peakIn >= 4 ? 'minor' : 'puddling') + ' at ' + fnS.total + ' corner' + (fnS.total > 1 ? 's' : '') + (fnS.hoods && fnS.hoods.length ? ' (' + fnS.hoods.slice(0,2).map(function(x){ return x.hood; }).join(', ') + ')' : '') + (fnS.open ? ', ' + fnS.open + ' still wet' : ''));
+      }
+      if(_lwRain){
+        var rr = _lwRain.rate || 0;
+        if(rr >= 1.75){ flThreat += 4; flDrivers.push('rain this hour ' + rr.toFixed(2) + '" — over the drain cap'); }
+        else if(rr >= 0.5){ flThreat += 2; flDrivers.push('heavy rain this hour (' + rr.toFixed(2) + '")'); }
+        if(_lwRain.last3 >= 1.5){ flThreat += 2; flDrivers.push(_lwRain.last3.toFixed(2) + '" in the last 3 h'); }
+        else if(_lwRain.last3 >= 0.75){ flThreat += 1; flDrivers.push(_lwRain.last3.toFixed(2) + '" in the last 3 h'); }
+        if(_lwRain.nxt3 >= 1){ flThreat += 1; flDrivers.push(_lwRain.nxt3.toFixed(2) + '" forecast in the next 3 h'); }
+        if(/FLASH|HEAVY|INTENSE/.test(_lwRain.nc || '')){ flThreat += 2; flDrivers.push('radar: ' + _lwRain.nc.toLowerCase()); }
+      }
+      var tdS = lw0 && lw0.tide, thS = tdS && tdS.th;
+      if(tdS && tdS.next && thS){
+        var ft = tdS.next.ft;
+        if(thS.major != null && ft >= thS.major){ flThreat += 5; flDrivers.push('next high tide ' + ft.toFixed(1) + ' ft — major coastal flooding'); }
+        else if(thS.moderate != null && ft >= thS.moderate){ flThreat += 3; flDrivers.push('next high tide ' + ft.toFixed(1) + ' ft — moderate coastal flooding'); }
+        else if(thS.minor != null && ft >= thS.minor){ flThreat += 2; flDrivers.push('next high tide ' + ft.toFixed(1) + ' ft — minor coastal flooding'); }
+        else if(thS.action != null && ft >= thS.action){ flThreat += 1; flDrivers.push('next high tide near the coastal action level'); }
+      }
+      if(_lwLocalAlerts.length){
+        var aw = 0; _lwLocalAlerts.forEach(function(a){ var e = (a.event || '').toLowerCase(); aw += /flash flood warning/.test(e) ? 4 : /warning/.test(e) ? 3 : 1; });
+        flThreat += Math.min(5, aw); flDrivers.push(_lwLocalAlerts.map(function(a){ return a.event; }).filter(function(v, i2, arr){ return arr.indexOf(v) === i2; }).join(', ') + ' in effect here');
+      }
+      if(wx.soilMoisture != null && wx.soilMoisture > 0.4){ flThreat += 1; flDrivers.push('saturated soils (' + (wx.soilMoisture*100).toFixed(0) + '%)'); }
       var flLevel = flThreat >= 12 ? 'MAJOR FLOOD' : flThreat >= 8 ? 'MODERATE FLOOD' : flThreat >= 5 ? 'MINOR FLOOD' : flThreat >= 2 ? 'WATCH' : 'NORMAL';
       var flCol = flThreat >= 12 ? '#dc2626' : flThreat >= 8 ? '#ef4444' : flThreat >= 5 ? '#f97316' : flThreat >= 2 ? '#ca8a04' : '#16a34a';
       var flNarr = [];
-      if(flLevel === 'MAJOR FLOOD'){
-        if((fs.major||0) > 0) flNarr.push((fs.major) + ' gauge'+(fs.major>1?'s':'')+' at major flood stage — life-threatening flooding in progress; evacuations likely ordered.');
-        if((fs.moderate||0) > 0) flNarr.push((fs.moderate) + ' gauge'+(fs.moderate>1?'s':'')+' at moderate flood — significant property damage and road closures.');
-        if(wx.soilMoisture > 0.4 && wx.precipProb > 50) flNarr.push('Saturated soils ('+(wx.soilMoisture*100).toFixed(0)+'%) with more rain expected ('+wx.precipProb+'% chance) — all additional rain becomes surface runoff.');
-        if(wx.cape > 1500 && wx.precipProb > 40) flNarr.push('Thunderstorms can produce extreme rain rates (2–4"/hr) on top of already-flooded conditions — catastrophic flash flooding possible.');
-        if(flAlertsCt > 0) flNarr.push(flAlertsCt+' NWS flood alert'+(flAlertsCt>1?'s':'')+' active.');
-      } else if(flLevel === 'MODERATE FLOOD' || flLevel === 'MINOR FLOOD'){
-        var floodingCount = (fs.major||0) + (fs.moderate||0) + (fs.minor||0);
-        if(floodingCount > 0) flNarr.push(floodingCount + ' gauge'+(floodingCount>1?'s':'')+' above flood stage. River crests may still be hours away.');
-        if(wx.precipTotal > 0.5) flNarr.push('Recent precipitation ('+wx.precipTotal.toFixed(2)+'") is still feeding rising water levels.');
-        if(wx.soilMoisture > 0.25 && wx.precipProb > 50) flNarr.push('Wet soils with more rain coming — flooding is likely to worsen before it improves.');
-      } else if(flLevel === 'WATCH'){
-        if(wx.precipProb > 60) flNarr.push('Significant precipitation expected ('+wx.precipProb+'%). Watching river gauges for a response.');
-        if(wx.soilMoisture > 0.3) flNarr.push('Pre-saturated soils drain slowly — even moderate rain can cause localized flooding.');
-      } else {
-        flNarr.push('All gauges at normal levels. No flood threats at this time.');
-      }
-      if(fnNow) flNarr.push('New York City street sensors are measuring water on the road right now' + (fnNow.place ? ' at ' + fnNow.place : '') + (fnNow.count > 1 ? ' and ' + (fnNow.count - 1) + ' more corner' + (fnNow.count > 2 ? 's' : '') : '') + '.');
-      if(largeFires.length > 0 && wx.precipProb > 30 && flLevel !== 'NORMAL'){
-        flNarr.push('Burn scar factor: '+largeFires.length+' large fire'+(largeFires.length>1?'s':'')+' left debris-flow-prone terrain — even moderate rain over burn scars can produce deadly mudslides.');
-      }
+      if(!lw0) flNarr.push('Local data still loading.');
+      else if(!flDrivers.length) flNarr.push('No local flood signals: nearby gauges normal, streets dry, no rain on radar, tide below its thresholds.');
+      else flNarr.push('<b style="color:rgba(30,30,50,.6);">Drivers:</b> ' + flDrivers.join(' · ') + '.');
+      var natEl = (fs.major||0) + (fs.moderate||0) + (fs.minor||0);
+      if(natEl && scopeLbl && scopeLbl !== 'NEARBY') flNarr.push('<span style="color:rgba(30,30,50,.5);">' + natEl + ' gauge' + (natEl > 1 ? 's' : '') + ' flooding elsewhere in the ' + (scopeLbl === 'NATIONWIDE' ? 'country' : scopeLbl.toLowerCase()) + ' — not scored here.</span>');
+      var largeFires = (window._activeFires||[]).filter(function(f){ return (f.acres||0) >= 5000; });
+      var fireNear = function(f){ var la = f.lat != null ? f.lat : (f.geometry && f.geometry.coordinates ? f.geometry.coordinates[1] : (f.properties && f.properties.lat)); var lo = f.lon != null ? f.lon : (f.geometry && f.geometry.coordinates ? f.geometry.coordinates[0] : (f.properties && f.properties.lon)); var L2 = window.LOCATION; return (la != null && lo != null && L2) ? _lwMiles(L2.lat, L2.lon, la, lo) <= 150 : false; };
+      largeFires = largeFires.filter(fireNear);
       h += STRIP('FLOOD LEVEL', SB(flLevel, flCol) + '<span style="font-size:.42rem;color:rgba(30,30,50,.45);">score ' + flThreat + '</span>'
         + (flNarr.length ? '<span style="font-size:.5rem;color:rgba(30,30,50,.75);line-height:1.45;flex:1 1 320px;">' + flNarr.join(' ') + '</span>' : ''),
         'rgba(' + (flThreat >= 8 ? '239,68,68' : flThreat >= 5 ? '249,115,22' : flThreat >= 2 ? '202,138,4' : '22,163,74') + ',.06)');
@@ -59836,28 +59892,58 @@ function initNowMicroTabs(){
       var daily = window._wxDaily;
       if(daily && daily.time && daily.precipitation_sum){
         var cells = '', totalPrecip3d = 0;
+        var hyO = window._wxHourly;
+        var peakFor = function(dayStr){ var mx = 0; if (hyO && hyO.time && hyO.precipitation){ for (var q = 0; q < hyO.time.length; q++){ if (String(hyO.time[q]).slice(0,10) === dayStr) mx = Math.max(mx, hyO.precipitation[q] || 0); } } return mx; };
         // _wxDaily is offset by past_days=1: index 1 = today
         for(var di=1; di<4 && di<daily.time.length; di++){
           var dPrecip = daily.precipitation_sum[di] || 0;
+          var dPeak = peakFor(String(daily.time[di]).slice(0,10));
           var dSnow = daily.snowfall_sum ? (daily.snowfall_sum[di] || 0) : 0;
           var dPrecipProb = daily.precipitation_probability_max ? (daily.precipitation_probability_max[di] || 0) : 0;
           totalPrecip3d += dPrecip;
           var dayLabel = di===1?'Today':di===2?'Tomorrow':'Day 3';
-          var fldRisk = dPrecip > 1.5 ? 'HIGH' : dPrecip > 0.75 ? 'MODERATE' : dPrecip > 0.25 ? 'SLIGHT' : 'LOW';
+          // rate matters more than the total: 2.9" over a day is nothing, 2.9" in 90 min floods basements
+          var rk = dPeak >= 1.75 ? 3 : dPeak >= 0.75 ? 2 : dPeak >= 0.3 ? 1 : 0;
+          var tk = dPrecip > 1.5 ? 3 : dPrecip > 0.75 ? 2 : dPrecip > 0.25 ? 1 : 0;
+          var lvl = Math.max(rk, tk);
+          var fldRisk = lvl === 3 ? 'HIGH' : lvl === 2 ? 'MODERATE' : lvl === 1 ? 'SLIGHT' : 'LOW';
           var fCol = fldRisk === 'HIGH' ? '#ef4444' : fldRisk === 'MODERATE' ? '#f97316' : fldRisk === 'SLIGHT' ? '#ca8a04' : '#16a34a';
-          cells += '<span style="font-size:.5rem;color:rgba(30,30,50,.75);white-space:nowrap;"><b style="color:rgba(30,30,50,.85);">' + dayLabel + '</b> ' + dPrecip.toFixed(2) + '"' + (dSnow > 0 ? ' · ' + dSnow.toFixed(1) + '" snow' : '') + ' · ' + dPrecipProb + '% <b style="color:' + fCol + ';letter-spacing:.04em;">' + fldRisk + '</b></span>';
+          cells += '<span style="font-size:.5rem;color:rgba(30,30,50,.75);white-space:nowrap;"><b style="color:rgba(30,30,50,.85);">' + dayLabel + '</b> ' + dPrecip.toFixed(2) + '"' + (dSnow > 0 ? ' · ' + dSnow.toFixed(1) + '" snow' : '') + ' · peak ' + dPeak.toFixed(2) + ' in/hr · ' + dPrecipProb + '% <b style="color:' + fCol + ';letter-spacing:.04em;">' + fldRisk + '</b></span>';
         }
         if(totalPrecip3d > 2 && wx.soilMoisture != null && wx.soilMoisture > 0.25) cells += '<span style="font-size:.46rem;color:#ef4444;font-weight:700;">3-day total ' + totalPrecip3d.toFixed(2) + '" on wet soils (' + (wx.soilMoisture*100).toFixed(0) + '%)</span>';
-        h += STRIP('3-DAY OUTLOOK', cells);
+        h += STRIP('3-DAY OUTLOOK', cells + '<span style="font-size:.42rem;color:rgba(30,30,50,.45);">rated by peak hourly rate vs the 1.75 in/hr drain cap, or by total</span>');
       }
+
+      // ── SEASON CONTEXT ──
+      (function(){
+        var curMonth = new Date().getMonth();
+        var seasonData = [
+          {phase:'WINTER ICE JAM SEASON',desc:'Ice jams on rivers in the northern US can cause sudden, severe flooding. Snowmelt + frozen rivers = upstream backup. Arctic air intrusions freeze rivers, then rapid thawing releases them.',pattern:'January ice-jam floods are most common in New England, the upper Midwest and Alaska.'},
+          {phase:'LATE WINTER THAW',desc:'Early snowmelt season begins in the South. Rain-on-snow events cause rapid runoff. Frozen ground cannot absorb water, amplifying flood potential.',pattern:'February is the transition — ice jams persist in the North while the South begins its spring flood season.'},
+          {phase:'SPRING FLOOD SEASON ONSET',desc:'Peak annual flood season begins. Snowmelt from the Rockies and northern Plains feeds major river systems. Saturated soils from winter precipitation. Flash flood season ramps up in the South.',pattern:'March is historically when the Ohio and Mississippi begin their spring rises.'},
+          {phase:'PEAK SPRING FLOOD SEASON',desc:'The most flood-prone month nationally. Major river crests. Snowmelt + spring rains saturate catchments. Flash floods accompany severe thunderstorms.',pattern:'April sees the most widespread river flooding. The Great Flood of 2011 crested in late April–May.'},
+          {phase:'LATE SPRING FLOODING',desc:'Severe thunderstorm-driven flash floods become the dominant threat. Major rivers still cresting from snowmelt. Soil saturation at its annual peak.',pattern:'May brings the overlap of river flooding and flash flooding. Training thunderstorms over saturated ground are the classic setup.'},
+          {phase:'FLASH FLOOD PEAK',desc:'Flash floods from severe thunderstorms are the number-one flood killer June–August. Monsoon begins in the Southwest. Tropical moisture surges.',pattern:'June flash floods kill more people than any other flood type. Urban areas with impervious surfaces flood fastest.'},
+          {phase:'SUMMER FLASH FLOOD SEASON',desc:'Flash floods from slow-moving thunderstorms. Monsoon active in the Southwest. Burn-scar flooding from wildfires. Hurricane season accelerating.',pattern:'July is peak monsoon in Arizona and New Mexico. Wildfire burn scars produce devastating debris flows.'},
+          {phase:'TROPICAL RAINFALL PEAK',desc:'Hurricane season peaks. Tropical systems produce the most catastrophic inland flooding events. Hurricane Harvey (2017): 60+ inches of rain in Houston.',pattern:'August–September: tropical rainfall flooding is the dominant threat. Harvey, Florence and Ida all struck in this window.'},
+          {phase:'HURRICANE FLOOD SEASON',desc:'Peak hurricane season. Inland flooding from tropical remnants can affect areas 500+ miles from the coast. Major river rises from tropical rain.',pattern:'September 2024: Hurricane Helene caused catastrophic flooding in western North Carolina, 400 miles from landfall.'},
+          {phase:'FALL TRANSITION',desc:'Hurricane season winding down but still active. Atmospheric rivers begin targeting the West Coast. Fall rain replenishes reservoirs.',pattern:'October atmospheric rivers hit California and the Pacific Northwest. The Pineapple Express can drop 10+ inches.'},
+          {phase:'ATMOSPHERIC RIVER SEASON',desc:'West Coast atmospheric river season peaks November–February. Heavy rain on steep, fire-scarred terrain creates debris flows. The East sees nor\'easters.',pattern:'November–March atmospheric rivers deliver 30–50% of the West Coast\'s annual precipitation.'},
+          {phase:'WINTER FLOOD SEASON',desc:'Atmospheric rivers continue on the West Coast. Ice-jam risk begins in the North. Lowest flash-flood activity nationally, but winter storms can still produce significant flooding.',pattern:'December flooding is typically driven by atmospheric rivers in the West and rain-on-snow in the interior.'}
+        ];
+        var sInfo = seasonData[curMonth];
+        h += STRIP('SEASON', SB(sInfo.phase, '#0e7490') + '<span style="font-size:.5rem;color:rgba(30,30,50,.72);line-height:1.45;flex:1 1 360px;">' + sInfo.desc + ' <span style="color:rgba(30,30,50,.55);">' + sInfo.pattern + '</span></span>');
+      })();
 
       // ── FLOODING GAUGES — rows, click flies the map to the gauge ──
       if(elevated.length > 0){
         h += '<div class="hz-sect">' + QH('FLOODING GAUGES');
         h += '<div style="display:flex;flex-direction:column;gap:1px;">';
-        elevated.sort(function(a,b){ return (b.status?b.status.priority:0) - (a.status?a.status.priority:0) || (b.gage||0) - (a.gage||0); }).slice(0, 8).forEach(function(g){
+        var isLake = function(g){ return /lake/i.test((g.name || '') + ' ' + (g.waterbody || '')) && (g.flood == null || Math.abs((g.gage||0) - g.flood) > 40); };
+        elevated.sort(function(a,b){ return (isLake(a) - isLake(b)) || (b.status?b.status.priority:0) - (a.status?a.status.priority:0) || (b.gage||0) - (a.gage||0); }).slice(0, 8).forEach(function(g){
           var statusCol = g.status ? g.status.color : '#f97316';
           var statusLbl = g.status ? g.status.label : 'ELEVATED';
+          if (isLake(g)) statusLbl = 'LAKE · ' + statusLbl.replace(' FLOOD', '');
           var stageDetail = '';
           // lakes report elevation-style stages with a placeholder flood value
           // (Devils Lake: 50.0 ft vs flood 0.1) — only trust plausible thresholds
@@ -59872,10 +59958,12 @@ function initNowMicroTabs(){
           h += '<span style="color:rgba(30,30,50,.9);font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + g.name + (g.waterbody ? ' <span style="color:rgba(30,30,50,.5);font-weight:500;">· ' + g.waterbody + '</span>' : '') + '</span>';
           h += '<span style="color:' + statusCol + ';font-weight:800;font-size:.48rem;white-space:nowrap;">' + (g.gage != null ? g.gage.toFixed(1) + ' ft' : '--') + '</span>';
           if(stageDetail) h += '<span style="color:rgba(30,30,50,.45);font-size:.44rem;white-space:nowrap;">' + stageDetail + '</span>';
+          var ag2 = ageTxt(g.obsAt); if (ag2) h += '<span style="color:rgba(30,30,50,.4);font-size:.4rem;white-space:nowrap;">' + ag2 + '</span>';
           h += '</div>';
         });
         h += '</div>';
         if(elevated.length > 8) h += QN('+ ' + (elevated.length - 8) + ' more flooding gauges on the map');
+        if(elevated.some(isLake)) h += QN('LAKE rows are closed-basin lakes reported as elevation — chronically "major", not a flood in progress.');
         h += '</div>';
       }
 
@@ -59915,7 +60003,9 @@ function initNowMicroTabs(){
       }
       var quakes = window._quakeFeatures || [];
       var sigQuakes = quakes.filter(function(q){ return (q.properties.mag || 0) >= 4.5; });
-      if(sigQuakes.length > 0 && elevated.length > 0) xh += QI('Seismic note', sigQuakes.length + ' M4.5+ earthquake' + (sigQuakes.length > 1 ? 's' : '') + ' in 24 h during elevated river levels — seismic activity can damage levees, dams and flood-control infrastructure.');
+      var L3 = window.LOCATION;
+      sigQuakes = sigQuakes.filter(function(q){ var c = q.geometry && q.geometry.coordinates; return c && L3 && _lwMiles(L3.lat, L3.lon, c[1], c[0]) <= 300; });
+      if(sigQuakes.length > 0 && lgFlood.length > 0) xh += QI('Seismic note', sigQuakes.length + ' M4.5+ earthquake' + (sigQuakes.length > 1 ? 's' : '') + ' within 300 mi in 24 h while local rivers run high — seismic activity can damage levees, dams and flood-control infrastructure.');
       if(wx.snow != null && wx.snow > 0) xh += QI('Active snowfall ' + wx.snow.toFixed(2) + ' in/hr', 'Accumulating snow now means delayed snowmelt flood risk when temperatures rise. Watch for rapid warming.');
       else if(wx.temp != null && wx.temp > 50 && wx.freezingLevel != null && wx.freezingLevel > 6000){
         var dailyS = window._wxDaily;
@@ -59972,34 +60062,6 @@ function initNowMicroTabs(){
         }
       }
 
-      // ── SEASON CONTEXT ──
-      (function(){
-        var curMonth = new Date().getMonth();
-        var seasonData = [
-          {phase:'WINTER ICE JAM SEASON',desc:'Ice jams on rivers in the northern US can cause sudden, severe flooding. Snowmelt + frozen rivers = upstream backup. Arctic air intrusions freeze rivers, then rapid thawing releases them.',pattern:'January ice-jam floods are most common in New England, the upper Midwest and Alaska.'},
-          {phase:'LATE WINTER THAW',desc:'Early snowmelt season begins in the South. Rain-on-snow events cause rapid runoff. Frozen ground cannot absorb water, amplifying flood potential.',pattern:'February is the transition — ice jams persist in the North while the South begins its spring flood season.'},
-          {phase:'SPRING FLOOD SEASON ONSET',desc:'Peak annual flood season begins. Snowmelt from the Rockies and northern Plains feeds major river systems. Saturated soils from winter precipitation. Flash flood season ramps up in the South.',pattern:'March is historically when the Ohio and Mississippi begin their spring rises.'},
-          {phase:'PEAK SPRING FLOOD SEASON',desc:'The most flood-prone month nationally. Major river crests. Snowmelt + spring rains saturate catchments. Flash floods accompany severe thunderstorms.',pattern:'April sees the most widespread river flooding. The Great Flood of 2011 crested in late April–May.'},
-          {phase:'LATE SPRING FLOODING',desc:'Severe thunderstorm-driven flash floods become the dominant threat. Major rivers still cresting from snowmelt. Soil saturation at its annual peak.',pattern:'May brings the overlap of river flooding and flash flooding. Training thunderstorms over saturated ground are the classic setup.'},
-          {phase:'FLASH FLOOD PEAK',desc:'Flash floods from severe thunderstorms are the number-one flood killer June–August. Monsoon begins in the Southwest. Tropical moisture surges.',pattern:'June flash floods kill more people than any other flood type. Urban areas with impervious surfaces flood fastest.'},
-          {phase:'SUMMER FLASH FLOOD SEASON',desc:'Flash floods from slow-moving thunderstorms. Monsoon active in the Southwest. Burn-scar flooding from wildfires. Hurricane season accelerating.',pattern:'July is peak monsoon in Arizona and New Mexico. Wildfire burn scars produce devastating debris flows.'},
-          {phase:'TROPICAL RAINFALL PEAK',desc:'Hurricane season peaks. Tropical systems produce the most catastrophic inland flooding events. Hurricane Harvey (2017): 60+ inches of rain in Houston.',pattern:'August–September: tropical rainfall flooding is the dominant threat. Harvey, Florence and Ida all struck in this window.'},
-          {phase:'HURRICANE FLOOD SEASON',desc:'Peak hurricane season. Inland flooding from tropical remnants can affect areas 500+ miles from the coast. Major river rises from tropical rain.',pattern:'September 2024: Hurricane Helene caused catastrophic flooding in western North Carolina, 400 miles from landfall.'},
-          {phase:'FALL TRANSITION',desc:'Hurricane season winding down but still active. Atmospheric rivers begin targeting the West Coast. Fall rain replenishes reservoirs.',pattern:'October atmospheric rivers hit California and the Pacific Northwest. The Pineapple Express can drop 10+ inches.'},
-          {phase:'ATMOSPHERIC RIVER SEASON',desc:'West Coast atmospheric river season peaks November–February. Heavy rain on steep, fire-scarred terrain creates debris flows. The East sees nor\'easters.',pattern:'November–March atmospheric rivers deliver 30–50% of the West Coast\'s annual precipitation.'},
-          {phase:'WINTER FLOOD SEASON',desc:'Atmospheric rivers continue on the West Coast. Ice-jam risk begins in the North. Lowest flash-flood activity nationally, but winter storms can still produce significant flooding.',pattern:'December flooding is typically driven by atmospheric rivers in the West and rain-on-snow in the interior.'}
-        ];
-        var sInfo = seasonData[curMonth];
-        h += '<div class="hz-sect">' + QH('SEASON CONTEXT');
-        h += '<div style="font-size:.6rem;font-weight:800;color:#0e7490;letter-spacing:.04em;margin-bottom:4px;">' + sInfo.phase + '</div>';
-        h += QP(sInfo.desc);
-        h += QP('<b style="color:rgba(30,30,50,.6);">Historically:</b> ' + sInfo.pattern);
-        h += QR('Avg annual US flood deaths', '~89', '#ef4444');
-        h += QR('Avg annual flood damage', '$8.2B', '#f97316');
-        h += QN('Flash floods account for about 75% of flood deaths. Six inches of fast-moving water can knock an adult down; a foot floats most cars. Turn around, don\'t drown. NWS · NOAA NCEI 30-year averages.');
-        h += '</div>';
-      })();
-
       // ── ACTIVE OVERLAYS ──
       var activeOvls = [];
       if(typeof floodOverlayActive !== 'undefined'){
@@ -60020,7 +60082,7 @@ function initNowMicroTabs(){
         h += QN('Compare QPE (what fell) against QPF (what is forecast) to judge evolving flood risk. Snow depth shows melt potential — warm rain on deep snow is the classic spring flood setup.');
         h += '</div>';
       }
-      h += '<div style="column-span:all;font-size:.44rem;color:rgba(30,30,50,.45);margin-top:2px;">Hover any gauge marker for station name, gage height and latest reading time.</div>';
+
     } else if (tab === 'hurricane') {
       var now = new Date();
       var month = now.getMonth() + 1; // 1-12
