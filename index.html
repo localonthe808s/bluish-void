@@ -57938,14 +57938,38 @@ function initNowMicroTabs(){
         try{ sessionStorage.setItem(flKey, JSON.stringify(o)); }catch(e){}
         return o;
       });
-      jobs.push(flP.then(function(th){
+      // surge residual: observed water level minus the prediction at the same
+      // minute — the difference between a routine tide and a nuisance flood.
+      // 6-min obs, last 3 h; 6-min predictions for today+tomorrow (cached a day).
+      var coB = 'https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?application=bluishvoid&station=' + td.id + '&datum=MLLW&units=english&time_zone=lst_ldt&format=json';
+      var _dd = new Date(), pdKey = 'bvpred6:' + td.id + ':' + _dd.getFullYear() + '-' + (_dd.getMonth()+1) + '-' + _dd.getDate(), pdC = null;
+      try{ pdC = JSON.parse(sessionStorage.getItem(pdKey) || 'null'); }catch(e){}
+      var predP = pdC ? Promise.resolve(pdC) : fetch(coB + '&product=predictions&interval=6&begin_date=' + _dd.getFullYear() + String(_dd.getMonth()+1).padStart(2,'0') + String(_dd.getDate()).padStart(2,'0') + '&range=48')
+        .then(function(r){ return r.ok ? r.json() : null; }).then(function(j){ var pr = (j && j.predictions) || null; if (pr) try{ sessionStorage.setItem(pdKey, JSON.stringify(pr)); }catch(e){} return pr; }).catch(function(){ return null; });
+      var obsP = fetch(coB + '&product=water_level&range=3').then(function(r){ return r.ok ? r.json() : null; }).then(function(j){ return (j && j.data) || null; }).catch(function(){ return null; });
+      jobs.push(Promise.all([flP, predP, obsP]).then(function(res){
+        var th = res[0], pred = res[1], obs = res[2];
         var now = Date.now(), next = null, nextLow = null;
         td.hilo.forEach(function(x){
           if (!x.t) return; var ts = x.t.getTime(); if (ts < now) return;
           if (x.high && (!next || ts < next.t.getTime())) next = x;
           if (!x.high && (!nextLow || ts < nextLow.t.getTime())) nextLow = x;
         });
-        out.tide = { id: td.id, next: next, nextLow: nextLow, th: th || null };
+        var tide = { id: td.id, next: next, nextLow: nextLow, th: th || null };
+        if (pred && obs && obs.length){
+          var pm = {}; pred.forEach(function(x){ pm[x.t] = parseFloat(x.v); });
+          var good = obs.filter(function(o){ return o.v !== '' && !isNaN(parseFloat(o.v)) && pm[o.t] != null; });
+          if (good.length){
+            var last = good[good.length-1], resid = parseFloat(last.v) - pm[last.t];
+            var hourAgo = good.length > 10 ? good[good.length-11] : good[0];
+            var residAgo = parseFloat(hourAgo.v) - pm[hourAgo.t];
+            var m = /(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/.exec(last.t);
+            tide.obsFt = parseFloat(last.v); tide.obsAt = m ? new Date(+m[1], +m[2]-1, +m[3], +m[4], +m[5]).getTime() : null;
+            tide.resid = resid; tide.residTrend = resid - residAgo;
+            if (next) tide.expHigh = next.ft + resid;        // persistence: today's surge carries to the next high
+          }
+        }
+        out.tide = tide;
       }).catch(function(){}));
     }
 
@@ -59771,21 +59795,31 @@ function initNowMicroTabs(){
         if (lw && lw.tide && lw.tide.next){
           var t = lw.tide, th = t.th || {}, nx = t.next;
           var minor = th.minor != null ? th.minor : null;
-          var tcol2 = th.major != null && nx.ft >= th.major ? '#dc2626' : th.moderate != null && nx.ft >= th.moderate ? '#ef4444' : minor != null && nx.ft >= minor ? '#f97316' : th.action != null && nx.ft >= th.action ? '#ca8a04' : '#0e7490';
-          var vs2 = minor != null ? (nx.ft >= minor ? (nx.ft - minor).toFixed(1) + ' ft over minor flood' : (minor - nx.ft).toFixed(1) + ' ft below minor flood') : '';
+          var hasRes = t.resid != null, useFt = hasRes ? t.expHigh : nx.ft;   // judge by the projected height when we have a residual
+          var tcol2 = th.major != null && useFt >= th.major ? '#dc2626' : th.moderate != null && useFt >= th.moderate ? '#ef4444' : minor != null && useFt >= minor ? '#f97316' : th.action != null && useFt >= th.action ? '#ca8a04' : '#0e7490';
+          var vs2 = minor != null ? (useFt >= minor ? (useFt - minor).toFixed(1) + ' ft over minor flood' : (minor - useFt).toFixed(1) + ' ft below minor flood') : '';
+          var resTxt = '';
+          if (hasRes){
+            var rs = t.resid, rc = Math.abs(rs) < 0.25 ? '#16a34a' : rs > 0 ? (rs >= 1 ? '#ef4444' : '#f97316') : '#0e7490';
+            var trend = t.residTrend > 0.15 ? ' and building' : t.residTrend < -0.15 ? ' and easing' : '';
+            resTxt = '<span style="font-size:.5rem;color:rgba(30,30,50,.7);white-space:nowrap;">now <b style="color:' + rc + ';">' + t.obsFt.toFixed(1) + ' ft</b> · '
+              + (Math.abs(rs) < 0.25 ? '<b style="color:#16a34a;">on prediction</b>' : '<b style="color:' + rc + ';">' + (rs > 0 ? '+' : '') + rs.toFixed(1) + ' ft ' + (rs > 0 ? 'above' : 'below') + ' predicted</b>' + trend)
+              + (t.obsAt ? ' <span style="color:rgba(30,30,50,.45);">' + ageTxt(t.obsAt) + '</span>' : '') + '</span>';
+          }
           // gauge bar: 0 → a little past major (or 1.5× the tide if no thresholds)
           var top = th.major != null ? th.major * 1.08 : Math.max(nx.ft * 1.5, 1);
           var pct = function(v){ return Math.max(0, Math.min(100, v / top * 100)); };
           var tick = function(v, lbl, c, above){ return v == null ? '' : '<span style="position:absolute;left:' + pct(v).toFixed(1) + '%;top:-3px;width:1px;height:12px;background:' + c + ';"></span><span style="position:absolute;left:' + pct(v).toFixed(1) + '%;' + (above ? 'top:-15px;' : 'top:11px;') + 'transform:translateX(-50%);font-size:.36rem;color:' + c + ';font-weight:700;white-space:nowrap;letter-spacing:.03em;">' + lbl + ' ' + v.toFixed(1) + '</span>'; };
           var actAbove = th.action != null && minor != null && Math.abs(pct(minor) - pct(th.action)) < 9;
           var bar = '<span style="position:relative;display:inline-block;flex:1 1 220px;min-width:180px;height:6px;border-radius:3px;background:rgba(43,34,244,.10);margin:' + (actAbove ? '12px' : '0') + ' 34px 14px 10px;">'
-            + '<span style="position:absolute;left:0;top:0;height:6px;width:' + pct(nx.ft).toFixed(1) + '%;border-radius:3px;background:' + tcol2 + ';"></span>'
+            + '<span style="position:absolute;left:0;top:0;height:6px;width:' + pct(useFt).toFixed(1) + '%;border-radius:3px;background:' + tcol2 + ';"></span>'
             + tick(th.action, 'ACT', '#ca8a04', actAbove) + tick(minor, 'MINOR', '#f97316') + tick(th.moderate, 'MOD', '#ef4444') + tick(th.major, 'MAJ', '#dc2626')
-            + '<span style="position:absolute;left:' + pct(nx.ft).toFixed(1) + '%;top:-5px;width:2px;height:16px;background:' + tcol2 + ';transform:translateX(-1px);"></span>'
+            + '<span style="position:absolute;left:' + pct(useFt).toFixed(1) + '%;top:-5px;width:2px;height:16px;background:' + tcol2 + ';transform:translateX(-1px);"></span>'
             + '</span>';
           tideStrip = STRIP('NEXT HIGH TIDE',
-              '<span style="font-size:.7rem;font-weight:900;color:' + tcol2 + ';">' + nx.ft.toFixed(1) + ' ft</span>'
-            + '<span style="font-size:.5rem;color:rgba(30,30,50,.7);">' + fmtWhen(nx.t.getTime()) + '</span>'
+              '<span style="font-size:.7rem;font-weight:900;color:' + tcol2 + ';">' + (hasRes ? t.expHigh.toFixed(1) : nx.ft.toFixed(1)) + ' ft</span>'
+            + '<span style="font-size:.5rem;color:rgba(30,30,50,.7);">' + fmtWhen(nx.t.getTime()) + (hasRes ? ' · predicted ' + nx.ft.toFixed(1) + ' + surge' : '') + '</span>'
+            + resTxt
             + (vs2 ? '<span style="font-size:.5rem;font-weight:700;color:' + (nx.ft >= (minor || 1e9) ? '#ef4444' : 'rgba(30,30,50,.75)') + ';">' + vs2 + '</span>' : '')
             + bar
             + (t.nextLow ? '<span style="font-size:.46rem;color:rgba(30,30,50,.55);">low ' + t.nextLow.ft.toFixed(1) + ' ft · ' + fmtWhen(t.nextLow.t.getTime()) + '</span>' : '')
@@ -59863,8 +59897,10 @@ function initNowMicroTabs(){
       }
       var tdS = lw0 && lw0.tide, thS = tdS && tdS.th;
       if(tdS && tdS.next && thS){
-        var ft = tdS.next.ft;
-        if(thS.major != null && ft >= thS.major){ flThreat += 5; flDrivers.push('next high tide ' + ft.toFixed(1) + ' ft — major coastal flooding'); }
+        var ft = tdS.resid != null ? tdS.expHigh : tdS.next.ft;
+        if(tdS.resid != null && tdS.resid >= 0.75){ flThreat += tdS.resid >= 1.5 ? 3 : 1; flDrivers.push('storm surge running +' + tdS.resid.toFixed(1) + ' ft above the predicted tide'); }
+        var proj = tdS.resid != null ? 'projected ' : '';
+        if(thS.major != null && ft >= thS.major){ flThreat += 5; flDrivers.push(proj + 'next high tide ' + ft.toFixed(1) + ' ft — major coastal flooding'); }
         else if(thS.moderate != null && ft >= thS.moderate){ flThreat += 3; flDrivers.push('next high tide ' + ft.toFixed(1) + ' ft — moderate coastal flooding'); }
         else if(thS.minor != null && ft >= thS.minor){ flThreat += 2; flDrivers.push('next high tide ' + ft.toFixed(1) + ' ft — minor coastal flooding'); }
         else if(thS.action != null && ft >= thS.action){ flThreat += 1; flDrivers.push('next high tide near the coastal action level'); }
