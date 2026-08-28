@@ -1278,6 +1278,13 @@
   #flood-subview .hz-sect { break-inside: avoid; margin-bottom: 14px; }
   #flood-subview .hz-sect { margin-bottom: 10px; }
   #flood-subview #flood-subview-insight { column-width: 270px; column-gap: 24px; }
+  @media (max-width: 640px) {
+    #flood-subview .lw-strip { gap: 3px 9px !important; padding: 5px 8px !important; }
+    #flood-subview .lw-tidebar { flex-basis: 100% !important; margin: 14px 26px 16px 4px !important; }
+    #flood-subview .lw-gauge-row { flex-wrap: wrap; }
+    /* auto-fit always makes a second track — single column on phones */
+    #flood-subview .lw-grid { grid-template-columns: 1fr !important; }
+  }
   #hurricane-subview #hz-hurricane-season-pill { max-width: none !important; padding: 0; }
   #hurricane-subview #hz-data-fresh { column-span: all; }
   #hurricane-subview #hz-view-list button { flex: 1 1 170px; }
@@ -15548,6 +15555,7 @@ function floodRateThreshold(lat, lon, soilMoisture){
       }).catch(function(){});
   }
   window._loadTides = loadTides;
+  window._nearestTideStation = nearestTideStation;
   function _tideRow(p){
     // "2026-07-19 13:19" is station-local wall clock — parse it as local, the
     // same naive handling the rest of the dashboard uses for local timestamps
@@ -28977,6 +28985,8 @@ function dayRangeAround(d, days){
                   }
                 }
                 window._nowcastStr = txt;
+                // numeric export for the flood subview: rate at THIS point (in/hr), 0 when birds/none
+                window._nowcastRate = (here && !window._bioScatterNow && tiers[0]) ? { inhr: tiers[0].mm / 25.4, label: lbl, floodNow: !!floodNow, at: Date.now() } : { inhr: 0, label: null, floodNow: false, at: Date.now() };
                 var el = document.getElementById('forecast-row');
                 // Live radar (when active) REPLACES the "REST OF DAY · MAX %" chance;
                 // the rain window (UNTIL/BURST) + storm flag always trail.
@@ -55372,6 +55382,7 @@ function initNowMicroTabs(){
           headline: props.headline || '',
           description: props.description || '',
           severity: classifyAlertSeverity(props.event),
+          parameters: props.parameters || null,
           geometry: geom,
           areaDesc: props.areaDesc || '',
           onset: props.onset,
@@ -57883,16 +57894,28 @@ function initNowMicroTabs(){
 
     // ── flood-prone corners: 90 days of FloodNet events by sensor, cached a day ──
     if (inNYC && typeof fnQuery === 'function'){
-      var hk = 'bv_fn_hist_v1', hc = null;
+      var hk = 'bv_fn_hist_v3', hc = null;
       try{ hc = JSON.parse(localStorage.getItem(hk) || 'null'); }catch(e){}
       if (hc && hc.at && Date.now() - hc.at < 24*3600000 && hc.key === key){ out.prone = hc.list; }
       else {
         var lo90 = new Date(Date.now() - 90*86400000).toISOString().slice(0,19);
         var hi90 = new Date(Date.now() + 5*60000).toISOString().slice(0,19);
-        jobs.push(fnQuery('{ flood_events(where:{_and:[{start_time:{_gte:"' + lo90 + '"}},{start_time:{_lte:"' + hi90 + '"}},{event_confidence:{_gte:0.5}}]}, limit:3000){ deployment_id } }')
-          .then(function(d){
-            var cnt = {};
-            ((d && d.flood_events) || []).forEach(function(e){ if (e.deployment_id) cnt[e.deployment_id] = (cnt[e.deployment_id] || 0) + 1; });
+        // 90 days of predicted highs at the harbour station: an event within
+        // ±2 h of a predicted high is a tidal flood, not a rain flood
+        var tst = (typeof window._nearestTideStation === 'function') ? window._nearestTideStation(lat, lon) : (window._tideData && window._tideData.id ? { id: window._tideData.id } : null);
+        var d90 = new Date(Date.now() - 90*86400000);
+        var hiloP = tst ? fetch('https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?product=predictions&application=bluishvoid&datum=MLLW&station=' + tst.id + '&time_zone=gmt&units=english&interval=hilo&format=json&begin_date=' + d90.getFullYear() + String(d90.getMonth()+1).padStart(2,'0') + String(d90.getDate()).padStart(2,'0') + '&range=2200')
+          .then(function(r){ return r.ok ? r.json() : null; }).then(function(j){ return ((j && j.predictions) || []).filter(function(x){ return x.type === 'H'; }).map(function(x){ return new Date(x.t.replace(' ', 'T') + 'Z').getTime(); }); }).catch(function(){ return []; }) : Promise.resolve([]);
+        jobs.push(Promise.all([fnQuery('{ flood_events(where:{_and:[{start_time:{_gte:"' + lo90 + '"}},{start_time:{_lte:"' + hi90 + '"}},{event_confidence:{_gte:0.5}}]}, limit:3000){ deployment_id start_time } }'), hiloP])
+          .then(function(res){
+            var d = res[0], highs = res[1] || [];
+            var cnt = {}, tidal = {};
+            var nearHigh = function(ms){ for (var i = 0; i < highs.length; i++){ if (Math.abs(highs[i] - ms) <= 2*3600000) return true; } return false; };
+            ((d && d.flood_events) || []).forEach(function(e){
+              if (!e.deployment_id) return;
+              cnt[e.deployment_id] = (cnt[e.deployment_id] || 0) + 1;
+              if (highs.length && nearHigh(new Date(e.start_time + (/[Zz+]/.test(e.start_time) ? '' : 'Z')).getTime())) tidal[e.deployment_id] = (tidal[e.deployment_id] || 0) + 1;
+            });
             var ids = Object.keys(cnt).sort(function(a, b){ return cnt[b] - cnt[a]; }).slice(0, 40);
             if (!ids.length){ out.prone = []; return; }
             return fnQuery('{ deployments(where:{deployment_id:{_in:' + JSON.stringify(ids) + '}}){ deployment_id name location sensor_address_borough sensor_address_neighborhood } }')
@@ -57902,8 +57925,10 @@ function initNowMicroTabs(){
                   if (x.sensor_address_borough === 'Staten Island') return;
                   var c = x.location && x.location.coordinates; if (!c) return;
                   var mi = _lwMiles(lat, lon, c[1], c[0]); if (mi > 20) return;
+                  var nn = cnt[x.deployment_id] || 0, tf = nn ? (tidal[x.deployment_id] || 0) / nn : 0;
                   list.push({ id: x.deployment_id, name: String(x.name || '').replace(/^[A-Z]{1,2}\s*-\s*/, '').replace(/\s*\/\s*/g, ' / ').trim(),
-                              hood: x.sensor_address_neighborhood || '', boro: x.sensor_address_borough || '', n: cnt[x.deployment_id] || 0, mi: mi, lat: c[1], lon: c[0] });
+                              hood: x.sensor_address_neighborhood || '', boro: x.sensor_address_borough || '', n: nn, mi: mi, lat: c[1], lon: c[0],
+                              kind: !highs.length ? '' : tf >= 0.6 ? 'TIDAL' : tf <= 0.3 ? 'RAIN' : 'MIXED', tf: tf });
                 });
                 list.sort(function(a, b){ return b.n - a.n; });
                 out.prone = list.slice(0, 10);
@@ -57990,6 +58015,61 @@ function initNowMicroTabs(){
     }).catch(function(){ _lwInflight = false; });
   }
   window._loadLocalWater = loadLocalWater;
+
+  // Inline NWPS hydrograph under a RIVERS NEARBY row: 3 days observed + the
+  // official forecast, flood / action stage lines. Fetched once per gauge,
+  // open state survives the subview's re-renders.
+  window._lwHydroCache = window._lwHydroCache || {};
+  window._lwHydroOpen = window._lwHydroOpen || {};
+  window._lwHydro = function(rowEl, flood, action){
+    var lid = rowEl && rowEl.getAttribute('data-lid'); if (!lid) return;
+    var nextEl = rowEl.nextElementSibling;
+    if (nextEl && nextEl.classList.contains('lw-hydro')){ nextEl.remove(); delete window._lwHydroOpen[lid]; return; }
+    window._lwHydroOpen[lid] = { flood: flood, action: action };
+    var box = document.createElement('div'); box.className = 'lw-hydro';
+    box.style.cssText = 'padding:2px 3px 6px 3px;font-size:.42rem;color:rgba(30,30,50,.5);';
+    box.textContent = 'Loading hydrograph…';
+    rowEl.parentNode.insertBefore(box, rowEl.nextSibling);
+    var draw = function(d){
+      if (!d){ box.textContent = 'No hydrograph available for ' + lid + '.'; return; }
+      var obs = ((d.observed && d.observed.data) || []).map(function(x){ return { t: new Date(x.validTime).getTime(), v: x.primary }; }).filter(function(x){ return x.v != null; });
+      var fc = ((d.forecast && d.forecast.data) || []).map(function(x){ return { t: new Date(x.validTime).getTime(), v: x.primary }; }).filter(function(x){ return x.v != null; });
+      var now = Date.now(); obs = obs.filter(function(x){ return x.t >= now - 3*86400000; });
+      var all = obs.concat(fc); if (!all.length){ box.textContent = 'No recent stage data for ' + lid + '.'; return; }
+      var t0 = all[0].t, t1 = all[all.length-1].t; if (t1 <= t0) t1 = t0 + 3600000;
+      var vals = all.map(function(x){ return x.v; }); if (flood != null) vals.push(flood); if (action != null) vals.push(action);
+      var vmin = Math.min.apply(null, vals), vmax = Math.max.apply(null, vals); if (vmax - vmin < 1){ vmax = vmin + 1; }
+      var pad = (vmax - vmin) * 0.08; vmin -= pad; vmax += pad;
+      var W = 300, H = 54, X = function(t){ return ((t - t0) / (t1 - t0) * W).toFixed(1); }, Y = function(v){ return (H - (v - vmin) / (vmax - vmin) * H).toFixed(1); };
+      var path = function(arr){ return arr.map(function(x, i){ return (i ? 'L' : 'M') + X(x.t) + ',' + Y(x.v); }).join(' '); };
+      var unit = (d.observed && d.observed.primaryUnits) || 'ft';
+      var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block;width:100%;height:54px;overflow:visible;">'
+        + (flood != null ? '<line x1="0" x2="' + W + '" y1="' + Y(flood) + '" y2="' + Y(flood) + '" stroke="#f97316" stroke-width="1" stroke-dasharray="3,3" vector-effect="non-scaling-stroke"/>' : '')
+        + (action != null ? '<line x1="0" x2="' + W + '" y1="' + Y(action) + '" y2="' + Y(action) + '" stroke="#ca8a04" stroke-width="1" stroke-dasharray="2,3" vector-effect="non-scaling-stroke"/>' : '')
+        + '<line x1="' + X(now) + '" x2="' + X(now) + '" y1="0" y2="' + H + '" stroke="rgba(43,34,244,.35)" stroke-width="1" vector-effect="non-scaling-stroke"/>'
+        + (obs.length > 1 ? '<path d="' + path(obs) + '" fill="none" stroke="#2B22F4" stroke-width="1.6" vector-effect="non-scaling-stroke"/>' : '')
+        + (fc.length > 1 ? '<path d="' + path(fc) + '" fill="none" stroke="#0e7490" stroke-width="1.6" stroke-dasharray="4,2" vector-effect="non-scaling-stroke"/>' : '')
+        + '</svg>';
+      var crest = fc.length ? fc.reduce(function(a, b){ return b.v > a.v ? b : a; }) : null;
+      var fmtW = function(ms){ var dd = new Date(ms); return dd.toLocaleDateString([], { weekday:'short' }) + ' ' + dd.toLocaleTimeString([], { hour:'numeric' }); };
+      box.innerHTML = svg + '<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-top:2px;">'
+        + '<span><b style="color:#2B22F4;">observed</b> 3 days · <b style="color:#0e7490;">forecast</b> ' + (fc.length ? 'to ' + fmtW(fc[fc.length-1].t) : 'none issued') + (crest ? ' · crest ' + crest.v.toFixed(1) + ' ' + unit + ' ' + fmtW(crest.t) : '') + '</span>'
+        + '<span>' + (flood != null ? '<span style="color:#f97316;">- - flood ' + flood.toFixed(1) + '</span> ' : '') + (action != null ? '<span style="color:#ca8a04;">- - action ' + action.toFixed(1) + '</span> ' : '') + '<a href="https://water.noaa.gov/gauges/' + lid.toLowerCase() + '" target="_blank" rel="noopener" style="color:rgba(43,34,244,.7);text-decoration:none;">NWPS ' + lid + ' ↗</a></span></div>';
+    };
+    var c = window._lwHydroCache[lid];
+    if (c && Date.now() - c.at < 30*60000){ draw(c.d); return; }
+    fetch('https://api.water.noaa.gov/nwps/v1/gauges/' + encodeURIComponent(lid) + '/stageflow').then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(d){ window._lwHydroCache[lid] = { at: Date.now(), d: d }; if (document.body.contains(box)) draw(d); })
+      .catch(function(){ if (document.body.contains(box)) draw(null); });
+  };
+  // re-open any hydrographs the user had expanded after a re-render
+  window._lwHydroRestore = function(){
+    var open = window._lwHydroOpen || {};
+    Object.keys(open).forEach(function(lid){
+      var row = document.querySelector('.lw-gauge-row[data-lid="' + lid + '"]');
+      if (row && !(row.nextElementSibling && row.nextElementSibling.classList.contains('lw-hydro'))){ delete window._lwHydroOpen[lid]; window._lwHydro(row, open[lid].flood, open[lid].action); }
+    });
+  };
 
   function updateHazardInsight(){
     var el = document.getElementById('hazard-insight-content');
@@ -59688,7 +59768,7 @@ function initNowMicroTabs(){
       // strips: one full-width row per topic, title chip + inline items
       // accent = the strip's colour identity: 3px bar, a wash fading right, title ink
       var hexA = function(hex, a){ var h6 = hex.replace('#',''); return 'rgba(' + parseInt(h6.substr(0,2),16) + ',' + parseInt(h6.substr(2,2),16) + ',' + parseInt(h6.substr(4,2),16) + ',' + a + ')'; };
-      var STRIP = function(title, items, accent){ accent = accent || '#2B22F4'; return '<div style="column-span:all;display:flex;align-items:center;flex-wrap:wrap;gap:5px 16px;margin:0 0 5px;padding:6px 10px 6px 10px;border-radius:8px;border-left:4px solid ' + accent + ';background:linear-gradient(90deg,' + hexA(accent, .13) + ',' + hexA(accent, .04) + ' 55%,rgba(255,255,255,.35));border:1px solid ' + hexA(accent, .18) + ';border-left:4px solid ' + accent + ';">'
+      var STRIP = function(title, items, accent){ accent = accent || '#2B22F4'; return '<div class="lw-strip" style="column-span:all;display:flex;align-items:center;flex-wrap:wrap;gap:5px 16px;margin:0 0 5px;padding:6px 10px 6px 10px;border-radius:8px;border-left:4px solid ' + accent + ';background:linear-gradient(90deg,' + hexA(accent, .13) + ',' + hexA(accent, .04) + ' 55%,rgba(255,255,255,.35));border:1px solid ' + hexA(accent, .18) + ';border-left:4px solid ' + accent + ';">'
         + '<span style="font-size:.5rem;color:' + accent + ';font-weight:900;letter-spacing:.09em;flex:none;">' + title + '</span>' + items + '</div>'; };
       var SI = function(label, val, color){ return '<span style="font-size:.5rem;color:rgba(30,30,50,.7);white-space:nowrap;">' + label + ' <b style="color:' + (color || '#2B22F4') + ';font-weight:800;">' + val + '</b></span>'; };
       var SB = function(txt, color){ return '<span style="font-size:.6rem;font-weight:900;letter-spacing:.05em;color:' + color + ';white-space:nowrap;">' + txt + '</span>'; };
@@ -59727,7 +59807,7 @@ function initNowMicroTabs(){
             var tr = g.trend === 'rising' ? '<span style="color:#ef4444;">▲ rising</span>' : g.trend === 'falling' ? '<span style="color:#16a34a;">▼ falling</span>' : g.trend === 'steady' ? '<span style="color:rgba(30,30,50,.5);">▬ steady</span>' : '';
             var crest = (g.fcst != null && g.trend === 'rising') ? (g.tidal ? 'high water ' : 'crest ') + g.fcst.toFixed(1) + ' ft' + (g.fcstAt ? ' ' + fmtWhen(g.fcstAt) : '') : '';
             var vs = (g.obs != null && g.flood != null) ? (g.obs >= g.flood ? '+' + (g.obs - g.flood).toFixed(1) + ' ft over flood' : (g.flood - g.obs).toFixed(1) + ' ft below flood') : '';
-            rb += '<div onclick="_hazFlyTo(' + g.lat + ',' + g.lon + ',11)" class="quake-item" style="display:flex;align-items:center;gap:5px;padding:2px 3px;cursor:pointer;border-radius:4px;font-size:.48rem;line-height:1.3;">';
+            rb += '<div data-lid="' + (g.id || '') + '" onclick="_hazFlyTo(' + g.lat + ',' + g.lon + ',11);window._lwHydro&&_lwHydro(this,' + (g.flood != null ? g.flood : 'null') + ',' + (g.action != null ? g.action : 'null') + ')" class="quake-item lw-gauge-row" style="display:flex;align-items:center;gap:5px;padding:2px 3px;cursor:pointer;border-radius:4px;font-size:.48rem;line-height:1.3;">';
             rb += '<span style="font-size:.38rem;padding:1px 4px;border-radius:5px;background:' + col + ';color:#fff;font-weight:800;letter-spacing:.04em;flex:none;">' + lbl + '</span>';
             rb += '<span style="flex:1;min-width:0;"><span style="color:rgba(30,30,50,.9);font-weight:600;">' + g.name + '</span>' + (g.river ? ' <span style="color:rgba(30,30,50,.5);">· ' + g.river + '</span>' : '') + '<span style="color:rgba(30,30,50,.45);"> · ' + Math.round(g.dist) + ' mi</span>'
                + (tr || crest || vs ? '<span style="font-size:.42rem;color:rgba(30,30,50,.55);"> · ' + [tr, crest, vs].filter(Boolean).join(' · ') + '</span>' : '') + '</span>';
@@ -59736,7 +59816,7 @@ function initNowMicroTabs(){
             rb += '</div>';
           });
           rb += '</div>';
-          rb += QN(gs.length + ' gauge' + (gs.length > 1 ? 's' : '') + ' within 40 mi · ' + (up.length ? up.length + ' at or above action stage' : 'all normal') + ' · click a row to fly there');
+          rb += QN(gs.length + ' gauge' + (gs.length > 1 ? 's' : '') + ' within 40 mi · ' + (up.length ? up.length + ' at or above action stage' : 'all normal') + ' · click a row for its hydrograph');
         }
         body += blk('RIVERS NEARBY', rb, true);
 
@@ -59765,10 +59845,11 @@ function initNowMicroTabs(){
           var pb = '<div style="display:flex;flex-direction:column;gap:1px;">';
           lw.prone.slice(0, 7).forEach(function(c){
             pb += '<div onclick="_hazFlyTo(' + c.lat + ',' + c.lon + ',14)" class="quake-item" style="display:flex;align-items:center;gap:6px;padding:2px 3px;cursor:pointer;border-radius:4px;font-size:.48rem;line-height:1.3;">'
+               + (c.kind ? '<span style="font-size:.36rem;padding:1px 4px;border-radius:5px;background:' + (c.kind === 'TIDAL' ? '#1d4ed8' : c.kind === 'RAIN' ? '#0e7490' : '#5a4f42') + ';color:#fff;font-weight:800;letter-spacing:.04em;flex:none;">' + c.kind + '</span>' : '')
                + '<span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><span style="color:rgba(30,30,50,.9);font-weight:600;">' + c.name + '</span>' + (c.hood ? ' <span style="color:rgba(30,30,50,.5);">· ' + c.hood + '</span>' : '') + '<span style="color:rgba(30,30,50,.45);"> · ' + Math.round(c.mi) + ' mi</span></span>'
                + '<span style="color:#5a4f42;font-weight:800;font-size:.48rem;white-space:nowrap;">' + c.n + ' event' + (c.n > 1 ? 's' : '') + '</span></div>';
           });
-          pb += '</div>' + QN('Sensors that flooded most often in the last 90 days · FloodNet');
+          pb += '</div>' + QN('Sensors that flooded most often in the last 90 days · TIDAL = fires around predicted high tides, RAIN = not · FloodNet');
           body += blk('FLOOD-PRONE CORNERS · 90 DAYS', pb);
         }
 
@@ -59781,9 +59862,11 @@ function initNowMicroTabs(){
         var peakNext = 0; if (hy && hy.precipitation){ for (var k4 = ni+1; k4 <= ni+24 && k4 < hy.precipitation.length; k4++) peakNext = Math.max(peakNext, hy.precipitation[k4] || 0); }
         var nc = String(window._nowcastStr || '').replace(/[^\x20-\x7E·—]/g, '').trim();
         var ncCol = nc ? (/FLASH|HEAVY|INTENSE/.test(nc) ? '#ef4444' : /RAIN NOW/.test(nc) ? '#0e7490' : '#2B22F4') : '#16a34a';
-        _lwRain = { rate: rate, last3: last3, nxt3: nxt3, nc: nc };
+        var rr0 = window._nowcastRate, radarIn = (rr0 && Date.now() - rr0.at < 15*60000) ? rr0.inhr : null;
+        _lwRain = { rate: rate, last3: last3, nxt3: nxt3, nc: nc, radar: radarIn };
         var rainStrip = STRIP('RAIN NOW', SB(nc || 'NO RAIN ON RADAR', ncCol)
-          + (rate != null ? SI('this hour', rate.toFixed(2) + '"', rate >= 1.75 ? '#ef4444' : rate >= 0.5 ? '#f97316' : null) : '')
+          + (radarIn != null && radarIn > 0 ? SI('radar here', radarIn.toFixed(2) + ' in/hr', radarIn >= 1.75 ? '#ef4444' : radarIn >= 0.5 ? '#f97316' : '#0e7490') : '')
+          + (rate != null ? SI('model this hour', rate.toFixed(2) + '"', rate >= 1.75 ? '#ef4444' : rate >= 0.5 ? '#f97316' : null) : '')
           + SI('last 3 h', last3.toFixed(2) + '"', last3 >= 1.5 ? '#ef4444' : last3 >= 0.75 ? '#f97316' : null)
           + SI('next 3 h', nxt3.toFixed(2) + '"', nxt3 >= 1.5 ? '#ef4444' : nxt3 >= 0.75 ? '#f97316' : null)
           + SI('last 24 h', last24.toFixed(2) + '"', last24 >= 2 ? '#ef4444' : last24 >= 1 ? '#f97316' : null)
@@ -59811,7 +59894,7 @@ function initNowMicroTabs(){
           var pct = function(v){ return Math.max(0, Math.min(100, v / top * 100)); };
           var tick = function(v, lbl, c, above){ return v == null ? '' : '<span style="position:absolute;left:' + pct(v).toFixed(1) + '%;top:-3px;width:1px;height:12px;background:' + c + ';"></span><span style="position:absolute;left:' + pct(v).toFixed(1) + '%;' + (above ? 'top:-15px;' : 'top:11px;') + 'transform:translateX(-50%);font-size:.36rem;color:' + c + ';font-weight:700;white-space:nowrap;letter-spacing:.03em;">' + lbl + ' ' + v.toFixed(1) + '</span>'; };
           var actAbove = th.action != null && minor != null && Math.abs(pct(minor) - pct(th.action)) < 9;
-          var bar = '<span style="position:relative;display:inline-block;flex:1 1 220px;min-width:180px;height:6px;border-radius:3px;background:rgba(43,34,244,.10);margin:' + (actAbove ? '12px' : '0') + ' 34px 14px 10px;">'
+          var bar = '<span class="lw-tidebar" style="position:relative;display:inline-block;flex:1 1 220px;min-width:180px;height:6px;border-radius:3px;background:rgba(43,34,244,.10);margin:' + (actAbove ? '12px' : '0') + ' 34px 14px 10px;">'
             + '<span style="position:absolute;left:0;top:0;height:6px;width:' + pct(useFt).toFixed(1) + '%;border-radius:3px;background:' + tcol2 + ';"></span>'
             + tick(th.action, 'ACT', '#ca8a04', actAbove) + tick(minor, 'MINOR', '#f97316') + tick(th.moderate, 'MOD', '#ef4444') + tick(th.major, 'MAJ', '#dc2626')
             + '<span style="position:absolute;left:' + pct(useFt).toFixed(1) + '%;top:-5px;width:2px;height:16px;background:' + tcol2 + ';transform:translateX(-1px);"></span>'
@@ -59846,8 +59929,16 @@ function initNowMicroTabs(){
             var d = String(a.description || '');
             var m = /(?:locations|areas)[^.]*?include[^.]*\.(?:[^.]*\.)?/i.exec(d);
             var places = m ? m[0].replace(/\s+/g, ' ').trim() : '';
+            var pr = a.parameters || {};
+            var threat = (pr.flashFloodDamageThreat || pr.FlashFloodDamageThreat || [])[0] || '';
+            var imp = /IMPACTS?\.{2,}\s*([\s\S]*?)(?:\n\s*\n|\*|$)/i.exec(d);
+            var impacts = imp ? imp[1].replace(/\s+/g, ' ').trim() : '';
+            if (impacts.length > 220) impacts = impacts.slice(0, 217) + '…';
             var ends = a.expires || a.ends; var endTxt = ''; try{ if (ends) endTxt = 'until ' + fmtWhen(new Date(ends).getTime()); }catch(err){}
-            ab += '<div style="margin-bottom:5px;"><div style="font-size:.54rem;font-weight:800;color:#ef4444;">' + a.event + (endTxt ? ' <span style="font-weight:600;color:rgba(30,30,50,.5);">' + endTxt + '</span>' : '') + '</div>'
+            ab += '<div style="margin-bottom:5px;"><div style="font-size:.54rem;font-weight:800;color:#ef4444;">' + a.event
+               + (threat ? ' <span style="font-size:.38rem;padding:1px 5px;border-radius:5px;background:' + (/CATASTROPHIC/i.test(threat) ? '#7f1d1d' : '#dc2626') + ';color:#fff;letter-spacing:.06em;vertical-align:middle;">' + threat.toUpperCase() + ' DAMAGE THREAT</span>' : '')
+               + (endTxt ? ' <span style="font-weight:600;color:rgba(30,30,50,.5);">' + endTxt + '</span>' : '') + '</div>'
+               + (impacts ? '<div style="font-size:.48rem;color:rgba(30,30,50,.8);line-height:1.45;"><b style="color:rgba(30,30,50,.6);">Impacts:</b> ' + impacts + '</div>' : '')
                + '<div style="font-size:.48rem;color:rgba(30,30,50,.7);line-height:1.45;">' + (places || (a.areaDesc || '').substring(0, 120)) + '</div></div>';
           });
           body += blk('FLOOD ALERTS HERE', ab);
@@ -59855,7 +59946,7 @@ function initNowMicroTabs(){
 
         h += '<div class="hz-sect" style="column-span:all;margin-bottom:0;padding-bottom:0;">'
            + '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:6px;"><span style="font-size:.62rem;color:rgba(43,34,244,.8);font-weight:900;letter-spacing:.12em;">LOCAL WATER</span><span style="font-size:.46rem;color:rgba(30,30,50,.5);">' + (L.name || 'here') + (lw ? ' · updated ' + new Date(lw.at).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }) : '') + '</span></div>'
-           + '<div style="display:grid;grid-template-columns:minmax(280px,38%) repeat(auto-fit,minmax(220px,1fr));grid-auto-rows:min-content;gap:8px 26px;align-items:start;margin-bottom:6px;">' + body + '</div>' + rainStrip + tideStrip + '</div>';
+           + '<div class="lw-grid" style="display:grid;grid-template-columns:minmax(280px,38%) repeat(auto-fit,minmax(220px,1fr));grid-auto-rows:min-content;gap:8px 26px;align-items:start;margin-bottom:6px;">' + body + '</div>' + rainStrip + tideStrip + '</div>';
       })();
 
       // ── GAUGE STATUS (current map scope) ──
@@ -59887,8 +59978,10 @@ function initNowMicroTabs(){
         flDrivers.push('street sensors: ' + (fnS.peakIn >= 12 ? 'major' : fnS.peakIn >= 4 ? 'minor' : 'puddling') + ' at ' + fnS.total + ' corner' + (fnS.total > 1 ? 's' : '') + (fnS.hoods && fnS.hoods.length ? ' (' + fnS.hoods.slice(0,2).map(function(x){ return x.hood; }).join(', ') + ')' : '') + (fnS.open ? ', ' + fnS.open + ' still wet' : ''));
       }
       if(_lwRain){
-        var rr = _lwRain.rate || 0;
-        if(rr >= 1.75){ flThreat += 4; flDrivers.push('rain this hour ' + rr.toFixed(2) + '" — over the drain cap'); }
+        var rr = _lwRain.rate || 0, rd = _lwRain.radar;
+        if(rd != null && rd >= 1.75){ flThreat += 4; flDrivers.push('radar rate here ' + rd.toFixed(2) + ' in/hr — over the drain cap'); }
+        else if(rd != null && rd >= 0.5){ flThreat += 2; flDrivers.push('radar: heavy rain here (' + rd.toFixed(2) + ' in/hr)'); }
+        else if(rr >= 1.75){ flThreat += 4; flDrivers.push('rain this hour ' + rr.toFixed(2) + '" — over the drain cap'); }
         else if(rr >= 0.5){ flThreat += 2; flDrivers.push('heavy rain this hour (' + rr.toFixed(2) + '")'); }
         if(_lwRain.last3 >= 1.5){ flThreat += 2; flDrivers.push(_lwRain.last3.toFixed(2) + '" in the last 3 h'); }
         else if(_lwRain.last3 >= 0.75){ flThreat += 1; flDrivers.push(_lwRain.last3.toFixed(2) + '" in the last 3 h'); }
@@ -60380,6 +60473,7 @@ function initNowMicroTabs(){
       var flEl = document.getElementById('flood-subview-insight');
       if (flEl) { flEl.innerHTML = h; flEl.style.display = h ? '' : 'none'; }
       el.innerHTML = '';
+      try{ if (window._lwHydroRestore) window._lwHydroRestore(); }catch(e){}
       return;
     }
     el.innerHTML = h;
