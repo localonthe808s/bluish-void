@@ -15545,6 +15545,7 @@ function floodRateThreshold(lat, lon, soilMoisture){
         try{ if (window._applyRainLine) window._applyRainLine(window._nowcastStr); }catch(e){}
       }).catch(function(){});
   }
+  window._loadTides = loadTides;
   function _tideRow(p){
     // "2026-07-19 13:19" is station-local wall clock — parse it as local, the
     // same naive handling the rest of the dashboard uses for local timestamps
@@ -57808,6 +57809,172 @@ function initNowMicroTabs(){
     }
   }
 
+  // ═══ LOCAL WATER — the flood subview's lead block ═══════════════════════
+  // "What is the water doing where I am": nearby river gauges with the NWS
+  // forecast crest (AHPS layer 0 observed + layer 15 full-period forecast),
+  // NYC street sensors graded by neighborhood (FloodNet events + depth rise),
+  // the next high tide against the station's NWS coastal-flood thresholds
+  // (CO-OPS floodlevels are in station datum → converted to MLLW), and the
+  // radar nowcast. Fetched once per location per 10 min; re-renders the
+  // subview when it lands.
+  window._localWater = null;
+  var _lwInflight = false, _lwAt = 0, _lwKey = '';
+  function _lwMiles(lat1, lon1, lat2, lon2){
+    var kx = Math.cos(lat1 * Math.PI/180);
+    return Math.sqrt(Math.pow((lat2-lat1)*69, 2) + Math.pow((lon2-lon1)*69*kx, 2));
+  }
+  function loadLocalWater(force){
+    var L = window.LOCATION; if (!L || L.lat == null) return;
+    var key = L.lat.toFixed(2) + ',' + L.lon.toFixed(2);
+    if (!force && _lwKey === key && Date.now() - _lwAt < 10*60000) return;
+    if (_lwInflight) return;
+    _lwInflight = true;
+    var lat = L.lat, lon = L.lon, ep = window._locEpoch || 0;
+    var out = { at: Date.now(), gauges: null, sensors: null, tide: null };
+    var jobs = [];
+
+    // ── rivers nearby: observed + forecast crest, within ~40 mi ──
+    var dLat = 0.6, dLon = 0.6 / Math.cos(lat * Math.PI/180);
+    var env = encodeURIComponent((lon-dLon).toFixed(3) + ',' + (lat-dLat).toFixed(3) + ',' + (lon+dLon).toFixed(3) + ',' + (lat+dLat).toFixed(3));
+    var ahpsQ = function(layer, fields){
+      return fetch(AHPS_BASE + '/' + layer + '/query?where=1%3D1&geometry=' + env + '&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=' + fields + '&outSR=4326&returnGeometry=true&f=json')
+        .then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; });
+    };
+    jobs.push(Promise.all([
+      ahpsQ(0, 'gaugelid,location,waterbody,status,observed,units,action,flood,moderate,major,obstime,url'),
+      ahpsQ(15, 'gaugelid,status,forecast,fcsttime')
+    ]).then(function(res){
+      var obs = (res[0] && res[0].features) || [], fc = {};
+      ((res[1] && res[1].features) || []).forEach(function(f){ var a = f.attributes || {}; if (a.gaugelid) fc[a.gaugelid] = a; });
+      var rows = [];
+      obs.forEach(function(f){
+        var a = f.attributes || {}, g = f.geometry; if (!g) return;
+        var st = ahpsStatusColor(a.status);
+        var o = a.observed != null && a.observed !== '' ? parseFloat(a.observed) : null;
+        var fa = fc[a.gaugelid] || {};
+        var fv = fa.forecast != null && fa.forecast !== '' ? parseFloat(fa.forecast) : null;
+        if (o != null && isNaN(o)) o = null; if (fv != null && isNaN(fv)) fv = null;
+        var flood = a.flood ? parseFloat(a.flood) : null, action = a.action ? parseFloat(a.action) : null;
+        var trend = (o != null && fv != null) ? (fv - o > 0.3 ? 'rising' : o - fv > 0.3 ? 'falling' : 'steady') : null;
+        var nm = String(a.location || 'Unknown'), tidal = /\(IN MLLW\)|\bMLLW\b/i.test(nm) || /harbor|bay|sound|inlet|ocean/i.test(a.waterbody || '');
+        nm = nm.replace(/\s*\(IN MLLW\)/i, '').trim();
+        rows.push({ id: a.gaugelid, name: nm, tidal: tidal, river: a.waterbody || '', lat: g.y, lon: g.x,
+          dist: _lwMiles(lat, lon, g.y, g.x), status: st, obs: o, fcst: fv, fcstAt: fa.fcsttime || null,
+          fcstStatus: fa.status ? ahpsStatusColor(fa.status) : null, trend: trend,
+          flood: (flood != null && !isNaN(flood) && flood >= 1) ? flood : null,
+          action: (action != null && !isNaN(action) && action >= 1) ? action : null,
+          obsAt: a.obstime || null, url: a.url || null });
+      });
+      rows = rows.filter(function(r){ return r.dist <= 40; });
+      rows.sort(function(x, y){ return ((y.status.priority||0) - (x.status.priority||0)) || (x.dist - y.dist); });
+      out.gauges = rows;
+    }));
+
+    // ── NYC street sensors by neighborhood (FloodNet), last 6 h ──
+    var inNYC = lat > 40.49 && lat < 40.92 && lon > -74.27 && lon < -73.68;
+    if (inNYC && typeof fnQuery === 'function'){
+      var nowMs = Date.now();
+      var lo = new Date(nowMs - 6*3600000).toISOString().slice(0,19);
+      var hi = new Date(nowMs + 5*60000).toISOString().slice(0,19);   // clock-in-2080 trap
+      jobs.push(fnQuery('{ flood_events(where:{_and:[{start_time:{_gte:"' + lo + '"}},{start_time:{_lte:"' + hi + '"}},{event_confidence:{_gte:0.5}}]}, order_by:{start_time:asc}, limit:300){ deployment_id start_time end_time } }')
+        .then(function(d){
+          var evs = ((d && d.flood_events) || []).filter(function(e){ return e.deployment_id; });
+          if (!evs.length){ out.sensors = { total: 0, hoods: [] }; return; }
+          var ids = []; evs.forEach(function(e){ if (ids.indexOf(e.deployment_id) < 0) ids.push(e.deployment_id); });
+          return Promise.all([
+            fnQuery('{ deployments(where:{deployment_id:{_in:' + JSON.stringify(ids) + '}}){ deployment_id name location sensor_address_borough sensor_address_neighborhood } }').catch(function(){ return null; }),
+            fnQuery('{ depth_data(where:{deployment_id:{_in:' + JSON.stringify(ids) + '}, time:{_gte:"' + lo + '", _lte:"' + hi + '"}}, order_by:{time:desc}, limit:9000){ deployment_id time depth_proc_mm } }').catch(function(){ return null; })
+          ]).then(function(res){
+            var dep = {}; ((res[0] && res[0].deployments) || []).forEach(function(x){ dep[x.deployment_id] = x; });
+            var by = {};
+            ((res[1] && res[1].depth_data) || []).forEach(function(rw){
+              if (rw.depth_proc_mm == null) return;
+              var t = new Date(rw.time + (/[Zz+]/.test(rw.time) ? '' : 'Z')).getTime();
+              (by[rw.deployment_id] = by[rw.deployment_id] || []).push({ t: t, mm: rw.depth_proc_mm });
+            });
+            Object.keys(by).forEach(function(k){ by[k].sort(function(x, y){ return x.t - y.t; }); });
+            var med = function(arr){ var q = arr.slice().sort(function(x, y){ return x - y; }); var m = q.length >> 1; return q.length % 2 ? q[m] : (q[m-1] + q[m]) / 2; };
+            var best = {}, open = {};
+            evs.forEach(function(e){
+              var rs = by[e.deployment_id]; if (!rs) return;
+              var st = new Date(e.start_time + (/[Zz+]/.test(e.start_time) ? '' : 'Z')).getTime();
+              var en = e.end_time ? new Date(e.end_time + (/[Zz+]/.test(e.end_time) ? '' : 'Z')).getTime() : nowMs;
+              if (!e.end_time) open[e.deployment_id] = true;
+              var pre = [], win = [];
+              rs.forEach(function(x){ if (x.t < st) pre.push(x.mm); else if (x.t <= Math.min(en, nowMs)) win.push(x.mm); });
+              if (!win.length) return;
+              pre = pre.slice(-15);
+              var floor = pre.length ? med(pre) : Math.min.apply(null, win);
+              var w = win.slice().sort(function(x, y){ return x - y; });
+              var p95 = w.length > 2 ? w[Math.floor(w.length * 0.95)] : w[w.length-1];
+              var rise = Math.max(0, p95 - floor);
+              if (!(best[e.deployment_id] >= rise)) best[e.deployment_id] = rise;
+            });
+            var hoods = {}, total = 0, peak = 0, stillWet = 0;
+            Object.keys(best).forEach(function(k){
+              var x = dep[k] || {};
+              if (x.sensor_address_borough === 'Staten Island') return;            // user call: ignore SI
+              var c = x.location && x.location.coordinates;
+              if (c && _lwMiles(lat, lon, c[1], c[0]) > 20) return;
+              var hood = x.sensor_address_neighborhood || x.sensor_address_borough || 'NYC';
+              var inch = best[k] / 25.4;
+              total++; peak = Math.max(peak, inch); if (open[k]) stillWet++;
+              var hh = hoods[hood] || (hoods[hood] = { hood: hood, boro: x.sensor_address_borough || '', n: 0, peakIn: 0, open: 0 });
+              hh.n++; hh.peakIn = Math.max(hh.peakIn, inch); if (open[k]) hh.open++;
+            });
+            var list = Object.keys(hoods).map(function(k){ return hoods[k]; }).sort(function(x, y){ return y.peakIn - x.peakIn; });
+            out.sensors = { total: total, peakIn: peak, open: stillWet, hoods: list };
+          });
+        }).catch(function(){}));
+    }
+
+    // ── next high tide vs NWS coastal-flood thresholds ──
+    var td = window._tideData;
+    if (!td && typeof window._loadTides === 'function' && !window._lwTideKick){
+      // tides load lazily elsewhere; kick them and come back once for the block
+      window._lwTideKick = true;
+      try{ window._loadTides(lat, lon); }catch(e){}
+      setTimeout(function(){ try{ loadLocalWater(true); }catch(e){} }, 5000);
+    }
+    if (td && td.id && td.hilo){
+      var flKey = 'bvfl:' + td.id, cached = null;
+      try{ cached = JSON.parse(sessionStorage.getItem(flKey) || 'null'); }catch(e){}
+      var flP = cached ? Promise.resolve(cached) : Promise.all([
+        fetch('https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations/' + td.id + '/floodlevels.json').then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; }),
+        fetch('https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations/' + td.id + '/datums.json').then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; })
+      ]).then(function(res){
+        var fl = res[0], dt = res[1]; if (!fl) return null;
+        var mllw = 0;
+        ((dt && dt.datums) || []).forEach(function(x){ if (x.name === 'MLLW') mllw = +x.value || 0; });
+        // floodlevels come in station datum (STND); predictions are MLLW
+        var o = { minor: fl.nws_minor != null ? fl.nws_minor - mllw : (fl.nos_minor != null ? fl.nos_minor - mllw : null),
+                  moderate: fl.nws_moderate != null ? fl.nws_moderate - mllw : null,
+                  major: fl.nws_major != null ? fl.nws_major - mllw : null,
+                  action: fl.action != null ? fl.action - mllw : null };
+        try{ sessionStorage.setItem(flKey, JSON.stringify(o)); }catch(e){}
+        return o;
+      });
+      jobs.push(flP.then(function(th){
+        var now = Date.now(), next = null, nextLow = null;
+        td.hilo.forEach(function(x){
+          if (!x.t) return; var ts = x.t.getTime(); if (ts < now) return;
+          if (x.high && (!next || ts < next.t.getTime())) next = x;
+          if (!x.high && (!nextLow || ts < nextLow.t.getTime())) nextLow = x;
+        });
+        out.tide = { id: td.id, next: next, nextLow: nextLow, th: th || null };
+      }).catch(function(){}));
+    }
+
+    Promise.all(jobs).then(function(){
+      _lwInflight = false;
+      if (ep !== (window._locEpoch || 0)) return;          // location switched mid-flight
+      _lwAt = Date.now(); _lwKey = key;
+      window._localWater = out;
+      try{ updateHazardInsight(); }catch(e){}
+    }).catch(function(){ _lwInflight = false; });
+  }
+  window._loadLocalWater = loadLocalWater;
+
   function updateHazardInsight(){
     var el = document.getElementById('hazard-insight-content');
     if(!el) return;
@@ -59504,11 +59671,133 @@ function initNowMicroTabs(){
       var QN = function(txt){ return '<div style="font-size:.46rem;color:rgba(30,30,50,.5);line-height:1.45;margin-top:4px;">' + txt + '</div>'; };
       var gLat = function(g){ return g.lat != null ? g.lat : (g.geometry && g.geometry.coordinates ? g.geometry.coordinates[1] : null); };
       var gLon = function(g){ return g.lon != null ? g.lon : (g.geometry && g.geometry.coordinates ? g.geometry.coordinates[0] : null); };
+      var moonPhaseG = window._moonPhase;
+      var isSpringTide = moonPhaseG && moonPhaseG.phase != null && (moonPhaseG.phase < 0.06 || moonPhaseG.phase > 0.94 || (moonPhaseG.phase > 0.44 && moonPhaseG.phase < 0.56));
 
-      // ── GAUGE STATUS ──
+      // ── LOCAL WATER — full-width lead block ──
+      try{ loadLocalWater(); }catch(e){}
+      (function(){
+        var lw = window._localWater;
+        var L = window.LOCATION || {};
+        var fmtWhen = function(ms){ if (!ms) return ''; var d = new Date(ms); var dh = (d - Date.now())/3600000;
+          var t = d.toLocaleTimeString([], { hour:'numeric', minute:'2-digit' });
+          return (dh < 20 && d.getDate() === new Date().getDate()) ? t : d.toLocaleDateString([], { weekday:'short' }) + ' ' + t; };
+        var blk = function(title, body){ return '<div style="flex:1 1 230px;min-width:220px;">' + QH(title) + body + '</div>'; };
+        var row = function(l, r, col){ return '<div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0;font-size:.52rem;"><span style="color:rgba(30,30,50,.75);">' + l + '</span><span style="font-weight:800;white-space:nowrap;color:' + (col || '#2B22F4') + ';">' + r + '</span></div>'; };
+        var body = '';
+
+        // RIVERS NEARBY
+        var rb = '';
+        if (!lw) rb = QN('Loading nearby gauges…');
+        else if (!lw.gauges || !lw.gauges.length) rb = QN('No NWS river gauges within 40 miles.');
+        else {
+          var gs = lw.gauges, up = gs.filter(function(g){ return g.status && g.status.priority >= 2; });
+          rb += '<div style="display:flex;flex-direction:column;gap:1px;">';
+          gs.slice(0, 6).forEach(function(g){
+            var col = g.status ? g.status.color : '#16a34a';
+            var lbl = g.status ? g.status.label : 'NORMAL';
+            if (g.tidal && lbl === 'NORMAL') lbl = 'TIDAL';
+            var stage = g.obs != null ? g.obs.toFixed(1) + ' ft' : '--';
+            var tr = g.trend === 'rising' ? '<span style="color:#ef4444;">▲ rising</span>' : g.trend === 'falling' ? '<span style="color:#16a34a;">▼ falling</span>' : g.trend === 'steady' ? '<span style="color:rgba(30,30,50,.5);">▬ steady</span>' : '';
+            var crest = (g.fcst != null && g.trend === 'rising') ? (g.tidal ? 'high water ' : 'crest ') + g.fcst.toFixed(1) + ' ft' + (g.fcstAt ? ' ' + fmtWhen(g.fcstAt) : '') : '';
+            var vs = (g.obs != null && g.flood != null) ? (g.obs >= g.flood ? '+' + (g.obs - g.flood).toFixed(1) + ' ft over flood' : (g.flood - g.obs).toFixed(1) + ' ft below flood') : '';
+            rb += '<div onclick="_hazFlyTo(' + g.lat + ',' + g.lon + ',11)" class="quake-item" style="display:flex;align-items:center;gap:6px;padding:3px 4px;cursor:pointer;border-radius:4px;font-size:.5rem;">';
+            rb += '<span style="font-size:.4rem;padding:1px 5px;border-radius:5px;background:' + col + ';color:#fff;font-weight:800;letter-spacing:.04em;flex:none;">' + lbl + '</span>';
+            rb += '<span style="flex:1;min-width:0;"><span style="color:rgba(30,30,50,.9);font-weight:600;">' + g.name + '</span>' + (g.river ? ' <span style="color:rgba(30,30,50,.5);">· ' + g.river + '</span>' : '') + '<span style="color:rgba(30,30,50,.45);"> · ' + Math.round(g.dist) + ' mi</span>'
+               + '<div style="font-size:.44rem;color:rgba(30,30,50,.55);">' + [tr, crest, vs].filter(Boolean).join(' · ') + '</div></span>';
+            rb += '<span style="color:' + col + ';font-weight:800;font-size:.5rem;white-space:nowrap;">' + stage + '</span>';
+            rb += '</div>';
+          });
+          rb += '</div>';
+          rb += QN(gs.length + ' gauge' + (gs.length > 1 ? 's' : '') + ' within 40 mi · ' + (up.length ? up.length + ' at or above action stage' : 'all normal') + ' · click a row to fly there');
+        }
+        body += blk('RIVERS NEARBY', rb);
+
+        // STREET SENSORS (NYC)
+        if (lw && lw.sensors){
+          var sb = '', sn = lw.sensors;
+          if (!sn.total) sb = QN('No street flooding measured in the last 6 hours' + (sn.hoods ? '' : '') + '.');
+          else {
+            var tier = sn.peakIn >= 12 ? 'MAJOR FLOODING' : sn.peakIn >= 4 ? 'MINOR FLOODING' : 'PUDDLING';
+            var tcol = sn.peakIn >= 12 ? '#dc2626' : sn.peakIn >= 4 ? '#f97316' : '#5a4f42';
+            sb += '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:3px;"><span style="font-size:.66rem;font-weight:900;color:' + tcol + ';letter-spacing:.05em;">' + tier + '</span><span style="font-size:.46rem;color:rgba(30,30,50,.5);">' + sn.total + ' sensor' + (sn.total > 1 ? 's' : '') + ' · last 6 h' + (sn.open ? ' · ' + sn.open + ' still wet' : '') + '</span></div>';
+            sn.hoods.slice(0, 6).forEach(function(hd){
+              var hc = hd.peakIn >= 12 ? '#dc2626' : hd.peakIn >= 4 ? '#f97316' : '#5a4f42';
+              sb += row(hd.hood + (hd.boro ? ' <span style="color:rgba(30,30,50,.45);">' + hd.boro + '</span>' : '') + ' · ' + hd.n + ' sensor' + (hd.n > 1 ? 's' : ''), (hd.peakIn < 1 ? '&lt;1 in' : Math.round(hd.peakIn) + ' in') + (hd.open ? ' · wet' : ''), hc);
+            });
+            if (sn.hoods.length > 6) sb += QN('+ ' + (sn.hoods.length - 6) + ' more neighborhoods');
+            sb += QN('Depth = rise above each sensor\'s own dry reading. FloodNet · Staten Island not included.');
+          }
+          body += blk('STREET SENSORS · NYC', sb);
+        } else if (!lw && L.lat > 40.49 && L.lat < 40.92 && L.lon > -74.27 && L.lon < -73.68){
+          body += blk('STREET SENSORS · NYC', QN('Loading FloodNet…'));
+        }
+
+        // RAIN NOW
+        var rn = '';
+        var hy = window._wxHourly, ni = window._wxNearestIdx || 0;
+        var rate = (hy && hy.precipitation && hy.precipitation[ni] != null) ? hy.precipitation[ni] : null;
+        var last3 = 0; if (hy && hy.precipitation){ for (var k = Math.max(0, ni-2); k <= ni; k++) last3 += (hy.precipitation[k] || 0); }
+        var nxt3 = 0; if (hy && hy.precipitation){ for (var k2 = ni+1; k2 <= ni+3 && k2 < hy.precipitation.length; k2++) nxt3 += (hy.precipitation[k2] || 0); }
+        var nc = String(window._nowcastStr || '').replace(/[^\x20-\x7E·—]/g, '').trim();
+        if (nc) rn += '<div style="font-size:.6rem;font-weight:900;letter-spacing:.05em;color:' + (/FLASH|HEAVY|INTENSE/.test(nc) ? '#ef4444' : /RAIN NOW/.test(nc) ? '#0e7490' : '#2B22F4') + ';margin-bottom:3px;">' + nc + '</div>';
+        else rn += '<div style="font-size:.6rem;font-weight:900;letter-spacing:.05em;color:#16a34a;margin-bottom:3px;">NO RAIN ON RADAR</div>';
+        if (rate != null) rn += row('This hour', rate.toFixed(2) + '"' + (rate >= 1.75 ? ' · over the drain cap' : rate >= 0.5 ? ' · heavy' : ''), rate >= 1.75 ? '#ef4444' : rate >= 0.5 ? '#f97316' : '#2B22F4');
+        rn += row('Last 3 hours', last3.toFixed(2) + '"', last3 >= 1.5 ? '#ef4444' : last3 >= 0.75 ? '#f97316' : '#2B22F4');
+        rn += row('Next 3 hours', nxt3.toFixed(2) + '"', nxt3 >= 1.5 ? '#ef4444' : nxt3 >= 0.75 ? '#f97316' : '#2B22F4');
+        rn += QN('New York City drains about 1.75 in/hr; rates above that pond on the street.');
+        body += blk('RAIN NOW', rn);
+
+        // NEXT HIGH TIDE
+        if (lw && lw.tide && lw.tide.next){
+          var t = lw.tide, th = t.th || {}, nx = t.next;
+          var tb = '';
+          var minor = th.minor != null ? th.minor : null;
+          var vs2 = minor != null ? (nx.ft >= minor ? '<span style="color:#ef4444;">' + (nx.ft - minor).toFixed(1) + ' ft over minor flood</span>' : (minor - nx.ft).toFixed(1) + ' ft below minor flood') : '';
+          var tcol2 = th.major != null && nx.ft >= th.major ? '#dc2626' : th.moderate != null && nx.ft >= th.moderate ? '#ef4444' : minor != null && nx.ft >= minor ? '#f97316' : th.action != null && nx.ft >= th.action ? '#ca8a04' : '#2B22F4';
+          tb += '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:3px;"><span style="font-size:.66rem;font-weight:900;color:' + tcol2 + ';">' + nx.ft.toFixed(1) + ' ft</span><span style="font-size:.5rem;color:rgba(30,30,50,.65);">high tide ' + fmtWhen(nx.t.getTime()) + '</span></div>';
+          if (vs2) tb += '<div style="font-size:.5rem;color:rgba(30,30,50,.75);margin-bottom:3px;">' + vs2 + '</div>';
+          if (minor != null) tb += row('NWS thresholds (MLLW)', (th.action != null ? 'act ' + th.action.toFixed(1) + ' · ' : '') + 'minor ' + minor.toFixed(1) + (th.moderate != null ? ' · mod ' + th.moderate.toFixed(1) : '') + (th.major != null ? ' · maj ' + th.major.toFixed(1) : ''), 'rgba(30,30,50,.65)');
+          if (t.nextLow) tb += row('Next low tide', t.nextLow.ft.toFixed(1) + ' ft · ' + fmtWhen(t.nextLow.t.getTime()), 'rgba(30,30,50,.65)');
+          if (isSpringTide) tb += QN('Spring tide — near new or full moon, ranges run 20–40% above normal.');
+          tb += QN('NOAA CO-OPS station ' + t.id);
+          body += blk('NEXT HIGH TIDE', tb);
+        }
+
+        // FLOOD ALERTS HERE — proximity by alert polygon bbox
+        var near = [];
+        (window._hazardAlerts || []).forEach(function(a){
+          var e = (a.event || '').toLowerCase();
+          if (e.indexOf('flood') < 0 && e.indexOf('hydrologic') < 0 && e.indexOf('surge') < 0) return;
+          var g = a.geometry; if (!g || !g.coordinates || L.lat == null) return;
+          var minLa = 90, maxLa = -90, minLo = 180, maxLo = -180;
+          var walk = function(c){ if (typeof c[0] === 'number'){ if (c[1] < minLa) minLa = c[1]; if (c[1] > maxLa) maxLa = c[1]; if (c[0] < minLo) minLo = c[0]; if (c[0] > maxLo) maxLo = c[0]; } else c.forEach(walk); };
+          try{ walk(g.coordinates); }catch(err){ return; }
+          if (L.lat >= minLa - 0.35 && L.lat <= maxLa + 0.35 && L.lon >= minLo - 0.45 && L.lon <= maxLo + 0.45) near.push(a);
+        });
+        if (near.length){
+          var ab = '';
+          near.slice(0, 3).forEach(function(a){
+            var d = String(a.description || '');
+            var m = /(?:locations|areas)[^.]*?include[^.]*\.(?:[^.]*\.)?/i.exec(d);
+            var places = m ? m[0].replace(/\s+/g, ' ').trim() : '';
+            var ends = a.expires || a.ends; var endTxt = ''; try{ if (ends) endTxt = 'until ' + fmtWhen(new Date(ends).getTime()); }catch(err){}
+            ab += '<div style="margin-bottom:5px;"><div style="font-size:.54rem;font-weight:800;color:#ef4444;">' + a.event + (endTxt ? ' <span style="font-weight:600;color:rgba(30,30,50,.5);">' + endTxt + '</span>' : '') + '</div>'
+               + '<div style="font-size:.48rem;color:rgba(30,30,50,.7);line-height:1.45;">' + (places || (a.areaDesc || '').substring(0, 120)) + '</div></div>';
+          });
+          body += blk('FLOOD ALERTS HERE', ab);
+        }
+
+        h += '<div class="hz-sect" style="column-span:all;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid rgba(43,34,244,.10);">'
+           + '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:8px;"><span style="font-size:.62rem;color:rgba(43,34,244,.8);font-weight:900;letter-spacing:.12em;">LOCAL WATER</span><span style="font-size:.46rem;color:rgba(30,30,50,.5);">' + (L.name || 'here') + (lw ? ' · updated ' + new Date(lw.at).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }) : '') + '</span></div>'
+           + '<div style="display:flex;flex-wrap:wrap;gap:18px 26px;">' + body + '</div></div>';
+      })();
+
+      // ── GAUGE STATUS (current map scope) ──
+      var scopeLbl = (typeof floodScope !== 'undefined') ? ({ nearby:'NEARBY', region:'REGION', state:'STATE', conus:'NATIONWIDE' })[floodScope] || '' : '';
       var fhr = typeof floodForecastHour !== 'undefined' ? floodForecastHour : 'obs';
       var fhrLabel = fhr === 'obs' ? 'Observed now' : fhr === 'full' ? 'Full forecast period (max)' : fhr + '-hour forecast';
-      h += '<div class="hz-sect">' + QH('GAUGE STATUS');
+      h += '<div class="hz-sect">' + QH('GAUGES' + (scopeLbl ? ' · ' + scopeLbl : ''));
       h += QR('Major flooding', fs.major || 0, '#9333ea');
       h += QR('Moderate flooding', fs.moderate || 0, '#ef4444');
       h += QR('Minor flooding', fs.minor || 0, '#f97316');
@@ -59532,8 +59821,6 @@ function initNowMicroTabs(){
       if(flAlertsCt > 0) flThreat += 3;
       if(wx.weatherCode >= 95) flThreat += 2;
       if(wx.next6hrMaxPrecipProb != null && wx.next6hrMaxPrecipProb > 80) flThreat += 1;
-      var moonPhaseG = window._moonPhase;
-      var isSpringTide = moonPhaseG && moonPhaseG.phase != null && (moonPhaseG.phase < 0.06 || moonPhaseG.phase > 0.94 || (moonPhaseG.phase > 0.44 && moonPhaseG.phase < 0.56));
       if(isSpringTide && elevated.length > 0) flThreat += 1;
       var largeFires = (window._activeFires||[]).filter(function(f){ return (f.acres||0) >= 5000; });
       if(largeFires.length > 0 && wx.precipProb > 30) flThreat += 1;
