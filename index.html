@@ -55856,7 +55856,7 @@ function initNowMicroTabs(){
   window._floodNetLayer = null;
   // Sensors start hidden — pressing NEARBY / ALL NYC is what puts them on the
   // map (the separate SENSORS ON/OFF toggle was removed as redundant).
-  var fnSensorsOn = false, fnRows = [], fnNames = {}, fnArea = 'near';
+  var fnSensorsOn = false, fnRows = [], fnNames = {}, fnMeta = {}, fnArea = 'near';
 
   // Depth tiers. FloodNet reports millimetres; a sensor reading dead 0 is the
   // normal dry state, not a fault, so 0 must still render as a live sensor.
@@ -55910,6 +55910,96 @@ function initNowMicroTabs(){
       + '<span>now</span></div></div>';
   }
 
+  // Static facts from the deployment record (already fetched with the sensors)
+  function fnMetaRows(id){
+    var x = fnMeta[id]; if (!x) return '';
+    var R = function(l, v){ return '<div class="hz-card-row"><span class="hz-label">' + l + '</span><span class="hz-val" style="max-width:160px;text-align:right;">' + v + '</span></div>'; };
+    var h = '';
+    var place = [x.sensor_address_neighborhood, x.sensor_address_borough].filter(Boolean).join(' · ');
+    if (place) h += R('Neighborhood', place);
+    if (x.mounted_over) h += R('Mounted over', String(x.mounted_over).replace(/_/g, ' ') + (/sidewalk/i.test(x.mounted_over) ? ' <span style="opacity:.55;">(curb ≈ 6″)</span>' : ''));
+    if (x.height_ground_mm) h += R('Sensor height', Math.round(x.height_ground_mm / 25.4) + '″ above the ground');
+    if (x.date_deployed){ var y = String(x.date_deployed).slice(0, 4); if (/^\d{4}$/.test(y)) h += R('Reporting since', y + (x.sensor_status && /off|down|inactive|fail|bad|poor/i.test(x.sensor_status) ? ' · <span style="color:#ef4444;">' + x.sensor_status + '</span>' : '')); }
+    return h;
+  }
+  // 90-day history for one sensor: last water, count, tidal vs rain, the
+  // high-tide height this corner floods above, and the tide/rain context now.
+  var fnHistCache = {};
+  function fnHighs90(){
+    if (window._fnHighs90P) return window._fnHighs90P;
+    var L = window.LOCATION || {};
+    var st = (typeof window._nearestTideStation === 'function' && L.lat != null) ? window._nearestTideStation(L.lat, L.lon) : (window._tideData && window._tideData.id ? { id: window._tideData.id } : null);
+    if (!st){ window._fnHighs90P = Promise.resolve([]); return window._fnHighs90P; }
+    var d90 = new Date(Date.now() - 90*86400000);
+    window._fnHighs90P = fetch('https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?product=predictions&application=bluishvoid&datum=MLLW&station=' + st.id + '&time_zone=gmt&units=english&interval=hilo&format=json&begin_date=' + d90.getFullYear() + String(d90.getMonth()+1).padStart(2,'0') + String(d90.getDate()).padStart(2,'0') + '&range=2200')
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(j){ return ((j && j.predictions) || []).filter(function(x){ return x.type === 'H'; }).map(function(x){ return { t: new Date(x.t.replace(' ', 'T') + 'Z').getTime(), v: parseFloat(x.v) }; }); })
+      .catch(function(){ window._fnHighs90P = null; return []; });
+    return window._fnHighs90P;
+  }
+  function fnLoadHistory(row, el){
+    if (!el || el.getAttribute('data-loaded')) return;
+    el.setAttribute('data-loaded', '1');
+    var id = row.id;
+    var R = function(l, v, col){ return '<div class="hz-card-row"><span class="hz-label">' + l + '</span><span class="hz-val" style="max-width:170px;text-align:right;' + (col ? 'color:' + col + ';' : '') + '">' + v + '</span></div>'; };
+    var fmtD = function(ms){ var d = new Date(ms); return d.toLocaleDateString([], { month:'short', day:'numeric' }) + ', ' + d.toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }); };
+    var fmtDur = function(ms){ var m = Math.round(ms/60000); return m < 60 ? m + ' min' : (m/60).toFixed(m >= 600 ? 0 : 1) + ' h'; };
+    var render = function(H){
+      var h = '';
+      if (!H || H.n === 0) h += R('Last water', 'none in 90 days', '#16a34a');
+      else {
+        h += R('Last water', fmtD(H.lastStart) + (H.lastDur ? ' · ' + fmtDur(H.lastDur) : ' · still open') + (H.lastPeakIn != null ? ' · peak ' + (H.lastPeakIn < 1 ? '<1″' : Math.round(H.lastPeakIn) + '″') : ''), '#5a4f42');
+        h += R('90 days', H.n + ' flood' + (H.n > 1 ? 's' : '') + (H.kind ? ' · <b>' + H.kind + '</b>' + (H.kind !== 'RAIN' ? ' (' + Math.round(H.tf*100) + '% near high tide)' : '') : ''), H.kind === 'TIDAL' ? '#1d4ed8' : H.kind === 'RAIN' ? '#0e7490' : '#5a4f42');
+        if (H.thresh != null){
+          var lw = window._localWater, nx = lw && lw.tide && lw.tide.next, exp = lw && lw.tide && lw.tide.expHigh != null ? lw.tide.expHigh : (nx ? nx.ft : null);
+          var over = exp != null && exp >= H.thresh;
+          h += R('Floods above', '~' + H.thresh.toFixed(1) + ' ft high tide' + (exp != null ? ' · next ' + exp.toFixed(1) + ' ft' + (over ? ' — <b>likely wet</b>' : '') : ''), over ? '#ef4444' : '#1d4ed8');
+        }
+      }
+      var rr = window._nowcastRate;
+      if (rr && Date.now() - rr.at < 15*60000) h += R('Rain here now', rr.inhr > 0 ? rr.inhr.toFixed(2) + ' in/hr' + (rr.label ? ' · ' + rr.label.toLowerCase() : '') : 'none on radar', rr.inhr >= 0.5 ? '#f97316' : rr.inhr > 0 ? '#0e7490' : '#16a34a');
+      el.innerHTML = h;
+    };
+    if (fnHistCache[id]){ render(fnHistCache[id]); return; }
+    var nowMs = Date.now();
+    var lo = new Date(nowMs - 90*86400000).toISOString().slice(0,19), hi = new Date(nowMs + 5*60000).toISOString().slice(0,19);
+    Promise.all([
+      fnQuery('{ flood_events(where:{_and:[{deployment_id:{_eq:' + JSON.stringify(id) + '}},{start_time:{_gte:"' + lo + '"}},{start_time:{_lte:"' + hi + '"}},{event_confidence:{_gte:0.5}}]}, order_by:{start_time:desc}, limit:400){ start_time end_time } }'),
+      fnHighs90()
+    ]).then(function(res){
+      var evs = ((res[0] && res[0].flood_events) || []), highs = res[1] || [];
+      var H = { n: evs.length };
+      if (!evs.length){ fnHistCache[id] = H; render(H); return; }
+      var P = function(t){ return new Date(t + (/[Zz+]/.test(t) ? '' : 'Z')).getTime(); };
+      var last = evs[0]; H.lastStart = P(last.start_time); H.lastDur = last.end_time ? P(last.end_time) - H.lastStart : null;
+      if (highs.length){
+        var matched = [];
+        evs.forEach(function(e){ var t = P(e.start_time), best = null; highs.forEach(function(hh){ if (Math.abs(hh.t - t) <= 2*3600000 && (!best || Math.abs(hh.t - t) < Math.abs(best.t - t))) best = hh; }); if (best) matched.push(best.v); });
+        H.tf = matched.length / evs.length;
+        H.kind = H.tf >= 0.6 ? 'TIDAL' : H.tf <= 0.3 ? 'RAIN' : 'MIXED';
+        if (H.kind !== 'RAIN' && matched.length >= 3){ matched.sort(function(a, b){ return a - b; }); H.thresh = matched[Math.floor(matched.length * 0.2)]; }
+      }
+      // peak of the last event: rise above the pre-event median, p95 in the window
+      var eLo = new Date(H.lastStart - 20*60000).toISOString().slice(0,19);
+      var eHi = new Date(Math.min(H.lastDur != null ? H.lastStart + H.lastDur + 60000 : H.lastStart + 6*3600000, nowMs)).toISOString().slice(0,19);
+      return fnQuery('{ depth_data(where:{_and:[{deployment_id:{_eq:' + JSON.stringify(id) + '}},{time:{_gte:"' + eLo + '"}},{time:{_lte:"' + eHi + '"}}]}, order_by:{time:asc}, limit:600){ time depth_proc_mm } }')
+        .then(function(d){
+          var rows = ((d && d.depth_data) || []).filter(function(r){ return r.depth_proc_mm != null; });
+          var pre = [], win = [];
+          rows.forEach(function(r){ (P(r.time) < H.lastStart ? pre : win).push(r.depth_proc_mm); });
+          if (win.length){
+            pre = pre.slice(-15);
+            var med = function(a){ var q = a.slice().sort(function(x, y){ return x - y; }); var m = q.length >> 1; return q.length % 2 ? q[m] : (q[m-1] + q[m]) / 2; };
+            var floor = pre.length ? med(pre) : Math.min.apply(null, win);
+            var w = win.slice().sort(function(x, y){ return x - y; });
+            var p95 = w.length > 2 ? w[Math.floor(w.length * 0.95)] : w[w.length-1];
+            H.lastPeakIn = Math.max(0, p95 - floor) / 25.4;
+          }
+          fnHistCache[id] = H; render(H);
+        }).catch(function(){ fnHistCache[id] = H; render(H); });
+    }).catch(function(){ el.innerHTML = '<div style="font-size:8.5px;opacity:.5;">History unavailable</div>'; });
+  }
+
   function fnLoadTrace(depId, el){
     if (!el || el.getAttribute('data-loaded')) return;
     el.setAttribute('data-loaded', '1');
@@ -55958,17 +56048,20 @@ function initNowMicroTabs(){
         '<div class="hz-card-head"><div class="hz-accent" style="background:' + t.c + ';"></div>'
         + '<span style="color:' + t.c + ';">' + t.label + '</span></div>'
         + '<div class="hz-card-row"><span class="hz-label">Corner</span><span class="hz-val" style="max-width:150px;text-align:right;">' + row.name + '</span></div>'
+        + fnMetaRows(row.id)
         + (row.stale ? ''
            : '<div class="hz-card-row"><span class="hz-label">Water depth</span><span class="hz-val" style="color:' + t.c + ';">'
              + (row.mm > 0 ? row.mm + ' mm (' + (row.mm/25.4).toFixed(1) + '″) above normal' : 'none') + '</span></div>'
              + (row.base > 0 ? '<div class="hz-card-row"><span class="hz-label">Sensor floor</span><span class="hz-val" style="font-size:8.5px;">reads ' + row.base + ' mm when dry</span></div>' : '')
              + '<div class="hz-card-row"><span class="hz-label">Measured</span><span class="hz-val">' + age + '</span></div>')
         + (row.stale ? '' : '<div class="fn-spark" style="min-height:52px;"><div style="font-size:8.5px;opacity:.5;padding:8px 0;">Loading trace…</div></div>')
+        + '<div class="fn-more"><div style="font-size:8.5px;opacity:.5;padding:4px 0;">Loading history…</div></div>'
         + '<div class="hz-card-footer">FloodNet NYC · street-level sensor</div>',
         { className:'hz-popup', maxWidth:280 });
-      if (!row.stale) m.on('popupopen', function(e){
+      m.on('popupopen', function(e){
         var host = e.popup.getElement();
-        fnLoadTrace(row.id, host && host.querySelector('.fn-spark'));
+        if (!row.stale) fnLoadTrace(row.id, host && host.querySelector('.fn-spark'));
+        fnLoadHistory(row, host && host.querySelector('.fn-more'));
       });
       window._floodNetLayer.addLayer(m);
     });
@@ -56098,13 +56191,14 @@ function initNowMicroTabs(){
       var qLat = city ? 40.7300 : lat, qLon = city ? -73.9400 : lon;
       var rad  = city ? 40000 : 12000, lim = city ? 600 : 150;
       fnQuery('{ deployments_within_radius(args:{lat:' + qLat.toFixed(4) + ', lon:' + qLon.toFixed(4)
-            + ', radius_meters:' + rad + '}, limit:' + lim + '){ deployment_id name location } }')
+            + ', radius_meters:' + rad + '}, limit:' + lim + '){ deployment_id name location mounted_over height_ground_mm date_deployed sensor_status sensor_address_borough sensor_address_neighborhood } }')
         .then(function(d){
           var deps = (d && d.deployments_within_radius) || [];
           if (!deps.length) return;
           var geo = {};
           deps.forEach(function(x){
             fnNames[x.deployment_id] = String(x.name || '').replace(/^[A-Z]{1,2}\s*-\s*/, '');
+            fnMeta[x.deployment_id] = x;
             if (x.location && x.location.coordinates) geo[x.deployment_id] = x.location.coordinates;
           });
           var ids = deps.map(function(x){ return JSON.stringify(x.deployment_id); }).join(',');
