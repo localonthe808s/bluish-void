@@ -288,8 +288,12 @@ then the place under it. MTA names carry both halves in one string joined by a h
 the order is not consistent — "34 St-Penn Station" but "Times Sq-42 St" — so `splitStation`
 pulls out whichever part reads as a street, and the street always lands on the same line.
 A hyphen **between digits** is part of a name rather than a separator: splitting
-"47-50 Sts-Rockefeller Ctr" naively yields "47". Bullets are a coloured disc per route in
-MTA order (1234567 ABCDEFG JLMNQRWZ S). Names are drawn only when the framing is finer than **9 m
+"47-50 Sts-Rockefeller Ctr" naively yields "47". Bullets stack **four to a row**, and a colour group never
+splits across rows — the A C E stay together and so do B D F M. They are gathered by
+colour **globally**, not by adjacency: MTA order runs A B C D E F G, so the blues and
+oranges interleave and adjacent grouping would give seven groups of one. Groups are then
+packed in order, a row taking a whole group or starting a new one. Times Square comes out
+1237 / ACE / NQRW / S; Herald Square BDFM / NQRW; W 4 St ACE / BDFM. Names are drawn only when the framing is finer than **9 m
 per pixel**; at city scale 444 of them is a smear, so the stations stay as dots. Labels
 are placed with a rectangle-overlap test and a label that collides is dropped rather than
 stacked.
