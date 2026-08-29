@@ -415,3 +415,29 @@ would overlap one already placed is dropped. At city framing exactly one label s
 citywide — Randalls Island Park.
 
 The live pane still uses the basemap's own place labels; this is the card render only.
+
+---
+
+# Neighbourhood names
+
+`bathy/hood_labels.json` — all 262 of the city's 2020 NTAs, each with a name, an anchor
+and a bounding box, built the same way the park labels are: the anchor is the sampled
+interior point furthest from any edge, not a centroid, and where an NTA is several
+polygons only the largest body is labelled.
+
+**Held back until 30 m per pixel.** From city framing they are noise laid across the whole
+map, so unlike the park names — which are governed purely by whether they fit — these
+carry an explicit zoom gate as well, and then still have to fit inside the
+neighbourhood's own box.
+
+**An NTA name joins distinct neighbourhoods with hyphens**, so each hyphen part takes its
+own line and is *not* split further — otherwise "Bulls Head" comes apart across two rows.
+Todt Hill-Emerson Hill-Lighthouse Hill-Manor Heights sets as four lines; Carroll
+Gardens-Cobble Hill-Gowanus-Red Hook as four. A single-part name falls back to the word
+stacking the parks use.
+
+## One collision list for all three
+
+Neighbourhood, park and station labels now share `LABELBOX`, filled in that priority
+order, so a later label gives way to one already placed instead of printing through it.
+Before this each kind kept its own list and only avoided its own kind.

@@ -91,7 +91,8 @@ var VIEWS = {
               ghosts:'bathy/ghost_streams.json', wet:'bathy/ghost_wetground.json',
               flood:'bathy/flood_stormwater.json',
               subway:'bathy/subway_lines.json', stops:'bathy/subway_stops.json',
-              bullets:'bathy/subway_colours.json', parkNames:'bathy/park_labels.json' },
+              bullets:'bathy/subway_colours.json', parkNames:'bathy/park_labels.json',
+              hoodNames:'bathy/hood_labels.json' },
   shelf:    { w:-75.20, s:37.20, e:-70.00, n:41.20, bathy:'bathy/bathy_shelf.json', zoom:7 },
   atlantic: { w:-80.00, s:5.00,  e:-5.00,  n:60.00, bathy:'bathy/bathy_atlantic.json', zoom:3 },
   /* The two places worth real bathymetry: GMRT multibeam rendered to images with
@@ -110,7 +111,7 @@ var W = 1100, H = Math.round(W / 1.1372);   // one style, so give it the room
    the band it opens, so drawing them deepest-last with a darkening ramp gives
    the shelf, the slope, the abyssal plain and the ridge as tone. */
 var BATHY = {}, BOROS = null, HOODS = null, GHOSTS = null, WETGROUND = null, FLOOD = null,
-    SUBWAY = null, STOPS = null, BULLETS = null, PARKNAMES = null;
+    SUBWAY = null, STOPS = null, BULLETS = null, PARKNAMES = null, HOODNAMES = null;
 function boroughsFor(view){
   var v = VIEWS[view];
   if (!v || !v.boroughs) return Promise.resolve(null);
@@ -131,6 +132,12 @@ function stopsFor(view){
   if (!v || !v.stops) return Promise.resolve(null);
   if (STOPS) return Promise.resolve(STOPS);
   return fetch(v.stops).then(function(r){ return r.json(); }).then(function(j){ STOPS = j; return j; });
+}
+function hoodNamesFor(view){
+  var v = VIEWS[view];
+  if (!v || !v.hoodNames) return Promise.resolve(null);
+  if (HOODNAMES) return Promise.resolve(HOODNAMES);
+  return fetch(v.hoodNames).then(function(r){ return r.json(); }).then(function(j){ HOODNAMES = j; return j; });
 }
 /* Park names. Central Park itself is deliberately absent from the data — at the zoom
    where its own name would fit, the interesting labels are the parts: Sheep Meadow,
@@ -521,7 +528,65 @@ function drawActiveWater(ctx, style, f, view, latMid, W, H){
 }
 /* Each route in its own MTA colour, straight out of the GTFS `route_color`. A white
    casing under every line keeps them apart where four of them share an avenue. */
-var RAIL_INK = '#33383F', PARK_INK = '#1F4D33';
+var RAIL_INK = '#33383F', PARK_INK = '#1F4D33', HOOD_INK = '#39424F';
+
+/* All three kinds of label share one list of occupied rectangles, filled in priority
+   order — neighbourhood, then park, then station — so a later one gives way to one
+   already placed instead of printing through it. */
+var LABELBOX = [];
+function labelFits(x, y, w, h){
+  for (var i = 0; i < LABELBOX.length; i++){
+    var t = LABELBOX[i];
+    if (x < t[2] && t[0] < x + w && y < t[3] && t[1] < y + h) return false;
+  }
+  LABELBOX.push([x, y, x + w, y + h]);
+  return true;
+}
+
+/* An NTA name joins distinct neighbourhoods with hyphens — "Todt Hill-Emerson
+   Hill-Lighthouse Hill-Manor Heights" — so each hyphen part takes its own line and is
+   NOT split further, or "Bulls Head" comes apart across two rows. A single-part name
+   falls back to the word stacking the parks use. */
+function stackHood(nm){
+  var parts = (nm || '').split(/\s*-\s*/).filter(Boolean);
+  return parts.length > 1 ? parts : stackName(nm);
+}
+
+/* Neighbourhood names, set at the pole of inaccessibility of each NTA. Held back until
+   the framing is finer than 30 m per pixel — from far out they are noise laid over the
+   whole city — and then still only drawn if the stacked block fits inside the
+   neighbourhood's own box. */
+function drawHoodNames(ctx, geo, proj, mPerPx){
+  LABELBOX.length = 0;
+  if (!geo || !mPerPx || mPerPx > 30) return;
+  ctx.save();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  var LH = 13;
+  ctx.font = '600 11px system-ui, sans-serif';
+  try { ctx.letterSpacing = '0.16em'; } catch(e){}
+  geo.features.forEach(function(ft){
+    var bb = ft.properties.bbox;
+    var a = proj({ x:bb[0], y:bb[3] }), b = proj({ x:bb[2], y:bb[1] });
+    var boxW = Math.abs(b.x - a.x), boxH = Math.abs(b.y - a.y);
+    if (boxW < 70 || boxH < 34) return;
+    var lines = stackHood(ft.properties.name).map(function(l){ return l.toUpperCase(); });
+    var tw = 0;
+    lines.forEach(function(l){ tw = Math.max(tw, ctx.measureText(l).width); });
+    var th = lines.length * LH;
+    if (tw > boxW * 0.8 || th > boxH * 0.6) return;
+    var q = proj({ x:ft.geometry.coordinates[0], y:ft.geometry.coordinates[1] });
+    if (!labelFits(q.x - tw / 2 - 4, q.y - th / 2 - 3, tw + 8, th + 6)) return;
+    lines.forEach(function(l, i){
+      var cy = q.y - th / 2 + LH / 2 + i * LH;
+      ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(255,255,255,.85)';
+      ctx.strokeText(l, q.x, cy);
+      ctx.fillStyle = HOOD_INK; ctx.fillText(l, q.x, cy);
+    });
+  });
+  ctx.textAlign = 'left';
+  try { ctx.letterSpacing = '0px'; } catch(e){}
+  ctx.restore();
+}
 
 /* A park is named only when the words actually fit inside it — measured against the
    park's own projected box, not against a zoom number. That way a name appears exactly
@@ -559,7 +624,6 @@ function drawParkNames(ctx, geo, proj){
   var FS = 8.5, LH = 10.5;
   ctx.font = '600 ' + FS + 'px system-ui, sans-serif';
   try { ctx.letterSpacing = '0.07em'; } catch(e){}
-  var taken = [];
   geo.features.forEach(function(ft){
     var bb = ft.properties.bbox;
     var a = proj({ x:bb[0], y:bb[3] }), b = proj({ x:bb[2], y:bb[1] });
@@ -571,12 +635,7 @@ function drawParkNames(ctx, geo, proj){
     var th = lines.length * LH;
     if (tw > boxW * 0.86 || th > boxH * 0.74) return;      // does not fit cleanly: skip
     var q = proj({ x:ft.geometry.coordinates[0], y:ft.geometry.coordinates[1] });
-    var x0 = q.x - tw / 2, y0 = q.y - th / 2;
-    for (var i = 0; i < taken.length; i++){
-      var t = taken[i];
-      if (x0 < t[2] && t[0] < x0 + tw && y0 < t[3] && t[1] < y0 + th) return;
-    }
-    taken.push([x0, y0, x0 + tw, y0 + th]);
+    if (!labelFits(q.x - tw / 2, q.y - th / 2, tw, th)) return;
     lines.forEach(function(l, i){
       var cy = q.y - th / 2 + LH / 2 + i * LH;
       ctx.lineWidth = 2.6; ctx.strokeStyle = 'rgba(255,255,255,.9)';
@@ -651,14 +710,7 @@ function drawSubway(ctx, lines, stops, proj, bullets, mPerPx){
   var shown = mPerPx && mPerPx < 22;
   var named = mPerPx && mPerPx < 9;
   if (!shown){ ctx.restore(); return; }
-  var R = 2.4, taken = [];
-  var fits = function(x, y, w, h){
-    for (var i = 0; i < taken.length; i++){
-      var t = taken[i];
-      if (x < t[2] && t[0] < x + w && y < t[3] && t[1] < y + h) return false;
-    }
-    taken.push([x, y, x + w, y + h]); return true;
-  };
+  var R = 2.4, fits = labelFits;
   ctx.font = '600 9px system-ui, sans-serif';
   ctx.textBaseline = 'middle';
   stops.features.forEach(function(ft){
@@ -890,6 +942,10 @@ function drawCard(style){
             }).then(function(fl){
               if (stale()) return;
               drawFlood(ctx, fl, out.project, W, H);
+              return hoodNamesFor(vkey);
+            }).then(function(hn){
+              if (stale()) return;
+              drawHoodNames(ctx, hn, out.project, VB.mpp);
               return parkNamesFor(vkey);
             }).then(function(pn){
               if (stale()) return;
