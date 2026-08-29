@@ -358,6 +358,26 @@ function flavorFor(style){
 
 var focused = STYLES[0], liveMap = null, liveLayers = [];
 
+/* Leaflet stacks by PANE, not by add order, and the two layer kinds here live in
+   different ones: protomapsL.leafletLayer is a grid layer in tilePane (z 200) while
+   L.geoJSON draws into overlayPane (z 400). So the opaque borough mask sat on top of
+   the parks-and-rivers pass no matter when it was added, and buried every park inside
+   the city. Give each band its own pane and the order becomes explicit:
+     tilePane 200  the base map
+     bvMask   350  the borough mask and neighbourhood lines
+     bvParks  360  parks and rivers, put back over the mask
+     overlay  400  ghost water, flood zones, the subway
+     bvLabels 480  place names, which have to clear all of it            */
+function livePane(name, z){
+  if (!liveMap.getPane(name)){
+    liveMap.createPane(name);
+    var el = liveMap.getPane(name);
+    el.style.zIndex = z;
+    el.style.pointerEvents = 'none';
+  }
+  return name;
+}
+
 /* Paint the depth bands straight onto the card canvas, under the vector draw,
    using the projection Static hands back so the two line up exactly. */
 function drawBathy(ctx, geo, proj, dark){
@@ -801,30 +821,45 @@ function focus(style){
   liveLayers.forEach(function(l){ liveMap.removeLayer(l); });
   liveLayers = [];
   if (liveBathy){ liveMap.removeLayer(liveBathy); liveBathy = null; }
+  livePane('bvMask', 350); livePane('bvParks', 360); livePane('bvLabels', 480);
   [false, true].forEach(function(labels){
-    var layer = protomapsL.leafletLayer({
+    var opts = {
       url: document.getElementById('src').value,
       maxDataZoom: 14,
       paintRules: labels ? [] : rulesFor(style, f),
       labelRules: labels ? labelsFor(style, f) : [],
       backgroundColor: labels ? undefined : f.background,
       attribution: ''
-    });
+    };
+    /* Set `pane` only when there is one to set. Passing `pane: undefined` does not
+       mean "use the default" — it overrides Leaflet's prototype default with
+       undefined, getPane() then returns nothing and the layer dies on appendChild,
+       taking the whole map with it. */
+    if (labels) opts.pane = 'bvLabels';
+    var layer = protomapsL.leafletLayer(opts);
     layer.addTo(liveMap); liveLayers.push(layer);
   });
   // the sea floor for the ocean framings, painted between the base and the labels
   if (view.relief){
     liveBathy = L.imageOverlay(view.relief.img, [[view.relief.s, view.relief.w], [view.relief.n, view.relief.e]],
                                { opacity:1, interactive:false }).addTo(liveMap);
-    if (liveLayers[1]) liveLayers[1].bringToFront();
     return;
   }
   boroughsFor(vkey).then(function(boro){
     if (!boro || vkey !== document.getElementById('view').value) return;
     var dark = !(style.base === 'light');
-    var lb = L.geoJSON(boro, { renderer: L.canvas({ padding:0.4 }),
+    var lb = L.geoJSON(boro, { renderer: L.canvas({ padding:0.4, pane:'bvMask' }), pane:'bvMask',
       style: function(){ return { color: boroughEdge(dark), weight:1.2, fillColor: boroughFill(dark), fillOpacity:1 }; } }).addTo(liveMap);
     liveLayers.push(lb);
+    /* The mask is opaque, so the parks and rivers inside the city have to be put back
+       over it. This has to happen HERE, inside the same promise: added outside, it went
+       on while boroughsFor was still resolving and the mask landed on top of it. */
+    if (view.boroughs){
+      var pl = protomapsL.leafletLayer({ url: document.getElementById('src').value, maxDataZoom: 14,
+        paintRules: parkRulesFor().concat(waterRulesFor(style, f)), labelRules: [],
+        pane: 'bvParks', attribution: '' });
+      pl.addTo(liveMap); liveLayers.push(pl);
+    }
     wetFor(vkey).then(function(wg){
       if (!wg) return;
       var wl = L.geoJSON(wg, { renderer: L.canvas({ padding:0.4 }),
@@ -908,19 +943,11 @@ function focus(style){
     });
     hoodsFor(vkey).then(function(hoods){
       if (!hoods) return;
-      var hl = L.geoJSON(hoods, { renderer: L.canvas({ padding:0.4 }),
+      var hl = L.geoJSON(hoods, { renderer: L.canvas({ padding:0.4, pane:'bvMask' }), pane:'bvMask',
         style: function(){ return { color: hoodEdge(dark), weight:0.6, fill:false }; } }).addTo(liveMap);
       liveLayers.push(hl);
-      if (liveLayers[1]) liveLayers[1].bringToFront();
     });
-    if (liveLayers[1]) liveLayers[1].bringToFront();
   });
-  if (view.boroughs){
-    var parkLayer = protomapsL.leafletLayer({ url: document.getElementById('src').value, maxDataZoom: 14,
-      paintRules: parkRulesFor().concat(waterRulesFor(style, f)), labelRules: [], attribution: '' });
-    parkLayer.addTo(liveMap); liveLayers.push(parkLayer);
-    if (liveLayers[1]) liveLayers[1].bringToFront();
-  }
   bathyFor(vkey).then(function(geo){
     if (!geo || vkey !== document.getElementById('view').value) return;
     var dark = !(style.base === 'light');
@@ -928,7 +955,6 @@ function focus(style){
       renderer: L.canvas({ padding: 0.4 }),
       style: function(ft){ return { stroke:false, fillColor: depthFill(ft.properties.d, dark), fillOpacity:1 }; }
     }).addTo(liveMap);
-    if (liveLayers[1]) liveLayers[1].bringToFront();   // labels stay on top
   });
 }
 

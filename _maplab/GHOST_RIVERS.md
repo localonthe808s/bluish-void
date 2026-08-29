@@ -319,3 +319,28 @@ makes sense, since the lines follow the avenues along the ridges rather than the
 floors. But a station is **twice as likely as the ground around it to sit in a
 deep-flooding polygon**. Seven of them do. That is the pairing worth showing, and it is
 about today's topography rather than the old watercourses.
+
+---
+
+# Layer order in the live pane
+
+Leaflet stacks by **pane, not by add order**, and the two kinds of layer here sit in
+different ones: `protomapsL.leafletLayer` is a grid layer in `tilePane` (z 200) while
+`L.geoJSON` draws into `overlayPane` (z 400). So the opaque borough mask covered the
+parks-and-rivers pass no matter when it was added, and every park inside the city was
+invisible — `bringToFront()` cannot help, because it only reorders within a pane.
+
+Each band now has its own pane:
+
+| pane | z | what |
+|---|---|---|
+| `tilePane` | 200 | the base map |
+| `bvMask` | 350 | borough mask, neighbourhood lines |
+| `bvParks` | 360 | parks and rivers, put back over the mask |
+| `overlayPane` | 400 | ghost water, flood zones, subway |
+| `bvLabels` | 480 | place names, which have to clear all of it |
+
+**Never pass `pane: undefined`.** It does not mean "use the default" — it overrides
+Leaflet's prototype default with undefined, `getPane()` then returns nothing, and the
+layer dies on `appendChild`, taking the whole map down with it. Set the key only when
+there is a pane to set.
