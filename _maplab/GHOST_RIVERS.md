@@ -185,3 +185,57 @@ A course does not always run the length of its marsh: the centreline is only kep
 where the wet ground was narrow enough to have been a channel, so a broad marsh is
 drawn as an area with no line through it, and a neck between two marshes gets a line.
 That is deliberate, not a gap.
+
+---
+
+# Flood-prone zones
+
+Added 2026-08-29. `bathy/flood_stormwater.json` — **NYC DEP Stormwater Flood Map**,
+moderate scenario at today's sea level, from the city's public ArcGIS:
+
+    services5.arcgis.com/GfwWNkhOj9bNBqoJ/.../DEP_Stormwater___Moderate_with_Current_Sea_Level_Rise/FeatureServer/14
+
+This is *pluvial* flooding — rain standing in the street, the kind that fills
+basements a mile from any FEMA zone. FEMA's NFHL maps coastal and riverine flooding
+and would tell the wrong story here. Two classes: nuisance (4 in–1 ft) and deep and
+contiguous (≥1 ft).
+
+**It cannot be fetched live.** It is a raster-derived polygonization: the whole city
+comes back as 13 MB across 27,600 rings even generalised server-side, and ArcGIS does
+not clip to the query envelope. Baked once instead — rings under 200 m² dropped, which
+sheds three quarters of them and keeps **91% of the flooded area**, then simplified to
+9 m. 7,072 polygons, 1.9 MB, 10.5 km². For the live site this should become raster
+tiles on R2 rather than GeoJSON.
+
+**Colour.** Red outlines the zones; the courses went back to plain blue. Bright red
+(`#E5342A`) is nearly invisible against the lab's orange borough mask — it needed a
+deep crimson (`#A5101A`) with a darkening fill to separate from the land under it.
+
+## Does flooding actually follow the buried water?
+
+Measured, not assumed (`overlap.py`, `overlap2.py`): both layers rasterised to a 20 m
+grid over the three boroughs, comparing the share of modelled flooding that falls on
+ghost ground against the share of *all* land that is ghost ground.
+
+| | ghost ground | deep flooding on it | enrichment |
+|---|---|---|---|
+| Manhattan · marsh | 12.8% | 24.8% | **1.93×** |
+| Manhattan · course within 60 m | 12.5% | 11.0% | 0.88× |
+| Brooklyn/Queens · marsh | 13.8% | 9.7% | **0.71×** |
+| Brooklyn/Queens · course within 60 m | 2.6% | 3.8% | 1.44× |
+
+**Two findings, one of them against the thesis.**
+
+In Manhattan deep flooding is **twice as likely** on the old marsh as on the island at
+large. But it is the *marsh* that predicts it, not the stream line — a 60 m corridor
+around the courses shows nothing (0.88×). The valley floor is the signal; the thread
+down the middle of it is not.
+
+In Brooklyn and Queens the relationship **inverts**: modelled flooding is *less* likely
+on the old marsh than elsewhere (0.71×). That is not a defect in either layer — those
+marshes were filled, raised and drained on purpose. JFK, the Flushing Meadows,
+Canarsie and Starrett City were engineered not to flood, and by this model they do not.
+
+So the honest citywide number is **no enrichment at all** (0.96× deep, 0.94× nuisance):
+the Manhattan signal and the outer-borough inversion cancel. Any "the city floods where
+the rivers were" headline is only defensible for Manhattan, and only about the marsh.

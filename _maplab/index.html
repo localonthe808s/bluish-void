@@ -90,7 +90,8 @@ var VIEWS = {
   city:     { w:-74.60, s:40.30, e:-73.40, n:41.10, bathy:null, zoom:11,
               boroughs:'bathy/nyc_boroughs.json', hoods:'bathy/nyc_ntas.json',
               dropLabels:['New York','Newark Bay','Upper New York Bay'],
-              ghosts:'bathy/ghost_streams.json', wet:'bathy/ghost_wetground.json' },
+              ghosts:'bathy/ghost_streams.json', wet:'bathy/ghost_wetground.json',
+              flood:'bathy/flood_stormwater.json' },
   shelf:    { w:-75.20, s:37.20, e:-70.00, n:41.20, bathy:'bathy/bathy_shelf.json', zoom:7 },
   atlantic: { w:-80.00, s:5.00,  e:-5.00,  n:60.00, bathy:'bathy/bathy_atlantic.json', zoom:3 },
   /* The two places worth real bathymetry: GMRT multibeam rendered to images with
@@ -108,13 +109,28 @@ var W = 1100, H = Math.round(W / 1.1372);   // one style, so give it the room
 /* Natural Earth depth bands, public domain. Each polygon carries the depth of
    the band it opens, so drawing them deepest-last with a darkening ramp gives
    the shelf, the slope, the abyssal plain and the ridge as tone. */
-var BATHY = {}, BOROS = null, HOODS = null, GHOSTS = null, WETGROUND = null;
+var BATHY = {}, BOROS = null, HOODS = null, GHOSTS = null, WETGROUND = null, FLOOD = null;
 function boroughsFor(view){
   var v = VIEWS[view];
   if (!v || !v.boroughs) return Promise.resolve(null);
   if (BOROS) return Promise.resolve(BOROS);
   return fetch(v.boroughs).then(function(r){ return r.json(); }).then(function(j){ BOROS = j; return j; });
 }
+/* Where the city expects rain to stand: NYC DEP's stormwater flood map, moderate
+   scenario at today's sea level. This is PLUVIAL flooding — the kind that fills
+   basements a mile from any FEMA zone — and it is what the buried water is an
+   explanation for. Modelled, not observed: the sensors are the only measured layer.
+   Rings under 200 m2 are dropped, which sheds three quarters of them and keeps 91%
+   of the flooded area. */
+function floodFor(view){
+  var v = VIEWS[view];
+  if (!v || !v.flood) return Promise.resolve(null);
+  if (FLOOD) return Promise.resolve(FLOOD);
+  return fetch(v.flood).then(function(r){ return r.json(); }).then(function(j){ FLOOD = j; return j; });
+}
+var FLOOD_LABEL = { 1:'Nuisance flooding \u2014 4 inches to 1 foot',
+                    2:'Deep and contiguous flooding \u2014 1 foot or more' };
+
 /* The marsh and meadow the streams ran through, as Viele surveyed it — the wash
    around the courses, not the courses themselves. */
 function wetFor(view){
@@ -423,12 +439,32 @@ function drawWet(ctx, geo, proj){
   ctx.restore();
 }
 
-/* Bright blue over a red casing: the red is what makes a thin line legible on top
-   of the orange borough mask and the green parks, and it marks the course as
-   something drawn onto the city rather than another river running through it.
-   Both strokes are SOLID — dashing them both put a round cap on every dash and
-   turned each course into a string of beads. Casing first, water on top. */
-var GHOST_INK = '#1B4DFF', GHOST_CASE = '#E5342A';
+/* The courses are plain bright blue. The red belongs to the flood zones, which it
+   outlines — one mark, one meaning: red is where the city expects water to stand
+   now, blue is where the water used to run. */
+var GHOST_INK = '#1B4DFF', FLOOD_EDGE = '#A5101A';
+function drawFlood(ctx, geo, proj){
+  if (!geo) return;
+  ctx.save();
+  ctx.lineJoin = 'round';
+  [1, 2].forEach(function(cat){
+    ctx.fillStyle   = cat === 2 ? 'rgba(165,16,26,.42)' : 'rgba(165,16,26,.20)';
+    ctx.strokeStyle = cat === 2 ? 'rgba(140,10,20,.98)' : 'rgba(165,16,26,.75)';
+    ctx.lineWidth   = cat === 2 ? 1.9 : 1.2;
+    geo.features.forEach(function(ft){
+      if (ft.properties.cat !== cat) return;
+      ft.geometry.coordinates.forEach(function(ring){
+        ctx.beginPath();
+        ring.forEach(function(pt, i){
+          var q = proj({ x:pt[0], y:pt[1] });
+          if (i === 0) ctx.moveTo(q.x, q.y); else ctx.lineTo(q.x, q.y);
+        });
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+      });
+    });
+  });
+  ctx.restore();
+}
 function drawGhosts(ctx, geo, proj){
   if (!geo) return;
   ctx.save();
@@ -456,7 +492,6 @@ function drawGhosts(ctx, geo, proj){
       }
     });
   };
-  pass(GHOST_CASE, 4.6, false);
   pass(GHOST_INK, 2.0, true);
   ctx.restore();
 }
@@ -522,6 +557,9 @@ function drawCard(style){
           .then(function(){
             return wetFor(vkey).then(function(wg){
               drawWet(ctx, wg, out.project);
+              return floodFor(vkey);
+            }).then(function(fl){
+              drawFlood(ctx, fl, out.project);
               return ghostsFor(vkey);
             }).then(function(gh){
               drawGhosts(ctx, gh, out.project);
@@ -585,14 +623,26 @@ function focus(style){
           lyr.bindPopup('marsh &amp; meadow · ' + (p.area_m2/10000).toFixed(0) + ' ha · ' + (p.boro || '') + ' · ' + (p.src || '')); } }).addTo(liveMap);
       liveLayers.push(wl);
     });
+    floodFor(vkey).then(function(fl){
+      if (!fl) return;
+      var flr = L.geoJSON(fl, { renderer: L.canvas({ padding:0.4 }),
+        style: function(ft){
+          var deep = ft.properties.cat === 2;
+          return { color: deep ? '#8C0A14' : FLOOD_EDGE, weight: deep ? 1.9 : 1.2,
+                   opacity: deep ? .98 : .75, fillColor:FLOOD_EDGE,
+                   fillOpacity: deep ? .42 : .20 };
+        },
+        onEachFeature: function(ft, lyr){
+          var p = ft.properties;
+          lyr.bindPopup('<b>' + FLOOD_LABEL[p.cat] + '</b><br>' + (p.a/10000).toFixed(2)
+                        + ' ha \u00b7 NYC DEP stormwater model, today\u2019s sea level');
+        } }).addTo(liveMap);
+      liveLayers.push(flr);
+    });
     ghostsFor(vkey).then(function(gh){
       if (!gh) return;
-      // the casing is its own layer so it sits under every course, not just its own
-      var gc = L.geoJSON(gh, { renderer: L.canvas({ padding:0.4 }), interactive:false,
-        style: function(){ return { color:GHOST_CASE, weight:4.6, lineCap:'round', lineJoin:'round', fill:false }; } }).addTo(liveMap);
-      liveLayers.push(gc);
       var gl = L.geoJSON(gh, { renderer: L.canvas({ padding:0.4 }),
-        style: function(){ return { color:GHOST_INK, weight:2.0, lineCap:'round', lineJoin:'round', fillColor:GHOST_INK, fillOpacity:.28 }; },
+        style: function(){ return { color:GHOST_INK, weight:2.2, lineCap:'round', lineJoin:'round', fillColor:GHOST_INK, fillOpacity:.28 }; },
         onEachFeature: function(ft, lyr){
           var p = ft.properties || {};
           lyr.bindPopup((p.name ? '<b>' + p.name + '</b>' + (p.story ? '<br>' + p.story : '') + '<br>'
