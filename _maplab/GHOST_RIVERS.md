@@ -104,3 +104,59 @@ been a channel (< ~125 m across). Broad marsh stays a polygon.
   exists in the bucket under any name tried.
 - Names here were attached **by position** from a small table in `name_kq.py`, not
   read off the sheet.
+
+---
+
+# Accuracy, checked
+
+Run 2026-08-29 (`audit_ghosts.py`, `crosscheck.py` in the scratchpad). Four
+independent tests, because "it looks right" is not a measurement.
+
+**1 · Two surveys, independently.** The USGS 1897 Harlem sheet also covers upper
+Manhattan, so the same signal can be pulled from a second survey with a different
+projection and a different extraction rule and compared with the Viele trace.
+Where both show water the median offset is **27 m** (90th percentile 88 m) — at
+1:62,500 the printed line is about 30 m wide, so that is agreement, and it
+validates the hue extraction and the polyconic georeferencing at once. Only 18% of
+Viele courses appear on the 1897 sheet at all: between 1865 and 1897 upper
+Manhattan was built and sewered, so absence there is not evidence of error.
+
+**2 · Landmarks.** 19 places whose modern identity records the buried water — a
+street named for it, a park built on it, a basin that is all that is left.
+**15 of 19** sit on a course or inside the wet ground. The four that do not:
+
+| place | result |
+|---|---|
+| Paerdegat Basin | Correct. The basin is still water, so it is subtracted — not a ghost. |
+| Alley Pond | Correct, same reason. |
+| Great Kill mouth, W 42nd | 535 m. The course exists inland; the mouth is trimmed by the ~45 m shoreline erosion. |
+| Saw Kill, E 74th | 943 m. A real gap — see below. |
+
+**3 · Controls.** Eight points of dry upland that were never wet — Washington
+Heights ridge, Prospect Park hilltop, Forest Hills ridge, Bay Ridge bluff,
+Carroll Gardens, and others. **0 of 8** flagged. Nearest course to any of them is
+135 m; the median is over 1 km.
+
+**4 · Structure.** 213 courses, 157 polygons, no faults: no degenerate geometry,
+no unclosed rings, no duplicates, nothing outside the NYC bounding box, every
+feature carrying its source.
+
+## The one real gap this found
+
+Below Third Avenue the Saw Kill is drawn on Viele as a **bare ink line with no
+marsh wash** — the extraction keys on the wash, and a 3 px opening erases a line
+that thin. So the layer holds water Viele *washed* as marsh or meadow, plus its
+blue channels; it does not hold reaches drawn only as a line through upland. A
+narrow-line detector was tried and rejected: on that sheet the line is desaturated
+and broken up by hill hachure, and the version that caught it also caught street
+ruling. Better a stated gap than a layer with invented streams in it.
+
+## Names were rebuilt
+
+The Manhattan names had been inherited from the old hand traces by proximity — and
+since those traces were up to 2.2 km out, some names landed on the wrong course:
+the audit found one labelled "Minetta Brook headwaters" sitting near West 42nd.
+Every Manhattan name was cleared and re-attached from an explicit table of
+documented positions (`rename_manhattan.py`), matching within 350 m; anchors now
+land 32–309 m from their reference point. Named courses drop from 46 to **20**,
+which is the honest count: a name now means a documented position, not a guess.
