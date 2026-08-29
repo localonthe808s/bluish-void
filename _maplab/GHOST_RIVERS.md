@@ -256,3 +256,40 @@ Canarsie and Starrett City were engineered not to flood, and by this model they 
 So the honest citywide number is **no enrichment at all** (0.96× deep, 0.94× nuisance):
 the Manhattan signal and the outer-borough inversion cancel. Any "the city floods where
 the rivers were" headline is only defensible for Manhattan, and only about the marsh.
+
+---
+
+# The subway
+
+`bathy/subway_lines.json` (29 routes, 806 km) and `bathy/subway_stops.json` (496
+stations), built from the **MTA's own GTFS feed** — `rrgtfsfeeds.s3.amazonaws.com/gtfs_subway.zip`,
+public and keyless. The published track alignment, not a redrawing of it.
+
+- One shape per **route**, not per trip: a route has dozens of short-turn variants, so
+  the longest shape wins. The two directions run the same track, so they collapse to one
+  line — drawing both just doubles every stroke.
+- Stops are the **parent stations** (`parent_station` empty), so a complex counts once
+  rather than once per platform.
+- Vertices thinned to 25 m and given one round of Chaikin, same as the courses.
+
+**Drawn in one graphite ink, not the MTA route colours.** This map is about water, and
+twenty-odd bright routes over the borough mask and the flood zones would bury it — and
+the 7's purple is out by house rule anyway. Every line keeps its official `colour` in the
+data, so that is a one-line change. A white halo under each line lifts it off the orange;
+stations are white-cored so they read on top of their own line.
+
+## What the overlay is worth
+
+Measured on the same 20 m grid as the flood work, for the 405 stations in the three
+boroughs:
+
+| | stations | land baseline | enrichment |
+|---|---|---|---|
+| within 100 m of buried water | 80 (20%) | 25% | 0.78× |
+| inside a deep-flood polygon | 7 (2%) | 0.9% | **1.97×** |
+
+Stations are *not* built on the buried streams — slightly less often than chance, which
+makes sense, since the lines follow the avenues along the ridges rather than the valley
+floors. But a station is **twice as likely as the ground around it to sit in a
+deep-flooding polygon**. Seven of them do. That is the pairing worth showing, and it is
+about today's topography rather than the old watercourses.

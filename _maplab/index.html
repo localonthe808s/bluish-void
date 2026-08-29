@@ -91,7 +91,8 @@ var VIEWS = {
               boroughs:'bathy/nyc_boroughs.json', hoods:'bathy/nyc_ntas.json',
               dropLabels:['New York','Newark Bay','Upper New York Bay'],
               ghosts:'bathy/ghost_streams.json', wet:'bathy/ghost_wetground.json',
-              flood:'bathy/flood_stormwater.json' },
+              flood:'bathy/flood_stormwater.json',
+              subway:'bathy/subway_lines.json', stops:'bathy/subway_stops.json' },
   shelf:    { w:-75.20, s:37.20, e:-70.00, n:41.20, bathy:'bathy/bathy_shelf.json', zoom:7 },
   atlantic: { w:-80.00, s:5.00,  e:-5.00,  n:60.00, bathy:'bathy/bathy_atlantic.json', zoom:3 },
   /* The two places worth real bathymetry: GMRT multibeam rendered to images with
@@ -109,13 +110,30 @@ var W = 1100, H = Math.round(W / 1.1372);   // one style, so give it the room
 /* Natural Earth depth bands, public domain. Each polygon carries the depth of
    the band it opens, so drawing them deepest-last with a darkening ramp gives
    the shelf, the slope, the abyssal plain and the ridge as tone. */
-var BATHY = {}, BOROS = null, HOODS = null, GHOSTS = null, WETGROUND = null, FLOOD = null;
+var BATHY = {}, BOROS = null, HOODS = null, GHOSTS = null, WETGROUND = null, FLOOD = null,
+    SUBWAY = null, STOPS = null;
 function boroughsFor(view){
   var v = VIEWS[view];
   if (!v || !v.boroughs) return Promise.resolve(null);
   if (BOROS) return Promise.resolve(BOROS);
   return fetch(v.boroughs).then(function(r){ return r.json(); }).then(function(j){ BOROS = j; return j; });
 }
+/* The subway, from the MTA's own GTFS feed — the published track alignment and every
+   parent station, not a redrawing of either. One shape per route (the two directions
+   run the same track), thinned to 25 m and softened. */
+function subwayFor(view){
+  var v = VIEWS[view];
+  if (!v || !v.subway) return Promise.resolve(null);
+  if (SUBWAY) return Promise.resolve(SUBWAY);
+  return fetch(v.subway).then(function(r){ return r.json(); }).then(function(j){ SUBWAY = j; return j; });
+}
+function stopsFor(view){
+  var v = VIEWS[view];
+  if (!v || !v.stops) return Promise.resolve(null);
+  if (STOPS) return Promise.resolve(STOPS);
+  return fetch(v.stops).then(function(r){ return r.json(); }).then(function(j){ STOPS = j; return j; });
+}
+
 /* Where the city expects rain to stand: NYC DEP's stormwater flood map, moderate
    scenario at today's sea level. This is PLUVIAL flooding — the kind that fills
    basements a mile from any FEMA zone — and it is what the buried water is an
@@ -473,6 +491,34 @@ function drawActiveWater(ctx, style, f, view, latMid, W, H){
       ctx.drawImage(_stencil(off, W, H, 1.8, WATER_DEEP), 0, 0);
     });
 }
+/* Drawn in one graphite ink rather than the MTA's route colours: this map is about
+   water, and twenty-odd bright routes over the borough mask and the flood zones would
+   bury it — the 7's purple is also out by house rule. Each line carries its official
+   `colour` in the data if that changes. Stations are white-cored so they read on top
+   of their own line. */
+var RAIL_INK = '#33383F';
+function drawSubway(ctx, lines, stops, proj){
+  if (lines){
+    ctx.save();
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    ctx.strokeStyle = 'rgba(255,255,255,.45)'; ctx.lineWidth = 3.4;
+    lines.features.forEach(function(ft){ curvePath(ctx, ft.geometry.coordinates, proj, false); ctx.stroke(); });
+    ctx.strokeStyle = RAIL_INK; ctx.lineWidth = 1.5;
+    lines.features.forEach(function(ft){ curvePath(ctx, ft.geometry.coordinates, proj, false); ctx.stroke(); });
+    ctx.restore();
+  }
+  if (stops){
+    ctx.save();
+    ctx.strokeStyle = RAIL_INK; ctx.lineWidth = 1.1; ctx.fillStyle = '#fff';
+    stops.features.forEach(function(ft){
+      var q = proj({ x:ft.geometry.coordinates[0], y:ft.geometry.coordinates[1] });
+      ctx.beginPath(); ctx.arc(q.x, q.y, 2.1, 0, Math.PI * 2);
+      ctx.fill(); ctx.stroke();
+    });
+    ctx.restore();
+  }
+}
+
 function drawFlood(ctx, geo, proj){
   if (!geo) return;
   ctx.save();
@@ -617,6 +663,9 @@ function drawCard(style){
               return floodFor(vkey);
             }).then(function(fl){
               drawFlood(ctx, fl, out.project);
+              return Promise.all([subwayFor(vkey), stopsFor(vkey)]);
+            }).then(function(sw){
+              drawSubway(ctx, sw[0], sw[1], out.project);
               var lab = new protomapsL.Static({ url: document.getElementById('src').value,
                 paintRules: [], labelRules: labelsFor(style, f), maxDataZoom: 14 });
               return lab.drawContextBounds(ctx, {x:view.w, y:latMid}, {x:view.e, y:latMid}, W, H);
@@ -705,6 +754,20 @@ function focus(style){
                         + p.len_m + ' m · ' + (p.boro || '') + ' · traced from ' + (p.src || ''));
         } }).addTo(liveMap);
       liveLayers.push(gl);
+    });
+    Promise.all([subwayFor(vkey), stopsFor(vkey)]).then(function(sw){
+      if (!sw[0]) return;
+      var halo = L.geoJSON(sw[0], { renderer: L.canvas({ padding:0.4 }), interactive:false,
+        style: function(){ return { color:'#fff', weight:3.4, opacity:.45, fill:false }; } }).addTo(liveMap);
+      var rail = L.geoJSON(sw[0], { renderer: L.canvas({ padding:0.4 }),
+        style: function(){ return { color:RAIL_INK, weight:1.5, fill:false }; },
+        onEachFeature: function(ft, lyr){ lyr.bindPopup('<b>' + ft.properties.route + '</b> \u00b7 ' + ft.properties.name); } }).addTo(liveMap);
+      liveLayers.push(halo, rail);
+      if (!sw[1]) return;
+      var st = L.geoJSON(sw[1], { renderer: L.canvas({ padding:0.4 }),
+        pointToLayer: function(ft, ll){ return L.circleMarker(ll, { radius:2.6, color:RAIL_INK, weight:1.1, fillColor:'#fff', fillOpacity:1 }); },
+        onEachFeature: function(ft, lyr){ lyr.bindPopup(ft.properties.name); } }).addTo(liveMap);
+      liveLayers.push(st);
     });
     hoodsFor(vkey).then(function(hoods){
       if (!hoods) return;
