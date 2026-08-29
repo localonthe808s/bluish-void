@@ -344,3 +344,30 @@ Each band now has its own pane:
 Leaflet's prototype default with undefined, `getPane()` then returns nothing, and the
 layer dies on `appendChild`, taking the whole map down with it. Set the key only when
 there is a pane to set.
+
+---
+
+# Park names
+
+`bathy/park_labels.json` — 2,849 named greens from OSM (`leisure=park|garden|nature_reserve|common`,
+`landuse=grass|meadow|forest|recreation_ground`, `natural=wood|scrub|grassland`), each carrying
+a name, an anchor point and its bounding box.
+
+**Central Park is deliberately not in the file.** At the zoom where its own name would fit,
+the interesting labels are its parts, and OSM has them: Sheep Meadow, The Ramble, The Ravine,
+The Dene, Cedar Hill, East and North Meadow, East Green, Great Hill, Conservatory Garden,
+Hallett Nature Sanctuary, Arthur Ross Pinetum. A second Overpass query scoped to the park's
+own box was needed to pick up the ones tagged as woods and grass rather than as parks.
+
+**The anchor is not the centroid.** A centroid falls outside a bent park — Riverside Park's
+would land in the Hudson. Each label point is the sampled interior point furthest from any
+edge, a cheap pole of inaccessibility.
+
+**A name appears when it fits, not at a zoom number.** The name is wrapped to the width of
+the park's own projected box and drawn only if the wrapped block is inside 86% of that box's
+width and 74% of its height, with the park at least 34 px across. So a short name on a small
+green appears earlier than a long one, which is what "fits cleanly" actually means. Lines are
+centred and stacked on the anchor, and a label that would overlap one already placed is
+dropped. At city framing exactly one label survives citywide — Randalls Island Park.
+
+The live pane still uses the basemap's own place labels; this is the card render only.
