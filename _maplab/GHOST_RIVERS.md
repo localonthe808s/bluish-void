@@ -170,11 +170,14 @@ marsh, the buried courses, and the water still standing — is the same light bl
 field, so the city's whole water story reads as one shape rather than as a historic
 layer sitting on a modern map. Inside that field:
 
-- **Light blue fill** (`#cfe1f6`) — ground that was or is water.
-- **Dark blue diagonal hatching** — the water that is *still there*. Drawn by taking
-  the basemap's own water shapes off-screen as a stencil, filling it with the field
-  colour, then laying the hatch over only what it covers, so today's rivers and lakes
-  sit **inside** the historic field instead of on top of it.
+- **Light blue fill** (`#9dc4ea`) — ground that was or is water.
+- **Solid dark blue** (`#17457F`) with a **feathered edge** — the water that is *still
+  there*. The basemap's own water shapes are rendered off-screen and used as a stencil;
+  blurring the stencil and then filling *through* it with `source-in` keeps the colour
+  flat and softens only the alpha, so the edge settles into the pale field instead of
+  being cut out of it. Two passes: a wider pale halo, so there is always light blue for
+  the water to fade into even where no historic marsh sits behind it, then the deep blue
+  with a slight feather.
 - **Blue line** (`#3B71CA`) — a buried watercourse.
 - **Deep crimson outline and tint** — a modelled flood zone. Red is deliberately not
   part of the water family: it is a forecast, not water.
