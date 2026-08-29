@@ -194,8 +194,12 @@ layer sitting on a modern map. Inside that field:
   the water to fade into. It ringed **every** body in white, including the big ones, and
   is gone. Where no historic marsh sits behind a creek it now fades into whatever is
   there, which is a two-pixel rim and much better than a glow.
-- **Blue line** (`#3B71CA`) — a buried watercourse. Weight runs 2.6–4.8 px with the
-  length of the course, so a trunk carries more line than a headwater stub.
+- **A blue band that bleeds** (`#3B71CA`) — a buried watercourse. Stroked into a mask and
+  laid down three times at falling blur and rising opacity, the same build the flood zones
+  use, so it fades into the pale field like a heat map instead of sitting on top of it as
+  a drawn line. That is the honest reading too: a buried stream is a best estimate of
+  where the water ran, and a crisp stroke claims more than the survey supports. Mask width
+  runs 2.2–4.2 px with the length of the course, so a trunk carries more than a stub.
 - **Deep crimson outline and tint** — a modelled flood zone. Red is deliberately not
   part of the water family: it is a forecast, not water.
 
