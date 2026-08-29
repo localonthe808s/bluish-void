@@ -268,6 +268,37 @@ window.BV_MAP_FLAVOR = {"background":"#0a0c12","earth":"#0f1116","park_a":"#0f17
    water, ink labels. Both flavors are plain objects — retinting the maps is
    editing colours here, nothing else. */
 window.BV_MAP_FLAVOR_LIGHT = {"background":"#eef0f4","earth":"#f6f4ef","park_a":"#e8efe4","park_b":"#e3ecdf","hospital":"#f3eeee","industrial":"#efeeea","school":"#f1efe9","wood_a":"#e6ece2","wood_b":"#e6ece2","pedestrian":"#f0eee9","scrub_a":"#eceee6","scrub_b":"#eceee6","glacier":"#f2f4f8","sand":"#f2efe6","beach":"#f4f0e4","aerodrome":"#eceef2","runway":"#ffffff","water":"#cfd9ee","zoo":"#eaeee6","military":"#eeeeea","tunnel_other_casing":"#e0e0e0","tunnel_minor_casing":"#e0e0e0","tunnel_link_casing":"#e0e0e0","tunnel_major_casing":"#e0e0e0","tunnel_highway_casing":"#e0e0e0","tunnel_other":"#d5d5d5","tunnel_minor":"#d5d5d5","tunnel_link":"#d5d5d5","tunnel_major":"#d5d5d5","tunnel_highway":"#d5d5d5","pier":"#e0e0e0","buildings":"#cccccc","minor_service_casing":"#e0e0e0","minor_casing":"#e0e0e0","link_casing":"#e0e0e0","major_casing_late":"#e0e0e0","highway_casing_late":"#e0e0e0","other":"#ebebeb","minor_service":"#ebebeb","minor_a":"#ebebeb","minor_b":"#ffffff","link":"#ffffff","major_casing_early":"#e0e0e0","major":"#ffffff","highway_casing_early":"#e0e0e0","highway":"#ffffff","railway":"#a7b1b3","boundaries":"#adadad","bridges_other_casing":"#e0e0e0","bridges_minor_casing":"#e0e0e0","bridges_link_casing":"#e0e0e0","bridges_major_casing":"#e0e0e0","bridges_highway_casing":"#e0e0e0","bridges_other":"#ebebeb","bridges_minor":"#ffffff","bridges_link":"#ffffff","bridges_major":"#f5f5f5","bridges_highway":"#ffffff","roads_label_minor":"#91888b","roads_label_minor_halo":"#f6f4ef","roads_label_major":"#938a8d","roads_label_major_halo":"#f6f4ef","ocean_label":"#7f8ba8","subplace_label":"#6b7186","subplace_label_halo":"#f6f4ef","city_label":"#2b2a55","city_label_halo":"#f6f4ef","state_label":"#8d93a8","state_label_halo":"#f6f4ef","country_label":"#5b6178","address_label":"#91888b","address_label_halo":"#f6f4ef","pois":{"blue":"#1A8CBD","green":"#20834D","lapis":"#315BCF","pink":"#EF56BA","red":"#F2567A","slategray":"#6A5B8F","tangerine":"#CB6704","turquoise":"#00C3D4"},"landcover":{"grassland":"rgba(236,241,231,1)","barren":"rgba(242,240,233,1)","urban_area":"rgba(240,239,235,1)","farmland":"rgba(238,242,232,1)","glacier":"rgba(243,245,249,1)","scrub":"rgba(238,240,232,1)","forest":"rgba(230,238,229,1)"}};
+/* One source of truth for what the archive actually holds. Anything outside
+   these windows has to come from the raster fallback. */
+window.BV_BASEMAP_TIERS = [
+  { min: 0,  max: 7,  data: 7,  bounds: null },
+  { min: 8,  max: 11, data: 11, bounds: [[24, -125], [50, -66]] },
+  { min: 12, max: 14, data: 14, bounds: [[39.4, -75.6], [42.6, -71.4]] }
+];
+window._bvCovers = function(z, latlng){
+  return window.BV_BASEMAP_TIERS.some(function(t){
+    if (z < t.min || z > t.max) return false;
+    if (!t.bounds) return true;
+    return latlng.lat >= t.bounds[0][0] && latlng.lat <= t.bounds[1][0]
+        && latlng.lng >= t.bounds[0][1] && latlng.lng <= t.bounds[1][1];
+  });
+};
+/* Keep the raster basemap OFF while our own tiles cover the view, and bring it
+   back the moment the map leaves that window — panning to Europe at z10, say.
+   Without this the Esri tiles were still being fetched under every map we had
+   already replaced, which is half the point of owning the tiles. */
+window._bvManageRaster = function(map, rasterLayer){
+  if (!map || !rasterLayer) return;
+  var sync = function(){
+    try {
+      var covered = window._bvCovers(map.getZoom(), map.getCenter());
+      if (covered && map.hasLayer(rasterLayer)) map.removeLayer(rasterLayer);
+      else if (!covered && !map.hasLayer(rasterLayer)) { map.addLayer(rasterLayer); if (rasterLayer.setZIndex) rasterLayer.setZIndex(1); }
+    } catch(e){}
+  };
+  map.on('zoomend moveend', sync);
+  sync();
+};
 window._bvVectorBase = function(map, opts){
   opts = opts || {};
   if (typeof protomapsL === 'undefined' || !window.BV_BASEMAP_URL) return null;
@@ -275,11 +306,7 @@ window._bvVectorBase = function(map, opts){
   // raster fallback below is already what mobile gets today
   if (!opts.force && window.matchMedia && window.matchMedia('(max-width:1100px)').matches) return null;
   var F = (opts.flavor === 'light') ? window.BV_MAP_FLAVOR_LIGHT : window.BV_MAP_FLAVOR;
-  var tiers = [
-    { min: 0,  max: 7,  data: 7,  bounds: null },
-    { min: 8,  max: 11, data: 11, bounds: [[24, -125], [50, -66]] },
-    { min: 12, max: 14, data: 14, bounds: [[39.4, -75.6], [42.6, -71.4]] }
-  ];
+  var tiers = window.BV_BASEMAP_TIERS;
   var added = [];
   try {
     tiers.forEach(function(t){
@@ -13990,8 +14017,9 @@ window._updateHeroWx = function(code, night){
               // Dark base + Lorenz 2024 light-pollution overlay + place labels on top.
               // Esri goes down first as the fallback; our own vector tiles paint over it
               // wherever the archive has data (see _bvVectorBase in the head).
-              L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', { maxNativeZoom:16, maxZoom:19 }).addTo(map);
+              var _bvRasterDS = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', { maxNativeZoom:16, maxZoom:19 }).addTo(map);
               var _bvBase = window._bvVectorBase && window._bvVectorBase(map);
+              if (_bvBase) window._bvManageRaster(map, _bvRasterDS);
               L.tileLayer('https://djlorenz.github.io/astronomy/image_tiles/tiles2024/tile_{z}_{x}_{y}.png', {
                 minZoom: 2, maxNativeZoom: 8, maxZoom: 19,
                 tileSize: 1024, zoomOffset: -2, opacity: 0.6,
@@ -60919,16 +60947,18 @@ function initNowMicroTabs(){
     
     // Dark base layer (no features, just black tiles) — Esri underneath, our own
     // vector tiles over it wherever the archive reaches
-    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+    var _bvRasterRadar = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
       attribution: '',
       maxNativeZoom: 16,
       maxZoom: 19,
       updateWhenZooming: false,
       updateWhenIdle: true,
       keepBuffer: 4
-    }).addTo(nationalRadarMap);
+    });
+    _bvRasterRadar.addTo(nationalRadarMap);
     if (window._bvVectorBase && window._bvVectorBase(nationalRadarMap)) {
       window._bvVectorBase(nationalRadarMap, { labels: true });
+      window._bvManageRaster(nationalRadarMap, _bvRasterRadar);
     }
 
     // Add CSS for smooth radar transitions (once — this init re-runs per
@@ -61344,14 +61374,19 @@ function initNowMicroTabs(){
     // Safety fallback: hide preview after 8s even if some tiles are slow
     setTimeout(hidePreview, 8000);
 
-    // Labels on top
-    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}', {
+    // Labels on top — ours over the satellite imagery when the archive loads.
+    // The base stays Esri World_Imagery: photography, not something vector tiles
+    // can stand in for.
+    var _bvRefHaz = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}', {
       attribution: TILE_ATTRIB,
       pane: 'shadowPane',
       updateWhenZooming: false,
       updateWhenIdle: true,
       keepBuffer: 4
     }).addTo(hazardMap);
+    if (window._bvVectorBase && window._bvVectorBase(hazardMap, { labels: true })) {
+      hazardMap.removeLayer(_bvRefHaz);
+    }
 
     // Create layer groups for each hazard type
     window._fireLayerGroup = L.layerGroup().addTo(hazardMap);
@@ -67044,10 +67079,14 @@ function initNowMicroTabs(){
       className: 'hurricane-basemap-inverted'
     }).addTo(_hurricaneMap);
 
-    // Reference labels on top
-    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}', {
+    // Reference labels on top — ours if the archive loads, Esri's otherwise. The
+    // ocean base underneath stays Esri: that is bathymetry, not decoration.
+    var _bvRefHur = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}', {
       attribution: '', maxZoom: 16, opacity: 0.85, updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 4
     }).addTo(_hurricaneMap);
+    if (window._bvVectorBase && window._bvVectorBase(_hurricaneMap, { labels: true })) {
+      _hurricaneMap.removeLayer(_bvRefHur);
+    }
 
     // Draw the classic African wave / hurricane genesis pathway annotation
     _drawAtlanticPathway();
@@ -71298,12 +71337,13 @@ function initNowMicroTabs(){
     });
 
     // Base layer - light map
-    L.tileLayer(DARK_TILES, { attribution: TILE_ATTRIB, updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 3 }).addTo(bedrockMap);
+    var _bvRaster_bedrockMap = L.tileLayer(DARK_TILES, { attribution: TILE_ATTRIB, updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 3 }).addTo(bedrockMap);
     var _bvRef_bedrockMap = L.tileLayer(LIGHT_REF_TILES, { maxNativeZoom: 16, pane: 'shadowPane', updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 3 }).addTo(bedrockMap);
     // our own tiles over the Esri raster; Esri's labels come off only if ours loaded
     if (window._bvVectorBase && window._bvVectorBase(bedrockMap, { flavor: 'light' })) {
       bedrockMap.removeLayer(_bvRef_bedrockMap);
       window._bvVectorBase(bedrockMap, { flavor: 'light', labels: true });
+      window._bvManageRaster(bedrockMap, _bvRaster_bedrockMap);
     }
 
     // Macrostrat geology overlay
@@ -71341,12 +71381,13 @@ function initNowMicroTabs(){
     });
 
     // Base layer
-    L.tileLayer(DARK_TILES, { attribution: TILE_ATTRIB, updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 3 }).addTo(lithologyMap);
+    var _bvRaster_lithologyMap = L.tileLayer(DARK_TILES, { attribution: TILE_ATTRIB, updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 3 }).addTo(lithologyMap);
     var _bvRef_lithologyMap = L.tileLayer(LIGHT_REF_TILES, { maxNativeZoom: 16, pane: 'shadowPane', updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 3 }).addTo(lithologyMap);
     // our own tiles over the Esri raster; Esri's labels come off only if ours loaded
     if (window._bvVectorBase && window._bvVectorBase(lithologyMap, { flavor: 'light' })) {
       lithologyMap.removeLayer(_bvRef_lithologyMap);
       window._bvVectorBase(lithologyMap, { flavor: 'light', labels: true });
+      window._bvManageRaster(lithologyMap, _bvRaster_lithologyMap);
     }
 
     // Macrostrat geology overlay with higher opacity for lithology focus
@@ -71384,12 +71425,13 @@ function initNowMicroTabs(){
     });
 
     // Base layer
-    L.tileLayer(DARK_TILES, { attribution: TILE_ATTRIB, updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 3 }).addTo(stratMap);
+    var _bvRaster_stratMap = L.tileLayer(DARK_TILES, { attribution: TILE_ATTRIB, updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 3 }).addTo(stratMap);
     var _bvRef_stratMap = L.tileLayer(LIGHT_REF_TILES, { maxNativeZoom: 16, pane: 'shadowPane', updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 3 }).addTo(stratMap);
     // our own tiles over the Esri raster; Esri's labels come off only if ours loaded
     if (window._bvVectorBase && window._bvVectorBase(stratMap, { flavor: 'light' })) {
       stratMap.removeLayer(_bvRef_stratMap);
       window._bvVectorBase(stratMap, { flavor: 'light', labels: true });
+      window._bvManageRaster(stratMap, _bvRaster_stratMap);
     }
 
     // Macrostrat geology overlay
@@ -73728,16 +73770,22 @@ function initNowMicroTabs(){
         }
       } else if (containerId === 'national-radar-map') {
         L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', { opacity: 0.7 }).addTo(window.modalMap);
-        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}', { opacity: 0.5 }).addTo(window.modalMap);
+        var _bvRefNat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}', { opacity: 0.5 }).addTo(window.modalMap);
+        if (window._bvVectorBase && window._bvVectorBase(window.modalMap)) {
+          window.modalMap.removeLayer(_bvRefNat);
+          window._bvVectorBase(window.modalMap, { labels: true });
+        }
         L.tileLayer('https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png?_=' + Date.now(), { opacity: 0.75 }).addTo(window.modalMap);
       } else if (containerId === 'lightning-map') {
         L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', { attribution: TILE_ATTRIB }).addTo(window.modalMap);
+        if (window._bvVectorBase && window._bvVectorBase(window.modalMap)) window._bvVectorBase(window.modalMap, { labels: true });
       } else {
-        L.tileLayer(DARK_TILES, { attribution: TILE_ATTRIB }).addTo(window.modalMap);
+        var _bvRasterModal = L.tileLayer(DARK_TILES, { attribution: TILE_ATTRIB }).addTo(window.modalMap);
         var _bvRefModal = L.tileLayer(LIGHT_REF_TILES, { maxNativeZoom: 16, pane: 'shadowPane' }).addTo(window.modalMap);
         if (window._bvVectorBase && window._bvVectorBase(window.modalMap, { flavor: 'light' })) {
           window.modalMap.removeLayer(_bvRefModal);
           window._bvVectorBase(window.modalMap, { flavor: 'light', labels: true });
+          window._bvManageRaster(window.modalMap, _bvRasterModal);
         }
         L.tileLayer('https://tiles.macrostrat.org/carto/{z}/{x}/{y}.png', { opacity: containerId === 'quake-map' ? 0.70 : 0.35 }).addTo(window.modalMap);
       }
