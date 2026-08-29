@@ -88,7 +88,8 @@ var VIEWS = {
      this over radar so the city still reads as a shape under a blanket of cloud,
      which means it has to be a solid mask, not an outline. */
   city:     { w:-74.60, s:40.30, e:-73.40, n:41.10, bathy:null, zoom:11,
-              boroughs:'bathy/nyc_boroughs.json', hoods:'bathy/nyc_ntas.json' },
+              boroughs:'bathy/nyc_boroughs.json', hoods:'bathy/nyc_ntas.json',
+              dropLabels:['New York'] },
   shelf:    { w:-75.20, s:37.20, e:-70.00, n:41.20, bathy:'bathy/bathy_shelf.json', zoom:7 },
   atlantic: { w:-80.00, s:5.00,  e:-5.00,  n:60.00, bathy:'bathy/bathy_atlantic.json', zoom:3 },
   /* The two places worth real bathymetry: GMRT multibeam rendered to images with
@@ -240,12 +241,39 @@ function rulesFor(style, f){
    prominence instead of by accident: 9 is the stock density, 7 drops the
    commuter towns, 5 leaves the handful of names anyone would recognise. The
    neighbourhood rule (the minzoom-9 one) goes entirely below 8. */
+/* The green inside the city. Parks are landuse polygons in the archive, so the
+   borough mask buries them — they get their own pass over the top, the same way
+   the water does. Green against the orange, so the parks read as the thing the
+   city is NOT built on. */
+function parkRulesFor(){
+  var kinds = ['park','forest','wood','grass','nature_reserve','recreation_ground',
+               'garden','cemetery','golf_course','pitch','playground','village_green'];
+  return [{ dataLayer:'landuse',
+    filter: function(z, f){ return kinds.indexOf(f.props.kind) >= 0; },
+    symbolizer: new protomapsL.PolygonSymbolizer({ fill: '#2f7d4f' }) }];
+}
 function waterRulesFor(style, f){
   return rulesFor(style, f).filter(function(r){ return r.dataLayer === 'water'; });
 }
 function labelsFor(style, f){
   var ls = protomapsL.labelRules(f, 'en');
   if ((style.mods||{}).noRoads) ls = ls.filter(function(r){ return r.dataLayer !== 'roads'; });
+  /* The mask already says where the city is, so its own name sitting across the
+     harbour is just in the way. A view can name labels to drop. */
+  var drop = (VIEWS[document.getElementById('view').value] || {}).dropLabels;
+  if (drop && drop.length){
+    ls = ls.map(function(r){
+      if (r.dataLayer !== 'places') return r;
+      var orig = r.filter, out = {};
+      for (var k in r) out[k] = r[k];
+      out.filter = function(z, feat){
+        var nm = feat && feat.props && (feat.props['name:en'] || feat.props.name);
+        if (nm && drop.indexOf(nm) >= 0) return false;
+        return orig ? orig(z, feat) : true;
+      };
+      return out;
+    });
+  }
   var cut = parseInt(document.getElementById('placecut').value, 10);
   if (!isFinite(cut) || cut >= 9) return ls;
   // NB: the minzoom-9 places rule is the ONLY thing drawing city names above z9 —
@@ -413,7 +441,7 @@ function drawCard(style){
         /* The mask is opaque, so it buries the rivers and the place names inside
            the city. Put them back over it: water first, then the labels. */
         var again = new protomapsL.Static({ url: document.getElementById('src').value,
-          paintRules: waterRulesFor(style, f), labelRules: [], maxDataZoom: 14 });
+          paintRules: parkRulesFor().concat(waterRulesFor(style, f)), labelRules: [], maxDataZoom: 14 });
         return again.drawContextBounds(ctx, {x:view.w, y:latMid}, {x:view.e, y:latMid}, W, H)
           .then(function(){
             var lab = new protomapsL.Static({ url: document.getElementById('src').value,
@@ -476,6 +504,12 @@ function focus(style){
     });
     if (liveLayers[1]) liveLayers[1].bringToFront();
   });
+  if (view.boroughs){
+    var parkLayer = protomapsL.leafletLayer({ url: document.getElementById('src').value, maxDataZoom: 14,
+      paintRules: parkRulesFor().concat(waterRulesFor(style, f)), labelRules: [], attribution: '' });
+    parkLayer.addTo(liveMap); liveLayers.push(parkLayer);
+    if (liveLayers[1]) liveLayers[1].bringToFront();
+  }
   bathyFor(vkey).then(function(geo){
     if (!geo || vkey !== document.getElementById('view').value) return;
     var dark = !(style.base === 'light');
