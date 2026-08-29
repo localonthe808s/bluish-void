@@ -49,8 +49,10 @@
   <input type="text" id="src" value="http://localhost:8091/bluish-basemap/{z}/{x}/{y}.mvt">
   <label class="sub">view <select id="view" onchange="renderAll()" style="font:inherit;font-size:.62rem;padding:3px 6px;border-radius:6px;border:1px solid rgba(43,34,244,.25)">
     <option value="city">THE CITY</option>
-    <option value="shelf">SHELF · Hudson Canyon</option>
-    <option value="atlantic">ATLANTIC · the ridge</option>
+    <option value="shelf">SHELF · isobaths</option>
+    <option value="canyon">CANYON · 61 m multibeam</option>
+    <option value="atlantic">ATLANTIC · isobaths</option>
+    <option value="ridge">RIDGE · 245 m multibeam</option>
   </select></label>
   <label class="sub">towns <input type="number" id="placecut" value="7" min="1" max="15" step="1" style="width:52px;min-width:0"></label>
   <button onclick="renderAll()">redraw</button>
@@ -84,7 +86,15 @@
 var VIEWS = {
   city:     { w:-74.60, s:40.30, e:-73.40, n:41.10, bathy:null,                    zoom:11 },
   shelf:    { w:-75.20, s:37.20, e:-70.00, n:41.20, bathy:'bathy/bathy_shelf.json', zoom:7 },
-  atlantic: { w:-80.00, s:5.00,  e:-5.00,  n:60.00, bathy:'bathy/bathy_atlantic.json', zoom:3 }
+  atlantic: { w:-80.00, s:5.00,  e:-5.00,  n:60.00, bathy:'bathy/bathy_atlantic.json', zoom:3 },
+  /* The two places worth real bathymetry: GMRT multibeam rendered to images with
+     the land left transparent, so the vector coast still owns it. Natural Earth
+     cannot show either — at 3.4 km vertex spacing the canyon is one dent in a
+     contour and the ridge is a smooth band. */
+  canyon:   { w:-73.4008, s:38.8997, e:-71.3990, n:40.4999, bathy:null, zoom:8,
+              relief:{ img:'bathy/gmrt_canyon.png', w:-73.400757, s:38.899705, e:-71.399048, n:40.499864 } },
+  ridge:    { w:-35.0002, s:28.0005, e:-27.0000, n:34.0034, bathy:null, zoom:6,
+              relief:{ img:'bathy/gmrt_ridge.png', w:-35.000244, s:28.000479, e:-27.000000, n:34.003409 } }
 };
 var CITY = VIEWS.city;
 var W = 460, H = Math.round(W / 1.1372);
@@ -293,6 +303,27 @@ function drawBathy(ctx, geo, proj, dark){
   });
 }
 
+/* The relief images are lat/lon grids; the map is Mercator. Drawing one as a
+   single rectangle stretches it wrong, so it goes down in horizontal strips,
+   each projected on its own — the error disappears and it costs nothing. */
+var RELIEF_IMGS = {};
+function reliefImage(src){
+  if (!RELIEF_IMGS[src]) RELIEF_IMGS[src] = new Promise(function(res, rej){
+    var im = new Image(); im.onload = function(){ res(im); }; im.onerror = rej; im.src = src;
+  });
+  return RELIEF_IMGS[src];
+}
+function drawRelief(ctx, img, r, proj, strips){
+  strips = strips || 48;
+  for (var i = 0; i < strips; i++){
+    var lat0 = r.n + (r.s - r.n) * (i / strips);
+    var lat1 = r.n + (r.s - r.n) * ((i + 1) / strips);
+    var p0 = proj({ x:r.w, y:lat0 }), p1 = proj({ x:r.e, y:lat1 });
+    ctx.drawImage(img, 0, img.height * (i / strips), img.width, img.height / strips,
+                  p0.x, p0.y, p1.x - p0.x, (p1.y - p0.y) + 0.5);
+  }
+}
+
 function drawCard(style){
   var f = flavorFor(style);
   var card = document.createElement('div');
@@ -333,9 +364,10 @@ function drawCard(style){
          fills the ocean opaquely, so anything painted beneath is invisible. The
          bands only cover sea, so the coast and the rivers survive — and Static
          hands back the projection it used, which is what lines them up. */
+      if (!out || !out.project) return;
+      if (view.relief) return reliefImage(view.relief.img).then(function(img){ drawRelief(ctx, img, view.relief, out.project); });
       return bathyFor(document.getElementById('view').value).then(function(geo){
-        if (!geo || !out || !out.project) return;
-        drawBathy(ctx, geo, out.project, !(style.base === 'light'));
+        if (geo) drawBathy(ctx, geo, out.project, !(style.base === 'light'));
       });
     })
     .catch(function(e){ card.querySelector('h2 em').textContent = 'failed: ' + e.message; });
@@ -371,6 +403,12 @@ function focus(style){
     layer.addTo(liveMap); liveLayers.push(layer);
   });
   // the sea floor for the ocean framings, painted between the base and the labels
+  if (view.relief){
+    liveBathy = L.imageOverlay(view.relief.img, [[view.relief.s, view.relief.w], [view.relief.n, view.relief.e]],
+                               { opacity:1, interactive:false }).addTo(liveMap);
+    if (liveLayers[1]) liveLayers[1].bringToFront();
+    return;
+  }
   bathyFor(vkey).then(function(geo){
     if (!geo || vkey !== document.getElementById('view').value) return;
     var dark = !(style.base === 'light');
