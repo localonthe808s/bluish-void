@@ -160,3 +160,28 @@ Every Manhattan name was cleared and re-attached from an explicit table of
 documented positions (`rename_manhattan.py`), matching within 350 m; anchors now
 land 32–309 m from their reference point. Named courses drop from 46 to **20**,
 which is the honest count: a name now means a documented position, not a guess.
+
+---
+
+# What you are looking at
+
+Three marks, and nothing else:
+
+- **Solid blue fill** — water that is still there. That comes from the basemap, not
+  from this layer.
+- **Bright blue line with a red edge** — a buried watercourse. The red is an outline,
+  not a second line: it is what keeps a two-pixel course legible over the orange
+  borough mask and the green parks, and it marks the course as something drawn onto
+  the city rather than something running through it.
+- **Pale wash with a faint blue edge** — the marsh and meadow the course ran through.
+  It is semi-transparent, so it takes a sage cast over parkland and a warm one over
+  built ground; the land under it still reads.
+
+Both course strokes are **solid**. Dashing them both put a round cap on either end of
+every dash, so each course came out as a string of beads in red shells rather than a
+line. The wash needs its edge for the same reason — without one it reads as a smudge.
+
+A course does not always run the length of its marsh: the centreline is only kept
+where the wet ground was narrow enough to have been a channel, so a broad marsh is
+drawn as an area with no line through it, and a neck between two marshes gets a line.
+That is deliberate, not a gap.
