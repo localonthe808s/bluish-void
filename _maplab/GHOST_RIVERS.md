@@ -326,7 +326,13 @@ about today's topography rather than the old watercourses.
 
 ---
 
-# Layer order in the live pane
+# Layer order in the live pane *(removed 2026-08-29)*
+
+The lab drew the same geography twice — an interactive Leaflet pane above the static card
+— and the two diverged as soon as you panned one of them, since the card always renders
+the fixed view box. Only the card ever carried the artwork, so the live pane and all of
+Leaflet went. The note below is kept because the trap is real and will bite again if a
+Leaflet map ever comes back.
 
 Leaflet stacks by **pane, not by add order**, and the two kinds of layer here sit in
 different ones: `protomapsL.leafletLayer` is a grid layer in `tilePane` (z 200) while

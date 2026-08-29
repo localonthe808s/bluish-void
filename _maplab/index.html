@@ -10,7 +10,6 @@
      Tiles: `pmtiles serve <dir> --port 8091 --cors '*'` next to the archive.
      The R2 CORS list is bluishvoid.com only, so the CDN URL will not load from
      localhost — that is what the local server is for. -->
-<link rel="stylesheet" href="https://cdn.bluishvoid.com/vendor/leaflet/leaflet.css">
 <style>
   :root{ --ink:#2B22F4; --paper:#f7f5ef; }
   *{box-sizing:border-box}
@@ -60,22 +59,16 @@
   <span class="sub" id="status"></span>
 </header>
 
-<main id="grid">
-  <div class="card wide">
-    <h2>LIVE · pan and zoom the focused style <em id="liveName">site dark</em></h2>
-    <div id="live"></div>
-  </div>
-</main>
+<main id="grid"></main>
 
 <p class="note">
-  Each tile is the same geography, same archive, different paint. Click a swatch to focus a style
-  in the live pane; <code>copy focused flavor</code> puts its object on the clipboard, ready to
+  Each tile is the same geography, same archive, different paint.
+  <code>copy focused flavor</code> puts its object on the clipboard, ready to
   drop into <code>BV_MAP_FLAVOR</code> in index.html. Tiles come from a local
   <code>pmtiles serve</code> — the CDN archive is CORS-locked to bluishvoid.com, so it will not
   load here.
 </p>
 
-<script src="https://cdn.bluishvoid.com/vendor/leaflet/leaflet.js"></script>
 <script src="https://cdn.bluishvoid.com/vendor/protomaps-leaflet/protomaps-leaflet-5.1.0.js"></script>
 <script>
 /* THE CITY box, verbatim from _cityBoxCfg() in index.html */
@@ -365,30 +358,8 @@ function flavorFor(style){
   return f;
 }
 
-var focused = STYLES[0], liveMap = null, liveLayers = [];
+var focused = STYLES[0];
 
-/* Leaflet stacks by PANE, not by add order, and the two layer kinds here live in
-   different ones: protomapsL.leafletLayer is a grid layer in tilePane (z 200) while
-   L.geoJSON draws into overlayPane (z 400). So the opaque borough mask sat on top of
-   the parks-and-rivers pass no matter when it was added, and buried every park inside
-   the city. Give each band its own pane and the order becomes explicit:
-     tilePane 200  the base map
-     bvMask   350  the borough mask and neighbourhood lines
-     bvParks  360  parks and rivers, put back over the mask
-     overlay  400  ghost water, flood zones, the subway
-     bvLabels 480  place names, which have to clear all of it            */
-function livePane(name, z){
-  if (!liveMap.getPane(name)){
-    liveMap.createPane(name);
-    var el = liveMap.getPane(name);
-    el.style.zIndex = z;
-    el.style.pointerEvents = 'none';
-  }
-  return name;
-}
-
-/* Paint the depth bands straight onto the card canvas, under the vector draw,
-   using the projection Static hands back so the two line up exactly. */
 function drawBathy(ctx, geo, proj, dark){
   if (!geo) return;
   var feats = geo.features.slice().sort(function(a,b){ return a.properties.d - b.properties.d; });
@@ -474,15 +445,22 @@ function drawHoods(ctx, geo, proj, dark){
    that is the whole grammar: solid is water that is still there, dashed is water
    that is under you. Every course here is lifted off the 1865 Viele survey itself
    rather than drawn from memory — see _maplab/GHOST_RIVERS.md. */
-/* The historic field, softened the same way as the water in it. The feather is most of
-   the width of a narrow creek arm, so those melt into the ground, and almost none of a
-   broad marsh's, so those keep their shape. The hard outline it used to carry is gone —
-   an outline is what makes a soft shape look cut out again. */
-function drawWet(ctx, geo, proj, W, H){
-  if (!geo || !W || !H) return;
-  var m = _maskOf(geo, proj, W, H, null);
-  ctx.drawImage(_stencil(m, W, H, 6, 'rgba(157,196,234,.5)'), 0, 0);
-  ctx.drawImage(_stencil(m, W, H, 2, 'rgba(157,196,234,.85)'), 0, 0);
+/* The historic field keeps a hard edge. It is a surveyed boundary — this is where the
+   marsh was — and softening it made a measurement look like a guess. Only the flood
+   model, which really is a gradient of likelihood, and the water surface get feathered. */
+function drawWet(ctx, geo, proj){
+  if (!geo) return;
+  ctx.save();
+  ctx.fillStyle = WATER_PALE;
+  ctx.strokeStyle = WATER_EDGE;
+  ctx.lineWidth = 1; ctx.lineJoin = 'round';
+  geo.features.forEach(function(ft){
+    ft.geometry.coordinates.forEach(function(ring){
+      curvePath(ctx, ring, proj, true);
+      ctx.fill(); ctx.stroke();
+    });
+  });
+  ctx.restore();
 }
 
 /* One water family, two states. Every piece of ground that ever held water — marsh,
@@ -810,9 +788,6 @@ function drawCard(style){
     b.style.background = f[k]; b.title = k + ' ' + f[k];
     row.appendChild(b);
   });
-  var pick = document.createElement('button');
-  pick.textContent = 'focus'; pick.onclick = function(){ focus(style); };
-  row.appendChild(pick);
   card.appendChild(row);
   document.getElementById('grid').appendChild(card);
 
@@ -857,7 +832,7 @@ function drawCard(style){
         return again.drawContextBounds(ctx, {x:view.w, y:latMid}, {x:view.e, y:latMid}, W, H)
           .then(function(){
             return wetFor(vkey).then(function(wg){
-              drawWet(ctx, wg, out.project, W, H);    // the field: ground that was water
+              drawWet(ctx, wg, out.project);          // the field: ground that was water
               return ghostsFor(vkey);
             }).then(function(gh){
               drawGhosts(ctx, gh, out.project);       // the buried courses, inside it
@@ -884,167 +859,11 @@ function drawCard(style){
     .catch(function(e){ card.querySelector('h2 em').textContent = 'failed: ' + e.message; });
 }
 
-var liveBathy = null;
-function focus(style){
-  focused = style;
-  document.getElementById('liveName').textContent = style.name;
-  var f = flavorFor(style);
-  var vkey = document.getElementById('view').value, view = VIEWS[vkey] || CITY;
-  if (!liveMap){
-    liveMap = L.map('live', { center:[(view.s+view.n)/2, (view.w+view.e)/2], zoom:view.zoom,
-                              attributionControl:false, preferCanvas:true });
-  }
-  liveMap.setView([(view.s+view.n)/2, (view.w+view.e)/2], view.zoom, { animate:false });
-  /* The grid reflows every redraw, so the pane changes width AFTER Leaflet has
-     measured it — without this the tiles are laid out for the old size and sit
-     off-screen, which reads as a blank map even though every canvas is painted. */
-  setTimeout(function(){ liveMap.invalidateSize(); }, 60);
-  liveLayers.forEach(function(l){ liveMap.removeLayer(l); });
-  liveLayers = [];
-  if (liveBathy){ liveMap.removeLayer(liveBathy); liveBathy = null; }
-  livePane('bvMask', 350); livePane('bvParks', 360); livePane('bvLabels', 480);
-  [false, true].forEach(function(labels){
-    var opts = {
-      url: document.getElementById('src').value,
-      maxDataZoom: 14,
-      paintRules: labels ? [] : rulesFor(style, f),
-      labelRules: labels ? labelsFor(style, f) : [],
-      backgroundColor: labels ? undefined : f.background,
-      attribution: ''
-    };
-    /* Set `pane` only when there is one to set. Passing `pane: undefined` does not
-       mean "use the default" — it overrides Leaflet's prototype default with
-       undefined, getPane() then returns nothing and the layer dies on appendChild,
-       taking the whole map with it. */
-    if (labels) opts.pane = 'bvLabels';
-    var layer = protomapsL.leafletLayer(opts);
-    layer.addTo(liveMap); liveLayers.push(layer);
-  });
-  // the sea floor for the ocean framings, painted between the base and the labels
-  if (view.relief){
-    liveBathy = L.imageOverlay(view.relief.img, [[view.relief.s, view.relief.w], [view.relief.n, view.relief.e]],
-                               { opacity:1, interactive:false }).addTo(liveMap);
-    return;
-  }
-  boroughsFor(vkey).then(function(boro){
-    if (!boro || vkey !== document.getElementById('view').value) return;
-    var dark = !(style.base === 'light');
-    var lb = L.geoJSON(boro, { renderer: L.canvas({ padding:0.4, pane:'bvMask' }), pane:'bvMask',
-      style: function(){ return { color: boroughEdge(dark), weight:1.2, fillColor: boroughFill(dark), fillOpacity:1 }; } }).addTo(liveMap);
-    liveLayers.push(lb);
-    /* The mask is opaque, so the parks and rivers inside the city have to be put back
-       over it. This has to happen HERE, inside the same promise: added outside, it went
-       on while boroughsFor was still resolving and the mask landed on top of it. */
-    if (view.boroughs){
-      var pl = protomapsL.leafletLayer({ url: document.getElementById('src').value, maxDataZoom: 14,
-        paintRules: parkRulesFor().concat(waterRulesFor(style, f)), labelRules: [],
-        pane: 'bvParks', attribution: '' });
-      pl.addTo(liveMap); liveLayers.push(pl);
-    }
-    wetFor(vkey).then(function(wg){
-      if (!wg) return;
-      var wl = L.geoJSON(wg, { renderer: L.canvas({ padding:0.4 }),
-        style: function(){ return { color:'#3B71CA', weight:1, opacity:.38, fillColor:WATER_PALE, fillOpacity:1 }; },
-        onEachFeature: function(ft, lyr){ var p = ft.properties || {};
-          lyr.bindPopup('marsh &amp; meadow · ' + (p.area_m2/10000).toFixed(0) + ' ha · ' + (p.boro || '') + ' · ' + (p.src || '')); } }).addTo(liveMap);
-      liveLayers.push(wl);
-    });
-    floodFor(vkey).then(function(fl){
-      if (!fl) return;
-      var flr = L.geoJSON(fl, { renderer: L.canvas({ padding:0.4 }),
-        style: function(ft){
-          var deep = ft.properties.cat === 2;
-          return { color: deep ? '#74080F' : FLOOD_EDGE, weight: deep ? 0.8 : 0.6,
-                   opacity: deep ? .55 : .28, fillColor:'#A8141C',
-                   fillOpacity: deep ? .58 : .24 };
-        },
-        onEachFeature: function(ft, lyr){
-          var p = ft.properties;
-          lyr.bindPopup('<b>' + FLOOD_LABEL[p.cat] + '</b><br>' + (p.a/10000).toFixed(2)
-                        + ' ha \u00b7 NYC DEP stormwater model, today\u2019s sea level');
-        } }).addTo(liveMap);
-      liveLayers.push(flr);
-    });
-    ghostsFor(vkey).then(function(gh){
-      if (!gh) return;
-      var gl = L.geoJSON(gh, { renderer: L.canvas({ padding:0.4 }),
-        style: function(ft){ var L=(ft.properties&&ft.properties.len_m)||0;
-          return { color:GHOST_INK, weight: 2.6 + Math.min(2.2, L/700), lineCap:'round', lineJoin:'round', fillColor:GHOST_INK, fillOpacity:.28 }; },
-        onEachFeature: function(ft, lyr){
-          var p = ft.properties || {};
-          lyr.bindPopup((p.name ? '<b>' + p.name + '</b>' + (p.story ? '<br>' + p.story : '') + '<br>'
-                                : '<b>unnamed watercourse</b><br>')
-                        + p.len_m + ' m · ' + (p.boro || '') + ' · traced from ' + (p.src || ''));
-        } }).addTo(liveMap);
-      liveLayers.push(gl);
-    });
-    Promise.all([subwayFor(vkey), stopsFor(vkey), bulletsFor(vkey)]).then(function(sw){
-      if (!sw[0]) return;
-      var halo = L.geoJSON(sw[0], { renderer: L.canvas({ padding:0.4 }), interactive:false,
-        style: function(){ return { color:'#fff', weight:4.2, opacity:.75, fill:false }; } }).addTo(liveMap);
-      var rail = L.geoJSON(sw[0], { renderer: L.canvas({ padding:0.4 }),
-        style: function(ft){ return { color: ft.properties.colour || RAIL_INK, weight:2.2, fill:false }; },
-        onEachFeature: function(ft, lyr){ lyr.bindPopup('<b>' + ft.properties.route + '</b> \u00b7 ' + ft.properties.name); } }).addTo(liveMap);
-      liveLayers.push(halo, rail);
-      if (!sw[1]) return;
-      var bul = sw[2] || {};
-      var chip = function(rts){
-        return bulletRows(rts, bul).map(function(rw){
-          return '<div>' + rw.map(function(r){
-            return '<span style="display:inline-block;width:14px;height:14px;line-height:14px;border-radius:50%;'
-                 + 'text-align:center;font:700 ' + (r.length > 1 ? '7' : '9') + 'px system-ui,sans-serif;color:#fff;'
-                 + 'background:' + ((bul[r]) || RAIL_INK) + ';margin-right:2px;">' + r + '</span>';
-          }).join('') + '</div>';
-        }).join('');
-      };
-      var st = L.geoJSON(sw[1], { renderer: L.canvas({ padding:0.4 }),
-        pointToLayer: function(ft, ll){ return L.circleMarker(ll, { radius:2.8, color:RAIL_INK, weight:1.1, fillColor:'#fff', fillOpacity:1 }); },
-        onEachFeature: function(ft, lyr){
-          var p = ft.properties;
-          var sp = splitStation(p.name);
-          lyr.bindPopup(chip(p.routes)
-            + '<div style="font:700 .8rem system-ui,sans-serif;color:#1d2126;margin-top:4px;">' + sp.street + '</div>'
-            + (sp.place ? '<div style="font:500 .68rem system-ui,sans-serif;color:#4a5058;">' + sp.place + '</div>' : ''));
-          lyr.bindTooltip('<div style="font:700 .72rem system-ui,sans-serif;">' + sp.street + '</div>'
-            + (sp.place ? '<div style="font:500 .62rem system-ui,sans-serif;opacity:.75;">' + sp.place + '</div>' : ''),
-            { direction:'right', offset:[4,0] });
-        } });
-      /* Zoomed out the dots bead along every line and swamp the map, so they are gated
-         the way the card render gates them. The handler is stored on the map so a
-         rebuild replaces it instead of stacking another one. */
-      if (liveMap._bvStopGate){ liveMap.off('zoomend', liveMap._bvStopGate); }
-      liveMap._bvStopGate = function(){
-        var on = liveMap.getZoom() >= 13;
-        if (on && !liveMap.hasLayer(st)) st.addTo(liveMap);
-        else if (!on && liveMap.hasLayer(st)) liveMap.removeLayer(st);
-      };
-      liveMap.on('zoomend', liveMap._bvStopGate);
-      liveMap._bvStopGate();
-      liveLayers.push(st);
-    });
-    hoodsFor(vkey).then(function(hoods){
-      if (!hoods) return;
-      var hl = L.geoJSON(hoods, { renderer: L.canvas({ padding:0.4, pane:'bvMask' }), pane:'bvMask',
-        style: function(){ return { color: hoodEdge(dark), weight:0.6, fill:false }; } }).addTo(liveMap);
-      liveLayers.push(hl);
-    });
-  });
-  bathyFor(vkey).then(function(geo){
-    if (!geo || vkey !== document.getElementById('view').value) return;
-    var dark = !(style.base === 'light');
-    liveBathy = L.geoJSON(geo, {
-      renderer: L.canvas({ padding: 0.4 }),
-      style: function(ft){ return { stroke:false, fillColor: depthFill(ft.properties.d, dark), fillOpacity:1 }; }
-    }).addTo(liveMap);
-  });
-}
 
 function renderAll(){
   var grid = document.getElementById('grid');
-  [].slice.call(grid.querySelectorAll('.card:not(.wide)')).forEach(function(c){ c.remove(); });
+  [].slice.call(grid.querySelectorAll('.card')).forEach(function(c){ c.remove(); });
   STYLES.forEach(drawCard);
-  focus(focused);
-  if (liveMap) setTimeout(function(){ liveMap.invalidateSize(); }, 120);
   document.getElementById('status').textContent = STYLES.length + ' styles · ' + W + '×' + H;
 }
 
@@ -1056,7 +875,6 @@ function copyFlavor(){
 }
 
 renderAll();
-window.addEventListener('resize', function(){ if (liveMap) liveMap.invalidateSize(); });
 </script>
 </body>
 </html>
