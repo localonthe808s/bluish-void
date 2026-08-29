@@ -367,11 +367,28 @@ own box was needed to pick up the ones tagged as woods and grass rather than as 
 would land in the Hudson. Each label point is the sampled interior point furthest from any
 edge, a cheap pole of inaccessibility.
 
-**A name appears when it fits, not at a zoom number.** The name is wrapped to the width of
-the park's own projected box and drawn only if the wrapped block is inside 86% of that box's
-width and 74% of its height, with the park at least 34 px across. So a short name on a small
-green appears earlier than a long one, which is what "fits cleanly" actually means. Lines are
-centred and stacked on the anchor, and a label that would overlap one already placed is
-dropped. At city framing exactly one label survives citywide — Randalls Island Park.
+**Names stack on their own words, not at whatever width runs out.** One word a line while
+the name is short; only past three tokens do the words pair up:
+
+| | |
+|---|---|
+| Flushing Meadows-Corona Park | FLUSHING MEADOWS / CORONA PARK |
+| Queens Botanical Garden | QUEENS / BOTANICAL / GARDEN |
+| Kissena Corridor Park | KISSENA / CORRIDOR / PARK |
+| The Ravine | THE RAVINE |
+
+Two rules earn their keep. **A hyphen is a word break** — OSM stores "Flushing
+Meadows-Corona Park", which as three tokens stacks FLUSHING / MEADOWS-CORONA / PARK; broken
+at the hyphen it is four and pairs correctly. (A hyphen between digits is left alone.) And
+**articles ride with their word**, so it is THE RAVINE, never THE over RAVINE. Set in caps
+with a little letter-spacing, which reads as a park label and keeps them apart from the
+station names.
+
+**A name appears when it fits, not at a zoom number.** It is drawn only if the stacked block
+sits inside 86% of the park's own projected box width and 74% of its height, with the park at
+least 34 px across. So a short name on a small green appears earlier than a long one, which
+is what "fits cleanly" actually means. Lines are centred on the anchor, and a label that
+would overlap one already placed is dropped. At city framing exactly one label survives
+citywide — Randalls Island Park.
 
 The live pane still uses the basemap's own place labels; this is the card render only.
