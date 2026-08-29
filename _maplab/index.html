@@ -423,8 +423,8 @@ function drawHoods(ctx, geo, proj, dark){
 function drawWet(ctx, geo, proj){
   if (!geo) return;
   ctx.save();
-  ctx.fillStyle = 'rgba(199,219,243,.66)';
-  ctx.strokeStyle = 'rgba(27,77,255,.30)';   // an edge, or it reads as a smudge
+  ctx.fillStyle = WATER_PALE;
+  ctx.strokeStyle = WATER_EDGE;   // an edge, or it reads as a smudge
   ctx.lineWidth = 1; ctx.lineJoin = 'round';
   geo.features.forEach(function(ft){
     ft.geometry.coordinates.forEach(function(ring){
@@ -439,10 +439,51 @@ function drawWet(ctx, geo, proj){
   ctx.restore();
 }
 
-/* The courses are plain bright blue. The red belongs to the flood zones, which it
-   outlines — one mark, one meaning: red is where the city expects water to stand
-   now, blue is where the water used to run. */
-var GHOST_INK = '#1B4DFF', FLOOD_EDGE = '#A5101A';
+/* One water family, two states. The ground that was ever water — marsh, meadow,
+   the courses, and the water still standing — is all the same light blue field, so
+   the city's whole water story reads as one shape. What is still wet is picked out
+   inside it by dark blue hatching; the buried courses are drawn as blue lines. Red
+   stays with the flood zones, which are a forecast, not water. */
+var WATER_PALE  = '#cfe1f6',   // the field: any ground that was or is water
+    WATER_EDGE  = 'rgba(59,113,202,.38)',
+    GHOST_INK   = '#3B71CA',   // a buried course
+    WATER_HATCH = '#0B3A78',   // water that is still there
+    FLOOD_EDGE  = '#A5101A';
+
+/* Diagonal shading, built once and reused as a fill. Canvas patterns are in device
+   pixels, so this is deliberately drawn at the size it will be shown at. */
+var _hatchPat = null;
+function hatchPattern(ctx){
+  if (_hatchPat) return _hatchPat;
+  var t = document.createElement('canvas'), S = 8;
+  t.width = t.height = S;
+  var g = t.getContext('2d');
+  g.strokeStyle = WATER_HATCH; g.lineWidth = 1.15; g.lineCap = 'square';
+  // two strokes so the 45-degree line is continuous across tile edges
+  g.beginPath(); g.moveTo(-1, S + 1); g.lineTo(S + 1, -1); g.stroke();
+  g.beginPath(); g.moveTo(-1, 1); g.lineTo(1, -1); g.stroke();
+  g.beginPath(); g.moveTo(S - 1, S + 1); g.lineTo(S + 1, S - 1); g.stroke();
+  _hatchPat = ctx.createPattern(t, 'repeat');
+  return _hatchPat;
+}
+
+/* Today's water, drawn off-screen so its own shapes become the stencil: fill the
+   stencil with the pale field, then lay the hatch over only what it covers. */
+function drawActiveWater(ctx, style, f, view, latMid, W, H){
+  var off = document.createElement('canvas'); off.width = W; off.height = H;
+  var oc = off.getContext('2d');
+  var st = new protomapsL.Static({ url: document.getElementById('src').value,
+    paintRules: waterRulesFor(style, f), labelRules: [], maxDataZoom: 14 });
+  return st.drawContextBounds(oc, {x:view.w, y:latMid}, {x:view.e, y:latMid}, W, H)
+    .then(function(){
+      oc.globalCompositeOperation = 'source-in';
+      oc.fillStyle = WATER_PALE; oc.fillRect(0, 0, W, H);
+      oc.globalCompositeOperation = 'source-atop';
+      oc.fillStyle = hatchPattern(oc); oc.fillRect(0, 0, W, H);
+      oc.globalCompositeOperation = 'source-over';
+      ctx.drawImage(off, 0, 0);
+    });
+}
 function drawFlood(ctx, geo, proj){
   if (!geo) return;
   ctx.save();
@@ -552,17 +593,19 @@ function drawCard(style){
         /* The mask is opaque, so it buries the rivers and the place names inside
            the city. Put them back over it: water first, then the labels. */
         var again = new protomapsL.Static({ url: document.getElementById('src').value,
-          paintRules: parkRulesFor().concat(waterRulesFor(style, f)), labelRules: [], maxDataZoom: 14 });
+          paintRules: parkRulesFor(), labelRules: [], maxDataZoom: 14 });
         return again.drawContextBounds(ctx, {x:view.w, y:latMid}, {x:view.e, y:latMid}, W, H)
           .then(function(){
             return wetFor(vkey).then(function(wg){
-              drawWet(ctx, wg, out.project);
+              drawWet(ctx, wg, out.project);          // the field: ground that was water
+              return ghostsFor(vkey);
+            }).then(function(gh){
+              drawGhosts(ctx, gh, out.project);       // the buried courses, inside it
+              return drawActiveWater(ctx, style, f, view, latMid, W, H);
+            }).then(function(){
               return floodFor(vkey);
             }).then(function(fl){
               drawFlood(ctx, fl, out.project);
-              return ghostsFor(vkey);
-            }).then(function(gh){
-              drawGhosts(ctx, gh, out.project);
               var lab = new protomapsL.Static({ url: document.getElementById('src').value,
                 paintRules: [], labelRules: labelsFor(style, f), maxDataZoom: 14 });
               return lab.drawContextBounds(ctx, {x:view.w, y:latMid}, {x:view.e, y:latMid}, W, H);
@@ -618,7 +661,7 @@ function focus(style){
     wetFor(vkey).then(function(wg){
       if (!wg) return;
       var wl = L.geoJSON(wg, { renderer: L.canvas({ padding:0.4 }),
-        style: function(){ return { color:'#1B4DFF', weight:1, opacity:.30, fillColor:'#c7dbf3', fillOpacity:.66 }; },
+        style: function(){ return { color:'#3B71CA', weight:1, opacity:.38, fillColor:WATER_PALE, fillOpacity:1 }; },
         onEachFeature: function(ft, lyr){ var p = ft.properties || {};
           lyr.bindPopup('marsh &amp; meadow · ' + (p.area_m2/10000).toFixed(0) + ' ha · ' + (p.boro || '') + ' · ' + (p.src || '')); } }).addTo(liveMap);
       liveLayers.push(wl);

@@ -165,21 +165,23 @@ which is the honest count: a name now means a documented position, not a guess.
 
 # What you are looking at
 
-Three marks, and nothing else:
+**One water family, two states.** Every piece of ground that ever held water — the
+marsh, the buried courses, and the water still standing — is the same light blue
+field, so the city's whole water story reads as one shape rather than as a historic
+layer sitting on a modern map. Inside that field:
 
-- **Solid blue fill** — water that is still there. That comes from the basemap, not
-  from this layer.
-- **Bright blue line with a red edge** — a buried watercourse. The red is an outline,
-  not a second line: it is what keeps a two-pixel course legible over the orange
-  borough mask and the green parks, and it marks the course as something drawn onto
-  the city rather than something running through it.
-- **Pale wash with a faint blue edge** — the marsh and meadow the course ran through.
-  It is semi-transparent, so it takes a sage cast over parkland and a warm one over
-  built ground; the land under it still reads.
+- **Light blue fill** (`#cfe1f6`) — ground that was or is water.
+- **Dark blue diagonal hatching** — the water that is *still there*. Drawn by taking
+  the basemap's own water shapes off-screen as a stencil, filling it with the field
+  colour, then laying the hatch over only what it covers, so today's rivers and lakes
+  sit **inside** the historic field instead of on top of it.
+- **Blue line** (`#3B71CA`) — a buried watercourse.
+- **Deep crimson outline and tint** — a modelled flood zone. Red is deliberately not
+  part of the water family: it is a forecast, not water.
 
-Both course strokes are **solid**. Dashing them both put a round cap on either end of
-every dash, so each course came out as a string of beads in red shells rather than a
-line. The wash needs its edge for the same reason — without one it reads as a smudge.
+Both course strokes are **solid**. Dashing them put a round cap on either end of every
+dash, so each course came out as a string of beads. The wash needs an edge for the same
+reason — without one it reads as a smudge.
 
 A course does not always run the length of its marsh: the centreline is only kept
 where the wet ground was narrow enough to have been a channel, so a broad marsh is
