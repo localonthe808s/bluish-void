@@ -293,9 +293,15 @@ splits across rows — the A C E stay together and so do B D F M. They are gathe
 colour **globally**, not by adjacency: MTA order runs A B C D E F G, so the blues and
 oranges interleave and adjacent grouping would give seven groups of one. Groups are then
 packed in order, a row taking a whole group or starting a new one. Times Square comes out
-1237 / ACE / NQRW / S; Herald Square BDFM / NQRW; W 4 St ACE / BDFM. Names are drawn only when the framing is finer than **9 m
-per pixel**; at city scale 444 of them is a smear, so the stations stay as dots. Labels
-are placed with a rectangle-overlap test and a label that collides is dropped rather than
+1237 / ACE / NQRW / S; Herald Square BDFM / NQRW; W 4 St ACE / BDFM. Two zoom gates: the **dots** appear below 22 m per pixel and the **names** below 9 m per
+pixel. At city framing 444 white dots bead along every line and read as the network
+itself, drowning the lines they are meant to sit on — so out there the coloured lines
+carry it alone. The live pane gates its station layer the same way at zoom 13, with the
+handler stored on the map so a rebuild replaces it rather than stacking another.
+
+The whole label is **centre-aligned on the bullet block**: each bullet row is centred, so
+a two-bullet row sits under a four, and the street and place are centred under both.
+Labels are placed with a rectangle-overlap test; one that collides is dropped rather than
 stacked.
 
 ## What the overlay is worth
