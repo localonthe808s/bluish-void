@@ -44,3 +44,63 @@ survey is the only honest source.
 **Rebuild:** the scripts are one-offs in the session scratchpad
 (`viele_wet2.py` → `viele_build.py`). Re-derive from the mosaic if the rules
 above need retuning; the mosaic itself takes ~4 minutes to refetch.
+
+---
+
+# Brooklyn and Queens
+
+Added 2026-08-29. The layers now hold three boroughs: 213 courses over 105 km and
+68.5 km² of wet ground. Each feature carries `boro` and `src`, because the two
+halves come from different surveys and are not equally good.
+
+**Why not the same source.** Viele's sheet stops at Manhattan. Map Warper layer
+1631, the "Topographical map of the counties of Kings and Queens", turned out to
+be Walling's 1859 *county atlas* — property lines and township colour washes, with
+marsh drawn as a monochrome engraved texture (line hatch and grass tufts) rather
+than a colour wash. Nothing to key a hue on, and in built Brooklyn the creeks are
+not drawn at all. It was rejected.
+
+**What was used instead: USGS 15-minute quadrangles, 1897.** Public domain, on
+the public `prd-tnm` S3 bucket, and already georeferenced:
+
+    StagedProducts/Maps/HistoricalTopo/GeoTIFF/NY/NY_<quad>_<id>_<year>_62500_geo.tif
+
+Four sheets tile the two boroughs — Brooklyn, Harlem, Hempstead and Oyster Bay,
+all 1897/98. USGS printed water and marsh in **cyan-blue** on these, so
+`B−R ≥ 26` separates it from everything else in one step.
+
+**Georeferencing.** The GeoTIFFs are American polyconic on Clarke 1866 (NAD27)
+with `ProjectedCSTypeGeoKey = User_Defined`, so no library will read them for you —
+but every parameter is in the geokeys. `polyconic.py` (scratchpad) implements the
+forward projection from Snyder, inverts it by Newton, and applies a Molodensky
+NAD27→WGS84 shift. Verified by drawing the modern borough outlines onto the sheet:
+they land exactly, and the gap at Jamaica Bay and Coney Island is real landfill.
+
+**Three clips, all necessary:**
+1. **Neatline.** Every sheet has a printed collar, and a *neighbour's* collar can
+   sit on top of real ground — the Harlem sheet's archive stamp lands in Queens and
+   came through as a watercourse shaped like the words "Topographic Division".
+   Round each sheet's extent inward to the 15′ graticule; the four bodies tile
+   exactly with no overlap.
+2. **Today's borough land** (`nyc_boroughs.json`, which is land only — Jamaica Bay
+   and the East River fall outside it). What is inside it *and* was water in 1897
+   is water the city has since covered.
+3. **Today's water and wetland**, from one Overpass query (`natural=water`,
+   `wetland`, `coastline`). Without this the layer claims Jamaica Bay's surviving
+   marsh islands as ghosts. Checked against known points afterwards: Rulers Bar and
+   Big Egg (still marsh) out, Jamaica Bay open water out, Prospect Park out; JFK,
+   Flushing Meadows and Starrett City in.
+
+A centreline through a mile-wide marsh is not a stream, so the skeleton is kept
+only where the distance transform says the wet ground was narrow enough to have
+been a channel (< ~125 m across). Broad marsh stays a polygon.
+
+**Known limits.**
+- **1897 is late for western Brooklyn.** Gowanus, Wallabout, Bushwick and Sunswick
+  creeks were already canalized or filled by then, so they are absent — the name
+  matcher found nothing within 3 km of Gowanus or Wallabout. Only 9 of 120
+  Kings/Queens courses carry a name, against 37 of 93 in Manhattan.
+- **Bay Ridge, west of −74.00, is uncovered** — no 1890s 62,500 quad for that block
+  exists in the bucket under any name tried.
+- Names here were attached **by position** from a small table in `name_kq.py`, not
+  read off the sheet.
