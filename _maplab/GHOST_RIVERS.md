@@ -23,8 +23,13 @@ anyone. The mosaic is a build input, not a layer.
    useless here — it carries a century of landfill, so the whole 1865 coast
    falls inside it and the coastline comes back as a "stream".
 3. *Clipped to Manhattan*, the one island the sheet covers end to end.
-4. *Skeletonised* to centre-lines, broken at junctions, then re-stitched where
-   ends meet and keep the same heading; simplified to ~13 m.
+4. *Skeletonised* to centre-lines, broken at junctions, then re-stitched where ends
+   meet and keep the same heading. **Breaking at the junctions is what let each branch
+   be walked separately, and it also punched a hole at every confluence** — a tributary
+   stopped short of the trunk it joined, so the network did not connect like a river.
+   Each junction's centroid is recorded before it is cut out, and every branch endpoint
+   within 7 px of one is snapped onto it; several branches landing on the same centroid
+   is exactly what makes them meet. 513 of 618 endpoints snap.
 5. *Smoothed, not straightened.* Douglas-Peucker is run at ~4 m, not the 13 m it
    started at: a skeleton through a smooth corridor is nearly straight, and a coarse
    tolerance collapses a whole reach to one chord, which is what made the first
@@ -185,7 +190,8 @@ layer sitting on a modern map. Inside that field:
   being cut out of it. Two passes: a wider pale halo, so there is always light blue for
   the water to fade into even where no historic marsh sits behind it, then the deep blue
   with a slight feather.
-- **Blue line** (`#3B71CA`) — a buried watercourse.
+- **Blue line** (`#3B71CA`) — a buried watercourse. Weight runs 2.6–4.8 px with the
+  length of the course, so a trunk carries more line than a headwater stub.
 - **Deep crimson outline and tint** — a modelled flood zone. Red is deliberately not
   part of the water family: it is a forecast, not water.
 
