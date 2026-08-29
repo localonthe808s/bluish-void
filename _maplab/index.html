@@ -89,7 +89,8 @@ var VIEWS = {
      which means it has to be a solid mask, not an outline. */
   city:     { w:-74.60, s:40.30, e:-73.40, n:41.10, bathy:null, zoom:11,
               boroughs:'bathy/nyc_boroughs.json', hoods:'bathy/nyc_ntas.json',
-              dropLabels:['New York'], ghosts:'bathy/ghost_streams.json' },
+              dropLabels:['New York','Newark Bay','Upper New York Bay'],
+              ghosts:'bathy/ghost_streams.json', wet:'bathy/ghost_wetground.json' },
   shelf:    { w:-75.20, s:37.20, e:-70.00, n:41.20, bathy:'bathy/bathy_shelf.json', zoom:7 },
   atlantic: { w:-80.00, s:5.00,  e:-5.00,  n:60.00, bathy:'bathy/bathy_atlantic.json', zoom:3 },
   /* The two places worth real bathymetry: GMRT multibeam rendered to images with
@@ -107,12 +108,20 @@ var W = 1100, H = Math.round(W / 1.1372);   // one style, so give it the room
 /* Natural Earth depth bands, public domain. Each polygon carries the depth of
    the band it opens, so drawing them deepest-last with a darkening ramp gives
    the shelf, the slope, the abyssal plain and the ridge as tone. */
-var BATHY = {}, BOROS = null, HOODS = null, GHOSTS = null;
+var BATHY = {}, BOROS = null, HOODS = null, GHOSTS = null, WETGROUND = null;
 function boroughsFor(view){
   var v = VIEWS[view];
   if (!v || !v.boroughs) return Promise.resolve(null);
   if (BOROS) return Promise.resolve(BOROS);
   return fetch(v.boroughs).then(function(r){ return r.json(); }).then(function(j){ BOROS = j; return j; });
+}
+/* The marsh and meadow the streams ran through, as Viele surveyed it — the wash
+   around the courses, not the courses themselves. */
+function wetFor(view){
+  var v = VIEWS[view];
+  if (!v || !v.wet) return Promise.resolve(null);
+  if (WETGROUND) return Promise.resolve(WETGROUND);
+  return fetch(v.wet).then(function(r){ return r.json(); }).then(function(j){ WETGROUND = j; return j; });
 }
 function ghostsFor(view){
   var v = VIEWS[view];
@@ -269,7 +278,7 @@ function labelsFor(style, f){
   var drop = (VIEWS[document.getElementById('view').value] || {}).dropLabels;
   if (drop && drop.length){
     ls = ls.map(function(r){
-      if (r.dataLayer !== 'places') return r;
+      if (r.dataLayer !== 'places' && r.dataLayer !== 'water') return r;
       var orig = r.filter, out = {};
       for (var k in r) out[k] = r[k];
       out.filter = function(z, feat){
@@ -393,8 +402,25 @@ function drawHoods(ctx, geo, proj, dark){
 
 /* The buried streams. Drawn in the SAME ink as the living water but dashed —
    that is the whole grammar: solid is water that is still there, dashed is water
-   that is under you. The ponds (Collect, Sunfish, Little Collect) come as
-   polygons, so they get a wash inside the dashes. */
+   that is under you. Every course here is lifted off the 1865 Viele survey itself
+   rather than drawn from memory — see _maplab/GHOST_RIVERS.md. */
+function drawWet(ctx, geo, proj){
+  if (!geo) return;
+  ctx.save();
+  ctx.fillStyle = 'rgba(214,226,244,.62)';
+  geo.features.forEach(function(ft){
+    ft.geometry.coordinates.forEach(function(ring){
+      ctx.beginPath();
+      ring.forEach(function(pt, i){
+        var q = proj({ x:pt[0], y:pt[1] });
+        if (i === 0) ctx.moveTo(q.x, q.y); else ctx.lineTo(q.x, q.y);
+      });
+      ctx.closePath(); ctx.fill();
+    });
+  });
+  ctx.restore();
+}
+
 function drawGhosts(ctx, geo, proj){
   if (!geo) return;
   ctx.save();
@@ -483,7 +509,10 @@ function drawCard(style){
           paintRules: parkRulesFor().concat(waterRulesFor(style, f)), labelRules: [], maxDataZoom: 14 });
         return again.drawContextBounds(ctx, {x:view.w, y:latMid}, {x:view.e, y:latMid}, W, H)
           .then(function(){
-            return ghostsFor(vkey).then(function(gh){
+            return wetFor(vkey).then(function(wg){
+              drawWet(ctx, wg, out.project);
+              return ghostsFor(vkey);
+            }).then(function(gh){
               drawGhosts(ctx, gh, out.project);
               var lab = new protomapsL.Static({ url: document.getElementById('src').value,
                 paintRules: [], labelRules: labelsFor(style, f), maxDataZoom: 14 });
@@ -537,13 +566,22 @@ function focus(style){
     var lb = L.geoJSON(boro, { renderer: L.canvas({ padding:0.4 }),
       style: function(){ return { color: boroughEdge(dark), weight:1.2, fillColor: boroughFill(dark), fillOpacity:1 }; } }).addTo(liveMap);
     liveLayers.push(lb);
+    wetFor(vkey).then(function(wg){
+      if (!wg) return;
+      var wl = L.geoJSON(wg, { renderer: L.canvas({ padding:0.4 }),
+        style: function(){ return { stroke:false, fillColor:'#d6e2f4', fillOpacity:.62 }; },
+        onEachFeature: function(ft, lyr){ lyr.bindPopup('marsh &amp; meadow, Viele 1865 · ' + (ft.properties.area_m2/10000).toFixed(1) + ' ha'); } }).addTo(liveMap);
+      liveLayers.push(wl);
+    });
     ghostsFor(vkey).then(function(gh){
       if (!gh) return;
       var gl = L.geoJSON(gh, { renderer: L.canvas({ padding:0.4 }),
         style: function(){ return { color:'#2B22F4', weight:1.6, dashArray:'5,4', fillColor:'#2B22F4', fillOpacity:.28 }; },
         onEachFeature: function(ft, lyr){
           var p = ft.properties || {};
-          if (p.name) lyr.bindPopup('<b>' + p.name + '</b>' + (p.story ? '<br>' + p.story : ''));
+          lyr.bindPopup((p.name ? '<b>' + p.name + '</b>' + (p.story ? '<br>' + p.story : '') + '<br>'
+                                : '<b>unnamed watercourse</b><br>')
+                        + p.len_m + ' m · traced from Viele, 1865');
         } }).addTo(liveMap);
       liveLayers.push(gl);
     });
