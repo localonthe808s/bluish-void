@@ -12205,9 +12205,9 @@ window._updateHeroWx = function(code, night){
                         <div id="floodnet-area-near" onclick="floodNetArea('near')" style="display:none;flex:1;padding:4px 0;border-radius:8px;border:1px solid rgba(0,107,182,.2);background:transparent;font-size:.4rem;font-weight:700;color:rgba(0,107,182,.45);cursor:pointer;text-align:center;user-select:none;">NEARBY</div>
                         <div id="floodnet-area-city" onclick="floodNetArea('city')" style="flex:1;padding:4px 0;border-radius:8px;border:1px solid rgba(0,107,182,.2);background:transparent;font-size:.4rem;font-weight:700;color:rgba(0,107,182,.45);cursor:pointer;text-align:center;user-select:none;">NYC</div>
                       </div>
-                      <!-- the city's buried streams: Viele's 1865 survey as georectified
-                           tiles — where the water was is where basements flood -->
-                      <div id="floodnet-ghost" onclick="toggleGhostRivers()" title="Viele's 1865 survey of Manhattan's original streams and marshes — the buried waterways under today's streets" style="display:none;margin-top:3px;padding:4px 0;border-radius:8px;border:1px solid rgba(0,107,182,.2);background:transparent;font-size:.4rem;font-weight:700;color:rgba(0,107,182,.45);cursor:pointer;text-align:center;user-select:none;">GHOST RIVERS · 1865</div>
+                      <!-- the city's buried streams, traced off Viele's 1865 survey into
+                           our own vectors — where the water was is where basements flood -->
+                      <div id="floodnet-ghost" onclick="toggleGhostRivers()" title="Manhattan's buried streams and marshes, traced off Viele's 1865 survey — the waterways under today's streets" style="margin-top:3px;padding:4px 0;border-radius:8px;border:1px solid rgba(0,107,182,.2);background:transparent;font-size:.4rem;font-weight:700;color:rgba(0,107,182,.45);cursor:pointer;text-align:center;user-select:none;">GHOST RIVERS · 1865</div>
                     </div><div style="background:rgba(255,255,255,.62);backdrop-filter:blur(20px);border-radius:14px;padding:8px 10px;border:1px solid rgba(43,34,244,.10);box-shadow:0 0 40px rgba(43,34,244,.035),0 6px 24px rgba(15,23,42,.12);">
                       <div style="display:flex;align-items:center;gap:6px;margin-bottom:5px;"><span style="width:3px;height:10px;background:#2B22F4;border-radius:2px;"></span><span style="font-size:.36rem;color:rgba(43,34,244,.45);font-weight:800;letter-spacing:.1em;">VIEW</span></div>
                       <div style="display:flex; gap:3px;">
@@ -47763,10 +47763,63 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     var on = mode !== null;
     var bm = document.getElementById('fcast-city-basemap');
     var bmU = document.getElementById('fcast-city-basemap-under');
-    var setSrc = function(u){ [bm, bmU].forEach(function(el){ if (el && el.getAttribute('src') !== u) el.src = u; }); };
+    var setSrc = function(u, under){
+      /* the top copy is screen-blended to lift the basemap's labels over the
+         radar; anything painted into it glows. So an extra pass — the ghost
+         rivers — goes to the opaque under copy only. */
+      if (bm && bm.getAttribute('src') !== u) bm.src = u;
+      var uu = under || u;
+      if (bmU && bmU.getAttribute('src') !== uu) bmU.src = uu;
+    };
     var show = function(v){ [bm, bmU].forEach(function(el){ if (el) el.style.display = v ? 'block' : 'none'; }); };
     if (!on) show(false);
-    else if (mode === 'city'){ setSrc('/nyc-basemap.jpg?v=2'); show(true); }
+    else if (mode === 'city'){
+      /* THE CITY is the other NYC view that earns the buried streams: the radar
+         plays over the ground that used to be water. Composited into the baked
+         backdrop once, on demand — nothing is fetched until this view opens. */
+      setSrc('/nyc-basemap.jpg?v=2', window._cityGhostBase || null); show(true);
+      if (!window._cityGhostBase && !window._cityGhostBusy){
+        window._cityGhostBusy = true;
+        window._ghostRivers(function(d){
+          if (!d){ window._cityGhostBusy = false; return; }
+          var C = _cityBoxCfg(), R = 6378137, PI = Math.PI;
+          var img = new Image();
+          img.onload = function(){
+            try {
+              var cv = document.createElement('canvas');
+              cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+              var g = cv.getContext('2d');
+              g.drawImage(img, 0, 0);
+              var px = function(lon, lat){
+                var X = lon * R * PI / 180;
+                var Y = R * Math.log(Math.tan(PI / 4 + lat * PI / 360));
+                return [ (X - C.X0) / (C.X1 - C.X0) * cv.width,
+                         (C.Y1 - Y) / (C.Y1 - C.Y0) * cv.height ];
+              };
+              g.fillStyle = 'rgba(96,142,224,.26)';
+              d.marsh.features.forEach(function(ft){
+                ft.geometry.coordinates.forEach(function(ring){
+                  g.beginPath();
+                  ring.forEach(function(pt, i){ var q = px(pt[0], pt[1]); if (i === 0) g.moveTo(q[0], q[1]); else g.lineTo(q[0], q[1]); });
+                  g.closePath(); g.fill();
+                });
+              });
+              g.strokeStyle = 'rgba(132,178,255,.72)'; g.lineWidth = 1.3; g.setLineDash([3, 2.5]);
+              d.streams.features.forEach(function(ft){
+                g.beginPath();
+                ft.geometry.coordinates.forEach(function(pt, i){ var q = px(pt[0], pt[1]); if (i === 0) g.moveTo(q[0], q[1]); else g.lineTo(q[0], q[1]); });
+                g.stroke();
+              });
+              window._cityGhostBase = cv.toDataURL('image/jpeg', 0.86);
+              if (fcastState.range === 'live' && fcastState.area === 'city-nyc' && bmU) bmU.src = window._cityGhostBase;
+            } catch(e){}
+            window._cityGhostBusy = false;
+          };
+          img.onerror = function(){ window._cityGhostBusy = false; };
+          img.src = '/nyc-basemap.jpg?v=2';
+        });
+      }
+    }
     else {
       var wantArea = fcastState.area;
       var cached = window._staBasemap[lbox.sid];
@@ -47783,7 +47836,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     var at = document.getElementById('fcast-city-attrib');
     if (at){
       at.style.display = on ? 'block' : 'none';
-      if (on) at.textContent = '\u00a9 OpenStreetMap \u00b7 \u00a9 CARTO \u00b7 ' + srcName + ' \u00b7 \u26a1 Blitzortung.org';
+      if (on) at.textContent = '\u00a9 OpenStreetMap \u00b7 \u00a9 CARTO \u00b7 ' + srcName
+        + (mode === 'city' ? ' \u00b7 ghost rivers: Viele 1865' : '') + ' \u00b7 \u26a1 Blitzortung.org';
     }
     // Header source label follows the live view \u2014 it read "NWS RADAR" for all
     // three WMS views while the map credit underneath named the actual feed.
@@ -56350,45 +56404,68 @@ function initNowMicroTabs(){
     // on launch (data still loads nearby quietly), and tapping either one
     // always flies the map there — the old same-area early-return made a
     // NEARBY tap at launch do nothing at all.
-    /* GHOST RIVERS: Viele's 1865 Sanitary & Topographical survey — Manhattan's
-       original streams, marshes and made land — as georectified tiles from
-       NYPL's scan on mapwarper.net (map 36301; public domain, CORS-open,
-       verified 2026-08-25). The buried streams are where the city floods:
-       Minetta Brook, Collect Pond, the Canal St canal all sit under today's
-       FloodNet hotspots. Sensors stay on top (their pane is z 460). */
+    /* GHOST RIVERS: Manhattan's buried water, traced off Viele's 1865 Sanitary &
+       Topographical survey by hue — our own geometry now, not the survey raster
+       (93 courses, plus the marsh they ran through as a wash underneath). The
+       buried streams are where the city floods: Minetta Brook, the Canal St
+       canal and the Lispenard meadows all sit under today's FloodNet hotspots.
+       Sensors stay on top (their pane is z 460). Recipe: _maplab/GHOST_RIVERS.md. */
+    /* Fetched on demand and never on boot: the only two callers are the FLOODS
+       map's GHOST RIVERS pill and THE CITY radar backdrop, both NYC-only views,
+       so a reader who never opens either never pays for the 68 KB. */
+    window._ghostRivers = function(cb){
+      if (window._ghostData){ cb(window._ghostData); return; }
+      if (window._ghostPending){ window._ghostPending.push(cb); return; }
+      window._ghostPending = [cb];
+      Promise.all([
+        fetch('ghost-rivers.json').then(function(r){ return r.json(); }),
+        fetch('ghost-marsh.json').then(function(r){ return r.json(); })
+      ]).then(function(a){
+        window._ghostData = { streams: a[0], marsh: a[1] };
+        var q = window._ghostPending; window._ghostPending = null;
+        q.forEach(function(f){ f(window._ghostData); });
+      }).catch(function(){
+        var q = window._ghostPending; window._ghostPending = null;
+        q.forEach(function(f){ f(null); });
+      });
+    };
     window.toggleGhostRivers = function(){
       var b = document.getElementById('floodnet-ghost');
-      if (!window._ghostLayer){
-        window._ghostLayer = L.tileLayer('https://mapwarper.net/maps/tile/36301/{z}/{x}/{y}.png', {
-          opacity: 0.85, maxNativeZoom: 16, maxZoom: 19,
-          bounds: [[40.675, -74.05], [40.885, -73.88]],
-          attribution: 'Viele 1865 · NYPL / Map Warper'
-        });
-        /* Brooklyn + Queens: the 7-sheet "Topographical map of the counties
-           of Kings and Queens" mosaic (Map Warper layer 1631, public domain,
-           CORS-open, verified 2026-08-26) — the outer boroughs' own streams
-           and ponds before burial */
-        window._ghostLayerBK = L.tileLayer('https://mapwarper.net/layers/tile/1631/{z}/{x}/{y}.png', {
-          opacity: 0.85, maxNativeZoom: 16, maxZoom: 19,
-          bounds: [[40.54, -74.05], [40.81, -73.70]],
-          attribution: 'Kings &amp; Queens topo · Map Warper'
-        });
-      }
-      var on = hazardMap && hazardMap.hasLayer(window._ghostLayer);
+      var on = hazardMap && window._ghostLayer && hazardMap.hasLayer(window._ghostLayer);
       if (on){
         hazardMap.removeLayer(window._ghostLayer);
-        hazardMap.removeLayer(window._ghostLayerBK);
-      } else if (hazardMap){
+        if (b) window._flPill(b, false, '245,132,38', '#006BB6');
+        return;
+      }
+      if (b) window._flPill(b, true, '245,132,38', '#006BB6');
+      window._ghostRivers(function(d){
+        if (!d || !hazardMap) return;
+        if (!window._ghostLayer){
+          window._ghostLayer = L.layerGroup([
+            /* the ground that was wet, under the courses — a pale veil rather than
+               a blue wash, which over the map's own water reads as a stain */
+            L.geoJSON(d.marsh, { renderer: L.canvas({ padding:0.4 }), interactive:false,
+              style: function(){ return { stroke:false, fillColor:'#d6e2f4', fillOpacity:.62 }; },
+              attribution: 'Buried streams traced from Viele 1865' }),
+            /* dashed is the whole grammar: solid is water still there, dashed is
+               water that is under you */
+            L.geoJSON(d.streams, { renderer: L.canvas({ padding:0.4 }),
+              style: function(){ return { color:'#2B22F4', weight:1.6, dashArray:'5,4', fill:false }; },
+              onEachFeature: function(ft, lyr){
+                var p = ft.properties || {};
+                lyr.bindPopup('<div style="font:700 .62rem system-ui,sans-serif;color:#2B22F4;letter-spacing:.04em;">'
+                  + (p.name ? p.name.toUpperCase() : 'UNNAMED WATERCOURSE') + '</div>'
+                  + (p.story ? '<div style="font:.58rem system-ui,sans-serif;color:#334;margin-top:3px;">' + p.story + '</div>' : '')
+                  + '<div style="font:.5rem system-ui,sans-serif;color:#889;margin-top:4px;">'
+                  + p.len_m + ' m \u00b7 traced from Viele, 1865</div>');
+              } })
+          ]);
+        }
         window._ghostLayer.addTo(hazardMap);
-        window._ghostLayerBK.addTo(hazardMap);
         if (window._hazardEngageMap) window._hazardEngageMap();
-        /* frame the two surveys together: Manhattan + Brooklyn + Queens */
-        hazardMap.flyToBounds([[40.57, -74.05], [40.88, -73.75]], { padding:[16,16], duration:0.8 });
-      }
-      if (b){
-        var now = !on;
-        window._flPill(b, now, '245,132,38', '#006BB6');
-      }
+        /* Manhattan only — that is the island the survey covers end to end */
+        hazardMap.flyToBounds([[40.695, -74.03], [40.882, -73.90]], { padding:[16,16], duration:0.8 });
+      });
     };
     window.floodNetArea = function(area){
       var same = area === fnArea && window._fnAreaPicked;
