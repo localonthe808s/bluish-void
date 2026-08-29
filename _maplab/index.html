@@ -84,7 +84,11 @@
    Canyon starts at the shelf break ~100 mi out, and the Mid-Atlantic Ridge needs
    half an ocean in frame. */
 var VIEWS = {
-  city:     { w:-74.60, s:40.30, e:-73.40, n:41.10, bathy:null,                    zoom:11 },
+  /* The five boroughs get their own fill. Not for decoration: the plan is to lay
+     this over radar so the city still reads as a shape under a blanket of cloud,
+     which means it has to be a solid mask, not an outline. */
+  city:     { w:-74.60, s:40.30, e:-73.40, n:41.10, bathy:null, zoom:11,
+              boroughs:'bathy/nyc_boroughs.json' },
   shelf:    { w:-75.20, s:37.20, e:-70.00, n:41.20, bathy:'bathy/bathy_shelf.json', zoom:7 },
   atlantic: { w:-80.00, s:5.00,  e:-5.00,  n:60.00, bathy:'bathy/bathy_atlantic.json', zoom:3 },
   /* The two places worth real bathymetry: GMRT multibeam rendered to images with
@@ -102,7 +106,21 @@ var W = 460, H = Math.round(W / 1.1372);
 /* Natural Earth depth bands, public domain. Each polygon carries the depth of
    the band it opens, so drawing them deepest-last with a darkening ramp gives
    the shelf, the slope, the abyssal plain and the ridge as tone. */
-var BATHY = {};
+var BATHY = {}, BOROS = null;
+function boroughsFor(view){
+  var v = VIEWS[view];
+  if (!v || !v.boroughs) return Promise.resolve(null);
+  if (BOROS) return Promise.resolve(BOROS);
+  return fetch(v.boroughs).then(function(r){ return r.json(); }).then(function(j){ BOROS = j; return j; });
+}
+/* White on the light styles, and a warm white on the dark ones — over radar the
+   point is the same either way: the city is the bright shape. */
+function boroughFill(dark){ return '#ffffff'; }
+/* On the dark palettes white is the loudest thing on the map. On paper it is the
+   quietest, so the light styles get a faint ring around the mask instead — the
+   city still reads as a shape without inventing a colour the palette does not
+   have. */
+function boroughEdge(dark){ return dark ? 'rgba(255,255,255,.5)' : 'rgba(43,34,244,.75)'; }
 function bathyFor(view){
   var v = VIEWS[view];
   if (!v.bathy) return Promise.resolve(null);
@@ -250,6 +268,9 @@ function rulesFor(style, f){
    prominence instead of by accident: 9 is the stock density, 7 drops the
    commuter towns, 5 leaves the handful of names anyone would recognise. The
    neighbourhood rule (the minzoom-9 one) goes entirely below 8. */
+function waterRulesFor(style, f){
+  return rulesFor(style, f).filter(function(r){ return r.dataLayer === 'water'; });
+}
 function labelsFor(style, f){
   var ls = protomapsL.labelRules(f, 'en');
   if ((style.mods||{}).noRoads) ls = ls.filter(function(r){ return r.dataLayer !== 'roads'; });
@@ -324,6 +345,27 @@ function drawRelief(ctx, img, r, proj, strips){
   }
 }
 
+function drawBoroughs(ctx, geo, proj, dark){
+  if (!geo) return;
+  ctx.fillStyle = boroughFill(dark);
+  ctx.strokeStyle = boroughEdge(dark);
+  ctx.lineWidth = dark ? 1 : 1.6;
+  geo.features.forEach(function(ft){
+    var polys = ft.geometry.type === 'Polygon' ? [ft.geometry.coordinates] : ft.geometry.coordinates;
+    polys.forEach(function(rings){
+      ctx.beginPath();
+      rings.forEach(function(ring){
+        ring.forEach(function(pt, i){
+          var q = proj({ x:pt[0], y:pt[1] });
+          if (i === 0) ctx.moveTo(q.x, q.y); else ctx.lineTo(q.x, q.y);
+        });
+        ctx.closePath();
+      });
+      ctx.fill('evenodd'); ctx.stroke();
+    });
+  });
+}
+
 function drawCard(style){
   var f = flavorFor(style);
   var card = document.createElement('div');
@@ -347,7 +389,7 @@ function drawCard(style){
   var st = new protomapsL.Static({
     url: document.getElementById('src').value,
     paintRules: rulesFor(style, f),
-    labelRules: labelsFor(style, f),
+    labelRules: (VIEWS[document.getElementById('view').value] || CITY).boroughs ? [] : labelsFor(style, f),
     backgroundColor: f.background,
     maxDataZoom: 14
   });
@@ -366,8 +408,24 @@ function drawCard(style){
          hands back the projection it used, which is what lines them up. */
       if (!out || !out.project) return;
       if (view.relief) return reliefImage(view.relief.img).then(function(img){ drawRelief(ctx, img, view.relief, out.project); });
-      return bathyFor(document.getElementById('view').value).then(function(geo){
-        if (geo) drawBathy(ctx, geo, out.project, !(style.base === 'light'));
+      var vkey = document.getElementById('view').value;
+      var dark = !(style.base === 'light');
+      return bathyFor(vkey).then(function(geo){
+        if (geo) drawBathy(ctx, geo, out.project, dark);
+        return boroughsFor(vkey);
+      }).then(function(boro){
+        if (!boro) return;
+        drawBoroughs(ctx, boro, out.project, dark);
+        /* The mask is opaque, so it buries the rivers and the place names inside
+           the city. Put them back over it: water first, then the labels. */
+        var again = new protomapsL.Static({ url: document.getElementById('src').value,
+          paintRules: waterRulesFor(style, f), labelRules: [], maxDataZoom: 14 });
+        return again.drawContextBounds(ctx, {x:view.w, y:latMid}, {x:view.e, y:latMid}, W, H)
+          .then(function(){
+            var lab = new protomapsL.Static({ url: document.getElementById('src').value,
+              paintRules: [], labelRules: labelsFor(style, f), maxDataZoom: 14 });
+            return lab.drawContextBounds(ctx, {x:view.w, y:latMid}, {x:view.e, y:latMid}, W, H);
+          });
       });
     })
     .catch(function(e){ card.querySelector('h2 em').textContent = 'failed: ' + e.message; });
@@ -409,6 +467,14 @@ function focus(style){
     if (liveLayers[1]) liveLayers[1].bringToFront();
     return;
   }
+  boroughsFor(vkey).then(function(boro){
+    if (!boro || vkey !== document.getElementById('view').value) return;
+    var dark = !(style.base === 'light');
+    var lb = L.geoJSON(boro, { renderer: L.canvas({ padding:0.4 }),
+      style: function(){ return { color: boroughEdge(dark), weight:1, fillColor: boroughFill(dark), fillOpacity:1 }; } }).addTo(liveMap);
+    liveLayers.push(lb);
+    if (liveLayers[1]) liveLayers[1].bringToFront();
+  });
   bathyFor(vkey).then(function(geo){
     if (!geo || vkey !== document.getElementById('view').value) return;
     var dark = !(style.base === 'light');
