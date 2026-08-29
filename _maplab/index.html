@@ -29,7 +29,11 @@
   .card h2{margin:0;padding:7px 11px;font-size:.6rem;letter-spacing:.13em;font-weight:800;
            display:flex;justify-content:space-between;align-items:center;color:rgba(30,30,50,.72)}
   .card h2 em{font-style:normal;font-weight:600;letter-spacing:.02em;color:rgba(30,30,50,.42);font-size:.56rem}
-  canvas{display:block;width:100%;height:auto;background:#dfe2ea}
+  /* Scope this to the STYLE CARDS only. As a bare `canvas` rule it also hit every
+     Leaflet tile canvas in the live pane — including the labels layer's, whose
+     tiles are transparent by design. An opaque grey background on those hid the
+     base layer completely: the map looked blank while every tile was painted. */
+  .card > canvas{display:block;width:100%;height:auto;background:#dfe2ea}
   .row{display:flex;gap:6px;padding:6px 11px 9px;flex-wrap:wrap}
   .sw{width:15px;height:15px;border-radius:4px;border:1px solid rgba(0,0,0,.16);cursor:pointer;padding:0}
   #live{height:460px}
@@ -337,16 +341,24 @@ function drawCard(style){
     .catch(function(e){ card.querySelector('h2 em').textContent = 'failed: ' + e.message; });
 }
 
+var liveBathy = null;
 function focus(style){
   focused = style;
   document.getElementById('liveName').textContent = style.name;
   var f = flavorFor(style);
+  var vkey = document.getElementById('view').value, view = VIEWS[vkey] || CITY;
   if (!liveMap){
-    liveMap = L.map('live', { center:[(CITY.s+CITY.n)/2, (CITY.w+CITY.e)/2], zoom:11,
+    liveMap = L.map('live', { center:[(view.s+view.n)/2, (view.w+view.e)/2], zoom:view.zoom,
                               attributionControl:false, preferCanvas:true });
   }
+  liveMap.setView([(view.s+view.n)/2, (view.w+view.e)/2], view.zoom, { animate:false });
+  /* The grid reflows every redraw, so the pane changes width AFTER Leaflet has
+     measured it — without this the tiles are laid out for the old size and sit
+     off-screen, which reads as a blank map even though every canvas is painted. */
+  setTimeout(function(){ liveMap.invalidateSize(); }, 60);
   liveLayers.forEach(function(l){ liveMap.removeLayer(l); });
   liveLayers = [];
+  if (liveBathy){ liveMap.removeLayer(liveBathy); liveBathy = null; }
   [false, true].forEach(function(labels){
     var layer = protomapsL.leafletLayer({
       url: document.getElementById('src').value,
@@ -358,6 +370,16 @@ function focus(style){
     });
     layer.addTo(liveMap); liveLayers.push(layer);
   });
+  // the sea floor for the ocean framings, painted between the base and the labels
+  bathyFor(vkey).then(function(geo){
+    if (!geo || vkey !== document.getElementById('view').value) return;
+    var dark = !(style.base === 'light');
+    liveBathy = L.geoJSON(geo, {
+      renderer: L.canvas({ padding: 0.4 }),
+      style: function(ft){ return { stroke:false, fillColor: depthFill(ft.properties.d, dark), fillOpacity:1 }; }
+    }).addTo(liveMap);
+    if (liveLayers[1]) liveLayers[1].bringToFront();   // labels stay on top
+  });
 }
 
 function renderAll(){
@@ -365,6 +387,7 @@ function renderAll(){
   [].slice.call(grid.querySelectorAll('.card:not(.wide)')).forEach(function(c){ c.remove(); });
   STYLES.forEach(drawCard);
   focus(focused);
+  if (liveMap) setTimeout(function(){ liveMap.invalidateSize(); }, 120);
   document.getElementById('status').textContent = STYLES.length + ' styles · ' + W + '×' + H;
 }
 
@@ -376,6 +399,7 @@ function copyFlavor(){
 }
 
 renderAll();
+window.addEventListener('resize', function(){ if (liveMap) liveMap.invalidateSize(); });
 </script>
 </body>
 </html>
