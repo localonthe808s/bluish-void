@@ -310,16 +310,14 @@ window._bvManageRaster = function(map, rasterLayer){
 window._bvVectorBase = function(map, opts){
   opts = opts || {};
   if (typeof protomapsL === 'undefined' || !window.BV_BASEMAP_URL) return null;
-  /* Desktop by default. Measured on a 4x-throttled phone viewport over ~14s of
-     continuous panning and zooming: 6.45s of main-thread time against 4.40s for
-     the Esri raster, and +12.6 MB of heap. Not catastrophic, but this page is
-     already heavy on phones, so mobile keeps the raster until it is tested on a
-     real device — `?vector=1` turns it on to try. */
-  if (!opts.force && window.matchMedia && window.matchMedia('(max-width:1100px)').matches) {
-    var forceMobile = false;
-    try { forceMobile = new URLSearchParams(location.search).get('vector') === '1'; } catch(e){}
-    if (!forceMobile) return null;
-  }
+  /* Phones included. Measured against production on a 4x-throttled phone viewport,
+     ~14s of continuous panning and zooming, three runs each: 4.19s median of
+     main-thread time for our tiles against 3.64s for the Esri raster — about 15%
+     more, not the 50% the first localhost run suggested. `?vector=0` drops back
+     to the raster if a real device disagrees. */
+  var q = null;
+  try { q = new URLSearchParams(location.search).get('vector'); } catch(e){}
+  if (q === '0') return null;
   var F = (opts.flavor === 'light') ? window.BV_MAP_FLAVOR_LIGHT : window.BV_MAP_FLAVOR;
   var tiers = window.BV_BASEMAP_TIERS;
   var added = [];
@@ -47909,7 +47907,50 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   // Client-stitched dark basemap for arbitrary station boxes (carto tiles are
   // CORS *, so the canvas stays untainted). ~12 tiles at z8, cached per station.
   window._staBasemap = window._staBasemap || {};
+  /* THE CITY's backdrop: a static image stitched for one bbox. It used to be
+     built from Esri raster tiles; now it is drawn from our own archive with
+     protomaps' Static renderer, with the raster stitch kept underneath as the
+     catch. Static takes plain {x: lon, y: lat} corners and derives its zoom from
+     the longitude span and the pixel width, so the centre latitude has to come
+     from the MERCATOR midpoint (averaging the two latitudes bends the result). */
+  function _stitchBasemapVector(box, cb){
+    try {
+      if (typeof protomapsL === 'undefined' || !window.BV_MAP_FLAVOR) { cb(null); return; }
+      var R = 6378137, PI = Math.PI;
+      var m2lon = function(X){ return X / R * 180 / PI; };
+      var m2lat = function(Y){ return (2 * Math.atan(Math.exp(Y / R)) - PI / 2) * 180 / PI; };
+      var lon0 = m2lon(box.X0), lon1 = m2lon(box.X1), latMid = m2lat((box.Y0 + box.Y1) / 2);
+      // same pixel box the raster path would have produced
+      var spanX = box.X1 - box.X0, spanY = box.Y1 - box.Y0;
+      var W = 1024, H = Math.round(W * spanY / spanX);
+      if (!isFinite(H) || H < 10 || H > 4000) { cb(null); return; }
+      var F = window.BV_MAP_FLAVOR;
+      var st = new protomapsL.Static({
+        url: window.BV_BASEMAP_URL,
+        paintRules: protomapsL.paintRules(F),
+        labelRules: protomapsL.labelRules(F, 'en'),
+        backgroundColor: F.background,
+        maxDataZoom: 9
+      });
+      var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+      var ctx = cv.getContext('2d');
+      st.drawContextBounds(ctx, { x: lon0, y: latMid }, { x: lon1, y: latMid }, W, H)
+        .then(function(){
+          try {
+            var u = cv.toDataURL('image/jpeg', 0.82);
+            window._staBasemap[box.sid] = u; cb(u);
+          } catch(e){ cb(null); }
+        })
+        .catch(function(){ cb(null); });
+    } catch(e){ cb(null); }
+  }
   function _stitchBasemap(box, cb){
+    _stitchBasemapVector(box, function(u){
+      if (u) { cb(u); return; }
+      _stitchBasemapRaster(box, cb);
+    });
+  }
+  function _stitchBasemapRaster(box, cb){
     if (window._staBasemap[box.sid]){ cb(window._staBasemap[box.sid]); return; }
     try{
       // zoom picked per box span: smallest tile count that stays sharp
