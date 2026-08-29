@@ -254,7 +254,7 @@
    `pmtiles serve` (see the basemap note in memory), `?basemap=<url>` at any
    other archive. No effect on the deployed site. */
 window.BV_BASEMAP_URL = (function(){
-  var live = 'https://cdn.bluishvoid.com/basemap/bluish-basemap-20260828.pmtiles';
+  var live = 'https://cdn.bluishvoid.com/basemap/bluish-basemap-20260829.pmtiles';
   try {
     var q = new URLSearchParams(location.search).get('basemap');
     if (q === 'local') return 'http://localhost:8091/bluish-basemap/{z}/{x}/{y}.mvt';
@@ -271,9 +271,9 @@ window.BV_MAP_FLAVOR_LIGHT = {"background":"#eef0f4","earth":"#f6f4ef","park_a":
 /* One source of truth for what the archive actually holds. Anything outside
    these windows has to come from the raster fallback. */
 window.BV_BASEMAP_TIERS = [
-  { min: 0,  max: 7,  data: 7,  bounds: null },
-  { min: 8,  max: 11, data: 11, bounds: [[24, -125], [50, -66]] },
-  { min: 12, max: 14, data: 14, bounds: [[39.4, -75.6], [42.6, -71.4]] }
+  { min: 0,  max: 9,  data: 9,  bounds: null },                        // the whole planet
+  { min: 10, max: 11, data: 11, bounds: [[14, -170], [72, -52]] },     // North America
+  { min: 12, max: 14, data: 14, bounds: [[24, -125], [50, -66]] }      // the lower 48, to street level
 ];
 window._bvCovers = function(z, latlng){
   return window.BV_BASEMAP_TIERS.some(function(t){
@@ -296,15 +296,30 @@ window._bvManageRaster = function(map, rasterLayer){
       else if (!covered && !map.hasLayer(rasterLayer)) { map.addLayer(rasterLayer); if (rasterLayer.setZIndex) rasterLayer.setZIndex(1); }
     } catch(e){}
   };
-  map.on('zoomend moveend', sync);
-  sync();
+  /* Only start pulling the raster once our own tiles have actually PAINTED. If
+     the archive is unreachable — a bad URL, an expired bucket, no network — the
+     gate never arms and the map stays exactly as it was. Nothing about owning
+     the tiles is worth a blank map. */
+  var armed = false;
+  var arm = function(){ if (!armed){ armed = true; sync(); } };
+  var vec = map._bvVectorLayers;
+  if (vec && vec.length && vec[0].once) vec[0].once('load', arm);
+  else arm();
+  map.on('zoomend moveend', function(){ if (armed) sync(); });
 };
 window._bvVectorBase = function(map, opts){
   opts = opts || {};
   if (typeof protomapsL === 'undefined' || !window.BV_BASEMAP_URL) return null;
-  // desktop first: canvas vector rendering is the CPU risk on phones, and the
-  // raster fallback below is already what mobile gets today
-  if (!opts.force && window.matchMedia && window.matchMedia('(max-width:1100px)').matches) return null;
+  /* Desktop by default. Measured on a 4x-throttled phone viewport over ~14s of
+     continuous panning and zooming: 6.45s of main-thread time against 4.40s for
+     the Esri raster, and +12.6 MB of heap. Not catastrophic, but this page is
+     already heavy on phones, so mobile keeps the raster until it is tested on a
+     real device — `?vector=1` turns it on to try. */
+  if (!opts.force && window.matchMedia && window.matchMedia('(max-width:1100px)').matches) {
+    var forceMobile = false;
+    try { forceMobile = new URLSearchParams(location.search).get('vector') === '1'; } catch(e){}
+    if (!forceMobile) return null;
+  }
   var F = (opts.flavor === 'light') ? window.BV_MAP_FLAVOR_LIGHT : window.BV_MAP_FLAVOR;
   var tiers = window.BV_BASEMAP_TIERS;
   var added = [];
@@ -325,6 +340,7 @@ window._bvVectorBase = function(map, opts){
       var layer = protomapsL.leafletLayer(cfg);
       layer.addTo(map);
       added.push(layer);
+      if (!opts.labels) map._bvVectorLayers = added;   // what the raster gate waits on
     });
   } catch(e){ console.warn('[basemap] vector layer failed, staying on raster', e); added.forEach(function(l){ try{ map.removeLayer(l); }catch(e2){} }); return null; }
   return added;
