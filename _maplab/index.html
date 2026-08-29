@@ -1,0 +1,302 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MAP LAB · THE CITY</title>
+<!-- Style lab for the NYC view. Draws the exact box THE CITY uses
+     (-74.60,40.30 → -73.40,41.10) out of our own PMTiles archive, so what you
+     see here is what the widget's backdrop would be.
+
+     Tiles: `pmtiles serve <dir> --port 8091 --cors '*'` next to the archive.
+     The R2 CORS list is bluishvoid.com only, so the CDN URL will not load from
+     localhost — that is what the local server is for. -->
+<link rel="stylesheet" href="https://cdn.bluishvoid.com/vendor/leaflet/leaflet.css">
+<style>
+  :root{ --ink:#2B22F4; --paper:#f7f5ef; }
+  *{box-sizing:border-box}
+  body{margin:0;background:#e9ebf0;color:#1b1d26;font:13px/1.45 system-ui,sans-serif}
+  header{display:flex;align-items:baseline;gap:14px;padding:10px 16px;background:rgba(255,255,255,.7);
+         border-bottom:1px solid rgba(43,34,244,.14);position:sticky;top:0;z-index:10;backdrop-filter:blur(12px)}
+  h1{font-size:.72rem;letter-spacing:.16em;font-weight:900;color:var(--ink);margin:0}
+  .sub{font-size:.62rem;color:rgba(30,30,50,.5)}
+  input[type=text]{font:inherit;font-size:.62rem;padding:3px 7px;border:1px solid rgba(43,34,244,.25);
+                   border-radius:6px;background:#fff;min-width:340px}
+  button{font:inherit;font-size:.62rem;font-weight:700;letter-spacing:.05em;padding:4px 10px;border-radius:7px;
+         border:1px solid rgba(43,34,244,.25);background:#fff;color:var(--ink);cursor:pointer}
+  button:hover{background:rgba(43,34,244,.07)}
+  main{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:14px;padding:14px}
+  .card{background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(20,25,50,.12)}
+  .card h2{margin:0;padding:7px 11px;font-size:.6rem;letter-spacing:.13em;font-weight:800;
+           display:flex;justify-content:space-between;align-items:center;color:rgba(30,30,50,.72)}
+  .card h2 em{font-style:normal;font-weight:600;letter-spacing:.02em;color:rgba(30,30,50,.42);font-size:.56rem}
+  canvas{display:block;width:100%;height:auto;background:#dfe2ea}
+  .row{display:flex;gap:6px;padding:6px 11px 9px;flex-wrap:wrap}
+  .sw{width:15px;height:15px;border-radius:4px;border:1px solid rgba(0,0,0,.16);cursor:pointer;padding:0}
+  #live{height:460px}
+  .wide{grid-column:1/-1}
+  .note{padding:0 16px 16px;font-size:.6rem;color:rgba(30,30,50,.5);max-width:860px;line-height:1.6}
+  code{background:rgba(43,34,244,.07);padding:1px 4px;border-radius:4px;font-size:.94em}
+</style>
+</head>
+<body>
+<header>
+  <h1>MAP LAB · THE CITY</h1>
+  <span class="sub">the box the widget draws: −74.60,40.30 → −73.40,41.10</span>
+  <input type="text" id="src" value="http://localhost:8091/bluish-basemap/{z}/{x}/{y}.mvt">
+  <button onclick="renderAll()">redraw</button>
+  <button onclick="copyFlavor()">copy focused flavor</button>
+  <span class="sub" id="status"></span>
+</header>
+
+<main id="grid">
+  <div class="card wide">
+    <h2>LIVE · pan and zoom the focused style <em id="liveName">site dark</em></h2>
+    <div id="live"></div>
+  </div>
+</main>
+
+<p class="note">
+  Each tile is the same geography, same archive, different paint. Click a swatch to focus a style
+  in the live pane; <code>copy focused flavor</code> puts its object on the clipboard, ready to
+  drop into <code>BV_MAP_FLAVOR</code> in index.html. Tiles come from a local
+  <code>pmtiles serve</code> — the CDN archive is CORS-locked to bluishvoid.com, so it will not
+  load here.
+</p>
+
+<script src="https://cdn.bluishvoid.com/vendor/leaflet/leaflet.js"></script>
+<script src="https://cdn.bluishvoid.com/vendor/protomaps-leaflet/protomaps-leaflet-5.1.0.js"></script>
+<script>
+/* THE CITY box, verbatim from _cityBoxCfg() in index.html */
+var CITY = { w:-74.60, s:40.30, e:-73.40, n:41.10 };
+var W = 460, H = Math.round(W / 1.1372);
+
+/* Base is the site's own dark flavor; every style below is a set of overrides on
+   top of it, so a style is only as long as what it actually changes. */
+var BASE = {
+ background:"#0a0c12", earth:"#0f1116", park_a:"#0f1712", park_b:"#101a14", hospital:"#151418",
+ industrial:"#131519", school:"#151519", wood_a:"#101613", wood_b:"#101613", pedestrian:"#12141a",
+ scrub_a:"#131612", scrub_b:"#131612", glacier:"#141821", sand:"#15161c", beach:"#171922",
+ aerodrome:"#12141a", runway:"#2a2e38", water:"#101a2e", zoo:"#131612", military:"#151519",
+ tunnel_other_casing:"#141414", tunnel_minor_casing:"#141414", tunnel_link_casing:"#141414",
+ tunnel_major_casing:"#141414", tunnel_highway_casing:"#141414", tunnel_other:"#1f1f1f",
+ tunnel_minor:"#1f1f1f", tunnel_link:"#1f1f1f", tunnel_major:"#1f1f1f", tunnel_highway:"#1f1f1f",
+ pier:"#12141a", buildings:"#181a20", minor_service_casing:"#141414", minor_casing:"#141414",
+ link_casing:"#141414", major_casing_late:"#141414", highway_casing_late:"#141414",
+ other:"#1f1f1f", minor_service:"#1f1f1f", minor_a:"#242424", minor_b:"#1f1f1f", link:"#292929",
+ major_casing_early:"#141414", major:"#292929", highway_casing_early:"#141414", highway:"#292929",
+ railway:"#2a2e38", boundaries:"#5b6172", waterway_label:"#54607d", bridges_other_casing:"#141414",
+ bridges_minor_casing:"#141414", bridges_link_casing:"#141414", bridges_major_casing:"#141414",
+ bridges_highway_casing:"#141414", bridges_other:"#1f1f1f", bridges_minor:"#1f1f1f",
+ bridges_link:"#292929", bridges_major:"#292929", bridges_highway:"#292929",
+ roads_label_minor:"#4c5566", roads_label_minor_halo:"#0a0c12", roads_label_major:"#5a6478",
+ roads_label_major_halo:"#0a0c12", ocean_label:"#54607d", subplace_label:"#5d6880",
+ subplace_label_halo:"#0a0c12", city_label:"#9aa7c2", city_label_halo:"#0a0c12",
+ state_label:"#3c4457", state_label_halo:"#0a0c12", country_label:"#7b88a6",
+ address_label:"#525252", address_label_halo:"#0a0c12",
+ landcover:{ grassland:"rgba(18,21,24,1)", barren:"rgba(20,21,24,1)", urban_area:"rgba(22,23,27,1)",
+   farmland:"rgba(18,21,23,1)", glacier:"rgba(28,31,38,1)", scrub:"rgba(19,21,23,1)",
+   forest:"rgba(16,21,22,1)" }
+};
+
+/* Light styles need their own base: overriding `earth` alone leaves every
+   land-use polygon (parks, schools, industrial, piers, buildings) near-black,
+   which is what speckled the paper styles. */
+var BASE_LIGHT = (function(){
+  var f = {}; for (var k in BASE) f[k] = BASE[k];
+  f.background='#eef0f4'; f.earth='#f6f4ef'; f.water='#cfd9ee';
+  f.park_a='#e8efe4'; f.park_b='#e3ecdf'; f.wood_a='#e6ece2'; f.wood_b='#e6ece2';
+  f.scrub_a='#eceee6'; f.scrub_b='#eceee6'; f.glacier='#f2f4f8'; f.sand='#f2efe6'; f.beach='#f4f0e4';
+  f.hospital='#f3eeee'; f.industrial='#efeeea'; f.school='#f1efe9'; f.pedestrian='#f0eee9';
+  f.aerodrome='#eceef2'; f.runway='#ffffff'; f.zoo='#eaeee6'; f.military='#eeeeea';
+  f.buildings='#e7e4dc'; f.pier='#ece9e1';
+  ['tunnel_other','tunnel_minor','tunnel_link','tunnel_major','tunnel_highway',
+   'bridges_other','bridges_minor','bridges_link','bridges_major','bridges_highway',
+   'other','minor_service','minor_a','minor_b','link','major','highway'].forEach(function(k){ f[k]='#ffffff'; });
+  ['tunnel_other_casing','tunnel_minor_casing','tunnel_link_casing','tunnel_major_casing','tunnel_highway_casing',
+   'bridges_other_casing','bridges_minor_casing','bridges_link_casing','bridges_major_casing','bridges_highway_casing',
+   'minor_service_casing','minor_casing','link_casing','major_casing_late','major_casing_early',
+   'highway_casing_late','highway_casing_early'].forEach(function(k){ f[k]='#dcd9d2'; });
+  f.railway='#c9c5bc'; f.boundaries='#b3b0a8';
+  f.city_label='#2b2a55'; f.state_label='#8d93a8'; f.country_label='#5b6178';
+  f.ocean_label='#7f8ba8'; f.subplace_label='#6b7186'; f.waterway_label='#7f8ba8';
+  f.roads_label_major='#6f7386'; f.roads_label_minor='#8b8f9e'; f.address_label='#9a9eaa';
+  Object.keys(f).forEach(function(k){ if (k.slice(-5)==='_halo') f[k]='#f6f4ef'; });
+  f.landcover={ grassland:'rgba(236,241,231,1)', barren:'rgba(242,240,233,1)', urban_area:'rgba(240,239,235,1)',
+    farmland:'rgba(238,242,232,1)', glacier:'rgba(243,245,249,1)', scrub:'rgba(238,240,232,1)', forest:'rgba(230,238,229,1)' };
+  return f;
+})();
+
+/* Directions worth trying for a city backdrop. Each is a name, a one-line reason
+   it might be right for THE CITY, and the overrides that make it. */
+var STYLES = [
+  { id:'dark', name:'SITE DARK', why:'what ships today', o:{} },
+
+  { id:'blueprint', name:'BLUEPRINT', why:'drafting table: ink ground, chalk lines',
+    o:{ background:'#0b1c3a', earth:'#0e2246', water:'#0a1730', buildings:'#123059',
+        major:'#7fb2ff', highway:'#9cc6ff', minor_a:'#3f6ea8', minor_b:'#35608f', link:'#6a9fd8',
+        other:'#2c527d', railway:'#a8c8f0', boundaries:'#6f9ad0', pier:'#123059',
+        city_label:'#dbe9ff', city_label_halo:'#0b1c3a', subplace_label:'#a8c4e8',
+        roads_label_major:'#8fb6e6', roads_label_minor:'#6d92c0', ocean_label:'#5f86bd',
+        landcover:{ grassland:'rgba(14,34,70,1)', urban_area:'rgba(16,38,76,1)', forest:'rgba(12,30,62,1)',
+          barren:'rgba(14,34,70,1)', farmland:'rgba(14,34,70,1)', scrub:'rgba(14,34,70,1)', glacier:'rgba(20,44,84,1)' } } },
+
+  { id:'viele', name:'VIELE PAPER', why:'the 1865 survey the GHOST RIVERS overlay comes from', base:'light',
+    o:{ background:'#efe7d4', earth:'#f3ecdb', water:'#a9bcc4', buildings:'#e3d8c0',
+        major:'#c8a878', highway:'#c09a63', minor_a:'#dcccae', minor_b:'#e2d4b9', link:'#d0b892',
+        other:'#e6dac2', railway:'#8d7a5c', boundaries:'#a8926c', pier:'#e3d8c0',
+        city_label:'#3f3524', city_label_halo:'#f3ecdb', subplace_label:'#6b5c40',
+        roads_label_major:'#7a6746', roads_label_minor:'#8d7c5c', ocean_label:'#5f7079',
+        state_label:'#a08c66', country_label:'#7a6746', waterway_label:'#5f7079',
+        landcover:{ grassland:'rgba(226,224,193,1)', urban_area:'rgba(238,231,213,1)', forest:'rgba(214,219,190,1)',
+          barren:'rgba(238,232,214,1)', farmland:'rgba(232,230,199,1)', scrub:'rgba(230,228,199,1)', glacier:'rgba(244,242,235,1)' } } },
+
+  { id:'water', name:'WATER FIRST', why:'harbour and rivers carry the image; land recedes',
+    o:{ background:'#080a10', earth:'#0c0e13', water:'#1d4ed8', buildings:'#0e1016',
+        major:'#1b1e26', highway:'#20242e', minor_a:'#161920', minor_b:'#141720',
+        link:'#191c24', other:'#131620', railway:'#171a22', boundaries:'#2a3140',
+        pier:'#132038', waterway_label:'#7aa2ff', ocean_label:'#7aa2ff',
+        city_label:'#7b8398', city_label_halo:'#080a10', subplace_label:'#4a5164',
+        roads_label_major:'#3d4454', roads_label_minor:'#343b49',
+        landcover:{ grassland:'rgba(12,14,19,1)', urban_area:'rgba(14,16,21,1)', forest:'rgba(11,14,18,1)',
+          barren:'rgba(12,14,19,1)', farmland:'rgba(12,14,19,1)', scrub:'rgba(12,14,19,1)', glacier:'rgba(20,24,32,1)' } } },
+
+  { id:'radar', name:'RADAR MONO', why:'neutral grey so reflectivity colour is the only colour',
+    o:{ background:'#0d0d0f', earth:'#141416', water:'#1c1c20', buildings:'#1a1a1d',
+        major:'#3a3a3e', highway:'#46464b', minor_a:'#242427', minor_b:'#202023',
+        link:'#303034', other:'#1e1e21', railway:'#2c2c30', boundaries:'#4a4a50',
+        city_label:'#a8a8ad', city_label_halo:'#0d0d0f', subplace_label:'#6a6a70',
+        roads_label_major:'#5a5a60', roads_label_minor:'#4a4a50', ocean_label:'#55555c',
+        landcover:{ grassland:'rgba(20,20,22,1)', urban_area:'rgba(23,23,26,1)', forest:'rgba(19,19,21,1)',
+          barren:'rgba(20,20,22,1)', farmland:'rgba(20,20,22,1)', scrub:'rgba(20,20,22,1)', glacier:'rgba(30,30,34,1)' } } },
+
+  { id:'ember', name:'EMBER', why:'the site\'s orange, for hazard views that need warmth',
+    o:{ background:'#120c0a', earth:'#181110', water:'#241a2e', buildings:'#1f1614',
+        major:'#f97316', highway:'#fb923c', minor_a:'#3a2620', minor_b:'#31201b',
+        link:'#8a4a1e', other:'#2a1d19', railway:'#5a3a24', boundaries:'#6b4630',
+        city_label:'#f6d4b0', city_label_halo:'#120c0a', subplace_label:'#b98a63',
+        roads_label_major:'#c58a52', roads_label_minor:'#8f6644', ocean_label:'#8a7ba0',
+        landcover:{ grassland:'rgba(24,17,16,1)', urban_area:'rgba(28,20,18,1)', forest:'rgba(22,16,15,1)',
+          barren:'rgba(24,17,16,1)', farmland:'rgba(24,17,16,1)', scrub:'rgba(24,17,16,1)', glacier:'rgba(34,26,24,1)' } } },
+
+  { id:'silverlime', name:'SILVER / LIME', why:'brushed-metal ground, lime line work', base:'light',
+    o:{ background:'#c9ced6', earth:'#d7dbe1', water:'#aeb6c0', buildings:'#c2c7cf', pier:'#c2c7cf',
+        major:'#a3e635', highway:'#bef264', minor_a:'#e6ebe0', minor_b:'#dfe4da', link:'#c6e88a',
+        other:'#dfe3dc', railway:'#8aa86a', boundaries:'#9aa2ad',
+        park_a:'#cfe0b4', park_b:'#c8dcaa', wood_a:'#cbdcae', wood_b:'#cbdcae',
+        scrub_a:'#d6ded0', scrub_b:'#d6ded0', pedestrian:'#d2d7dd', industrial:'#ced3da',
+        school:'#d2d7dd', hospital:'#d4d8de', military:'#cfd4db', zoo:'#d2ddc4', aerodrome:'#ced3da',
+        city_label:'#2f3a1c', city_label_halo:'#d7dbe1', subplace_label:'#556344',
+        roads_label_major:'#4d5a36', roads_label_minor:'#69745c', ocean_label:'#6b7481',
+        state_label:'#8f97a1', country_label:'#5b6470', waterway_label:'#6b7481',
+        landcover:{ grassland:'rgba(206,220,190,1)', urban_area:'rgba(211,216,222,1)', forest:'rgba(198,214,182,1)',
+          barren:'rgba(214,218,224,1)', farmland:'rgba(208,220,196,1)', scrub:'rgba(210,218,200,1)', glacier:'rgba(226,230,236,1)' } } },
+
+  { id:'graphitelime', name:'GRAPHITE / LIME', why:'the same idea after dark — graphite ground, lime glow',
+    o:{ background:'#16181c', earth:'#1c1f24', water:'#12161c', buildings:'#22262c',
+        major:'#a3e635', highway:'#d9f99d', minor_a:'#2f353c', minor_b:'#282e35', link:'#7fb832',
+        other:'#262b31', railway:'#5f7a34', boundaries:'#4b5560', pier:'#22262c',
+        park_a:'#1b2a16', park_b:'#1d2e18', wood_a:'#1a2915', wood_b:'#1a2915',
+        city_label:'#dff5b0', city_label_halo:'#16181c', subplace_label:'#93a878',
+        roads_label_major:'#a8bf85', roads_label_minor:'#79885f', ocean_label:'#5d6a78',
+        landcover:{ grassland:'rgba(28,34,24,1)', urban_area:'rgba(30,33,38,1)', forest:'rgba(24,32,22,1)',
+          barren:'rgba(30,33,38,1)', farmland:'rgba(28,34,24,1)', scrub:'rgba(28,33,25,1)', glacier:'rgba(38,42,48,1)' } } },
+
+  { id:'ink', name:'INK ON PAPER', why:'the site palette exactly: paper ground, #2B22F4 ink', base:'light',
+    o:{ background:'#f2f0ea', earth:'#f7f5ef', water:'#cfd6f4', buildings:'#e9e6dd',
+        major:'#2B22F4', highway:'#2B22F4', minor_a:'#b9b6d8', minor_b:'#c6c3e0',
+        link:'#6a63e8', other:'#d2cfe4', railway:'#8a86b8', boundaries:'#9d9ac4',
+        city_label:'#2B22F4', city_label_halo:'#f7f5ef', subplace_label:'#5f5ba8',
+        roads_label_major:'#4a45c0', roads_label_minor:'#6f6bb4', ocean_label:'#6f7ab4',
+        state_label:'#9a97c8', country_label:'#5f5ba8', waterway_label:'#5f6bb4',
+        landcover:{ grassland:'rgba(236,240,232,1)', urban_area:'rgba(242,240,234,1)', forest:'rgba(228,236,228,1)',
+          barren:'rgba(242,240,233,1)', farmland:'rgba(238,241,231,1)', scrub:'rgba(238,240,232,1)', glacier:'rgba(245,246,250,1)' } } }
+];
+
+function flavorFor(style){
+  var src = (style.base === 'light') ? BASE_LIGHT : BASE;
+  var f = {}; for (var k in src) f[k] = src[k];
+  for (var k2 in style.o) f[k2] = style.o[k2];
+  if (style.o.landcover) f.landcover = style.o.landcover;
+  return f;
+}
+
+var focused = STYLES[0], liveMap = null, liveLayers = [];
+
+function drawCard(style){
+  var f = flavorFor(style);
+  var card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = '<h2>' + style.name + ' <em>' + style.why + '</em></h2>';
+  var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  card.appendChild(cv);
+  var row = document.createElement('div'); row.className = 'row';
+  ['earth','water','major','city_label','buildings'].forEach(function(k){
+    var b = document.createElement('button'); b.className = 'sw';
+    b.style.background = f[k]; b.title = k + ' ' + f[k];
+    row.appendChild(b);
+  });
+  var pick = document.createElement('button');
+  pick.textContent = 'focus'; pick.onclick = function(){ focus(style); };
+  row.appendChild(pick);
+  card.appendChild(row);
+  document.getElementById('grid').appendChild(card);
+
+  var st = new protomapsL.Static({
+    url: document.getElementById('src').value,
+    paintRules: protomapsL.paintRules(f),
+    labelRules: protomapsL.labelRules(f, 'en'),
+    backgroundColor: f.background,
+    maxDataZoom: 14
+  });
+  // Static takes {x:lon, y:lat} and reads zoom off the longitude span; the centre
+  // latitude has to be the MERCATOR midpoint or the coastline slides.
+  var R = 6378137, PI = Math.PI;
+  var lat2m = function(la){ return R * Math.log(Math.tan(PI/4 + la*PI/360)); };
+  var m2lat = function(Y){ return (2*Math.atan(Math.exp(Y/R)) - PI/2) * 180/PI; };
+  var latMid = m2lat((lat2m(CITY.s) + lat2m(CITY.n)) / 2);
+  st.drawContextBounds(cv.getContext('2d'), {x:CITY.w, y:latMid}, {x:CITY.e, y:latMid}, W, H)
+    .catch(function(e){ card.querySelector('h2 em').textContent = 'failed: ' + e.message; });
+}
+
+function focus(style){
+  focused = style;
+  document.getElementById('liveName').textContent = style.name;
+  var f = flavorFor(style);
+  if (!liveMap){
+    liveMap = L.map('live', { center:[(CITY.s+CITY.n)/2, (CITY.w+CITY.e)/2], zoom:11,
+                              attributionControl:false, preferCanvas:true });
+  }
+  liveLayers.forEach(function(l){ liveMap.removeLayer(l); });
+  liveLayers = [];
+  [false, true].forEach(function(labels){
+    var layer = protomapsL.leafletLayer({
+      url: document.getElementById('src').value,
+      maxDataZoom: 14,
+      paintRules: labels ? [] : protomapsL.paintRules(f),
+      labelRules: labels ? protomapsL.labelRules(f, 'en') : [],
+      backgroundColor: labels ? undefined : f.background,
+      attribution: ''
+    });
+    layer.addTo(liveMap); liveLayers.push(layer);
+  });
+}
+
+function renderAll(){
+  var grid = document.getElementById('grid');
+  [].slice.call(grid.querySelectorAll('.card:not(.wide)')).forEach(function(c){ c.remove(); });
+  STYLES.forEach(drawCard);
+  focus(focused);
+  document.getElementById('status').textContent = STYLES.length + ' styles · ' + W + '×' + H;
+}
+
+function copyFlavor(){
+  var txt = 'window.BV_MAP_FLAVOR = ' + JSON.stringify(flavorFor(focused)) + ';';
+  navigator.clipboard.writeText(txt).then(function(){
+    document.getElementById('status').textContent = 'copied ' + focused.name + ' (' + txt.length + ' bytes)';
+  });
+}
+
+renderAll();
+</script>
+</body>
+</html>
