@@ -420,21 +420,35 @@ The live pane still uses the basemap's own place labels; this is the card render
 
 # Neighbourhood names
 
-`bathy/hood_labels.json` — all 262 of the city's 2020 NTAs, each with a name, an anchor
-and a bounding box, built the same way the park labels are: the anchor is the sampled
-interior point furthest from any edge, not a centroid, and where an NTA is several
-polygons only the largest body is labelled.
+`bathy/hood_labels.json` — 340 names, 21 districts and 319 neighbourhoods, from OSM
+`place=quarter` and `place=neighbourhood`, clipped to the five borough polygons (which
+sheds Avenel, Sewaren and the rest of New Jersey).
 
-**Held back until 30 m per pixel.** From city framing they are noise laid across the whole
-map, so unlike the park names — which are governed purely by whether they fit — these
-carry an explicit zoom gate as well, and then still have to fit inside the
-neighbourhood's own box.
+**Not the NTAs**, which is what this was built on first and was wrong. The 2020
+Neighborhood Tabulation Areas are NYC Planning's *statistical* geographies: they fuse
+neighbourhoods into administrative units and label them accordingly — "Tribeca-Civic
+Center", "Battery Park City-Lower Manhattan", "Carroll Gardens-Cobble Hill-Gowanus-Red
+Hook". Nobody says any of those. OSM carries the vernacular names, so Tribeca, SoHo, NoHo,
+Civic Center, Battery Park City, Two Bridges, Seaport and Alphabet City are each
+themselves. The NTA polygons are still used, but only for the faint boundary lines.
 
-**An NTA name joins distinct neighbourhoods with hyphens**, so each hyphen part takes its
-own line and is *not* split further — otherwise "Bulls Head" comes apart across two rows.
-Todt Hill-Emerson Hill-Lighthouse Hill-Manor Heights sets as four lines; Carroll
-Gardens-Cobble Hill-Gowanus-Red Hook as four. A single-part name falls back to the word
-stacking the parks use.
+**Two tiers, because they are not the same kind of thing.** Rank 1 is a district you can
+read from a distance — Harlem, Midtown, Williamsburg, Flushing, Long Island City — and
+appears below 55 m per pixel. Rank 2 is the fine grain and waits until 22. Most entries
+are points, so there is usually no shape to fit inside; where one carries a boundary the
+name still has to sit within it.
+
+**Set in Qellia**, the site's display serif, at weight 500 — it is a single-weight face
+and asking for a bold invites a synthesised one. It runs about a fifth narrower and much
+lighter in stroke than the sans (measured: 124 px against Georgia's 173 for the same
+string), so 9 px reads smaller here than 9 px elsewhere. No halo — the white edging turned
+every name into a sticker.
+
+The font is served from `_maplab/qellia.woff2`, **not the CDN**: a font is a CORS fetch and
+`cdn.bluishvoid.com` only allows `bluishvoid.com`, so from localhost the face never
+arrives and canvas quietly falls back to Georgia with no error. And canvas text does not
+trigger a font load the way DOM text does, so the first paint waits on
+`document.fonts.load` before drawing.
 
 ## One collision list for all three
 

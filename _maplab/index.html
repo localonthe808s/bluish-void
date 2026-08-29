@@ -32,6 +32,16 @@
      Leaflet tile canvas in the live pane — including the labels layer's, whose
      tiles are transparent by design. An opaque grey background on those hid the
      base layer completely: the map looked blank while every tile was painted. */
+  @font-face{
+    font-family:"QelliaRegular";
+    /* Local copy, not the CDN: a font is a CORS fetch and cdn.bluishvoid.com only allows
+       bluishvoid.com, so from localhost the face never arrives and canvas quietly falls
+       back to Georgia. The CDN stays as a second source for when this is served from the
+       site itself. */
+    src:url('qellia.woff2') format('woff2'),
+        url('https://cdn.bluishvoid.com/qellia.woff2?v=1') format('woff2');
+    font-display:block;
+  }
   .zoomers{ float:right; display:flex; gap:4px; }
   .zoomers button{ font:inherit; font-size:.6rem; padding:2px 8px; border-radius:6px; cursor:pointer;
     border:1px solid rgba(43,34,244,.25); background:#fff; color:#2B22F4; }
@@ -528,7 +538,7 @@ function drawActiveWater(ctx, style, f, view, latMid, W, H){
 }
 /* Each route in its own MTA colour, straight out of the GTFS `route_color`. A white
    casing under every line keeps them apart where four of them share an avenue. */
-var RAIL_INK = '#33383F', PARK_INK = '#1F4D33', HOOD_INK = '#39424F';
+var RAIL_INK = '#33383F', PARK_INK = '#1F4D33', HOOD_INK = '#2E3742';
 
 /* All three kinds of label share one list of occupied rectangles, filled in priority
    order — neighbourhood, then park, then station — so a later one gives way to one
@@ -543,44 +553,49 @@ function labelFits(x, y, w, h){
   return true;
 }
 
-/* An NTA name joins distinct neighbourhoods with hyphens — "Todt Hill-Emerson
-   Hill-Lighthouse Hill-Manor Heights" — so each hyphen part takes its own line and is
-   NOT split further, or "Bulls Head" comes apart across two rows. A single-part name
-   falls back to the word stacking the parks use. */
-function stackHood(nm){
-  var parts = (nm || '').split(/\s*-\s*/).filter(Boolean);
-  return parts.length > 1 ? parts : stackName(nm);
-}
+/* Neighbourhood names as people actually say them.
 
-/* Neighbourhood names, set at the pole of inaccessibility of each NTA. Held back until
-   the framing is finer than 30 m per pixel — from far out they are noise laid over the
-   whole city — and then still only drawn if the stacked block fits inside the
-   neighbourhood's own box. */
+   NOT the 2020 NTAs, which was the first attempt: those are NYC Planning's statistical
+   geographies and deliberately fuse neighbourhoods into administrative units —
+   "Tribeca-Civic Center", "Battery Park City-Lower Manhattan" — which nobody says. These
+   come from OSM place=neighbourhood and place=quarter clipped to the five boroughs, so
+   Tribeca, SoHo, NoHo, Two Bridges, Alphabet City and Civic Center are each themselves.
+
+   Two tiers, because they are not the same kind of thing: rank 1 is a district you can
+   read from a distance — Harlem, Midtown, Williamsburg, Flushing — and rank 2 is the
+   fine grain, which waits until much closer in. */
+var HOOD_ZOOM = { 1: 55, 2: 22 };   // metres per pixel above which each tier stays away
 function drawHoodNames(ctx, geo, proj, mPerPx){
   LABELBOX.length = 0;
-  if (!geo || !mPerPx || mPerPx > 30) return;
+  if (!geo || !mPerPx) return;
   ctx.save();
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  var LH = 13;
-  ctx.font = '600 11px system-ui, sans-serif';
-  try { ctx.letterSpacing = '0.16em'; } catch(e){}
+  /* Set in Qellia, the site's display serif, at weight 500 — it is a single-weight face
+     and asking for a bold invites a synthesised one. It runs about a fifth narrower and
+     much lighter than the sans, so 9 px here reads smaller than 9 px would elsewhere,
+     which is the point. No halo: the white edging turned every name into a sticker. */
+  var LH = 11;
+  ctx.font = '500 9px QelliaRegular, "Bodoni Moda", Georgia, serif';
+  try { ctx.letterSpacing = '0.2em'; } catch(e){}
   geo.features.forEach(function(ft){
-    var bb = ft.properties.bbox;
-    var a = proj({ x:bb[0], y:bb[3] }), b = proj({ x:bb[2], y:bb[1] });
-    var boxW = Math.abs(b.x - a.x), boxH = Math.abs(b.y - a.y);
-    if (boxW < 70 || boxH < 34) return;
-    var lines = stackHood(ft.properties.name).map(function(l){ return l.toUpperCase(); });
+    var rank = ft.properties.rank || 2;
+    if (mPerPx > (HOOD_ZOOM[rank] || 22)) return;
+    var lines = stackName(ft.properties.name).map(function(l){ return l.toUpperCase(); });
     var tw = 0;
     lines.forEach(function(l){ tw = Math.max(tw, ctx.measureText(l).width); });
     var th = lines.length * LH;
-    if (tw > boxW * 0.8 || th > boxH * 0.6) return;
+    /* Most of these are points, so there is usually no shape to sit inside; where one
+       does carry a boundary, still keep the name within it. */
+    var bb = ft.properties.bbox;
+    if (bb){
+      var a = proj({ x:bb[0], y:bb[3] }), b = proj({ x:bb[2], y:bb[1] });
+      if (tw > Math.abs(b.x - a.x) * 0.9 || th > Math.abs(b.y - a.y) * 0.7) return;
+    }
     var q = proj({ x:ft.geometry.coordinates[0], y:ft.geometry.coordinates[1] });
-    if (!labelFits(q.x - tw / 2 - 4, q.y - th / 2 - 3, tw + 8, th + 6)) return;
+    if (!labelFits(q.x - tw / 2 - 5, q.y - th / 2 - 4, tw + 10, th + 8)) return;
+    ctx.fillStyle = HOOD_INK;
     lines.forEach(function(l, i){
-      var cy = q.y - th / 2 + LH / 2 + i * LH;
-      ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(255,255,255,.85)';
-      ctx.strokeText(l, q.x, cy);
-      ctx.fillStyle = HOOD_INK; ctx.fillText(l, q.x, cy);
+      ctx.fillText(l, q.x, q.y - th / 2 + LH / 2 + i * LH);
     });
   });
   ctx.textAlign = 'left';
@@ -588,9 +603,6 @@ function drawHoodNames(ctx, geo, proj, mPerPx){
   ctx.restore();
 }
 
-/* A park is named only when the words actually fit inside it — measured against the
-   park's own projected box, not against a zoom number. That way a name appears exactly
-   when there is room for it, and a long name on a small green waits until there is. */
 /* Park names stack on their own words rather than wrapping wherever the width happens
    to run out. One word a line while the name is short; only once it runs past three do
    the words pair up — so QUEENS / BOTANICAL / GARDEN and KISSENA / CORRIDOR / PARK each
@@ -1031,7 +1043,14 @@ function copyFlavor(){
   });
 }
 
-renderAll();
+/* Canvas text does not trigger a font load the way DOM text does, so the first paint
+   would quietly fall back to Georgia. Ask for Qellia, then draw; if it never arrives
+   the catch still renders, in the fallback serif. */
+if (document.fonts && document.fonts.load){
+  document.fonts.load('500 12px QelliaRegular').then(renderAll, renderAll);
+} else {
+  renderAll();
+}
 </script>
 </body>
 </html>
