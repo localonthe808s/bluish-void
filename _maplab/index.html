@@ -43,6 +43,11 @@
   <h1>MAP LAB · THE CITY</h1>
   <span class="sub">the box the widget draws: −74.60,40.30 → −73.40,41.10</span>
   <input type="text" id="src" value="http://localhost:8091/bluish-basemap/{z}/{x}/{y}.mvt">
+  <label class="sub">view <select id="view" onchange="renderAll()" style="font:inherit;font-size:.62rem;padding:3px 6px;border-radius:6px;border:1px solid rgba(43,34,244,.25)">
+    <option value="city">THE CITY</option>
+    <option value="shelf">SHELF · Hudson Canyon</option>
+    <option value="atlantic">ATLANTIC · the ridge</option>
+  </select></label>
   <label class="sub">towns <input type="number" id="placecut" value="7" min="1" max="15" step="1" style="width:52px;min-width:0"></label>
   <button onclick="renderAll()">redraw</button>
   <button onclick="copyFlavor()">copy focused flavor</button>
@@ -68,8 +73,37 @@
 <script src="https://cdn.bluishvoid.com/vendor/protomaps-leaflet/protomaps-leaflet-5.1.0.js"></script>
 <script>
 /* THE CITY box, verbatim from _cityBoxCfg() in index.html */
-var CITY = { w:-74.60, s:40.30, e:-73.40, n:41.10 };
+/* Three framings. THE CITY is the widget's own box; the other two exist because
+   the seafloor is the subject and it is nowhere near the harbour — the Hudson
+   Canyon starts at the shelf break ~100 mi out, and the Mid-Atlantic Ridge needs
+   half an ocean in frame. */
+var VIEWS = {
+  city:     { w:-74.60, s:40.30, e:-73.40, n:41.10, bathy:null,                    zoom:11 },
+  shelf:    { w:-75.20, s:37.20, e:-70.00, n:41.20, bathy:'bathy/bathy_shelf.json', zoom:7 },
+  atlantic: { w:-80.00, s:5.00,  e:-5.00,  n:60.00, bathy:'bathy/bathy_atlantic.json', zoom:3 }
+};
+var CITY = VIEWS.city;
 var W = 460, H = Math.round(W / 1.1372);
+
+/* Natural Earth depth bands, public domain. Each polygon carries the depth of
+   the band it opens, so drawing them deepest-last with a darkening ramp gives
+   the shelf, the slope, the abyssal plain and the ridge as tone. */
+var BATHY = {};
+function bathyFor(view){
+  var v = VIEWS[view];
+  if (!v.bathy) return Promise.resolve(null);
+  if (BATHY[view]) return Promise.resolve(BATHY[view]);
+  return fetch(v.bathy).then(function(r){ return r.json(); }).then(function(j){ BATHY[view] = j; return j; });
+}
+/* Depth ramp in the ink palette: shallow shelf near the paper, the deep basin
+   near full ink. Same family as the rivers so the water reads as one system. */
+function depthFill(d, dark){
+  // deeper = darker, walking down from the style's own water colour
+  var steps = dark
+    ? { 200:'#8fd23a', 1000:'#6fae2c', 2000:'#548a22', 3000:'#3d6819', 4000:'#2a4a12', 5000:'#1b310c', 6000:'#101d07' }
+    : { 200:'#4a43f6', 1000:'#3a34d0', 2000:'#2d29ad', 3000:'#241f8b', 4000:'#1b176b', 5000:'#14114f', 6000:'#0d0b35' };
+  return steps[d] || (dark ? '#101d07' : '#0d0b35');
+}
 
 /* Base is the site's own dark flavor; every style below is a set of overrides on
    top of it, so a style is only as long as what it actually changes. */
@@ -233,6 +267,28 @@ function flavorFor(style){
 
 var focused = STYLES[0], liveMap = null, liveLayers = [];
 
+/* Paint the depth bands straight onto the card canvas, under the vector draw,
+   using the projection Static hands back so the two line up exactly. */
+function drawBathy(ctx, geo, proj, dark){
+  if (!geo) return;
+  var feats = geo.features.slice().sort(function(a,b){ return a.properties.d - b.properties.d; });
+  feats.forEach(function(ft){
+    ctx.fillStyle = depthFill(ft.properties.d, dark);
+    var polys = ft.geometry.type === 'Polygon' ? [ft.geometry.coordinates] : ft.geometry.coordinates;
+    polys.forEach(function(rings){
+      ctx.beginPath();
+      rings.forEach(function(ring){
+        ring.forEach(function(pt, i){
+          var p = proj({ x: pt[0], y: pt[1] });   // it takes ONE {x:lon, y:lat}, not two numbers
+          if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+        });
+        ctx.closePath();
+      });
+      ctx.fill('evenodd');
+    });
+  });
+}
+
 function drawCard(style){
   var f = flavorFor(style);
   var card = document.createElement('div');
@@ -252,6 +308,7 @@ function drawCard(style){
   card.appendChild(row);
   document.getElementById('grid').appendChild(card);
 
+  var view = VIEWS[document.getElementById('view').value] || CITY;
   var st = new protomapsL.Static({
     url: document.getElementById('src').value,
     paintRules: rulesFor(style, f),
@@ -264,8 +321,19 @@ function drawCard(style){
   var R = 6378137, PI = Math.PI;
   var lat2m = function(la){ return R * Math.log(Math.tan(PI/4 + la*PI/360)); };
   var m2lat = function(Y){ return (2*Math.atan(Math.exp(Y/R)) - PI/2) * 180/PI; };
-  var latMid = m2lat((lat2m(CITY.s) + lat2m(CITY.n)) / 2);
-  st.drawContextBounds(cv.getContext('2d'), {x:CITY.w, y:latMid}, {x:CITY.e, y:latMid}, W, H)
+  var latMid = m2lat((lat2m(view.s) + lat2m(view.n)) / 2);
+  var ctx = cv.getContext('2d');
+  st.drawContextBounds(ctx, {x:view.w, y:latMid}, {x:view.e, y:latMid}, W, H)
+    .then(function(out){
+      /* Depth bands go ON TOP of the vector pass, not under it: the vector draw
+         fills the ocean opaquely, so anything painted beneath is invisible. The
+         bands only cover sea, so the coast and the rivers survive — and Static
+         hands back the projection it used, which is what lines them up. */
+      return bathyFor(document.getElementById('view').value).then(function(geo){
+        if (!geo || !out || !out.project) return;
+        drawBathy(ctx, geo, out.project, !(style.base === 'light'));
+      });
+    })
     .catch(function(e){ card.querySelector('h2 em').textContent = 'failed: ' + e.message; });
 }
 
