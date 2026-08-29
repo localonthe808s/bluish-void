@@ -32,6 +32,11 @@
      Leaflet tile canvas in the live pane — including the labels layer's, whose
      tiles are transparent by design. An opaque grey background on those hid the
      base layer completely: the map looked blank while every tile was painted. */
+  .zoomers{ float:right; display:flex; gap:4px; }
+  .zoomers button{ font:inherit; font-size:.6rem; padding:2px 8px; border-radius:6px; cursor:pointer;
+    border:1px solid rgba(43,34,244,.25); background:#fff; color:#2B22F4; }
+  .zoomers button:hover{ background:rgba(43,34,244,.08); }
+  .card > canvas.pannable{ touch-action:none; }
   .card > canvas{display:block;width:100%;height:auto;background:#dfe2ea}
   .row{display:flex;gap:6px;padding:6px 11px 9px;flex-wrap:wrap}
   .sw{width:15px;height:15px;border-radius:4px;border:1px solid rgba(0,0,0,.16);cursor:pointer;padding:0}
@@ -779,8 +784,12 @@ function drawCard(style){
   var f = flavorFor(style);
   var card = document.createElement('div');
   card.className = 'card';
-  card.innerHTML = '<h2>' + style.name + ' <em>' + style.why + '</em></h2>';
+  card.innerHTML = '<h2>' + style.name + ' <em>' + style.why + '</em>'
+                 + '<span class="zoomers"><button data-z="in">+</button>'
+                 + '<button data-z="out">\u2212</button>'
+                 + '<button data-z="home">reset</button></span></h2>';
   var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  cv.className = 'pannable';
   card.appendChild(cv);
   var row = document.createElement('div'); row.className = 'row';
   ['earth','water','major','city_label','buildings'].forEach(function(k){
@@ -791,72 +800,168 @@ function drawCard(style){
   card.appendChild(row);
   document.getElementById('grid').appendChild(card);
 
-  var view = VIEWS[document.getElementById('view').value] || CITY;
-  var st = new protomapsL.Static({
-    url: document.getElementById('src').value,
-    paintRules: rulesFor(style, f),
-    labelRules: (VIEWS[document.getElementById('view').value] || CITY).boroughs ? [] : labelsFor(style, f),
-    backgroundColor: f.background,
-    maxDataZoom: 14
-  });
-  // Static takes {x:lon, y:lat} and reads zoom off the longitude span; the centre
-  // latitude has to be the MERCATOR midpoint or the coastline slides.
-  var R = 6378137, PI = Math.PI;
-  var lat2m = function(la){ return R * Math.log(Math.tan(PI/4 + la*PI/360)); };
-  var m2lat = function(Y){ return (2*Math.atan(Math.exp(Y/R)) - PI/2) * 180/PI; };
-  var latMid = m2lat((lat2m(view.s) + lat2m(view.n)) / 2);
   var ctx = cv.getContext('2d');
-  st.drawContextBounds(ctx, {x:view.w, y:latMid}, {x:view.e, y:latMid}, W, H)
-    .then(function(out){
-      /* Depth bands go ON TOP of the vector pass, not under it: the vector draw
-         fills the ocean opaquely, so anything painted beneath is invisible. The
-         bands only cover sea, so the coast and the rivers survive — and Static
-         hands back the projection it used, which is what lines them up. */
-      if (!out || !out.project) return;
-      if (view.relief) return reliefImage(view.relief.img).then(function(img){ drawRelief(ctx, img, view.relief, out.project); });
-      var vkey = document.getElementById('view').value;
-      var dark = !(style.base === 'light');
-      return bathyFor(vkey).then(function(geo){
-        if (geo) drawBathy(ctx, geo, out.project, dark);
-        return boroughsFor(vkey);
-      }).then(function(boro){
-        if (!boro) return;
-        drawBoroughs(ctx, boro, out.project, dark);
-        return hoodsFor(vkey).then(function(hoods){ drawHoods(ctx, hoods, out.project, dark); });
-      }).then(function(){
-        if (!VIEWS[vkey] || !VIEWS[vkey].boroughs) return;
-        /* The mask is opaque, so it buries the rivers and the place names inside
-           the city. Put them back over it: water first, then the labels. */
-        var again = new protomapsL.Static({ url: document.getElementById('src').value,
-          paintRules: parkRulesFor(), labelRules: [], maxDataZoom: 14 });
-        return again.drawContextBounds(ctx, {x:view.w, y:latMid}, {x:view.e, y:latMid}, W, H)
-          .then(function(){
-            return wetFor(vkey).then(function(wg){
+  var R = 6378137, PI = Math.PI;
+  var lon2x = function(lo){ return lo * R * PI / 180; };
+  var x2lon = function(X){ return X / R * 180 / PI; };
+  var lat2y = function(la){ return R * Math.log(Math.tan(PI/4 + la*PI/360)); };
+  var y2lat = function(Y){ return (2*Math.atan(Math.exp(Y/R)) - PI/2) * 180/PI; };
+
+  /* The card is the only view now, so it has to pan and zoom. State is kept in web
+     mercator — the left edge, the vertical centre, and metres per pixel — because that
+     is what Static actually consumes: it reads its zoom off the longitude span and takes
+     the centre latitude, so the vertical extent is implied by the canvas aspect rather
+     than by any latitude pair. */
+  var VB = null;
+  function home(){
+    var v = VIEWS[document.getElementById('view').value] || CITY;
+    var Xw = lon2x(v.w);
+    VB = { Xw: Xw, mpp: (lon2x(v.e) - Xw) / W, Ymid: (lat2y(v.s) + lat2y(v.n)) / 2, relief: v.relief };
+  }
+  home();
+  var box = function(){
+    return { w: x2lon(VB.Xw), e: x2lon(VB.Xw + VB.mpp * W), latMid: y2lat(VB.Ymid),
+             s: y2lat(VB.Ymid - VB.mpp * H / 2), n: y2lat(VB.Ymid + VB.mpp * H / 2),
+             relief: VB.relief };
+  };
+
+  /* While the mouse is down there is no time to redraw — a full pass is a second or
+     more — so the last finished bitmap is transformed into place as a preview, and the
+     real render happens once the pointer goes quiet. */
+  var last = document.createElement('canvas'); last.width = W; last.height = H;
+  var lastBox = null, timer = null, busy = 0;
+  function preview(){
+    if (!lastBox) return;
+    var scale = lastBox.mpp / VB.mpp;
+    var dx = (lastBox.Xw - VB.Xw) / VB.mpp;
+    var dy = ((VB.Ymid + VB.mpp*H/2) - (lastBox.Ymid + lastBox.mpp*H/2)) / VB.mpp;
+    ctx.save();
+    ctx.fillStyle = f.background || '#dfe2ea'; ctx.fillRect(0, 0, W, H);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(last, dx, dy, W * scale, H * scale);
+    ctx.restore();
+  }
+  function schedule(){
+    preview();
+    clearTimeout(timer);
+    timer = setTimeout(paint, 260);
+  }
+
+  function paint(){
+    var view = box(), token = ++busy;
+    var vkey = document.getElementById('view').value;
+    var dark = !(style.base === 'light');
+    var stale = function(){ return token !== busy; };
+    var st = new protomapsL.Static({
+      url: document.getElementById('src').value,
+      paintRules: rulesFor(style, f),
+      labelRules: (VIEWS[vkey] || CITY).boroughs ? [] : labelsFor(style, f),
+      backgroundColor: f.background,
+      maxDataZoom: 14
+    });
+    return st.drawContextBounds(ctx, {x:view.w, y:view.latMid}, {x:view.e, y:view.latMid}, W, H)
+      .then(function(out){
+        /* Depth bands go ON TOP of the vector pass, not under it: the vector draw fills
+           the ocean opaquely, so anything painted beneath is invisible. Static hands back
+           the projection it used, which is what lines everything up. */
+        if (!out || !out.project || stale()) return;
+        if (view.relief) return reliefImage(view.relief.img).then(function(img){ drawRelief(ctx, img, view.relief, out.project); });
+        return bathyFor(vkey).then(function(geo){
+          if (geo) drawBathy(ctx, geo, out.project, dark);
+          return boroughsFor(vkey);
+        }).then(function(boro){
+          if (!boro || stale()) return;
+          drawBoroughs(ctx, boro, out.project, dark);
+          return hoodsFor(vkey).then(function(hoods){ drawHoods(ctx, hoods, out.project, dark); });
+        }).then(function(){
+          if (!VIEWS[vkey] || !VIEWS[vkey].boroughs || stale()) return;
+          /* The mask is opaque, so it buries the parks and the place names inside the
+             city. Put them back over it. */
+          var again = new protomapsL.Static({ url: document.getElementById('src').value,
+            paintRules: parkRulesFor(), labelRules: [], maxDataZoom: 14 });
+          return again.drawContextBounds(ctx, {x:view.w, y:view.latMid}, {x:view.e, y:view.latMid}, W, H)
+            .then(function(){ return wetFor(vkey); })
+            .then(function(wg){
+              if (stale()) return;
               drawWet(ctx, wg, out.project);          // the field: ground that was water
               return ghostsFor(vkey);
             }).then(function(gh){
+              if (stale()) return;
               drawGhosts(ctx, gh, out.project);       // the buried courses, inside it
-              return drawActiveWater(ctx, style, f, view, latMid, W, H);
+              return drawActiveWater(ctx, style, f, view, view.latMid, W, H);
             }).then(function(){
               return floodFor(vkey);
             }).then(function(fl){
+              if (stale()) return;
               drawFlood(ctx, fl, out.project, W, H);
               return parkNamesFor(vkey);
             }).then(function(pn){
+              if (stale()) return;
               drawParkNames(ctx, pn, out.project);
               return Promise.all([subwayFor(vkey), stopsFor(vkey), bulletsFor(vkey)]);
             }).then(function(sw){
-              var a = out.project({ x:view.w, y:latMid }), b = out.project({ x:view.e, y:latMid });
-              var mpp = (view.e - view.w) * 84500 / Math.max(1, Math.abs(b.x - a.x));
-              drawSubway(ctx, sw[0], sw[1], out.project, sw[2], mpp);
+              if (stale()) return;
+              drawSubway(ctx, sw[0], sw[1], out.project, sw[2], VB.mpp);
               var lab = new protomapsL.Static({ url: document.getElementById('src').value,
                 paintRules: [], labelRules: labelsFor(style, f), maxDataZoom: 14 });
-              return lab.drawContextBounds(ctx, {x:view.w, y:latMid}, {x:view.e, y:latMid}, W, H);
+              return lab.drawContextBounds(ctx, {x:view.w, y:view.latMid}, {x:view.e, y:view.latMid}, W, H);
             });
-          });
-      });
-    })
-    .catch(function(e){ card.querySelector('h2 em').textContent = 'failed: ' + e.message; });
+        });
+      })
+      .then(function(){
+        if (stale()) return;
+        last.getContext('2d').drawImage(cv, 0, 0);
+        lastBox = { Xw: VB.Xw, Ymid: VB.Ymid, mpp: VB.mpp };
+        document.getElementById('status').textContent =
+          Math.round(VB.mpp * 10) / 10 + ' m/px \u00b7 ' + W + '\u00d7' + H;
+      })
+      .catch(function(e){ card.querySelector('h2 em').textContent = 'failed: ' + e.message; });
+  }
+
+  // ── zoom about the cursor, so the point under the pointer stays put ──────────
+  function zoomAt(mx, my, k){
+    var Xcur = VB.Xw + mx * VB.mpp;
+    var Ycur = VB.Ymid + (H / 2 - my) * VB.mpp;
+    VB.mpp /= k;
+    VB.Xw = Xcur - mx * VB.mpp;
+    VB.Ymid = Ycur - (H / 2 - my) * VB.mpp;
+    schedule();
+  }
+  cv.addEventListener('wheel', function(ev){
+    ev.preventDefault();
+    var r = cv.getBoundingClientRect();
+    zoomAt((ev.clientX - r.left) * W / r.width, (ev.clientY - r.top) * H / r.height,
+           Math.pow(1.0016, -ev.deltaY));
+  }, { passive: false });
+  cv.addEventListener('dblclick', function(ev){
+    var r = cv.getBoundingClientRect();
+    zoomAt((ev.clientX - r.left) * W / r.width, (ev.clientY - r.top) * H / r.height, 2);
+  });
+  var drag = null;
+  cv.addEventListener('pointerdown', function(ev){
+    drag = { x: ev.clientX, y: ev.clientY }; cv.setPointerCapture(ev.pointerId);
+    cv.style.cursor = 'grabbing';
+  });
+  cv.addEventListener('pointermove', function(ev){
+    if (!drag) return;
+    var r = cv.getBoundingClientRect();
+    var dx = (ev.clientX - drag.x) * W / r.width, dy = (ev.clientY - drag.y) * H / r.height;
+    drag.x = ev.clientX; drag.y = ev.clientY;
+    VB.Xw -= dx * VB.mpp;
+    VB.Ymid += dy * VB.mpp;
+    schedule();
+  });
+  var release = function(){ drag = null; cv.style.cursor = 'grab'; };
+  cv.addEventListener('pointerup', release);
+  cv.addEventListener('pointercancel', release);
+  cv.style.cursor = 'grab';
+  card.querySelector('.zoomers').addEventListener('click', function(ev){
+    var z = ev.target.getAttribute('data-z');
+    if (z === 'in') zoomAt(W/2, H/2, 1.8);
+    else if (z === 'out') zoomAt(W/2, H/2, 1/1.8);
+    else if (z === 'home'){ home(); schedule(); }
+  });
+  paint();
 }
 
 

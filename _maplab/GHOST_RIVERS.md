@@ -326,12 +326,25 @@ about today's topography rather than the old watercourses.
 
 ---
 
-# Layer order in the live pane *(removed 2026-08-29)*
+# One view, and it pans and zooms
 
-The lab drew the same geography twice — an interactive Leaflet pane above the static card
-— and the two diverged as soon as you panned one of them, since the card always renders
-the fixed view box. Only the card ever carried the artwork, so the live pane and all of
-Leaflet went. The note below is kept because the trap is real and will bite again if a
+The lab used to draw the same geography twice — an interactive Leaflet pane above the
+static card — and the two diverged the moment you panned either, since the card always
+rendered the fixed view box. The artwork only ever lived on the card, so the Leaflet pane
+went; the card gained the interaction instead, and the lab no longer loads Leaflet at all.
+
+The card keeps its state in **web mercator** — left edge, vertical centre, metres per
+pixel — because that is what `Static` consumes: it reads zoom off the longitude span and
+takes a centre latitude, so the vertical extent follows the canvas aspect rather than any
+latitude pair. Wheel and double-click zoom **about the cursor**, drag pans, and there are
++/−/reset buttons.
+
+A full repaint is a second or more, so during interaction the last finished bitmap is
+transformed into place as a preview and the real render fires 260 ms after the pointer
+goes quiet. Each render carries a token and abandons itself if a newer one has started,
+which is what stops a slow pass from painting over a newer view.
+
+The note below is kept because the Leaflet pane trap is real and will bite again if a
 Leaflet map ever comes back.
 
 Leaflet stacks by **pane, not by add order**, and the two kinds of layer here sit in
