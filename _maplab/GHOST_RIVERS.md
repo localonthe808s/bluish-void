@@ -186,10 +186,14 @@ layer sitting on a modern map. Inside that field:
 - **Solid dark blue** (`#17457F`) with a **feathered edge** — the water that is *still
   there*. The basemap's own water shapes are rendered off-screen and used as a stencil;
   blurring the stencil and then filling *through* it with `source-in` keeps the colour
-  flat and softens only the alpha, so the edge settles into the pale field instead of
-  being cut out of it. Two passes: a wider pale halo, so there is always light blue for
-  the water to fade into even where no historic marsh sits behind it, then the deep blue
-  with a slight feather.
+  flat and softens only the alpha. The softness is self-scaling: a 1.5 px feather is a
+  good part of the width of a creek, so it melts into the pale field, and almost nothing
+  on a reservoir, which keeps its edge.
+
+  An earlier version laid a wide pale halo underneath first, to guarantee something for
+  the water to fade into. It ringed **every** body in white, including the big ones, and
+  is gone. Where no historic marsh sits behind a creek it now fades into whatever is
+  there, which is a two-pixel rim and much better than a glow.
 - **Blue line** (`#3B71CA`) — a buried watercourse. Weight runs 2.6–4.8 px with the
   length of the course, so a trunk carries more line than a headwater stub.
 - **Deep crimson outline and tint** — a modelled flood zone. Red is deliberately not
