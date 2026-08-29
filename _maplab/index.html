@@ -88,7 +88,7 @@ var VIEWS = {
      this over radar so the city still reads as a shape under a blanket of cloud,
      which means it has to be a solid mask, not an outline. */
   city:     { w:-74.60, s:40.30, e:-73.40, n:41.10, bathy:null, zoom:11,
-              boroughs:'bathy/nyc_boroughs.json' },
+              boroughs:'bathy/nyc_boroughs.json', hoods:'bathy/nyc_ntas.json' },
   shelf:    { w:-75.20, s:37.20, e:-70.00, n:41.20, bathy:'bathy/bathy_shelf.json', zoom:7 },
   atlantic: { w:-80.00, s:5.00,  e:-5.00,  n:60.00, bathy:'bathy/bathy_atlantic.json', zoom:3 },
   /* The two places worth real bathymetry: GMRT multibeam rendered to images with
@@ -106,21 +106,30 @@ var W = 1100, H = Math.round(W / 1.1372);   // one style, so give it the room
 /* Natural Earth depth bands, public domain. Each polygon carries the depth of
    the band it opens, so drawing them deepest-last with a darkening ramp gives
    the shelf, the slope, the abyssal plain and the ridge as tone. */
-var BATHY = {}, BOROS = null;
+var BATHY = {}, BOROS = null, HOODS = null;
 function boroughsFor(view){
   var v = VIEWS[view];
   if (!v || !v.boroughs) return Promise.resolve(null);
   if (BOROS) return Promise.resolve(BOROS);
   return fetch(v.boroughs).then(function(r){ return r.json(); }).then(function(j){ BOROS = j; return j; });
 }
-/* White on the light styles, and a warm white on the dark ones — over radar the
-   point is the same either way: the city is the bright shape. */
-function boroughFill(dark){ return '#ffffff'; }
+function hoodsFor(view){
+  var v = VIEWS[view];
+  if (!v || !v.hoods) return Promise.resolve(null);
+  if (HOODS) return Promise.resolve(HOODS);
+  return fetch(v.hoods).then(function(r){ return r.json(); }).then(function(j){ HOODS = j; return j; });
+}
+/* The city in the site's orange, with its 262 neighbourhoods traced inside it.
+   The trace is a shade of the same orange rather than a contrasting colour, so
+   the city still reads as ONE shape from across the room and only resolves into
+   neighbourhoods when you look at it. */
+function boroughFill(dark){ return '#f97316'; }
+function hoodEdge(dark){ return 'rgba(124,45,18,.55)'; }
 /* On the dark palettes white is the loudest thing on the map. On paper it is the
    quietest, so the light styles get a faint ring around the mask instead — the
    city still reads as a shape without inventing a colour the palette does not
    have. */
-function boroughEdge(dark){ return dark ? 'rgba(255,255,255,.5)' : 'rgba(43,34,244,.75)'; }
+function boroughEdge(dark){ return dark ? 'rgba(255,237,213,.85)' : 'rgba(124,45,18,.9)'; }
 function bathyFor(view){
   var v = VIEWS[view];
   if (!v.bathy) return Promise.resolve(null);
@@ -329,6 +338,25 @@ function drawBoroughs(ctx, geo, proj, dark){
   });
 }
 
+function drawHoods(ctx, geo, proj, dark){
+  if (!geo) return;
+  ctx.strokeStyle = hoodEdge(dark);
+  ctx.lineWidth = 0.6;
+  geo.features.forEach(function(ft){
+    var polys = ft.geometry.type === 'Polygon' ? [ft.geometry.coordinates] : ft.geometry.coordinates;
+    polys.forEach(function(rings){
+      rings.forEach(function(ring){
+        ctx.beginPath();
+        ring.forEach(function(pt, i){
+          var q = proj({ x:pt[0], y:pt[1] });
+          if (i === 0) ctx.moveTo(q.x, q.y); else ctx.lineTo(q.x, q.y);
+        });
+        ctx.closePath(); ctx.stroke();
+      });
+    });
+  });
+}
+
 function drawCard(style){
   var f = flavorFor(style);
   var card = document.createElement('div');
@@ -379,6 +407,9 @@ function drawCard(style){
       }).then(function(boro){
         if (!boro) return;
         drawBoroughs(ctx, boro, out.project, dark);
+        return hoodsFor(vkey).then(function(hoods){ drawHoods(ctx, hoods, out.project, dark); });
+      }).then(function(){
+        if (!VIEWS[vkey] || !VIEWS[vkey].boroughs) return;
         /* The mask is opaque, so it buries the rivers and the place names inside
            the city. Put them back over it: water first, then the labels. */
         var again = new protomapsL.Static({ url: document.getElementById('src').value,
@@ -434,8 +465,15 @@ function focus(style){
     if (!boro || vkey !== document.getElementById('view').value) return;
     var dark = !(style.base === 'light');
     var lb = L.geoJSON(boro, { renderer: L.canvas({ padding:0.4 }),
-      style: function(){ return { color: boroughEdge(dark), weight:1, fillColor: boroughFill(dark), fillOpacity:1 }; } }).addTo(liveMap);
+      style: function(){ return { color: boroughEdge(dark), weight:1.2, fillColor: boroughFill(dark), fillOpacity:1 }; } }).addTo(liveMap);
     liveLayers.push(lb);
+    hoodsFor(vkey).then(function(hoods){
+      if (!hoods) return;
+      var hl = L.geoJSON(hoods, { renderer: L.canvas({ padding:0.4 }),
+        style: function(){ return { color: hoodEdge(dark), weight:0.6, fill:false }; } }).addTo(liveMap);
+      liveLayers.push(hl);
+      if (liveLayers[1]) liveLayers[1].bringToFront();
+    });
     if (liveLayers[1]) liveLayers[1].bringToFront();
   });
   bathyFor(vkey).then(function(geo){
