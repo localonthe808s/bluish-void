@@ -268,15 +268,26 @@ public and keyless. The published track alignment, not a redrawing of it.
 - One shape per **route**, not per trip: a route has dozens of short-turn variants, so
   the longest shape wins. The two directions run the same track, so they collapse to one
   line — drawing both just doubles every stroke.
-- Stops are the **parent stations** (`parent_station` empty), so a complex counts once
-  rather than once per platform.
+- Stops are **complexes**, not parent stations. GTFS keeps the IRT, BMT and IND halves
+  of Times Square as three separate parent stations — labelling those directly printed
+  "Times Sq-42 St" three times over. `transfers.txt` is what says they are one place, so
+  the parents are union-found through it: 496 parent stations collapse to **444
+  complexes**, and Times Square comes out once carrying 1 2 3 7 A C E N Q R W S. A
+  complex takes the name of its **busiest** member; "longest name" made Times Square
+  come out as 42 St-Port Authority Bus Terminal.
+- Routes serving each station are walked out of `stop_times` → `trips` → `routes`.
+  Shuttles all present as **S**, express variants take their line's bullet.
 - Vertices thinned to 25 m and given one round of Chaikin, same as the courses.
 
-**Drawn in one graphite ink, not the MTA route colours.** This map is about water, and
-twenty-odd bright routes over the borough mask and the flood zones would bury it — and
-the 7's purple is out by house rule anyway. Every line keeps its official `colour` in the
-data, so that is a one-line change. A white halo under each line lifts it off the orange;
-stations are white-cored so they read on top of their own line.
+**Drawn in the MTA's own route colours**, straight from the GTFS `route_color`; the no-purple
+rule does not apply, since these are data-driven. A white casing under every line keeps
+them apart where four share an avenue.
+
+Station names carry their **route bullets** — a coloured disc per route, in MTA order
+(1234567 ABCDEFG JLMNQRWZ S). Names are drawn only when the framing is finer than **9 m
+per pixel**; at city scale 444 of them is a smear, so the stations stay as dots. Labels
+are placed with a rectangle-overlap test and a label that collides is dropped rather than
+stacked.
 
 ## What the overlay is worth
 
