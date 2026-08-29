@@ -25,7 +25,14 @@ anyone. The mosaic is a build input, not a layer.
 3. *Clipped to Manhattan*, the one island the sheet covers end to end.
 4. *Skeletonised* to centre-lines, broken at junctions, then re-stitched where
    ends meet and keep the same heading; simplified to ~13 m.
-5. *Named* by nearest match to the old hand-traced draft (320 m tolerance).
+5. *Smoothed, not straightened.* Douglas-Peucker is run at ~4 m, not the 13 m it
+   started at: a skeleton through a smooth corridor is nearly straight, and a coarse
+   tolerance collapses a whole reach to one chord, which is what made the first
+   courses look like crudely pasted straight lines. Two rounds of Chaikin
+   corner-cutting follow, endpoints pinned, and the renderer lays the path as
+   quadratics through vertex midpoints. Courses average ~42 points instead of a
+   handful.
+6. *Named* by nearest match to the old hand-traced draft (320 m tolerance).
    All 12 names matched a real course; 37 of 93 carry one, the rest are
    genuine unnamed watercourses.
 
@@ -208,8 +215,7 @@ contiguous (≥1 ft).
 **It cannot be fetched live.** It is a raster-derived polygonization: the whole city
 comes back as 13 MB across 27,600 rings even generalised server-side, and ArcGIS does
 not clip to the query envelope. Baked once instead — rings under 200 m² dropped, which
-sheds three quarters of them and keeps **91% of the flooded area**, then simplified to
-9 m. 7,072 polygons, 1.9 MB, 10.5 km². For the live site this should become raster
+sheds three quarters of them and keeps **91% of the flooded area**, then simplified to 9 m. 7,072 polygons, 1.9 MB, 10.5 km². For the live site this should become raster
 tiles on R2 rather than GeoJSON.
 
 **Colour.** Red outlines the zones; the courses went back to plain blue. Bright red
