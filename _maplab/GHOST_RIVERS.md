@@ -283,8 +283,13 @@ public and keyless. The published track alignment, not a redrawing of it.
 rule does not apply, since these are data-driven. A white casing under every line keeps
 them apart where four share an avenue.
 
-Station names carry their **route bullets** — a coloured disc per route, in MTA order
-(1234567 ABCDEFG JLMNQRWZ S). Names are drawn only when the framing is finer than **9 m
+Station labels are a **vertical stack**: route bullets, then the cross street in bold,
+then the place under it. MTA names carry both halves in one string joined by a hyphen and
+the order is not consistent — "34 St-Penn Station" but "Times Sq-42 St" — so `splitStation`
+pulls out whichever part reads as a street, and the street always lands on the same line.
+A hyphen **between digits** is part of a name rather than a separator: splitting
+"47-50 Sts-Rockefeller Ctr" naively yields "47". Bullets are a coloured disc per route in
+MTA order (1234567 ABCDEFG JLMNQRWZ S). Names are drawn only when the framing is finer than **9 m
 per pixel**; at city scale 444 of them is a smear, so the stations stay as dots. Labels
 are placed with a rectangle-overlap test and a label that collides is dropped rather than
 stacked.
