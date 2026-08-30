@@ -123,7 +123,8 @@ var VIEWS = {
                  tiles untouched, plus a bight/Sound/Hudson pull (35 m cells,
                  bands to 60 m) around them. depthFade is that pull's box — the
                  veils dissolve at its edge rather than stopping on a line. */
-              depth:'bathy/river_depth.json', depthFade:[-74.85,40.10,-73.15,41.10] },
+              depth:'bathy/river_depth.json', depthFade:[-74.85,40.10,-73.15,41.10],
+              depthSeam:[-74.28,40.48015,-73.68015,40.93] },
   shelf:    { w:-75.20, s:37.20, e:-70.00, n:41.20, bathy:'bathy/bathy_shelf.json', zoom:7 },
   atlantic: { w:-80.00, s:5.00,  e:-5.00,  n:60.00, bathy:'bathy/bathy_atlantic.json', zoom:3 },
   /* The two places worth real bathymetry: GMRT multibeam rendered to images with
@@ -731,34 +732,62 @@ function drawActiveWater(ctx, style, f, view, latMid, W, H){
    reads as a trench and a bay as a shelf. Clipped to the water mask because the DEM's
    shoreline and the basemap's disagree by a few metres, and a band that crossed onto the
    orange would read as land flooding. */
-function drawDepth(ctx, geo, proj, waterMask, W, H, fade){
+function drawDepth(ctx, geo, proj, waterMask, W, H, fade, seam){
   if (!geo || !waterMask) return;
   var c = document.createElement('canvas'); c.width = W; c.height = H;
   var g = c.getContext('2d');
-  geo.features.forEach(function(ft){
+  var paint = function(gc, ft){
     var d = ft.properties.d;
     var t = Math.min(1, Math.log(1 + d) / Math.log(31));
     var al = (ft.properties.a != null) ? ft.properties.a : (0.10 + 0.14 * t);
-    g.fillStyle = 'rgba(4,10,40,' + al.toFixed(3) + ')';
+    gc.fillStyle = 'rgba(4,10,40,' + al.toFixed(3) + ')';
     /* One veil per pixel, never a stack — that is the harbour grammar, and the
        bight features keep to it by carrying the next band's rings as even-odd
        holes: every ring goes into one path, deeper rings cancelling. The
        harbour/creek features are single-ring, for which this is a plain fill. */
-    g.beginPath();
+    gc.beginPath();
     ft.geometry.coordinates.forEach(function(ring){
       var P = ring.map(function(pt){ return proj({ x:pt[0], y:pt[1] }); });
       if (P.length < 3){
-        P.forEach(function(q,i){ if (i===0) g.moveTo(q.x,q.y); else g.lineTo(q.x,q.y); });
-        g.closePath(); return;
+        P.forEach(function(q,i){ if (i===0) gc.moveTo(q.x,q.y); else gc.lineTo(q.x,q.y); });
+        gc.closePath(); return;
       }
-      g.moveTo(P[0].x, P[0].y);
+      gc.moveTo(P[0].x, P[0].y);
       for (var i = 1; i < P.length - 1; i++)
-        g.quadraticCurveTo(P[i].x, P[i].y, (P[i].x+P[i+1].x)/2, (P[i].y+P[i+1].y)/2);
-      g.quadraticCurveTo(P[P.length-2].x, P[P.length-2].y, P[P.length-1].x, P[P.length-1].y);
-      g.closePath();
+        gc.quadraticCurveTo(P[i].x, P[i].y, (P[i].x+P[i+1].x)/2, (P[i].y+P[i+1].y)/2);
+      gc.quadraticCurveTo(P[P.length-2].x, P[P.length-2].y, P[P.length-1].x, P[P.length-1].y);
+      gc.closePath();
     });
-    g.fill('evenodd');
+    gc.fill('evenodd');
+  };
+  /* The bight veils go through their own canvas so their edge against the old
+     harbour bake can be softened: that bake has bare patches, so at the box
+     line the two sets differ by a fraction of a veil and a straight step
+     shows. Fading the bight out over its last ~1.5 km makes the handover
+     gradual — a slope no eye picks out, where a line was. */
+  var seamed = document.createElement('canvas'); seamed.width = W; seamed.height = H;
+  var g2 = seamed.getContext('2d');
+  geo.features.forEach(function(ft){
+    paint(ft.properties.src === 'bight' ? g2 : g, ft);
   });
+  if (seam){
+    var stl = proj({ x: seam[0], y: seam[3] }), sbr = proj({ x: seam[2], y: seam[1] });
+    var sf = Math.abs(proj({ x: seam[0] + 0.017, y: seam[3] }).x - stl.x);   // ~1.5 km
+    if (sf > 1.5){
+      g2.globalCompositeOperation = 'destination-out';
+      var thaw = function(x0, y0, x1, y1, gx0, gy0, gx1, gy1){
+        var gr = g2.createLinearGradient(gx0, gy0, gx1, gy1);
+        gr.addColorStop(0, 'rgba(0,0,0,1)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+        g2.fillStyle = gr; g2.fillRect(x0, y0, x1 - x0, y1 - y0);
+      };
+      thaw(stl.x - sf, stl.y - sf, stl.x,      sbr.y + sf, stl.x, 0, stl.x - sf, 0);   // west of box
+      thaw(sbr.x,      stl.y - sf, sbr.x + sf, sbr.y + sf, sbr.x, 0, sbr.x + sf, 0);   // east
+      thaw(stl.x - sf, stl.y - sf, sbr.x + sf, stl.y,      0, stl.y, 0, stl.y - sf);   // north
+      thaw(stl.x - sf, sbr.y,      sbr.x + sf, sbr.y + sf, 0, sbr.y, 0, sbr.y + sf);   // south
+      g2.globalCompositeOperation = 'source-over';
+    }
+  }
+  g.drawImage(seamed, 0, 0);
   /* The survey does not end where the water does, so its edge must not read as
      one: erase the veils over the outer ~7 km of the pull box, so the detail
      dissolves into plain navy instead of stopping on a line. The gradients sit
@@ -1517,7 +1546,8 @@ function drawCard(style){
               if (stale()) return;
               return depthFor(vkey).then(function(dp){
                 if (stale()) return waterMask;
-                drawDepth(ctx, dp, out.project, waterMask, W, H, (VIEWS[vkey] || {}).depthFade);
+                drawDepth(ctx, dp, out.project, waterMask, W, H,
+                          (VIEWS[vkey] || {}).depthFade, (VIEWS[vkey] || {}).depthSeam);
                 return drawPiers(ctx, style, f, view, view.latMid, W, H, boroMaskCv, waterMask);
               }).then(function(){ return waterMask; });
             }).then(function(waterMask){
