@@ -579,3 +579,32 @@ or they are still water today and were subtracted as such. The Bronx's 116 cours
 real and drawn, and every one of them is unnamed until that is chased down.
 
 Staten Island is still untraced. Its quads were never downloaded.
+
+---
+
+# The white shoreline sliver
+
+A thin paper-coloured rim ran along parts of the coast, between the orange borough mask and
+the navy water. It was neither: the borough polygon and the basemap tiles' coastline come
+from **different sources and disagree by a real ground distance**, and wherever the polygon
+fell short of the tiles' land, the base pass's pale earth showed through.
+
+The mask is now **stroked in its own fill colour before being filled**, which grows the
+silhouette by half a line width. Water is drawn after the mask, so a fat mask can only close
+gaps on the water side — it can never eat into water.
+
+The growth is a fixed distance on the **ground**, not in pixels, because the disagreement is
+a ground distance. Measured by counting paper-coloured pixels with both orange and navy
+within three pixels:
+
+| growth | Coney | Rockaway | Throgs Neck | SI north |
+|---|---|---|---|---|
+| 3 px flat | 2 | 422 | 46 | 42 |
+| 30 m | 3 | 462 | 23 | 21 |
+| 60 m | 0 | 237 | 0 | 32 |
+| 120 m | 0 | 0 | 0 | 18 |
+
+Settled at **100 m**: enough for every coast tried, and small enough that a *land* border —
+Queens/Nassau, Bronx/Westchester, where no water follows to cover an overrun — stays within
+a couple of pixels at normal framings. Rockaway is the stubborn case, because the barrier
+beach is narrow and the borough polygon is most generalised exactly there.
