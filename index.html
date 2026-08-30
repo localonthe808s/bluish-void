@@ -47342,7 +47342,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   var _cityOv = window._cityOv = {
     timer:null, ws:null, wsHost:0, strikes:[], alerts:[], lastAlerts:0,
     fn:null, lastFn:0,
-    X0:-8279956, Y0:4935942, X1:-8199781, Y1:5006443, ASPECT:1.1372
+    X0:-8273078, Y0:4936445, X1:-8195528, Y1:5004638, ASPECT:1.1372
   };
   function _cityOvMerc(lon, lat){
     var R = 6378137;
@@ -47886,7 +47886,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     _staBoxCache[sid] = box;
     return box;
   }
-  function _cityBoxCfg(){ return { sid:'kokx', w:-74.3801, s:40.48, e:-73.6599, n:40.96, X0:-8279956, Y0:4935942, X1:-8199781, Y1:5006443, ASPECT:1.1372 }; }  // tightened 2026-08-30: the wide box wasted half the frame on open ocean
+  function _cityBoxCfg(){ return { sid:'kokx', w:-74.3183, s:40.4834, e:-73.6217, n:40.9478, X0:-8273078, Y0:4936445, X1:-8195528, Y1:5004638, ASPECT:1.1372 }; }  // tightened 2026-08-30: the wide box wasted half the frame on open ocean
   var _conusBoxMemo = null;
   function _conusBox(){
     if (_conusBoxMemo) return _conusBoxMemo;
@@ -48352,6 +48352,93 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     im.onerror = function(){ cb(url); };
     im.src = url;
   }
+
+  /* ── THE CITY zoom: wheel, pinch, drag — the map widgets' grammar. One
+     transform drives all five aligned layers (both crossfade frames, both
+     basemap copies, the warnings/strikes canvas), so everything stays
+     registered at any zoom. Chips and labels are siblings and never scale.
+     touch-action flips with the state: at rest the page scrolls over the
+     widget as normal and a pinch starts the zoom; zoomed in, the view owns
+     every touch and one finger pans. */
+  var _cityZoom = { k:1, tx:0, ty:0 };
+  var _CITY_ZOOM_LAYERS = ['fcast-radar-img','fcast-radar-img-b',
+                           'fcast-city-basemap','fcast-city-basemap-under','fcast-city-overlay'];
+  function _cityZoomLive(){ return fcastState.range === 'live' && fcastState.area === 'city-nyc'; }
+  function _cityZoomApply(){
+    var t = 'translate(-50%,-50%) translate(' + _cityZoom.tx.toFixed(1) + 'px,'
+          + _cityZoom.ty.toFixed(1) + 'px) scale(' + _cityZoom.k.toFixed(3) + ')';
+    _CITY_ZOOM_LAYERS.forEach(function(id){
+      var el = document.getElementById(id);
+      if (el) el.style.transform = t;
+    });
+    var c = document.getElementById('fcast-img-container');
+    if (c){ c.style.overflow = 'hidden'; c.style.touchAction = _cityZoom.k > 1 ? 'none' : 'pan-y'; }
+  }
+  window._cityZoomReset = function(){ _cityZoom.k = 1; _cityZoom.tx = 0; _cityZoom.ty = 0; _cityZoomApply(); };
+  (function(){
+    var c = document.getElementById('fcast-img-container');
+    if (!c) return;
+    function clamp(){
+      var r = c.getBoundingClientRect();
+      var mx = (_cityZoom.k - 1) * r.width / 2, my = (_cityZoom.k - 1) * r.height / 2;
+      _cityZoom.tx = Math.max(-mx, Math.min(mx, _cityZoom.tx));
+      _cityZoom.ty = Math.max(-my, Math.min(my, _cityZoom.ty));
+    }
+    function zoomAt(px, py, f){
+      var k2 = Math.max(1, Math.min(4, _cityZoom.k * f));
+      if (k2 === _cityZoom.k) return;
+      var sc = k2 / _cityZoom.k;
+      _cityZoom.tx = px - sc * (px - _cityZoom.tx);
+      _cityZoom.ty = py - sc * (py - _cityZoom.ty);
+      _cityZoom.k = k2;
+      clamp(); _cityZoomApply();
+    }
+    function rel(ev){
+      var r = c.getBoundingClientRect();
+      return [ev.clientX - r.left - r.width / 2, ev.clientY - r.top - r.height / 2];
+    }
+    c.addEventListener('wheel', function(ev){
+      if (!_cityZoomLive()) return;
+      ev.preventDefault();
+      var p = rel(ev);
+      zoomAt(p[0], p[1], Math.pow(1.0015, -ev.deltaY));
+    }, { passive:false });
+    c.addEventListener('dblclick', function(ev){
+      if (!_cityZoomLive()) return;
+      var p = rel(ev);
+      if (_cityZoom.k > 1.05) window._cityZoomReset();
+      else zoomAt(p[0], p[1], 2);
+    });
+    var pts = {};
+    c.addEventListener('pointerdown', function(ev){
+      if (!_cityZoomLive()) return;
+      pts[ev.pointerId] = rel(ev);
+      if (Object.keys(pts).length === 1 && _cityZoom.k > 1){
+        try { c.setPointerCapture(ev.pointerId); } catch(e){}
+      }
+    });
+    c.addEventListener('pointermove', function(ev){
+      if (!_cityZoomLive() || !(ev.pointerId in pts)) return;
+      var ids = Object.keys(pts);
+      var p = rel(ev);
+      if (ids.length === 1 && _cityZoom.k > 1){
+        _cityZoom.tx += p[0] - pts[ev.pointerId][0];
+        _cityZoom.ty += p[1] - pts[ev.pointerId][1];
+        pts[ev.pointerId] = p;
+        clamp(); _cityZoomApply();
+      } else if (ids.length === 2){
+        var other = pts[ids[0] === String(ev.pointerId) ? ids[1] : ids[0]];
+        var prev = pts[ev.pointerId];
+        var d0 = Math.hypot(prev[0] - other[0], prev[1] - other[1]);
+        var d1 = Math.hypot(p[0] - other[0], p[1] - other[1]);
+        if (d0 > 8) zoomAt((p[0] + other[0]) / 2, (p[1] + other[1]) / 2, d1 / d0);
+        pts[ev.pointerId] = p;
+      }
+    });
+    var lift = function(ev){ delete pts[ev.pointerId]; };
+    c.addEventListener('pointerup', lift);
+    c.addEventListener('pointercancel', lift);
+  })();
 
   function loadFcastRadar(){
     var fhrs = getActiveFhrs();
@@ -49534,6 +49621,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       img.style.transform = 'translate(-50%,-50%)';   // base centering — the imgs sit at top/left 50%
       img.style.transformOrigin = '';
     });
+    if (window._cityZoomReset) window._cityZoomReset();   // a fresh area starts unzoomed
     if (window._syncCityBasemap) window._syncCityBasemap();
     // Reset frame dots for new area
     updateFrameIndicator();
