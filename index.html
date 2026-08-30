@@ -47407,6 +47407,61 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     }
     return g.join('');
   }
+  /* ── WHAT'S FALLING — KOKX dual-pol hydrometeor classification (bdhc)
+     sampled in a ~6 km box around the viewed location, 32×32 px. Speaks only
+     when a FROZEN or MIXED class dominates — plain rain is the nowcast chip's
+     story. Palette matched to the layer's own legend. Fetched in city mode,
+     in the cold season, only while precip is at the location. */
+  var _bdhcState = { at:0, label:null };
+  function _cityFetchBdhc(){
+    _bdhcState.at = Date.now();
+    var loc = window.LOCATION; if (!loc) return;
+    var R2 = 6378137, Xc = loc.lon * Math.PI / 180 * R2,
+        Yc = R2 * Math.log(Math.tan(Math.PI / 4 + loc.lat * Math.PI / 360));
+    var half = 3000;
+    var url = 'https://opengeo.ncep.noaa.gov/geoserver/kokx/ows?service=WMS&version=1.1.0&request=GetMap'
+      + '&layers=kokx_bdhc&styles=&bbox=' + Math.round(Xc - half) + ',' + Math.round(Yc - half) + ','
+      + Math.round(Xc + half) + ',' + Math.round(Yc + half)
+      + '&width=32&height=32&srs=EPSG:3857&format=image/png&transparent=true&_=' + Math.floor(Date.now() / 240000);
+    var im = new Image(); im.crossOrigin = 'anonymous';
+    im.onload = function(){
+      try{
+        var c = document.createElement('canvas'); c.width = 32; c.height = 32;
+        var g = c.getContext('2d'); g.drawImage(im, 0, 0);
+        var d = g.getImageData(0, 0, 32, 32).data;
+        var classes = [
+          ['SNOW',        0, 255, 255],   // DS dry snow
+          ['WET SNOW',    0, 144, 255],   // WS
+          ['SLEET',     210, 132, 132],   // GR graupel
+          ['SNOW',      255, 176, 176],   // IC ice crystals read as snow aloft
+          ['RAIN',        0, 251, 144],   // RA
+          ['RAIN',        0, 187,   0],   // HR
+          ['HAIL',      255,   0,   0]    // HA
+        ];
+        var counts = {};
+        for (var i = 0; i < d.length; i += 4){
+          if (d[i + 3] < 60) continue;
+          for (var k = 0; k < classes.length; k++){
+            var cl = classes[k];
+            if (Math.abs(d[i] - cl[1]) < 28 && Math.abs(d[i + 1] - cl[2]) < 28 && Math.abs(d[i + 2] - cl[3]) < 28){
+              counts[cl[0]] = (counts[cl[0]] || 0) + 1; break;
+            }
+          }
+        }
+        var frozen = ['SNOW', 'WET SNOW', 'SLEET', 'HAIL'];
+        var best = null;
+        frozen.forEach(function(f){ if (counts[f] && (!best || counts[f] > counts[best])) best = f; });
+        var frozenPx = frozen.reduce(function(a, f){ return a + (counts[f] || 0); }, 0);
+        var rainPx = counts.RAIN || 0;
+        _bdhcState.label = (frozenPx >= 12)
+          ? (rainPx > frozenPx * 0.6 ? 'WINTRY MIX' : best)
+          : null;
+        _cityOvDraw();
+      }catch(e){}
+    };
+    im.onerror = function(){};
+    im.src = url;
+  }
   function _cityOvConnect(){
     if (_cityOv.ws) return;
     var hosts=['wss://ws1.blitzortung.org/','wss://ws7.blitzortung.org/','wss://ws8.blitzortung.org/'];
@@ -47621,6 +47676,37 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         ctx.fillText('RADAR NOWCAST \u00b7 AT YOUR SPOT', nx0 + 26, ny0 + nh0 / 2 + 7);
       }
     }catch(e){}
+    // ── WHAT'S FALLING badge — stacked under the nowcast chip, top-right.
+    try{
+      if (fcastState.area === 'city-nyc' && _bdhcState.label && now - _bdhcState.at < 600000){
+        var bLbl = _bdhcState.label;
+        var bCols = { 'SNOW':'#e0f2fe', 'WET SNOW':'#7dd3fc', 'SLEET':'#fda4af',
+                      'HAIL':'#f87171', 'WINTRY MIX':'#fda4af' };
+        var bCol = bCols[bLbl] || '#e0f2fe';
+        ctx.font = '700 10px system-ui, sans-serif';
+        var bTw = ctx.measureText(bLbl).width;
+        ctx.font = '600 7.5px system-ui, sans-serif';
+        bTw = Math.max(bTw, ctx.measureText('KOKX DUAL-POL \u00b7 PRECIP TYPE').width);
+        var bw0 = 26 + Math.ceil(bTw) + 12, bh0 = 30;
+        var bx0 = ox + bw - 12 - bw0, by0 = oy + 46;
+        ctx.fillStyle = 'rgba(8,12,22,.74)';
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(bx0, by0, bw0, bh0, 7); else ctx.rect(bx0, by0, bw0, bh0);
+        ctx.fill();
+        ctx.fillStyle = bCol;
+        ctx.beginPath(); ctx.arc(bx0 + 15, by0 + bh0 / 2, 4, 0, 6.2832); ctx.fill();
+        ctx.shadowColor = bCol; ctx.shadowBlur = 8;
+        ctx.beginPath(); ctx.arc(bx0 + 15, by0 + bh0 / 2, 4, 0, 6.2832); ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = 'rgba(255,255,255,.95)';
+        ctx.font = '700 10px system-ui, sans-serif';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(bLbl, bx0 + 26, by0 + bh0 / 2 - 5);
+        ctx.fillStyle = 'rgba(255,255,255,.5)';
+        ctx.font = '600 7.5px system-ui, sans-serif';
+        ctx.fillText('KOKX DUAL-POL \u00b7 PRECIP TYPE', bx0 + 26, by0 + bh0 / 2 + 7);
+      }
+    }catch(e){}
     if (fcastState.area === 'conus') return;   // national view: strikes only (steering/warnings are local-scale)
     // ── STORM MOTION chip — same steering picks as _radarNowcast:
     // 500hPa direction (else 700/10m), 700hPa speed (else 500/10m, mph),
@@ -47680,6 +47766,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             if (Date.now() - _cityOv.lastAlerts > 120000 || _cityOv.alertsArea !== _wantArea) _cityOvFetchAlerts();
           }
           if (fcastState.area === 'city-nyc' && Date.now() - _cityOv.lastFn > 300000) _cityOvFetchFloodNet();
+          if (fcastState.area === 'city-nyc' && Date.now() - _bdhcState.at > 240000){
+            var _mo2 = new Date().getMonth();          // cold season: Nov-Apr
+            var _wet2 = (window._nowcastRate && window._nowcastRate.inhr > 0) || !!window._nowcastStr;
+            if ((_mo2 >= 10 || _mo2 <= 3) && _wet2) _cityFetchBdhc();
+          }
           if (!_cityOv.ws) _cityOvConnect();
           _cityOvDraw();
         }catch(e){ console.error('city overlay tick:', e && e.message, e && e.stack); }
