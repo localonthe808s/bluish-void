@@ -48308,6 +48308,51 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   var lastGoodSrc = ''; // Last successfully loaded frame
   var radarImgFront = true; // true = fcast-radar-img is front, false = fcast-radar-img-b is front
 
+  /* THE CITY's clear-air problem: on a dry day KOKX runs in clear-air mode and
+     fills the box with low-dBZ speckle — bugs, dust, refraction — which reads
+     as weather that isn't there. In the NWS palette that clutter is the LIGHT,
+     DESATURATED end (grays and gray-blues); actual precipitation is saturated
+     colour. Frames are pulled through a canvas (opengeo sends CORS *) and any
+     pixel with max−min < 40 at brightness > 110 goes transparent — measured on
+     a live mixed frame this removes the clear-air bloom whole while shower
+     cells keep their cores and fringes. Results are cached per scan URL, so
+     the loop only pays once per frame. */
+  var _despeckleCache = {}, _despeckleOrder = [];
+  function _despeckleWms(url, cb){
+    if (_despeckleCache[url]) return cb(_despeckleCache[url]);
+    var im = new Image();
+    im.crossOrigin = 'anonymous';
+    im.onload = function(){
+      try {
+        var c = document.createElement('canvas');
+        c.width = im.naturalWidth; c.height = im.naturalHeight;
+        var g = c.getContext('2d');
+        g.drawImage(im, 0, 0);
+        var id = g.getImageData(0, 0, c.width, c.height), d = id.data;
+        for (var i = 0; i < d.length; i += 4){
+          if (!d[i + 3]) continue;
+          var r = d[i], gg = d[i + 1], b = d[i + 2];
+          var mx = r > gg ? (r > b ? r : b) : (gg > b ? gg : b);
+          var mn = r < gg ? (r < b ? r : b) : (gg < b ? gg : b);
+          if (mx - mn < 40 && mx > 110) d[i + 3] = 0;
+        }
+        g.putImageData(id, 0, 0);
+        c.toBlob(function(bl){
+          if (!bl) return cb(url);
+          var u = URL.createObjectURL(bl);
+          _despeckleCache[url] = u; _despeckleOrder.push(url);
+          if (_despeckleOrder.length > 60){
+            var old = _despeckleOrder.shift();
+            URL.revokeObjectURL(_despeckleCache[old]); delete _despeckleCache[old];
+          }
+          cb(u);
+        }, 'image/png');
+      } catch(e){ cb(url); }
+    };
+    im.onerror = function(){ cb(url); };
+    im.src = url;
+  }
+
   function loadFcastRadar(){
     var fhrs = getActiveFhrs();
     var imgA = document.getElementById('fcast-radar-img');
@@ -48394,7 +48439,16 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     // Add transition to back image before loading
     back.style.transition = 'opacity .35s ease';
     back.style.opacity = '0';
-    back.src = url;
+    if (fcastState.range === 'live' && fcastState.area === 'city-nyc'
+        && url.indexOf('opengeo.ncep.noaa.gov') >= 0){
+      back._despeckleWant = url;
+      _despeckleWms(url, function(u){
+        if (back._despeckleWant === url) back.src = u;   // a newer frame may have claimed the img
+      });
+    } else {
+      back._despeckleWant = null;
+      back.src = url;
+    }
 
     // Update frame indicator
     updateFrameIndicator();
