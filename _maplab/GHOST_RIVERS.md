@@ -552,7 +552,23 @@ alpha = 1−(1−a)^k, which pushes anything above a low value towards opaque an
 near-zero near zero — a soft threshold, where a **larger k means a lower cut and so a wider
 region**. Two of them at k=5 and k=9, with the tighter punched out of the wider by
 `destination-out`, leave a thin band: the plume's contour, drawn in a darker copper. So each
-discharge reads as an aura, a body, and an edge.
+discharge reads as an aura, a body, and a **red edge** — red because the slick itself is
+carried by value, which leaves hue free to say what it is.
+
+**Piers are cut out of the water mask.** The mask is built from the water shapes *before*
+the piers are drawn on top of them, so without punching them back out the stain spread
+straight across a pier as though it were open water — which is what "leaking onto land"
+looked like.
+
+**Held back until 55 m per pixel.** There are 415 outfalls on a coastline this long, so at
+city framing their plumes merge into one dark rim around the whole shore, which says the
+entire coast is contaminated. That is not what the data says.
+
+**The reach is 750 m and now stays 750 m.** An earlier version fixed the step count at 20
+and floored each step at 1.2 px, so past roughly 60 m per pixel the floor took over and the
+plume grew to about 1.7 km — at city zoom the rivers became one continuous black band. The
+step count is derived from the pixel reach instead, and below a few pixels it does not
+spread at all.
 
 **What this does not model is tide or current.** There is no direction here beyond the shape
 of the water itself. A downstream bias would look convincing and would be a guess dressed

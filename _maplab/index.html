@@ -661,7 +661,7 @@ function drawActiveWater(ctx, style, f, view, latMid, W, H){
    is a bright copper point on top of it. Dark field, bright source — the contrast does the
    work and no hue has to compete with the land. */
 var SEWER_DARK  = '#2A1B0B',   // the slick
-    SEWER_EDGE  = '#120B03',   // its contour
+    SEWER_EDGE  = '#D01B12',   // its contour: red, so the slick reads as a warning
     SEWER_MOUTH = '#FFB320';   // the pipe itself
 
 /* Discharge does not spread in a circle — it goes where the water goes. A round plume at
@@ -703,7 +703,7 @@ function _boroMask(geo, proj, W, H, growPx){
   });
   return c;
 }
-function drawPiers(ctx, style, f, view, latMid, W, H, boroMask){
+function drawPiers(ctx, style, f, view, latMid, W, H, boroMask, waterMask){
   var off = document.createElement('canvas'); off.width = W; off.height = H;
   return new protomapsL.Static({ url: document.getElementById('src').value, maxDataZoom: 14,
       labelRules: [],
@@ -722,11 +722,25 @@ function drawPiers(ctx, style, f, view, latMid, W, H, boroMask){
       cc.globalCompositeOperation = 'source-in';
       cc.fillStyle = boroughFill(false); cc.fillRect(0, 0, W, H);
       ctx.drawImage(c, 0, 0);
+      /* And punch the piers out of the water mask. The mask is built from the water shapes
+         before the piers are drawn on top of them, so without this the sewage stain — which
+         is clipped to that mask — spreads straight across a pier as though it were water. */
+      if (waterMask){
+        var wc = waterMask.getContext('2d');
+        wc.save();
+        wc.globalCompositeOperation = 'destination-out';
+        wc.drawImage(off, 0, 0);
+        wc.restore();
+      }
     });
 }
 
+/* Held back until 55 m per pixel. There are 415 outfalls on a coastline this long, so at
+   city framing their plumes merge into one dark rim around the whole shore — which says
+   the entire coast is contaminated, and that is not what the data says. Two zoom clicks in
+   from the opening view, where an individual discharge is legible, it appears. */
 function drawSewerStain(ctx, geo, proj, waterMask, W, H, mPerPx){
-  if (!geo || !waterMask || !mPerPx) return;
+  if (!geo || !waterMask || !mPerPx || mPerPx > 55) return;
 
   /* Weighted by pipe size, not one blob per pipe. DEP records each outfall's dimensions,
      so a box or an egg is reduced to the diameter of a circle with the same cross-section
@@ -762,8 +776,15 @@ function drawSewerStain(ctx, geo, proj, waterMask, W, H, mPerPx){
 
      What this does NOT model is tide or current: there is no direction here beyond the
      shape of the water itself, and inventing one would be a guess dressed as data. */
-  var STEPS = 20;
-  var step = Math.min(7, Math.max(1.2, (750 / mPerPx) / STEPS));
+  /* The reach is 750 m of ground, and it has to STAY 750 m. An earlier version fixed the
+     step count at 20 and floored the step at 1.2 px, which meant that once the framing
+     passed about 60 m per pixel the floor took over and the plume grew to some 1.7 km —
+     at city zoom the rivers turned into one continuous black band. Derive the step count
+     from the pixel reach instead, and below a few pixels do not spread at all. */
+  var reachPx = 750 / mPerPx;
+  if (reachPx < 3) return;
+  var STEPS = Math.max(4, Math.min(20, Math.round(reachPx / 2)));
+  var step = reachPx / STEPS;
   var acc = document.createElement('canvas'); acc.width = W; acc.height = H;
   var ac = acc.getContext('2d');
   ac.globalCompositeOperation = 'lighter';
@@ -826,7 +847,7 @@ function drawSewerStain(ctx, geo, proj, waterMask, W, H, mPerPx){
      opaque to stay copper rather than turning grey. */
   tint(acc,    SEWER_DARK,  0.30);   // the aura, still falling off with distance
   tint(shrunk, SEWER_DARK,  0.72);   // the body
-  tint(ring,   SEWER_EDGE,  0.90);   // the contour that makes it a shape
+  tint(ring,   SEWER_EDGE,  0.95);   // the red contour that makes it a shape
 
   /* And the pipe itself — the one part of this layer that is a measured position rather
      than a model, so it is the only thing here with a hard edge.
@@ -844,7 +865,7 @@ function drawSewerStain(ctx, geo, proj, waterMask, W, H, mPerPx){
       ctx.fillStyle = 'rgba(255,255,255,.95)'; ctx.fill();
       ctx.beginPath(); ctx.arc(p[0], p[1], r, 0, Math.PI * 2);
       ctx.fillStyle = SEWER_MOUTH; ctx.fill();
-      ctx.strokeStyle = SEWER_EDGE; ctx.lineWidth = 1; ctx.stroke();
+      ctx.strokeStyle = '#7A0F0A'; ctx.lineWidth = 1; ctx.stroke();
     });
     ctx.restore();
   }
@@ -1285,7 +1306,7 @@ function drawCard(style){
               return drawActiveWater(ctx, style, f, view, view.latMid, W, H);
             }).then(function(waterMask){
               if (stale()) return;
-              return drawPiers(ctx, style, f, view, view.latMid, W, H, boroMaskCv)
+              return drawPiers(ctx, style, f, view, view.latMid, W, H, boroMaskCv, waterMask)
                 .then(function(){ return waterMask; });
             }).then(function(waterMask){
               if (stale()) return;
