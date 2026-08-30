@@ -614,51 +614,73 @@ var SEWER_BROWN = '#B06A22';
    reach stays about the same distance on the ground rather than on the screen. */
 function drawSewerStain(ctx, geo, proj, waterMask, W, H, mPerPx){
   if (!geo || !waterMask || !mPerPx) return;
-  var seedR = Math.max(1.6, 40 / mPerPx);
+
+  /* Weighted by pipe size, not one blob per pipe. DEP records each outfall's dimensions,
+     so a box or an egg is reduced to the diameter of a circle with the same cross-section
+     and the seed is scaled by it — these run from 10 inches to 294 (Alley Creek), and a
+     144-inch trunk sewer should not stain like a 10-inch pipe. Seeding bigger also carries
+     further on its own, because the spread is mass diffusing through the channel. */
   var seed = document.createElement('canvas'); seed.width = W; seed.height = H;
   var g = seed.getContext('2d');
   g.fillStyle = '#000';
-  var any = false;
+  var pts = [], any = false;
   geo.features.forEach(function(ft){
     var q = proj({ x:ft.geometry.coordinates[0], y:ft.geometry.coordinates[1] });
     if (q.x < -W || q.y < -H || q.x > 2 * W || q.y > 2 * H) return;
-    any = true;
-    g.beginPath(); g.arc(q.x, q.y, seedR, 0, Math.PI * 2); g.fill();
+    var dia = (ft.properties && ft.properties.d) || 57;
+    var k = Math.sqrt(dia / 57);                      // 57 in is the median
+    var r = Math.max(1.2, (26 / mPerPx) * k);
+    any = true; pts.push([q.x, q.y, k]);
+    g.beginPath(); g.arc(q.x, q.y, r, 0, Math.PI * 2); g.fill();
   });
   if (!any) return;
 
+  /* The spread is GEODESIC: grown one small step at a time with the water mask reapplied
+     after every step, so it can never leave the water. It runs along a creek, stops dead
+     at a bank or a spit, and thins as it travels because each step blurs again. */
   var STEPS = 16;
-  var step = Math.min(8, Math.max(1.4, (700 / mPerPx) / STEPS));   // about 700 m of reach
+  var step = Math.min(8, Math.max(1.4, (700 / mPerPx) / STEPS));
   var flow = seed;
   for (var i = 0; i < STEPS; i++){
     var t = document.createElement('canvas'); t.width = W; t.height = H;
     var tc = t.getContext('2d');
     tc.filter = 'blur(' + step + 'px)';
     tc.drawImage(flow, 0, 0);
-    tc.drawImage(flow, 0, 0);        // twice, so the front survives the next clip
+    tc.drawImage(flow, 0, 0);
     tc.filter = 'none';
     tc.globalCompositeOperation = 'destination-in';
-    tc.drawImage(waterMask, 0, 0);   // it can only travel through water
+    tc.drawImage(waterMask, 0, 0);
     flow = t;
   }
-
-  /* Two reads of the same spread: the whole reach faintly, and a strong core where the
-     discharge is still concentrated near the pipe. */
-  [[flow, 0.34, 0], [seed, 0.96, Math.max(2, seedR * 1.6)]].forEach(function(pass){
+  var lay = function(src, alpha, blur){
     var c = document.createElement('canvas'); c.width = W; c.height = H;
     var cc = c.getContext('2d');
-    if (pass[2]){
-      cc.filter = 'blur(' + pass[2] + 'px)';
-      cc.drawImage(pass[0], 0, 0); cc.drawImage(pass[0], 0, 0);
+    if (blur){
+      cc.filter = 'blur(' + blur + 'px)';
+      cc.drawImage(src, 0, 0); cc.drawImage(src, 0, 0);
       cc.filter = 'none';
       cc.globalCompositeOperation = 'destination-in'; cc.drawImage(waterMask, 0, 0);
-    } else {
-      cc.drawImage(pass[0], 0, 0);
-    }
+    } else cc.drawImage(src, 0, 0);
     cc.globalCompositeOperation = 'source-in';
     cc.fillStyle = SEWER_BROWN; cc.fillRect(0, 0, W, H);
-    ctx.save(); ctx.globalAlpha = pass[1]; ctx.drawImage(c, 0, 0); ctx.restore();
-  });
+    ctx.save(); ctx.globalAlpha = alpha; ctx.drawImage(c, 0, 0); ctx.restore();
+  };
+  lay(flow, 0.52, 0);      // the reach
+  lay(seed, 0.96, 2);      // the concentrated end, at the pipe
+
+  /* And the pipe itself. Without a mark the stain is only a smear and you cannot see what
+     is producing it — this is the one part of the layer that is a measured position rather
+     than a model, so it gets a hard edge. Sized by the same diameter. */
+  if (mPerPx < 26){
+    ctx.save();
+    ctx.strokeStyle = '#3A2408'; ctx.lineWidth = 1.1;
+    pts.forEach(function(p){
+      var r = Math.max(1.8, Math.min(7, 2.2 * p[2]));
+      ctx.beginPath(); ctx.arc(p[0], p[1], r, 0, Math.PI * 2);
+      ctx.fillStyle = '#D98A2B'; ctx.fill(); ctx.stroke();
+    });
+    ctx.restore();
+  }
 }
 /* Each route in its own MTA colour, straight out of the GTFS `route_color`. A white
    casing under every line keeps them apart where four of them share an avenue. */

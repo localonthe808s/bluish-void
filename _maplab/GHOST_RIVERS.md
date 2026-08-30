@@ -504,6 +504,18 @@ nearly opaque** (`#B06A22`, core alpha .96): it separates from the navy by hue a
 orange by depth, and because the core replaces the water rather than tinting it, the canal
 reads as a different substance rather than as shading.
 
+**Weighted by pipe size.** DEP records each outfall's dimensions, so a box or an egg is
+reduced to the diameter of a circle with the same cross-section — flow follows area, not
+the longest side. That parses for **413 of 415**, and they run from 10 inches to 294
+(Alley Creek; then Flushing Creek at 184, Bergen Basin 177, English Kills 171). The seed
+scales with it, so a trunk sewer stains further and harder than a 10-inch pipe instead of
+every outfall contributing an identical blob.
+
+**The pipe itself is drawn.** A stain with no mark on it is a smear you cannot attribute;
+the outfall position is the one part of this layer that is measured rather than modelled,
+so it gets a hard-edged dot, sized by the same diameter, once the framing is under 26 m
+per pixel.
+
 **Drawn as a stain, and the spread is geodesic.** Discharge does not go out in a circle —
 it goes where the water goes. A round plume clipped to the water was the first attempt, and
 it put stain on the far side of a headland while leaving the channel it should have run
