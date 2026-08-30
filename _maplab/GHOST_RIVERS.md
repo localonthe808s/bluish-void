@@ -491,6 +491,13 @@ tributaries). By catchment: Newtown Creek plant 82, Wards Island 75, North River
 Bay 43, Port Richmond 37, Red Hook 35, Hunts Point 34. **A quarter of them — 100 of 415 —
 discharge into a former tidal creek, canal or kill** rather than open water.
 
+**Colour took three tries**, and the reason is worth keeping. A *dark* brown over the dark
+navy water is the same value as the water, so it mixed to mud. A *pale* brown is just a dim
+orange, which is the land colour, so it went grey. What reads is a **saturated copper laid
+nearly opaque** (`#B06A22`, core alpha .96): it separates from the navy by hue and from the
+orange by depth, and because the core replaces the water rather than tinting it, the canal
+reads as a different substance rather than as shading.
+
 **Drawn as a stain, not as dots.** Each outfall lays down a soft plume which is then
 clipped to the water mask, so it spreads on the surface and stops at the bank. The
 behaviour falls out of the geometry rather than being drawn: ten outfalls along something
