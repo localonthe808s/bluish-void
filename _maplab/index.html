@@ -69,6 +69,7 @@
     <option value="ridge">RIDGE · 245 m multibeam</option>
   </select></label>
   <label class="sub">towns <input type="number" id="placecut" value="7" min="1" max="15" step="1" style="width:52px;min-width:0"></label>
+  <label class="sub"><input type="checkbox" id="radar" onchange="renderAll()"> radar</label>
   <button onclick="renderAll()">redraw</button>
   <button onclick="copyFlavor()">copy focused flavor</button>
   <span class="sub" id="status"></span>
@@ -751,12 +752,16 @@ function drawActiveWater(ctx, style, f, view, latMid, W, H){
    shade on them — under the roads and everything that moves. The borough mask is
    clipped out afterwards, and the veils dissolve at the pull box like the depth. */
 var TERRAIN_ALPHA = { 30:0.08, 60:0.12, 120:0.17, 240:0.23 };
+/* Slate, not the first cut's warm tan: this map's destiny is under radar, and THE
+   CITY renders the real NWS palette — greens through reds, unfiltered. Every warm
+   saturated hue on the finished thing should mean weather (the orange mask is the
+   one settled exception), so the ground keeps to neutrals and inks. */
 function drawTerrain(ctx, geo, proj, W, H, fade, boroMask){
   if (!geo) return;
   var c = document.createElement('canvas'); c.width = W; c.height = H;
   var g = c.getContext('2d');
   geo.features.forEach(function(ft){
-    g.fillStyle = 'rgba(92,74,50,' + (TERRAIN_ALPHA[ft.properties.h] || 0.23) + ')';
+    g.fillStyle = 'rgba(75,80,92,' + (TERRAIN_ALPHA[ft.properties.h] || 0.23) + ')';
     g.beginPath();
     ft.geometry.coordinates.forEach(function(ring){
       var P = ring.map(function(pt){ return proj({ x:pt[0], y:pt[1] }); });
@@ -1461,6 +1466,39 @@ function drawGhosts(ctx, geo, proj, W, H){
   ctx.drawImage(_stencil(m, W, H, 1.2, 'rgba(45,92,186,.42)'), 0, 0);
 }
 
+/* RADAR REHEARSAL — the contract this backdrop is being built for, live. THE CITY
+   widget layers, bottom to top: the map, KOKX super-res echoes at the FULL NWS
+   palette, the same map ghosted back over them at half strength ("streets ghost
+   over the echoes"), then warnings, strikes and names crisp on top. The checkbox
+   reproduces that here: snapshot the painted map, drop the latest scan over it,
+   lay the snapshot back at 0.5 — and the label pass that follows plays the part
+   of the overlay canvas. Same geoserver, same EPSG:3857 box the view is drawn in. */
+function radarOverlay(ctx, W, H, X0, Y0, X1, Y1){
+  var tick = document.getElementById('radar');
+  if (!tick || !tick.checked) return Promise.resolve();
+  var url = 'https://opengeo.ncep.noaa.gov/geoserver/kokx/ows?service=WMS&version=1.1.0&request=GetMap'
+    + '&layers=kokx_sr_bref&styles=&bbox=' + Math.round(X0) + ',' + Math.round(Y0) + ','
+    + Math.round(X1) + ',' + Math.round(Y1)
+    + '&width=' + W + '&height=' + H + '&srs=EPSG:3857&format=image/png&transparent=true'
+    + '&_=' + Math.floor(Date.now() / 60000);
+  return new Promise(function(res){
+    var attempt = function(cors){
+      var im = new Image();
+      if (cors) im.crossOrigin = 'anonymous';
+      im.onload = function(){
+        var snap = document.createElement('canvas'); snap.width = W; snap.height = H;
+        snap.getContext('2d').drawImage(ctx.canvas, 0, 0);
+        ctx.drawImage(im, 0, 0, W, H);
+        ctx.save(); ctx.globalAlpha = 0.5; ctx.drawImage(snap, 0, 0); ctx.restore();
+        res();
+      };
+      im.onerror = function(){ cors ? attempt(false) : res(); };
+      im.src = url;
+    };
+    attempt(true);
+  });
+}
+
 function drawCard(style){
   var f = flavorFor(style);
   var card = document.createElement('div');
@@ -1637,6 +1675,10 @@ function drawCard(style){
             }).then(function(sw){
               if (stale()) return;
               drawSubway(ctx, sw[0], sw[1], out.project, sw[2], VB.mpp);
+              return radarOverlay(ctx, W, H, VB.Xw, VB.Ymid - VB.mpp * H / 2,
+                                  VB.Xw + VB.mpp * W, VB.Ymid + VB.mpp * H / 2);
+            }).then(function(){
+              if (stale()) return;
               var lab = new protomapsL.Static({ url: document.getElementById('src').value,
                 paintRules: [], labelRules: labelsFor(style, f), maxDataZoom: 14 });
               return lab.drawContextBounds(ctx, {x:view.w, y:view.latMid}, {x:view.e, y:view.latMid}, W, H);

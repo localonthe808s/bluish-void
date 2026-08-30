@@ -775,3 +775,34 @@ Newtown 27 m, Alley Creek 4 m.
 
 **Caveat:** CUDEM is a model stitched from surveys of different dates. Channel depths are
 real survey data, but it will not reflect dredging since its sources were compiled.
+
+---
+
+# Radar
+
+This backdrop is being built to sit under KOKX. The contract, taken from THE CITY
+widget as it already works (`_radarImgFilter`, `_cityOv` in index.html), bottom to top:
+
+1. **The map**, opaque — everything this lab draws.
+2. **Echoes** — `kokx_sr_bref` from the NWS opengeo geoserver, EPSG:3857 for the same
+   box the map is drawn in, at the FULL NWS palette, unfiltered. THE CITY is the one
+   radar view on the site that never goes through the invert filter.
+3. **The map again at 0.5** — "streets ghost over the echoes." The city mask reads as
+   a shape under a blanket of rain because it is solid, which is why it is a mask.
+4. **The overlay canvas** — warning polygons, Blitzortung strikes, and the names.
+
+The `radar` checkbox in the header rehearses exactly this stack against the live scan,
+with the label pass standing in for layer 4.
+
+Consequences already baked into the ground layers:
+
+- **Hue discipline.** Warm saturated colour is reserved for weather (and the orange
+  mask). The terrain veils are slate, the water story is navy — greens through reds
+  arriving on layer 2 collide with nothing.
+- **The terrain is the explanation layer.** The 30/60/120/240 m terraces mark the
+  Watchungs, the Palisades sill, the Ramapo wall and the moraine spine — the reasons a
+  line weakens crossing from the northwest, re-fires over the harbour, or initiates
+  along the island's spine on a sea-breeze afternoon. Under the ghosted composite they
+  survive in echo-free ground, which is where that explanation is read.
+- **Quiet by value.** Every ground layer is a translucent veil over paper or navy, so
+  nothing in the backdrop competes with reflectivity for attention.
