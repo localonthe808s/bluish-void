@@ -516,9 +516,14 @@ scales with it, so a trunk sewer stains further and harder than a 10-inch pipe i
 every outfall contributing an identical blob.
 
 **The pipe itself is drawn.** A stain with no mark on it is a smear you cannot attribute;
-the outfall position is the one part of this layer that is measured rather than modelled,
-so it gets a hard-edged dot, sized by the same diameter, once the framing is under 26 m
-per pixel.
+the outfall position is the one part of this layer that is *measured* rather than modelled,
+so it is the only thing here with a hard edge — sized by the same diameter, shown under
+26 m per pixel.
+
+Drawn as a **cockade**: white surround, amber disc, dark rim. The white is what lets one
+mark work on every background this map has; a bare amber dot vanishes into the orange land
+and goes dull against the slick. An earlier version also painted a soft amber blob
+underneath, which smeared the very mark it was meant to show.
 
 **Drawn as a stain, and the spread is geodesic.** Discharge does not go out in a circle —
 it goes where the water goes. A round plume clipped to the water was the first attempt, and
