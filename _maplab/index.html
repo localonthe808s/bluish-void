@@ -102,7 +102,7 @@ var VIEWS = {
               flood:'bathy/flood_stormwater.json',
               subway:'bathy/subway_lines.json', stops:'bathy/subway_stops.json',
               bullets:'bathy/subway_colours.json', parkNames:'bathy/park_labels.json',
-              hoodNames:'bathy/hood_labels.json' },
+              hoodNames:'bathy/hood_labels.json', cso:'bathy/cso_outfalls.json' },
   shelf:    { w:-75.20, s:37.20, e:-70.00, n:41.20, bathy:'bathy/bathy_shelf.json', zoom:7 },
   atlantic: { w:-80.00, s:5.00,  e:-5.00,  n:60.00, bathy:'bathy/bathy_atlantic.json', zoom:3 },
   /* The two places worth real bathymetry: GMRT multibeam rendered to images with
@@ -121,7 +121,7 @@ var W = 1100, H = Math.round(W / 1.1372);   // one style, so give it the room
    the band it opens, so drawing them deepest-last with a darkening ramp gives
    the shelf, the slope, the abyssal plain and the ridge as tone. */
 var BATHY = {}, BOROS = null, HOODS = null, GHOSTS = null, WETGROUND = null, FLOOD = null,
-    SUBWAY = null, STOPS = null, BULLETS = null, PARKNAMES = null, HOODNAMES = null;
+    SUBWAY = null, STOPS = null, BULLETS = null, PARKNAMES = null, HOODNAMES = null, CSO = null;
 function boroughsFor(view){
   var v = VIEWS[view];
   if (!v || !v.boroughs) return Promise.resolve(null);
@@ -142,6 +142,15 @@ function stopsFor(view){
   if (!v || !v.stops) return Promise.resolve(null);
   if (STOPS) return Promise.resolve(STOPS);
   return fetch(v.stops).then(function(r){ return r.json(); }).then(function(j){ STOPS = j; return j; });
+}
+/* The 415 combined sewer overflow outfalls, from NYC DEP's Citywide Outfalls. About 60%
+   of the city is on a COMBINED system — one pipe carrying sewage and street runoff
+   together — and when rain fills that pipe the mix discharges untreated at these points. */
+function csoFor(view){
+  var v = VIEWS[view];
+  if (!v || !v.cso) return Promise.resolve(null);
+  if (CSO) return Promise.resolve(CSO);
+  return fetch(v.cso).then(function(r){ return r.json(); }).then(function(j){ CSO = j; return j; });
 }
 function hoodNamesFor(view){
   var v = VIEWS[view];
@@ -566,10 +575,55 @@ function _waterPass(style, f, view, latMid, W, H, narrow){
     .then(function(){ return off; });
 }
 function drawActiveWater(ctx, style, f, view, latMid, W, H){
+  /* Also hands back a mask of the water it drew, which is what lets the sewage stain
+     stop at the bank. */
+  var mask = document.createElement('canvas'); mask.width = W; mask.height = H;
   return _waterPass(style, f, view, latMid, W, H, false)
-    .then(function(broad){ ctx.drawImage(_stencil(broad, W, H, 0, WATER_DEEP), 0, 0); })
-    .then(function(){ return _waterPass(style, f, view, latMid, W, H, true); })
-    .then(function(narrow){ ctx.drawImage(_stencil(narrow, W, H, 1.6, WATER_DEEP), 0, 0); });
+    .then(function(broad){
+      ctx.drawImage(_stencil(broad, W, H, 0, WATER_DEEP), 0, 0);
+      mask.getContext('2d').drawImage(broad, 0, 0);
+      return _waterPass(style, f, view, latMid, W, H, true);
+    })
+    .then(function(narrow){
+      ctx.drawImage(_stencil(narrow, W, H, 1.6, WATER_DEEP), 0, 0);
+      mask.getContext('2d').drawImage(narrow, 0, 0);
+      return mask;
+    });
+}
+
+/* Paint the water brown where the sewers empty into it. Each outfall gets a soft plume,
+   clipped to the water mask so the stain spreads on the surface and stops at the bank
+   instead of washing over the land. The behaviour falls out of the geometry rather than
+   being drawn: ten outfalls along something as narrow as the Gowanus merge into one brown
+   channel, while ten spread along the East River barely tint it. Nothing is hand-picked —
+   it is the 415 outfall positions and the shape of the water. */
+var SEWER_BROWN = '#6B4A24';
+function drawSewerStain(ctx, geo, proj, waterMask, W, H, mPerPx){
+  if (!geo || !waterMask || !mPerPx) return;
+  var r = Math.max(3, 170 / mPerPx);          // a plume about 170 m across on the ground
+  var plume = document.createElement('canvas'); plume.width = W; plume.height = H;
+  var g = plume.getContext('2d');
+  g.fillStyle = '#000';
+  var any = false;
+  geo.features.forEach(function(ft){
+    var q = proj({ x:ft.geometry.coordinates[0], y:ft.geometry.coordinates[1] });
+    if (q.x < -r || q.y < -r || q.x > W + r || q.y > H + r) return;
+    any = true;
+    g.beginPath(); g.arc(q.x, q.y, r, 0, Math.PI * 2); g.fill();
+  });
+  if (!any) return;
+  [[r * 0.9, 0.30], [r * 0.35, 0.34]].forEach(function(pass){
+    var c = document.createElement('canvas'); c.width = W; c.height = H;
+    var cc = c.getContext('2d');
+    cc.filter = 'blur(' + pass[0] + 'px)';
+    cc.drawImage(plume, 0, 0);
+    cc.filter = 'none';
+    cc.globalCompositeOperation = 'destination-in';   // keep only what lies over water
+    cc.drawImage(waterMask, 0, 0);
+    cc.globalCompositeOperation = 'source-in';
+    cc.fillStyle = SEWER_BROWN; cc.fillRect(0, 0, W, H);
+    ctx.save(); ctx.globalAlpha = pass[1]; ctx.drawImage(c, 0, 0); ctx.restore();
+  });
 }
 /* Each route in its own MTA colour, straight out of the GTFS `route_color`. A white
    casing under every line keeps them apart where four of them share an avenue. */
@@ -987,6 +1041,11 @@ function drawCard(style){
               if (stale()) return;
               drawGhosts(ctx, gh, out.project, W, H); // the buried courses, inside it
               return drawActiveWater(ctx, style, f, view, view.latMid, W, H);
+            }).then(function(waterMask){
+              if (stale()) return;
+              return csoFor(vkey).then(function(cs){
+                drawSewerStain(ctx, cs, out.project, waterMask, W, H, VB.mpp);
+              });
             }).then(function(){
               return floodFor(vkey);
             }).then(function(fl){

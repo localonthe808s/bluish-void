@@ -475,3 +475,40 @@ Nothing that matters was lost by dropping it. A park is `park`, a ball field is 
 cemetery is `cemetery` (10% of that same frame, and correctly so — those are the Queens
 cemeteries), and Central Park's meadows sit inside the park polygon, so Sheep Meadow and
 Cedar Hill are still green and still labelled.
+
+---
+
+# Where the sewers empty
+
+`bathy/cso_outfalls.json` — the **415 combined sewer overflow outfalls**, from NYC DEP's
+*Citywide Outfalls* (`8rjn-kpsh` on NYC Open Data; 5,428 outfalls in all, of which CSO is
+one type). About 60% of the city is on a combined system — one pipe for sewage and street
+runoff — and when rain fills that pipe the mix discharges untreated at these points.
+
+Where they go: East River 138, Hudson 53, Harlem River 41, Upper New York Bay 26, Kill Van
+Kull 20, Buttermilk Channel 11, **Gowanus Canal 10**, **Newtown Creek 14** (with its tidal
+tributaries). By catchment: Newtown Creek plant 82, Wards Island 75, North River 52, Bowery
+Bay 43, Port Richmond 37, Red Hook 35, Hunts Point 34. **A quarter of them — 100 of 415 —
+discharge into a former tidal creek, canal or kill** rather than open water.
+
+**Drawn as a stain, not as dots.** Each outfall lays down a soft plume which is then
+clipped to the water mask, so it spreads on the surface and stops at the bank. The
+behaviour falls out of the geometry rather than being drawn: ten outfalls along something
+as narrow as the Gowanus merge into one continuous brown channel, while ten spread along
+the East River barely tint it. Nothing is hand-picked — it is the 415 positions and the
+shape of the water. `drawActiveWater` now returns the water mask it drew, which is what
+makes the clip possible.
+
+**No volumes or frequencies are available.** The state's CSO dataset (`ephi-ffu6`) has a
+`number_of_overflow_events` field, but for all 427 NYC outfalls it is blank — the entry
+reads "Real-time waterbody advisory, visit website", because the city reports through a
+live advisory instead. Annual discharge volumes exist only inside DEP's Waterbody/Watershed
+Facility Plan PDFs. So the stain is uniform per outfall: it says *where*, never *how much*.
+
+**A test that is not yet answerable.** Whether outfalls sit on the buried creeks — the
+sewers were laid in the old valleys, so they should — came out at 0.61× against a coastline
+baseline, i.e. *less* likely than average shoreline. That number is not trustworthy: only
+42% of the outfalls fall in boroughs we have traced. The Bronx and Staten Island have no
+ghost-river data at all, and 186 more could not be placed in any borough because an outfall
+sits in the water, just outside the land polygon. The test is measuring coverage gaps, not
+the city. It needs the Bronx and Staten Island traced, and shoreline-aware placement.
