@@ -519,3 +519,27 @@ baseline, i.e. *less* likely than average shoreline. That number is not trustwor
 ghost-river data at all, and 186 more could not be placed in any borough because an outfall
 sits in the water, just outside the land polygon. The test is measuring coverage gaps, not
 the city. It needs the Bronx and Staten Island traced, and shoreline-aware placement.
+
+---
+
+# The Bronx (added 2026-08-29)
+
+The Bronx was never missing from the source — it was **thrown away at the clip**. Its whole
+extent (−73.934…−73.765, 40.785…40.916) sits inside the Harlem 1897 neatline, a sheet
+already downloaded for Manhattan and Queens; `build_kq.py` simply clipped to Brooklyn and
+Queens polygons and discarded the rest. Adding `'Bronx'` to that list was the whole change,
+plus one more Overpass fetch: the modern-water query stopped at 40.83 and the borough runs
+to 40.92, so without extending it the northern Bronx would have kept water that is still
+there.
+
+The Harlem sheet went from 23 wet blobs to 70. Citywide the layer is now **457 courses over
+232 km and 82.5 km² of wet ground**, up from 350 and 75.6.
+
+**None of it is named.** Five Bronx reference points were tried — Tibbetts Brook, Mill
+Brook, Westchester Creek, Pugsley's Creek, Rattlesnake Brook — and **all five failed to
+match a course within the 650 m tolerance**. That is not the geometry being wrong; it means
+either the coordinates are off, or those particular reaches were already culverted by 1897,
+or they are still water today and were subtracted as such. The Bronx's 116 courses are
+real and drawn, and every one of them is unnamed until that is chased down.
+
+Staten Island is still untraced. Its quads were never downloaded.
