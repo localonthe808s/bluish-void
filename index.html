@@ -47341,7 +47341,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   // frame/basemap contain-fit for the same 3857 bbox, so everything aligns.
   var _cityOv = window._cityOv = {
     timer:null, ws:null, wsHost:0, strikes:[], alerts:[], lastAlerts:0,
-    fn:null, lastFn:0,
+    fn:null, lastFn:0, glm:[], glmT:0, glmLast:0,
     X0:-8273078, Y0:4936445, X1:-8195528, Y1:5004638, ASPECT:1.1372
   };
   function _cityOvMerc(lon, lat){
@@ -47407,7 +47407,23 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     }
     return g.join('');
   }
+  /* THE CITY's lightning is GOES-19's Geostationary Lightning Mapper: the
+     satellite's own optical flash detections, distilled to a tiny JSON by the
+     glm-snapshot action (user 2026-08-30: not Blitzortung). Polled every
+     minute; a stale snapshot (>25 min) draws nothing rather than old strikes. */
+  function _cityOvFetchGlm(){
+    _cityOv.glmLast = Date.now();
+    fetch('https://cdn.bluishvoid.com/glm/latest.json?_=' + Math.floor(Date.now() / 60000))
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        if (!j || !j.flashes) return;
+        _cityOv.glmT = j.t || 0;
+        _cityOv.glm = j.flashes;
+        _cityOvDraw();
+      }).catch(function(){});
+  }
   function _cityOvConnect(){
+    if (fcastState.area === 'city-nyc') return;   // the city view never touches Blitzortung
     if (_cityOv.ws) return;
     var hosts=['wss://ws1.blitzortung.org/','wss://ws7.blitzortung.org/','wss://ws8.blitzortung.org/'];
     var url = hosts[_cityOv.wsHost % hosts.length];
@@ -47497,6 +47513,26 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       });
     });
     var now=Date.now();
+    if (fcastState.area === 'city-nyc'){
+      /* GLM flashes: a soft optical glow, not the crosshair grammar: the
+         mapper sees light from cloud tops. Fade over 15 min; freshness gated
+         on the snapshot's own timestamp. */
+      if (_cityOv.glmT && now / 1000 - _cityOv.glmT < 1500){
+        _cityOv.glm.forEach(function(f){
+          var age = (now / 1000 - f[2]) / 900;
+          if (age < 0) age = 0;
+          if (age > 1) return;
+          var p = px(f[0], f[1]);
+          ctx.globalAlpha = Math.max(.10, (1 - age) * .85);
+          ctx.fillStyle = age < .2 ? '#fff3c4' : '#ffd76a';
+          ctx.shadowColor = '#ffd76a'; ctx.shadowBlur = age < .2 ? 14 : 7;
+          ctx.beginPath();
+          ctx.arc(p[0], p[1], age < .2 ? 4.5 : 3, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+        });
+      }
+    } else {
     _cityOv.strikes = _cityOv.strikes.filter(function(s){ return now-s.t < 600000; });
     _cityOv.strikes.forEach(function(s){
       var age=(now-s.t)/600000, a=1-age;
@@ -47511,6 +47547,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       ctx.stroke();
       ctx.shadowBlur=0; ctx.globalAlpha=1;
     });
+    }
     // ── FLOODNET chip — measured street water (events-triggered, see
     // bluish-floodnet: depth quantifies, events trigger). Top-left corner.
     // Clickable via an <a> overlay — hidden by default so it never lingers
@@ -47609,12 +47646,13 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             if (Date.now() - _cityOv.lastAlerts > 120000 || _cityOv.alertsArea !== _wantArea) _cityOvFetchAlerts();
           }
           if (fcastState.area === 'city-nyc' && Date.now() - _cityOv.lastFn > 300000) _cityOvFetchFloodNet();
+          if (fcastState.area === 'city-nyc' && Date.now() - _cityOv.glmLast > 60000) _cityOvFetchGlm();
           if (!_cityOv.ws) _cityOvConnect();
           _cityOvDraw();
         }catch(e){ console.error('city overlay tick:', e && e.message, e && e.stack); }
       }, 1500);
     }
-    _cityOvFetchAlerts(); if (fcastState.area === 'city-nyc') _cityOvFetchFloodNet(); _cityOvConnect(); _cityOvDraw();
+    _cityOvFetchAlerts(); if (fcastState.area === 'city-nyc'){ _cityOvFetchFloodNet(); _cityOvFetchGlm(); } _cityOvConnect(); _cityOvDraw();
   }
   function _cityOvStop(){
     var cv = document.getElementById('fcast-city-overlay');
@@ -47819,7 +47857,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
          The stitched station/conus maps are Protomaps too \u2014 CARTO is gone. */
       if (on) at.textContent = '\u00a9 OpenStreetMap \u00b7 Protomaps \u00b7 '
         + (mode === 'city' ? 'NOAA NCEI \u00b7 ' : '') + srcName
-        + (mode === 'city' ? ' \u00b7 ghost rivers: Viele 1865' : '') + ' \u00b7 \u26a1 Blitzortung.org';
+        + (mode === 'city' ? ' \u00b7 ghost rivers: Viele 1865 \u00b7 \u26a1 GOES-19 GLM'
+                           : ' \u00b7 \u26a1 Blitzortung.org');
     }
     // Header source label follows the live view \u2014 it read "NWS RADAR" for all
     // three WMS views while the map credit underneath named the actual feed.
