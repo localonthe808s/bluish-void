@@ -608,3 +608,36 @@ Settled at **100 m**: enough for every coast tried, and small enough that a *lan
 Queens/Nassau, Bronx/Westchester, where no water follows to cover an overrun — stays within
 a couple of pixels at normal framings. Rockaway is the stubborn case, because the barrier
 beach is narrow and the borough polygon is most generalised exactly there.
+
+---
+
+# Roads
+
+Added 2026-08-29 as the quietest thing on the map. The flavour's own road rules are stripped
+by the style's `noRoads`, so these are ours: fine silver hairlines, weighted only enough to
+tell a motorway from a residential street, and **no labels**. Paths, tracks and rail are
+deliberately absent — this is for the shape of the street grid, and a footway in a park
+would say something the layer is not trying to say.
+
+They are drawn with the parks: **after** the opaque borough mask, which would otherwise bury
+them, and **before** every thematic layer, so water, ghost courses, flood and subway all sit
+above them.
+
+**Width scales with the framing.** A weight that reads as a hairline at street level is a
+haze at city level, where the whole grid collapses into a few pixels — pulled back, the
+lines have to get *thinner*, not just fewer. The first pass used fixed widths and was both
+invisible at street zoom and a smear at city zoom.
+
+Silver on orange has plenty of value contrast but almost no hue contrast, which is why the
+first attempt at low alpha vanished entirely.
+
+## Zoom gates, all together
+
+| layer | appears below |
+|---|---|
+| subway lines | 70 m/px — one zoom click from the 121 m/px opening view |
+| neighbourhood districts | 55 m/px |
+| station dots | 22 m/px |
+| neighbourhoods | 22 m/px |
+| station names | 9 m/px |
+| park names | when the name fits inside the park |
