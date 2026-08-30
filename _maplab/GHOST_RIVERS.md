@@ -755,3 +755,23 @@ come out as New York.
 
 `_boroMask` builds the borough silhouette as a reusable stencil, dilated the same way the
 visible mask is.
+
+---
+
+# River depth
+
+`bathy/river_depth.json` — 1,248 depth-band polygons from **NCEI's CUDEM topobathy
+model** (`gis.ngdc.noaa.gov/.../DEM_mosaics/DEM_all/ImageServer`), contoured at 1, 2, 4,
+7, 10, 15, 20 and 30 m. Drawn over today's water and clipped to it, each band darkening the
+navy a step, so a dredged channel reads as a trench and a bay as a shelf.
+
+**Two resolutions, because one is not enough.** A harbour-wide export at the server's
+maximum size comes back at 12.7 m per pixel, and at that resolution the Gowanus, Dutch
+Kills and Alley Creek are narrower than a cell and vanish into the bank — sampled, they
+read as land. Seven creek boxes (Gowanus, Newtown, Flushing, Bronx River, Coney Island
+Creek, Alley Creek, Fresh Kills) are pulled separately at the model's native 3.2 m and
+come later in the file so they win on overlap. At that resolution Gowanus reads 17 m,
+Newtown 27 m, Alley Creek 4 m.
+
+**Caveat:** CUDEM is a model stitched from surveys of different dates. Channel depths are
+real survey data, but it will not reflect dredging since its sources were compiled.

@@ -102,7 +102,8 @@ var VIEWS = {
               flood:'bathy/flood_stormwater.json',
               subway:'bathy/subway_lines.json', stops:'bathy/subway_stops.json',
               bullets:'bathy/subway_colours.json', parkNames:'bathy/park_labels.json',
-              hoodNames:'bathy/hood_labels.json', cso:'bathy/cso_outfalls.json' },
+              hoodNames:'bathy/hood_labels.json', cso:'bathy/cso_outfalls.json',
+              depth:'bathy/river_depth.json' },
   shelf:    { w:-75.20, s:37.20, e:-70.00, n:41.20, bathy:'bathy/bathy_shelf.json', zoom:7 },
   atlantic: { w:-80.00, s:5.00,  e:-5.00,  n:60.00, bathy:'bathy/bathy_atlantic.json', zoom:3 },
   /* The two places worth real bathymetry: GMRT multibeam rendered to images with
@@ -121,7 +122,7 @@ var W = 1100, H = Math.round(W / 1.1372);   // one style, so give it the room
    the band it opens, so drawing them deepest-last with a darkening ramp gives
    the shelf, the slope, the abyssal plain and the ridge as tone. */
 var BATHY = {}, BOROS = null, HOODS = null, GHOSTS = null, WETGROUND = null, FLOOD = null,
-    SUBWAY = null, STOPS = null, BULLETS = null, PARKNAMES = null, HOODNAMES = null, CSO = null;
+    SUBWAY = null, STOPS = null, BULLETS = null, PARKNAMES = null, HOODNAMES = null, CSO = null, DEPTH = null;
 function boroughsFor(view){
   var v = VIEWS[view];
   if (!v || !v.boroughs) return Promise.resolve(null);
@@ -146,6 +147,16 @@ function stopsFor(view){
 /* The 415 combined sewer overflow outfalls, from NYC DEP's Citywide Outfalls. About 60%
    of the city is on a COMBINED system — one pipe carrying sewage and street runoff
    together — and when rain fills that pipe the mix discharges untreated at these points. */
+/* River depth: NCEI's CUDEM topobathy grid, contoured at fixed depths. One harbour-wide
+   pull at 12.7 m per pixel, plus seven creek boxes at the model's native 3.2 m — at the
+   coarse resolution the Gowanus, Dutch Kills and Alley Creek are narrower than a cell and
+   vanish into the bank. Fine tiles come later in the file so they win on overlap. */
+function depthFor(view){
+  var v = VIEWS[view];
+  if (!v || !v.depth) return Promise.resolve(null);
+  if (DEPTH) return Promise.resolve(DEPTH);
+  return fetch(v.depth, { cache:'no-cache' }).then(function(r){ return r.json(); }).then(function(j){ DEPTH = j; return j; });
+}
 function csoFor(view){
   var v = VIEWS[view];
   if (!v || !v.cso) return Promise.resolve(null);
@@ -647,6 +658,26 @@ function drawActiveWater(ctx, style, f, view, latMid, W, H){
       mask.getContext('2d').drawImage(narrow, 0, 0);
       return mask;
     });
+}
+
+/* Depth bands, drawn over today's water and clipped to it. Each band is "deeper than d",
+   stacked shallow-to-deep in the same navy darkening a step at a time, so a dredged channel
+   reads as a trench and a bay as a shelf. Clipped to the water mask because the DEM's
+   shoreline and the basemap's disagree by a few metres, and a band that crossed onto the
+   orange would read as land flooding. */
+function drawDepth(ctx, geo, proj, waterMask, W, H){
+  if (!geo || !waterMask) return;
+  var c = document.createElement('canvas'); c.width = W; c.height = H;
+  var g = c.getContext('2d');
+  geo.features.forEach(function(ft){
+    var d = ft.properties.d;
+    var t = Math.min(1, Math.log(1 + d) / Math.log(31));
+    g.fillStyle = 'rgba(4,10,40,' + (0.10 + 0.14 * t).toFixed(3) + ')';
+    curvePath(g, ft.geometry.coordinates[0], proj, true); g.fill();
+  });
+  g.globalCompositeOperation = 'destination-in';
+  g.drawImage(waterMask, 0, 0);
+  ctx.drawImage(c, 0, 0);
 }
 
 /* Paint the water brown where the sewers empty into it. Each outfall gets a soft plume,
@@ -1358,8 +1389,11 @@ function drawCard(style){
               return drawActiveWater(ctx, style, f, view, view.latMid, W, H);
             }).then(function(waterMask){
               if (stale()) return;
-              return drawPiers(ctx, style, f, view, view.latMid, W, H, boroMaskCv, waterMask)
-                .then(function(){ return waterMask; });
+              return depthFor(vkey).then(function(dp){
+                if (stale()) return waterMask;
+                drawDepth(ctx, dp, out.project, waterMask, W, H);
+                return drawPiers(ctx, style, f, view, view.latMid, W, H, boroMaskCv, waterMask);
+              }).then(function(){ return waterMask; });
             }).then(function(waterMask){
               if (stale()) return;
               return csoFor(vkey).then(function(cs){
