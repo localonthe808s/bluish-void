@@ -665,3 +665,21 @@ first attempt at low alpha vanished entirely.
 | neighbourhoods | 22 m/px |
 | station names | 9 m/px |
 | park names | when the name fits inside the park |
+
+---
+
+# Piers
+
+Piers are land you can walk on, and the water pass was painting straight over them — the
+Manhattan waterfront, Chelsea Piers and the Brooklyn Bridge Park piers all came out as
+smooth shoreline, with `PIER 1` and `PIER 3` labelled over open water. They live in
+`landuse` as kind **`pier`**, and they have to be drawn **after** the water or it buries
+them again.
+
+Two passes, because a pier belongs to whichever shore it is attached to: every pier is
+painted the pale off-map land colour first, then the ones inside a generously grown borough
+mask (250 m) are repainted in the borough fill. Without that split, New Jersey's piers would
+come out as New York.
+
+`_boroMask` builds the borough silhouette as a reusable stencil, dilated the same way the
+visible mask is.

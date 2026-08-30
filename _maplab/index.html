@@ -659,6 +659,58 @@ var SEWER_BROWN = '#B06A22';
    creeps along a creek and stops dead at a bank or a spit, and the repeated blur thins it
    as it travels, which gives the falloff for free. Step size scales with the zoom so the
    reach stays about the same distance on the ground rather than on the screen. */
+/* Piers are land you can walk on, and the water pass was painting straight over them —
+   Chelsea Piers, the Brooklyn Bridge Park piers and the whole Manhattan waterfront came out
+   as smooth shoreline. They live in `landuse` as kind `pier`, and they have to be drawn
+   AFTER the water or the water buries them again.
+
+   Two passes, because a pier belongs to whichever shore it is attached to: every pier gets
+   the pale off-map land colour, then the ones inside a generously grown borough mask are
+   repainted in the borough fill. Without the split, New Jersey's piers would come out as
+   New York. */
+function _boroMask(geo, proj, W, H, growPx){
+  var c = document.createElement('canvas'); c.width = W; c.height = H;
+  var g = c.getContext('2d');
+  g.fillStyle = '#000'; g.strokeStyle = '#000';
+  g.lineWidth = Math.max(2, growPx || 3); g.lineJoin = 'round';
+  geo.features.forEach(function(ft){
+    var polys = ft.geometry.type === 'Polygon' ? [ft.geometry.coordinates] : ft.geometry.coordinates;
+    polys.forEach(function(rings){
+      g.beginPath();
+      rings.forEach(function(ring){
+        ring.forEach(function(pt, i){
+          var q = proj({ x:pt[0], y:pt[1] });
+          if (i === 0) g.moveTo(q.x, q.y); else g.lineTo(q.x, q.y);
+        });
+        g.closePath();
+      });
+      g.stroke(); g.fill('evenodd');
+    });
+  });
+  return c;
+}
+function drawPiers(ctx, style, f, view, latMid, W, H, boroMask){
+  var off = document.createElement('canvas'); off.width = W; off.height = H;
+  return new protomapsL.Static({ url: document.getElementById('src').value, maxDataZoom: 14,
+      labelRules: [],
+      paintRules: [{ dataLayer:'landuse',
+        filter: function(z, ft){ return ft.props.kind === 'pier'; },
+        symbolizer: new protomapsL.PolygonSymbolizer({ fill:'#000' }) }] })
+    .drawContextBounds(off.getContext('2d'), {x:view.w, y:latMid}, {x:view.e, y:latMid}, W, H)
+    .then(function(){
+      ctx.drawImage(_stencil(off, W, H, 0, f.earth || '#eceade'), 0, 0);
+      if (!boroMask) return;
+      var c = document.createElement('canvas'); c.width = W; c.height = H;
+      var cc = c.getContext('2d');
+      cc.drawImage(off, 0, 0);
+      cc.globalCompositeOperation = 'destination-in';
+      cc.drawImage(boroMask, 0, 0);
+      cc.globalCompositeOperation = 'source-in';
+      cc.fillStyle = boroughFill(false); cc.fillRect(0, 0, W, H);
+      ctx.drawImage(c, 0, 0);
+    });
+}
+
 function drawSewerStain(ctx, geo, proj, waterMask, W, H, mPerPx){
   if (!geo || !waterMask || !mPerPx) return;
 
@@ -1124,7 +1176,7 @@ function drawCard(style){
   }
 
   function paint(){
-    var view = box(), token = ++busy;
+    var view = box(), token = ++busy, boroMaskCv = null;
     var vkey = document.getElementById('view').value;
     var dark = !(style.base === 'light');
     var stale = function(){ return token !== busy; };
@@ -1148,6 +1200,7 @@ function drawCard(style){
         }).then(function(boro){
           if (!boro || stale()) return;
           drawBoroughs(ctx, boro, out.project, dark, Math.max(2, 100 / VB.mpp));
+        boroMaskCv = _boroMask(boro, out.project, W, H, Math.max(3, 250 / VB.mpp));
           return hoodsFor(vkey).then(function(hoods){ drawHoods(ctx, hoods, out.project, dark); });
         }).then(function(){
           if (!VIEWS[vkey] || !VIEWS[vkey].boroughs || stale()) return;
@@ -1165,6 +1218,10 @@ function drawCard(style){
               if (stale()) return;
               drawGhosts(ctx, gh, out.project, W, H); // the buried courses, inside it
               return drawActiveWater(ctx, style, f, view, view.latMid, W, H);
+            }).then(function(waterMask){
+              if (stale()) return;
+              return drawPiers(ctx, style, f, view, view.latMid, W, H, boroMaskCv)
+                .then(function(){ return waterMask; });
             }).then(function(waterMask){
               if (stale()) return;
               return csoFor(vkey).then(function(cs){
