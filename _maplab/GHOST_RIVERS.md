@@ -570,9 +570,27 @@ plume grew to about 1.7 km — at city zoom the rivers became one continuous bla
 step count is derived from the pixel reach instead, and below a few pixels it does not
 spread at all.
 
-**What this does not model is tide or current.** There is no direction here beyond the shape
-of the water itself. A downstream bias would look convincing and would be a guess dressed
-as data.
+**The tide shapes it.** NOAA publishes current predictions for **101 stations inside the
+harbour box**, and each carries a *mean ebb bearing* — the compass direction the water
+leaves on an outgoing tide — plus a peak ebb speed. Both are static properties of the
+station, so one fetch settles it. Every outfall takes the values of its nearest station:
+median distance **996 m**, 90th percentile 2.9 km, and only three outfalls sit further than
+6 km from one.
+
+The bearings are not evenly spread, and they should not be: 251 of the 415 fall in the 180°
+and 225° buckets, ebb running south and south-west out through the Narrows, which is the
+actual shape of this harbour.
+
+Each step of the geodesic spread is now **shifted down-tide** as well as blurred, so a plume
+leans the way the water goes while still being unable to climb a bank. Reach scales with the
+station's peak ebb speed. Outfalls are grouped into eight compass buckets and the diffusion
+runs once per bucket, which is what makes a per-outfall direction affordable — it is eight
+passes rather than 415.
+
+**So the layer shows one specific condition: where a discharge goes on an outgoing tide.**
+Not an average and not a forecast. The East River reverses four times a day and a CSO fires
+whenever it rains, so no single picture is "the" answer — this one is the ebb, and it says
+so.
 
 The behaviour falls out of the geometry rather than being drawn: ten outfalls along
 something as narrow as the Gowanus merge into one continuous brown channel, the Hutchinson
