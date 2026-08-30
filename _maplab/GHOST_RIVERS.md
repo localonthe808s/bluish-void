@@ -183,17 +183,19 @@ field, so the city's whole water story reads as one shape rather than as a histo
 layer sitting on a modern map. Inside that field:
 
 - **Light blue fill** (`#9dc4ea`) — ground that was or is water.
-- **Solid dark blue** (`#17457F`) with a **feathered edge** — the water that is *still
-  there*. The basemap's own water shapes are rendered off-screen and used as a stencil;
-  blurring the stencil and then filling *through* it with `source-in` keeps the colour
-  flat and softens only the alpha. The softness is self-scaling: a 1.5 px feather is a
-  good part of the width of a creek, so it melts into the pale field, and almost nothing
-  on a reservoir, which keeps its edge.
+- **Solid dark blue** (`#17457F`) — the water that is *still there*, drawn in **two
+  passes**. A creek is narrow, so a soft edge is most of its width and it melts into the
+  pale field, which is the point. A settling basin at the Newtown Creek plant is small but
+  *compact*, and the same feather on a sixty-metre rectangle just looks out of focus. The
+  split is on each feature's own `bbox`: `maxDataZoom` is pinned at 14, so tile units map
+  to a fixed ground size and the minor dimension is a stable measure of narrowness. Under
+  60 units (~35 m) the water is feathered; over it, crisp.
 
   An earlier version laid a wide pale halo underneath first, to guarantee something for
   the water to fade into. It ringed **every** body in white, including the big ones, and
   is gone. Where no historic marsh sits behind a creek it now fades into whatever is
-  there, which is a two-pixel rim and much better than a glow.
+  there, which is a two-pixel rim and much better than a glow. A later version feathered
+  *all* water at once, which is what made the treatment plant look out of focus.
 - **A blue band that bleeds** (`#3B71CA`) — a buried watercourse. Stroked into a mask and
   laid down three times at falling blur and rising opacity, the same build the flood zones
   use, so it fades into the pale field like a heat map instead of sitting on top of it as

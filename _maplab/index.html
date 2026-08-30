@@ -331,9 +331,13 @@ function parkRulesFor(){
      lawn, and the tiles carry nothing to tell them apart: a grass feature arrives with
      only `kind` and `sort_rank`, no kind_detail and no name. It was painting whole
      interchanges green. The ground that matters is still covered: a park is `park`, a
-     ball field is `pitch`, and Central Park's meadows sit inside the park polygon. */
+     ball field is `pitch`, and Central Park's meadows sit inside the park polygon.
+
+     `cemetery` is out too. Calvary and Mount Zion are enormous — a tenth of a frame of
+     western Queens on their own — and painting them the same green as a park says they
+     are somewhere you go, which reads wrong on a map about ground and water. */
   var kinds = ['park','forest','wood','nature_reserve','recreation_ground',
-               'garden','cemetery','golf_course','pitch','playground','village_green'];
+               'garden','golf_course','pitch','playground','village_green'];
   return [{ dataLayer:'landuse',
     filter: function(z, f){ return kinds.indexOf(f.props.kind) >= 0; },
     symbolizer: new protomapsL.PolygonSymbolizer({ fill: '#2f7d4f' }) }];
@@ -532,15 +536,40 @@ function _stencil(off, W, H, blur, colour){
   g.fillStyle = colour; g.fillRect(0, 0, W, H);
   return c;
 }
-function drawActiveWater(ctx, style, f, view, latMid, W, H){
+/* Two passes, because one feather cannot serve both ends of this layer. A creek is
+   NARROW, so a soft edge is most of its width and it melts into the pale field, which is
+   the point. A settling basin at the Newtown Creek plant is small but COMPACT, and the
+   same feather on a rectangle sixty metres across just looks out of focus — which is
+   what it looked like.
+
+   The split is on the feature's own bbox: `maxDataZoom` is pinned at 14, so tile units
+   map to a fixed ground size and the minor dimension is a stable measure of narrowness.
+   Below the threshold the water is feathered, above it, crisp. */
+var WATER_NARROW = 60;   // tile units on the minor axis, roughly 35 m of ground
+function _waterPass(style, f, view, latMid, W, H, narrow){
   var off = document.createElement('canvas'); off.width = W; off.height = H;
-  var oc = off.getContext('2d');
-  var st = new protomapsL.Static({ url: document.getElementById('src').value,
-    paintRules: waterRulesFor(style, f), labelRules: [], maxDataZoom: 14 });
-  return st.drawContextBounds(oc, {x:view.w, y:latMid}, {x:view.e, y:latMid}, W, H)
-    .then(function(){
-      ctx.drawImage(_stencil(off, W, H, 1.5, WATER_DEEP), 0, 0);
-    });
+  var rules = waterRulesFor(style, f).map(function(r){
+    var out = {}; for (var k in r) out[k] = r[k];
+    var orig = r.filter;
+    out.filter = function(z, ft){
+      if (orig && !orig(z, ft)) return false;
+      var b = ft.bbox;
+      if (!b) return !narrow;
+      var minor = Math.min(b.maxX - b.minX, b.maxY - b.minY);
+      return narrow ? (minor < WATER_NARROW) : (minor >= WATER_NARROW);
+    };
+    return out;
+  });
+  return new protomapsL.Static({ url: document.getElementById('src').value,
+      paintRules: rules, labelRules: [], maxDataZoom: 14 })
+    .drawContextBounds(off.getContext('2d'), {x:view.w, y:latMid}, {x:view.e, y:latMid}, W, H)
+    .then(function(){ return off; });
+}
+function drawActiveWater(ctx, style, f, view, latMid, W, H){
+  return _waterPass(style, f, view, latMid, W, H, false)
+    .then(function(broad){ ctx.drawImage(_stencil(broad, W, H, 0, WATER_DEEP), 0, 0); })
+    .then(function(){ return _waterPass(style, f, view, latMid, W, H, true); })
+    .then(function(narrow){ ctx.drawImage(_stencil(narrow, W, H, 1.6, WATER_DEEP), 0, 0); });
 }
 /* Each route in its own MTA colour, straight out of the GTFS `route_color`. A white
    casing under every line keeps them apart where four of them share an avenue. */
