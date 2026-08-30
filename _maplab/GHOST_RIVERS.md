@@ -578,7 +578,31 @@ either the coordinates are off, or those particular reaches were already culvert
 or they are still water today and were subtracted as such. The Bronx's 116 courses are
 real and drawn, and every one of them is unnamed until that is chased down.
 
-Staten Island is still untraced. Its quads were never downloaded.
+# Staten Island (added 2026-08-30) — all five boroughs
+
+Traced from `NJ_Staten Island_255388_1898`, whose neatline is −74.25…−74.00 / 40.50…40.75.
+Two slivers fall outside it, each about 500 m: the far western shore beyond −74.25 and the
+Tottenville tip below 40.50.
+
+**Finding the sheet took a detour worth recording:** it is named `NJ_…` but filed under the
+bucket's **`NY/` folder**, so every prefix search for `NY_Staten` and for `NJ/NJ_Staten`
+returned nothing. Only a full paginated listing of `NY/` found it.
+
+**And it broke the extraction.** The scan carries a heavy yellow cast — blue sits *below*
+red across the whole sheet, water included — so the fixed `B−R ≥ 26` that worked on the
+coloured sheets matched 0.15% of it and found no water at all. The distributions turn out to
+have the same shape once shifted (Brooklyn's median B−R is −6, Staten Island's −82), so the
+threshold is now **relative to each sheet's own median**, at median + 32. That reproduces
+exactly 26 on Brooklyn — the value already known to work — and −50 on Staten Island, which
+yields 68 wet blobs where the absolute threshold yielded none.
+
+Citywide the layer is now **577 courses over 292 km and 100.1 km² of wet ground.**
+
+**Staten Island's 87 courses are unnamed**, as the Bronx's are. Four references were tried —
+Fresh Kills, Richmond Creek, Old Place Creek, Great Kills — and none matched within 650 m.
+Fresh Kills and the Arthur Kill are still water today and are subtracted as such, which
+probably accounts for most of it. 25 of 577 courses carry a name, all in Manhattan,
+Brooklyn and Queens.
 
 ---
 
