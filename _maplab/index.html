@@ -109,7 +109,8 @@ var VIEWS = {
      ~100 mi offshore. The relief is feathered because its rectangle is the edge of
      a survey, not of the seafloor. */
   city:     { w:-74.60, s:40.30, e:-73.40, n:41.10, bathy:'bathy/bathy_atlantic.json', zoom:11,
-              relief:{ img:'bathy/gmrt_canyon.png', w:-73.400757, s:38.899705, e:-71.399048, n:40.499864,
+              bathyRamp:'abyss',
+              relief:{ img:'bathy/gmrt_canyon_dark.png', w:-73.400757, s:38.899705, e:-71.399048, n:40.499864,
                        feather:true },
               boroughs:'bathy/nyc_boroughs.json', hoods:'bathy/nyc_ntas.json',
               dropLabels:['New York','Newark Bay','Upper New York Bay','Lower New York Bay'],
@@ -265,6 +266,12 @@ function depthFill(d, dark){
     : { 200:'#4a43f6', 1000:'#3a34d0', 2000:'#2d29ad', 3000:'#241f8b', 4000:'#1b176b', 5000:'#14114f', 6000:'#0d0b35' };
   return steps[d] || (dark ? '#101d07' : '#0d0b35');
 }
+/* The city's offshore ramp cannot reuse the ink one: out there the bands go down
+   OVER the active-water pass, so they walk into the dark from WATER_DEEP itself —
+   the shelf break is a small step off today's water, the abyssal plain near black.
+   The bright ink ramp next to that navy read as shallow-bright/deep-dark inverted. */
+var ABYSS = { 200:'#123C70', 1000:'#0F3462', 2000:'#0C2C54', 3000:'#0A2546',
+              4000:'#071E39', 5000:'#05172C', 6000:'#041120' };
 
 /* Base is the site's own dark flavor; every style below is a set of overrides on
    top of it, so a style is only as long as what it actually changes. */
@@ -460,7 +467,7 @@ function flavorFor(style){
 
 var focused = STYLES[0];
 
-function drawBathy(ctx, geo, proj, dark, view){
+function drawBathy(ctx, geo, proj, dark, view, ramp){
   if (!geo) return;
   var feats = geo.features.slice().sort(function(a,b){ return a.properties.d - b.properties.d; });
   feats.forEach(function(ft){
@@ -479,7 +486,7 @@ function drawBathy(ctx, geo, proj, dark, view){
       }
       if (ft._bb[2] < view.w || ft._bb[0] > view.e || ft._bb[3] < view.s || ft._bb[1] > view.n) return;
     }
-    ctx.fillStyle = depthFill(ft.properties.d, dark);
+    ctx.fillStyle = ramp ? (ramp[ft.properties.d] || '#041120') : depthFill(ft.properties.d, dark);
     var polys = ft.geometry.type === 'Polygon' ? [ft.geometry.coordinates] : ft.geometry.coordinates;
     polys.forEach(function(rings){
       ctx.beginPath();
@@ -1407,14 +1414,23 @@ function drawCard(style){
            the projection it used, which is what lines everything up. */
         if (!out || !out.project || stale()) return;
         /* Bands first, survey second: the relief is the finer reading wherever
-           both exist, so it wins the overlap. The city keeps its whole pipeline
-           on top of them — the seafloor is backdrop there, not subject. */
-        return bathyFor(vkey).then(function(geo){
-          if (geo && !stale()) drawBathy(ctx, geo, out.project, dark, view);
-          if (view.relief) return reliefImage(view.relief.img).then(function(img){
-            if (!stale()) drawRelief(ctx, img, view.relief, out.project);
+           both exist, so it wins the overlap. In the CITY view the seafloor has
+           to wait its turn — the active-water pass paints every offshore pixel
+           WATER_DEEP, so bands drawn now would be buried under it. It runs as
+           `seafloor` right after that pass instead, walking the ABYSS ramp down
+           from the water's own navy. */
+        var seafloor = function(){
+          return bathyFor(vkey).then(function(geo){
+            if (geo && !stale())
+              drawBathy(ctx, geo, out.project, dark, view,
+                        (VIEWS[vkey] || {}).bathyRamp ? ABYSS : null);
+            if (view.relief) return reliefImage(view.relief.img).then(function(img){
+              if (!stale()) drawRelief(ctx, img, view.relief, out.project);
+            });
           });
-        }).then(function(){
+        };
+        var deferred = !!(VIEWS[vkey] && VIEWS[vkey].boroughs);
+        return (deferred ? Promise.resolve() : seafloor()).then(function(){
           return boroughsFor(vkey);
         }).then(function(boro){
           if (!boro || stale()) return;
@@ -1448,6 +1464,11 @@ function drawCard(style){
               if (stale()) return;
               drawGhosts(ctx, gh, out.project, W, H); // the buried courses, inside it
               return drawActiveWater(ctx, style, f, view, view.latMid, W, H);
+            }).then(function(waterMask){
+              if (stale() || !waterMask) return waterMask;
+              /* The ocean is WATER_DEEP everywhere now — the seafloor goes on over
+                 it, under the harbour depth, the piers and everything coastal. */
+              return seafloor().then(function(){ return waterMask; });
             }).then(function(waterMask){
               if (stale()) return;
               return depthFor(vkey).then(function(dp){
