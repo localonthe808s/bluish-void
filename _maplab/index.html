@@ -597,34 +597,64 @@ function drawActiveWater(ctx, style, f, view, latMid, W, H){
    being drawn: ten outfalls along something as narrow as the Gowanus merge into one brown
    channel, while ten spread along the East River barely tint it. Nothing is hand-picked —
    it is the 415 outfall positions and the shape of the water. */
-/* Getting this to read took two tries. A dark brown over the dark navy is the same value
-   as the water, so it mixed to mud. A pale brown is just a dim orange, which is the land
-   colour, so it went grey. What works is a SATURATED copper laid nearly opaque: it
-   separates from the navy by hue and from the orange by depth, and because the core
-   replaces the water rather than tinting it, the canal reads as a different substance. */
+/* Getting the colour to read took two tries. A dark brown over the dark navy is the same
+   value as the water, so it mixed to mud. A pale brown is just a dim orange, which is the
+   land colour, so it went grey. What works is a SATURATED copper laid nearly opaque: it
+   separates from the navy by hue and from the orange by depth. */
 var SEWER_BROWN = '#B06A22';
+
+/* Discharge does not spread in a circle — it goes where the water goes. A round plume at
+   each outfall put stain on the far side of a headland and left the channel it should have
+   run down untouched.
+
+   So the spread is GEODESIC: seeded at the outfall, then grown one small step at a time
+   with the water mask reapplied after every step. Because it can never leave the water it
+   creeps along a creek and stops dead at a bank or a spit, and the repeated blur thins it
+   as it travels, which gives the falloff for free. Step size scales with the zoom so the
+   reach stays about the same distance on the ground rather than on the screen. */
 function drawSewerStain(ctx, geo, proj, waterMask, W, H, mPerPx){
   if (!geo || !waterMask || !mPerPx) return;
-  var r = Math.max(4, 210 / mPerPx);          // a plume about 210 m across on the ground
-  var plume = document.createElement('canvas'); plume.width = W; plume.height = H;
-  var g = plume.getContext('2d');
+  var seedR = Math.max(1.6, 40 / mPerPx);
+  var seed = document.createElement('canvas'); seed.width = W; seed.height = H;
+  var g = seed.getContext('2d');
   g.fillStyle = '#000';
   var any = false;
   geo.features.forEach(function(ft){
     var q = proj({ x:ft.geometry.coordinates[0], y:ft.geometry.coordinates[1] });
-    if (q.x < -r || q.y < -r || q.x > W + r || q.y > H + r) return;
+    if (q.x < -W || q.y < -H || q.x > 2 * W || q.y > 2 * H) return;
     any = true;
-    g.beginPath(); g.arc(q.x, q.y, r, 0, Math.PI * 2); g.fill();
+    g.beginPath(); g.arc(q.x, q.y, seedR, 0, Math.PI * 2); g.fill();
   });
   if (!any) return;
-  [[r * 0.8, 0.34], [r * 0.34, 0.96]].forEach(function(pass){
+
+  var STEPS = 16;
+  var step = Math.min(8, Math.max(1.4, (700 / mPerPx) / STEPS));   // about 700 m of reach
+  var flow = seed;
+  for (var i = 0; i < STEPS; i++){
+    var t = document.createElement('canvas'); t.width = W; t.height = H;
+    var tc = t.getContext('2d');
+    tc.filter = 'blur(' + step + 'px)';
+    tc.drawImage(flow, 0, 0);
+    tc.drawImage(flow, 0, 0);        // twice, so the front survives the next clip
+    tc.filter = 'none';
+    tc.globalCompositeOperation = 'destination-in';
+    tc.drawImage(waterMask, 0, 0);   // it can only travel through water
+    flow = t;
+  }
+
+  /* Two reads of the same spread: the whole reach faintly, and a strong core where the
+     discharge is still concentrated near the pipe. */
+  [[flow, 0.34, 0], [seed, 0.96, Math.max(2, seedR * 1.6)]].forEach(function(pass){
     var c = document.createElement('canvas'); c.width = W; c.height = H;
     var cc = c.getContext('2d');
-    cc.filter = 'blur(' + pass[0] + 'px)';
-    cc.drawImage(plume, 0, 0);
-    cc.filter = 'none';
-    cc.globalCompositeOperation = 'destination-in';   // keep only what lies over water
-    cc.drawImage(waterMask, 0, 0);
+    if (pass[2]){
+      cc.filter = 'blur(' + pass[2] + 'px)';
+      cc.drawImage(pass[0], 0, 0); cc.drawImage(pass[0], 0, 0);
+      cc.filter = 'none';
+      cc.globalCompositeOperation = 'destination-in'; cc.drawImage(waterMask, 0, 0);
+    } else {
+      cc.drawImage(pass[0], 0, 0);
+    }
     cc.globalCompositeOperation = 'source-in';
     cc.fillStyle = SEWER_BROWN; cc.fillRect(0, 0, W, H);
     ctx.save(); ctx.globalAlpha = pass[1]; ctx.drawImage(c, 0, 0); ctx.restore();

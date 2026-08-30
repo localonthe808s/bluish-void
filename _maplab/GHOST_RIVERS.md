@@ -390,6 +390,12 @@ The Dene, Cedar Hill, East and North Meadow, East Green, Great Hill, Conservator
 Hallett Nature Sanctuary, Arthur Ross Pinetum. A second Overpass query scoped to the park's
 own box was needed to pick up the ones tagged as woods and grass rather than as parks.
 
+**One park, one label.** A park can be many polygons spread over kilometres — Pelham Bay
+Park is five — so same-name polygons are clustered transitively at 2.5 km and the cluster
+is labelled once, at the anchor of its largest piece and with the union of their bounding
+boxes as its extent. Deduping at 600 m, which is what this did first, printed PELHAM BAY
+PARK five times across the same park.
+
 **The anchor is not the centroid.** A centroid falls outside a bent park — Riverside Park's
 would land in the Hudson. Each label point is the sampled interior point furthest from any
 edge, a cheap pole of inaccessibility.
@@ -498,13 +504,20 @@ nearly opaque** (`#B06A22`, core alpha .96): it separates from the navy by hue a
 orange by depth, and because the core replaces the water rather than tinting it, the canal
 reads as a different substance rather than as shading.
 
-**Drawn as a stain, not as dots.** Each outfall lays down a soft plume which is then
-clipped to the water mask, so it spreads on the surface and stops at the bank. The
-behaviour falls out of the geometry rather than being drawn: ten outfalls along something
-as narrow as the Gowanus merge into one continuous brown channel, while ten spread along
-the East River barely tint it. Nothing is hand-picked — it is the 415 positions and the
-shape of the water. `drawActiveWater` now returns the water mask it drew, which is what
-makes the clip possible.
+**Drawn as a stain, and the spread is geodesic.** Discharge does not go out in a circle —
+it goes where the water goes. A round plume clipped to the water was the first attempt, and
+it put stain on the far side of a headland while leaving the channel it should have run
+down untouched. Now the stain is seeded at the outfall and grown one small step at a time
+with the water mask reapplied *after every step*, so it can never leave the water: it creeps
+along a creek, stops dead at a bank or a spit, and thins as it travels because each step
+blurs again — which gives the falloff for free. Step size scales with zoom so the reach
+stays about 700 m on the ground rather than a fixed number of pixels.
+
+The behaviour falls out of the geometry rather than being drawn: ten outfalls along
+something as narrow as the Gowanus merge into one continuous brown channel, the Hutchinson
+carries its stain down past Co-op City, and ten spread along the East River barely tint it.
+Nothing is hand-picked — it is the 415 positions and the shape of the water.
+`drawActiveWater` returns the mask it drew, which is what makes any of this possible.
 
 **No volumes or frequencies are available.** The state's CSO dataset (`ephi-ffu6`) has a
 `number_of_overflow_events` field, but for all 427 NYC outfalls it is blank — the entry
