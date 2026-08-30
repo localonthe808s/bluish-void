@@ -200,8 +200,10 @@ layer sitting on a modern map. Inside that field:
   a drawn line. That is the honest reading too: a buried stream is a best estimate of
   where the water ran, and a crisp stroke claims more than the survey supports. Mask width
   runs 2.2–4.2 px with the length of the course, so a trunk carries more than a stub.
-- **Deep crimson outline and tint** — a modelled flood zone. Red is deliberately not
-  part of the water family: it is a forecast, not water.
+- **Radioactive lime, glowing** — a modelled flood zone. Deliberately outside the water
+  family: it is a forecast, not water, and on the orange nothing else on the map comes
+  near it. The glow is real rather than an effect — a wide faint pass well beyond the
+  shape, with the intense colour held to the core, so the edge falls off like light.
 
 Both course strokes are **solid**. Dashing them put a round cap on either end of every
 dash, so each course came out as a string of beads. The wash needs an edge for the same
@@ -455,3 +457,19 @@ trigger a font load the way DOM text does, so the first paint waits on
 Neighbourhood, park and station labels now share `LABELBOX`, filled in that priority
 order, so a later label gives way to one already placed instead of printing through it.
 Before this each kind kept its own list and only avoided its own kind.
+
+---
+
+# Green that is not park
+
+`parkRulesFor` deliberately omits **`grass`**. In OSM that tag covers highway infill —
+cloverleaf loops, median strips, the ribbons along the BQE — as much as it covers a lawn,
+and it was painting whole interchanges green. Measured on a frame of the BQE/LIE knot in
+Queens, `grass` was 1.44% of the frame, and probing the features showed the tiles carry
+**nothing to tell the two apart**: a grass feature arrives with only `kind` and
+`sort_rank` — no `kind_detail`, no `name`.
+
+Nothing that matters was lost by dropping it. A park is `park`, a ball field is `pitch`, a
+cemetery is `cemetery` (10% of that same frame, and correctly so — those are the Queens
+cemeteries), and Central Park's meadows sit inside the park polygon, so Sheep Meadow and
+Cedar Hill are still green and still labelled.
