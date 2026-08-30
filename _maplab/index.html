@@ -124,7 +124,13 @@ var VIEWS = {
                  bands to 60 m) around them. depthFade is that pull's box — the
                  veils dissolve at its edge rather than stopping on a line. */
               depth:'bathy/river_depth.json', depthFade:[-74.85,40.10,-73.15,41.10],
-              depthSeam:[-74.28,40.48015,-73.68015,40.93] },
+              depthSeam:[-74.28,40.48015,-73.68015,40.93],
+              /* The land that steers the afternoon: warm veils at 30/60/120/240 m
+                 from the same DEM pull, so the Watchungs, the Palisades sill, the
+                 Ramapo wall and the moraine spine surface as terraces while the
+                 storm-alley flats stay bare paper. The city mask is clipped out —
+                 the city stays a flat orange shape. */
+              terrain:'bathy/land_relief.json' },
   shelf:    { w:-75.20, s:37.20, e:-70.00, n:41.20, bathy:'bathy/bathy_shelf.json', zoom:7 },
   atlantic: { w:-80.00, s:5.00,  e:-5.00,  n:60.00, bathy:'bathy/bathy_atlantic.json', zoom:3 },
   /* The two places worth real bathymetry: GMRT multibeam rendered to images with
@@ -143,7 +149,14 @@ var W = 1100, H = Math.round(W / 1.1372);   // one style, so give it the room
    the band it opens, so drawing them deepest-last with a darkening ramp gives
    the shelf, the slope, the abyssal plain and the ridge as tone. */
 var BATHY = {}, BOROS = null, HOODS = null, GHOSTS = null, WETGROUND = null, FLOOD = null,
-    SUBWAY = null, STOPS = null, BULLETS = null, PARKNAMES = null, HOODNAMES = null, CSO = null, DEPTH = null;
+    SUBWAY = null, STOPS = null, BULLETS = null, PARKNAMES = null, HOODNAMES = null, CSO = null,
+    DEPTH = null, TERRAIN = null;
+function terrainFor(view){
+  var v = VIEWS[view];
+  if (!v || !v.terrain) return Promise.resolve(null);
+  if (TERRAIN) return Promise.resolve(TERRAIN);
+  return fetch(v.terrain, { cache:'no-cache' }).then(function(r){ return r.json(); }).then(function(j){ TERRAIN = j; return j; });
+}
 function boroughsFor(view){
   var v = VIEWS[view];
   if (!v || !v.boroughs) return Promise.resolve(null);
@@ -732,6 +745,53 @@ function drawActiveWater(ctx, style, f, view, latMid, W, H){
    reads as a trench and a bay as a shelf. Clipped to the water mask because the DEM's
    shoreline and the basemap's disagree by a few metres, and a band that crossed onto the
    orange would read as land flooding. */
+/* The depth grammar mirrored onto land: one warm veil per pixel, class by height,
+   so terrain arrives as quiet terraces rather than a picture of mountains. Drawn
+   over the parks — the highlands ARE mostly park up there, and the tint reads as
+   shade on them — under the roads and everything that moves. The borough mask is
+   clipped out afterwards, and the veils dissolve at the pull box like the depth. */
+var TERRAIN_ALPHA = { 30:0.08, 60:0.12, 120:0.17, 240:0.23 };
+function drawTerrain(ctx, geo, proj, W, H, fade, boroMask){
+  if (!geo) return;
+  var c = document.createElement('canvas'); c.width = W; c.height = H;
+  var g = c.getContext('2d');
+  geo.features.forEach(function(ft){
+    g.fillStyle = 'rgba(92,74,50,' + (TERRAIN_ALPHA[ft.properties.h] || 0.23) + ')';
+    g.beginPath();
+    ft.geometry.coordinates.forEach(function(ring){
+      var P = ring.map(function(pt){ return proj({ x:pt[0], y:pt[1] }); });
+      if (P.length < 3) return;
+      g.moveTo(P[0].x, P[0].y);
+      for (var i = 1; i < P.length - 1; i++)
+        g.quadraticCurveTo(P[i].x, P[i].y, (P[i].x+P[i+1].x)/2, (P[i].y+P[i+1].y)/2);
+      g.quadraticCurveTo(P[P.length-2].x, P[P.length-2].y, P[P.length-1].x, P[P.length-1].y);
+      g.closePath();
+    });
+    g.fill('evenodd');
+  });
+  if (fade){
+    var tl = proj({ x: fade[0], y: fade[3] }), br = proj({ x: fade[2], y: fade[1] });
+    var fpx = Math.abs(proj({ x: fade[0] + 0.08, y: fade[3] }).x - tl.x);
+    if (fpx > 2){
+      g.globalCompositeOperation = 'destination-out';
+      var wipe = function(x0, y0, x1, y1, gx0, gy0, gx1, gy1){
+        var gr = g.createLinearGradient(gx0, gy0, gx1, gy1);
+        gr.addColorStop(0, 'rgba(0,0,0,1)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+        g.fillStyle = gr; g.fillRect(x0, y0, x1 - x0, y1 - y0);
+      };
+      wipe(tl.x,       tl.y,       tl.x + fpx, br.y,       tl.x, 0, tl.x + fpx, 0);
+      wipe(br.x - fpx, tl.y,       br.x,       br.y,       br.x, 0, br.x - fpx, 0);
+      wipe(tl.x,       tl.y,       br.x,       tl.y + fpx, 0, tl.y, 0, tl.y + fpx);
+      wipe(tl.x,       br.y - fpx, br.x,       br.y,       0, br.y, 0, br.y - fpx);
+    }
+  }
+  if (boroMask){
+    g.globalCompositeOperation = 'destination-out';
+    g.drawImage(boroMask, 0, 0);
+  }
+  ctx.drawImage(c, 0, 0);
+}
+
 function drawDepth(ctx, geo, proj, waterMask, W, H, fade, seam){
   if (!geo || !waterMask) return;
   var c = document.createElement('canvas'); c.width = W; c.height = H;
@@ -1517,7 +1577,12 @@ function drawCard(style){
           var again = new protomapsL.Static({ url: document.getElementById('src').value,
             paintRules: parkRulesFor(), labelRules: [], maxDataZoom: 14 });
           return again.drawContextBounds(ctx, {x:view.w, y:view.latMid}, {x:view.e, y:view.latMid}, W, H)
-            .then(function(){ return wetFor(vkey); })
+            .then(function(){ return terrainFor(vkey); })
+            .then(function(tr){
+              if (tr && !stale())
+                drawTerrain(ctx, tr, out.project, W, H, (VIEWS[vkey] || {}).depthFade, boroMaskCv);
+              return wetFor(vkey);
+            })
             .then(function(wg){
               if (stale()) return;
               drawWet(ctx, wg, out.project);          // the field: ground that was water
