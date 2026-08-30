@@ -529,7 +529,13 @@ seaward end — rather than a dot. Its heading is not invented: the water mask i
 ring around each outfall and the stub points the way the water lies, so every pipe comes out
 of its own shore at the right angle. Width comes from the recorded diameter. The stub is
 deliberately **short**, a couple of widths, because a long one stops reading as a pipe and
-starts reading as a pier.
+starts reading as a pier — *except* where the outfall genuinely stands offshore. OH-002 sits
+400 m out in the bay off the Owl's Head pier. For those the nearest land pixel in any
+direction is found by a growing ring search and the pipe runs the whole way back to it, so
+it visibly comes from the shore it actually comes from. Capped at ~250 m of ground: past
+that the point is more likely mis-placed than a real quarter-mile of exposed pipe. Walking
+back along the "outward" vector does not work for this — in open water outward points at
+nothing.
 
 It keeps the white halo the earlier dot had, which is what lets one mark work on every
 background this map has: bare amber vanishes into the orange land and goes dull against the
