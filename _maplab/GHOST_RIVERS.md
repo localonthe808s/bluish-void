@@ -189,7 +189,11 @@ layer sitting on a modern map. Inside that field:
   *compact*, and the same feather on a sixty-metre rectangle just looks out of focus. The
   split is on each feature's own `bbox`: `maxDataZoom` is pinned at 14, so tile units map
   to a fixed ground size and the minor dimension is a stable measure of narrowness. Under
-  60 units (~35 m) the water is feathered; over it, crisp.
+  60 units (~35 m) the water is feathered; over it, crisp. The narrow pass draws **crisp
+  first and then the feather**: a feathered stencil on its own is translucent right across a
+  channel a few pixels wide, so at anything but close zoom the street grid underneath showed
+  through and a road appeared to run over the canal. The crisp pass makes the channel solid;
+  the blurred pass on top still gives the soft edge.
 
   An earlier version laid a wide pale halo underneath first, to guarantee something for
   the water to fade into. It ringed **every** body in white, including the big ones, and
