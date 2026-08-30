@@ -532,6 +532,15 @@ which *boosted* alpha instead of letting it decay and turned the result into a f
 like. Each step is added into an accumulator with `lighter`, so the near field carries the
 sum of all twenty passes and the far field only the last few.
 
+**The plume has an extent, not just a gradient.** A pure falloff has no boundary, so it
+reads as fog rather than as a mapped thing you can point at. Canvas cannot threshold an
+alpha channel, but drawing the same canvas onto itself *k* times with `source-over` gives
+alpha = 1−(1−a)^k, which pushes anything above a low value towards opaque and leaves
+near-zero near zero — a soft threshold, where a **larger k means a lower cut and so a wider
+region**. Two of them at k=5 and k=9, with the tighter punched out of the wider by
+`destination-out`, leave a thin band: the plume's contour, drawn in a darker copper. So each
+discharge reads as an aura, a body, and an edge.
+
 **What this does not model is tide or current.** There is no direction here beyond the shape
 of the water itself. A downstream bias would look convincing and would be a guess dressed
 as data.
