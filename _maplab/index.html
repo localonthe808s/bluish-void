@@ -119,7 +119,11 @@ var VIEWS = {
               subway:'bathy/subway_lines.json', stops:'bathy/subway_stops.json',
               bullets:'bathy/subway_colours.json', parkNames:'bathy/park_labels.json',
               hoodNames:'bathy/hood_labels.json', cso:'bathy/cso_outfalls.json',
-              depth:'bathy/river_depth.json' },
+              /* depth now carries the whole frame: the original harbour + creek
+                 tiles untouched, plus a bight/Sound/Hudson pull (35 m cells,
+                 bands to 60 m) around them. depthFade is that pull's box — the
+                 veils dissolve at its edge rather than stopping on a line. */
+              depth:'bathy/river_depth.json', depthFade:[-74.85,40.10,-73.15,41.10] },
   shelf:    { w:-75.20, s:37.20, e:-70.00, n:41.20, bathy:'bathy/bathy_shelf.json', zoom:7 },
   atlantic: { w:-80.00, s:5.00,  e:-5.00,  n:60.00, bathy:'bathy/bathy_atlantic.json', zoom:3 },
   /* The two places worth real bathymetry: GMRT multibeam rendered to images with
@@ -727,7 +731,7 @@ function drawActiveWater(ctx, style, f, view, latMid, W, H){
    reads as a trench and a bay as a shelf. Clipped to the water mask because the DEM's
    shoreline and the basemap's disagree by a few metres, and a band that crossed onto the
    orange would read as land flooding. */
-function drawDepth(ctx, geo, proj, waterMask, W, H){
+function drawDepth(ctx, geo, proj, waterMask, W, H, fade){
   if (!geo || !waterMask) return;
   var c = document.createElement('canvas'); c.width = W; c.height = H;
   var g = c.getContext('2d');
@@ -737,6 +741,28 @@ function drawDepth(ctx, geo, proj, waterMask, W, H){
     g.fillStyle = 'rgba(4,10,40,' + (0.10 + 0.14 * t).toFixed(3) + ')';
     curvePath(g, ft.geometry.coordinates[0], proj, true); g.fill();
   });
+  /* The survey does not end where the water does, so its edge must not read as
+     one: erase the veils over the outer ~7 km of the pull box, so the detail
+     dissolves into plain navy instead of stopping on a line. The gradients sit
+     at the box's projected edges — zoomed into the harbour they are off-canvas
+     and cost nothing. */
+  if (fade){
+    var tl = proj({ x: fade[0], y: fade[3] }), br = proj({ x: fade[2], y: fade[1] });
+    var fpx = Math.abs(proj({ x: fade[0] + 0.08, y: fade[3] }).x - tl.x);   // ~7 km
+    if (fpx > 2){
+      g.globalCompositeOperation = 'destination-out';
+      var wipe = function(x0, y0, x1, y1, gx0, gy0, gx1, gy1){
+        var gr = g.createLinearGradient(gx0, gy0, gx1, gy1);
+        gr.addColorStop(0, 'rgba(0,0,0,1)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+        g.fillStyle = gr; g.fillRect(x0, y0, x1 - x0, y1 - y0);
+      };
+      wipe(tl.x,        tl.y,        tl.x + fpx, br.y,        tl.x, 0, tl.x + fpx, 0);
+      wipe(br.x - fpx,  tl.y,        br.x,       br.y,        br.x, 0, br.x - fpx, 0);
+      wipe(tl.x,        tl.y,        br.x,       tl.y + fpx,  0, tl.y, 0, tl.y + fpx);
+      wipe(tl.x,        br.y - fpx,  br.x,       br.y,        0, br.y, 0, br.y - fpx);
+      g.globalCompositeOperation = 'source-over';
+    }
+  }
   g.globalCompositeOperation = 'destination-in';
   g.drawImage(waterMask, 0, 0);
   ctx.drawImage(c, 0, 0);
@@ -1473,7 +1499,7 @@ function drawCard(style){
               if (stale()) return;
               return depthFor(vkey).then(function(dp){
                 if (stale()) return waterMask;
-                drawDepth(ctx, dp, out.project, waterMask, W, H);
+                drawDepth(ctx, dp, out.project, waterMask, W, H, (VIEWS[vkey] || {}).depthFade);
                 return drawPiers(ctx, style, f, view, view.latMid, W, H, boroMaskCv, waterMask);
               }).then(function(){ return waterMask; });
             }).then(function(waterMask){
