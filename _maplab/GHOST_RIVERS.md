@@ -497,12 +497,16 @@ tributaries). By catchment: Newtown Creek plant 82, Wards Island 75, North River
 Bay 43, Port Richmond 37, Red Hook 35, Hunts Point 34. **A quarter of them — 100 of 415 —
 discharge into a former tidal creek, canal or kill** rather than open water.
 
-**Colour took three tries**, and the reason is worth keeping. A *dark* brown over the dark
-navy water is the same value as the water, so it mixed to mud. A *pale* brown is just a dim
-orange, which is the land colour, so it went grey. What reads is a **saturated copper laid
-nearly opaque** (`#B06A22`, core alpha .96): it separates from the navy by hue and from the
-orange by depth, and because the core replaces the water rather than tinting it, the canal
-reads as a different substance rather than as shading.
+**Colour took four tries, and the lesson is that hue cannot carry this.** Brown sits between
+the map's two dominant colours. A *dark* brown over the dark navy is the same value as the
+water, so it mixed to mud. A *pale* brown is a dim orange, which is the land colour, so it
+went grey. A *saturated copper* fixed the canal but then read as two different colours
+depending on what it crossed — muddy over navy, olive over the orange piers.
+
+So the plume is carried by **value** instead: a near-black warm slick (`#2A1B0B`), far darker
+than anything else on the map, which reads the same over water and over land, with the pipe
+mouth as a bright amber point (`#E09A34`) on top of it. Dark field, bright source — the
+contrast does the work and no hue has to compete with the city.
 
 **Weighted by pipe size.** DEP records each outfall's dimensions, so a box or an egg is
 reduced to the diameter of a circle with the same cross-section — flow follows area, not
