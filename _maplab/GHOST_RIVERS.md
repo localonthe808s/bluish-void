@@ -643,9 +643,13 @@ tell a motorway from a residential street, and **no labels**. Paths, tracks and 
 deliberately absent — this is for the shape of the street grid, and a footway in a park
 would say something the layer is not trying to say.
 
-They are drawn with the parks: **after** the opaque borough mask, which would otherwise bury
-them, and **before** every thematic layer, so water, ghost courses, flood and subway all sit
-above them.
+They are drawn after the opaque borough mask, which would otherwise bury them, and **after
+the historic water field** — the marsh is ground the city was built on, not a hole in it,
+and hiding the streets beneath it made the old water read as somewhere else. With the grid
+on top you can see the blocks laid across Kissena Corridor and the Flushing Meadows arms,
+which is the point the layer exists to make. They stay **under** the buried courses, which
+are the subject, under today's water, since no street crosses the Hudson, and under the
+flood and subway.
 
 **Width scales with the framing.** A weight that reads as a hairline at street level is a
 haze at city level, where the whole grid collapses into a few pixels — pulled back, the
