@@ -635,22 +635,36 @@ function drawSewerStain(ctx, geo, proj, waterMask, W, H, mPerPx){
   });
   if (!any) return;
 
-  /* The spread is GEODESIC: grown one small step at a time with the water mask reapplied
-     after every step, so it can never leave the water. It runs along a creek, stops dead
-     at a bank or a spit, and thins as it travels because each step blurs again. */
-  var STEPS = 16;
-  var step = Math.min(8, Math.max(1.4, (700 / mPerPx) / STEPS));
-  var flow = seed;
+  /* The spread is GEODESIC and it DECAYS. Each step blurs the front and reapplies the
+     water mask, so it can only travel through water — along a creek, dead-stopped at a
+     bank. Crucially the front is drawn once per step, not twice: blurring conserves total
+     alpha while spreading it, so density falls as the plume grows, which is the whole
+     point. An earlier version drew it twice each step to help the front survive, which
+     boosted alpha instead of letting it decay and turned the result into a flat
+     "everywhere the water reaches" mask — a whole bay filled evenly.
+
+     Every step is added into an accumulator with `lighter`, so the near field gets the sum
+     of all sixteen passes and the far field only the last few. Dense at the pipe, thinning
+     with distance, shaped by the channel.
+
+     What this does NOT model is tide or current: there is no direction here beyond the
+     shape of the water itself, and inventing one would be a guess dressed as data. */
+  var STEPS = 20;
+  var step = Math.min(7, Math.max(1.2, (750 / mPerPx) / STEPS));
+  var acc = document.createElement('canvas'); acc.width = W; acc.height = H;
+  var ac = acc.getContext('2d');
+  ac.globalCompositeOperation = 'lighter';
+  var cur = seed;
   for (var i = 0; i < STEPS; i++){
     var t = document.createElement('canvas'); t.width = W; t.height = H;
     var tc = t.getContext('2d');
     tc.filter = 'blur(' + step + 'px)';
-    tc.drawImage(flow, 0, 0);
-    tc.drawImage(flow, 0, 0);
+    tc.drawImage(cur, 0, 0);                 // once: the plume is allowed to thin
     tc.filter = 'none';
     tc.globalCompositeOperation = 'destination-in';
-    tc.drawImage(waterMask, 0, 0);
-    flow = t;
+    tc.drawImage(waterMask, 0, 0);           // and it can only travel through water
+    cur = t;
+    ac.drawImage(cur, 0, 0);
   }
   var lay = function(src, alpha, blur){
     var c = document.createElement('canvas'); c.width = W; c.height = H;
@@ -665,8 +679,8 @@ function drawSewerStain(ctx, geo, proj, waterMask, W, H, mPerPx){
     cc.fillStyle = SEWER_BROWN; cc.fillRect(0, 0, W, H);
     ctx.save(); ctx.globalAlpha = alpha; ctx.drawImage(c, 0, 0); ctx.restore();
   };
-  lay(flow, 0.52, 0);      // the reach
-  lay(seed, 0.96, 2);      // the concentrated end, at the pipe
+  lay(acc, 0.80, 0);       // the plume, densest where every pass overlapped
+  lay(seed, 0.96, 2);      // the pipe mouth itself
 
   /* And the pipe itself. Without a mark the stain is only a smear and you cannot see what
      is producing it — this is the one part of the layer that is a measured position rather

@@ -521,9 +521,20 @@ it goes where the water goes. A round plume clipped to the water was the first a
 it put stain on the far side of a headland while leaving the channel it should have run
 down untouched. Now the stain is seeded at the outfall and grown one small step at a time
 with the water mask reapplied *after every step*, so it can never leave the water: it creeps
-along a creek, stops dead at a bank or a spit, and thins as it travels because each step
-blurs again — which gives the falloff for free. Step size scales with zoom so the reach
-stays about 700 m on the ground rather than a fixed number of pixels.
+along a creek and stops dead at a bank or a spit. Step size scales with zoom so the reach
+stays about 750 m on the ground rather than a fixed number of pixels.
+
+**And it decays.** The front is drawn **once** per step, not twice. Blurring conserves total
+alpha while spreading it, so density falls as the plume grows — that is the whole mechanism.
+An earlier version drew it twice each step so the front would survive the repeated clipping,
+which *boosted* alpha instead of letting it decay and turned the result into a flat
+"everywhere the water reaches" mask: a whole bay filled evenly, which is what it looked
+like. Each step is added into an accumulator with `lighter`, so the near field carries the
+sum of all twenty passes and the far field only the last few.
+
+**What this does not model is tide or current.** There is no direction here beyond the shape
+of the water itself. A downstream bias would look convincing and would be a guess dressed
+as data.
 
 The behaviour falls out of the geometry rather than being drawn: ten outfalls along
 something as narrow as the Gowanus merge into one continuous brown channel, the Hutchinson
