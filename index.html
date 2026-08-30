@@ -47790,7 +47790,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
          read washed out (user 2026-08-30). Enough ghost for the streets to
          register, most of the palette left to the rain. */
       if (bm){ bm.style.mixBlendMode = 'normal'; bm.style.opacity = '.35'; }
-      setSrc('/nyc-basemap-ink.jpg?v=4', '/nyc-basemap-ink.jpg?v=4'); show(true);
+      /* zoomed in, the backdrop is a composite of the deeper lab tiles for
+         the visible box (built by _cityComposeBM); at the launch view it is
+         the plain bake */
+      var inkU = (window._cityView && window._cityViewBM)
+        ? window._cityViewBM : '/nyc-basemap-ink.jpg?v=4';
+      setSrc(inkU, inkU); show(true);
     }
     else {
       if (bm){ bm.style.mixBlendMode = 'screen'; bm.style.opacity = '.85'; }
@@ -48158,8 +48163,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var ic = document.getElementById('fcast-img-container');
         var ch = Math.max(400, Math.min(1000, (ic && ic.clientHeight) || 600));
         var cw = Math.round(ch * wbox.ASPECT);
+        /* zoomed THE CITY: the frames re-render server-side for exactly the
+           visible box at full container resolution — crisp at any depth */
+        var vb = (isCity && window._cityView) ? window._cityView : wbox;
         return 'https://opengeo.ncep.noaa.gov/geoserver/' + sid + '/ows?service=WMS&version=1.1.0&request=GetMap'
-          + '&layers=' + _wmsLayerFor(sid, prod) + '&styles=&bbox=' + Math.round(wbox.X0) + ',' + Math.round(wbox.Y0) + ',' + Math.round(wbox.X1) + ',' + Math.round(wbox.Y1)
+          + '&layers=' + _wmsLayerFor(sid, prod) + '&styles=&bbox=' + Math.round(vb.X0) + ',' + Math.round(vb.Y0) + ',' + Math.round(vb.X1) + ',' + Math.round(vb.Y1)
           + '&width=' + cw + '&height=' + ch + '&srs=EPSG:3857&format=image/png&transparent=true'
           + '&time=' + encodeURIComponent(t);
       }
@@ -48357,16 +48365,32 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     im.src = url;
   }
 
-  /* ── THE CITY zoom: wheel, pinch, drag — the map widgets' grammar. One
-     transform drives all five aligned layers (both crossfade frames, both
-     basemap copies, the warnings/strikes canvas), so everything stays
-     registered at any zoom. Chips and labels are siblings and never scale.
-     touch-action flips with the state: at rest the page scrolls over the
-     widget as normal and a pinch starts the zoom; zoomed in, the view owns
-     every touch and one finger pans. */
+  /* ── THE CITY zoom — lab-grade. The gesture is instant CSS transform on all
+     five aligned layers; half a second after it settles, the view RE-RENDERS
+     for exactly the visible box: the WMS frames refetch at full container
+     resolution (crisp echoes at any depth), the warnings/strikes canvas
+     remaps its bounds, and the backdrop swaps to a composite of the deeper
+     lab bake — four half-box tiles at 35 m/px, where the subway, the
+     neighbourhoods and the finer water story surface just as they do in the
+     lab. Zooming back out lands on the launch view and everything restores. */
   var _cityZoom = { k:1, tx:0, ty:0 };
   var _CITY_ZOOM_LAYERS = ['fcast-radar-img','fcast-radar-img-b',
                            'fcast-city-basemap','fcast-city-basemap-under','fcast-city-overlay'];
+  window._cityView = null;            // null = the launch box; else {X0,Y0,X1,Y1,ASPECT}
+  window._cityViewBM = null;          // blob URL of the composed zoomed backdrop
+  var _CITY_TILES = { z1:'/nyc-basemap-ink.jpg?v=4',
+    z2:{ nw:'/nyc-basemap-ink-z2-nw.jpg?v=1', ne:'/nyc-basemap-ink-z2-ne.jpg?v=1',
+         sw:'/nyc-basemap-ink-z2-sw.jpg?v=1', se:'/nyc-basemap-ink-z2-se.jpg?v=1' } };
+  var _cityTileCache = {};
+  function _cityTile(url){
+    if (!_cityTileCache[url]) _cityTileCache[url] = new Promise(function(res, rej){
+      var im = new Image();
+      im.onload = function(){ res(im); };
+      im.onerror = rej;
+      im.src = url;
+    });
+    return _cityTileCache[url];
+  }
   function _cityZoomLive(){ return fcastState.range === 'live' && fcastState.area === 'city-nyc'; }
   function _cityZoomApply(){
     var t = 'translate(-50%,-50%) translate(' + _cityZoom.tx.toFixed(1) + 'px,'
@@ -48376,26 +48400,130 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (el) el.style.transform = t;
     });
     var c = document.getElementById('fcast-img-container');
-    if (c){ c.style.overflow = 'hidden'; c.style.touchAction = _cityZoom.k > 1 ? 'none' : 'pan-y'; }
+    if (c){
+      c.style.overflow = 'hidden';
+      c.style.touchAction = (_cityZoom.k > 1 || window._cityView) ? 'none' : 'pan-y';
+    }
   }
-  window._cityZoomReset = function(){ _cityZoom.k = 1; _cityZoom.tx = 0; _cityZoom.ty = 0; _cityZoomApply(); };
+  function _cityRerenderFrames(){
+    /* the frames on screen were rendered for the previous box — hide them so
+       a misregistered scan never blends with the new one; the next tick's
+       frame fades in for the new box */
+    ['fcast-radar-img','fcast-radar-img-b'].forEach(function(id){
+      var im = document.getElementById(id);
+      if (im) im.style.opacity = '0';
+    });
+    try{ loadFcastRadar(); }catch(e){}
+  }
+  window._cityZoomReset = function(){
+    var wasZoomed = !!window._cityView;
+    _cityZoom.k = 1; _cityZoom.tx = 0; _cityZoom.ty = 0;
+    window._cityView = null;
+    if (window._cityViewBM){ try{ URL.revokeObjectURL(window._cityViewBM); }catch(e){} window._cityViewBM = null; }
+    try{
+      var B = _cityBoxCfg();
+      _cityOv.X0 = B.X0; _cityOv.Y0 = B.Y0; _cityOv.X1 = B.X1; _cityOv.Y1 = B.Y1;
+    }catch(e){}
+    _cityZoomApply();
+    if (wasZoomed && _cityZoomLive()){
+      if (window._syncCityBasemap) try{ _syncCityBasemap(); }catch(e){}
+      try{ _cityOvDraw(); }catch(e){}
+      _cityRerenderFrames();
+    }
+  };
+  function _cityComposeBM(v){
+    var B = _cityBoxCfg();
+    var c = document.getElementById('fcast-img-container');
+    var r = c ? c.getBoundingClientRect() : null;
+    var W2 = (r && Math.round(r.width)) || 1100;
+    var H2 = (r && Math.round(r.height)) || Math.round(W2 / B.ASPECT);
+    var kAbs = (B.X1 - B.X0) / (v.X1 - v.X0);
+    var Xm = (B.X0 + B.X1) / 2, Ym = (B.Y0 + B.Y1) / 2;
+    var jobs;
+    if (kAbs >= 1.9){
+      jobs = [
+        { n:'nw', X0:B.X0, Y0:Ym, X1:Xm, Y1:B.Y1 },
+        { n:'ne', X0:Xm, Y0:Ym, X1:B.X1, Y1:B.Y1 },
+        { n:'sw', X0:B.X0, Y0:B.Y0, X1:Xm, Y1:Ym },
+        { n:'se', X0:Xm, Y0:B.Y0, X1:B.X1, Y1:Ym }
+      ].filter(function(q){ return q.X1 > v.X0 && q.X0 < v.X1 && q.Y1 > v.Y0 && q.Y0 < v.Y1; })
+       .map(function(q){ return _cityTile(_CITY_TILES.z2[q.n]).then(function(im){ return { im:im, b:q }; }); });
+    } else {
+      jobs = [_cityTile(_CITY_TILES.z1).then(function(im){ return { im:im, b:B }; })];
+    }
+    Promise.all(jobs).then(function(parts){
+      if (window._cityView !== v) return;             // a newer settle won
+      var cv = document.createElement('canvas'); cv.width = W2; cv.height = H2;
+      var g = cv.getContext('2d');
+      var sx = W2 / (v.X1 - v.X0), sy = H2 / (v.Y1 - v.Y0);
+      parts.forEach(function(p){
+        g.drawImage(p.im, (p.b.X0 - v.X0) * sx, (v.Y1 - p.b.Y1) * sy,
+                    (p.b.X1 - p.b.X0) * sx, (p.b.Y1 - p.b.Y0) * sy);
+      });
+      cv.toBlob(function(bl){
+        if (!bl || window._cityView !== v) return;
+        if (window._cityViewBM){ try{ URL.revokeObjectURL(window._cityViewBM); }catch(e){} }
+        window._cityViewBM = URL.createObjectURL(bl);
+        if (window._syncCityBasemap) try{ _syncCityBasemap(); }catch(e){}
+      }, 'image/jpeg', 0.92);
+    }).catch(function(){});   // a missing tile leaves the CSS-zoomed base in place
+  }
   (function(){
     var c = document.getElementById('fcast-img-container');
     if (!c) return;
+    var pts = {};
+    var settleTimer = null;
+    function settleSoon(){ clearTimeout(settleTimer); settleTimer = setTimeout(settle, 500); }
+    function settle(){
+      if (!_cityZoomLive()) return;
+      if (Object.keys(pts).length){ settleSoon(); return; }        // still mid-gesture
+      if (_cityZoom.k === 1 && !_cityZoom.tx && !_cityZoom.ty) return;
+      var r = c.getBoundingClientRect();
+      if (!r.width) return;
+      var B = _cityBoxCfg();
+      var cur = window._cityView || B;
+      var curXs = cur.X1 - cur.X0, curYs = cur.Y1 - cur.Y0;
+      var k = _cityZoom.k;
+      var cx = (cur.X0 + cur.X1) / 2 - (_cityZoom.tx / k) * (curXs / r.width);
+      var cy = (cur.Y0 + cur.Y1) / 2 + (_cityZoom.ty / k) * (curYs / r.height);
+      var BXs = B.X1 - B.X0;
+      var ns = Math.max(BXs / 4, Math.min(BXs, curXs / k));
+      var nYs = ns / BXs * (B.Y1 - B.Y0);
+      cx = Math.max(B.X0 + ns / 2, Math.min(B.X1 - ns / 2, cx));
+      cy = Math.max(B.Y0 + nYs / 2, Math.min(B.Y1 - nYs / 2, cy));
+      _cityZoom.k = 1; _cityZoom.tx = 0; _cityZoom.ty = 0;
+      if (ns >= BXs * 0.995){ window._cityZoomReset(); return; }
+      var v = { X0:cx - ns / 2, Y0:cy - nYs / 2, X1:cx + ns / 2, Y1:cy + nYs / 2, ASPECT:B.ASPECT };
+      window._cityView = v;
+      _cityZoomApply();
+      _cityOv.X0 = v.X0; _cityOv.Y0 = v.Y0; _cityOv.X1 = v.X1; _cityOv.Y1 = v.Y1;
+      try{ _cityOvDraw(); }catch(e){}
+      _cityComposeBM(v);
+      _cityRerenderFrames();
+    }
     function clamp(){
       var r = c.getBoundingClientRect();
-      var mx = (_cityZoom.k - 1) * r.width / 2, my = (_cityZoom.k - 1) * r.height / 2;
-      _cityZoom.tx = Math.max(-mx, Math.min(mx, _cityZoom.tx));
-      _cityZoom.ty = Math.max(-my, Math.min(my, _cityZoom.ty));
+      if (window._cityView){
+        // loose during the gesture — the settle clamps to the launch box exactly
+        _cityZoom.tx = Math.max(-r.width * 0.75, Math.min(r.width * 0.75, _cityZoom.tx));
+        _cityZoom.ty = Math.max(-r.height * 0.75, Math.min(r.height * 0.75, _cityZoom.ty));
+      } else {
+        var mx = (_cityZoom.k - 1) * r.width / 2, my = (_cityZoom.k - 1) * r.height / 2;
+        _cityZoom.tx = Math.max(-mx, Math.min(mx, _cityZoom.tx));
+        _cityZoom.ty = Math.max(-my, Math.min(my, _cityZoom.ty));
+      }
     }
     function zoomAt(px, py, f){
-      var k2 = Math.max(1, Math.min(4, _cityZoom.k * f));
+      var B = _cityBoxCfg();
+      var cur = window._cityView || B;
+      var ratio = (B.X1 - B.X0) / (cur.X1 - cur.X0);      // absolute zoom of the settled view
+      var k2 = Math.max(1 / ratio, Math.min(4 / ratio, _cityZoom.k * f));
       if (k2 === _cityZoom.k) return;
       var sc = k2 / _cityZoom.k;
       _cityZoom.tx = px - sc * (px - _cityZoom.tx);
       _cityZoom.ty = py - sc * (py - _cityZoom.ty);
       _cityZoom.k = k2;
-      clamp(); _cityZoomApply();
+      clamp(); _cityZoomApply(); settleSoon();
     }
     function rel(ev){
       var r = c.getBoundingClientRect();
@@ -48410,14 +48538,13 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     c.addEventListener('dblclick', function(ev){
       if (!_cityZoomLive()) return;
       var p = rel(ev);
-      if (_cityZoom.k > 1.05) window._cityZoomReset();
-      else zoomAt(p[0], p[1], 2);
+      if (_cityZoom.k > 1.05 || window._cityView) window._cityZoomReset();
+      else { zoomAt(p[0], p[1], 2); }
     });
-    var pts = {};
     c.addEventListener('pointerdown', function(ev){
       if (!_cityZoomLive()) return;
       pts[ev.pointerId] = rel(ev);
-      if (Object.keys(pts).length === 1 && _cityZoom.k > 1){
+      if (Object.keys(pts).length === 1 && (_cityZoom.k > 1 || window._cityView)){
         try { c.setPointerCapture(ev.pointerId); } catch(e){}
       }
     });
@@ -48425,11 +48552,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (!_cityZoomLive() || !(ev.pointerId in pts)) return;
       var ids = Object.keys(pts);
       var p = rel(ev);
-      if (ids.length === 1 && _cityZoom.k > 1){
+      if (ids.length === 1 && (_cityZoom.k > 1 || window._cityView)){
         _cityZoom.tx += p[0] - pts[ev.pointerId][0];
         _cityZoom.ty += p[1] - pts[ev.pointerId][1];
         pts[ev.pointerId] = p;
-        clamp(); _cityZoomApply();
+        clamp(); _cityZoomApply(); settleSoon();
       } else if (ids.length === 2){
         var other = pts[ids[0] === String(ev.pointerId) ? ids[1] : ids[0]];
         var prev = pts[ev.pointerId];
@@ -48439,7 +48566,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         pts[ev.pointerId] = p;
       }
     });
-    var lift = function(ev){ delete pts[ev.pointerId]; };
+    var lift = function(ev){ delete pts[ev.pointerId]; settleSoon(); };
     c.addEventListener('pointerup', lift);
     c.addEventListener('pointercancel', lift);
   })();
