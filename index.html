@@ -49009,7 +49009,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       ['boha','1-HR RAIN'], ['bdsa','STORM TOTAL']
     ];
     function frameUrl(fhr){
-      var v = cw.view;
+      /* frames register to the PAINTED basemap, not the requested target —
+         they ride the same CSS transform, so during a gesture the loop keeps
+         hitting the same cached (despeckled) URLs instead of cold-fetching
+         boxes that are about to change again */
+      var v = cwPainted;
       var body = document.getElementById('cw-body');
       var ch = Math.max(400, Math.min(1000, (body && body.clientHeight) || 600));
       ch = Math.round(ch * Math.min(2, window.devicePixelRatio || 1));
@@ -49023,8 +49027,19 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         + '&time=' + encodeURIComponent(t);
     }
     var cwComposeSeq = 0, cwComposeUrl = null;
+    /* cwPainted is the view the on-screen pixels were actually rendered for.
+       The gesture transform (z) is ALWAYS relative to cwPainted; cw.view is
+       the requested target a compose may still be fetching. Folding the
+       gesture into the view only happens when the repaint lands (see
+       cwRemapZoom) — while radar frames and flood tiles kept composes slow,
+       the old fold-at-settle + reset-at-land pair double-counted overlapping
+       settles and wiped gestures mid-flight, which made zooming fight back. */
+    var cwPainted = CW_VIEW, cwComposeBusy = 0, cwRemapZoom = null;
     function compose(done){
       var v = cw.view, B = _cityBoxCfg();
+      cwComposeBusy++;
+      var _cb = done, _finished = false;
+      var fin = function(ok){ if (_finished) return; _finished = true; cwComposeBusy--; if (_cb) _cb(ok); };
       var body = document.getElementById('cw-body');
       var dpr = Math.min(2, window.devicePixelRatio || 1);
       var W2 = Math.round(((body && body.clientWidth) || 1100) * dpr);
@@ -49056,7 +49071,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       }
       var seq = ++cwComposeSeq;
       Promise.all(jobs).then(function(parts){
-        if (seq !== cwComposeSeq){ if (done) done(false); return; }
+        if (seq !== cwComposeSeq){ fin(false); return; }
         var cv = document.createElement('canvas'); cv.width = W2; cv.height = H2;
         var g = cv.getContext('2d');
         var sx = W2 / (v.X1 - v.X0), sy = H2 / (v.Y1 - v.Y0);
@@ -49067,26 +49082,32 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         /* toBlob: the jpeg encode leaves the main thread (toDataURL blocked it
            ~100ms at 2x); the probe decode means the swap lands fully painted */
         cv.toBlob(function(blob){
-          if (seq !== cwComposeSeq || !blob){ if (done) done(false); return; }
+          if (seq !== cwComposeSeq || !blob){ fin(false); return; }
           var u = URL.createObjectURL(blob);
           var probe = new Image();
           var land = function(){
-            if (seq !== cwComposeSeq){ URL.revokeObjectURL(u); if (done) done(false); return; }
+            if (seq !== cwComposeSeq){ URL.revokeObjectURL(u); fin(false); return; }
             var a = document.getElementById('cw-bm-under'), b2 = document.getElementById('cw-bm-ghost');
             if (a) a.src = u;
             if (b2) b2.src = u;
             if (cwComposeUrl){ var old = cwComposeUrl; setTimeout(function(){ URL.revokeObjectURL(old); }, 3000); }
             cwComposeUrl = u;
+            /* the painting now shows v — re-express the live gesture
+               transform against it (identity when the user has been still,
+               their in-progress pinch preserved when they haven't) */
+            var pOld = cwPainted;
+            cwPainted = v;
+            if (cwRemapZoom) cwRemapZoom(pOld, v);
             cwDrawSensors();
-            if (done) done(true);
+            fin(true);
           };
           probe.onload = function(){
             if (probe.decode) probe.decode().then(land, land); else land();
           };
-          probe.onerror = function(){ URL.revokeObjectURL(u); if (done) done(false); };
+          probe.onerror = function(){ URL.revokeObjectURL(u); fin(false); };
           probe.src = u;
         }, 'image/jpeg', 0.9);
-      }).catch(function(){ if (done) done(false); });
+      }).catch(function(){ fin(false); });
     }
     function build(){
       if (cw.built) return;
@@ -49167,8 +49188,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var pts = {}, settleTimer = null;
       var AR = (CW_VIEW.X1 - CW_VIEW.X0) / (CW_VIEW.Y1 - CW_VIEW.Y0);
       function atHome(){
-        var v = cw.view;
+        var v = cwPainted;
         return Math.abs(v.X0 - CW_VIEW.X0) < 2 && Math.abs(v.X1 - CW_VIEW.X1) < 2 && Math.abs(v.Y0 - CW_VIEW.Y0) < 2;
+      }
+      function near(u, v2){
+        return Math.abs(u.X0 - v2.X0) < 1 && Math.abs(u.X1 - v2.X1) < 1
+            && Math.abs(u.Y0 - v2.Y0) < 1 && Math.abs(u.Y1 - v2.Y1) < 1;
       }
       function hideFrames(){
         var fa = document.getElementById('cw-frame-a'), fb = document.getElementById('cw-frame-b');
@@ -49206,7 +49231,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var r = c.getBoundingClientRect();
         if (!r.width) return;
         var B = _cityBoxCfg();
-        var cur = cw.view;
+        var cur = cwPainted;    // z is painted-relative — fold against the pixels on screen
         var curXs = cur.X1 - cur.X0, curYs = cur.Y1 - cur.Y0;
         var cx = (cur.X0 + cur.X1) / 2 - (z.tx / z.k) * (curXs / r.width);
         var cy = (cur.Y0 + cur.Y1) / 2 + (z.ty / z.k) * (curYs / r.height);
@@ -49216,17 +49241,22 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var nYs = ns / AR;
         cx = Math.max(B.X0 + ns / 2, Math.min(B.X1 - ns / 2, cx));
         cy = Math.max(B.Y0 + nYs / 2, Math.min(B.Y1 - nYs / 2, cy));
-        cw.view = { X0: cx - ns / 2, Y0: cy - nYs / 2, X1: cx + ns / 2, Y1: cy + nYs / 2, ASPECT: AR };
+        var nv = { X0: cx - ns / 2, Y0: cy - nYs / 2, X1: cx + ns / 2, Y1: cy + nYs / 2, ASPECT: AR };
+        if (near(nv, cw.view)){
+          if (near(cw.view, cwPainted)){
+            /* the clamps absorbed the whole gesture (edge pan / over-zoom):
+               rubber-band the residual transform home */
+            zt.k = 1; zt.tx = 0; zt.ty = 0; animate();
+          } else if (!cwComposeBusy){
+            /* this box is already the target but its compose died — retry */
+            compose(function(ok){ if (!ok) settleSoon(); });
+          } else settleSoon();   // its compose is still in flight — check back
+          return;
+        }
+        cw.view = nv;
         /* the CSS-magnified old backdrop stays up until the recompose has
-           decoded, then the swap + transform reset land in one frame — the
-           old settle reset first and visibly snapped out, then back in */
-        compose(function(ok){
-          /* reset even when superseded/failed — a rare snap beats a view
-             stuck under a stale magnification */
-          z.k = 1; z.tx = 0; z.ty = 0;
-          zt.k = 1; zt.tx = 0; zt.ty = 0;
-          apply(); hideFrames();
-        });
+           decoded; the swap + gesture remap (cwRemapZoom) land in one frame */
+        compose(function(ok){ if (!ok) settleSoon(); });
       }
       function clamp(t){
         var r = c.getBoundingClientRect();
@@ -49235,7 +49265,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       }
       function zoomAt(px, py, f, eased){
         var B = _cityBoxCfg();
-        var curXs = cw.view.X1 - cw.view.X0;
+        var curXs = cwPainted.X1 - cwPainted.X0;
         var BXs = B.X1 - B.X0, BYs = B.Y1 - B.Y0;
         var maxXs = Math.min(BXs, BYs * AR);
         var k2 = Math.max(curXs / maxXs, Math.min(4 * curXs / BXs, zt.k * f));
@@ -49265,7 +49295,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           /* ease home: aim the transform at the home framing (blank margins
              fill in navy until the settle recomposes) */
           var r = c.getBoundingClientRect();
-          var v = cw.view;
+          var v = cwPainted;
           var vXs = v.X1 - v.X0, vYs = v.Y1 - v.Y0;
           var kh = vXs / (CW_VIEW.X1 - CW_VIEW.X0);
           zt.k = kh;
@@ -49288,7 +49318,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         if (!r.width) return;
         var px = ev.clientX - r.left - r.width / 2, py = ev.clientY - r.top - r.height / 2;
         var xc = (px - z.tx) / z.k + r.width / 2, yc = (py - z.ty) / z.k + r.height / 2;
-        var v = cw.view;
+        var v = cwPainted;
         var X = v.X0 + (xc / r.width) * (v.X1 - v.X0);
         var Y = v.Y1 - (yc / r.height) * (v.Y1 - v.Y0);
         var mpp = (v.X1 - v.X0) / (r.width * z.k);
@@ -49324,6 +49354,32 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var lift = function(ev){ delete pts[ev.pointerId]; settleSoon(); };
       c.addEventListener('pointerup', lift);
       c.addEventListener('pointercancel', lift);
+      /* called by compose() the moment the backdrop swaps from pOld to pNew:
+         rewrite the transform so the screen doesn't move. If the user was
+         still, this lands exactly on identity; if they kept pinching while
+         the compose was in flight, their gesture survives the swap intact. */
+      cwRemapZoom = function(pOld, pNew){
+        if (pOld === pNew) return;
+        var r = c.getBoundingClientRect();
+        var a = (pOld.X1 - pOld.X0) / (pNew.X1 - pNew.X0);
+        if (!r.width){
+          z.k = 1; z.tx = 0; z.ty = 0; zt.k = 1; zt.tx = 0; zt.ty = 0;
+          apply(); hideFrames(); return;
+        }
+        var bx = r.width  * ((pOld.X0 - pNew.X0) / (pNew.X1 - pNew.X0) + 0.5 * a - 0.5);
+        var by = r.height * (0.5 - (pOld.Y0 - pNew.Y0) / (pNew.Y1 - pNew.Y0) - 0.5 * a);
+        [z, zt].forEach(function(o){
+          o.k = o.k / a;
+          o.tx -= o.k * bx;
+          o.ty -= o.k * by;
+          /* snap float dust so the identity guards in apply/settle engage */
+          if (Math.abs(o.k - 1) < 0.004 && Math.abs(o.tx) < 0.7 && Math.abs(o.ty) < 0.7){ o.k = 1; o.tx = 0; o.ty = 0; }
+        });
+        apply();
+        hideFrames();   // the frames on screen were fetched for pOld
+        if (z.k !== zt.k || z.tx !== zt.tx || z.ty !== zt.ty) animate();
+        else if (z.k !== 1 || z.tx || z.ty) settleSoon();
+      };
       apply();
     }
     function paintTabs(){
@@ -49593,7 +49649,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       cvs.width = Math.round(r.width * dpr); cvs.height = Math.round(r.height * dpr);
       var g = cvs.getContext('2d');
       g.clearRect(0, 0, cvs.width, cvs.height);
-      var v = cw.view, R2 = 6378137;
+      var v = cwPainted, R2 = 6378137;   // the canvas rides the painted layers' transform
       if (cw.trains && window.BV_MTA_STOPS){
         /* subway-map idiom: white dot, ink ring; the tapped station glows */
         window.BV_MTA_STOPS.forEach(function(st){
