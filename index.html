@@ -49018,7 +49018,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         + '&width=' + cwd + '&height=' + ch + '&srs=EPSG:3857&format=image/png&transparent=true'
         + '&time=' + encodeURIComponent(t);
     }
-    function compose(){
+    var cwComposeSeq = 0, cwComposeUrl = null;
+    function compose(done){
       var v = cw.view, B = _cityBoxCfg();
       var body = document.getElementById('cw-body');
       var dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -49047,7 +49048,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           });
         })(tb, tu, lays);
       }
+      var seq = ++cwComposeSeq;
       Promise.all(jobs).then(function(parts){
+        if (seq !== cwComposeSeq){ if (done) done(false); return; }
         var cv = document.createElement('canvas'); cv.width = W2; cv.height = H2;
         var g = cv.getContext('2d');
         var sx = W2 / (v.X1 - v.X0), sy = H2 / (v.Y1 - v.Y0);
@@ -49055,12 +49058,29 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           g.drawImage(p.im, (p.b.X0 - v.X0) * sx, (v.Y1 - p.b.Y1) * sy,
                       (p.b.X1 - p.b.X0) * sx, (p.b.Y1 - p.b.Y0) * sy);
         });
-        var u = cv.toDataURL('image/jpeg', 0.9);
-        var a = document.getElementById('cw-bm-under'), b2 = document.getElementById('cw-bm-ghost');
-        if (a) a.src = u;
-        if (b2) b2.src = u;
-        cwDrawSensors();
-      }).catch(function(){});
+        /* toBlob: the jpeg encode leaves the main thread (toDataURL blocked it
+           ~100ms at 2x); the probe decode means the swap lands fully painted */
+        cv.toBlob(function(blob){
+          if (seq !== cwComposeSeq || !blob){ if (done) done(false); return; }
+          var u = URL.createObjectURL(blob);
+          var probe = new Image();
+          var land = function(){
+            if (seq !== cwComposeSeq){ URL.revokeObjectURL(u); if (done) done(false); return; }
+            var a = document.getElementById('cw-bm-under'), b2 = document.getElementById('cw-bm-ghost');
+            if (a) a.src = u;
+            if (b2) b2.src = u;
+            if (cwComposeUrl){ var old = cwComposeUrl; setTimeout(function(){ URL.revokeObjectURL(old); }, 3000); }
+            cwComposeUrl = u;
+            cwDrawSensors();
+            if (done) done(true);
+          };
+          probe.onload = function(){
+            if (probe.decode) probe.decode().then(land, land); else land();
+          };
+          probe.onerror = function(){ URL.revokeObjectURL(u); if (done) done(false); };
+          probe.src = u;
+        }, 'image/jpeg', 0.9);
+      }).catch(function(){ if (done) done(false); });
     }
     function build(){
       if (cw.built) return;
@@ -49080,11 +49100,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         + '<datalist id="cw-hood-list"></datalist>'
         + '<div id="cw-tabs" style="display:flex;flex-wrap:wrap;gap:5px;justify-content:center;padding:8px 8px 6px;"></div>'
         + '<div id="cw-body" style="position:relative;overflow:hidden;aspect-ratio:1.0467;border-radius:10px;margin:0 8px 8px;background:#17457F;">'
-        + '<img id="cw-bm-under" alt="" style="' + IMG + 'z-index:0;">'
-        + '<img id="cw-frame-a" alt="" style="' + IMG + 'z-index:1;opacity:0;transition:opacity .3s ease;">'
-        + '<img id="cw-frame-b" alt="" style="' + IMG + 'z-index:1;opacity:0;transition:opacity .3s ease;">'
-        + '<img id="cw-bm-ghost" alt="" style="' + IMG + 'z-index:2;opacity:.35;pointer-events:none;">'
-        + '<canvas id="cw-ov" style="' + IMG + 'z-index:3;pointer-events:none;"></canvas>'
+        + '<img id="cw-bm-under" alt="" style="' + IMG + 'z-index:0;will-change:transform;">'
+        + '<img id="cw-frame-a" alt="" style="' + IMG + 'z-index:1;opacity:0;transition:opacity .3s ease;will-change:transform;">'
+        + '<img id="cw-frame-b" alt="" style="' + IMG + 'z-index:1;opacity:0;transition:opacity .3s ease;will-change:transform;">'
+        + '<img id="cw-bm-ghost" alt="" style="' + IMG + 'z-index:2;opacity:.35;pointer-events:none;will-change:transform;">'
+        + '<canvas id="cw-ov" style="' + IMG + 'z-index:3;pointer-events:none;will-change:transform;"></canvas>'
         + '<div id="cw-time" style="position:absolute;right:8px;top:6px;z-index:4;font:700 9px system-ui,sans-serif;letter-spacing:.08em;color:rgba(255,255,255,.9);background:rgba(8,12,22,.6);border-radius:6px;padding:3px 8px;"></div>'
         + '<div style="position:absolute;right:8px;bottom:6px;z-index:4;font:500 8px system-ui,sans-serif;color:rgba(30,30,50,.6);background:rgba(255,255,255,.6);padding:1px 6px;border-radius:4px;">\u00a9 OpenStreetMap \u00b7 Protomaps \u00b7 NOAA NCEI \u00b7 NOAA KOKX super-res</div>'
         + '</div>'
@@ -49126,8 +49146,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var c = document.getElementById('cw-body');
       if (!c || c._zoomed) return;
       c._zoomed = true;
-      var LAYERS = ['cw-bm-under','cw-frame-a','cw-frame-b','cw-bm-ghost'];
-      var z = { k:1, tx:0, ty:0 };
+      var LAYERS = ['cw-bm-under','cw-frame-a','cw-frame-b','cw-bm-ghost','cw-ov'];
+      var z = { k:1, tx:0, ty:0 };       // painted transform
+      var zt = { k:1, tx:0, ty:0 };      // target: wheel/dblclick ease toward it
+      var anim = null;
       var pts = {}, settleTimer = null;
       var AR = (CW_VIEW.X1 - CW_VIEW.X0) / (CW_VIEW.Y1 - CW_VIEW.Y0);
       function atHome(){
@@ -49148,10 +49170,24 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         c.style.touchAction = (z.k === 1 && atHome()) ? 'pan-y' : 'none';
         c.style.cursor = 'grab';
       }
+      function animTick(){
+        anim = null;
+        var close = true;
+        ['k','tx','ty'].forEach(function(p){
+          var d = zt[p] - z[p];
+          var eps = p === 'k' ? 0.002 : 0.4;
+          if (Math.abs(d) <= eps){ z[p] = zt[p]; }
+          else { z[p] += d * 0.3; close = false; }
+        });
+        apply();
+        if (!close) anim = requestAnimationFrame(animTick);
+        else settleSoon();
+      }
+      function animate(){ if (!anim) anim = requestAnimationFrame(animTick); }
       function settleSoon(){ clearTimeout(settleTimer); settleTimer = setTimeout(settle, 500); }
       function settle(){
         if (!cw.running) return;
-        if (Object.keys(pts).length){ settleSoon(); return; }
+        if (Object.keys(pts).length || anim){ settleSoon(); return; }
         if (z.k === 1 && !z.tx && !z.ty) return;
         var r = c.getBoundingClientRect();
         if (!r.width) return;
@@ -49166,27 +49202,37 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var nYs = ns / AR;
         cx = Math.max(B.X0 + ns / 2, Math.min(B.X1 - ns / 2, cx));
         cy = Math.max(B.Y0 + nYs / 2, Math.min(B.Y1 - nYs / 2, cy));
-        z.k = 1; z.tx = 0; z.ty = 0;
         cw.view = { X0: cx - ns / 2, Y0: cy - nYs / 2, X1: cx + ns / 2, Y1: cy + nYs / 2, ASPECT: AR };
-        apply(); compose(); hideFrames();
+        /* the CSS-magnified old backdrop stays up until the recompose has
+           decoded, then the swap + transform reset land in one frame — the
+           old settle reset first and visibly snapped out, then back in */
+        compose(function(ok){
+          /* reset even when superseded/failed — a rare snap beats a view
+             stuck under a stale magnification */
+          z.k = 1; z.tx = 0; z.ty = 0;
+          zt.k = 1; zt.tx = 0; zt.ty = 0;
+          apply(); hideFrames();
+        });
       }
-      function clamp(){
+      function clamp(t){
         var r = c.getBoundingClientRect();
-        z.tx = Math.max(-r.width * 0.75, Math.min(r.width * 0.75, z.tx));
-        z.ty = Math.max(-r.height * 0.75, Math.min(r.height * 0.75, z.ty));
+        t.tx = Math.max(-r.width * 0.75, Math.min(r.width * 0.75, t.tx));
+        t.ty = Math.max(-r.height * 0.75, Math.min(r.height * 0.75, t.ty));
       }
-      function zoomAt(px, py, f){
+      function zoomAt(px, py, f, eased){
         var B = _cityBoxCfg();
         var curXs = cw.view.X1 - cw.view.X0;
         var BXs = B.X1 - B.X0, BYs = B.Y1 - B.Y0;
         var maxXs = Math.min(BXs, BYs * AR);
-        var k2 = Math.max(curXs / maxXs, Math.min(4 * curXs / BXs, z.k * f));
-        if (k2 === z.k) return;
-        var sc = k2 / z.k;
-        z.tx = px - sc * (px - z.tx);
-        z.ty = py - sc * (py - z.ty);
-        z.k = k2;
-        clamp(); apply(); settleSoon();
+        var k2 = Math.max(curXs / maxXs, Math.min(4 * curXs / BXs, zt.k * f));
+        if (k2 === zt.k) return;
+        var sc = k2 / zt.k;
+        zt.tx = px - sc * (px - zt.tx);
+        zt.ty = py - sc * (py - zt.ty);
+        zt.k = k2;
+        clamp(zt);
+        if (eased){ animate(); }
+        else { z.k = zt.k; z.tx = zt.tx; z.ty = zt.ty; apply(); settleSoon(); }
       }
       function rel(ev){
         var r = c.getBoundingClientRect();
@@ -49195,15 +49241,24 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       c.addEventListener('wheel', function(ev){
         ev.preventDefault();
         var p = rel(ev);
-        zoomAt(p[0], p[1], Math.pow(1.0015, -ev.deltaY));
+        var dy = ev.deltaY * (ev.deltaMode === 1 ? 33 : ev.deltaMode === 2 ? 400 : 1);
+        dy = Math.max(-360, Math.min(360, dy));
+        zoomAt(p[0], p[1], Math.pow(1.0015, -dy), true);
       }, { passive:false });
       c.addEventListener('dblclick', function(ev){
         var p = rel(ev);
-        if (z.k > 1.05 || !atHome()){
-          z.k = 1; z.tx = 0; z.ty = 0;
-          cw.view = CW_VIEW;
-          apply(); compose(); hideFrames();
-        } else zoomAt(p[0], p[1], 2);
+        if (zt.k > 1.05 || !atHome()){
+          /* ease home: aim the transform at the home framing (blank margins
+             fill in navy until the settle recomposes) */
+          var r = c.getBoundingClientRect();
+          var v = cw.view;
+          var vXs = v.X1 - v.X0, vYs = v.Y1 - v.Y0;
+          var kh = vXs / (CW_VIEW.X1 - CW_VIEW.X0);
+          zt.k = kh;
+          zt.tx = ((v.X0 + v.X1) / 2 - (CW_VIEW.X0 + CW_VIEW.X1) / 2) * kh * r.width / vXs;
+          zt.ty = ((CW_VIEW.Y0 + CW_VIEW.Y1) / 2 - (v.Y0 + v.Y1) / 2) * kh * r.height / vYs;
+          animate();
+        } else zoomAt(p[0], p[1], 2, true);
       });
       c.addEventListener('pointerdown', function(ev){
         pts[ev.pointerId] = rel(ev);
@@ -49213,10 +49268,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         if (!(ev.pointerId in pts)) return;
         var ids = Object.keys(pts), p = rel(ev);
         if (ids.length === 1){
-          z.tx += p[0] - pts[ev.pointerId][0];
-          z.ty += p[1] - pts[ev.pointerId][1];
+          zt.tx += p[0] - pts[ev.pointerId][0];
+          zt.ty += p[1] - pts[ev.pointerId][1];
           pts[ev.pointerId] = p;
-          clamp(); apply(); settleSoon();
+          clamp(zt);
+          z.tx = zt.tx; z.ty = zt.ty; z.k = zt.k;
+          apply(); settleSoon();
         } else if (ids.length === 2){
           var other = pts[ids[0] === String(ev.pointerId) ? ids[1] : ids[0]];
           var prev = pts[ev.pointerId];
