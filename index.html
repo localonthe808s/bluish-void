@@ -48975,6 +48975,183 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     c.addEventListener('dblclick', function(){ clearTimeout(tapTimer); });
   })();
 
+  /* ══ THE CITY — its own widget ══
+     The four-borough live map as a first-class widget above CLOUDS, for
+     viewers in the tristate box only (same rule as the radar pill). v1 of the
+     standalone build: the ink map at the launch framing, the despeckled vivid
+     KOKX loop over it, and a subview row toggling the dual-pol products — the
+     row is the seed for the non-weather subviews to come. The radar widget's
+     THE CITY area is untouched; shared helpers (despeckler, tiles, launch
+     view) are reused, shared DOM is not. */
+  (function(){
+    function inNYCBox(){
+      return typeof LOCATION !== 'undefined'
+        && LOCATION.lat > 40.40 && LOCATION.lat < 41.10
+        && LOCATION.lon > -74.35 && LOCATION.lon < -73.60;
+    }
+    var cw = { built:false, running:false, idx:0, timer:null, prod:'bref', front:true };
+    var PRODUCTS = [
+      ['bref','RADAR'], ['bvel','VELOCITY'], ['bdhc','HYDRO'],
+      ['boha','1-HR RAIN'], ['bdsa','STORM TOTAL']
+    ];
+    function frameUrl(fhr){
+      var v = _cityLaunchView();
+      var body = document.getElementById('cw-body');
+      var ch = Math.max(400, Math.min(1000, (body && body.clientHeight) || 600));
+      ch = Math.round(ch * Math.min(2, window.devicePixelRatio || 1));
+      var cwd = Math.round(ch * v.ASPECT);
+      var layer = (cw.prod === 'bref' || cw.prod === 'bvel') ? 'kokx_sr_' + cw.prod : 'kokx_' + cw.prod;
+      var t = new Date(Math.floor(Date.now() / 240000) * 240000 - fhr * 240000).toISOString();
+      return 'https://opengeo.ncep.noaa.gov/geoserver/kokx/ows?service=WMS&version=1.1.0&request=GetMap'
+        + '&layers=' + layer + '&styles=&bbox=' + Math.round(v.X0) + ',' + Math.round(v.Y0) + ','
+        + Math.round(v.X1) + ',' + Math.round(v.Y1)
+        + '&width=' + cwd + '&height=' + ch + '&srs=EPSG:3857&format=image/png&transparent=true'
+        + '&time=' + encodeURIComponent(t);
+    }
+    function compose(){
+      var v = _cityLaunchView(), B = _cityBoxCfg();
+      var body = document.getElementById('cw-body');
+      var dpr = Math.min(2, window.devicePixelRatio || 1);
+      var W2 = Math.round(((body && body.clientWidth) || 1100) * dpr);
+      var H2 = Math.round(W2 / v.ASPECT);
+      var mppNeed = (v.X1 - v.X0) / W2;
+      var grid = mppNeed < 26 ? 4 : (mppNeed < 52 ? 2 : 1);
+      var jobs = [];
+      var BXs = B.X1 - B.X0, BYs = B.Y1 - B.Y0;
+      for (var gr = 0; gr < grid; gr++) for (var gq = 0; gq < grid; gq++){
+        var tb = { X0: B.X0 + BXs * gq / grid, X1: B.X0 + BXs * (gq + 1) / grid,
+                   Y1: B.Y1 - BYs * gr / grid, Y0: B.Y1 - BYs * (gr + 1) / grid };
+        if (!(tb.X1 > v.X0 && tb.X0 < v.X1 && tb.Y1 > v.Y0 && tb.Y0 < v.Y1)) continue;
+        var tu = grid === 1 ? _CITY_TILES.z1
+               : grid === 2 ? _CITY_TILES.z2[(gr ? 's' : 'n') + (gq ? 'e' : 'w')]
+               : '/nyc-basemap-ink-z3-r' + gr + 'c' + gq + '.jpg?v=1';
+        (function(bb, uu){ jobs.push(_cityTile(uu).then(function(im){ return { im: im, b: bb }; })); })(tb, tu);
+      }
+      Promise.all(jobs).then(function(parts){
+        var cv = document.createElement('canvas'); cv.width = W2; cv.height = H2;
+        var g = cv.getContext('2d');
+        var sx = W2 / (v.X1 - v.X0), sy = H2 / (v.Y1 - v.Y0);
+        parts.forEach(function(p){
+          g.drawImage(p.im, (p.b.X0 - v.X0) * sx, (v.Y1 - p.b.Y1) * sy,
+                      (p.b.X1 - p.b.X0) * sx, (p.b.Y1 - p.b.Y0) * sy);
+        });
+        var u = cv.toDataURL('image/jpeg', 0.9);
+        var a = document.getElementById('cw-bm-under'), b2 = document.getElementById('cw-bm-ghost');
+        if (a) a.src = u;
+        if (b2) b2.src = u;
+      }).catch(function(){});
+    }
+    function build(){
+      if (cw.built) return;
+      var anchor = document.getElementById('clouds-radar-widget');
+      if (!anchor) return;
+      var w = document.createElement('div');
+      w.className = 'widget';
+      w.id = 'city-widget';
+      var IMG = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;';
+      w.innerHTML =
+        '<div class="widget-head">'
+        + '<div class="widget-title">THE CITY<span class="live-tag">\u00b7 LIVE</span></div>'
+        + '<span class="widget-sub">NOAA KOKX SUPER-RES \u00b7 THE INK MAP</span>'
+        + '</div>'
+        + '<div class="widget-body" style="background:rgba(255,255,255,.06);position:relative;overflow:hidden;">'
+        + '<div id="cw-tabs" style="display:flex;flex-wrap:wrap;gap:5px;justify-content:center;padding:8px 8px 6px;"></div>'
+        + '<div id="cw-body" style="position:relative;overflow:hidden;aspect-ratio:1.1372;border-radius:10px;margin:0 8px 8px;background:#17457F;">'
+        + '<img id="cw-bm-under" alt="" style="' + IMG + 'z-index:0;">'
+        + '<img id="cw-frame-a" alt="" style="' + IMG + 'z-index:1;opacity:0;transition:opacity .3s ease;">'
+        + '<img id="cw-frame-b" alt="" style="' + IMG + 'z-index:1;opacity:0;transition:opacity .3s ease;">'
+        + '<img id="cw-bm-ghost" alt="" style="' + IMG + 'z-index:2;opacity:.35;pointer-events:none;">'
+        + '<div id="cw-time" style="position:absolute;right:8px;top:6px;z-index:4;font:700 9px system-ui,sans-serif;letter-spacing:.08em;color:rgba(255,255,255,.9);background:rgba(8,12,22,.6);border-radius:6px;padding:3px 8px;"></div>'
+        + '<div style="position:absolute;right:8px;bottom:6px;z-index:4;font:500 8px system-ui,sans-serif;color:rgba(30,30,50,.6);background:rgba(255,255,255,.6);padding:1px 6px;border-radius:4px;">\u00a9 OpenStreetMap \u00b7 Protomaps \u00b7 NOAA NCEI \u00b7 NOAA KOKX super-res</div>'
+        + '</div>'
+        + '</div>';
+      anchor.parentNode.insertBefore(w, anchor);
+      var tabs = document.getElementById('cw-tabs');
+      PRODUCTS.forEach(function(pr){
+        var b = document.createElement('button');
+        b.id = 'cw-tab-' + pr[0];
+        b.textContent = pr[1];
+        b.style.cssText = 'padding:5px 14px;border-radius:8px;border:none;font:700 .58rem system-ui,sans-serif;letter-spacing:.5px;text-transform:uppercase;cursor:pointer;white-space:nowrap;';
+        b.onclick = function(){ setProduct(pr[0]); };
+        tabs.appendChild(b);
+      });
+      paintTabs();
+      cw.built = true;
+    }
+    function paintTabs(){
+      PRODUCTS.forEach(function(pr){
+        var b = document.getElementById('cw-tab-' + pr[0]);
+        if (!b) return;
+        b.style.background = (pr[0] === cw.prod) ? 'rgba(43,34,244,.9)' : 'rgba(234,88,12,.92)';
+        b.style.color = 'rgba(255,255,255,.97)';
+      });
+    }
+    function setProduct(p){
+      cw.prod = p; paintTabs();
+      var fa = document.getElementById('cw-frame-a'), fb = document.getElementById('cw-frame-b');
+      if (fa) fa.style.opacity = '0';
+      if (fb) fb.style.opacity = '0';
+      step();
+    }
+    function step(){
+      if (!cw.running || document.hidden) return;
+      var fhrs = [9,8,7,6,5,4,3,2,1,0];
+      cw.idx = (cw.idx + 1) % fhrs.length;
+      var fhr = fhrs[cw.idx];
+      var url = frameUrl(fhr);
+      var front = document.getElementById(cw.front ? 'cw-frame-a' : 'cw-frame-b');
+      var back = document.getElementById(cw.front ? 'cw-frame-b' : 'cw-frame-a');
+      if (!front || !back) return;
+      back.style.filter = cw.prod === 'bref' ? 'saturate(1.5) contrast(1.07) blur(0.5px)' : 'none';
+      back._want = url;
+      var apply = function(u){
+        if (back._want !== url || !cw.running) return;
+        back.onload = function(){
+          back.style.opacity = '1';
+          setTimeout(function(){ front.style.opacity = '0'; }, 300);
+          cw.front = !cw.front;
+          var t = document.getElementById('cw-time');
+          if (t) t.textContent = fhr === 0 ? 'NOW' : '~' + (fhr * 4) + ' MIN AGO';
+        };
+        back.src = u;
+      };
+      if (cw.prod === 'bref') _despeckleWms(url, apply);
+      else apply(url);
+    }
+    function start(){
+      if (cw.running) return;
+      cw.running = true;
+      compose();
+      step();
+      cw.timer = setInterval(step, 1200);
+    }
+    function stop(){
+      cw.running = false;
+      if (cw.timer){ clearInterval(cw.timer); cw.timer = null; }
+    }
+    function gate(){
+      var ok = inNYCBox();
+      if (ok && !cw.built) build();
+      var w = document.getElementById('city-widget');
+      if (w) w.style.display = ok ? '' : 'none';
+      if (!ok && cw.running) stop();
+    }
+    setTimeout(function(){
+      gate();
+      try{
+        var w = document.getElementById('city-widget');
+        if (w && 'IntersectionObserver' in window){
+          new IntersectionObserver(function(en){
+            if (!inNYCBox()) return;
+            if (en[0].isIntersecting){ if (!cw.running) start(); }
+            else stop();
+          }, { threshold: 0.05 }).observe(w);
+        } else if (w && inNYCBox()) start();
+      }catch(e){}
+      setInterval(gate, 60000);
+    }, 3000);
+  })();
+
   function loadFcastRadar(){
     var fhrs = getActiveFhrs();
     var imgA = document.getElementById('fcast-radar-img');
