@@ -48994,12 +48994,13 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        and the inlet stay in frame (user 2026-08-30) — taller than the shared
        1.1372 box, and the widget-body's global 16/10 aspect is overridden */
     var CW_VIEW = { X0:-8259060, Y0:4941065, X1:-8195564, Y1:5001727, ASPECT:1.0467 };
+    cw.view = CW_VIEW;
     var PRODUCTS = [
       ['bref','RADAR'], ['bvel','VELOCITY'], ['bdhc','HYDRO'],
       ['boha','1-HR RAIN'], ['bdsa','STORM TOTAL']
     ];
     function frameUrl(fhr){
-      var v = CW_VIEW;
+      var v = cw.view;
       var body = document.getElementById('cw-body');
       var ch = Math.max(400, Math.min(1000, (body && body.clientHeight) || 600));
       ch = Math.round(ch * Math.min(2, window.devicePixelRatio || 1));
@@ -49013,7 +49014,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         + '&time=' + encodeURIComponent(t);
     }
     function compose(){
-      var v = CW_VIEW, B = _cityBoxCfg();
+      var v = cw.view, B = _cityBoxCfg();
       var body = document.getElementById('cw-body');
       var dpr = Math.min(2, window.devicePixelRatio || 1);
       var W2 = Math.round(((body && body.clientWidth) || 1100) * dpr);
@@ -49082,7 +49083,122 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         tabs.appendChild(b);
       });
       paintTabs();
+      cwZoomInit();
       cw.built = true;
+    }
+    /* the same zoom grammar as the radar widget's city view: instant CSS
+       gesture on all four layers, then half a second after it settles the
+       frames refetch for exactly the visible box and the backdrop recomposes
+       from the tile pyramid. Bounds: the full city box; double-click returns
+       home to the widget framing. */
+    function cwZoomInit(){
+      var c = document.getElementById('cw-body');
+      if (!c || c._zoomed) return;
+      c._zoomed = true;
+      var LAYERS = ['cw-bm-under','cw-frame-a','cw-frame-b','cw-bm-ghost'];
+      var z = { k:1, tx:0, ty:0 };
+      var pts = {}, settleTimer = null;
+      var AR = (CW_VIEW.X1 - CW_VIEW.X0) / (CW_VIEW.Y1 - CW_VIEW.Y0);
+      function atHome(){
+        var v = cw.view;
+        return Math.abs(v.X0 - CW_VIEW.X0) < 2 && Math.abs(v.X1 - CW_VIEW.X1) < 2 && Math.abs(v.Y0 - CW_VIEW.Y0) < 2;
+      }
+      function hideFrames(){
+        var fa = document.getElementById('cw-frame-a'), fb = document.getElementById('cw-frame-b');
+        if (fa) fa.style.opacity = '0';
+        if (fb) fb.style.opacity = '0';
+      }
+      function apply(){
+        var t = 'translate(' + z.tx.toFixed(1) + 'px,' + z.ty.toFixed(1) + 'px) scale(' + z.k.toFixed(3) + ')';
+        LAYERS.forEach(function(id){
+          var el = document.getElementById(id);
+          if (el){ el.style.transformOrigin = '50% 50%'; el.style.transform = t; }
+        });
+        c.style.touchAction = (z.k === 1 && atHome()) ? 'pan-y' : 'none';
+        c.style.cursor = 'grab';
+      }
+      function settleSoon(){ clearTimeout(settleTimer); settleTimer = setTimeout(settle, 500); }
+      function settle(){
+        if (!cw.running) return;
+        if (Object.keys(pts).length){ settleSoon(); return; }
+        if (z.k === 1 && !z.tx && !z.ty) return;
+        var r = c.getBoundingClientRect();
+        if (!r.width) return;
+        var B = _cityBoxCfg();
+        var cur = cw.view;
+        var curXs = cur.X1 - cur.X0, curYs = cur.Y1 - cur.Y0;
+        var cx = (cur.X0 + cur.X1) / 2 - (z.tx / z.k) * (curXs / r.width);
+        var cy = (cur.Y0 + cur.Y1) / 2 + (z.ty / z.k) * (curYs / r.height);
+        var BXs = B.X1 - B.X0, BYs = B.Y1 - B.Y0;
+        var maxXs = Math.min(BXs, BYs * AR);
+        var ns = Math.max(BXs / 4, Math.min(maxXs, curXs / z.k));
+        var nYs = ns / AR;
+        cx = Math.max(B.X0 + ns / 2, Math.min(B.X1 - ns / 2, cx));
+        cy = Math.max(B.Y0 + nYs / 2, Math.min(B.Y1 - nYs / 2, cy));
+        z.k = 1; z.tx = 0; z.ty = 0;
+        cw.view = { X0: cx - ns / 2, Y0: cy - nYs / 2, X1: cx + ns / 2, Y1: cy + nYs / 2, ASPECT: AR };
+        apply(); compose(); hideFrames();
+      }
+      function clamp(){
+        var r = c.getBoundingClientRect();
+        z.tx = Math.max(-r.width * 0.75, Math.min(r.width * 0.75, z.tx));
+        z.ty = Math.max(-r.height * 0.75, Math.min(r.height * 0.75, z.ty));
+      }
+      function zoomAt(px, py, f){
+        var B = _cityBoxCfg();
+        var curXs = cw.view.X1 - cw.view.X0;
+        var BXs = B.X1 - B.X0, BYs = B.Y1 - B.Y0;
+        var maxXs = Math.min(BXs, BYs * AR);
+        var k2 = Math.max(curXs / maxXs, Math.min(4 * curXs / BXs, z.k * f));
+        if (k2 === z.k) return;
+        var sc = k2 / z.k;
+        z.tx = px - sc * (px - z.tx);
+        z.ty = py - sc * (py - z.ty);
+        z.k = k2;
+        clamp(); apply(); settleSoon();
+      }
+      function rel(ev){
+        var r = c.getBoundingClientRect();
+        return [ev.clientX - r.left - r.width / 2, ev.clientY - r.top - r.height / 2];
+      }
+      c.addEventListener('wheel', function(ev){
+        ev.preventDefault();
+        var p = rel(ev);
+        zoomAt(p[0], p[1], Math.pow(1.0015, -ev.deltaY));
+      }, { passive:false });
+      c.addEventListener('dblclick', function(ev){
+        var p = rel(ev);
+        if (z.k > 1.05 || !atHome()){
+          z.k = 1; z.tx = 0; z.ty = 0;
+          cw.view = CW_VIEW;
+          apply(); compose(); hideFrames();
+        } else zoomAt(p[0], p[1], 2);
+      });
+      c.addEventListener('pointerdown', function(ev){
+        pts[ev.pointerId] = rel(ev);
+        if (Object.keys(pts).length === 1){ try{ c.setPointerCapture(ev.pointerId); }catch(e){} }
+      });
+      c.addEventListener('pointermove', function(ev){
+        if (!(ev.pointerId in pts)) return;
+        var ids = Object.keys(pts), p = rel(ev);
+        if (ids.length === 1){
+          z.tx += p[0] - pts[ev.pointerId][0];
+          z.ty += p[1] - pts[ev.pointerId][1];
+          pts[ev.pointerId] = p;
+          clamp(); apply(); settleSoon();
+        } else if (ids.length === 2){
+          var other = pts[ids[0] === String(ev.pointerId) ? ids[1] : ids[0]];
+          var prev = pts[ev.pointerId];
+          var d0 = Math.hypot(prev[0] - other[0], prev[1] - other[1]);
+          var d1 = Math.hypot(p[0] - other[0], p[1] - other[1]);
+          if (d0 > 8) zoomAt((p[0] + other[0]) / 2, (p[1] + other[1]) / 2, d1 / d0);
+          pts[ev.pointerId] = p;
+        }
+      });
+      var lift = function(ev){ delete pts[ev.pointerId]; settleSoon(); };
+      c.addEventListener('pointerup', lift);
+      c.addEventListener('pointercancel', lift);
+      apply();
     }
     function paintTabs(){
       PRODUCTS.forEach(function(pr){
