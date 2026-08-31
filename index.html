@@ -47639,6 +47639,134 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     }catch(e){}
     if (fcastState.area === 'conus') return;   // national view: strikes only (steering/warnings are local-scale)
   }
+  /* ── the doorstep rain line — "will it rain on ME, and when": the same
+     RainViewer sampling the rain line uses, run at the chosen neighbourhood's
+     own coordinates (340 OSM neighbourhood points from the map lab's data).
+     Sentence favours the 5-30 minute window; the pick persists. */
+  var _hoodNc = { at:0 };
+  function _hoodNowcast(lat, lon, cb){
+    try{
+      var hy = window._wxHourly, ni = window._wxNearestIdx || 0;
+      var pk = function(a){ return (a && a[ni] != null) ? a[ni] : null; };
+      var dir = pk(hy && hy.winddirection_500hPa); if (dir == null) dir = pk(hy && hy.winddirection_700hPa); if (dir == null) dir = pk(hy && hy.wind_direction_10m); if (dir == null) dir = 270;
+      var spd = pk(hy && hy.windspeed_700hPa); if (spd == null) spd = pk(hy && hy.windspeed_500hPa); if (spd == null) spd = pk(hy && hy.windspeed_10m); if (spd == null) spd = 25;
+      var stormKmH = Math.max(12, spd * 0.85) * 1.60934;
+      var z = 7, ts = 256, Rk = 6371;
+      var dest = function(la0, lo0, brg, dk){
+        var br = brg * Math.PI / 180, la = la0 * Math.PI / 180, lo = lo0 * Math.PI / 180, dr = dk / Rk;
+        var la2 = Math.asin(Math.sin(la) * Math.cos(dr) + Math.cos(la) * Math.sin(dr) * Math.cos(br));
+        var lo2 = lo + Math.atan2(Math.sin(br) * Math.sin(dr) * Math.cos(la), Math.cos(dr) - Math.sin(la) * Math.sin(la2));
+        return { lat: la2 * 180 / Math.PI, lon: ((lo2 * 180 / Math.PI + 540) % 360) - 180 };
+      };
+      var tilePx = function(lo, la){
+        var n = Math.pow(2, z), xf = (lo + 180) / 360 * n, lr = la * Math.PI / 180;
+        var yf = (1 - Math.log(Math.tan(lr) + 1 / Math.cos(lr)) / Math.PI) / 2 * n;
+        var xt = Math.floor(xf), yt = Math.floor(yf);
+        return { xt: xt, yt: yt, px: Math.min(ts - 1, Math.max(0, Math.floor((xf - xt) * ts))), py: Math.min(ts - 1, Math.max(0, Math.floor((yf - yt) * ts))) };
+      };
+      var tier = function(c){
+        if (!c || c[3] < 35) return null;
+        var r = c[0], g = c[1], b = c[2];
+        if (r > 140 && b > 110 && g < 130) return { l:'INTENSE' };
+        if (r > 165 && g < 115 && b < 115) return { l:'HEAVY' };
+        if (r > 195 && g >= 110 && g < 195 && b < 120) return { l:'HEAVY' };
+        if (r > 175 && g > 175 && b < 150) return { l:'MODERATE' };
+        if (g > 120 && r < 195 && b < 175) return { l:'MODERATE' };
+        return { l:'LIGHT' };
+      };
+      (window._rvMapsFetch ? window._rvMapsFetch()
+        : fetch('https://api.rainviewer.com/public/weather-maps.json').then(function(r){ return r.json(); }))
+      .then(function(data){
+        var host = data.host, past = data.radar && data.radar.past;
+        if (!host || !past || !past.length) return cb(null);
+        var frame = past[past.length - 1];
+        var pts = [0,7,14,21,28,36,44,54,66,80].map(function(dk){
+          var p = dest(lat, lon, dir, dk); var tp = tilePx(p.lon, p.lat); tp.dk = dk; return tp;
+        });
+        var tk = {}; pts.forEach(function(p){ tk[p.xt + '_' + p.yt] = 1; });
+        var keys = Object.keys(tk), rem = keys.length, loaded = {};
+        if (!rem) return cb(null);
+        var cvt = document.createElement('canvas'); cvt.width = ts; cvt.height = ts;
+        var gt = cvt.getContext('2d', { willReadFrequently: true });
+        var fin = function(){
+          var at = function(p){
+            var d = loaded[p.xt + '_' + p.yt]; if (!d) return null;
+            var ix = (p.py * ts + p.px) * 4;
+            return tier([d[ix], d[ix + 1], d[ix + 2], d[ix + 3]]);
+          };
+          var tiers = pts.map(at);
+          var here = tiers[0], arrKm = null, arrT = null;
+          for (var i = 1; i < pts.length; i++){ if (tiers[i]){ arrKm = pts[i].dk; arrT = tiers[i]; break; } }
+          var startIdx = -1;
+          for (var m2 = 0; m2 < tiers.length; m2++){ if (tiers[m2]){ startIdx = m2; break; } }
+          var bandEnd = null;
+          if (startIdx >= 0){ for (var m3 = startIdx; m3 < tiers.length && tiers[m3]; m3++) bandEnd = pts[m3].dk; }
+          cb({ here: here, arrKm: arrKm, arrTier: arrT, bandEndKm: bandEnd, kmh: stormKmH });
+        };
+        keys.forEach(function(k){
+          var pp = k.split('_');
+          var im = new Image(); im.crossOrigin = 'anonymous';
+          im.onload = function(){
+            try{ gt.clearRect(0, 0, ts, ts); gt.drawImage(im, 0, 0); loaded[k] = gt.getImageData(0, 0, ts, ts).data; }catch(e){}
+            if (--rem === 0) fin();
+          };
+          im.onerror = function(){ if (--rem === 0) fin(); };
+          im.src = host + frame.path + '/' + ts + '/' + z + '/' + pp[0] + '/' + pp[1] + '/2/0_0.png';
+        });
+      }).catch(function(){ cb(null); });
+    }catch(e){ cb(null); }
+  }
+  function _hoodLineRun(){
+    var h = window._cityHood, el = document.getElementById('city-hood-text');
+    if (!h || !el) return;
+    _hoodNc.at = Date.now();
+    var nm = h.name.toUpperCase();
+    el.textContent = nm + ' \u00b7 CHECKING\u2026';
+    _hoodNowcast(h.lat, h.lon, function(r){
+      if (!r){ el.textContent = nm + ' \u00b7 RADAR UNAVAILABLE'; return; }
+      if (r.here){
+        var left = r.bandEndKm != null ? Math.round(r.bandEndKm / r.kmh * 60) : null;
+        el.textContent = nm + ' \u00b7 ' + r.here.l + ' RAIN NOW'
+          + (left == null ? '' : (left <= 12 ? ' \u00b7 BRIEF' : left <= 45 ? ' \u00b7 ~' + left + ' MIN LEFT' : ' \u00b7 STEADY'));
+      } else if (r.arrKm != null){
+        var mins = Math.max(1, Math.round(r.arrKm / r.kmh * 60));
+        el.textContent = mins <= 5 ? nm + ' \u00b7 RAIN WITHIN 5 MIN'
+          : nm + ' \u00b7 ' + r.arrTier.l + ' RAIN IN ~' + mins + ' MIN';
+      } else {
+        el.textContent = nm + ' \u00b7 DRY \u00b7 NOTHING INBOUND FOR ~90 MIN';
+      }
+    });
+  }
+  function _hoodLineInit(){
+    fetch('/_maplab/bathy/hood_labels.json')
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        var dl = document.getElementById('city-hood-list');
+        var inp = document.getElementById('city-hood-input');
+        if (!dl || !inp || !j || !j.features) return;
+        window._cityHoods = j.features;
+        dl.innerHTML = j.features.map(function(f){
+          return '<option value="' + f.properties.name.replace(/"/g, '&quot;') + '">';
+        }).join('');
+        inp.addEventListener('change', function(){
+          var want = (inp.value || '').trim().toLowerCase();
+          var hit = null;
+          window._cityHoods.forEach(function(f){
+            if (!hit && f.properties.name.toLowerCase() === want) hit = f;
+          });
+          if (!hit) return;
+          window._cityHood = { name: hit.properties.name,
+                               lon: hit.geometry.coordinates[0], lat: hit.geometry.coordinates[1] };
+          try{ localStorage.setItem('bv_city_hood', JSON.stringify(window._cityHood)); }catch(e){}
+          _hoodLineRun();
+        });
+        try{
+          var saved = JSON.parse(localStorage.getItem('bv_city_hood') || 'null');
+          if (saved && saved.name){ window._cityHood = saved; inp.value = saved.name; _hoodLineRun(); }
+        }catch(e){}
+      }).catch(function(){});
+  }
+
   /* ── the three city info cards — FloodNet, the radar nowcast, storm motion
      — as one row across the top of THE CITY view (user 2026-08-30), replacing
      their scattered map-corner chips. Same states, same 1.5s cadence. */
@@ -47708,6 +47836,21 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         }
       }
     }catch(e){}
+    // ── the doorstep line: full-width bar under the cards. Pick your
+    // neighbourhood and the nowcast runs at THAT point, not the widget's.
+    if (!document.getElementById('city-hood-line')){
+      var lineEl = document.createElement('div');
+      lineEl.id = 'city-hood-line';
+      lineEl.style.cssText = 'flex-basis:100%;display:flex;justify-content:center;pointer-events:none;';
+      lineEl.innerHTML = '<div style="background:rgba(8,12,22,.74);border-radius:8px;padding:4px 10px;display:flex;align-items:center;gap:9px;pointer-events:auto;backdrop-filter:blur(6px);">'
+        + '<input id="city-hood-input" list="city-hood-list" placeholder="YOUR NEIGHBORHOOD" autocomplete="off" '
+        + 'style="background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.18);border-radius:6px;color:rgba(255,255,255,.95);font:600 9px system-ui,sans-serif;letter-spacing:.05em;padding:3px 7px;width:126px;outline:none;">'
+        + '<datalist id="city-hood-list"></datalist>'
+        + '<span id="city-hood-text" style="font:700 10.5px system-ui,sans-serif;color:rgba(255,255,255,.95);letter-spacing:.02em;white-space:nowrap;">WILL IT RAIN ON YOU? PICK YOUR NEIGHBORHOOD</span>'
+        + '</div>';
+      row.appendChild(lineEl);
+      _hoodLineInit();
+    }
   }
   function _cityOvStart(){
     var cv = document.getElementById('fcast-city-overlay');
@@ -47731,6 +47874,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           if (!_cityOv.ws) _cityOvConnect();
           _cityOvDraw();
           _cityCardsSync();
+          if (fcastState.area === 'city-nyc' && window._cityHood && Date.now() - _hoodNc.at > 240000) _hoodLineRun();
         }catch(e){ console.error('city overlay tick:', e && e.message, e && e.stack); }
       }, 1500);
     }
