@@ -49548,10 +49548,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       }, 30000);
       cwDrawSensors();
     }
-    function mtaPanelFill(st){
-      /* a tapped station opens its whole COMPLEX (Times Sq = 1/2/3 + 7 +
-         N/Q/R/W + S + Port Authority's A/C/E), each platform under its own
-         direction label, the tapped station's lines first */
+    /* a station's whole COMPLEX (Times Sq = 1/2/3 + 7 + N/Q/R/W + S + Port
+       Authority's A/C/E), the given station's lines first */
+    function mtaComplexArrivals(st, cb){
       var members = (window.BV_MTA_STOPS || []).filter(function(e){ return e[8] === st[8]; });
       if (!members.length) members = [st];
       members.sort(function(a, b){ return (a[0] === st[0] ? 0 : 1) - (b[0] === st[0] ? 0 : 1); });
@@ -49559,9 +49558,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       members.forEach(function(m, mi){
         mtaArrivals(m, function(list){
           acc[mi] = list;
-          if (!--left) mtaPanelRender(st, members, acc);
+          if (!--left) cb(members, acc);
         });
       });
+    }
+    function mtaPanelFill(st){
+      mtaComplexArrivals(st, function(members, acc){ mtaPanelRender(st, members, acc); });
     }
     function mtaPanelRender(st, members, acc){
       var p = document.getElementById('cw-mta-panel');
@@ -49704,43 +49706,80 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         }
       });
     }
-    var cwHoodAt = 0, cwMtaAt = 0;
-    /* the hood pill's second line: live arrivals at the nearest station to
-       the chosen neighborhood/address (independent of the TRAINS toggle) */
+    var cwHoodAt = 0, cwMtaAt = 0, cwMtaNear = [], cwMtaIdx = 0, cwMtaKey = '';
+    /* the hood pill's subway block: the nearest station COMPLEX's full board
+       (every line, both directions), with a cycler through other nearby
+       stations. Independent of the SUBWAY toggle. */
     function cwHoodMta(){
       var h = window._cityHood;
-      if (!h || !document.getElementById('cw-hood-mta')) return;
+      var host = document.getElementById('cw-hood-mta');
+      if (!h || !host) return;
       mtaStops(function(stops){
         if (!stops) return;
         var R2 = 6378137;
         var hX = h.lon * Math.PI / 180 * R2;
         var hY = R2 * Math.log(Math.tan(Math.PI / 4 + h.lat * Math.PI / 360));
-        var best = null, bd = Infinity;
+        var byCx = {};
         stops.forEach(function(st){
           var sX = st[3] * Math.PI / 180 * R2;
           var sY = R2 * Math.log(Math.tan(Math.PI / 4 + st[2] * Math.PI / 360));
           var d = Math.hypot(sX - hX, sY - hY);
-          if (d < bd){ bd = d; best = st; }
+          if (!byCx[st[8]] || d < byCx[st[8]].d) byCx[st[8]] = { st: st, d: d };
         });
-        var el = document.getElementById('cw-hood-mta');
-        if (!best || bd > 2400){ if (el) el.style.display = 'none'; return; }
-        mtaArrivals(best, function(list){
+        var near = Object.keys(byCx).map(function(k){ return byCx[k]; })
+          .filter(function(e){ return e.d < 2600; })
+          .sort(function(a, b){ return a.d - b.d; }).slice(0, 4);
+        var key = h.name + '|' + h.lat;
+        if (key !== cwMtaKey){ cwMtaKey = key; cwMtaIdx = 0; }
+        cwMtaNear = near;
+        if (!near.length){ host.style.display = 'none'; return; }
+        if (cwMtaIdx >= near.length) cwMtaIdx = 0;
+        var pick = near[cwMtaIdx];
+        mtaComplexArrivals(pick.st, function(members, acc){
           var el2 = document.getElementById('cw-hood-mta');
           if (!el2 || window._cityHood !== h) return;
-          var nw = Date.now() / 1000, segs = [];
-          [['N', best[5] || 'NORTH'], ['S', best[6] || 'SOUTH']].forEach(function(dd){
-            var e = null;
-            list.some(function(a){
-              var m = (a.t - nw) / 60;
-              if (a.dir === dd[0] && m >= -0.5 && m <= 60){ e = { rt: a.rt, m: Math.max(0, Math.round(m)) }; return true; }
-              return false;
+          var nw = Date.now() / 1000, rows = [];
+          members.forEach(function(m, mi){
+            var byDir = { N:{}, S:{} };
+            (acc[mi] || []).forEach(function(a2){
+              var mm = (a2.t - nw) / 60;
+              if (mm < -0.5 || mm > 60) return;
+              (byDir[a2.dir][a2.rt] = byDir[a2.dir][a2.rt] || []).push(Math.max(0, Math.round(mm)));
             });
-            if (e) segs.push(mtaEsc(mtaDirLbl(dd[1])) + ' ' + mtaChip(e.rt, 13)
-                             + ' ' + (e.m < 1 ? 'DUE' : e.m + ' MIN'));
+            ['N','S'].forEach(function(dk){
+              var routes = Object.keys(byDir[dk]).sort();
+              if (!routes.length) return;
+              rows.push([mtaDirLbl(m[dk === 'N' ? 5 : 6] || ''), routes.map(function(rt){
+                return mtaChip(rt, 15) + '<span style="margin-left:3px;">'
+                  + byDir[dk][rt].slice(0, 2).map(function(mm){ return mm < 1 ? 'DUE' : mm; }).join(', ') + '</span>';
+              })]);
+            });
           });
-          if (!segs.length){ el2.style.display = 'none'; return; }
-          el2.innerHTML = mtaEsc(best[1]).toUpperCase() + ' · ' + segs.join(' · ');
+          if (!rows.length){ el2.style.display = 'none'; return; }
+          rows = rows.slice(0, 4);
+          var mi2 = Math.round(pick.d * 0.758 / 80);  /* ground m = mercator·cos40.7; walk 80 m/min */
+          var html = '<span style="display:flex;align-items:center;gap:6px;margin:3px 0 1px;">'
+            + '<span style="font:800 10px system-ui,sans-serif;letter-spacing:.04em;">' + mtaEsc(pick.st[1]).toUpperCase() + '</span>'
+            + '<span style="font:600 8px system-ui,sans-serif;color:rgba(255,255,255,.62);">' + (mi2 < 2 ? 'AT THE CORNER' : '~' + mi2 + ' MIN WALK') + '</span>'
+            + (cwMtaNear.length > 1
+               ? '<button id="cw-mta-cycle" style="background:rgba(0,0,0,.22);border:1px solid rgba(255,255,255,.35);border-radius:5px;color:rgba(255,255,255,.95);font:700 8px system-ui,sans-serif;letter-spacing:.05em;padding:1px 6px;cursor:pointer;">NEXT STATION ▸</button>'
+               : '')
+            + '</span>';
+          rows.forEach(function(rw){
+            html += '<span style="display:flex;align-items:center;gap:6px;margin:2px 0;font:700 9.5px system-ui,sans-serif;">'
+              + '<span style="color:rgba(255,255,255,.72);font-weight:800;font-size:8px;letter-spacing:.07em;">' + mtaEsc(rw[0]) + '</span>'
+              + rw[1].map(function(seg){ return '<span style="display:inline-flex;align-items:center;">' + seg + '</span>'; }).join('')
+              + '<span style="color:rgba(255,255,255,.62);font-size:8px;">MIN</span>'
+              + '</span>';
+          });
+          el2.innerHTML = html;
           el2.style.display = 'block';
+          var cyc = document.getElementById('cw-mta-cycle');
+          if (cyc) cyc.onclick = function(e2){
+            e2.stopPropagation();
+            cwMtaIdx = (cwMtaIdx + 1) % cwMtaNear.length;
+            cwHoodMta();
+          };
         });
       });
     }
@@ -49817,8 +49856,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             if (q.length < 3) return;
             var el0 = document.getElementById('cw-hood-text');
             if (el0) el0.textContent = 'LOOKING UP “' + q.toUpperCase() + '”…';
+            /* address-shaped input goes through the STRUCTURED street field —
+               free-form parsing turned "45 west 21st" into West 45th Street */
             fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&bounded=1'
-                  + '&viewbox=-74.30,41.00,-73.60,40.45&q=' + encodeURIComponent(q))
+                  + '&viewbox=-74.30,41.00,-73.60,40.45&'
+                  + (/^\d+\s/.test(q) ? 'street=' + encodeURIComponent(q) + '&city=New York'
+                                      : 'q=' + encodeURIComponent(q)))
               .then(function(r){ return r.json(); })
               .then(function(j){
                 var el = document.getElementById('cw-hood-text');
