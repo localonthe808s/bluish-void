@@ -49089,27 +49089,21 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       ['boha','1-HR RAIN'], ['bdsa','STORM TOTAL']
     ];
     function frameUrl(fhr){
-      /* frames register to the PAINTED basemap, not the requested target —
-         they ride the same CSS transform, so during a gesture the loop keeps
-         hitting the same cached (despeckled) URLs instead of cold-fetching
-         boxes that are about to change again */
-      var v = cwPainted;
-      var body = document.getElementById('cw-body');
-      var ch = Math.max(400, Math.min(1000, (body && body.clientHeight) || 600));
-      /* dpr capped at 1.5, not 2: echoes get blur(0.5px) anyway, and the
-         2x frames were 4.2Mpx — 78% more pixels to download AND despeckle
-         (~69ms/frame main-thread) for no visible gain (perf 2026-08-31) */
-      ch = Math.round(ch * Math.min(1.5, window.devicePixelRatio || 1));
-      var cwd = Math.round(ch * v.ASPECT);
+      /* frames are VIEW-INDEPENDENT (2026-08-31): one fetch covers the WHOLE
+         city box at ~32 m/px — KOKX super-res gates are ~250m, so the radar
+         data, not these pixels, is the limit even at max zoom. The frames
+         ride the base-layer registration transform, which means zoom/pan
+         NEVER refetches radar, despeckle runs once per scan ever, and the
+         echoes stay on screen through a gesture instead of blanking.
+         png8: 61% smaller, despeckle survivors byte-identical to full png
+         (verified 0 disagreement across 2.35M px on a live frame). */
+      var B = _cityBoxCfg();
       var layer = (cw.prod === 'bref' || cw.prod === 'bvel') ? 'kokx_sr_' + cw.prod : 'kokx_' + cw.prod;
       var t = new Date(Math.floor(Date.now() / 240000) * 240000 - fhr * 240000).toISOString();
-      /* png8: 61% smaller frames, and the despeckle survivor set is
-         IDENTICAL to full png (verified 0 disagreement across 2.35M px on a
-         live frame 2026-08-31 — the radar palette fits 256 colors) */
       return 'https://opengeo.ncep.noaa.gov/geoserver/kokx/ows?service=WMS&version=1.1.0&request=GetMap'
-        + '&layers=' + layer + '&styles=&bbox=' + Math.round(v.X0) + ',' + Math.round(v.Y0) + ','
-        + Math.round(v.X1) + ',' + Math.round(v.Y1)
-        + '&width=' + cwd + '&height=' + ch + '&srs=EPSG:3857&format=image/png8&transparent=true'
+        + '&layers=' + layer + '&styles=&bbox=' + Math.round(B.X0) + ',' + Math.round(B.Y0) + ','
+        + Math.round(B.X1) + ',' + Math.round(B.Y1)
+        + '&width=2400&height=2111&srs=EPSG:3857&format=image/png8&transparent=true'
         + '&time=' + encodeURIComponent(t);
     }
     var cwComposeSeq = 0, cwComposeUrl = null;
@@ -49138,22 +49132,15 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var tb = { X0: B.X0 + BXs * gq / grid, X1: B.X0 + BXs * (gq + 1) / grid,
                    Y1: B.Y1 - BYs * gr / grid, Y0: B.Y1 - BYs * (gr + 1) / grid };
         if (!(tb.X1 > v.X0 && tb.X0 < v.X1 && tb.Y1 > v.Y0 && tb.Y0 < v.Y1)) continue;
-        /* the CORE map (no toggleable story layers), then one transparent
-           overlay per active toggle — the pattern every future layer (trees,
-           subway, ...) follows */
+        /* the CORE map only — story layers (floods, radar) are their own
+           full-box registered elements now, never baked into the compose */
         var suffix = grid === 1 ? '' : grid === 2 ? '-z2-' + (gr ? 's' : 'n') + (gq ? 'e' : 'w') : '-z3-r' + gr + 'c' + gq;
         var tu = '/nyc-basemap-ink-dry' + suffix + '.jpg?v=2';
-        var lays = [];
-        if (cw.floods) lays.push('/nyc-basemap-floods' + suffix + '.png?v=2');
-        (function(bb, uu, ll){
+        (function(bb, uu){
           /* a missing tile drops out instead of blanking the whole map */
           jobs.push(_cityTile(uu).then(function(im){ return { im: im, b: bb, z: 0 }; },
                                        function(){ return null; }));
-          ll.forEach(function(lu, li){
-            jobs.push(_cityTile(lu).then(function(im){ return { im: im, b: bb, z: li + 1 }; },
-                                         function(){ return null; }));
-          });
-        })(tb, tu, lays);
+        })(tb, tu);
       }
       var seq = ++cwComposeSeq;
       Promise.all(jobs).then(function(parts){
@@ -49226,8 +49213,14 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
            out" was this transient) */
         + '<img id="cw-bm-base" alt="" src="/nyc-basemap-ink-dry.jpg?v=2" style="' + IMG + 'object-fit:fill;z-index:0;will-change:transform;">'
         + '<img id="cw-bm-under" alt="" style="' + IMG + 'z-index:0;will-change:transform;">'
-        + '<img id="cw-frame-a" alt="" style="' + IMG + 'z-index:1;opacity:0;transition:opacity .3s ease;will-change:transform;">'
-        + '<img id="cw-frame-b" alt="" style="' + IMG + 'z-index:1;opacity:0;transition:opacity .3s ease;will-change:transform;">'
+        /* the FLOODS overlay is its own full-box layer riding the base
+           transform — toggling it is an instant display flip, never a
+           recompose (2026-08-31); soft washes upscale fine at depth */
+        + '<img id="cw-fl" alt="" src="/nyc-basemap-floods.png?v=3" style="' + IMG + 'object-fit:fill;z-index:0;will-change:transform;display:none;">'
+        /* frames carry the full city box now — fill, not cover, or the
+           aspect difference misregisters them against the base transform */
+        + '<img id="cw-frame-a" alt="" style="' + IMG + 'object-fit:fill;z-index:1;opacity:0;transition:opacity .3s ease;will-change:transform;">'
+        + '<img id="cw-frame-b" alt="" style="' + IMG + 'object-fit:fill;z-index:1;opacity:0;transition:opacity .3s ease;will-change:transform;">'
         + '<img id="cw-bm-ghost" alt="" style="' + IMG + 'z-index:2;opacity:.35;pointer-events:none;will-change:transform;">'
         + '<canvas id="cw-ov" style="' + IMG + 'z-index:3;pointer-events:none;will-change:transform;"></canvas>'
         + '<div id="cw-time" style="position:absolute;right:8px;top:6px;z-index:4;font:700 9px system-ui,sans-serif;letter-spacing:.08em;color:rgba(255,255,255,.9);background:rgba(8,12,22,.6);border-radius:6px;padding:3px 8px;"></div>'
@@ -49253,7 +49246,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       fb2.textContent = 'FLOODING';
       fb2.style.cssText = TAB;
       fb2.onclick = function(){
-        cw.floods = !cw.floods; paintTabs(); compose();
+        cw.floods = !cw.floods; paintTabs();
+        /* instant: the overlay is its own registered layer, no recompose */
+        var fl2 = document.getElementById('cw-fl');
+        if (fl2) fl2.style.display = cw.floods ? '' : 'none';
+        if (cw.floods) cwFlBuild();
         if (cw.floods && window._floodNetLoad) try{ fnArea = 'city'; _floodNetLoad(cwDrawSensors); }catch(e){}
         cwDrawSensors();
         var fnEl = document.getElementById('cw-card-fn');
@@ -49273,7 +49270,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var c = document.getElementById('cw-body');
       if (!c || c._zoomed) return;
       c._zoomed = true;
-      var LAYERS = ['cw-bm-under','cw-frame-a','cw-frame-b','cw-bm-ghost','cw-ov'];
+      /* painted-view layers only — the frames and floods overlay ride the
+         BASE transform now (full-box registration, view-independent) */
+      var LAYERS = ['cw-bm-under','cw-bm-ghost','cw-ov'];
       var z = { k:1, tx:0, ty:0 };       // painted transform
       var zt = { k:1, tx:0, ty:0 };      // target: wheel/dblclick ease toward it
       var anim = null;
@@ -49287,34 +49286,29 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         return Math.abs(u.X0 - v2.X0) < 1 && Math.abs(u.X1 - v2.X1) < 1
             && Math.abs(u.Y0 - v2.Y0) < 1 && Math.abs(u.Y1 - v2.Y1) < 1;
       }
-      function hideFrames(){
-        var fa = document.getElementById('cw-frame-a'), fb = document.getElementById('cw-frame-b');
-        if (fa) fa.style.opacity = '0';
-        if (fb) fb.style.opacity = '0';
-      }
       function apply(){
         var t = 'translate(' + z.tx.toFixed(1) + 'px,' + z.ty.toFixed(1) + 'px) scale(' + z.k.toFixed(3) + ')';
         LAYERS.forEach(function(id){
           var el = document.getElementById(id);
           if (el){ el.style.transformOrigin = '50% 50%'; el.style.transform = t; }
         });
-        /* the full-extent backdrop gets its OWN transform: it shows the box
-           B stretched to the container, so mapping it onto the painted view
-           needs non-uniform scale + offset (identical to the layer
-           transform when painted == B) */
-        var base = document.getElementById('cw-bm-base');
-        if (base){
-          var rb = c.getBoundingClientRect();
-          if (rb.width){
-            var Bb = _cityBoxCfg(), Pb = cwPainted;
-            var PXb = Pb.X1 - Pb.X0, PYb = Pb.Y1 - Pb.Y0;
-            var BXb = Bb.X1 - Bb.X0, BYb = Bb.Y1 - Bb.Y0;
-            var bx2 = z.k * rb.width  * ((Bb.X0 - Pb.X0) / PXb + 0.5 * BXb / PXb - 0.5) + z.tx;
-            var by2 = z.k * rb.height * (0.5 - (Bb.Y0 - Pb.Y0) / PYb - 0.5 * BYb / PYb) + z.ty;
-            base.style.transformOrigin = '50% 50%';
-            base.style.transform = 'translate(' + bx2.toFixed(1) + 'px,' + by2.toFixed(1) + 'px) '
-              + 'scale(' + (z.k * BXb / PXb).toFixed(4) + ',' + (z.k * BYb / PYb).toFixed(4) + ')';
-          }
+        /* full-box layers (backdrop, floods overlay, radar frames) get their
+           OWN transform: they show the box B stretched to the container, so
+           mapping onto the painted view needs non-uniform scale + offset
+           (identical to the layer transform when painted == B) */
+        var rb = c.getBoundingClientRect();
+        if (rb.width){
+          var Bb = _cityBoxCfg(), Pb = cwPainted;
+          var PXb = Pb.X1 - Pb.X0, PYb = Pb.Y1 - Pb.Y0;
+          var BXb = Bb.X1 - Bb.X0, BYb = Bb.Y1 - Bb.Y0;
+          var bx2 = z.k * rb.width  * ((Bb.X0 - Pb.X0) / PXb + 0.5 * BXb / PXb - 0.5) + z.tx;
+          var by2 = z.k * rb.height * (0.5 - (Bb.Y0 - Pb.Y0) / PYb - 0.5 * BYb / PYb) + z.ty;
+          var bt = 'translate(' + bx2.toFixed(1) + 'px,' + by2.toFixed(1) + 'px) '
+            + 'scale(' + (z.k * BXb / PXb).toFixed(4) + ',' + (z.k * BYb / PYb).toFixed(4) + ')';
+          ['cw-bm-base','cw-fl','cw-frame-a','cw-frame-b'].forEach(function(id){
+            var el = document.getElementById(id);
+            if (el){ el.style.transformOrigin = '50% 50%'; el.style.transform = bt; }
+          });
         }
         c.style.touchAction = (z.k === 1 && atHome()) ? 'pan-y' : 'none';
         c.style.cursor = 'grab';
@@ -49489,7 +49483,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var a = (pOld.X1 - pOld.X0) / (pNew.X1 - pNew.X0);
         if (!r.width){
           z.k = 1; z.tx = 0; z.ty = 0; zt.k = 1; zt.tx = 0; zt.ty = 0;
-          apply(); hideFrames(); return;
+          apply(); return;
         }
         var bx = r.width  * ((pOld.X0 - pNew.X0) / (pNew.X1 - pNew.X0) + 0.5 * a - 0.5);
         var by = r.height * (0.5 - (pOld.Y0 - pNew.Y0) / (pNew.Y1 - pNew.Y0) - 0.5 * a);
@@ -49501,7 +49495,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           if (Math.abs(o.k - 1) < 0.004 && Math.abs(o.tx) < 0.7 && Math.abs(o.ty) < 0.7){ o.k = 1; o.tx = 0; o.ty = 0; }
         });
         apply();
-        hideFrames();   // the frames on screen were fetched for pOld
+        /* frames are full-box registered now — they stay put through the
+           swap, no hiding needed */
         if (z.k !== zt.k || z.tx !== zt.tx || z.ty !== zt.ty) animate();
         else if (z.k !== 1 || z.tx || z.ty) settleSoon();
       };
@@ -49567,6 +49562,31 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       else apply(url);
     }
     window._cwFloodsOn = function(){ return !!(cw.floods && cw.running); };
+    /* the floods layer boots on the light z1 bake (instant), then upgrades
+       ONCE to the four z2 quadrants stitched at native 35 m/px — sharp at
+       depth, still a single view-independent texture, never recomposed */
+    var cwFlBuilt = false;
+    function cwFlBuild(){
+      if (cwFlBuilt) return;
+      cwFlBuilt = true;
+      var Q = [['nw',0,0],['ne',1,0],['sw',0,1],['se',1,1]];
+      Promise.all(Q.map(function(q){
+        return _cityTile('/nyc-basemap-floods-z2-' + q[0] + '.png?v=3')
+          .then(function(im){ return { im: im, q: q }; }, function(){ return null; });
+      })).then(function(parts){
+        parts = parts.filter(Boolean);
+        if (parts.length < 4) return;          // the z1 src stays as fallback
+        var w = parts[0].im.naturalWidth, h = parts[0].im.naturalHeight;
+        var cv = document.createElement('canvas'); cv.width = w * 2; cv.height = h * 2;
+        var g = cv.getContext('2d');
+        parts.forEach(function(p){ g.drawImage(p.im, p.q[1] * w, p.q[2] * h); });
+        cv.toBlob(function(bl){
+          if (!bl) return;
+          var fl = document.getElementById('cw-fl');
+          if (fl) fl.src = URL.createObjectURL(bl);
+        }, 'image/png');
+      });
+    }
     /* the FloodNet sensors, on the widget map: fnRows/fnTier are the hazard
        module's own state and grammar — same tiers, same colors, drawn to the
        cw-ov canvas in the widget's view space. Part of the FLOODS layer. */
