@@ -48653,15 +48653,83 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
 
   /* THE CITY's clear-air problem: on a dry day KOKX runs in clear-air mode and
      fills the box with low-dBZ speckle — bugs, dust, refraction — which reads
-     as weather that isn't there. In the NWS palette that clutter is the LIGHT,
-     DESATURATED end (grays and gray-blues); actual precipitation is saturated
-     colour. Frames are pulled through a canvas (opengeo sends CORS *) and any
-     pixel with max−min < 40 at brightness > 110 goes transparent — measured on
-     a live mixed frame this removes the clear-air bloom whole while shower
-     cells keep their cores and fringes. Results are cached per scan URL, so
-     the loop only pays once per frame. */
-  var _despeckleCache = {}, _despeckleOrder = [];
+     as weather that isn't there. Any pixel matching the clutter families goes
+     transparent. THE KILL RULE was graded pixel-by-pixel against the live
+     kokx_sr_bref legend ramp (2026-08-31): it splits EXACTLY at ~10 dBZ —
+     everything below dies, everything above lives, verified zero regressions:
+       mx>110 && mx<245 — bright enough to be palette, but NOT the near-white
+                          58-60 dBZ band (sat 3!) an earlier rule was deleting
+                          from the strongest storm cores; clutter tops at 211
+       sat<60           — the gray clear-air bloom
+       b>g>r && sat<100 — the steel-blue bloom family
+       r>=g>b && sat<70 — the pale-khaki family (sat 60-66 slipped the old net)
+     The rule lives ONCE in _DS_LOOP and feeds both the Worker (OffscreenCanvas,
+     off the main thread — the pass costs ~40-70ms per 2-4Mpx frame) and the
+     main-thread fallback for browsers without OffscreenCanvas.
+     Results are cached per scan URL, so the loop only pays once per frame. */
+  var _despeckleCache = {}, _despeckleOrder = [], _dsPend = {}, _dsWorker;
+  var _DS_LOOP = 'for(var i=0;i<d.length;i+=4){if(!d[i+3])continue;'
+    + 'var r=d[i],g=d[i+1],b=d[i+2];'
+    + 'var mx=r>g?(r>b?r:b):(g>b?g:b),mn=r<g?(r<b?r:b):(g<b?g:b),sat=mx-mn;'
+    + 'if(mx>110&&mx<245&&(sat<60||(b>g&&g>r&&sat<100)||(r>=g&&g>b&&sat<70)))d[i+3]=0;}';
+  var _dsScrub = new Function('d', _DS_LOOP);
+  var _DS_WSRC = 'var scrub=function(d){' + _DS_LOOP + '};'
+    + 'self.onmessage=function(ev){var url=ev.data;'
+    + 'fetch(url,{mode:"cors"}).then(function(r){if(!r.ok)throw 0;return r.blob();})'
+    + '.then(function(b){return createImageBitmap(b);})'
+    + '.then(function(im){var c=new OffscreenCanvas(im.width,im.height);'
+    + 'var g=c.getContext("2d");g.drawImage(im,0,0);'
+    + 'var id=g.getImageData(0,0,im.width,im.height);scrub(id.data);'
+    + 'g.putImageData(id,0,0);return c.convertToBlob({type:"image/png"});})'
+    + '.then(function(bl){self.postMessage({url:url,blob:bl});})'
+    + '.catch(function(){self.postMessage({url:url});});};';
+  function _dsPut(url, u){
+    _despeckleCache[url] = u; _despeckleOrder.push(url);
+    /* 24, not 60: the loop only ever touches ~10 URLs per product, and a
+       zoom orphans the whole set — 60 full-res blobs was tens of MB of
+       dead weight (perf 2026-08-31) */
+    if (_despeckleOrder.length > 24){
+      var old = _despeckleOrder.shift();
+      URL.revokeObjectURL(_despeckleCache[old]); delete _despeckleCache[old];
+    }
+  }
+  function _dsGetWorker(){
+    if (_dsWorker !== undefined) return _dsWorker;
+    try{
+      if (typeof OffscreenCanvas === 'undefined' || typeof createImageBitmap === 'undefined' || !window.Worker) throw 0;
+      var w = new Worker(URL.createObjectURL(new Blob([_DS_WSRC], { type: 'text/javascript' })));
+      w.onmessage = function(ev){
+        var m = ev.data, cbs = _dsPend[m.url] || [];
+        delete _dsPend[m.url];
+        var u = m.url;                       // worker failed → raw frame through
+        if (m.blob){ u = URL.createObjectURL(m.blob); _dsPut(m.url, u); }
+        cbs.forEach(function(f){ f(u); });
+      };
+      w.onerror = function(){
+        /* the worker died: flush its pending through the fallback and stop
+           using it for the rest of the session */
+        _dsWorker = null;
+        var pend = _dsPend; _dsPend = {};
+        Object.keys(pend).forEach(function(u2){
+          pend[u2].forEach(function(f){ _dsMain(u2, f); });
+        });
+      };
+      _dsWorker = w;
+    }catch(e){ _dsWorker = null; }
+    return _dsWorker;
+  }
   function _despeckleWms(url, cb){
+    if (_despeckleCache[url]) return cb(_despeckleCache[url]);
+    var w = _dsGetWorker();
+    if (w){
+      if (_dsPend[url]){ _dsPend[url].push(cb); return; }
+      _dsPend[url] = [cb];
+      w.postMessage(url);
+      return;
+    }
+    _dsMain(url, cb);
+  }
+  function _dsMain(url, cb){
     if (_despeckleCache[url]) return cb(_despeckleCache[url]);
     var im = new Image();
     im.crossOrigin = 'anonymous';
@@ -48671,31 +48739,13 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         c.width = im.naturalWidth; c.height = im.naturalHeight;
         var g = c.getContext('2d');
         g.drawImage(im, 0, 0);
-        var id = g.getImageData(0, 0, c.width, c.height), d = id.data;
-        for (var i = 0; i < d.length; i += 4){
-          if (!d[i + 3]) continue;
-          var r = d[i], gg = d[i + 1], b = d[i + 2];
-          var mx = r > gg ? (r > b ? r : b) : (gg > b ? gg : b);
-          var mn = r < gg ? (r < b ? r : b) : (gg < b ? gg : b);
-          /* the sub-5 dBZ palette (clear-air/bio bloom) is khaki + steel-blue,
-             sat 17-90; real precip bands start at sat 103 (and the pale-pink
-             60+ dBZ hail band, sat 68, is NOT blue-monotonic — kept). Verified
-             against the kokx_sr_bref legend ramp 2026-08-31. */
-          var sat = mx - mn;
-          if (mx > 110 && (sat < 60 || (b > gg && gg > r && sat < 100))) d[i + 3] = 0;
-        }
+        var id = g.getImageData(0, 0, c.width, c.height);
+        _dsScrub(id.data);
         g.putImageData(id, 0, 0);
         c.toBlob(function(bl){
           if (!bl) return cb(url);
           var u = URL.createObjectURL(bl);
-          _despeckleCache[url] = u; _despeckleOrder.push(url);
-          /* 24, not 60: the loop only ever touches ~10 URLs per product, and
-             a zoom orphans the whole set — 60 full-res blobs was tens of MB
-             of dead weight (perf 2026-08-31) */
-          if (_despeckleOrder.length > 24){
-            var old = _despeckleOrder.shift();
-            URL.revokeObjectURL(_despeckleCache[old]); delete _despeckleCache[old];
-          }
+          _dsPut(url, u);
           cb(u);
         }, 'image/png');
       } catch(e){ cb(url); }
@@ -49494,14 +49544,21 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       back._want = url;
       var apply = function(u){
         if (back._want !== url || !cw.running) return;
-        back.onload = function(){
+        var swap = function(){
+          if (back._want !== url || !cw.running) return;
           back.style.opacity = '1';
           setTimeout(function(){ front.style.opacity = '0'; }, 300);
           cw.front = !cw.front;
           var t = document.getElementById('cw-time');
           if (t) t.textContent = fhr === 0 ? 'NOW' : '~' + (fhr * 4) + ' MIN AGO';
         };
+        back.onload = null;
         back.src = u;
+        /* decode() lifts the multi-Mpx PNG decode off the paint path — the
+           bare src-swap was costing ~940ms of main thread PER FRAME
+           (profiled 2026-08-31: all native '(program)' decode, zero JS) */
+        if (back.decode) back.decode().then(swap, swap);
+        else back.onload = swap;
       };
       if (cw.prod === 'bref') _despeckleWms(url, apply);
       else apply(url);
