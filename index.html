@@ -48689,7 +48689,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           if (!bl) return cb(url);
           var u = URL.createObjectURL(bl);
           _despeckleCache[url] = u; _despeckleOrder.push(url);
-          if (_despeckleOrder.length > 60){
+          /* 24, not 60: the loop only ever touches ~10 URLs per product, and
+             a zoom orphans the whole set — 60 full-res blobs was tens of MB
+             of dead weight (perf 2026-08-31) */
+          if (_despeckleOrder.length > 24){
             var old = _despeckleOrder.shift();
             URL.revokeObjectURL(_despeckleCache[old]); delete _despeckleCache[old];
           }
@@ -48722,7 +48725,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (!_cityTileCache[url]) _cityTileCache[url] = new Promise(function(res, rej){
       var im = new Image();
       im.onload = function(){ res(im); };
-      im.onerror = rej;
+      /* a transient failure must not be cached forever — drop the entry so
+         the next compose retries the tile (perf/reliability 2026-08-31) */
+      im.onerror = function(){ delete _cityTileCache[url]; rej(); };
       im.src = url;
     });
     return _cityTileCache[url];
@@ -49041,7 +49046,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var v = cwPainted;
       var body = document.getElementById('cw-body');
       var ch = Math.max(400, Math.min(1000, (body && body.clientHeight) || 600));
-      ch = Math.round(ch * Math.min(2, window.devicePixelRatio || 1));
+      /* dpr capped at 1.5, not 2: echoes get blur(0.5px) anyway, and the
+         2x frames were 4.2Mpx — 78% more pixels to download AND despeckle
+         (~69ms/frame main-thread) for no visible gain (perf 2026-08-31) */
+      ch = Math.round(ch * Math.min(1.5, window.devicePixelRatio || 1));
       var cwd = Math.round(ch * v.ASPECT);
       var layer = (cw.prod === 'bref' || cw.prod === 'bvel') ? 'kokx_sr_' + cw.prod : 'kokx_' + cw.prod;
       var t = new Date(Math.floor(Date.now() / 240000) * 240000 - fhr * 240000).toISOString();
@@ -50325,7 +50333,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var nw2 = Date.now();
       if (nw2 - cwWarmAt < 240000) return;
       cwWarmAt = nw2;
-      [9,8,7,6,5,4,3,2,1,0].forEach(function(fh){
+      /* warm only the 3 newest frames (perf 2026-08-31): the first RADAR tap
+         still plays instantly, the loop backfills the older ones as it goes.
+         Steady-state the bucket rotation means ~1 new frame per cycle anyway;
+         this mostly trims the initial and post-zoom warms. */
+      [2,1,0].forEach(function(fh){
         var u = frameUrl(fh);
         if (u) _despeckleWms(u, function(){});
       });
