@@ -49597,8 +49597,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           try{ c.setPointerCapture(ev.pointerId); }catch(e){}
         } else tapMoved = true;
       });
+      /* every layer answers when tapped (user 2026-09-01): stations, then
+         the flood story — sensors, outfall pipes, buried streams. Nearest
+         wins within each layer's screen-px reach, checked in that order. */
       c.addEventListener('click', function(ev){
-        if (tapMoved || !cw.trains || !window.BV_MTA_STOPS) return;
+        if (tapMoved) return;
         var r = c.getBoundingClientRect();
         if (!r.width) return;
         var px = ev.clientX - r.left - r.width / 2, py = ev.clientY - r.top - r.height / 2;
@@ -49607,14 +49610,65 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var X = v.X0 + (xc / r.width) * (v.X1 - v.X0);
         var Y = v.Y1 - (yc / r.height) * (v.Y1 - v.Y0);
         var mpp = (v.X1 - v.X0) / (r.width * z.k);
-        var R2 = 6378137, best = null, bd = Infinity;
-        window.BV_MTA_STOPS.forEach(function(st){
-          var sX = st[3] * Math.PI / 180 * R2;
-          var sY = R2 * Math.log(Math.tan(Math.PI / 4 + st[2] * Math.PI / 360));
-          var d = Math.hypot(sX - X, sY - Y);
-          if (d < bd){ bd = d; best = st; }
-        });
-        if (best && bd / mpp < 18) mtaPanelOpen(best);
+        var R2 = 6378137;
+        var toX = function(lon){ return lon * Math.PI / 180 * R2; };
+        var toY = function(lat){ return R2 * Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360)); };
+        /* NEAREST WINS across every layer, measured in SCREEN pixels — a
+           priority cascade let the sensors (whose reach is ~900m when the
+           map is zoomed out) swallow taps meant for a pipe or a stream */
+        var cand = null;
+        var offer = function(dPx, reach, fn, arg){
+          if (dPx > reach) return;
+          if (!cand || dPx < cand.d) cand = { d: dPx, fn: fn, arg: arg };
+        };
+        if (cw.trains && window.BV_MTA_STOPS){
+          var bs = null, bsd = Infinity;
+          window.BV_MTA_STOPS.forEach(function(st){
+            var d = Math.hypot(toX(st[3]) - X, toY(st[2]) - Y);
+            if (d < bsd){ bsd = d; bs = st; }
+          });
+          if (bs) offer(bsd / mpp, 14, mtaPanelOpen, bs);
+        }
+        if (cw.floods && typeof fnRows !== 'undefined' && fnRows.length){
+          var bf = null, bfd = Infinity;
+          fnRows.forEach(function(row){
+            var d = Math.hypot(toX(row.lon) - X, toY(row.lat) - Y);
+            if (d < bfd){ bfd = d; bf = row; }
+          });
+          if (bf) offer(bfd / mpp, 12, cwFloodNetTap, bf);
+        }
+        if (window._cwCSO){
+          var bc = null, bcd = Infinity;
+          window._cwCSO.forEach(function(p2){
+            var d = Math.hypot(toX(p2[0]) - X, toY(p2[1]) - Y);
+            if (d < bcd){ bcd = d; bc = p2; }
+          });
+          if (bc) offer(bcd / mpp, 10, cwCSOTap, bc);
+        }
+        if (cw.floods){
+          /* point-to-segment against the buried courses; the NAMED draft
+             (which carries the stories) wins ties over the traced set */
+          var hit = null, hd = Infinity;
+          var scan = function(fc, named){
+            ((fc && fc.features) || []).forEach(function(ft){
+              if (!ft.geometry || ft.geometry.type !== 'LineString') return;
+              var cs = ft.geometry.coordinates;
+              for (var i2 = 1; i2 < cs.length; i2++){
+                var ax = toX(cs[i2-1][0]), ay = toY(cs[i2-1][1]);
+                var bx2 = toX(cs[i2][0]), by2 = toY(cs[i2][1]);
+                var dx = bx2 - ax, dy = by2 - ay;
+                var L2 = dx*dx + dy*dy;
+                var t2 = L2 ? Math.max(0, Math.min(1, ((X-ax)*dx + (Y-ay)*dy) / L2)) : 0;
+                var d = Math.hypot(ax + t2*dx - X, ay + t2*dy - Y);
+                if (d < hd - (named ? 60 : 0)){ hd = d; hit = ft; }
+              }
+            });
+          };
+          scan(window._cwPonds, true);
+          scan(window._ghostData && window._ghostData.streams, false);
+          if (hit) offer(hd / mpp, 10, cwGhostTap, hit);
+        }
+        if (cand) cand.fn(cand.arg);
       });
       c.addEventListener('pointermove', function(ev){
         if (!(ev.pointerId in pts)) return;
@@ -49825,8 +49879,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var ent = mtaCache[sfx] = { at: c ? c.at : 0, by: c ? c.by : null, pend: [cb] };
       fetch('https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs' + sfx)
         .then(function(r){ return r.arrayBuffer(); })
-        .then(function(ab){ ent.by = mtaDecode(ab); ent.at = Date.now(); })
-        .catch(function(){})
+        .then(function(ab){ ent.by = mtaDecode(ab); ent.at = Date.now(); window._mtaFeedOk = Date.now(); })
+        /* remember the failure: a dead feed must not read as "no trains" */
+        .catch(function(){ window._mtaFeedBad = Date.now(); })
         .then(function(){ var ps = ent.pend; ent.pend = null; ps.forEach(function(p){ try{ p(ent.by); }catch(e){} }); });
     }
     function mtaArrivals(st, cb){
@@ -49883,9 +49938,77 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (mtaPanelTimer){ clearInterval(mtaPanelTimer); mtaPanelTimer = null; }
       cwDrawSensors();
     }
+    /* one panel for every non-train map feature — same chrome as the
+       arrivals panel so a tap always answers the same way */
+    function cwFeatPanel(title, sub, html){
+      var body = document.getElementById('cw-body');
+      if (!body) return;
+      mtaPanelClose();
+      var p = document.getElementById('cw-feat-panel');
+      if (!p){
+        p = document.createElement('div');
+        p.id = 'cw-feat-panel';
+        p.style.cssText = 'position:absolute;left:8px;right:8px;bottom:8px;z-index:6;background:rgba(252,252,250,.95);'
+          + 'border-radius:10px;padding:9px 12px 10px;font-family:system-ui,sans-serif;color:#1b2340;'
+          + 'box-shadow:0 6px 24px rgba(10,20,40,.35);max-height:46%;overflow-y:auto;overscroll-behavior:contain;';
+        ['pointerdown','click','dblclick'].forEach(function(evn){
+          p.addEventListener(evn, function(e){ e.stopPropagation(); });
+        });
+        p.addEventListener('wheel', function(e){ e.stopPropagation(); }, { passive: true });
+        body.appendChild(p);
+      }
+      p.style.display = '';
+      p.innerHTML = '<div style="display:flex;align-items:baseline;gap:8px;">'
+        + '<span style="font:800 12px system-ui,sans-serif;letter-spacing:.03em;">' + mtaEsc(title).toUpperCase() + '</span>'
+        + (sub ? '<span style="font:600 8px system-ui,sans-serif;color:#5b647a;letter-spacing:.08em;white-space:nowrap;">' + mtaEsc(sub).toUpperCase() + '</span>' : '')
+        + '<button id="cw-feat-x" style="margin-left:auto;background:none;border:none;font:700 13px system-ui,sans-serif;color:#1b2340;cursor:pointer;padding:0 2px;">✕</button></div>'
+        + html;
+      var x = document.getElementById('cw-feat-x');
+      if (x) x.onclick = function(e){ e.stopPropagation(); p.style.display = 'none'; };
+    }
+    function cwFeatClose(){
+      var p = document.getElementById('cw-feat-panel');
+      if (p) p.style.display = 'none';
+    }
+    function cwFloodNetTap(row){
+      var t = fnTier(row.mm, row.stale);
+      var inches = row.mm / 25.4;
+      var age = row.stale ? null : (row.ageMin < 60 ? Math.round(row.ageMin) + ' MIN AGO'
+        : Math.round(row.ageMin / 60) + ' HR AGO');
+      cwFeatPanel(row.name, 'FLOODNET · MEASURED',
+        '<div style="display:flex;align-items:baseline;gap:8px;margin-top:6px;">'
+        + '<span style="width:9px;height:9px;border-radius:50%;background:' + t.c + ';display:inline-block;"></span>'
+        + '<span style="font:800 13px system-ui,sans-serif;">' + t.label + '</span>'
+        + (row.stale ? '' : '<span style="font:700 11px system-ui,sans-serif;color:#5b647a;">'
+            + (row.mm > 0 ? inches.toFixed(1) + '″ ON THE STREET' : 'NO WATER') + '</span>')
+        + '</div>'
+        + '<div style="font:600 9px system-ui,sans-serif;color:#5b647a;letter-spacing:.05em;margin-top:5px;">'
+        + (age ? 'LAST REPORT ' + age : 'NO RECENT REPORT')
+        + ' · SENSOR ' + mtaEsc(row.id) + '</div>'
+        + '<div style="font:.62rem system-ui,sans-serif;color:#334;margin-top:6px;line-height:1.5;">'
+        + 'A street-level ultrasonic sensor measuring standing water at the curb — the depth above its own dry baseline.</div>');
+    }
+    function cwCSOTap(p2){
+      var wb = (window._cwCSOwb || [])[p2[4]] || 'the harbor';
+      cwFeatPanel('OUTFALL ' + (p2[3] || '—'), 'NYS DEC · COMBINED SEWER',
+        '<div style="font:700 11px system-ui,sans-serif;margin-top:6px;">DISCHARGES TO ' + mtaEsc(wb).toUpperCase() + '</div>'
+        + '<div style="font:.62rem system-ui,sans-serif;color:#334;margin-top:6px;line-height:1.5;">'
+        + 'In heavy rain the sewers carry more than the treatment plants can take, and the overflow — street runoff mixed with sewage — leaves the city through this pipe. '
+        + 'It is why the water darkens here after a storm, and why the city asks you to wait 48 hours before going in.</div>');
+    }
+    function cwGhostTap(ft){
+      var p3 = ft.properties || {};
+      var bits = [];
+      if (p3.len_m) bits.push(p3.len_m + ' M TRACED');
+      cwFeatPanel(p3.name || 'UNNAMED WATERCOURSE', 'BURIED · VIELE 1865',
+        (p3.story ? '<div style="font:.62rem system-ui,sans-serif;color:#334;margin-top:6px;line-height:1.5;">' + mtaEsc(p3.story) + '</div>' : '')
+        + '<div style="font:600 9px system-ui,sans-serif;color:#5b647a;letter-spacing:.05em;margin-top:6px;">'
+        + (bits.length ? bits.join(' · ') + ' · ' : '') + 'STILL FLOWING UNDER THE STREET</div>');
+    }
     function mtaPanelOpen(st){
       var body = document.getElementById('cw-body');
       if (!body) return;
+      cwFeatClose();          // one panel at a time
       mtaSel = st;
       var p = document.getElementById('cw-mta-panel');
       if (!p){
@@ -49939,7 +50062,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         (acc[mi] || []).forEach(function(a){
           var mm = (a.t - nw) / 60;
           if (mm < -0.5 || mm > 60) return;
-          (byDir[a.dir][a.rt] = byDir[a.dir][a.rt] || []).push(Math.max(0, Math.round(mm)));
+          (byDir[a.dir][a.rt] = byDir[a.dir][a.rt] || []).push({ mm: Math.max(0, Math.round(mm)), t: a.t });
         });
         [['N', m[5] || 'NORTHBOUND'], ['S', m[6] || 'SOUTHBOUND']].forEach(function(dd){
           var routes = Object.keys(byDir[dd[0]]).sort();
@@ -49949,10 +50072,16 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           if (m[1] !== st[1]) lbl = mtaEsc(m[1]).toUpperCase() + ' · ' + lbl;
           html += '<div style="font:700 8px system-ui,sans-serif;color:#8a91a5;letter-spacing:.1em;margin:7px 0 3px;">' + lbl + '</div>';
           routes.forEach(function(rt){
+            /* clock times, matching the board (user 2026-09-01) — the panel
+               used to say "7 MIN" while the board said 8:15 */
             var ms = byDir[dd[0]][rt].slice(0, 4);
             html += '<div style="display:flex;align-items:center;gap:7px;margin:2px 0;">' + mtaChip(rt)
-              + '<span style="font:600 11px system-ui,sans-serif;">'
-              + ms.map(function(mm){ return mm < 1 ? 'NOW' : mm + ' MIN'; }).join(' · ') + '</span></div>';
+              + '<span style="font:600 11px system-ui,sans-serif;font-variant-numeric:tabular-nums;">'
+              + ms.map(function(a4){
+                  if (a4.mm < 1) return '<span class="cw-now">NOW</span>';
+                  var d4 = new Date(a4.t * 1000);
+                  return (d4.getHours() % 12 || 12) + ':' + ('0' + d4.getMinutes()).slice(-2);
+                }).join('<span style="opacity:.4;"> | </span>') + '</span></div>';
           });
         });
       });
@@ -50248,7 +50377,13 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (!el2 || window._cityHood !== h) return;
       var nw = Date.now() / 1000;
       var hr0 = new Date().getHours();
-      var noTrains = (hr0 >= 21 || hr0 < 6) ? 'NO NIGHT TRAINS' : 'NO TRAINS DUE';
+      /* honesty (user 2026-09-01): if the feeds themselves are failing, an
+         empty board is an OUTAGE, not a quiet night — never claim service
+         doesn't exist when we simply couldn't ask */
+      var feedBad = window._mtaFeedBad && (!window._mtaFeedOk || window._mtaFeedBad > window._mtaFeedOk)
+                    && Date.now() - window._mtaFeedBad < 300000;
+      var noTrains = feedBad ? 'FEED QUIET · RETRYING'
+        : ((hr0 >= 21 || hr0 < 6) ? 'NO NIGHT TRAINS' : 'NO TRAINS DUE');
       var sections = [];
       near.forEach(function(pick, pi){
         var members = results[pi][0], acc = results[pi][1];
@@ -50721,7 +50856,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (!window._cwCSO && !window._cwCSOReq){
         window._cwCSOReq = 1;
         fetch('city_cso.json').then(function(r){ return r.json(); })
-          .then(function(j){ if (j && j.p){ window._cwCSO = j.p; cwDrawSensors(); } }).catch(function(){});
+          .then(function(j){ if (j && j.p){ window._cwCSO = j.p; window._cwCSOwb = j.wb || []; cwDrawSensors(); } }).catch(function(){});
       }
       /* the bridges, baked from OSM (48KB) */
       if (!window._cwBridges && !window._cwBridgesReq){
