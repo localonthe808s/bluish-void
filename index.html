@@ -48265,7 +48265,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   };
   function _activeWmsBox(){
     if (fcastState.range !== 'live') return null;
-    if (fcastState.area === 'city-nyc') return window._cityView || _cityBoxCfg();   // zoomed = the visible box
+    if (fcastState.area === 'city-nyc') return window._cityPainted || _cityBoxCfg();   // the PAINTED box — what the pixels on screen show
     if (fcastState.area === 'local' && window._localWmsOn) return _localBox();
     if (fcastState.area === 'conus' && window._conusWmsOn) return _conusBox();
     return null;
@@ -48769,6 +48769,29 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   var _CITY_ZOOM_LAYERS = ['fcast-radar-img','fcast-radar-img-b',
                            'fcast-city-basemap','fcast-city-basemap-under','fcast-city-overlay'];
   window._cityView = null;            // null = the launch box; else {X0,Y0,X1,Y1,ASPECT}
+  /* PAINTED-VIEW invariant, ported from THE CITY widget (2026-09-01): the
+     gesture transform is always relative to _cityPainted — the view the
+     on-screen pixels actually show — and folds into the view ONLY when a
+     recompose lands, via _cityRemap. The old fold-at-settle + sync reset
+     double-counted overlapping settles and snapped visibly. */
+  window._cityPainted = null;         // null = launch framing
+  var _cityCompBusy = 0;
+  function _cityPaintedV(){ return window._cityPainted || _cityLaunchView(); }
+  function _cityRemap(pOld, pNew){
+    var c0 = document.getElementById('fcast-img-container');
+    var r0 = c0 ? c0.getBoundingClientRect() : null;
+    if (!r0 || !r0.width){ _cityZoom.k = 1; _cityZoom.tx = 0; _cityZoom.ty = 0; _cityZoomApply(); return; }
+    var a = (pOld.X1 - pOld.X0) / (pNew.X1 - pNew.X0);
+    var bx = r0.width  * ((pOld.X0 - pNew.X0) / (pNew.X1 - pNew.X0) + 0.5 * a - 0.5);
+    var by = r0.height * (0.5 - (pOld.Y0 - pNew.Y0) / (pNew.Y1 - pNew.Y0) - 0.5 * a);
+    _cityZoom.k = _cityZoom.k / a;
+    _cityZoom.tx -= _cityZoom.k * bx;
+    _cityZoom.ty -= _cityZoom.k * by;
+    if (Math.abs(_cityZoom.k - 1) < 0.004 && Math.abs(_cityZoom.tx) < 0.7 && Math.abs(_cityZoom.ty) < 0.7){
+      _cityZoom.k = 1; _cityZoom.tx = 0; _cityZoom.ty = 0;
+    }
+    _cityZoomApply();
+  }
   window._cityViewBM = null;          // blob URL of the composed zoomed backdrop
   var _CITY_TILES = { z1:'/nyc-basemap-ink.jpg?v=5',
     z2:{ nw:'/nyc-basemap-ink-z2-nw.jpg?v=2', ne:'/nyc-basemap-ink-z2-ne.jpg?v=2',
@@ -48818,13 +48841,14 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
              w:-74.1924, s:40.545, e:-73.6220, n:40.925 };
   }
   function _cityAtLaunch(){
-    var v = window._cityView, L = _cityLaunchView();
+    var v = window._cityPainted, L = _cityLaunchView();
     return !v || (Math.abs(v.X0 - L.X0) < 2 && Math.abs(v.X1 - L.X1) < 2 && Math.abs(v.Y0 - L.Y0) < 2);
   }
   window._cityZoomReset = function(){
     _cityZoom.k = 1; _cityZoom.tx = 0; _cityZoom.ty = 0;
     var lv = _cityLaunchView();
     window._cityView = lv;
+    window._cityPainted = lv;   // an explicit reset snaps by design
     if (window._cityViewBM){ try{ URL.revokeObjectURL(window._cityViewBM); }catch(e){} window._cityViewBM = null; }
     try{ _cityOv.X0 = lv.X0; _cityOv.Y0 = lv.Y0; _cityOv.X1 = lv.X1; _cityOv.Y1 = lv.Y1; }catch(e){}
     _cityZoomApply();
@@ -48836,6 +48860,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     }
   };
   function _cityComposeBM(v){
+    _cityCompBusy++;
+    var _cf = false;
+    var cfin = function(){ if (_cf) return; _cf = true; _cityCompBusy--; };
     var B = _cityBoxCfg();
     var c = document.getElementById('fcast-img-container');
     var r = c ? c.getBoundingClientRect() : null;
@@ -48864,7 +48891,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       }
     }
     Promise.all(jobs).then(function(parts){
-      if (window._cityView !== v) return;             // a newer settle won
+      if (window._cityView !== v){ cfin(); return; }  // a newer settle won
       var cv = document.createElement('canvas'); cv.width = W2; cv.height = H2;
       var g = cv.getContext('2d');
       var sx = W2 / (v.X1 - v.X0), sy = H2 / (v.Y1 - v.Y0);
@@ -48873,12 +48900,21 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                     (p.b.X1 - p.b.X0) * sx, (p.b.Y1 - p.b.Y0) * sy);
       });
       cv.toBlob(function(bl){
-        if (!bl || window._cityView !== v) return;
+        if (!bl || window._cityView !== v){ cfin(); return; }
         if (window._cityViewBM){ try{ URL.revokeObjectURL(window._cityViewBM); }catch(e){} }
         window._cityViewBM = URL.createObjectURL(bl);
         if (window._syncCityBasemap) try{ _syncCityBasemap(); }catch(e){}
+        /* the fold lands WITH the pixels: remap the live gesture against
+           the new painting, re-register the overlay, refresh the frames */
+        var pOld = _cityPaintedV();
+        window._cityPainted = v;
+        _cityRemap(pOld, v);
+        _cityOv.X0 = v.X0; _cityOv.Y0 = v.Y0; _cityOv.X1 = v.X1; _cityOv.Y1 = v.Y1;
+        try{ _cityOvDraw(); }catch(e){}
+        _cityRerenderFrames();
+        cfin();
       }, 'image/jpeg', 0.92);
-    }).catch(function(){});   // a missing tile leaves the CSS-zoomed base in place
+    }).catch(function(){ cfin(); });   // a missing tile leaves the CSS-zoomed base in place
   }
   (function(){
     var c = document.getElementById('fcast-img-container');
@@ -48893,7 +48929,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var r = c.getBoundingClientRect();
       if (!r.width) return;
       var B = _cityBoxCfg();
-      var cur = window._cityView || B;
+      var cur = _cityPaintedV();    // fold against the pixels on screen
       var curXs = cur.X1 - cur.X0, curYs = cur.Y1 - cur.Y0;
       var k = _cityZoom.k;
       var cx = (cur.X0 + cur.X1) / 2 - (_cityZoom.tx / k) * (curXs / r.width);
@@ -48903,35 +48939,51 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var nYs = ns / BXs * (B.Y1 - B.Y0);
       cx = Math.max(B.X0 + ns / 2, Math.min(B.X1 - ns / 2, cx));
       cy = Math.max(B.Y0 + nYs / 2, Math.min(B.Y1 - nYs / 2, cy));
-      _cityZoom.k = 1; _cityZoom.tx = 0; _cityZoom.ty = 0;
       var v = { X0:cx - ns / 2, Y0:cy - nYs / 2, X1:cx + ns / 2, Y1:cy + nYs / 2, ASPECT:B.ASPECT };
       var _iR = 6378137;
       v.w = v.X0 / _iR * 180 / Math.PI; v.e = v.X1 / _iR * 180 / Math.PI;
       v.s = (2 * Math.atan(Math.exp(v.Y0 / _iR)) - Math.PI / 2) * 180 / Math.PI;
       v.n = (2 * Math.atan(Math.exp(v.Y1 / _iR)) - Math.PI / 2) * 180 / Math.PI;
+      /* no reset here — the transform stays until the compose LANDS and
+         _cityRemap folds it against the new painting (no visible snap,
+         no double-fold across overlapping settles) */
+      var t0 = window._cityView || _cityLaunchView();
+      var sameT = Math.abs(v.X0 - t0.X0) < 1 && Math.abs(v.X1 - t0.X1) < 1 && Math.abs(v.Y0 - t0.Y0) < 1;
+      if (sameT){
+        var p0 = _cityPaintedV();
+        var sameP = Math.abs(t0.X0 - p0.X0) < 1 && Math.abs(t0.X1 - p0.X1) < 1 && Math.abs(t0.Y0 - p0.Y0) < 1;
+        if (sameP){
+          /* the clamps absorbed the whole gesture — snap the residual */
+          _cityZoom.k = 1; _cityZoom.tx = 0; _cityZoom.ty = 0; _cityZoomApply();
+        } else if (!_cityCompBusy){ window._cityView = t0; _cityComposeBM(t0); }
+        else settleSoon();
+        return;
+      }
       window._cityView = v;
-      _cityZoomApply();
-      _cityOv.X0 = v.X0; _cityOv.Y0 = v.Y0; _cityOv.X1 = v.X1; _cityOv.Y1 = v.Y1;
-      try{ _cityOvDraw(); }catch(e){}
       _cityComposeBM(v);
-      _cityRerenderFrames();
     }
     function clamp(){
+      /* exact bounds, painted-relative: the implied world window never
+         leaves the city box — no elastic overshoot, no navy reveal */
       var r = c.getBoundingClientRect();
-      if (window._cityView){
-        // loose during the gesture — the settle clamps to the launch box exactly
-        _cityZoom.tx = Math.max(-r.width * 0.75, Math.min(r.width * 0.75, _cityZoom.tx));
-        _cityZoom.ty = Math.max(-r.height * 0.75, Math.min(r.height * 0.75, _cityZoom.ty));
-      } else {
-        var mx = (_cityZoom.k - 1) * r.width / 2, my = (_cityZoom.k - 1) * r.height / 2;
-        _cityZoom.tx = Math.max(-mx, Math.min(mx, _cityZoom.tx));
-        _cityZoom.ty = Math.max(-my, Math.min(my, _cityZoom.ty));
-      }
+      if (!r.width) return;
+      var B = _cityBoxCfg(), P = _cityPaintedV();
+      var PXs = P.X1 - P.X0, PYs = P.Y1 - P.Y0;
+      var pcx = (P.X0 + P.X1) / 2, pcy = (P.Y0 + P.Y1) / 2;
+      var k = _cityZoom.k, sX = PXs / k, sY = PYs / k;
+      var cx = pcx - (_cityZoom.tx / k) * (PXs / r.width);
+      var cy = pcy + (_cityZoom.ty / k) * (PYs / r.height);
+      var lo = B.X0 + sX / 2, hi = B.X1 - sX / 2;
+      cx = lo > hi ? (B.X0 + B.X1) / 2 : Math.max(lo, Math.min(hi, cx));
+      lo = B.Y0 + sY / 2; hi = B.Y1 - sY / 2;
+      cy = lo > hi ? (B.Y0 + B.Y1) / 2 : Math.max(lo, Math.min(hi, cy));
+      _cityZoom.tx = (pcx - cx) * k * r.width / PXs;
+      _cityZoom.ty = (cy - pcy) * k * r.height / PYs;
     }
     function zoomAt(px, py, f){
       var B = _cityBoxCfg();
-      var cur = window._cityView || B;
-      var ratio = (B.X1 - B.X0) / (cur.X1 - cur.X0);      // absolute zoom of the settled view
+      var cur = _cityPaintedV();
+      var ratio = (B.X1 - B.X0) / (cur.X1 - cur.X0);      // absolute zoom of the painted view
       var k2 = Math.max(1 / ratio, Math.min(4 / ratio, _cityZoom.k * f));
       if (k2 === _cityZoom.k) return;
       var sc = k2 / _cityZoom.k;
@@ -48944,20 +48996,43 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var r = c.getBoundingClientRect();
       return [ev.clientX - r.left - r.width / 2, ev.clientY - r.top - r.height / 2];
     }
+    /* click-to-engage wheel (parity with THE CITY widget, 2026-09-01):
+       page scroll passes through until the map is clicked; ctrl/cmd+wheel
+       is always deliberate; clicking elsewhere hands the wheel back */
+    var engaged = false, hintEl = null, hintT = null;
+    function wheelHint(){
+      if (!hintEl){
+        hintEl = document.createElement('div');
+        hintEl.style.cssText = 'position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:6;'
+          + 'background:rgba(8,12,22,.72);color:rgba(255,255,255,.95);font:700 10px system-ui,sans-serif;'
+          + 'letter-spacing:.08em;padding:8px 14px;border-radius:8px;pointer-events:none;opacity:0;transition:opacity .25s;white-space:nowrap;';
+        hintEl.textContent = 'CLICK THE MAP TO ENABLE SCROLL ZOOM';
+        c.appendChild(hintEl);
+      }
+      hintEl.style.opacity = '1';
+      clearTimeout(hintT);
+      hintT = setTimeout(function(){ if (hintEl) hintEl.style.opacity = '0'; }, 1200);
+    }
+    document.addEventListener('pointerdown', function(e){
+      if (!c.contains(e.target)) engaged = false;
+    }, true);
     c.addEventListener('wheel', function(ev){
       if (!_cityZoomLive()) return;
+      if (!engaged && !(ev.ctrlKey || ev.metaKey)){ wheelHint(); return; }
       ev.preventDefault();
       var p = rel(ev);
       zoomAt(p[0], p[1], Math.pow(1.0015, -ev.deltaY));
     }, { passive:false });
     c.addEventListener('dblclick', function(ev){
       if (!_cityZoomLive()) return;
+      /* standard map grammar: double-click always zooms IN */
       var p = rel(ev);
-      if (_cityZoom.k > 1.05 || !_cityAtLaunch()) window._cityZoomReset();
-      else { zoomAt(p[0], p[1], 2); }
+      zoomAt(p[0], p[1], 2);
     });
     c.addEventListener('pointerdown', function(ev){
       if (!_cityZoomLive()) return;
+      engaged = true;
+      if (hintEl) hintEl.style.opacity = '0';
       pts[ev.pointerId] = rel(ev);
       if (Object.keys(pts).length === 1){
         try { c.setPointerCapture(ev.pointerId); } catch(e){}
