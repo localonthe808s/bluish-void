@@ -48732,12 +48732,27 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     + 'if(mx>110&&mx<245&&(sat<60||(b>g&&g>r&&sat<100)||(r>=g&&g>b&&sat<70)))d[i+3]=0;}';
   var _dsScrub = new Function('d', _DS_LOOP);
   var _DS_WSRC = 'var scrub=function(d){' + _DS_LOOP + '};'
-    + 'self.onmessage=function(ev){var url=ev.data;'
+    /* THE MOSAIC IS A GATE, NOT A PER-PIXEL MASK. Measured 2026-09-01: voting
+       pixel-by-pixel deleted 80% of real echo, because KOKX and MRMS are
+       minutes apart and storms move kilometres in minutes — the removed
+       pixels were exactly as storm-like as the kept ones. But on those same
+       frames the palette rule leaks ~1,500 storm-looking pixels whether or
+       not it is raining (1,477 with the mosaic reporting 0.00% precipitation
+       over the box, 1,858 an hour earlier, 1,613 during real rain). So the
+       mosaic gets one coarse vote: if the QC'd mosaic sees NOTHING in the
+       city box at this frame's minute, the frame is clear-air and everything
+       the palette left is phantom — drop it. Otherwise KOKX is untouched and
+       keeps its full super-res detail.
+       The vote is decided on the MAIN thread (_dsGate) and passed in as a
+       boolean: a fetch buried in the worker fails invisibly. */
+    + 'self.onmessage=function(ev){var url=ev.data&&ev.data.url?ev.data.url:ev.data;'
+    + 'var shut=!!(ev.data&&ev.data.shut);'
     + 'fetch(url,{mode:"cors"}).then(function(r){if(!r.ok)throw 0;return r.blob();})'
     + '.then(function(b){return createImageBitmap(b);})'
     + '.then(function(im){var c=new OffscreenCanvas(im.width,im.height);'
     + 'var g=c.getContext("2d");g.drawImage(im,0,0);'
-    + 'var id=g.getImageData(0,0,im.width,im.height);scrub(id.data);'
+    + 'var id=g.getImageData(0,0,im.width,im.height);'
+    + 'if(shut){var d=id.data;for(var j=3;j<d.length;j+=4)d[j]=0;} else scrub(id.data);'
     + 'g.putImageData(id,0,0);return c.convertToBlob({type:"image/png"});})'
     + '.then(function(bl){self.postMessage({url:url,blob:bl});})'
     + '.catch(function(){self.postMessage({url:url});});};';
@@ -48750,6 +48765,34 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var old = _despeckleOrder.shift();
       URL.revokeObjectURL(_despeckleCache[old]); delete _despeckleCache[old];
     }
+  }
+  /* one tiny fetch (a few hundred bytes) per frame minute, cached */
+  var _dsGateCache = {};
+  function _dsGate(maskUrl){
+    if (!maskUrl) return Promise.resolve(false);
+    if (maskUrl in _dsGateCache) return Promise.resolve(_dsGateCache[maskUrl]);
+    return new Promise(function(res){
+      var im = new Image();
+      im.crossOrigin = 'anonymous';
+      im.onload = function(){
+        var shut = false;
+        try{
+          var c = document.createElement('canvas');
+          c.width = im.naturalWidth; c.height = im.naturalHeight;
+          var g = c.getContext('2d');
+          g.drawImage(im, 0, 0);
+          var d = g.getImageData(0, 0, c.width, c.height).data, n = 0;
+          for (var i = 3; i < d.length; i += 4){ if (d[i] > 60){ n++; if (n > 2) break; } }
+          shut = n <= 2;
+        }catch(e){ shut = false; }        /* unreadable never blanks a frame */
+        _dsGateCache[maskUrl] = shut;
+        var ks = Object.keys(_dsGateCache);
+        if (ks.length > 40) delete _dsGateCache[ks[0]];
+        res(shut);
+      };
+      im.onerror = function(){ res(false); };
+      im.src = maskUrl;
+    });
   }
   function _dsGetWorker(){
     if (_dsWorker !== undefined) return _dsWorker;
@@ -48776,18 +48819,23 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     }catch(e){ _dsWorker = null; }
     return _dsWorker;
   }
-  function _despeckleWms(url, cb){
+  function _despeckleWms(url, cb, mask){
     if (_despeckleCache[url]) return cb(_despeckleCache[url]);
-    var w = _dsGetWorker();
-    if (w){
-      if (_dsPend[url]){ _dsPend[url].push(cb); return; }
-      _dsPend[url] = [cb];
-      w.postMessage(url);
-      return;
-    }
-    _dsMain(url, cb);
+    if (_dsPend[url]){ _dsPend[url].push(cb); return; }
+    /* settle the mosaic's vote first, then hand the frame off */
+    _dsGate(mask).then(function(shut){
+      if (_despeckleCache[url]) return cb(_despeckleCache[url]);
+      var w = _dsGetWorker();
+      if (w){
+        if (_dsPend[url]){ _dsPend[url].push(cb); return; }
+        _dsPend[url] = [cb];
+        w.postMessage({ url: url, shut: shut });
+        return;
+      }
+      _dsMain(url, cb, shut);
+    });
   }
-  function _dsMain(url, cb){
+  function _dsMain(url, cb, shut){
     if (_despeckleCache[url]) return cb(_despeckleCache[url]);
     var im = new Image();
     im.crossOrigin = 'anonymous';
@@ -48798,7 +48846,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var g = c.getContext('2d');
         g.drawImage(im, 0, 0);
         var id = g.getImageData(0, 0, c.width, c.height);
-        _dsScrub(id.data);
+        if (shut){ var d0 = id.data; for (var j0 = 3; j0 < d0.length; j0 += 4) d0[j0] = 0; }
+        else _dsScrub(id.data);
         g.putImageData(id, 0, 0);
         c.toBlob(function(bl){
           if (!bl) return cb(url);
@@ -49290,6 +49339,28 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         frames: function(){ return 'https://cdn.star.nesdis.noaa.gov/GOES19/ABI/SECTOR/ne/GEOCOLOR/1200x1200.jpg?cb=' + Math.floor(Date.now()/600000); },
         n:1, fit:'cover' }
     ];
+    /* MRMS AS QUALITY CONTROL, KOKX AS THE PICTURE (user 2026-09-01).
+       KOKX super-res sees the city at ~790 x 250 m — four times finer than
+       the 1 km mosaic — so it stays the visual. But MRMS is quality
+       controlled (clutter, anomalous propagation and birds already removed),
+       so it gets a vote: a KOKX pixel survives only if the mosaic also has
+       echo within ~2.5 km of it AT THE SAME MINUTE. Masks are tiny (a few
+       hundred bytes at 160x141 over the city box) and time-matched per frame,
+       because a 40-minute-old frame cannot be judged against a mask from now.
+       An empty or missing mask NEVER blanks a frame — on a genuinely clear
+       night that is indistinguishable from a data gap, so we fall back to the
+       palette rule alone, which is what it was built for. */
+    function frameTime(fhr){
+      return new Date(Math.floor(Date.now() / 240000) * 240000 - fhr * 240000).toISOString();
+    }
+    function maskUrl(fhr){
+      var B = _cityBoxCfg();
+      return 'https://opengeo.ncep.noaa.gov/geoserver/conus/ows?service=WMS&version=1.1.0&request=GetMap'
+        + '&layers=conus_bref_qcd&styles=&bbox=' + Math.round(B.X0) + ',' + Math.round(B.Y0) + ','
+        + Math.round(B.X1) + ',' + Math.round(B.Y1)
+        + '&width=160&height=141&srs=EPSG:3857&format=image/png8&transparent=true'
+        + '&time=' + encodeURIComponent(frameTime(fhr));
+    }
     function frameUrl(fhr){
       /* frames are VIEW-INDEPENDENT (2026-08-31): one fetch covers the WHOLE
          city box at ~32 m/px — KOKX super-res gates are ~250m, so the radar
@@ -49301,7 +49372,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
          (verified 0 disagreement across 2.35M px on a live frame). */
       var B = _cityBoxCfg();
       var layer = (cw.prod === 'bref' || cw.prod === 'bvel') ? 'kokx_sr_' + cw.prod : 'kokx_' + cw.prod;
-      var t = new Date(Math.floor(Date.now() / 240000) * 240000 - fhr * 240000).toISOString();
+      var t = frameTime(fhr);
       return 'https://opengeo.ncep.noaa.gov/geoserver/kokx/ows?service=WMS&version=1.1.0&request=GetMap'
         + '&layers=' + layer + '&styles=&bbox=' + Math.round(B.X0) + ',' + Math.round(B.Y0) + ','
         + Math.round(B.X1) + ',' + Math.round(B.Y1)
@@ -50185,7 +50256,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         if (back.decode) back.decode().then(swap, swap);
         else back.onload = swap;
       };
-      if (cw.prod === 'bref') _despeckleWms(url, apply);
+      /* only base reflectivity is masked: the mosaic is reflectivity, so it
+         cannot arbitrate velocity, hydrometeor class or accumulations */
+      if (cw.prod === 'bref') _despeckleWms(url, apply, maskUrl(fhr));
       else apply(url);
     }
     window._cwFloodsOn = function(){ return !!(cw.floods && cw.running); };
@@ -51333,7 +51406,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
          this mostly trims the initial and post-zoom warms. */
       [2,1,0].forEach(function(fh){
         var u = frameUrl(fh);
-        if (u) _despeckleWms(u, function(){});
+        if (u) _despeckleWms(u, function(){}, maskUrl(fh));
       });
     }
     function start(){
