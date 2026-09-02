@@ -50750,73 +50750,138 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         g.lineJoin = 'round'; g.lineCap = 'round';
         g.textAlign = 'left'; g.textBaseline = 'middle';
         g.font = '800 ' + (8 * dpr) + 'px system-ui,sans-serif';
-        /* the counties and zones each alert actually covers, drawn UNDER the
-           storm polygon so the bold outline still reads on top */
         var Z = window._cwZones;
-        if (Z){
-          var zoneShapes = function(ids, col, fill){
-            var sx = 0, sy = 0, n = 0;
-            (ids || []).forEach(function(zid){
-              var rings = Z[zid];
-              if (!rings) return;                      // out of frame, or marine
-              rings.forEach(function(ring){
-                g.beginPath();
-                ring.forEach(function(p, i){
-                  var X = px(p), Y = py(p);
-                  sx += X; sy += Y; n++;
-                  i ? g.lineTo(X, Y) : g.moveTo(X, Y);
-                });
-                g.closePath();
-                if (fill){ g.fillStyle = cwHexA(col, .11); g.fill(); }
-                g.lineWidth = 2.4 * dpr; g.strokeStyle = 'rgba(8,10,16,.45)'; g.stroke();
-                g.lineWidth = 1.1 * dpr; g.strokeStyle = cwHexA(col, .78); g.stroke();
-              });
-            });
-            return n ? [sx / n, sy / n] : null;
-          };
-          /* a zone alert has no other shape, so its zones ARE its extent */
-          (AL.zoneAl || []).forEach(function(a){
-            var c = zoneShapes(a.z, cwAlertCol(a.e), true);
-            if (!c) return;
-            markLines(splitEvent(a.e), c[0] + 5 * dpr, c[1], cwAlertCol(a.e));
+        /* Severity decides who owns a county and who gets to speak. A county
+           inside a tornado warning AND a severe thunderstorm watch was being
+           stroked twice in two colours, which is where the tangle came from
+           (user 2026-09-02). */
+        var rankOf = function(e){
+          var n = String(e).toLowerCase();
+          if (n.indexOf('tornado warning') >= 0) return 100;
+          if (n.indexOf('flash flood warning') >= 0) return 90;
+          if (n.indexOf('severe thunderstorm warning') >= 0) return 85;
+          if (n.indexOf('warning') >= 0) return 70;
+          if (n.indexOf('watch') >= 0) return 45;
+          if (n.indexOf('advisory') >= 0) return 30;
+          return 20;
+        };
+        var all = (AL.poly || []).concat(AL.zoneAl || []);
+        /* one owner per county: the worst thing happening to it */
+        var owner = {};
+        all.forEach(function(a){
+          (a.z || []).forEach(function(zid){
+            if (!Z || !Z[zid]) return;
+            if (!owner[zid] || rankOf(a.e) > rankOf(owner[zid])) owner[zid] = a.e;
           });
-          (AL.poly || []).forEach(function(a){ zoneShapes(a.z, cwAlertCol(a.e), false); });
-        }
+        });
+        /* the county wash — each drawn EXACTLY ONCE, and lighter than before:
+           it is context for the storm polygon, not the headline */
+        if (Z) Object.keys(owner).forEach(function(zid){
+          var col = cwAlertCol(owner[zid]);
+          Z[zid].forEach(function(ring){
+            g.beginPath();
+            ring.forEach(function(p, i){ i ? g.lineTo(px(p), py(p)) : g.moveTo(px(p), py(p)); });
+            g.closePath();
+            g.fillStyle = cwHexA(col, .085); g.fill();
+            g.lineWidth = 1.6 * dpr; g.strokeStyle = 'rgba(8,10,16,.40)'; g.stroke();
+            g.lineWidth = 0.8 * dpr; g.strokeStyle = cwHexA(col, .60); g.stroke();
+          });
+        });
+        /* the storm polygons on top — these are the shapes that matter */
         (AL.poly || []).forEach(function(a){
-          var col = cwAlertCol(a.e), sx = 0, sy = 0, n = 0, seen = false;
+          var col = cwAlertCol(a.e);
           a.r.forEach(function(ring){
             if (!ring || ring.length < 3) return;
             g.beginPath();
-            ring.forEach(function(p, i){
-              var X = px(p), Y = py(p);
-              if (X > -40 && X < cvs.width + 40 && Y > -40 && Y < cvs.height + 40) seen = true;
-              sx += X; sy += Y; n++;
-              i ? g.lineTo(X, Y) : g.moveTo(X, Y);
-            });
+            ring.forEach(function(p, i){ i ? g.lineTo(px(p), py(p)) : g.moveTo(px(p), py(p)); });
             g.closePath();
             g.fillStyle = cwHexA(col, .16); g.fill();
             g.lineWidth = 3.4 * dpr; g.strokeStyle = 'rgba(8,10,16,.7)'; g.stroke();
             g.lineWidth = 1.8 * dpr; g.strokeStyle = col; g.stroke();
           });
-          if (seen && n){
-            markLines(splitEvent(a.e), sx / n + 5 * dpr, sy / n, col);
-          }
         });
-        /* the zone-based ones have no shape, so they get counted, not drawn */
-        var zk = Object.keys(AL.zone || {});
+        /* ONE label per KIND of alert. Four identical severe thunderstorm
+           warnings wrote those two words four times; the shapes are already
+           colour-coded and the corner carries the full count, so the map only
+           needs to name each kind once, with a multiplier when there are
+           several. Anchored on the BIGGEST ring of that kind rather than the
+           mean of every vertex — a mean over scattered counties lands in the
+           gap BETWEEN them instead of inside one. */
+        var byEvent = {};
+        all.forEach(function(a){
+          var e = a.e, rings = (a.r || []).slice();
+          if (Z) (a.z || []).forEach(function(zid){ if (Z[zid]) rings = rings.concat(Z[zid]); });
+          if (!byEvent[e]) byEvent[e] = { e: e, n: 0, best: null, area: -1 };
+          byEvent[e].n++;
+          rings.forEach(function(ring){
+            if (!ring || ring.length < 3) return;
+            var x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+            ring.forEach(function(p){
+              var X = px(p), Y = py(p);
+              if (X < x0) x0 = X;
+              if (X > x1) x1 = X;
+              if (Y < y0) y0 = Y;
+              if (Y > y1) y1 = Y;
+            });
+            if (x1 < 0 || y1 < 0 || x0 > cvs.width || y0 > cvs.height) return;   // off frame
+            var ar = (x1 - x0) * (y1 - y0);
+            if (ar > byEvent[e].area){
+              byEvent[e].area = ar;
+              byEvent[e].best = [(x0 + x1) / 2, (y0 + y1) / 2];
+            }
+          });
+        });
+        /* worst first, so when two labels want the same gap the tornado
+           warning takes it and the advisory is the one that steps aside */
+        var evs = [];
+        Object.keys(byEvent).forEach(function(k){ if (byEvent[k].best) evs.push(byEvent[k]); });
+        evs.sort(function(a, b){ return rankOf(b.e) - rankOf(a.e); });
+        var placed = [];
+        evs.forEach(function(v){
+          var lines = splitEvent(v.e);
+          if (v.n > 1) lines[lines.length - 1] += ' ×' + v.n;
+          var lw = 0;
+          lines.forEach(function(t){ lw = Math.max(lw, g.measureText(t).width); });
+          var lh = lines.length * 10.5 * dpr;
+          var tries = [[0, 0], [0, -30 * dpr], [0, 30 * dpr], [-lw - 16 * dpr, 0],
+                       [40 * dpr, 0], [0, -60 * dpr], [0, 60 * dpr]];
+          for (var t2 = 0; t2 < tries.length; t2++){
+            var lx = v.best[0] + 5 * dpr + tries[t2][0], ly = v.best[1] + tries[t2][1];
+            if (lx < 4 * dpr || lx + lw > cvs.width - 4 * dpr) continue;
+            if (ly - lh / 2 < 4 * dpr || ly + lh / 2 > cvs.height - 4 * dpr) continue;
+            var bx = lx, by = ly - lh / 2;
+            var hit = false;
+            for (var q = 0; q < placed.length; q++){
+              var o = placed[q];
+              if (!(bx > o[0] + o[2] + 6 * dpr || bx + lw + 6 * dpr < o[0]
+                 || by > o[1] + o[3] + 4 * dpr || by + lh + 4 * dpr < o[1])){ hit = true; break; }
+            }
+            if (hit) continue;
+            placed.push([bx, by, lw, lh]);
+            markLines(lines, lx, ly, cwAlertCol(v.e));
+            return;
+          }
+          /* nowhere clean for it — the colour and the corner still carry it */
+        });
+        /* the corner is the FULL inventory now, not just the shapeless ones:
+           the map names each kind once and silently drops any label it cannot
+           place, so this is where nothing is allowed to go missing */
+        var tally = {};
+        all.forEach(function(a){ tally[a.e] = (tally[a.e] || 0) + 1; });
+        var zk = Object.keys(tally);
         if (zk.length){
-          zk.sort(function(a, b){ return AL.zone[b] - AL.zone[a]; });
+          zk.sort(function(a, b){ return rankOf(b) - rankOf(a) || tally[b] - tally[a]; });
           g.font = '700 ' + (8 * dpr) + 'px system-ui,sans-serif';
           var yy = 14 * dpr;
           g.lineWidth = 3 * dpr;
-          zk.slice(0, 5).forEach(function(k){
-            var t2 = AL.zone[k] + '× ' + k.toUpperCase();
-            g.strokeStyle = 'rgba(8,10,16,.8)'; g.strokeText(t2, 10 * dpr, yy);
-            g.fillStyle = cwHexA(cwAlertCol(k), .92); g.fillText(t2, 10 * dpr, yy);
+          zk.slice(0, 6).forEach(function(k){
+            var t3 = tally[k] + '× ' + k.toUpperCase();
+            g.strokeStyle = 'rgba(8,10,16,.8)'; g.strokeText(t3, 10 * dpr, yy);
+            g.fillStyle = cwHexA(cwAlertCol(k), .92); g.fillText(t3, 10 * dpr, yy);
             yy += 12 * dpr;
           });
-          if (zk.length > 5){
-            var more = '+' + (zk.length - 5) + ' MORE';
+          if (zk.length > 6){
+            var more = '+' + (zk.length - 6) + ' MORE';
             g.strokeStyle = 'rgba(8,10,16,.8)'; g.strokeText(more, 10 * dpr, yy);
             g.fillStyle = 'rgba(255,255,255,.55)'; g.fillText(more, 10 * dpr, yy);
           }
