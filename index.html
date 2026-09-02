@@ -48313,7 +48313,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
      catch. Static takes plain {x: lon, y: lat} corners and derives its zoom from
      the longitude span and the pixel width, so the centre latitude has to come
      from the MERCATOR midpoint (averaging the two latitudes bends the result). */
-  function _stitchBasemapVector(box, cb, flavor, labelNames){
+  function _stitchBasemapVector(box, cb, flavor, labelNames, roadKinds){
     try {
       if (typeof protomapsL === 'undefined' || !window.BV_MAP_FLAVOR) { cb(null); return; }
       var R = 6378137, PI = Math.PI;
@@ -48347,9 +48347,30 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           return out;
         });
       }
+      /* Road classes, same wrapping trick as the labels. At the INCOMING box
+         (~213 m/px, zoom 9.1) protomaps draws trunk, primary, secondary and
+         tertiary as well as the motorways, and that web is dense enough to
+         read as county lines — which is what it was mistaken for. Verified
+         it is roads and NOT boundaries: dropping the whole boundaries layer
+         changes 0 pixels, while recolouring `major` turns every line in the
+         mesh. Keeping motorway + trunk leaves the skeleton and drops the web. */
+      var pr = protomapsL.paintRules(F);
+      if (roadKinds && roadKinds.length){
+        pr = pr.map(function(r){
+          if (r.dataLayer !== 'roads') return r;
+          var base = r.filter, out = {};
+          for (var k in r) out[k] = r[k];
+          out.filter = function(z, f){
+            if (base && !base(z, f)) return false;
+            var kd = (f && f.props ? f.props.kind_detail : '') || '';
+            return roadKinds.indexOf(kd) >= 0;
+          };
+          return out;
+        });
+      }
       var st = new protomapsL.Static({
         url: window.BV_BASEMAP_URL,
-        paintRules: protomapsL.paintRules(F),
+        paintRules: pr,
         labelRules: lr,
         backgroundColor: F.background,
         maxDataZoom: 9
@@ -48366,11 +48387,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         .catch(function(){ cb(null); });
     } catch(e){ cb(null); }
   }
-  function _stitchBasemap(box, cb, flavor, labelNames){
+  function _stitchBasemap(box, cb, flavor, labelNames, roadKinds){
     _stitchBasemapVector(box, function(u){
       if (u) { cb(u); return; }
       _stitchBasemapRaster(box, cb);
-    }, flavor, labelNames);
+    }, flavor, labelNames, roadKinds);
   }
   function _stitchBasemapRaster(box, cb){
     if (window._staBasemap[box.sid]){ cb(window._staBasemap[box.sid]); return; }
@@ -49295,6 +49316,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
            Explicit coordinates also settle the two Middletowns — this
            is the Orange County one, not the shore town by Trenton. */
         labels: [],
+        /* interstates and US routes only — the rest of the road classes make
+           a web at this scale that reads as county lines (user 2026-09-01) */
+        roads: ['motorway', 'motorway_link', 'trunk', 'trunk_link'],
         cityLbl: [['Poughkeepsie', 41.7004, -73.9210], ['Newburgh', 41.5034, -74.0104],
                   ['Middletown', 41.4459, -74.4229], ['Port Jervis', 41.3751, -74.6927],
                   ['Scranton', 41.4090, -75.6624], ['Stroudsburg', 40.9868, -75.1946],
@@ -50135,6 +50159,42 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       WIDE.forEach(function(w2){ if (w2.id === cw.wide) out = w2; });
       return out;
     }
+    /* Clicking a wide view used to leave the CITY map on screen while the
+       regional basemap and its frames loaded — you'd hit INCOMING and stare
+       at Brooklyn for a second (user 2026-09-01). The water-cycle loader now
+       covers the panel until the view it names is actually there. Cloned from
+       the boot loader rather than a third copy of that markup; it keeps living
+       in the DOM at display:none, so the clone is safe. */
+    var cwWideLoadCap = null;
+    function cwWideLoad(on, label){
+      var ld = document.getElementById('cw-wideload');
+      if (!ld){
+        if (!on) return;
+        var src = document.getElementById('cw-loading');
+        if (!src || !src.parentNode) return;
+        ld = src.cloneNode(true);
+        ld.id = 'cw-wideload';
+        ld._done = 1;                       /* never touched by the boot dismissal */
+        /* its own gradient id — the boot loader's sits in a display:none
+           subtree once dismissed, and a duplicate id resolves to that one */
+        var gr = ld.querySelector('linearGradient');
+        if (gr){
+          gr.id = 'wcSunsetCloudCWw';
+          var pa = ld.querySelector('path[fill^="url("]');
+          if (pa) pa.setAttribute('fill', 'url(#wcSunsetCloudCWw)');
+        }
+        ld.style.zIndex = '6';
+        ld.style.background = '#0d1626';    /* opaque, or the city shows through */
+        src.parentNode.appendChild(ld);
+      }
+      if (cwWideLoadCap){ clearTimeout(cwWideLoadCap); cwWideLoadCap = null; }
+      var cap = ld.lastElementChild;
+      if (on && cap) cap.textContent = 'LOADING ' + (label || 'THE MAP') + '…';
+      ld.style.display = on ? 'flex' : 'none';
+      ld.style.opacity = on ? '1' : '0';
+      /* a layer that never lands must not hold the panel hostage */
+      if (on) cwWideLoadCap = setTimeout(function(){ cwWideLoad(false); }, 10000);
+    }
     function setWide(id){
       cw.wide = id || null;
       var el = document.getElementById('cw-wide'), tag = document.getElementById('cw-wide-tag');
@@ -50144,6 +50204,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var bs = document.getElementById('cw-wide-base');
       var bt = document.getElementById('cw-wide-bathy');
       if (!cw.wide){
+        cwWideLoad(false);
         el.style.display = 'none'; tag.style.display = 'none';
         if (bs) bs.style.display = 'none';
         if (bt){ bt.style.display = 'none'; bt.removeAttribute('src'); }
@@ -50157,6 +50218,14 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       el.style.objectFit = wv.fit;
       el.style.display = '';
       el.style.background = wv.box ? 'transparent' : '#0d1626';
+      /* the loader comes up NOW and comes down only when the layers this view
+         is made of have both landed — the basemap under it and a first frame */
+      cwWideLoad(true, String(wv.label).split(' · ')[0]);
+      var ready = { base: !wv.box, frame: false };
+      var settle = function(){
+        if (cw.wide !== wv.id) return;
+        if (ready.base && ready.frame) cwWideLoad(false);
+      };
       if (bs){
         if (wv.box){
           /* our own basemap, rendered for this box in the light flavour */
@@ -50166,6 +50235,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             if (cw.wide !== wv.id) return;
             bs.style.display = '';
             if (bt && wv.mid) bt.style.display = '';
+            ready.base = true; settle();
           };
           bs.onload = showUnder;
           if (cwWideBase[wv.id]){ bs.src = cwWideBase[wv.id]; if (bs.complete) showUnder(); }
@@ -50175,7 +50245,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
               if (!u || cw.wide !== wantB) return;
               cwWideBase[wantB] = u; bs.src = u;
               if (bs.complete) showUnder();
-            }, window.BV_MAP_FLAVOR_NE, wv.labels);
+            }, window.BV_MAP_FLAVOR_NE, wv.labels, wv.roads);
           }
         } else { bs.style.display = 'none'; bs.removeAttribute('src'); }
       }
@@ -50219,8 +50289,15 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         im.onload = im.onerror = function(){
           if (cw.wide !== want) return;
           loaded++;
-          if (loaded === 1 && k === urls.length - 1) el.src = u;      // newest first paint
+          if (loaded === 1 && k === urls.length - 1){
+            el.src = u;                                               // newest first paint
+            ready.frame = true; settle();
+          }
           if (loaded === urls.length && urls.length > 1){
+            /* also the safety net: if the NEWEST frame was not the first to
+               arrive, the branch above never fired and the loader would sit
+               there until its 10s cap */
+            ready.frame = true; settle();
             cwWideImgs = urls;
             if (cwWideTimer) clearInterval(cwWideTimer);
             cwWideTimer = setInterval(function(){
