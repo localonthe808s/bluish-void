@@ -49260,7 +49260,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             + '&width=1400&height=1228&srs=EPSG:3857&format=image/png8&transparent=true'
             + '&time=' + encodeURIComponent(t);
         },
-        boroughs: true, lead: true,   /* ~155 km of upwind runway: 2-4 hours */
+        boroughs: true, lead: true, fuel: true,   /* ~155 km of upwind runway: 2-4 hours */
         n:6, fit:'cover' },
       /* NORTHEAST is drawn on OUR OWN MAP (user 2026-09-01): the site's
          PMTiles archive rendered for this box in the light flavour, with
@@ -49476,8 +49476,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         + '<img id="cw-wide" alt="" style="' + IMG + 'z-index:4;display:none;background:#0d1626;">'
         + '<canvas id="cw-wide-ov" style="' + IMG + 'z-index:5;display:none;pointer-events:none;"></canvas>'
         + '<div id="cw-wide-tag" style="position:absolute;left:10px;bottom:10px;z-index:6;display:none;'
-        + 'background:rgba(234,88,12,.95);color:#fff;font:800 9px system-ui,sans-serif;letter-spacing:.08em;'
-        + 'padding:6px 11px;border-radius:8px;pointer-events:none;white-space:nowrap;"></div>'
+        + 'background:rgba(234,88,12,.95);color:#fff;letter-spacing:.08em;'
+        + 'padding:6px 11px;border-radius:8px;pointer-events:none;white-space:nowrap;">'
+        + '<span id="cw-wide-tag-main" style="display:block;font:800 9px system-ui,sans-serif;"></span>'
+        + '<span id="cw-wide-tag-sub" style="display:none;font:700 8px system-ui,sans-serif;color:rgba(255,255,255,.82);margin-top:2px;"></span>'
+        + '</div>'
         + '<div id="cw-time" style="position:absolute;right:8px;top:6px;z-index:4;font:700 9px system-ui,sans-serif;letter-spacing:.08em;color:rgba(255,255,255,.9);background:rgba(8,12,22,.6);border-radius:6px;padding:3px 8px;"></div>'
         + '<div style="position:absolute;right:8px;bottom:6px;z-index:4;font:500 8px system-ui,sans-serif;color:rgba(30,30,50,.6);background:rgba(255,255,255,.6);padding:1px 6px;border-radius:4px;">\u00a9 OpenStreetMap \u00b7 Protomaps \u00b7 NOAA NCEI \u00b7 NOAA KOKX super-res \u00b7 MTA \u00b7 Viele 1865</div>'
         /* the water-cycle loader owns the blue until the first compose
@@ -49896,6 +49899,59 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        its own slow loop. The city timers keep running underneath so
        returning is instant; the map's gestures are inert while it's up. */
     var cwWideTimer = null, cwWideIdx = 0, cwWideImgs = [], cwWideBase = {};
+    /* CAN IT HOLD TOGETHER? (user 2026-09-01) — the terrain shows where the
+       lift is, but lift needs fuel and the coast has a kill switch. Two
+       reads, refreshed every 20 min:
+         CAPE upwind (over the Highlands) vs at the city — the gradient tells
+         you whether a cell is about to run out of fuel as it crosses the
+         lee edge, and CIN whether anything is holding it down.
+         Sea-surface temperature in the bight against the air over it — water
+         COLDER than the air is a stable marine wedge that kills or lifts
+         storms at the shoreline; water warmer means no cap and lines can
+         reach the boroughs. */
+    var cwFuelAt = 0;
+    function cwFuel(){
+      var el = document.getElementById('cw-wide-tag-sub');
+      if (!el) return;
+      if (Date.now() - cwFuelAt < 1200000) return;
+      cwFuelAt = Date.now();
+      var hr = new Date().getHours();
+      Promise.all([
+        fetch('https://api.open-meteo.com/v1/forecast?latitude=40.90,40.74&longitude=-74.60,-73.92'
+              + '&hourly=cape,convective_inhibition&timezone=America%2FNew_York&forecast_days=1')
+          .then(function(r){ return r.json(); }),
+        fetch('https://marine-api.open-meteo.com/v1/marine?latitude=40.45&longitude=-73.75'
+              + '&hourly=sea_surface_temperature&timezone=America%2FNew_York&forecast_days=1')
+          .then(function(r){ return r.json(); }),
+        fetch('https://api.open-meteo.com/v1/forecast?latitude=40.45&longitude=-73.75'
+              + '&hourly=temperature_2m&timezone=America%2FNew_York&forecast_days=1')
+          .then(function(r){ return r.json(); })
+      ]).then(function(a){
+        if (!el.isConnected) return;
+        var up = a[0] && a[0][0] && a[0][0].hourly, city = a[0] && a[0][1] && a[0][1].hourly;
+        var pick = function(arr){ return (arr && arr[hr] != null) ? arr[hr] : null; };
+        var cUp = up ? pick(up.cape) : null, cCity = city ? pick(city.cape) : null;
+        var cinUp = up ? pick(up.convective_inhibition) : null;
+        var sst = a[1] && a[1].hourly ? pick(a[1].hourly.sea_surface_temperature) : null;
+        var airSea = a[2] && a[2].hourly ? pick(a[2].hourly.temperature_2m) : null;
+        var bits = [];
+        if (cUp != null){
+          bits.push('CAPE ' + Math.round(cUp) + ' UPWIND'
+            + (cCity != null ? ' \u00b7 ' + Math.round(cCity) + ' CITY' : ''));
+          /* no fuel at all is the headline, not a footnote */
+          if (cUp < 250) bits[bits.length - 1] = 'NO FUEL \u00b7 CAPE ' + Math.round(cUp);
+          else if (cinUp != null && cinUp > 100) bits.push('CAPPED (CIN ' + Math.round(cinUp) + ')');
+        }
+        if (sst != null){
+          var t = 'OCEAN ' + Math.round(sst) + '\u00b0';
+          if (airSea != null) t += (sst < airSea - 1) ? ' \u00b7 MARINE CAP' : ' \u00b7 NO CAP';
+          bits.push(t);
+        }
+        if (!bits.length) return;
+        el.textContent = bits.join(' \u00b7 ');
+        el.style.display = 'block';
+      }).catch(function(){});
+    }
     function cwWideDef(){
       var out = null;
       WIDE.forEach(function(w2){ if (w2.id === cw.wide) out = w2; });
@@ -50067,11 +50123,13 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (!wv) return;
       cwDrawWideOv(wv);
       var tag = document.getElementById('cw-wide-tag');
-      if (tag && wv.lead && window._cwStorm && window._cwStorm.mph){
+      var tm = document.getElementById('cw-wide-tag-main');
+      if (tm && wv.lead && window._cwStorm && window._cwStorm.mph){
         var dd2 = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
-        tag.textContent = wv.label + ' \u00b7 MOVING ' + dd2[Math.round(window._cwStorm.toward / 22.5) % 16]
+        tm.textContent = wv.label + ' \u00b7 MOVING ' + dd2[Math.round(window._cwStorm.toward / 22.5) % 16]
           + ' ' + window._cwStorm.mph + ' MPH';
       }
+      if (wv.fuel) cwFuel();
     }
     function setProduct(p){
       /* re-clicking the lit product turns the radar layer OFF — the bare map */
