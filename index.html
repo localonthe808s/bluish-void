@@ -49331,7 +49331,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         /* the same reads as INCOMING, scaled to this box (user 2026-09-01):
            land relief now shares the seafloor layer, the lead arcs step out
            to six and twelve hours, and the fuel line comes along */
-        lead: true, fuel: true, leadHrs: [[6, .95], [12, .6]],
+        lead: true, fuel: true, leadHrs: [[6, .95], [12, .6]], geo: true,
         box: { X0:-8927823, Y0:4607718, X1:-7636517, Y1:5716479, sid:'cw-ne' },
         /* the middle layer — drawn under the radar, over our basemap. Here
            the Atlantic seafloor from GMRT, reprojected to mercator so it
@@ -50008,6 +50008,81 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
          COLDER than the air is a stable marine wedge that kills or lifts
          storms at the shoreline; water warmer means no cap and lines can
          reach the boroughs. */
+    /* THE MACHINERY (user 2026-09-01) — the physical features that MAKE this
+       region's weather, under the live layers. Relief already shows the
+       landforms; this says what they DO. Standing geology is drawn dim; only
+       what is running right now brightens, so the map is quiet in a settled
+       pattern and loud when the machine is on.
+         - the two snowbelt uplands (Tug Hill, the Chautauqua ridge) and the
+           lakes that load them
+         - the two breaks in the Appalachian wall that deliver arctic air
+         - the Gulf Stream's north wall, the sea-surface cliff that coastal
+           lows deepen over */
+    function cwGeoLoad(){
+      if (window._cwGeoNE || window._cwGeoNEing) return;
+      window._cwGeoNEing = 1;
+      fetch('/city_ne_geo.json').then(function(r){ return r.json(); })
+        .then(function(j){ window._cwGeoNE = j; }).catch(function(){});
+    }
+    /* the meridians we walk south-to-north looking for the sea-surface cliff */
+    var CW_GLON = [-72, -71, -70, -69], CW_GLAT = [];
+    (function(){ for (var i = 0; i < 14; i++) CW_GLAT.push(38.4 + 0.4 * i); })();
+    var cwGeoAt = 0;
+    function cwGeoRead(){
+      if (Date.now() - cwGeoAt < 1200000) return;
+      cwGeoAt = Date.now();
+      var mla = [], mlo = [];
+      CW_GLON.forEach(function(lo){ CW_GLAT.forEach(function(la){
+        mla.push(la.toFixed(2)); mlo.push(lo.toFixed(2)); }); });
+      Promise.all([
+        /* soil_temperature_0cm over a lake cell is the model's LAKE SKIN
+           temperature — checked against NDBC 45142 in eastern Erie and it
+           came within about a degree, which is plenty for a threshold. The
+           850 hPa air above it is the other half of the classic ΔT. */
+        fetch('https://api.open-meteo.com/v1/forecast?latitude=43.57,42.68&longitude=-77.97,-79.55'
+              + '&current=soil_temperature_0cm,temperature_850hPa,wind_direction_850hPa')
+          .then(function(r){ return r.json(); }),
+        fetch('https://marine-api.open-meteo.com/v1/marine?latitude=' + mla.join(',')
+              + '&longitude=' + mlo.join(',') + '&current=sea_surface_temperature')
+          .then(function(r){ return r.json(); })
+      ]).then(function(a){
+        var out = { lakes: [], wall: [], gom: null };
+        var L = a[0];
+        if (L && L.length) L.forEach(function(r, i){
+          var c = r.current || {};
+          if (c.soil_temperature_0cm == null || c.temperature_850hPa == null) return;
+          out.lakes[i] = { dt: c.soil_temperature_0cm - c.temperature_850hPa,
+                           lst: c.soil_temperature_0cm, dir: c.wind_direction_850hPa };
+        });
+        var M = a[1], n = CW_GLAT.length;
+        if (M && M.length === mla.length){
+          var sst = function(gi, k){
+            var r = M[gi * n + k];
+            return (r && r.current) ? r.current.sea_surface_temperature : null;
+          };
+          CW_GLON.forEach(function(lo, gi){
+            /* down each meridian, the steepest DROP going north. Search stops
+               below 41.5N: the Gulf Stream never runs higher than that here,
+               and above it the shelf/Gulf of Maine front would win the vote
+               and drag the line onto the wrong feature entirely. */
+            var best = 0, at = null, warm = null, cold = null;
+            for (var k = 0; k < n - 1; k++){
+              if (CW_GLAT[k] > 41.5) break;
+              var t0 = sst(gi, k), t1 = sst(gi, k + 1);
+              if (t0 == null || t1 == null) continue;
+              if (t0 - t1 > best){ best = t0 - t1; at = (CW_GLAT[k] + CW_GLAT[k+1]) / 2; warm = t0; cold = t1; }
+            }
+            /* a real front is degrees over 40 km; a shallower slope is just
+               the seasonal gradient and gets no line */
+            if (at != null && best >= 2) out.wall.push([lo, at, warm, cold]);
+          });
+          for (var gi = CW_GLON.length - 1; gi >= 0 && out.gom == null; gi--)
+            for (var k = n - 1; k >= 0; k--)
+              if (CW_GLAT[k] >= 42.4 && sst(gi, k) != null){ out.gom = [CW_GLON[gi], CW_GLAT[k], sst(gi, k)]; break; }
+        }
+        window._cwGeoLive = out;
+      }).catch(function(){});
+    }
     var cwFuelAt = 0, cwFuelText = '';
     function cwFuel(){
       var el = document.getElementById('cw-wide-tag-sub');
@@ -50187,6 +50262,82 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var ox = (cvs.width - (b.X1 - b.X0) * sc) / 2, oy = (cvs.height - (b.Y1 - b.Y0) * sc) / 2;
       var px = function(c){ return ox + (c[0] * Math.PI / 180 * R2 - b.X0) * sc; };
       var py = function(c){ return oy + (b.Y1 - R2 * Math.log(Math.tan(Math.PI / 4 + c[1] * Math.PI / 360))) * sc; };
+      /* THE MACHINERY — see cwGeoRead. Drawn FIRST so everything live sits on
+         top of it; this is the substrate, not the headline. */
+      if (wv.geo && window._cwGeoNE){
+        var G = window._cwGeoNE, LV = window._cwGeoLive || {};
+        var path = function(r){
+          g.beginPath();
+          r.forEach(function(p, i){ i ? g.lineTo(px(p), py(p)) : g.moveTo(px(p), py(p)); });
+        };
+        var mark = function(t, x, y, col){
+          g.lineWidth = 3 * dpr; g.strokeStyle = 'rgba(8,10,16,.72)';
+          g.strokeText(t, x, y); g.fillStyle = col; g.fillText(t, x, y);
+        };
+        g.save();
+        g.lineCap = 'round'; g.lineJoin = 'round';
+        g.textAlign = 'left'; g.textBaseline = 'middle';
+        g.font = '600 ' + (8 * dpr) + 'px system-ui,sans-serif';
+        /* 1. the corridors. A channel is not a boundary — soft and dashed,
+              because where the cold air runs is a tendency, not a survey. */
+        g.setLineDash([9 * dpr, 7 * dpr]);
+        g.lineWidth = 1.5 * dpr; g.strokeStyle = 'rgba(126,206,192,.30)';
+        (G.corridor || []).forEach(function(c){
+          path(c.r); g.stroke();
+          mark(c.n, px(c.r[1]) + 6 * dpr, py(c.r[1]), 'rgba(126,206,192,.44)');
+        });
+        g.setLineDash([]);
+        /* 2. the snowbelt uplands — traced off the elevation grid, so these
+              ARE surveyed and get a crisp edge. They light up only when the
+              lake that loads them is actually firing. */
+        (G.upland || []).forEach(function(u){
+          var lk = LV.lakes && LV.lakes[u.lk], on = lk && lk.dt >= 13;
+          path(u.r); g.closePath();
+          g.fillStyle = on ? 'rgba(236,240,247,.15)' : 'rgba(216,196,158,.05)';
+          g.fill();
+          g.lineWidth = (on ? 1.9 : 1.2) * dpr;
+          g.strokeStyle = on ? 'rgba(240,244,250,.72)' : 'rgba(216,196,158,.40)';
+          g.stroke();
+          mark(u.n + (on ? ' · BANDS' : ''), px(u.c) + 5 * dpr, py(u.c),
+               on ? 'rgba(240,244,250,.88)' : 'rgba(216,196,158,.46)');
+        });
+        /* 3. the lakes that load them: surface temperature against the 850 hPa
+              air. Thirteen degrees is the classic threshold for bands. */
+        (G.lake || []).forEach(function(k, i){
+          var lk = LV.lakes && LV.lakes[i];
+          if (!lk) return;
+          var on = lk.dt >= 13, cx0 = px(k.c), cy0 = py(k.c);
+          if (on && lk.dir != null){
+            /* downwind from the lake, the way the bands run — 850 hPa wind
+               direction is where it comes FROM, so the band goes the other way */
+            var tw = (lk.dir + 180) * Math.PI / 180;
+            var mk = 1000 / Math.cos(k.c[1] * Math.PI / 180);
+            var len = 150 * mk * sc;
+            g.strokeStyle = 'rgba(236,240,247,.34)'; g.lineWidth = 9 * dpr;
+            g.beginPath(); g.moveTo(cx0, cy0);
+            g.lineTo(cx0 + Math.sin(tw) * len, cy0 - Math.cos(tw) * len); g.stroke();
+          }
+          g.beginPath(); g.arc(cx0, cy0, 2.4 * dpr, 0, 6.284);
+          g.fillStyle = on ? 'rgba(240,244,250,.9)' : 'rgba(160,196,214,.5)'; g.fill();
+          mark(k.n + ' Δ' + Math.round(lk.dt) + '°', cx0 + 5 * dpr, cy0,
+               on ? 'rgba(240,244,250,.9)' : 'rgba(160,196,214,.5)');
+        });
+        /* 4. the Gulf Stream's north wall — an estimate off a coarse SST grid,
+              so it gets a soft body under a thin core rather than a hard line */
+        if (LV.wall && LV.wall.length > 1){
+          path(LV.wall.map(function(p){ return [p[0], p[1]]; }));
+          g.strokeStyle = 'rgba(238,166,84,.12)'; g.lineWidth = 16 * dpr; g.stroke();
+          g.strokeStyle = 'rgba(244,198,140,.48)'; g.lineWidth = 1.7 * dpr; g.stroke();
+          var w0 = LV.wall[Math.floor(LV.wall.length / 2)];
+          mark('GULF STREAM · ' + Math.round(w0[2]) + '°→' + Math.round(w0[3]) + '°',
+               px([w0[0], w0[1]]) + 6 * dpr, py([w0[0], w0[1]]) - 9 * dpr, 'rgba(244,198,140,.60)');
+        }
+        if (LV.gom){
+          mark('GULF OF MAINE ' + Math.round(LV.gom[2]) + '°',
+               px(LV.gom) + 5 * dpr, py(LV.gom), 'rgba(160,196,214,.5)');
+        }
+        g.restore();
+      }
       var trace = function(){
         boros.forEach(function(bo){
           bo.r.forEach(function(ring){
@@ -50269,6 +50420,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           + ' ' + window._cwStorm.mph + ' MPH';
       }
       if (wv.fuel) cwFuel();
+      if (wv.geo){ cwGeoLoad(); cwGeoRead(); }
     }
     function setProduct(p){
       if (cw.wide){
