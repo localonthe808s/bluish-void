@@ -49207,10 +49207,27 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        framed image (its own basemap and legend baked in), so they replace
        the city stack rather than layering on it. */
     var WIDE = [
-      { id:'nearest', label:'NEAREST',
-        sub:'KOKX BROOKHAVEN · NWS UPTON',
-        frames: function(i){ return 'https://radar.weather.gov/ridge/standard/KOKX_' + i + '.gif?cb=' + Math.floor(Date.now()/300000); },
-        n:10, fit:'contain' },
+      /* INCOMING (user 2026-09-01): what is about to arrive. The box runs
+         WEST/SOUTHWEST from the city — the corridor NYC weather comes down —
+         with the city pinned at the right edge. No single station is the
+         answer at this range: an hour of lead is only 30-70 km upwind, so
+         this uses the MRMS mosaic, which already fuses KDIX (the SSW/coastal
+         approach), KOKX overhead, KBGM and KENX to the northwest and north,
+         and KCCX out west. Our own map underneath, as with NORTHEAST. */
+      { id:'incoming', label:'INCOMING',
+        sub:'NEXT HOURS · MRMS MOSAIC',
+        box: { X0:-8432451, Y0:4873211, X1:-8143021, Y1:5126986, sid:'cw-incoming' },
+        wms: 'conus_bref_qcd',
+        frames: function(i){
+          var b = this.box;
+          var t = new Date(Math.floor(Date.now() / 120000) * 120000 - i * 600000).toISOString();
+          return 'https://opengeo.ncep.noaa.gov/geoserver/conus/ows?service=WMS&version=1.1.0&request=GetMap'
+            + '&layers=' + this.wms + '&styles=&bbox=' + b.X0 + ',' + b.Y0 + ',' + b.X1 + ',' + b.Y1
+            + '&width=1400&height=1228&srs=EPSG:3857&format=image/png8&transparent=true'
+            + '&time=' + encodeURIComponent(t);
+        },
+        boroughs: true, lead: true,   /* ~155 km of upwind runway: 2-4 hours */
+        n:6, fit:'cover' },
       /* NORTHEAST is drawn on OUR OWN MAP (user 2026-09-01): the site's
          PMTiles archive rendered for this box in the light flavour, with
          NOAA's national mosaic over it — the city map's grammar, one
@@ -49844,6 +49861,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        its own slow loop. The city timers keep running underneath so
        returning is instant; the map's gestures are inert while it's up. */
     var cwWideTimer = null, cwWideIdx = 0, cwWideImgs = [], cwWideBase = {};
+    function cwWideDef(){
+      var out = null;
+      WIDE.forEach(function(w2){ if (w2.id === cw.wide) out = w2; });
+      return out;
+    }
     function setWide(id){
       cw.wide = id || null;
       var el = document.getElementById('cw-wide'), tag = document.getElementById('cw-wide-tag');
@@ -49861,8 +49883,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         el.removeAttribute('src'); cwWideImgs = [];
         return;
       }
-      var wv = null;
-      WIDE.forEach(function(w2){ if (w2.id === cw.wide) wv = w2; });
+      var wv = cwWideDef();
       if (!wv) return;
       el.style.objectFit = wv.fit;
       el.style.display = '';
@@ -49960,6 +49981,51 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       g.lineJoin = 'round'; g.lineCap = 'round';
       g.strokeStyle = 'rgba(8,10,16,.9)'; g.lineWidth = 5 * dpr;   trace();
       g.strokeStyle = '#f97216';           g.lineWidth = 2.4 * dpr; trace();
+      /* HOW FAR AWAY IS AN HOUR? (user 2026-09-01) — arcs upwind of the city
+         at the distance today's storm motion actually covers in 1h and 2h,
+         so INCOMING answers "when does that reach me", not just "where is
+         it". Drawn from the live steering wind, labelled with the speed. */
+      if (wv.lead && window._cwStorm && window._cwStorm.mph){
+        var st = window._cwStorm;
+        var cLat = 40.744, cLon = -73.921;      // the city, where the clock is
+        var cx = px([cLon, cLat]), cy = py([cLon, cLat]);
+        /* ground km -> mercator metres -> canvas px (mercator stretches by
+           1/cos(lat), so an hour on the ground is fewer map metres) */
+        var mPerKm = 1000 / Math.cos(cLat * Math.PI / 180);
+        var from = (st.toward + 180) % 360;              // where it comes FROM
+        var a0 = (from - 62) * Math.PI / 180, a1 = (from + 62) * Math.PI / 180;
+        g.font = '700 ' + (9 * dpr) + 'px system-ui,sans-serif';
+        g.textAlign = 'center';
+        [[1, .95], [2, .6]].forEach(function(h2){
+          var rr = st.mph * 1.609 * h2[0] * mPerKm * sc;
+          if (rr < 8 * dpr || rr > cvs.width) return;
+          g.setLineDash([7 * dpr, 6 * dpr]);
+          g.lineWidth = 3.4 * dpr; g.strokeStyle = 'rgba(8,10,16,.8)';
+          g.beginPath(); g.arc(cx, cy, rr, a0 - Math.PI/2, a1 - Math.PI/2); g.stroke();
+          g.lineWidth = 1.6 * dpr; g.strokeStyle = 'rgba(255,255,255,' + h2[1] + ')';
+          g.beginPath(); g.arc(cx, cy, rr, a0 - Math.PI/2, a1 - Math.PI/2); g.stroke();
+          g.setLineDash([]);
+          var la = from * Math.PI / 180 - Math.PI/2;
+          var lx = cx + Math.cos(la) * rr, ly = cy + Math.sin(la) * rr;
+          var txt = h2[0] + ' HR';
+          g.lineWidth = 3.5 * dpr; g.strokeStyle = 'rgba(8,10,16,.85)';
+          g.strokeText(txt, lx, ly - 5 * dpr);
+          g.fillStyle = 'rgba(255,255,255,' + h2[1] + ')';
+          g.fillText(txt, lx, ly - 5 * dpr);
+        });
+      }
+    }
+    /* keep the wide overlay and its label current while a view is up */
+    function cwWideSync(){
+      var wv = cwWideDef();
+      if (!wv) return;
+      cwDrawWideOv(wv);
+      var tag = document.getElementById('cw-wide-tag');
+      if (tag && wv.lead && window._cwStorm && window._cwStorm.mph){
+        var dd2 = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+        tag.textContent = wv.label + ' \u00b7 MOVING ' + dd2[Math.round(window._cwStorm.toward / 22.5) % 16]
+          + ' ' + window._cwStorm.mph + ' MPH';
+      }
     }
     function setProduct(p){
       /* re-clicking the lit product turns the radar layer OFF — the bare map */
@@ -50911,6 +50977,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           var toward = (csd + 180) % 360;
           var dd = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
           var smSub = document.getElementById('cw-sm-sub');
+          window._cwStorm = { toward: toward, mph: Math.round(Math.max(12, css * 0.85)) };
           if (smSub){
             var hNm = (window._cityHood && window._cityHood.name) ? window._cityHood.name.toUpperCase() + ' \u00b7 ' : '';
             smSub.textContent = hNm + 'STORM MOTION \u00b7 '
@@ -51183,7 +51250,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       cwLiveClock();
       /* cwWarmTiles(2) rides this guarded tick, not a one-shot timer — a
          one-shot that fires while the tab is hidden burns its only chance */
-      cw.cardsTimer = setInterval(function(){ if (!document.hidden){ cwCardsSync(); cwDrawSensors(); cwWarm(); cwLiveClock(); cwWarmTiles(2); cwUmbrella(); } }, 3000);
+      cw.cardsTimer = setInterval(function(){ if (!document.hidden){ cwCardsSync(); cwDrawSensors(); cwWarm(); cwLiveClock(); cwWarmTiles(2); cwUmbrella(); if (cw.wide) cwWideSync(); } }, 3000);
       if (cw.floods && window._floodNetLoad) try{ fnArea = 'city'; _floodNetLoad(cwDrawSensors); }catch(e){}
     }
     function stop(){
