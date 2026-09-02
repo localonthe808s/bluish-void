@@ -49360,7 +49360,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         /* the same reads as INCOMING, scaled to this box (user 2026-09-01):
            land relief now shares the seafloor layer, the lead arcs step out
            to six and twelve hours, and the fuel line comes along */
-        lead: true, fuel: true, leadHrs: [[6, .95], [12, .6]], geo: true,
+        lead: true, fuel: true, leadHrs: [[6, .95], [12, .6]], geo: true, alerts: true,
         box: { X0:-8927823, Y0:4607718, X1:-7636517, Y1:5716479, sid:'cw-ne' },
         /* the middle layer — drawn under the radar, over our basemap. Here
            the Atlantic seafloor from GMRT, reprojected to mercator so it
@@ -49370,16 +49370,24 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         wms: 'conus_bref_qcd',
         frames: function(i){
           var b = this.box;
-          var t = new Date(Math.floor(Date.now() / 120000) * 120000 - i * 600000).toISOString();
+          var t = new Date(Math.floor(Date.now() / 120000) * 120000 - i * (this.stepMs || 600000)).toISOString();
           return 'https://opengeo.ncep.noaa.gov/geoserver/conus/ows?service=WMS&version=1.1.0&request=GetMap'
             + '&layers=' + this.wms + '&styles=&bbox=' + b.X0 + ',' + b.Y0 + ',' + b.X1 + ',' + b.Y1
             + '&width=1400&height=1202&srs=EPSG:3857&format=image/png8&transparent=true'
             + '&time=' + encodeURIComponent(t);
         },
-        n:6, fit:'cover' },
+        /* The loop has to match the BOX, the same way the lead arcs do. Six
+           frames ten minutes apart is an hour, and at 961 km wide a 23 mph
+           storm covers 37 km in an hour — 3.9% of the frame, so the
+           animation sat almost still. Eight frames a quarter-hour apart is
+           1h45m of travel instead. The ceiling is the source: measured, this
+           WMS serves frames back to about 126 minutes and returns an empty
+           tile beyond that, so do not reach for three hours. */
+        n:8, stepMs: 900000, fit:'cover' },
       { id:'sat', label:'SATELLITE',
         sub:'GOES-19 EAST · 75.2°W · GEOCOLOR',
         frames: function(){ return 'https://cdn.star.nesdis.noaa.gov/GOES19/ABI/SECTOR/ne/GEOCOLOR/1200x1200.jpg?cb=' + Math.floor(Date.now()/600000); },
+        lagMin: 10,
         n:1, fit:'cover' }
     ];
     /* MRMS AS QUALITY CONTROL, KOKX AS THE PICTURE (user 2026-09-01).
@@ -50112,6 +50120,48 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         window._cwGeoLive = out;
       }).catch(function(){});
     }
+    /* WATCHES & WARNINGS (user 2026-09-02). api.weather.gov is CORS-open and
+       keyless, and the whole nine-state northeast comes back in about 8 KB.
+       The thing to know before trusting this: MOST alerts are ZONE-based and
+       carry no geometry at all — measured nationwide, 5 of 252 active alerts
+       had a polygon. The storm-based ones that matter over radar (tornado,
+       severe thunderstorm, flash flood) do carry one, so those are drawn;
+       everything else is COUNTED in the corner rather than handed a shape it
+       does not have. Drawing zone alerts properly needs a baked zone-geometry
+       file — the bulk endpoint ignores include_geometry (311 zones, 0 shapes). */
+    var CW_ALERT_COL = {
+      'Tornado Warning': '#e8262b', 'Hurricane Warning': '#e8262b',
+      'Severe Thunderstorm Warning': '#f0a01e', 'Tropical Storm Warning': '#e8595f',
+      'Flash Flood Warning': '#2fa36b', 'Flood Warning': '#2f7c4e',
+      'Flood Advisory': '#4a9c7a', 'Winter Storm Warning': '#4f86c6',
+      'Special Weather Statement': '#9aa7c2'
+    };
+    function cwAlertCol(e){ return CW_ALERT_COL[e] || '#d9b45a'; }
+    function cwHexA(h, a){
+      return 'rgba(' + parseInt(h.substr(1,2),16) + ',' + parseInt(h.substr(3,2),16)
+           + ',' + parseInt(h.substr(5,2),16) + ',' + a + ')';
+    }
+    var cwAlertAt = 0;
+    function cwAlertRead(){
+      /* warnings turn over fast — a much shorter throttle than the fuel read */
+      if (Date.now() - cwAlertAt < 120000) return;
+      cwAlertAt = Date.now();
+      fetch('https://api.weather.gov/alerts/active?status=actual'
+            + '&area=NY,NJ,CT,PA,MA,VT,NH,ME,RI')
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          var poly = [], zone = {}, zn = 0;
+          (j.features || []).forEach(function(f){
+            var p = f.properties || {}, gm = f.geometry;
+            if (gm && (gm.type === 'Polygon' || gm.type === 'MultiPolygon')){
+              var rings = gm.type === 'Polygon' ? [gm.coordinates[0]]
+                        : gm.coordinates.map(function(c){ return c[0]; });
+              poly.push({ e: p.event || 'ALERT', r: rings });
+            } else if (p.event){ zone[p.event] = (zone[p.event] || 0) + 1; zn++; }
+          });
+          window._cwAlerts = { poly: poly, zone: zone, zn: zn };
+        }).catch(function(){});
+    }
     var cwFuelAt = 0, cwFuelText = '';
     function cwFuel(){
       var el = document.getElementById('cw-wide-tag-sub');
@@ -50289,6 +50339,16 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var urls = [];
       for (var i = wv.n - 1; i >= 0; i--) urls.push(wv.frames.call(wv, i));   // oldest → newest
       var loaded = 0;
+      /* Stamp the frame. The wide views run their own cycle and never went
+         through step(), so #cw-time sat EMPTY on them — a radar animation
+         with no indication of when any of it was from (user 2026-09-02). */
+      var stamp = function(k){
+        var tEl = document.getElementById('cw-time');
+        if (!tEl) return;
+        if (wv.lagMin != null){ tEl.textContent = '~' + wv.lagMin + ' MIN'; return; }
+        var age = (urls.length - 1 - k) * (wv.stepMs || 600000);
+        tEl.textContent = age < 60000 ? 'NOW' : '~' + Math.round(age / 60000) + ' MIN AGO';
+      };
       urls.forEach(function(u, k){
         var im = new Image();
         im.onload = im.onerror = function(){
@@ -50296,6 +50356,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           loaded++;
           if (loaded === 1 && k === urls.length - 1){
             el.src = u;                                               // newest first paint
+            stamp(k);
             ready.frame = true; settle();
           }
           if (loaded === urls.length && urls.length > 1){
@@ -50309,6 +50370,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
               if (cw.wide !== want || document.hidden) return;
               cwWideIdx = (cwWideIdx + 1) % cwWideImgs.length;
               el.src = cwWideImgs[cwWideIdx];
+              stamp(cwWideIdx);
             }, 700);
           }
         };
@@ -50516,6 +50578,58 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           g.fillText(txt, lx, ly - 5 * dpr);
         });
       }
+      /* Warnings sit above the weather they describe and under the city
+         labels — the most urgent thing on the map, so nothing dims them. */
+      if (wv.alerts && window._cwAlerts){
+        var AL = window._cwAlerts;
+        g.save();
+        g.lineJoin = 'round'; g.lineCap = 'round';
+        g.textAlign = 'left'; g.textBaseline = 'middle';
+        g.font = '800 ' + (8 * dpr) + 'px system-ui,sans-serif';
+        (AL.poly || []).forEach(function(a){
+          var col = cwAlertCol(a.e), sx = 0, sy = 0, n = 0, seen = false;
+          a.r.forEach(function(ring){
+            if (!ring || ring.length < 3) return;
+            g.beginPath();
+            ring.forEach(function(p, i){
+              var X = px(p), Y = py(p);
+              if (X > -40 && X < cvs.width + 40 && Y > -40 && Y < cvs.height + 40) seen = true;
+              sx += X; sy += Y; n++;
+              i ? g.lineTo(X, Y) : g.moveTo(X, Y);
+            });
+            g.closePath();
+            g.fillStyle = cwHexA(col, .16); g.fill();
+            g.lineWidth = 3.4 * dpr; g.strokeStyle = 'rgba(8,10,16,.7)'; g.stroke();
+            g.lineWidth = 1.8 * dpr; g.strokeStyle = col; g.stroke();
+          });
+          if (seen && n){
+            var lx = sx / n, ly = sy / n, txt = a.e.toUpperCase();
+            g.lineWidth = 3.2 * dpr; g.strokeStyle = 'rgba(8,10,16,.8)';
+            g.strokeText(txt, lx + 5 * dpr, ly);
+            g.fillStyle = col; g.fillText(txt, lx + 5 * dpr, ly);
+          }
+        });
+        /* the zone-based ones have no shape, so they get counted, not drawn */
+        var zk = Object.keys(AL.zone || {});
+        if (zk.length){
+          zk.sort(function(a, b){ return AL.zone[b] - AL.zone[a]; });
+          g.font = '700 ' + (8 * dpr) + 'px system-ui,sans-serif';
+          var yy = 14 * dpr;
+          g.lineWidth = 3 * dpr;
+          zk.slice(0, 5).forEach(function(k){
+            var t2 = AL.zone[k] + '× ' + k.toUpperCase();
+            g.strokeStyle = 'rgba(8,10,16,.8)'; g.strokeText(t2, 10 * dpr, yy);
+            g.fillStyle = cwHexA(cwAlertCol(k), .92); g.fillText(t2, 10 * dpr, yy);
+            yy += 12 * dpr;
+          });
+          if (zk.length > 5){
+            var more = '+' + (zk.length - 5) + ' MORE';
+            g.strokeStyle = 'rgba(8,10,16,.8)'; g.strokeText(more, 10 * dpr, yy);
+            g.fillStyle = 'rgba(255,255,255,.55)'; g.fillText(more, 10 * dpr, yy);
+          }
+        }
+        g.restore();
+      }
       /* City anchors ride the OVERLAY, not the basemap (user 2026-09-01).
          Baked into the basemap they sit under the seafloor layer, and the
          seafloor is opaque near shore — Boston's label was painted out by
@@ -50553,6 +50667,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       }
       if (wv.fuel) cwFuel();
       if (wv.geo){ cwGeoLoad(); cwGeoRead(); }
+      if (wv.alerts) cwAlertRead();
     }
     function setProduct(p){
       if (cw.wide){
