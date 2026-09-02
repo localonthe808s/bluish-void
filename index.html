@@ -50141,25 +50141,48 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       return 'rgba(' + parseInt(h.substr(1,2),16) + ',' + parseInt(h.substr(3,2),16)
            + ',' + parseInt(h.substr(5,2),16) + ',' + a + ')';
     }
+    /* The counties and marine/forecast zones a warning actually covers
+       (user 2026-09-02). Baked from api.weather.gov per-zone geometry for
+       every state the box touches — NY NJ CT PA MA VT NH ME RI MD DE WV VA,
+       but NOT Ohio, whose eastern border at -80.52 sits west of the box —
+       simplified to ~1.4 km (under 2 px at this map's 849 m/px) and clipped
+       to the frame. 648 zones, 273 KB. Marine zones are deliberately absent:
+       a Small Craft Advisory is not a county, and outlining the ocean added
+       nothing but ink — those stay in the corner count. */
+    function cwZonesLoad(){
+      if (window._cwZones || window._cwZonesReq) return;
+      window._cwZonesReq = 1;
+      fetch('/city_ne_zones.json').then(function(r){ return r.json(); })
+        .then(function(j){ window._cwZones = j; }).catch(function(){});
+    }
     var cwAlertAt = 0;
     function cwAlertRead(){
       /* warnings turn over fast — a much shorter throttle than the fuel read */
       if (Date.now() - cwAlertAt < 120000) return;
       cwAlertAt = Date.now();
       fetch('https://api.weather.gov/alerts/active?status=actual'
-            + '&area=NY,NJ,CT,PA,MA,VT,NH,ME,RI')
+            + '&area=NY,NJ,CT,PA,MA,VT,NH,ME,RI,MD,DE,WV,VA')
         .then(function(r){ return r.json(); })
         .then(function(j){
-          var poly = [], zone = {}, zn = 0;
+          var poly = [], zoneAl = [], zone = {}, zn = 0, any = false;
           (j.features || []).forEach(function(f){
             var p = f.properties || {}, gm = f.geometry;
+            var ugc = (p.geocode || {}).UGC || [];
             if (gm && (gm.type === 'Polygon' || gm.type === 'MultiPolygon')){
               var rings = gm.type === 'Polygon' ? [gm.coordinates[0]]
                         : gm.coordinates.map(function(c){ return c[0]; });
-              poly.push({ e: p.event || 'ALERT', r: rings });
-            } else if (p.event){ zone[p.event] = (zone[p.event] || 0) + 1; zn++; }
+              poly.push({ e: p.event || 'ALERT', r: rings, z: ugc });
+              any = true;
+            } else if (p.event){
+              zone[p.event] = (zone[p.event] || 0) + 1; zn++;
+              zoneAl.push({ e: p.event, z: ugc });
+              any = true;
+            }
           });
-          window._cwAlerts = { poly: poly, zone: zone, zn: zn };
+          window._cwAlerts = { poly: poly, zoneAl: zoneAl, zone: zone, zn: zn };
+          /* 273 KB of zone outlines is only worth fetching once something
+             actually needs drawing */
+          if (any) cwZonesLoad();
         }).catch(function(){});
     }
     var cwFuelAt = 0, cwFuelText = '';
@@ -50586,6 +50609,41 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         g.lineJoin = 'round'; g.lineCap = 'round';
         g.textAlign = 'left'; g.textBaseline = 'middle';
         g.font = '800 ' + (8 * dpr) + 'px system-ui,sans-serif';
+        /* the counties and zones each alert actually covers, drawn UNDER the
+           storm polygon so the bold outline still reads on top */
+        var Z = window._cwZones;
+        if (Z){
+          var zoneShapes = function(ids, col, fill){
+            var sx = 0, sy = 0, n = 0;
+            (ids || []).forEach(function(zid){
+              var rings = Z[zid];
+              if (!rings) return;                      // out of frame, or marine
+              rings.forEach(function(ring){
+                g.beginPath();
+                ring.forEach(function(p, i){
+                  var X = px(p), Y = py(p);
+                  sx += X; sy += Y; n++;
+                  i ? g.lineTo(X, Y) : g.moveTo(X, Y);
+                });
+                g.closePath();
+                if (fill){ g.fillStyle = cwHexA(col, .11); g.fill(); }
+                g.lineWidth = 2.4 * dpr; g.strokeStyle = 'rgba(8,10,16,.45)'; g.stroke();
+                g.lineWidth = 1.1 * dpr; g.strokeStyle = cwHexA(col, .78); g.stroke();
+              });
+            });
+            return n ? [sx / n, sy / n] : null;
+          };
+          /* a zone alert has no other shape, so its zones ARE its extent */
+          (AL.zoneAl || []).forEach(function(a){
+            var c = zoneShapes(a.z, cwAlertCol(a.e), true);
+            if (!c) return;
+            var t = a.e.toUpperCase();
+            g.lineWidth = 3.2 * dpr; g.strokeStyle = 'rgba(8,10,16,.8)';
+            g.strokeText(t, c[0] + 5 * dpr, c[1]);
+            g.fillStyle = cwAlertCol(a.e); g.fillText(t, c[0] + 5 * dpr, c[1]);
+          });
+          (AL.poly || []).forEach(function(a){ zoneShapes(a.z, cwAlertCol(a.e), false); });
+        }
         (AL.poly || []).forEach(function(a){
           var col = cwAlertCol(a.e), sx = 0, sy = 0, n = 0, seen = false;
           a.r.forEach(function(ring){
