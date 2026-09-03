@@ -267,6 +267,86 @@ window.BV_BASEMAP_URL = (function(){
    interchangeable: a 13° gap in Celsius is a 23° gap in Fahrenheit, not 55°. */
 window.bvF  = function(c){ return c == null ? null : c * 9 / 5 + 32; };
 window.bvDF = function(c){ return c == null ? null : c * 9 / 5; };
+/* ONE Blitzortung client for the whole page (user 2026-09-02). Two widgets
+   were each running their own socket and their own copy of the frame decode.
+   Consumers now register interest by name and share a single store; the
+   socket lives while ANY of them wants it and the tab is in front.
+   Blitzortung is the volunteer VLF network behind lightningmaps.org — its
+   live socket is public, a WebSocket is exempt from CORS (the server decides,
+   there is no preflight), and it is free for non-commercial use with
+   attribution. Measured: 8.8 strikes/s worldwide at 7.6 KB/s, so it is never
+   left open idly. */
+window.bvLightning = (function(){
+  var HOSTS = ['wss://ws1.blitzortung.org/', 'wss://ws7.blitzortung.org/', 'wss://ws8.blitzortung.org/'];
+  var KEEP = 20 * 60000;
+  var ws = null, host = 0, retry = null, want = {}, strikes = [];
+  /* Blitzortung ships each frame LZW-dictionary encoded */
+  function lzw(b){
+    var e = {}, d = String(b).split(''), c = d[0], f = c, out = [c], o = 256, k;
+    for (var i = 1; i < d.length; i++){
+      var cc = d[i].charCodeAt(0);
+      k = cc < 256 ? d[i] : (e[cc] !== undefined ? e[cc] : f + c);
+      out.push(k); c = k.charAt(0); e[o++] = f + c; f = k;
+    }
+    return out.join('');
+  }
+  function anyWant(){ for (var q in want){ if (want[q]) return true; } return false; }
+  function open(){
+    if (ws || typeof WebSocket === 'undefined' || document.hidden || !anyWant()) return;
+    try {
+      var sk = new WebSocket(HOSTS[host % HOSTS.length]);
+      ws = sk;
+      sk.onopen = function(){ try { sk.send('{"a":111}'); } catch(e){} };
+      sk.onmessage = function(ev){
+        var j;
+        try { j = JSON.parse(lzw(ev.data)); } catch(e){ return; }
+        if (typeof j.lat !== 'number' || typeof j.lon !== 'number') return;
+        /* the whole planet comes down this pipe — keep the widest box any
+           consumer could ask for, and let each filter its own view */
+        if (j.lon < -82 || j.lon > -66 || j.lat < 36 || j.lat > 47) return;
+        strikes.push([j.lon, j.lat, Date.now()]);
+        if (strikes.length > 1500) strikes.splice(0, strikes.length - 1500);
+      };
+      sk.onclose = sk.onerror = function(){
+        if (ws === sk){ ws = null; host++; }        // rotate hosts on failure
+        if (anyWant() && !retry) retry = setTimeout(function(){ retry = null; open(); }, 4000);
+      };
+    } catch(e){ ws = null; host++; }
+  }
+  function close(){
+    if (retry){ clearTimeout(retry); retry = null; }
+    if (!ws) return;
+    try { ws.close(); } catch(e){}
+    ws = null;
+  }
+  try {
+    document.addEventListener('visibilitychange', function(){
+      if (document.hidden) close(); else open();
+    });
+  } catch(e){}
+  return {
+    /* consumers say what they want; nobody owns the socket */
+    want: function(key, on){
+      if (on) want[key] = 1; else delete want[key];
+      if (anyWant()) open(); else close();
+    },
+    /* strikes inside a lon/lat box, newer than maxAge. Expiry happens here so
+       no consumer needs a sweep timer of its own. */
+    since: function(w, s2, e2, n2, maxAge){
+      var now = Date.now(), out = [], keep = 0, lim = maxAge || KEEP;
+      for (var i = 0; i < strikes.length; i++){
+        var p = strikes[i];
+        if (now - p[2] > KEEP) continue;
+        strikes[keep++] = p;
+        if (now - p[2] <= lim && p[0] >= w && p[0] <= e2 && p[1] >= s2 && p[1] <= n2) out.push(p);
+      }
+      strikes.length = keep;
+      return out;
+    },
+    count: function(){ return strikes.length; },
+    live: function(){ return !!ws; }
+  };
+})();
 window.BV_MAP_FLAVOR = {"background":"#0a0c12","earth":"#0f1116","park_a":"#0f1712","park_b":"#101a14","hospital":"#151418","industrial":"#131519","school":"#151519","wood_a":"#101613","wood_b":"#101613","pedestrian":"#12141a","scrub_a":"#131612","scrub_b":"#131612","glacier":"#141821","sand":"#15161c","beach":"#171922","aerodrome":"#12141a","runway":"#2a2e38","water":"#101a2e","zoo":"#131612","military":"#151519","tunnel_other_casing":"#141414","tunnel_minor_casing":"#141414","tunnel_link_casing":"#141414","tunnel_major_casing":"#141414","tunnel_highway_casing":"#141414","tunnel_other":"#292929","tunnel_minor":"#292929","tunnel_link":"#292929","tunnel_major":"#292929","tunnel_highway":"#292929","pier":"#333333","buildings":"#111111","minor_service_casing":"#1f1f1f","minor_casing":"#1f1f1f","link_casing":"#1f1f1f","major_casing_late":"#1f1f1f","highway_casing_late":"#1f1f1f","other":"#333333","minor_service":"#333333","minor_a":"#3d3d3d","minor_b":"#333333","link":"#3d3d3d","major_casing_early":"#1f1f1f","major":"#3d3d3d","highway_casing_early":"#1f1f1f","highway":"#474747","railway":"#000000","boundaries":"#5b6374","bridges_other_casing":"#2b2b2b","bridges_minor_casing":"#1f1f1f","bridges_link_casing":"#1f1f1f","bridges_major_casing":"#1f1f1f","bridges_highway_casing":"#1f1f1f","bridges_other":"#333333","bridges_minor":"#333333","bridges_link":"#3d3d3d","bridges_major":"#3d3d3d","bridges_highway":"#474747","roads_label_minor":"#4c5566","roads_label_minor_halo":"#0a0c12","roads_label_major":"#5a6478","roads_label_major_halo":"#0a0c12","ocean_label":"#54607d","subplace_label":"#5d6880","subplace_label_halo":"#0a0c12","city_label":"#9aa7c2","city_label_halo":"#0a0c12","state_label":"#3c4457","state_label_halo":"#0a0c12","country_label":"#7b88a6","address_label":"#525252","address_label_halo":"#0a0c12","pois":{"blue":"#4299BB","green":"#30C573","lapis":"#2B5CEA","pink":"#EF56BA","red":"#F2567A","slategray":"#93939F","tangerine":"#F19B6E","turquoise":"#00C3D4"},"landcover":{"grassland":"rgba(18, 21, 24, 1)","barren":"rgba(20, 21, 24, 1)","urban_area":"rgba(22, 23, 27, 1)","farmland":"rgba(18, 21, 23, 1)","glacier":"rgba(28, 31, 38, 1)","scrub":"rgba(19, 21, 23, 1)","forest":"rgba(16, 21, 22, 1)"}};
 /* Light twin of the flavor above, for the maps that sit on a pale ground
    (hazards, geology). Same palette language as the site: paper land, blue-ink
@@ -47437,7 +47517,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   // Drawn on a canvas over the WMS frames (z4). Geometry mapping mirrors the
   // frame/basemap contain-fit for the same 3857 bbox, so everything aligns.
   var _cityOv = window._cityOv = {
-    timer:null, ws:null, wsHost:0, strikes:[], alerts:[], lastAlerts:0,
+    timer:null, strikes:[], alerts:[], lastAlerts:0,
     fn:null, lastFn:0,
     X0:-8273078, Y0:4936445, X1:-8195528, Y1:5004638, ASPECT:1.1372
   };
@@ -47494,16 +47574,6 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       }).catch(function(){});
   }
 
-  // Blitzortung public feed: LZW-style dictionary decode of each frame.
-  function _cityOvLzw(b){
-    var e={}, d=b.split(''), c=d[0], f=c, g=[c], o=256, k;
-    for (var i=1;i<d.length;i++){
-      var cc=d[i].charCodeAt(0);
-      k = 256>cc ? d[i] : (e[cc] ? e[cc] : f+c);
-      g.push(k); c=k.charAt(0); e[o++]=f+c; f=k;
-    }
-    return g.join('');
-  }
   /* ── WHAT'S FALLING — KOKX dual-pol hydrometeor classification (bdhc)
      sampled in a ~6 km box around the viewed location, 32×32 px. Speaks only
      when a FROZEN or MIXED class dominates — plain rain is the nowcast chip's
@@ -47559,30 +47629,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     im.onerror = function(){};
     im.src = url;
   }
-  function _cityOvConnect(){
-    if (_cityOv.ws) return;
-    var hosts=['wss://ws1.blitzortung.org/','wss://ws7.blitzortung.org/','wss://ws8.blitzortung.org/'];
-    var url = hosts[_cityOv.wsHost % hosts.length];
-    try{
-      var ws = new WebSocket(url);
-      _cityOv.ws = ws;
-      ws.onopen = function(){ try{ ws.send(JSON.stringify({a:111})); }catch(e){} };
-      ws.onmessage = function(m){
-        try{
-          var s = JSON.parse(_cityOvLzw(m.data));
-          if (typeof s.lat !== 'number' || typeof s.lon !== 'number') return;
-          var abx = _activeWmsBox();
-          if (!abx) return;
-          if (s.lat < abx.s - 0.6 || s.lat > abx.n + 0.6 || s.lon < abx.w - 0.7 || s.lon > abx.e + 0.7) return;
-          _cityOv.strikes.push({ lat:s.lat, lon:s.lon, t:Date.now() });
-          if (_cityOv.strikes.length > 400) _cityOv.strikes.splice(0, 100);
-        }catch(e){}
-      };
-      ws.onclose = ws.onerror = function(){
-        if (_cityOv.ws === ws){ _cityOv.ws = null; _cityOv.wsHost++; }
-      };
-    }catch(e){ _cityOv.ws = null; _cityOv.wsHost++; }
-  }
+  /* the socket, the decode and the reconnect all live in window.bvLightning
+     now; this widget just says whether it wants strikes */
+  function _cityOvConnect(){ if (window.bvLightning) window.bvLightning.want('radar', true); }
+  function _cityOvDisconnect(){ if (window.bvLightning) window.bvLightning.want('radar', false); }
   // The FloodNet chip is canvas-drawn, and the overlay canvas is
   // pointer-events:none so map interaction passes through it. So the chip's
   // click target is a real <a> positioned over it: a genuine link (keyboard
@@ -47649,7 +47699,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       });
     });
     var now=Date.now();
-    _cityOv.strikes = _cityOv.strikes.filter(function(s){ return now-s.t < 600000; });
+    var _sbx = _activeWmsBox();
+    _cityOv.strikes = (_sbx && window.bvLightning)
+      ? window.bvLightning.since(_sbx.w - 0.7, _sbx.s - 0.6, _sbx.e + 0.7, _sbx.n + 0.6, 600000)
+          .map(function(p){ return { lon: p[0], lat: p[1], t: p[2] }; })
+      : [];
     _cityOv.strikes.forEach(function(s){
       var age=(now-s.t)/600000, a=1-age;
       var p=px(s.lon,s.lat), r = age<.05 ? 7 : 3.5;
@@ -47977,7 +48031,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             var _wet2 = (window._nowcastRate && window._nowcastRate.inhr > 0) || !!window._nowcastStr;
             if ((_mo2 >= 10 || _mo2 <= 3) && _wet2) _cityFetchBdhc();
           }
-          if (!_cityOv.ws) _cityOvConnect();
+          _cityOvConnect();
           _cityOvDraw();
           _cityCardsSync();
           if (fcastState.area === 'city-nyc' && window._cityHood && Date.now() - _hoodNc.at > 240000) _hoodLineRun();
@@ -47993,7 +48047,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     var _ccRow = document.getElementById('city-info-cards');
     if (_ccRow) _ccRow.style.display = 'none';
     if (_cityOv.timer){ clearInterval(_cityOv.timer); _cityOv.timer = null; }
-    if (_cityOv.ws){ try{ _cityOv.ws.close(); }catch(e){} _cityOv.ws = null; }
+    _cityOvDisconnect();
   }
 
   // Boot-idle prewarm: scan lists only (~18KB each). The station-wide basemap
@@ -50254,56 +50308,20 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        hour, far too much to leave running. So the socket opens only while a
        view that draws it is on screen, closes on a hidden tab, and only this
        corner of the continent is retained. */
-    var cwLtgSock = null;
-    window._cwStrikes = window._cwStrikes || [];
-    function cwLtgDecode(b){
-      var e = {}, d = String(b).split(''), c = d[0], f = c, out = [c], n2 = 256, h;
-      for (var i = 1; i < d.length; i++){
-        var cc = d[i].charCodeAt(0);
-        h = cc < 256 ? d[i] : (e[cc] !== undefined ? e[cc] : f + c);
-        out.push(h); c = h.charAt(0); e[n2] = f + c; n2++; f = h;
-      }
-      return out.join('');
-    }
-    function cwLtgOpen(){
-      if (cwLtgSock || typeof WebSocket === 'undefined') return;
-      try {
-        var sk = new WebSocket('wss://ws1.blitzortung.org/');
-        cwLtgSock = sk;
-        sk.onopen = function(){ try { sk.send('{"a":111}'); } catch(e){} };
-        sk.onmessage = function(ev){
-          var j;
-          try { j = JSON.parse(cwLtgDecode(ev.data)); } catch(e){ return; }
-          if (typeof j.lat !== 'number' || typeof j.lon !== 'number') return;
-          /* the whole planet comes down this pipe — keep only what these
-             maps could ever show */
-          if (j.lon < -82 || j.lon > -66 || j.lat < 36 || j.lat > 47) return;
-          var A = window._cwStrikes;
-          A.push([j.lon, j.lat, Date.now()]);
-          if (A.length > 1200) A.splice(0, A.length - 1200);
-        };
-        sk.onclose = function(){ if (cwLtgSock === sk) cwLtgSock = null; };
-        sk.onerror = function(){ try { sk.close(); } catch(e){} if (cwLtgSock === sk) cwLtgSock = null; };
-      } catch(e){ cwLtgSock = null; }
-    }
-    function cwLtgClose(){
-      if (!cwLtgSock) return;
-      try { cwLtgSock.close(); } catch(e){}
-      cwLtgSock = null;
-    }
+    function cwLtgOpen(){ if (window.bvLightning) window.bvLightning.want('city', true); }
+    function cwLtgClose(){ if (window.bvLightning) window.bvLightning.want('city', false); }
     var CW_LTG_AGE = 20 * 60000;
     /* one painter, two projections: the wide views hand it lon/lat, the city
        map hands it its own painted-view mapping. Expiry happens here, during
        the draw, so nothing else has to sweep the buffer. */
     function cwDrawStrikes(g, dpr, proj){
-      var A = window._cwStrikes;
-      if (!A || !A.length) return;
-      var now = Date.now(), keep = 0;
+      if (!window.bvLightning) return;
+      var A = window.bvLightning.since(-82, 36, -66, 47, CW_LTG_AGE);
+      if (!A.length) return;
+      var now = Date.now();
       g.save(); g.lineCap = 'round';
       for (var i = 0; i < A.length; i++){
         var age = now - A[i][2];
-        if (age > CW_LTG_AGE) continue;
-        A[keep++] = A[i];
         var p = proj(A[i][0], A[i][1]);
         if (!p) continue;
         var f = 1 - age / CW_LTG_AGE;          // 1 just struck, 0 about to expire
@@ -50320,7 +50338,6 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           g.fillStyle = 'rgba(255,255,255,.92)'; g.fill();
         }
       }
-      A.length = keep;
       g.restore(); g.globalAlpha = 1;
     }
     var cwAlertAt = 0;
@@ -66734,9 +66751,6 @@ function initNowMicroTabs(){
     window._floodLayerGroup = null;
     window._hazardAlerts = [];
     window._floodGauges = [];
-    blitzortungStrikes = [];
-    if (blitzortungWs){ try { blitzortungWs.close(); } catch(e){} blitzortungWs = null; }
-    if (blitzortungReconnectTimer){ clearTimeout(blitzortungReconnectTimer); blitzortungReconnectTimer = null; }
     // Stop watching the (now-detached) hazard-map element for resize.
     if (window._hazardMapResizeObs){ try { window._hazardMapResizeObs.disconnect(); } catch(e){} window._hazardMapResizeObs = null; }
     // Cancel any pending hazard-tab prefetch that hasn't fired yet — it would otherwise
@@ -66748,9 +66762,6 @@ function initNowMicroTabs(){
     }
   }
 // ============ LIGHTNING MAP ============
-  var blitzortungWs = null;
-  var blitzortungReconnectTimer = null;
-  var blitzortungStrikes = [];
 
   // Lightning now uses Blitzortung iframe inside hazard widget - loaded on tab switch
   function initLightningMap(){
