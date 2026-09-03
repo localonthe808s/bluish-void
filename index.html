@@ -49634,6 +49634,61 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             g.putImageData(im2, 0, 0);
           } catch(e){}
         }
+        /* AIRFIELDS AND BEACHES BELONG IN THE MAP, not in an overlay
+           (moved here 2026-09-02). They used to draw on cw-gv, UNDER
+           #cw-bm-ghost, and every tone had to be solved backwards through
+           that 35% wash. Blackening the land outside New York exposed the
+           ceiling in that scheme: over black the ghost contributes nothing,
+           so an overlay there can never exceed 0.65 x 255 = 166 brightness —
+           Newark's beige collapsed to 133,116,78 and runways could not stay
+           lighter than their own apron.
+           Painted into the composed basemap instead, the ghost re-applies
+           these pixels along with everything else, so it is the map ghosting
+           over itself and the colours are simply TRUE. No compensation, no
+           per-shape background, and radar still lands on top. */
+        var _ap = window._cwAirports, _bc = window._cwBeaches;
+        if (_ap || _bc){
+          try {
+            var R4 = 6378137;
+            var trace4 = function(ring){
+              ring.forEach(function(c4, i4){
+                var X4 = c4[0] * Math.PI / 180 * R4;
+                var Y4 = R4 * Math.log(Math.tan(Math.PI / 4 + c4[1] * Math.PI / 360));
+                var x4 = (X4 - v.X0) * sx, y4 = (v.Y1 - Y4) * sy;
+                i4 ? g.lineTo(x4, y4) : g.moveTo(x4, y4);
+              });
+            };
+            g.save();
+            g.lineJoin = 'round'; g.lineCap = 'butt';
+            (_bc || []).forEach(function(b4){
+              if (!b4.r || b4.r.length < 4) return;
+              g.beginPath(); trace4(b4.r); g.closePath();
+              g.fillStyle = 'rgb(231,217,181)'; g.fill();
+            });
+            /* runways at their real ~50 m width, so the diagram tightens with
+               the zoom the compose was built for */
+            var mpp4 = (v.X1 - v.X0) * Math.cos(40.7 * Math.PI / 180) / W2;
+            var rww4 = Math.max(1, Math.min(14, 50 / mpp4));
+            (_ap || []).forEach(function(a4){
+              g.beginPath(); trace4(a4.r); g.closePath();
+              g.fillStyle = 'rgb(214,197,158)'; g.fill();
+              g.strokeStyle = 'rgb(236,224,198)'; g.lineWidth = rww4;
+              (a4.rw || []).forEach(function(w4){
+                if (w4.length < 2) return;
+                g.beginPath(); trace4(w4); g.stroke();
+              });
+              g.fillStyle = 'rgb(150,137,112)';
+              (a4.tm || []).forEach(function(t4){
+                if (!t4.r || t4.r.length < 4) return;
+                g.beginPath(); trace4(t4.r); g.closePath(); g.fill();
+              });
+              g.beginPath(); trace4(a4.r); g.closePath();
+              g.lineWidth = Math.max(1, 1.4 * (W2 / 1132) / 2);
+              g.strokeStyle = 'rgb(176,160,126)'; g.stroke();
+            });
+            g.restore();
+          } catch(e){}
+        }
         /* toBlob: the jpeg encode leaves the main thread (toDataURL blocked it
            ~100ms at 2x); the probe decode means the swap lands fully painted */
         cv.toBlob(function(blob){
@@ -50220,13 +50275,13 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (window._cwBeaches || window._cwBeachesReq) return;
       window._cwBeachesReq = 1;
       fetch('/city_beaches.json').then(function(r){ return r.json(); })
-        .then(function(j){ window._cwBeaches = j; cwDrawSensors(); }).catch(function(){});
+        .then(function(j){ window._cwBeaches = j; try { compose(); } catch(e){} }).catch(function(){});
     }
     function cwAirportsLoad(){
       if (window._cwAirports || window._cwAirportsReq) return;
       window._cwAirportsReq = 1;
       fetch('/city_airports.json').then(function(r){ return r.json(); })
-        .then(function(j){ window._cwAirports = j; cwDrawSensors(); }).catch(function(){});
+        .then(function(j){ window._cwAirports = j; try { compose(); } catch(e){} }).catch(function(){});
     }
     function cwGeoLoad(u){
       if (!u) return;
@@ -51566,83 +51621,6 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var v = cwPainted, R2 = 6378137;
       var px = function(c){ return ((c[0] * Math.PI / 180 * R2) - v.X0) / (v.X1 - v.X0) * cvs.width; };
       var py = function(c){ return (v.Y1 - R2 * Math.log(Math.tan(Math.PI / 4 + c[1] * Math.PI / 360))) / (v.Y1 - v.Y0) * cvs.height; };
-      /* THE AIRFIELDS (user 2026-09-02) — JFK, LaGuardia and Newark in beige,
-         so the three fields read as their own ground rather than as more
-         city. Real OSM aerodrome outlines (city_airports.json, simplified to
-         ~15 m, well under a pixel even on the 35 m/px z2 tiles). Drawn as an
-         overlay rather than re-baking the whole ink tile pyramid for a colour
-         change, and first on this canvas so the bridges and outfalls that
-         follow still sit on top. */
-      if (window._cwAirports){
-        /* THE GHOST TAX (user asked whether the orange bleeds through — it
-           does, measured 2026-09-02). #cw-bm-ghost re-applies the whole
-           basemap at 35% ON TOP of this canvas, so 35% of what you see at any
-           airport is the map underneath. A flat beige therefore landed as
-           219,169,122 over the orange city and 222,215,194 over pale New
-           Jersey — the same paint reading as two different colours.
-           So don't paint the target: paint what COMPOSITES to the target.
-           Each field carries the bake's own colour beneath it (a.bg, measured
-           off the live map) and the fill is solved from it. Re-measure a.bg if
-           the ink bake is ever re-rendered. */
-        var AIR_T = [214, 197, 158], AIR_MIX = 0.35;
-        var BEACH_T = [231, 217, 181];
-        /* everything on this canvas pays the same ghost tax, so runways and
-           terminals are solved back from their targets too */
-        var airComp = function(t, bg){
-          var o = [0, 0, 0];
-          for (var i = 0; i < 3; i++){
-            o[i] = Math.max(0, Math.min(255,
-              Math.round((t[i] - AIR_MIX * bg[i]) / (1 - AIR_MIX))));
-          }
-          return 'rgb(' + o[0] + ',' + o[1] + ',' + o[2] + ')';
-        };
-        /* runways are drawn at their REAL width — about 50 m — so the field
-           diagram tightens up as you zoom instead of staying a fat scribble */
-        var airMpp = (v.X1 - v.X0) * Math.cos(40.7 * Math.PI / 180) / cvs.width;
-        var airRwW = Math.max(1.1 * dpr, Math.min(9 * dpr, 50 / airMpp));
-        g.save();
-        g.lineJoin = 'round'; g.lineCap = 'butt';
-        /* THE BEACHES (user 2026-09-02) — 40 of them, NYC only. Each carries
-           the bake colour under it too, sampled at bake time from many points
-           INSIDE the shape rather than at the centroid: a barrier beach is a
-           thin strip and its centroid lands in the water. */
-        (window._cwBeaches || []).forEach(function(b2){
-          if (!b2.r || b2.r.length < 4) return;
-          g.beginPath();
-          b2.r.forEach(function(p, i){ i ? g.lineTo(px(p), py(p)) : g.moveTo(px(p), py(p)); });
-          g.closePath();
-          g.fillStyle = airComp(BEACH_T, b2.bg || [200, 150, 90]);
-          g.fill();
-        });
-        window._cwAirports.forEach(function(a){
-          var bg = a.bg || [230, 128, 62];
-          var trace = function(ring){
-            ring.forEach(function(p, i){ i ? g.lineTo(px(p), py(p)) : g.moveTo(px(p), py(p)); });
-          };
-          /* the field */
-          g.beginPath(); trace(a.r); g.closePath();
-          g.fillStyle = airComp(AIR_T, bg); g.fill();
-          /* runways, a shade lighter than the apron */
-          g.strokeStyle = airComp([236, 224, 198], bg);
-          g.lineWidth = airRwW;
-          (a.rw || []).forEach(function(w){
-            if (w.length < 2) return;
-            g.beginPath(); trace(w); g.stroke();
-          });
-          /* terminals and piers, a shade darker — the barebones gate map */
-          g.fillStyle = airComp([150, 137, 112], bg);
-          (a.tm || []).forEach(function(t2){
-            if (!t2.r || t2.r.length < 4) return;
-            g.beginPath(); trace(t2.r); g.closePath(); g.fill();
-          });
-          /* the field's own edge, last so it stays crisp over both */
-          g.beginPath(); trace(a.r); g.closePath();
-          g.lineWidth = 1 * dpr;
-          g.strokeStyle = airComp([176, 160, 126], bg);
-          g.stroke();
-        });
-        g.restore();
-      }
       /* the BRIDGES (user 2026-09-01): the ink bake stops its roads at the
          water, so the boroughs floated disconnected. 68 named crossings
          from OSM (city_bridges.json) draw in the bake's own road grammar —
