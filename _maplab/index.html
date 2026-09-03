@@ -379,7 +379,8 @@ var STYLES = [
      landcover — and a river blue that survives on it (the ink #2B22F4 reads
      violet on black, and there is a standing no-purple rule). */
   { id:'ink-night', name:'INK \u00b7 NIGHT', why:'black land, green parks, theme blue water',
-    mods:{ noRoads:true, noBuildings:true, rivers:{ color:'#2f6fbf', width:0.55 } },
+    mods:{ noRoads:true, noBuildings:true, splitRoads:true,
+           rivers:{ color:'#2f6fbf', width:0.55 } },
     o:{} }
 ];
 
@@ -416,7 +417,7 @@ function rulesFor(style, f){
 
    Paths, tracks and rail are deliberately absent. This is for the shape of the street
    grid, and a footway in a park would say something the layer is not trying to say. */
-function roadRulesFor(mPerPx){
+function roadRulesFor(mPerPx, trunkOnly){
   /* Silver on orange has plenty of value contrast but very little hue contrast, so a
      hairline at low alpha disappears entirely — the first pass was invisible at street
      zoom. These are the weights at which the grid reads without competing. */
@@ -429,6 +430,10 @@ function roadRulesFor(mPerPx){
      city level, where the whole grid collapses into a few pixels — pulled back, the lines
      have to get thinner, not just fewer. */
   var k = Math.max(0.3, Math.min(1.6, 30 / (mPerPx || 30)));
+  /* Outside the city only the motorways are wanted — the full mesh out there
+     reads louder than the city it surrounds, and the trunk web in particular
+     has been mistaken for county lines before. */
+  if (trunkOnly) lanes = lanes.slice(0, 1);
   var rules = lanes.map(function(l){
     return { dataLayer:'roads',
       filter: function(z, f){ return f.props.kind === l[0]; },
@@ -1658,9 +1663,37 @@ function drawCard(style){
                  water read as somewhere else — you could not see that Sheep Meadow's
                  outflow runs beneath blocks. Still under the buried courses, which are the
                  subject, and under today's water, since no street crosses the Hudson. */
-              return new protomapsL.Static({ url: document.getElementById('src').value,
-                paintRules: roadRulesFor(VB.mpp), labelRules: [], maxDataZoom: 14 })
-                .drawContextBounds(ctx, {x:view.w, y:view.latMid}, {x:view.e, y:view.latMid}, W, H);
+              /* THE GRID IS THE CITY'S (user 2026-09-03). Drawn in one pass over
+                 everything, the silver mesh covers the black surroundings more
+                 brightly than the city it is meant to frame. So it is rendered
+                 twice and cut against the borough mask: the full grid kept
+                 INSIDE, motorways only and dimmed to a third kept OUTSIDE. */
+              var roadCv = function(rules){
+                var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+                return new protomapsL.Static({ url: document.getElementById('src').value,
+                  paintRules: rules, labelRules: [], maxDataZoom: 14 })
+                  .drawContextBounds(cv.getContext('2d'),
+                    {x:view.w, y:view.latMid}, {x:view.e, y:view.latMid}, W, H)
+                  .then(function(){ return cv; });
+              };
+              if (!(style.mods || {}).splitRoads || !boroMaskCv)
+                return new protomapsL.Static({ url: document.getElementById('src').value,
+                  paintRules: roadRulesFor(VB.mpp), labelRules: [], maxDataZoom: 14 })
+                  .drawContextBounds(ctx, {x:view.w, y:view.latMid}, {x:view.e, y:view.latMid}, W, H);
+              return roadCv(roadRulesFor(VB.mpp)).then(function(inCv){
+                return roadCv(roadRulesFor(VB.mpp, true)).then(function(outCv){
+                  if (stale()) return;
+                  var ci = inCv.getContext('2d');
+                  ci.globalCompositeOperation = 'destination-in';
+                  ci.drawImage(boroMaskCv, 0, 0);      // the city's own grid
+                  var co = outCv.getContext('2d');
+                  co.globalCompositeOperation = 'destination-out';
+                  co.drawImage(boroMaskCv, 0, 0);      // everything but the city
+                  ctx.save(); ctx.globalAlpha = 0.32;
+                  ctx.drawImage(outCv, 0, 0); ctx.restore();
+                  ctx.drawImage(inCv, 0, 0);
+                });
+              });
             })
             .then(function(){
               if (stale()) return;
