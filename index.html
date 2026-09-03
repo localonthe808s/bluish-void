@@ -50558,14 +50558,19 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           (j.features || []).forEach(function(f){
             var p = f.properties || {}, gm = f.geometry;
             var ugc = (p.geocode || {}).UGC || [];
+            /* areaDesc is the human name for each UGC, in the same order —
+               this is what lets a label say WHERE instead of how many */
+            var ad = String(p.areaDesc || '').split(';').map(function(t){
+              return t.trim().toUpperCase();
+            }).filter(Boolean);
             if (gm && (gm.type === 'Polygon' || gm.type === 'MultiPolygon')){
               var rings = gm.type === 'Polygon' ? [gm.coordinates[0]]
                         : gm.coordinates.map(function(c){ return c[0]; });
-              poly.push({ e: p.event || 'ALERT', r: rings, z: ugc });
+              poly.push({ e: p.event || 'ALERT', r: rings, z: ugc, ad: ad });
               any = true;
             } else if (p.event){
               zone[p.event] = (zone[p.event] || 0) + 1; zn++;
-              zoneAl.push({ e: p.event, z: ugc });
+              zoneAl.push({ e: p.event, z: ugc, ad: ad });
               any = true;
             }
           });
@@ -50871,7 +50876,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       };
       var flushLabels = function(){
         LBL.sort(function(a, b){ return b.r - a.r; });
-        var placed = [], LH = 10.5 * dpr;
+        var placed = [], dropped = [], LH = 10.5 * dpr;
         g.textAlign = 'left'; g.textBaseline = 'middle';
         LBL.forEach(function(q){
           g.font = q.f;
@@ -50902,8 +50907,19 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             });
             return;
           }
+          /* fell through every candidate spot: this label is NOT on the map */
+          dropped.push(q.l.join(' '));
         });
         g.textBaseline = 'alphabetic';
+        /* SAY SO WHEN A LABEL IS DROPPED (2026-09-03). A label with nowhere
+           clean to sit is discarded rather than stacked, which is right — but
+           it happened silently, so the map could be over-subscribed and the
+           only symptom was a name you expected and did not get. Now every
+           render leaves its own receipt. */
+        window._cwLabels = { view: wv.id, total: LBL.length,
+                             placed: LBL.length - dropped.length, dropped: dropped };
+        if (dropped.length) console.warn('[CITY] ' + wv.id + ': ' + dropped.length
+          + ' label(s) dropped for want of room — ' + dropped.join(' · '));
       };
       /* is a WARNING standing on this landform right now? The storms firing
          over the Chautauqua ridge are the whole reason the ridge is drawn. */
@@ -51222,11 +51238,17 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
            gap BETWEEN them instead of inside one. */
         var byEvent = {};
         all.forEach(function(a){
-          var e = a.e, rings = (a.r || []).slice();
-          if (Z) (a.z || []).forEach(function(zid){ if (Z[zid]) rings = rings.concat(Z[zid]); });
-          if (!byEvent[e]) byEvent[e] = { e: e, n: 0, best: null, area: -1 };
+          var e = a.e, ad = a.ad || [], rings = [];
+          /* every ring carries the name of the ground it covers: a polygon
+             is the whole alert, a zone ring is its own county */
+          (a.r || []).forEach(function(r){ rings.push([r, ad[0] || '']); });
+          if (Z) (a.z || []).forEach(function(zid, zi){
+            if (Z[zid]) Z[zid].forEach(function(r){ rings.push([r, ad[zi] || ad[0] || '']); });
+          });
+          if (!byEvent[e]) byEvent[e] = { e: e, n: 0, best: null, area: -1, where: '' };
           byEvent[e].n++;
-          rings.forEach(function(ring){
+          rings.forEach(function(pair){
+            var ring = pair[0];
             if (!ring || ring.length < 3) return;
             var x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
             ring.forEach(function(p){
@@ -51241,6 +51263,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             if (ar > byEvent[e].area){
               byEvent[e].area = ar;
               byEvent[e].best = [(x0 + x1) / 2, (y0 + y1) / 2];
+              byEvent[e].where = pair[1];
             }
           });
         });
@@ -51250,7 +51273,15 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         Object.keys(byEvent).forEach(function(k){ if (byEvent[k].best) evs.push(byEvent[k]); });
         evs.sort(function(a, b){ return rankOf(b.e) - rankOf(a.e); });
         evs.forEach(function(v){
-          var lines = splitEvent(countedEvent(v.e, v.n));
+          /* WHERE, not how many (2026-09-03). The corner inventory already
+             prints "5 FLASH FLOOD WARNINGS"; printing it again over the
+             polygons said the same thing twice, and with a DIFFERENT number,
+             because the inventory counts every alert while the map can only
+             anchor the ones with geometry in frame. So the map names the
+             ground it is actually pointing at and leaves counting to the
+             corner — the two now answer different questions. */
+          var lines = splitEvent(v.e);
+          if (v.where) lines.push(v.where);
           /* Hazards outrank everything else for a contested spot, and the
              worst of them are also SET LARGER (user 2026-09-02): a tornado or
              flash flood warning should not be the same size as a routine
