@@ -54,13 +54,28 @@ Kalshi prices live in the *_dollars fields.  The legacy integer-cent fields
 """
 
 import json, math, os, statistics, sys, urllib.request, urllib.error
-import io, csv, collections, datetime
+import io, csv, collections, datetime, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT  = os.path.join(HERE, '..', 'kalshi_ny.json')
 
-CP_LAT, CP_LON = 40.7789, -73.9692        # Belvedere Castle / Central Park
-SERIES  = 'KXHIGHNY'
+# Kalshi lists ~369 weather series (other cities' highs and lows, rain, snow).
+# Adding one is a dict here: its series ticker, the station that settles it, the
+# co-ordinates to forecast for, and the file the page reads. Everything below is
+# written against a market config, never against NYC specifically. Each market
+# runs isolated, so one broken feed cannot take the others down.
+MARKETS = [
+    {
+        'key':     'nyc_high',
+        'series':  'KXHIGHNY',
+        'label':   'NYC daily high',
+        'station': 'NYC', 'network': 'NY_ASOS',
+        'lat':     40.7789, 'lon': -73.9692,   # Belvedere Castle / Central Park
+        'field':   'max_temp_f',
+        'tz':      'America/New_York', 'tzlabel': 'ET',
+        'out':     'kalshi_ny.json',
+    },
+]
+
 BIAS_K  = 21                              # days in the rolling bias window
 BIAS_MIN = 7                              # need this many before trusting it
 LOCK_HOUR = 12                            # noon ET: morning obs in hand, peak ahead
@@ -87,13 +102,18 @@ SD_FALLBACK = {8:3.06, 9:3.02, 10:2.99, 11:2.83, 12:2.64, 13:2.33, 14:2.11,
 
 
 def get(url, timeout=90, tries=3):
+    """Fetch with backoff. These feeds are all third-party and all flaky at some
+    point in a day; a bare retry loop hammers a struggling host instead of
+    letting it recover."""
     last = None
-    for _ in range(tries):
+    for a in range(tries):
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'bluishvoid/1.0'})
             return urllib.request.urlopen(req, timeout=timeout).read()
         except Exception as e:
             last = e
+            if a < tries - 1:
+                time.sleep(1.5 * (2 ** a))
     raise last
 
 
@@ -101,21 +121,30 @@ def get_json(url, **kw):
     return json.loads(get(url, **kw))
 
 
-def et_now():
-    """America/New_York without a tz database dependency (EDT Mar-Nov)."""
-    u = datetime.datetime.utcnow()
-    off = 4 if 3 <= u.month <= 11 else 5
-    return u - datetime.timedelta(hours=off)
+def local_now(cfg):
+    """Wall-clock time where the market settles.
+
+    These markets settle on the local calendar day, so every hour comparison --
+    the noon lock, the 6pm call, which forecast hours are still ahead -- has to
+    be in the station's own zone, not ours. Falls back to a fixed US-Eastern
+    offset only if the tz database is unavailable.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.datetime.now(ZoneInfo(cfg.get('tz', 'America/New_York'))).replace(tzinfo=None)
+    except Exception:
+        u = datetime.datetime.utcnow()
+        return u - datetime.timedelta(hours=4 if 3 <= u.month <= 11 else 5)
 
 
 # ---------------------------------------------------------------- market ----
-def event_ticker(d):
-    return '%s-%s' % (SERIES, d.strftime('%y%b%d').upper())
+def event_ticker(cfg, d):
+    return '%s-%s' % (cfg['series'], d.strftime('%y%b%d').upper())
 
 
-def fetch_market(ev):
+def fetch_market(cfg, ev):
     d = get_json('https://api.elections.kalshi.com/trade-api/v2/markets'
-                 '?series_ticker=%s&status=open&limit=60' % SERIES)
+                 '?series_ticker=%s&status=open&limit=60' % cfg['series'])
     out = []
     for m in d.get('markets', []):
         if m.get('event_ticker') != ev:
@@ -160,24 +189,39 @@ def fetch_market(ev):
 HOURLY_PEAK_OFFSET = 1.0     # median(daily.json - max hourly), for historic floors
 
 
-def daily_max_series():
-    """Every Central Park daily max IEM holds -> {'YYYY-MM-DD': degF}.
+def daily_series(cfg, start, end):
+    """Settling temperature per day -> {'YYYY-MM-DD': degF}, including today's
+    running value.
 
-    One call returns the whole archive (back to 1943), so history, the bias
-    window and scoring all come from a single request.
+    Uses the date-ranged endpoint, not `daily.json` with no date: that returns
+    the station's whole archive back to 1943 -- **8.8 MB on every run**, twenty
+    times a day, for the ~75 days actually needed. The ranged form is 15 KB and
+    was checked to agree with it exactly, today's running max included.
     """
-    d = get_json('https://mesonet.agron.iastate.edu/api/1/daily.json'
-                 '?station=NYC&network=NY_ASOS', timeout=180)
-    return {r['date']: float(r['max_tmpf'])
-            for r in (d.get('data') or []) if r.get('max_tmpf') is not None}
+    u = ('https://mesonet.agron.iastate.edu/cgi-bin/request/daily.py'
+         '?network=%s&stations=%s&year1=%d&month1=%d&day1=%d'
+         '&year2=%d&month2=%d&day2=%d&format=comma'
+         % (cfg['network'], cfg['station'], start.year, start.month, start.day,
+            end.year, end.month, end.day))
+    out = {}
+    for r in csv.DictReader(io.StringIO(get(u, timeout=120).decode())):
+        v = r.get(cfg['field'])
+        if v not in (None, '', 'M', 'None'):
+            try:
+                out[r['day']] = float(v)
+            except ValueError:
+                pass
+    return out
 
 
-def obs_hourly_range(start, end):
+def obs_hourly_range(cfg, start, end):
     """Hourly obs -> {'YYYY-MM-DD': {hour: degF}}, for historic running maxima."""
-    u = ('https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station=NYC'
+    u = ('https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station=%s'
          '&data=tmpf&year1=%d&month1=%d&day1=%d&year2=%d&month2=%d&day2=%d'
-         '&tz=America%%2FNew_York&format=onlycomma&missing=empty&trace=empty'
-         % (start.year, start.month, start.day, end.year, end.month, end.day))
+         '&tz=%s&format=onlycomma&missing=empty&trace=empty'
+         % (cfg['station'], start.year, start.month, start.day,
+            end.year, end.month, end.day,
+            urllib.parse.quote(cfg.get('tz', 'America/New_York'))))
     out = collections.defaultdict(dict)
     for r in csv.DictReader(io.StringIO(get(u, timeout=180).decode())):
         if r.get('tmpf'):
@@ -187,7 +231,7 @@ def obs_hourly_range(start, end):
 
 
 # ------------------------------------------------------------- forecast ----
-def forecast_runs(past_days, model=None):
+def forecast_runs(cfg, past_days, model=None):
     """Day-ahead run, hourly, degF, local time -> {'YYYY-MM-DD': {hour: F}}.
 
     previous_day1 = the run issued ~24 h earlier.  The calibration used this
@@ -197,7 +241,8 @@ def forecast_runs(past_days, model=None):
     u = ('https://previous-runs-api.open-meteo.com/v1/forecast'
          '?latitude=%.4f&longitude=%.4f&hourly=temperature_2m_previous_day1'
          '&past_days=%d&forecast_days=1&temperature_unit=fahrenheit'
-         '&timezone=America%%2FNew_York' % (CP_LAT, CP_LON, past_days)
+         '&timezone=%s' % (cfg['lat'], cfg['lon'], past_days,
+                           urllib.parse.quote(cfg.get('tz', 'America/New_York')))
          + ('&models=' + model if model else ''))
     h = get_json(u, timeout=120)['hourly']
     out = collections.defaultdict(dict)
@@ -207,7 +252,7 @@ def forecast_runs(past_days, model=None):
     return out
 
 
-def fresh_runs(hour):
+def fresh_runs(cfg, hour):
     """Today's CURRENT runs, one call, all five models -> {model: peak degF}.
 
     Not used by the forecast: the live model deliberately runs on `previous_day1`
@@ -219,8 +264,9 @@ def fresh_runs(hour):
     """
     u = ('https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f'
          '&hourly=temperature_2m&models=%s&forecast_days=1'
-         '&temperature_unit=fahrenheit&timezone=America%%2FNew_York'
-         % (CP_LAT, CP_LON, ','.join(MODELS)))
+         '&temperature_unit=fahrenheit&timezone=%s'
+         % (cfg['lat'], cfg['lon'], ','.join(MODELS),
+            urllib.parse.quote(cfg.get('tz', 'America/New_York'))))
     h = get_json(u, timeout=90)['hourly']
     out = {}
     for m in MODELS:
@@ -359,15 +405,15 @@ def which(rows, t):
     return None
 
 
-def load_log():
+def load_log(out):
     try:
-        with open(OUT) as f:
+        with open(out) as f:
             return json.load(f)
     except Exception:
         return {'history': []}
 
 
-def fetch_settled(limit=400):
+def fetch_settled(cfg, limit=400):
     """Past events -> their own bracket ladder plus which bracket settled yes.
 
     The ladder is re-centred by Kalshi every day (Sep 3 ran 83-84/85-86/87-88,
@@ -375,7 +421,7 @@ def fetch_settled(limit=400):
     ladder it actually traded, never today's.
     """
     d = get_json('https://api.elections.kalshi.com/trade-api/v2/markets'
-                 '?series_ticker=%s&status=settled&limit=%d' % (SERIES, limit))
+                 '?series_ticker=%s&status=settled&limit=%d' % (cfg['series'], limit))
     ev = collections.defaultdict(list)
     for m in d.get('markets', []):
         f, c, st = m.get('floor_strike'), m.get('cap_strike'), m.get('strike_type')
@@ -456,32 +502,36 @@ def backfill(fcm, bias_of, daily, obh, settled, sd_lock):
     return out
 
 
-def main():
+def run_market(cfg):
     dry = '--dry' in sys.argv
-    now = et_now()
+    now = local_now(cfg)
     today = now.date()
     tkey = today.isoformat()
+    OUT = os.path.join(HERE, '..', cfg['out'])
 
-    rows = fetch_market(event_ticker(today))
+    rows = fetch_market(cfg, event_ticker(cfg, today))
     if not rows:
-        print('no open market for %s' % event_ticker(today))
+        print('%s: no open market for %s' % (cfg['key'], event_ticker(cfg, today)))
         return 0
 
     span = RESID_M + BIAS_K + 6
     fcm = {}
     for m in MODELS:
         try:
-            fcm[m] = forecast_runs(span, m)
+            fcm[m] = forecast_runs(cfg, span, m)
         except Exception as e:
             print('model %s unavailable: %s' % (m, e))
     if not fcm:
         print('no forecast models available')
         return 0
     fc = fcm.get(MODELS[0]) or list(fcm.values())[0]
-    daily = daily_max_series()
+    # the observation window is deliberately wider than the model window: it also
+    # has to score history entries (kept 120 days) and backfill against every
+    # settled market Kalshi still lists. At 15 KB the extra span is free.
+    daily = daily_series(cfg, today - datetime.timedelta(days=200), today)
     # end one day AHEAD: asos.py treats the end date as the cut-off, so asking
     # for `today` returns almost nothing for today
-    obh = obs_hourly_range(today - datetime.timedelta(days=span),
+    obh = obs_hourly_range(cfg, today - datetime.timedelta(days=span),
                            today + datetime.timedelta(days=1))
 
     bias, nb = rolling_bias(fc, daily, tkey)
@@ -511,12 +561,15 @@ def main():
         print('no forecast and no observations yet')
         return 0
     pred = max(cands)
+    if not (-40.0 < pred < 130.0):
+        print('%s: implausible prediction %.1f -- refusing to write' % (cfg['key'], pred))
+        return 0
     res = residuals(fcm, bias_of, daily, obh, now.hour, tkey)
     sd, nsd = spread(res, now.hour)
     sd_lock, _ = spread(residuals(fcm, bias_of, daily, obh, LOCK_HOUR, tkey), LOCK_HOUR)
 
     try:
-        fresh_peaks = fresh_runs(hr0)
+        fresh_peaks = fresh_runs(cfg, hr0)
     except Exception as e:
         fresh_peaks = None
         print('fresh runs unavailable: %s' % e)
@@ -525,12 +578,12 @@ def main():
     best = max(range(len(rows)), key=lambda i: ps[i])
     mbest = max(range(len(rows)), key=lambda i: rows[i]['mid'])
 
-    log = load_log()
+    log = load_log(OUT)
     hist = {h['date']: h for h in log.get('history', [])}
 
     if '--backfill' in sys.argv:
         added = 0
-        for h in backfill(fcm, bias_of, daily, obh, fetch_settled(), sd_lock):
+        for h in backfill(fcm, bias_of, daily, obh, fetch_settled(cfg), sd_lock):
             if h['date'] not in hist:
                 hist[h['date']] = h
                 added += 1
@@ -539,7 +592,7 @@ def main():
     # ---- lock one decision per day, at or after noon ET, never overwritten
     entry = hist.get(tkey)
     if entry is None:
-        entry = {'date': tkey, 'event': event_ticker(today)}
+        entry = {'date': tkey, 'event': event_ticker(cfg, today)}
         hist[tkey] = entry
     def snapshot(hour):
         """Our call AS OF `hour` today, however late the job actually runs.
@@ -584,7 +637,8 @@ def main():
             'at': now.strftime('%Y-%m-%dT%H:%M') + ' ET',
             'pick': rows[best]['label'], 'ticker': rows[best]['ticker'],
             'p': round(ps[best], 4), 'pred': round(pred, 2), 'sd': round(sd, 2),
-            'as_of': '%02d:00 ET' % hour, 'bias': round(bias, 2),
+            'as_of': '%02d:00 %s' % (hour, cfg.get('tzlabel', 'ET')),
+            'bias': round(bias, 2),
             'obs_at_lock': fl,
             'market_pick': rows[mbest]['label'], 'market_p': rows[mbest]['mid'],
             # recorded, not used -- see fresh_runs()
@@ -623,8 +677,8 @@ def main():
         L = make_lock(LOCK_HOUR)
         if L:
             entry['lock'] = L
-            print('LOCKED %s (as of %s): %s (%.0f%%), market %s (%.0f%%)'
-                  % (tkey, L['as_of'], L['pick'], 100 * L['p'],
+            print('%s LOCKED %s (as of %s): %s (%.0f%%), market %s (%.0f%%)'
+                  % (cfg['key'], tkey, L['as_of'], L['pick'], 100 * L['p'],
                      L['market_pick'], 100 * L['market_p']))
     if 'final' not in entry and now.hour >= FINAL_HOUR:
         F = make_lock(FINAL_HOUR)
@@ -697,10 +751,18 @@ def main():
                             'window': '2026-06-28..2026-09-03',
                             'lock_hour': LOCK_HOUR}
 
+    # trails are per-hour rows and only useful while recent; drop the old ones
+    # so the file the page downloads does not grow without bound
+    keep = sorted(hist, reverse=True)[:14]
+    for k, h in hist.items():
+        if k not in keep and 'trail' in h:
+            del h['trail']
+
     doc = {
         'updated': now.strftime('%Y-%m-%dT%H:%M') + ' ET',
         'today': {
-            'date': tkey, 'event': event_ticker(today),
+            'date': tkey, 'event': event_ticker(cfg, today),
+            'tz': cfg.get('tzlabel', 'ET'), 'market': cfg.get('label', ''),
             'close': rows[0]['close'], 'settles': 'Central Park (CLINYC), whole degrees',
             'pred': round(pred, 2), 'sd': sd, 'bias': round(bias, 2),
             'bias_days': nb, 'sd_days': nsd,
@@ -729,6 +791,20 @@ def main():
         json.dump(doc, f, separators=(',', ':'))
     print('wrote %s (%d scored days)' % (OUT, record['n']))
     return 0
+
+
+def main():
+    """Run every configured market. One market's outage must not stop the rest,
+    and a market that throws leaves its previous file untouched rather than
+    writing something half-built."""
+    bad = 0
+    for cfg in MARKETS:
+        try:
+            run_market(cfg)
+        except Exception as e:
+            bad += 1
+            print('%s FAILED: %s: %s' % (cfg['key'], type(e).__name__, e))
+    return 1 if bad == len(MARKETS) else 0
 
 
 if __name__ == '__main__':
