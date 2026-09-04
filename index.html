@@ -49473,7 +49473,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             + '&width=1400&height=1228&srs=EPSG:3857&format=image/png8&transparent=true'
             + '&time=' + encodeURIComponent(t);
         },
-        boroughs: true, lead: true, fuel: true, leadHrs: [[1, .98], [2, .85]], prods: true, alerts: true, fronts: true,
+        boroughs: true, lead: true, fuel: true, leadHrs: [[1, .98], [2, .85]], prods: true, alerts: true, fronts: true, barbs: true,
         /* the landforms this view exists to show: the Pocono plateau, the
            Kittatinny ridge and the Shawangunk. No lakes or Gulf Stream in
            this box, so no geoLive read. */
@@ -49522,7 +49522,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         /* the same reads as INCOMING, scaled to this box (user 2026-09-01):
            land relief now shares the seafloor layer, the lead arcs step out
            to six and twelve hours, and the fuel line comes along */
-        lead: true, fuel: true, leadHrs: [[6, .98], [12, .85]], alerts: true, prods: true, fronts: true,
+        lead: true, fuel: true, leadHrs: [[6, .98], [12, .85]], alerts: true, prods: true, fronts: true, barbs: true,
         geo: '/city_ne_geo.json', geoLive: true, lightning: true,
         box: { X0:-8927823, Y0:4607718, X1:-7636517, Y1:5716479, sid:'cw-ne' },
         /* the middle layer — drawn under the radar, over our basemap. Here
@@ -50687,6 +50687,32 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        first two and longitude in the rest, so 4284 is 42N 84W and 63146 is
        63N 146W. Whole degrees — this is a continental analysis, and a front
        drawn from it is a position to a degree, not a surveyed line. */
+    /* SURFACE OBSERVATIONS (user 2026-09-03). Radar shows where the rain is;
+       the barbs show the wind field that is steering it — the convergence
+       line, the sea breeze, the shift behind a front. 164 stations in the
+       northeast box, 163 of them reporting wind.
+       aviationweather.gov serves this openly but sends NO CORS header, so it
+       goes through the site's own proxy racer rather than a new fallback
+       chain of its own. Fetched once for the LARGER box and filtered per
+       view, so switching between 3 and 12 hours costs nothing. */
+    var CW_METAR_AT = 0;
+    function cwMetarRead(){
+      if (Date.now() - CW_METAR_AT < 900000) return;
+      CW_METAR_AT = Date.now();
+      var u = 'https://aviationweather.gov/api/data/metar?bbox=38,-81,46,-68&format=json';
+      var go = window.bvProxyJSON ? window.bvProxyJSON(u, { noDirect: true })
+                                  : fetch(u).then(function(r){ return r.json(); });
+      go.then(function(j){
+        if (!Array.isArray(j)) return;
+        window._cwMetar = j.filter(function(o){
+          return o && o.lat != null && o.lon != null
+              && o.wdir != null && o.wspd != null && o.wspd !== '' ;
+        }).map(function(o){
+          return { la: +o.lat, lo: +o.lon, d: +o.wdir, s: +o.wspd };
+        }).filter(function(o){ return isFinite(o.d) && isFinite(o.s); });
+        if (cw.wide) cwDrawWideOv(cwWideDef());
+      }).catch(function(){});
+    }
     var CW_FRONT_AT = 0;
     function cwFrontsRead(){
       if (Date.now() - CW_FRONT_AT < 1800000) return;
@@ -51533,6 +51559,66 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var X = px([lo, la]), Y = py([lo, la]);
         return (X < -8 || Y < -8 || X > cvs.width + 8 || Y > cvs.height + 8) ? null : [X, Y];
       });
+      /* WIND BARBS, the station model's own shorthand: the shaft lies along
+         the wind and the feathers count it — a pennant is 50 kt, a full barb
+         10, a half barb 5. Drawn before the front, so the front reads over
+         them, and thinned on a minimum pixel spacing rather than by station
+         rank: at 849 m/px the northeast has 164 reports and they would
+         otherwise pile into an unreadable mat around the cities. */
+      if (wv.barbs && window._cwMetar){
+        g.save(); g.lineCap = 'butt'; g.lineJoin = 'miter';
+        var taken = [], MINSEP = 46 * dpr;
+        window._cwMetar.forEach(function(o){
+          var x = px([o.lo, o.la]), y = py([o.lo, o.la]);
+          if (x < 8 || y < 8 || x > cvs.width - 8 || y > cvs.height - 8) return;
+          for (var i = 0; i < taken.length; i++)
+            if (Math.hypot(x - taken[i][0], y - taken[i][1]) < MINSEP) return;
+          taken.push([x, y]);
+          var kt = o.s, L = 16 * dpr;
+          /* the shaft points INTO the wind: a barb at 270 lies to the west,
+             which is where the air is coming from */
+          var a = (o.d + 180) * Math.PI / 180 - Math.PI / 2;
+          var ux = Math.cos(a), uy = Math.sin(a);
+          var nx = -uy, ny = ux;
+          g.strokeStyle = 'rgba(8,10,16,.8)'; g.lineWidth = 3.4 * dpr;
+          g.beginPath(); g.moveTo(x, y); g.lineTo(x + ux * L, y + uy * L); g.stroke();
+          g.strokeStyle = 'rgba(214,228,245,.92)'; g.lineWidth = 1.3 * dpr;
+          g.beginPath(); g.moveTo(x, y); g.lineTo(x + ux * L, y + uy * L); g.stroke();
+          g.fillStyle = 'rgba(214,228,245,.92)';
+          g.beginPath(); g.arc(x, y, 1.5 * dpr, 0, 6.284); g.fill();
+          if (kt < 3) {                       // calm: a ring, no feathers
+            g.strokeStyle = 'rgba(214,228,245,.8)'; g.lineWidth = 1.1 * dpr;
+            g.beginPath(); g.arc(x, y, 3.4 * dpr, 0, 6.284); g.stroke();
+            return;
+          }
+          var rem = Math.round(kt / 5) * 5, pos = L, STEP = 3.6 * dpr;
+          g.strokeStyle = 'rgba(214,228,245,.92)'; g.lineWidth = 1.3 * dpr;
+          while (rem >= 50){
+            g.beginPath();
+            g.moveTo(x + ux * pos, y + uy * pos);
+            g.lineTo(x + ux * (pos - STEP * 1.6) + nx * 7 * dpr,
+                     y + uy * (pos - STEP * 1.6) + ny * 7 * dpr);
+            g.lineTo(x + ux * (pos - STEP * 1.6 * 2), y + uy * (pos - STEP * 1.6 * 2));
+            g.closePath(); g.fill();
+            pos -= STEP * 1.6 * 2; rem -= 50;
+          }
+          while (rem >= 10){
+            g.beginPath();
+            g.moveTo(x + ux * pos, y + uy * pos);
+            g.lineTo(x + ux * (pos - STEP) + nx * 7 * dpr, y + uy * (pos - STEP) + ny * 7 * dpr);
+            g.stroke();
+            pos -= STEP; rem -= 10;
+          }
+          if (rem >= 5){
+            g.beginPath();
+            g.moveTo(x + ux * pos, y + uy * pos);
+            g.lineTo(x + ux * (pos - STEP * .55) + nx * 3.6 * dpr,
+                     y + uy * (pos - STEP * .55) + ny * 3.6 * dpr);
+            g.stroke();
+          }
+        });
+        g.restore();
+      }
       /* THE FRONT, drawn in the classic hand: a line with pips on one side,
          triangles for cold and half-circles for warm, both alternating on a
          stationary boundary. Colours are meteorological convention rather
@@ -51638,6 +51724,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (wv.geo){ cwGeoLoad(wv.geo); if (wv.geoLive) cwGeoRead(); }
       if (wv.alerts) cwAlertRead();
       if (wv.fronts) cwFrontsRead();
+      if (wv.barbs) cwMetarRead();
     }
     /* FLOODING belongs to the CITY MAP tab. Leaving that tab has to drop the
        layer, or it stays painted over the radar with its button hidden and no
