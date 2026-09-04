@@ -49473,7 +49473,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             + '&width=1400&height=1228&srs=EPSG:3857&format=image/png8&transparent=true'
             + '&time=' + encodeURIComponent(t);
         },
-        boroughs: true, lead: true, fuel: true, leadHrs: [[1, .98], [2, .85]], prods: true, alerts: true,
+        boroughs: true, lead: true, fuel: true, leadHrs: [[1, .98], [2, .85]], prods: true, alerts: true, fronts: true,
         /* the landforms this view exists to show: the Pocono plateau, the
            Kittatinny ridge and the Shawangunk. No lakes or Gulf Stream in
            this box, so no geoLive read. */
@@ -49522,7 +49522,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         /* the same reads as INCOMING, scaled to this box (user 2026-09-01):
            land relief now shares the seafloor layer, the lead arcs step out
            to six and twelve hours, and the fuel line comes along */
-        lead: true, fuel: true, leadHrs: [[6, .98], [12, .85]], alerts: true, prods: true,
+        lead: true, fuel: true, leadHrs: [[6, .98], [12, .85]], alerts: true, prods: true, fronts: true,
         geo: '/city_ne_geo.json', geoLive: true, lightning: true,
         box: { X0:-8927823, Y0:4607718, X1:-7636517, Y1:5716479, sid:'cw-ne' },
         /* the middle layer — drawn under the radar, over our basemap. Here
@@ -50678,6 +50678,45 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       }
       g.restore(); g.globalAlpha = 1;
     }
+    /* WPC SURFACE FRONTS (user 2026-09-03). The wide views draw the echo and
+       the machinery under it; the front is the thing that explains the line.
+       Source is the coded surface bulletin CODSUS — WPC's own analysis, via
+       api.weather.gov, which is CORS-open and keyless where wpc.ncep.noaa.gov
+       itself is not. Product type COD, location SUS, reissued about hourly.
+       The coding is compact: each point is a run of digits, latitude in the
+       first two and longitude in the rest, so 4284 is 42N 84W and 63146 is
+       63N 146W. Whole degrees — this is a continental analysis, and a front
+       drawn from it is a position to a degree, not a surveyed line. */
+    var CW_FRONT_AT = 0;
+    function cwFrontsRead(){
+      if (Date.now() - CW_FRONT_AT < 1800000) return;
+      CW_FRONT_AT = Date.now();
+      fetch('https://api.weather.gov/products?type=COD&limit=8')
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          var g = (j['@graph'] || []).filter(function(p){ return p.productCode === 'COD'; });
+          if (!g.length) return;
+          return fetch('https://api.weather.gov/products/' + g[0].id)
+            .then(function(r2){ return r2.json(); })
+            .then(function(p){
+              var out = [], txt = String(p.productText || '');
+              txt.split('\n').forEach(function(ln){
+                var m = ln.trim().match(/^(COLD|WARM|STNRY|OCFNT)\s+(.*)$/);
+                if (!m) return;
+                var pts = [];
+                m[2].split(/\s+/).forEach(function(tk){
+                  if (!/^\d{4,5}$/.test(tk)) return;
+                  var la = parseInt(tk.slice(0, 2), 10), lo = parseInt(tk.slice(2), 10);
+                  if (la < 15 || la > 80 || lo < 50 || lo > 180) return;
+                  pts.push([-lo, la]);
+                });
+                if (pts.length > 1) out.push({ k: m[1], p: pts });
+              });
+              window._cwFronts = out;
+              if (cw.wide) cwDrawWideOv(cwWideDef());
+            });
+        }).catch(function(){});
+    }
     var cwAlertAt = 0;
     function cwAlertRead(){
       /* warnings turn over fast — a much shorter throttle than the fuel read */
@@ -51494,6 +51533,59 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var X = px([lo, la]), Y = py([lo, la]);
         return (X < -8 || Y < -8 || X > cvs.width + 8 || Y > cvs.height + 8) ? null : [X, Y];
       });
+      /* THE FRONT, drawn in the classic hand: a line with pips on one side,
+         triangles for cold and half-circles for warm, both alternating on a
+         stationary boundary. Colours are meteorological convention rather
+         than site palette — blue cold, red warm — which the no-purple rule
+         exempts as data-driven; an occluded front takes the site's ink
+         instead of the conventional violet.
+         The pips sit on a consistent side of the line: the bulletin gives a
+         position, not a direction of travel, so choosing a side per segment
+         would be inventing information. */
+      if (wv.fronts && window._cwFronts){
+        g.save(); g.lineCap = 'round'; g.lineJoin = 'round';
+        var FCOL = { COLD:'#3b82f6', WARM:'#ef4444', STNRY:'#3b82f6', OCFNT:'#2B22F4' };
+        window._cwFronts.forEach(function(f){
+          var P = f.p.map(function(c){ return [px(c), py(c)]; });
+          var any = P.some(function(q){
+            return q[0] > -80 && q[0] < cvs.width + 80 && q[1] > -80 && q[1] < cvs.height + 80;
+          });
+          if (!any) return;
+          g.beginPath();
+          P.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); });
+          g.lineWidth = 4.6 * dpr; g.strokeStyle = 'rgba(8,10,16,.75)'; g.stroke();
+          g.lineWidth = 2.2 * dpr; g.strokeStyle = FCOL[f.k] || '#9aa3b5'; g.stroke();
+          /* pips every ~34 px of drawn line, so a short segment still gets one */
+          var acc = 0, STEP = 34 * dpr, alt = 0;
+          for (var i = 1; i < P.length; i++){
+            var ax = P[i-1][0], ay = P[i-1][1], bx = P[i][0], by = P[i][1];
+            var L = Math.hypot(bx - ax, by - ay);
+            if (!L) continue;
+            var ux = (bx - ax) / L, uy = (by - ay) / L;
+            var nx = -uy, ny = ux;                       // one consistent side
+            for (var d = STEP - acc; d < L; d += STEP){
+              var mx = ax + ux * d, my = ay + uy * d;
+              var kind = f.k === 'STNRY' ? (alt++ % 2 ? 'WARM' : 'COLD') : f.k;
+              var col = kind === 'WARM' ? '#ef4444' : (FCOL[f.k] || '#3b82f6');
+              g.fillStyle = col;
+              if (kind === 'WARM' || f.k === 'OCFNT' && alt++ % 2){
+                g.beginPath();
+                g.arc(mx + nx * 3 * dpr, my + ny * 3 * dpr, 3.6 * dpr,
+                      Math.atan2(ny, nx) - Math.PI/2, Math.atan2(ny, nx) + Math.PI/2);
+                g.fill();
+              } else {
+                g.beginPath();
+                g.moveTo(mx - ux * 3.4 * dpr, my - uy * 3.4 * dpr);
+                g.lineTo(mx + ux * 3.4 * dpr, my + uy * 3.4 * dpr);
+                g.lineTo(mx + nx * 6.2 * dpr, my + ny * 6.2 * dpr);
+                g.closePath(); g.fill();
+              }
+            }
+            acc = (acc + L) % STEP;
+          }
+        });
+        g.restore();
+      }
       /* City anchors ride the OVERLAY, not the basemap (user 2026-09-01).
          Baked into the basemap they sit under the seafloor layer, and the
          seafloor is opaque near shore — Boston's label was painted out by
@@ -51545,6 +51637,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (wv.fuel) cwFuel();
       if (wv.geo){ cwGeoLoad(wv.geo); if (wv.geoLive) cwGeoRead(); }
       if (wv.alerts) cwAlertRead();
+      if (wv.fronts) cwFrontsRead();
     }
     /* FLOODING belongs to the CITY MAP tab. Leaving that tab has to drop the
        layer, or it stays painted over the radar with its button hidden and no
