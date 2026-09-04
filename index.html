@@ -46824,6 +46824,30 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           // fetch is still in flight.
           if (_epG !== (window._locEpoch || 0)) return;
           goesFrames = uniq.slice(-goesLength);
+          /* OUR-MAP MODE: swap the NESDIS square frames for one georeferenced
+             GIBS frame of the same sector, and build the boundary/label
+             overlay to sit over it. Single frame for now - the animation
+             needs the TIME list read out of GetCapabilities, since GIBS runs
+             about two hours behind and a guessed timestamp returns a 1 KB
+             blank rather than an error. Falls straight back to the NESDIS
+             frames if anything here comes up empty. */
+          if (window._goesMapMode && window._goesMapMode()){
+            try {
+              var _gc = document.getElementById('goes-canvas');
+              var _r = _gc ? _gc.getBoundingClientRect() : null;
+              var _w = _r && _r.width ? Math.round(_r.width) : 1000;
+              var _h = _r && _r.height ? Math.round(_r.height) : 620;
+              var _gf = window._goesGibsFrame(goesSector, goesBand, _w, _h);
+              if (_gf){
+                goesFrames = [_gf];
+                window._goesOverlayCanvas = null;
+                window._goesMapOverlay(goesSector, _w, _h, function(cv){
+                  window._goesOverlayCanvas = cv;
+                  try { if (typeof startGoesCanvasAnim === 'function') startGoesCanvasAnim(); } catch(e){}
+                });
+              }
+            } catch(e){}
+          }
           goesIdx = 0;
           goesLiveEl.textContent = "• LIVE";
           /* LIVE pill = time of the NEWEST frame we hold (the real "live"
@@ -46968,6 +46992,124 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     stallTimer = setTimeout(startWhenReady, 20000);
   }
 
+  /* ── OUR MAP OVER THE SATELLITE (user 2026-09-04) ─────────────────────
+     The widget draws NESDIS sector JPGs that carry NESDIS's own white
+     coastlines baked into the pixels. To show OUR map instead, two things
+     have to change together:
+
+     1. THE IMAGERY MUST BE GEOREFERENCED. NESDIS sector images are square
+        (1200/2400 px) for a non-square sector - the satellite's geostationary
+        projection - with no bounds published anywhere, so nothing can be
+        registered to them. GIBS WMS serves the same GeoColor for an explicit
+        mercator bbox as ONE seamless image. Not its WMTS endpoint: those
+        tiles arrive from different scan times and band together visibly, and
+        every explicit time returns 400 so it cannot be pinned.
+     2. OUR MAP GOES ON TOP, NOT UNDER. GeoColor is opaque - a basemap beneath
+        it would simply be invisible. NESDIS puts its coastlines over the
+        imagery and so do we: boundaries and place names only, no land fill.
+
+     Requested at the canvas's own aspect so nothing is cropped, which is what
+     lets the overlay register exactly. Opt-in with ?goesmap=1 while it is
+     proven; NESDIS stays the default and any failure falls back to it. */
+  var GOES_SECTOR_BOX = {
+    ne:    { w: -82.0, e: -66.0, s: 36.0, n: 47.5 },
+    conus: { w: -125.0, e: -66.5, s: 24.2, n: 50.2 }
+  };
+  var GOES_GIBS_PRODUCT = {
+    GEOCOLOR: 'GOES-East_ABI_GeoColor', AirMass: 'GOES-East_ABI_Air_Mass',
+    DUST: 'GOES-East_ABI_Dust', FireTemperature: 'GOES-East_ABI_FireTemp',
+    Sandwich: null, '02': 'GOES-East_ABI_Band2_Red_Visible_1km',
+    '13': 'GOES-East_ABI_Band13_Clean_Infrared'
+  };
+  window._goesMapMode = function(){
+    try { return new URLSearchParams(location.search).get('goesmap') === '1'; }
+    catch(e){ return false; }
+  };
+  function _goesBoxFor(sector, w, h){
+    var b = GOES_SECTOR_BOX[sector];
+    if (!b || !w || !h) return null;
+    var R = 6378137, D = Math.PI / 180;
+    var my = function(la){ return R * Math.log(Math.tan(Math.PI/4 + la*D/2)); };
+    var X0 = b.w*D*R, X1 = b.e*D*R, Y0 = my(b.s), Y1 = my(b.n);
+    /* grow the shorter axis so the bbox matches the canvas aspect exactly -
+       then the image needs no crop and the overlay lines up pixel for pixel */
+    var want = w / h, have = (X1-X0) / (Y1-Y0);
+    if (have < want){ var g = ((want/have) - 1) * (X1-X0) / 2; X0 -= g; X1 += g; }
+    else if (have > want){ var v = ((have/want) - 1) * (Y1-Y0) / 2; Y0 -= v; Y1 += v; }
+    return { X0: X0, Y0: Y0, X1: X1, Y1: Y1 };
+  }
+  window._goesGibsFrame = function(sector, band, w, h){
+    var prod = GOES_GIBS_PRODUCT[band];
+    var box = _goesBoxFor(sector, w, h);
+    if (!prod || !box) return null;
+    var R = 6378137, D = Math.PI / 180;
+    return 'https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi?'
+      + 'service=WMS&version=1.3.0&request=GetMap&layers=' + prod
+      + '&crs=EPSG:3857&bbox=' + [box.X0, box.Y0, box.X1, box.Y1].join(',')
+      + '&width=' + Math.round(w) + '&height=' + Math.round(h)
+      + '&format=image/png&transparent=false';
+  };
+  /* boundaries + our own place names, on a transparent canvas, to sit over
+     the imagery in place of NESDIS's baked coastlines */
+  window._goesMapOverlay = function(sector, w, h, cb){
+    try {
+      var box = _goesBoxFor(sector, w, h);
+      if (!box || typeof protomapsL === 'undefined' || !window.BV_BASEMAP_URL){ cb(null); return; }
+      var F = window.BV_MAP_FLAVOR_CONTINENTAL || window.BV_MAP_FLAVOR;
+      var R = 6378137;
+      var m2lon = function(X){ return X / R * 180 / Math.PI; };
+      var m2lat = function(Y){ return (2*Math.atan(Math.exp(Y/R)) - Math.PI/2) * 180 / Math.PI; };
+      var allowB = (window.BV_CONTINENTAL || {}).bounds || ['country','region','2','4',2,4];
+      var pr = protomapsL.paintRules(F).filter(function(r){ return r.dataLayer === 'boundaries'; })
+        .map(function(r){
+          var base = r.filter, o = {}; for (var k in r) o[k] = r[k];
+          o.filter = function(z, f){
+            if (base && !base(z, f)) return false;
+            var pp = (f && f.props) || {};
+            return allowB.indexOf(pp.kind || '') >= 0 || allowB.indexOf(+pp.kind_detail) >= 0;
+          };
+          return o;
+        });
+      var cv = document.createElement('canvas'); cv.width = Math.round(w); cv.height = Math.round(h);
+      var mid = m2lat((box.Y0 + box.Y1) / 2);
+      new protomapsL.Static({ url: window.BV_BASEMAP_URL, paintRules: pr, labelRules: [], maxDataZoom: 9 })
+        .drawContextBounds(cv.getContext('2d'), { x: m2lon(box.X0), y: mid },
+                           { x: m2lon(box.X1), y: mid }, cv.width, cv.height)
+        .then(function(){
+          /* our names, drawn like the static renderer does them */
+          var C = window.BV_CONTINENTAL, ctx2 = cv.getContext('2d');
+          if (C && C.cityLbl){
+            var fs = Math.max(9, Math.round(cv.width / 90));
+            ctx2.textBaseline = 'middle'; ctx2.lineJoin = 'round';
+            C.cityLbl.forEach(function(c){
+              var X = c[2] * Math.PI / 180 * R;
+              var Y = R * Math.log(Math.tan(Math.PI/4 + c[1] * Math.PI/360));
+              var x = (X - box.X0) / (box.X1 - box.X0) * cv.width;
+              var y = (box.Y1 - Y) / (box.Y1 - box.Y0) * cv.height;
+              if (x < 0 || y < 0 || x > cv.width || y > cv.height) return;
+              var water = c[3] === 'water';
+              ctx2.font = (water ? 'italic 400 ' : '700 ') + fs + 'px system-ui, sans-serif';
+              ctx2.textAlign = water ? 'center' : 'left';
+              if (!water){
+                ctx2.beginPath(); ctx2.arc(x, y, 3.2, 0, 6.284);
+                ctx2.fillStyle = 'rgba(8,10,16,.9)'; ctx2.fill();
+                ctx2.beginPath(); ctx2.arc(x, y, 1.9, 0, 6.284);
+                ctx2.fillStyle = '#fff'; ctx2.fill();
+              }
+              ctx2.lineWidth = Math.max(2.6, fs * 0.3);
+              ctx2.strokeStyle = 'rgba(8,10,16,.9)';
+              ctx2.strokeText(c[0], water ? x : x + 7, y);
+              ctx2.fillStyle = water ? 'rgba(122,170,222,.92)' : '#fff';
+              ctx2.fillText(c[0], water ? x : x + 7, y);
+            });
+            ctx2.textAlign = 'left';
+          }
+          cb(cv);
+        })
+        .catch(function(){ cb(null); });
+    } catch(e){ cb(null); }
+  };
+
   function drawGoesFrame(ctx, img, w, h){
     if (!img || !img.complete || !img.naturalWidth) return;
     // Cover the canvas (like object-fit:cover)
@@ -46976,6 +47118,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     var dw = iw * scale, dh = ih * scale;
     var dx = (w - dw) / 2, dy = (h - dh) / 2;
     ctx.drawImage(img, dx, dy, dw, dh);
+    /* our boundaries and names over the imagery, replacing the coastlines
+       NESDIS bakes into its own pixels */
+    if (window._goesOverlayCanvas && window._goesMapMode()){
+      try { ctx.drawImage(window._goesOverlayCanvas, 0, 0, w, h); } catch(e){}
+    }
   }
 
   function startGoesCanvasAnim(){
