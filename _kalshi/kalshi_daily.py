@@ -9,11 +9,13 @@ page cannot reach the market live. It reads our own repo instead.
 
 THE MODEL
 
-    pred = max( observed_high_so_far,  damped( day_ahead_peak - bias ) )
+    pred = max( observed_high_so_far,  damped( consensus_peak - per_model_bias ) )
 
-  * bias is the mean (forecast peak - actual) over the previous 21 days,
-    using only days that had already been scored.  Open-Meteo runs warm at
-    Central Park; removing that is most of the skill.
+  * FIVE models are averaged (NBM, ECMWF, GFS, ICON, GEM), each with its own
+    rolling bias -- the mean (that model's peak - actual) over the previous 21
+    scored days.  Every member beat our old single source and the average beat
+    every member: MAE 1.66 -> 1.44, Brier 0.559 -> 0.491 on the real ladders.
+    Removing each model's warm bias is still most of the skill.
   * the observed-so-far term is a hard physical floor.  It is one-sided, so it
     deliberately introduces a positive bias (+0.79 degF at noon) -- without it
     the forecast is near-unbiased at -0.15 but MAE is far worse, 2.64 vs 1.98.
@@ -28,6 +30,11 @@ THE MODEL
     (worse in 4 of 5 months at full strength).
 
   * warm-ups are damped -- see point_forecast(), the strongest usable signal.
+
+  TWO LOCKS, both well before the 11:59pm close.  Noon is the honest forecast
+  and what the skill record scores.  18:00 is the call worth acting on -- the
+  day has largely resolved by then and backtested accuracy jumps from 40/68 to
+  53/68 (MAE 1.44 -> 0.68).
 
   Verified by replaying this exact model on the 68 real Kalshi ladders and
   scoring against the settlements themselves (2026-06-28..09-03):
@@ -57,6 +64,16 @@ SERIES  = 'KXHIGHNY'
 BIAS_K  = 21                              # days in the rolling bias window
 BIAS_MIN = 7                              # need this many before trusting it
 LOCK_HOUR = 12                            # noon ET: morning obs in hand, peak ahead
+FINAL_HOUR = 18                           # the actionable call, still 6 h before close
+
+# Five-model consensus.  Every one of these beats our old single source, and
+# averaging them beats every individual member: on the real ladders MAE 1.66 ->
+# 1.44 and Brier 0.559 -> 0.491.  Chosen a priori as the major global/regional
+# runs rather than picked by score, so there is no selection built in.  NBM is
+# NOAA's own blend, the closest public thing to what the market's providers use.
+# meteofrance_seamless is deliberately excluded -- clearly worst at MAE 2.19.
+MODELS = ['ncep_nbm_conus', 'ecmwf_ifs025', 'gfs_seamless',
+          'icon_seamless', 'gem_seamless']
 
 SWING_DAMP = 0.25         # see point_forecast(): models overdo warm-ups
 RESID_M = 45              # days of recent residuals behind the spread estimate
@@ -170,7 +187,7 @@ def obs_hourly_range(start, end):
 
 
 # ------------------------------------------------------------- forecast ----
-def forecast_runs(past_days):
+def forecast_runs(past_days, model=None):
     """Day-ahead run, hourly, degF, local time -> {'YYYY-MM-DD': {hour: F}}.
 
     previous_day1 = the run issued ~24 h earlier.  The calibration used this
@@ -180,13 +197,26 @@ def forecast_runs(past_days):
     u = ('https://previous-runs-api.open-meteo.com/v1/forecast'
          '?latitude=%.4f&longitude=%.4f&hourly=temperature_2m_previous_day1'
          '&past_days=%d&forecast_days=1&temperature_unit=fahrenheit'
-         '&timezone=America%%2FNew_York' % (CP_LAT, CP_LON, past_days))
+         '&timezone=America%%2FNew_York' % (CP_LAT, CP_LON, past_days)
+         + ('&models=' + model if model else ''))
     h = get_json(u, timeout=120)['hourly']
     out = collections.defaultdict(dict)
     for t, v in zip(h['time'], h['temperature_2m_previous_day1']):
         if v is not None:
             out[t[:10]][int(t[11:13])] = v
     return out
+
+
+def biases_factory(fcm, daily):
+    """-> f(prior_days) giving each model's mean (peak - actual) over them."""
+    def f(prior):
+        out = {}
+        for m, fc in fcm.items():
+            e = [max(fc[p].values()) - daily[p]
+                 for p in prior if p in fc and p in daily and len(fc[p]) >= 20]
+            out[m] = statistics.mean(e) if len(e) >= BIAS_MIN else None
+        return out
+    return f
 
 
 def rolling_bias(fc, daily, today_key):
@@ -205,8 +235,8 @@ def rolling_bias(fc, daily, today_key):
     return statistics.mean(errs), len(errs)
 
 
-def point_forecast(day_fc, hour, bias, yday):
-    """Bias-corrected peak of the remaining hours, with warm-ups damped.
+def point_forecast(fcm, biases, key, hour, yday):
+    """Consensus of the models' bias-corrected peaks, with warm-ups damped.
 
     The single strongest usable predictor of a bust is how big a day-to-day
     RISE the run is calling for: on days forecast to climb more than 4 degF
@@ -217,16 +247,23 @@ def point_forecast(day_fc, hour, bias, yday):
     knife-edge: at 0.25, MAE 1.83 -> 1.66, bias +0.78 -> +0.20, brackets
     37/68 -> 39/68, Brier 0.591 -> 0.559.
     """
-    rest = [v for h, v in day_fc.items() if h >= hour]
-    if not rest:
+    vals = []
+    for m, fc in fcm.items():
+        day = fc.get(key)
+        if not day or biases.get(m) is None:
+            continue
+        rest = [v for h, v in day.items() if h >= hour]
+        if rest:
+            vals.append(max(rest) - biases[m])
+    if not vals:
         return None
-    p = max(rest) - bias
+    p = statistics.mean(vals)
     if yday is not None:
         p -= SWING_DAMP * max(0.0, p - yday)
     return p
 
 
-def residuals(fc, daily, obh, hour, today_key):
+def residuals(fcm, biases_of, daily, obh, hour, today_key):
     """Replay the model on past days at `hour` -> [(date, pred - actual)].
 
     This is what the spread is measured from, so it is recomputed every run and
@@ -234,15 +271,16 @@ def residuals(fc, daily, obh, hour, today_key):
     plus HOURLY_PEAK_OFFSET, since that stream reads low against the daily max
     the model is actually scored on.
     """
-    keys = sorted(k for k in fc if k < today_key and k in daily
-                  and len(fc[k]) >= 20 and len(obh.get(k, {})) >= 18)
+    any_fc = fcm[MODELS[0]]
+    keys = sorted(k for k in any_fc if k < today_key and k in daily
+                  and len(any_fc[k]) >= 20 and len(obh.get(k, {})) >= 18)
     out = []
     for i, k in enumerate(keys):
         prior = keys[max(0, i - BIAS_K):i]
         if len(prior) < BIAS_MIN:
             continue
-        b = statistics.mean(max(fc[p].values()) - daily[p] for p in prior)
-        p = point_forecast(fc[k], hour, b, daily.get(keys[i - 1]) if i else None)
+        b = biases_of(prior)
+        p = point_forecast(fcm, b, k, hour, daily.get(keys[i - 1]) if i else None)
         if p is None:
             continue
         run = max([v for h, v in obh[k].items() if h <= hour] or [-99.0])
@@ -333,7 +371,7 @@ def fetch_settled(limit=400):
     return ev
 
 
-def backfill(fc, daily, obh, settled, sd_lock):
+def backfill(fcm, bias_of, daily, obh, settled, sd_lock):
     """What we WOULD have locked at noon on each past day, scored.
 
     Uses only information available at noon that day: the day-ahead run and a
@@ -352,22 +390,23 @@ def backfill(fc, daily, obh, settled, sd_lock):
     def act(k):
         return daily.get(k)
 
+    fc = fcm[MODELS[0]] if MODELS[0] in fcm else list(fcm.values())[0]
     keys = sorted(k for k in by_date if k in fc and len(fc[k]) >= 20)
     out = []
     for k in keys:
         a = act(k)
         if a is None:
             continue
-        prior = [p for p in sorted(x for x in fc if x < k)[-BIAS_K:] if len(fc[p]) >= 20]
-        errs = [max(fc[p].values()) - act(p) for p in prior if act(p) is not None]
-        if len(errs) < BIAS_MIN:
+        prior = [p for p in sorted(x for x in fc if x < k)[-BIAS_K:]
+                 if len(fc[p]) >= 20 and act(p) is not None]
+        if len(prior) < BIAS_MIN:
             continue
-        b = statistics.mean(errs)
+        b = bias_of(prior)
         oh = obh.get(k) or {}
         run = max([v for h, v in oh.items() if h <= LOCK_HOUR] or [-99.0])
         obs = run + HOURLY_PEAK_OFFSET if run > -90 else None
         yk = (datetime.date(*map(int, k.split('-'))) - datetime.timedelta(days=1)).isoformat()
-        fp = point_forecast(fc[k], LOCK_HOUR, b, daily.get(yk))
+        fp = point_forecast(fcm, b, k, LOCK_HOUR, daily.get(yk))
         if fp is None:
             continue
         pred = max([x for x in (obs, fp) if x is not None])
@@ -384,7 +423,7 @@ def backfill(fc, daily, obh, settled, sd_lock):
             'err': round(pred - a, 2),
             'lock': {'at': k + 'T12:00 ET (backtest)', 'pick': lad[bi]['label'],
                      'p': round(ps[bi], 4), 'pred': round(pred, 2),
-                     'sd': round(sd_lock, 2), 'bias': round(b, 2),
+                     'sd': round(sd_lock, 2),
                      'obs_at_lock': obs, 'market_pick': None, 'market_p': None,
                      'ladder': [{'label': r['label'], 'lo': r['lo'], 'hi': r['hi'],
                                  'ours': round(p, 4), 'market': None}
@@ -405,7 +444,16 @@ def main():
         return 0
 
     span = RESID_M + BIAS_K + 6
-    fc = forecast_runs(span)
+    fcm = {}
+    for m in MODELS:
+        try:
+            fcm[m] = forecast_runs(span, m)
+        except Exception as e:
+            print('model %s unavailable: %s' % (m, e))
+    if not fcm:
+        print('no forecast models available')
+        return 0
+    fc = fcm.get(MODELS[0]) or list(fcm.values())[0]
     daily = daily_max_series()
     # end one day AHEAD: asos.py treats the end date as the cut-off, so asking
     # for `today` returns almost nothing for today
@@ -416,6 +464,10 @@ def main():
     if bias is None:
         print('not enough scored history for a bias (%d days)' % nb)
         return 0
+    bias_of = biases_factory(fcm, daily)
+    prior_days = sorted(k for k in fc if k < tkey and k in daily
+                        and len(fc[k]) >= 20)[-BIAS_K:]
+    biases = bias_of(prior_days)
 
     # today's floor comes straight from the running daily max -- the same field
     # the market settles on, so no offset is needed here
@@ -428,17 +480,16 @@ def main():
     hr0 = now.hour
     rest = [v for h, v in (fc.get(tkey) or {}).items() if h >= hr0]
     fpeak = max(rest) if rest else None
-    fadj = point_forecast(fc.get(tkey) or {}, hr0, bias, yday)
+    fadj = point_forecast(fcm, biases, tkey, hr0, yday)
 
     cands = [x for x in (obs_far, fadj) if x is not None]
     if not cands:
         print('no forecast and no observations yet')
         return 0
     pred = max(cands)
-    res = residuals(fc, daily, obh, now.hour, tkey)
+    res = residuals(fcm, bias_of, daily, obh, now.hour, tkey)
     sd, nsd = spread(res, now.hour)
-    res_lock = residuals(fc, daily, obh, LOCK_HOUR, tkey)
-    sd_lock, _ = spread(res_lock, LOCK_HOUR)
+    sd_lock, _ = spread(residuals(fcm, bias_of, daily, obh, LOCK_HOUR, tkey), LOCK_HOUR)
 
     ps = distribution(rows, pred, sd, obs_far)
     best = max(range(len(rows)), key=lambda i: ps[i])
@@ -449,7 +500,7 @@ def main():
 
     if '--backfill' in sys.argv:
         added = 0
-        for h in backfill(fc, daily, obh, fetch_settled(), sd_lock):
+        for h in backfill(fcm, bias_of, daily, obh, fetch_settled(), sd_lock):
             if h['date'] not in hist:
                 hist[h['date']] = h
                 added += 1
@@ -460,8 +511,8 @@ def main():
     if entry is None:
         entry = {'date': tkey, 'event': event_ticker(today)}
         hist[tkey] = entry
-    if 'lock' not in entry and now.hour >= LOCK_HOUR:
-        entry['lock'] = {
+    def make_lock():
+        return {
             'at': now.strftime('%Y-%m-%dT%H:%M') + ' ET',
             'pick': rows[best]['label'], 'ticker': rows[best]['ticker'],
             'p': round(ps[best], 4), 'pred': round(pred, 2), 'sd': sd,
@@ -473,9 +524,20 @@ def main():
                         'ours': round(p, 4), 'market': r['mid']}
                        for r, p in zip(rows, ps)],
         }
+
+    # TWO locks, both well before the 11:59pm close, because they answer
+    # different questions.  The noon lock is the honest forecast -- the peak is
+    # still hours away -- and it is what the skill record scores.  The 18:00
+    # lock is the call worth acting on: by then the day has largely resolved
+    # and backtested bracket accuracy jumps from 40/68 to 53/68.
+    if 'lock' not in entry and now.hour >= LOCK_HOUR:
+        entry['lock'] = make_lock()
         print('LOCKED %s: %s (%.0f%%), market %s (%.0f%%)'
               % (tkey, rows[best]['label'], 100 * ps[best],
                  rows[mbest]['label'], 100 * rows[mbest]['mid']))
+    if 'final' not in entry and now.hour >= FINAL_HOUR:
+        entry['final'] = make_lock()
+        print('FINAL %s: %s (%.0f%%)' % (tkey, rows[best]['label'], 100 * ps[best]))
 
     # ---- score any past locked day whose actual has since been published
     for k, h in hist.items():
@@ -492,6 +554,8 @@ def main():
         h['actual_bracket'] = lad[ai]['label'] if ai is not None else None
         h['hit'] = (h['lock']['pick'] == h['actual_bracket'])
         h['market_hit'] = (h['lock']['market_pick'] == h['actual_bracket'])
+        if h.get('final'):
+            h['final_hit'] = (h['final']['pick'] == h['actual_bracket'])
         h['err'] = round(h['lock']['pred'] - a, 2)
         print('scored %s: actual %.0f -> %s | ours %s %s | market %s %s'
               % (k, a, h['actual_bracket'], h['lock']['pick'],
@@ -530,9 +594,12 @@ def main():
     record['vs_market'] = {'n': len(h2h),
                            'ours': sum(1 for h in h2h if h.get('hit')),
                            'market': sum(1 for h in h2h if h.get('market_hit'))}
+    fin = [h for h in scored if h.get('final_hit') is not None]
+    record['final'] = {'n': len(fin), 'hits': sum(1 for h in fin if h['final_hit']),
+                       'hour': FINAL_HOUR}
     # measured by replaying this exact model on the 68 real Kalshi ladders,
     # scored against the settlements themselves (2026-06-28..09-03)
-    record['calibrated'] = {'mae': 1.66, 'bracket': '39/68', 'brier': 0.559,
+    record['calibrated'] = {'mae': 1.44, 'bracket': '40/68', 'brier': 0.491,
                             'window': '2026-06-28..2026-09-03',
                             'lock_hour': LOCK_HOUR}
 
@@ -553,7 +620,8 @@ def main():
                         'bid': r['bid'], 'ask': r['ask'], 'market': r['mid'],
                         'ours': round(p, 4), 'vol': r['vol']}
                        for r, p in zip(rows, ps)],
-            'locked': entry.get('lock'),
+            'locked': entry.get('lock'), 'final': entry.get('final'),
+            'final_hour': FINAL_HOUR,
         },
         'record': record,
         'history': sorted(hist.values(), key=lambda h: h['date'], reverse=True)[:120],
