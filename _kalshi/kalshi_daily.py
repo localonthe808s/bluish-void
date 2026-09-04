@@ -9,7 +9,7 @@ page cannot reach the market live. It reads our own repo instead.
 
 THE MODEL
 
-    pred = max( observed_high_so_far,  day_ahead_forecast_peak - bias )
+    pred = max( observed_high_so_far,  damped( day_ahead_peak - bias ) )
 
   * bias is the mean (forecast peak - actual) over the previous 21 days,
     using only days that had already been scored.  Open-Meteo runs warm at
@@ -27,20 +27,15 @@ THE MODEL
     persist to the peak), and a second-stage mean correction on the residuals
     (worse in 4 of 5 months at full strength).
 
+  * warm-ups are damped -- see point_forecast(), the strongest usable signal.
+
   Verified by replaying this exact model on the 68 real Kalshi ladders and
   scoring against the settlements themselves (2026-06-28..09-03):
-  bias +0.13, MAE 1.93 degF, 35/68 brackets, 16/43 on the bounded ones,
-  Brier 0.592 against 0.833 for a uniform guess.  Fixing the spread alone took
-  Brier from 0.628 to 0.592 and log loss from 1.309 to 1.134, with reliability
-  landing on the diagonal (stated 38% -> 38% actual, 70% -> 71%).
-
-SETTLEMENT: Central Park (CLINYC), reported in WHOLE degrees -- 1096 of 1114
-observations are integers.  So "84 to 85" means the reported integer is 84 or
-85, i.e. the true temperature lies in [83.5, 85.5).  Bracket edges are offset
-by half a degree accordingly; getting this wrong shifts every probability.
-
-Kalshi prices live in the *_dollars fields.  The legacy integer-cent fields
-(yes_bid, last_price) are present but always null -- do not read them.
+  39/68 brackets, Brier 0.559 against 0.833 for a uniform guess.  Each fix
+  compounded: the spread alone took Brier 0.628 -> 0.592 and log loss
+  1.309 -> 1.134, putting reliability on the diagonal (stated 38% -> 38%
+  actual, 70% -> 71%); damping warm-ups then took MAE 1.83 -> 1.66,
+  bias +0.78 -> +0.20 and Brier -> 0.559.
 
 SETTLEMENT: Central Park (CLINYC), reported in WHOLE degrees -- 1096 of 1114
 observations are integers.  So "84 to 85" means the reported integer is 84 or
@@ -63,6 +58,7 @@ BIAS_K  = 21                              # days in the rolling bias window
 BIAS_MIN = 7                              # need this many before trusting it
 LOCK_HOUR = 12                            # noon ET: morning obs in hand, peak ahead
 
+SWING_DAMP = 0.25         # see point_forecast(): models overdo warm-ups
 RESID_M = 45              # days of recent residuals behind the spread estimate
 SD_FLOOR = 0.25
 # Fallback only, for the first runs before enough residuals accumulate. These
@@ -209,6 +205,27 @@ def rolling_bias(fc, daily, today_key):
     return statistics.mean(errs), len(errs)
 
 
+def point_forecast(day_fc, hour, bias, yday):
+    """Bias-corrected peak of the remaining hours, with warm-ups damped.
+
+    The single strongest usable predictor of a bust is how big a day-to-day
+    RISE the run is calling for: on days forecast to climb more than 4 degF
+    above yesterday the error runs MAE 2.68 / bias +1.43, against 1.26-1.96
+    elsewhere (r = +0.22 with |error|, beating cloud, rain and wind at
+    0.05-0.18). The model overdoes warm advection, so a quarter of the
+    forecast rise is taken back. Damping 0.15-0.40 all help, so this is not a
+    knife-edge: at 0.25, MAE 1.83 -> 1.66, bias +0.78 -> +0.20, brackets
+    37/68 -> 39/68, Brier 0.591 -> 0.559.
+    """
+    rest = [v for h, v in day_fc.items() if h >= hour]
+    if not rest:
+        return None
+    p = max(rest) - bias
+    if yday is not None:
+        p -= SWING_DAMP * max(0.0, p - yday)
+    return p
+
+
 def residuals(fc, daily, obh, hour, today_key):
     """Replay the model on past days at `hour` -> [(date, pred - actual)].
 
@@ -225,12 +242,12 @@ def residuals(fc, daily, obh, hour, today_key):
         if len(prior) < BIAS_MIN:
             continue
         b = statistics.mean(max(fc[p].values()) - daily[p] for p in prior)
-        rest = [v for h, v in fc[k].items() if h >= hour]
-        if not rest:
+        p = point_forecast(fc[k], hour, b, daily.get(keys[i - 1]) if i else None)
+        if p is None:
             continue
         run = max([v for h, v in obh[k].items() if h <= hour] or [-99.0])
         floor = run + HOURLY_PEAK_OFFSET if run > -90 else -99.0
-        out.append((k, max(floor, max(rest) - b) - daily[k]))
+        out.append((k, max(floor, p) - daily[k]))
     return out
 
 
@@ -349,10 +366,11 @@ def backfill(fc, daily, obh, settled, sd_lock):
         oh = obh.get(k) or {}
         run = max([v for h, v in oh.items() if h <= LOCK_HOUR] or [-99.0])
         obs = run + HOURLY_PEAK_OFFSET if run > -90 else None
-        rest = [v for h, v in fc[k].items() if h >= LOCK_HOUR]
-        if not rest:
+        yk = (datetime.date(*map(int, k.split('-'))) - datetime.timedelta(days=1)).isoformat()
+        fp = point_forecast(fc[k], LOCK_HOUR, b, daily.get(yk))
+        if fp is None:
             continue
-        pred = max([x for x in (obs, max(rest) - b) if x is not None])
+        pred = max([x for x in (obs, fp) if x is not None])
         lad = by_date[k]
         ps = distribution(lad, pred, sd_lock, obs)
         bi = max(range(len(lad)), key=lambda i: ps[i])
@@ -400,10 +418,13 @@ def main():
     # the market settles on, so no offset is needed here
     obs_far = daily.get(tkey)
     obs_hr = max(obh.get(tkey) or {0: 0}) if obh.get(tkey) else None
-    rest = [v for h, v in (fc.get(tkey) or {}).items() if h >= (obs_hr if obs_hr is not None else 0)]
+    yday = daily.get((today - datetime.timedelta(days=1)).isoformat())
+    hr0 = obs_hr if obs_hr is not None else 0
+    rest = [v for h, v in (fc.get(tkey) or {}).items() if h >= hr0]
     fpeak = max(rest) if rest else None
+    fadj = point_forecast(fc.get(tkey) or {}, hr0, bias, yday)
 
-    cands = [x for x in (obs_far, (fpeak - bias) if fpeak is not None else None) if x is not None]
+    cands = [x for x in (obs_far, fadj) if x is not None]
     if not cands:
         print('no forecast and no observations yet')
         return 0
@@ -505,8 +526,8 @@ def main():
                            'market': sum(1 for h in h2h if h.get('market_hit'))}
     # measured by replaying this exact model on the 68 real Kalshi ladders,
     # scored against the settlements themselves (2026-06-28..09-03)
-    record['calibrated'] = {'mae': 1.93, 'bracket': '35/68', 'interior': '16/43',
-                            'brier': 0.592, 'window': '2026-06-28..2026-09-03',
+    record['calibrated'] = {'mae': 1.66, 'bracket': '39/68', 'brier': 0.559,
+                            'window': '2026-06-28..2026-09-03',
                             'lock_hour': LOCK_HOUR}
 
     doc = {
