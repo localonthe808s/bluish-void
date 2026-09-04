@@ -100,6 +100,13 @@ SD_FLOOR = 0.25
 # Refit 2026-09-04 on 607 days spanning all twelve months, on the five-model
 # consensus. The previous table came from ONE model over 173 spring-summer days
 # and was far too wide -- 2.64 at noon where the consensus achieves 1.76.
+# Bracket accuracy by hour, same 607-day all-season fit, scored on fixed 2 degF
+# bins. Flat by comparison with the 68 summer ladders, which suggested 78% by
+# 6pm -- that was a summer artefact of the wide bottom bracket. The real gain is
+# concentrated in ONE step, 11am -> noon (45 -> 51), after which each further
+# hour buys about a point while the market's own uncertainty keeps decaying.
+HOUR_ACC = {8:44, 9:44, 10:44, 11:45, 12:51, 13:52, 14:51, 15:51, 16:51,
+            17:52, 18:54, 19:55, 20:56, 21:56, 22:56}
 SD_FALLBACK = {8:2.03, 9:2.02, 10:1.99, 11:1.93, 12:1.76, 13:1.51, 14:1.33,
                15:1.19, 16:1.13, 17:1.03, 18:0.91, 19:0.81, 20:0.71, 21:0.68, 22:0.67}
 
@@ -890,6 +897,12 @@ def run_market(cfg):
                        for r, p in zip(rows, ps)],
             'locked': entry.get('lock'), 'final': entry.get('final'),
             'final_hour': FINAL_HOUR,
+            # what is measured about timing, and how much of the other half
+            # (when the MARKET is slow) we have collected so far
+            'by_hour': [{'h': h, 'acc': HOUR_ACC[h], 'sd': SD_FALLBACK.get(h)}
+                        for h in sorted(HOUR_ACC)],
+            'lock_hour': LOCK_HOUR,
+            'trail_days': sum(1 for h in hist.values() if h.get('trail')),
         },
         'record': record,
         'history': sorted(hist.values(), key=lambda h: h['date'], reverse=True)[:120],
