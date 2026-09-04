@@ -50687,60 +50687,58 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        first two and longitude in the rest, so 4284 is 42N 84W and 63146 is
        63N 146W. Whole degrees — this is a continental analysis, and a front
        drawn from it is a position to a degree, not a surveyed line. */
-    /* SURFACE OBSERVATIONS (user 2026-09-03). Radar shows where the rain is;
-       the barbs show the wind field that is steering it — the convergence
-       line, the sea breeze, the shift behind a front. 164 stations in the
-       northeast box, 163 of them reporting wind.
-       aviationweather.gov serves this openly but sends NO CORS header, so it
-       goes through the site's own proxy racer rather than a new fallback
-       chain of its own. Fetched once for the LARGER box and filtered per
-       view, so switching between 3 and 12 hours costs nothing. */
-    var CW_METAR_AT = 0;
+    /* THE SURFACE WIND AND TEMPERATURE FIELD (user 2026-09-03). Radar shows
+       where the rain is; this shows the air that is steering it — the
+       convergence line, the sea breeze, the shift behind a front — and it
+       gives the fronts an air mass to be the edge of.
+       NOT station observations. I built this on aviationweather.gov's METAR
+       feed first and it cannot be reached: that host sends no CORS header,
+       and the site's own worker runs an allowlist it is not on, so every
+       request fell through to allorigins and timed out. Measured live:
+       "all proxies failed".
+       So it is a REGULAR GRID from Open-Meteo instead — 70 points in one
+       call, 33 KB, already CORS-open and already a dependency everywhere
+       else on this page. That is model analysis rather than observation, and
+       the lattice is the honest tell: evenly spaced barbs read as a field,
+       where barbs scattered at real airports would claim to be reports. */
+    var CW_WIND_AT = 0;
     function cwMetarRead(){
-      if (Date.now() - CW_METAR_AT < 900000) return;
-      CW_METAR_AT = Date.now();
-      var u = 'https://aviationweather.gov/api/data/metar?bbox=38,-81,46,-68&format=json';
-      var go = window.bvProxyJSON ? window.bvProxyJSON(u, { noDirect: true })
-                                  : fetch(u).then(function(r){ return r.json(); });
-      go.then(function(j){
-        if (!Array.isArray(j)) return;
-        window._cwMetar = j.filter(function(o){
-          return o && o.lat != null && o.lon != null
-              && o.wdir != null && o.wspd != null && o.wspd !== '' ;
-        }).map(function(o){
-          return { la: +o.lat, lo: +o.lon, d: +o.wdir, s: +o.wspd, t: +o.temp };
-        }).filter(function(o){ return isFinite(o.d) && isFinite(o.s); });
-        /* AN AIR MASS IS A FIELD, NOT A LINE (user 2026-09-03). A front is
-           the edge between two bodies of air, so the same observations that
-           draw the barbs can draw the air itself. Inverse-distance over the
-           reporting temperatures onto a coarse 72x48 grid, built ONCE per
-           fetch and then scaled up by the compositor, which is what makes it
-           soft — an inference drawn with hard edges would claim a precision
-           these scattered points do not have. See the edges-encode-certainty
-           rule: surveyed things crisp, estimated things soft. */
-        var TT = window._cwMetar.filter(function(o){ return isFinite(o.t); });
-        if (TT.length > 20){
-          var GW = 72, GH = 48, W0 = -82, W1 = -66, S0 = 36, S1 = 47;
-          var fld = new Float32Array(GW * GH);
-          for (var gy = 0; gy < GH; gy++) for (var gx = 0; gx < GW; gx++){
-            var lo = W0 + (gx + 0.5) / GW * (W1 - W0);
-            var la = S1 - (gy + 0.5) / GH * (S1 - S0);
-            var sw = 0, sv = 0;
-            for (var q = 0; q < TT.length; q++){
-              var dx = (TT[q].lo - lo), dy = (TT[q].la - la);
-              var d2 = dx * dx + dy * dy + 0.02;
-              if (d2 > 9) continue;                  // ~3 degrees of influence
-              var w = 1 / (d2 * d2);
-              sw += w; sv += w * TT[q].t;
-            }
-            fld[gy * GW + gx] = sw ? sv / sw : NaN;
+      if (Date.now() - CW_WIND_AT < 900000) return;
+      CW_WIND_AT = Date.now();
+      var NX = 10, NY = 7, la0 = 38.6, la1 = 45.4, lo0 = -79.8, lo1 = -69.2;
+      var las = [], los = [];
+      for (var iy = 0; iy < NY; iy++) for (var ix = 0; ix < NX; ix++){
+        las.push((la0 + iy * (la1 - la0) / (NY - 1)).toFixed(3));
+        los.push((lo0 + ix * (lo1 - lo0) / (NX - 1)).toFixed(3));
+      }
+      fetch('https://api.open-meteo.com/v1/forecast?latitude=' + las.join(',')
+            + '&longitude=' + los.join(',')
+            + '&current=temperature_2m,wind_speed_10m,wind_direction_10m'
+            + '&wind_speed_unit=kn&timezone=UTC')
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          if (!Array.isArray(j) || !j.length) return;
+          var pts = [];
+          j.forEach(function(o){
+            var c = o && o.current; if (!c) return;
+            pts.push({ la: +o.latitude, lo: +o.longitude,
+                       d: +c.wind_direction_10m, s: +c.wind_speed_10m,
+                       t: +c.temperature_2m });
+          });
+          window._cwMetar = pts.filter(function(o){ return isFinite(o.d) && isFinite(o.s); });
+          /* the field is already a regular lattice, so it needs no
+             interpolation of its own — built at grid size and blown up by the
+             compositor, which is what makes it a gradient rather than cells */
+          var TT = pts.filter(function(o){ return isFinite(o.t); });
+          if (TT.length === NX * NY){
+            var fld = new Float32Array(NX * NY);
+            for (var k = 0; k < TT.length; k++) fld[k] = TT[k].t;
+            var srt = Array.prototype.slice.call(fld).sort(function(x, y){ return x - y; });
+            window._cwTfield = { w: NX, h: NY, W0: lo0, W1: lo1, S0: la0, S1: la1,
+                                 d: fld, mid: srt[srt.length >> 1], flip: true };
           }
-          var srt = Array.prototype.slice.call(fld).filter(isFinite).sort(function(a,b){ return a-b; });
-          window._cwTfield = { w: GW, h: GH, W0: W0, W1: W1, S0: S0, S1: S1,
-                               d: fld, mid: srt[srt.length >> 1] };
-        }
-        if (cw.wide) cwDrawWideOv(cwWideDef());
-      }).catch(function(){});
+          if (cw.wide) cwDrawWideOv(cwWideDef());
+        }).catch(function(){});
     }
     var CW_FRONT_AT = 0;
     function cwFrontsRead(){
@@ -51666,7 +51664,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var tc = document.createElement('canvas'); tc.width = TF.w; tc.height = TF.h;
         var tg = tc.getContext('2d'), tim = tg.createImageData(TF.w, TF.h);
         for (var ti = 0; ti < TF.w * TF.h; ti++){
-          var tv = TF.d[ti], o4 = ti * 4;
+          var srcI = TF.flip
+            ? (TF.h - 1 - Math.floor(ti / TF.w)) * TF.w + (ti % TF.w) : ti;
+          var tv = TF.d[srcI], o4 = ti * 4;
           if (!isFinite(tv)){ tim.data[o4 + 3] = 0; continue; }
           var k4 = Math.max(-1, Math.min(1, (tv - TF.mid) / 8));
           tim.data[o4]     = k4 > 0 ? 226 : 96;
@@ -51886,7 +51886,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             var gx2 = Math.round((lo - TF2.W0) / (TF2.W1 - TF2.W0) * TF2.w - 0.5);
             var gy2 = Math.round((TF2.S1 - la) / (TF2.S1 - TF2.S0) * TF2.h - 0.5);
             if (gx2 < 0 || gy2 < 0 || gx2 >= TF2.w || gy2 >= TF2.h) return NaN;
-            return TF2.d[gy2 * TF2.w + gx2];
+            var row = TF2.flip ? (TF2.h - 1 - gy2) : gy2;
+            return TF2.d[row * TF2.w + gx2];
           };
           var dT = NaN;
           if (window._cwTfield && f.p.length > 2){
