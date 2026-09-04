@@ -76,7 +76,7 @@ MARKETS = [
     },
 ]
 
-BIAS_K  = 30                              # days in the rolling bias window
+BIAS_K  = 21                              # days in the rolling bias window
 BIAS_MIN = 7                              # need this many before trusting it
 LOCK_HOUR = 12                            # noon ET: morning obs in hand, peak ahead
 FINAL_HOUR = 18                           # the actionable call, still 6 h before close
@@ -100,7 +100,7 @@ def models_for(cfg):
     inside = (20.0 <= cfg['lat'] <= 55.0) and (-130.0 <= cfg['lon'] <= -60.0)
     return [m for m in MODELS if inside or m not in CONUS_ONLY]
 
-SWING_DAMP = 0.10         # see point_forecast(): models overdo warm-ups
+SWING_DAMP = 0.05         # see point_forecast(): models overdo warm-ups
 RESID_M = 45              # days of recent residuals behind the spread estimate
 SD_FLOOR = 0.25
 # Fallback only, for the first runs before enough residuals accumulate. These
@@ -110,15 +110,16 @@ SD_FLOOR = 0.25
 # Refit 2026-09-04 on 607 days spanning all twelve months, on the five-model
 # consensus. The previous table came from ONE model over 173 spring-summer days
 # and was far too wide -- 2.64 at noon where the consensus achieves 1.76.
-# Bracket accuracy by hour, same 607-day all-season fit, scored on fixed 2 degF
-# bins. Flat by comparison with the 68 summer ladders, which suggested 78% by
-# 6pm -- that was a summer artefact of the wide bottom bracket. The real gain is
-# concentrated in ONE step, 11am -> noon (45 -> 51), after which each further
-# hour buys about a point while the market's own uncertainty keeps decaying.
-HOUR_ACC = {8:44, 9:44, 10:44, 11:45, 12:51, 13:52, 14:51, 15:51, 16:51,
-            17:52, 18:54, 19:55, 20:56, 21:56, 22:56}
-SD_FALLBACK = {8:2.03, 9:2.02, 10:1.99, 11:1.93, 12:1.76, 13:1.51, 14:1.33,
-               15:1.19, 16:1.13, 17:1.03, 18:0.91, 19:0.81, 20:0.71, 21:0.68, 22:0.67}
+# Bracket accuracy by hour on fixed 2 degF bins. REFIT on the fresh product --
+# every constant here was originally fitted on the day-old run, and after that
+# switch the whole table was wrong, understating the morning by 13 points. The
+# shape changed too: with a same-day run the morning is already strong (57%) and
+# the curve is nearly flat, so there is no longer a decisive "wait until noon"
+# step. What still improves through the day is certainty, not accuracy.
+HOUR_ACC = {8:57, 9:57, 10:57, 11:57, 12:59, 13:58, 14:55, 15:55, 16:56,
+            17:56, 18:58, 19:58, 20:58, 21:58, 22:58}
+SD_FALLBACK = {8:1.20, 9:1.20, 10:1.20, 11:1.17, 12:1.10, 13:1.01, 14:0.92,
+               15:0.82, 16:0.78, 17:0.72, 18:0.66, 19:0.64, 20:0.61, 21:0.59, 22:0.58}
 
 
 def get(url, timeout=90, tries=3):
@@ -442,7 +443,9 @@ def residuals(fcm, biases_of, daily, obh, hour, today_key, h0_of):
         if len(prior) < BIAS_MIN:
             continue
         b = biases_of(prior)
-        p = point_forecast(fcm, b, k, hour, daily.get(keys[i - 1]) if i else None)
+        yk = (datetime.date(*map(int, k.split('-')))
+              - datetime.timedelta(days=1)).isoformat()
+        p = point_forecast(fcm, b, k, hour, daily.get(yk))
         if p is None:
             continue
         run = running_max(obh, k, hour, h0_of(k))
@@ -729,8 +732,18 @@ def run_market(cfg):
         """
         r = running_max(obh, tkey, min(hour, now.hour), h0)
         fl = (r + HOURLY_PEAK_OFFSET) if r is not None else None
-        if hour >= now.hour and obs_far is not None:
-            fl = obs_far if fl is None else max(fl, obs_far)
+        # For an hour already past, the hourly stream only ESTIMATES the running
+        # max (it misses the intra-hour peak). But if the hourly series already
+        # peaked at or before this hour, the day's true max had been reached by
+        # then, so the exact figure applies rather than the estimate. That is
+        # not hindsight -- it uses only WHEN the observed peak happened. Without
+        # it a 6pm call on a day that peaked at 3pm was built on 83.62 when 84.0
+        # was known, landing the estimate a tenth of a degree off a bracket edge.
+        oh = obh.get(tkey) or {}
+        peak_h = max(oh, key=lambda k: oh[k]) if oh else None
+        if live is not None and ((hour >= now.hour)
+                                 or (peak_h is not None and peak_h <= hour)):
+            fl = live if fl is None else max(fl, live)
         pf = point_forecast(fcm, biases, tkey, hour, yday)
         cand = [x for x in (fl, pf) if x is not None]
         if not cand:
@@ -738,6 +751,9 @@ def run_market(cfg):
         pr = max(cand)
         bind = (fl is not None and pf is not None and fl >= pf)
         sdh, _ = spread(residuals(fcm, bias_of, daily, obh, hour, tkey, h0_of), hour, bind)
+        if bind and live is not None and fl is not None and fl <= live + 1e-9:
+            sdh = max(EXACT_FLOOR_SD_MIN,
+                      math.sqrt(max(sdh * sdh - OFFSET_SD * OFFSET_SD, 0.0)))
         return pr, sdh, distribution(rows, pr, sdh, fl), fl
 
     def make_lock(hour):
