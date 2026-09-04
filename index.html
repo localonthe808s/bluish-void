@@ -78513,6 +78513,46 @@ function initNowMicroTabs(){
      lines. Hazard there is expressed as ZONES, so that is what gets drawn:
      diffuse regions with no edge at all, because nobody can draw you the
      fault. Edges encode certainty and these have the least of any layer. */
+  /* VERTICAL LANE-PACKING FOR MAP LABELS (user 2026-09-04). Placing every
+     label at its feature centroid guarantees collisions wherever the features
+     themselves overlap - and here they genuinely do: the three Permian plays
+     are stacked on each other geologically, and four eastern seismic zones
+     sit in one corner of the mid-South. Overprinted text is worse than none.
+
+     After placement they get packed: sort by screen y, then push any label
+     that would land on one already placed far enough down to clear it. Same
+     idea as the timeline badge lanes, in map space. Re-runs on zoom and pan,
+     because which labels collide changes with both. THE FEATURE DOES NOT
+     MOVE - only the text slides - so nothing lies about position. */
+  var _geoLabels = [];
+  function _geoStackLabels(){
+    if (!hazardMap || !_geoLabels.length) return;
+    var placed = [], items = [];
+    _geoLabels.forEach(function(m){
+      if (!m._icon || !m._map) return;
+      var el = m._icon.firstChild || m._icon;
+      el.style.marginTop = '0px';
+      var pt = hazardMap.latLngToContainerPoint(m.getLatLng());
+      items.push({ el: el, y: pt.y, x: pt.x,
+                   w: Math.max(40, el.offsetWidth || 90),
+                   h: Math.max(10, el.offsetHeight || 12) });
+    });
+    items.sort(function(p1, p2){ return p1.y - p2.y; });
+    items.forEach(function(it){
+      var y = it.y, guard = 0;
+      for (var i = 0; i < placed.length && guard < 80; i++){
+        var q = placed[i];
+        if ((it.x < q.x + q.w) && (q.x < it.x + it.w) &&
+            (y < q.y + q.h + 2) && (q.y < y + it.h + 2)){
+          y = q.y + q.h + 3; i = -1; guard++;
+        }
+      }
+      it.el.style.marginTop = Math.round(y - it.y) + 'px';
+      placed.push({ x: it.x, y: y, w: it.w, h: it.h });
+    });
+  }
+  window._geoStackLabels = _geoStackLabels;
+
   var EAST_SEISMIC = [
     { n: 'NEW MADRID SEISMIC ZONE',   at: [36.3, -89.6], rx: 0.9, ry: 1.1,
       note: '1811\u201312 \u00b7 three M7+ shocks, felt to Boston' },
@@ -78531,11 +78571,15 @@ function initNowMicroTabs(){
           var a2 = i/40*Math.PI*2;
           pts.push([z.at[0] + Math.sin(a2)*z.ry*st[0], z.at[1] + Math.cos(a2)*z.rx*st[0]]);
         }
-        L.polygon(pts, { stroke:false, fillColor:'#fca5a5', fillOpacity:st[1], interactive:false }).addTo(group);
+        if (hazardMap && !hazardMap.getPane('hz-geo-fill')){
+          hazardMap.createPane('hz-geo-fill');
+          hazardMap.getPane('hz-geo-fill').style.zIndex = 385;
+        }
+        L.polygon(pts, { stroke:false, fillColor:'#fca5a5', fillOpacity:st[1], interactive:false, pane:'hz-geo-fill' }).addTo(group);
       });
-      L.marker(z.at, { interactive:false, icon: L.divIcon({ className:'', iconAnchor:[0,8],
-        html:'<div style="font-family:system-ui,sans-serif;font-size:.44rem;font-weight:900;letter-spacing:.07em;color:#fca5a5;text-shadow:0 0 8px #000,0 0 14px #000;white-space:nowrap;">' + z.n
-           + '</div><div style="font-family:system-ui,sans-serif;font-size:.38rem;font-weight:600;color:rgba(255,255,255,.6);text-shadow:0 0 8px #000;white-space:nowrap;margin-top:1px;">' + z.note + '</div>' }) }).addTo(group);
+      _geoLabels.push(L.marker(z.at, { interactive:false, icon: L.divIcon({ className:'', iconAnchor:[0,8],
+        html:'<div><div style="font-family:system-ui,sans-serif;font-size:.44rem;font-weight:900;letter-spacing:.07em;color:#fca5a5;text-shadow:0 0 8px #000,0 0 14px #000;white-space:nowrap;">' + z.n
+           + '</div><div style="font-family:system-ui,sans-serif;font-size:.38rem;font-weight:600;color:rgba(255,255,255,.6);text-shadow:0 0 8px #000;white-space:nowrap;margin-top:1px;">' + z.note + '</div></div>' }) }).addTo(group));
     });
   }
 
@@ -78561,21 +78605,31 @@ function initNowMicroTabs(){
     }
     if (!_energyOn){ if (_energyLayer) hazardMap.removeLayer(_energyLayer); return; }
     if (_energyLayer){ _energyLayer.addTo(hazardMap); return; }
+    /* AREAS UNDER LINES. Shale plays and seismic zones are broad washes and
+       were painting over the fault lines simply because they were added
+       later. Their own pane below the overlay pane fixes the order for good,
+       whatever sequence the toggles are pressed in. */
+    if (!hazardMap.getPane('hz-geo-fill')){
+      hazardMap.createPane('hz-geo-fill');
+      hazardMap.getPane('hz-geo-fill').style.zIndex = 385;
+    }
     _energyLayer = L.layerGroup().addTo(hazardMap);
     fetch('/us_energy.json').then(function(r){ return r.json(); }).then(function(d){
       var seen = {};
       (d.plays || []).forEach(function(pl){
-        L.polygon(pl.p, { stroke:false, fillColor:'#c98a3c', fillOpacity:0.20, interactive:true })
+        L.polygon(pl.p, { stroke:false, fillColor:'#c98a3c', fillOpacity:0.20, interactive:true, pane:'hz-geo-fill' })
           .bindTooltip((PLAY_LABEL[pl.n] || pl.n) + ' shale play', { sticky:true, className:'hz-tooltip', opacity:1 })
           .addTo(_energyLayer);
         if (!seen[pl.n]){
           seen[pl.n] = 1;
           var la=0, lo=0;
           pl.p.forEach(function(c){ la+=c[0]; lo+=c[1]; });
-          L.marker([la/pl.p.length, lo/pl.p.length], { interactive:false, icon: L.divIcon({ className:'', iconAnchor:[0,6],
-            html:'<div style="font-family:system-ui,sans-serif;font-size:.44rem;font-weight:900;letter-spacing:.07em;color:#e0a458;text-shadow:0 0 8px #000,0 0 14px #000;white-space:nowrap;">' + (PLAY_LABEL[pl.n] || pl.n) + '</div>' }) }).addTo(_energyLayer);
+          _geoLabels.push(L.marker([la/pl.p.length, lo/pl.p.length], { interactive:false, icon: L.divIcon({ className:'', iconAnchor:[0,6],
+            html:'<div><div style="font-family:system-ui,sans-serif;font-size:.44rem;font-weight:900;letter-spacing:.07em;color:#e0a458;text-shadow:0 0 8px #000,0 0 14px #000;white-space:nowrap;">' + (PLAY_LABEL[pl.n] || pl.n) + '</div></div>' }) }).addTo(_energyLayer));
         }
       });
+      setTimeout(_geoStackLabels, 60);
+      hazardMap.off('zoomend moveend', _geoStackLabels).on('zoomend moveend', _geoStackLabels);
     }).catch(function(){});
   };
 
@@ -78606,6 +78660,7 @@ function initNowMicroTabs(){
           { sticky: true, className: 'hz-tooltip', opacity: 1 });
         ln.addTo(group);
       });
+      setTimeout(_geoStackLabels, 80);
     }).catch(function(){ _faultsLoaded = false; });
   }
   window.toggleQuakeTectonics = function(){
@@ -78642,8 +78697,8 @@ function initNowMicroTabs(){
           }
         }
         var mid = f.pts[Math.floor(f.pts.length / 2)];
-        L.marker(mid, { interactive: false, icon: L.divIcon({ className: '', iconAnchor: [0, 9],
-          html: '<div style="font-family:system-ui,sans-serif;font-size:.44rem;font-weight:900;letter-spacing:.07em;color:' + st.color + ';text-shadow:0 0 8px #000,0 0 14px #000;white-space:nowrap;opacity:' + (kind === 'fracture' ? '.75' : '1') + ';">' + f.name + '</div>' }) }).addTo(_tectLayer);
+        _geoLabels.push(L.marker(mid, { interactive: false, icon: L.divIcon({ className: '', iconAnchor: [0, 9],
+          html: '<div><div style="font-family:system-ui,sans-serif;font-size:.44rem;font-weight:900;letter-spacing:.07em;color:' + st.color + ';text-shadow:0 0 8px #000,0 0 14px #000;white-space:nowrap;opacity:' + (kind === 'fracture' ? '.75' : '1') + ';">' + f.name + '</div></div>' }) }).addTo(_tectLayer));
       });
     });
     /* the one place three plates meet - San Andreas, Cascadia and the
@@ -78655,6 +78710,8 @@ function initNowMicroTabs(){
       html: '<div style="font-family:system-ui,sans-serif;font-size:.44rem;font-weight:900;letter-spacing:.07em;color:#fff;text-shadow:0 0 8px #000,0 0 14px #000;white-space:nowrap;">MENDOCINO TRIPLE JUNCTION</div>' }) }).addTo(_tectLayer);
     _drawEastZones(_tectLayer);
     _loadUSFaults(_tectLayer);
+    setTimeout(_geoStackLabels, 60);
+    hazardMap.off('zoomend moveend', _geoStackLabels).on('zoomend moveend', _geoStackLabels);
     _tectLayer.addTo(hazardMap);
   };
 
