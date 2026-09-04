@@ -13031,6 +13031,13 @@ window._updateHeroWx = function(code, night){
                     <div id="hz-basin-box" style="flex:1 1 100%;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
                       <button id="hz-extra-ghosts" onclick="toggleGhostTracks()" style="flex:0 0 auto;padding:5px 10px;border-radius:8px;border:1px solid transparent;background:rgba(167,139,250,.30);color:rgba(43,34,244,.65);font-size:.52rem;font-weight:800;cursor:pointer;letter-spacing:.06em;">HISTORICAL<span class="hz-lbl-long"> HURRICANES</span></button>
                       <button id="hz-extra-recurve" onclick="toggleRecurve()" style="flex:0 0 auto;padding:5px 10px;border-radius:8px;border:1px solid transparent;background:rgba(167,139,250,.30);color:rgba(43,34,244,.65);font-size:.52rem;font-weight:800;cursor:pointer;letter-spacing:.06em;">RECURVATURE LINE</button>
+                      <!-- SATELLITE (2026-09-04): the GOES layer existed in
+                           toggleHurricaneLayer but nothing ever called it, so
+                           it was unreachable. GeoColor is true colour by day
+                           and IR cloud-top by night, and the product follows
+                           the basin - East for the Atlantic, West for the
+                           Pacific, where the storms are near its nadir. -->
+                      <button id="hz-extra-goes" onclick="toggleHzGoes()" style="flex:0 0 auto;padding:5px 10px;border-radius:8px;border:1px solid transparent;background:rgba(167,139,250,.30);color:rgba(43,34,244,.65);font-size:.52rem;font-weight:800;cursor:pointer;letter-spacing:.06em;">SATELLITE</button>
                       <button id="hz-extra-waves" onclick="toggleHzWaves()" style="flex:0 0 auto;padding:5px 10px;border-radius:8px;border:1px solid transparent;background:rgba(234,88,12,.92);color:rgba(255,255,255,.97);font-size:.52rem;font-weight:800;cursor:pointer;letter-spacing:.06em;">WAVE CORRIDOR</button>
                       <div style="display:flex;gap:4px;margin-left:auto;">
                         <button id="hz-basin-americas" onclick="setHurricaneBasin('americas')" title="Atlantic + East Pacific · NHC" style="flex:1;padding:5px 10px;border-radius:8px;background:rgba(234,88,12,.92);border:1px solid transparent;color:rgba(255,255,255,.97);font-size:.52rem;font-weight:800;cursor:pointer;letter-spacing:.06em;">AMERICAS</button>
@@ -72962,18 +72969,7 @@ function initNowMicroTabs(){
     }
 
     if (which === 'goes') {
-      if (on) {
-        if (!_hurricaneLayerObjs.goes) {
-          // GOES-East GeoColor from NASA GIBS — confirmed working on epsg3857
-          _hurricaneLayerObjs.goes = L.tileLayer(
-            'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/GOES-East_ABI_GeoColor/default/GoogleMapsCompatible_Level7/{z}/{y}/{x}.jpg',
-            { attribution: 'NASA GIBS · GOES-East GeoColor', opacity: 1.0, maxZoom: 7, tileSize: 256, minZoom: 2, pane: 'hz-goes', updateWhenZooming: false, updateWhenIdle: true }
-          );
-        }
-        _hurricaneLayerObjs.goes.addTo(_hurricaneMap);
-      } else {
-        if (_hurricaneLayerObjs.goes && _hurricaneMap.hasLayer(_hurricaneLayerObjs.goes)) _hurricaneMap.removeLayer(_hurricaneLayerObjs.goes);
-      }
+      if (on) window._hzAddGoes(); else window._hzRemoveGoes();
     }
 
     // ── SAHARAN AIR LAYER / DUST RGB ─────────────────────────────────────────
@@ -73175,6 +73171,8 @@ function initNowMicroTabs(){
       });
       window._hzBasin = b;
       try { localStorage.setItem('bv_hz_basin', b); } catch(e){}
+      /* if the satellite is up, swap to the one that actually sees this basin */
+      try { if (_hurricaneLayers.goes && window._hzAddGoes) window._hzAddGoes(); } catch(e){}
       /* if something is actually running in the basin you just picked, frame
          it rather than the empty climatology view */
       try {
@@ -73563,6 +73561,10 @@ function initNowMicroTabs(){
     b.style.background = on ? 'rgba(234,88,12,.92)' : 'rgba(167,139,250,.30)';
     b.style.color = on ? 'rgba(255,255,255,.97)' : 'rgba(43,34,244,.65)';
   };
+  window.toggleHzGoes = function(){
+    toggleHurricaneLayer('goes');
+    window._hzExtraBtnPaint('hz-extra-goes', !!_hurricaneLayers.goes);
+  };
   window.toggleHzWaves = function(){
     toggleHurricaneLayer('waves');
     window._hzExtraBtnPaint('hz-extra-waves', !!_hurricaneLayers.waves);
@@ -73631,6 +73633,38 @@ function initNowMicroTabs(){
       })
       .catch(function(){ /* leave the neutral placeholder in place */ });
   }
+
+  /* THE SATELLITE FOLLOWS THE BASIN (user 2026-09-04). This was GOES-East
+     only. GOES-East parks at 75.2W, so the east Pacific sits out near its
+     limb where the geometry smears everything; GOES-West is at 137.2W, which
+     puts Karina, Marie and Lowell close to nadir, and it is the satellite NHC
+     and the Central Pacific Hurricane Center actually read that basin from.
+     Both are NASA GIBS GeoColor - true colour by day, IR cloud-top by night,
+     so it stays useful through a storm's overnight hours. */
+  window._hzGoesProduct = function(){
+    return (window._hzBasin === 'pac') ? 'GOES-West' : 'GOES-East';
+  };
+  window._hzAddGoes = function(){
+    if (!_hurricaneMap) return;
+    var want = window._hzGoesProduct();
+    if (_hurricaneLayerObjs.goes && _hurricaneLayerObjs.goes._bvProduct !== want) window._hzRemoveGoes(true);
+    if (!_hurricaneLayerObjs.goes) {
+      _hurricaneLayerObjs.goes = L.tileLayer(
+        'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/' + want + '_ABI_GeoColor/default/GoogleMapsCompatible_Level7/{z}/{y}/{x}.jpg',
+        { attribution: 'NASA GIBS \u00b7 ' + want + ' GeoColor', opacity: 1.0, maxZoom: 7,
+          tileSize: 256, minZoom: 2, pane: 'hz-goes', updateWhenZooming: false, updateWhenIdle: true }
+      );
+      _hurricaneLayerObjs.goes._bvProduct = want;
+    }
+    if (!_hurricaneMap.hasLayer(_hurricaneLayerObjs.goes)) _hurricaneLayerObjs.goes.addTo(_hurricaneMap);
+  };
+  window._hzRemoveGoes = function(drop){
+    try {
+      if (_hurricaneLayerObjs.goes && _hurricaneMap.hasLayer(_hurricaneLayerObjs.goes))
+        _hurricaneMap.removeLayer(_hurricaneLayerObjs.goes);
+      if (drop) _hurricaneLayerObjs.goes = null;
+    } catch(e){}
+  };
 
   function _fetchNHCCurrentStorms() {
     // NHC CurrentStorms.json — official live active storm summary
