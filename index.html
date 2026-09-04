@@ -51677,43 +51677,76 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (wv.fronts && window._cwFronts){
         g.save(); g.lineCap = 'round'; g.lineJoin = 'round';
         var FCOL = { COLD:'#3b82f6', WARM:'#ef4444', STNRY:'#3b82f6', OCFNT:'#2B22F4' };
+        /* A FRONT IS NOT A CHAIN OF CHORDS (user 2026-09-03: "a more
+           realistic curve... instead of angular"). CODSUS gives whole
+           degrees, so its points sit ~100 km apart and a straight run
+           between them put a hard corner at every one.
+           Catmull-Rom, not the midpoint-quadratic the lab uses for
+           watercourses: that one passes through the MIDPOINTS and would pull
+           the line off the analysed positions, and these positions are the
+           analysis. Catmull-Rom passes through every given point and curves
+           between them. The pips then walk the densified curve and take
+           their angle from the local tangent, so they lean along the bend
+           instead of stepping around it. */
+        var crSmooth = function(P, per){
+          if (P.length < 3) return P.slice();
+          var out = [];
+          for (var i = 0; i < P.length - 1; i++){
+            var p0 = P[i - 1] || P[i], p1 = P[i], p2 = P[i + 1], p3 = P[i + 2] || P[i + 1];
+            for (var t = 0; t < per; t++){
+              var u = t / per, u2 = u * u, u3 = u2 * u;
+              out.push([
+                0.5 * ((2*p1[0]) + (-p0[0]+p2[0])*u + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*u2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*u3),
+                0.5 * ((2*p1[1]) + (-p0[1]+p2[1])*u + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*u2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*u3)
+              ]);
+            }
+          }
+          out.push(P[P.length - 1]);
+          return out;
+        };
         window._cwFronts.forEach(function(f){
-          var P = f.p.map(function(c){ return [px(c), py(c)]; });
-          var any = P.some(function(q){
+          var RAW = f.p.map(function(c){ return [px(c), py(c)]; });
+          var any = RAW.some(function(q){
             return q[0] > -80 && q[0] < cvs.width + 80 && q[1] > -80 && q[1] < cvs.height + 80;
           });
           if (!any) return;
+          var P = crSmooth(RAW, 14);
           g.beginPath();
           P.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); });
           g.lineWidth = 4.6 * dpr; g.strokeStyle = 'rgba(8,10,16,.75)'; g.stroke();
           g.lineWidth = 2.2 * dpr; g.strokeStyle = FCOL[f.k] || '#9aa3b5'; g.stroke();
-          /* pips every ~34 px of drawn line, so a short segment still gets one */
-          var acc = 0, STEP = 34 * dpr, alt = 0;
+          /* pips every ~34 px ALONG THE CURVE, angled by the local tangent */
+          var STEP = 34 * dpr, acc = STEP * 0.6, alt = 0;
           for (var i = 1; i < P.length; i++){
             var ax = P[i-1][0], ay = P[i-1][1], bx = P[i][0], by = P[i][1];
             var L = Math.hypot(bx - ax, by - ay);
             if (!L) continue;
             var ux = (bx - ax) / L, uy = (by - ay) / L;
             var nx = -uy, ny = ux;                       // one consistent side
-            for (var d = STEP - acc; d < L; d += STEP){
-              var mx = ax + ux * d, my = ay + uy * d;
-              var kind = f.k === 'STNRY' ? (alt++ % 2 ? 'WARM' : 'COLD') : f.k;
-              var col = kind === 'WARM' ? '#ef4444' : (FCOL[f.k] || '#3b82f6');
-              g.fillStyle = col;
-              if (kind === 'WARM' || f.k === 'OCFNT' && alt++ % 2){
+            acc += L;
+            while (acc >= STEP){
+              var back = acc - STEP;
+              var mx = bx - ux * back, my = by - uy * back;
+              acc -= STEP;
+              if (mx < -20 || my < -20 || mx > cvs.width + 20 || my > cvs.height + 20) { alt++; continue; }
+              var kind = f.k === 'STNRY' ? (alt % 2 ? 'WARM' : 'COLD')
+                       : f.k === 'OCFNT' ? (alt % 2 ? 'WARM' : 'COLD') : f.k;
+              alt++;
+              g.fillStyle = f.k === 'OCFNT' ? FCOL.OCFNT
+                          : (kind === 'WARM' ? '#ef4444' : '#3b82f6');
+              if (kind === 'WARM'){
                 g.beginPath();
-                g.arc(mx + nx * 3 * dpr, my + ny * 3 * dpr, 3.6 * dpr,
+                g.arc(mx + nx * 2.6 * dpr, my + ny * 2.6 * dpr, 3.6 * dpr,
                       Math.atan2(ny, nx) - Math.PI/2, Math.atan2(ny, nx) + Math.PI/2);
                 g.fill();
               } else {
                 g.beginPath();
                 g.moveTo(mx - ux * 3.4 * dpr, my - uy * 3.4 * dpr);
                 g.lineTo(mx + ux * 3.4 * dpr, my + uy * 3.4 * dpr);
-                g.lineTo(mx + nx * 6.2 * dpr, my + ny * 6.2 * dpr);
+                g.lineTo(mx + nx * 6.4 * dpr, my + ny * 6.4 * dpr);
                 g.closePath(); g.fill();
               }
             }
-            acc = (acc + L) % STEP;
           }
         });
         g.restore();
