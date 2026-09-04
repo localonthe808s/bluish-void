@@ -189,6 +189,32 @@ def fetch_market(cfg, ev):
 HOURLY_PEAK_OFFSET = 1.0     # median(daily.json - max hourly), for historic floors
 
 
+def climate_day_start(cfg, day):
+    """First hour of the NWS climate day, in the station's LOCAL clock.
+
+    Settlement is the next-morning NWS Climate Report (CLI), whose period is
+    12:00 AM - 11:59 PM **Local Standard Time**. Under daylight saving that is
+    1:00 AM - 12:59 AM on the local clock, so the midnight hour belongs to the
+    PREVIOUS climate day. Ignoring this inflates the morning floor on 23% of
+    days by ~1.6 degF, and changes the day's max outright on 10 of 187 days --
+    five of them in March-May, when a warm front can put the peak just after
+    midnight. Summer hides it: 0 of 77 settled days diverged.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        z = ZoneInfo(cfg.get('tz', 'America/New_York'))
+        noon = datetime.datetime(day.year, day.month, day.day, 12, tzinfo=z)
+        return 1 if (noon.dst() or datetime.timedelta(0)) else 0
+    except Exception:
+        return 1 if 3 <= day.month <= 11 else 0
+
+
+def running_max(obh, key, hour, h0):
+    """Warmest reading so far on the climate day, from the hourly stream."""
+    v = [x for h, x in (obh.get(key) or {}).items() if h0 <= h <= hour]
+    return max(v) if v else None
+
+
 def daily_series(cfg, start, end):
     """Settling temperature per day -> {'YYYY-MM-DD': degF}, including today's
     running value.
@@ -333,7 +359,7 @@ def point_forecast(fcm, biases, key, hour, yday):
     return p
 
 
-def residuals(fcm, biases_of, daily, obh, hour, today_key):
+def residuals(fcm, biases_of, daily, obh, hour, today_key, h0_of):
     """Replay the model on past days at `hour` -> [(date, pred - actual)].
 
     This is what the spread is measured from, so it is recomputed every run and
@@ -353,8 +379,8 @@ def residuals(fcm, biases_of, daily, obh, hour, today_key):
         p = point_forecast(fcm, b, k, hour, daily.get(keys[i - 1]) if i else None)
         if p is None:
             continue
-        run = max([v for h, v in obh[k].items() if h <= hour] or [-99.0])
-        floor = run + HOURLY_PEAK_OFFSET if run > -90 else -99.0
+        run = running_max(obh, k, hour, h0_of(k))
+        floor = run + HOURLY_PEAK_OFFSET if run is not None else -99.0
         out.append((k, max(floor, p) - daily[k]))
     return out
 
@@ -539,13 +565,18 @@ def run_market(cfg):
         print('not enough scored history for a bias (%d days)' % nb)
         return 0
     bias_of = biases_factory(fcm, daily)
+    h0_of = lambda k: climate_day_start(
+        cfg, datetime.date(*map(int, k.split('-'))))
     prior_days = sorted(k for k in fc if k < tkey and k in daily
                         and len(fc[k]) >= 20)[-BIAS_K:]
     biases = bias_of(prior_days)
 
-    # today's floor comes straight from the running daily max -- the same field
-    # the market settles on, so no offset is needed here
-    obs_far = daily.get(tkey)
+    # the floor is built exactly as the calibration built it -- hourly stream,
+    # climate-day window, plus the peak offset -- so the measured spread applies
+    # to the number it is actually paired with
+    h0 = climate_day_start(cfg, today)
+    rmax = running_max(obh, tkey, now.hour, h0)
+    obs_far = (rmax + HOURLY_PEAK_OFFSET) if rmax is not None else None
     obs_hr = max(obh.get(tkey) or {0: 0}) if obh.get(tkey) else None
     yday = daily.get((today - datetime.timedelta(days=1)).isoformat())
     # the remaining-hours cut-off is the CLOCK hour, matching residuals(), not
@@ -564,9 +595,9 @@ def run_market(cfg):
     if not (-40.0 < pred < 130.0):
         print('%s: implausible prediction %.1f -- refusing to write' % (cfg['key'], pred))
         return 0
-    res = residuals(fcm, bias_of, daily, obh, now.hour, tkey)
+    res = residuals(fcm, bias_of, daily, obh, now.hour, tkey, h0_of)
     sd, nsd = spread(res, now.hour)
-    sd_lock, _ = spread(residuals(fcm, bias_of, daily, obh, LOCK_HOUR, tkey), LOCK_HOUR)
+    sd_lock, _ = spread(residuals(fcm, bias_of, daily, obh, LOCK_HOUR, tkey, h0_of), LOCK_HOUR)
 
     try:
         fresh_peaks = fresh_runs(cfg, hr0)
@@ -603,18 +634,14 @@ def run_market(cfg):
         and the floor is the running max through then, taken from the hourly
         stream (+ offset) rather than today's live daily max.
         """
-        if hour >= now.hour:
-            fl = obs_far                      # up to the minute; nothing later exists
-        else:
-            run = max([v for h, v in (obh.get(tkey) or {}).items() if h <= hour]
-                      or [-99.0])
-            fl = run + HOURLY_PEAK_OFFSET if run > -90 else None
+        r = running_max(obh, tkey, min(hour, now.hour), h0)
+        fl = (r + HOURLY_PEAK_OFFSET) if r is not None else None
         pf = point_forecast(fcm, biases, tkey, hour, yday)
         cand = [x for x in (fl, pf) if x is not None]
         if not cand:
             return None
         pr = max(cand)
-        sdh, _ = spread(residuals(fcm, bias_of, daily, obh, hour, tkey), hour)
+        sdh, _ = spread(residuals(fcm, bias_of, daily, obh, hour, tkey, h0_of), hour)
         return pr, sdh, distribution(rows, pr, sdh, fl), fl
 
     def make_lock(hour):
@@ -688,23 +715,60 @@ def run_market(cfg):
                   % (tkey, F['as_of'], F['pick'], 100 * F['p']))
 
     # ---- score any past locked day whose actual has since been published
+    #
+    # TRUTH BY DEFINITION.  The settled market itself says which bracket paid,
+    # so use that rather than re-deriving it from an observation feed. Kalshi
+    # resolves on the next-morning NWS Climate Report (CLI, 12:00-11:59 LST);
+    # our observation source agrees with it on all 68 settled days checked, but
+    # a 1 degF disagreement hides inside a 2 degF bracket, so agreement at the
+    # bracket level is weaker evidence than it looks. Scoring on the settlement
+    # is exact, and comparing our own figure against it turns any future drift
+    # in the feed into a visible flag instead of a silent wrong record.
+    pending = [k for k, h in hist.items()
+               if k < tkey and 'lock' in h and h.get('actual') is None]
+    settled_by_date = {}
+    if pending:
+        try:
+            for evk, lad in fetch_settled(cfg).items():
+                try:
+                    dk = datetime.datetime.strptime(evk.split('-')[1], '%y%b%d').date()
+                except Exception:
+                    continue
+                w = next((r['label'] for r in lad if r.get('yes')), None)
+                if w:
+                    settled_by_date[dk.isoformat()] = w
+        except Exception as e:
+            print('settled lookup failed (%s) -- falling back to observations' % e)
+
     for k, h in hist.items():
         if k >= tkey or 'lock' not in h or h.get('actual') is not None:
             continue
         a = daily.get(k)
-        if a is None:
-            continue
         lad = h['lock'].get('ladder') or []
         if not lad or lad[0].get('lo', 'x') == 'x':
             continue                       # pre-bounds lock; nothing to score against
-        ai = which(lad, a)
+        truth = settled_by_date.get(k)
+        ours = None
+        if a is not None:
+            ai = which(lad, a)
+            ours = lad[ai]['label'] if ai is not None else None
+        if truth is None:
+            if ours is None:
+                continue                   # neither settlement nor observation yet
+            truth, h['truth_source'] = ours, 'observed'
+        else:
+            h['truth_source'] = 'settlement'
+            if ours is not None and ours != truth:
+                h['feed_mismatch'] = {'observed': a, 'observed_bracket': ours}
+                print('FEED MISMATCH %s: settled %s but our observation %.1f says %s'
+                      % (k, truth, a, ours))
         h['actual'] = a
-        h['actual_bracket'] = lad[ai]['label'] if ai is not None else None
+        h['actual_bracket'] = truth
         h['hit'] = (h['lock']['pick'] == h['actual_bracket'])
         h['market_hit'] = (h['lock']['market_pick'] == h['actual_bracket'])
         if h.get('final'):
             h['final_hit'] = (h['final']['pick'] == h['actual_bracket'])
-        h['err'] = round(h['lock']['pred'] - a, 2)
+        h['err'] = round(h['lock']['pred'] - a, 2) if a is not None else None
         print('scored %s: actual %.0f -> %s | ours %s %s | market %s %s'
               % (k, a, h['actual_bracket'], h['lock']['pick'],
                  'HIT' if h['hit'] else 'miss', h['lock']['market_pick'],
