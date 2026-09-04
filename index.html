@@ -588,7 +588,123 @@ window._bvVectorBase = function(map, opts){
   } catch(e){ console.warn('[basemap] vector layer failed, staying on raster', e); added.forEach(function(l){ try{ map.removeLayer(l); }catch(e2){} }); return null; }
   return added;
 };
+
+/* CONTINENTAL TERRAIN (2026-09-04) — the baked seafloor, hillshade, parks,
+   rivers and watershed divides, as a tile pyramid over the same box as
+   BV_CONTINENTAL. Call it BETWEEN the two _bvVectorBase calls:
+
+     _bvVectorBase(map);                     // land, water, landuse
+     _bvContinentalTerrain(map);             // terrain, then roads + borders
+     _bvVectorBase(map, { labels: true });   // labels last, so they survive
+
+   Labels going on last is the whole trick. A baked label under a wide raster
+   gets eaten - that is why BV_CONTINENTAL carries labels:[] and hand-places
+   its own - but Leaflet's label pass is a separate layer added afterwards, so
+   here the problem simply does not arise.
+
+   The tiles are z2-z6 only. The raster is 1213 m/px and z6 is 1874, so z6 is
+   the last level carrying real detail; maxNativeZoom lets Leaflet upsample it
+   to z7 rather than shipping 336 redundant files, and above z7 the layer
+   leaves and the plain vector basemap is what you had before. Outside the box
+   - Alaska, Hawaii, the Caribbean, Guam - `bounds` means nothing is requested
+   and nothing is drawn. */
+window.BV_CONTINENTAL_BOUNDS = [[22, -128], [52, -64]];
+window._bvContinentalTerrain = function(map, opts){
+  opts = opts || {};
+  if (!map || typeof L === 'undefined') return null;
+  var q = null;
+  try { q = new URLSearchParams(location.search).get('terrain'); } catch(e){}
+  if (q === '0') return null;
+  var B = L.latLngBounds(window.BV_CONTINENTAL_BOUNDS), added = [];
+  try {
+    var terrain = L.tileLayer('/terrain/{z}/{x}/{y}.png?v=1', {
+      bounds: B, minZoom: 2, maxNativeZoom: 6, maxZoom: 7,
+      attribution: '<a href="https://www.gmrt.org">GMRT</a>',
+      updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 2
+    });
+    terrain.addTo(map);
+    if (terrain.setZIndex) terrain.setZIndex(350);
+    added.push(terrain);
+    /* ROADS AND BORDERS COME BACK ON TOP. They are painted by the pass
+       underneath, and the terrain's land alpha follows the relief - up to 255
+       on a ridge - so through the Rockies the hillshade was muting exactly the
+       state lines a national map is read by. Same allowlists the static
+       renderer uses: interstates only, country and state but never county. */
+    var C = window.BV_CONTINENTAL;
+    if (typeof protomapsL !== 'undefined' && window.BV_BASEMAP_URL && C) {
+      var F = window[C.flavor] || window.BV_MAP_FLAVOR;
+      var allowB = C.bounds, allowR = C.roads;
+      var pr = protomapsL.paintRules(F).filter(function(r){
+        return r.dataLayer === 'roads' || r.dataLayer === 'boundaries';
+      }).map(function(r){
+        var base = r.filter, o = {}; for (var k in r) o[k] = r[k];
+        o.filter = function(z, f){
+          if (base && !base(z, f)) return false;
+          var p = (f && f.props) || {};
+          if (r.dataLayer === 'roads') return allowR.indexOf(p.kind_detail || '') >= 0;
+          return allowB.indexOf(p.kind || '') >= 0 || allowB.indexOf(+p.kind_detail) >= 0;
+        };
+        return o;
+      });
+      var lines = protomapsL.leafletLayer({
+        url: window.BV_BASEMAP_URL, maxDataZoom: 9,
+        minZoom: 2, maxZoom: 7, bounds: B,
+        paintRules: pr, labelRules: [], attribution: ''
+      });
+      lines.addTo(map);
+      if (lines.setZIndex) lines.setZIndex(400);
+      added.push(lines);
+    }
+  } catch(e){
+    console.warn('[terrain] continental layer failed, map unchanged', e);
+    added.forEach(function(l){ try { map.removeLayer(l); } catch(e2){} });
+    return null;
+  }
+  return added;
+};
+
+/* The themed names — Jupiter, Vega, Cosmos and the rest. cityLbl is read by
+   the static renderer only; on a Leaflet map the vector label pass draws real
+   cities instead, so these need to be their own markers. Continental zooms
+   only: at z7 they would sit on towns of a few hundred people. */
+window._bvContinentalNames = function(map){
+  var C = window.BV_CONTINENTAL;
+  if (!map || !C || !C.cityLbl || typeof L === 'undefined') return null;
+  var g = L.layerGroup();
+  C.cityLbl.forEach(function(c){
+    L.marker([c[1], c[2]], {
+      interactive: false, keyboard: false,
+      icon: L.divIcon({
+        className: 'bv-conus-name', iconSize: [0, 0], iconAnchor: [0, 0],
+        html: '<i></i><b>' + c[0] + '</b>'
+      })
+    }).addTo(g);
+  });
+  var sync = function(){
+    var z = map.getZoom();
+    if (z >= 2 && z <= 6) { if (!map.hasLayer(g)) g.addTo(map); }
+    else if (map.hasLayer(g)) map.removeLayer(g);
+  };
+  sync();
+  map.on('zoomend', sync);
+  return g;
+};
 </script>
+<style>
+  /* the continental themed names, matching the static render: a haloed dot
+     with the name set to its right, and never catching a pointer */
+  .bv-conus-name { pointer-events: none !important; white-space: nowrap; }
+  .bv-conus-name i {
+    position: absolute; left: -2.5px; top: -2.5px; width: 5px; height: 5px;
+    border-radius: 50%; background: #fff; box-shadow: 0 0 0 1.5px rgba(8,10,16,.9);
+  }
+  .bv-conus-name b {
+    position: absolute; left: 7px; top: -8px;
+    font: 700 11.5px/1 system-ui, sans-serif; color: #fff;
+    text-shadow: 0 0 3px rgba(8,10,16,.95), 0 0 2px rgba(8,10,16,.95),
+                 0 1px 2px rgba(8,10,16,.9);
+  }
+</style>
 
 <script defer src="https://cdn.bluishvoid.com/vendor/jszip/jszip.min.js"></script>
 
@@ -66536,6 +66652,13 @@ function initNowMicroTabs(){
     });
     _bvRasterRadar.addTo(nationalRadarMap);
     if (window._bvVectorBase && window._bvVectorBase(nationalRadarMap)) {
+      /* our own continental terrain between the paint pass and the labels:
+         seafloor, hillshade, parks, rivers and watershed divides, then roads
+         and state lines back on top of it, then the labels last */
+      if (window._bvContinentalTerrain) {
+        window._bvContinentalTerrain(nationalRadarMap);
+        window._bvContinentalNames(nationalRadarMap);
+      }
       window._bvVectorBase(nationalRadarMap, { labels: true });
       window._bvManageRaster(nationalRadarMap, _bvRasterRadar);
     }
