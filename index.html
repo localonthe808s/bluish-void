@@ -46841,11 +46841,21 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
               var _h = _r && _r.height ? Math.round(_r.height) : 620;
               var _gf = window._goesGibsFrame(goesSector, goesBand, _w, _h);
               if (_gf){
+                /* one frame immediately so the widget is never blank, then the
+                   probed 12-frame list replaces it and the loop restarts */
                 goesFrames = [_gf];
                 window._goesOverlayCanvas = null;
                 window._goesMapOverlay(goesSector, _w, _h, function(cv){
                   window._goesOverlayCanvas = cv;
                   try { if (typeof startGoesCanvasAnim === 'function') startGoesCanvasAnim(); } catch(e){}
+                });
+                window._goesGibsFrames(goesSector, goesBand, goesLength || 12, _w, _h, function(list){
+                  if (!list || list.length < 2) return;      /* keep the single frame */
+                  if (!window._goesMapMode()) return;        /* mode changed under us */
+                  goesFrames = list;
+                  goesIdx = 0;
+                  try { if (typeof preloadGoesImages === 'function') preloadGoesImages();
+                        else if (typeof startGoesCanvasAnim === 'function') startGoesCanvasAnim(); } catch(e){}
                 });
               }
             } catch(e){}
@@ -47040,17 +47050,68 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     else if (have > want){ var v = ((have/want) - 1) * (Y1-Y0) / 2; Y0 -= v; Y1 += v; }
     return { X0: X0, Y0: Y0, X1: X1, Y1: Y1 };
   }
-  window._goesGibsFrame = function(sector, band, w, h){
+  window._goesGibsFrame = function(sector, band, w, h, time){
     var prod = GOES_GIBS_PRODUCT[band];
     var box = _goesBoxFor(sector, w, h);
     if (!prod || !box) return null;
-    var R = 6378137, D = Math.PI / 180;
     return 'https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi?'
+      + (time ? 'TIME=' + encodeURIComponent(time) + '&' : '')
       + 'service=WMS&version=1.3.0&request=GetMap&layers=' + prod
       + '&crs=EPSG:3857&bbox=' + [box.X0, box.Y0, box.X1, box.Y1].join(',')
       + '&width=' + Math.round(w) + '&height=' + Math.round(h)
       + '&format=image/png&transparent=false';
   };
+  /* THE FRAME LIST, FOUND BY PROBING (2026-09-04). GIBS WMS accepts TIME,
+     so the loop is possible - but the timestamps have to be discovered, not
+     computed. Two reasons:
+       - GIBS lags wall clock, and by a varying amount. Measured 40 minutes on
+         one sample and over an hour on another, so any fixed offset is wrong
+         some of the time.
+       - A TIME with no data returns a VALID BLANK PNG, not an error. At full
+         size that is ~545 bytes against ~325 KB, so nothing downstream would
+         notice; the loop would just show empty frames.
+     GetCapabilities does publish the exact list, and it is 2.4 MB - far too
+     much to pull into a weather dashboard for one timestamp. So instead we
+     probe backwards from now in 10-minute steps with a 48x36 request, which
+     costs 86 bytes for a blank against 5.5 KB for a real frame, and stop at
+     the first real one. Five requests of under 6 KB total, and the endpoint
+     sends access-control-allow-origin:* so the size is readable. */
+  var _goesGibsCache = { key: null, at: 0, newest: null };
+  window._goesGibsFrames = function(sector, band, count, w, h, cb){
+    var prod = GOES_GIBS_PRODUCT[band];
+    if (!prod){ cb(null); return; }
+    var key = sector + '|' + band;
+    var build = function(newestMs){
+      var out = [];
+      for (var i = count - 1; i >= 0; i--){      /* oldest first, so it plays forward */
+        var t = new Date(newestMs - i * 600000);
+        out.push(window._goesGibsFrame(sector, band, w, h,
+          t.toISOString().replace('.000Z', 'Z')));
+      }
+      cb(out.filter(Boolean));
+    };
+    if (_goesGibsCache.key === key && Date.now() - _goesGibsCache.at < 300000 && _goesGibsCache.newest){
+      build(_goesGibsCache.newest); return;
+    }
+    var now = new Date();
+    now.setUTCSeconds(0, 0);
+    now.setUTCMinutes(now.getUTCMinutes() - (now.getUTCMinutes() % 10));
+    var probe = function(step){
+      if (step > 24){ cb(null); return; }          /* give up after 4 hours */
+      var t = new Date(now.getTime() - step * 600000);
+      var ts = t.toISOString().replace('.000Z', 'Z');
+      var u = window._goesGibsFrame(sector, band, 48, 36, ts);
+      if (!u){ cb(null); return; }
+      fetch(u).then(function(r){ return r.blob(); }).then(function(bl){
+        if (bl && bl.size > 1200){
+          _goesGibsCache = { key: key, at: Date.now(), newest: t.getTime() };
+          build(t.getTime());
+        } else probe(step + 1);
+      }).catch(function(){ probe(step + 1); });
+    };
+    probe(0);
+  };
+
   /* boundaries + our own place names, on a transparent canvas, to sit over
      the imagery in place of NESDIS's baked coastlines */
   window._goesMapOverlay = function(sector, w, h, cb){
