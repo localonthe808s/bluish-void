@@ -959,6 +959,10 @@ def run_market(cfg):
             'by_hour': [{'h': h, 'acc': HOUR_ACC[h], 'sd': SD_FALLBACK.get(h)}
                         for h in sorted(HOUR_ACC)],
             'lock_hour': LOCK_HOUR,
+            # the panel renders these rather than hardcoding them: the prose had
+            # already drifted from the constants twice after a refit
+            'damp': SWING_DAMP, 'bias_days': BIAS_K, 'resid_days': RESID_M,
+            'n_models': len(models_for(cfg)),
             'trail_days': sum(1 for h in hist.values() if h.get('trail')),
         },
         'record': record,
