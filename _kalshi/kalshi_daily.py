@@ -407,7 +407,10 @@ def main():
     span = RESID_M + BIAS_K + 6
     fc = forecast_runs(span)
     daily = daily_max_series()
-    obh = obs_hourly_range(today - datetime.timedelta(days=span), today)
+    # end one day AHEAD: asos.py treats the end date as the cut-off, so asking
+    # for `today` returns almost nothing for today
+    obh = obs_hourly_range(today - datetime.timedelta(days=span),
+                           today + datetime.timedelta(days=1))
 
     bias, nb = rolling_bias(fc, daily, tkey)
     if bias is None:
@@ -419,7 +422,10 @@ def main():
     obs_far = daily.get(tkey)
     obs_hr = max(obh.get(tkey) or {0: 0}) if obh.get(tkey) else None
     yday = daily.get((today - datetime.timedelta(days=1)).isoformat())
-    hr0 = obs_hr if obs_hr is not None else 0
+    # the remaining-hours cut-off is the CLOCK hour, matching residuals(), not
+    # whichever hour last reported -- otherwise the spread is measured for one
+    # horizon and applied to another
+    hr0 = now.hour
     rest = [v for h, v in (fc.get(tkey) or {}).items() if h >= hr0]
     fpeak = max(rest) if rest else None
     fadj = point_forecast(fc.get(tkey) or {}, hr0, bias, yday)
