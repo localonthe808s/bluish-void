@@ -50717,30 +50717,53 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     function cwFrontsRead(){
       if (Date.now() - CW_FRONT_AT < 1800000) return;
       CW_FRONT_AT = Date.now();
-      fetch('https://api.weather.gov/products?type=COD&limit=8')
+      var parseCod = function(txt){
+        var out = [];
+        String(txt).split('\n').forEach(function(ln){
+          var m = ln.trim().match(/^(COLD|WARM|STNRY|OCFNT)\s+(.*)$/);
+          if (!m) return;
+          var pts = [];
+          m[2].split(/\s+/).forEach(function(tk){
+            if (!/^\d{4,5}$/.test(tk)) return;
+            var la = parseInt(tk.slice(0, 2), 10), lo = parseInt(tk.slice(2), 10);
+            if (la < 15 || la > 80 || lo < 50 || lo > 180) return;
+            pts.push([-lo, la]);
+          });
+          if (pts.length > 1) out.push({ k: m[1], p: pts });
+        });
+        return out;
+      };
+      /* THE FRONT GETS A WAKE (user 2026-09-03). A single line reads as a
+         fact about now, when the whole reason to look at a front is that it
+         is coming toward you. api.weather.gov lists the last several
+         bulletins, reissued about hourly, so the previous analyses are free —
+         drawn behind the current one they show which way it is moving, how
+         fast, and whether it is stalling. */
+      fetch('https://api.weather.gov/products?type=COD&limit=12')
         .then(function(r){ return r.json(); })
         .then(function(j){
           var g = (j['@graph'] || []).filter(function(p){ return p.productCode === 'COD'; });
           if (!g.length) return;
-          return fetch('https://api.weather.gov/products/' + g[0].id)
-            .then(function(r2){ return r2.json(); })
-            .then(function(p){
-              var out = [], txt = String(p.productText || '');
-              txt.split('\n').forEach(function(ln){
-                var m = ln.trim().match(/^(COLD|WARM|STNRY|OCFNT)\s+(.*)$/);
-                if (!m) return;
-                var pts = [];
-                m[2].split(/\s+/).forEach(function(tk){
-                  if (!/^\d{4,5}$/.test(tk)) return;
-                  var la = parseInt(tk.slice(0, 2), 10), lo = parseInt(tk.slice(2), 10);
-                  if (la < 15 || la > 80 || lo < 50 || lo > 180) return;
-                  pts.push([-lo, la]);
-                });
-                if (pts.length > 1) out.push({ k: m[1], p: pts });
-              });
-              window._cwFronts = out;
-              if (cw.wide) cwDrawWideOv(cwWideDef());
+          return Promise.all(g.slice(0, 5).map(function(p){
+            return fetch('https://api.weather.gov/products/' + p.id)
+              .then(function(r2){ return r2.json(); })
+              .then(function(d){ return { t: p.issuanceTime, x: String(d.productText || '') }; })
+              .catch(function(){ return null; });
+          })).then(function(all){
+            /* the COD type also carries SRP; only the surface bulletin has
+               frontal positions, and an empty parse is the tell */
+            var runs = [];
+            all.filter(Boolean).forEach(function(d){
+              if (d.x.indexOf('CODED SURFACE FRONTAL POSITIONS') < 0) return;
+              var f = parseCod(d.x);
+              if (f.length) runs.push({ t: Date.parse(d.t), f: f });
             });
+            runs.sort(function(a, b){ return b.t - a.t; });
+            if (!runs.length) return;
+            window._cwFronts = runs[0].f;
+            window._cwFrontRuns = runs.slice(0, 4);     // newest first
+            if (cw.wide) cwDrawWideOv(cwWideDef());
+          });
         }).catch(function(){});
     }
     var cwAlertAt = 0;
@@ -51704,6 +51727,90 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           out.push(P[P.length - 1]);
           return out;
         };
+        /* the wake: older analyses first, fading back in time. Same curve,
+           no pips — pips on a ghost would read as another live front. */
+        var runs = window._cwFrontRuns || [];
+        for (var ri = runs.length - 1; ri >= 1; ri--){
+          var age = ri;
+          g.globalAlpha = Math.max(0.10, 0.30 - (age - 1) * 0.07);
+          runs[ri].f.forEach(function(f0){
+            var R0 = f0.p.map(function(c){ return [px(c), py(c)]; });
+            if (!R0.some(function(q){ return q[0] > -80 && q[0] < cvs.width + 80
+                                          && q[1] > -80 && q[1] < cvs.height + 80; })) return;
+            var Q = crSmooth(R0, 14);
+            g.beginPath();
+            Q.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); });
+            g.lineWidth = 1.6 * dpr;
+            g.strokeStyle = FCOL[f0.k] || '#9aa3b5';
+            g.stroke();
+          });
+        }
+        g.globalAlpha = 1;
+        /* WHERE IT WILL BE (user 2026-09-03). The wake is not just a picture
+           of motion — it measures it. Matching each point of the current
+           analysis to the nearest point of the previous one of the SAME kind
+           gives a displacement, and the bulletin times give the hours, so the
+           front carries a velocity. Projected forward it answers the question
+           a front is actually asked: not where is it, but when does the
+           change reach me.
+           The median displacement is taken, not the mean: a front grows and
+           shrinks at its ends between analyses, and those endpoints would
+           otherwise drag the whole estimate. Anything over 2 degrees an hour
+           is discarded as a mismatch rather than drawn as a 220 km/h front. */
+        var vel = null, runsV = window._cwFrontRuns || [];
+        if (runsV.length > 1){
+          var dtH = (runsV[0].t - runsV[1].t) / 3600000;
+          if (dtH > 0.2 && dtH < 12){
+            var dxs = [], dys = [];
+            runsV[0].f.forEach(function(f0){
+              var prev = runsV[1].f.filter(function(q){ return q.k === f0.k; });
+              if (!prev.length) return;
+              f0.p.forEach(function(c){
+                var bd = 1e9, bp = null;
+                prev.forEach(function(q){ q.p.forEach(function(c2){
+                  var d = (c2[0]-c[0])*(c2[0]-c[0]) + (c2[1]-c[1])*(c2[1]-c[1]);
+                  if (d < bd){ bd = d; bp = c2; }
+                }); });
+                if (bp && bd < 25){ dxs.push(c[0]-bp[0]); dys.push(c[1]-bp[1]); }
+              });
+            });
+            if (dxs.length > 6){
+              dxs.sort(function(a,b){ return a-b; }); dys.sort(function(a,b){ return a-b; });
+              var mx2 = dxs[dxs.length>>1] / dtH, my2 = dys[dys.length>>1] / dtH;
+              if (Math.abs(mx2) < 2 && Math.abs(my2) < 2 && (Math.abs(mx2) > 0.02 || Math.abs(my2) > 0.02))
+                vel = [mx2, my2];
+            }
+          }
+        }
+        if (vel){
+          [[3, .34], [6, .20]].forEach(function(h2){
+            g.globalAlpha = h2[1];
+            g.setLineDash([7 * dpr, 6 * dpr]);
+            window._cwFronts.forEach(function(f0){
+              var R0 = f0.p.map(function(c){
+                return [px([c[0] + vel[0]*h2[0], c[1] + vel[1]*h2[0]]),
+                        py([c[0] + vel[0]*h2[0], c[1] + vel[1]*h2[0]])];
+              });
+              if (!R0.some(function(q){ return q[0] > -60 && q[0] < cvs.width + 60
+                                            && q[1] > -60 && q[1] < cvs.height + 60; })) return;
+              var Q = crSmooth(R0, 12);
+              g.beginPath();
+              Q.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); });
+              g.lineWidth = 1.8 * dpr;
+              g.strokeStyle = FCOL[f0.k] || '#9aa3b5';
+              g.stroke();
+              if (f0.p.length > 2){
+                var mid = Q[Math.floor(Q.length / 2)];
+                if (mid[0] > 30 && mid[0] < cvs.width - 30 && mid[1] > 14 && mid[1] < cvs.height - 14)
+                  queueLabel(['+' + h2[0] + ' HR'], mid[0] + 5 * dpr, mid[1],
+                             FCOL[f0.k] || '#9aa3b5', 35,
+                             '700 ' + (7.6 * TS * dpr) + 'px system-ui,sans-serif');
+              }
+            });
+            g.setLineDash([]);
+          });
+          g.globalAlpha = 1;
+        }
         window._cwFronts.forEach(function(f){
           var RAW = f.p.map(function(c){ return [px(c), py(c)]; });
           var any = RAW.some(function(q){
