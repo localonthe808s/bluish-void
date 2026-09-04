@@ -186,7 +186,22 @@ def fetch_market(cfg, ev):
 # misses the intra-hour peak and reads 1-2 degF LOW on 22 of 34 days (adding
 # report_type=1..4 does not fix it).  An earlier calibration built on that
 # stream reported MAE 1.54 / 56% when the truth was really MAE 1.93 / 49%.
-HOURLY_PEAK_OFFSET = 1.0     # median(daily.json - max hourly), for historic floors
+# The hourly stream misses the intra-hour peak, so a running max taken from it
+# needs lifting. Use the MEAN gap (0.62), not the median (1.0): this is an
+# estimate of the true running max, not a bound on it, and the median overshot.
+# With 1.0 the prediction sat +0.29 degF above the eventual high on days the
+# floor was binding, which pushed real probability into brackets the day had
+# already walked past -- 6% on a bracket that empirically never happened.
+HOURLY_PEAK_OFFSET = 0.62
+# Spread of that same gap. The residuals are measured against a floor built as
+# hourly + offset, so they carry this noise; today's floor is the exact running
+# max and carries none of it. On days the floor is binding the measured spread
+# (0.75-0.88) is almost entirely this term -- deconvolving leaves ~0.3, which is
+# what matches the empirical record: the high never rose 1.5 degF further after
+# the floor was set, yet an un-deconvolved spread put 6% on a bracket that far
+# out. Only applied when the floor is both binding and exact.
+OFFSET_SD = 0.82
+EXACT_FLOOR_SD_MIN = 0.30
 
 
 def climate_day_start(cfg, day):
@@ -381,13 +396,28 @@ def residuals(fcm, biases_of, daily, obh, hour, today_key, h0_of):
             continue
         run = running_max(obh, k, hour, h0_of(k))
         floor = run + HOURLY_PEAK_OFFSET if run is not None else -99.0
-        out.append((k, max(floor, p) - daily[k]))
+        # record WHICH regime the day was in: once the observed high exceeds the
+        # forecast, the only question left is how much further it can climb, and
+        # that is a far tighter distribution than a day still being forecast
+        out.append((k, max(floor, p) - daily[k], floor >= p))
     return out
 
 
-def spread(res, hour):
-    """Standard deviation of the recent residuals; fallback until enough exist."""
-    v = [e for _, e in res[-RESID_M:]]
+def spread(res, hour, binding=None):
+    """Spread of the recent residuals, conditioned on the regime.
+
+    Measured over 174 days, the two regimes are nothing alike: with the floor
+    binding the spread runs ~0.75 degF at any afternoon hour, without it 1.5-2.5.
+    Blending them overstates the uncertainty on exactly the days the answer is
+    already known -- which invents value in brackets the day has walked past --
+    and understates it on the days still genuinely open.
+    """
+    pool = res
+    if binding is not None:
+        same = [r for r in res if len(r) > 2 and r[2] == binding]
+        if len(same) >= 20:
+            pool = same
+    v = [r[1] for r in pool[-RESID_M:]]
     if len(v) < 20:
         return SD_FALLBACK.get(hour, 3.06 if hour < 8 else 0.89), len(v)
     return max(statistics.stdev(v), SD_FLOOR), len(v)
@@ -571,12 +601,20 @@ def run_market(cfg):
                         and len(fc[k]) >= 20)[-BIAS_K:]
     biases = bias_of(prior_days)
 
-    # the floor is built exactly as the calibration built it -- hourly stream,
-    # climate-day window, plus the peak offset -- so the measured spread applies
-    # to the number it is actually paired with
+    # TODAY'S FLOOR USES THE BEST DATA AVAILABLE, not the same estimate history
+    # is stuck with. daily.json carries the station's true running max, which is
+    # the settlement source's own figure; the hourly stream plus an offset is
+    # only an approximation of it, and approximating when the real number is in
+    # hand put 22% on a bracket the day had already passed. History has no
+    # choice -- there is no archived running max -- so the residuals keep using
+    # the estimate, and the resulting spread is mildly conservative. Take
+    # whichever is higher: both are lower bounds on where the day ends up.
     h0 = climate_day_start(cfg, today)
     rmax = running_max(obh, tkey, now.hour, h0)
-    obs_far = (rmax + HOURLY_PEAK_OFFSET) if rmax is not None else None
+    est = (rmax + HOURLY_PEAK_OFFSET) if rmax is not None else None
+    live = daily.get(tkey)
+    cands_fl = [x for x in (est, live) if x is not None]
+    obs_far = max(cands_fl) if cands_fl else None
     obs_hr = max(obh.get(tkey) or {0: 0}) if obh.get(tkey) else None
     yday = daily.get((today - datetime.timedelta(days=1)).isoformat())
     # the remaining-hours cut-off is the CLOCK hour, matching residuals(), not
@@ -596,8 +634,12 @@ def run_market(cfg):
         print('%s: implausible prediction %.1f -- refusing to write' % (cfg['key'], pred))
         return 0
     res = residuals(fcm, bias_of, daily, obh, now.hour, tkey, h0_of)
-    sd, nsd = spread(res, now.hour)
-    sd_lock, _ = spread(residuals(fcm, bias_of, daily, obh, LOCK_HOUR, tkey, h0_of), LOCK_HOUR)
+    binding_now = (obs_far is not None and fadj is not None and obs_far >= fadj)
+    sd, nsd = spread(res, now.hour, binding_now)
+    if binding_now and live is not None and obs_far <= live + 1e-9:
+        sd = max(EXACT_FLOOR_SD_MIN, math.sqrt(max(sd * sd - OFFSET_SD * OFFSET_SD, 0.0)))
+    sd_lock, _ = spread(residuals(fcm, bias_of, daily, obh, LOCK_HOUR, tkey, h0_of),
+                        LOCK_HOUR, binding_now)
 
     try:
         fresh_peaks = fresh_runs(cfg, hr0)
@@ -636,12 +678,15 @@ def run_market(cfg):
         """
         r = running_max(obh, tkey, min(hour, now.hour), h0)
         fl = (r + HOURLY_PEAK_OFFSET) if r is not None else None
+        if hour >= now.hour and obs_far is not None:
+            fl = obs_far if fl is None else max(fl, obs_far)
         pf = point_forecast(fcm, biases, tkey, hour, yday)
         cand = [x for x in (fl, pf) if x is not None]
         if not cand:
             return None
         pr = max(cand)
-        sdh, _ = spread(residuals(fcm, bias_of, daily, obh, hour, tkey, h0_of), hour)
+        bind = (fl is not None and pf is not None and fl >= pf)
+        sdh, _ = spread(residuals(fcm, bias_of, daily, obh, hour, tkey, h0_of), hour, bind)
         return pr, sdh, distribution(rows, pr, sdh, fl), fl
 
     def make_lock(hour):
