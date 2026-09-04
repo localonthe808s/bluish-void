@@ -597,6 +597,23 @@ def main():
                        for r, p in zip(rows, ps)],
         }
 
+    # INTRADAY PRICE TRAIL.  Kalshi's candlestick endpoint 404s, so there is no
+    # way to recover how a day's prices moved -- which means the question "when
+    # is the market slowest to update, i.e. when is our edge biggest" cannot be
+    # answered from history.  So record it going forward: one row per hour with
+    # the market's mids, our probabilities and the state of the day.  After a
+    # few weeks this is the dataset that answers when to act.
+    trail = entry.setdefault('trail', [])
+    if not trail or trail[-1].get('h') != now.hour:
+        trail.append({
+            'h': now.hour,
+            'pred': round(pred, 2), 'sd': round(sd, 2),
+            'obs': obs_far,
+            'ours': [round(p, 3) for p in ps],
+            'mkt': [r['mid'] for r in rows],
+        })
+        del trail[:-24]
+
     # TWO locks, both well before the 11:59pm close, because they answer
     # different questions.  The noon lock is the honest forecast -- the peak is
     # still hours away -- and it is what the skill record scores.  The 18:00
