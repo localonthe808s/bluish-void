@@ -541,7 +541,35 @@ def main():
     if entry is None:
         entry = {'date': tkey, 'event': event_ticker(today)}
         hist[tkey] = entry
-    def make_lock():
+    def snapshot(hour):
+        """Our call AS OF `hour` today, however late the job actually runs.
+
+        Cron slots get delayed or skipped, and a noon lock computed from 2pm
+        data would quietly be hindsight rather than a forecast. So the lock is
+        rebuilt for its own hour: the forecast uses only hours from then on,
+        and the floor is the running max through then, taken from the hourly
+        stream (+ offset) rather than today's live daily max.
+        """
+        if hour >= now.hour:
+            fl = obs_far                      # up to the minute; nothing later exists
+        else:
+            run = max([v for h, v in (obh.get(tkey) or {}).items() if h <= hour]
+                      or [-99.0])
+            fl = run + HOURLY_PEAK_OFFSET if run > -90 else None
+        pf = point_forecast(fcm, biases, tkey, hour, yday)
+        cand = [x for x in (fl, pf) if x is not None]
+        if not cand:
+            return None
+        pr = max(cand)
+        sdh, _ = spread(residuals(fcm, bias_of, daily, obh, hour, tkey), hour)
+        return pr, sdh, distribution(rows, pr, sdh, fl), fl
+
+    def make_lock(hour):
+        snap = snapshot(hour)
+        if snap is None:
+            return None
+        pred, sd, ps, fl = snap
+        best = max(range(len(rows)), key=lambda i: ps[i])
         fresh = fresh_peaks or {}
         fadj_fresh = None
         if fresh:
@@ -550,13 +578,14 @@ def main():
                 fadj_fresh = statistics.mean(v)
                 if yday is not None:
                     fadj_fresh -= SWING_DAMP * max(0.0, fadj_fresh - yday)
-                if obs_far is not None:
-                    fadj_fresh = max(fadj_fresh, obs_far)
+                if fl is not None:
+                    fadj_fresh = max(fadj_fresh, fl)
         return {
             'at': now.strftime('%Y-%m-%dT%H:%M') + ' ET',
             'pick': rows[best]['label'], 'ticker': rows[best]['ticker'],
-            'p': round(ps[best], 4), 'pred': round(pred, 2), 'sd': sd,
-            'bias': round(bias, 2), 'obs_at_lock': obs_far,
+            'p': round(ps[best], 4), 'pred': round(pred, 2), 'sd': round(sd, 2),
+            'as_of': '%02d:00 ET' % hour, 'bias': round(bias, 2),
+            'obs_at_lock': fl,
             'market_pick': rows[mbest]['label'], 'market_p': rows[mbest]['mid'],
             # recorded, not used -- see fresh_runs()
             'fresh_peaks': fresh or None,
@@ -574,13 +603,18 @@ def main():
     # lock is the call worth acting on: by then the day has largely resolved
     # and backtested bracket accuracy jumps from 40/68 to 53/68.
     if 'lock' not in entry and now.hour >= LOCK_HOUR:
-        entry['lock'] = make_lock()
-        print('LOCKED %s: %s (%.0f%%), market %s (%.0f%%)'
-              % (tkey, rows[best]['label'], 100 * ps[best],
-                 rows[mbest]['label'], 100 * rows[mbest]['mid']))
+        L = make_lock(LOCK_HOUR)
+        if L:
+            entry['lock'] = L
+            print('LOCKED %s (as of %s): %s (%.0f%%), market %s (%.0f%%)'
+                  % (tkey, L['as_of'], L['pick'], 100 * L['p'],
+                     L['market_pick'], 100 * L['market_p']))
     if 'final' not in entry and now.hour >= FINAL_HOUR:
-        entry['final'] = make_lock()
-        print('FINAL %s: %s (%.0f%%)' % (tkey, rows[best]['label'], 100 * ps[best]))
+        F = make_lock(FINAL_HOUR)
+        if F:
+            entry['final'] = F
+            print('FINAL %s (as of %s): %s (%.0f%%)'
+                  % (tkey, F['as_of'], F['pick'], 100 * F['p']))
 
     # ---- score any past locked day whose actual has since been published
     for k, h in hist.items():
