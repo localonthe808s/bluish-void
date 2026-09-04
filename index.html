@@ -50708,8 +50708,37 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           return o && o.lat != null && o.lon != null
               && o.wdir != null && o.wspd != null && o.wspd !== '' ;
         }).map(function(o){
-          return { la: +o.lat, lo: +o.lon, d: +o.wdir, s: +o.wspd };
+          return { la: +o.lat, lo: +o.lon, d: +o.wdir, s: +o.wspd, t: +o.temp };
         }).filter(function(o){ return isFinite(o.d) && isFinite(o.s); });
+        /* AN AIR MASS IS A FIELD, NOT A LINE (user 2026-09-03). A front is
+           the edge between two bodies of air, so the same observations that
+           draw the barbs can draw the air itself. Inverse-distance over the
+           reporting temperatures onto a coarse 72x48 grid, built ONCE per
+           fetch and then scaled up by the compositor, which is what makes it
+           soft — an inference drawn with hard edges would claim a precision
+           these scattered points do not have. See the edges-encode-certainty
+           rule: surveyed things crisp, estimated things soft. */
+        var TT = window._cwMetar.filter(function(o){ return isFinite(o.t); });
+        if (TT.length > 20){
+          var GW = 72, GH = 48, W0 = -82, W1 = -66, S0 = 36, S1 = 47;
+          var fld = new Float32Array(GW * GH);
+          for (var gy = 0; gy < GH; gy++) for (var gx = 0; gx < GW; gx++){
+            var lo = W0 + (gx + 0.5) / GW * (W1 - W0);
+            var la = S1 - (gy + 0.5) / GH * (S1 - S0);
+            var sw = 0, sv = 0;
+            for (var q = 0; q < TT.length; q++){
+              var dx = (TT[q].lo - lo), dy = (TT[q].la - la);
+              var d2 = dx * dx + dy * dy + 0.02;
+              if (d2 > 9) continue;                  // ~3 degrees of influence
+              var w = 1 / (d2 * d2);
+              sw += w; sv += w * TT[q].t;
+            }
+            fld[gy * GW + gx] = sw ? sv / sw : NaN;
+          }
+          var srt = Array.prototype.slice.call(fld).filter(isFinite).sort(function(a,b){ return a-b; });
+          window._cwTfield = { w: GW, h: GH, W0: W0, W1: W1, S0: S0, S1: S1,
+                               d: fld, mid: srt[srt.length >> 1] };
+        }
         if (cw.wide) cwDrawWideOv(cwWideDef());
       }).catch(function(){});
     }
@@ -51628,6 +51657,31 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var X = px([lo, la]), Y = py([lo, la]);
         return (X < -8 || Y < -8 || X > cvs.width + 8 || Y > cvs.height + 8) ? null : [X, Y];
       });
+      /* the air-mass wash. Painted at grid resolution into a tiny canvas and
+         blown up by the compositor, so it arrives as a gradient rather than
+         cells. Warm ahead, cool behind, measured against the field's own
+         median so it reads the same in January as in July. */
+      if (wv.barbs && window._cwTfield){
+        var TF = window._cwTfield;
+        var tc = document.createElement('canvas'); tc.width = TF.w; tc.height = TF.h;
+        var tg = tc.getContext('2d'), tim = tg.createImageData(TF.w, TF.h);
+        for (var ti = 0; ti < TF.w * TF.h; ti++){
+          var tv = TF.d[ti], o4 = ti * 4;
+          if (!isFinite(tv)){ tim.data[o4 + 3] = 0; continue; }
+          var k4 = Math.max(-1, Math.min(1, (tv - TF.mid) / 8));
+          tim.data[o4]     = k4 > 0 ? 226 : 96;
+          tim.data[o4 + 1] = k4 > 0 ? 150 : 150;
+          tim.data[o4 + 2] = k4 > 0 ? 92  : 214;
+          tim.data[o4 + 3] = Math.round(Math.abs(k4) * 46);
+        }
+        tg.putImageData(tim, 0, 0);
+        var sxT = cvs.width / (TF.W1 - TF.W0) * 1, R2t = 6378137;
+        var xA = px([TF.W0, TF.S1]), yA = py([TF.W0, TF.S1]);
+        var xB = px([TF.W1, TF.S0]), yB = py([TF.W1, TF.S0]);
+        g.save(); g.imageSmoothingEnabled = true;
+        g.drawImage(tc, xA, yA, xB - xA, yB - yA);
+        g.restore();
+      }
       /* WIND BARBS, the station model's own shorthand: the shaft lies along
          the wind and the feathers count it — a pennant is 50 kt, a full barb
          10, a half barb 5. Drawn before the front, so the front reads over
@@ -51818,10 +51872,44 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           });
           if (!any) return;
           var P = crSmooth(RAW, 14);
+          /* THE LINE CARRIES THE CONTRAST IT ACTUALLY HAS (user 2026-09-03).
+             A front with 15 degrees across it and one with 3 were drawn
+             identically. Sampling the temperature field either side of the
+             boundary — half a degree of latitude along the normal, roughly
+             55 km, which is far enough to be in the air mass and near enough
+             to still be the same front — gives the real contrast, and the
+             stroke thickens with it. A boundary doing nothing now looks like
+             a boundary doing nothing. */
+          var tAt = function(lo, la){
+            var TF2 = window._cwTfield;
+            if (!TF2) return NaN;
+            var gx2 = Math.round((lo - TF2.W0) / (TF2.W1 - TF2.W0) * TF2.w - 0.5);
+            var gy2 = Math.round((TF2.S1 - la) / (TF2.S1 - TF2.S0) * TF2.h - 0.5);
+            if (gx2 < 0 || gy2 < 0 || gx2 >= TF2.w || gy2 >= TF2.h) return NaN;
+            return TF2.d[gy2 * TF2.w + gx2];
+          };
+          var dT = NaN;
+          if (window._cwTfield && f.p.length > 2){
+            var diffs = [];
+            for (var pi2 = 1; pi2 < f.p.length; pi2++){
+              var c1 = f.p[pi2 - 1], c2b = f.p[pi2];
+              var vx = c2b[0] - c1[0], vy = c2b[1] - c1[1];
+              var vl = Math.hypot(vx, vy) || 1;
+              var pnx = -vy / vl * 0.5, pny = vx / vl * 0.5;
+              var mlo = (c1[0] + c2b[0]) / 2, mla = (c1[1] + c2b[1]) / 2;
+              var t1 = tAt(mlo + pnx, mla + pny), t2 = tAt(mlo - pnx, mla - pny);
+              if (isFinite(t1) && isFinite(t2)) diffs.push(Math.abs(t1 - t2));
+            }
+            if (diffs.length){
+              diffs.sort(function(a, b){ return a - b; });
+              dT = diffs[diffs.length >> 1];
+            }
+          }
+          var str = isFinite(dT) ? Math.max(0.6, Math.min(1.7, dT / 4)) : 1;
           g.beginPath();
           P.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); });
-          g.lineWidth = 4.6 * dpr; g.strokeStyle = 'rgba(8,10,16,.75)'; g.stroke();
-          g.lineWidth = 2.2 * dpr; g.strokeStyle = FCOL[f.k] || '#9aa3b5'; g.stroke();
+          g.lineWidth = (3.2 + 1.9 * str) * dpr; g.strokeStyle = 'rgba(8,10,16,.75)'; g.stroke();
+          g.lineWidth = (1.1 + 1.35 * str) * dpr; g.strokeStyle = FCOL[f.k] || '#9aa3b5'; g.stroke();
           /* pips every ~34 px ALONG THE CURVE, angled by the local tangent */
           var STEP = 34 * dpr, acc = STEP * 0.6, alt = 0;
           for (var i = 1; i < P.length; i++){
