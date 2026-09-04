@@ -207,6 +207,30 @@ def forecast_runs(past_days, model=None):
     return out
 
 
+def fresh_runs(hour):
+    """Today's CURRENT runs, one call, all five models -> {model: peak degF}.
+
+    Not used by the forecast: the live model deliberately runs on `previous_day1`
+    because that is the only product with an archive long enough to calibrate
+    against.  A same-day run should be better, but there is no way to backtest
+    that claim -- so we record it beside every lock and build our own archive.
+    After a few weeks, compare `fresh_pred` against the day-ahead prediction on
+    the same days and switch if it wins.  See project_bluish_kalshi_accuracy.
+    """
+    u = ('https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f'
+         '&hourly=temperature_2m&models=%s&forecast_days=1'
+         '&temperature_unit=fahrenheit&timezone=America%%2FNew_York'
+         % (CP_LAT, CP_LON, ','.join(MODELS)))
+    h = get_json(u, timeout=90)['hourly']
+    out = {}
+    for m in MODELS:
+        v = [x for i, x in enumerate(h.get('temperature_2m_' + m) or [])
+             if x is not None and int(h['time'][i][11:13]) >= hour]
+        if v:
+            out[m] = round(max(v), 2)
+    return out
+
+
 def biases_factory(fcm, daily):
     """-> f(prior_days) giving each model's mean (peak - actual) over them."""
     def f(prior):
@@ -491,6 +515,12 @@ def main():
     sd, nsd = spread(res, now.hour)
     sd_lock, _ = spread(residuals(fcm, bias_of, daily, obh, LOCK_HOUR, tkey), LOCK_HOUR)
 
+    try:
+        fresh_peaks = fresh_runs(hr0)
+    except Exception as e:
+        fresh_peaks = None
+        print('fresh runs unavailable: %s' % e)
+
     ps = distribution(rows, pred, sd, obs_far)
     best = max(range(len(rows)), key=lambda i: ps[i])
     mbest = max(range(len(rows)), key=lambda i: rows[i]['mid'])
@@ -512,12 +542,25 @@ def main():
         entry = {'date': tkey, 'event': event_ticker(today)}
         hist[tkey] = entry
     def make_lock():
+        fresh = fresh_peaks or {}
+        fadj_fresh = None
+        if fresh:
+            v = [fresh[m] - biases[m] for m in fresh if biases.get(m) is not None]
+            if v:
+                fadj_fresh = statistics.mean(v)
+                if yday is not None:
+                    fadj_fresh -= SWING_DAMP * max(0.0, fadj_fresh - yday)
+                if obs_far is not None:
+                    fadj_fresh = max(fadj_fresh, obs_far)
         return {
             'at': now.strftime('%Y-%m-%dT%H:%M') + ' ET',
             'pick': rows[best]['label'], 'ticker': rows[best]['ticker'],
             'p': round(ps[best], 4), 'pred': round(pred, 2), 'sd': sd,
             'bias': round(bias, 2), 'obs_at_lock': obs_far,
             'market_pick': rows[mbest]['label'], 'market_p': rows[mbest]['mid'],
+            # recorded, not used -- see fresh_runs()
+            'fresh_peaks': fresh or None,
+            'fresh_pred': round(fadj_fresh, 2) if fadj_fresh is not None else None,
             # bounds are stored with the lock so a past day can be scored even
             # if the live ladder has since changed shape
             'ladder': [{'label': r['label'], 'lo': r['lo'], 'hi': r['hi'],
