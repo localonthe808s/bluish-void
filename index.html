@@ -48523,7 +48523,17 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       setSrc(inkU, inkU); show(true);
     }
     else {
-      if (bm){ bm.style.mixBlendMode = 'screen'; bm.style.opacity = '.85'; }
+      /* NATIONWIDE RUNS ON OUR OWN MAP (2026-09-04), the same contract THE
+         CITY uses one scale in: the map opaque under the echoes and ghosted
+         back over them, NOT screen-blended. Screen blend exists to lift a
+         plain dark basemap's labels through the radar; against a map with a
+         lit hillshade and a seafloor in it, every slope glows and the echoes
+         wash out. LOCAL keeps the screen blend - it has no terrain. */
+      var isConusView = (mode === 'conus');
+      if (bm){
+        bm.style.mixBlendMode = isConusView ? 'normal' : 'screen';
+        bm.style.opacity = isConusView ? '.38' : '.85';
+      }
       var wantArea = fcastState.area;
       var cached = window._staBasemap[lbox.sid];
       if (cached){ setSrc(cached); show(true); }
@@ -48531,7 +48541,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         show(false);   // radar plays on the plain backdrop while tiles stitch (~1s)
         _stitchBasemap(lbox, function(u){
           if (u && fcastState.range === 'live' && fcastState.area === wantArea){ setSrc(u); show(true); }
-        });
+        }, isConusView ? window.BV_MAP_FLAVOR_CONTINENTAL : null,
+           null,
+           isConusView && window.BV_CONTINENTAL ? window.BV_CONTINENTAL.roads : null,
+           isConusView && window.BV_CONTINENTAL ? window.BV_CONTINENTAL.bounds : null,
+           isConusView ? '/city_terrain_natl.png?v=1' : null);
       }
     }
     var srcName = mode === 'conus' ? 'NOAA MRMS composite'
@@ -48674,7 +48688,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
      catch. Static takes plain {x: lon, y: lat} corners and derives its zoom from
      the longitude span and the pixel width, so the centre latitude has to come
      from the MERCATOR midpoint (averaging the two latitudes bends the result). */
-  function _stitchBasemapVector(box, cb, flavor, labelNames, roadKinds, bKinds){
+  function _stitchBasemapVector(box, cb, flavor, labelNames, roadKinds, bKinds, terrainUrl){
     try {
       if (typeof protomapsL === 'undefined' || !window.BV_MAP_FLAVOR) { cb(null); return; }
       var R = 6378137, PI = Math.PI;
@@ -48749,16 +48763,52 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           return out;
         });
       }
-      var st = new protomapsL.Static({
-        url: window.BV_BASEMAP_URL,
-        paintRules: pr,
-        labelRules: lr,
-        backgroundColor: F.background,
-        maxDataZoom: 9
-      });
       var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
       var ctx = cv.getContext('2d');
-      st.drawContextBounds(ctx, { x: lon0, y: latMid }, { x: lon1, y: latMid }, W, H)
+      /* OUR OWN TERRAIN UNDER THE LINE WORK (2026-09-04). When a view passes
+         terrainUrl, the baked continental map — seafloor, hillshade, parks,
+         rivers, watershed divides — is drawn first and the vector pass is cut
+         down to roads, boundaries and labels on top of it. Same idea THE CITY
+         already uses, one scale out.
+         The raster covers the whole BV_CONTINENTAL box, so any sub-box of it
+         is a source-rect crop; both are mercator, so the crop is exact. It is
+         same-origin, which matters — a tainted canvas cannot toDataURL. */
+      var wantT = !!terrainUrl && !!(window.BV_CONTINENTAL && window.BV_CONTINENTAL.box);
+      var prep = new Promise(function(done){
+        if (!wantT) { done(false); return; }
+        var T = window.BV_CONTINENTAL.box;
+        if (box.X0 < T.X0 || box.X1 > T.X1 || box.Y0 < T.Y0 || box.Y1 > T.Y1) { done(false); return; }
+        var img = new Image();
+        img.onload = function(){
+          try {
+            var iw = img.naturalWidth, ih = img.naturalHeight;
+            ctx.drawImage(img,
+              (box.X0 - T.X0) / (T.X1 - T.X0) * iw,
+              (T.Y1 - box.Y1) / (T.Y1 - T.Y0) * ih,
+              (box.X1 - box.X0) / (T.X1 - T.X0) * iw,
+              (box.Y1 - box.Y0) / (T.Y1 - T.Y0) * ih,
+              0, 0, W, H);
+            done(true);
+          } catch(e){ done(false); }
+        };
+        /* if it will not load we keep the ordinary vector basemap rather than
+           a canvas with line work floating on nothing */
+        img.onerror = function(){ done(false); };
+        img.src = terrainUrl;
+      });
+      prep.then(function(gotTerrain){
+        var pr2 = gotTerrain
+          ? pr.filter(function(r){ return r.dataLayer === 'roads' || r.dataLayer === 'boundaries'; })
+          : pr;
+        var st = new protomapsL.Static({
+          url: window.BV_BASEMAP_URL,
+          paintRules: pr2,
+          labelRules: lr,
+          backgroundColor: gotTerrain ? undefined : F.background,
+          maxDataZoom: 9
+        });
+        return st.drawContextBounds(ctx, { x: lon0, y: latMid }, { x: lon1, y: latMid }, W, H);
+      })
         .then(function(){
           try {
             var u = cv.toDataURL('image/jpeg', 0.82);
@@ -48768,11 +48818,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         .catch(function(){ cb(null); });
     } catch(e){ cb(null); }
   }
-  function _stitchBasemap(box, cb, flavor, labelNames, roadKinds, bKinds){
+  function _stitchBasemap(box, cb, flavor, labelNames, roadKinds, bKinds, terrainUrl){
     _stitchBasemapVector(box, function(u){
       if (u) { cb(u); return; }
       _stitchBasemapRaster(box, cb);
-    }, flavor, labelNames, roadKinds, bKinds);
+    }, flavor, labelNames, roadKinds, bKinds, terrainUrl);
   }
   function _stitchBasemapRaster(box, cb){
     if (window._staBasemap[box.sid]){ cb(window._staBasemap[box.sid]); return; }
