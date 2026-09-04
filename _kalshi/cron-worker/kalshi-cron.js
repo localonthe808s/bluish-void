@@ -79,14 +79,42 @@ export default {
   async fetch(request, env) {
     // Status only. This deliberately cannot trigger a run: a public endpoint that
     // fires CI is an open invitation, and the cron is the point.
+    //
+    // The token is CHECKED, not merely counted. A token that has expired -- these
+    // are issued with a fixed lifetime -- would still be "configured", so a
+    // presence check would read healthy while every dispatch quietly 401s. One
+    // read-only call against the workflow answers whether it actually works.
+    let token = env.GH_TOKEN ? 'set, but unverified' : 'MISSING';
+    let healthy = false;
+    if (env.GH_TOKEN) {
+      try {
+        const r = await fetch(
+          `https://api.github.com/repos/${OWNER}/${REPO}/actions/workflows/${WORKFLOW}`,
+          { headers: {
+              'Authorization': `Bearer ${env.GH_TOKEN}`,
+              'Accept': 'application/vnd.github+json',
+              'User-Agent': 'bluishvoid-kalshi-cron'
+          } });
+        healthy = r.ok;
+        token = r.ok ? 'valid'
+              : (r.status === 401 ? 'REJECTED - expired or revoked'
+              : r.status === 404 ? 'REJECTED - no access to this repo/workflow'
+              : `REJECTED - http ${r.status}`);
+      } catch (e) {
+        token = `could not be checked: ${e}`;
+      }
+    }
     const body = {
       worker: 'kalshi-cron',
+      healthy,
+      token,
       dispatches: `${OWNER}/${REPO} :: ${WORKFLOW} @ ${REF}`,
-      token_configured: Boolean(env.GH_TOKEN),
+      schedule_utc: ['5 12-23 * * *', '5 0-4 * * *'],
       now_utc: new Date().toISOString(),
-      note: 'Triggering is cron-only. Watch dispatches with `wrangler tail`.'
+      note: 'Triggering is cron-only. Runs appear at github.com/' + OWNER + '/' + REPO + '/actions'
     };
     return new Response(JSON.stringify(body, null, 2), {
+      status: healthy ? 200 : 503,
       headers: { 'content-type': 'application/json; charset=utf-8' }
     });
   }
