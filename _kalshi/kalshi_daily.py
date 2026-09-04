@@ -87,8 +87,18 @@ FINAL_HOUR = 18                           # the actionable call, still 6 h befor
 # runs rather than picked by score, so there is no selection built in.  NBM is
 # NOAA's own blend, the closest public thing to what the market's providers use.
 # meteofrance_seamless is deliberately excluded -- clearly worst at MAE 2.19.
-MODELS = ['ncep_nbm_conus', 'ecmwf_ifs025', 'gfs_seamless',
+MODELS = ['ncep_hrrr_conus', 'ncep_nbm_conus', 'ecmwf_ifs025', 'gfs_seamless',
           'icon_seamless', 'gem_seamless']
+# NOAA's two run over CONUS only and answer HTTP 400 anywhere else. The per-model
+# guard would catch that, but it would burn three retries with backoff on a
+# request that can never succeed, every run, for any market outside the US.
+CONUS_ONLY = {'ncep_hrrr_conus', 'ncep_nbm_conus'}
+
+
+def models_for(cfg):
+    """The models that actually cover this market's location."""
+    inside = (20.0 <= cfg['lat'] <= 55.0) and (-130.0 <= cfg['lon'] <= -60.0)
+    return [m for m in MODELS if inside or m not in CONUS_ONLY]
 
 SWING_DAMP = 0.10         # see point_forecast(): models overdo warm-ups
 RESID_M = 45              # days of recent residuals behind the spread estimate
@@ -344,11 +354,11 @@ def fresh_runs(cfg, hour):
          '&hourly=temperature_2m_previous_day1&past_days=1&forecast_days=1'
          '&temperature_unit=fahrenheit&timezone=%s&models=%s'
          % (cfg['lat'], cfg['lon'],
-            urllib.parse.quote(cfg.get('tz', 'America/New_York')), ','.join(MODELS)))
+            urllib.parse.quote(cfg.get('tz', 'America/New_York')), ','.join(models_for(cfg))))
     h = get_json(u, timeout=90)['hourly']
     today = local_now(cfg).date().isoformat()
     out = {}
-    for m in MODELS:
+    for m in models_for(cfg):
         key = 'temperature_2m_previous_day1_' + m
         col = h.get(key) or h.get('temperature_2m_previous_day1') or []
         v = [x for i, x in enumerate(col)
@@ -423,7 +433,7 @@ def residuals(fcm, biases_of, daily, obh, hour, today_key, h0_of):
     plus HOURLY_PEAK_OFFSET, since that stream reads low against the daily max
     the model is actually scored on.
     """
-    any_fc = fcm[MODELS[0]]
+    any_fc = fcm[sorted(fcm)[0]]
     keys = sorted(k for k in any_fc if k < today_key and k in daily
                   and len(any_fc[k]) >= 20 and len(obh.get(k, {})) >= 18)
     out = []
@@ -613,7 +623,7 @@ def run_market(cfg):
 
     span = RESID_M + BIAS_K + 6
     fcm = {}
-    for m in MODELS:
+    for m in models_for(cfg):
         try:
             fcm[m] = forecast_runs(cfg, span, m)
         except Exception as e:
