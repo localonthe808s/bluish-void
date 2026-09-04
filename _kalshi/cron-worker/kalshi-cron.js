@@ -1,0 +1,93 @@
+// Cloudflare Worker: a reliable clock for the Kalshi daily job.
+//
+// WHY THIS EXISTS.  GitHub queues scheduled workflows on a best-effort basis and
+// skips most of them under load: on the job's first day it fired 2 of ~10 slots,
+// and never once in the 6pm window that writes the day's final call. Cloudflare
+// cron triggers actually fire. So Cloudflare keeps the time and GitHub still does
+// the work.
+//
+// WHY IT DOES NOT DO THE WORK ITSELF.  The forecast lives in
+// _kalshi/kalshi_daily.py — five-model consensus, per-model rolling bias, a
+// measured spread, the climate-day floor. Re-implementing that in JS would fork
+// it, and the two copies would drift apart on the first change. This worker only
+// presses the button.
+//
+// SETUP (all in your hands, no secrets in this repo):
+//   1. Create a GitHub fine-grained personal access token
+//        Settings -> Developer settings -> Personal access tokens -> Fine-grained
+//        Repository access: only localonthe808s/bluish-void
+//        Repository permissions: Actions = Read and write   (nothing else)
+//   2. cd _kalshi/cron-worker && wrangler secret put GH_TOKEN
+//        (paste the token when prompted; it is stored by Cloudflare, never here)
+//   3. wrangler deploy
+//
+// Check it: GET the worker's URL for a status page. It never triggers anything —
+// an open trigger endpoint is an invitation to abuse — so use `wrangler tail` or
+// the Actions tab to watch the dispatches land.
+
+const OWNER = 'localonthe808s';
+const REPO = 'bluish-void';
+const WORKFLOW = 'kalshi-nyc.yml';
+const REF = 'main';
+
+async function dispatch(env) {
+  if (!env.GH_TOKEN) {
+    return { ok: false, status: 0, detail: 'GH_TOKEN secret is not set' };
+  }
+  const url = `https://api.github.com/repos/${OWNER}/${REPO}` +
+              `/actions/workflows/${WORKFLOW}/dispatches`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${env.GH_TOKEN}`,
+      'Accept': 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      // GitHub rejects API requests without one
+      'User-Agent': 'bluishvoid-kalshi-cron'
+    },
+    body: JSON.stringify({ ref: REF })
+  });
+  // 204 No Content is success here; anything else carries a reason worth logging
+  const detail = res.status === 204 ? '' : (await res.text()).slice(0, 300);
+  return { ok: res.status === 204, status: res.status, detail };
+}
+
+export default {
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil((async () => {
+      let r;
+      try {
+        r = await dispatch(env);
+      } catch (e) {
+        r = { ok: false, status: 0, detail: String(e) };
+      }
+      // One retry: a transient GitHub 5xx should not cost the hour, and the job
+      // is idempotent — a lock is written once and never rewritten.
+      if (!r.ok && r.status >= 500) {
+        await new Promise((s) => setTimeout(s, 4000));
+        try {
+          r = await dispatch(env);
+        } catch (e) {
+          r = { ok: false, status: 0, detail: String(e) };
+        }
+      }
+      console.log(`[kalshi-cron] ${event.cron} -> ${r.ok ? 'dispatched' : 'FAILED'} ` +
+                  `(http ${r.status}) ${r.detail}`);
+    })());
+  },
+
+  async fetch(request, env) {
+    // Status only. This deliberately cannot trigger a run: a public endpoint that
+    // fires CI is an open invitation, and the cron is the point.
+    const body = {
+      worker: 'kalshi-cron',
+      dispatches: `${OWNER}/${REPO} :: ${WORKFLOW} @ ${REF}`,
+      token_configured: Boolean(env.GH_TOKEN),
+      now_utc: new Date().toISOString(),
+      note: 'Triggering is cron-only. Watch dispatches with `wrangler tail`.'
+    };
+    return new Response(JSON.stringify(body, null, 2), {
+      headers: { 'content-type': 'application/json; charset=utf-8' }
+    });
+  }
+};
