@@ -7,23 +7,40 @@ Why a scheduled job rather than a browser fetch: Kalshi answers 403 to any
 request carrying an Origin header, and our proxy worker is 403'd too, so the
 page cannot reach the market live. It reads our own repo instead.
 
-THE MODEL (calibrated 2026-09-04 over 24 scored days, out of sample):
+THE MODEL
 
     pred = max( observed_high_so_far,  day_ahead_forecast_peak - bias )
 
   * bias is the mean (forecast peak - actual) over the previous 21 days,
-    using only days that had already been scored.  Open-Meteo runs ~2.3 degF
-    warm at Central Park; removing that is most of the skill.
-  * the observed-so-far term is a hard physical floor.  It is what collapses
-    the low brackets once the day is underway -- the market knew this and our
-    first naive distribution did not.
-  * an "intraday nudge" (carrying the morning's forecast error into the
-    afternoon) was tested and REJECTED: it made things worse, MAE 3.07 -> 3.54.
-    The morning error does not persist to the peak.  Do not re-add it.
+    using only days that had already been scored.  Open-Meteo runs warm at
+    Central Park; removing that is most of the skill.
+  * the observed-so-far term is a hard physical floor.  It is one-sided, so it
+    deliberately introduces a positive bias (+0.79 degF at noon) -- without it
+    the forecast is near-unbiased at -0.15 but MAE is far worse, 2.64 vs 1.98.
+    Do NOT "correct" that bias away; the floor is a constraint, not an error,
+    and the distribution is truncated at it instead.
+  * the spread is measured from the last 45 days of this model's own residuals
+    at the current hour, recomputed every run.  A fixed table cannot work: the
+    spread is strongly seasonal, SD 3.79 in March against 2.06 in August.
+  * REJECTED, do not re-add: an intraday nudge carrying the morning's forecast
+    error into the afternoon (MAE 3.07 -> 3.54; the morning error does not
+    persist to the peak), and a second-stage mean correction on the residuals
+    (worse in 4 of 5 months at full strength).
 
-  Measured at the noon lock: bias -0.42, MAE 1.24 degF, SD 1.65,
-  bracket accuracy 15/24 = 62%.  MAE is below the 2 degF bracket width,
-  which is the only reason this market is playable.
+  Verified by replaying this exact model on the 68 real Kalshi ladders and
+  scoring against the settlements themselves (2026-06-28..09-03):
+  bias +0.13, MAE 1.93 degF, 35/68 brackets, 16/43 on the bounded ones,
+  Brier 0.592 against 0.833 for a uniform guess.  Fixing the spread alone took
+  Brier from 0.628 to 0.592 and log loss from 1.309 to 1.134, with reliability
+  landing on the diagonal (stated 38% -> 38% actual, 70% -> 71%).
+
+SETTLEMENT: Central Park (CLINYC), reported in WHOLE degrees -- 1096 of 1114
+observations are integers.  So "84 to 85" means the reported integer is 84 or
+85, i.e. the true temperature lies in [83.5, 85.5).  Bracket edges are offset
+by half a degree accordingly; getting this wrong shifts every probability.
+
+Kalshi prices live in the *_dollars fields.  The legacy integer-cent fields
+(yes_bid, last_price) are present but always null -- do not read them.
 
 SETTLEMENT: Central Park (CLINYC), reported in WHOLE degrees -- 1096 of 1114
 observations are integers.  So "84 to 85" means the reported integer is 84 or
@@ -46,9 +63,14 @@ BIAS_K  = 21                              # days in the rolling bias window
 BIAS_MIN = 7                              # need this many before trusting it
 LOCK_HOUR = 12                            # noon ET: morning obs in hand, peak ahead
 
-# SD of (pred - actual) by hour of day, measured 2026-09-04 (see module docstring)
-SD_BY_HOUR = {8:2.23, 9:2.23, 10:2.19, 11:1.84, 12:1.65, 13:1.18, 14:1.00,
-              15:0.78, 16:0.69, 17:0.61, 18:0.58, 19:0.31, 20:0.10, 21:0.10, 22:0.10}
+RESID_M = 45              # days of recent residuals behind the spread estimate
+SD_FLOOR = 0.25
+# Fallback only, for the first runs before enough residuals accumulate. These
+# came from a 173-day fit; the live model prefers its own rolling estimate
+# because the spread is strongly seasonal (SD 3.8 in March, 2.1 in August), so
+# any fixed table is wrong for half the year.
+SD_FALLBACK = {8:3.06, 9:3.02, 10:2.99, 11:2.83, 12:2.64, 13:2.33, 14:2.11,
+               15:1.93, 16:1.83, 17:1.58, 18:1.25, 19:1.03, 20:0.89, 21:0.89, 22:0.89}
 
 
 def get(url, timeout=90, tries=3):
@@ -113,36 +135,42 @@ def fetch_market(ev):
 
 
 # ------------------------------------------------------------- observed ----
-def obs_today(day):
-    """Hourly Central Park observations for `day` (a date) -> {hour: maxF}."""
-    n = day + datetime.timedelta(days=1)
+# TRUTH SOURCE.  IEM's daily.json max_tmpf, rounded, landed in the bracket
+# Kalshi actually settled on **68 of 68** settled markets (2026-06-28..09-03).
+# It is also a RUNNING max during the current day, so the same field serves as
+# both the settlement truth and today's floor.
+#
+# Do NOT compute the max from the hourly asos.py stream: the routine METAR
+# misses the intra-hour peak and reads 1-2 degF LOW on 22 of 34 days (adding
+# report_type=1..4 does not fix it).  An earlier calibration built on that
+# stream reported MAE 1.54 / 56% when the truth was really MAE 1.93 / 49%.
+HOURLY_PEAK_OFFSET = 1.0     # median(daily.json - max hourly), for historic floors
+
+
+def daily_max_series():
+    """Every Central Park daily max IEM holds -> {'YYYY-MM-DD': degF}.
+
+    One call returns the whole archive (back to 1943), so history, the bias
+    window and scoring all come from a single request.
+    """
+    d = get_json('https://mesonet.agron.iastate.edu/api/1/daily.json'
+                 '?station=NYC&network=NY_ASOS', timeout=180)
+    return {r['date']: float(r['max_tmpf'])
+            for r in (d.get('data') or []) if r.get('max_tmpf') is not None}
+
+
+def obs_hourly_range(start, end):
+    """Hourly obs -> {'YYYY-MM-DD': {hour: degF}}, for historic running maxima."""
     u = ('https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station=NYC'
          '&data=tmpf&year1=%d&month1=%d&day1=%d&year2=%d&month2=%d&day2=%d'
          '&tz=America%%2FNew_York&format=onlycomma&missing=empty&trace=empty'
-         % (day.year, day.month, day.day, n.year, n.month, n.day))
-    rows = list(csv.DictReader(io.StringIO(get(u, timeout=120).decode())))
-    h = {}
-    key = day.isoformat()
-    for r in rows:
-        if not r.get('tmpf') or not r['valid'].startswith(key):
-            continue
-        hh = int(r['valid'][11:13])
-        h[hh] = max(h.get(hh, -99.0), float(r['tmpf']))
-    return h
-
-
-def obs_daily_max(day):
-    """Official-ish daily max for a past day, or None if not published yet."""
-    try:
-        d = get_json('https://mesonet.agron.iastate.edu/api/1/daily.json'
-                     '?station=NYC&network=NY_ASOS&date=%s' % day.isoformat(),
-                     timeout=60)
-        rows = d.get('data') or []
-        if rows and rows[0].get('max_tmpf') is not None:
-            return float(rows[0]['max_tmpf'])
-    except Exception:
-        pass
-    return None
+         % (start.year, start.month, start.day, end.year, end.month, end.day))
+    out = collections.defaultdict(dict)
+    for r in csv.DictReader(io.StringIO(get(u, timeout=180).decode())):
+        if r.get('tmpf'):
+            d, hh = r['valid'][:10], int(r['valid'][11:13])
+            out[d][hh] = max(out[d].get(hh, -99.0), float(r['tmpf']))
+    return out
 
 
 # ------------------------------------------------------------- forecast ----
@@ -165,20 +193,53 @@ def forecast_runs(past_days):
     return out
 
 
-def rolling_bias(fc, today_key):
+def rolling_bias(fc, daily, today_key):
     """mean(forecast peak - actual) over prior scored days. None if too few."""
     keys = sorted(k for k in fc if k < today_key)[-BIAS_K:]
     errs = []
     for k in keys:
         if len(fc[k]) < 20:
             continue
-        a = obs_daily_max(datetime.date(*map(int, k.split('-'))))
+        a = daily.get(k)
         if a is None:
             continue
         errs.append(max(fc[k].values()) - a)
     if len(errs) < BIAS_MIN:
         return None, len(errs)
     return statistics.mean(errs), len(errs)
+
+
+def residuals(fc, daily, obh, hour, today_key):
+    """Replay the model on past days at `hour` -> [(date, pred - actual)].
+
+    This is what the spread is measured from, so it is recomputed every run and
+    tracks the season on its own.  Historic floors come from the hourly stream
+    plus HOURLY_PEAK_OFFSET, since that stream reads low against the daily max
+    the model is actually scored on.
+    """
+    keys = sorted(k for k in fc if k < today_key and k in daily
+                  and len(fc[k]) >= 20 and len(obh.get(k, {})) >= 18)
+    out = []
+    for i, k in enumerate(keys):
+        prior = keys[max(0, i - BIAS_K):i]
+        if len(prior) < BIAS_MIN:
+            continue
+        b = statistics.mean(max(fc[p].values()) - daily[p] for p in prior)
+        rest = [v for h, v in fc[k].items() if h >= hour]
+        if not rest:
+            continue
+        run = max([v for h, v in obh[k].items() if h <= hour] or [-99.0])
+        floor = run + HOURLY_PEAK_OFFSET if run > -90 else -99.0
+        out.append((k, max(floor, max(rest) - b) - daily[k]))
+    return out
+
+
+def spread(res, hour):
+    """Standard deviation of the recent residuals; fallback until enough exist."""
+    v = [e for _, e in res[-RESID_M:]]
+    if len(v) < 20:
+        return SD_FALLBACK.get(hour, 3.06 if hour < 8 else 0.89), len(v)
+    return max(statistics.stdev(v), SD_FLOOR), len(v)
 
 
 # ---------------------------------------------------------- probability ----
@@ -255,7 +316,7 @@ def fetch_settled(limit=400):
     return ev
 
 
-def backfill(fc, settled):
+def backfill(fc, daily, obh, settled, sd_lock):
     """What we WOULD have locked at noon on each past day, scored.
 
     Uses only information available at noon that day: the day-ahead run and a
@@ -271,11 +332,8 @@ def backfill(fc, settled):
             continue
         by_date[d.isoformat()] = lad
 
-    actual = {}
     def act(k):
-        if k not in actual:
-            actual[k] = obs_daily_max(datetime.date(*map(int, k.split('-'))))
-        return actual[k]
+        return daily.get(k)
 
     keys = sorted(k for k in by_date if k in fc and len(fc[k]) >= 20)
     out = []
@@ -288,18 +346,15 @@ def backfill(fc, settled):
         if len(errs) < BIAS_MIN:
             continue
         b = statistics.mean(errs)
-        day = datetime.date(*map(int, k.split('-')))
-        try:
-            oh = obs_today(day)
-        except Exception:
-            continue
-        obs = max([v for h, v in oh.items() if h <= LOCK_HOUR] or [-99.0])
+        oh = obh.get(k) or {}
+        run = max([v for h, v in oh.items() if h <= LOCK_HOUR] or [-99.0])
+        obs = run + HOURLY_PEAK_OFFSET if run > -90 else None
         rest = [v for h, v in fc[k].items() if h >= LOCK_HOUR]
         if not rest:
             continue
-        pred = max(obs, max(rest) - b)
+        pred = max([x for x in (obs, max(rest) - b) if x is not None])
         lad = by_date[k]
-        ps = distribution(lad, pred, SD_BY_HOUR[LOCK_HOUR], obs)
+        ps = distribution(lad, pred, sd_lock, obs)
         bi = max(range(len(lad)), key=lambda i: ps[i])
         ai = which(lad, a)
         truth = next((r['label'] for r in lad if r['yes']), None) \
@@ -311,7 +366,7 @@ def backfill(fc, settled):
             'err': round(pred - a, 2),
             'lock': {'at': k + 'T12:00 ET (backtest)', 'pick': lad[bi]['label'],
                      'p': round(ps[bi], 4), 'pred': round(pred, 2),
-                     'sd': SD_BY_HOUR[LOCK_HOUR], 'bias': round(b, 2),
+                     'sd': round(sd_lock, 2), 'bias': round(b, 2),
                      'obs_at_lock': obs, 'market_pick': None, 'market_p': None,
                      'ladder': [{'label': r['label'], 'lo': r['lo'], 'hi': r['hi'],
                                  'ours': round(p, 4), 'market': None}
@@ -331,15 +386,20 @@ def main():
         print('no open market for %s' % event_ticker(today))
         return 0
 
-    fc = forecast_runs(BIAS_K + 3)
-    bias, nb = rolling_bias(fc, tkey)
+    span = RESID_M + BIAS_K + 6
+    fc = forecast_runs(span)
+    daily = daily_max_series()
+    obh = obs_hourly_range(today - datetime.timedelta(days=span), today)
+
+    bias, nb = rolling_bias(fc, daily, tkey)
     if bias is None:
         print('not enough scored history for a bias (%d days)' % nb)
         return 0
 
-    oh = obs_today(today)
-    obs_far = max(oh.values()) if oh else None
-    obs_hr = max(oh) if oh else None
+    # today's floor comes straight from the running daily max -- the same field
+    # the market settles on, so no offset is needed here
+    obs_far = daily.get(tkey)
+    obs_hr = max(obh.get(tkey) or {0: 0}) if obh.get(tkey) else None
     rest = [v for h, v in (fc.get(tkey) or {}).items() if h >= (obs_hr if obs_hr is not None else 0)]
     fpeak = max(rest) if rest else None
 
@@ -348,7 +408,10 @@ def main():
         print('no forecast and no observations yet')
         return 0
     pred = max(cands)
-    sd = SD_BY_HOUR.get(now.hour, 2.23 if now.hour < 8 else 0.10)
+    res = residuals(fc, daily, obh, now.hour, tkey)
+    sd, nsd = spread(res, now.hour)
+    res_lock = residuals(fc, daily, obh, LOCK_HOUR, tkey)
+    sd_lock, _ = spread(res_lock, LOCK_HOUR)
 
     ps = distribution(rows, pred, sd, obs_far)
     best = max(range(len(rows)), key=lambda i: ps[i])
@@ -359,7 +422,7 @@ def main():
 
     if '--backfill' in sys.argv:
         added = 0
-        for h in backfill(fc, fetch_settled()):
+        for h in backfill(fc, daily, obh, fetch_settled(), sd_lock):
             if h['date'] not in hist:
                 hist[h['date']] = h
                 added += 1
@@ -391,7 +454,7 @@ def main():
     for k, h in hist.items():
         if k >= tkey or 'lock' not in h or h.get('actual') is not None:
             continue
-        a = obs_daily_max(datetime.date(*map(int, k.split('-'))))
+        a = daily.get(k)
         if a is None:
             continue
         lad = h['lock'].get('ladder') or []
@@ -440,8 +503,11 @@ def main():
     record['vs_market'] = {'n': len(h2h),
                            'ours': sum(1 for h in h2h if h.get('hit')),
                            'market': sum(1 for h in h2h if h.get('market_hit'))}
-    record['calibrated'] = {'mae': 1.24, 'sd': 1.65, 'bracket': '15/24',
-                            'window': '2026-08-04..2026-09-03', 'lock_hour': LOCK_HOUR}
+    # measured by replaying this exact model on the 68 real Kalshi ladders,
+    # scored against the settlements themselves (2026-06-28..09-03)
+    record['calibrated'] = {'mae': 1.93, 'bracket': '35/68', 'interior': '16/43',
+                            'brier': 0.592, 'window': '2026-06-28..2026-09-03',
+                            'lock_hour': LOCK_HOUR}
 
     doc = {
         'updated': now.strftime('%Y-%m-%dT%H:%M') + ' ET',
@@ -449,7 +515,7 @@ def main():
             'date': tkey, 'event': event_ticker(today),
             'close': rows[0]['close'], 'settles': 'Central Park (CLINYC), whole degrees',
             'pred': round(pred, 2), 'sd': sd, 'bias': round(bias, 2),
-            'bias_days': nb,
+            'bias_days': nb, 'sd_days': nsd,
             'obs_so_far': obs_far, 'obs_through': obs_hr,
             'fc_peak': round(fpeak, 2) if fpeak is not None else None,
             'ours': [round(p, 4) for p in ps],
