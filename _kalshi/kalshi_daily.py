@@ -76,7 +76,7 @@ MARKETS = [
     },
 ]
 
-BIAS_K  = 21                              # days in the rolling bias window
+BIAS_K  = 30                              # days in the rolling bias window
 BIAS_MIN = 7                              # need this many before trusting it
 LOCK_HOUR = 12                            # noon ET: morning obs in hand, peak ahead
 FINAL_HOUR = 18                           # the actionable call, still 6 h before close
@@ -90,15 +90,18 @@ FINAL_HOUR = 18                           # the actionable call, still 6 h befor
 MODELS = ['ncep_nbm_conus', 'ecmwf_ifs025', 'gfs_seamless',
           'icon_seamless', 'gem_seamless']
 
-SWING_DAMP = 0.25         # see point_forecast(): models overdo warm-ups
+SWING_DAMP = 0.10         # see point_forecast(): models overdo warm-ups
 RESID_M = 45              # days of recent residuals behind the spread estimate
 SD_FLOOR = 0.25
 # Fallback only, for the first runs before enough residuals accumulate. These
 # came from a 173-day fit; the live model prefers its own rolling estimate
 # because the spread is strongly seasonal (SD 3.8 in March, 2.1 in August), so
 # any fixed table is wrong for half the year.
-SD_FALLBACK = {8:3.06, 9:3.02, 10:2.99, 11:2.83, 12:2.64, 13:2.33, 14:2.11,
-               15:1.93, 16:1.83, 17:1.58, 18:1.25, 19:1.03, 20:0.89, 21:0.89, 22:0.89}
+# Refit 2026-09-04 on 607 days spanning all twelve months, on the five-model
+# consensus. The previous table came from ONE model over 173 spring-summer days
+# and was far too wide -- 2.64 at noon where the consensus achieves 1.76.
+SD_FALLBACK = {8:2.03, 9:2.02, 10:1.99, 11:1.93, 12:1.76, 13:1.51, 14:1.33,
+               15:1.19, 16:1.13, 17:1.03, 18:0.91, 19:0.81, 20:0.71, 21:0.68, 22:0.67}
 
 
 def get(url, timeout=90, tries=3):
