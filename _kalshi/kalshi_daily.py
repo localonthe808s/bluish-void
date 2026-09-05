@@ -968,17 +968,49 @@ def decode_ticker(tk, lookup):
     return d, int(lo) if lo is not None else None, int(hi) if hi is not None else None
 
 
-def fetch_fills(cfg, lookup):
-    """This market's fills, as trade rows in the same shape as trades.csv."""
+_FILLS_CACHE = []          # one page-through per process, shared by all markets
+
+
+def _all_fills():
+    """Every fill on the account, fetched ONCE. Called per market otherwise,
+    which would page through the whole history seven times a run for no reason
+    and for no thanks from the rate limiter."""
+    if _FILLS_CACHE:
+        return _FILLS_CACHE[0]
     sign = _signer()
     if not sign:
+        _FILLS_CACHE.append(None)
         return None
-    out, cursor = [], None
+    got, cursor = [], None
     try:
         for _ in range(20):                       # 200 a page; plenty of history
             params = '?limit=200' + ('&cursor=' + cursor if cursor else '')
             j = portfolio_get(sign, '/trade-api/v2/portfolio/fills', params)
-            for f in j.get('fills') or []:
+            got += j.get('fills') or []
+            cursor = j.get('cursor')
+            if not cursor:
+                break
+        print('portfolio: %d fills on the account' % len(got))
+    except urllib.error.HTTPError as e:
+        print('portfolio: HTTP %s -- check the key id, that the PEM matches it, '
+              'and that the key has the read scope' % e.code)
+        got = None
+    except Exception as e:
+        print('portfolio: %s: %s' % (type(e).__name__, e))
+        got = None
+    _FILLS_CACHE.append(got)
+    return got
+
+
+def fetch_fills(cfg, lookup):
+    """This market's fills, as trade rows in the same shape as trades.csv."""
+    fills = _all_fills()
+    if fills is None:
+        return None
+    out = []
+    try:
+        if True:
+            for f in fills:
                 tk = f.get('ticker') or ''
                 if not tk.startswith(cfg['series'] + '-'):
                     continue
@@ -1000,17 +1032,11 @@ def fetch_fills(cfg, lookup):
                             'contracts': float(f.get('count') or 0),
                             'fee': None, 'note': 'api',
                             'id': f.get('trade_id') or f.get('order_id')})
-            cursor = j.get('cursor')
-            if not cursor:
-                break
-    except urllib.error.HTTPError as e:
-        print('portfolio: HTTP %s -- check the key id and that the PEM matches it'
-              % e.code)
-        return None
     except Exception as e:
         print('portfolio: %s: %s' % (type(e).__name__, e))
         return None
-    print('%s portfolio: %d fills imported' % (cfg['key'], len(out)))
+    if out:
+        print('%s portfolio: %d fills' % (cfg['key'], len(out)))
     return out
 
 
