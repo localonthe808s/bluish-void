@@ -1087,8 +1087,22 @@ def run_market(cfg):
         except Exception as e:
             print('settled lookup failed (%s) -- falling back to observations' % e)
 
+    # PROVISIONAL SCORES HAVE TO BE REVISITED.  The rulebook resolves on "the
+    # first official non-preliminary report", and revisions after that are
+    # explicitly not counted -- but a day is often scored here hours before
+    # Kalshi settles it, off an observation that can still be revised. Freezing
+    # that on first sight, which is what this loop did, meant a provisional
+    # score stood forever even once the exchange said otherwise.
+    #
+    # So: a day scored from a SETTLEMENT is final and never touched again. A day
+    # scored from an OBSERVATION is provisional and is re-examined every run
+    # until the settlement appears, then rewritten to agree with it.
     for k, h in hist.items():
-        if k >= tkey or 'lock' not in h or h.get('actual') is not None:
+        if k >= tkey or 'lock' not in h:
+            continue
+        was = h.get('actual')
+        if was is not None and not (h.get('truth_source') == 'observed'
+                                    and settled_by_date.get(k)):
             continue
         a = daily.get(k)
         lad = h['lock'].get('ladder') or []
@@ -1103,12 +1117,25 @@ def run_market(cfg):
             if ours is None:
                 continue                   # neither settlement nor observation yet
             truth, h['truth_source'] = ours, 'observed'
+            h['provisional'] = True
         else:
             h['truth_source'] = 'settlement'
+            h.pop('provisional', None)
             if ours is not None and ours != truth:
                 h['feed_mismatch'] = {'observed': a, 'observed_bracket': ours}
                 print('FEED MISMATCH %s: settled %s but our observation %.1f says %s'
                       % (k, truth, a, ours))
+        # what an upgrade actually changed, kept so a corrected day is visible
+        # rather than silently different from what the record showed yesterday
+        if was is not None:
+            if h.get('actual_bracket') != truth or (a is not None and a != was):
+                h['revised'] = {'from_bracket': h.get('actual_bracket'),
+                                'from_actual': was, 'was_hit': h.get('hit')}
+                print('REVISED %s: provisional %s (%.1f) -> settled %s (%.1f)'
+                      % (k, h.get('actual_bracket'), was, truth,
+                         a if a is not None else float('nan')))
+            else:
+                print('confirmed %s: settlement agrees with the provisional score' % k)
         h['actual'] = a
         h['actual_bracket'] = truth
         h['hit'] = (h['lock']['pick'] == h['actual_bracket'])
@@ -1127,6 +1154,16 @@ def run_market(cfg):
               % (k, a, h['actual_bracket'], h['lock']['pick'],
                  'HIT' if h['hit'] else 'miss', h['lock']['market_pick'],
                  'HIT' if h['market_hit'] else 'miss'))
+
+    # normalise the flag across days scored before it existed, so "could this
+    # still change" is answerable from the record alone
+    for h in hist.values():
+        if h.get('actual') is None or h.get('backtest'):
+            continue
+        if h.get('truth_source') == 'observed':
+            h['provisional'] = True
+        else:
+            h.pop('provisional', None)
 
     scored = [h for h in hist.values() if h.get('actual') is not None and 'lock' in h]
 
@@ -1171,8 +1208,11 @@ def run_market(cfg):
                            'market': sum(1 for h in h2h if h.get('market_hit'))}
     # P&L, on the same on-time-price rule as the head-to-head: a bet is only
     # real if the quote it was struck at was live when the lock was written.
+    # a provisional day's outcome can still be rewritten by the settlement, and
+    # the P&L is the one number that should never move backwards, so it counts
+    # only days the exchange has actually resolved
     money = [h for h in live
-             if h.get('bet_result') and priced_on_time(h)]
+             if h.get('bet_result') and priced_on_time(h) and not h.get('provisional')]
     record['money'] = {
         'n': len(money),
         'wins': sum(1 for h in money if h['bet_result']['won']),
@@ -1216,6 +1256,9 @@ def run_market(cfg):
     fin = [h for h in scored if h.get('final_hit') is not None]
     record['final'] = {'n': len(fin), 'hits': sum(1 for h in fin if h['final_hit']),
                        'hour': FINAL_HOUR}
+    # days scored off an observation because Kalshi had not settled them yet.
+    # They are in the accuracy tally but can still be rewritten.
+    record['provisional'] = sum(1 for h in scored if h.get('provisional'))
     # measured by replaying this exact model on the 68 real Kalshi ladders,
     # scored against the settlements themselves (2026-06-28..09-03)
     record['calibrated'] = {'mae': 1.44, 'bracket': '40/68', 'brier': 0.491,
