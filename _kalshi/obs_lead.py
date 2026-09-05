@@ -20,6 +20,62 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TRAIL = os.path.join(HERE, 'obs_trail')
 
 
+def pull():
+    """Fold the worker's trail into the local one, if it is configured.
+
+    The Mac's agent and the Cloudflare worker write the same row shape, so both
+    land in the same files and neither is authoritative. Rows are de-duplicated
+    on (t, key), which is exactly the identity of a snapshot, so pulling twice
+    costs nothing and a laptop tick that overlaps a worker tick is not counted
+    twice.
+
+    Configure with, e.g.:
+        export BV_OBS_URL=https://bluish-void-kalshi-cron.<sub>.workers.dev/obs
+        export BV_OBS_TOKEN=<the PANEL_TOKEN>
+    """
+    url, tok = os.environ.get('BV_OBS_URL'), os.environ.get('BV_OBS_TOKEN')
+    if not url:
+        return 0
+    import urllib.request
+    have = set()
+    for r in load():
+        have.add((r.get('t'), r.get('key')))
+    since = max((t for t, _ in have if t), default='')
+    req = urllib.request.Request(
+        url + ('&' if '?' in url else '?') + 'since=' + since,
+        headers={'Authorization': 'Bearer %s' % (tok or '')})
+    try:
+        body = urllib.request.urlopen(req, timeout=60).read().decode()
+    except Exception as e:
+        print('  (worker pull failed: %s)' % str(e)[:80])
+        return 0
+    add = []
+    for line in body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if (r.get('t'), r.get('key')) in have:
+            continue
+        have.add((r.get('t'), r.get('key')))
+        add.append(r)
+    if not add:
+        return 0
+    os.makedirs(TRAIL, exist_ok=True)
+    by_month = collections.defaultdict(list)
+    for r in add:
+        by_month[str(r.get('t', ''))[:7] or 'unknown'].append(r)
+    for month, rs in by_month.items():
+        with open(os.path.join(TRAIL, month + '.jsonl'), 'a') as fh:
+            for r in sorted(rs, key=lambda x: (x.get('t', ''), x.get('key', ''))):
+                fh.write(json.dumps(r, sort_keys=True) + '\n')
+    print('  pulled %d new rows from the worker' % len(add))
+    return len(add)
+
+
 def load(only=None):
     rows = []
     for p in sorted(glob.glob(os.path.join(TRAIL, '*.jsonl'))):
@@ -44,6 +100,7 @@ def ts(r):
 
 def main():
     only = sys.argv[1] if len(sys.argv) > 1 else None
+    pull()
     rows = load(only)
     if not rows:
         print('no trail yet -- is the agent loaded?  launchctl list | grep obslog')

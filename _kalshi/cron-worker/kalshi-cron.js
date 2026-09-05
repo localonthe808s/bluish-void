@@ -145,6 +145,47 @@ function cors(origin) {
 }
 const ALLOWED = 'https://bluishvoid.com';
 
+async function obsDump(request, env) {
+  // Behind the same token as /positions. The trail is not secret, but an open
+  // endpoint that lists a KV namespace is a free way for anyone to burn the
+  // day's read quota and blind the study.
+  const url = new URL(request.url);
+  const given = (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '')
+                || url.searchParams.get('t') || '';
+  if (!tokenOk(given, env.PANEL_TOKEN)) {
+    return new Response(JSON.stringify({ error: 'unauthorized' }), {
+      status: 401, headers: { 'content-type': 'application/json', ...cors(ALLOWED) } });
+  }
+  if (!env.OBS) {
+    return new Response(JSON.stringify({ error: 'no KV binding' }), {
+      status: 503, headers: { 'content-type': 'application/json', ...cors(ALLOWED) } });
+  }
+  // `since` is a plain ISO prefix, so obs_lead.py can pull only what it has not
+  // seen. KV keys sort lexicographically and the timestamp does too.
+  const since = url.searchParams.get('since') || '';
+  const out = [];
+  let cursor;
+  do {
+    const page = await env.OBS.list({ prefix: 'obs:', cursor, limit: 1000 });
+    for (const k of page.keys) {
+      if (since && k.name <= `obs:${since}`) continue;
+      out.push(k.name);
+    }
+    cursor = page.list_complete ? null : page.cursor;
+  } while (cursor && out.length < 4000);
+  out.sort();
+  // JSONL, matching what obs_log.py writes locally, so one reader handles both.
+  const body = [];
+  for (const name of out.slice(0, 2000)) {
+    const v = await env.OBS.get(name);
+    if (!v) continue;
+    try { for (const r of JSON.parse(v)) body.push(JSON.stringify(r)); } catch (e) { /* skip */ }
+  }
+  return new Response(body.join('\n') + '\n', {
+    headers: { 'content-type': 'application/x-ndjson; charset=utf-8', ...cors(ALLOWED) } });
+}
+
+
 async function positions(request, env) {
   const url = new URL(request.url);
   const given = (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '')
@@ -209,8 +250,140 @@ async function positions(request, env) {
   }
 }
 
+// -------------------------------------------------------- observation log ----
+//
+// WHY THE WORKER AND NOT THE LAPTOP.  This records TWC's
+// temperatureMaxSince7Am, a running maximum with intra-hour peaks in it. It is a
+// CURRENT-ONLY field: there is no archive and no backfill. If nothing asks at
+// 2:35 PM, that reading does not exist afterwards -- unlike IEM daily, the METAR
+// and the six-hourly groups, which can all be re-fetched for any past day. So a
+// logger that stops when a lid closes loses precisely the quantity it was built
+// to measure, and permanently. A laptop cannot hold this job.
+//
+// WHY IT DOES THE WORK HERE, when the rest of this file deliberately does not:
+// the thing being measured is LEAD IN MINUTES. Dispatching a GitHub runner adds
+// thirty to sixty seconds of variable startup to every timestamp, which is noise
+// laid directly on top of the signal. Four fetches and a KV write is not a
+// forecast model, so there is no second copy to drift.
+//
+// 2026-09-05 is why: Central Park peaked at 79 at 2:33 PM, the 2:51 METAR read
+// 77.0 because it had already fallen back, and the market repriced "78 or below"
+// from 84c to 2c at about 4:25 PM -- before the 4:43 PM climate report. max7 held
+// 79 the whole time. Whether that lead is real, and whether max7's spikes (that
+// same day Chicago read 86 against IEM's 83 with the market 100% on 83-84, and it
+// had not retracted hours later) make it unusable, is what this decides.
+const OBS_MARKETS = [
+  // key,      ICAO,   IEM network, IEM station
+  ['ny_high',  'KNYC', 'NY_ASOS', 'NYC'],
+  ['chi_high', 'KMDW', 'IL_ASOS', 'MDW'],
+  ['mia_high', 'KMIA', 'FL_ASOS', 'MIA'],
+  ['aus_high', 'KAUS', 'TX_ASOS', 'AUS'],
+  ['den_high', 'KDEN', 'CO_ASOS', 'DEN'],
+  ['lax_high', 'KLAX', 'CA_ASOS', 'LAX'],
+  ['phl_high', 'KPHL', 'PA_ASOS', 'PHL']
+];
+
+// THE STATION TRAP, and it cost a whole 45-day study before it was found.
+//   v3 /wx/observations/current?icaoCode=KNYC -> Central Park   RIGHT
+//   v1 /location/KNYC:9:US/observations/...   -> LaGuardia      WRONG
+// Same ICAO, two endpoints, two different stations three miles and two degrees
+// apart. Only the v3 current form is used here. `language` is REQUIRED: without
+// it the answer is HTTP 400 with every field null, which reads like a station
+// outage rather than a malformed request.
+const TWC_KEY = 'e1f10a1e78da46f5b10a1e78da96f525';
+
+async function obsSnapshot() {
+  const t = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+  const rows = [];
+  // One batched METAR call for all seven, rather than seven -- subrequests are
+  // capped per invocation and this is the only field that batches.
+  let metar = {};
+  try {
+    const ids = OBS_MARKETS.map((m) => m[1]).join(',');
+    const r = await fetch(
+      `https://aviationweather.gov/api/data/metar?ids=${ids}&format=json&hours=3`,
+      { headers: { 'User-Agent': 'bluishvoid-obs-log' } });
+    if (r.ok) {
+      for (const m of await r.json()) {
+        if (m && m.temp != null && m.icaoId) {
+          const f = Math.round((m.temp * 9 / 5 + 32) * 10) / 10;
+          const cur = metar[m.icaoId];
+          if (!cur || m.reportTime > cur.at) metar[m.icaoId] = { at: m.reportTime, f };
+        }
+      }
+    }
+  } catch (e) { /* one dead source must not cost the tick */ }
+
+  await Promise.all(OBS_MARKETS.map(async ([key, icao, net, stn]) => {
+    const row = { t, key };
+    const mt = metar[icao];
+    if (mt) { row.metar = mt.f; row.metar_at = mt.at; }
+    try {
+      const r = await fetch('https://api.weather.com/v3/wx/observations/current'
+        + `?icaoCode=${icao}&units=e&language=en-US&format=json&apiKey=${TWC_KEY}`);
+      if (r.ok) {
+        const j = await r.json();
+        if (typeof j.temperatureMaxSince7Am === 'number') row.max7 = j.temperatureMaxSince7Am;
+        if (typeof j.temperature === 'number') row.now = j.temperature;
+        if (typeof j.temperatureMax24Hour === 'number') row.max24 = j.temperatureMax24Hour;
+      } else { row.err_twc = `http ${r.status}`; }
+    } catch (e) { row.err_twc = String(e).slice(0, 60); }
+    try {
+      // The station's LOCAL date, which is what IEM's daily row is keyed by --
+      // asking UTC would request tomorrow for half the day in the west.
+      const d = new Date().toLocaleDateString('en-CA', { timeZone: {
+        ny_high: 'America/New_York', chi_high: 'America/Chicago',
+        mia_high: 'America/New_York', aus_high: 'America/Chicago',
+        den_high: 'America/Denver',   lax_high: 'America/Los_Angeles',
+        phl_high: 'America/New_York' }[key] });
+      row.day = d;
+      const [Y, M, D] = d.split('-').map(Number);
+      const r = await fetch('https://mesonet.agron.iastate.edu/cgi-bin/request/daily.py'
+        + `?network=${net}&stations=${stn}&year1=${Y}&month1=${M}&day1=${D}`
+        + `&year2=${Y}&month2=${M}&day2=${D}&format=comma`);
+      if (r.ok) {
+        const txt = await r.text();
+        const lines = txt.trim().split('\n');
+        const head = lines[0].split(','); const col = head.indexOf('max_temp_f');
+        if (col > 0 && lines.length > 1) {
+          const v = parseFloat(lines[lines.length - 1].split(',')[col]);
+          if (!isNaN(v)) row.iem = v;
+        }
+      } else { row.err_iem = `http ${r.status}`; }
+    } catch (e) { row.err_iem = String(e).slice(0, 60); }
+    rows.push(row);
+  }));
+  return { t, rows };
+}
+
+async function logObs(env) {
+  if (!env.OBS) return 'no KV binding';
+  const snap = await obsSnapshot();
+  // One key per tick. ~192 ticks a day against a 1000/day free write limit, and
+  // the key sorts lexicographically because the timestamp does.
+  await env.OBS.put(`obs:${snap.t}`, JSON.stringify(snap.rows), {
+    expirationTtl: 60 * 60 * 24 * 120        // 120 days is far past any analysis
+  });
+  const lead = snap.rows.filter((r) => r.max7 != null && r.iem != null && r.max7 > r.iem);
+  return `${snap.rows.length} rows` + (lead.length
+    ? `, max7 above iem: ${lead.map((r) => `${r.key} +${(r.max7 - r.iem).toFixed(1)}`).join(' ')}`
+    : '');
+}
+
 export default {
   async scheduled(event, env, ctx) {
+    // EVERY tick logs; only the original four minutes dispatch. The cron went to
+    // */5 for the observation trail, and the daily job must not suddenly run
+    // twelve times an hour -- it takes ~5 minutes and the runs would overlap.
+    ctx.waitUntil((async () => {
+      try {
+        console.log(`[obs-log] ${new Date().toISOString()} ${await logObs(env)}`);
+      } catch (e) {
+        console.log(`[obs-log] FAILED ${e}`);
+      }
+    })());
+    const minute = new Date().getUTCMinutes();
+    if (![5, 20, 35, 50].includes(minute)) return;
     ctx.waitUntil((async () => {
       let r;
       try {
@@ -239,6 +412,7 @@ export default {
       return new Response(null, { status: 204, headers: cors(ALLOWED) });
     }
     if (url.pathname === '/positions') return positions(request, env);
+    if (url.pathname === '/obs') return obsDump(request, env);
 
     // Status only. This deliberately cannot trigger a run: a public endpoint that
     // fires CI is an open invitation, and the cron is the point.
@@ -277,7 +451,9 @@ export default {
       // page confidently reported a cadence the worker was not running.
       // Cloudflare does not expose a worker's own triggers to its code, so
       // this has to be kept in step with [triggers] in wrangler.toml by hand.
-      schedule_utc: ['5,20,35,50 12-23 * * *', '5,20,35,50 0-4 * * *'],
+      schedule_utc: ['*/5 12-23 * * *', '*/5 0-4 * * *'],
+      dispatch_minutes: [5, 20, 35, 50],
+      obs_log: env.OBS ? 'KV bound' : 'NO KV BINDING - not logging',
       now_utc: new Date().toISOString(),
       note: 'Triggering is cron-only. Runs appear at github.com/' + OWNER + '/' + REPO + '/actions'
     };
