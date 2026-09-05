@@ -169,6 +169,24 @@ def event_ticker(cfg, d):
     return '%s-%s' % (cfg['series'], d.strftime('%y%b%d').upper())
 
 
+def book_depth(ticker):
+    """Contracts available at the best price, each way -> (yes_size, no_size).
+
+    Sizing advice is worthless if the book cannot fill it, and this book is
+    thin: often under a hundred contracts at the touch. Note the crossing --
+    the size you can BUY yes at sits on the no side of the book, and the other
+    way round.
+    """
+    try:
+        # depth=1 returns the LOWEST level, not the best -- the levels come back
+        # ascending, so the touch is the last one. Ask for enough to contain it.
+        o = (get_json('https://api.elections.kalshi.com/trade-api/v2/markets/%s'
+                      '/orderbook?depth=20' % ticker, timeout=45).get('orderbook_fp') or {})
+    except Exception:
+        return None, None
+    return o
+
+
 def fetch_market(cfg, ev):
     d = get_json('https://api.elections.kalshi.com/trade-api/v2/markets'
                  '?series_ticker=%s&status=open&limit=60' % cfg['series'])
@@ -197,10 +215,19 @@ def fetch_market(cfg, ev):
         # where the value is -- there are five ways to be right instead of one.
         nbid = float(m.get('no_bid_dollars') or 0)
         nask = float(m.get('no_ask_dollars') or 0)
+        # how much can actually be bought at those prices
+        ysz = nsz = None
+        ob = book_depth(m['ticker'])
+        if ob:
+            def _at(side, price):
+                return sum(float(q) for pr, q in (ob.get(side) or [])
+                           if abs(float(pr) - price) < 0.011)
+            ysz = _at('no_dollars', round(1 - ask, 2)) if 0 < ask < 1 else 0
+            nsz = _at('yes_dollars', round(1 - nask, 2)) if 0 < nask < 1 else 0
         out.append({
             'ticker': m['ticker'], 'label': m.get('yes_sub_title') or '',
             'lo': lo, 'hi': hi, 'bid': bid, 'ask': ask,
-            'nbid': nbid, 'nask': nask,
+            'nbid': nbid, 'nask': nask, 'ysize': ysz, 'nsize': nsz,
             'mid': round((bid + ask) / 2, 4),
             'vol': float(m.get('volume_fp') or 0),
             'close': m.get('close_time'),
@@ -742,7 +769,8 @@ def run_market(cfg):
                 'ladder': [{'label': r['label'], 'lo': r['lo'], 'hi': r['hi'],
                             'ours': round(pp, 4), 'market': r['mid'],
                             'bid': r['bid'], 'ask': r['ask'],
-                            'nbid': r['nbid'], 'nask': r['nask']}
+                            'nbid': r['nbid'], 'nask': r['nask'],
+                            'ysize': r['ysize'], 'nsize': r['nsize']}
                            for r, pp in zip(trows, tps)],
                 'link': (cfg['url'] + '/' + event_ticker(cfg, tdate).lower())
                         if cfg.get('url') else None,
@@ -995,7 +1023,8 @@ def run_market(cfg):
             'agree': best == mbest,
             'ladder': [{'label': r['label'], 'lo': r['lo'], 'hi': r['hi'],
                         'bid': r['bid'], 'ask': r['ask'],
-                        'nbid': r['nbid'], 'nask': r['nask'], 'market': r['mid'],
+                        'nbid': r['nbid'], 'nask': r['nask'],
+                        'ysize': r['ysize'], 'nsize': r['nsize'], 'market': r['mid'],
                         'ours': round(p, 4), 'vol': r['vol']}
                        for r, p in zip(rows, ps)],
             'locked': entry.get('lock'), 'final': entry.get('final'),
