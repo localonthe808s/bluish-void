@@ -53773,11 +53773,16 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           if (oAge < -60) oAge += 1440;      /* stamped before midnight */
         }
       }
+      /* 80 minutes, not 95. That ceiling was sized for a :50 bake missing the
+         :51 report by a minute and carrying an hour-old reading -- the very
+         thing the cron move to :56 retired. With slots at :05/:20/:35/:56 the
+         worst honest case is a :35 bake read at :55, about 64 minutes, so past
+         80 now means something is genuinely behind rather than merely unlucky. */
       qcL.push(T.now_temp == null
         ? qcRow(QCA, 'STATION', 'NO CURRENT READING', 'Central Park has not reported')
-        : qcRow((oAge != null && oAge < 95) ? QCG : QCA, 'STATION',
+        : qcRow((oAge != null && oAge < 80) ? QCG : QCA, 'STATION',
             T1(T.now_temp) + '° AT ' + t12(T.now_at) + ' · ' + ageTxt(oAge),
-            (oAge != null && oAge >= 95) ? 'it reports hourly at :51' : ''));
+            (oAge != null && oAge >= 80) ? 'it reports hourly at :51' : ''));
 
       /* 5. the consensus behind the forecast */
       var nMod = T.n_models || 0;
@@ -53796,12 +53801,24 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       /* 7. the lock. Past noon with nothing locked means the run that writes
             the day's graded decision never happened -- the failure that makes
             the record dishonest rather than merely stale. */
+      /* Judged against THE BAKE'S OWN CLOCK, not the wall clock. Comparing a
+         lock field to the current time asks a bake written at 11:51 why it
+         does not contain a decision taken at noon, and paints a red light for
+         a pipeline doing exactly the right thing -- which is what it did at
+         12:11 on 2026-09-05, while the noon run was still executing. Red here
+         has to mean "a run finished after the lock hour and wrote no
+         decision", and nothing else. */
+      var bakeH = (String(K.updated || '').match(/T(\d{1,2}):/) || [])[1];
+      bakeH = (bakeH == null) ? etH : +bakeH;
+      var lockH = (T.lock_hour == null) ? 12 : T.lock_hour;
       qcL.push(T.locked
         ? qcRow(QCG, 'LOCK', 'LOCKED ' + deg(T.locked.pick || '')
             + (T.locked.as_of ? ' AS OF ' + mtaEsc(T.locked.as_of) : ''))
-        : etH < (T.lock_hour == null ? 12 : T.lock_hour)
-          ? qcRow(QCN, 'LOCK', 'PENDING', 'locks at ' + t12((T.lock_hour == null ? 12 : T.lock_hour) + ':00'))
-          : qcRow(QCR, 'LOCK', 'NOT LOCKED', 'the noon run did not write a decision'));
+        : bakeH < lockH
+          ? qcRow(QCN, 'LOCK', 'PENDING', 'locks at ' + t12(lockH + ':00')
+              + (etH >= lockH ? '; this bake predates it' : ''))
+          : qcRow(QCR, 'LOCK', 'NOT LOCKED', 'a run finished after '
+              + t12(lockH + ':00') + ' and wrote no decision'));
 
       var qcBox = hdr('SYSTEM')
         + '<div style="margin-top:2px;">' + qcL.join('') + '</div>';
