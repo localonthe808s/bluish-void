@@ -145,6 +145,25 @@ function cors(origin) {
 }
 const ALLOWED = 'https://bluishvoid.com';
 
+async function obsLead(request, env) {
+  // PUBLIC, unlike /obs. This returns aggregates and no raw rows, it is one KV
+  // get rather than a namespace listing, and the page has to reach it on a plain
+  // load -- a token in client JS is not a token. The raw trail stays gated.
+  if (!env.OBS) {
+    return new Response(JSON.stringify({ error: 'no KV binding' }), {
+      status: 503, headers: { 'content-type': 'application/json', ...cors(ALLOWED) } });
+  }
+  const sum = await env.OBS.get(LEAD_KEY, { type: 'json' });
+  return new Response(JSON.stringify(sum || { days: {}, ticks: 0 }), {
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      // a tick is five minutes; there is no point re-asking sooner
+      'cache-control': 'public, max-age=120',
+      ...cors(ALLOWED)
+    } });
+}
+
+
 async function obsDump(request, env) {
   // Behind the same token as /positions. The trail is not secret, but an open
   // endpoint that lists a KV namespace is a free way for anyone to burn the
@@ -356,9 +375,55 @@ async function obsSnapshot() {
   return { t, rows };
 }
 
+// THE STUDY'S RUNNING ANSWER, FOLDED IN A TICK AT A TIME.
+//
+// The panel cannot scan a KV namespace on a page load, and the question does not
+// need raw rows to answer -- it needs, per city-day, the peak each source
+// reached and WHEN IT FIRST REACHED IT. That is a few hundred bytes and it can
+// be maintained incrementally, so a page view costs one KV get.
+//
+// "First reached" is tracked against each source's OWN running peak: if a source
+// later reads higher, its clock restarts, because the quantity of interest is
+// when it arrived at the value the day ends on. A day is only reported once it
+// has stopped moving -- while it is still climbing, whoever is merely EARLIEST
+// reads as whoever is RIGHT, which is the exact mistake this study exists to
+// avoid making twice.
+const LEAD_KEY = 'lead:summary';
+const LEAD_SOURCES = ['max7', 'iem', 'six'];
+
+function foldLead(sum, snap) {
+  sum = sum && typeof sum === 'object' ? sum : { days: {}, first: null };
+  if (!sum.first) sum.first = snap.t;
+  sum.last = snap.t;
+  sum.ticks = (sum.ticks || 0) + 1;
+  for (const r of snap.rows) {
+    if (!r.day || !r.key) continue;
+    const id = `${r.key}|${r.day}`;
+    const d = (sum.days[id] = sum.days[id] || {});
+    for (const src of LEAD_SOURCES) {
+      const v = r[src];
+      if (typeof v !== 'number') continue;
+      const cur = d[src];
+      // strictly higher restarts the clock; equal keeps the FIRST sighting
+      if (!cur || v > cur.v + 1e-9) d[src] = { v, at: r.t };
+    }
+    d.seen = r.t;
+  }
+  // 30 days is far more than any analysis needs and keeps the value small
+  const cutoff = new Date(Date.parse(snap.t) - 30 * 864e5).toISOString().slice(0, 10);
+  for (const id of Object.keys(sum.days)) {
+    if (id.split('|')[1] < cutoff) delete sum.days[id];
+  }
+  return sum;
+}
+
 async function logObs(env) {
   if (!env.OBS) return 'no KV binding';
   const snap = await obsSnapshot();
+  try {
+    const prev = await env.OBS.get(LEAD_KEY, { type: 'json' });
+    await env.OBS.put(LEAD_KEY, JSON.stringify(foldLead(prev, snap)));
+  } catch (e) { /* the trail itself still gets written below */ }
   // One key per tick. ~192 ticks a day against a 1000/day free write limit, and
   // the key sorts lexicographically because the timestamp does.
   await env.OBS.put(`obs:${snap.t}`, JSON.stringify(snap.rows), {
@@ -413,6 +478,7 @@ export default {
     }
     if (url.pathname === '/positions') return positions(request, env);
     if (url.pathname === '/obs') return obsDump(request, env);
+    if (url.pathname === '/obs/lead') return obsLead(request, env);
 
     // Status only. This deliberately cannot trigger a run: a public endpoint that
     // fires CI is an open invitation, and the cron is the point.

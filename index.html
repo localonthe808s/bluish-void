@@ -53864,6 +53864,76 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var h2 = Math.floor(min / 60), r2 = Math.round(min - 60 * h2);
         return h2 + ' HR' + (r2 ? ' ' + r2 + ' MIN' : '') + ' AGO';
       };
+      /* THE LEAD STUDY, LIVE.
+         2026-09-05 cost a position to two degrees the hourly stream never saw:
+         Central Park made 79 at 2:33 PM and the 2:51 report already read 77.
+         The only public field carrying that peak in real time is TWC's
+         temperatureMaxSince7Am -- and the same field read 86 for Chicago-Midway
+         that afternoon, which is a station twenty miles away, against Midway's
+         own 83. So it is measured rather than trusted.
+
+         The worker keeps the running answer (one KV get, no raw rows) and this
+         renders it. Deliberately refuses to state a lead until a city-day has
+         stopped moving: while a day is still climbing, whoever is merely
+         EARLIEST reads as whoever is RIGHT, which is the exact error that
+         started all of this. */
+      var bvLeadStudy = function(){
+        /* the container is written as part of a string that the panel injects
+           later in the same task; a bare setTimeout(0) usually lands after that
+           and occasionally does not, so retry rather than silently doing
+           nothing on a slow layout */
+        var el = document.getElementById('bv-lead-study');
+        if (!el) {
+          if ((bvLeadStudy._n = (bvLeadStudy._n || 0) + 1) < 6) setTimeout(bvLeadStudy, 300);
+          return;
+        }
+        bvLeadStudy._n = 0;
+        fetch('https://bluish-void-kalshi-cron.junkyjunkjunkjunkjunk.workers.dev/obs/lead',
+              { cache: 'no-store' })
+          .then(function(r){ return r.ok ? r.json() : null; })
+          .then(function(d){
+            if (!d) return;
+            var days = d.days || {}, ids = Object.keys(days);
+            var ticks = d.ticks || 0;
+            /* a city-day counts as closed once nothing has moved for two hours,
+               which is also long enough that a stalled feed shows as stale
+               rather than as a finished day */
+            var closed = [], live = [];
+            ids.forEach(function(id){
+              var v = days[id];
+              if (!v || !v.max7 || !v.iem) return;
+              var last = Date.parse(v.seen || 0);
+              var moved = Math.max(Date.parse(v.max7.at || 0), Date.parse(v.iem.at || 0));
+              (last - moved >= 7.2e6 ? closed : live).push({ id: id, v: v });
+            });
+            var rows = [];
+            closed.forEach(function(c){
+              var lead = (Date.parse(c.v.iem.at) - Date.parse(c.v.max7.at)) / 6e4;
+              rows.push(qcRow(Math.abs(lead) < 1 ? QCN : (lead > 0 ? QCG : QCA),
+                c.id.split('|')[0].replace('_high', '').toUpperCase(),
+                (lead > 0 ? 'max7 led IEM by ' : lead < 0 ? 'IEM led max7 by ' : 'tied')
+                  + (lead ? Math.abs(Math.round(lead)) + ' min' : ''),
+                c.id.split('|')[1]));
+            });
+            /* the excursions are the reason this is not in the floor */
+            live.forEach(function(c){
+              var gap = c.v.max7.v - c.v.iem.v;
+              if (gap > 0.01) rows.push(qcRow(QCA,
+                c.id.split('|')[0].replace('_high', '').toUpperCase(),
+                'max7 ' + T1(c.v.max7.v) + '\u00B0 vs IEM ' + T1(c.v.iem.v) + '\u00B0',
+                'unexplained, and why max7 is not trusted'));
+            });
+            if (!rows.length) {
+              rows.push(qcRow(QCN, 'STATUS',
+                ticks + (ticks === 1 ? ' TICK' : ' TICKS') + ' LOGGED',
+                'no city-day has closed yet \u2014 needs about two weeks'));
+            }
+            el.innerHTML = hdr('LEAD STUDY')
+              + '<div style="margin-top:2px;">' + rows.join('') + '</div>';
+          })
+          .catch(function(){ /* a study that cannot load must not break the panel */ });
+      };
+
       var qcRow = function(col, name, val, note){
         return '<div style="display:flex;align-items:baseline;gap:7px;margin-top:5px;">'
           + '<span style="width:7px;height:7px;border-radius:50%;background:' + col
@@ -54039,8 +54109,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
               + t12(lockH + ':00') + ' and wrote no decision'));
 
       var qcBox = hdr('SYSTEM')
-        + '<div style="margin-top:2px;">' + qcL.join('') + '</div>';
+        + '<div style="margin-top:2px;">' + qcL.join('') + '</div>'
+        /* filled in asynchronously from the worker; see bvLeadStudy below */
+        + '<div id="bv-lead-study"></div>';
       /* the zone label travels with the data, so a second city reads correctly */
+      setTimeout(bvLeadStudy, 0);
       var tzl = T.tz || 'ET';
       /* two different numbers, and the panel needs both: the peak so far is
          what the market settles on, but "how warm is it out" is the question a
