@@ -49,6 +49,17 @@ observations are integers.  So "84 to 85" means the reported integer is 84 or
 85, i.e. the true temperature lies in [83.5, 85.5).  Bracket edges are offset
 by half a degree accordingly; getting this wrong shifts every probability.
 
+  AND IT IS READ DIRECTLY -- see twc_today().  The rulebook says "according to
+  The Weather Company", and for a long time that sentence was in the output
+  string while the number was never fetched: the floor was built from the
+  station's hourly METAR plus a fitted offset, a proxy that agreed on settled
+  days because settled days are the ones where it had already agreed.  It is
+  not a small difference and it is not a constant.  On 2026-09-05 the station
+  peaked at 77, the offset was +0.71, and this model put 85.6% on "78 or below"
+  and called the 1c ask an 85c edge -- while TWC held 79 and the market held
+  0.5%.  With TWC in the floor the same afternoon reads 0.0% against the
+  market's 0.5%.  The proxy was never checkable in the only window that pays.
+
 Kalshi prices live in the *_dollars fields.  The legacy integer-cent fields
 (yes_bid, last_price) are present but always null -- do not read them.
 """
@@ -464,6 +475,69 @@ def metar_today(cfg, day):
             continue
         f = round(float(t) * 9.0 / 5.0 + 32.0, 1)
         out[loc.hour] = max(out.get(loc.hour, -99.0), f)
+    return out
+
+
+# THE SETTLEMENT FEED ITSELF, NOT A PROXY FOR IT.
+#
+# Everything else here measures the weather. This reads the number the market
+# pays on. The rulebook settles on the official daily figure "according to The
+# Weather Company", and TWC publishes its own running maximum for the day --
+# temperatureMaxSince7Am -- on the same public endpoint weather.com serves. That
+# is the settled quantity, live, the night before the CLI report exists.
+#
+# It is NOT the station's METAR, and the gap is not a constant an offset can
+# absorb. TWC minus the day's METAR peak, all seven markets, 16:40 ET on
+# 2026-09-05:
+#
+#     New York      +2.0        Denver         -0.0
+#     Chicago       +4.0        Los Angeles    -1.1
+#     Miami         -1.0        Philadelphia   -0.0
+#     Austin        +0.9
+#
+# New York that afternoon is the whole argument. METAR peaked at 77, the fitted
+# offset was +0.71, and "78 or below" traded at 85c on the strength of it. TWC
+# printed 79; the market repriced to 2c inside a minute. Every ladder built on
+# the hourly stream was on the wrong side of a bracket edge, and no amount of
+# freshness in that stream would have helped -- it was the wrong measurement.
+#
+# Whole degrees, like the settlement, so 79 means [78.5, 79.5) and the
+# half-degree bracket convention above applies unchanged.
+#
+# `language` is a REQUIRED parameter. Without it the endpoint answers HTTP 400
+# with every field null, which reads exactly like a station outage rather than a
+# malformed request -- it cost an hour here. `icaoCode` pins the station the
+# market's rules name; `geocode` snaps to a nearest-station blend and disagreed
+# on Denver and Los Angeles in that same sample.
+TWC_KEY = 'e1f10a1e78da46f5b10a1e78da96f525'   # the key weather.com's own site ships
+
+
+def twc_today(cfg):
+    """The Weather Company's running max and current temp -> {'max','now'}.
+
+    Since-7am does not cover the 1am-7am part of the climate day (see
+    climate_day_start), so on a warm-front night it can sit under the true
+    climate-day maximum. It is merged with max() against a floor that does cover
+    those hours, so it can only ever raise the floor, never talk it down.
+
+    Returns {} when unavailable. This is an additional floor, never a
+    precondition: every market must survive it being missing.
+    """
+    icao = cfg.get('icao') or ('K' + cfg['station'])
+    try:
+        j = get_json('https://api.weather.com/v3/wx/observations/current'
+                     '?icaoCode=%s&units=e&language=en-US&format=json&apiKey=%s'
+                     % (icao, TWC_KEY), timeout=45)
+    except Exception as e:
+        print('twc: %s unavailable (%s)' % (icao, e))
+        return {}
+    if not isinstance(j, dict):
+        return {}
+    out = {}
+    for src, dst in (('temperatureMaxSince7Am', 'max'), ('temperature', 'now')):
+        v = j.get(src)
+        if isinstance(v, (int, float)):
+            out[dst] = float(v)
     return out
 
 
@@ -1534,6 +1608,19 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
                  ('%d' % len(_new)) if _new else 'none',
                  (' (' + ', '.join('%d:00' % h for h in _new) + ')') if _new else ''))
 
+    # AND THE SETTLEMENT FEED'S OWN RUNNING MAX, WHICH OUTRANKS BOTH OF THEM.
+    # METAR and IEM measure the station; this is the figure the rulebook names.
+    # It is folded into `live` below rather than into obh, because it is a daily
+    # maximum and not an hourly observation -- the same shape as daily.py's
+    # running figure, and used in exactly the same place.
+    _twc = twc_today(cfg)
+    if _twc.get('max') is not None:
+        print('%s twc: max %.0f, now %s'
+              % (cfg['key'], _twc['max'],
+                 ('%.0f' % _twc['now']) if _twc.get('now') is not None else '-'))
+    else:
+        print('%s twc: no reading; floor falls back to the station' % cfg['key'])
+
 
     bias, nb = rolling_bias(fc, daily, tkey)
     if bias is None:
@@ -1573,6 +1660,20 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
     rmax = running_max(obh, tkey, now.hour, h0)
     est = (rmax + HOURLY_PEAK_OFFSET) if rmax is not None else None
     live = daily.get(tkey)
+    # THE SETTLEMENT FEED OUTRANKS THE ARCHIVE. `live` is IEM's running max for
+    # today -- a proxy that has matched the settlement on every settled market
+    # checked, and the operative word is proxy. TWC's own running max is the
+    # figure the rulebook names, and it is hours fresher than IEM. Merge with
+    # max(): both are lower bounds on where the day ends up, and since-7am does
+    # not cover the pre-dawn part of the climate day.
+    #
+    # Folding it in HERE is deliberately the whole change. Everything downstream
+    # already reads `live` -- the floor, the exactness test that collapses the
+    # spread, and snapshot()'s locks -- so none of them need to learn where the
+    # number came from, and none of them can be left half-converted.
+    _tmax = _twc.get('max')
+    if _tmax is not None:
+        live = _tmax if live is None else max(live, _tmax)
     cands_fl = [x for x in (est, live) if x is not None]
     obs_far = max(cands_fl) if cands_fl else None
     obs_hr = max(obh.get(tkey) or {0: 0}) if obh.get(tkey) else None
@@ -2092,6 +2193,14 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
             'pred': round(pred, 2), 'sd': sd, 'bias': round(bias, 2),
             'bias_days': nb, 'sd_days': nsd,
             'obs_so_far': obs_far, 'obs_through': obs_hr,
+            # WHAT THE EXCHANGE IS SETTLING ON, next to what the station read.
+            # The panel shows both, because the gap is the thing worth seeing
+            # and it is not small: Chicago ran +4.0 the day this was wired in,
+            # New York +2.0 on the afternoon that made the case for it.
+            'twc_max': _twc.get('max'), 'twc_now': _twc.get('now'),
+            'twc_gap': (round(_twc['max'] - rmax, 1)
+                        if _twc.get('max') is not None and rmax is not None
+                        else None),
             # the day's warming is finished and the high is already on the board.
             # Whatever spread is left is only doubt about where between two METARs
             # the true peak fell -- and the exchange settles on the official
