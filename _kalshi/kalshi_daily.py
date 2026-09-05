@@ -1729,20 +1729,25 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
     rmax = running_max(obh, tkey, now.hour, h0)
     est = (rmax + HOURLY_PEAK_OFFSET) if rmax is not None else None
     live = daily.get(tkey)
-    # THE SETTLEMENT FEED OUTRANKS THE ARCHIVE. `live` is IEM's running max for
-    # today -- a proxy that has matched the settlement on every settled market
-    # checked, and the operative word is proxy. TWC's own running max is the
-    # figure the rulebook names, and it is hours fresher than IEM. Merge with
-    # max(): both are lower bounds on where the day ends up, and since-7am does
-    # not cover the pre-dawn part of the climate day.
+    # TWC IS SHOWN, NOT TRUSTED. It was briefly folded into this floor and that
+    # was a mistake, caught by backtest before it could cost anything.
     #
-    # Folding it in HERE is deliberately the whole change. Everything downstream
-    # already reads `live` -- the floor, the exactness test that collapses the
-    # spread, and snapshot()'s locks -- so none of them need to learn where the
-    # number came from, and none of them can be left half-converted.
-    _tmax = _twc.get('max')
-    if _tmax is not None:
-        live = _tmax if live is None else max(live, _tmax)
+    # Scored against 21 real New York settlements, the max of TWC's own
+    # observation history landed inside the bracket that PAID on 12 of 21 days.
+    # Raw IEM daily landed inside on 20 of 21. Worse, TWC was too HIGH on 7 of
+    # those 9 misses -- 08-23 read 83 against a settled 80-81, 09-03 read 87
+    # against a settled 83-84 -- and a floor above the settled bracket does not
+    # merely mis-weight it, it DELETES it. A third of days would have had the
+    # winning rung zeroed. Chicago showed the same shape live: max7 86 against
+    # its own history's 83 and a market at 99% on 83-84.
+    #
+    # So the feed carries spurious highs and cannot be a lower bound. What it is
+    # good for is TIMING -- on 2026-09-05 it published 79 around 16:25 ET, the
+    # market repriced within minutes, and IEM daily did not carry 79 until an
+    # hour later. That is worth seeing on the panel, and it is worth nothing in
+    # the arithmetic until the spikes can be told from the scoops.
+    #
+    # THE REAL FAULT THAT DAY WAS IEM DAILY'S LATENCY, not its accuracy.
     cands_fl = [x for x in (est, live) if x is not None]
     obs_far = max(cands_fl) if cands_fl else None
     obs_hr = max(obh.get(tkey) or {0: 0}) if obh.get(tkey) else None
