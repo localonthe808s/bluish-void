@@ -346,8 +346,13 @@ def daily_series(cfg, start, end):
     return out
 
 
-def obs_hourly_range(cfg, start, end):
-    """Hourly obs -> {'YYYY-MM-DD': {hour: degF}}, for historic running maxima."""
+def obs_hourly_range(cfg, start, end, sink=None):
+    """Hourly obs -> {'YYYY-MM-DD': {hour: degF}}, for historic running maxima.
+
+    Each hour holds that hour's MAXIMUM, which is what a running peak needs. The
+    latest actual reading is a different thing -- it is the temperature right
+    now, which can sit a degree under the hour it belongs to -- so a caller can
+    pass `sink` to also receive the final row as (timestamp, degF)."""
     u = ('https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station=%s'
          '&data=tmpf&year1=%d&month1=%d&day1=%d&year2=%d&month2=%d&day2=%d'
          '&tz=%s&format=onlycomma&missing=empty&trace=empty'
@@ -355,10 +360,14 @@ def obs_hourly_range(cfg, start, end):
             end.year, end.month, end.day,
             urllib.parse.quote(cfg.get('tz', 'America/New_York'))))
     out = collections.defaultdict(dict)
+    last = None
     for r in csv.DictReader(io.StringIO(get(u, timeout=180).decode())):
         if r.get('tmpf'):
             d, hh = r['valid'][:10], int(r['valid'][11:13])
             out[d][hh] = max(out[d].get(hh, -99.0), float(r['tmpf']))
+            last = (r['valid'], float(r['tmpf']))
+    if sink is not None and last:
+        sink.append(last)
     return out
 
 
@@ -765,8 +774,9 @@ def run_market(cfg):
     daily = daily_series(cfg, today - datetime.timedelta(days=200), today)
     # end one day AHEAD: asos.py treats the end date as the cut-off, so asking
     # for `today` returns almost nothing for today
+    ob_last = []
     obh = obs_hourly_range(cfg, today - datetime.timedelta(days=span),
-                           today + datetime.timedelta(days=1))
+                           today + datetime.timedelta(days=1), sink=ob_last)
 
     bias, nb = rolling_bias(fc, daily, tkey)
     if bias is None:
@@ -1145,6 +1155,9 @@ def run_market(cfg):
             'pred': round(pred, 2), 'sd': sd, 'bias': round(bias, 2),
             'bias_days': nb, 'sd_days': nsd,
             'obs_so_far': obs_far, 'obs_through': obs_hr,
+            # the temperature right now, as opposed to the day's peak so far
+            'now_temp': round(ob_last[0][1], 1) if ob_last else None,
+            'now_at': ob_last[0][0][11:16] if ob_last else None,
             'fc_peak': round(fpeak, 2) if fpeak is not None else None,
             'ours': [round(p, 4) for p in ps],
             'pick': rows[best]['label'], 'p': round(ps[best], 4),
