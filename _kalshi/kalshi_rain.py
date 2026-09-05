@@ -336,11 +336,15 @@ def main():
                 row['bet'] = best
                 cost = best['price'] + K.fee_of(best['price'])
                 want = BANKROLL * best['kelly'] / cost           # contracts
-                fill = want if best.get('size') is None else min(want, best['size'])
-                best['fill'] = round(fill, 1)
-                take_ev += fill * best['ev']
-                take_stake += fill * cost
-                n_bets += 1
+                if best.get('size') is not None:
+                    want = min(want, best['size'])
+                n_ct = int(want)
+                best['fill'] = n_ct
+                best['wanted'] = round(want, 2)
+                if n_ct >= 1:
+                    take_ev += n_ct * best['ev']
+                    take_stake += n_ct * cost
+                    n_bets += 1
                 # one lock per city per day, never rewritten
                 key = '%s|%s' % (c['date'], c['code'])
                 if key not in hist and c['hour'] >= LOCK_HOUR:
