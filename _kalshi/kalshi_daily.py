@@ -63,18 +63,38 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # co-ordinates to forecast for, and the file the page reads. Everything below is
 # written against a market config, never against NYC specifically. Each market
 # runs isolated, so one broken feed cannot take the others down.
+# Every Kalshi daily-high city market. Skill per market is unchanged by adding
+# more of them, but the number of MISPRICED ranges per day scales with the count
+# -- the one lever that does not require getting smarter. Each runs
+# independently and writes its own file; one city's outage cannot stop the rest.
+#
+# The station is whatever the market's own rules name. Read them, do not guess:
+# Chicago settles on CLIMDW, which is MIDWAY, not O'Hare -- the two routinely
+# differ by a degree and O'Hare would have been wrong all season.
+def _mkt(key, series, city, station, net, lat, lon, tz, tzl, cli, slug):
+    return {'key': key, 'series': series, 'label': city + ' daily high',
+            'station': station, 'network': net, 'lat': lat, 'lon': lon,
+            'field': 'max_temp_f', 'tz': tz, 'tzlabel': tzl,
+            'city': city, 'cli': cli,
+            'url': 'https://kalshi.com/markets/%s/%s' % (series.lower(), slug),
+            'out': 'kalshi_%s.json' % key.split('_')[0]}
+
+
 MARKETS = [
-    {
-        'key':     'nyc_high',
-        'series':  'KXHIGHNY',
-        'label':   'NYC daily high',
-        'station': 'NYC', 'network': 'NY_ASOS',
-        'lat':     40.7789, 'lon': -73.9692,   # Belvedere Castle / Central Park
-        'field':   'max_temp_f',
-        'tz':      'America/New_York', 'tzlabel': 'ET',
-        'url':     'https://kalshi.com/markets/kxhighny/highest-temperature-in-nyc',
-        'out':     'kalshi_ny.json',
-    },
+    _mkt('ny_high',  'KXHIGHNY',   'New York',     'NYC', 'NY_ASOS', 40.7789, -73.9692,
+         'America/New_York',    'ET', 'CLINYC', 'highest-temperature-in-nyc'),
+    _mkt('chi_high', 'KXHIGHCHI',  'Chicago',      'MDW', 'IL_ASOS', 41.786,  -87.752,
+         'America/Chicago',     'CT', 'CLIMDW', 'highest-temperature-in-chicago'),
+    _mkt('mia_high', 'KXHIGHMIA',  'Miami',        'MIA', 'FL_ASOS', 25.791,  -80.316,
+         'America/New_York',    'ET', 'CLIMIA', 'highest-temperature-in-miami'),
+    _mkt('aus_high', 'KXHIGHAUS',  'Austin',       'AUS', 'TX_ASOS', 30.183,  -97.680,
+         'America/Chicago',     'CT', 'CLIAUS', 'highest-temperature-in-austin'),
+    _mkt('den_high', 'KXHIGHDEN',  'Denver',       'DEN', 'CO_ASOS', 39.847, -104.656,
+         'America/Denver',      'MT', 'CLIDEN', 'highest-temperature-in-denver'),
+    _mkt('lax_high', 'KXHIGHLAX',  'Los Angeles',  'LAX', 'CA_ASOS', 33.938, -118.389,
+         'America/Los_Angeles', 'PT', 'CLILAX', 'highest-temperature-in-los-angeles'),
+    _mkt('phl_high', 'KXHIGHPHIL', 'Philadelphia', 'PHL', 'PA_ASOS', 39.873,  -75.227,
+         'America/New_York',    'ET', 'CLIPHL', 'highest-temperature-in-philadelphia'),
 ]
 
 BIAS_K  = 21                              # days in the rolling bias window
@@ -283,7 +303,7 @@ def fetch_market(cfg, ev):
 # With 1.0 the prediction sat +0.29 degF above the eventual high on days the
 # floor was binding, which pushed real probability into brackets the day had
 # already walked past -- 6% on a bracket that empirically never happened.
-HOURLY_PEAK_OFFSET = 0.62
+HOURLY_PEAK_OFFSET = 0.70
 # Spread of that same gap. The residuals are measured against a floor built as
 # hourly + offset, so they carry this noise; today's floor is the exact running
 # max and carries none of it. On days the floor is binding the measured spread
@@ -291,7 +311,7 @@ HOURLY_PEAK_OFFSET = 0.62
 # what matches the empirical record: the high never rose 1.5 degF further after
 # the floor was set, yet an un-deconvolved spread put 6% on a bracket that far
 # out. Only applied when the floor is both binding and exact.
-OFFSET_SD = 0.82
+OFFSET_SD = 0.65
 EXACT_FLOOR_SD_MIN = 0.30
 
 
@@ -822,10 +842,19 @@ def run_market(cfg):
         print('%s: implausible prediction %.1f -- refusing to write' % (cfg['key'], pred))
         return 0
     res = residuals(fcm, bias_of, daily, obh, now.hour, tkey, h0_of)
-    binding_now = (obs_far is not None and fadj is not None and obs_far >= fadj)
+    # same rule as snapshot(): no forecast hour left in the day is the strongest
+    # binding case, and `obs_far >= fadj` failed against a None fadj -- so a
+    # finished day kept a full forecast spread. Distinguish "the day is over"
+    # from "the forecast never arrived", which must not collapse anything.
+    over_now = bool(fc.get(tkey)) and not [h for h in (fc.get(tkey) or {}) if h >= hr0]
+    binding_now = (obs_far is not None
+                   and ((fadj is not None and obs_far >= fadj) or over_now))
     sd, nsd = spread(res, now.hour, binding_now)
-    if binding_now and live is not None and obs_far <= live + 1e-9:
-        sd = max(EXACT_FLOOR_SD_MIN, math.sqrt(max(sd * sd - OFFSET_SD * OFFSET_SD, 0.0)))
+    if binding_now:
+        exact_now = (live is not None and obs_far <= live + 1e-9)
+        sd = min(sd, max(EXACT_FLOOR_SD_MIN,
+                         math.sqrt(max(sd * sd - OFFSET_SD * OFFSET_SD, 0.0)))
+                     if exact_now else OFFSET_SD)
     sd_lock, _ = spread(residuals(fcm, bias_of, daily, obh, LOCK_HOUR, tkey, h0_of),
                         LOCK_HOUR, binding_now)
 
@@ -921,11 +950,33 @@ def run_market(cfg):
         if not cand:
             return None
         pr = max(cand)
-        bind = (fl is not None and pf is not None and fl >= pf)
+        # NO REMAINING HOURS IS THE STRONGEST BINDING CASE, NOT A MISSING ONE.
+        # point_forecast returns None once no forecast hour is left in the day,
+        # and `fl >= pf` then failed against None -- so the most finished day
+        # possible was treated as wide open. Distinguish that from a forecast
+        # that never arrived, which must NOT collapse the spread.
+        day_has_fc = bool(fc.get(tkey))
+        hours_left = len([h for h in (fc.get(tkey) or {}) if h >= hour])
+        over = day_has_fc and hours_left == 0
+        bind = (fl is not None and ((pf is not None and fl >= pf) or over))
         sdh, _ = spread(residuals(fcm, bias_of, daily, obh, hour, tkey, h0_of), hour, bind)
-        if bind and live is not None and fl is not None and fl <= live + 1e-9:
-            sdh = max(EXACT_FLOOR_SD_MIN,
-                      math.sqrt(max(sdh * sdh - OFFSET_SD * OFFSET_SD, 0.0)))
+        # ONCE THE FLOOR BINDS, THE DAY IS OVER.  `bind` means no remaining hour
+        # is forecast above what the station has already recorded, so the high is
+        # not going to move: the only live question is whether the true peak sat
+        # a little above the samples we have. That is the offset's uncertainty,
+        # nothing like a forecast's.
+        #
+        # This used to apply only when daily.json had published an exact figure,
+        # and daily.json lags. On a day where it had not, the full forecast
+        # spread survived to midnight -- Denver 2026-09-04 closed at 92.7 with
+        # the market at 99.5% on 92-93, and this model still put 23% on 94-95
+        # and called buying it at 1c a 21c edge. It was betting on a day that had
+        # already happened.
+        if bind and fl is not None:
+            exact = (live is not None and fl <= live + 1e-9)
+            sdh = min(sdh, max(EXACT_FLOOR_SD_MIN,
+                               math.sqrt(max(sdh * sdh - OFFSET_SD * OFFSET_SD, 0.0)))
+                           if exact else OFFSET_SD)
         return pr, sdh, distribution(rows, pr, sdh, fl), fl
 
     def make_lock(hour):
@@ -985,6 +1036,9 @@ def run_market(cfg):
             'obs': obs_far,
             'ours': [round(p, 3) for p in ps],
             'mkt': [r['mid'] for r in rows],
+            # the size of the best available edge at this hour. Prices alone
+            # cannot answer "when should the bet go on" -- this can.
+            'edge': (lambda b: round(b['ev'], 4) if b else None)(best_bet(rows, ps)),
         })
         del trail[:-24]
 
@@ -1185,6 +1239,12 @@ def run_market(cfg):
             'pred': round(pred, 2), 'sd': sd, 'bias': round(bias, 2),
             'bias_days': nb, 'sd_days': nsd,
             'obs_so_far': obs_far, 'obs_through': obs_hr,
+            # the day's warming is finished and the high is already on the board.
+            # Whatever spread is left is only doubt about where between two METARs
+            # the true peak fell -- and the exchange settles on the official
+            # reading, which it can see and this cannot. There is no edge to have
+            # on a day that has already happened, however the arithmetic looks.
+            'day_over': bool(binding_now),
             # the temperature right now, as opposed to the day's peak so far
             'now_temp': round(ob_last[0][1], 1) if ob_last else None,
             'now_at': ob_last[0][0][11:16] if ob_last else None,
@@ -1228,20 +1288,52 @@ def run_market(cfg):
     with open(OUT, 'w') as f:
         json.dump(doc, f, separators=(',', ':'))
     print('wrote %s (%d scored days)' % (OUT, record['n']))
-    return 0
+    # a one-line digest for the panel's other-cities table, so seven markets
+    # cost one fetch rather than seven
+    t = doc['today']
+    st_now = t.get('state') or {}
+    decided = (t.get('p') or 0) >= 0.95 or (t.get('sd') is not None and t['sd'] <= 0.4) \
+              or bool(t.get('day_over'))
+    bb = best_bet(rows, ps) if (rows and st_now.get('status') == 'open' and not decided) else None
+    return {'key': cfg['key'], 'city': cfg.get('city', cfg['key']),
+            'tzlabel': cfg.get('tzlabel'), 'link': t.get('link'),
+            'date': t.get('date'), 'state': t.get('state'),
+            'pred': t.get('pred'), 'sd': t.get('sd'),
+            'pick': t.get('pick'), 'p': t.get('p'),
+            'market_pick': t.get('market_pick'), 'agree': t.get('agree'),
+            'obs': t.get('obs_so_far'), 'now_temp': t.get('now_temp'),
+            'day_over': t.get('day_over'),
+            'bet': bb, 'file': cfg['out']}
 
 
 def main():
     """Run every configured market. One market's outage must not stop the rest,
     and a market that throws leaves its previous file untouched rather than
-    writing something half-built."""
+    writing something half-built.
+
+    Afterwards the digests are folded into the first market's file, so the page
+    can show every city's best bet from the one fetch it already makes."""
     bad = 0
+    digests = []
     for cfg in MARKETS:
         try:
-            run_market(cfg)
+            d = run_market(cfg)
+            if isinstance(d, dict):
+                digests.append(d)
         except Exception as e:
             bad += 1
             print('%s FAILED: %s: %s' % (cfg['key'], type(e).__name__, e))
+    if digests and '--dry' not in sys.argv:
+        head = os.path.join(HERE, '..', MARKETS[0]['out'])
+        try:
+            with open(head) as f:
+                doc = json.load(f)
+            doc['markets'] = digests
+            with open(head, 'w') as f:
+                json.dump(doc, f, separators=(',', ':'))
+            print('folded %d market digests into %s' % (len(digests), MARKETS[0]['out']))
+        except Exception as e:
+            print('digest fold failed: %s' % e)
     return 1 if bad == len(MARKETS) else 0
 
 
