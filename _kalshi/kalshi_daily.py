@@ -1792,7 +1792,15 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
             del h['trail']
 
     doc = {
-        'updated': now.strftime('%Y-%m-%dT%H:%M') + ' ET',
+        # `now` is local_now(cfg) -- the clock where the market SETTLES, not
+        # Eastern. This said ' ET' for every city, so Los Angeles stamped
+        # "06:56 ET" at 09:56 ET and the file read three hours stale when it
+        # had just been written. cfg['tzlabel'] is the right label and is
+        # already used correctly two lines down.
+        'updated': now.strftime('%Y-%m-%dT%H:%M') + ' ' + cfg.get('tzlabel', 'ET'),
+        # ...and an unambiguous one beside it, so nothing downstream has to
+        # infer an offset from a two-letter suffix to work out an age.
+        'updated_utc': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
         'today': {
             'date': tkey, 'event': event_ticker(cfg, today),
             'tz': cfg.get('tzlabel', 'ET'), 'market': cfg.get('label', ''),
