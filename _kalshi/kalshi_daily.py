@@ -405,6 +405,68 @@ def daily_series(cfg, start, end):
     return out
 
 
+# THE LIVE OBSERVATION, AHEAD OF IEM.
+#
+# IEM is the archive and the settlement truth, but it publishes each :51 report
+# late -- 10-15 minutes on a good afternoon, and on 2026-09-05 it stalled for
+# over two hours. The market reads METAR directly and reprices within three
+# minutes of the report (measured: minute :54 carries 4.6x the movement of an
+# average minute), so a bake on IEM alone is trading against people who can see
+# an observation it cannot.
+#
+# That gap cost something real. At 13:19 the panel recommended betting against
+# a position, off an 11:51 reading, while the market -- holding the 12:51 -- had
+# moved its odds forty points. The disagreement it was selling was not an edge,
+# it was the hour it was blind for.
+#
+# So: aviationweather.gov first, IEM behind it. Keyless, no CORS problem for a
+# job that runs server-side, and it had the 15:51 report five minutes after it
+# was taken. IEM stays the archive and stays the settlement truth -- this only
+# fills in TODAY's most recent hours, and only where it is actually newer.
+def metar_today(cfg, day):
+    """{hour: degF} for `day` from the live METAR feed, or {} if unavailable.
+
+    reportTime in this API is rounded UP to the hour, so it cannot be used to
+    place an observation: a :51 report comes back stamped as the next hour. The
+    raw METAR carries its own DDHHMMZ group and that is what is parsed here.
+    """
+    from zoneinfo import ZoneInfo          # imported locally, as elsewhere here
+    icao = cfg.get('icao') or ('K' + cfg['station'])
+    try:
+        j = get_json('https://aviationweather.gov/api/data/metar?ids=%s&format=json&hours=12'
+                     % icao, timeout=45)
+    except Exception as e:
+        print('metar: %s unavailable (%s)' % (icao, e))
+        return {}
+    out = {}
+    for m in (j or []):
+        t = m.get('temp')
+        if t is None:
+            continue
+        raw = str(m.get('rawOb') or '')
+        stamp = None
+        for tok in raw.split():
+            if len(tok) == 7 and tok.endswith('Z') and tok[:6].isdigit():
+                stamp = tok
+                break
+        if not stamp:
+            continue
+        try:
+            utc = datetime.datetime(day.year, day.month, day.day,
+                                    int(stamp[2:4]), int(stamp[4:6]),
+                                    tzinfo=datetime.timezone.utc)
+            # the day-of-month in the group settles which UTC date it belongs to
+            utc = utc.replace(day=int(stamp[0:2]))
+        except Exception:
+            continue
+        loc = utc.astimezone(ZoneInfo(cfg.get('tz', 'America/New_York')))
+        if loc.date() != day:
+            continue
+        f = round(float(t) * 9.0 / 5.0 + 32.0, 1)
+        out[loc.hour] = max(out.get(loc.hour, -99.0), f)
+    return out
+
+
 def obs_hourly_range(cfg, start, end, sink=None):
     """Hourly obs -> {'YYYY-MM-DD': {hour: degF}}, for historic running maxima.
 
@@ -1365,6 +1427,27 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
     ob_last = []
     obh = obs_hourly_range(cfg, today - datetime.timedelta(days=span),
                            today + datetime.timedelta(days=1), sink=ob_last)
+
+    # LIVE METAR OVER THE TOP OF TODAY. IEM stays the archive and the settlement
+    # truth; this only fills in hours it has not published yet, and only where
+    # the reading is actually higher or missing. A running peak can only go up,
+    # so max() is the safe merge -- it can never talk the floor down.
+    _mt = metar_today(cfg, today)
+    if _mt:
+        _cur = obh.setdefault(tkey, {})
+        _new = sorted(h for h in _mt if h not in _cur)
+        for _h, _v in _mt.items():
+            _cur[_h] = max(_cur.get(_h, -99.0), _v)
+        # and the reading the panel prints as "now": prefer the newer one
+        _lh = max(_mt)
+        _iem_h = int(ob_last[0][0][11:13]) if ob_last else -1
+        _iem_d = ob_last[0][0][:10] if ob_last else None
+        if not ob_last or _iem_d != tkey or _lh > _iem_h:
+            ob_last[:] = [('%s %02d:51' % (tkey, _lh), _mt[_lh])]
+        print('%s metar: %d hours, %s ahead of IEM%s'
+              % (cfg['key'], len(_mt),
+                 ('%d' % len(_new)) if _new else 'none',
+                 (' (' + ', '.join('%d:00' % h for h in _new) + ')') if _new else ''))
 
 
     bias, nb = rolling_bias(fc, daily, tkey)
