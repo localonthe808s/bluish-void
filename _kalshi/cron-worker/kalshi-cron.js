@@ -122,8 +122,13 @@ async function kalshiGet(env, path, query) {
   return res.json();
 }
 
-// length-independent compare, so the failure does not leak the token by timing
+// Constant-time-ish compare, so a failure does not leak the token by timing.
+// BOTH SIDES ARE TRIMMED: a secret pasted into a dashboard field very often
+// carries a trailing newline, and comparing lengths first turns that invisible
+// character into a flat 401 that looks exactly like a wrong token.
 function tokenOk(given, want) {
+  given = String(given || '').trim();
+  want = String(want || '').trim();
   if (!want || !given || given.length !== want.length) return false;
   let d = 0;
   for (let i = 0; i < given.length; i++) d |= given.charCodeAt(i) ^ want.charCodeAt(i);
@@ -162,26 +167,38 @@ async function positions(request, env) {
     ]);
     const cash = bal.balance_dollars != null
       ? Number(bal.balance_dollars) : Number(bal.balance || 0) / 100;
-    // market_positions carries a SIGNED count: positive is yes, negative is no.
+    // FIELD NAMES AND UNITS, READ FROM THE SCHEMA RATHER THAN GUESSED. The first
+    // attempt used `position` and treated the money as cents; the endpoint
+    // answered with nulls and zeroes rather than an error, which is the worst
+    // kind of wrong. The real names are position_fp (signed: negative is NO) and
+    // *_dollars, and the dollar fields are fixed-point STRINGS already in
+    // dollars -- dividing by 100 was inventing a hundredfold error.
+    const num = (v) => { const x = Number(v); return isFinite(x) ? x : 0; };
     const held = (pos.market_positions || [])
-      .filter((m) => Number(m.position) !== 0)
-      .map((m) => ({
-        ticker: m.ticker,
-        side: Number(m.position) > 0 ? 'yes' : 'no',
-        contracts: Math.abs(Number(m.position)),
-        // cents in the API; dollars everywhere this panel speaks
-        exposure: Number(m.market_exposure || 0) / 100,
-        traded: Number(m.total_traded || 0) / 100,
-        realized: Number(m.realized_pnl || 0) / 100,
-        fees: Number(m.fees_paid || 0) / 100
-      }));
+      .map((m) => {
+        const n = num(m.position_fp !== undefined ? m.position_fp : m.position);
+        return {
+          ticker: m.ticker,
+          side: n > 0 ? 'yes' : 'no',
+          contracts: Math.abs(n),
+          exposure: num(m.market_exposure_dollars),
+          traded: num(m.total_traded_dollars),
+          realized: num(m.realized_pnl_dollars),
+          fees: num(m.fees_paid_dollars)
+        };
+      })
+      .filter((h) => h.contracts !== 0);
     const exposure = held.reduce((a, h) => a + h.exposure, 0);
     return new Response(JSON.stringify({
       at: new Date().toISOString(),
       cash: Math.round(cash * 100) / 100,
-      // what sizing should actually divide by: cash alone called the account
-      // broke at $0.83 while it held $71 of open contracts
-      equity: Math.round((cash + exposure) * 100) / 100,
+      // AT COST, and named that way. market_exposure_dollars is what the
+      // position cost, not what it is worth now -- calling the sum "equity"
+      // said $28 while the same positions were worth about $71 on the screen.
+      // Sizing wants market value, which needs live prices the panel already
+      // holds: contracts x the current bid. That multiplication belongs there,
+      // not here, so this returns the honest input and lets the page finish it.
+      cost_basis: Math.round((cash + exposure) * 100) / 100,
       positions: held
     }), { headers: { 'content-type': 'application/json',
                      'cache-control': 'no-store', ...cors(ALLOWED) } });
