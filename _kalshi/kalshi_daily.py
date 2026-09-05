@@ -704,13 +704,27 @@ def fetch_settled(cfg, limit=400):
     return ev
 
 
-def backfill(fcm, bias_of, daily, obh, settled, sd_lock):
+def backfill(fcm, bias_of, daily, obh, settled, sd_lock,
+             cfg=None, h0_of=None, res=None):
     """What we WOULD have locked at noon on each past day, scored.
 
-    Uses only information available at noon that day: the day-ahead run and a
-    bias from days already scored.  Flagged backtest=true so it is never shown
-    as a live lock.  Contemporaneous market prices are not recoverable (the
-    candlestick endpoint 404s), so these days score us only.
+    Uses only information available at noon that day. Flagged backtest=true so
+    it is never shown as a live lock. Contemporaneous market prices are not
+    recoverable for these days, so they score us only.
+
+    WALK-FORWARD, INCLUDING THE FITTED CONSTANTS.  The per-model bias was always
+    fitted only on days before k, which is the honest way round. The other two
+    numbers were not: HOURLY_PEAK_OFFSET is a mean over every day in the record
+    and the spread came from every residual in it, and both were then used to
+    score the very days they were measured on. Day k was helping to set its own
+    yardstick.
+
+    The leak is small -- one day is 1/71st of a mean, and the argmax bracket is
+    driven by the prediction rather than the spread -- but "small" is a claim,
+    and a backtest that grades itself has no standing to make it. Both are now
+    refitted per day on days strictly before k, falling back to the defaults
+    early on when there is not enough history, which is exactly what would have
+    been known at the time.
     """
     by_date = {}
     for evk, lad in settled.items():
@@ -737,14 +751,26 @@ def backfill(fcm, bias_of, daily, obh, settled, sd_lock):
         b = bias_of(prior)
         oh = obh.get(k) or {}
         run = max([v for h, v in oh.items() if h <= LOCK_HOUR] or [-99.0])
-        obs = run + HOURLY_PEAK_OFFSET if run > -90 else None
+        # the station offset as it would have been measured that morning
+        off_k = HOURLY_PEAK_OFFSET
+        if cfg is not None and h0_of is not None:
+            m_k = measure_offset(cfg, {d: v for d, v in obh.items() if d < k},
+                                 {d: v for d, v in daily.items() if d < k}, h0_of)
+            off_k = m_k[0] if m_k else OFFSET_DEFAULT
+        obs = run + off_k if run > -90 else None
         yk = (datetime.date(*map(int, k.split('-'))) - datetime.timedelta(days=1)).isoformat()
         fp = point_forecast(fcm, b, k, LOCK_HOUR, daily.get(yk))
         if fp is None:
             continue
         pred = max([x for x in (obs, fp) if x is not None])
         lad = by_date[k]
-        ps = distribution(lad, pred, sd_lock, obs)
+        # the spread as it would have looked that morning, not as it looks now
+        sd_k = sd_lock
+        if res is not None:
+            past = [r for r in res if r[0] < k]
+            if len(past) >= 20:
+                sd_k, _ = spread(past, LOCK_HOUR)
+        ps = distribution(lad, pred, sd_k, obs)
         bi = max(range(len(lad)), key=lambda i: ps[i])
         ai = which(lad, a)
         truth = next((r['label'] for r in lad if r['yes']), None) \
@@ -756,7 +782,7 @@ def backfill(fcm, bias_of, daily, obh, settled, sd_lock):
             'err': round(pred - a, 2),
             'lock': {'at': k + 'T12:00 ET (backtest)', 'pick': lad[bi]['label'],
                      'p': round(ps[bi], 4), 'pred': round(pred, 2),
-                     'sd': round(sd_lock, 2),
+                     'sd': round(sd_k, 2),
                      'obs_at_lock': obs, 'market_pick': None, 'market_p': None,
                      'ladder': [{'label': r['label'], 'lo': r['lo'], 'hi': r['hi'],
                                  'ours': round(p, 4), 'market': None}
@@ -1365,8 +1391,8 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
         sd = min(sd, max(EXACT_FLOOR_SD_MIN,
                          math.sqrt(max(sd * sd - OFFSET_SD * OFFSET_SD, 0.0)))
                      if exact_now else OFFSET_SD)
-    sd_lock, _ = spread(residuals(fcm, bias_of, daily, obh, LOCK_HOUR, tkey, h0_of),
-                        LOCK_HOUR, binding_now)
+    res_lock = residuals(fcm, bias_of, daily, obh, LOCK_HOUR, tkey, h0_of)
+    sd_lock, _ = spread(res_lock, LOCK_HOUR, binding_now)
 
     try:
         fresh_peaks = fresh_runs(cfg, hr0)
@@ -1421,7 +1447,8 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
 
     if '--backfill' in sys.argv:
         added = 0
-        for h in backfill(fcm, bias_of, daily, obh, fetch_settled(cfg), sd_lock):
+        for h in backfill(fcm, bias_of, daily, obh, fetch_settled(cfg), sd_lock,
+                          cfg=cfg, h0_of=h0_of, res=res_lock):
             if h['date'] not in hist:
                 hist[h['date']] = h
                 added += 1
