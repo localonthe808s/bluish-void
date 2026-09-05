@@ -942,8 +942,7 @@ def book_value(rows, ps, bankroll=None):
             ev += fill * e
             stake += fill * cost
             n += 1
-    return {'ev': round(ev, 2), 'stake': round(stake, 2), 'n': n,
-            'bankroll': bankroll}
+    return {'ev': round(ev, 2), 'stake': round(stake, 2), 'n': n}
 
 
 # ----------------------------------------------------------- real trades ----
@@ -1045,6 +1044,20 @@ def score_trades(trades, hist):
 #   KALSHI_API_KEY_ID    the key's uuid
 #   KALSHI_PRIVATE_KEY   the PEM, newlines and all
 # With either missing this whole path no-ops and trades.csv remains the ledger.
+# BANKROLL IS NOT PUBLISHED. kalshi_*.json is served by GitHub Pages, so every
+# field in it is world-readable -- `curl` on the URL returns it with no browser
+# and no session. The account's live cash balance sat in `today.bankroll` for
+# anyone who looked. It is now served privately by the cron worker's /positions
+# endpoint instead, behind a token.
+#
+# The number is still READ here, because sizing has to divide by something. It
+# just does not go in the file.
+#
+# HONEST RESIDUAL: the contract counts that remain are derived from it, and the
+# quantities they are derived from (our q, the price) are published, so a
+# determined reader can still work the pot out to within a rounding. Closing
+# that means moving sizing into the page against the private feed, which is the
+# next step rather than this one.
 KALSHI_BASE = 'https://api.elections.kalshi.com'
 
 
@@ -1784,7 +1797,6 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
         'wins': sum(1 for h in money if h['bet_result']['won']),
         'staked': round(sum(h['bet_result']['staked'] for h in money), 2),
         'pl': round(sum(h['bet_result']['pl'] for h in money), 2),
-        'bankroll': BANKROLL,
     }
     st = record['money']['staked']
     record['money']['roi'] = round(100.0 * record['money']['pl'] / st, 1) if st else None
@@ -1946,7 +1958,6 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
                     if cfg.get('url') else None,
             'n_models': len(models_for(cfg)),
             'trail_days': sum(1 for h in hist.values() if h.get('trail')),
-            'bankroll': BANKROLL,
             'tomorrow': tom,
         },
         'record': record,
@@ -2077,7 +2088,7 @@ def main():
                 'scale': round(scale, 3),
                 'n': sum((d.get('take') or {}).get('n', 0) for d in digests),
                 'cities': sum(1 for d in digests if (d.get('take') or {}).get('n')),
-                'bankroll': bank, 'cap': cap_frac,
+                'cap': cap_frac,
             }
             print('take: $%.2f expected on $%.2f staked (%d positions, %d cities)%s'
                   % (doc['take']['ev'], doc['take']['stake'], doc['take']['n'],

@@ -52,6 +52,127 @@ async function dispatch(env) {
   return { ok: res.status === 204, status: res.status, detail };
 }
 
+// ---------------------------------------------------------------- PRIVATE ----
+// GET /positions -- what the account actually holds, for the panel.
+//
+// WHY IT LIVES HERE AND NOT IN THE REPO. bluishvoid.com is GitHub Pages: every
+// file it serves is world-readable, and a JS gate or an overlay on the popup is
+// decoration -- `curl` never touches the page. Anything the browser can show
+// without a server checking who is asking IS public. So positions are not baked
+// into kalshi_*.json at all. They are fetched here, behind a token, by a worker
+// that already holds secrets and sits on a domain we control.
+//
+// The threat this actually addresses is a stranger reading a public URL. A token
+// in localStorage does not defend against someone using the owner's own browser,
+// and is not claimed to.
+//
+// SETUP (three secrets, none of them in this repo):
+//   wrangler secret put KALSHI_API_KEY_ID     the key's uuid
+//   wrangler secret put KALSHI_PRIVATE_KEY    the PEM, newlines and all
+//   wrangler secret put PANEL_TOKEN           any long random string you invent
+//
+// Kalshi signs with RSA-PSS/SHA-256 over `timestamp + METHOD + path`, salt length
+// equal to the digest (32). The query string is NOT covered -- the same rule the
+// Python side documents, and getting it wrong returns a 401 that looks like a bad
+// key.
+const KALSHI = 'https://api.elections.kalshi.com';
+
+function pemToDer(pem) {
+  const b64 = pem.replace(/\\n/g, '\n')
+    .replace(/-----[A-Z ]+-----/g, '').replace(/\s+/g, '');
+  const raw = atob(b64);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out.buffer;
+}
+
+async function kalshiGet(env, path, query) {
+  const key = await crypto.subtle.importKey(
+    'pkcs8', pemToDer(env.KALSHI_PRIVATE_KEY),
+    { name: 'RSA-PSS', hash: 'SHA-256' }, false, ['sign']);
+  const ts = String(Date.now());
+  const sig = await crypto.subtle.sign(
+    { name: 'RSA-PSS', saltLength: 32 }, key,
+    new TextEncoder().encode(ts + 'GET' + path));
+  const res = await fetch(KALSHI + path + (query || ''), {
+    headers: {
+      'KALSHI-ACCESS-KEY': env.KALSHI_API_KEY_ID,
+      'KALSHI-ACCESS-TIMESTAMP': ts,
+      'KALSHI-ACCESS-SIGNATURE': btoa(String.fromCharCode(...new Uint8Array(sig))),
+      'Accept': 'application/json',
+      'User-Agent': 'bluishvoid-kalshi-cron'
+    }
+  });
+  if (!res.ok) throw new Error('kalshi ' + path + ' -> ' + res.status);
+  return res.json();
+}
+
+// length-independent compare, so the failure does not leak the token by timing
+function tokenOk(given, want) {
+  if (!want || !given || given.length !== want.length) return false;
+  let d = 0;
+  for (let i = 0; i < given.length; i++) d |= given.charCodeAt(i) ^ want.charCodeAt(i);
+  return d === 0;
+}
+
+function cors(origin) {
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Headers': 'authorization',
+    'Access-Control-Max-Age': '86400',
+    'Vary': 'Origin'
+  };
+}
+const ALLOWED = 'https://bluishvoid.com';
+
+async function positions(request, env) {
+  const url = new URL(request.url);
+  const given = (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '')
+                || url.searchParams.get('t') || '';
+  if (!tokenOk(given, env.PANEL_TOKEN)) {
+    return new Response(JSON.stringify({ error: 'unauthorized' }), {
+      status: 401,
+      headers: { 'content-type': 'application/json', ...cors(ALLOWED) }
+    });
+  }
+  try {
+    const [bal, pos] = await Promise.all([
+      kalshiGet(env, '/trade-api/v2/portfolio/balance'),
+      kalshiGet(env, '/trade-api/v2/portfolio/positions',
+                '?settlement_status=unsettled&limit=200')
+    ]);
+    const cash = bal.balance_dollars != null
+      ? Number(bal.balance_dollars) : Number(bal.balance || 0) / 100;
+    // market_positions carries a SIGNED count: positive is yes, negative is no.
+    const held = (pos.market_positions || [])
+      .filter((m) => Number(m.position) !== 0)
+      .map((m) => ({
+        ticker: m.ticker,
+        side: Number(m.position) > 0 ? 'yes' : 'no',
+        contracts: Math.abs(Number(m.position)),
+        // cents in the API; dollars everywhere this panel speaks
+        exposure: Number(m.market_exposure || 0) / 100,
+        traded: Number(m.total_traded || 0) / 100,
+        realized: Number(m.realized_pnl || 0) / 100,
+        fees: Number(m.fees_paid || 0) / 100
+      }));
+    const exposure = held.reduce((a, h) => a + h.exposure, 0);
+    return new Response(JSON.stringify({
+      at: new Date().toISOString(),
+      cash: Math.round(cash * 100) / 100,
+      // what sizing should actually divide by: cash alone called the account
+      // broke at $0.83 while it held $71 of open contracts
+      equity: Math.round((cash + exposure) * 100) / 100,
+      positions: held
+    }), { headers: { 'content-type': 'application/json',
+                     'cache-control': 'no-store', ...cors(ALLOWED) } });
+  } catch (e) {
+    return new Response(JSON.stringify({ error: String(e) }), {
+      status: 502, headers: { 'content-type': 'application/json', ...cors(ALLOWED) }
+    });
+  }
+}
+
 export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil((async () => {
@@ -77,6 +198,12 @@ export default {
   },
 
   async fetch(request, env) {
+    const url = new URL(request.url);
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: cors(ALLOWED) });
+    }
+    if (url.pathname === '/positions') return positions(request, env);
+
     // Status only. This deliberately cannot trigger a run: a public endpoint that
     // fires CI is an open invitation, and the cron is the point.
     //
