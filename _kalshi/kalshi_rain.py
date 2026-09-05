@@ -355,9 +355,24 @@ def main():
         # the exchange can see the same gauge this can.
         if p is not None and mk and mk['status'] == 'active' and not row['already_rained']:
             best = None
+            mkt_p = row.get('market_p')
             for side, price, q in (('yes', mk['yes_ask'], p),
                                    ('no', mk['no_ask'], 1 - p)):
-                if not (0 < price < 1):
+                # THE TEMPERATURE RULES, EXTRAPOLATED -- and labelled as such.
+                # This board has its own model and its own scoring, and its
+                # betting record is ONE trade. There is no rain evidence for a
+                # price floor either way.
+                #
+                # What there is: 435 temperature bets at a nickel or less with
+                # zero winners, and the identical shape here today -- New
+                # Orleans NO at 1c because we said 33% where the market said 1%.
+                # Fading a liquid market's near-certainty for pennies is a
+                # mechanism, not a quirk of ladders. Revisit when this board has
+                # a real sample rather than one.
+                if not (K.MIN_PRICE <= price < 1):
+                    continue
+                if mkt_p is not None and abs(q - (mkt_p if side == 'yes' else 1 - mkt_p)) \
+                        > K.MAX_DISAGREE:
                     continue
                 ev = q - price - K.fee_of(price)
                 if ev <= 0.005:
