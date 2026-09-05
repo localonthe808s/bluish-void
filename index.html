@@ -53550,6 +53550,143 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var m = v.match(/^(\d{4}-\d{2}-\d{2})T(\d{1,2}:\d{2})(.*)$/);
         return m ? m[1] + ' ' + t12(m[2]) + m[3] : v.replace('T', ' ');
       };
+
+      /* ---- SYSTEM: is the machine behind this panel still running? ---------
+         Every number above is baked by a job on a schedule, and when that job
+         dies the panel keeps rendering the last good bake and looks perfectly
+         healthy. On 2026-09-05 it served a five-hour-old read all morning and
+         nothing on screen said so -- the only clue was an observation clock
+         reading 3:51, which is not a refresh time and was never meant to be
+         read as one. These lights say it out loud.
+
+         GREEN is not "perfect", it is "as fresh as this input ever gets".
+         GREY is idle and expected -- a closed market, the overnight window.
+         AMBER is late. RED is broken. */
+      var QCG = '#2ecc71', QCA = '#f5a524', QCR = '#ff6b5e', QCN = '#7b8496';
+
+      /* New York's wall clock as comparable milliseconds. The bake stamps its
+         time in ET carrying no offset, so the only honest comparison is wall
+         against wall -- converting either side needs the offset the string does
+         not have. (Both sides are an hour out for one hour a year, at the DST
+         step. Nothing on this panel is worth more than that.) */
+      var etWall = function(d){
+        try {
+          var o = {};
+          new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York',
+            hour12: false, year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit' }).formatToParts(d)
+            .forEach(function(x){ o[x.type] = x.value; });
+          return Date.UTC(+o.year, +o.month - 1, +o.day, (+o.hour) % 24, +o.minute);
+        } catch (e) { return d.getTime(); }
+      };
+      var nowET = etWall(new Date());
+      var etH = new Date(nowET).getUTCHours();
+      /* the overnight hole is deliberate: no cron covers 1-8 AM ET */
+      var qcNight = (etH >= 1 && etH < 8);
+      var ageOf = function(stamp){
+        var m = String(stamp || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{1,2}):(\d{2})(Z?)/);
+        if (!m) return null;
+        var t = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
+        /* a Z stamp (the rain board) is real UTC and compares against real now;
+           a bare one is ET wall clock and compares against the ET wall clock */
+        return (m[6] ? (Date.now() - t) : (nowET - t)) / 6e4;
+      };
+      var ageTxt = function(min){
+        if (min == null) return 'UNKNOWN';
+        if (min < 1) return 'JUST NOW';
+        if (min < 60) return Math.round(min) + ' MIN AGO';
+        var h2 = Math.floor(min / 60), r2 = Math.round(min - 60 * h2);
+        return h2 + ' HR' + (r2 ? ' ' + r2 + ' MIN' : '') + ' AGO';
+      };
+      var qcRow = function(col, name, val, note){
+        return '<div style="display:flex;align-items:baseline;gap:7px;margin-top:5px;">'
+          + '<span style="width:7px;height:7px;border-radius:50%;background:' + col
+          + ';display:inline-block;flex:0 0 auto;position:relative;top:-1px;"></span>'
+          + '<span style="font:800 8px system-ui,sans-serif;letter-spacing:.07em;'
+          + 'color:#5b647a;width:52px;flex:0 0 auto;">' + name + '</span>'
+          + '<span style="font:.62rem system-ui,sans-serif;color:#223;">' + val
+          + (note ? '<span style="color:#7b8496;"> — ' + note + '</span>' : '')
+          + '</span></div>';
+      };
+
+      var qcL = [];
+      /* 1. THE BAKE. Hourly at :05, so anything past ~75 minutes means a run
+            did not land -- except overnight, when none is scheduled. */
+      var fAge = ageOf(K.updated);
+      qcL.push(fAge == null
+        ? qcRow(QCR, 'FEED', 'NO TIMESTAMP', 'the file carries no update time')
+        : fAge < 75 ? qcRow(QCG, 'FEED', mtaEsc(stamp12(K.updated)) + ' · ' + ageTxt(fAge))
+        : qcNight ? qcRow(QCN, 'FEED', ageTxt(fAge), 'overnight; the job resumes at 8:05 AM')
+        : fAge < 180 ? qcRow(QCA, 'FEED', ageTxt(fAge), 'a refresh is late; it runs hourly at :05')
+        : qcRow(QCR, 'FEED', ageTxt(fAge), 'the bake has stopped landing'));
+
+      /* 2. THE TRAIL -- the strongest signal here, because it is a RECORD and
+            not a snapshot: one entry per hourly run that actually landed. A
+            missing hour is a run that died, and it stays missing all day. */
+      var schedH = [];
+      for (var qi = 0; qi <= 23; qi++) if (qi <= 4 || qi >= 8) schedH.push(qi);
+      var dueH = schedH.filter(function(x){ return x < etH; });
+      var todayH = (H.filter(function(h){ return h.date === T.date; })[0] || {}).trail || [];
+      var haveH = {};
+      todayH.forEach(function(x){ haveH[x.h] = 1; });
+      var missH = dueH.filter(function(x){ return !haveH[x]; });
+      qcL.push(qcRow(!dueH.length ? QCN : !missH.length ? QCG : missH.length > 2 ? QCR : QCA,
+        'RUNS', (dueH.length - missH.length) + ' OF ' + dueH.length + ' HOURS TODAY',
+        missH.length ? 'missed ' + missH.map(function(x){ return t12(x + ':00'); }).join(', ') : ''));
+
+      /* 3. the market itself: quoted, or open with an empty book (a real fault) */
+      var qSt = T.state || {};
+      var qQuoted = (T.ladder || []).filter(function(r){ return r.ask; }).length;
+      qcL.push(String(qSt.status).toLowerCase() === 'open'
+        ? (qQuoted ? qcRow(QCG, 'MARKET', 'OPEN · ' + qQuoted + ' RANGES QUOTED')
+                   : qcRow(QCR, 'MARKET', 'OPEN, NO QUOTES', 'Kalshi returned an empty book'))
+        : qcRow(QCN, 'MARKET', mtaEsc(String(qSt.status || 'closed').toUpperCase()),
+                qSt.opens ? 'opens ' + mtaEsc(qSt.opens) : ''));
+
+      /* 4. the thermometer the whole market settles on. It reports at :51 past
+            the hour, so ~95 minutes is the most it should ever be behind. */
+      var oAge = null;
+      if (T.now_at){
+        var hm = String(T.now_at).match(/^(\d{1,2}):(\d{2})/);
+        if (hm){
+          var nd = new Date(nowET);
+          oAge = (nowET - Date.UTC(nd.getUTCFullYear(), nd.getUTCMonth(), nd.getUTCDate(),
+                                   +hm[1], +hm[2])) / 6e4;
+          if (oAge < -60) oAge += 1440;      /* stamped before midnight */
+        }
+      }
+      qcL.push(T.now_temp == null
+        ? qcRow(QCA, 'STATION', 'NO CURRENT READING', 'Central Park has not reported')
+        : qcRow((oAge != null && oAge < 95) ? QCG : QCA, 'STATION',
+            T1(T.now_temp) + '° AT ' + t12(T.now_at) + ' · ' + ageTxt(oAge),
+            (oAge != null && oAge >= 95) ? 'it reports hourly at :51' : ''));
+
+      /* 5. the consensus behind the forecast */
+      var nMod = T.n_models || 0;
+      qcL.push(qcRow(nMod >= 4 ? QCG : nMod >= 2 ? QCA : QCR, 'MODELS',
+        nMod + ' IN THE CONSENSUS', nMod >= 4 ? '' : 'upstream models are missing'));
+
+      /* 6. the rain board is a separate file and a separate bake; it can fail
+            on its own, and the job is written so that it does */
+      var qRN = window._cwRain;
+      var rAge = qRN ? ageOf(qRN.updated) : null;
+      qcL.push(!qRN
+        ? qcRow(QCR, 'RAIN', 'NOT LOADED', 'the 22-city board did not arrive')
+        : qcRow((rAge != null && rAge < 90) ? QCG : qcNight ? QCN : QCA, 'RAIN',
+            ((qRN.cities || []).length) + ' CITIES · ' + ageTxt(rAge)));
+
+      /* 7. the lock. Past noon with nothing locked means the run that writes
+            the day's graded decision never happened -- the failure that makes
+            the record dishonest rather than merely stale. */
+      qcL.push(T.locked
+        ? qcRow(QCG, 'LOCK', 'LOCKED ' + deg(T.locked.pick || '')
+            + (T.locked.as_of ? ' AS OF ' + mtaEsc(T.locked.as_of) : ''))
+        : etH < (T.lock_hour == null ? 12 : T.lock_hour)
+          ? qcRow(QCN, 'LOCK', 'PENDING', 'locks at ' + t12((T.lock_hour == null ? 12 : T.lock_hour) + ':00'))
+          : qcRow(QCR, 'LOCK', 'NOT LOCKED', 'the noon run did not write a decision'));
+
+      var qcBox = hdr('SYSTEM')
+        + '<div style="margin-top:2px;">' + qcL.join('') + '</div>';
       /* the zone label travels with the data, so a second city reads correctly */
       var tzl = T.tz || 'ET';
       /* two different numbers, and the panel needs both: the peak so far is
@@ -54612,13 +54749,14 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         + tallyLines
         + timing
         + (PHONE ? kalshiBtn(T.link, 'OPEN ON KALSHI &rarr;') : '')
+        + qcBox
         + '<div style="font:600 8px system-ui,sans-serif;color:#359478;letter-spacing:.05em;margin-top:8px;">'
         + ((!PHONE && T.link)
             ? kalshiBtn(T.link, 'OPEN ON KALSHI &rarr;') + '<span style="opacity:.6;"> \u00B7 </span>'
             : '')
         + mtaEsc(T.event || '') + ' \u00B7 ' + mtaEsc(T.settles || '').toUpperCase()
         + ' \u00B7 UPDATED '
-        + mtaEsc(stamp12(K.updated)) + '</div>';
+        + mtaEsc(stamp12(K.updated)) + ' \u00B7 ' + ageTxt(fAge) + '</div>';
 
       cwKalshiPanel('BELVEDERE CASTLE', 'NYC DAILY HIGH', body);
     }
