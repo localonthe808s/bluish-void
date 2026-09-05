@@ -72,6 +72,7 @@ MARKETS = [
         'lat':     40.7789, 'lon': -73.9692,   # Belvedere Castle / Central Park
         'field':   'max_temp_f',
         'tz':      'America/New_York', 'tzlabel': 'ET',
+        'url':     'https://kalshi.com/markets/kxhighny/highest-temperature-in-nyc',
         'out':     'kalshi_ny.json',
     },
 ]
@@ -962,6 +963,10 @@ def run_market(cfg):
             # the panel renders these rather than hardcoding them: the prose had
             # already drifted from the constants twice after a refit
             'damp': SWING_DAMP, 'bias_days': BIAS_K, 'resid_days': RESID_M,
+            # deep link straight to today's event, so the panel is one click
+            # from actually placing the bet
+            'link': (cfg['url'] + '/' + event_ticker(cfg, today).lower())
+                    if cfg.get('url') else None,
             'n_models': len(models_for(cfg)),
             'trail_days': sum(1 for h in hist.values() if h.get('trail')),
         },
