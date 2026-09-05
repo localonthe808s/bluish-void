@@ -1883,16 +1883,6 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
         _cli = cli_read(cfg)
     except Exception as e:
         print('%s cli unavailable (%s)' % (cfg['key'], e))
-    _ncli = 0
-    for _k, _v in _cli.items():
-        if not _v.get('final') or _v.get('max') is None:
-            continue
-        if _k in daily and abs(daily[_k] - _v['max']) > 1e-9:
-            print('  climate report %s: IEM %.1f -> %.1f' % (_k, daily[_k], _v['max']))
-            _ncli += 1
-        daily[_k] = _v['max']
-    if _ncli:
-        print('%s: %d day(s) corrected to the climate report' % (cfg['key'], _ncli))
 
     _settled = {}
     try:
@@ -1902,6 +1892,50 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
     daily, _nfix = settle_corrected(daily, _settled)
     if _nfix:
         print('%s: %d day(s) corrected to the settlement' % (cfg['key'], _nfix))
+
+    # AND THE CLIMATE REPORT HAS THE LAST WORD, WHICH IT DID NOT AN HOUR AGO.
+    #
+    # expiration_value was applied last, on the reasoning that what the exchange
+    # paid is true by definition. It is true about the PAYMENT. It is not always
+    # true about the WEATHER, and `daily` is where the weather lives -- the
+    # rolling bias, the peak offset and the residual spread all take their
+    # actuals from here.
+    #
+    # Miami 2026-08-29 is the case, 1 in 112. The exchange settled 90.00. Against
+    # that:
+    #
+    #     climate report (CLIMIA)   85      TWC's own obs feed        85
+    #     IEM daily                 85      Fort Lauderdale           85
+    #     Opa-Locka                 84      Hollywood                 84
+    #     Miami's own METARs        never above 82 after 9 AM, 0.62in of rain
+    #
+    # and the market closed with "87 or below" at 98c. The exchange paid the 2c
+    # rung. Every instrument in south Florida, the market itself, and the
+    # publisher named in the rules all said 85; the settlement said 90. Feeding
+    # that into the record put a 5 degF error into everything fitted for Miami.
+    #
+    # So the physical record wins for the physical quantities. Settlements still
+    # correct the days where no final climate report exists, which is what that
+    # layer was for. Where the two disagree the day is named out loud rather than
+    # quietly absorbed -- a settlement that contradicts every instrument is worth
+    # seeing, not smoothing.
+    _ncli = _nodd = 0
+    for _k, _v in _cli.items():
+        if not _v.get('final') or _v.get('max') is None:
+            continue
+        _was = daily.get(_k)
+        if _was is not None and abs(_was - _v['max']) > 1e-9:
+            _paid = abs(_was - _v['max']) > 1.5
+            print('  %s %s: %.1f -> %.1f (climate report)%s'
+                  % ('SETTLEMENT ANOMALY' if _paid else 'climate report', _k,
+                     _was, _v['max'], '  <-- the exchange paid on %.1f' % _was if _paid else ''))
+            _ncli += 1
+            _nodd += 1 if _paid else 0
+        daily[_k] = _v['max']
+    if _ncli:
+        print('%s: %d day(s) set from the climate report%s'
+              % (cfg['key'], _ncli,
+                 ', %d contradicting a settlement' % _nodd if _nodd else ''))
     # end one day AHEAD: asos.py treats the end date as the cut-off, so asking
     # for `today` returns almost nothing for today
     ob_last = []
