@@ -792,6 +792,35 @@ def fee_of(price):
     return min(0.035, math.ceil(0.07 * price * (1 - price) * 100) / 100.0)
 
 
+# HOW FAR WE ARE ALLOWED TO DISAGREE, measured rather than chosen.
+#
+# _kalshi/market_study.py bins 1,065 hour-rows of real quotes by how far our
+# probability sat from the market's, and asks who ended up closer to what
+# happened. The answer is not monotonic and the last line is brutal:
+#
+#     gap          n     our brier   mkt brier
+#     10-20 pts   961      0.0971      0.0852   market wins by 12%
+#     20-30 pts   219      0.1349      0.1952   we win by 31%
+#     30-50 pts   205      0.1979      0.2002   level
+#     50+  pts    213      0.5595      0.1065   MARKET WINS BY 81%
+#
+# A Brier of 0.56 is not "slightly off". It is being confidently wrong, over and
+# over. Past about half the board, a disagreement with a liquid market has never
+# been an edge -- it has been this model breaking, and the panel was sizing real
+# money against it. Miami's 88-89 rung this morning sat 52 points from the
+# market and wanted 65% of the bankroll.
+#
+# So: rungs we disagree with by more than this are not traded. They are not
+# hidden either -- they still render on the ladder, where a 50-point gap is
+# worth looking at as a bug report.
+MAX_DISAGREE = 0.50
+
+
+def _wild(q, market_p):
+    """True when our number is too far from the market's to be believed."""
+    return market_p is not None and abs(q - market_p) > MAX_DISAGREE
+
+
 def best_bet(rows, ps):
     """The largest gap between our probability and what a side actually costs,
     after the fee.  Both directions: on a six-way ladder buying NO is usually
@@ -801,6 +830,12 @@ def best_bet(rows, ps):
         for side, price, q in (('for', r.get('ask'), p),
                                ('against', r.get('nask'), 1.0 - p)):
             if price is None or not (0 < price < 1):
+                continue
+            # our q for this side vs the market's own number for the same side
+            mp = r.get('market')
+            if mp is not None and side == 'against':
+                mp = 1.0 - mp
+            if _wild(q, mp):
                 continue
             ev = q - price - fee_of(price)
             if best is None or ev > best['ev']:
@@ -832,6 +867,11 @@ def book_value(rows, ps, bankroll=None):
         for side, price, q, size in (('for', r.get('ask'), p, r.get('ysize')),
                                      ('against', r.get('nask'), 1.0 - p, r.get('nsize'))):
             if price is None or not (0 < price < 1):
+                continue
+            mp = r.get('market')
+            if mp is not None and side == 'against':
+                mp = 1.0 - mp
+            if _wild(q, mp):
                 continue
             e = q - price - fee_of(price)
             if e <= 0.005:
