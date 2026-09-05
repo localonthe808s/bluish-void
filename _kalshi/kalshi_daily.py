@@ -842,6 +842,35 @@ def fee_of(price):
 MAX_DISAGREE = 0.50
 
 
+# THE CHEAPEST CONTRACTS HAVE NEVER ONCE PAID.
+#
+# Every chosen bet in the record, 1,065 of them, split by what it cost:
+#
+#     price      bets   winrate   ret/$1   cumulative
+#      0- 5c      435       0%     -0.94     -410.00
+#      5-10c       51       6%     -0.28      -14.49
+#     10-25c      106      27%     +0.67      +71.12
+#     25-50c      178      55%     +0.44      +79.10
+#     50-75c      141      87%     +0.40      +55.82
+#     75c+        154      91%     +0.00       +0.33
+#
+# Four hundred and thirty-five bets at a nickel or less, and NOT ONE of them
+# won. That is the whole loss: the strategy is -218 units overall and +206 with
+# nothing under a dime in it.
+#
+# WHY, and it is not the obvious reason. The calibration is fine in the
+# aggregate -- across all rung-hours we say 14% and it happens 15%. But bets are
+# not a random sample of rung-hours, they are the subset where we disagree with
+# the market MOST, and that is exactly where our number is most inflated. Buying
+# only where we are the most out of line with a liquid market is the winner's
+# curse with the safety off. It is the same finding as MAX_DISAGREE from the
+# other end: there by how far we disagree, here by what the disagreement costs.
+#
+# The floor is a dime, not a quarter, deliberately: 10-25c is the single best
+# band in the record at +0.67 per $1, and a quarter would throw it away.
+MIN_PRICE = 0.10
+
+
 def _wild(q, market_p):
     """True when our number is too far from the market's to be believed."""
     return market_p is not None and abs(q - market_p) > MAX_DISAGREE
@@ -855,7 +884,7 @@ def best_bet(rows, ps):
     for r, p in zip(rows, ps):
         for side, price, q in (('for', r.get('ask'), p),
                                ('against', r.get('nask'), 1.0 - p)):
-            if price is None or not (0 < price < 1):
+            if price is None or not (MIN_PRICE <= price < 1):
                 continue
             # our q for this side vs the market's own number for the same side
             mp = r.get('market')
@@ -892,7 +921,7 @@ def book_value(rows, ps, bankroll=None):
     for r, p in zip(rows, ps):
         for side, price, q, size in (('for', r.get('ask'), p, r.get('ysize')),
                                      ('against', r.get('nask'), 1.0 - p, r.get('nsize'))):
-            if price is None or not (0 < price < 1):
+            if price is None or not (MIN_PRICE <= price < 1):
                 continue
             mp = r.get('market')
             if mp is not None and side == 'against':

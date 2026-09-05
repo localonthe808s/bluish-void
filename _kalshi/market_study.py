@@ -109,6 +109,78 @@ def main():
                  bar(min(1.0, max(0.0, (ret + 1) / 3)))))
     print()
 
+    # ------------------------------ the 10-20c bucket, split open ------------
+    # That bucket is the biggest on the board -- 424 of the chosen bets -- and it
+    # returned -0.57 per $1. Two very different stories look identical in that
+    # one number: "cheap long shots lose four times in five and pay for it when
+    # they land" is a structural feature to be sized around, while "our 10-20c
+    # estimates are simply wrong" means the band should not be traded at all.
+    # They imply opposite responses, so the bucket gets opened.
+    #
+    # The chosen rung is not stored, but it is recoverable: ev = q - price - fee,
+    # so q = ev + price + fee, and that q matches exactly one rung and side in
+    # `ours`. Anything that fails to match within half a point is dropped rather
+    # than guessed at.
+    def whose(r):
+        b = r.get('best')
+        if not b:
+            return None
+        q = b['ev'] + b['price'] + fee_of(b['price'])
+        best = None
+        for i, o_ in enumerate(r['ours']):
+            if o_ is None:
+                continue
+            for side, qq in (('yes', o_), ('no', 1.0 - o_)):
+                d = abs(qq - q)
+                if best is None or d < best[0]:
+                    best = (d, i, side)
+        if best is None or best[0] > 0.005:
+            return None
+        return best[1], best[2]
+
+    sel = []
+    for r in rows:
+        b = r.get('best')
+        if not b or not (0.10 <= b['ev'] < 0.20):
+            continue
+        w = whose(r)
+        if w is None:
+            continue
+        sel.append((b, w[0], w[1]))
+    print('THE 10-20c BUCKET, SPLIT (%d of the 424 rungs identified)' % len(sel))
+
+    print('\n  by WHAT IT COST:')
+    print('    %-12s %6s %8s %9s' % ('price', 'bets', 'winrate', 'ret/$1'))
+    for lo, hi in [(0.0, 0.10), (0.10, 0.25), (0.25, 0.50), (0.50, 0.75), (0.75, 1.01)]:
+        g = [b for b, _, _ in sel if lo <= b['price'] < hi]
+        if len(g) < 10:
+            continue
+        print('    %2.0f-%3.0fc      %6d %7.0f%% %+9.2f'
+              % (100 * lo, 100 * hi, len(g),
+                 100.0 * sum(1 for b in g if b['wins']) / len(g),
+                 sum(b['ret'] for b in g) / len(g)))
+
+    print('\n  by WHICH RUNG:')
+    print('    %-12s %6s %8s %9s' % ('rung', 'bets', 'winrate', 'ret/$1'))
+    for name, test in (('tail', lambda i: i in (0, 5)),
+                       ('interior', lambda i: i not in (0, 5))):
+        g = [b for b, i, _ in sel if test(i)]
+        if len(g) < 10:
+            continue
+        print('    %-12s %6d %7.0f%% %+9.2f'
+              % (name, len(g), 100.0 * sum(1 for b in g if b['wins']) / len(g),
+                 sum(b['ret'] for b in g) / len(g)))
+
+    print('\n  by WHICH SIDE:')
+    for side in ('yes', 'no'):
+        g = [b for b, _, sd in sel if sd == side]
+        if len(g) < 10:
+            continue
+        print('    %-12s %6d %7.0f%% %+9.2f'
+              % (side.upper(), len(g), 100.0 * sum(1 for b in g if b['wins']) / len(g),
+                 sum(b['ret'] for b in g) / len(g)))
+    print()
+
     # --------------------------------------------- tails versus interiors ----
     # Rungs 0 and 5 are open-ended; 1-4 are two-degree windows.
     print('TAIL RUNGS VERSUS INTERIOR ONES')
