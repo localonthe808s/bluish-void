@@ -53176,7 +53176,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             + 'background:rgba(0,210,152,.28);}'
             + '#cw-kalshi-panel{-webkit-user-select:text;user-select:text;}'
             + '#cw-kalshi-panel a{-webkit-touch-callout:default !important;'
-            + '-webkit-user-select:text !important;user-select:text !important;}';
+            + '-webkit-user-select:text !important;user-select:text !important;}'
+            + '@keyframes cwkSpin{to{transform:rotate(360deg);}}'
+            + '#cw-kalshi-panel .cwk-spin{animation:cwkSpin .7s linear infinite;}'
+            + '#cw-kalshi-panel #cw-kalshi-r:active{background:rgba(0,210,152,.28);}';
           document.head.appendChild(st);
         }
         /* the map must not pan, zoom or re-tap underneath a sheet this large */
@@ -53203,6 +53206,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         + '-webkit-overflow-scrolling:touch;';
       p.style.display = '';
       p.scrollTop = 0;
+      var cwkBtnCss = 'flex:0 0 auto;width:' + (narrow ? 38 : 26) + 'px;height:'
+        + (narrow ? 38 : 26) + 'px;border-radius:50%;background:rgba(255,255,255,.075);'
+        + 'border:1px solid rgba(0,210,152,.24);padding:0;line-height:'
+        + (narrow ? 36 : 24) + 'px;text-align:center;font:700 ' + (narrow ? 17 : 13)
+        + 'px system-ui,sans-serif;color:#00D298;cursor:pointer;';
       p.innerHTML = '<div style="display:flex;align-items:center;gap:8px;position:sticky;'
         + 'top:' + (narrow ? '-8px' : '-10px') + ';background:#0d1117;padding:'
         + (narrow ? '6px 0 10px' : '2px 0 8px') + ';margin:-2px 0 0;z-index:2;">'
@@ -53210,16 +53218,42 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         + mtaEsc(title).toUpperCase() + '</span>'
         + (sub ? '<span style="font:600 8px system-ui,sans-serif;color:#45b491;letter-spacing:.08em;'
             + 'white-space:nowrap;">' + mtaEsc(sub).toUpperCase() + '</span>' : '')
-        + '<button id="cw-kalshi-x" aria-label="Close" style="margin-left:auto;flex:0 0 auto;'
-        + 'width:' + (narrow ? 38 : 26) + 'px;height:' + (narrow ? 38 : 26) + 'px;'
-        + 'border-radius:50%;background:rgba(255,255,255,.075);'
-        + 'border:1px solid rgba(0,210,152,.24);padding:0;line-height:'
-        + (narrow ? 36 : 24) + 'px;text-align:center;font:700 ' + (narrow ? 17 : 13)
-        + 'px system-ui,sans-serif;color:#00D298;cursor:pointer;">'
+        /* REFRESH, then close. Both share the X's geometry so the pair reads as
+           one control cluster rather than a button bolted on. Refresh sits
+           first because it is the one you reach for repeatedly: this is a live
+           market, and a sheet opened five minutes ago quotes a price that has
+           since moved. */
+        + '<button id="cw-kalshi-r" aria-label="Refresh data" title="Refresh" style="'
+        + 'margin-left:auto;' + cwkBtnCss + '">\u21BB</button>'
+        + '<button id="cw-kalshi-x" aria-label="Close" style="' + cwkBtnCss + '">'
         + '&#10005;</button></div>'
         + html;
       var x = document.getElementById('cw-kalshi-x');
       if (x) x.onclick = function(e){ e.stopPropagation(); p.style.display = 'none'; };
+      /* A refresh that silently does nothing when the bake has not moved reads
+         as a dead button -- the mistake the open link already made once here.
+         So: spin while fetching, and if nothing changed say so with a tick
+         rather than just stopping. When it HAS changed the sheet is rebuilt and
+         this element is gone, which is its own answer. */
+      var rb = document.getElementById('cw-kalshi-r');
+      if (rb) rb.onclick = function(e){
+        e.stopPropagation();
+        if (rb.disabled) return;
+        rb.disabled = true;
+        rb.classList.add('cwk-spin');
+        cwKalshiFresh(true, function(changed){
+          var b2 = document.getElementById('cw-kalshi-r');
+          if (!b2 || changed) return;              /* redrawn: nothing to reset */
+          b2.classList.remove('cwk-spin');
+          b2.disabled = false;
+          b2.innerHTML = '\u2713';
+          b2.style.color = '#2ecc71';
+          setTimeout(function(){
+            var b3 = document.getElementById('cw-kalshi-r');
+            if (b3){ b3.innerHTML = '\u21BB'; b3.style.color = ''; }
+          }, 1400);
+        });
+      };
       /* copy the ticker, and say so -- a copy that gives no feedback reads as a
          dead button, which is the mistake the open link already made once */
       var cp = p.querySelector('.cwk-btn2');
@@ -53302,23 +53336,27 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        Only ever on a tap, never on a timer: a sheet that silently re-rendered
        itself under a finger mid-read would be worse than a stale timestamp. */
     var cwKalshiPullAt = 0;
-    function cwKalshiFresh(){
+    function cwKalshiFresh(force, done){
+      var fin = function(ch){ if (done) try { done(ch); } catch (e){} };
       var now = Date.now();
-      if (now - cwKalshiPullAt < 3e5) return;   /* at most once every 5 minutes */
+      /* the throttle guards the automatic pull on open. Someone who presses
+         refresh has asked for it, and gets it. */
+      if (!force && now - cwKalshiPullAt < 3e5) return fin(false);
       cwKalshiPullAt = now;
       var cb = '?v=' + Math.floor(now / 6e4);
       fetch('kalshi_rain.json' + cb).then(function(r){ return r.json(); })
         .then(function(j){ if (j && j.cities) window._cwRain = j; }).catch(function(){});
       fetch('kalshi_ny.json' + cb).then(function(r){ return r.json(); })
         .then(function(j){
-          if (!j || !j.today) return;
+          if (!j || !j.today) return fin(false);
           var stale = window._cwKalshi && window._cwKalshi.updated;
           window._cwKalshi = j;
-          if (stale === j.updated) return;      /* same bake -- leave the sheet alone */
+          if (stale === j.updated) return fin(false);  /* same bake, leave it alone */
           try { cwDrawSensors(); } catch (e){}
           var p = document.getElementById('cw-kalshi-panel');
           if (p && p.style.display !== 'none') cwKalshiTap();
-        }).catch(function(){});
+          fin(true);
+        }).catch(function(){ fin(false); });
     }
     /* the KALSHI daily-high market, read off Belvedere Castle. Shows their
        ladder against ours, the pick we locked before the market closed, and
