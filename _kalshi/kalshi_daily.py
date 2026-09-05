@@ -313,6 +313,11 @@ def fetch_market(cfg, ev):
             'nbid': nbid, 'nask': nask, 'ysize': ysz, 'nsize': nsz,
             'mid': round((bid + ask) / 2, 4),
             'vol': float(m.get('volume_fp') or 0),
+            # OPEN INTEREST is the pool: contracts currently held, each of which
+            # settles at a dollar, so the count IS the money riding on this rung.
+            # Volume counts every trade including the ones already closed out, so
+            # it says how busy the market has been rather than how much is on it.
+            'oi': float(m.get('open_interest_fp') or m.get('open_interest') or 0),
             'close': m.get('close_time'), 'open': m.get('open_time'),
         })
     out.sort(key=lambda r: (r['lo'] if r['lo'] is not None else -999))
@@ -1943,7 +1948,7 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
                         'bid': r['bid'], 'ask': r['ask'],
                         'nbid': r['nbid'], 'nask': r['nask'],
                         'ysize': r['ysize'], 'nsize': r['nsize'], 'market': r['mid'],
-                        'ours': round(p, 4), 'vol': r['vol']}
+                        'ours': round(p, 4), 'vol': r['vol'], 'oi': r.get('oi')}
                        for r, p in zip(rows, ps)],
             'locked': entry.get('lock'), 'final': entry.get('final'),
             'final_hour': FINAL_HOUR,
@@ -1996,6 +2001,9 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
             'market_pick': t.get('market_pick'), 'agree': t.get('agree'),
             'obs': t.get('obs_so_far'), 'now_temp': t.get('now_temp'),
             'day_over': t.get('day_over'),
+            # what is riding on this market right now, across every rung
+            'pool': round(sum((r.get('oi') or 0) for r in rows), 0),
+            'vol': round(sum((r.get('vol') or 0) for r in rows), 0),
             'bet': bb, 'take': take, 'file': cfg['out']}
 
 
