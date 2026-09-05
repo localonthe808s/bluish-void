@@ -1432,6 +1432,22 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
     # truth; this only fills in hours it has not published yet, and only where
     # the reading is actually higher or missing. A running peak can only go up,
     # so max() is the safe merge -- it can never talk the floor down.
+    # THE BOUNDARY, AND IT MATTERS MORE THAN THE FRESHNESS.
+    #
+    # The rulebook settles on the official daily figure -- CLINYC via The
+    # Weather Company -- and IEM's daily max_temp_f is the proxy that has
+    # matched it on every settled market checked. That is the truth this record
+    # is scored against, and METAR IS NOT IT. An hourly observation is a
+    # different measurement: it misses the intra-hour peak, which is the entire
+    # reason HOURLY_PEAK_OFFSET exists.
+    #
+    # So this merge writes obh (the forecast's running floor) and ob_last (the
+    # reading shown as "now"). It must never write `daily`. A model that is
+    # fresher is worth having; a model scored against a number the exchange does
+    # not use is worth nothing, however fresh.
+    #
+    # The offset stays honest too: it is fitted on PAST days, where obh is still
+    # IEM-only, so today's METAR rows cannot drift the calibration.
     _mt = metar_today(cfg, today)
     if _mt:
         _cur = obh.setdefault(tkey, {})
