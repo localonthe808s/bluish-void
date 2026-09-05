@@ -53479,6 +53479,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (bt.interior_n) tallyBits.push('easy ranges ' + (bt.hits - bt.interior_hits)
         + '/' + (bt.n - bt.interior_n) + ', hard ones ' + bt.interior_hits + '/' + bt.interior_n);
       if (fr.n) tallyBits.push('the 6 PM call ' + fr.hits + '/' + fr.n);
+      /* the measure that actually has to hold for the staking to work: a
+         stated 45% has to happen 45% of the time. Accuracy can stay at 58%
+         forever and the bets still make money, as long as this stays honest. */
+      var cal = R.calibration || {};
+      if (cal.gap != null) tallyBits.push('odds run ' + (100 * cal.gap).toFixed(1)
+        + ' points off what happens');
       /* the number that decides whether any of this is worth doing. It can only
          start live: a settled Kalshi market quotes 0 or 100 and the candlestick
          endpoint 404s, so no backfilled day has an entry price to score. */
@@ -53682,6 +53688,43 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         consider(vb2, r, 'for', r.ask, r.ours || 0);
         consider(vb2, r, 'against', r.nask, 1 - (r.ours || 0));
       });
+      /* the whole book of positions worth holding today. One bet per day was
+         leaving growth on the table: on a six-way ladder there are usually two
+         or three cells the market has wrong, and they are not the same bet. */
+      var book = [];
+      (T.ladder || []).forEach(function(r){
+        [['for', r.ask, r.ours || 0], ['against', r.nask, 1 - (r.ours || 0)]]
+          .forEach(function(o){
+            var px = o[1], q = o[2];
+            if (px == null || px <= 0 || px >= 1) return;
+            var ev = q - px - feeOf(px);
+            if (ev <= 0.005) return;              // below a cent is noise
+            var k = stakeOf(q, px);
+            if (!k) return;
+            book.push({ r: r, dir: o[0], ask: px, q: q, ev: ev,
+                        f: k.quarter, cost: k.cost });
+          });
+      });
+      book.sort(function(a, b){ return b.ev - a.ev; });
+      /* exact payoff per outcome: the ladder is mutually exclusive, so for each
+         range that could settle, each position either pays $1 or expires at 0 */
+      var bookRoll = null;
+      if (book.length > 1){
+        var tot = 0;
+        book.forEach(function(b){ tot += b.f; });
+        var lo = null, hi = null, ev = 0, worstAt = null;
+        (T.ladder || []).forEach(function(out){
+          var pl = 0;
+          book.forEach(function(b){
+            var wins = (b.dir === 'for') ? (b.r === out) : (b.r !== out);
+            pl += wins ? b.f * (1 - b.cost) / b.cost : -b.f;
+          });
+          ev += (out.ours || 0) * pl;
+          if (lo == null || pl < lo){ lo = pl; worstAt = out; }
+          if (hi == null || pl > hi) hi = pl;
+        });
+        bookRoll = { n: book.length, stake: tot, lo: lo, hi: hi, ev: ev, worstAt: worstAt };
+      }
 
       rows = (T.ladder || []).map(function(r){
         return ladderRow(r, T.pick, dead(r), vbest, T.market_pick, mnorm(T.ladder));
@@ -54048,10 +54091,23 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                         + 'however good the read.')
                     : '')
                 + stakeLine(vbest.dir, vbest.r, vbest.ask, pq)
-                + (vb2[0] && vb2[0].ev > 0
-                    ? kvLine('BACKUP', (vb2[0].dir === 'against' ? 'NO' : 'YES') + ' on '
-                        + deg(vb2[0].r.label) + ' at ' + cents(vb2[0].ask) + ', worth '
-                        + cents(vb2[0].ev) + ' per $1.')
+                + (book.length > 1
+                    ? kvLine('ALSO', book.slice(1).map(function(b){
+                          return '<b style="color:' + (b.dir === 'against' ? NOC : YESC) + ';">'
+                            + (b.dir === 'against' ? 'NO' : 'YES') + '</b> on ' + deg(b.r.label)
+                            + ' at ' + cents(b.ask) + ' (' + cents(b.ev) + ')';
+                        }).join(' &nbsp;·&nbsp; ')
+                        + '. Kalshi&rsquo;s ranges are mutually exclusive, so these are separate '
+                        + 'reads on the same day, not one bet repeated.')
+                    : '')
+                + (bookRoll
+                    ? kvLine('ALL ' + bookRoll.n, 'Taking every one stakes <b>'
+                        + (100 * bookRoll.stake).toFixed(1) + '%</b> of the pot. On $500: '
+                        + '<b style="color:' + YESC + ';">+$' + (500 * bookRoll.hi).toFixed(0)
+                        + '</b> at best, <b style="color:' + NOC + ';">&minus;$'
+                        + Math.abs(500 * bookRoll.lo).toFixed(0) + '</b> at worst (if it settles '
+                        + deg(bookRoll.worstAt.label) + '), <b>' + (bookRoll.ev >= 0 ? '+' : '&minus;')
+                        + '$' + Math.abs(500 * bookRoll.ev).toFixed(0) + '</b> on average.')
                     : '')
               : kvLine('WHY NOT', 'Every range costs at least what it is estimated to be worth '
                     + 'once the fee is counted. Sitting out is a position.'))

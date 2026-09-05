@@ -1129,6 +1129,36 @@ def run_market(cfg):
     st = record['money']['staked']
     record['money']['roi'] = round(100.0 * record['money']['pl'] / st, 1) if st else None
 
+    # CALIBRATION.  The hit rate says how often the top pick lands. It does not
+    # say whether the PROBABILITIES can be trusted -- and every bet on this panel
+    # is sized off those probabilities, so calibration, not accuracy, is what has
+    # to hold for the money to work. A stated 45% that happens 45% of the time is
+    # a profitable number even though it loses more often than it wins.
+    #
+    # Measured over every cell of every scored ladder, not just the pick, because
+    # the pick alone is 66 samples clustered at the confident end.
+    cal_b = {}
+    for h in scored:
+        tb = h.get('actual_bracket')
+        for r in (h.get('lock', {}).get('ladder') or []):
+            p = r.get('ours')
+            if p is None:
+                continue
+            b = min(9, int(p * 10))
+            e = cal_b.setdefault(b, [0, 0, 0.0])
+            e[0] += 1
+            e[1] += 1 if r['label'] == tb else 0
+            e[2] += p
+    record['calibration'] = {
+        'bins': [{'lo': round(b / 10.0, 1), 'n': v[0],
+                  'said': round(v[2] / v[0], 3), 'happened': round(v[1] / v[0], 3)}
+                 for b, v in sorted(cal_b.items())],
+        # one number for the panel: how far the stated odds sit from reality,
+        # weighted by how often each level is quoted
+        'gap': round(sum(v[0] * abs(v[2] / v[0] - v[1] / v[0]) for v in cal_b.values())
+                     / max(1, sum(v[0] for v in cal_b.values())), 3),
+    }
+
     fin = [h for h in scored if h.get('final_hit') is not None]
     record['final'] = {'n': len(fin), 'hits': sum(1 for h in fin if h['final_hit']),
                        'hour': FINAL_HOUR}
