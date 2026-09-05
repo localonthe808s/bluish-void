@@ -53336,6 +53336,47 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        Only ever on a tap, never on a timer: a sheet that silently re-rendered
        itself under a finger mid-read would be worse than a stale timestamp. */
     var cwKalshiPullAt = 0;
+    /* THE COUNTDOWN.  One second-interval, started the first time the sheet is
+       opened and cheap to leave running: it returns immediately unless the
+       panel is on screen. The element carries its own deadline as a plain
+       epoch on data-due, so this never has to redo the timezone arithmetic
+       that produced it.
+
+       When the deadline passes it waits 75 seconds -- the job takes about a
+       minute, and GitHub Pages needs a moment to publish -- then pulls, and
+       keeps retrying every 45 seconds until the bake actually changes. A run
+       can be late, and a countdown that gives up at zero would be exactly the
+       stale panel this is meant to end.
+
+       Scroll position is restored across the redraw. Without that, a sheet
+       that refreshes itself while you are reading the bottom of it throws you
+       back to the top, which is worse than the staleness. */
+    var cwkPulling = false, cwkRetryAt = 0;
+    function cwkTick(){
+      var el = document.getElementById('cwk-next');
+      if (!el || document.hidden) return;
+      var p = document.getElementById('cw-kalshi-panel');
+      if (!p || p.style.display === 'none') return;
+      var left = (+el.getAttribute('data-due') || 0) - Date.now();
+      if (left > 0){
+        var t = Math.round(left / 1000);
+        var h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), sec = t % 60;
+        el.innerHTML = 'next in ' + (h ? h + 'h ' : '') + m + ':'
+          + (sec < 10 ? '0' : '') + sec;
+        return;
+      }
+      el.innerHTML = 'new bake landing\u2026';
+      if (left > -75000 || cwkPulling || Date.now() < cwkRetryAt) return;
+      cwkPulling = true;
+      cwkRetryAt = Date.now() + 45000;
+      var sc = p.scrollTop;
+      cwKalshiFresh(true, function(changed){
+        cwkPulling = false;
+        var p2 = document.getElementById('cw-kalshi-panel');
+        if (changed && p2) p2.scrollTop = sc;
+      });
+    }
+
     function cwKalshiFresh(force, done){
       var fin = function(ch){ if (done) try { done(ch); } catch (e){} };
       var now = Date.now();
@@ -53612,9 +53653,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           var o = {};
           new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York',
             hour12: false, year: 'numeric', month: '2-digit', day: '2-digit',
-            hour: '2-digit', minute: '2-digit' }).formatToParts(d)
+            hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(d)
             .forEach(function(x){ o[x.type] = x.value; });
-          return Date.UTC(+o.year, +o.month - 1, +o.day, (+o.hour) % 24, +o.minute);
+          return Date.UTC(+o.year, +o.month - 1, +o.day, (+o.hour) % 24,
+                          +o.minute, +o.second);
         } catch (e) { return d.getTime(); }
       };
       var nowET = etWall(new Date());
@@ -53632,6 +53674,37 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
            a bare one is a wall clock and compares against the ET wall clock --
            correct for this panel, which is New York */
         return (m[6] ? (Date.now() - t) : (nowET - t)) / 6e4;
+      };
+      /* WHEN THE NEXT ONE LANDS.  The worker fires at these minutes past the
+         hour (see _kalshi/cron-worker/wrangler.toml), through ET hours 8-23
+         and midnight. 1-7 AM is deliberately uncovered, so the countdown there
+         runs to the 8:05 resumption rather than pretending one is imminent.
+         :56 rather than :50 because the station reports at :51 -- a run at :50
+         misses it by a minute and bakes an hour-old reading.
+
+         Hand-maintained against that cron, like the worker's own status page:
+         Cloudflare does not publish a worker's triggers to anything that could
+         read them. */
+      var CWK_SLOTS = [5, 20, 35, 56];
+      var cwkDueIn = function(){
+        var d = new Date(nowET);
+        var hNow = d.getUTCHours(), mNow = d.getUTCMinutes(), sNow = d.getUTCSeconds();
+        var hourTop = nowET - (mNow * 60000 + sNow * 1000);
+        for (var add = 0; add < 36; add++){
+          var hh = (hNow + add) % 24;
+          if (!(hh === 0 || hh >= 8)) continue;          /* the 1-7 AM hole */
+          for (var i = 0; i < CWK_SLOTS.length; i++){
+            var t = hourTop + add * 3600000 + CWK_SLOTS[i] * 60000;
+            if (t > nowET) return t - nowET;
+          }
+        }
+        return null;
+      };
+      var mmss = function(ms){
+        if (ms == null) return '';
+        var t = Math.max(0, Math.round(ms / 1000));
+        var h2 = Math.floor(t / 3600), m2 = Math.floor((t % 3600) / 60), s2 = t % 60;
+        return (h2 ? h2 + 'h ' : '') + m2 + ':' + (s2 < 10 ? '0' : '') + s2;
       };
       var ageTxt = function(min){
         if (min == null) return 'UNKNOWN';
@@ -53657,7 +53730,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var fAge = ageOf(K.updated, K.updated_utc);
       qcL.push(fAge == null
         ? qcRow(QCR, 'FEED', 'NO TIMESTAMP', 'the file carries no update time')
-        : fAge < 75 ? qcRow(QCG, 'FEED', mtaEsc(stamp12(K.updated)) + ' · ' + ageTxt(fAge))
+        : fAge < 75 ? qcRow(QCG, 'FEED', mtaEsc(stamp12(K.updated)) + ' · ' + ageTxt(fAge)
+            + ' · <span id="cwk-next" data-due="'
+            + (Date.now() + (cwkDueIn() || 0)) + '" style="color:#45b491;">next in '
+            + mmss(cwkDueIn()) + '</span>')
         : qcNight ? qcRow(QCN, 'FEED', ageTxt(fAge), 'overnight; the job resumes at 8:05 AM')
         : fAge < 180 ? qcRow(QCA, 'FEED', ageTxt(fAge), 'a refresh is late; the job runs through the day')
         : qcRow(QCR, 'FEED', ageTxt(fAge), 'the bake has stopped landing'));
@@ -54824,6 +54900,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         + mtaEsc(stamp12(K.updated)) + ' \u00B7 ' + ageTxt(fAge) + '</div>';
 
       cwKalshiPanel('BELVEDERE CASTLE', 'NYC DAILY HIGH', body);
+      if (!window._cwkTickId) window._cwkTickId = setInterval(cwkTick, 1000);
     }
     function cwGhostTap(ft){
       var p3 = ft.properties || {};
