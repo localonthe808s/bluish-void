@@ -53348,6 +53348,39 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
 
        Only ever on a tap, never on a timer: a sheet that silently re-rendered
        itself under a finger mid-read would be worse than a stale timestamp. */
+    /* YOUR OWN BOOK, PRIVATELY.  The panel's numbers are public; what you hold
+       is not, so it does not live in kalshi_*.json -- that file is served by
+       GitHub Pages and a curl reads every field in it. Positions come from the
+       cron worker's token-gated /positions instead.
+
+       The token is pasted once, as ?kt=... on the URL. It is stored and the
+       parameter is stripped from the address bar so a screenshot or a shared
+       link does not carry it. Without a token this whole path is skipped and
+       the panel behaves exactly as it did before. */
+    var CWK_POS_URL = 'https://bluish-void-kalshi-cron.junkyjunkjunkjunkjunk.workers.dev/positions';
+    function cwkToken(){
+      try {
+        var m = location.search.match(/[?&]kt=([^&]+)/);
+        if (m){
+          localStorage.setItem('bv_kalshi_token', decodeURIComponent(m[1]));
+          history.replaceState(null, '', location.pathname + location.hash);
+        }
+        return localStorage.getItem('bv_kalshi_token') || '';
+      } catch (e){ return ''; }
+    }
+    var cwkPosAt = 0;
+    function cwkPositions(force, done){
+      var tk = cwkToken();
+      if (!tk) { if (done) done(); return; }
+      var now = Date.now();
+      if (!force && now - cwkPosAt < 6e4) { if (done) done(); return; }
+      cwkPosAt = now;
+      fetch(CWK_POS_URL + '?cb=' + now, { headers: { 'Authorization': 'Bearer ' + tk } })
+        .then(function(r){ return r.ok ? r.json() : null; })
+        .then(function(j){ if (j && !j.error) window._cwPot = j; if (done) done(); })
+        .catch(function(){ if (done) done(); });
+    }
+
     var cwKalshiPullAt = 0;
     /* THE COUNTDOWN.  One second-interval, started the first time the sheet is
        opened and cheap to leave running: it returns immediately unless the
@@ -53406,6 +53439,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
          refresh has asked for it, and gets it. */
       if (!force && now - cwKalshiPullAt < 3e5) return fin(false);
       cwKalshiPullAt = now;
+      cwkPositions(force);
       var cb = '?v=' + Math.floor(now / 6e4);
       fetch('kalshi_rain.json' + cb).then(function(r){ return r.json(); })
         .then(function(j){ if (j && j.cities) window._cwRain = j; }).catch(function(){});
@@ -53765,6 +53799,40 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           + (note ? '<span style="color:#7b8496;"> — ' + note + '</span>' : '')
           + '</span></div>';
       };
+
+      /* WHAT YOU HOLD, matched to the rungs on screen.  Each ladder row now
+         carries its own ticker, so a holding lands on a row by identity rather
+         than by decoding KXHIGHNY-...-B79.5 back into bounds -- the T form does
+         not record its direction, so decoding would be a guess.
+
+         Valued at the BID, not the ask: the bid is what you could actually get
+         out at, and a position marked at the ask flatters itself by the spread.
+         Cost comes from the exchange; the profit shown is what you would keep
+         if you closed now, which is the only number that answers "should I
+         still be holding this". */
+      var POS = (window._cwPot && window._cwPot.positions) || [];
+      var posOn = {};
+      (T.ladder || []).forEach(function(r){
+        if (!r.ticker) return;
+        POS.forEach(function(h){
+          if (h.ticker !== r.ticker) return;
+          var out = (h.side === 'yes') ? r.bid : r.nbid;   /* exit price */
+          var val = (out == null) ? null : out * h.contracts;
+          posOn[r.label] = { side: h.side, n: h.contracts, cost: h.cost || h.traded,
+                             value: val, pl: (val == null) ? null : val - (h.traded || 0) };
+        });
+      });
+      var bookRows = Object.keys(posOn);
+      var bookVal = 0, bookCost = 0, bookKnown = bookRows.length > 0;
+      bookRows.forEach(function(k){
+        bookVal += posOn[k].value || 0; bookCost += posOn[k].cost || 0;
+      });
+      /* equity, finally: cash from the exchange plus what the book is worth
+         now. The worker deliberately returns cost basis and stops there --
+         market value needs these live prices, which only the page has. */
+      if (bookKnown && window._cwPot && window._cwPot.cash != null){
+        window._cwPot.equity = Math.round((window._cwPot.cash + bookVal) * 100) / 100;
+      }
 
       var qcL = [];
       /* 1. THE BAKE. Hourly at :05, so anything past ~75 minutes means a run
@@ -54972,6 +55040,34 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
              IN THE WINDOW / WINDOW HAS PASSED, and a row restating it in a
              sentence was the same fact twice in one box. */
 
+          /* AGAINST YOUR OWN BOOK.  This panel sizes fresh money and has never
+             known what is already on. At 13:19 today it said BET NO on 78-or-
+             below while 78 contracts of YES on that exact rung were open --
+             economically "sell your winner", offered as if it were a new idea.
+
+             It is not always wrong to reverse. It is always wrong to do it
+             without being told that is what you are doing. */
+          + (function(){
+              var mine = posOn[vbest.r.label];
+              if (!mine) return '';
+              var same = (mine.side === 'yes') === (vbest.dir === 'for');
+              return '<div style="margin-top:7px;padding:6px 8px;border-radius:6px;'
+                + 'background:' + (same ? 'rgba(46,204,113,.10)' : 'rgba(242,131,63,.12)')
+                + ';border:1px solid ' + (same ? 'rgba(46,204,113,.35)' : 'rgba(242,131,63,.45)')
+                + ';font:600 8.5px system-ui,sans-serif;letter-spacing:.02em;line-height:1.5;'
+                + 'color:' + (same ? '#63dbb6' : '#f2833f') + ';">'
+                + (same
+                    ? 'YOU ALREADY HOLD THIS \u2014 ' + (+mine.n).toFixed(mine.n % 1 ? 2 : 0)
+                      + ' contracts of ' + mine.side.toUpperCase() + ' on ' + deg(vbest.r.label)
+                      + '. Adding here doubles a position, it does not open one.'
+                    : 'THIS REVERSES YOUR POSITION \u2014 you hold '
+                      + (+mine.n).toFixed(mine.n % 1 ? 2 : 0) + ' contracts of '
+                      + mine.side.toUpperCase() + ' on ' + deg(vbest.r.label)
+                      + '. Buying the other side closes or flips it. That may be right; '
+                      + 'it is not a new bet.')
+                + '</div>';
+            })()
+
           /* BEHIND THE MARKET.  Central Park reports at :51 and the market
              reprices on it within three minutes, reading METAR directly. This
              model reads IEM, which publishes the same observation 10-15
@@ -55072,8 +55168,39 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         + ' \u00B7 <span class="cwk-next" data-due="' + (Date.now() + (cwkDueIn() || 0))
         + '" style="color:#63dbb6;">NEXT IN ' + mmss(cwkDueIn()) + '</span></div>';
 
+      /* IN THE INTRO, because it changes how everything below it should be
+         read. A recommendation means one thing on an empty account and quite
+         another when you already hold the other side of it. */
+      var yourBook = '';
+      if (bookKnown){
+        var plc = (bookVal - bookCost) >= 0 ? YESC : NOC;
+        yourBook = '<div style="margin-top:8px;padding:8px 10px;border-radius:8px;'
+          + 'background:rgba(0,210,152,.07);border:1px solid rgba(0,210,152,.22);">'
+          + '<div style="font:800 7.5px system-ui,sans-serif;letter-spacing:.09em;'
+          + 'color:#5b8f7d;">YOU HOLD</div>'
+          + bookRows.map(function(k){
+              var h = posOn[k];
+              return '<div style="font:600 10px system-ui,sans-serif;color:#fff;'
+                + 'margin-top:3px;">'
+                + '<b style="color:' + (h.side === 'yes' ? YESC : NOC) + ';">'
+                + h.side.toUpperCase() + '</b> on ' + deg(k) + ' \u00B7 '
+                + (+h.n).toFixed(h.n % 1 ? 2 : 0) + ' contracts'
+                + (h.value == null ? ''
+                    : ' \u00B7 worth <b>$' + h.value.toFixed(2) + '</b> now'
+                      + ' <span style="color:' + ((h.pl || 0) >= 0 ? YESC : NOC) + ';">('
+                      + ((h.pl || 0) >= 0 ? '+' : '\u2212') + '$'
+                      + Math.abs(h.pl || 0).toFixed(2) + ')</span>')
+                + '</div>';
+            }).join('')
+          + '<div style="font:600 8px system-ui,sans-serif;color:#45b491;margin-top:5px;">'
+          + 'AT THE BID, WHAT YOU WOULD KEEP CLOSING NOW \u00B7 '
+          + '<span style="color:' + plc + ';">$' + bookVal.toFixed(2) + ' ON $'
+          + bookCost.toFixed(2) + ' RISKED</span></div></div>';
+      }
+
       var body = ''
         + brief
+        + yourBook
         /* the briefing ends by talking about tomorrow, so today's own numbers
            need naming or they read as tomorrow's -- reported as exactly that */
         + hdr((dayName(T.date) || 'TODAY').toUpperCase() + ' · '

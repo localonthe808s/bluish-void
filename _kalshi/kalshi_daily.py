@@ -1932,7 +1932,14 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
             'pick': rows[best]['label'], 'p': round(ps[best], 4),
             'market_pick': rows[mbest]['label'], 'market_p': rows[mbest]['mid'],
             'agree': best == mbest,
+            # the rung's own ticker travels with it, so the panel can match a
+            # holding to a row exactly. Without it the page would have to decode
+            # KXHIGHNY-26SEP05-B79.5 and -T79 back into bounds, and the T form
+            # does not record its direction -- a guess where an identity is
+            # available. Public either way: it is the exchange's own name for a
+            # market anyone can look up.
             'ladder': [{'label': r['label'], 'lo': r['lo'], 'hi': r['hi'],
+                        'ticker': r.get('ticker'),
                         'bid': r['bid'], 'ask': r['ask'],
                         'nbid': r['nbid'], 'nask': r['nask'],
                         'ysize': r['ysize'], 'nsize': r['nsize'], 'market': r['mid'],
