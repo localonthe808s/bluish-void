@@ -1732,14 +1732,35 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
     # TWC IS SHOWN, NOT TRUSTED. It was briefly folded into this floor and that
     # was a mistake, caught by backtest before it could cost anything.
     #
-    # Scored against 21 real New York settlements, the max of TWC's own
-    # observation history landed inside the bracket that PAID on 12 of 21 days.
-    # Raw IEM daily landed inside on 20 of 21. Worse, TWC was too HIGH on 7 of
-    # those 9 misses -- 08-23 read 83 against a settled 80-81, 09-03 read 87
-    # against a settled 83-84 -- and a floor above the settled bracket does not
-    # merely mis-weight it, it DELETES it. A third of days would have had the
-    # winning rung zeroed. Chicago showed the same shape live: max7 86 against
-    # its own history's 83 and a market at 99% on 83-84.
+    # Scored on 315 settled market-days -- all seven cities, 45 days each --
+    # against the bracket that actually PAID:
+    #
+    #     raw IEM daily              310/315   98.4%
+    #     TWC obs, calendar day      185/315   58.7%
+    #     TWC obs, climate day       185/315   58.7%
+    #
+    # The two windows score IDENTICALLY, so the midnight-hour question that
+    # prompted this is answered and it is not the problem: dropping that hour
+    # changes no day in 315. The feed is.
+    #
+    # Six of the seven cities are never HIGH -- Chicago, Miami, Austin, Denver,
+    # Los Angeles and Philadelphia run 0.6 to 1.1 degF LOW with a hard ceiling
+    # at 0.0, the exact signature of hourly spot sampling missing an intra-hour
+    # peak. That is the same deficiency as the METAR this already reads, so TWC
+    # adds nothing there.
+    #
+    # NEW YORK IS THE OUTLIER, AND IT IS THE MARKET THAT MATTERS MOST HERE:
+    # mean +1.18 degF, high on 32 of 45 days, and the tail is not small --
+    #
+    #     2026-08-10   TWC 91   IEM 85.0   settled "88 or below"
+    #     2026-08-03   TWC 84   IEM 80.0   settled 80-81
+    #     2026-09-03   TWC 87   IEM 83.0   settled 83-84
+    #
+    # A floor above the settled bracket does not mis-weight the winning rung, it
+    # DELETES it. Fitting each city's own mean bias and subtracting it makes
+    # things WORSE, not better -- 147/315, 46.7% -- so the error is not an
+    # offset to calibrate away, it is noise with a fat upper tail on the one
+    # station we care about most.
     #
     # So the feed carries spurious highs and cannot be a lower bound. What it is
     # good for is TIMING -- on 2026-09-05 it published 79 around 16:25 ET, the
