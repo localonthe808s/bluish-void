@@ -608,6 +608,89 @@ def twc_today(cfg, day):
     return out
 
 
+# THE STATION'S OWN SIX-HOUR MAXIMUM, WHICH THE HOURLY REPORT THROWS AWAY.
+#
+# A METAR carries the temperature at :51 and nothing else, so a peak that falls
+# between two reports is simply gone from that stream -- 2026-09-05 Central Park
+# topped out at 79 at 2:33 PM and the 2:51 report already read 25.0C = 77.0F.
+# But the ASOS also computes its own six-hour maximum and appends it as the
+# 1sTTT remark group in the observation nearest 00/06/12/18Z. That group is the
+# instrument's max over the window, intra-hour peaks included.
+#
+# Scored against Kalshi's own expiration_value over 322 settled market-days,
+# seven cities, reconstructed from these groups alone:
+#
+#     exact (to the settled whole degree)   98.1%
+#     MAE                                   0.12 degF
+#     mean error                           -0.06 degF
+#
+# The mean is NEGATIVE, which is what makes this safe as a floor: it is a
+# maximum over a window inside the day, so it cannot structurally exceed the
+# day's maximum, and the measurement agrees.
+#
+# WHY BOTHER WHEN IEM DAILY IS ALSO 96-98% EXACT: because it is independent of
+# IEM and lands earlier. The 17:51Z group closes 12-18Z at 1:51 PM local ET, so
+# a day that peaks before 2 PM has an exact figure in hand two hours before the
+# preliminary climate report. 2026-09-04 is the case: the group read 84.0 at
+# 1:51 PM, the exchange settled 84.00, and IEM daily still says 83.0 today --
+# settle_corrected has been fixing that day after the fact ever since. This
+# catches that class of error while the market is still open.
+#
+# WINDOW DISCIPLINE. Each group covers the six hours ENDING at its synoptic
+# hour, so a group is only usable when that whole window falls inside the local
+# climate day (climate_day_start, which starts at 1am LST under DST). In ET that
+# admits the 06-12Z, 12-18Z and 18-00Z groups -- 2am to 8pm local -- and drops
+# both 00-06Z groups, which straddle midnight and would import the previous
+# evening. The uncovered hours are night, which cannot hold a daily maximum.
+def metar_six_max(cfg, day):
+    """The day's max from the ASOS six-hourly groups, or None.
+
+    Own fetch rather than sharing metar_today()'s: that one asks for 12 hours,
+    and the 18-00Z group lands in the 23:51Z report, which is outside that
+    window for most of the runs in a day.
+    """
+    from zoneinfo import ZoneInfo
+    icao = cfg.get('icao') or ('K' + cfg['station'])
+    try:
+        j = get_json('https://aviationweather.gov/api/data/metar?ids=%s&format=json&hours=36'
+                     % icao, timeout=45)
+    except Exception as e:
+        print('six-hourly: %s unavailable (%s)' % (icao, e))
+        return None
+    z = ZoneInfo(cfg.get('tz', 'America/New_York'))
+    h0 = climate_day_start(cfg, day)
+    lo = datetime.datetime(day.year, day.month, day.day, h0, tzinfo=z)
+    hi = (datetime.datetime(day.year, day.month, day.day, 23, 59, tzinfo=z)
+          + datetime.timedelta(minutes=1) + (datetime.timedelta(hours=1) if h0 == 1
+                                             else datetime.timedelta(0)))
+    best = None
+    for m in (j or []):
+        raw = str(m.get('rawOb') or '')
+        g = re.search(r'\b1([01])(\d{3})\b', raw)
+        if not g:
+            continue
+        stamp = next((t for t in raw.split()
+                      if len(t) == 7 and t.endswith('Z') and t[:6].isdigit()), None)
+        if not stamp:
+            continue
+        try:
+            rep = datetime.datetime(day.year, day.month, int(stamp[0:2]),
+                                    int(stamp[2:4]), int(stamp[4:6]),
+                                    tzinfo=datetime.timezone.utc)
+        except ValueError:
+            continue
+        # the group is stamped on the :51 report; its window ends at the hour
+        end = rep.replace(minute=0, second=0) + (datetime.timedelta(hours=1)
+                                                 if rep.minute > 30 else datetime.timedelta(0))
+        st = end - datetime.timedelta(hours=6)
+        if not (st.astimezone(z) >= lo and end.astimezone(z) <= hi):
+            continue
+        c = (int(g.group(2)) / 10.0) * (-1 if g.group(1) == '1' else 1)
+        f = round(c * 9.0 / 5.0 + 32.0, 1)
+        best = f if best is None else max(best, f)
+    return best
+
+
 def obs_hourly_range(cfg, start, end, sink=None):
     """Hourly obs -> {'YYYY-MM-DD': {hour: degF}}, for historic running maxima.
 
@@ -1721,6 +1804,13 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
     else:
         print('%s twc: no reading; floor falls back to the station' % cfg['key'])
 
+    # AND THE STATION'S OWN SIX-HOUR MAXIMUM, which unlike TWC is measured
+    # rather than published: 98.1% exact against the exchange's settled figure
+    # over 322 market-days, mean error -0.06degF. This one does go in the floor.
+    _six = metar_six_max(cfg, today)
+    if _six is not None:
+        print('%s six-hourly: %.1f degF from the ASOS max groups' % (cfg['key'], _six))
+
 
     bias, nb = rolling_bias(fc, daily, tkey)
     if bias is None:
@@ -1800,6 +1890,18 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
     # the arithmetic until the spikes can be told from the scoops.
     #
     # THE REAL FAULT THAT DAY WAS IEM DAILY'S LATENCY, not its accuracy.
+
+    # SO THIS IS THE ONE THAT GOES IN. The six-hourly group is the same class of
+    # thing as `live` -- an exact running maximum for the day, not an estimate
+    # needing HOURLY_PEAK_OFFSET -- and it is independent of IEM, so it also
+    # catches the days IEM has plain wrong. max() because both are lower bounds.
+    #
+    # Everything downstream reads `live`: the floor, the exactness test that
+    # collapses the spread, and snapshot()'s locks. Folding it in here is the
+    # whole change, exactly as it was for TWC -- the difference is that this one
+    # earned it on 322 days instead of being assumed.
+    if _six is not None:
+        live = _six if live is None else max(live, _six)
     cands_fl = [x for x in (est, live) if x is not None]
     obs_far = max(cands_fl) if cands_fl else None
     obs_hr = max(obh.get(tkey) or {0: 0}) if obh.get(tkey) else None
@@ -2323,6 +2425,7 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
             # The panel shows both, because the gap is the thing worth seeing
             # and it is not small: Chicago ran +4.0 the day this was wired in,
             # New York +2.0 on the afternoon that made the case for it.
+            'six_max': _six,
             'twc_max': _twc.get('max'), 'twc_now': _twc.get('now'),
             'twc_gap': (round(_twc['max'] - rmax, 1)
                         if _twc.get('max') is not None and rmax is not None
