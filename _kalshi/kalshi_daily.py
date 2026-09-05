@@ -303,7 +303,8 @@ def fetch_market(cfg, ev):
 # With 1.0 the prediction sat +0.29 degF above the eventual high on days the
 # floor was binding, which pushed real probability into brackets the day had
 # already walked past -- 6% on a bracket that empirically never happened.
-HOURLY_PEAK_OFFSET = 0.70
+OFFSET_DEFAULT = 0.70          # fallback until a market has 40 days of its own
+HOURLY_PEAK_OFFSET = OFFSET_DEFAULT
 # Spread of that same gap. The residuals are measured against a floor built as
 # hourly + offset, so they carry this noise; today's floor is the exact running
 # max and carries none of it. On days the floor is binding the measured spread
@@ -311,7 +312,8 @@ HOURLY_PEAK_OFFSET = 0.70
 # what matches the empirical record: the high never rose 1.5 degF further after
 # the floor was set, yet an un-deconvolved spread put 6% on a bracket that far
 # out. Only applied when the floor is both binding and exact.
-OFFSET_SD = 0.65
+OFFSET_SD_DEFAULT = 0.65
+OFFSET_SD = OFFSET_SD_DEFAULT
 EXACT_FLOOR_SD_MIN = 0.30
 
 
@@ -753,6 +755,42 @@ def best_bet(rows, ps):
     return best
 
 
+def book_value(rows, ps, bankroll=500.0):
+    """Expected dollars from today's whole book, capped by what is on offer.
+
+    Edge per contract is exactly `ev` -- pay cost, receive $1 with probability
+    q, so the expectation is q - cost. Multiply by the number of contracts that
+    can actually be bought and it is dollars, not basis points.
+
+    This is the number the strategy is really trying to maximise. Accuracy
+    without size is a hobby: the largest edge on the board tonight was 41c with
+    $2 behind it, while the deepest market had $349 and a 3c edge.
+    """
+    ev = stake = 0.0
+    n = 0
+    for r, p in zip(rows, ps):
+        for side, price, q, size in (('for', r.get('ask'), p, r.get('ysize')),
+                                     ('against', r.get('nask'), 1.0 - p, r.get('nsize'))):
+            if price is None or not (0 < price < 1):
+                continue
+            e = q - price - fee_of(price)
+            if e <= 0.005:
+                continue
+            cost = price + fee_of(price)
+            if cost >= 1:
+                continue
+            f = max(0.0, (q - cost) / (1 - cost)) / KELLY_DIV
+            want = (bankroll * f) / cost
+            fill = want if size is None else min(want, float(size))
+            if fill <= 0:
+                continue
+            ev += fill * e
+            stake += fill * cost
+            n += 1
+    return {'ev': round(ev, 2), 'stake': round(stake, 2), 'n': n,
+            'bankroll': bankroll}
+
+
 def grade_bet(bet, truth):
     """Profit on a $100 bankroll staked at quarter Kelly.  Cost is price plus
     fee; a winning contract pays $1, a losing one pays nothing."""
@@ -763,6 +801,42 @@ def grade_bet(bet, truth):
     stake = BANKROLL * bet['kelly']
     return {'won': won, 'staked': round(stake, 2),
             'pl': round(stake * ((1 - cost) / cost) if won else -stake, 2)}
+
+
+def measure_offset(cfg, obh, daily, h0_of):
+    """How far the hourly stream reads BELOW the day's true max, for this
+    station specifically.
+
+    The routine METAR misses the intra-hour peak, so a running max built from it
+    reads low -- but by how much depends on the station's reporting cadence and
+    its diurnal curve, which are not the same in Los Angeles as in Central Park.
+    These were fitted once on NYC and applied to all seven cities, which is
+    exactly the kind of borrowed constant that quietly costs accuracy.
+
+    Direct measurement, not a fit: for each completed day, the published daily
+    max minus the max of the hourly readings. Returns (mean, sd, n), or None
+    when there is not enough history to be worth trusting.
+    """
+    gaps = []
+    for k, hrs in obh.items():
+        a = daily.get(k)
+        if a is None or not hrs:
+            continue
+        try:
+            h0 = h0_of(k)
+        except Exception:
+            continue
+        vals = [v for h, v in hrs.items() if h >= h0]
+        if len(vals) < 18:            # a day with big holes says nothing
+            continue
+        g = a - max(vals)
+        if -3.0 < g < 5.0:            # a gap outside this is a data fault
+            gaps.append(g)
+    if len(gaps) < 40:
+        return None
+    return (round(statistics.mean(gaps), 3),
+            round(max(0.20, statistics.pstdev(gaps)), 3),
+            len(gaps))
 
 
 def run_market(cfg):
@@ -798,6 +872,7 @@ def run_market(cfg):
     obh = obs_hourly_range(cfg, today - datetime.timedelta(days=span),
                            today + datetime.timedelta(days=1), sink=ob_last)
 
+
     bias, nb = rolling_bias(fc, daily, tkey)
     if bias is None:
         print('not enough scored history for a bias (%d days)' % nb)
@@ -805,6 +880,21 @@ def run_market(cfg):
     bias_of = biases_factory(fcm, daily)
     h0_of = lambda k: climate_day_start(
         cfg, datetime.date(*map(int, k.split('-'))))
+
+    # Per-station offset, measured from this market's own history. Assigned to
+    # the module globals because the constant is read from every layer of the
+    # calculation -- the floor, the residuals, the backfill -- and threading it
+    # through all of them would be a large refactor for no behavioural gain.
+    # Markets run sequentially, so each sets its own before computing anything.
+    global HOURLY_PEAK_OFFSET, OFFSET_SD
+    HOURLY_PEAK_OFFSET, OFFSET_SD = OFFSET_DEFAULT, OFFSET_SD_DEFAULT
+    off_n = 0
+    _m = measure_offset(cfg, obh, daily, h0_of)
+    if _m:
+        HOURLY_PEAK_OFFSET, OFFSET_SD, off_n = _m
+        print('%s offset measured: +%.2f degF, sd %.2f, over %d days (defaults %.2f/%.2f)'
+              % (cfg['key'], HOURLY_PEAK_OFFSET, OFFSET_SD, off_n,
+                 OFFSET_DEFAULT, OFFSET_SD_DEFAULT))
     prior_days = sorted(k for k in fc if k < tkey and k in daily
                         and len(fc[k]) >= 20)[-BIAS_K:]
     biases = bias_of(prior_days)
@@ -1259,11 +1349,31 @@ def run_market(cfg):
     # days scored off an observation because Kalshi had not settled them yet.
     # They are in the accuracy tally but can still be rewritten.
     record['provisional'] = sum(1 for h in scored if h.get('provisional'))
-    # measured by replaying this exact model on the 68 real Kalshi ladders,
-    # scored against the settlements themselves (2026-06-28..09-03)
-    record['calibrated'] = {'mae': 1.44, 'bracket': '40/68', 'brier': 0.491,
-                            'window': '2026-06-28..2026-09-03',
-                            'lock_hour': LOCK_HOUR}
+    # These were hardcoded from a refit and went stale the moment the model
+    # improved: the file advertised 40/68 and MAE 1.44 long after the fresh-run
+    # switch had taken it to 48/66 and 1.04, understating itself by 14 points.
+    # Compute them instead, from the same ladders the record is built on.
+    br, ll = [], []
+    for h in scored:
+        tb = h.get('actual_bracket')
+        for r in (h.get('lock', {}).get('ladder') or []):
+            p = r.get('ours')
+            if p is None:
+                continue
+            o = 1 if r['label'] == tb else 0
+            br.append((p - o) ** 2)
+            if o:
+                ll.append(-math.log(max(p, 1e-9)))
+    ds = sorted(h['date'] for h in scored)
+    record['measured'] = {
+        'brier': round(statistics.mean(br), 4) if br else None,
+        'logloss': round(statistics.mean(ll), 3) if ll else None,
+        'bracket': '%d/%d' % (record['hits'], record['n']),
+        'mae': record['mae'],
+        'window': ('%s..%s' % (ds[0], ds[-1])) if ds else None,
+        'lock_hour': LOCK_HOUR,
+        'offset': HOURLY_PEAK_OFFSET, 'offset_sd': OFFSET_SD, 'offset_n': off_n,
+    }
 
     # trails are per-hour rows and only useful while recent; drop the old ones
     # so the file the page downloads does not grow without bound
@@ -1338,7 +1448,9 @@ def run_market(cfg):
     st_now = t.get('state') or {}
     decided = (t.get('p') or 0) >= 0.95 or (t.get('sd') is not None and t['sd'] <= 0.4) \
               or bool(t.get('day_over'))
-    bb = best_bet(rows, ps) if (rows and st_now.get('status') == 'open' and not decided) else None
+    tradable = bool(rows) and st_now.get('status') == 'open' and not decided
+    bb = best_bet(rows, ps) if tradable else None
+    take = book_value(rows, ps) if tradable else {'ev': 0.0, 'stake': 0.0, 'n': 0}
     return {'key': cfg['key'], 'city': cfg.get('city', cfg['key']),
             'tzlabel': cfg.get('tzlabel'), 'link': t.get('link'),
             'date': t.get('date'), 'state': t.get('state'),
@@ -1347,7 +1459,7 @@ def run_market(cfg):
             'market_pick': t.get('market_pick'), 'agree': t.get('agree'),
             'obs': t.get('obs_so_far'), 'now_temp': t.get('now_temp'),
             'day_over': t.get('day_over'),
-            'bet': bb, 'file': cfg['out']}
+            'bet': bb, 'take': take, 'file': cfg['out']}
 
 
 def main():
@@ -1367,12 +1479,85 @@ def main():
         except Exception as e:
             bad += 1
             print('%s FAILED: %s: %s' % (cfg['key'], type(e).__name__, e))
+    # HOW INDEPENDENT ARE SEVEN CITIES, REALLY?
+    # They share a model family and one bias method, so a bad synoptic day can
+    # miss in several at once. Seven bets are only worth seven if their errors
+    # are unrelated; measure it rather than assume it. Effective independent
+    # bets = n / (1 + (n-1) * mean pairwise r), the standard correction for an
+    # equicorrelated set.
+    corr = None
+    try:
+        series = {}
+        for d in digests:
+            with open(os.path.join(HERE, '..', d['file'])) as f:
+                hist = json.load(f).get('history') or []
+            series[d['city']] = {h['date']: h['err'] for h in hist
+                                 if h.get('err') is not None}
+        rs = []
+        names = sorted(series)
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                a, b = series[names[i]], series[names[j]]
+                both = sorted(set(a) & set(b))
+                if len(both) < 30:
+                    continue
+                xs = [a[k] for k in both]
+                ys = [b[k] for k in both]
+                mx, my = statistics.mean(xs), statistics.mean(ys)
+                sx = math.sqrt(sum((v - mx) ** 2 for v in xs))
+                sy = math.sqrt(sum((v - my) ** 2 for v in ys))
+                if sx > 0 and sy > 0:
+                    rs.append(sum((xs[t] - mx) * (ys[t] - my)
+                                  for t in range(len(xs))) / (sx * sy))
+        if rs:
+            rbar = statistics.mean(rs)
+            n = len(names)
+            eff = n / (1 + (n - 1) * max(rbar, 0.0)) if n > 1 else 1.0
+            corr = {'pairs': len(rs), 'mean_r': round(rbar, 3),
+                    'max_r': round(max(rs), 3), 'cities': n,
+                    'effective_bets': round(eff, 2)}
+            print('cross-city error correlation: mean r %.3f over %d pairs '
+                  '-> %.1f independent bets, not %d'
+                  % (rbar, len(rs), eff, n))
+    except Exception as e:
+        print('correlation check failed: %s' % e)
+
     if digests and '--dry' not in sys.argv:
         head = os.path.join(HERE, '..', MARKETS[0]['out'])
         try:
             with open(head) as f:
                 doc = json.load(f)
             doc['markets'] = digests
+            if corr:
+                doc['correlation'] = corr
+            # the day's fillable expectation, which is the number the whole
+            # exercise is actually trying to maximise
+            # A DAILY RISK BUDGET.  Each position is sized at quarter Kelly of
+            # the WHOLE bankroll, which is right for one bet and badly wrong for
+            # nineteen: unscaled they wanted $745 of a $500 pot. Kelly assumes
+            # independent opportunities and these are not -- same models, same
+            # bias method, seven cities under one synoptic pattern. So cap the
+            # day's total exposure and scale every position to fit. Expected
+            # dollars scale linearly with size, so the capped figure is simply
+            # proportional -- and it is the honest one.
+            bank, cap_frac = 500.0, 0.25
+            raw_ev = sum((d.get('take') or {}).get('ev', 0) for d in digests)
+            raw_st = sum((d.get('take') or {}).get('stake', 0) for d in digests)
+            budget = bank * cap_frac
+            scale = min(1.0, budget / raw_st) if raw_st > 0 else 1.0
+            doc['take'] = {
+                'ev': round(raw_ev * scale, 2), 'stake': round(raw_st * scale, 2),
+                'raw_ev': round(raw_ev, 2), 'raw_stake': round(raw_st, 2),
+                'scale': round(scale, 3),
+                'n': sum((d.get('take') or {}).get('n', 0) for d in digests),
+                'cities': sum(1 for d in digests if (d.get('take') or {}).get('n')),
+                'bankroll': bank, 'cap': cap_frac,
+            }
+            print('take: $%.2f expected on $%.2f staked (%d positions, %d cities)%s'
+                  % (doc['take']['ev'], doc['take']['stake'], doc['take']['n'],
+                     doc['take']['cities'],
+                     '' if scale >= 1 else ' -- scaled to %.0f%% of a $%.0f budget'
+                     % (100 * scale, budget)))
             with open(head, 'w') as f:
                 json.dump(doc, f, separators=(',', ':'))
             print('folded %d market digests into %s' % (len(digests), MARKETS[0]['out']))
