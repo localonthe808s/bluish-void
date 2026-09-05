@@ -87,7 +87,13 @@ def bounds(m):
 
 
 def candles(cfg, ticker, day, tzoff):
-    """{local hour: (bid, ask)} across the trading day, from hourly candles."""
+    """{local hour: (bid, ask, open_interest)} across the trading day.
+
+    Open interest is the pool: every open contract settles at a dollar, so the
+    count is the money riding on that rung at that hour. It answers a question
+    the price cannot -- WHEN the market fills up -- which is what decides
+    whether an edge found at 8 AM can actually be bought.
+    """
     start = calendar.timegm(datetime.datetime(day.year, day.month, day.day).timetuple()) \
         + tzoff * 3600
     u = ('https://api.elections.kalshi.com/trade-api/v2/series/%s/markets/%s'
@@ -103,7 +109,8 @@ def candles(cfg, ticker, day, tzoff):
             if b is None and a is None:
                 continue
             out[t.hour] = (float(b) if b is not None else None,
-                           float(a) if a is not None else None)
+                           float(a) if a is not None else None,
+                           float(x.get('open_interest_fp') or 0))
     except Exception:
         pass
     return out
@@ -203,8 +210,9 @@ def study(cfg):
                         cost = price + K.fee_of(price)
                         best = {'ev': e, 'price': price, 'side': side, 'wins': wins,
                                 'ret': ((1 - cost) / cost) if wins else -1.0}
+            pool = sum((q[2] if q and len(q) > 2 and q[2] else 0) for q in quote)
             rows.append({
-                'date': day, 'hour': h,
+                'date': day, 'hour': h, 'pool': round(pool, 1),
                 'ours': [round(x, 4) for x in ps],
                 'mkt': [None if x is None else round(x / tot, 4) for x in mids],
                 'truth': [bool(r['won']) for r in lad],
@@ -217,10 +225,12 @@ def study(cfg):
 
 def summarise(rows):
     by = collections.defaultdict(lambda: {'n': 0, 'ob': [], 'mb': [], 'ev': [],
-                                          'ret': [], 'won': 0, 'bets': 0})
+                                          'ret': [], 'won': 0, 'bets': 0, 'pool': []})
     for r in rows:
         e = by[r['hour']]
         e['n'] += 1
+        if r.get('pool'):
+            e['pool'].append(r['pool'])
         for p, m, t in zip(r['ours'], r['mkt'], r['truth']):
             o = 1 if t else 0
             e['ob'].append((p - o) ** 2)
@@ -243,6 +253,9 @@ def summarise(rows):
             'edge': round(statistics.mean(e['ev']), 4) if e['ev'] else None,
             'ret': round(statistics.mean(e['ret']), 4) if e['ret'] else None,
             'winrate': round(e['won'] / e['bets'], 3) if e['bets'] else None,
+            # the median, not the mean: one enormous day would otherwise draw a
+            # curve no ordinary day resembles
+            'pool': round(statistics.median(e['pool'])) if e['pool'] else None,
         })
     return out
 

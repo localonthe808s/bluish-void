@@ -1315,6 +1315,7 @@ def measured_hours(cfg):
         if e.get('ret') is None:
             continue
         out.append({'h': e['h'], 'ret': e['ret'], 'winrate': e.get('winrate'),
+                    'pool': e.get('pool'),
                     'bets': e.get('bets'), 'ours': e.get('ours_brier'),
                     'mkt': e.get('mkt_brier'), 'days': e.get('days'),
                     # kept so the old chart still has something to draw
