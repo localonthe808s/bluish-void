@@ -850,6 +850,11 @@ def run_market(cfg):
             'pick': rows[best]['label'], 'ticker': rows[best]['ticker'],
             'p': round(ps[best], 4), 'pred': round(pred, 2), 'sd': round(sd, 2),
             'as_of': '%02d:00 %s' % (hour, cfg.get('tzlabel', 'ET')),
+            # the hour the PRICES were read. A lock is rebuilt as-of its own
+            # hour, but the market quotes can only ever be live ones -- so if the
+            # run happens well after the lock hour the forecast is honest and the
+            # prices are not, and the head-to-head must skip that day.
+            'priced_at': now.hour,
             'bias': round(bias, 2),
             'obs_at_lock': fl,
             'market_pick': rows[mbest]['label'], 'market_p': rows[mbest]['mid'],
@@ -987,7 +992,16 @@ def run_market(cfg):
     record['live'] = tally(live)
     record['backtest'] = tally([h for h in scored if h.get('backtest')])
     # head-to-head only exists where a contemporaneous market price was captured
-    h2h = [h for h in live if h.get('market_hit') is not None]
+    def priced_on_time(h):
+        L = h.get('lock') or {}
+        pa = L.get('priced_at')
+        if pa is None:
+            return False              # older locks: provenance unknown, don't count
+        try:
+            return abs(int(pa) - int(str(L.get('as_of', '')).split(':')[0])) <= 1
+        except Exception:
+            return False
+    h2h = [h for h in live if h.get('market_hit') is not None and priced_on_time(h)]
     record['vs_market'] = {'n': len(h2h),
                            'ours': sum(1 for h in h2h if h.get('hit')),
                            'market': sum(1 for h in h2h if h.get('market_hit'))}
