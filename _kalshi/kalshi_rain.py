@@ -51,7 +51,7 @@ OUT = os.path.join(HERE, '..', 'kalshi_rain.json')
 WET = 0.005            # the station reports hundredths; a trace prints 0.00
 HIST_DAYS = 170        # calibration window, extended as history accumulates
 LOCK_HOUR = 12         # the pick that gets graded, in each city's own clock
-BANKROLL = 500.0
+BANKROLL = K.BANKROLL          # one bankroll for the whole operation
 FIT_ITERS = 700
 
 # code -> (city, IEM station, IEM network, lat, lon, tz). The station is the one

@@ -53684,23 +53684,38 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         if (!(c > 0 && c < 1) || q <= c) return null;
         return { quarter: (q - c) / (1 - c) / 4, cost: c };
       };
+      /* AT THIS SIZE THE UNIT IS CONTRACTS, NOT PERCENT.  "5.9% of bankroll"
+         is a useless instruction on a $10 pot -- it is 59 cents, which buys two
+         contracts at 26c and nothing at 61c. So lead with the number to type
+         into Kalshi, and say plainly when quarter Kelly does not reach even one
+         contract, because the honest answer there is usually to skip rather
+         than round up into a bet four times the size the maths asked for. */
+      var pot = (K.today && K.today.bankroll) || (R.money && R.money.bankroll) || 10;
       var stakeLine = function(dir, r, price, q){
         var k = stakeOf(q, price);
         if (!k) return '';
-        var pot = 500;                    // a worked example, not a recommendation
         var dollars = pot * k.quarter;
-        var want = Math.floor(dollars / k.cost);
+        var want = dollars / k.cost;
         var have = (dir === 'against') ? r.nsize : r.ysize;
-        var capped = (have != null && have > 0 && want > have);
-        return kvLine('STAKE', '<b>' + (100 * k.quarter).toFixed(1) + '% of bankroll</b> — '
-          + '$' + dollars.toFixed(0) + ' of a $' + pot + ' pot, about ' + want + ' contracts. '
-          + (have == null ? ''
-             : capped ? '<span style="color:#f2833f;">Only ' + Math.floor(have)
-                        + ' on offer at that price — roughly $'
-                        + (have * k.cost).toFixed(0) + ' would fill.</span>'
-                      : '<span style="color:#359478;">' + Math.floor(have)
-                        + ' available at that price.</span>')
-          + ' Quarter Kelly, so a wrong read costs a quarter of what it could.');
+        var n = Math.floor(want);
+        var capped = (have != null && have > 0 && n > have);
+        if (capped) n = Math.floor(have);
+        if (n < 1){
+          return kvLine('STAKE', '<span style="color:#f2833f;">Quarter Kelly wants '
+            + want.toFixed(1) + ' contracts here \u2014 under one.</span> A single contract at '
+            + cents(price) + ' is ' + (100 * k.cost / pot).toFixed(0) + '% of a $' + pot
+            + ' pot, well over what the edge justifies. Skip it, or take one and know '
+            + 'it is oversized.');
+        }
+        return kvLine('STAKE', '<b style="font-size:11px;">' + n + ' contract'
+          + (n === 1 ? '' : 's') + ' at ' + cents(price) + '</b> \u2014 $'
+          + (n * k.cost).toFixed(2) + ' of a $' + pot + ' pot ('
+          + (100 * k.quarter).toFixed(1) + '% at quarter Kelly). '
+          + (capped ? '<span style="color:#f2833f;">Only ' + Math.floor(have)
+                      + ' on offer, so that is the whole book.</span> '
+             : have != null ? '<span style="color:#359478;">' + Math.floor(have)
+                      + ' available.</span> ' : '')
+          + 'Wins ' + cents((1 - k.cost) * n) + ', loses ' + cents(k.cost * n) + '.');
       };
 
       var vbest = null;
@@ -53753,22 +53768,30 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       book.sort(function(a, b){ return b.ev - a.ev; });
       /* exact payoff per outcome: the ladder is mutually exclusive, so for each
          range that could settle, each position either pays $1 or expires at 0 */
+      /* WHOLE CONTRACTS, OR IT IS NOT A REAL PLAN.  Spreading quarter Kelly
+         across a six-way ladder sounds fine until the pot is $10: nineteen
+         positions at 13c each buys nothing at all. Positions that cannot afford
+         a single contract are dropped here, so the line below reports what could
+         actually be typed into Kalshi rather than a fractional ideal. */
       var bookRoll = null;
-      if (book.length > 1){
-        var tot = 0;
-        book.forEach(function(b){ tot += b.f; });
+      book.forEach(function(b){ b.n = Math.floor(pot * b.f / b.cost); });
+      var takeable = book.filter(function(b){ return b.n >= 1; });
+      if (takeable.length > 1){
+        var stake = 0;
+        takeable.forEach(function(b){ stake += b.n * b.cost; });
         var lo = null, hi = null, ev = 0, worstAt = null;
         (T.ladder || []).forEach(function(out){
           var pl = 0;
-          book.forEach(function(b){
+          takeable.forEach(function(b){
             var wins = (b.dir === 'for') ? (b.r === out) : (b.r !== out);
-            pl += wins ? b.f * (1 - b.cost) / b.cost : -b.f;
+            pl += wins ? b.n * (1 - b.cost) : -b.n * b.cost;
           });
           ev += (out.ours || 0) * pl;
           if (lo == null || pl < lo){ lo = pl; worstAt = out; }
           if (hi == null || pl > hi) hi = pl;
         });
-        bookRoll = { n: book.length, stake: tot, lo: lo, hi: hi, ev: ev, worstAt: worstAt };
+        bookRoll = { n: takeable.length, stake: stake, lo: lo, hi: hi, ev: ev,
+                     worstAt: worstAt, dropped: book.length - takeable.length };
       }
 
       rows = (T.ladder || []).map(function(r){
@@ -54346,13 +54369,16 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                         + 'reads on the same day, not one bet repeated.')
                     : '')
                 + (bookRoll
-                    ? kvLine('ALL ' + bookRoll.n, 'Taking every one stakes <b>'
-                        + (100 * bookRoll.stake).toFixed(1) + '%</b> of the pot. On $500: '
-                        + '<b style="color:' + YESC + ';">+$' + (500 * bookRoll.hi).toFixed(0)
+                    ? kvLine('ALL ' + bookRoll.n, 'Taking all of them costs <b>$'
+                        + bookRoll.stake.toFixed(2) + '</b> of a $' + pot + ' pot: '
+                        + '<b style="color:' + YESC + ';">+$' + bookRoll.hi.toFixed(2)
                         + '</b> at best, <b style="color:' + NOC + ';">&minus;$'
-                        + Math.abs(500 * bookRoll.lo).toFixed(0) + '</b> at worst (if it settles '
+                        + Math.abs(bookRoll.lo).toFixed(2) + '</b> at worst (if it settles '
                         + deg(bookRoll.worstAt.label) + '), <b>' + (bookRoll.ev >= 0 ? '+' : '&minus;')
-                        + '$' + Math.abs(500 * bookRoll.ev).toFixed(0) + '</b> on average.')
+                        + '$' + Math.abs(bookRoll.ev).toFixed(2) + '</b> on average.'
+                        + (bookRoll.dropped ? ' ' + bookRoll.dropped + ' other mispriced range'
+                            + (bookRoll.dropped > 1 ? 's are' : ' is')
+                            + ' too small to buy even one contract at this pot size.' : ''))
                     : '')
               : kvLine('WHY NOT', 'Every range costs at least what it is estimated to be worth '
                     + 'once the fee is counted. Sitting out is a position.'))

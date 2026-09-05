@@ -774,7 +774,15 @@ def backfill(fcm, bias_of, daily, obh, settled, sd_lock):
 # This can only ever start live.  Kalshi's candlestick endpoint 404s and a
 # settled market quotes 0 or 100, so no historical entry price is recoverable;
 # the backfilled days carry no prices at all and are excluded by construction.
-BANKROLL = 100.0      # the P&L is quoted per $100 staked at quarter Kelly
+# THE ACTUAL BANKROLL. Every stake, the daily cap and the P&L are quoted
+# against this one number, and it is small on purpose: the user is starting with
+# $10 and a suggestion of "8% of bankroll" means nothing if the arithmetic
+# underneath assumed $500. At this size CONTRACTS are the real unit -- quarter
+# Kelly on $10 buys one or two of them -- and Kalshi's fee rounds UP to the cent
+# per ORDER, so a single contract pays about 2c where a hundred pay 1.35c each.
+# fee_of() already computes the single-contract worst case, so the edge shown
+# here is the one a small order actually gets.
+BANKROLL = 10.0
 KELLY_DIV = 4.0
 
 def fee_of(price):
@@ -806,7 +814,7 @@ def best_bet(rows, ps):
     return best
 
 
-def book_value(rows, ps, bankroll=500.0):
+def book_value(rows, ps, bankroll=None):
     """Expected dollars from today's whole book, capped by what is on offer.
 
     Edge per contract is exactly `ev` -- pay cost, receive $1 with probability
@@ -817,6 +825,7 @@ def book_value(rows, ps, bankroll=500.0):
     without size is a hobby: the largest edge on the board tonight was 41c with
     $2 behind it, while the deepest market had $349 and a 3c edge.
     """
+    bankroll = bankroll or BANKROLL
     ev = stake = 0.0
     n = 0
     for r, p in zip(rows, ps):
@@ -1020,6 +1029,29 @@ def decode_ticker(tk, lookup):
 
 
 _FILLS_CACHE = []          # one page-through per process, shared by all markets
+
+
+def fetch_balance():
+    """The real bankroll, from the exchange. Returns dollars, or None.
+
+    Hardcoding it means editing source every time the pot changes, and the pot
+    is meant to change -- that is the whole point. With the read-scoped key set
+    this tracks the actual balance, so every stake on the panel is sized against
+    what is really there. Without the key it falls back to BANKROLL.
+    """
+    sign = _signer()
+    if not sign:
+        return None
+    try:
+        j = portfolio_get(sign, '/trade-api/v2/portfolio/balance')
+        # `balance` is in cents; newer responses also carry a _dollars form
+        if j.get('balance_dollars') is not None:
+            return float(j['balance_dollars'])
+        if j.get('balance') is not None:
+            return float(j['balance']) / 100.0
+    except Exception as e:
+        print('portfolio: balance unavailable (%s)' % e)
+    return None
 
 
 def _all_fills():
@@ -1810,6 +1842,7 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
                     if cfg.get('url') else None,
             'n_models': len(models_for(cfg)),
             'trail_days': sum(1 for h in hist.values() if h.get('trail')),
+            'bankroll': BANKROLL,
             'tomorrow': tom,
         },
         'record': record,
@@ -1851,6 +1884,13 @@ def main():
 
     Afterwards the digests are folded into the first market's file, so the page
     can show every city's best bet from the one fetch it already makes."""
+    global BANKROLL
+    bal = fetch_balance()
+    if bal is not None and bal > 0:
+        BANKROLL = round(bal, 2)
+        print('bankroll: $%.2f, read from the exchange' % BANKROLL)
+    else:
+        print('bankroll: $%.2f (no balance available, using the default)' % BANKROLL)
     bad = 0
     digests = []
     for cfg in MARKETS:
@@ -1922,7 +1962,7 @@ def main():
             # day's total exposure and scale every position to fit. Expected
             # dollars scale linearly with size, so the capped figure is simply
             # proportional -- and it is the honest one.
-            bank, cap_frac = 500.0, 0.25
+            bank, cap_frac = BANKROLL, 0.25
             raw_ev = sum((d.get('take') or {}).get('ev', 0) for d in digests)
             raw_st = sum((d.get('take') or {}).get('stake', 0) for d in digests)
             budget = bank * cap_frac
