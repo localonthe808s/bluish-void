@@ -683,6 +683,59 @@ def backfill(fcm, bias_of, daily, obh, settled, sd_lock):
     return out
 
 
+# ---------------------------------------------------------------- money ----
+# A bracket hit-rate says nothing about profit: 80c to win 20c and 30c to win
+# 70c both score one square.  What decides whether any of this is worth doing
+# is what the recommended bet would have RETURNED, so each lock records the bet
+# it would have placed -- side, price, fee, stake -- and settlement grades it.
+#
+# This can only ever start live.  Kalshi's candlestick endpoint 404s and a
+# settled market quotes 0 or 100, so no historical entry price is recoverable;
+# the backfilled days carry no prices at all and are excluded by construction.
+BANKROLL = 100.0      # the P&L is quoted per $100 staked at quarter Kelly
+KELLY_DIV = 4.0
+
+def fee_of(price):
+    """Kalshi's per-contract trading fee, charged on entry: ceil(0.07 p (1-p)
+    * 100)/100, capped at 3.5c.  It peaks at a 50c contract, which is exactly
+    where thin edges live, so an edge that ignores it is not an edge."""
+    return min(0.035, math.ceil(0.07 * price * (1 - price) * 100) / 100.0)
+
+
+def best_bet(rows, ps):
+    """The largest gap between our probability and what a side actually costs,
+    after the fee.  Both directions: on a six-way ladder buying NO is usually
+    where the value sits, because there are five ways to be right."""
+    best = None
+    for r, p in zip(rows, ps):
+        for side, price, q in (('for', r.get('ask'), p),
+                               ('against', r.get('nask'), 1.0 - p)):
+            if price is None or not (0 < price < 1):
+                continue
+            ev = q - price - fee_of(price)
+            if best is None or ev > best['ev']:
+                cost = price + fee_of(price)
+                best = {'dir': side, 'label': r['label'], 'price': round(price, 4),
+                        'q': round(q, 4), 'ev': round(ev, 4),
+                        'fee': round(fee_of(price), 4),
+                        'kelly': round(max(0.0, (q - cost) / (1 - cost)) / KELLY_DIV, 4)
+                                 if cost < 1 else 0.0,
+                        'size': r.get('nsize') if side == 'against' else r.get('ysize')}
+    return best
+
+
+def grade_bet(bet, truth):
+    """Profit on a $100 bankroll staked at quarter Kelly.  Cost is price plus
+    fee; a winning contract pays $1, a losing one pays nothing."""
+    if not bet or truth is None or not bet.get('kelly'):
+        return None
+    won = (bet['label'] == truth) if bet['dir'] == 'for' else (bet['label'] != truth)
+    cost = bet['price'] + bet['fee']
+    stake = BANKROLL * bet['kelly']
+    return {'won': won, 'staked': round(stake, 2),
+            'pl': round(stake * ((1 - cost) / cost) if won else -stake, 2)}
+
+
 def run_market(cfg):
     dry = '--dry' in sys.argv
     now = local_now(cfg)
@@ -902,6 +955,10 @@ def run_market(cfg):
             'ladder': [{'label': r['label'], 'lo': r['lo'], 'hi': r['hi'],
                         'ours': round(p, 4), 'market': r['mid']}
                        for r, p in zip(rows, ps)],
+            # what would actually have been staked, at the prices on the screen
+            # at this moment. Only counted later if those prices were live -- see
+            # priced_on_time().
+            'bet': best_bet(rows, ps),
         }
 
     # INTRADAY PRICE TRAIL.  Kalshi's candlestick endpoint 404s, so there is no
@@ -995,6 +1052,13 @@ def run_market(cfg):
         if h.get('final'):
             h['final_hit'] = (h['final']['pick'] == h['actual_bracket'])
         h['err'] = round(h['lock']['pred'] - a, 2) if a is not None else None
+        g = grade_bet(h['lock'].get('bet'), truth)
+        if g:
+            h['bet_result'] = g
+            print('  bet %s %s at %.0fc -> %s, %+.2f on $%d'
+                  % (h['lock']['bet']['dir'], h['lock']['bet']['label'],
+                     100 * h['lock']['bet']['price'],
+                     'WON' if g['won'] else 'lost', g['pl'], BANKROLL))
         print('scored %s: actual %.0f -> %s | ours %s %s | market %s %s'
               % (k, a, h['actual_bracket'], h['lock']['pick'],
                  'HIT' if h['hit'] else 'miss', h['lock']['market_pick'],
@@ -1041,6 +1105,20 @@ def run_market(cfg):
     record['vs_market'] = {'n': len(h2h),
                            'ours': sum(1 for h in h2h if h.get('hit')),
                            'market': sum(1 for h in h2h if h.get('market_hit'))}
+    # P&L, on the same on-time-price rule as the head-to-head: a bet is only
+    # real if the quote it was struck at was live when the lock was written.
+    money = [h for h in live
+             if h.get('bet_result') and priced_on_time(h)]
+    record['money'] = {
+        'n': len(money),
+        'wins': sum(1 for h in money if h['bet_result']['won']),
+        'staked': round(sum(h['bet_result']['staked'] for h in money), 2),
+        'pl': round(sum(h['bet_result']['pl'] for h in money), 2),
+        'bankroll': BANKROLL,
+    }
+    st = record['money']['staked']
+    record['money']['roi'] = round(100.0 * record['money']['pl'] / st, 1) if st else None
+
     fin = [h for h in scored if h.get('final_hit') is not None]
     record['final'] = {'n': len(fin), 'hits': sum(1 for h in fin if h['final_hit']),
                        'hour': FINAL_HOUR}
