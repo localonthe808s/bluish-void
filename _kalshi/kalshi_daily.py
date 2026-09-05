@@ -82,8 +82,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # The station is whatever the market's own rules name. Read them, do not guess:
 # Chicago settles on CLIMDW, which is MIDWAY, not O'Hare -- the two routinely
 # differ by a degree and O'Hare would have been wrong all season.
-def _mkt(key, series, city, station, net, lat, lon, tz, tzl, cli, slug):
+def _mkt(key, series, city, station, net, lat, lon, tz, tzl, cli, slug, wfo=None):
     return {'key': key, 'series': series, 'label': city + ' daily high',
+            'wfo': wfo,
             'station': station, 'network': net, 'lat': lat, 'lon': lon,
             'field': 'max_temp_f', 'tz': tz, 'tzlabel': tzl,
             'city': city, 'cli': cli,
@@ -93,19 +94,19 @@ def _mkt(key, series, city, station, net, lat, lon, tz, tzl, cli, slug):
 
 MARKETS = [
     _mkt('ny_high',  'KXHIGHNY',   'New York',     'NYC', 'NY_ASOS', 40.7789, -73.9692,
-         'America/New_York',    'ET', 'CLINYC', 'highest-temperature-in-nyc'),
+         'America/New_York',    'ET', 'CLINYC', 'highest-temperature-in-nyc', 'OKX'),
     _mkt('chi_high', 'KXHIGHCHI',  'Chicago',      'MDW', 'IL_ASOS', 41.786,  -87.752,
-         'America/Chicago',     'CT', 'CLIMDW', 'highest-temperature-in-chicago'),
+         'America/Chicago',     'CT', 'CLIMDW', 'highest-temperature-in-chicago', 'LOT'),
     _mkt('mia_high', 'KXHIGHMIA',  'Miami',        'MIA', 'FL_ASOS', 25.791,  -80.316,
-         'America/New_York',    'ET', 'CLIMIA', 'highest-temperature-in-miami'),
+         'America/New_York',    'ET', 'CLIMIA', 'highest-temperature-in-miami', 'MFL'),
     _mkt('aus_high', 'KXHIGHAUS',  'Austin',       'AUS', 'TX_ASOS', 30.183,  -97.680,
-         'America/Chicago',     'CT', 'CLIAUS', 'highest-temperature-in-austin'),
+         'America/Chicago',     'CT', 'CLIAUS', 'highest-temperature-in-austin', 'EWX'),
     _mkt('den_high', 'KXHIGHDEN',  'Denver',       'DEN', 'CO_ASOS', 39.847, -104.656,
-         'America/Denver',      'MT', 'CLIDEN', 'highest-temperature-in-denver'),
+         'America/Denver',      'MT', 'CLIDEN', 'highest-temperature-in-denver', 'BOU'),
     _mkt('lax_high', 'KXHIGHLAX',  'Los Angeles',  'LAX', 'CA_ASOS', 33.938, -118.389,
-         'America/Los_Angeles', 'PT', 'CLILAX', 'highest-temperature-in-los-angeles'),
+         'America/Los_Angeles', 'PT', 'CLILAX', 'highest-temperature-in-los-angeles', 'LOX'),
     _mkt('phl_high', 'KXHIGHPHIL', 'Philadelphia', 'PHL', 'PA_ASOS', 39.873,  -75.227,
-         'America/New_York',    'ET', 'CLIPHL', 'highest-temperature-in-philadelphia'),
+         'America/New_York',    'ET', 'CLIPHL', 'highest-temperature-in-philadelphia', 'PHI'),
 ]
 
 BIAS_K  = 21                              # days in the rolling bias window
@@ -689,6 +690,124 @@ def metar_six_max(cfg, day):
         f = round(c * 9.0 / 5.0 + 32.0, 1)
         best = f if best is None else max(best, f)
     return best
+
+
+# THE INSTRUMENT THE MARKET ACTUALLY SETTLES ON.
+#
+# The rules say "according to The Weather Company", and that names the PUBLISHER,
+# not a different number. Scored against Kalshi's own expiration_value -- the
+# settled temperature, which the exchange publishes -- over 22 days x 2 cities:
+#
+#     NWS CLI, FINAL      44/44        <-- governs
+#     NWS CLI, prelim     37/44
+#     IEM daily           41/44
+#
+# The aggregate is not the proof; the disagreements are. Every day the candidates
+# diverged, settlement followed the CLI final:
+#
+#     New York 2026-09-03   settled 84   CLI final 84   CLI prelim 83   IEM 83.0
+#     New York 2026-09-04   settled 84   CLI final 84                   IEM 83.0
+#     Chicago  2026-09-04   settled 93   CLI final 93                   IEM 92.0
+#
+# So TWC's blended fields are irrelevant here. They govern Kalshi's HOURLY
+# temperature markets, which are a different product; this reads the climate
+# report, which is free, keyless, and the actual settlement instrument.
+#
+# PUBLICATION: a preliminary run in the afternoon (~4:43 PM ET for New York,
+# "VALID TODAY AS OF 0400 PM"), sometimes a morning run as well, and the FINAL
+# for the day at roughly 2:30 AM local the next morning.
+#
+# THE PRELIMINARY IS NOT THE ANSWER, and how wrong it is depends on the city.
+# Its window closes at 4 PM local and New York frequently peaks later: 15/22
+# there, against 22/22 for Chicago, which peaks earlier in its day. 2026-09-03 is
+# the shape of it -- prelim 83 at 2:59 PM, final 84 at 4:58 PM, settled 84. So a
+# preliminary is used ONLY as a floor for today, never to score a past day.
+CLI_CACHE = os.path.join(HERE, 'cli_cache.json')
+
+
+def _cli_parse(text):
+    """One CLI product -> {'day','max','final'} or None.
+
+    THREE THINGS THAT BREAK A NAIVE PARSER, all found live before this shipped:
+      * "MM" means MISSING, not a number. Miami's 4pm run on 2026-09-05 carried
+        `MAXIMUM MM MM` -- reading that as present would poison the record.
+      * FINAL is the ABSENCE of a valid-as-of line, not the presence of some
+        phrase. Denver says "VALID AS OF 0600 AM LOCAL TIME" where New York says
+        "VALID TODAY AS OF 0400 PM" -- matching on "VALID TODAY" called Denver's
+        6:30am partial a final and would have recorded an overnight 73 as the
+        day's high against an actual 92.
+      * offices issue two or three products a day, so a version index is not a
+        day index.
+    """
+    d = re.search(r'SUMMARY FOR\s+(\w+)\s+(\d+)\s+(\d{4})', text)
+    if not d:
+        return None
+    try:
+        day = datetime.datetime.strptime(
+            '%s %s %s' % (d.group(1)[:3], d.group(2), d.group(3)), '%b %d %Y').date()
+    except ValueError:
+        return None
+    # the first MAXIMUM after the temperature block, so PRECIPITATION's own
+    # columns and the record/normal values cannot be mistaken for it
+    seg = text.split('TEMPERATURE', 1)
+    if len(seg) < 2:
+        return None
+    m = re.search(r'MAXIMUM\s+(MM|-?\d+)', seg[1])
+    if not m:
+        return None
+    val = None if m.group(1) == 'MM' else float(m.group(1))
+    return {'day': day.isoformat(), 'max': val,
+            'final': not re.search(r'VALID.{0,12}AS OF', text)}
+
+
+def cli_read(cfg, deep=False):
+    """{'YYYY-MM-DD': {'max': degF, 'final': bool}} for this market's station.
+
+    Cached on disk and topped up a few versions at a time: the products are
+    immutable once issued, and refetching forty of them per city per run would
+    add minutes to a job that runs every quarter hour. `deep` backfills.
+    """
+    wfo = cfg.get('wfo')
+    if not wfo:
+        return {}
+    try:
+        with open(CLI_CACHE) as fh:
+            cache = json.load(fh)
+        if not isinstance(cache, dict):
+            cache = {}
+    except Exception:
+        cache = {}
+    mine = cache.setdefault(cfg['cli'], {})
+    # a station with little history gets the deep pass once; after that the two
+    # or three newest products are all that can have appeared since last run
+    n = 40 if (deep or len(mine) < 10) else 4
+    fresh = 0
+    for v in range(1, n + 1):
+        try:
+            h = get('https://forecast.weather.gov/product.php?site=%s&issuedby=%s'
+                    '&product=CLI&format=CI&version=%d&glossary=0'
+                    % (wfo, cfg['cli'][3:], v), timeout=45).decode('utf-8', 'replace')
+        except Exception:
+            break
+        m = re.search(r'<pre[^>]*>(.*?)</pre>', h, re.S)
+        if not m:
+            break
+        p = _cli_parse(re.sub(r'<[^>]*>', '', m.group(1)))
+        if not p or p['max'] is None:
+            continue
+        old = mine.get(p['day'])
+        # a final always wins; between two of the same kind the newer one does,
+        # and versions are returned newest-first so the first seen is the newest
+        if old is None or (p['final'] and not old.get('final')):
+            mine[p['day']] = {'max': p['max'], 'final': p['final']}
+            fresh += 1
+    if fresh:
+        try:
+            with open(CLI_CACHE, 'w') as fh:
+                json.dump(cache, fh, indent=0, sort_keys=True)
+        except Exception as e:
+            print('cli cache not written (%s)' % e)
+    return mine
 
 
 def obs_hourly_range(cfg, start, end, sink=None):
@@ -1738,6 +1857,43 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
     # downstream -- the rolling bias, the peak offset, the residual spread, the
     # backfill -- now takes its actuals from a series that agrees with what
     # actually paid, rather than from whatever IEM has revised since.
+    # THREE SOURCES FOR `daily`, APPLIED LEAST AUTHORITATIVE FIRST.
+    #
+    #   IEM daily          the feed, and it REVISES -- 41/44 against settlement
+    #   NWS CLI, final     the settlement instrument itself -- 111/112
+    #   expiration_value   what the exchange actually paid -- true by definition
+    #
+    # Each overwrites the one before it, so a day ends up carrying the best
+    # figure available for it: the exchange's own number once it has settled,
+    # the climate report before that, the feed only where neither exists.
+    #
+    # The CLI layer is what fills the gap that used to hurt. A day is FINAL in
+    # the climate report at about 2:30 AM but does not settle until 7 or 8 AM,
+    # and IEM may never agree with it at all -- New York 2026-09-03 and 09-04
+    # both settled 84 while IEM still says 83.0 today. Those days feed the
+    # rolling bias, the peak offset and the residual spread, so scoring them
+    # against a feed that drifted is a slow leak into every fitted quantity.
+    #
+    # PRELIMINARIES ARE NOT USED HERE. Their window closes at 4 PM local and New
+    # York peaks later often enough to make them wrong 1 day in 3. They are used
+    # only as a floor for TODAY, below, where being a lower bound is all that is
+    # asked of them.
+    _cli = {}
+    try:
+        _cli = cli_read(cfg)
+    except Exception as e:
+        print('%s cli unavailable (%s)' % (cfg['key'], e))
+    _ncli = 0
+    for _k, _v in _cli.items():
+        if not _v.get('final') or _v.get('max') is None:
+            continue
+        if _k in daily and abs(daily[_k] - _v['max']) > 1e-9:
+            print('  climate report %s: IEM %.1f -> %.1f' % (_k, daily[_k], _v['max']))
+            _ncli += 1
+        daily[_k] = _v['max']
+    if _ncli:
+        print('%s: %d day(s) corrected to the climate report' % (cfg['key'], _ncli))
+
     _settled = {}
     try:
         _settled = fetch_settled(cfg)
@@ -1890,6 +2046,19 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
     # the arithmetic until the spikes can be told from the scoops.
     #
     # THE REAL FAULT THAT DAY WAS IEM DAILY'S LATENCY, not its accuracy.
+
+    # TODAY'S CLIMATE REPORT IS A FLOOR TOO, preliminary or not. Its value is a
+    # maximum measured over a window inside the day, so it cannot structurally
+    # exceed the day's maximum -- the same argument that makes the six-hourly
+    # group safe, and the reason a preliminary that is unfit for SCORING is
+    # perfectly fit for BOUNDING. On 2026-09-05 New York's 4:43 PM run already
+    # carried 79 at 2:33 PM, three hours before the six-hourly group covering
+    # that peak was published at 7:51 PM.
+    _ctoday = (_cli.get(tkey) or {}).get('max')
+    if _ctoday is not None:
+        live = _ctoday if live is None else max(live, _ctoday)
+        print('%s climate report today: %.1f%s' % (cfg['key'], _ctoday,
+              '' if (_cli.get(tkey) or {}).get('final') else ' (preliminary)'))
 
     # SO THIS IS THE ONE THAT GOES IN. The six-hourly group is the same class of
     # thing as `live` -- an exact running maximum for the day, not an estimate
