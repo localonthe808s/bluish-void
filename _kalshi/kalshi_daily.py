@@ -148,19 +148,51 @@ SD_FALLBACK = {8:1.20, 9:1.20, 10:1.20, 11:1.17, 12:1.10, 13:1.01, 14:0.92,
                15:0.82, 16:0.78, 17:0.72, 18:0.66, 19:0.64, 20:0.61, 21:0.59, 22:0.58}
 
 
+# Where the wall clock goes, by host. The job runs in ~70s on a laptop and hit a
+# 15-minute cap on a GitHub runner at the same work, so the bottleneck is one
+# upstream throttling that network and not the code. Guessing which would be
+# guessing; this measures it.
+TIMING = collections.defaultdict(lambda: [0.0, 0, 0])   # host -> [secs, calls, retries]
+
+
+def timing_report(reset=True):
+    if not TIMING:
+        return ''
+    parts = []
+    for host, (secs, calls, retries) in sorted(TIMING.items(), key=lambda kv: -kv[1][0]):
+        parts.append('%s %.0fs/%d%s' % (host, secs, calls,
+                                        (' +%dretry' % retries) if retries else ''))
+    out = ' | '.join(parts)
+    if reset:
+        TIMING.clear()
+    return out
+
+
 def get(url, timeout=90, tries=3):
     """Fetch with backoff. These feeds are all third-party and all flaky at some
     point in a day; a bare retry loop hammers a struggling host instead of
     letting it recover."""
+    host = urllib.parse.urlsplit(url).netloc.split('.')[-2:]
+    host = '.'.join(host)
+    t0 = time.time()
     last = None
     for a in range(tries):
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'bluishvoid/1.0'})
-            return urllib.request.urlopen(req, timeout=timeout).read()
+            body = urllib.request.urlopen(req, timeout=timeout).read()
+            e = TIMING[host]
+            e[0] += time.time() - t0
+            e[1] += 1
+            e[2] += a
+            return body
         except Exception as e:
             last = e
             if a < tries - 1:
                 time.sleep(1.5 * (2 ** a))
+    e = TIMING[host]
+    e[0] += time.time() - t0
+    e[1] += 1
+    e[2] += tries - 1
     raise last
 
 
@@ -412,10 +444,36 @@ def forecast_runs(cfg, past_days, model=None, today=None):
     forecast API; the two were verified to return identical values for the same
     day, and they carry real forecast error (86.9 against an actual 84 on
     2026-09-04), so this is a forecast and not hindsight.
+
+    ONE REQUEST, ALL MODELS.  `&models=a,b,c` returns a column per model
+    (`temperature_2m_gfs_seamless` and so on), so six models cost one call
+    rather than six. This mattered: the job ran in ~70s on a laptop and timed
+    out at 15 minutes on a GitHub runner doing identical work, because 13
+    Open-Meteo calls per market times seven markets is 91 requests from a
+    datacentre IP. Batched it is three.
+
+    Pass `models` as a list to get {model: {date: {hour: degF}}}; the old
+    single-model form still works and returns just {date: {hour: degF}}.
     """
+    many = isinstance(model, (list, tuple))
+    mods = list(model) if many else ([model] if model else [])
     tz = urllib.parse.quote(cfg.get('tz', 'America/New_York'))
-    mq = ('&models=' + model) if model else ''
-    out = collections.defaultdict(dict)
+    mq = ('&models=' + ','.join(mods)) if mods else ''
+    out = {m: collections.defaultdict(dict) for m in mods} if many \
+        else collections.defaultdict(dict)
+
+    def absorb(h):
+        for m in (mods if many else [None]):
+            # a single-model request labels the column plainly; a multi-model
+            # one suffixes it with the model name
+            col = h.get('temperature_2m_' + m) if (many and m) else h.get('temperature_2m')
+            if col is None:
+                continue
+            tgt = out[m] if many else out
+            for t, v in zip(h['time'], col):
+                if v is not None:
+                    tgt[t[:10]][int(t[11:13])] = v
+
     if today is None:
         today = local_now(cfg).date()
     start = today - datetime.timedelta(days=past_days)
@@ -424,23 +482,16 @@ def forecast_runs(cfg, past_days, model=None, today=None):
          '&temperature_unit=fahrenheit&timezone=%s'
          % (cfg['lat'], cfg['lon'], start.isoformat(),
             (today - datetime.timedelta(days=1)).isoformat(), tz) + mq)
-    h = get_json(u, timeout=180)['hourly']
-    for t, v in zip(h['time'], h['temperature_2m']):
-        if v is not None:
-            out[t[:10]][int(t[11:13])] = v
+    absorb(get_json(u, timeout=180)['hourly'])
     # today comes from the live run, which is fresher than anything archived
     # two days: today drives the live call, tomorrow drives the plan
     u2 = ('https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f'
           '&hourly=temperature_2m&forecast_days=2&temperature_unit=fahrenheit'
           '&timezone=%s' % (cfg['lat'], cfg['lon'], tz) + mq)
     try:
-        h2 = get_json(u2, timeout=120)['hourly']
-        for t, v in zip(h2['time'], h2['temperature_2m']):
-            if v is not None:
-                out[t[:10]][int(t[11:13])] = v
+        absorb(get_json(u2, timeout=120)['hourly'])
     except Exception as e:
-        print('live run unavailable for %s (%s); today falls back to archive'
-              % (model or 'default', e))
+        print('live run unavailable (%s); today falls back to archive' % e)
     return out
 
 
@@ -1105,12 +1156,20 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
         return 0
 
     span = RESID_M + BIAS_K + 6
-    fcm = {}
-    for m in models_for(cfg):
-        try:
-            fcm[m] = forecast_runs(cfg, span, m)
-        except Exception as e:
-            print('model %s unavailable: %s' % (m, e))
+    want = models_for(cfg)
+    try:
+        fcm = {m: v for m, v in forecast_runs(cfg, span, want).items() if v}
+        for m in want:
+            if m not in fcm:
+                print('model %s returned nothing' % m)
+    except Exception as e:
+        print('batched forecast failed (%s); falling back to one call per model' % e)
+        fcm = {}
+        for m in want:
+            try:
+                fcm[m] = forecast_runs(cfg, span, m)
+            except Exception as e2:
+                print('model %s unavailable: %s' % (m, e2))
     if not fcm:
         print('no forecast models available')
         return 0
@@ -1723,7 +1782,8 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
         return 0
     with open(OUT, 'w') as f:
         json.dump(doc, f, separators=(',', ':'))
-    print('wrote %s (%d scored days)' % (OUT, record['n']))
+    print('wrote %s (%d scored days) -- %s'
+          % (OUT, record['n'], timing_report()))
     # a one-line digest for the panel's other-cities table, so seven markets
     # cost one fetch rather than seven
     t = doc['today']
