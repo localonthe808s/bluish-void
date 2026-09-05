@@ -192,9 +192,15 @@ def fetch_market(cfg, ev):
             lo, hi = lo + (1.0 if st == 'greater' else 0.0), None
         bid = float(m.get('yes_bid_dollars') or 0)
         ask = float(m.get('yes_ask_dollars') or 0)
+        # the other half of the instrument: you can also buy NO, which pays out
+        # when this range does NOT happen. On a six-way ladder that is usually
+        # where the value is -- there are five ways to be right instead of one.
+        nbid = float(m.get('no_bid_dollars') or 0)
+        nask = float(m.get('no_ask_dollars') or 0)
         out.append({
             'ticker': m['ticker'], 'label': m.get('yes_sub_title') or '',
             'lo': lo, 'hi': hi, 'bid': bid, 'ask': ask,
+            'nbid': nbid, 'nask': nask,
             'mid': round((bid + ask) / 2, 4),
             'vol': float(m.get('volume_fp') or 0),
             'close': m.get('close_time'),
@@ -735,7 +741,8 @@ def run_market(cfg):
                 'agree': tb == tm,
                 'ladder': [{'label': r['label'], 'lo': r['lo'], 'hi': r['hi'],
                             'ours': round(pp, 4), 'market': r['mid'],
-                            'bid': r['bid'], 'ask': r['ask']}
+                            'bid': r['bid'], 'ask': r['ask'],
+                            'nbid': r['nbid'], 'nask': r['nask']}
                            for r, pp in zip(trows, tps)],
                 'link': (cfg['url'] + '/' + event_ticker(cfg, tdate).lower())
                         if cfg.get('url') else None,
@@ -987,7 +994,8 @@ def run_market(cfg):
             'market_pick': rows[mbest]['label'], 'market_p': rows[mbest]['mid'],
             'agree': best == mbest,
             'ladder': [{'label': r['label'], 'lo': r['lo'], 'hi': r['hi'],
-                        'bid': r['bid'], 'ask': r['ask'], 'market': r['mid'],
+                        'bid': r['bid'], 'ask': r['ask'],
+                        'nbid': r['nbid'], 'nask': r['nask'], 'market': r['mid'],
                         'ours': round(p, 4), 'vol': r['vol']}
                        for r, p in zip(rows, ps)],
             'locked': entry.get('lock'), 'final': entry.get('final'),
