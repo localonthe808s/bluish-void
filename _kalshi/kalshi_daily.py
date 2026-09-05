@@ -1234,7 +1234,8 @@ def run_market(cfg):
         'today': {
             'date': tkey, 'event': event_ticker(cfg, today),
             'tz': cfg.get('tzlabel', 'ET'), 'market': cfg.get('label', ''),
-            'close': rows[0]['close'], 'settles': 'Central Park (CLINYC), whole degrees',
+            'close': rows[0]['close'],
+            'settles': '%s (%s) via The Weather Company' % (cfg.get('city', ''), cfg.get('cli', '')),
             'state': market_state(cfg, rows, now),
             'pred': round(pred, 2), 'sd': sd, 'bias': round(bias, 2),
             'bias_days': nb, 'sd_days': nsd,
