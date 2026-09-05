@@ -1094,6 +1094,7 @@ TICKER_CACHE = {}
 def run_market(cfg, ticker_cache=TICKER_CACHE):
     dry = '--dry' in sys.argv
     now = local_now(cfg)
+    print('--- %s (%s) ---' % (cfg['key'], cfg.get('city', '')))
     today = now.date()
     tkey = today.isoformat()
     OUT = os.path.join(HERE, '..', cfg['out'])
