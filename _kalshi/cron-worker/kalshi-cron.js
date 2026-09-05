@@ -109,7 +109,12 @@ export default {
       healthy,
       token,
       dispatches: `${OWNER}/${REPO} :: ${WORKFLOW} @ ${REF}`,
-      schedule_utc: ['5 12-23 * * *', '5 0-4 * * *'],
+      // HAND-MAINTAINED, and it drifted: this still read the old hourly
+      // schedule after the triggers went to every 15 minutes, so the status
+      // page confidently reported a cadence the worker was not running.
+      // Cloudflare does not expose a worker's own triggers to its code, so
+      // this has to be kept in step with [triggers] in wrangler.toml by hand.
+      schedule_utc: ['5,20,35,50 12-23 * * *', '5,20,35,50 0-4 * * *'],
       now_utc: new Date().toISOString(),
       note: 'Triggering is cron-only. Runs appear at github.com/' + OWNER + '/' + REPO + '/actions'
     };
