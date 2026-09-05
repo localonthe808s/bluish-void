@@ -752,14 +752,18 @@ def _cli_parse(text):
     seg = text.split('TEMPERATURE', 1)
     if len(seg) < 2:
         return None
-    m = re.search(r'MAXIMUM\s+(MM|-?\d+)', seg[1])
+    m = re.search(r'MAXIMUM\s+(MM|-?\d+)\s+(\d{1,2}:?\d{2}\s*(?:AM|PM))?', seg[1])
     if not m:
         return None
     val = None if m.group(1) == 'MM' else float(m.group(1))
+    at = (m.group(2) or '').replace(' ', '')
+    if at and ':' not in at:                    # "233PM" -> "2:33PM"
+        at = at[:-4].lstrip('0') + ':' + at[-4:-2] + at[-2:]
     # the WMO header's DDHHMM decides WHICH final came first, and that is the
     # whole ballgame -- see cli_read()
     w = re.search(r'CDUS\d+\s+\w+\s+(\d{6})', text)
     return {'day': day.isoformat(), 'max': val, 'issued': w.group(1) if w else None,
+            'at': at or None,
             'final': not re.search(r'VALID.{0,12}AS OF', text)}
 
 
@@ -829,7 +833,7 @@ def cli_read(cfg, deep=False):
             better = bool(oi and ni and ni < oi)  # an EARLIER final wins
         if better:
             mine[p['day']] = {'max': p['max'], 'final': p['final'],
-                              'issued': p.get('issued')}
+                              'issued': p.get('issued'), 'at': p.get('at')}
             fresh += 1
     if fresh:
         try:
@@ -2651,6 +2655,14 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
             # and it is not small: Chicago ran +4.0 the day this was wired in,
             # New York +2.0 on the afternoon that made the case for it.
             'six_max': _six,
+            # THE REPORT THE DAY IS ACTUALLY SETTLED ON. Verified against the
+            # exchange's own expiration_value on 112 of 112 settled days. The
+            # panel leads with this; everything else on screen is an estimate of
+            # it. `cli_final` false means the preliminary, whose window closes at
+            # 4 PM local and which is wrong about 1 New York day in 3.
+            'cli_max': (_cli.get(tkey) or {}).get('max'),
+            'cli_final': (_cli.get(tkey) or {}).get('final'),
+            'cli_at': (_cli.get(tkey) or {}).get('at'),
             'twc_max': _twc.get('max'), 'twc_now': _twc.get('now'),
             'twc_gap': (round(_twc['max'] - rmax, 1)
                         if _twc.get('max') is not None and rmax is not None
