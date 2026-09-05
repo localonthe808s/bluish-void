@@ -267,6 +267,9 @@ def main():
     doc = {'built': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%MZ'),
            'hour_rows': len(all_rows), 'by_market': per,
            'pooled': summarise(all_rows)}
+    with open(os.path.join(HERE, 'price_rows.json'), 'w') as f:
+        json.dump(all_rows, f, separators=(',', ':'))
+    print('kept %d raw rows for later analysis' % len(all_rows))
     with open(OUT, 'w') as f:
         json.dump(doc, f, indent=1)
     print('\nwrote %s' % OUT)
