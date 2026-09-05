@@ -225,7 +225,7 @@ def main():
     hist = {h['key']: h for h in log.get('history', [])}
 
     start = today_utc - datetime.timedelta(days=HIST_DAYS)
-    samples, cities, board_ev = [], [], None
+    samples, cities, board_ev, board = [], [], None, {}
 
     for code, name, st, nw, lat, lon, tz in CITIES:
         try:
