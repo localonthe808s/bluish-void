@@ -756,7 +756,10 @@ def _cli_parse(text):
     if not m:
         return None
     val = None if m.group(1) == 'MM' else float(m.group(1))
-    return {'day': day.isoformat(), 'max': val,
+    # the WMO header's DDHHMM decides WHICH final came first, and that is the
+    # whole ballgame -- see cli_read()
+    w = re.search(r'CDUS\d+\s+\w+\s+(\d{6})', text)
+    return {'day': day.isoformat(), 'max': val, 'issued': w.group(1) if w else None,
             'final': not re.search(r'VALID.{0,12}AS OF', text)}
 
 
@@ -796,10 +799,37 @@ def cli_read(cfg, deep=False):
         if not p or p['max'] is None:
             continue
         old = mine.get(p['day'])
-        # a final always wins; between two of the same kind the newer one does,
-        # and versions are returned newest-first so the first seen is the newest
-        if old is None or (p['final'] and not old.get('final')):
-            mine[p['day']] = {'max': p['max'], 'final': p['final']}
+        # KEEP THE *FIRST* NON-PRELIMINARY REPORT, NOT THE NEWEST ONE.
+        #
+        # Kalshi settles on "the first official non-preliminary report" and
+        # explicitly ignores later revisions. The NWS does revise, sometimes
+        # within the hour, and when it does the exchange does NOT follow.
+        #
+        # Miami 2026-08-29 is the case and it cost a wrong conclusion before it
+        # was found. Two finals for that day:
+        #
+        #     04:24 AM Aug 30   MAXIMUM 90 at 3:25 PM   <-- the exchange paid 90
+        #     05:10 AM Aug 30   MAXIMUM 85 at 5:11 AM   <-- corrected, 46 min later
+        #
+        # Every instrument agrees the true value was 85 -- the corrected report
+        # even moves the time of the max from an afternoon 3:25 PM to an
+        # early-morning 5:11 AM, which is what the METARs show on a day with
+        # 0.62in of rain. It does not matter. The rulebook settles on the first
+        # one, so THAT is the quantity this model has to predict, and a record
+        # holding 85 would be scoring against a number the exchange never used.
+        #
+        # Versions come back newest-first, so an older product is seen later;
+        # the issuance stamp is compared rather than trusting iteration order,
+        # because an incremental run only fetches the newest few.
+        better = old is None
+        if not better and p['final'] and not old.get('final'):
+            better = True                       # any final beats a preliminary
+        elif not better and p['final'] and old.get('final'):
+            oi, ni = old.get('issued'), p.get('issued')
+            better = bool(oi and ni and ni < oi)  # an EARLIER final wins
+        if better:
+            mine[p['day']] = {'max': p['max'], 'final': p['final'],
+                              'issued': p.get('issued')}
             fresh += 1
     if fresh:
         try:
@@ -1884,6 +1914,41 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
     except Exception as e:
         print('%s cli unavailable (%s)' % (cfg['key'], e))
 
+    # THE FIRST NON-PRELIMINARY CLIMATE REPORT, WHICH IS THE TARGET VARIABLE.
+    #
+    # This model exists to predict what the exchange will PAY, and the rulebook
+    # pays on the first official non-preliminary report, explicitly ignoring
+    # later revisions. So that -- not the physically-corrected figure -- is the
+    # quantity `daily` has to carry. cli_read() keeps the first final for exactly
+    # this reason; see the note there on Miami 2026-08-29, where the NWS issued
+    # 90 at 4:24 AM and corrected it to 85 forty-six minutes later, and the
+    # exchange paid 90.
+    #
+    # Applied BEFORE settle_corrected, because expiration_value is what actually
+    # paid and is therefore the last word on a settled day. This layer's job is
+    # the days in between: a day is final in the climate report at ~2:30 AM but
+    # does not settle until 7 or 8 AM, and IEM may never agree with either --
+    # New York 09-03 and 09-04 both paid 84 while IEM still says 83.0 today.
+    # Those days feed the rolling bias, the peak offset and the residual spread.
+    #
+    # A disagreement bigger than a rounding step is NAMED rather than absorbed.
+    # With the first-final rule in place there should be none; if one appears it
+    # means either the rule has changed or a report was reissued in a way this
+    # does not model, and that is worth seeing rather than smoothing.
+    _ncli = 0
+    for _k, _v in _cli.items():
+        if not _v.get('final') or _v.get('max') is None:
+            continue
+        _was = daily.get(_k)
+        if _was is not None and abs(_was - _v['max']) > 1e-9:
+            _ncli += 1
+            if abs(_was - _v['max']) > 1.5:
+                print('  LARGE climate-report correction %s: %.1f -> %.1f'
+                      % (_k, _was, _v['max']))
+        daily[_k] = _v['max']
+    if _ncli:
+        print('%s: %d day(s) set from the first final climate report' % (cfg['key'], _ncli))
+
     _settled = {}
     try:
         _settled = fetch_settled(cfg)
@@ -1893,49 +1958,6 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
     if _nfix:
         print('%s: %d day(s) corrected to the settlement' % (cfg['key'], _nfix))
 
-    # AND THE CLIMATE REPORT HAS THE LAST WORD, WHICH IT DID NOT AN HOUR AGO.
-    #
-    # expiration_value was applied last, on the reasoning that what the exchange
-    # paid is true by definition. It is true about the PAYMENT. It is not always
-    # true about the WEATHER, and `daily` is where the weather lives -- the
-    # rolling bias, the peak offset and the residual spread all take their
-    # actuals from here.
-    #
-    # Miami 2026-08-29 is the case, 1 in 112. The exchange settled 90.00. Against
-    # that:
-    #
-    #     climate report (CLIMIA)   85      TWC's own obs feed        85
-    #     IEM daily                 85      Fort Lauderdale           85
-    #     Opa-Locka                 84      Hollywood                 84
-    #     Miami's own METARs        never above 82 after 9 AM, 0.62in of rain
-    #
-    # and the market closed with "87 or below" at 98c. The exchange paid the 2c
-    # rung. Every instrument in south Florida, the market itself, and the
-    # publisher named in the rules all said 85; the settlement said 90. Feeding
-    # that into the record put a 5 degF error into everything fitted for Miami.
-    #
-    # So the physical record wins for the physical quantities. Settlements still
-    # correct the days where no final climate report exists, which is what that
-    # layer was for. Where the two disagree the day is named out loud rather than
-    # quietly absorbed -- a settlement that contradicts every instrument is worth
-    # seeing, not smoothing.
-    _ncli = _nodd = 0
-    for _k, _v in _cli.items():
-        if not _v.get('final') or _v.get('max') is None:
-            continue
-        _was = daily.get(_k)
-        if _was is not None and abs(_was - _v['max']) > 1e-9:
-            _paid = abs(_was - _v['max']) > 1.5
-            print('  %s %s: %.1f -> %.1f (climate report)%s'
-                  % ('SETTLEMENT ANOMALY' if _paid else 'climate report', _k,
-                     _was, _v['max'], '  <-- the exchange paid on %.1f' % _was if _paid else ''))
-            _ncli += 1
-            _nodd += 1 if _paid else 0
-        daily[_k] = _v['max']
-    if _ncli:
-        print('%s: %d day(s) set from the climate report%s'
-              % (cfg['key'], _ncli,
-                 ', %d contradicting a settlement' % _nodd if _nodd else ''))
     # end one day AHEAD: asos.py treats the end date as the cut-off, so asking
     # for `today` returns almost nothing for today
     ob_last = []
