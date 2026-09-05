@@ -67,6 +67,13 @@ async function dispatch(env) {
 // and is not claimed to.
 //
 // SETUP (three secrets, none of them in this repo):
+// THE KEY MUST BE READ-ONLY. Kalshi scopes API keys, and this worker only ever
+// reads: grant `read` and nothing else. `write::trade` and `write::transfer` are
+// what would let a leaked PANEL_TOKEN place orders or move money, and nothing
+// here needs them. Kalshi does not document a per-endpoint scope for
+// /portfolio/positions; `read` is the parent of the read endpoints, so it is the
+// right grant, and a 403 from this endpoint would be the signal it is not.
+//
 //   wrangler secret put KALSHI_API_KEY_ID     the key's uuid
 //   wrangler secret put KALSHI_PRIVATE_KEY    the PEM, newlines and all
 //   wrangler secret put PANEL_TOKEN           any long random string you invent
@@ -78,8 +85,16 @@ async function dispatch(env) {
 const KALSHI = 'https://api.elections.kalshi.com';
 
 function pemToDer(pem) {
-  const b64 = pem.replace(/\\n/g, '\n')
-    .replace(/-----[A-Z ]+-----/g, '').replace(/\s+/g, '');
+  const txt = pem.replace(/\\n/g, '\n');
+  // Kalshi hands out an RSA_PRIVATE_KEY, which is PKCS#1. Python's
+  // load_pem_private_key takes either, so the GitHub job never noticed.
+  // WebCrypto takes PKCS#8 ONLY, and rejects PKCS#1 with a DataError that
+  // surfaces here as an unexplained 502. Say what is wrong instead.
+  if (/BEGIN RSA PRIVATE KEY/.test(txt)) {
+    throw new Error('private key is PKCS#1; WebCrypto needs PKCS#8. Convert it: '
+      + 'openssl pkcs8 -topk8 -nocrypt -in kalshi-key.pem -out kalshi-key-pkcs8.pem');
+  }
+  const b64 = txt.replace(/-----[A-Z ]+-----/g, '').replace(/\s+/g, '');
   const raw = atob(b64);
   const out = new Uint8Array(raw.length);
   for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
@@ -138,8 +153,12 @@ async function positions(request, env) {
   try {
     const [bal, pos] = await Promise.all([
       kalshiGet(env, '/trade-api/v2/portfolio/balance'),
+      // count_filter=position asks the exchange for rows with a non-zero
+      // position, which is the whole question here. settlement_status is NOT a
+      // parameter of this endpoint -- it is on /portfolio/settlements -- and
+      // sending it invites a 400 that reads like an auth failure.
       kalshiGet(env, '/trade-api/v2/portfolio/positions',
-                '?settlement_status=unsettled&limit=200')
+                '?count_filter=position&limit=500')
     ]);
     const cash = bal.balance_dollars != null
       ? Number(bal.balance_dollars) : Number(bal.balance || 0) / 100;
