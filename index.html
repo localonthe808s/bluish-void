@@ -53775,114 +53775,139 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         return ladderRow(r, T.pick, dead(r), vbest, T.market_pick, mnorm(T.ladder));
       }).join('');
 
-      /* ---- WHEN: the window, worked out from the clock ------------------
-         Our accuracy is flat from 8am (57%) to dusk (58%), but the price hardens
-         through the day as the answer becomes obvious to everyone. So the window
-         is the morning, once the fresh model runs land and before the market has
-         caught up -- not noon, which is only when the scoreboard writes a number
-         down. */
-      /* named clockH, not nowH: the timing chart already uses nowH in this same
-         scope for which bar to paint teal, and a second `var nowH` would quietly
-         overwrite it */
+      /* ---- WHEN TO ACT, MEASURED -----------------------------------------
+         This section used to reason: our accuracy is flat by hour, prices are
+         assumed to harden through the day, therefore bet in the morning. The
+         price half of that was never checked, because a note in our own records
+         said Kalshi's candlestick endpoint 404s and historical prices could not
+         be recovered. The PATH was wrong, not the capability -- the history was
+         public the whole time.
+
+         So it is measured now. price_study.py replays this model hour by hour
+         across every settled day and puts our probability next to the market's
+         real bid and ask at that moment, then scores what a bet placed then
+         actually RETURNED. That is a different question from "when are we most
+         accurate", and it gives a different answer:
+
+             11 AM  +0.58 per $1, won 64%      <- the best hour
+              2 PM  -0.20         won 40%
+              6 PM  -0.78         won  4%
+             10 PM  -1.00         won  0%
+
+         Our Brier keeps improving all day (0.079 -> 0.050). So does the
+         market's, only faster (0.096 -> 0.0001), and it overtakes us at 2 PM.
+         After that our disagreements are not edges, they are errors -- and an
+         earlier version of this panel had a SECOND betting window at 6 PM,
+         argued from bracket accuracy. It would have lost on 96% of them. */
+      /* named clockH, not nowH: the hourly chart already uses nowH in this same
+         scope for which bar to paint teal, and a second `var nowH` would
+         quietly overwrite it */
       var clockH = null;
       var um = String(K.updated || '').match(/T(\d{1,2}):/);
       if (um) clockH = +um[1];
-      /* TWO windows, not one. The 6pm lock scores 53/68 against noon's 40/68 --
-         by then the day has largely resolved and the remaining uncertainty is
-         small, so on a day where the morning edge was thin that is the better
-         moment to act. The panel used to call the whole afternoon a closed
-         door and send you to tomorrow. */
-      var win, winCol;
-      var fh = (T.final_hour || 18);
-      if (clockH == null)    { win = 'Best window is the morning, 8 AM to noon.'; winCol = '#45b491'; }
-      else if (clockH < 8)   { win = 'Too early \u2014 the models refresh around 8 AM. Check back then.'; winCol = '#45b491'; }
-      else if (clockH < 12)  { win = 'This is the window \u2014 fresh models are in and the price has not caught up.'; winCol = '#2fbfa8'; }
-      else if (clockH < 15)  { win = 'Window is closing \u2014 still open, but the price is hardening.'; winCol = '#f2833f'; }
-      else if (clockH < fh)  { win = 'Between windows \u2014 hold until ' + (fh % 12 || 12)
-                                     + ' PM, when the day has resolved and the read is sharpest.'; winCol = '#45b491'; }
-      else if (clockH < 22)  { win = 'Second window \u2014 the ' + (fh % 12 || 12)
-                                     + ' PM read lands the right range 78% of the time against noon&rsquo;s '
-                                     + '58%, so an edge that survives to now is a good one.'; winCol = '#2fbfa8'; }
-      else                   { win = 'Late \u2014 the market closes soon and the answer is known. Play tomorrow instead.'; winCol = '#45b491'; }
-      var early = (clockH != null && ((clockH >= 8 && clockH < 15) || (clockH >= fh && clockH < 22)));
 
-      /* ---- WHEN TO ACT ------------------------------------------------
-         The section answers one question and used to bury it: the milestone
-         strip lit whatever came next, which read as "act now" at any hour.
-         The window is stated first, in words, with where the clock stands
-         against it -- then the evidence for it.
-
-         That evidence is two series, both as bars because a row of dots read
-         as decoration. Accuracy is FLAT all day (55-59%): waiting does not buy
-         a better answer. The typical miss halves (1.2 to 0.6 degrees): waiting
-         does buy a sharper one -- and the market sees the same thing, so the
-         price hardens and the payout shrinks. Flat against falling is the
-         whole argument for betting early, so both are drawn to scale with
-         their numbers on. */
-      var timing = '';
       var bh = T.by_hour || [];
+      var measured = bh.length && bh[0].ret != null;
+      var bestH = null, winA = null, winB = null;
+      if (measured){
+        bh.forEach(function(x){
+          if (bestH == null || x.ret > bestH.ret) bestH = x;
+        });
+        /* the window is the run of consecutive profitable hours around the best
+           one -- not a round number picked because it reads nicely */
+        var idx = bh.indexOf(bestH), a = idx, b = idx;
+        while (a > 0 && bh[a - 1].ret > 0) a--;
+        while (b < bh.length - 1 && bh[b + 1].ret > 0) b++;
+        winA = bh[a].h; winB = bh[b].h;
+      }
+      var W0 = measured ? winA : 8, W1 = measured ? winB : 12;
+      var inWin = function(h){ return h >= W0 && h <= W1; };
+      var hr12 = function(h){ return (h % 12 || 12) + (h < 12 ? ' AM' : ' PM'); };
+
+      var win, winCol;
+      if (clockH == null)      { win = 'Best window is ' + hr12(W0) + ' to ' + hr12(W1) + '.'; winCol = '#45b491'; }
+      else if (clockH < W0)    { win = 'Too early — the models refresh around 8 AM and the window opens at '
+                                       + hr12(W0) + '.'; winCol = '#45b491'; }
+      else if (inWin(clockH))  { win = 'This is the window — fresh models are in and the price has not caught up.'; winCol = '#2fbfa8'; }
+      else                     { win = 'Past the window. From ' + hr12(W1 + 1) + ' the market prices this '
+                                       + 'better than the forecast does, and bets placed after it lost money on '
+                                       + 'every settled day measured.'; winCol = '#f2833f'; }
+      var early = (clockH != null && inWin(clockH));
+
+      var timing = '';
       if (bh.length){
-        var amax = Math.max.apply(null, bh.map(function(x){ return x.acc; }));
-        var amin = Math.min.apply(null, bh.map(function(x){ return x.acc; }));
-        var sds  = bh.map(function(x){ return x.sd || 0; });
-        var smax = Math.max.apply(null, sds), smin = Math.min.apply(null, sds);
+        var rmax = 0, bmax = 0;
+        bh.forEach(function(x){
+          rmax = Math.max(rmax, Math.abs(x.ret == null ? 0 : x.ret));
+          bmax = Math.max(bmax, x.ours || 0, x.mkt || 0);
+        });
         var nowH = T.obs_through;
-        /* both windows: the morning, and the hour of the final call */
-        var W0 = 8, W1 = 12, W2 = (T.final_hour || 18);
-        var inWin = function(h){ return (h >= W0 && h <= W1) || h === W2; };
+        var col = function(x){ return x.h; };
 
-        /* the value sits INSIDE its bar, so a column is one object to read
-           rather than a number hovering above a shape. That sets a floor on
-           bar height -- 6px type needs room -- so the bars carry a fixed base
-           and the data rides on top of it. Units live in the sub-heads, not
-           on fifteen repeated labels. */
-        var series = function(pick, fmt, fill, nowFill, ink, nowInk, base, hmax, showHours){
-          return '<div style="display:flex;align-items:flex-end;gap:2px;margin-top:3px;">'
-            + bh.map(function(x){
-                var v = pick(x);
-                var isNow = (nowH != null && x.h === nowH);
-                return '<div style="flex:1;display:flex;flex-direction:column;'
-                  + 'align-items:center;gap:2px;background:'
-                  + (inWin(x.h) ? 'rgba(245,165,36,.09)' : 'transparent')
-                  + ';border-radius:3px 3px 0 0;padding:3px 0 0;">'
-                  + '<div style="position:relative;width:100%;max-width:17px;height:'
-                  + (base + v.frac * hmax).toFixed(0) + 'px;background:'
-                  + (isNow ? nowFill : fill) + ';border-radius:2px;">'
-                  + '<div style="position:absolute;left:0;right:0;top:2px;text-align:center;'
-                  + 'font:800 6px system-ui,sans-serif;letter-spacing:-.02em;color:'
-                  + (isNow ? nowInk : ink) + ';">' + fmt(v.raw) + '</div></div>'
-                  + (showHours
-                      ? '<div style="font:700 6px system-ui,sans-serif;color:'
-                        + (isNow ? '#2fbfa8' : '#2c7f66') + ';">' + (x.h % 12 || 12) + '</div>'
-                      : '')
-                  + '</div>';
-              }).join('')
-            + '</div>';
-        };
-        var subhead = function(t, note){
-          return '<div style="font:800 6.5px system-ui,sans-serif;letter-spacing:.07em;'
-            + 'color:#2c7f66;margin-top:8px;">' + t
-            + '<span style="color:#359478;font-weight:600;"> — ' + note + '</span></div>';
-        };
-        var accRow = series(
-          function(x){ return { raw: x.acc, frac: (x.acc - amin + 2) / (amax - amin + 4) }; },
-          function(v){ return String(v); },
-          'rgba(0,210,152,.40)', '#2fbfa8', '#d5f7ec', '#062018', 15, 17, true);
-        var sdRow = series(
-          function(x){ return { raw: x.sd || 0,
-                                frac: (smax > smin)
-                                        ? ((x.sd - smin) / (smax - smin)) * 0.85 + 0.15 : 0.5 }; },
-          function(v){ return v.toFixed(1); },
-          'rgba(255,107,94,.38)', '#f2833f', '#ffdbd6', '#2a1408', 15, 15, false);
+        /* what a bet placed at this hour returned, per dollar -- bars from a
+           zero line, because the answer is negative for half the day */
+        var retRow = '<div style="display:flex;align-items:stretch;gap:2px;margin-top:4px;'
+          + 'height:56px;">'
+          + bh.map(function(x){
+              var v = x.ret == null ? 0 : x.ret;
+              var up = v >= 0, mag = rmax ? Math.abs(v) / rmax : 0;
+              var isNow = (nowH != null && x.h === nowH);
+              var c = up ? (isNow ? '#2fbfa8' : 'rgba(46,204,113,.55)')
+                         : (isNow ? '#f2833f' : 'rgba(255,107,94,.5)');
+              return '<div title="' + hr12(x.h) + ': ' + (v >= 0 ? '+' : '') + v.toFixed(2)
+                + ' per $1 over ' + (x.bets || 0) + ' bets, won '
+                + Math.round(100 * (x.winrate || 0)) + '%"'
+                + ' style="flex:1;display:flex;flex-direction:column;background:'
+                + (inWin(x.h) ? 'rgba(245,165,36,.10)' : 'transparent') + ';border-radius:3px;">'
+                + '<div style="flex:1;display:flex;align-items:flex-end;justify-content:center;">'
+                + (up ? '<div style="width:100%;max-width:15px;height:' + (3 + mag * 22).toFixed(0)
+                        + 'px;background:' + c + ';border-radius:2px 2px 0 0;position:relative;">'
+                        + '<div style="position:absolute;left:0;right:0;top:-9px;text-align:center;'
+                        + 'font:800 6px system-ui,sans-serif;color:#63dbb6;">+' + v.toFixed(2)
+                        + '</div></div>' : '')
+                + '</div>'
+                + '<div style="height:1px;background:rgba(255,255,255,.20);"></div>'
+                + '<div style="flex:1;display:flex;align-items:flex-start;justify-content:center;">'
+                + (up ? '' : '<div style="width:100%;max-width:15px;height:' + (3 + mag * 22).toFixed(0)
+                        + 'px;background:' + c + ';border-radius:0 0 2px 2px;position:relative;">'
+                        + '<div style="position:absolute;left:0;right:0;bottom:-9px;text-align:center;'
+                        + 'font:800 6px system-ui,sans-serif;color:#ff9d93;">' + v.toFixed(2)
+                        + '</div></div>')
+                + '</div></div>';
+            }).join('')
+          + '</div>'
+          + '<div style="display:flex;gap:2px;margin-top:11px;">'
+          + bh.map(function(x){
+              var isNow = (nowH != null && x.h === nowH);
+              return '<div style="flex:1;text-align:center;font:700 6px system-ui,sans-serif;'
+                + 'color:' + (isNow ? '#2fbfa8' : x.h === (bestH || {}).h ? FCC : '#2c7f66')
+                + ';">' + (x.h % 12 || 12) + '</div>';
+            }).join('')
+          + '</div>';
 
-        /* the day's fixed points, stated as facts. Deliberately not styled as
-           a call to action -- that is what the window box above is for. */
+        /* who is closer to the truth, us or them, at each hour */
+        var duel = '<div style="display:flex;align-items:flex-end;gap:2px;margin-top:4px;height:34px;">'
+          + bh.map(function(x){
+              var o = bmax ? (x.ours || 0) / bmax : 0, m = bmax ? (x.mkt || 0) / bmax : 0;
+              var better = (x.mkt != null && x.ours != null && x.ours < x.mkt);
+              return '<div title="' + hr12(x.h) + ': Bluish ' + (x.ours || 0).toFixed(3)
+                + ' vs Kalshi ' + (x.mkt == null ? '-' : x.mkt.toFixed(3))
+                + ' (lower is better)" style="flex:1;display:flex;align-items:flex-end;'
+                + 'justify-content:center;gap:1px;background:'
+                + (better ? 'rgba(245,165,36,.10)' : 'transparent') + ';border-radius:3px 3px 0 0;">'
+                + '<div style="width:5px;height:' + (2 + o * 28).toFixed(0) + 'px;background:'
+                + FCC + 'cc;border-radius:1px 1px 0 0;"></div>'
+                + '<div style="width:5px;height:' + (2 + m * 28).toFixed(0) + 'px;background:'
+                + MKC + 'cc;border-radius:1px 1px 0 0;"></div></div>';
+            }).join('')
+          + '</div>';
+
         var closesAt = (T.state && T.state.closes) || '1 AM';
         var miles = [
-          { h: 8,                    t: 'MODELS IN' },
-          { h: (T.lock_hour || 12),  t: 'PICK LOCKED' },
+          { h: 8, t: 'MODELS IN' },
+          { h: (T.lock_hour || 12), t: 'PICK LOCKED' },
           { h: (T.final_hour || 18), t: 'FINAL CALL' },
-          { h: 99,                   t: 'MARKET CLOSES', lbl: closesAt }
+          { h: 99, t: 'MARKET CLOSES', lbl: closesAt }
         ];
         var nextI = -1;
         for (var mi = 0; mi < miles.length; mi++){
@@ -53900,33 +53925,43 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             }).join('')
           + '</div>';
 
-        var nowIn = (clockH != null && inWin(clockH));
-        var td = T.trail_days || 0;
+        var days = (bh[0] || {}).days || 0;
         timing = hdr('WHEN TO ACT')
-          /* the answer, before any chart */
           + '<div style="margin-top:7px;padding:8px 10px;border-radius:8px;'
           + 'background:rgba(245,165,36,.09);border:1px solid rgba(245,165,36,.28);">'
-          + kvLine('WINDOW', '<b style="color:' + FCC + ';font-size:11px;">8 AM to noon</b> for a '
-              + 'mispriced forecast, and again at <b style="color:' + FCC + ';font-size:11px;">'
-              + ((T.final_hour || 18) % 12 || 12) + ' PM</b> once the day has resolved \u2014 that '
-              + 'read lands the right range 78% of the time against noon&rsquo;s 58%.')
-          + kvLine('RIGHT NOW', '<span style="color:' + (nowIn ? FCC : '#45b491')
-              + ';font-weight:800;">' + win + '</span>')
+          + kvLine('WINDOW', '<b style="color:' + FCC + ';font-size:11px;">' + hr12(W0)
+              + ' to ' + hr12(W1) + '</b>'
+              + (measured
+                  ? '. Measured, not assumed: across ' + days + ' settled days the best hour was <b>'
+                    + hr12(bestH.h) + '</b> at <b>' + (bestH.ret > 0 ? '+' : '')
+                    + bestH.ret.toFixed(2) + ' per $1</b>, and every hour after '
+                    + hr12(W1) + ' lost money.'
+                  : '. The forecast is no better later on, but the price is worse.'))
+          + kvLine('RIGHT NOW', '<span style="color:' + winCol + ';font-weight:800;">' + win + '</span>')
           + '</div>'
-          + subhead('HOW OFTEN THE RIGHT RANGE IS PICKED, %', 'flat all day, so waiting gains nothing')
-          + accRow
-          + subhead('TYPICAL MISS, °F', 'halves by evening — and the price follows it down')
-          + sdRow
-          + '<div style="font:600 7px system-ui,sans-serif;color:#2c7f66;letter-spacing:.05em;'
-          + 'margin-top:6px;"><span style="color:' + FCC + ';">SHADED COLUMNS = THE WINDOW</span>'
-          + ' · <span style="color:#2fbfa8;">TEAL = THE CURRENT HOUR</span></div>'
+          + (measured
+              ? '<div style="font:800 6.5px system-ui,sans-serif;letter-spacing:.07em;'
+                + 'color:#2c7f66;margin-top:9px;">WHAT A BET PLACED AT THAT HOUR RETURNED, PER $1'
+                + '<span style="color:#359478;font-weight:600;"> — on settled days, at the '
+                + 'prices actually quoted</span></div>'
+                + retRow
+                + '<div style="font:800 6.5px system-ui,sans-serif;letter-spacing:.07em;'
+                + 'color:#2c7f66;margin-top:10px;">WHO IS CLOSER TO THE TRUTH '
+                + '<span style="color:' + FCC + ';">BLUISH</span> / '
+                + '<span style="color:' + MKC + ';">KALSHI</span>'
+                + '<span style="color:#359478;font-weight:600;"> — shorter is better; '
+                + 'shaded where the forecast wins</span></div>'
+                + duel
+              : '')
           + track
-          + '<div style="font:.62rem system-ui,sans-serif;color:#63dbb6;margin-top:8px;line-height:1.45;">'
-          + 'Both charts run 8 AM to 10 PM. The top one barely moves; the bottom one halves. '
-          + 'That gap is the edge — by evening the answer is obvious to everyone, so the '
-          + 'contracts that were cheap in the morning are not cheap any more.'
-          + '<br><span style="color:#359478;">Which hour actually pays the most is still being '
-          + 'measured directly: ' + td + ' of ~14 days of prices recorded.</span></div>';
+          + '<div style="font:.62rem system-ui,sans-serif;color:#63dbb6;margin-top:9px;line-height:1.45;">'
+          + (measured
+              ? 'Both charts come from replaying this model against the market&rsquo;s own '
+                + 'quotes on every settled day. The forecast keeps improving all day — and so '
+                + 'does the market, faster. Once it passes us, a disagreement is not an edge, it '
+                + 'is a mistake, and betting on it lost money on nearly every day measured.'
+              : 'Timing is still assumed rather than measured here — run price_study.py.')
+          + '</div>';
       }
 
       /* ---- TOMORROW: the plan ----------------------------------------
@@ -54233,9 +54268,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             + 'color:' + (actNow ? YESC : '#45b491') + ';border:1px solid '
             + (actNow ? YESC : '#45b491') + '55;border-radius:999px;padding:2px 7px;'
             + 'margin-left:8px;vertical-align:middle;white-space:nowrap;">'
-            + (actNow ? (clockH >= fh ? 'SECOND WINDOW' : 'IN THE WINDOW')
+            + (actNow ? 'IN THE WINDOW'
                : stale ? 'WAIT FOR 8 AM'
-               : (clockH != null && clockH < fh) ? 'HOLD FOR ' + (fh % 12 || 12) + ' PM'
+               : (clockH != null && clockH < W0) ? 'OPENS ' + hr12(W0)
                : 'WINDOW HAS PASSED') + '</span>';
 
         /* the contract drawn to scale: what leaves your pocket, what comes back */

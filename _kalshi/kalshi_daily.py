@@ -1142,6 +1142,42 @@ def measure_offset(cfg, obh, daily, h0_of):
 TICKER_CACHE = {}
 
 
+_STUDY = []
+
+
+def measured_hours(cfg):
+    """The hourly curve from price_study.py, this market's own if it has one.
+
+    Replaces an ASSUMED timing story with a measured one. The panel used to say
+    "bet in the morning" because our accuracy is flat and prices were assumed to
+    harden; this is what betting at each hour actually returned.
+    """
+    if not _STUDY:
+        f = os.path.join(HERE, 'price_study.json')
+        try:
+            with open(f) as fh:
+                _STUDY.append(json.load(fh))
+        except Exception:
+            _STUDY.append(None)
+    d = _STUDY[0]
+    if not d:
+        return None
+    cur = (d.get('by_market') or {}).get(cfg['key']) or d.get('pooled')
+    if not cur:
+        return None
+    out = []
+    for e in cur:
+        if e.get('ret') is None:
+            continue
+        out.append({'h': e['h'], 'ret': e['ret'], 'winrate': e.get('winrate'),
+                    'bets': e.get('bets'), 'ours': e.get('ours_brier'),
+                    'mkt': e.get('mkt_brier'), 'days': e.get('days'),
+                    # kept so the old chart still has something to draw
+                    'acc': int(round(100 * (e.get('winrate') or 0))),
+                    'sd': SD_FALLBACK.get(e['h'])})
+    return out or None
+
+
 def run_market(cfg, ticker_cache=TICKER_CACHE):
     dry = '--dry' in sys.argv
     now = local_now(cfg)
@@ -1758,8 +1794,12 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
             'final_hour': FINAL_HOUR,
             # what is measured about timing, and how much of the other half
             # (when the MARKET is slow) we have collected so far
-            'by_hour': [{'h': h, 'acc': HOUR_ACC[h], 'sd': SD_FALLBACK.get(h)}
-                        for h in sorted(HOUR_ACC)],
+            # MEASURED, when price_study.py has been run: what a bet placed at
+            # each hour actually returned, against the market's own quotes on
+            # settled days. Falls back to the assumed accuracy curve otherwise.
+            'by_hour': measured_hours(cfg) or [
+                {'h': h, 'acc': HOUR_ACC[h], 'sd': SD_FALLBACK.get(h)}
+                for h in sorted(HOUR_ACC)],
             'lock_hour': LOCK_HOUR,
             # the panel renders these rather than hardcoding them: the prose had
             # already drifted from the constants twice after a refit
