@@ -512,32 +512,99 @@ def metar_today(cfg, day):
 TWC_KEY = 'e1f10a1e78da46f5b10a1e78da96f525'   # the key weather.com's own site ships
 
 
-def twc_today(cfg):
-    """The Weather Company's running max and current temp -> {'max','now'}.
+# The running max is the right quantity but the WRONG FIELD ON ITS OWN.
+# temperatureMaxSince7Am is what weather.com prints, and on 2026-09-05 it read
+# 86 for Chicago while TWC's own observation history for the same station
+# peaked at 83 and the market sat at 99% on "83 to 84". Trusting it alone put
+# the floor four degrees high -- which is worse than the proxy it replaced,
+# because a floor that is too HIGH deletes the bracket the day actually lands
+# in. New York the same afternoon: max7 79, history 79, market 79-80. The field
+# is right when it agrees with the history and unusable when it does not.
+#
+# So the history is the spine and max7 is corroboration. The history is TWC's
+# own observation series -- hourly plus specials, the same shape as METAR, and
+# therefore sampled: it can miss a peak between reports, which is exactly what
+# HOURLY_PEAK_OFFSET exists for. max7 is a true running max and should sit at or
+# a little above it. A little above is the intra-hour peak and is believed; far
+# above is a broken aggregate and is dropped.
+TWC_MAX7_TOL = 1.5     # degF above the history that an intra-hour peak can explain
 
-    Since-7am does not cover the 1am-7am part of the climate day (see
-    climate_day_start), so on a warm-front night it can sit under the true
-    climate-day maximum. It is merged with max() against a floor that does cover
-    those hours, so it can only ever raise the floor, never talk it down.
+# THE CLIMATE DAY, UNRESOLVED AND DELIBERATELY NOT GUESSED AT.
+# climate_day_start() drops the midnight hour, because the NWS climate day runs
+# 1am-12:59am local STANDARD time. Chicago on 2026-09-05 read 83 at 00:53 CT and
+# the market settled that day on 83-84, which is the calendar day including it.
+# One day is not enough to overturn a rule fitted on 187, so this window is used
+# for the TWC floor only and climate_day_start() is left exactly as it was.
+def twc_history(cfg, day):
+    """TWC's own observations for `day`, local calendar day -> [degF].
 
-    Returns {} when unavailable. This is an additional floor, never a
-    precondition: every market must survive it being missing.
+    v1 rather than v3: it is the only form that returns the series instead of a
+    single current reading, and the series is what makes max7 checkable.
+    """
+    from zoneinfo import ZoneInfo
+    icao = cfg.get('icao') or ('K' + cfg['station'])
+    z = ZoneInfo(cfg.get('tz', 'America/New_York'))
+    try:
+        j = get_json('https://api.weather.com/v1/location/%s:9:US/observations/'
+                     'historical.json?apiKey=%s&units=e&startDate=%s'
+                     % (icao, TWC_KEY, day.strftime('%Y%m%d')), timeout=45)
+    except Exception as e:
+        print('twc history: %s unavailable (%s)' % (icao, e))
+        return []
+    out = []
+    for o in (j or {}).get('observations') or []:
+        t, v = o.get('temp'), o.get('valid_time_gmt')
+        if not isinstance(t, (int, float)) or not isinstance(v, (int, float)):
+            continue
+        if datetime.datetime.fromtimestamp(v, datetime.timezone.utc)\
+                            .astimezone(z).date() == day:
+            out.append(float(t))
+    return out
+
+
+def twc_today(cfg, day):
+    """The settlement feed's own view of today -> {'max','now','hist','max7'}.
+
+    'max' is the figure to use: the history's peak, raised to max7 only when
+    max7 is close enough to be a real intra-hour peak rather than a bad
+    aggregate. Returns {} when nothing is available -- this is an additional
+    floor, never a precondition, and every market must survive it missing.
     """
     icao = cfg.get('icao') or ('K' + cfg['station'])
+    cur = {}
     try:
         j = get_json('https://api.weather.com/v3/wx/observations/current'
                      '?icaoCode=%s&units=e&language=en-US&format=json&apiKey=%s'
                      % (icao, TWC_KEY), timeout=45)
+        if isinstance(j, dict):
+            cur = j
     except Exception as e:
         print('twc: %s unavailable (%s)' % (icao, e))
-        return {}
-    if not isinstance(j, dict):
-        return {}
+    hist = twc_history(cfg, day)
+    hmax = max(hist) if hist else None
+    m7 = cur.get('temperatureMaxSince7Am')
+    m7 = float(m7) if isinstance(m7, (int, float)) else None
+    now = cur.get('temperature')
+    now = float(now) if isinstance(now, (int, float)) else None
+
+    use = hmax
+    if m7 is not None:
+        if hmax is None:
+            use = m7                      # nothing to check it against
+        elif m7 <= hmax + TWC_MAX7_TOL:
+            use = max(hmax, m7)
+        else:
+            print('twc: %s max7 %.0f exceeds its own history %.0f by more than '
+                  '%.1f -- dropped' % (icao, m7, hmax, TWC_MAX7_TOL))
     out = {}
-    for src, dst in (('temperatureMaxSince7Am', 'max'), ('temperature', 'now')):
-        v = j.get(src)
-        if isinstance(v, (int, float)):
-            out[dst] = float(v)
+    if use is not None:
+        out['max'] = use
+    if now is not None:
+        out['now'] = now
+    if hmax is not None:
+        out['hist'] = hmax
+    if m7 is not None:
+        out['max7'] = m7
     return out
 
 
@@ -1613,10 +1680,12 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
     # It is folded into `live` below rather than into obh, because it is a daily
     # maximum and not an hourly observation -- the same shape as daily.py's
     # running figure, and used in exactly the same place.
-    _twc = twc_today(cfg)
+    _twc = twc_today(cfg, today)
     if _twc.get('max') is not None:
-        print('%s twc: max %.0f, now %s'
+        print('%s twc: max %.0f (history %s, max7 %s), now %s'
               % (cfg['key'], _twc['max'],
+                 ('%.0f' % _twc['hist']) if _twc.get('hist') is not None else '-',
+                 ('%.0f' % _twc['max7']) if _twc.get('max7') is not None else '-',
                  ('%.0f' % _twc['now']) if _twc.get('now') is not None else '-'))
     else:
         print('%s twc: no reading; floor falls back to the station' % cfg['key'])
