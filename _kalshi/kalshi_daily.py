@@ -802,7 +802,8 @@ def run_market(cfg):
                             'ours': round(pp, 4), 'market': r['mid'],
                             'bid': r['bid'], 'ask': r['ask'],
                             'nbid': r['nbid'], 'nask': r['nask'],
-                            'ysize': r['ysize'], 'nsize': r['nsize']}
+                            'ysize': r['ysize'], 'nsize': r['nsize'],
+                            'vol': r['vol']}
                            for r, pp in zip(trows, tps)],
                 'link': (cfg['url'] + '/' + event_ticker(cfg, tdate).lower())
                         if cfg.get('url') else None,
