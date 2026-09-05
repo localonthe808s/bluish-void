@@ -101,6 +101,11 @@ def models_for(cfg):
     inside = (20.0 <= cfg['lat'] <= 55.0) and (-130.0 <= cfg['lon'] <= -60.0)
     return [m for m in MODELS if inside or m not in CONUS_ONLY]
 
+# Spread on a call made the day before, measured over 601 days: bias -0.09,
+# MAE 1.64, SD 2.19. Wider than any same-day figure because there is no
+# observed floor yet and the run is a day older -- tomorrow is a genuine
+# forecast, not a half-settled fact.
+TOMORROW_SD = 2.19
 SWING_DAMP = 0.05         # see point_forecast(): models overdo warm-ups
 RESID_M = 45              # days of recent residuals behind the spread estimate
 SD_FLOOR = 0.25
@@ -329,8 +334,9 @@ def forecast_runs(cfg, past_days, model=None, today=None):
         if v is not None:
             out[t[:10]][int(t[11:13])] = v
     # today comes from the live run, which is fresher than anything archived
+    # two days: today drives the live call, tomorrow drives the plan
     u2 = ('https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f'
-          '&hourly=temperature_2m&forecast_days=1&temperature_unit=fahrenheit'
+          '&hourly=temperature_2m&forecast_days=2&temperature_unit=fahrenheit'
           '&timezone=%s' % (cfg['lat'], cfg['lon'], tz) + mq)
     try:
         h2 = get_json(u2, timeout=120)['hourly']
@@ -706,6 +712,37 @@ def run_market(cfg):
     best = max(range(len(rows)), key=lambda i: ps[i])
     mbest = max(range(len(rows)), key=lambda i: rows[i]['mid'])
 
+    # ---- TOMORROW: the plan, not the call -----------------------------------
+    # Kalshi opens the next day's ladder in the afternoon, so most evenings there
+    # is already a market to look at. Worth showing because the ladder is placed
+    # off a model forecast and inherits its warm bias, which is exactly where a
+    # disagreement worth acting on tends to sit.
+    tom = None
+    try:
+        tdate = today + datetime.timedelta(days=1)
+        tkey2 = tdate.isoformat()
+        trows = fetch_market(cfg, event_ticker(cfg, tdate))
+        tp = point_forecast(fcm, biases, tkey2, 0, daily.get(tkey) or obs_far)
+        if trows and tp is not None and -40.0 < tp < 130.0:
+            tps = distribution(trows, tp, TOMORROW_SD, None)
+            tb = max(range(len(trows)), key=lambda i: tps[i])
+            tm = max(range(len(trows)), key=lambda i: trows[i]['mid'])
+            tom = {
+                'date': tkey2, 'event': event_ticker(cfg, tdate),
+                'pred': round(tp, 2), 'sd': TOMORROW_SD,
+                'pick': trows[tb]['label'], 'p': round(tps[tb], 4),
+                'market_pick': trows[tm]['label'], 'market_p': trows[tm]['mid'],
+                'agree': tb == tm,
+                'ladder': [{'label': r['label'], 'lo': r['lo'], 'hi': r['hi'],
+                            'ours': round(pp, 4), 'market': r['mid'],
+                            'bid': r['bid'], 'ask': r['ask']}
+                           for r, pp in zip(trows, tps)],
+                'link': (cfg['url'] + '/' + event_ticker(cfg, tdate).lower())
+                        if cfg.get('url') else None,
+            }
+    except Exception as e:
+        print('tomorrow unavailable: %s' % e)
+
     log = load_log(OUT)
     hist = {h['date']: h for h in log.get('history', [])}
 
@@ -969,6 +1006,7 @@ def run_market(cfg):
                     if cfg.get('url') else None,
             'n_models': len(models_for(cfg)),
             'trail_days': sum(1 for h in hist.values() if h.get('trail')),
+            'tomorrow': tom,
         },
         'record': record,
         'history': sorted(hist.values(), key=lambda h: h['date'], reverse=True)[:120],
