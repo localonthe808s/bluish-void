@@ -54,7 +54,7 @@ Kalshi prices live in the *_dollars fields.  The legacy integer-cent fields
 """
 
 import json, math, os, statistics, sys, urllib.request, urllib.error
-import io, csv, re, collections, datetime, time
+import io, csv, re, base64, collections, datetime, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -880,6 +880,140 @@ def score_trades(trades, hist):
     return done, open_
 
 
+# ------------------------------------------------------- portfolio import ----
+# Real fills, straight from the exchange, so the ledger needs no typing. Kalshi
+# authenticates with an RSA key: every request carries the key id, a millisecond
+# timestamp, and an RSA-PSS/SHA256 signature over `timestamp + METHOD + path`.
+#
+# THE KEY NEVER TOUCHES THIS REPO. Both values are read from the environment and
+# come from GitHub Actions secrets, which the account owner sets themselves:
+#   KALSHI_API_KEY_ID    the key's uuid
+#   KALSHI_PRIVATE_KEY   the PEM, newlines and all
+# With either missing this whole path no-ops and trades.csv remains the ledger.
+KALSHI_BASE = 'https://api.elections.kalshi.com'
+
+
+def _signer():
+    kid = os.environ.get('KALSHI_API_KEY_ID')
+    pem = os.environ.get('KALSHI_PRIVATE_KEY')
+    if not kid or not pem:
+        return None
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+    except ImportError:
+        print('portfolio: cryptography not installed, skipping API import')
+        return None
+    try:
+        key = serialization.load_pem_private_key(
+            pem.replace('\\n', '\n').encode(), password=None)
+    except Exception as e:
+        print('portfolio: private key could not be loaded (%s)' % type(e).__name__)
+        return None
+
+    def sign(method, path):
+        ts = str(int(time.time() * 1000))
+        sig = key.sign((ts + method + path).encode(),
+                       padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                                   salt_length=padding.PSS.DIGEST_LENGTH),
+                       hashes.SHA256())
+        return {'KALSHI-ACCESS-KEY': kid,
+                'KALSHI-ACCESS-TIMESTAMP': ts,
+                'KALSHI-ACCESS-SIGNATURE': base64.b64encode(sig).decode()}
+    return sign
+
+
+def portfolio_get(sign, path, params=''):
+    """Signed GET. The signature covers the PATH ONLY -- query string excluded."""
+    req = urllib.request.Request(KALSHI_BASE + path + params,
+                                 headers=dict(sign('GET', path),
+                                              **{'Accept': 'application/json',
+                                                 'User-Agent': 'bluishvoid/1.0'}))
+    return json.loads(urllib.request.urlopen(req, timeout=45).read())
+
+
+def decode_ticker(tk, lookup):
+    """KXHIGHNY-26SEP05-B85.5 -> (date, lo, hi). `B` carries its own bounds; `T`
+    is a threshold whose direction the ticker does not record, so those are
+    looked up once and cached."""
+    parts = tk.split('-')
+    if len(parts) < 3:
+        return None
+    try:
+        d = datetime.datetime.strptime(parts[1], '%y%b%d').date().isoformat()
+    except Exception:
+        return None
+    suf = parts[2]
+    if suf.startswith('B'):
+        try:
+            mid = float(suf[1:])
+            return d, int(math.floor(mid)), int(math.ceil(mid))
+        except Exception:
+            return None
+    if tk not in lookup:
+        try:
+            m = json.loads(get('%s/trade-api/v2/markets/%s'
+                               % (KALSHI_BASE, urllib.parse.quote(tk))))['market']
+            lookup[tk] = (m.get('floor_strike'), m.get('cap_strike'), m.get('strike_type'))
+        except Exception:
+            lookup[tk] = None
+    got = lookup[tk]
+    if not got:
+        return None
+    lo, hi, st = got
+    if st == 'less':
+        return d, None, int(hi) - 1 if hi is not None else None
+    if st == 'greater':
+        return d, int(lo) + 1 if lo is not None else None, None
+    return d, int(lo) if lo is not None else None, int(hi) if hi is not None else None
+
+
+def fetch_fills(cfg, lookup):
+    """This market's fills, as trade rows in the same shape as trades.csv."""
+    sign = _signer()
+    if not sign:
+        return None
+    out, cursor = [], None
+    try:
+        for _ in range(20):                       # 200 a page; plenty of history
+            params = '?limit=200' + ('&cursor=' + cursor if cursor else '')
+            j = portfolio_get(sign, '/trade-api/v2/portfolio/fills', params)
+            for f in j.get('fills') or []:
+                tk = f.get('ticker') or ''
+                if not tk.startswith(cfg['series'] + '-'):
+                    continue
+                dec = decode_ticker(tk, lookup)
+                if not dec:
+                    continue
+                d, lo, hi = dec
+                # `side` is which contract was bought; `action` says buy or sell.
+                # A sale is an exit, not a new position -- skip rather than
+                # score it as a fresh bet in the opposite direction.
+                if (f.get('action') or 'buy') != 'buy':
+                    continue
+                side = (f.get('side') or 'yes').lower()
+                cents = f.get('yes_price') if side == 'yes' else f.get('no_price')
+                if cents is None:
+                    continue
+                out.append({'date': d, 'side': side, 'lo': lo, 'hi': hi,
+                            'price': float(cents) / 100.0,
+                            'contracts': float(f.get('count') or 0),
+                            'fee': None, 'note': 'api',
+                            'id': f.get('trade_id') or f.get('order_id')})
+            cursor = j.get('cursor')
+            if not cursor:
+                break
+    except urllib.error.HTTPError as e:
+        print('portfolio: HTTP %s -- check the key id and that the PEM matches it'
+              % e.code)
+        return None
+    except Exception as e:
+        print('portfolio: %s: %s' % (type(e).__name__, e))
+        return None
+    print('%s portfolio: %d fills imported' % (cfg['key'], len(out)))
+    return out
+
+
 def grade_bet(bet, truth):
     """Profit on a $100 bankroll staked at quarter Kelly.  Cost is price plus
     fee; a winning contract pays $1, a losing one pays nothing."""
@@ -928,7 +1062,10 @@ def measure_offset(cfg, obh, daily, h0_of):
             len(gaps))
 
 
-def run_market(cfg):
+TICKER_CACHE = {}
+
+
+def run_market(cfg, ticker_cache=TICKER_CACHE):
     dry = '--dry' in sys.argv
     now = local_now(cfg)
     today = now.date()
@@ -1440,7 +1577,18 @@ def run_market(cfg):
     record['provisional'] = sum(1 for h in scored if h.get('provisional'))
 
     # WHAT WAS ACTUALLY DONE, as opposed to what was suggested.
-    tr_done, tr_open = score_trades(load_trades(cfg['key']), hist)
+    api_rows = fetch_fills(cfg, ticker_cache)
+    manual = load_trades(cfg['key'])
+    if api_rows is None:
+        rows_in = manual                      # no credentials: the CSV is the ledger
+    else:
+        # both, deduped: a fill logged by hand and then imported should count once
+        seen = set((r['date'], r['side'], r['lo'], r['hi'], round(r['price'], 2))
+                   for r in api_rows)
+        rows_in = api_rows + [r for r in manual
+                              if (r['date'], r['side'], r['lo'], r['hi'],
+                                  round(r['price'], 2)) not in seen]
+    tr_done, tr_open = score_trades(rows_in, hist)
     if tr_done or tr_open:
         staked = sum(t['contracts'] * t['cost'] for t in tr_done)
         pl = sum(t['pl'] for t in tr_done)
