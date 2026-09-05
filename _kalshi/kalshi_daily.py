@@ -196,8 +196,8 @@ def market_state(cfg, rows, now):
     elif c and now >= c:
         st = 'closed'
     return {'status': st,
-            'opens': o.strftime('%-I %p') if o else None,
-            'closes': c.strftime('%-I %p') if c else None}
+            'opens': o.strftime('%a %-I %p').upper() if o else None,
+            'closes': c.strftime('%a %-I %p').upper() if c else None}
 
 
 def book_depth(ticker):
