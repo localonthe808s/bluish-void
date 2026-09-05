@@ -771,6 +771,62 @@ def fetch_settled(cfg, limit=400):
     return ev
 
 
+def settle_corrected(daily, settled):
+    """`daily` with every settled day forced to agree with the exchange.
+
+    WHY THIS EXISTS.  Kalshi resolves on "the first official non-preliminary
+    report" and explicitly ignores later revisions. IEM does not: its daily
+    max_temp_f is revised after the fact. Measured 2026-09-05 across 466 settled
+    markets, the two disagree on five -- and IEM is LOW on all five, because it
+    has since corrected values downward:
+
+        New York    2026-09-04   IEM now 83.0   exchange settled 84-85
+        Chicago     2026-09-04   IEM now 92.0   exchange settled 93-94
+        Miami       2026-09-04   IEM now 90.0   exchange settled 91-92
+        Miami       2026-08-29   IEM now 85.0   exchange settled 90-91
+        Los Angeles 2026-09-03   IEM now 77.0   exchange settled 78-79
+
+    New York is the proof: the record STORED 84.0 that day, the exchange settled
+    84-85, and IEM today says 83.0. It agreed at the time and drifted afterwards.
+
+    So a re-fetch scores old days against numbers the exchange never used, and
+    every fitted quantity that takes its actuals from `daily` -- the rolling
+    bias, the peak offset, the residual spread -- inherits that drift.
+
+    A settled bracket is not a temperature, so this cannot restore the exact
+    figure. It does the least it can: where IEM falls outside the bracket the
+    exchange settled, the value moves to the nearest edge of that bracket -- the
+    closest number consistent with what actually paid. Days inside their bracket
+    are left alone.
+    """
+    if not settled:
+        return daily, 0
+    out = dict(daily)
+    fixed = 0
+    for evk, lad in settled.items():
+        try:
+            k = datetime.datetime.strptime(evk.split('-')[1], '%y%b%d').date().isoformat()
+        except Exception:
+            continue
+        a = out.get(k)
+        if a is None:
+            continue
+        win = next((r for r in lad if r.get('yes')), None)
+        if not win:
+            continue
+        lo, hi = win.get('lo'), win.get('hi')
+        if lo is not None and a < lo:
+            out[k] = lo
+        elif hi is not None and a > hi:
+            out[k] = hi
+        else:
+            continue
+        fixed += 1
+        print('  settled override %s: IEM %.1f -> %.1f (settled %s)'
+              % (k, a, out[k], win.get('label')))
+    return out, fixed
+
+
 def backfill(fcm, bias_of, daily, obh, settled, sd_lock,
              cfg=None, h0_of=None, res=None):
     """What we WOULD have locked at noon on each past day, scored.
@@ -1422,6 +1478,19 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
     # has to score history entries (kept 120 days) and backfill against every
     # settled market Kalshi still lists. At 15 KB the extra span is free.
     daily = daily_series(cfg, today - datetime.timedelta(days=200), today)
+    # THE EXCHANGE OUTRANKS THE FEED. Fetched once here and reused for the
+    # pending-day scoring below, so this costs no extra call. Everything fitted
+    # downstream -- the rolling bias, the peak offset, the residual spread, the
+    # backfill -- now takes its actuals from a series that agrees with what
+    # actually paid, rather than from whatever IEM has revised since.
+    _settled = {}
+    try:
+        _settled = fetch_settled(cfg)
+    except Exception as e:
+        print('settled markets unavailable (%s); scoring on the feed alone' % e)
+    daily, _nfix = settle_corrected(daily, _settled)
+    if _nfix:
+        print('%s: %d day(s) corrected to the settlement' % (cfg['key'], _nfix))
     # end one day AHEAD: asos.py treats the end date as the cut-off, so asking
     # for `today` returns almost nothing for today
     ob_last = []
@@ -1594,7 +1663,7 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
 
     if '--backfill' in sys.argv:
         added = 0
-        for h in backfill(fcm, bias_of, daily, obh, fetch_settled(cfg), sd_lock,
+        for h in backfill(fcm, bias_of, daily, obh, (_settled or fetch_settled(cfg)), sd_lock,
                           cfg=cfg, h0_of=h0_of, res=res_lock):
             if h['date'] not in hist:
                 hist[h['date']] = h
@@ -1760,7 +1829,7 @@ def run_market(cfg, ticker_cache=TICKER_CACHE):
     settled_by_date = {}
     if pending:
         try:
-            for evk, lad in fetch_settled(cfg).items():
+            for evk, lad in (_settled or fetch_settled(cfg)).items():
                 try:
                     dk = datetime.datetime.strptime(evk.split('-')[1], '%y%b%d').date()
                 except Exception:
