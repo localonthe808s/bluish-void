@@ -169,6 +169,37 @@ def event_ticker(cfg, d):
     return '%s-%s' % (cfg['series'], d.strftime('%y%b%d').upper())
 
 
+def market_state(cfg, rows, now):
+    """Where a day's market is in its life: not open yet, trading, or closed.
+
+    Each day's ladder is listed at 10am local the day before and trades until
+    about 1am the night after -- a 15 hour overlap, not the 10 first assumed --
+    so between 1am and 10am only ONE of the two is live. Saying which is the difference between 'no bet' meaning we see no
+    value and 'no bet' meaning the market does not exist yet.
+    """
+    if not rows:
+        # the ladder for a day is listed at 10am local the day before
+        return {'status': 'not_open', 'opens': '10 AM'}
+    def local(iso):
+        if not iso:
+            return None
+        try:
+            u = datetime.datetime.strptime(iso[:19], '%Y-%m-%dT%H:%M:%S')
+        except Exception:
+            return None
+        off = 4 if 3 <= u.month <= 11 else 5      # the tz label's own offset
+        return u - datetime.timedelta(hours=off)
+    o, c = local(rows[0].get('open')), local(rows[0].get('close'))
+    st = 'open'
+    if o and now < o:
+        st = 'not_open'
+    elif c and now >= c:
+        st = 'closed'
+    return {'status': st,
+            'opens': o.strftime('%-I %p') if o else None,
+            'closes': c.strftime('%-I %p') if c else None}
+
+
 def book_depth(ticker):
     """Contracts available at the best price, each way -> (yes_size, no_size).
 
@@ -230,7 +261,7 @@ def fetch_market(cfg, ev):
             'nbid': nbid, 'nask': nask, 'ysize': ysz, 'nsize': nsz,
             'mid': round((bid + ask) / 2, 4),
             'vol': float(m.get('volume_fp') or 0),
-            'close': m.get('close_time'),
+            'close': m.get('close_time'), 'open': m.get('open_time'),
         })
     out.sort(key=lambda r: (r['lo'] if r['lo'] is not None else -999))
     return out
@@ -762,6 +793,7 @@ def run_market(cfg):
             tm = max(range(len(trows)), key=lambda i: trows[i]['mid'])
             tom = {
                 'date': tkey2, 'event': event_ticker(cfg, tdate),
+                'state': market_state(cfg, trows, now),
                 'pred': round(tp, 2), 'sd': TOMORROW_SD,
                 'pick': trows[tb]['label'], 'p': round(tps[tb], 4),
                 'market_pick': trows[tm]['label'], 'market_p': trows[tm]['mid'],
@@ -775,6 +807,9 @@ def run_market(cfg):
                 'link': (cfg['url'] + '/' + event_ticker(cfg, tdate).lower())
                         if cfg.get('url') else None,
             }
+        elif not trows:
+            tom = {'date': tkey2, 'event': event_ticker(cfg, tdate),
+                   'state': market_state(cfg, [], now), 'ladder': []}
     except Exception as e:
         print('tomorrow unavailable: %s' % e)
 
@@ -1027,6 +1062,7 @@ def run_market(cfg):
             'date': tkey, 'event': event_ticker(cfg, today),
             'tz': cfg.get('tzlabel', 'ET'), 'market': cfg.get('label', ''),
             'close': rows[0]['close'], 'settles': 'Central Park (CLINYC), whole degrees',
+            'state': market_state(cfg, rows, now),
             'pred': round(pred, 2), 'sd': sd, 'bias': round(bias, 2),
             'bias_days': nb, 'sd_days': nsd,
             'obs_so_far': obs_far, 'obs_through': obs_hr,
