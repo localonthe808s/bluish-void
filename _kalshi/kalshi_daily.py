@@ -54,7 +54,7 @@ Kalshi prices live in the *_dollars fields.  The legacy integer-cent fields
 """
 
 import json, math, os, statistics, sys, urllib.request, urllib.error
-import io, csv, collections, datetime, time
+import io, csv, re, collections, datetime, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -791,6 +791,95 @@ def book_value(rows, ps, bankroll=500.0):
             'bankroll': bankroll}
 
 
+# ----------------------------------------------------------- real trades ----
+# The P&L above is hypothetical: quarter Kelly, filled at the ask. What was
+# actually done is a different number and the more useful one, so it is kept in
+# a plain file the user appends to (_kalshi/trades.csv) and scored here against
+# the same settlements. Deliberately tolerant about how a strike is written --
+# a ledger that rejects "78-" because it wanted "78 or below" will not get kept.
+TRADES = os.path.join(HERE, 'trades.csv')
+
+
+def parse_strike(txt):
+    """'84-85' / '78 or below' / '90+' / '<=78' -> (lo, hi), either may be None."""
+    t = str(txt).lower().replace('\u00b0', '').replace('\u2264', '<=').replace('\u2265', '>=')
+    nums = [int(x) for x in re.findall(r'\d+', t)]
+    if len(nums) >= 2:
+        return min(nums[0], nums[1]), max(nums[0], nums[1])
+    if not nums:
+        return None
+    n = nums[0]
+    if any(w in t for w in ('below', 'under', 'less', '<')) or t.rstrip().endswith('-'):
+        return None, n
+    if any(w in t for w in ('above', 'over', 'greater', '>')) or t.rstrip().endswith('+'):
+        return n, None
+    return n, n            # a bare number: treat as its own bracket
+
+
+def load_trades(market_key):
+    """Rows for one market, as dicts. A bad line is reported, never fatal."""
+    out = []
+    if not os.path.exists(TRADES):
+        return out
+    short = market_key.split('_')[0]
+    try:
+        with open(TRADES) as f:
+            body = [l for l in f if l.strip() and not l.lstrip().startswith('#')]
+        for i, row in enumerate(csv.DictReader(body)):
+            if not row.get('date') or not row.get('market'):
+                continue
+            if row['market'].strip().lower() not in (short, market_key):
+                continue
+            try:
+                price = float(row['price'])
+                if price > 1.5:              # written in cents
+                    price /= 100.0
+                side = row['side'].strip().lower()
+                bounds = parse_strike(row['strike'])
+                if bounds is None or side not in ('yes', 'no'):
+                    raise ValueError('side or strike not understood')
+                out.append({'date': row['date'].strip(), 'side': side,
+                            'lo': bounds[0], 'hi': bounds[1], 'price': price,
+                            'contracts': float(row['contracts']),
+                            'fee': (float(row['fee']) / 100.0) if row.get('fee') else None,
+                            'note': (row.get('note') or '').strip()})
+            except Exception as e:
+                print('trades.csv line %d ignored (%s): %s' % (i + 2, e, row))
+    except Exception as e:
+        print('could not read trades.csv: %s' % e)
+    return out
+
+
+def score_trades(trades, hist):
+    """Real P&L: cost is price plus fee, a winner pays $1, a loser pays nothing."""
+    done, open_ = [], []
+    for t in trades:
+        h = hist.get(t['date'])
+        if not h or h.get('actual_bracket') is None:
+            open_.append(t)
+            continue
+        # match by BOUNDS, not by label: the ladder re-centres daily and the
+        # user writes "78-", not "78\u00b0 or below"
+        lad = (h.get('lock') or {}).get('ladder') or []
+        mine = None
+        for r in lad:
+            if r.get('lo') == t['lo'] and r.get('hi') == t['hi']:
+                mine = r['label']
+                break
+        if mine is None:
+            print('trade %s: no range with those bounds that day, skipped' % t['date'])
+            continue
+        won = (mine == h['actual_bracket']) if t['side'] == 'yes' \
+              else (mine != h['actual_bracket'])
+        fee = t['fee'] if t['fee'] is not None else fee_of(t['price'])
+        cost = t['price'] + fee
+        pl = t['contracts'] * ((1 - cost) if won else -cost)
+        done.append(dict(t, bracket=mine, settled=h['actual_bracket'], won=won,
+                         cost=round(cost, 4), pl=round(pl, 2),
+                         provisional=bool(h.get('provisional'))))
+    return done, open_
+
+
 def grade_bet(bet, truth):
     """Profit on a $100 bankroll staked at quarter Kelly.  Cost is price plus
     fee; a winning contract pays $1, a losing one pays nothing."""
@@ -1349,6 +1438,24 @@ def run_market(cfg):
     # days scored off an observation because Kalshi had not settled them yet.
     # They are in the accuracy tally but can still be rewritten.
     record['provisional'] = sum(1 for h in scored if h.get('provisional'))
+
+    # WHAT WAS ACTUALLY DONE, as opposed to what was suggested.
+    tr_done, tr_open = score_trades(load_trades(cfg['key']), hist)
+    if tr_done or tr_open:
+        staked = sum(t['contracts'] * t['cost'] for t in tr_done)
+        pl = sum(t['pl'] for t in tr_done)
+        record['real'] = {
+            'n': len(tr_done), 'wins': sum(1 for t in tr_done if t['won']),
+            'staked': round(staked, 2), 'pl': round(pl, 2),
+            'roi': round(100 * pl / staked, 1) if staked else None,
+            'open': len(tr_open),
+            'recent': [{'date': t['date'], 'side': t['side'], 'range': t['bracket'],
+                        'price': t['price'], 'contracts': t['contracts'],
+                        'won': t['won'], 'pl': t['pl']}
+                       for t in sorted(tr_done, key=lambda x: x['date'])[-8:]],
+        }
+        print('real trades: %d scored, %+.2f on $%.2f staked (%d still open)'
+              % (len(tr_done), pl, staked, len(tr_open)))
     # These were hardcoded from a refit and went stale the moment the model
     # improved: the file advertised 40/68 and MAE 1.44 long after the fresh-run
     # switch had taken it to 48/66 and 1.04, understating itself by 14 points.
