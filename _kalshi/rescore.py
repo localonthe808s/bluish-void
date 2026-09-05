@@ -17,6 +17,12 @@ you next to the frozen one, never in place of it.
     python3 _kalshi/rescore.py            # New York
     python3 _kalshi/rescore.py --all      # all seven markets
 
+A DIFFERENCE IS NOT NECESSARILY A CODE CHANGE.  The replay refetches its inputs,
+and those move on their own: model archives get revised, and each day's bias is
+fitted on the days before it, so one changed day can nudge its neighbours. On a
+run with no code change at all, 5 of 453 day-markets picked a different bracket.
+Treat single-digit differences as the noise floor, not as a result.
+
 WHAT IT CANNOT TELL YOU.  The historical days are the days the model was tuned
 on -- bias windows, the peak offset, the spread. A backtest over them is
 in-sample and flatters itself, and this diff inherits that. It answers "is the
@@ -84,16 +90,28 @@ def compare(cfg):
     print(line('STORED', tal(fh, both)))
     print(line('TODAY', tal(nh, both)))
 
+    # A FLIPPED VERDICT IS NOT AUTOMATICALLY A MODEL CHANGE, and reporting it
+    # as one is how a tool like this starts lying. Chicago 2026-09-04 flipped to
+    # a hit on the first run of this script with the pick completely unchanged:
+    # the day had been scored provisionally from an observation and the market
+    # has since settled a bracket higher. That is the record correcting itself,
+    # and crediting it to the model would be exactly the self-flattery the
+    # frozen record exists to prevent. So each flip is attributed.
     flips = [(k, fh[k], nh[k]) for k in both if bool(fh[k].get('hit')) != bool(nh[k].get('hit'))]
-    gained = [f for f in flips if f[2].get('hit')]
-    lost = [f for f in flips if not f[2].get('hit')]
-    print('  %d days changed verdict: %d gained, %d lost' % (len(flips), len(gained), len(lost)))
-    for k, o, n in flips[:12]:
-        print('    %s  actual %-5s  was %-14s -> now %-14s  %s'
+    model = [f for f in flips if f[1]['lock'].get('pick') != f[2]['lock'].get('pick')]
+    truth = [f for f in flips if f[1]['lock'].get('pick') == f[2]['lock'].get('pick')]
+    g = sum(1 for f in model if f[2].get('hit'))
+    print('  %d verdicts moved: %d from a different PICK (%d gained, %d lost), '
+          '%d from the TRUTH resolving' % (len(flips), len(model), g, len(model) - g,
+                                           len(truth)))
+    for k, o, n in model[:10]:
+        print('    MODEL %s  actual %-5s  %-14s -> %-14s  %s'
               % (k, o.get('actual'), o['lock'].get('pick'), n['lock'].get('pick'),
                  'GAINED' if n.get('hit') else 'lost'))
-    if len(flips) > 12:
-        print('    ... and %d more' % (len(flips) - 12))
+    for k, o, n in truth[:10]:
+        print('    TRUTH %s  actual %-5s  pick %-14s unchanged; bracket %s -> %s'
+              % (k, o.get('actual'), o['lock'].get('pick'),
+                 o.get('actual_bracket'), n.get('actual_bracket')))
 
     # the picks that did not flip a verdict can still have moved
     moved = sum(1 for k in both if fh[k]['lock'].get('pick') != nh[k]['lock'].get('pick'))
