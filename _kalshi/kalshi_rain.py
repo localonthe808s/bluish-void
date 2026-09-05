@@ -35,11 +35,13 @@ TEMPERATURE settles on CLIMDW (Midway) -- same city, different stations, and
 using one for the other would be wrong on a meaningful number of days.
 """
 import collections
+import concurrent.futures as cf
 import datetime
 import json
 import math
 import os
 import sys
+import time
 import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -53,6 +55,18 @@ HIST_DAYS = 170        # calibration window, extended as history accumulates
 LOCK_HOUR = 12         # the pick that gets graded, in each city's own clock
 BANKROLL = K.BANKROLL          # one bankroll for the whole operation
 FIT_ITERS = 700
+# How many cities to fetch at once. MEASURED, not guessed -- the same 22 cities,
+# minutes apart, on this laptop:
+#
+#     workers   wall    open-meteo (44 calls)   retries
+#        1      34.3s        16s                  -
+#        4      16.5s        20s                  -
+#        8      14.4s        26s                 +3
+#
+# Open-Meteo throttles concurrency rather than refusing it: at 8 every request
+# costs 60% more and three failed outright, rescued only by K.get's backoff. Two
+# seconds is not worth leaning on a free upstream this whole project depends on.
+WORKERS = 4
 
 # code -> (city, IEM station, IEM network, lat, lon, tz). The station is the one
 # each market's rules name; they were read, not guessed.
@@ -213,8 +227,22 @@ def _budget(ev, stake, cap=0.25):
             'scale': round(scale, 3), 'cap': cap}
 
 
+def _city_data(spec, start):
+    """One city's two upstream reads: settled observations and the model QPF.
+
+    Pulled out of main's loop and kept PURE -- it touches no shared state and
+    returns everything it learned -- so a pool can run these concurrently."""
+    code, name, st, nw, lat, lon, tz = spec
+    local = K.local_now({'tz': tz})
+    day = local.date()
+    obs = obs_precip(st, nw, start, day + datetime.timedelta(days=1))
+    fc = qpf(lat, lon, tz, start, day + datetime.timedelta(days=1))
+    return local, day, obs, fc
+
+
 # ------------------------------------------------------------------- main ----
 def main():
+    t_start = time.time()
     today_utc = datetime.datetime.utcnow().date()
     log = {}
     if os.path.exists(OUT):
@@ -225,19 +253,40 @@ def main():
     hist = {h['key']: h for h in log.get('history', [])}
 
     start = today_utc - datetime.timedelta(days=HIST_DAYS)
-    samples, cities, board_ev, board = [], [], None, {}
+    samples, cities = [], []
+
+    # THE BOARD, ONCE.  It is keyed by the trading day, and near midnight UTC the
+    # cities disagree about what that is, so it is read against the first city's
+    # clock -- which is what the serial version did by asking whichever city it
+    # reached first. Hoisted out because the fetch below no longer runs in order.
+    # market_rows swallows its own fetch failure and returns an empty board, so
+    # there is nothing to retry per city.
+    board_ev, board = market_rows(K.local_now({'tz': CITIES[0][6]}).date())
+
+    # THE FETCH, IN PARALLEL.  22 cities x 3 requests, issued one at a time, spent
+    # 27 of a 31-second local run doing nothing but waiting on sockets. On a
+    # GitHub runner, where every one of those requests is ~25x slower, that same
+    # serial walk took 14 minutes -- most of the job's 25-minute cap, and the
+    # reason the whole pipeline cannot refresh more often than hourly.
+    #
+    # Nothing here shares state, so the only care needed is on the way out: the
+    # results are reassembled in CITIES order below, because the fit is an SGD
+    # walk over the training set and a run-to-run reshuffle would move the
+    # weights on identical data.
+    got = {}
+    with cf.ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        futs = {ex.submit(_city_data, spec, start): spec for spec in CITIES}
+        for f in cf.as_completed(futs):
+            spec = futs[f]
+            try:
+                got[spec[0]] = f.result()
+            except Exception as e:
+                print('%-5s FAILED: %s: %s' % (spec[0], type(e).__name__, e))
 
     for code, name, st, nw, lat, lon, tz in CITIES:
-        try:
-            local = K.local_now({'tz': tz})
-            day = local.date()
-            if board_ev is None:
-                board_ev, board = market_rows(day)
-            obs = obs_precip(st, nw, start, day + datetime.timedelta(days=1))
-            fc = qpf(lat, lon, tz, start, day + datetime.timedelta(days=1))
-        except Exception as e:
-            print('%-5s FAILED: %s: %s' % (code, type(e).__name__, e))
+        if code not in got:
             continue
+        local, day, obs, fc = got[code]
 
         # every past day with both a forecast and a settled observation trains it
         for d, q in fc.items():
@@ -391,7 +440,10 @@ def main():
               % (r['code'], r['city'], 100 * r['p'], 100 * (r.get('market_p') or 0),
                  b['side'].upper(), 100 * b['price'], 100 * b['ev'],
                  ('%.0f' % b['size']) if b.get('size') is not None else '?'))
-    print('timing: %s' % K.timing_report())
+    # Per-host seconds are SUMMED ACROSS THREADS now, so they add up to well
+    # more than the elapsed time -- that is the point of the change. Print the
+    # wall clock beside them or the report reads like a regression.
+    print('timing: %s | wall %.0fs' % (K.timing_report(), time.time() - t_start))
     return 0
 
 
