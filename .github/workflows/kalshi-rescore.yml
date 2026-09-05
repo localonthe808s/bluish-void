@@ -1,0 +1,67 @@
+name: Kalshi rescore
+
+# Does a model change actually help?
+#
+# The record in kalshi_*.json is FROZEN on purpose -- each day's decision is
+# written once and never rewritten, and the hourly job never runs backfill.
+# That is what makes it a forecast score rather than hindsight. The cost is
+# that after touching the model, "did that help?" cannot be answered from it.
+#
+# So this replays the new model over the same historical days and prints the
+# diff, automatically, whenever the model itself changes. It writes nothing:
+# rescore.py works in a scratch directory, and this job makes no commit. The
+# record stays exactly as it was decided.
+#
+# It deliberately does NOT fail on a regression. The replay refetches its
+# inputs and those move on their own -- with no code change at all a replay
+# moved 5 of 453 picks -- so a red X on noise would train everyone to ignore it.
+# It reports; you read it.
+
+on:
+  push:
+    paths:
+      # the model, and only the model. Panel copy, the rain script and the
+      # worker do not change what would have been picked at noon.
+      - '_kalshi/kalshi_daily.py'
+      - '_kalshi/rescore.py'
+      - '.github/workflows/kalshi-rescore.yml'
+  workflow_dispatch: {}
+
+# never queue behind or alongside itself; the hourly job has its own group and
+# is untouched by this one
+concurrency:
+  group: kalshi-rescore
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rescore:
+    runs-on: ubuntu-latest
+    # seven markets, each refetching a season of model archives
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Replay the current model over the frozen record
+        id: run
+        run: |
+          set -o pipefail
+          python3 -u _kalshi/rescore.py --all 2>&1 | tee /tmp/rescore.txt
+
+      - name: Put it in the run summary
+        if: always()
+        run: |
+          {
+            echo '## Kalshi rescore'
+            echo
+            echo 'Replay of the current model over the frozen record. Nothing was written back.'
+            echo
+            echo '```'
+            # the per-market noise from the bake itself is not the point here
+            grep -v -e '^---' -e 'offset measured' -e '^wrote ' -e 'LOCKED' \
+                    -e 'backfilled' -e 'no open market' -e 'not enough scored' \
+                    /tmp/rescore.txt || cat /tmp/rescore.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

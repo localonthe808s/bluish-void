@@ -67,7 +67,7 @@ def line(tag, t):
 def compare(cfg):
     out = os.path.join(HERE, '..', cfg['out'])
     if not os.path.exists(out):
-        print('%s: no stored record' % cfg['key']); return
+        print('%s: no stored record' % cfg['key']); return None
     frozen = json.load(open(out))
     print('\n=== %s ===' % cfg.get('city', cfg['key']))
     fresh = replay(cfg)
@@ -78,7 +78,7 @@ def compare(cfg):
           if h.get('actual') is not None and 'lock' in h}
     both = sorted(set(fh) & set(nh))
     if not both:
-        print('  no overlapping scored days'); return
+        print('  no overlapping scored days'); return None
 
     def tal(src, keys):
         rows = [src[k] for k in keys]
@@ -116,6 +116,10 @@ def compare(cfg):
     # the picks that did not flip a verdict can still have moved
     moved = sum(1 for k in both if fh[k]['lock'].get('pick') != nh[k]['lock'].get('pick'))
     print('  %d of %d picks differ at all' % (moved, len(both)))
+    return {'city': cfg.get('city', cfg['key']), 'days': len(both),
+            'was': tal(fh, both)['hits'], 'now': tal(nh, both)['hits'],
+            'model_flips': len(model), 'gained': g, 'lost': len(model) - g,
+            'truth_flips': len(truth), 'moved': moved}
 
 
 def main():
@@ -123,11 +127,37 @@ def main():
            [c for c in K.MARKETS if c['key'] == 'ny_high']
     print('REPLAYING TODAY\'S MODEL OVER THE FROZEN RECORD')
     print('nothing here is written back; the record stays as it was decided.')
+    tot = []
     for cfg in keys:
         try:
-            compare(cfg)
+            r = compare(cfg)
+            if r:
+                tot.append(r)
         except Exception as e:
             print('  %s failed: %s: %s' % (cfg['key'], type(e).__name__, e))
+    if not tot:
+        return 1
+
+    days = sum(t['days'] for t in tot)
+    was = sum(t['was'] for t in tot)
+    now = sum(t['now'] for t in tot)
+    moved = sum(t['moved'] for t in tot)
+    print('\n' + '=' * 58)
+    print('OVERALL  %d markets, %d scored day-markets' % (len(tot), days))
+    print('  stored  %d hits  %.1f%%' % (was, 100.0 * was / days))
+    print('  today   %d hits  %.1f%%   (%+d)' % (now, 100.0 * now / days, now - was))
+    print('  %d picks differ (%.1f%%), %d verdicts moved on a changed pick'
+          % (moved, 100.0 * moved / days, sum(t['model_flips'] for t in tot)))
+    # THE NOISE FLOOR IS REAL AND HAS BEEN MEASURED. With no code change at all,
+    # a replay moved 5 of 453 picks -- the archives it refetches get revised,
+    # and each day's bias is fitted on the days before it. Calling a two-day
+    # improvement a win is how a model gets tuned into a backtest.
+    verdict = ('NOISE -- below the measured floor of ~5 days; not a result'
+               if abs(now - was) <= 5 else
+               ('BETTER by %d days' % (now - was)) if now > was else
+               ('WORSE by %d days' % (was - now)))
+    print('  VERDICT: %s' % verdict)
+    print('=' * 58)
     return 0
 
 
