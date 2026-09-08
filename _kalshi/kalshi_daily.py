@@ -3384,7 +3384,18 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             day_decided = True
             # the exact figure: the group, or the settlement sensor's own 5-minute
             # maximum where that runs higher (the group is whole-degree Celsius)
-            _exact = max(x for x in (_six, _own5) if x is not None)
+            # A FLOOR IS A LOWER BOUND AND MUST NEVER FALL. This line used to
+            # read max(_six, _own5), which DISCARDED the climate report and
+            # every other bound already established, and it did it while
+            # collapsing the spread to 0.15 -- so a stale figure became a
+            # near-certainty. 2026-09-08 at 6:05 PM: CLINYC read 80 (peak
+            # 2:26 PM), the 8 AM-1:51 PM group read 78.98 because the peak fell
+            # in the NEXT group, which had not been published yet, and the
+            # panel printed 100% on "79 or below" against a market at 0.5%.
+            # Confidently wrong, in the direction of the open position.
+            # `live` carries the exact bounds and `_ctoday` the settlement
+            # source; including both makes this monotone by construction.
+            _exact = max(x for x in (_six, _own5, _ctoday, live) if x is not None)
             pred, obs_far, sd = _exact, _exact, 0.15
             print('%s day decided: the %d-%d group read %.1f, readings since a degree under, peak behind us %.0f%% -- spread %.2f'
                   % (cfg['key'], _sw[0], _sw[1], _six, 100 * (peak_done.get('p') or 0), sd))
