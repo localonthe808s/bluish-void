@@ -37468,11 +37468,57 @@ function dayRangeAround(d, days){
     return { label: "Very High", cls: "very-high" };
   }
 
-  function loadPollen(){
+  /* POLLEN IS A DAILY FORECAST, SO IT IS CACHED FOR THE DAY.
+
+     Google's Pollen API is the ONLY metered service this page touches. Maps
+     Platform bills it past 10,000 calls a month; every other feed here (NWS,
+     NOAA, NASA, Open-Meteo, Macrostrat, Kalshi) is free and unmetered. This
+     used to fetch on every page load AND again every hour a tab stayed open --
+     roughly 17-24 calls a day per parked tab, plus one per reload, for a
+     forecast whose values are DAILY. At ~100-150 loads a day that was running
+     at the edge of the free tier for no added information.
+
+     Cached, a reload inside the window costs nothing and a parked tab costs
+     about four calls a day.
+
+     THE STORED DAY IS CHECKED AGAINST TODAY, not just the age: dailyInfo[0] IS
+     today, so a cache that survived midnight would label yesterday's index as
+     now. Six hours inside the same local day, so Google's intraday refinements
+     still land. Keyed by rounded location so switching cities cannot serve the
+     old city's count. */
+  var POLLEN_TTL = 6 * 60 * 60 * 1000;
+  function _pollenCacheKey(){
+    return 'bv_pollen:' + Number(LOCATION.lat).toFixed(2) + ',' + Number(LOCATION.lon).toFixed(2);
+  }
+  function _pollenToday(){
+    try { return new Date().toLocaleDateString('en-CA'); } catch(e){ return ''; }
+  }
+  function _pollenCacheRead(){
+    try {
+      var raw = localStorage.getItem(_pollenCacheKey());
+      if (!raw) return null;
+      var c = JSON.parse(raw);
+      if (!c || !c.data || !c.data.dailyInfo) return null;
+      if (c.d !== _pollenToday()) return null;              // rolled past midnight
+      if (Date.now() - (c.t || 0) >= POLLEN_TTL) return null;
+      return c.data;
+    } catch(e){ return null; }                              // unreadable = just fetch
+  }
+  function _pollenCacheWrite(data){
+    try {
+      localStorage.setItem(_pollenCacheKey(),
+        JSON.stringify({ d: _pollenToday(), t: Date.now(), data: data }));
+    } catch(e){ /* private mode or quota -- the reading itself is still good */ }
+  }
+
+  function loadPollen(force){
     var _ep = window._locEpoch || 0;   // stale-location guard epoch
     window._pollenLastLoad = Date.now();
-    var treeEl = document.getElementById("pollen-tree");
-    var grassEl = document.getElementById("pollen-grass");
+
+    if (!force) {
+      var hit = _pollenCacheRead();
+      if (hit) { _pollenRender(hit, _ep); return; }
+    }
 
     var url = "https://pollen.googleapis.com/v1/forecast:lookup" +
       "?key=" + GOOGLE_POLLEN_KEY +
@@ -37484,6 +37530,26 @@ function dayRangeAround(d, days){
       .then(function(r){ return r.json(); })
       .then(function(data){
         try {
+          if (_ep !== (window._locEpoch || 0)) return; // stale-location resolve
+          if (!data || !data.dailyInfo) return;
+          _pollenCacheWrite(data);
+          _pollenRender(data, _ep);
+        } catch(e){
+          console.error("Pollen parse error", e);
+        }
+      })
+      .catch(function(err){
+        console.error("Pollen load error", err);
+      });
+  }
+
+  /* Paints whatever reading it is handed -- fetched a moment ago or read back
+     out of localStorage. Split out of loadPollen so the cached path renders
+     through the exact same code as the live one. */
+  function _pollenRender(data, _ep){
+    var treeEl = document.getElementById("pollen-tree");
+    var grassEl = document.getElementById("pollen-grass");
+    try {
           if (_ep !== (window._locEpoch || 0)) return; // stale-location resolve
           if (!data || !data.dailyInfo) return;
           window._pollenData = data;
@@ -37523,13 +37589,9 @@ function dayRangeAround(d, days){
             try { window._tlRenderForOffset(); } catch(e){}
           }
 
-        } catch(e){
-          console.error("Pollen parse error", e);
-        }
-      })
-      .catch(function(err){
-        console.error("Pollen load error", err);
-      });
+    } catch(e){
+      console.error("Pollen parse error", e);
+    }
   }
 
   function openPollenDetail(code){
