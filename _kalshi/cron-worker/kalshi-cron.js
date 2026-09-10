@@ -788,28 +788,49 @@ async function alertTick(env) {
     // 1b. the settlement sensor itself crossed, or is about to cross, an edge
     const ownSt = OWN5[h.am.series], own = ownSt && sens[ownSt];
     if (own && own.max7 != null) {
-      const prevOwn = state.own5[ownSt];
-      const wasIn = prevOwn != null ? inRung(prevOwn, b) : null, nowIn = inRung(own.max7, b);
+      // A DAY'S RUNNING MAXIMUM ONLY EVER RISES, and this holds it to that.
+      //
+      // api.weather.gov is served from an edge cache that does not always hand
+      // back the same window twice: sampled a minute apart it returned newest
+      // rows of 01:05, then 01:10, then 01:05 again (2026-09-09). So the row
+      // carrying the day's peak can drop out for a tick and come back. Taken at
+      // face value that reads as the sensor FALLING out of the rung -- an
+      // urgent alert, on a cache artifact, and a second one when it returned.
+      // Synoptic answered from one response and never did this; the guard is
+      // the cost of the free feed, and it is the right shape anyway.
+      //
+      // Keyed by the market's own local day so the peak resets at midnight
+      // rather than pinning yesterday's high forever. A stored bare number is
+      // the pre-2026-09-09 shape and is read as "no usable previous".
+      const ownDay = new Intl.DateTimeFormat('en-CA',
+        { timeZone: h.am.tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+      const rec = state.own5[ownSt];
+      const prevOk = rec && typeof rec === 'object' && rec.d === ownDay && typeof rec.v === 'number';
+      const prevOwn = prevOk ? rec.v : null;
+      // The dip is discarded, not alerted on; only a genuine new high moves it.
+      const ownMax = (prevOwn != null && prevOwn > own.max7) ? prevOwn : own.max7;
+      const ownAt = (ownMax === own.max7) ? own.maxAt : rec.at;
+      const wasIn = prevOwn != null ? inRung(prevOwn, b) : null, nowIn = inRung(ownMax, b);
       const wasAbove = prevOwn != null && b[1] != null && prevOwn > b[1] + 0.5;
-      const nowAbove = b[1] != null && own.max7 > b[1] + 0.5;
+      const nowAbove = b[1] != null && ownMax > b[1] + 0.5;
       if (prevOwn != null && (wasIn !== nowIn || wasAbove !== nowAbove)) {
         const bad = (side === 'YES') ? !nowIn : nowIn;
-        await notify(env, state, `own5:${h.ticker}:${Math.round(own.max7)}`,
-          `${h.am.name} sensor ${own.max7}° at ${own.maxAt} -- ${nowIn ? 'inside' : nowAbove ? 'above' : 'below'} ${label}`,
-          `${ownSt}'s own 5-minute reading set a new high of ${own.max7}° at ${own.maxAt} local. ` +
+        await notify(env, state, `own5:${h.ticker}:${Math.round(ownMax)}`,
+          `${h.am.name} sensor ${ownMax}° at ${ownAt} -- ${nowIn ? 'inside' : nowAbove ? 'above' : 'below'} ${label}`,
+          `${ownSt}'s own 5-minute reading set a new high of ${ownMax}° at ${ownAt} local. ` +
           `You hold ${Math.abs(h.n)} ${side} on ${label}${bad ? ' -- this is against you' : ' -- in your favour'}. ` +
           `This is the settlement sensor; the hourly report and the market see it up to 55 minutes later.`,
           bad ? 'urgent' : 'high');
-        out.push(`own5 ${ownSt} ${prevOwn}->${own.max7}`);
-      } else if (b[1] != null && own.max7 <= b[1] + 0.5 && own.max7 >= b[1] - 0.4 && (prevOwn == null || prevOwn < b[1] - 0.4)) {
+        out.push(`own5 ${ownSt} ${prevOwn}->${ownMax}`);
+      } else if (b[1] != null && ownMax <= b[1] + 0.5 && ownMax >= b[1] - 0.4 && (prevOwn == null || prevOwn < b[1] - 0.4)) {
         // within half a degree of the top edge: one warning, before it crosses
         await notify(env, state, `own5near:${h.ticker}`,
-          `${h.am.name} sensor ${own.max7}°, near the top of ${label}`,
-          `${ownSt} read ${own.max7}° at ${own.maxAt}, within half a degree of ${label}'s top edge. ` +
+          `${h.am.name} sensor ${ownMax}°, near the top of ${label}`,
+          `${ownSt} read ${ownMax}° at ${ownAt}, within half a degree of ${label}'s top edge. ` +
           `You hold ${Math.abs(h.n)} ${side}. One more tick decides it.`, 'high');
-        out.push(`own5 near ${ownSt} ${own.max7}`);
+        out.push(`own5 near ${ownSt} ${ownMax}`);
       }
-      state.own5[ownSt] = own.max7;
+      state.own5[ownSt] = { d: ownDay, v: ownMax, at: ownAt };
     }
     // 2. TWC's running max crossed an edge of your rung
     if (max7 != null && prevMax7 != null && max7 !== prevMax7) {
