@@ -311,38 +311,80 @@ const OBS_MARKETS = [
 // the trend rather than quote one number (user 2026-09-07: "a line that shows
 // every 5 minute reading ... so trends are visible"). The obs log and the
 // alerts never ask for it -- it would bloat every KV row twentyfold.
-async function readSensors(env, recentMin, withSeries) {
+//
+// THE SOURCE IS api.weather.gov, KEYLESS (swapped off Synoptic 2026-09-09).
+// Synoptic quoted $9,100/yr with a one-year minimum to keep serving this, and
+// what it was serving was NWS data with a unit conversion on it: its /sensors
+// output read 104 / 102.2 / 87.8 / 78.8, which are 40 / 39 / 31 / 26 C. The
+// NWS feed is the same observations at the same cadence -- 5-minute for the
+// six FAA airports, hourly for KNYC and KATT, exactly as Synoptic had it --
+// so the swap costs no resolution and no station.
+//
+// Two shape differences from the old Synoptic call, both handled below:
+//   - ONE CALL PER STATION, not one for all eight. Eight subrequests, issued
+//     together; a station that fails is skipped, never the whole read.
+//   - NEWEST FIRST, and timestamps are UTC. Both are inverted/converted here
+//     so the rest of the worker keeps seeing oldest-last readings stamped in
+//     the market's own zone, which is what every caller already assumes.
+const NWS_UA = 'bluishvoid-kalshi (nicolas7iana@outlook.com)';
+async function readSensors(recentMin, withSeries) {
   const out = {};
-  if (!env || !env.SYNOPTIC_TOKEN) return out;
-  const stids = Object.values(APT5).map((a) => a.stids).join(',');
-  const r = await fetch(`https://api.synopticdata.com/v2/stations/timeseries?stid=${stids}` +
-    `&recent=${recentMin || 720}&vars=air_temp&units=temp|F&obtimezone=local&token=${env.SYNOPTIC_TOKEN}`);
-  if (!r.ok) return out;
-  const j = await r.json();
   const tzOf = {};
   for (const k of Object.keys(APT5)) for (const st of APT5[k].stids.split(',')) tzOf[st] = APT5[k].tz;
-  for (const st of (j.STATION || [])) {
-    const tz = tzOf[st.STID] || 'America/New_York';
-    const today = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
-    const ts = (st.OBSERVATIONS || {}).date_time || [], vs = (st.OBSERVATIONS || {}).air_temp_set_1 || [];
-    let mx = null, mxAt = null, last = null, lastAt = null;
-    const series = [];
-    for (let i = 0; i < ts.length; i++) {
-      const v = vs[i]; if (typeof v !== 'number') continue;
-      const hh = Number(ts[i].slice(11, 13));
-      if (ts[i].slice(0, 10) === today && hh >= 7 && (mx == null || v > mx)) { mx = v; mxAt = ts[i].slice(11, 16); }
-      last = v; lastAt = ts[i].slice(11, 16);
-      if (withSeries && ts[i].slice(0, 10) === today) series.push([hh * 60 + Number(ts[i].slice(14, 16)), Math.round(v * 10) / 10]);
-    }
-    out[st.STID] = { max7: mx, maxAt: mxAt, last, at: lastAt, n: ts.length };
-    if (withSeries) out[st.STID].series = series;
-  }
+  const start = new Date(Date.now() - (recentMin || 720) * 60000).toISOString().replace(/\.\d+Z$/, 'Z');
+  await Promise.all(Object.keys(tzOf).map(async (stid) => {
+    const tz = tzOf[stid];
+    try {
+      const r = await fetch(`https://api.weather.gov/stations/${stid}/observations?start=${start}`,
+        { headers: { 'User-Agent': NWS_UA, 'Accept': 'application/geo+json' } });
+      if (!r.ok) return;
+      const j = await r.json();
+      // Local calendar date and local HH:MM for a UTC stamp, in the station's
+      // own zone -- the same two fields the Synoptic `obtimezone=local` form
+      // used to hand back already split.
+      const dayFmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+      const hmFmt = new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+      const today = dayFmt.format(new Date());
+      // Oldest first, so `last` ends on the newest reading the way the old
+      // top-to-bottom Synoptic loop did.
+      const feats = (j.features || []).slice().reverse();
+      let mx = null, mxAt = null, last = null, lastAt = null, n = 0;
+      const series = [], seen = new Set();
+      for (const f of feats) {
+        const p = (f && f.properties) || {};
+        const c = p.temperature && p.temperature.value;
+        if (typeof c !== 'number' || !p.timestamp) continue;
+        const d = new Date(p.timestamp);
+        if (isNaN(d)) continue;
+        const day = dayFmt.format(d), hm = hmFmt.format(d);
+        // A minute can arrive twice (the :51 METAR alongside a :50 five-minute
+        // row is not a dupe, but a re-issued ob is). Last one in wins.
+        const key = day + hm;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        // TO THE HUNDREDTH, which is not spurious precision: a Celsius tenth
+        // converts to an exact hundredth of a degree F (26.1 C = 78.98 F), and
+        // the panel's D1 prints that second decimal because it is measured.
+        // Rounding to a tenth here would throw away a real digit -- the 0.1 C
+        // hourly METARs land on x.x6 and x.x8, not on a tenth of a degree F.
+        const v = Math.round((c * 9 / 5 + 32) * 100) / 100;
+        const hh = Number(hm.slice(0, 2));
+        n++;
+        if (day === today && hh >= 7 && (mx == null || v > mx)) { mx = v; mxAt = hm; }
+        last = v; lastAt = hm;
+        if (withSeries && day === today) series.push([hh * 60 + Number(hm.slice(3, 5)), v]);
+      }
+      if (!n) return;
+      out[stid] = { max7: mx, maxAt: mxAt, last, at: lastAt, n };
+      if (withSeries) out[stid].series = series;
+    } catch (e) { /* one dead station must not cost the read */ }
+  }));
   return out;
 }
 const APT5 = {
-  // KNYC rides along for the trend line: Synoptic carries Central Park HOURLY
-  // (the 5-minute stream is NWS-run and not in the FAA feed; MADIS pending),
-  // so its points are the hourly reports, drawn as such. Never OWN5 for NY.
+  // KNYC rides along for the trend line: Central Park reports HOURLY (its
+  // 5-minute stream is NWS-run and not in the FAA feed; MADIS pending), so its
+  // points are the hourly reports, drawn as such. Never OWN5 for NY.
   ny_high:  { stids: 'KLGA,KJFK,KEWR,KNYC', tz: 'America/New_York' },
   las_high: { stids: 'KLAS,KVGT',      tz: 'America/Los_Angeles' },
   aus_high: { stids: 'KAUS,KATT',      tz: 'America/Chicago' }
@@ -419,14 +461,14 @@ async function obsSnapshot(env) {
     rows.push(row);
   }));
   // THE AIRPORTS' 5-MINUTE READINGS, as a regional early warning for New York.
-  // Central Park's own 5-minute stream is not public (Synoptic carries it for
-  // LaGuardia, JFK and Newark, hourly only for the park -- checked 2026-09-06).
+  // Central Park's own 5-minute stream is not public (the FAA feed carries
+  // LaGuardia, JFK and Newark at 5 minutes, the park hourly -- 2026-09-09).
   // So the three airports' 5-minute maxima since 7 AM ride on the New York
   // row, to be judged against TWC's field and the settlement: when the region
   // is peaking between the hourly reports, the park usually is too.
-  if (env && env.SYNOPTIC_TOKEN) {
+  {
     try {
-      const sens = await readSensors(env, 720);
+      const sens = await readSensors(720);
       for (const key of Object.keys(APT5)) {
         const row = rows.find((x) => x.key === key);
         if (!row) continue;
@@ -674,7 +716,7 @@ async function alertTick(env) {
   const OWN5 = { KXHIGHTLV: 'KLAS', KXHIGHAUS: 'KAUS' };
   let sens = {};
   if (held.some((h) => OWN5[h.am.series])) {
-    try { sens = await readSensors(env, 720); } catch (e) { out.push('sensors err'); }
+    try { sens = await readSensors(720); } catch (e) { out.push('sensors err'); }
   }
   // THE HOURLY REPORT, THE MINUTE IT PRINTS. The market prices the hourly
   // METAR and little else (minute anatomy of 2026-09-06: 0 -> 94c on 8,500
@@ -868,11 +910,11 @@ export default {
     if (url.pathname === '/obs/lead') return obsLead(request, env);
     if (url.pathname === '/sensors') {
       // PUBLIC, LIVE: the 5-minute stations' latest reading and high since 7 AM,
-      // read from Synoptic on each request (the token stays server-side). The
+      // read from api.weather.gov on each request (keyless, so no secret). The
       // panel polls this every minute while it is open (2026-09-06: "it's about
       // seeing the latest information and knowing first when temp changes").
       let sens = {};
-      try { sens = await readSensors(env, 1080, true); } catch (e) { /* empty */ }
+      try { sens = await readSensors(1080, true); } catch (e) { /* empty */ }
       return new Response(JSON.stringify({ at: new Date().toISOString(), s: sens }), {
         headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...cors(ALLOWED) } });
     }
