@@ -2438,6 +2438,101 @@ def fetch_fills(cfg, lookup):
     return out
 
 
+# ---------------------------------------------------------------- PRIVACY ----
+def redact_money(doc):
+    """Strip every dollar figure from the document before it is published.
+
+    WHY THIS EXISTS.  kalshi_*.json is served by GitHub Pages, so every field in
+    it is world-readable -- `curl` never sees the panel's token gate. The bet
+    grades were being published in dollars, and that was worse than it looked:
+    `grade_bet` stakes BANKROLL * kelly, and main() sets BANKROLL from
+    `fetch_balance()` -- the REAL account balance. Both `staked` and `kelly`
+    were published, so `staked / kelly` handed anyone the balance, day by day.
+    Two cities agreed to the cent on the same date ($146.04 / $146.13 on
+    2026-09-07), which is what proved it was one real account and not a
+    notional bankroll (user 2026-09-10: "please remove my money from public
+    view ... dont show profits").
+
+    WHAT SURVIVES: whether a bet WON. That is the plan's hit record, not a
+    balance, and the panel's bet strip is built from it. What goes is anything
+    denominated in dollars, plus `kelly` itself -- keeping the fraction beside
+    a stake is what made the division possible, so neither side of it is
+    published now.
+
+    Applied at the write, not at the computation, so the run itself still
+    scores in full and only the artifact is thinned. Note the consequence:
+    history is reloaded FROM this file, so redacted days cannot be re-totalled
+    later. That is intended -- the figure is not wanted.
+    """
+    rec = doc.get('record') or {}
+    rec.pop('money', None)
+    # THE REAL LEDGER NEVER LEAVES. record['real'] is settled fills -- real
+    # contracts, real staked, real P&L, and a per-trade recent list. It is
+    # absent from a file only when nothing has settled yet, so its absence is
+    # never evidence that it is safe.
+    rec.pop('real', None)
+    # execution keeps its aggregates (hit rate against the plan, slippage in
+    # cents, delay in minutes -- all execution QUALITY, no money) but not the
+    # per-fill rows, which carry `contracts`.
+    ex = rec.get('execution')
+    if isinstance(ex, dict):
+        ex.pop('recent', None)
+    d = rec.get('discipline')
+    if isinstance(d, dict):
+        for k in ('fills_pl', 'fills_staked', 'plan_ret', 'plan_wins'):
+            d.pop(k, None)
+        for row in (d.get('by_day') or []):
+            for k in ('fills_pl', 'fills_staked', 'plan_ret'):
+                row.pop(k, None)
+        if not any(k for k in d if k != 'by_day'):
+            rec.pop('discipline', None)
+
+    def _strip_grade(g):
+        if isinstance(g, dict):
+            g.pop('staked', None); g.pop('pl', None)
+
+    def _strip_bet(b):
+        if isinstance(b, dict):
+            b.pop('kelly', None)      # staked/kelly was the division
+            b.pop('size', None)
+
+    for h in (doc.get('history') or []):
+        _strip_grade(h.get('bet_result'))
+        _strip_grade(h.get('eve_result'))
+        for g in (h.get('book_results') or []):
+            _strip_grade(g)
+        for leg in ('lock', 'eve', 'final'):
+            blk = h.get(leg)
+            if isinstance(blk, dict):
+                _strip_bet(blk.get('bet'))
+                for b in (blk.get('book') or []):
+                    _strip_bet(b)
+        h.pop('plan_ret', None)
+
+    t = doc.get('today') or {}
+    for leg in ('locked', 'tomorrow', 'eve', 'final'):
+        blk = t.get(leg)
+        if isinstance(blk, dict):
+            _strip_bet(blk.get('bet'))
+            for b in (blk.get('book') or []):
+                _strip_bet(b)
+
+    # book_value() sizes its fills as (bankroll * f) / cost, so `stake` and
+    # `ev` are dollars off the same real balance. They read 0.00 on a day with
+    # nothing tradable, which is exactly why they are easy to miss. `n`, the
+    # number of lines, carries no money and stays.
+    def _strip_take(tk):
+        if isinstance(tk, dict):
+            for k in ('stake', 'raw_stake', 'ev', 'raw_ev'):
+                tk.pop(k, None)
+    _strip_take(doc.get('take'))
+    _strip_take(t.get('take'))
+    for m in (doc.get('markets') or []):
+        if isinstance(m, dict):
+            _strip_take(m.get('take'))
+    return doc
+
+
 def grade_bet(bet, truth):
     """Profit on a $100 bankroll staked at quarter Kelly.  Cost is price plus
     fee; a winning contract pays $1, a losing one pays nothing."""
@@ -4241,6 +4336,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             with open(os.environ['BV_DRY_OUT'].replace('KEY', cfg['key']), 'w') as f:
                 json.dump(doc, f, separators=(',', ':'))
         return 0
+    redact_money(doc)
     with open(OUT, 'w') as f:
         json.dump(doc, f, separators=(',', ':'))
     # the bake trail, appended for the workflow to push to R2
