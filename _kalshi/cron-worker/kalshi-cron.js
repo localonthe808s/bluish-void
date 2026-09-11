@@ -618,10 +618,46 @@ function localDate(offsetDays) {
 // same token that dispatches the bake, the same ntfy topic as the position
 // alerts. Keyed by day so a failure pages once, not every tick.
 const WATCHED = [
-  { wf: 'kalshi-nightly.yml', name: 'nightly refit',    maxAgeH: 30 },
+  { wf: 'kalshi-nightly.yml', name: 'nightly refit',    maxAgeH: 30, scanLog: true },
   { wf: 'kalshi-tune.yml',    name: 'weekly tune',      maxAgeH: 8 * 24, weekday: 1 },   // Mondays, after Sunday's run
-  { wf: 'kalshi-nyc.yml',     name: 'five-minute bake', maxAgeH: 1 }
+  { wf: 'kalshi-nyc.yml',     name: 'five-minute bake', maxAgeH: 1, scanLog: true }
 ];
+// A GREEN RUN IS NOT A WORKING RUN (2026-09-11). main() catches each market's
+// exception so one city's outage cannot stop the other two, prints
+// "<key> FAILED: <error>" and exits 0 -- so the job concludes `success` and
+// this watchdog saw nothing while New York died on every run for eighteen
+// hours (a redacted bet crashed its scoring; 09-10 went unscored and 09-11
+// never got a noon lock). The log is the only place that failure exists, so
+// the watchdog reads it.
+//
+// PER-JOB logs, not the run's: /runs/{id}/logs is a zip, which a Worker cannot
+// unpack, while /jobs/{id}/logs is plain text. Both answer with a redirect to
+// a storage host, followed MANUALLY here -- the Authorization header must not
+// travel to that host (it is another origin, and it answers 400 when it does).
+const FAILED_RX = /^\S+Z (\S+) FAILED: (.+)$/gm;
+async function logFailures(env, runId) {
+  const H = { 'Authorization': `Bearer ${env.GH_TOKEN}`, 'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'bluishvoid-kalshi-cron' };
+  const jr = await fetch(`https://api.github.com/repos/${OWNER}/${REPO}/actions/runs/${runId}/jobs`, { headers: H });
+  if (!jr.ok) return { err: `jobs api ${jr.status}` };
+  const hits = [];
+  for (const j of ((await jr.json()).jobs || [])) {
+    if (j.status !== 'completed') continue;
+    const lr = await fetch(`https://api.github.com/repos/${OWNER}/${REPO}/actions/jobs/${j.id}/logs`,
+      { headers: H, redirect: 'manual' });
+    const loc = lr.headers.get('location');
+    // no auth header on the redirect: a different origin, and it 400s with one
+    const tr = loc ? await fetch(loc) : lr;
+    if (!tr.ok) { hits.push({ key: j.name, err: `log ${tr.status}` }); continue; }
+    const text = await tr.text();
+    FAILED_RX.lastIndex = 0;
+    // The word FAILED also appears in workflow comments echoed into the log, so
+    // match the bake's own shape -- "<key> FAILED: <error>" on its own line.
+    let m;
+    while ((m = FAILED_RX.exec(text)) !== null) hits.push({ key: m[1], err: m[2].slice(0, 120) });
+  }
+  return { hits };
+}
 async function jobWatch(env) {
   if (!env.NTFY_TOPIC || !env.OBS || !env.GH_TOKEN) return 'watchdog off';
   const state = (await env.OBS.get(ALERT_KEY, { type: 'json' })) || {};
@@ -647,7 +683,24 @@ async function jobWatch(env) {
       await notify(env, state, `job:${w.wf}:${today}`, `Kalshi ${w.name}: ${bad}`,
         `${w.wf} -- ${bad}. ${r ? r.html_url : ''} The sheet keeps serving the last good study; nothing learns until this is fixed.`, 'high');
       out.push(`${w.name}: ${bad} (paged)`);
-    } else out.push(`${w.name}: ok`);
+      continue;
+    }
+    // GREEN, BUT DID EVERY MARKET SURVIVE IT? Only worth asking of a finished
+    // run; a job still going has half a log.
+    if (!w.scanLog || r.status !== 'completed') { out.push(`${w.name}: ok`); continue; }
+    let scan;
+    try { scan = await logFailures(env, r.id); }
+    catch (e) { out.push(`${w.name}: ok, log unread (${String(e).slice(0, 40)})`); continue; }
+    if (scan.err) { out.push(`${w.name}: ok, log unread (${scan.err})`); continue; }
+    if (!scan.hits.length) { out.push(`${w.name}: ok`); continue; }
+    const what = scan.hits.map((h) => `${h.key}: ${h.err}`).join('\n');
+    // keyed by day like the rest, so a market that fails every five minutes
+    // pages once and the message names every market that died in that run
+    await notify(env, state, `jobmkt:${w.wf}:${today}`,
+      `Kalshi ${w.name}: ${scan.hits.map((h) => h.key).join(', ')} failing`,
+      `The run passed but ${scan.hits.length} market(s) threw inside it:\n${what}\n${r.html_url}\nThat city's file stops updating -- no lock, no score -- while the job still reports success.`,
+      'high');
+    out.push(`${w.name}: green but ${scan.hits.map((h) => h.key).join('/')} FAILED (paged)`);
   }
   if (JSON.stringify(state) !== before) await env.OBS.put(ALERT_KEY, JSON.stringify(state));
   return out.join(' | ');
@@ -875,7 +928,11 @@ export default {
     // cadence (one KV write per tick against a 1,000/day budget) and the
     // daily job its four minutes an hour.
     const minute = new Date().getUTCMinutes();
-    if (minute === 0 && new Date().getUTCHours() === 13) {
+    // HOURLY, NOT ONCE AT 13:00Z. The 09-11 New York crash was invisible for
+    // eighteen hours because the only check ran at 13:00Z and read the run's
+    // conclusion, which was green. Three API calls and one 25 KB log an hour is
+    // nothing, and paging stays keyed by day, so a failure still pages once.
+    if (minute === 0) {
       ctx.waitUntil((async () => {
         try { console.log(`[watchdog] ${new Date().toISOString()} ${await jobWatch(env)}`); }
         catch (e) { console.log(`[watchdog] FAILED ${e}`); }
@@ -940,6 +997,24 @@ export default {
         headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...cors(ALLOWED) } });
     }
 
+    // THE WATCHDOG, ON DEMAND. Token-gated, because it reads the repo's job
+    // logs. It runs itself hourly; this is how a change to it gets verified
+    // without waiting for the top of the hour, and how "is anything failing
+    // right now" gets answered. Paging stays keyed by day, so calling this
+    // cannot spam the phone.
+    if (url.pathname === '/watchdog') {
+      const given = (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '')
+                    || url.searchParams.get('t') || '';
+      if (!tokenOk(given, env.PANEL_TOKEN)) {
+        return new Response(JSON.stringify({ error: 'unauthorized' }), {
+          status: 401, headers: { 'content-type': 'application/json', ...cors(ALLOWED) } });
+      }
+      let said;
+      try { said = await jobWatch(env); } catch (e) { said = `threw: ${e}`; }
+      return new Response(JSON.stringify({ at: new Date().toISOString(), watchdog: said }), {
+        headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...cors(ALLOWED) } });
+    }
+
     // Status only. This deliberately cannot trigger a run: a public endpoint that
     // fires CI is an open invitation, and the cron is the point.
     //
@@ -982,7 +1057,7 @@ export default {
       fast_lane_minutes: [0, 10, 15, 25, 30, 40, 45, 55],
       obs_log: env.OBS ? 'KV bound' : 'NO KV BINDING - not logging',
       alerts: env.NTFY_TOPIC ? 'ntfy topic set; New York positions watched every 5 min' : 'off (no NTFY_TOPIC)',
-      watchdog: (env.NTFY_TOPIC && env.GH_TOKEN) ? 'nightly refit, weekly tune and the bake checked at 13:00Z daily; a failed or missing run pages' : 'off',
+      watchdog: (env.NTFY_TOPIC && env.GH_TOKEN) ? 'nightly refit, weekly tune and the bake checked hourly; a failed, missing or stale run pages, and so does a green run whose log says a market FAILED' : 'off',
       now_utc: new Date().toISOString(),
       note: 'Triggering is cron-only. Runs appear at github.com/' + OWNER + '/' + REPO + '/actions'
     };
