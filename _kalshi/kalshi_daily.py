@@ -2536,9 +2536,15 @@ def redact_money(doc):
 def grade_bet(bet, truth):
     """Profit on a $100 bankroll staked at quarter Kelly.  Cost is price plus
     fee; a winning contract pays $1, a losing one pays nothing."""
-    if not bet or truth is None or not bet.get('kelly'):
+    if not bet or truth is None:
         return None
     won = (bet['label'] == truth) if bet['dir'] == 'for' else (bet['label'] != truth)
+    # A REDACTED BET STILL GETS GRADED. redact_money strips `kelly` at the write
+    # and history is reloaded from that file, so every lock is kelly-less by the
+    # time its day settles. Returning None here left 2026-09-10 unscored and the
+    # print below crashed the NY bake all of 09-11. The hit record needs no money.
+    if not bet.get('kelly'):
+        return {'won': won}
     cost = bet['price'] + bet['fee']
     stake = BANKROLL * bet['kelly']
     return {'won': won, 'staked': round(stake, 2),
@@ -2754,7 +2760,8 @@ def compose_review(cfg, hist, obh, cli, fills_by_day, now, record=None):
         L.append('The noon bet %s (%+.2f on $%.2f).' % ('paid' if b.get('won') else 'lost', b.get('pl', 0), b.get('staked', 0)))
     f = (fills_by_day or {}).get(k)
     if f and f.get('staked'):
-        L.append('Real fills that day: <b>%+.2f</b> on $%.2f.' % (f['pl'], f['staked']))
+        # no dollars: record.review is published, redact_money never sees prose
+        L.append('Real fills that day <b>%s</b>.' % ('came out ahead' if f['pl'] >= 0 else 'lost'))
         if h.get('plan_ret') is not None and h['plan_ret'] > 0 and f['pl'] < 0:
             L.append('<b>Lesson:</b> the plan paid and the fills did not \u2014 the loss came from stepping off the plan, not from the forecast.')
     # 6. the model lesson
@@ -2811,7 +2818,7 @@ def compose_run_review(cfg, record):
     if D.get('days') and D.get('plan_ret') is not None:
         line = 'The noon plan held to settlement returned <b>%+.2f per $1</b> over %d days (%d won).' % (D['plan_ret'], D['days'], D.get('plan_wins', 0))
         if mn.get('n'):
-            line += ' Real fills: <b>%+.2f</b> on $%.2f.' % (mn['pl'], mn.get('staked', 0))
+            # the dollar figure is gone -- this line is published (redact_money)
             if D['plan_ret'] > 0 and mn['pl'] < 0:
                 line += ' The gap between the two is discipline, not forecasting: the plan pays when it is left alone.'
         R.append(line)
@@ -3880,10 +3887,10 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
                     _den += w
             if _den:
                 h['plan_ret'] = round(_num / _den, 3)
-            print('  bet %s %s at %.0fc -> %s, %+.2f on $%d'
-                  % (h['lock']['bet']['dir'], h['lock']['bet']['label'],
-                     100 * h['lock']['bet']['price'],
-                     'WON' if g['won'] else 'lost', g['pl'], BANKROLL))
+            if g:
+                print('  bet %s %s at %.0fc -> %s'
+                      % (h['lock']['bet']['dir'], h['lock']['bet']['label'],
+                         100 * h['lock']['bet']['price'], 'WON' if g['won'] else 'lost'))
         print('scored %s: actual %.0f -> %s | ours %s %s | market %s %s'
               % (k, a, h['actual_bracket'], h['lock']['pick'],
                  'HIT' if h['hit'] else 'miss', h['lock']['market_pick'],
