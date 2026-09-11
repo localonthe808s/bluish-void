@@ -4169,10 +4169,22 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     # settlement" needs months. So the first morning reading with a published
     # forecast (7-9 AM local) is stamped on the day's row permanently, three
     # numbers, and the record scores it below. Nothing here feeds the pick.
-    # THE LIVE MORNING CURVE. The archive replay says accuracy is flat from
-    # 7 to 11 AM, but the archive holds each day's best run; live, 8 AM sees
-    # the overnight runs and 11 AM the morning ones. Each hour's top pick is
-    # stamped from the trail before the trail is trimmed, and scored below.
+    # THE LIVE CURVE, HOUR BY HOUR. The archive replay says accuracy is flat
+    # from 7 to 11 AM, but the archive holds each day's best run; live, 8 AM
+    # sees the overnight runs and 11 AM the morning ones. Each hour's top pick
+    # is stamped from the trail before the trail is trimmed, and scored below.
+    #
+    # RUNS TO 5 PM (user 2026-09-10: "the market gets wild in those hours").
+    # It stopped at 1 PM because it was built as a MORNING curve, and the
+    # afternoon is where the money actually moves -- the hours when the peak
+    # is landing and the book reprices hardest. The trail already held 14-23,
+    # so nothing new is recorded; this only stops discarding it, and the days
+    # still carrying a trail backfill on the first run.
+    #
+    # READ THE LATE HOURS DIFFERENTLY. A 4 PM pick has seen most of the day's
+    # observed max, so a high hit rate there is partly the day having already
+    # happened rather than forecast skill. The morning hours are the forecast;
+    # the afternoon ones are how fast the sheet converges once the peak is in.
     for k, h in hist.items():
         tr = h.get('trail') or []
         if not tr:
@@ -4181,7 +4193,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         lad = (h.get('lock') or {}).get('ladder') or []
         for t in tr:
             hh = t.get('h')
-            if hh is None or not (7 <= hh <= 13) or str(hh) in lp:
+            if hh is None or not (7 <= hh <= 17) or str(hh) in lp:
                 continue
             ours = t.get('ours') or []
             if ours and lad and len(lad) == len(ours):
