@@ -3963,11 +3963,17 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     # only days the exchange has actually resolved
     money = [h for h in live
              if h.get('bet_result') and priced_on_time(h) and not h.get('provisional')]
+    # REDACTED DAYS STILL COUNT, THEY JUST CARRY NO MONEY. redact_money strips
+    # `staked`/`pl` from every published grade but keeps `won`, and history is
+    # reloaded from that published file -- so a reloaded row has a truthy
+    # bet_result with no dollars in it. Indexing it crashed the whole bake
+    # (2026-09-10, first run after the redaction shipped). Count the record off
+    # `won`, sum only what is actually there.
     record['money'] = {
         'n': len(money),
-        'wins': sum(1 for h in money if h['bet_result']['won']),
-        'staked': round(sum(h['bet_result']['staked'] for h in money), 2),
-        'pl': round(sum(h['bet_result']['pl'] for h in money), 2),
+        'wins': sum(1 for h in money if h['bet_result'].get('won')),
+        'staked': round(sum((h['bet_result'].get('staked') or 0) for h in money), 2),
+        'pl': round(sum((h['bet_result'].get('pl') or 0) for h in money), 2),
     }
     st = record['money']['staked']
     record['money']['roi'] = round(100.0 * record['money']['pl'] / st, 1) if st else None
@@ -3975,11 +3981,11 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     # does the morning reverse it
     _eve = [h for h in hist.values() if h.get('eve_result') and h.get('actual') is not None]
     if _eve:
-        _es = sum(h['eve_result']['staked'] for h in _eve)
-        record['eve'] = {'n': len(_eve), 'wins': sum(1 for h in _eve if h['eve_result']['won']),
+        _es = sum((h['eve_result'].get('staked') or 0) for h in _eve)   # redacted rows: 0
+        record['eve'] = {'n': len(_eve), 'wins': sum(1 for h in _eve if h['eve_result'].get('won')),
                          'hits': sum(1 for h in _eve if h.get('eve_hit')),
                          'reversed': sum(1 for h in _eve if h.get('eve_reversed')),
-                         'ret': round(sum(h['eve_result']['pl'] for h in _eve) / _es, 3) if _es else None}
+                         'ret': round(sum((h['eve_result'].get('pl') or 0) for h in _eve) / _es, 3) if _es else None}
 
     # THE PUBLISHED FORECASTS, SCORED. Same days, same truth, same hour: our
     # morning number against TWC's own forecast and the NWS point forecast.
@@ -4562,6 +4568,10 @@ def main():
                      doc['take']['cities'],
                      '' if scale >= 1 else ' -- scaled to %.0f%% of a $%.0f budget'
                      % (100 * scale, budget)))
+            # SECOND WRITE PATH. This rewrites the head file after run_market
+            # already redacted it, and doc['take'] above is sized off BANKROLL
+            # -- so without this the money goes straight back in.
+            redact_money(doc)
             with open(head, 'w') as f:
                 json.dump(doc, f, separators=(',', ':'))
             print('folded %d market digests into %s' % (len(digests), MARKETS[0]['out']))
