@@ -927,14 +927,24 @@ export default {
     // would have said so at 4:20. The observation log keeps its five-minute
     // cadence (one KV write per tick against a 1,000/day budget) and the
     // daily job its four minutes an hour.
-    const minute = new Date().getUTCMinutes();
+    // THE SCHEDULED MINUTE, NOT THE WALL CLOCK. `new Date()` here is when the
+    // invocation actually STARTED, and Cloudflare can deliver a tick late. On
+    // 2026-09-11 the 23:00:40Z tick ran at ~23:01: its alerts line is stamped
+    // 23:01:50Z where its neighbours log 4-11 s in, and that one invocation ran
+    // NEITHER the hourly watchdog (minute === 0) NOR the five-minute obs log
+    // (minute % 5) while every other 5-minute tick ran both. Two independent
+    // gates missing on the same invocation is the minute being misread, not two
+    // bugs -- and the same `minute` decides whether the bake is dispatched, so a
+    // late tick was silently skipping bakes and KV writes too (one of seven in a
+    // 36-minute sample). event.scheduledTime is the tick the cron asked for.
+    const minute = new Date(event.scheduledTime || Date.now()).getUTCMinutes();
     // HOURLY, NOT ONCE AT 13:00Z. The 09-11 New York crash was invisible for
     // eighteen hours because the only check ran at 13:00Z and read the run's
     // conclusion, which was green. Three API calls and one 25 KB log an hour is
     // nothing, and paging stays keyed by day, so a failure still pages once.
     if (minute === 0) {
       ctx.waitUntil((async () => {
-        try { console.log(`[watchdog] ${new Date().toISOString()} ${await jobWatch(env)}`); }
+        try { console.log(`[watchdog] :${minute} ${new Date().toISOString()} ${await jobWatch(env)}`); }
         catch (e) { console.log(`[watchdog] FAILED ${e}`); }
       })());
     }
