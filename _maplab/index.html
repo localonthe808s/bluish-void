@@ -1295,6 +1295,34 @@ function labelFits(x, y, w, h){
   return true;
 }
 
+/* KEEP A NAME WHOLE, OR DO NOT DRAW IT (2026-09-12).
+   Area names are centred on their feature's point and nothing checked the frame,
+   so a neighbourhood whose centre sits near the edge came out sliced —
+   "CARROLL GARDENS" reading as "ROLL DENS". It was always there; scaling the
+   type for depth just made it obvious.
+
+   It matters far more in a tiled bake than in one render: the cut is baked in
+   permanently, and the same name cuts differently on every tile it touches.
+
+   Two rules. A feature whose CENTRE is outside this frame is skipped outright —
+   it belongs to the neighbouring tile, and nudging it in would print a name from
+   two kilometres away against the edge. Everything else is nudged inward until
+   the whole box fits, optionally also inside the feature's own bounds so a park
+   name cannot slide off its green. If there is nowhere the name fits whole, it
+   is dropped rather than cut: half a word is worse than no word. */
+function anchorInFrame(ctx, q, tw, th, bounds){
+  var W = ctx.canvas.width, H = ctx.canvas.height, pad = 3;
+  if (q.x < 0 || q.x > W || q.y < 0 || q.y > H) return null;   // another tile's name
+  var x0 = pad + tw / 2, x1 = W - pad - tw / 2;
+  var y0 = pad + th / 2, y1 = H - pad - th / 2;
+  if (bounds){
+    x0 = Math.max(x0, bounds.x0 + tw / 2); x1 = Math.min(x1, bounds.x1 - tw / 2);
+    y0 = Math.max(y0, bounds.y0 + th / 2); y1 = Math.min(y1, bounds.y1 - th / 2);
+  }
+  if (x1 < x0 || y1 < y0) return null;                         // nowhere to sit whole
+  return { x: Math.min(Math.max(q.x, x0), x1), y: Math.min(Math.max(q.y, y0), y1) };
+}
+
 /* Neighbourhood names as people actually say them.
 
    NOT the 2020 NTAs, which was the first attempt: those are NYC Planning's statistical
@@ -1329,12 +1357,16 @@ function drawHoodNames(ctx, geo, proj, mPerPx){
     var th = lines.length * LH;
     /* Most of these are points, so there is usually no shape to sit inside; where one
        does carry a boundary, still keep the name within it. */
-    var bb = ft.properties.bbox;
+    var bb = ft.properties.bbox, bpx = null;
     if (bb){
       var a = proj({ x:bb[0], y:bb[3] }), b = proj({ x:bb[2], y:bb[1] });
       if (tw > Math.abs(b.x - a.x) * 0.9 || th > Math.abs(b.y - a.y) * 0.7) return;
+      bpx = { x0: Math.min(a.x, b.x), x1: Math.max(a.x, b.x),
+              y0: Math.min(a.y, b.y), y1: Math.max(a.y, b.y) };
     }
     var q = proj({ x:ft.geometry.coordinates[0], y:ft.geometry.coordinates[1] });
+    q = anchorInFrame(ctx, q, tw, th, bpx);        // whole, or not at all
+    if (!q) return;
     if (!labelFits(q.x - tw / 2 - 5, q.y - th / 2 - 4, tw + 10, th + 8)) return;
     ctx.fillStyle = HOOD_INK;
     lines.forEach(function(l, i){
@@ -1391,6 +1423,11 @@ function drawParkNames(ctx, geo, proj, mPerPx){
     var th = lines.length * LH;
     if (tw > boxW * 0.86 || th > boxH * 0.74) return;      // does not fit cleanly: skip
     var q = proj({ x:ft.geometry.coordinates[0], y:ft.geometry.coordinates[1] });
+    /* inside the frame AND inside the park, so the name is never cut by the tile
+       edge and never slides off its own green */
+    q = anchorInFrame(ctx, q, tw, th, { x0: Math.min(a.x, b.x), x1: Math.max(a.x, b.x),
+                                        y0: Math.min(a.y, b.y), y1: Math.max(a.y, b.y) });
+    if (!q) return;
     if (!labelFits(q.x - tw / 2, q.y - th / 2, tw, th)) return;
     /* White, and nothing behind it. A park name sits inside its own green, so it has the
        contrast without a halo, and the halo was what made these read as stickers. */
