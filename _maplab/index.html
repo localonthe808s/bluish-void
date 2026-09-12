@@ -990,6 +990,54 @@ function _boroMask(geo, proj, W, H, growPx){
   });
   return c;
 }
+/* BUILDINGS, DRAWN AFTER THE BOROUGH MASK (2026-09-12, deep-zoom plan step 2).
+   The archive carries a `buildings` layer at z11-15 and both styles suppress it
+   with `mods.noBuildings`. Clearing that flag is NOT enough and that is the
+   whole reason this function exists: the base vector pass runs BEFORE
+   drawBoroughs, and the borough fill is opaque, so buildings drawn in the base
+   pass are rendered and then painted out. They have to be drawn again over the
+   mask — the same problem the parks pass and the road grid already solve, and
+   this copies the road grid's stack exactly: render the layer alone to an
+   offscreen canvas, clip it to the borough silhouette with destination-in, then
+   composite.
+
+   WHY IT MATTERS: footprints cover 31% of pixels at 2.20 m/px and 36% at 1.22,
+   so this is what makes a deeper bake show MORE rather than just BIGGER — the
+   sidewalk-in-front-of-a-row context a flat orange field cannot carry.
+
+   The tint is one flat number everywhere (user 2026-09-10: "just move it down
+   to 18% and thats fine, nothing complicated") — no zoom-conditional and no
+   trees-conditional weighting. 55% buried the orange; 35% competed with the
+   tree discs.
+
+   The colour is the palette's own `buildings` entry rather than a new constant,
+   so it stays consistent with whatever base the style selects.
+
+   THE SYMBOLIZER IS BUILT HERE RATHER THAN REUSED. protomaps' own buildings
+   rule is `PolygonSymbolizer({fill: f.buildings, opacity: .5})` — it halves the
+   alpha before we ever see it, so filtering the library's rule list and then
+   compositing at 18% would land at an effective 9%, half the number that was
+   actually reviewed. Drawn opaque here, so BUILDING_TINT is the only alpha in
+   play and the figure means what it says. */
+var BUILDING_TINT = 0.18;
+function drawBuildings(ctx, f, view, latMid, W, H, boroMask, alpha){
+  if (!boroMask) return Promise.resolve();
+  var off = document.createElement('canvas'); off.width = W; off.height = H;
+  return new protomapsL.Static({ url: document.getElementById('src').value, maxDataZoom: 14,
+      labelRules: [],
+      paintRules: [{ dataLayer:'buildings',
+        symbolizer: new protomapsL.PolygonSymbolizer({ fill: f.buildings || '#e7e4dc' }) }] })
+    .drawContextBounds(off.getContext('2d'), {x:view.w, y:latMid}, {x:view.e, y:latMid}, W, H)
+    .then(function(){
+      var oc = off.getContext('2d');
+      oc.globalCompositeOperation = 'destination-in';   // boroughs only, like the grid
+      oc.drawImage(boroMask, 0, 0);
+      ctx.save();
+      ctx.globalAlpha = (alpha == null ? BUILDING_TINT : alpha);
+      ctx.drawImage(off, 0, 0);
+      ctx.restore();
+    });
+}
 function drawPiers(ctx, style, f, view, latMid, W, H, boroMask, waterMask){
   var off = document.createElement('canvas'); off.width = W; off.height = H;
   return new protomapsL.Static({ url: document.getElementById('src').value, maxDataZoom: 14,
@@ -1667,6 +1715,12 @@ function drawCard(style){
           var again = new protomapsL.Static({ url: document.getElementById('src').value,
             paintRules: parkRulesFor(), labelRules: [], maxDataZoom: 14 });
           return again.drawContextBounds(ctx, {x:view.w, y:view.latMid}, {x:view.e, y:view.latMid}, W, H)
+            /* blocks go on over the parks and UNDER the road grid — streets
+               belong on top of the buildings they run between */
+            .then(function(){
+              if (stale()) return;
+              return drawBuildings(ctx, f, view, view.latMid, W, H, boroMaskCv);
+            })
             .then(function(){ return terrainFor(vkey); })
             .then(function(tr){
               if (tr && !stale())
