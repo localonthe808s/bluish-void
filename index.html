@@ -50091,7 +50091,22 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
          missing header fails the load loudly instead, and a failed tile already
          drops out harmlessly. */
       if (url.indexOf('http') === 0) im.crossOrigin = 'anonymous';
-      im.onload = function(){ res(im); };
+      /* DECODE OFF THE MAIN THREAD (2026-09-12). `onload` only means the bytes
+         arrived — the PNG is still decoded synchronously the first time
+         drawImage touches it. Measured in the browser: ~13 ms for one 1100x967
+         tile scaled to 2264 px, so ~50 ms for a four-tile compose and close to
+         half a second for a 36-tile one, all on the main thread while the map
+         is meant to feel responsive. decode() does that work asynchronously and
+         resolves once the bitmap is ready, leaving the later drawImage nearly
+         free.
+         Deliberately NOT createImageBitmap, which is marginally faster again:
+         it returns a resource that must be close()d on eviction, and one closed
+         a moment too early fails only on some later pan. .decode() is what the
+         rest of this file already uses. */
+      im.onload = function(){
+        if (im.decode) im.decode().then(function(){ res(im); }, function(){ res(im); });
+        else res(im);
+      };
       /* a transient failure must not be cached forever — drop the entry so
          the next compose retries the tile (perf/reliability 2026-08-31) */
       im.onerror = function(){ _cityTileCache.delete(url); rej(); };
@@ -50770,6 +50785,30 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
          lands, stay on z4 — the first deep compose asks for it and the next one
          gets the sharper picture, rather than firing hundreds of 404s. */
       if (grid >= 16 && !_cityDeepReady()) grid = 8;
+      /* WARM THE NEXT RUNG UNDER THE POINTER (2026-09-12).
+         The ladder's discipline is that z5 and z6 are never pre-warmed, and
+         that still holds for the LEVEL — warming 256 or 1,024 tiles would be
+         absurd. This warms exactly ONE: the next level's tile containing the
+         centre of the current view, which is where a double-click zooms to.
+         Measured cost of not doing it: a cold tile is 266-450 ms of fetch that
+         lands after the gesture has already finished, so the sharp picture
+         arrives late. One tile of speculative bandwidth buys that back.
+         Only when the manifest is in hand, and only for a tile it lists, so
+         this never speculates into the ocean. */
+      if (grid >= 8 && grid < 32 && _cityDeepMan){
+        var _ng = grid * 2, _nl = (_ng === 16) ? 5 : 6;
+        var _cx = (v.X0 + v.X1) / 2, _cy = (v.Y0 + v.Y1) / 2;
+        var _nc = Math.floor((_cx - B.X0) / ((B.X1 - B.X0) / _ng));
+        var _nr = Math.floor((B.Y1 - _cy) / ((B.Y1 - B.Y0) / _ng));
+        if (_nr >= 0 && _nc >= 0 && _nr < _ng && _nc < _ng && _cityDeepHas(_nl, _nr, _nc)){
+          /* swallow the rejection: _cityTile rejects on a failed load, and a
+             SPECULATIVE tile nobody is waiting for must not surface as an
+             unhandled rejection. The compose path below catches for the same
+             reason. Failure here costs nothing — the real compose retries. */
+          _cityTile(CITY_DEEP_BASE + '/nyc-basemap-ink-dry-z' + _nl + '-r' + _nr + 'c' + _nc + '.png')
+            .catch(function(){});
+        }
+      }
       /* climbing the ladder: at z2 depth, pre-warm z3 for the next push.
          z4 is NEVER warmed — 64 tiles, and a zoom that deep needs about four
          of them. Only what the view intersects is ever fetched. */
@@ -59941,6 +59980,15 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       cw.cardsTimer = setInterval(function(){
         if (document.hidden){ cwLtgClose(); return; }
         cwCardsSync(); cwDrawSensors(); cwWarm(); cwLiveClock(); cwWarmTiles(2); cwUmbrella();
+        /* THE DEEP MANIFEST, FETCHED BEFORE IT IS NEEDED (2026-09-12).
+           _cityDeepReady() was called from exactly one place — inside
+           compose() — so the first deep zoom from cold paid a 228 ms round trip
+           IN the critical path and, worse, spent a whole compose cycle
+           rendering z4 because the manifest had not arrived yet. Asking for it
+           here, on the same guarded tick that warms z2, means it is in hand
+           long before anyone zooms and the first deep compose can go straight
+           to grid 32. It is 3 KB, cached immutable, and the call is idempotent. */
+        try { _cityDeepReady(); } catch (e) {}
         if (cw.wide) cwWideSync();
         else if (cw.radarOn) cwAlertRead();   // the city radar draws them too now
         var wd = cw.wide ? cwWideDef() : null;
