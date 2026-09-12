@@ -50512,6 +50512,17 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     }
     var cw = { built:false, running:false, idx:0, timer:null, cardsTimer:null, wprod:'bref',
                prod:'bref', front:true, radarOn:false, floods:false, trains:true, wide:null, rock:false };
+    /* WHICH VIEW THE WIDGET OPENS ON (2026-09-12, user: "launch on a view based
+       on the current weather"). null = undecided, 'user' = someone tapped a tab
+       and the chooser must keep its hands off, anything else = the chooser has
+       already run. It is checked before the auto-pick fires and set by both
+       setWide and setProduct, so a deliberate tap always wins a race with the
+       radar read. */
+    var cwLaunchPick = null;
+    /* true only while cwLaunchDecide is calling setWide/setProduct itself, so
+       those two can tell an automatic open from a deliberate tap. Without it
+       the chooser's own calls mark the pick as 'user' and cancel themselves. */
+    var cwLaunchDriving = false;
     /* the widget's own framing: the launch box stretched south so Rockaway
        and the inlet stay in frame (user 2026-08-30) — taller than the shared
        1.1372 box, and the widget-body's global 16/10 aspect is overridden */
@@ -52260,6 +52271,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (on) cwWideLoadCap = setTimeout(function(){ cwWideLoad(false); }, 10000);
     }
     function setWide(id){
+      /* a deliberate tap outranks the launch chooser: whatever it was about to
+         decide, it must not move the view under someone who just picked one.
+         Skipped while the chooser is driving — those calls are not taps. */
+      if (!cwLaunchDriving) cwLaunchPick = 'user';
       if (id){ cwFloodsOff(); cwTreesOff(); cwRockOff(); }
       cw.wide = id || null;
       var el = document.getElementById('cw-wide'), tag = document.getElementById('cw-wide-tag');
@@ -53828,6 +53843,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        and the tap targets ask this, so nothing is left tappable-but-invisible. */
     function cwMapMode(){ return !cw.wide && !cw.radarOn; }
     function setProduct(p){
+      /* same as setWide: a tap is a decision, and the launch chooser defers.
+         Skipped while the chooser is driving — it calls this for the NOW view. */
+      if (!cwLaunchDriving) cwLaunchPick = 'user';
       cwFloodsOff(); cwTreesOff(); cwRockOff();
       if (cw.wide){
         /* you were looking at a wide view: come back to the city map and
@@ -60031,10 +60049,164 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         if (u) _despeckleWms(u, function(){}, maskUrl(fh));
       });
     }
+    /* ─ THE LAUNCH CHOOSER (2026-09-12) ────────────────────────────────────
+       User: open on the view the weather justifies — NOW if it is raining on
+       you, the 3 HR map if something is in that box, the 12 HR map if the only
+       activity is further out, and the plain city map when there is nothing.
+
+       WHY IT SAMPLES RATHER THAN ASKS. _nowcastRate is the natural "is it
+       raining here" signal, but it is produced by _radarNowcast, which needs
+       LOCATION plus hourly wind and then walks a ~13-frame tile loop; on a cold
+       load it is almost never populated in time. So all three questions are
+       answered from ONE read of the same RainViewer frame: the pixel over your
+       neighbourhood, and a coarse lattice inside each wide box.
+
+       COST. Four tiles at z5 — the 3 HR box's two are a subset of the 12 HR
+       four — and the catalogue comes from _rvMapsFetch, which is memoised for
+       two minutes and usually already in hand. Threshold is green or heavier
+       (mm >= 3), so the faint blue speckle that is often clutter or virga does
+       not drag the widget onto a regional map over nothing.
+
+       The palette and tile maths are deliberately a local copy, not a lift out
+       of _radarNowcast's closure: that is a hot, profiled path feeding the rain
+       line, and reaching into another scope for it is the exact trap that has
+       cost this widget before. Keep the two in step by hand if the palette
+       moves. */
+    var CW_LAUNCH_MS = 2000;
+    function cwLaunchDecide(done){
+      var fired = false;
+      var finish = function(pick){
+        if (fired) return;
+        fired = true;
+        /* A TAP DURING THE WINDOW ENDS THIS, SILENTLY. Calling done(null) here
+           would run the callback's else-branch — compose() — painting the city
+           map underneath the view they just chose, which is the exact flash the
+           deferral exists to prevent. So the chooser simply stands down and
+           leaves the first paint to whatever they opened. */
+        if (cwLaunchPick === 'user') return;
+        done(pick);
+      };
+      setTimeout(function(){ finish(null); }, CW_LAUNCH_MS);   /* never hold the panel */
+      try {
+        /* WHERE "ON YOU" IS, and why this cannot just read _cityHood.
+           The Flatiron default is assigned inside cwCardsSync(), which start()
+           calls AFTER this chooser — so on a cold load with nothing saved,
+           _cityHood is still undefined here and an early bail would send every
+           launch to the city map. That is precisely the symptom this feature
+           exists to fix, so it would have shipped looking untouched.
+           Order of preference: a hood the user actually picked, then the site's
+           own LOCATION, then the same Flatiron default cwCardsSync would set. */
+        var hood = window._cityHood;
+        if (!hood || !isFinite(hood.lat)){
+          var L = window.LOCATION;
+          hood = (L && isFinite(L.lat)) ? { lat: +L.lat, lon: +L.lon }
+                                        : { lat: 40.7423, lon: -73.9925 };
+        }
+        if (!isFinite(hood.lat) || !isFinite(hood.lon)) { finish(null); return; }
+        var BOXES = {
+          incoming: { X0:-8432451, Y0:4873211, X1:-8143021, Y1:5126986 },
+          ne:       { X0:-8927823, Y0:4607718, X1:-7636517, Y1:5716479 }
+        };
+        var R2 = 6378137, z = 5, ts = 256;
+        var m2lon = function(X){ return X / R2 * 180 / Math.PI; };
+        var m2lat = function(Y){ return (2 * Math.atan(Math.exp(Y / R2)) - Math.PI / 2) * 180 / Math.PI; };
+        var at = function(lo, la){
+          var n = Math.pow(2, z), xf = (lo + 180) / 360 * n, lr = la * Math.PI / 180;
+          var yf = (1 - Math.log(Math.tan(lr) + 1 / Math.cos(lr)) / Math.PI) / 2 * n;
+          var xt = Math.floor(xf), yt = Math.floor(yf);
+          return { xt: xt, yt: yt,
+                   px: Math.min(ts - 1, Math.max(0, Math.floor((xf - xt) * ts))),
+                   py: Math.min(ts - 1, Math.max(0, Math.floor((yf - yt) * ts))) };
+        };
+        /* green or heavier on the RainViewer universal palette */
+        var wet = function(c){
+          if (!c || c[3] < 35) return false;
+          var r = c[0], g2 = c[1], b2 = c[2];
+          if (r > 140 && b2 > 110 && g2 < 130) return true;      /* magenta */
+          if (r > 165 && g2 < 115 && b2 < 115) return true;      /* red */
+          if (r > 195 && g2 >= 110 && g2 < 195 && b2 < 120) return true;  /* orange */
+          if (r > 175 && g2 > 175 && b2 < 150) return true;      /* yellow */
+          if (g2 > 120 && r < 195 && b2 < 175) return true;      /* green */
+          return false;                                          /* blue/teal: too light */
+        };
+        var pts = [{ k: 'here', p: at(hood.lon, hood.lat) }];
+        ['incoming', 'ne'].forEach(function(key){
+          var b = BOXES[key];
+          for (var i = 0; i < 6; i++) for (var j = 0; j < 6; j++)
+            pts.push({ k: key, p: at(m2lon(b.X0 + (b.X1 - b.X0) * (i + 0.5) / 6),
+                                     m2lat(b.Y0 + (b.Y1 - b.Y0) * (j + 0.5) / 6)) });
+        });
+        var need = {};
+        pts.forEach(function(q){ need[q.p.xt + '_' + q.p.yt] = 1; });
+        var keys = Object.keys(need), left = keys.length, px = {};
+        if (!left) { finish(null); return; }
+        window._rvMapsFetch().then(function(data){
+          var host = data && data.host, past = data && data.radar && data.radar.past;
+          if (!host || !past || !past.length) { finish(null); return; }
+          var frame = past[past.length - 1];
+          if (!window._cwLaunchCanvas){
+            window._cwLaunchCanvas = document.createElement('canvas');
+            window._cwLaunchCanvas.width = ts; window._cwLaunchCanvas.height = ts;
+          }
+          keys.forEach(function(kk){
+            var xy = kk.split('_');
+            var im = new Image(); im.crossOrigin = 'anonymous';
+            im.onload = im.onerror = function(){
+              try {
+                if (im.width){
+                  var cx = window._cwLaunchCanvas.getContext('2d', { willReadFrequently: true });
+                  cx.clearRect(0, 0, ts, ts); cx.drawImage(im, 0, 0);
+                  px[kk] = cx.getImageData(0, 0, ts, ts).data;
+                }
+              } catch (e) {}
+              if (--left > 0) return;
+              var hit = { here: false, incoming: false, ne: false };
+              pts.forEach(function(q){
+                var d = px[q.p.xt + '_' + q.p.yt];
+                if (!d) return;
+                var ix = (q.p.py * ts + q.p.px) * 4;
+                if (wet([d[ix], d[ix + 1], d[ix + 2], d[ix + 3]])) hit[q.k] = true;
+              });
+              finish(hit.here ? 'now' : hit.incoming ? 'incoming' : hit.ne ? 'ne' : null);
+            };
+            /* 0_0, NOT 1_1: the trailing pair is smoothing and snow-colouring.
+               Every other pixel-READING call in this file uses 0_0 because the
+               palette test below classifies raw universal-palette colours; the
+               1_1 form is for display layers only. Sampling a smoothed tile
+               would blur the thresholds, and a wrong path would 404 into a
+               silent fall-through to the city map — indistinguishable from the
+               chooser never running. */
+            im.src = host + frame.path + '/' + ts + '/' + z + '/' + xy[0] + '/' + xy[1] + '/2/0_0.png';
+          });
+        }, function(){ finish(null); });
+      } catch (e) { finish(null); }
+    }
     function start(){
       if (cw.running) return;
       cw.running = true;
-      compose();
+      /* THE FIRST COMPOSE WAITS ON THE CHOOSER. compose() is what dismisses
+         #cw-loading, so painting the city map first and switching afterwards
+         would flash a view nobody asked for — the thing the user explicitly
+         ruled out. Everything else below runs immediately; only the first
+         paint is deferred, and never by more than CW_LAUNCH_MS. */
+      cwLaunchDecide(function(pick){
+        /* setWide and setProduct both stamp cwLaunchPick='user' on entry, and
+           setProduct calls setWide(null) on its way — so driving them from here
+           writes that flag up to three times before this function's own value
+           lands. Relying on which assignment happens last is the kind of thing
+           that breaks silently the next time someone reorders a line, so the
+           chooser announces itself instead and those two leave the flag alone
+           while it is set. */
+        cwLaunchDriving = true;
+        try {
+          if (pick === 'now') setProduct('bref');
+          else if (pick === 'incoming' || pick === 'ne') setWide(pick);
+          else compose();
+        } finally {
+          cwLaunchDriving = false;
+          cwLaunchPick = pick || 'city';
+        }
+      });
       step();
       cwCardsSync();
       cwWarm();
