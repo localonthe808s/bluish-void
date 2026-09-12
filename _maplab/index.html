@@ -1343,8 +1343,21 @@ function anchorInFrame(ctx, q, tw, th, bounds){
    fine grain, which waits until much closer in. */
 var HOOD_ZOOM = { 1: 55, 2: 22 };   // metres per pixel above which each tier stays away
 function drawHoodNames(ctx, geo, proj, mPerPx){
+  /* MEASURES AND CLAIMS NOW, PAINTS LAST (user 2026-09-12: "put the
+     neighborhood on top of it all not below lines"). drawSubway runs AFTER this
+     in the chain and lays a white casing under every route, so at Herald Square
+     the converging lines cut straight through the letters.
+
+     Placement order and paint order are different things and both matter.
+     LABELBOX is filled in priority order — neighbourhood, then park, then
+     station — so a station gives way to a name already placed. Moving the whole
+     call to the end of the chain would invert that and let the stations
+     suppress the neighbourhoods instead. So the measuring and the claim stay
+     exactly here; only the drawing is deferred. Returns the painter, which the
+     chain calls once everything else is down. */
   LABELBOX.length = 0;
-  if (!geo || !mPerPx) return;
+  var pending = [], font = null, noop = function(){};
+  if (!geo || !mPerPx) return noop;
   ctx.save();
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   /* Set in Qellia, the site's display serif, at weight 500 — it is a single-weight face
@@ -1353,7 +1366,8 @@ function drawHoodNames(ctx, geo, proj, mPerPx){
      which is the point. No halo: the white edging turned every name into a sticker. */
   var _s = labelScale(mPerPx);                  // grows below the z4 rung only
   var LH = 11 * _s;
-  ctx.font = '500 ' + (9 * _s).toFixed(1) + 'px QelliaRegular, "Bodoni Moda", Georgia, serif';
+  font = '500 ' + (9 * _s).toFixed(1) + 'px QelliaRegular, "Bodoni Moda", Georgia, serif';
+  ctx.font = font;                              // measuring needs it set now too
   try { ctx.letterSpacing = '0.2em'; } catch(e){}
   geo.features.forEach(function(ft){
     var rank = ft.properties.rank || 2;
@@ -1375,14 +1389,27 @@ function drawHoodNames(ctx, geo, proj, mPerPx){
     q = anchorInFrame(ctx, q, tw, th, bpx);        // whole, or not at all
     if (!q) return;
     if (!labelFits(q.x - tw / 2 - 5, q.y - th / 2 - 4, tw + 10, th + 8)) return;
-    ctx.fillStyle = HOOD_INK;
-    lines.forEach(function(l, i){
-      ctx.fillText(l, q.x, q.y - th / 2 + LH / 2 + i * LH);
-    });
+    pending.push({ lines: lines, x: q.x, y: q.y, th: th });   // drawn at the end
   });
   ctx.textAlign = 'left';
   try { ctx.letterSpacing = '0px'; } catch(e){}
   ctx.restore();
+  if (!pending.length) return noop;
+  return function paintHoodNames(){
+    ctx.save();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = font;
+    try { ctx.letterSpacing = '0.2em'; } catch(e){}
+    ctx.fillStyle = HOOD_INK;
+    pending.forEach(function(p){
+      p.lines.forEach(function(l, i){
+        ctx.fillText(l, p.x, p.y - p.th / 2 + LH / 2 + i * LH);
+      });
+    });
+    ctx.textAlign = 'left';
+    try { ctx.letterSpacing = '0px'; } catch(e){}
+    ctx.restore();
+  };
 }
 
 /* Park names stack on their own words rather than wrapping wherever the width happens
@@ -1738,7 +1765,7 @@ function drawCard(style){
   }
 
   function paint(){
-    var view = box(), token = ++busy, boroMaskCv = null;
+    var view = box(), token = ++busy, boroMaskCv = null, paintHoods = null;
     var vkey = document.getElementById('view').value;
     var dark = !(style.base === 'light');
     var stale = function(){ return token !== busy; };
@@ -1867,7 +1894,8 @@ function drawCard(style){
               return hoodNamesFor(vkey);
             }).then(function(hn){
               if (stale()) return;
-              drawHoodNames(ctx, hn, out.project, VB.mpp);
+              /* claims its space here, in priority order; paints last */
+              paintHoods = drawHoodNames(ctx, hn, out.project, VB.mpp);
               return parkNamesFor(vkey);
             }).then(function(pn){
               if (stale()) return;
@@ -1882,7 +1910,12 @@ function drawCard(style){
               if (stale()) return;
               var lab = new protomapsL.Static({ url: document.getElementById('src').value,
                 paintRules: [], labelRules: labelsFor(style, f), maxDataZoom: 14 });
-              return lab.drawContextBounds(ctx, {x:view.w, y:view.latMid}, {x:view.e, y:view.latMid}, W, H);
+              return lab.drawContextBounds(ctx, {x:view.w, y:view.latMid}, {x:view.e, y:view.latMid}, W, H)
+                .then(function(){
+                  /* LAST THING DOWN. Nothing may cross a neighbourhood name —
+                     not the subway casing, not the protomaps place labels. */
+                  if (!stale() && paintHoods) paintHoods();
+                });
             });
         });
       })
