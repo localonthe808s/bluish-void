@@ -51161,6 +51161,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         + '<img id="cw-frame-b" alt="" style="' + IMG + 'object-fit:fill;z-index:1;opacity:0;transition:opacity .3s ease;will-change:transform;">'
         + '<img id="cw-bm-ghost" alt="" style="' + IMG + 'z-index:2;opacity:.35;pointer-events:none;will-change:transform;">'
         + '<canvas id="cw-ov" style="' + IMG + 'z-index:3;pointer-events:none;will-change:transform;"></canvas>'
+        /* the lead arcs get their own layer so the radar loop can redraw them
+           per frame without repainting cw-ov (user 2026-09-12) */
+        + '<canvas id="cw-ov-arc" style="' + IMG + 'z-index:4;pointer-events:none;will-change:transform;"></canvas>'
         /* the wide view sits above the whole city stack when lit */
         + '<img id="cw-wide-base" alt="" style="' + IMG + 'z-index:4;display:none;">'
         + '<img id="cw-wide-bathy" alt="" style="' + IMG + 'z-index:4;display:none;">'
@@ -51329,7 +51332,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       c._zoomed = true;
       /* painted-view layers only — the frames and floods overlay ride the
          BASE transform now (full-box registration, view-independent) */
-      var LAYERS = ['cw-bm-under','cw-rock','cw-gv','cw-bm-ghost','cw-ov'];
+      var LAYERS = ['cw-bm-under','cw-rock','cw-gv','cw-bm-ghost','cw-ov','cw-ov-arc'];
       var z = { k:1, tx:0, ty:0 };       // painted transform
       var zt = { k:1, tx:0, ty:0 };      // target: wheel/dblclick ease toward it
       var anim = null;
@@ -52228,7 +52231,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        is display:none unless FLOODING is on) and clobbering it would strand
        the flood layer off when the loader let go */
     var CW_CITY_LAYERS = ['cw-bm-base','cw-bm-under','cw-rock','cw-bm-ghost','cw-fl',
-                          'cw-gv','cw-frame-a','cw-frame-b','cw-ov'];
+                          'cw-gv','cw-frame-a','cw-frame-b','cw-ov','cw-ov-arc'];
     function cwCityLayers(show){
       CW_CITY_LAYERS.forEach(function(id){
         var e = document.getElementById(id);
@@ -53937,6 +53940,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           cw.front = !cw.front;
           var t = document.getElementById('cw-time');
           if (t) t.textContent = fhr === 0 ? 'NOW' : '~' + (fhr * 4) + ' MIN AGO';
+          /* the arcs follow the frame (user 2026-09-12). fhr, NOT cw.idx: the
+             tick is 1200 ms and a decode can outlast it, so cw.idx may already
+             name the next frame. Guarded on a compose because the arcs ride
+             cwPainted, which still describes the old box mid-zoom. */
+          cw.leadOff = -(fhr * 4);
+          if (!cwComposeBusy) try { cwDrawLeadArcs(cw.leadOff); } catch (e){}
         };
         back.onload = null;
         back.src = u;
@@ -58898,6 +58907,134 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         g.setLineDash([]);
       }
     }
+    /* LEAD ARCS, on their own layer (user 2026-09-12). Lifted out of
+       cwDrawSensors so the radar loop can redraw them once per frame: that
+       function resizes its canvas and repaints airports, ferries, MTA, Kalshi
+       and the rest, which is far too heavy for a 1200 ms tick. This one owns
+       #cw-ov-arc and clears only that. offMin is the displayed frame's age in
+       minutes (negative) — see the label comment below. */
+    function cwDrawLeadArcs(offMin){
+      var cvs = document.getElementById('cw-ov-arc');
+      if (!cvs) return;
+      var body = document.getElementById('cw-body');
+      var r = body ? body.getBoundingClientRect() : null;
+      if (!r || !r.width) return;
+      var dpr = Math.min(2, window.devicePixelRatio || 1);
+      var wantW = Math.round(r.width * dpr), wantH = Math.round(r.height * dpr);
+      /* only resize when it actually changed: assigning width clears the
+         canvas AND reallocates, which is the cost this split exists to avoid */
+      if (cvs.width !== wantW || cvs.height !== wantH){ cvs.width = wantW; cvs.height = wantH; }
+      var g = cvs.getContext('2d');
+      g.clearRect(0, 0, cvs.width, cvs.height);
+      var v = cwPainted, R2 = 6378137;   // R2 is a local in every sibling; keep the idiom
+      if (!v) return;
+      var _off = +offMin || 0;
+      var hood = window._cityHood, st = window._cwStorm;
+      if (cw.radarOn && hood && st && st.mph){
+        var hX = hood.lon * Math.PI / 180 * R2;
+        var hY = R2 * Math.log(Math.tan(Math.PI / 4 + hood.lat * Math.PI / 360));
+        var hx = (hX - v.X0) / (v.X1 - v.X0) * cvs.width;
+        var hy = (v.Y1 - hY) / (v.Y1 - v.Y0) * cvs.height;
+        var pxPerM = cvs.width / (v.X1 - v.X0);
+        var mPerKm = 1000 / Math.cos(hood.lat * Math.PI / 180);
+        var from = (st.toward + 180) % 360;             // where it comes FROM
+        var a0 = (from - 62) * Math.PI / 180, a1 = (from + 62) * Math.PI / 180;
+        g.save();
+        g.lineCap = 'round';
+        /* LOUDER (user 2026-09-02: hard to see). Thin dashed white also read
+           as one more road on a map whose roads are white — so: a long bold
+           dash nothing else on here uses, a heavy ink halo that carries over
+           black land, blue water and orange city alike, and the far arcs no
+           longer fade to near-nothing. */
+        g.font = '800 ' + (10.5 * dpr) + 'px system-ui,sans-serif';
+        g.textAlign = 'center'; g.textBaseline = 'middle';
+        [[10, 1], [20, .95], [30, .85]].forEach(function(m2){
+          var rr = st.mph * 1.609 * (m2[0] / 60) * mPerKm * pxPerM;
+          if (rr < 10 * dpr || rr > cvs.width * 1.4) return;
+          g.setLineDash([15 * dpr, 9 * dpr]);
+          g.lineWidth = 6 * dpr; g.strokeStyle = 'rgba(8,10,16,.85)';
+          g.beginPath(); g.arc(hx, hy, rr, a0 - Math.PI / 2, a1 - Math.PI / 2); g.stroke();
+          /* ON TARGET, NOT JUST IN RANGE — the wide views' treatment, brought
+             down to the city map so all the arcs speak the same way (user
+             2026-09-12: "could we add that to all archs?"). A cell d off the
+             upwind apex drifts past the doorstep at r*sin(d), so the stroke
+             brightens toward the apex and fades where a cell would pass wide.
+             SIGMA here is deliberately SMALLER than the wide views' 22 km:
+             these rings are 10/20/30 MINUTES out, a few km across, and this
+             map is the doorstep rather than the city — 22 km would light the
+             whole fan and say nothing. 4 km is about the width of a
+             neighbourhood, which is what these rings are answering for.
+             pxPerM is this canvas's scale (the wide copy calls it sc). */
+          var SEGc = 40, midC = (a0 + a1) / 2;
+          var SIGMAc = 4 * mPerKm * pxPerM;          /* 4 km of miss, in px */
+          var segLenC = rr * (a1 - a0) / SEGc;
+          for (var sc2 = 0; sc2 < SEGc; sc2++){
+            var u0 = a0 + (a1 - a0) * sc2 / SEGc, u1 = a0 + (a1 - a0) * (sc2 + 1) / SEGc;
+            var dC = Math.abs((u0 + u1) / 2 - midC);
+            var missC = rr * Math.sin(Math.min(dC, Math.PI / 2));
+            var wC = 1 / (1 + (missC / SIGMAc) * (missC / SIGMAc));
+            g.lineDashOffset = -segLenC * sc2;       /* one dash rhythm across segments */
+            g.lineWidth = (1.6 + 2.4 * wC) * dpr;
+            g.strokeStyle = 'rgba(255,255,255,' + (m2[1] * (0.22 + 0.78 * wC)).toFixed(3) + ')';
+            g.beginPath(); g.arc(hx, hy, rr, u0 - Math.PI / 2, u1 - Math.PI / 2); g.stroke();
+          }
+          g.lineDashOffset = 0;
+          g.setLineDash([]);
+          /* SLIDES ALONG ITS OWN ARC, as the wide views' captions do. The
+             apex of the 20 and 30 MIN rings falls off the left edge on a
+             fast westerly, and this canvas has no label queue to catch it —
+             so instead of being dropped the caption rendered half off frame,
+             which is worse. Walk out from the apex across the arc's own 62
+             degree half-span and take the first angle that fits the whole
+             word; the arc itself is already stroked either way. */
+          /* the wide views' clock grammar, brought down here too (user
+             2026-09-12). These rings are 10/20/30 minutes of travel from the
+             doorstep, and they DO carry a frame offset. An earlier comment
+             here said they did not, because "this view runs its own live
+             loop" — the loop is live, the frames it shows are not: step()
+             replays fhrs 9..0, four minutes apart, so up to 36 minutes of
+             past radar sits under a ring labelled from Date.now(). _off is
+             the displayed frame's own age, negative; the city-map twin of
+             cwWideLeadOff. */
+          var arrDc = new Date(Date.now() + (m2[0] + _off) * 60000);
+          /* same +1 rule as the wide arcs. These rings only reach 30 minutes so
+             they can cross midnight in a narrow window, but when they do the
+             marker is just as correct — and having one grammar across every arc
+             matters more than saving three characters on one view. */
+          var txt = (arrDc.getHours() % 12 || 12) + ':' + ('0' + arrDc.getMinutes()).slice(-2)
+                  + ' ' + (arrDc.getHours() < 12 ? 'AM' : 'PM')
+                  + (arrDc.getDate() !== new Date().getDate() ? ' +1' : '');
+          var tw = g.measureText(txt).width, rl = rr + 16 * dpr;
+          var la, ux, uy, lx, ly, anc, ok = false;
+          for (var dd = 0; dd <= 62 && !ok; dd += 6){
+            for (var sg = 0; sg < (dd ? 2 : 1) && !ok; sg++){
+              la = (from + (sg ? -dd : dd)) * Math.PI / 180 - Math.PI / 2;
+              ux = Math.cos(la); uy = Math.sin(la);
+              lx = hx + ux * rl; ly = hy + uy * rl;
+              anc = Math.abs(ux) < 0.35 ? 'center' : (ux < 0 ? 'right' : 'left');
+              var x0 = anc === 'center' ? lx - tw / 2 : anc === 'right' ? lx - tw : lx;
+              ok = x0 > 6 * dpr && x0 + tw < cvs.width - 6 * dpr
+                && ly > 10 * dpr && ly < cvs.height - 10 * dpr;
+            }
+          }
+          if (!ok) return;                          // arc drawn, caption has no room
+          var ty = ly;                              // baseline is 'middle' here too
+          g.textAlign = anc;
+          g.lineWidth = 4.4 * dpr; g.strokeStyle = 'rgba(8,10,16,.9)';
+          g.strokeText(txt, lx, ty);
+          g.lineWidth = 1.6 * dpr; g.strokeStyle = 'rgba(8,10,16,.7)';
+          g.strokeText(txt, lx, ty);
+          g.fillStyle = 'rgba(255,255,255,' + Math.max(.92, m2[1]) + ')';
+          g.fillText(txt, lx, ty);
+        });
+        /* the doorstep itself, so the centre of the arcs is not a guess */
+        g.beginPath(); g.arc(hx, hy, 5 * dpr, 0, 6.2832);
+        g.fillStyle = 'rgba(8,10,16,.8)'; g.fill();
+        g.beginPath(); g.arc(hx, hy, 3.1 * dpr, 0, 6.2832);
+        g.fillStyle = '#fff4de'; g.fill();
+        g.restore();
+      }
+    }
     function cwDrawSensors(){
       try { cwRockDraw(); } catch (e){}
       cwDrawGhost();
@@ -59080,106 +59217,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
          those never had such a gate. Same instrument at two scales behaving
          two different ways reads as a fault, and it was reported as one. The
          only requirement now is a known storm motion, exactly as upstairs. */
-      var hood = window._cityHood, st = window._cwStorm;
-      if (cw.radarOn && hood && st && st.mph){
-        var hX = hood.lon * Math.PI / 180 * R2;
-        var hY = R2 * Math.log(Math.tan(Math.PI / 4 + hood.lat * Math.PI / 360));
-        var hx = (hX - v.X0) / (v.X1 - v.X0) * cvs.width;
-        var hy = (v.Y1 - hY) / (v.Y1 - v.Y0) * cvs.height;
-        var pxPerM = cvs.width / (v.X1 - v.X0);
-        var mPerKm = 1000 / Math.cos(hood.lat * Math.PI / 180);
-        var from = (st.toward + 180) % 360;             // where it comes FROM
-        var a0 = (from - 62) * Math.PI / 180, a1 = (from + 62) * Math.PI / 180;
-        g.save();
-        g.lineCap = 'round';
-        /* LOUDER (user 2026-09-02: hard to see). Thin dashed white also read
-           as one more road on a map whose roads are white — so: a long bold
-           dash nothing else on here uses, a heavy ink halo that carries over
-           black land, blue water and orange city alike, and the far arcs no
-           longer fade to near-nothing. */
-        g.font = '800 ' + (10.5 * dpr) + 'px system-ui,sans-serif';
-        g.textAlign = 'center'; g.textBaseline = 'middle';
-        [[10, 1], [20, .95], [30, .85]].forEach(function(m2){
-          var rr = st.mph * 1.609 * (m2[0] / 60) * mPerKm * pxPerM;
-          if (rr < 10 * dpr || rr > cvs.width * 1.4) return;
-          g.setLineDash([15 * dpr, 9 * dpr]);
-          g.lineWidth = 6 * dpr; g.strokeStyle = 'rgba(8,10,16,.85)';
-          g.beginPath(); g.arc(hx, hy, rr, a0 - Math.PI / 2, a1 - Math.PI / 2); g.stroke();
-          /* ON TARGET, NOT JUST IN RANGE — the wide views' treatment, brought
-             down to the city map so all the arcs speak the same way (user
-             2026-09-12: "could we add that to all archs?"). A cell d off the
-             upwind apex drifts past the doorstep at r*sin(d), so the stroke
-             brightens toward the apex and fades where a cell would pass wide.
-             SIGMA here is deliberately SMALLER than the wide views' 22 km:
-             these rings are 10/20/30 MINUTES out, a few km across, and this
-             map is the doorstep rather than the city — 22 km would light the
-             whole fan and say nothing. 4 km is about the width of a
-             neighbourhood, which is what these rings are answering for.
-             pxPerM is this canvas's scale (the wide copy calls it sc). */
-          var SEGc = 40, midC = (a0 + a1) / 2;
-          var SIGMAc = 4 * mPerKm * pxPerM;          /* 4 km of miss, in px */
-          var segLenC = rr * (a1 - a0) / SEGc;
-          for (var sc2 = 0; sc2 < SEGc; sc2++){
-            var u0 = a0 + (a1 - a0) * sc2 / SEGc, u1 = a0 + (a1 - a0) * (sc2 + 1) / SEGc;
-            var dC = Math.abs((u0 + u1) / 2 - midC);
-            var missC = rr * Math.sin(Math.min(dC, Math.PI / 2));
-            var wC = 1 / (1 + (missC / SIGMAc) * (missC / SIGMAc));
-            g.lineDashOffset = -segLenC * sc2;       /* one dash rhythm across segments */
-            g.lineWidth = (1.6 + 2.4 * wC) * dpr;
-            g.strokeStyle = 'rgba(255,255,255,' + (m2[1] * (0.22 + 0.78 * wC)).toFixed(3) + ')';
-            g.beginPath(); g.arc(hx, hy, rr, u0 - Math.PI / 2, u1 - Math.PI / 2); g.stroke();
-          }
-          g.lineDashOffset = 0;
-          g.setLineDash([]);
-          /* SLIDES ALONG ITS OWN ARC, as the wide views' captions do. The
-             apex of the 20 and 30 MIN rings falls off the left edge on a
-             fast westerly, and this canvas has no label queue to catch it —
-             so instead of being dropped the caption rendered half off frame,
-             which is worse. Walk out from the apex across the arc's own 62
-             degree half-span and take the first angle that fits the whole
-             word; the arc itself is already stroked either way. */
-          /* the wide views' clock grammar, brought down here too (user
-             2026-09-12). These rings are 10/20/30 minutes of travel from the
-             doorstep and, unlike the wide arcs, carry no frame offset — this
-             view runs its own live loop, so now + m2[0] is the arrival. */
-          var arrDc = new Date(Date.now() + m2[0] * 60000);
-          /* same +1 rule as the wide arcs. These rings only reach 30 minutes so
-             they can cross midnight in a narrow window, but when they do the
-             marker is just as correct — and having one grammar across every arc
-             matters more than saving three characters on one view. */
-          var txt = (arrDc.getHours() % 12 || 12) + ':' + ('0' + arrDc.getMinutes()).slice(-2)
-                  + ' ' + (arrDc.getHours() < 12 ? 'AM' : 'PM')
-                  + (arrDc.getDate() !== new Date().getDate() ? ' +1' : '');
-          var tw = g.measureText(txt).width, rl = rr + 16 * dpr;
-          var la, ux, uy, lx, ly, anc, ok = false;
-          for (var dd = 0; dd <= 62 && !ok; dd += 6){
-            for (var sg = 0; sg < (dd ? 2 : 1) && !ok; sg++){
-              la = (from + (sg ? -dd : dd)) * Math.PI / 180 - Math.PI / 2;
-              ux = Math.cos(la); uy = Math.sin(la);
-              lx = hx + ux * rl; ly = hy + uy * rl;
-              anc = Math.abs(ux) < 0.35 ? 'center' : (ux < 0 ? 'right' : 'left');
-              var x0 = anc === 'center' ? lx - tw / 2 : anc === 'right' ? lx - tw : lx;
-              ok = x0 > 6 * dpr && x0 + tw < cvs.width - 6 * dpr
-                && ly > 10 * dpr && ly < cvs.height - 10 * dpr;
-            }
-          }
-          if (!ok) return;                          // arc drawn, caption has no room
-          var ty = ly;                              // baseline is 'middle' here too
-          g.textAlign = anc;
-          g.lineWidth = 4.4 * dpr; g.strokeStyle = 'rgba(8,10,16,.9)';
-          g.strokeText(txt, lx, ty);
-          g.lineWidth = 1.6 * dpr; g.strokeStyle = 'rgba(8,10,16,.7)';
-          g.strokeText(txt, lx, ty);
-          g.fillStyle = 'rgba(255,255,255,' + Math.max(.92, m2[1]) + ')';
-          g.fillText(txt, lx, ty);
-        });
-        /* the doorstep itself, so the centre of the arcs is not a guess */
-        g.beginPath(); g.arc(hx, hy, 5 * dpr, 0, 6.2832);
-        g.fillStyle = 'rgba(8,10,16,.8)'; g.fill();
-        g.beginPath(); g.arc(hx, hy, 3.1 * dpr, 0, 6.2832);
-        g.fillStyle = '#fff4de'; g.fill();
-        g.restore();
-      }
+      /* the arcs live on #cw-ov-arc now, so the radar loop can refresh them
+         per frame without repainting this canvas. cw.leadOff is the age of
+         the frame currently on screen, set by step()'s swap(). */
+      cwDrawLeadArcs(cw.leadOff || 0);
       if (!cw.floods || typeof fnRows === 'undefined' || !fnRows.length) return;
       fnRows.forEach(function(row){
         var X = row.lon * Math.PI / 180 * R2;
@@ -75081,6 +75122,12 @@ function initNowMicroTabs(){
     return window._rvMapsP;
   }
   window._rvMapsFetch = rvMapsFetch; // the nowcast lives in an earlier closure
+  /* warm the catalogue at load (user 2026-09-12): the CITY launch chooser was
+     deciding at ~3.8 s under boot load against a 2 s cap and falling through to
+     the city map. rvMapsFetch is memoised for two minutes, so this is one
+     request that every later caller reuses. Deferred a tick so it never sits on
+     the parse path. */
+  try { setTimeout(function(){ try { rvMapsFetch(); } catch (e){} }, 0); } catch (e){}
 
   // Shared CNEOS fireball fetch — the fireballs tab and the hazard dash card
   // both pulled the same 12-month feed at boot (the card via its own
