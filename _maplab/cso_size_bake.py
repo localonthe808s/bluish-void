@@ -39,6 +39,76 @@ CSO_JSON = os.path.join(REPO, 'city_cso.json')
 DEP_URL = 'https://data.cityofnewyork.us/resource/8rjn-kpsh.json?$limit=6000'
 DEC_URL = 'https://data.ny.gov/resource/ephi-ffu6.json?$limit=5000'
 NYC_COUNTIES = ('Kings', 'Queens', 'New York', 'Bronx', 'Richmond')
+# THE PLANT BEHIND THE PIPE (2026-09-12).  A combined sewer only spills because
+# the plant it runs to is full, so the plant's capacity is the mechanism -- and
+# neither outfall feed carries it.  NYS DEC's descriptive table does:
+# design flow in MGD, population served, year built, for all 15 of the plants
+# our `fac` list names (14 in the five boroughs + Yonkers Joint, which takes
+# part of the Bronx and sits in Westchester, so the county filter must include
+# it or Riverdale's pipes lose their plant).
+PLANT_URL = ("https://data.ny.gov/resource/g5a2-qa6a.json?$where=county%20in"
+             "('KINGS','QUEENS','NEW%20YORK','BRONX','RICHMOND','WESTCHESTER')&$limit=200")
+# Words that say what a plant IS rather than which one it is. Dropped before
+# matching, because the two agencies abbreviate them differently in every row
+# ("WATER POLL CNTL PLT" / "WPCP" / "WASTEWATER TREATMENT PL").
+_PLANT_NOISE = {'NYC', 'DEP', 'WATER', 'POLL', 'POLLUTION', 'CNTL', 'CONTROL', 'CTL',
+                'CONTR', 'CNTRL', 'PLT', 'PLANT', 'PL', 'WPCP', 'WPCF', 'WWTP',
+                'WASTEWATER', 'TREATMENT', 'TRT', 'WORKS', 'JOINT', 'MUNICIPAL',
+                'SEWAGE', 'CO', 'SEWER', 'DIST', 'CENTER'}
+
+
+def _plant_tokens(s):
+    """'Tallmans Island WPCP' -> ['TALLMAN','ISLAND'].
+
+    SINGULARISE PER WORD, not on the joined string.  We write "Tallmans Island"
+    and "Wards Island"; DEC writes "TALLMAN ISLAND" and "WARD ISLAND".  Stripping
+    a trailing S from the collapsed form does nothing (it ends in D) and both
+    plants silently fall out of the join -- which is exactly what happened on the
+    first attempt, 13 of 15 instead of 15.
+    """
+    out = []
+    for w in re.findall(r'[A-Z0-9]+', str(s or '').upper().replace("'", '')):
+        if w in _PLANT_NOISE:
+            continue
+        out.append(re.sub(r'S$', '', w))
+    return out
+
+
+def plant_table(fac):
+    """-> [{f: design flow MGD, pop: people served, yr: year built} | None] per `fac`.
+
+    Indexed to match `fac` exactly, so the renderer looks it up with the plant
+    index the pipe already carries (p[5]) and needs no name matching of its own.
+    A plant that does not match is None rather than a guess: the readout then
+    says nothing about capacity for its pipes, which is the honest failure.
+    """
+    try:
+        rows = get(PLANT_URL)
+    except Exception as e:                      # the sizes are the point; a plant
+        print(f'  ! plant table unavailable ({e}) -- capacities left out')
+        return [None] * len(fac)
+    out = []
+    for name in fac:
+        tf = _plant_tokens(name)
+        hit = None
+        for r in rows:
+            tr = _plant_tokens(r.get('facility_name'))
+            if tf and tr and tf[0] == tr[0] and (len(tf) < 2 or len(tr) < 2 or tf[1] == tr[1]):
+                hit = r
+                break
+        if hit is None:
+            print(f'  ! no plant row for {name!r}')
+            out.append(None)
+            continue
+        def num(v):
+            try:
+                return round(float(v), 1)
+            except Exception:
+                return None
+        out.append({'f': num(hit.get('design_flow')),
+                    'pop': int(float(hit.get('population_served') or 0)) or None,
+                    'yr': (hit.get('year_built') or None)})
+    return out
 
 
 def get(url):
@@ -145,11 +215,33 @@ def main():
         dec_at[(round(float(r['latitude']), 5), round(float(r['longtitude']), 5))] = r
 
     sizes, widths, idx_of = [], [], {}
+    # WHERE THE PIPE IS, in street terms.  DEP's `location` is populated for 414
+    # of its 415 CSO rows ("W 255TH STREET (REG # R-3)", "750' n/o W 261st
+    # Street") and we were already fetching it for the size and throwing it
+    # away.  It is the one question the readout could not answer: a dot on the
+    # water with no address.  Deduped like the sizes, since the regulator
+    # numbers repeat across pipes.
+    locs, loc_idx = [], {}
     stats = collections.Counter()
     unmatched = []
 
+    def set_loc(row):
+        """-> index into `locs` for this DEP row's address, or -1."""
+        s = re.sub(r'\s+', ' ', str(row.get('location') or '').strip())
+        if not s:
+            return -1
+        if s not in loc_idx:
+            loc_idx[s] = len(locs)
+            locs.append(s)
+        return loc_idx[s]
+
     for p in pipes:
         lon, lat, oid = p[0], p[1], p[3]
+        # Row grew to 9 on 2026-09-12 (p[8] = address index). Normalise first so
+        # every later assignment can index straight in, and so a rerun over an
+        # already-widened file behaves the same as one over the old 8-wide rows.
+        while len(p) < 9:
+            p.append(-1)
         # nearest DEP pipe, and whether the ids agree
         best, bd = None, 1e9
         for s in dep:
@@ -179,6 +271,11 @@ def main():
                 stats['rejected: id clash, far'] += 1
             else:
                 stats['rejected: no DEP pipe near'] += 1
+        # The address comes from the SAME matched row as the size, and it is
+        # taken whether or not the size parses -- an unparseable `of_size`
+        # string says nothing about whether DEP knows the street.
+        if ok and best is not None:
+            p[8] = set_loc(best)
         if ok and best.get('of_size'):
             parsed = parse_size(best['of_size'])
             if parsed:
@@ -208,6 +305,8 @@ def main():
             d = feet(lat, lon, float(s['latitude']), float(s['longitude']))
             if d < ad:
                 ad, alt = d, s
+        if alt is not None and ad <= 10 and p[8] < 0:
+            p[8] = set_loc(alt)                 # same structure, 10 ft away
         if alt is not None and ad <= 10 and alt.get('of_size'):
             parsed = parse_size(alt['of_size'])
             if parsed:
@@ -230,6 +329,9 @@ def main():
         print(f'    {k:<24} {v:>4}')
     print(f'\n  SIZED: {stats["sized"]} / {len(pipes)} '
           f'({100*stats["sized"]/len(pipes):.0f}%)   distinct size labels: {len(sizes)}')
+    n_loc = sum(1 for p in pipes if len(p) > 8 and p[8] >= 0)
+    print(f'  ADDRESSED: {n_loc} / {len(pipes)} '
+          f'({100*n_loc/len(pipes):.0f}%)   distinct addresses: {len(locs)}')
     if unmatched:
         print(f'  left unsized (first 8 of {len(unmatched)}):')
         for oid, w, d in unmatched[:8]:
@@ -242,6 +344,8 @@ def main():
         # count (one row claims 72 barrels and is surely a typo), and not on
         # height, because the mouth width is what a plan view can honestly show.
         cso['szw'] = widths
+        cso['loc'] = locs                       # p[8] indexes this
+        cso['plant'] = plant_table(fac)         # indexed like `fac`, p[5]
         json.dump(cso, open(CSO_JSON, 'w'), separators=(',', ':'))
         print(f'\n  wrote {CSO_JSON} ({os.path.getsize(CSO_JSON):,} bytes)')
     else:
