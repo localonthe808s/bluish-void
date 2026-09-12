@@ -50038,18 +50038,73 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   var _CITY_TILES = { z1:'/nyc-basemap-ink.jpg?v=5',
     z2:{ nw:'/nyc-basemap-ink-z2-nw.jpg?v=2', ne:'/nyc-basemap-ink-z2-ne.jpg?v=2',
          sw:'/nyc-basemap-ink-z2-sw.jpg?v=2', se:'/nyc-basemap-ink-z2-se.jpg?v=2' } };
-  var _cityTileCache = {};
+  /* BOUNDED SINCE 2026-09-12.  This was a plain object that only ever grew:
+     every entry is a decoded 1100x967 tile, about 4.25 MB of bitmap, and
+     nothing ever pruned it.  Today the whole pyramid is 85 tiles so a session
+     self-limits around 361 MB — survivable, and the only reason this has not
+     bitten yet.  The deep-zoom ladder (z5 + z6, 1,365 tiles) would take the
+     ceiling to 5.8 GB, which is a mobile tab CRASH rather than a slowdown, so
+     the cap ships first and on its own.  40 entries is ~170 MB, and a compose
+     only ever wants 9-25 tiles, so the working set still fits with room over.
+
+     A Map, because its insertion order IS recency order: re-setting a key on a
+     hit moves it to the end, so the oldest key is always the first one and
+     eviction is O(1) without a second structure.
+
+     EVICTION DOES NOT CANCEL AN IN-FLIGHT FETCH.  A compose holds its own
+     reference to the promise it asked for, so dropping the entry mid-flight
+     costs at worst a re-fetch later, which the browser's own HTTP cache
+     usually answers without touching the network. */
+  var CITY_TILE_LRU = 64;
+  var _cityTileCache = new Map();     // url -> { p: Promise<Image>, g: generation }
+  var _cityTileGen = 0;
+  /* A FLAT CAP CANNOT WORK HERE, and the arithmetic is worth writing down.
+     compose() walks grid x grid and keeps every cell the view intersects, and
+     when the trees tab is on it asks for a SECOND tile per cell. Simulated over
+     the real box (77,550 m, 1100 px tiles, dpr clamped to 2) across the whole
+     zoom range: the worst single compose is 36 tiles on a 1132 px desktop, 72
+     with trees on, and 128 on an 1800 px monitor at the z4 boundary — the full
+     8x8 grid plus its tree twin. Any cap small enough to be worth having is
+     therefore SMALLER than one compose's own working set, and a plain LRU would
+     have each compose evicting the tiles it was still assembling and re-fetching
+     them on the next pass.
+     So eviction is generation-aware: compose() bumps the generation as it
+     starts, and tiles requested by the CURRENT generation are never evicted.
+     The cache overshoots the cap for the life of that compose and settles back
+     on the next one. (Eviction never breaks a compose in any case — Promise.all
+     holds its own references — it only costs a re-fetch later.) */
+  function _cityTileNewGen(){ _cityTileGen++; }
   function _cityTile(url){
-    if (!_cityTileCache[url]) _cityTileCache[url] = new Promise(function(res, rej){
+    var hit = _cityTileCache.get(url);
+    if (hit){
+      hit.g = _cityTileGen;                                        // still wanted
+      _cityTileCache.delete(url); _cityTileCache.set(url, hit);    // touch: to the end
+      return hit.p;
+    }
+    var e = { p: null, g: _cityTileGen };
+    e.p = new Promise(function(res, rej){
       var im = new Image();
       im.onload = function(){ res(im); };
       /* a transient failure must not be cached forever — drop the entry so
          the next compose retries the tile (perf/reliability 2026-08-31) */
-      im.onerror = function(){ delete _cityTileCache[url]; rej(); };
+      im.onerror = function(){ _cityTileCache.delete(url); rej(); };
       im.src = url;
     });
-    return _cityTileCache[url];
+    _cityTileCache.set(url, e);
+    if (_cityTileCache.size > CITY_TILE_LRU){
+      /* oldest first; deleting during iteration is safe on a Map */
+      var it = _cityTileCache.keys(), k;
+      while (_cityTileCache.size > CITY_TILE_LRU && !(k = it.next()).done){
+        var old = _cityTileCache.get(k.value);
+        if (old && old.g === _cityTileGen) continue;   // this compose's own
+        _cityTileCache.delete(k.value);
+      }
+    }
+    return e.p;
   }
+  /* harness hook, like _cwMapState: the cap is invisible from outside
+     otherwise, and "did it actually stop growing" is the whole question */
+  window._cityTileCacheSize = function(){ return _cityTileCache.size; };
   function _cityZoomLive(){ return fcastState.range === 'live' && fcastState.area === 'city-nyc'; }
   function _cityZoomApply(){
     var t = 'translate(-50%,-50%) translate(' + _cityZoom.tx.toFixed(1) + 'px,'
@@ -50640,6 +50695,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     }
     function compose(done){
       var v = cw.view, B = _cityBoxCfg();
+      /* every tile asked for from here on belongs to THIS compose and is exempt
+         from LRU eviction until the next one starts — see _cityTile */
+      _cityTileNewGen();
       cwComposeBusy++;
       cwZoomLoadSync();
       var _cb = done, _finished = false;
