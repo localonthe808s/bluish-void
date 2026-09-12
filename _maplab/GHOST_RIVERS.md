@@ -760,7 +760,7 @@ visible mask is.
 
 # River depth
 
-`bathy/river_depth.json` — 1,248 depth-band polygons from **NCEI's CUDEM topobathy
+`bathy/river_depth.json` — 1,983 depth-band polygons from **NCEI's CUDEM topobathy
 model** (`gis.ngdc.noaa.gov/.../DEM_mosaics/DEM_all/ImageServer`), contoured at 1, 2, 4,
 7, 10, 15, 20 and 30 m. Drawn over today's water and clipped to it, each band darkening the
 navy a step, so a dredged channel reads as a trench and a bay as a shelf.
@@ -772,6 +772,32 @@ read as land. Seven creek boxes (Gowanus, Newtown, Flushing, Bronx River, Coney 
 Creek, Alley Creek, Fresh Kills) are pulled separately at the model's native 3.2 m and
 come later in the file so they win on overlap. At that resolution Gowanus reads 17 m,
 Newtown 27 m, Alley Creek 4 m.
+
+**The rivers too (2026-09-12).** The East River, Harlem and Hudson were still the 12.7 m
+harbour grid — the creeks got native treatment, the main channels never did. They are now
+re-pulled in ten boxes at the model's native 3.4 m by `river_depth_bake.py`, which is this
+recipe as a committed file: the original bake was run in-session and lost, and had to be
+reconstructed from this page. The channel reads 46.9 m off the Battery, 36.6 m at Hell
+Gate, 35.8 m at Throgs Neck — structure a 12.7 m cell averages flat.
+
+Two things that bake has to get right, both found by measurement rather than by eye:
+
+- **Bands need their holes.** A band around a deep core is an ANNULUS. A single filled
+  ring would cover the core, so that water would sit inside two bands and be veiled twice.
+  Each connected component therefore ships as a polygon with its interiors, rings sorted
+  by winding, and `drawDepth`'s existing `evenodd` fill handles it — the same way the
+  bight features already work.
+- **Boxes need exclusive claims.** The ten boxes follow two winding channels and overlap:
+  22% of the pulled area was double-counted, the Battery sitting in both a Hudson box and
+  an East River box, the Harlem box inside the upper Hudson box. Each box now keeps only
+  ground no earlier box claimed, so two pulls never veil the same water. Order in `BOXES`
+  is the priority.
+
+Verified by probing real water pixels: 0.1% fall in more than one band, 99.4% in the depth
+class the raster actually says, and no point is covered by two river sources. Note the
+simplify tolerance is set by that probe, not by looks — 4.5e-5 leaves 0.6% double-veiled,
+1.5e-5 leaves 0.0%. Bands still stack over `harbour`, which is pre-existing behaviour the
+creeks share (a point in the Gowanus sits in 2–10 committed polygons).
 
 **Caveat:** CUDEM is a model stitched from surveys of different dates. Channel depths are
 real survey data, but it will not reflect dredging since its sources were compiled.
