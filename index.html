@@ -50084,6 +50084,13 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     var e = { p: null, g: _cityTileGen };
     e.p = new Promise(function(res, rej){
       var im = new Image();
+      /* A CDN TILE MUST BE CORS-LOADED. The deep rungs come from R2, and an
+         image fetched cross-origin without this TAINTS the canvas it is drawn
+         into — compose() ends with cv.toBlob(), which then throws and takes the
+         whole map with it rather than degrading. With crossOrigin set, a
+         missing header fails the load loudly instead, and a failed tile already
+         drops out harmlessly. */
+      if (url.indexOf('http') === 0) im.crossOrigin = 'anonymous';
       im.onload = function(){ res(im); };
       /* a transient failure must not be cached forever — drop the entry so
          the next compose retries the tile (perf/reliability 2026-08-31) */
@@ -50105,6 +50112,38 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   /* harness hook, like _cwMapState: the cap is invisible from outside
      otherwise, and "did it actually stop growing" is the whole question */
   window._cityTileCacheSize = function(){ return _cityTileCache.size; };
+  /* THE DEEP RUNGS (z5 = 4.41 m/px, z6 = 2.20) live on R2, not in the repo:
+     386 tiles, ~150 MB, against a repo already at 359 MB on GitHub Pages.
+     Only the boroughs are baked — ocean and New Jersey have nothing a deeper
+     render can reveal — so most of the grid has NO deep tile, and the manifest
+     is what keeps the widget from asking for them. Without it every absent cell
+     is re-requested on every compose forever, because _cityTile drops failed
+     entries on purpose so that transient failures retry.
+     The path carries its own version: a re-bake ships as v2 rather than trying
+     to purge a CDN. */
+  var CITY_DEEP_BASE = 'https://cdn.bluishvoid.com/basemap/ink/v1';
+  var _cityDeepMan = null, _cityDeepReq = 0;
+  function _cityDeepReady(){
+    if (_cityDeepMan) return true;
+    if (!_cityDeepReq){
+      _cityDeepReq = 1;
+      fetch(CITY_DEEP_BASE + '/ink-pyramid-manifest.json')
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          var m = {};
+          Object.keys(j || {}).forEach(function(k){
+            if (Array.isArray(j[k])) m[k] = new Set(j[k]);     // 'r,c' strings
+          });
+          _cityDeepMan = m;
+        })
+        .catch(function(){ _cityDeepReq = 0; });   // let a later compose retry
+    }
+    return false;                                  // this compose stays shallow
+  }
+  function _cityDeepHas(level, r, c){
+    var s = _cityDeepMan && _cityDeepMan[String(level)];
+    return !!s && s.has(r + ',' + c);
+  }
   function _cityZoomLive(){ return fcastState.range === 'live' && fcastState.area === 'city-nyc'; }
   function _cityZoomApply(){
     var t = 'translate(-50%,-50%) translate(' + _cityZoom.tx.toFixed(1) + 'px,'
@@ -50718,9 +50757,15 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
          fetches all 16 z3 tiles whenever grid >= 2, so they were being
          downloaded and then not used. */
       var TILEPX = 1100, BWm = B.X1 - B.X0;
-      var grid = mppNeed < BWm / 4 / TILEPX ? 8
+      var grid = mppNeed < BWm / 16 / TILEPX ? 32
+               : mppNeed < BWm / 8 / TILEPX ? 16
+               : mppNeed < BWm / 4 / TILEPX ? 8
                : mppNeed < BWm / 2 / TILEPX ? 4
                : mppNeed < BWm / TILEPX ? 2 : 1;
+      /* The deep levels need the manifest to know which tiles exist. Until it
+         lands, stay on z4 — the first deep compose asks for it and the next one
+         gets the sharper picture, rather than firing hundreds of 404s. */
+      if (grid >= 16 && !_cityDeepReady()) grid = 8;
       /* climbing the ladder: at z2 depth, pre-warm z3 for the next push.
          z4 is NEVER warmed — 64 tiles, and a zoom that deep needs about four
          of them. Only what the view intersects is ever fetched. */
@@ -50733,9 +50778,17 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         if (!(tb.X1 > v.X0 && tb.X0 < v.X1 && tb.Y1 > v.Y0 && tb.Y0 < v.Y1)) continue;
         /* the CORE map only — story layers (floods, radar) are their own
            full-box registered elements now, never baked into the compose */
-        var suffix = grid === 1 ? '' : grid === 2 ? '-z2-' + (gr ? 's' : 'n') + (gq ? 'e' : 'w')
-                   : grid === 4 ? '-z3-r' + gr + 'c' + gq : '-z4-r' + gr + 'c' + gq;
-        var tu = '/nyc-basemap-ink-dry' + suffix + '.png?v=9';
+        /* grid 1,2,4,8,16,32 -> z1..z6. The deep two are on R2 and exist only
+           over the boroughs, so a cell the manifest does not list is skipped and
+           the full-extent z1 image underneath shows through — which is what
+           those stretches of water look like today in any case. */
+        var lvl = grid === 1 ? 1 : grid === 2 ? 2 : grid === 4 ? 3
+                : grid === 8 ? 4 : grid === 16 ? 5 : 6;
+        if (lvl >= 5 && !_cityDeepHas(lvl, gr, gq)) continue;
+        var suffix = lvl === 1 ? '' : lvl === 2 ? '-z2-' + (gr ? 's' : 'n') + (gq ? 'e' : 'w')
+                   : '-z' + lvl + '-r' + gr + 'c' + gq;
+        var tu = lvl >= 5 ? (CITY_DEEP_BASE + '/nyc-basemap-ink-dry' + suffix + '.png')
+                          : ('/nyc-basemap-ink-dry' + suffix + '.png?v=9');
         (function(bb, uu){
           /* a missing tile drops out instead of blanking the whole map */
           jobs.push(_cityTile(uu).then(function(im){ return { im: im, b: bb, z: 0 }; },
@@ -50754,7 +50807,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
            lost in their own colour. Past the depth where the points load, the
            raster is simply not composed: one representation of the trees at a
            time, the picture far out and the trees themselves near in. */
-        if (cw.trees && (v.X1 - v.X0) > 7000) (function(bb, uu){
+        /* lvl <= 4: there are no trees tiles at z5/z6, and at the shallow end of
+           z5 the view is still ~20 km wide, i.e. past the 7 km threshold — so
+           without this clamp the compose asks for tiles that were never baked */
+        if (cw.trees && lvl <= 4 && (v.X1 - v.X0) > 7000) (function(bb, uu){
           jobs.push(_cityTile(uu).then(function(im){ return { im: im, b: bb, z: 1 }; },
                                        function(){ return null; }));
         })(tb, '/nyc-basemap-trees' + suffix + '.png?v=8');
