@@ -29,6 +29,7 @@ Only `bight` features are multi-ring and carry `a`; nothing here touches those.
 """
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -277,6 +278,68 @@ def bake_box(name, w, s, e, n, tmpdir, label='', clip=None):
     return feats
 
 
+def bake_mosaic(tmpdir):
+    """Contour the rivers as ONE grid rather than ten separately-contoured boxes.
+
+    NOT THE DEFAULT, AND HERE IS THE HONEST REASON. This was written to remove a
+    seam at the box claim edges -- equal-separation transects put |delta alpha|
+    across those edges at 1.61x the interior control. That finding was WRONG.
+    Mosaicking barely moved the number (1.60x), and the split still showed
+    "internal" joins at 1.57x even though a single contour pass leaves no
+    internal boundary in the geometry at all. A placebo control settled it:
+    lines offset a few hundred metres from any real edge score 1.38x against
+    1.46x for the real edges, with random interior pairs at 1.00x. The boxes
+    were drawn to hug the channels, so their edges cut ACROSS the river at steep
+    depth gradients while the control sampled flat water -- the ratio measured
+    my sampling, not a discontinuity.
+
+    So there is no seam to fix, and `--bake` (ten boxes with exclusive claims)
+    remains the default. This mode is kept because it is genuinely simpler --
+    one contour pass, one `rivers` source, 598 features against 725, and the
+    channel comes out as one connected band instead of fragments cut at box
+    lines -- but it buys nothing measurable, so it does not ship.
+
+    Two details that matter. The strips are cut ON the mosaic lattice, so they
+    paste at integer offsets -- the hand-written boxes were off by up to 0.23 px,
+    which would have smeared the joins they were meant to remove. And the result
+    is clipped to the union of the corridor boxes, so this stays a river re-pull
+    instead of quietly re-contouring the whole harbour rectangle at native.
+    """
+    W0 = min(w for _, w, _, _, _ in BOXES)
+    E0 = max(e for _, _, _, e, _ in BOXES)
+    S0 = min(s for _, _, s, _, _ in BOXES)
+    N0 = max(n for _, _, _, _, n in BOXES)
+    W = int(round((E0 - W0) / NATIVE))
+    H = int(round((N0 - S0) / NATIVE))
+    print('mosaic %d x %d px (%.0f MB), %.4f,%.4f -> %.4f,%.4f'
+          % (W, H, W * H * 4 / 1048576, W0, S0, E0, N0))
+
+    mosaic = np.full((H, W), -9999.0, dtype='f4')
+    STRIP = 3024                      # px per request; H*STRIP*4 ~ 95 MB
+    x = k = 0
+    while x < W:
+        wpx = min(STRIP, W - x)
+        sw = W0 + x * NATIVE
+        se = W0 + (x + wpx) * NATIVE
+        path = os.path.join(tmpdir, 'mosaic_%02d.tif' % k)
+        if not (os.path.exists(path) and os.path.getsize(path) > 1024):
+            fetch(sw, S0, se, N0, path)
+        arr = tifffile.imread(path).astype('f4')
+        hh, ww = arr.shape
+        mosaic[0:min(hh, H), x:x + min(ww, W - x)] = -arr[0:min(hh, H), 0:min(ww, W - x)]
+        print('  strip %d  cols %5d..%-5d  got %dx%d' % (k, x, x + wpx, ww, hh))
+        x += wpx
+        k += 1
+
+    mosaic[~np.isfinite(mosaic)] = -9999
+    feats = bands(mosaic, W0, S0, E0, N0, 'rivers')
+    print('  contoured once: %d features before corridor clip' % len(feats))
+    corridor = unary_union([shp_box(w, s, e, n) for _, w, s, e, n in BOXES])
+    feats = clip_features(feats, corridor)
+    print('  after corridor clip: %d features' % len(feats))
+    return feats
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--dry', action='store_true')
@@ -285,6 +348,10 @@ def main():
                     help='check one veil per pixel and correct class, on a real box')
     ap.add_argument('--probe-n', type=int, default=4000)
     ap.add_argument('--bake', action='store_true')
+    ap.add_argument('--mosaic', action='store_true',
+                    help='contour the rivers as ONE grid (no internal claim edges)')
+    ap.add_argument('--seam', action='store_true',
+                    help='measure veil discontinuity at the box edges vs a control')
     ap.add_argument('--merge', action='store_true')
     ap.add_argument('--tmp', default='/tmp')
     a = ap.parse_args()
@@ -380,6 +447,88 @@ def main():
               % (right_class, 100 * right_class / max(1, exactly_one)))
         return
 
+    if a.seam:
+        # EQUAL-SEPARATION TRANSECTS, the same instrument the bight seam used.
+        # A box edge is invisible to feature counts and easy to talk yourself
+        # out of by eye, because the data really does get sharper across it.
+        # The honest test is to sample pairs straddling an edge, sum the alpha
+        # of every band containing each point (what drawDepth actually stacks),
+        # and compare against pairs the same distance apart in the interior.
+        from shapely.geometry import Point
+        from shapely.strtree import STRtree
+        doc = json.load(open(TARGET))
+        polys, alph = [], []
+        for f in doc['features']:
+            p = f['properties']
+            if p.get('src') == 'bight':          # drawn to its own canvas
+                continue
+            c = f['geometry']['coordinates']
+            try:
+                g = Polygon(c[0], c[1:])
+            except Exception:                    # noqa: BLE001 - degenerate ring
+                continue
+            if not g.is_valid:
+                g = g.buffer(0)
+            polys.append(g)
+            alph.append(p['a'] if p.get('a') is not None
+                        else 0.10 + 0.14 * min(1.0, math.log(1 + p['d']) / math.log(31)))
+        tree = STRtree(polys)
+
+        def veil(pt):
+            return sum(alph[i] for i in tree.query(pt) if polys[i].contains(pt))
+
+        OFF = 0.00035                            # ~30 m either side
+        rng = np.random.default_rng(5)
+        seam, ctl = [], []
+        for _, w, s, e, n in BOXES:
+            for _ in range(400):
+                if rng.random() < 0.5:
+                    x = w if rng.random() < 0.5 else e
+                    y = rng.uniform(s, n)
+                    pa, pb = Point(x - OFF, y), Point(x + OFF, y)
+                else:
+                    y = s if rng.random() < 0.5 else n
+                    x = rng.uniform(w, e)
+                    pa, pb = Point(x, y - OFF), Point(x, y + OFF)
+                va, vb = veil(pa), veil(pb)
+                if va > 0 and vb > 0:
+                    seam.append(abs(va - vb))
+        for _ in range(4000):
+            _, w, s, e, n = BOXES[rng.integers(len(BOXES))]
+            x, y = rng.uniform(w, e), rng.uniform(s, n)
+            th = rng.uniform(0, 2 * math.pi)
+            pa = Point(x, y)
+            pb = Point(x + OFF * math.cos(th), y + OFF * math.sin(th))
+            va, vb = veil(pa), veil(pb)
+            if va > 0 and vb > 0:
+                ctl.append(abs(va - vb))
+        seam, ctl = np.array(seam), np.array(ctl)
+        print('across box edges : n=%d  mean %.4f  p90 %.4f'
+              % (len(seam), seam.mean(), np.percentile(seam, 90)))
+        print('control, same gap: n=%d  mean %.4f  p90 %.4f'
+              % (len(ctl), ctl.mean(), np.percentile(ctl, 90)))
+        r = seam.mean() / max(1e-9, ctl.mean())
+        print('ratio %.2f (edges vs interior control)' % r)
+        # THIS RATIO ALONE PROVES NOTHING, and reading it as a seam cost a whole
+        # rebake. The boxes hug the channels, so their edges cut ACROSS the river
+        # at steep depth gradients while the control samples mostly flat water:
+        # the ratio runs ~1.5x with no discontinuity present anywhere. Measured
+        # placebo -- lines offset 200-600 m from any real edge -- scored 1.38x
+        # against 1.46x for the real edges. Only an excess OVER a placebo counts.
+        print('NOT a verdict: box edges cut across the channel, so this runs ~1.5x')
+        print('even with no discontinuity. Compare against placebo lines offset')
+        print('from the edges before concluding anything (measured: 1.46x real vs')
+        print('1.38x placebo vs 1.00x control -> no seam).')
+        return
+
+    if a.mosaic:
+        feats = bake_mosaic(a.tmp)
+        json.dump({'type': 'FeatureCollection', 'features': feats},
+                  open(BANDS_OUT, 'w'), separators=(',', ':'))
+        print('\nwrote %s: %d features, %.2f MB'
+              % (BANDS_OUT, len(feats), os.path.getsize(BANDS_OUT) / 1048576))
+        return
+
     if a.bake:
         feats = []
         print('pulling %d boxes at native %.1f m:' % (len(BOXES), NATIVE * 111320))
@@ -404,7 +553,7 @@ def main():
         doc = json.load(open(TARGET))
         feats = doc['features']
         new = json.load(open(BANDS_OUT))['features']
-        names = {n for n, *_ in BOXES}
+        names = {n for n, *_ in BOXES} | {'rivers'}
         feats = [f for f in feats if f['properties'].get('src') not in names]  # idempotent
         # Order is precedence: later features paint over earlier ones. The new
         # river bands must beat `harbour`, but must NOT displace the creeks --

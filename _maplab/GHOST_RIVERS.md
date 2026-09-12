@@ -799,6 +799,20 @@ simplify tolerance is set by that probe, not by looks — 4.5e-5 leaves 0.6% dou
 1.5e-5 leaves 0.0%. Bands still stack over `harbour`, which is pre-existing behaviour the
 creeks share (a point in the Gowanus sits in 2–10 committed polygons).
 
+**A seam that was not there.** Transects across the box claim edges came back at 1.61x the
+interior control, which read as a discontinuity, so the rivers were re-baked as a single
+9072x7841 mosaic contoured in one pass (`--mosaic`, still in the script). It barely moved
+the number — 1.60x — and the split still put "internal" joins at 1.57x even though one
+contour pass leaves no internal boundary in the geometry to begin with. A signal that
+outlives the removal of its cause is the instrument. The placebo control: lines offset
+200–600 m from any real edge score 1.38x, against 1.46x for the real edges and 1.00x for
+random interior pairs. The boxes hug the channels, so their edges cut ACROSS the river at
+steep depth gradients while the control sampled flat water — the ratio was measuring where
+I sampled. There is no seam, the ten-box bake with exclusive claims stayed, and the mosaic
+was reverted rather than shipped on a disproven premise. `--seam` now refuses to give a
+verdict without a placebo. What WAS real, and stands, is the overlap: 22% double-counted
+pulled area, up to 11 bands over one point, fixed by the exclusive claims above.
+
 **Caveat:** CUDEM is a model stitched from surveys of different dates. Channel depths are
 real survey data, but it will not reflect dredging since its sources were compiled.
 
