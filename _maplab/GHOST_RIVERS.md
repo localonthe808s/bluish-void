@@ -813,6 +813,31 @@ was reverted rather than shipped on a disproven premise. `--seam` now refuses to
 verdict without a placebo. What WAS real, and stands, is the overlap: 22% double-counted
 pulled area, up to 11 bands over one point, fixed by the exclusive claims above.
 
+**The Atlantic was flat for a different reason (2026-09-12).** Asked to improve the ocean
+showing in the harbour, the first three guesses were all wrong, and the measurements are
+worth keeping because of it. The view declares `bathy/bathy_atlantic.json`, but that file's
+shallowest band is 200 m and **0 of its 531 features touch the CITY box** — it draws nothing
+here. The offshore is not short of data either: 353 bands cover the strip (harbour 303,
+coney 24, freshkills 26, and no `bight` at all). Nor is it short of classes — CUDEM puts
+that water at median 10.1 m, p90 21.1 m, max 32.9 m, which the existing ladder already
+splits into five populated bands (4–7: 21%, 7–10: 20%, 10–15: 23%, 15–20: 16%, 20–30: 13%,
+with 30/45/60 empty).
+
+It was short of CONTRAST. Against the shipped veil `rgba(4,10,40)` over WATER_DEEP
+`#17457F`, the old `0.10 + 0.14*log(1+d)/log(31)` put **adjacent classes 0–2 RGB apart**,
+and the 4–20 m range holding 81% of the offshore water spanned **5 RGB in total**. The
+smallest step the eye catches on a dark navy is ~2–3 RGB, so the shelf washed into one tone
+however good the geometry beneath it was — the identical saturation the bight hit, which is
+why bight features carry their own `a`.
+
+`drawDepth` now carries an explicit `DEPTH_ALPHA` ladder — 1:.10 2:.14 4:.19 7:.25 10:.32
+15:.40 20:.49 30:.60 — tuned to the water actually in frame, spending its whole range on
+1–30 m rather than reserving headroom for 45/60 m classes that hold 0.00% of it. 4–20 m now
+spans **26 RGB**. It is a renderer change, not a data one, so nothing needs re-baking;
+`properties.a` still wins, so the bight keeps its hand-tuned values; and the formula remains
+as the fallback for any class off the ladder (currently unreachable — every formula-driven
+feature is one of 1/2/4/7/10/15/20/30).
+
 **Caveat:** CUDEM is a model stitched from surveys of different dates. Channel depths are
 real survey data, but it will not reflect dredging since its sources were compiled.
 
