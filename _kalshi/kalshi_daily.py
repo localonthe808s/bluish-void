@@ -1167,7 +1167,15 @@ def _cli_parse(text):
     seg = text.split('TEMPERATURE', 1)
     if len(seg) < 2:
         return None
-    m = re.search(r'MAXIMUM\s+(MM|-?\d+)\s+(\d{1,2}:?\d{2}\s*(?:AM|PM))?', seg[1])
+    # A RECORD HIGH IS FLAGGED "103R" (2026-09-13). The flag sits on the number
+    # with no space, and a pattern that wanted whitespace right after the digits
+    # matched nothing -- so every product carrying a record was silently
+    # dropped: Austin 09-10 (100R) and 09-11 (103R), Las Vegas 110R and 111R,
+    # both the 5 PM preliminary and the final each time. Austin's panel led
+    # with the 7 AM report's 81 all of 09-11 against a 103 settlement, and the
+    # day never had a parsed final. Heat-wave days are exactly the ones that
+    # set records, so this bit the days that mattered most.
+    m = re.search(r'MAXIMUM\s+(MM|-?\d+)[A-Z*]?\s+(\d{1,2}:?\d{2}\s*(?:AM|PM))?', seg[1])
     if not m:
         return None
     val = None if m.group(1) == 'MM' else float(m.group(1))
@@ -1311,6 +1319,16 @@ def cli_read(cfg, deep=False):
             elif not better and p['final'] and old.get('final'):
                 oi, ni = old.get('issued'), p.get('issued')
                 better = bool(oi and ni and ni < oi)  # an EARLIER final wins
+            elif not better and not p['final'] and not old.get('final'):
+                # PRELIMINARIES ARE RUNNING MAXIMA. An office issues several a
+                # day (Austin: 7 AM, 4 PM, 5 PM), each carrying the day so far,
+                # so the NEWEST is the most complete one. Newest-first iteration
+                # used to be the only thing choosing it; a cache that persists
+                # between runs kept whichever preliminary it saw first, which
+                # for a 7 AM product is the overnight reading.
+                oi, ni = old.get('issued'), p.get('issued')
+                better = bool(oi and ni and ni > oi) or (
+                    not (oi and ni) and p['max'] > (old.get('max') or -999.0))
             if better:
                 mine[p['day']] = {'max': p['max'], 'final': p['final'],
                                   'issued': p.get('issued'), 'at': p.get('at')}
@@ -2845,6 +2863,22 @@ def compose_run_review(cfg, record):
     vm = record.get('vs_market') or {}
     if vm.get('n', 0) >= 3:
         R.append('Head to head at noon over %d priced days: ours %d, the market %d.' % (vm['n'], vm.get('ours', 0), vm.get('market', 0)))
+    # the stated odds beside what happened, live days only, ours and the
+    # market's on the same days: the sentence that tells a hard week from a
+    # broken model (see tally). Under five days it is noise, and says nothing.
+    lv = record.get('live') or {}
+    if lv.get('n', 0) >= 5 and lv.get('said') is not None:
+        s_ = 'Live, we said %d%% and hit %d%%' % (round(100 * lv['said']), round(100.0 * lv['hits'] / lv['n']))
+        if lv.get('market_n') and lv.get('market_said') is not None:
+            s_ += '; the market said %d%% and hit %d%% on the same days' % (
+                round(100 * lv['market_said']), round(100.0 * lv['market_hits'] / lv['market_n']))
+        gap = lv['said'] - lv['hits'] / float(lv['n'])
+        word = lambda g: ('calibrated' if abs(g) < 0.08 else
+                          ('overconfident' if g > 0 else 'underconfident') + ' by %d points' % round(abs(100 * g)))
+        s_ += ' \u2014 %s' % word(gap)
+        if lv.get('market_n') and lv.get('market_said') is not None:
+            s_ += ', the market %s' % word(lv['market_said'] - lv['market_hits'] / float(lv['market_n']))
+        R.append(s_ + '.')
     return R
 
 
@@ -3920,11 +3954,24 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     def tally(rows):
         e = [h['err'] for h in rows if h.get('err') is not None]
         inner = [h for h in rows if is_interior(h)]
+        # WHAT WAS SAID NEXT TO WHAT HAPPENED (2026-09-13). A hit rate on its
+        # own cannot say whether a bad week was the atmosphere or the model:
+        # the first week live hit 11 of 24 city-days against ~74% backtested,
+        # and the only way to read that was the stated odds -- ours averaged
+        # 61%, the market's 69% on the same days, and the market hit 58%. Both
+        # sides fell ~12 points short, which is a hard week, not a broken model.
+        ps = [h['lock']['p'] for h in rows if (h.get('lock') or {}).get('p') is not None]
+        mk = [h for h in rows if (h.get('lock') or {}).get('market_p') is not None]
         return {'n': len(rows), 'hits': sum(1 for h in rows if h.get('hit')),
                 'mae': round(statistics.mean(abs(x) for x in e), 2) if e else None,
                 'bias': round(statistics.mean(e), 2) if e else None,
                 'interior_n': len(inner),
-                'interior_hits': sum(1 for h in inner if h.get('hit'))}
+                'interior_hits': sum(1 for h in inner if h.get('hit')),
+                'said': round(statistics.mean(ps), 3) if ps else None,
+                'market_n': len(mk),
+                'market_hits': sum(1 for h in mk if h.get('market_hit')),
+                'market_said': (round(statistics.mean(h['lock']['market_p'] for h in mk), 3)
+                                if mk else None)}
 
     live = [h for h in scored if not h.get('backtest')]
     record = tally(scored)

@@ -31,7 +31,7 @@ import rescore as R               # noqa: E402
 OUT = os.path.join(HERE, 'tuned.json')
 KNOBS = collections.OrderedDict([
     ('skill',      [False, True]),
-    ('bias_hl',    [None, 7, 14]),
+    ('bias_hl',    [None, 7, 14, 4]),    # 4 added 2026-09-13: Austin ran 1.1 degF cold after a -2.7 correction for eight straight September days; let the guardrails judge a faster window
     ('sd_mult',    [0.75, 1.0, 1.25]),
     ('bias_k',     [21, 30, 45]),        # K.BIAS_K, days in the rolling bias window
     ('swing_damp', [0.0, 0.05, 0.10]),   # K.SWING_DAMP, how much of a warm-up the models overdo
@@ -49,7 +49,9 @@ def grown_lists(prev_lists, cur):
     lists = {k: list(v) for k, v in KNOBS.items()}
     for k, v in (prev_lists or {}).items():
         if k in lists and isinstance(v, list) and v:
-            lists[k] = v
+            # the stored list, plus any seed value added since it was written --
+            # otherwise a new candidate never reaches a city that already has a list
+            lists[k] = v + [x for x in lists[k] if x not in v]
     for k, (step, lo, hi) in STEP.items():
         vals = [x for x in lists[k] if x is not None]
         if not vals or cur.get(k) is None:
