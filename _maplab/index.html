@@ -964,9 +964,26 @@ function drawDepth(ctx, geo, proj, waterMask, W, H, fade, seam){
    anything else on the map, which reads the same over navy and over orange; the pipe mouth
    is a bright copper point on top of it. Dark field, bright source — the contrast does the
    work and no hue has to compete with the land. */
-var SEWER_DARK  = '#2A1B0B',   // the slick
-    SEWER_EDGE  = '#D01B12',   // its contour: red, so the slick reads as a warning
-    SEWER_MOUTH = '#FFB320';   // the pipe itself
+/* THE GREEN LIVES HERE NOW (2026-09-12). It used to be applied AFTER the bake:
+   a one-off pass over the 21 shipped PNGs on 2026-09-07 that was never committed,
+   so the recipe is gone and every rebake since would have produced a near-black
+   slick that the browser then ate. The site protects this layer with one test --
+   G>150 && B<70 && R<170 (index.html, the flood-blue remap) -- and near-black
+   fails it, so the blue-dominant branch would have turned the sewage stain into
+   flood water. Both values below are the ones measured in the shipped tiles, so
+   the look is unchanged and the bake is finally reproducible.
+   FLAT, NOT TINTED. The old lay-down was tint(acc, DARK, 0.30) for the aura,
+   which composites to about rgb(51,92,38) over navy -- G=92, outside the test.
+   The lost pass thresholded, which is why the shipped tiles carry exactly two
+   values in the plume. Drawing the near-binary masks at alpha 1 reproduces that. */
+var SEWER_BODY  = '#8CFF1E',   // 140,255,30 -- the slick
+    SEWER_AURA  = '#46BE2D',   //  70,190,45 -- its falloff
+    SEWER_EDGE  = '#2BC42B',   //  43,196,43 -- the contour. NOT the old red
+                               //  #D01B12 (user 2026-09-07: "no more red"), and
+                               //  NOT a dark green: rgb(46,125,35) would fail the
+                               //  G>150 test and then match the lime branch, so
+                               //  the contour itself would come out flood blue.
+    SEWER_MOUTH = '#FFB320';   // the pipe itself stays amber -- a measured position
 
 /* Discharge does not spread in a circle — it goes where the water goes. A round plume at
    each outfall put stain on the far side of a headland and left the channel it should have
@@ -1104,6 +1121,41 @@ function drawSewerStain(ctx, geo, proj, waterMask, W, H, mPerPx){
      outgoing tide. Not an average, not a forecast. The East River reverses four times a
      day and a CSO fires whenever it rains, so no single picture is "the" answer — this is
      the ebb. */
+  /* DEAD-END BASINS DO NOT FLUSH (2026-09-12, user: "make the river flow a
+     variable to be more accurate"). DEP records each outfall's receiving water in
+     `w` and this renderer has never read it, so a discharge into the Gowanus Canal
+     was grown with the same 750 m open-channel reach as one into the East River.
+     They are not the same thing: the canal is a dead end 2.9 km long with a
+     flushing tunnel at its head, which is why it is a Superfund site -- what goes
+     in stays in and builds up. The same is true of Newtown Creek and its branches,
+     and of the Jamaica Bay basins.
+     THIS TABLE IS A JUDGEMENT, NOT A MEASUREMENT. There is no residence-time
+     dataset here; it encodes geography -- a dead end holds what enters it, an open
+     strait carries it away. Read it as such. It COMPOUNDS the tidal speed already
+     in the data rather than replacing it (Gowanus outfalls carry a median 0.7 kn
+     against the East River's 3.69), so the two are not double-counted: the factor
+     scales the reach that kn has already set. */
+  var FLUSH = {
+    'GOWANUS CANAL': 0.32, 'GOWANUS BAY': 0.60,
+    'NEWTOWN CREEK': 0.32, 'NEWTOWN CREEK AND TIDAL TRIBS': 0.30,
+    'ENGLISH KILLS': 0.24, 'DUTCH KILLS': 0.26, 'WHALE CREEK': 0.26,
+    'LUYSTER CREEK': 0.45, 'HENDRIX CREEK': 0.30, 'OLD MILL CREEK': 0.30,
+    'CONEY ISLAND CREEK': 0.32, 'FLUSHING CREEK': 0.30, 'FLUSHING CREEK/BAY': 0.40,
+    'ALLEY CREEK': 0.38, "PUGSLEY'S CREEK": 0.38, 'WESTCHESTER CREEK': 0.42,
+    'SPUYTEN DUYVIL CREEK': 0.55, 'BRONX RIVER': 0.50, 'BRONX KILL': 0.55,
+    'PAERDEGAT BASIN': 0.28, 'BERGEN BASIN': 0.28, 'FRESH CREEK BASIN': 0.28,
+    'THURSTON BASIN': 0.28, 'NAVY YARD BASIN': 0.35, 'WALLABOUT CHANNEL': 0.45,
+    'LAGOON': 0.30, 'GRASSY BAY': 0.45, 'EASTCHESTER BAY': 0.65,
+    'BOWERY BAY': 0.70, 'LITTLE NECK BAY': 0.70, 'SHEEPSHEAD BAY': 0.60,
+    'GRAVESEND BAY': 0.85, 'GRASS HASSOCK CHANNEL': 0.70
+    /* everything else -- EAST RIVER and its reaches, HUDSON, HARLEM, KILL VAN
+       KULL, the NEW YORK BAYS, BUTTERMILK and EAST CHANNEL, ROCKAWAY INLET,
+       LONG ISLAND SOUND -- is open water and keeps the full reach (1.0). */
+  };
+  var flushOf = function(w){
+    var f = FLUSH[String(w || '').toUpperCase()];
+    return (typeof f === 'number') ? f : 1;
+  };
   var pts = [], buckets = {};
   geo.features.forEach(function(ft){
     var q = proj({ x:ft.geometry.coordinates[0], y:ft.geometry.coordinates[1] });
@@ -1114,8 +1166,12 @@ function drawSewerStain(ctx, geo, proj, waterMask, W, H, mPerPx){
     var brg = (typeof pr.e === 'number') ? pr.e : 180;
     var kn  = pr.kn || 0.8;
     pts.push([q.x, q.y, k]);
-    var b = Math.round(brg / 45) % 8;                 // eight compass buckets
-    (buckets[b] = buckets[b] || { n:0, kn:0, discs:[] });
+    /* the flush class joins the bucket key, so a canal's outfalls grow as their
+       own short field instead of being averaged in with the open river they
+       happen to share a compass direction with */
+    var fl = flushOf(pr.w);
+    var b = (Math.round(brg / 45) % 8) + ':' + fl.toFixed(2);
+    (buckets[b] = buckets[b] || { n:0, kn:0, discs:[], deg:Math.round(brg / 45) % 8 * 45, fl:fl });
     buckets[b].n++; buckets[b].kn += kn;
     buckets[b].discs.push([q.x, q.y, Math.max(1.2, (26 / mPerPx) * k)]);
   });
@@ -1128,10 +1184,10 @@ function drawSewerStain(ctx, geo, proj, waterMask, W, H, mPerPx){
   var sg = seed.getContext('2d'); sg.fillStyle = '#000';
 
   Object.keys(buckets).forEach(function(key){
-    var bk = buckets[key], deg = key * 45, kn = bk.kn / bk.n;
+    var bk = buckets[key], deg = bk.deg, kn = bk.kn / bk.n;
     /* A faster ebb carries further. 750 m at a typical knot, scaled by the station's own
        peak speed and held to a sane range. */
-    var reachPx = (750 * Math.max(0.55, Math.min(1.7, kn / 0.9))) / mPerPx;
+    var reachPx = (750 * Math.max(0.55, Math.min(1.7, kn / 0.9)) * bk.fl) / mPerPx;
     if (reachPx < 3) reachPx = 3;
     var STEPS = Math.max(4, Math.min(16, Math.round(reachPx / 2)));
     var step = reachPx / STEPS;
@@ -1141,8 +1197,15 @@ function drawSewerStain(ctx, geo, proj, waterMask, W, H, mPerPx){
 
     var cur = document.createElement('canvas'); cur.width = W; cur.height = H;
     var cg = cur.getContext('2d'); cg.fillStyle = '#000';
+    /* A BASIN THAT DOES NOT FLUSH CONCENTRATES: the same discharge held in a
+       shorter reach is a denser stain, not merely a smaller one. Bucket-level,
+       not per-pipe -- every outfall in a bucket shares the flush class by
+       construction, since the class is part of the bucket key. */
+    var kSeed = bk.fl < 0.7 ? (1 + (0.7 - bk.fl)) : 1;
     bk.discs.forEach(function(dsc){
-      cg.beginPath(); cg.arc(dsc[0], dsc[1], dsc[2], 0, Math.PI * 2); cg.fill();
+      cg.beginPath(); cg.arc(dsc[0], dsc[1], dsc[2] * kSeed, 0, Math.PI * 2); cg.fill();
+      /* `seed` is written and never read -- dead before this change; left at the
+         unscaled radius rather than quietly growing a canvas nothing consumes */
       sg.beginPath(); sg.arc(dsc[0], dsc[1], dsc[2], 0, Math.PI * 2); sg.fill();
     });
 
@@ -1195,9 +1258,10 @@ function drawSewerStain(ctx, geo, proj, waterMask, W, H, mPerPx){
   rc.globalCompositeOperation = 'destination-out';
   rc.drawImage(shrunk, 0, 0);
 
-  tint(acc,    SEWER_DARK,  0.30);   // the aura, falling off with distance
-  tint(shrunk, SEWER_DARK,  0.72);   // the body
-  tint(ring,   SEWER_EDGE,  0.95);   // the red contour that makes it a shape
+  tint(wide,   SEWER_AURA,  1.00);   // the aura -- `wide` not `acc`: near-binary, so it
+                                     // lands ON the colour instead of fading through it
+  tint(shrunk, SEWER_BODY,  1.00);   // the body
+  tint(ring,   SEWER_EDGE,  0.95);   // the contour that makes it a shape
 
   /* And the pipe itself — the one part of this layer that is a measured position rather
      than a model, so it is the only thing here with a hard edge.
