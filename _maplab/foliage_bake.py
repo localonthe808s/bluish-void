@@ -143,18 +143,48 @@ REGIONS = [('Adirondacks', -74.6, -73.6, 43.6, 44.4), ('Catskills', -74.7, -74.0
            ('Delaware Water Gap', -75.2, -74.9, 40.9, 41.2), ('Finger Lakes', -77.3, -76.3, 42.3, 42.9),
            ('Green Mountains', -73.1, -72.6, 43.0, 44.3), ('White Mountains', -71.7, -71.0, 43.9, 44.4),
            ('New York City & Long Island', -74.1, -72.2, 40.6, 41.0)]
-# the bands the signs use -- PROVISIONAL, typed from the 2025 replay (peak ~ a
-# 40-50% fall in greenness); calibrate against the state reports and the NPN
-# points in the first weeks, then move them here, never in the page
-BANDS = [(0, 'NOT YET'), (10, 'STARTING'), (25, 'NEAR PEAK'), (40, 'PEAK'), (60, 'PAST PEAK')]
+# WHAT "PEAK" IS ON THIS INDEX (learned from the 2025 replay, 2026-09-13).
+# Greenness falls only a little while leaves TURN and collapses when they
+# DROP, so the index reads ~20% in the Adirondacks at peak colour and keeps
+# falling into November. A level threshold therefore puts every peak in
+# November. Peak colour is the week of the FASTEST decline, and each region
+# has its own level at that week (Adirondacks ~21%, Catskills ~20% in 2025).
+# The bands are RELATIVE to that level, per region, from last year's curve;
+# the absolute fallback below is only for a region with no history.
+BANDS = [(0, 'NOT YET'), (8, 'STARTING'), (15, 'NEAR PEAK'), (20, 'PEAK'), (30, 'PAST PEAK')]
+REL = [(0.0, 'NOT YET'), (0.35, 'STARTING'), (0.75, 'NEAR PEAK'), (0.95, 'PEAK'), (1.3, 'PAST PEAK')]
 
 
-def band(pct):
+def band(pct, peak_level=None):
+    if peak_level:
+        out = REL[0][1]
+        for f, name in REL:
+            if pct >= f * peak_level:
+                out = name
+        return out
     out = BANDS[0][1]
     for lo, name in BANDS:
         if pct >= lo:
             out = name
     return out
+
+
+def peak_of(dates, arr):
+    """(date, level) of the fastest weekly decline in greenness on a lightly
+    smoothed curve -- peak colour -- or (None, None)."""
+    pts = [(dt, x) for dt, x in zip(dates, arr) if x is not None]
+    if len(pts) < 4:
+        return None, None
+    xs = [x for _, x in pts]
+    sm = [xs[0]] + [(xs[i - 1] + xs[i] + xs[i + 1]) / 3.0 for i in range(1, len(xs) - 1)] + [xs[-1]]
+    best, bi = None, None
+    for i in range(1, len(sm)):
+        d = sm[i] - sm[i - 1]
+        if best is None or d > best:
+            best, bi = d, i
+    if bi is None:
+        return None, None
+    return pts[bi][0], int(round(sm[bi]))
 
 
 def region_means(p):
@@ -205,14 +235,7 @@ def last_year_curve(year, keys, vals, prev):
             for n in per:
                 per[n].append(rm.get(n, (None, None))[0])
         d += datetime.timedelta(days=7)
-    peak = {}
-    for n, arr in per.items():
-        vals_ = [(x, dt) for x, dt in zip(arr, dates) if x is not None]
-        at = next((dt for x, dt in vals_ if x >= 40), None)
-        if at is None and vals_:
-            at = max(vals_)[1]
-        peak[n] = at
-    return {'year': year, 'dates': dates, 'regions': per, 'peak': peak}
+    return {'year': year, 'dates': dates, 'regions': per}
 CLASSES = {'Less than 5%': 0, '5-24%': 1, '25-49%': 2, '50-74%': 3, '75-94%': 4, '95% or more': 5}
 
 
@@ -289,13 +312,16 @@ def main():
         if name not in means:
             continue
         pct, past = means[name]
+        pk_date, pk_level = (None, None)
+        if ly and ly.get('regions', {}).get(name):
+            pk_date, pk_level = peak_of(ly['dates'], ly['regions'][name])
         regions.append({'name': name, 'lat': round((la0 + la1) / 2, 3), 'lon': round((lo0 + lo1) / 2, 3),
-                        'pct': pct, 'past_peak': past, 'band': band(pct),
+                        'pct': pct, 'past_peak': past, 'band': band(pct, pk_level),
                         'delta7': ((pct - ref[name]) if (ref and name in ref) else None),
-                        'peak_last_year': ((ly or {}).get('peak') or {}).get(name)})
+                        'peak_last_year': pk_date, 'peak_level': pk_level})
     doc = {'built': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%MZ'),
            'composites': cur_dates, 'baseline': [d.isoformat() for d in aug[:len(base_imgs)]],
-           'layer': LAYER, 'box': BOX, 'w': W, 'h': H, 'regions': regions, 'bands': BANDS,
+           'layer': LAYER, 'box': BOX, 'w': W, 'h': H, 'regions': regions, 'bands': BANDS, 'rel_bands': REL,
            'history': hist, 'last_year': ly,
            'points': npn_points(today), 'points_since': (today - datetime.timedelta(days=14)).isoformat(),
            'classes': ['<5%', '5-24%', '25-49%', '50-74%', '75-94%', '95%+']}
