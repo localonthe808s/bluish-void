@@ -562,7 +562,12 @@ PRI = {'Adirondacks': 78, 'Catskills': 78, 'New York City & Long Island': 76, 'H
        'Green Mountains': 72, 'White Mountains': 72, 'Berkshires': 70, 'Finger Lakes': 70,
        'Poconos': 68, 'Harriman & Bear Mountain': 68, 'Litchfield Hills': 64, 'Delaware Water Gap': 64,
        'Shawangunks': 62}
-ANCHOR = {'Hudson Valley': (41.56, -73.52), 'Shawangunks': (41.72, -74.42), 'Catskills': (42.12, -74.45)}
+# signs sit where a New Yorker would point (user 2026-09-13: "some of these
+# locations aren't in the right spot"): the Hudson Valley on the river at
+# Hyde Park, Harriman inside the park, the city-and-island sign on Long
+# Island at the Nassau line rather than out in Suffolk
+ANCHOR = {'Hudson Valley': (41.78, -73.93), 'Shawangunks': (41.72, -74.42), 'Catskills': (42.12, -74.45),
+          'Harriman & Bear Mountain': (41.24, -74.09), 'New York City & Long Island': (40.74, -73.45)}
 BANDS = [(0, 'NOT YET'), (8, 'STARTING'), (15, 'NEAR PEAK'), (20, 'PEAK'), (30, 'PAST PEAK')]
 REL = [(0.0, 'NOT YET'), (0.35, 'STARTING'), (0.75, 'NEAR PEAK'), (0.95, 'PEAK'), (1.3, 'PAST PEAK')]
 
