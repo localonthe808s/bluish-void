@@ -54001,14 +54001,38 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     /* the floods layer boots on the light z1 bake (instant), then upgrades
        ONCE to the four z2 quadrants stitched at native 35 m/px — sharp at
        depth, still a single view-independent texture, never recomposed */
-    var cwFlLevel = 0;                 /* 0 none, 2 quadrants, 3 the fine set */
-    /* THE RECOLOUR, LIFTED OUT SO BOTH LEVELS SHARE IT (2026-09-12). It sat
-       inline in the z2 stitch. The z3 upgrade below needs the same pass and a
-       second copy would drift the first time either was touched, so it takes a
-       context and a size: once over the z2 composite, once per TILE at z3. */
-    function cwFlRecolour(g, w, h){
+    var cwFlBuilt = false;
+    function cwFlBuild(){
+      if (cwFlBuilt) return;
+      cwFlBuilt = true;
+      var Q = [['nw',0,0],['ne',1,0],['sw',0,1],['se',1,1]];
+      Promise.all(Q.map(function(q){
+        return _cityTile('/nyc-basemap-floods-z2-' + q[0] + '.png?v=10')
+          .then(function(im){ return { im: im, q: q }; }, function(){ return null; });
+      })).then(function(parts){
+        parts = parts.filter(Boolean);
+        if (parts.length < 4) return;          // the z1 src stays as fallback
+        var w = parts[0].im.naturalWidth, h = parts[0].im.naturalHeight;
+        var cv = document.createElement('canvas'); cv.width = w * 2; cv.height = h * 2;
+        var g = cv.getContext('2d');
+        parts.forEach(function(p){ g.drawImage(p.im, p.q[1] * w, p.q[2] * h); });
+        /* RECOLOUR THE FLOOD BLUES (user 2026-09-02: "check the flooding
+           layer colors"). The city's own map is drawn for a WHITE basemap, so
+           its water is a pale 155,195,234 — and this layer sits under
+           #cw-bm-ghost, which puts 35% of the orange city back on top.
+           Measured, that pale blue composites to 182,172,174: grey, with more
+           red than blue. Every blue class died the same way while the orange
+           and dark classes came through untouched, because they already match
+           the map beneath.
+           Two things are wrong at once, so compensation alone is not enough:
+           the source is too pale AND the ghost eats a third of it. Blue-
+           dominant pixels are therefore remapped to a single saturated paint
+           that lands at about 95,150,185 over the city — properly blue. Done
+           ONCE here, while the tiles are already in a canvas, rather than as a
+           CSS filter the compositor would re-run every frame (and which would
+           have dragged the orange classes with it). */
         try {
-          var idat = g.getImageData(0, 0, w, h), q = idat.data;
+          var idat = g.getImageData(0, 0, cv.width, cv.height), q = idat.data;
           for (var i = 0; i < q.length; i += 4){
             if (q[i + 3] < 30) continue;
             /* THE SEWER SLICK IS GREEN NOW (user 2026-09-07: "make the sewage
@@ -54050,70 +54074,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           }
           g.putImageData(idat, 0, 0);
         } catch(e){}
-    }
-    function cwFlBuild(){
-      if (cwFlLevel) return;
-      cwFlLevel = 2;
-      var Q = [['nw',0,0],['ne',1,0],['sw',0,1],['se',1,1]];
-      Promise.all(Q.map(function(q){
-        return _cityTile('/nyc-basemap-floods-z2-' + q[0] + '.png?v=10')
-          .then(function(im){ return { im: im, q: q }; }, function(){ return null; });
-      })).then(function(parts){
-        parts = parts.filter(Boolean);
-        if (parts.length < 4){ cwFlLevel = 0; return; }   // the z1 src stays as fallback
-        var w = parts[0].im.naturalWidth, h = parts[0].im.naturalHeight;
-        var cv = document.createElement('canvas'); cv.width = w * 2; cv.height = h * 2;
-        var g = cv.getContext('2d');
-        parts.forEach(function(p){ g.drawImage(p.im, p.q[1] * w, p.q[2] * h); });
-        cwFlRecolour(g, cv.width, cv.height);
         /* flood tiles ONLY — the ghost water vectors moved to the cw-gv
            canvas (2026-08-31): baked into this raster they upscaled into
            blurry "sausage link" dashes at depth; the canvas redraws per
            painted view at device resolution, crisp at any zoom */
-        cv.toBlob(function(bl){
-          if (!bl) return;
-          var fl = document.getElementById('cw-fl');
-          if (fl) fl.src = URL.createObjectURL(bl);
-        }, 'image/png');
-        cwFlUpgrade();
-      });
-    }
-    /* AND THEN THE z3 SET, BAKED AND NEVER WIRED UP (2026-09-12, user: "heres
-       gowanus for example, this could be better"). Sixteen tiles shipped with
-       the z2 four on 2026-09-07 and nothing has ever referenced them. They
-       matter most exactly where the user pointed: the Gowanus Canal is 1.1-2.2
-       px wide at z2's 26.7 m/px, so sixteen outfalls seeded at the 1.2 px floor
-       and blurred over eleven steps merge into one blob. At z3's 13.4 m/px the
-       canal is 2.2-4.5 px and they separate. Measured over the same ground box:
-       the merged-mush rgb(88,37,42) falls 14.8% -> 1.2% and the slick stops
-       swallowing a third of the box (32.4% -> 18.4%), on 4x the samples.
-       PER TILE, NOT OVER THE COMPOSITE: one getImageData over 4400x3868 is
-       17 Mpx and ~68 MB on the thread the frame path runs on; per tile it is
-       1100x967 and ~4 MB, sixteen times, for the same result. Runs only after
-       z2 has landed so the layer is never blank, and a missing tile leaves the
-       z2 composite exactly as it was. */
-    function cwFlUpgrade(){
-      if (cwFlLevel !== 2) return;
-      cwFlLevel = 3;
-      var T = [];
-      for (var r = 0; r < 4; r++) for (var c = 0; c < 4; c++) T.push([r, c]);
-      Promise.all(T.map(function(rc){
-        return _cityTile('/nyc-basemap-floods-z3-r' + rc[0] + 'c' + rc[1] + '.png?v=10')
-          .then(function(im){ return { im: im, rc: rc }; }, function(){ return null; });
-      })).then(function(parts){
-        parts = parts.filter(Boolean);
-        if (parts.length < 16) return;                    // keep the z2 composite
-        var w = parts[0].im.naturalWidth, h = parts[0].im.naturalHeight;
-        var cv = document.createElement('canvas'); cv.width = w * 4; cv.height = h * 4;
-        var g = cv.getContext('2d');
-        var t = document.createElement('canvas'); t.width = w; t.height = h;
-        var tg = t.getContext('2d');
-        parts.forEach(function(p){
-          tg.clearRect(0, 0, w, h);
-          tg.drawImage(p.im, 0, 0);
-          cwFlRecolour(tg, w, h);
-          g.drawImage(t, p.rc[1] * w, p.rc[0] * h);        // r0 is the NORTH row
-        });
         cv.toBlob(function(bl){
           if (!bl) return;
           var fl = document.getElementById('cw-fl');
