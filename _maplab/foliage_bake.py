@@ -449,6 +449,22 @@ SPECIES_MIN_BA = 5.0
 SPECIES_BLUR = 1.4                  # px of the 250 m grid; a 30 m raster sampled nearest is salt and pepper
 
 
+def blur2d(a, sigma):
+    """A separable Gaussian in numpy (PIL will not blur a float image)."""
+    r = max(1, int(round(3 * sigma)))
+    x = np.arange(-r, r + 1, dtype=np.float32)
+    k = np.exp(-0.5 * (x / sigma) ** 2); k /= k.sum()
+    pad = np.pad(a, ((0, 0), (r, r)), mode='edge')
+    out = np.zeros_like(a)
+    for i, w in enumerate(k):
+        out += w * pad[:, i:i + a.shape[1]]
+    pad = np.pad(out, ((r, r), (0, 0)), mode='edge')
+    out2 = np.zeros_like(a)
+    for i, w in enumerate(k):
+        out2 += w * pad[i:i + a.shape[0], :]
+    return out2
+
+
 def species_raster(fn):
     u = (FHP + '/exportImage?bbox=%d,%d,%d,%d&bboxSR=3857&imageSR=3857&size=%d,%d&format=tiff&pixelType=F32'
          '&interpolation=RSP_NearestNeighbor&f=image&renderingRule=%s'
@@ -473,7 +489,7 @@ def species(shade, mask):
                 print('species: %s failed (%s)' % (fn, e))
         # the leader is decided on a lightly smoothed field, so one 30 m cell
         # sampled into a 250 m pixel does not flip the colour by itself
-        acc = np.array(Image.fromarray(acc, 'F').filter(ImageFilter.GaussianBlur(SPECIES_BLUR)), np.float32)
+        acc = blur2d(acc, SPECIES_BLUR)
         ba.append(acc)
         print('species: %-12s covers %.1f%% of the box at >= %g' % (role, 100 * (acc >= SPECIES_MIN_BA).mean(), SPECIES_MIN_BA))
     st = np.stack(ba)
