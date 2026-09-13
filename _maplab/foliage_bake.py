@@ -860,6 +860,11 @@ def npn_points(today):
 # and ramp are the big map's own, so the inset reads on the same legend.
 PARK_BOX = (-73.982, 40.7645, -73.949, 40.8005)     # west, south, east, north
 PARK_W, PARK_H = 300, 420
+# the park itself, corner by corner (Columbus Circle, Grand Army Plaza,
+# 110th & Fifth, 110th & Central Park West): everything outside is cut and
+# the frame is turned so the park stands upright (user 2026-09-13: "remove
+# the rest outside of central park")
+PARK_POLY = [(-73.9819, 40.7681), (-73.9730, 40.7644), (-73.9493, 40.7968), (-73.9580, 40.8005)]
 PARK_DAYS = 14
 PARK_CLEAR = 0.5       # a look counts when this share of the box is clear by the scene's own mask
 PARK_LANDSAT = False   # Landsat is wired but off: at 30 m its park pixels mix in street, and one hazy
@@ -960,10 +965,29 @@ def park(prev):
     veg = canopy & np.isfinite(cur)
     coverage = float(veg.sum() / canopy.sum()) if canopy.any() else 0.0
     p = np.where(veg, np.clip(p, 0, 1), np.nan)
-    ramp(p, 0.96, None).save(os.path.join(OUT, PARK_FRAME), 'WEBP', quality=88, method=6)   # ramp() returns the image
+    # inside the park only: canopy on the ramp, the rest of the park (lawns,
+    # water, paths) a dark fill so the shape reads, the city outside cut away
+    W0, S0, E0, N0 = PARK_BOX
+    poly = [((lon - W0) / (E0 - W0) * PARK_W, (N0 - lat) / (N0 - S0) * PARK_H) for lon, lat in PARK_POLY]
+    mimg = Image.new('L', (PARK_W, PARK_H), 0)
+    ImageDraw.Draw(mimg).polygon(poly, fill=255)
+    inside = np.array(mimg) > 0
+    p = np.where(inside, p, np.nan)
+    img = np.array(ramp(p, 0.96, None).convert('RGBA'))
+    fill = inside & ~np.isfinite(p)
+    img[fill] = (16, 24, 34, 210)
+    img[~inside] = (0, 0, 0, 0)
+    # turn the frame so the park's long axis stands upright, then crop to it
+    ang = math.degrees(math.atan2(poly[0][0] - poly[3][0], poly[0][1] - poly[3][1]))
+    fr = Image.fromarray(img, 'RGBA').rotate(-ang, resample=Image.BICUBIC, expand=True)
+    bb = fr.getbbox()
+    if bb:
+        fr = fr.crop((max(0, bb[0] - 3), max(0, bb[1] - 3), min(fr.width, bb[2] + 3), min(fr.height, bb[3] + 3)))
+    fr.save(os.path.join(OUT, PARK_FRAME), 'WEBP', quality=88, method=6)
+    out_w, out_h = fr.size
     pct = int(round(100 * float(np.nanmean(p)))) if veg.any() else None
     dates = sorted(set(d for _, d in cur_used))
-    out = {'url': CDN + PARK_FRAME, 'w': PARK_W, 'h': PARK_H, 'box': list(PARK_BOX), 'as_of': dates[-1],
+    out = {'url': CDN + PARK_FRAME, 'w': out_w, 'h': out_h, 'box': list(PARK_BOX), 'as_of': dates[-1],
            'scenes': dates, 'base_scenes': sorted(set(base_used)), 'pct': pct,
            'coverage': round(coverage, 2), 'thin': coverage < 0.6, 'stale': stale, 'canopy_share': round(float(canopy.mean()), 3),
            'built': today.isoformat()}
