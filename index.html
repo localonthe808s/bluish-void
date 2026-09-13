@@ -50137,10 +50137,13 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
      The path carries its own version: a re-bake ships as v2 rather than trying
      to purge a CDN. */
   var CITY_DEEP_BASE = 'https://cdn.bluishvoid.com/basemap/ink/v2';
-  var _cityDeepMan = null, _cityDeepReq = 0;
+  var _cityDeepMan = null, _cityDeepReq = 0, _cityDeepRetryAt = 0;
   function _cityDeepReady(){
     if (_cityDeepMan) return true;
-    if (!_cityDeepReq){
+    /* a failed fetch waits 60 s before the next try: this is called from the
+       3 s tick, and offline it used to be one failed request every 3 s for
+       the life of the page (review 2026-09-13) */
+    if (!_cityDeepReq && Date.now() >= _cityDeepRetryAt){
       _cityDeepReq = 1;
       fetch(CITY_DEEP_BASE + '/ink-pyramid-manifest.json')
         .then(function(r){ return r.json(); })
@@ -50151,7 +50154,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           });
           _cityDeepMan = m;
         })
-        .catch(function(){ _cityDeepReq = 0; });   // let a later compose retry
+        .catch(function(){ _cityDeepReq = 0; _cityDeepRetryAt = Date.now() + 60000; });   // let a later tick retry, later
     }
     return false;                                  // this compose stays shallow
   }
@@ -50795,7 +50798,14 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var fin = function(ok){ if (_finished) return; _finished = true; cwComposeBusy--; cwZoomLoadSync(); if (_cb) _cb(ok); };
       var body = document.getElementById('cw-body');
       var dpr = Math.min(2, window.devicePixelRatio || 1);
-      var W2 = Math.round(((body && body.clientWidth) || 1100) * dpr);
+      /* CAPPED AT 2600 CANVAS PX (review 2026-09-13). #cw-body has no
+         max-width, so an 1800 px monitor at dpr 2 asked for a 3600 x 3156
+         canvas -- 11.4 Mpx drawn from up to 128 tiles, JPEG-encoded and
+         decoded again on every compose, ~45 MB transient. The tile ladder
+         cannot supply more than a 1100 px tile per grid cell anyway, and the
+         CSS layer scales the result, so past ~2600 the extra pixels are pure
+         upscale. 2600 keeps a 1300 px body at full retina. */
+      var W2 = Math.min(2600, Math.round(((body && body.clientWidth) || 1100) * dpr));
       var H2 = Math.round(W2 / v.ASPECT);
       var mppNeed = (v.X1 - v.X0) / W2;
       /* PICK THE LEVEL THAT IS NOT UPSCALED (user 2026-09-03: "it seems
@@ -60615,7 +60625,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           .then(function(j){
             if (!j || !j.b) return;
             window._cwBoros = j.b; window._cwBorosHi = j.hi || null;
-            try { compose(); } catch(e){}
+            /* compose() stopped reading the boroughs when the stencil went
+               (2026-09-03); redoing the whole composition here was a full
+               tile assembly and JPEG round trip for nothing on every boot.
+               The vector layers are what read them (review 2026-09-13). */
+            try { cwDrawSensors(); } catch(e){}
           }).catch(function(){});
       }
       /* the bridges, baked from OSM (48KB) */
