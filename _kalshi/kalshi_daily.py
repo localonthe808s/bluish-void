@@ -4710,6 +4710,9 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             'bet': best_bet(rows, ps),
             'calib': _CALIB.get(cfg['key']) or None,
             'edge_floor': {'min': EDGE_FLOOR, 'priced': EDGE_FLOOR_PRICED, 'price': EDGE_PRICE},
+            # which distribution priced the open-day ladder (kernel.json ruling)
+            'kernel': ({'k': _kc['k'], 'pool': _kc['pool'], 'n': _kc.get('n'), 'applied': not binding_now}
+                       if (_kc := kernel_court(cfg)) else None),
             'max_disagree': MAX_DISAGREE,
             'regime': metar_regime(cfg),
             'brake': record.get('brake'),
