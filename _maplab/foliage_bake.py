@@ -419,6 +419,81 @@ def forest(shade, prev):
     return codes
 
 
+# WHICH TREE LEADS (user 2026-09-13: "is it not possible to break up maple
+# beech birch?"). The type groups cannot be split -- they are the atlas's own
+# classes -- but the Forest Service's FHTET species rasters can: modelled
+# basal area per species at 30 m (circa 2002, made for the insect-and-disease
+# risk map), one raster function per species on the same image service
+# family. Sampled to the bake's 250 m grid, the leading colour-maker at each
+# forest pixel is the species (or kin) with the most basal area, drawn only
+# where that leader holds at least SPECIES_MIN_BA square feet an acre. The
+# frame is rendered once a season (SPECIES_FRAME), like the forest.
+FHP = ('https://imagery.geoplatform.gov/iipp/rest/services/Vegetation/'
+       'USFS_EDW_FHP_TreeSpeciesMetrics_BasalArea/ImageServer')
+SPECIES = [   # (role, what it does in fall, display rgb, the rasters summed)
+    ('SUGAR MAPLE', 'ORANGE TO RED, EARLY OCTOBER', (250, 120, 40), ['sugar_maple']),
+    ('RED MAPLE', 'SCARLET, THE FIRST TO TURN', (215, 45, 40), ['red_maple', 'silver_maple']),
+    ('BEECH', 'BRONZE, HOLDS ITS LEAVES', (205, 160, 90), ['American_beech']),
+    ('BIRCH', 'CLEAR YELLOW', (250, 225, 95), ['yellow_birch', 'paper_birch', 'sweet_birch', 'gray_birch']),
+    ('ASPEN', 'GOLD, EARLY', (240, 190, 30), ['quaking_aspen', 'bigtooth_aspen']),
+    ('RED OAK', 'RUSSET RED, LATE OCTOBER', (165, 65, 50), ['northern_red_oak', 'black_oak', 'scarlet_oak', 'pin_oak']),
+    ('WHITE OAK', 'BROWN AND WINE, THE LAST', (135, 100, 75), ['white_oak', 'chestnut_oak', 'swamp_white_oak']),
+    ('HICKORY', 'GOLDEN BROWN', (190, 145, 45), ['hickory_spp', 'shagbark_hickory', 'pignut_hickory', 'mockernut_hickory', 'bitternut_hickory']),
+    ('ASH', 'PLUM AND YELLOW, EARLY', (175, 125, 150), ['white_ash', 'green_ash', 'black_ash']),
+    ('HEMLOCK', 'EVERGREEN, THE RAVINES', (35, 95, 85), ['eastern_hemlock']),
+    ('PINE', 'EVERGREEN', (80, 140, 80), ['eastern_white_pine', 'red_pine', 'pitch_pine']),
+    ('SPRUCE, FIR', 'EVERGREEN, THE HIGH GROUND', (22, 74, 52), ['red_spruce', 'black_spruce', 'white_spruce', 'balsam_fir', 'Norway_spruce']),
+]
+SPECIES_FRAME = 'species_v1.webp'
+SPECIES_MIN_BA = 5.0
+
+
+def species_raster(fn):
+    u = (FHP + '/exportImage?bbox=%d,%d,%d,%d&bboxSR=3857&imageSR=3857&size=%d,%d&format=tiff&pixelType=F32'
+         '&interpolation=RSP_NearestNeighbor&f=image&renderingRule=%s'
+         % (BOX + (W, H) + (urllib.parse.quote('{"rasterFunction":"%s"}' % fn),)))
+    a = np.array(Image.open(io.BytesIO(get(u, 240)))).astype(np.float32)
+    # the service's nodata comes back as huge floats; basal area is 0-400 sq ft an acre
+    return np.where(np.isfinite(a) & (a >= 0) & (a <= 400), a, 0.0)
+
+
+def species(shade, mask):
+    """Renders SPECIES_FRAME + species_codes.png under OUT when the CDN does
+    not have them (0 = no leader, i+1 = SPECIES[i]); nothing otherwise."""
+    if on_cdn(SPECIES_FRAME) and on_cdn('species_codes.png'):
+        return
+    ba = []
+    for role, _, _, fns in SPECIES:
+        acc = np.zeros((H, W), np.float32)
+        for fn in fns:
+            try:
+                acc += species_raster(fn)
+            except Exception as e:
+                print('species: %s failed (%s)' % (fn, e))
+        ba.append(acc)
+        print('species: %-12s covers %.1f%% of the box at >= %g' % (role, 100 * (acc >= SPECIES_MIN_BA).mean(), SPECIES_MIN_BA))
+    st = np.stack(ba)
+    lead = st.argmax(0).astype(np.uint8) + 1
+    top = st.max(0)
+    ok = top >= SPECIES_MIN_BA
+    if mask is not None:
+        ok &= mask
+    codes = np.where(ok, lead, 0).astype(np.uint8)
+    img = np.zeros((H, W, 4), np.uint8)
+    for i, (role, _, rgb, _) in enumerate(SPECIES):
+        m = codes == i + 1
+        col = np.array(rgb, np.float32)[None, :]
+        if shade is not None:
+            f = np.clip(1.0 + (shade[m] - 127.0) / 85.0, 0.55, 1.4)[:, None]
+            col = col * f
+        img[m, :3] = np.clip(col, 0, 255).astype(np.uint8)
+        img[m, 3] = 218
+    Image.fromarray(img).save(os.path.join(OUT, SPECIES_FRAME), 'WEBP', quality=82, method=6)
+    Image.fromarray(codes, 'L').save(os.path.join(OUT, 'species_codes.png'), optimize=True)
+    tot = (codes > 0).sum() or 1
+    print('species: leaders ' + ', '.join('%s %.0f%%' % (r[0], 100 * (codes == i + 1).sum() / tot) for i, r in enumerate(SPECIES)))
+
+
 def forest_shares(codes, labels, ids):
     """per county fips -> {'show': %, 'gold': %, 'late': %, 'ever': %} of its typed forest"""
     role_of = {i + 1: r for i, (_, r, _) in enumerate(FOREST_ROLES)}
@@ -788,6 +863,10 @@ def main():
     try:
         fcodes = FOREST_CODES if FOREST_CODES is not None else forest(shade, prev)
         forest_by_county = forest_shares(fcodes, labels, ids)
+        try:
+            species(shade, FOREST_MASK)
+        except Exception as e:
+            print('species: unavailable (%s)' % e)
     except Exception as e:
         print('forest: unavailable (%s)' % e)
         fcodes, forest_by_county = None, {}
@@ -833,6 +912,9 @@ def main():
            'forest_url': CDN + FOREST_FRAME, 'forest_codes_url': CDN + 'forest_codes.png',
            'forest_legend': [[r, txt, list(rgb)] for r, txt, rgb in FOREST_LEGEND],
            'forest_roles': [[lab, role] for lab, role, _ in FOREST_ROLES], 'forest_by_county': forest_by_county,
+           'species_url': CDN + SPECIES_FRAME, 'species_codes_url': CDN + 'species_codes.png',
+           'species_legend': [[r, txt, list(rgb)] for r, txt, rgb, _ in SPECIES],
+           'species_roles': [[r, txt] for r, txt, _, _ in SPECIES],
            'points': npn_points(today), 'points_since': (today - datetime.timedelta(days=14)).isoformat(),
            'classes': ['<5%', '5-24%', '25-49%', '50-74%', '75-94%', '95%+']}
     with open(os.path.join(OUT, 'latest.json'), 'w') as f:
