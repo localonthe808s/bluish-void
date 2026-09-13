@@ -222,6 +222,11 @@ def study(cfg):
                 # the raw quote per rung at this hour, so a bet struck earlier
                 # can be valued here: (yes bid, yes ask)
                 'q': [[None, None] if not q else [q[0], q[1]] for q in quote],
+                # the floor at this hour (running hourly max + offset), so the
+                # afternoon-blend court can be run on the saved rows
+                'fl': (round(fl, 2) if fl is not None else None),
+                'pred': round(pred, 2), 'sd': round(sd, 3),
+                'bounds': [[r['lo'], r['hi']] for r in lad],
             })
         if (i + 1) % 15 == 0:
             print('  %d/%d days, %d hour-rows' % (i + 1, len(ev), len(rows)))
@@ -466,7 +471,9 @@ def main():
            'flip_by_market': {k: pick_flip([r for r in all_rows if r.get('city') == k])
                               for k in per},
            'edge_floor': edge_floor(all_rows),
-           'disagree_cap': disagree_cap(all_rows)}
+           'disagree_cap': disagree_cap(all_rows),
+           'by_market_season': {k: by_season([r for r in all_rows if r.get('city') == k]) for k in per},
+           'afternoon_blend': afternoon_blend(all_rows)}
     with open(os.path.join(HERE, 'price_rows.json'), 'w') as f:
         json.dump(all_rows, f, separators=(',', ':'))
     print('kept %d raw rows for later analysis' % len(all_rows))
@@ -547,6 +554,76 @@ def blend_by_hour(rows):
     return out
 
 
+SEASON = {12: 'DJF', 1: 'DJF', 2: 'DJF', 3: 'MAM', 4: 'MAM', 5: 'MAM',
+          6: 'JJA', 7: 'JJA', 8: 'JJA', 9: 'SON', 10: 'SON', 11: 'SON'}
+
+
+def by_season(rows):
+    """summarise() per season, so the bake can take the season's own window
+    once it has twenty days (2026-09-13)."""
+    out = {}
+    for se in ('DJF', 'MAM', 'JJA', 'SON'):
+        rs = [r for r in rows if SEASON.get(int((r.get('date') or '2000-01')[5:7]), '') == se]
+        if rs:
+            out[se] = summarise(rs)
+    return out
+
+
+def afternoon_blend(rows, table_path=None, hours=(13, 14, 15, 16, 17)):
+    """THE AFTERNOON COURT (2026-09-13): from 1 PM, blend our ladder probabilities
+    with the empirical climb distribution (afternoon.json: how often the
+    official max ends 1/2/3 degrees above the running hourly max, by season and
+    hour) and score against the settled rung. Needs rows carrying 'fl' and
+    'bounds' (studies run from 2026-09-13). Per city and hour: Brier for
+    weights 0/.25/.5/.75 on the empirical side, and the weight that wins.
+
+    Measured first on the archive (scratch blend_court.py, 1,068 hour-rows,
+    both halves): w .25-.5 cut Brier 5-9% at 2-4 PM, neutral at 1 PM, and the
+    empirical alone was worse than the model. This is the same test on the
+    real ladders."""
+    try:
+        tab = json.load(open(table_path or os.path.join(HERE, 'afternoon.json')))
+    except Exception:
+        return None
+    out = {}
+    byc = collections.defaultdict(list)
+    for r in rows:
+        if r.get('fl') is not None and r.get('bounds') and r.get('city') and r.get('hour') in hours:
+            byc[r['city']].append(r)
+    for city, rs in byc.items():
+        ct = ((tab.get('cities') or {}).get(city) or {}).get('by_season') or {}
+        acc = collections.defaultdict(lambda: collections.defaultdict(list))
+        for r in rs:
+            se = SEASON.get(int(r['date'][5:7]))
+            row = (ct.get(se) or {}).get(str(r['hour'])) or (ct.get('ALL') or {}).get(str(r['hour']))
+            if not row or row.get('p1') is None:
+                continue
+            R = int(round(r['fl'] - K.HOURLY_PEAK_OFFSET))
+            p0, p1, p2, p3 = row['p0'], row['p1'], row['p2'], (row.get('p3') or 0.0)
+            mass = {R: p0, R + 1: max(0.0, p1 - p2), R + 2: max(0.0, p2 - p3),
+                    R + 3: 0.6 * p3, R + 4: 0.3 * p3, R + 5: 0.1 * p3}
+            emp = []
+            for lo, hi in r['bounds']:
+                emp.append(sum(v for t, v in mass.items()
+                               if (lo is None or t >= lo) and (hi is None or t <= hi)))
+            tot = sum(emp) or 1.0
+            emp = [x / tot for x in emp]
+            for w in (0.0, 0.25, 0.5, 0.75):
+                p = [w * e + (1 - w) * o for e, o in zip(emp, r['ours'])]
+                sp = sum(p) or 1.0
+                b = sum((x / sp - (1.0 if t else 0.0)) ** 2 for x, t in zip(p, r['truth']))
+                acc[r['hour']][w].append(b)
+        out[city] = {}
+        for h, ws in acc.items():
+            if len(ws[0.0]) < 20:
+                continue
+            sc = {('%.2f' % w): round(statistics.mean(v), 4) for w, v in ws.items()}
+            best = min(ws, key=lambda w: statistics.mean(ws[w]))
+            out[city][str(h)] = {'n': len(ws[0.0]), 'brier': sc, 'best_w': best,
+                                 'gain': round(statistics.mean(ws[0.0]) - statistics.mean(ws[best]), 4)}
+    return out or None
+
+
 def refit_from_rows():
     """Rebuild price_study.json's exit block from the saved rows, no fetching."""
     with open(os.path.join(HERE, 'price_rows.json')) as f:
@@ -555,6 +632,8 @@ def refit_from_rows():
         doc = json.load(f)
     doc['exit'] = exit_policy(rows)
     keys = sorted(set(r.get('city') for r in rows if r.get('city')))
+    doc['by_market_season'] = {k: by_season([r for r in rows if r.get('city') == k]) for k in keys}
+    doc['afternoon_blend'] = afternoon_blend(rows)
     doc['exit_by_market'] = {k: exit_policy([r for r in rows if r.get('city') == k]) for k in keys}
     doc['calib'] = calibration_bands(rows)
     doc['calib_by_market'] = {k: calibration_bands([r for r in rows if r.get('city') == k]) for k in keys}

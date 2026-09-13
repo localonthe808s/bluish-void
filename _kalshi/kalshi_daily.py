@@ -1302,7 +1302,11 @@ def cli_read(cfg, deep=False):
     # THE FAST CHANNEL FIRST. Same products, same merge rule below -- it just
     # arrives off LDM instead of through a CMS. Never a precondition: an empty
     # list simply falls through to the versioned pages.
-    _pending = list(cli_fast(cfg))
+    # twelve, not three: one request either way, and it puts the newest four
+    # days' products in hand even when the versioned pages throttle under
+    # three markets fetching at once (the finals for 09-09/09-10 went missing
+    # from a shallow run on 2026-09-13 while a deep one had all of them)
+    _pending = list(cli_fast(cfg, limit=12))
     for v in range(0, n + 1):
         if v == 0:
             if not _pending:
@@ -2424,6 +2428,65 @@ def fetch_balance():
     return None
 
 
+_POS_CACHE = []
+
+
+def fee_ratio(cfg, fills):
+    """WHAT THE ACCOUNT PAID IN FEES AGAINST THE TAKER FORMULA (2026-09-13).
+
+    Every edge the plan quotes assumes fee_of(): the taker's ceil(0.07 p (1-p)).
+    A resting order is said to pay about a quarter of that, and Kalshi's fee
+    PDF would not load to confirm it. The portfolio positions carry
+    fees_paid_dollars per market; against the taker fee implied by this
+    account's fills on the same market that is a measurement, not a claim.
+    Returns {n, ratio} -- the ratio only, never the dollars (see redact_money).
+    """
+    if not fills:
+        return None
+    if not _POS_CACHE:
+        sign = _signer()
+        got = None
+        if sign:
+            try:
+                got = []
+                cursor = None
+                for _ in range(10):
+                    params = '?limit=200&settlement_status=all' + ('&cursor=' + cursor if cursor else '')
+                    j = portfolio_get(sign, '/trade-api/v2/portfolio/positions', params)
+                    got += j.get('market_positions') or []
+                    cursor = j.get('cursor')
+                    if not cursor:
+                        break
+            except Exception as e:
+                print('portfolio positions: %s: %s' % (type(e).__name__, e))
+                got = None
+        _POS_CACHE.append(got)
+    pos = _POS_CACHE[0]
+    if not pos:
+        return None
+    paid = {p.get('ticker'): p.get('fees_paid_dollars') for p in pos if p.get('ticker')}
+    num = den = 0.0
+    n = 0
+    by_ticker = collections.defaultdict(float)
+    for t in fills:
+        if t.get('ticker') and t.get('price') is not None and t.get('contracts'):
+            by_ticker[t['ticker']] += fee_of(float(t['price'])) * float(t['contracts'])
+    for tk, taker in by_ticker.items():
+        fp = paid.get(tk)
+        if fp is None or taker <= 0:
+            continue
+        try:
+            fp = float(fp)
+        except Exception:
+            continue
+        num += fp
+        den += taker
+        n += 1
+    if not n or den <= 0:
+        return None
+    return {'n': n, 'ratio': round(num / den, 2)}
+
+
 def _all_fills():
     """Every fill on the account, fetched ONCE. Called per market otherwise,
     which would page through the whole history seven times a run for no reason
@@ -2488,7 +2551,7 @@ def fetch_fills(cfg, lookup):
                 out.append({'date': d, 'side': side, 'lo': lo, 'hi': hi,
                             'price': float(cents) / 100.0,
                             'contracts': float(f.get('count') or 0),
-                            'fee': None, 'note': 'api',
+                            'fee': None, 'note': 'api', 'ticker': tk,
                             'at': f.get('created_time'),
                             'id': f.get('trade_id') or f.get('order_id')})
     except Exception as e:
@@ -2728,6 +2791,17 @@ def measured_hours(cfg):
     if not d:
         return None
     cur = (d.get('by_market') or {}).get(cfg['key']) or d.get('pooled')
+    # THE SEASON'S OWN CURVE, once it has twenty days at 11 AM (2026-09-13).
+    # The window was measured on summer rows; the afternoon table says autumn
+    # decides an hour earlier in New York and two hours later in the desert.
+    try:
+        se = {12: 'DJF', 1: 'DJF', 2: 'DJF', 3: 'MAM', 4: 'MAM', 5: 'MAM', 6: 'JJA',
+              7: 'JJA', 8: 'JJA', 9: 'SON', 10: 'SON', 11: 'SON'}[local_now(cfg).month]
+        sc = ((d.get('by_market_season') or {}).get(cfg['key']) or {}).get(se)
+        if sc and any(e.get('h') == 11 and (e.get('days') or 0) >= 20 for e in sc):
+            cur = sc
+    except Exception:
+        pass
     if not cur:
         return None
     out = []
@@ -2742,6 +2816,25 @@ def measured_hours(cfg):
                     'acc': int(round(100 * (e.get('winrate') or 0))),
                     'sd': SD_FALLBACK.get(e['h'])})
     return out or None
+
+
+def measured_emp_w(cfg, hour):
+    """THE AFTERNOON BLEND'S WEIGHT, measured nightly (price_study.afternoon_blend):
+    for this city and hour, the weight on the empirical climb distribution that
+    scored best on the real settled ladders -- taken only when the court had
+    twenty days and the gain was real (>= 0.005 Brier). Zero otherwise, so the
+    ladder is the plain forecast until the study has spoken. First measured on
+    the archive 2026-09-13: .25-.5 from 2 PM cut Brier 5-9% on both halves."""
+    if not _STUDY:
+        measured_hours(cfg)
+    d = _STUDY[0] if _STUDY else None
+    row = (((d or {}).get('afternoon_blend') or {}).get(cfg['key']) or {}).get(str(hour))
+    if not row or (row.get('n') or 0) < 20 or (row.get('gain') or 0) < 0.005:
+        return 0.0
+    try:
+        return max(0.0, min(0.75, float(row.get('best_w') or 0.0)))
+    except Exception:
+        return 0.0
 
 
 def compose_review(cfg, hist, obh, cli, fills_by_day, now, record=None):
@@ -3592,6 +3685,31 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         print('fresh runs unavailable: %s' % e)
 
     ps = distribution(rows, pred, sd, obs_far)
+    # THE AFTERNOON BLEND (2026-09-13). After 1 PM the ladder was still a
+    # symmetric forecast around a number; the afternoon table (afternoon.json)
+    # says, for this city, season and hour, how the official max actually ends
+    # up relative to the running hourly max. Its weight is measured on the real
+    # ladders by price_study.afternoon_blend and is zero until that court has
+    # ruled; a decided or binding day keeps its collapsed spread untouched.
+    emp_w = 0.0
+    _climb_now = climb_now(cfg, _day_obs, now)
+    if _climb_now and _climb_now.get('p1') is not None and not binding_now and not day_decided and now.hour >= 13:
+        emp_w = measured_emp_w(cfg, now.hour)
+        if emp_w > 0:
+            _R = int(round(_climb_now['run']))
+            _p0, _p1, _p2 = _climb_now['p0'], _climb_now['p1'], _climb_now['p2']
+            _p3 = _climb_now.get('p3') or 0.0
+            _mass = {_R: _p0, _R + 1: max(0.0, _p1 - _p2), _R + 2: max(0.0, _p2 - _p3),
+                     _R + 3: 0.6 * _p3, _R + 4: 0.3 * _p3, _R + 5: 0.1 * _p3}
+            _emp = [sum(v for t, v in _mass.items()
+                        if (r['lo'] is None or t >= r['lo']) and (r['hi'] is None or t <= r['hi']))
+                    for r in rows]
+            _et = sum(_emp) or 1.0
+            ps = [emp_w * e / _et + (1.0 - emp_w) * p for e, p in zip(_emp, ps)]
+            _st = sum(ps) or 1.0
+            ps = [p / _st for p in ps]
+            print('%s afternoon blend: %.0f%% on the climb table (%s %dh, n=%d)'
+                  % (cfg['key'], 100 * emp_w, _climb_now.get('season'), _climb_now.get('h'), _climb_now.get('n') or 0))
     best = max(range(len(rows)), key=lambda i: ps[i])
     mbest = max(range(len(rows)), key=lambda i: rows[i]['mid'])
 
@@ -3977,6 +4095,41 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
                  'HIT' if h['hit'] else 'miss', h['lock']['market_pick'],
                  'HIT' if h['market_hit'] else 'miss'))
 
+    # THE CLIMATE REPORT MUST AGREE WITH THE SETTLEMENT (2026-09-13). The
+    # record-flag bug ("103R") dropped every product carrying a record for
+    # weeks and nothing complained, because a settled day scores from the
+    # exchange whether or not the report parsed. So: for each day settled in
+    # the last three, a parsed FINAL must exist and equal what the exchange
+    # paid. Otherwise a FAILED line prints on every bake until it does -- the
+    # watchdog reads the newest job log hourly and pages on that word.
+    _deep_done = False
+    for k, h in sorted(hist.items()):
+        if h.get('truth_source') != 'settlement' or h.get('actual') is None:
+            continue
+        if k < (now.date() - datetime.timedelta(days=3)).isoformat() or k >= tkey:
+            continue
+        c = _cli.get(k) or {}
+        if not (c.get('final') and c.get('max') is not None) and not _deep_done:
+            # a missing final is more often a shallow fetch than a broken parser:
+            # look forty versions deep once before saying anything
+            _deep_done = True
+            try:
+                _cli = cli_read(cfg, deep=True)
+            except Exception as e:
+                print('%s cli deep refetch failed (%s)' % (cfg['key'], e))
+            c = _cli.get(k) or {}
+        if c.get('final') and c.get('max') is not None:
+            if abs(float(c['max']) - float(h['actual'])) > 0.5:
+                h['cli_check'] = {'ok': False, 'why': 'report %s vs settled %s' % (c['max'], h['actual'])}
+                print('%s FAILED: climate report for %s says %s but the exchange settled %s'
+                      % (cfg['key'], k, c['max'], h['actual']))
+            else:
+                h['cli_check'] = {'ok': True}
+        else:
+            h['cli_check'] = {'ok': False, 'why': 'no parsed final'}
+            print('%s FAILED: no parsed climate-report final for %s (settled %s) -- product or parser changed'
+                  % (cfg['key'], k, h['actual']))
+
     # normalise the flag across days scored before it existed, so "could this
     # still change" is answerable from the record alone
     for h in hist.values():
@@ -4188,6 +4341,12 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         _ex = execution_score(cfg, rows_in, lambda lo, hi: _lab.get((lo, hi)))
         if _ex:
             record['execution'] = _ex
+            try:
+                _fr = fee_ratio(cfg, rows_in)
+                if _fr:
+                    record['execution']['fee_ratio'] = _fr
+            except Exception as e:
+                print('fee ratio: skipped (%s)' % e)
     except Exception as e:
         print('execution: skipped (%s)' % e)
     if tr_done or tr_open:
@@ -4375,8 +4534,9 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             'fc_peak': round(fpeak, 2) if fpeak is not None else None,
             'peak_hour': peak_hour,
             'peak_done': peak_done, 'day_decided': day_decided,
-            # the afternoon table's row for the report in hand (see climb_now)
-            'climb': climb_now(cfg, _day_obs, now),
+            # the afternoon table's row for the report in hand (see climb_now),
+            # and the weight the ladder gave it this bake (0 = plain forecast)
+            'climb': _climb_now, 'emp_w': round(emp_w, 2),
             'own5_gap': _gap5,
             'ours': [round(p, 4) for p in ps],
             'pick': rows[best]['label'], 'p': round(ps[best], 4),
