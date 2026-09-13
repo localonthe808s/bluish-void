@@ -102,11 +102,19 @@ def relief():
         return None
 
 
+# THE RAMP IS CENTRED ON PEAK (2026-09-13). Greenness falls ~15-30% at peak
+# colour on this index and 40%+ only once the leaves are down, so a ramp that
+# reached orange at 40% painted every peak yellow. Orange now sits at 20%,
+# red at 28%, brown (bare) from 40%. The page reads these stops for its legend.
+RAMP = [(0.0, (34, 120, 40)), (0.08, (150, 190, 40)), (0.15, (240, 200, 40)),
+        (0.20, (235, 120, 30)), (0.28, (200, 40, 30)), (0.40, (120, 60, 30)), (1.01, (90, 45, 25))]
+RAMP_LEGEND = [(0, '0%'), (8, '8%'), (15, '15%'), (20, '20% PEAK'), (28, '28%'), (40, '40%+ BARE')]
+
+
 def ramp(p, alpha=0.80, shade=None):
     h, w = p.shape
     img = np.zeros((h, w, 4), np.uint8)
-    stops = [(0.0, (34, 120, 40)), (0.12, (150, 190, 40)), (0.25, (240, 200, 40)),
-             (0.40, (235, 120, 30)), (0.55, (200, 40, 30)), (0.75, (120, 60, 30)), (1.01, (90, 45, 25))]
+    stops = RAMP
     m = np.isfinite(p)
     for i in range(len(stops) - 1):
         a, ca = stops[i]; b, cb = stops[i + 1]
@@ -125,6 +133,74 @@ def ramp(p, alpha=0.80, shade=None):
         img[sel, :3] = np.clip(col, 0, 255).astype(np.uint8)
         img[sel, 3] = int(255 * alpha)
     return Image.fromarray(img)
+
+
+def frame(p, shade):
+    """The index -> the RGBA frame: a 5-px median first (the 250 m pixels
+    speckle yellow over a green field at map scale; a median keeps rivers and
+    ridgelines while removing the salt), then the ramp with the relief."""
+    pm = np.where(np.isfinite(p), p, -1.0).astype(np.float32)
+    med = np.array(Image.fromarray((np.clip(pm, 0, 1) * 250 + 2).astype(np.uint8)).filter(ImageFilter.MedianFilter(5))).astype(np.float32)
+    p_s = np.where(np.isfinite(p), (med - 2) / 250.0, np.nan)
+    return ramp(np.clip(p_s, 0, 1), shade=shade)
+
+
+CDN = 'https://cdn.bluishvoid.com/foliage/'
+
+
+def on_cdn(path):
+    try:
+        req = urllib.request.Request(CDN + path, method='HEAD', headers={'User-Agent': 'bluishvoid.com foliage bake'})
+        return urllib.request.urlopen(req, timeout=20).status == 200
+    except Exception:
+        return False
+
+
+def season_frames(year, keys, vals, shade):
+    """Weekly frames for a past season, Sep 15 - Nov 10, rendered only for
+    dates not already on the CDN. Returns the list of dates that exist (on
+    the CDN or freshly written under OUT/season/<year>/)."""
+    dates, todo = [], []
+    d = datetime.date(year, 9, 15)
+    while d <= datetime.date(year, 11, 10):
+        if on_cdn('season/%d/%s.webp' % (year, d.isoformat())):
+            dates.append(d.isoformat())
+        else:
+            todo.append(d)
+        d += datetime.timedelta(days=7)
+    if todo:
+        print('season %d: rendering %d frames' % (year, len(todo)), flush=True)
+        aug = [datetime.date(year, 8, 5), datetime.date(year, 8, 13), datetime.date(year, 8, 21), datetime.date(year, 8, 29)]
+        bimgs = [v for v in (ndvi(x, keys, vals) for x in aug) if v is not None]
+        if bimgs:
+            base = np.nanmax(np.stack(bimgs), 0)
+            os.makedirs(os.path.join(OUT, 'season', str(year)), exist_ok=True)
+            for d in todo:
+                v = ndvi(d, keys, vals)
+                v2 = ndvi(d - datetime.timedelta(days=6), keys, vals)
+                if v is None:
+                    continue
+                cur = np.nanmax(np.stack([x for x in (v, v2) if x is not None]), 0)
+                with np.errstate(invalid='ignore', divide='ignore'):
+                    pp = 1 - cur / base
+                pp[~(base > 0.45)] = np.nan
+                frame(np.clip(pp, 0, 1), shade).save(os.path.join(OUT, 'season', str(year), d.isoformat() + '.webp'), 'WEBP', quality=82, method=6)
+                dates.append(d.isoformat())
+    return {'year': year, 'dates': sorted(dates), 'base': CDN + 'season/%d/' % year}
+
+
+def archive_this_season(today, prev):
+    """One frame a week of the current season under season/<year>/: today's
+    latest.webp is copied there when a week has passed since the last one."""
+    have = ((prev or {}).get('season_this') or {}).get('dates') or []
+    have = [x for x in have if x[:4] == str(today.year)]
+    last = max(have) if have else None
+    if last is None or (today - datetime.date.fromisoformat(last)).days >= 7:
+        os.makedirs(os.path.join(OUT, 'season', str(today.year)), exist_ok=True)
+        import shutil
+        shutil.copyfile(os.path.join(OUT, 'latest.webp'), os.path.join(OUT, 'season', str(today.year), today.isoformat() + '.webp'))
+        have.append(today.isoformat())
+    return {'year': today.year, 'dates': sorted(set(have)), 'base': CDN + 'season/%d/' % today.year}
 
 
 def px(lon, lat):
@@ -395,6 +471,7 @@ def npn_points(today):
 def main():
     today = datetime.date.today()
     keys, vals = colormap()
+    prev = previous()                      # yesterday's file: history, last year, spots, the archive list
     aug = [datetime.date(today.year, 8, 5), datetime.date(today.year, 8, 13),
            datetime.date(today.year, 8, 21), datetime.date(today.year, 8, 29)]
     print('baseline (August %d):' % today.year, flush=True)
@@ -413,15 +490,14 @@ def main():
         p = 1 - cur / base
     p[~(base > 0.45)] = np.nan
     p = np.clip(p, 0, 1)
-    # a 5-px median over the index before the ramp: the 250 m pixels speckle
-    # yellow over a green field at map scale, and a median keeps edges
-    # (rivers, ridgelines) while removing the salt (user 2026-09-13)
-    pm = np.where(np.isfinite(p), p, -1.0).astype(np.float32)
-    med = np.array(Image.fromarray((np.clip(pm, 0, 1) * 250 + 2).astype(np.uint8)).filter(ImageFilter.MedianFilter(5))).astype(np.float32)
-    p_s = np.where(np.isfinite(p), (med - 2) / 250.0, np.nan)
-    img = ramp(np.clip(p_s, 0, 1), shade=relief())
-    img.save(os.path.join(OUT, 'latest.webp'), 'WEBP', quality=82, method=6)   # ~1/6 the PNG, alpha kept
-    prev = previous()
+    shade = relief()
+    frame(p, shade).save(os.path.join(OUT, 'latest.webp'), 'WEBP', quality=82, method=6)   # ~1/6 the PNG, alpha kept
+    # LAST SEASON, WEEK BY WEEK (user 2026-09-13: "what will the map look like
+    # during peak?"): the same frame for each week of last autumn, baked once
+    # and kept on R2 under season/<year>/, so the page can play the wave
+    season_last = season_frames(today.year - 1, keys, vals, shade)
+    # and this season's own weekly archive, one frame a week, for the same loop
+    season_this = archive_this_season(today, prev)
     ly = last_year_curve(today.year - 1, keys, vals, prev)
     # the season's history rides in the file: one row per bake day, 90 days
     hist = [h for h in (prev.get('history') or []) if h.get('date') and h['date'] != today.isoformat()][-89:]
@@ -450,6 +526,7 @@ def main():
            'composites': cur_dates, 'baseline': [d.isoformat() for d in aug[:len(base_imgs)]],
            'layer': LAYER, 'box': BOX, 'w': W, 'h': H, 'regions': regions, 'bands': BANDS, 'rel_bands': REL,
            'history': hist, 'last_year': ly, 'weekend_from': sat, 'spots': spots(prev),
+           'season_last': season_last, 'season_this': season_this, 'ramp': RAMP_LEGEND,
            'points': npn_points(today), 'points_since': (today - datetime.timedelta(days=14)).isoformat(),
            'classes': ['<5%', '5-24%', '25-49%', '50-74%', '75-94%', '95%+']}
     with open(os.path.join(OUT, 'latest.json'), 'w') as f:
