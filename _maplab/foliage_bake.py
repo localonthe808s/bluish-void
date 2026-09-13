@@ -89,7 +89,20 @@ def ndvi(date, keys, vals):
     return v if share > 0.3 else None       # a blank (unpublished) composite decodes to nothing
 
 
-def ramp(p, alpha=0.80):
+def relief():
+    """ASTER GDEM greyscale shaded relief for the box, 0..255 (mean ~127), or
+    None. Multiplied into the ramp so the mountains read through the green
+    (user 2026-09-13: "add the topography as an undertone")."""
+    u = (WMS + '?SERVICE=WMS&REQUEST=GetMap&VERSION=1.3.0&LAYERS=ASTER_GDEM_Greyscale_Shaded_Relief'
+         '&CRS=EPSG:3857&BBOX=%d,%d,%d,%d&WIDTH=%d&HEIGHT=%d&FORMAT=image/png' % (BOX + (W, H)))
+    try:
+        return np.array(Image.open(io.BytesIO(get(u, 240))).convert('L')).astype(np.float32)
+    except Exception as e:
+        print('relief: unavailable (%s)' % e)
+        return None
+
+
+def ramp(p, alpha=0.80, shade=None):
     h, w = p.shape
     img = np.zeros((h, w, 4), np.uint8)
     stops = [(0.0, (34, 120, 40)), (0.12, (150, 190, 40)), (0.25, (240, 200, 40)),
@@ -101,7 +114,15 @@ def ramp(p, alpha=0.80):
         if not sel.any():
             continue
         t = ((p - a) / (b - a))[sel][:, None]
-        img[sel, :3] = (np.array(ca) * (1 - t) + np.array(cb) * t).astype(np.uint8)
+        col = np.array(ca) * (1 - t) + np.array(cb) * t
+        if shade is not None:
+            # hillshade as lightness, around the relief's own middle grey
+            # (~127): flat ground keeps the ramp's colour, a sunlit slope
+            # lifts to 1.4x and a shadowed one falls to 0.55x -- strong enough
+            # that the ridges read as ridges under the green
+            f = np.clip(1.0 + (shade[sel] - 127.0) / 85.0, 0.55, 1.4)[:, None]
+            col = col * f
+        img[sel, :3] = np.clip(col, 0, 255).astype(np.uint8)
         img[sel, 3] = int(255 * alpha)
     return Image.fromarray(img)
 
@@ -177,7 +198,7 @@ def main():
         p = 1 - cur / base
     p[~(base > 0.45)] = np.nan
     p = np.clip(p, 0, 1)
-    img = ramp(p)
+    img = ramp(p, shade=relief())
     img.save(os.path.join(OUT, 'latest.webp'), 'WEBP', quality=82, method=6)   # ~1/6 the PNG, alpha kept
     regions = []
     for name, lo0, lo1, la0, la1 in REGIONS:
