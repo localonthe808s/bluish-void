@@ -151,6 +151,13 @@ REGIONS = [('Adirondacks', -74.6, -73.6, 43.6, 44.4), ('Catskills', -74.7, -74.0
 # has its own level at that week (Adirondacks ~21%, Catskills ~20% in 2025).
 # The bands are RELATIVE to that level, per region, from last year's curve;
 # the absolute fallback below is only for a region with no history.
+# sign priority (the label queue drops the lowest first when signs collide at
+# this scale) and, where a box centre sits on a neighbour's sign, an anchor
+PRI = {'Adirondacks': 78, 'Catskills': 78, 'New York City & Long Island': 76, 'Hudson Valley': 74,
+       'Green Mountains': 72, 'White Mountains': 72, 'Berkshires': 70, 'Finger Lakes': 70,
+       'Poconos': 68, 'Harriman & Bear Mountain': 68, 'Litchfield Hills': 64, 'Delaware Water Gap': 64,
+       'Shawangunks': 62}
+ANCHOR = {'Hudson Valley': (41.56, -73.52), 'Shawangunks': (41.72, -74.42), 'Catskills': (42.12, -74.45)}
 BANDS = [(0, 'NOT YET'), (8, 'STARTING'), (15, 'NEAR PEAK'), (20, 'PEAK'), (30, 'PAST PEAK')]
 REL = [(0.0, 'NOT YET'), (0.35, 'STARTING'), (0.75, 'NEAR PEAK'), (0.95, 'PEAK'), (1.3, 'PAST PEAK')]
 
@@ -315,7 +322,8 @@ def main():
         pk_date, pk_level = (None, None)
         if ly and ly.get('regions', {}).get(name):
             pk_date, pk_level = peak_of(ly['dates'], ly['regions'][name])
-        regions.append({'name': name, 'lat': round((la0 + la1) / 2, 3), 'lon': round((lo0 + lo1) / 2, 3),
+        alat, alon = ANCHOR.get(name, ((la0 + la1) / 2, (lo0 + lo1) / 2))
+        regions.append({'name': name, 'lat': round(alat, 3), 'lon': round(alon, 3), 'pri': PRI.get(name, 66),
                         'pct': pct, 'past_peak': past, 'band': band(pct, pk_level),
                         'delta7': ((pct - ref[name]) if (ref and name in ref) else None),
                         'peak_last_year': pk_date, 'peak_level': pk_level})
