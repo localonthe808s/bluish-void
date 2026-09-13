@@ -22,7 +22,7 @@ baseline says forest (> 0.45).
 """
 import datetime, io, json, os, re, sys, time, urllib.parse, urllib.request
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), '_foliage_out')
 os.makedirs(OUT, exist_ok=True)
@@ -246,6 +246,116 @@ def last_year_curve(year, keys, vals, prev):
 CLASSES = {'Less than 5%': 0, '5-24%': 1, '25-49%': 2, '50-74%': 3, '75-94%': 4, '95% or more': 5}
 
 
+WEEKEND_WX = {0: 'CLEAR', 1: 'CLEAR', 2: 'PARTLY CLOUDY', 3: 'OVERCAST', 45: 'FOG', 48: 'FOG',
+              51: 'DRIZZLE', 53: 'DRIZZLE', 55: 'DRIZZLE', 56: 'DRIZZLE', 57: 'DRIZZLE',
+              61: 'RAIN', 63: 'RAIN', 65: 'RAIN', 66: 'RAIN', 67: 'RAIN',
+              71: 'SNOW', 73: 'SNOW', 75: 'SNOW', 77: 'SNOW', 80: 'SHOWERS', 81: 'SHOWERS', 82: 'SHOWERS',
+              85: 'SNOW', 86: 'SNOW', 95: 'STORMS', 96: 'STORMS', 99: 'STORMS'}
+
+
+def weekend(today, anchors):
+    """Saturday and Sunday ahead, per region anchor: {name: [[date, word, hiF, rain%], ...]}.
+    One Open-Meteo call for every anchor; 'this weekend' is the next Saturday,
+    or today's if it is the weekend already."""
+    # the weekend a planner is planning: this Saturday if it is still ahead
+    # (or is today), otherwise next Saturday -- a Sunday looks a week on
+    sat = today + datetime.timedelta(days=(5 - today.weekday()) % 7)
+    sun = sat + datetime.timedelta(days=1)
+    names = [n for n, _ in anchors]
+    u = ('https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s'
+         '&daily=weathercode,temperature_2m_max,precipitation_probability_max&temperature_unit=fahrenheit'
+         '&timezone=America%%2FNew_York&start_date=%s&end_date=%s'
+         % (','.join('%.3f' % a[0] for _, a in anchors), ','.join('%.3f' % a[1] for _, a in anchors),
+            sat.isoformat(), sun.isoformat()))
+    try:
+        j = json.loads(get(u, 60))
+    except Exception as e:
+        print('weekend: unavailable (%s)' % e)
+        return {}, sat.isoformat()
+    if isinstance(j, dict):
+        j = [j]
+    out = {}
+    for n, row in zip(names, j):
+        d = (row or {}).get('daily') or {}
+        days = []
+        for i, dt in enumerate(d.get('time') or []):
+            code = (d.get('weathercode') or [None])[i]
+            days.append([dt, WEEKEND_WX.get(code, 'CLOUDY') if code is not None else None,
+                         (round((d.get('temperature_2m_max') or [None])[i]) if (d.get('temperature_2m_max') or [None])[i] is not None else None),
+                         (d.get('precipitation_probability_max') or [None])[i]])
+        out[n] = days
+    return out, sat.isoformat()
+
+
+def pace(today, pct, ly, name):
+    """Days ahead (+) or behind (-) last year's curve at today's share, or None
+    when the share is still inside the noise (< 8%)."""
+    if not ly or pct is None or pct < 8:
+        return None
+    arr = ly.get('regions', {}).get(name)
+    if not arr:
+        return None
+    pts = [(datetime.date.fromisoformat(dt), x) for dt, x in zip(ly['dates'], arr) if x is not None]
+    if len(pts) < 2:
+        return None
+    ref = datetime.date(pts[0][0].year, today.month, today.day)   # today, last year
+    # the first date last year at or past today's share, interpolated
+    for (d0, x0), (d1, x1) in zip(pts, pts[1:]):
+        if x0 <= pct <= x1 and x1 > x0:
+            at = d0 + datetime.timedelta(days=(pct - x0) / (x1 - x0) * (d1 - d0).days)
+            return (at - ref).days
+    if pct < pts[0][1]:
+        return None
+    return None
+
+
+SPOTS = [
+    ('Bear Mountain', 'NY', 'Harriman & Bear Mountain', 'Metro-North to Peekskill, then a taxi'),
+    ('Breakneck Ridge', 'NY', 'Hudson Valley', 'Metro-North Hudson Line, Breakneck Ridge stop (weekends)'),
+    ('Storm King Mountain', 'NY', 'Hudson Valley', 'Metro-North to Beacon, then a taxi'),
+    ('Mount Beacon', 'NY', 'Hudson Valley', 'Metro-North to Beacon, walk to the trailhead'),
+    ('Minnewaska State Park', 'NY', 'Shawangunks', 'Trailways bus to New Paltz, then a taxi'),
+    ('Mohonk Preserve', 'NY', 'Shawangunks', 'Trailways bus to New Paltz'),
+    ('Sams Point', 'NY', 'Shawangunks', 'car'),
+    ('Kaaterskill Falls', 'NY', 'Catskills', 'Trailways bus to Palenville'),
+    ('Overlook Mountain', 'NY', 'Catskills', 'Trailways bus to Woodstock'),
+    ('Hunter Mountain', 'NY', 'Catskills', 'Trailways bus to Hunter'),
+    ('Slide Mountain', 'NY', 'Catskills', 'car'),
+    ('Mount Tammany', 'NJ', 'Delaware Water Gap', 'car'),
+    ('High Point State Park', 'NJ', 'Delaware Water Gap', 'car'),
+    ('Bash Bish Falls', 'MA', 'Berkshires', 'Metro-North Harlem Line to Wassaic, then a taxi'),
+    ('Mount Greylock', 'MA', 'Berkshires', 'car'),
+    ('Prospect Mountain, Lake George', 'NY', 'Adirondacks', 'car (Lake George)'),
+    ('Whiteface Mountain', 'NY', 'Adirondacks', 'car'),
+    ('Olana State Historic Site', 'NY', 'Hudson Valley', 'Amtrak to Hudson, then a taxi'),
+]
+
+
+def spots(prev):
+    """The lookouts, located once through Nominatim and carried forward."""
+    have = {x['name']: x for x in (prev or {}).get('spots') or []}
+    out = []
+    for name, st, region, how in SPOTS:
+        if name in have and have[name].get('lat') is not None:
+            out.append(have[name]); continue
+        try:
+            q = urllib.parse.urlencode({'q': '%s, %s' % (name, st), 'format': 'json', 'limit': 1})
+            req = urllib.request.Request('https://nominatim.openstreetmap.org/search?' + q,
+                                         headers={'User-Agent': 'bluishvoid.com foliage bake (contact via site)'})
+            j = json.loads(urllib.request.urlopen(req, timeout=30).read())
+            time.sleep(1.1)
+            if not j:
+                print('spot: %s not found' % name); continue
+            la, lo = float(j[0]['lat']), float(j[0]['lon'])
+            x, y = px(lo, la)
+            if not (0 <= x < W and 0 <= y < H):
+                print('spot: %s outside the box' % name); continue
+            out.append({'name': name, 'lat': round(la, 4), 'lon': round(lo, 4), 'region': region, 'how': how})
+        except Exception as e:
+            print('spot: %s failed (%s)' % (name, e))
+    return out
+
+
 def npn_points(today):
     a = (today - datetime.timedelta(days=14)).isoformat()
     q = 'start_date=%s&end_date=%s&phenophase_id[0]=498&request_src=bluishvoid_foliage' % (a, today.isoformat())
@@ -303,7 +413,13 @@ def main():
         p = 1 - cur / base
     p[~(base > 0.45)] = np.nan
     p = np.clip(p, 0, 1)
-    img = ramp(p, shade=relief())
+    # a 5-px median over the index before the ramp: the 250 m pixels speckle
+    # yellow over a green field at map scale, and a median keeps edges
+    # (rivers, ridgelines) while removing the salt (user 2026-09-13)
+    pm = np.where(np.isfinite(p), p, -1.0).astype(np.float32)
+    med = np.array(Image.fromarray((np.clip(pm, 0, 1) * 250 + 2).astype(np.uint8)).filter(ImageFilter.MedianFilter(5))).astype(np.float32)
+    p_s = np.where(np.isfinite(p), (med - 2) / 250.0, np.nan)
+    img = ramp(np.clip(p_s, 0, 1), shade=relief())
     img.save(os.path.join(OUT, 'latest.webp'), 'WEBP', quality=82, method=6)   # ~1/6 the PNG, alpha kept
     prev = previous()
     ly = last_year_curve(today.year - 1, keys, vals, prev)
@@ -314,6 +430,8 @@ def main():
     week_ago = (today - datetime.timedelta(days=7)).isoformat()
     older = [h for h in hist if h['date'] <= week_ago]
     ref = older[-1]['pct'] if older else None
+    anchors = [(name, ANCHOR.get(name, ((la0 + la1) / 2, (lo0 + lo1) / 2))) for name, lo0, lo1, la0, la1 in REGIONS]
+    wx, sat = weekend(today, anchors)
     regions = []
     for name, lo0, lo1, la0, la1 in REGIONS:
         if name not in means:
@@ -326,11 +444,12 @@ def main():
         regions.append({'name': name, 'lat': round(alat, 3), 'lon': round(alon, 3), 'pri': PRI.get(name, 66),
                         'pct': pct, 'past_peak': past, 'band': band(pct, pk_level),
                         'delta7': ((pct - ref[name]) if (ref and name in ref) else None),
-                        'peak_last_year': pk_date, 'peak_level': pk_level})
+                        'peak_last_year': pk_date, 'peak_level': pk_level,
+                        'pace_days': pace(today, pct, ly, name), 'weekend': wx.get(name)})
     doc = {'built': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%MZ'),
            'composites': cur_dates, 'baseline': [d.isoformat() for d in aug[:len(base_imgs)]],
            'layer': LAYER, 'box': BOX, 'w': W, 'h': H, 'regions': regions, 'bands': BANDS, 'rel_bands': REL,
-           'history': hist, 'last_year': ly,
+           'history': hist, 'last_year': ly, 'weekend_from': sat, 'spots': spots(prev),
            'points': npn_points(today), 'points_since': (today - datetime.timedelta(days=14)).isoformat(),
            'classes': ['<5%', '5-24%', '25-49%', '50-74%', '75-94%', '95%+']}
     with open(os.path.join(OUT, 'latest.json'), 'w') as f:
