@@ -849,6 +849,129 @@ def npn_points(today):
     return pts
 
 
+# CENTRAL PARK AT 10 M (user 2026-09-13: "build a small 10m display"). The
+# park is three MODIS pixels wide; Sentinel-2 sees it at 10 m. Through the
+# Planetary Computer's data API (keyless): every scene since August over the
+# park's box, NDVI as (B08-B04)/(B08+B04) and the scene classification, both
+# as numpy; a pixel counts only where the SCL says vegetation, bare, water or
+# unclassified (4-7), so cloud, shadow and cirrus fall out; the August
+# baseline is the clear-sky maximum of August, today is the maximum of the
+# last PARK_DAYS days (widened once when nothing clear landed). The index
+# and ramp are the big map's own, so the inset reads on the same legend.
+PARK_BOX = (-73.982, 40.7645, -73.949, 40.8005)     # west, south, east, north
+PARK_W, PARK_H = 300, 420
+PARK_DAYS = 14
+PARK_CLEAR = 0.5       # a look counts when this share of the box is clear by the scene's own mask
+PARK_LANDSAT = False   # Landsat is wired but off: at 30 m its park pixels mix in street, and one hazy
+                       # look inflated a max-composited baseline until 29 August read 40% turned against itself
+PARK_FRAME = 'park_v1.webp'
+PC_STAC = 'https://planetarycomputer.microsoft.com/api/stac/v1/search'
+PC_DATA = 'https://planetarycomputer.microsoft.com/api/data/v1/item/bbox/%s/%dx%d.npy' % (','.join(str(x) for x in PARK_BOX), PARK_W, PARK_H)
+
+
+def park_scenes(since):
+    """Sentinel-2 (10 m, every 2-5 days) and Landsat 8/9 (30 m, every 8)
+    over the park since `since`, newest first: (collection, id, date)."""
+    out = []
+    for coll in ('sentinel-2-l2a', 'landsat-c2-l2'):
+        body = json.dumps({'collections': [coll], 'bbox': list(PARK_BOX),
+                           'datetime': since + 'T00:00:00Z/' + datetime.date.today().isoformat() + 'T23:59:59Z',
+                           'query': {'eo:cloud_cover': {'lt': 80}}, 'limit': 60,
+                           'sortby': [{'field': 'datetime', 'direction': 'desc'}]}).encode()
+        req = urllib.request.Request(PC_STAC, data=body, headers={'Content-Type': 'application/json', 'User-Agent': 'bluishvoid.com foliage bake'})
+        try:
+            j = json.loads(urllib.request.urlopen(req, timeout=60).read())
+        except Exception as e:
+            print('park: %s search failed (%s)' % (coll, e)); continue
+        out += [(coll, f['id'], f['properties']['datetime'][:10]) for f in j.get('features', [])]
+    return sorted(out, key=lambda x: x[2], reverse=True)
+
+
+def park_ndvi(coll, scene_id):
+    """the scene's NDVI over the park, NaN where the sky was not clear.
+    Sentinel-2: the scene classification's vegetation and bare classes only
+    (water, unclassified, cloud, shadow, cirrus all fall out -- 'unclassified'
+    is mostly haze). Landsat: surface reflectance scaled (x0.0000275 - 0.2)
+    before the ratio, cleared by the QA bits for fill, dilated cloud, cirrus,
+    cloud and shadow."""
+    q = '?collection=%s&item=%s' % (coll, scene_id)
+    if coll == 'sentinel-2-l2a':
+        a = np.load(io.BytesIO(get(PC_DATA + q + '&expression=' + urllib.parse.quote('(B08-B04)/(B08+B04)') + '&asset_as_band=true&resampling=bilinear', 120)))
+        scl = np.load(io.BytesIO(get(PC_DATA + q + '&assets=SCL&resampling=nearest', 120)))
+        ok = np.isin(scl[0], [4, 5])
+    else:
+        ex = '((nir08*0.0000275-0.2)-(red*0.0000275-0.2))/((nir08*0.0000275-0.2)+(red*0.0000275-0.2))'
+        a = np.load(io.BytesIO(get(PC_DATA + q + '&expression=' + urllib.parse.quote(ex) + '&asset_as_band=true&resampling=bilinear', 120)))
+        qa = np.load(io.BytesIO(get(PC_DATA + q + '&assets=qa_pixel&resampling=nearest', 120)))[0].astype(np.int64)
+        ok = (qa & 0b11111) == 0
+    nd = a[0].astype(np.float32)
+    ok = ok & np.isfinite(nd) & (nd >= -1) & (nd <= 1) & ((a[1] > 0) if a.shape[0] > 1 else True)
+    return np.where(ok, nd, np.nan), float(ok.mean())
+
+
+def park(prev):
+    today = datetime.date.today()
+    scenes = park_scenes((today.replace(month=8, day=1) if today.month >= 8 else datetime.date(today.year - 1, 8, 1)).isoformat())
+    if not PARK_LANDSAT:
+        scenes = [s for s in scenes if s[0] == 'sentinel-2-l2a']
+    aug = [s for s in scenes if s[2][5:7] == '08']
+    base_imgs, base_used = [], []
+    for coll, sid, d in aug:
+        try:
+            nd, clear = park_ndvi(coll, sid)
+            if clear >= 0.2:
+                base_imgs.append(nd); base_used.append(d)
+        except Exception as e:
+            print('park: %s failed (%s)' % (sid, e))
+    if not base_imgs:
+        raise RuntimeError('no clear August scene over the park')
+    base = np.nanmedian(np.stack(base_imgs), 0)     # the median of August, not its maximum: one bright outlier cannot set it
+    # TODAY: only a MOSTLY CLEAR look counts (PARK_CLEAR of the box clear by
+    # the scene's own mask). Thin cloud and haze pass the masks at the edges
+    # and depress NDVI, and a composite stitched from such scraps read the
+    # park 49% turned on September 13 with nothing turned. Newest clear look
+    # since the baseline month wins; if September has had none, the last
+    # clear look of August stands in, flagged stale, so the inset says so.
+    sep1 = today.replace(month=9, day=1).isoformat() if today.month >= 9 else (today.replace(day=1)).isoformat()
+    looks = []          # (date, coll, ndvi) clear looks, newest first
+    for coll, sid, d in scenes:
+        if d < sep1 and looks:
+            break
+        try:
+            nd, clear = park_ndvi(coll, sid)
+            print('park: %s %s clear %.0f%%' % (d, coll[:8], 100 * clear))
+            if clear >= PARK_CLEAR:
+                looks.append((d, coll, nd))
+                if d >= sep1 and len(looks) >= 2:
+                    break
+        except Exception as e:
+            print('park: %s failed (%s)' % (sid, e))
+    if not looks:
+        raise RuntimeError('no clear look at the park')
+    fresh = [x for x in looks if x[0] >= sep1]
+    stale = not fresh
+    use = fresh if fresh else looks[:1]
+    cur_imgs = [x[2] for x in use]
+    cur_used = [(x[1], x[0]) for x in use]
+    cur = np.nanmax(np.stack(cur_imgs), 0)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        p = 1 - cur / base
+    canopy = np.isfinite(base) & (base > 0.45)
+    veg = canopy & np.isfinite(cur)
+    coverage = float(veg.sum() / canopy.sum()) if canopy.any() else 0.0
+    p = np.where(veg, np.clip(p, 0, 1), np.nan)
+    ramp(p, 0.96, None).save(os.path.join(OUT, PARK_FRAME), 'WEBP', quality=88, method=6)   # ramp() returns the image
+    pct = int(round(100 * float(np.nanmean(p)))) if veg.any() else None
+    dates = sorted(set(d for _, d in cur_used))
+    out = {'url': CDN + PARK_FRAME, 'w': PARK_W, 'h': PARK_H, 'box': list(PARK_BOX), 'as_of': dates[-1],
+           'scenes': dates, 'base_scenes': sorted(set(base_used)), 'pct': pct,
+           'coverage': round(coverage, 2), 'thin': coverage < 0.6, 'stale': stale, 'canopy_share': round(float(canopy.mean()), 3),
+           'built': today.isoformat()}
+    print('park: %s%% turned as of %s, %.0f%% of the canopy seen (scenes %s; baseline %d August looks)'
+          % (pct, out['as_of'], 100 * coverage, ','.join(dates), len(base_used)))
+    return out
+
+
 def main():
     today = datetime.date.today()
     keys, vals = colormap()
@@ -931,7 +1054,13 @@ def main():
                         'delta7': ((pct - ref[name]) if (ref and name in ref) else None),
                         'peak_last_year': pk_date, 'peak_level': pk_level,
                         'pace_days': pace(today, pct, ly, name), 'weekend': wx.get(name)})
+    try:
+        park_doc = park(prev)
+    except Exception as e:
+        print('park: unavailable (%s)' % e)
+        park_doc = (prev or {}).get('park')
     doc = {'built': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%MZ'),
+           'park': park_doc,
            'composites': cur_dates, 'baseline': [d.isoformat() for d in aug[:len(base_imgs)]],
            'layer': LAYER, 'box': BOX, 'w': W, 'h': H, 'regions': regions, 'bands': BANDS, 'rel_bands': REL,
            'history': hist, 'last_year': ly, 'weekend_from': sat, 'spots': spots(prev),
@@ -951,4 +1080,13 @@ def main():
 
 
 if __name__ == '__main__':
+    if '--park' in sys.argv:
+        # the inset alone, merged into the plan file already under OUT
+        _pp = os.path.join(OUT, 'latest.json')
+        _prev = json.load(open(_pp)) if os.path.exists(_pp) else {}
+        _prev['park'] = park(_prev)
+        with open(_pp, 'w') as fh:
+            json.dump(_prev, fh)
+        print('park merged into', _pp)
+        sys.exit(0)
     main()
