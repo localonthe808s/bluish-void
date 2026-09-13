@@ -140,11 +140,19 @@ def bands(p, shade, sigma=7):
     blurred to landscape scale (sigma 7 px ~ 6 km) and posterised to the
     ramp's own stops, so the colour comes as bands that follow the hills
     rather than county lines or 250 m speckle. Same relief undertone."""
-    pm = np.where(np.isfinite(p), p, np.nan).astype(np.float32)
-    fill = np.nanmean(pm) if np.isfinite(pm).any() else 0.0
-    im = Image.fromarray((np.clip(np.where(np.isfinite(pm), pm, fill), 0, 1) * 250 + 2).astype(np.uint8))
-    bl = np.array(im.filter(ImageFilter.GaussianBlur(sigma))).astype(np.float32)
-    q = np.where(np.isfinite(pm), (bl - 2) / 250.0, np.nan)
+    # a MASK-AWARE blur: blur(p x mask) / blur(mask), so water, towns and
+    # the untyped edge do not bleed a filled-in value into the forest next
+    # to them (the first cut filled gaps with the mean and drew yellow
+    # halos round every lake and city). Only pixels with 300 m of forest
+    # around them keep a band; the rest stay clear and the map shows through.
+    fin = np.isfinite(p)
+    pv = np.where(fin, p, 0.0).astype(np.float32)
+    mk = fin.astype(np.float32)
+    to = lambda a: Image.fromarray((np.clip(a, 0, 1) * 250).astype(np.uint8))           # noqa: E731
+    bp = np.array(to(pv).filter(ImageFilter.GaussianBlur(sigma))).astype(np.float32) / 250.0
+    bm = np.array(to(mk).filter(ImageFilter.GaussianBlur(sigma))).astype(np.float32) / 250.0
+    with np.errstate(invalid='ignore', divide='ignore'):
+        q = np.where(bm > 0.35, bp / bm, np.nan)
     # posterise: each pixel takes the lower stop of the band it falls in
     stops = [st for st, _ in RAMP[:-1]]
     post = np.full_like(q, np.nan)
