@@ -344,27 +344,36 @@ def county_last_year(year, keys, vals, labels, ids, prev):
 # the same atlas as per-species basal area rasters, but the type GROUP is
 # what decides the colour: maple/beech/birch is the show, aspen/birch and
 # elm/ash go yellow, oak/hickory turns late and russet, spruce, fir and pine
-# never turn. Rendered once a season as forest_v1.webp with the relief, plus
+# never turn. Rendered once a season as FOREST_FRAME with the relief, plus
 # forest_codes.png (one byte a pixel, the group index) for the page's taps.
 FTG = ('https://imagery.geoplatform.gov/iipp/rest/services/Vegetation/'
        'USFS_EDW_FIA_ForestAtlas_ForestTypeGroups_109_CONUS/ImageServer')
+# SIX COLOURS, NOT FOUR (user 2026-09-13: "is there a way to break up the
+# colors further on FOREST?"). Measured over the box's typed forest: maple,
+# beech, birch 57%; oak, hickory 31%; the pines 5%; spruce and fir 3%; the
+# river-bottom elm, ash, cottonwood 1%; aspen and birch 1%; everything else
+# under 1% each and folded into its nearest kin. The pines against the
+# spruce-fir mark the Pine Barrens and the sandy uplands against the boreal
+# high ground; the two golds are the river bottoms against the far north.
 FOREST_ROLES = [   # (label as the atlas prints it, our role, display rgb)
     ('Maple/Beech/Birch Group', 'THE SHOW', (232, 108, 38)),
-    ('Aspen/Birch Group', 'GOLD', (240, 200, 60)),
-    ('Elm/Ash/Cottonwood Group', 'GOLD', (222, 182, 70)),
+    ('Aspen/Birch Group', 'NORTH GOLD', (244, 208, 56)),
+    ('Elm/Ash/Cottonwood Group', 'RIVER GOLD', (206, 176, 104)),
     ('Oak/Hickory Group', 'LATE, RUSSET', (168, 106, 58)),
-    ('Oak/Pine Group', 'LATE, RUSSET', (150, 120, 62)),
-    ('Oak/Gum/Cypress Group', 'LATE, RUSSET', (158, 132, 60)),
-    ('Spruce/Fir Group', 'EVERGREEN', (26, 84, 48)),
-    ('White/Red/Jack Pine Group', 'EVERGREEN', (32, 96, 52)),
-    ('Loblolly/Shortleaf Pine Group', 'EVERGREEN', (36, 100, 54)),
-    ('Longleaf/Slash Pine Group', 'EVERGREEN', (36, 100, 54)),
-    ('Pinyon/Juniper Group', 'EVERGREEN', (40, 96, 56)),
-    ('Douglas-fir Group', 'EVERGREEN', (30, 90, 50)),
-    ('Exotic Softwoods Group', 'EVERGREEN', (44, 98, 58)),
+    ('Oak/Pine Group', 'LATE, RUSSET', (156, 112, 60)),
+    ('Oak/Gum/Cypress Group', 'LATE, RUSSET', (160, 118, 62)),
+    ('Spruce/Fir Group', 'SPRUCE, FIR', (22, 74, 52)),
+    ('White/Red/Jack Pine Group', 'PINE', (78, 142, 78)),
+    ('Loblolly/Shortleaf Pine Group', 'PINE', (84, 148, 80)),
+    ('Longleaf/Slash Pine Group', 'PINE', (84, 148, 80)),
+    ('Pinyon/Juniper Group', 'PINE', (80, 140, 78)),
+    ('Douglas-fir Group', 'SPRUCE, FIR', (26, 80, 54)),
+    ('Exotic Softwoods Group', 'PINE', (82, 144, 80)),
 ]
-FOREST_LEGEND = [('THE SHOW', 'MAPLE, BEECH, BIRCH', (232, 108, 38)), ('GOLD', 'ASPEN, BIRCH, ASH', (240, 200, 60)),
-                 ('LATE, RUSSET', 'OAK, HICKORY', (168, 106, 58)), ('EVERGREEN', 'SPRUCE, FIR, PINE', (30, 92, 52))]
+FOREST_LEGEND = [('THE SHOW', 'MAPLE, BEECH, BIRCH', (232, 108, 38)), ('LATE, RUSSET', 'OAK, HICKORY', (168, 106, 58)),
+                 ('NORTH GOLD', 'ASPEN, BIRCH', (244, 208, 56)), ('RIVER GOLD', 'ELM, ASH, COTTONWOOD', (206, 176, 104)),
+                 ('PINE', 'WHITE, RED, PITCH', (78, 142, 78)), ('SPRUCE, FIR', 'THE HIGH GROUND', (22, 74, 52))]
+FOREST_FRAME = 'forest_v2.webp'     # bump when the palette changes; the CDN copy is otherwise kept
 
 
 def forest(shade, prev):
@@ -395,7 +404,7 @@ def forest(shade, prev):
     global FOREST_CODES
     FOREST_CODES = codes
     print('forest: %.0f%% of the box is typed forest' % (100 * (codes > 0).mean()))
-    if not (on_cdn('forest_v1.webp') and on_cdn('forest_codes.png')):
+    if not (on_cdn(FOREST_FRAME) and on_cdn('forest_codes.png')):
         img = np.zeros((H, W, 4), np.uint8)
         for i, (label, role, rgb) in enumerate(FOREST_ROLES):
             m = codes == i + 1
@@ -405,7 +414,7 @@ def forest(shade, prev):
                 col = col * f
             img[m, :3] = np.clip(col, 0, 255).astype(np.uint8)
             img[m, 3] = 218
-        Image.fromarray(img).save(os.path.join(OUT, 'forest_v1.webp'), 'WEBP', quality=82, method=6)
+        Image.fromarray(img).save(os.path.join(OUT, FOREST_FRAME), 'WEBP', quality=82, method=6)
         Image.fromarray(codes, 'L').save(os.path.join(OUT, 'forest_codes.png'), optimize=True)
     return codes
 
@@ -413,7 +422,8 @@ def forest(shade, prev):
 def forest_shares(codes, labels, ids):
     """per county fips -> {'show': %, 'gold': %, 'late': %, 'ever': %} of its typed forest"""
     role_of = {i + 1: r for i, (_, r, _) in enumerate(FOREST_ROLES)}
-    key = {'THE SHOW': 'show', 'GOLD': 'gold', 'LATE, RUSSET': 'late', 'EVERGREEN': 'ever'}
+    key = {'THE SHOW': 'show', 'NORTH GOLD': 'gold', 'RIVER GOLD': 'gold', 'LATE, RUSSET': 'late',
+           'PINE': 'ever', 'SPRUCE, FIR': 'ever'}
     out = {}
     valid = codes > 0
     tot = np.bincount(labels[valid], minlength=len(ids) + 1)
@@ -820,7 +830,7 @@ def main():
            'history': hist, 'last_year': ly, 'weekend_from': sat, 'spots': spots(prev),
            'season_last': season_last, 'season_this': season_this, 'ramp': RAMP_LEGEND,
            'counties': counties_now, 'counties_ly': counties_ly, 'counties_url': CDN + 'counties.json',
-           'forest_url': CDN + 'forest_v1.webp', 'forest_codes_url': CDN + 'forest_codes.png',
+           'forest_url': CDN + FOREST_FRAME, 'forest_codes_url': CDN + 'forest_codes.png',
            'forest_legend': [[r, txt, list(rgb)] for r, txt, rgb in FOREST_LEGEND],
            'forest_roles': [[lab, role] for lab, role, _ in FOREST_ROLES], 'forest_by_county': forest_by_county,
            'points': npn_points(today), 'points_since': (today - datetime.timedelta(days=14)).isoformat(),
