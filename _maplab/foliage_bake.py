@@ -542,7 +542,7 @@ def px(lon, lat):
 # NYCers going upstate on weekends"), each a box for the mean and an anchor
 # for its sign on the map
 REGIONS = [('Adirondacks', -74.6, -73.6, 43.6, 44.4), ('Catskills', -74.7, -74.0, 41.9, 42.3),
-           ('Shawangunks', -74.35, -74.15, 41.65, 41.82), ('Harriman & Bear Mountain', -74.12, -73.9, 41.2, 41.36),
+           ('Shawangunks', -74.35, -74.15, 41.65, 41.82),
            ('Hudson Valley', -74.0, -73.6, 41.2, 41.8), ('Litchfield Hills', -73.4, -73.0, 41.7, 42.0),
            ('Berkshires', -73.4, -72.9, 42.1, 42.7), ('Poconos', -75.6, -75.0, 41.0, 41.4),
            ('Delaware Water Gap', -75.2, -74.9, 40.9, 41.2), ('Finger Lakes', -77.3, -76.3, 42.3, 42.9),
@@ -560,14 +560,17 @@ REGIONS = [('Adirondacks', -74.6, -73.6, 43.6, 44.4), ('Catskills', -74.7, -74.0
 # this scale) and, where a box centre sits on a neighbour's sign, an anchor
 PRI = {'Adirondacks': 78, 'Catskills': 78, 'New York City & Long Island': 76, 'Hudson Valley': 74,
        'Green Mountains': 72, 'White Mountains': 72, 'Berkshires': 70, 'Finger Lakes': 70,
-       'Poconos': 68, 'Harriman & Bear Mountain': 68, 'Litchfield Hills': 64, 'Delaware Water Gap': 64,
+       'Poconos': 68, 'Litchfield Hills': 64, 'Delaware Water Gap': 64,
        'Shawangunks': 62}
 # signs sit where a New Yorker would point (user 2026-09-13: "some of these
 # locations aren't in the right spot"): the Hudson Valley on the river at
-# Hyde Park, Harriman inside the park, the city-and-island sign on Long
+# Hyde Park, the city-and-island sign on Long
 # Island at the Nassau line rather than out in Suffolk
 ANCHOR = {'Hudson Valley': (41.78, -73.93), 'Shawangunks': (41.72, -74.42), 'Catskills': (42.12, -74.45),
-          'Harriman & Bear Mountain': (41.24, -74.09), 'New York City & Long Island': (40.74, -73.45)}
+          'New York City & Long Island': (40.74, -73.45)}
+# the Harriman & Bear Mountain sign was dropped (user 2026-09-13: "keep
+# breakneck, remove harriman"): it crowded the Highlands against the lookouts
+# and Bear Mountain is a lookout of the Hudson Valley
 BANDS = [(0, 'NOT YET'), (8, 'STARTING'), (15, 'NEAR PEAK'), (20, 'PEAK'), (30, 'PAST PEAK')]
 REL = [(0.0, 'NOT YET'), (0.35, 'STARTING'), (0.75, 'NEAR PEAK'), (0.95, 'PEAK'), (1.3, 'PAST PEAK')]
 
@@ -717,7 +720,7 @@ def pace(today, pct, ly, name):
 
 
 SPOTS = [
-    ('Bear Mountain', 'NY', 'Harriman & Bear Mountain', 'Metro-North to Peekskill, then a taxi'),
+    ('Bear Mountain', 'NY', 'Hudson Valley', 'Metro-North to Peekskill, then a taxi'),
     ('Breakneck Ridge', 'NY', 'Hudson Valley', 'Metro-North Hudson Line, Breakneck Ridge stop (weekends)'),
     ('Storm King Mountain', 'NY', 'Hudson Valley', 'Metro-North to Beacon, then a taxi'),
     ('Mount Beacon', 'NY', 'Hudson Valley', 'Metro-North to Beacon, walk to the trailhead'),
