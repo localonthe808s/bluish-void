@@ -204,6 +204,14 @@ def models_for(cfg):
 # observed floor yet and the run is a day older -- tomorrow is a genuine
 # forecast, not a half-settled fact.
 TOMORROW_SD = 2.19
+# ... for New York. Measured per city on the same 74 days (dayahead_study.py,
+# 2026-09-13): Las Vegas 1.83 and Austin 1.56, and their days land inside a
+# two-degree bracket twice as often (64% within a degree against 45%). So the
+# overnight ladder is priced off each city's own day-ahead court when it has
+# one (dayahead.json: per-model peak biases and the residual list of their
+# mean, walk-forward), and the constant above is the fallback.
+DAYAHEAD_MIN_N = 30
+DAYAHEAD_KERNEL = 0.5     # degF; each residual is smeared this much when it prices a bracket
 SWING_DAMP = 0.05         # see point_forecast(): models overdo warm-ups
 RESID_M = 45              # days of recent residuals behind the spread estimate
 SD_FLOOR = 0.25
@@ -1712,6 +1720,38 @@ def spread(res, hour, binding=None):
 # ---------------------------------------------------------- probability ----
 def _phi(z):
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+_DAYAHEAD = []
+
+
+def dayahead_court(cfg):
+    """dayahead.json's row for this city, or None (see dayahead_study.py)."""
+    if not _DAYAHEAD:
+        try:
+            _DAYAHEAD.append(json.load(open(os.path.join(HERE, 'dayahead.json'))))
+        except Exception:
+            _DAYAHEAD.append(None)
+    d = _DAYAHEAD[0] or {}
+    c = (d.get('cities') or {}).get(cfg['key'])
+    if not c or (c.get('n') or 0) < DAYAHEAD_MIN_N or not c.get('resid') or not c.get('bias'):
+        return None
+    return c
+
+
+def dayahead_distribution(rows, pred, court):
+    """P(bracket) for tomorrow from the court's residual list: each residual
+    is a small normal (DAYAHEAD_KERNEL) around pred + r, averaged. Keeps the
+    peaked centre and the fat tails a single normal cannot hold at once."""
+    k = DAYAHEAD_KERNEL
+    ps = []
+    for r in rows:
+        lo = (r['lo'] - 0.5) if r['lo'] is not None else -1e9
+        hi = (r['hi'] + 0.5) if r['hi'] is not None else 1e9
+        ps.append(max(0.0, statistics.mean(_phi((hi - pred - e) / k) - _phi((lo - pred - e) / k)
+                                           for e in court['resid'])))
+    s = sum(ps) or 1.0
+    return [p / s for p in ps]
 
 
 def distribution(rows, pred, sd, obs_floor):
@@ -3729,24 +3769,46 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         # prepare against without a ladder: our number, each run's own peak,
         # the two official forecasts, and when the peak comes.
         t_models, t_ph = {}, []
-        for _m, _fc in fcm.items():
-            _day = _fc.get(tkey2) or {}
-            if len(_day) >= 20 and biases.get(_m) is not None:
-                _pk = max(_day.items(), key=lambda kv: kv[1])
-                t_models[_m] = round(_pk[1] - biases[_m], 1)
-                t_ph.append(_pk[0])
-        t_prep = {'pred': round(tp, 2) if tp is not None else None, 'sd': TOMORROW_SD,
+        t_sd, t_court = TOMORROW_SD, None
+        court = dayahead_court(cfg)
+        if court:
+            # THE CITY'S OWN DAY-AHEAD COURT: each run's raw peak plus that
+            # model's measured day-ahead bias, an equal mean of the five real
+            # models (HRRR is the GFS again at this range), and the spread the
+            # court measured. No swing damping here: the residuals were taken
+            # on the undamped mean, so they already hold whatever the models
+            # overdo.
+            for _m, _fc in fcm.items():
+                _day = _fc.get(tkey2) or {}
+                if len(_day) >= 20 and _m in court['bias']:
+                    _pk = max(_day.items(), key=lambda kv: kv[1])
+                    t_models[_m] = round(_pk[1] + court['bias'][_m], 1)
+                    t_ph.append(_pk[0])
+            if t_models:
+                tp = statistics.mean(t_models.values())
+                t_sd = court.get('sd') or TOMORROW_SD
+                t_court = {'n': court.get('n'), 'sd': court.get('sd'), 'mae': court.get('mae'),
+                           'p_within1': court.get('p_within1'), 'from': court.get('from'), 'to': court.get('to'),
+                           'kernel': DAYAHEAD_KERNEL}
+        if not t_models:
+            for _m, _fc in fcm.items():
+                _day = _fc.get(tkey2) or {}
+                if len(_day) >= 20 and biases.get(_m) is not None:
+                    _pk = max(_day.items(), key=lambda kv: kv[1])
+                    t_models[_m] = round(_pk[1] - biases[_m], 1)
+                    t_ph.append(_pk[0])
+        t_prep = {'pred': round(tp, 2) if tp is not None else None, 'sd': t_sd, 'court': t_court,
                   'models': t_models,
                   'peak_hour': int(statistics.median(t_ph)) if t_ph else None,
                   'twc_fc': twc_forecast(cfg, tdate), 'nws_fc': nws_forecast(cfg, tdate)}
         if trows and tp is not None and -40.0 < tp < 130.0:
-            tps = distribution(trows, tp, TOMORROW_SD, None)
+            tps = dayahead_distribution(trows, tp, court) if t_court else distribution(trows, tp, TOMORROW_SD, None)
             tb = max(range(len(trows)), key=lambda i: tps[i])
             tm = max(range(len(trows)), key=lambda i: trows[i]['mid'])
             tom = {
                 'date': tkey2, 'event': event_ticker(cfg, tdate),
                 'state': market_state(cfg, trows, now),
-                'pred': round(tp, 2), 'sd': TOMORROW_SD,
+                'pred': round(tp, 2), 'sd': t_sd, 'court': t_court,
                 'pick': trows[tb]['label'], 'p': round(tps[tb], 4),
                 'market_pick': trows[tm]['label'], 'market_p': trows[tm]['mid'],
                 'agree': tb == tm,
