@@ -1754,6 +1754,73 @@ def dayahead_distribution(rows, pred, court):
     return [p / s for p in ps]
 
 
+_KERNEL = []
+
+
+def kernel_court(cfg):
+    """kernel.json's row for this city when the study ruled for the kernel
+    (kernel_study.py, nightly): {'use', 'k', 'pool', ...}, else None.
+
+    Per city, because the court split: on ~535 noon days the kernel beats the
+    normal in New York (ladder Brier .531 -> .489, and the 20-35% cells land
+    28-30% instead of 35%), loses in Las Vegas (.364 -> .374, residuals there
+    are already normal) and is a wash in Austin. The study decides, not a
+    constant."""
+    if not _KERNEL:
+        try:
+            _KERNEL.append(json.load(open(os.path.join(HERE, 'kernel.json'))))
+        except Exception:
+            _KERNEL.append(None)
+    d = _KERNEL[0] or {}
+    c = (d.get('cities') or {}).get(cfg['key'])
+    return c if c and c.get('use') and c.get('k') and c.get('pool') else None
+
+
+def spread_pool(res, binding=None):
+    """The residual list spread() measures from: same regime when it has 20,
+    else everything, last RESID_M. [(date, resid, binding)] -> [resid]."""
+    pool = res
+    if binding is not None:
+        same = [r for r in res if len(r) > 2 and r[2] == binding]
+        if len(same) >= 20:
+            pool = same
+    return [r[1] for r in pool[-RESID_M:]]
+
+
+def kernel_distribution(rows, pred, pool, obs_floor, k):
+    """P(bracket) from the residual list itself: each residual r (pred - actual)
+    is a small normal of width k around pred - r, averaged; truncated below the
+    observed floor like distribution(). Keeps the centre peaked and the tails
+    the way they were, which one width cannot."""
+    cut = (obs_floor - 0.5) if obs_floor is not None else None
+    f = lambda x: statistics.mean(_phi((x - pred + r) / k) for r in pool)
+    base = 1.0 - f(cut) if cut is not None else 1.0
+    if base < 1e-6:
+        base, cut = 1.0, None
+    ps = []
+    for r in rows:
+        lo = (r['lo'] - 0.5) if r['lo'] is not None else -1e9
+        hi = (r['hi'] + 0.5) if r['hi'] is not None else 1e9
+        if cut is not None:
+            lo, hi = max(lo, cut), max(hi, cut)
+        ps.append(max(0.0, (f(hi) - f(lo)) / base))
+    s = sum(ps) or 1.0
+    return [p / s for p in ps]
+
+
+def ladder_probs(cfg, rows, pred, sd, obs_floor, res, binding):
+    """The live ladder: the city's kernel over its residual pool when the
+    court ruled for it and the day is still open; the normal otherwise (a
+    binding floor keeps the exact-figure spread logic, which the kernel study
+    did not replay)."""
+    kc = kernel_court(cfg)
+    if kc and not binding:
+        pool = spread_pool(res, binding)[-int(kc['pool']):]
+        if len(pool) >= 20:
+            return kernel_distribution(rows, pred, pool, obs_floor, float(kc['k']))
+    return distribution(rows, pred, sd, obs_floor)
+
+
 def distribution(rows, pred, sd, obs_floor):
     """P(reported integer high lands in each bracket).
 
@@ -3724,7 +3791,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         fresh_peaks = None
         print('fresh runs unavailable: %s' % e)
 
-    ps = distribution(rows, pred, sd, obs_far)
+    ps = ladder_probs(cfg, rows, pred, sd, obs_far, res, binding_now)
     # THE AFTERNOON BLEND (2026-09-13). After 1 PM the ladder was still a
     # symmetric forecast around a number; the afternoon table (afternoon.json)
     # says, for this city, season and hour, how the official max actually ends
@@ -3790,6 +3857,20 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
                 t_court = {'n': court.get('n'), 'sd': court.get('sd'), 'mae': court.get('mae'),
                            'p_within1': court.get('p_within1'), 'from': court.get('from'), 'to': court.get('to'),
                            'kernel': DAYAHEAD_KERNEL}
+                # THE SPREAD BIN (idea 2, 2026-09-13): when the study ruled that
+                # same-bin residuals price better than the pooled list, and the
+                # bin has its minimum, tomorrow's ladder is priced from the
+                # residuals of days whose runs disagreed like today's do.
+                _spr = max(t_models.values()) - min(t_models.values())
+                t_court['spread'] = round(_spr, 2)
+                if court.get('spread_use') and court.get('spread') and len(court['spread']) == len(court['resid']):
+                    _split = float(court.get('spread_split') or 5.0)
+                    _hi = _spr >= _split
+                    _bin = [r for r, sp in zip(court['resid'], court['spread']) if (sp >= _split) == _hi]
+                    if len(_bin) >= int(court.get('spread_min') or 40):
+                        court = dict(court, resid=_bin)
+                        t_court['spread_bin'] = ('>=%g' % _split) if _hi else ('<%g' % _split)
+                        t_court['spread_bin_n'] = len(_bin)
         if not t_models:
             for _m, _fc in fcm.items():
                 _day = _fc.get(tkey2) or {}
@@ -3905,7 +3986,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         hours_left = len([h for h in (fc.get(tkey) or {}) if h >= hour])
         over = day_has_fc and hours_left == 0
         bind = (fl is not None and ((pf is not None and fl >= pf) or over))
-        sdh, _ = spread(residuals(fcm, bias_of, daily, obh, hour, tkey, h0_of), hour, bind)
+        _res_h = residuals(fcm, bias_of, daily, obh, hour, tkey, h0_of)
+        sdh, _ = spread(_res_h, hour, bind)
         # ONCE THE FLOOR BINDS, THE DAY IS OVER.  `bind` means no remaining hour
         # is forecast above what the station has already recorded, so the high is
         # not going to move: the only live question is whether the true peak sat
@@ -3923,7 +4005,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             sdh = min(sdh, max(EXACT_FLOOR_SD_MIN,
                                math.sqrt(max(sdh * sdh - OFFSET_SD * OFFSET_SD, 0.0)))
                            if exact else OFFSET_SD)
-        return pr, sdh, distribution(rows, pr, sdh, fl), fl
+        return pr, sdh, ladder_probs(cfg, rows, pr, sdh, fl, _res_h, bind), fl
 
     def make_lock(hour):
         snap = snapshot(hour)

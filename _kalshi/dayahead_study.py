@@ -30,9 +30,18 @@ before d (at least 14); the residual is actual_d minus the mean of the five
 corrected peaks. The bias published for tomorrow is the trailing 45 days
 through the newest scored day.
 
+Spread bins (2026-09-13, idea 2). The five runs' disagreement is the one bust
+flag that survived: day-ahead miss 1.3 degF when the peaks sit within 5 degF,
+1.9 when they are 5 or more apart (n 106). Each residual is stored with its
+day's spread; the study scores, walk-forward, pricing from the same-bin
+residuals against the pooled list (mean log score of the settled integer
+through the bake's kernel) and rules `spread_use` only when the bin pricing
+wins AND both bins hold SPREAD_MIN days. The bake then takes the bin's
+residuals for tomorrow's ladder. Until the ruling flips, the log just grows.
+
 Offline: python3 _kalshi/dayahead_study.py [--days 120]
 """
-import csv, io, json, os, sys, time, datetime, statistics, urllib.parse, urllib.request
+import csv, io, json, math, os, sys, time, datetime, statistics, urllib.parse, urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import kalshi_daily as K                                   # noqa: E402
@@ -42,6 +51,9 @@ MODELS = ['ncep_nbm_conus', 'ecmwf_ifs025', 'gfs_seamless', 'icon_seamless', 'ge
 WINDOW = 45          # days of bias memory
 MIN_BIAS_N = 14      # fewer scored days than this and a day is not graded
 DAYS = 120           # how far back the archive is asked for
+SPREAD_SPLIT = 5.0   # degF between the warmest and coldest corrected peak
+SPREAD_MIN = 40      # days in EACH bin before the bin pricing can rule
+KERNEL = 0.5         # the bake's DAYAHEAD_KERNEL
 
 
 def fetch(name, url, max_age_h=20):
@@ -91,26 +103,63 @@ def peaks_of(cfg, since, until):
 
 def court(truth, peaks):
     days = sorted(d for d in peaks if d in truth and len(peaks[d]) == len(MODELS))
-    resid, graded = [], []
+    resid, graded, spread = [], [], []
     for i, d in enumerate(days):
         prior = days[max(0, i - WINDOW):i]
         if len(prior) < MIN_BIAS_N:
             continue
         bias = {m: statistics.mean(truth[p] - peaks[p][m] for p in prior) for m in MODELS}
-        pred = statistics.mean(peaks[d][m] + bias[m] for m in MODELS)
+        corr = [peaks[d][m] + bias[m] for m in MODELS]
+        pred = statistics.mean(corr)
         resid.append(round(truth[d] - pred, 2))
+        spread.append(round(max(corr) - min(corr), 2))
         graded.append(d)
     tail = days[-WINDOW:]
     bias_now = {m: round(statistics.mean(truth[p] - peaks[p][m] for p in tail), 2) for m in MODELS} if tail else {}
     out = {'models': MODELS, 'window': WINDOW, 'bias': bias_now, 'bias_n': len(tail),
            'n': len(resid), 'from': graded[0] if graded else None, 'to': graded[-1] if graded else None,
-           'resid': resid}
+           'resid': resid, 'spread': spread, 'spread_split': SPREAD_SPLIT, 'spread_min': SPREAD_MIN}
+    out.update(spread_ruling(resid, spread))
     if resid:
         out.update({'sd': round(statistics.pstdev(resid), 3), 'mae': round(statistics.mean(abs(r) for r in resid), 3),
                     'bias_resid': round(statistics.mean(resid), 3),
                     'p_within1': round(sum(1 for r in resid if abs(r) <= 1.0) / len(resid), 3),
                     'sd_last30': round(statistics.pstdev(resid[-30:]), 3) if len(resid) >= 10 else None})
     return out
+
+
+def _phi(z):
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+def _logscore(pool, r):
+    """log P(the settled integer) when residual r is priced from `pool` through the kernel."""
+    if len(pool) < 10:
+        return None
+    p = statistics.mean(_phi((r + 0.5 - e) / KERNEL) - _phi((r - 0.5 - e) / KERNEL) for e in pool)
+    return math.log(max(p, 1e-6))
+
+
+def spread_ruling(resid, spread):
+    """Walk-forward: for each graded day, price from the pooled prior residuals
+    and from the prior residuals in the same spread bin; mean log score of each."""
+    pooled, binned, n_lo, n_hi = [], [], 0, 0
+    for i in range(len(resid)):
+        prior = list(range(max(0, i - 90), i))
+        hi = spread[i] >= SPREAD_SPLIT
+        same = [resid[j] for j in prior if (spread[j] >= SPREAD_SPLIT) == hi]
+        a = _logscore([resid[j] for j in prior], resid[i]); b = _logscore(same, resid[i])
+        if a is None or b is None:
+            continue
+        pooled.append(a); binned.append(b)
+        if hi: n_hi += 1
+        else: n_lo += 1
+    if not pooled:
+        return {'spread_use': False, 'spread_n': [n_lo, n_hi]}
+    gain = statistics.mean(binned) - statistics.mean(pooled)
+    use = gain > 0 and n_lo >= SPREAD_MIN and n_hi >= SPREAD_MIN
+    return {'spread_use': use, 'spread_gain': round(gain, 4), 'spread_n': [n_lo, n_hi],
+            'spread_score': [round(statistics.mean(pooled), 4), round(statistics.mean(binned), 4)]}
 
 
 def main():
@@ -129,6 +178,9 @@ def main():
             print('%-9s n %3d (%s..%s)  SD %.2f  MAE %.2f  within 1: %.2f  bias now %s'
                   % (cfg['key'], c['n'], c['from'], c['to'], c.get('sd') or 0, c.get('mae') or 0,
                      c.get('p_within1') or 0, c['bias']))
+            print('          spread bins <%g / >=%g: n %s  log score pooled/binned %s  gain %s  -> %s'
+                  % (SPREAD_SPLIT, SPREAD_SPLIT, c.get('spread_n'), c.get('spread_score'), c.get('spread_gain'),
+                     'BINNED' if c.get('spread_use') else 'pooled'))
         except Exception as e:
             print('%s: day-ahead court failed (%s)' % (cfg['key'], e))
     if doc['cities']:
