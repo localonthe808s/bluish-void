@@ -50973,9 +50973,71 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        nearest report within 16 px, read out in the info bar the way a tapped
        station is -- species, share turned, date, elevation. Anywhere else
        clears it. The overlay's own cover-fit mapping, so the hit is exact. */
+    /* a routed drive time as a sign reads it: 45 MIN, 1 HR, 2\u00bd HR DRIVE */
+    function folDrive(dr){
+      if (!dr || !dr.min) return '';
+      var m = dr.min;
+      if (m < 58) return (Math.round(m / 5) * 5) + ' MIN DRIVE';
+      var q = Math.round(m / 15), h = Math.floor(q / 4), f = ['', '\u00bc', '\u00bd', '\u00be'][q % 4];
+      return (h ? h : '') + f + ' HR' + (dr.routed === false ? ' DRIVE, ABOUT' : ' DRIVE');
+    }
+    function folCountyAt(tx, ty, at){
+      var fips = null, cname = null;
+      if (window._cwCounties) Object.keys(window._cwCounties).forEach(function(f){
+        if (fips) return;
+        var c = window._cwCounties[f], inside = false;
+        c.r.forEach(function(ring){
+          for (var i = 0, j = ring.length - 1; i < ring.length; j = i++){
+            var xi = at(ring[i][1], ring[i][0]), xj = at(ring[j][1], ring[j][0]);
+            if (((xi[1] > ty) !== (xj[1] > ty)) && (tx < (xj[0] - xi[0]) * (ty - xi[1]) / (xj[1] - xi[1]) + xi[0])) inside = !inside;
+          }
+        });
+        if (inside){ fips = f; cname = c.n + ' COUNTY, ' + c.s; }
+      });
+      return { fips: fips, name: cname };
+    }
+    function folForestAt(tx, ty, ox, oy, sc, b, F){
+      if (!cwForestCodes) return null;
+      var fx = Math.round((tx - ox) / sc / (b.X1 - b.X0) * cwForestCodes.w);
+      var fy = Math.round((ty - oy) / sc / (b.Y1 - b.Y0) * cwForestCodes.h);
+      if (fx < 0 || fy < 0 || fx >= cwForestCodes.w || fy >= cwForestCodes.h) return null;
+      var code = cwForestCodes.data[(fy * cwForestCodes.w + fx) * 4];
+      var roles = F.forest_roles || [];
+      return (code > 0 && code <= roles.length) ? roles[code - 1] : null;
+    }
+    function folRegionLine(rgn){
+      if (!rgn) return '';
+      var MON = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+      var out = mtaEsc(String(rgn.name).toUpperCase()) + ' ' + rgn.pct + '% TURNED'
+        + (rgn.delta7 != null && rgn.delta7 !== 0 ? ' (' + (rgn.delta7 > 0 ? '+' : '\u2212') + Math.abs(rgn.delta7) + ' ON THE WEEK)' : '') + ' \u00b7 ' + mtaEsc(rgn.band);
+      if (rgn.peak_last_year){
+        var dd = String(rgn.peak_last_year).split('-');
+        if (dd.length === 3) out += ' \u00b7 PEAK LAST YEAR ' + MON[(+dd[1]) - 1] + ' ' + (+dd[2])
+          + (rgn.pace_days != null ? (Math.abs(rgn.pace_days) < 3 ? ', ON PACE' : ', ' + Math.abs(rgn.pace_days) + ' DAYS ' + (rgn.pace_days > 0 ? 'AHEAD' : 'BEHIND')) : '');
+      }
+      if (rgn.weekend && rgn.weekend.length){
+        var wk = rgn.weekend.map(function(dw){
+          if (!dw || !dw[1]) return null;
+          var dn = ['MON','TUE','WED','THU','FRI','SAT','SUN'][(new Date(dw[0] + 'T12:00:00').getDay() + 6) % 7];
+          return dn + ' ' + (dw[2] != null ? dw[2] + '\u00b0 ' : '') + dw[1];
+        }).filter(Boolean);
+        if (wk.length) out += ' \u00b7 THE WEEKEND: ' + wk.join(', ');
+      }
+      return out;
+    }
+    function folShow(l1, l2){
+      var info = document.getElementById('cw-wide-tag-info');
+      if (!info) return;
+      info.innerHTML = '<span style="font-weight:800;color:#fff;">' + l1 + '</span>' + (l2 ? '<br>' + l2 : '');
+      info.style.display = 'block';
+    }
+    function folHide(){
+      var info = document.getElementById('cw-wide-tag-info');
+      if (info){ info.style.display = 'none'; info.innerHTML = ''; }
+    }
     function cwFoliageTap(ev, c){
       var F = window._cwFoliage, wv = cwWideDef();
-      var el = document.getElementById('cw-info');
+      var el = document.getElementById('cw-wide-tag-info');
       if (!F || !wv || !wv.box || !el) return;
       var r = c.getBoundingClientRect();
       if (!r.width) return;
@@ -51000,61 +51062,59 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var d = Math.hypot(xy[0] - tx, xy[1] - ty) / dpr;
         if (d <= 16 && (!best || d < best.d)) best = { d: d, spot: sp };
       });
-      if (!best && cwFoliageLook === 'forest' && cwForestCodes){
-        /* the codes image is the frame's own grid (W x H of the bake); map
-           the tap through the same cover fit */
-        var fx = Math.round((tx - ox) / sc / (b.X1 - b.X0) * cwForestCodes.w);
-        var fy = Math.round((ty - oy) / sc / (b.Y1 - b.Y0) * cwForestCodes.h);
-        if (fx >= 0 && fy >= 0 && fx < cwForestCodes.w && fy < cwForestCodes.h){
-          var code = cwForestCodes.data[(fy * cwForestCodes.w + fx) * 4];
-          var roles = F.forest_roles || [];
-          var rr = (code > 0 && code <= roles.length) ? roles[code - 1] : null;
-          var fips = null, cname = null;
-          if (window._cwCounties) Object.keys(window._cwCounties).forEach(function(f){
-            if (fips) return;
-            var c = window._cwCounties[f];
-            /* ray test on the county's rings, in canvas px */
-            var inside = false;
-            c.r.forEach(function(ring){
-              for (var i = 0, j = ring.length - 1; i < ring.length; j = i++){
-                var xi = at(ring[i][1], ring[i][0]), xj = at(ring[j][1], ring[j][0]);
-                if (((xi[1] > ty) !== (xj[1] > ty)) && (tx < (xj[0] - xi[0]) * (ty - xi[1]) / (xj[1] - xi[1]) + xi[0])) inside = !inside;
-              }
-            });
-            if (inside){ fips = f; cname = c.n + ' COUNTY, ' + c.s; }
-          });
-          var mix = (fips && F.forest_by_county) ? F.forest_by_county[fips] : null;
-          el.innerHTML = '<div style="font:800 9px system-ui,sans-serif;letter-spacing:.09em;color:#1b2340;">'
-            + (rr ? mtaEsc(String(rr[0]).toUpperCase().replace(' GROUP', '')) + ' \u00b7 ' + mtaEsc(rr[1]) : 'NOT TYPED FOREST HERE')
-            + (cname ? ' \u00b7 ' + mtaEsc(String(cname).toUpperCase()) : '') + '</div>'
-            + (mix ? '<div style="font:600 8.5px system-ui,sans-serif;color:rgba(27,35,64,.75);margin-top:2px;">THE COUNTY\u2019S FOREST: '
-                + mix.show + '% MAPLE, BEECH, BIRCH \u00b7 ' + mix.late + '% OAK, HICKORY \u00b7 ' + mix.gold + '% ASPEN, BIRCH, ASH \u00b7 ' + mix.ever + '% EVERGREEN</div>' : '');
-          el.style.display = '';
-          return;
-        }
+      /* the signs themselves: a tap on a region's dot reads the whole sign */
+      (F.regions || []).forEach(function(rg){
+        if (rg.lat == null) return;
+        var xy = at(rg.lat, rg.lon);
+        var d = Math.hypot(xy[0] - tx, xy[1] - ty) / dpr;
+        if (d <= 14 && (!best || d < best.d)) best = { d: d, region: rg };
+      });
+      var county = folCountyAt(tx, ty, at), forest = folForestAt(tx, ty, ox, oy, sc, b, F);
+      var here = (county.name ? mtaEsc(String(county.name).toUpperCase()) : '')
+        + (forest ? (county.name ? ' \u00b7 ' : '') + mtaEsc(String(forest[0]).toUpperCase().replace(' GROUP', '')) + ' FOREST, ' + mtaEsc(forest[1]) : '');
+      if (!best){
+        /* bare ground under the tap: the county, what grows there, and on the
+           forest look the county's mix (the old grey-bar readout) */
+        if (!here){ folHide(); return; }
+        var mix = (county.fips && F.forest_by_county) ? F.forest_by_county[county.fips] : null;
+        folShow(here, mix ? 'THE COUNTY\u2019S FOREST: ' + mix.show + '% MAPLE, BEECH, BIRCH \u00b7 ' + mix.late + '% OAK, HICKORY \u00b7 '
+          + mix.gold + '% ASPEN, BIRCH, ASH \u00b7 ' + mix.ever + '% EVERGREEN' : '');
+        return;
       }
-      if (!best){ cwInfoDefault(); return; }
+      if (best.region){
+        var rg2 = best.region;
+        folShow(mtaEsc(String(rg2.name).toUpperCase()) + (rg2.drive && rg2.drive.min ? ' \u00b7 ' + folDrive(rg2.drive) + (rg2.drive.mi ? ', ' + rg2.drive.mi + ' MI' : '') : ''),
+                folRegionLine(rg2) + (rg2.peak_level ? ' \u00b7 PEAK COLOUR HERE READS ABOUT ' + rg2.peak_level + '% ON THIS INDEX' : ''));
+        return;
+      }
       if (best.spot){
         var sp = best.spot, rgn = null;
         (F.regions || []).forEach(function(r){ if (r.name === sp.region) rgn = r; });
-        el.innerHTML = '<div style="font:800 9px system-ui,sans-serif;letter-spacing:.09em;color:#1b2340;">'
-          + mtaEsc(String(sp.name).toUpperCase().replace(', LAKE GEORGE', '')) + (rgn ? ' \u00b7 ' + mtaEsc(String(rgn.name).toUpperCase()) + ' ' + rgn.pct + '% TURNED \u00b7 ' + mtaEsc(rgn.band) : '') + '</div>'
-          + '<div style="font:600 8.5px system-ui,sans-serif;color:rgba(27,35,64,.75);margin-top:2px;">'
-          + (sp.how && sp.how !== 'car' ? 'WITHOUT A CAR: ' + mtaEsc(String(sp.how).toUpperCase()) : 'BY CAR' + (sp.how && sp.how.indexOf('(') >= 0 ? ' ' + mtaEsc(String(sp.how).toUpperCase().replace(/^CAR\s*/, '')) : ''))
-          + (rgn && rgn.peak_last_year ? ' \u00b7 PEAK LAST YEAR ' + mtaEsc(String(rgn.peak_last_year).slice(5).replace('-', '/')) : '') + '</div>';
-        el.style.display = '';
+        var l2 = [];
+        if (sp.drive && sp.drive.min) l2.push(folDrive(sp.drive) + (sp.drive.mi ? ', ' + sp.drive.mi + ' MI' : ''));
+        if (sp.how && sp.how !== 'car') l2.push('WITHOUT A CAR: ' + mtaEsc(String(sp.how).toUpperCase()));
+        if (here) l2.push(here);
+        folShow(mtaEsc(String(sp.name).toUpperCase().replace(', LAKE GEORGE', '')) + ' \u00b7 LOOKOUT',
+                l2.join(' \u00b7 ') + (rgn ? '<br>' + folRegionLine(rgn) : ''));
         return;
       }
       var p = best.p, CLS = F.classes || ['<5%', '5-24%', '25-49%', '50-74%', '75-94%', '95%+'];
       var MON = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
       var dd = String(p[3] || '').split('-');
       var when = dd.length === 3 ? MON[(+dd[1]) - 1] + ' ' + (+dd[2]) : String(p[3] || '');
-      el.innerHTML = '<div style="font:800 9px system-ui,sans-serif;letter-spacing:.09em;color:#1b2340;">'
-        + mtaEsc(String(p[4] || 'A TREE').toUpperCase()) + ' \u00b7 ' + mtaEsc(CLS[Math.max(0, Math.min(5, p[2] | 0))]) + ' OF LEAVES TURNED</div>'
-        + '<div style="font:600 8.5px system-ui,sans-serif;color:rgba(27,35,64,.75);margin-top:2px;">'
-        + 'REPORTED ' + mtaEsc(when) + (p[5] != null ? ' \u00b7 ' + Math.round(p[5]) + ' M ELEVATION' : '')
-        + ' \u00b7 ' + (+p[0]).toFixed(2) + '\u00b0N ' + Math.abs(+p[1]).toFixed(2) + '\u00b0W \u00b7 USA NATIONAL PHENOLOGY NETWORK</div>';
-      el.style.display = '';
+      /* the nearest sign, so a report reads against its region */
+      var near = null, nd = 1e9;
+      (F.regions || []).forEach(function(r){
+        if (r.lat == null) return;
+        var d = Math.hypot((r.lat - p[0]) * 69.0, (r.lon - p[1]) * 53.0);
+        if (d < nd){ nd = d; near = r; }
+      });
+      var miCity = Math.hypot((p[0] - 40.768) * 69.0, (p[1] + 73.982) * 53.0);
+      var l2p = 'REPORTED ' + mtaEsc(when) + (p[5] != null ? ' \u00b7 ' + Math.round(p[5]) + ' M UP' : '')
+        + ' \u00b7 ' + Math.round(miCity) + ' MI FROM THE CITY AS THE CROW FLIES' + (here ? ' \u00b7 ' + here : '')
+        + ' \u00b7 USA NATIONAL PHENOLOGY NETWORK';
+      folShow(mtaEsc(String(p[4] || 'A TREE').toUpperCase()) + ' \u00b7 ' + mtaEsc(CLS[Math.max(0, Math.min(5, p[2] | 0))]) + ' OF LEAVES TURNED',
+              l2p + (near && nd < 60 ? '<br>NEAREST SIGN, ' + Math.round(nd) + ' MI: ' + folRegionLine(near) : ''));
     }
     /* MRMS AS QUALITY CONTROL, KOKX AS THE PICTURE (user 2026-09-01).
        KOKX super-res sees the city at ~790 x 250 m — four times finer than
@@ -51498,6 +51558,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         + 'color:#fff;letter-spacing:.08em;font-family:system-ui,sans-serif;text-align:center;line-height:1.4;">'
         + '<span id="cw-wide-tag-main" style="font:800 9px system-ui,sans-serif;letter-spacing:.08em;"></span>'
         + '<span id="cw-wide-tag-sub" style="display:none;font:700 8px system-ui,sans-serif;letter-spacing:.08em;color:rgba(255,255,255,.82);margin-left:10px;"></span>'
+        /* THE FOLIAGE READING LINE (user 2026-09-13: "move the foliage info
+           into the orange section with the rest"): a tapped sign, lookout or
+           leaf report reads out here, under the legend, not in the grey bar */
+        + '<span id="cw-wide-tag-info" style="display:none;margin:5px 0 0;padding-top:5px;border-top:1px solid rgba(255,255,255,.25);font:600 8.5px system-ui,sans-serif;letter-spacing:.07em;color:rgba(255,255,255,.9);line-height:1.65;"></span>'
         + '</div>'
         + '<div id="cw-body" style="position:relative;overflow:hidden;aspect-ratio:1.1405;border-radius:0 0 10px 10px;margin:0 14px 8px;background:#17457F;">'
         /* the full-extent bake rides UNDER the composed view with its own
@@ -52696,6 +52760,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (!cw.wide){
         cwWideLoad(false);
         el.style.display = 'none';
+        folHide();
         cwTagCity();
         if (bs) bs.style.display = 'none';
         if (bt){ bt.style.display = 'none'; bt.removeAttribute('src'); }
@@ -52707,6 +52772,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       }
       var wv = cwWideDef();
       if (!wv) return;
+      if (!wv.foliage) folHide();
       el.style.objectFit = wv.fit;
       el.style.display = '';
       el.style.background = wv.box ? 'transparent' : '#0d1626';
@@ -53957,7 +54023,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                        BANDC[fpk] || '#fff', rg.pri || 70, '800 ' + (8.6 * TS * dpr) + 'px system-ui,sans-serif');
             return;
           }
-          var lines = [String(rg.name).toUpperCase(),
+          var lines = [String(rg.name).toUpperCase() + (rg.drive && rg.drive.min ? ' \u00b7 ' + folDrive(rg.drive) : ''),
                        rg.pct + '% TURNED' + (rg.delta7 != null ? ' \u00b7 ' + (rg.delta7 >= 0 ? '+' : '\u2212') + Math.abs(rg.delta7) + ' ON THE WEEK' : '') + ' \u00b7 ' + rg.band];
           if (rg.peak_last_year){
             var dd = String(rg.peak_last_year).split('-');
@@ -53988,22 +54054,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           g.beginPath(); g.moveTo(x, y - r3); g.lineTo(x + r3, y + r3 * 0.8); g.lineTo(x - r3, y + r3 * 0.8); g.closePath();
           g.lineWidth = 2.6 * dpr; g.strokeStyle = 'rgba(8,10,16,.8)'; g.stroke();
           g.lineWidth = 1.2 * dpr; g.strokeStyle = 'rgba(255,255,255,.95)'; g.stroke();
-          queueLabel([String(sp.name).toUpperCase().replace(', LAKE GEORGE', '')], x + 6 * dpr, y, 'rgba(235,240,255,.9)', 55, '700 ' + (7.6 * TS * dpr) + 'px system-ui,sans-serif');
+          queueLabel([String(sp.name).toUpperCase().replace(', LAKE GEORGE', '') + (sp.drive && sp.drive.min ? ' \u00b7 ' + folDrive(sp.drive) : '')],
+                     x + 6 * dpr, y, 'rgba(235,240,255,.9)', 55, '700 ' + (7.6 * TS * dpr) + 'px system-ui,sans-serif');
         });
-        /* DRIVE-TIME RINGS from Columbus Circle, roughly: an hour of driving
-           is about 55 miles on these roads, so rings at 55, 110 and 165 miles
-           as the crow flies. A guide, not a promise -- the label says so. */
-        (function(){
-          var cx = px([-73.982, 40.768]), cy = py([-73.982, 40.768]);
-          var mPerPx = (b.X1 - b.X0) / (cvs.width - 2 * ox) * Math.cos(40.77 * Math.PI / 180);   // ground metres per canvas px near the city
-          [[55, '~1 HR BY CAR'], [110, '~2 HR'], [165, '~3 HR']].forEach(function(ring){
-            var rad = ring[0] * 1609.34 / mPerPx;
-            g.beginPath(); g.arc(cx, cy, rad, 0, 6.284);
-            g.setLineDash([6 * dpr, 6 * dpr]); g.lineWidth = 1.1 * dpr; g.strokeStyle = 'rgba(255,255,255,.42)'; g.stroke();
-            g.setLineDash([]);
-            queueLabel([ring[1]], cx + 4 * dpr, cy - rad - 6 * dpr, 'rgba(255,255,255,.75)', 50, '800 ' + (7.4 * TS * dpr) + 'px system-ui,sans-serif');
-          });
-        })();
+        /* the drive-time rings that used to sit here were dropped (user
+           2026-09-13: "remove those rings and just add the drive time to the
+           locations"): every sign and lookout carries its own routed time */
       }
       flushLabels();
     }
