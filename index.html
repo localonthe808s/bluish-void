@@ -50708,8 +50708,64 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
            1h45m of travel instead. The ceiling is the source: measured, this
            WMS serves frames back to about 126 minutes and returns an empty
            tile beyond that, so do not reach for three hours. */
-        n:8, stepMs: 900000, fit:'cover' }
+        n:8, stepMs: 900000, fit:'cover' },
+      /* FALL FOLIAGE (user 2026-09-13: "a tab that shows a map like the 12hr
+         map and just show the foliage peaks this fall"). The same box and
+         basemap as the 12-hour view; the frame is ONE image baked nightly by
+         _maplab/foliage_bake.py from NASA's MODIS greenness (how far each
+         pixel has fallen from its own August peak, green to brown), and the
+         overlay carries USA-NPN "colored leaves" reports as dots. No radar,
+         no arcs, no alerts. cityLbl is copied from the 12-hour view below. */
+      { id:'foliage', label:'FALL FOLIAGE \u00b7 NORTHEAST',
+        sub:'GREENNESS LOST SINCE AUGUST \u00b7 NASA MODIS \u00b7 USA-NPN',
+        labels: [], cityLbl: [], foliage: true,
+        lead: false, fuel: false, alerts: false, prods: false, fronts: false, barbs: false, lightning: false,
+        roads: ['__bv_no_roads__'],
+        box: { X0:-8927823, Y0:4607718, X1:-7636517, Y1:5716479, sid:'cw-ne' },
+        mid: '/city_bathy_ne.png?v=8', midOp: 1,
+        boroughs: true,
+        frames: function(i){
+          /* one frame; the hour in the query beats the CDN's cache once a day */
+          return 'https://cdn.bluishvoid.com/foliage/latest.webp?v=' + Math.floor(Date.now() / 3600000);
+        },
+        n:1, stepMs: 3600000, fit:'cover' }
     ];
+    (function(){                      /* the foliage view names the same places as the 12-hour view */
+      var ne = null, fo = null;
+      WIDE.forEach(function(w){ if (w.id === 'ne') ne = w; if (w.id === 'foliage') fo = w; });
+      if (ne && fo) fo.cityLbl = ne.cityLbl;
+    })();
+    /* THE FOLIAGE READOUT (2026-09-13): the bake's JSON -- the composite
+       date, regional percentages and the NPN points -- fetched once every
+       half hour while the view is up; the strip says the regions, the
+       overlay draws the reports. */
+    var cwFoliageAt = 0;
+    function cwFoliageSync(wv){
+      var tm = document.getElementById('cw-wide-tag-main');
+      var ts = document.getElementById('cw-wide-tag-sub');
+      var paint = function(){
+        var F = window._cwFoliage;
+        if (!F) return;
+        var want = { 'Adirondacks': 'ADIRONDACKS', 'Catskills': 'CATSKILLS', 'Hudson Valley': 'HUDSON VALLEY', 'New York City & Long Island': 'THE CITY' };
+        var parts = [];
+        (F.regions || []).forEach(function(r){ if (want[r.name]) parts.push(want[r.name] + ' ' + r.pct + '%'); });
+        var d = (F.composites && F.composites[0]) ? F.composites[0] : '';
+        if (tm) tm.textContent = 'FALL FOLIAGE \u00b7 ' + (d ? 'AS OF ' + d.slice(5).replace('-', '/') + ' \u00b7 ' : '') + (parts.join(' \u00b7 ') || 'NOTHING HAS TURNED YET');
+        if (ts){
+          ts.textContent = 'GREEN \u2192 YELLOW \u2192 ORANGE \u2192 RED = 0 \u2192 50%+ OF SUMMER GREENNESS GONE \u00b7 '
+            + ((F.points || []).length) + ' LEAF REPORTS (USA-NPN, 14 DAYS)';
+          ts.style.display = 'inline';
+        }
+        try { cwDrawWideOv(wv); } catch (e){}
+      };
+      if (window._cwFoliage && Date.now() - cwFoliageAt < 1800000){ paint(); return; }
+      if (Date.now() - cwFoliageAt < 30000) return;     /* a fetch is in flight or just failed */
+      cwFoliageAt = Date.now();
+      fetch('https://cdn.bluishvoid.com/foliage/latest.json?v=' + Math.floor(Date.now() / 1800000))
+        .then(function(r){ return r.ok ? r.json() : null; })
+        .then(function(j){ if (j && j.regions){ window._cwFoliage = j; paint(); } })
+        .catch(function(){});
+    }
     /* MRMS AS QUALITY CONTROL, KOKX AS THE PICTURE (user 2026-09-01).
        KOKX super-res sees the city at ~790 x 250 m — four times finer than
        the 1 km mosaic — so it stays the visual. But MRMS is quality
@@ -52400,6 +52456,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var tagSub = document.getElementById('cw-wide-tag-sub');
       if (tagSub && !wv.fuel) tagSub.style.display = 'none';
       if (wv.fuel) cwFuel();
+      if (wv.foliage) cwFoliageSync(wv);
       tag.style.display = '';
       /* preload every frame, then cycle — a half-drawn RIDGE gif flickers */
       cwWideImgs = [];
@@ -53512,6 +53569,23 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         });
         g.textBaseline = 'alphabetic';
       }
+      /* THE LEAF REPORTS (foliage view): one disc per reporting site, its
+         colour and size the share of leaves the observer called coloured,
+         a dark ring so it reads on the ramp underneath. */
+      if (wv.foliage && window._cwFoliage && window._cwFoliage.points){
+        var FCOL = ['rgba(120,190,80,.95)', 'rgba(190,210,60,.95)', 'rgba(245,205,50,.97)',
+                    'rgba(240,130,40,.97)', 'rgba(210,50,40,.97)', 'rgba(120,60,30,.97)'];
+        window._cwFoliage.points.forEach(function(p){
+          var x = px([p[1], p[0]]), y = py([p[1], p[0]]);
+          if (x < 0 || y < 0 || x > cvs.width || y > cvs.height) return;
+          var cls = Math.max(0, Math.min(5, p[2] | 0));
+          var rad = (2.4 + cls * 0.9) * dpr;
+          g.beginPath(); g.arc(x, y, rad + 1.4 * dpr, 0, 6.284);
+          g.fillStyle = 'rgba(8,10,16,.8)'; g.fill();
+          g.beginPath(); g.arc(x, y, rad, 0, 6.284);
+          g.fillStyle = FCOL[cls]; g.fill();
+        });
+      }
       flushLabels();
     }
     /* THE STRIP FOR THE CITY RADAR (user 2026-09-13): the lit KOKX product's
@@ -53545,6 +53619,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           + ' ' + window._cwStorm.mph + ' MPH';
       }
       if (wv.fuel) cwFuel();
+      if (wv.foliage) cwFoliageSync(wv);
       if (wv.geo){ cwGeoLoad(wv.geo); if (wv.geoLive) cwGeoRead(); }
       if (wv.alerts) cwAlertRead();
       if (wv.fronts) cwFrontsRead();
