@@ -20,7 +20,7 @@ baseline says forest (> 0.45).
 
     python3 _maplab/foliage_bake.py [outdir]          # writes latest.png + latest.json
 """
-import datetime, io, json, os, re, sys, time, urllib.parse, urllib.request
+import datetime, io, json, math, os, re, sys, time, urllib.parse, urllib.request
 import numpy as np
 from PIL import Image, ImageFilter, ImageDraw
 
@@ -628,13 +628,59 @@ SPOTS = [
 ]
 
 
+# DRIVE TIME FROM COLUMBUS CIRCLE (user 2026-09-13: "remove those rings and
+# just add the drive time to the locations"). Real routed minutes from the
+# public OSRM router, one call per place, cached in foliage_drive.json next to
+# this file (committed: roads do not move, and the router is a shared demo).
+# A place the router cannot reach falls back to the crow-flies miles at 48 mph
+# times 1.25 for the roads, flagged so the sign can say "about".
+DRIVE_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'foliage_drive.json')
+CITY = (-73.982, 40.768)
+
+
+def drive_minutes(name, lat, lon):
+    try:
+        cache = json.load(open(DRIVE_CACHE))
+    except Exception:
+        cache = {}
+    key = '%s@%.3f,%.3f' % (name, lat, lon)
+    if key in cache:
+        return cache[key]
+    out = None
+    try:
+        u = ('https://router.project-osrm.org/route/v1/driving/%.4f,%.4f;%.4f,%.4f?overview=false'
+             % (CITY[0], CITY[1], lon, lat))
+        # Python's TLS stack fails the handshake with this router (SSLV3_ALERT,
+        # 2026-09-13) while curl is fine, so curl carries the request
+        import subprocess
+        raw = subprocess.run(['curl', '-s', '-m', '30', '-A', 'bluishvoid.com foliage bake', u],
+                             capture_output=True, text=True, timeout=40).stdout
+        j = json.loads(raw)
+        r = (j.get('routes') or [None])[0]
+        if r and r.get('duration'):
+            out = {'min': int(round(r['duration'] / 60.0)), 'mi': int(round(r['distance'] / 1609.34)), 'routed': True}
+    except Exception as e:
+        print('drive: %s unrouted (%s)' % (name, e))
+    if out is None:
+        d = math.hypot((lon - CITY[0]) * 53.0, (lat - CITY[1]) * 69.0)
+        out = {'min': int(round(d * 1.25 / 48.0 * 60)), 'mi': int(round(d)), 'routed': False}
+    cache[key] = out
+    with open(DRIVE_CACHE, 'w') as fh:
+        json.dump(cache, fh, indent=0, sort_keys=True)
+    time.sleep(0.3)
+    return out
+
+
 def spots(prev):
     """The lookouts, located once through Nominatim and carried forward."""
     have = {x['name']: x for x in (prev or {}).get('spots') or []}
     out = []
     for name, st, region, how in SPOTS:
         if name in have and have[name].get('lat') is not None:
-            out.append(have[name]); continue
+            sp = dict(have[name])
+            if not (sp.get('drive') or {}).get('routed'):
+                sp['drive'] = drive_minutes(name, sp['lat'], sp['lon'])
+            out.append(sp); continue
         try:
             q = urllib.parse.urlencode({'q': '%s, %s' % (name, st), 'format': 'json', 'limit': 1})
             req = urllib.request.Request('https://nominatim.openstreetmap.org/search?' + q,
@@ -647,7 +693,8 @@ def spots(prev):
             x, y = px(lo, la)
             if not (0 <= x < W and 0 <= y < H):
                 print('spot: %s outside the box' % name); continue
-            out.append({'name': name, 'lat': round(la, 4), 'lon': round(lo, 4), 'region': region, 'how': how})
+            out.append({'name': name, 'lat': round(la, 4), 'lon': round(lo, 4), 'region': region, 'how': how,
+                        'drive': drive_minutes(name, la, lo)})
         except Exception as e:
             print('spot: %s failed (%s)' % (name, e))
     return out
@@ -762,6 +809,7 @@ def main():
             pk_date, pk_level = peak_of(ly['dates'], ly['regions'][name])
         alat, alon = ANCHOR.get(name, ((la0 + la1) / 2, (lo0 + lo1) / 2))
         regions.append({'name': name, 'lat': round(alat, 3), 'lon': round(alon, 3), 'pri': PRI.get(name, 66),
+                        'drive': drive_minutes(name, alat, alon),
                         'pct': pct, 'past_peak': past, 'band': band(pct, pk_level),
                         'delta7': ((pct - ref[name]) if (ref and name in ref) else None),
                         'peak_last_year': pk_date, 'peak_level': pk_level,
