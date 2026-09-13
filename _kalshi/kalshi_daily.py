@@ -2875,9 +2875,13 @@ def compose_run_review(cfg, record):
         gap = lv['said'] - lv['hits'] / float(lv['n'])
         word = lambda g: ('calibrated' if abs(g) < 0.08 else
                           ('overconfident' if g > 0 else 'underconfident') + ' by %d points' % round(abs(100 * g)))
-        s_ += ' \u2014 %s' % word(gap)
+        s_ += ' \u2014 '
         if lv.get('market_n') and lv.get('market_said') is not None:
-            s_ += ', the market %s' % word(lv['market_said'] - lv['market_hits'] / float(lv['market_n']))
+            mw = word(lv['market_said'] - lv['market_hits'] / float(lv['market_n']))
+            s_ += ('both calibrated' if word(gap) == mw == 'calibrated'
+                   else '%s, the market %s' % (word(gap), mw))
+        else:
+            s_ += word(gap)
         R.append(s_ + '.')
     return R
 
