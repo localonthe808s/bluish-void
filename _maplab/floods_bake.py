@@ -140,8 +140,44 @@ class Lab(object):
         self.ws = websocket.create_connection(tab['webSocketDebuggerUrl'],
                                               suppress_origin=True, timeout=600)
         self.n = 0
+        self.reload()
+
+    def reload(self):
+        """ALWAYS RELOAD. A page runs the JavaScript it parsed at load time, so
+        attaching to an already-open tab silently bakes whatever version was
+        deployed whenever that tab was opened.
+
+        On 2026-09-12 this cost a full bake and a full gate run: the deploy poll
+        confirmed `var adv = bk.fl` was being SERVED at 23:23:27, the bake ran at
+        23:24:25, and it produced z1/z2 tiles byte-identical to the previous
+        model's -- because the tab had been open for hours. The gate then
+        reproduced its earlier numbers to three decimals, which is what finally
+        gave it away.
+
+        Cache-busted, because Pages will otherwise hand back the same bytes."""
+        import time as _t
+        self.send('Page.enable')
+        self.send('Page.navigate',
+                  url='https://bluishvoid.com/_maplab/?bake=%d' % int(_t.time()))
+        _t.sleep(20)
+        ok = self.js("(function(){return typeof VIEWS !== 'undefined'"
+                     " && typeof renderAll === 'function';})()")
+        if not ok:
+            raise SystemExit('lab did not finish loading after reload')
 
     def send(self, method, **params):
+        """Chrome drops this socket after roughly 15-20 renders -- seen twice on
+        2026-09-12, both times late in the z3 sequence (tile 14 and tile 16 of
+        16). Dying there loses the rest of a 42-render job, so reconnect once
+        and retry rather than propagate. The bake is resumable either way, but
+        a run that finishes is worth more than one that has to be restarted."""
+        try:
+            return self._send(method, **params)
+        except Exception:
+            self._reconnect()
+            return self._send(method, **params)
+
+    def _send(self, method, **params):
         self.n += 1
         self.ws.send(json.dumps({'id': self.n, 'method': method, 'params': params}))
         while True:
@@ -150,6 +186,18 @@ class Lab(object):
                 if 'error' in msg:
                     raise RuntimeError('%s: %s' % (method, msg['error']))
                 return msg.get('result', {})
+
+    def _reconnect(self):
+        import websocket, time as _t
+        with urllib.request.urlopen('http://127.0.0.1:%d/json/list' % PORT, timeout=10) as f:
+            tabs = [t for t in json.loads(f.read().decode()) if t.get('type') == 'page']
+        tab = next((t for t in tabs if '_maplab' in (t.get('url') or '')), None)
+        if not tab:
+            raise SystemExit('lost the _maplab tab and cannot reconnect')
+        self.ws = websocket.create_connection(tab['webSocketDebuggerUrl'],
+                                              suppress_origin=True, timeout=600)
+        self.n = 0
+        _t.sleep(1)
 
     def js(self, expr):
         r = self.send('Runtime.evaluate', expression=expr,
