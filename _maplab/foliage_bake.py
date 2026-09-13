@@ -251,7 +251,11 @@ def county_labels(shapes):
     return np.array(im, dtype=np.int32), ids
 
 
-def county_means(labels, ids, p, min_px=20):
+def county_means(labels, ids, p, min_px=400):
+    """Mean index per county over its FOREST pixels. A county needs 400 of
+    them (~25 km2 at 250 m) to get a block: the boroughs and the sliver
+    counties on the box's edge were being coloured by a handful of noisy
+    pixels and read as orange in September (2026-09-13)."""
     valid = np.isfinite(p) & (labels > 0)
     if not valid.any():
         return {}
