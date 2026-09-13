@@ -135,6 +135,24 @@ def ramp(p, alpha=0.80, shade=None):
     return Image.fromarray(img)
 
 
+def bands(p, shade, sigma=7):
+    """THE BANDS LOOK (user 2026-09-13: "id rather see bands"): the index
+    blurred to landscape scale (sigma 7 px ~ 6 km) and posterised to the
+    ramp's own stops, so the colour comes as bands that follow the hills
+    rather than county lines or 250 m speckle. Same relief undertone."""
+    pm = np.where(np.isfinite(p), p, np.nan).astype(np.float32)
+    fill = np.nanmean(pm) if np.isfinite(pm).any() else 0.0
+    im = Image.fromarray((np.clip(np.where(np.isfinite(pm), pm, fill), 0, 1) * 250 + 2).astype(np.uint8))
+    bl = np.array(im.filter(ImageFilter.GaussianBlur(sigma))).astype(np.float32)
+    q = np.where(np.isfinite(pm), (bl - 2) / 250.0, np.nan)
+    # posterise: each pixel takes the lower stop of the band it falls in
+    stops = [st for st, _ in RAMP[:-1]]
+    post = np.full_like(q, np.nan)
+    for lo in stops:
+        post = np.where(np.isfinite(q) & (q >= lo), lo + 0.001, post)
+    return ramp(post, shade=shade)
+
+
 def frame(p, shade):
     """The index -> the RGBA frame: a 5-px median first (the 250 m pixels
     speckle yellow over a green field at map scale; a median keeps rivers and
@@ -163,7 +181,7 @@ def season_frames(year, keys, vals, shade):
     dates, todo = [], []
     d = datetime.date(year, 9, 15)
     while d <= datetime.date(year, 11, 10):
-        if on_cdn('season/%d/%s.webp' % (year, d.isoformat())):
+        if on_cdn('season/%d/%s.webp' % (year, d.isoformat())) and on_cdn('season/%d/%s_bands.webp' % (year, d.isoformat())):
             dates.append(d.isoformat())
         else:
             todo.append(d)
@@ -185,6 +203,7 @@ def season_frames(year, keys, vals, shade):
                     pp = 1 - cur / base
                 pp[~(base > 0.45)] = np.nan
                 frame(np.clip(pp, 0, 1), shade).save(os.path.join(OUT, 'season', str(year), d.isoformat() + '.webp'), 'WEBP', quality=82, method=6)
+                bands(np.clip(pp, 0, 1), shade).save(os.path.join(OUT, 'season', str(year), d.isoformat() + '_bands.webp'), 'WEBP', quality=82, method=6)
                 dates.append(d.isoformat())
     return {'year': year, 'dates': sorted(dates), 'base': CDN + 'season/%d/' % year}
 
@@ -199,6 +218,7 @@ def archive_this_season(today, prev):
         os.makedirs(os.path.join(OUT, 'season', str(today.year)), exist_ok=True)
         import shutil
         shutil.copyfile(os.path.join(OUT, 'latest.webp'), os.path.join(OUT, 'season', str(today.year), today.isoformat() + '.webp'))
+        shutil.copyfile(os.path.join(OUT, 'latest_bands.webp'), os.path.join(OUT, 'season', str(today.year), today.isoformat() + '_bands.webp'))
         have.append(today.isoformat())
     return {'year': today.year, 'dates': sorted(set(have)), 'base': CDN + 'season/%d/' % today.year}
 
@@ -295,6 +315,94 @@ def county_last_year(year, keys, vals, labels, ids, prev):
                 by[fips].append(m.get(fips))
         d += datetime.timedelta(days=7)
     return {'year': year, 'dates': dates, 'by': by}
+
+
+# THE FOREST ITSELF (user 2026-09-13: "are we able to see species location?").
+# USFS FIA Forest Atlas, Forest Type Groups, 250 m (MODIS 2002-03 plus ~100
+# layers; the Forest Service's own product, served by the USGS geoplatform
+# image service with CORS for bluishvoid.com). Species-level maps exist in
+# the same atlas as per-species basal area rasters, but the type GROUP is
+# what decides the colour: maple/beech/birch is the show, aspen/birch and
+# elm/ash go yellow, oak/hickory turns late and russet, spruce, fir and pine
+# never turn. Rendered once a season as forest_v1.webp with the relief, plus
+# forest_codes.png (one byte a pixel, the group index) for the page's taps.
+FTG = ('https://imagery.geoplatform.gov/iipp/rest/services/Vegetation/'
+       'USFS_EDW_FIA_ForestAtlas_ForestTypeGroups_109_CONUS/ImageServer')
+FOREST_ROLES = [   # (label as the atlas prints it, our role, display rgb)
+    ('Maple/Beech/Birch Group', 'THE SHOW', (232, 108, 38)),
+    ('Aspen/Birch Group', 'GOLD', (240, 200, 60)),
+    ('Elm/Ash/Cottonwood Group', 'GOLD', (222, 182, 70)),
+    ('Oak/Hickory Group', 'LATE, RUSSET', (168, 106, 58)),
+    ('Oak/Pine Group', 'LATE, RUSSET', (150, 120, 62)),
+    ('Oak/Gum/Cypress Group', 'LATE, RUSSET', (158, 132, 60)),
+    ('Spruce/Fir Group', 'EVERGREEN', (26, 84, 48)),
+    ('White/Red/Jack Pine Group', 'EVERGREEN', (32, 96, 52)),
+    ('Loblolly/Shortleaf Pine Group', 'EVERGREEN', (36, 100, 54)),
+    ('Longleaf/Slash Pine Group', 'EVERGREEN', (36, 100, 54)),
+    ('Pinyon/Juniper Group', 'EVERGREEN', (40, 96, 56)),
+    ('Douglas-fir Group', 'EVERGREEN', (30, 90, 50)),
+    ('Exotic Softwoods Group', 'EVERGREEN', (44, 98, 58)),
+]
+FOREST_LEGEND = [('THE SHOW', 'MAPLE, BEECH, BIRCH', (232, 108, 38)), ('GOLD', 'ASPEN, BIRCH, ASH', (240, 200, 60)),
+                 ('LATE, RUSSET', 'OAK, HICKORY', (168, 106, 58)), ('EVERGREEN', 'SPRUCE, FIR, PINE', (30, 92, 52))]
+
+
+def forest(shade, prev):
+    """-> (codes HxW uint8 with 0 = no forest and i+1 = FOREST_ROLES[i], legend
+    rows). Renders forest_v1.webp + forest_codes.png under OUT when the CDN
+    does not have them yet; always returns the codes for the region shares."""
+    leg = json.loads(get(FTG + '/legend?f=json', 60))
+    import base64
+    cols = {}
+    for L in leg.get('layers', []):
+        for it in L.get('legend', []):
+            im = Image.open(io.BytesIO(base64.b64decode(it['imageData']))).convert('RGB')
+            a = np.array(im).reshape(-1, 3)
+            v, c = np.unique(a, axis=0, return_counts=True)
+            cols[it.get('label')] = tuple(int(x) for x in v[c.argmax()])
+    u = (FTG + '/exportImage?bbox=%d,%d,%d,%d&bboxSR=3857&imageSR=3857&size=%d,%d&format=png'
+         '&interpolation=RSP_NearestNeighbor&f=image' % (BOX + (W, H)))
+    a = np.array(Image.open(io.BytesIO(get(u, 240))).convert('RGB'))
+    flat = a.reshape(-1, 3)
+    codes = np.zeros(flat.shape[0], np.uint8)
+    for i, (label, role, rgb) in enumerate(FOREST_ROLES):
+        c = cols.get(label)
+        if c is None:
+            continue
+        m = (flat[:, 0] == c[0]) & (flat[:, 1] == c[1]) & (flat[:, 2] == c[2])
+        codes[m] = i + 1
+    codes = codes.reshape(a.shape[:2])
+    print('forest: %.0f%% of the box is typed forest' % (100 * (codes > 0).mean()))
+    if not (on_cdn('forest_v1.webp') and on_cdn('forest_codes.png')):
+        img = np.zeros((H, W, 4), np.uint8)
+        for i, (label, role, rgb) in enumerate(FOREST_ROLES):
+            m = codes == i + 1
+            col = np.array(rgb, np.float32)[None, :]
+            if shade is not None:
+                f = np.clip(1.0 + (shade[m] - 127.0) / 85.0, 0.55, 1.4)[:, None]
+                col = col * f
+            img[m, :3] = np.clip(col, 0, 255).astype(np.uint8)
+            img[m, 3] = 218
+        Image.fromarray(img).save(os.path.join(OUT, 'forest_v1.webp'), 'WEBP', quality=82, method=6)
+        Image.fromarray(codes, 'L').save(os.path.join(OUT, 'forest_codes.png'), optimize=True)
+    return codes
+
+
+def forest_shares(codes, labels, ids):
+    """per county fips -> {'show': %, 'gold': %, 'late': %, 'ever': %} of its typed forest"""
+    role_of = {i + 1: r for i, (_, r, _) in enumerate(FOREST_ROLES)}
+    key = {'THE SHOW': 'show', 'GOLD': 'gold', 'LATE, RUSSET': 'late', 'EVERGREEN': 'ever'}
+    out = {}
+    valid = codes > 0
+    tot = np.bincount(labels[valid], minlength=len(ids) + 1)
+    per = {}
+    for code, role in role_of.items():
+        per.setdefault(key[role], np.zeros(len(ids) + 1))
+        per[key[role]] += np.bincount(labels[valid & (codes == code)], minlength=len(ids) + 1)
+    for k, fips in enumerate(ids, 1):
+        if tot[k] >= 200:
+            out[fips] = {r: int(round(100 * per[r][k] / tot[k])) for r in per}
+    return out
 
 
 def px(lon, lat):
@@ -586,9 +694,16 @@ def main():
     p = np.clip(p, 0, 1)
     shade = relief()
     frame(p, shade).save(os.path.join(OUT, 'latest.webp'), 'WEBP', quality=82, method=6)   # ~1/6 the PNG, alpha kept
+    bands(p, shade).save(os.path.join(OUT, 'latest_bands.webp'), 'WEBP', quality=82, method=6)
     shapes = county_shapes()
     labels, ids = county_labels(shapes)
     counties_now = county_means(labels, ids, p)
+    try:
+        fcodes = forest(shade, prev)
+        forest_by_county = forest_shares(fcodes, labels, ids)
+    except Exception as e:
+        print('forest: unavailable (%s)' % e)
+        fcodes, forest_by_county = None, {}
     counties_ly = county_last_year(today.year - 1, keys, vals, labels, ids, prev)
     print('counties: %d with a reading today' % len(counties_now))
     # LAST SEASON, WEEK BY WEEK (user 2026-09-13: "what will the map look like
@@ -627,6 +742,9 @@ def main():
            'history': hist, 'last_year': ly, 'weekend_from': sat, 'spots': spots(prev),
            'season_last': season_last, 'season_this': season_this, 'ramp': RAMP_LEGEND,
            'counties': counties_now, 'counties_ly': counties_ly, 'counties_url': CDN + 'counties.json',
+           'forest_url': CDN + 'forest_v1.webp', 'forest_codes_url': CDN + 'forest_codes.png',
+           'forest_legend': [[r, txt, list(rgb)] for r, txt, rgb in FOREST_LEGEND],
+           'forest_roles': [[lab, role] for lab, role, _ in FOREST_ROLES], 'forest_by_county': forest_by_county,
            'points': npn_points(today), 'points_since': (today - datetime.timedelta(days=14)).isoformat(),
            'classes': ['<5%', '5-24%', '25-49%', '50-74%', '75-94%', '95%+']}
     with open(os.path.join(OUT, 'latest.json'), 'w') as f:
