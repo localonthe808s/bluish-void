@@ -223,7 +223,14 @@ def bake_tile(lab, w, s, e, n):
     d = np.abs(A[..., :3].astype(int) - B[..., :3].astype(int)).sum(axis=2)
     keep = d >= DIFF_MIN
     out = np.zeros_like(A)
-    out[..., :3] = A[..., :3]
+    # RGB ONLY WHERE KEPT. Writing A's colour across the whole tile and masking
+    # with alpha alone costs 4-12x the file: PNG compresses the colour planes
+    # regardless of alpha, so every transparent pixel still carried detailed
+    # city imagery. Measured on three z2 tiles -- nw 659 KB -> 52, ne 1224 ->
+    # 299, se 833 -> 215. It is also why the byte count did not move when the
+    # diff threshold changed: the RGB plane was identical either way and
+    # dominated. PIL's optimize=True alone changed nothing (0.94-0.99x).
+    out[..., :3] = np.where(keep[..., None], A[..., :3], 0)
     out[..., 3] = np.where(keep, 255, 0).astype(np.uint8)
     return out, keep
 
@@ -295,7 +302,7 @@ def main():
             continue
         t0 = time.time()
         tile, keep = bake_tile(lab, w, s, e, n)
-        Image.fromarray(tile).save(path)
+        Image.fromarray(tile).save(path, optimize=True)
         print('  [%2d/%d] %-34s %5.1f%% opaque  %7d B  %4.0fs'
               % (i, len(todo), nm, 100.0 * keep.mean(), os.path.getsize(path),
                  time.time() - t0))
