@@ -133,11 +133,86 @@ def px(lon, lat):
     return (x - BOX[0]) / (BOX[2] - BOX[0]) * W, (BOX[3] - y) / (BOX[3] - BOX[1]) * H
 
 
+# the places a New Yorker drives to for the colour (user 2026-09-13: "for
+# NYCers going upstate on weekends"), each a box for the mean and an anchor
+# for its sign on the map
 REGIONS = [('Adirondacks', -74.6, -73.6, 43.6, 44.4), ('Catskills', -74.7, -74.0, 41.9, 42.3),
-           ('Finger Lakes', -77.3, -76.3, 42.3, 42.9), ('Green Mountains', -73.1, -72.6, 43.0, 44.3),
-           ('White Mountains', -71.7, -71.0, 43.9, 44.4), ('Berkshires', -73.4, -72.9, 42.1, 42.7),
-           ('Poconos', -75.6, -75.0, 41.0, 41.4), ('Hudson Valley', -74.0, -73.6, 41.2, 41.8),
+           ('Shawangunks', -74.35, -74.15, 41.65, 41.82), ('Harriman & Bear Mountain', -74.12, -73.9, 41.2, 41.36),
+           ('Hudson Valley', -74.0, -73.6, 41.2, 41.8), ('Litchfield Hills', -73.4, -73.0, 41.7, 42.0),
+           ('Berkshires', -73.4, -72.9, 42.1, 42.7), ('Poconos', -75.6, -75.0, 41.0, 41.4),
+           ('Delaware Water Gap', -75.2, -74.9, 40.9, 41.2), ('Finger Lakes', -77.3, -76.3, 42.3, 42.9),
+           ('Green Mountains', -73.1, -72.6, 43.0, 44.3), ('White Mountains', -71.7, -71.0, 43.9, 44.4),
            ('New York City & Long Island', -74.1, -72.2, 40.6, 41.0)]
+# the bands the signs use -- PROVISIONAL, typed from the 2025 replay (peak ~ a
+# 40-50% fall in greenness); calibrate against the state reports and the NPN
+# points in the first weeks, then move them here, never in the page
+BANDS = [(0, 'NOT YET'), (10, 'STARTING'), (25, 'NEAR PEAK'), (40, 'PEAK'), (60, 'PAST PEAK')]
+
+
+def band(pct):
+    out = BANDS[0][1]
+    for lo, name in BANDS:
+        if pct >= lo:
+            out = name
+    return out
+
+
+def region_means(p):
+    out = {}
+    for name, lo0, lo1, la0, la1 in REGIONS:
+        x0, y1 = px(lo0, la0); x1, y0 = px(lo1, la1)
+        sub = p[int(max(0, y0)):int(min(H, y1)), int(max(0, x0)):int(min(W, x1))]
+        m = np.isfinite(sub)
+        if m.sum() < 50:
+            continue
+        out[name] = (int(round(100 * float(np.nanmean(sub)))), int(round(100 * float((sub[m] >= 0.5).mean()))))
+    return out
+
+
+def previous():
+    try:
+        return json.loads(get('https://cdn.bluishvoid.com/foliage/latest.json?v=%d' % int(time.time()), 60))
+    except Exception:
+        return {}
+
+
+def last_year_curve(year, keys, vals, prev):
+    """Last season's progress per region, weekly Sep 15 - Nov 10, from the same
+    satellite record -- so each sign can say when its peak came last year.
+    Fourteen fetches, done once and carried forward in the JSON."""
+    ly = (prev or {}).get('last_year')
+    if ly and ly.get('year') == year and ly.get('regions') and all(n in ly['regions'] for n, *_ in REGIONS):
+        return ly
+    print('last year (%d):' % year, flush=True)
+    aug = [datetime.date(year, 8, 5), datetime.date(year, 8, 13), datetime.date(year, 8, 21), datetime.date(year, 8, 29)]
+    bimgs = [v for v in (ndvi(d, keys, vals) for d in aug) if v is not None]
+    if not bimgs:
+        return None
+    base = np.nanmax(np.stack(bimgs), 0)
+    dates, per = [], {n: [] for n, *_ in REGIONS}
+    d = datetime.date(year, 9, 15)
+    while d <= datetime.date(year, 11, 10):
+        v = ndvi(d, keys, vals)
+        v2 = ndvi(d - datetime.timedelta(days=6), keys, vals)
+        if v is not None:
+            cur = np.nanmax(np.stack([x for x in (v, v2) if x is not None]), 0)
+            with np.errstate(invalid='ignore', divide='ignore'):
+                pp = 1 - cur / base
+            pp[~(base > 0.45)] = np.nan
+            pp = np.clip(pp, 0, 1)
+            rm = region_means(pp)
+            dates.append(d.isoformat())
+            for n in per:
+                per[n].append(rm.get(n, (None, None))[0])
+        d += datetime.timedelta(days=7)
+    peak = {}
+    for n, arr in per.items():
+        vals_ = [(x, dt) for x, dt in zip(arr, dates) if x is not None]
+        at = next((dt for x, dt in vals_ if x >= 40), None)
+        if at is None and vals_:
+            at = max(vals_)[1]
+        peak[n] = at
+    return {'year': year, 'dates': dates, 'regions': per, 'peak': peak}
 CLASSES = {'Less than 5%': 0, '5-24%': 1, '25-49%': 2, '50-74%': 3, '75-94%': 4, '95% or more': 5}
 
 
@@ -200,18 +275,28 @@ def main():
     p = np.clip(p, 0, 1)
     img = ramp(p, shade=relief())
     img.save(os.path.join(OUT, 'latest.webp'), 'WEBP', quality=82, method=6)   # ~1/6 the PNG, alpha kept
+    prev = previous()
+    ly = last_year_curve(today.year - 1, keys, vals, prev)
+    # the season's history rides in the file: one row per bake day, 90 days
+    hist = [h for h in (prev.get('history') or []) if h.get('date') and h['date'] != today.isoformat()][-89:]
+    means = region_means(p)
+    hist.append({'date': today.isoformat(), 'pct': {n: v[0] for n, v in means.items()}})
+    week_ago = (today - datetime.timedelta(days=7)).isoformat()
+    older = [h for h in hist if h['date'] <= week_ago]
+    ref = older[-1]['pct'] if older else None
     regions = []
     for name, lo0, lo1, la0, la1 in REGIONS:
-        x0, y1 = px(lo0, la0); x1, y0 = px(lo1, la1)
-        sub = p[int(max(0, y0)):int(min(H, y1)), int(max(0, x0)):int(min(W, x1))]
-        m = np.isfinite(sub)
-        if m.sum() < 50:
+        if name not in means:
             continue
-        regions.append({'name': name, 'pct': int(round(100 * float(np.nanmean(sub)))),
-                        'past_peak': int(round(100 * float((sub[m] >= 0.5).mean())))})
+        pct, past = means[name]
+        regions.append({'name': name, 'lat': round((la0 + la1) / 2, 3), 'lon': round((lo0 + lo1) / 2, 3),
+                        'pct': pct, 'past_peak': past, 'band': band(pct),
+                        'delta7': ((pct - ref[name]) if (ref and name in ref) else None),
+                        'peak_last_year': ((ly or {}).get('peak') or {}).get(name)})
     doc = {'built': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%MZ'),
            'composites': cur_dates, 'baseline': [d.isoformat() for d in aug[:len(base_imgs)]],
-           'layer': LAYER, 'box': BOX, 'w': W, 'h': H, 'regions': regions,
+           'layer': LAYER, 'box': BOX, 'w': W, 'h': H, 'regions': regions, 'bands': BANDS,
+           'history': hist, 'last_year': ly,
            'points': npn_points(today), 'points_since': (today - datetime.timedelta(days=14)).isoformat(),
            'classes': ['<5%', '5-24%', '25-49%', '50-74%', '75-94%', '95%+']}
     with open(os.path.join(OUT, 'latest.json'), 'w') as f:
