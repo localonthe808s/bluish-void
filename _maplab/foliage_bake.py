@@ -22,7 +22,7 @@ baseline says forest (> 0.45).
 """
 import datetime, io, json, os, re, sys, time, urllib.parse, urllib.request
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageDraw
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), '_foliage_out')
 os.makedirs(OUT, exist_ok=True)
@@ -201,6 +201,96 @@ def archive_this_season(today, prev):
         shutil.copyfile(os.path.join(OUT, 'latest.webp'), os.path.join(OUT, 'season', str(today.year), today.isoformat() + '.webp'))
         have.append(today.isoformat())
     return {'year': today.year, 'dates': sorted(set(have)), 'base': CDN + 'season/%d/' % today.year}
+
+
+# COUNTY BLOCKS (user 2026-09-13: "id rather see bands or color blocks"). The
+# 217 counties of the nine states in the box, from the Census outlines
+# (plotly's GeoJSON mirror of the 2010 cartographic boundaries), simplified
+# to ~100 KB and shipped once as counties.json; the bake rasterises them into
+# one label image and averages the index per county, today and for each week
+# of last season, so the page can paint the blocks the way the foliage maps
+# people know read -- while the 250 m raster stays underneath for detail.
+COUNTY_SRC = 'https://raw.githubusercontent.com/plotly/datasets/master/geojson-counties-fips.json'
+COUNTY_STATES = {'36': 'NY', '34': 'NJ', '09': 'CT', '25': 'MA', '50': 'VT', '33': 'NH', '42': 'PA', '44': 'RI', '23': 'ME'}
+
+
+def county_shapes():
+    """{fips: {'n': name, 's': state, 'r': [ring, ...]}} with rings in lon/lat,
+    simplified; written to OUT/counties.json (uploaded once)."""
+    import shapely.geometry as sg
+    j = json.loads(get(COUNTY_SRC, 120))
+    out = {}
+    for f in j.get('features', []):
+        fid = str(f.get('id') or '')
+        st = COUNTY_STATES.get(fid[:2])
+        if not st:
+            continue
+        g = sg.shape(f['geometry']).simplify(0.008, preserve_topology=True)
+        polys = list(g.geoms) if g.geom_type == 'MultiPolygon' else [g]
+        rings = [[[round(x, 4), round(y, 4)] for x, y in pg.exterior.coords] for pg in polys if not pg.is_empty]
+        if rings:
+            out[fid] = {'n': (f.get('properties') or {}).get('NAME'), 's': st, 'r': rings}
+    with open(os.path.join(OUT, 'counties.json'), 'w') as fh:
+        json.dump(out, fh, separators=(',', ':'))
+    return out
+
+
+def county_labels(shapes):
+    """One label image for the box: each county's exterior rings filled with
+    its index (1..n); returns (labels HxW int32, [fips...])."""
+    im = Image.new('I', (W, H), 0)
+    dr = ImageDraw.Draw(im)
+    ids = []
+    for fips, c in shapes.items():
+        ids.append(fips)
+        k = len(ids)
+        for ring in c['r']:
+            pts = [px(lon, lat) for lon, lat in ring]
+            if len(pts) >= 3:
+                dr.polygon(pts, fill=k)
+    return np.array(im, dtype=np.int32), ids
+
+
+def county_means(labels, ids, p, min_px=20):
+    valid = np.isfinite(p) & (labels > 0)
+    if not valid.any():
+        return {}
+    sums = np.bincount(labels[valid], weights=p[valid], minlength=len(ids) + 1)
+    cnt = np.bincount(labels[valid], minlength=len(ids) + 1)
+    out = {}
+    for k, fips in enumerate(ids, 1):
+        if cnt[k] >= min_px:
+            out[fips] = int(round(100 * sums[k] / cnt[k]))
+    return out
+
+
+def county_last_year(year, keys, vals, labels, ids, prev):
+    """Per-county share for each week of last season, carried forward once done."""
+    cl = (prev or {}).get('counties_ly')
+    if cl and cl.get('year') == year and cl.get('dates') and cl.get('by'):
+        return cl
+    print('county curves (%d):' % year, flush=True)
+    aug = [datetime.date(year, 8, 5), datetime.date(year, 8, 13), datetime.date(year, 8, 21), datetime.date(year, 8, 29)]
+    bimgs = [v for v in (ndvi(x, keys, vals) for x in aug) if v is not None]
+    if not bimgs:
+        return None
+    base = np.nanmax(np.stack(bimgs), 0)
+    dates, by = [], {fips: [] for fips in ids}
+    d = datetime.date(year, 9, 15)
+    while d <= datetime.date(year, 11, 10):
+        v = ndvi(d, keys, vals)
+        v2 = ndvi(d - datetime.timedelta(days=6), keys, vals)
+        if v is not None:
+            cur = np.nanmax(np.stack([x for x in (v, v2) if x is not None]), 0)
+            with np.errstate(invalid='ignore', divide='ignore'):
+                pp = 1 - cur / base
+            pp[~(base > 0.45)] = np.nan
+            m = county_means(labels, ids, np.clip(pp, 0, 1))
+            dates.append(d.isoformat())
+            for fips in ids:
+                by[fips].append(m.get(fips))
+        d += datetime.timedelta(days=7)
+    return {'year': year, 'dates': dates, 'by': by}
 
 
 def px(lon, lat):
@@ -492,6 +582,11 @@ def main():
     p = np.clip(p, 0, 1)
     shade = relief()
     frame(p, shade).save(os.path.join(OUT, 'latest.webp'), 'WEBP', quality=82, method=6)   # ~1/6 the PNG, alpha kept
+    shapes = county_shapes()
+    labels, ids = county_labels(shapes)
+    counties_now = county_means(labels, ids, p)
+    counties_ly = county_last_year(today.year - 1, keys, vals, labels, ids, prev)
+    print('counties: %d with a reading today' % len(counties_now))
     # LAST SEASON, WEEK BY WEEK (user 2026-09-13: "what will the map look like
     # during peak?"): the same frame for each week of last autumn, baked once
     # and kept on R2 under season/<year>/, so the page can play the wave
@@ -502,7 +597,7 @@ def main():
     # the season's history rides in the file: one row per bake day, 90 days
     hist = [h for h in (prev.get('history') or []) if h.get('date') and h['date'] != today.isoformat()][-89:]
     means = region_means(p)
-    hist.append({'date': today.isoformat(), 'pct': {n: v[0] for n, v in means.items()}})
+    hist.append({'date': today.isoformat(), 'pct': {n: v[0] for n, v in means.items()}, 'counties': counties_now})
     week_ago = (today - datetime.timedelta(days=7)).isoformat()
     older = [h for h in hist if h['date'] <= week_ago]
     ref = older[-1]['pct'] if older else None
@@ -527,6 +622,7 @@ def main():
            'layer': LAYER, 'box': BOX, 'w': W, 'h': H, 'regions': regions, 'bands': BANDS, 'rel_bands': REL,
            'history': hist, 'last_year': ly, 'weekend_from': sat, 'spots': spots(prev),
            'season_last': season_last, 'season_this': season_this, 'ramp': RAMP_LEGEND,
+           'counties': counties_now, 'counties_ly': counties_ly, 'counties_url': CDN + 'counties.json',
            'points': npn_points(today), 'points_since': (today - datetime.timedelta(days=14)).isoformat(),
            'classes': ['<5%', '5-24%', '25-49%', '50-74%', '75-94%', '95%+']}
     with open(os.path.join(OUT, 'latest.json'), 'w') as f:
