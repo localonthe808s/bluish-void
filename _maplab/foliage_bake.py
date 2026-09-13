@@ -442,10 +442,11 @@ SPECIES = [   # (role, what it does in fall, display rgb, the rasters summed)
     ('ASH', 'PLUM AND YELLOW, EARLY', (175, 125, 150), ['white_ash', 'green_ash', 'black_ash']),
     ('HEMLOCK', 'EVERGREEN, THE RAVINES', (35, 95, 85), ['eastern_hemlock']),
     ('PINE', 'EVERGREEN', (80, 140, 80), ['eastern_white_pine', 'red_pine', 'pitch_pine']),
-    ('SPRUCE, FIR', 'EVERGREEN, THE HIGH GROUND', (22, 74, 52), ['red_spruce', 'black_spruce', 'white_spruce', 'balsam_fir', 'Norway_spruce']),
+    ('SPRUCE, FIR', 'EVERGREEN, THE HIGH GROUND', (22, 74, 52), ['red_spruce', 'black_spruce', 'white_spruce', 'Balsam_fir', 'Norway_spruce']),
 ]
-SPECIES_FRAME = 'species_v1.webp'
+SPECIES_FRAME = 'species_v2.webp'   # v2: smoothed leaders, Balsam_fir spelled as the service has it
 SPECIES_MIN_BA = 5.0
+SPECIES_BLUR = 1.4                  # px of the 250 m grid; a 30 m raster sampled nearest is salt and pepper
 
 
 def species_raster(fn):
@@ -470,6 +471,9 @@ def species(shade, mask):
                 acc += species_raster(fn)
             except Exception as e:
                 print('species: %s failed (%s)' % (fn, e))
+        # the leader is decided on a lightly smoothed field, so one 30 m cell
+        # sampled into a 250 m pixel does not flip the colour by itself
+        acc = np.array(Image.fromarray(acc, 'F').filter(ImageFilter.GaussianBlur(SPECIES_BLUR)), np.float32)
         ba.append(acc)
         print('species: %-12s covers %.1f%% of the box at >= %g' % (role, 100 * (acc >= SPECIES_MIN_BA).mean(), SPECIES_MIN_BA))
     st = np.stack(ba)
