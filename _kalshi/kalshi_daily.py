@@ -952,6 +952,49 @@ def peak_stats(cfg):
     return (d.get('cities') or {}).get(cfg['key']) or {}
 
 
+# THE AFTERNOON TABLE (afternoon_stats.py, 2026-09-13): per city, season and
+# local hour, with the latest hourly report in hand, how often the official
+# maximum ends up 1, 2 or 3 degrees higher -- and the same split by whether the
+# last hour was still rising. 612 Central Park days: after 1:51 PM 60% of days
+# climb a degree and 35% two; after 2:51 PM 46% / 20%, but 29% / 13% in autumn.
+_AFTERNOON = []
+_SEASON_WORD = {'DJF': 'winter', 'MAM': 'spring', 'JJA': 'summer', 'SON': 'autumn'}
+
+
+def climb_now(cfg, day_obs, now):
+    """today.climb: the table's row for the report in hand, or None.
+
+    `day_obs` is {hour: that hour's max reading} for today; the row is keyed on
+    its latest hour (10-17 local). 'rising' means that hour read above the one
+    before it, which is what separates days before 2 PM and nothing after."""
+    if not _AFTERNOON:
+        try:
+            _AFTERNOON.append(json.load(open(os.path.join(HERE, 'afternoon.json'))))
+        except Exception:
+            _AFTERNOON.append(None)
+    d = _AFTERNOON[0] or {}
+    city = (d.get('cities') or {}).get(cfg['key']) or {}
+    if not day_obs or not city:
+        return None
+    h = max(day_obs)
+    if h < 10 or h > 17:
+        return None
+    se = {12: 'DJF', 1: 'DJF', 2: 'DJF', 3: 'MAM', 4: 'MAM', 5: 'MAM',
+          6: 'JJA', 7: 'JJA', 8: 'JJA', 9: 'SON', 10: 'SON', 11: 'SON'}[now.month]
+    bs = city.get('by_season') or {}
+    row = (bs.get(se) or {}).get(str(h)) or (bs.get('ALL') or {}).get(str(h))
+    if not row:
+        return None
+    season = se if (bs.get(se) or {}).get(str(h)) else 'ALL'
+    rising = (h - 1) in day_obs and day_obs[h] > day_obs[h - 1]
+    tr = row.get('rise' if rising else 'flat') or {}
+    return {'h': h, 'season': season, 'season_word': _SEASON_WORD.get(season, 'all seasons'),
+            'trend': 'rising' if rising else 'flat', 'n': row.get('n'),
+            'p0': row.get('p0'), 'p1': row.get('p1'), 'p2': row.get('p2'), 'p3': row.get('p3'),
+            'tn': tr.get('n'), 'tp1': tr.get('p1'), 'tp2': tr.get('p2'), 'tp3': tr.get('p3'),
+            'run': round(max(day_obs.values()), 2), 'days': city.get('n_days')}
+
+
 def own5_row(cfg, day):
     """{max7, last, at} from the worker's summary for the settlement sensor."""
     st = OWN5.get(cfg['key'])
@@ -4332,6 +4375,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             'fc_peak': round(fpeak, 2) if fpeak is not None else None,
             'peak_hour': peak_hour,
             'peak_done': peak_done, 'day_decided': day_decided,
+            # the afternoon table's row for the report in hand (see climb_now)
+            'climb': climb_now(cfg, _day_obs, now),
             'own5_gap': _gap5,
             'ours': [round(p, 4) for p in ps],
             'pick': rows[best]['label'], 'p': round(ps[best], 4),
