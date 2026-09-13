@@ -161,6 +161,22 @@ def bands(p, shade, sigma=7):
     return ramp(post, shade=shade)
 
 
+FOREST_MASK = None
+FOREST_CODES = None
+
+
+def index_of(cur, base, mask=None):
+    """progress = 1 - cur/base on forest pixels only (the typed-forest mask
+    where it exists, else August greenness > 0.55), clipped 0..1."""
+    with np.errstate(invalid='ignore', divide='ignore'):
+        p = 1 - cur / base
+    ok = np.isfinite(p) & (base > 0.55)
+    if mask is not None:
+        ok &= mask
+    p = np.where(ok, p, np.nan)
+    return np.clip(p, 0, 1)
+
+
 def frame(p, shade):
     """The index -> the RGBA frame: a 5-px median first (the 250 m pixels
     speckle yellow over a green field at map scale; a median keeps rivers and
@@ -207,11 +223,9 @@ def season_frames(year, keys, vals, shade):
                 if v is None:
                     continue
                 cur = np.nanmax(np.stack([x for x in (v, v2) if x is not None]), 0)
-                with np.errstate(invalid='ignore', divide='ignore'):
-                    pp = 1 - cur / base
-                pp[~(base > 0.45)] = np.nan
-                frame(np.clip(pp, 0, 1), shade).save(os.path.join(OUT, 'season', str(year), d.isoformat() + '.webp'), 'WEBP', quality=82, method=6)
-                bands(np.clip(pp, 0, 1), shade).save(os.path.join(OUT, 'season', str(year), d.isoformat() + '_bands.webp'), 'WEBP', quality=82, method=6)
+                pp = index_of(cur, base, FOREST_MASK)
+                frame(pp, shade).save(os.path.join(OUT, 'season', str(year), d.isoformat() + '.webp'), 'WEBP', quality=82, method=6)
+                bands(pp, shade).save(os.path.join(OUT, 'season', str(year), d.isoformat() + '_bands.webp'), 'WEBP', quality=82, method=6)
                 dates.append(d.isoformat())
     return {'year': year, 'dates': sorted(dates), 'base': CDN + 'season/%d/' % year}
 
@@ -314,10 +328,8 @@ def county_last_year(year, keys, vals, labels, ids, prev):
         v2 = ndvi(d - datetime.timedelta(days=6), keys, vals)
         if v is not None:
             cur = np.nanmax(np.stack([x for x in (v, v2) if x is not None]), 0)
-            with np.errstate(invalid='ignore', divide='ignore'):
-                pp = 1 - cur / base
-            pp[~(base > 0.45)] = np.nan
-            m = county_means(labels, ids, np.clip(pp, 0, 1))
+            pp = index_of(cur, base, FOREST_MASK)
+            m = county_means(labels, ids, pp)
             dates.append(d.isoformat())
             for fips in ids:
                 by[fips].append(m.get(fips))
@@ -380,6 +392,8 @@ def forest(shade, prev):
         m = (flat[:, 0] == c[0]) & (flat[:, 1] == c[1]) & (flat[:, 2] == c[2])
         codes[m] = i + 1
     codes = codes.reshape(a.shape[:2])
+    global FOREST_CODES
+    FOREST_CODES = codes
     print('forest: %.0f%% of the box is typed forest' % (100 * (codes > 0).mean()))
     if not (on_cdn('forest_v1.webp') and on_cdn('forest_codes.png')):
         img = np.zeros((H, W, 4), np.uint8)
@@ -519,10 +533,7 @@ def last_year_curve(year, keys, vals, prev):
         v2 = ndvi(d - datetime.timedelta(days=6), keys, vals)
         if v is not None:
             cur = np.nanmax(np.stack([x for x in (v, v2) if x is not None]), 0)
-            with np.errstate(invalid='ignore', divide='ignore'):
-                pp = 1 - cur / base
-            pp[~(base > 0.45)] = np.nan
-            pp = np.clip(pp, 0, 1)
+            pp = index_of(cur, base, FOREST_MASK)
             rm = region_means(pp)
             dates.append(d.isoformat())
             for n in per:
@@ -696,18 +707,29 @@ def main():
     if not cur_imgs:
         cur_imgs, cur_dates = [base], ['baseline']      # August: nothing has turned yet
     cur = np.nanmax(np.stack(cur_imgs), 0)
-    with np.errstate(invalid='ignore', divide='ignore'):
-        p = 1 - cur / base
-    p[~(base > 0.45)] = np.nan
-    p = np.clip(p, 0, 1)
     shade = relief()
+    # ONLY TYPED FOREST CARRIES THE INDEX (user 2026-09-13: "why does this
+    # scattering happen?"). Masked by greenness alone, harvested cornfields
+    # and mown hay on the Lake Ontario plain, in the Champlain and St
+    # Lawrence valleys and round the Finger Lakes read as 15-25% "turned" in
+    # mid-September, and lake-edge pixels with a low August baseline
+    # inflated small changes into big shares. The Forest Service's typed
+    # forest, at the same 250 m, is the honest mask; farmland, towns and
+    # water get no index at all and the map shows through.
+    global FOREST_MASK
+    try:
+        FOREST_MASK = forest(shade, prev) > 0
+    except Exception as e:
+        print('forest mask: unavailable (%s), falling back to greenness' % e)
+        FOREST_MASK = None
+    p = index_of(cur, base, FOREST_MASK)
     frame(p, shade).save(os.path.join(OUT, 'latest.webp'), 'WEBP', quality=82, method=6)   # ~1/6 the PNG, alpha kept
     bands(p, shade).save(os.path.join(OUT, 'latest_bands.webp'), 'WEBP', quality=82, method=6)
     shapes = county_shapes()
     labels, ids = county_labels(shapes)
     counties_now = county_means(labels, ids, p)
     try:
-        fcodes = forest(shade, prev)
+        fcodes = FOREST_CODES if FOREST_CODES is not None else forest(shade, prev)
         forest_by_county = forest_shares(fcodes, labels, ids)
     except Exception as e:
         print('forest: unavailable (%s)' % e)
