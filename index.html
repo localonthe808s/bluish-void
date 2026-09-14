@@ -53010,8 +53010,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         tEl.textContent = age < 60000 ? 'NOW' : '~' + Math.round(age / 60000) + ' MIN AGO';
         cwInfoDefault();
       };
+      var ims = [];
       urls.forEach(function(u, k){
         var im = new Image();
+        if (wv.wms) im.crossOrigin = 'anonymous';      /* NOAA's GeoServer allows any origin; the pixels are read below */
+        ims[k] = im;
         im.onload = im.onerror = function(){
           if (cw.wide !== want) return;
           loaded++;
@@ -53028,6 +53031,18 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             /* the extrapolated steps reuse the newest frame; only the
                transform and the chip change, so they cost no network */
             cwWideImgs = urls.concat(new Array(nSteps).fill(urls[urls.length - 1]));
+            if (wv.wms && wv.lead){
+              try {
+                var mo = cwMeasureMotion(ims[0], ims[urls.length - 1], (urls.length - 1) * stepMs / 60000, wv);
+                if (mo){
+                  if (window._cwStorm && !window._cwStorm.measured) window._cwStormSteer = window._cwStorm;
+                  window._cwStorm = { toward: mo.toward, mph: Math.max(mo.mph, 5), measured: true, at: Date.now(), src: wv.id, match: mo.match };
+                  console.log('[CITY] storm motion from the radar: toward ' + mo.toward + ' at ' + mo.mph + ' mph (match ' + mo.match + ', ' + mo.n + ' echo px, ' + mo.span + ' min)');
+                  try { cwWideSync(); } catch (e){}
+                  try { cwDrawLeadArcs(cwWideLeadOff); } catch (e){}
+                }
+              } catch (e){}
+            }
             if (cwWideTimer) clearInterval(cwWideTimer);
             cwWideTimer = setInterval(function(){
               if (cw.wide !== want || document.hidden) return;
@@ -54221,7 +54236,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       PRODUCTS.forEach(function(pr){ if (pr[0] === cw.prod) lab = pr[1]; });
       if (window._cwStorm && window._cwStorm.mph){
         var dd3 = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
-        lab += ' \u00b7 MOVING ' + dd3[Math.round(window._cwStorm.toward / 22.5) % 16] + ' ' + window._cwStorm.mph + ' MPH';
+        lab += ' \u00b7 MOVING ' + dd3[Math.round(window._cwStorm.toward / 22.5) % 16] + ' ' + window._cwStorm.mph + ' MPH'
+             + (window._cwStorm.measured ? ' (RADAR)' : '');
       }
       tm.textContent = lab;
       var ts0 = document.getElementById('cw-wide-tag-sub');
@@ -54239,7 +54255,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (tm && wv.lead && window._cwStorm && window._cwStorm.mph){
         var dd2 = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
         tm.textContent = wv.label + ' \u00b7 MOVING ' + dd2[Math.round(window._cwStorm.toward / 22.5) % 16]
-          + ' ' + window._cwStorm.mph + ' MPH';
+          + ' ' + window._cwStorm.mph + ' MPH' + (window._cwStorm.measured ? ' (RADAR)' : ' (STEERING WIND)');
       }
       if (wv.fuel) cwFuel();
       if (wv.foliage) cwFoliageSync(wv);
@@ -59830,6 +59846,53 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        and the rest, which is far too heavy for a 1200 ms tick. This one owns
        #cw-ov-arc and clears only that. offMin is the displayed frame's age in
        minutes (negative) — see the label comment below. */
+    /* STORM MOTION FROM THE RADAR ITSELF (user 2026-09-13: "the highlighted
+       part of the arches doesn't match the incoming storm's direction"). The
+       motion behind the arcs, the nowcast and the strip was the model's
+       500 mb steering wind at the city, which is not what a front's line
+       does -- the line moves with the front. So when a radar loop has
+       loaded, the newest frame is matched against the oldest by shifting
+       one over the other and counting overlap (a block cross-correlation on
+       the echo mask at ~2 km a pixel); the best shift over the loop's span
+       is the motion. Kept only with a coherent match (a quarter of the
+       echo lands), a displacement inside the search window, and something
+       actually moving; otherwise the steering wind stands. */
+    function cwMeasureMotion(imA, imB, dtMin, wv){
+      if (!imA || !imB || !imA.naturalWidth || !imB.naturalWidth || !(dtMin >= 8)) return null;
+      var boxKm = (wv.box.X1 - wv.box.X0) / 1000 * Math.cos(41.5 * Math.PI / 180);
+      var W = Math.max(200, Math.min(600, Math.round(boxKm / 2.2)));
+      var H = Math.round(W * imA.naturalHeight / imA.naturalWidth), kmPx = boxKm / W;
+      var c = document.createElement('canvas'); c.width = W; c.height = H;
+      var g = c.getContext('2d', { willReadFrequently: true });
+      var grab = function(im){
+        g.clearRect(0, 0, W, H); g.drawImage(im, 0, 0, W, H);
+        var d = g.getImageData(0, 0, W, H).data, m = new Uint8Array(W * H), n = 0;
+        for (var i = 0; i < W * H; i++){ if (d[i * 4 + 3] > 60){ m[i] = 1; n++; } }
+        return { m: m, n: n };
+      };
+      var A, B;
+      try { A = grab(imA); B = grab(imB); } catch (e){ return null; }
+      if (A.n < 300 || B.n < 300) return null;
+      var xs = [], ys = [];
+      for (var y = 0; y < H; y++) for (var x = 0; x < W; x++) if (A.m[y * W + x]){ xs.push(x); ys.push(y); }
+      var stride = Math.max(1, Math.floor(xs.length / 8000)), nA = 0;
+      for (var k0 = 0; k0 < xs.length; k0 += stride) nA++;
+      var S = Math.max(4, Math.min(40, Math.ceil(70 * 1.609 * dtMin / 60 / kmPx)));   /* up to 70 mph */
+      var best = { s: -1, dx: 0, dy: 0 };
+      for (var dy = -S; dy <= S; dy++) for (var dx = -S; dx <= S; dx++){
+        var sc = 0;
+        for (var k = 0; k < xs.length; k += stride){
+          var x2 = xs[k] + dx, y2 = ys[k] + dy;
+          if (x2 >= 0 && y2 >= 0 && x2 < W && y2 < H && B.m[y2 * W + x2]) sc++;
+        }
+        if (sc > best.s) best = { s: sc, dx: dx, dy: dy };
+      }
+      if (best.s < 0.25 * nA || Math.abs(best.dx) >= S || Math.abs(best.dy) >= S) return null;
+      var km = Math.hypot(best.dx, best.dy) * kmPx, mph = km / dtMin * 60 / 1.609;
+      if (mph < 4) return null;                          /* sitting still: no direction to read */
+      return { toward: Math.round((Math.atan2(best.dx, -best.dy) * 180 / Math.PI + 360) % 360),
+               mph: Math.round(mph), match: +(best.s / nA).toFixed(2), n: nA, kmPx: +kmPx.toFixed(2), span: dtMin };
+    }
     function cwDrawLeadArcs(offMin){
       var cvs = document.getElementById('cw-ov-arc');
       if (!cvs) return;
@@ -60870,12 +60933,19 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           var toward = (csd + 180) % 360;
           var dd = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
           var smSub = document.getElementById('cw-sm-sub');
-          window._cwStorm = { toward: toward, mph: Math.round(Math.max(12, css * 0.85)) };
+          var steer = { toward: toward, mph: Math.round(Math.max(12, css * 0.85)) };
+          window._cwStormSteer = steer;
+          /* a motion measured off the radar loop within the last 45 min wins
+             over the steering wind (see cwMeasureMotion) */
+          var fresh = window._cwStorm && window._cwStorm.measured && (Date.now() - window._cwStorm.at) < 45 * 60000;
+          if (!fresh) window._cwStorm = steer;
+          toward = window._cwStorm.toward; css = window._cwStorm.mph / 0.85;
           try { cwTagCity(); } catch (e){}
           if (smSub){
             var hNm = (window._cityHood && window._cityHood.name) ? window._cityHood.name.toUpperCase() + ' \u00b7 ' : '';
             smSub.textContent = hNm + 'STORM MOTION \u00b7 '
-              + dd[Math.round(toward / 22.5) % 16] + ' ' + Math.round(Math.max(12, css * 0.85)) + ' MPH';
+              + dd[Math.round(toward / 22.5) % 16] + ' ' + Math.round(Math.max(12, css * 0.85)) + ' MPH'
+              + (window._cwStorm.measured ? ' (RADAR)' : '');
           }
           var d2 = document.querySelector('#cw-card-sm [data-dot]');
           if (d2){
