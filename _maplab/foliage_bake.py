@@ -210,7 +210,8 @@ def season_frames(year, keys, vals, shade):
     dates, todo = [], []
     d = datetime.date(year, 9, 15)
     while d <= datetime.date(year, 11, 10):
-        if on_cdn('season/%d/%s.webp' % (year, d.isoformat())) and on_cdn('season/%d/%s_bands.webp' % (year, d.isoformat())):
+        if on_cdn('season/%d/%s.webp' % (year, d.isoformat())) and on_cdn('season/%d/%s_bands.webp' % (year, d.isoformat())) \
+                and on_cdn('season/%d/%s_blobs.webp' % (year, d.isoformat())):
             dates.append(d.isoformat())
         else:
             todo.append(d)
@@ -231,6 +232,7 @@ def season_frames(year, keys, vals, shade):
                 pp = index_of(cur, base, FOREST_MASK)
                 frame(pp, shade).save(os.path.join(OUT, 'season', str(year), d.isoformat() + '.webp'), 'WEBP', quality=82, method=6)
                 bands(pp, shade).save(os.path.join(OUT, 'season', str(year), d.isoformat() + '_bands.webp'), 'WEBP', quality=82, method=6)
+                bands(pp, shade, blobs=True).save(os.path.join(OUT, 'season', str(year), d.isoformat() + '_blobs.webp'), 'WEBP', quality=82, method=6)
                 dates.append(d.isoformat())
     return {'year': year, 'dates': sorted(dates), 'base': CDN + 'season/%d/' % year}
 
@@ -246,6 +248,8 @@ def archive_this_season(today, prev):
         import shutil
         shutil.copyfile(os.path.join(OUT, 'latest.webp'), os.path.join(OUT, 'season', str(today.year), today.isoformat() + '.webp'))
         shutil.copyfile(os.path.join(OUT, 'latest_bands.webp'), os.path.join(OUT, 'season', str(today.year), today.isoformat() + '_bands.webp'))
+        if os.path.exists(os.path.join(OUT, 'latest_blobs.webp')):
+            shutil.copyfile(os.path.join(OUT, 'latest_blobs.webp'), os.path.join(OUT, 'season', str(today.year), today.isoformat() + '_blobs.webp'))
         have.append(today.isoformat())
     return {'year': today.year, 'dates': sorted(set(have)), 'base': CDN + 'season/%d/' % today.year}
 
