@@ -159,10 +159,28 @@ def bands(p, shade, sigma=7, blobs=False):
     for lo in stops:
         post = np.where(np.isfinite(q) & (q >= lo), lo + 0.001, post)
     if blobs:
-        # THE BLOBS ALONE (user 2026-09-13: "i want to see the blobs on
-        # detail"): the coloured bands from the second stop up, the base
-        # green left clear, so they float over the raw 250 m detail
+        # THE BLOBS AS OUTLINES (user 2026-09-13: "the smoothed view should be
+        # gone"): from the second stop up, each band's edge drawn in the
+        # band's own colour and its inside only faintly tinted, so the raw
+        # 250 m detail reads through even in late October when every pixel
+        # is above the first stop and a filled blob was the whole map.
         post = np.where(post >= RAMP[1][0], post, np.nan)
+        img = np.array(ramp(post, shade=None).convert('RGBA'))
+        fin = np.isfinite(post)
+        lvl = np.where(fin, post, -1.0)
+        edge = np.zeros_like(fin)
+        edge[1:, :] |= lvl[1:, :] != lvl[:-1, :]
+        edge[:-1, :] |= lvl[:-1, :] != lvl[1:, :]
+        edge[:, 1:] |= lvl[:, 1:] != lvl[:, :-1]
+        edge[:, :-1] |= lvl[:, :-1] != lvl[:, 1:]
+        edge &= fin
+        # a two-pixel line: the edge and its inward neighbour
+        e2 = edge.copy()
+        e2[1:, :] |= edge[:-1, :]; e2[:, 1:] |= edge[:, :-1]
+        e2 &= fin
+        alpha = np.where(e2, 235, np.where(fin, 60, 0)).astype(np.uint8)
+        img[..., 3] = alpha
+        return Image.fromarray(img, 'RGBA')
     return ramp(post, shade=shade)
 
 
