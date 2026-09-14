@@ -479,6 +479,29 @@ def blur2d(a, sigma):
     return out2
 
 
+def canada_mask():
+    """True north of the border, by a piecewise line through the box: the
+    Niagara, Lake Ontario's north shore, the St Lawrence, then the 45th
+    parallel. The first cut used "outside the county shapes", but those
+    cover nine states, so Maryland, Delaware and West Virginia came out
+    looking like Canada with a hard line along the Mason-Dixon (user
+    2026-09-13: "is this line of green and black accurate?"). The typed
+    forest stops at this line; north of it the greenness rule stands."""
+    R = 6378137.0
+    X0, Y0, X1, Y1 = BOX
+    xs = X0 + (np.arange(W) + 0.5) / W * (X1 - X0)
+    ys = Y1 - (np.arange(H) + 0.5) / H * (Y1 - Y0)
+    lon = xs / R * 180 / math.pi
+    lat = (2 * np.arctan(np.exp(ys / R)) - math.pi / 2) * 180 / math.pi
+    LON, LAT = np.meshgrid(lon, lat)
+    line = np.where(LON < -79.05, 42.88,
+           np.where(LON < -76.9, 43.55,
+           np.where(LON < -76.4, 44.0,
+           np.where(LON < -74.7, 44.1 + (LON + 76.4) * 0.53,
+           np.where(LON < -71.0, 45.0, 45.7)))))
+    return LAT > line
+
+
 def species_raster(fn):
     u = (FHP + '/exportImage?bbox=%d,%d,%d,%d&bboxSR=3857&imageSR=3857&size=%d,%d&format=tiff&pixelType=F32'
          '&interpolation=RSP_NearestNeighbor&f=image&renderingRule=%s'
@@ -1090,7 +1113,7 @@ def main():
     forest_only = None
     try:
         forest_only = forest(shade, prev) > 0
-        FOREST_MASK = forest_only | (labels == 0)
+        FOREST_MASK = forest_only | canada_mask()
     except Exception as e:
         print('forest mask: unavailable (%s), falling back to greenness' % e)
         FOREST_MASK = None
