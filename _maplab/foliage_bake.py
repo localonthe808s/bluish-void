@@ -1050,9 +1050,20 @@ def main():
     # inflated small changes into big shares. The Forest Service's typed
     # forest, at the same 250 m, is the honest mask; farmland, towns and
     # water get no index at all and the map shows through.
+    # CANADA TOO (user 2026-09-13: "last season shows canada but all other
+    # views block canada out"). The Forest Service's typed forest stops at
+    # the border, so north of it the index fell back to nothing. Outside the
+    # counties -- which is Canada and the sea in this box -- the greenness
+    # rule alone (August NDVI > 0.55, in index_of) carries the index, the
+    # way the whole map did before the forest mask; the species frame keeps
+    # to the typed forest it is made from.
+    shapes = county_shapes()
+    labels, ids = county_labels(shapes)
     global FOREST_MASK
+    forest_only = None
     try:
-        FOREST_MASK = forest(shade, prev) > 0
+        forest_only = forest(shade, prev) > 0
+        FOREST_MASK = forest_only | (labels == 0)
     except Exception as e:
         print('forest mask: unavailable (%s), falling back to greenness' % e)
         FOREST_MASK = None
@@ -1060,14 +1071,12 @@ def main():
     frame(p, shade).save(os.path.join(OUT, 'latest.webp'), 'WEBP', quality=82, method=6)   # ~1/6 the PNG, alpha kept
     bands(p, shade).save(os.path.join(OUT, 'latest_bands.webp'), 'WEBP', quality=82, method=6)
     bands(p, shade, blobs=True).save(os.path.join(OUT, 'latest_blobs.webp'), 'WEBP', quality=82, method=6)
-    shapes = county_shapes()
-    labels, ids = county_labels(shapes)
     counties_now = county_means(labels, ids, p)
     try:
         fcodes = FOREST_CODES if FOREST_CODES is not None else forest(shade, prev)
         forest_by_county = forest_shares(fcodes, labels, ids)
         try:
-            species(shade, FOREST_MASK)
+            species(shade, forest_only)
         except Exception as e:
             print('species: unavailable (%s)' % e)
     except Exception as e:
