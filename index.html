@@ -51733,6 +51733,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
            per painted view at device resolution — crisp at any zoom, the
            hazard map's exact line grammar */
         + '<canvas id="cw-gv" style="' + IMG + 'z-index:0;pointer-events:none;will-change:transform;"></canvas>'
+        /* THE TIDE'S FLOW (user 2026-09-13): particles carried by NOAA's
+           predicted currents, and the outfalls' runoff drifting with them;
+           its own layer so the trails can fade without touching the vectors */
+        + '<canvas id="cw-flow" style="' + IMG + 'z-index:0;pointer-events:none;will-change:transform;display:none;"></canvas>'
         /* frames carry the full city box now — fill, not cover, or the
            aspect difference misregisters them against the base transform */
         + '<img id="cw-frame-a" alt="" style="' + IMG + 'object-fit:fill;z-index:1;opacity:0;transition:opacity .3s ease;will-change:transform;">'
@@ -51811,6 +51815,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         /* instant: the overlay is its own registered layer, no recompose */
         var fl2 = document.getElementById('cw-fl');
         if (fl2) fl2.style.display = cw.floods ? '' : 'none';
+        cwFlowSync();
         if (cw.floods){
           cwFlBuild();
           /* ghost-water data for the vector canvas: shared loader + the
@@ -51914,7 +51919,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       c._zoomed = true;
       /* painted-view layers only — the frames and floods overlay ride the
          BASE transform now (full-box registration, view-independent) */
-      var LAYERS = ['cw-bm-under','cw-rock','cw-gv','cw-bm-ghost','cw-ov','cw-ov-arc'];
+      var LAYERS = ['cw-bm-under','cw-rock','cw-gv','cw-flow','cw-bm-ghost','cw-ov','cw-ov-arc'];
       var z = { k:1, tx:0, ty:0 };       // painted transform
       var zt = { k:1, tx:0, ty:0 };      // target: wheel/dblclick ease toward it
       var anim = null;
@@ -52361,6 +52366,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       });
       /* THE RED FLASH: a view with weather in it, while it is not the one on
          show (user 2026-09-13) */
+      try { cwFlowSync(); } catch (e){}
       var A = window._cwActive || {};
       var flag = function(id, on){ var el = document.getElementById(id); if (el) el.classList.toggle('cw-tab-alert', !!on); };
       flag('cw-tab-bref', !!A.here && !(cw.radarOn && !cw.wide));
@@ -52830,7 +52836,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        is display:none unless FLOODING is on) and clobbering it would strand
        the flood layer off when the loader let go */
     var CW_CITY_LAYERS = ['cw-bm-base','cw-bm-under','cw-rock','cw-bm-ghost','cw-fl',
-                          'cw-gv','cw-frame-a','cw-frame-b','cw-ov','cw-ov-arc'];
+                          'cw-gv','cw-flow','cw-frame-a','cw-frame-b','cw-ov','cw-ov-arc'];
     function cwCityLayers(show){
       CW_CITY_LAYERS.forEach(function(id){
         var e = document.getElementById(id);
@@ -55060,6 +55066,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var el = document.getElementById('cw-info');
       if (!el || mtaSel) return;
       if (cw.rock && cwMapMode()){ cwRockLegend(el); return; }
+      if (cw.floods && cwMapMode() && !cw.wide && cwCur.stations){ cwFlowCaption(); return; }
       el.innerHTML = '';
       el.style.display = 'none';
     }
@@ -59619,6 +59626,221 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        courses #2B22F4 dashed 5,4 at weight 1.6 SCREEN px. Redrawn per
        painted view at device resolution — no raster upscaling, no sausage
        links. Ponds are buried OPEN water: a real water fill, not a veil. */
+    /* ─ THE RIVERS' FLOW (user 2026-09-13: "make sure we have the rivers flow
+       correct to properly show how this runoff is traveling and dispersing
+       along the rivers of NYC, the hudson is flowing north at times") ─────
+       Every water in the city is tidal: the Hudson floods north for six
+       hours in twelve, the East River is a strait that reverses, Hell Gate
+       runs four knots. NOAA CO-OPS publishes hourly current PREDICTIONS
+       (keyless, CORS *) at 28 harmonic and PORTS stations on these waters
+       (city_currents.json): speed along the channel, positive on the flood
+       toward meanFloodDir, negative on the ebb toward meanEbbDir. The flow
+       at any point is the inverse-distance blend of the nearest stations'
+       vectors for this hour, interpolated between hours.
+
+       What moves: tracer particles seeded on water (the composed basemap's
+       blue, sampled at a sixth of its size), drawn as fading streaks; and
+       the RUNOFF -- every outfall lets go a particle every few frames that
+       drifts with the same field, spreads by a random walk and dies on
+       land or after its life. Time runs at one minute a second so a tide
+       cycle takes twelve minutes to watch. Only on FLOODING, only on the
+       city map, paused when the page is hidden. An estimate between
+       stations, and the caption says so. */
+    var cwCur = { stations: null, series: {}, at: 0, req: 0 }, cwFlowT = null, cwFlowP = [], cwFlowR = [], cwFlowMask = null, cwFlowClock = 0;
+    var CW_FLOW_SPEEDUP = 60;                 /* one second on screen is one minute of tide */
+    function cwCurLoad(){
+      if (cwCur.req || (cwCur.stations && Date.now() - cwCur.at < 6 * 3600000)) return;
+      cwCur.req = 1;
+      fetch('city_currents.json').then(function(r){ return r.json(); }).then(function(j){
+        var st = (j && j.stations) || [];
+        var d0 = new Date(); var ymd = d0.getFullYear() + ('0' + (d0.getMonth() + 1)).slice(-2) + ('0' + d0.getDate()).slice(-2);
+        var key = 'cwCurrents:' + ymd;
+        try { var cached = JSON.parse(localStorage.getItem(key) || 'null'); if (cached && cached.series){ cwCur.stations = st; cwCur.series = cached.series; cwCur.at = Date.now(); cwCur.req = 0; cwFlowSync(); return; } } catch (e){}
+        var left = st.length, series = {};
+        st.forEach(function(s){
+          fetch('https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?product=currents_predictions&station=' + s.id
+                + '&begin_date=' + ymd + '&range=48&time_zone=lst_ldt&units=english&interval=h&format=json')
+            .then(function(r){ return r.json(); })
+            .then(function(d){
+              var cp = (d && d.current_predictions && d.current_predictions.cp) || [];
+              if (cp.length) series[s.id] = { fd: +cp[0].meanFloodDir, ed: +cp[0].meanEbbDir,
+                                              t: cp.map(function(r){ return new Date(r.Time.replace(' ', 'T')).getTime(); }),
+                                              v: cp.map(function(r){ return +r.Velocity_Major; }) };
+            }).catch(function(){}).then(function(){
+              if (--left) return;
+              cwCur.stations = st; cwCur.series = series; cwCur.at = Date.now(); cwCur.req = 0;
+              try { localStorage.setItem(key, JSON.stringify({ series: series })); } catch (e){}
+              cwFlowSync();
+            });
+        });
+      }).catch(function(){ cwCur.req = 0; });
+    }
+    /* the current at a station at time t: knots, signed (+ flood) */
+    function cwCurAt(id, t){
+      var S = cwCur.series[id];
+      if (!S || !S.t.length) return null;
+      if (t <= S.t[0]) return S.v[0];
+      for (var i = 1; i < S.t.length; i++){
+        if (t <= S.t[i]){ var f = (t - S.t[i - 1]) / (S.t[i] - S.t[i - 1]); return S.v[i - 1] + (S.v[i] - S.v[i - 1]) * f; }
+      }
+      return S.v[S.v.length - 1];
+    }
+    /* the flow vector at lon/lat at time t: [east, north] in knots */
+    function cwFlowVec(lon, lat, t){
+      var st = cwCur.stations; if (!st) return null;
+      var sw = 0, su = 0, sv = 0, n = 0, kmx = Math.cos(lat * Math.PI / 180) * 111.32;
+      var near = [];
+      st.forEach(function(s){
+        var S = cwCur.series[s.id]; if (!S) return;
+        var d = Math.hypot((s.lon - lon) * kmx, (s.lat - lat) * 111.32);
+        near.push([d, s]);
+      });
+      near.sort(function(a, b){ return a[0] - b[0]; });
+      near.slice(0, 3).forEach(function(q){
+        var d = Math.max(0.3, q[0]); if (d > 7 && n) return;
+        var s = q[1], S = cwCur.series[s.id], v = cwCurAt(s.id, t);
+        if (v == null) return;
+        var dir = (v >= 0 ? S.fd : S.ed) * Math.PI / 180, sp = Math.abs(v), w = 1 / (d * d);
+        su += w * sp * Math.sin(dir); sv += w * sp * Math.cos(dir); sw += w; n++;
+      });
+      if (!sw) return null;
+      return [su / sw, sv / sw];
+    }
+    /* the water, sampled off the composed basemap at a sixth of its size */
+    function cwFlowMaskBuild(){
+      var im = document.getElementById('cw-bm-under');
+      if (!im || !im.naturalWidth) return null;
+      var W = Math.round(im.naturalWidth / 6), H = Math.round(im.naturalHeight / 6);
+      var c = document.createElement('canvas'); c.width = W; c.height = H;
+      var g = c.getContext('2d', { willReadFrequently: true });
+      try { g.drawImage(im, 0, 0, W, H); var d = g.getImageData(0, 0, W, H).data; } catch (e){ return null; }
+      var m = new Uint8Array(W * H), n = 0;
+      for (var i = 0; i < W * H; i++){
+        var r = d[i * 4], gg = d[i * 4 + 1], b = d[i * 4 + 2];
+        /* the ink bake's water: blue leads, and not the near-black land */
+        if (b > 60 && b > r + 25 && b > gg + 8){ m[i] = 1; n++; }
+      }
+      return { w: W, h: H, m: m, share: n / (W * H), src: im.src };
+    }
+    function cwFlowWater(x, y, cvs){
+      var M = cwFlowMask; if (!M) return false;
+      var i = Math.floor(y / cvs.height * M.h) * M.w + Math.floor(x / cvs.width * M.w);
+      return i >= 0 && i < M.m.length && M.m[i] === 1;
+    }
+    function cwFlowSync(){
+      var cvs = document.getElementById('cw-flow');
+      if (!cvs) return;
+      var on = cw.floods && cwMapMode() && !cw.wide;
+      if (!on){
+        cvs.style.display = 'none';
+        if (cwFlowT){ cancelAnimationFrame(cwFlowT); cwFlowT = null; }
+        cwFlowP = []; cwFlowR = [];
+        return;
+      }
+      cwCurLoad();
+      cvs.style.display = '';
+      if (!cwFlowT) cwFlowT = requestAnimationFrame(cwFlowStep);
+      cwFlowCaption();
+    }
+    function cwFlowStep(){
+      cwFlowT = null;
+      var cvs = document.getElementById('cw-flow');
+      if (!cvs || !cw.floods || !cwMapMode() || cw.wide) return;
+      cwFlowT = requestAnimationFrame(cwFlowStep);
+      if (document.hidden || !cwCur.stations) return;
+      var body = document.getElementById('cw-body');
+      var r = body ? body.getBoundingClientRect() : null;
+      if (!r || !r.width) return;
+      var dpr = Math.min(2, window.devicePixelRatio || 1);
+      var W = Math.round(r.width * dpr), H = Math.round(r.height * dpr);
+      var im = document.getElementById('cw-bm-under');
+      if (!cwFlowMask || (im && cwFlowMask.src !== im.src)){ cwFlowMask = cwFlowMaskBuild(); cwFlowP = []; cwFlowR = []; }
+      if (!cwFlowMask || cwFlowMask.share < 0.02) return;
+      var g = cvs.getContext('2d');
+      if (cvs.width !== W || cvs.height !== H){ cvs.width = W; cvs.height = H; cwFlowP = []; cwFlowR = []; }
+      var v = cwPainted, R2 = 6378137;
+      var mPerPx = (v.X1 - v.X0) / W * Math.cos(40.7 * Math.PI / 180);      /* ground metres per canvas px */
+      var lonOf = function(x){ return (v.X0 + x / W * (v.X1 - v.X0)) / R2 * 180 / Math.PI; };
+      var latOf = function(y){ return (2 * Math.atan(Math.exp((v.Y1 - y / H * (v.Y1 - v.Y0)) / R2)) - Math.PI / 2) * 180 / Math.PI; };
+      var now = Date.now();
+      /* model time runs sixty times faster than the clock, from the moment the layer opened */
+      if (!cwFlowClock) cwFlowClock = now;
+      var tModel = now + (now - cwFlowClock) * (CW_FLOW_SPEEDUP - 1);
+      if (tModel - now > 12 * 3600000) { cwFlowClock = now; tModel = now; }    /* twelve hours out, start again at now */
+      var dt = 1 / 30;                                                       /* seconds per frame, nominal */
+      var pxPerKnot = 0.5144 * CW_FLOW_SPEEDUP * dt / mPerPx;                /* canvas px a knot moves per frame */
+      /* fade the trails */
+      g.globalCompositeOperation = 'destination-out';
+      g.fillStyle = 'rgba(0,0,0,.09)'; g.fillRect(0, 0, W, H);
+      g.globalCompositeOperation = 'source-over';
+      /* tracers on the water */
+      var want = Math.round(W * H / 900);
+      while (cwFlowP.length < want){
+        var x = Math.random() * W, y = Math.random() * H;
+        if (cwFlowWater(x, y, cvs)) cwFlowP.push({ x: x, y: y, a: 40 + Math.random() * 120 });
+        else if (Math.random() < 0.02) break;
+      }
+      g.lineCap = 'round'; g.lineWidth = 1.1 * dpr;
+      for (var i = cwFlowP.length - 1; i >= 0; i--){
+        var pt = cwFlowP[i], vec = cwFlowVec(lonOf(pt.x), latOf(pt.y), tModel);
+        if (!vec || --pt.a <= 0 || !cwFlowWater(pt.x, pt.y, cvs)){ cwFlowP.splice(i, 1); continue; }
+        var nx = pt.x + vec[0] * pxPerKnot, ny = pt.y - vec[1] * pxPerKnot;
+        var sp = Math.hypot(vec[0], vec[1]);
+        g.strokeStyle = 'rgba(190,220,255,' + Math.min(0.85, 0.25 + sp * 0.2).toFixed(2) + ')';
+        g.beginPath(); g.moveTo(pt.x, pt.y); g.lineTo(nx, ny); g.stroke();
+        pt.x = nx; pt.y = ny;
+      }
+      /* the runoff: each outfall lets go a particle now and then, lime like the slick */
+      var cso = window._cwCSO ? { p: window._cwCSO } : null;
+      if (cso && cso.p){
+        var px = function(c){ return ((c[0] * Math.PI / 180 * R2) - v.X0) / (v.X1 - v.X0) * W; };
+        var py = function(c){ return (v.Y1 - R2 * Math.log(Math.tan(Math.PI / 4 + c[1] * Math.PI / 360))) / (v.Y1 - v.Y0) * H; };
+        for (var k = 0; k < cso.p.length; k++){
+          if (Math.random() > 0.03) continue;
+          var o = cso.p[k], ox = px(o), oy = py(o);
+          if (ox < 0 || oy < 0 || ox > W || oy > H) continue;
+          /* step off the pipe's mouth into the water */
+          var ang = (o[2] || 0) * Math.PI / 180;
+          cwFlowR.push({ x: ox + Math.sin(ang) * 3 * dpr, y: oy - Math.cos(ang) * 3 * dpr, a: 900 + Math.random() * 600, s: 0 });
+        }
+      }
+      g.lineWidth = 1.5 * dpr;
+      for (var j = cwFlowR.length - 1; j >= 0; j--){
+        var q = cwFlowR[j];
+        q.s++;
+        if (q.s > 12 && !cwFlowWater(q.x, q.y, cvs)){ cwFlowR.splice(j, 1); continue; }
+        if (--q.a <= 0){ cwFlowR.splice(j, 1); continue; }
+        var vq = cwFlowVec(lonOf(q.x), latOf(q.y), tModel) || [0, 0];
+        var jit = 0.45 * dpr;
+        var qx = q.x + vq[0] * pxPerKnot + (Math.random() - 0.5) * jit, qy = q.y - vq[1] * pxPerKnot + (Math.random() - 0.5) * jit;
+        var life = q.a / 1500;
+        g.strokeStyle = 'rgba(150,255,70,' + (0.15 + 0.7 * life).toFixed(2) + ')';
+        g.beginPath(); g.moveTo(q.x, q.y); g.lineTo(qx, qy); g.stroke();
+        q.x = qx; q.y = qy;
+      }
+      if (cwFlowR.length > 6000) cwFlowR.splice(0, cwFlowR.length - 6000);
+    }
+    /* the reading: what each river is doing now and when it turns */
+    function cwFlowCaption(){
+      var el = document.getElementById('cw-info');
+      if (!el || !cwCur.stations) return;
+      var KEY = [['Hudson', 'NYH1928'], ['East River', 'NYH1924'], ['Harlem', 'NYH1926'], ['Narrows', 'n03020'], ['Kill Van Kull', 'n06010'], ['Jamaica Bay', 'NYH1934']];
+      var now = Date.now(), parts = [];
+      KEY.forEach(function(k){
+        var S = cwCur.series[k[1]]; if (!S) return;
+        var v = cwCurAt(k[1], now); if (v == null) return;
+        var turn = null;
+        for (var i = 1; i < S.t.length; i++){ if (S.t[i] > now && (S.v[i] >= 0) !== (v >= 0)){ turn = S.t[i - 1] + (S.t[i] - S.t[i - 1]) * Math.abs(S.v[i - 1]) / (Math.abs(S.v[i - 1]) + Math.abs(S.v[i]) || 1); break; } }
+        var dd = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+        var dir = dd[Math.round((v >= 0 ? S.fd : S.ed) / 22.5) % 16];
+        var tt = turn ? new Date(turn).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : null;
+        parts.push('<b>' + k[0].toUpperCase() + '</b> ' + (Math.abs(v) < 0.2 ? 'SLACK' : (v >= 0 ? 'FLOODING ' : 'EBBING ') + dir + ' ' + Math.abs(v).toFixed(1) + ' KT') + (tt ? ' \u00b7 TURNS ' + tt.toUpperCase() : ''));
+      });
+      if (!parts.length) return;
+      el.innerHTML = '<div style="font:800 9px system-ui,sans-serif;letter-spacing:.09em;color:#1b2340;">THE TIDE NOW \u00b7 ' + parts.join(' \u00b7 ') + '</div>'
+        + '<div style="font:600 8.5px system-ui,sans-serif;color:rgba(27,35,64,.75);margin-top:2px;">NOAA CURRENT PREDICTIONS AT 28 HARBOR STATIONS, BLENDED BETWEEN THEM \u00b7 STREAKS RIDE THE TIDE, LIME IS THE OUTFALLS\u2019 RUNOFF \u00b7 ONE SECOND IS ONE MINUTE OF TIDE</div>';
+      el.style.display = '';
+    }
     function cwDrawGhost(){
       var cvs = document.getElementById('cw-gv');
       if (!cvs) return;
