@@ -135,7 +135,7 @@ def ramp(p, alpha=0.80, shade=None):
     return Image.fromarray(img)
 
 
-def bands(p, shade, sigma=7):
+def bands(p, shade, sigma=7, blobs=False):
     """THE BANDS LOOK (user 2026-09-13: "id rather see bands"): the index
     blurred to landscape scale (sigma 7 px ~ 6 km) and posterised to the
     ramp's own stops, so the colour comes as bands that follow the hills
@@ -158,6 +158,11 @@ def bands(p, shade, sigma=7):
     post = np.full_like(q, np.nan)
     for lo in stops:
         post = np.where(np.isfinite(q) & (q >= lo), lo + 0.001, post)
+    if blobs:
+        # THE BLOBS ALONE (user 2026-09-13: "i want to see the blobs on
+        # detail"): the coloured bands from the second stop up, the base
+        # green left clear, so they float over the raw 250 m detail
+        post = np.where(post >= RAMP[1][0], post, np.nan)
     return ramp(post, shade=shade)
 
 
@@ -1042,6 +1047,7 @@ def main():
     p = index_of(cur, base, FOREST_MASK)
     frame(p, shade).save(os.path.join(OUT, 'latest.webp'), 'WEBP', quality=82, method=6)   # ~1/6 the PNG, alpha kept
     bands(p, shade).save(os.path.join(OUT, 'latest_bands.webp'), 'WEBP', quality=82, method=6)
+    bands(p, shade, blobs=True).save(os.path.join(OUT, 'latest_blobs.webp'), 'WEBP', quality=82, method=6)
     shapes = county_shapes()
     labels, ids = county_labels(shapes)
     counties_now = county_means(labels, ids, p)
