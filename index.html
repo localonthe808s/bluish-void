@@ -5652,6 +5652,15 @@ window._bvContinentalNames = function(map, opts){
   @keyframes badge-pulse-normal   { 0%,100%{ opacity:.75; text-shadow:0 0 4px rgba(255,255,255,.5); } 50%{ opacity:1; text-shadow:0 0 10px rgba(255,255,255,.9),0 0 20px rgba(255,255,255,.4); } }
   @keyframes badge-pulse-elevated { 0%,100%{ opacity:.85; text-shadow:0 0 6px rgba(255,255,255,.7); } 50%{ opacity:1; text-shadow:0 0 14px rgba(255,255,255,1),0 0 28px rgba(255,255,255,.55); } }
   @keyframes badge-pulse-critical { 0%,100%{ opacity:.9; text-shadow:0 0 8px rgba(255,255,255,.8); transform:scale(1); } 50%{ opacity:1; text-shadow:0 0 18px rgba(255,255,255,1),0 0 36px rgba(255,220,80,.9),0 0 56px rgba(255,200,40,.5); transform:scale(1.06); } }
+  /* THE CITY's view tabs flash red when that view has weather in it (user
+     2026-09-13: "have that tab flash red like a hazard tab would"); the
+     class outranks the tabs' inline orange, and paintTabs takes it off the
+     lit tab */
+  .cw-tab-alert {
+    animation: tab-alert-glow 2.5s ease-in-out infinite;
+    background: rgba(220,38,38,.92) !important;
+    --glow-color: rgba(239,68,68,.6);
+  }
   #hazard-tabs .geo-tab.tab-alert {
     animation: tab-alert-glow 2.5s ease-in-out infinite;
     background: var(--alert-bg, rgba(239,68,68,.2)) !important;
@@ -52343,6 +52352,13 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         b.style.background = cw.wide === wv.id ? 'rgba(43,34,244,.9)' : 'rgba(234,88,12,.92)';
         b.style.color = 'rgba(255,255,255,.97)';
       });
+      /* THE RED FLASH: a view with weather in it, while it is not the one on
+         show (user 2026-09-13) */
+      var A = window._cwActive || {};
+      var flag = function(id, on){ var el = document.getElementById(id); if (el) el.classList.toggle('cw-tab-alert', !!on); };
+      flag('cw-tab-bref', !!A.here && !(cw.radarOn && !cw.wide));
+      flag('cw-wtab-incoming', !!A.incoming && cw.wide !== 'incoming');
+      flag('cw-wtab-ne', !!A.ne && cw.wide !== 'ne');
     }
     /* WIDE VIEWS: swap the city stack for a framed regional image and run
        its own slow loop. The city timers keep running underneath so
@@ -61265,38 +61281,18 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        line, and reaching into another scope for it is the exact trap that has
        cost this widget before. Keep the two in step by hand if the palette
        moves. */
-    var CW_LAUNCH_MS = 2000;
+    /* NO LONGER A CHOOSER (user 2026-09-13: "waiting on radar is too much,
+       when the page loads just show the CITY MAP, but if there is anything
+       active in the 12 hr, 3 hr or KOKX then have that tab flash red"). The
+       same read now answers all three questions and reports them as flags;
+       the widget paints the city map at once and paintTabs lights the tabs. */
     function cwLaunchDecide(done){
       var fired = false;
-      var lateUsed = false;
-      var finish = function(pick){
-        if (fired) {
-          /* A LATE ANSWER STILL WINS (user 2026-09-12). Measured on four cold
-             loads: the catalogue lands in 11-29 ms (the prefetch works), but
-             the tile PIXEL READS take 3.7-6.7 s, so the 2 s cap fired first on
-             4 of 4 and the city map won a coin flip — while hit.incoming was
-             true in every single run. The cap exists so the panel never hangs,
-             not to discard a correct answer that arrives a moment later. So:
-             the cap still paints immediately, and one real pick afterwards is
-             allowed through. Only once (lateUsed), only if it is non-null, and
-             never over a tap — cwLaunchPick is 'city' by now, so this must test
-             for 'user' specifically, not for unset. */
-          if (lateUsed || !pick) { return; }
-          if (cwLaunchPick === 'user') { return; }
-          lateUsed = true;
-          done(pick);
-          return;
-        }
+      var finish = function(hit){
+        if (fired) return;
         fired = true;
-        /* A TAP DURING THE WINDOW ENDS THIS, SILENTLY. Calling done(null) here
-           would run the callback's else-branch — compose() — painting the city
-           map underneath the view they just chose, which is the exact flash the
-           deferral exists to prevent. So the chooser simply stands down and
-           leaves the first paint to whatever they opened. */
-        if (cwLaunchPick === 'user') return;
-        done(pick);
+        done(hit);
       };
-      setTimeout(function(){ finish(null); }, CW_LAUNCH_MS);   /* never hold the panel */
       try {
         /* WHERE "ON YOU" IS, and why this cannot just read _cityHood.
            The Flatiron default is assigned inside cwCardsSync(), which start()
@@ -61377,7 +61373,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                 var ix = (q.p.py * ts + q.p.px) * 4;
                 if (wet([d[ix], d[ix + 1], d[ix + 2], d[ix + 3]])) hit[q.k] = true;
               });
-              finish(hit.here ? 'now' : hit.incoming ? 'incoming' : hit.ne ? 'ne' : null);
+              finish(hit);
             };
             /* 0_0, NOT 1_1: the trailing pair is smoothing and snow-colouring.
                Every other pixel-READING call in this file uses 0_0 because the
@@ -61394,29 +61390,20 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     function start(){
       if (cw.running) return;
       cw.running = true;
-      /* THE FIRST COMPOSE WAITS ON THE CHOOSER. compose() is what dismisses
-         #cw-loading, so painting the city map first and switching afterwards
-         would flash a view nobody asked for — the thing the user explicitly
-         ruled out. Everything else below runs immediately; only the first
-         paint is deferred, and never by more than CW_LAUNCH_MS. */
-      cwLaunchDecide(function(pick){
-        /* setWide and setProduct both stamp cwLaunchPick='user' on entry, and
-           setProduct calls setWide(null) on its way — so driving them from here
-           writes that flag up to three times before this function's own value
-           lands. Relying on which assignment happens last is the kind of thing
-           that breaks silently the next time someone reorders a line, so the
-           chooser announces itself instead and those two leave the flag alone
-           while it is set. */
-        cwLaunchDriving = true;
-        try {
-          if (pick === 'now') setProduct('bref');
-          else if (pick === 'incoming' || pick === 'ne') setWide(pick);
-          else compose();
-        } finally {
-          cwLaunchDriving = false;
-          cwLaunchPick = pick || 'city';
-        }
-      });
+      /* THE CITY MAP FIRST (user 2026-09-13): nothing waits on a radar read
+         any more; the read runs behind the first paint and only lights tabs. */
+      /* the city map, at once; the weather read lights the tabs when it lands */
+      compose();
+      cwLaunchPick = 'city';
+      var readActive = function(){
+        if (document.hidden) return;
+        cwLaunchDecide(function(hit){
+          window._cwActive = hit || {};
+          try { paintTabs(); } catch (e){}
+        });
+      };
+      readActive();
+      setInterval(readActive, 300000);
       step();
       cwCardsSync();
       cwWarm();
