@@ -520,6 +520,44 @@ def canada_mask():
     return LAT > line
 
 
+# A FOREST MASK NORTH OF THE BORDER (user 2026-09-13: "will that fix that
+# smoothing in canada too?"). The Forest Service's typed forest stops at the
+# line, so Canada carried the index on every green pixel, farmland included,
+# and came out blotchy against the speckled US side. NASA's MODIS IGBP land
+# cover (500 m, yearly) covers it: the five forest classes and woody savanna
+# are the mask there. Colours are matched to the layer's own colormap.
+IGBP_LAYER = 'MODIS_Combined_L3_IGBP_Land_Cover_Type_Annual'
+IGBP_RGB = {1: (33, 138, 33), 2: (49, 204, 49), 3: (152, 204, 49), 4: (150, 250, 150), 5: (141, 186, 141),
+            6: (186, 141, 141), 7: (245, 222, 179), 8: (218, 235, 157), 9: (255, 213, 0), 10: (240, 185, 103),
+            11: (71, 131, 181), 12: (250, 239, 115), 13: (255, 0, 0), 14: (153, 147, 86), 15: (255, 255, 255),
+            16: (191, 191, 189), 17: (134, 202, 227), 255: (100, 100, 100)}
+IGBP_FOREST = {1, 2, 3, 4, 5, 8}
+
+
+def igbp_forest():
+    """True where MODIS land cover says forest, on the bake's grid; the newest
+    year the service has (tried back from last year)."""
+    for year in range(datetime.date.today().year - 1, datetime.date.today().year - 5, -1):
+        u = ('https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi?SERVICE=WMS&REQUEST=GetMap&VERSION=1.3.0'
+             '&LAYERS=%s&CRS=EPSG:3857&BBOX=%d,%d,%d,%d&WIDTH=%d&HEIGHT=%d&FORMAT=image/png&TIME=%d-01-01'
+             % ((IGBP_LAYER,) + BOX + (W, H, year)))
+        try:
+            a = np.array(Image.open(io.BytesIO(get(u, 240))).convert('RGB')).astype(np.int32)
+        except Exception as e:
+            print('igbp: %d failed (%s)' % (year, e)); continue
+        keys = list(IGBP_RGB)
+        pal = np.array([IGBP_RGB[k] for k in keys], np.int32)
+        flat = a.reshape(-1, 3)
+        d = ((flat[:, None, :] - pal[None, :, :]) ** 2).sum(2)
+        cls = np.array(keys)[d.argmin(1)].reshape(a.shape[:2])
+        near = d.min(1).reshape(a.shape[:2]) <= 3 * 12 * 12
+        forest = near & np.isin(cls, list(IGBP_FOREST))
+        if (near & (cls != 255)).mean() > 0.3:
+            print('igbp: %d, forest on %.0f%% of the box' % (year, 100 * forest.mean()))
+            return forest
+    return None
+
+
 def species_raster(fn):
     u = (FHP + '/exportImage?bbox=%d,%d,%d,%d&bboxSR=3857&imageSR=3857&size=%d,%d&format=tiff&pixelType=F32'
          '&interpolation=RSP_NearestNeighbor&f=image&renderingRule=%s'
@@ -1131,7 +1169,9 @@ def main():
     forest_only = None
     try:
         forest_only = forest(shade, prev) > 0
-        FOREST_MASK = forest_only | canada_mask()
+        north = canada_mask()
+        igbp = igbp_forest()
+        FOREST_MASK = forest_only | (north & igbp if igbp is not None else north)
     except Exception as e:
         print('forest mask: unavailable (%s), falling back to greenness' % e)
         FOREST_MASK = None
