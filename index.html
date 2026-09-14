@@ -59647,7 +59647,32 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        city map, paused when the page is hidden. An estimate between
        stations, and the caption says so. */
     var cwCur = { stations: null, series: {}, at: 0, req: 0 }, cwFlowT = null, cwFlowP = [], cwFlowR = [], cwFlowMask = null, cwFlowClock = 0;
-    var CW_FLOW_SPEEDUP = 60;                 /* one second on screen is one minute of tide */
+    /* one second on screen is ten minutes of tide: at one minute a second a
+       two-knot current moved a tenth of a pixel a frame and nothing showed
+       (measured: 0.12% of the canvas drawn); at ten a tide cycle plays in
+       about seventy seconds and the streaks read */
+    var CW_FLOW_SPEEDUP = 600;
+    var cwFlowGridV = null;
+    /* the field once per frame on a coarse grid; the particles read the grid
+       rather than each blending 28 stations (10,000 particles x 28 sorts a
+       frame was the cost) */
+    function cwFlowGridBuild(W, H, lonOf, latOf, t){
+      var gw = 48, gh = Math.max(8, Math.round(48 * H / W)), u = new Float32Array(gw * gh), vv = new Float32Array(gw * gh);
+      for (var j = 0; j < gh; j++) for (var i = 0; i < gw; i++){
+        var x = (i + 0.5) / gw * W, y = (j + 0.5) / gh * H;
+        var vec = cwFlowVec(lonOf(x), latOf(y), t);
+        if (vec){ u[j * gw + i] = vec[0]; vv[j * gw + i] = vec[1]; }
+      }
+      return { gw: gw, gh: gh, u: u, v: vv, W: W, H: H };
+    }
+    function cwFlowGridAt(x, y){
+      var G = cwFlowGridV; if (!G) return null;
+      var fx = Math.min(G.gw - 1.001, Math.max(0, x / G.W * G.gw - 0.5)), fy = Math.min(G.gh - 1.001, Math.max(0, y / G.H * G.gh - 0.5));
+      var i0 = Math.floor(fx), j0 = Math.floor(fy), tx = fx - i0, ty = fy - j0;
+      var k00 = j0 * G.gw + i0, k10 = k00 + 1, k01 = k00 + G.gw, k11 = k01 + 1;
+      return [G.u[k00] * (1 - tx) * (1 - ty) + G.u[k10] * tx * (1 - ty) + G.u[k01] * (1 - tx) * ty + G.u[k11] * tx * ty,
+              G.v[k00] * (1 - tx) * (1 - ty) + G.v[k10] * tx * (1 - ty) + G.v[k01] * (1 - tx) * ty + G.v[k11] * tx * ty];
+    }
     function cwCurLoad(){
       if (cwCur.req || (cwCur.stations && Date.now() - cwCur.at < 6 * 3600000)) return;
       cwCur.req = 1;
@@ -59769,9 +59794,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (tModel - now > 12 * 3600000) { cwFlowClock = now; tModel = now; }    /* twelve hours out, start again at now */
       var dt = 1 / 30;                                                       /* seconds per frame, nominal */
       var pxPerKnot = 0.5144 * CW_FLOW_SPEEDUP * dt / mPerPx;                /* canvas px a knot moves per frame */
+      if (!cwFlowGridV || cwFlowGridV.W !== W || cwFlowGridV.H !== H || (now - (cwFlowGridV.at || 0)) > 500){
+        cwFlowGridV = cwFlowGridBuild(W, H, lonOf, latOf, tModel); cwFlowGridV.at = now;
+      }
       /* fade the trails */
       g.globalCompositeOperation = 'destination-out';
-      g.fillStyle = 'rgba(0,0,0,.09)'; g.fillRect(0, 0, W, H);
+      g.fillStyle = 'rgba(0,0,0,.05)'; g.fillRect(0, 0, W, H);
       g.globalCompositeOperation = 'source-over';
       /* tracers on the water */
       var want = Math.round(W * H / 900);
@@ -59782,7 +59810,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       }
       g.lineCap = 'round'; g.lineWidth = 1.1 * dpr;
       for (var i = cwFlowP.length - 1; i >= 0; i--){
-        var pt = cwFlowP[i], vec = cwFlowVec(lonOf(pt.x), latOf(pt.y), tModel);
+        var pt = cwFlowP[i], vec = cwFlowGridAt(pt.x, pt.y);
         if (!vec || --pt.a <= 0 || !cwFlowWater(pt.x, pt.y, cvs)){ cwFlowP.splice(i, 1); continue; }
         var nx = pt.x + vec[0] * pxPerKnot, ny = pt.y - vec[1] * pxPerKnot;
         var sp = Math.hypot(vec[0], vec[1]);
@@ -59810,7 +59838,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         q.s++;
         if (q.s > 12 && !cwFlowWater(q.x, q.y, cvs)){ cwFlowR.splice(j, 1); continue; }
         if (--q.a <= 0){ cwFlowR.splice(j, 1); continue; }
-        var vq = cwFlowVec(lonOf(q.x), latOf(q.y), tModel) || [0, 0];
+        var vq = cwFlowGridAt(q.x, q.y) || [0, 0];
         var jit = 0.45 * dpr;
         var qx = q.x + vq[0] * pxPerKnot + (Math.random() - 0.5) * jit, qy = q.y - vq[1] * pxPerKnot + (Math.random() - 0.5) * jit;
         var life = q.a / 1500;
@@ -59838,7 +59866,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       });
       if (!parts.length) return;
       el.innerHTML = '<div style="font:800 9px system-ui,sans-serif;letter-spacing:.09em;color:#1b2340;">THE TIDE NOW \u00b7 ' + parts.join(' \u00b7 ') + '</div>'
-        + '<div style="font:600 8.5px system-ui,sans-serif;color:rgba(27,35,64,.75);margin-top:2px;">NOAA CURRENT PREDICTIONS AT 28 HARBOR STATIONS, BLENDED BETWEEN THEM \u00b7 STREAKS RIDE THE TIDE, LIME IS THE OUTFALLS\u2019 RUNOFF \u00b7 ONE SECOND IS ONE MINUTE OF TIDE</div>';
+        + '<div style="font:600 8.5px system-ui,sans-serif;color:rgba(27,35,64,.75);margin-top:2px;">NOAA CURRENT PREDICTIONS AT 28 HARBOR STATIONS, BLENDED BETWEEN THEM \u00b7 STREAKS RIDE THE TIDE, LIME IS THE OUTFALLS\u2019 RUNOFF \u00b7 ONE SECOND IS TEN MINUTES OF TIDE</div>';
       el.style.display = '';
     }
     function cwDrawGhost(){
