@@ -204,12 +204,12 @@ def on_cdn(path):
 
 
 def season_frames(year, keys, vals, shade):
-    """Weekly frames for a past season, Sep 15 - Nov 10, rendered only for
+    """Weekly frames for a past season, Sep 15 - Dec 1, rendered only for
     dates not already on the CDN. Returns the list of dates that exist (on
     the CDN or freshly written under OUT/season/<year>/)."""
     dates, todo = [], []
     d = datetime.date(year, 9, 15)
-    while d <= datetime.date(year, 11, 10):
+    while d <= datetime.date(year, *SEASON_END):
         if on_cdn('season/%d/%s.webp' % (year, d.isoformat())) and on_cdn('season/%d/%s_bands.webp' % (year, d.isoformat())) \
                 and on_cdn('season/%d/%s_blobs.webp' % (year, d.isoformat())):
             dates.append(d.isoformat())
@@ -332,7 +332,7 @@ def county_last_year(year, keys, vals, labels, ids, prev):
     base = np.nanmax(np.stack(bimgs), 0)
     dates, by = [], {fips: [] for fips in ids}
     d = datetime.date(year, 9, 15)
-    while d <= datetime.date(year, 11, 10):
+    while d <= datetime.date(year, *SEASON_END):
         v = ndvi(d, keys, vals)
         v2 = ndvi(d - datetime.timedelta(days=6), keys, vals)
         if v is not None:
@@ -636,7 +636,7 @@ def previous():
 
 
 def last_year_curve(year, keys, vals, prev):
-    """Last season's progress per region, weekly Sep 15 - Nov 10, from the same
+    """Last season's progress per region, weekly Sep 15 - Dec 1, from the same
     satellite record -- so each sign can say when its peak came last year.
     Fourteen fetches, done once and carried forward in the JSON."""
     ly = (prev or {}).get('last_year')
@@ -650,7 +650,7 @@ def last_year_curve(year, keys, vals, prev):
     base = np.nanmax(np.stack(bimgs), 0)
     dates, per = [], {n: [] for n, *_ in REGIONS}
     d = datetime.date(year, 9, 15)
-    while d <= datetime.date(year, 11, 10):
+    while d <= datetime.date(year, *SEASON_END):
         v = ndvi(d, keys, vals)
         v2 = ndvi(d - datetime.timedelta(days=6), keys, vals)
         if v is not None:
@@ -727,6 +727,14 @@ def pace(today, pct, ly, name):
         return None
     return None
 
+
+# THE SEASON WINDOW (user 2026-09-13: "it ends nov 10th, is that accurate?").
+# It was not: the coast, the city and Long Island peak in early-to-mid
+# November and hold colour past Thanksgiving, and a curve cut at Nov 10 made
+# "PEAK LAST YEAR NOV 10" the window's edge rather than a measurement for
+# the Berkshires and the city. Weekly from Sep 15 through Dec 1, when the
+# leaves are down everywhere and the last frame reads bare.
+SEASON_END = (12, 1)
 
 SPOTS = [
     ('Bear Mountain', 'NY', 'Hudson Valley', 'Metro-North to Peekskill, then a taxi'),
