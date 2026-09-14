@@ -196,6 +196,11 @@ CDN = 'https://cdn.bluishvoid.com/foliage/'
 
 
 def on_cdn(path):
+    # FOLIAGE_FORCE=1 re-renders everything: the edge cache answers HEAD with
+    # a copy for a day after the bucket object is deleted (2026-09-13, nine
+    # of twelve season frames were skipped and the loop went dark on them)
+    if os.environ.get('FOLIAGE_FORCE'):
+        return False
     try:
         req = urllib.request.Request(CDN + path, method='HEAD', headers={'User-Agent': 'bluishvoid.com foliage bake'})
         return urllib.request.urlopen(req, timeout=20).status == 200
