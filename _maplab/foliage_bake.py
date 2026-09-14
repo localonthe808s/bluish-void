@@ -599,21 +599,43 @@ def band(pct, peak_level=None):
 
 
 def peak_of(dates, arr):
-    """(date, level) of the fastest weekly decline in greenness on a lightly
-    smoothed curve -- peak colour -- or (None, None)."""
+    """(date, level) of PEAK COLOUR on last year's weekly curve, or (None, None).
+
+    Not the fastest decline any more: with the window run out to Dec 1 the
+    fastest week is the leaf DROP in mid-November (the index jumps 25 points
+    in the Adirondacks the week of Nov 17), which put every northern peak
+    three to six weeks late. Measured against the 2025 peaks people reported
+    (user 2026-09-13), the reading that lands within a week everywhere is:
+    the first week the index rises PEAK_RISE points in a week, or the day
+    40% of the season's whole loss is in (PEAK_FRAC, interpolated to the
+    day), whichever comes first. The level is the curve's value that day,
+    which is what the relative bands read against."""
     pts = [(dt, x) for dt, x in zip(dates, arr) if x is not None]
     if len(pts) < 4:
         return None, None
+    ds = [datetime.date.fromisoformat(d) for d, _ in pts]
     xs = [x for _, x in pts]
-    sm = [xs[0]] + [(xs[i - 1] + xs[i] + xs[i + 1]) / 3.0 for i in range(1, len(xs) - 1)] + [xs[-1]]
-    best, bi = None, None
-    for i in range(1, len(sm)):
-        d = sm[i] - sm[i - 1]
-        if best is None or d > best:
-            best, bi = d, i
-    if bi is None:
+    total = xs[-1] - xs[0]
+    if total <= 3:
         return None, None
-    return pts[bi][0], int(round(sm[bi]))
+    cand = []
+    for i in range(1, len(xs)):
+        if xs[i] - xs[i - 1] >= PEAK_RISE:
+            cand.append((ds[i], xs[i])); break
+    for i in range(1, len(xs)):
+        if xs[i] - xs[0] >= PEAK_FRAC * total:
+            a, b = xs[i - 1] - xs[0], xs[i] - xs[0]
+            f = (PEAK_FRAC * total - a) / (b - a) if b > a else 0.0
+            day = ds[i - 1] + datetime.timedelta(days=round(7 * f))
+            cand.append((day, xs[i - 1] + (xs[i] - xs[i - 1]) * f)); break
+    if not cand:
+        return None, None
+    day, lvl = min(cand)
+    return day.isoformat(), int(round(lvl))
+
+
+PEAK_RISE = 8.0     # points of index in a week: the colour phase's steep week
+PEAK_FRAC = 0.40    # share of the season's whole loss
 
 
 def region_means(p):
