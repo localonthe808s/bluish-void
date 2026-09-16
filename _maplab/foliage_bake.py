@@ -1041,6 +1041,60 @@ def park_ndvi(coll, scene_id):
     return np.where(ok, nd, np.nan), float(ok.mean()), water
 
 
+PARK_OSM = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'foliage_park_osm.json')
+
+def park_shapes():
+    """the park's water, pools and playing fields as lon/lat rings, from the
+    committed OpenStreetMap extract (natural=water, leisure=swimming_pool,
+    leisure=pitch in PARK_BOX; relations stitched to outer rings). Fetched
+    once through Overpass if the file is missing. The scene classification
+    cannot tell the Gottesman pool (NDVI .05, class 'bare') from the Met's
+    roof (.01, 'bare'), and calls half the Meer 'vegetation'; the map can."""
+    if os.path.exists(PARK_OSM):
+        return json.load(open(PARK_OSM))
+    W, S, E, N = PARK_BOX
+    bb = '%s,%s,%s,%s' % (S, W, N, E)
+    q = ('[out:json][timeout:90];(way["natural"="water"](%s);relation["natural"="water"](%s);'
+         'way["leisure"="swimming_pool"](%s);way["leisure"="pitch"](%s););out geom;') % (bb, bb, bb, bb)
+    req = urllib.request.Request('https://overpass-api.de/api/interpreter', data=urllib.parse.urlencode({'data': q}).encode(),
+                                 headers={'User-Agent': 'bluishvoid.com foliage bake'})
+    j = json.loads(urllib.request.urlopen(req, timeout=120).read())
+    def ring_of(g): return [[round(pt['lon'], 6), round(pt['lat'], 6)] for pt in g]
+    def stitch(ways):
+        ways = [list(w) for w in ways if len(w) > 1]; rings = []
+        while ways:
+            cur = ways.pop(0)
+            while cur[0] != cur[-1]:
+                for i, w in enumerate(ways):
+                    if w[0] == cur[-1]: cur += w[1:]; ways.pop(i); break
+                    if w[-1] == cur[-1]: cur += w[::-1][1:]; ways.pop(i); break
+                else: break
+            rings.append(cur)
+        return rings
+    out = {'water': [], 'pools': [], 'fields': [], 'source': 'OpenStreetMap contributors, ODbL'}
+    for el in j['elements']:
+        t = el.get('tags', {})
+        rings = [ring_of(el['geometry'])] if el['type'] == 'way' else \
+            stitch([ring_of(m['geometry']) for m in el.get('members', []) if m.get('role') == 'outer' and 'geometry' in m])
+        rings = [r for r in rings if len(r) >= 4]
+        if t.get('natural') == 'water': out['water'] += rings
+        elif t.get('leisure') == 'swimming_pool': out['pools'] += rings
+        elif t.get('leisure') == 'pitch': out['fields'] += rings
+    json.dump(out, open(PARK_OSM, 'w'), separators=(',', ':'))
+    return out
+
+
+def park_rings(rings):
+    """a PARK_W x PARK_H boolean of the given lon/lat rings"""
+    W0, S0, E0, N0 = PARK_BOX
+    im = Image.new('L', (PARK_W, PARK_H), 0)
+    dr = ImageDraw.Draw(im)
+    for r in rings:
+        pts = [((lon - W0) / (E0 - W0) * PARK_W, (N0 - lat) / (N0 - S0) * PARK_H) for lon, lat in r]
+        if len(pts) >= 3: dr.polygon(pts, fill=255)
+    return np.array(im) > 0
+
+
 def park(prev):
     today = datetime.date.today()
     scenes = park_scenes((today.replace(month=8, day=1) if today.month >= 8 else datetime.date(today.year - 1, 8, 1)).isoformat())
@@ -1059,6 +1113,13 @@ def park(prev):
         raise RuntimeError('no clear August scene over the park')
     base = np.nanmedian(np.stack(base_imgs), 0)     # the median of August, not its maximum: one bright outlier cannot set it
     water = np.mean(np.stack(water_votes), 0) >= 0.5   # water where most August looks called it water
+    fields = np.zeros((PARK_H, PARK_W), bool)
+    try:
+        shp = park_shapes()
+        water = park_rings(shp['water'] + shp['pools'])   # the map knows the pool; the classifier does not
+        fields = park_rings(shp['fields'])
+    except Exception as e:
+        print('park: OSM shapes unavailable (%s), water from the scene classification' % e)
     # TODAY: only a MOSTLY CLEAR look counts (PARK_CLEAR of the box clear by
     # the scene's own mask). Thin cloud and haze pass the masks at the edges
     # and depress NDVI, and a composite stitched from such scraps read the
@@ -1093,11 +1154,14 @@ def park(prev):
     veg = canopy & np.isfinite(cur)
     coverage = float(veg.sum() / canopy.sum()) if canopy.any() else 0.0
     p = np.where(veg, np.clip(p, 0, 1), np.nan)
-    # inside the park only: canopy on the ramp; what is not canopy splits in
-    # two (user 2026-09-15: "all of these areas look like water but some of
-    # those are baseball fields"): WATER (the reservoir, the Lake, the Meer)
-    # a deep blue-black, BARE GROUND (the infields, the Met's roof, plazas,
-    # paths) a dry earth tone; the city outside cut away
+    # inside the park only: canopy on the ramp; what is not canopy splits
+    # (user 2026-09-15: "these are baseball fields, they shouldnt be the same
+    # color as water ... make the fields green, keep water blue and the pool
+    # blue"): WATER (the reservoir, the Lake, the Meer, the Gottesman pool,
+    # by the map) blue; the FIELDS (the map's pitches: the infields' dirt with
+    # them) and every small bare patch (paths, a stage) the ramp's own green,
+    # as ground that is not turning; only a LARGE bare block (the Met's roof,
+    # a construction site) a dry earth tone; the city outside cut away
     W0, S0, E0, N0 = PARK_BOX
     poly = [((lon - W0) / (E0 - W0) * PARK_W, (N0 - lat) / (N0 - S0) * PARK_H) for lon, lat in PARK_POLY]
     mimg = Image.new('L', (PARK_W, PARK_H), 0)
@@ -1106,8 +1170,14 @@ def park(prev):
     p = np.where(inside, p, np.nan)
     img = np.array(ramp(p, 0.96, None).convert('RGBA'))
     fill = inside & ~np.isfinite(p)
-    img[fill & water] = (14, 26, 46, 215)
-    img[fill & ~water] = (118, 104, 82, 215)
+    bare = fill & ~water
+    # a bare patch that survives a 2-px erosion is a block (roof, site); the
+    # infields (~3 px across at 10 m) and the paths do not
+    core = np.array(Image.fromarray((bare * 255).astype(np.uint8)).filter(ImageFilter.MinFilter(5))) > 0
+    block = bare & (np.array(Image.fromarray((core * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(7))) > 0) & ~fields
+    img[bare] = RAMP[0][1] + (245,)
+    img[block] = (118, 104, 82, 215)
+    img[inside & water] = (44, 98, 172, 235)
     img[~inside] = (0, 0, 0, 0)
     # turn the frame so the park's long axis stands upright, then crop to it
     ang = math.degrees(math.atan2(poly[0][0] - poly[3][0], poly[0][1] - poly[3][1]))
