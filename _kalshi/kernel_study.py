@@ -115,7 +115,10 @@ def replay(fc, truth, obh, days, scheme):
                 bias[m] = st.mean(err[p][m] for p in prior[-30:])
         for h in HOURS:
             p = st.mean(max(v for hh, v in fc[d][m].items() if hh >= h) - bias[m] for m in M)
-            run = max((v for hh, v in obh[d].items() if hh <= h), default=None)
+            # the newest ROUTINE report in hand at h:00 is the (h-1):51 one; `hh <= h`
+            # handed the noon replay the 12:51 reading, a 51-minute look-ahead that
+            # doubled the binding share (26% vs 14%) -- fixed 2026-09-15
+            run = max((v for hh, v in obh[d].items() if hh <= h - 1), default=None)
             floor = run + OFFSET if run is not None else -99.0
             pred = max(floor, p)
             out[h].append((d, pred, run, pred - truth[d], floor >= p))
