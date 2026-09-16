@@ -36,8 +36,9 @@ KNOBS = collections.OrderedDict([
     ('bias_k',     [21, 30, 45]),        # K.BIAS_K, days in the rolling bias window
     ('swing_damp', [0.0, 0.05, 0.10]),   # K.SWING_DAMP, how much of a warm-up the models overdo
     ('sd_floor',   [0.25, 0.40]),        # K.SD_FLOOR, the least spread the ladder may claim
+    ('drop_worst', [0, 2]),              # runs left out of the mean by trailing MAE (New York: 2, measured 2026-09-15)
 ])
-CFG_KNOBS = ('skill', 'bias_hl', 'sd_mult')
+CFG_KNOBS = ('skill', 'bias_hl', 'sd_mult', 'drop_worst')
 # THE LISTS GROW ON THEIR OWN (2026-09-07). A knob chosen at the END of its
 # list is a knob whose best value may lie beyond it, so the next week's list
 # for that city gains one more step in that direction, within a sane bound.
@@ -83,7 +84,7 @@ def score(hist, keys):
 
 def defaults_of(cfg):
     return {'skill': bool(cfg.get('skill', True)), 'bias_hl': cfg.get('bias_hl'), 'sd_mult': float(cfg.get('sd_mult', 1.0)),
-            'bias_k': K.BIAS_K, 'swing_damp': K.SWING_DAMP, 'sd_floor': K.SD_FLOOR}
+            'drop_worst': int(cfg.get('drop_worst') or 0), 'bias_k': K.BIAS_K, 'swing_damp': K.SWING_DAMP, 'sd_floor': K.SD_FLOOR}
 
 
 def replay_with(cfg, st):

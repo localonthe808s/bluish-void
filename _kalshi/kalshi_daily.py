@@ -85,10 +85,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # Chicago settles on CLIMDW, which is MIDWAY, not O'Hare -- the two routinely
 # differ by a degree and O'Hare would have been wrong all season.
 def _mkt(key, series, city, station, net, lat, lon, tz, tzl, cli, slug, wfo=None,
-         skill=True, twc_geocode=False, bias_hl=None, sd_mult=1.0):
+         skill=True, twc_geocode=False, bias_hl=None, sd_mult=1.0, drop_worst=0):
     return {'key': key, 'series': series, 'label': city + ' daily high',
             'wfo': wfo, 'skill': skill, 'twc_geocode': twc_geocode, 'bias_hl': bias_hl,
-            'sd_mult': sd_mult,
+            'sd_mult': sd_mult, 'drop_worst': drop_worst,
             'station': station, 'network': net, 'lat': lat, 'lon': lon,
             'field': 'max_temp_f', 'tz': tz, 'tzlabel': tzl,
             'city': city, 'cli': cli,
@@ -104,9 +104,20 @@ MARKETS = [
     # 2 PM. Sixty-seven days is a small court, but the equal mean is also the
     # form the 607-day refit validated, so it is the conservative choice for
     # the one market that matters most. Revisit with the live trail.
+    # DROP THE TWO WORST RUNS (2026-09-15, user: "improve NYC's noon lock").
+    # 536 noon days since 2025-01-01 replayed walk-forward with the
+    # observations cut at the 11:51 report (scratch noon/drop_robust.py):
+    # the equal mean of six hits 59.4% (parity-averaged six-rung ladder),
+    # MAE 0.895, Brier .537; the mean of the four with the lowest trailing
+    # 45-day MAE hits 61.1%, MAE .854, Brier .521 -- better in both halves
+    # (63.8/55.0 -> 65.3/56.9), in 2026 (54.1 -> 55.6) and at 9 AM. Dropping
+    # one (58.4%) or three (58.7%) is worse; windows 30-60 agree; 14 is
+    # weaker. ECMWF 0.25 goes 69% of days, GEM 49%, NBM 43%, ICON 35%; HRRR
+    # and GFS almost never. Inverse-MAE weights do NOT get this (58.7%, and
+    # they lose the second half) -- a hard cut is what works here.
     _mkt('ny_high',  'KXHIGHNY',   'New York',     'NYC', 'NY_ASOS', 40.7789, -73.9692,
          'America/New_York',    'ET', 'CLINYC', 'highest-temperature-in-nyc', 'OKX',
-         skill=False, twc_geocode=True, bias_hl=7),
+         skill=False, twc_geocode=True, bias_hl=7, drop_worst=2),
     _mkt('chi_high', 'KXHIGHCHI',  'Chicago',      'MDW', 'IL_ASOS', 41.786,  -87.752,
          'America/Chicago',     'CT', 'CLIMDW', 'highest-temperature-in-chicago', 'LOT'),
     _mkt('mia_high', 'KXHIGHMIA',  'Miami',        'MIA', 'FL_ASOS', 25.791,  -80.316,
@@ -1577,18 +1588,23 @@ SKILL_MAE_FLOOR = 0.3         # degF; below this a model's weight stops growing
 BIAS_SPAN = 90                # days an EWMA bias looks back
 
 
-def biases_factory(fcm, daily, skill=True, half_life=None):
+DROP_WIN = 45                 # days of bias-corrected MAE that rank the runs for drop_worst
+
+
+def biases_factory(fcm, daily, skill=True, half_life=None, drop_worst=0):
     """-> f(prior_days) giving each model's bias (peak - actual) over them,
     plus its skill weight under '__w__' (see SKILL_POWER above). With
     skill=False every weight is 1 -- the plain mean, which New York keeps.
     With half_life set, the bias is an exponentially weighted mean over the
     last BIAS_SPAN days ending at the last prior day, instead of a flat mean
-    over `prior`."""
+    over `prior`. With drop_worst set, '__mae__' carries each run's flat
+    bias-corrected MAE over the last DROP_WIN days and '__drop__' the count,
+    and point_forecast leaves that many of the worst runs out of the mean."""
     any_fc = fcm[sorted(fcm)[0]] if fcm else {}
     all_keys = sorted(k for k in any_fc if k in daily and len(any_fc[k]) >= 20)
 
     def f(prior):
-        out, w = {}, {}
+        out, w, mae_of = {}, {}, {}
         if half_life and prior:
             last = max(prior)
             span = [k for k in all_keys if k <= last][-BIAS_SPAN:]
@@ -1605,7 +1621,11 @@ def biases_factory(fcm, daily, skill=True, half_life=None):
                 if skill:
                     mae = sum(abs(e) * wt for e, wt in pts) / ws
                     w[m] = 1.0 / max(mae, SKILL_MAE_FLOOR) ** SKILL_POWER
+                # pts is newest first: a flat window of the bias-corrected error
+                mae_of[m] = statistics.mean(abs(e - out[m]) for e, _ in pts[:DROP_WIN])
             out['__w__'] = w
+            out['__mae__'] = mae_of
+            out['__drop__'] = drop_worst
             return out
         for m, fc in fcm.items():
             e = [max(fc[p].values()) - daily[p]
@@ -1614,7 +1634,11 @@ def biases_factory(fcm, daily, skill=True, half_life=None):
             if out[m] is not None and skill:
                 mae = statistics.mean(abs(x) for x in e)
                 w[m] = 1.0 / max(mae, SKILL_MAE_FLOOR) ** SKILL_POWER
+            if out[m] is not None:
+                mae_of[m] = statistics.mean(abs(x - out[m]) for x in e[-DROP_WIN:])
         out['__w__'] = w
+        out['__mae__'] = mae_of
+        out['__drop__'] = drop_worst
         return out
     return f
 
@@ -1647,7 +1671,7 @@ def point_forecast(fcm, biases, key, hour, yday):
     knife-edge: at 0.25, MAE 1.83 -> 1.66, bias +0.78 -> +0.20, brackets
     37/68 -> 39/68, Brier 0.591 -> 0.559.
     """
-    vals, ws = [], []
+    vals, ws, names = [], [], []
     wt = biases.get('__w__') or {}
     for m, fc in fcm.items():
         day = fc.get(key)
@@ -1657,8 +1681,18 @@ def point_forecast(fcm, biases, key, hour, yday):
         if rest:
             vals.append(max(rest) - biases[m])
             ws.append(wt.get(m, 1.0))
+            names.append(m)
     if not vals:
         return None
+    # drop_worst: leave out the runs with the worst trailing MAE, as long as
+    # at least three remain (see the New York entry in MARKETS)
+    drop = int(biases.get('__drop__') or 0)
+    mae_of = biases.get('__mae__') or {}
+    if drop > 0 and len(vals) - drop >= 3 and all(m in mae_of for m in names):
+        worst = set(sorted(names, key=lambda m: mae_of[m])[-drop:])
+        keep = [i for i, m in enumerate(names) if m not in worst]
+        vals = [vals[i] for i in keep]
+        ws = [ws[i] for i in keep]
     # skill-weighted, not equal: see biases_factory
     p = sum(v * w for v, w in zip(vals, ws)) / sum(ws)
     if yday is not None:
@@ -3258,7 +3292,8 @@ def restore_globals(saved):
 
 
 def params_of(cfg):
-    p = {'skill': bool(cfg.get('skill', True)), 'bias_hl': cfg.get('bias_hl'), 'sd_mult': cfg.get('sd_mult', 1.0)}
+    p = {'skill': bool(cfg.get('skill', True)), 'bias_hl': cfg.get('bias_hl'), 'sd_mult': cfg.get('sd_mult', 1.0),
+         'drop_worst': int(cfg.get('drop_worst') or 0)}
     p.update({k: v for k, v in (cfg.get('_globals') or {}).items() if k in TUNABLE_GLOBALS})
     return p
 
@@ -3483,7 +3518,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     if bias is None:
         print('not enough scored history for a bias (%d days)' % nb)
         return 0
-    bias_of = biases_factory(fcm, daily, cfg.get('skill', True), cfg.get('bias_hl'))
+    bias_of = biases_factory(fcm, daily, cfg.get('skill', True), cfg.get('bias_hl'), int(cfg.get('drop_worst') or 0))
     h0_of = lambda k: climate_day_start(
         cfg, datetime.date(*map(int, k.split('-'))))
 
@@ -3506,6 +3541,12 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     prior_days = sorted(k for k in fc if k < tkey and k in daily
                         and len(fc[k]) >= 20)[-BIAS_K:]
     biases = bias_of(prior_days)
+    if int(biases.get('__drop__') or 0) > 0 and biases.get('__mae__'):
+        _rank = sorted(biases['__mae__'], key=biases['__mae__'].get)
+        print('%s drops the %d worst runs by %d-day MAE: %s (kept %s)' % (
+            cfg['key'], int(biases['__drop__']), DROP_WIN,
+            ', '.join('%s %.2f' % (m, biases['__mae__'][m]) for m in _rank[-int(biases['__drop__']):]),
+            ', '.join('%s %.2f' % (m, biases['__mae__'][m]) for m in _rank[:-int(biases['__drop__'])])))
 
     # TODAY'S FLOOR USES THE BEST DATA AVAILABLE, not the same estimate history
     # is stuck with. daily.json carries the station's true running max, which is
@@ -4850,7 +4891,7 @@ def main():
         for cfg in RUN:
             a = (_tuned.get(cfg['key']) or {}).get('active')
             if a and (_tuned.get(cfg['key']) or {}).get('n', 0) >= 45:
-                cfg.update({k: a[k] for k in ('skill', 'bias_hl', 'sd_mult') if k in a})
+                cfg.update({k: a[k] for k in ('skill', 'bias_hl', 'sd_mult', 'drop_worst') if k in a})
                 g = {k: a[k] for k in TUNABLE_GLOBALS if k in a}
                 if g:
                     cfg['_globals'] = g
