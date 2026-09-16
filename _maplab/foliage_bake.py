@@ -1035,7 +1035,10 @@ def park_ndvi(coll, scene_id):
         ok = (qa & 0b11111) == 0
     nd = a[0].astype(np.float32)
     ok = ok & np.isfinite(nd) & (nd >= -1) & (nd <= 1) & ((a[1] > 0) if a.shape[0] > 1 else True)
-    return np.where(ok, nd, np.nan), float(ok.mean())
+    # the scene's own water call, so the inset can tell the reservoir from a
+    # ball field's infield (both fall out of the canopy; they are not the same thing)
+    water = (scl[0] == 6) if coll == 'sentinel-2-l2a' else ((qa >> 7) & 1) == 1
+    return np.where(ok, nd, np.nan), float(ok.mean()), water
 
 
 def park(prev):
@@ -1044,17 +1047,18 @@ def park(prev):
     if not PARK_LANDSAT:
         scenes = [s for s in scenes if s[0] == 'sentinel-2-l2a']
     aug = [s for s in scenes if s[2][5:7] == '08']
-    base_imgs, base_used = [], []
+    base_imgs, base_used, water_votes = [], [], []
     for coll, sid, d in aug:
         try:
-            nd, clear = park_ndvi(coll, sid)
+            nd, clear, wet = park_ndvi(coll, sid)
             if clear >= 0.2:
-                base_imgs.append(nd); base_used.append(d)
+                base_imgs.append(nd); base_used.append(d); water_votes.append(wet)
         except Exception as e:
             print('park: %s failed (%s)' % (sid, e))
     if not base_imgs:
         raise RuntimeError('no clear August scene over the park')
     base = np.nanmedian(np.stack(base_imgs), 0)     # the median of August, not its maximum: one bright outlier cannot set it
+    water = np.mean(np.stack(water_votes), 0) >= 0.5   # water where most August looks called it water
     # TODAY: only a MOSTLY CLEAR look counts (PARK_CLEAR of the box clear by
     # the scene's own mask). Thin cloud and haze pass the masks at the edges
     # and depress NDVI, and a composite stitched from such scraps read the
@@ -1067,7 +1071,7 @@ def park(prev):
         if d < sep1 and looks:
             break
         try:
-            nd, clear = park_ndvi(coll, sid)
+            nd, clear, _ = park_ndvi(coll, sid)
             print('park: %s %s clear %.0f%%' % (d, coll[:8], 100 * clear))
             if clear >= PARK_CLEAR:
                 looks.append((d, coll, nd))
@@ -1089,8 +1093,11 @@ def park(prev):
     veg = canopy & np.isfinite(cur)
     coverage = float(veg.sum() / canopy.sum()) if canopy.any() else 0.0
     p = np.where(veg, np.clip(p, 0, 1), np.nan)
-    # inside the park only: canopy on the ramp, the rest of the park (lawns,
-    # water, paths) a dark fill so the shape reads, the city outside cut away
+    # inside the park only: canopy on the ramp; what is not canopy splits in
+    # two (user 2026-09-15: "all of these areas look like water but some of
+    # those are baseball fields"): WATER (the reservoir, the Lake, the Meer)
+    # a deep blue-black, BARE GROUND (the infields, the Met's roof, plazas,
+    # paths) a dry earth tone; the city outside cut away
     W0, S0, E0, N0 = PARK_BOX
     poly = [((lon - W0) / (E0 - W0) * PARK_W, (N0 - lat) / (N0 - S0) * PARK_H) for lon, lat in PARK_POLY]
     mimg = Image.new('L', (PARK_W, PARK_H), 0)
@@ -1099,7 +1106,8 @@ def park(prev):
     p = np.where(inside, p, np.nan)
     img = np.array(ramp(p, 0.96, None).convert('RGBA'))
     fill = inside & ~np.isfinite(p)
-    img[fill] = (16, 24, 34, 210)
+    img[fill & water] = (14, 26, 46, 215)
+    img[fill & ~water] = (118, 104, 82, 215)
     img[~inside] = (0, 0, 0, 0)
     # turn the frame so the park's long axis stands upright, then crop to it
     ang = math.degrees(math.atan2(poly[0][0] - poly[3][0], poly[0][1] - poly[3][1]))
@@ -1123,6 +1131,7 @@ def park(prev):
     out = {'url': CDN + PARK_FRAME, 'w': out_w, 'h': out_h, 'box': list(PARK_BOX), 'as_of': dates[-1], 'mark': mark,
            'scenes': dates, 'base_scenes': sorted(set(base_used)), 'pct': pct,
            'coverage': round(coverage, 2), 'thin': coverage < 0.6, 'stale': stale, 'canopy_share': round(float(canopy.mean()), 3),
+           'water_share': round(float((inside & water).sum() / max(1, inside.sum())), 3),
            'built': today.isoformat()}
     print('park: %s%% turned as of %s, %.0f%% of the canopy seen (scenes %s; baseline %d August looks)'
           % (pct, out['as_of'], 100 * coverage, ','.join(dates), len(base_used)))
