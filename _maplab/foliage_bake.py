@@ -1055,7 +1055,8 @@ def park_shapes():
     W, S, E, N = PARK_BOX
     bb = '%s,%s,%s,%s' % (S, W, N, E)
     q = ('[out:json][timeout:90];(way["natural"="water"](%s);relation["natural"="water"](%s);'
-         'way["leisure"="swimming_pool"](%s);way["leisure"="pitch"](%s););out geom;') % (bb, bb, bb, bb)
+         'way["leisure"="swimming_pool"](%s);way["leisure"="pitch"](%s);'
+         'way["building"]["name"~"Metropolitan Museum"](%s);relation["building"]["name"~"Metropolitan Museum"](%s););out geom;') % (bb, bb, bb, bb, bb, bb)
     req = urllib.request.Request('https://overpass-api.de/api/interpreter', data=urllib.parse.urlencode({'data': q}).encode(),
                                  headers={'User-Agent': 'bluishvoid.com foliage bake'})
     j = json.loads(urllib.request.urlopen(req, timeout=120).read())
@@ -1071,7 +1072,7 @@ def park_shapes():
                 else: break
             rings.append(cur)
         return rings
-    out = {'water': [], 'pools': [], 'fields': [], 'source': 'OpenStreetMap contributors, ODbL'}
+    out = {'water': [], 'pools': [], 'fields': [], 'blocks': [], 'source': 'OpenStreetMap contributors, ODbL'}
     for el in j['elements']:
         t = el.get('tags', {})
         rings = [ring_of(el['geometry'])] if el['type'] == 'way' else \
@@ -1080,6 +1081,7 @@ def park_shapes():
         if t.get('natural') == 'water': out['water'] += rings
         elif t.get('leisure') == 'swimming_pool': out['pools'] += rings
         elif t.get('leisure') == 'pitch': out['fields'] += rings
+        elif t.get('building'): out['blocks'] += rings
     json.dump(out, open(PARK_OSM, 'w'), separators=(',', ':'))
     return out
 
@@ -1113,11 +1115,12 @@ def park(prev):
         raise RuntimeError('no clear August scene over the park')
     base = np.nanmedian(np.stack(base_imgs), 0)     # the median of August, not its maximum: one bright outlier cannot set it
     water = np.mean(np.stack(water_votes), 0) >= 0.5   # water where most August looks called it water
-    fields = np.zeros((PARK_H, PARK_W), bool)
+    fields = blocks = np.zeros((PARK_H, PARK_W), bool)
     try:
         shp = park_shapes()
         water = park_rings(shp['water'] + shp['pools'])   # the map knows the pool; the classifier does not
         fields = park_rings(shp['fields'])
+        blocks = park_rings(shp.get('blocks', []))         # the Met alone (user: "remove the grey blobs ... besides the MET")
     except Exception as e:
         print('park: OSM shapes unavailable (%s), water from the scene classification' % e)
     # TODAY: only a MOSTLY CLEAR look counts (PARK_CLEAR of the box clear by
@@ -1158,10 +1161,10 @@ def park(prev):
     # (user 2026-09-15: "these are baseball fields, they shouldnt be the same
     # color as water ... make the fields green, keep water blue and the pool
     # blue"): WATER (the reservoir, the Lake, the Meer, the Gottesman pool,
-    # by the map) blue; the FIELDS (the map's pitches: the infields' dirt with
-    # them) and every small bare patch (paths, a stage) the ramp's own green,
-    # as ground that is not turning; only a LARGE bare block (the Met's roof,
-    # a construction site) a dry earth tone; the city outside cut away
+    # by the map) blue; every other bare pixel (the infields' dirt, paths, a
+    # stage, a site) the ramp's own green, as ground that is not turning; the
+    # Met's roof alone (the map's building ring) a dry earth tone (user: "remove
+    # the grey blobs they dont make sense besides the MET"); the city outside cut away
     W0, S0, E0, N0 = PARK_BOX
     poly = [((lon - W0) / (E0 - W0) * PARK_W, (N0 - lat) / (N0 - S0) * PARK_H) for lon, lat in PARK_POLY]
     mimg = Image.new('L', (PARK_W, PARK_H), 0)
@@ -1170,13 +1173,8 @@ def park(prev):
     p = np.where(inside, p, np.nan)
     img = np.array(ramp(p, 0.96, None).convert('RGBA'))
     fill = inside & ~np.isfinite(p)
-    bare = fill & ~water
-    # a bare patch that survives a 2-px erosion is a block (roof, site); the
-    # infields (~3 px across at 10 m) and the paths do not
-    core = np.array(Image.fromarray((bare * 255).astype(np.uint8)).filter(ImageFilter.MinFilter(5))) > 0
-    block = bare & (np.array(Image.fromarray((core * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(7))) > 0) & ~fields
-    img[bare] = RAMP[0][1] + (245,)
-    img[block] = (118, 104, 82, 215)
+    img[fill & ~water] = RAMP[0][1] + (245,)
+    img[inside & blocks] = (118, 104, 82, 215)
     img[inside & water] = (44, 98, 172, 235)
     img[~inside] = (0, 0, 0, 0)
     # turn the frame so the park's long axis stands upright, then crop to it
