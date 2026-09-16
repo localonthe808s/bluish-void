@@ -1175,7 +1175,7 @@ def park(prev):
     fill = inside & ~np.isfinite(p)
     img[fill & ~water] = RAMP[0][1] + (245,)
     img[inside & blocks] = (118, 104, 82, 215)
-    img[inside & water] = (44, 98, 172, 235)
+    img[inside & water] = (16, 24, 34, 210)     # the original deep fill: the user chose it over blue (2026-09-15)
     img[~inside] = (0, 0, 0, 0)
     # turn the frame so the park's long axis stands upright, then crop to it
     ang = math.degrees(math.atan2(poly[0][0] - poly[3][0], poly[0][1] - poly[3][1]))
