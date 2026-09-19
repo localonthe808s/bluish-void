@@ -13,9 +13,22 @@ highs bake has trusted for months -- its consensus, per-model bias, regime
 spread, floor offset and bracket arithmetic run unchanged on the negated
 numbers. What does NOT carry over is set here explicitly: the warm-up damping
 is off (damping a forecast cool-down is not a measured claim), the floor
-offset is measured on this station's own hourly-minimum gap, and none of the
-high-shaped extras (six-hour group, TWC max7, 5-minute sensors, the afternoon
-table) are used. They can be added once this record has spoken.
+offset is measured on this station's own hourly-minimum gap, and the TWC max7,
+the 5-minute sensors and the afternoon table are not used.
+
+THE EXACT CEILING (2026-09-18). The hourly stream is a sample, and a minimum
+can fall between two reports: Las Vegas 2026-09-18 read 78.98 at 4:56 AM and
+the station's own six-hour minimum group said 24.4 C = 75.9, the climate
+report MINIMUM 76 at 5:31 AM. The bake held 78, put 59% on "77 or above" --
+a rung that was already impossible -- against a market at 92% on 75-76. So
+the ASOS 2sTTT groups and today's climate-report MINIMUM line are read as an
+exact ceiling on the low, the mirror of the highs' six-hour floor.
+
+THE CLIMATE DAY ENDS AT 1 AM ON THE DAYLIGHT CLOCK. The report's day is
+midnight to midnight STANDARD time, so under daylight time the 00:xx hour
+belongs to the day before -- and a falling evening often sets the low there.
+That hour is carried as hour 24 of its climate day in the observations and
+the forecasts alike, and the bake stays on yesterday's market until it ends.
 
 TWO LOCKS A DAY, because the low's information arrives at the other end of the
 clock. The EVE lock is written the evening before (20:00 local, tomorrow's
@@ -33,6 +46,7 @@ import io
 import json
 import math
 import os
+import re
 import statistics
 import sys
 import urllib.parse
@@ -104,6 +118,99 @@ def obs_hourly_min(cfg, start, end, sink=None):
     return out
 
 
+def fold_midnight(days, h0_of):
+    """{'YYYY-MM-DD': {hour: v}} with each daylight-time day's closing hour
+    attached as hour 24. The climate day is midnight to midnight STANDARD time,
+    so on the daylight clock it runs 1 AM to 12:59 AM and the 00:xx hour of D+1
+    is the last hour of D (K.climate_day_start already drops it from D+1). A
+    high almost never lands there; a low on a falling evening often does."""
+    for k in sorted(days):
+        if h0_of(k) != 1:
+            continue
+        nxt = (datetime.date(*map(int, k.split('-'))) + datetime.timedelta(days=1)).isoformat()
+        v = (days.get(nxt) or {}).get(0)
+        if v is not None:
+            days[k][24] = v
+    return days
+
+
+def metar_six_min(cfg, day):
+    """(degF, [start hour, end hour]) -- the day's lowest ASOS six-hour minimum
+    (the 2sTTT remark group), or (None, None). The mirror of K.metar_six_max,
+    with its window discipline: a group counts only when its whole six hours
+    sit inside the climate day, because a window that straddles the day's start
+    can carry the previous evening's minimum, which is no ceiling on today's."""
+    from zoneinfo import ZoneInfo
+    icao = cfg.get('icao') or ('K' + cfg['station'])
+    try:
+        j = K.get_json('https://aviationweather.gov/api/data/metar?ids=%s&format=json&hours=36'
+                       % icao, timeout=45)
+    except Exception as e:
+        print('six-hourly min: %s unavailable (%s)' % (icao, e))
+        return None, None
+    z = ZoneInfo(cfg.get('tz', 'America/New_York'))
+    h0 = K.climate_day_start(cfg, day)
+    lo = datetime.datetime(day.year, day.month, day.day, h0, tzinfo=z)
+    hi = lo + datetime.timedelta(days=1)
+    best, win = None, None
+    for m in (j or []):
+        raw = str(m.get('rawOb') or '')
+        # remarks only: a five-digit group starting with 2 means nothing else there
+        g = re.search(r'\b2([01])(\d{3})\b', raw.split(' RMK ', 1)[1]) if ' RMK ' in raw else None
+        ts = m.get('obsTime')
+        if not g or not isinstance(ts, (int, float)):
+            continue
+        rep = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+        # the group is stamped on the :51 report; its window ends at the hour
+        end = rep.replace(minute=0, second=0, microsecond=0) + (datetime.timedelta(hours=1)
+                                                                if rep.minute > 30 else datetime.timedelta(0))
+        st = end - datetime.timedelta(hours=6)
+        if not (st.astimezone(z) >= lo and end.astimezone(z) <= hi):
+            continue
+        c = (int(g.group(2)) / 10.0) * (-1 if g.group(1) == '1' else 1)
+        f = round(c * 9.0 / 5.0 + 32.0, 2)
+        if best is None or f < best:
+            best, win = f, [st.astimezone(z).hour, end.astimezone(z).hour]
+    return best, win
+
+
+def cli_min_today(cfg, day):
+    """(degF, 'h:mmAM') -- the lowest MINIMUM any climate report has printed for
+    `day`, or (None, None). A preliminary is enough: whatever the rest of the
+    day does, the low cannot finish above a minimum already reported. Same
+    product and fast channel as the highs' K.cli_fast; "MM" is missing and a
+    record low is flagged on the number ("53R"), as there."""
+    pil = cfg.get('cli')
+    if not pil:
+        return None, None
+    try:
+        raw = K.get('https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py'
+                    '?pil=%s&limit=6&fmt=text' % pil, timeout=30).decode('utf-8', 'replace')
+    except Exception as e:
+        print('cli min: %s unavailable (%s)' % (pil, e))
+        return None, None
+    best, at = None, None
+    for part in re.split(r'(?m)^(?=CDUS\d+ K[A-Z]{3} \d{6}\s*$)', raw):
+        d = re.search(r'SUMMARY FOR\s+(\w+)\s+(\d+)\s+(\d{4})', part)
+        seg = part.split('TEMPERATURE', 1)
+        if not d or len(seg) < 2:
+            continue
+        try:
+            pday = datetime.datetime.strptime('%s %s %s' % (d.group(1)[:3], d.group(2), d.group(3)), '%b %d %Y').date()
+        except ValueError:
+            continue
+        m = re.search(r'MINIMUM\s+(MM|-?\d+)[A-Z*]?\s+(\d{1,2}:?\d{2}\s*(?:AM|PM))?', seg[1])
+        if pday != day or not m or m.group(1) == 'MM':
+            continue
+        v = float(m.group(1))
+        if best is None or v < best:
+            t = (m.group(2) or '').replace(' ', '')
+            if t and ':' not in t:                  # "531AM" -> "5:31AM"
+                t = t[:-4].lstrip('0') + ':' + t[-4:-2] + t[-2:]
+            best, at = v, K._cli_local_time(t or None, day.isoformat(), cfg.get('tz', 'America/New_York'))
+    return best, at
+
+
 # ----------------------------------------------------------- the model ----
 def gap_table(obh_raw, daily_raw, h0_of, hour, before=None, min_n=40):
     """THE SETTLED LOW AGAINST THE RUNNING MINIMUM AT `hour` (positive space):
@@ -134,24 +241,49 @@ def gap_table(obh_raw, daily_raw, h0_of, hour, before=None, min_n=40):
     return {g: c / float(n) for g, c in cnt.items()}, n
 
 
-def empirical_ps(rows_neg, run_neg, table):
+def empirical_ps(rows_neg, run_neg, table, cap=None):
     """Bracket probabilities from the gap table: the settled low is the running
-    minimum plus k, with the table's weight on each k."""
+    minimum plus k, with the table's weight on each k.
+
+    ROUNDED, because the table is (2026-09-18). gap_table() measures
+    k = round(settled - running min) against a settled WHOLE degree, so the
+    outcome it describes is round(run + k). Comparing the raw run + k against
+    the integer bounds dropped every outcome that fell between two brackets:
+    Las Vegas 2026-09-17 ran 75.92, and k = 0 (53% of days) landed at 75.92 --
+    above "74 to 75", below "76 to 77", in neither -- so the whole table
+    renormalised onto k = -1 and the lock said 96% on 74-75. It settled 76.
+    Same shape the day before (78.98, said 96% on 77-78, settled 79). Any
+    reading above a bracket's top edge lost its k = 0 mass this way.
+
+    `cap`, when given, is an exact ceiling (positive degF): outcomes above its
+    whole degree are impossible and carry no weight."""
     run = -run_neg
+    top = math.floor(cap + 0.5) if cap is not None else None
     ps = []
     for r in rows_neg:
         lo = -r['hi'] if r['hi'] is not None else None      # back to positive bounds
         hi = -r['lo'] if r['lo'] is not None else None
-        ps.append(sum(w for g, w in table.items()
-                      if (lo is None or run + g >= lo) and (hi is None or run + g <= hi)))
+        tot = 0.0
+        for g, w in table.items():
+            v = math.floor(run + g + 0.5)
+            if top is not None and v > top:
+                continue
+            if (lo is None or v >= lo) and (hi is None or v <= hi):
+                tot += w
+        ps.append(tot)
+    if not sum(ps):
+        return None
     s = sum(ps) or 1.0
     return [p / s for p in ps]
 
 
-def snapshot(fcm, bias_of, daily, obh, h0_of, k, hour, rows_neg, floor_on=True, gaps=None):
+def snapshot(fcm, bias_of, daily, obh, h0_of, k, hour, rows_neg, floor_on=True, gaps=None, exact=None):
     """One decision in negated space: (pred, sd, floor, pf, binding, ps) or None.
     `gaps` = (obh_raw, daily_raw) enables the empirical gap distribution when
-    the floor binds."""
+    the floor binds. `exact` is the negated exact ceiling (six-hour group or
+    climate report), today only -- handled as the highs handle `live`: it
+    joins the floor with no offset, and when it IS the floor the spread is the
+    exact-figure one and the hourly gap table has nothing left to say."""
     fc = fcm.get(K.MODELS[0]) or list(fcm.values())[0]
     prior = sorted(x for x in fc if x < k and x in daily and len(fc[x]) >= 20)[-K.BIAS_K:]
     if len(prior) < K.BIAS_MIN:
@@ -159,7 +291,9 @@ def snapshot(fcm, bias_of, daily, obh, h0_of, k, hour, rows_neg, floor_on=True, 
     biases = bias_of(prior)
     yk = (datetime.date(*map(int, k.split('-'))) - datetime.timedelta(days=1)).isoformat()
     r = K.running_max(obh, k, hour, h0_of(k)) if floor_on else None
-    fl = (r + K.HOURLY_PEAK_OFFSET) if r is not None else None
+    live = exact if floor_on else None
+    cf = [x for x in ((r + K.HOURLY_PEAK_OFFSET) if r is not None else None, live) if x is not None]
+    fl = max(cf) if cf else None
     pf = K.point_forecast(fcm, biases, k, hour, daily.get(yk))
     cand = [x for x in (fl, pf) if x is not None]
     if not cand:
@@ -169,16 +303,19 @@ def snapshot(fcm, bias_of, daily, obh, h0_of, k, hour, rows_neg, floor_on=True, 
     over = bool(day) and not [h for h in day if h >= hour]
     bind = fl is not None and ((pf is not None and fl >= pf) or over)
     sd, _ = K.spread(K.residuals(fcm, bias_of, daily, obh, hour, k, h0_of), hour, bind)
+    is_exact = bind and live is not None and fl <= live + 1e-9
     if bind:
-        sd = min(sd, K.OFFSET_SD)
+        sd = min(sd, max(K.EXACT_FLOOR_SD_MIN, math.sqrt(max(sd * sd - K.OFFSET_SD * K.OFFSET_SD, 0.0)))
+                 if is_exact else K.OFFSET_SD)
     ps = K.distribution(rows_neg, pred, sd, fl)
     emp = None
-    if bind and gaps and r is not None:
-        t = gap_table(gaps[0], gaps[1], h0_of, hour, before=k)
-        if t:
-            ps = empirical_ps(rows_neg, r, t[0])
+    if bind and gaps and r is not None and not is_exact:
+        t = gap_table(gaps[0], gaps[1], h0_of, min(hour, 23), before=k)
+        e = empirical_ps(rows_neg, r, t[0], cap=(-live if live is not None else None)) if t else None
+        if e:
+            ps = e
             emp = {'n': t[1], 'table': {str(g): round(w, 3) for g, w in sorted(t[0].items())}}
-    return {'pred': pred, 'sd': sd, 'fl': fl, 'run': r, 'pf': pf, 'bind': bind, 'over': over,
+    return {'pred': pred, 'sd': sd, 'fl': fl, 'run': r, 'pf': pf, 'bind': bind, 'over': over, 'exact': is_exact,
             'ps': ps, 'emp': emp, 'biases': {m: biases.get(m) for m in fcm}}
 
 
@@ -271,6 +408,11 @@ def calibration(rows):
 def run_market(cfg, dry_dir=None):
     now = K.local_now(cfg)
     today = now.date()
+    hour = now.hour
+    # the 00:xx hour on the daylight clock is still yesterday's climate day, and
+    # yesterday's market is still trading: stay on it, as its hour 24
+    if hour < K.climate_day_start(cfg, today - datetime.timedelta(days=1)):
+        today, hour = today - datetime.timedelta(days=1), hour + 24
     tkey = today.isoformat()
     out_path = os.path.join(HERE, '..', cfg['out'])
     prev = K.load_log(out_path) if os.path.exists(out_path) else {'history': []}
@@ -280,17 +422,21 @@ def run_market(cfg, dry_dir=None):
     fcm_raw = {m: v for m, v in K.forecast_runs(cfg, SPAN + 40, K.models_for(cfg)).items() if v}
     if not fcm_raw:
         raise RuntimeError('no forecast')
+    h0_of = lambda k: K.climate_day_start(cfg, datetime.date(*map(int, k.split('-'))))   # noqa: E731
+    for m in fcm_raw:
+        fold_midnight(fcm_raw[m], h0_of)
     fcm = neg_fcm(fcm_raw)
     daily_raw = K.daily_series(cfg, today - datetime.timedelta(days=SPAN + 60), today)
     daily = {d: -v for d, v in daily_raw.items()}
     sink = []
-    obh_raw = obs_hourly_min(cfg, today - datetime.timedelta(days=SPAN + 60), today + datetime.timedelta(days=1), sink)
-    live = K.metar_today(cfg, today) or {}
-    for h, v in live.items():
-        obh_raw.setdefault(tkey, {})
-        obh_raw[tkey][h] = min(obh_raw[tkey].get(h, 999.0), v)
+    obh_raw = obs_hourly_min(cfg, today - datetime.timedelta(days=SPAN + 60), today + datetime.timedelta(days=2), sink)
+    for day in ((today, today + datetime.timedelta(days=1)) if hour >= 24 else (today,)):
+        for h, v in (K.metar_today(cfg, day) or {}).items():
+            dk = day.isoformat()
+            obh_raw.setdefault(dk, {})
+            obh_raw[dk][h] = min(obh_raw[dk].get(h, 999.0), v)
+    fold_midnight(obh_raw, h0_of)
     obh = {d: {h: -v for h, v in hrs.items()} for d, hrs in obh_raw.items()}
-    h0_of = lambda k: K.climate_day_start(cfg, datetime.date(*map(int, k.split('-'))))   # noqa: E731
     bias_of = K.biases_factory(fcm, daily, cfg.get('skill', False), cfg.get('bias_hl'))
 
     # the floor offset for THIS station's minima, measured; the highs' 0.70 is a fallback
@@ -373,7 +519,15 @@ def run_market(cfg, dry_dir=None):
     except Exception as e:
         print('%s market unavailable (%s)' % (cfg['key'], e))
     rows_neg = neg_rows(rows) if rows else []
-    s = snapshot(fcm, bias_of, daily, obh, h0_of, tkey, now.hour, rows_neg, gaps=(obh_raw, daily_raw)) if rows else None
+    # the exact ceiling: the station's own six-hour minimum and the climate report's
+    six, six_win = metar_six_min(cfg, today)
+    cmin, cmin_at = cli_min_today(cfg, today)
+    caps = [x for x in (six, cmin) if x is not None]
+    cap = min(caps) if caps else None
+    if cap is not None:
+        print('%s ceiling %.2f (six-hour %s, climate report %s)' % (cfg['key'], cap, six, cmin))
+    s = snapshot(fcm, bias_of, daily, obh, h0_of, tkey, hour, rows_neg, gaps=(obh_raw, daily_raw),
+                 exact=(-cap if cap is not None else None)) if rows else None
     T = {'date': tkey, 'event': K.event_ticker(cfg, today), 'kind': 'low', 'key': cfg['key'],
          'label': cfg['label'], 'city': cfg.get('city'), 'station': cfg['station'],
          'as_of': now.strftime('%H:%M ') + cfg['tzlabel'], 'tz': cfg['tz'],
@@ -381,15 +535,18 @@ def run_market(cfg, dry_dir=None):
          'offset': offset, 'lock_hour': LOCK_HOUR, 'eve_hour': EVE_HOUR,
          'obs_hours': [[h, round(v, 2)] for h, v in sorted((obh_raw.get(tkey) or {}).items())],
          'now_temp': (round(sink[-1][1], 2) if sink else None), 'now_at': (sink[-1][0][11:16] if sink else None)}
-    run_today = K.running_max(obh, tkey, now.hour, h0_of(tkey))
-    T['obs_so_far'] = round(-run_today, 2) if run_today is not None else None
+    run_today = K.running_max(obh, tkey, hour, h0_of(tkey))
+    lows = [x for x in ((-run_today if run_today is not None else None), cap) if x is not None]
+    T['obs_so_far'] = round(min(lows), 2) if lows else None
+    T.update({'obs_hourly': (round(-run_today, 2) if run_today is not None else None),
+              'six_min': six, 'six_window': six_win, 'cli_min': cmin, 'cli_min_at': cmin_at})
     if s:
         lad = ladder_out(rows, rows_neg, s['ps'])
         best = max(range(len(lad)), key=lambda i: lad[i]['ours'] or 0)
         mbest = max(range(len(lad)), key=lambda i: lad[i]['market'] or 0)
         T.update({'pred': round(-s['pred'], 2), 'sd': round(s['sd'], 3), 'fc_low': (round(-s['pf'], 2) if s['pf'] is not None else None),
-                  'binding': s['bind'], 'gap_table': s.get('emp'),
-                  'day_over': bool(s['over']) or now.hour >= 23, 'day_decided': False,
+                  'binding': s['bind'], 'exact': s['exact'], 'gap_table': s.get('emp'),
+                  'day_over': bool(s['over']), 'day_decided': False,
                   'pick': lad[best]['label'], 'p': lad[best]['ours'],
                   'market_pick': lad[mbest]['label'], 'market_p': lad[mbest]['market'],
                   'agree': best == mbest, 'ours': [r['ours'] for r in lad], 'ladder': lad,
@@ -400,18 +557,18 @@ def run_market(cfg, dry_dir=None):
         T['bet'], T['book'] = bet, book
         # the morning lock, once, at the first bake at or after LOCK_HOUR
         h = hist.setdefault(tkey, {'date': tkey, 'event': T['event']})
-        if now.hour >= LOCK_HOUR and 'lock' not in h:
+        if hour >= LOCK_HOUR and 'lock' not in h:
             h['lock'] = {'at': now.strftime('%Y-%m-%dT%H:%M ') + cfg['tzlabel'], 'pick': T['pick'], 'p': T['p'],
                          'pred': T['pred'], 'sd': T['sd'], 'obs_at_lock': T['obs_so_far'], 'binding': s['bind'],
                          'ladder': [{'label': r['label'], 'lo': r['lo'], 'hi': r['hi'], 'ours': r['ours'], 'market': r['market']} for r in lad],
                          'market_pick': T['market_pick'], 'market_p': T['market_p'], 'bet': bet, 'book': book,
-                         'priced_at': now.hour}
+                         'priced_at': hour}
             print('%s LOCKED %s: %s (%.0f%%), market %s (%.0f%%)' % (cfg['key'], tkey, T['pick'], 100 * (T['p'] or 0),
                                                                     T['market_pick'], 100 * (T['market_p'] or 0)))
         T['locked'] = h.get('lock')
     else:
         T.update({'pred': None, 'sd': None, 'pick': None, 'p': None, 'ladder': [], 'bet': None, 'book': [],
-                  'day_over': now.hour >= 23, 'locked': (hist.get(tkey) or {}).get('lock')})
+                  'day_over': False, 'locked': (hist.get(tkey) or {}).get('lock')})
 
     # ---- tomorrow: the evening plan, on tomorrow's ladder, no floor
     tom = None
@@ -433,7 +590,7 @@ def run_market(cfg, dry_dir=None):
                               for m, b in st['biases'].items()}}
             # the EVE lock for tomorrow, once, from EVE_HOUR on
             h2 = hist.setdefault(tkey2, {'date': tkey2, 'event': tom['event']})
-            if now.hour >= EVE_HOUR and 'eve' not in h2:
+            if hour >= EVE_HOUR and 'eve' not in h2:
                 h2['eve'] = {'at': now.strftime('%Y-%m-%dT%H:%M ') + cfg['tzlabel'], 'pick': tom['pick'], 'p': tom['p'],
                              'pred': tom['pred'], 'sd': tom['sd'], 'market_pick': tom['market_pick'],
                              'market_p': tom['market_p'], 'bet': tbet, 'book': tbook}
