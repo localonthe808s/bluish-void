@@ -3368,11 +3368,7 @@ function drawTraffic(g, W, H, X0, Y0, X1, Y1, proj, view, v){
       });
     }));
   })(tx, ty);
-  /* the rail canvas sits ABOVE this one, so a station glyph lands on top of a tag. The
-     stations are drawn already and cannot move, so a tag that would collide steps down once. */
-  var stopsP = (v && v.stops && _VJ[v.stops]) ? _VJ[v.stops] : Promise.resolve(null);
-  return Promise.all(jobs.concat([trafficData(v), stopsP])).then(function(res){
-    var stops = res[res.length - 1];
+  return Promise.all(jobs.concat([trafficData(v)])).then(function(){
     g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
     var path = function(sg){ g.beginPath(); sg.pts.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); };
     /* the calm network first and faint; then the slow roads, the slowest last so it wins a shared carriageway */
@@ -3395,21 +3391,12 @@ function drawTraffic(g, W, H, X0, Y0, X1, Y1, proj, view, v){
     var ls = len(slowSegs), lc = len(calm);
     TRAF.flow = { slow: slowSegs.length, calm: calm.length, z: z, at: Date.now(), slowShare: (ls + lc) ? ls / (ls + lc) : 0 };
     var hits = [], P = function(c){ return proj({ x:c[0], y:c[1] }); }, inF = function(q){ return q.x > -20 && q.y > -20 && q.x < W + 20 && q.y < H + 20; };
-    /* WHAT A TAG MUST DODGE, kept in its own list. Putting these in LABELBOX -- the ledger
-       the map NAMES keep -- silenced every tag on the card: with nothing over thirty minutes
-       that day, all nine had to pass the collision test and the neighbourhood names had the
-       ground. A delay tag is the point of this layer and is never suppressed; it only
-       steps down when something drawn above it is in the way. */
-    var avoid = [];
-    if (window.LAB_RAIL !== false && stops && stops.features)
-      stops.features.forEach(function(ft){
-        var c = (ft.geometry || {}).coordinates; if (!c) return;
-        var q = P(c); if (!inF(q)) return;
-        avoid.push([q.x - 9, q.y - 9, q.x + 9, q.y + 9]);
-      });
-    /* THE LIT FREEWAY SIGNS ARE DRAWN FIRST NOW. They used to come after the tags on this
-       same canvas, so one landed on "+22 MIN" and left "+22 =IN". Below the tags they can
-       be overlapped instead of overlapping. */
+    /* A DELAY TAG IS NEVER SUPPRESSED. Making them pass labelFits -- the ledger the map
+       NAMES keep -- silenced all nine on a day with nothing over thirty minutes. The only
+       thing a tag dodges now is another tag, and that merely shifts it down a row:
+       everything else it simply covers, being drawn last on the topmost layer. */
+    var avoid = [], tags = [];
+    /* the lit freeway signs, under the tags */
     (TRAF.cms || []).forEach(function(c){
       var q = P([c.lon, c.lat]); if (!inF(q)) return;
       g.save(); g.fillStyle = 'rgba(8,10,16,.92)'; g.strokeStyle = '#fde68a'; g.lineWidth = 1.2;
@@ -3453,25 +3440,8 @@ function drawTraffic(g, W, H, X0, Y0, X1, Y1, proj, view, v){
              step aside (user: "dont limit if its ever longer than 30 minutes too") */
           var clashes = function(){ return avoid.some(function(b){ return bx < b[2] && b[0] < bx + bw && by < b[3] && b[1] < by + bh; }); };
           if (!must && clashes()) by += bh + 5;
-          /* and a drawn tag joins the list, so the next one steps off it rather than landing
-             on it -- the jams are already sorted worst first, so the bigger number holds the
-             spot. This can only move a tag, never silence one. */
           avoid.push([bx - 2, by - 2, bx + bw + 2, by + bh + 2]);
-          {
-            g.fillStyle = 'rgba(8,10,16,.92)';
-            g.beginPath(); g.roundRect ? g.roundRect(bx, by, bw, bh, 5) : g.rect(bx, by, bw, bh); g.fill();
-            g.lineWidth = 1.2; g.strokeStyle = must ? '#FF1B1B' : '#FF6B00'; g.stroke();
-            g.textAlign = 'center'; g.textBaseline = 'middle';
-            if (road){
-              g.font = '800 8.5px system-ui, sans-serif'; g.fillStyle = 'rgba(255,252,244,.8)';
-              g.fillText(road, mid.x, by + 8.5);
-              g.font = '800 11px system-ui, sans-serif'; g.fillStyle = must ? '#FF6B6B' : '#FFD166';
-              g.fillText(t, mid.x, by + 19.5);
-            } else {
-              g.font = '800 11px system-ui, sans-serif'; g.fillStyle = must ? '#FF6B6B' : '#FFD166';
-              g.fillText(t, mid.x, by + 9.5);
-            }
-          }
+          tags.push({ x: mid.x, bx: bx, by: by, bw: bw, bh: bh, road: road, t: t, must: must });
         }
       } else if (cat === 9 || cat === 7){                               // works and lane closures: small, and only close in
         if (gm > 40 || !inF(mid)){ g.restore(); return; }
@@ -3486,8 +3456,27 @@ function drawTraffic(g, W, H, X0, Y0, X1, Y1, proj, view, v){
         from: p.from, to: p.to, roads: (p.roadNumbers || []).join(' '), delayMin: p.delay ? Math.round(p.delay / 60) : null,
         lengthM: p.length ? Math.round(p.length) : null, since: p.startTime, source: 'TomTom' } });
     });
-TRAF.hits = hits;
+    TRAF.hits = hits; TRAF.tags = tags;
     try { if (window.parent !== window) window.parent.postMessage({ labTraffic: { counts: counts, signs: (TRAF.cms || []).length, at: Date.now(), incAt: TRAF.incAt, flow: TRAF.flow } }, '*'); } catch(e){}
+  });
+}
+
+/* drawn last, on the layer above the rail: the one mark on this card that nothing covers */
+function drawJamTags(g, tags){
+  (tags || []).forEach(function(k){
+    g.fillStyle = 'rgba(8,10,16,.92)';
+    g.beginPath(); g.roundRect ? g.roundRect(k.bx, k.by, k.bw, k.bh, 5) : g.rect(k.bx, k.by, k.bw, k.bh); g.fill();
+    g.lineWidth = 1.2; g.strokeStyle = k.must ? '#FF1B1B' : '#FF6B00'; g.stroke();
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    if (k.road){
+      g.font = '800 8.5px system-ui, sans-serif'; g.fillStyle = 'rgba(255,252,244,.8)';
+      g.fillText(k.road, k.x, k.by + 8.5);
+      g.font = '800 11px system-ui, sans-serif'; g.fillStyle = k.must ? '#FF6B6B' : '#FFD166';
+      g.fillText(k.t, k.x, k.by + 19.5);
+    } else {
+      g.font = '800 11px system-ui, sans-serif'; g.fillStyle = k.must ? '#FF6B6B' : '#FFD166';
+      g.fillText(k.t, k.x, k.by + 9.5);
+    }
   });
 }
 
@@ -3536,8 +3525,15 @@ function drawCard(style){
   geoCv.style.cssText = 'position:absolute;left:0;background:transparent;pointer-events:none;';
   card.appendChild(geoCv);
   card.appendChild(railCv);
+  /* THE DELAY TAGS RIDE ABOVE EVERYTHING (user 2026-09-19: "keep traffic markers on top").
+     They lived on the traffic canvas, which sits UNDER the rail -- so a station glyph landed
+     on one and ate its text, and no amount of nudging could fix it, because the thing on top
+     was drawn by someone else entirely. Their own layer, appended last, cleared and refilled
+     by the traffic pass alone so a five-minute refresh cannot strand a stale tag. */
+  var tagCv = hiCanvas();
+  card.appendChild(tagCv);
   card.insertBefore(swellCv, trafCv);
-  [swellCv, trafCv, geoCv, railCv].forEach(function(c){ c.style.width = '100%'; c.style.height = 'auto'; });
+  [swellCv, trafCv, geoCv, railCv, tagCv].forEach(function(c){ c.style.width = '100%'; c.style.height = 'auto'; });
   var row = document.createElement('div'); row.className = 'row';
   ['earth','water','major','city_label','buildings'].forEach(function(k){
     var b = document.createElement('button'); b.className = 'sw';
@@ -3593,6 +3589,7 @@ function drawCard(style){
     geoCv.getContext('2d').clearRect(0, 0, W, H);   // the rock is redrawn with the real pass
     trafCv.getContext('2d').clearRect(0, 0, W, H); TRAF.hits = [];
     railCv.getContext('2d').clearRect(0, 0, W, H);
+    tagCv.getContext('2d').clearRect(0, 0, W, H);
     cancelAnimationFrame(window._swellRAF); swellCv.getContext('2d').clearRect(0, 0, W, H);
     clearTimeout(timer);
     timer = setTimeout(paint, 260);
@@ -4018,12 +4015,17 @@ function drawCard(style){
         paint._traffic = function(){
           var tbox = document.getElementById('traffic');
           trafCv.style.top = cv.offsetTop + 'px';
-          if (!tbox || !tbox.checked || geoOn() || surfOn() || !paint._proj || VB.mpp > 320){ trafCv.getContext('2d').clearRect(0, 0, W, H); TRAF.hits = []; return Promise.resolve(); }
+          tagCv.style.top = cv.offsetTop + 'px';
+          if (!tbox || !tbox.checked || geoOn() || surfOn() || !paint._proj || VB.mpp > 320){
+            trafCv.getContext('2d').clearRect(0, 0, W, H); tagCv.getContext('2d').clearRect(0, 0, W, H);
+            TRAF.hits = []; TRAF.tags = []; return Promise.resolve();
+          }
           var off = hiCanvas();                                                        // build aside, swap in: no blank flash
           return drawTraffic(off.getContext('2d'), W, H, VB.Xw, VB.Ymid - VB.mpp * H / 2, VB.Xw + VB.mpp * W, VB.Ymid + VB.mpp * H / 2,
                              paint._proj, view, VIEWS[vkey] || {}).then(function(){
             if (stale()) return;
             var tg = trafCv.getContext('2d'); tg.clearRect(0, 0, W, H); tg.drawImage(off, 0, 0, W, H);
+            var kg = tagCv.getContext('2d'); kg.clearRect(0, 0, W, H); drawJamTags(kg, TRAF.tags);
           });
         };
         clearInterval(window._trafTimer);
