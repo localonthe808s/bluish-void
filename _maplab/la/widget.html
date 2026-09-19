@@ -176,7 +176,7 @@ function readsLine(v){
    an empty list for every line when this was built. It is asked first every time, and the day
    it answers with trains this board should be rebuilt on it -- until then a scheduled time is
    never dressed up as a live one. */
-var SCHED = null, STATION = { id:'80138S', name:'17th Street / SMC', routes:['E'], kind:'metro' }, LIVE = null;
+var SCHED = null, STATION = { id:'80138S', name:'17th Street / SMC', routes:['E'], kind:'metro' }, LIVE = null;   // = DEFAULT_STATION
 var LINE_COL = { A:'#0072BC', B:'#EB131B', C:'#58A738', D:'#A05DA5', E:'#FDB913', K:'#E56DB1' };
 fetch('rail_sched.json').then(function(r){ return r.json(); }).then(function(j){ SCHED = j; paint(); }).catch(function(){});
 fetch('https://api.metro.net/LACMTA_Rail/trip_detail/route_code/804').then(function(r){ return r.json(); })
@@ -192,32 +192,65 @@ function laNow(){
   return { min: (+p.hour % 24) * 60 + (+p.minute), today: ymd(new Date()), yday: ymd(new Date(Date.now() - 864e5)) };
 }
 function clock(min){ var h = Math.floor(min / 60) % 24, m = min % 60; return (h % 12 || 12) + ':' + ('0' + m).slice(-2) + (h < 12 ? ' AM' : ' PM'); }
+/* THE LAYOUT IS NEW YORK'S (index.html, mtaPanelRender), centred (user 2026-09-19: "visualize
+   the train times better like NYC ... center and match its layout"): a header row -- the
+   station, its lines as bullets, a small grey tag saying where the times come from, a close
+   -- then the direction groups SIDE BY SIDE, each a small grey label over a bullet and its
+   clock times, bars between, NOW in green, no AM/PM inside the hour. New York's tag reads
+   LIVE · MTA; this one reads TIMETABLE, because that is what it is. Four groups at most, the
+   soonest first ("you dont need to show them all"). */
+var DEFAULT_STATION = { id:'80138S', name:'17th Street / SMC', routes:['E'], kind:'metro' };
+var DARK_TEXT = { E:1 };                       // the E Line's gold wants dark lettering, as New York's yellows do
+function bullet(rt, px){
+  px = px || 17;
+  var col = LINE_COL[rt] || '#5b647a', wide = rt.length > 1;
+  return '<span style="display:inline-flex;align-items:center;justify-content:center;min-width:' + px + 'px;height:' + px + 'px;'
+    + 'border-radius:' + (wide ? Math.round(px / 2) + 'px' : '50%') + ';padding:0 ' + (wide ? '5px' : '0') + ';'
+    + 'background:' + col + ';color:' + (DARK_TEXT[rt] ? '#1b2340' : '#fff') + ';vertical-align:middle;'
+    + 'font:700 ' + Math.round(px * 0.59) + 'px system-ui,sans-serif;letter-spacing:0;flex-shrink:0;">' + rt + '</span>';
+}
 function board(){
-  var sd = SCHED && SCHED[STATION.id];
-  var head = '<b>' + STATION.name.toUpperCase() + '</b> &nbsp;';
-  if (!SCHED) return head + '·&nbsp; reading the timetable…';
-  if (!sd) return head + '·&nbsp; no timetable for this station';
+  var sd = SCHED && SCHED[STATION.id], isDefault = STATION.id === DEFAULT_STATION.id;
+  var lines = (STATION.routes || []).filter(function(r, k, a){ return a.indexOf(r) === k; });
+  var head = '<div style="display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;position:relative;">'
+    + '<span style="font:800 12px system-ui,sans-serif;letter-spacing:.03em;white-space:nowrap;">' + STATION.name.toUpperCase() + '</span>'
+    + '<span style="display:inline-flex;gap:3px;align-items:center;">' + lines.map(function(r){ return bullet(r); }).join('') + '</span>'
+    + '<span style="font:600 8px system-ui,sans-serif;color:#5b647a;letter-spacing:.08em;white-space:nowrap;">TIMETABLE · '
+    + (STATION.kind === 'commuter' ? 'METROLINK' : 'LA METRO') + '</span>'
+    + (isDefault ? '' : '<button id="cw-la-x" style="position:absolute;right:0;top:-2px;background:none;border:none;font:700 13px system-ui,sans-serif;color:#1b2340;cursor:pointer;padding:0 2px;">✕</button>')
+    + '</div>';
+  var note = function(t){ return '<div style="font:600 10px system-ui,sans-serif;color:#5b647a;margin-top:6px;text-align:center;letter-spacing:0;">' + t + '</div>'; };
+  if (!SCHED) return head + note('READING THE TIMETABLE…');
+  if (!sd) return head + note('NO TIMETABLE FOR THIS STATION');
   /* the timetable is stored PER DATE (Metro's calendar changes daily); a date it does not
      hold means the bake has gone stale, and the board says that rather than guessing */
   var now = laNow(), of = function(r, ds){ var ix = r.d[ds]; return ix == null ? null : r.t[ix]; };
-  if (!sd.rows.some(function(r){ return of(r, now.today); }))
-    return head + '·&nbsp; THE TIMETABLE ON FILE DOES NOT REACH TODAY · IT NEEDS RE-BAKING';
-  /* A BOARD IS ABOUT THE NEXT HOUR. A train within 90 minutes gets its clock, its wait and the
-     two after it; a direction with nothing that soon says when its FIRST TRAIN is instead of
-     "270 MIN"; soonest first, six rows at most -- Union Station has a lot of platforms. */
-  var rows = sd.rows.map(function(r){
+  if (!sd.rows.some(function(r){ return of(r, now.today); })) return head + note('THE TIMETABLE ON FILE DOES NOT REACH TODAY · IT NEEDS RE-BAKING');
+  var hm = function(min){ var h = Math.floor(min / 60) % 24; return (h % 12 || 12) + ':' + ('0' + (min % 60)).slice(-2); };
+  var groups = sd.rows.map(function(r){
     /* today's service day, and the tail of yesterday's that runs past midnight */
     var t = (of(r, now.yday) || []).filter(function(x){ return x >= now.min + 1440; }).map(function(x){ return x - 1440; })
       .concat((of(r, now.today) || []).filter(function(x){ return x >= now.min; })).sort(function(a, b){ return a - b; });
     if (!t.length) return null;
-    var c = LINE_COL[r.r], wait = t[0] - now.min, tag = (c ? chip(r.r, c) : '<b>' + r.r + '</b>') + ' TO ' + r.h.toUpperCase() + ' &nbsp;';
-    var soon = t.filter(function(x){ return x - now.min <= 90; }).slice(0, 3);
-    return { wait: wait, html: '<span style="white-space:nowrap;">' + tag + (soon.length
-      ? '<b>' + clock(soon[0]) + '</b> (' + wait + ' MIN)' + (soon.length > 1 ? ', THEN ' + soon.slice(1).map(clock).join(', ') : '')
-      : 'FIRST TRAIN <b>' + clock(t[0]) + '</b>') + '</span>' };
-  }).filter(Boolean).sort(function(a, b){ return a.wait - b.wait; }).slice(0, 6).map(function(o){ return o.html; });
-  return head + (rows.length ? rows.join(' &nbsp;·&nbsp; ') : '·&nbsp; NO MORE TRAINS TONIGHT ON THE TIMETABLE')
-       + ' &nbsp;·&nbsp; <span style="opacity:.62;">SCHEDULED TIMES, NOT LIVE' + (LIVE === 0 ? ' · METRO’S LIVE FEED IS SILENT' : '') + ' · TAP A STATION FOR ITS OWN</span>';
+    var soon = t.filter(function(x){ return x - now.min <= 60; }).slice(0, 4);
+    var times = soon.length
+      ? soon.map(function(x){ return x - now.min < 1 ? '<span style="color:#65a30d;">NOW</span>' : hm(x); }).join('<span style="opacity:.4;"> | </span>')
+      : '<span style="color:#5b647a;font-weight:600;">FIRST TRAIN ' + clock(t[0]) + '</span>';
+    return { wait: t[0] - now.min, html:
+        '<div style="text-align:left;">'
+      + '<div style="font:700 8px system-ui,sans-serif;color:#8a91a5;letter-spacing:.1em;margin:7px 0 3px;white-space:nowrap;">TO ' + r.h.toUpperCase() + '</div>'
+      + '<div style="display:flex;align-items:center;gap:7px;margin:2px 0;">' + bullet(r.r)
+      + '<span style="font:600 11px system-ui,sans-serif;font-variant-numeric:tabular-nums;letter-spacing:0;white-space:nowrap;">' + times + '</span></div></div>' };
+  }).filter(Boolean).sort(function(a, b){ return a.wait - b.wait; });
+  var more = groups.length - 4;
+  var body = groups.length
+    ? '<div style="display:flex;flex-wrap:wrap;justify-content:center;align-items:flex-start;gap:0 34px;">'
+      + groups.slice(0, 4).map(function(g){ return g.html; }).join('') + '</div>'
+    : note('NO MORE TRAINS TONIGHT ON THE TIMETABLE');
+  return head + body
+    + '<div style="font:600 8px system-ui,sans-serif;color:#8a91a5;letter-spacing:.08em;text-align:center;margin-top:7px;">SCHEDULED TIMES, NOT LIVE'
+    + (more > 0 ? ' · ' + more + ' MORE DIRECTION' + (more > 1 ? 'S' : '') + ' HERE' : '')
+    + ' · TAP A STATION ON THE MAP FOR ITS OWN</div>';
 }
 setInterval(function(){ if (st.view === 'map' && !st.geo) paint(); }, 30000);
 function chip(r, c){ return '<span class="chip" style="background:' + c + '">' + r + '</span>'; }
@@ -251,6 +284,8 @@ function paint(){
     document.getElementById('cw-wide-tag-info').innerHTML = readsLine(v);
     document.getElementById('cw-wide-tag-info').style.display = READS ? 'block' : 'none';
   }
+  var xb = document.getElementById('cw-la-x');
+  if (xb) xb.onclick = function(){ STATION = DEFAULT_STATION; paint(); };
   document.getElementById('cw-time').textContent = v.prods ? 'LATEST FRAME' : '';
   document.getElementById('cw-time').style.display = v.prods ? '' : 'none';
   document.getElementById('cw-attrib').textContent = '© OpenStreetMap · Protomaps · USGS 3DEP · NOAA NCEI · LA Metro · Metrolink'
