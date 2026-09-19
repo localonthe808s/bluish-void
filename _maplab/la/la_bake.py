@@ -160,8 +160,14 @@ def bake_city():
            '&spatialRel=esriSpatialRelIntersects&maxAllowableOffset=0.0002' % PULL)
     fs = arcgis_geojson(URBAN_URL, extra=env)
     print('  urban areas: %s' % sorted((f['properties'].get('BASENAME') or f['properties'].get('NAME') or '?') for f in fs))
+    # WHOLE urban areas, not the pull's rectangle of them: the wide tabs (MRMS 3 h / 12 h)
+    # look at this map from 500 km up, and a footprint cut on the pull box put a ruled
+    # orange edge down the Inland Empire. An area belongs if its centre is in the pull --
+    # which keeps the conurbation entire and leaves out San Diego and Santa Barbara, whose
+    # corners merely touch it.
     frame = shp_box(*PULL)
-    urban = unary_union([shape(f['geometry']).buffer(0) for f in fs]).intersection(frame)
+    geoms = [shape(f['geometry']).buffer(0) for f in fs]
+    urban = unary_union([g for g in geoms if frame.contains(g.centroid)])
     urban = urban.buffer(0.0015).buffer(-0.0015)
     KM2 = 111.32 * 111.32 * math.cos(math.radians(34.05))
     parts = []
