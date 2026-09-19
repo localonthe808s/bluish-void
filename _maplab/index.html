@@ -1468,7 +1468,7 @@ function anchorInFrame(ctx, q, tw, th, bounds){
      the same gap reads as generous under 9 px and cramped under 18 px, with a
      floor of 8. Only the FRAME is padded, never the feature's own bounds, so a
      park name is still allowed to sit right up against its own green. */
-  var W = ctx.canvas.width, H = ctx.canvas.height;
+  var W = cvW(ctx), H = cvH(ctx);
   var pad = Math.max(8, Math.round(th * 0.4));
   if (q.x < 0 || q.x > W || q.y < 0 || q.y > H) return null;   // another tile's name
   var x0 = pad + tw / 2, x1 = W - pad - tw / 2;
@@ -1572,7 +1572,8 @@ function drawHoodNames(ctx, geo, proj, mPerPx, opts){
         var x = p.x - p.tw / 2 - padX, y = p.y - p.th / 2 - padY, w = p.tw + 2 * padX, h = p.th + 2 * padY;
         [[13 * _s, 0.5], [7 * _s, 0.3]].forEach(function(pass){       // wide and faint, then a little closer:
                                                                    // any tighter and the patch gets an edge, and an edge is a sticker
-          ctx.shadowBlur = pass[0]; ctx.globalAlpha = pass[1];
+          ctx.shadowBlur = pass[0] * (ctx.canvas._lw ? ctx.canvas.width / ctx.canvas._lw : 1);   // a blur is in DEVICE px: keep its reach on a dense canvas
+          ctx.globalAlpha = pass[1];
           ctx.beginPath();
           ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
           ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); ctx.fill();
@@ -1793,7 +1794,7 @@ function frontsRead(){
 }
 function makeFronts(ctx, runs, proj, view, tz){
   var FCOL = { COLD:'#3b82f6', WARM:'#ef4444', STNRY:'#3b82f6', OCFNT:'#2B22F4', TROF:'#d8a25c' }, labels = [];
-  var CW = ctx.canvas.width, CH = ctx.canvas.height;
+  var CW = cvW(ctx), CH = cvH(ctx);
   var P2 = function(c){ var q = proj({ x:c[0], y:c[1] }); return [q.x, q.y]; };
   var seen = function(R0, pad){ return R0.some(function(q){ return q[0] > -pad && q[0] < CW + pad && q[1] > -pad && q[1] < CH + pad; }); };
   var cr = function(P, per){
@@ -1931,7 +1932,7 @@ function makeMachinery(ctx, geo, R, proj, mpp, view, mode, frontRuns){
   var EARTH = 'rgba(216,196,158,', TEAL = 'rgba(126,206,192,';
   var nameFont = '500 9px QelliaRegular, "Bodoni Moda", Georgia, serif', readFont = '700 7.5px system-ui, sans-serif';
   var ang = function(a, b){ var d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
-  var inFrame = function(q){ return q.x > 10 && q.y > 10 && q.x < ctx.canvas.width - 10 && q.y < ctx.canvas.height - 10; };
+  var inFrame = function(q){ return q.x > 10 && q.y > 10 && q.x < cvW(ctx) - 10 && q.y < cvH(ctx) - 10; };
   /* a label: a name in the map's own hand, and under it (only when running) the read in sans */
   var label = function(list, name, read, lon, lat, col, rank){ list.push({ name:name, read:read, q:proj({ x:lon, y:lat }), col:col, rank:rank }); };
   if (geo){
@@ -1999,7 +2000,7 @@ function makeMachinery(ctx, geo, R, proj, mpp, view, mode, frontRuns){
       if (L.read){ ctx.font = readFont; try { ctx.letterSpacing = '0.06em'; } catch(e){} w2 = ctx.measureText(L.read).width; }
       if (L.day) w2 = ctx.measureText(L.day).width;
       var w = Math.max(w1, w2) + 8, h = (L.read || L.day) ? 24 : 13;
-      var x = Math.max(4, Math.min(ctx.canvas.width - w - 4, L.q.x - w / 2));
+      var x = Math.max(4, Math.min(cvW(ctx) - w - 4, L.q.x - w / 2));
       if (!labelFits(x, L.q.y - h / 2, w, h)) return;
       L.x = x + w / 2; placed.push(L);
     });
@@ -2073,6 +2074,10 @@ function makeMachinery(ctx, geo, R, proj, mpp, view, mode, frontRuns){
   };
 }
 
+/* A canvas may be DENSER than the map's 1100 x 967 units (see hiCanvas in drawCard); anything
+   that asks a canvas how big it is, to keep a label inside the frame, wants the map's units. */
+function cvW(ctx){ return ctx.canvas._lw || ctx.canvas.width; }
+function cvH(ctx){ return ctx.canvas._lh || ctx.canvas.height; }
 /* SKY NAMES: a mark and a name beside it, in the neighbourhood names' own hand. A place is
    a dot, a summit a small open triangle. Same two-step as drawHoodNames -- claim the space
    now, in priority order, and hand back a painter for the very end -- so nothing drawn
@@ -2083,7 +2088,7 @@ function drawSkyNames(ctx, list, proj, mpp){
   var font = '500 9px QelliaRegular, "Bodoni Moda", Georgia, serif';
   ctx.save(); ctx.font = font;
   try { ctx.letterSpacing = '0.2em'; } catch(e){}
-  var CW = ctx.canvas.width, CH = ctx.canvas.height;
+  var CW = cvW(ctx), CH = cvH(ctx);
   list.forEach(function(r){
     if (r[4] && mpp > r[4]) return;
     var q = proj({ x:r[1], y:r[2] });
@@ -2754,15 +2759,33 @@ function drawCard(style){
      their names. With TRAFFIC lit the network is drawn on this canvas instead of the card --
      at the same point in the chain, so it claims its label space once and in the same order.
      With traffic off nothing changes and the card (which the pyramid bake reads) is as before. */
-  var railCv = document.createElement('canvas'); railCv.width = W; railCv.height = H;
+  /* WHY THE LETTERING WAS FUZZY (user 2026-09-19: "all the text across the LA view feel fuzzy
+     and not clear"). The card is 1100 px wide and the browser stretches it to the widget --
+     about 1,150 CSS px, which on a retina screen is 2,300 device px. Every glyph was drawn once
+     at 9 px and then enlarged 2.1x: that is the fuzz, on every view. The basemap can stand
+     being a raster; type cannot. So the overlay canvases are made at DEVICE resolution
+     (hiCanvas: backing store W x S, context pre-scaled by S, so every painter still works in
+     the map's 1100-unit space), and in the widget preview all lettering, the rail, the arcs,
+     the fronts and the traffic are drawn on them instead of on the card. A plain lab page --
+     which is what the pyramid bake drives -- still draws everything on the card, unchanged.
+     (The widget proper composes at clientWidth x dpr already; the lesson to carry there is
+     that names must be drawn LIVE at device resolution, never baked into a tile.) */
+  var HS = Math.max(1, Math.min(3, (window.devicePixelRatio || 1) * ((cv.getBoundingClientRect().width || W) / W)));
+  var hiCanvas = function(){
+    var c = document.createElement('canvas'); c.width = Math.round(W * HS); c.height = Math.round(H * HS); c._lw = W; c._lh = H;
+    c.getContext('2d').setTransform(c.width / W, 0, 0, c.height / H, 0, 0);
+    return c;
+  };
+  var railCv = hiCanvas();
   railCv.style.cssText = 'position:absolute;left:0;background:transparent;pointer-events:none;z-index:3;';
-  var trafCv = document.createElement('canvas'); trafCv.width = W; trafCv.height = H;
+  var trafCv = hiCanvas();
   trafCv.style.cssText = 'position:absolute;left:0;background:transparent;pointer-events:none;';
   card.appendChild(trafCv);
-  var geoCv = document.createElement('canvas'); geoCv.width = W; geoCv.height = H;
+  var geoCv = hiCanvas();
   geoCv.style.cssText = 'position:absolute;left:0;background:transparent;pointer-events:none;';
   card.appendChild(geoCv);
   card.appendChild(railCv);
+  [trafCv, geoCv, railCv].forEach(function(c){ c.style.width = '100%'; c.style.height = 'auto'; });
   var row = document.createElement('div'); row.className = 'row';
   ['earth','water','major','city_label','buildings'].forEach(function(k){
     var b = document.createElement('button'); b.className = 'sw';
@@ -2828,6 +2851,9 @@ function drawCard(style){
     /* the scale every "show it below N m/px" rule reads: New York's, whatever the box */
     var nmpp = function(){ return VB.mpp / ((VIEWS[vkey] || {}).mppK || 1); };
     var geoOn = function(){ return !!(document.getElementById('geo') || {}).checked; };
+    /* the lettering's canvas: the dense one in the widget preview, the card itself in the lab */
+    var tctx = window.LAB_EMBED ? railCv.getContext('2d') : ctx;
+    railCv.getContext('2d').clearRect(0, 0, W, H); railCv.style.top = cv.offsetTop + 'px';
     var dark = !(style.base === 'light');
     var stale = function(){ return token !== busy; };
     var st = new protomapsL.Static({
@@ -3025,12 +3051,12 @@ function drawCard(style){
                    the sky names; the quiet machinery; the rest of the geography */
                 return Promise.all([viewJson(vkey, 'wxGeo'), wxReads(), frontsRead()]).then(function(gr){
                   if (stale()) return;
-                  var M = makeMachinery(ctx, gr[0], gr[1], out.project, VB.mpp, view, null, gr[2]);
-                  var p1 = drawHoodNames(ctx, asGeo(vv.regionNames.slice(0, 1)), out.project, 10, { weight: 0.07 });
+                  var M = makeMachinery(tctx, gr[0], gr[1], out.project, VB.mpp, view, null, gr[2]);
+                  var p1 = drawHoodNames(tctx, asGeo(vv.regionNames.slice(0, 1)), out.project, 10, { weight: 0.07 });
                   M.claimHot();
-                  var p2 = drawSkyNames(ctx, vv.skyNames, out.project, VB.mpp);
+                  var p2 = drawSkyNames(tctx, vv.skyNames, out.project, VB.mpp);
                   M.claimQuiet();
-                  var p3 = drawHoodNames(ctx, asGeo(vv.regionNames.slice(1)), out.project, 10, { weight: 0.07, keep: true });
+                  var p3 = drawHoodNames(tctx, asGeo(vv.regionNames.slice(1)), out.project, 10, { weight: 0.07, keep: true });
                   paintHoods = function(){ M.paint(); p3(); p2(); p1(); };
                   return parkNamesFor(vkey);
                 });
@@ -3041,34 +3067,30 @@ function drawCard(style){
                    The rings' times claim their space first; the names fit round them. */
                 return wxReads().then(function(R){
                   if (stale()) return;
-                  var M = makeMachinery(ctx, null, R, out.project, VB.mpp, view, 'city');
+                  var M = makeMachinery(tctx, null, R, out.project, VB.mpp, view, 'city');
                   LABELBOX.length = 0; M.claimHot();
-                  var ph = drawHoodNames(ctx, hn, out.project, nmpp(), { clear: hoodOpts && hoodOpts.clear, weight: 0.085, keep: true });
+                  var ph = drawHoodNames(tctx, hn, out.project, nmpp(), { clear: hoodOpts && hoodOpts.clear, weight: 0.085, keep: true });
                   paintHoods = function(){ ph(); M.paint(); };
                   return parkNamesFor(vkey);
                 });
               }
               if (geoOn()){
-                railCv.getContext('2d').clearRect(0, 0, W, H);
-                railCv.style.top = cv.offsetTop + 'px';
                 paintHoods = drawHoodNames(railCv.getContext('2d'), hn, out.project, nmpp() * 0.72, { ink: '#141a2b', weight: 0.075 });
                 paintTop = paintHoods; paint._tapRing = null;
                 return null;                                   // no park names either: the rock is the subject
               }
-              paintHoods = drawHoodNames(ctx, hn, out.project, nmpp(), hoodOpts);
+              paintHoods = drawHoodNames(tctx, hn, out.project, nmpp(), hoodOpts);
               return parkNamesFor(vkey);
             }).then(function(pn){
               if (stale()) return;
-              drawParkNames(ctx, pn, out.project, nmpp());
+              drawParkNames(tctx, pn, out.project, nmpp());
               return Promise.all([subwayFor(vkey), stopsFor(vkey), bulletsFor(vkey)]);
             }).then(function(sw){
               if (stale()) return;
               if (geoOn()) return radarOverlay(ctx, W, H, VB.Xw, VB.Ymid - VB.mpp * H / 2,
                                                VB.Xw + VB.mpp * W, VB.Ymid + VB.mpp * H / 2);
               var tOn = (document.getElementById('traffic') || {}).checked && VB.mpp <= 320;
-              var rg = railCv.getContext('2d'); rg.clearRect(0, 0, W, H);
-              railCv.style.top = cv.offsetTop + 'px';
-              drawSubway(tOn ? rg : ctx, sw[0], sw[1], out.project, sw[2], nmpp());
+              drawSubway((tOn || window.LAB_EMBED) ? railCv.getContext('2d') : ctx, sw[0], sw[1], out.project, sw[2], nmpp());
               return radarOverlay(ctx, W, H, VB.Xw, VB.Ymid - VB.mpp * H / 2,
                                   VB.Xw + VB.mpp * W, VB.Ymid + VB.mpp * H / 2);
             }).then(function(){
@@ -3095,11 +3117,11 @@ function drawCard(style){
           var tbox = document.getElementById('traffic');
           trafCv.style.top = cv.offsetTop + 'px';
           if (!tbox || !tbox.checked || geoOn() || !paint._proj || VB.mpp > 320){ trafCv.getContext('2d').clearRect(0, 0, W, H); TRAF.hits = []; return Promise.resolve(); }
-          var off = document.createElement('canvas'); off.width = W; off.height = H;      // build aside, swap in: no blank flash
+          var off = hiCanvas();                                                        // build aside, swap in: no blank flash
           return drawTraffic(off.getContext('2d'), W, H, VB.Xw, VB.Ymid - VB.mpp * H / 2, VB.Xw + VB.mpp * W, VB.Ymid + VB.mpp * H / 2,
                              paint._proj, view, VIEWS[vkey] || {}).then(function(){
             if (stale()) return;
-            var tg = trafCv.getContext('2d'); tg.clearRect(0, 0, W, H); tg.drawImage(off, 0, 0);
+            var tg = trafCv.getContext('2d'); tg.clearRect(0, 0, W, H); tg.drawImage(off, 0, 0, W, H);
           });
         };
         clearInterval(window._trafTimer);
@@ -3267,6 +3289,7 @@ function copyFlavor(){
 (function(){
   var q = new URLSearchParams(location.search);
   if (!q.get('embed')) return;
+  window.LAB_EMBED = true;
   var st = document.createElement('style');
   st.textContent = 'header,.note,.card h2,.card .row{display:none!important}main{padding:0!important;gap:0!important}'
     + 'body{background:#17457F!important}.card{border-radius:0!important;box-shadow:none!important;background:transparent!important}';
