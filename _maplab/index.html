@@ -1931,6 +1931,50 @@ function makeFronts(ctx, runs, proj, view, tz){
    THE RULE, as everywhere on this map: a break is quiet unless it is RUNNING -- the measured
    swell at its buoy comes from inside its window, at 0.6 m and 8 s or more. "Working" is OUR
    reading of published numbers, and the readout shows the numbers it came from. */
+/* THE SWELL, DRAWN AS SWELL (user 2026-09-19: "lets visualize wave directions better"). An arrow
+   at a buoy says which way; it does not say what that MEANS for a coast tucked behind islands.
+   So the sea carries moving CRESTS: lines square to the swell's travel, spaced and paced by its
+   period (a 16 s groundswell is drawn longer and faster than an 8 s wind swell), running the
+   way the buoy says the swell runs.
+   AND THEY FADE IN THE ISLANDS' SHADOW. For every patch of sea the lab walks back toward where
+   the swell comes from, across a 1 km land/sea mask of the whole Bight (la/swell_land.png --
+   the islands that matter are outside the map's frame), along a fan of five bearings, +-20
+   degrees, because a real swell is not one ray but a spread. The share of the fan that reaches
+   open ocean is that patch's EXPOSURE, and the crests' brightness. Turn the swell from south to
+   west and Catalina's shadow swings off the South Bay and the Channel Islands' falls on Malibu.
+   WHAT IT IS NOT: a wave model. Straight lines only -- no refraction round a headland, no
+   bending over the shelf, which is exactly how a south swell still wraps into Malibu. It shows
+   what is BLOCKED, honestly; it under-states what bends in. The strip says so. */
+var SWELLMASK = null;
+function swellMask(){
+  if (!SWELLMASK) SWELLMASK = new Promise(function(res){
+    var im = new Image();
+    im.onload = function(){
+      var c = document.createElement('canvas'); c.width = im.width; c.height = im.height;
+      var g = c.getContext('2d'); g.drawImage(im, 0, 0);
+      var d = g.getImageData(0, 0, im.width, im.height).data, land = new Uint8Array(im.width * im.height);
+      for (var i = 0; i < land.length; i++) land[i] = d[i * 4 + 3] > 127 ? 1 : 0;
+      res({ w: im.width, h: im.height, land: land, W: -121.0, S: 32.2, E: -117.0, N: 34.8, cell: 0.01 });
+    };
+    im.onerror = function(){ res(null); };
+    im.src = 'la/swell_land.png';
+  });
+  return SWELLMASK;
+}
+/* exposure of one point of sea to a swell from `dir` (degrees it comes FROM): 0..1 */
+function swellExposure(M, lon, lat, dir, skipKm){
+  var FAN = [[-20, .1], [-10, .2], [0, .4], [10, .2], [20, .1]], kmLat = 111.32, kmLon = 111.32 * Math.cos(lat * Math.PI / 180), ex = 0;
+  for (var f = 0; f < FAN.length; f++){
+    var a = (dir + FAN[f][0]) * Math.PI / 180, dLon = Math.sin(a) / kmLon, dLat = Math.cos(a) / kmLat, open = 1;
+    for (var k = (skipKm || 0); k < 320; k++){
+      var x = Math.floor((lon + dLon * k - M.W) / M.cell), y = Math.floor((M.N - (lat + dLat * k)) / M.cell);
+      if (x < 0 || y < 0 || x >= M.w || y >= M.h) break;            // off the mask: open ocean
+      if (M.land[y * M.w + x]){ open = 0; break; }
+    }
+    ex += open * FAN[f][1];
+  }
+  return ex;
+}
 var SURF = { t: 0, p: null, hits: [] };
 function surfReads(){
   if (SURF.p && Date.now() - SURF.t < 600000) return SURF.p;
@@ -1982,7 +2026,7 @@ function surfReads(){
   return SURF.p;
 }
 function compass(d){ return ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'][Math.round(((d % 360) + 360) % 360 / 22.5) % 16]; }
-function makeSurf(ctx, spots, R, proj, mpp){
+function makeSurf(ctx, spots, R, proj, mpp, M){
   var hits = [], labels = [], marks = [], tideNow = R && R.level ? R.level.ft : null;
   var inWin = function(d, w){ d = (d + 360) % 360; return w[0] <= w[1] ? (d >= w[0] && d <= w[1]) : (d >= w[0] || d <= w[1]); };
   var CW = cvW(ctx), CH = cvH(ctx), inF = function(q){ return q.x > 6 && q.y > 6 && q.x < CW - 6 && q.y < CH - 6; };
@@ -2001,7 +2045,11 @@ function makeSurf(ctx, spots, R, proj, mpp){
     marks.push({ t:'spot', q:q, on:on });
     /* a running break is always named; a quiet one only once the map is close enough for it */
     if (on || mpp < 80) labels.push({ x:q.x, y:q.y, txt:sp.n.toUpperCase(), rank: on ? 70 : 20, col: on ? '#ecfeff' : 'rgba(200,222,240,.82)', side:true });
-    hits.push({ x:q.x, y:q.y, reach:14, d:{ kind:'spot', name:sp.n, win:sp.win, tide:sp.tide, bottom:sp.bottom, on:on, tideOk:tideOk, tideNow:tideNow,
+    /* how open THIS break is to THIS swell, by straight lines (the first 3 km are skipped: a
+       break sits on the mask's own coastline) */
+    var openDir = window.LAB_SWELLDIR != null ? window.LAB_SWELLDIR : (b ? b.dir : null);
+    var open = (M && openDir != null) ? swellExposure(M, sp.c[0], sp.c[1], openDir, 3) : null;
+    hits.push({ x:q.x, y:q.y, reach:14, d:{ kind:'spot', name:sp.n, open: open, openDir: openDir, whatIf: window.LAB_SWELLDIR != null, win:sp.win, tide:sp.tide, bottom:sp.bottom, on:on, tideOk:tideOk, tideNow:tideNow,
       buoy: b ? { id:sp.buoy, name:(spots.buoys || {})[sp.buoy], hs:b.hs, tp:b.tp, dir:b.dir, model:!!b.model } : null } });
   });
   var placed = [];
@@ -2975,6 +3023,8 @@ function drawCard(style){
   };
   var railCv = hiCanvas();
   railCv.style.cssText = 'position:absolute;left:0;background:transparent;pointer-events:none;z-index:3;';
+  var swellCv = hiCanvas();                       // the moving crests: above the map, under every label
+  swellCv.style.cssText = 'position:absolute;left:0;background:transparent;pointer-events:none;';
   var trafCv = hiCanvas();
   trafCv.style.cssText = 'position:absolute;left:0;background:transparent;pointer-events:none;';
   card.appendChild(trafCv);
@@ -2982,7 +3032,8 @@ function drawCard(style){
   geoCv.style.cssText = 'position:absolute;left:0;background:transparent;pointer-events:none;';
   card.appendChild(geoCv);
   card.appendChild(railCv);
-  [trafCv, geoCv, railCv].forEach(function(c){ c.style.width = '100%'; c.style.height = 'auto'; });
+  card.insertBefore(swellCv, trafCv);
+  [swellCv, trafCv, geoCv, railCv].forEach(function(c){ c.style.width = '100%'; c.style.height = 'auto'; });
   var row = document.createElement('div'); row.className = 'row';
   ['earth','water','major','city_label','buildings'].forEach(function(k){
     var b = document.createElement('button'); b.className = 'sw';
@@ -3038,6 +3089,7 @@ function drawCard(style){
     geoCv.getContext('2d').clearRect(0, 0, W, H);   // the rock is redrawn with the real pass
     trafCv.getContext('2d').clearRect(0, 0, W, H); TRAF.hits = [];
     railCv.getContext('2d').clearRect(0, 0, W, H);
+    cancelAnimationFrame(window._swellRAF); swellCv.getContext('2d').clearRect(0, 0, W, H);
     clearTimeout(timer);
     timer = setTimeout(paint, 260);
   }
@@ -3052,6 +3104,7 @@ function drawCard(style){
     /* the lettering's canvas: the dense one in the widget preview, the card itself in the lab */
     var tctx = window.LAB_EMBED ? railCv.getContext('2d') : ctx;
     railCv.getContext('2d').clearRect(0, 0, W, H); railCv.style.top = cv.offsetTop + 'px';
+    cancelAnimationFrame(window._swellRAF); swellCv.getContext('2d').clearRect(0, 0, W, H); swellCv.style.top = cv.offsetTop + 'px';
     var dark = !(style.base === 'light');
     var stale = function(){ return token !== busy; };
     var st = new protomapsL.Static({
@@ -3263,9 +3316,10 @@ function drawCard(style){
               if (surfOn() && vv.surf){
                 /* THE COAST IS THE SUBJECT: buoys and breaks claim their space first, the
                    neighbourhood names fit round them, and the rail and the traffic stand down */
-                return Promise.all([viewJson(vkey, 'surf'), surfReads()]).then(function(sr){
+                return Promise.all([viewJson(vkey, 'surf'), surfReads(), swellMask()]).then(function(sr){
                   if (stale()) return;
-                  var SF = makeSurf(tctx, sr[0] || {}, sr[1], out.project, nmpp());
+                  var SF = makeSurf(tctx, sr[0] || {}, sr[1], out.project, nmpp(), sr[2]);
+                  paint._swell = { R: sr[1], M: sr[2] };
                   LABELBOX.length = 0; SF.claim(); SURF.hits = SF.hits;
                   var ph = drawHoodNames(tctx, hn, out.project, nmpp(), { clear: hoodOpts && hoodOpts.clear, weight: 0.085, keep: true });
                   paintHoods = function(){ ph(); SF.paint(); };
@@ -3318,6 +3372,66 @@ function drawCard(style){
                 });
             });
         });
+      })
+      .then(function(){
+        var SW = paint._swell; paint._swell = null;
+        if (stale() || !SW || !SW.M || !SW.R || !surfOn()) return;
+        var B = SW.R.buoys || {}, lead = B['46221'] || B['46268'] || B['46222'] || B[Object.keys(B)[0]];
+        if (!lead || lead.dir == null) return;
+        /* WHAT IF: the widget can ask for a swell direction that is not today's, to show how
+           the shadows move. Only the crests and the breaks' exposure follow it -- which breaks
+           are lit stays with the swell that is really arriving. */
+        if (window.LAB_SWELLDIR != null) lead = { dir: window.LAB_SWELLDIR, tp: lead.tp, model: lead.model, whatIf: true };
+        /* exposure on a screen grid of 8 px cells, once per paint */
+        var CELL = 8, gw = Math.ceil(W / CELL) + 1, gh = Math.ceil(H / CELL) + 1, EX = new Float32Array(gw * gh);
+        for (var gy = 0; gy < gh; gy++) for (var gx = 0; gx < gw; gx++){
+          var lo = x2lon(VB.Xw + gx * CELL * VB.mpp), la = y2lat(VB.Ymid + (H / 2 - gy * CELL) * VB.mpp);
+          EX[gy * gw + gx] = swellExposure(SW.M, lo, la, lead.dir, 0);
+        }
+        var exAt = function(x, y){
+          var fx = Math.max(0, Math.min(gw - 1.001, x / CELL)), fy = Math.max(0, Math.min(gh - 1.001, y / CELL)), i = Math.floor(fx), j = Math.floor(fy), tx = fx - i, ty = fy - j;
+          return EX[j*gw+i]*(1-tx)*(1-ty) + EX[j*gw+i+1]*tx*(1-ty) + EX[(j+1)*gw+i]*(1-tx)*ty + EX[(j+1)*gw+i+1]*tx*ty;
+        };
+        /* travel direction on screen (north is up): the swell runs TOWARD dir + 180 */
+        var th = (lead.dir + 180) * Math.PI / 180, tx = Math.sin(th), ty = -Math.cos(th), px = -ty, py = tx;
+        var T = Math.max(5, Math.min(22, lead.tp || 10)), GAP = 9 + T * 1.5, SPEED = 5 + T * 0.75;     // px, px a second
+        var sg = swellCv.getContext('2d'), water = paint._water, t0 = performance.now(), reach = Math.hypot(W, H) / 2;
+        var BUCKETS = [[0.80, 0.62], [0.55, 0.40], [0.30, 0.22], [0.10, 0.10]];
+        var frame = function(now){
+          if (stale() || !surfOn()){ sg.clearRect(0, 0, W, H); return; }
+          if (!document.hidden){
+            sg.clearRect(0, 0, W, H);
+            var phase = ((now - t0) / 1000 * SPEED) % GAP, paths = BUCKETS.map(function(){ return []; });
+            for (var s0 = -reach - GAP + phase; s0 <= reach + GAP; s0 += GAP){
+              var cx = W / 2 + tx * s0, cy = H / 2 + ty * s0, run = null, runB = -1;
+              for (var u = -reach; u <= reach; u += 7){
+                /* a crest is not a ruled line: it wanders a little along its length */
+                var wob = Math.sin(u * 0.012 + s0 * 0.05) * 3.2;
+                var x = cx + px * u + tx * wob, y = cy + py * u + ty * wob, b = -1;
+                if (x >= 0 && y >= 0 && x <= W && y <= H){
+                  var e = exAt(x, y);
+                  for (var k = 0; k < BUCKETS.length; k++) if (e >= BUCKETS[k][0]){ b = k; break; }
+                }
+                if (b !== runB){ if (run && run.length > 1) paths[runB].push(run); run = b >= 0 ? [] : null; runB = b; }
+                if (run) run.push([x, y]);
+              }
+              if (run && run.length > 1) paths[runB].push(run);
+            }
+            sg.lineCap = 'round'; sg.lineJoin = 'round'; sg.lineWidth = 1.25;
+            paths.forEach(function(list, k){
+              sg.strokeStyle = 'rgba(214,236,255,' + BUCKETS[k][1] + ')';
+              sg.beginPath();
+              list.forEach(function(r){ r.forEach(function(q, i){ i ? sg.lineTo(q[0], q[1]) : sg.moveTo(q[0], q[1]); }); });
+              sg.stroke();
+            });
+            /* the sea only: the map's own water mask cuts the crests at the real shoreline */
+            if (water){ sg.globalCompositeOperation = 'destination-in'; sg.drawImage(water, 0, 0, W, H); sg.globalCompositeOperation = 'source-over'; }
+          }
+          window._swellRAF = requestAnimationFrame(frame);
+        };
+        cancelAnimationFrame(window._swellRAF);
+        window._swellRAF = requestAnimationFrame(frame);
+        try { if (window.parent !== window) window.parent.postMessage({ labSwell: { dir: lead.dir, tp: lead.tp, model: !!lead.model } }, '*'); } catch(e){}
       })
       .then(function(){
         /* TomTom re-models the flow every MINUTE (its tiles expire in 60 s; read off the
@@ -3527,6 +3641,7 @@ function copyFlavor(){
     document.getElementById('geo').checked = !!m.geo;
     document.getElementById('traffic').checked = !!m.traffic;
     document.getElementById('surf').checked = !!m.surf;
+    window.LAB_SWELLDIR = (m.swellDir == null ? null : +m.swellDir);
     document.getElementById('radar').checked = !!(m.radar || m.sat);
     window.LAB_LOCK = !!m.lock;
     renderAll();

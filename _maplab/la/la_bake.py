@@ -1154,7 +1154,36 @@ def bake_sched():
     write('rail_sched.json', m)
 
 
-PARTS = {'sched': bake_sched, 'geo': bake_geo, 'air': bake_air, 'veg': bake_veg, 'region': bake_region, 'land': bake_land, 'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea}
+# ------------------------------------------------------------ swell mask ----
+# THE ISLANDS, FOR THE SWELL SHADOW. The surf layer draws the swell as moving crests and fades
+# them where land stands between a patch of sea and the open ocean the swell is coming from.
+# The islands that do that to Los Angeles are mostly OUTSIDE the map's frame -- Catalina, San
+# Clemente, San Nicolas, Santa Barbara Island, the northern Channel Islands -- so the lab cannot
+# use the view's own water mask. This is the land/sea mask of the whole Bight, 0.01 degree
+# (~1 km) cells, from ETOPO: land opaque, sea clear, a 12 KB PNG the page reads into an array.
+SWELL_BOX = (-121.0, 32.2, -117.0, 34.8)
+
+
+def bake_swell():
+    from PIL import Image
+    print('swell shadow mask')
+    a = dem_pull(SWELL_BOX, 0.01, ETOPO_15S)
+    land = (a > 0) & (a > -9000)
+    # the same rule as the seafloor: below sea level but cut off from the ocean is land
+    lab, nl = ndimage.label(~land)
+    edge = np.unique(np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]]))
+    sea = np.isin(lab, edge[edge > 0])
+    out = np.zeros(a.shape + (2,), 'uint8')
+    out[..., 1] = np.where(sea, 0, 255)
+    Image.fromarray(out).save(os.path.join(HERE, 'swell_land.png'), optimize=True)
+    print('  swell_land.png  %dx%d  land %.0f%%  %d KB' % (a.shape[1], a.shape[0], 100 * (~sea).mean(), os.path.getsize(os.path.join(HERE, 'swell_land.png')) // 1024))
+    for nm, lo, la in (('Catalina', -118.42, 33.39), ('San Clemente I.', -118.49, 32.90), ('San Nicolas I.', -119.50, 33.25),
+                       ('Santa Cruz I.', -119.75, 34.02), ('open sea', -119.0, 33.0), ('Santa Monica Bay', -118.60, 33.90)):
+        x = int((lo - SWELL_BOX[0]) / 0.01); y = int((SWELL_BOX[3] - la) / 0.01)
+        print('    %-18s %s' % (nm, 'LAND' if not sea[y, x] else 'sea'))
+
+
+PARTS = {'swell': bake_swell, 'sched': bake_sched, 'geo': bake_geo, 'air': bake_air, 'veg': bake_veg, 'region': bake_region, 'land': bake_land, 'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea}
 
 if __name__ == '__main__':
     print('home box  w %.4f  s %.4f  e %.4f  n %.4f' % home_box())
