@@ -943,22 +943,41 @@ RANGES = [  # name, (w, s, e, n), level m, face (wind FROM), crest note, view
     ('SPRING MOUNTAINS',         (-115.98, 35.95, -115.35, 36.55), 2200, 215, 'far'),
     ('SIERRA SAN PEDRO MARTIR',  (-116.00, 30.45, -115.10, 31.35), 1800, 250, 'far'),
 ]
-CORRIDORS = [  # name, [[lon, lat]...] in the direction the offshore wind runs, view
-    ('CAJON PASS',               [[-117.28, 34.58], [-117.44, 34.34], [-117.42, 34.19], [-117.50, 34.04]], 'near'),
-    ('SAN GORGONIO PASS',        [[-116.40, 33.91], [-116.72, 33.93], [-116.98, 33.93], [-117.22, 33.96]], 'near'),
-    ('SOLEDAD \u00b7 NEWHALL',  [[-118.10, 34.60], [-118.30, 34.46], [-118.50, 34.38], [-118.58, 34.26]], 'near'),
-    ('SANTA CLARA RIVER VALLEY', [[-118.62, 34.42], [-118.86, 34.40], [-119.10, 34.33], [-119.28, 34.24]], 'near'),
-    ('TEJON PASS',               [[-118.93, 35.00], [-118.88, 34.84], [-118.78, 34.70], [-118.64, 34.54]], 'near'),
-    ('SANTA ANA WIND GAPS',      [[-116.60, 34.75], [-117.20, 34.45], [-117.45, 34.20], [-117.75, 33.95]], 'far'),
-    ('GULF SURGE',               [[-114.75, 31.70], [-115.25, 32.65], [-115.75, 33.25], [-116.20, 33.80]], 'far'),
+# THE GAPS ARE TRACED, NOT DRAWN (user, 2026-09-19: "make sure these dashed lines are as accurate as
+# possible, they cant be generalized"). The first cut was four hand-placed points a pass. Now each
+# is the LEAST-COST PATH through the elevation grid between a point on the desert side and a
+# point on the coastal side, with height as the cost (1 + (m/150)^2, eight-connected, true
+# lengths): the line the terrain itself offers air that is falling to the sea -- it finds the
+# lowest saddle and then keeps to the canyon floor. On USGS 3DEP at 3 arc-seconds (~90 m); the
+# Gulf surge, 400 km of it, on ETOPO 15". Each trace is CHECKED against the pass it is named for
+# (how near it runs to the summit's published position) and the bake prints the miss.
+GAP_BOX = (-119.40, 33.60, -116.20, 35.10)
+CORRIDORS = [  # name, (lon, lat) desert end, (lon, lat) coastal end, view, (check name, lon, lat)
+    ('CAJON PASS',               (-117.37, 34.47), (-117.42, 34.14), 'near', ('Cajon Summit', -117.446, 34.349)),
+    ('SAN GORGONIO PASS',        (-116.55, 33.92), (-117.12, 33.97), 'near', ('Banning', -116.876, 33.925)),
+    ('SOLEDAD \u00b7 NEWHALL',  (-118.13, 34.50), (-118.50, 34.31), 'near', ('Newhall Pass', -118.507, 34.339)),
+    ('SANTA CLARA RIVER VALLEY', (-118.60, 34.42), (-119.25, 34.24), 'near', ('Santa Paula', -119.059, 34.354)),
+    ('TEJON PASS',               (-118.88, 34.96), (-118.62, 34.48), 'near', ('Tejon Pass', -118.877, 34.803)),
 ]
+GULF_SURGE = ('GULF SURGE', (-114.80, 31.85), (-116.30, 33.75), ('Salton Sea', -115.83, 33.30))
+
+
+def trace_gap(grid, box, a, b, eps):
+    from skimage import graph
+    w, s, e, n = box
+    H, W = grid.shape
+    rc = lambda p: (int(min(H - 1, max(0, (n - p[1]) / (n - s) * H))), int(min(W - 1, max(0, (p[0] - w) / (e - w) * W))))   # noqa: E731
+    cost = 1.0 + (np.clip(np.where(grid < -9000, 4000, grid), 0, None) / 150.0) ** 2
+    path, _ = graph.route_through_array(cost, rc(a), rc(b), fully_connected=True, geometric=True)
+    pts = [(w + (c + 0.5) / W * (e - w), n - (r + 0.5) / H * (n - s)) for r, c in path]
+    return pts, list(LineString(pts).simplify(eps).coords)
+
+
 PASSES = [  # name, lon, lat, elevation ft, view
     ('TEJON PASS \u00b7 THE GRAPEVINE', -118.877, 34.803, 4144, 'near'),
     ('CAJON SUMMIT', -117.446, 34.349, 4190, 'near'),
     ('DONNER PASS', -120.327, 39.316, 7056, 'far'), ('TEJON PASS', -118.877, 34.803, 4144, 'far'),
 ]
-COLD_EDGE = {'line': [[-120.47, 34.45], [-120.62, 34.05], [-120.70, 33.60]],
-             'cool': [-120.875, 34.458], 'warm': [-118.708, 33.625]}
 
 
 def dp_open(pts, eps):
@@ -970,7 +989,7 @@ def bake_geo():
     a = dem_pull(REGION, 15 / 3600.0, ETOPO_15S)
     H, W = a.shape
     w0, s0, e0, n0 = REGION
-    out = {'upland': [], 'corridor': [], 'pass': [], 'coldEdge': COLD_EDGE}
+    out = {'upland': [], 'corridor': [], 'pass': []}       # the cold edge is found LIVE by the lab, not drawn here
     for name, (w, s, e, n), level, face, view in RANGES:
         x0, x1 = int((w - w0) / (e0 - w0) * W), int((e - w0) / (e0 - w0) * W)
         y0, y1 = int((n0 - n) / (n0 - s0) * H), int((n0 - s) / (n0 - s0) * H)
@@ -1007,8 +1026,27 @@ def bake_geo():
         out['upland'].append({'n': name, 'r': rnd(ring, 4), 'open': bool(opened), 'crest': int(round(crest)),
                               'face': face, 'c': ctr, 'v': view})
         print('  %-26s %3d pts  %s  crest %d m' % (name, len(ring), 'open' if opened else 'closed', crest))
-    for name, line, view in CORRIDORS:
-        out['corridor'].append({'n': name, 'l': line, 'v': view})
+    g3 = dem_pull(GAP_BOX, 3 / 3600.0, None, LAND_SRC)
+    km = lambda p, q: math.hypot((p[0] - q[0]) * 111.32 * math.cos(math.radians(q[1])), (p[1] - q[1]) * 111.32)   # noqa: E731
+    for name, a_, b_, view, chk in CORRIDORS:
+        raw, line = trace_gap(g3, GAP_BOX, a_, b_, 0.0012)
+        if min(km(p, (chk[1], chk[2])) for p in raw) > 3.0:
+            # THE CHEAPEST WAY IS NOT ALWAYS THE NAMED ONE. Left alone, the Tejon trace ran 87 km
+            # round by a lower saddle and missed Tejon Pass by 6.5 km. A line labelled with a
+            # pass's name goes THROUGH that pass: two legs, joined at the summit's position.
+            r1, _ = trace_gap(g3, GAP_BOX, a_, (chk[1], chk[2]), 0.0012)
+            r2, _ = trace_gap(g3, GAP_BOX, (chk[1], chk[2]), b_, 0.0012)
+            raw = r1 + r2[1:]
+            line = list(LineString(raw).simplify(0.0012).coords)
+            print('    (%s: routed through the summit)' % name)
+        miss = min(km(p, (chk[1], chk[2])) for p in raw)
+        print('  %-26s %3d pts, %.0f km, passes %.1f km from %s' % (name, len(line), sum(km(raw[i], raw[i + 1]) for i in range(len(raw) - 1)), miss, chk[0]))
+        out['corridor'].append({'n': name, 'l': rnd(line, 4), 'v': view})
+        # the far view shows the same traces, unlabelled but for one name
+        out['corridor'].append({'n': 'SANTA ANA WIND GAPS' if name == 'CAJON PASS' else '', 'l': rnd(list(LineString(raw).simplify(0.006).coords), 4), 'v': 'far', 'kind': 'gap'})
+    raw, line = trace_gap(a, REGION, GULF_SURGE[1], GULF_SURGE[2], 0.004)
+    print('  %-26s %3d pts, passes %.1f km from %s' % (GULF_SURGE[0], len(line), min(km(p, (GULF_SURGE[3][1], GULF_SURGE[3][2])) for p in raw), GULF_SURGE[3][0]))
+    out['corridor'].append({'n': GULF_SURGE[0], 'l': rnd(line, 3), 'v': 'far'})
     for name, lo, la, ft, view in PASSES:
         out['pass'].append({'n': name, 'c': [lo, la], 'ft': ft, 'v': view})
     write('weather_geo.json', out)

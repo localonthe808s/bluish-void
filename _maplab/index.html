@@ -1912,6 +1912,48 @@ function makeFronts(ctx, runs, proj, view, tz){
       g.restore();
     } };
 }
+/* THE COLD EDGE IS MEASURED, NOT DRAWN (user 2026-09-19: "make sure these dashed lines are as accurate
+   as possible, they cant be generalized"). The first cut was three hand-placed points running due
+   south from Point Conception. The sea said otherwise the first time it was asked: the front ran
+   south-EAST, from the Point to the northern Channel Islands, round a 63 F upwelling plume.
+   So, New York's Gulf Stream method: one marine call over an 8 x 14 grid of sea-surface
+   temperature (Open-Meteo, 1/6 degree); the front's temperature is midway between the grid's cold
+   and warm masses (its 15th and 85th percentiles); on each row the line is where the water,
+   walked from the warm east, first falls through that temperature -- kept only where the sea
+   really changes there (2.5 F or more across three cells, ~45 km), so a row with no front draws
+   nothing, and a day with no front draws no line at all. Still dotted and soft: a 15 km grid
+   places a front to within a cell, and the line says so. The two water temperatures printed are
+   the model's own cells either side of it, not an average of ours. */
+var COLD = { t: 0, p: null };
+function coldEdgeRead(){
+  if (COLD.p && Date.now() - COLD.t < 1800000) return COLD.p;
+  COLD.t = Date.now();
+  var lats = [], lons = [], P = [];
+  for (var i = 0; i < 8; i++) lats.push(33.3 + 0.2 * i);
+  for (var j = 0; j < 14; j++) lons.push(-121.6 + j / 6);
+  lats.forEach(function(la){ lons.forEach(function(lo){ P.push([la, lo]); }); });
+  COLD.p = fetch('https://marine-api.open-meteo.com/v1/marine?latitude=' + P.map(function(q){ return q[0].toFixed(3); }).join(',')
+      + '&longitude=' + P.map(function(q){ return q[1].toFixed(3); }).join(',') + '&current=sea_surface_temperature&temperature_unit=fahrenheit')
+    .then(function(r){ return r.json(); }).then(function(d){
+      var T = function(r, c){ var o = d[r * lons.length + c]; var v = o && o.current && o.current.sea_surface_temperature; return (v == null) ? NaN : +v; };
+      var all = []; for (var r = 0; r < lats.length; r++) for (var c = 0; c < lons.length; c++){ var v = T(r, c); if (isFinite(v)) all.push(v); }
+      if (all.length < 40) return null;
+      all.sort(function(a, b){ return a - b; });
+      var mid = (all[Math.floor(all.length * 0.15)] + all[Math.floor(all.length * 0.85)]) / 2, line = [];
+      for (r = lats.length - 1; r >= 0; r--){                         // north to south
+        for (c = lons.length - 1; c > 0; c--){                         // walking west from the warm side
+          var e = T(r, c), w = T(r, c - 1);
+          if (!isFinite(e) || !isFinite(w) || !(e >= mid && w < mid)) continue;
+          var e2 = T(r, Math.min(lons.length - 1, c + 1)), w2 = T(r, Math.max(0, c - 2));
+          if (isFinite(e2) && isFinite(w2) && e2 - w2 >= 2.5)
+            line.push({ lon: lons[c] - (e - mid) / (e - w) / 6, lat: lats[r], cool: w2, warm: e2, coolAt: [lons[Math.max(0, c - 2)], lats[r]], warmAt: [lons[Math.min(lons.length - 1, c + 1)], lats[r]] });
+          break;
+        }
+      }
+      return line.length >= 3 ? { line: line, mid: mid } : { line: [], mid: mid };
+    }).catch(function(){ return null; });
+  return COLD.p;
+}
 var LA_PT = { x:-118.4912, y:34.0195, name:'SANTA MONICA' };
 /* AN ARC SAYS WHEN, NOT HOW LONG (user 2026-09-19: "the arches should be reading the time not
    the hours ahead, we fixed that for NYC"). The widget's grammar, cwDrawLeadArcs: the arrival
@@ -1925,7 +1967,7 @@ function arcClock(mins, tz){
   return { time: f({ hour:'numeric', minute:'2-digit' }),
            day: day(d) !== day(new Date()) ? f({ weekday:'short' }).toUpperCase() : null };
 }
-function makeMachinery(ctx, geo, R, proj, mpp, view, mode, frontRuns){
+function makeMachinery(ctx, geo, R, proj, mpp, view, mode, frontRuns, cold){
   var city = mode === 'city';
   var FR = (!city && frontRuns) ? makeFronts(ctx, frontRuns, proj, view, (VIEWS[document.getElementById('view').value] || {}).tz) : null;
   if (city) geo = null;                           // the half-hour view carries the rings only
@@ -1951,6 +1993,7 @@ function makeMachinery(ctx, geo, R, proj, mpp, view, mode, frontRuns){
       if (k.v !== kind) return;
       var surge = /SURGE/.test(k.n), on = !!(R && (surge ? R.surge : R.santaAna));
       paintList.push({ t:'co', k:k, on:on });
+      if (!k.n) return;                                   // a far-view trace that shares one name
       var mid = k.l[Math.floor(k.l.length / 2)];
       label(on ? hot : quiet, k.n, on ? (surge ? 'MONSOON MOISTURE RUNNING NORTH \u00b7 ' + (R.pt.yum.total_column_integrated_water_vapour / 25.4).toFixed(1) + ' IN OF WATER AT YUMA'
                                               : 'SANTA ANA BLOWING \u00b7 LAX ' + Math.abs(R.grad).toFixed(1) + ' MB BELOW DAGGETT') : null,
@@ -1964,12 +2007,12 @@ function makeMachinery(ctx, geo, R, proj, mpp, view, mode, frontRuns){
       label(hot, ps.n, 'FREEZING LEVEL ' + (Math.round(fz / 100) * 100).toLocaleString() + ' FT \u00b7 THE ROAD IS AT ' + ps.ft.toLocaleString() + ' FT',
             ps.c[0], ps.c[1], 'rgba(225,238,255,1)', 79);
     });
-    if (geo.coldEdge && R && R.sst){
-      paintList.push({ t:'ce', e:geo.coldEdge });
-      var e = geo.coldEdge;
-      label(quiet, 'CALIFORNIA CURRENT \u00b7 THE COLD EDGE', null, e.line[1][0] - 0.02, e.line[1][1], 'rgba(170,210,255,.9)', 41);
-      label(quiet, 'COOL WATER ' + Math.round(R.sst.cool) + '\u00b0F', null, e.cool[0] - 0.25, e.cool[1] - 0.22, 'rgba(170,210,255,.9)', 40);
-      label(quiet, 'WARM WATER ' + Math.round(R.sst.warm) + '\u00b0F', null, e.warm[0] - 0.15, e.warm[1] - 0.12, 'rgba(255,214,170,.9)', 40);
+    if (cold && cold.line && cold.line.length >= 3){
+      var CL = cold.line, m = CL[Math.floor(CL.length / 2)];
+      paintList.push({ t:'ce', e:{ line: CL.map(function(q){ return [q.lon, q.lat]; }) } });
+      label(quiet, 'THE COLD EDGE', null, m.lon, m.lat, 'rgba(170,210,255,.95)', 41);
+      label(quiet, 'COOL WATER ' + Math.round(m.cool) + '\u00b0F', null, m.coolAt[0] - 0.12, m.coolAt[1] - 0.1, 'rgba(170,210,255,.95)', 40);
+      label(quiet, 'WARM WATER ' + Math.round(m.warm) + '\u00b0F', null, m.warmAt[0] + 0.12, m.warmAt[1] - 0.1, 'rgba(255,214,170,.95)', 40);
     }
   }
   /* the arcs: 1, 2, 3 hours on the near views, 6 and 12 on the far one */
@@ -2030,7 +2073,18 @@ function makeMachinery(ctx, geo, R, proj, mpp, view, mode, frontRuns){
           g.lineTo(b.x - s * Math.cos(th + 0.45), b.y - s * Math.sin(th + 0.45)); g.closePath();
           g.fillStyle = it.on ? 'rgba(190,245,232,.95)' : TEAL + '.55)'; g.fill();
         } else if (it.t === 'ce'){
-          path(it.e.line, false); g.setLineDash([3, 5]); g.lineWidth = 1.4; g.strokeStyle = 'rgba(150,200,255,.5)'; g.stroke(); g.setLineDash([]);
+          /* soft body under a dotted core, smoothed THROUGH the measured points */
+          var cp = it.e.line.map(function(c){ var q = proj({ x:c[0], y:c[1] }); return [q.x, q.y]; }), sm = [];
+          for (var ci = 0; ci < cp.length - 1; ci++){
+            var c0 = cp[ci - 1] || cp[ci], c1 = cp[ci], c2 = cp[ci + 1], c3 = cp[ci + 2] || cp[ci + 1];
+            for (var ct = 0; ct < 10; ct++){ var u = ct / 10, u2 = u * u, u3 = u2 * u;
+              sm.push([0.5 * (2*c1[0] + (-c0[0]+c2[0])*u + (2*c0[0]-5*c1[0]+4*c2[0]-c3[0])*u2 + (-c0[0]+3*c1[0]-3*c2[0]+c3[0])*u3),
+                       0.5 * (2*c1[1] + (-c0[1]+c2[1])*u + (2*c0[1]-5*c1[1]+4*c2[1]-c3[1])*u2 + (-c0[1]+3*c1[1]-3*c2[1]+c3[1])*u3)]); }
+          }
+          sm.push(cp[cp.length - 1]);
+          g.beginPath(); sm.forEach(function(q, qi){ qi ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); });
+          g.lineWidth = 7; g.strokeStyle = 'rgba(150,200,255,.13)'; g.stroke();
+          g.setLineDash([2, 5]); g.lineWidth = 1.6; g.strokeStyle = 'rgba(190,225,255,.8)'; g.stroke(); g.setLineDash([]);
         } else if (it.t === 'pa'){
           var q = proj({ x:it.ps.c[0], y:it.ps.c[1] });
           g.beginPath(); g.arc(q.x, q.y, 3, 0, Math.PI * 2); g.fillStyle = 'rgba(225,238,255,.95)'; g.fill();
@@ -3050,9 +3104,9 @@ function drawCard(style){
                 }) }; };
                 /* space is claimed in this order: the city; the arcs and whatever is RUNNING;
                    the sky names; the quiet machinery; the rest of the geography */
-                return Promise.all([viewJson(vkey, 'wxGeo'), wxReads(), frontsRead()]).then(function(gr){
+                return Promise.all([viewJson(vkey, 'wxGeo'), wxReads(), frontsRead(), coldEdgeRead()]).then(function(gr){
                   if (stale()) return;
-                  var M = makeMachinery(tctx, gr[0], gr[1], out.project, VB.mpp, view, null, gr[2]);
+                  var M = makeMachinery(tctx, gr[0], gr[1], out.project, VB.mpp, view, null, gr[2], gr[3]);
                   var p1 = drawHoodNames(tctx, asGeo(vv.regionNames.slice(0, 1)), out.project, 10, { weight: 0.07 });
                   M.claimHot();
                   var p2 = drawSkyNames(tctx, vv.skyNames, out.project, VB.mpp);
