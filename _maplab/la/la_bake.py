@@ -327,6 +327,28 @@ def bake_rail():
 
 
 # ---------------------------------------------------------------- faults ----
+# THE TWO CALIFORNIA LAYERS DO NOT SPEAK THE SAME LANGUAGE. Layer 4 (onshore) names its
+# columns in lower case and layer 5 (offshore) in upper, with different words for the same
+# facts -- `age` against `FLT_AGE`, `linetype` against `LINE_TYPE`. Reading only the onshore
+# names shipped every offshore fault with no age and no certainty, so the whole San Pedro
+# shelf drew in the fallback weight, one flat colour, when the survey in fact dates half of
+# those traces to the latest Quaternary. Both schemas are normalised here into one.
+#
+# And `linetype` is NOT `mapped_certainty`. The first says how the trace is expressed --
+# well constrained, inferred, concealed -- and the second how well its position is known.
+# Taking `mapped_certainty or linetype` let "Good" win for almost every onshore trace and
+# threw the expression away, so 44 of the 124 traces off Long Beach were marked inferred by
+# the survey and drawn as solid fact. They are separate properties now: `trace` is what the
+# dash means, `certainty` and `scale` are how precisely it was located.
+FAULT_SENSE = {'D': 'Right lateral', 'S': 'Left lateral', 'N': 'Normal', 'R': 'Reverse',
+               'DR': 'Right lateral-reverse', 'RD': 'Reverse-right lateral',
+               'DN': 'Right lateral-normal', 'ND': 'Normal-right lateral',
+               'SR': 'Left lateral-reverse', 'RS': 'Reverse-left lateral',
+               'SN': 'Left lateral-normal', 'NS': 'Normal-left lateral'}
+FAULT_RATE = {'<0.2': 'Less than 0.2 mm/yr', '0.2-1': 'Between 0.2 and 1.0 mm/yr',
+              '1-5': 'Between 1.0 and 5.0 mm/yr', '>5': 'Greater than 5.0 mm/yr'}
+
+
 def bake_faults():
     print('faults')
     meta = json.loads(get(QFAULTS + '?f=json'))
@@ -339,18 +361,36 @@ def bake_faults():
             if g.get('type') not in ('LineString', 'MultiLineString'):
                 continue
             p = {k.lower(): v for k, v in f['properties'].items()}
+            blank = lambda v: None if v in (None, '', 'unspecified', 'Unspecified') else v
+            sense = blank(p.get('slip_sense'))
+            rate = blank(p.get('slip_rate'))
+            props = {'name': blank(p.get('fault_name')) or blank(p.get('name')),
+                     'section': blank(p.get('section_name')) or blank(p.get('section_na')),
+                     'age': blank(p.get('age')) or blank(p.get('flt_age')),
+                     'slip_rate': FAULT_RATE.get(rate, rate),
+                     'sense': FAULT_SENSE.get(sense, sense),
+                     # how the survey draws it: this is what the dash means
+                     'trace': blank(p.get('linetype')) or blank(p.get('line_type')),
+                     # how well it is located: a separate question
+                     'certainty': blank(p.get('mapped_certainty')),
+                     'scale': blank(p.get('mapped_scale')) or blank(p.get('mapped_sca'))}
             parts = [g['coordinates']] if g['type'] == 'LineString' else g['coordinates']
             for c in parts:
-                ls = LineString([(x[0], x[1]) for x in c]).simplify(0.0002)
-                if ls.length < 0.002:
+                if len(c) < 2:
                     continue
-                feats.append({'type': 'Feature',
-                              'properties': {'name': p.get('fault_name') or p.get('name'), 'section': p.get('section_name'),
-                                             'age': p.get('age'), 'slip_rate': p.get('slip_rate'),
-                                             'sense': p.get('slip_sense'), 'certainty': p.get('mapped_certainty') or p.get('linetype')},
+                # 0.00005 deg is about 5.5 m -- under a pixel at any zoom this map reaches.
+                # The old 0.0002 strayed up to 22 m, nearly 3 px once the card is zoomed in.
+                ls = LineString([(x[0], x[1]) for x in c]).simplify(0.00005)
+                # and only degenerate slivers are dropped. The old 200 m floor cut 939 of the
+                # 1922 traces over the home box -- 626 of them on the Sierra Madre front, which
+                # the survey delivers as hundreds of short segments -- and left it dotted.
+                if ls.length < 0.0002:
+                    continue
+                feats.append({'type': 'Feature', 'properties': props,
                               'geometry': {'type': 'LineString', 'coordinates': rnd(ls.coords)}})
     print('  %d traces; %s' % (len(feats), Counter(f['properties']['age'] for f in feats).most_common(6)))
-    print('  busiest: %s' % Counter(f['properties']['name'] for f in feats).most_common(8))
+    print('  trace:    %s' % Counter(f['properties']['trace'] for f in feats).most_common(8))
+    print('  busiest:  %s' % Counter(f['properties']['name'] for f in feats).most_common(8))
     write('faults.json', {'type': 'FeatureCollection', 'features': feats})
 
 
