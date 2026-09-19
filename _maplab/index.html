@@ -148,9 +148,9 @@ var VIEWS = {
      The hills are inside the city here (the Santa Monicas split it in two), so the
      terrain veils are NOT clipped out of the mask. */
   la:       { w:-118.85, s:33.69, e:-117.95, n:34.346, zoom:10, mppK:1.292,
-              bathy:'la/la_bathy.json',
-              bathyRamp:{ 10:'#16427A', 25:'#154077', 50:'#143D73', 100:'#12396D', 200:'#103465',
-                          400:'#0D2D59', 600:'#0A264C', 800:'#081F40' },
+              /* the seafloor is shaded relief from NOAA's 10 m / 30 m models, not bands:
+                 la/sea_index.json lists the images (la_bake.py sea) */
+              bathy:null, reliefs:'la/sea_index.json', nameClear:true,
               boroughs:'la/la_urban.json', hoodNames:'la/hood_labels.json',
               dropLabels:['Los Angeles'], dropHoodNames:true,
               subway:'la/rail_lines.json', stops:'la/rail_stops.json', bullets:'la/rail_colours.json',
@@ -1413,7 +1413,7 @@ function anchorInFrame(ctx, q, tw, th, bounds){
    read from a distance — Harlem, Midtown, Williamsburg, Flushing — and rank 2 is the
    fine grain, which waits until much closer in. */
 var HOOD_ZOOM = { 1: 55, 2: 22 };   // metres per pixel above which each tier stays away
-function drawHoodNames(ctx, geo, proj, mPerPx){
+function drawHoodNames(ctx, geo, proj, mPerPx, opts){
   /* MEASURES AND CLAIMS NOW, PAINTS LAST (user 2026-09-12: "put the
      neighborhood on top of it all not below lines"). drawSubway runs AFTER this
      in the chain and lays a white casing under every route, so at Herald Square
@@ -1460,7 +1460,7 @@ function drawHoodNames(ctx, geo, proj, mPerPx){
     q = anchorInFrame(ctx, q, tw, th, bpx);        // whole, or not at all
     if (!q) return;
     if (!labelFits(q.x - tw / 2 - 5, q.y - th / 2 - 4, tw + 10, th + 8)) return;
-    pending.push({ lines: lines, x: q.x, y: q.y, th: th });   // drawn at the end
+    pending.push({ lines: lines, x: q.x, y: q.y, th: th, tw: tw });   // drawn at the end
   });
   ctx.textAlign = 'left';
   try { ctx.letterSpacing = '0px'; } catch(e){}
@@ -1477,6 +1477,29 @@ function drawHoodNames(ctx, geo, proj, mPerPx){
        of a long async chain and inherits whatever state is current when it
        fires, so it states its own. */
     ctx.globalAlpha = 1;
+    /* THE STREETS YIELD UNDER A NAME (Los Angeles, 2026-09-19). The basin's grid is far
+       denser than New York's at the same scale, and a white name over a white mesh
+       came out as KOREATOWN in pencil. Not a halo -- that was tried and turned every
+       name into a sticker. The patch is the MASK'S OWN ORANGE, feathered to nothing, so
+       what the eye sees is the street mesh thinning out where a name sits, the way a
+       cartographer breaks a line for lettering. Opt-in per view (`nameClear`), so the
+       New York bake is untouched. */
+    if (opts && opts.clear){
+      ctx.save();
+      ctx.fillStyle = opts.clear; ctx.shadowColor = opts.clear;
+      pending.forEach(function(p){
+        var padX = 5 * _s, padY = 1.5 * _s, r = Math.min(p.th, 12 * _s) / 2;
+        var x = p.x - p.tw / 2 - padX, y = p.y - p.th / 2 - padY, w = p.tw + 2 * padX, h = p.th + 2 * padY;
+        [[9 * _s, 0.55], [4 * _s, 0.5]].forEach(function(pass){       // wide and faint, then tight
+          ctx.shadowBlur = pass[0]; ctx.globalAlpha = pass[1];
+          ctx.beginPath();
+          ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+          ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); ctx.fill();
+        });
+      });
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    }
     ctx.fillStyle = HOOD_INK;
     /* A SHADE BOLDER, WITHOUT A SYNTHESISED BOLD ("bolden them a slightly").
        Qellia is a single-weight face, so asking for 600/700 hands you the
@@ -1487,7 +1510,7 @@ function drawHoodNames(ctx, geo, proj, mPerPx){
        joins, or the serifs spike. */
     ctx.strokeStyle = HOOD_INK;
     ctx.lineJoin = 'round';
-    ctx.lineWidth = Math.max(0.45, 9 * _s * 0.06);
+    ctx.lineWidth = Math.max(0.45, 9 * _s * ((opts && opts.weight) || 0.06));
     pending.forEach(function(p){
       p.lines.forEach(function(l, i){
         var yy = p.y - p.th / 2 + LH / 2 + i * LH;
@@ -1948,6 +1971,20 @@ function drawCard(style){
             if (view.relief) return reliefImage(view.relief.img).then(function(img){
               if (!stale()) drawRelief(ctx, img, view.relief, out.project);
             });
+            /* a TIERED seafloor (Los Angeles): an index of images, coarse to fine, each
+               carrying the m/px below which it is worth decoding. Drawn in order, so the
+               finest survey in frame is the one left showing. */
+            return viewJson(vkey, 'reliefs').then(function(list){
+              var chain = Promise.resolve();
+              (list || []).forEach(function(r){
+                if (r.maxMpp && VB.mpp > r.maxMpp) return;
+                if (r.e < view.w || r.w > view.e || r.n < view.s || r.s > view.n) return;
+                chain = chain.then(function(){ return reliefImage(r.img); }).then(function(img){
+                  if (!stale()) drawRelief(ctx, img, r, out.project, r.maxMpp ? 24 : 48);
+                }).catch(function(){});
+              });
+              return chain;
+            });
           });
         };
         var deferred = !!(VIEWS[vkey] && VIEWS[vkey].boroughs);
@@ -2054,7 +2091,8 @@ function drawCard(style){
                 vv._dropped = true;
               }
               /* claims its space here, in priority order; paints last */
-              paintHoods = drawHoodNames(ctx, hn, out.project, nmpp());
+              paintHoods = drawHoodNames(ctx, hn, out.project, nmpp(),
+                vv.nameClear ? { clear: boroughFill(dark), weight: 0.085 } : null);
               return parkNamesFor(vkey);
             }).then(function(pn){
               if (stale()) return;

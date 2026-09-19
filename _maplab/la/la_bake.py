@@ -13,10 +13,11 @@ the lab paints Los Angeles with the same code that paints New York:
     rail_colours.json   route -> the agency's published colour
     faults.json         Quaternary faults                                       USGS Qfaults
     land_relief.json    terrain veils at fixed heights                          NOAA NCEI DEM mosaic
-    la_bathy.json       seafloor bands at fixed depths                          the same grid
+    sea_*.png           seafloor shaded relief, 3 / 1 / 1/3 arc-second tiers     NOAA CRM v2 + Santa Monica DEM
+    sea_index.json      where each image sits and the scale it is for
 
     python3 la_bake.py            # everything
-    python3 la_bake.py rail dem   # only those parts (city, rail, faults, dem)
+    python3 la_bake.py rail dem   # only those parts (city, rail, faults, dem, sea)
 
 The DEM is ONE pull far wider than the home box (Channel Islands to the San
 Gorgonio Pass) so a pan never runs off the terrain. Contours leave here as
@@ -52,9 +53,10 @@ PULL = (-119.60, 33.20, -117.30, 34.75)
 DEM_SIZE = (2300, 1550)                       # 0.001 deg a pixel, ~100 m
 
 TERRAIN_LEVELS = (150, 300, 600, 1200, 1800, 2400)
-BATHY_LEVELS = (10, 25, 50, 100, 200, 400, 600, 800)
 
 URBAN_URL = 'https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Urban/MapServer/6'
+PLACES_URL = 'https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Places_CouSub_ConCity_SubMCD/MapServer'
+PLACE_LAYERS = (4, 5)                          # incorporated places, census designated places
 CSA_URL = ('https://public.gis.lacounty.gov/public/rest/services/LACounty_Dynamic/'
            'Political_Boundaries/MapServer/23')
 QFAULTS = 'https://earthquake.usgs.gov/arcgis/rest/services/haz/Qfaults/MapServer'
@@ -125,7 +127,9 @@ MARQUEE = {'Downtown', 'Hollywood', 'Santa Monica', 'Beverly Hills', 'West Holly
            'Van Nuys', 'North Hollywood', 'Sherman Oaks', 'Torrance', 'Westchester', 'Highland Park', 'Encino',
            'Northridge', 'Pacific Palisades', 'Brentwood', 'Marina del Rey', 'El Segundo', 'Manhattan Beach',
            'Redondo Beach', 'Downey', 'Whittier', 'Alhambra', 'Pomona', 'El Monte', 'Studio City', 'Mid-City',
-           'Los Feliz', 'Crenshaw District', 'Santa Clarita', 'Woodland Hills', 'Calabasas', 'Carson'}
+           'Los Feliz', 'Crenshaw District', 'Santa Clarita', 'Woodland Hills', 'Calabasas', 'Carson',
+           'Anaheim', 'Fullerton', 'Huntington Beach', 'Santa Ana', 'Irvine', 'Newport Beach', 'Garden Grove',
+           'Thousand Oaks', 'Simi Valley', 'Oxnard', 'Ontario', 'Riverside', 'San Bernardino', 'Seal Beach'}
 HOLE_KM2 = 25.0
 RENAME = {'Silverlake': 'Silver Lake', 'Mid-city': 'Mid-City'}
 
@@ -170,8 +174,11 @@ def bake_city():
          'geometry': {'type': 'Polygon', 'coordinates': flat_rings(urban, 0.00012)}}]})
 
     rows = {}
+    county = []
     for f in arcgis_geojson(CSA_URL):
         a = f['properties']
+        if f.get('geometry'):
+            county.append(shape(f['geometry']).buffer(0))
         # a community name only where the County names PLACES with it: inside the City of
         # Los Angeles and in unincorporated land. Long Beach's rows are "Eastside",
         # "Downtown", "Pier" -- planning districts, and its Downtown is not LA's.
@@ -184,6 +191,22 @@ def bake_city():
         if g.is_empty or g.area * KM2 < 0.6:
             continue
         rows[nm] = g if nm not in rows else rows[nm].union(g)
+    # BEYOND THE COUNTY LINE the County's layer has nothing, and the frame's south-east
+    # corner is Orange County: orange, and nameless. Census places (incorporated + CDP)
+    # name everything else in the pull -- one national source, so Ventura and the Inland
+    # Empire come with it -- and a place is taken only where the County did not speak.
+    la_county = unary_union(county).buffer(0.002)
+    for lyr in PLACE_LAYERS:
+        for f in arcgis_geojson('%s/%d' % (PLACES_URL, lyr), extra=env.replace('0.0002', '0.0003')):
+            nm = (f['properties'].get('BASENAME') or '').strip()
+            if not nm or nm in rows or not f.get('geometry'):
+                continue
+            g0 = shape(f['geometry']).buffer(0)
+            if la_county.contains(g0.representative_point()):
+                continue
+            g = g0.intersection(urban)
+            if not g.is_empty and g.area * KM2 >= 0.6:
+                rows[nm] = g
     ranked = sorted(rows.items(), key=lambda kv: -kv[1].area)
     labels = []
     for i, (nm, g) in enumerate(ranked):
@@ -335,16 +358,119 @@ def bake_dem():
     # a veil is a shape to read from across the room, not a survey: soften the
     # grid first so a terrace edge is a line and not a fringe of 100 m teeth
     land = ndimage.gaussian_filter(a, 1.6)
-    sea = ndimage.gaussian_filter(a, 2.2)
     write('land_relief.json', {'type': 'FeatureCollection', 'features': [
         {'type': 'Feature', 'properties': {'h': h},
          'geometry': {'type': 'Polygon', 'coordinates': contour_rings(land, h, True)}} for h in TERRAIN_LEVELS]})
-    write('la_bathy.json', {'type': 'FeatureCollection', 'features': [
-        {'type': 'Feature', 'properties': {'d': d},
-         'geometry': {'type': 'Polygon', 'coordinates': contour_rings(sea, -d, False)}} for d in BATHY_LEVELS]})
 
 
-PARTS = {'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem}
+# ------------------------------------------------------------------- sea ----
+# THE SEAFLOOR AT THE BEST RESOLUTION THAT EXISTS (user, 2026-09-19: "make sure the pacific
+# bathymetry is the best detail we can get"). The first pass contoured one 100 m grid into
+# eight flat bands. NOAA's mosaic holds far more than that here -- read from its own
+# catalogue, not assumed:
+#
+#     santa_monica_ca_navd_88   1/3 arc-second (~10 m)   -119.14..-117.80, 33.20..34.20
+#     socal_1as (CRM v2)        1 arc-second   (~30 m)   the whole borderland
+#
+# so the 10 m model covers the ENTIRE home frame out past Catalina: Redondo and Santa
+# Monica canyons, the Palos Verdes shelf, the San Pedro escarpment, the harbour channels.
+# Three tiers, each drawn only when the view is close enough to use it (`maxMpp`):
+#
+#     3 arc-second   the whole pull, one image      always
+#     1 arc-second   the whole pull, 3 x 2 images   below 60 m/px
+#     1/3 arc-second the home frame's sea, 4 images below 25 m/px
+#
+# LOCK THE RASTER, MEASURED. Asked for 1/3 arc-second with the service's default mosaic
+# rule, it answered with something coarse resampled into blocks: on the Redondo Canyon
+# slope only 2.2% of horizontally adjacent pixels differed. The same request locked to
+# the Santa Monica model: 97.5%. The default order is not "finest on top", so every tier
+# names the raster it wants (OBJECTIDs from the service's own catalogue).
+RASTER = {'13as': 173, '1as': 196, '3as': 197}     # santa_monica_ca_navd_88, socal_1as, socal_3as
+#
+# ONE COLOUR PER PIXEL: a depth ramp that starts AT the map's own water colour and walks
+# down into the navy, times a hillshade of the depth field -- never stacked veils. Land is
+# transparent. Because the shallowest tone IS the water colour, the DEM's coastline never
+# has to agree with the vector coast: where they differ the pixel is water-coloured either
+# way. The images stay plate carree; the lab's drawRelief projects them strip by strip.
+SEA_RAMP = [(0, (0x17, 0x45, 0x7F)), (50, (0x15, 0x40, 0x78)), (200, (0x11, 0x38, 0x69)),
+            (500, (0x0D, 0x2E, 0x59)), (900, (0x09, 0x24, 0x4A)), (2000, (0x06, 0x1A, 0x38))]
+HOME_SEA = (-118.85, 33.69, -117.95, 34.05)        # the home frame, south of the last salt water
+
+
+def dem_pull(box, step, lock):
+    w, s, e, n = box
+    size = (int(round((e - w) / step)), int(round((n - s) / step)))
+    q = {'bbox': '%f,%f,%f,%f' % box, 'bboxSR': 4326, 'imageSR': 4326, 'size': '%d,%d' % size,
+         'format': 'tiff', 'pixelType': 'F32', 'noData': -9999,
+         'interpolation': 'RSP_BilinearInterpolation', 'f': 'image',
+         'mosaicRule': json.dumps({'mosaicMethod': 'esriMosaicLockRaster', 'lockRasterIds': [lock]})}
+    for k in range(4):
+        try:
+            return tifffile.imread(io.BytesIO(get(DEM_SRC + '?' + urllib.parse.urlencode(q), 600))).astype('float32')
+        except Exception as ex:
+            print('    retry %d (%s)' % (k + 1, ex))
+    raise RuntimeError('DEM pull failed for %s' % (box,))
+
+
+def sea_image(a, box, zfac, name):
+    from PIL import Image
+    w, s, e, n = box
+    H, W = a.shape
+    sea = (a < -0.3) & (a > -9000)                 # outside a locked raster is nodata, not abyss
+    if sea.mean() < 0.002:
+        return None
+    d = np.clip(-a, 0, None)
+    xs = [r[0] for r in SEA_RAMP]
+    rgb = np.stack([np.interp(d, xs, [r[1][c] for r in SEA_RAMP]) for c in range(3)], -1)
+    # hillshade in true metres; the field is eased first so a survey's track lines do not
+    # become the texture, and the relief fades in over the first metres so surf is flat
+    g = ndimage.gaussian_filter(np.where(a > 0, 0, a), 1.0)
+    my = (n - s) / H * 111320.0
+    mx = (e - w) / W * 111320.0 * math.cos(math.radians((s + n) / 2))
+    gy, gx = np.gradient(g * zfac, my, mx)
+    az, alt = math.radians(315), math.radians(45)
+    slope = np.arctan(np.hypot(gx, gy))
+    aspect = np.arctan2(gy, -gx)
+    hs = math.sin(alt) * np.cos(slope) + math.cos(alt) * np.sin(slope) * np.cos(az - math.pi / 2 - aspect)
+    shade = np.clip(hs / math.sin(alt), 0.58, 1.14)
+    shade = 1 + (shade - 1) * np.clip(d / 6.0, 0, 1)
+    out = np.zeros((H, W, 4), 'uint8')
+    out[..., :3] = np.clip(rgb * shade[..., None], 0, 255)
+    out[..., 3] = np.where(sea, 255, 0)
+    im = Image.fromarray(out)
+    # a single-hue ramp survives 96 colours untouched, and the file drops ~5x
+    al = im.getchannel('A')
+    pim = im.convert('RGB').quantize(96, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE).convert('RGB')
+    pim.putalpha(al)
+    pim.save(os.path.join(HERE, name), optimize=True)
+    print('  %-22s %5dx%-5d %6d KB  sea %.0f%%' % (name, W, H, os.path.getsize(os.path.join(HERE, name)) // 1024, 100 * sea.mean()))
+    return {'img': 'la/' + name, 'w': w, 's': s, 'e': e, 'n': n}
+
+
+def grid(box, nx, ny):
+    w, s, e, n = box
+    for j in range(ny):
+        for i in range(nx):
+            yield (w + (e - w) * i / nx, s + (n - s) * j / ny, w + (e - w) * (i + 1) / nx, s + (n - s) * (j + 1) / ny), '%d%d' % (j, i)
+
+
+def bake_sea():
+    print('seafloor relief')
+    idx = []
+    r = sea_image(dem_pull(PULL, 3 / 3600.0, RASTER['3as']), PULL, 5.0, 'sea_3as.png')
+    idx.append(dict(r, feather=True))
+    for b, tag in grid(PULL, 3, 2):
+        r = sea_image(dem_pull(b, 1 / 3600.0, RASTER['1as']), b, 3.5, 'sea_1as_%s.png' % tag)
+        if r:
+            idx.append(dict(r, maxMpp=60))
+    for b, tag in grid(HOME_SEA, 4, 1):
+        r = sea_image(dem_pull(b, 1 / 10800.0, RASTER['13as']), b, 2.2, 'sea_13as_%s.png' % tag)
+        if r:
+            idx.append(dict(r, maxMpp=25))
+    write('sea_index.json', idx)
+
+
+PARTS = {'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea}
 
 if __name__ == '__main__':
     print('home box  w %.4f  s %.4f  e %.4f  n %.4f' % home_box())
