@@ -157,6 +157,7 @@ var VIEWS = {
               /* shaded relief, not terraces: the veils (la/land_relief.json) were built for
                  New York's 120 m of relief and barely registered against 3,000 m */
               landReliefs:'la/land_index.json', veg:'la/veg_index.json', airfields:'la/airfields.json',
+              wxGeo:'la/weather_geo.json',
               depthFade:[-119.60,33.20,-117.30,34.75],
               faults:'la/faults.json', radar:'ksox',
               /* [name, lon, lat, only-below-this-m/px]: the far ones stay out of the 3-hour view's way */
@@ -167,10 +168,9 @@ var VIEWS = {
                  the SKY NAMES below. [name, lon, lat, only-below-this-m/px] */
               regionNames:[ ['Los Angeles',-118.25,34.02],
                 ['Catalina',-118.42,33.39,700], ['Point Conception',-120.47,34.45,700],
-                ['Channel Islands',-119.85,33.98,700], ['San Gabriel Mountains',-117.9,34.33,700],
-                ['Santa Monica Mountains',-118.75,34.10,700], ['Colorado Desert',-115.6,33.2,700],
-                ['Sierra Nevada',-118.9,37.0], ['Mojave Desert',-115.9,35.25], ['Central Valley',-120.6,36.9],
-                ['Coast Ranges',-121.2,36.15], ['Great Basin',-116.4,39.4],
+                ['Channel Islands',-119.85,33.98,700], ['Colorado Desert',-115.6,33.2,700],
+                /* the ranges are not here: the weather machinery traces and names them */
+                ['Mojave Desert',-115.9,35.25], ['Central Valley',-120.6,36.9], ['Great Basin',-116.4,39.4],
                 ['Baja California',-115.2,30.3], ['Pacific Ocean',-124.5,32.0], ['Gulf of California',-113.6,29.6] ],
               /* SKY NAMES, the New York view's idea carried west: real places and summits whose
                  names look up -- space, sky, cloud, blue. Every one is from a sweep of
@@ -1650,6 +1650,192 @@ function drawAirBeach(ctx, data, proj, mpp, view){
   g.restore();
 }
 
+/* THE WEATHER INTELLIGENCE for the wide views (2026-09-19): the lead arcs, and the
+   machinery of la/weather_geo.json brought to life by a handful of model reads.
+
+   THE READS are Open-Meteo's (CORS-open, keyless), one forecast call over nine points and
+   one marine call over two, cached ten minutes. Every number shown is the MODEL'S, and the
+   strip says so; nothing here is an observation, and nothing is derived beyond a difference
+   of two published values.
+
+   THE RULE, as in New York: standing geology is dim, and only what is RUNNING NOW
+   brightens. So on a settled day the map is quiet. What can run:
+     a range       when the 850 mb flow climbs it: from within 50 deg of the bearing its
+                   wet face looks toward, at 20 kt or more, with 18 mm of water to wring
+     the wind gaps when Great Basin air is falling to the sea: mean-sea-level pressure at
+                   LAX at least 3 mb BELOW Daggett's (the forecasters' own LAX-DAG gradient)
+                   and the 850 mb wind at Daggett out of the north-east quadrant
+     the surge     when the low desert is loaded: 35 mm of water at Yuma on a southerly
+     a pass        when the freezing level is within 2,500 ft of the road
+
+   THE ARCS say where weather has to be NOW to reach Los Angeles in so many hours. In the
+   widget the motion is MEASURED off the radar loop; the lab has one frame, so it uses the
+   widget's fallback, the steering wind (700 mb, the mean of the city and a point 250 km
+   upstream). Under 4 kt there is no meaningful "upstream" and no arc is drawn. */
+var WX = { t: 0, p: null };
+var WX_PTS = [['lax',33.94,-118.41], ['dag',34.85,-116.79], ['sea',33.50,-121.00], ['sgm',34.30,-118.00],
+              ['sie',37.20,-119.60], ['baj',31.00,-115.80], ['yum',32.70,-114.60], ['don',39.32,-120.33], ['tej',34.80,-118.88]];
+function wxReads(){
+  if (WX.p && Date.now() - WX.t < 600000) return WX.p;
+  WX.t = Date.now();
+  var u = 'https://api.open-meteo.com/v1/forecast?latitude=' + WX_PTS.map(function(q){ return q[1]; }).join(',')
+    + '&longitude=' + WX_PTS.map(function(q){ return q[2]; }).join(',')
+    + '&current=pressure_msl,temperature_2m,freezing_level_height,total_column_integrated_water_vapour,temperature_925hPa,'
+    + 'wind_speed_850hPa,wind_direction_850hPa,wind_speed_700hPa,wind_direction_700hPa&wind_speed_unit=kn&temperature_unit=fahrenheit';
+  var m = 'https://marine-api.open-meteo.com/v1/marine?latitude=34.458,33.625&longitude=-120.875,-118.708'
+    + '&current=sea_surface_temperature&temperature_unit=fahrenheit';
+  var j = function(url){ return fetch(url).then(function(r){ return r.json(); }); };
+  WX.p = Promise.all([j(u), j(m).catch(function(){ return null; })]).then(function(r){
+    var pt = {};
+    r[0].forEach(function(q, i){ pt[WX_PTS[i][0]] = q.current; });
+    var vec = function(c){ var a = c.wind_direction_700hPa * Math.PI / 180; return [c.wind_speed_700hPa * Math.sin(a), c.wind_speed_700hPa * Math.cos(a)]; };
+    var a = vec(pt.lax), b = vec(pt.sea), sx = (a[0] + b[0]) / 2, sy = (a[1] + b[1]) / 2;
+    var R = { pt: pt, at: pt.lax.time,
+      steer: { kt: Math.hypot(sx, sy), from: (Math.atan2(sx, sy) * 180 / Math.PI + 360) % 360 },
+      grad: pt.lax.pressure_msl - pt.dag.pressure_msl,
+      sst: r[1] && r[1].length === 2 ? { cool: r[1][0].current.sea_surface_temperature, warm: r[1][1].current.sea_surface_temperature } : null };
+    var d = pt.dag.wind_direction_850hPa;
+    R.santaAna = R.grad <= -3 && (d >= 330 || d <= 120);
+    R.surge = pt.yum.total_column_integrated_water_vapour >= 35 && pt.yum.wind_direction_850hPa >= 110 && pt.yum.wind_direction_850hPa <= 215;
+    try { if (window.parent !== window) window.parent.postMessage({ labReads: R }, '*'); } catch(e){}
+    return R;
+  }).catch(function(){ return null; });
+  return WX.p;
+}
+var LA_PT = { x:-118.25, y:34.05 };
+function makeMachinery(ctx, geo, R, proj, mpp, view){
+  var near = mpp < 700, kind = near ? 'near' : 'far', hot = [], quiet = [], paintList = [];
+  var EARTH = 'rgba(216,196,158,', TEAL = 'rgba(126,206,192,';
+  var nameFont = '500 8.5px QelliaRegular, "Bodoni Moda", Georgia, serif', readFont = '700 7.5px system-ui, sans-serif';
+  var ang = function(a, b){ var d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
+  var inFrame = function(q){ return q.x > 10 && q.y > 10 && q.x < ctx.canvas.width - 10 && q.y < ctx.canvas.height - 10; };
+  /* a label: a name in the map's own hand, and under it (only when running) the read in sans */
+  var label = function(list, name, read, lon, lat, col, rank){ list.push({ name:name, read:read, q:proj({ x:lon, y:lat }), col:col, rank:rank }); };
+  if (geo){
+    (geo.upland || []).forEach(function(u){
+      if (u.v !== kind) return;
+      /* the flow that matters is the one arriving: offshore for the coastal ranges, the
+         range's own for the Sierra and Baja */
+      var c = R && R.pt[/SIERRA NEVADA|WHITE|SPRING/.test(u.n) ? 'sie' : /PEDRO|PENINSULAR/.test(u.n) ? 'baj' : 'sea'];
+      var on = !!(c && ang(c.wind_direction_850hPa, u.face) <= 50 && c.wind_speed_850hPa >= 20 && c.total_column_integrated_water_vapour >= 18);
+      paintList.push({ t:'up', u:u, on:on });
+      label(on ? hot : quiet, u.n, on ? 'FLOW CLIMBING \u00b7 850 MB FROM ' + Math.round(c.wind_direction_850hPa) + '\u00b0 AT ' + Math.round(c.wind_speed_850hPa) + ' KT' : null,
+            u.c[0], u.c[1], on ? 'rgba(252,236,200,1)' : EARTH + '.78)', on ? 78 : 30);
+    });
+    (geo.corridor || []).forEach(function(k){
+      if (k.v !== kind) return;
+      var surge = /SURGE/.test(k.n), on = !!(R && (surge ? R.surge : R.santaAna));
+      paintList.push({ t:'co', k:k, on:on });
+      var mid = k.l[Math.floor(k.l.length / 2)];
+      label(on ? hot : quiet, k.n, on ? (surge ? 'MONSOON MOISTURE RUNNING NORTH \u00b7 ' + (R.pt.yum.total_column_integrated_water_vapour / 25.4).toFixed(1) + ' IN OF WATER AT YUMA'
+                                              : 'SANTA ANA BLOWING \u00b7 LAX ' + Math.abs(R.grad).toFixed(1) + ' MB BELOW DAGGETT') : null,
+            mid[0], mid[1], on ? 'rgba(210,250,240,1)' : TEAL + '.8)', on ? 78 : 28);
+    });
+    (geo.pass || []).forEach(function(ps){
+      if (ps.v !== kind || !R) return;
+      var c = R.pt[/DONNER/.test(ps.n) ? 'don' : /CAJON/.test(ps.n) ? 'sgm' : 'tej'], fz = c.freezing_level_height * 3.281;
+      if (fz > ps.ft + 2500) return;                 // well above the road: nothing to say
+      paintList.push({ t:'pa', ps:ps });
+      label(hot, ps.n, 'FREEZING LEVEL ' + (Math.round(fz / 100) * 100).toLocaleString() + ' FT \u00b7 THE ROAD IS AT ' + ps.ft.toLocaleString() + ' FT',
+            ps.c[0], ps.c[1], 'rgba(225,238,255,1)', 79);
+    });
+    if (geo.coldEdge && R && R.sst){
+      paintList.push({ t:'ce', e:geo.coldEdge });
+      var e = geo.coldEdge;
+      label(quiet, 'CALIFORNIA CURRENT \u00b7 THE COLD EDGE', null, e.line[1][0] - 0.02, e.line[1][1], 'rgba(170,210,255,.9)', 41);
+      label(quiet, 'COOL WATER ' + Math.round(R.sst.cool) + '\u00b0F', null, e.cool[0] - 0.25, e.cool[1] - 0.22, 'rgba(170,210,255,.9)', 40);
+      label(quiet, 'WARM WATER ' + Math.round(R.sst.warm) + '\u00b0F', null, e.warm[0] - 0.15, e.warm[1] - 0.12, 'rgba(255,214,170,.9)', 40);
+    }
+  }
+  /* the arcs: 1, 2, 3 hours on the near views, 6 and 12 on the far one */
+  var arcs = [];
+  if (R && R.steer.kt >= 4 && !(VIEWS[document.getElementById('view').value] || {}).sat){   // no arcs on the satellite view
+    var c0 = proj(LA_PT), kmh = R.steer.kt * 1.852;
+    (near ? [1, 2, 3] : [6, 12]).forEach(function(h){
+      var rpx = kmh * h * 1000 / Math.cos(34.05 * Math.PI / 180) / mpp;
+      if (rpx < 14) return;
+      arcs.push({ h:h, r:rpx, c:c0, from:R.steer.from });
+      var b = R.steer.from * Math.PI / 180;
+      hot.unshift({ name: h + ' HR', arc:true, q:{ x:c0.x + Math.sin(b) * (rpx + 9), y:c0.y - Math.cos(b) * (rpx + 9) }, col:'#fff', rank:80 });
+    });
+  }
+  var placed = [];
+  var claim = function(list){
+    ctx.save();
+    list.sort(function(a, b){ return b.rank - a.rank; }).forEach(function(L){
+      if (!inFrame(L.q)) return;
+      ctx.font = L.arc ? '800 9.5px system-ui, sans-serif' : nameFont;
+      try { ctx.letterSpacing = L.arc ? '0.08em' : '0.18em'; } catch(e){}
+      var w1 = ctx.measureText(L.name).width, w2 = 0;
+      if (L.read){ ctx.font = readFont; try { ctx.letterSpacing = '0.06em'; } catch(e){} w2 = ctx.measureText(L.read).width; }
+      var w = Math.max(w1, w2) + 8, h = L.read ? 24 : 13;
+      var x = Math.max(4, Math.min(ctx.canvas.width - w - 4, L.q.x - w / 2));
+      if (!labelFits(x, L.q.y - h / 2, w, h)) return;
+      L.x = x + w / 2; placed.push(L);
+    });
+    try { ctx.letterSpacing = '0px'; } catch(e){}
+    ctx.restore();
+  };
+  return {
+    claimHot: function(){ claim(hot); }, claimQuiet: function(){ claim(quiet); },
+    paint: function(){
+      var g = ctx; g.save(); g.lineJoin = 'round'; g.lineCap = 'round'; g.globalAlpha = 1;
+      var path = function(pts, close){ g.beginPath(); pts.forEach(function(c, i){ var q = proj({ x:c[0], y:c[1] }); i ? g.lineTo(q.x, q.y) : g.moveTo(q.x, q.y); }); if (close) g.closePath(); };
+      paintList.forEach(function(it){
+        if (it.t === 'up'){
+          path(it.u.r, !it.u.open);
+          if (!it.u.open){ g.fillStyle = it.on ? 'rgba(246,214,150,.10)' : EARTH + '.05)'; g.fill(); }
+          g.setLineDash([]); g.lineWidth = it.on ? 1.9 : 1.1;
+          g.strokeStyle = it.on ? 'rgba(246,214,150,.95)' : EARTH + '.40)'; g.stroke();
+        } else if (it.t === 'co'){
+          path(it.k.l, false);
+          g.setLineDash([6, 5]); g.lineWidth = it.on ? 2.2 : 1.3;
+          g.strokeStyle = it.on ? 'rgba(190,245,232,.95)' : TEAL + '.42)'; g.stroke(); g.setLineDash([]);
+          /* the head says which way the air runs when it runs */
+          var n = it.k.l.length, a = proj({ x:it.k.l[n-2][0], y:it.k.l[n-2][1] }), b = proj({ x:it.k.l[n-1][0], y:it.k.l[n-1][1] });
+          var th = Math.atan2(b.y - a.y, b.x - a.x), s = it.on ? 6 : 4.5;
+          g.beginPath(); g.moveTo(b.x, b.y); g.lineTo(b.x - s * Math.cos(th - 0.45), b.y - s * Math.sin(th - 0.45));
+          g.lineTo(b.x - s * Math.cos(th + 0.45), b.y - s * Math.sin(th + 0.45)); g.closePath();
+          g.fillStyle = it.on ? 'rgba(190,245,232,.95)' : TEAL + '.55)'; g.fill();
+        } else if (it.t === 'ce'){
+          path(it.e.line, false); g.setLineDash([3, 5]); g.lineWidth = 1.4; g.strokeStyle = 'rgba(150,200,255,.5)'; g.stroke(); g.setLineDash([]);
+        } else if (it.t === 'pa'){
+          var q = proj({ x:it.ps.c[0], y:it.ps.c[1] });
+          g.beginPath(); g.arc(q.x, q.y, 3, 0, Math.PI * 2); g.fillStyle = 'rgba(225,238,255,.95)'; g.fill();
+        }
+      });
+      /* arcs: a dark dashed casing, then white that is strongest dead upstream and fades to
+         either side -- the direction is a best estimate, and the fade is how it says so */
+      arcs.forEach(function(A){
+        var mid = (A.from - 90) * Math.PI / 180, half = 42 * Math.PI / 180;
+        g.setLineDash([15, 9]); g.lineWidth = 5; g.strokeStyle = 'rgba(8,10,16,.8)';
+        g.beginPath(); g.arc(A.c.x, A.c.y, A.r, mid - half, mid + half); g.stroke();
+        for (var i = 0; i < 14; i++){
+          var u0 = mid - half + (2 * half) * i / 14, u1 = u0 + (2 * half) / 14, off = ((u0 + u1) / 2 - mid) / half;
+          var wt = Math.exp(-off * off / 0.32);
+          g.lineWidth = 1.4 + 2.2 * wt; g.strokeStyle = 'rgba(255,255,255,' + (0.2 + 0.75 * wt).toFixed(3) + ')';
+          g.beginPath(); g.arc(A.c.x, A.c.y, A.r, u0, u1); g.stroke();
+        }
+        g.setLineDash([]);
+      });
+      g.textAlign = 'center'; g.textBaseline = 'middle';
+      placed.forEach(function(L){
+        g.font = L.arc ? '800 9.5px system-ui, sans-serif' : nameFont;
+        try { g.letterSpacing = L.arc ? '0.08em' : '0.18em'; } catch(e){}
+        var y = L.read ? L.q.y - 5 : L.q.y;
+        g.lineWidth = 2.6; g.strokeStyle = 'rgba(8,10,16,.78)'; g.strokeText(L.name, L.x, y);
+        g.fillStyle = L.col; g.fillText(L.name, L.x, y);
+        if (L.read){
+          g.font = readFont; try { g.letterSpacing = '0.06em'; } catch(e){}
+          g.strokeText(L.read, L.x, y + 11); g.fillStyle = L.col; g.fillText(L.read, L.x, y + 11);
+        }
+      });
+      try { g.letterSpacing = '0px'; } catch(e){}
+      g.restore();
+    }
+  };
+}
+
 /* SKY NAMES: a mark and a name beside it, in the neighbourhood names' own hand. A place is
    a dot, a summit a small open triangle. Same two-step as drawHoodNames -- claim the space
    now, in priority order, and hand back a painter for the very end -- so nothing drawn
@@ -2303,11 +2489,19 @@ function drawCard(style){
                 }).map(function(r){
                   return { type:'Feature', properties:{ name:r[0], rank:1 }, geometry:{ type:'Point', coordinates:[r[1], r[2]] } };
                 }) }; };
-                /* space is claimed in this order: the city, the sky names, then the landforms */
-                var p1 = drawHoodNames(ctx, asGeo(vv.regionNames.slice(0, 1)), out.project, 10, { weight: 0.07 });
-                var p2 = drawSkyNames(ctx, vv.skyNames, out.project, VB.mpp);
-                var p3 = drawHoodNames(ctx, asGeo(vv.regionNames.slice(1)), out.project, 10, { weight: 0.07, keep: true });
-                paintHoods = function(){ p3(); p2(); p1(); };
+                /* space is claimed in this order: the city; the arcs and whatever is RUNNING;
+                   the sky names; the quiet machinery; the rest of the geography */
+                return Promise.all([viewJson(vkey, 'wxGeo'), wxReads()]).then(function(gr){
+                  if (stale()) return;
+                  var M = makeMachinery(ctx, gr[0], gr[1], out.project, VB.mpp, view);
+                  var p1 = drawHoodNames(ctx, asGeo(vv.regionNames.slice(0, 1)), out.project, 10, { weight: 0.07 });
+                  M.claimHot();
+                  var p2 = drawSkyNames(ctx, vv.skyNames, out.project, VB.mpp);
+                  M.claimQuiet();
+                  var p3 = drawHoodNames(ctx, asGeo(vv.regionNames.slice(1)), out.project, 10, { weight: 0.07, keep: true });
+                  paintHoods = function(){ M.paint(); p3(); p2(); p1(); };
+                  return parkNamesFor(vkey);
+                });
               } else
               paintHoods = drawHoodNames(ctx, hn, out.project, nmpp(),
                 vv.nameClear ? { clear: boroughFill(dark), weight: 0.085 } : null);

@@ -19,6 +19,7 @@ the lab paints Los Angeles with the same code that paints New York:
     land_index.json
     veg_*.png           what is actually growing, one green weighted by cover     ESA WorldCover 2021
     veg_index.json
+    weather_geo.json    the weather machinery: traced ranges, wind gaps, passes, the cold edge   ETOPO 15" + hand-set
     airfields.json      airfields (field, aprons, taxiways, runways, terminals) + beaches   OpenStreetMap
 
     python3 la_bake.py            # everything
@@ -898,7 +899,120 @@ def bake_air():
     write('airfields.json', {'fields': out, 'beaches': beaches})
 
 
-PARTS = {'air': bake_air, 'veg': bake_veg, 'region': bake_region, 'land': bake_land, 'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea}
+# ----------------------------------------------------------- machinery ----
+# THE WEATHER MACHINERY (user, 2026-09-19: "can you add the weather intelligence now ... we
+# havent made any geological weather features for those views"). New York's wide views carry
+# a layer that says what the landforms DO -- the snowbelt uplands, the lake-effect gate, the
+# Appalachian gaps, the Gulf Stream's north wall. Los Angeles has its own machine, and it is
+# a different one:
+#
+#   THE WALL.      The Transverse Ranges run east-west, square across the flow of every
+#                  Pacific storm, and wring two and three times the basin's rain out of the
+#                  same cloud. A range carries `face`: the bearing the wind must come FROM to
+#                  climb it. The lab lights a range when the 850 mb flow does.
+#   THE GAPS.      Santa Ana winds are Great Basin air falling to the sea, and it falls
+#                  through four doors: Cajon, San Gorgonio, Soledad-Newhall and the Santa
+#                  Clara River valley (Tejon is the fifth, the Grapevine's). Hand-set, dashed,
+#                  soft -- where air runs is a tendency, not a survey.
+#   THE COLD EDGE. Point Conception is where the coast turns east and the upwelled water of
+#                  the California Current stops: cold sea to the west, the warm Bight to the
+#                  east -- the marine layer's supply and Los Angeles' Gulf Stream wall.
+#   THE PASSES.    Where the freezing level meets a road: Tejon (the Grapevine), Cajon, Donner.
+#
+# Ranges are TRACED, not drawn: the largest connected block above a level inside a box, on
+# the same ETOPO grid the relief uses -- mask closed then opened so the contour describes the
+# massif rather than its gullies, marching squares, simplified TO THE VIEW (0.006 deg for the
+# 3-hour box, 0.02 deg for the 12-hour). A block that runs out of its box is a spine, not an
+# island: the vertices on the box are dropped and it is kept OPEN.
+RANGES = [  # name, (w, s, e, n), level m, face (wind FROM), crest note, view
+    ('SAN GABRIEL MOUNTAINS',    (-118.50, 34.12, -117.45, 34.52), 1200, 200, 'near'),
+    ('SAN BERNARDINO MOUNTAINS', (-117.42, 33.98, -116.55, 34.42), 1500, 215, 'near'),
+    ('SANTA MONICA MOUNTAINS',   (-119.12, 34.00, -118.38, 34.20),  330, 190, 'near'),
+    ('SANTA YNEZ MOUNTAINS',     (-120.50, 34.38, -119.25, 34.64),  620, 180, 'near'),
+    ('TOPATOPA MOUNTAINS',       (-119.65, 34.44, -118.72, 34.88), 1300, 200, 'near'),
+    ('TEHACHAPI MOUNTAINS',      (-118.95, 34.78, -118.15, 35.32), 1400, 255, 'near'),
+    ('SANTA ANA MOUNTAINS',      (-117.78, 33.52, -117.32, 33.92),  720, 240, 'near'),
+    ('SAN JACINTO MOUNTAINS',    (-116.98, 33.52, -116.45, 33.92), 1600, 250, 'near'),
+    ('SIERRA NEVADA',            (-121.20, 35.40, -117.80, 40.20), 2300, 250, 'far'),
+    ('TRANSVERSE RANGES',        (-120.60, 33.95, -116.40, 34.95), 1150, 200, 'far'),
+    ('PENINSULAR RANGES',        (-117.30, 32.30, -116.10, 33.95), 1250, 250, 'far'),
+    ('SANTA LUCIA RANGE',        (-121.95, 35.50, -120.80, 36.60),  800, 230, 'far'),
+    ('WHITE MOUNTAINS',          (-118.45, 36.90, -117.95, 37.95), 2900, 250, 'far'),
+    ('SPRING MOUNTAINS',         (-115.98, 35.95, -115.35, 36.55), 2200, 215, 'far'),
+    ('SIERRA SAN PEDRO MARTIR',  (-116.00, 30.45, -115.10, 31.35), 1800, 250, 'far'),
+]
+CORRIDORS = [  # name, [[lon, lat]...] in the direction the offshore wind runs, view
+    ('CAJON PASS',               [[-117.28, 34.58], [-117.44, 34.34], [-117.42, 34.19], [-117.50, 34.04]], 'near'),
+    ('SAN GORGONIO PASS',        [[-116.40, 33.91], [-116.72, 33.93], [-116.98, 33.93], [-117.22, 33.96]], 'near'),
+    ('SOLEDAD \u00b7 NEWHALL',  [[-118.10, 34.60], [-118.30, 34.46], [-118.50, 34.38], [-118.58, 34.26]], 'near'),
+    ('SANTA CLARA RIVER VALLEY', [[-118.62, 34.42], [-118.86, 34.40], [-119.10, 34.33], [-119.28, 34.24]], 'near'),
+    ('TEJON PASS',               [[-118.93, 35.00], [-118.88, 34.84], [-118.78, 34.70], [-118.64, 34.54]], 'near'),
+    ('SANTA ANA WIND GAPS',      [[-116.60, 34.75], [-117.20, 34.45], [-117.45, 34.20], [-117.75, 33.95]], 'far'),
+    ('GULF SURGE',               [[-114.75, 31.70], [-115.25, 32.65], [-115.75, 33.25], [-116.20, 33.80]], 'far'),
+]
+PASSES = [  # name, lon, lat, elevation ft, view
+    ('TEJON PASS \u00b7 THE GRAPEVINE', -118.877, 34.803, 4144, 'near'),
+    ('CAJON SUMMIT', -117.446, 34.349, 4190, 'near'),
+    ('DONNER PASS', -120.327, 39.316, 7056, 'far'), ('TEJON PASS', -118.877, 34.803, 4144, 'far'),
+]
+COLD_EDGE = {'line': [[-120.47, 34.45], [-120.62, 34.05], [-120.70, 33.60]],
+             'cool': [-120.875, 34.458], 'warm': [-118.708, 33.625]}
+
+
+def dp_open(pts, eps):
+    return list(LineString(pts).simplify(eps).coords)
+
+
+def bake_geo():
+    print('weather machinery')
+    a = dem_pull(REGION, 15 / 3600.0, ETOPO_15S)
+    H, W = a.shape
+    w0, s0, e0, n0 = REGION
+    out = {'upland': [], 'corridor': [], 'pass': [], 'coldEdge': COLD_EDGE}
+    for name, (w, s, e, n), level, face, view in RANGES:
+        x0, x1 = int((w - w0) / (e0 - w0) * W), int((e - w0) / (e0 - w0) * W)
+        y0, y1 = int((n0 - n) / (n0 - s0) * H), int((n0 - s) / (n0 - s0) * H)
+        sub = a[y0:y1, x0:x1]
+        k = 5 if view == 'near' else 9
+        m = ndimage.binary_opening(ndimage.binary_closing(np.pad(sub >= level, k), np.ones((k, k))), np.ones((3, 3)))[k:-k, k:-k]
+        m = ndimage.binary_fill_holes(m)
+        lab, nl = ndimage.label(m)
+        if not nl:
+            print('  %-26s nothing above %d m' % (name, level)); continue
+        big = lab == (1 + np.argmax(ndimage.sum(m, lab, range(1, nl + 1))))
+        cs = measure.find_contours(np.pad(big.astype('float32'), 1), 0.5)
+        c = max(cs, key=len) - 1
+        hh, ww = big.shape
+        pts = [(w + (x + 0.5) / ww * (e - w), n - (y + 0.5) / hh * (n - s)) for y, x in c]
+        edge = [(x < w + 0.02 or x > e - 0.02 or y < s + 0.02 or y > n - 0.02) for x, y in pts]
+        opened = any(edge)
+        if opened:
+            # keep the longest natural run; the straight box edges are not the range
+            runs, cur = [], []
+            for pt, on in list(zip(pts, edge)) * 2:
+                if on:
+                    if cur: runs.append(cur)
+                    cur = []
+                else:
+                    cur.append(pt)
+            if cur: runs.append(cur)
+            pts = max(runs, key=len) if runs else pts
+        eps = 0.006 if view == 'near' else 0.02
+        ring = dp_open(pts, eps)
+        crest = float(sub[big].max())
+        ys, xs = np.nonzero(big)
+        ctr = [round(w + (xs.mean() + 0.5) / ww * (e - w), 4), round(n - (ys.mean() + 0.5) / hh * (n - s), 4)]
+        out['upland'].append({'n': name, 'r': rnd(ring, 4), 'open': bool(opened), 'crest': int(round(crest)),
+                              'face': face, 'c': ctr, 'v': view})
+        print('  %-26s %3d pts  %s  crest %d m' % (name, len(ring), 'open' if opened else 'closed', crest))
+    for name, line, view in CORRIDORS:
+        out['corridor'].append({'n': name, 'l': line, 'v': view})
+    for name, lo, la, ft, view in PASSES:
+        out['pass'].append({'n': name, 'c': [lo, la], 'ft': ft, 'v': view})
+    write('weather_geo.json', out)
+
+
+PARTS = {'geo': bake_geo, 'air': bake_air, 'veg': bake_veg, 'region': bake_region, 'land': bake_land, 'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea}
 
 if __name__ == '__main__':
     print('home box  w %.4f  s %.4f  e %.4f  n %.4f' % home_box())
