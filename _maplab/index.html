@@ -161,7 +161,11 @@ var VIEWS = {
               landReliefs:'la/land_index.json', veg:'la/veg_index.json', airfields:'la/airfields.json', surf:'la/surf_spots.json',
               wxGeo:'la/weather_geo.json', tz:'America/Los_Angeles',
               depthFade:[-119.60,33.20,-117.30,34.75],
-              faults:'la/faults.json', quakes:'la/quakes.json', shake:'la/shake.json', radar:'ksox',
+              faults:'la/faults.json', shake:'la/shake.json', radar:'ksox',
+              /* the flag that this view has seismicity, and the file behind it: the record
+                 since 1900, which the map no longer draws -- a 1994 diamond read as news.
+                 Kept baked because the record is worth having, not because it is on screen. */
+              quakes:'la/quakes.json',
               /* [name, lon, lat, only-below-this-m/px]: the far ones stay out of the 3-hour view's way */
               /* THE WIDE VIEWS CARRY NO ORDINARY TOWNS (user 2026-09-19: "i only want space/
                  skies/clouds/blue themes like the NYC view -- remove all the town labels shown
@@ -276,27 +280,26 @@ function hoodsFor(view){ return viewJson(view, 'hoods'); }
    the city still reads as ONE shape from across the room and only resolves into
    neighbourhoods when you look at it. */
 function faultsFor(view){ return viewJson(view, 'faults'); }
-function quakesFor(view){ return viewJson(view, 'quakes'); }
 function shakeFor(view){ return viewJson(view, 'shake'); }
-/* THE RECENT SWARM, LIVE. The USGS catalogue is keyless and sends CORS, so this is the one
-   feed on the geology card that does not wait on the proxy. The whole pull box is fetched
-   once and held ten minutes; the view filters it, because panning must not re-query. */
+/* WHAT THE EARTHQUAKES WIDGET IS SHOWING, not a second opinion (user 2026-09-19, shown the
+   two side by side: "that says its from 94 - this is what earthquakes shows"). The card had
+   been drawing a month of the catalogue plus every event since 1900, so the loudest mark on
+   it was Northridge -- thirty-two years old, and read as news.
+   This is now the widget's own feed, the same URL it fetches: all_day, every quake USGS has
+   logged worldwide in the last 24 hours, filtered to this box, and with NO magnitude floor,
+   because the widget has none either ("Plot ALL global quakes"). Four dots on a quiet day is
+   the honest answer and is what the widget shows over Los Angeles on that day. Held ten
+   minutes; the view filters it, so panning never re-queries. */
 var QLIVE = { t:0, p:null, d:null };
 function liveQuakes(){
   if (QLIVE.d && Date.now() - QLIVE.t < 600000) return Promise.resolve(QLIVE.d);
   if (QLIVE.p) return QLIVE.p;
-  var st = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
-  QLIVE.p = fetch('https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&starttime=' + st
-      + '&minlatitude=33.2&maxlatitude=34.75&minlongitude=-119.6&maxlongitude=-117.3&minmagnitude=1&orderby=time')
+  QLIVE.p = fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson')
     .then(function(r){ return r.json(); })
     .then(function(j){ QLIVE.d = j; QLIVE.t = Date.now(); QLIVE.p = null; return j; })
     .catch(function(){ QLIVE.p = null; return { features: [] }; });
   return QLIVE.p;
 }
-/* what is worth a dot at this height. All 222 of the last month's tremors over the whole
-   basin is a smear at the wide view and the point of the layer at street level, so the
-   floor follows the zoom. */
-function quakeFloor(mpp){ return mpp > 150 ? 2.5 : mpp > 60 ? 2 : mpp > 25 ? 1.5 : 0; }
 /* SOFT GROUND, hatched. Not a fill: the rock map underneath is the other half of the
    answer and must stay readable, and a hazard zone is drawn as a hatch on every paper map
    for the same reason. */
@@ -340,8 +343,8 @@ function quakeDiamond(g, x, y, sz){
   var h = sz * 0.7071;                      // a square of side sz, turned 45 degrees
   g.beginPath(); g.moveTo(x, y - h); g.lineTo(x + h, y); g.lineTo(x, y + h); g.lineTo(x - h, y); g.closePath();
 }
-function drawQuakes(g, baked, live, proj, mpp, W, H){
-  var hits = [], floor = quakeFloor(mpp);
+function drawQuakes(g, live, proj, W, H){
+  var hits = [];
   var inF = function(q){ return q.x > -30 && q.y > -30 && q.x < W + 30 && q.y < H + 30; };
   var mark = function(q, m, d){
     var sz = quakeSize(m), col = quakeColour(m);
@@ -355,19 +358,12 @@ function drawQuakes(g, baked, live, proj, mpp, W, H){
     hits.push({ x:q.x, y:q.y, reach:sz * 0.7071 + 6, d:d });
   };
   ((live || {}).features || []).forEach(function(ft){
-    var m = ft.properties.mag;
-    if (m == null || m < floor) return;
-    var c = ft.geometry.coordinates, q = proj({ x:c[0], y:c[1] });
+    var m = ft.properties.mag, c = ft.geometry.coordinates;
+    if (m == null || !c) return;
+    var q = proj({ x:c[0], y:c[1] });
     if (!inF(q)) return;
     mark(q, m, { kind:'quake', live:true, mag:m, place:ft.properties.place, time:ft.properties.time,
                  depth:c[2], type:ft.properties.magType, url:ft.properties.url });
-  });
-  ((baked || {}).features || []).forEach(function(ft){
-    var p = ft.properties, m = p.mag;
-    if (m < 5.5 && mpp > 60) return;          // only the destroyers survive the wide view
-    var c = ft.geometry.coordinates, q = proj({ x:c[0], y:c[1] });
-    if (!inF(q)) return;
-    mark(q, m, { kind:'quake', mag:m, place:p.place, time:p.time, depth:p.depth, type:p.type, url:p.url });
   });
   return hits;
 }
@@ -3927,15 +3923,15 @@ function drawCard(style){
             gg.globalAlpha = 1;
             /* the rock map washes the sea grey (its offshore units): cut it to the land */
             if (paint._water){ gg.globalCompositeOperation = 'destination-out'; gg.drawImage(paint._water, 0, 0); gg.globalCompositeOperation = 'source-over'; }
-            return Promise.all([faultsFor(vkey), shakeFor(vkey), quakesFor(vkey),
+            return Promise.all([faultsFor(vkey), shakeFor(vkey),
                                 (VIEWS[vkey] || {}).quakes ? liveQuakes() : null]);
           })
           .then(function(r){
             if (stale()) return;
-            /* the ground first, then what broke it, then what it has done lately */
+            /* the ground first, then what broke it, then what it is doing now */
             drawSoftGround(gg, r[1], paint._proj);
             drawFaults(gg, r[0], paint._proj, view);
-            paint._quakes = drawQuakes(gg, r[2], r[3], paint._proj, VB.mpp, W, H);
+            paint._quakes = drawQuakes(gg, r[2], paint._proj, W, H);
             paint._shake = r[1];
           });
       })
