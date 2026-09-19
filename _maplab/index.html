@@ -2476,8 +2476,8 @@ function drawRock(g, W, H, X0, Y0, X1, Y1){
    THE KEY is TomTom's, the user's, free tier, no card on file (so the worst case is a blank
    layer, never a bill). It is locked to bluishvoid.com by referrer -- verified: 200 from the
    site, 403 InvalidReferer from anywhere else -- and enabled for the three Traffic products
-   only, so lifting it from this source gets nobody anything. Tiles are cached per 3-minute
-   bucket and only fetched while the layer is on. On its OWN canvas, like the rock: it is
+   only, so lifting it from this source gets nobody anything. Tiles are cached per 5-minute
+   bucket, incidents for 20 (see trafficData), and nothing is fetched unless the layer is on. On its OWN canvas, like the rock: it is
    live weather-of-the-roads, not basemap, and must never be baked into a tile.
    NOT HERE YET: CHP's incident log (better than TomTom's, but it sends no CORS header and
    media.chp.ca.gov is not on the proxy worker's allowlist) and Caltrans lane closures (an
@@ -2488,12 +2488,30 @@ var TT_CAT = { 0:'UNKNOWN', 1:'ACCIDENT', 2:'FOG', 3:'DANGEROUS CONDITIONS', 4:'
                8:'ROAD CLOSED', 9:'ROAD WORKS', 10:'WIND', 11:'FLOODING', 14:'BROKEN DOWN VEHICLE' };
 function trafficData(v){
   var now = Date.now(), h = v._home || v, jobs = [];
-  if (!TRAF.inc || now - TRAF.incAt > 180000){
+  /* THE QUOTA DECIDES THE CADENCE (read off the user's TomTom dashboard 2026-09-19): raster
+     tiles 200,000 a month, but Incident Details only 2,500 -- about 83 calls a DAY for everyone
+     together. Asked every 3 minutes per viewer, as this first was, five people with the layer
+     on would spend the month in a week. So the incident list is kept 20 minutes and kept in
+     localStorage, so a reload, a second tab or a pan costs nothing: one viewer-hour is 3 calls.
+     (Closures and works barely change in 20 minutes; the congestion itself is the tiles, which
+     stay fresh.) The real fix belongs to the widget: ONE fetch every 20 minutes in the worker,
+     published to the CDN, and no viewer ever calls TomTom for incidents at all. */
+  var INC_TTL = 1200000;
+  if (!TRAF.inc){
+    try {
+      var sv = JSON.parse(localStorage.getItem('bv_tt_inc') || 'null');
+      if (sv && now - sv.at < INC_TTL && sv.box === [h.w, h.s, h.e, h.n].join(',')){ TRAF.inc = sv.inc; TRAF.incAt = sv.at; }
+    } catch(e){}
+  }
+  if (!TRAF.inc || now - TRAF.incAt > INC_TTL){
     TRAF.incAt = now;
     jobs.push(fetch('https://api.tomtom.com/traffic/services/5/incidentDetails?key=' + TT_KEY
       + '&bbox=' + [h.w, h.s, h.e, h.n].join(',') + '&language=en-US&timeValidityFilter=present&fields='
       + encodeURIComponent('{incidents{type,geometry{type,coordinates},properties{id,iconCategory,magnitudeOfDelay,events{description},startTime,endTime,from,to,length,delay,roadNumbers}}}'))
-      .then(function(r){ return r.json(); }).then(function(j){ TRAF.inc = j.incidents || []; }).catch(function(){ TRAF.inc = TRAF.inc || []; }));
+      .then(function(r){ return r.json(); }).then(function(j){
+        TRAF.inc = j.incidents || [];
+        try { localStorage.setItem('bv_tt_inc', JSON.stringify({ at: TRAF.incAt, box: [h.w, h.s, h.e, h.n].join(','), inc: TRAF.inc })); } catch(e){}
+      }).catch(function(){ TRAF.inc = TRAF.inc || []; }));
   }
   if (!TRAF.cms || now - TRAF.cmsAt > 300000){
     TRAF.cmsAt = now;
@@ -2517,7 +2535,7 @@ function drawTraffic(g, W, H, X0, Y0, X1, Y1, proj, view, v){
   var z = Math.max(6, Math.min(18, Math.round(Math.log2(78271.517 / mpp)))), n = Math.pow(2, z), span = 2 * WORLD / n;
   var tx0 = Math.floor((X0 + WORLD) / span), tx1 = Math.floor((X1 + WORLD) / span);
   var ty0 = Math.floor((WORLD - Y1) / span), ty1 = Math.floor((WORLD - Y0) / span);
-  var bucket = Math.floor(Date.now() / 180000), jobs = [];
+  var bucket = Math.floor(Date.now() / 300000), jobs = [];      // tiles: a 5-minute bucket (200,000 a month)
   var flow = document.createElement('canvas'); flow.width = W; flow.height = H;
   var fg = flow.getContext('2d');
   for (var ty = ty0; ty <= ty1; ty++) for (var tx = tx0; tx <= tx1; tx++) (function(tx, ty){
@@ -2579,7 +2597,7 @@ function drawTraffic(g, W, H, X0, Y0, X1, Y1, proj, view, v){
       hits.push({ x: q.x, y: q.y, reach: 12, d: { kind: 'FREEWAY SIGN', sign: c.text, where: c.where, roads: c.road, source: 'Caltrans District 7' } });
     });
     TRAF.hits = hits;
-    try { if (window.parent !== window) window.parent.postMessage({ labTraffic: { counts: counts, signs: (TRAF.cms || []).length, at: Date.now() } }, '*'); } catch(e){}
+    try { if (window.parent !== window) window.parent.postMessage({ labTraffic: { counts: counts, signs: (TRAF.cms || []).length, at: Date.now(), incAt: TRAF.incAt } }, '*'); } catch(e){}
   });
 }
 
