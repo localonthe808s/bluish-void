@@ -2118,29 +2118,8 @@ function swellTravelTime(D, dirFrom, T, Hs){
       amp[kk3] = Math.min(3, (b1 + 2 * tmp[kk3] + b2) / 4);
     }
   }
-  /* THE BREAK LINE, WHICH IS THE ONE MARK A SURFER WANTS (user 2026-09-19: "should you show some
-     of the waves breaking is there like a breaking point for surfers?"). The white water is real
-     but on a small day it is a strip a few metres wide -- under a pixel from up here, so the map
-     showed nothing. So the OUTER EDGE of the breaking field is traced as a line and drawn as a
-     line, the way a chart marks a reef: marching squares over `brk`, one segment per cell that
-     the edge crosses, in lon/lat so it projects at any zoom. On a 2 ft day it hugs the sand; on a
-     10 ft day it stands a quarter-mile off the points. */
-  var seg = [], TH = 0.15;
-  var lonAt = function(x){ return D.W + (x + 0.5) * D.step; }, latAt = function(y){ return D.N - (y + 0.5) * D.step; };
-  for (var by = 0; by < h - 1; by++) for (var bx = 0; bx < w - 1; bx++){
-    var q0 = by * w + bx, f00 = brk[q0], f10 = brk[q0 + 1], f01 = brk[q0 + w], f11 = brk[q0 + w + 1];
-    var lo = Math.min(f00, f10, f01, f11), hi2 = Math.max(f00, f10, f01, f11);
-    if (!(lo <= TH && hi2 > TH)) continue;
-    var pts = [], mix = function(a1, b1){ var t2 = (TH - a1) / ((b1 - a1) || 1e-6); return t2 < 0 ? 0 : t2 > 1 ? 1 : t2; };
-    if ((f00 > TH) !== (f10 > TH)) pts.push([lonAt(bx + mix(f00, f10)), latAt(by)]);
-    if ((f10 > TH) !== (f11 > TH)) pts.push([lonAt(bx + 1), latAt(by + mix(f10, f11))]);
-    if ((f01 > TH) !== (f11 > TH)) pts.push([lonAt(bx + mix(f01, f11)), latAt(by + 1)]);
-    if ((f00 > TH) !== (f01 > TH)) pts.push([lonAt(bx), latAt(by + mix(f00, f01))]);
-    if (pts.length >= 2) seg.push([pts[0], pts[1]]);
-    if (pts.length === 4) seg.push([pts[2], pts[3]]);
-  }
   var keys = Object.keys(D.solved); if (keys.length > 5) delete D.solved[keys[0]];
-  return (D.solved[key] = { tau: tau, amp: amp, brk: brk, line: seg, c0: c0, te: te, tn: tn, hx: hx, hy: hy });
+  return (D.solved[key] = { tau: tau, amp: amp, brk: brk, c0: c0, te: te, tn: tn, hx: hx, hy: hy });
 }
 var SURF = { t: 0, p: null, hits: [] };
 function surfReads(){
@@ -2249,9 +2228,8 @@ function leadSwell(R){
   return window.LAB_SWELLDIR != null ? { dir: window.LAB_SWELLDIR, tp: b.tp, hs: b.hs, model: b.model, whatIf: true } : b;
 }
 function makeSurf(ctx, spots, R, proj, mpp, M, D){
-  var hits = [], labels = [], marks = [], tideNow = R && R.level ? R.level.ft : null;
-  /* the same solve the sea is drawn from -- it is cached, so this costs nothing twice */
-  var lead = leadSwell(R), sol = (D && lead) ? swellTravelTime(D, lead.dir, Math.max(5, Math.min(22, lead.tp || 10)), lead.hs) : null;
+  var hits = [], labels = [], marks = [], bars = [], tideNow = R && R.level ? R.level.ft : null;
+  var lead = leadSwell(R);
   /* WHERE A BREAK BREAKS, and how big the face is when it does. NOT read off the grid: the
      soundings are 250 m apart and a surf zone is thirty metres wide, so asking the grid which
      cell breaks gave answers a kilometre out. This is the standard empirical breaker height from
@@ -2280,15 +2258,17 @@ function makeSurf(ctx, spots, R, proj, mpp, M, D){
     while (edge <= 1.0 && dep(edge) == null) edge += 0.125;
     if (edge > 1.0) return null;
     var z = dep(edge + 0.25);
-    return z == null ? null : Math.max(0.004, Math.min(0.15, z / 250));
+    if (z == null) return null;
+    return { slope: Math.max(0.004, Math.min(0.15, z / 250)), edgeM: edge * 1000 };
   };
   var breakAt = function(sp, openFrac){
     if (!lead || lead.hs == null || !lead.tp) return null;
     var hs = lead.hs * Math.sqrt(Math.max(openFrac == null ? 1 : openFrac, 0.04));
     if (!(hs > 0.02)) return null;
     var Hb = 0.39 * Math.pow(9.81, 0.2) * Math.pow(lead.tp * hs * hs, 0.4);   // metres, trough to crest
-    var hb = Hb / 0.78, sl = slopeAt(sp.c[0], sp.c[1], faceOf(sp.win));
-    return { faceFt: Hb * 3.281, depFt: hb * 3.281, outM: sl ? Math.round(hb / sl) : null, slope: sl };
+    var hb = Hb / 0.78, g2 = slopeAt(sp.c[0], sp.c[1], faceOf(sp.win));
+    return { faceFt: Hb * 3.281, depFt: hb * 3.281, outM: g2 ? Math.round(hb / g2.slope) : null,
+             slope: g2 ? g2.slope : null, edgeM: g2 ? g2.edgeM : null };
   };
   var inWin = function(d, w){ d = (d + 360) % 360; return w[0] <= w[1] ? (d >= w[0] && d <= w[1]) : (d >= w[0] || d <= w[1]); };
   var CW = cvW(ctx), CH = cvH(ctx), inF = function(q){ return q.x > 6 && q.y > 6 && q.x < CW - 6 && q.y < CH - 6; };
@@ -2322,8 +2302,24 @@ function makeSurf(ctx, spots, R, proj, mpp, M, D){
       R.wind.forEach(function(w){ var dd = (w.lat - sp.c[1]) * (w.lat - sp.c[1]) + (w.lon - sp.c[0]) * (w.lon - sp.c[0]); if (dd < bd){ bd = dd; bw = w; } });
       wnd = windOn(bw, face);
     }
+    /* WHERE IT BREAKS, AS ONE SHORT BAR (user 2026-09-19: "is there like a breaking point for
+       surfers?"). NOT traced out of the grid: the soundings are 250 m apart and today's wave
+       breaks in four feet of water forty-seven metres off the sand, so no cell ever qualifies and
+       the only contour the grid offered was focusing noise out in the deep. This is the spot's own
+       arithmetic instead -- the breaker height from the swell it is open to, the depth that stands
+       it up, the beach's slope -- laid across the swell where it lands, 300 m of lineup. At the
+       wide view it is three pixels, which is honest; zoom in and it walks off the sand as the
+       swell builds. */
+    var bk = breakAt(sp, open);
+    if (bk && bk.outM != null){
+      var fa = faceOf(sp.win), kx = 1 / (111.32 * Math.cos(sp.c[1] * Math.PI / 180)), ky = 1 / 111.32;
+      var deg = function(bearing, km){ var r = bearing * Math.PI / 180; return [Math.sin(r) * km * kx, Math.cos(r) * km * ky]; };
+      var o = deg(fa, (bk.edgeM + bk.outM) / 1000), cLo = sp.c[0] + o[0], cLa = sp.c[1] + o[1];
+      var t = deg(fa + 90, 0.15);   // half of 300 m of lineup, laid across the swell
+      bars.push([[cLo - t[0], cLa - t[1]], [cLo + t[0], cLa + t[1]]]);
+    }
     hits.push({ x:q.x, y:q.y, reach:14, d:{ kind:'spot', name:sp.n, open: open, openDir: openDir, whatIf: window.LAB_SWELLDIR != null,
-      brk: breakAt(sp, open), win:sp.win, tide:sp.tide, bottom:sp.bottom, on:on, tideOk:tideOk, tideNow:tideNow,
+      brk: bk, win:sp.win, tide:sp.tide, bottom:sp.bottom, on:on, tideOk:tideOk, tideNow:tideNow,
       face: face, wind: wnd,
       buoy: b ? { id:sp.buoy, name:(spots.buoys || {})[sp.buoy], hs:b.hs, tp:b.tp, dir:b.dir, model:!!b.model, trend:b.trend } : null } });
   });
@@ -2356,17 +2352,18 @@ function makeSurf(ctx, spots, R, proj, mpp, M, D){
     },
     paint: function(){
       var g = ctx; g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
-      /* THE BREAK LINE first, under every mark: a chart line, not weather. Dark casing so it reads
-         on the blue, white over it, and a hair wider when the map is close in. */
-      if (sol && sol.line && sol.line.length){
-        var wid = mpp < 12 ? 2.6 : mpp < 40 ? 2 : 1.5;
+      /* the break bars first, under every mark: a chart line, not weather. Dark casing so they
+         read on the blue, white over. Only close in -- at the wide view they are shorter than the
+         pin they belong to and would only fur the coast. */
+      if (bars.length && mpp < 40){
+        var wid = mpp < 12 ? 2.6 : 2;
         g.beginPath();
-        sol.line.forEach(function(sgm){
+        bars.forEach(function(sgm){
           var a1 = proj({ x:sgm[0][0], y:sgm[0][1] }), b1 = proj({ x:sgm[1][0], y:sgm[1][1] });
           g.moveTo(a1.x, a1.y); g.lineTo(b1.x, b1.y);
         });
-        g.lineWidth = wid + 2.2; g.strokeStyle = 'rgba(8,12,22,.55)'; g.stroke();
-        g.lineWidth = wid; g.strokeStyle = 'rgba(255,255,255,.92)'; g.stroke();
+        g.lineWidth = wid + 2.4; g.strokeStyle = 'rgba(8,12,22,.6)'; g.stroke();
+        g.lineWidth = wid; g.strokeStyle = 'rgba(255,255,255,.95)'; g.stroke();
       }
       marks.forEach(function(m){
         if (m.t === 'buoy'){
