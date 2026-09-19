@@ -1706,6 +1706,204 @@ function wxReads(){
    monica the default LA location for the weather views"): Pacific weather reaches the coast
    first, so its clock is the early one. The widget will move this to the reader's own
    neighbourhood, as New York's does; a view may name its own with `home`. */
+/* FRONTS, ported from the widget (index.html, cwFrontsRead and the `wv.fronts` block of
+   cwDrawWideOv), which is a national product and so needs nothing changed to work here: the
+   Weather Prediction Center's CODED SURFACE FRONTAL POSITIONS bulletin off api.weather.gov,
+   reissued about three-hourly, whole degrees, covering the eastern Pacific as well as the land.
+   The same grammar: Catmull-Rom through the analysed points (they ARE the analysis, so the
+   curve passes through every one); the WAKE of the last few analyses faded behind the live
+   line, which is what shows it is coming; a VELOCITY measured from the wake (median
+   displacement of matched points, anything over 2 degrees an hour thrown out as a mismatch)
+   and the line projected 3 and 6 hours on, dashed; cold pips as triangles, warm as half-discs,
+   stationary and occluded alternating. One change, by the same rule the arcs follow: the
+   projections are labelled with the CLOCK TIME, not "+3 HR". */
+var FRONTS = { t: 0, p: null };
+/* THREE BULLETINS SHARE THE `COD` TYPE, and they are not interchangeable (read off the feed
+   2026-09-19):
+     ASUS01 CODSUS   the ANALYSIS, whole degrees          "COLD 4955 4656 ..."
+     ASUS02 CODSUS   the same analysis in TENTHS          "COLD 4860554 4560556 ..."  (48.6N 55.4W)
+     FSUS02 CODSRP   the FORECAST, 12/24/36/48 HR progs   "... FRONTAL POSITIONS FORECAST"
+   A reader that keeps anything whose text contains "CODED SURFACE FRONTAL POSITIONS" and sorts
+   by issue time -- which is what the widget's cwFrontsRead does -- takes the forecast for the
+   present whenever a prog was issued last, and builds its wake out of a mixture. So: split on
+   the WMO id; date every bulletin by its own VALID time, not its issue time; take the tenths
+   analysis where there is one; and use the forecasters' progs for WHERE IT WILL BE, which is
+   better than anything extrapolated from the wake. TROF lines are kept (a trough is half of
+   southern California's weather) and drawn as the dashed line the charts use. */
+function frontsRead(){
+  if (FRONTS.p && Date.now() - FRONTS.t < 1800000) return FRONTS.p;
+  FRONTS.t = Date.now();
+  var parse = function(txt){
+    var out = [];
+    /* a long front wraps onto continuation lines that start with a number: join them first */
+    String(txt).replace(/\n(?=\s*\d)/g, ' ').split('\n').forEach(function(ln){
+      var m = ln.trim().match(/^(COLD|WARM|STNRY|OCFNT|TROF)\s+(.*)$/);
+      if (!m) return;
+      var pts = [];
+      m[2].split(/\s+/).forEach(function(tk){
+        var la, lo;
+        if (/^\d{7}$/.test(tk)){ la = parseInt(tk.slice(0, 3), 10) / 10; lo = parseInt(tk.slice(3), 10) / 10; }
+        else if (/^\d{4,5}$/.test(tk)){ la = parseInt(tk.slice(0, 2), 10); lo = parseInt(tk.slice(2), 10); }
+        else return;
+        if (la < 15 || la > 80 || lo < 50 || lo > 180) return;
+        pts.push([-lo, la]);
+      });
+      if (pts.length > 1) out.push({ k: m[1], p: pts });
+    });
+    return out;
+  };
+  var validOf = function(txt, issued){
+    /* "VALID 091903Z" is MMDDHH; a prog says "12HR PROG VALID 191800Z", which is DDHHMM */
+    var a = txt.match(/^VALID (\d{2})(\d{2})(\d{2})Z/m), b = txt.match(/PROG VALID (\d{2})(\d{2})(\d{2})Z/);
+    var ref = new Date(issued), y = ref.getUTCFullYear(), t;
+    if (b){ t = Date.UTC(y, ref.getUTCMonth(), +b[1], +b[2], +b[3]); if (t < ref - 5 * 864e5) t = Date.UTC(y, ref.getUTCMonth() + 1, +b[1], +b[2], +b[3]); return t; }
+    if (a) return Date.UTC(y, +a[1] - 1, +a[2], +a[3]);
+    return +ref;
+  };
+  FRONTS.p = fetch('https://api.weather.gov/products?type=COD&limit=30').then(function(r){ return r.json(); })
+    .then(function(j){
+      var g = (j['@graph'] || []).filter(function(q){ return q.productCode === 'COD'; });
+      var an = g.filter(function(q){ return /^ASUS/.test(q.wmoCollectiveId || ''); }).slice(0, 8);
+      var fc = g.filter(function(q){ return /^FSUS/.test(q.wmoCollectiveId || ''); }).slice(0, 6);
+      return Promise.all(an.concat(fc).map(function(q){
+        return fetch('https://api.weather.gov/products/' + q.id).then(function(r2){ return r2.json(); })
+          .then(function(d){ return { id: q.wmoCollectiveId, t: q.issuanceTime, x: String(d.productText || '') }; }).catch(function(){ return null; });
+      }));
+    }).then(function(all){
+      var byValid = {}, progs = {};
+      (all || []).filter(Boolean).forEach(function(d){
+        var f = parse(d.x); if (!f.length) return;
+        var v = validOf(d.x, d.t), fine = d.id === 'ASUS02';
+        if (/^FSUS/.test(d.id) || /FORECAST/.test(d.x.slice(0, 200))){ if (!progs[v]) progs[v] = { t: v, f: f }; return; }
+        if (!byValid[v] || fine) byValid[v] = { t: v, f: f, fine: fine || (byValid[v] && byValid[v].fine) };
+      });
+      var runs = Object.keys(byValid).map(function(k){ return byValid[k]; }).sort(function(a, b){ return b.t - a.t; }).slice(0, 4);
+      var ahead = Object.keys(progs).map(function(k){ return progs[k]; }).filter(function(q){ return q.t > Date.now(); })
+                        .sort(function(a, b){ return a.t - b.t; }).slice(0, 2);
+      runs.progs = ahead;
+      return runs;
+    }).catch(function(){ return []; });
+  return FRONTS.p;
+}
+function makeFronts(ctx, runs, proj, view, tz){
+  var FCOL = { COLD:'#3b82f6', WARM:'#ef4444', STNRY:'#3b82f6', OCFNT:'#2B22F4', TROF:'#d8a25c' }, labels = [];
+  var CW = ctx.canvas.width, CH = ctx.canvas.height;
+  var P2 = function(c){ var q = proj({ x:c[0], y:c[1] }); return [q.x, q.y]; };
+  var seen = function(R0, pad){ return R0.some(function(q){ return q[0] > -pad && q[0] < CW + pad && q[1] > -pad && q[1] < CH + pad; }); };
+  var cr = function(P, per){
+    if (P.length < 3) return P.slice();
+    var out = [];
+    for (var i = 0; i < P.length - 1; i++){
+      var p0 = P[i-1] || P[i], p1 = P[i], p2 = P[i+1], p3 = P[i+2] || P[i+1];
+      for (var t = 0; t < per; t++){
+        var u = t / per, u2 = u * u, u3 = u2 * u;
+        out.push([0.5 * ((2*p1[0]) + (-p0[0]+p2[0])*u + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*u2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*u3),
+                  0.5 * ((2*p1[1]) + (-p0[1]+p2[1])*u + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*u2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*u3)]);
+      }
+    }
+    out.push(P[P.length - 1]);
+    return out;
+  };
+  /* the velocity the wake measures, in degrees an hour */
+  var vel = null;
+  if (runs && runs.length > 1){
+    var dtH = (runs[0].t - runs[1].t) / 3600000;
+    if (dtH > 0.2 && dtH < 12){
+      var dxs = [], dys = [];
+      runs[0].f.forEach(function(f0){
+        if (f0.k === 'TROF') return;
+        var prev = runs[1].f.filter(function(q){ return q.k === f0.k; });
+        f0.p.forEach(function(c){
+          var bd = 1e9, bp = null;
+          prev.forEach(function(q){ q.p.forEach(function(c2){
+            var d = (c2[0]-c[0])*(c2[0]-c[0]) + (c2[1]-c[1])*(c2[1]-c[1]);
+            if (d < bd){ bd = d; bp = c2; }
+          }); });
+          if (bp && bd < 25){ dxs.push(c[0]-bp[0]); dys.push(c[1]-bp[1]); }
+        });
+      });
+      if (dxs.length > 6){
+        dxs.sort(function(a,b){ return a-b; }); dys.sort(function(a,b){ return a-b; });
+        var mx = dxs[dxs.length>>1] / dtH, my = dys[dys.length>>1] / dtH;
+        if (Math.abs(mx) < 2 && Math.abs(my) < 2 && (Math.abs(mx) > 0.02 || Math.abs(my) > 0.02)) vel = [mx, my];
+      }
+    }
+  }
+  var proj3 = [];
+  /* WHERE IT WILL BE: the forecasters' own progs when the feed has them, each labelled with the
+     clock time it is valid for; the wake's extrapolation only when it does not */
+  var progs = (runs && runs.progs) || [];
+  progs.forEach(function(pg, pi){
+    pg.f.forEach(function(f0){
+      if (f0.k === 'TROF') return;
+      var R0 = f0.p.map(P2); if (!seen(R0, 60)) return;
+      var Q = cr(R0, 12); proj3.push({ Q:Q, k:f0.k, a: pi ? .24 : .40 });
+      var mid = Q[Math.floor(Q.length / 2)], k = arcClock((pg.t - Date.now()) / 60000, tz);
+      if (f0.p.length > 2) labels.push({ name: k.time, day: k.day, arc:true, q:{ x:mid[0] + 5, y:mid[1] }, col: FCOL[f0.k], rank:35 });
+    });
+  });
+  if (!progs.length && vel && runs.length) [[3, .34], [6, .20]].forEach(function(h){
+    runs[0].f.forEach(function(f0){
+      if (f0.k === 'TROF') return;
+      var R0 = f0.p.map(function(c){ return P2([c[0] + vel[0]*h[0], c[1] + vel[1]*h[0]]); });
+      if (!seen(R0, 60)) return;
+      var Q = cr(R0, 12); proj3.push({ Q:Q, k:f0.k, a:h[1] });
+      var mid = Q[Math.floor(Q.length / 2)];
+      /* the bulletin is already some hours old: the clock counts from ITS time, not from now */
+      if (f0.p.length > 2) labels.push({ name: arcClock((runs[0].t - Date.now()) / 60000 + h[0] * 60, tz).time, arc:true,
+                                         q:{ x:mid[0] + 5, y:mid[1] }, col: FCOL[f0.k], rank:35 });
+    });
+  });
+  return { labels: labels, fine: !!(runs && runs.length && runs[0].fine), progs: progs.length,
+    n: runs && runs.length ? runs[0].f.filter(function(f0){ return f0.k !== 'TROF' && seen(f0.p.map(P2), 0); }).length : 0,
+    trof: runs && runs.length ? runs[0].f.filter(function(f0){ return f0.k === 'TROF' && seen(f0.p.map(P2), 0); }).length : 0, at: runs && runs.length ? runs[0].t : null,
+    paint: function(){
+      if (!runs || !runs.length) return;
+      var g = ctx; g.save(); g.lineCap = 'round'; g.lineJoin = 'round';
+      var line = function(Q){ g.beginPath(); Q.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); };
+      for (var ri = runs.length - 1; ri >= 1; ri--){                 // the wake, oldest first
+        g.globalAlpha = Math.max(0.10, 0.30 - (ri - 1) * 0.07);
+        runs[ri].f.forEach(function(f0){
+          if (f0.k === 'TROF') return;                 // a trough re-forms rather than travels: no wake
+          var R0 = f0.p.map(P2); if (!seen(R0, 80)) return;
+          line(cr(R0, 14)); g.lineWidth = 1.6; g.strokeStyle = FCOL[f0.k] || '#9aa3b5'; g.stroke();
+        });
+      }
+      g.setLineDash([7, 6]);
+      proj3.forEach(function(o){ g.globalAlpha = o.a; line(o.Q); g.lineWidth = 1.8; g.strokeStyle = FCOL[o.k] || '#9aa3b5'; g.stroke(); });
+      g.setLineDash([]); g.globalAlpha = 1;
+      runs[0].f.forEach(function(f){
+        var RAW = f.p.map(P2); if (!seen(RAW, 80)) return;
+        var P = cr(RAW, 14);
+        if (f.k === 'TROF'){
+          line(P); g.setLineDash([9, 6]); g.lineWidth = 3.4; g.strokeStyle = 'rgba(8,10,16,.6)'; g.stroke();
+          g.lineWidth = 1.5; g.strokeStyle = FCOL.TROF; g.stroke(); g.setLineDash([]); return;
+        }
+        line(P); g.lineWidth = 5.1; g.strokeStyle = 'rgba(8,10,16,.75)'; g.stroke();
+        g.lineWidth = 2.45; g.strokeStyle = FCOL[f.k] || '#9aa3b5'; g.stroke();
+        var STEP = 34, acc = STEP * 0.6, alt = 0;
+        for (var i = 1; i < P.length; i++){
+          var ax = P[i-1][0], ay = P[i-1][1], bx = P[i][0], by = P[i][1], L = Math.hypot(bx - ax, by - ay);
+          if (!L) continue;
+          var ux = (bx - ax) / L, uy = (by - ay) / L, nx = -uy, ny = ux;
+          acc += L;
+          while (acc >= STEP){
+            var back = acc - STEP, mx2 = bx - ux * back, my2 = by - uy * back;
+            acc -= STEP;
+            if (mx2 < -20 || my2 < -20 || mx2 > CW + 20 || my2 > CH + 20){ alt++; continue; }
+            var kind = (f.k === 'STNRY' || f.k === 'OCFNT') ? (alt % 2 ? 'WARM' : 'COLD') : f.k;
+            alt++;
+            g.fillStyle = f.k === 'OCFNT' ? FCOL.OCFNT : (kind === 'WARM' ? '#ef4444' : '#3b82f6');
+            g.beginPath();
+            if (kind === 'WARM') g.arc(mx2 + nx * 2.6, my2 + ny * 2.6, 3.6, Math.atan2(ny, nx) - Math.PI/2, Math.atan2(ny, nx) + Math.PI/2);
+            else { g.moveTo(mx2 - ux * 3.4, my2 - uy * 3.4); g.lineTo(mx2 + ux * 3.4, my2 + uy * 3.4); g.lineTo(mx2 + nx * 6.4, my2 + ny * 6.4); g.closePath(); }
+            g.fill();
+          }
+        }
+      });
+      g.restore();
+    } };
+}
 var LA_PT = { x:-118.4912, y:34.0195, name:'SANTA MONICA' };
 /* AN ARC SAYS WHEN, NOT HOW LONG (user 2026-09-19: "the arches should be reading the time not
    the hours ahead, we fixed that for NYC"). The widget's grammar, cwDrawLeadArcs: the arrival
@@ -1719,8 +1917,9 @@ function arcClock(mins, tz){
   return { time: f({ hour:'numeric', minute:'2-digit' }),
            day: day(d) !== day(new Date()) ? f({ weekday:'short' }).toUpperCase() : null };
 }
-function makeMachinery(ctx, geo, R, proj, mpp, view, mode){
+function makeMachinery(ctx, geo, R, proj, mpp, view, mode, frontRuns){
   var city = mode === 'city';
+  var FR = (!city && frontRuns) ? makeFronts(ctx, frontRuns, proj, view, (VIEWS[document.getElementById('view').value] || {}).tz) : null;
   if (city) geo = null;                           // the half-hour view carries the rings only
   var near = mpp < 700, kind = near ? 'near' : 'far', hot = [], quiet = [], paintList = [];
   var EARTH = 'rgba(216,196,158,', TEAL = 'rgba(126,206,192,';
@@ -1781,6 +1980,8 @@ function makeMachinery(ctx, geo, R, proj, mpp, view, mode){
       hot.unshift({ name: k.time, day: k.day, arc:true, q:{ x:c0.x + Math.sin(b) * off, y:c0.y - Math.cos(b) * off }, col:'#fff', rank:80 });
     });
   }
+  if (FR) FR.labels.forEach(function(L){ quiet.push(L); });
+  try { if (FR && window.parent !== window) window.parent.postMessage({ labFronts: { n: FR.n, trof: FR.trof, at: FR.at, fine: FR.fine, progs: FR.progs } }, '*'); } catch(e){}
   var placed = [];
   var claim = function(list){
     ctx.save();
@@ -1827,6 +2028,7 @@ function makeMachinery(ctx, geo, R, proj, mpp, view, mode){
           g.beginPath(); g.arc(q.x, q.y, 3, 0, Math.PI * 2); g.fillStyle = 'rgba(225,238,255,.95)'; g.fill();
         }
       });
+      if (FR) FR.paint();                 // over the geology, under the arcs and every label
       /* arcs: a dark dashed casing, then white that is strongest dead upstream and fades to
          either side -- the direction is a best estimate, and the fade is how it says so */
       arcs.forEach(function(A){
@@ -2520,9 +2722,9 @@ function drawCard(style){
                 }) }; };
                 /* space is claimed in this order: the city; the arcs and whatever is RUNNING;
                    the sky names; the quiet machinery; the rest of the geography */
-                return Promise.all([viewJson(vkey, 'wxGeo'), wxReads()]).then(function(gr){
+                return Promise.all([viewJson(vkey, 'wxGeo'), wxReads(), frontsRead()]).then(function(gr){
                   if (stale()) return;
-                  var M = makeMachinery(ctx, gr[0], gr[1], out.project, VB.mpp, view);
+                  var M = makeMachinery(ctx, gr[0], gr[1], out.project, VB.mpp, view, null, gr[2]);
                   var p1 = drawHoodNames(ctx, asGeo(vv.regionNames.slice(0, 1)), out.project, 10, { weight: 0.07 });
                   M.claimHot();
                   var p2 = drawSkyNames(ctx, vv.skyNames, out.project, VB.mpp);
