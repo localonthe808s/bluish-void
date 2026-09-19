@@ -1975,6 +1975,76 @@ function swellExposure(M, lon, lat, dir, skipKm){
   }
   return ex;
 }
+/* HOW THE SWELL BENDS: the depth grid, and an eikonal solve over it (2026-09-19, user: "make the
+   waves more realistic from above live aerial view, not abstract lines").
+   A wave of period T in water of depth h travels at  c = (gT/2pi) * sqrt(tanh(w^2 h / g))
+   (Eckart's form of the dispersion relation, within a few percent everywhere): full speed in
+   the basins, slowing over the shelf. The crests are the level lines of TRAVEL TIME tau, and
+   tau obeys |grad tau| = 1/c. That is solved here by fast sweeping from a plane wave entering
+   along the grid's upstream edges -- geometric optics, first arrival: it turns the crests
+   toward every beach, wraps them round Point Dume and Palos Verdes, focuses them over canyons'
+   shoulders. It carries no wave HEIGHT; brightness still comes from the islands' shadow. */
+var SWELLDEPTH = null;
+function swellDepth(){
+  if (!SWELLDEPTH) SWELLDEPTH = new Promise(function(res){
+    var im = new Image();
+    im.onload = function(){
+      var c = document.createElement('canvas'); c.width = im.width; c.height = im.height;
+      var g = c.getContext('2d'); g.drawImage(im, 0, 0);
+      var d = g.getImageData(0, 0, im.width, im.height).data, h = new Float32Array(im.width * im.height);
+      for (var i = 0; i < h.length; i++) h[i] = (d[i * 4] * 256 + d[i * 4 + 1]) / 10;
+      res({ w: im.width, h: im.height, depth: h, W: -119.30, S: 33.30, E: -117.80, N: 34.20, step: 0.0025, solved: {} });
+    };
+    im.onerror = function(){ res(null); };
+    im.src = 'la/swell_depth.png';
+  });
+  return SWELLDEPTH;
+}
+function swellTravelTime(D, dirFrom, T){
+  var key = Math.round(dirFrom / 3) * 3 + '|' + Math.round(T);
+  if (D.solved[key]) return D.solved[key];
+  var w = D.w, h = D.h, n = w * h, tau = new Float32Array(n), slow = new Float32Array(n), fixed = new Uint8Array(n);
+  var g = 9.81, om = 2 * Math.PI / T, c0 = g * T / (2 * Math.PI), lat0 = (D.S + D.N) / 2;
+  var hx = D.step * 111320 * Math.cos(lat0 * Math.PI / 180), hy = D.step * 111320;
+  for (var i = 0; i < n; i++){
+    var dep = D.depth[i];
+    if (dep <= 0){ slow[i] = 0; tau[i] = Infinity; continue; }            // land
+    slow[i] = 1 / (c0 * Math.sqrt(Math.tanh(om * om * Math.max(dep, 2) / g)));
+    tau[i] = 1e12;
+  }
+  /* the plane wave on the upstream edges: travel is TOWARD dirFrom + 180 */
+  var th = (dirFrom + 180) * Math.PI / 180, te = Math.sin(th), tn = Math.cos(th);
+  var seed = function(x, y){
+    var k = y * w + x; if (!slow[k]) return;
+    tau[k] = ((x * hx) * te + ((h - 1 - y) * hy) * tn) / c0; fixed[k] = 1;
+  };
+  for (var x = 0; x < w; x++){ if (tn > 0) seed(x, h - 1); if (tn < 0) seed(x, 0); }
+  for (var y = 0; y < h; y++){ if (te > 0) seed(0, y); if (te < 0) seed(w - 1, y); }
+  var ax = 1 / (hx * hx), ay = 1 / (hy * hy);
+  var upd = function(x, y){
+    var k = y * w + x; if (!slow[k] || fixed[k]) return;
+    var a = Math.min(x > 0 ? tau[k - 1] : Infinity, x < w - 1 ? tau[k + 1] : Infinity);
+    var b = Math.min(y > 0 ? tau[k - w] : Infinity, y < h - 1 ? tau[k + w] : Infinity);
+    if (a > 1e11 && b > 1e11) return;
+    var s = slow[k], t;
+    var one = Math.min(a + s * hx, b + s * hy);
+    if (a > 1e11 || b > 1e11) t = one;
+    else {
+      var A = ax + ay, B = -2 * (a * ax + b * ay), C = a * a * ax + b * b * ay - s * s, disc = B * B - 4 * A * C;
+      t = disc >= 0 ? (-B + Math.sqrt(disc)) / (2 * A) : one;
+      if (t < Math.max(a, b)) t = one;
+    }
+    if (t < tau[k]) tau[k] = t;
+  };
+  for (var it = 0; it < 3; it++){
+    for (y = 0; y < h; y++) for (x = 0; x < w; x++) upd(x, y);
+    for (y = 0; y < h; y++) for (x = w - 1; x >= 0; x--) upd(x, y);
+    for (y = h - 1; y >= 0; y--) for (x = 0; x < w; x++) upd(x, y);
+    for (y = h - 1; y >= 0; y--) for (x = w - 1; x >= 0; x--) upd(x, y);
+  }
+  var keys = Object.keys(D.solved); if (keys.length > 5) delete D.solved[keys[0]];
+  return (D.solved[key] = { tau: tau, c0: c0, te: te, tn: tn, hx: hx, hy: hy });
+}
 var SURF = { t: 0, p: null, hits: [] };
 function surfReads(){
   if (SURF.p && Date.now() - SURF.t < 600000) return SURF.p;
@@ -3316,10 +3386,10 @@ function drawCard(style){
               if (surfOn() && vv.surf){
                 /* THE COAST IS THE SUBJECT: buoys and breaks claim their space first, the
                    neighbourhood names fit round them, and the rail and the traffic stand down */
-                return Promise.all([viewJson(vkey, 'surf'), surfReads(), swellMask()]).then(function(sr){
+                return Promise.all([viewJson(vkey, 'surf'), surfReads(), swellMask(), swellDepth()]).then(function(sr){
                   if (stale()) return;
                   var SF = makeSurf(tctx, sr[0] || {}, sr[1], out.project, nmpp(), sr[2]);
-                  paint._swell = { R: sr[1], M: sr[2] };
+                  paint._swell = { R: sr[1], M: sr[2], D: sr[3] };
                   LABELBOX.length = 0; SF.claim(); SURF.hits = SF.hits;
                   var ph = drawHoodNames(tctx, hn, out.project, nmpp(), { clear: hoodOpts && hoodOpts.clear, weight: 0.085, keep: true });
                   paintHoods = function(){ ph(); SF.paint(); };
@@ -3379,59 +3449,94 @@ function drawCard(style){
         var B = SW.R.buoys || {}, lead = B['46221'] || B['46268'] || B['46222'] || B[Object.keys(B)[0]];
         if (!lead || lead.dir == null) return;
         /* WHAT IF: the widget can ask for a swell direction that is not today's, to show how
-           the shadows move. Only the crests and the breaks' exposure follow it -- which breaks
-           are lit stays with the swell that is really arriving. */
-        if (window.LAB_SWELLDIR != null) lead = { dir: window.LAB_SWELLDIR, tp: lead.tp, model: lead.model, whatIf: true };
-        /* exposure on a screen grid of 8 px cells, once per paint */
-        var CELL = 8, gw = Math.ceil(W / CELL) + 1, gh = Math.ceil(H / CELL) + 1, EX = new Float32Array(gw * gh);
-        for (var gy = 0; gy < gh; gy++) for (var gx = 0; gx < gw; gx++){
-          var lo = x2lon(VB.Xw + gx * CELL * VB.mpp), la = y2lat(VB.Ymid + (H / 2 - gy * CELL) * VB.mpp);
-          EX[gy * gw + gx] = swellExposure(SW.M, lo, la, lead.dir, 0);
+           the shadows move. Only the sea's picture and the breaks' exposure follow it -- which
+           breaks are lit stays with the swell that is really arriving. */
+        if (window.LAB_SWELLDIR != null) lead = { dir: window.LAB_SWELLDIR, tp: lead.tp, hs: lead.hs, model: lead.model, whatIf: true };
+        /* THE SEA FROM ABOVE. Not ruled lines: a swell seen from the air is soft bands of light
+           and shade -- the sunlit face of each wave and the trough behind it -- arriving in
+           SETS, with crests of finite length, turning toward the beach as the water shoals,
+           bunching up in the shallows, and going white where they break.
+             spacing  the swell's TRUE wavelength (gT^2/2pi: 225 m at 12 s, 400 m at 16 s) at
+                      the map's scale. From far out that is under 7 px and would only shimmer,
+                      so it is held at 7 px there; zoom in past ~30 m/px and it is to scale.
+             bending  the travel-time field solved over the real depths (swellTravelTime).
+             light    full where the islands leave the sea open to this swell, faint where they
+                      shadow it -- faint, not gone, because swell does bend into a shadow.
+             white    along the shore, only where the swell reaches it.
+             time     sped up: at true speed a 12 s swell crosses one pixel in four seconds. */
+        var T = Math.max(5, Math.min(22, lead.tp || 10)), D = SW.D, sol = D ? swellTravelTime(D, lead.dir, T) : null;
+        var gm = VB.mpp * Math.cos(y2lat(VB.Ymid) * Math.PI / 180), L0 = 9.81 * T * T / (2 * Math.PI);
+        var Lshown = Math.max(L0, 7 * gm), c0 = 9.81 * T / (2 * Math.PI), K = 2 * Math.PI / Lshown;
+        var th = (lead.dir + 180) * Math.PI / 180, te = Math.sin(th), tn = Math.cos(th);
+        /* per pixel, once: phase (from travel time), light (exposure), nearness to the shore */
+        var RW = Math.round(W / 2) * 2 / 2 | 0, RH = H | 0; RW = W; RH = H;
+        var water = paint._water, wd = null;
+        if (water){ var wc = document.createElement('canvas'); wc.width = RW; wc.height = RH; var wg = wc.getContext('2d'); wg.drawImage(water, 0, 0, RW, RH); wd = wg.getImageData(0, 0, RW, RH).data; }
+        /* nearness to land: the water mask blurred, read back -- 1 in open sea, falling to 0 at the beach */
+        var nd = null;
+        if (water){ var bc = document.createElement('canvas'); bc.width = RW; bc.height = RH; var bg = bc.getContext('2d'); bg.filter = 'blur(5px)'; bg.drawImage(water, 0, 0, RW, RH); nd = bg.getImageData(0, 0, RW, RH).data; }
+        var idx = [], PH = [], LI = [], SH = [], UU = [];
+        var lonOf = new Float64Array(RW), latOf = new Float64Array(RH);
+        for (var x = 0; x < RW; x++) lonOf[x] = x2lon(VB.Xw + (x + 0.5) * VB.mpp);
+        for (var y = 0; y < RH; y++) latOf[y] = y2lat(VB.Ymid + (H / 2 - (y + 0.5)) * VB.mpp);
+        var CELL = 8, gw = Math.ceil(RW / CELL) + 1, gh = Math.ceil(RH / CELL) + 1, EX = new Float32Array(gw * gh);
+        for (var gy = 0; gy < gh; gy++) for (var gx = 0; gx < gw; gx++)
+          EX[gy * gw + gx] = swellExposure(SW.M, x2lon(VB.Xw + gx * CELL * VB.mpp), y2lat(VB.Ymid + (H / 2 - gy * CELL) * VB.mpp), lead.dir, 0);
+        for (y = 0; y < RH; y++){
+          var la = latOf[y], fy = D ? (D.N - la) / D.step - 0.5 : -1, ym = (la - 33.3) * 111320;
+          for (x = 0; x < RW; x++){
+            var p = y * RW + x;
+            if (wd && wd[p * 4 + 3] < 128) continue;
+            var lo = lonOf[x], fx = D ? (lo - D.W) / D.step - 0.5 : -1, dist;
+            var xm = (lo + 119.3) * 111320 * 0.83;
+            if (sol && fx >= 0 && fy >= 0 && fx < D.w - 1 && fy < D.h - 1){
+              var i0 = Math.floor(fx), j0 = Math.floor(fy), ax2 = fx - i0, ay2 = fy - j0, q = j0 * D.w + i0;
+              var t00 = sol.tau[q], t10 = sol.tau[q + 1], t01 = sol.tau[q + D.w], t11 = sol.tau[q + D.w + 1], m = Math.min(t00, t10, t01, t11);
+              if (m > 1e11) continue;
+              /* a corner on land has no travel time: lend it its neighbours' */
+              if (!(t00 < 1e11)) t00 = m; if (!(t10 < 1e11)) t10 = m; if (!(t01 < 1e11)) t01 = m; if (!(t11 < 1e11)) t11 = m;
+              dist = (t00 * (1 - ax2) * (1 - ay2) + t10 * ax2 * (1 - ay2) + t01 * (1 - ax2) * ay2 + t11 * ax2 * ay2) * c0;
+            } else dist = xm * te + ym * tn;                                 // off the depth grid: deep water, a plane wave
+            var ex = EX[Math.floor(y / CELL) * gw + Math.floor(x / CELL)];
+            idx.push(p); PH.push(dist * K); LI.push(0.16 + 0.84 * ex);
+            SH.push(nd ? Math.max(0, 1 - nd[p * 4 + 3] / 255 * 1.0) * 2 : 0);
+            UU.push((xm * tn - ym * te) / Lshown);                             // along the crest, in wavelengths
+          }
         }
-        var exAt = function(x, y){
-          var fx = Math.max(0, Math.min(gw - 1.001, x / CELL)), fy = Math.max(0, Math.min(gh - 1.001, y / CELL)), i = Math.floor(fx), j = Math.floor(fy), tx = fx - i, ty = fy - j;
-          return EX[j*gw+i]*(1-tx)*(1-ty) + EX[j*gw+i+1]*tx*(1-ty) + EX[(j+1)*gw+i]*(1-tx)*ty + EX[(j+1)*gw+i+1]*tx*ty;
-        };
-        /* travel direction on screen (north is up): the swell runs TOWARD dir + 180 */
-        var th = (lead.dir + 180) * Math.PI / 180, tx = Math.sin(th), ty = -Math.cos(th), px = -ty, py = tx;
-        var T = Math.max(5, Math.min(22, lead.tp || 10)), GAP = 9 + T * 1.5, SPEED = 5 + T * 0.75;     // px, px a second
-        var sg = swellCv.getContext('2d'), water = paint._water, t0 = performance.now(), reach = Math.hypot(W, H) / 2;
-        var BUCKETS = [[0.80, 0.62], [0.55, 0.40], [0.30, 0.22], [0.10, 0.10]];
+        var N = idx.length; if (!N) return;
+        var PHf = new Float32Array(PH), LIf = new Float32Array(LI), SHf = new Float32Array(SH), UUf = new Float32Array(UU), IDX = new Uint32Array(idx);
+        var off = document.createElement('canvas'); off.width = RW; off.height = RH;
+        var og = off.getContext('2d'), img = og.createImageData(RW, RH), px = img.data;
+        var amp = Math.max(0.45, Math.min(1, 0.35 + (lead.hs || 0.6) * 3.281 / 7));
+        var sg = swellCv.getContext('2d'), t0 = performance.now(), lastDraw = 0, TV = 2.8;            // seconds a crest takes to advance one wavelength on screen
         var frame = function(now){
           if (stale() || !surfOn()){ sg.clearRect(0, 0, W, H); return; }
-          if (!document.hidden){
-            sg.clearRect(0, 0, W, H);
-            var phase = ((now - t0) / 1000 * SPEED) % GAP, paths = BUCKETS.map(function(){ return []; });
-            for (var s0 = -reach - GAP + phase; s0 <= reach + GAP; s0 += GAP){
-              var cx = W / 2 + tx * s0, cy = H / 2 + ty * s0, run = null, runB = -1;
-              for (var u = -reach; u <= reach; u += 7){
-                /* a crest is not a ruled line: it wanders a little along its length */
-                var wob = Math.sin(u * 0.012 + s0 * 0.05) * 3.2;
-                var x = cx + px * u + tx * wob, y = cy + py * u + ty * wob, b = -1;
-                if (x >= 0 && y >= 0 && x <= W && y <= H){
-                  var e = exAt(x, y);
-                  for (var k = 0; k < BUCKETS.length; k++) if (e >= BUCKETS[k][0]){ b = k; break; }
-                }
-                if (b !== runB){ if (run && run.length > 1) paths[runB].push(run); run = b >= 0 ? [] : null; runB = b; }
-                if (run) run.push([x, y]);
+          if (!document.hidden && now - lastDraw > 45){
+            lastDraw = now;
+            var t = (now - t0) / 1000, wt = 2 * Math.PI * t / TV, gt = wt * 0.5;
+            for (var k = 0; k < N; k++){
+              var ph = PHf[k], u = UUf[k];
+              /* sets: a slow envelope along the travel, moving at the group's half speed; and
+                 crests of finite length: a slower one along the crest */
+              var env = 0.62 + 0.38 * Math.sin(ph / 7.3 - gt + 1.7 * Math.sin(u * 0.21));
+              var len = 0.7 + 0.3 * Math.sin(u * 0.55 + ph * 0.045 + 0.4 * Math.sin(u * 0.13));
+              var s = Math.sin(ph - wt + 0.5 * Math.sin(u * 0.33));
+              var a = LIf[k] * env * len * amp, o = IDX[k] * 4, sh = SHf[k];
+              if (s > 0){
+                var lit = s * s * (0.34 * a) + sh * a * (0.30 + 0.45 * s);          // the sunlit face; whiter in the shallows
+                px[o] = 232; px[o + 1] = 244; px[o + 2] = 255; px[o + 3] = Math.min(235, lit * 255);
+              } else {
+                px[o] = 3; px[o + 1] = 12; px[o + 2] = 34; px[o + 3] = Math.min(200, (-s) * (0.30 * a) * 255);   // the trough behind it
               }
-              if (run && run.length > 1) paths[runB].push(run);
             }
-            sg.lineCap = 'round'; sg.lineJoin = 'round'; sg.lineWidth = 1.25;
-            paths.forEach(function(list, k){
-              sg.strokeStyle = 'rgba(214,236,255,' + BUCKETS[k][1] + ')';
-              sg.beginPath();
-              list.forEach(function(r){ r.forEach(function(q, i){ i ? sg.lineTo(q[0], q[1]) : sg.moveTo(q[0], q[1]); }); });
-              sg.stroke();
-            });
-            /* the sea only: the map's own water mask cuts the crests at the real shoreline */
-            if (water){ sg.globalCompositeOperation = 'destination-in'; sg.drawImage(water, 0, 0, W, H); sg.globalCompositeOperation = 'source-over'; }
+            og.putImageData(img, 0, 0);
+            sg.clearRect(0, 0, W, H); sg.imageSmoothingEnabled = true; sg.drawImage(off, 0, 0, W, H);
           }
           window._swellRAF = requestAnimationFrame(frame);
         };
         cancelAnimationFrame(window._swellRAF);
         window._swellRAF = requestAnimationFrame(frame);
-        try { if (window.parent !== window) window.parent.postMessage({ labSwell: { dir: lead.dir, tp: lead.tp, model: !!lead.model } }, '*'); } catch(e){}
+        try { if (window.parent !== window) window.parent.postMessage({ labSwell: { dir: lead.dir, tp: lead.tp, model: !!lead.model, L: Math.round(L0), toScale: Lshown <= L0 * 1.001, bent: !!sol } }, '*'); } catch(e){}
       })
       .then(function(){
         /* TomTom re-models the flow every MINUTE (its tiles expire in 60 s; read off the

@@ -1183,7 +1183,36 @@ def bake_swell():
         print('    %-18s %s' % (nm, 'LAND' if not sea[y, x] else 'sea'))
 
 
-PARTS = {'swell': bake_swell, 'sched': bake_sched, 'geo': bake_geo, 'air': bake_air, 'veg': bake_veg, 'region': bake_region, 'land': bake_land, 'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea}
+# ------------------------------------------------------------ swell depth ----
+# THE DEPTH THE SWELL FEELS. A swell turns toward shallow water -- that is why crests arrive
+# nearly square to every beach whatever their direction offshore, and how a south swell wraps
+# into Malibu. The lab computes that bending from the seafloor itself (an eikonal solve: the
+# wave's speed at each cell follows from its period and the depth there), so it needs depth as
+# NUMBERS, not as a shaded picture. NOAA Coastal Relief Model, 250 m cells over the surf map's
+# reach; depth in DECIMETRES packed into a PNG's red and green bytes (R*256+G), land = 0,
+# lossless, ~200 KB. Blue carries nothing; alpha is opaque so no browser premultiplies it away.
+DEPTH_BOX = (-119.30, 33.30, -117.80, 34.20)
+DEPTH_STEP = 0.0025
+
+
+def bake_depth():
+    from PIL import Image
+    print('swell depth grid')
+    a = dem_pull(DEPTH_BOX, DEPTH_STEP, RASTER['1as'])
+    a = np.where(a < -9000, 0, a)
+    d = np.clip(np.round(-a * 10), 0, 65535).astype('uint16')          # decimetres of water; land 0
+    out = np.zeros(a.shape + (3,), 'uint8')
+    out[..., 0] = d >> 8
+    out[..., 1] = d & 255
+    Image.fromarray(out).save(os.path.join(HERE, 'swell_depth.png'), optimize=True)
+    print('  swell_depth.png  %dx%d  sea %.0f%%  deepest %.0f m  %d KB' % (a.shape[1], a.shape[0], 100 * (d > 0).mean(), d.max() / 10.0,
+                                                                        os.path.getsize(os.path.join(HERE, 'swell_depth.png')) // 1024))
+    for nm, lo, la in (('Redondo Canyon head', -118.42, 33.83), ('Santa Monica Bay mid', -118.60, 33.90), ('off Malibu 1 km', -118.68, 34.025), ('San Pedro Basin', -118.45, 33.55)):
+        x = int((lo - DEPTH_BOX[0]) / DEPTH_STEP); y = int((DEPTH_BOX[3] - la) / DEPTH_STEP)
+        print('    %-22s %6.1f m' % (nm, d[y, x] / 10.0))
+
+
+PARTS = {'depth': bake_depth, 'swell': bake_swell, 'sched': bake_sched, 'geo': bake_geo, 'air': bake_air, 'veg': bake_veg, 'region': bake_region, 'land': bake_land, 'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea}
 
 if __name__ == '__main__':
     print('home box  w %.4f  s %.4f  e %.4f  n %.4f' % home_box())
