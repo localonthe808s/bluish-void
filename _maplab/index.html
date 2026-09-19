@@ -2000,8 +2000,9 @@ function swellDepth(){
   });
   return SWELLDEPTH;
 }
-function swellTravelTime(D, dirFrom, T){
-  var key = Math.round(dirFrom / 3) * 3 + '|' + Math.round(T);
+function swellTravelTime(D, dirFrom, T, Hs){
+  Hs = Hs > 0 ? Hs : 0.6;
+  var key = Math.round(dirFrom / 3) * 3 + '|' + Math.round(T) + '|' + (Math.round(Hs * 5) / 5);
   if (D.solved[key]) return D.solved[key];
   var w = D.w, h = D.h, n = w * h, tau = new Float32Array(n), slow = new Float32Array(n), fixed = new Uint8Array(n);
   var g = 9.81, om = 2 * Math.PI / T, c0 = g * T / (2 * Math.PI), lat0 = (D.S + D.N) / 2;
@@ -2042,8 +2043,83 @@ function swellTravelTime(D, dirFrom, T){
     for (y = h - 1; y >= 0; y--) for (x = 0; x < w; x++) upd(x, y);
     for (y = h - 1; y >= 0; y--) for (x = w - 1; x >= 0; x--) upd(x, y);
   }
+  /* WHAT THE SEA DOES TO THE SWELL ON THE WAY IN (2026-09-19, user: "can you show realer dynamics
+     in the wave patterns around the capes and sea depth"). Travel time alone bends the crests; it
+     does not say that they GROW, and it is the growing that a surfer reads a coast by. Three
+     things happen, and all three fall out of one law -- the energy running down a ray tube is
+     conserved until the wave breaks:
+       SHOALING  the group speed falls as the bottom rises, so the same energy is carried by a
+                 slower wave and the height goes up. A swell stands taller on the shelf than it
+                 ever was offshore.
+       FOCUSING  refraction turns rays toward shallow ground, so they CONVERGE on every point and
+                 headland and spread apart in the bays between. That is why Palos Verdes and Point
+                 Dume break bigger than the beach a mile up the coast on the very same swell, and
+                 why the head of Redondo Canyon is a hole the swell falls into.
+       BREAKING  a wave cannot stand higher than about 0.78 of the water under it. Past that it
+                 breaks and the surplus is gone for good. The white band this leaves IS the surf
+                 zone -- wider where the bottom is flat, wider on a bigger day, and reaching
+                 furthest out on the points the rays converged on.
+     Solved by walking the cells in order of travel time. Energy only ever moves downwind, so one
+     pass in that order is exact -- no iteration: each cell hands its flux to the two cells ahead
+     of it, split by the ray's direction. Flux that meets land is simply lost. */
+  var order = [], i2;
+  for (i2 = 0; i2 < n; i2++) if (slow[i2] && tau[i2] < 1e11) order.push(i2);
+  order.sort(function(a, b){ return tau[a] - tau[b]; });
+  var cg = new Float32Array(n), F = new Float32Array(n), amp = new Float32Array(n), brk = new Float32Array(n);
+  for (i2 = 0; i2 < order.length; i2++){
+    var kc = order[i2], cc = 1 / slow[kc], kh = (om / cc) * Math.max(D.depth[kc], 2), sh2 = Math.sinh(2 * kh);
+    cg[kc] = 0.5 * cc * (1 + (kh < 18 && sh2 > 1e-6 ? 2 * kh / sh2 : 0));
+  }
+  var cg0 = c0 / 2;                                         // deep water: the group runs at half the crest
+  for (i2 = 0; i2 < n; i2++) if (fixed[i2]) F[i2] = cg0;    // one unit of energy arriving from the open sea
+  var tv = function(kk, home){ return (kk >= 0 && kk < n && slow[kk] && tau[kk] < 1e11) ? tau[kk] : tau[home]; };
+  for (i2 = 0; i2 < order.length; i2++){
+    var k3 = order[i2], f3 = F[k3];
+    if (!(f3 > 0)) continue;
+    var E = f3 / Math.max(cg[k3], 0.05), A = Math.sqrt(E), dep3 = D.depth[k3], Hlim = 0.78 * dep3;
+    if (A * Hs > Hlim){                                     // depth-limited: it breaks, and stays broken
+      brk[k3] = Math.min(1, (A * Hs - Hlim) / Math.max(Hlim, 0.25) + 0.3);
+      A = Hlim / Hs; F[k3] = f3 = A * A * cg[k3];
+    }
+    amp[k3] = A;
+    var x3 = k3 % w, y3 = (k3 - x3) / w;
+    var gx = (tv(x3 < w - 1 ? k3 + 1 : -1, k3) - tv(x3 > 0 ? k3 - 1 : -1, k3)) / (2 * hx);
+    var gy = (tv(y3 < h - 1 ? k3 + w : -1, k3) - tv(y3 > 0 ? k3 - w : -1, k3)) / (2 * hy);
+    var gm = Math.sqrt(gx * gx + gy * gy);
+    if (!(gm > 1e-12)) continue;
+    var wx = Math.abs(gx / gm), wy = Math.abs(gy / gm), sm = wx + wy;
+    if (!(sm > 0)) continue;
+    var kx = gx > 0 ? (x3 < w - 1 ? k3 + 1 : -1) : (x3 > 0 ? k3 - 1 : -1);
+    var ky = gy > 0 ? (y3 < h - 1 ? k3 + w : -1) : (y3 > 0 ? k3 - w : -1);
+    var okx = kx >= 0 && slow[kx] && tau[kx] > tau[k3], oky = ky >= 0 && slow[ky] && tau[ky] > tau[k3];
+    /* IF ONLY ONE WAY IS OPEN, ALL OF IT GOES THAT WAY. Splitting the flux and letting the half
+       aimed at a dry cell vanish bled the energy away over the last few hundred metres -- exactly
+       where a swell is supposed to be standing UP -- and left the beaches reading a quarter of
+       their true height. Energy is only lost where the water itself ends. */
+    if (okx && oky){ F[kx] += f3 * wx / sm; F[ky] += f3 * wy / sm; }
+    else if (okx) F[kx] += f3;
+    else if (oky) F[ky] += f3;
+  }
+  /* A LITTLE SMOOTHING STANDS IN FOR DIFFRACTION. Rays carry no energy sideways, so a headland's
+     lee comes out as a hard black wedge; the real sea leaks into it. Two three-tap passes also
+     take the grain off the upwind scheme. */
+  var tmp = new Float32Array(n);
+  for (var pass = 0; pass < 3; pass++){
+    for (var yy = 0; yy < h; yy++) for (var xx = 0; xx < w; xx++){
+      var kk2 = yy * w + xx;
+      if (!slow[kk2]){ tmp[kk2] = 0; continue; }
+      var a1 = xx > 0 && slow[kk2 - 1] ? amp[kk2 - 1] : amp[kk2], a2 = xx < w - 1 && slow[kk2 + 1] ? amp[kk2 + 1] : amp[kk2];
+      tmp[kk2] = (a1 + 2 * amp[kk2] + a2) / 4;
+    }
+    for (yy = 0; yy < h; yy++) for (xx = 0; xx < w; xx++){
+      var kk3 = yy * w + xx;
+      if (!slow[kk3]){ amp[kk3] = 0; continue; }
+      var b1 = yy > 0 && slow[kk3 - w] ? tmp[kk3 - w] : tmp[kk3], b2 = yy < h - 1 && slow[kk3 + w] ? tmp[kk3 + w] : tmp[kk3];
+      amp[kk3] = Math.min(3, (b1 + 2 * tmp[kk3] + b2) / 4);
+    }
+  }
   var keys = Object.keys(D.solved); if (keys.length > 5) delete D.solved[keys[0]];
-  return (D.solved[key] = { tau: tau, c0: c0, te: te, tn: tn, hx: hx, hy: hy });
+  return (D.solved[key] = { tau: tau, amp: amp, brk: brk, c0: c0, te: te, tn: tn, hx: hx, hy: hy });
 }
 var SURF = { t: 0, p: null, hits: [] };
 function surfReads(){
@@ -3545,7 +3621,8 @@ function drawCard(style){
                       shadow it -- faint, not gone, because swell does bend into a shadow.
              white    along the shore, only where the swell reaches it.
              time     sped up: at true speed a 12 s swell crosses one pixel in four seconds. */
-        var T = Math.max(5, Math.min(22, lead.tp || 10)), D = SW.D, sol = D ? swellTravelTime(D, lead.dir, T) : null;
+        var T = Math.max(5, Math.min(22, lead.tp || 10)), D = SW.D;
+        var sol = D ? swellTravelTime(D, lead.dir, T, lead.hs) : null;
         var gm = VB.mpp * Math.cos(y2lat(VB.Ymid) * Math.PI / 180), L0 = 9.81 * T * T / (2 * Math.PI);
         var Lshown = Math.max(L0, 7 * gm), c0 = 9.81 * T / (2 * Math.PI), K = 2 * Math.PI / Lshown;
         var th = (lead.dir + 180) * Math.PI / 180, te = Math.sin(th), tn = Math.cos(th);
@@ -3556,7 +3633,7 @@ function drawCard(style){
         /* nearness to land: the water mask blurred, read back -- 1 in open sea, falling to 0 at the beach */
         var nd = null;
         if (water){ var bc = document.createElement('canvas'); bc.width = RW; bc.height = RH; var bg = bc.getContext('2d'); bg.filter = 'blur(5px)'; bg.drawImage(water, 0, 0, RW, RH); nd = bg.getImageData(0, 0, RW, RH).data; }
-        var idx = [], PH = [], LI = [], SH = [], UU = [];
+        var idx = [], PH = [], LI = [], SH = [], UU = [], AM = [], BR = [];
         var lonOf = new Float64Array(RW), latOf = new Float64Array(RH);
         for (var x = 0; x < RW; x++) lonOf[x] = x2lon(VB.Xw + (x + 0.5) * VB.mpp);
         for (var y = 0; y < RH; y++) latOf[y] = y2lat(VB.Ymid + (H / 2 - (y + 0.5)) * VB.mpp);
@@ -3568,7 +3645,7 @@ function drawCard(style){
           for (x = 0; x < RW; x++){
             var p = y * RW + x;
             if (wd && wd[p * 4 + 3] < 128) continue;
-            var lo = lonOf[x], fx = D ? (lo - D.W) / D.step - 0.5 : -1, dist;
+            var lo = lonOf[x], fx = D ? (lo - D.W) / D.step - 0.5 : -1, dist, am = 1, br = 0;
             var xm = (lo + 119.3) * 111320 * 0.83;
             if (sol && fx >= 0 && fy >= 0 && fx < D.w - 1 && fy < D.h - 1){
               var i0 = Math.floor(fx), j0 = Math.floor(fy), ax2 = fx - i0, ay2 = fy - j0, q = j0 * D.w + i0;
@@ -3577,15 +3654,23 @@ function drawCard(style){
               /* a corner on land has no travel time: lend it its neighbours' */
               if (!(t00 < 1e11)) t00 = m; if (!(t10 < 1e11)) t10 = m; if (!(t01 < 1e11)) t01 = m; if (!(t11 < 1e11)) t11 = m;
               dist = (t00 * (1 - ax2) * (1 - ay2) + t10 * ax2 * (1 - ay2) + t01 * (1 - ax2) * ay2 + t11 * ax2 * ay2) * c0;
+              /* the height the swell has reached here, and how much of it is already breaking */
+              var bl = function(arr){
+                return arr[q] * (1 - ax2) * (1 - ay2) + arr[q + 1] * ax2 * (1 - ay2)
+                     + arr[q + D.w] * (1 - ax2) * ay2 + arr[q + D.w + 1] * ax2 * ay2;
+              };
+              am = bl(sol.amp); br = bl(sol.brk);
             } else dist = xm * te + ym * tn;                                 // off the depth grid: deep water, a plane wave
             var ex = EX[Math.floor(y / CELL) * gw + Math.floor(x / CELL)];
-            idx.push(p); PH.push(dist * K); LI.push(0.16 + 0.84 * ex);
-            SH.push(nd ? Math.max(0, 1 - nd[p * 4 + 3] / 255 * 1.0) * 2 : 0);
+            idx.push(p); PH.push(dist * K); LI.push(0.16 + 0.84 * ex); AM.push(am); BR.push(br);
+            /* outside the depth grid there is no breaking to compute: the blurred shoreline stands in */
+            SH.push((br > 0 || !nd) ? 0 : Math.max(0, 1 - nd[p * 4 + 3] / 255) * 1.6);
             UU.push((xm * tn - ym * te) / Lshown);                             // along the crest, in wavelengths
           }
         }
         var N = idx.length; if (!N) return;
-        var PHf = new Float32Array(PH), LIf = new Float32Array(LI), SHf = new Float32Array(SH), UUf = new Float32Array(UU), IDX = new Uint32Array(idx);
+        var PHf = new Float32Array(PH), LIf = new Float32Array(LI), SHf = new Float32Array(SH), UUf = new Float32Array(UU);
+        var AMf = new Float32Array(AM), BRf = new Float32Array(BR), IDX = new Uint32Array(idx);
         var off = document.createElement('canvas'); off.width = RW; off.height = RH;
         var og = off.getContext('2d'), img = og.createImageData(RW, RH), px = img.data;
         var amp = Math.max(0.45, Math.min(1, 0.35 + (lead.hs || 0.6) * 3.281 / 7));
@@ -3602,10 +3687,18 @@ function drawCard(style){
               var env = 0.62 + 0.38 * Math.sin(ph / 7.3 - gt + 1.7 * Math.sin(u * 0.21));
               var len = 0.7 + 0.3 * Math.sin(u * 0.55 + ph * 0.045 + 0.4 * Math.sin(u * 0.13));
               var s = Math.sin(ph - wt + 0.5 * Math.sin(u * 0.33));
-              var a = LIf[k] * env * len * amp, o = IDX[k] * 4, sh = SHf[k];
-              if (s > 0){
-                var lit = s * s * (0.34 * a) + sh * a * (0.30 + 0.45 * s);          // the sunlit face; whiter in the shallows
-                px[o] = 232; px[o + 1] = 244; px[o + 2] = 255; px[o + 3] = Math.min(235, lit * 255);
+              /* the local height carries the shoaling and the focusing; the shallow face of a
+                 standing wave is also steeper, so it takes the light harder */
+              /* floored and capped: a lee that the rays never reach is dark, not blank -- real swell
+                 leaks into it -- and one focused streak cannot be allowed to burn out the frame */
+              var hgt = AMf[k] < 0.3 ? 0.3 : (AMf[k] > 2.2 ? 2.2 : AMf[k]);
+              var a = LIf[k] * env * len * amp * (0.55 + 0.75 * hgt), o = IDX[k] * 4, fo = BRf[k];
+              var lit = s > 0 ? s * s * (0.34 * a) * (hgt > 1 ? 1 + (hgt - 1) * 0.5 : 1) : 0;
+              /* WHITE WATER IS NOT A WAVE. Where it has broken the surface is foam: brighter,
+                 rougher, and running at its own pace rather than the swell's. */
+              if (fo > 0) lit += fo * (0.30 + 0.26 * Math.sin(ph * 1.9 - wt * 1.8 + u * 2.7) + 0.12 * Math.sin(u * 5.1 - wt * 0.9)) * Math.min(1.15, a + 0.4);
+              if (lit > 0){
+                px[o] = 232; px[o + 1] = 244; px[o + 2] = 255; px[o + 3] = Math.min(245, lit * 255);
               } else {
                 px[o] = 3; px[o + 1] = 12; px[o + 2] = 34; px[o + 3] = Math.min(200, (-s) * (0.30 * a) * 255);   // the trough behind it
               }
@@ -3617,7 +3710,8 @@ function drawCard(style){
         };
         cancelAnimationFrame(window._swellRAF);
         window._swellRAF = requestAnimationFrame(frame);
-        try { if (window.parent !== window) window.parent.postMessage({ labSwell: { dir: lead.dir, tp: lead.tp, model: !!lead.model, L: Math.round(L0), toScale: Lshown <= L0 * 1.001, bent: !!sol } }, '*'); } catch(e){}
+        try { if (window.parent !== window) window.parent.postMessage({ labSwell: { dir: lead.dir, tp: lead.tp, model: !!lead.model,
+          L: Math.round(L0), toScale: Lshown <= L0 * 1.001, bent: !!sol, hs: lead.hs } }, '*'); } catch(e){}
       })
       .then(function(){
         /* TomTom re-models the flow every MINUTE (its tiles expire in 60 s; read off the
