@@ -157,7 +157,7 @@ var VIEWS = {
               /* shaded relief, not terraces: the veils (la/land_relief.json) were built for
                  New York's 120 m of relief and barely registered against 3,000 m */
               landReliefs:'la/land_index.json', veg:'la/veg_index.json', airfields:'la/airfields.json',
-              wxGeo:'la/weather_geo.json',
+              wxGeo:'la/weather_geo.json', tz:'America/Los_Angeles',
               depthFade:[-119.60,33.20,-117.30,34.75],
               faults:'la/faults.json', radar:'ksox',
               /* [name, lon, lat, only-below-this-m/px]: the far ones stay out of the 3-hour view's way */
@@ -1703,7 +1703,21 @@ function wxReads(){
   return WX.p;
 }
 var LA_PT = { x:-118.25, y:34.05 };
-function makeMachinery(ctx, geo, R, proj, mpp, view){
+/* AN ARC SAYS WHEN, NOT HOW LONG (user 2026-09-19: "the arches should be reading the time not
+   the hours ahead, we fixed that for NYC"). The widget's grammar, cwDrawLeadArcs: the arrival
+   as a clock time, "3:40 PM", and the weekday on a second row when that is not today. In the
+   VIEW's timezone, not the reader's -- this lab is driven from New York and the widget is for
+   Los Angeles. */
+function arcClock(mins, tz){
+  var d = new Date(Date.now() + mins * 60000), o = { timeZone: tz || 'America/Los_Angeles' };
+  var f = function(x){ var k = {}; for (var i in o) k[i] = o[i]; for (var j in x) k[j] = x[j]; return new Intl.DateTimeFormat('en-US', k).format(d); };
+  var day = function(t){ return new Intl.DateTimeFormat('en-CA', o).format(t); };
+  return { time: f({ hour:'numeric', minute:'2-digit' }),
+           day: day(d) !== day(new Date()) ? f({ weekday:'short' }).toUpperCase() : null };
+}
+function makeMachinery(ctx, geo, R, proj, mpp, view, mode){
+  var city = mode === 'city';
+  if (city) geo = null;                           // the half-hour view carries the rings only
   var near = mpp < 700, kind = near ? 'near' : 'far', hot = [], quiet = [], paintList = [];
   var EARTH = 'rgba(216,196,158,', TEAL = 'rgba(126,206,192,';
   var nameFont = '500 9px QelliaRegular, "Bodoni Moda", Georgia, serif', readFont = '700 7.5px system-ui, sans-serif';
@@ -1751,12 +1765,15 @@ function makeMachinery(ctx, geo, R, proj, mpp, view){
   var arcs = [];
   if (R && R.steer.kt >= 4 && !(VIEWS[document.getElementById('view').value] || {}).sat){   // no arcs on the satellite view
     var c0 = proj(LA_PT), kmh = R.steer.kt * 1.852;
-    (near ? [1, 2, 3] : [6, 12]).forEach(function(h){
-      var rpx = kmh * h * 1000 / Math.cos(34.05 * Math.PI / 180) / mpp;
+    /* minutes of travel: 10/20/30 on the half-hour view (the widget's city rings), 1/2/3 h
+       on the 3-hour view, 6/12 h on the 12-hour */
+    var tz = (VIEWS[document.getElementById('view').value] || {}).tz;
+    (city ? [10, 20, 30] : near ? [60, 120, 180] : [360, 720]).forEach(function(mins){
+      var rpx = kmh * (mins / 60) * 1000 / Math.cos(34.05 * Math.PI / 180) / mpp;
       if (rpx < 14) return;
-      arcs.push({ h:h, r:rpx, c:c0, from:R.steer.from });
-      var b = R.steer.from * Math.PI / 180;
-      hot.unshift({ name: h + ' HR', arc:true, q:{ x:c0.x + Math.sin(b) * (rpx + 9), y:c0.y - Math.cos(b) * (rpx + 9) }, col:'#fff', rank:80 });
+      arcs.push({ r:rpx, c:c0, from:R.steer.from });
+      var b = R.steer.from * Math.PI / 180, k = arcClock(mins, tz), off = rpx + (k.day ? 15 : 9);
+      hot.unshift({ name: k.time, day: k.day, arc:true, q:{ x:c0.x + Math.sin(b) * off, y:c0.y - Math.cos(b) * off }, col:'#fff', rank:80 });
     });
   }
   var placed = [];
@@ -1768,7 +1785,8 @@ function makeMachinery(ctx, geo, R, proj, mpp, view){
       try { ctx.letterSpacing = L.arc ? '0.08em' : '0.18em'; } catch(e){}
       var w1 = ctx.measureText(L.name).width, w2 = 0;
       if (L.read){ ctx.font = readFont; try { ctx.letterSpacing = '0.06em'; } catch(e){} w2 = ctx.measureText(L.read).width; }
-      var w = Math.max(w1, w2) + 8, h = L.read ? 24 : 13;
+      if (L.day) w2 = ctx.measureText(L.day).width;
+      var w = Math.max(w1, w2) + 8, h = (L.read || L.day) ? 24 : 13;
       var x = Math.max(4, Math.min(ctx.canvas.width - w - 4, L.q.x - w / 2));
       if (!labelFits(x, L.q.y - h / 2, w, h)) return;
       L.x = x + w / 2; placed.push(L);
@@ -1822,13 +1840,14 @@ function makeMachinery(ctx, geo, R, proj, mpp, view){
       placed.forEach(function(L){
         g.font = L.arc ? '800 9.5px system-ui, sans-serif' : nameFont;
         try { g.letterSpacing = L.arc ? '0.08em' : '0.18em'; } catch(e){}
-        var y = L.read ? L.q.y - 5 : L.q.y;
+        var y = (L.read || L.day) ? L.q.y - 5 : L.q.y;
         g.lineWidth = 2.6; g.strokeStyle = 'rgba(8,10,16,.78)'; g.strokeText(L.name, L.x, y);
         g.fillStyle = L.col; g.fillText(L.name, L.x, y);
         if (L.read){
           g.font = readFont; try { g.letterSpacing = '0.06em'; } catch(e){}
           g.strokeText(L.read, L.x, y + 11); g.fillStyle = L.col; g.fillText(L.read, L.x, y + 11);
         }
+        if (L.day){ g.strokeText(L.day, L.x, y + 11); g.fillStyle = L.col; g.fillText(L.day, L.x, y + 11); }   // the day, stacked
       });
       try { g.letterSpacing = '0px'; } catch(e){}
       g.restore();
@@ -2502,9 +2521,21 @@ function drawCard(style){
                   paintHoods = function(){ M.paint(); p3(); p2(); p1(); };
                   return parkNamesFor(vkey);
                 });
-              } else
-              paintHoods = drawHoodNames(ctx, hn, out.project, nmpp(),
-                vv.nameClear ? { clear: boroughFill(dark), weight: 0.085 } : null);
+              }
+              var hoodOpts = vv.nameClear ? { clear: boroughFill(dark), weight: 0.085 } : null;
+              if (vv.wxGeo && document.getElementById('radar').checked && !vv.sat){
+                /* the half-hour radar view: the widget's 10/20/30-minute rings, clock-labelled.
+                   The rings' times claim their space first; the names fit round them. */
+                return wxReads().then(function(R){
+                  if (stale()) return;
+                  var M = makeMachinery(ctx, null, R, out.project, VB.mpp, view, 'city');
+                  LABELBOX.length = 0; M.claimHot();
+                  var ph = drawHoodNames(ctx, hn, out.project, nmpp(), { clear: hoodOpts && hoodOpts.clear, weight: 0.085, keep: true });
+                  paintHoods = function(){ ph(); M.paint(); };
+                  return parkNamesFor(vkey);
+                });
+              }
+              paintHoods = drawHoodNames(ctx, hn, out.project, nmpp(), hoodOpts);
               return parkNamesFor(vkey);
             }).then(function(pn){
               if (stale()) return;
@@ -2559,18 +2590,24 @@ function drawCard(style){
     VB.Ymid = Ycur - (H / 2 - my) * VB.mpp;
     schedule();
   }
+  /* LAB_LOCK (embed message `lock`): the radar and satellite views are FIXED FRAMES in the
+     widget -- only the map itself pans and zooms -- so the preview holds them still too, and
+     the wheel goes back to scrolling the page. */
   cv.addEventListener('wheel', function(ev){
+    if (window.LAB_LOCK) return;
     ev.preventDefault();
     var r = cv.getBoundingClientRect();
     zoomAt((ev.clientX - r.left) * W / r.width, (ev.clientY - r.top) * H / r.height,
            Math.pow(1.0016, -ev.deltaY));
   }, { passive: false });
   cv.addEventListener('dblclick', function(ev){
+    if (window.LAB_LOCK) return;
     var r = cv.getBoundingClientRect();
     zoomAt((ev.clientX - r.left) * W / r.width, (ev.clientY - r.top) * H / r.height, 2);
   });
   var drag = null;
   cv.addEventListener('pointerdown', function(ev){
+    if (window.LAB_LOCK) return;
     drag = { x: ev.clientX, y: ev.clientY }; cv.setPointerCapture(ev.pointerId);
     cv.style.cursor = 'grabbing';
   });
@@ -2586,7 +2623,7 @@ function drawCard(style){
   var release = function(){ drag = null; cv.style.cursor = 'grab'; };
   cv.addEventListener('pointerup', release);
   cv.addEventListener('pointercancel', release);
-  cv.style.cursor = 'grab';
+  cv.style.cursor = window.LAB_LOCK ? 'default' : 'grab';
   card.querySelector('.zoomers').addEventListener('click', function(ev){
     var z = ev.target.getAttribute('data-z');
     if (z === 'in') zoomAt(W/2, H/2, 1.8);
@@ -2635,6 +2672,7 @@ function copyFlavor(){
     document.getElementById('view').value = key;
     document.getElementById('geo').checked = !!m.geo;
     document.getElementById('radar').checked = !!(m.radar || m.sat);
+    window.LAB_LOCK = !!m.lock;
     renderAll();
   });
 })();
