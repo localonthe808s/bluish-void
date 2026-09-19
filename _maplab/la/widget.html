@@ -188,7 +188,8 @@ function laNow(){
   /* the clock on the platform: Los Angeles time, whatever the reader's is */
   var p = {}; new Intl.DateTimeFormat('en-US', { timeZone:'America/Los_Angeles', weekday:'short', hour:'numeric', minute:'numeric', hourCycle:'h23' })
     .formatToParts(new Date()).forEach(function(x){ p[x.type] = x.value; });
-  return { min: (+p.hour % 24) * 60 + (+p.minute), dow: ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].indexOf(p.weekday) };
+  var ymd = function(t){ return new Intl.DateTimeFormat('en-CA', { timeZone:'America/Los_Angeles' }).format(t).replace(/-/g, ''); };
+  return { min: (+p.hour % 24) * 60 + (+p.minute), today: ymd(new Date()), yday: ymd(new Date(Date.now() - 864e5)) };
 }
 function clock(min){ var h = Math.floor(min / 60) % 24, m = min % 60; return (h % 12 || 12) + ':' + ('0' + m).slice(-2) + (h < 12 ? ' AM' : ' PM'); }
 function board(){
@@ -196,16 +197,25 @@ function board(){
   var head = '<b>' + STATION.name.toUpperCase() + '</b> &nbsp;';
   if (!SCHED) return head + '·&nbsp; reading the timetable…';
   if (!sd) return head + '·&nbsp; no timetable for this station';
-  var now = laNow(), key = function(d){ return d === 0 ? 'su' : d === 6 ? 'sa' : 'wk'; };
+  /* the timetable is stored PER DATE (Metro's calendar changes daily); a date it does not
+     hold means the bake has gone stale, and the board says that rather than guessing */
+  var now = laNow(), of = function(r, ds){ var ix = r.d[ds]; return ix == null ? null : r.t[ix]; };
+  if (!sd.rows.some(function(r){ return of(r, now.today); }))
+    return head + '·&nbsp; THE TIMETABLE ON FILE DOES NOT REACH TODAY · IT NEEDS RE-BAKING';
+  /* A BOARD IS ABOUT THE NEXT HOUR. A train within 90 minutes gets its clock, its wait and the
+     two after it; a direction with nothing that soon says when its FIRST TRAIN is instead of
+     "270 MIN"; soonest first, six rows at most -- Union Station has a lot of platforms. */
   var rows = sd.rows.map(function(r){
     /* today's service day, and the tail of yesterday's that runs past midnight */
-    var t = (r[key((now.dow + 6) % 7)] || []).filter(function(x){ return x >= now.min + 1440; }).map(function(x){ return x - 1440; })
-      .concat((r[key(now.dow)] || []).filter(function(x){ return x >= now.min; })).sort(function(a, b){ return a - b; }).slice(0, 3);
-    if (!t.length) return '';
-    var c = LINE_COL[r.r];
-    return '<span style="white-space:nowrap;">' + (c ? chip(r.r, c) : '<b>' + r.r + '</b>') + ' TO ' + r.h.toUpperCase() + ' &nbsp;<b>' + clock(t[0]) + '</b> (' + (t[0] - now.min) + ' MIN)'
-         + (t.length > 1 ? ', THEN ' + t.slice(1).map(clock).join(', ') : '') + '</span>';
-  }).filter(Boolean);
+    var t = (of(r, now.yday) || []).filter(function(x){ return x >= now.min + 1440; }).map(function(x){ return x - 1440; })
+      .concat((of(r, now.today) || []).filter(function(x){ return x >= now.min; })).sort(function(a, b){ return a - b; });
+    if (!t.length) return null;
+    var c = LINE_COL[r.r], wait = t[0] - now.min, tag = (c ? chip(r.r, c) : '<b>' + r.r + '</b>') + ' TO ' + r.h.toUpperCase() + ' &nbsp;';
+    var soon = t.filter(function(x){ return x - now.min <= 90; }).slice(0, 3);
+    return { wait: wait, html: '<span style="white-space:nowrap;">' + tag + (soon.length
+      ? '<b>' + clock(soon[0]) + '</b> (' + wait + ' MIN)' + (soon.length > 1 ? ', THEN ' + soon.slice(1).map(clock).join(', ') : '')
+      : 'FIRST TRAIN <b>' + clock(t[0]) + '</b>') + '</span>' };
+  }).filter(Boolean).sort(function(a, b){ return a.wait - b.wait; }).slice(0, 6).map(function(o){ return o.html; });
   return head + (rows.length ? rows.join(' &nbsp;·&nbsp; ') : '·&nbsp; NO MORE TRAINS TONIGHT ON THE TIMETABLE')
        + ' &nbsp;·&nbsp; <span style="opacity:.62;">SCHEDULED TIMES, NOT LIVE' + (LIVE === 0 ? ' · METRO’S LIVE FEED IS SILENT' : '') + ' · TAP A STATION FOR ITS OWN</span>';
 }

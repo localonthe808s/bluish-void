@@ -32,6 +32,7 @@ lon/lat vectors and are projected at draw time -- nothing raster is resampled
 into mercator, which is the trap the New York seafloor fell into twice.
 """
 import csv
+import datetime
 import io
 import json
 import math
@@ -1030,38 +1031,74 @@ def bake_geo():
 # so the reader can look in yesterday's list too. A trip's last stop is an arrival, not a
 # departure, and is left out. Holiday exceptions in calendar_dates are NOT applied.
 def sched_from(rd, name_of, kind):
+    # METRO'S CALENDAR IS PER DATE, NOT PER WEEKDAY. Read 2026-09-19: the feed carries a
+    # separate service_id for almost every day of the coming fortnight ("801-1_Weekday-07" for
+    # the 21st alone, "-13" for the 22nd ...) -- track work changes the timetable daily -- plus
+    # calendar_dates removals on top. A weekday/Saturday/Sunday table cannot hold that: it
+    # printed 12:21 and 12:22 as two trains (two calendars, same flag) and then, filtered to
+    # "in force today", lost Sunday entirely. So the bake resolves each of the NEXT EIGHT DATES
+    # (yesterday, for its after-midnight tail, through six days on) to its own service_ids the
+    # way the spec says -- range and weekday flag, minus type-2 exceptions, plus type-1 -- and
+    # stores each row's departures per date. Identical days share one list. It is good for a
+    # week: the widget needs a nightly bake.
+    from zoneinfo import ZoneInfo
     routes = {r['route_id']: r for r in rd('routes.txt')}
-    day_of = {}
-    for c in rd('calendar.txt'):
-        ks = set()
-        if any(c[d] == '1' for d in ('monday', 'tuesday', 'wednesday', 'thursday', 'friday')): ks.add('wk')
-        if c['saturday'] == '1': ks.add('sa')
-        if c['sunday'] == '1': ks.add('su')
-        day_of[c['service_id']] = ks
+    la_today = datetime.datetime.now(ZoneInfo('America/Los_Angeles')).date()
+    dates = [la_today + datetime.timedelta(days=k) for k in range(-1, 7)]
+    flags = ('monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday')
+    cal = rd('calendar.txt')
+    exc = defaultdict(dict)
+    for x in rd('calendar_dates.txt'):
+        exc[x['date']][x['service_id']] = x['exception_type']
+    active = {}
+    for d in dates:
+        ds = d.strftime('%Y%m%d')
+        on = {c['service_id'] for c in cal if c['start_date'] <= ds <= c['end_date'] and c[flags[d.weekday()]] == '1'}
+        on -= {sid for sid, t in exc[ds].items() if t == '2'}
+        on |= {sid for sid, t in exc[ds].items() if t == '1'}
+        active[ds] = on
+    svc_dates = defaultdict(list)
+    for ds, on in active.items():
+        for sid in on:
+            svc_dates[sid].append(ds)
     trips = {t['trip_id']: t for t in rd('trips.txt')}
     stops = {x['stop_id']: x for x in rd('stops.txt')}
     parent = lambda sid: (stops[sid].get('parent_station') or sid) if sid in stops else sid     # noqa: E731
     by_trip = defaultdict(list)
     for st in rd('stop_times.txt'):
         by_trip[st['trip_id']].append((int(st['stop_sequence']), st['stop_id'], st.get('departure_time') or st.get('arrival_time')))
-    out = defaultdict(lambda: defaultdict(lambda: {'wk': set(), 'sa': set(), 'su': set()}))
+    out = defaultdict(lambda: defaultdict(lambda: defaultdict(set)))
+    heads = defaultdict(Counter)
     for tid, rows in by_trip.items():
         t = trips.get(tid)
-        if not t or t['route_id'] not in routes:
+        if not t or t['route_id'] not in routes or t['service_id'] not in svc_dates:
             continue
         rows.sort()
         head = (t.get('trip_headsign') or stops.get(rows[-1][1], {}).get('stop_name') or '').replace(' Station', '').strip()
         line = name_of(routes[t['route_id']])
+        # BY DIRECTION, not by headsign: the A Line alone signs its northbound trains three
+        # ways (APU / Citrus College, Pomona North, one Monrovia short-turn a day), and a
+        # rider on the platform wants "the next train that way". The commonest sign names it.
+        dirn = t.get('direction_id') or '0'
         for seq, sid, tm in rows[:-1]:
             if not tm:
                 continue
             h, m = int(tm[:-6]), int(tm[-5:-3])
-            for k in day_of.get(t['service_id'], ()):
-                out[parent(sid)][(line, head)][k].add(h * 60 + m)
+            for ds in svc_dates[t['service_id']]:
+                out[parent(sid)][(line, dirn)][ds].add(h * 60 + m)
+            heads[(parent(sid), line, dirn)][head] += 1
     res = {}
     for pid, rows in out.items():
-        res[pid] = {'kind': kind, 'rows': [{'r': l, 'h': h, 'wk': sorted(v['wk']), 'sa': sorted(v['sa']), 'su': sorted(v['su'])}
-                                          for (l, h), v in sorted(rows.items())]}
+        rr = []
+        for (l, d), per in sorted(rows.items()):
+            lists, idx = [], {}
+            for ds in sorted(per):
+                v = sorted(per[ds])
+                if v not in lists:
+                    lists.append(v)
+                idx[ds] = lists.index(v)
+            rr.append({'r': l, 'h': heads[(pid, l, d)].most_common(1)[0][0], 'd': idx, 't': lists})
+        res[pid] = {'kind': kind, 'rows': rr}
     return res
 
 
@@ -1075,7 +1112,7 @@ def bake_sched():
     print('  %d stations; default candidates: %s' % (len(m), [(i, names[i]) for i in smc]))
     for i in smc:
         for r in m.get(i, {}).get('rows', []):
-            print('    %s to %-28s weekday %d, saturday %d, sunday %d departures' % (r['r'], r['h'], len(r['wk']), len(r['sa']), len(r['su'])))
+            print('    %s to %-26s %s' % (r['r'], r['h'], ', '.join('%s:%d' % (ds[4:], len(r['t'][ix])) for ds, ix in sorted(r['d'].items()))))
     write('rail_sched.json', m)
 
 
