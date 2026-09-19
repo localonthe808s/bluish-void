@@ -437,7 +437,7 @@ def dem_pull(box, step, lock, src=None):
     raise RuntimeError('DEM pull failed for %s' % (box,))
 
 
-def sea_image(a, box, zfac, name):
+def sea_image(a, box, zfac, name, keep=None):
     from PIL import Image
     w, s, e, n = box
     H, W = a.shape
@@ -468,7 +468,7 @@ def sea_image(a, box, zfac, name):
     shade = 1 + (shade - 1) * np.clip(d / 6.0, 0, 1)
     out = np.zeros((H, W, 4), 'uint8')
     out[..., :3] = np.clip(rgb * shade[..., None], 0, 255)
-    out[..., 3] = np.where(sea, 255, 0)
+    out[..., 3] = np.where(sea, 255, 0) if keep is None else np.where(sea, np.round(255 * keep), 0)
     im = Image.fromarray(out)
     # a single-hue ramp survives 96 colours untouched, and the file drops ~5x
     al = im.getchannel('A')
@@ -602,8 +602,10 @@ def bake_region():
     print('regional base (ETOPO 15")')
     a = dem_pull(REGION, 15 / 3600.0, ETOPO_15S)
     print('  grid %s, %.0f to %.0f m' % (a.shape, a[a > -9000].min(), a.max()))
-    rs = sea_image(a, REGION, 7.0, 'sea_15as.png')
-    # knock the land shading out where the finer tiers take over
+    # knock this tier out where the finer ones take over. For the LAND it stops two alphas
+    # stacking. For the SEA it stops something worse: a 450 m cell's idea of the coast,
+    # drawn opaque, spilled navy hundreds of metres up the beach beside LAX, and the finer
+    # tiers on top are transparent over land so they never covered it.
     H, W = a.shape
     lon = REGION[0] + (np.arange(W) + 0.5) / W * (REGION[2] - REGION[0])
     lat = REGION[3] - (np.arange(H) + 0.5) / H * (REGION[3] - REGION[1])
@@ -611,6 +613,7 @@ def bake_region():
     inx = np.clip(np.minimum(lon - PULL[0], PULL[2] - lon) / fx, 0, 1)
     iny = np.clip(np.minimum(lat - PULL[1], PULL[3] - lat) / fy, 0, 1)
     keep = 1.0 - np.minimum.outer(iny, inx)        # 1 outside the pull, 0 well inside it
+    rs = sea_image(a, REGION, 7.0, 'sea_15as.png', keep)
     # from 1,000 km up the ranges sit on BLACK land, where only the lit faces can draw them
     rl = land_image(a, REGION, 2.4, 'land_15as.png', keep, lite_gain=1.8)
     for name, first in (('sea_index.json', rs), ('land_index.json', rl)):
@@ -787,17 +790,22 @@ def bake_veg():
 # Monica, John Wayne, Ontario and the rest. Beaches are natural=beach, which is also what
 # finally paints the strand from Malibu to Newport: it lies outside the urban footprint, so
 # it had been coming out as black land against the sea.
-OVERPASS = ('https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter')
+OVERPASS = ('https://overpass-api.de/api/interpreter', 'https://overpass.private.coffee/api/interpreter',
+            'https://overpass.kumi.systems/api/interpreter')
 
 
 def overpass(q):
-    for url in OVERPASS:
-        try:
-            r = urllib.request.urlopen(urllib.request.Request(
-                url, data=urllib.parse.urlencode({'data': q}).encode(), headers=UA), timeout=300).read()
-            return json.loads(r)['elements']
-        except Exception as ex:
-            print('    %s: %s' % (url.split('/')[2], ex))
+    # the public servers 504 in bursts; three mirrors, five rounds, then give up
+    import time
+    for rnd_ in range(5):
+        for url in OVERPASS:
+            try:
+                r = urllib.request.urlopen(urllib.request.Request(
+                    url, data=urllib.parse.urlencode({'data': q}).encode(), headers=UA), timeout=300).read()
+                return json.loads(r)['elements']
+            except Exception as ex:
+                print('    %s: %s' % (url.split('/')[2], ex))
+        time.sleep(30)
     raise RuntimeError('overpass unreachable')
 
 
@@ -806,12 +814,37 @@ def rings_of(el):
     if el['type'] == 'way':
         g = [[p['lon'], p['lat']] for p in el.get('geometry') or []]
         return [g] if len(g) >= 4 else []
-    out = []
+    # A big multipolygon's outline arrives in PIECES -- Dockweiler State Beach is several
+    # open ways end to end -- and keeping only the members that were already closed dropped
+    # exactly the largest beaches. Stitch the outer ways into rings by their shared endpoints.
+    segs = []
     for m in el.get('members') or []:
-        if m.get('role') in ('outer', '') and m.get('geometry'):
-            g = [[p['lon'], p['lat']] for p in m['geometry']]
-            if len(g) >= 4 and g[0] == g[-1]:
-                out.append(g)
+        if m.get('role') in ('outer', '') and m.get('type') == 'way' and m.get('geometry'):
+            g = [(p['lon'], p['lat']) for p in m['geometry']]
+            if len(g) >= 2:
+                segs.append(g)
+    out = []
+    while segs:
+        ring = segs.pop(0)
+        grew = True
+        while ring[0] != ring[-1] and grew:
+            grew = False
+            for i, g in enumerate(segs):
+                if g[0] == ring[-1]:
+                    ring += g[1:]
+                elif g[-1] == ring[-1]:
+                    ring += g[-2::-1]
+                elif g[-1] == ring[0]:
+                    ring = g[:-1] + ring
+                elif g[0] == ring[0]:
+                    ring = g[:0:-1] + ring
+                else:
+                    continue
+                segs.pop(i)
+                grew = True
+                break
+        if len(ring) >= 4 and ring[0] == ring[-1]:
+            out.append([list(c) for c in ring])
     return out
 
 
