@@ -2118,8 +2118,29 @@ function swellTravelTime(D, dirFrom, T, Hs){
       amp[kk3] = Math.min(3, (b1 + 2 * tmp[kk3] + b2) / 4);
     }
   }
+  /* THE BREAK LINE, WHICH IS THE ONE MARK A SURFER WANTS (user 2026-09-19: "should you show some
+     of the waves breaking is there like a breaking point for surfers?"). The white water is real
+     but on a small day it is a strip a few metres wide -- under a pixel from up here, so the map
+     showed nothing. So the OUTER EDGE of the breaking field is traced as a line and drawn as a
+     line, the way a chart marks a reef: marching squares over `brk`, one segment per cell that
+     the edge crosses, in lon/lat so it projects at any zoom. On a 2 ft day it hugs the sand; on a
+     10 ft day it stands a quarter-mile off the points. */
+  var seg = [], TH = 0.15;
+  var lonAt = function(x){ return D.W + (x + 0.5) * D.step; }, latAt = function(y){ return D.N - (y + 0.5) * D.step; };
+  for (var by = 0; by < h - 1; by++) for (var bx = 0; bx < w - 1; bx++){
+    var q0 = by * w + bx, f00 = brk[q0], f10 = brk[q0 + 1], f01 = brk[q0 + w], f11 = brk[q0 + w + 1];
+    var lo = Math.min(f00, f10, f01, f11), hi2 = Math.max(f00, f10, f01, f11);
+    if (!(lo <= TH && hi2 > TH)) continue;
+    var pts = [], mix = function(a1, b1){ var t2 = (TH - a1) / ((b1 - a1) || 1e-6); return t2 < 0 ? 0 : t2 > 1 ? 1 : t2; };
+    if ((f00 > TH) !== (f10 > TH)) pts.push([lonAt(bx + mix(f00, f10)), latAt(by)]);
+    if ((f10 > TH) !== (f11 > TH)) pts.push([lonAt(bx + 1), latAt(by + mix(f10, f11))]);
+    if ((f01 > TH) !== (f11 > TH)) pts.push([lonAt(bx + mix(f01, f11)), latAt(by + 1)]);
+    if ((f00 > TH) !== (f01 > TH)) pts.push([lonAt(bx), latAt(by + mix(f00, f01))]);
+    if (pts.length >= 2) seg.push([pts[0], pts[1]]);
+    if (pts.length === 4) seg.push([pts[2], pts[3]]);
+  }
   var keys = Object.keys(D.solved); if (keys.length > 5) delete D.solved[keys[0]];
-  return (D.solved[key] = { tau: tau, amp: amp, brk: brk, c0: c0, te: te, tn: tn, hx: hx, hy: hy });
+  return (D.solved[key] = { tau: tau, amp: amp, brk: brk, line: seg, c0: c0, te: te, tn: tn, hx: hx, hy: hy });
 }
 var SURF = { t: 0, p: null, hits: [] };
 function surfReads(){
@@ -2221,8 +2242,46 @@ function faceOf(win){
   var a = win[0], d = ((win[1] - win[0]) % 360 + 360) % 360;        // the middle, the short way round
   return ((a + d / 2) % 360 + 360) % 360;
 }
-function makeSurf(ctx, spots, R, proj, mpp, M){
+/* the swell this map is drawn for: the bay buoy, or whatever the dial is asking about */
+function leadSwell(R){
+  var B = (R && R.buoys) || {}, b = B['46221'] || B['46268'] || B['46222'] || B[Object.keys(B)[0]];
+  if (!b || b.dir == null) return null;
+  return window.LAB_SWELLDIR != null ? { dir: window.LAB_SWELLDIR, tp: b.tp, hs: b.hs, model: b.model, whatIf: true } : b;
+}
+function makeSurf(ctx, spots, R, proj, mpp, M, D){
   var hits = [], labels = [], marks = [], tideNow = R && R.level ? R.level.ft : null;
+  /* the same solve the sea is drawn from -- it is cached, so this costs nothing twice */
+  var lead = leadSwell(R), sol = (D && lead) ? swellTravelTime(D, lead.dir, Math.max(5, Math.min(22, lead.tp || 10)), lead.hs) : null;
+  /* WHERE A BREAK BREAKS, and how big the face is when it does. NOT read off the grid: the
+     soundings are 250 m apart and a surf zone is thirty metres wide, so asking the grid which
+     cell breaks gave answers a kilometre out. This is the standard empirical breaker height from
+     the swell that is arriving -- Komar and Gaughan, Hb = 0.39 g^0.2 (T Hs^2)^0.4 -- with the
+     swell first cut down by how much of it this break is open to (height goes as the square root
+     of energy). The wave then breaks in about Hb/0.78 of water, and how far out that is depends
+     only on how fast the bottom drops away, which the grid CAN say: the fall between a quarter
+     and a kilometre offshore. A steep reef breaks a few metres off the rocks; a shelving beach
+     puts the same wave a long way out. */
+  var slopeAt = function(lon, lat, face){
+    if (!D) return null;
+    var a = (face * Math.PI) / 180, dLon = Math.sin(a) / (111.32 * Math.cos(lat * Math.PI / 180)), dLat = Math.cos(a) / 111.32;
+    var dep = function(km){
+      var x2 = Math.round((lon + dLon * km - D.W) / D.step), y2 = Math.round((D.N - (lat + dLat * km)) / D.step);
+      if (x2 < 0 || y2 < 0 || x2 >= D.w || y2 >= D.h) return null;
+      var v = D.depth[y2 * D.w + x2];
+      return v > 0 ? v : null;
+    };
+    var near = dep(0.25), far = dep(1.0);
+    if (near == null || far == null || far <= near) return null;
+    return Math.max(0.004, Math.min(0.15, (far - near) / 750));
+  };
+  var breakAt = function(sp, openFrac){
+    if (!lead || lead.hs == null || !lead.tp) return null;
+    var hs = lead.hs * Math.sqrt(Math.max(openFrac == null ? 1 : openFrac, 0.04));
+    if (!(hs > 0.02)) return null;
+    var Hb = 0.39 * Math.pow(9.81, 0.2) * Math.pow(lead.tp * hs * hs, 0.4);   // metres, trough to crest
+    var hb = Hb / 0.78, sl = slopeAt(sp.c[0], sp.c[1], faceOf(sp.win));
+    return { faceFt: Hb * 3.281, depFt: hb * 3.281, outM: sl ? Math.round(hb / sl) : null, slope: sl };
+  };
   var inWin = function(d, w){ d = (d + 360) % 360; return w[0] <= w[1] ? (d >= w[0] && d <= w[1]) : (d >= w[0] || d <= w[1]); };
   var CW = cvW(ctx), CH = cvH(ctx), inF = function(q){ return q.x > 6 && q.y > 6 && q.x < CW - 6 && q.y < CH - 6; };
   var B = (R && R.buoys) || {};
@@ -2255,7 +2314,8 @@ function makeSurf(ctx, spots, R, proj, mpp, M){
       R.wind.forEach(function(w){ var dd = (w.lat - sp.c[1]) * (w.lat - sp.c[1]) + (w.lon - sp.c[0]) * (w.lon - sp.c[0]); if (dd < bd){ bd = dd; bw = w; } });
       wnd = windOn(bw, face);
     }
-    hits.push({ x:q.x, y:q.y, reach:14, d:{ kind:'spot', name:sp.n, open: open, openDir: openDir, whatIf: window.LAB_SWELLDIR != null, win:sp.win, tide:sp.tide, bottom:sp.bottom, on:on, tideOk:tideOk, tideNow:tideNow,
+    hits.push({ x:q.x, y:q.y, reach:14, d:{ kind:'spot', name:sp.n, open: open, openDir: openDir, whatIf: window.LAB_SWELLDIR != null,
+      brk: breakAt(sp, open), win:sp.win, tide:sp.tide, bottom:sp.bottom, on:on, tideOk:tideOk, tideNow:tideNow,
       face: face, wind: wnd,
       buoy: b ? { id:sp.buoy, name:(spots.buoys || {})[sp.buoy], hs:b.hs, tp:b.tp, dir:b.dir, model:!!b.model, trend:b.trend } : null } });
   });
@@ -2288,6 +2348,18 @@ function makeSurf(ctx, spots, R, proj, mpp, M){
     },
     paint: function(){
       var g = ctx; g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
+      /* THE BREAK LINE first, under every mark: a chart line, not weather. Dark casing so it reads
+         on the blue, white over it, and a hair wider when the map is close in. */
+      if (sol && sol.line && sol.line.length){
+        var wid = mpp < 12 ? 2.6 : mpp < 40 ? 2 : 1.5;
+        g.beginPath();
+        sol.line.forEach(function(sgm){
+          var a1 = proj({ x:sgm[0][0], y:sgm[0][1] }), b1 = proj({ x:sgm[1][0], y:sgm[1][1] });
+          g.moveTo(a1.x, a1.y); g.lineTo(b1.x, b1.y);
+        });
+        g.lineWidth = wid + 2.2; g.strokeStyle = 'rgba(8,12,22,.55)'; g.stroke();
+        g.lineWidth = wid; g.strokeStyle = 'rgba(255,255,255,.92)'; g.stroke();
+      }
       marks.forEach(function(m){
         if (m.t === 'buoy'){
           /* NO CONE, NO ARROW (user 2026-09-19: "do we need the cones if we already show the water
@@ -3545,7 +3617,7 @@ function drawCard(style){
                    neighbourhood names fit round them, and the rail and the traffic stand down */
                 return Promise.all([viewJson(vkey, 'surf'), surfReads(), swellMask(), swellDepth()]).then(function(sr){
                   if (stale()) return;
-                  var SF = makeSurf(tctx, sr[0] || {}, sr[1], out.project, nmpp(), sr[2]);
+                  var SF = makeSurf(tctx, sr[0] || {}, sr[1], out.project, nmpp(), sr[2], sr[3]);
                   paint._swell = { R: sr[1], M: sr[2], D: sr[3] };
                   LABELBOX.length = 0; SF.claim(); SURF.hits = SF.hits;
                   var ph = drawHoodNames(tctx, hn, out.project, nmpp(), { clear: hoodOpts && hoodOpts.clear, weight: 0.085, keep: true });
