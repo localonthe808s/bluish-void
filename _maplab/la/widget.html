@@ -131,11 +131,11 @@ var VIEWSET = {
   map:    { label:'CITY MAP', layers:true, attrib:'' }
 };
 var ORDER = ['ksox', 'mrms3', 'mrms12', 'map'];
-var st = { view:'map', prod:{}, geo:false };
+var st = { view:'map', prod:{}, geo:false, traffic:false };
 
 function send(){
   /* every view but the map is a fixed frame, as in the widget: no pan, no zoom */
-  var v = VIEWSET[st.view], m = { view:'la', geo: st.view === 'map' && st.geo, lock: st.view !== 'map' };
+  var v = VIEWSET[st.view], m = { view:'la', geo: st.view === 'map' && st.geo, lock: st.view !== 'map', traffic: st.view === 'map' && st.traffic };
   if (v.box) m.box = v.box;
   if (v.prods === SAT) m.sat = st.prod[st.view] || SAT[0][0];
   else if (v.prods){ m.radar = true; m.radarSid = v.sid; m.radarLayer = st.prod[st.view] || v.prods[0][0]; }
@@ -181,6 +181,46 @@ function readsLine(v){
   }
   return out.join(' &nbsp;·&nbsp; ') + ' &nbsp;·&nbsp; MODEL READS' + fr;
 }
+/* TRAFFIC in the info bar. At rest the train board stays and one line under it counts what is
+   on the map; a tapped incident or freeway sign takes the bar, in the board's own band, until
+   it is closed. Every figure is the publisher's -- TomTom's delay, Caltrans' sign text. */
+var INCIDENT = null, TRAFFIC = null;
+window.addEventListener('message', function(ev){
+  if (ev.data && ev.data.labIncident){ INCIDENT = ev.data.labIncident; paint(); }
+  if (ev.data && ev.data.labTraffic){ TRAFFIC = ev.data.labTraffic; paint(); }
+});
+function trafficLine(){
+  var c = (TRAFFIC && TRAFFIC.counts) || null;
+  var part = function(n, one, many){ return n ? n + ' ' + (n === 1 ? one : many) : ''; };
+  var bits = c ? [part(c[1], 'ACCIDENT', 'ACCIDENTS'), part(c[14], 'BREAKDOWN', 'BREAKDOWNS'), part(c[6], 'JAM', 'JAMS'),
+                  part(c[8], 'ROAD CLOSED', 'ROADS CLOSED'), part((c[7] || 0) + (c[9] || 0), 'LANE CLOSURE OR WORKS', 'LANE CLOSURES AND WORKS'),
+                  part(TRAFFIC.signs, 'FREEWAY SIGN LIT', 'FREEWAY SIGNS LIT')].filter(Boolean) : [];
+  return '<div style="font:600 8px system-ui,sans-serif;color:#5b647a;letter-spacing:.08em;text-align:center;margin-top:7px;padding-top:6px;border-top:1px solid rgba(27,35,64,.10);">'
+    + '<b style="color:#1b2340;">TRAFFIC · LIVE</b> &nbsp;·&nbsp; ' + (bits.length ? bits.join(' &nbsp;·&nbsp; ') : 'READING…')
+    + ' &nbsp;·&nbsp; COLOUR ONLY WHERE TRAFFIC IS SLOWER THAN FREE FLOW &nbsp;·&nbsp; TAP A MARKER, A CLOSURE OR A SIGN</div>';
+}
+function incidentBand(){
+  var d = INCIDENT, esc = function(t){ return String(t == null ? '' : t).replace(/[&<>]/g, function(c){ return { '&':'&amp;', '<':'&lt;', '>':'&gt;' }[c]; }); };
+  var col = function(label, html){ return '<div class="dir"><div style="font:700 8px system-ui,sans-serif;color:#8a91a5;letter-spacing:.1em;margin-bottom:4px;">' + label
+    + '</div><div style="font:600 11.5px system-ui,sans-serif;letter-spacing:0;line-height:1.35;">' + html + '</div></div>'; };
+  var cols = [];
+  if (d.sign) cols.push(col('THE SIGN SAYS', '<span style="font:800 12px ui-monospace,Menlo,monospace;letter-spacing:.06em;background:#0b0e16;color:#fde68a;padding:3px 8px;border-radius:4px;display:inline-block;">'
+    + d.sign.map(esc).join('<br>') + '</span>'));
+  if (d.from || d.to) cols.push(col('WHERE', esc(d.from || '') + (d.to && d.to !== d.from ? ' <span style="opacity:.45;">→</span> ' + esc(d.to) : '')));
+  if (d.where) cols.push(col('WHERE', esc(d.where)));
+  if (d.delayMin) cols.push(col('DELAY', '<b>+' + d.delayMin + ' MIN</b>'));
+  if (d.lengthM) cols.push(col('LENGTH', d.lengthM >= 1609 ? (d.lengthM / 1609.34).toFixed(1) + ' MI' : Math.round(d.lengthM * 3.281 / 50) * 50 + ' FT'));
+  if (d.since){
+    var t = new Date(d.since);
+    if (!isNaN(t)) cols.push(col('SINCE', new Intl.DateTimeFormat('en-US', { timeZone:'America/Los_Angeles', weekday:'short', hour:'numeric', minute:'2-digit' }).format(t).toUpperCase()));
+  }
+  return '<div class="tb" style="--n:' + Math.max(1, cols.length) + ';"><div class="st">'
+    + '<div style="font:800 13px system-ui,sans-serif;letter-spacing:.03em;">' + esc(d.kind) + (d.roads ? ' &nbsp;<span style="font-weight:700;color:#5b647a;">' + esc(d.roads) + '</span>' : '') + '</div>'
+    + (d.what && d.what.toUpperCase() !== d.kind ? '<div style="font:600 9px system-ui,sans-serif;color:#1b2340;letter-spacing:.04em;margin-top:4px;">' + esc(d.what).toUpperCase() + '</div>' : '')
+    + '<div style="font:600 8px system-ui,sans-serif;color:#5b647a;letter-spacing:.08em;margin-top:5px;">LIVE · ' + esc(d.source).toUpperCase() + '</div></div>'
+    + (cols.join('') || '<div class="dir solo"></div>')
+    + '<button id="cw-la-ix" style="position:absolute;right:-4px;top:-4px;background:none;border:none;font:700 13px system-ui,sans-serif;color:#1b2340;cursor:pointer;padding:0 2px;">✕</button></div>';
+}
 /* THE TRAIN BOARD, in the info bar as New York's is: a station's next departures by line and
    direction. 17th Street / SMC is the default (user); tap any station on the map for its own.
    New York's board is live. This one is Metro's PUBLISHED TIMETABLE and says so on its face:
@@ -194,7 +234,7 @@ fetch('rail_sched.json').then(function(r){ return r.json(); }).then(function(j){
 fetch('https://api.metro.net/LACMTA_Rail/trip_detail/route_code/804').then(function(r){ return r.json(); })
   .then(function(j){ LIVE = Array.isArray(j) && j.length ? j.length : 0; paint(); }).catch(function(){ LIVE = null; });
 window.addEventListener('message', function(ev){
-  if (ev.data && ev.data.labStation){ STATION = ev.data.labStation; paint(); }
+  if (ev.data && ev.data.labStation){ STATION = ev.data.labStation; INCIDENT = null; paint(); }
 });
 function laNow(){
   /* the clock on the platform: Los Angeles time, whatever the reader's is */
@@ -288,14 +328,18 @@ function paint(){
     var cur = st.prod[st.view] || v.prods[0][0];
     add(p[1], cur === p[0], function(){ st.prod[st.view] = p[0]; paint(); send(); });
   });
-  else add('GEOLOGY', st.geo, function(){ st.geo = !st.geo; paint(); send(); });
+  else {
+    /* the map's own layers, as New York's row is FLOODING / TREES / GEOLOGY */
+    add('TRAFFIC', st.traffic, function(){ st.traffic = !st.traffic; INCIDENT = null; paint(); send(); });
+    add('GEOLOGY', st.geo, function(){ st.geo = !st.geo; paint(); send(); });
+  }
 
   var info = document.getElementById('cw-info'), tag = document.getElementById('cw-wide-tag');
   if (v.layers){
     tag.style.display = 'none'; info.style.display = '';
     info.innerHTML = st.geo
       ? '<b>THE ROCK UNDER THE BASIN</b> &nbsp;·&nbsp; Macrostrat units, with USGS Quaternary faults: heaviest where the ground has broken in historic time, dashed where the survey infers the trace. In the widget a tap names the unit and its age.'
-      : board();
+      : (st.traffic && INCIDENT ? incidentBand() : board() + (st.traffic ? trafficLine() : ''));
   } else {
     info.style.display = 'none'; tag.style.display = '';
     var cur = (v.prods.filter(function(p){ return p[0] === (st.prod[st.view] || v.prods[0][0]); })[0] || v.prods[0])[1];
@@ -304,12 +348,15 @@ function paint(){
     document.getElementById('cw-wide-tag-info').innerHTML = readsLine(v);
     document.getElementById('cw-wide-tag-info').style.display = READS ? 'block' : 'none';
   }
+  var ixb = document.getElementById('cw-la-ix');
+  if (ixb) ixb.onclick = function(){ INCIDENT = null; paint(); };
   var xb = document.getElementById('cw-la-x');
   if (xb) xb.onclick = function(){ STATION = DEFAULT_STATION; paint(); };
   document.getElementById('cw-time').textContent = v.prods ? 'LATEST FRAME' : '';
   document.getElementById('cw-time').style.display = v.prods ? '' : 'none';
   document.getElementById('cw-attrib').textContent = '© OpenStreetMap · Protomaps · USGS 3DEP · NOAA NCEI · LA Metro · Metrolink'
-    + (v.attrib ? ' · ' + v.attrib : '') + (st.view === 'map' && st.geo ? ' · Macrostrat · USGS Qfaults' : '');
+    + (v.attrib ? ' · ' + v.attrib : '') + (st.view === 'map' && st.geo ? ' · Macrostrat · USGS Qfaults' : '')
+    + (st.view === 'map' && st.traffic ? ' · © TomTom · Caltrans' : '');
 }
 function tab(k){
   var b = document.createElement('button'); b.id = 't-' + k; b.textContent = VIEWSET[k].label;

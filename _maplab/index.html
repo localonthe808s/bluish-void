@@ -73,6 +73,7 @@
   <label class="sub">towns <input type="number" id="placecut" value="7" min="1" max="15" step="1" style="width:52px;min-width:0"></label>
   <label class="sub"><input type="checkbox" id="radar" onchange="renderAll()"> radar</label>
   <label class="sub"><input type="checkbox" id="geo" onchange="renderAll()"> geology</label>
+  <label class="sub"><input type="checkbox" id="traffic" onchange="renderAll()"> traffic</label>
   <button onclick="renderAll()">redraw</button>
   <button onclick="copyFlavor()">copy focused flavor</button>
   <span class="sub" id="status"></span>
@@ -2458,6 +2459,130 @@ function drawRock(g, W, H, X0, Y0, X1, Y1){
   return Promise.all(jobs);
 }
 
+/* TRAFFIC (2026-09-19, user: "i want to add traffic and street congestion to the city map").
+   Three live sources, each probed before a line was written (memory: la traffic sources):
+
+     CONGESTION   TomTom Traffic Flow raster tiles, style `relative-delay` -- which paints ONLY
+                  where traffic is slower than free flow. A road that is moving gets no colour
+                  at all, so at 1 AM the map is nearly bare and at 5 PM it is not: the site's
+                  rule that only what is RUNNING shows. Laid down with a dark halo, because
+                  TomTom's yellows and oranges vanish on an orange city.
+     INCIDENTS    TomTom incidentDetails over the home frame: closures as a dashed line along
+                  their own geometry, accidents / breakdowns / hazards as a marker, and a jam's
+                  DELAY as TomTom publishes it ("+6 MIN") -- never a figure of ours.
+     THE SIGNS    Caltrans District 7's changeable message signs (CORS-open): the ones that are
+                  lit, as a small sign; a tap reads what the sign says.
+
+   THE KEY is TomTom's, the user's, free tier, no card on file (so the worst case is a blank
+   layer, never a bill). It is locked to bluishvoid.com by referrer -- verified: 200 from the
+   site, 403 InvalidReferer from anywhere else -- and enabled for the three Traffic products
+   only, so lifting it from this source gets nobody anything. Tiles are cached per 3-minute
+   bucket and only fetched while the layer is on. On its OWN canvas, like the rock: it is
+   live weather-of-the-roads, not basemap, and must never be baked into a tile.
+   NOT HERE YET: CHP's incident log (better than TomTom's, but it sends no CORS header and
+   media.chp.ca.gov is not on the proxy worker's allowlist) and Caltrans lane closures (an
+   18 MB file -- worker or bake, never the browser). */
+var TT_KEY = 'Zz5RohucCbv94eXOc733BHxMVkqLMI4N';
+var TRAF = { inc: null, incAt: 0, cms: null, cmsAt: 0, img: {}, hits: [] };
+var TT_CAT = { 0:'UNKNOWN', 1:'ACCIDENT', 2:'FOG', 3:'DANGEROUS CONDITIONS', 4:'RAIN', 5:'ICE', 6:'JAM', 7:'LANE CLOSED',
+               8:'ROAD CLOSED', 9:'ROAD WORKS', 10:'WIND', 11:'FLOODING', 14:'BROKEN DOWN VEHICLE' };
+function trafficData(v){
+  var now = Date.now(), h = v._home || v, jobs = [];
+  if (!TRAF.inc || now - TRAF.incAt > 180000){
+    TRAF.incAt = now;
+    jobs.push(fetch('https://api.tomtom.com/traffic/services/5/incidentDetails?key=' + TT_KEY
+      + '&bbox=' + [h.w, h.s, h.e, h.n].join(',') + '&language=en-US&timeValidityFilter=present&fields='
+      + encodeURIComponent('{incidents{type,geometry{type,coordinates},properties{id,iconCategory,magnitudeOfDelay,events{description},startTime,endTime,from,to,length,delay,roadNumbers}}}'))
+      .then(function(r){ return r.json(); }).then(function(j){ TRAF.inc = j.incidents || []; }).catch(function(){ TRAF.inc = TRAF.inc || []; }));
+  }
+  if (!TRAF.cms || now - TRAF.cmsAt > 300000){
+    TRAF.cmsAt = now;
+    jobs.push(fetch('https://cwwp2.dot.ca.gov/data/d7/cms/cmsStatusD07.json').then(function(r){ return r.json(); }).then(function(j){
+      TRAF.cms = (j.data || []).map(function(o){ return o.cms; }).filter(function(c){
+        var m = c.message || {}; return c.inService === 'true' && m.display && m.display !== 'Blank' && m.display !== 'Not Reported';
+      }).map(function(c){
+        var L = [], m = c.message;
+        ['phase1', 'phase2'].forEach(function(ph){ var q = m[ph] || {}; [1, 2, 3].forEach(function(k){ var t = (q[ph + 'Line' + k] || '').trim(); if (t) L.push(t); }); });
+        return { lon: +c.location.longitude, lat: +c.location.latitude, where: (c.location.locationName || '').trim(),
+                 road: ((c.location.route || '') + ' ' + (c.location.direction || '')).trim(), text: L };
+      }).filter(function(c){ return c.text.length && isFinite(c.lon) && isFinite(c.lat); });
+    }).catch(function(){ TRAF.cms = TRAF.cms || []; }));
+  }
+  return Promise.all(jobs);
+}
+function drawTraffic(g, W, H, X0, Y0, X1, Y1, proj, view, v){
+  var mpp = (X1 - X0) / W, WORLD = 20037508.342789244;
+  /* 512 px tiles: pick the zoom whose pixels are nearest the screen's, so TomTom's line
+     weights arrive at roughly the size they were drawn for */
+  var z = Math.max(6, Math.min(18, Math.round(Math.log2(78271.517 / mpp)))), n = Math.pow(2, z), span = 2 * WORLD / n;
+  var tx0 = Math.floor((X0 + WORLD) / span), tx1 = Math.floor((X1 + WORLD) / span);
+  var ty0 = Math.floor((WORLD - Y1) / span), ty1 = Math.floor((WORLD - Y0) / span);
+  var bucket = Math.floor(Date.now() / 180000), jobs = [];
+  var flow = document.createElement('canvas'); flow.width = W; flow.height = H;
+  var fg = flow.getContext('2d');
+  for (var ty = ty0; ty <= ty1; ty++) for (var tx = tx0; tx <= tx1; tx++) (function(tx, ty){
+    var key = z + '/' + tx + '/' + ty + '@' + bucket;
+    jobs.push((TRAF.img[key] = TRAF.img[key] || new Promise(function(res){
+      var im = new Image(); im.crossOrigin = 'anonymous';
+      im.onload = function(){ res(im); }; im.onerror = function(){ res(null); };
+      im.src = 'https://api.tomtom.com/traffic/map/4/tile/flow/relative-delay/' + z + '/' + tx + '/' + ty + '.png?key=' + TT_KEY + '&tileSize=512&thickness=6';
+    })).then(function(im){
+      if (im) fg.drawImage(im, (tx * span - WORLD - X0) / mpp, (Y1 - (WORLD - ty * span)) / mpp, span / mpp + 0.5, span / mpp + 0.5);
+    }));
+  })(tx, ty);
+  return Promise.all(jobs.concat([trafficData(v)])).then(function(){
+    g.save();
+    g.shadowColor = 'rgba(8,10,16,.95)'; g.shadowBlur = 2.5;           // the halo that lets amber read on orange
+    g.drawImage(flow, 0, 0); g.drawImage(flow, 0, 0);
+    g.restore();
+    var hits = [], P = function(c){ return proj({ x:c[0], y:c[1] }); }, inF = function(q){ return q.x > -20 && q.y > -20 && q.x < W + 20 && q.y < H + 20; };
+    var gm = mpp * Math.cos((view.latMid || 34) * Math.PI / 180);
+    var counts = {};
+    (TRAF.inc || []).forEach(function(it){
+      var p = it.properties || {}, cat = p.iconCategory, geo = it.geometry || {};
+      var pts = geo.type === 'Point' ? [geo.coordinates] : (geo.coordinates || []);
+      if (!pts.length) return;
+      counts[cat] = (counts[cat] || 0) + 1;
+      var Q = pts.map(P), mid = Q[Math.floor(Q.length / 2)];
+      if (!Q.some(inF)) return;
+      g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
+      if (cat === 8){                                                   // closed: a dashed line on its own road
+        g.beginPath(); Q.forEach(function(q, i){ i ? g.lineTo(q.x, q.y) : g.moveTo(q.x, q.y); });
+        g.lineWidth = 3.4; g.strokeStyle = 'rgba(255,250,240,.85)'; g.stroke();
+        g.setLineDash([4, 3]); g.lineWidth = 1.8; g.strokeStyle = '#7f1d1d'; g.stroke();
+      } else if (cat === 6){                                            // a jam: the flow tiles draw it; this is its delay
+        var mins = Math.round((p.delay || 0) / 60);
+        if (mins >= 3 && inF(mid)){
+          var t = '+' + mins + ' MIN'; g.font = '800 9px system-ui, sans-serif'; var w = g.measureText(t).width + 8;
+          g.fillStyle = 'rgba(8,10,16,.88)'; g.beginPath(); g.roundRect ? g.roundRect(mid.x - w / 2, mid.y - 7, w, 14, 4) : g.rect(mid.x - w / 2, mid.y - 7, w, 14); g.fill();
+          g.fillStyle = p.magnitudeOfDelay >= 3 ? '#fca5a5' : '#fde68a'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(t, mid.x, mid.y + 0.5);
+        }
+      } else if (cat === 9 || cat === 7){                               // works and lane closures: small, and only close in
+        if (gm > 40 || !inF(mid)){ g.restore(); return; }
+        g.beginPath(); g.arc(mid.x, mid.y, 3.2, 0, Math.PI * 2); g.fillStyle = '#f59e0b'; g.fill(); g.lineWidth = 1.4; g.strokeStyle = 'rgba(8,10,16,.9)'; g.stroke();
+      } else if (inF(mid)){                                             // accident, breakdown, hazard, flooding: a marker
+        g.beginPath(); g.arc(mid.x, mid.y, 6, 0, Math.PI * 2); g.fillStyle = '#fff'; g.fill(); g.lineWidth = 2; g.strokeStyle = '#b91c1c'; g.stroke();
+        g.fillStyle = '#b91c1c'; g.font = '900 9.5px system-ui, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('!', mid.x, mid.y + 0.5);
+      }
+      g.restore();
+      if (inF(mid)) hits.push({ x: mid.x, y: mid.y, reach: cat === 8 ? 10 : 14, d: {
+        kind: TT_CAT[cat] || 'INCIDENT', what: (p.events || []).map(function(e){ return e.description; }).join(' \u00b7 '),
+        from: p.from, to: p.to, roads: (p.roadNumbers || []).join(' '), delayMin: p.delay ? Math.round(p.delay / 60) : null,
+        lengthM: p.length ? Math.round(p.length) : null, since: p.startTime, source: 'TomTom' } });
+    });
+    (TRAF.cms || []).forEach(function(c){
+      var q = P([c.lon, c.lat]); if (!inF(q)) return;
+      g.save(); g.fillStyle = 'rgba(8,10,16,.92)'; g.strokeStyle = '#fde68a'; g.lineWidth = 1.2;
+      g.beginPath(); g.rect(q.x - 6, q.y - 4, 12, 8); g.fill(); g.stroke();
+      g.fillStyle = '#fde68a'; g.fillRect(q.x - 4, q.y - 1.8, 8, 1.2); g.fillRect(q.x - 4, q.y + 0.8, 5.5, 1.2);
+      g.restore();
+      hits.push({ x: q.x, y: q.y, reach: 12, d: { kind: 'FREEWAY SIGN', sign: c.text, where: c.where, roads: c.road, source: 'Caltrans District 7' } });
+    });
+    TRAF.hits = hits;
+    try { if (window.parent !== window) window.parent.postMessage({ labTraffic: { counts: counts, signs: (TRAF.cms || []).length, at: Date.now() } }, '*'); } catch(e){}
+  });
+}
+
 function drawCard(style){
   var f = flavorFor(style);
   var card = document.createElement('div');
@@ -2470,6 +2595,9 @@ function drawCard(style){
   cv.className = 'pannable';
   card.appendChild(cv);
   card.style.position = 'relative';
+  var trafCv = document.createElement('canvas'); trafCv.width = W; trafCv.height = H;
+  trafCv.style.cssText = 'position:absolute;left:0;background:transparent;pointer-events:none;';
+  card.appendChild(trafCv);
   var geoCv = document.createElement('canvas'); geoCv.width = W; geoCv.height = H;
   geoCv.style.cssText = 'position:absolute;left:0;background:transparent;pointer-events:none;';
   card.appendChild(geoCv);
@@ -2526,6 +2654,7 @@ function drawCard(style){
   function schedule(){
     preview();
     geoCv.getContext('2d').clearRect(0, 0, W, H);   // the rock is redrawn with the real pass
+    trafCv.getContext('2d').clearRect(0, 0, W, H); TRAF.hits = [];
     clearTimeout(timer);
     timer = setTimeout(paint, 260);
   }
@@ -2774,6 +2903,15 @@ function drawCard(style){
         });
       })
       .then(function(){
+        var tg = trafCv.getContext('2d');
+        tg.clearRect(0, 0, W, H); TRAF.hits = [];
+        trafCv.style.top = cv.offsetTop + 'px';
+        var tbox = document.getElementById('traffic');
+        if (stale() || !tbox || !tbox.checked || !paint._proj || VB.mpp > 320) return;
+        return drawTraffic(tg, W, H, VB.Xw, VB.Ymid - VB.mpp * H / 2, VB.Xw + VB.mpp * W, VB.Ymid + VB.mpp * H / 2,
+                           paint._proj, view, VIEWS[vkey] || {});
+      })
+      .then(function(){
         var gg = geoCv.getContext('2d');
         gg.clearRect(0, 0, W, H);
         geoCv.style.top = cv.offsetTop + 'px';
@@ -2831,7 +2969,15 @@ function drawCard(style){
         var d = (q.x - mx) * (q.x - mx) + (q.y - my) * (q.y - my);
         if (d < bd){ bd = d; best = ft; }
       });
-      if (best) window.parent.postMessage({ labStation: best.properties }, '*');
+      /* the NEAREST feature wins across every layer (the widget's rule): an incident or a
+         sign within its own reach beats a station that is further off */
+      var hit = null, hd = 1e9;
+      (TRAF.hits || []).forEach(function(h){
+        var d = (h.x - mx) * (h.x - mx) + (h.y - my) * (h.y - my);
+        if (d < h.reach * h.reach && d < hd){ hd = d; hit = h; }
+      });
+      if (hit && hd <= bd) window.parent.postMessage({ labIncident: hit.d }, '*');
+      else if (best) window.parent.postMessage({ labStation: best.properties }, '*');
     });
   });
   cv.addEventListener('pointerdown', function(ev){
@@ -2901,6 +3047,7 @@ function copyFlavor(){
     v.radar = m.radarSid || v._home.radar; v.radarLayer = m.radarLayer || null; v.sat = m.sat || null;
     document.getElementById('view').value = key;
     document.getElementById('geo').checked = !!m.geo;
+    document.getElementById('traffic').checked = !!m.traffic;
     document.getElementById('radar').checked = !!(m.radar || m.sat);
     window.LAB_LOCK = !!m.lock;
     renderAll();
