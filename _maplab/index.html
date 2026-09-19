@@ -2528,31 +2528,121 @@ function trafficData(v){
   }
   return Promise.all(jobs);
 }
+/* A MINIMAL VECTOR-TILE READER, for TomTom's flow tiles: one layer ("Traffic flow"), line
+   features, four properties. Hand-walked, as the widget hand-walks the MTA's protobuf -- about
+   sixty lines against a library. Returns [{p:{road_type, traffic_level, road_closure...},
+   lines:[[[x,y]...]...]}] in tile units, with the extent. */
+function mvtFlow(buf){
+  var b = new Uint8Array(buf), out = { extent: 4096, feats: [] };
+  var vint = function(o){ var r = 0, s = 1, c; do { c = b[o.i++]; r += (c & 127) * s; s *= 128; } while (c > 127); return r; };
+  var each = function(i0, i1, fn){
+    var o = { i: i0 };
+    while (o.i < i1){
+      var k = vint(o), f = Math.floor(k / 8), t = k & 7, a, z;
+      if (t === 0){ fn(f, t, vint(o)); }
+      else if (t === 2){ var l = vint(o); a = o.i; z = a + l; o.i = z; fn(f, t, a, z); }
+      else if (t === 5){ a = o.i; o.i += 4; fn(f, t, a, a + 4); }
+      else if (t === 1){ a = o.i; o.i += 8; fn(f, t, a, a + 8); }
+      else return;
+    }
+  };
+  var txt = function(a, z){ return new TextDecoder().decode(b.subarray(a, z)); };
+  var dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  each(0, b.length, function(f, t, a, z){
+    if (f !== 3 || t !== 2) return;
+    var keys = [], vals = [], raw = [];
+    each(a, z, function(f2, t2, a2, z2){
+      if (f2 === 3) keys.push(txt(a2, z2));
+      else if (f2 === 5 && t2 === 0) out.extent = a2;
+      else if (f2 === 2) raw.push([a2, z2]);
+      else if (f2 === 4) each(a2, z2, function(f3, t3, a3, z3){
+        vals.push(f3 === 1 ? txt(a3, z3) : f3 === 2 ? dv.getFloat32(a3, true) : f3 === 3 ? dv.getFloat64(a3, true) : f3 === 7 ? !!a3 : a3);
+      });
+    });
+    raw.forEach(function(r){
+      var tags = [], geom = [], type = 0;
+      each(r[0], r[1], function(f2, t2, a2, z2){
+        if (f2 === 3 && t2 === 0) type = a2;
+        else if (f2 === 2 && t2 === 2){ var o = { i: a2 }; while (o.i < z2) tags.push(vint(o)); }
+        else if (f2 === 4 && t2 === 2){ var o2 = { i: a2 }; while (o2.i < z2) geom.push(vint(o2)); }
+      });
+      if (type !== 2) return;
+      var p = {}; for (var k = 0; k + 1 < tags.length; k += 2) p[keys[tags[k]]] = vals[tags[k + 1]];
+      var lines = [], cur = null, x = 0, y = 0, gi = 0;
+      while (gi < geom.length){
+        var cmd = geom[gi] & 7, cnt = geom[gi] >> 3; gi++;
+        for (var c = 0; c < cnt && (cmd === 1 || cmd === 2); c++){
+          var dx = geom[gi++], dy = geom[gi++];
+          x += (dx >> 1) ^ -(dx & 1); y += (dy >> 1) ^ -(dy & 1);
+          if (cmd === 1){ cur = [[x, y]]; lines.push(cur); } else if (cur) cur.push([x, y]);
+        }
+      }
+      out.feats.push({ p: p, lines: lines });
+    });
+  });
+  return out;
+}
+/* HOW THE FLOW IS DRAWN (2026-09-19, after the user's review of the first cut: "are they hard
+   stops like this, they look a little large for the roads ... the highways have no traffic?").
+   The first cut used TomTom's PICTURE tiles at a heavy weight with a halo, and three things
+   were wrong with it:
+     - every slow block was a fat lozenge with square ends, because the picture is theirs;
+     - most of those blocks were not congestion at all. A surface street reads about half its
+       free-flow speed at 6:30 on a Saturday morning -- that is traffic LIGHTS. Measured on the
+       tile: "Connecting road" and "Major local road" segments at 0.46-0.52, freeways at 1.00;
+     - and the freeways, flowing freely, got no mark, so the layer looked as if it had not
+       loaded them. (It had: 69 of 69 mph over the Sepulveda Pass, by TomTom's own segment read.)
+   So the layer now reads TomTom's VECTOR flow tiles -- each segment's road type and its speed as
+   a fraction of free flow -- and draws them itself:
+     - at the weight of the map's own roads, round-ended, on a hairline casing;
+     - a street has to be much slower than a freeway before it counts (signals are not jams):
+       freeways and trunk roads colour below 80% of free flow, arterials below 45%, local
+       streets below 35%;
+     - freeways and trunk roads that ARE flowing get a thin pale line, so it is plain they were
+       measured and are clear. That is the one exception to "only what is running shows",
+       made because an empty freeway network reads as a broken layer. */
+var FLOW_CLASS = { 'Motorway':0, 'International road':0, 'Major road':0, 'Secondary road':1, 'Connecting road':1,
+                   'Major local road':1, 'Local road':2, 'Minor local road':2 };
+var FLOW_RULE = [ { slow:0.80, w:2.4, calm:true }, { slow:0.45, w:1.7 }, { slow:0.35, w:1.3 } ];
+function flowColour(r){ return r < 0.20 ? '#7f1d1d' : r < 0.40 ? '#dc2626' : r < 0.60 ? '#ea580c' : '#fbbf24'; }
 function drawTraffic(g, W, H, X0, Y0, X1, Y1, proj, view, v){
   var mpp = (X1 - X0) / W, WORLD = 20037508.342789244;
-  /* 512 px tiles: pick the zoom whose pixels are nearest the screen's, so TomTom's line
-     weights arrive at roughly the size they were drawn for */
-  var z = Math.max(6, Math.min(18, Math.round(Math.log2(78271.517 / mpp)))), n = Math.pow(2, z), span = 2 * WORLD / n;
+  /* the standard zoom for this scale: the tile whose 256 px match the screen's */
+  var z = Math.max(6, Math.min(16, Math.floor(Math.log2(2 * WORLD / (mpp * 256))))), n = Math.pow(2, z), span = 2 * WORLD / n;
   var tx0 = Math.floor((X0 + WORLD) / span), tx1 = Math.floor((X1 + WORLD) / span);
   var ty0 = Math.floor((WORLD - Y1) / span), ty1 = Math.floor((WORLD - Y0) / span);
-  var bucket = Math.floor(Date.now() / 300000), jobs = [];      // tiles: a 5-minute bucket (200,000 a month)
-  var flow = document.createElement('canvas'); flow.width = W; flow.height = H;
-  var fg = flow.getContext('2d');
+  var bucket = Math.floor(Date.now() / 300000), jobs = [], segs = [];      // tiles: a 5-minute bucket
   for (var ty = ty0; ty <= ty1; ty++) for (var tx = tx0; tx <= tx1; tx++) (function(tx, ty){
     var key = z + '/' + tx + '/' + ty + '@' + bucket;
-    jobs.push((TRAF.img[key] = TRAF.img[key] || new Promise(function(res){
-      var im = new Image(); im.crossOrigin = 'anonymous';
-      im.onload = function(){ res(im); }; im.onerror = function(){ res(null); };
-      im.src = 'https://api.tomtom.com/traffic/map/4/tile/flow/relative-delay/' + z + '/' + tx + '/' + ty + '.png?key=' + TT_KEY + '&tileSize=512&thickness=6';
-    })).then(function(im){
-      if (im) fg.drawImage(im, (tx * span - WORLD - X0) / mpp, (Y1 - (WORLD - ty * span)) / mpp, span / mpp + 0.5, span / mpp + 0.5);
+    jobs.push((TRAF.img[key] = TRAF.img[key] || fetch('https://api.tomtom.com/traffic/map/4/tile/flow/relative/' + z + '/' + tx + '/' + ty + '.pbf?key=' + TT_KEY)
+      .then(function(r){ return r.ok ? r.arrayBuffer() : null; }).then(function(ab){ return ab ? mvtFlow(ab) : null; }).catch(function(){ return null; }))
+    .then(function(t){
+      if (!t) return;
+      var ox = tx * span - WORLD, oy = WORLD - ty * span, k = span / t.extent;
+      t.feats.forEach(function(f){
+        var cls = FLOW_CLASS[f.p.road_type]; if (cls == null) cls = 2;
+        var r = +f.p.traffic_level, rule = FLOW_RULE[cls];
+        if (f.p.road_closure || !isFinite(r)) return;                  // closures are the incident layer's
+        var slow = r < rule.slow;
+        if (!slow && !rule.calm) return;
+        f.lines.forEach(function(ln){
+          segs.push({ r: r, slow: slow, w: rule.w, pts: ln.map(function(c){ return [(ox + c[0] * k - X0) / mpp, (Y1 - (oy - c[1] * k)) / mpp]; }) });
+        });
+      });
     }));
   })(tx, ty);
   return Promise.all(jobs.concat([trafficData(v)])).then(function(){
-    g.save();
-    g.shadowColor = 'rgba(8,10,16,.95)'; g.shadowBlur = 2.5;           // the halo that lets amber read on orange
-    g.drawImage(flow, 0, 0); g.drawImage(flow, 0, 0);
+    g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
+    var path = function(sg){ g.beginPath(); sg.pts.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); };
+    /* the calm network first and faint; then the slow roads, the slowest last so it wins a shared carriageway */
+    segs.filter(function(sg){ return !sg.slow; }).forEach(function(sg){
+      path(sg); g.lineWidth = 1.5; g.strokeStyle = 'rgba(214,250,224,.62)'; g.stroke();
+    });
+    var slowSegs = segs.filter(function(sg){ return sg.slow; }).sort(function(a, b){ return b.r - a.r; });
+    slowSegs.forEach(function(sg){ path(sg); g.lineWidth = sg.w + 1.6; g.strokeStyle = 'rgba(8,10,16,.82)'; g.stroke(); });
+    slowSegs.forEach(function(sg){ path(sg); g.lineWidth = sg.w; g.strokeStyle = flowColour(sg.r); g.stroke(); });
     g.restore();
+    TRAF.flow = { slow: slowSegs.length, calm: segs.length - slowSegs.length, z: z };
     var hits = [], P = function(c){ return proj({ x:c[0], y:c[1] }); }, inF = function(q){ return q.x > -20 && q.y > -20 && q.x < W + 20 && q.y < H + 20; };
     var gm = mpp * Math.cos((view.latMid || 34) * Math.PI / 180);
     var counts = {};
