@@ -3369,8 +3369,7 @@ function drawTraffic(g, W, H, X0, Y0, X1, Y1, proj, view, v){
     }));
   })(tx, ty);
   /* the rail canvas sits ABOVE this one, so a station glyph lands on top of a tag. The
-     stations are already drawn by the time this runs and cannot move, so their boxes are
-     claimed and the tags step around them -- only while the rail is on. */
+     stations are drawn already and cannot move, so a tag that would collide steps down once. */
   var stopsP = (v && v.stops && _VJ[v.stops]) ? _VJ[v.stops] : Promise.resolve(null);
   return Promise.all(jobs.concat([trafficData(v), stopsP])).then(function(res){
     var stops = res[res.length - 1];
@@ -3396,18 +3395,28 @@ function drawTraffic(g, W, H, X0, Y0, X1, Y1, proj, view, v){
     var ls = len(slowSegs), lc = len(calm);
     TRAF.flow = { slow: slowSegs.length, calm: calm.length, z: z, at: Date.now(), slowShare: (ls + lc) ? ls / (ls + lc) : 0 };
     var hits = [], P = function(c){ return proj({ x:c[0], y:c[1] }); }, inF = function(q){ return q.x > -20 && q.y > -20 && q.x < W + 20 && q.y < H + 20; };
+    /* WHAT A TAG MUST DODGE, kept in its own list. Putting these in LABELBOX -- the ledger
+       the map NAMES keep -- silenced every tag on the card: with nothing over thirty minutes
+       that day, all nine had to pass the collision test and the neighbourhood names had the
+       ground. A delay tag is the point of this layer and is never suppressed; it only
+       steps down when something drawn above it is in the way. */
+    var avoid = [];
     if (window.LAB_RAIL !== false && stops && stops.features)
       stops.features.forEach(function(ft){
         var c = (ft.geometry || {}).coordinates; if (!c) return;
         var q = P(c); if (!inF(q)) return;
-        LABELBOX.push([q.x - 8, q.y - 8, q.x + 8, q.y + 8]);
+        avoid.push([q.x - 9, q.y - 9, q.x + 9, q.y + 9]);
       });
-    /* AND THE LIT FREEWAY SIGNS, which were the real offender: they are drawn further down
-       this same function, AFTER the tags, so one landed on "+22 MIN" and left "+22 =IN".
-       Claimed before any tag is placed, so the tags go round them instead. */
+    /* THE LIT FREEWAY SIGNS ARE DRAWN FIRST NOW. They used to come after the tags on this
+       same canvas, so one landed on "+22 MIN" and left "+22 =IN". Below the tags they can
+       be overlapped instead of overlapping. */
     (TRAF.cms || []).forEach(function(c){
       var q = P([c.lon, c.lat]); if (!inF(q)) return;
-      LABELBOX.push([q.x - 9, q.y - 7, q.x + 9, q.y + 7]);
+      g.save(); g.fillStyle = 'rgba(8,10,16,.92)'; g.strokeStyle = '#fde68a'; g.lineWidth = 1.2;
+      g.beginPath(); g.rect(q.x - 6, q.y - 4, 12, 8); g.fill(); g.stroke();
+      g.fillStyle = '#fde68a'; g.fillRect(q.x - 4, q.y - 1.8, 8, 1.2); g.fillRect(q.x - 4, q.y + 0.8, 5.5, 1.2);
+      g.restore();
+      hits.push({ x: q.x, y: q.y, reach: 12, d: { kind: 'FREEWAY SIGN', sign: c.text, where: c.where, roads: c.road, source: 'Caltrans District 7' } });
     });
     var gm = mpp * Math.cos((view.latMid || 34) * Math.PI / 180);
     var counts = {};
@@ -3439,15 +3448,12 @@ function drawTraffic(g, W, H, X0, Y0, X1, Y1, proj, view, v){
           g.font = '800 11px system-ui, sans-serif'; var w1 = g.measureText(t).width;
           g.font = '800 8.5px system-ui, sans-serif'; var w2 = road ? g.measureText(road).width : 0;
           var bw = Math.max(w1, w2) + 12, bh = road ? 27 : 18;
-          var bx = mid.x - bw / 2, by = mid.y - bh / 2;
-          /* HALF AN HOUR IS NEVER HIDDEN (user: "dont limit if its ever longer than 30
-             minutes too"). Every other tag yields to a label already on the map -- the names
-             claim first, and now these two-line tags would otherwise pile on each other --
-             but a 30-minute jam draws whatever is in the way, and claims its box so the
-             smaller ones move instead. */
-          var must = mins >= 30;
-          if (must || labelFits(bx - 2, by - 2, bw + 4, bh + 4)){
-            if (must) LABELBOX.push([bx - 2, by - 2, bx + bw + 2, by + bh + 2]);
+          var bx = mid.x - bw / 2, by = mid.y - bh / 2, must = mins >= 30;
+          /* nothing over fifteen minutes is ever dropped, and half an hour does not even
+             step aside (user: "dont limit if its ever longer than 30 minutes too") */
+          var clashes = function(){ return avoid.some(function(b){ return bx < b[2] && b[0] < bx + bw && by < b[3] && b[1] < by + bh; }); };
+          if (!must && clashes()) by += bh + 5;
+          {
             g.fillStyle = 'rgba(8,10,16,.92)';
             g.beginPath(); g.roundRect ? g.roundRect(bx, by, bw, bh, 5) : g.rect(bx, by, bw, bh); g.fill();
             g.lineWidth = 1.2; g.strokeStyle = must ? '#FF1B1B' : '#FF6B00'; g.stroke();
@@ -3476,15 +3482,7 @@ function drawTraffic(g, W, H, X0, Y0, X1, Y1, proj, view, v){
         from: p.from, to: p.to, roads: (p.roadNumbers || []).join(' '), delayMin: p.delay ? Math.round(p.delay / 60) : null,
         lengthM: p.length ? Math.round(p.length) : null, since: p.startTime, source: 'TomTom' } });
     });
-    (TRAF.cms || []).forEach(function(c){
-      var q = P([c.lon, c.lat]); if (!inF(q)) return;
-      g.save(); g.fillStyle = 'rgba(8,10,16,.92)'; g.strokeStyle = '#fde68a'; g.lineWidth = 1.2;
-      g.beginPath(); g.rect(q.x - 6, q.y - 4, 12, 8); g.fill(); g.stroke();
-      g.fillStyle = '#fde68a'; g.fillRect(q.x - 4, q.y - 1.8, 8, 1.2); g.fillRect(q.x - 4, q.y + 0.8, 5.5, 1.2);
-      g.restore();
-      hits.push({ x: q.x, y: q.y, reach: 12, d: { kind: 'FREEWAY SIGN', sign: c.text, where: c.where, roads: c.road, source: 'Caltrans District 7' } });
-    });
-    TRAF.hits = hits;
+TRAF.hits = hits;
     try { if (window.parent !== window) window.parent.postMessage({ labTraffic: { counts: counts, signs: (TRAF.cms || []).length, at: Date.now(), incAt: TRAF.incAt, flow: TRAF.flow } }, '*'); } catch(e){}
   });
 }
