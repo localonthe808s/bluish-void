@@ -3166,6 +3166,40 @@ function radarTimes(sid, lyr){
   RADTIMES[key] = { t: Date.now(), p: p };
   return p;
 }
+/* THE CLOUD, NOT THE WHOLE PICTURE (user 2026-09-19: "it adds a haze over the land, is that
+   needed?"). It is not. Laid down whole, the satellite dulls the clear ground as much as it
+   shows the cloud, and under a radar sweep only the cloud is worth carrying.
+   MASKING IT TO THE SEA WOULD BE WRONG (user, same breath: "is the marine layer always on
+   the water?"). It is not -- the marine layer's whole habit is to come ashore, through the
+   passes and over the basin before dawn, and that is exactly the hour you want to see it.
+   So the cut is on what a pixel IS, never where it sits: cloud is bright and very nearly
+   grey. Measured on a live frame -- stratus reads luminance 193 at chroma 2, clear desert
+   124 at chroma 44, clear ocean 43. Soft at both ends so a thin margin fades instead of
+   cutting out. */
+function cloudOnly(im, W, H){
+  var c = document.createElement('canvas'); c.width = W; c.height = H;
+  var g2 = c.getContext('2d'); g2.drawImage(im, 0, 0, W, H);
+  var id;
+  try { id = g2.getImageData(0, 0, W, H); } catch (e){ return im; }
+  var d = id.data, i, n = d.length >> 2, samp = [];
+  /* the frame's own middle brightness says whether this is daylight: after dark GeoColor
+     paints low cloud in pale blues over a near-black ground, so the bar has to come down */
+  for (i = 0; i < n; i += 97) samp.push(0.2126 * d[i * 4] + 0.7152 * d[i * 4 + 1] + 0.0722 * d[i * 4 + 2]);
+  samp.sort(function(a, b){ return a - b; });
+  var night = samp.length && samp[samp.length >> 1] < 70;
+  var L0 = night ? 40 : 120, L1 = night ? 100 : 190, C0 = night ? 70 : 30, C1 = night ? 45 : 10;
+  for (i = 0; i < d.length; i += 4){
+    if (!d[i + 3]) continue;
+    var r = d[i], g3 = d[i + 1], b = d[i + 2];
+    var L = 0.2126 * r + 0.7152 * g3 + 0.0722 * b;
+    var S = Math.max(r, g3, b) - Math.min(r, g3, b);
+    var t = (L - L0) / (L1 - L0); t = t < 0 ? 0 : t > 1 ? 1 : t;
+    var u = (C0 - S) / (C0 - C1); u = u < 0 ? 0 : u > 1 ? 1 : u;
+    d[i + 3] = d[i + 3] * t * u;
+  }
+  g2.putImageData(id, 0, 0);
+  return c;
+}
 function radarOverlay(ctx, W, H, X0, Y0, X1, Y1){
   var tick = document.getElementById('radar');
   if (!tick || !tick.checked) return Promise.resolve();
@@ -3200,7 +3234,7 @@ function radarOverlay(ctx, W, H, X0, Y0, X1, Y1){
     var show = function(k){
       ctx.clearRect(0, 0, W, H);
       ctx.drawImage(base, 0, 0);
-      if (under){ ctx.save(); ctx.globalAlpha = 0.82; ctx.drawImage(under, 0, 0, W, H); ctx.restore(); }
+      if (under){ ctx.save(); ctx.globalAlpha = 0.95; ctx.drawImage(under, 0, 0, W, H); ctx.restore(); }
       ctx.drawImage(frames[k], 0, 0, W, H);
       ctx.save(); ctx.globalAlpha = 0.35; ctx.drawImage(base, 0, 0); ctx.restore();
     };
@@ -3237,6 +3271,7 @@ function radarOverlay(ctx, W, H, X0, Y0, X1, Y1){
      native pixels across the basin and eighty. */
   var under = window.LAB_SATUNDER
     ? loadImg(satUrl(window.LAB_SATLAYER || 'GOES-West_ABI_GeoColor', X0, Y0, X1, Y1, W, H, null))
+        .then(function(im){ return im ? cloudOnly(im, W, H) : null; })
     : Promise.resolve(null);
   return Promise.all([radarTimes(sid, lyr), under]).then(function(r){
     var times = r[0], un = r[1];
