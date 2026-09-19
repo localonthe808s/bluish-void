@@ -17,6 +17,8 @@ the lab paints Los Angeles with the same code that paints New York:
     sea_index.json      where each image sits and the scale it is for
     land_*.png          mountain relief, light and shade only, the same tiers     the same models
     land_index.json
+    veg_*.png           what is actually growing, one green weighted by cover     ESA WorldCover 2021
+    veg_index.json
 
     python3 la_bake.py            # everything
     python3 la_bake.py rail dem   # only those parts (city, rail, faults, dem, sea)
@@ -165,9 +167,22 @@ def bake_city():
     # orange edge down the Inland Empire. An area belongs if its centre is in the pull --
     # which keeps the conurbation entire and leaves out San Diego and Santa Barbara, whose
     # corners merely touch it.
-    frame = shp_box(*PULL)
-    geoms = [shape(f['geometry']).buffer(0) for f in fs]
-    urban = unary_union([g for g in geoms if frame.contains(g.centroid)])
+    # WHICH URBAN AREAS ARE LOS ANGELES (user, 2026-09-19, pointing at orange islands: "is
+    # that accurately considered LA too?"). It was not: the rule had been "any urban area
+    # centred in the data rectangle", which is a fact about my rectangle, not about the
+    # city, and it painted Oxnard-Ventura, Camarillo, Santa Paula, Fillmore, Palmdale-
+    # Lancaster (30 km over the San Gabriels), Victorville, Wrightwood and Avalon orange.
+    # The rule now: the Census LOS ANGELES--LONG BEACH--ANAHEIM urban area, plus any urban
+    # area within 5 km of it -- the ones you reach without leaving the built-up city:
+    # Thousand Oaks and Mission Viejo (touching), Simi Valley (0.4 km), Santa Clarita
+    # (3 km, through the Newhall Pass), Riverside--San Bernardino (touching at Pomona).
+    # Everything across open country stays the colour of open country.
+    name_of = lambda f: f['properties'].get('BASENAME') or f['properties'].get('NAME') or ''     # noqa: E731
+    geoms = {name_of(f): shape(f['geometry']).buffer(0) for f in fs}
+    core = geoms['Los Angeles--Long Beach--Anaheim, CA']
+    keep = sorted(n for n, g in geoms.items() if g.distance(core) <= 0.05)
+    print('  Los Angeles = %s' % keep)
+    urban = unary_union([geoms[n] for n in keep])
     urban = urban.buffer(0.0015).buffer(-0.0015)
     KM2 = 111.32 * 111.32 * math.cos(math.radians(34.05))
     parts = []
@@ -603,7 +618,167 @@ def bake_region():
         write(name, [first] + idx)
 
 
-PARTS = {'region': bake_region, 'land': bake_land, 'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea}
+# ------------------------------------------------------------------- veg ----
+# THE GREEN IS VEGETATION, NOT A LAND DEED (user, 2026-09-19: "im seeing cubed grass can you
+# make sure all the green is correct"). The basemap paints green wherever OSM has a park, a
+# forest or a nature reserve -- and out here that means NATIONAL FOREST BOUNDARIES, which
+# follow survey section lines: squares, staircases and a checkerboard of inholdings where
+# Los Padres meets private land. Legally exact and visually nonsense, the same disease as
+# the city limit. So outside the city the green now comes from what is actually growing:
+# ESA WorldCover 2021, 10 m, global (so Baja has it too), read straight from the
+# cloud-optimised files on the Planetary Computer.
+#
+# ONE GREEN, WEIGHTED BY WHAT IT IS: tree cover full strength, shrubland (chaparral, the
+# real colour of these mountains) most of it, grassland a little -- California's grass is
+# gold for nine months -- cropland a trace, bare ground and desert none. Each output pixel
+# is the MEAN weight of the 10 m cells under it, not the commonest class, so a slope that
+# is half oak and half rock comes out half green instead of flickering between the two.
+# Same tiers and the same exclusive compositing as the mountain relief.
+VEG_GREEN = (0x2A, 0x6A, 0x43)
+# ...AND HOW GREEN IT ACTUALLY IS. Land cover says WHAT grows, not how green: WorldCover calls
+# Nevada's sagebrush and the San Gabriels' chaparral the same "shrubland", and the first bake
+# painted the Great Basin as lush as the Coast Ranges. So everything that is not tree cover is
+# scaled by measured greenness -- MODIS NDVI, the greenest of four months of the year (GIBS,
+# decoded through its own colormap): nothing below 0.18, full strength from 0.45. Chaparral
+# peaks near 0.5-0.6 and keeps its green; sagebrush at 0.2-0.3 keeps a trace; the Mojave at
+# 0.1 keeps none. Trees are trusted as mapped.
+VEG_TREE = {10: 1.0, 90: 0.8, 95: 0.8}
+VEG_OTHER = {20: 0.85, 30: 0.45, 40: 0.30, 100: 0.3}
+NDVI_WMS = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi'
+NDVI_CMAP = 'https://gibs.earthdata.nasa.gov/colormaps/v1.3/MODIS_NDVI.xml'
+NDVI_MONTHS = ('2025-03-01', '2025-05-01', '2025-07-01', '2025-10-01')
+_GREEN = []
+
+
+def greenness():
+    """(factor grid over REGION at 30", 0..1). Peak NDVI of the year, as a multiplier."""
+    if _GREEN:
+        return _GREEN[0]
+    import re
+    from PIL import Image
+    x = get(NDVI_CMAP).decode('utf-8', 'replace')
+    ents = re.findall(r'<ColorMapEntry[^>]*rgb="(\d+),(\d+),(\d+)"[^>]*value="\[?([-\d.]+)', x)
+    keys = np.array([[int(r), int(g), int(b)] for r, g, b, _ in ents])
+    vals = np.array([float(v) for _, _, _, v in ents])
+    W, H = int((REGION[2] - REGION[0]) * 120), int((REGION[3] - REGION[1]) * 120)
+    best = np.full((H, W), np.nan, 'float32')
+    for day in NDVI_MONTHS:
+        u = (NDVI_WMS + '?SERVICE=WMS&REQUEST=GetMap&VERSION=1.1.1&LAYERS=MODIS_Terra_L3_NDVI_Monthly&STYLES='
+             '&SRS=EPSG:4326&BBOX=%f,%f,%f,%f&WIDTH=%d&HEIGHT=%d&FORMAT=image/png&TIME=%s' % (REGION + (W, H, day)))
+        a = np.array(Image.open(io.BytesIO(get(u, 300))).convert('RGB')).reshape(-1, 3)
+        v = np.full(a.shape[0], np.nan, 'float32')
+        for i in range(0, a.shape[0], 200000):
+            ch = a[i:i + 200000].astype('int32')
+            d = ((ch[:, None, :] - keys[None, :, :]) ** 2).sum(2)
+            v[i:i + 200000] = np.where(d.min(1) == 0, vals[d.argmin(1)], np.nan)
+        v = v.reshape(H, W)
+        print('  ndvi %s valid %.0f%%  land median %.2f' % (day, 100 * np.isfinite(v).mean(), np.nanmedian(v)))
+        best = np.fmax(best, v)
+    # the published scale may be 0..1 or 0..10000
+    if np.nanmax(best) > 2:
+        best = best / 10000.0
+    f = np.clip((best - 0.18) / 0.27, 0, 1)
+    f = np.where(np.isfinite(f), f, 0.5).astype('float32')
+    f = ndimage.gaussian_filter(f, 1.2)
+    _GREEN.append(f)
+    return f
+
+
+def green_on(box, W, H):
+    """The greenness factor resampled (bilinear) onto a W x H grid over `box`."""
+    f = greenness()
+    fh, fw = f.shape
+    xs = ((box[0] + (np.arange(W) + 0.5) / W * (box[2] - box[0])) - REGION[0]) / (REGION[2] - REGION[0]) * fw - 0.5
+    ys = (REGION[3] - (box[3] - (np.arange(H) + 0.5) / H * (box[3] - box[1]))) / (REGION[3] - REGION[1]) * fh - 0.5
+    yy, xx = np.meshgrid(np.clip(ys, 0, fh - 1), np.clip(xs, 0, fw - 1), indexing='ij')
+    return ndimage.map_coordinates(f, [yy, xx], order=1).astype('float32')
+WC_TOKEN = 'https://planetarycomputer.microsoft.com/api/sas/v1/token/esa-worldcover'
+WC_TILE = ('https://ai4edataeuwest.blob.core.windows.net/esa-worldcover/v200/2021/map/'
+           'ESA_WorldCover_10m_2021_v200_%s%02d%s%03d_Map.tif')
+
+
+def veg_weights(box, W, H, over, tok):
+    """Mean vegetation weight on a W x H plate-carree grid over `box`, from every 3-degree
+    WorldCover tile it touches, each read at `over` x the output resolution."""
+    import rasterio
+    from rasterio.windows import from_bounds
+    w, s, e, n = box
+    out = np.zeros((H, W), 'float32')
+    oth = np.zeros((H, W), 'float32')
+    lut = np.zeros(256, 'float32')
+    lut2 = np.zeros(256, 'float32')
+    for k, v in VEG_TREE.items():
+        lut[k] = v
+    for k, v in VEG_OTHER.items():
+        lut2[k] = v
+    for la in range(int(math.floor(s / 3.0)) * 3, int(math.ceil(n)), 3):
+        for lo in range(int(math.floor(w / 3.0)) * 3, int(math.ceil(e)), 3):
+            tw, ts, te, tn = max(w, lo), max(s, la), min(e, lo + 3), min(n, la + 3)
+            if te <= tw or tn <= ts:
+                continue
+            x0, x1 = int(round((tw - w) / (e - w) * W)), int(round((te - w) / (e - w) * W))
+            y0, y1 = int(round((n - tn) / (n - s) * H)), int(round((n - ts) / (n - s) * H))
+            if x1 <= x0 or y1 <= y0:
+                continue
+            url = WC_TILE % ('N' if la >= 0 else 'S', abs(la), 'E' if lo >= 0 else 'W', abs(lo)) + '?' + tok
+            try:
+                with rasterio.open(url) as ds:
+                    a = ds.read(1, window=from_bounds(tw, ts, te, tn, ds.transform),
+                                out_shape=((y1 - y0) * over, (x1 - x0) * over))
+            except Exception:
+                continue                                   # open ocean: no tile
+            out[y0:y1, x0:x1] = lut[a].reshape(y1 - y0, over, x1 - x0, over).mean(axis=(1, 3))
+            oth[y0:y1, x0:x1] = lut2[a].reshape(y1 - y0, over, x1 - x0, over).mean(axis=(1, 3))
+    return np.clip(out + oth * green_on(box, W, H), 0, 1)
+
+
+def veg_image(wt, box, name, keep=None):
+    from PIL import Image
+    if keep is not None:
+        wt = wt * keep
+    if (wt > 0.04).mean() < 0.002:
+        return None
+    lv = np.clip(np.round(wt * 15), 0, 15).astype('uint8')          # 16 steps of one green
+    im = Image.fromarray(lv)
+    im = im.convert('P')
+    im.putpalette(list(VEG_GREEN) * 16 + [0, 0, 0] * 240)
+    im.info['transparency'] = bytes([int(round(i * 255 / 15.0)) for i in range(16)] + [0] * 240)
+    im.save(os.path.join(HERE, name), optimize=True, transparency=im.info['transparency'])
+    print('  %-22s %5dx%-5d %6d KB  green %.0f%%' % (name, wt.shape[1], wt.shape[0],
+          os.path.getsize(os.path.join(HERE, name)) // 1024, 100 * (wt > 0.04).mean()))
+    return {'img': 'la/' + name, 'w': box[0], 's': box[1], 'e': box[2], 'n': box[3]}
+
+
+def bake_veg():
+    print('vegetation (ESA WorldCover 2021)')
+    tok = json.loads(get(WC_TOKEN))['token']
+    idx = []
+
+    def tier(box, step, over, name, extra, keep=None):
+        W, H = int(round((box[2] - box[0]) / step)), int(round((box[3] - box[1]) / step))
+        p = os.path.join(HERE, name)
+        r = ({'img': 'la/' + name, 'w': box[0], 's': box[1], 'e': box[2], 'n': box[3]} if os.path.exists(p)
+             else veg_image(veg_weights(box, W, H, over, tok), box, name, keep))
+        if r:
+            idx.append(dict(r, **extra))
+
+    # the regional tier fades out across the pull's rim, where the 3" tier's feather fades in
+    W, H = int(round((REGION[2] - REGION[0]) * 240)), int(round((REGION[3] - REGION[1]) * 240))
+    lon = REGION[0] + (np.arange(W) + 0.5) / W * (REGION[2] - REGION[0])
+    lat = REGION[3] - (np.arange(H) + 0.5) / H * (REGION[3] - REGION[1])
+    fx, fy = 0.05 * (PULL[2] - PULL[0]), 0.05 * (PULL[3] - PULL[1])
+    keep = 1.0 - np.minimum.outer(np.clip(np.minimum(lat - PULL[1], PULL[3] - lat) / fy, 0, 1),
+                                  np.clip(np.minimum(lon - PULL[0], PULL[2] - lon) / fx, 0, 1))
+    tier(REGION, 15 / 3600.0, 4, 'veg_15as.png', {}, keep)
+    tier(PULL, 3 / 3600.0, 4, 'veg_3as.png', {'feather': True})
+    for b, tag in grid(PULL, 3, 2):
+        tier(b, 1 / 3600.0, 2, 'veg_1as_%s.png' % tag, {'maxMpp': 60})
+    for b, tag in grid(HOME_LAND, 4, 3):
+        tier(b, 1 / 10800.0, 1, 'veg_13as_%s.png' % tag, {'maxMpp': 25})
+    write('veg_index.json', idx)
+
+
+PARTS = {'veg': bake_veg, 'region': bake_region, 'land': bake_land, 'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea}
 
 if __name__ == '__main__':
     print('home box  w %.4f  s %.4f  e %.4f  n %.4f' % home_box())
