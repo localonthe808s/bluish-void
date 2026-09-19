@@ -1581,7 +1581,12 @@ function drawHoodNames(ctx, geo, proj, mPerPx, opts){
       ctx.restore();
       ctx.globalAlpha = 1;
     }
-    ctx.fillStyle = HOOD_INK;
+    var INK = (opts && opts.ink) || HOOD_INK;
+    if (opts && opts.ink){                              // dark ink wants a whisper of paper behind it
+      ctx.strokeStyle = 'rgba(255,252,244,.7)'; ctx.lineJoin = 'round'; ctx.lineWidth = 2.6;
+      pending.forEach(function(p){ p.lines.forEach(function(l, i){ ctx.strokeText(l, p.x, p.y - p.th / 2 + LH / 2 + i * LH); }); });
+    }
+    ctx.fillStyle = INK;
     /* A SHADE BOLDER, WITHOUT A SYNTHESISED BOLD ("bolden them a slightly").
        Qellia is a single-weight face, so asking for 600/700 hands you the
        browser's faux-bold, which smears at these sizes — the note above the
@@ -1589,7 +1594,7 @@ function drawHoodNames(ctx, geo, proj, mPerPx, opts){
        real letterform instead. Scaled to the type (0.06 em) so it is a nudge at
        both ends of the ladder: ~0.54 px under 9 px, ~1.1 px under 18 px. Round
        joins, or the serifs spike. */
-    ctx.strokeStyle = HOOD_INK;
+    ctx.strokeStyle = INK;
     ctx.lineJoin = 'round';
     ctx.lineWidth = Math.max(0.45, 9 * _s * ((opts && opts.weight) || 0.06));
     pending.forEach(function(p){
@@ -2461,8 +2466,9 @@ function drawRock(g, W, H, X0, Y0, X1, Y1){
         var x = (tx * span - WORLD - X0) / mpp, y = (Y1 - (WORLD - ty * span)) / mpp, w = span / mpp;
         g.drawImage(im, x, y, w + 0.5, w + 0.5); res();
       };
-      im.onerror = function(){ res(); };
-      im.src = 'https://tiles.macrostrat.org/carto/' + z + '/' + tx + '/' + ty + '.png';
+      var tries = 0, url = 'https://tiles.macrostrat.org/carto/' + z + '/' + tx + '/' + ty + '.png';
+      im.onerror = function(){ if (tries++ < 2) setTimeout(function(){ im.src = url + '?r=' + tries; }, 600 * tries); else res(); };
+      im.src = url;
     }));
   })(tx, ty);
   return Promise.all(jobs);
@@ -2821,6 +2827,7 @@ function drawCard(style){
     var vkey = document.getElementById('view').value;
     /* the scale every "show it below N m/px" rule reads: New York's, whatever the box */
     var nmpp = function(){ return VB.mpp / ((VIEWS[vkey] || {}).mppK || 1); };
+    var geoOn = function(){ return !!(document.getElementById('geo') || {}).checked; };
     var dark = !(style.base === 'light');
     var stale = function(){ return token !== busy; };
     var st = new protomapsL.Static({
@@ -2934,6 +2941,13 @@ function drawCard(style){
                     {x:view.w, y:view.latMid}, {x:view.e, y:view.latMid}, W, H)
                   .then(function(){ return cv; });
               };
+              /* GEOLOGY IS THE GROUND AND ITS NAMES, nothing else (user 2026-09-19: "remove the
+                 streets from geology, just show the neighborhoods, no traintimes or traffic").
+                 Under a translucent rock map the white street mesh became a pale net over
+                 every unit, and the rail a set of stray coloured threads. With the rock on:
+                 no road pass, no rail, no traffic, and the neighbourhood names lifted onto
+                 the top canvas in dark ink, since white lettering dies on pale alluvium. */
+              if (geoOn()) return;
               var rm = (style.mods || {}).roadsMode;
               if (rm === 'none') return;                       // no road grid at all
               if (rm !== 'city' || !boroMaskCv)
@@ -2957,6 +2971,7 @@ function drawCard(style){
               drawGhosts(ctx, gh, out.project, W, H); // the buried courses, inside it
               return drawActiveWater(ctx, style, f, view, view.latMid, W, H);
             }).then(function(waterMask){
+              paint._water = waterMask || null;
               if (stale() || !waterMask) return waterMask;
               /* The ocean is WATER_DEEP everywhere now — the seafloor goes on over
                  it, under the harbour depth, the piers and everything coastal. */
@@ -3033,6 +3048,12 @@ function drawCard(style){
                   return parkNamesFor(vkey);
                 });
               }
+              if (geoOn()){
+                railCv.getContext('2d').clearRect(0, 0, W, H);
+                railCv.style.top = cv.offsetTop + 'px';
+                paintHoods = drawHoodNames(railCv.getContext('2d'), hn, out.project, nmpp() * 0.72, { ink: '#141a2b', weight: 0.075 });
+                return null;                                   // no park names either: the rock is the subject
+              }
               paintHoods = drawHoodNames(ctx, hn, out.project, nmpp(), hoodOpts);
               return parkNamesFor(vkey);
             }).then(function(pn){
@@ -3041,6 +3062,8 @@ function drawCard(style){
               return Promise.all([subwayFor(vkey), stopsFor(vkey), bulletsFor(vkey)]);
             }).then(function(sw){
               if (stale()) return;
+              if (geoOn()) return radarOverlay(ctx, W, H, VB.Xw, VB.Ymid - VB.mpp * H / 2,
+                                               VB.Xw + VB.mpp * W, VB.Ymid + VB.mpp * H / 2);
               var tOn = (document.getElementById('traffic') || {}).checked && VB.mpp <= 320;
               var rg = railCv.getContext('2d'); rg.clearRect(0, 0, W, H);
               railCv.style.top = cv.offsetTop + 'px';
@@ -3070,7 +3093,7 @@ function drawCard(style){
         paint._traffic = function(){
           var tbox = document.getElementById('traffic');
           trafCv.style.top = cv.offsetTop + 'px';
-          if (!tbox || !tbox.checked || !paint._proj || VB.mpp > 320){ trafCv.getContext('2d').clearRect(0, 0, W, H); TRAF.hits = []; return Promise.resolve(); }
+          if (!tbox || !tbox.checked || geoOn() || !paint._proj || VB.mpp > 320){ trafCv.getContext('2d').clearRect(0, 0, W, H); TRAF.hits = []; return Promise.resolve(); }
           var off = document.createElement('canvas'); off.width = W; off.height = H;      // build aside, swap in: no blank flash
           return drawTraffic(off.getContext('2d'), W, H, VB.Xw, VB.Ymid - VB.mpp * H / 2, VB.Xw + VB.mpp * W, VB.Ymid + VB.mpp * H / 2,
                              paint._proj, view, VIEWS[vkey] || {}).then(function(){
@@ -3090,7 +3113,12 @@ function drawCard(style){
         if (stale() || !document.getElementById('geo').checked || !paint._proj) return;
         gg.globalAlpha = 0.62;
         return drawRock(gg, W, H, VB.Xw, VB.Ymid - VB.mpp * H / 2, VB.Xw + VB.mpp * W, VB.Ymid + VB.mpp * H / 2)
-          .then(function(){ gg.globalAlpha = 1; return faultsFor(vkey); })
+          .then(function(){
+            gg.globalAlpha = 1;
+            /* the rock map washes the sea grey (its offshore units): cut it to the land */
+            if (paint._water){ gg.globalCompositeOperation = 'destination-out'; gg.drawImage(paint._water, 0, 0); gg.globalCompositeOperation = 'source-over'; }
+            return faultsFor(vkey);
+          })
           .then(function(fl){ if (!stale()) drawFaults(gg, fl, paint._proj, view); });
       })
       .then(function(){
