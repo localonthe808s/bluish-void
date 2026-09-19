@@ -3054,6 +3054,50 @@ function drawGhosts(ctx, geo, proj, W, H){
    reproduces that here: snapshot the painted map, drop the latest scan over it,
    lay the snapshot back at 0.5 — and the label pass that follows plays the part
    of the overlay canvas. Same geoserver, same EPSG:3857 box the view is drawn in. */
+/* CLEAR AIR IS NOT WEATHER (user 2026-09-19: "add the same type of filter so noise isnt
+   always showing on the KSOX view"). A single-site super-res reflectivity sweep sees insects,
+   birds, dust and the ground itself, and on a dry September afternoon that clutter covered
+   HALF the frame -- the basin under a blue-grey rash with no rain in the county.
+   The service has no style that thresholds it (its only style is a bare RasterSymbolizer,
+   and the colours come from the raster's own palette), but it does send CORS, so the pixels
+   can be read and cut here. The ramp below is read off the service's OWN legend, so the cut
+   is made in its units rather than guessed from the look of it.
+   WHERE TO CUT, measured on a live frame: the ramp indices form two humps. Clutter is a
+   mountain from index 3 to 13, peaking at 8 with a tenth of the whole frame; real echo is a
+   thin tail from 14 up. Cutting at that valley takes the frame from 51.8% covered to 1.8%.
+   Only the single-site sweep is filtered: MRMS ships quality-controlled products that have
+   had this done properly upstream, and velocity is a different quantity on a different ramp. */
+var BREF_RAMP = [[143,133,116],[148,141,95],[158,154,96],[171,170,119],[186,187,144],[202,203,167],
+  [201,204,180],[185,190,180],[169,175,180],[155,162,181],[136,146,178],[112,128,172],[91,112,166],
+  [75,100,161],[74,115,172],[87,153,195],[91,184,195],[85,203,174],[65,214,125],[32,214,57],
+  [13,194,19],[12,156,16],[11,125,14],[10,105,11],[73,128,7],[191,192,2],[250,214,12],[240,192,34],
+  [239,178,34],[250,178,12],[231,4,5],[186,12,13],[166,12,13],[173,4,4],[248,219,255],[235,152,253],
+  [234,116,253],[248,117,254],[151,0,241],[111,0,221],[0,0,0]];
+var BREF_KEEP = 14, _brefLut = {};
+function brefIndex(r, g, b){
+  var k = (r << 16) | (g << 8) | b, v = _brefLut[k];
+  if (v !== undefined) return v;
+  var best = 0, bd = 1e9;
+  for (var i = 0; i < BREF_RAMP.length; i++){
+    var c = BREF_RAMP[i], dr = c[0] - r, dg = c[1] - g, db = c[2] - b, d = dr * dr + dg * dg + db * db;
+    if (d < bd){ bd = d; best = i; }
+  }
+  return (_brefLut[k] = best);
+}
+function filterBref(im, W, H){
+  var c = document.createElement('canvas'); c.width = W; c.height = H;
+  var g2 = c.getContext('2d'); g2.drawImage(im, 0, 0, W, H);
+  var id;
+  try { id = g2.getImageData(0, 0, W, H); }
+  catch (e){ return im; }                      /* no CORS this time: better whole than blank */
+  var d = id.data;
+  for (var i = 0; i < d.length; i += 4){
+    if (!d[i + 3]) continue;
+    if (brefIndex(d[i], d[i + 1], d[i + 2]) < BREF_KEEP) d[i + 3] = 0;
+  }
+  g2.putImageData(id, 0, 0);
+  return c;
+}
 function radarOverlay(ctx, W, H, X0, Y0, X1, Y1){
   var tick = document.getElementById('radar');
   if (!tick || !tick.checked) return Promise.resolve();
@@ -3080,7 +3124,7 @@ function radarOverlay(ctx, W, H, X0, Y0, X1, Y1){
       im.onload = function(){
         var snap = document.createElement('canvas'); snap.width = W; snap.height = H;
         snap.getContext('2d').drawImage(ctx.canvas, 0, 0);
-        ctx.drawImage(im, 0, 0, W, H);
+        ctx.drawImage(!vw.sat && /_sr_bref$/.test(lyr) ? filterBref(im, W, H) : im, 0, 0, W, H);
         ctx.save(); ctx.globalAlpha = 0.35; ctx.drawImage(snap, 0, 0); ctx.restore();
         res();
       };
