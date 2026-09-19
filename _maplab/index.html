@@ -154,8 +154,9 @@ var VIEWS = {
               boroughs:'la/la_urban.json', hoodNames:'la/hood_labels.json',
               dropLabels:['Los Angeles'], dropHoodNames:true,
               subway:'la/rail_lines.json', stops:'la/rail_stops.json', bullets:'la/rail_colours.json',
-              terrain:'la/land_relief.json', terrainOverCity:true,
-              terrainAlpha:{ 150:0.07, 300:0.11, 600:0.16, 1200:0.21, 1800:0.26, 2400:0.31 },
+              /* shaded relief, not terraces: the veils (la/land_relief.json) were built for
+                 New York's 120 m of relief and barely registered against 3,000 m */
+              landReliefs:'la/land_index.json',
               depthFade:[-119.60,33.20,-117.30,34.75],
               faults:'la/faults.json', radar:'ksox' },
   shelf:    { w:-75.20, s:37.20, e:-70.00, n:41.20, bathy:'bathy/bathy_shelf.json', zoom:7 },
@@ -588,6 +589,21 @@ function drawRelief(ctx, img, r, proj, strips){
     g.globalCompositeOperation = 'source-over';
   }
   ctx.drawImage(off, 0, 0);
+}
+
+/* A TIERED RELIEF (Los Angeles): an index of images, coarse to fine, each carrying the
+   m/px below which it is worth decoding. Drawn in order, so the finest model in frame is
+   the one left showing. Used twice -- the seafloor and the mountains. */
+function drawReliefList(ctx, list, view, mpp, proj, stale){
+  var chain = Promise.resolve();
+  (list || []).forEach(function(r){
+    if (r.maxMpp && mpp > r.maxMpp) return;
+    if (r.e < view.w || r.w > view.e || r.n < view.s || r.s > view.n) return;
+    chain = chain.then(function(){ return reliefImage(r.img); }).then(function(img){
+      if (!stale()) drawRelief(ctx, img, r, proj, r.maxMpp ? 24 : 48);
+    }).catch(function(){});
+  });
+  return chain;
 }
 
 function drawBoroughs(ctx, geo, proj, dark, growPx){
@@ -1972,19 +1988,8 @@ function drawCard(style){
             if (view.relief) return reliefImage(view.relief.img).then(function(img){
               if (!stale()) drawRelief(ctx, img, view.relief, out.project);
             });
-            /* a TIERED seafloor (Los Angeles): an index of images, coarse to fine, each
-               carrying the m/px below which it is worth decoding. Drawn in order, so the
-               finest survey in frame is the one left showing. */
             return viewJson(vkey, 'reliefs').then(function(list){
-              var chain = Promise.resolve();
-              (list || []).forEach(function(r){
-                if (r.maxMpp && VB.mpp > r.maxMpp) return;
-                if (r.e < view.w || r.w > view.e || r.n < view.s || r.s > view.n) return;
-                chain = chain.then(function(){ return reliefImage(r.img); }).then(function(img){
-                  if (!stale()) drawRelief(ctx, img, r, out.project, r.maxMpp ? 24 : 48);
-                }).catch(function(){});
-              });
-              return chain;
+              return drawReliefList(ctx, list, view, VB.mpp, out.project, stale);
             });
           });
         };
@@ -2014,8 +2019,14 @@ function drawCard(style){
               if (tr && !stale())
                 drawTerrain(ctx, tr, out.project, W, H, (VIEWS[vkey] || {}).depthFade,
                             (VIEWS[vkey] || {}).terrainOverCity ? null : boroMaskCv, (VIEWS[vkey] || {}).terrainAlpha);
-              return wetFor(vkey);
+              /* THE MOUNTAINS, as light and shade (la/land_index.json). Same slot as the
+                 veils: over the mask, the parks and the blocks, UNDER the street grid, so
+                 a canyon road still reads as a white thread up a shaded slope. */
+              return viewJson(vkey, 'landReliefs').then(function(list){
+                return drawReliefList(ctx, list, view, VB.mpp, out.project, stale);
+              });
             })
+            .then(function(){ return wetFor(vkey); })
             .then(function(wg){
               if (stale()) return;
               drawWet(ctx, wg, out.project);          // the field: ground that was water

@@ -15,6 +15,8 @@ the lab paints Los Angeles with the same code that paints New York:
     land_relief.json    terrain veils at fixed heights                          NOAA NCEI DEM mosaic
     sea_*.png           seafloor shaded relief, 3 / 1 / 1/3 arc-second tiers     NOAA CRM v2 + Santa Monica DEM
     sea_index.json      where each image sits and the scale it is for
+    land_*.png          mountain relief, light and shade only, the same tiers     the same models
+    land_index.json
 
     python3 la_bake.py            # everything
     python3 la_bake.py rail dem   # only those parts (city, rail, faults, dem, sea)
@@ -397,16 +399,17 @@ SEA_RAMP = [(0, (0x17, 0x45, 0x7F)), (50, (0x15, 0x40, 0x78)), (200, (0x11, 0x38
 HOME_SEA = (-118.85, 33.69, -117.95, 34.05)        # the home frame, south of the last salt water
 
 
-def dem_pull(box, step, lock):
+def dem_pull(box, step, lock, src=None):
     w, s, e, n = box
     size = (int(round((e - w) / step)), int(round((n - s) / step)))
     q = {'bbox': '%f,%f,%f,%f' % box, 'bboxSR': 4326, 'imageSR': 4326, 'size': '%d,%d' % size,
          'format': 'tiff', 'pixelType': 'F32', 'noData': -9999,
-         'interpolation': 'RSP_BilinearInterpolation', 'f': 'image',
-         'mosaicRule': json.dumps({'mosaicMethod': 'esriMosaicLockRaster', 'lockRasterIds': [lock]})}
+         'interpolation': 'RSP_BilinearInterpolation', 'f': 'image'}
+    if lock is not None:
+        q['mosaicRule'] = json.dumps({'mosaicMethod': 'esriMosaicLockRaster', 'lockRasterIds': [lock]})
     for k in range(4):
         try:
-            return tifffile.imread(io.BytesIO(get(DEM_SRC + '?' + urllib.parse.urlencode(q), 600))).astype('float32')
+            return tifffile.imread(io.BytesIO(get((src or DEM_SRC) + '?' + urllib.parse.urlencode(q), 600))).astype('float32')
         except Exception as ex:
             print('    retry %d (%s)' % (k + 1, ex))
     raise RuntimeError('DEM pull failed for %s' % (box,))
@@ -470,7 +473,85 @@ def bake_sea():
     write('sea_index.json', idx)
 
 
-PARTS = {'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea}
+# ------------------------------------------------------------------ land ----
+# THE MOUNTAINS (user, 2026-09-19: "LA has a lot of mountains too, add the topography relief
+# so its not flat"). The veils in land_relief.json are terraces -- fine for New York's 120 m
+# of relief, nothing like enough for a basin walled by 3,000 m. Same models and the same
+# tiers as the seafloor, the same locked rasters, but drawn as LIGHT AND SHADE ONLY: a
+# pixel is black-with-alpha where the slope faces away from a north-west sun and
+# white-with-alpha where it faces it, and fully transparent where the ground is flat. No
+# hypsometric colour -- colour on this map belongs to the city, the parks, the water and
+# (later) the radar. So the basin floor stays clean orange, the Santa Monicas and the
+# Hollywood Hills shade the orange they are built on, and on the black land outside the
+# footprint the lit faces are what draw the San Gabriels at all.
+# THE LAND COMES FROM USGS 3DEP, NOT THE NOAA MODELS. NOAA's coastal relief model has a
+# rectangular hole in it -- nothing east of -118.0 above 34.05, mapped cell by cell -- which
+# is the eastern San Gabriels, Mt Baldy included, and its 10 m model stops at 34.2 N. 3DEP
+# is seamless at 1/3 arc-second across the whole pull (Baldy reads 3,068 m, every pixel
+# distinct), so all three tiers use it and the fine tier covers the full home frame.
+LAND_SRC = 'https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage'
+HOME_LAND = (-118.85, 33.69, -117.95, 34.346)
+
+
+def land_image(a, box, zfac, name):
+    from PIL import Image
+    w, s, e, n = box
+    H, W = a.shape
+    land = (a > 0.5)
+    if land.mean() < 0.002:
+        return None
+    g = ndimage.gaussian_filter(np.where(a < -9000, 0, np.clip(a, 0, None)), 0.8)
+    my = (n - s) / H * 111320.0
+    mx = (e - w) / W * 111320.0 * math.cos(math.radians((s + n) / 2))
+    gy, gx = np.gradient(g * zfac, my, mx)
+    slope = np.arctan(np.hypot(gx, gy))
+    aspect = np.arctan2(gy, -gx)
+    alt = math.radians(45)
+    # three suns, the north-west one leading: a single light leaves every south-east face
+    # one flat black and the ranges read as cut-outs
+    hs = np.zeros_like(g)
+    for az_deg, wt in ((315, 0.6), (270, 0.2), (0, 0.2)):
+        az = math.radians(az_deg)
+        hs += wt * (math.sin(alt) * np.cos(slope) + math.cos(alt) * np.sin(slope) * np.cos(az - math.pi / 2 - aspect))
+    sh = hs / math.sin(alt) - 1.0                      # 0 on the flat, negative in shadow
+    dark = np.clip(-sh, 0, 1) * 0.62
+    lite = np.clip(sh / 0.41, 0, 1) * 0.30
+    alpha = np.where(sh < 0, dark, lite) * land
+    alpha = np.round(alpha * 255 / 8) * 8              # 32 steps: invisible, and the file halves
+    alpha[alpha < 10] = 0                              # the basin floor carries nothing at all
+    out = np.zeros((H, W, 2), 'uint8')
+    out[..., 0] = np.where(sh < 0, 0, 255)
+    out[..., 0][alpha == 0] = 0
+    out[..., 1] = np.clip(alpha, 0, 255)
+    Image.fromarray(out).save(os.path.join(HERE, name), optimize=True)
+    print('  %-22s %5dx%-5d %6d KB  land %.0f%%  shaded %.0f%%' % (
+        name, W, H, os.path.getsize(os.path.join(HERE, name)) // 1024, 100 * land.mean(), 100 * (alpha > 0).mean()))
+    return {'img': 'la/' + name, 'w': w, 's': s, 'e': e, 'n': n}
+
+
+def bake_land():
+    """Resumable: an image already on disk is kept (delete it to re-pull). The fine tier
+    goes in 4 x 3 pieces -- 3DEP answers a 17-megapixel request with a 500."""
+    print('land relief')
+    idx = []
+
+    def tier(box, step, zfac, name, extra):
+        if os.path.exists(os.path.join(HERE, name)):
+            r = {'img': 'la/' + name, 'w': box[0], 's': box[1], 'e': box[2], 'n': box[3]}
+        else:
+            r = land_image(dem_pull(box, step, None, LAND_SRC), box, zfac, name)
+        if r:
+            idx.append(dict(r, **extra))
+
+    tier(PULL, 3 / 3600.0, 1.6, 'land_3as.png', {'feather': True})
+    for b, tag in grid(PULL, 3, 2):
+        tier(b, 1 / 3600.0, 1.25, 'land_1as_%s.png' % tag, {'maxMpp': 60})
+    for b, tag in grid(HOME_LAND, 4, 3):
+        tier(b, 1 / 10800.0, 1.0, 'land_13as_%s.png' % tag, {'maxMpp': 25})
+    write('land_index.json', idx)
+
+
+PARTS = {'land': bake_land, 'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea}
 
 if __name__ == '__main__':
     print('home box  w %.4f  s %.4f  e %.4f  n %.4f' % home_box())
