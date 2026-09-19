@@ -6,9 +6,8 @@ Everything the `la` view in ../index.html draws, pulled from its publisher and
 written next to this file in the shapes the NYC draw functions already read, so
 the lab paints Los Angeles with the same code that paints New York:
 
-    la_city.json        the City of Los Angeles boundary (the orange mask)      LA City Planning
-    la_hoods.json       its 114 neighbourhoods, traced inside the mask          LA Times Mapping L.A.
-    hood_labels.json    one label point per neighbourhood, ranked by area
+    la_urban.json       the built-up basin (the orange mask), no city limits    Census 2020 urban areas
+    hood_labels.json    one name per city / neighbourhood / community           LA County CSA layer
     rail_lines.json     Metro Rail + Metrolink track, one shape per route       the agencies' own GTFS
     rail_stops.json     every station, with the routes that call there
     rail_colours.json   route -> the agency's published colour
@@ -39,6 +38,7 @@ import numpy as np
 import tifffile
 from scipy import ndimage
 from shapely.geometry import LineString, Polygon, shape
+from shapely.geometry import box as shp_box
 from shapely.ops import unary_union
 from skimage import measure
 
@@ -54,10 +54,9 @@ DEM_SIZE = (2300, 1550)                       # 0.001 deg a pixel, ~100 m
 TERRAIN_LEVELS = (150, 300, 600, 1200, 1800, 2400)
 BATHY_LEVELS = (10, 25, 50, 100, 200, 400, 600, 800)
 
-CITY_URL = ('https://services1.arcgis.com/tzwalEyxl2rpamKs/arcgis/rest/services/'
-            'Los_Angeles_City_Boundary/FeatureServer/0')
-HOODS_URL = ('https://services5.arcgis.com/7nsPwEMP38bSkCjy/arcgis/rest/services/'
-             'LA_Times_Neighborhoods/FeatureServer/0')
+URBAN_URL = 'https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Urban/MapServer/6'
+CSA_URL = ('https://public.gis.lacounty.gov/public/rest/services/LACounty_Dynamic/'
+           'Political_Boundaries/MapServer/23')
 QFAULTS = 'https://earthquake.usgs.gov/arcgis/rest/services/haz/Qfaults/MapServer'
 METRO_GTFS = 'https://gitlab.com/LACMTA/gtfs_rail/raw/master/gtfs_rail.zip'
 METROLINK_GTFS = 'https://metrolinktrains.com/globalassets/about/gtfs/gtfs.zip'
@@ -117,34 +116,81 @@ def flat_rings(geom, tol, min_area=0.0):
     return rings
 
 
+# Area is a poor guide to which names matter -- by area the first twelve are Santa
+# Clarita, Lancaster, Palmdale -- so the names a map of Los Angeles is expected to carry
+# at arm's length are listed. Everything else earns its tier by size.
+MARQUEE = {'Downtown', 'Hollywood', 'Santa Monica', 'Beverly Hills', 'West Hollywood', 'Venice', 'Koreatown',
+           'Long Beach', 'Pasadena', 'Burbank', 'Glendale', 'Inglewood', 'Culver City', 'Compton', 'San Pedro',
+           'Malibu', 'Westwood', 'Silver Lake', 'Echo Park', 'Boyle Heights', 'East Los Angeles', 'Watts',
+           'Van Nuys', 'North Hollywood', 'Sherman Oaks', 'Torrance', 'Westchester', 'Highland Park', 'Encino',
+           'Northridge', 'Pacific Palisades', 'Brentwood', 'Marina del Rey', 'El Segundo', 'Manhattan Beach',
+           'Redondo Beach', 'Downey', 'Whittier', 'Alhambra', 'Pomona', 'El Monte', 'Studio City', 'Mid-City',
+           'Los Feliz', 'Crenshaw District', 'Santa Clarita', 'Woodland Hills', 'Calabasas', 'Carson'}
+RENAME = {'Silverlake': 'Silver Lake', 'Mid-city': 'Mid-City'}
+
+
 def bake_city():
-    print('city + neighbourhoods')
-    fs = arcgis_geojson(CITY_URL)
-    city = unary_union([shape(f['geometry']).buffer(0) for f in fs])
-    print('  city %.0f km2 (published: 1,302)' % (city.area * 111.32 * 111.32 * math.cos(math.radians(34.05))))
-    write('la_city.json', {'type': 'FeatureCollection', 'features': [
+    """THE ORANGE IS THE BUILT-UP BASIN, NOT A JURISDICTION (user, 2026-09-19: "its all
+    LA, properly highlight LA without any of the pretentious borders"). The first pass
+    used the City of Los Angeles limit, which is legally exact and reads as nonsense:
+    Beverly Hills, West Hollywood, Santa Monica and Culver City came out as black holes
+    and Pasadena, Long Beach and East L.A. as not-Los-Angeles. New York's legal city and
+    its lived city are the same five boroughs; here they are not.
+
+    So the mask is the Census 2020 urban footprint -- every urban area touching the
+    frame, merged -- which stops at the mountains on its own and knows no city limits.
+    Closed by 150 m and with holes under 1.5 km2 filled, because the raw footprint is
+    built from census blocks and is pitted with golf courses and rail yards; the big
+    voids (Griffith Park, the Santa Monicas, the Baldwin and Puente Hills) stay open,
+    which is the terrain reading through. No inner boundary lines at all: the places
+    are NAMES inside the shape, from the County's community layer (88 cities, the
+    City's neighbourhoods, the unincorporated communities) with the jurisdiction
+    dropped from each -- "West Hollywood", never "City of"."""
+    print('urban footprint + place names')
+    env = ('&geometry=%f,%f,%f,%f&geometryType=esriGeometryEnvelope&inSR=4326'
+           '&spatialRel=esriSpatialRelIntersects&maxAllowableOffset=0.0002' % PULL)
+    fs = arcgis_geojson(URBAN_URL, extra=env)
+    print('  urban areas: %s' % sorted((f['properties'].get('BASENAME') or f['properties'].get('NAME') or '?') for f in fs))
+    frame = shp_box(*PULL)
+    urban = unary_union([shape(f['geometry']).buffer(0) for f in fs]).intersection(frame)
+    urban = urban.buffer(0.0015).buffer(-0.0015)
+    KM2 = 111.32 * 111.32 * math.cos(math.radians(34.05))
+    parts = []
+    for poly in ([urban] if urban.geom_type == 'Polygon' else list(urban.geoms)):
+        if poly.area * KM2 < 0.5:
+            continue
+        parts.append(Polygon(poly.exterior, [h for h in poly.interiors if Polygon(h).area * KM2 >= 1.5]))
+    urban = unary_union(parts)
+    print('  footprint %.0f km2 in %d pieces' % (urban.area * KM2, len(parts)))
+    write('la_urban.json', {'type': 'FeatureCollection', 'features': [
         {'type': 'Feature', 'properties': {'name': 'Los Angeles'},
-         'geometry': {'type': 'Polygon', 'coordinates': flat_rings(city, 0.00008, 2e-7)}}]})
-    hs = arcgis_geojson(HOODS_URL)
-    feats, labels = [], []
-    rows = []
-    for f in hs:
-        g = shape(f['geometry']).buffer(0)
-        nm = (f['properties'].get('name') or '').strip()
-        if nm and not g.is_empty:
-            rows.append((g.area, nm, g))
-    rows.sort(reverse=True)
-    for i, (a, nm, g) in enumerate(rows):
-        feats.append({'type': 'Feature', 'properties': {'name': nm, 'boro': 'LA'},
-                      'geometry': {'type': 'Polygon', 'coordinates': flat_rings(g, 0.00008, 1e-7)}})
-        p = g.representative_point()
-        big = max(([g] if g.geom_type == 'Polygon' else list(g.geoms)), key=lambda q: q.area)
-        c = big.centroid if big.contains(big.centroid) else p
+         'geometry': {'type': 'Polygon', 'coordinates': flat_rings(urban, 0.00012)}}]})
+
+    rows = {}
+    for f in arcgis_geojson(CSA_URL):
+        a = f['properties']
+        # a community name only where the County names PLACES with it: inside the City of
+        # Los Angeles and in unincorporated land. Long Beach's rows are "Eastside",
+        # "Downtown", "Pier" -- planning districts, and its Downtown is not LA's.
+        city = (a.get('LCITY') or '').strip()
+        nm = (a.get('COMMUNITY') or '').strip() if city in ('Los Angeles', 'Unincorporated') else city
+        nm = RENAME.get(nm, nm)
+        if not nm or not f.get('geometry') or (a.get('Feat_Type') or 'Land') != 'Land':
+            continue
+        g = shape(f['geometry']).buffer(0).intersection(urban)       # the part of it that is city
+        if g.is_empty or g.area * KM2 < 0.6:
+            continue
+        rows[nm] = g if nm not in rows else rows[nm].union(g)
+    ranked = sorted(rows.items(), key=lambda kv: -kv[1].area)
+    labels = []
+    for i, (nm, g) in enumerate(ranked):
+        big = max(([g] if g.geom_type == 'Polygon' else [q for q in g.geoms if q.geom_type == 'Polygon']), key=lambda q: q.area)
+        c = big.centroid if big.contains(big.centroid) else big.representative_point()
         labels.append({'type': 'Feature',
-                       'properties': {'name': nm, 'rank': 1 if i < 24 else (2 if i < 70 else 3), 'b': 'LA',
+                       'properties': {'name': nm, 'rank': 1 if (nm in MARQUEE or i < 12) else (2 if i < 150 else 3), 'b': 'LA',
                                       'bbox': [round(v, 5) for v in big.bounds]},
                        'geometry': {'type': 'Point', 'coordinates': [round(c.x, 5), round(c.y, 5)]}})
-    write('la_hoods.json', {'type': 'FeatureCollection', 'features': feats})
+    print('  %d places; first: %s' % (len(labels), [l['properties']['name'] for l in labels[:12]]))
     write('hood_labels.json', {'type': 'FeatureCollection', 'features': labels})
 
 
