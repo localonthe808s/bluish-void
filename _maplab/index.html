@@ -3312,6 +3312,26 @@ var FLOW_GREEN = '#00E676';
    Saturated the whole ladder and skipped the city's orange on the way up: vivid yellow,
    vivid orange-red, vivid red, deep crimson. The dark casing under each line does the rest. */
 function flowColour(r, slowAt){ var k = r / slowAt; return k < 0.30 ? '#B80020' : k < 0.55 ? '#FF1B1B' : k < 0.80 ? '#FF6B00' : '#FFE500'; }
+/* THE ROAD A JAM SITS ON, as short as it can honestly be said (user 2026-09-19: "can you
+   write the name of the street or highway that has the congestion abbreviated in the marker
+   above the time"). TomTom puts the CONTROLLING route in parentheses on `from` -- "Barham
+   Blvd (US-101)" -- and that is the one field that is right every time; `roadNumbers` is a
+   bag that can hold four names for one stretch ("Hollywood Fwy N", "CA-2 W", "US-101 N",
+   "Santa Ana Fwy N"), so it is used only to recover the direction of the route we already
+   know. A surface street carries no route, and gives its own name up to the first slash. */
+function jamRoad(p){
+  var from = p.from || '', roads = p.roadNumbers || [];
+  var m = from.match(/\(([^()]+)\)\s*$/), route = m ? m[1].trim() : null;
+  if (route){
+    for (var i = 0; i < roads.length; i++)
+      if (roads[i].indexOf(route) === 0) return roads[i].toUpperCase();     // route with its direction
+    return route.toUpperCase();
+  }
+  var r0 = roads.filter(function(r){ return /^(I|US|CA|SR)-\d/.test(r); })[0] || roads[0];
+  if (r0) return String(r0).toUpperCase();
+  var street = from.replace(/\([^()]*\)/g, '').split('/')[0].trim();
+  return street ? street.toUpperCase().slice(0, 18) : '';
+}
 function drawTraffic(g, W, H, X0, Y0, X1, Y1, proj, view, v){
   var mpp = (X1 - X0) / W, WORLD = 20037508.342789244;
   /* the standard zoom for this scale: the tile whose 256 px match the screen's */
@@ -3373,7 +3393,12 @@ function drawTraffic(g, W, H, X0, Y0, X1, Y1, proj, view, v){
     var hits = [], P = function(c){ return proj({ x:c[0], y:c[1] }); }, inF = function(q){ return q.x > -20 && q.y > -20 && q.x < W + 20 && q.y < H + 20; };
     var gm = mpp * Math.cos((view.latMid || 34) * Math.PI / 180);
     var counts = {};
-    (TRAF.inc || []).forEach(function(it){
+    /* the worst jams are drawn FIRST so they claim their space before the lesser ones ask */
+    var incList = (TRAF.inc || []).slice().sort(function(a, b){
+      var pa = a.properties || {}, pb = b.properties || {};
+      return (pb.iconCategory === 6 ? (pb.delay || 0) : -1) - (pa.iconCategory === 6 ? (pa.delay || 0) : -1);
+    });
+    incList.forEach(function(it){
       var p = it.properties || {}, cat = p.iconCategory, geo = it.geometry || {};
       var pts = geo.type === 'Point' ? [geo.coordinates] : (geo.coordinates || []);
       if (!pts.length) return;
@@ -3392,10 +3417,33 @@ function drawTraffic(g, W, H, X0, Y0, X1, Y1, proj, view, v){
            what you do, and with so few on screen each one can be read from further away. */
         var mins = Math.round((p.delay || 0) / 60);
         if (mins >= 15 && inF(mid)){
-          var t = '+' + mins + ' MIN'; g.font = '800 11px system-ui, sans-serif'; var w = g.measureText(t).width + 11;
-          g.fillStyle = 'rgba(8,10,16,.92)'; g.beginPath(); g.roundRect ? g.roundRect(mid.x - w / 2, mid.y - 9, w, 18, 5) : g.rect(mid.x - w / 2, mid.y - 9, w, 18); g.fill();
-          g.lineWidth = 1.2; g.strokeStyle = mins >= 30 ? '#FF1B1B' : '#FF6B00'; g.stroke();
-          g.fillStyle = mins >= 30 ? '#FF6B6B' : '#FFD166'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(t, mid.x, mid.y + 0.5);
+          var road = jamRoad(p), t = '+' + mins + ' MIN';
+          g.font = '800 11px system-ui, sans-serif'; var w1 = g.measureText(t).width;
+          g.font = '800 8.5px system-ui, sans-serif'; var w2 = road ? g.measureText(road).width : 0;
+          var bw = Math.max(w1, w2) + 12, bh = road ? 27 : 18;
+          var bx = mid.x - bw / 2, by = mid.y - bh / 2;
+          /* HALF AN HOUR IS NEVER HIDDEN (user: "dont limit if its ever longer than 30
+             minutes too"). Every other tag yields to a label already on the map -- the names
+             claim first, and now these two-line tags would otherwise pile on each other --
+             but a 30-minute jam draws whatever is in the way, and claims its box so the
+             smaller ones move instead. */
+          var must = mins >= 30;
+          if (must || labelFits(bx - 2, by - 2, bw + 4, bh + 4)){
+            if (must) LABELBOX.push([bx - 2, by - 2, bx + bw + 2, by + bh + 2]);
+            g.fillStyle = 'rgba(8,10,16,.92)';
+            g.beginPath(); g.roundRect ? g.roundRect(bx, by, bw, bh, 5) : g.rect(bx, by, bw, bh); g.fill();
+            g.lineWidth = 1.2; g.strokeStyle = must ? '#FF1B1B' : '#FF6B00'; g.stroke();
+            g.textAlign = 'center'; g.textBaseline = 'middle';
+            if (road){
+              g.font = '800 8.5px system-ui, sans-serif'; g.fillStyle = 'rgba(255,252,244,.8)';
+              g.fillText(road, mid.x, by + 8.5);
+              g.font = '800 11px system-ui, sans-serif'; g.fillStyle = must ? '#FF6B6B' : '#FFD166';
+              g.fillText(t, mid.x, by + 19.5);
+            } else {
+              g.font = '800 11px system-ui, sans-serif'; g.fillStyle = must ? '#FF6B6B' : '#FFD166';
+              g.fillText(t, mid.x, by + 9.5);
+            }
+          }
         }
       } else if (cat === 9 || cat === 7){                               // works and lane closures: small, and only close in
         if (gm > 40 || !inF(mid)){ g.restore(); return; }
