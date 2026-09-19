@@ -19,6 +19,7 @@ the lab paints Los Angeles with the same code that paints New York:
     land_index.json
     veg_*.png           what is actually growing, one green weighted by cover     ESA WorldCover 2021
     veg_index.json
+    airfields.json      airfields (field, aprons, taxiways, runways, terminals) + beaches   OpenStreetMap
 
     python3 la_bake.py            # everything
     python3 la_bake.py rail dem   # only those parts (city, rail, faults, dem, sea)
@@ -778,7 +779,93 @@ def bake_veg():
     write('veg_index.json', idx)
 
 
-PARTS = {'veg': bake_veg, 'region': bake_region, 'land': bake_land, 'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea}
+# ------------------------------------------------------------ air + sand ----
+# AIRFIELDS AND BEACHES, THE NEW YORK WAY (user, 2026-09-19: "detail the airports and beaches
+# like NYC now"). New York's widget draws JFK, LaGuardia and Newark as tarmac -- field, aprons,
+# taxiways, hangars, runways, terminals, from OSM's aeroway tags -- and its beaches as sand.
+# Same tags, same grammar, every field in the pull: LAX, Burbank, Long Beach, Van Nuys, Santa
+# Monica, John Wayne, Ontario and the rest. Beaches are natural=beach, which is also what
+# finally paints the strand from Malibu to Newport: it lies outside the urban footprint, so
+# it had been coming out as black land against the sea.
+OVERPASS = ('https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter')
+
+
+def overpass(q):
+    for url in OVERPASS:
+        try:
+            r = urllib.request.urlopen(urllib.request.Request(
+                url, data=urllib.parse.urlencode({'data': q}).encode(), headers=UA), timeout=300).read()
+            return json.loads(r)['elements']
+        except Exception as ex:
+            print('    %s: %s' % (url.split('/')[2], ex))
+    raise RuntimeError('overpass unreachable')
+
+
+def rings_of(el):
+    """Closed rings of a way or a multipolygon relation (outer members), as lon/lat lists."""
+    if el['type'] == 'way':
+        g = [[p['lon'], p['lat']] for p in el.get('geometry') or []]
+        return [g] if len(g) >= 4 else []
+    out = []
+    for m in el.get('members') or []:
+        if m.get('role') in ('outer', '') and m.get('geometry'):
+            g = [[p['lon'], p['lat']] for p in m['geometry']]
+            if len(g) >= 4 and g[0] == g[-1]:
+                out.append(g)
+    return out
+
+
+def bake_air():
+    print('airfields + beaches')
+    bb = '%f,%f,%f,%f' % (PULL[1], PULL[0], PULL[3], PULL[2])
+    els = overpass('[out:json][timeout:240];(way["aeroway"~"aerodrome|runway|taxiway|taxilane|apron|terminal|hangar"](%s);'
+                   'relation["aeroway"~"aerodrome|apron|terminal"](%s);way["natural"="beach"](%s);'
+                   'relation["natural"="beach"](%s););out geom;' % (bb, bb, bb, bb))
+    KM2 = 111.32 * 111.32 * math.cos(math.radians(34.0))
+    fields, parts, beaches = [], [], []
+    for e in els:
+        t = e.get('tags') or {}
+        k = t.get('aeroway')
+        if t.get('natural') == 'beach':
+            for r in rings_of(e):
+                pg = Polygon(r).buffer(0)
+                if pg.area * KM2 >= 0.004:
+                    beaches.append({'name': t.get('name'), 'r': rnd(pg.simplify(0.00003).exterior.coords)
+                                    if pg.geom_type == 'Polygon' else rnd(r)})
+        elif k == 'aerodrome':
+            rs = [Polygon(r).buffer(0) for r in rings_of(e)]
+            rs = [q for q in rs if not q.is_empty]
+            if rs:
+                pg = unary_union(rs)
+                # a field is somewhere an aeroplane lands: hospital pads and rooftop helistops are not
+                if pg.area * KM2 >= 0.25:
+                    fields.append({'name': t.get('name') or t.get('iata') or t.get('icao'), 'code': t.get('iata') or t.get('icao'),
+                                   'pg': pg, 'rw': [], 'tx': [], 'ap': [], 'tm': [], 'hg': []})
+        elif k in ('runway', 'taxiway', 'taxilane') and e['type'] == 'way':
+            g = [[p['lon'], p['lat']] for p in e.get('geometry') or []]
+            if len(g) >= 2:
+                parts.append(('rw' if k == 'runway' else 'tx', LineString(g), rnd(g), t))
+        elif k in ('apron', 'terminal', 'hangar'):
+            for r in rings_of(e):
+                parts.append(({'apron': 'ap', 'terminal': 'tm', 'hangar': 'hg'}[k], Polygon(r).buffer(0), rnd(r), t))
+    for kind, geom, coords, t in parts:
+        c = geom.centroid
+        f = next((f for f in fields if f['pg'].buffer(0.002).contains(c)), None)
+        if f is not None:
+            f[kind].append(coords)
+    out = []
+    for f in sorted(fields, key=lambda f: -f['pg'].area):
+        if not f['rw']:
+            continue                                        # a closed or paper field
+        big = max(([f['pg']] if f['pg'].geom_type == 'Polygon' else list(f['pg'].geoms)), key=lambda q: q.area)
+        out.append({'name': f['name'], 'code': f['code'], 'r': rnd(big.simplify(0.00004).exterior.coords),
+                    'rw': f['rw'], 'tx': f['tx'], 'ap': f['ap'], 'tm': f['tm'], 'hg': f['hg']})
+    print('  %d fields: %s' % (len(out), ', '.join('%s (%d rw, %d tx)' % (f['code'] or f['name'], len(f['rw']), len(f['tx'])) for f in out[:14])))
+    print('  %d beaches, e.g. %s' % (len(beaches), sorted({b['name'] for b in beaches if b['name']})[:10]))
+    write('airfields.json', {'fields': out, 'beaches': beaches})
+
+
+PARTS = {'air': bake_air, 'veg': bake_veg, 'region': bake_region, 'land': bake_land, 'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea}
 
 if __name__ == '__main__':
     print('home box  w %.4f  s %.4f  e %.4f  n %.4f' % home_box())
