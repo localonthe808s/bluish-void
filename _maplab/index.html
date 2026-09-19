@@ -158,7 +158,16 @@ var VIEWS = {
                  New York's 120 m of relief and barely registered against 3,000 m */
               landReliefs:'la/land_index.json',
               depthFade:[-119.60,33.20,-117.30,34.75],
-              faults:'la/faults.json', radar:'ksox' },
+              faults:'la/faults.json', radar:'ksox',
+              /* [name, lon, lat, only-below-this-m/px]: the far ones stay out of the 3-hour view's way */
+              regionNames:[ ['Los Angeles',-118.25,34.02], ['San Diego',-117.12,32.78], ['Santa Barbara',-119.72,34.44],
+                ['Bakersfield',-119.02,35.37], ['Las Vegas',-115.14,36.17], ['San Francisco',-122.42,37.77],
+                ['Sacramento',-121.49,38.58], ['Fresno',-119.78,36.74], ['Phoenix',-112.07,33.45], ['Tijuana',-116.97,32.47],
+                ['Reno',-119.81,39.53], ['San Luis Obispo',-120.66,35.28,700], ['Palm Springs',-116.54,33.83,700],
+                ['Ventura',-119.23,34.30,700], ['Lancaster',-118.14,34.70,700], ['Catalina',-118.42,33.39,700],
+                ['Point Conception',-120.47,34.45,700], ['Channel Islands',-119.85,33.98,700],
+                ['Sierra Nevada',-118.9,37.0], ['Mojave Desert',-116.6,35.0], ['Central Valley',-120.6,36.9],
+                ['Baja California',-115.2,30.3], ['Pacific Ocean',-124.5,32.0], ['Gulf of California',-113.6,29.6] ] },
   shelf:    { w:-75.20, s:37.20, e:-70.00, n:41.20, bathy:'bathy/bathy_shelf.json', zoom:7 },
   atlantic: { w:-80.00, s:5.00,  e:-5.00,  n:60.00, bathy:'bathy/bathy_atlantic.json', zoom:3 },
   /* The two places worth real bathymetry: GMRT multibeam rendered to images with
@@ -600,16 +609,32 @@ function drawRelief(ctx, img, r, proj, strips){
 /* A TIERED RELIEF (Los Angeles): an index of images, coarse to fine, each carrying the
    m/px below which it is worth decoding. Drawn in order, so the finest model in frame is
    the one left showing. Used twice -- the seafloor and the mountains. */
-function drawReliefList(ctx, list, view, mpp, proj, stale){
+function drawReliefList(ctx, list, view, mpp, proj, stale, exclusive){
+  /* `exclusive` is for TRANSLUCENT relief (the mountains). Opaque tiers can simply lie on
+     each other; alpha tiers STACK, and the hills came out shaded two and three times over
+     wherever the 3", 1" and 1/3" images overlapped. So the list is assembled on its own
+     canvas, each finer image first clearing the ground it covers, and the result goes down
+     once. A feathered image does not clear -- its rim is there to blend, and the tier under
+     it is baked with the complementary ramp (see la_bake.py, region). */
+  var target = ctx, off = null;
+  if (exclusive){
+    off = document.createElement('canvas'); off.width = ctx.canvas.width; off.height = ctx.canvas.height;
+    target = off.getContext('2d');
+  }
   var chain = Promise.resolve();
   (list || []).forEach(function(r){
     if (r.maxMpp && mpp > r.maxMpp) return;
     if (r.e < view.w || r.w > view.e || r.n < view.s || r.s > view.n) return;
     chain = chain.then(function(){ return reliefImage(r.img); }).then(function(img){
-      if (!stale()) drawRelief(ctx, img, r, proj, r.maxMpp ? 24 : 48);
+      if (stale()) return;
+      if (exclusive && !r.feather){
+        var tl = proj({ x:r.w, y:r.n }), br = proj({ x:r.e, y:r.s });
+        target.clearRect(tl.x, Math.round(tl.y), br.x - tl.x, Math.round(br.y) - Math.round(tl.y));
+      }
+      drawRelief(target, img, r, proj, r.maxMpp ? 24 : 48);
     }).catch(function(){});
   });
-  return chain;
+  return chain.then(function(){ if (off && !stale()) ctx.drawImage(off, 0, 0); });
 }
 
 function drawBoroughs(ctx, geo, proj, dark, growPx){
@@ -2036,7 +2061,7 @@ function drawCard(style){
                  veils: over the mask, the parks and the blocks, UNDER the street grid, so
                  a canyon road still reads as a white thread up a shaded slope. */
               return viewJson(vkey, 'landReliefs').then(function(list){
-                return drawReliefList(ctx, list, view, VB.mpp, out.project, stale);
+                return drawReliefList(ctx, list, view, VB.mpp, out.project, stale, true);
               });
             })
             .then(function(){ return wetFor(vkey); })
@@ -2116,6 +2141,19 @@ function drawCard(style){
                 vv._dropped = true;
               }
               /* claims its space here, in priority order; paints last */
+              /* FROM FAR OUT the neighbourhood list is silent (its tiers stop at 55 m/px) and
+                 the basemap's own place labels do not draw at these zooms, so the wide tabs
+                 had no names at all. A short list of anchors -- cities, ranges, waters --
+                 goes through the same painter; handed a nominal 10 m/px so its zoom tiers
+                 pass, it sizes by `px` instead. */
+              if (vv.regionNames && VB.mpp > 150){
+                hn = { type:'FeatureCollection', features: vv.regionNames.filter(function(r){
+                  return VB.mpp < (r[3] || 1e9);
+                }).map(function(r){
+                  return { type:'Feature', properties:{ name:r[0], rank:1 }, geometry:{ type:'Point', coordinates:[r[1], r[2]] } };
+                }) };
+                paintHoods = drawHoodNames(ctx, hn, out.project, 10, { weight: 0.07 });
+              } else
               paintHoods = drawHoodNames(ctx, hn, out.project, nmpp(),
                 vv.nameClear ? { clear: boroughFill(dark), weight: 0.085 } : null);
               return parkNamesFor(vkey);

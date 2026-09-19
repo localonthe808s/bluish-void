@@ -426,6 +426,13 @@ def sea_image(a, box, zfac, name):
     w, s, e, n = box
     H, W = a.shape
     sea = (a < -0.3) & (a > -9000)                 # outside a locked raster is nodata, not abyss
+    # BELOW SEA LEVEL IS NOT THE SEA. The regional grid drew the whole Salton Trough and
+    # Death Valley as ocean. Salt water reaches the frame's edge (the Gulf of California
+    # does, at the bottom); a basin that never touches it is dry land.
+    lab, nlab = ndimage.label(sea)
+    if nlab > 1:
+        edge = np.unique(np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]]))
+        sea = np.isin(lab, edge[edge > 0])
     if sea.mean() < 0.002:
         return None
     d = np.clip(-a, 0, None)
@@ -499,7 +506,7 @@ LAND_SRC = 'https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation
 HOME_LAND = (-118.85, 33.69, -117.95, 34.346)
 
 
-def land_image(a, box, zfac, name):
+def land_image(a, box, zfac, name, keep=None, lite_gain=1.0):
     from PIL import Image
     w, s, e, n = box
     H, W = a.shape
@@ -521,8 +528,10 @@ def land_image(a, box, zfac, name):
         hs += wt * (math.sin(alt) * np.cos(slope) + math.cos(alt) * np.sin(slope) * np.cos(az - math.pi / 2 - aspect))
     sh = hs / math.sin(alt) - 1.0                      # 0 on the flat, negative in shadow
     dark = np.clip(-sh, 0, 1) * 0.62
-    lite = np.clip(sh / 0.41, 0, 1) * 0.30
+    lite = np.clip(sh / 0.41, 0, 1) * 0.30 * lite_gain
     alpha = np.where(sh < 0, dark, lite) * land
+    if keep is not None:
+        alpha = alpha * keep
     alpha = np.round(alpha * 255 / 8) * 8              # 32 steps: invisible, and the file halves
     alpha[alpha < 10] = 0                              # the basin floor carries nothing at all
     out = np.zeros((H, W, 2), 'uint8')
@@ -557,7 +566,44 @@ def bake_land():
     write('land_index.json', idx)
 
 
-PARTS = {'land': bake_land, 'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea}
+# ---------------------------------------------------------------- region ----
+# THE WIDE TABS NEED A MAP TOO (user, 2026-09-19: "the weather views dont have the map loaded
+# at all"). MRMS 3 h / 12 h and the marine layer look at this map from 500-1,500 km up, and
+# everything above was pulled for a 250 km rectangle round the city -- so the West came out as
+# flat black with one detailed postage stamp in it. One more tier UNDER the others, for both
+# relief lists: ETOPO 2022 at 15 arc-seconds, the only model in the mosaic that is seamless
+# across the US, Mexico and the ocean floor alike, over everything the 12-hour box can show.
+#
+# THE SEAM. The sea is opaque, so the 3" image simply lies on top and its feathered rim
+# dissolves into this one (same ramp, same tones). The land is ALPHA, and two alphas stack:
+# so this tier's shading is ramped to nothing across the same outer 5% of the pull that the
+# 3" image's feather ramps IN across -- complementary, neither a doubled band nor a bare ring.
+REGION = (-130.0, 26.5, -112.5, 42.0)
+ETOPO_15S = 2527                                  # ETOPO_2022_v1_15s_surface_elev
+
+
+def bake_region():
+    print('regional base (ETOPO 15")')
+    a = dem_pull(REGION, 15 / 3600.0, ETOPO_15S)
+    print('  grid %s, %.0f to %.0f m' % (a.shape, a[a > -9000].min(), a.max()))
+    rs = sea_image(a, REGION, 7.0, 'sea_15as.png')
+    # knock the land shading out where the finer tiers take over
+    H, W = a.shape
+    lon = REGION[0] + (np.arange(W) + 0.5) / W * (REGION[2] - REGION[0])
+    lat = REGION[3] - (np.arange(H) + 0.5) / H * (REGION[3] - REGION[1])
+    fx, fy = 0.05 * (PULL[2] - PULL[0]), 0.05 * (PULL[3] - PULL[1])
+    inx = np.clip(np.minimum(lon - PULL[0], PULL[2] - lon) / fx, 0, 1)
+    iny = np.clip(np.minimum(lat - PULL[1], PULL[3] - lat) / fy, 0, 1)
+    keep = 1.0 - np.minimum.outer(iny, inx)        # 1 outside the pull, 0 well inside it
+    # from 1,000 km up the ranges sit on BLACK land, where only the lit faces can draw them
+    rl = land_image(a, REGION, 2.4, 'land_15as.png', keep, lite_gain=1.8)
+    for name, first in (('sea_index.json', rs), ('land_index.json', rl)):
+        p = os.path.join(HERE, name)
+        idx = [r for r in json.load(open(p)) if r['img'] != first['img']]
+        write(name, [first] + idx)
+
+
+PARTS = {'region': bake_region, 'land': bake_land, 'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea}
 
 if __name__ == '__main__':
     print('home box  w %.4f  s %.4f  e %.4f  n %.4f' % home_box())
