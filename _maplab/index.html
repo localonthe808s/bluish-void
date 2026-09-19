@@ -161,7 +161,7 @@ var VIEWS = {
               landReliefs:'la/land_index.json', veg:'la/veg_index.json', airfields:'la/airfields.json', surf:'la/surf_spots.json',
               wxGeo:'la/weather_geo.json', tz:'America/Los_Angeles',
               depthFade:[-119.60,33.20,-117.30,34.75],
-              faults:'la/faults.json', radar:'ksox',
+              faults:'la/faults.json', quakes:'la/quakes.json', shake:'la/shake.json', radar:'ksox',
               /* [name, lon, lat, only-below-this-m/px]: the far ones stay out of the 3-hour view's way */
               /* THE WIDE VIEWS CARRY NO ORDINARY TOWNS (user 2026-09-19: "i only want space/
                  skies/clouds/blue themes like the NYC view -- remove all the town labels shown
@@ -276,6 +276,87 @@ function hoodsFor(view){ return viewJson(view, 'hoods'); }
    the city still reads as ONE shape from across the room and only resolves into
    neighbourhoods when you look at it. */
 function faultsFor(view){ return viewJson(view, 'faults'); }
+function quakesFor(view){ return viewJson(view, 'quakes'); }
+function shakeFor(view){ return viewJson(view, 'shake'); }
+/* THE RECENT SWARM, LIVE. The USGS catalogue is keyless and sends CORS, so this is the one
+   feed on the geology card that does not wait on the proxy. The whole pull box is fetched
+   once and held ten minutes; the view filters it, because panning must not re-query. */
+var QLIVE = { t:0, p:null, d:null };
+function liveQuakes(){
+  if (QLIVE.d && Date.now() - QLIVE.t < 600000) return Promise.resolve(QLIVE.d);
+  if (QLIVE.p) return QLIVE.p;
+  var st = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+  QLIVE.p = fetch('https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&starttime=' + st
+      + '&minlatitude=33.2&maxlatitude=34.75&minlongitude=-119.6&maxlongitude=-117.3&minmagnitude=1&orderby=time')
+    .then(function(r){ return r.json(); })
+    .then(function(j){ QLIVE.d = j; QLIVE.t = Date.now(); QLIVE.p = null; return j; })
+    .catch(function(){ QLIVE.p = null; return { features: [] }; });
+  return QLIVE.p;
+}
+/* what is worth a dot at this height. All 222 of the last month's tremors over the whole
+   basin is a smear at the wide view and the point of the layer at street level, so the
+   floor follows the zoom. */
+function quakeFloor(mpp){ return mpp > 120 ? 3 : mpp > 60 ? 2.5 : mpp > 25 ? 2 : 0; }
+/* SOFT GROUND, hatched. Not a fill: the rock map underneath is the other half of the
+   answer and must stay readable, and a hazard zone is drawn as a hatch on every paper map
+   for the same reason. */
+function softHatch(g){
+  var c = document.createElement('canvas'); c.width = c.height = 7;
+  var h = c.getContext('2d');
+  h.strokeStyle = 'rgba(13,74,86,.55)'; h.lineWidth = 1;
+  h.beginPath(); h.moveTo(-2, 5); h.lineTo(5, -2); h.moveTo(2, 9); h.lineTo(9, 2); h.stroke();
+  return g.createPattern(c, 'repeat');
+}
+function drawSoftGround(g, sh, proj){
+  var fc = sh && sh.soft && sh.soft.features;
+  if (!fc || !fc.length) return;
+  g.save();
+  fc.forEach(function(ft){
+    g.beginPath();
+    ft.geometry.coordinates.forEach(function(ring){
+      ring.forEach(function(pt, i){ var q = proj({ x:pt[0], y:pt[1] }); if (i) g.lineTo(q.x, q.y); else g.moveTo(q.x, q.y); });
+      g.closePath();
+    });
+    g.fillStyle = softHatch(g); g.fill('evenodd');
+    g.lineWidth = 1; g.strokeStyle = 'rgba(13,74,86,.5)'; g.stroke();
+  });
+  g.restore();
+}
+/* EVERY QUAKE IN THE VIEW GETS ITS DOT (user 2026-09-19). Two registers: what the ground
+   did this month, filled and fading with age, and the named destroyers since 1900, which
+   are rings -- an event that is ninety years gone should not look like this morning. */
+function drawQuakes(g, baked, live, proj, mpp, W, H){
+  var hits = [], floor = quakeFloor(mpp), now = Date.now();
+  var inF = function(q){ return q.x > -30 && q.y > -30 && q.x < W + 30 && q.y < H + 30; };
+  g.save(); g.lineJoin = 'round';
+  ((live || {}).features || []).forEach(function(ft){
+    var m = ft.properties.mag;
+    if (m == null || m < floor) return;
+    var c = ft.geometry.coordinates, q = proj({ x:c[0], y:c[1] });
+    if (!inF(q)) return;
+    var r = Math.max(2.4, 1.6 + m * 1.7), days = (now - ft.properties.time) / 864e5;
+    var heat = days < 1 ? 1 : days < 7 ? 0.62 : 0.34;
+    g.beginPath(); g.arc(q.x, q.y, r, 0, 6.3);
+    g.fillStyle = 'rgba(245,158,11,' + (0.32 + heat * 0.55).toFixed(2) + ')'; g.fill();
+    g.lineWidth = 1.2; g.strokeStyle = 'rgba(28,18,4,' + (0.45 + heat * 0.4).toFixed(2) + ')'; g.stroke();
+    hits.push({ x:q.x, y:q.y, reach:r + 5, d:{ kind:'quake', live:true, mag:m, place:ft.properties.place,
+      time:ft.properties.time, depth:c[2], type:ft.properties.magType, url:ft.properties.url } });
+  });
+  ((baked || {}).features || []).forEach(function(ft){
+    var p = ft.properties, m = p.mag;
+    if (m < 5.5 && mpp > 60) return;          // only the destroyers survive the wide view
+    var c = ft.geometry.coordinates, q = proj({ x:c[0], y:c[1] });
+    if (!inF(q)) return;
+    var r = Math.max(5, 1.6 + m * 2.2);
+    g.beginPath(); g.arc(q.x, q.y, r, 0, 6.3);
+    g.lineWidth = 3.4; g.strokeStyle = 'rgba(255,250,240,.7)'; g.stroke();
+    g.lineWidth = m >= 5.5 ? 2 : 1.2; g.strokeStyle = m >= 5.5 ? '#B4231F' : 'rgba(124,45,18,.75)'; g.stroke();
+    hits.push({ x:q.x, y:q.y, reach:r + 5, d:{ kind:'quake', mag:m, place:p.place, time:p.time,
+      depth:p.depth, type:p.type, url:p.url } });
+  });
+  g.restore();
+  return hits;
+}
 function boroughFill(dark){ return '#f97316'; }
 function hoodEdge(dark){ return 'rgba(124,45,18,.55)'; }
 /* On the dark palettes white is the loudest thing on the map. On paper it is the
@@ -3832,9 +3913,17 @@ function drawCard(style){
             gg.globalAlpha = 1;
             /* the rock map washes the sea grey (its offshore units): cut it to the land */
             if (paint._water){ gg.globalCompositeOperation = 'destination-out'; gg.drawImage(paint._water, 0, 0); gg.globalCompositeOperation = 'source-over'; }
-            return faultsFor(vkey);
+            return Promise.all([faultsFor(vkey), shakeFor(vkey), quakesFor(vkey),
+                                (VIEWS[vkey] || {}).quakes ? liveQuakes() : null]);
           })
-          .then(function(fl){ if (!stale()) drawFaults(gg, fl, paint._proj, view); });
+          .then(function(r){
+            if (stale()) return;
+            /* the ground first, then what broke it, then what it has done lately */
+            drawSoftGround(gg, r[1], paint._proj);
+            drawFaults(gg, r[0], paint._proj, view);
+            paint._quakes = drawQuakes(gg, r[2], r[3], paint._proj, VB.mpp, W, H);
+            paint._shake = r[1];
+          });
       })
       .then(function(){
         if (stale()) return;
@@ -3884,6 +3973,13 @@ function drawCard(style){
     if ((document.getElementById('geo') || {}).checked){
       var vk = document.getElementById('view').value;
       var lon = x2lon(VB.Xw + mx * VB.mpp), lat = y2lat(VB.Ymid + (H / 2 - my) * VB.mpp);
+      /* a QUAKE DOT wins over everything: it is the smallest mark on the card and the
+         most specific, so a finger that lands on one meant it. */
+      var bestQ = null, bdQ = 1e9;
+      (paint._quakes || []).forEach(function(h){
+        var dx = h.x - mx, dy = h.y - my, d = dx * dx + dy * dy;
+        if (d <= h.reach * h.reach && d < bdQ){ bdQ = d; bestQ = h.d; }
+      });
       faultsFor(vk).then(function(fl){
         var bestF = null, bdF = 9 * 9;
         ((fl || {}).features || []).forEach(function(ft){
@@ -3908,7 +4004,20 @@ function drawCard(style){
         rg.beginPath(); rg.arc(mx, my, 5, 0, 6.3); rg.lineWidth = 3.2; rg.strokeStyle = 'rgba(255,252,244,.95)'; rg.stroke();
         rg.lineWidth = 1.5; rg.strokeStyle = '#141a2b'; rg.stroke();
         paint._tapRing = [mx, my];
-        window.parent.postMessage(bestF ? { labFault: bestF.properties } : { labRock: { lat: lat, lon: lon } }, '*');
+        /* the ground's own answer travels with the reading: the widget asks Macrostrat what
+           the rock is, and the lab already holds what that rock will do in a quake. */
+        var sh = null, G = (paint._shake || {}).grid;
+        if (G){
+          var gx = Math.floor((lon - G.w) / G.step), gy = Math.floor((G.n - lat) / G.step);
+          if (gx >= 0 && gy >= 0 && gx < G.cols && gy < G.rows){
+            var k = gy * G.cols + gx, vs = G.vs30[k], mm = G.mmi[k];
+            if (vs > 0) sh = { vs30: vs, mmi: mm > 0 ? mm / 10 : null,
+                               cls: vs < 180 ? 'E' : vs < 360 ? 'D' : vs < 760 ? 'C' : 'B' };
+          }
+        }
+        window.parent.postMessage(bestQ ? { labQuake: bestQ }
+          : bestF ? { labFault: bestF.properties }
+          : { labRock: { lat: lat, lon: lon, shake: sh } }, '*');
       });
       return;
     }

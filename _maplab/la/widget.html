@@ -212,6 +212,35 @@ function readsLine(v){
    A FAULT is USGS Qfaults: its name and section, when it last moved (the survey's age class,
    spelt out in years), how fast it slips, which way, and how well the trace is located. */
 var ROCK = null, ROCKSEQ = 0;
+/* WHAT THE GROUND DOES IN A QUAKE. Two numbers, and they answer different questions.
+   Vs30 is how fast a shear wave travels through the top 30 m: slow ground is soft ground,
+   and soft ground amplifies. The NEHRP class is the building code's name for that band.
+   MMI is the hazard itself -- the shaking to expect at 2% in 50 years, a 1-in-2,475-year
+   quake -- and across this basin it barely moves, which is the point: all of Los Angeles
+   is in the top bracket. */
+var NEHRP = { 'E': ['SOFT SOIL', 'THE SOFTEST GROUND THERE IS \u00b7 IT AMPLIFIES SHAKING MOST'],
+              'D': ['STIFF SOIL', 'BASIN FILL \u00b7 IT AMPLIFIES SHAKING'],
+              'C': ['DENSE SOIL OR SOFT ROCK', 'FIRM GROUND'],
+              'B': ['ROCK', 'HARD GROUND \u00b7 IT SHAKES LEAST'] };
+var MMI_WORDS = { 7:'VERY STRONG', 8:'SEVERE', 9:'VIOLENT', 10:'EXTREME' };
+var ROMAN = { 7:'VII', 8:'VIII', 9:'IX', 10:'X', 11:'XI' };
+function shakeLines(sh, lab){
+  if (!sh) return [];
+  var out = [], n = NEHRP[sh.cls];
+  if (n) out.push(lab('GROUND') + n[0] + ' \u00b7 ' + Math.round(sh.vs30) + ' M/S \u00b7 ' + n[1]);
+  if (sh.mmi != null){
+    var r = Math.round(sh.mmi);
+    out.push(lab('EXPECTED SHAKING') + (ROMAN[r] || r) + ' \u00b7 ' + (MMI_WORDS[r] || '') + ' \u00b7 AT 2% IN 50 YEARS');
+  }
+  return out;
+}
+function whenWords(t){
+  var d = (Date.now() - t) / 1000;
+  if (d < 3600) return Math.max(1, Math.round(d / 60)) + ' MIN AGO';
+  if (d < 86400) return Math.round(d / 3600) + ' H AGO';
+  if (d < 86400 * 60) return Math.round(d / 86400) + ' DAYS AGO';
+  return new Date(t).getFullYear();
+}
 var FAULT_AGE_WORDS = { 'historic': 'IN HISTORIC TIME \u00b7 THE LAST 150 YEARS',
   'latest Quaternary': 'WITHIN 15,000 YEARS', 'late Quaternary': 'WITHIN 130,000 YEARS',
   'undifferentiated Quaternary': 'WITHIN 1.6 MILLION YEARS', 'pre-Quaternary': 'NOT SINCE THE QUATERNARY' };
@@ -221,6 +250,7 @@ var FAULT_TRACE_WORDS = { 'Well Constrained': 'WELL CONSTRAINED', 'Moderately Co
   'Accurately Located': 'ACCURATELY LOCATED', 'Approximately Located': 'APPROXIMATELY LOCATED \u00b7 DRAWN DASHED' };
 window.addEventListener('message', function(ev){
   if (ev.data && ev.data.labFault){ ROCKSEQ++; ROCK = { fault: ev.data.labFault }; paint(); }
+  if (ev.data && ev.data.labQuake){ ROCKSEQ++; ROCK = { quake: ev.data.labQuake }; paint(); }
   if (ev.data && ev.data.labRock){
     var q = ev.data.labRock, seq = ++ROCKSEQ;
     ROCK = { loading: q }; paint();
@@ -254,6 +284,19 @@ function rockBand(){
           [FAULT_AGE_WORDS[f.age] ? lab('LAST MOVED') + FAULT_AGE_WORDS[f.age] : '', rate ? lab('SLIPS') + esc(rate) : '', sense ? lab('MOTION') + esc(sense) : '',
            lab('TRACE') + how].filter(Boolean).join(' &nbsp;\u00b7&nbsp; '));
   }
+  if (ROCK.quake){
+    var k = ROCK.quake, when = whenWords(k.time), dt = new Date(k.time);
+    var big5 = k.mag >= 5.5;
+    return head('<span style="display:inline-block;width:11px;height:11px;border-radius:50%;'
+        + (big5 ? 'border:2px solid #B4231F;' : 'background:rgba(245,158,11,.85);border:1px solid rgba(28,18,4,.6);') + '"></span>'
+        + '<span style="font:800 7px system-ui,sans-serif;letter-spacing:.1em;color:#5b647a;">EARTHQUAKE</span>'
+        + big('M' + k.mag.toFixed(1) + (k.place ? ' \u00b7 ' + k.place : ''))
+        + tag(esc(String(when))) + tag('USGS' + (k.live ? '' : ' \u00b7 THE RECORD SINCE 1900')))
+      + line('font:600 9.5px system-ui,sans-serif;color:#3b4460;margin-top:3px;line-height:1.5;',
+          [lab('WHEN') + dt.toLocaleString('en-US', { timeZone:'America/Los_Angeles', dateStyle:'medium', timeStyle:'short' }),
+           k.depth != null ? lab('DEPTH') + k.depth.toFixed(1) + ' KM' : '',
+           k.type ? lab('MEASURED') + String(k.type).toUpperCase() : ''].filter(Boolean).join(' &nbsp;\u00b7&nbsp; '));
+  }
   var U = ROCK.units || [], coarse = { 7:1, 154:1 };
   var fine = U.filter(function(x){ return !coarse[x.source_id] && x.source_id !== 133; })[0] || null;
   var state = U.filter(function(x){ return x.source_id === 133; })[0] || null;
@@ -281,6 +324,8 @@ function rockBand(){
     + (lith ? line('font:700 10px system-ui,sans-serif;margin-top:3px;', lab('MADE OF') + esc(lith)) : '')
     + (formed ? line('font:500 9.5px system-ui,sans-serif;color:#3b4460;margin-top:2px;line-height:1.45;', lab('FORMED') + esc(formed)) : '')
     + (desc ? line('font:500 9.5px system-ui,sans-serif;color:#5b647a;margin-top:2px;line-height:1.45;', lab('SURVEY') + esc(desc)) : '')
+    + (shakeLines((ROCK.at || {}).shake, lab).length ? line('font:600 9.5px system-ui,sans-serif;color:#3b4460;margin-top:3px;line-height:1.5;',
+        shakeLines((ROCK.at || {}).shake, lab).join(' &nbsp;\u00b7&nbsp; ')) : '')
     + (state && state !== u ? line('font:600 9px system-ui,sans-serif;color:#5b647a;letter-spacing:.04em;margin-top:3px;',
         'ON THE STATE MAP: <b style="color:#1b2340;">' + esc(state.name) + '</b>' + (ageOf(state) ? ' \u00b7 ' + esc(ageOf(state)) : '') + (lithOf(state) ? ' \u00b7 ' + esc(lithOf(state)) : '')) : '');
 }
@@ -560,7 +605,7 @@ function paint(){
   if (v.layers){
     tag.style.display = 'none'; info.style.display = '';
     info.innerHTML = st.surf ? surfBand() + swellDial() : st.geo && ROCK ? rockBand() : st.geo
-      ? '<b>THE ROCK UNDER THE BASIN</b> &nbsp;·&nbsp; Macrostrat units, with USGS Quaternary faults: heaviest where the ground has broken in historic time, dashed where the survey infers the trace. Tap the map for the rock under your finger, or a fault line for the fault.'
+      ? '<b>THE ROCK UNDER THE BASIN</b> &nbsp;·&nbsp; Macrostrat units, with USGS Quaternary faults: heaviest where the ground has broken in historic time, dashed where the survey infers the trace. Hatched where the ground is soft enough to amplify shaking. Amber dots are the last thirty days, brightest in the last day; red rings are the earthquakes that did damage, back to 1900. Tap any of it.'
       : (st.traffic && INCIDENT ? incidentBand() : board() + (st.traffic ? trafficLine() : ''));
   } else {
     info.style.display = 'none'; tag.style.display = '';

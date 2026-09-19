@@ -1252,7 +1252,105 @@ def bake_depth():
         print('    %-22s %6.1f m' % (nm, d[y, x] / 10.0))
 
 
-PARTS = {'depth': bake_depth, 'swell': bake_swell, 'sched': bake_sched, 'geo': bake_geo, 'air': bake_air, 'veg': bake_veg, 'region': bake_region, 'land': bake_land, 'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea}
+# ------------------------------------------------------------- earthquakes ----
+# WHAT THE GROUND HAS ACTUALLY DONE (user 2026-09-19: "since LA is earthquake prone, can
+# you add earthquake hazard data to that geology view"). The USGS catalogue, keyless and
+# CORS-open, so the RECENT swarm is fetched live by the map; this bakes only the record
+# that does not change -- every M4.5 and over since 1900. Fourteen of them reached M5.5:
+# Northridge 1994, San Fernando 1971, Long Beach 1933.
+FDSN = 'https://earthquake.usgs.gov/fdsnws/event/1/query'
+
+
+def bake_quakes():
+    print('earthquakes')
+    w, s, e, n = PULL
+    q = {'format': 'geojson', 'starttime': '1900-01-01', 'minmagnitude': 4.5, 'orderby': 'time',
+         'minlatitude': s, 'maxlatitude': n, 'minlongitude': w, 'maxlongitude': e}
+    d = json.loads(get(FDSN + '?' + urllib.parse.urlencode(q)))
+    feats = []
+    for f in d['features']:
+        p = f['properties']
+        c = f['geometry']['coordinates']
+        if p.get('mag') is None:
+            continue
+        feats.append({'type': 'Feature',
+                      'properties': {'mag': round(p['mag'], 1), 'place': p.get('place'),
+                                     'time': p['time'], 'type': p.get('magType'),
+                                     'depth': None if c[2] is None else round(c[2], 1),
+                                     'url': p.get('url')},
+                      'geometry': {'type': 'Point', 'coordinates': [round(c[0], 4), round(c[1], 4)]}})
+    feats.sort(key=lambda f: -f['properties']['mag'])
+    print('  %d since 1900 at M4.5+; %d reached M5.5' % (len(feats), sum(1 for f in feats if f['properties']['mag'] >= 5.5)))
+    for f in feats[:4]:
+        p = f['properties']
+        print('    M%.1f  %s  %s' % (p['mag'], datetime.datetime.utcfromtimestamp(p['time'] / 1000).strftime('%Y-%m-%d'), (p['place'] or '')[:40]))
+    write('quakes.json', {'type': 'FeatureCollection', 'features': feats})
+
+
+# ------------------------------------------------------------ shaking ----
+# HOW HARD THE GROUND WILL SHAKE, which on a geology map is the geology's own doing.
+#
+# The obvious layer is the hazard itself -- CGS MS48 gives Modified Mercalli from peak
+# ground acceleration at 2% in 50 years -- but MEASURED over the home frame it is a flat
+# wash: 74.6% of the basin sits in one half-unit band (MMI 9.0 to 9.5) and none of it
+# falls below 8.7. All of Los Angeles is in the top bracket. That is worth SAYING, and it
+# is in the tap readout, but drawn as a map it is one colour and tells you nothing.
+#
+# What does vary, sharply, is how the ground under you answers: Vs30, the shear-wave speed
+# in the top 30 m. Over the same frame it runs 228 m/s in the deep basin fill to 626 in the
+# hills -- soft ground amplifies, hard rock does not -- and it follows the Macrostrat units
+# already on the card, which is the point of putting it here. So the SOFT GROUND is drawn,
+# by the NEHRP classes, and the hazard number is reported on tap.
+CGS_IMG = 'https://gis.conservation.ca.gov/server/rest/services/CGS/%s/ImageServer/exportImage'
+VS30_SRC = 'MS48_Vs30_ShearWaveVelocity2022'
+MMI_SRC = 'MS48_MMI_PGA_2pc50'
+SOFT_LEVELS = ((180, 'E'), (360, 'D'))        # NEHRP: E soft soil, D stiff soil
+TAP_STEP = 0.004                              # ~440 m, the readout grid over the home frame
+
+
+def _cgs(src, box, size):
+    q = {'bbox': '%f,%f,%f,%f' % box, 'bboxSR': 4326, 'imageSR': 4326, 'size': '%d,%d' % size,
+         'format': 'tiff', 'pixelType': 'F32', 'noData': -9999,
+         'interpolation': 'RSP_BilinearInterpolation', 'f': 'image'}
+    return tifffile.imread(io.BytesIO(get((CGS_IMG % src) + '?' + urllib.parse.urlencode(q), 300))).astype('float32')
+
+
+def bake_shake():
+    print('shaking')
+    vs = _cgs(VS30_SRC, PULL, (1150, 775))
+    sea = ~np.isfinite(vs) | (vs < 80)
+    print('  Vs30 grid %s, %.0f to %.0f m/s over land (%.0f%% of the frame)'
+          % (vs.shape, vs[~sea].min(), vs[~sea].max(), 100 * (~sea).mean()))
+    # the ocean and everything outside California read -9999, which is "softer than soft":
+    # push it the other way so the rings close on the coast instead of swallowing the sea
+    vs = np.where(sea, 9999.0, vs)
+    soft = ndimage.gaussian_filter(vs, 1.0)
+    feats = []
+    for lvl, cls in SOFT_LEVELS:
+        rings = contour_rings(soft, lvl, False)
+        print('  under %4d m/s (NEHRP %s): %d rings' % (lvl, cls, len(rings)))
+        if not rings:      # class E does not occur here: the softest ground measures 176 m/s
+            continue
+        feats.append({'type': 'Feature', 'properties': {'cls': cls, 'vs30': lvl},
+                      'geometry': {'type': 'Polygon', 'coordinates': rings}})
+
+    hw, hs, he, hn = home_box()
+    cols = int(round((he - hw) / TAP_STEP))
+    rows = int(round((hn - hs) / TAP_STEP))
+    gv = _cgs(VS30_SRC, (hw, hs, he, hn), (cols, rows))
+    gm = _cgs(MMI_SRC, (hw, hs, he, hn), (cols, rows))
+    q = lambda a, k: [(-1 if (not np.isfinite(v) or v < -100) else int(round(v * k))) for v in a.ravel()]  # noqa: E731
+    live = np.isfinite(gm) & (gm > 3)
+    print('  tap grid %dx%d at %.3f deg; MMI %.1f to %.1f over the home frame'
+          % (cols, rows, TAP_STEP, gm[live].min(), gm[live].max()))
+    write('shake.json', {'soft': {'type': 'FeatureCollection', 'features': feats},
+                         'grid': {'w': hw, 's': hs, 'e': he, 'n': hn, 'step': TAP_STEP,
+                                  'cols': cols, 'rows': rows,
+                                  'vs30': q(gv, 1), 'mmi': q(gm, 10)}})
+
+
+PARTS = {'depth': bake_depth, 'swell': bake_swell, 'sched': bake_sched, 'geo': bake_geo, 'air': bake_air, 'veg': bake_veg, 'region': bake_region, 'land': bake_land, 'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea,
+         'quakes': bake_quakes, 'shake': bake_shake}
 
 if __name__ == '__main__':
     print('home box  w %.4f  s %.4f  e %.4f  n %.4f' % home_box())
