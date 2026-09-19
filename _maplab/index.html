@@ -2062,14 +2062,37 @@ function surfReads(){
     fetch('https://api.weather.gov/products?type=SRF&location=LOX&limit=1', { headers:{ Accept:'application/ld+json' } }).then(function(r){ return r.json(); })
       .then(function(j){ var g = (j['@graph'] || [])[0]; return g ? fetch('https://api.weather.gov/products/' + g.id).then(function(r){ return r.json(); }) : null; }).catch(function(){ return null; }),
     J('https://marine-api.open-meteo.com/v1/marine?latitude=33.854,34.022,33.618&longitude=-118.633,-118.578,-118.317'
-      + '&current=swell_wave_height,swell_wave_period,swell_wave_direction,secondary_swell_wave_height,secondary_swell_wave_period,secondary_swell_wave_direction')
+      + '&current=swell_wave_height,swell_wave_period,swell_wave_direction,secondary_swell_wave_height,secondary_swell_wave_period,secondary_swell_wave_direction'
+      + '&hourly=swell_wave_height&forecast_hours=7'),
+    /* THE WIND IS HALF OF WHETHER IT IS ANY GOOD. A swell can be perfect and the sea still
+       ruined: wind blowing in off the water stands the faces up and crumbles them, wind off the
+       land holds them open. So: wind at four points along THIS coast (Malibu, Santa Monica, El
+       Segundo, Palos Verdes), and each break is judged against the way it faces. */
+    J('https://api.open-meteo.com/v1/forecast?latitude=34.032,34.008,33.905,33.740&longitude=-118.680,-118.500,-118.420,-118.400'
+      + '&current=wind_speed_10m,wind_direction_10m,wind_gusts_10m&wind_speed_unit=kn')
   ]).then(function(r){
     var R = { buoys: {}, source: 'buoys', at: Date.now() };
     if (r[0] && r[0].table){
       var c = r[0].table.columnNames, ix = function(k){ return c.indexOf(k); };
+      var first = {};
       r[0].table.rows.forEach(function(w){                        // rows run oldest first: the last one per station wins
-        R.buoys[w[ix('station')]] = { id: w[ix('station')], t: w[ix('time')], lat: w[ix('latitude')], lon: w[ix('longitude')],
+        var id = w[ix('station')];
+        if (!first[id]) first[id] = { t: w[ix('time')], hs: w[ix('WVHT')], tp: w[ix('DPD')] };
+        R.buoys[id] = { id: id, t: w[ix('time')], lat: w[ix('latitude')], lon: w[ix('longitude')],
           hs: w[ix('WVHT')], tp: w[ix('DPD')], dir: w[ix('MWD')], wt: w[ix('WTMP')] };
+      });
+      /* IS IT BUILDING? The call already asks for five hours; the first reader kept only the last
+         row of each station and threw the rest away. The change across that window is the most
+         useful thing a buoy says after the swell itself -- a 2 ft swell on the way up is a
+         different afternoon from a 2 ft swell on the way down. Half a foot is the bar: under
+         that it is the sea breathing, not a trend. */
+      Object.keys(R.buoys).forEach(function(id){
+        var f = first[id], b = R.buoys[id];
+        if (!f || f.hs == null || b.hs == null) return;
+        var dh = b.hs - f.hs, hrs = (Date.parse(b.t) - Date.parse(f.t)) / 3600000;
+        if (!(hrs >= 1)) return;
+        b.trend = { d: dh, hrs: hrs, word: dh >= 0.15 ? 'BUILDING' : dh <= -0.15 ? 'EASING' : 'HOLDING',
+                    dtp: (f.tp != null && b.tp != null) ? b.tp - f.tp : null };
       });
     }
     if (!Object.keys(R.buoys).length && r[5] && r[5].length === 3){
@@ -2079,9 +2102,19 @@ function surfReads(){
         var o = r[5][q[1]], k = o.current, a = { hs:k.swell_wave_height, tp:k.swell_wave_period, dir:k.swell_wave_direction },
             b = { hs:k.secondary_swell_wave_height, tp:k.secondary_swell_wave_period, dir:k.secondary_swell_wave_direction };
         var u = (b.tp > a.tp && b.hs > 0.15) ? b : a;
-        R.buoys[q[0]] = { id:q[0], t:k.time, lat:o.latitude, lon:o.longitude, hs:u.hs, tp:u.tp, dir:u.dir, wt:null, model:true };
+        /* the stand-in's trend is a FORECAST, not a measurement: the model's own next six hours */
+        var hh = (o.hourly || {}).swell_wave_height || [], tr = null;
+        if (hh.length > 6 && hh[0] != null && hh[6] != null){
+          var dh2 = hh[6] - hh[0];
+          tr = { d: dh2, hrs: 6, ahead: true, word: dh2 >= 0.15 ? 'BUILDING' : dh2 <= -0.15 ? 'EASING' : 'HOLDING' };
+        }
+        R.buoys[q[0]] = { id:q[0], t:k.time, lat:o.latitude, lon:o.longitude, hs:u.hs, tp:u.tp, dir:u.dir, wt:null, model:true, trend:tr };
       });
     }
+    var WPTS = [[34.032, -118.680], [34.008, -118.500], [33.905, -118.420], [33.740, -118.400]];
+    R.wind = (r[6] && r[6].length === 4) ? r[6].map(function(o, i){
+      return { lat: WPTS[i][0], lon: WPTS[i][1], kt: o.current.wind_speed_10m, dir: o.current.wind_direction_10m, gust: o.current.wind_gusts_10m };
+    }) : null;
     R.tides = ((r[1] || {}).predictions || []).map(function(q){ return { t:q.t, ft:+q.v, hi:q.type === 'H' }; });
     var wl = ((r[2] || {}).data || [])[0]; R.level = wl ? { ft:+wl.v, t:wl.t } : null;
     var wt = ((r[3] || {}).data || [])[0]; R.water = wt ? { f:+wt.v, t:wt.t } : null;
@@ -2096,6 +2129,22 @@ function surfReads(){
   return SURF.p;
 }
 function compass(d){ return ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'][Math.round(((d % 360) + 360) % 360 / 22.5) % 16]; }
+function angDiff(a, b){ return Math.abs(((a - b) % 360 + 540) % 360 - 180); }
+/* HOW THE WIND SITS ON A BREAK. `face` is the way a break looks out to sea, taken as the middle
+   of its swell window -- the same thing. Wind FROM near that bearing is blowing in off the water
+   (onshore: the faces crumble); wind from behind it is offshore and holds them open. Under four
+   knots none of it matters and the water is glass. */
+function windOn(w, face){
+  if (!w || w.kt == null) return null;
+  if (w.kt < 4) return { kt:w.kt, dir:w.dir, kind:'GLASSY', good:true };
+  var d = angDiff(w.dir, face);
+  return { kt:w.kt, dir:w.dir, gust:w.gust, kind: d < 55 ? 'ONSHORE' : d > 125 ? 'OFFSHORE' : 'CROSS-SHORE',
+           good: d > 125, bad: d < 55 };
+}
+function faceOf(win){
+  var a = win[0], d = ((win[1] - win[0]) % 360 + 360) % 360;        // the middle, the short way round
+  return ((a + d / 2) % 360 + 360) % 360;
+}
 function makeSurf(ctx, spots, R, proj, mpp, M){
   var hits = [], labels = [], marks = [], tideNow = R && R.level ? R.level.ft : null;
   var inWin = function(d, w){ d = (d + 360) % 360; return w[0] <= w[1] ? (d >= w[0] && d <= w[1]) : (d >= w[0] || d <= w[1]); };
@@ -2105,28 +2154,50 @@ function makeSurf(ctx, spots, R, proj, mpp, M){
     var b = B[id]; if (b.hs == null || b.dir == null) return;
     var q = proj({ x:b.lon, y:b.lat }); if (!inF(q)) return;
     marks.push({ t:'buoy', q:q, b:b });
-    labels.push({ x:q.x, y:q.y + 26, txt: (b.hs * 3.281).toFixed(1) + ' FT · ' + Math.round(b.tp) + ' S · ' + compass(b.dir), rank:60, col:'#fff', small:true });
-    hits.push({ x:q.x, y:q.y, reach:16, d:{ kind:'buoy', id:id, name:(spots.buoys || {})[id] || ('BUOY ' + id), hs:b.hs, tp:b.tp, dir:b.dir, wt:b.wt, t:b.t, model:!!b.model } });
+    var tr = b.trend, arrow = tr ? (tr.word === 'BUILDING' ? '↑ ' : tr.word === 'EASING' ? '↓ ' : '– ') : '';
+    labels.push({ x:q.x, y:q.y + 30, rank:60, col:'#fff', lines: [
+      { t: (b.hs * 3.281).toFixed(1) + ' FT · ' + Math.round(b.tp) + ' S', big: true },
+      { t: compass(b.dir) + (tr ? '   ' + arrow + tr.word : '') }
+    ] });
+    hits.push({ x:q.x, y:q.y, reach:16, d:{ kind:'buoy', id:id, name:(spots.buoys || {})[id] || ('BUOY ' + id), hs:b.hs, tp:b.tp, dir:b.dir, wt:b.wt, t:b.t, model:!!b.model, trend:tr } });
   });
   (spots.spots || []).forEach(function(sp){
     var q = proj({ x:sp.c[0], y:sp.c[1] }); if (!inF(q)) return;
     var b = B[sp.buoy] || null, on = !!(b && b.hs >= 0.6 && b.tp >= 8 && inWin(b.dir, sp.win));
     var tideOk = tideNow == null ? null : (tideNow >= sp.tide[0] && tideNow <= sp.tide[1]);
-    marks.push({ t:'spot', q:q, on:on });
+    marks.push({ t:'spot', q:q, on:on, clean: !!(on && wnd && wnd.good), blown: !!(on && wnd && wnd.bad) });
     /* a running break is always named; a quiet one only once the map is close enough for it */
     if (on || mpp < 80) labels.push({ x:q.x, y:q.y, txt:sp.n.toUpperCase(), rank: on ? 70 : 20, col: on ? '#ecfeff' : 'rgba(200,222,240,.82)', side:true });
     /* how open THIS break is to THIS swell, by straight lines (the first 3 km are skipped: a
        break sits on the mask's own coastline) */
     var openDir = window.LAB_SWELLDIR != null ? window.LAB_SWELLDIR : (b ? b.dir : null);
     var open = (M && openDir != null) ? swellExposure(M, sp.c[0], sp.c[1], openDir, 3) : null;
+    /* the wind at the nearest of the four coastal points, judged against the way this break faces */
+    var face = faceOf(sp.win), wnd = null;
+    if (R && R.wind){
+      var bw = null, bd = 1e9;
+      R.wind.forEach(function(w){ var dd = (w.lat - sp.c[1]) * (w.lat - sp.c[1]) + (w.lon - sp.c[0]) * (w.lon - sp.c[0]); if (dd < bd){ bd = dd; bw = w; } });
+      wnd = windOn(bw, face);
+    }
     hits.push({ x:q.x, y:q.y, reach:14, d:{ kind:'spot', name:sp.n, open: open, openDir: openDir, whatIf: window.LAB_SWELLDIR != null, win:sp.win, tide:sp.tide, bottom:sp.bottom, on:on, tideOk:tideOk, tideNow:tideNow,
-      buoy: b ? { id:sp.buoy, name:(spots.buoys || {})[sp.buoy], hs:b.hs, tp:b.tp, dir:b.dir, model:!!b.model } : null } });
+      face: face, wind: wnd,
+      buoy: b ? { id:sp.buoy, name:(spots.buoys || {})[sp.buoy], hs:b.hs, tp:b.tp, dir:b.dir, model:!!b.model, trend:b.trend } : null } });
   });
   var placed = [];
   return { hits: hits,
     claim: function(){
       ctx.save();
       labels.sort(function(a, b){ return b.rank - a.rank; }).forEach(function(L){
+        if (L.lines){                                   // the buoy's block: stacked, centred on it
+          var wmax = 0;
+          L.lines.forEach(function(ln){
+            ctx.font = ln.big ? '800 10.5px system-ui, sans-serif' : '700 8px system-ui, sans-serif';
+            try { ctx.letterSpacing = '0.06em'; } catch(e){}
+            wmax = Math.max(wmax, ctx.measureText(ln.t).width);
+          });
+          if (!labelFits(L.x - wmax / 2 - 3, L.y - 8, wmax + 6, L.lines.length * 12 + 6)) return;
+          L.px = L.x; placed.push(L); return;
+        }
         ctx.font = L.small ? '700 8px system-ui, sans-serif' : '500 9px QelliaRegular, "Bodoni Moda", Georgia, serif';
         try { ctx.letterSpacing = L.small ? '0.06em' : '0.18em'; } catch(e){}
         var w = ctx.measureText(L.txt).width;
@@ -2143,26 +2214,52 @@ function makeSurf(ctx, spots, R, proj, mpp, M){
       var g = ctx; g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
       marks.forEach(function(m){
         if (m.t === 'buoy'){
-          /* the arrow points the way the swell TRAVELS; its length is its height */
-          var th = (m.b.dir + 180) * Math.PI / 180, L = 26 + Math.min(54, m.b.hs * 3.281 * 8), dx = Math.sin(th), dy = -Math.cos(th);
-          var x0 = m.q.x - dx * L / 2, y0 = m.q.y - dy * L / 2, x1 = m.q.x + dx * L / 2, y1 = m.q.y + dy * L / 2;
-          [[5, 'rgba(8,10,16,.8)'], [2.2, m.b.model ? 'rgba(186,230,253,.9)' : '#fff']].forEach(function(st){
-            g.lineWidth = st[0]; g.strokeStyle = st[1]; g.fillStyle = st[1];
-            if (m.b.model) g.setLineDash(st[0] > 3 ? [] : [4, 3]);
-            g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke(); g.setLineDash([]);
-            var a = Math.atan2(y1 - y0, x1 - x0), s = st[0] > 3 ? 9 : 7;
-            g.beginPath(); g.moveTo(x1 + Math.cos(a) * 3, y1 + Math.sin(a) * 3); g.lineTo(x1 - s * Math.cos(a - 0.5), y1 - s * Math.sin(a - 0.5));
-            g.lineTo(x1 - s * Math.cos(a + 0.5), y1 - s * Math.sin(a + 0.5)); g.closePath(); g.fill();
-          });
-          g.beginPath(); g.arc(m.q.x, m.q.y, 3.4, 0, 6.3); g.fillStyle = '#fbbf24'; g.fill(); g.lineWidth = 1.4; g.strokeStyle = 'rgba(8,10,16,.9)'; g.stroke();
+          /* A CONE, NOT A SKINNY ARROW (user 2026-09-19: "you dont need skinny arrows"). It opens
+             the way the swell travels, 20 degrees each side -- the spread a real swell has -- and
+             fades out along its length, so it reads as "the swell runs that way from here" rather
+             than as a pin. Its far edge is an arc, the shape of a wavefront. Length by height;
+             the edge is dashed while the reading is the model's stand-in. */
+          var th = (m.b.dir + 180) * Math.PI / 180, L = 30 + Math.min(46, m.b.hs * 3.281 * 9), HALF = 20 * Math.PI / 180;
+          g.save();
+          g.translate(m.q.x, m.q.y); g.rotate(th);                    // +y now runs the way it travels
+          var lit = m.b.model ? 'rgba(186,230,253,' : 'rgba(255,255,255,';
+          var grad = g.createLinearGradient(0, 0, 0, L);
+          grad.addColorStop(0, lit + '.95)'); grad.addColorStop(0.55, lit + '.42)'); grad.addColorStop(1, lit + '0)');
+          g.beginPath(); g.moveTo(0, 5);
+          g.arc(0, 0, L, Math.PI / 2 - HALF, Math.PI / 2 + HALF);
+          g.closePath(); g.fillStyle = grad; g.fill();
+          g.lineWidth = 1.2; g.strokeStyle = 'rgba(8,10,16,.5)';
+          if (m.b.model) g.setLineDash([5, 4]);
+          g.beginPath();
+          g.moveTo(Math.sin(-HALF) * 5, Math.cos(-HALF) * 5); g.lineTo(Math.sin(-HALF) * L, Math.cos(-HALF) * L);
+          g.moveTo(Math.sin(HALF) * 5, Math.cos(HALF) * 5); g.lineTo(Math.sin(HALF) * L, Math.cos(HALF) * L);
+          g.stroke(); g.setLineDash([]);
+          g.restore();
+          /* the buoy itself: a ring, the way a chart marks one */
+          g.beginPath(); g.arc(m.q.x, m.q.y, 4.6, 0, 6.3); g.fillStyle = 'rgba(8,12,22,.85)'; g.fill();
+          g.lineWidth = 2.2; g.strokeStyle = '#fbbf24'; g.stroke();
         } else {
-          if (m.on){ g.beginPath(); g.arc(m.q.x, m.q.y, 9, 0, 6.3); g.fillStyle = 'rgba(45,212,191,.22)'; g.fill(); }
+          if (m.on){ g.beginPath(); g.arc(m.q.x, m.q.y, 9, 0, 6.3); g.fillStyle = m.blown ? 'rgba(148,163,184,.20)' : 'rgba(45,212,191,.22)'; g.fill(); }
           g.beginPath(); g.arc(m.q.x, m.q.y, m.on ? 4.2 : 2.6, 0, 6.3);
-          g.fillStyle = m.on ? '#5eead4' : 'rgba(186,214,235,.85)'; g.fill(); g.lineWidth = 1.3; g.strokeStyle = 'rgba(8,10,16,.85)'; g.stroke();
+          /* running and offshore is the brightest thing on the water; running but blown out is grey */
+          g.fillStyle = m.clean ? '#5eead4' : m.on ? (m.blown ? '#cbd5e1' : '#7dd3c0') : 'rgba(186,214,235,.85)';
+          g.fill(); g.lineWidth = 1.3; g.strokeStyle = 'rgba(8,10,16,.85)'; g.stroke();
         }
       });
       g.textAlign = 'left'; g.textBaseline = 'middle';
       placed.forEach(function(L){
+        if (L.lines){
+          g.textAlign = 'center';
+          L.lines.forEach(function(ln, i){
+            g.font = ln.big ? '800 10.5px system-ui, sans-serif' : '700 8px system-ui, sans-serif';
+            try { g.letterSpacing = '0.06em'; } catch(e){}
+            var yy = L.y + i * 12;
+            g.lineWidth = 3; g.strokeStyle = 'rgba(8,10,16,.85)'; g.strokeText(ln.t, L.px, yy);
+            g.fillStyle = ln.big ? '#fff' : 'rgba(226,240,255,.92)'; g.fillText(ln.t, L.px, yy);
+          });
+          g.textAlign = 'left';
+          return;
+        }
         g.font = L.small ? '700 8px system-ui, sans-serif' : '500 9px QelliaRegular, "Bodoni Moda", Georgia, serif';
         try { g.letterSpacing = L.small ? '0.06em' : '0.18em'; } catch(e){}
         g.lineWidth = 2.8; g.strokeStyle = 'rgba(8,10,16,.8)'; g.strokeText(L.txt, L.px, L.y);
