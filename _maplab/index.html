@@ -3139,6 +3139,28 @@ function satHasPicture(im){
     return n > 24 * 18 * 0.5;
   } catch (e){ return true; }                               // cannot look: take it on trust
 }
+/* THE SWEEPS THE SERVICE ACTUALLY HOLDS. The radar WMS carries a time dimension and, unlike
+   GIBS, publishes the exact list of timestamps it has -- so the radar loop needs no probing:
+   read the list, take the last few, ask for those. `nearestValue="1"` means it would snap
+   anyway, but asking for times it named is honest and never lands on an empty frame. */
+var RADTIMES = {};
+function radarTimes(sid, lyr){
+  var key = sid + '/' + lyr, hit = RADTIMES[key];
+  if (hit && Date.now() - hit.t < 300000) return hit.p;
+  var p = fetch('https://opengeo.ncep.noaa.gov/geoserver/' + sid + '/ows?service=WMS&version=1.3.0&request=GetCapabilities')
+    .then(function(r){ return r.text(); })
+    .then(function(x){
+      var i = x.indexOf('<Name>' + lyr + '</Name>');
+      if (i < 0) return [];
+      var seg = x.slice(i), j = seg.indexOf('</Layer>');
+      if (j > 0) seg = seg.slice(0, j);                     // this layer's block, not the next one's
+      var m = seg.match(/<Dimension name="time"[^>]*>([^<]+)<\/Dimension>/);
+      return m ? m[1].split(',').map(function(t){ return t.trim(); }).filter(Boolean) : [];
+    })
+    .catch(function(){ return []; });
+  RADTIMES[key] = { t: Date.now(), p: p };
+  return p;
+}
 function radarOverlay(ctx, W, H, X0, Y0, X1, Y1){
   var tick = document.getElementById('radar');
   if (!tick || !tick.checked) return Promise.resolve();
@@ -3163,6 +3185,31 @@ function radarOverlay(ctx, W, H, X0, Y0, X1, Y1){
     snap.getContext('2d').drawImage(ctx.canvas, 0, 0);
     return snap;
   };
+  /* one way of showing a run of frames, whatever made them: the map underneath, the cloud
+     if it was asked for, the frame, and the map washed back over at a third so the coast
+     and the lettering survive */
+  var play = function(frames, under){
+    frames = frames.filter(Boolean);
+    if (!frames.length) return;
+    var base = snapOf();
+    var show = function(k){
+      ctx.clearRect(0, 0, W, H);
+      ctx.drawImage(base, 0, 0);
+      if (under){ ctx.save(); ctx.globalAlpha = 0.82; ctx.drawImage(under, 0, 0, W, H); ctx.restore(); }
+      ctx.drawImage(frames[k], 0, 0, W, H);
+      ctx.save(); ctx.globalAlpha = 0.35; ctx.drawImage(base, 0, 0); ctx.restore();
+    };
+    show(frames.length - 1);
+    stopSatLoop();
+    if (frames.length > 1){
+      var k = frames.length - 1, hold = frames.length + 2;   // a beat on the newest before it wraps
+      SATLOOP.timer = setInterval(function(){
+        if (document.hidden) return;
+        k = (k + 1) % hold;
+        show(Math.min(k, frames.length - 1));
+      }, 620);
+    }
+  };
   /* THE SATELLITE VIEW RUNS AS A LOOP */
   if (vw.sat){
     var slots = satSlots(16);
@@ -3174,40 +3221,27 @@ function radarOverlay(ctx, W, H, X0, Y0, X1, Y1){
         if (!good.length) good = [null];                    // no TIME at all: the server's own latest
         return Promise.all(good.map(function(iso){ return loadImg(satUrl(vw.sat, X0, Y0, X1, Y1, W, H, iso)); }));
       })
-      .then(function(frames){
-        frames = frames.filter(Boolean);
-        if (!frames.length) return;
-        var base = snapOf();
-        var show = function(k){
-          ctx.clearRect(0, 0, W, H);
-          ctx.drawImage(base, 0, 0);
-          ctx.drawImage(frames[k], 0, 0, W, H);
-          ctx.save(); ctx.globalAlpha = 0.35; ctx.drawImage(base, 0, 0); ctx.restore();
-        };
-        show(frames.length - 1);
-        stopSatLoop();
-        if (frames.length > 1){
-          var k = frames.length - 1, hold = frames.length + 2;   // a beat on the newest frame
-          SATLOOP.timer = setInterval(function(){
-            if (document.hidden) return;
-            k = (k + 1) % hold;
-            show(Math.min(k, frames.length - 1));
-          }, 620);
-        }
-      });
+      .then(function(frames){ play(frames, null); });
   }
   /* A RADAR VIEW, optionally over the cloud (user: "is there a way to bring that view into
      the NEXT HALF HOUR / 3HR / 12HR"). The sweep says where the rain is; the satellite says
      what the sky is doing around it, which on this coast is usually the marine layer. */
+  /* the cloud takes WHICHEVER GOES product the marine tab is set to, so the choice between
+     GeoColor at 2 km and the red visible band at 1 km is the viewer's, made where it is
+     already made. Over a tight frame like KSOX's that is the difference between forty
+     native pixels across the basin and eighty. */
   var under = window.LAB_SATUNDER
-    ? loadImg(satUrl('GOES-West_ABI_GeoColor', X0, Y0, X1, Y1, W, H, null)) : Promise.resolve(null);
-  return Promise.all([loadImg(url), under]).then(function(r){
-    var im = r[0], un = r[1];
-    if (!im) return;
-    var snap = snapOf();
-    if (un){ ctx.save(); ctx.globalAlpha = 0.82; ctx.drawImage(un, 0, 0, W, H); ctx.restore(); }
-    ctx.drawImage(/_sr_bref$/.test(lyr) ? filterBref(im, W, H) : im, 0, 0, W, H);
-    ctx.save(); ctx.globalAlpha = 0.35; ctx.drawImage(snap, 0, 0); ctx.restore();
+    ? loadImg(satUrl(window.LAB_SATLAYER || 'GOES-West_ABI_GeoColor', X0, Y0, X1, Y1, W, H, null))
+    : Promise.resolve(null);
+  return Promise.all([radarTimes(sid, lyr), under]).then(function(r){
+    var times = r[0], un = r[1];
+    var want = times.length ? times.slice(-8) : [null];
+    return Promise.all(want.map(function(ts){ return loadImg(url + (ts ? '&TIME=' + ts : '')); }))
+      .then(function(ims){
+        play(ims.filter(Boolean).map(function(im){
+          return /_sr_bref$/.test(lyr) ? filterBref(im, W, H) : im;
+        }), un);
+      });
   });
 }
 
@@ -4388,6 +4422,7 @@ function copyFlavor(){
     window.LAB_SWELLDIR = (m.swellDir == null ? null : +m.swellDir);
     window.LAB_RAIL = m.rail !== false;
     window.LAB_SATUNDER = !!m.satUnder;
+    window.LAB_SATLAYER = m.satLayer || null;
     document.getElementById('radar').checked = !!(m.radar || m.sat);
     window.LAB_LOCK = !!m.lock;
     renderAll();
