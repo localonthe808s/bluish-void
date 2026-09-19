@@ -11,6 +11,7 @@ the lab paints Los Angeles with the same code that paints New York:
     rail_lines.json     Metro Rail + Metrolink track, one shape per route       the agencies' own GTFS
     rail_stops.json     every station, with the routes that call there
     rail_colours.json   route -> the agency's published colour
+    rail_sched.json     every station's departures by line, headsign and service day   the same GTFS (TIMETABLE, not live)
     faults.json         Quaternary faults                                       USGS Qfaults
     land_relief.json    terrain veils at fixed heights                          NOAA NCEI DEM mosaic
     sea_*.png           seafloor shaded relief, 3 / 1 / 1/3 arc-second tiers     NOAA CRM v2 + Santa Monica DEM
@@ -1012,7 +1013,73 @@ def bake_geo():
     write('weather_geo.json', out)
 
 
-PARTS = {'geo': bake_geo, 'air': bake_air, 'veg': bake_veg, 'region': bake_region, 'land': bake_land, 'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea}
+# ----------------------------------------------------------------- trains ----
+# THE TRAIN TIMES (user, 2026-09-19: "add the train times like we did for NYC, use 17th street
+# SMC as the default"). New York's board is LIVE -- the MTA's GTFS-realtime feeds are keyless and
+# CORS-open. Los Angeles is not there: Metro's API (api.metro.net, v2.1.38) has dropped its
+# trip_updates and vehicle_positions routes (404), and the one realtime route left,
+# /LACMTA_Rail/trip_detail/route_code/<n>, answered [] for every rail line AND for the 24-hour
+# 720 bus when this was written; Swiftly's feed wants a key; UmoIQ no longer lists the agency.
+# So the board is built on what Metro does publish without conditions: the TIMETABLE, from the
+# same GTFS the lines are drawn from -- and it SAYS it is the timetable. The preview asks the
+# live route first and uses it if it ever answers.
+#
+# Shape: per station, per line and headsign, the day's departures as minutes after midnight,
+# for three service days (weekday / Saturday / Sunday). GTFS times run past 24:00 for the trips
+# after midnight, which belong to the service day before -- kept as they are (1,475 = 12:35 AM)
+# so the reader can look in yesterday's list too. A trip's last stop is an arrival, not a
+# departure, and is left out. Holiday exceptions in calendar_dates are NOT applied.
+def sched_from(rd, name_of, kind):
+    routes = {r['route_id']: r for r in rd('routes.txt')}
+    day_of = {}
+    for c in rd('calendar.txt'):
+        ks = set()
+        if any(c[d] == '1' for d in ('monday', 'tuesday', 'wednesday', 'thursday', 'friday')): ks.add('wk')
+        if c['saturday'] == '1': ks.add('sa')
+        if c['sunday'] == '1': ks.add('su')
+        day_of[c['service_id']] = ks
+    trips = {t['trip_id']: t for t in rd('trips.txt')}
+    stops = {x['stop_id']: x for x in rd('stops.txt')}
+    parent = lambda sid: (stops[sid].get('parent_station') or sid) if sid in stops else sid     # noqa: E731
+    by_trip = defaultdict(list)
+    for st in rd('stop_times.txt'):
+        by_trip[st['trip_id']].append((int(st['stop_sequence']), st['stop_id'], st.get('departure_time') or st.get('arrival_time')))
+    out = defaultdict(lambda: defaultdict(lambda: {'wk': set(), 'sa': set(), 'su': set()}))
+    for tid, rows in by_trip.items():
+        t = trips.get(tid)
+        if not t or t['route_id'] not in routes:
+            continue
+        rows.sort()
+        head = (t.get('trip_headsign') or stops.get(rows[-1][1], {}).get('stop_name') or '').replace(' Station', '').strip()
+        line = name_of(routes[t['route_id']])
+        for seq, sid, tm in rows[:-1]:
+            if not tm:
+                continue
+            h, m = int(tm[:-6]), int(tm[-5:-3])
+            for k in day_of.get(t['service_id'], ()):
+                out[parent(sid)][(line, head)][k].add(h * 60 + m)
+    res = {}
+    for pid, rows in out.items():
+        res[pid] = {'kind': kind, 'rows': [{'r': l, 'h': h, 'wk': sorted(v['wk']), 'sa': sorted(v['sa']), 'su': sorted(v['su'])}
+                                          for (l, h), v in sorted(rows.items())]}
+    return res
+
+
+def bake_sched():
+    print('train times (published timetable)')
+    m = sched_from(gtfs(METRO_GTFS), lambda r: (r.get('route_short_name') or r.get('route_long_name') or r['route_id']).replace('Metro ', '').replace(' Line', '').strip(), 'metro')
+    k = sched_from(gtfs(METROLINK_GTFS), lambda r: (r.get('route_short_name') or r.get('route_long_name') or r['route_id']).replace(' Line', '').strip(), 'commuter')
+    m.update(k)
+    names = {f['properties']['id']: f['properties']['name'] for f in json.load(open(os.path.join(HERE, 'rail_stops.json')))['features']}
+    smc = [i for i, n in names.items() if '17th' in n]
+    print('  %d stations; default candidates: %s' % (len(m), [(i, names[i]) for i in smc]))
+    for i in smc:
+        for r in m.get(i, {}).get('rows', []):
+            print('    %s to %-28s weekday %d, saturday %d, sunday %d departures' % (r['r'], r['h'], len(r['wk']), len(r['sa']), len(r['su'])))
+    write('rail_sched.json', m)
+
+
+PARTS = {'sched': bake_sched, 'geo': bake_geo, 'air': bake_air, 'veg': bake_veg, 'region': bake_region, 'land': bake_land, 'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea}
 
 if __name__ == '__main__':
     print('home box  w %.4f  s %.4f  e %.4f  n %.4f' % home_box())
