@@ -131,11 +131,11 @@ var VIEWSET = {
   map:    { label:'CITY MAP', layers:true, attrib:'' }
 };
 var ORDER = ['ksox', 'mrms3', 'mrms12', 'map'];
-var st = { view:'map', prod:{}, geo:false, traffic:false };
+var st = { view:'map', prod:{}, geo:false, traffic:false, surf:false };
 
 function send(){
   /* every view but the map is a fixed frame, as in the widget: no pan, no zoom */
-  var v = VIEWSET[st.view], m = { view:'la', geo: st.view === 'map' && st.geo, lock: st.view !== 'map', traffic: st.view === 'map' && st.traffic };
+  var v = VIEWSET[st.view], m = { view:'la', geo: st.view === 'map' && st.geo, lock: st.view !== 'map', traffic: st.view === 'map' && st.traffic, surf: st.view === 'map' && st.surf };
   if (v.box) m.box = v.box;
   if (v.prods === SAT) m.sat = st.prod[st.view] || SAT[0][0];
   else if (v.prods){ m.radar = true; m.radarSid = v.sid; m.radarLayer = st.prod[st.view] || v.prods[0][0]; }
@@ -258,6 +258,57 @@ function rockBand(){
     + (desc ? line('font:500 9.5px system-ui,sans-serif;color:#5b647a;margin-top:2px;line-height:1.45;', lab('SURVEY') + esc(desc)) : '')
     + (state && state !== u ? line('font:600 9px system-ui,sans-serif;color:#5b647a;letter-spacing:.04em;margin-top:3px;',
         'ON THE STATE MAP: <b style="color:#1b2340;">' + esc(state.name) + '</b>' + (ageOf(state) ? ' \u00b7 ' + esc(ageOf(state)) : '') + (lithOf(state) ? ' \u00b7 ' + esc(lithOf(state)) : '')) : '');
+}
+/* SURF in the info bar, in the train board's band. AT REST: the beach report -- the NWS surf
+   zone forecast for the Los Angeles County beaches, the pier's measured water temperature and
+   tide with the next turn, and the bay buoy's swell. A TAPPED BUOY reads its swell; a TAPPED
+   BREAK says whether it is running and shows the numbers that decided it. "Running" is this
+   map's reading, from a hand-written table of swell windows that is a DRAFT -- said on the band. */
+var SURFR = null, SURFTAP = null;
+window.addEventListener('message', function(ev){
+  if (ev.data && ev.data.labSurf){ SURFR = ev.data.labSurf; paint(); }
+  if (ev.data && ev.data.labSurfTap){ SURFTAP = ev.data.labSurfTap; paint(); }
+});
+var COMPASS = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+function cmp(d){ return COMPASS[Math.round(((d % 360) + 360) % 360 / 22.5) % 16]; }
+function surfBand(){
+  var esc = function(t){ return String(t == null ? '' : t).replace(/[&<>]/g, function(c){ return { '&':'&amp;', '<':'&lt;', '>':'&gt;' }[c]; }); };
+  var col = function(label, html, sub){ return '<div class="dir"><div style="font:700 8px system-ui,sans-serif;color:#8a91a5;letter-spacing:.1em;margin-bottom:4px;">' + label
+    + '</div><div style="font:600 12px system-ui,sans-serif;letter-spacing:0;line-height:1.3;font-variant-numeric:tabular-nums;">' + html + '</div>'
+    + (sub ? '<div style="font:600 8px system-ui,sans-serif;color:#8a91a5;letter-spacing:.06em;margin-top:3px;">' + sub + '</div>' : '') + '</div>'; };
+  var st = function(title, l1, l2, x){ return '<div class="st"><div style="font:800 13px system-ui,sans-serif;letter-spacing:.03em;">' + title + '</div>'
+    + '<div style="font:600 8px system-ui,sans-serif;color:#5b647a;letter-spacing:.08em;margin-top:5px;">' + l1 + '</div>'
+    + (l2 ? '<div style="font:600 8px system-ui,sans-serif;color:#8a91a5;letter-spacing:.08em;margin-top:2px;">' + l2 + '</div>' : '') + '</div>'; };
+  var X = '<button id="cw-la-sx" style="position:absolute;right:-4px;top:-4px;background:none;border:none;font:700 13px system-ui,sans-serif;color:#1b2340;cursor:pointer;padding:0 2px;">✕</button>';
+  var R = SURFR, swell = function(b){ return '<b>' + (b.hs * 3.281).toFixed(1) + ' FT</b> AT <b>' + Math.round(b.tp) + ' S</b> FROM <b>' + cmp(b.dir) + '</b> ' + Math.round(b.dir) + '°'; };
+  var ago = function(t){ var m = Math.round((Date.now() - Date.parse(t)) / 60000); return isFinite(m) ? (m < 90 ? m + ' MIN AGO' : Math.round(m / 60) + ' H AGO') : ''; };
+  if (!R) return '<div class="tb" style="--n:1;">' + st('SURF', 'READING THE BUOYS, THE PIER AND THE FORECAST…') + '<div class="dir solo"></div></div>';
+  var hm = function(t){ var d = new Date(t.replace(' ', 'T')); var h = d.getHours(), m = d.getMinutes(); return (h % 12 || 12) + ':' + ('0' + m).slice(-2) + (h < 12 ? ' AM' : ' PM'); };
+  /* the next turn of the tide: the first prediction still ahead of the pier's own clock */
+  var nowLA = new Intl.DateTimeFormat('sv-SE', { timeZone:'America/Los_Angeles', year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' }).format(new Date());
+  var next = (R.tides || []).filter(function(q){ return q.t > nowLA; }).slice(0, 2);
+  var tideHtml = (R.level ? '<b>' + R.level.ft.toFixed(1) + ' FT</b> NOW' : '') + (next[0] ? (R.level ? ' · ' : '') + (next[0].hi ? 'HIGH ' : 'LOW ') + next[0].ft.toFixed(1) + ' AT ' + hm(next[0].t) : '');
+  var src = R.source === 'model' ? 'SWELL IS THE MODEL’S · THE BUOY FEED IS NOT THROUGH THE PROXY YET' : 'SWELL MEASURED BY THE BUOYS';
+  if (SURFTAP && SURFTAP.kind === 'buoy'){
+    var b = SURFTAP;
+    return '<div class="tb" style="--n:3;">' + st(esc(b.name), (b.model ? 'MODEL SWELL AT THE BUOY’S POSITION' : 'NOAA NDBC BUOY ' + esc(b.id) + ' · ' + ago(b.t)), 'THE ARROW POINTS THE WAY THE SWELL TRAVELS')
+      + col('SWELL', swell(b)) + col('PERIOD', '<b>' + Math.round(b.tp) + ' S</b>', b.tp >= 14 ? 'LONG-PERIOD GROUNDSWELL' : b.tp >= 10 ? 'GROUNDSWELL' : b.tp >= 8 ? 'SHORT SWELL' : 'WIND CHOP')
+      + col('WATER', b.wt != null ? '<b>' + Math.round(b.wt * 9 / 5 + 32) + '°F</b>' : '—', 'AT THE BUOY') + X + '</div>';
+  }
+  if (SURFTAP && SURFTAP.kind === 'spot'){
+    var s = SURFTAP, bb = s.buoy;
+    var verdict = !bb ? 'NO SWELL READING FOR THIS BREAK' : s.on ? 'THE SWELL IS IN ITS WINDOW' : (bb.hs < 0.6 || bb.tp < 8) ? 'TOO SMALL OR TOO SHORT TO REACH IT' : 'THE SWELL IS COMING FROM OUTSIDE ITS WINDOW';
+    return '<div class="tb" style="--n:3;">' + st(esc(s.name).toUpperCase(), '<span style="color:' + (s.on ? '#0f766e' : '#5b647a') + ';">' + verdict + '</span>', esc(s.bottom).toUpperCase() + ' · SPOT TABLE IS A DRAFT')
+      + col('SWELL' + (bb ? ' AT ' + esc(bb.name || bb.id) : ''), bb ? swell(bb) : '—', bb && bb.model ? 'MODEL, NOT MEASURED' : '')
+      + col('ITS WINDOW', '<b>' + cmp(s.win[0]) + '</b> TO <b>' + cmp(s.win[1]) + '</b>', s.win[0] + '° TO ' + s.win[1] + '°')
+      + col('TIDE', (s.tideNow != null ? '<b>' + s.tideNow.toFixed(1) + ' FT</b> NOW' : '—'), 'LIKES ' + s.tide[0] + ' TO ' + s.tide[1] + ' FT' + (s.tideOk == null ? '' : s.tideOk ? ' · IN RANGE' : ' · OUT OF RANGE')) + X + '</div>';
+  }
+  var bay = (R.buoys || {})['46221'] || (R.buoys || {})['46268'], n = R.nws;
+  return '<div class="tb" style="--n:4;">' + st('LOS ANGELES COUNTY BEACHES', n ? 'NWS SURF ZONE FORECAST · ' + esc(n.remarks || '').toUpperCase() : 'NWS SURF FORECAST NOT AVAILABLE', src + ' · TAP A BUOY OR A BREAK')
+    + col('SURF', n && n.surf ? '<b>' + esc(n.surf).toUpperCase() + '</b>' : '—', 'NWS, TODAY')
+    + col('RIP CURRENTS', n && n.rip ? '<b style="color:' + (/high/i.test(n.rip) ? '#b91c1c' : /moderate/i.test(n.rip) ? '#b45309' : '#15803d') + ';">' + esc(n.rip).toUpperCase() + '</b>' : '—', 'NWS RISK')
+    + col('SWELL IN THE BAY', bay ? swell(bay) : '—', bay ? (bay.model ? 'MODEL' : 'BUOY 46221 · ' + ago(bay.t)) : '')
+    + col('SANTA MONICA PIER', (R.water ? '<b>' + Math.round(R.water.f) + '°F</b> WATER' : '') , tideHtml.replace(/<\/?b>/g, '')) + '</div>';
 }
 /* TRAFFIC in the info bar. At rest the train board stays and one line under it counts what is
    on the map; a tapped incident or freeway sign takes the bar, in the board's own band, until
@@ -413,14 +464,15 @@ function paint(){
   });
   else {
     /* the map's own layers, as New York's row is FLOODING / TREES / GEOLOGY */
-    add('TRAFFIC', st.traffic, function(){ st.traffic = !st.traffic; if (st.traffic) st.geo = false; INCIDENT = null; paint(); send(); });
-    add('GEOLOGY', st.geo, function(){ st.geo = !st.geo; ROCK = null; if (st.geo){ st.traffic = false; INCIDENT = null; } paint(); send(); });   // the rock stands alone
+    add('TRAFFIC', st.traffic, function(){ st.traffic = !st.traffic; if (st.traffic){ st.geo = false; st.surf = false; } INCIDENT = null; paint(); send(); });
+    add('SURF', st.surf, function(){ st.surf = !st.surf; SURFTAP = null; if (st.surf){ st.geo = false; st.traffic = false; INCIDENT = null; ROCK = null; } paint(); send(); });
+    add('GEOLOGY', st.geo, function(){ st.geo = !st.geo; ROCK = null; if (st.geo){ st.surf = false; st.traffic = false; INCIDENT = null; } paint(); send(); });   // the rock stands alone
   }
 
   var info = document.getElementById('cw-info'), tag = document.getElementById('cw-wide-tag');
   if (v.layers){
     tag.style.display = 'none'; info.style.display = '';
-    info.innerHTML = st.geo && ROCK ? rockBand() : st.geo
+    info.innerHTML = st.surf ? surfBand() : st.geo && ROCK ? rockBand() : st.geo
       ? '<b>THE ROCK UNDER THE BASIN</b> &nbsp;·&nbsp; Macrostrat units, with USGS Quaternary faults: heaviest where the ground has broken in historic time, dashed where the survey infers the trace. Tap the map for the rock under your finger, or a fault line for the fault.'
       : (st.traffic && INCIDENT ? incidentBand() : board() + (st.traffic ? trafficLine() : ''));
   } else {
@@ -431,6 +483,8 @@ function paint(){
     document.getElementById('cw-wide-tag-info').innerHTML = readsLine(v);
     document.getElementById('cw-wide-tag-info').style.display = READS ? 'block' : 'none';
   }
+  var sxb = document.getElementById('cw-la-sx');
+  if (sxb) sxb.onclick = function(){ SURFTAP = null; paint(); };
   var rxb = document.getElementById('cw-la-rx');
   if (rxb) rxb.onclick = function(){ ROCK = null; ROCKSEQ++; paint(); };
   var ixb = document.getElementById('cw-la-ix');
@@ -441,7 +495,8 @@ function paint(){
   document.getElementById('cw-time').style.display = v.prods ? '' : 'none';
   document.getElementById('cw-attrib').textContent = '© OpenStreetMap · Protomaps · USGS 3DEP · NOAA NCEI · LA Metro · Metrolink'
     + (v.attrib ? ' · ' + v.attrib : '') + (st.view === 'map' && st.geo ? ' · Macrostrat · USGS Qfaults' : '')
-    + (st.view === 'map' && st.traffic ? ' · © TomTom · Caltrans' : '');
+    + (st.view === 'map' && st.traffic ? ' · © TomTom · Caltrans' : '')
+    + (st.view === 'map' && st.surf ? ' · NOAA NDBC · Scripps CDIP · NOAA CO-OPS · NWS' : '');
 }
 function tab(k){
   var b = document.createElement('button'); b.id = 't-' + k; b.textContent = VIEWSET[k].label;

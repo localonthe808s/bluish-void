@@ -74,6 +74,7 @@
   <label class="sub"><input type="checkbox" id="radar" onchange="renderAll()"> radar</label>
   <label class="sub"><input type="checkbox" id="geo" onchange="renderAll()"> geology</label>
   <label class="sub"><input type="checkbox" id="traffic" onchange="renderAll()"> traffic</label>
+  <label class="sub"><input type="checkbox" id="surf" onchange="renderAll()"> surf</label>
   <button onclick="renderAll()">redraw</button>
   <button onclick="copyFlavor()">copy focused flavor</button>
   <span class="sub" id="status"></span>
@@ -157,7 +158,7 @@ var VIEWS = {
               subway:'la/rail_lines.json', stops:'la/rail_stops.json', bullets:'la/rail_colours.json',
               /* shaded relief, not terraces: the veils (la/land_relief.json) were built for
                  New York's 120 m of relief and barely registered against 3,000 m */
-              landReliefs:'la/land_index.json', veg:'la/veg_index.json', airfields:'la/airfields.json',
+              landReliefs:'la/land_index.json', veg:'la/veg_index.json', airfields:'la/airfields.json', surf:'la/surf_spots.json',
               wxGeo:'la/weather_geo.json', tz:'America/Los_Angeles',
               depthFade:[-119.60,33.20,-117.30,34.75],
               faults:'la/faults.json', radar:'ksox',
@@ -1912,6 +1913,147 @@ function makeFronts(ctx, runs, proj, view, tz){
       g.restore();
     } };
 }
+/* SURF (2026-09-19, user: "build the surf tab in city map"). What a surfer needs is three things
+   and only one of them is a forecast: the swell that is ACTUALLY arriving, the tide, and whether
+   a given break faces that swell.
+     THE SWELL   the wave buoys off Los Angeles -- NOAA NDBC, most of them Scripps CDIP Waveriders
+                 -- height, dominant period and the direction it comes from, every half hour.
+                 NDBC and its ERDDAP mirror send no CORS header, so they come through the site's
+                 proxy worker (coastwatch.pfeg.noaa.gov, one call for every buoy in frame). If
+                 the proxy will not pass it, the model's swell stands in and IS LABELLED MODEL:
+                 checked against the bay buoy it called a 13 s SSW swell a 5.6 s west one, so it
+                 is a stand-in and nothing better.
+     THE TIDE    NOAA CO-OPS at the Santa Monica pier (CORS-open): observed water level and
+                 temperature, and the day's predicted highs and lows.
+     THE BEACH   the NWS Los Angeles surf zone forecast: rip current risk, surf height, remarks.
+     THE BREAKS  la/surf_spots.json -- a hand-written DRAFT: each break's swell window and the
+                 tide it likes. Nobody publishes this (OSM's "surfing" tags here are surf shops).
+   THE RULE, as everywhere on this map: a break is quiet unless it is RUNNING -- the measured
+   swell at its buoy comes from inside its window, at 0.6 m and 8 s or more. "Working" is OUR
+   reading of published numbers, and the readout shows the numbers it came from. */
+var SURF = { t: 0, p: null, hits: [] };
+function surfReads(){
+  if (SURF.p && Date.now() - SURF.t < 600000) return SURF.p;
+  SURF.t = Date.now();
+  var J = function(u){ return fetch(u).then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; }); };
+  var erd = 'https://coastwatch.pfeg.noaa.gov/erddap/tabledap/cwwcNDBCMet.json?station,time,latitude,longitude,WVHT,DPD,MWD,WTMP'
+    + '&time%3E=now-5hours&latitude%3E=33.2&latitude%3C=34.3&longitude%3E=-120.0&longitude%3C=-117.6&WVHT%3E0';
+  var co = 'https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?application=bluishvoid&station=9410840&time_zone=lst_ldt&units=english&format=json';
+  var ymd = new Intl.DateTimeFormat('en-CA', { timeZone:'America/Los_Angeles' }).format(new Date()).replace(/-/g, '');
+  SURF.p = Promise.all([
+    J('https://proxy.bluishvoid.com/?url=' + encodeURIComponent(erd) + '&ttl=600'),
+    J(co + '&product=predictions&datum=MLLW&interval=hilo&begin_date=' + ymd + '&range=48'),
+    J(co + '&product=water_level&datum=MLLW&date=latest'),
+    J(co + '&product=water_temperature&date=latest'),
+    fetch('https://api.weather.gov/products?type=SRF&location=LOX&limit=1', { headers:{ Accept:'application/ld+json' } }).then(function(r){ return r.json(); })
+      .then(function(j){ var g = (j['@graph'] || [])[0]; return g ? fetch('https://api.weather.gov/products/' + g.id).then(function(r){ return r.json(); }) : null; }).catch(function(){ return null; }),
+    J('https://marine-api.open-meteo.com/v1/marine?latitude=33.854,34.022,33.618&longitude=-118.633,-118.578,-118.317'
+      + '&current=swell_wave_height,swell_wave_period,swell_wave_direction,secondary_swell_wave_height,secondary_swell_wave_period,secondary_swell_wave_direction')
+  ]).then(function(r){
+    var R = { buoys: {}, source: 'buoys', at: Date.now() };
+    if (r[0] && r[0].table){
+      var c = r[0].table.columnNames, ix = function(k){ return c.indexOf(k); };
+      r[0].table.rows.forEach(function(w){                        // rows run oldest first: the last one per station wins
+        R.buoys[w[ix('station')]] = { id: w[ix('station')], t: w[ix('time')], lat: w[ix('latitude')], lon: w[ix('longitude')],
+          hs: w[ix('WVHT')], tp: w[ix('DPD')], dir: w[ix('MWD')], wt: w[ix('WTMP')] };
+      });
+    }
+    if (!Object.keys(R.buoys).length && r[5] && r[5].length === 3){
+      /* the stand-in: the model's longer-period partition at three buoy sites, SAID to be the model */
+      R.source = 'model';
+      [['46221', 0], ['46268', 1], ['46222', 2]].forEach(function(q){
+        var o = r[5][q[1]], k = o.current, a = { hs:k.swell_wave_height, tp:k.swell_wave_period, dir:k.swell_wave_direction },
+            b = { hs:k.secondary_swell_wave_height, tp:k.secondary_swell_wave_period, dir:k.secondary_swell_wave_direction };
+        var u = (b.tp > a.tp && b.hs > 0.15) ? b : a;
+        R.buoys[q[0]] = { id:q[0], t:k.time, lat:o.latitude, lon:o.longitude, hs:u.hs, tp:u.tp, dir:u.dir, wt:null, model:true };
+      });
+    }
+    R.tides = ((r[1] || {}).predictions || []).map(function(q){ return { t:q.t, ft:+q.v, hi:q.type === 'H' }; });
+    var wl = ((r[2] || {}).data || [])[0]; R.level = wl ? { ft:+wl.v, t:wl.t } : null;
+    var wt = ((r[3] || {}).data || [])[0]; R.water = wt ? { f:+wt.v, t:wt.t } : null;
+    /* the surf zone forecast: the block for the Los Angeles County beaches, TODAY's rows */
+    var txt = String((r[4] || {}).productText || ''), blk = txt.split('$$').filter(function(b){ return /Los Angeles County Beaches/i.test(b); })[0] || '';
+    var row = function(k){ var m = blk.match(new RegExp(k + '\\.{2,}\\s*([^\\n]+)')); return m ? m[1].replace(/\.$/, '').trim() : null; };
+    R.nws = blk ? { rip: row('Rip Current Risk\\*?'), surf: row('Surf Height'), water: row('Water Temperature'), remarks: row('Remarks'),
+                    issued: (r[4] || {}).issuanceTime || null } : null;
+    try { if (window.parent !== window) window.parent.postMessage({ labSurf: R }, '*'); } catch(e){}
+    return R;
+  });
+  return SURF.p;
+}
+function compass(d){ return ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'][Math.round(((d % 360) + 360) % 360 / 22.5) % 16]; }
+function makeSurf(ctx, spots, R, proj, mpp){
+  var hits = [], labels = [], marks = [], tideNow = R && R.level ? R.level.ft : null;
+  var inWin = function(d, w){ d = (d + 360) % 360; return w[0] <= w[1] ? (d >= w[0] && d <= w[1]) : (d >= w[0] || d <= w[1]); };
+  var CW = cvW(ctx), CH = cvH(ctx), inF = function(q){ return q.x > 6 && q.y > 6 && q.x < CW - 6 && q.y < CH - 6; };
+  var B = (R && R.buoys) || {};
+  Object.keys(B).forEach(function(id){
+    var b = B[id]; if (b.hs == null || b.dir == null) return;
+    var q = proj({ x:b.lon, y:b.lat }); if (!inF(q)) return;
+    marks.push({ t:'buoy', q:q, b:b });
+    labels.push({ x:q.x, y:q.y + 13, txt: (b.hs * 3.281).toFixed(1) + ' FT · ' + Math.round(b.tp) + ' S · ' + compass(b.dir), rank:60, col:'#fff', small:true });
+    hits.push({ x:q.x, y:q.y, reach:16, d:{ kind:'buoy', id:id, name:(spots.buoys || {})[id] || ('BUOY ' + id), hs:b.hs, tp:b.tp, dir:b.dir, wt:b.wt, t:b.t, model:!!b.model } });
+  });
+  (spots.spots || []).forEach(function(sp){
+    var q = proj({ x:sp.c[0], y:sp.c[1] }); if (!inF(q)) return;
+    var b = B[sp.buoy] || null, on = !!(b && b.hs >= 0.6 && b.tp >= 8 && inWin(b.dir, sp.win));
+    var tideOk = tideNow == null ? null : (tideNow >= sp.tide[0] && tideNow <= sp.tide[1]);
+    marks.push({ t:'spot', q:q, on:on });
+    /* a running break is always named; a quiet one only once the map is close enough for it */
+    if (on || mpp < 60) labels.push({ x:q.x, y:q.y, txt:sp.n.toUpperCase(), rank: on ? 70 : 20, col: on ? '#ecfeff' : 'rgba(200,222,240,.82)', side:true });
+    hits.push({ x:q.x, y:q.y, reach:14, d:{ kind:'spot', name:sp.n, win:sp.win, tide:sp.tide, bottom:sp.bottom, on:on, tideOk:tideOk, tideNow:tideNow,
+      buoy: b ? { id:sp.buoy, name:(spots.buoys || {})[sp.buoy], hs:b.hs, tp:b.tp, dir:b.dir, model:!!b.model } : null } });
+  });
+  var placed = [];
+  return { hits: hits,
+    claim: function(){
+      ctx.save();
+      labels.sort(function(a, b){ return b.rank - a.rank; }).forEach(function(L){
+        ctx.font = L.small ? '700 8px system-ui, sans-serif' : '500 9px QelliaRegular, "Bodoni Moda", Georgia, serif';
+        try { ctx.letterSpacing = L.small ? '0.06em' : '0.18em'; } catch(e){}
+        var w = ctx.measureText(L.txt).width;
+        /* a break's name sits SEAWARD of it (to the left: this coast faces south-west) */
+        var x = L.side ? L.x - 8 - w : L.x - w / 2, y = L.y;
+        if (x < 4){ x = L.x + 8; }
+        if (!labelFits(x - 2, y - 6, w + 4, 12)) return;
+        L.px = x; placed.push(L);
+      });
+      try { ctx.letterSpacing = '0px'; } catch(e){}
+      ctx.restore();
+    },
+    paint: function(){
+      var g = ctx; g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
+      marks.forEach(function(m){
+        if (m.t === 'buoy'){
+          /* the arrow points the way the swell TRAVELS; its length is its height */
+          var th = (m.b.dir + 180) * Math.PI / 180, L = 16 + Math.min(40, m.b.hs * 3.281 * 6), dx = Math.sin(th), dy = -Math.cos(th);
+          var x0 = m.q.x - dx * L / 2, y0 = m.q.y - dy * L / 2, x1 = m.q.x + dx * L / 2, y1 = m.q.y + dy * L / 2;
+          [[5, 'rgba(8,10,16,.8)'], [2.2, m.b.model ? 'rgba(186,230,253,.9)' : '#fff']].forEach(function(st){
+            g.lineWidth = st[0]; g.strokeStyle = st[1]; g.fillStyle = st[1];
+            if (m.b.model) g.setLineDash(st[0] > 3 ? [] : [4, 3]);
+            g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke(); g.setLineDash([]);
+            var a = Math.atan2(y1 - y0, x1 - x0), s = st[0] > 3 ? 9 : 7;
+            g.beginPath(); g.moveTo(x1 + Math.cos(a) * 3, y1 + Math.sin(a) * 3); g.lineTo(x1 - s * Math.cos(a - 0.5), y1 - s * Math.sin(a - 0.5));
+            g.lineTo(x1 - s * Math.cos(a + 0.5), y1 - s * Math.sin(a + 0.5)); g.closePath(); g.fill();
+          });
+          g.beginPath(); g.arc(m.q.x, m.q.y, 3.4, 0, 6.3); g.fillStyle = '#fbbf24'; g.fill(); g.lineWidth = 1.4; g.strokeStyle = 'rgba(8,10,16,.9)'; g.stroke();
+        } else {
+          if (m.on){ g.beginPath(); g.arc(m.q.x, m.q.y, 9, 0, 6.3); g.fillStyle = 'rgba(45,212,191,.22)'; g.fill(); }
+          g.beginPath(); g.arc(m.q.x, m.q.y, m.on ? 4.2 : 2.6, 0, 6.3);
+          g.fillStyle = m.on ? '#5eead4' : 'rgba(186,214,235,.85)'; g.fill(); g.lineWidth = 1.3; g.strokeStyle = 'rgba(8,10,16,.85)'; g.stroke();
+        }
+      });
+      g.textAlign = 'left'; g.textBaseline = 'middle';
+      placed.forEach(function(L){
+        g.font = L.small ? '700 8px system-ui, sans-serif' : '500 9px QelliaRegular, "Bodoni Moda", Georgia, serif';
+        try { g.letterSpacing = L.small ? '0.06em' : '0.18em'; } catch(e){}
+        g.lineWidth = 2.8; g.strokeStyle = 'rgba(8,10,16,.8)'; g.strokeText(L.txt, L.px, L.y);
+        g.fillStyle = L.col; g.fillText(L.txt, L.px, L.y);
+      });
+      try { g.letterSpacing = '0px'; } catch(e){}
+      g.restore();
+    } };
+}
 /* THE COLD EDGE IS MEASURED, NOT DRAWN (user 2026-09-19: "make sure these dashed lines are as accurate
    as possible, they cant be generalized"). The first cut was three hand-placed points running due
    south from Point Conception. The sea said otherwise the first time it was asked: the front ran
@@ -2906,6 +3048,7 @@ function drawCard(style){
     /* the scale every "show it below N m/px" rule reads: New York's, whatever the box */
     var nmpp = function(){ return VB.mpp / ((VIEWS[vkey] || {}).mppK || 1); };
     var geoOn = function(){ return !!(document.getElementById('geo') || {}).checked; };
+    var surfOn = function(){ return !!(document.getElementById('surf') || {}).checked && VB.mpp <= 320; };
     /* the lettering's canvas: the dense one in the widget preview, the card itself in the lab */
     var tctx = window.LAB_EMBED ? railCv.getContext('2d') : ctx;
     railCv.getContext('2d').clearRect(0, 0, W, H); railCv.style.top = cv.offsetTop + 'px';
@@ -3117,6 +3260,19 @@ function drawCard(style){
                 });
               }
               var hoodOpts = vv.nameClear ? { clear: boroughFill(dark), weight: 0.085 } : null;
+              if (surfOn() && vv.surf){
+                /* THE COAST IS THE SUBJECT: buoys and breaks claim their space first, the
+                   neighbourhood names fit round them, and the rail and the traffic stand down */
+                return Promise.all([viewJson(vkey, 'surf'), surfReads()]).then(function(sr){
+                  if (stale()) return;
+                  var SF = makeSurf(tctx, sr[0] || {}, sr[1], out.project, nmpp());
+                  LABELBOX.length = 0; SF.claim(); SURF.hits = SF.hits;
+                  var ph = drawHoodNames(tctx, hn, out.project, nmpp(), { clear: hoodOpts && hoodOpts.clear, weight: 0.085, keep: true });
+                  paintHoods = function(){ ph(); SF.paint(); };
+                  return null;
+                });
+              }
+              SURF.hits = [];
               if (vv.wxGeo && document.getElementById('radar').checked && !vv.sat){
                 /* the half-hour radar view: the widget's 10/20/30-minute rings, clock-labelled.
                    The rings' times claim their space first; the names fit round them. */
@@ -3142,7 +3298,7 @@ function drawCard(style){
               return Promise.all([subwayFor(vkey), stopsFor(vkey), bulletsFor(vkey)]);
             }).then(function(sw){
               if (stale()) return;
-              if (geoOn()) return radarOverlay(ctx, W, H, VB.Xw, VB.Ymid - VB.mpp * H / 2,
+              if (geoOn() || surfOn()) return radarOverlay(ctx, W, H, VB.Xw, VB.Ymid - VB.mpp * H / 2,
                                                VB.Xw + VB.mpp * W, VB.Ymid + VB.mpp * H / 2);
               var tOn = (document.getElementById('traffic') || {}).checked && VB.mpp <= 320;
               drawSubway((tOn || window.LAB_EMBED) ? railCv.getContext('2d') : ctx, sw[0], sw[1], out.project, sw[2], nmpp());
@@ -3171,7 +3327,7 @@ function drawCard(style){
         paint._traffic = function(){
           var tbox = document.getElementById('traffic');
           trafCv.style.top = cv.offsetTop + 'px';
-          if (!tbox || !tbox.checked || geoOn() || !paint._proj || VB.mpp > 320){ trafCv.getContext('2d').clearRect(0, 0, W, H); TRAF.hits = []; return Promise.resolve(); }
+          if (!tbox || !tbox.checked || geoOn() || surfOn() || !paint._proj || VB.mpp > 320){ trafCv.getContext('2d').clearRect(0, 0, W, H); TRAF.hits = []; return Promise.resolve(); }
           var off = hiCanvas();                                                        // build aside, swap in: no blank flash
           return drawTraffic(off.getContext('2d'), W, H, VB.Xw, VB.Ymid - VB.mpp * H / 2, VB.Xw + VB.mpp * W, VB.Ymid + VB.mpp * H / 2,
                              paint._proj, view, VIEWS[vkey] || {}).then(function(){
@@ -3285,6 +3441,14 @@ function drawCard(style){
       /* the NEAREST feature wins across every layer (the widget's rule): an incident or a
          sign within its own reach beats a station that is further off */
       var hit = null, hd = 1e9;
+      if ((document.getElementById('surf') || {}).checked){
+        (SURF.hits || []).forEach(function(h){
+          var d = (h.x - mx) * (h.x - mx) + (h.y - my) * (h.y - my);
+          if (d < h.reach * h.reach && d < hd){ hd = d; hit = h; }
+        });
+        if (hit) window.parent.postMessage({ labSurfTap: hit.d }, '*');
+        return;
+      }
       (TRAF.hits || []).forEach(function(h){
         var d = (h.x - mx) * (h.x - mx) + (h.y - my) * (h.y - my);
         if (d < h.reach * h.reach && d < hd){ hd = d; hit = h; }
@@ -3362,6 +3526,7 @@ function copyFlavor(){
     document.getElementById('view').value = key;
     document.getElementById('geo').checked = !!m.geo;
     document.getElementById('traffic').checked = !!m.traffic;
+    document.getElementById('surf').checked = !!m.surf;
     document.getElementById('radar').checked = !!(m.radar || m.sat);
     window.LAB_LOCK = !!m.lock;
     renderAll();

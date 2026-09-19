@@ -75,7 +75,14 @@ const CACHE_RULES = {
   //    The feed answers fine but sends no Access-Control-Allow-Origin, so the
   //    city widget's ferry board has to come through here. 25 s matches the
   //    MTA feed cache the subway board already uses. ──
-  'nycferry.connexionz.net':      25
+  'nycferry.connexionz.net':      25,
+  // ── Los Angeles widget (2026-09-19). Both answer fine and send no
+  //    Access-Control-Allow-Origin. coastwatch = NOAA's ERDDAP mirror of the NDBC
+  //    wave buoys (one JSON call for every buoy off LA, ~30-min readings) for the
+  //    SURF layer; CHP = the statewide dispatch log for the TRAFFIC layer. ──
+  'coastwatch.pfeg.noaa.gov':     600,
+  'www.ndbc.noaa.gov':            600,
+  'media.chp.ca.gov':             60
 };
 
 const DEFAULT_TTL = 300;
