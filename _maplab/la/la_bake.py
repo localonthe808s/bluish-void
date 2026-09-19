@@ -126,6 +126,7 @@ MARQUEE = {'Downtown', 'Hollywood', 'Santa Monica', 'Beverly Hills', 'West Holly
            'Northridge', 'Pacific Palisades', 'Brentwood', 'Marina del Rey', 'El Segundo', 'Manhattan Beach',
            'Redondo Beach', 'Downey', 'Whittier', 'Alhambra', 'Pomona', 'El Monte', 'Studio City', 'Mid-City',
            'Los Feliz', 'Crenshaw District', 'Santa Clarita', 'Woodland Hills', 'Calabasas', 'Carson'}
+HOLE_KM2 = 25.0
 RENAME = {'Silverlake': 'Silver Lake', 'Mid-city': 'Mid-City'}
 
 
@@ -139,10 +140,12 @@ def bake_city():
 
     So the mask is the Census 2020 urban footprint -- every urban area touching the
     frame, merged -- which stops at the mountains on its own and knows no city limits.
-    Closed by 150 m and with holes under 1.5 km2 filled, because the raw footprint is
-    built from census blocks and is pitted with golf courses and rail yards; the big
-    voids (Griffith Park, the Santa Monicas, the Baldwin and Puente Hills) stay open,
-    which is the terrain reading through. No inner boundary lines at all: the places
+    Closed by 150 m and with holes under 25 km2 filled, because the raw footprint is
+    built from census blocks and is pitted with golf courses, rail yards and one naval
+    weapons station that came out as a black rectangle beside Long Beach. Filling is
+    safe for green space -- the lab repaints parks OVER the mask -- and the big voids
+    (the Santa Monicas, the Verdugos, the Puente Hills) stay open, which is the
+    terrain reading through. No inner boundary lines at all: the places
     are NAMES inside the shape, from the County's community layer (88 cities, the
     City's neighbourhoods, the unincorporated communities) with the jurisdiction
     dropped from each -- "West Hollywood", never "City of"."""
@@ -159,7 +162,7 @@ def bake_city():
     for poly in ([urban] if urban.geom_type == 'Polygon' else list(urban.geoms)):
         if poly.area * KM2 < 0.5:
             continue
-        parts.append(Polygon(poly.exterior, [h for h in poly.interiors if Polygon(h).area * KM2 >= 1.5]))
+        parts.append(Polygon(poly.exterior, [h for h in poly.interiors if Polygon(h).area * KM2 >= HOLE_KM2]))
     urban = unary_union(parts)
     print('  footprint %.0f km2 in %d pieces' % (urban.area * KM2, len(parts)))
     write('la_urban.json', {'type': 'FeatureCollection', 'features': [
