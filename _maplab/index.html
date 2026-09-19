@@ -3098,6 +3098,47 @@ function filterBref(im, W, H){
   g2.putImageData(id, 0, 0);
   return c;
 }
+/* THE MARINE LAYER MOVES, so it should be shown moving (user 2026-09-19: "can you make the
+   marine layer loop here too"). GIBS carries GOES-West on a TIME dimension at ten-minute
+   steps, but two things make a naive loop fail: it publishes about FIFTY MINUTES behind the
+   clock, and its archive has holes. Asking for a slot it does not hold returns a valid PNG
+   that is simply empty -- 336 bytes of nothing -- so the slots are PROBED at thumbnail size
+   first and only the ones that came back with a picture are fetched at full size. */
+var SATLOOP = { timer: null };
+function stopSatLoop(){ if (SATLOOP.timer){ clearInterval(SATLOOP.timer); SATLOOP.timer = null; } }
+function satUrl(layer, X0, Y0, X1, Y1, w, h, iso){
+  return 'https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi?SERVICE=WMS&REQUEST=GetMap&VERSION=1.1.1'
+    + '&LAYERS=' + layer + '&SRS=EPSG:3857&BBOX=' + Math.round(X0) + ',' + Math.round(Y0) + ','
+    + Math.round(X1) + ',' + Math.round(Y1) + '&WIDTH=' + w + '&HEIGHT=' + h
+    + '&FORMAT=image/png&TRANSPARENT=true' + (iso ? '&TIME=' + iso : '');
+}
+function satSlots(n){
+  var t = new Date(); t.setUTCSeconds(0, 0); t.setUTCMinutes(Math.floor(t.getUTCMinutes() / 10) * 10);
+  var out = [];
+  for (var i = 0; i < n; i++) out.push(new Date(t - i * 600000).toISOString().replace(/\.\d+Z$/, 'Z'));
+  return out;                                               // newest first
+}
+function loadImg(u, cors){
+  return new Promise(function(res){
+    var im = new Image();
+    if (cors !== false) im.crossOrigin = 'anonymous';
+    im.onload = function(){ res(im); };
+    im.onerror = function(){ cors === false ? res(null) : loadImg(u, false).then(res); };
+    im.src = u;
+  });
+}
+/* an empty slot still decodes: it is the alpha that gives it away */
+function satHasPicture(im){
+  if (!im) return false;
+  var c = document.createElement('canvas'); c.width = 24; c.height = 18;
+  var g = c.getContext('2d');
+  try {
+    g.drawImage(im, 0, 0, 24, 18);
+    var d = g.getImageData(0, 0, 24, 18).data, n = 0;
+    for (var i = 3; i < d.length; i += 4) if (d[i] > 8) n++;
+    return n > 24 * 18 * 0.5;
+  } catch (e){ return true; }                               // cannot look: take it on trust
+}
 function radarOverlay(ctx, W, H, X0, Y0, X1, Y1){
   var tick = document.getElementById('radar');
   if (!tick || !tick.checked) return Promise.resolve();
@@ -3117,21 +3158,56 @@ function radarOverlay(ctx, W, H, X0, Y0, X1, Y1){
   if (vw.sat) url = 'https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi?SERVICE=WMS&REQUEST=GetMap&VERSION=1.1.1'
     + '&LAYERS=' + vw.sat + '&SRS=EPSG:3857&BBOX=' + Math.round(X0) + ',' + Math.round(Y0) + ','
     + Math.round(X1) + ',' + Math.round(Y1) + '&WIDTH=' + W + '&HEIGHT=' + H + '&FORMAT=image/png&TRANSPARENT=true';
-  return new Promise(function(res){
-    var attempt = function(cors){
-      var im = new Image();
-      if (cors) im.crossOrigin = 'anonymous';
-      im.onload = function(){
-        var snap = document.createElement('canvas'); snap.width = W; snap.height = H;
-        snap.getContext('2d').drawImage(ctx.canvas, 0, 0);
-        ctx.drawImage(!vw.sat && /_sr_bref$/.test(lyr) ? filterBref(im, W, H) : im, 0, 0, W, H);
-        ctx.save(); ctx.globalAlpha = 0.35; ctx.drawImage(snap, 0, 0); ctx.restore();
-        res();
-      };
-      im.onerror = function(){ cors ? attempt(false) : res(); };
-      im.src = url;
-    };
-    attempt(true);
+  var snapOf = function(){
+    var snap = document.createElement('canvas'); snap.width = W; snap.height = H;
+    snap.getContext('2d').drawImage(ctx.canvas, 0, 0);
+    return snap;
+  };
+  /* THE SATELLITE VIEW RUNS AS A LOOP */
+  if (vw.sat){
+    var slots = satSlots(16);
+    return Promise.all(slots.map(function(iso){ return loadImg(satUrl(vw.sat, X0, Y0, X1, Y1, 64, 48, iso)); }))
+      .then(function(probe){
+        var good = [];
+        for (var i = 0; i < slots.length && good.length < 8; i++) if (satHasPicture(probe[i])) good.push(slots[i]);
+        good.reverse();                                     // oldest -> newest, the way it moved
+        if (!good.length) good = [null];                    // no TIME at all: the server's own latest
+        return Promise.all(good.map(function(iso){ return loadImg(satUrl(vw.sat, X0, Y0, X1, Y1, W, H, iso)); }));
+      })
+      .then(function(frames){
+        frames = frames.filter(Boolean);
+        if (!frames.length) return;
+        var base = snapOf();
+        var show = function(k){
+          ctx.clearRect(0, 0, W, H);
+          ctx.drawImage(base, 0, 0);
+          ctx.drawImage(frames[k], 0, 0, W, H);
+          ctx.save(); ctx.globalAlpha = 0.35; ctx.drawImage(base, 0, 0); ctx.restore();
+        };
+        show(frames.length - 1);
+        stopSatLoop();
+        if (frames.length > 1){
+          var k = frames.length - 1, hold = frames.length + 2;   // a beat on the newest frame
+          SATLOOP.timer = setInterval(function(){
+            if (document.hidden) return;
+            k = (k + 1) % hold;
+            show(Math.min(k, frames.length - 1));
+          }, 620);
+        }
+      });
+  }
+  /* A RADAR VIEW, optionally over the cloud (user: "is there a way to bring that view into
+     the NEXT HALF HOUR / 3HR / 12HR"). The sweep says where the rain is; the satellite says
+     what the sky is doing around it, which on this coast is usually the marine layer. */
+  var under = window.LAB_SATUNDER
+    ? loadImg(satUrl('GOES-West_ABI_GeoColor', X0, Y0, X1, Y1, W, H, null)) : Promise.resolve(null);
+  return Promise.all([loadImg(url), under]).then(function(r){
+    var im = r[0], un = r[1];
+    if (!im) return;
+    var snap = snapOf();
+    if (un){ ctx.save(); ctx.globalAlpha = 0.82; ctx.drawImage(un, 0, 0, W, H); ctx.restore(); }
+    ctx.drawImage(/_sr_bref$/.test(lyr) ? filterBref(im, W, H) : im, 0, 0, W, H);
+    ctx.save(); ctx.globalAlpha = 0.35; ctx.drawImage(snap, 0, 0); ctx.restore();
   });
 }
 
@@ -3638,6 +3714,7 @@ function drawCard(style){
     trafCv.getContext('2d').clearRect(0, 0, W, H); TRAF.hits = [];
     railCv.getContext('2d').clearRect(0, 0, W, H);
     tagCv.getContext('2d').clearRect(0, 0, W, H);
+    stopSatLoop();
     cancelAnimationFrame(window._swellRAF); swellCv.getContext('2d').clearRect(0, 0, W, H);
     clearTimeout(timer);
     timer = setTimeout(paint, 260);
@@ -4310,6 +4387,7 @@ function copyFlavor(){
     document.getElementById('surf').checked = !!m.surf;
     window.LAB_SWELLDIR = (m.swellDir == null ? null : +m.swellDir);
     window.LAB_RAIL = m.rail !== false;
+    window.LAB_SATUNDER = !!m.satUnder;
     document.getElementById('radar').checked = !!(m.radar || m.sat);
     window.LAB_LOCK = !!m.lock;
     renderAll();
