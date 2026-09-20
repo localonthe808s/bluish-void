@@ -13052,7 +13052,7 @@ window._updateHeroWx = function(code, night){
                           ○ SATELLITE<br><span style="font-weight:500;opacity:.75;font-size:.56rem;">GOES GeoColor · Saharan dust</span>
                         </button>
                         <button id="hz-view-enso" onclick="setHurricaneView('enso')" style="padding:8px 12px;border-radius:10px;background:rgba(220,38,38,.14);border:1px solid transparent;color:#b91c1c;font-size:.58rem;font-weight:800;cursor:pointer;letter-spacing:.04em;text-align:center;line-height:1.4;">
-                          ○ EL NIÑO<br><span style="font-weight:500;opacity:.75;font-size:.56rem;">The Pacific · what loads the season’s dice</span>
+                          ○ EL NIÑO<br><span style="font-weight:500;opacity:.75;font-size:.56rem;">Sea temp vs normal · Niño 3.4 · what it means</span>
                         </button>
                       </div>
                     </div>
@@ -82651,8 +82651,13 @@ function initNowMicroTabs(){
       if (on) {
         if (!_hurricaneLayerObjs.enso) {
           _hurricaneLayerObjs.enso = L.tileLayer(
-            'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/GHRSST_L4_MUR_Sea_Surface_Temperature_Anomalies/default/GoogleMapsCompatible_Level7/{z}/{y}/{x}.png',
-            { attribution: 'NASA GIBS \u00b7 GHRSST MUR SST anomaly', opacity: 0.62, maxZoom: 7,
+            /* TODAY is the 1 km product; a PAST DAY is its quarter-degree twin. Measured on the tile server 2026-09-20: the
+               1 km anomaly tiles start in July 2019 (2015-09-19 is a 404), MUR25 runs from 2002 on the same colour map, but
+               only to tile level 6 -- so a dated skin is MUR25 with maxNativeZoom 6 and Leaflet stretches it beyond. */
+            window._hzEnsoDate
+              ? 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/GHRSST_L4_MUR25_Sea_Surface_Temperature_Anomalies/default/' + window._hzEnsoDate + '/GoogleMapsCompatible_Level6/{z}/{y}/{x}.png'
+              : 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/GHRSST_L4_MUR_Sea_Surface_Temperature_Anomalies/default/GoogleMapsCompatible_Level7/{z}/{y}/{x}.png',
+            { attribution: 'NASA GIBS \u00b7 GHRSST MUR SST anomaly' + (window._hzEnsoDate ? ' \u00b7 ' + window._hzEnsoDate : ''), opacity: 0.72, maxZoom: 7, maxNativeZoom: window._hzEnsoDate ? 6 : 7,
               tileSize: 256, minZoom: 2, pane: 'hz-sst', updateWhenZooming: false, updateWhenIdle: true }
           );
         }
@@ -83410,6 +83415,13 @@ function initNowMicroTabs(){
     b.style.background = on ? 'rgba(234,88,12,.92)' : 'rgba(167,139,250,.30)';
     b.style.color = on ? 'rgba(255,255,255,.97)' : 'rgba(43,34,244,.65)';
   };
+  /* re-date the anomaly skin (the EL NINO view's NOW / 2015 / 2010): GIBS WMTS takes the day in its path, null = newest */
+  window._hzEnsoSkin = function(day){
+    if ((window._hzEnsoDate || null) === (day || null)) return;
+    window._hzEnsoDate = day || null;
+    if (_hurricaneLayerObjs.enso){ try { if (_hurricaneMap && _hurricaneMap.hasLayer(_hurricaneLayerObjs.enso)) _hurricaneMap.removeLayer(_hurricaneLayerObjs.enso); } catch(e){} _hurricaneLayerObjs.enso = null; }
+    if (_hurricaneLayers.enso){ _hurricaneLayers.enso = false; toggleHurricaneLayer('enso'); }
+  };
   window.toggleHzEnso = function(){
     toggleHurricaneLayer('enso');
     window._hzExtraBtnPaint('hz-extra-enso', !!_hurricaneLayers.enso);
@@ -83434,22 +83446,30 @@ function initNowMicroTabs(){
      ONI is and single months cross the 0.5 threshold on noise. cpc.ncep.noaa.gov
      sends no CORS, so it goes through our own worker with allorigins behind it. */
   function _hzFetchEnso(){
-    var src = 'https://www.cpc.ncep.noaa.gov/products/analysis_monitoring/ensostuff/detrend.nino34.ascii.txt';
+    /* THE PUBLISHED INDEX, NOT ONE OF OUR OWN (fixed 2026-09-20). This used to average the last three rows of
+       detrend.nino34.ascii.txt itself. That file had stopped at JUNE, so in a September with NOAA calling a
+       strengthening El Nino the map still said "+1.76 F, WEAK" -- a stale number we had computed, beside a panel
+       quoting the real ones. Now: the ONI is the last row of CPC's own oni.ascii.txt, named with its season, and
+       the second line is the newest WEEK of CPC's weekly Nino 3.4 file. Two published numbers, each labelled. */
+    var src = 'https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt', srcWk = 'https://www.cpc.ncep.noaa.gov/data/indices/wksst9120.for';
     var get = function(u){ return fetch(u).then(function(r){ if(!r.ok) throw 0; return r.text(); }); };
-    get('https://proxy.bluishvoid.com/?url=' + encodeURIComponent(src))
-      .catch(function(){
-        return fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(src))
-          .then(function(r){ return r.json(); }).then(function(j){ return j.contents || ''; });
-      })
-      .then(function(txt){
-        var rows = String(txt).trim().split('\n').map(function(l){
-          return l.trim().split(/\s+/);
-        }).filter(function(c){ return c.length >= 5 && /^\d{4}$/.test(c[0]); });
-        if (rows.length < 3) return;
-        var last3 = rows.slice(-3).map(function(c){ return parseFloat(c[4]); });
-        if (last3.some(isNaN)) return;
-        var oni = last3.reduce(function(a2,b2){ return a2+b2; }, 0) / 3;
-        var cur = last3[2];
+    Promise.all([
+      get('https://proxy.bluishvoid.com/?url=' + encodeURIComponent(src))
+        .catch(function(){
+          return fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(src))
+            .then(function(r){ return r.json(); }).then(function(j){ return j.contents || ''; });
+        }),
+      get('https://proxy.bluishvoid.com/?url=' + encodeURIComponent(srcWk)).catch(function(){ return ''; })
+    ])
+      .then(function(both){
+        var rows = String(both[0]).trim().split('\n').map(function(l){ return l.trim().split(/\s+/); })
+                     .filter(function(c){ return c.length >= 4 && /^[A-Z]{3}$/.test(c[0]) && /^\d{4}$/.test(c[1]); });
+        if (!rows.length) return;
+        var lastRow = rows[rows.length - 1], oni = parseFloat(lastRow[lastRow.length - 1]), seas = lastRow[0] + ' ' + lastRow[1];
+        if (isNaN(oni)) return;
+        var cur = null, wkLine = String(both[1]).trim().split('\n').filter(function(l){ return /^\s*\d{2}[A-Z]{3}\d{4}/.test(l); }).pop();
+        if (wkLine){ var nums = wkLine.replace(/^\s*\S+/, '').match(/-?\d+\.\d/g); if (nums && nums.length >= 6 && !isNaN(parseFloat(nums[5]))) cur = parseFloat(nums[5]); }
+        var curLbl = cur == null ? '' : 'latest week ' + (cur >= 0 ? '+' : '') + bvDF(cur).toFixed(1) + '\u00b0F \u00b7 ';
         var mag = Math.abs(oni);
         /* CPC publishes these in Celsius and they are ANOMALIES - departures
            from normal, not temperatures. So they convert with bvDF (x9/5),
@@ -83470,10 +83490,10 @@ function initNowMicroTabs(){
           if (window._hzNinoLbl) window._hzNinoLbl.setIcon(L.divIcon({
             className: '', iconAnchor: [0, 10],
             html: '<div style="font-family:system-ui,sans-serif;white-space:nowrap;text-shadow:0 0 10px #000,0 0 20px #000;">'
-                + '<div style="font-size:.52rem;font-weight:900;color:' + col + ';letter-spacing:.08em;">NI\u00d1O 3.4 &nbsp;'
-                + (oni >= 0 ? '+' : '') + bvDF(oni).toFixed(2) + '\u00b0F \u00b7 ' + strength + phase + '</div>'
+                + '<div style="font-size:.52rem;font-weight:900;color:' + col + ';letter-spacing:.08em;">NI\u00d1O 3.4 &nbsp;' + seas + ' '
+                + (oni >= 0 ? '+' : '') + bvDF(oni).toFixed(1) + '\u00b0F \u00b7 ' + strength + phase + '</div>'
                 + '<div style="font-size:.42rem;font-weight:700;color:rgba(226,232,240,.62);letter-spacing:.05em;margin-top:2px;">'
-                + 'latest month ' + (cur >= 0 ? '+' : '') + bvDF(cur).toFixed(2) + '\u00b0F \u00b7 '
+                + curLbl
                 + (mag < 0.5 ? 'trades near normal'
                    : oni > 0 ? 'trades slackened \u00b7 east Pacific favoured, Atlantic suppressed'
                              : 'trades strengthened \u00b7 Atlantic favoured, east Pacific suppressed')
@@ -83481,8 +83501,8 @@ function initNowMicroTabs(){
           if (window._hzNinoLblAtl) window._hzNinoLblAtl.setIcon(L.divIcon({
             className: '', iconAnchor: [0, 10],
             html: '<div style="font-family:system-ui,sans-serif;white-space:nowrap;text-shadow:0 0 10px #000,0 0 20px #000;">'
-                + '<div style="font-size:.5rem;font-weight:900;color:' + col + ';letter-spacing:.07em;">ENSO &nbsp;'
-                + (oni >= 0 ? '+' : '') + bvDF(oni).toFixed(2) + '\u00b0F \u00b7 ' + strength + phase + '</div>'
+                + '<div style="font-size:.5rem;font-weight:900;color:' + col + ';letter-spacing:.07em;">ENSO &nbsp;' + seas + ' '
+                + (oni >= 0 ? '+' : '') + bvDF(oni).toFixed(1) + '\u00b0F \u00b7 ' + strength + phase + '</div>'
                 + '<div style="font-size:.42rem;font-weight:700;color:rgba(226,232,240,.62);letter-spacing:.05em;margin-top:2px;">'
                 + (mag < 0.5 ? 'near-normal shear \u00b7 neither basin favoured'
                    : oni > 0 ? 'warm phase \u00b7 upper-level shear UP over the Atlantic, season suppressed'
@@ -87359,10 +87379,14 @@ function initNowMicroTabs(){
   // ── VIEW PRESETS ────────────────────────────────────────────────────────────
   // Each view defines exactly which layers are on — everything else turns off.
   var _hurricaneViewPresets = {
-    track: { track: true,  sst: false, tchp: false, gtwo: true,  goes: false, sal: false, shear: false, wv: false, waves: true  },
-    ocean: { track: true,  sst: true,  tchp: true,  gtwo: true,  goes: false, sal: false, shear: false, wv: false, waves: false },
-    atmo:  { track: true,  sst: false, tchp: false, gtwo: false, goes: false, sal: false, shear: true,  wv: true,  waves: false },
-    sat:   { track: true,  sst: false, tchp: false, gtwo: false, goes: true,  sal: true,  shear: false, wv: false, waves: false },
+    track: { track: true,  sst: false, tchp: false, gtwo: true,  goes: false, sal: false, shear: false, wv: false, waves: true , enso: false },
+    ocean: { track: true,  sst: true,  tchp: true,  gtwo: true,  goes: false, sal: false, shear: false, wv: false, waves: false, enso: false },
+    atmo:  { track: true,  sst: false, tchp: false, gtwo: false, goes: false, sal: false, shear: true,  wv: true,  waves: false, enso: false },
+    sat:   { track: true,  sst: false, tchp: false, gtwo: false, goes: true,  sal: true,  shear: false, wv: false, waves: false, enso: false },
+    /* EL NINO IS A SKIN, LIKE OCEAN (user 2026-09-20: "el nino should be a skin on the map that changes like OCEAN, why
+       doesnt ocean show the el nino"). OCEAN cannot show it: it paints the water's actual temperature, and the equatorial
+       Pacific is warm every day of the year. El Nino is a DEPARTURE from normal, so its view paints the anomaly instead. */
+    enso:  { track: true,  sst: false, tchp: false, gtwo: true,  goes: false, sal: false, shear: false, wv: false, waves: false, enso: true  },
   };
 
   var _activeHurricaneView = 'track';
@@ -87380,21 +87404,23 @@ function initNowMicroTabs(){
     });
 
     // Update view button styles
-    var viewLabels = { track: 'TRACK', ocean: 'OCEAN', atmo: 'ATMOSPHERE', sat: 'SATELLITE' };
+    var viewLabels = { track: 'TRACK', ocean: 'OCEAN', atmo: 'ATMOSPHERE', sat: 'SATELLITE', enso: 'EL NI\u00d1O' };
     var viewSubs   = {
       track: 'Active storms · Disturbances · Waves',
       ocean: 'Sea surface temp · Ocean heat content (TCHP)',
       atmo:  'Wind shear · Water vapor · Moisture',
-      sat:   'GOES GeoColor · Saharan dust'
+      sat:   'GOES GeoColor · Saharan dust',
+      enso:  'Sea temp vs normal \u00b7 Ni\u00f1o 3.4 \u00b7 what it means'
     };
-    var views = ['track', 'ocean', 'atmo', 'sat'];
+    var views = ['track', 'ocean', 'atmo', 'sat', 'enso'];
     // LIVE CLOUDS button scheme: selected = solid hue + white text, unselected =
     // soft tint of the same hue. Each view is color-coded.
     var viewTints = {
       track: { on: 'rgba(234,88,12,.92)',  tint: 'rgba(234,88,12,.16)',  ink: '#c2410c' },
       ocean: { on: 'rgba(13,148,136,.92)', tint: 'rgba(20,184,166,.20)', ink: '#0f766e' },
       atmo:  { on: 'rgba(37,99,235,.92)',  tint: 'rgba(59,130,246,.16)', ink: '#1d4ed8' },
-      sat:   { on: 'rgba(202,138,4,.92)',  tint: 'rgba(250,204,21,.30)', ink: '#a16207' }
+      sat:   { on: 'rgba(202,138,4,.92)',  tint: 'rgba(250,204,21,.30)', ink: '#a16207' },
+      enso:  { on: 'rgba(185,28,28,.92)',  tint: 'rgba(220,38,38,.14)',  ink: '#b91c1c' }
     };
     views.forEach(function(v) {
       var btn = document.getElementById('hz-view-' + v);
@@ -87407,7 +87433,7 @@ function initNowMicroTabs(){
       btn.innerHTML = (active ? '⦿ ' : '○ ') + viewLabels[v] +
         '<br><span style="font-weight:500;opacity:.75;font-size:.56rem;">' + viewSubs[v] + '</span>';
     });
-    if (window._hzExtraBtnPaint) window._hzExtraBtnPaint('hz-extra-waves', !!_hurricaneLayers.waves);
+    if (window._hzExtraBtnPaint){ window._hzExtraBtnPaint('hz-extra-waves', !!_hurricaneLayers.waves); window._hzExtraBtnPaint('hz-extra-enso', !!_hurricaneLayers.enso); }
   }
 
   // ── BASIN ──────────────────────────────────────────────────────────────────
@@ -87524,8 +87550,8 @@ function initNowMicroTabs(){
      It first shipped as a CLOUDS tab; the same day: "bad call by me, lets make this info a tab in
      the hurricane hazard widget ... add all this there". So it is the fifth VIEW of the hurricane
      subview, beside TRACK / OCEAN / ATMOSPHERE / SATELLITE -- the Pacific is what loads the dice
-     for a hurricane season, and that widget is where the rest of the ocean lives. The view leaves
-     the map's layers alone and swaps the panel under the buttons. Not tied to a city: the tropical Pacific is one place, and what changes per
+     for a hurricane season, and that widget is where the rest of the ocean lives. The view re-skins
+     the hurricane map with the anomaly (see `skin`) and swaps the panel under the buttons. Not tied to a city: the tropical Pacific is one place, and what changes per
      viewer is only the last paragraph. Everything shown is somebody's published number or image,
      named as what it is:
        STATUS    the Climate Prediction Center's monthly ENSO Diagnostic Discussion: its alert
@@ -87669,15 +87695,8 @@ function initNowMicroTabs(){
         /* TWO COLUMNS ON A WIDE SCREEN: the map filled the whole pane on the first build and everything else was a scroll away (measured: 1,472 px of content in a 708 px body) */
         + '<div class="enso-grid"><div style="min-width:0;">'
         + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;align-items:center;">' + btn('now', 'NOW') + btn('y2015', 'THIS DATE IN 2015 · THE LAST VERY STRONG EL NIÑO') + btn('y2010', 'THIS DATE IN 2010 · LA NIÑA')
-        + '<span style="font:700 8px system-ui,sans-serif;letter-spacing:.08em;color:#6b7389;">SEA-SURFACE TEMPERATURE AGAINST NORMAL · ' + (day || '') + ' · NASA MUR</span></div>'
-        + (day ? '<div id="enso-map" style="position:relative;width:100%;aspect-ratio:' + LONW + ' / ' + LATH + ';background:#efe9da;border-radius:9px;overflow:hidden;margin-top:6px;box-shadow:0 0 0 1px rgba(27,35,64,.22);">'
-          + '<img alt="" src="' + GIBS + '&BBOX=120,-35,180,50&WIDTH=500&HEIGHT=708&TIME=' + day + '" style="position:absolute;left:0;top:0;width:33.3334%;height:100%;display:block;">'
-          + '<img alt="" src="' + GIBS + '&BBOX=-180,-35,-60,50&WIDTH=1000&HEIGHT=708&TIME=' + day + '" style="position:absolute;left:33.3333%;top:0;width:66.6667%;height:100%;display:block;">'
-          + '<div style="position:absolute;left:0;right:0;top:' + (LAT1 / LATH * 100) + '%;border-top:1px dashed rgba(27,35,64,.35);"></div>'
-          + box(160, 210, 5, -5, '', null, false) + box(210, 270, 5, -5, '', null, false) + box(270, 280, 0, -10, '', null, false)
-          + box(190, 240, 5, -5, 'NIÑO 3.4 · THE BOX THAT IS WATCHED', L ? L.n34 : null, true)
-          + (inFrame ? '<div style="position:absolute;left:' + lx + '%;top:' + ly + '%;width:9px;height:9px;margin:-5px 0 0 -5px;border-radius:50%;background:#2B22F4;box-shadow:0 0 0 2px #fff;"></div><div style="position:absolute;left:' + lx + '%;top:' + ly + '%;transform:translate(' + (lx > 85 ? '-108%' : '9px') + ',-50%);font:800 9px system-ui,sans-serif;letter-spacing:.06em;color:#2B22F4;background:rgba(255,252,244,.9);padding:1px 5px;border-radius:4px;white-space:nowrap;">' + nm + '</div>' : '')
-          + '<div style="position:absolute;left:8px;bottom:6px;font:700 7.5px system-ui,sans-serif;letter-spacing:.08em;color:#1b2340;background:rgba(255,252,244,.85);padding:2px 5px;border-radius:3px;">EQUATOR DASHED · FAINT BOXES: NIÑO 4, 3, 1+2</div></div>'
+        + '<span style="font:700 8px system-ui,sans-serif;letter-spacing:.08em;color:#6b7389;">THE MAP ABOVE IS WEARING THIS · SEA-SURFACE TEMPERATURE AGAINST NORMAL · ' + (day || '') + ' · NASA MUR</span></div>'
+        + (day ? ''
           + '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;margin-top:5px;font:700 8px system-ui,sans-serif;letter-spacing:.06em;color:#1b2340;"><span>−5.4°F</span><div style="flex:1 1 160px;min-width:120px;max-width:420px;height:8px;border-radius:4px;background:linear-gradient(90deg,#' + PAL.join(',#') + ');"></div><span>+5.4°F OR MORE</span><span style="color:#6b7389;">COLDER / WARMER THAN NORMAL (±3°C) · THE SCALE STOPS THERE: DARK RED MAY BE MORE</span></div>' : '')
         + '</div><div style="min-width:0;">'
         + '<div style="font:500 10.5px/1.4 system-ui,sans-serif;color:#3b4460;margin-top:10px;">Normally the trade winds pile the Pacific’s warm water up against Indonesia and pull cold water to the surface off Peru. In an El Niño the winds slacken and the warm water sloshes back east along the equator. <b style="font-weight:700;">The rain follows the warm water, the tropical heat source moves thousands of miles, and the jet streams over both hemispheres bend to suit it.</b> La Niña is the same machine running harder the normal way.</div>'
@@ -87692,34 +87711,40 @@ function initNowMicroTabs(){
           + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px;margin-top:5px;"><a href="' + CPC + 'products/predictions/long_range/seasonal.php?lead=1" target="_blank" rel="noopener"><img alt="Temperature outlook" src="' + CPC + 'products/predictions/long_range/lead01/off01_temp.gif" style="display:block;width:100%;border-radius:7px;background:#fff;"></a>'
           + '<a href="' + CPC + 'products/predictions/long_range/seasonal.php?lead=1" target="_blank" rel="noopener"><img alt="Precipitation outlook" src="' + CPC + 'products/predictions/long_range/lead01/off01_prcp.gif" style="display:block;width:100%;border-radius:7px;background:#fff;"></a></div>' : '')
         + '<div style="font:600 8px system-ui,sans-serif;letter-spacing:.06em;color:#6b7389;margin-top:10px;">SOURCES · <a href="' + CPC + 'products/analysis_monitoring/enso_advisory/ensodisc.shtml" target="_blank" rel="noopener" style="color:inherit;">CPC ENSO DIAGNOSTIC DISCUSSION</a> · <a href="' + CPC + 'data/indices/wksst9120.for" target="_blank" rel="noopener" style="color:inherit;">CPC WEEKLY NIÑO INDICES</a> · <a href="https://podaac.jpl.nasa.gov/dataset/MUR25-JPL-L4-GLOB-v04.2" target="_blank" rel="noopener" style="color:inherit;">NASA JPL MUR SST VIA GIBS</a></div>';
-      [].slice.call(root.querySelectorAll('[data-cmp]')).forEach(function(b){ b.onclick = function(e){ e.stopPropagation(); S.cmp = b.getAttribute('data-cmp'); render(); }; });
+      [].slice.call(root.querySelectorAll('[data-cmp]')).forEach(function(b){ b.onclick = function(e){ e.stopPropagation(); S.cmp = b.getAttribute('data-cmp'); skin(); render(); }; });
       var cv = document.getElementById('enso-chart'); if (cv) chart(cv);
     }
-    window.bvEnsoOpen = function(){ render(); load().then(render).catch(render); };
+    /* THE SKIN (user 2026-09-20: "el nino should be a skin on the map that changes like OCEAN"). The view turns the
+       hurricane map's own anomaly layer on, as OCEAN turns on temperature; NOW / 2015 / 2010 re-date that layer
+       (GIBS WMTS takes the day in its path), so the comparison happens on the big map, not on a second small one. */
+    var skin = function(){
+      var md = S.day ? S.day.slice(4) : '', d = S.cmp === 'y2015' ? '2015' + md : S.cmp === 'y2010' ? '2010' + md : null;
+      if (window._hzEnsoSkin) window._hzEnsoSkin(d && md ? d : null);
+    };
+    window.bvEnsoOpen = function(){ render(); load().then(function(){ render(); skin(); }).catch(render); };
     var active = function(){ var p = document.getElementById('hz-enso-panel'); return !!p && p.style.display !== 'none'; };
     window.addEventListener('resize', function(){ if (active()){ var cv = document.getElementById('enso-chart'); if (cv) chart(cv); } });
     var css = document.createElement('style');
     css.textContent = '.enso-grid{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:4px 18px;align-items:start;}'
       + '@media (max-width:1100px){.enso-grid{grid-template-columns:minmax(0,1fr);}}';
     document.head.appendChild(css);
-    /* THE FIFTH VIEW. setHurricaneView owns four buttons and the map's layer presets; this wraps it rather than
-       reaching inside: 'enso' paints its own button, dims the others to their tints, and shows the panel in place
-       of the season columns; any other view hands straight back and the panel goes away. */
-    var TINT = { track: ['rgba(234,88,12,.16)', '#c2410c'], ocean: ['rgba(20,184,166,.20)', '#0f766e'], atmo: ['rgba(59,130,246,.16)', '#1d4ed8'], sat: ['rgba(250,204,21,.30)', '#a16207'] };
-    var paintBtn = function(on){ var b = document.getElementById('hz-view-enso'); if (!b) return;
-      b.style.background = on ? 'rgba(185,28,28,.92)' : 'rgba(220,38,38,.14)'; b.style.color = on ? 'rgba(255,255,255,.97)' : '#b91c1c';
-      b.innerHTML = (on ? '\u29bf ' : '\u25cb ') + 'EL NI\u00d1O<br><span style="font-weight:500;opacity:.75;font-size:.56rem;">The Pacific \u00b7 what loads the season\u2019s dice</span>'; };
+    /* THE FIFTH VIEW is a native preset of setHurricaneView now (layers + button paint live there, like the other
+       four). This wrapper only swaps the panel under the buttons, puts a phone on the ocean the view is about,
+       and hands the skin back to today's date on the way out. */
     var show = function(on){
       var p = document.getElementById('hz-enso-panel'), body = document.getElementById('hurricane-subview-body');
       if (p) p.style.display = on ? 'block' : 'none';
       if (body) body.style.display = on ? 'none' : 'flex';
-      paintBtn(on);
     };
     var prev = window.setHurricaneView;
     if (typeof prev === 'function') window.setHurricaneView = function(view){
-      if (view !== 'enso'){ show(false); return prev.apply(this, arguments); }
-      Object.keys(TINT).forEach(function(v){ var b = document.getElementById('hz-view-' + v); if (!b) return; b.style.background = TINT[v][0]; b.style.color = TINT[v][1]; b.innerHTML = b.innerHTML.replace('\u29bf', '\u25cb'); });
-      show(true); window.bvEnsoOpen();
+      var r = prev.apply(this, arguments), on = view === 'enso';
+      show(on);
+      if (on){
+        if (window._hzWide && !window._hzWide() && window._hzBasin !== 'pac' && window._hzSetBasin) window._hzSetBasin('pac');
+        window.bvEnsoOpen();
+      } else if (S.cmp !== 'now'){ S.cmp = 'now'; if (window._hzEnsoSkin) window._hzEnsoSkin(null); }
+      return r;
     };
   })();
 
