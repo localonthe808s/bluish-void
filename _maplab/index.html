@@ -749,9 +749,25 @@ function drawReliefList(ctx, list, view, mpp, proj, stale, exclusive){
     target = off.getContext('2d');
   }
   var chain = Promise.resolve();
-  (list || []).forEach(function(r){
-    if (r.maxMpp && mpp > r.maxMpp) return;
-    if (r.e < view.w || r.w > view.e || r.n < view.s || r.s > view.n) return;
+  /* DO NOT FETCH WHAT A FINER TIER WILL ERASE. Measured on the city map: 13.9 MB cold, of
+     which 10 MB was the three regional 15" images -- sea alone 6.7 MB -- that the 3" tier
+     then cleared from under itself without one pixel showing, because the home frame lies
+     wholly inside the pull box. A tier is skipped when some finer tier that WILL draw at this
+     scale contains the whole view, inset by its feathered rim so the blend at a pull-box
+     edge still has its partner whenever that edge is actually on screen. */
+  var live = (list || []).filter(function(r){
+    return !(r.maxMpp && mpp > r.maxMpp) && !(r.e < view.w || r.w > view.e || r.n < view.s || r.s > view.n);
+  });
+  var area = function(r){ return (r.e - r.w) * (r.n - r.s); };
+  var buried = function(r){
+    return live.some(function(f){
+      if (f === r || area(f) >= area(r)) return false;
+      var ix = (f.e - f.w) * 0.07, iy = (f.n - f.s) * 0.07;
+      return view.w >= f.w + ix && view.e <= f.e - ix && view.s >= f.s + iy && view.n <= f.n - iy;
+    });
+  };
+  live.forEach(function(r){
+    if (buried(r)) return;
     chain = chain.then(function(){ return reliefImage(r.img); }).then(function(img){
       if (stale()) return;
       if (exclusive && !r.feather){
@@ -2336,72 +2352,12 @@ function surfReads(){
   return SURF.p;
 }
 function compass(d){ return ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'][Math.round(((d % 360) + 360) % 360 / 22.5) % 16]; }
-function angDiff(a, b){ return Math.abs(((a - b) % 360 + 540) % 360 - 180); }
-/* HOW THE WIND SITS ON A BREAK. `face` is the way a break looks out to sea, taken as the middle
-   of its swell window -- the same thing. Wind FROM near that bearing is blowing in off the water
-   (onshore: the faces crumble); wind from behind it is offshore and holds them open. Under four
-   knots none of it matters and the water is glass. */
-function windOn(w, face){
-  if (!w || w.kt == null) return null;
-  if (w.kt < 4) return { kt:w.kt, dir:w.dir, kind:'GLASSY', good:true };
-  var d = angDiff(w.dir, face);
-  return { kt:w.kt, dir:w.dir, gust:w.gust, kind: d < 55 ? 'ONSHORE' : d > 125 ? 'OFFSHORE' : 'CROSS-SHORE',
-           good: d > 125, bad: d < 55 };
-}
-function faceOf(win){
-  var a = win[0], d = ((win[1] - win[0]) % 360 + 360) % 360;        // the middle, the short way round
-  return ((a + d / 2) % 360 + 360) % 360;
-}
-/* the swell this map is drawn for: the bay buoy, or whatever the dial is asking about */
-function leadSwell(R){
-  var B = (R && R.buoys) || {}, b = B['46221'] || B['46268'] || B['46222'] || B[Object.keys(B)[0]];
-  if (!b || b.dir == null) return null;
-  return window.LAB_SWELLDIR != null ? { dir: window.LAB_SWELLDIR, tp: b.tp, hs: b.hs, model: b.model, whatIf: true } : b;
-}
 function makeSurf(ctx, spots, R, proj, mpp, M, D){
-  var hits = [], labels = [], marks = [], bars = [], tideNow = R && R.level ? R.level.ft : null;
-  var lead = leadSwell(R);
-  /* WHERE A BREAK BREAKS, and how big the face is when it does. NOT read off the grid: the
-     soundings are 250 m apart and a surf zone is thirty metres wide, so asking the grid which
-     cell breaks gave answers a kilometre out. This is the standard empirical breaker height from
-     the swell that is arriving -- Komar and Gaughan, Hb = 0.39 g^0.2 (T Hs^2)^0.4 -- with the
-     swell first cut down by how much of it this break is open to (height goes as the square root
-     of energy). The wave then breaks in about Hb/0.78 of water, and how far out that is depends
-     only on how fast the bottom drops away, which the grid CAN say: the fall between a quarter
-     and a kilometre offshore. A steep reef breaks a few metres off the rocks; a shelving beach
-     puts the same wave a long way out. */
-  var slopeAt = function(lon, lat, face){
-    if (!D) return null;
-    var a = (face * Math.PI) / 180, dLon = Math.sin(a) / (111.32 * Math.cos(lat * Math.PI / 180)), dLat = Math.cos(a) / 111.32;
-    var dep = function(km){
-      var x2 = Math.round((lon + dLon * km - D.W) / D.step), y2 = Math.round((D.N - (lat + dLat * km)) / D.step);
-      if (x2 < 0 || y2 < 0 || x2 >= D.w || y2 >= D.h) return null;
-      var v = D.depth[y2 * D.w + x2];
-      return v > 0 ? v : null;
-    };
-    /* the slope that matters is the one the wave climbs, from the sand out to where it stands up --
-       a few hundred metres, not the shelf beyond. Reading the shelf instead (a quarter out to a
-       kilometre) put Huntington's 3 ft day 244 m off the sand; it breaks a quarter of that.
-       So: walk seaward to the water's edge, then take the depth a quarter-kilometre past it. The
-       walk matters -- under the cliffs at Palos Verdes the cell on the pin is rock, and measuring
-       from the pin made a steep reef read like a flat, and put a 10 ft day 667 m out. */
-    var edge = 0;
-    while (edge <= 1.0 && dep(edge) == null) edge += 0.125;
-    if (edge > 1.0) return null;
-    var z = dep(edge + 0.25);
-    if (z == null) return null;
-    return { slope: Math.max(0.004, Math.min(0.15, z / 250)), edgeM: edge * 1000 };
-  };
-  var breakAt = function(sp, openFrac){
-    if (!lead || lead.hs == null || !lead.tp) return null;
-    var hs = lead.hs * Math.sqrt(Math.max(openFrac == null ? 1 : openFrac, 0.04));
-    if (!(hs > 0.02)) return null;
-    var Hb = 0.39 * Math.pow(9.81, 0.2) * Math.pow(lead.tp * hs * hs, 0.4);   // metres, trough to crest
-    var hb = Hb / 0.78, g2 = slopeAt(sp.c[0], sp.c[1], faceOf(sp.win));
-    return { faceFt: Hb * 3.281, depFt: hb * 3.281, outM: g2 ? Math.round(hb / g2.slope) : null,
-             slope: g2 ? g2.slope : null, edgeM: g2 ? g2.edgeM : null };
-  };
-  var inWin = function(d, w){ d = (d + 360) % 360; return w[0] <= w[1] ? (d >= w[0] && d <= w[1]) : (d >= w[0] || d <= w[1]); };
+  /* THE NAMED BREAKS ARE GONE (user 2026-09-20: "remove surf spots"). Eighteen pins with
+     swell windows and tide ranges I had drafted by hand were driving a verdict -- RUNNING, TOO
+     SMALL -- that read as authority and was guesswork. Everything round them was measured, which
+     made it worse. What stays is what is read, not reasoned: the buoys and the moving sea. */
+  var hits = [], labels = [], marks = [];
   var CW = cvW(ctx), CH = cvH(ctx), inF = function(q){ return q.x > 6 && q.y > 6 && q.x < CW - 6 && q.y < CH - 6; };
   var B = (R && R.buoys) || {};
   Object.keys(B).forEach(function(id){
@@ -2414,48 +2370,6 @@ function makeSurf(ctx, spots, R, proj, mpp, M, D){
       { t: compass(b.dir) + (tr ? '   ' + arrow + tr.word : '') }
     ] });
     hits.push({ x:q.x, y:q.y, reach:16, d:{ kind:'buoy', id:id, name:(spots.buoys || {})[id] || ('BUOY ' + id), hs:b.hs, tp:b.tp, dir:b.dir, wt:b.wt, t:b.t, model:!!b.model, trend:tr } });
-  });
-  (spots.spots || []).forEach(function(sp){
-    var q = proj({ x:sp.c[0], y:sp.c[1] }); if (!inF(q)) return;
-    var b = B[sp.buoy] || null, on = !!(b && b.hs >= 0.6 && b.tp >= 8 && inWin(b.dir, sp.win));
-    var tideOk = tideNow == null ? null : (tideNow >= sp.tide[0] && tideNow <= sp.tide[1]);
-    marks.push({ t:'spot', q:q, on:on, clean: !!(on && wnd && wnd.good), blown: !!(on && wnd && wnd.bad) });
-    /* a running break is always named; a quiet one only once the map is close enough for it */
-    if (on || mpp < 80) labels.push({ x:q.x, y:q.y, txt:sp.n.toUpperCase(), rank: on ? 70 : 20, col: on ? '#ecfeff' : 'rgba(200,222,240,.82)', side:true });
-    /* how open THIS break is to THIS swell, by straight lines (the first 3 km are skipped: a
-       break sits on the mask's own coastline) */
-    var openDir = window.LAB_SWELLDIR != null ? window.LAB_SWELLDIR : (b ? b.dir : null);
-    var open = (M && openDir != null) ? swellExposure(M, sp.c[0], sp.c[1], openDir, 3) : null;
-    /* the wind at the nearest of the four coastal points, judged against the way this break faces */
-    var face = faceOf(sp.win), wnd = null;
-    if (R && R.wind){
-      var bw = null, bd = 1e9;
-      R.wind.forEach(function(w){ var dd = (w.lat - sp.c[1]) * (w.lat - sp.c[1]) + (w.lon - sp.c[0]) * (w.lon - sp.c[0]); if (dd < bd){ bd = dd; bw = w; } });
-      wnd = windOn(bw, face);
-    }
-    /* WHERE IT BREAKS, AS ONE SHORT BAR (user 2026-09-19: "is there like a breaking point for
-       surfers?"). NOT traced out of the grid: the soundings are 250 m apart and today's wave
-       breaks in four feet of water forty-seven metres off the sand, so no cell ever qualifies and
-       the only contour the grid offered was focusing noise out in the deep. This is the spot's own
-       arithmetic instead -- the breaker height from the swell it is open to, the depth that stands
-       it up, the beach's slope -- laid across the swell where it lands, 300 m of lineup. At the
-       wide view it is three pixels, which is honest; zoom in and it walks off the sand as the
-       swell builds. */
-    var bk = breakAt(sp, open);
-    if (bk && bk.outM != null){
-      var fa = faceOf(sp.win), kx = 1 / (111.32 * Math.cos(sp.c[1] * Math.PI / 180)), ky = 1 / 111.32;
-      var deg = function(bearing, km){ var r = bearing * Math.PI / 180; return [Math.sin(r) * km * kx, Math.cos(r) * km * ky]; };
-      /* measured from the pin, not from the grid's water's edge: a 250 m cell puts that edge up to
-         a cell away even where the sand is thirty metres off, and adding it laid Malibu's bar on
-         the spit. The pins are already on the break. */
-      var o = deg(fa, bk.outM / 1000), cLo = sp.c[0] + o[0], cLa = sp.c[1] + o[1];
-      var t = deg(fa + 90, 0.15);   // half of 300 m of lineup, laid across the swell
-      bars.push([[cLo - t[0], cLa - t[1]], [cLo + t[0], cLa + t[1]]]);
-    }
-    hits.push({ x:q.x, y:q.y, reach:14, d:{ kind:'spot', name:sp.n, open: open, openDir: openDir, whatIf: window.LAB_SWELLDIR != null,
-      brk: bk, win:sp.win, tide:sp.tide, bottom:sp.bottom, on:on, tideOk:tideOk, tideNow:tideNow,
-      face: face, wind: wnd,
-      buoy: b ? { id:sp.buoy, name:(spots.buoys || {})[sp.buoy], hs:b.hs, tp:b.tp, dir:b.dir, model:!!b.model, trend:b.trend } : null } });
   });
   var placed = [];
   return { hits: hits,
@@ -2486,19 +2400,6 @@ function makeSurf(ctx, spots, R, proj, mpp, M, D){
     },
     paint: function(){
       var g = ctx; g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
-      /* the break bars first, under every mark: a chart line, not weather. Dark casing so they
-         read on the blue, white over. Only close in -- at the wide view they are shorter than the
-         pin they belong to and would only fur the coast. */
-      if (bars.length && mpp < 40){
-        var wid = mpp < 12 ? 2.6 : 2;
-        g.beginPath();
-        bars.forEach(function(sgm){
-          var a1 = proj({ x:sgm[0][0], y:sgm[0][1] }), b1 = proj({ x:sgm[1][0], y:sgm[1][1] });
-          g.moveTo(a1.x, a1.y); g.lineTo(b1.x, b1.y);
-        });
-        g.lineWidth = wid + 2.4; g.strokeStyle = 'rgba(8,12,22,.6)'; g.stroke();
-        g.lineWidth = wid; g.strokeStyle = 'rgba(255,255,255,.95)'; g.stroke();
-      }
       marks.forEach(function(m){
         if (m.t === 'buoy'){
           /* NO CONE, NO ARROW (user 2026-09-19: "do we need the cones if we already show the water
@@ -2509,12 +2410,6 @@ function makeSurf(ctx, spots, R, proj, mpp, M, D){
           g.beginPath(); g.arc(m.q.x, m.q.y, 5, 0, 6.3); g.fillStyle = 'rgba(8,12,22,.8)'; g.fill();
           g.lineWidth = 2.4; g.strokeStyle = '#fbbf24'; g.stroke();
           g.beginPath(); g.arc(m.q.x, m.q.y, 1.5, 0, 6.3); g.fillStyle = '#fbbf24'; g.fill();
-        } else {
-          if (m.on){ g.beginPath(); g.arc(m.q.x, m.q.y, 9, 0, 6.3); g.fillStyle = m.blown ? 'rgba(148,163,184,.20)' : 'rgba(45,212,191,.22)'; g.fill(); }
-          g.beginPath(); g.arc(m.q.x, m.q.y, m.on ? 4.2 : 2.6, 0, 6.3);
-          /* running and offshore is the brightest thing on the water; running but blown out is grey */
-          g.fillStyle = m.clean ? '#5eead4' : m.on ? (m.blown ? '#cbd5e1' : '#7dd3c0') : 'rgba(186,214,235,.85)';
-          g.fill(); g.lineWidth = 1.3; g.strokeStyle = 'rgba(8,10,16,.85)'; g.stroke();
         }
       });
       g.textAlign = 'left'; g.textBaseline = 'middle';
