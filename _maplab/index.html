@@ -159,6 +159,7 @@ var VIEWS = {
               /* shaded relief, not terraces: the veils (la/land_relief.json) were built for
                  New York's 120 m of relief and barely registered against 3,000 m */
               landReliefs:'la/land_index.json', veg:'la/veg_index.json', airfields:'la/airfields.json', surf:'la/surf_spots.json',
+              parks:'la/parks.json',
               wxGeo:'la/weather_geo.json', tz:'America/Los_Angeles',
               depthFade:[-119.60,33.20,-117.30,34.75],
               faults:'la/faults.json', shake:'la/shake.json', radar:'ksox',
@@ -2865,6 +2866,76 @@ function stackName(nm){
   for (var j = 0; j < toks.length; j += 2) out.push(toks.slice(j, j + 2).join(' '));
   return out;
 }
+/* THE WILD LAND (user 2026-09-19: "can you detail the parks in LA if theres any main hiking
+   park mountain areas on the city map"). The basemap draws parks, but only inside the urban
+   mask and never named, so the ranges this city is wrapped in -- which are most of what
+   anyone actually walks in -- were anonymous green.
+   Two registers, because they are two different things: WILD land (nature reserve, protected
+   area, national forest) takes a deeper green and a firm edge; an ordinary big park takes a
+   lighter one. Both go UNDER the street grid: a fire road through Griffith should still read
+   as a thread across the green, and Sunset still has to cross Elysian. */
+var PARK_WILD = 'rgba(28,102,64,.50)', PARK_CITY = 'rgba(52,130,78,.38)';
+function drawParks(ctx, list, proj, mpp, W, H){
+  if (!list || !list.length) return;
+  ctx.save(); ctx.lineJoin = 'round';
+  [true, false].forEach(function(wild){
+    list.forEach(function(p){
+      if (!!p.wild !== wild) return;
+      /* a park has to be worth a few pixels before it is worth drawing at all */
+      if (p.ha < mpp * mpp * 0.00025) return;
+      ctx.beginPath();
+      p.rings.forEach(function(r){
+        r.forEach(function(c, i){ var q = proj({ x:c[0], y:c[1] }); if (i) ctx.lineTo(q.x, q.y); else ctx.moveTo(q.x, q.y); });
+        ctx.closePath();
+      });
+      ctx.fillStyle = wild ? PARK_WILD : PARK_CITY; ctx.fill('evenodd');
+      ctx.lineWidth = wild ? 1.1 : 0.8;
+      ctx.strokeStyle = wild ? 'rgba(18,72,45,.55)' : 'rgba(40,104,62,.42)';
+      ctx.stroke();
+    });
+  });
+  ctx.restore();
+}
+/* the names go on the top canvas with everything else that is lettered, so the grid cannot
+   run through them. Big country first, so Griffith wins its ground before a canyon asks. */
+function parkLabels(ctx, list, proj, mpp){
+  var noop = function(){}, pending = [];
+  if (!list || !list.length) return noop;
+  var font = function(px){ return '500 ' + px.toFixed(1) + 'px QelliaRegular, "Bodoni Moda", Georgia, serif'; };
+  ctx.save();
+  try { ctx.letterSpacing = '0.14em'; } catch(e){}
+  var CW = cvW(ctx), CH = cvH(ctx);
+  list.slice().sort(function(a, b){ return b.ha - a.ha; }).forEach(function(p){
+    /* the same rule as the fill, one notch stricter: a name needs room, not just presence */
+    if (p.ha < mpp * mpp * 0.0011) return;
+    var px = Math.max(8.5, Math.min(15, 7.5 + Math.log(p.ha) * 0.95));
+    ctx.font = font(px);
+    var lines = stackName(p.name).map(function(l){ return l.toUpperCase(); });
+    var tw = 0; lines.forEach(function(l){ tw = Math.max(tw, ctx.measureText(l).width); });
+    var LH = px * 1.22, th = lines.length * LH;
+    var q = proj({ x:p.at[0], y:p.at[1] });
+    if (q.x < tw / 2 + 4 || q.y < th / 2 + 4 || q.x > CW - tw / 2 - 4 || q.y > CH - th / 2 - 4) return;
+    if (!labelFits(q.x - tw / 2 - 5, q.y - th / 2 - 4, tw + 10, th + 8)) return;
+    pending.push({ lines: lines, x: q.x, y: q.y, th: th, LH: LH, px: px });
+  });
+  try { ctx.letterSpacing = '0px'; } catch(e){}
+  ctx.restore();
+  if (!pending.length) return noop;
+  return function(){
+    ctx.save(); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+    try { ctx.letterSpacing = '0.14em'; } catch(e){}
+    pending.forEach(function(p){
+      ctx.font = font(p.px);
+      p.lines.forEach(function(l, i){
+        var y = p.y - p.th / 2 + p.LH / 2 + i * p.LH;
+        ctx.strokeStyle = 'rgba(255,252,244,.75)'; ctx.lineWidth = 2.4; ctx.strokeText(l, p.x, y);
+        ctx.fillStyle = '#0f3f28'; ctx.fillText(l, p.x, y);
+      });
+    });
+    try { ctx.letterSpacing = '0px'; } catch(e){}
+    ctx.restore();
+  };
+}
 function drawParkNames(ctx, geo, proj, mPerPx){
   if (!geo) return;
   ctx.save();
@@ -4077,6 +4148,12 @@ function drawCard(style){
             .then(function(wg){
               if (stale()) return;
               drawWet(ctx, wg, out.project);          // the field: ground that was water
+              return viewJson(vkey, 'parks').then(function(pk){
+                if (!stale() && pk && !geoOn()){ paint._parks = pk; drawParks(ctx, pk, out.project, nmpp(), W, H); }
+              });
+            })
+            .then(function(){
+              if (stale()) return;
               /* The grid goes on ABOVE the historic field. The marsh is where the city
                  was built, not a hole in it, and hiding the streets under it made the old
                  water read as somewhere else — you could not see that Sheep Meadow's
@@ -4251,6 +4328,10 @@ function drawCard(style){
                 return null;                                   // no park names either: the rock is the subject
               }
               paintHoods = drawHoodNames(tctx, hn, out.project, nmpp(), hoodOpts);
+              /* the wild land's names after the city's, so a neighbourhood keeps its ground,
+                 but before the stations -- GRIFFITH PARK is a bigger fact than a stop */
+              var pl = parkLabels(tctx, paint._parks, out.project, nmpp());
+              var ph0 = paintHoods; paintHoods = function(){ ph0(); pl(); };
               return parkNamesFor(vkey);
             }).then(function(pn){
               if (stale()) return;

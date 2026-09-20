@@ -37,6 +37,7 @@ import io
 import json
 import math
 import os
+import re
 import sys
 import urllib.parse
 import urllib.request
@@ -1349,8 +1350,100 @@ def bake_shake():
                                   'vs30': q(gv, 1), 'mmi': q(gm, 10)}})
 
 
+# ------------------------------------------------------------------ parks ----
+# THE WILD LAND (user 2026-09-19: "can you detail the parks in LA if theres any main hiking
+# park mountain areas on the city map"). The basemap draws parks, but only inside the urban
+# mask and never named -- so the mountains that surround this city, which are most of what
+# people actually walk in, were anonymous green. Griffith, Topanga, Runyon, Elysian, Debs,
+# Kenneth Hahn, Eaton Canyon, the Verdugos, the Santa Monicas, the Angeles National Forest.
+#
+# OSM knows all of them. What it also knows is 1,867 other things called parks, nearly all of
+# them a swing set on a corner, so the cut is by AREA and by kind: wild land (nature reserve,
+# protected area, national park) counts from 20 hectares, an ordinary park has to reach 40
+# before it earns a place on a map of this scale. Names that announce themselves as something
+# else -- recreation centers, community centers, mini parks, triangles -- are dropped whatever
+# their size, because a name is what this layer is for.
+PARK_Q = """
+[out:json][timeout:600];
+(
+  way["leisure"="park"](%f,%f,%f,%f);
+  relation["leisure"="park"](%f,%f,%f,%f);
+  way["leisure"="nature_reserve"](%f,%f,%f,%f);
+  relation["leisure"="nature_reserve"](%f,%f,%f,%f);
+  relation["boundary"="protected_area"](%f,%f,%f,%f);
+  relation["boundary"="national_park"](%f,%f,%f,%f);
+);
+out geom;
+"""
+# and the sea is not a hiking area: OSM's marine conservation zones are water, and the
+# beaches already have their own layer from the airfields bake
+PARK_JUNK = re.compile(r'recreation cent|community cent|senior cent|mini park|pocket park|'
+                       r'triangle|playground|dog park|skate|golf|cemetery|memorial park$|'
+                       r'state marine|marine conservation|marine reserve|state beach|county beach', re.I)
+PARK_MIN_WILD, PARK_MIN_PARK = 20.0, 40.0        # hectares
+
+
+def bake_parks():
+    print('parks and wild land (OSM)')
+    from shapely.geometry import Polygon, MultiPolygon, box as shbox
+    from shapely.ops import unary_union
+    w, s, e, n = HOME_W, HOME_S, HOME_E, home_box()[3]
+    args = (s, w, n, e) * 6
+    els = overpass(PARK_Q % args)
+    print('  %d elements' % len(els))
+    clip = shbox(w - 0.05, s - 0.05, e + 0.05, n + 0.05)
+    out, dropped = [], 0
+    for el in els:
+        t = el.get('tags') or {}
+        name = t.get('name')
+        if not name or PARK_JUNK.search(name):
+            dropped += 1
+            continue
+        kind = t.get('boundary') or t.get('leisure')
+        rings = rings_of(el)
+        if not rings:
+            continue
+        polys = []
+        for r in rings:
+            if len(r) < 4:
+                continue
+            try:
+                g = Polygon(r)
+                if not g.is_valid:
+                    g = g.buffer(0)
+                if not g.is_empty:
+                    polys.append(g)
+            except Exception:
+                pass
+        if not polys:
+            continue
+        g = unary_union(polys)
+        g = g.intersection(clip)
+        if g.is_empty:
+            continue
+        # hectares, properly: degrees are not metres and longitude shrinks with latitude
+        lat = g.centroid.y
+        ha = g.area * (111320.0 ** 2) * math.cos(math.radians(lat)) / 10000.0
+        wild = kind in ('nature_reserve', 'protected_area', 'national_park')
+        if ha < (PARK_MIN_WILD if wild else PARK_MIN_PARK):
+            continue
+        rp = g.representative_point()
+        gs = g.simplify(0.00015)
+        parts = list(gs.geoms) if isinstance(gs, MultiPolygon) else [gs]
+        rr = [rnd(list(pp.exterior.coords)) for pp in parts if pp.exterior and len(pp.exterior.coords) > 3]
+        if not rr:
+            continue
+        out.append({'name': name, 'kind': kind, 'ha': round(ha), 'wild': wild,
+                    'at': [round(rp.x, 5), round(rp.y, 5)], 'rings': rr})
+    out.sort(key=lambda r: -r['ha'])
+    print('  kept %d (dropped %d by name); biggest:' % (len(out), dropped))
+    for r in out[:10]:
+        print('    %-46s %-16s %6d ha' % (r['name'][:46], r['kind'], r['ha']))
+    write('parks.json', out)
+
+
 PARTS = {'depth': bake_depth, 'swell': bake_swell, 'sched': bake_sched, 'geo': bake_geo, 'air': bake_air, 'veg': bake_veg, 'region': bake_region, 'land': bake_land, 'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea,
-         'quakes': bake_quakes, 'shake': bake_shake}
+         'quakes': bake_quakes, 'shake': bake_shake, 'parks': bake_parks}
 
 if __name__ == '__main__':
     print('home box  w %.4f  s %.4f  e %.4f  n %.4f' % home_box())
