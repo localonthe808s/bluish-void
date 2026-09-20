@@ -2548,7 +2548,7 @@ function makeMachinery(ctx, geo, R, proj, mpp, view, mode, frontRuns, cold, moti
   var SW = (R && R.steer && R.steer.kt >= 4) ? R.steer : null;
   var use = MO || SW;
   if (R) R.motion = MO;                                   // rides up to the strip with the reads
-  var steerOK = use && !(VIEWS[document.getElementById('view').value] || {}).sat;
+  var steerOK = use && (MO || !(VIEWS[document.getElementById('view').value] || {}).sat);
   /* AND WHEN THERE IS NOTHING STEERING, SAY SO ON THE MAP. The card used to go silently bare
      -- no arcs, no mark, nothing to tell you whether the feature had failed or the air was
      simply still. The doorstep is drawn either way now, and on a calm day it carries the
@@ -3307,6 +3307,7 @@ function radarOverlay(ctx, W, H, X0, Y0, X1, Y1){
     + Math.round(X1) + ',' + Math.round(Y1)
     + '&width=' + W + '&height=' + H + '&srs=EPSG:3857&format=image/png&transparent=true'
     + '&_=' + Math.floor(Date.now() / 60000);
+  var rainUrl = url;
   /* a SATELLITE view rides the same rehearsal: one seamless georeferenced GOES image
      from GIBS WMS (not WMTS -- its tiles come from different scans), no TIME so the
      server's own latest frame answers */
@@ -3321,15 +3322,15 @@ function radarOverlay(ctx, W, H, X0, Y0, X1, Y1){
   /* one way of showing a run of frames, whatever made them: the map underneath, the cloud
      if it was asked for, the frame, and the map washed back over at a third so the coast
      and the lettering survive */
-  var play = function(frames, under){
+  var play = function(frames, over){
     frames = frames.filter(Boolean);
     if (!frames.length) return;
     var base = snapOf();
     var show = function(k){
       ctx.clearRect(0, 0, W, H);
       ctx.drawImage(base, 0, 0);
-      if (under){ ctx.save(); ctx.globalAlpha = 0.95; ctx.drawImage(under, 0, 0, W, H); ctx.restore(); }
       ctx.drawImage(frames[k], 0, 0, W, H);
+      if (over) ctx.drawImage(over, 0, 0, W, H);
       ctx.save(); ctx.globalAlpha = 0.35; ctx.drawImage(base, 0, 0); ctx.restore();
     };
     show(frames.length - 1);
@@ -3354,31 +3355,26 @@ function radarOverlay(ctx, W, H, X0, Y0, X1, Y1){
         if (!good.length) good = [null];                    // no TIME at all: the server's own latest
         return Promise.all(good.map(function(iso){ return loadImg(satUrl(vw.sat, X0, Y0, X1, Y1, W, H, iso)); }));
       })
-      .then(function(frames){ play(frames, null); });
+      .then(function(frames){
+        /* THE MARINE LAYER VIEW (user 2026-09-20: "remake the 12HR as the marine layer now and
+           remove the 3HR and KSOX"). Measured: this city has radar weather 34 days a year, so
+           three rain cards were empty nine months in twelve while the cloud -- the weather LA
+           actually has -- rode underneath as an option. It is the subject now. Each frame is
+           cut to its cloud, so the map under it keeps its desert and its coast and its names
+           (laid whole, the satellite put a haze on the land); and on the days it does rain,
+           the newest MRMS mosaic goes over the top, late by design and said so on the strip:
+           the cloud runs ~50 min behind the clock, the rain two. */
+        if (vw.cloud) frames = frames.map(function(im){ return im ? cloudOnly(im, W, H) : null; });
+        return (vw.rain ? loadImg(rainUrl) : Promise.resolve(null)).then(function(rain){ play(frames, rain); });
+      });
   }
-  /* A RADAR VIEW, optionally over the cloud (user: "is there a way to bring that view into
-     the NEXT HALF HOUR / 3HR / 12HR"). The sweep says where the rain is; the satellite says
-     what the sky is doing around it, which on this coast is usually the marine layer. */
-  /* GEOCOLOR IS THE BEST CLOUD VIEW HERE, and that is measured, not assumed (user
-     2026-09-19: "i want the high resolution for the marine layer used whatever has the best
-     cloud view for it"). I had said the red visible band would be twice the detail, reading
-     that off its name -- 1km against GeoColor's 2 km. It is not. GIBS composites GeoColor
-     using the half-kilometre visible band for its texture, so on a KSOX-sized box it carries
-     MORE fine structure than Band 2, not less: mean gradient 1.10 against 0.86, so the
-     "1 km" layer has 22% LESS. On the wide frames the two are within 8% of each other.
-     And GeoColor wins the two things that actually matter for this job. It has colour, which
-     is what separates cloud from ground almost perfectly -- stratus reads chroma 2 where dry
-     land reads 40 -- while Band 2 is greyscale, leaving only brightness, and bright desert
-     sits at 116 against stratus at 166 with the distributions nearly touching. And it still
-     works after dark, where the visible band is simply black.
-     Asking for more pixels would not help either: over even the 12-hour box the 2 km grid is
-     already oversampled about twice by the request. There is no sharper cloud to be had. */
-  var under = window.LAB_SATUNDER
-    ? loadImg(satUrl(window.LAB_SATLAYER || 'GOES-West_ABI_GeoColor', X0, Y0, X1, Y1, W, H, null))
-        .then(function(im){ return im ? cloudOnly(im, W, H) : null; })
-    : Promise.resolve(null);
-  return Promise.all([radarTimes(sid, lyr), under]).then(function(r){
-    var times = r[0], un = r[1], want;
+  /* GEOCOLOR IS THE CLOUD PRODUCT, measured not assumed: GIBS composites it from the
+     half-kilometre visible band, so on a tight box it carries MORE fine structure than the
+     "1 km" Band 2 (mean gradient 1.10 against 0.86); its colour is what lets cloudOnly
+     separate cloud from ground (stratus chroma 2, dry land 40, where greyscale Band 2 leaves
+     bright desert at 116 nearly touching stratus at 166); and it still works after dark. */
+  return radarTimes(sid, lyr).then(function(times){
+    var want;
     /* EIGHT PICTURES, BUT OVER HOW LONG? Taking the last eight as they come gives the MRMS
        views a SIXTEEN MINUTE loop -- its mosaic lands every two minutes -- on a card whose
        job is what arrives in the next twelve hours. Nothing visibly moves. So the frames are
@@ -3400,7 +3396,7 @@ function radarOverlay(ctx, W, H, X0, Y0, X1, Y1){
       .then(function(ims){
         play(ims.filter(Boolean).map(function(im){
           return /_sr_bref$/.test(lyr) ? filterBref(im, W, H) : im;
-        }), un);
+        }));
       });
   });
 }
@@ -4628,14 +4624,14 @@ function copyFlavor(){
     var b = m.box || v._home;
     v.w = b.w; v.s = b.s; v.e = b.e; v.n = b.n;
     v.radar = m.radarSid || v._home.radar; v.radarLayer = m.radarLayer || null; v.sat = m.sat || null;
+    v.cloud = !!m.cloud; v.rain = !!m.rain;
     document.getElementById('view').value = key;
     document.getElementById('geo').checked = !!m.geo;
     document.getElementById('traffic').checked = !!m.traffic;
     document.getElementById('surf').checked = !!m.surf;
     window.LAB_SWELLDIR = (m.swellDir == null ? null : +m.swellDir);
     window.LAB_RAIL = m.rail !== false;
-    window.LAB_SATUNDER = !!m.satUnder;
-    window.LAB_SATLAYER = m.satLayer || null;
+
     document.getElementById('radar').checked = !!(m.radar || m.sat);
     window.LAB_LOCK = !!m.lock;
     renderAll();
