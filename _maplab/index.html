@@ -1941,6 +1941,93 @@ function frontsRead(){
     }).catch(function(){ return []; });
   return FRONTS.p;
 }
+/* WHAT IS TRUE OF EACH FRONT, NOW -- the same two reads New York's widget makes, done here
+   because this is where the fronts' geometry is (2026-09-20):
+     TEMPERATURE  up to four places along each line that is in frame, one degree of GROUND
+                  distance out to each side, ONE keyless Open-Meteo call, Fahrenheit, at 2 m and
+                  at 850 mb. The ground lies near a coast (cool sea against hot desert is not a
+                  front), so the colder SIDE is taken from 850 mb when that shows a difference.
+     RADAR        a small MRMS mosaic of the frame (CORS-open, so its pixels can be read), within
+                  ~25 mi of the line: how much of the line is wet and how hard, by brefIndex.
+   Cached per bulletin and per frame; when a read lands the newest paint's fronts are re-posted. */
+var FRONTFACTS = { key: null, at: 0, temps: null, busyT: false, rain: null, rkey: null, rat: 0, busyR: false };
+function frontFactsRun(FR, view, inFrame){
+  var F = FRONTFACTS, key = FR.at + '|' + FR.lines.length;
+  if (F.key !== key || Date.now() - F.at > 900000){ F.key = key; F.at = Date.now(); F.temps = null; }
+  if (!F.temps && !F.busyT){
+    var pts = [], plan = [];
+    FR.lines.forEach(function(ln){
+      var p = ln.src, segs = [];
+      for (var i = 1; i < p.length; i++){ if (inFrame((p[i-1][0] + p[i][0]) / 2, (p[i-1][1] + p[i][1]) / 2)) segs.push(i); }
+      var n = Math.min(4, segs.length);
+      for (var q = 0; q < n; q++){
+        var j = segs[Math.floor((q + 0.5) * segs.length / n)], a = p[j-1], b = p[j], mla = (a[1] + b[1]) / 2, mlo = (a[0] + b[0]) / 2, c = Math.cos(mla * Math.PI / 180);
+        var gx = (b[0] - a[0]) * c, gy = b[1] - a[1], gl = Math.hypot(gx, gy) || 1, nx = -gy / gl, ny = gx / gl;
+        plan.push({ i: ln.i, nx: nx, ny: ny, at: pts.length });
+        pts.push([mla + ny, mlo + nx / c], [mla - ny, mlo - nx / c]);
+      }
+    });
+    if (pts.length){
+      F.busyT = true;
+      fetch('https://api.open-meteo.com/v1/forecast?latitude=' + pts.map(function(q){ return q[0].toFixed(3); }).join(',') + '&longitude=' + pts.map(function(q){ return q[1].toFixed(3); }).join(',')
+          + '&current=temperature_2m,temperature_850hPa&temperature_unit=fahrenheit&timezone=UTC')
+        .then(function(r){ return r.json(); }).then(function(j){
+          if (!Array.isArray(j)) j = [j];
+          var by = {}, cur = function(k, key2){ var c2 = j[k] && j[k].current; return c2 ? +c2[key2] : NaN; };
+          plan.forEach(function(pl){
+            var t1 = cur(pl.at, 'temperature_2m'), t2 = cur(pl.at + 1, 'temperature_2m'); if (!isFinite(t1) || !isFinite(t2)) return;
+            var u1 = cur(pl.at, 'temperature_850hPa'), u2 = cur(pl.at + 1, 'temperature_850hPa');
+            (by[pl.i] = by[pl.i] || []).push({ d: t1 - t2, up: (isFinite(u1) && isFinite(u2)) ? u1 - u2 : NaN, nx: pl.nx, ny: pl.ny });
+          });
+          var median = function(a){ a = a.slice().sort(function(x, y){ return x - y; }); var h = a.length >> 1; return a.length % 2 ? a[h] : (a[h - 1] + a[h]) / 2; };
+          var NAMES = ['NORTH','NORTHEAST','EAST','SOUTHEAST','SOUTH','SOUTHWEST','WEST','NORTHWEST'], out = {};
+          Object.keys(by).forEach(function(k){
+            var L = by[k], sx = 0, sy = 0; L.forEach(function(o){ sx += o.nx; sy += o.ny; });
+            var sideOf = function(m){ var cx = m > 0 ? -sx : sx, cy = m > 0 ? -sy : sy; return NAMES[Math.round(((Math.atan2(cx, cy) * 180 / Math.PI + 360) % 360) / 45) % 8]; };
+            var med = median(L.map(function(o){ return o.d; })), ups = L.map(function(o){ return o.up; }).filter(isFinite), mu = ups.length === L.length ? median(ups) : NaN;
+            var useM = (isFinite(mu) && Math.abs(mu) >= 2) ? mu : (Math.abs(med) >= 2 ? med : null), cv = null;
+            if (useM != null){ var sl = Math.hypot(sx, sy) || 1; cv = useM > 0 ? [-sx / sl, -sy / sl] : [sx / sl, sy / sl]; }
+            out[k] = { f: Math.abs(med), n: L.length, side: sideOf(med), cv: cv, up: isFinite(mu) ? Math.abs(mu) : null, upSide: isFinite(mu) ? sideOf(mu) : null };
+          });
+          F.temps = out;
+        }).catch(function(){ F.temps = {}; }).then(function(){ F.busyT = false; if (window._frontPost) window._frontPost(); });
+    } else F.temps = {};
+  }
+  var rkey = [view.w, view.s, view.e, view.n].map(function(v){ return v.toFixed(2); }).join(',');
+  if ((F.rkey !== rkey || Date.now() - F.rat > 480000) && !F.busyR){
+    F.busyR = true;
+    var R2 = 6378137, mx = function(lo){ return lo * Math.PI / 180 * R2; }, my = function(la){ return R2 * Math.log(Math.tan(Math.PI / 4 + la * Math.PI / 360)); };
+    var X0 = mx(view.w), X1 = mx(view.e), Y0 = my(view.s), Y1 = my(view.n), w = 360, h = Math.max(40, Math.round(w * (Y1 - Y0) / (X1 - X0))), im = new Image();
+    im.crossOrigin = 'anonymous';
+    im.onload = function(){
+      try { var c = document.createElement('canvas'); c.width = w; c.height = h; var g2 = c.getContext('2d'); g2.drawImage(im, 0, 0, w, h);
+            F.rain = { px: g2.getImageData(0, 0, w, h).data, w: w, h: h, X0: X0, X1: X1, Y0: Y0, Y1: Y1, mx: mx, my: my }; } catch(e){ F.rain = null; }
+      F.rkey = rkey; F.rat = Date.now(); F.busyR = false; if (window._frontPost) window._frontPost();
+    };
+    im.onerror = function(){ F.rain = null; F.rkey = rkey; F.rat = Date.now(); F.busyR = false; };
+    im.src = 'https://opengeo.ncep.noaa.gov/geoserver/conus/ows?service=WMS&version=1.1.0&request=GetMap&layers=conus_bref_qcd&styles=&bbox='
+      + X0 + ',' + Y0 + ',' + X1 + ',' + Y1 + '&width=' + w + '&height=' + h + '&srs=EPSG:3857&format=image/png8&transparent=true';
+  }
+}
+function frontRainOn(ln){
+  var R = FRONTFACTS.rain; if (!R) return null;
+  var kx = R.w / (R.X1 - R.X0), rad = Math.max(2, Math.round(40000 / Math.cos(35 * Math.PI / 180) * kx)), n = 0, wet = 0, mod = 0, hvy = 0, p = ln.src;
+  for (var i = 1; i < p.length; i++) for (var t = 0; t < 1; t += 0.2){
+    var lo = p[i-1][0] + (p[i][0] - p[i-1][0]) * t, la = p[i-1][1] + (p[i][1] - p[i-1][1]) * t;
+    var x = Math.round((R.mx(lo) - R.X0) * kx), y = Math.round((R.Y1 - R.my(la)) * kx);
+    if (x < 0 || y < 0 || x >= R.w || y >= R.h) continue;
+    n++; var hit = 0;
+    for (var dy = -rad; dy <= rad && hit < 3; dy += 2) for (var dx = -rad; dx <= rad; dx += 2){
+      var xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= R.w || yy >= R.h) continue;
+      var o = (yy * R.w + xx) * 4; if (R.px[o + 3] < 128) continue;
+      var r = R.px[o], g3 = R.px[o + 1], bl = R.px[o + 2], lv = (r > 180 && g3 < 110) ? 3 : (r > 200 && g3 > 120 && bl < 110) ? 2 : 1;
+      if (lv > hit) hit = lv;
+    }
+    if (hit) wet++; if (hit >= 2) mod++; if (hit >= 3) hvy++;
+  }
+  if (n < 3) return null;
+  var f = wet / n; return { frac: f, lvl: f < 0.08 ? 0 : (hvy / n > 0.06 ? 3 : mod / n > 0.10 ? 2 : 1) };
+}
 /* px from a point to a drawn polyline */
 function frontDist(P, x, y){
   var best = 1e9;
@@ -1950,16 +2037,6 @@ function frontDist(P, x, y){
     best = Math.min(best, ex * ex + ey * ey);
   }
   return Math.sqrt(best);
-}
-/* the nearest point ON the line, for the widget's mark */
-function frontNear(P, x, y){
-  var best = 1e18, at = null;
-  for (var i = 1; i < P.length; i++){
-    var ax = P[i-1][0], ay = P[i-1][1], dx = P[i][0] - ax, dy = P[i][1] - ay, L2 = dx * dx + dy * dy || 1;
-    var t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L2)), qx = ax + t * dx, qy = ay + t * dy, d = (qx - x) * (qx - x) + (qy - y) * (qy - y);
-    if (d < best){ best = d; at = [qx, qy]; }
-  }
-  return at;
 }
 function makeFronts(ctx, runs, proj, view, tz){
   var FCOL = { COLD:'#3b82f6', WARM:'#ef4444', STNRY:'#3b82f6', OCFNT:'#2B22F4', TROF:'#d8a25c' }, labels = [];
@@ -2036,9 +2113,9 @@ function makeFronts(ctx, runs, proj, view, tz){
   if (runs && runs.length) runs[0].f.forEach(function(f0){
     var RAW0 = f0.p.map(P2);
     if (seen(RAW0, 0)) kinds[f0.k] = (kinds[f0.k] || 0) + 1;
-    if (seen(RAW0, 80)) lines.push({ k: f0.k, P: cr(RAW0, 14) });
+    if (seen(RAW0, 80)) lines.push({ k: f0.k, P: cr(RAW0, 14), src: f0.p, i: lines.length });
   });
-  return { labels: labels, kinds: kinds, lines: lines, fine: !!(runs && runs.length && runs[0].fine), progs: progs.length,
+  return { labels: labels, kinds: kinds, lines: lines, vel: vel, fine: !!(runs && runs.length && runs[0].fine), progs: progs.length,
     n: runs && runs.length ? runs[0].f.filter(function(f0){ return f0.k !== 'TROF' && seen(f0.p.map(P2), 0); }).length : 0,
     trof: runs && runs.length ? runs[0].f.filter(function(f0){ return f0.k === 'TROF' && seen(f0.p.map(P2), 0); }).length : 0, at: runs && runs.length ? runs[0].t : null,
     paint: function(){
@@ -2641,14 +2718,43 @@ function makeMachinery(ctx, geo, R, proj, mpp, view, mode, frontRuns, cold, moti
     FR.lines.forEach(function(L){
       var km = frontDist(L.P, hq.x, hq.y) * kmpp, score = km * (L.k === 'TROF' ? 2 : 1);
       if (!play || score < play.score) play = { k: L.k, km: Math.round(km), score: score, P: L.P };
-      if (!nearBy[L.k] || km < nearBy[L.k].km) nearBy[L.k] = { k: L.k, km: Math.round(km), score: score };
+      L.km = Math.round(km);
+      if (!nearBy[L.k] || km < nearBy[L.k].km) nearBy[L.k] = { k: L.k, km: Math.round(km), score: score, i: L.i };
     });
     /* EVERY KIND IN PLAY, nearest first (the widget lays them side by side across its band) */
     var near = Object.keys(nearBy).map(function(k){ return nearBy[k]; }).sort(function(a, b){ return a.score - b.score; })
-                     .map(function(o){ return { k: o.k, km: o.km }; });
+                     .map(function(o){ return { k: o.k, km: o.km, i: o.i }; });
   }
-  try { if (FR && window.parent !== window) window.parent.postMessage({ labFronts: { n: FR.n, trof: FR.trof, at: FR.at, fine: FR.fine, progs: FR.progs, kinds: FR.kinds,
-    play: play ? { k: play.k, km: play.km } : null, near: (typeof near !== 'undefined' && near) || [] } }, '*'); } catch(e){}
+  var HOMEPT = (VIEWS[document.getElementById('view').value] || {}).home || LA_PT;
+  window._frontPost = function(){
+    if (!FR || window.parent === window) return;
+    var T = FRONTFACTS.temps || {}, facts = {};
+    FR.lines.forEach(function(L){
+      var o = { km: L.km }, dT = T[L.i] || null, rn = frontRainOn(L);
+      if (rn){ o.rain = rn.lvl; o.rainFrac = rn.frac; }
+      if (dT){
+        o.dT = { f: dT.f, n: dT.n, side: dT.side, up: dT.up, upSide: dT.upSide };
+        if (dT.cv){
+          var p = L.src, c = Math.cos(HOMEPT.y * Math.PI / 180), hx = HOMEPT.x * c, hy = HOMEPT.y, best = 1e9, vx = 0, vy = 0;
+          for (var i = 1; i < p.length; i++){
+            var ax = p[i-1][0] * c, ay = p[i-1][1], dx = p[i][0] * c - ax, dy = p[i][1] - ay, l2 = dx * dx + dy * dy || 1;
+            var t = Math.max(0, Math.min(1, ((hx - ax) * dx + (hy - ay) * dy) / l2)), qx = ax + t * dx, qy = ay + t * dy, d2 = Math.hypot(hx - qx, hy - qy);
+            if (d2 < best){ best = d2; vx = hx - qx; vy = hy - qy; }
+          }
+          o.cityCold = (vx * dT.cv[0] + vy * dT.cv[1]) > 0;
+          o.coldAz = (Math.atan2(dT.cv[0], dT.cv[1]) * 180 / Math.PI + 360) % 360;
+        }
+      }
+      facts[L.i] = o;
+    });
+    var vel = FR.vel ? Math.hypot(FR.vel[0] * Math.cos(35 * Math.PI / 180) * 111, FR.vel[1] * 111) * 0.621 : null;
+    try { window.parent.postMessage({ labFronts: { n: FR.n, trof: FR.trof, at: FR.at, fine: FR.fine, progs: FR.progs, kinds: FR.kinds,
+      play: play ? { k: play.k, km: play.km } : null, near: (typeof near !== 'undefined' && near) || [], facts: facts, mph: vel } }, '*'); } catch(e){}
+  };
+  if (FR){
+    try { frontFactsRun(FR, view, function(lo, la){ var q = proj({ x: lo, y: la }); return q.x > 0 && q.y > 0 && q.x < cvW(ctx) && q.y < cvH(ctx); }); } catch(e){}
+    window._frontPost();
+  }
   var placed = [];
   var claim = function(list){
     ctx.save();
@@ -4644,8 +4750,7 @@ function drawCard(style){
     if (window._frontLines && window._frontLines.length && !(document.getElementById('geo') || {}).checked){
       var bestL = null, bdL = 14;
       window._frontLines.forEach(function(L){ var d = frontDist(L.P, mx, my); if (d < bdL){ bdL = d; bestL = L; } });
-      var tq = bestL ? (frontNear(bestL.P, mx, my) || [mx, my]) : null;
-      window.parent.postMessage({ labFrontTap: bestL ? { k: bestL.k, at: [tq[0] / W, tq[1] / H] } : null }, '*');
+      window.parent.postMessage({ labFrontTap: bestL ? { k: bestL.k, i: bestL.i, km: bestL.km } : null }, '*');
       if (bestL) return;
     }
     /* everything below needs a live, unlocked map. The front tap above does not: the weather
