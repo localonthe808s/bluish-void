@@ -374,6 +374,8 @@ def bake_faults():
                      # hanging wall, the block that rides up on a reverse fault. Onshore layer only --
                      # the offshore layer does not record it, and the card says so rather than guess.
                      'dip': blank(p.get('dip_direction')),
+                     # the named earthquake the survey ties to this section, when it names one
+                     'eq': (blank(p.get('earthquake')) or '').strip() or None,     # one record carries a lone space
                      # how the survey draws it: this is what the dash means
                      'trace': blank(p.get('linetype')) or blank(p.get('line_type')),
                      # how well it is located: a separate question
@@ -393,6 +395,25 @@ def bake_faults():
                     continue
                 feats.append({'type': 'Feature', 'properties': props,
                               'geometry': {'type': 'LineString', 'coordinates': rnd(ls.coords)}})
+    # BLIND THRUSTS. The survey has no such flag, but the data says it twice over: some are NAMED
+    # blind, and a reverse/thrust fault whose EVERY trace is drawn 'Inferred' is one nobody has
+    # seen at the surface. Checked 2026-09-20: that rule picks out exactly Puente Hills, Compton,
+    # Lower and Upper Elysian Park, Northridge, San Joaquin Hills, Peralta Hills and the Oak
+    # Ridge mid-channel structure -- the known blind thrusts, and nothing else.
+    by_name = {}
+    for f in feats:
+        pr = f['properties']
+        if re.search(r'thrust|reverse', str(pr.get('sense')), re.I):
+            by_name.setdefault(pr['name'], []).append(pr.get('trace'))
+    for f in feats:
+        pr = f['properties']
+        tr = by_name.get(pr['name'])
+        if pr['name'] and re.search(r'blind', pr['name'], re.I):
+            pr['blind'] = 'named'
+        elif tr and all(t in ('Inferred', 'Concealed') for t in tr):
+            pr['blind'] = 'inferred'
+    print('  blind: %s' % sorted(set((f['properties']['name'], f['properties']['blind']) for f in feats if f['properties'].get('blind'))))
+    print('  named earthquakes: %s' % sorted(set((f['properties']['name'], f['properties']['eq']) for f in feats if f['properties'].get('eq'))))
     print('  %d traces; %s' % (len(feats), Counter(f['properties']['age'] for f in feats).most_common(6)))
     print('  trace:    %s' % Counter(f['properties']['trace'] for f in feats).most_common(8))
     print('  busiest:  %s' % Counter(f['properties']['name'] for f in feats).most_common(8))

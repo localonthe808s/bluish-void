@@ -301,6 +301,42 @@ function liveQuakes(){
     .catch(function(){ QLIVE.p = null; return { features: [] }; });
   return QLIVE.p;
 }
+/* WHAT IS NEAR A FAULT, for its card's scene (2026-09-20). Measured against EVERY trace that
+   carries the fault's name, not just the piece that was tapped -- the survey delivers one fault
+   as dozens of short lines. Distances are on the ground (longitude scaled by cos latitude).
+     near   the last day's quakes within 15 mi of it: depth, magnitude, and how far ACROSS the
+            fault they sit -- toward the side it leans to when the survey records the lean, so
+            the cut through the ground can put each one where it really is.
+     city   downtown Los Angeles the same way, plus its bearing from the nearest point of the
+            fault for the view from above. */
+var DIP_AZ_LAB = { N:0, NE:45, E:90, SE:135, S:180, SW:225, W:270, NW:315 };
+function faultAround(ft, fl){
+  var nm = ft.properties.name, traces = ((fl || {}).features || []).filter(function(q){ return nm ? q.properties.name === nm : q === ft; });
+  if (!traces.length) traces = [ft];
+  var dz = DIP_AZ_LAB[ft.properties.dip], du = dz == null ? null : [Math.sin(dz * Math.PI / 180), Math.cos(dz * Math.PI / 180)];
+  var K = 111.32, nearest = function(lon, lat){
+    var c = Math.cos(lat * Math.PI / 180), best = 1e9, out = null;
+    traces.forEach(function(t){ var p = t.geometry.coordinates;
+      for (var i = 1; i < p.length; i++){
+        var ax = (p[i-1][0] - lon) * c * K, ay = (p[i-1][1] - lat) * K, bx = (p[i][0] - lon) * c * K, by = (p[i][1] - lat) * K, dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy || 1;
+        var tt = Math.max(0, Math.min(1, (-ax * dx - ay * dy) / l2)), qx = ax + tt * dx, qy = ay + tt * dy, d = Math.hypot(qx, qy);
+        if (d < best){ best = d; var nl = Math.hypot(dx, dy) || 1; out = { km: d, vec: [-qx, -qy], n: [-dy / nl, dx / nl] }; }   // vec: from the fault TO the point (east, north), km
+      } });
+    if (out) out.x = du ? out.vec[0] * du[0] + out.vec[1] * du[1] : out.vec[0] * out.n[0] + out.vec[1] * out.n[1];
+    return out;
+  };
+  var near = [];
+  ((QLIVE.d || {}).features || []).forEach(function(q){
+    var g2 = q.geometry && q.geometry.coordinates; if (!g2 || !(q.properties.mag > -1)) return;
+    if (Math.abs(g2[1] - ft.geometry.coordinates[0][1]) > 1.2 || Math.abs(g2[0] - ft.geometry.coordinates[0][0]) > 1.5) return;
+    var r = nearest(g2[0], g2[1]); if (!r || r.km > 24) return;
+    near.push({ x: +r.x.toFixed(1), km: +r.km.toFixed(1), depth: +(+g2[2]).toFixed(1), mag: q.properties.mag, time: q.properties.time, place: q.properties.place });
+  });
+  near.sort(function(a, b){ return b.mag - a.mag; });
+  var ct = nearest(-118.2437, 34.0522);
+  return { near: near.slice(0, 8), nearCount: near.length, quakesRead: !!QLIVE.d,
+           city: ct ? { name: 'DOWNTOWN LA', km: +ct.km.toFixed(1), x: +ct.x.toFixed(1), vec: [+ct.vec[0].toFixed(1), +ct.vec[1].toFixed(1)], sided: !!du } : null };
+}
 /* SOFT GROUND, hatched. Not a fill: the rock map underneath is the other half of the
    answer and must stay readable, and a hazard zone is drawn as a hatch on every paper map
    for the same reason. */
@@ -4831,7 +4867,7 @@ function drawCard(style){
                  conformal, so the screen angle is the compass angle. */
               var c = bestF.geometry.coordinates, a = paint._proj({ x:c[0][0], y:c[0][1] }), b = paint._proj({ x:c[c.length - 1][0], y:c[c.length - 1][1] });
               return (Math.atan2(b.x - a.x, -(b.y - a.y)) * 180 / Math.PI + 360) % 360;
-            })() }) }
+            })() }, faultAround(bestF, fl)) }
           : { labRock: { lat: lat, lon: lon, shake: sh } }, '*');
       });
       return;
