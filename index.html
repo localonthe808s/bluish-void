@@ -82855,19 +82855,42 @@ function initNowMicroTabs(){
            (measured: every label on the map piled onto North America). So the zoom is worked out from the container's
            own width -- 164 degrees, Hawaii to the African coast, floored to a quarter level -- and when the container
            has no width yet, it waits for it (ResizeObserver) rather than guessing. */
-        var fitBoth = function(){
+        var place = function(){
           var el = _hurricaneMap.getContainer(), w = el ? el.clientWidth : 0; if (!w) return false;
           var z = Math.floor(Math.log(w * 360 / (256 * 164)) / Math.LN2 * 4) / 4;
           try { _hurricaneMap.options.zoomSnap = 0.25; _hurricaneMap.invalidateSize(); _hurricaneMap.setView([22, -88], Math.max(2.5, Math.min(4, z)), { animate: false }); } catch(e){}
           return true;
         };
-        if (!fitBoth() && window.ResizeObserver && !window._hzFitRO){
-          window._hzFitRO = new ResizeObserver(function(){ if (window._hzBasin === 'both' && fitBoth()){ window._hzFitRO.disconnect(); window._hzFitRO = null; } });
-          window._hzFitRO.observe(_hurricaneMap.getContainer());
-        }
       } else {
         var v = (b === 'pac') ? [[16, -122], 4] : [[25, -55], 4];
-        try { _hurricaneMap.setView(v[0], v[1], { animate: true }); } catch(e){}
+        var place = function(){
+          var el = _hurricaneMap.getContainer(); if (!el || !el.clientWidth) return false;
+          try { _hurricaneMap.setView(v[0], v[1], { animate: true }); } catch(e){}
+          return true;
+        };
+      }
+      /* NEVER MOVE A MAP THAT HAS NO SIZE. Leaflet throws "Invalid LatLng object: (NaN, NaN)" from a setView on a 0 px
+         container (caught through CDP while verifying this: a window resized while another hazard tab was showing).
+         If the container is not laid out yet, wait for it and place the view then. A flyTo is worse than a setView: on a
+         sizeless map it throws on EVERY animation frame (71 exceptions from one resize, measured), so the storm framing
+         below runs only after the view has been placed on a real container. */
+      /* if something is actually running in the basin you just picked, frame
+         it rather than the empty climatology view */
+      var frameLive = function(){ try {
+        var live = (((window._hzSystems || {}).storms) || []).filter(function(x){
+          return ((x.basin === 'EPAC') ? 'pac' : 'atl') === b;
+        });
+        if (b === 'both'){ /* the whole point is both oceans at once: a storm is reached from its row, not by losing the view */ }
+        else if (live.length === 1) _hurricaneMap.flyTo([live[0].lat, live[0].lon], 6, { duration: 1.2 });
+        else if (live.length > 1) _hurricaneMap.flyToBounds(
+          L.latLngBounds(live.map(function(x){ return [x.lat, x.lon]; })).pad(0.5),
+          { duration: 1.2, maxZoom: 6 });
+      } catch(e){} };
+      if (window._hzFitRO){ try { window._hzFitRO.disconnect(); } catch(e){} window._hzFitRO = null; }
+      if (place()) frameLive();
+      else if (window.ResizeObserver){
+        window._hzFitRO = new ResizeObserver(function(){ if (place()){ window._hzFitRO.disconnect(); window._hzFitRO = null; frameLive(); } });
+        window._hzFitRO.observe(_hurricaneMap.getContainer());
       }
       /* swap which basin's annotations are drawn. Both sets live permanently
          on the map in their own pane, so this is a display toggle - nothing
@@ -82909,18 +82932,6 @@ function initNowMicroTabs(){
           var want = (b === 'pac') ? window._hzRecurvePacLayers : (b === 'both') ? (window._hzRecurveLayers || []).concat(window._hzRecurvePacLayers || []) : window._hzRecurveLayers;
           (want || []).forEach(function(l){ l.addTo(_hurricaneMap); });
         }
-      } catch(e){}
-      /* if something is actually running in the basin you just picked, frame
-         it rather than the empty climatology view */
-      try {
-        var live = (((window._hzSystems || {}).storms) || []).filter(function(x){
-          return ((x.basin === 'EPAC') ? 'pac' : 'atl') === b;
-        });
-        if (b === 'both'){ /* the whole point is both oceans at once: a storm is reached from its row, not by losing the view */ }
-        else if (live.length === 1) _hurricaneMap.flyTo([live[0].lat, live[0].lon], 6, { duration: 1.2 });
-        else if (live.length > 1) _hurricaneMap.flyToBounds(
-          L.latLngBounds(live.map(function(x){ return [x.lat, x.lon]; })).pad(0.5),
-          { duration: 1.2, maxZoom: 6 });
       } catch(e){}
     };
     try {
@@ -83675,7 +83686,8 @@ function initNowMicroTabs(){
             if (sB !== curBasin) return;
             stormBounds.push([sLat, sLon]);
           });
-          if (stormBounds.length > 0) {
+          var _hzEl = _hurricaneMap.getContainer();
+          if (stormBounds.length > 0 && _hzEl && _hzEl.clientWidth && _hzEl.clientHeight) {   // never fly a map that has no size (NaN LatLng on every frame)
             // If single storm, zoom to it with context; if multiple, fit all
             if (stormBounds.length === 1) {
               _hurricaneMap.flyTo(stormBounds[0], 6, { duration: 1.2 });
