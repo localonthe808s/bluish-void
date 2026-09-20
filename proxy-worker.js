@@ -82,7 +82,32 @@ const CACHE_RULES = {
   //    SURF layer; CHP = the statewide dispatch log for the TRAFFIC layer. ──
   'coastwatch.pfeg.noaa.gov':     600,
   'www.ndbc.noaa.gov':            600,
-  'media.chp.ca.gov':             60
+  'media.chp.ca.gov':             60,
+  // ── THE CITY's TRAFFIC tab (2026-09-20). Both answer without a key and send no
+  //    Access-Control-Allow-Origin. panynj = the Port Authority's crossing times (GWB,
+  //    Lincoln, Holland, Bayonne, Goethals, Outerbridge: minutes now against usual).
+  //    511ny = the state's event list, 2.7 MB for all of New York -- ALWAYS asked for
+  //    with &shape=nyc511 (below), which cuts it to the city's closures and incidents. ──
+  'www.panynj.gov':               120,
+  '511ny.org':                    300
+};
+
+// SHAPES: an upstream that is far too big to hand a phone is cut down HERE, once, and the
+// slim copy is what gets cached and served. Asked for with &shape=<name>; unknown = ignored.
+const SHAPES = {
+  // 511NY: keep what is inside New York City and is a closure or an incident, and only the
+  // fields the map reads. Measured 2026-09-20: 2,231 events / 2.7 MB -> 127 events / ~92 KB.
+  nyc511(text) {
+    const all = JSON.parse(text);
+    const keep = ['ID', 'EventType', 'EventSubType', 'RoadwayName', 'DirectionOfTravel', 'Description',
+                  'Latitude', 'Longitude', 'LastUpdated', 'Severity', 'LanesAffected', 'LanesStatus',
+                  'StartDate', 'PlannedEndDate'];
+    const out = (Array.isArray(all) ? all : []).filter(e =>
+      e && e.Latitude > 40.49 && e.Latitude < 40.92 && e.Longitude > -74.27 && e.Longitude < -73.68 &&
+      (e.EventType === 'closures' || e.EventType === 'accidentsAndIncidents')
+    ).map(e => { const o = {}; keep.forEach(k => { o[k] = e[k]; }); return o; });
+    return JSON.stringify(out);
+  }
 };
 
 const DEFAULT_TTL = 300;
@@ -148,7 +173,12 @@ export default {
     const override = parseInt(reqUrl.searchParams.get('ttl') || '', 10);
     const ttl = ttlFor(targetUrl.hostname, override);
     const cache = caches.default;
-    const cacheKey = new Request(targetUrl.toString(), { method: 'GET' });
+    // a shaped copy is a different object from the raw one: it gets its own cache key
+    const shapeName = reqUrl.searchParams.get('shape') || '';
+    const shape = Object.prototype.hasOwnProperty.call(SHAPES, shapeName) ? SHAPES[shapeName] : null;
+    const keyUrl = new URL(targetUrl.toString());
+    if (shape) keyUrl.searchParams.set('__bvshape', shapeName);
+    const cacheKey = new Request(keyUrl.toString(), { method: 'GET' });
 
     // 1) Fresh edge hit? (guarded — cache errors never break the path)
     let cached = null;
@@ -179,9 +209,18 @@ export default {
       });
     }
 
-    const body = await upstream.arrayBuffer();
+    let body = await upstream.arrayBuffer();
+    let shaped = false;
+    if (shape) {
+      // if the upstream changes its format the shape throws: serve stale if we have it, else say so
+      try { body = new TextEncoder().encode(shape(new TextDecoder().decode(body))).buffer; shaped = true; }
+      catch (e) {
+        if (cached) return withCors(cached, cors, 'STALE-ERR', null);
+        return json({ error: 'Shape failed', shape: shapeName, detail: String(e) }, 502, cors);
+      }
+    }
     const storeHeaders = {
-      'Content-Type': upstream.headers.get('Content-Type') || 'application/octet-stream',
+      'Content-Type': shaped ? 'application/json' : (upstream.headers.get('Content-Type') || 'application/octet-stream'),
       'Cache-Control': `public, max-age=${ttl}`,
       'X-BV-Cached-At': String(Date.now()),
       'X-BV-Upstream': targetUrl.hostname
