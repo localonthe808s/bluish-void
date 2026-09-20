@@ -1941,6 +1941,16 @@ function frontsRead(){
     }).catch(function(){ return []; });
   return FRONTS.p;
 }
+/* px from a point to a drawn polyline */
+function frontDist(P, x, y){
+  var best = 1e9;
+  for (var i = 1; i < P.length; i++){
+    var ax = P[i-1][0], ay = P[i-1][1], dx = P[i][0] - ax, dy = P[i][1] - ay, L2 = dx * dx + dy * dy || 1;
+    var t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L2)), ex = ax + t * dx - x, ey = ay + t * dy - y;
+    best = Math.min(best, ex * ex + ey * ey);
+  }
+  return Math.sqrt(best);
+}
 function makeFronts(ctx, runs, proj, view, tz){
   var FCOL = { COLD:'#3b82f6', WARM:'#ef4444', STNRY:'#3b82f6', OCFNT:'#2B22F4', TROF:'#d8a25c' }, labels = [];
   var CW = cvW(ctx), CH = cvH(ctx);
@@ -2010,10 +2020,15 @@ function makeFronts(ctx, runs, proj, view, tz){
                                          q:{ x:mid[0] + 5, y:mid[1] }, col: FCOL[f0.k], rank:35 });
     });
   });
-  /* which KINDS are in frame, for the widget's cut-through diagrams: it draws only what is on the map */
-  var kinds = {};
-  if (runs && runs.length) runs[0].f.forEach(function(f0){ if (seen(f0.p.map(P2), 0)) kinds[f0.k] = (kinds[f0.k] || 0) + 1; });
-  return { labels: labels, kinds: kinds, fine: !!(runs && runs.length && runs[0].fine), progs: progs.length,
+  /* which KINDS are in frame, and the drawn lines themselves in screen space: a tap on one
+     names it, and the one nearest home is the one "in play" (the widget shows ONE diagram) */
+  var kinds = {}, lines = [];
+  if (runs && runs.length) runs[0].f.forEach(function(f0){
+    var RAW0 = f0.p.map(P2);
+    if (seen(RAW0, 0)) kinds[f0.k] = (kinds[f0.k] || 0) + 1;
+    if (seen(RAW0, 80)) lines.push({ k: f0.k, P: cr(RAW0, 14) });
+  });
+  return { labels: labels, kinds: kinds, lines: lines, fine: !!(runs && runs.length && runs[0].fine), progs: progs.length,
     n: runs && runs.length ? runs[0].f.filter(function(f0){ return f0.k !== 'TROF' && seen(f0.p.map(P2), 0); }).length : 0,
     trof: runs && runs.length ? runs[0].f.filter(function(f0){ return f0.k === 'TROF' && seen(f0.p.map(P2), 0); }).length : 0, at: runs && runs.length ? runs[0].t : null,
     paint: function(){
@@ -2606,7 +2621,19 @@ function makeMachinery(ctx, geo, R, proj, mpp, view, mode, frontRuns, cold, moti
     });
   }
   if (FR) FR.labels.forEach(function(L){ quiet.push(L); });
-  try { if (FR && window.parent !== window) window.parent.postMessage({ labFronts: { n: FR.n, trof: FR.trof, at: FR.at, fine: FR.fine, progs: FR.progs, kinds: FR.kinds } }, '*'); } catch(e){}
+  /* THE ONE IN PLAY: the analysed line nearest home. A trough counts for half -- it is on the
+     map most days here and a real front, when there is one, is the bigger fact. */
+  var play = null;
+  window._frontLines = FR ? FR.lines : [];
+  if (FR && FR.lines.length){
+    var hq = proj((VIEWS[document.getElementById('view').value] || {}).home || LA_PT), kmpp = mpp * Math.cos(34.05 * Math.PI / 180) / 1000;
+    FR.lines.forEach(function(L){
+      var km = frontDist(L.P, hq.x, hq.y) * kmpp, score = km * (L.k === 'TROF' ? 2 : 1);
+      if (!play || score < play.score) play = { k: L.k, km: Math.round(km), score: score };
+    });
+  }
+  try { if (FR && window.parent !== window) window.parent.postMessage({ labFronts: { n: FR.n, trof: FR.trof, at: FR.at, fine: FR.fine, progs: FR.progs, kinds: FR.kinds,
+    play: play ? { k: play.k, km: play.km } : null } }, '*'); } catch(e){}
   var placed = [];
   var claim = function(list){
     ctx.save();
@@ -4590,12 +4617,24 @@ function drawCard(style){
      preview, which reads its trains out in the info bar -- the widget's grammar, no popup over
      the map. A tap is a press that did not travel; a drag never names a station. */
   cv.addEventListener('click', function(ev){
-    if (window.LAB_LOCK || moved > 5 || !paint._proj || window.parent === window) return;
+    if (window.parent === window) return;
     var r = cv.getBoundingClientRect(), mx = (ev.clientX - r.left) * W / r.width, my = (ev.clientY - r.top) * H / r.height;
     /* WITH THE ROCK ON, A TAP READS THE GROUND (user 2026-09-19: "i should be able to click on
        geology and see the dropdown info on the rock from macrostrat like NYC same with
        faults"). A fault trace within 9 px wins -- it is a line, and thin; anything else is the
        rock under the point. The lab only says WHERE; the widget asks Macrostrat and words it. */
+    /* A TAP ON A FRONT NAMES IT (user 2026-09-20: "i would just want to see the one i click
+       on or thats in play"). Within 14 px of a drawn line; a tap on open map hands the card
+       back to the one in play. */
+    if (window._frontLines && window._frontLines.length && !(document.getElementById('geo') || {}).checked){
+      var bestL = null, bdL = 14;
+      window._frontLines.forEach(function(L){ var d = frontDist(L.P, mx, my); if (d < bdL){ bdL = d; bestL = L; } });
+      window.parent.postMessage({ labFrontTap: bestL ? { k: bestL.k } : null }, '*');
+      if (bestL) return;
+    }
+    /* everything below needs a live, unlocked map. The front tap above does not: the weather
+       views are LOCKED frames (no pan, so `moved` never counts there) and need no projection. */
+    if (window.LAB_LOCK || moved > 5 || !paint._proj) return;
     if ((document.getElementById('geo') || {}).checked){
       var vk = document.getElementById('view').value;
       var lon = x2lon(VB.Xw + mx * VB.mpp), lat = y2lat(VB.Ymid + (H / 2 - my) * VB.mpp);
