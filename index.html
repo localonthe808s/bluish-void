@@ -55422,13 +55422,241 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         cvs2.style.display = '';
       });
     }
+    /* THE FAULT, MOVING THE WAY FAULTS MOVE (user 2026-09-20: "do them all"). The first diagrams slid
+       their blocks smoothly, which is the one thing a fault almost never does. This is a canvas scene,
+       because ground that BENDS and then snaps cannot be done with a css transform:
+         STICK-SLIP   the fault is locked. The country either side keeps moving, so the ground near the
+                      fault bends -- a road across it bows -- until it lets go all at once and the bend
+                      becomes an offset. That release IS the earthquake. How often the scene lets go
+                      follows the fault's slip rate.
+         mode 'above' sideways faults, from above, north up, the line at its true bearing.
+         mode 'cut'   up-and-down faults, cut through the ground. A BLIND thrust stops short of the
+                      surface and the layers above it fold into a hill instead of breaking. The cut
+                      carries a true depth scale, and any quake near this fault in the last day is a
+                      dot at its real depth and its real distance from the trace. The lean itself is a
+                      TYPICAL angle (the survey records which way a fault leans, not how steeply), so
+                      the dots are where the quakes are, not where the drawn plane says they should be.
+         mode 'block' faults that do both: one angled block, moving both ways at once.
+         pin          the city, on the side of the fault it is really on.
+         fossil       an ANCIENT thrust (New York's): it moved hundreds of millions of years ago and is
+                      not moving now, so it must not be shown loading toward an earthquake. One slow
+                      push, replayed; no lock-and-release, no shake, no rupture, no depth scale or
+                      quake dots, and the two blocks are the two ROCK BODIES when their names are known.
+       One scene per canvas, 30 fps cap, asleep off screen, one still frame under reduced motion;
+       state is kept per key so a re-rendered card carries on rather than restarting. */
+    function bvFaultScene(cv, o){
+      o = o || {};
+      var W = 176, H = 100, dpr = Math.min(2, window.devicePixelRatio || 1);
+      cv.width = W * dpr; cv.height = H * dpr; cv.style.width = W + 'px'; cv.style.height = H + 'px';
+      cv.style.letterSpacing = '0px';                        // canvas text inherits the host's css letter-spacing (#cw-info sets .07em): it stretched the labels and clipped one
+      var g = cv.getContext('2d'), S = bvFaultScene.state || (bvFaultScene.state = {}), st = S[o.key || 'k'] || (S[o.key || 'k'] = { t: 0 });
+      var ink = '#1b2340', RED = '#B4231F', lerp = function(a, b, t){ return a + (b - a) * t; };
+      var ease = function(x){ x = x < 0 ? 0 : x > 1 ? 1 : x; return x * x * (3 - 2 * x); };
+      /* how long between ruptures, from the slip rate (mm/yr, the top of the survey's class) */
+      var rate = o.rate ? o.rate[1] || o.rate[0] : null, PERIOD = rate == null ? 8 : rate > 5 ? 5.5 : rate > 1 ? 7.5 : rate > 0.2 ? 9.5 : 12;
+      /* one cycle: 0-.74 strain builds, .74-.78 it lets go, .78-.93 the offset stands, .93-1 the picture resets */
+      if (o.fossil) PERIOD = 11;
+      var phase = function(){ var p = o.freeze != null ? o.freeze : (st.t % PERIOD) / PERIOD;
+        if (o.fossil){ var pu = ease((p - 0.12) / 0.62); return { p: p, build: pu, slip: pu, reset: ease((p - 0.93) / 0.07), shake: 0, fossil: true }; } return { p: p, build: ease(p / 0.74), slip: ease((p - 0.74) / 0.04), reset: ease((p - 0.93) / 0.07), shake: p > 0.74 && p < 0.80 ? Math.sin((p - 0.74) * 900) * (1 - (p - 0.74) / 0.06) : 0 }; };
+      /* displacement (0..1 of the full offset) felt at distance d from a LOCKED fault, then after release */
+      var field = function(d, ph){ var lam = 16, bent = 1 - Math.exp(-Math.abs(d) / lam); return lerp(bent * ph.build, 1, ph.slip) * (1 - ph.reset); };
+      var plate = function(s, x, y, col, right){ g.font = '800 6.5px system-ui,sans-serif'; try { g.letterSpacing = '0px'; } catch(e){} var w = g.measureText(s).width; if (right) x = x - w; g.fillStyle = 'rgba(255,252,244,.84)'; g.fillRect(x - 2, y - 6.6, w + 4, 9); g.fillStyle = col || ink; g.fillText(s, x, y); return w; };
+      var qcol = function(m){ return m >= 5.5 ? '#ef4444' : m >= 4.5 ? '#f97316' : m >= 3.5 ? '#eab308' : m >= 2.5 ? '#84cc16' : m >= 1.5 ? '#4ade80' : '#7dd3fc'; };
+
+      var drawAbove = function(ph){
+        var cx = W / 2, cy = H / 2, az = (o.az == null ? 90 : o.az) * Math.PI / 180, u = [Math.sin(az), -Math.cos(az)], n = [u[1], -u[0]], D = 9, R = 130;
+        var P = function(a, b){ return [cx + a * u[0] + b * n[0], cy + a * u[1] + b * n[1]]; };
+        /* the two blocks */
+        [[1, '#e7c79c'], [-1, '#d6ad7e']].forEach(function(s){ g.fillStyle = s[1]; g.beginPath(); [P(-R, 0), P(R, 0), P(R, R * s[0]), P(-R, R * s[0])].forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); g.closePath(); g.fill(); });
+        /* things that cross the fault, each bent by the field and then offset: a road, a stream, a fence */
+        var cross = function(off, draw){
+          var pts = []; for (var d = -80; d <= 80; d += 2){ var side = d >= 0 ? 1 : -1, disp = o.lat * side * D * field(d, ph) / 2; pts.push(P(off + disp, d)); }
+          draw(pts);
+        };
+        var strokePts = function(pts, col, w, dash){ g.beginPath(); var prev = null; pts.forEach(function(q, i){ var jump = prev && Math.hypot(q[0] - prev[0], q[1] - prev[1]) > 6; (i && !jump) ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); prev = q; }); g.setLineDash(dash || []); g.strokeStyle = col; g.lineWidth = w; g.lineCap = 'butt'; g.stroke(); g.setLineDash([]); };
+        cross(-34, function(p){ strokePts(p, '#5b9bd5', 1.6); });                                            // a stream
+        cross(0, function(p){ strokePts(p, 'rgba(255,252,244,.95)', 7); strokePts(p, 'rgba(120,110,96,.8)', 0.8, [4, 3]); });   // a road, with its centre line
+        cross(36, function(p){ p.forEach(function(q, i){ if (i % 4) return; g.fillStyle = '#4b6b3a'; g.beginPath(); g.arc(q[0], q[1], 1.6, 0, 6.3); g.fill(); }); });   // a row of trees
+        /* the fault, and the rupture running along it when it goes */
+        var a0 = P(-R, 0), a1 = P(R, 0); g.beginPath(); g.moveTo(a0[0], a0[1]); g.lineTo(a1[0], a1[1]); g.setLineDash(o.soft ? [5, 3] : []); g.strokeStyle = RED; g.lineWidth = 2.2; g.stroke(); g.setLineDash([]);
+        if (ph.slip > 0 && ph.p < 0.86){ var k = (ph.p - 0.74) / 0.12, r0 = P(-70 * k, 0), r1 = P(70 * k, 0); g.beginPath(); g.moveTo(r0[0], r0[1]); g.lineTo(r1[0], r1[1]); g.strokeStyle = 'rgba(255,240,200,' + (1 - k).toFixed(2) + ')'; g.lineWidth = 5; g.stroke(); }
+        /* which way each side goes */
+        [1, -1].forEach(function(side){ var dir = o.lat * side, oo = 17 * side, b0 = P(-10 * dir, oo), b1 = P(10 * dir, oo), b2 = P(5 * dir, oo + 3.8 * side); g.beginPath(); g.moveTo(b0[0], b0[1]); g.lineTo(b1[0], b1[1]); g.lineTo(b2[0], b2[1]); g.strokeStyle = ink; g.lineWidth = 1.6; g.lineCap = 'round'; g.lineJoin = 'round'; g.stroke(); });
+        /* the city, on its real side, along its real bearing from the fault */
+        if (o.pin && o.pin.vec){ var pv = o.pin.vec, L = Math.hypot(pv[0], pv[1]) || 1, rr = Math.min(40, 14 + o.pin.mi * 1.2), px0 = Math.max(10, Math.min(W - 10, cx + pv[0] / L * rr)), py0 = Math.max(22, Math.min(H - 8, cy - pv[1] / L * rr));
+          g.strokeStyle = ink; g.lineWidth = 1.2; g.beginPath(); g.moveTo(px0, py0); g.lineTo(px0, py0 - 11); g.stroke(); g.fillStyle = '#2B22F4'; g.beginPath(); g.moveTo(px0, py0 - 11); g.lineTo(px0 + 6, py0 - 8.5); g.lineTo(px0, py0 - 6); g.closePath(); g.fill();
+          g.fillStyle = '#fff'; g.beginPath(); g.arc(px0, py0, 1.6, 0, 6.3); g.fill(); plate(o.pin.name, Math.max(3, Math.min(W - 60, px0 - 20)), py0 - 14, '#2B22F4'); }
+        plate('N↑', 4, 9, ink);
+      };
+
+      var drawCut = function(ph){
+        var top = 20, DEPTH = 18, kz = (H - top - 4) / DEPTH, th = (o.thrust ? 30 : o.dipSlip === 'normal' ? 60 : 50) * Math.PI / 180, x0 = o.thrust ? 44 : 62;
+        var up = o.dipSlip === 'reverse' ? -1 : 1, D = o.fossil ? 11 : 7, tipZ = o.blind ? 5.2 : 0;   // an ancient thrust sheet travelled far: drawn with a bigger throw          // a blind thrust stops this many km down
+        var planeX = function(z){ return x0 + z / Math.tan(th); };                          // z in km, 1:1 with the horizontal
+        var toY = function(z){ return top + z * kz; }, toX = function(xkm){ return x0 + xkm * kz; };
+        var pX = function(z){ return x0 + (z * kz) / Math.tan(th); };                        // the plane, in px
+        /* sky */
+        var sk = g.createLinearGradient(0, 0, 0, top); sk.addColorStop(0, '#cfe0f4'); sk.addColorStop(1, '#e8f0fa'); g.fillStyle = sk; g.fillRect(0, 0, W, H);
+        /* displacement of a point of rock: nothing on the footwall; on the hanging wall, along the plane.
+           Above a blind tip there is no break to slide on, so the motion is smeared into a fold. */
+        var disp = function(x, z){
+          var side = x - pX(z), dn = Math.sin(th) * side;                                     // distance from the plane
+          var m;
+          if (z < tipZ){ var w = 9 + (tipZ - z) * 2.6; m = 0.5 * (1 + Math.tanh(side / w)) * lerp(ph.build * 0.75, 1, ph.slip) * (1 - ph.reset); }
+          else m = side > 0 ? field(dn, ph) : 0;
+          return [up * Math.cos(th) * D * m, up * Math.sin(th) * D * m];
+        };
+        /* layers, drawn as bands whose edges are carried by the displacement */
+        var bands = o.fossil ? [[0, 0.5, '#7f9a72'], [0.5, 24, '#9aa3ad']] : [[0, 0.55, '#86a76e'], [0.55, 3.2, '#e7c79c'], [3.2, 7, '#cfa06c'], [7, 12, '#b07f52'], [12, 24, '#96683f']];
+        var edge = function(z, x){ var dd = disp(x, z); return [x + dd[0], toY(z) + dd[1]]; };
+        bands.forEach(function(b){
+          for (var part = 0; part < 2; part++){                                              // footwall, then hanging wall on top of it
+            g.beginPath(); var first = true, xs = [], x;
+            for (x = -12; x <= W + 300; x += 3) xs.push(x);          // far past the frame: a shallow plane runs a long way before it is deep
+            var keep = function(x, z){ var s2 = x - pX(z); return z < tipZ ? true : (part ? s2 > 0 : s2 <= 0); };
+            var topPts = [], botPts = [];
+            xs.forEach(function(x){ if (keep(x, b[0])) topPts.push(edge(b[0], x)); if (keep(x, b[1])) botPts.push(edge(b[1], x)); });
+            if (b[0] >= tipZ || b[1] > tipZ){ var pa = edge(b[0], pX(b[0]) + (part ? 0.01 : -0.01)), pb = edge(b[1], pX(b[1]) + (part ? 0.01 : -0.01)); if (part){ topPts.unshift(pa); botPts.unshift(pb); } else { topPts.push(pa); botPts.push(pb); } }
+            if (topPts.length < 2 || botPts.length < 2) continue;
+            topPts.concat(botPts.reverse()).forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); });
+            g.closePath(); g.fillStyle = (o.fossil && b[0] > 0 && part) ? '#b3a892' : b[2]; g.fill();      // an ancient thrust: the block on top is a different rock from the one beneath
+            if (z0(b) && part === 0 && tipZ > 0) break;
+          }
+        });
+        function z0(b){ return b[1] <= tipZ; }                                                // wholly above a blind tip: one unbroken band
+        /* the fault: from the tip (or the surface) down */
+        var zt = tipZ, a = edge(zt, pX(zt)); g.beginPath(); g.moveTo(pX(zt), toY(zt)); g.lineTo(pX(DEPTH + 4), toY(DEPTH + 4)); g.setLineDash(o.soft && !o.blind ? [5, 3] : []); g.strokeStyle = RED; g.lineWidth = 2.2; g.stroke(); g.setLineDash([]);
+        if (o.blind){ g.fillStyle = RED; g.beginPath(); g.arc(pX(zt), toY(zt), 2.2, 0, 6.3); g.fill(); g.font = '800 6.5px system-ui,sans-serif'; var lw = g.measureText('THE FAULT ENDS HERE').width; plate('THE FAULT ENDS HERE', Math.max(4, pX(zt) - 4 - lw), toY(zt) + 11, RED); }
+        if (!o.fossil && ph.slip > 0 && ph.p < 0.86){ var k = (ph.p - 0.74) / 0.12; g.beginPath(); g.moveTo(pX(zt + 3), toY(zt + 3)); g.lineTo(pX(zt + 3 + 13 * k), toY(zt + 3 + 13 * k)); g.strokeStyle = 'rgba(255,240,200,' + (1 - k).toFixed(2) + ')'; g.lineWidth = 5; g.stroke(); }
+        /* the hanging wall's arrow */
+        var mz = 9, ax = pX(mz) + 13, ay = toY(mz) - 8 * Math.cos(th), dir = up, ex = Math.cos(th) * 9, ey = Math.sin(th) * 9;
+        g.strokeStyle = ink; g.lineWidth = 1.6; g.lineCap = 'round'; g.beginPath(); g.moveTo(ax - dir * ex, ay - dir * ey); g.lineTo(ax + dir * ex, ay + dir * ey); g.stroke();
+        var hx = ax + dir * ex, hy = ay + dir * ey, an = Math.atan2(dir * ey, dir * ex); g.beginPath(); g.moveTo(hx - 4.5 * Math.cos(an - 0.6), hy - 4.5 * Math.sin(an - 0.6)); g.lineTo(hx, hy); g.lineTo(hx - 4.5 * Math.cos(an + 0.6), hy - 4.5 * Math.sin(an + 0.6)); g.stroke();
+        if (o.fossil){
+          /* the grain of the rock, so the two bodies read as rock and their offset can be seen */
+          g.save(); g.globalAlpha = 0.28; g.strokeStyle = '#2b3340'; g.lineWidth = 0.7;
+          for (var fz = 2; fz < DEPTH + 2; fz += 2.2) for (var part2 = 0; part2 < 2; part2++){ g.beginPath(); var started = false;
+            for (var fx = -12; fx <= W + 40; fx += 4){ var sd = fx - pX(fz); if (part2 ? sd <= 1 : sd > -1){ started = false; continue; } var q2 = edge(fz + (part2 ? 0.7 : 0) + 0.5 * Math.sin(fx * 0.08 + fz), fx); started ? g.lineTo(q2[0], q2[1]) : g.moveTo(q2[0], q2[1]); started = true; }
+            g.stroke(); }
+          g.restore();
+          if (o.rocks){ plate(o.rocks[0], 5, H - 16, '#1b2340'); plate(o.rocks[1], W - 4, toY(3.2), '#1b2340', true); }
+          plate(o.when || 'AN ANCIENT THRUST', 4, 9, ink); plate('NOT MOVING NOW', W - 4, 9, '#5b647a', true);
+        }
+        /* quakes of the last day, where they really are: depth down, distance from the trace across */
+        (o.fossil ? [] : (o.quakes || [])).forEach(function(q){ var x = toX(q.x), y = toY(q.depth); if (x < 3 || x > W - 22 || y > H - 3) return; var r = 1.8 + Math.max(0, q.mag) * 0.9, pul = 0.5 + 0.5 * Math.sin(st.t * 3 + q.depth);
+          g.fillStyle = qcol(q.mag); g.strokeStyle = 'rgba(255,255,255,.95)'; g.lineWidth = 1; g.save(); g.translate(x, y); g.rotate(Math.PI / 4); g.fillRect(-r, -r, 2 * r, 2 * r); g.strokeRect(-r, -r, 2 * r, 2 * r); g.restore();
+          g.strokeStyle = 'rgba(255,255,255,' + (0.5 * (1 - pul)).toFixed(2) + ')'; g.beginPath(); g.arc(x, y, r + 2 + pul * 5, 0, 6.3); g.stroke(); });
+        /* the depth scale: real kilometres (shown in miles) */
+        g.font = '700 5.6px system-ui,sans-serif'; g.textAlign = 'right';
+        (o.fossil ? [] : [0, 5, 10, 15]).forEach(function(z){ g.strokeStyle = 'rgba(27,35,64,.5)'; g.lineWidth = 0.8; g.beginPath(); g.moveTo(W - 5, toY(z)); g.lineTo(W - 1, toY(z)); g.stroke(); if (z){ g.fillStyle = 'rgba(255,252,244,.9)'; g.fillText(Math.round(z * 0.621) + ' MI', W - 6.5, toY(z) + 2); } });
+        g.textAlign = 'left';
+        /* the city on the surface, at its real distance across the fault */
+        if (o.pin && o.pin.x != null){ var px0 = Math.max(8, Math.min(W - 30, toX(o.pin.x))), sy = edge(0, px0)[1];
+          g.strokeStyle = ink; g.lineWidth = 1.2; g.beginPath(); g.moveTo(px0, sy); g.lineTo(px0, sy - 12); g.stroke(); g.fillStyle = '#2B22F4'; g.beginPath(); g.moveTo(px0, sy - 12); g.lineTo(px0 + 6 * (px0 > W - 60 ? -1 : 1), sy - 9.5); g.lineTo(px0, sy - 7); g.closePath(); g.fill();
+          g.fillStyle = '#fff'; g.beginPath(); g.arc(px0, sy, 1.6, 0, 6.3); g.fill(); plate(o.pin.name, Math.max(3, Math.min(W - 70, px0 - 22)), 9, '#2B22F4'); }
+        if (o.ends && o.ends[0]){ plate(o.ends[0], 3, H - 4, ink); plate(o.ends[1], W - 22, H - 4, ink, true); }
+      };
+
+      var drawBlock = function(ph){
+        /* an angled block: x runs ACROSS the fault (toward the side it leans to), y along it, z up */
+        var k = 10.6, ox = 14, oy = 84, c30 = Math.cos(Math.PI / 6), s30 = 0.5, X = 11, Y = 5.2, Z = 4.6, th = 52 * Math.PI / 180, xf = 4.2;
+        var I = function(x, y, z){ return [ox + (x + y * 0.62) * k * c30 * 1.05, oy + (-y * 0.62) * k * s30 * 1.25 - z * k + x * 0]; };
+        var pl = function(z){ return xf + (Z - z) / Math.tan(th); };                           // the plane's x at height z
+        var m = lerp(0, 1, ph.slip) * (1 - ph.reset), bend = ph.build * (1 - ph.slip) * (1 - ph.reset);
+        var up = o.dipSlip === 'normal' ? -1 : 1, dv = [ -up * Math.cos(th) * 0.9 * m, -o.lat * 0.9 * m, up * Math.sin(th) * 0.9 * m ];   // the hanging wall's slip
+        var poly = function(pts, fill, stroke){ g.beginPath(); pts.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); g.closePath(); g.fillStyle = fill; g.fill(); if (stroke){ g.strokeStyle = stroke; g.lineWidth = 0.7; g.stroke(); } };
+        var sky = g.createLinearGradient(0, 0, 0, H); sky.addColorStop(0, '#dbe7f6'); sky.addColorStop(1, '#eef3fa'); g.fillStyle = sky; g.fillRect(0, 0, W, H);
+        g.save(); g.beginPath(); g.rect(0, 0, W, oy + 0.5); g.clip();                        // nothing hangs below the block's base: a dropping side sinks INTO the ground
+        var layers = [[Z, Z - 0.35, '#86a76e'], [Z - 0.35, Z - 1.7, '#e7c79c'], [Z - 1.7, Z - 3.1, '#cfa06c'], [Z - 3.1, -2.5, '#b07f52']];                 // the lowest layer runs on below the base (clipped), so a lifted block leaves no hole
+        var blockOf = function(hang){
+          var d = hang ? dv : [0, 0, 0], T = function(x, y, z){ return I(x + d[0], y + d[1], z + d[2]); };
+          var xa = function(z){ return hang ? pl(z) : 0; }, xb = function(z){ return hang ? X : pl(z); };
+          /* the cut face (y = 0), layer by layer */
+          layers.forEach(function(L){ poly([T(xa(L[0]), 0, L[0]), T(xb(L[0]), 0, L[0]), T(xb(L[1]), 0, L[1]), T(xa(L[1]), 0, L[1])], L[2]); });
+          /* the top */
+          poly([T(xa(Z), 0, Z), T(xb(Z), 0, Z), T(xb(Z), Y, Z), T(xa(Z), Y, Z)], hang ? '#9cbb84' : '#8fb077', 'rgba(27,35,64,.25)');
+          /* a road across the top, bowed while the fault is locked */
+          var y0 = Y * 0.5, rp = []; for (var x = xa(Z); x <= xb(Z) + 0.01; x += 0.5){ var dd = Math.abs(x - pl(Z)), b = (hang ? -1 : 1) * o.lat * 0.45 * bend * (1 - Math.exp(-dd / 2.2)); rp.push(T(x, y0 + b, Z)); }
+          g.beginPath(); rp.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); g.strokeStyle = 'rgba(255,252,244,.95)'; g.lineWidth = 3.2; g.stroke();
+          if (hang) poly([T(X, 0, Z), T(X, Y, Z), T(X, Y, 0), T(X, 0, 0)], '#8a6240', 'rgba(27,35,64,.25)');        // its far side
+        };
+        blockOf(false);
+        /* the fault plane itself, where the two blocks no longer cover it */
+        poly([I(pl(Z), 0, Z), I(pl(Z), Y, Z), I(pl(0), Y, 0), I(pl(0), 0, 0)], 'rgba(180,35,31,.30)');
+        blockOf(true);
+        var f0 = I(pl(Z), 0, Z), f1 = I(pl(0), 0, 0), f2 = I(pl(Z), Y, Z); g.strokeStyle = RED; g.lineWidth = 2; g.setLineDash(o.soft ? [5, 3] : []); g.beginPath(); g.moveTo(f1[0], f1[1]); g.lineTo(f0[0], f0[1]); g.lineTo(f2[0], f2[1]); g.stroke(); g.setLineDash([]);
+        /* one arrow for the whole motion */
+        var a0 = I(7.6, 1.2, Z + 0.2), a1 = I(7.6 + dvN(0), 1.2 + dvN(1), Z + 0.2 + dvN(2)); function dvN(i){ var v = [-up * Math.cos(th), -o.lat * 1.0, up * Math.sin(th)], L = Math.hypot(v[0], v[1], v[2]); return v[i] / L * 2.6; }
+        g.strokeStyle = ink; g.lineWidth = 1.7; g.lineCap = 'round'; g.beginPath(); g.moveTo(a0[0], a0[1]); g.lineTo(a1[0], a1[1]); g.stroke(); var an = Math.atan2(a1[1] - a0[1], a1[0] - a0[0]);
+        g.beginPath(); g.moveTo(a1[0] - 5 * Math.cos(an - 0.55), a1[1] - 5 * Math.sin(an - 0.55)); g.lineTo(a1[0], a1[1]); g.lineTo(a1[0] - 5 * Math.cos(an + 0.55), a1[1] - 5 * Math.sin(an + 0.55)); g.stroke();
+        g.restore();
+        plate((o.dipSlip === 'normal' ? 'DOWN' : 'UP') + ' AND ALONG AT ONCE', 4, 9, ink);
+        if (o.ends && o.ends[0]){ var e0 = I(0, 0, 0), e1 = I(X, 0, 0); plate(o.ends[0], e0[0] - 1, e0[1] + 9, ink); plate(o.ends[1], e1[0] + 2, e1[1] + 9, ink, true); }
+      };
+
+      var draw = function(dt){
+        st.t += dt; g.setTransform(dpr, 0, 0, dpr, 0, 0); var ph = phase();
+        g.save(); g.clearRect(0, 0, W, H); if (ph.shake) g.translate(ph.shake * 1.6, ph.shake * -1.1);
+        if (o.mode === 'above') drawAbove(ph); else if (o.mode === 'block') drawBlock(ph); else drawCut(ph);
+        g.restore();
+      };
+      var LIVE = bvFaultScene.live || (bvFaultScene.live = []), alive = true, last = 0, raf = 0;
+      LIVE.push(function(){ alive = false; cancelAnimationFrame(raf); });
+      bvFaultScene.stop = function(){ while (LIVE.length) LIVE.pop()(); };
+      if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches){ st.t = PERIOD * 0.85; draw(0); return; }
+      var tick = function(now){
+        if (!alive) return; if (!cv.isConnected){ alive = false; return; }
+        raf = requestAnimationFrame(tick);
+        if (document.hidden || now - last < 33) return;
+        var r = cv.getBoundingClientRect(); if (r.bottom < 0 || r.top > innerHeight){ last = now; return; }
+        var dt = Math.min(0.06, (now - (last || now)) / 1000) || 0.033; last = now; draw(dt);
+      };
+      draw(0.033); raf = requestAnimationFrame(tick);
+    }
+    /* NEW YORK'S FAULTS ARE NOT LOS ANGELES'S (user 2026-09-20: "NYC doesnt have this data yet for its
+       faults"). These were traced off two scanned bedrock sheets; a trace knows where it is, how
+       surely it was mapped, its name where the sheet printed one, and whether it is a THRUST --
+       nothing about rate, sense or lean -- and none of them has moved since the Mesozoic. So the
+       Los Angeles scene, which shows a fault loading toward an earthquake, would be a lie here.
+       What is true, and is shown:
+         the 36 thrusts   the same cut through the ground in its FOSSIL mode: one slow push,
+                          replayed and labelled as ancient, no lock-and-release, no rate. Cameron's
+                          Line alone names its two rock bodies and its direction (the Hartland
+                          schists carried westward over the Manhattan Formation, ~450 million years
+                          ago -- the sheet's own account, already on this card). For the rest,
+                          which side rode over is on the sheet (its teeth) but was not carried into
+                          this map's data, so the cut has no compass letters and says so.
+         every fault      the last day's earthquakes within 15 mi of it, from the USGS feed. */
+    var CW_QK = { at: 0, d: null, p: null };
+    function cwQuakeFeed(){
+      if (CW_QK.d && Date.now() - CW_QK.at < 600000) return Promise.resolve(CW_QK.d);
+      if (CW_QK.p) return CW_QK.p;
+      CW_QK.p = fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson').then(function(r){ return r.json(); })
+        .then(function(j){ CW_QK.d = j; CW_QK.at = Date.now(); CW_QK.p = null; return j; }).catch(function(){ CW_QK.p = null; return null; });
+      return CW_QK.p;
+    }
+    function cwQuakesNear(f, j){
+      var traces = (f.n && window._cwFaults) ? window._cwFaults.filter(function(q){ return q.n === f.n; }) : [f], out = [], K = 111.32;
+      ((j || {}).features || []).forEach(function(q){
+        var g2 = q.geometry && q.geometry.coordinates; if (!g2 || !(q.properties.mag > -1)) return;
+        if (Math.abs(g2[1] - f.c[0][1]) > 0.6 || Math.abs(g2[0] - f.c[0][0]) > 0.8) return;
+        var c = Math.cos(g2[1] * Math.PI / 180), best = 1e9;
+        traces.forEach(function(t){ for (var i = 1; i < t.c.length; i++){
+          var ax = (t.c[i-1][0] - g2[0]) * c * K, ay = (t.c[i-1][1] - g2[1]) * K, dx = (t.c[i][0] - g2[0]) * c * K - ax, dy = (t.c[i][1] - g2[1]) * K - ay, l2 = dx * dx + dy * dy || 1;
+          var tt = Math.max(0, Math.min(1, (-ax * dx - ay * dy) / l2)); best = Math.min(best, Math.hypot(ax + tt * dx, ay + tt * dy)); } });
+        if (best <= 24) out.push({ km: best, depth: +g2[2], mag: q.properties.mag, place: q.properties.place, time: q.properties.time });
+      });
+      return out.sort(function(a, b){ return b.mag - a.mag; });
+    }
     function cwFaultTap(f){
       var el = document.getElementById('cw-info');
       if (!el) return;
       mtaPanelClose(); cwFeatClose();
       el.style.display = '';
       var km = f.len_m ? (f.len_m >= 1000 ? (f.len_m / 1000).toFixed(1) + ' km' : f.len_m + ' m') : '';
-      el.innerHTML = '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'
+      var thrust = f.t === 'thrust', CL = f.n === "Cameron's Line", tok = (window._cwFaultTok = (window._cwFaultTok || 0) + 1);
+      el.innerHTML = (thrust ? '<div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;"><canvas id="cw-fault-cv" style="display:block;flex:none;border-radius:7px;box-shadow:0 0 0 1px rgba(27,35,64,.22);"></canvas><div style="flex:1;min-width:240px;">' : '<div><div>')
+        + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'
         + '<span style="display:inline-block;width:26px;height:0;border-top:' + ((f.r === 3 ? 4 : f.r === 2 ? 3 : 2) + 'px ' + (f.k === 'certain' ? 'solid' : 'dashed')) + ' #7a1416;box-shadow:0 0 0 1px rgba(255,255,255,.8);"></span>'
         /* THE NAME FIRST (user 2026-09-07: "show their names"): the label the
            survey printed along the trace where it printed one, else the fault
@@ -55451,7 +55679,25 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             : f.n === "Cameron's Line" ? 'The Taconic suture: a thrust that carried the Hartland schists westward over the Manhattan Formation about 450 million years ago. The sheets follow it from the Bronx down the east side of Manhattan to the Upper Bay; in City Water Tunnel No. 3 it is a shear zone less than six inches wide.'
             : f.n === 'Inwood Hill thrust' ? 'A thrust with open teeth on the sheet, lying several hundred feet below Cameron\u2019s Line through Inwood and Washington Heights, so the two draw almost on top of each other.'
             : 'High-angle faults here mostly show a few inches of offset, many with a right-lateral sense; no movement has been observed since the Mesozoic.')
-        + '</div>';
+        + '</div>'
+        + (thrust ? '<div style="font:600 8.5px system-ui,sans-serif;color:#5b647a;letter-spacing:.06em;margin-top:4px;line-height:1.45;"><span style="font-weight:800;color:#8a91a5;margin-right:6px;">CUT THROUGH THE GROUND \u00b7 A REPLAY</span>'
+            + (CL ? 'THE HARTLAND SCHISTS WERE PUSHED WESTWARD, UP AND OVER THE MANHATTAN FORMATION, ABOUT 450 MILLION YEARS AGO'
+                  : 'ONE BODY OF ROCK WAS PUSHED UP AND OVER ANOTHER, LONG AGO \u00b7 WHICH SIDE RODE OVER IS ON THE SHEET BUT NOT IN THIS MAP\u2019S DATA')
+            + ' \u00b7 IT IS NOT MOVING NOW \u00b7 THE LEAN IS DRAWN AT A TYPICAL ANGLE</div>' : '')
+        + '<div id="cw-fault-qk" style="font:600 8.5px system-ui,sans-serif;color:#5b647a;letter-spacing:.06em;margin-top:3px;"><span style="font-weight:800;color:#8a91a5;margin-right:6px;">LAST 24 HOURS</span>CHECKING THE USGS FEED\u2026</div>'
+        + '</div></div>';
+      if (bvFaultScene.stop) bvFaultScene.stop();
+      var fcv = document.getElementById('cw-fault-cv');
+      if (fcv) bvFaultScene(fcv, { key: 'nyc|' + (f.n || f.loc || '') + '|' + f.len_m, mode: 'cut', dipSlip: 'reverse', thrust: true, fossil: true, soft: f.k !== 'certain',
+        ends: CL ? ['W', 'E'] : null, rocks: CL ? ['MANHATTAN FORMATION', 'HARTLAND SCHISTS'] : null, when: CL ? '450 MILLION YEARS AGO' : 'AN ANCIENT THRUST' });
+      cwQuakeFeed().then(function(j){
+        var q = document.getElementById('cw-fault-qk'); if (!q || tok !== window._cwFaultTok) return;          // another card has taken the bar since
+        var lab = '<span style="font-weight:800;color:#8a91a5;margin-right:6px;">LAST 24 HOURS</span>', mi = function(km){ return Math.round(km * 0.621); };
+        if (!j){ q.innerHTML = lab + 'THE USGS FEED DID NOT ANSWER'; return; }
+        var L = cwQuakesNear(f, j);
+        q.innerHTML = lab + (L.length ? L.length + (L.length === 1 ? ' QUAKE' : ' QUAKES') + ' WITHIN 15 MI OF IT \u00b7 LARGEST M' + L[0].mag.toFixed(1) + ', ' + mi(L[0].depth) + ' MI DEEP, ' + mi(L[0].km) + ' MI FROM THE TRACE \u00b7 ' + mtaEsc(String(L[0].place || '').toUpperCase())
+                                       : 'NO QUAKES WITHIN 15 MI OF IT') + ' \u00b7 USGS';
+      });
       var xb = document.getElementById('cw-fault-x');
       if (xb) xb.onclick = function(e){ e.stopPropagation(); cwInfoDefault(); };
     }
