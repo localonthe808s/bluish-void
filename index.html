@@ -51309,7 +51309,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           g.globalAlpha = 1;
         }
         /* RAIN first, so the air moves in front of it */
-        var zone = { COLD:[xn - 14, xn + 16, 0.95, 46], WARM:[xs + 8, xs + 118, 0.45, 30], STNRY:[xn - 34, xn + 14, 0.4, 24], OCFNT:[xc - 44, xc + 44, 0.7, 40], TROF:[W / 2 - 14, W / 2 + 14, 0.3, 12] }[kind];
+        /* at a cold front the rain falls BEHIND the gust front, under the cells -- not out ahead of the shelf */
+        var zone = { COLD:[xn - 34, xn - 3, 0.95, 46], WARM:[xs + 8, xs + 118, 0.45, 30], STNRY:[xn - 34, xn + 14, 0.4, 24], OCFNT:[xc - 44, xc + 44, 0.7, 40], TROF:[W / 2 - 14, W / 2 + 14, 0.3, 12] }[kind];
         g.lineCap = 'round';
         var RK = RAIN == null ? 1 : [0, 0.35, 0.75, 1.1][RAIN];
         st.rain.forEach(function(r, i){
@@ -51403,107 +51404,132 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
            Water cloud is crisp and lumpy, ice cloud is smooth and streaky: the tower is lobes lit from
            the upper left, the anvil a soft wedge with combed tips. The lobes rise and are replaced,
            which is the boiling. A flash lights it from inside. */
-        var drawCb = function(cx, stage, scale){
-          var baseY = G - 29, topY = stage >= 3 ? 9 : stage === 2 ? 16 : baseY - 22 * scale, Ht = baseY - topY, hw = (stage >= 3 ? 16 : stage === 2 ? 13 : 10) * scale;
-          var lit = st.flash > 0 ? 1 : 0;
+        /* IT DEVELOPS (user 2026-09-20: "i like how the old one showed the clouds developing upwards,
+           this feels more like a fixed image of a cloud"). The structure is kept, but it now LIVES,
+           the way a squall line does: a cell is born low at the gust front, its turrets push up
+           through its own top, it reaches the lid and only then spreads an anvil, it matures, and
+           then it rains out from the bottom and drifts back over the cold air while the NEXT cell is
+           already climbing ahead of it. Two cells half a life apart, so something is always growing.
+           `a` is a cell's age, 0..1:  0-.42 climbing   .42-.72 mature, anvil spreading   .72-1 decaying */
+        var drawCb = function(cx, stage, scale, a, seedK){
+          var baseY = G - 29, lit = st.flash > 0 ? 1 : 0;
+          var ease = function(x){ x = x < 0 ? 0 : x > 1 ? 1 : x; return x * x * (3 - 2 * x); };
           var shade = function(v, up){                          // v: 0 at the base .. 1 at the top
             var k = Math.pow(v, 0.55), d0 = NF > 0.5 ? [30, 38, 56] : [128, 140, 164], d1 = NF > 0.5 ? [158, 170, 194] : [250, 251, 255];
-            var c = [lerp(d0[0], d1[0], k), lerp(d0[1], d1[1], k), lerp(d0[2], d1[2], k)].map(function(x, ci){ return (up ? Math.min(255, x * 1.0 + (NF > 0.5 ? 26 : 34)) : x * (NF > 0.5 ? 0.8 : 0.84) - (ci < 2 ? 4 : 0)) + (lit ? 60 : 0); });
+            var c = [lerp(d0[0], d1[0], k), lerp(d0[1], d1[1], k), lerp(d0[2], d1[2], k)].map(function(x, ci){ return (up ? Math.min(255, x + (NF > 0.5 ? 26 : 34)) : x * (NF > 0.5 ? 0.8 : 0.84) - (ci < 2 ? 4 : 0)) + (lit ? 60 : 0); });
             return 'rgb(' + c.map(function(x){ return Math.round(Math.max(0, Math.min(255, x))); }).join(',') + ')';
           };
-          if (stage <= 0){
-            /* dry: a street of flat cumulus humilis, their bases all on one level */
-            for (var hi = 0; hi < 4; hi++){
-              var hx = cx - 26 + hi * 19 + 3 * Math.sin(t * 0.3 + hi), hr = 4.2 + (hi % 2);
-              g.save(); g.beginPath(); g.rect(hx - 12, baseY - 12, 24, 12); g.clip();
-              [[-hr * 0.9, 0, hr * 0.8], [0, -1.5, hr], [hr * 0.9, 0, hr * 0.75]].forEach(function(c){ g.fillStyle = shade(0.75, false); g.beginPath(); g.arc(hx + c[0], baseY - 1 + c[1], c[2], 0, 6.3); g.fill();
-                g.fillStyle = shade(0.95, true); g.beginPath(); g.arc(hx + c[0] - c[2] * 0.22, baseY - 1 + c[1] - c[2] * 0.28, c[2] * 0.66, 0, 6.3); g.fill(); });
-              g.restore();
-            }
-            return;
+          var grow = ease(a / 0.42), spread = stage >= 2 ? ease((a - 0.40) / 0.30) : 0, die = ease((a - 0.72) / 0.28);
+          var fullH = (stage >= 3 ? baseY - 9 : stage === 2 ? baseY - 16 : 24 * scale), Ht = Math.max(6, fullH * (0.16 + 0.84 * grow)), topY = baseY - Ht;
+          var hw = (stage >= 3 ? 16 : stage === 2 ? 13 : 10) * scale * (0.55 + 0.45 * grow);
+          cx -= 15 * a * scale;                                  // an ageing cell is left behind by the front
+          var alpha = 1 - die, lift = die * Ht * 0.45;           // dying: it fades, and the foot of it rains away first
+          if (alpha <= 0.02) return;
+          /* rain: none while it climbs, hardest when mature, tailing off */
+          var rainK = stage >= 1 ? ease((a - 0.30) / 0.2) * (1 - die * 0.7) : 0;
+          if (rainK > 0.02){
+            var rc = g.createLinearGradient(0, baseY, 0, G); rc.addColorStop(0, (NF > 0.5 ? 'rgba(120,150,200,' : 'rgba(40,70,120,') + ((0.10 + 0.11 * stage) * rainK).toFixed(3) + ')'); rc.addColorStop(1, 'rgba(40,70,120,0.02)');
+            g.fillStyle = rc; g.beginPath(); g.moveTo(cx - hw * 0.95, baseY); g.lineTo(cx + hw * 0.2, baseY); g.lineTo(cx + hw * 0.2 - 9, G); g.lineTo(cx - hw * 0.95 - 12, G); g.closePath(); g.fill();
           }
-          /* the rain curtain first: it hangs from the base and slants back under the tower */
-          if (stage >= 1){
-            var rc = g.createLinearGradient(0, baseY, 0, G); rc.addColorStop(0, NF > 0.5 ? 'rgba(120,150,200,' + (0.10 + 0.10 * stage) + ')' : 'rgba(40,70,120,' + (0.10 + 0.11 * stage) + ')'); rc.addColorStop(1, 'rgba(40,70,120,0.02)');
-            g.fillStyle = rc; g.beginPath(); g.moveTo(cx - hw * 0.9, baseY); g.lineTo(cx + hw * 0.35, baseY); g.lineTo(cx + hw * 0.35 - 9, G); g.lineTo(cx - hw * 0.9 - 12, G); g.closePath(); g.fill();
-          }
-          /* the anvil, behind the tower: ice. Long ahead of the storm, short behind it. */
-          if (stage >= 2){
-            var aR = (stage >= 3 ? 70 : 32) * scale, aL = (stage >= 3 ? 32 : 15) * scale, th = stage >= 3 ? 11 : 7, ax = cx - 6 * scale, drift = 1.5 * Math.sin(t * 0.25);
+          /* the anvil only exists once the top has met the lid, and it outlives the tower */
+          if (spread > 0.02){
+            var aR = (stage >= 3 ? 70 : 32) * scale * spread, aL = (stage >= 3 ? 32 : 15) * scale * spread, th = (stage >= 3 ? 11 : 7) * (0.5 + 0.5 * spread), ax = cx - 6 * scale;
             var ag = g.createLinearGradient(0, topY - 2, 0, topY + th + 3); ag.addColorStop(0, shade(1, true)); ag.addColorStop(1, shade(0.5, false));
-            g.save(); g.shadowColor = NF > 0.5 ? 'rgba(150,162,186,.8)' : 'rgba(255,255,255,.9)'; g.shadowBlur = 5;
+            g.save(); g.globalAlpha = Math.min(1, 1 - die * 0.75); g.shadowColor = NF > 0.5 ? 'rgba(150,162,186,.8)' : 'rgba(255,255,255,.9)'; g.shadowBlur = 5;
             g.fillStyle = ag; g.beginPath();
             g.moveTo(ax - aL, topY + th * 0.55);
             g.quadraticCurveTo(ax - aL * 0.5, topY - 1.5, ax, topY - 1);
-            g.quadraticCurveTo(ax + aR * 0.55, topY - 2.5, ax + aR + drift, topY + th * 0.30);           // upper surface: flat against the lid
-            g.quadraticCurveTo(ax + aR * 0.6, topY + th * 0.95, ax + hw * 0.8, topY + th + 2.5);           // underside: thickest at the tower
+            g.quadraticCurveTo(ax + aR * 0.55, topY - 2.5, ax + aR, topY + th * 0.30);
+            g.quadraticCurveTo(ax + aR * 0.6, topY + th * 0.95, ax + hw * 0.8, topY + th + 2.5);
             g.lineTo(ax - hw * 0.8, topY + th + 2.5);
             g.quadraticCurveTo(ax - aL * 0.6, topY + th * 1.05, ax - aL, topY + th * 0.55);
-            g.closePath(); g.fill(); g.restore();
-            /* combed tips: ice falling out in streaks */
+            g.closePath(); g.fill(); g.shadowBlur = 0;
             g.strokeStyle = NF > 0.5 ? 'rgba(150,162,186,.55)' : 'rgba(255,255,255,.75)'; g.lineWidth = 0.9;
-            for (var fi = 0; fi < 5; fi++){ var fy = topY + 1.2 + fi * (th * 0.17), fxx = ax + aR * (0.9 - fi * 0.03) + drift; g.beginPath(); g.moveTo(fxx - 7, fy); g.quadraticCurveTo(fxx + 3, fy + 0.4, fxx + 9 + fi * 1.5, fy + 1.6 + fi * 0.5); g.stroke(); }
-            /* mammatus: pouches hanging under the forward anvil, only under a mature storm */
-            if (stage >= 3){
+            for (var fi = 0; fi < 5; fi++){ var fy = topY + 1.2 + fi * (th * 0.17), fxx = ax + aR * (0.9 - fi * 0.03); g.beginPath(); g.moveTo(fxx - 7 * spread, fy); g.quadraticCurveTo(fxx + 3, fy + 0.4, fxx + (9 + fi * 1.5) * spread, fy + 1.6 + fi * 0.5); g.stroke(); }
+            if (stage >= 3 && spread > 0.75){
               for (var mi = 0; mi < 7; mi++){
-                var mxx = ax + hw + 6 + mi * 6.2, tt = (mxx - ax) / aR, my0 = topY + th * (0.98 - 0.62 * tt) + 1.2;
-                g.fillStyle = shade(0.42, false); g.beginPath(); g.arc(mxx, my0, 2.5 + 0.35 * Math.sin(t * 0.8 + mi), 0, Math.PI); g.fill();
-                g.fillStyle = shade(0.62, true); g.beginPath(); g.arc(mxx - 0.5, my0 - 0.2, 1.5, 0, Math.PI); g.fill();
+                var mxx = ax + hw + 6 + mi * 6.2; if (mxx > ax + aR - 8) break;
+                var tt = (mxx - ax) / aR, my0 = topY + th * (0.98 - 0.62 * tt) + 1.2;
+                g.fillStyle = shade(0.42, false); g.beginPath(); g.arc(mxx, my0, (2.5 + 0.35 * Math.sin(t * 0.8 + mi)) * ease((spread - 0.75) * 4), 0, Math.PI); g.fill();
               }
             }
+            g.restore();
           }
-          /* the tower: lobes on a column that narrows at the waist and leans back with height */
-          var L = st.cb || (st.cb = (function(){ var a = []; for (var i = 0; i < 27; i++) a.push({ v: (i + rnd() * 0.8) / 27, u: i % 3 === 0 ? -1 : i % 3 === 1 ? 1 : (rnd() * 1.0 - 0.5), r: 0.6 + rnd() * 0.4, ph: rnd() * 6.3 }); return a; })());
+          /* the tower. Its lobes RISE -- quickly enough to see -- swelling as they climb and vanishing
+             into the top, and while it is still climbing the newest ones burst out above it. */
+          var L = st.cb || (st.cb = (function(){ var arr = []; for (var i = 0; i < 27; i++) arr.push({ v: (i + rnd() * 0.8) / 27, u: i % 3 === 0 ? -1 : i % 3 === 1 ? 1 : (rnd() * 1.0 - 0.5), r: 0.6 + rnd() * 0.4, ph: rnd() * 6.3 }); return arr; })());
           var col = L.map(function(o){
-            var v = (o.v + t * 0.035 * (0.7 + 0.5 * o.r)) % 1;                                          // rising, and replaced at the base: the boil
+            var v = (o.v + seedK + t * 0.085 * (0.75 + 0.5 * o.r)) % 1;
             var waist = 1 - 0.34 * Math.sin(Math.min(1, v / 0.85) * Math.PI) + (v > 0.82 ? (v - 0.82) * 1.4 : 0);
-            var x = cx - 9 * scale * v * (stage >= 2 ? 1 : 0.5) + o.u * hw * waist * 0.82 + 0.8 * Math.sin(t * 0.6 + o.ph);
-            var y = baseY - v * (Ht - (stage >= 2 ? 3 : 0));
-            var r = (4.0 + 5.2 * o.r * (0.6 + 0.7 * Math.sin(Math.min(1, v * 1.15) * Math.PI))) * scale * (Math.abs(o.u) === 1 ? 1.0 : 1.2);
+            var burst = (1 - grow) * 5 * Math.max(0, v - 0.8) * 5;                                       // climbing: the top is not a lid yet
+            var x = cx - 9 * scale * v * (stage >= 2 ? 1 : 0.5) * grow + o.u * hw * waist * 0.82 + 0.8 * Math.sin(t * 0.6 + o.ph);
+            var y = baseY - lift - v * (Ht - lift - (spread > 0.3 ? 3 : 0)) - burst;
+            var r = (4.0 + 5.2 * o.r * (0.6 + 0.7 * Math.sin(Math.min(1, v * 1.15) * Math.PI))) * scale * (Math.abs(o.u) === 1 ? 1.0 : 1.2) * (0.5 + 0.5 * grow);
             return { x: x, y: y, r: r, v: v };
-          }).sort(function(a, b){ return b.r - a.r; });
-          /* THE TOWER IS BUILT ON ITS OWN TRANSPARENT LAYER, so its lee-side shadow can be laid with
-             source-atop and land on cloud only. (Done straight onto the scene, the shadow painted a
-             grey slab onto the sky beside the tower: the scene is opaque, so "atop" meant everything.) */
+          }).sort(function(p, q){ return q.r - p.r; });
           var off = st.cbCv || (st.cbCv = document.createElement('canvas'));
           if (off.width !== W * dpr || off.height !== H * dpr){ off.width = W * dpr; off.height = H * dpr; }
           var main = g; g = off.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
-          g.save(); g.beginPath(); g.rect(-10, -10, W + 20, baseY + 10.5); g.clip();                     // the base is FLAT: that level is where the air condenses
+          g.save(); g.beginPath(); g.rect(-10, -10, W + 20, baseY - lift + 10.5); g.clip();               // the base is FLAT: that level is where the air condenses
           col.forEach(function(o){ g.fillStyle = shade(o.v, false); g.beginPath(); g.arc(o.x, o.y, o.r, 0, 6.3); g.fill(); });
           col.forEach(function(o){ g.fillStyle = shade(Math.min(1, o.v + 0.1), true); g.beginPath(); g.arc(o.x - o.r * 0.20, o.y - o.r * 0.24, o.r * 0.74, 0, 6.3); g.fill(); });
-          /* the overshooting top: the updraft carries on past the lid for a moment */
-          if (stage >= 3){ var ox = cx - 8 * scale, oy = topY - 1 + 0.8 * Math.sin(t * 0.9); [[0, 0, 5.2], [-4.2, 1.6, 3.6], [4.4, 1.8, 3.4]].forEach(function(c){ g.fillStyle = shade(1, false); g.beginPath(); g.arc(ox + c[0], oy + c[1], c[2] * scale, 0, 6.3); g.fill(); g.fillStyle = shade(1, true); g.beginPath(); g.arc(ox + c[0] - 1, oy + c[1] - 1.1, c[2] * scale * 0.62, 0, 6.3); g.fill(); }); }
-          /* the lee side of the whole column is in its own shadow, and so is the foot of it */
+          if (stage >= 3 && spread > 0.3 && die < 0.4){ var ox = cx - 8 * scale, oy = topY - 1 + 0.8 * Math.sin(t * 0.9), ok2 = ease((spread - 0.3) * 2.5) * (1 - die * 2.5);
+            [[0, 0, 5.2], [-4.2, 1.6, 3.6], [4.4, 1.8, 3.4]].forEach(function(c){ g.fillStyle = shade(1, false); g.beginPath(); g.arc(ox + c[0], oy + c[1] + (1 - ok2) * 5, c[2] * scale * ok2, 0, 6.3); g.fill(); g.fillStyle = shade(1, true); g.beginPath(); g.arc(ox + c[0] - 1, oy + c[1] - 1.1 + (1 - ok2) * 5, c[2] * scale * 0.62 * ok2, 0, 6.3); g.fill(); }); }
           var sh = g.createLinearGradient(cx - hw * 1.2, 0, cx + hw * 1.3, 0); sh.addColorStop(0, 'rgba(60,76,110,0)'); sh.addColorStop(0.5, 'rgba(60,76,110,0)'); sh.addColorStop(1, NF > 0.5 ? 'rgba(6,10,20,.5)' : 'rgba(60,76,110,.42)');
           g.globalCompositeOperation = 'source-atop'; g.fillStyle = sh; g.fillRect(-10, -10, W + 20, H + 20);
           var sv = g.createLinearGradient(0, baseY - Ht * 0.34, 0, baseY); sv.addColorStop(0, 'rgba(52,64,92,0)'); sv.addColorStop(1, NF > 0.5 ? 'rgba(6,10,20,.55)' : 'rgba(52,64,92,.5)');
           g.fillStyle = sv; g.fillRect(-10, -10, W + 20, H + 20);
-          g.globalCompositeOperation = 'source-over';
-          g.restore();
-          g = main; g.drawImage(off, 0, 0, W, H);
-          /* the base: dark and level, scud hanging under it */
-          g.fillStyle = NF > 0.5 ? 'rgba(14,20,32,.85)' : 'rgba(58,68,88,.8)';
-          for (var sc2 = 0; sc2 < 3; sc2++){ g.beginPath(); g.ellipse(cx - hw * 0.6 + sc2 * hw * 0.55 + 1.5 * Math.sin(t * 0.5 + sc2 * 2), baseY + 1.6 + sc2 % 2, 3.4 - sc2 * 0.5, 1.3, 0, 0, 6.3); g.fill(); }
-          /* the shelf: a low roll pushed out ahead of the rain by the gust front, smooth on top, ragged below */
-          if (stage >= 2){
-            var sx0 = cx + hw * 0.15, sx1 = cx + hw * 1.05 + 11 * scale, sg2 = g.createLinearGradient(0, baseY - 4, 0, baseY + 6);
-            sg2.addColorStop(0, NF > 0.5 ? 'rgba(74,88,116,.95)' : 'rgba(176,186,204,.96)'); sg2.addColorStop(1, NF > 0.5 ? 'rgba(12,18,30,.95)' : 'rgba(66,78,100,.95)');
-            g.fillStyle = sg2; g.beginPath(); g.moveTo(sx0, baseY - 3);
-            g.bezierCurveTo(sx0 + (sx1 - sx0) * 0.45, baseY - 6.5, sx1 - 3, baseY - 3.5, sx1, baseY + 2.2);
-            g.bezierCurveTo(sx1 - 5, baseY + 5.2, sx0 + (sx1 - sx0) * 0.4, baseY + 4.6, sx0, baseY + 2); g.closePath(); g.fill();
-            g.strokeStyle = NF > 0.5 ? 'rgba(130,144,170,.45)' : 'rgba(255,255,255,.55)'; g.lineWidth = 0.7; g.beginPath(); g.moveTo(sx0 + 2, baseY - 2.2); g.bezierCurveTo(sx0 + (sx1 - sx0) * 0.5, baseY - 5.2, sx1 - 4, baseY - 2.6, sx1 - 1.5, baseY + 1.2); g.stroke();
-          }
-          /* a flash is inside the cloud before it is a bolt under it */
-          if (lit){ var fg = g.createRadialGradient(cx - 4, baseY - Ht * 0.45, 0, cx - 4, baseY - Ht * 0.45, Ht * 0.7); fg.addColorStop(0, 'rgba(255,250,215,.55)'); fg.addColorStop(1, 'rgba(255,250,215,0)');
+          g.globalCompositeOperation = 'source-over'; g.restore();
+          g = main; g.save(); g.globalAlpha = alpha; g.drawImage(off, 0, 0, W, H); g.restore();
+          /* scud under a live base */
+          if (die < 0.5){ g.fillStyle = NF > 0.5 ? 'rgba(14,20,32,' + (0.85 * alpha).toFixed(2) + ')' : 'rgba(58,68,88,' + (0.8 * alpha).toFixed(2) + ')';
+            for (var sc2 = 0; sc2 < 3; sc2++){ g.beginPath(); g.ellipse(cx - hw * 0.6 + sc2 * hw * 0.55 + 1.5 * Math.sin(t * 0.5 + sc2 * 2), baseY + 1.6 + sc2 % 2, 3.4 - sc2 * 0.5, 1.3, 0, 0, 6.3); g.fill(); } }
+          if (lit && die < 0.6){ var fg = g.createRadialGradient(cx - 4, baseY - Ht * 0.45, 0, cx - 4, baseY - Ht * 0.45, Ht * 0.7); fg.addColorStop(0, 'rgba(255,250,215,.55)'); fg.addColorStop(1, 'rgba(255,250,215,0)');
             g.save(); g.globalCompositeOperation = 'lighter'; g.fillStyle = fg; g.fillRect(cx - Ht, topY - 6, Ht * 2, Ht + 10); g.restore(); }
-          st.cbBase = [cx, baseY];
+          if (a > 0.35 && a < 0.8) st.cbBase = [cx, baseY];      // only a mature cell throws bolts
         };
+        /* fair-weather cumulus for a dry line: they too are born, swell and thin out */
+        var drawHumilis = function(cx){
+          var baseY = G - 29;
+          for (var hi = 0; hi < 4; hi++){
+            var age = ((t * 0.06 + hi * 0.27) % 1), sw = Math.sin(age * Math.PI), hx = cx - 30 + hi * 19 - 10 * age, hr = (4.4 + (hi % 2)) * (0.35 + 0.65 * sw);
+            g.save(); g.globalAlpha = Math.min(1, sw * 1.6); g.beginPath(); g.rect(hx - 14, baseY - 14, 28, 14); g.clip();
+            [[-hr * 0.9, 0, hr * 0.8], [0, -1.5, hr], [hr * 0.9, 0, hr * 0.75]].forEach(function(c){ g.fillStyle = NF > 0.5 ? 'rgb(96,108,132)' : 'rgb(214,220,232)'; g.beginPath(); g.arc(hx + c[0], baseY - 1 + c[1], c[2], 0, 6.3); g.fill();
+              g.fillStyle = NF > 0.5 ? 'rgb(140,152,178)' : 'rgb(255,255,255)'; g.beginPath(); g.arc(hx + c[0] - c[2] * 0.22, baseY - 1 + c[1] - c[2] * 0.28, c[2] * 0.66, 0, 6.3); g.fill(); });
+            g.restore();
+          }
+        };
+        /* THE SHELF BELONGS TO THE GUST FRONT, NOT TO A CELL (user 2026-09-20: "make sure the shelf cloud
+           is on the correct side"). The first cut hung it far out ahead of the storm over the warm
+           air. It forms where the outflow's leading edge lifts the warm air: its low tip sits right
+           over the nose of the cold air, and it slopes UP AND BACK from there to the storm's base,
+           with the rain behind it. So it is anchored at `nose`, whatever the cells above are doing. */
+        var drawShelf = function(nose, k){
+          var baseY = G - 29, tipX = nose + 4, tipY = baseY + 9.5, backX = nose - 24, sg2 = g.createLinearGradient(0, baseY - 5, 0, tipY + 1);
+          sg2.addColorStop(0, NF > 0.5 ? 'rgba(74,88,116,.95)' : 'rgba(176,186,204,.96)'); sg2.addColorStop(1, NF > 0.5 ? 'rgba(12,18,30,.95)' : 'rgba(62,74,98,.96)');
+          g.save(); g.globalAlpha = k; g.fillStyle = sg2; g.beginPath();
+          g.moveTo(backX, baseY - 4);
+          g.bezierCurveTo(nose - 12, baseY - 5.5, nose - 1, baseY - 1.5, tipX, tipY - 1.5);               // smooth, laminar upper surface
+          g.bezierCurveTo(tipX + 0.5, tipY + 1.4, tipX - 3, tipY + 1.6, tipX - 6, tipY + 0.4);             // the rounded leading lip
+          /* the underside runs almost straight back -- a wedge, not a hook -- and it is the ragged side */
+          g.bezierCurveTo(nose - 9, baseY + 8.2 + 0.7 * Math.sin(t * 0.7), nose - 17, baseY + 6.4 + 0.6 * Math.sin(t * 0.9 + 1), backX, baseY + 4.5);
+          g.closePath(); g.fill();
+          g.strokeStyle = NF > 0.5 ? 'rgba(130,144,170,.45)' : 'rgba(255,255,255,.6)'; g.lineWidth = 0.7;
+          for (var li2 = 0; li2 < 2; li2++){ g.beginPath(); g.moveTo(backX + 3, baseY - 3 + li2 * 1.6); g.bezierCurveTo(nose - 12, baseY - 4.4 + li2 * 1.6, nose - 2, baseY - 0.6 + li2 * 1.5, tipX - 1.5, tipY - 2.4 + li2 * 1.2); g.stroke(); }
+          g.restore();
+        };
+        st.cbBase = null;
         if (kind === 'COLD'){
-          var stg = RAIN == null ? 2 : RAIN;
-          drawCb(xn - 3, stg, (0.82 + 0.18 * STR) * (stg >= 3 ? 1 : 0.94));
+          var stg = RAIN == null ? 2 : RAIN, scl = (0.82 + 0.18 * STR) * (stg >= 3 ? 1 : 0.94), LIFE = 24;
+          if (stg <= 0) drawHumilis(xn - 2);
+          else {
+            /* the older cell first (it is further back), then the one climbing in front of it */
+            var a1 = (t / LIFE) % 1, a2 = (a1 + 0.5) % 1, cells = [[a1, 0], [a2, 0.43]].sort(function(p, q){ return q[0] - p[0]; });
+            cells.forEach(function(c){ drawCb(xn - 8, stg, scl, c[0], c[1]); });
+            if (stg >= 2) drawShelf(xn, 1);
+          }
         } else if (LV.flash === true && kind !== 'TROF'){
-          /* thunder embedded in a layered front: one tower poking up through the deck */
-          drawCb(kind === 'WARM' ? xs + 52 : kind === 'OCFNT' ? xc + 2 : xn - 30, 2, 0.62);
+          drawCb(kind === 'WARM' ? xs + 52 : kind === 'OCFNT' ? xc + 2 : xn - 30, 2, 0.62, (t / 26) % 1, 0);
         }
         if (st.flash > 0 && st.bolt){
           var bx = kind === 'COLD' ? st.bolt[0] : (kind === 'WARM' ? xs + 40 : kind === 'OCFNT' ? xc : kind === 'TROF' ? W / 2 : xn - 20) + (st.bolt[1] - 0.5) * 16, by = G - 58;
