@@ -51412,38 +51412,65 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       };
       draw(0.033); raf = requestAnimationFrame(tick);
     }
-    /* HOW MUCH COLDER, AND ON WHICH SIDE (user 2026-09-20: "lets do it"). The stroke already
-       thickens with a contrast read, but that read snaps to the nearest of 70 grid points half
-       a degree off the line, so both samples often fall in one cell -- fine for a line weight,
-       not for a number someone will repeat. This one interpolates the same field and steps a
-       full degree (~110 km) to each side, which is inside the air mass at this grid's spacing.
-       THE FIELD IS OPEN-METEO'S MODEL ANALYSIS IN CELSIUS (no unit override on that call), so
-       the difference goes through bvDF, and the card says MODEL. It covers 38.6-45.4 N,
-       79.8-69.2 W only: a front mostly outside that gets no number rather than a guess. */
-    function cwFrontContrast(f){
-      var TF = window._cwTfield; if (!TF || !f.p || f.p.length < 3) return null;
-      var at = function(lo, la){
-        var fx = (lo - TF.W0) / (TF.W1 - TF.W0) * (TF.w - 1), fy = (la - TF.S0) / (TF.S1 - TF.S0) * (TF.h - 1);
-        if (fx < 0 || fy < 0 || fx > TF.w - 1 || fy > TF.h - 1) return NaN;
-        var x0 = Math.min(TF.w - 2, Math.floor(fx)), y0 = Math.min(TF.h - 2, Math.floor(fy)), ax = fx - x0, ay = fy - y0;
-        var v = function(x, y){ return TF.d[y * TF.w + x]; };              // rows run south to north, as fetched
-        return v(x0, y0) * (1 - ax) * (1 - ay) + v(x0 + 1, y0) * ax * (1 - ay) + v(x0, y0 + 1) * (1 - ax) * ay + v(x0 + 1, y0 + 1) * ax * ay;
-      };
-      var ds = [], nxs = 0, nys = 0, segs = 0;
-      for (var i = 1; i < f.p.length; i++){
-        var a = f.p[i - 1], b = f.p[i], vx = b[0] - a[0], vy = b[1] - a[1], vl = Math.hypot(vx, vy) || 1;
-        var nx = -vy / vl, ny = vx / vl, mlo = (a[0] + b[0]) / 2, mla = (a[1] + b[1]) / 2;
-        segs++;
-        var t1 = at(mlo + nx, mla + ny), t2 = at(mlo - nx, mla - ny);
-        if (!isFinite(t1) || !isFinite(t2)) continue;
-        ds.push(t1 - t2); nxs += nx; nys += ny;
-      }
-      if (ds.length < 2 || ds.length < segs * 0.5) return null;            // mostly off the grid: say nothing
-      ds.sort(function(x, y){ return x - y; });
-      var med = ds[ds.length >> 1];                                        // + means the +normal side is WARMER
-      var cx = med > 0 ? -nxs : nxs, cy = med > 0 ? -nys : nys;            // toward the colder side (lon, lat)
-      var az = (Math.atan2(cx, cy) * 180 / Math.PI + 360) % 360;
-      return { f: Math.abs(bvDF(med)), side: ['NORTH','NORTHEAST','EAST','SOUTHEAST','SOUTH','SOUTHWEST','WEST','NORTHWEST'][Math.round(az / 45) % 8] };
+    /* HOW MUCH COLDER, AND ON WHICH SIDE (user 2026-09-20: "lets do it"). The first cut read the
+       barbs' 70-point temperature lattice, and measured live it was nearly mute: that lattice
+       only covers 38.6-45.4 N, 79.8-69.2 W, so one front in five got a number and the one in
+       play got none. So the fronts are asked about directly instead: up to four places along
+       each line that is on screen, one degree of ground distance (~70 mi) out to each side,
+       all in ONE keyless Open-Meteo call, in Fahrenheit. The median across-line difference is
+       the number; its sign says which side is colder. This is the MODEL's analysis, not
+       stations, and the card says so. Cached per bulletin for 15 minutes; a line that could
+       not be read is remembered as unread rather than asked again every repaint. */
+    var CW_FRONT_DT = { ref: null, at: 0, m: {}, busy: false };
+    function cwFrontTemps(lines){
+      var D = CW_FRONT_DT, F = window._cwFronts;
+      if (D.ref !== F || Date.now() - D.at > 900000){ D.ref = F; D.at = Date.now(); D.m = {}; }
+      if (D.busy) return;
+      var want = lines.filter(function(ln){ return ln.idx >= 0 && !(ln.idx in D.m) && ln.src.p.length >= 3; });
+      if (!want.length) return;
+      var pts = [], plan = [];
+      want.forEach(function(ln){
+        var p = ln.src.p, segs = [];
+        for (var i = 1; i < p.length; i++) segs.push(i);
+        /* only the part of the line the view shows, then at most four of those, evenly */
+        segs = segs.filter(function(i){ var mlo = (p[i-1][0] + p[i][0]) / 2, mla = (p[i-1][1] + p[i][1]) / 2; return ln.inView(mlo, mla); });
+        if (!segs.length){ D.m[ln.idx] = false; return; }
+        var pick = [], n = Math.min(4, segs.length);
+        for (var q = 0; q < n; q++) pick.push(segs[Math.floor((q + 0.5) * segs.length / n)]);
+        pick.forEach(function(i){
+          var a = p[i-1], b = p[i], mla = (a[1] + b[1]) / 2, mlo = (a[0] + b[0]) / 2, c = Math.cos(mla * Math.PI / 180);
+          var gx = (b[0] - a[0]) * c, gy = b[1] - a[1], gl = Math.hypot(gx, gy) || 1, nx = -gy / gl, ny = gx / gl;   // unit normal ON THE GROUND
+          plan.push({ idx: ln.idx, nx: nx, ny: ny, at: pts.length });
+          pts.push([mla + ny, mlo + nx / c], [mla - ny, mlo - nx / c]);                                         // one degree of ground each way
+        });
+      });
+      if (!pts.length) return;
+      D.busy = true;
+      fetch('https://api.open-meteo.com/v1/forecast?latitude=' + pts.map(function(q){ return q[0].toFixed(3); }).join(',')
+          + '&longitude=' + pts.map(function(q){ return q[1].toFixed(3); }).join(',')
+          + '&current=temperature_2m&temperature_unit=fahrenheit&timezone=UTC')
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          if (!Array.isArray(j)) j = [j];
+          var by = {};
+          plan.forEach(function(pl){
+            var t1 = j[pl.at] && j[pl.at].current && j[pl.at].current.temperature_2m, t2 = j[pl.at + 1] && j[pl.at + 1].current && j[pl.at + 1].current.temperature_2m;
+            if (!isFinite(t1) || !isFinite(t2)) return;
+            (by[pl.idx] = by[pl.idx] || []).push({ d: t1 - t2, nx: pl.nx, ny: pl.ny });
+          });
+          want.forEach(function(ln){
+            var L = by[ln.idx];
+            if (!L || !L.length){ if (!(ln.idx in D.m)) D.m[ln.idx] = false; return; }
+            L.sort(function(x, y){ return x.d - y.d; });
+            var med = L[L.length >> 1].d, sx = 0, sy = 0;
+            L.forEach(function(o){ sx += o.nx; sy += o.ny; });
+            var cx = med > 0 ? -sx : sx, cy = med > 0 ? -sy : sy, az = (Math.atan2(cx, cy) * 180 / Math.PI + 360) % 360;   // toward the colder side
+            D.m[ln.idx] = { f: Math.abs(med), n: L.length,
+              side: ['NORTH','NORTHEAST','EAST','SOUTHEAST','SOUTH','SOUTHWEST','WEST','NORTHWEST'][Math.round(az / 45) % 8] };
+          });
+        })
+        .catch(function(){ want.forEach(function(ln){ if (!(ln.idx in D.m)) D.m[ln.idx] = false; }); })
+        .then(function(){ D.busy = false; try { cwFrontCard(); } catch(e){} });
     }
     function bvFrontCss(){
       if (document.getElementById('bv-front-css')) return;
@@ -51462,7 +51489,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var info = document.getElementById('cw-wide-tag-info'), wv = cwWideDef();
       if (!info || !wv || !wv.fronts) return;
       var tap = window._cwFrontTapK, play = window._cwFrontPlay, k = tap || (play && play.k);
-      var dT = tap ? window._cwFrontTapDT : (play && play.dT);
+      var dIdx = tap ? window._cwFrontTapIdx : (play && play.idx), dT = (CW_FRONT_DT.ref === window._cwFronts && CW_FRONT_DT.m[dIdx]) || null;
       var key = (window._cwFrontOff || !k || !BV_FRONT_TXT[k]) ? '' : k + '|' + (tap ? 'tap' : play.km) + '|' + cw.wide + '|' + (dT ? Math.round(dT.f) + dT.side : '');
       if (info._bvFrKey === key) return;
       info._bvFrKey = key;
@@ -51478,7 +51505,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         + (dT ? '<span class="bvfr-m" style="display:block;color:#1b2340;font-size:8.5px;">ACROSS THIS ONE NOW \u00b7 '
             + (dT.f < 2 ? 'UNDER 2\u00b0F BETWEEN THE TWO SIDES \u00b7 A LINE ON THE MAP MORE THAN A CHANGE IN THE AIR'
                         : 'ABOUT ' + Math.round(dT.f) + '\u00b0F COLDER ON ITS ' + dT.side + ' SIDE')
-            + ' <span style="color:#6b7389;">\u00b7 MODEL, ~60 MI EITHER SIDE</span></span>' : '')
+            + ' <span style="color:#6b7389;">\u00b7 MODEL AIR TEMPERATURE ~70 MI EITHER SIDE, ' + dT.n + (dT.n === 1 ? ' PLACE' : ' PLACES') + ' ALONG IT</span></span>' : '')
         + '<span class="bvfr-m" style="display:block;">' + T[4] + ' · TAP ANY LINE ON THE MAP</span></span></span></span>';
       info.style.display = 'block';
       var fcv = document.getElementById('cw-front-cv');
@@ -51498,7 +51525,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         }
       });
       window._cwFrontTapK = best ? best.k : null;             // open map hands it back to the one in play
-      window._cwFrontTapDT = best ? best.dT : null;
+      window._cwFrontTapIdx = best ? best.idx : null;
       if (best) window._cwFrontOff = false;
       cwFrontCard();
     }
@@ -53303,7 +53330,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (!wv.foliage) folHide();
       var fi0 = document.getElementById('cw-wide-tag-info'); if (fi0) fi0._bvFrKey = null;   // folHide emptied it: let the front card rebuild
       if (bvFrontScene.stop) bvFrontScene.stop();
-      window._cwFrontTapK = null; window._cwFrontTapDT = null;
+      window._cwFrontTapK = null; window._cwFrontTapIdx = null;
       el.style.objectFit = wv.fit;
       el.style.display = '';
       el.style.background = wv.box ? 'transparent' : '#0d1626';
@@ -54403,7 +54430,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           });
           if (!any) return;
           var P = crSmooth(RAW, 14);
-          cwFL.push({ k: f.k, P: P, w: cvs.width, dT: cwFrontContrast(f) });   // for the tap, and for "the one in play"
+          cwFL.push({ k: f.k, P: P, w: cvs.width, src: f, idx: window._cwFronts.indexOf(f),   // for the tap, and for "the one in play"
+            inView: function(lo, la){ var X = px([lo, la]), Y = py([lo, la]); return X > 0 && Y > 0 && X < cvs.width && Y < cvs.height; } });
           /* THE LINE CARRIES THE CONTRAST IT ACTUALLY HAS (user 2026-09-03).
              A front with 15 degrees across it and one with 3 were drawn
              identically. Sampling the temperature field either side of the
@@ -54490,8 +54518,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             bd2 = Math.min(bd2, Math.hypot(ax2 + t2 * dx2 - hx, ay2 + t2 * dy2 - hy));
           }
           var km2 = Math.round(bd2 * kmPx);
-          if (!window._cwFrontPlay || km2 < window._cwFrontPlay.km) window._cwFrontPlay = { k: ln.k, km: km2, dT: ln.dT };
+          if (!window._cwFrontPlay || km2 < window._cwFrontPlay.km) window._cwFrontPlay = { k: ln.k, km: km2, idx: ln.idx };
         });
+        try { cwFrontTemps(cwFL); } catch(e){}
         try { cwFrontCard(); } catch(e){}
       } else if (wv.fronts){ window._cwFrontLines = []; window._cwFrontPlay = null; try { cwFrontCard(); } catch(e){} }
       /* City anchors ride the OVERLAY, not the basemap (user 2026-09-01).
