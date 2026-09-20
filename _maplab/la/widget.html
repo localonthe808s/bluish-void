@@ -93,16 +93,15 @@
   /* the wide strip is orange with white type: the legend brings its own paper (first cut put
      dark sentence text and blue/red titles straight on the orange and none of it could be read) */
   .frt-panel{ position:relative; background:rgba(255,252,244,.96); border-radius:10px; padding:8px 30px 8px 10px; margin:8px auto 0; width:fit-content; max-width:100%; box-sizing:border-box; }
-  .frt{ max-width:520px !important; }
+  .frt{ max-width:660px !important; }
+  .frt-cv{ display:block; flex:none; border-radius:7px; box-shadow:0 0 0 1px rgba(27,35,64,.22); }
+  @media (max-width: 620px){ .frt{ flex-direction:column; align-items:flex-start; } }
   .frt-row{ display:flex; flex-wrap:wrap; justify-content:center; gap:10px 22px; }
   .frt{ display:flex; gap:9px; align-items:center; text-align:left; max-width:372px; }
   .frt svg{ display:block; flex:none; border-radius:6px; box-shadow:0 0 0 1px rgba(27,35,64,.22); }
   .frt-t{ font:800 9px system-ui,sans-serif; letter-spacing:.1em; }
   .frt-w{ font:500 10.5px/1.35 system-ui,sans-serif; letter-spacing:0; color:#3b4460; text-transform:none; margin-top:2px; }
   .frt-m{ font:600 8px system-ui,sans-serif; letter-spacing:.06em; color:#6b7389; margin-top:3px; }
-  .flt-nudge{ animation:fltNudge 2.2s ease-in-out infinite alternate; }
-  @keyframes fltNudge{ 0%{ transform:translate(0,0); } 100%{ transform:translate(var(--sx),var(--sy)); } }
-  @media (prefers-reduced-motion: reduce){ .flt-nudge{ animation:none; } }
   .flt-base{ animation:fltBase 3.6s linear infinite; }
   @keyframes fltBase{ 0%{opacity:1} 9%,86%{opacity:0} 100%{opacity:1} }
   .flt-dia svg{ display:block; border-radius:6px; box-shadow:0 0 0 1px rgba(27,35,64,.22); }
@@ -227,65 +226,234 @@ var FRONT_TXT = {
   TROF:  ['TROUGH', '#a9742f', 'Not a front: the air is the same on both sides. It is a line where the pressure dips, so surface air flows in from both sides and has nowhere to go but up.',
           'A line of cloud or showers if the air is moist. Out here, often only a wind shift.', 'ON THE MAP · A DASHED TAN LINE']
 };
-function frontCut(k){
-  var W = 116, H = 58, G = 50, ink = '#1b2340', COLD = '#a9cdf5', WARM = '#fbe3cf';
-  var arrow = function(pts, col){                                        // a polyline with a head on its last segment
-    var a = pts[pts.length - 2], b = pts[pts.length - 1], an = Math.atan2(b[1] - a[1], b[0] - a[0]), h = 4.2;
-    return '<polyline points="' + pts.map(function(q){ return q.join(','); }).join(' ') + '" fill="none" stroke="' + (col || ink) + '" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>'
-      + '<polyline points="' + (b[0] - h * Math.cos(an - 0.6)).toFixed(1) + ',' + (b[1] - h * Math.sin(an - 0.6)).toFixed(1) + ' ' + b.join(',') + ' '
-      + (b[0] - h * Math.cos(an + 0.6)).toFixed(1) + ',' + (b[1] - h * Math.sin(an + 0.6)).toFixed(1) + '" fill="none" stroke="' + (col || ink) + '" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>';
+/* THE FRONT, ALIVE (user 2026-09-20: "lets improve the pressure front visuals, lets make these
+   cool and inventive now"). Still the honest picture -- a cut through the air seen from the
+   side -- but drawn as MOVING AIR instead of a diagram:
+     - the air is streamlines of parcels. Cold air is blue and hugs the ground; warm air is
+       amber, and where the front lifts it past the condensation level it turns white. The
+       cloud is not painted on: it is made of the lifted warm air, which is what a cloud is.
+     - the camera RIDES WITH THE FRONT, so the land scrolls underneath: a small skyline passes
+       from warm light, into the rain, and under the cold dome. Warm air is still over the
+       ground, so its streaks and the ground move together -- the front is what is travelling.
+     - rain fits the kind: hard and narrow at a cold front (with the odd flash), wide and light
+       AHEAD of a warm front, broad under an occlusion. A ribbon under the ground carries the
+       temperature across the line.
+   Kinematic, not a simulation: every parcel rides an analytic streamline over the frontal
+   surface, so it cannot wander off and costs nothing. One scene runs at a time, capped at
+   30 fps, asleep when off screen or hidden; its state is kept per kind so a card that is
+   re-rendered picks up where it was instead of reseeding. */
+function bvFrontScene(cv, kind, opts){
+  opts = opts || {};
+  var W = 224, H = 104, G = 86, dpr = Math.min(2, window.devicePixelRatio || 1);
+  cv.width = W * dpr; cv.height = H * dpr; cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  var g = cv.getContext('2d');
+  var S = bvFrontScene.state || (bvFrontScene.state = {}), key = kind + '|' + (opts.site || '');
+  var rnd = function(){ S._seed = ((S._seed || 9301) * 1103515245 + 12345) & 0x7fffffff; return S._seed / 0x7fffffff; };
+  var COLC = { COLD:'#3b82f6', WARM:'#ef4444', STNRY:'#3b82f6', OCFNT:'#2B22F4', TROF:'#d8a25c' };
+  /* the frontal surface: height of the cold air above the ground at x, per kind */
+  var xn = 128, xs = 58, xc = 112;
+  var surf = function(x, t){
+    if (kind === 'COLD')  return x < xn ? 44 * Math.sqrt(Math.min(1, (xn - x) / 70)) + Math.max(0, xn - 70 - x) * 0.10 : 0;
+    if (kind === 'WARM')  return x > xs ? Math.min(66, (x - xs) * 0.34) : 0;
+    if (kind === 'STNRY'){ var n2 = xn - 10 + 4 * Math.sin(t * 0.7); return x < n2 ? 40 * Math.sqrt(Math.min(1, (n2 - x) / 120)) : 0; }
+    if (kind === 'OCFNT') return x < xc ? 18 + 36 * Math.sqrt(Math.min(1, (xc - x) / 120)) : 18 + Math.min(44, (x - xc) * 0.30);
+    return 0;
   };
-  var puff = function(L, fill){ return L.map(function(c){ return '<ellipse cx="' + c[0] + '" cy="' + c[1] + '" rx="' + c[2] + '" ry="' + (c[3] || c[2]) + '" fill="' + fill + '"/>'; }).join(''); };
-  var rain = function(x0, x1, y0, y1, step, col){
-    var g = ''; for (var x = x0; x <= x1; x += step) g += '<line x1="' + x + '" y1="' + y0 + '" x2="' + (x - 2.5) + '" y2="' + y1 + '" stroke="' + (col || '#3b82f6') + '" stroke-width="1" stroke-linecap="round" opacity=".8"/>';
-    return g;
-  };
-  var txt = function(x, y, t, col){ return '<text x="' + x + '" y="' + y + '" font-family="system-ui,sans-serif" font-size="5.6" font-weight="800" letter-spacing=".3" fill="' + (col || ink) + '">' + t + '</text>'; };
-  var ground = '<rect x="-20" y="' + G + '" width="' + (W + 40) + '" height="3" fill="#86a76e"/><rect x="-20" y="' + (G + 3) + '" width="' + (W + 40) + '" height="10" fill="#a9774c"/>';
-  var mover = function(inner, sx, sy){ return '<g class="flt-base">' + inner + '</g><g class="flt-mv"><g class="flt-blk" style="--sx:' + sx + 'px;--sy:' + sy + 'px;">' + inner + '</g></g>'; };
-  var body = '';
-  if (k === 'COLD'){
-    /* a steep blunt nose: friction holds the bottom of the wedge back, so it bulges */
-    var wedge = '<path d="M -30 ' + G + ' L 50 ' + G + ' Q 56 ' + (G - 12) + ' 44 ' + (G - 22) + ' Q 24 ' + (G - 34) + ' -30 ' + (G - 38) + ' Z" fill="' + COLD + '"/>'
-      + '<path d="M 50 ' + G + ' Q 56 ' + (G - 12) + ' 44 ' + (G - 22) + ' Q 24 ' + (G - 34) + ' -30 ' + (G - 38) + '" fill="none" stroke="#2563eb" stroke-width="2"/>';
-    var tower = puff([[64, 30, 8, 5], [60, 22, 7], [68, 16, 8], [62, 10, 7], [72, 9, 7], [78, 7, 9, 4]], '#f4f6fa') + puff([[64, 31, 9, 3.5]], '#b9c1d0') + rain(58, 72, 35, G - 1, 3.5, '#2563eb');
-    body = '<rect width="' + W + '" height="' + H + '" fill="' + WARM + '"/>'
-      + mover(wedge + tower + arrow([[8, G - 9], [32, G - 9]]) + arrow([[57, G - 4], [60, G - 16], [58, 34]], '#c2410c'), 8, 0)
-      + txt(5, G - 20, 'COLD AIR', '#1e3a8a') + txt(80, G - 6, 'WARM AIR', '#9a3412');
-  } else if (k === 'WARM'){
-    var ramp = '<path d="M 28 ' + G + ' L 130 ' + G + ' L 130 10 Q 80 ' + (G - 14) + ' 28 ' + G + ' Z" fill="' + COLD + '"/>'
-      + '<path d="M 28 ' + G + ' Q 80 ' + (G - 14) + ' 130 10" fill="none" stroke="#dc2626" stroke-width="2"/>';
-    var deck = puff([[52, 33, 12, 3.2], [70, 25, 13, 3], [58, 29, 10, 3]], '#c9cfdb') + puff([[92, 12, 11, 1.6], [80, 17, 9, 1.8]], '#f4f6fa') + rain(46, 76, 35, G - 1, 5, '#60a5fa');
-    body = '<rect width="' + W + '" height="' + H + '" fill="' + WARM + '"/>'
-      + mover(ramp + deck + arrow([[4, G - 7], [24, G - 7], [50, G - 17], [74, G - 28]], '#c2410c'), 5, 0)
-      + txt(4, 22, 'WARM AIR', '#9a3412') + txt(82, G - 4, 'COLD AIR', '#1e3a8a');
-  } else if (k === 'STNRY'){
-    body = '<rect width="' + W + '" height="' + H + '" fill="' + WARM + '"/>'
-      + '<path d="M -30 ' + G + ' L 58 ' + G + ' Q 44 ' + (G - 20) + ' -30 ' + (G - 30) + ' Z" fill="' + COLD + '"/>'
-      + '<path d="M 58 ' + G + ' Q 44 ' + (G - 20) + ' -30 ' + (G - 30) + '" fill="none" stroke="#2563eb" stroke-width="2"/>'
-      + '<path d="M 58 ' + G + ' Q 44 ' + (G - 20) + ' -30 ' + (G - 30) + '" fill="none" stroke="#dc2626" stroke-width="2" stroke-dasharray="7 7"/>'
-      + puff([[58, 24, 12, 3.4], [50, 28, 10, 3.2], [68, 21, 9, 3]], '#c9cfdb') + rain(48, 66, 31, G - 1, 6, '#60a5fa')
-      + '<g class="flt-nudge" style="--sx:2.5px;--sy:0px;">' + arrow([[8, G - 5], [32, G - 5]]) + '</g>'
-      + '<g class="flt-nudge" style="--sx:-2.5px;--sy:0px;">' + arrow([[106, G - 5], [82, G - 5]], '#c2410c') + '</g>'
-      + txt(4, G - 11, 'COLD', '#1e3a8a') + txt(80, G - 11, 'WARM AIR', '#9a3412');
-  } else if (k === 'OCFNT'){
-    body = '<rect width="' + W + '" height="' + H + '" fill="' + WARM + '"/>'
-      + '<path d="M -30 ' + G + ' L 52 ' + G + ' L 52 ' + (G - 17) + ' Q 34 ' + (G - 32) + ' -30 ' + (G - 40) + ' Z" fill="#8fbcf0"/>'
-      + '<path d="M 52 ' + G + ' L 130 ' + G + ' L 130 12 Q 86 ' + (G - 26) + ' 52 ' + (G - 17) + ' Z" fill="#c4ddf8"/>'
-      + '<path d="M -30 ' + (G - 40) + ' Q 34 ' + (G - 32) + ' 52 ' + (G - 17) + ' Q 86 ' + (G - 26) + ' 130 12 M 52 ' + (G - 17) + ' L 52 ' + G + '" fill="none" stroke="#2B22F4" stroke-width="2"/>'
-      + mover(puff([[52, 22, 15, 4.5], [44, 16, 9, 5], [58, 13, 10, 6], [66, 18, 9, 4]], '#eef1f6') + puff([[52, 24, 16, 3]], '#b9c1d0') + arrow([[52, G - 20], [52, G - 30]], '#c2410c'), 0, -4)
-      + rain(42, 62, G - 22, G - 1, 5, '#3b82f6')
-      + arrow([[8, G - 8], [30, G - 8]])
-      + txt(4, G - 19, 'COLD', '#1e3a8a') + txt(92, G - 5, 'COOL', '#1e3a8a') + txt(72, 9, 'WARM ALOFT', '#9a3412');
-  } else {
-    body = '<rect width="' + W + '" height="' + H + '" fill="#e6eef9"/>'
-      + '<path d="M -4 14 Q 58 34 120 14" fill="none" stroke="#8a91a5" stroke-width="1.2"/>' + txt(3, 9, 'LOW PRESSURE', '#5b647a')
-      + '<line x1="58" y1="26" x2="58" y2="' + G + '" stroke="#a9742f" stroke-width="2.2" stroke-dasharray="4 3"/>'
-      + arrow([[12, G - 5], [44, G - 5]]) + arrow([[104, G - 5], [72, G - 5]])
-      + mover(arrow([[66, G - 8], [66, G - 22]]) + puff([[60, 21, 10, 4.2], [53, 19, 6.5], [66, 17, 7.5]], '#f4f6fa'), 0, -5);
+  var LCL = 30;                                           // lifted this far, a warm parcel condenses
+  var st = S[key];
+  if (!st){
+    st = S[key] = { t: 0, off: 0, warm: [], cold: [], rain: [], flash: 0, nextFlash: 3 + rnd() * 3 };
+    for (var i = 0; i < 96; i++) st.warm.push({ x: rnd() * (W + 40) - 20, b: 3 + Math.pow(rnd(), 1.7) * 58, s: 0.75 + rnd() * 0.5 });
+    for (i = 0; i < 30; i++) st.cold.push({ p: rnd() * 6.283, r: 0.3 + rnd() * 0.7, s: 0.7 + rnd() * 0.6, x: rnd() * W, b: 2 + rnd() * 30 });
+    for (i = 0; i < 46; i++) st.rain.push({ u: rnd(), v: rnd(), s: 0.8 + rnd() * 0.5 });
+    /* the land: a strip of silhouettes one tile wide, repeated */
+    st.land = [];
+    if (opts.site === 'la'){
+      for (i = 0; i < 9; i++) st.land.push({ x: i * 26 + rnd() * 10, palm: rnd() < 0.55, h: 5 + rnd() * 5, w: 6 + rnd() * 8 });
+    } else {
+      for (i = 0; i < 16; i++) st.land.push({ x: i * 14 + rnd() * 4, h: 4 + Math.pow(rnd(), 2) * 13, w: 5 + rnd() * 6, spire: rnd() < 0.14 });
+    }
   }
-  return '<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + FRONT_TXT[k][0].toLowerCase() + ', cut through the air and seen from the side">'
-    + body + ground + '</svg>';
+  /* relative winds (px/s): how fast warm air passes the front, which is how fast the front crosses the land */
+  var U = { COLD: -24, WARM: 15, STNRY: 0, OCFNT: -13, TROF: 0 }[kind], SCROLL = { COLD: -24, WARM: -7, STNRY: 0, OCFNT: -13, TROF: -3 }[kind];
+  var warmY = function(p, t){
+    /* a parcel's height above ground: its own level, plus the lift the surface forces on it */
+    var h = surf(p.x, t), k = 1 - p.b / 150, lift = h * k;
+    if (kind === 'COLD') lift += 60 * Math.exp(-Math.pow((p.x - xn + 3) / 15, 2)) * (1 - p.b / 90 > 0 ? 1 - p.b / 90 : 0);   // the burst at the nose
+    if (kind === 'OCFNT') lift += 16 * Math.exp(-Math.pow((p.x - xc) / 30, 2));
+    if (kind === 'STNRY') lift += 24 * Math.exp(-Math.pow((p.x - xn + 22) / 30, 2));
+    /* nothing rises for ever: at the top of the weather it spreads flat -- the anvil */
+    var yy = p.b + lift, cap = 76; if (yy > cap) yy = cap + (yy - cap) * 0.12;
+    return { y: yy, lift: lift };
+  };
+  var lerp = function(a, b, t){ return a + (b - a) * t; };
+  var draw = function(dt){
+    var t = st.t += dt; st.off += SCROLL * dt;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    /* AIR: warm everywhere, then the cold body laid in under its surface */
+    var sky = g.createLinearGradient(0, 0, 0, G); sky.addColorStop(0, '#e2a77c'); sky.addColorStop(0.55, '#f0c9a6'); sky.addColorStop(1, '#f9e2cd');
+    if (kind === 'TROF'){ sky = g.createLinearGradient(0, 0, 0, G); sky.addColorStop(0, '#d6e3f4'); sky.addColorStop(1, '#eaf1fa'); }
+    g.fillStyle = sky; g.fillRect(0, 0, W, H);
+    if (kind !== 'TROF'){
+      var body = function(x0, x1, c0, c1){
+        g.beginPath(); g.moveTo(x0, G);
+        for (var x = x0; x <= x1; x += 2) g.lineTo(x, G - surf(x, t));
+        g.lineTo(x1, G); g.closePath();
+        var cg = g.createLinearGradient(0, G - 60, 0, G); cg.addColorStop(0, c0); cg.addColorStop(1, c1);
+        g.fillStyle = cg; g.fill();
+      };
+      if (kind === 'OCFNT'){ body(-2, xc, '#a6c8f2', '#6fa4e6'); body(xc, W + 2, '#cfe2f8', '#a9cbf1'); }
+      else body(-2, W + 2, '#b9d5f6', '#7fb0ea');
+    }
+    /* RAIN first, so the air moves in front of it */
+    var zone = { COLD:[xn - 14, xn + 16, 0.95, 46], WARM:[xs + 8, xs + 118, 0.45, 30], STNRY:[xn - 34, xn + 14, 0.4, 24], OCFNT:[xc - 44, xc + 44, 0.7, 40], TROF:[W / 2 - 14, W / 2 + 14, 0.3, 12] }[kind];
+    g.lineCap = 'round';
+    st.rain.forEach(function(r, i){
+      if (i / st.rain.length > zone[3] / 46) return;
+      var x = lerp(zone[0], zone[1], r.u), top = G - (kind === 'TROF' ? 46 : Math.max(24, surf(x, t) + 16)) , fall = (r.v + t * r.s * (kind === 'COLD' ? 1.5 : 0.9)) % 1;
+      var y = lerp(top, G, fall), len = kind === 'COLD' ? 6 : 3.5;
+      g.strokeStyle = 'rgba(37,99,235,' + (zone[2] * (0.35 + 0.65 * Math.sin(fall * Math.PI))).toFixed(2) + ')'; g.lineWidth = kind === 'COLD' ? 1.1 : 0.8;
+      g.beginPath(); g.moveTo(x, y); g.lineTo(x - len * 0.3, Math.min(G, y + len)); g.stroke();
+    });
+    /* COLD AIR: a rolling head behind a cold front, a slow drift elsewhere */
+    st.cold.forEach(function(p){
+      var x, y, x2, y2;
+      if (kind === 'COLD' || kind === 'OCFNT' || kind === 'STNRY'){
+        var nose = kind === 'OCFNT' ? xc : xn, cxr = nose - 44, a = p.p + t * p.s * (kind === 'STNRY' ? 0.35 : 0.9);
+        x = cxr + Math.cos(a) * 40 * p.r; y = 17 - Math.sin(a) * 13 * p.r;               // forward along the ground, back aloft
+        x2 = cxr + Math.cos(a - 0.22) * 40 * p.r; y2 = 17 - Math.sin(a - 0.22) * 13 * p.r;
+        if (y > surf(x, t) - 3 || y2 > surf(x2, t) - 3) return;
+      } else if (kind === 'WARM'){
+        p.x += 5 * p.s * dt; if (p.x > W + 6) p.x = xs + 12;
+        x = p.x; y = Math.min(p.b, surf(x, t) - 4); if (y < 2 || x < xs + 8) return; x2 = x - 5; y2 = y;
+      } else return;
+      g.strokeStyle = 'rgba(30,64,175,.55)'; g.lineWidth = 1.2;
+      g.beginPath(); g.moveTo(x2, G - y2); g.lineTo(x, G - y); g.stroke();
+    });
+    /* WARM AIR: streaks while it is clear air, soft white once it has been lifted into cloud */
+    var puffs = [];
+    st.warm.forEach(function(p){
+      if (kind === 'TROF'){
+        /* a fountain: in along the ground from both sides, up the axis, out aloft */
+        p.ph = ((p.ph == null ? p.x / W : p.ph) + dt * 0.11 * p.s) % 1;
+        var side = p.b > 30 ? 1 : -1, q = p.ph, d, y;
+        if (q < 0.5){ d = 96 * (1 - q / 0.5) + 4; y = 4 + p.b % 9; }
+        else if (q < 0.72){ d = 4 * (1 - (q - 0.5) / 0.22) + 2; y = 8 + 50 * (q - 0.5) / 0.22; }
+        else { d = 2 + 70 * (q - 0.72) / 0.28; y = 58 + 6 * Math.sin((q - 0.72) * 9); }
+        var xx = W / 2 + side * d;
+        if (q >= 0.62) puffs.push([xx, G - y, 6 + 3 * Math.sin(q * 20 + p.b), 0.45 * (1 - Math.max(0, (q - 0.85) / 0.15))]);
+        else { g.strokeStyle = 'rgba(71,85,105,.6)'; g.lineWidth = 1.2; g.beginPath(); g.moveTo(xx + side * 5, G - y); g.lineTo(xx, G - y - (q >= 0.5 ? 4 : 0)); g.stroke(); }
+        return;
+      }
+      if (kind === 'STNRY'){ p.x0 = p.x0 == null ? xn - 74 + rnd() * (W - xn + 74) : p.x0; p.x = p.x0 - 9 * Math.sin(t * 0.8 * p.s + p.b); }
+      else {
+        p.x += U * p.s * dt;
+        if (U < 0 && p.x < -12){ p.x = W + 10; p.b = 3 + Math.pow(rnd(), 1.4) * 58; }
+        if (U > 0 && p.x > W + 12){ p.x = -10; p.b = 3 + Math.pow(rnd(), 1.4) * 58; }
+      }
+      var a = warmY(p, t), y1 = G - a.y;
+      if (y1 < -4) return;
+      if (a.lift > LCL * (0.55 + p.b / 140)){
+        /* high and far ahead of a warm front the cloud is thin ice: a wisp, not a heap */
+        var high = a.y > 62, fade = 1;
+        if (kind === 'COLD'){ fade = 1 - (xn - 34 - p.x) / 60; fade = fade > 1 ? 1 : fade < 0 ? 0 : fade; if (!fade) return; }
+        puffs.push([p.x, y1, high ? 3 : 7 + 3 * Math.sin(p.b * 3.1), (high ? 0.22 : 0.5) * fade, high && kind === 'WARM']);
+      } else {
+        var dir = U < 0 ? 1 : -1, b2 = warmY({ x: p.x + dir * 7, b: p.b }, t);
+        g.strokeStyle = 'rgba(194,65,12,.62)'; g.lineWidth = 1.2;
+        g.beginPath(); g.moveTo(p.x + dir * 7, G - b2.y); g.lineTo(p.x, y1); g.stroke();
+      }
+    });
+    /* the flash lights the tower from inside */
+    if (kind === 'COLD'){
+      if (t > st.nextFlash){ st.flash = 0.16; st.nextFlash = t + 3.5 + rnd() * 4; st.bolt = [xn + 2 + rnd() * 10, rnd()]; }
+      if (st.flash > 0) st.flash -= dt;
+    }
+    puffs.forEach(function(q){
+      if (q[4]) return;
+      var sg = g.createRadialGradient(q[0], q[1] + 3, 0, q[0], q[1] + 3, q[2] * 1.5);
+      sg.addColorStop(0, 'rgba(90,104,128,' + (kind === 'COLD' ? .42 : .30) + ')'); sg.addColorStop(1, 'rgba(90,104,128,0)');
+      g.fillStyle = sg; g.beginPath(); g.arc(q[0], q[1] + 3, q[2] * 1.5, 0, 6.3); g.fill();
+    });
+    puffs.forEach(function(q){
+      var lit = kind === 'COLD' && st.flash > 0 ? 0.5 : 0;
+      if (q[4]){ g.strokeStyle = 'rgba(255,255,255,' + (q[3] + 0.3) + ')'; g.lineWidth = 1.4; g.beginPath(); g.moveTo(q[0] - 7, q[1] + 1.5); g.quadraticCurveTo(q[0], q[1] - 2, q[0] + 8, q[1] - 1); g.stroke(); return; }
+      var rg = g.createRadialGradient(q[0], q[1], 0, q[0], q[1], q[2] * 1.7);
+      rg.addColorStop(0, 'rgba(255,255,255,' + Math.min(1, q[3] + lit + 0.25) + ')'); rg.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = rg; g.beginPath(); g.arc(q[0], q[1], q[2] * 1.7, 0, 6.3); g.fill();
+    });
+    if (kind === 'COLD' && st.flash > 0 && st.bolt){
+      var bx = st.bolt[0], by = G - 58; g.strokeStyle = 'rgba(255,251,214,.95)'; g.lineWidth = 1.3; g.beginPath(); g.moveTo(bx, by);
+      for (var k = 1; k <= 5; k++){ bx += (((st.bolt[1] * 97 * k) % 1) - 0.5) * 9; g.lineTo(bx, by + k * (58 / 5)); } g.stroke();
+    }
+    /* THE FRONT ITSELF, in the colour it has on the map */
+    if (kind !== 'TROF'){
+      var strokeSurf = function(x0, x1, col, dash){
+        g.beginPath(); var first = true;
+        for (var x = x0; x <= x1; x += 2){ var h = surf(x, t); if (h <= 0 && kind !== 'OCFNT') continue; first ? g.moveTo(x, G - h) : g.lineTo(x, G - h); first = false; }
+        if (kind === 'COLD' || kind === 'STNRY') g.lineTo(kind === 'COLD' ? xn : xn - 10 + 4 * Math.sin(t * 0.7), G);
+        g.setLineDash(dash || []); g.strokeStyle = col; g.lineWidth = 2.2; g.lineJoin = 'round'; g.stroke(); g.setLineDash([]);
+      };
+      g.shadowColor = COLC[kind]; g.shadowBlur = 6;
+      if (kind === 'WARM'){ g.beginPath(); g.moveTo(xs, G); for (var x3 = xs; x3 <= W + 2; x3 += 2) g.lineTo(x3, G - surf(x3, t)); g.strokeStyle = COLC.WARM; g.lineWidth = 2.2; g.stroke(); }
+      else if (kind === 'OCFNT'){ strokeSurf(-2, W + 2, COLC.OCFNT); g.beginPath(); g.moveTo(xc, G - 18); g.lineTo(xc, G); g.stroke(); }
+      else if (kind === 'STNRY'){ strokeSurf(-2, W, '#3b82f6'); g.shadowBlur = 0; strokeSurf(-2, W, '#ef4444', [7, 7]); }
+      else strokeSurf(-2, W, COLC.COLD);
+      g.shadowBlur = 0;
+    } else {
+      g.setLineDash([4, 3]); g.strokeStyle = '#a9742f'; g.lineWidth = 2; g.beginPath(); g.moveTo(W / 2, G); g.lineTo(W / 2, G - 44); g.stroke(); g.setLineDash([]);
+      g.strokeStyle = 'rgba(71,85,105,.75)'; g.lineWidth = 1.2; g.beginPath(); g.moveTo(-2, 12); g.quadraticCurveTo(W / 2, 30 + 3 * Math.sin(t * 1.3), W + 2, 12); g.stroke();
+    }
+    /* THE LAND, scrolling under the front; each silhouette takes the colour of the air over it */
+    var airAt = function(x){                               // 0 warm .. 1 cold, at ground level
+      if (kind === 'COLD') return x < xn ? 1 : 0;
+      if (kind === 'WARM') return x > xs ? 1 : 0;
+      if (kind === 'STNRY') return x < xn - 10 ? 1 : 0;
+      if (kind === 'OCFNT') return x < xc ? 1 : 0.6;
+      return 0.4;
+    };
+    var TILE = opts.site === 'la' ? 234 : 224, o = ((st.off % TILE) + TILE) % TILE;
+    for (var rep = -1; rep <= 1; rep++) st.land.forEach(function(b){
+      var x = b.x + o + rep * TILE; if (x < -14 || x > W + 14) return;
+      var c = airAt(x), wet = x > zone[0] && x < zone[1];
+      g.fillStyle = wet ? '#1f2937' : c > 0.8 ? '#2f4363' : c > 0.5 ? '#3d4d66' : '#5a4636';
+      if (b.palm){
+        g.strokeStyle = g.fillStyle; g.lineWidth = 1.1; g.beginPath(); g.moveTo(x, G); g.quadraticCurveTo(x + 1.5, G - b.h * 0.6, x + 0.5, G - b.h - 4); g.stroke();
+        for (var f = 0; f < 5; f++){ var an = -2.6 + f * 0.52; g.beginPath(); g.moveTo(x + 0.5, G - b.h - 4); g.quadraticCurveTo(x + 0.5 + Math.cos(an) * 3, G - b.h - 6.5, x + 0.5 + Math.cos(an) * 5.5, G - b.h - 3 + Math.abs(Math.cos(an)) * 2); g.stroke(); }
+      } else {
+        g.fillRect(x, G - b.h, b.w, b.h);
+        if (b.spire){ g.fillRect(x + b.w / 2 - 0.6, G - b.h - 6, 1.2, 6); }
+        if (!wet && c < 0.5){ g.fillStyle = 'rgba(253,230,138,.85)'; for (var wy = G - b.h + 2; wy < G - 2; wy += 3.4) g.fillRect(x + 1.4 + ((wy * 7 + b.x) % 3), wy, 1, 1.2); }
+      }
+    });
+    g.fillStyle = '#4b5b3c'; g.fillRect(0, G, W, 2);
+    g.fillStyle = '#6b4a2f'; g.fillRect(0, G + 2, W, H - G - 2);
+    /* the temperature across the line, as the ground feels it */
+    for (var xr = 0; xr < W; xr += 2){ var c2 = airAt(xr); g.fillStyle = c2 > 0.8 ? '#60a5fa' : c2 > 0.5 ? '#93c5fd' : kind === 'TROF' ? '#cbd5e1' : '#fb923c'; g.fillRect(xr, H - 5, 2, 3); }
+    /* words, few */
+    g.font = '800 7.5px system-ui,sans-serif'; g.textBaseline = 'alphabetic';
+    var word = function(s, x, y, col){ g.fillStyle = 'rgba(255,252,244,.72)'; var w = g.measureText(s).width; g.fillRect(x - 2, y - 7.5, w + 4, 10); g.fillStyle = col; g.fillText(s, x, y); };
+    if (kind === 'COLD'){ word('COLD AIR', 6, G - 22, '#1e3a8a'); word('WARM AIR', W - 50, G - 30, '#9a3412'); }
+    if (kind === 'WARM'){ word('WARM AIR', 6, G - 40, '#9a3412'); word('COLD AIR', W - 50, G - 6 - 12, '#1e3a8a'); }
+    if (kind === 'STNRY'){ word('COLD AIR', 6, G - 14, '#1e3a8a'); word('WARM AIR', W - 50, G - 24, '#9a3412'); }
+    if (kind === 'OCFNT'){ word('COLD', 6, G - 22, '#1e3a8a'); word('COOL', W - 30, G - 22, '#1e3a8a'); word('WARM AIR, LIFTED OFF THE GROUND', 40, 11, '#9a3412'); }
+    if (kind === 'TROF'){ word('LOWER PRESSURE ALONG THIS LINE', 44, 10, '#475569'); }
+  };
+  /* one scene at a time */
+  if (bvFrontScene.stop) bvFrontScene.stop();
+  var alive = true, last = 0, raf = 0, still = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  bvFrontScene.stop = function(){ alive = false; cancelAnimationFrame(raf); };
+  if (still){ for (var w0 = 0; w0 < 90; w0++) { st.t += 0.05; } draw(0.05); return; }
+  var tick = function(now){
+    if (!alive) return;
+    if (!cv.isConnected){ alive = false; return; }
+    raf = requestAnimationFrame(tick);
+    if (document.hidden || now - last < 33) return;
+    var r = cv.getBoundingClientRect(); if (r.bottom < 0 || r.top > innerHeight){ last = now; return; }
+    var dt = Math.min(0.06, (now - (last || now)) / 1000) || 0.033; last = now;
+    draw(dt);
+  };
+  draw(0.033); raf = requestAnimationFrame(tick);
 }
 /* ONE AT A TIME (user 2026-09-20, of the first cut's five-up legend: "this looks really big
    ... i would just want to see the one i click on or thats in play -- all of them arent needed
@@ -300,7 +468,7 @@ function frontLegend(v){
   var T = FRONT_TXT[k], n = ((FRONTS && FRONTS.kinds) || {})[k] || 0;
   var why = FRONTTAP ? 'THE LINE YOU TAPPED' : 'NEAREST LOS ANGELES · ' + (play.km < 40 ? 'OVERHEAD' : '~' + (Math.round(play.km * 0.621 / 10) * 10).toLocaleString() + ' MI OFF');
   return '<div class="frt-panel"><button onclick="closeFront()" aria-label="close" style="position:absolute;right:8px;top:4px;background:none;border:none;font:700 12px system-ui,sans-serif;color:#1b2340;cursor:pointer;">✕</button>'
-    + '<div class="frt">' + frontCut(k) + '<div><div class="frt-t" style="color:' + T[1] + ';">' + T[0]
+    + '<div class="frt"><canvas class="frt-cv" data-k="' + k + '"></canvas><div><div class="frt-t" style="color:' + T[1] + ';">' + T[0]
     + '<span style="color:#6b7389;font-weight:700;"> &nbsp;' + why + (n > 1 ? ' · ' + n + ' ON THE MAP' : '') + '</span></div>'
     + '<div class="frt-w">' + T[2] + ' <b style="font-weight:700;">' + T[3] + '</b></div><div class="frt-m">' + T[4] + ' · TAP ANY LINE ON THE MAP</div></div></div></div>';
 }
@@ -855,6 +1023,10 @@ function paint(){
     document.getElementById('cw-wide-tag-main').textContent = v.tag;
     document.getElementById('cw-wide-tag-sub').textContent = v.sub;
     document.getElementById('cw-wide-tag-info').innerHTML = readsLine(v) + frontLegend(v);
+    /* the card's scene: its state is kept per kind, so this re-render does not reseed it */
+    var fcv = document.querySelector('#cw-wide-tag-info .frt-cv');
+    if (fcv) bvFrontScene(fcv, fcv.getAttribute('data-k'), { site: 'la' });
+    else if (bvFrontScene.stop) bvFrontScene.stop();
     document.getElementById('cw-wide-tag-info').style.display = READS ? 'block' : 'none';
   }
   [].slice.call(document.querySelectorAll('[data-swell]')).forEach(function(b){
