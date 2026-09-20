@@ -1922,6 +1922,150 @@ function wxReads(){
    and the line projected 3 and 6 hours on, dashed; cold pips as triangles, warm as half-discs,
    stationary and occluded alternating. One change, by the same rule the arcs follow: the
    projections are labelled with the CLOCK TIME, not "+3 HR". */
+/* (the same five functions as THE CITY's, index.html -- keep the two copies identical) */
+/* ONE STORM, NOT FIVE LINES (user 2026-09-20: "what if its a complicated mixture" ... "yeah
+   build that"). Three reads of the forecasters' coded bulletins, no model of our own:
+     bvFrontsParse    one bulletin's text -> its fronts and its LOWS (pressure centres). Wrapped
+                      lines are joined; tokens are whole degrees (4277) or tenths (4150811); a
+                      forecast prog carries WK/MDT/STG after the kind, which is kept.
+     bvFrontSystems   which fronts are ONE system. The bulletin says it without saying it: fronts
+                      that belong together END ON THE SAME COORDINATE, and the LOWS line puts a
+                      pressure centre on the joins. A warm and a cold front meeting at a low is
+                      the classic storm, and gets the one wide cut.
+     bvFrontArrivals  WHEN, not how far. Two analyses an hour apart in whole degrees show no
+                      motion at all (measured), so arrival is read off the forecasters' own progs:
+                      follow each front from the analysis through the 12/24/36/48 h positions and
+                      find the step in which it sweeps over the city. The same test run backwards
+                      over the last analyses says "it already went through". */
+function bvFrontsParse(txt){
+  var out = { f: [], lows: [], highs: [] }, body = String(txt).replace(/\n(?=\s*\d)/g, ' ');
+  body.split('\n').forEach(function(ln){
+    var m = ln.trim().match(/^(COLD|WARM|STNRY|OCFNT|TROF|LOWS|HIGHS)\s+(.*)$/);
+    if (!m) return;
+    var tk = m[2].split(/\s+/), pos = function(s){
+      var la, lo;
+      if (/^\d{7}$/.test(s)){ la = parseInt(s.slice(0, 3), 10) / 10; lo = parseInt(s.slice(3), 10) / 10; }
+      else if (/^\d{4,5}$/.test(s)){ la = parseInt(s.slice(0, 2), 10); lo = parseInt(s.slice(2), 10); }
+      else return null;
+      return (la < 15 || la > 80 || lo < 50 || lo > 180) ? null : [-lo, la];
+    };
+    if (m[1] === 'LOWS' || m[1] === 'HIGHS'){
+      for (var i = 0; i + 1 < tk.length; i += 2){ var mb = +tk[i], p = pos(tk[i + 1]); if (p && mb > 850 && mb < 1100) (m[1] === 'LOWS' ? out.lows : out.highs).push({ mb: mb, lon: p[0], lat: p[1] }); }
+      return;
+    }
+    var pts = [], wk = null;
+    tk.forEach(function(s){ if (/^(WK|MDT|STG)$/.test(s)){ wk = s; return; } var p2 = pos(s); if (p2) pts.push(p2); });
+    if (pts.length > 1) out.f.push({ k: m[1], p: pts, wk: wk });
+  });
+  return out;
+}
+function bvFrontGeo(home){
+  var K = 111.32, c0 = Math.cos(home[1] * Math.PI / 180), G = function(p){ return [p[0] * c0 * K, p[1] * K]; }, H = G(home);
+  /* nearest point of a front to a ground point: { d km, q [x,y], end: true when it is the tip of the line } */
+  var near = function(f, Q){
+    var b = { d: 1e9, q: null, end: false }, n = f.p.length;
+    for (var s = 1; s < n; s++){
+      var A = G(f.p[s - 1]), B = G(f.p[s]), dx = B[0] - A[0], dy = B[1] - A[1], l2 = dx * dx + dy * dy || 1;
+      var t = Math.max(0, Math.min(1, ((Q[0] - A[0]) * dx + (Q[1] - A[1]) * dy) / l2)), qx = A[0] + t * dx, qy = A[1] + t * dy, d = Math.hypot(Q[0] - qx, Q[1] - qy);
+      if (d < b.d) b = { d: d, q: [qx, qy], end: (s === 1 && t === 0) || (s === n - 1 && t === 1) };
+    }
+    return b;
+  };
+  return { G: G, H: H, near: near, gd: function(a, b){ var A = G(a), B = G(b); return Math.hypot(A[0] - B[0], A[1] - B[1]); } };
+}
+function bvFrontSystems(fronts, lows, home){
+  var X = bvFrontGeo(home), gd = X.gd, n = fronts.length, par = [], i, j;
+  for (i = 0; i < n; i++) par.push(i);
+  var find = function(x){ while (par[x] !== x){ par[x] = par[par[x]]; x = par[x]; } return x; };
+  var ends = function(f){ return [f.p[0], f.p[f.p.length - 1]]; };
+  var meet = function(a, b){ var hit = false; ends(a).forEach(function(p){ ends(b).forEach(function(q){ if (gd(p, q) <= 130) hit = true; }); }); return hit; };
+  for (i = 0; i < n; i++) for (j = i + 1; j < n; j++) if (fronts[i].k !== 'TROF' && fronts[j].k !== 'TROF' && meet(fronts[i], fronts[j])) par[find(i)] = find(j);
+  var groups = {}; for (i = 0; i < n; i++){ if (fronts[i].k === 'TROF') continue; var r = find(i); (groups[r] = groups[r] || []).push(i); }
+  var lowAt = function(f){ var b = null; (lows || []).forEach(function(L){ ends(f).forEach(function(e){ var d = gd(e, [L.lon, L.lat]); if (d <= 170 && (!b || d < b.d)) b = { d: d, L: L }; }); }); return b && b.L; };
+  return Object.keys(groups).map(function(r){
+    var idx = groups[r], kinds = {}, myLows = [];
+    idx.forEach(function(q){ var f = fronts[q]; kinds[f.k] = (kinds[f.k] || 0) + 1; var L = lowAt(f); if (L && myLows.indexOf(L) < 0) myLows.push(L); });
+    var members = idx.map(function(q){ return { idx: q, k: fronts[q].k, km: X.near(fronts[q], X.H).d }; }).sort(function(a, b){ return a.km - b.km; });
+    /* THE CLASSIC STORM inside it: a cold and a warm front whose ends meet, or that hang off the same low.
+       On a boundary two thousand miles long there can be several; the one nearest the city is the one drawn. */
+    var pair = null;
+    idx.forEach(function(a){ if (fronts[a].k !== 'COLD') return; idx.forEach(function(b){ if (fronts[b].k !== 'WARM') return;
+      var La = lowAt(fronts[a]), Lb = lowAt(fronts[b]); if (!(meet(fronts[a], fronts[b]) || (La && La === Lb))) return;
+      var km = Math.min(X.near(fronts[a], X.H).d, X.near(fronts[b], X.H).d);
+      if (!pair || km < pair.km) pair = { cold: a, warm: b, km: km, low: La || Lb || null }; }); });
+    var low = (pair && pair.low) || myLows.slice().sort(function(a, b){ return gd([a.lon, a.lat], home) - gd([b.lon, b.lat], home); })[0] || null;
+    if (low) low = { mb: low.mb, lon: low.lon, lat: low.lat, km: gd([low.lon, low.lat], home),
+                     az: (Math.atan2((low.lon - home[0]) * Math.cos(home[1] * Math.PI / 180), low.lat - home[1]) * 180 / Math.PI + 360) % 360 };
+    return { kind: pair ? 'cyclone' : kinds.OCFNT ? 'occluded' : myLows.length ? 'wave' : idx.length > 1 ? 'chain' : 'single',
+             kinds: kinds, members: members, pair: pair, low: low, km: members[0].km };
+  }).sort(function(a, b){ return a.km - b.km; });
+}
+function bvFrontArrivals(runs, progs, home){
+  /* runs: analyses, NEWEST FIRST [{t,f}]; progs: forecasts, soonest first [{t,f}] */
+  var X = bvFrontGeo(home), H = X.H, out = [];
+  if (!runs || !runs.length) return out;
+  var FAM = function(k){ return k === 'TROF' ? 'T' : 'F'; };
+  /* THE SAME FRONT, A STEP ON: judged on the stretch of it near the city -- its vertices within
+     ~1,200 km of its nearest point -- by how far those lie, on average, from the candidate. Judging
+     on the one nearest point alone walked every front toward whichever line lay closest to the
+     city (measured: five different fronts all "ended" 817 km out). */
+  var match = function(f, A, set, dtH){
+    var V = f.p.map(X.G).filter(function(v){ return Math.hypot(v[0] - A[0], v[1] - A[1]) <= 1200; }); V.push(A);
+    var best = null, cap = 60 * Math.abs(dtH) + 150;
+    set.forEach(function(g){ if (FAM(g.k) !== FAM(f.k)) return;
+      var sum = 0; V.forEach(function(v){ sum += X.near(g, v).d; }); var d = sum / V.length, sc = d + (g.k === f.k ? 0 : 120);
+      if (d <= cap && (!best || sc < best.sc)) best = { g: g, sc: sc }; });
+    return best && best.g;
+  };
+  /* A PROG IS IN WHOLE DEGREES -- about 55 km either way -- so a front drawn within ~80 km of the
+     city is ON it as far as this data can say, and a change of side inside that distance is
+     rounding, not a passage (measured on 2026-09-20: a wavering boundary over New Jersey flipped
+     sides three times in four progs). So a front ARRIVES when it first comes within 80 km, or
+     when it clearly crosses from beyond 80 km on one side to beyond it on the other. */
+  var NEAR = 80;
+  /* crossed = the city now lies on the OPPOSITE side: the two "front -> city" arrows point more than
+     120 degrees apart. A bare sign test called a front that swung from west of the city to south of
+     it a passage (measured, New York 2026-09-20). */
+  var swept = function(a, b){ return ((H[0] - a.q[0]) * (H[0] - b.q[0]) + (H[1] - a.q[1]) * (H[1] - b.q[1])) / ((a.d || 1) * (b.d || 1)) < -0.5 && !(a.end && b.end); };
+  runs[0].f.forEach(function(f, idx){
+    var a0 = X.near(f, H), R = { idx: idx, k: f.k, km: a0.d, state: null, t: null, as: null, kmEnd: null };
+    if (a0.d < 60){ R.state = 'here'; out.push(R); return; }
+    /* forward, through the progs */
+    var cur = f, a = a0, tc = runs[0].t;
+    for (var i = 0; i < (progs || []).length; i++){
+      var P = progs[i], dtH = (P.t - tc) / 36e5; if (dtH <= 0.5) continue;
+      var g = match(cur, a.q, P.f, dtH); if (!g) break;
+      var b = X.near(g, H), hit = null;
+      if (b.d < NEAR) hit = a.d <= NEAR ? 0 : (a.d - NEAR) / (a.d - b.d);
+      else if (a.d >= NEAR && swept(a, b)) hit = a.d / (a.d + b.d);
+      /* faster than ~45 mph toward the city is not a front moving: it is two forecasters drawing the
+         same boundary differently, or one line redrawn as part of a longer one. No promise from that. */
+      if (hit != null && (b.d < NEAR ? a.d - b.d : a.d + b.d) / dtH > 75) break;
+      if (hit != null){ R.state = 'coming'; R.t = tc + hit * (P.t - tc); R.as = g.k; R.wk = g.wk || null; break; }
+      cur = g; a = b; tc = P.t; R.kmEnd = b.d; R.tEnd = P.t;
+    }
+    /* backward, through the last analyses: did it just go through? */
+    if (!R.state){
+      var c2 = f, a2 = a0, t2 = runs[0].t;
+      for (var j = 1; j < runs.length && runs[0].t - runs[j].t <= 18 * 36e5; j++){
+        var g2 = match(c2, a2.q, runs[j].f, (runs[j].t - t2) / 36e5); if (!g2) break;
+        var b2 = X.near(g2, H);
+        if (swept(a2, b2)){ R.state = 'passed'; R.t = t2 - (a2.d / (a2.d + b2.d)) * (t2 - runs[j].t); break; }
+        c2 = g2; a2 = b2; t2 = runs[j].t;
+      }
+    }
+    if (!R.state && R.kmEnd != null) R.state = R.kmEnd < a0.d - 120 ? 'closing' : R.kmEnd > a0.d + 120 ? 'leaving' : 'holding';
+    out.push(R);
+  });
+  return out;
+}
+/* THE CITY'S OWN OUTLOOK, which needs no front followed from chart to chart: at each forecast
+   time, the nearest front of any kind and how far off it is drawn. */
+function bvFrontOutlook(runs, progs, home){
+  var X = bvFrontGeo(home), row = function(S){ var b = null; S.f.forEach(function(f){ if (f.k === 'TROF') return; var n = X.near(f, X.H); if (!b || n.d < b.km) b = { t: S.t, k: f.k, km: n.d, wk: f.wk || null,
+    az: (Math.atan2(n.q[0] - X.H[0], n.q[1] - X.H[1]) * 180 / Math.PI + 360) % 360 }; }); return b; };
+  return [runs[0]].concat(progs || []).map(row).filter(Boolean);
+}
 var FRONTS = { t: 0, p: null };
 /* THREE BULLETINS SHARE THE `COD` TYPE, and they are not interchangeable (read off the feed
    2026-09-19):
@@ -1978,14 +2122,15 @@ function frontsRead(){
       var byValid = {}, progs = {};
       (all || []).filter(Boolean).forEach(function(d){
         var f = parse(d.x); if (!f.length) return;
-        var v = validOf(d.x, d.t), fine = d.id === 'ASUS02';
-        if (/^FSUS/.test(d.id) || /FORECAST/.test(d.x.slice(0, 200))){ if (!progs[v]) progs[v] = { t: v, f: f }; return; }
-        if (!byValid[v] || fine) byValid[v] = { t: v, f: f, fine: fine || (byValid[v] && byValid[v].fine) };
+        var v = validOf(d.x, d.t), fine = d.id === 'ASUS02', PC = bvFrontsParse(d.x), issued = Date.parse(d.t);
+        if (/^FSUS/.test(d.id) || /FORECAST/.test(d.x.slice(0, 200))){ if (!progs[v] || issued > progs[v].issued) progs[v] = { t: v, f: f, lows: PC.lows, issued: issued }; return; }
+        if (!byValid[v] || fine) byValid[v] = { t: v, f: f, lows: PC.lows, highs: PC.highs, fine: fine || (byValid[v] && byValid[v].fine) };
       });
-      var runs = Object.keys(byValid).map(function(k){ return byValid[k]; }).sort(function(a, b){ return b.t - a.t; }).slice(0, 4);
-      var ahead = Object.keys(progs).map(function(k){ return progs[k]; }).filter(function(q){ return q.t > Date.now(); })
-                        .sort(function(a, b){ return a.t - b.t; }).slice(0, 2);
-      runs.progs = ahead;
+      var every = Object.keys(byValid).map(function(k){ return byValid[k]; }).sort(function(a, b){ return b.t - a.t; }), runs = every.slice(0, 4);
+      var aheadAll = Object.keys(progs).map(function(k){ return progs[k]; }).filter(function(q){ return q.t > Date.now(); })
+                        .sort(function(a, b){ return a.t - b.t; }), ahead = aheadAll.slice(0, 2);
+      runs.progs = ahead;                                  // the two the MAP draws
+      runs.all = every.slice(0, 8); runs.progsAll = aheadAll.filter(function(q){ return every.length && q.t > every[0].t; });   // what the storm read follows
       return runs;
     }).catch(function(){ return []; });
   return FRONTS.p;
@@ -2162,7 +2307,7 @@ function makeFronts(ctx, runs, proj, view, tz){
   if (runs && runs.length) runs[0].f.forEach(function(f0){
     var RAW0 = f0.p.map(P2);
     if (seen(RAW0, 0)) kinds[f0.k] = (kinds[f0.k] || 0) + 1;
-    if (seen(RAW0, 80)) lines.push({ k: f0.k, P: cr(RAW0, 14), src: f0.p, i: lines.length });
+    if (seen(RAW0, 80)) lines.push({ k: f0.k, P: cr(RAW0, 14), src: f0.p, i: lines.length, ci: runs[0].f.indexOf(f0) });   // ci: its place on the chart, which is how the storm read names it
   });
   return { labels: labels, kinds: kinds, lines: lines, vel: vel, fine: !!(runs && runs.length && runs[0].fine), progs: progs.length,
     n: runs && runs.length ? runs[0].f.filter(function(f0){ return f0.k !== 'TROF' && seen(f0.p.map(P2), 0); }).length : 0,
@@ -2775,6 +2920,30 @@ function makeMachinery(ctx, geo, R, proj, mpp, view, mode, frontRuns, cold, moti
                      .map(function(o){ return { k: o.k, km: o.km, i: o.i }; });
   }
   var HOMEPT = (VIEWS[document.getElementById('view').value] || {}).home || LA_PT;
+  /* ONE STORM, AND WHEN -- the same read THE CITY makes (index.html, cwStorm), made here because
+     this is where the chart is: which fronts are one system, when each reaches home on the
+     forecasters' progs, the nearest front at every forecast time, the highs, and where each
+     system's low is put on the next chart. Once per analysis; the widget only lays it out. */
+  var stormRead = function(){
+    var runs = frontRuns, home = [HOMEPT.x, HOMEPT.y], key = (runs && runs.length ? runs[0].t : 0) + '|' + home.join(',');
+    if (window._stormRead && window._stormRead.key === key) return window._stormRead.v;
+    var v = null;
+    try {
+      var X = bvFrontGeo(home), all = runs.all || runs, progs = runs.progsAll || [];
+      var sys = bvFrontSystems(runs[0].f, runs[0].lows || [], home);
+      sys.forEach(function(s2){ s2.trk = null; var low = s2.low; if (!low) return;
+        progs.some(function(Pg){ var dtH = (Pg.t - runs[0].t) / 36e5, b = null; if (dtH < 5 || !Pg.lows) return false;
+          Pg.lows.forEach(function(q){ var d = X.gd([q.lon, q.lat], [low.lon, low.lat]); if (d <= 60 * dtH + 150 && (!b || d < b.d)) b = { d: d, q: q }; });
+          if (b) s2.trk = { lon: b.q.lon, lat: b.q.lat, mb: b.q.mb, t: Pg.t, mph: b.d / dtH * 0.621,
+                           az: (Math.atan2((b.q.lon - low.lon) * Math.cos(low.lat * Math.PI / 180), b.q.lat - low.lat) * 180 / Math.PI + 360) % 360 };
+          return !!b; }); });
+      v = { sys: sys.filter(function(s2){ return s2.km <= 3000; }), arr: bvFrontArrivals(all, progs, home), out: bvFrontOutlook(all, progs, home),
+            highs: (runs[0].highs || []).map(function(h){ return { mb: h.mb, lon: h.lon, lat: h.lat, km: X.gd([h.lon, h.lat], home),
+              az: (Math.atan2((h.lon - home[0]) * Math.cos(home[1] * Math.PI / 180), h.lat - home[1]) * 180 / Math.PI + 360) % 360 }; }).filter(function(h){ return h.km <= 1500; }),
+            f: runs[0].f.map(function(f0){ return { k: f0.k, p: f0.p }; }), home: home };
+    } catch(e){ v = null; }
+    window._stormRead = { key: key, v: v }; return v;
+  };
   window._frontPost = function(){
     if (!FR || window.parent === window) return;
     var T = FRONTFACTS.temps || {}, facts = {};
@@ -2800,7 +2969,8 @@ function makeMachinery(ctx, geo, R, proj, mpp, view, mode, frontRuns, cold, moti
     });
     var vel = FR.vel ? Math.hypot(FR.vel[0] * Math.cos(35 * Math.PI / 180) * 111, FR.vel[1] * 111) * 0.621 : null;
     try { window.parent.postMessage({ labFronts: { n: FR.n, trof: FR.trof, at: FR.at, fine: FR.fine, progs: FR.progs, kinds: FR.kinds,
-      play: play ? { k: play.k, km: play.km } : null, near: (typeof near !== 'undefined' && near) || [], facts: facts, mph: vel } }, '*'); } catch(e){}
+      play: play ? { k: play.k, km: play.km } : null, near: (typeof near !== 'undefined' && near) || [], facts: facts, mph: vel,
+      lines: FR.lines.map(function(L){ return { i: L.i, ci: L.ci, k: L.k, km: L.km }; }), storm: stormRead() } }, '*'); } catch(e){}
   };
   if (FR){
     try { frontFactsRun(FR, view, function(lo, la){ var q = proj({ x: lo, y: la }); return q.x > 0 && q.y > 0 && q.x < cvW(ctx) && q.y < cvH(ctx); }); } catch(e){}
@@ -4826,7 +4996,7 @@ function drawCard(style){
     if (window._frontLines && window._frontLines.length && !(document.getElementById('geo') || {}).checked){
       var bestL = null, bdL = 14;
       window._frontLines.forEach(function(L){ var d = frontDist(L.P, mx, my); if (d < bdL){ bdL = d; bestL = L; } });
-      window.parent.postMessage({ labFrontTap: bestL ? { k: bestL.k, i: bestL.i, km: bestL.km } : null }, '*');
+      window.parent.postMessage({ labFrontTap: bestL ? { k: bestL.k, i: bestL.i, ci: bestL.ci, km: bestL.km } : null }, '*');
       if (bestL) return;
     }
     /* everything below needs a live, unlocked map. The front tap above does not: the weather
