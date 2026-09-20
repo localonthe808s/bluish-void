@@ -2268,6 +2268,28 @@ function swellTravelTime(D, dirFrom, T, Hs){
   var keys = Object.keys(D.solved); if (keys.length > 5) delete D.solved[keys[0]];
   return (D.solved[key] = { tau: tau, amp: amp, brk: brk, c0: c0, te: te, tn: tn, hx: hx, hy: hy });
 }
+/* one 256 x 256 tile of smooth noise, two octaves, wrapping on both edges -- what the swell's
+   sets and its crest lengths are read from. Seeded, so the sea is the same sea on every paint. */
+var SWELLNOISE = null;
+function swellNoise(){
+  if (SWELLNOISE) return SWELLNOISE;
+  var S = 256, out = new Float32Array(S * S), seed = 1234567;
+  var rnd = function(){ seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  [[16, 1], [32, 0.45]].forEach(function(oc){
+    var n = oc[0], g = new Float32Array(n * n), c = S / n;
+    for (var i = 0; i < g.length; i++) g[i] = rnd();
+    for (var y = 0; y < S; y++) for (var x = 0; x < S; x++){
+      var gx = x / c, gy = y / c, x0 = Math.floor(gx), y0 = Math.floor(gy), fx = gx - x0, fy = gy - y0;
+      fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy);
+      var x1 = (x0 + 1) % n, y1 = (y0 + 1) % n;
+      out[y * S + x] += oc[1] * ((g[y0 * n + x0] * (1 - fx) + g[y0 * n + x1] * fx) * (1 - fy)
+                               + (g[y1 * n + x0] * (1 - fx) + g[y1 * n + x1] * fx) * fy);
+    }
+  });
+  var lo = 1e9, hi = -1e9; for (var k = 0; k < out.length; k++){ if (out[k] < lo) lo = out[k]; if (out[k] > hi) hi = out[k]; }
+  for (k = 0; k < out.length; k++){ var v = (out[k] - lo) / (hi - lo); out[k] = v * v * (3 - 2 * v); }   // pushed apart: sets are sets, lulls are lulls
+  return (SWELLNOISE = out);
+}
 var SURF = { t: 0, p: null, hits: [] };
 function surfReads(){
   if (SURF.p && Date.now() - SURF.t < 600000) return SURF.p;
@@ -2333,6 +2355,14 @@ function surfReads(){
         }
         R.buoys[q[0]] = { id:q[0], t:k.time, lat:o.latitude, lon:o.longitude, hs:u.hs, tp:u.tp, dir:u.dir, wt:null, model:true, trend:tr };
       });
+    }
+    /* the model's two swell partitions at the bay buoy's site, kept whichever source the
+       headline numbers came from: a buoy reports ONE dominant train, and the sea never is one */
+    if (r[5] && r[5].length === 3 && r[5][0].current){
+      var k0 = r[5][0].current;
+      R.parts = [{ hs:k0.swell_wave_height, tp:k0.swell_wave_period, dir:k0.swell_wave_direction },
+                 { hs:k0.secondary_swell_wave_height, tp:k0.secondary_swell_wave_period, dir:k0.secondary_swell_wave_direction }]
+        .filter(function(q){ return q.hs > 0 && q.tp > 0 && q.dir != null; });
     }
     var WPTS = [[34.032, -118.680], [34.008, -118.500], [33.905, -118.420], [33.740, -118.400]];
     R.wind = (r[6] && r[6].length === 4) ? r[6].map(function(o, i){
@@ -4293,6 +4323,31 @@ function drawCard(style){
              time     sped up: at true speed a 12 s swell crosses one pixel in four seconds. */
         var T = Math.max(5, Math.min(22, lead.tp || 10)), D = SW.D;
         var sol = D ? swellTravelTime(D, lead.dir, T, lead.hs) : null;
+        /* WHY IT LOOKED RULED (user 2026-09-20: "its a bit uniform and idk if waves go out that
+           far ... get the shoreline waves to interact with the coast more realistically").
+           Four things the first cut left out, all of them physics rather than decoration:
+             DEPTH     a 1.5 ft, 13 s swell in deep water is 1 part in 500 steep: from the air it
+                       is not there. It shows once it FEELS THE BOTTOM -- depth under half its
+                       wavelength -- because it slows, shortens and steepens. So the light is
+                       scaled by that, and the open basin goes quiet.
+             CROSSING  a buoy reports one dominant train; the sea is never one. The model's
+                       other swell partition is solved over the same depths and added, and the
+                       interference of the two is what makes real water patchy.
+             PROFILE   a sine offshore; in the shallows the crests sharpen and the troughs go
+                       long and flat (the wave is no longer linear).
+             THE EDGE  the 250 m depth grid cannot hold a 50 m surf zone, so on a small day
+                       nothing broke anywhere. The waterline comes from the pixel mask instead:
+                       a wash that pulses as each crest lands, as strong as the swell that
+                       actually reaches that stretch -- so a harbour behind its breakwater
+                       stays still. */
+        var second = null;
+        ((SW.R.parts) || []).forEach(function(q){
+          var dd = Math.abs(((q.dir - lead.dir) % 360 + 540) % 360 - 180), dt = Math.abs(q.tp - T);
+          if (q.hs < 0.15 || (dd < 12 && dt < 3)) return;
+          if (!second || dd + dt * 5 > second.score) second = { dir:q.dir, tp:Math.max(5, Math.min(22, q.tp)), hs:q.hs, score: dd + dt * 5 };
+        });
+        if (window.LAB_SWELLDIR != null) second = null;                // a what-if is one clean train
+        var sol2 = (second && D) ? swellTravelTime(D, second.dir, second.tp, second.hs) : null;
         var gm = VB.mpp * Math.cos(y2lat(VB.Ymid) * Math.PI / 180), L0 = 9.81 * T * T / (2 * Math.PI);
         var Lshown = Math.max(L0, 7 * gm), c0 = 9.81 * T / (2 * Math.PI), K = 2 * Math.PI / Lshown;
         var th = (lead.dir + 180) * Math.PI / 180, te = Math.sin(th), tn = Math.cos(th);
@@ -4303,7 +4358,13 @@ function drawCard(style){
         /* nearness to land: the water mask blurred, read back -- 1 in open sea, falling to 0 at the beach */
         var nd = null;
         if (water){ var bc = document.createElement('canvas'); bc.width = RW; bc.height = RH; var bg = bc.getContext('2d'); bg.filter = 'blur(5px)'; bg.drawImage(water, 0, 0, RW, RH); nd = bg.getImageData(0, 0, RW, RH).data; }
-        var idx = [], PH = [], LI = [], SH = [], UU = [], AM = [], BR = [];
+        var idx = [], PH = [], LI = [], SH = [], UU = [], AM = [], BR = [], SP = [], PH2 = [], A2 = [];
+        var om1 = 2 * Math.PI / T, LUTN = 2048, LK = LUTN / (2 * Math.PI);
+        if (second){
+          var L02 = 9.81 * second.tp * second.tp / (2 * Math.PI), Lshown2 = Math.max(Lshown * L02 / L0, 5 * gm);
+          var K2 = 2 * Math.PI / Lshown2, c02 = 9.81 * second.tp / (2 * Math.PI);
+          var th2 = (second.dir + 180) * Math.PI / 180, te2 = Math.sin(th2), tn2 = Math.cos(th2);
+        }
         var lonOf = new Float64Array(RW), latOf = new Float64Array(RH);
         for (var x = 0; x < RW; x++) lonOf[x] = x2lon(VB.Xw + (x + 0.5) * VB.mpp);
         for (var y = 0; y < RH; y++) latOf[y] = y2lat(VB.Ymid + (H / 2 - (y + 0.5)) * VB.mpp);
@@ -4315,7 +4376,7 @@ function drawCard(style){
           for (x = 0; x < RW; x++){
             var p = y * RW + x;
             if (wd && wd[p * 4 + 3] < 128) continue;
-            var lo = lonOf[x], fx = D ? (lo - D.W) / D.step - 0.5 : -1, dist, am = 1, br = 0;
+            var lo = lonOf[x], fx = D ? (lo - D.W) / D.step - 0.5 : -1, dist, am = 1, br = 0, dep = 4000, amx = 1, d2 = 0, a2 = 0;
             var xm = (lo + 119.3) * 111320 * 0.83;
             if (sol && fx >= 0 && fy >= 0 && fx < D.w - 1 && fy < D.h - 1){
               var i0 = Math.floor(fx), j0 = Math.floor(fy), ax2 = fx - i0, ay2 = fy - j0, q = j0 * D.w + i0;
@@ -4329,48 +4390,87 @@ function drawCard(style){
                 return arr[q] * (1 - ax2) * (1 - ay2) + arr[q + 1] * ax2 * (1 - ay2)
                      + arr[q + D.w] * (1 - ax2) * ay2 + arr[q + D.w + 1] * ax2 * ay2;
               };
-              am = bl(sol.amp); br = bl(sol.brk);
-            } else dist = xm * te + ym * tn;                                 // off the depth grid: deep water, a plane wave
+              am = bl(sol.amp); br = bl(sol.brk); dep = bl(D.depth);
+              amx = Math.max(sol.amp[q], sol.amp[q + 1], sol.amp[q + D.w], sol.amp[q + D.w + 1]);
+              if (sol2){
+                var u00 = sol2.tau[q], u10 = sol2.tau[q + 1], u01 = sol2.tau[q + D.w], u11 = sol2.tau[q + D.w + 1], m2 = Math.min(u00, u10, u01, u11);
+                if (m2 < 1e11){
+                  if (!(u00 < 1e11)) u00 = m2; if (!(u10 < 1e11)) u10 = m2; if (!(u01 < 1e11)) u01 = m2; if (!(u11 < 1e11)) u11 = m2;
+                  d2 = (u00 * (1 - ax2) * (1 - ay2) + u10 * ax2 * (1 - ay2) + u01 * (1 - ax2) * ay2 + u11 * ax2 * ay2) * c02;
+                  a2 = bl(sol2.amp);
+                }
+              }
+            } else {
+              dist = xm * te + ym * tn;                                      // off the depth grid: deep water, a plane wave
+              if (second){ d2 = xm * te2 + ym * tn2; a2 = 1; }
+            }
+            /* how hard the bottom has hold of it: 1/sqrt(tanh) is how much the wave has shortened */
+            var kr = 1 / Math.sqrt(Math.tanh(om1 * om1 * Math.max(dep, 2) / 9.81));
+            var fe = (0.5 * L0 - dep) / (0.35 * L0); fe = fe < 0 ? 0 : fe > 1 ? 1 : fe; fe = fe * fe * (3 - 2 * fe);
+            var vis = (0.30 + 0.70 * fe) * Math.min(1.9, Math.pow(kr, 0.8));
             var ex = EX[Math.floor(y / CELL) * gw + Math.floor(x / CELL)];
-            idx.push(p); PH.push(dist * K); LI.push(0.16 + 0.84 * ex); AM.push(am); BR.push(br);
-            /* outside the depth grid there is no breaking to compute: the blurred shoreline stands in */
-            SH.push((br > 0 || !nd) ? 0 : Math.max(0, 1 - nd[p * 4 + 3] / 255) * 1.6);
-            UU.push((xm * tn - ym * te) / Lshown);                             // along the crest, in wavelengths
+            var uu = (xm * tn - ym * te) / Lshown;                             // along the crest, in wavelengths
+            idx.push(p); PH.push(dist * K + 0.5 * Math.sin(uu * 0.33)); LI.push((0.16 + 0.84 * ex) * vis); AM.push(am); BR.push(br);
+            SP.push(Math.min(1, Math.max(0, (kr - 1.05) / 1.1)));
+            PH2.push(second ? d2 * K2 + 0.6 * Math.sin(uu * 0.21 + 1.3) : 0); A2.push(a2);
+            /* THE WATERLINE, from the pixel mask: how close to the sand, times how much swell arrives */
+            var nv = nd ? nd[p * 4 + 3] / 255 : 1, edge = (0.93 - nv) / 0.45; edge = edge < 0 ? 0 : edge > 1 ? 1 : edge;
+            SH.push(edge * Math.min(1.4, (0.16 + 0.84 * ex) * Math.min(amx, 2.2)));
+            UU.push(uu);
           }
         }
         var N = idx.length; if (!N) return;
-        var PHf = new Float32Array(PH), LIf = new Float32Array(LI), SHf = new Float32Array(SH), UUf = new Float32Array(UU);
-        var AMf = new Float32Array(AM), BRf = new Float32Array(BR), IDX = new Uint32Array(idx);
+        var LIf = new Float32Array(LI), SHf = new Float32Array(SH), SPf = new Float32Array(SP);
+        var AMf = new Float32Array(AM), BRf = new Float32Array(BR), IDX = new Uint32Array(idx), A2f = new Float32Array(A2);
+        /* everything periodic is read from tables: a sine, and one tile of smooth noise. The old
+           loop called Math.sin six times a pixel; this calls it for foam only. */
+        var SINL = new Float32Array(LUTN); for (var li = 0; li < LUTN; li++) SINL[li] = Math.sin(li / LK);
+        var NZ = swellNoise();
+        var PHi = new Float32Array(N), PH2i = new Float32Array(N), NEa = new Float32Array(N), NLa = new Float32Array(N);
+        var NEr = new Int32Array(N), NLr = new Int32Array(N);
+        for (var k0 = 0; k0 < N; k0++){
+          var wl = PH[k0] / (2 * Math.PI);                                     // travel, in wavelengths
+          PHi[k0] = PH[k0] * LK; PH2i[k0] = PH2[k0] * LK;
+          NEa[k0] = wl * 16 / 6;   NEr[k0] = ((UU[k0] * 16 / 11) & 255) << 8;  // SETS: six waves deep, eleven wide
+          NLa[k0] = wl * 16 / 1.6; NLr[k0] = ((UU[k0] * 16 / 2.8 + 97) & 255) << 8;   // CRESTS: a few wavelengths long
+        }
         var off = document.createElement('canvas'); off.width = RW; off.height = RH;
         var og = off.getContext('2d'), img = og.createImageData(RW, RH), px = img.data;
         var amp = Math.max(0.45, Math.min(1, 0.35 + (lead.hs || 0.6) * 3.281 / 7));
+        var w2 = second ? Math.min(1, second.hs / Math.max(lead.hs || 0.6, 0.2)) : 0, r2 = second ? T / second.tp : 0;
         var sg = swellCv.getContext('2d'), t0 = performance.now(), lastDraw = 0, TV = 2.8;            // seconds a crest takes to advance one wavelength on screen
         var frame = function(now){
           if (stale() || !surfOn()){ sg.clearRect(0, 0, W, H); return; }
           if (!document.hidden && now - lastDraw > 45){
             lastDraw = now;
-            var t = (now - t0) / 1000, wt = 2 * Math.PI * t / TV, gt = wt * 0.5;
+            var t = (now - t0) / 1000, cyc = t / TV, wt = 2 * Math.PI * cyc, wti = wt * LK, wti2 = wti * r2;
+            var gE = cyc * 0.5 * 16 / 6, gL = cyc * 16 / 1.6;                  // the sets run at the GROUP's half speed; a crest keeps its own shape
             for (var k = 0; k < N; k++){
-              var ph = PHf[k], u = UUf[k];
-              /* sets: a slow envelope along the travel, moving at the group's half speed; and
-                 crests of finite length: a slower one along the crest */
-              var env = 0.62 + 0.38 * Math.sin(ph / 7.3 - gt + 1.7 * Math.sin(u * 0.21));
-              var len = 0.7 + 0.3 * Math.sin(u * 0.55 + ph * 0.045 + 0.4 * Math.sin(u * 0.13));
-              var s = Math.sin(ph - wt + 0.5 * Math.sin(u * 0.33));
-              /* the local height carries the shoaling and the focusing; the shallow face of a
-                 standing wave is also steeper, so it takes the light harder */
-              /* floored and capped: a lee that the rays never reach is dark, not blank -- real swell
-                 leaks into it -- and one focused streak cannot be allowed to burn out the frame */
+              var env = 0.30 + 1.05 * NZ[NEr[k] | ((NEa[k] - gE) & 255)];
+              var len = 0.45 + 0.75 * NZ[NLr[k] | ((NLa[k] - gL) & 255)];
               var hgt = AMf[k] < 0.3 ? 0.3 : (AMf[k] > 2.2 ? 2.2 : AMf[k]);
-              var a = LIf[k] * env * len * amp * (0.55 + 0.75 * hgt), o = IDX[k] * 4, fo = BRf[k];
-              var lit = s > 0 ? s * s * (0.34 * a) * (hgt > 1 ? 1 + (hgt - 1) * 0.5 : 1) : 0;
+              var s = SINL[(PHi[k] - wti) & 2047];
+              if (w2){                                                         // the two trains, weighed by the height each has HERE
+                var h2 = A2f[k] < 0.3 ? 0.3 : (A2f[k] > 2.2 ? 2.2 : A2f[k]), q2 = w2 * h2 / hgt;
+                s = (s + q2 * SINL[(PH2i[k] - wti2) & 2047]) / (1 + 0.6 * q2);
+                if (s > 1) s = 1; else if (s < -1) s = -1;
+              }
+              var a = LIf[k] * env * len * amp * (0.55 + 0.75 * hgt), o = IDX[k] * 4, fo = BRf[k], sp = SPf[k], lit = 0;
+              if (s > 0){
+                var s2 = s * s;
+                /* the crest narrows as the water shoals: s^2 offshore, toward s^6 on the shelf */
+                lit = s2 * (1 - sp + sp * s2 * s2) * (0.36 + 0.10 * sp) * a * (hgt > 1 ? 1 + (hgt - 1) * 0.5 : 1);
+              }
               /* WHITE WATER IS NOT A WAVE. Where it has broken the surface is foam: brighter,
                  rougher, and running at its own pace rather than the swell's. */
-              if (fo > 0) lit += fo * (0.30 + 0.26 * Math.sin(ph * 1.9 - wt * 1.8 + u * 2.7) + 0.12 * Math.sin(u * 5.1 - wt * 0.9)) * Math.min(1.15, a + 0.4);
-              if (lit > 0){
+              if (fo > 0){ var ph = PHi[k] / LK, u = NLr[k] * 0.0007; lit += fo * (0.30 + 0.26 * Math.sin(ph * 1.9 - wt * 1.8 + u * 2.7) + 0.12 * Math.sin(u * 5.1 - wt * 0.9)) * Math.min(1.15, a + 0.4); }
+              /* the wash on the sand: up as the crest lands, draining before the next */
+              var sh = SHf[k];
+              if (sh > 0){ var pu = SINL[(PHi[k] - wti - 380) & 2047]; lit += sh * amp * (0.16 + (pu > 0 ? 0.62 * pu : 0)) * (0.55 + 0.6 * len); }
+              if (lit > 0.004){
                 px[o] = 232; px[o + 1] = 244; px[o + 2] = 255; px[o + 3] = Math.min(245, lit * 255);
               } else {
-                px[o] = 3; px[o + 1] = 12; px[o + 2] = 34; px[o + 3] = Math.min(200, (-s) * (0.30 * a) * 255);   // the trough behind it
+                px[o] = 3; px[o + 1] = 12; px[o + 2] = 34; px[o + 3] = s < 0 ? Math.min(200, (-s) * (0.30 * a) * (1 - 0.5 * sp) * 255) : 0;   // the trough behind it, flatter in the shallows
               }
             }
             og.putImageData(img, 0, 0);
