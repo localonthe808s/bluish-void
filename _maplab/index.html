@@ -2594,7 +2594,7 @@ function arcClock(mins, tz){
   return { time: f({ hour:'numeric', minute:'2-digit' }),
            day: day(d) !== day(new Date()) ? f({ weekday:'short' }).toUpperCase() : null };
 }
-function makeMachinery(ctx, geo, R, proj, mpp, view, mode, frontRuns, cold){
+function makeMachinery(ctx, geo, R, proj, mpp, view, mode, frontRuns, cold, motion){
   var city = mode === 'city';
   var FR = (!city && frontRuns) ? makeFronts(ctx, frontRuns, proj, view, (VIEWS[document.getElementById('view').value] || {}).tz) : null;
   if (city) geo = null;                           // the half-hour view carries the rings only
@@ -2644,7 +2644,15 @@ function makeMachinery(ctx, geo, R, proj, mpp, view, mode, frontRuns, cold){
   }
   /* the arcs: 1, 2, 3 hours on the near views, 6 and 12 on the far one */
   var arcs = [];
-  var steerOK = R && R.steer.kt >= 4 && !(VIEWS[document.getElementById('view').value] || {}).sat;
+  /* MEASURED FIRST. A shift read off the loop is what the echo did; the steering wind is a
+     guess about what it might do, and on a sheared day the two can point opposite ways. The
+     measurement is already filtered for coherence and for standing still, so it needs no
+     speed gate of its own -- only the fallback keeps the 4 kt bar. */
+  var MO = motion && motion.kt ? { kt: motion.kt, from: (motion.toward + 180) % 360, measured: true } : null;
+  var SW = (R && R.steer && R.steer.kt >= 4) ? R.steer : null;
+  var use = MO || SW;
+  if (R) R.motion = MO;                                   // rides up to the strip with the reads
+  var steerOK = use && !(VIEWS[document.getElementById('view').value] || {}).sat;
   /* AND WHEN THERE IS NOTHING STEERING, SAY SO ON THE MAP. The card used to go silently bare
      -- no arcs, no mark, nothing to tell you whether the feature had failed or the air was
      simply still. The doorstep is drawn either way now, and on a calm day it carries the
@@ -2656,15 +2664,15 @@ function makeMachinery(ctx, geo, R, proj, mpp, view, mode, frontRuns, cold){
   }
   if (steerOK){
     var HOME = (VIEWS[document.getElementById('view').value] || {}).home || LA_PT;
-    var c0 = proj(HOME), kmh = R.steer.kt * 1.852;
+    var c0 = proj(HOME), kmh = use.kt * 1.852;
     /* minutes of travel: 10/20/30 on the half-hour view (the widget's city rings), 1/2/3 h
        on the 3-hour view, 6/12 h on the 12-hour */
     var tz = (VIEWS[document.getElementById('view').value] || {}).tz;
     (city ? [10, 20, 30] : near ? [60, 120, 180] : [360, 720]).forEach(function(mins){
       var rpx = kmh * (mins / 60) * 1000 / Math.cos(34.05 * Math.PI / 180) / mpp;
       if (rpx < 14) return;
-      arcs.push({ r:rpx, c:c0, from:R.steer.from });
-      var b = R.steer.from * Math.PI / 180, k = arcClock(mins, tz), off = rpx + (k.day ? 15 : 9);
+      arcs.push({ r:rpx, c:c0, from:use.from });
+      var b = use.from * Math.PI / 180, k = arcClock(mins, tz), off = rpx + (k.day ? 15 : 9);
       hot.unshift({ name: k.time, day: k.day, arc:true, q:{ x:c0.x + Math.sin(b) * off, y:c0.y - Math.cos(b) * off }, col:'#fff', rank:80 });
     });
   }
@@ -3243,6 +3251,75 @@ function cloudOnly(im, W, H){
   }
   g2.putImageData(id, 0, 0);
   return c;
+}
+/* MEASURE THE MOTION, DO NOT ASK A MODEL FOR IT (user 2026-09-19: "its gone again, youre
+   missing something, it shoudlnt be this complicated, NYC had no issues, figure out
+   direction"). Quite right, and New York settled this a week ago for the same reason -- its
+   note reads "the highlighted part of the arches doesn't match the incoming storm's
+   direction", and the answer there was to stop asking the model. A front's line moves with
+   the front, not with the wind at whatever pressure level you picked; I spent three passes
+   choosing levels and they were all guesses about a thing that can simply be watched.
+   This is NYC's cwMeasureMotion, ported: shift the newest frame over the oldest, count how
+   much echo lands on echo, and the best shift over the loop's span IS the motion. The lab
+   could not do this before today because it had one frame; it has eight now.
+   Kept only on a coherent match (a quarter of the echo lands), a shift inside the window, and
+   something actually moving. Otherwise the steering wind stands, as it does in New York. */
+var RMOT = {};
+function radarMotion(sid, lyr, X0, Y0, X1, Y1, latMid){
+  var key = sid + '/' + lyr + '@' + Math.round(X0) + ',' + Math.round(Y0), hit = RMOT[key];
+  if (hit && Date.now() - hit.t < 300000) return hit.p;
+  var MW = 420, MH = Math.max(60, Math.round(MW * (Y1 - Y0) / (X1 - X0)));
+  var url = function(iso){
+    return 'https://opengeo.ncep.noaa.gov/geoserver/' + sid + '/ows?service=WMS&version=1.1.0&request=GetMap'
+      + '&layers=' + lyr + '&styles=&bbox=' + Math.round(X0) + ',' + Math.round(Y0) + ','
+      + Math.round(X1) + ',' + Math.round(Y1) + '&width=' + MW + '&height=' + MH
+      + '&srs=EPSG:3857&format=image/png&transparent=true&TIME=' + iso;
+  };
+  var p = radarTimes(sid, lyr).then(function(times){
+    if (times.length < 2) return null;
+    var a = times[Math.max(0, times.length - 8)], b = times[times.length - 1];
+    var dtMin = (Date.parse(b) - Date.parse(a)) / 60000;
+    if (!(dtMin >= 8)) return null;
+    return Promise.all([loadImg(url(a)), loadImg(url(b))]).then(function(im){
+      if (!im[0] || !im[1]) return null;
+      /* the same clear-air cut the map gets: ground clutter does not move, and left in it
+         anchors the correlation at zero shift and reports a stationary sky */
+      var prep = function(x){ return /_sr_bref$/.test(lyr) ? filterBref(x, MW, MH) : x; };
+      var c = document.createElement('canvas'); c.width = MW; c.height = MH;
+      var g = c.getContext('2d', { willReadFrequently: true });
+      var grab = function(x){
+        g.clearRect(0, 0, MW, MH); g.drawImage(prep(x), 0, 0, MW, MH);
+        var d, m = new Uint8Array(MW * MH), n = 0;
+        try { d = g.getImageData(0, 0, MW, MH).data; } catch (e){ return null; }
+        for (var i = 0; i < MW * MH; i++) if (d[i * 4 + 3] > 60){ m[i] = 1; n++; }
+        return { m: m, n: n };
+      };
+      var A = grab(im[0]), B = grab(im[1]);
+      if (!A || !B || A.n < 250 || B.n < 250) return null;
+      var kmPx = (X1 - X0) / 1000 * Math.cos((latMid || 34) * Math.PI / 180) / MW;
+      var xs = [], ys = [], y, x;
+      for (y = 0; y < MH; y++) for (x = 0; x < MW; x++) if (A.m[y * MW + x]){ xs.push(x); ys.push(y); }
+      var stride = Math.max(1, Math.floor(xs.length / 8000)), nA = 0, k;
+      for (k = 0; k < xs.length; k += stride) nA++;
+      var S = Math.max(4, Math.min(40, Math.ceil(70 * 1.609 * dtMin / 60 / kmPx)));      // up to 70 mph
+      var best = { s: -1, dx: 0, dy: 0 }, dx, dy;
+      for (dy = -S; dy <= S; dy++) for (dx = -S; dx <= S; dx++){
+        var sc = 0;
+        for (k = 0; k < xs.length; k += stride){
+          var x2 = xs[k] + dx, y2 = ys[k] + dy;
+          if (x2 >= 0 && y2 >= 0 && x2 < MW && y2 < MH && B.m[y2 * MW + x2]) sc++;
+        }
+        if (sc > best.s) best = { s: sc, dx: dx, dy: dy };
+      }
+      if (best.s < 0.25 * nA || Math.abs(best.dx) >= S || Math.abs(best.dy) >= S) return null;
+      var km = Math.hypot(best.dx, best.dy) * kmPx, kt = km / dtMin * 60 / 1.852;
+      if (kt < 3.5) return null;                       // sitting still: no direction to read
+      return { toward: (Math.atan2(best.dx, -best.dy) * 180 / Math.PI + 360) % 360,
+               kt: kt, match: best.s / nA, span: Math.round(dtMin) };
+    });
+  }).catch(function(){ return null; });
+  RMOT[key] = { t: Date.now(), p: p };
+  return p;
 }
 function radarOverlay(ctx, W, H, X0, Y0, X1, Y1){
   var tick = document.getElementById('radar');
@@ -4100,9 +4177,12 @@ function drawCard(style){
                 }) }; };
                 /* space is claimed in this order: the city; the arcs and whatever is RUNNING;
                    the sky names; the quiet machinery; the rest of the geography */
-                return Promise.all([viewJson(vkey, 'wxGeo'), wxReads(), frontsRead(), coldEdgeRead()]).then(function(gr){
+                return Promise.all([viewJson(vkey, 'wxGeo'), wxReads(), frontsRead(), coldEdgeRead(),
+                                    vv.radar ? radarMotion(vv.radar, vv.radarLayer || (vv.radar + '_sr_bref'),
+                                      VB.Xw, VB.Ymid - VB.mpp * H / 2, VB.Xw + VB.mpp * W, VB.Ymid + VB.mpp * H / 2,
+                                      view.latMid) : null]).then(function(gr){
                   if (stale()) return;
-                  var M = makeMachinery(tctx, gr[0], gr[1], out.project, VB.mpp, view, null, gr[2], gr[3]);
+                  var M = makeMachinery(tctx, gr[0], gr[1], out.project, VB.mpp, view, null, gr[2], gr[3], gr[4]);
                   /* with the rock on, the base is pale and busy: these names take the same dark
                      ink the neighbourhood names take below. This branch returns before the
                      geoOn() case further down ever runs, so it has to ask for itself. */
@@ -4146,9 +4226,12 @@ function drawCard(style){
               if (vv.wxGeo && document.getElementById('radar').checked && !vv.sat){
                 /* the half-hour radar view: the widget's 10/20/30-minute rings, clock-labelled.
                    The rings' times claim their space first; the names fit round them. */
-                return wxReads().then(function(R){
+                return Promise.all([wxReads(), radarMotion(vv.radar || 'ksox', vv.radarLayer || ((vv.radar || 'ksox') + '_sr_bref'),
+                                      VB.Xw, VB.Ymid - VB.mpp * H / 2, VB.Xw + VB.mpp * W, VB.Ymid + VB.mpp * H / 2,
+                                      view.latMid)]).then(function(rr){
                   if (stale()) return;
-                  var M = makeMachinery(tctx, null, R, out.project, VB.mpp, view, 'city');
+                  var R = rr[0];
+                  var M = makeMachinery(tctx, null, R, out.project, VB.mpp, view, 'city', null, null, rr[1]);
                   LABELBOX.length = 0; M.claimHot();
                   /* THE NAMES ARE WHAT PLACE THE WEATHER (user 2026-09-19: "dont show the train
                      lines on the weather views either, just neighborhoods"). The rank-1 ceiling
