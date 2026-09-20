@@ -370,6 +370,10 @@ def bake_faults():
                      'age': blank(p.get('age')) or blank(p.get('flt_age')),
                      'slip_rate': FAULT_RATE.get(rate, rate),
                      'sense': FAULT_SENSE.get(sense, sense),
+                     # which way the plane leans (N, NW, Vertical): the side it leans toward is the
+                     # hanging wall, the block that rides up on a reverse fault. Onshore layer only --
+                     # the offshore layer does not record it, and the card says so rather than guess.
+                     'dip': blank(p.get('dip_direction')),
                      # how the survey draws it: this is what the dash means
                      'trace': blank(p.get('linetype')) or blank(p.get('line_type')),
                      # how well it is located: a separate question
