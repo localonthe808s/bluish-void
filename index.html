@@ -83422,6 +83422,75 @@ function initNowMicroTabs(){
     if (_hurricaneLayerObjs.enso){ try { if (_hurricaneMap && _hurricaneMap.hasLayer(_hurricaneLayerObjs.enso)) _hurricaneMap.removeLayer(_hurricaneLayerObjs.enso); } catch(e){} _hurricaneLayerObjs.enso = null; }
     if (_hurricaneLayers.enso){ _hurricaneLayers.enso = false; toggleHurricaneLayer('enso'); }
   };
+  /* THE LAST 90 DAYS, PLAYED ON THE MAP (user 2026-09-20: "add the 90 day animation of the el nino map").
+     Tiles cannot be animated honestly -- 46 days x a dozen tiles is 500+ requests and frames that arrive in
+     pieces -- so each frame is ONE georeferenced image of the whole hurricane domain from GIBS WMS (the
+     quarter-degree anomaly, ~195 KB at 1,024 px: measured), every other day, ~6 MB in all and fetched only
+     when PLAY is pressed. They are preloaded, then swapped through a single L.imageOverlay in the same pane
+     and at the same strength as the skin, which is faded out underneath while it runs. The date rides ON the
+     map, because that is where the eyes are. */
+  window._hzEnsoAnim = (function(){
+    var A = { token: null, frames: [], i: 0, timer: null, overlay: null, badge: null, paused: false, cb: null };
+    var R = 6378137, mx = function(lon){ return lon * Math.PI / 180 * R; }, my = function(lat){ return Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360)) * R; };
+    var S0 = -35, N0 = 60, W0 = -180, E0 = 20;                 // the map's own maxBounds in longitude; one WMS image cannot cross the dateline and need not
+    var tell = function(o){ try { if (A.cb) A.cb(o); } catch(e){} };
+    var label = function(day){ var d = new Date(day + 'T12:00:00Z'); return d.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' }).toUpperCase(); };
+    A.show = function(i){
+      if (!A.frames.length || !A.overlay) return;
+      A.i = (i + A.frames.length) % A.frames.length;
+      var f = A.frames[A.i]; A.overlay.setUrl(f.src);
+      if (A.badge) A.badge.firstChild.textContent = label(f._day);
+      tell({ phase: A.paused ? 'paused' : 'playing', day: f._day, label: label(f._day), i: A.i, total: A.frames.length });
+    };
+    var tick = function(){
+      if (A.paused || !A.frames.length) return;
+      var last = A.i === A.frames.length - 1;
+      A.timer = setTimeout(function(){ if (!A.token || A.paused) return; if (document.hidden){ tick(); return; } A.show(A.i + 1); tick(); }, last ? 1600 : 170);   // rest on today before looping
+    };
+    A.pause = function(){ A.paused = true; clearTimeout(A.timer); A.show(A.i); };
+    A.resume = function(){ if (!A.frames.length) return; A.paused = false; A.show(A.i); tick(); };
+    A.stop = function(quiet){
+      clearTimeout(A.timer); A.token = null; A.paused = false;
+      A.frames.forEach(function(im){ im.onload = im.onerror = null; }); A.frames = [];
+      try { if (A.overlay && _hurricaneMap) _hurricaneMap.removeLayer(A.overlay); } catch(e){} A.overlay = null;
+      if (A.badge && A.badge.parentNode) A.badge.parentNode.removeChild(A.badge); A.badge = null;
+      try { if (_hurricaneLayerObjs.enso) _hurricaneLayerObjs.enso.setOpacity(0.72); } catch(e){}
+      if (!quiet) tell({ phase: 'stopped' });
+    };
+    A.start = function(endDay, cb){
+      A.stop(true); A.cb = cb;
+      if (!_hurricaneMap || !endDay) return;
+      var token = A.token = {}, Wpx = window.innerWidth < 700 ? 640 : 1024, Hpx = Math.round(Wpx * (my(N0) - my(S0)) / (mx(E0) - mx(W0)));
+      var end = Date.parse(endDay + 'T00:00:00Z'), days = []; for (var k = 90; k >= 0; k -= 2) days.push(new Date(end - k * 864e5).toISOString().slice(0, 10));
+      var done = 0, imgs = days.map(function(d){
+        var im = new Image(); im._day = d;
+        im.onload = im.onerror = function(){
+          if (A.token !== token) return; done++;
+          tell({ phase: 'loading', done: done, total: days.length });
+          if (done === days.length) play();
+        };
+        im.src = 'https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS=GHRSST_L4_MUR25_Sea_Surface_Temperature_Anomalies&STYLES=&FORMAT=image/png&TRANSPARENT=true&SRS=EPSG:3857'
+          + '&BBOX=' + [mx(W0), my(S0), mx(E0), my(N0)].map(function(v){ return v.toFixed(0); }).join(',') + '&WIDTH=' + Wpx + '&HEIGHT=' + Hpx + '&TIME=' + d;
+        return im;
+      });
+      tell({ phase: 'loading', done: 0, total: days.length });
+      var play = function(){
+        A.frames = imgs.filter(function(im){ return im.naturalWidth > 0; });
+        if (A.frames.length < 5){ A.stop(); return; }
+        try { if (_hurricaneLayerObjs.enso) _hurricaneLayerObjs.enso.setOpacity(0); } catch(e){}
+        A.overlay = L.imageOverlay(A.frames[0].src, [[S0, W0], [N0, E0]], { pane: 'hz-sst', opacity: 0.72, interactive: false }).addTo(_hurricaneMap);
+        var b = A.badge = document.createElement('div');
+        b.style.cssText = 'position:absolute;left:12px;bottom:14px;z-index:650;display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:10px;background:rgba(10,14,28,.78);color:#fff;font:800 12px system-ui,sans-serif;letter-spacing:.1em;pointer-events:auto;cursor:pointer;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);';
+        b.innerHTML = '<span></span><span style="font-weight:700;font-size:9px;opacity:.7;">SEA TEMP VS NORMAL · TAP TO PAUSE</span><span title="stop" style="font-weight:900;font-size:12px;opacity:.85;padding:0 2px 0 6px;border-left:1px solid rgba(255,255,255,.25);">✕</span>';
+        var words = b.children[1];
+        b.onclick = function(e){ e.stopPropagation(); if (e.target === b.lastChild){ A.stop(); return; } if (A.paused) A.resume(); else A.pause(); words.textContent = 'SEA TEMP VS NORMAL · TAP TO ' + (A.paused ? 'PLAY' : 'PAUSE'); };
+        _hurricaneMap.getContainer().appendChild(b);
+        A.paused = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);      // reduced motion: loaded, shown on today, scrubbed by hand
+        A.show(A.paused ? A.frames.length - 1 : 0); if (!A.paused) tick(); else words.textContent = 'SEA TEMP VS NORMAL · TAP TO PLAY';
+      };
+    };
+    return A;
+  })();
   window.toggleHzEnso = function(){
     toggleHurricaneLayer('enso');
     window._hzExtraBtnPaint('hz-extra-enso', !!_hurricaneLayers.enso);
@@ -87695,6 +87764,8 @@ function initNowMicroTabs(){
         /* TWO COLUMNS ON A WIDE SCREEN: the map filled the whole pane on the first build and everything else was a scroll away (measured: 1,472 px of content in a 708 px body) */
         + '<div class="enso-grid"><div style="min-width:0;">'
         + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;align-items:center;">' + btn('now', 'NOW') + btn('y2015', 'THIS DATE IN 2015 · THE LAST VERY STRONG EL NIÑO') + btn('y2010', 'THIS DATE IN 2010 · LA NIÑA')
+        + '<button type="button" id="enso-play" style="cursor:pointer;font:800 8.5px system-ui,sans-serif;letter-spacing:.09em;padding:5px 12px;border-radius:12px;border:1px solid #b91c1c;background:' + (S.anim ? '#b91c1c' : 'rgba(255,255,255,.7)') + ';color:' + (S.anim ? '#fff' : '#b91c1c') + ';">' + (S.anim ? '\u25a0 STOP' : '\u25b6 PLAY THE LAST 90 DAYS') + '</button>'
+        + (S.anim ? '<input id="enso-scrub" type="range" min="0" max="45" value="0" style="flex:1 1 160px;min-width:120px;max-width:360px;accent-color:#b91c1c;"><span id="enso-anim-lbl" style="font:800 9px system-ui,sans-serif;letter-spacing:.08em;color:#1b2340;min-width:150px;"></span>' : '')
         + '<span style="font:700 8px system-ui,sans-serif;letter-spacing:.08em;color:#6b7389;">THE MAP ABOVE IS WEARING THIS · SEA-SURFACE TEMPERATURE AGAINST NORMAL · ' + (day || '') + ' · NASA MUR</span></div>'
         + (day ? ''
           + '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;margin-top:5px;font:700 8px system-ui,sans-serif;letter-spacing:.06em;color:#1b2340;"><span>−5.4°F</span><div style="flex:1 1 160px;min-width:120px;max-width:420px;height:8px;border-radius:4px;background:linear-gradient(90deg,#' + PAL.join(',#') + ');"></div><span>+5.4°F OR MORE</span><span style="color:#6b7389;">COLDER / WARMER THAN NORMAL (±3°C) · THE SCALE STOPS THERE: DARK RED MAY BE MORE</span></div>' : '')
@@ -87711,8 +87782,11 @@ function initNowMicroTabs(){
           + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px;margin-top:5px;"><a href="' + CPC + 'products/predictions/long_range/seasonal.php?lead=1" target="_blank" rel="noopener"><img alt="Temperature outlook" src="' + CPC + 'products/predictions/long_range/lead01/off01_temp.gif" style="display:block;width:100%;border-radius:7px;background:#fff;"></a>'
           + '<a href="' + CPC + 'products/predictions/long_range/seasonal.php?lead=1" target="_blank" rel="noopener"><img alt="Precipitation outlook" src="' + CPC + 'products/predictions/long_range/lead01/off01_prcp.gif" style="display:block;width:100%;border-radius:7px;background:#fff;"></a></div>' : '')
         + '<div style="font:600 8px system-ui,sans-serif;letter-spacing:.06em;color:#6b7389;margin-top:10px;">SOURCES · <a href="' + CPC + 'products/analysis_monitoring/enso_advisory/ensodisc.shtml" target="_blank" rel="noopener" style="color:inherit;">CPC ENSO DIAGNOSTIC DISCUSSION</a> · <a href="' + CPC + 'data/indices/wksst9120.for" target="_blank" rel="noopener" style="color:inherit;">CPC WEEKLY NIÑO INDICES</a> · <a href="https://podaac.jpl.nasa.gov/dataset/MUR25-JPL-L4-GLOB-v04.2" target="_blank" rel="noopener" style="color:inherit;">NASA JPL MUR SST VIA GIBS</a></div>';
-      [].slice.call(root.querySelectorAll('[data-cmp]')).forEach(function(b){ b.onclick = function(e){ e.stopPropagation(); S.cmp = b.getAttribute('data-cmp'); skin(); render(); }; });
+      [].slice.call(root.querySelectorAll('[data-cmp]')).forEach(function(b){ b.onclick = function(e){ e.stopPropagation(); stopAnim(); S.cmp = b.getAttribute('data-cmp'); skin(); render(); }; });
+      var pb = document.getElementById('enso-play'); if (pb) pb.onclick = function(e){ e.stopPropagation(); if (S.anim) { stopAnim(); render(); } else startAnim(); };
+      var sc = document.getElementById('enso-scrub'); if (sc) sc.oninput = function(){ var A = window._hzEnsoAnim; if (A && A.frames.length){ var want = +sc.value; A.pause(); A.show(want); } };   // read the thumb FIRST: pausing reports the current frame, which writes the slider back (a touch drag does not focus it)
       var cv = document.getElementById('enso-chart'); if (cv) chart(cv);
+      mapPlay();
     }
     /* THE SKIN (user 2026-09-20: "el nino should be a skin on the map that changes like OCEAN"). The view turns the
        hurricane map's own anomaly layer on, as OCEAN turns on temperature; NOW / 2015 / 2010 re-date that layer
@@ -87720,6 +87794,22 @@ function initNowMicroTabs(){
     var skin = function(){
       var md = S.day ? S.day.slice(4) : '', d = S.cmp === 'y2015' ? '2015' + md : S.cmp === 'y2010' ? '2010' + md : null;
       if (window._hzEnsoSkin) window._hzEnsoSkin(d && md ? d : null);
+    };
+    /* PLAY THE LAST 90 DAYS: the frames live on the big map (_hzEnsoAnim); this only runs the button, the scrubber and the
+       words beside them. The panel is NOT re-rendered per frame -- that would rebuild the scrubber under the thumb. */
+    var stopAnim = function(){ if (S.anim){ S.anim = null; if (window._hzEnsoAnim) window._hzEnsoAnim.stop(true); } };
+    var startAnim = function(){
+      if (!window._hzEnsoAnim || !S.day) return;
+      if (S.cmp !== 'now'){ S.cmp = 'now'; skin(); }
+      S.anim = 'loading'; render();
+      window._hzEnsoAnim.start(S.day, function(o){
+        var lbl = document.getElementById('enso-anim-lbl'), sc = document.getElementById('enso-scrub');
+        if (o.phase === 'stopped'){ S.anim = null; render(); return; }
+        if (o.phase === 'loading'){ if (lbl) lbl.textContent = 'LOADING ' + o.done + ' / ' + o.total; return; }
+        S.anim = o.phase;
+        if (sc){ sc.max = o.total - 1; if (document.activeElement !== sc) sc.value = o.i; }
+        if (lbl) lbl.textContent = o.label + (o.phase === 'paused' ? ' \u00b7 PAUSED' : '');
+      });
     };
     window.bvEnsoOpen = function(){ render(); load().then(function(){ render(); skin(); }).catch(render); };
     var active = function(){ var p = document.getElementById('hz-enso-panel'); return !!p && p.style.display !== 'none'; };
@@ -87731,10 +87821,23 @@ function initNowMicroTabs(){
     /* THE FIFTH VIEW is a native preset of setHurricaneView now (layers + button paint live there, like the other
        four). This wrapper only swaps the panel under the buttons, puts a phone on the ocean the view is about,
        and hands the skin back to today's date on the way out. */
+    /* PLAY lives on the map too: the panel is a scroll below it, and nobody should have to go and fetch a button to animate the thing in front of them */
+    var mapPlay = function(){
+      var host = document.getElementById('hurricane-map'), b = document.getElementById('hz-enso-mapplay'), p = document.getElementById('hz-enso-panel');
+      var want = !!host && !!p && p.style.display !== 'none' && !S.anim && !!S.day;
+      if (!want){ if (b && b.parentNode) b.parentNode.removeChild(b); return; }
+      if (b) return;
+      b = document.createElement('button'); b.id = 'hz-enso-mapplay'; b.type = 'button';
+      b.style.cssText = 'position:absolute;left:12px;bottom:14px;z-index:650;padding:7px 12px;border-radius:10px;border:none;background:rgba(10,14,28,.78);color:#fff;font:800 10px system-ui,sans-serif;letter-spacing:.1em;cursor:pointer;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);';
+      b.textContent = '▶ PLAY THE LAST 90 DAYS';
+      b.onclick = function(e){ e.stopPropagation(); startAnim(); };
+      host.appendChild(b);
+    };
     var show = function(on){
       var p = document.getElementById('hz-enso-panel'), body = document.getElementById('hurricane-subview-body');
       if (p) p.style.display = on ? 'block' : 'none';
       if (body) body.style.display = on ? 'none' : 'flex';
+      mapPlay();
     };
     var prev = window.setHurricaneView;
     if (typeof prev === 'function') window.setHurricaneView = function(view){
@@ -87743,7 +87846,7 @@ function initNowMicroTabs(){
       if (on){
         if (window._hzWide && !window._hzWide() && window._hzBasin !== 'pac' && window._hzSetBasin) window._hzSetBasin('pac');
         window.bvEnsoOpen();
-      } else if (S.cmp !== 'now'){ S.cmp = 'now'; if (window._hzEnsoSkin) window._hzEnsoSkin(null); }
+      } else { stopAnim(); if (S.cmp !== 'now'){ S.cmp = 'now'; if (window._hzEnsoSkin) window._hzEnsoSkin(null); } }
       return r;
     };
   })();
