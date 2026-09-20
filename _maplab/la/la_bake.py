@@ -1379,7 +1379,7 @@ out geom;
 # beaches already have their own layer from the airfields bake
 PARK_JUNK = re.compile(r'recreation cent|community cent|senior cent|mini park|pocket park|'
                        r'triangle|playground|dog park|skate|golf|cemetery|memorial park$|'
-                       r'state marine|marine conservation|marine reserve|state beach|county beach', re.I)
+                       r'state marine|marine conservation|marine reserve|state beach|county beach|city beach', re.I)
 PARK_MIN_WILD, PARK_MIN_PARK = 20.0, 40.0        # hectares
 
 
