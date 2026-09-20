@@ -4340,13 +4340,21 @@ function drawCard(style){
                        a wash that pulses as each crest lands, as strong as the swell that
                        actually reaches that stretch -- so a harbour behind its breakwater
                        stays still. */
-        var second = null;
+        /* ONLY A GROUNDSWELL GETS CRESTS. The first cut drew whatever the other partition was,
+           and on its first day that was a 5 s west wind swell: 40 m from crest to crest, under
+           half a pixel from here. Stretched to a wavelength that could be drawn, it crossed the
+           real swell at 76 degrees and printed a halftone grid over the whole bay. A sea that
+           short is not lines from the air, it is ROUGHNESS -- so under 8 s it becomes a grain
+           drifting downwind (chop), and only a second swell of 8 s or more is drawn as crests,
+           never at more than about half the weight of the first. */
+        var second = null, chop = null;
         ((SW.R.parts) || []).forEach(function(q){
           var dd = Math.abs(((q.dir - lead.dir) % 360 + 540) % 360 - 180), dt = Math.abs(q.tp - T);
+          if (q.tp < 8){ if (q.hs >= 0.2 && (!chop || q.hs > chop.hs)) chop = { dir:q.dir, hs:q.hs, tp:q.tp }; return; }
           if (q.hs < 0.15 || (dd < 12 && dt < 3)) return;
           if (!second || dd + dt * 5 > second.score) second = { dir:q.dir, tp:Math.max(5, Math.min(22, q.tp)), hs:q.hs, score: dd + dt * 5 };
         });
-        if (window.LAB_SWELLDIR != null) second = null;                // a what-if is one clean train
+        if (window.LAB_SWELLDIR != null){ second = null; chop = null; }  // a what-if is one clean train
         var sol2 = (second && D) ? swellTravelTime(D, second.dir, second.tp, second.hs) : null;
         var gm = VB.mpp * Math.cos(y2lat(VB.Ymid) * Math.PI / 180), L0 = 9.81 * T * T / (2 * Math.PI);
         var Lshown = Math.max(L0, 7 * gm), c0 = 9.81 * T / (2 * Math.PI), K = 2 * Math.PI / Lshown;
@@ -4427,23 +4435,27 @@ function drawCard(style){
         var SINL = new Float32Array(LUTN); for (var li = 0; li < LUTN; li++) SINL[li] = Math.sin(li / LK);
         var NZ = swellNoise();
         var PHi = new Float32Array(N), PH2i = new Float32Array(N), NEa = new Float32Array(N), NLa = new Float32Array(N);
-        var NEr = new Int32Array(N), NLr = new Int32Array(N);
+        var NEr = new Int32Array(N), NLr = new Int32Array(N), CXa = new Float32Array(N), CYa = new Float32Array(N);
         for (var k0 = 0; k0 < N; k0++){
           var wl = PH[k0] / (2 * Math.PI);                                     // travel, in wavelengths
           PHi[k0] = PH[k0] * LK; PH2i[k0] = PH2[k0] * LK;
           NEa[k0] = wl * 16 / 6;   NEr[k0] = ((UU[k0] * 16 / 11) & 255) << 8;  // SETS: six waves deep, eleven wide
           NLa[k0] = wl * 16 / 1.6; NLr[k0] = ((UU[k0] * 16 / 2.8 + 97) & 255) << 8;   // CRESTS: a few wavelengths long
+          CXa[k0] = (IDX[k0] % RW) * 2.3; CYa[k0] = ((IDX[k0] / RW) | 0) * 2.3;       // CHOP: a grain about seven pixels across
         }
         var off = document.createElement('canvas'); off.width = RW; off.height = RH;
         var og = off.getContext('2d'), img = og.createImageData(RW, RH), px = img.data;
         var amp = Math.max(0.45, Math.min(1, 0.35 + (lead.hs || 0.6) * 3.281 / 7));
-        var w2 = second ? Math.min(1, second.hs / Math.max(lead.hs || 0.6, 0.2)) : 0, r2 = second ? T / second.tp : 0;
+        var w2 = second ? Math.min(0.55, second.hs / Math.max(lead.hs || 0.6, 0.2)) : 0, r2 = second ? T / second.tp : 0;
+        var cw = chop ? Math.min(0.5, chop.hs * 0.7) : 0, cth = chop ? (chop.dir + 180) * Math.PI / 180 : 0;
+        var cvx = Math.sin(cth) * 9, cvy = -Math.cos(cth) * 9;                 // texels a second, downwind (screen y runs south)
         var sg = swellCv.getContext('2d'), t0 = performance.now(), lastDraw = 0, TV = 2.8;            // seconds a crest takes to advance one wavelength on screen
         var frame = function(now){
           if (stale() || !surfOn()){ sg.clearRect(0, 0, W, H); return; }
           if (!document.hidden && now - lastDraw > 45){
             lastDraw = now;
             var t = (now - t0) / 1000, cyc = t / TV, wt = 2 * Math.PI * cyc, wti = wt * LK, wti2 = wti * r2;
+            var cdx = cvx * t, cdy = cvy * t;
             var gE = cyc * 0.5 * 16 / 6, gL = cyc * 16 / 1.6;                  // the sets run at the GROUP's half speed; a crest keeps its own shape
             for (var k = 0; k < N; k++){
               var env = 0.30 + 1.05 * NZ[NEr[k] | ((NEa[k] - gE) & 255)];
@@ -4455,6 +4467,7 @@ function drawCard(style){
                 s = (s + q2 * SINL[(PH2i[k] - wti2) & 2047]) / (1 + 0.6 * q2);
                 if (s > 1) s = 1; else if (s < -1) s = -1;
               }
+              if (cw) len *= 1 - cw + cw * 1.7 * NZ[(((CYa[k] - cdy) & 255) << 8) | ((CXa[k] - cdx) & 255)];
               var a = LIf[k] * env * len * amp * (0.55 + 0.75 * hgt), o = IDX[k] * 4, fo = BRf[k], sp = SPf[k], lit = 0;
               if (s > 0){
                 var s2 = s * s;
