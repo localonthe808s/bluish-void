@@ -1349,8 +1349,104 @@ def bake_shake():
                                   'vs30': q(gv, 1), 'mmi': q(gm, 10)}})
 
 
+# ------------------------------------------------------------------ ghost ----
+# THE BASIN AS IT WAS, 1894 (user 2026-09-19: "does LA have any sinkhole or ghost river/water",
+# then "start with the 1894 quad" / "do A"). New York's ghost rivers are TRACED off the Viele
+# sheet, colour by colour. That does not transfer here and I measured why: USGS holds five
+# scans of the Los Angeles quadrangle and every one is sepia, the best managing 0.061% water
+# ink with blue-minus-red at the 99.9th percentile of FIVE. There is no chroma to pull on, so
+# downtown -- the cienegas, the laguna, the zanjas -- cannot be separated from the road grid.
+# (Outer sheets differ wildly: one Downey 1902 scan gives a clean 0.44% and extracts the river
+# and the Long Beach marshes perfectly. Scans of the same sheet are not alike, and the
+# thumbnails lie about it.)
+#
+# So the sheet is carried whole instead, as the layer, which is the honest thing it supports:
+# the survey's own lettering says LAS CIENEGAS and LA BALLONA and RINCON DE LOS BUEYES where
+# the water was, and the river still braids through downtown because nobody had poured it yet.
+#
+# GEOREFERENCING IT WITHOUT GDAL. These are polyconic with a printed collar, and there is no
+# GDAL here. But every sheet carries a 5-minute graticule, and those rules are the darkest
+# straight lines on it -- findable as spikes in the row and column ink profiles. Interpolating
+# between them maps output lon/lat onto source pixels directly, which also absorbs the
+# projection's curvature instead of assuming it away.
+# THE CHECK THAT CANNOT LIE: pixels-per-degree of longitude divided by the same for latitude
+# must equal cos(latitude). It comes to 0.8323 against cos(34.125) = 0.8278 -- 0.55% -- which
+# is what says the graticule was read correctly rather than some other set of straight lines.
+GHOST_SHEETS = [
+    # name, GeoTIFF, lon/lat of the neat line, and the graticule step in minutes
+    ('la1894', 'https://prd-tnm.s3.amazonaws.com/StagedProducts/Maps/HistoricalTopo/GeoTIFF/CA/'
+               'CA_Los%20Angeles_465887_1894_62500_geo.tif', (-118.5, 34.0, -118.0, 34.25), 5),
+]
+GHOST_PX_PER_DEG = 9600          # ~11 m a pixel: the lettering stays readable when zoomed in
+
+
+def _rules(prof, want, lo=0.18):
+    """Positions of the graticule rules in one ink profile: the `want` strongest
+    well-separated spikes, returned in order."""
+    idx = [i for i, v in enumerate(prof) if v > lo]
+    runs = []
+    for i in idx:
+        if runs and i - runs[-1][-1] <= 4:
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+    runs = [(float(np.mean(r)), float(max(prof[r[0]:r[-1] + 1]))) for r in runs]
+    runs.sort(key=lambda r: -r[1])
+    keep = sorted(p for p, _ in runs[:want])
+    return keep
+
+
+def bake_ghost():
+    print('ghost sheets (USGS historical topo)')
+    from PIL import Image
+    Image.MAX_IMAGE_PIXELS = None
+    idx = []
+    for name, url, box, step in GHOST_SHEETS:
+        raw = os.path.join(HERE, '_%s_src.tif' % name)
+        if not os.path.exists(raw):
+            open(raw, 'wb').write(get(url, 600))
+        a = np.array(Image.open(raw).convert('RGB'))
+        grey = np.array(Image.open(raw).convert('L'))
+        dark = grey < 150
+        w, s, e, n = box
+        nx = int(round((e - w) * 60 / step)) + 1        # graticule rules across and down
+        ny = int(round((n - s) * 60 / step)) + 1
+        cols = _rules(dark.mean(0), nx)
+        rows = _rules(dark.mean(1), ny)
+        if len(cols) < 3 or len(rows) < 3:
+            print('  %s: graticule not found (%d cols, %d rows), skipped' % (name, len(cols), len(rows)))
+            continue
+        # spacing from the MEDIAN gap, never from the endpoints: a missing rule at either
+        # edge would otherwise stretch the whole sheet quietly
+        gx = float(np.median(np.diff(cols))); gy = float(np.median(np.diff(rows)))
+        pxlon, pxlat = gx / (step / 60.0), gy / (step / 60.0)
+        off = abs(pxlon / pxlat / math.cos(math.radians((s + n) / 2)) - 1)
+        spanx, spany = (nx - 1) * gx, (ny - 1) * gy
+        okx = abs((cols[-1] - cols[0]) - spanx) < 0.02 * spanx
+        oky = abs((rows[-1] - rows[0]) - spany) < 0.02 * spany
+        print('  %s: %d/%d cols, %d/%d rows; px/deg lon %.0f lat %.0f; cos check %.2f%%; span %s %s'
+              % (name, len(cols), nx, len(rows), ny, pxlon, pxlat, 100 * off,
+                 'ok' if okx else 'BAD', 'ok' if oky else 'BAD'))
+        if off > 0.03 or not okx or not oky:
+            print('    REJECTED: those are not the graticule rules')
+            continue
+        # outermost rules ARE the neat line, now that the span confirms it
+        lon_at = [w + (c - cols[0]) / pxlon for c in cols]
+        lat_at = [n - (r - rows[0]) / pxlat for r in rows]
+        W = int(round((e - w) * GHOST_PX_PER_DEG))
+        H = int(round((n - s) * GHOST_PX_PER_DEG))
+        xi = np.clip(np.round(np.interp(np.linspace(w, e, W), lon_at, cols)).astype(int), 0, a.shape[1] - 1)
+        yi = np.clip(np.round(np.interp(np.linspace(n, s, H), lat_at[::-1], rows[::-1])).astype(int), 0, a.shape[0] - 1)
+        out = a[yi[:, None], xi[None, :]]
+        f = '%s.webp' % name
+        Image.fromarray(out).save(os.path.join(HERE, f), quality=82, method=4)
+        print('    %-16s %dx%d  %d KB' % (f, W, H, os.path.getsize(os.path.join(HERE, f)) // 1024))
+        idx.append({'img': 'la/' + f, 'w': w, 's': s, 'e': e, 'n': n, 'year': 1894})
+    write('ghost_index.json', idx)
+
+
 PARTS = {'depth': bake_depth, 'swell': bake_swell, 'sched': bake_sched, 'geo': bake_geo, 'air': bake_air, 'veg': bake_veg, 'region': bake_region, 'land': bake_land, 'city': bake_city, 'rail': bake_rail, 'faults': bake_faults, 'dem': bake_dem, 'sea': bake_sea,
-         'quakes': bake_quakes, 'shake': bake_shake}
+         'quakes': bake_quakes, 'shake': bake_shake, 'ghost': bake_ghost}
 
 if __name__ == '__main__':
     print('home box  w %.4f  s %.4f  e %.4f  n %.4f' % home_box())
