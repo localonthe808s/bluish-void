@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Earth Lab</title>
+<!--
+  EARTH LAB (user 2026-09-20: "would it be easier to show the world as a globe on this widget?" ... "yes build a lab").
+  A prototype for CLOUDS > EARTH SYSTEMS, not wired into the site. What it is for: deciding whether the PLANETARY views
+  (El Nino, the wind belts, the three cells, the jet stream) should move from the flat map onto a globe.
+
+  HOW IT IS DRAWN. No library. One full-canvas fragment shader: for every pixel inside the disc it takes the sphere's
+  normal, turns it by the view rotation into a latitude and longitude, and samples two whole-world pictures -- NASA's
+  Blue Marble underneath (muted, the way the site's own sea is) and a data SKIN over it. Both come from NASA GIBS WMS in
+  plain lat/lon (EPSG:4326, 2048 x 1024), which is exactly the unwrapped skin of a sphere, and GIBS sends CORS headers,
+  which WebGL insists on. A 2D canvas on top carries everything that is a line or a word -- graticule, the Nino 3.4 box,
+  the viewer's dot, and the cells -- projected with the same rotation, so picture and drawing cannot drift apart.
+
+  THE CELLS ON THE EDGE. With the tilt held at zero, the globe's left and right edges ARE a cut from pole to pole: the
+  angle round the rim is the latitude. So the three cells are drawn standing on the rim, both hemispheres, both sides --
+  the textbook picture, but attached to the live planet it describes. They are a DIAGRAM (the same analytic loops as
+  bvCellScene) and say so.
+
+  WHAT IS NOT HERE YET, AND WHY. The wind-belt, moisture and jet-stream pictures come from Unidata's THREDDS server,
+  which sends no CORS header: a browser may show such an image but will not let WebGL use it as a texture. Putting
+  them on a globe needs thredds.ucar.edu added to the proxy worker's allowlist (one deploy).
+-->
+<style>
+  :root{ --ink:#1b2340; --mute:#6b7389; }
+  html,body{ margin:0; background:#eceff7; color:var(--ink); font-family:system-ui,sans-serif; }
+  .wrap{ max-width:1080px; margin:0 auto; padding:14px 14px 26px; }
+  .cap{ font:900 10px system-ui,sans-serif; letter-spacing:.16em; color:#2B22F4; }
+  .row{ display:flex; flex-wrap:wrap; justify-content:center; gap:5px; margin-top:8px; }
+  .pill{ padding:5px 14px; border-radius:8px; border:none; font:700 .58rem system-ui,sans-serif; letter-spacing:.5px; text-transform:uppercase; white-space:nowrap;
+         cursor:pointer; background:rgba(22,163,74,.82); color:rgba(255,255,255,.95); }
+  .pill.on{ background:rgba(234,88,12,.92); color:rgba(255,255,255,.97); }
+  .pill.alt{ background:rgba(27,35,64,.78); }
+  .pill.alt.on{ background:rgba(234,88,12,.92); }
+  .grid{ display:grid; grid-template-columns:minmax(0,1.35fr) minmax(0,1fr); gap:6px 20px; align-items:start; margin-top:10px; }
+  @media (max-width:860px){ .grid{ grid-template-columns:minmax(0,1fr); } }
+  #stage{ position:relative; width:100%; aspect-ratio:1 / 1; max-width:660px; margin:0 auto; border-radius:14px; overflow:hidden; background:radial-gradient(circle at 50% 45%, #15203f 0%, #0a1024 62%, #060a18 100%); touch-action:none; cursor:grab; }
+  #stage.drag{ cursor:grabbing; }
+  #gl,#ov{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+  #ov{ pointer-events:none; letter-spacing:0; }
+  #hint{ position:absolute; left:12px; bottom:10px; font:800 9px system-ui,sans-serif; letter-spacing:.1em; color:rgba(255,255,255,.75); text-shadow:0 0 6px #000; }
+  #stat{ position:absolute; right:12px; bottom:10px; font:700 8px system-ui,sans-serif; letter-spacing:.08em; color:rgba(255,255,255,.6); text-shadow:0 0 6px #000; text-align:right; }
+  h2{ font:900 10px system-ui,sans-serif; letter-spacing:.14em; margin:0; }
+  p{ font:500 11.5px/1.45 system-ui,sans-serif; margin:5px 0 0; }
+  .m{ font:600 8.5px/1.5 system-ui,sans-serif; letter-spacing:.06em; color:var(--ink); margin-top:8px; }
+  .g{ color:var(--mute); }
+  .leg{ display:flex; align-items:center; gap:8px; margin-top:8px; font:700 8px system-ui,sans-serif; letter-spacing:.06em; }
+  .leg i{ flex:1 1 140px; max-width:320px; height:8px; border-radius:4px; display:block; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="cap">EARTH LAB &nbsp;<span class="g" style="font-weight:700;">· A GLOBE FOR EARTH SYSTEMS · PROTOTYPE, NOT ON THE SITE</span></div>
+  <div class="row" id="skins"></div>
+  <div class="row"><button class="pill alt" id="b-cells">THE THREE CELLS, ON THE EDGE</button><button class="pill alt" id="b-spin">SLOW TURN</button><button class="pill alt" id="b-home">FACE MY LOCATION</button><button class="pill alt" id="b-pole">LOOK DOWN ON THE POLE</button></div>
+  <div class="grid">
+    <div><div id="stage"><canvas id="gl"></canvas><canvas id="ov"></canvas><div id="hint">DRAG TO TURN · SCROLL OR PINCH TO ZOOM</div><div id="stat"></div></div></div>
+    <div id="words"></div>
+  </div>
+</div>
+<script>
+(function(){
+  var Q = new URLSearchParams(location.search), HOME = { lat: +(Q.get('lat') || 40.744), lon: +(Q.get('lon') || -73.921), name: (Q.get('name') || 'NYC').toUpperCase() };
+  var GIBS = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&STYLES=&SRS=EPSG:4326&BBOX=-180,-90,180,90&WIDTH=2048&HEIGHT=1024';
+  var day = function(back){ return new Date(Date.now() - back * 864e5).toISOString().slice(0, 10); };
+  var PAL = '6b00db,8900cf,7f1ad1,2264f1,00aeff,03f8fa,47ffb6,88ff84,b1ff98,bfe8a9,c2cab8,e2e2a2,fff679,ffd025,ffaa00,ff8200,ff3d00,f90113,e60067,bf0068,88000f,800000'.split(',');
+  var SKINS = {
+    enso:  { label: 'EL NIÑO · NOW', layer: 'GHRSST_L4_MUR25_Sea_Surface_Temperature_Anomalies', back: 2, face: [2, -140],
+             h: 'SEA TEMPERATURE AGAINST NORMAL', col: '#b91c1c', p: 'Red is warmer than usual, blue cooler. El Niño is the warm tongue along the equator of the Pacific — on a globe it is what it is: <b>a stripe a third of the way round the planet</b>, with no seam at the date line. The box is Niño 3.4, where the index is measured.', leg: true },
+    e2015: { label: 'THIS DATE IN 2015', layer: 'GHRSST_L4_MUR25_Sea_Surface_Temperature_Anomalies', year: 2015, back: 2, face: [2, -140],
+             h: 'THE LAST VERY STRONG EL NIÑO', col: '#b91c1c', p: 'The same day of the year in 2015, on the same colours. Re-dating the globe is one request: a whole-world picture is the only thing it needs.', leg: true },
+    sst:   { label: 'SEA TEMPERATURE', layer: 'GHRSST_L4_MUR_Sea_Surface_Temperature', back: 2, face: [25, -60],
+             h: 'THE WATER’S TEMPERATURE', col: '#0f766e', p: 'Warm at the equator, cold at the poles, and the currents that break the rule: the Gulf Stream’s warm ribbon up the American coast, the cold tongue off Peru. For reading ONE coast closely the flat map is still the better tool — that is why Gulf Stream and AMOC would stay on it.' },
+    none:  { label: 'JUST THE EARTH', layer: null, face: [20, -40], h: 'NO SKIN', col: '#1b2340', p: 'NASA Blue Marble, muted to the site’s own sea. Every skin is laid over this.' }
+  };
+  var stage = document.getElementById('stage'), glc = document.getElementById('gl'), ovc = document.getElementById('ov');
+  var gl = glc.getContext('webgl', { premultipliedAlpha: true, antialias: true }), ov = ovc.getContext('2d');
+  var V = { lat0: 8, lon0: -140, tLat: 8, tLon: -140, zoom: 1, cells: false, spin: false, skin: 'enso', t: 0, dirty: true, loaded: {}, want: null };
+  var DPR = Math.min(2, window.devicePixelRatio || 1), W = 0, H = 0, R = 0, CX = 0, CY = 0;
+  if (!gl){ document.getElementById('words').innerHTML = '<p>This browser will not give the page a WebGL context, so there is no globe to draw.</p>'; return; }
+
+  var vs = 'attribute vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }';
+  var fs = 'precision highp float; uniform vec2 uC; uniform float uR; uniform mat3 uW; uniform sampler2D uBase; uniform sampler2D uSkin; uniform float uSkinOn;'
+    + 'void main(){ vec2 p = (gl_FragCoord.xy - uC) / uR; float r2 = dot(p, p);'
+    + ' if (r2 > 1.0){ float d = sqrt(r2) - 1.0; float a = exp(-d * 22.0) * 0.5; gl_FragColor = vec4(vec3(0.38, 0.62, 1.0) * a, a); return; }'
+    + ' float z = sqrt(1.0 - r2); vec3 w = uW * vec3(p.x, p.y, z);'
+    + ' vec2 uv = vec2(atan(w.x, w.z) / 6.2831853 + 0.5, 0.5 - asin(clamp(w.y, -1.0, 1.0)) / 3.14159265);'
+    + ' vec3 b = texture2D(uBase, uv).rgb; float g = dot(b, vec3(0.3, 0.59, 0.11)); b = mix(vec3(g), b, 0.6) * vec3(0.50, 0.56, 0.72);'   // muted and cooled: the site\'s night sea, not a postcard
+    + ' vec4 s = texture2D(uSkin, uv); vec3 c = mix(b, s.rgb, s.a * 0.86 * uSkinOn);'
+    + ' c *= 0.50 + 0.50 * z; c += vec3(0.30, 0.50, 0.90) * pow(1.0 - z, 3.0) * 0.35; gl_FragColor = vec4(c, 1.0); }';
+  var sh = function(type, src){ var s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+  var pr = gl.createProgram(); gl.attachShader(pr, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(pr); gl.useProgram(pr);
+  var buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+  var aloc = gl.getAttribLocation(pr, 'a'); gl.enableVertexAttribArray(aloc); gl.vertexAttribPointer(aloc, 2, gl.FLOAT, false, 0, 0);
+  var U = {}; ['uC','uR','uW','uBase','uSkin','uSkinOn'].forEach(function(k){ U[k] = gl.getUniformLocation(pr, k); });
+  var tex = function(unit){ var t = gl.createTexture(); gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 0]));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); return t; };
+  var tBase = tex(0), tSkin = tex(1), IMG = {};
+  var put = function(unit, t, im){ gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, im); V.dirty = true; };
+  var fetchImg = function(url){ return new Promise(function(res, rej){ var im = new Image(); im.crossOrigin = 'anonymous'; im.onload = function(){ res(im); }; im.onerror = rej; im.src = url; }); };
+  var stat = function(s){ document.getElementById('stat').textContent = s || ''; };
+  fetchImg(GIBS + '&FORMAT=image/jpeg&LAYERS=BlueMarble_ShadedRelief_Bathymetry').then(function(im){ put(0, tBase, im); }).catch(function(){ stat('THE BASE MAP DID NOT LOAD'); });
+  /* a skin: the newest day the layer has (the first with enough opaque pixels, stepping back), or that day in another year */
+  var loadSkin = function(k){
+    var S = SKINS[k]; V.skin = k; V.want = k; V.dirty = true; words();
+    if (!S.layer){ stat(''); return; }
+    if (IMG[k]){ put(1, tSkin, IMG[k].im); stat(IMG[k].day + ' · NASA GIBS'); return; }
+    stat('LOADING…');
+    var tryDay = function(back){
+      var d = day(back); if (S.year) d = S.year + d.slice(4);
+      return fetchImg(GIBS + '&FORMAT=image/png&TRANSPARENT=true&LAYERS=' + S.layer + '&TIME=' + d).then(function(im){
+        var c = document.createElement('canvas'); c.width = 64; c.height = 32; var g = c.getContext('2d'); g.drawImage(im, 0, 0, 64, 32);
+        var px = g.getImageData(0, 0, 64, 32).data, n = 0; for (var i = 3; i < px.length; i += 4) if (px[i] > 0) n++;
+        if (n < 500 && back < 8) return tryDay(back + 1);
+        return { im: im, day: d };
+      });
+    };
+    tryDay(S.back || 2).then(function(o){ IMG[k] = o; if (V.want === k){ put(1, tSkin, o.im); stat(o.day + ' · NASA GIBS'); } }).catch(function(){ if (V.want === k) stat('THAT SKIN DID NOT LOAD'); });
+  };
+
+  /* view rotation: VIEW = Rx(lat0) * Ry(-lon0); the shader wants its transpose (view -> world), column-major */
+  var rad = Math.PI / 180;
+  var mats = function(){ var a = V.lat0 * rad, l = -V.lon0 * rad, ca = Math.cos(a), sa = Math.sin(a), cl = Math.cos(l), sl = Math.sin(l);
+    var Vm = [[cl, 0, sl], [sa * sl, ca, -sa * cl], [-ca * sl, sa, ca * cl]];               // rows of VIEW
+    return { V: Vm, Wcol: new Float32Array([Vm[0][0], Vm[0][1], Vm[0][2], Vm[1][0], Vm[1][1], Vm[1][2], Vm[2][0], Vm[2][1], Vm[2][2]]) }; };   // VIEW rows = columns of its transpose
+  var project = function(M, lat, lon){ var la = lat * rad, lo = lon * rad, x = Math.cos(la) * Math.sin(lo), y = Math.sin(la), z = Math.cos(la) * Math.cos(lo);
+    var vx = M[0][0] * x + M[0][1] * y + M[0][2] * z, vy = M[1][0] * x + M[1][1] * y + M[1][2] * z, vz = M[2][0] * x + M[2][1] * y + M[2][2] * z;
+    return [CX + vx * R, CY - vy * R, vz]; };
+
+  var resize = function(){ var r = stage.getBoundingClientRect(); W = r.width; H = r.height; [glc, ovc].forEach(function(c){ c.width = Math.round(W * DPR); c.height = Math.round(H * DPR); }); gl.viewport(0, 0, glc.width, glc.height); V.dirty = true; };
+  /* ---------- the overlay: everything that is a line or a word ---------- */
+  var path = function(M, pts){ var pen = false; ov.beginPath(); pts.forEach(function(p){ var q = project(M, p[0], p[1]); if (q[2] <= 0.02){ pen = false; return; } if (pen) ov.lineTo(q[0], q[1]); else { ov.moveTo(q[0], q[1]); pen = true; } }); ov.stroke(); };
+  var word = function(s, x, y, col, font, back){ ov.font = font || '800 9px system-ui,sans-serif'; var w = ov.measureText(s).width; x = Math.max(6, Math.min(W - w - 6, x)); y = Math.max(12, Math.min(H - 6, y)); /* a word never leaves the stage: HADLEY was cut to HAD at the rim */ if (back){ ov.fillStyle = 'rgba(255,252,244,.9)'; ov.fillRect(x - 3, y - 9, w + 6, 12); } else { ov.shadowColor = '#000'; ov.shadowBlur = 5; } ov.fillStyle = col; ov.fillText(s, x, y); ov.shadowBlur = 0; };
+  var TROP = function(lat){ return 16.5 - 8.5 * Math.pow(Math.abs(lat) / 90, 1.15); };
+  var CELLDEF = [{ k: 'HADLEY', a: 1, b: 30, dir: 1 }, { k: 'FERREL', a: 30, b: 60, dir: -1 }, { k: 'POLAR', a: 60, b: 89, dir: 1 }], PARC = [];
+  (function(){ var sd = 4242, rnd = function(){ sd = (sd * 1103515245 + 12345) & 0x7fffffff; return sd / 0x7fffffff; }; CELLDEF.forEach(function(c, ci){ for (var i = 0; i < 40; i++) PARC.push({ c: ci, u: rnd(), s: 0.34 + Math.sqrt(rnd()) * 0.66, v: 0.75 + rnd() * 0.5 }); }); })();
+  /* a point of a cell: latitude and height above the rim (px), on a rounded loop in (latitude, height) space */
+  var cellAt = function(c, u, s, HMAX){ var mid = (c.a + c.b) / 2, half = (c.b - c.a) / 2 - 1.5, top = HMAX * (TROP(mid) - 1.2) / 16.5, bot = HMAX * 0.06, hm = (top + bot) / 2, hh = (top - bot) / 2;
+    var th = u * 6.2832 * c.dir - Math.PI, co = Math.cos(th), si = Math.sin(th), e = 0.42;
+    return [mid + half * s * Math.sign(co) * Math.pow(Math.abs(co), e), hm - hh * s * Math.sign(si) * Math.pow(Math.abs(si), e)]; };
+  var rim = function(lat, h, side){ var a = lat * rad, rr = R + 3 + h; return [CX + side * rr * Math.cos(a), CY - rr * Math.sin(a)]; };
+  var drawCells = function(dt){
+    var HMAX = Math.min(W, H) * 0.115;
+    [1, -1].forEach(function(side){ [1, -1].forEach(function(hem){
+      /* the lid: where the weather stops */
+      ov.setLineDash([3, 4]); ov.strokeStyle = 'rgba(255,255,255,.45)'; ov.lineWidth = 1; ov.beginPath();
+      for (var la = 0; la <= 89; la += 2){ var q = rim(hem * la, HMAX * TROP(la) / 16.5, side); la ? ov.lineTo(q[0], q[1]) : ov.moveTo(q[0], q[1]); } ov.stroke(); ov.setLineDash([]);
+      CELLDEF.forEach(function(c){ ov.beginPath(); for (var u = 0; u <= 1.0001; u += 0.02){ var p = cellAt(c, u, 1, HMAX), q2 = rim(hem * p[0], p[1], side); u ? ov.lineTo(q2[0], q2[1]) : ov.moveTo(q2[0], q2[1]); } ov.strokeStyle = 'rgba(255,255,255,.22)'; ov.lineWidth = 1; ov.stroke(); });
+    }); });
+    ov.lineCap = 'round';
+    PARC.forEach(function(q){ var c = CELLDEF[q.c]; q.u = (q.u + dt * 0.035 * q.v / (0.5 + q.s * 0.5)) % 1;
+      var A = cellAt(c, q.u, q.s, HMAX), B = cellAt(c, (q.u + 0.012) % 1, q.s, HMAX), warm = Math.max(0, Math.min(1, 1 - A[0] / 62 - (A[1] / HMAX) * 0.75));
+      ov.strokeStyle = 'rgba(' + Math.round(120 + 135 * warm) + ',' + Math.round(170 + 20 * warm) + ',' + Math.round(255 - 190 * warm) + ',.95)'; ov.lineWidth = 1.6;
+      [1, -1].forEach(function(side){ [1, -1].forEach(function(hem){ var a = rim(hem * A[0], A[1], side), b = rim(hem * B[0], B[1], side), dx = b[0] - a[0], dy = b[1] - a[1], dl = Math.hypot(dx, dy) || 1;
+        ov.beginPath(); ov.moveTo(a[0], a[1]); ov.lineTo(a[0] + dx / dl * 6, a[1] + dy / dl * 6); ov.stroke(); }); }); });
+    CELLDEF.forEach(function(c){ var q = rim((c.a + c.b) / 2, HMAX * 1.14, 1); ov.font = '900 9px system-ui,sans-serif'; var w = ov.measureText(c.k).width, mid = (c.a + c.b) / 2; word(c.k, q[0] + (mid > 70 ? -w / 2 : 3), q[1] + (mid > 70 ? -4 : 3), '#fff', '900 9px system-ui,sans-serif'); });
+    [[0, 'EQUATOR'], [30, '30°'], [60, '60°']].forEach(function(t){ var q = rim(t[0], HMAX * 1.12, -1); ov.font = '800 8px system-ui,sans-serif'; var w = ov.measureText(t[1]).width; word(t[1], q[0] - w - 2, q[1] + 3, 'rgba(255,255,255,.85)', '800 8px system-ui,sans-serif'); });
+    word('THE CELLS ARE A DIAGRAM OF THE AVERAGE · THE RIM IS A CUT FROM POLE TO POLE', 12, H - 26, 'rgba(255,255,255,.8)', '700 8px system-ui,sans-serif');
+  };
+  var drawOverlay = function(dt){
+    var M = mats().V; ov.setTransform(DPR, 0, 0, DPR, 0, 0); ov.clearRect(0, 0, W, H); ov.lineJoin = 'round';
+    var ring = function(lat, a){ var p = []; for (var lo = -180; lo <= 180; lo += 3) p.push([lat, lo]); ov.strokeStyle = 'rgba(255,255,255,' + a + ')'; ov.lineWidth = 1; ov.setLineDash(lat ? [3, 6] : [5, 5]); path(M, p); ov.setLineDash([]); };
+    ring(0, .55); [30, -30, 60, -60].forEach(function(la){ ring(la, .28); });
+    if ((V.skin === 'enso' || V.skin === 'e2015') && project(M, 0, -145)[2] > 0.25){ var bx = [];   /* only when the box is properly in view: at the horizon a sliver of it drew as a stray arc along the rim */ for (var lo = -170; lo <= -120; lo += 2) bx.push([5, lo]); for (var la = 5; la >= -5; la -= 1) bx.push([la, -120]); for (lo = -120; lo >= -170; lo -= 2) bx.push([-5, lo]); for (la = -5; la <= 5; la += 1) bx.push([la, -170]);
+      ov.strokeStyle = '#fff'; ov.lineWidth = 2; path(M, bx); var q = project(M, -6.5, -168); if (q[2] > 0.15) word('NIÑO 3.4', q[0], q[1] + 10, '#1b2340', '800 9px system-ui,sans-serif', true); }
+    var h = project(M, HOME.lat, HOME.lon); if (h[2] > 0.03){ ov.fillStyle = '#fff'; ov.beginPath(); ov.arc(h[0], h[1], 5, 0, 6.3); ov.fill(); ov.fillStyle = '#2B22F4'; ov.beginPath(); ov.arc(h[0], h[1], 3.4, 0, 6.3); ov.fill(); word(HOME.name, h[0] + 9, h[1] + 3, '#2B22F4', '800 9px system-ui,sans-serif', true); }
+    if (V.cells) drawCells(dt);
+  };
+  var frame = function(now){
+    requestAnimationFrame(frame);
+    var dt = Math.min(0.06, (now - (frame.last || now)) / 1000) || 0.016; frame.last = now;
+    if (document.hidden) return;
+    if (V.spin && !V.dragging){ V.tLon -= dt * 4; }
+    if (V.cells) V.tLat = 0;
+    var dLat = V.tLat - V.lat0, dLon = V.tLon - V.lon0; if (Math.abs(dLat) > 0.01 || Math.abs(dLon) > 0.01){ var k = V.dragging ? 1 : Math.min(1, dt * 7); V.lat0 += dLat * k; V.lon0 += dLon * k; V.dirty = true; }
+    if (!V.dirty && !V.cells) return;
+    var r = stage.getBoundingClientRect(); if (r.bottom < 0 || r.top > innerHeight) return;
+    R = Math.min(W, H) * (V.cells ? 0.325 : 0.43) * (V.cells ? Math.min(1.15, V.zoom) : V.zoom); /* the cells need the rim's margin, so zooming is held back while they are up */ CX = W / 2; CY = H / 2;
+    gl.uniform2f(U.uC, CX * DPR, (H - CY) * DPR); gl.uniform1f(U.uR, R * DPR); gl.uniformMatrix3fv(U.uW, false, mats().Wcol);
+    gl.uniform1i(U.uBase, 0); gl.uniform1i(U.uSkin, 1); gl.uniform1f(U.uSkinOn, SKINS[V.skin].layer && IMG[V.skin] ? 1 : 0);
+    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    drawOverlay(dt); V.dirty = false;
+  };
+
+  /* ---------- hands ---------- */
+  var pts = {}, pinch = 0;
+  stage.addEventListener('pointerdown', function(e){ stage.setPointerCapture(e.pointerId); pts[e.pointerId] = [e.clientX, e.clientY]; V.dragging = true; stage.classList.add('drag'); document.getElementById('hint').style.opacity = 0; });
+  stage.addEventListener('pointermove', function(e){ if (!pts[e.pointerId]) return; var ids = Object.keys(pts);
+    if (ids.length === 2){ pts[e.pointerId] = [e.clientX, e.clientY]; var a = pts[ids[0]], b = pts[ids[1]], d = Math.hypot(a[0] - b[0], a[1] - b[1]); if (pinch) V.zoom = Math.max(0.8, Math.min(2.6, V.zoom * d / pinch)); pinch = d; V.dirty = true; return; }
+    var p = pts[e.pointerId], k = 0.28 / V.zoom * (560 / Math.max(280, W)); V.tLon -= (e.clientX - p[0]) * k; if (!V.cells) V.tLat = Math.max(-89, Math.min(89, V.tLat + (e.clientY - p[1]) * k)); V.lon0 = V.tLon; V.lat0 = V.tLat; pts[e.pointerId] = [e.clientX, e.clientY]; V.dirty = true; });
+  var up = function(e){ delete pts[e.pointerId]; pinch = 0; if (!Object.keys(pts).length){ V.dragging = false; stage.classList.remove('drag'); } };
+  stage.addEventListener('pointerup', up); stage.addEventListener('pointercancel', up);
+  stage.addEventListener('wheel', function(e){ e.preventDefault(); V.zoom = Math.max(0.8, Math.min(2.6, V.zoom * (e.deltaY < 0 ? 1.08 : 0.926))); V.dirty = true; }, { passive: false });
+
+  var words = function(){ var S = SKINS[V.skin];
+    document.getElementById('words').innerHTML = '<h2 style="color:' + S.col + ';">' + S.h + '</h2><p>' + S.p + '</p>'
+      + (S.leg ? '<div class="leg"><span>−5.4°F</span><i style="background:linear-gradient(90deg,#' + PAL.join(',#') + ');"></i><span>+5.4°F OR MORE</span></div>' : '')
+      + (V.cells ? '<div class="m" style="margin-top:12px;"><b>THE THREE CELLS, ON THE EDGE.</b> <span class="g">WITH THE GLOBE HELD UPRIGHT ITS RIM IS A CUT FROM POLE TO POLE, SO THE CELLS STAND WHERE THEY REALLY ARE: HOT AIR UP AT THE EQUATOR, DOWN DRY AT 30° (LOOK ACROSS TO THE DESERTS ON THE FACE), UP AGAIN AT THE POLAR FRONT, DOWN OVER THE POLE. TURN THE GLOBE AND THE CELLS STAY PUT: THEY GO ALL THE WAY ROUND.</span></div>' : '')
+      + '<div class="m">WHAT THIS LAB IS TESTING <span class="g">· NO DATE-LINE SEAM · TRUE SHAPES NEAR THE POLES (PRESS “LOOK DOWN ON THE POLE”) · THE DIAGRAM AND THE LIVE MAP AS ONE PICTURE · YOUR OWN DOT ON IT</span></div>'
+      + '<div class="m">NOT HERE YET <span class="g">· THE WIND BELTS, THE MOISTURE BAND AND THE JET STREAM: THEIR SERVER SENDS NO CORS HEADER, WHICH A GLOBE NEEDS. ONE HOST ADDED TO THE PROXY WORKER FIXES THAT.</span></div>'
+      + '<div class="m g">NASA GIBS · BLUE MARBLE · JPL MUR SEA-SURFACE TEMPERATURE · DRAWN WITH ONE SHADER, NO LIBRARY</div>'; };
+  var skinsRow = document.getElementById('skins');
+  Object.keys(SKINS).forEach(function(k){ var b = document.createElement('button'); b.className = 'pill'; b.textContent = SKINS[k].label; b.dataset.k = k;
+    b.onclick = function(){ [].slice.call(skinsRow.children).forEach(function(x){ x.classList.toggle('on', x === b); }); V.tLat = V.cells ? 0 : SKINS[k].face[0]; V.tLon = near(SKINS[k].face[1]); loadSkin(k); }; skinsRow.appendChild(b); });
+  var near = function(lon){ var d = ((lon - V.lon0 + 540) % 360) - 180; return V.lon0 + d; };      // turn the short way round
+  var tog = function(id, key, fn){ var b = document.getElementById(id); b.onclick = function(){ V[key] = !V[key]; b.classList.toggle('on', V[key]); V.dirty = true; if (fn) fn(); words(); }; };
+  tog('b-cells', 'cells'); tog('b-spin', 'spin');
+  document.getElementById('b-home').onclick = function(){ V.tLat = V.cells ? 0 : HOME.lat; V.tLon = near(HOME.lon); V.dirty = true; };
+  document.getElementById('b-pole').onclick = function(){ if (V.cells) document.getElementById('b-cells').click(); V.tLat = 89; V.tLon = near(HOME.lon); V.dirty = true; };
+  if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) document.getElementById('b-spin').style.display = 'none';
+  window.addEventListener('resize', resize); if (window.ResizeObserver) new ResizeObserver(resize).observe(stage);
+  resize(); skinsRow.children[0].classList.add('on'); loadSkin('enso'); requestAnimationFrame(frame);
+  window._earthLab = V;      // for the test harness
+})();
+</script>
+</body>
+</html>
