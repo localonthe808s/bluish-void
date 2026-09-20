@@ -51448,25 +51448,33 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       D.busy = true;
       fetch('https://api.open-meteo.com/v1/forecast?latitude=' + pts.map(function(q){ return q[0].toFixed(3); }).join(',')
           + '&longitude=' + pts.map(function(q){ return q[1].toFixed(3); }).join(',')
-          + '&current=temperature_2m&temperature_unit=fahrenheit&timezone=UTC')
+          + '&current=temperature_2m,temperature_850hPa&temperature_unit=fahrenheit&timezone=UTC')
         .then(function(r){ return r.json(); })
         .then(function(j){
           if (!Array.isArray(j)) j = [j];
-          var by = {};
+          /* TWO LEVELS, because the ground lies near a coast: measured 09-20 at 5 am, the sample
+             south of Long Island read 9.4 F across the line and most of that was cool land
+             against a warm ocean, not the front. 850 mb (~5,000 ft) is where forecasters
+             compare air masses -- above the ground's own heating and the sea. */
+          var by = {}, cur = function(i, key){ var c = j[i] && j[i].current; return c ? +c[key] : NaN; };
           plan.forEach(function(pl){
-            var t1 = j[pl.at] && j[pl.at].current && j[pl.at].current.temperature_2m, t2 = j[pl.at + 1] && j[pl.at + 1].current && j[pl.at + 1].current.temperature_2m;
+            var t1 = cur(pl.at, 'temperature_2m'), t2 = cur(pl.at + 1, 'temperature_2m');
             if (!isFinite(t1) || !isFinite(t2)) return;
-            (by[pl.idx] = by[pl.idx] || []).push({ d: t1 - t2, nx: pl.nx, ny: pl.ny });
+            var u1 = cur(pl.at, 'temperature_850hPa'), u2 = cur(pl.at + 1, 'temperature_850hPa');
+            (by[pl.idx] = by[pl.idx] || []).push({ d: t1 - t2, up: (isFinite(u1) && isFinite(u2)) ? u1 - u2 : NaN, nx: pl.nx, ny: pl.ny });
           });
           want.forEach(function(ln){
             var L = by[ln.idx];
             if (!L || !L.length){ if (!(ln.idx in D.m)) D.m[ln.idx] = false; return; }
-            L.sort(function(x, y){ return x.d - y.d; });
-            var med = L[L.length >> 1].d, sx = 0, sy = 0;
-            L.forEach(function(o){ sx += o.nx; sy += o.ny; });
-            var cx = med > 0 ? -sx : sx, cy = med > 0 ? -sy : sy, az = (Math.atan2(cx, cy) * 180 / Math.PI + 360) % 360;   // toward the colder side
-            D.m[ln.idx] = { f: Math.abs(med), n: L.length,
-              side: ['NORTH','NORTHEAST','EAST','SOUTHEAST','SOUTH','SOUTHWEST','WEST','NORTHWEST'][Math.round(az / 45) % 8] };
+            /* a true median: with two samples the first cut took the larger and called it typical */
+            var median = function(a){ a = a.slice().sort(function(x, y){ return x - y; }); var h = a.length >> 1; return a.length % 2 ? a[h] : (a[h - 1] + a[h]) / 2; };
+            var sx = 0, sy = 0; L.forEach(function(o){ sx += o.nx; sy += o.ny; });
+            var sideOf = function(m){ var cx = m > 0 ? -sx : sx, cy = m > 0 ? -sy : sy, az = (Math.atan2(cx, cy) * 180 / Math.PI + 360) % 360;   // toward the colder side
+              return ['NORTH','NORTHEAST','EAST','SOUTHEAST','SOUTH','SOUTHWEST','WEST','NORTHWEST'][Math.round(az / 45) % 8]; };
+            var med = median(L.map(function(o){ return o.d; })), ups = L.map(function(o){ return o.up; }).filter(isFinite);
+            var mu = ups.length === L.length ? median(ups) : NaN;
+            D.m[ln.idx] = { f: Math.abs(med), n: L.length, side: sideOf(med),
+                            up: isFinite(mu) ? Math.abs(mu) : null, upSide: isFinite(mu) ? sideOf(mu) : null };
           });
         })
         .catch(function(){ want.forEach(function(ln){ if (!(ln.idx in D.m)) D.m[ln.idx] = false; }); })
@@ -51490,7 +51498,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (!info || !wv || !wv.fronts) return;
       var tap = window._cwFrontTapK, play = window._cwFrontPlay, k = tap || (play && play.k);
       var dIdx = tap ? window._cwFrontTapIdx : (play && play.idx), dT = (CW_FRONT_DT.ref === window._cwFronts && CW_FRONT_DT.m[dIdx]) || null;
-      var key = (window._cwFrontOff || !k || !BV_FRONT_TXT[k]) ? '' : k + '|' + (tap ? 'tap' : play.km) + '|' + cw.wide + '|' + (dT ? Math.round(dT.f) + dT.side : '');
+      var key = (window._cwFrontOff || !k || !BV_FRONT_TXT[k]) ? '' : k + '|' + (tap ? 'tap' : play.km) + '|' + cw.wide + '|' + (dT ? Math.round(dT.f) + dT.side + Math.round(dT.up || 0) : '');
       if (info._bvFrKey === key) return;
       info._bvFrKey = key;
       if (!key){ info.style.display = 'none'; info.innerHTML = ''; if (bvFrontScene.stop) bvFrontScene.stop(); return; }
@@ -51503,9 +51511,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         + '<span style="color:#6b7389;font-weight:700;"> &nbsp;' + why + (n > 1 ? ' · ' + n + ' ON THE MAP' : '') + '</span></span>'
         + '<span class="bvfr-w" style="display:block;">' + T[2] + ' <b style="font-weight:700;">' + T[3] + '</b></span>'
         + (dT ? '<span class="bvfr-m" style="display:block;color:#1b2340;font-size:8.5px;">ACROSS THIS ONE NOW \u00b7 '
-            + (dT.f < 2 ? 'UNDER 2\u00b0F BETWEEN THE TWO SIDES \u00b7 A LINE ON THE MAP MORE THAN A CHANGE IN THE AIR'
-                        : 'ABOUT ' + Math.round(dT.f) + '\u00b0F COLDER ON ITS ' + dT.side + ' SIDE')
-            + ' <span style="color:#6b7389;">\u00b7 MODEL AIR TEMPERATURE ~70 MI EITHER SIDE, ' + dT.n + (dT.n === 1 ? ' PLACE' : ' PLACES') + ' ALONG IT</span></span>' : '')
+            + (dT.f < 2 && !(dT.up >= 2) ? 'UNDER 2\u00b0F BETWEEN THE TWO SIDES, AT THE GROUND AND ALOFT \u00b7 A LINE ON THE MAP MORE THAN A CHANGE IN THE AIR'
+               : (dT.f < 2 ? 'UNDER 2\u00b0F AT THE GROUND' : 'AT THE GROUND ABOUT ' + Math.round(dT.f) + '\u00b0F COLDER ON ITS ' + dT.side + ' SIDE')
+                 + (dT.up != null ? ' \u00b7 5,000 FT UP, WHERE LAND AND SEA DO NOT COUNT, '
+                     + (dT.up < 2 ? 'UNDER 2\u00b0F' : Math.round(dT.up) + '\u00b0F' + ((dT.upSide !== dT.side || dT.f < 2) ? ' COLDER TO THE ' + dT.upSide : '')) : ''))
+            + ' <span style="color:#6b7389;">\u00b7 MODEL, ~70 MI EITHER SIDE, ' + dT.n + (dT.n === 1 ? ' PLACE' : ' PLACES') + ' ALONG IT</span></span>' : '')
         + '<span class="bvfr-m" style="display:block;">' + T[4] + ' · TAP ANY LINE ON THE MAP</span></span></span></span>';
       info.style.display = 'block';
       var fcv = document.getElementById('cw-front-cv');
