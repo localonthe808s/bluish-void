@@ -93489,7 +93489,7 @@ function closeAlertModal(){
     var STAGE = 'map';
     var GLOBE = (function(){
       var G = { ok: false, el: null, V: { lat0: 8, lon0: -140, tLat: 8, tLon: -140, zoom: 1, cells: null, lock: false }, annot: null, on: [0, 0], dirty: true };
-      var gl, ov, glc, ovc, U = {}, T = [], DPR = Math.min(2, window.devicePixelRatio || 1), W = 0, H = 0, R = 0, CX = 0, CY = 0, rad = Math.PI / 180, last = 0, pts = {}, pinch = 0, dragging = false;
+      var gl, ov, glc, ovc, flc, U = {}, T = [], DPR = Math.min(2, window.devicePixelRatio || 1), W = 0, H = 0, R = 0, CX = 0, CY = 0, rad = Math.PI / 180, last = 0, pts = {}, pinch = 0, dragging = false;
       var TROP = function(lat){ return 16.5 - 8.5 * Math.pow(Math.abs(lat) / 90, 1.15); };
       var CELLDEF = [{ k: 'hadley', n: 'HADLEY', a: 1, b: 30, dir: 1 }, { k: 'ferrel', n: 'FERREL', a: 30, b: 60, dir: -1 }, { k: 'polar', n: 'POLAR', a: 60, b: 89, dir: 1 }], PARC = [];
       (function(){ var sd = 4242, rnd = function(){ sd = (sd * 1103515245 + 12345) & 0x7fffffff; return sd / 0x7fffffff; }; CELLDEF.forEach(function(c, ci){ for (var i = 0; i < 40; i++) PARC.push({ c: ci, u: rnd(), s: 0.34 + Math.sqrt(rnd()) * 0.66, v: 0.75 + rnd() * 0.5 }); }); })();
@@ -93523,14 +93523,77 @@ function closeAlertModal(){
         if (W < 460){ word('THE CELLS ON THE RIM ARE A DIAGRAM OF THE AVERAGE', 12, H - 22, 'rgba(255,255,255,.75)', '700 7.5px system-ui,sans-serif'); word('THE RIM IS A CUT FROM POLE TO POLE', 12, H - 11, 'rgba(255,255,255,.75)', '700 7.5px system-ui,sans-serif'); }
         else word('THE CELLS ON THE RIM ARE A DIAGRAM OF THE AVERAGE · THE RIM IS A CUT FROM POLE TO POLE', 12, H - 12, 'rgba(255,255,255,.75)', '700 7.5px system-ui,sans-serif');
       };
+      /* ---------- FLOW: the wind as wind (user 2026-09-20: "are those the best visuals we have" -> lab -> "lets go live with it") ----------
+         The model's two wind components come as two GREY pictures (Unidata's map server, ColorBrewer Greys: a known ramp,
+         inverted by formula), so every pixel decodes back to metres a second -- checked against the server's own point
+         readings, worst miss 0.4 m/s. From that field the globe paints its OWN colours (alpha ramps in: no cut edge) and
+         moves streaks along it. A streak = a particle plus the last TL places it has been, kept ON THE SPHERE as unit
+         vectors, so the whole tail is re-projected and redrawn each frame: no fade buffer (it left grey residue in calm
+         air) and the tails survive turning the globe. */
+      var FLOW = (function(){
+        var A9 = [255, 240, 217, 189, 150, 115, 82, 37, 0], INV = new Float32Array(256), g0, i0;
+        for (g0 = 0; g0 < 256; g0++){ INV[g0] = 1; for (i0 = 0; i0 < 8; i0++) if (g0 <= A9[i0] && g0 >= A9[i0 + 1]){ INV[g0] = (i0 + (A9[i0] - g0) / (A9[i0] - A9[i0 + 1])) / 8; break; } }
+        var F = { on: false, fl: null, U: null, V: null, gw: 0, gh: 0, mode: 'speed', k: 0.2, floor: 22, N: 0, p: null, still: false, cache: {} };
+        F.url = function(sp, which, iso, small){ var w = small ? 512 : 1024; return 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://thredds.ucar.edu/thredds/wms/grib/NCEP/GFS/Global_0p25deg/Best?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&CRS=CRS:84&BBOX=-180,-90,180,90&WIDTH=' + w + '&HEIGHT=' + (w / 2)
+          + '&FORMAT=image/png&TRANSPARENT=false&NUMCOLORBANDS=250&STYLES=default-scalar/seq-Greys&BELOWMINCOLOR=extend&ABOVEMAXCOLOR=extend&COLORSCALERANGE=' + (-sp.range) + ',' + sp.range + '&LAYERS=' + which + '-component_of_wind_' + sp.level + '&ELEVATION=' + sp.elev + (iso ? '&TIME=' + iso : '')); };
+        var decode = function(im, range){ var w = im.naturalWidth, h = im.naturalHeight, c = document.createElement('canvas'); c.width = w; c.height = h; var g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(im, 0, 0);
+          var px = g.getImageData(0, 0, w, h).data, out = new Float32Array(w * h); for (var i = 0; i < out.length; i++) out[i] = (INV[px[i * 4]] * 2 - 1) * range; return { d: out, w: w, h: h }; };
+        /* bilinear; longitude wraps, latitude clamps; [u, v] in m/s */
+        F.at = function(lat, lon){ if (!F.U) return [0, 0]; var GW = F.gw, GH = F.gh, x = (lon + 180) / 360 * GW - 0.5, y = Math.max(0, Math.min(GH - 1.001, (90 - lat) / 180 * GH - 0.5));
+          var x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0, xa = ((x0 % GW) + GW) % GW, xb = (xa + 1) % GW, r0 = y0 * GW, r1 = r0 + GW, U2 = F.U, V2 = F.V;
+          return [(U2[r0 + xa] * (1 - fx) + U2[r0 + xb] * fx) * (1 - fy) + (U2[r1 + xa] * (1 - fx) + U2[r1 + xb] * fx) * fy, (V2[r0 + xa] * (1 - fx) + V2[r0 + xb] * fx) * (1 - fy) + (V2[r1 + xa] * (1 - fx) + V2[r1 + xb] * fx) * fy]; };
+        var ramp = function(st, t){ t = Math.max(0, Math.min(1, t)); var n = st.length - 1, i = Math.min(n - 1, Math.floor(t * n)), f = t * n - i, a = st[i], b = st[i + 1]; return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f]; };
+        var HOT = [[254, 240, 190], [253, 186, 116], [234, 88, 12], [185, 28, 28], [110, 10, 20]], TEAL = [[153, 246, 228], [45, 212, 191], [13, 148, 136]], ORNG = [[254, 215, 170], [251, 146, 60], [194, 65, 12]];
+        /* mode: 'speed' = the jet; 'ew' = from the east teal + from the west orange; 'east' / 'west' = only that one coloured */
+        F.paint = function(u, v, mode){ var w = u.w, h = u.h, c = document.createElement('canvas'); c.width = w; c.height = h; var g = c.getContext('2d'), im = g.createImageData(w, h), d = im.data, U2 = u.d, V2 = v.d;
+          for (var i = 0; i < w * h; i++){ var uu = U2[i], col, a;
+            if (mode === 'speed'){ var sp = Math.sqrt(uu * uu + V2[i] * V2[i]); a = Math.max(0, Math.min(1, (sp - 22) / 16)); col = ramp(HOT, (sp - 26) / 60); }
+            else { var e = Math.abs(uu); a = Math.max(0, Math.min(1, (e - 2.5) / 9)) * 0.78; if ((mode === 'east' && uu > 0) || (mode === 'west' && uu < 0)) a = 0; col = uu < 0 ? ramp(TEAL, (e - 3) / 10) : ramp(ORNG, (e - 3) / 12); }
+            d[i * 4] = col[0]; d[i * 4 + 1] = col[1]; d[i * 4 + 2] = col[2]; d[i * 4 + 3] = a * 235; }
+          g.putImageData(im, 0, 0); if (w === 1024) return c;
+          var c2 = document.createElement('canvas'); c2.width = 1024; c2.height = 512; var g2 = c2.getContext('2d'); g2.imageSmoothingQuality = 'high'; g2.drawImage(c, 0, 0, 1024, 512); return c2; };   /* the texture wraps, so it must be a power of two */
+        F.field = function(imU, imV, sp){ var u = decode(imU, sp.range), v = decode(imV, sp.range); return { u: u, v: v }; };
+        F.set = function(f){ F.U = f.u.d; F.V = f.v.d; F.gw = f.u.w; F.gh = f.u.h; };
+        var TL = 16, EVERY = 2, H3 = null, CNT = null, head = 0, tick = 0;
+        var born = function(i, M){ for (var t = 0; t < 5; t++){ var r = Math.sqrt(Math.random()) * 0.985, th = Math.random() * 6.2832, x = r * Math.cos(th), y = r * Math.sin(th), z = Math.sqrt(1 - r * r);
+            var wx = x * M[0][0] + y * M[1][0] + z * M[2][0], wy = x * M[0][1] + y * M[1][1] + z * M[2][1], wz = x * M[0][2] + y * M[1][2] + z * M[2][2];
+            var la = Math.asin(Math.max(-1, Math.min(1, wy))) / rad, lo = Math.atan2(wx, wz) / rad, w = F.at(la, lo);
+            if (Math.hypot(w[0], w[1]) > F.floor || Math.random() < 0.07 || t === 4){ F.p[i * 3] = la; F.p[i * 3 + 1] = lo; F.p[i * 3 + 2] = 1.6 + Math.random() * 3.4; CNT[i] = 0; return; } } };
+        F.start = function(sp){ F.mode = sp.mode; F.k = sp.k; F.floor = sp.floor; F.N = W < 460 ? 1300 : 2800; F.p = new Float32Array(F.N * 3); H3 = new Float32Array(F.N * TL * 3); CNT = new Uint8Array(F.N); head = 0; tick = 0;
+          var M = mats().V; for (var i = 0; i < F.N; i++){ born(i, M); F.p[i * 3 + 2] *= Math.random(); }
+          F.still = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches); F.on = true;
+          if (F.still){ for (var s2 = 0; s2 < 44; s2++) F.move(0.033, M); } G.dirty = true; };
+        F.stop = function(){ F.on = false; if (F.fl && W) F.fl.clearRect(0, 0, W, H); };
+        F.move = function(dt, M){ var P = F.p, push = (++tick % EVERY) === 0; if (push) head = (head + 1) % TL;
+          for (var i = 0; i < F.N; i++){ var o = i * 3, la = P[o], lo = P[o + 1]; P[o + 2] -= dt; if (P[o + 2] <= 0){ if (F.still) P[o + 2] = 9; else { born(i, M); continue; } }
+            var w = F.at(la, lo), cl = Math.max(0.12, Math.cos(la * rad)); la += w[1] * F.k * dt; lo += w[0] * F.k * dt / cl;
+            if (la > 89 || la < -89){ born(i, M); continue; } if (lo > 180) lo -= 360; else if (lo < -180) lo += 360; P[o] = la; P[o + 1] = lo;
+            if (push){ var a = la * rad, l = lo * rad, ca = Math.cos(a), hb = (i * TL + head) * 3; H3[hb] = ca * Math.sin(l); H3[hb + 1] = Math.sin(a); H3[hb + 2] = ca * Math.cos(l); if (CNT[i] < TL) CNT[i]++; } } };
+        F.draw = function(M){ var fl = F.fl, P = F.p, sc = F.mode === 'speed' ? 1 : 4.2, Gn = 4, paths = [], i; for (i = 0; i < Gn * 2; i++) paths.push([]);
+          fl.setTransform(DPR, 0, 0, DPR, 0, 0); fl.clearRect(0, 0, W, H);
+          var m00 = M[0][0], m01 = M[0][1], m02 = M[0][2], m10 = M[1][0], m11 = M[1][1], m12 = M[1][2], m20 = M[2][0], m21 = M[2][1], m22 = M[2][2];
+          for (i = 0; i < F.N; i++){ var n = CNT[i]; if (n < 2) continue; var w2 = F.at(P[i * 3], P[i * 3 + 1]), fast = Math.hypot(w2[0], w2[1]) * sc > 29 ? 1 : 0, life = P[i * 3 + 2], px = 0, py = 0, pz = -1;
+            for (var j = 0; j < n; j++){ var hb2 = (i * TL + ((head - j + TL * 4) % TL)) * 3, x = H3[hb2], y = H3[hb2 + 1], z = H3[hb2 + 2];
+              var qz = m20 * x + m21 * y + m22 * z, qx = CX + (m00 * x + m01 * y + m02 * z) * R, qy = CY - (m10 * x + m11 * y + m12 * z) * R;
+              if (j > 0 && qz > 0.05 && pz > 0.05){ var gI = Math.min(Gn - 1, Math.floor(j * Gn / TL)); if (life < 0.5) gI = Math.min(Gn - 1, gI + 1); paths[fast * Gn + gI].push(px, py, qx, qy); }
+              px = qx; py = qy; pz = qz; } }
+          fl.lineCap = 'round';
+          for (var c = 0; c < 2; c++) for (var g2 = 0; g2 < Gn; g2++){ var L = paths[c * Gn + g2]; if (!L.length) continue; var al = (c ? 0.95 : 0.34) * (1 - g2 / Gn) * (1 - g2 / Gn);
+            fl.strokeStyle = 'rgba(255,255,255,' + al.toFixed(3) + ')'; fl.lineWidth = (W < 460 ? 1 : 1.2) * (c ? 1.15 : 0.9) * (1 - g2 * 0.12); fl.beginPath(); for (var q = 0; q < L.length; q += 4){ fl.moveTo(L[q], L[q + 1]); fl.lineTo(L[q + 2], L[q + 3]); } fl.stroke(); } };
+        /* what the wind is doing over one place, off the field: mph and the compass point it blows FROM */
+        F.say = function(lat, lon){ if (!F.U) return null; var w = F.at(lat, lon), sp = Math.hypot(w[0], w[1]), from = (Math.atan2(-w[0], -w[1]) / rad + 360) % 360, N8 = ['NORTH', 'NORTH-EAST', 'EAST', 'SOUTH-EAST', 'SOUTH', 'SOUTH-WEST', 'WEST', 'NORTH-WEST'];
+          return { mph: Math.round(sp * 2.23694), from: N8[Math.round(from / 45) % 8] }; };
+        return F;
+      })();
       var frame = function(now){
         requestAnimationFrame(frame);
         var dt = Math.min(0.06, (now - (last || now)) / 1000) || 0.016; last = now;
         if (document.hidden || STAGE !== 'globe' || !isOpen() || !G.el || !W) return;
         var V = G.V; if (V.cells) V.tLat = 0;
         var dLa = V.tLat - V.lat0, dLo = V.tLon - V.lon0; if (Math.abs(dLa) > 0.01 || Math.abs(dLo) > 0.01){ var k = dragging ? 1 : Math.min(1, dt * 7); V.lat0 += dLa * k; V.lon0 += dLo * k; G.dirty = true; }
-        if (!G.dirty && !V.cells) return;
+        if (!G.dirty && !V.cells && !(FLOW.on && !FLOW.still)) return;
         var r = G.el.getBoundingClientRect(); if (r.bottom < 0 || r.top > innerHeight) return;
+        if (FLOW.on && !G.dirty && !V.cells){ var M0 = mats().V; FLOW.move(dt, M0); FLOW.draw(M0); return; }   /* the sphere has not changed: only the streaks move */
         var TOP = W < 460 ? 40 : 0;   /* phones: the two buttons get their own strip, they were covering the rim's POLAR and FERREL labels */
         R = Math.min(W, H - TOP) * (V.cells ? 0.33 : 0.445) * (V.cells ? Math.min(1.12, V.zoom) : V.zoom); CX = W / 2; CY = TOP + (H - TOP) / 2;
         gl.uniform2f(U.uC, CX * DPR, (H - CY) * DPR); gl.uniform1f(U.uR, R * DPR); gl.uniformMatrix3fv(U.uW, false, mats().Wcol);
@@ -93544,18 +93607,19 @@ function closeAlertModal(){
         if (isFinite(la0) && isFinite(lo0)){ var h = proj(M, la0, lo0); if (h[2] > 0.03){ ov.fillStyle = '#fff'; ov.beginPath(); ov.arc(h[0], h[1], 5, 0, 6.3); ov.fill(); ov.fillStyle = '#2B22F4'; ov.beginPath(); ov.arc(h[0], h[1], 3.4, 0, 6.3); ov.fill(); word(String(loc.name || 'YOU').toUpperCase(), h[0] + 9, h[1] + 3, '#2B22F4', '800 9px system-ui,sans-serif', true); } }
         if (V.cells) drawCells(dt);
         var hn = G.el && G.el.querySelector('[data-g=hint]'), hv = V.cells ? 'hidden' : 'visible'; if (hn && hn.style.visibility !== hv) hn.style.visibility = hv;   /* the rim note owns the bottom edge */
+        if (FLOW.on){ if (!FLOW.still) FLOW.move(dt, M); FLOW.draw(M); }
         G.dirty = false;
       };
       G.mount = function(host){
         if (G.el) return G.ok;
         var el = G.el = document.createElement('div'); el.id = 'es-globe';
         el.style.cssText = 'display:none;position:relative;width:100%;aspect-ratio:1 / 1;max-height:540px;margin-top:8px;border-radius:12px;overflow:hidden;background:radial-gradient(circle at 50% 45%,#15203f 0%,#0a1024 62%,#060a18 100%);touch-action:none;cursor:grab;';
-        el.innerHTML = '<canvas style="position:absolute;inset:0;width:100%;height:100%;display:block;"></canvas><canvas style="position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none;letter-spacing:0;"></canvas>'
+        el.innerHTML = '<canvas style="position:absolute;inset:0;width:100%;height:100%;display:block;"></canvas><canvas style="position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none;"></canvas><canvas style="position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none;letter-spacing:0;"></canvas>'
           + '<div style="position:absolute;right:10px;top:10px;display:flex;flex-direction:column;gap:5px;z-index:3;"><button type="button" data-g="home" style="cursor:pointer;border:none;border-radius:8px;padding:5px 10px;background:rgba(10,14,28,.72);color:#fff;font:800 8px system-ui,sans-serif;letter-spacing:.1em;">FACE MY LOCATION</button>'
           + '<button type="button" data-g="pole" style="cursor:pointer;border:none;border-radius:8px;padding:5px 10px;background:rgba(10,14,28,.72);color:#fff;font:800 8px system-ui,sans-serif;letter-spacing:.1em;">LOOK DOWN ON THE POLE</button></div>'
           + '<div data-g="hint" style="position:absolute;right:12px;bottom:10px;font:800 8px system-ui,sans-serif;letter-spacing:.1em;color:rgba(255,255,255,.7);text-shadow:0 0 6px #000;">DRAG TO TURN · PINCH TO ZOOM</div>';
         host.parentNode.insertBefore(el, host.nextSibling);
-        glc = el.children[0]; ovc = el.children[1];
+        glc = el.children[0]; flc = el.children[1]; ovc = el.children[2]; FLOW.fl = flc.getContext('2d');
         try { gl = glc.getContext('webgl', { premultipliedAlpha: true, antialias: true }); } catch(e){ gl = null; }
         if (!gl) return (G.ok = false);
         ov = ovc.getContext('2d'); try { ovc.style.letterSpacing = '0px'; } catch(e){}
@@ -93593,7 +93657,7 @@ function closeAlertModal(){
         var rs = function(){ var r = el.getBoundingClientRect(); if (!r.width) return;
           var nar = r.width < 460, bx = el.querySelector('[data-g=home]').parentNode, hh = nar ? Math.round(r.width + 40) + 'px' : '';
           if (el.style.height !== hh){ el.style.aspectRatio = nar ? 'auto' : '1 / 1'; el.style.height = hh; bx.style.flexDirection = nar ? 'row' : 'column'; bx.style.left = nar ? '10px' : 'auto'; bx.style.justifyContent = nar ? 'space-between' : 'flex-start'; r = el.getBoundingClientRect(); }
-          W = r.width; H = r.height; [glc, ovc].forEach(function(c){ c.width = Math.round(W * DPR); c.height = Math.round(H * DPR); }); gl.viewport(0, 0, glc.width, glc.height); G.dirty = true; };
+          W = r.width; H = r.height; [glc, flc, ovc].forEach(function(c){ c.width = Math.round(W * DPR); c.height = Math.round(H * DPR); }); gl.viewport(0, 0, glc.width, glc.height); G.dirty = true; };
         if (window.ResizeObserver) new ResizeObserver(rs).observe(el); window.addEventListener('resize', rs); G.resize = rs;
         requestAnimationFrame(frame);
         return true;
@@ -93604,7 +93668,13 @@ function closeAlertModal(){
       G.skins = function(urls){ G.want = urls.join('|'); var want = G.want;
         return Promise.all(urls.map(function(u){ return G.img(u); })).then(function(ims){ if (G.want !== want) return true; ims.forEach(function(im, i){ G.put(1 + i, im); }); G.on = [ims.length > 0 ? 1 : 0, ims.length > 1 ? 1 : 0]; G.dirty = true; return true; })
           .catch(function(){ if (G.want === want){ G.on = [0, 0]; G.dirty = true; } return false; }); };
-      G.clear = function(){ G.want = ''; G.on = [0, 0]; G.annot = null; G.V.cells = null; G.dirty = true; };
+      /* sp = { level, elev, range, mode, k, floor, skin:false? } -> true when the wind is on the sphere and moving, false when it could not be had */
+      G.flow = function(sp, iso){ var key = [sp.level, sp.elev, sp.mode, iso || ''].join('|'), want = G.fwant = key;
+        if (sp.skin !== false) G.want = 'flow:' + key;
+        var have = FLOW.cache[key] ? Promise.resolve(FLOW.cache[key]) : Promise.all([G.img(FLOW.url(sp, 'u', iso)), G.img(FLOW.url(sp, 'v', iso))]).then(function(ims){ var f = FLOW.field(ims[0], ims[1], sp); if (sp.skin !== false) f.skin = FLOW.paint(f.u, f.v, sp.mode); FLOW.cache = {}; FLOW.cache[key] = f; return f; });
+        return have.then(function(f){ if (G.fwant !== want) return true; FLOW.set(f); if (sp.skin !== false){ G.put(1, f.skin); G.on = [1, 0]; } FLOW.start(sp); return true; }).catch(function(){ if (G.fwant === want) FLOW.stop(); return false; }); };
+      G.FLOW = FLOW;
+      G.clear = function(){ G.fwant = ''; FLOW.stop(); G.want = ''; G.on = [0, 0]; G.annot = null; G.V.cells = null; G.dirty = true; };
       G.show = function(on){ if (G.el) G.el.style.display = on ? 'block' : 'none'; if (on && G.resize) setTimeout(G.resize, 0); };
       return G;
     })();
@@ -93618,19 +93688,20 @@ function closeAlertModal(){
     var GPLAY = (function(){
       var P = { frames: [], i: 0, timer: null, token: null, paused: false, badge: null, cb: null, rest: 1600, step: 180 };
       var tell = function(o){ try { if (P.cb) P.cb(o); } catch(e){} };
-      P.show = function(i){ if (!P.frames.length) return; P.i = (i + P.frames.length) % P.frames.length; var f = P.frames[P.i]; GLOBE.put(1, f); GLOBE.on = [1, 0];
+      P.show = function(i){ if (!P.frames.length) return; P.i = (i + P.frames.length) % P.frames.length; var f = P.frames[P.i]; if (P.apply){ try { P.apply(f); } catch(e){} } else { GLOBE.put(1, f); GLOBE.on = [1, 0]; }
         if (P.badge) P.badge.firstChild.textContent = f._label; tell({ phase: P.paused ? 'paused' : 'playing', label: f._label, i: P.i, total: P.frames.length }); };
       var tick = function(){ if (P.paused || !P.frames.length) return; P.timer = setTimeout(function(){ if (!P.token || P.paused) return; if (!document.hidden) P.show(P.i + 1); tick(); }, P.i === P.frames.length - 1 ? P.rest : P.step); };
       P.pause = function(){ P.paused = true; clearTimeout(P.timer); P.show(P.i); };
       P.resume = function(){ if (!P.frames.length) return; P.paused = false; P.show(P.i); tick(); };
-      P.stop = function(quiet){ var was = !!P.token; clearTimeout(P.timer); P.token = null; P.paused = false; P.frames.forEach(function(im){ im.onload = im.onerror = null; }); P.frames = [];
+      P.stop = function(quiet){ var was = !!P.token; clearTimeout(P.timer); P.token = null; P.paused = false; P.frames.forEach(function(im){ im.onload = im.onerror = null; if (im._v) im._v.onload = im._v.onerror = null; }); P.frames = []; P.apply = null;
         if (P.badge && P.badge.parentNode) P.badge.parentNode.removeChild(P.badge); P.badge = null; if (was && !quiet) tell({ phase: 'stopped' }); return was; };
-      P.start = function(list, words, cb, step){
-        P.stop(true); P.cb = cb; P.step = step || 180; if (!GLOBE.ok || !list.length) return;
-        var token = P.token = {}, done = 0, imgs = list.map(function(it){ var im = new Image(); im.crossOrigin = 'anonymous'; im._label = it.label;
-          im.onload = im.onerror = function(){ if (P.token !== token) return; done++; tell({ phase: 'loading', done: done, total: list.length }); if (done === list.length) go(); }; im.src = it.url; return im; });
+      P.start = function(list, words, cb, step, apply){
+        P.stop(true); P.apply = apply || null; P.cb = cb; P.step = step || 180; if (!GLOBE.ok || !list.length) return;
+        var token = P.token = {}, done = 0, total = 0, one = function(){ if (P.token !== token) return; done++; tell({ phase: 'loading', done: done, total: total }); if (done === total) go(); };
+        var imgs = list.map(function(it){ var im = new Image(); im.crossOrigin = 'anonymous'; im._label = it.label; total++; im.onload = im.onerror = one; im.src = it.url;
+          if (it.url2){ var i2 = im._v = new Image(); i2.crossOrigin = 'anonymous'; total++; i2.onload = i2.onerror = one; i2.src = it.url2; } return im; });
         tell({ phase: 'loading', done: 0, total: list.length });
-        var go = function(){ P.frames = imgs.filter(function(im){ return im.naturalWidth > 0; }); if (P.frames.length < 5){ P.stop(); return; }
+        var go = function(){ P.frames = imgs.filter(function(im){ return im.naturalWidth > 0 && (!im._v || im._v.naturalWidth > 0); }); if (P.frames.length < 5){ P.stop(); return; }
           var b = P.badge = document.createElement('div');
           b.style.cssText = 'position:absolute;left:12px;bottom:26px;z-index:4;display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:10px;background:rgba(10,14,28,.78);color:#fff;font:800 12px system-ui,sans-serif;letter-spacing:.1em;cursor:pointer;';
           b.innerHTML = '<span></span><span style="font-weight:700;font-size:9px;opacity:.7;"></span><span title="stop" style="font-weight:900;font-size:12px;opacity:.85;padding:0 2px 0 6px;border-left:1px solid rgba(255,255,255,.25);">✕</span>';
@@ -94332,8 +94403,16 @@ function closeAlertModal(){
       b.onclick = function(e){ e.stopPropagation(); fn(); }; b.addEventListener('pointerdown', function(e){ e.stopPropagation(); }); GLOBE.el.appendChild(b); };
     var jetWhen = function(d){ var tz = (window.LOCATION && window.LOCATION.tz) || undefined, s2; try { s2 = d.toLocaleString('en-US', { timeZone: tz, weekday: 'short', hour: 'numeric' }).toUpperCase().replace(',', ''); } catch(e){ s2 = d.toUTCString().slice(0, 22).toUpperCase(); }
       var dh = Math.round((d - Date.now()) / 36e5); return s2 + ' · ' + (Math.abs(dh) < 2 ? 'ABOUT NOW' : dh > 0 ? 'IN ' + (dh >= 48 ? Math.round(dh / 24) + ' DAYS' : dh + ' H') : (-dh) + ' H AGO'); };
-    var jetPlayGlobe = function(){ globeBtn(null); var list = []; for (var k = 0; k < 21; k++){ var n = new Date(); n.setUTCMinutes(0, 0, 0); n.setUTCHours(Math.floor(n.getUTCHours() / 6) * 6 + 6 * k); list.push({ url: gfsWorld(JETP, n.toISOString().slice(0, 13) + ':00:00.000Z', true), label: jetWhen(n) }); }
-      GPLAY.start(list, 'JET STREAM FORECAST', function(o){ if (o.phase === 'stopped' && CUR === 'jet' && STAGE === 'globe'){ GLOBE.skins([gfsWorld(JETP)]); globeBtn('▶ PLAY THE NEXT 5 DAYS', jetPlayGlobe); } }, 260); };
+    /* THE WIND AS WIND (see FLOW in the globe): the jet and the surface belts are decoded model fields with streaks riding them */
+    var JETF = { level: 'isobaric', elev: 25000, range: 90, mode: 'speed', k: 0.2, floor: 22 };
+    var SURF = function(mode, skin){ return { level: 'height_above_ground', elev: 10, range: 30, mode: mode, k: 0.85, floor: 4, skin: skin }; };
+    var flowSay = function(high){ var loc = window.LOCATION || {}, y = isFinite(+loc.lat) && isFinite(+loc.lon) ? GLOBE.FLOW.say(+loc.lat, +loc.lon) : null; if (!y) return '';
+      return ' <span style="color:#2B22F4;font-weight:800;letter-spacing:.04em;">' + (high ? 'ABOUT 34,000 FT ABOVE ' : 'AT THE SURFACE NEAR ') + String(loc.name || 'YOU').toUpperCase() + ' · ' + y.mph + ' MPH FROM THE ' + y.from + '</span> <span style="color:rgba(30,30,50,.5);font-weight:600;">(the model’s wind there, not a measurement)</span>'; };
+    var jetLine = function(say){ line('<span style="color:#1d4ed8;font-weight:900;letter-spacing:.06em;">THE JET STREAM</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">· the river of wind about 34,000 ft up, blowing west to east. Every streak is carried by the model’s own wind, faster where the jet is faster; colour fades in from about 50 mph and deepens through orange to dark red past 150. Press LOOK DOWN ON THE POLE to see it as what it is, a wavy ring round the top of the planet. A dip in it pulls a hurricane north and out to sea, and it steers every front and nor’easter. A strong El Niño drags the Pacific branch south and east. NOAA GFS model via Unidata · press play for the next five days.</span>' + (say || '')); };
+    var jetPlayGlobe = function(){ globeBtn(null); var list = []; for (var k = 0; k < 21; k++){ var n = new Date(); n.setUTCMinutes(0, 0, 0); n.setUTCHours(Math.floor(n.getUTCHours() / 6) * 6 + 6 * k); var iso = n.toISOString().slice(0, 13) + ':00:00.000Z';
+        list.push({ url: GLOBE.FLOW.url(JETF, 'u', iso, true), url2: GLOBE.FLOW.url(JETF, 'v', iso, true), label: jetWhen(n) }); }
+      GPLAY.start(list, 'JET STREAM FORECAST', function(o){ if (o.phase === 'stopped' && CUR === 'jet' && STAGE === 'globe'){ GLOBE.flow(JETF); globeBtn('▶ PLAY THE NEXT 5 DAYS', jetPlayGlobe); } }, 320,
+        function(f){ var fld = GLOBE.FLOW.field(f, f._v, JETF); GLOBE.FLOW.set(fld); GLOBE.put(1, GLOBE.FLOW.paint(fld.u, fld.v, 'speed')); GLOBE.on = [1, 0]; }); };   /* each step swaps the wind under the streaks: they keep flowing, and bend to the new field */
     var CELLLAB = {
       trades: [[16, 'NORTH-EAST TRADES', '#99f6e4'], [-14, 'SOUTH-EAST TRADES', '#99f6e4'], [3, 'DOLDRUMS', '#fff'], [33, 'HORSE LATITUDES · 30°', '#fff'], [47, 'WESTERLIES', '#fed7aa'], [-47, 'THE ROARING FORTIES', '#fed7aa']],
       easterlies: [[15, 'TRADE WINDS', '#99f6e4'], [-15, 'TRADE WINDS', '#99f6e4'], [68, 'POLAR EASTERLIES', '#99f6e4'], [-66, 'POLAR EASTERLIES', '#99f6e4']],
@@ -94344,8 +94423,17 @@ function closeAlertModal(){
     var cellGlobe = function(k, skins){
       GLOBE.annot = function(c){ (CELLLAB[k] || []).forEach(function(L2){ var q = c.proj(L2[0], c.lon0); if (q[2] < 0.2) return; c.ov.font = '900 9px system-ui,sans-serif'; var w = c.ov.measureText(L2[1]).width; c.word(L2[1], q[0] - w / 2, q[1] - 3, L2[2], '900 9px system-ui,sans-serif'); }); };
       if (k === 'polar'){ GLOBE.V.cells = null; GLOBE.V.tLat = 89; GLOBE.face(89, homeLon()); } else { GLOBE.V.cells = k; GLOBE.face(0, k === 'ferrel' ? homeLon() : -150); }
-      return GLOBE.skins(skins.map(function(s2){ return gfsWorld(CELLS.params[s2]); }));
+      var T = CELLTXT[k], cap = function(){ if (CUR !== k || STAGE !== 'globe') return; line('<span style="color:' + T[1] + ';font-weight:900;letter-spacing:.06em;">' + T[0] + '</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">· ' + FLOWTXT[k] + ' · NOAA GFS model via Unidata, the latest run.</span>' + flowSay(false)); };
+      if (k === 'hadley') return GLOBE.skins(skins.map(function(s2){ return gfsWorld(CELLS.params[s2]); })).then(function(ok){ if (ok && CUR === k) GLOBE.flow(SURF('ew', false)).then(function(ok2){ if (ok2) cap(); }); return ok; });
+      return GLOBE.flow(SURF(CFLOW[k])).then(function(ok){ if (ok) cap(); return ok; });
     };
+    var CFLOW = { trades: 'ew', easterlies: 'east', ferrel: 'west', polar: 'east' };
+    var FLOWTXT = {
+      trades: 'every streak is carried by today’s surface wind · teal air blows from the east, orange from the west, deeper is stronger · the two teal belts either side of the equator are the trades, running into each other at the doldrums',
+      easterlies: 'the streaks are all of today’s surface wind; only wind from the east is coloured, deeper teal is stronger · the broad tropical belts are the trades, the patchy ones near the poles the polar easterlies',
+      hadley: 'the colour is how much water the air holds: the wet band is air rising, the dry gaps near 30° are air sinking · the streaks are today’s surface wind: watch the trades from both hemispheres run together under the wet band, which is the cell’s ground floor',
+      ferrel: 'the streaks are all of today’s surface wind; only wind from the west is coloured, deeper orange is stronger · the spirals are the mid-latitude storms, and they are this cell’s real machinery',
+      polar: 'looking down on the pole · teal is wind from the east, deeper is stronger · the streaks show cold air draining off the ice and the storms circling the polar front near 60°' };
     var CV = {   // the five circulation tabs: [skins, wide frame, phone frame, flat labels]
       trades: [['EAST', 'WEST'], [[-40, -215], [44, -5]], null, 'belts'], easterlies: [['EAST'], [[-58, -215], [77, -5]], null, 'east'], hadley: [['MOIST'], [[-42, -215], [46, -5]], null, 'hadley'],
       ferrel: [['WEST'], [[20, -200], [68, 5]], null, 'ferrel'], polar: [['EAST'], [[44, -200], [80, 5]], null, 'polar'] };
@@ -94363,9 +94451,8 @@ function closeAlertModal(){
       gulf: { label: 'GULF STREAM', on: function(){ GULF(true); }, off: function(){ GULF(false); } },
       amoc: { label: 'AMOC', on: function(){ AMOC(true); renderAmoc(); loadAmoc().then(function(){ if (CUR === 'amoc') renderAmoc(); }); }, off: function(){ AMOC(false); } },
       jet:  { label: 'JET STREAM',
-        globe: function(){ GLOBE.V.cells = null; GLOBE.annot = null; GLOBE.face(46, homeLon());
-          line('<span style="color:#1d4ed8;font-weight:900;letter-spacing:.06em;">THE JET STREAM</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">· the river of wind about 34,000 ft up, blowing west to east, shown only where it tops ~65 mph: pale ~65–100, orange ~100–150, deep red 150–190 mph and more. Press LOOK DOWN ON THE POLE to see it as what it is, a wavy ring round the top of the planet. A dip in it pulls a hurricane north and out to sea, and it steers every front and nor’easter. A strong El Niño drags the Pacific branch south and east. NOAA GFS model via Unidata · press play for the next five days.</span>');
-          return GLOBE.skins([gfsWorld(JETP)]).then(function(ok){ if (ok && CUR === 'jet') globeBtn('▶ PLAY THE NEXT 5 DAYS', jetPlayGlobe); return ok; }); },
+        globe: function(){ GLOBE.V.cells = null; GLOBE.annot = null; GLOBE.face(46, homeLon()); jetLine();
+          return GLOBE.flow(JETF).then(function(ok){ if (ok && CUR === 'jet'){ globeBtn('\u25b6 PLAY THE NEXT 5 DAYS', jetPlayGlobe); jetLine(flowSay(true)); } return ok; }); },
         flat: function(){ JET(true); }, off: function(){ JET(false); globeBtn(null); } },
       /* the global circulation: five tabs, two live skins, one cutaway (see CELLS / bvCellScene), and on the globe the cells on the rim */
       trades: cellEntry('trades', 'TRADE WINDS', 'THE GLOBAL CIRCULATION'), easterlies: cellEntry('easterlies', 'EASTERLIES'), hadley: cellEntry('hadley', 'HADLEY CELL'),
@@ -94432,7 +94519,7 @@ function closeAlertModal(){
       if (window.ResizeObserver) new ResizeObserver(function(){ if (PENDFIT && isOpen()) fit(PENDFIT); }).observe(EM.getContainer());
     };
     /* read-only, for the test sweeps (the CITY map's _cwMapState idiom): what the stage holds right now */
-    window._bvEarthState = function(){ return { view: CUR, stage: STAGE, skins: GLOBE.want || '', lit: (GLOBE.on || []).slice(), cells: (GLOBE.V && GLOBE.V.cells) || null, playing: !!GPLAY.token, frames: (GPLAY.frames || []).length, frame: GPLAY.i }; };
+    window._bvEarthState = function(){ return { view: CUR, stage: STAGE, skins: GLOBE.want || '', lit: (GLOBE.on || []).slice(), cells: (GLOBE.V && GLOBE.V.cells) || null, flow: !!(GLOBE.FLOW && GLOBE.FLOW.on), streaks: (GLOBE.FLOW && GLOBE.FLOW.on && GLOBE.FLOW.N) || 0, flowMode: (GLOBE.FLOW && GLOBE.FLOW.on && GLOBE.FLOW.mode) || null, playing: !!GPLAY.token, frames: (GPLAY.frames || []).length, frame: GPLAY.i }; };
     window.bvEarthOpen = function(){
       build(); if (!EM) return;
       var want = CUR; if (!want){ try { want = localStorage.getItem('bv_es_view'); } catch(e){} } if (!VIEWS[want]) want = 'enso';
