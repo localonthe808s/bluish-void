@@ -93471,6 +93471,169 @@ function closeAlertModal(){
     };
 
     /* ================= EL NINO ================= */
+
+    /* ================= THE GLOBE ================= */
+    /* The planetary views stand on a GLOBE (user 2026-09-20, after the _earthlab prototype: "that looks cool lets go for it").
+       No library: one full-canvas fragment shader turns every pixel of the disc into a latitude and longitude and samples
+       whole-world pictures in plain lat/lon -- NASA's Blue Marble underneath, muted to the site's own sea, and up to TWO data
+       skins over it (the wind belts are two: from the east, from the west). A 2D canvas on top, projected with the same
+       rotation, carries every line and word, so drawing and picture cannot drift apart. With the tilt held at zero the rim is
+       a cut from pole to pole, which is where the three cells stand. GULF STREAM and AMOC stay on the flat map: they are
+       about one coast, and zooming in and tapping the water is what a flat map is for.
+       WebGL will only take a picture whose server sends CORS headers. NASA GIBS does. Unidata THREDDS (jet, wind belts,
+       moisture) does not, so those go through the site's proxy worker -- and if the worker does not yet allow that host, the
+       load fails, globeOn() says so, and the view falls back to the flat map it had before. Nothing breaks either way. */
+    var STAGE = 'map';
+    var GLOBE = (function(){
+      var G = { ok: false, el: null, V: { lat0: 8, lon0: -140, tLat: 8, tLon: -140, zoom: 1, cells: null, lock: false }, annot: null, on: [0, 0], dirty: true };
+      var gl, ov, glc, ovc, U = {}, T = [], DPR = Math.min(2, window.devicePixelRatio || 1), W = 0, H = 0, R = 0, CX = 0, CY = 0, rad = Math.PI / 180, last = 0, pts = {}, pinch = 0, dragging = false;
+      var TROP = function(lat){ return 16.5 - 8.5 * Math.pow(Math.abs(lat) / 90, 1.15); };
+      var CELLDEF = [{ k: 'hadley', n: 'HADLEY', a: 1, b: 30, dir: 1 }, { k: 'ferrel', n: 'FERREL', a: 30, b: 60, dir: -1 }, { k: 'polar', n: 'POLAR', a: 60, b: 89, dir: 1 }], PARC = [];
+      (function(){ var sd = 4242, rnd = function(){ sd = (sd * 1103515245 + 12345) & 0x7fffffff; return sd / 0x7fffffff; }; CELLDEF.forEach(function(c, ci){ for (var i = 0; i < 40; i++) PARC.push({ c: ci, u: rnd(), s: 0.34 + Math.sqrt(rnd()) * 0.66, v: 0.75 + rnd() * 0.5 }); }); })();
+      var lit = function(k){ var f = G.V.cells; return f === 'all' || f === k || (f === 'trades' && k === 'hadley') || (f === 'easterlies' && (k === 'hadley' || k === 'polar')); };
+      var mats = function(){ var a = G.V.lat0 * rad, l = -G.V.lon0 * rad, ca = Math.cos(a), sa = Math.sin(a), cl = Math.cos(l), sl = Math.sin(l);
+        var Vm = [[cl, 0, sl], [sa * sl, ca, -sa * cl], [-ca * sl, sa, ca * cl]];
+        return { V: Vm, Wcol: new Float32Array([Vm[0][0], Vm[0][1], Vm[0][2], Vm[1][0], Vm[1][1], Vm[1][2], Vm[2][0], Vm[2][1], Vm[2][2]]) }; };
+      var proj = function(M, lat, lon){ var la = lat * rad, lo = lon * rad, x = Math.cos(la) * Math.sin(lo), y = Math.sin(la), z = Math.cos(la) * Math.cos(lo);
+        return [CX + (M[0][0] * x + M[0][1] * y + M[0][2] * z) * R, CY - (M[1][0] * x + M[1][1] * y + M[1][2] * z) * R, M[2][0] * x + M[2][1] * y + M[2][2] * z]; };
+      var word = function(s, x, y, col, font, back){ ov.font = font || '800 9px system-ui,sans-serif'; var w = ov.measureText(s).width; x = Math.max(6, Math.min(W - w - 6, x)); y = Math.max(12, Math.min(H - 6, y));
+        if (back){ ov.fillStyle = 'rgba(255,252,244,.9)'; ov.fillRect(x - 3, y - 9, w + 6, 12); } else { ov.shadowColor = '#000'; ov.shadowBlur = 5; } ov.fillStyle = col; ov.fillText(s, x, y); ov.shadowBlur = 0; };
+      var path = function(M, p){ var pen = false; ov.beginPath(); p.forEach(function(q0){ var q = proj(M, q0[0], q0[1]); if (q[2] <= 0.02){ pen = false; return; } if (pen) ov.lineTo(q[0], q[1]); else { ov.moveTo(q[0], q[1]); pen = true; } }); ov.stroke(); };
+      var cellAt = function(c, u, s, HMAX){ var mid = (c.a + c.b) / 2, half = (c.b - c.a) / 2 - 1.5, top = HMAX * (TROP(mid) - 1.2) / 16.5, bot = HMAX * 0.06, hm = (top + bot) / 2, hh = (top - bot) / 2;
+        var th = u * 6.2832 * c.dir - Math.PI, co = Math.cos(th), si = Math.sin(th), e = 0.42;
+        return [mid + half * s * Math.sign(co) * Math.pow(Math.abs(co), e), hm - hh * s * Math.sign(si) * Math.pow(Math.abs(si), e)]; };
+      var rim = function(lat, h, side){ var a = lat * rad, rr = R + 3 + h; return [CX + side * rr * Math.cos(a), CY - rr * Math.sin(a)]; };
+      var drawCells = function(dt){
+        var HMAX = Math.min(W, H) * 0.125;
+        [1, -1].forEach(function(side){ [1, -1].forEach(function(hem){
+          ov.setLineDash([3, 4]); ov.strokeStyle = 'rgba(255,255,255,.4)'; ov.lineWidth = 1; ov.beginPath();
+          for (var la = 0; la <= 89; la += 2){ var q = rim(hem * la, HMAX * TROP(la) / 16.5, side); la ? ov.lineTo(q[0], q[1]) : ov.moveTo(q[0], q[1]); } ov.stroke(); ov.setLineDash([]);
+          CELLDEF.forEach(function(c){ ov.beginPath(); for (var u = 0; u <= 1.0001; u += 0.02){ var p = cellAt(c, u, 1, HMAX), q2 = rim(hem * p[0], p[1], side); u ? ov.lineTo(q2[0], q2[1]) : ov.moveTo(q2[0], q2[1]); }
+            ov.strokeStyle = lit(c.k) ? 'rgba(255,255,255,.34)' : 'rgba(255,255,255,.10)'; ov.lineWidth = 1; ov.stroke(); }); }); });
+        ov.lineCap = 'round';
+        PARC.forEach(function(q){ var c = CELLDEF[q.c], on = lit(c.k); q.u = (q.u + dt * 0.035 * q.v / (0.5 + q.s * 0.5)) % 1;
+          var A = cellAt(c, q.u, q.s, HMAX), B = cellAt(c, (q.u + 0.012) % 1, q.s, HMAX), warm = Math.max(0, Math.min(1, 1 - A[0] / 62 - (A[1] / HMAX) * 0.75));
+          ov.strokeStyle = 'rgba(' + Math.round(120 + 135 * warm) + ',' + Math.round(170 + 20 * warm) + ',' + Math.round(255 - 190 * warm) + ',' + (on ? 0.95 : 0.18) + ')'; ov.lineWidth = on ? 1.7 : 1;
+          [1, -1].forEach(function(side){ [1, -1].forEach(function(hem){ var a = rim(hem * A[0], A[1], side), b = rim(hem * B[0], B[1], side), dx = b[0] - a[0], dy = b[1] - a[1], dl = Math.hypot(dx, dy) || 1;
+            ov.beginPath(); ov.moveTo(a[0], a[1]); ov.lineTo(a[0] + dx / dl * 6, a[1] + dy / dl * 6); ov.stroke(); }); }); });
+        CELLDEF.forEach(function(c){ var mid = (c.a + c.b) / 2, q = rim(mid, HMAX * 1.14, 1); ov.font = '900 9px system-ui,sans-serif'; var w = ov.measureText(c.n).width; ov.globalAlpha = lit(c.k) ? 1 : 0.45; word(c.n, q[0] + (mid > 70 ? -w / 2 : 3), q[1] + (mid > 70 ? -4 : 3), '#fff', '900 9px system-ui,sans-serif'); ov.globalAlpha = 1; });
+        word('THE CELLS ON THE RIM ARE A DIAGRAM OF THE AVERAGE · THE RIM IS A CUT FROM POLE TO POLE', 12, H - 12, 'rgba(255,255,255,.75)', '700 7.5px system-ui,sans-serif');
+      };
+      var frame = function(now){
+        requestAnimationFrame(frame);
+        var dt = Math.min(0.06, (now - (last || now)) / 1000) || 0.016; last = now;
+        if (document.hidden || STAGE !== 'globe' || !isOpen() || !G.el || !W) return;
+        var V = G.V; if (V.cells) V.tLat = 0;
+        var dLa = V.tLat - V.lat0, dLo = V.tLon - V.lon0; if (Math.abs(dLa) > 0.01 || Math.abs(dLo) > 0.01){ var k = dragging ? 1 : Math.min(1, dt * 7); V.lat0 += dLa * k; V.lon0 += dLo * k; G.dirty = true; }
+        if (!G.dirty && !V.cells) return;
+        var r = G.el.getBoundingClientRect(); if (r.bottom < 0 || r.top > innerHeight) return;
+        R = Math.min(W, H) * (V.cells ? 0.33 : 0.445) * (V.cells ? Math.min(1.12, V.zoom) : V.zoom); CX = W / 2; CY = H / 2;
+        gl.uniform2f(U.uC, CX * DPR, (H - CY) * DPR); gl.uniform1f(U.uR, R * DPR); gl.uniformMatrix3fv(U.uW, false, mats().Wcol);
+        gl.uniform1i(U.uBase, 0); gl.uniform1i(U.uSkin, 1); gl.uniform1i(U.uSkin2, 2); gl.uniform1f(U.uOn, G.on[0]); gl.uniform1f(U.uOn2, G.on[1]);
+        gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        var M = mats().V; ov.setTransform(DPR, 0, 0, DPR, 0, 0); ov.clearRect(0, 0, W, H); ov.lineJoin = 'round';
+        var ring = function(lat, a){ var p = []; for (var lo = -180; lo <= 180; lo += 3) p.push([lat, lo]); ov.strokeStyle = 'rgba(255,255,255,' + a + ')'; ov.lineWidth = 1; ov.setLineDash(lat ? [3, 6] : [5, 5]); path(M, p); ov.setLineDash([]); };
+        ring(0, .5); [30, -30, 60, -60].forEach(function(la){ ring(la, .26); });
+        if (G.annot) try { G.annot({ ov: ov, M: M, proj: function(la, lo){ return proj(M, la, lo); }, path: function(p){ path(M, p); }, word: word, W: W, H: H, lon0: V.lon0, lat0: V.lat0 }); } catch(e){}
+        var loc = window.LOCATION || {}, la0 = +loc.lat, lo0 = +loc.lon;
+        if (isFinite(la0) && isFinite(lo0)){ var h = proj(M, la0, lo0); if (h[2] > 0.03){ ov.fillStyle = '#fff'; ov.beginPath(); ov.arc(h[0], h[1], 5, 0, 6.3); ov.fill(); ov.fillStyle = '#2B22F4'; ov.beginPath(); ov.arc(h[0], h[1], 3.4, 0, 6.3); ov.fill(); word(String(loc.name || 'YOU').toUpperCase(), h[0] + 9, h[1] + 3, '#2B22F4', '800 9px system-ui,sans-serif', true); } }
+        if (V.cells) drawCells(dt);
+        G.dirty = false;
+      };
+      G.mount = function(host){
+        if (G.el) return G.ok;
+        var el = G.el = document.createElement('div'); el.id = 'es-globe';
+        el.style.cssText = 'display:none;position:relative;width:100%;aspect-ratio:1 / 1;max-height:540px;margin-top:8px;border-radius:12px;overflow:hidden;background:radial-gradient(circle at 50% 45%,#15203f 0%,#0a1024 62%,#060a18 100%);touch-action:none;cursor:grab;';
+        el.innerHTML = '<canvas style="position:absolute;inset:0;width:100%;height:100%;display:block;"></canvas><canvas style="position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none;letter-spacing:0;"></canvas>'
+          + '<div style="position:absolute;right:10px;top:10px;display:flex;flex-direction:column;gap:5px;z-index:3;"><button type="button" data-g="home" style="cursor:pointer;border:none;border-radius:8px;padding:5px 10px;background:rgba(10,14,28,.72);color:#fff;font:800 8px system-ui,sans-serif;letter-spacing:.1em;">FACE MY LOCATION</button>'
+          + '<button type="button" data-g="pole" style="cursor:pointer;border:none;border-radius:8px;padding:5px 10px;background:rgba(10,14,28,.72);color:#fff;font:800 8px system-ui,sans-serif;letter-spacing:.1em;">LOOK DOWN ON THE POLE</button></div>'
+          + '<div data-g="hint" style="position:absolute;right:12px;bottom:10px;font:800 8px system-ui,sans-serif;letter-spacing:.1em;color:rgba(255,255,255,.7);text-shadow:0 0 6px #000;">DRAG TO TURN · PINCH TO ZOOM</div>';
+        host.parentNode.insertBefore(el, host.nextSibling);
+        glc = el.children[0]; ovc = el.children[1];
+        try { gl = glc.getContext('webgl', { premultipliedAlpha: true, antialias: true }); } catch(e){ gl = null; }
+        if (!gl) return (G.ok = false);
+        ov = ovc.getContext('2d'); try { ovc.style.letterSpacing = '0px'; } catch(e){}
+        var vs = 'attribute vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }';
+        var fs = 'precision highp float; uniform vec2 uC; uniform float uR; uniform mat3 uW; uniform sampler2D uBase; uniform sampler2D uSkin; uniform sampler2D uSkin2; uniform float uOn; uniform float uOn2;'
+          + 'void main(){ vec2 p = (gl_FragCoord.xy - uC) / uR; float r2 = dot(p, p);'
+          + ' if (r2 > 1.0){ float d = sqrt(r2) - 1.0; float a = exp(-d * 22.0) * 0.5; gl_FragColor = vec4(vec3(0.38, 0.62, 1.0) * a, a); return; }'
+          + ' float z = sqrt(1.0 - r2); vec3 w = uW * vec3(p.x, p.y, z);'
+          + ' vec2 uv = vec2(atan(w.x, w.z) / 6.2831853 + 0.5, 0.5 - asin(clamp(w.y, -1.0, 1.0)) / 3.14159265);'
+          + ' vec3 b = texture2D(uBase, uv).rgb; float g = dot(b, vec3(0.3, 0.59, 0.11)); b = mix(vec3(g), b, 0.6) * vec3(0.50, 0.56, 0.72);'
+          + ' vec4 s = texture2D(uSkin, uv); vec3 c = mix(b, s.rgb, s.a * 0.86 * uOn); vec4 s2 = texture2D(uSkin2, uv); c = mix(c, s2.rgb, s2.a * 0.86 * uOn2);'
+          + ' c *= 0.50 + 0.50 * z; c += vec3(0.30, 0.50, 0.90) * pow(1.0 - z, 3.0) * 0.35; gl_FragColor = vec4(c, 1.0); }';
+        try {
+          var sh = function(type, src){ var s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+          var pr = gl.createProgram(); gl.attachShader(pr, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(pr); gl.useProgram(pr);
+          var buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+          var aloc = gl.getAttribLocation(pr, 'a'); gl.enableVertexAttribArray(aloc); gl.vertexAttribPointer(aloc, 2, gl.FLOAT, false, 0, 0);
+          ['uC', 'uR', 'uW', 'uBase', 'uSkin', 'uSkin2', 'uOn', 'uOn2'].forEach(function(k){ U[k] = gl.getUniformLocation(pr, k); });
+          for (var i = 0; i < 3; i++){ var t = gl.createTexture(); gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 0]));
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); T.push(t); }
+        } catch(e){ return (G.ok = false); }
+        G.ok = true;
+        G.img(GIBS4326 + '&FORMAT=image/jpeg&LAYERS=BlueMarble_ShadedRelief_Bathymetry').then(function(im){ G.put(0, im); }).catch(function(){});
+        var near = function(lon){ var d = ((lon - G.V.lon0 + 540) % 360) - 180; return G.V.lon0 + d; };
+        G.face = function(lat, lon){ G.V.tLat = G.V.cells ? 0 : lat; G.V.tLon = near(lon); G.dirty = true; };
+        el.addEventListener('pointerdown', function(e){ if (e.target.getAttribute && e.target.getAttribute('data-g')) return; el.setPointerCapture(e.pointerId); pts[e.pointerId] = [e.clientX, e.clientY]; dragging = true; el.style.cursor = 'grabbing'; var hn = el.querySelector('[data-g=hint]'); if (hn) hn.style.opacity = 0; });
+        el.addEventListener('pointermove', function(e){ if (!pts[e.pointerId]) return; var ids = Object.keys(pts);
+          if (ids.length === 2){ pts[e.pointerId] = [e.clientX, e.clientY]; var a = pts[ids[0]], b = pts[ids[1]], d = Math.hypot(a[0] - b[0], a[1] - b[1]); if (pinch) G.V.zoom = Math.max(0.8, Math.min(2.6, G.V.zoom * d / pinch)); pinch = d; G.dirty = true; return; }
+          var p = pts[e.pointerId], k = 0.28 / G.V.zoom * (440 / Math.max(260, Math.min(W, H))); G.V.tLon -= (e.clientX - p[0]) * k; if (!G.V.cells) G.V.tLat = Math.max(-89, Math.min(89, G.V.tLat + (e.clientY - p[1]) * k)); G.V.lon0 = G.V.tLon; G.V.lat0 = G.V.tLat; pts[e.pointerId] = [e.clientX, e.clientY]; G.dirty = true; });
+        var up = function(e){ delete pts[e.pointerId]; pinch = 0; if (!Object.keys(pts).length){ dragging = false; el.style.cursor = 'grab'; } };
+        el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up);
+        el.addEventListener('wheel', function(e){ if (!e.ctrlKey && !e.metaKey) return; e.preventDefault(); G.V.zoom = Math.max(0.8, Math.min(2.6, G.V.zoom * (e.deltaY < 0 ? 1.08 : 0.926))); G.dirty = true; }, { passive: false });   // a plain wheel is the page scrolling past; a trackpad pinch arrives as ctrl+wheel, and that zooms
+        el.querySelector('[data-g=home]').onclick = function(e){ e.stopPropagation(); var loc = window.LOCATION || {}; if (isFinite(+loc.lat)) G.face(+loc.lat, +loc.lon); };
+        el.querySelector('[data-g=pole]').onclick = function(e){ e.stopPropagation(); if (G.V.cells){ G.V.cells = null; } G.V.tLat = 89; G.dirty = true; };
+        var rs = function(){ var r = el.getBoundingClientRect(); if (!r.width) return; W = r.width; H = r.height; [glc, ovc].forEach(function(c){ c.width = Math.round(W * DPR); c.height = Math.round(H * DPR); }); gl.viewport(0, 0, glc.width, glc.height); G.dirty = true; };
+        if (window.ResizeObserver) new ResizeObserver(rs).observe(el); window.addEventListener('resize', rs); G.resize = rs;
+        requestAnimationFrame(frame);
+        return true;
+      };
+      G.img = function(url){ return new Promise(function(res, rej){ var im = new Image(); im.crossOrigin = 'anonymous'; im.onload = function(){ res(im); }; im.onerror = function(){ rej(new Error('image')); }; im.src = url; }); };
+      G.put = function(unit, im){ if (!G.ok) return; gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, T[unit]); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, im); G.dirty = true; };
+      /* up to two skins; resolves true when every picture arrived and is on the sphere, false when any could not be had */
+      G.skins = function(urls){ G.want = urls.join('|'); var want = G.want;
+        return Promise.all(urls.map(function(u){ return G.img(u); })).then(function(ims){ if (G.want !== want) return true; ims.forEach(function(im, i){ G.put(1 + i, im); }); G.on = [ims.length > 0 ? 1 : 0, ims.length > 1 ? 1 : 0]; G.dirty = true; return true; })
+          .catch(function(){ if (G.want === want){ G.on = [0, 0]; G.dirty = true; } return false; }); };
+      G.clear = function(){ G.want = ''; G.on = [0, 0]; G.annot = null; G.V.cells = null; G.dirty = true; };
+      G.show = function(on){ if (G.el) G.el.style.display = on ? 'block' : 'none'; if (on && G.resize) setTimeout(G.resize, 0); };
+      return G;
+    })();
+    var GIBS4326 = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&STYLES=&SRS=EPSG:4326&BBOX=-180,-90,180,90&WIDTH=2048&HEIGHT=1024';
+    var gibsWorld = function(layer, day, small){ return (small ? GIBS4326.replace('WIDTH=2048&HEIGHT=1024', 'WIDTH=1024&HEIGHT=512') : GIBS4326) + '&FORMAT=image/png&TRANSPARENT=true&LAYERS=' + layer + (day ? '&TIME=' + day : ''); };
+    /* a whole-world GFS picture from THREDDS, through the proxy (WebGL needs the CORS header the proxy adds) */
+    var gfsWorld = function(params, iso, small){ var wh = small ? 'WIDTH=1024&HEIGHT=512' : 'WIDTH=2048&HEIGHT=1024';
+      return 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://thredds.ucar.edu/thredds/wms/grib/NCEP/GFS/Global_0p25deg/Best?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&CRS=CRS:84&BBOX=-180,-90,180,90&' + wh + '&FORMAT=image/png&TRANSPARENT=true&NUMCOLORBANDS=40&' + params + (iso ? '&TIME=' + iso : '')); };
+    var stageSet = function(which){ STAGE = which; var bd = document.getElementById('es-body'); if (bd) bd.classList.toggle('side', which === 'globe' && window.innerWidth > 1100); var m = document.getElementById('es-map'); if (m) m.style.display = which === 'map' ? 'block' : 'none'; GLOBE.show(which === 'globe'); if (which === 'map') sized(); };
+    /* THE GLOBE'S PLAYER: a list of whole-world pictures swapped through the first skin. Same callback shape as the flat map's. */
+    var GPLAY = (function(){
+      var P = { frames: [], i: 0, timer: null, token: null, paused: false, badge: null, cb: null, rest: 1600, step: 180 };
+      var tell = function(o){ try { if (P.cb) P.cb(o); } catch(e){} };
+      P.show = function(i){ if (!P.frames.length) return; P.i = (i + P.frames.length) % P.frames.length; var f = P.frames[P.i]; GLOBE.put(1, f); GLOBE.on = [1, 0];
+        if (P.badge) P.badge.firstChild.textContent = f._label; tell({ phase: P.paused ? 'paused' : 'playing', label: f._label, i: P.i, total: P.frames.length }); };
+      var tick = function(){ if (P.paused || !P.frames.length) return; P.timer = setTimeout(function(){ if (!P.token || P.paused) return; if (!document.hidden) P.show(P.i + 1); tick(); }, P.i === P.frames.length - 1 ? P.rest : P.step); };
+      P.pause = function(){ P.paused = true; clearTimeout(P.timer); P.show(P.i); };
+      P.resume = function(){ if (!P.frames.length) return; P.paused = false; P.show(P.i); tick(); };
+      P.stop = function(quiet){ var was = !!P.token; clearTimeout(P.timer); P.token = null; P.paused = false; P.frames.forEach(function(im){ im.onload = im.onerror = null; }); P.frames = [];
+        if (P.badge && P.badge.parentNode) P.badge.parentNode.removeChild(P.badge); P.badge = null; if (was && !quiet) tell({ phase: 'stopped' }); return was; };
+      P.start = function(list, words, cb, step){
+        P.stop(true); P.cb = cb; P.step = step || 180; if (!GLOBE.ok || !list.length) return;
+        var token = P.token = {}, done = 0, imgs = list.map(function(it){ var im = new Image(); im.crossOrigin = 'anonymous'; im._label = it.label;
+          im.onload = im.onerror = function(){ if (P.token !== token) return; done++; tell({ phase: 'loading', done: done, total: list.length }); if (done === list.length) go(); }; im.src = it.url; return im; });
+        tell({ phase: 'loading', done: 0, total: list.length });
+        var go = function(){ P.frames = imgs.filter(function(im){ return im.naturalWidth > 0; }); if (P.frames.length < 5){ P.stop(); return; }
+          var b = P.badge = document.createElement('div');
+          b.style.cssText = 'position:absolute;left:12px;bottom:26px;z-index:4;display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:10px;background:rgba(10,14,28,.78);color:#fff;font:800 12px system-ui,sans-serif;letter-spacing:.1em;cursor:pointer;';
+          b.innerHTML = '<span></span><span style="font-weight:700;font-size:9px;opacity:.7;"></span><span title="stop" style="font-weight:900;font-size:12px;opacity:.85;padding:0 2px 0 6px;border-left:1px solid rgba(255,255,255,.25);">✕</span>';
+          var w2 = b.children[1], lab = function(){ w2.textContent = words + ' · TAP TO ' + (P.paused ? 'PLAY' : 'PAUSE'); };
+          b.onclick = function(e){ e.stopPropagation(); if (e.target === b.lastChild){ P.stop(); return; } if (P.paused) P.resume(); else P.pause(); lab(); };
+          b.addEventListener('pointerdown', function(e){ e.stopPropagation(); });
+          GLOBE.el.appendChild(b); P.paused = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches); lab(); P.show(P.paused ? P.frames.length - 1 : 0); if (!P.paused) tick(); };
+      };
+      return P;
+    })();
+
+    /* ================= EL NINO (continued) ================= */
     var PROXY = 'https://proxy.bluishvoid.com/?url=', CPC = 'https://www.cpc.ncep.noaa.gov/';
     var GIBS = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS=GHRSST_L4_MUR25_Sea_Surface_Temperature_Anomalies&STYLES=&FORMAT=image/png&TRANSPARENT=true&SRS=EPSG:4326';
     var PAL = '6b00db,8900cf,7f1ad1,2264f1,00aeff,03f8fa,47ffb6,88ff84,b1ff98,bfe8a9,c2cab8,e2e2a2,fff679,ffd025,ffaa00,ff8200,ff3d00,f90113,e60067,bf0068,88000f,800000'.split(',');
@@ -93599,7 +93762,7 @@ function closeAlertModal(){
         + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;align-items:center;">' + btn('now', 'NOW') + btn('y2015', 'THIS DATE IN 2015 · THE LAST VERY STRONG EL NIÑO') + btn('y2010', 'THIS DATE IN 2010 · LA NIÑA')
         + '<button type="button" id="enso-play" style="cursor:pointer;font:800 8.5px system-ui,sans-serif;letter-spacing:.09em;padding:5px 12px;border-radius:12px;border:1px solid #b91c1c;background:' + (S.anim ? '#b91c1c' : 'rgba(255,255,255,.7)') + ';color:' + (S.anim ? '#fff' : '#b91c1c') + ';">' + (S.anim ? '\u25a0 STOP' : '\u25b6 PLAY THE LAST 90 DAYS') + '</button>'
         + (S.anim ? '<input id="enso-scrub" type="range" min="0" max="45" value="0" style="flex:1 1 160px;min-width:120px;max-width:360px;accent-color:#b91c1c;"><span id="enso-anim-lbl" style="font:800 9px system-ui,sans-serif;letter-spacing:.08em;color:#1b2340;min-width:150px;"></span>' : '')
-        + '<span style="font:700 8px system-ui,sans-serif;letter-spacing:.08em;color:#6b7389;">THE MAP IS WEARING THIS · SEA-SURFACE TEMPERATURE AGAINST NORMAL · ' + (day || '') + ' · NASA MUR</span></div>'
+        + '<span style="font:700 8px system-ui,sans-serif;letter-spacing:.08em;color:#6b7389;">' + (STAGE === 'globe' ? 'THE GLOBE' : 'THE MAP') + ' IS WEARING THIS · SEA-SURFACE TEMPERATURE AGAINST NORMAL · ' + (day || '') + ' · NASA MUR</span></div>'
         + (day ? ''
           + '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;margin-top:5px;font:700 8px system-ui,sans-serif;letter-spacing:.06em;color:#1b2340;"><span>−5.4°F</span><div style="flex:1 1 160px;min-width:120px;max-width:420px;height:8px;border-radius:4px;background:linear-gradient(90deg,#' + PAL.join(',#') + ');"></div><span>+5.4°F OR MORE</span><span style="color:#6b7389;">COLDER / WARMER THAN NORMAL (±3°C) · THE SCALE STOPS THERE: DARK RED MAY BE MORE</span></div>' : '')
         + (wk ? '<div style="margin-top:12px;font:800 9px system-ui,sans-serif;letter-spacing:.1em;color:#1b2340;">THE NIÑO 3.4 BOX, EVERY WEEK SINCE 1981 <span style="color:#6b7389;font-weight:700;">· RED = WARMER THAN NORMAL, BLUE = COLDER · THE LINES AT ±0.9°F (±0.5°C) ARE WHERE AN EVENT BEGINS, +3.6°F (+2°C) IS “VERY STRONG”</span></div><canvas id="enso-chart" style="display:block;width:100%;margin-top:4px;"></canvas>' : '')
@@ -93617,7 +93780,7 @@ function closeAlertModal(){
         + '<div style="font:600 8px system-ui,sans-serif;letter-spacing:.06em;color:#6b7389;margin-top:10px;">SOURCES · <a href="' + CPC + 'products/analysis_monitoring/enso_advisory/ensodisc.shtml" target="_blank" rel="noopener" style="color:inherit;">CPC ENSO DIAGNOSTIC DISCUSSION</a> · <a href="' + CPC + 'data/indices/wksst9120.for" target="_blank" rel="noopener" style="color:inherit;">CPC WEEKLY NIÑO INDICES</a> · <a href="https://podaac.jpl.nasa.gov/dataset/MUR25-JPL-L4-GLOB-v04.2" target="_blank" rel="noopener" style="color:inherit;">NASA JPL MUR SST VIA GIBS</a></div>';
       [].slice.call(root.querySelectorAll('[data-cmp]')).forEach(function(b){ b.onclick = function(e){ e.stopPropagation(); stopAnim(); S.cmp = b.getAttribute('data-cmp'); skin(); render(); }; });
       var pb = document.getElementById('enso-play'); if (pb) pb.onclick = function(e){ e.stopPropagation(); if (S.anim) { stopAnim(); render(); } else startAnim(); };
-      var sc = document.getElementById('enso-scrub'); if (sc) sc.oninput = function(){ var A = ANIM; if (A && A.frames.length){ var want = +sc.value; A.pause(); A.show(want); } };   // read the thumb FIRST: pausing reports the current frame, which writes the slider back (a touch drag does not focus it)
+      var sc = document.getElementById('enso-scrub'); if (sc) sc.oninput = function(){ var A = (STAGE === 'globe') ? GPLAY : ANIM; if (A && A.frames.length){ var want = +sc.value; A.pause(); A.show(want); } };   // read the thumb FIRST: pausing reports the current frame, which writes the slider back (a touch drag does not focus it)
       var cv = document.getElementById('enso-chart'); if (cv) chart(cv);
       mapPlay();
     }
@@ -93646,14 +93809,15 @@ function closeAlertModal(){
     };
     /* PLAY lives on the map: nobody should have to go and fetch a button to animate the thing in front of them */
     var mapPlay = function(){
-      var host = document.getElementById('es-map'), b = document.getElementById('es-enso-mapplay');
+      var host = STAGE === 'globe' ? GLOBE.el : document.getElementById('es-map'), b = document.getElementById('es-enso-mapplay');
+      if (b && b.parentNode !== host){ b.parentNode.removeChild(b); b = null; }                     // the stage changed under it
       var want = !!host && CUR === 'enso' && !S.anim && !!S.day;
       if (!want){ if (b && b.parentNode) b.parentNode.removeChild(b); return; }
       if (b) return;
       b = document.createElement('button'); b.id = 'es-enso-mapplay'; b.type = 'button';
-      b.style.cssText = 'position:absolute;left:12px;bottom:14px;z-index:650;padding:7px 12px;border-radius:10px;border:none;background:rgba(10,14,28,.78);color:#fff;font:800 10px system-ui,sans-serif;letter-spacing:.1em;cursor:pointer;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);';
+      b.style.cssText = 'position:absolute;left:12px;bottom:26px;z-index:650;padding:7px 12px;border-radius:10px;border:none;background:rgba(10,14,28,.78);color:#fff;font:800 10px system-ui,sans-serif;letter-spacing:.1em;cursor:pointer;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);';
       b.textContent = '▶ PLAY THE LAST 90 DAYS';
-      b.onclick = function(e){ e.stopPropagation(); startAnim(); };
+      b.onclick = function(e){ e.stopPropagation(); startAnim(); }; b.addEventListener('pointerdown', function(e){ e.stopPropagation(); });
       host.appendChild(b);
     };
     /* the box the index is measured in, on the map, wearing this week's published number */
@@ -93668,6 +93832,38 @@ function closeAlertModal(){
         html: '<div style="display:inline-block;font:800 9px system-ui,sans-serif;letter-spacing:.06em;color:#1b2340;background:rgba(255,252,244,.9);padding:2px 6px;border-radius:4px;white-space:nowrap;">NIÑO 3.4 · THE BOX THAT IS WATCHED' + (Lw && S.cmp === 'now' ? ' · ' + F(Lw.n34) + ' THIS WEEK' : '') + '</div>' }) }).addTo(EM));
     };
     window.addEventListener('resize', function(){ if (CUR === 'enso' && isOpen()){ var cv = document.getElementById('enso-chart'); if (cv) chart(cv); } });
+
+    /* ON THE GLOBE the same three controls drive the sphere instead of the flat map: the skin is one whole-world picture,
+       and PLAY swaps 46 of them (1,024 px each) through the first skin slot. The panel, its buttons and its scrubber do not
+       know which stage is up. */
+    var ANOM25 = 'GHRSST_L4_MUR25_Sea_Surface_Temperature_Anomalies';
+    var skinFlat = skin, startAnimFlat = startAnim, stopAnimFlat = stopAnim;
+    skin = function(){
+      if (STAGE !== 'globe') return skinFlat();
+      var md = S.day ? S.day.slice(4) : '', d = S.cmp === 'y2015' && md ? '2015' + md : S.cmp === 'y2010' && md ? '2010' + md : (S.day || null);
+      return GLOBE.skins([gibsWorld(ANOM25, d)]);
+    };
+    stopAnim = function(){ if (GPLAY.stop(true)){ S.anim = null; if (CUR === 'enso' && STAGE === 'globe') skin(); } stopAnimFlat(); };
+    startAnim = function(){
+      if (STAGE !== 'globe') return startAnimFlat();
+      if (!S.day || CUR !== 'enso') return;
+      S.cmp = 'now'; S.anim = 'loading'; render();
+      var end = Date.parse(S.day + 'T00:00:00Z'), list = [];
+      for (var k = 90; k >= 0; k -= 2){ var d = new Date(end - k * 864e5).toISOString().slice(0, 10); list.push({ url: gibsWorld(ANOM25, d, true), label: new Date(d + 'T12:00:00Z').toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' }).toUpperCase() }); }
+      GPLAY.start(list, 'SEA TEMP VS NORMAL', function(o){
+        var lbl = document.getElementById('enso-anim-lbl'), sc = document.getElementById('enso-scrub');
+        if (o.phase === 'stopped'){ S.anim = null; if (CUR === 'enso') skin(); render(); return; }
+        if (o.phase === 'loading'){ if (lbl) lbl.textContent = 'LOADING ' + o.done + ' / ' + o.total; return; }
+        S.anim = o.phase; if (sc){ sc.max = o.total - 1; if (document.activeElement !== sc) sc.value = o.i; } if (lbl) lbl.textContent = o.label + (o.phase === 'paused' ? ' · PAUSED' : '');
+      });
+    };
+    var ensoAnnot = function(c){
+      if (c.proj(0, -145)[2] < 0.25) return;
+      var bx = [], lo, la; for (lo = -170; lo <= -120; lo += 2) bx.push([5, lo]); for (la = 5; la >= -5; la -= 1) bx.push([la, -120]); for (lo = -120; lo >= -170; lo -= 2) bx.push([-5, lo]); for (la = -5; la <= 5; la += 1) bx.push([la, -170]);
+      c.ov.strokeStyle = '#fff'; c.ov.lineWidth = 2; c.path(bx);
+      var q = c.proj(-6.5, -168), Lw = S.wk && S.wk[S.wk.length - 1];
+      c.word('NIÑO 3.4' + (Lw && S.cmp === 'now' && !S.anim ? ' · ' + F(Lw.n34) + ' THIS WEEK' : ''), q[0], q[1] + 10, '#1b2340', '800 9px system-ui,sans-serif', true);
+    };
 
     /* ---- the 90-day player ---- */
     var ANIM = (function(){
@@ -94080,6 +94276,7 @@ function closeAlertModal(){
         ferrel:function(){ ring(30); ring(60); band(47, 'THE WESTERLIES \u00b7 THE FERREL CELL\u2019S GROUND FLOOR', '#fed7aa'); band(31.5, '30\u00b0', '#fff', 8); band(61.5, '60\u00b0', '#fff', 8); },
         polar: function(){ ring(60); band(69, 'POLAR EASTERLIES \u00b7 COLD AIR DRAINING OFF THE ICE', '#99f6e4'); band(61.5, '60\u00b0 \u00b7 THE POLAR FRONT', '#fff', 8); }
       };
+      C.params = SKINS;
       return C;
     })();
     var CELLTXT = {
@@ -94099,16 +94296,16 @@ function closeAlertModal(){
       var a = Math.abs(la), nm = String(loc.name || 'YOU').toUpperCase(), h = la < 0 ? 'S' : 'N';
       return nm + ' \u00b7 ' + Math.round(a) + '\u00b0' + h + ' \u00b7 ' + (a < 30 ? 'UNDER THE HADLEY CELL, IN THE TRADE WIND BELT: YOUR STEADY WIND COMES FROM THE EAST' : a < 60 ? 'UNDER THE FERREL CELL, IN THE WESTERLIES: YOUR WEATHER ARRIVES FROM THE WEST, STEERED BY THE JET STREAM' : 'UNDER THE POLAR CELL');
     };
-    var cellView = function(k, skins, wideFrame, phoneFrame, labels){
+    var cellView = function(k, skins, wideFrame, phoneFrame, labels, noMap){
       var T = CELLTXT[k], loc = window.LOCATION || {};
-      CELLS.show(skins, wide() ? wideFrame : phoneFrame, labels);
+      if (!noMap) CELLS.show(skins, wide() ? wideFrame : phoneFrame, labels);      // on the globe the skins go on the sphere instead
       line('<span style="color:' + T[1] + ';font-weight:900;letter-spacing:.06em;">' + T[0] + '</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">\u00b7 ' + T[3].charAt(0) + T[3].slice(1).toLowerCase().replace(/ mph/g, ' mph').replace(/el ni\u00f1o/g, 'El Ni\u00f1o') + ' \u00b7 NOAA GFS model via Unidata, the latest run.</span>');
       var p = document.getElementById('es-panel'); if (!p) return;
       p.innerHTML = '<div class="enso-grid"><div style="min-width:0;"><canvas id="es-cell-scene"></canvas></div><div style="min-width:0;">'
         + '<div style="font:900 10px system-ui,sans-serif;letter-spacing:.14em;color:' + T[1] + ';">' + T[0] + '</div>'
         + '<div style="font:500 11.5px/1.45 system-ui,sans-serif;color:#1b2340;margin-top:4px;">' + T[2] + '</div>'
         + (cellWhere() ? '<div style="margin-top:10px;padding:8px 10px;border-radius:9px;background:rgba(255,255,255,.6);font:700 8.5px/1.45 system-ui,sans-serif;letter-spacing:.06em;color:#2B22F4;">' + cellWhere() + '</div>' : '')
-        + '<div style="font:600 8px/1.45 system-ui,sans-serif;letter-spacing:.06em;color:#6b7389;margin-top:8px;">THE CUTAWAY IS A DIAGRAM OF THE LONG-TERM AVERAGE, EQUATOR TO POLE \u00b7 THE MAP ABOVE IS TODAY\u2019S MODEL ANALYSIS \u00b7 THE BANDS UNDER THE CUTAWAY USE THE MAP\u2019S TWO COLOURS</div>'
+        + '<div style="font:600 8px/1.45 system-ui,sans-serif;letter-spacing:.06em;color:#6b7389;margin-top:8px;">THE CUTAWAY IS A DIAGRAM OF THE LONG-TERM AVERAGE, EQUATOR TO POLE \u00b7 THE PICTURE ABOVE IS TODAY\u2019S MODEL ANALYSIS \u00b7 THE BANDS UNDER THE CUTAWAY USE THE MAP\u2019S TWO COLOURS</div>'
         + '</div></div>';
       try { bvCellScene(document.getElementById('es-cell-scene'), { focus: k, lat: +loc.lat, name: String(loc.name || 'YOU').toUpperCase() }); } catch(e){}
     };
@@ -94116,22 +94313,54 @@ function closeAlertModal(){
 
 
     /* ================= THE VIEWS, AND THE DROPDOWN ================= */
+    /* a view is: panel() = words and data; flat() = the Leaflet map; globe() = the sphere, returning whether it could be shown
+       (false -> the flat map takes over, e.g. while the proxy does not yet carry the wind server). GULF STREAM and AMOC have
+       only on(): they are regional, and stay flat. */
+    var JETP = 'LAYERS=u-component_of_wind_isobaric:v-component_of_wind_isobaric-mag&ELEVATION=25000&STYLES=default-scalar/seq-YlOrRd&COLORSCALERANGE=30,85&BELOWMINCOLOR=transparent&ABOVEMAXCOLOR=extend';
+    var globeBtn = function(label, fn){ var b = document.getElementById('es-globe-play'); if (b && b.parentNode) b.parentNode.removeChild(b); if (!label || !GLOBE.el) return;
+      b = document.createElement('button'); b.type = 'button'; b.id = 'es-globe-play'; b.textContent = label;
+      b.style.cssText = 'position:absolute;left:12px;bottom:26px;z-index:4;padding:7px 12px;border-radius:10px;border:none;background:rgba(10,14,28,.78);color:#fff;font:800 10px system-ui,sans-serif;letter-spacing:.1em;cursor:pointer;';
+      b.onclick = function(e){ e.stopPropagation(); fn(); }; b.addEventListener('pointerdown', function(e){ e.stopPropagation(); }); GLOBE.el.appendChild(b); };
+    var jetWhen = function(d){ var tz = (window.LOCATION && window.LOCATION.tz) || undefined, s2; try { s2 = d.toLocaleString('en-US', { timeZone: tz, weekday: 'short', hour: 'numeric' }).toUpperCase().replace(',', ''); } catch(e){ s2 = d.toUTCString().slice(0, 22).toUpperCase(); }
+      var dh = Math.round((d - Date.now()) / 36e5); return s2 + ' · ' + (Math.abs(dh) < 2 ? 'ABOUT NOW' : dh > 0 ? 'IN ' + (dh >= 48 ? Math.round(dh / 24) + ' DAYS' : dh + ' H') : (-dh) + ' H AGO'); };
+    var jetPlayGlobe = function(){ globeBtn(null); var list = []; for (var k = 0; k < 21; k++){ var n = new Date(); n.setUTCMinutes(0, 0, 0); n.setUTCHours(Math.floor(n.getUTCHours() / 6) * 6 + 6 * k); list.push({ url: gfsWorld(JETP, n.toISOString().slice(0, 13) + ':00:00.000Z', true), label: jetWhen(n) }); }
+      GPLAY.start(list, 'JET STREAM FORECAST', function(o){ if (o.phase === 'stopped' && CUR === 'jet' && STAGE === 'globe'){ GLOBE.skins([gfsWorld(JETP)]); globeBtn('▶ PLAY THE NEXT 5 DAYS', jetPlayGlobe); } }, 260); };
+    var CELLLAB = {
+      trades: [[16, 'NORTH-EAST TRADES', '#99f6e4'], [-14, 'SOUTH-EAST TRADES', '#99f6e4'], [3, 'DOLDRUMS', '#fff'], [33, 'HORSE LATITUDES · 30°', '#fff'], [47, 'WESTERLIES', '#fed7aa'], [-47, 'THE ROARING FORTIES', '#fed7aa']],
+      easterlies: [[15, 'TRADE WINDS', '#99f6e4'], [-15, 'TRADE WINDS', '#99f6e4'], [68, 'POLAR EASTERLIES', '#99f6e4'], [-66, 'POLAR EASTERLIES', '#99f6e4']],
+      hadley: [[7, 'THE WET BAND · AIR RISING', '#fff'], [27, 'DRY · AIR SINKING', '#fde68a'], [-26, 'DRY · AIR SINKING', '#fde68a']],
+      ferrel: [[47, 'THE WESTERLIES', '#fed7aa'], [-48, 'THE WESTERLIES', '#fed7aa']],
+      polar: [[72, 'POLAR EASTERLIES', '#99f6e4'], [60.5, '60° · THE POLAR FRONT', '#fff']]
+    };
+    var cellGlobe = function(k, skins){
+      GLOBE.annot = function(c){ (CELLLAB[k] || []).forEach(function(L2){ var q = c.proj(L2[0], c.lon0); if (q[2] < 0.2) return; c.ov.font = '900 9px system-ui,sans-serif'; var w = c.ov.measureText(L2[1]).width; c.word(L2[1], q[0] - w / 2, q[1] - 3, L2[2], '900 9px system-ui,sans-serif'); }); };
+      if (k === 'polar'){ GLOBE.V.cells = null; GLOBE.V.tLat = 89; GLOBE.face(89, homeLon()); } else { GLOBE.V.cells = k; GLOBE.face(0, k === 'ferrel' ? homeLon() : -150); }
+      return GLOBE.skins(skins.map(function(s2){ return gfsWorld(CELLS.params[s2]); }));
+    };
+    var CV = {   // the five circulation tabs: [skins, wide frame, phone frame, flat labels]
+      trades: [['EAST', 'WEST'], [[-40, -215], [44, -5]], null, 'belts'], easterlies: [['EAST'], [[-58, -215], [77, -5]], null, 'east'], hadley: [['MOIST'], [[-42, -215], [46, -5]], null, 'hadley'],
+      ferrel: [['WEST'], [[20, -200], [68, 5]], null, 'ferrel'], polar: [['EAST'], [[44, -200], [80, 5]], null, 'polar'] };
+    var phoneFrame = function(k){ var h = homeLon(); return k === 'ferrel' ? [[22, h - 40], [66, h + 40]] : k === 'polar' ? [[46, h - 50], [80, h + 50]] : k === 'easterlies' ? [[-45, h - 50], [76, h + 45]] : [[-34, h - 55], [40, h + 45]]; };
+    var cellEntry = function(k, label, group){ var d = CV[k]; return { label: label, group: group,
+      globe: function(){ cellView(k, d[0], d[1], phoneFrame(k), [CELLS.labels[d[3]]], true); return cellGlobe(k, d[0]); },
+      flat: function(){ cellView(k, d[0], d[1], phoneFrame(k), [CELLS.labels[d[3]]]); }, off: cellOff }; };
+    var ensoLine = function(){ line('<span style="color:#b91c1c;font-weight:900;letter-spacing:.06em;">SEA TEMPERATURE AGAINST NORMAL</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">· red is warmer than usual, blue cooler. El Niño is the warm tongue spreading east along the equator; La Niña is the same stretch running cold.</span>'); };
     var VIEWS = {
-      enso: { label: 'EL NI\u00d1O',
-        on: function(){ fit(wide() ? [[-32, -215], [52, -60]] : [[-26, -178], [36, -78]]); skin(); ninoBox(true); render();
-          line('<span style="color:#b91c1c;font-weight:900;letter-spacing:.06em;">SEA TEMPERATURE AGAINST NORMAL</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">· red is warmer than usual, blue cooler. El Niño is the warm tongue spreading east along the equator; La Niña is the same stretch running cold.</span>');
-          load().then(function(){ if (CUR === 'enso'){ render(); skin(); ninoBox(true); } }).catch(function(){ if (CUR === 'enso') render(); }); },
-        off: function(){ stopAnim(); S.cmp = 'now'; ninoBox(false); skinSet(null); mapPlay(); } },
+      enso: { label: 'EL NIÑO',
+        panel: function(){ render(); ensoLine(); load().then(function(){ if (CUR !== 'enso') return; render(); if (STAGE === 'globe'){ GLOBE.dirty = true; mapPlay(); if (S.cmp !== 'now') skin(); } else { skin(); ninoBox(true); } }).catch(function(){ if (CUR === 'enso') render(); }); },
+        globe: function(){ GLOBE.V.cells = null; GLOBE.annot = ensoAnnot; GLOBE.face(2, -140); return skin(); },
+        flat: function(){ fit(wide() ? [[-32, -215], [52, -60]] : [[-26, -178], [36, -78]]); skin(); ninoBox(true); },
+        off: function(){ stopAnim(); S.cmp = 'now'; ninoBox(false); skinSet(null); } },
       gulf: { label: 'GULF STREAM', on: function(){ GULF(true); }, off: function(){ GULF(false); } },
-      amoc: { label: 'AMOC',
-        on: function(){ AMOC(true); renderAmoc(); loadAmoc().then(function(){ if (CUR === 'amoc') renderAmoc(); }); }, off: function(){ AMOC(false); } },
-      jet:  { label: 'JET STREAM', on: function(){ JET(true); }, off: function(){ JET(false); } },
-      /* the global circulation: five tabs, two live skins, one cutaway (see CELLS / bvCellScene) */
-      trades:     { label: 'TRADE WINDS', group: 'THE GLOBAL CIRCULATION', on: function(){ cellView('trades', ['EAST', 'WEST'], [[-40, -215], [44, -5]], [[-32, homeLon() - 55], [38, homeLon() + 45]], [CELLS.labels.belts]); }, off: cellOff },
-      easterlies: { label: 'EASTERLIES',  on: function(){ cellView('easterlies', ['EAST'], [[-58, -215], [77, -5]], [[-45, homeLon() - 50], [76, homeLon() + 45]], [CELLS.labels.east]); }, off: cellOff },
-      hadley:     { label: 'HADLEY CELL', on: function(){ cellView('hadley', ['MOIST'], [[-42, -215], [46, -5]], [[-34, homeLon() - 55], [40, homeLon() + 45]], [CELLS.labels.hadley]); }, off: cellOff },
-      ferrel:     { label: 'FERREL CELL', on: function(){ cellView('ferrel', ['WEST'], [[20, -200], [68, 5]], [[22, homeLon() - 40], [66, homeLon() + 40]], [CELLS.labels.ferrel]); }, off: cellOff },
-      polar:      { label: 'POLAR CELL',  on: function(){ cellView('polar', ['EAST'], [[44, -200], [80, 5]], [[46, homeLon() - 50], [80, homeLon() + 50]], [CELLS.labels.polar]); }, off: cellOff }
+      amoc: { label: 'AMOC', on: function(){ AMOC(true); renderAmoc(); loadAmoc().then(function(){ if (CUR === 'amoc') renderAmoc(); }); }, off: function(){ AMOC(false); } },
+      jet:  { label: 'JET STREAM',
+        globe: function(){ GLOBE.V.cells = null; GLOBE.annot = null; GLOBE.face(46, homeLon());
+          line('<span style="color:#1d4ed8;font-weight:900;letter-spacing:.06em;">THE JET STREAM</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">· the river of wind about 34,000 ft up, blowing west to east, shown only where it tops ~65 mph: pale ~65–100, orange ~100–150, deep red 150–190 mph and more. Press LOOK DOWN ON THE POLE to see it as what it is, a wavy ring round the top of the planet. A dip in it pulls a hurricane north and out to sea, and it steers every front and nor’easter. A strong El Niño drags the Pacific branch south and east. NOAA GFS model via Unidata · press play for the next five days.</span>');
+          return GLOBE.skins([gfsWorld(JETP)]).then(function(ok){ if (ok && CUR === 'jet') globeBtn('▶ PLAY THE NEXT 5 DAYS', jetPlayGlobe); return ok; }); },
+        flat: function(){ JET(true); }, off: function(){ JET(false); globeBtn(null); } },
+      /* the global circulation: five tabs, two live skins, one cutaway (see CELLS / bvCellScene), and on the globe the cells on the rim */
+      trades: cellEntry('trades', 'TRADE WINDS', 'THE GLOBAL CIRCULATION'), easterlies: cellEntry('easterlies', 'EASTERLIES'), hadley: cellEntry('hadley', 'HADLEY CELL'),
+      ferrel: cellEntry('ferrel', 'FERREL CELL'), polar: cellEntry('polar', 'POLAR CELL')
     };
     var setView = function(k){
       if (!VIEWS[k] || !EM) return;
@@ -94139,15 +94368,22 @@ function closeAlertModal(){
       /* NOTHING FROM THE LAST VIEW SURVIVES THE SWITCH. El Nino's off() asked mapPlay() to take its PLAY button away while CUR
          still said 'enso', so the button stayed on the map under every other view -- and pressed there, it ran the El Nino
          animation over the jet stream (user 2026-09-20: "the amoc is stuck behind the jet stream"; it was this, found by
-         listing the map's layers and buttons on the live site). So: both players are stopped here whatever the views did,
-         CUR changes FIRST, then the button is asked again. */
-      try { stopAnim(); if (JET.stop) JET.stop(); } catch(e){}
-      CUR = k; mapPlay(); var p = document.getElementById('es-panel'); if (p) p.innerHTML = ''; line('');
+         listing the map's layers and buttons on the live site). So: every player is stopped here whatever the views did,
+         CUR changes FIRST, then the button is asked again. The globe is wiped the same way. */
+      try { stopAnim(); GPLAY.stop(true); if (JET.stop) JET.stop(); globeBtn(null); } catch(e){}
+      CUR = k; var p = document.getElementById('es-panel'); if (p) p.innerHTML = ''; line('');
       try { localStorage.setItem('bv_es_view', k); } catch(e){}
       [].slice.call(document.querySelectorAll('.es-view-btn')).forEach(function(b){ var on = b.getAttribute('data-view') === k;      // the LIVE row's two colours
         b.style.background = on ? 'rgba(234,88,12,.92)' : 'rgba(22,163,74,.82)'; b.style.color = on ? 'rgba(255,255,255,.97)' : 'rgba(255,255,255,.95)'; });
-      try { VIEWS[k].on(); } catch(e){}
-      homeDot();
+      var v = VIEWS[k], useGlobe = !!v.globe && GLOBE.mount(document.getElementById('es-map'));
+      GLOBE.clear();
+      try {
+        if (useGlobe){
+          stageSet('globe'); if (v.panel) v.panel();
+          Promise.resolve(v.globe()).then(function(ok){ if (CUR !== k) return; if (ok === false){ stageSet('map'); GLOBE.clear(); globeBtn(null); try { v.flat(); } catch(e){} homeDot(); } mapPlay(); });
+        } else { stageSet('map'); if (v.on) v.on(); else { if (v.panel) v.panel(); v.flat(); } }
+      } catch(e){}
+      mapPlay(); homeDot();
     };
     /* where you are, on every view: these are planetary things, and the first question is always "and where am I in this?" */
     var homeDot = function(){
@@ -94167,9 +94403,11 @@ function closeAlertModal(){
          letters washed out (looked at on the capture). */
       root.innerHTML = '<div id="es-view-row" style="display:flex;flex-wrap:wrap;justify-content:center;gap:5px;">'
         + Object.keys(VIEWS).map(function(k){ return (VIEWS[k].group ? '<span style="flex:1 1 100%;height:0;"></span>' : '') + '<button type="button" class="es-view-btn" data-view="' + k + '" style="padding:5px 14px;border-radius:8px;border:none;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);font-size:.58rem;font-weight:700;letter-spacing:.5px;cursor:pointer;font-family:system-ui,sans-serif;text-transform:uppercase;white-space:nowrap;background:rgba(22,163,74,.82);color:rgba(255,255,255,.95);">' + VIEWS[k].label + '</button>'; }).join('') + '</div>'
-        + '<div id="es-map" style="position:relative;height:clamp(280px,48vh,470px);margin-top:8px;border-radius:12px;overflow:hidden;background:#0b1020;"></div>'
-        + '<div id="es-line" style="font:600 .64rem/1.5 system-ui,sans-serif;color:#1b2340;margin-top:8px;"></div>'
-        + '<div id="es-panel" style="margin-top:10px;"></div>';
+        /* the stage and its words: stacked for the flat map (it wants the width), SIDE BY SIDE for the globe on a wide screen --
+           a sphere is square, and stacked it sat in 1,100 px of empty dark with its panel a scroll below (looked at) */
+        + '<div id="es-body"><div id="es-left"><div id="es-map" style="position:relative;height:clamp(280px,48vh,470px);margin-top:8px;border-radius:12px;overflow:hidden;background:#0b1020;"></div>'
+        + '<div id="es-line" style="font:600 .64rem/1.5 system-ui,sans-serif;color:#1b2340;margin-top:8px;"></div></div>'
+        + '<div id="es-panel" style="margin-top:10px;"></div></div>';
       [].slice.call(root.querySelectorAll('.es-view-btn')).forEach(function(b){ b.onclick = function(e){ e.stopPropagation(); setView(b.getAttribute('data-view')); }; });
       EM = L.map('es-map', { center: [20, -110], zoom: 3, zoomSnap: 0.25, zoomControl: true, attributionControl: true, minZoom: 2, maxZoom: 7, worldCopyJump: false,
         maxBounds: [[-58, -262], [82, 62]], scrollWheelZoom: false });                 // the page scrolls over it; pinch and the +/- buttons zoom
@@ -94188,7 +94426,8 @@ function closeAlertModal(){
       setTimeout(function(){ sized(); setView(want); }, 60);      // after the pane is laid out; always re-entered, because leaving the tab stops every animation
     };
     var css = document.createElement('style');
-    css.textContent = '#cira-pane-earth::-webkit-scrollbar{display:none}.enso-grid{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:4px 18px;align-items:start;}'
+    css.textContent = '#es-body.side{display:flex;gap:18px;align-items:flex-start;}#es-body.side #es-left{flex:0 0 min(540px,47%);min-width:0;}#es-body.side #es-panel{flex:1 1 0;min-width:0;margin-top:8px !important;}#es-body.side .enso-grid{grid-template-columns:minmax(0,1fr);}'
+      + '#cira-pane-earth::-webkit-scrollbar{display:none}.enso-grid{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:4px 18px;align-items:start;}'
       + '@media (max-width:1100px){.enso-grid{grid-template-columns:minmax(0,1fr);}'
       + '#radar-widget-body[data-cira-tab="earth"] > *:not(#cira-tab-bar){display:none !important;}'
       + '#cira-pane-earth{position:relative !important;top:auto !important;left:auto !important;right:auto !important;bottom:auto !important;padding:10px 10px 14px !important;margin:0 !important;overflow:visible !important;}}';
@@ -94197,7 +94436,7 @@ function closeAlertModal(){
     if (typeof prevTab === 'function') window.switchCiraTab = function(tab){
       var r = prevTab.apply(this, arguments);
       if (tab === 'earth'){ var a = document.getElementById('fcast-source-link'); if (a){ a.textContent = 'NASA GIBS · NOAA · RAPID ↗'; a.href = 'https://worldview.earthdata.nasa.gov/'; } window.bvEarthOpen(); }
-      else { try { stopAnim(); if (JET.stop) JET.stop(); if (bvCellScene.stop) bvCellScene.stop(); } catch(e){} }                 // nothing keeps animating behind another tab
+      else { try { stopAnim(); GPLAY.stop(true); if (JET.stop) JET.stop(); if (bvCellScene.stop) bvCellScene.stop(); } catch(e){} }                 // nothing keeps animating behind another tab
       return r;
     };
   })();

@@ -52,6 +52,10 @@ const CACHE_RULES = {
   'www.wpc.ncep.noaa.gov':        600,
   'www.cpc.ncep.noaa.gov':        600,
   'gibs.earthdata.nasa.gov':      600,
+  // Unidata THREDDS: NOAA GFS as WMS images (jet stream, wind belts, column moisture) for CLOUDS > EARTH SYSTEMS.
+  // The flat map shows them as plain <img>, which needs no CORS; the GLOBE uses them as WebGL textures, which does,
+  // and thredds sends no Access-Control-Allow-Origin. 30 min: GFS runs six-hourly, and one cached copy serves everyone.
+  'thredds.ucar.edu':             1800,
   'api.rss2json.com':             600,
   'kauai.ccmc.gsfc.nasa.gov':     300,
   'api.nasa.gov':                 300,
