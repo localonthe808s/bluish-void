@@ -204,11 +204,16 @@
      so every pixel decodes back to metres a second -- checked against the server's own point readings, worst miss 0.4 m/s.
      From that field the lab paints its OWN speed colours (soft edges, no server palette) and moves streaks along it. */
   var FLOW = (function(){
-    var GW = 1024, GH = 512, A9 = [255, 240, 217, 189, 150, 115, 82, 37, 0];
-    var inv = function(g){ for (var i = 0; i < 8; i++) if (g <= A9[i] && g >= A9[i + 1]) return (i + (A9[i] - g) / (A9[i] - A9[i + 1])) / 8; return g > 255 ? 0 : 1; };
-    var INV = new Float32Array(256); for (var g0 = 0; g0 < 256; g0++) INV[g0] = inv(g0);
-    var url = function(layer, elev, range, iso){ return 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://thredds.ucar.edu/thredds/wms/grib/NCEP/GFS/Global_0p25deg/Best?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&CRS=CRS:84&BBOX=-180,-90,180,90&WIDTH=' + GW + '&HEIGHT=' + GH
-      + '&FORMAT=image/png&TRANSPARENT=false&NUMCOLORBANDS=250&STYLES=default-scalar/seq-Greys&BELOWMINCOLOR=extend&ABOVEMAXCOLOR=extend&COLORSCALERANGE=' + (-range) + ',' + range + '&LAYERS=' + layer + '&ELEVATION=' + elev + (iso ? '&TIME=' + iso : '')); };
+    /* audit 2026-09-21: (1) the rolling "Best" collection through the MAP service does not return the hour asked for (checked against the raw grid); a NAMED RUN does, exactly.
+       (2) inverting the palette by formula read half a band low; the server's own legend, band centres, has no bias. Both fixed here as on the site. */
+    var GW = 1024, GH = 512, GREYS = 'fffffefefdfdfcfcfbfbfafaf9f9f8f8f7f7f6f6f5f5f4f4f3f3f2f2f1f1f0f0efefeeedececebeaeae9e8e7e7e6e5e5e4e3e2e2e1e0dfdfdedddddcdbdadad9d8d7d6d5d4d4d3d2d1d0cfcecdcccbcbcac9c8c7c6c5c4c3c2c2c1c0bfbebdbcbab9b8b7b5b4b3b2b0afaeadabaaa9a8a6a5a4a3a1a09f9e9c9b9a99979695949391908f8e8d8c8b8a88878685848382817f7e7d7c7b7a7978767574737271706f6e6d6c6b6a6968676665646361605f5e5d5c5b5a5958575655545352514f4e4c4b494846454342413f3e3c3b393836353432312f2e2c2b29282625242321201f1e1d1b1a1918171514131211100e0d0c0b0a08070605040200', INV = new Float32Array(256), SUM = {}, CN = {}, lastT = 0, g0;
+    for (g0 = 0; g0 < 250; g0++){ var gv = parseInt(GREYS.substr(g0 * 2, 2), 16); SUM[gv] = (SUM[gv] || 0) + g0; CN[gv] = (CN[gv] || 0) + 1; }
+    for (g0 = 255; g0 >= 0; g0--){ if (CN[g0]) lastT = (SUM[g0] / CN[g0] + 0.5) / 250; INV[g0] = lastT; }
+    var p2 = function(n){ return (n < 10 ? '0' : '') + n; }, RUNBACK = 0;
+    var runBase = function(){ var t = new Date(Date.now() - (7 + 6 * RUNBACK) * 36e5); t.setUTCHours(Math.floor(t.getUTCHours() / 6) * 6, 0, 0, 0); return 'https://thredds.ucar.edu/thredds/wms/grib/NCEP/GFS/Global_0p25deg/GFS_Global_0p25deg_' + t.getUTCFullYear() + p2(t.getUTCMonth() + 1) + p2(t.getUTCDate()) + '_' + p2(t.getUTCHours()) + '00.grib2'; };
+    var validIso = function(){ return new Date(Math.round(Date.now() / 108e5) * 108e5).toISOString().slice(0, 13) + ':00:00.000Z'; };
+    var url = function(layer, elev, range, iso){ return 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent(runBase() + '?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&CRS=CRS:84&BBOX=-180,-90,180,90&WIDTH=' + GW + '&HEIGHT=' + GH
+      + '&FORMAT=image/png&TRANSPARENT=false&NUMCOLORBANDS=250&STYLES=default-scalar/seq-Greys&BELOWMINCOLOR=extend&ABOVEMAXCOLOR=extend&COLORSCALERANGE=' + (-range) + ',' + range + '&LAYERS=' + layer + '&ELEVATION=' + elev + '&TIME=' + (iso || validIso())); };
     var decode = function(im, range){ var c = document.createElement('canvas'); c.width = GW; c.height = GH; var g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(im, 0, 0, GW, GH);
       var px = g.getImageData(0, 0, GW, GH).data, out = new Float32Array(GW * GH); for (var i = 0; i < out.length; i++) out[i] = (INV[px[i * 4]] * 2 - 1) * range; return out; };
     var F = { on: false, U: null, V: null, mode: 'speed', k: 0.16, N: 0, p: null, cache: {} };
@@ -226,6 +231,8 @@
         d[i * 4] = col[0]; d[i * 4 + 1] = col[1]; d[i * 4 + 2] = col[2]; d[i * 4 + 3] = a * 235; }
       g.putImageData(im, 0, 0); return c; };
     F.load = function(k, S){ var key = k; if (F.cache[key]) return Promise.resolve(F.cache[key]);
+      return F.load1(k, S).catch(function(){ if (RUNBACK >= 2) throw new Error('no run'); RUNBACK++; return F.load(k, S); }); };
+    F.load1 = function(k, S){ var key = k;
       return Promise.all([fetchImg(url(S.flow.u, S.flow.elev, S.flow.range)), fetchImg(url(S.flow.v, S.flow.elev, S.flow.range))]).then(function(ims){
         var o = { U: decode(ims[0], S.flow.range), V: decode(ims[1], S.flow.range) }; F.U = o.U; F.V = o.V; o.skin = paint(S.flow.mode); F.cache[key] = o; return o; }); };
     F.use = function(o, S){ F.U = o.U; F.V = o.V; F.mode = S.flow.mode; F.k = S.flow.k; F.floor = S.flow.floor; F.on = true; F.seed(); };
@@ -280,7 +287,7 @@
       + '<div class="m">WHAT THIS LAB IS TESTING <span class="g">· NO DATE-LINE SEAM · TRUE SHAPES NEAR THE POLES (PRESS “LOOK DOWN ON THE POLE”) · THE DIAGRAM AND THE LIVE MAP AS ONE PICTURE · YOUR OWN DOT ON IT</span></div>'
       + (S.flow && FLOW.on ? (function(){ var y = FLOW.say(HOME.lat, HOME.lon); return '<div class="m" style="color:#2B22F4;">' + (S.flow.mode === 'speed' ? 'ABOUT 34,000 FT ABOVE ' : 'AT THE SURFACE NEAR ') + HOME.name + ' · ' + y.mph + ' MPH FROM THE ' + y.from + ' <span class="g">· READ OFF THE MODEL FIELD, NOT A MEASUREMENT</span></div>'
           + '<div class="leg"><span>' + (S.flow.mode === 'speed' ? '50 MPH' : 'FROM THE EAST') + '</span><i style="background:' + (S.flow.mode === 'speed' ? 'linear-gradient(90deg,rgba(254,240,190,.2),#fdba74,#ea580c,#b91c1c,#6e0a14)' : 'linear-gradient(90deg,#0d9488,#99f6e4,rgba(255,255,255,.1),#fed7aa,#c2410c)') + ';"></i><span>' + (S.flow.mode === 'speed' ? '190 MPH +' : 'FROM THE WEST') + '</span></div>'
-          + '<div class="m g">EVERY STREAK IS MOVED BY THE MODEL’S OWN WIND, DECODED FROM TWO GREY PICTURES (EAST–WEST AND NORTH–SOUTH) · CHECKED AGAINST THE SERVER’S POINT READINGS: WORST MISS 0.4 M/S</div>'; })() : '')
+          + '<div class="m g">EVERY STREAK IS MOVED BY THE MODEL’S OWN WIND, DECODED FROM TWO GREY PICTURES (EAST–WEST AND NORTH–SOUTH) · CHECKED AGAINST THE MODEL’S RAW GRID AT SEVEN PLACES: WITHIN 1–3 MPH</div>'; })() : '')
       + '<div class="m g">NASA GIBS · BLUE MARBLE · JPL MUR SEA-SURFACE TEMPERATURE · DRAWN WITH ONE SHADER, NO LIBRARY</div>'; };
   var skinsRow = document.getElementById('skins');
   Object.keys(SKINS).forEach(function(k){ var b = document.createElement('button'); b.className = 'pill'; b.textContent = SKINS[k].label; b.dataset.k = k;

@@ -93456,6 +93456,29 @@ function closeAlertModal(){
     var homeLon = function(){ var lo = +((window.LOCATION || {}).lon); return isFinite(lo) ? Math.max(-150, Math.min(-20, lo)) : -74; };
     var isOpen = function(){ var b = document.getElementById('radar-widget-body'); return !!b && b.getAttribute('data-cira-tab') === 'earth'; };
     var line = function(html){ var e = document.getElementById('es-line'); if (e) e.innerHTML = html || ''; };
+    /* WHICH MODEL RUN (audit 2026-09-21: "review all the earth system data and confirm its accurate").
+       Every model picture here used Unidata's rolling "Best" collection through its map service. Checked against the raw
+       grid (the same server's subset service, and Open-Meteo's GFS, which agreed with each other to the digit), "Best"
+       through the MAP service does NOT return the hour it is asked for: at Tokyo it gave u = -5.9 m/s where the grid has
+       +7.9; over the jet the error is smaller, which is why the pictures looked right. The same map service pointed at ONE
+       NAMED RUN returns the grid exactly (7.939209 = 7.939209). So: name the run. A run is complete on that server about 6 h
+       after its cycle time, so the newest safe one is the cycle at or before (now - 7 h); it is probed once with a tiny
+       picture and, if it is not there, the one before it is used. The valid hour is always asked for explicitly. */
+    var GFSRUN = (function(){
+      var R = { back: 0, ok: null, at: 0 }, p2 = function(n){ return (n < 10 ? '0' : '') + n; };
+      R.cycle = function(){ var t = new Date(Date.now() - (7 + 6 * R.back) * 36e5); t.setUTCHours(Math.floor(t.getUTCHours() / 6) * 6, 0, 0, 0); return t; };
+      R.base = function(){ var t = R.cycle(); return 'https://thredds.ucar.edu/thredds/wms/grib/NCEP/GFS/Global_0p25deg/GFS_Global_0p25deg_' + t.getUTCFullYear() + p2(t.getUTCMonth() + 1) + p2(t.getUTCDate()) + '_' + p2(t.getUTCHours()) + '00.grib2'; };
+      R.valid = function(){ var t = new Date(Math.round(Date.now() / 108e5) * 108e5); if (t < R.cycle()) t = R.cycle(); return t; };      /* the 3-hourly step nearest now */
+      R.iso = function(d){ return (d || R.valid()).toISOString().slice(0, 13) + ':00:00.000Z'; };
+      R.words = function(){ var c = R.cycle(), v = R.valid(), MN = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'], tz = (window.LOCATION && window.LOCATION.tz) || undefined, w;
+        try { w = v.toLocaleString('en-US', { timeZone: tz, weekday: 'short', hour: 'numeric' }).replace(',', ''); } catch(e){ w = p2(v.getUTCHours()) + ' UTC'; }
+        return 'the ' + MN[c.getUTCMonth()] + ' ' + c.getUTCDate() + ' ' + p2(c.getUTCHours()) + 'Z run, its picture for ' + w; };
+      R.ready = function(){ if (R.ok && Date.now() - R.at < 18e5) return R.ok; R.at = Date.now(); R.back = 0;
+        var probe = function(){ return new Promise(function(res){ var im = new Image(); im.crossOrigin = 'anonymous'; im.onload = function(){ res(true); }; im.onerror = function(){ res(false); };
+          im.src = 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent(R.base() + '?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&CRS=CRS:84&BBOX=-180,-90,180,90&WIDTH=64&HEIGHT=32&FORMAT=image/png&STYLES=default-scalar/seq-Greys&COLORSCALERANGE=-90,90&LAYERS=u-component_of_wind_isobaric&ELEVATION=25000&TIME=' + R.iso()); }); };
+        return (R.ok = probe().then(function(ok){ if (ok) return true; R.back = 1; return probe().then(function(ok2){ if (ok2) return true; R.back = 2; return probe(); }); })); };
+      return R;
+    })();
     var sized = function(){ if (!EM) return false; try { EM.invalidateSize({ pan: false }); var z = EM.getSize(); return z.x > 0 && z.y > 0; } catch(e){ return false; } };
     var fit = function(b){ PENDFIT = b; if (sized()){ try { EM.fitBounds(b, { animate: false }); } catch(e){} PENDFIT = null; } };
     /* THE SKIN: NASA GIBS tiles under everything else. 'sst' = the water's temperature (1 km MUR); 'anom' = temperature against
@@ -93531,17 +93554,22 @@ function closeAlertModal(){
          vectors, so the whole tail is re-projected and redrawn each frame: no fade buffer (it left grey residue in calm
          air) and the tails survive turning the globe. */
       var FLOW = (function(){
-        var A9 = [255, 240, 217, 189, 150, 115, 82, 37, 0], INV = new Float32Array(256), g0, i0;
-        for (g0 = 0; g0 < 256; g0++){ INV[g0] = 1; for (i0 = 0; i0 < 8; i0++) if (g0 <= A9[i0] && g0 >= A9[i0 + 1]){ INV[g0] = (i0 + (A9[i0] - g0) / (A9[i0] - A9[i0 + 1])) / 8; break; } }
+        /* grey -> where in the range, from the server's OWN legend for this palette at 250 bands (band 0 = lowest), band centres.
+           The first build inverted the palette's nine anchor colours by formula: measured on 48 random points against the
+           server's point readings that read 0.39 m/s LOW (half a band) with a worst miss of 1.16; this table has no bias
+           (+0.02) and a worst miss of 0.36, which is half a band: the limit (audit 2026-09-21). */
+        var GREYS = 'fffffefefdfdfcfcfbfbfafaf9f9f8f8f7f7f6f6f5f5f4f4f3f3f2f2f1f1f0f0efefeeedececebeaeae9e8e7e7e6e5e5e4e3e2e2e1e0dfdfdedddddcdbdadad9d8d7d6d5d4d4d3d2d1d0cfcecdcccbcbcac9c8c7c6c5c4c3c2c2c1c0bfbebdbcbab9b8b7b5b4b3b2b0afaeadabaaa9a8a6a5a4a3a1a09f9e9c9b9a99979695949391908f8e8d8c8b8a88878685848382817f7e7d7c7b7a7978767574737271706f6e6d6c6b6a6968676665646361605f5e5d5c5b5a5958575655545352514f4e4c4b494846454342413f3e3c3b393836353432312f2e2c2b29282625242321201f1e1d1b1a1918171514131211100e0d0c0b0a08070605040200', INV = new Float32Array(256), g0, SUM = {}, CNT2 = {}, last = 0;
+        for (g0 = 0; g0 < 250; g0++){ var gv = parseInt(GREYS.substr(g0 * 2, 2), 16); SUM[gv] = (SUM[gv] || 0) + g0; CNT2[gv] = (CNT2[gv] || 0) + 1; }
+        for (g0 = 255; g0 >= 0; g0--){ if (CNT2[g0]) last = (SUM[g0] / CNT2[g0] + 0.5) / 250; INV[g0] = last; }
         var F = { on: false, fl: null, U: null, V: null, gw: 0, gh: 0, mode: 'speed', k: 0.2, floor: 22, N: 0, p: null, still: false, cache: {} };
-        F.url = function(sp, which, iso, small){ var w = small ? 512 : 1024; return 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://thredds.ucar.edu/thredds/wms/grib/NCEP/GFS/Global_0p25deg/Best?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&CRS=CRS:84&BBOX=-180,-90,180,90&WIDTH=' + w + '&HEIGHT=' + (w / 2)
-          + '&FORMAT=image/png&TRANSPARENT=false&NUMCOLORBANDS=250&STYLES=default-scalar/seq-Greys&BELOWMINCOLOR=extend&ABOVEMAXCOLOR=extend&COLORSCALERANGE=' + (-sp.range) + ',' + sp.range + '&LAYERS=' + which + '-component_of_wind_' + sp.level + '&ELEVATION=' + sp.elev + (iso ? '&TIME=' + iso : '')); };
+        F.url = function(sp, which, iso, small){ var w = small ? 512 : 1024; return 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent(GFSRUN.base() + '?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&CRS=CRS:84&BBOX=-180,-90,180,90&WIDTH=' + w + '&HEIGHT=' + (w / 2)
+          + '&FORMAT=image/png&TRANSPARENT=false&NUMCOLORBANDS=250&STYLES=default-scalar/seq-Greys&BELOWMINCOLOR=extend&ABOVEMAXCOLOR=extend&COLORSCALERANGE=' + (-sp.range) + ',' + sp.range + '&LAYERS=' + which + '-component_of_wind_' + sp.level + '&ELEVATION=' + sp.elev + '&TIME=' + (iso || GFSRUN.iso())); };
         /* any grey picture from that server, back into numbers between lo and hi (the wind is the case lo = -hi) */
         F.grey = function(im, lo, hi){ var w = im.naturalWidth, h = im.naturalHeight, c = document.createElement('canvas'); c.width = w; c.height = h; var g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(im, 0, 0);
           var px = g.getImageData(0, 0, w, h).data, out = new Float32Array(w * h); for (var i = 0; i < out.length; i++) out[i] = lo + INV[px[i * 4]] * (hi - lo); return { d: out, w: w, h: h }; };
         var decode = function(im, range){ return F.grey(im, -range, range); };
-        F.greyUrl = function(layer, elev, lo, hi, iso){ return 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://thredds.ucar.edu/thredds/wms/grib/NCEP/GFS/Global_0p25deg/Best?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&CRS=CRS:84&BBOX=-180,-90,180,90&WIDTH=1024&HEIGHT=512'
-          + '&FORMAT=image/png&TRANSPARENT=false&NUMCOLORBANDS=250&STYLES=default-scalar/seq-Greys&BELOWMINCOLOR=extend&ABOVEMAXCOLOR=extend&COLORSCALERANGE=' + lo + ',' + hi + '&LAYERS=' + layer + (elev != null ? '&ELEVATION=' + elev : '') + (iso ? '&TIME=' + iso : '')); };
+        F.greyUrl = function(layer, elev, lo, hi, iso){ return 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent(GFSRUN.base() + '?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&CRS=CRS:84&BBOX=-180,-90,180,90&WIDTH=1024&HEIGHT=512'
+          + '&FORMAT=image/png&TRANSPARENT=false&NUMCOLORBANDS=250&STYLES=default-scalar/seq-Greys&BELOWMINCOLOR=extend&ABOVEMAXCOLOR=extend&COLORSCALERANGE=' + lo + ',' + hi + '&LAYERS=' + layer + (elev != null ? '&ELEVATION=' + elev : '') + '&TIME=' + (iso || GFSRUN.iso())); };
         /* a field of numbers -> a skin in our own colours; fn(value, out) fills out[0..3] (rgba, 0-255); NaN = no reading = clear */
         F.skinFrom = function(f, fn){ var c = document.createElement('canvas'); c.width = f.w; c.height = f.h; var g = c.getContext('2d'), im = g.createImageData(f.w, f.h), d = im.data, o = [0, 0, 0, 0];
           for (var i = 0; i < f.w * f.h; i++){ var v = f.d[i]; if (v !== v){ d[i * 4 + 3] = 0; continue; } fn(v, o); d[i * 4] = o[0]; d[i * 4 + 1] = o[1]; d[i * 4 + 2] = o[2]; d[i * 4 + 3] = o[3]; }
@@ -93691,7 +93719,7 @@ function closeAlertModal(){
     var gibsWorld = function(layer, day, small){ return (small ? GIBS4326.replace('WIDTH=2048&HEIGHT=1024', 'WIDTH=1024&HEIGHT=512') : GIBS4326) + '&FORMAT=image/png&TRANSPARENT=true&LAYERS=' + layer + (day ? '&TIME=' + day : ''); };
     /* a whole-world GFS picture from THREDDS, through the proxy (WebGL needs the CORS header the proxy adds) */
     var gfsWorld = function(params, iso, small){ var wh = small ? 'WIDTH=1024&HEIGHT=512' : 'WIDTH=2048&HEIGHT=1024';
-      return 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://thredds.ucar.edu/thredds/wms/grib/NCEP/GFS/Global_0p25deg/Best?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&CRS=CRS:84&BBOX=-180,-90,180,90&' + wh + '&FORMAT=image/png&TRANSPARENT=true&NUMCOLORBANDS=40&' + params + (iso ? '&TIME=' + iso : '')); };
+      return 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent(GFSRUN.base() + '?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&CRS=CRS:84&BBOX=-180,-90,180,90&' + wh + '&FORMAT=image/png&TRANSPARENT=true&NUMCOLORBANDS=40&' + params + '&TIME=' + (iso || GFSRUN.iso())); };
     var stageSet = function(which){ STAGE = which; var bd = document.getElementById('es-body'); if (bd) bd.classList.toggle('side', which === 'globe' && window.innerWidth > 1100); var m = document.getElementById('es-map'); if (m) m.style.display = which === 'map' ? 'block' : 'none'; GLOBE.show(which === 'globe'); if (which === 'map') sized(); };
     /* THE GLOBE'S PLAYER: a list of whole-world pictures swapped through the first skin. Same callback shape as the flat map's. */
     var GPLAY = (function(){
@@ -94065,7 +94093,7 @@ function closeAlertModal(){
       var clear = function(){ G.layers.forEach(function(l){ try { EM.removeLayer(l); } catch(e){} }); G.layers = []; };
       var words = function(extra){
         line('<span style="color:#0f766e;font-weight:900;letter-spacing:.06em;">THE GULF STREAM</span>'
-          + ' <span style="color:rgba(30,30,50,.6);font-weight:600;">· the dark-red ribbon: warm water carried from the Florida Straits up the coast, off at Cape Hatteras and out across the Atlantic, shedding loops and rings as it goes. It is why a hurricane or a nor’easter that reaches it can deepen fast. The dashed line is its usual path; the temperatures are read off today’s NASA map'
+          + ' <span style="color:rgba(30,30,50,.6);font-weight:600;">· the dark-red ribbon: warm water carried from the Florida Straits up the coast, off at Cape Hatteras and out across the Atlantic, shedding loops and rings as it goes. It is why a hurricane or a nor’easter that reaches it can deepen fast. The dashed line is its usual path; the temperatures are read off NASA’s newest daily map, which runs a day or two behind'
           + (extra ? ' · <b style="color:#0f766e;">' + extra + '</b>' : ' · tap the water to read it anywhere') + '.</span>');
       };
       return function(on){
@@ -94172,11 +94200,11 @@ function closeAlertModal(){
         + '<canvas id="es-amoc-chart" style="display:block;width:100%;margin-top:4px;"></canvas>'
         + M('LAST MONTH MEASURED (' + endWords + ') · ' + last.toFixed(1) + ' SV · THE LAST 12 MONTHS AVERAGED ' + yr.toFixed(1) + ' AGAINST ' + d.mean.toFixed(1) + ' FOR THE WHOLE RECORD · THE WEAKEST MONTH WAS ' + d.moc[lo].toFixed(1) + ' IN ' + MN[+d.months[lo].slice(5) - 1] + ' ' + d.months[lo].slice(0, 4))
         + M('FOR SCALE · THE GULF STREAM THROUGH THE FLORIDA STRAITS CARRIES ~' + flMean.toFixed(0) + ' SV (SAME ARRAY) · EVERY RIVER ON EARTH TOGETHER, ABOUT 1')
-        + (A.fp ? M('THE FINGERPRINT TODAY · THE BOX SOUTH OF GREENLAND IS ' + FA(A.fp.box) + ' AGAINST NORMAL, THE REST OF THE NORTH ATLANTIC ' + FA(A.fp.rest) + ' <span style="color:#6b7389;">· MEASURED OFF TODAY’S NASA MAP · ONE DAY’S WEATHER MOVES THIS; THE FINGERPRINT IS THE DECADES-LONG VERSION OF IT</span>') : '')
+        + (A.fp ? M('THE FINGERPRINT NOW · THE BOX SOUTH OF GREENLAND IS ' + FA(A.fp.box) + ' AGAINST NORMAL, THE REST OF THE NORTH ATLANTIC ' + FA(A.fp.rest) + ' <span style="color:#6b7389;">· MEASURED OFF NASA’S NEWEST DAILY MAP, A DAY OR TWO OLD · ONE DAY’S WEATHER MOVES THIS; THE FINGERPRINT IS THE DECADES-LONG VERSION OF IT</span>') : '')
         + '</div><div style="min-width:0;">'
         + '<div style="font:500 10.5px/1.4 system-ui,sans-serif;color:#3b4460;margin-top:2px;">The Gulf Stream is the fast, wind-driven part of something bigger. Warm, salty water runs north at the surface, hands its heat to the air off Europe, turns dense, sinks near Greenland and creeps back south two miles down. <b style="font-weight:700;">It moves as much heat as a million power stations, and it is why north-west Europe is far milder than Labrador at the same latitude.</b> Fresh water from melting ice makes the northern water lighter and harder to sink, which is how warming is expected to slow the loop.</div>'
         + '<div style="margin-top:10px;padding:9px 11px;border-radius:9px;background:rgba(255,255,255,.6);"><div style="font:800 9px system-ui,sans-serif;letter-spacing:.1em;color:#0f766e;">WHAT THE RECORD CAN AND CANNOT SAY</div>'
-        + '<div style="font:500 11.5px/1.4 system-ui,sans-serif;color:#1b2340;margin-top:3px;">It swings by a third from one year to the next (the 2009–10 dip came with a brutal European winter and a jump in sea level along the US East Coast). Twenty years is too short to separate a decline from those swings. Climate assessments expect a weakening this century; whether and when it could tip into a collapse is genuinely disputed.</div>'
+        + '<div style="font:500 11.5px/1.4 system-ui,sans-serif;color:#1b2340;margin-top:3px;">It swings hard: for a year in 2009–10 it ran about 30% weak (that dip came with a brutal European winter and a jump in sea level along the US East Coast), and one calendar year can differ from the next by a sixth. Twenty years is too short to separate a decline from those swings. Climate assessments expect a weakening this century; whether and when it could tip into a collapse is genuinely disputed.</div>'
         + M('WHY IT MATTERS ON A WEATHER PAGE · THE LOOP SETS HOW MUCH HEAT THE TROPICAL ATLANTIC KEEPS, AND A WEAKER ONE RAISES SEA LEVEL ALONG THE US EAST COAST, WHICH IS WHAT A STORM SURGE RIDES ON') + '</div>'
         + '</div></div>'
         + '<div style="font:600 8px system-ui,sans-serif;letter-spacing:.06em;color:#6b7389;margin-top:10px;">SOURCE · <a href="https://rapid.ac.uk/" target="_blank" rel="noopener" style="color:inherit;">RAPID-MOCHA-WBTS ARRAY, NATIONAL OCEANOGRAPHY CENTRE</a> · ' + d.ack.toUpperCase() + '</div>';
@@ -94190,9 +94218,9 @@ function closeAlertModal(){
       var R = 6378137, mx = function(lon){ return lon * Math.PI / 180 * R; }, my = function(lat){ return Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360)) * R; };
       var S0 = -10, N0 = 72, W0 = -180, E0 = 20;
       var url = function(iso){ var Wpx = window.innerWidth < 700 ? 640 : 1024, Hpx = Math.round(Wpx * (my(N0) - my(S0)) / (mx(E0) - mx(W0)));
-        return 'https://thredds.ucar.edu/thredds/wms/grib/NCEP/GFS/Global_0p25deg/Best?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=u-component_of_wind_isobaric:v-component_of_wind_isobaric-mag'
+        return GFSRUN.base() + '?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=u-component_of_wind_isobaric:v-component_of_wind_isobaric-mag'
           + '&STYLES=default-scalar/seq-YlOrRd&CRS=EPSG:3857&BBOX=' + [mx(W0), my(S0), mx(E0), my(N0)].map(function(v){ return v.toFixed(0); }).join(',') + '&WIDTH=' + Wpx + '&HEIGHT=' + Hpx
-          + '&FORMAT=image/png&TRANSPARENT=true&ELEVATION=25000&COLORSCALERANGE=30,85&BELOWMINCOLOR=transparent&ABOVEMAXCOLOR=extend&NUMCOLORBANDS=60' + (iso ? '&TIME=' + iso : ''); };
+          + '&FORMAT=image/png&TRANSPARENT=true&ELEVATION=25000&COLORSCALERANGE=30,85&BELOWMINCOLOR=transparent&ABOVEMAXCOLOR=extend&NUMCOLORBANDS=60' + '&TIME=' + (iso || GFSRUN.iso()); };
       var six = function(k){ var n = new Date(); n.setUTCMinutes(0, 0, 0); n.setUTCHours(Math.floor(n.getUTCHours() / 6) * 6 + 6 * k); return n; };
       var when = function(d){ var tz = (window.LOCATION && window.LOCATION.tz) || undefined;
         try { return d.toLocaleString('en-US', { timeZone: tz, weekday: 'short', hour: 'numeric' }).toUpperCase().replace(',', ''); } catch(e){ return d.toUTCString().slice(0, 22).toUpperCase(); } };
@@ -94345,8 +94373,8 @@ function closeAlertModal(){
         MOIST: 'LAYERS=Precipitable_water_entire_atmosphere_single_layer&STYLES=default-scalar/seq-GnBu&COLORSCALERANGE=28,65&BELOWMINCOLOR=transparent&ABOVEMAXCOLOR=extend'
       };
       var url = function(k){ var Wpx = window.innerWidth < 700 ? 900 : 1400, Hpx = Math.round(Wpx * (my(N0) - my(S0)) / (mx(180) - mx(-180)));
-        return 'https://thredds.ucar.edu/thredds/wms/grib/NCEP/GFS/Global_0p25deg/Best?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&CRS=EPSG:3857&BBOX=' + [mx(-180), my(S0), mx(180), my(N0)].map(function(v){ return v.toFixed(0); }).join(',')
-          + '&WIDTH=' + Wpx + '&HEIGHT=' + Hpx + '&FORMAT=image/png&TRANSPARENT=true&NUMCOLORBANDS=40&' + SKINS[k]; };
+        return GFSRUN.base() + '?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&CRS=EPSG:3857&BBOX=' + [mx(-180), my(S0), mx(180), my(N0)].map(function(v){ return v.toFixed(0); }).join(',')
+          + '&WIDTH=' + Wpx + '&HEIGHT=' + Hpx + '&FORMAT=image/png&TRANSPARENT=true&NUMCOLORBANDS=40&' + SKINS[k] + '&TIME=' + GFSRUN.iso(); };
       var TXT = 'font-family:system-ui,sans-serif;white-space:nowrap;text-shadow:0 0 6px #000,0 0 12px #000;font-weight:900;letter-spacing:.1em;';
       var tag = function(lat, lon, s2, col, px){ return L.marker([lat, lon], { interactive: false, pane: 'es-anno', icon: L.divIcon({ className: '', iconAnchor: [0, 6], html: '<div style="' + TXT + 'font-size:' + (px || 9) + 'px;color:' + (col || '#fff') + ';">' + s2 + '</div>' }) }); };
       var band = function(lat, s2, col){ [-150, -35].forEach(function(lo){ C.layers.push(tag(lat, lo, s2, col).addTo(EM)); }); };
@@ -94369,7 +94397,7 @@ function closeAlertModal(){
       return C;
     })();
     var CELLTXT = {
-      trades: ['THE TRADE WINDS', '#0f766e', 'Air that rose at the equator comes back down around 30\u00b0 and flows home along the surface. The turning Earth bends it, so it arrives from the north-east in our hemisphere and the south-east in the other. <b style="font-weight:700;">They are the steadiest winds on the planet: they carried the sailing trade, they push the Pacific\u2019s warm water west (slacken them and you have El Ni\u00f1o), and they carry every Atlantic hurricane toward the Americas.</b>',
+      trades: ['THE TRADE WINDS', '#0f766e', 'Air that rose at the equator comes back down around 30\u00b0 and flows home along the surface. The turning Earth bends it, so it arrives from the north-east in our hemisphere and the south-east in the other. <b style="font-weight:700;">They are the steadiest winds on the planet: they carried the sailing trade, they push the Pacific\u2019s warm water west (slacken them and you have El Ni\u00f1o), and they carry most Atlantic hurricanes west toward the Americas.</b>',
                'ON THE MAP \u00b7 TEAL BLOWS FROM THE EAST, ORANGE FROM THE WEST \u00b7 ONLY WIND OF ~7 MPH OR MORE IS DRAWN; FOR THE EASTERLIES PALER IS STRONGER, FOR THE WESTERLIES REDDER IS STRONGER \u00b7 THE TWO TEAL BANDS EITHER SIDE OF THE EQUATOR ARE THE TRADES, TODAY'],
       easterlies: ['THE EASTERLIES', '#0f766e', 'The planet has two belts that blow from the east, and they are the ground floors of two different cells. <b style="font-weight:700;">The tropical easterlies are the trade winds: broad, steady, thousands of miles wide. The polar easterlies are cold air draining off the ice toward 60\u00b0: shallow, patchy and often missing on a given day</b>, as the map will show you. Between them the wind blows the other way.',
                'ON THE MAP \u00b7 ONLY WIND BLOWING FROM THE EAST IS DRAWN (BLUE-GREEN, ~7 MPH OR MORE, PALER IS STRONGER) \u00b7 EVERYTHING LEFT BLANK IS CALM OR BLOWING FROM THE WEST'],
@@ -94388,7 +94416,7 @@ function closeAlertModal(){
     var cellView = function(k, skins, wideFrame, phoneFrame, labels, noMap){
       var T = CELLTXT[k], loc = window.LOCATION || {};
       if (!noMap) CELLS.show(skins, wide() ? wideFrame : phoneFrame, labels);      // on the globe the skins go on the sphere instead
-      line('<span style="color:' + T[1] + ';font-weight:900;letter-spacing:.06em;">' + T[0] + '</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">\u00b7 ' + T[3].charAt(0) + T[3].slice(1).toLowerCase().replace(/ mph/g, ' mph').replace(/el ni\u00f1o/g, 'El Ni\u00f1o') + ' \u00b7 NOAA GFS model via Unidata, the latest run.</span>');
+      line('<span style="color:' + T[1] + ';font-weight:900;letter-spacing:.06em;">' + T[0] + '</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">\u00b7 ' + T[3].charAt(0) + T[3].slice(1).toLowerCase().replace(/ mph/g, ' mph').replace(/el ni\u00f1o/g, 'El Ni\u00f1o') + ' \u00b7 NOAA GFS model via Unidata, ' + GFSRUN.words() + '.</span>');
       var p = document.getElementById('es-panel'); if (!p) return;
       p.innerHTML = '<div class="enso-grid"><div style="min-width:0;"><canvas id="es-cell-scene"></canvas></div><div style="min-width:0;">'
         + '<div style="font:900 10px system-ui,sans-serif;letter-spacing:.14em;color:' + T[1] + ';">' + T[0] + '</div>'
@@ -94437,7 +94465,7 @@ function closeAlertModal(){
             + airM('THINNEST ANYWHERE · ' + s2.min + ' DOBSON UNITS AT ' + Math.abs(Math.round(s2.at[0])) + '°' + (s2.at[0] < 0 ? 'S' : 'N'))
             + (h ? airM('OVER ' + h.name + ' · ' + Math.round(GLOBE.FLOW.sample(OZ.f, h.lat, h.lon)) + ' DOBSON UNITS', '#2B22F4') : '')
             + airM('ALL THREE ARE READ OFF THE MODEL’S FIELD BY THIS PAGE, NOT PUBLISHED FIGURES', '#6b7389') + '</div>')
-        + airM('NOAA GFS MODEL, TOTAL OZONE, THE LATEST RUN, VIA UNIDATA · WIND AT 50 hPa FROM THE SAME RUN', '#6b7389'); };
+        + airM('NOAA GFS MODEL, TOTAL OZONE, VIA UNIDATA · ' + GFSRUN.words().toUpperCase() + ' · WIND AT 50 hPa FROM THE SAME RUN AND HOUR', '#6b7389'); };
     var ozoneGlobe = function(){ var tok = ++AIR.tok, F = GLOBE.FLOW; OZ.err = false; GLOBE.V.cells = null; GLOBE.face(-78, homeLon());
       GLOBE.annot = function(c){ if (!OZ.st) return; var q = c.proj(-90, 0); if (q[2] > 0.1){ c.ov.fillStyle = '#fff'; c.ov.beginPath(); c.ov.arc(q[0], q[1], 2.5, 0, 6.3); c.ov.fill(); c.word('SOUTH POLE', q[0] + 6, q[1] + 3, '#fff', '800 8px system-ui,sans-serif'); }
         if (OZ.st.area >= 0.5){ var m = c.proj(OZ.st.at[0], OZ.st.at[1]); if (m[2] > 0.15) c.word('THINNEST · ' + OZ.st.min, m[0] - 28, m[1] - 8, '#fff', '900 9px system-ui,sans-serif'); } };
@@ -94517,7 +94545,7 @@ function closeAlertModal(){
       p.innerHTML = pill
         + '<div style="margin-top:14px;">' + card('es-ghg-co2', 'CARBON DIOXIDE · MAUNA LOA, HAWAII', '#b91c1c', big(last[4].toFixed(2), 'PARTS PER MILLION', '#b91c1c'),
             MN[last[1] - 1] + ' ' + last[2] + ', ' + last[0] + (ago ? ' · ' + ago[4].toFixed(2) + ' ON ' + MN[ago[1] - 1] + ' ' + ago[2] + ', ' + ago[0] + ' · <b style="font-weight:800;">' + (last[4] - ago[4] >= 0 ? '+' : '') + (last[4] - ago[4]).toFixed(2) + ' IN A YEAR</b>' : '') + ' · ABOUT 280 BEFORE INDUSTRY, SO ' + Math.round((last[4] / 280 - 1) * 100) + '% MORE',
-            'Measured on the same mountain since 1958, the longest unbroken record there is. <b style="font-weight:700;">The saw-tooth is the planet breathing</b>: northern forests draw it down every summer and give it back every winter, so it peaks in May. The thick line is the same record with the seasons taken out; over the last ten years it has climbed <b style="font-weight:700;">' + rate(D.mm, 4).toFixed(1) + ' parts per million a year</b> (this page’s sum from NOAA’s column). It does most of the warming, and what is added stays for centuries.',
+            'Measured at Mauna Loa since 1958, the longest record of its kind (for a few months after the 2022 eruption cut the road, the readings came from neighbouring Maunakea). <b style="font-weight:700;">The saw-tooth is the planet breathing</b>: northern forests draw it down every summer and give it back every winter, so it peaks in May. The thick line is the same record with the seasons taken out; over the last ten years it has climbed <b style="font-weight:700;">' + rate(D.mm, 4).toFixed(1) + ' parts per million a year</b> (this page’s sum from NOAA’s column). It does most of the warming, and what is added stays for centuries.',
             'NOAA GLOBAL MONITORING LABORATORY · DAILY AND MONTHLY MEANS, MAUNA LOA · THE NEWEST MONTHS ARE PRELIMINARY') + '</div>'
         + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:18px 22px;margin-top:18px;">'
         + card('es-ghg-ch4', 'METHANE · THE WHOLE GLOBE', '#b45309', big(cm[3].toFixed(0), 'PARTS PER BILLION', '#b45309'), MN[cm[1] - 1] + ' ' + cm[0] + ' · ABOUT 730 BEFORE INDUSTRY, SO ' + (cm[3] / 730).toFixed(1) + '× AS MUCH · +' + rate(D.ch, 5).toFixed(1) + ' A YEAR OVER TEN YEARS',
@@ -94550,7 +94578,7 @@ function closeAlertModal(){
     var SURF = function(mode, skin){ return { level: 'height_above_ground', elev: 10, range: 30, mode: mode, k: 0.85, floor: 4, skin: skin }; };
     var flowSay = function(high){ var loc = window.LOCATION || {}, y = isFinite(+loc.lat) && isFinite(+loc.lon) ? GLOBE.FLOW.say(+loc.lat, +loc.lon) : null; if (!y) return '';
       return ' <span style="color:#2B22F4;font-weight:800;letter-spacing:.04em;">' + (high ? 'ABOUT 34,000 FT ABOVE ' : 'AT THE SURFACE NEAR ') + String(loc.name || 'YOU').toUpperCase() + ' · ' + y.mph + ' MPH FROM THE ' + y.from + '</span> <span style="color:rgba(30,30,50,.5);font-weight:600;">(the model’s wind there, not a measurement)</span>'; };
-    var jetLine = function(say){ line('<span style="color:#1d4ed8;font-weight:900;letter-spacing:.06em;">THE JET STREAM</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">· the river of wind about 34,000 ft up, blowing west to east. Every streak is carried by the model’s own wind, faster where the jet is faster; colour fades in from about 50 mph and deepens through orange to dark red past 150. Press LOOK DOWN ON THE POLE to see it as what it is, a wavy ring round the top of the planet. A dip in it pulls a hurricane north and out to sea, and it steers every front and nor’easter. A strong El Niño drags the Pacific branch south and east. NOAA GFS model via Unidata · press play for the next five days.</span>' + (say || '')); };
+    var jetLine = function(say){ line('<span style="color:#1d4ed8;font-weight:900;letter-spacing:.06em;">THE JET STREAM</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">· the river of wind about 34,000 ft up, blowing west to east. Every streak is carried by the model’s own wind, faster where the jet is faster; colour fades in from about 50 mph and deepens through orange to dark red past 150. Press LOOK DOWN ON THE POLE to see it as what it is, a wavy ring round the top of the planet. A dip in it pulls a hurricane north and out to sea, and it steers every front and nor’easter. A strong El Niño drags the Pacific branch south and east. NOAA GFS model via Unidata, ' + GFSRUN.words() + ' · press play for the next five days.</span>' + (say || '')); };
     var jetPlayGlobe = function(){ globeBtn(null); var list = []; for (var k = 0; k < 21; k++){ var n = new Date(); n.setUTCMinutes(0, 0, 0); n.setUTCHours(Math.floor(n.getUTCHours() / 6) * 6 + 6 * k); var iso = n.toISOString().slice(0, 13) + ':00:00.000Z';
         list.push({ url: GLOBE.FLOW.url(JETF, 'u', iso, true), url2: GLOBE.FLOW.url(JETF, 'v', iso, true), label: jetWhen(n) }); }
       GPLAY.start(list, 'JET STREAM FORECAST', function(o){ if (o.phase === 'stopped' && CUR === 'jet' && STAGE === 'globe'){ GLOBE.flow(JETF); globeBtn('▶ PLAY THE NEXT 5 DAYS', jetPlayGlobe); } }, 320,
@@ -94565,7 +94593,7 @@ function closeAlertModal(){
     var cellGlobe = function(k, skins){
       GLOBE.annot = function(c){ (CELLLAB[k] || []).forEach(function(L2){ var q = c.proj(L2[0], c.lon0); if (q[2] < 0.2) return; c.ov.font = '900 9px system-ui,sans-serif'; var w = c.ov.measureText(L2[1]).width; c.word(L2[1], q[0] - w / 2, q[1] - 3, L2[2], '900 9px system-ui,sans-serif'); }); };
       if (k === 'polar'){ GLOBE.V.cells = null; GLOBE.V.tLat = 89; GLOBE.face(89, homeLon()); } else { GLOBE.V.cells = k; GLOBE.face(0, k === 'ferrel' ? homeLon() : -150); }
-      var T = CELLTXT[k], cap = function(){ if (CUR !== k || STAGE !== 'globe') return; line('<span style="color:' + T[1] + ';font-weight:900;letter-spacing:.06em;">' + T[0] + '</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">· ' + FLOWTXT[k] + ' · NOAA GFS model via Unidata, the latest run.</span>' + flowSay(false)); };
+      var T = CELLTXT[k], cap = function(){ if (CUR !== k || STAGE !== 'globe') return; line('<span style="color:' + T[1] + ';font-weight:900;letter-spacing:.06em;">' + T[0] + '</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">· ' + FLOWTXT[k] + ' · NOAA GFS model via Unidata, ' + GFSRUN.words() + '.</span>' + flowSay(false)); };
       if (k === 'hadley') return GLOBE.skins(skins.map(function(s2){ return gfsWorld(CELLS.params[s2]); })).then(function(ok){ if (ok && CUR === k) GLOBE.flow(SURF('ew', false)).then(function(ok2){ if (ok2) cap(); }); return ok; });
       return GLOBE.flow(SURF(CFLOW[k])).then(function(ok){ if (ok) cap(); return ok; });
     };
@@ -94620,6 +94648,8 @@ function closeAlertModal(){
       var v = VIEWS[k], useGlobe = !!v.globe && GLOBE.mount(document.getElementById('es-map'));
       GLOBE.clear();
       var bd0 = document.getElementById('es-body'); if (bd0) bd0.classList.remove('solo');
+      /* every model picture is asked of a NAMED run (see GFSRUN): the run is settled before the view draws (instant once known) */
+      GFSRUN.ready().then(function(){ if (CUR !== k) return;
       try {
         if (useGlobe){
           stageSet('globe'); if (v.panel) v.panel();
@@ -94628,6 +94658,7 @@ function closeAlertModal(){
         } else { stageSet(v.bare ? 'bare' : 'map'); if (v.on) v.on(); else { if (v.panel) v.panel(); v.flat(); } }   /* 'bare' = no stage at all: a view that is a record, not a picture */
       } catch(e){}
       mapPlay(); homeDot();
+      });
     };
     /* where you are, on every view: these are planetary things, and the first question is always "and where am I in this?" */
     var homeDot = function(){
