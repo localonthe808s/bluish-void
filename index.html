@@ -93536,8 +93536,17 @@ function closeAlertModal(){
         var F = { on: false, fl: null, U: null, V: null, gw: 0, gh: 0, mode: 'speed', k: 0.2, floor: 22, N: 0, p: null, still: false, cache: {} };
         F.url = function(sp, which, iso, small){ var w = small ? 512 : 1024; return 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://thredds.ucar.edu/thredds/wms/grib/NCEP/GFS/Global_0p25deg/Best?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&CRS=CRS:84&BBOX=-180,-90,180,90&WIDTH=' + w + '&HEIGHT=' + (w / 2)
           + '&FORMAT=image/png&TRANSPARENT=false&NUMCOLORBANDS=250&STYLES=default-scalar/seq-Greys&BELOWMINCOLOR=extend&ABOVEMAXCOLOR=extend&COLORSCALERANGE=' + (-sp.range) + ',' + sp.range + '&LAYERS=' + which + '-component_of_wind_' + sp.level + '&ELEVATION=' + sp.elev + (iso ? '&TIME=' + iso : '')); };
-        var decode = function(im, range){ var w = im.naturalWidth, h = im.naturalHeight, c = document.createElement('canvas'); c.width = w; c.height = h; var g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(im, 0, 0);
-          var px = g.getImageData(0, 0, w, h).data, out = new Float32Array(w * h); for (var i = 0; i < out.length; i++) out[i] = (INV[px[i * 4]] * 2 - 1) * range; return { d: out, w: w, h: h }; };
+        /* any grey picture from that server, back into numbers between lo and hi (the wind is the case lo = -hi) */
+        F.grey = function(im, lo, hi){ var w = im.naturalWidth, h = im.naturalHeight, c = document.createElement('canvas'); c.width = w; c.height = h; var g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(im, 0, 0);
+          var px = g.getImageData(0, 0, w, h).data, out = new Float32Array(w * h); for (var i = 0; i < out.length; i++) out[i] = lo + INV[px[i * 4]] * (hi - lo); return { d: out, w: w, h: h }; };
+        var decode = function(im, range){ return F.grey(im, -range, range); };
+        F.greyUrl = function(layer, elev, lo, hi, iso){ return 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://thredds.ucar.edu/thredds/wms/grib/NCEP/GFS/Global_0p25deg/Best?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&CRS=CRS:84&BBOX=-180,-90,180,90&WIDTH=1024&HEIGHT=512'
+          + '&FORMAT=image/png&TRANSPARENT=false&NUMCOLORBANDS=250&STYLES=default-scalar/seq-Greys&BELOWMINCOLOR=extend&ABOVEMAXCOLOR=extend&COLORSCALERANGE=' + lo + ',' + hi + '&LAYERS=' + layer + (elev != null ? '&ELEVATION=' + elev : '') + (iso ? '&TIME=' + iso : '')); };
+        /* a field of numbers -> a skin in our own colours; fn(value, out) fills out[0..3] (rgba, 0-255); NaN = no reading = clear */
+        F.skinFrom = function(f, fn){ var c = document.createElement('canvas'); c.width = f.w; c.height = f.h; var g = c.getContext('2d'), im = g.createImageData(f.w, f.h), d = im.data, o = [0, 0, 0, 0];
+          for (var i = 0; i < f.w * f.h; i++){ var v = f.d[i]; if (v !== v){ d[i * 4 + 3] = 0; continue; } fn(v, o); d[i * 4] = o[0]; d[i * 4 + 1] = o[1]; d[i * 4 + 2] = o[2]; d[i * 4 + 3] = o[3]; }
+          g.putImageData(im, 0, 0); if (f.w === 1024 && f.h === 512) return c; var c2 = document.createElement('canvas'); c2.width = 1024; c2.height = 512; c2.getContext('2d').drawImage(c, 0, 0, 1024, 512); return c2; };
+        F.sample = function(f, lat, lon){ var x = Math.floor(((lon + 180) / 360 * f.w) % f.w), y = Math.max(0, Math.min(f.h - 1, Math.floor((90 - lat) / 180 * f.h))); return f.d[y * f.w + ((x + f.w) % f.w)]; };
         /* bilinear; longitude wraps, latitude clamps; [u, v] in m/s */
         F.at = function(lat, lon){ if (!F.U) return [0, 0]; var GW = F.gw, GH = F.gh, x = (lon + 180) / 360 * GW - 0.5, y = Math.max(0, Math.min(GH - 1.001, (90 - lat) / 180 * GH - 0.5));
           var x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0, xa = ((x0 % GW) + GW) % GW, xb = (xa + 1) % GW, r0 = y0 * GW, r1 = r0 + GW, U2 = F.U, V2 = F.V;
@@ -94392,6 +94401,139 @@ function closeAlertModal(){
     var cellOff = function(){ CELLS.clear(); if (bvCellScene.stop) bvCellScene.stop(); };
 
 
+    /* ================= THE AIR: OZONE, CARBON MONOXIDE, GREENHOUSE GASES =================
+       (user 2026-09-20: "is there stuff like this for CO2 and other gases?" -> shown what is really served -> "build those")
+       A gas has no direction of its own: the wind carries it. So each globe view is the gas as colour, in numbers decoded
+       from the source's own picture, with the streaks riding the wind AT THAT GAS'S HEIGHT.
+       - OZONE: NOAA's GFS model, total column in Dobson units, no gaps (same grey-picture decode as the wind); streaks at
+         50 hPa, where the polar vortex walls the hole in.
+       - CARBON MONOXIDE: NASA AIRS at 500 hPa via GIBS. One day has gaps between passes, so the last four days (night and
+         day passes) are laid oldest-first into one picture. NASA's colour scale is linear, 1.4 ppb a step, and every pixel
+         sits exactly on it (checked: 100%), so the picture decodes exactly and is repainted in the site's colours.
+       - GREENHOUSE GASES: there is NO live map of CO2 (the satellite that measures it sees a pencil-thin track), so this is
+         the record: NOAA's Mauna Loa CO2 and global methane and nitrous oxide. A record, said as a record. */
+    var AIR = { tok: 0, ghg: null };
+    var COHEX = 'fffddafffdd9fffdd8fffcd7fffcd6fffcd5fffcd4fffdd4fffdd3fffcd3fffcd2fffdd1fffdd0fffcd0fffccffffccefffccdfffcccfffdccfffdcbfffdcafffcc9fffdc9fffdc8fffdc7fffdc6fffdc5fffcc4fffdc4fffdc3fffdc2fffdc1fffdc0fffcbffffcbefffcbcfffcbbfffdbafffdb9fffdb8fffdb7fffdb6fffdb5fffdb4fffdb2fffdb1fffdb0fffdaffffdadfffdacfffcabfffca9fffba7fffaa5fff9a3fef8a0fff79efff59bfff398fef295fdf092fdee8ffdec8cfdea89fde886fde683fde480fde27dfde079fcde76fddb73fcd971fcd76efdd56bfdd269fcd066fccd64fdcb62fcc85ffcc65dfcc35bfcc15afbbe58fbbc57fbb956fcb655fbb354fcb053fcad52fdaa51fda851fda551fda251fd9f50fd9c50fd9950fd9550fd9250fd8f50fd8c50fd894ffd854ffd824ffd7f4ffd7c4ffd784ffd754ffd724ffd704efd6d4efc6a4efc684dfc654cfc634cfb614bfa5f4af95d49f95b48f75a47f65846f55644f35442f15341ef5140ee4f3eed4d3ceb4b3aeb4939e84837e74635e44434e44232e14130df3f2edd3e2dda3d2bd93b29d83a28d63926d33825d23623cf3522cd3421cb3220c9311fc7301ec52f1dc42d1dc22c1dc02b1cbf2a1cbb291cb9281cb7271cb6261cb5251bb4241bb3231bb2231cb0221caf211dad211ead211fac2121ab2023aa2025aa2027a9202aa8212da72130a72134a62137a5213ba4213fa42143a42147a3224ba32250a32254a12259a2225da12362a02366a0236b9f236f9f23749f24799f247d9e24829e25869d258b9d268f9c26939c26979b279b9b279f9b27a29b28a69b28a99a29ad9929b19729b5962ab9962bbe952bc2942cc8932dcc922ed1912fd69030da8f30de8e31e28d32e58c33e98c33ed8a34f08834f28735f48635f68535f78436f78335f78035f77f35f67e35f57c34f37a33f17832ee7731ea7330e6732fe1702ddc6e2cd76b2ad16829cb6627c56326be6124b76023b15d21ab581fa4571e9d541c97511a904f198a4d17844c167f49157947147546127045126c2f054a';
+    var COLUT = null, coLut = function(){ if (COLUT) return COLUT; COLUT = {}; for (var i = 0; i < 252; i++) COLUT[parseInt(COHEX.substr(i * 6, 6), 16)] = Math.max(0, (i - 1) * 1.4 + 0.7); return COLUT; };
+    var airRamp = function(st, v, o){ var n = st.length; if (v <= st[0][0]){ o[0] = st[0][1][0]; o[1] = st[0][1][1]; o[2] = st[0][1][2]; return; } for (var i = 1; i < n; i++) if (v <= st[i][0]){ var a = st[i - 1], b = st[i], f = (v - a[0]) / (b[0] - a[0]); o[0] = a[1][0] + (b[1][0] - a[1][0]) * f; o[1] = a[1][1] + (b[1][1] - a[1][1]) * f; o[2] = a[1][2] + (b[1][2] - a[1][2]) * f; return; } var z = st[n - 1][1]; o[0] = z[0]; o[1] = z[1]; o[2] = z[2]; };
+    var airCss = function(st){ var lo = st[0][0], hi = st[st.length - 1][0]; return 'linear-gradient(90deg,' + st.map(function(s2){ return 'rgb(' + s2[1].join(',') + ') ' + ((s2[0] - lo) / (hi - lo) * 100).toFixed(1) + '%'; }).join(',') + ')'; };
+    var airHome = function(){ var loc = window.LOCATION || {}; return isFinite(+loc.lat) && isFinite(+loc.lon) ? { lat: +loc.lat, lon: +loc.lon, name: String(loc.name || 'YOU').toUpperCase() } : null; };
+    var airM = function(s2, col){ return '<div style="font:600 8.5px/1.5 system-ui,sans-serif;letter-spacing:.06em;color:' + (col || '#1b2340') + ';margin-top:6px;">' + s2 + '</div>'; };
+    var airHead = function(h, col, p){ return '<div style="font:900 10px system-ui,sans-serif;letter-spacing:.14em;color:' + col + ';">' + h + '</div><div style="font:500 11.5px/1.45 system-ui,sans-serif;color:#1b2340;margin-top:4px;">' + p + '</div>'; };
+    var airLeg = function(st, a, b, mark){ return '<div style="display:flex;align-items:center;gap:8px;margin-top:10px;font:700 8px system-ui,sans-serif;letter-spacing:.06em;color:#1b2340;"><span>' + a + '</span><i style="position:relative;flex:1 1 140px;max-width:340px;height:9px;border-radius:5px;display:block;background:' + airCss(st) + ';">' + (mark || '') + '</i><span>' + b + '</span></div>'; };
+
+    /* ---------------- OZONE ---------------- */
+    var OZST = [[150, [10, 24, 84]], [200, [24, 70, 160]], [220, [56, 130, 220]], [260, [45, 190, 180]], [300, [96, 200, 120]], [350, [232, 212, 96]], [420, [234, 120, 30]], [500, [150, 40, 16]]];
+    var OZ = { f: null, st: null, err: false };
+    var ozStats = function(f){ var lo = 1e9, at = [0, 0], area = 0, Rk = 6371, dy = Math.PI / f.h * Rk, dx0 = 2 * Math.PI / f.w * Rk;
+      for (var j = 0; j < f.h; j++){ var lat = 90 - (j + 0.5) * 180 / f.h, cell = dy * dx0 * Math.cos(lat * Math.PI / 180); for (var i = 0; i < f.w; i++){ var v = f.d[j * f.w + i]; if (lat < -40 && v < 220) area += cell; if (v < lo){ lo = v; at = [lat, -180 + (i + 0.5) * 360 / f.w]; } } }
+      return { min: Math.round(lo), at: at, area: area / 1e6 }; };
+    var renderOzone = function(){ var p = document.getElementById('es-panel'); if (!p || CUR !== 'ozone') return; var s2 = OZ.st, h = airHome(), mo = new Date().getUTCMonth() + 1, season = mo >= 8 && mo <= 11;
+      p.innerHTML = airHead('THE OZONE LAYER', '#1d4ed8', 'A thin veil of ozone 10 to 20 miles up soaks up the sun’s burning ultraviolet. It is counted in Dobson units: squeeze all the ozone above you down to the ground and <b style="font-weight:700;">300 units is a layer 3 mm thick</b>. Below 220 is called a hole. One opens over Antarctica every southern spring (August to November): through the dark winter a ring of wind, the polar vortex, walls the air in, it gets cold enough for ice clouds to form in the stratosphere, and when the sun returns the chlorine from old refrigerants and sprays eats the ozone on those clouds. <b style="font-weight:700;">The streaks are that ring of wind, today, about 12 miles up.</b> The world agreed to phase those chemicals out in 1987 and the hole is slowly healing; full recovery is expected around the 2060s.')
+        + (OZ.err ? airM('THE MODEL’S OZONE COULD NOT BE HAD JUST NOW.', '#b91c1c') : !s2 ? airM('READING THE MODEL…', '#6b7389')
+          : airLeg(OZST, '150', '500 DOBSON UNITS', '<b style="position:absolute;left:20%;top:-3px;bottom:-3px;width:2px;background:#fff;box-shadow:0 0 0 1px rgba(27,35,64,.55);"></b>') + airM('THE WHITE LINE ON THE GLOBE AND THE SCALE IS 220: INSIDE IT IS THE HOLE', '#6b7389')
+            + '<div style="margin-top:10px;padding:9px 11px;border-radius:9px;background:rgba(255,255,255,.6);">'
+            + airM(s2.area >= 0.5 ? 'THE HOLE TODAY · ABOUT ' + s2.area.toFixed(1) + ' MILLION KM² UNDER 220 · ' + (s2.area / 14.2).toFixed(1) + '× THE AREA OF ANTARCTICA' : (season ? 'NO HOLE TO SPEAK OF TODAY · NOTHING SOUTH OF 40°S IS UNDER 220' : 'OUT OF SEASON · THE HOLE OPENS AUGUST TO NOVEMBER; NOTHING IS UNDER 220 TODAY'), '#1d4ed8').replace('margin-top:6px', 'margin-top:0')
+            + airM('THINNEST ANYWHERE · ' + s2.min + ' DOBSON UNITS AT ' + Math.abs(Math.round(s2.at[0])) + '°' + (s2.at[0] < 0 ? 'S' : 'N'))
+            + (h ? airM('OVER ' + h.name + ' · ' + Math.round(GLOBE.FLOW.sample(OZ.f, h.lat, h.lon)) + ' DOBSON UNITS', '#2B22F4') : '')
+            + airM('ALL THREE ARE READ OFF THE MODEL’S FIELD BY THIS PAGE, NOT PUBLISHED FIGURES', '#6b7389') + '</div>')
+        + airM('NOAA GFS MODEL, TOTAL OZONE, THE LATEST RUN, VIA UNIDATA · WIND AT 50 hPa FROM THE SAME RUN', '#6b7389'); };
+    var ozoneGlobe = function(){ var tok = ++AIR.tok, F = GLOBE.FLOW; OZ.err = false; GLOBE.V.cells = null; GLOBE.face(-78, homeLon());
+      GLOBE.annot = function(c){ if (!OZ.st) return; var q = c.proj(-90, 0); if (q[2] > 0.1){ c.ov.fillStyle = '#fff'; c.ov.beginPath(); c.ov.arc(q[0], q[1], 2.5, 0, 6.3); c.ov.fill(); c.word('SOUTH POLE', q[0] + 6, q[1] + 3, '#fff', '800 8px system-ui,sans-serif'); }
+        if (OZ.st.area >= 0.5){ var m = c.proj(OZ.st.at[0], OZ.st.at[1]); if (m[2] > 0.15) c.word('THINNEST · ' + OZ.st.min, m[0] - 28, m[1] - 8, '#fff', '900 9px system-ui,sans-serif'); } };
+      line('<span style="color:#1d4ed8;font-weight:900;letter-spacing:.06em;">OZONE</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">· how much ozone is overhead, everywhere, today: blue is thin, green ordinary, orange thick. The white line is 220 Dobson units, the edge of the hole. The streaks are the wind about 12 miles up. Drag the globe; FACE MY LOCATION shows the ozone over you.</span>');
+      renderOzone();
+      return GLOBE.img(F.greyUrl('Total_ozone_entire_atmosphere_single_layer', null, 100, 550)).then(function(im){ if (tok !== AIR.tok || CUR !== 'ozone') return true;
+        var f = F.grey(im, 100, 550), o3 = [0, 0, 0]; OZ.f = f; OZ.st = ozStats(f); GLOBE.want = 'air:ozone';
+        GLOBE.put(1, F.skinFrom(f, function(v, o){ if (Math.abs(v - 220) < 3.2){ o[0] = o[1] = o[2] = 255; o[3] = 235; return; } airRamp(OZST, v, o3); o[0] = o3[0]; o[1] = o3[1]; o[2] = o3[2]; o[3] = 200; })); GLOBE.on = [1, 0];
+        renderOzone(); globeBtn('LOOK AT THE SOUTH POLE', function(){ GLOBE.V.tLat = -78; GLOBE.dirty = true; });
+        GLOBE.flow({ level: 'isobaric', elev: 5000, range: 90, mode: 'speed', k: 0.2, floor: 18, skin: false }); return true;
+      }).catch(function(){ if (tok === AIR.tok){ OZ.err = true; renderOzone(); } return true; }); };
+
+    /* ---------------- CARBON MONOXIDE ---------------- */
+    /* the scale is set from the data (2026-09-20, four-day composite): half the seen world is 76-103 ppb, only the top ~10% is over 110 -- so the first try, tinting from 85, washed most of the planet tan and buried the plumes */
+    var COST = [[105, [254, 236, 170]], [125, [253, 176, 90]], [150, [234, 88, 12]], [190, [185, 28, 28]], [260, [90, 12, 20]]];
+    var CO = { f: null, cover: 0, from: '', to: '', peak: null, err: false };
+    var renderCo = function(){ var p = document.getElementById('es-panel'); if (!p || CUR !== 'co') return; var h = airHome(), v = h && CO.f ? GLOBE.FLOW.sample(CO.f, h.lat, h.lon) : NaN;
+      p.innerHTML = airHead('CARBON MONOXIDE · SMOKE YOU CANNOT SEE', '#b45309', 'Every fire gives off carbon monoxide, and so does every engine and furnace. It lasts a month or two in the air, <b style="font-weight:700;">long enough to cross an ocean and short enough that it never mixes evenly</b>, which makes it the best tracer there is of where smoke and pollution go. This is the gas about 3½ miles up, where the wind takes it furthest: a wildfire plume shows as a red tongue drawn out along the streaks, often thousands of miles from the fire. Clean air holds 50 to 100 parts per billion; downwind of big fires it passes 200.')
+        + (CO.err ? airM('NASA’S CARBON MONOXIDE PICTURES COULD NOT BE HAD JUST NOW.', '#b91c1c') : !CO.f ? airM('LAYING FOUR DAYS OF SATELLITE PASSES TOGETHER…', '#6b7389')
+          : airLeg(COST, '105 PPB', '260 PPB +') + airM('UNDER 105 IS ORDINARY AIR AND IS LEFT CLEAR SO THE PLUMES STAND OUT · BLANK PATCHES ARE WHERE NO PASS SAW THROUGH THE CLOUD', '#6b7389')
+            + '<div style="margin-top:10px;padding:9px 11px;border-radius:9px;background:rgba(255,255,255,.6);">'
+            + airM('SATELLITE PASSES OF ' + CO.from + ' TO ' + CO.to + ', NEWEST ON TOP · ' + Math.round(CO.cover * 100) + '% OF THE WORLD SEEN', '#b45309').replace('margin-top:6px', 'margin-top:0')
+            + (CO.peak ? airM('THE THICKEST PLUME · ABOUT ' + Math.round(CO.peak.v) + ' PARTS PER BILLION NEAR ' + (Math.round(CO.peak.lat) === 0 ? 'THE EQUATOR, ' : Math.abs(Math.round(CO.peak.lat)) + '°' + (CO.peak.lat < 0 ? 'S' : 'N') + ' ') + Math.abs(Math.round(CO.peak.lon)) + '°' + (CO.peak.lon < 0 ? 'W' : 'E') + ' <span style="color:#6b7389;">· AVERAGED OVER ABOUT 200 MILES, THIS PAGE’S SUM</span>') : '')
+            + (h ? airM(v === v ? '3½ MILES ABOVE ' + h.name + ' · ' + Math.round(v) + ' PARTS PER BILLION <span style="color:#6b7389;">· NASA’S READING, DECODED FROM ITS PICTURE</span>' : 'NO PASS SAW THE AIR ABOVE ' + h.name + ' IN THOSE FOUR DAYS', '#2B22F4') : '') + '</div>')
+        + airM('NASA AIRS ON THE AQUA SATELLITE, 500 hPa, VIA NASA GIBS · THE STREAKS ARE TODAY’S WIND AT THE SAME HEIGHT (NOAA GFS), NOT THE WIND OF THE DAY EACH PASS WAS MADE', '#6b7389'); };
+    var coGlobe = function(){ var tok = ++AIR.tok, F = GLOBE.FLOW; CO.err = false; GLOBE.V.cells = null; GLOBE.face(38, homeLon());
+      GLOBE.annot = function(c){ if (!CO.peak || CO.peak.v <= 125) return; var q = c.proj(CO.peak.lat, CO.peak.lon); if (q[2] > 0.15) c.word('THICKEST · ' + Math.round(CO.peak.v) + ' PPB', q[0] + 6, q[1] - 6, '#fff', '900 9px system-ui,sans-serif'); };
+      line('<span style="color:#b45309;font-weight:900;letter-spacing:.06em;">CARBON MONOXIDE</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">· the gas of fires and engines, about 3½ miles up, from the last four days of satellite passes. Ordinary air is left clear; pale yellow is a plume, red a thick one. The streaks are today’s wind at that height, the wind that draws the plumes out.</span>');
+      renderCo();
+      var day = function(b){ return new Date(Date.now() - b * 864e5).toISOString().slice(0, 10); }, list = [];
+      [4, 3, 2, 1].forEach(function(b){ ['Night', 'Day'].forEach(function(k){ list.push(gibsWorld('AIRS_L2_Carbon_Monoxide_500hPa_Volume_Mixing_Ratio_' + k, day(b), true)); }); });
+      return Promise.all(list.map(function(u){ return GLOBE.img(u).catch(function(){ return null; }); })).then(function(ims){ if (tok !== AIR.tok || CUR !== 'co') return true;
+        var w = 1024, h2 = 512, c = document.createElement('canvas'); c.width = w; c.height = h2; var g = c.getContext('2d', { willReadFrequently: true }); ims.forEach(function(im){ if (im) g.drawImage(im, 0, 0, w, h2); });
+        var px = g.getImageData(0, 0, w, h2).data, L = coLut(), d = new Float32Array(w * h2), seen = 0, mx = 0;
+        for (var i = 0; i < d.length; i++){ var v = px[i * 4 + 3] === 255 ? L[(px[i * 4] << 16) | (px[i * 4 + 1] << 8) | px[i * 4 + 2]] : undefined; if (v === undefined){ d[i] = NaN; continue; } d[i] = v; seen++; if (v > mx) mx = v; }
+        if (seen < d.length * 0.15){ CO.err = true; renderCo(); return true; }
+        var f = { d: d, w: w, h: h2 }, o3 = [0, 0, 0], MN = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'], nm = function(s2){ return MN[+s2.slice(5, 7) - 1] + ' ' + (+s2.slice(8)); };
+        /* the skin is a 3x3 mean of whatever readings surround each pixel (single footprints speckle); the readout keeps the raw field */
+        var sm = new Float32Array(d.length); for (var y = 0; y < h2; y++) for (var x = 0; x < w; x++){ var s3 = 0, n3 = 0; if (d[y * w + x] !== d[y * w + x]){ sm[y * w + x] = NaN; continue; }
+          for (var yy = Math.max(0, y - 1); yy <= Math.min(h2 - 1, y + 1); yy++) for (var xx = x - 1; xx <= x + 1; xx++){ var q = d[yy * w + ((xx + w) % w)]; if (q === q){ s3 += q; n3++; } } sm[y * w + x] = s3 / n3; }
+        var pk = null; for (var by = 40; by < h2 - 40; by += 4) for (var bx = 0; bx < w; bx += 4){ var s4 = 0, n4 = 0; for (var y4 = by; y4 < by + 8; y4++) for (var x4 = bx; x4 < bx + 8; x4++){ var q4 = d[y4 * w + (x4 % w)]; if (q4 === q4){ s4 += q4; n4++; } } if (n4 >= 40 && (!pk || s4 / n4 > pk.v)) pk = { v: s4 / n4, lat: 90 - (by + 4) * 180 / h2, lon: -180 + ((bx + 4) % w) * 360 / w }; }
+        CO.f = f; CO.cover = seen / d.length; CO.peak = pk; CO.from = nm(day(4)); CO.to = nm(day(1)); GLOBE.want = 'air:co';
+        GLOBE.put(1, F.skinFrom({ d: sm, w: w, h: h2 }, function(v2, o){ var a = Math.max(0, Math.min(1, (v2 - 103) / 20)); airRamp(COST, v2, o3); o[0] = o3[0]; o[1] = o3[1]; o[2] = o3[2]; o[3] = a * 225; })); GLOBE.on = [1, 0];
+        renderCo(); if (pk && pk.v > 125) globeBtn('SHOW THE THICKEST PLUME', function(){ GLOBE.face(pk.lat, pk.lon); });
+        GLOBE.flow({ level: 'isobaric', elev: 50000, range: 90, mode: 'speed', k: 0.2, floor: 10, skin: false }); return true;
+      }).catch(function(){ if (tok === AIR.tok){ CO.err = true; renderCo(); } return true; }); };
+
+    /* ---------------- GREENHOUSE GASES: the record ---------------- */
+    var ghgRows = function(t){ return t.split('\n').filter(function(l){ return l && l.charAt(0) !== '#' && /\d/.test(l); }).map(function(l){ return l.trim().split(/\s+/).map(Number); }); };
+    var ghgLoad = function(){ if (AIR.ghg) return Promise.resolve(AIR.ghg); var B = 'https://gml.noaa.gov/webdata/ccgg/trends/', get = function(u){ return fetch(B + u).then(function(r){ if (!r.ok) throw new Error(u); return r.text(); }); };
+      return Promise.all([get('co2/co2_mm_mlo.txt'), get('co2/co2_daily_mlo.txt'), get('ch4/ch4_mm_gl.txt'), get('n2o/n2o_mm_gl.txt')]).then(function(t){
+        var mm = ghgRows(t[0]).filter(function(r){ return r[3] > 0; }), dd = ghgRows(t[1]).filter(function(r){ return r[4] > 0; }), ch = ghgRows(t[2]).filter(function(r){ return r[3] > 0; }), n2 = ghgRows(t[3]).filter(function(r){ return r[3] > 0; });
+        if (mm.length < 600 || dd.length < 1000 || ch.length < 300 || n2.length < 200) throw new Error('short');
+        return (AIR.ghg = { mm: mm, dd: dd, ch: ch, n2: n2 }); }); };
+    var ghgChart = function(cv, xs, ys, tr, col, Hh, base){
+      var W = cv.clientWidth || 600, H = Hh, dpr = Math.min(2, window.devicePixelRatio || 1); cv.width = W * dpr; cv.height = H * dpr; cv.style.height = H + 'px';
+      var g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); try { g.letterSpacing = '0px'; cv.style.letterSpacing = '0px'; } catch(e){}
+      var lo = Math.min.apply(null, ys), hi = Math.max.apply(null, ys), pad = (hi - lo) * 0.08; lo -= pad; hi += pad; var x0 = xs[0], x1 = xs[xs.length - 1], L = 34;
+      var X = function(x){ return L + (x - x0) / (x1 - x0) * (W - L - 10); }, Y = function(v){ return 8 + (hi - v) / (hi - lo) * (H - 28); };
+      var step = (hi - lo) > 200 ? 100 : (hi - lo) > 60 ? 25 : (hi - lo) > 20 ? 10 : 5; g.font = '700 7.5px system-ui,sans-serif'; g.textBaseline = 'middle'; g.fillStyle = '#6b7389';
+      for (var v = Math.ceil(lo / step) * step; v <= hi; v += step){ g.strokeStyle = 'rgba(27,35,64,.12)'; g.lineWidth = 1; g.beginPath(); g.moveTo(L, Y(v)); g.lineTo(W - 8, Y(v)); g.stroke(); g.fillText(v + '', 6, Y(v)); }
+      g.strokeStyle = base; g.lineWidth = 1; g.beginPath(); xs.forEach(function(x, i){ if (i) g.lineTo(X(x), Y(ys[i])); else g.moveTo(X(x), Y(ys[i])); }); g.stroke();      /* the months: the saw-tooth is the planet breathing */
+      g.strokeStyle = col; g.lineWidth = 2; g.beginPath(); xs.forEach(function(x, i){ if (i) g.lineTo(X(x), Y(tr[i])); else g.moveTo(X(x), Y(tr[i])); }); g.stroke();
+      g.textBaseline = 'alphabetic'; g.fillStyle = '#6b7389'; var span = x1 - x0, ev = span > 50 ? 10 : span > 12 ? 5 : 1; for (var yr = Math.ceil(x0 / ev) * ev; yr <= x1; yr += ev){ g.fillRect(X(yr), H - 15, 1, 3); g.fillText(yr + '', Math.min(W - 24, X(yr) - 9), H - 3); }
+      g.fillStyle = col; g.beginPath(); g.arc(X(x1), Y(ys[ys.length - 1]), 3, 0, 6.3); g.fill(); };
+    var renderGhg = function(){ var p = document.getElementById('es-panel'); if (!p || CUR !== 'ghg') return; var D = AIR.ghg;
+      var pill = '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;"><span style="font:900 10px system-ui,sans-serif;letter-spacing:.14em;color:#fff;background:#475569;padding:5px 11px;border-radius:13px;">A RECORD, NOT A MAP</span>'
+        + '<span style="font:700 8.5px system-ui,sans-serif;letter-spacing:.08em;color:#6b7389;flex:1 1 300px;">NOBODY HAS A LIVE MAP OF CARBON DIOXIDE: THE SATELLITE THAT MEASURES IT SEES A TRACK A FEW MILES WIDE, AND THE SWIRLING GLOBES YOU MAY HAVE SEEN ARE MODEL RUNS OF PAST YEARS. WHAT IS MEASURED, EVERY DAY, IS THIS.</span></div>';
+      if (AIR.ghgErr){ p.innerHTML = pill + airM('NOAA’S RECORDS COULD NOT BE HAD JUST NOW.', '#b91c1c'); return; }
+      if (!D){ p.innerHTML = pill + '<div style="font:700 10px system-ui,sans-serif;letter-spacing:.1em;color:#6b7389;padding:24px 0;text-align:center;">READING THE RECORD…</div>'; return; }
+      var MN = ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER'];
+      var last = D.dd[D.dd.length - 1], ago = null; for (var i = D.dd.length - 1; i >= 0; i--){ if (D.dd[i][3] <= last[3] - 1){ ago = D.dd[i]; break; } }
+      var rate = function(rows, col){ var n = rows.length - 1, k = Math.max(0, n - 120); return (rows[n][col] - rows[k][col]) / (rows[n][2] - rows[k][2]); };
+      var big = function(v, unit, col){ return '<span style="font:900 30px/1 system-ui,sans-serif;color:' + col + ';letter-spacing:-.01em;">' + v + '</span> <span style="font:800 10px system-ui,sans-serif;letter-spacing:.1em;color:' + col + ';">' + unit + '</span>'; };
+      var cm = D.ch[D.ch.length - 1], nm2 = D.n2[D.n2.length - 1];
+      var card = function(id, h, col, num, sub, words, src){ return '<div style="min-width:0;"><div style="font:900 10px system-ui,sans-serif;letter-spacing:.14em;color:' + col + ';">' + h + '</div><div style="margin-top:4px;">' + num + '</div>' + airM(sub, '#1b2340') + (id === 'es-ghg-co2' ? '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:6px 22px;margin-top:8px;"><div style="min-width:0;">' + airM('SINCE 1958', '#6b7389') + '<canvas id="es-ghg-co2" style="display:block;width:100%;margin-top:4px;"></canvas></div><div style="min-width:0;">' + airM('THE LAST FIVE YEARS · THE PLANET BREATHING', '#6b7389') + '<canvas id="es-ghg-co2z" style="display:block;width:100%;margin-top:4px;"></canvas></div></div>' : '<canvas id="' + id + '" style="display:block;width:100%;margin-top:8px;"></canvas>') + '<div style="font:500 11px/1.45 system-ui,sans-serif;color:#1b2340;margin-top:6px;">' + words + '</div>' + airM(src, '#6b7389') + '</div>'; };
+      p.innerHTML = pill
+        + '<div style="margin-top:14px;">' + card('es-ghg-co2', 'CARBON DIOXIDE · MAUNA LOA, HAWAII', '#b91c1c', big(last[4].toFixed(2), 'PARTS PER MILLION', '#b91c1c'),
+            MN[last[1] - 1] + ' ' + last[2] + ', ' + last[0] + (ago ? ' · ' + ago[4].toFixed(2) + ' ON ' + MN[ago[1] - 1] + ' ' + ago[2] + ', ' + ago[0] + ' · <b style="font-weight:800;">' + (last[4] - ago[4] >= 0 ? '+' : '') + (last[4] - ago[4]).toFixed(2) + ' IN A YEAR</b>' : '') + ' · ABOUT 280 BEFORE INDUSTRY, SO ' + Math.round((last[4] / 280 - 1) * 100) + '% MORE',
+            'Measured on the same mountain since 1958, the longest unbroken record there is. <b style="font-weight:700;">The saw-tooth is the planet breathing</b>: northern forests draw it down every summer and give it back every winter, so it peaks in May. The thick line is the same record with the seasons taken out; over the last ten years it has climbed <b style="font-weight:700;">' + rate(D.mm, 4).toFixed(1) + ' parts per million a year</b> (this page’s sum from NOAA’s column). It does most of the warming, and what is added stays for centuries.',
+            'NOAA GLOBAL MONITORING LABORATORY · DAILY AND MONTHLY MEANS, MAUNA LOA · THE NEWEST MONTHS ARE PRELIMINARY') + '</div>'
+        + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:18px 22px;margin-top:18px;">'
+        + card('es-ghg-ch4', 'METHANE · THE WHOLE GLOBE', '#b45309', big(cm[3].toFixed(0), 'PARTS PER BILLION', '#b45309'), MN[cm[1] - 1] + ' ' + cm[0] + ' · ABOUT 730 BEFORE INDUSTRY, SO ' + (cm[3] / 730).toFixed(1) + '× AS MUCH · +' + rate(D.ch, 5).toFixed(1) + ' A YEAR OVER TEN YEARS',
+            'From wetlands, cattle, rice, landfills and leaking gas. Pound for pound it traps about 80 times the heat of carbon dioxide over its first 20 years, but it lasts only about 12, so cutting it cools fastest.', 'NOAA GML · GLOBAL MONTHLY MEAN FROM THE MARINE SURFACE SITES · PUBLISHED A FEW MONTHS BEHIND')
+        + card('es-ghg-n2o', 'NITROUS OXIDE · THE WHOLE GLOBE', '#0f766e', big(nm2[3].toFixed(1), 'PARTS PER BILLION', '#0f766e'), MN[nm2[1] - 1] + ' ' + nm2[0] + ' · ABOUT 270 BEFORE INDUSTRY, SO ' + Math.round((nm2[3] / 270 - 1) * 100) + '% MORE · +' + rate(D.n2, 5).toFixed(2) + ' A YEAR OVER TEN YEARS',
+            'Mostly from fertilised soil. Far less of it, but each pound traps about 270 times the heat of carbon dioxide and lasts over a century, and it is now the main thing still eating the ozone layer.', 'NOAA GML · GLOBAL MONTHLY MEAN · PUBLISHED A FEW MONTHS BEHIND')
+        + '</div>';
+      var draw = function(){ if (CUR !== 'ghg') return; var a = document.getElementById('es-ghg-co2'), b = document.getElementById('es-ghg-ch4'), c = document.getElementById('es-ghg-n2o'); if (!a) return;
+        var col = function(rows, k){ return rows.map(function(r){ return r[k]; }); };
+        ghgChart(a, col(D.mm, 2), col(D.mm, 3), col(D.mm, 4), '#b91c1c', 200, 'rgba(185,28,28,.4)'); var z = D.mm.slice(-61), cz = document.getElementById('es-ghg-co2z'); if (cz) ghgChart(cz, col(z, 2), col(z, 3), col(z, 4), '#b91c1c', 200, 'rgba(185,28,28,.75)'); ghgChart(b, col(D.ch, 2), col(D.ch, 3), col(D.ch, 5), '#b45309', 120, 'rgba(180,83,9,.4)'); ghgChart(c, col(D.n2, 2), col(D.n2, 3), col(D.n2, 5), '#0f766e', 120, 'rgba(15,118,110,.4)'); };
+      draw(); AIR.ghgDraw = draw; };
+    var ghgOn = function(){ AIR.ghgErr = false; line(''); renderGhg(); ghgLoad().then(function(){ renderGhg(); }).catch(function(){ AIR.ghgErr = true; renderGhg(); }); };
+    window.addEventListener('resize', function(){ if (CUR === 'ghg' && AIR.ghgDraw) AIR.ghgDraw(); });
+    var airNeedsGlobe = function(){ var p = document.getElementById('es-panel'); if (p) p.innerHTML = airM('THIS VIEW IS DRAWN ON THE GLOBE, AND THIS BROWSER WOULD NOT GIVE THE PAGE ONE.', '#6b7389'); };
+
+
     /* ================= THE VIEWS, AND THE DROPDOWN ================= */
     /* a view is: panel() = words and data; flat() = the Leaflet map; globe() = the sphere, returning whether it could be shown
        (false -> the flat map takes over, e.g. while the proxy does not yet carry the wind server). GULF STREAM and AMOC have
@@ -94456,7 +94598,11 @@ function closeAlertModal(){
         flat: function(){ JET(true); }, off: function(){ JET(false); globeBtn(null); } },
       /* the global circulation: five tabs, two live skins, one cutaway (see CELLS / bvCellScene), and on the globe the cells on the rim */
       trades: cellEntry('trades', 'TRADE WINDS', 'THE GLOBAL CIRCULATION'), easterlies: cellEntry('easterlies', 'EASTERLIES'), hadley: cellEntry('hadley', 'HADLEY CELL'),
-      ferrel: cellEntry('ferrel', 'FERREL CELL'), polar: cellEntry('polar', 'POLAR CELL')
+      ferrel: cellEntry('ferrel', 'FERREL CELL'), polar: cellEntry('polar', 'POLAR CELL'),
+      /* the air itself: two gases on the globe with the wind at their own height, and the greenhouse record (see THE AIR) */
+      ozone: { label: 'OZONE', group: 'THE AIR', globe: ozoneGlobe, flat: airNeedsGlobe, off: function(){ globeBtn(null); } },
+      co: { label: 'CARBON MONOXIDE', globe: coGlobe, flat: airNeedsGlobe, off: function(){ globeBtn(null); } },
+      ghg: { label: 'GREENHOUSE GASES', bare: true, on: ghgOn, off: function(){} }
     };
     var setView = function(k){
       if (!VIEWS[k] || !EM) return;
@@ -94479,7 +94625,7 @@ function closeAlertModal(){
           stageSet('globe'); if (v.panel) v.panel();
           var gp = v.globe(); if (bd0) bd0.classList.toggle('solo', !(p && p.innerHTML));   /* no side panel (the jet stream): a centred, wider globe, not half an empty pane */
           Promise.resolve(gp).then(function(ok){ if (CUR !== k) return; if (ok === false){ stageSet('map'); GLOBE.clear(); globeBtn(null); try { v.flat(); } catch(e){} homeDot(); } mapPlay(); });
-        } else { stageSet('map'); if (v.on) v.on(); else { if (v.panel) v.panel(); v.flat(); } }
+        } else { stageSet(v.bare ? 'bare' : 'map'); if (v.on) v.on(); else { if (v.panel) v.panel(); v.flat(); } }   /* 'bare' = no stage at all: a view that is a record, not a picture */
       } catch(e){}
       mapPlay(); homeDot();
     };
