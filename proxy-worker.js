@@ -85,6 +85,11 @@ const CACHE_RULES = {
   //    wave buoys (one JSON call for every buoy off LA, ~30-min readings) for the
   //    SURF layer; CHP = the statewide dispatch log for the TRAFFIC layer. ──
   'coastwatch.pfeg.noaa.gov':     600,
+  // ── GULF STREAM currents (2026-09-21). NESDIS CoastWatch ERDDAP (a different
+  //    server from the PFEG one above): daily geostrophic surface currents from
+  //    altimetry, u/v in m/s, keyless, no Access-Control-Allow-Origin. The grid is
+  //    one day per day and lands two days late, so an hour of cache is nothing lost. ──
+  'coastwatch.noaa.gov':          3600,
   'www.ndbc.noaa.gov':            600,
   'media.chp.ca.gov':             60,
   // ── THE CITY's TRAFFIC tab (2026-09-20). Both answer without a key and send no
