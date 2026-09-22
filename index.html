@@ -253,6 +253,21 @@
    i.e. you would be styling the map blind. `?basemap=local` points at a local
    `pmtiles serve` (see the basemap note in memory), `?basemap=<url>` at any
    other archive. No effect on the deployed site. */
+/* LAZY-LOAD OBSERVERS MUST NOT JUDGE THE HALF-BUILT PAGE (2026-09-21). Every
+   below-the-fold widget arms an IntersectionObserver so it loads only on approach.
+   Measured at boot: at 200 ms the page is ~7,000 px tall and still growing, the
+   clouds widget sits at y=601 and the hazard widget within its 500 px margin -- so
+   those observers fired at once, and a Los Angeles visitor paid the hazard map's
+   155 PMTiles reads, the 7 MB CIRA video and (some boots) 30 MB of GOES frames before
+   the hero had rendered. Three seconds later the same widgets are 1,200-2,400 px
+   below the fold. THE CITY / THE BASIN insert above them at 3 s, which is the last
+   big layout shift. Arm through this and the observer sees the settled page; it
+   still fires at once if the widget really is in view. */
+window._bvBootT0 = performance.now();
+window._bvLazyArm = function(fn){
+  var wait = 4000 - (performance.now() - window._bvBootT0);
+  if (wait > 0) setTimeout(fn, wait); else fn();
+};
 window.BV_BASEMAP_URL = (function(){
   var live = 'https://cdn.bluishvoid.com/basemap/bluish-basemap-20260829.pmtiles';
   try {
@@ -15010,6 +15025,11 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
   var SATLIB = 'https://satlib.cira.colostate.edu/wp-json/wp/v2/';
   var SLIDER = 'https://slider.cira.colostate.edu/data/json/';
   var _currentTab = 'goes';
+  /* the loop-of-the-day is a 7 MB looping video. It used to be assigned (and, being
+     autoplay, fully downloaded and decoded) the moment the feed landed -- on the LIVE
+     tab, where nobody can see it; measured 28 MB at boot with the range re-reads
+     (2026-09-21). Now it waits here until the EVENTS tab is actually open. */
+  var _lodPending = null;
   var _archiveRendered = false;
   var _allPosts = [];
   var _decodeEl = document.createElement('textarea');
@@ -15027,6 +15047,13 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
   // ── Tab switcher (exposed globally so onclick can reach it) ──
   window.switchCiraTab = function(tab) {
     _currentTab = tab;
+    var _lodVid = document.getElementById('cira-lod-video');
+    if (tab === 'events'){
+      if (_lodPending){ var _pm = _lodPending; _lodPending = null; loadLOD(_pm); }
+      else if (_lodVid && _lodVid.src && _lodVid.paused){ try { var _pp = _lodVid.play(); if (_pp && _pp.catch) _pp.catch(function(){}); } catch(e){} }
+    } else if (_lodVid && !_lodVid.paused){
+      try { _lodVid.pause(); } catch(e){}   /* a hidden tab should not keep decoding */
+    }
     // Restore GOES satellite view when switching back to LIVE. Call via
     // window.* — switchFcastRange is defined in a different IIFE scope, so the
     // bare `typeof switchFcastRange === 'function'` guard here was always false
@@ -15273,6 +15300,7 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
     var topLink=document.getElementById('fcast-source-link');
     if(topLink && m.link){ topLink.href=m.link; }
     if(loading)loading.style.display='flex';
+    if(_currentTab!=='events'){ _lodPending=m; return; }   /* media waits for the tab */
     if(m.mp4){
       imgEl.style.display='none';
       vid.style.display='block';
@@ -15522,13 +15550,18 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
   // autoplay bundle uses. Falls back to boot-time init without IO.
   var _ciraInited = false;
   function _ciraInit(){ if (_ciraInited) return; _ciraInited = true; try { init(); } catch(e){} }
+  var _ciraArmed = false;
   function _ciraArm(){
+    if (_ciraArmed) return; _ciraArmed = true;
     var crw = document.getElementById('clouds-radar-widget');
     if (crw && 'IntersectionObserver' in window){
-      var lodIO = new IntersectionObserver(function(ents){
-        if (ents.some(function(e){ return e.isIntersecting; })){ lodIO.disconnect(); _ciraInit(); }
-      }, { rootMargin: '600px 0px' });
-      lodIO.observe(crw);
+      /* armed once the boot layout has settled -- see _bvLazyArm in the head */
+      (window._bvLazyArm || function(f){ f(); })(function(){
+        var lodIO = new IntersectionObserver(function(ents){
+          if (ents.some(function(e){ return e.isIntersecting; })){ lodIO.disconnect(); _ciraInit(); }
+        }, { rootMargin: '600px 0px' });
+        lodIO.observe(crw);
+      });
     } else {
       _ciraInit();
     }
@@ -91342,7 +91375,7 @@ function initNowMicroTabs(){
     }, 800);
 
     // ─── Clouds/Radar: load only when actually scrolled into view ───
-    setTimeout(function(){
+    window._bvLazyArm(function(){
       // The GOES "live clouds" loop fires a burst of satellite-frame image
       // requests that saturate a mobile connection and starve the data fetches
       // of every widget below it. Loading it on boot (or at window 'load',
@@ -91370,7 +91403,7 @@ function initNowMicroTabs(){
       // GFS/polar-vortex is a separate, lighter widget (loads one frame) — keep
       // it on the boot path so it isn't tied to the radar's visibility.
       try { initGfsWidget(); } catch(e){ console.error('[init] initGfsWidget failed:', e); }
-    }, 1500);
+    });
 
     // ─── Pre-init hazard map so tiles are cached before user clicks ───
     // DESKTOP ONLY: warm the hazard/geology Leaflet maps ~6s in. On mobile this
@@ -94860,6 +94893,10 @@ function closeAlertModal(){
     if (!widget) return;
     if (window._hazardInited) return;  // already engaged
 
+    /* armed once the boot layout has settled -- see _bvLazyArm in the head. Measured
+       2026-09-21: at 200 ms this fired for a widget that ended up 2,400 px down. */
+    (window._bvLazyArm || function(f){ f(); })(function(){
+    if (window._hazardInited) return;
     var io = new IntersectionObserver(function(entries){
       entries.forEach(function(entry){
         if (entry.isIntersecting && !window._hazardInited) {
@@ -94878,6 +94915,7 @@ function closeAlertModal(){
       });
     }, { rootMargin: '500px 0px' });  // start init well before the widget enters (maps take a moment)
     io.observe(widget);
+    });
   })();
 </script>
 

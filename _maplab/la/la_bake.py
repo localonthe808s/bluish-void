@@ -558,6 +558,7 @@ def grid(box, nx, ny):
 def bake_sea():
     print('seafloor relief')
     idx = []
+    # after a bake run webp_pass.py: the 3as tiers ship as lossless WebP (index files point there)
     r = sea_image(dem_pull(PULL, 3 / 3600.0, RASTER['3as']), PULL, 5.0, 'sea_3as.png')
     idx.append(dict(r, feather=True))
     for b, tag in grid(PULL, 3, 2):
