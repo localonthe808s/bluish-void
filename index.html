@@ -50691,11 +50691,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         mid: '/city_terrain_inc.png?v=4', midOp: 1,
         wms: 'conus_bref_qcd',
         frames: function(i){
-          var b = this.box;
+          var b = cwWideFetchBox(this), W = Math.round(1400 * (1 + 2 * (this._pad || 0))), H = Math.round(W * 1228 / 1400);   /* padded for the nowcast, same km per pixel */
           var t = new Date(Math.floor(Date.now() / 120000) * 120000 - i * 600000).toISOString();
           return 'https://opengeo.ncep.noaa.gov/geoserver/conus/ows?service=WMS&version=1.1.0&request=GetMap'
             + '&layers=' + cwWideLayer(this) + '&styles=&bbox=' + b.X0 + ',' + b.Y0 + ',' + b.X1 + ',' + b.Y1
-            + '&width=1400&height=1228&srs=EPSG:3857&format=image/png8&transparent=true'
+            + '&width=' + W + '&height=' + H + '&srs=EPSG:3857&format=image/png8&transparent=true'
             + '&time=' + encodeURIComponent(t);
         },
         boroughs: true, lead: true, fuel: true, leadHrs: [[1, .98], [2, .85]], prods: true, alerts: true, fronts: true, barbs: true,
@@ -54295,6 +54295,31 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       /* a layer that never lands must not hold the panel hostage */
       if (on) cwWideLoadCap = setTimeout(function(){ cwWideLoad(false); }, 10000);
     }
+    /* THE NOWCAST MUST NEVER SHOW AN EDGE (user 2026-09-21: "we cant show an edge at all on
+       those views"). The frames after the last observation are the newest picture slid along the
+       storm motion, and a picture that only covers the box leaves a bare strip behind it as it
+       goes -- measured on the live +40 frame, the rain stopped dead in a vertical line 81 px in,
+       and at half opacity the whole thing read as a translucent rectangle sliding over the map.
+       So a view with a nowcast fetches EVERY frame over a wider box, padded on all four sides
+       (the motion is re-measured off these very frames and can turn), and the <img> is sized to
+       match, hanging past the body on every side; the body's overflow clips it. How much: what
+       the storm will cover in the whole nowcast, times 1.3, never under a fifth of the box and
+       never over half. moveFrame also caps the slide at the margin it has, so a storm that
+       outruns the padding stalls the picture -- it never shows its edge. Everything drawn on the
+       other canvases keeps using wv.box: the padding is the radar picture's business only. */
+    function cwWidePad(wv){
+      if (!wv || !wv.nowcast || !wv.box) return 0;
+      var st = window._cwStorm || window._cwStormSteer, mph = (st && st.mph) ? st.mph : 25;
+      var km = mph * 1.609 * (wv.nowcast * (wv.stepMs || 600000) / 3600000);
+      var groundKm = (wv.box.X1 - wv.box.X0) * Math.cos(40.7 * Math.PI / 180) / 1000;
+      return Math.max(0.2, Math.min(0.5, km * 1.3 / groundKm));
+    }
+    function cwWideFetchBox(wv){
+      var b = wv.box, p = wv._pad || 0;
+      if (!p) return b;
+      var dx = (b.X1 - b.X0) * p, dy = (b.Y1 - b.Y0) * p;
+      return { X0: b.X0 - dx, Y0: b.Y0 - dy, X1: b.X1 + dx, Y1: b.Y1 + dy, sid: b.sid };
+    }
     function setWide(id){
       /* a deliberate tap outranks the launch chooser: whatever it was about to
          decide, it must not move the view under someone who just picked one.
@@ -54333,6 +54358,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       el.style.objectFit = wv.fit;
       el.style.display = '';
       el.style.background = wv.box ? 'transparent' : '#0d1626';
+      wv._pad = cwWidePad(wv);                 /* see cwWidePad: the nowcast's picture hangs past the body */
+      el.style.width = el.style.height = wv._pad ? (100 + wv._pad * 200).toFixed(2) + '%' : '100%';
+      el.style.left = el.style.top = wv._pad ? '-' + (wv._pad * 100).toFixed(2) + '%' : '0';
       /* the loader comes up NOW and comes down only when the layers this view
          is made of have both landed — the basemap under it and a first frame */
       cwWideLoad(true, 'THE ' + String(wv.label).split(' · ').pop());
@@ -54422,14 +54450,17 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         if (fwd <= 0 || !window._cwStorm || !window._cwStorm.mph){
           el.style.transform = ''; el.style.opacity = '1'; return;
         }
-        var r2 = el.getBoundingClientRect();
-        if (!r2.width) return;
+        var body2 = document.getElementById('cw-body'), r2 = body2 ? body2.getBoundingClientRect() : null;   /* the BODY's width: the picture itself is wider (cwWidePad) */
+        if (!r2 || !r2.width) return;
         var kmh = window._cwStorm.mph * 1.609;
         var km = kmh * (fwd * stepMs / 3600000);
         var mercM = km * 1000 / Math.cos(40.7 * Math.PI / 180);
         var pxPerM = r2.width / (wv.box.X1 - wv.box.X0);
         var d = mercM * pxPerM;
         var th = window._cwStorm.toward * Math.PI / 180;
+        /* never past the padding: a slide longer than the margin would bring the picture's edge into view */
+        var mx = (wv._pad || 0) * r2.width * 0.98, my = (wv._pad || 0) * r2.height * 0.98, sx = Math.abs(Math.sin(th)), sy = Math.abs(Math.cos(th));
+        if (mx){ if (sx > 1e-3) d = Math.min(d, mx / sx); if (sy > 1e-3) d = Math.min(d, my / sy); }
         el.style.transform = 'translate(' + (Math.sin(th) * d).toFixed(1) + 'px,'
                            + (-Math.cos(th) * d).toFixed(1) + 'px)';
         el.style.opacity = String(Math.max(0.34, 1 - fwd * 0.13));
@@ -54485,7 +54516,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             cwWideImgs = urls.concat(new Array(nSteps).fill(urls[urls.length - 1]));
             if (wv.wms && wv.lead){
               try {
-                var mo = cwMeasureMotion(ims[0], ims[urls.length - 1], (urls.length - 1) * stepMs / 60000, wv);
+                var mo = cwMeasureMotion(ims[0], ims[urls.length - 1], (urls.length - 1) * stepMs / 60000, wv, cwWideFetchBox(wv));
                 if (mo){
                   if (window._cwStorm && !window._cwStorm.measured) window._cwStormSteer = window._cwStorm;
                   window._cwStorm = { toward: mo.toward, mph: Math.max(mo.mph, 5), measured: true, at: Date.now(), src: wv.id, match: mo.match };
@@ -62219,9 +62250,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        is the motion. Kept only with a coherent match (a quarter of the
        echo lands), a displacement inside the search window, and something
        actually moving; otherwise the steering wind stands. */
-    function cwMeasureMotion(imA, imB, dtMin, wv){
+    function cwMeasureMotion(imA, imB, dtMin, wv, fetchBox){
       if (!imA || !imB || !imA.naturalWidth || !imB.naturalWidth || !(dtMin >= 8)) return null;
-      var boxKm = (wv.box.X1 - wv.box.X0) / 1000 * Math.cos(41.5 * Math.PI / 180);
+      var bx = fetchBox || wv.box;                    /* the frames may cover a padded box (cwWidePad); the km per pixel must be theirs */
+      var boxKm = (bx.X1 - bx.X0) / 1000 * Math.cos(41.5 * Math.PI / 180);
       var W = Math.max(200, Math.min(600, Math.round(boxKm / 2.2)));
       var H = Math.round(W * imA.naturalHeight / imA.naturalWidth), kmPx = boxKm / W;
       var c = document.createElement('canvas'); c.width = W; c.height = H;
