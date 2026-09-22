@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Earth Lab · Fabric</title>
+<!--
+  EARTH LAB · FABRIC (user 2026-09-22: "think of something cooler though, how can we reinvent the visual of flow beyond
+  just tiny lines, i want to be unique" -> "lets go for it").
+
+  THE IDEA. Stop drawing the wind; let the wind draw the surface. Every frame the whole picture of the disc is pushed a
+  small step along the wind and a little fresh grain is blended in (image-based flow visualisation, van Wijk 2002). Nothing
+  is a line. Where the air is fast the grain stretches into long fibres; where it is calm the weave stays tight and still.
+
+  TWO SKINS, ONE ENGINE.
+    GRAIN  the fabric itself, tinted by the field (the jet's heat, or teal from the east / orange from the west).
+    DYE    warm dye dropped along the equator, cold dye at the poles, carried by the real wind and folded by the storms:
+           the transport of the cells as marbling.
+
+  HOW. Plain WebGL 1, no library, no float textures. The wind (NOAA GFS, the two components as grey pictures from Unidata's
+  map server through the site's proxy, decoded with the server's own legend) is one RGBA8 texture. Pass 1 advects a
+  screen-sized RGBA8 buffer (ping-pong): for each pixel of the disc -> world normal -> latitude, longitude -> wind -> the
+  tangent velocity turned into the view -> a step back in SCREEN pixels -> the previous frame there, blended with noise (or
+  faded, plus dye sources). Pass 2 is the site's globe shader with the fabric as one more input. Screen space means no pole
+  distortion; the cost is that a turn of the globe smears the cloth for about half a second while it re-forms.
+-->
+<style>
+  :root{ --ink:#1b2340; --mute:#6b7389; }
+  html,body{ margin:0; background:#eceff7; color:var(--ink); font-family:system-ui,sans-serif; }
+  .wrap{ max-width:1100px; margin:0 auto; padding:14px; }
+  .row{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:8px 0; }
+  .pill{ border:none; border-radius:8px; padding:6px 13px; background:rgba(22,163,74,.82); color:#fff; font:700 .6rem system-ui,sans-serif; letter-spacing:.06em; text-transform:uppercase; cursor:pointer; }
+  .pill.on{ background:rgba(234,88,12,.92); }
+  .lab{ font:900 .5rem system-ui,sans-serif; letter-spacing:.16em; color:rgba(27,35,64,.55); margin:0 4px 0 2px; }
+  #stage{ position:relative; width:100%; aspect-ratio:1/1; max-height:720px; border-radius:14px; overflow:hidden; background:radial-gradient(circle at 50% 45%,#15203f 0%,#0a1024 62%,#060a18 100%); touch-action:none; cursor:grab; }
+  #stage.drag{ cursor:grabbing; }
+  #stage canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+  #ov{ pointer-events:none; }
+  #stat{ position:absolute; left:12px; bottom:10px; font:800 8px system-ui,sans-serif; letter-spacing:.1em; color:rgba(255,255,255,.75); text-shadow:0 0 6px #000; }
+  #hint{ position:absolute; right:12px; bottom:10px; font:800 8px system-ui,sans-serif; letter-spacing:.1em; color:rgba(255,255,255,.7); text-shadow:0 0 6px #000; }
+  .m{ font:600 8.5px/1.5 system-ui,sans-serif; letter-spacing:.06em; color:var(--mute); margin-top:8px; }
+  .m b{ color:var(--ink); }
+  input[type=range]{ width:110px; vertical-align:middle; }
+  .k{ font:700 .55rem system-ui,sans-serif; letter-spacing:.06em; color:var(--ink); margin-left:10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="row"><span class="lab">FIELD</span><span id="fields"></span><span class="lab" style="margin-left:14px;">LOOK</span><span id="looks"></span>
+    <button class="pill" id="b-home" style="background:rgba(27,35,64,.75);">FACE NEW YORK</button><button class="pill" id="b-pole" style="background:rgba(27,35,64,.75);">LOOK DOWN ON THE POLE</button></div>
+  <div id="stage"><canvas id="gl"></canvas><canvas id="ov"></canvas><div id="stat"></div><div id="hint">DRAG TO TURN · PINCH OR WHEEL TO ZOOM</div></div>
+  <div class="row"><span class="lab">TUNE</span>
+    <span class="k">GRAIN <input id="r-inject" type="range" min="0.005" max="0.25" step="0.005" value="0.02"></span>
+    <span class="k">SPEED <input id="r-ts" type="range" min="3600" max="120000" step="600" value="43200"></span>
+    <span class="k">CONTRAST <input id="r-con" type="range" min="0.3" max="2.5" step="0.05" value="1.0"></span>
+    <span class="k">DYE FADE <input id="r-fade" type="range" min="0.990" max="0.9999" step="0.0002" value="0.9993"></span>
+    <span class="k">DROPS <input id="r-drop" type="range" min="0.9" max="0.999" step="0.001" value="0.994"></span></div>
+  <div id="words" class="m"></div>
+</div>
+<script>
+(function(){
+  var HOME = { lat: 40.7128, lon: -74.006, name: 'NEW YORK' };
+  var GIBS = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&SRS=EPSG:4326&BBOX=-180,-90,180,90&WIDTH=2048&HEIGHT=1024&STYLES=';
+  var FIELDS = {
+    jet:  { label: 'JET STREAM · 34,000 FT', u: 'u-component_of_wind_isobaric', v: 'v-component_of_wind_isobaric', elev: 25000, range: 90, mode: 'speed', face: [46, -74],
+            words: 'The jet as a fabric: the cloth stretches into long bright fibres where the air tops ~50 mph and deepens to red past 150. Calm air keeps a tight, still weave.' },
+    surf: { label: 'SURFACE WIND · 10 M', u: 'u-component_of_wind_height_above_ground', v: 'v-component_of_wind_height_above_ground', elev: 10, range: 30, mode: 'ew', face: [8, -150],
+            words: 'The wind belts as a fabric: teal fibres run from the east (the trades, the polar easterlies), orange from the west (the westerlies). The storms are whorls in the cloth.' }
+  };
+  var LOOKS = { weave: 'WEAVE', grain: 'COMETS', dye: 'DYE' }, MODE = { weave: 0, grain: 1, dye: 2 };
+  var stage = document.getElementById('stage'), glc = document.getElementById('gl'), ovc = document.getElementById('ov');
+  var gl = glc.getContext('webgl', { premultipliedAlpha: true, antialias: false, preserveDrawingBuffer: false }), ov = ovc.getContext('2d');
+  var stat = function(s){ document.getElementById('stat').textContent = s || ''; };
+  if (!gl){ stat('NO WEBGL'); return; }
+  var V = { lat0: 46, lon0: -74, tLat: 46, tLon: -74, zoom: 1, field: 'jet', look: 'weave', dirty: true, dragging: false, ready: false, dyeT: 0 };
+  var P = { inject: 0.08, ts: 43200, con: 1.4, fade: 0.9993, drop: 0.98 };
+  var DPR = Math.min(2, window.devicePixelRatio || 1), W = 0, H = 0, R = 0, CX = 0, CY = 0, rad = Math.PI / 180;
+
+  /* ---------- programs ---------- */
+  var sh = function(type, src){ var s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+  var prog = function(fs, names){ var vs = 'attribute vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }';
+    var pr = gl.createProgram(); gl.attachShader(pr, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(pr);
+    if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(pr));
+    var U = {}; names.forEach(function(k){ U[k] = gl.getUniformLocation(pr, k); }); return { pr: pr, U: U }; };
+  var HEAD = 'precision highp float; uniform vec2 uC; uniform float uR; uniform mat3 uW; uniform vec2 uRes;'
+    + 'vec2 ll(vec3 w){ return vec2(atan(w.x, w.z) / 6.2831853 + 0.5, 0.5 - asin(clamp(w.y, -1.0, 1.0)) / 3.14159265); }';
+  /* PASS 1: advect the fabric one step along the wind, in screen space */
+  var ADV = prog(HEAD + 'uniform mat3 uV; uniform sampler2D uPrev; uniform sampler2D uWind; uniform sampler2D uNoise; uniform float uStep; uniform float uRange; uniform float uSeed; uniform float uInject; uniform float uMode; uniform float uFade; uniform float uDrop; uniform float uPour;'
+    + 'void main(){ vec2 frag = gl_FragCoord.xy; vec2 p = (frag - uC) / uR; float r2 = dot(p, p);'
+    + ' vec2 nuv = frag / 256.0 + vec2(uSeed, uSeed * 1.7); float nz = texture2D(uNoise, nuv).r;'
+    + ' if (r2 > 1.0){ gl_FragColor = vec4(0.0); return; }'
+    + ' float z = sqrt(1.0 - r2); vec3 n = vec3(p.x, p.y, z); vec3 w = uW * n;'
+    + ' vec2 uv = ll(w); vec4 wt = texture2D(uWind, uv); vec2 wind = (wt.rg * 2.0 - 1.0) * uRange;'
+    + ' vec3 east = normalize(cross(vec3(0.0, 1.0, 0.0), w) + vec3(1e-5, 0.0, 0.0)); vec3 north = cross(w, east);'
+    + ' vec3 dW = east * wind.x + north * wind.y; vec3 dV = uV * dW; vec2 d = dV.xy * uStep;'
+    + ' vec2 srcPx = frag - d; vec2 sp = (srcPx - uC) / uR; float onSphere = step(dot(sp, sp), 0.985);'
+    + ' vec4 prev = texture2D(uPrev, srcPx / uRes);'
+    + ' if (uMode < 0.5){ float g = mix(prev.r, nz, uInject); g = clamp(0.5 + (g - 0.5) * 1.06, 0.0, 1.0); g = mix(nz, g, onSphere); gl_FragColor = vec4(g, g, g, 1.0); return; }'
+    + ' if (uMode < 1.5){ float speck = step(uDrop, nz) * 0.8; float here = texture2D(uPrev, frag / uRes).r; float g = max(prev.r * onSphere, here * (1.0 - uInject)) + speck; if (g < 0.02) g = 0.0; gl_FragColor = vec4(min(g, 1.0), 0.0, 0.0, 1.0); return; }'
+    + ' vec4 dye = prev * uFade * onSphere; float latd = degrees(asin(clamp(w.y, -1.0, 1.0)));'
+    + ' float band = smoothstep(4.5, 1.5, abs(latd)); float cap = smoothstep(70.0, 78.0, abs(latd)); float gate = step(uDrop, nz) * (1.0 + uPour * 6.0);'
+    + ' dye.r += band * gate * 0.35; dye.g += cap * gate * 0.35;'
+    + ' gl_FragColor = vec4(min(dye.rg, vec2(1.0)), 0.0, 1.0); }',
+    ['uC', 'uR', 'uW', 'uRes', 'uV', 'uPrev', 'uWind', 'uNoise', 'uStep', 'uRange', 'uSeed', 'uInject', 'uMode', 'uFade', 'uDrop', 'uPour']);
+  /* PASS 2: the globe, with the fabric as one more input */
+  var GLB = prog(HEAD + 'uniform sampler2D uBase; uniform sampler2D uWind; uniform sampler2D uFab; uniform float uRange; uniform float uMode; uniform float uCol; uniform float uCon; uniform float uOn;'
+    + 'vec3 ramp3(vec3 a, vec3 b, vec3 c, float t){ return t < 0.5 ? mix(a, b, t * 2.0) : mix(b, c, t * 2.0 - 1.0); }'
+    + 'void main(){ vec2 p = (gl_FragCoord.xy - uC) / uR; float r2 = dot(p, p);'
+    + ' if (r2 > 1.0){ float d = sqrt(r2) - 1.0; float a = exp(-d * 22.0) * 0.5; gl_FragColor = vec4(vec3(0.38, 0.62, 1.0) * a, a); return; }'
+    + ' float z = sqrt(1.0 - r2); vec3 w = uW * vec3(p.x, p.y, z); vec2 uv = ll(w);'
+    + ' vec3 b = texture2D(uBase, uv).rgb; float g = dot(b, vec3(0.3, 0.59, 0.11)); b = mix(vec3(g), b, 0.6) * vec3(0.50, 0.56, 0.72);'
+    + ' vec4 fab = texture2D(uFab, gl_FragCoord.xy / uRes); vec4 wt = texture2D(uWind, uv); vec2 wind = (wt.rg * 2.0 - 1.0) * uRange; float spd = length(wind);'
+    + ' vec3 c = b;'
+    + ' if (uOn > 0.5 && uMode < 1.5){'
+    + '   float f = uMode < 0.5 ? (fab.r - 0.5) * 2.0 : fab.r; vec3 tint; float a;'
+    + '   if (uCol < 0.5){ a = clamp((spd - 20.0) / 18.0, 0.0, 1.0); tint = ramp3(vec3(1.0, 0.95, 0.78), vec3(0.95, 0.45, 0.10), vec3(0.62, 0.08, 0.10), clamp((spd - 24.0) / 60.0, 0.0, 1.0)); }'
+    + '   else { float e = abs(wind.x); a = clamp((e - 2.5) / 9.0, 0.0, 1.0) * 0.9; tint = wind.x < 0.0 ? ramp3(vec3(0.60, 0.96, 0.89), vec3(0.18, 0.83, 0.75), vec3(0.05, 0.58, 0.53), clamp((e - 3.0) / 10.0, 0.0, 1.0)) : ramp3(vec3(1.0, 0.84, 0.66), vec3(0.98, 0.57, 0.24), vec3(0.76, 0.25, 0.05), clamp((e - 3.0) / 12.0, 0.0, 1.0)); }'
+    + '   if (uMode < 0.5){ vec3 fabric = tint * (0.55 + uCon * f); c = mix(b, clamp(fabric, 0.0, 1.0), a); c += tint * max(f, 0.0) * a * 0.25; }'
+    + '   else { float k = clamp(f * uCon, 0.0, 1.0); c = mix(b, tint * (0.75 + 0.45 * k), a * k); c += tint * k * k * a * 0.35; } }'
+    + ' else if (uOn > 0.5){ float wm = clamp(fab.r * uCon, 0.0, 1.0), cd = clamp(fab.g * uCon, 0.0, 1.0); vec3 warm = mix(vec3(0.55, 0.16, 0.05), vec3(1.0, 0.62, 0.20), wm), cold = mix(vec3(0.05, 0.25, 0.55), vec3(0.55, 0.85, 1.0), cd);'
+    + '   float m = clamp(wm + cd, 0.0, 1.0); vec3 dyec = (warm * wm + cold * cd) / max(wm + cd, 1e-3); c = mix(b, dyec, m * 0.92); }'
+    + ' c *= 0.50 + 0.50 * z; c += vec3(0.30, 0.50, 0.90) * pow(1.0 - z, 3.0) * 0.35; gl_FragColor = vec4(c, 1.0); }',
+    ['uC', 'uR', 'uW', 'uRes', 'uBase', 'uWind', 'uFab', 'uRange', 'uMode', 'uCol', 'uCon', 'uOn']);
+  var buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  var bindQuad = function(pr){ var aloc = gl.getAttribLocation(pr, 'a'); gl.enableVertexAttribArray(aloc); gl.vertexAttribPointer(aloc, 2, gl.FLOAT, false, 0, 0); };
+
+  /* ---------- textures: 0 base, 1 wind, 2 noise, 3/4 the fabric ping-pong ---------- */
+  var tex = function(wrapS, nearest){ var t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 0]));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, nearest ? gl.NEAREST : gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, nearest ? gl.NEAREST : gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrapS || gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrapS || gl.CLAMP_TO_EDGE); return t; };
+  var tBase = tex(gl.REPEAT), tWind = tex(gl.REPEAT), tNoise = tex(gl.REPEAT, true),   /* NEAREST: the noise must keep its extremes, or no speck ever crosses the threshold */ tFab = [tex(), tex()], fbo = [gl.createFramebuffer(), gl.createFramebuffer()], cur = 0, fabW = 0, fabH = 0;
+  var putImg = function(t, im){ gl.bindTexture(gl.TEXTURE_2D, t); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, im); V.dirty = true; };
+  (function(){ var n = 256, d = new Uint8Array(n * n * 4); for (var i = 0; i < d.length; i++) d[i] = Math.random() * 256 | 0; gl.bindTexture(gl.TEXTURE_2D, tNoise); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, n, n, 0, gl.RGBA, gl.UNSIGNED_BYTE, d); })();
+  var sizeFab = function(){ var w = glc.width, h = glc.height; if (w === fabW && h === fabH) return; fabW = w; fabH = h;
+    for (var i = 0; i < 2; i++){ gl.bindTexture(gl.TEXTURE_2D, tFab[i]); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo[i]); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tFab[i], 0); }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); V.dyeT = 0; };
+  var fetchImg = function(url){ return new Promise(function(res, rej){ var im = new Image(); im.crossOrigin = 'anonymous'; im.onload = function(){ res(im); }; im.onerror = rej; im.src = url; }); };
+  fetchImg(GIBS + '&FORMAT=image/jpeg&LAYERS=BlueMarble_ShadedRelief_Bathymetry').then(function(im){ putImg(tBase, im); }).catch(function(){ stat('THE BASE MAP DID NOT LOAD'); });
+  var COAST = null; fetch('../es_coast.json?v=1').then(function(r){ return r.json(); }).then(function(j){ COAST = j; V.dirty = true; }).catch(function(){});
+
+  /* ---------- the wind, as on the site: two grey pictures through the proxy, decoded with the server's own legend ---------- */
+  var GREYS = 'fffffefefdfdfcfcfbfbfafaf9f9f8f8f7f7f6f6f5f5f4f4f3f3f2f2f1f1f0f0efefeeedececebeaeae9e8e7e7e6e5e5e4e3e2e2e1e0dfdfdedddddcdbdadad9d8d7d6d5d4d4d3d2d1d0cfcecdcccbcbcac9c8c7c6c5c4c3c2c2c1c0bfbebdbcbab9b8b7b5b4b3b2b0afaeadabaaa9a8a6a5a4a3a1a09f9e9c9b9a99979695949391908f8e8d8c8b8a88878685848382817f7e7d7c7b7a7978767574737271706f6e6d6c6b6a6968676665646361605f5e5d5c5b5a5958575655545352514f4e4c4b494846454342413f3e3c3b393836353432312f2e2c2b29282625242321201f1e1d1b1a1918171514131211100e0d0c0b0a08070605040200';
+  var INV = new Float32Array(256), SUM = {}, CN = {}, lastT = 1, g0;
+  for (g0 = 0; g0 < 250 && g0 * 2 + 1 < GREYS.length; g0++){ var gv = parseInt(GREYS.substr(g0 * 2, 2), 16); SUM[gv] = (SUM[gv] || 0) + g0; CN[gv] = (CN[gv] || 0) + 1; }
+  for (g0 = 255; g0 >= 0; g0--){ if (CN[g0]) lastT = (SUM[g0] / CN[g0] + 0.5) / 250; INV[g0] = lastT; }
+  var GW = 1024, GH = 512, p2 = function(n){ return (n < 10 ? '0' : '') + n; }, RUNBACK = 0;
+  var runBase = function(){ var t = new Date(Date.now() - (7 + 6 * RUNBACK) * 36e5); t.setUTCHours(Math.floor(t.getUTCHours() / 6) * 6, 0, 0, 0); return 'https://thredds.ucar.edu/thredds/wms/grib/NCEP/GFS/Global_0p25deg/GFS_Global_0p25deg_' + t.getUTCFullYear() + p2(t.getUTCMonth() + 1) + p2(t.getUTCDate()) + '_' + p2(t.getUTCHours()) + '00.grib2'; };
+  var validIso = function(){ return new Date(Math.round(Date.now() / 108e5) * 108e5).toISOString().slice(0, 13) + ':00:00.000Z'; };
+  var url = function(layer, elev, range){ return 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent(runBase() + '?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&CRS=CRS:84&BBOX=-180,-90,180,90&WIDTH=' + GW + '&HEIGHT=' + GH
+    + '&FORMAT=image/png&TRANSPARENT=false&NUMCOLORBANDS=250&STYLES=default-scalar/seq-Greys&BELOWMINCOLOR=extend&ABOVEMAXCOLOR=extend&COLORSCALERANGE=' + (-range) + ',' + range + '&LAYERS=' + layer + '&ELEVATION=' + elev + '&TIME=' + validIso()); };
+  var decode = function(im){ var c = document.createElement('canvas'); c.width = GW; c.height = GH; var g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(im, 0, 0, GW, GH);
+    var px = g.getImageData(0, 0, GW, GH).data, out = new Float32Array(GW * GH); for (var i = 0; i < out.length; i++) out[i] = INV[px[i * 4]] * 2 - 1; return out; };   /* -1..1 of the range */
+  var CACHE = {}, WIND = null;
+  var loadField = function(k){ var F = FIELDS[k]; V.field = k; V.ready = false; V.clearFab = true; stat('LOADING THE WIND…'); words();
+    var go = function(o){ if (V.field !== k) return; WIND = o;
+      var d = new Uint8Array(GW * GH * 4); for (var i = 0; i < GW * GH; i++){ var u = o.u[i], v = o.v[i]; d[i * 4] = (u * 0.5 + 0.5) * 255; d[i * 4 + 1] = (v * 0.5 + 0.5) * 255; d[i * 4 + 2] = Math.min(255, Math.sqrt(u * u + v * v) * 255); d[i * 4 + 3] = 255; }
+      gl.bindTexture(gl.TEXTURE_2D, tWind); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, GW, GH, 0, gl.RGBA, gl.UNSIGNED_BYTE, d);
+      V.ready = true; V.dyeT = 0; V.dirty = true; stat('NOAA GFS · ' + (RUNBACK ? 'AN EARLIER RUN' : 'LATEST RUN') + ' · FABRIC'); words(); };
+    if (CACHE[k]) return go(CACHE[k]);
+    var attempt = function(){ return Promise.all([fetchImg(url(F.u, F.elev, F.range)), fetchImg(url(F.v, F.elev, F.range))]).then(function(ims){ return { u: decode(ims[0]), v: decode(ims[1]) }; }); };
+    attempt().catch(function(){ if (RUNBACK >= 2) throw new Error('no run'); RUNBACK++; return attempt(); }).then(function(o){ CACHE[k] = o; go(o); }).catch(function(){ stat('THE WIND DID NOT LOAD'); });
+  };
+
+  /* ---------- view ---------- */
+  var mats = function(){ var a = V.lat0 * rad, l = -V.lon0 * rad, ca = Math.cos(a), sa = Math.sin(a), cl = Math.cos(l), sl = Math.sin(l);
+    var Vm = [[cl, 0, sl], [sa * sl, ca, -sa * cl], [-ca * sl, sa, ca * cl]];
+    return { V: Vm, Vcol: new Float32Array([Vm[0][0], Vm[1][0], Vm[2][0], Vm[0][1], Vm[1][1], Vm[2][1], Vm[0][2], Vm[1][2], Vm[2][2]]), Wcol: new Float32Array([Vm[0][0], Vm[0][1], Vm[0][2], Vm[1][0], Vm[1][1], Vm[1][2], Vm[2][0], Vm[2][1], Vm[2][2]]) }; };
+  var project = function(M, lat, lon){ var la = lat * rad, lo = lon * rad, x = Math.cos(la) * Math.sin(lo), y = Math.sin(la), z = Math.cos(la) * Math.cos(lo);
+    var vx = M[0][0] * x + M[0][1] * y + M[0][2] * z, vy = M[1][0] * x + M[1][1] * y + M[1][2] * z, vz = M[2][0] * x + M[2][1] * y + M[2][2] * z; return [CX + vx * R, CY - vy * R, vz]; };
+  var resize = function(){ var r = stage.getBoundingClientRect(); W = r.width; H = r.height; [glc, ovc].forEach(function(c){ c.width = Math.round(W * DPR); c.height = Math.round(H * DPR); }); V.dirty = true; };
+  var path = function(M, pts){ var pen = false; ov.beginPath(); pts.forEach(function(p){ var q = project(M, p[0], p[1]); if (q[2] <= 0.02){ pen = false; return; } if (pen) ov.lineTo(q[0], q[1]); else { ov.moveTo(q[0], q[1]); pen = true; } }); ov.stroke(); };
+  var word = function(s, x, y, col, font, back){ ov.font = font || '800 9px system-ui,sans-serif'; var w = ov.measureText(s).width; x = Math.max(6, Math.min(W - w - 6, x)); y = Math.max(12, Math.min(H - 6, y));
+    if (back){ ov.fillStyle = 'rgba(255,252,244,.9)'; ov.fillRect(x - 3, y - 9, w + 6, 12); } ov.fillStyle = col; ov.fillText(s, x, y); };
+  var drawOverlay = function(){ var M = mats().V; ov.setTransform(DPR, 0, 0, DPR, 0, 0); ov.clearRect(0, 0, W, H); ov.lineJoin = 'round';
+    var ring = function(lat, a){ var p = []; for (var lo = -180; lo <= 180; lo += 3) p.push([lat, lo]); ov.strokeStyle = 'rgba(255,255,255,' + a + ')'; ov.lineWidth = 1; ov.setLineDash(lat ? [3, 6] : [5, 5]); path(M, p); ov.setLineDash([]); };
+    ring(0, .5); [30, -30, 60, -60].forEach(function(la){ ring(la, .26); });
+    if (COAST){ ov.strokeStyle = 'rgba(234,88,12,.82)'; ov.lineWidth = 0.95; COAST.forEach(function(line){ path(M, line); }); }
+    var h = project(M, HOME.lat, HOME.lon); if (h[2] > 0.03){ ov.fillStyle = '#fff'; ov.beginPath(); ov.arc(h[0], h[1], 5, 0, 6.3); ov.fill(); ov.fillStyle = '#2B22F4'; ov.beginPath(); ov.arc(h[0], h[1], 3.4, 0, 6.3); ov.fill(); word(HOME.name, h[0] + 9, h[1] + 3, '#2B22F4', '800 9px system-ui,sans-serif', true); } };
+
+  /* ---------- the loop: advect, then draw ---------- */
+  var seed = Math.random(), last = 0, ft = [], FTN = 0;
+  var frame = function(now){
+    requestAnimationFrame(frame);
+    var dt = Math.min(0.05, (now - (last || now)) / 1000) || 0.016; last = now;
+    if (document.hidden) return;
+    var dLat = V.tLat - V.lat0, dLon = V.tLon - V.lon0; if (Math.abs(dLat) > 0.01 || Math.abs(dLon) > 0.01){ var k = V.dragging ? 1 : Math.min(1, dt * 7); V.lat0 += dLat * k; V.lon0 += dLon * k; V.dirty = true; }
+    var r = stage.getBoundingClientRect(); if (r.bottom < 0 || r.top > innerHeight) return;
+    R = Math.min(W, H) * 0.445 * V.zoom; CX = W / 2; CY = H / 2;
+    sizeFab();
+    if (V.clearFab){ for (var ci = 0; ci < 2; ci++){ gl.bindFramebuffer(gl.FRAMEBUFFER, fbo[ci]); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); } gl.bindFramebuffer(gl.FRAMEBUFFER, null); V.clearFab = false; }
+    var M = mats(), on = V.ready ? 1 : 0, F = FIELDS[V.field], mode = MODE[V.look];
+    var t0 = performance.now();
+    if (on){
+      /* pass 1 -> the other fabric buffer */
+      var nxt = 1 - cur; gl.bindFramebuffer(gl.FRAMEBUFFER, fbo[nxt]); gl.viewport(0, 0, fabW, fabH); gl.useProgram(ADV.pr); bindQuad(ADV.pr);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tFab[cur]); gl.uniform1i(ADV.U.uPrev, 0);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, tWind); gl.uniform1i(ADV.U.uWind, 1);
+      gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, tNoise); gl.uniform1i(ADV.U.uNoise, 2);
+      gl.uniform2f(ADV.U.uC, CX * DPR, (H - CY) * DPR); gl.uniform1f(ADV.U.uR, R * DPR); gl.uniformMatrix3fv(ADV.U.uW, false, M.Wcol); gl.uniformMatrix3fv(ADV.U.uV, false, M.Vcol); gl.uniform2f(ADV.U.uRes, fabW, fabH);
+      seed = (seed + 0.618034) % 1; gl.uniform1f(ADV.U.uSeed, seed);
+      gl.uniform1f(ADV.U.uStep, R * DPR * P.ts * dt / 6371000);   /* px per (m/s) this frame: the wind for uSpeed seconds of real air per second of ours */
+      gl.uniform1f(ADV.U.uRange, F.range); gl.uniform1f(ADV.U.uInject, P.inject); gl.uniform1f(ADV.U.uMode, mode); gl.uniform1f(ADV.U.uFade, P.fade); gl.uniform1f(ADV.U.uDrop, P.drop);
+      V.dyeT += dt; gl.uniform1f(ADV.U.uPour, mode === 2 && V.dyeT < 2.5 ? 1 : 0);   /* the first moment of DYE pours hard so the bands appear at once */
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); cur = nxt;
+    }
+    /* pass 2 -> the screen */
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, glc.width, glc.height); gl.useProgram(GLB.pr); bindQuad(GLB.pr);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tBase); gl.uniform1i(GLB.U.uBase, 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, tWind); gl.uniform1i(GLB.U.uWind, 1);
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, tFab[cur]); gl.uniform1i(GLB.U.uFab, 3);
+    gl.uniform2f(GLB.U.uC, CX * DPR, (H - CY) * DPR); gl.uniform1f(GLB.U.uR, R * DPR); gl.uniformMatrix3fv(GLB.U.uW, false, M.Wcol); gl.uniform2f(GLB.U.uRes, glc.width, glc.height);
+    gl.uniform1f(GLB.U.uRange, F.range); gl.uniform1f(GLB.U.uMode, mode); gl.uniform1f(GLB.U.uCol, F.mode === 'speed' ? 0 : 1); gl.uniform1f(GLB.U.uCon, P.con); gl.uniform1f(GLB.U.uOn, on);
+    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    if (V.dirty || !frame.ovDone){ drawOverlay(); frame.ovDone = true; }
+    V.dirty = false;
+    ft[FTN++ % 120] = now - (frame.prevNow || now); frame.prevNow = now;
+  };
+  window._fab = { V: V, P: P, cost: function(){ var a = ft.slice().sort(function(x, y){ return x - y; }); return a.length ? { median: +a[a.length >> 1].toFixed(2), p95: +a[Math.floor(a.length * 0.95)].toFixed(2) } : null; } };
+
+  /* ---------- hands and buttons ---------- */
+  var pts = {}, pinch = 0;
+  stage.addEventListener('pointerdown', function(e){ stage.setPointerCapture(e.pointerId); pts[e.pointerId] = [e.clientX, e.clientY]; V.dragging = true; stage.classList.add('drag'); document.getElementById('hint').style.opacity = 0; });
+  stage.addEventListener('pointermove', function(e){ if (!pts[e.pointerId]) return; var ids = Object.keys(pts);
+    if (ids.length === 2){ pts[e.pointerId] = [e.clientX, e.clientY]; var a = pts[ids[0]], b = pts[ids[1]], d = Math.hypot(a[0] - b[0], a[1] - b[1]); if (pinch) V.zoom = Math.max(0.8, Math.min(2.6, V.zoom * d / pinch)); pinch = d; V.dirty = true; return; }
+    var p = pts[e.pointerId], k = 0.28 / V.zoom * (560 / Math.max(280, W)); V.tLon -= (e.clientX - p[0]) * k; V.tLat = Math.max(-89, Math.min(89, V.tLat + (e.clientY - p[1]) * k)); V.lon0 = V.tLon; V.lat0 = V.tLat; pts[e.pointerId] = [e.clientX, e.clientY]; V.dirty = true; });
+  var up = function(e){ delete pts[e.pointerId]; pinch = 0; if (!Object.keys(pts).length){ V.dragging = false; stage.classList.remove('drag'); } };
+  stage.addEventListener('pointerup', up); stage.addEventListener('pointercancel', up);
+  stage.addEventListener('wheel', function(e){ e.preventDefault(); V.zoom = Math.max(0.8, Math.min(2.6, V.zoom * (e.deltaY < 0 ? 1.08 : 0.926))); V.dirty = true; }, { passive: false });
+  var near = function(lon){ var d = ((lon - V.lon0 + 540) % 360) - 180; return V.lon0 + d; };
+  var rowOf = function(id, obj, cur, fn){ var row = document.getElementById(id); Object.keys(obj).forEach(function(k){ var b = document.createElement('button'); b.className = 'pill' + (k === cur ? ' on' : ''); b.textContent = obj[k].label || obj[k]; b.dataset.k = k;
+    b.onclick = function(){ [].slice.call(row.children).forEach(function(x){ x.classList.toggle('on', x === b); }); fn(k); }; row.appendChild(b); }); };
+  rowOf('fields', FIELDS, 'jet', function(k){ V.tLat = FIELDS[k].face[0]; V.tLon = near(FIELDS[k].face[1]); loadField(k); });
+  var TUNE = { grain: { inject: 0.07, drop: 0.996, con: 1.0, ts: 43200 }, weave: { inject: 0.08, drop: 0.98, con: 1.4, ts: 43200 }, dye: { inject: 0.02, drop: 0.99, con: 1.0, ts: 86400 } };
+  var setLook = function(k){ V.look = k; V.dyeT = 0; V.clearFab = true; var T = TUNE[k]; Object.keys(T).forEach(function(q){ P[q] = T[q]; var el = document.getElementById('r-' + q); if (el) el.value = T[q]; }); words(); };
+  rowOf('looks', LOOKS, 'weave', setLook);   /* dye needs days of wind to marble; a second is a day */
+  document.getElementById('b-home').onclick = function(){ V.tLat = HOME.lat; V.tLon = near(HOME.lon); };
+  document.getElementById('b-pole').onclick = function(){ V.tLat = 89; V.tLon = near(HOME.lon); };
+  [['r-inject', 'inject'], ['r-ts', 'ts'], ['r-con', 'con'], ['r-fade', 'fade'], ['r-drop', 'drop']].forEach(function(q){ var el = document.getElementById(q[0]); el.oninput = function(){ P[q[1]] = +el.value; words(); }; });
+  var words = function(){ var F = FIELDS[V.field];
+    document.getElementById('words').innerHTML = '<b>' + LOOKS[V.look] + ' · ' + F.label + '</b> · ' + (V.look === 'dye'
+      ? 'Warm dye is dropped along the equator and cold dye at the poles, then carried by the real wind. Watch the trades drag the warm dye west and the storms fold the two together: the transport of the cells, as marbling. It takes a minute to develop.'
+      : F.words)
+      + '<br>' + 'ONE SECOND HERE = ' + Math.round(P.ts / 3600) + ' HOURS OF WIND · GRAIN ' + P.inject.toFixed(3) + ' · CONTRAST ' + P.con.toFixed(2) + ' · DYE FADE ' + P.fade.toFixed(4) + ' · DROPS ' + P.drop.toFixed(3)
+      + '<br>NOAA GFS VIA UNIDATA THROUGH THE SITE’S PROXY · NASA BLUE MARBLE · NATURAL EARTH COASTS · IMAGE-BASED FLOW VISUALISATION (VAN WIJK 2002), TWO SHADER PASSES, NO LIBRARY'; };
+  window.addEventListener('resize', resize); if (window.ResizeObserver) new ResizeObserver(resize).observe(stage);
+  resize(); loadField('jet'); requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
