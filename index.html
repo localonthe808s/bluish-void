@@ -55865,12 +55865,37 @@ var CW_EWR = [[[-74.0402,40.7268],[-74.0394,40.7315],[-74.0452,40.732],[-74.0517
         return false; };
       C.polyD = function(X, Y, L2){ var best = Infinity; for (var a = 0; a < L2.length - 1; a++){ var d = segD(X, Y, L2[a], L2[a + 1]); if (d < best) best = d; } return best; };
       C.corridor = function(X, Y, tol){ if (!C.cors) return false; for (var i = 0; i < C.cors.length; i++) if (C.polyD(X, Y, C.cors[i]) <= tol) return true; return false; };
-      C.keep = function(pts){ if (!C.ready()) return true; for (var i = 0; i < pts.length; i++) if (C.inside(pts[i][0], pts[i][1], 120)) return true;
-        var mid = pts[Math.floor(pts.length / 2)]; return C.corridor(mid[0], mid[1], 250) || C.corridor(pts[0][0], pts[0][1], 250) || C.corridor(pts[pts.length - 1][0], pts[pts.length - 1][1], 250); };
-      C.load = function(cb){ if (window._cwBoros || window._cwBorosReq) return; window._cwBorosReq = 1;
+      /* inside the boroughs any road counts. On the corridors only the highway and major-road classes do, and a stretch has to
+         RUN ALONG the route (7 in 10 of its points within 150 m), not merely touch it: the first cut kept any road with one
+         point within 250 m, whole, which dragged in Fort Lee's streets, Kearny's ramps and left stubs everywhere (user
+         2026-09-22: "random deadends"). An incident or a 511 mark has no class: its point decides. */
+      C.keep = function(pts, cls){ if (!C.ready()) return true; for (var i = 0; i < pts.length; i++) if (C.inside(pts[i][0], pts[i][1], 120)) return true;
+        if (cls != null && cls > 1) return false;
+        var n = 0; for (i = 0; i < pts.length; i++) if (C.corridor(pts[i][0], pts[i][1], 150)) n++;
+        return n >= Math.max(1, Math.ceil(pts.length * 0.7)); };
+      /* CUT AT THE LINE, not judged whole (2026-09-22): a highway leaving the Bronx for Westchester is one long stretch in the
+         tile, and one vertex inside kept all of it -- so Westchester and Nassau were drawn after all. Each stretch is now split
+         into the runs of points that pass: inside a borough (any class), or along a corridor (highway and major road only,
+         within 150 m). A corridor run must be at least four points and 500 m long, so a road merely CROSSING the route does
+         not leave a stub. Returns the list of runs to draw. */
+      C.cut = function(pts, cls){ if (!C.ready()) return [pts]; var runs = [], cur = [], curCor = true, seal = function(){
+          if (cur.length >= 2){ var ok = true; if (curCor){ var L = 0; for (var q = 1; q < cur.length; q++) L += Math.hypot(cur[q][0] - cur[q-1][0], cur[q][1] - cur[q-1][1]); ok = cur.length >= 4 && L >= 500; } if (ok) runs.push(cur); } cur = []; curCor = true; };
+        for (var i = 0; i < pts.length; i++){ var P = pts[i], inB = C.inside(P[0], P[1], 120), inC = !inB && (cls == null || cls <= 1) && C.corridor(P[0], P[1], 150);
+          if (inB || inC){ cur.push(P); if (inB) curCor = false; } else seal(); }
+        seal(); return runs; };
+      /* the outline may already be on its way from the wide radar's own fetch (`_cwBorosReq` set, no data yet): then this
+         waits for it rather than giving up, or the first traffic picture stands unclipped for a whole five-minute bucket
+         (seen 2026-09-22: Westchester and Nassau drawn) */
+      C.load = function(cb){
+        if (window._cwBoros){ if (cb) cb(); return; }
+        if (window._cwBorosReq){ var n = 0, poll = function(){ if (window._cwBoros){ if (cb) cb(); } else if (++n < 40) setTimeout(poll, 500); }; setTimeout(poll, 500); return; }
+        window._cwBorosReq = 1;
         fetch('city_boroughs.json?v=3').then(function(r2){ return r2.json(); }).then(function(j){ if (j && j.b){ window._cwBoros = j.b; window._cwBorosHi = j.hi || null; if (cb) cb(); } }).catch(function(){}); };
       return C;
     })();
+    window._cwTrafDbg = function(){ var R2 = 6378137, MX = function(lo){ return lo * Math.PI / 180 * R2; }, MY = function(la){ return R2 * Math.log(Math.tan(Math.PI / 4 + la * Math.PI / 360)); };
+      var t = function(la, lo){ return cwTrafClip.inside(MX(lo), MY(la), 120); };
+      return { ready: cwTrafClip.ready(), rings: cwTrafClip.rings ? cwTrafClip.rings.length : null, midtown: t(40.75, -73.98), whitePlains: t(41.03, -73.76), hempstead: t(40.70, -73.62), hoboken: t(40.745, -74.03), stats: cwTraf.clipStats || null, hits: (cwTraf.hits || []).length }; };
     var cwTraf = { inc:null, incAt:0, tiles:{}, bucket:0, hits:[], key:'', seq:0, flow:null, counts:{}, jams:0,
                    cross:null, crossAt:0, ev:null, evAt:0 };
     function cwStationsOn(){ return cw.traffic ? cw.trafStations === true : cw.trains; }
@@ -55988,7 +56013,13 @@ var CW_EWR = [[[-74.0402,40.7268],[-74.0394,40.7315],[-74.0452,40.732],[-74.0517
       var cvs = document.getElementById('cw-traf');
       if (!cvs) return;
       if (!cw.traffic || !cwMapMode()){ cvs.style.display = 'none'; cwTraf.key = ''; cwTraf.hits = []; return; }
-      if (!cwTrafClip.ready()) cwTrafClip.load(function(){ cwTraf.key = ''; cwTrafDraw(); });      /* the outline lands once; until then nothing is clipped */
+      /* NOTHING IS PAINTED UNTIL THE OUTLINE IS IN (2026-09-22): a first picture drawn before it landed stood unclipped --
+         Westchester and Nassau in full -- and the redraw did not always overtake it. The outline is one small file; if it
+         has not come in fifteen seconds the picture is drawn anyway, unclipped, rather than never. */
+      if (!cwTrafClip.ready()){
+        if (!cwTraf.clipWait){ cwTraf.clipWait = true; cwTraf.clipT0 = Date.now(); cwTrafClip.load(function(){ cwTraf.clipWait = false; cwTraf.key = ''; cwTrafDraw(); }); }
+        if (Date.now() - (cwTraf.clipT0 || 0) < 15000){ cwTraf.key = ''; return; }
+      }
       var body = document.getElementById('cw-body'), r = body ? body.getBoundingClientRect() : null;
       if (!r || !r.width) return;
       var dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(r.width * dpr), H = Math.round(r.height * dpr), v = cwPainted;
@@ -55999,7 +56030,7 @@ var CW_EWR = [[[-74.0402,40.7268],[-74.0394,40.7315],[-74.0452,40.732],[-74.0517
       /* the 3 s card tick calls this too: the same view, bucket and data is the same picture */
       if (key === cwTraf.key) return;
       cwTraf.key = key;
-      var seq = ++cwTraf.seq, WORLD = 20037508.342789244, mpp = (v.X1 - v.X0) / r.width;
+      var seq = ++cwTraf.seq, WORLD = 20037508.342789244, mpp = (v.X1 - v.X0) / r.width; cwTraf.clipStats = null;
       var z = Math.max(6, Math.min(16, Math.floor(Math.log2(2 * WORLD / (mpp * 256))))), n = Math.pow(2, z), span = 2 * WORLD / n;
       var tx0 = Math.floor((v.X0 + WORLD) / span), tx1 = Math.floor((v.X1 + WORLD) / span), ty0 = Math.floor((WORLD - v.Y1) / span), ty1 = Math.floor((WORLD - v.Y0) / span);
       var jobs = [], segs = [], px = function(X){ return (X - v.X0) / (v.X1 - v.X0) * W; }, py = function(Y){ return (v.Y1 - Y) / (v.Y1 - v.Y0) * H; };
@@ -56016,8 +56047,8 @@ var CW_EWR = [[[-74.0402,40.7268],[-74.0394,40.7315],[-74.0452,40.732],[-74.0517
               if (f.p.road_closure || !isFinite(lv)) return;                       // closures belong to the incident layer
               var slow = lv < rule.slow;
               if (!slow && cls === 3 && mpp > 18) return;                           // moving local streets are a mesh until the view is close
-              f.lines.forEach(function(ln){ var M = ln.map(function(c){ return [ox + c[0] * k, oy - c[1] * k]; }); if (!cwTrafClip.keep(M)) return;
-                segs.push({ r: lv, slow: slow, w: rule.w, at: rule.slow, cls: cls, m: M, pts: M.map(function(q){ return [px(q[0]), py(q[1])]; }) }); });
+              f.lines.forEach(function(ln){ var M = ln.map(function(c){ return [ox + c[0] * k, oy - c[1] * k]; }); cwTraf.clipStats = cwTraf.clipStats || { seen: 0, kept: 0, ready: 0 }; cwTraf.clipStats.seen++; cwTraf.clipStats.ready = cwTrafClip.ready() ? 1 : 0;
+                cwTrafClip.cut(M, cls).forEach(function(run){ cwTraf.clipStats.kept++; segs.push({ r: lv, slow: slow, w: rule.w, at: rule.slow, cls: cls, m: run, pts: run.map(function(q){ return [px(q[0]), py(q[1])]; }) }); }); });
             });
           }));
       })(tx, ty);
