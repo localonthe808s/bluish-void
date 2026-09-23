@@ -123,10 +123,15 @@
         '&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,sunrise,sunset,uv_index_max,windspeed_10m_max,windgusts_10m_max,snowfall_sum,rain_sum,wind_direction_10m_dominant,showers_sum,et0_fao_evapotranspiration' +
         '&forecast_days=10&past_days=1';
       window._earlyWxUrl = url;
-      window._earlyWxFetch = fetch(url).then(function(r){
+      // A timeout, so a request a corporate proxy stalls cannot hang forever:
+      // with no abort the chain behind it never moved on to the fallbacks.
+      var ctl = ('AbortController' in window) ? new AbortController() : null;
+      var t = ctl ? setTimeout(function(){ ctl.abort(); }, 10000) : 0;
+      window._earlyWxFetch = fetch(url, ctl ? { signal: ctl.signal } : undefined).then(function(r){
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
-      }).catch(function(){ return null; });
+      }).then(function(d){ clearTimeout(t); return d; })
+        .catch(function(){ clearTimeout(t); return null; });
     } catch(e){}
   })();
 
@@ -39480,34 +39485,56 @@ function dayRangeAround(d, days){
       });
     }
 
-    directFetch
-      .catch(function(err){
-        console.warn('[Weather] direct fetch failed:', err && err.message);
-        return tryViaProxy().catch(function(proxyErr){
-          console.warn('[Weather] proxy fetch failed:', proxyErr && proxyErr.message, '— using cache');
-          var cached = loadFromCache();
-          if (cached) return cached;
-          /* EVERYTHING failed — the direct call, every proxy, and there was no
-             cached copy to fall back on. Without a retry the panel sits at
-             "--" until the user reloads by hand: verified 2026-09-02 by
-             blocking the host, restoring it, and watching the hero stay dashed
-             ninety seconds after the network came back. Back off, and try
-             again the moment the browser says it is online. */
-          window._wxRetry = (window._wxRetry || 0) + 1;
-          if (window._wxRetry <= 4){
-            setTimeout(function(){
-              try { loadWeatherForLocation(loc); } catch(e){}
-            }, [4000, 10000, 25000, 60000][window._wxRetry - 1]);
-          }
-          if (!window._wxOnlineHooked){
-            window._wxOnlineHooked = 1;
-            window.addEventListener('online', function(){
-              window._wxRetry = 0;
-              try { loadWeatherForLocation(LOCATION); } catch(e){}
-            });
-          }
-          throw proxyErr;
+    /* HEDGE, don't queue (2026-09-23): the proxies used to start only after the
+       direct call FAILED, so a slow or stalled direct call held the hero on "--"
+       for its whole timeout first. Now the proxy race starts at 2.5 s if direct
+       has not answered (or at once if it fails), and the first good answer wins.
+       Healthy loads answer direct in ~0.5 s and never touch a proxy. */
+    var wxData = new Promise(function(resolve, reject){
+      var settled = false, proxyStarted = false, directDone = false, proxyDone = false, proxyErr = null;
+      var win = function(d){ if (!settled){ settled = true; clearTimeout(hedge); resolve(d); } };
+      var startProxy = function(){
+        if (proxyStarted || settled) return;
+        proxyStarted = true;
+        tryViaProxy().then(win, function(e){
+          proxyErr = e; proxyDone = true;
+          if (directDone && !settled){ settled = true; reject(e); }
         });
+      };
+      var hedge = setTimeout(startProxy, 2500);
+      directFetch.then(win, function(err){
+        console.warn('[Weather] direct fetch failed:', err && err.message);
+        directDone = true; clearTimeout(hedge);
+        if (!proxyStarted) startProxy();
+        else if (proxyDone && !settled){ settled = true; reject(proxyErr); }
+      });
+    });
+
+    wxData
+      .catch(function(proxyErr){
+        console.warn('[Weather] proxy fetch failed:', proxyErr && proxyErr.message, '— using cache');
+        var cached = loadFromCache();
+        if (cached) return cached;
+        /* EVERYTHING failed — the direct call, every proxy, and there was no
+           cached copy to fall back on. Without a retry the panel sits at
+           "--" until the user reloads by hand: verified 2026-09-02 by
+           blocking the host, restoring it, and watching the hero stay dashed
+           ninety seconds after the network came back. Back off, and try
+           again the moment the browser says it is online. */
+        window._wxRetry = (window._wxRetry || 0) + 1;
+        if (window._wxRetry <= 4){
+          setTimeout(function(){
+            try { loadWeatherForLocation(loc); } catch(e){}
+          }, [4000, 10000, 25000, 60000][window._wxRetry - 1]);
+        }
+        if (!window._wxOnlineHooked){
+          window._wxOnlineHooked = 1;
+          window.addEventListener('online', function(){
+            window._wxRetry = 0;
+            try { loadWeatherForLocation(LOCATION); } catch(e){}
+          });
+        }
+        throw proxyErr;
       })
       .then(function(data){
         try{

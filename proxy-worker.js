@@ -98,7 +98,17 @@ const CACHE_RULES = {
   //    511ny = the state's event list, 2.7 MB for all of New York -- ALWAYS asked for
   //    with &shape=nyc511 (below), which cuts it to the city's closures and incidents. ──
   'www.panynj.gov':               120,
-  '511ny.org':                    300
+  '511ny.org':                    300,
+  // ── Open-Meteo (2026-09-23). These answer with CORS, so the browser normally goes
+  //    direct; they are listed so the fallback tier WORKS when a network blocks or
+  //    rate-limits the direct call. Before this the hero's fallback hit a 403 here,
+  //    then allorigins timed out at 12 s, and the top panel sat on "--" (seen on a
+  //    work network while every other widget loaded). The forecast is hourly data,
+  //    so 5 minutes of edge cache is nothing lost and spares Open-Meteo's per-IP quota. ──
+  'api.open-meteo.com':           300,
+  'air-quality-api.open-meteo.com': 600,
+  'marine-api.open-meteo.com':    600,
+  'geocoding-api.open-meteo.com': 86400
 };
 
 // SHAPES: an upstream that is far too big to hand a phone is cut down HERE, once, and the
