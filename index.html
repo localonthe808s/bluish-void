@@ -55860,6 +55860,12 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         C.rings = []; src.forEach(function(b){ (b.r || []).forEach(function(ring){ var m = ring.map(function(c){ return [MX(c[0]), MY(c[1])]; }), xs = m.map(function(q){ return q[0]; }), ys = m.map(function(q){ return q[1]; });
           C.rings.push({ m: m, x0: Math.min.apply(null, xs), x1: Math.max.apply(null, xs), y0: Math.min.apply(null, ys), y1: Math.max.apply(null, ys) }); }); });
         C.cors = CW_EWR.map(function(line){ return line.map(function(c){ return [MX(c[0]), MY(c[1])]; }); }); return true; };
+      C.ringAt = function(X, Y, tol){
+        if (!C.rings) return -1; var t = tol || 0;
+        for (var i = 0; i < C.rings.length; i++){ var r = C.rings[i]; if (X < r.x0 - t || X > r.x1 + t || Y < r.y0 - t || Y > r.y1 + t) continue; var m = r.m, inn = false;
+          for (var a = 0, b = m.length - 1; a < m.length; b = a++){ if ((m[a][1] > Y) !== (m[b][1] > Y) && X < (m[b][0] - m[a][0]) * (Y - m[a][1]) / (m[b][1] - m[a][1]) + m[a][0]) inn = !inn; }
+          if (inn) return i; if (t){ for (a = 0; a < m.length - 1; a++) if (segD(X, Y, m[a], m[a + 1]) <= t) return i; } }
+        return -1; };
       C.inside = function(X, Y, tol){
         if (!C.rings) return true; var t = tol || 0;
         for (var i = 0; i < C.rings.length; i++){ var r = C.rings[i]; if (X < r.x0 - t || X > r.x1 + t || Y < r.y0 - t || Y > r.y1 + t) continue; var m = r.m, inn = false;
@@ -55872,7 +55878,9 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
          RUN ALONG the route (7 in 10 of its points within 150 m), not merely touch it: the first cut kept any road with one
          point within 250 m, whole, which dragged in Fort Lee's streets, Kearny's ramps and left stubs everywhere (user
          2026-09-22: "random deadends"). An incident or a 511 mark has no class: its point decides. */
-      C.keep = function(pts, cls){ if (!C.ready()) return true; for (var i = 0; i < pts.length; i++) if (C.inside(pts[i][0], pts[i][1], 120)) return true;
+      /* an incident is a point, not a run, so it cannot be carried across a gap: it gets 500 m of reach from the outline
+         instead, enough for a crash or a closure inside an East River tube to stand where it happened */
+      C.keep = function(pts, cls){ if (!C.ready()) return true; for (var i = 0; i < pts.length; i++) if (C.inside(pts[i][0], pts[i][1], 500)) return true;
         if (cls != null && cls > 1) return false;
         var n = 0; for (i = 0; i < pts.length; i++) if (C.corridor(pts[i][0], pts[i][1], 150)) n++;
         return n >= Math.max(1, Math.ceil(pts.length * 0.7)); };
@@ -55881,7 +55889,14 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
          into the runs of points that pass: inside a borough (any class), or along a corridor (highway and major road only,
          within 150 m). A corridor run must be at least four points and 500 m long, so a road merely CROSSING the route does
          not leave a stub -- 3 points and 350 m, low enough that a deck split across two tiles still stands. Returns the runs. */
-      C.cut = function(pts, cls){ if (!C.ready()) return [pts]; var runs = [], cur = [], curCor = true, seal = function(){
+      /* A CROSSING IS A SHORT GAP, NOT AN END (user 2026-09-22: "show the tunnels under the east river for traffic too").
+         A tube under the East River and a deck over it lie in no borough -- the outline is the land -- so a road running
+         Manhattan to Queens was cut into two pieces with the crossing itself missing, which is the part anyone cares about.
+         So a kept road may cross up to 3 km of unkept ground and carry on: every East River tunnel and bridge is well under
+         that (the Hugh Carey is the longest at 2.8 km portal to portal, the Queensboro span 1.1 km), while a road that
+         wanders out of the city for good still ends at the line. The gap's own points are on the road, so nothing is invented. */
+      C.GAPMAX = 3000;
+      C.cut = function(pts, cls){ if (!C.ready()) return [pts]; var runs = [], cur = [], curCor = true, gap = [], gapLen = 0, lastRing = -2, seal = function(){
           if (cur.length >= 2){ var ok = true; if (curCor){ var L = 0; for (var q = 1; q < cur.length; q++) L += Math.hypot(cur[q][0] - cur[q-1][0], cur[q][1] - cur[q-1][1]);
             /* NO RAMPS ON THE CORRIDORS (user 2026-09-22, shown two curls in the Meadowlands: "whats this"). An interchange
                ramp comes within 150 m of the road it serves, so it was kept, and alone on a dark map a cloverleaf loop or a
@@ -55889,10 +55904,22 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
                loops at Fort Lee and a street at the Ridgefield Park interchange. A ramp is SHORT AND CURLED: its ends are
                closer together than half the road it covers. A highway that bends is long, so the length test spares it. */
             var span = Math.hypot(cur[cur.length - 1][0] - cur[0][0], cur[cur.length - 1][1] - cur[0][1]);
-            ok = cur.length >= 3 && L >= 350 && !(L < 1200 && span < 0.5 * L); } if (ok) runs.push(cur); } cur = []; curCor = true; };
+            /* a ramp is curled at any length once it has been joined to its neighbours across a gap, so the curl test applies
+               throughout and only relaxes for a long road: measured, ramps came out at 0.04-0.35 of their own length end to
+               end and real highway at 0.54-0.63, so the two do not overlap. */
+            ok = cur.length >= 3 && L >= 350 && span >= (L < 1200 ? 0.5 : 0.35) * L; } if (ok) runs.push(cur); } cur = []; curCor = true; };
         for (var i = 0; i < pts.length; i++){ var P = pts[i], inB = C.inside(P[0], P[1], 120), inC = !inB && (cls == null || cls <= 1) && C.corridor(P[0], P[1], 150);
-          if (inB || inC){ cur.push(P); if (inB) curCor = false; } else seal(); }
-        seal(); return runs; };
+          if (inB || inC){
+            var ring = inB ? C.ringAt(P[0], P[1], 120) : -1;
+            /* the gap is only a crossing if the road comes back on a DIFFERENT shore, or a corridor is involved. Bridging any
+               gap let roads weave along the Queens/Nassau line and poke into the suburbs (4 of them, measured). */
+            if (gap.length){ if (ring !== lastRing || ring === -1 || lastRing === -1) cur = cur.concat(gap); else seal(); gap = []; gapLen = 0; }
+            cur.push(P); if (inB) curCor = false; lastRing = ring;
+          } else if (cur.length){
+            gapLen += i ? Math.hypot(P[0] - pts[i-1][0], P[1] - pts[i-1][1]) : 0; gap.push(P);
+            if (gapLen > C.GAPMAX){ gap = []; gapLen = 0; seal(); }              /* gone for good: the run ended at the line */
+          } }
+        gap = []; seal(); return runs; };
       /* the outline may already be on its way from the wide radar's own fetch (`_cwBorosReq` set, no data yet): then this
          waits for it rather than giving up, or the first traffic picture stands unclipped for a whole five-minute bucket
          (seen 2026-09-22: Westchester and Nassau drawn) */
@@ -55911,6 +55938,8 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         return isFinite(best) ? Math.round(best) : null; };
       return { ready: cwTrafClip.ready(), rings: cwTrafClip.rings ? cwTrafClip.rings.length : null, midtown: t(40.75, -73.98), whitePlains: t(41.03, -73.76), hempstead: t(40.70, -73.62), hoboken: t(40.745, -74.03),
         drawnM: { gwbDeck: near(40.8517, -73.9530), lincolnTube: near(40.7650, -74.0150), hollandTube: near(40.7280, -74.0210), goethals: near(40.6355, -74.1960), turnpikeNJ: near(40.7350, -74.1000),
+                  midtownTube: near(40.7456, -73.9617), careyTube: near(40.6945, -74.0083), brooklynBr: near(40.7061, -73.9969), manhattanBr: near(40.7075, -73.9903),
+                  williamsburgBr: near(40.7132, -73.9723), queensboroBr: near(40.7570, -73.9540), verrazzano: near(40.6066, -74.0447), throgsNeck: near(40.8000, -73.7947), whitestoneBr: near(40.7995, -73.8330),
                   whitePlains: near(41.03, -73.76), hempstead: near(40.70, -73.62), fortLee: near(40.852, -73.975), timesSq: near(40.7580, -73.9855) },
         outside: (function(){ /* what survives OUTSIDE the boroughs, by class: the corridor's own catch */
           var R = 6378137, out = [];
@@ -55922,6 +55951,10 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
               lat: +((2 * Math.atan(Math.exp(mid[1] / R)) - Math.PI / 2) * 180 / Math.PI).toFixed(4), lon: +(mid[0] / R * 180 / Math.PI).toFixed(4) }); });
           out.sort(function(a, b){ return a.straight - b.straight; }); return out; })(),
         stats: cwTraf.clipStats || null, hits: (cwTraf.hits || []).length }; };
+    window._cwTrafNear = function(list){ var R2 = 6378137, MX = function(lo){ return lo * Math.PI / 180 * R2; }, MY = function(la){ return R2 * Math.log(Math.tan(Math.PI / 4 + la * Math.PI / 360)); };
+      return list.map(function(q){ var X = MX(q[1]), Y = MY(q[0]), best = Infinity;
+        (cwTraf.hits || []).forEach(function(h){ if (!h.poly) return; var d = cwTrafClip.polyD(X, Y, h.poly); if (d < best) best = d; });
+        return isFinite(best) ? Math.round(best) : null; }); };
     var cwTraf = { inc:null, incAt:0, tiles:{}, bucket:0, hits:[], key:'', seq:0, flow:null, counts:{}, jams:0,
                    cross:null, crossAt:0, ev:null, evAt:0 };
     function cwStationsOn(){ return cw.traffic ? cw.trafStations === true : cw.trains; }
