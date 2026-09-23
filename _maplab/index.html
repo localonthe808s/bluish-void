@@ -4114,6 +4114,7 @@ function drawTraffic(g, W, H, X0, Y0, X1, Y1, proj, view, v){
     var len = function(list){ return list.reduce(function(a, sg){ for (var i = 1; i < sg.pts.length; i++) a += Math.hypot(sg.pts[i][0] - sg.pts[i-1][0], sg.pts[i][1] - sg.pts[i-1][1]); return a; }, 0); };
     var ls = len(slowSegs), lc = len(calm);
     TRAF.flow = { slow: slowSegs.length, calm: calm.length, z: z, at: Date.now(), slowShare: (ls + lc) ? ls / (ls + lc) : 0 };
+    TRAF.segs = segs; TRAF.mpp = (X1 - X0) / W;      /* kept for A TO B, which times a route against the very roads drawn here */
     var hits = [], P = function(c){ return proj({ x:c[0], y:c[1] }); }, inF = function(q){ return q.x > -20 && q.y > -20 && q.x < W + 20 && q.y < H + 20; };
     /* A DELAY TAG IS NEVER SUPPRESSED. Making them pass labelFits -- the ledger the map
        NAMES keep -- silenced all nine on a day with nothing over thirty minutes. The only
@@ -4183,6 +4184,87 @@ function drawTraffic(g, W, H, X0, Y0, X1, Y1, proj, view, v){
     TRAF.hits = hits; TRAF.tags = tags;
     try { if (window.parent !== window) window.parent.postMessage({ labTraffic: { counts: counts, signs: (TRAF.cms || []).length, at: Date.now(), incAt: TRAF.incAt, flow: TRAF.flow } }, '*'); } catch(e){}
   });
+}
+
+/* ---- A TO B (user 2026-09-23). The same thing THE CITY has, in this renderer: OSRM gives the road and a free-flow
+   second count per piece (keyless, CORS-open; TomTom's key here is traffic-only and its routing endpoint answers 403),
+   and the time NOW is measured off the flow stretches this card just drew. The widget owns the button and the words;
+   this file owns the taps, the line and the arithmetic. ---- */
+var AB = { on: false, a: null, b: null, route: null, seq: 0 };
+function abTell(o){ try { if (window.parent !== window) window.parent.postMessage({ labAB: o }, '*'); } catch(e){} }
+function abClear(){ AB.a = null; AB.b = null; AB.route = null; AB.seq++; }
+function abTime(){
+  var R = AB.route, segs = TRAF.segs || [], mpp = TRAF.mpp || 1, PR = window.LAB_PROJ; if (!R || !PR) return;
+  var tol = 120 / mpp, CELL = Math.max(20, tol * 2), grid = {}, i, k;
+  for (i = 0; i < segs.length; i++) for (k = 0; k < segs[i].pts.length; k++){
+    var key = Math.floor(segs[i].pts[k][0] / CELL) + ',' + Math.floor(segs[i].pts[k][1] / CELL);
+    if (!grid[key]) grid[key] = []; if (grid[key][grid[key].length - 1] !== i) grid[key].push(i);
+  }
+  var segD = function(x, y, a, b){ var dx = b[0] - a[0], dy = b[1] - a[1], L = dx * dx + dy * dy;
+    var t = L ? Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / L)) : 0;
+    return Math.hypot(x - (a[0] + t * dx), y - (a[1] + t * dy)); };
+  var now = 0, tot = 0, seen = 0;
+  for (i = 0; i + 1 < R.ll.length && i < R.dur.length; i++){
+    var c0 = R.ll[i], c1 = R.ll[i + 1], q = PR({ x: (c0[0] + c1[0]) / 2, y: (c0[1] + c1[1]) / 2 });
+    var cx = Math.floor(q.x / CELL), cy = Math.floor(q.y / CELL), best = Infinity, ratio = 1, done = {};
+    for (var dx2 = -1; dx2 <= 1; dx2++) for (var dy2 = -1; dy2 <= 1; dy2++){
+      var list = grid[(cx + dx2) + ',' + (cy + dy2)]; if (!list) continue;
+      for (k = 0; k < list.length; k++){ var idx = list[k]; if (done[idx]) continue; done[idx] = 1;
+        var pts = segs[idx].pts, bd = Infinity;
+        for (var j = 1; j < pts.length; j++){ var d = segD(q.x, q.y, pts[j - 1], pts[j]); if (d < bd) bd = d; }
+        if (bd < best){ best = bd; ratio = segs[idx].r; } }
+    }
+    var got = best <= tol && isFinite(ratio) && ratio > 0;
+    now += R.dur[i] / (got ? Math.max(0.15, Math.min(1, ratio)) : 1);
+    tot += R.dur[i]; if (got) seen += R.dur[i];
+  }
+  /* the router's own total includes turn penalties that the per-piece seconds do not, so comparing one against the other
+     made a route come out FASTER than free-flow. The measured slowdown is a RATIO, applied to the router's total: with
+     every road at its free speed the two numbers agree exactly, which is the only honest way for them to meet. */
+  R.now = tot ? R.free * (now / tot) : R.free; R.cover = tot ? seen / tot : 0;
+}
+function abRoute(){
+  var a = AB.a, b = AB.b; if (!a || !b) return;
+  var seq = ++AB.seq;
+  abTell({ state: 'working' });
+  fetch('https://router.project-osrm.org/route/v1/driving/' + a[1].toFixed(5) + ',' + a[0].toFixed(5) + ';' + b[1].toFixed(5) + ',' + b[0].toFixed(5)
+        + '?overview=full&geometries=geojson&annotations=duration,distance')
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(j){
+      if (AB.seq !== seq) return;
+      var rt = j && j.routes && j.routes[0], an = rt && rt.legs && rt.legs[0] && rt.legs[0].annotation;
+      if (!rt || !an){ abTell({ state: 'err', err: 'NO ROAD BETWEEN THOSE TWO POINTS' }); return; }
+      AB.route = { ll: rt.geometry.coordinates, dur: an.duration, km: rt.distance / 1000, free: rt.duration };
+      /* a failure to TIME the route is not a failure to FIND it: fall back to the free-flow number and say the
+         coverage was nothing, rather than letting the catch below blame the router */
+      try { abTime(); } catch(e){ window._abErr = String(e); AB.route.now = AB.route.free; AB.route.cover = 0; }
+      try { renderAll(); } catch(e){ window._abErr = String(e); }
+      abTell({ state: 'done', nowMin: Math.max(1, Math.round(AB.route.now / 60)), freeMin: Math.max(1, Math.round(AB.route.free / 60)),
+               mi: +(AB.route.km / 1.609).toFixed(1), cover: Math.round((AB.route.cover || 0) * 100) });
+    })
+    .catch(function(e){ window._abErr = String(e); if (AB.seq === seq) abTell({ state: 'err', err: 'THE ROUTER DID NOT ANSWER' }); });
+}
+function abTap(lon, lat){
+  if (!AB.a || AB.b){ abClear(); AB.a = [lat, lon]; abTell({ state: 'a' }); renderAll(); return; }
+  AB.b = [lat, lon]; renderAll(); abRoute();
+}
+/* the line and its two pins, over everything the traffic drew */
+function drawAB(g){
+  var PR = window.LAB_PROJ; if (!PR || (!AB.a && !AB.b)) return;
+  g.save();
+  if (AB.route){
+    g.beginPath(); AB.route.ll.forEach(function(c, i){ var q = PR({ x:c[0], y:c[1] }); i ? g.lineTo(q.x, q.y) : g.moveTo(q.x, q.y); });
+    g.lineJoin = 'round'; g.lineCap = 'round';
+    g.lineWidth = 5.5; g.strokeStyle = 'rgba(8,10,16,.8)'; g.stroke();
+    g.lineWidth = 2.6; g.strokeStyle = '#2B22F4'; g.stroke();
+  }
+  [['A', AB.a], ['B', AB.b]].forEach(function(pin){
+    if (!pin[1]) return; var q = PR({ x: pin[1][1], y: pin[1][0] });
+    g.beginPath(); g.arc(q.x, q.y, 8, 0, 6.3); g.fillStyle = '#2B22F4'; g.fill();
+    g.lineWidth = 1.8; g.strokeStyle = '#fff'; g.stroke();
+    g.fillStyle = '#fff'; g.font = '900 9.5px system-ui, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(pin[0], q.x, q.y + 0.5);
+  });
+  g.restore();
 }
 
 /* drawn last, on the layer above the rail: the one mark on this card that nothing covers */
@@ -4369,7 +4451,7 @@ function drawCard(style){
            the ocean opaquely, so anything painted beneath is invisible. Static hands back
            the projection it used, which is what lines everything up. */
         if (!out || !out.project || stale()) return;
-        paint._proj = out.project;
+        paint._proj = out.project; window.LAB_PROJ = out.project;      /* the top-level helpers (A TO B) cannot see `paint` */
         /* Bands first, survey second: the relief is the finer reading wherever
            both exist, so it wins the overlap. In the CITY view the seafloor has
            to wait its turn — the active-water pass paints every offshore pixel
@@ -4912,7 +4994,7 @@ function drawCard(style){
                              paint._proj, view, VIEWS[vkey] || {}).then(function(){
             if (stale()) return;
             var tg = trafCv.getContext('2d'); tg.clearRect(0, 0, W, H); tg.drawImage(off, 0, 0, W, H);
-            var kg = tagCv.getContext('2d'); kg.clearRect(0, 0, W, H); drawJamTags(kg, TRAF.tags);
+            var kg = tagCv.getContext('2d'); kg.clearRect(0, 0, W, H); drawJamTags(kg, TRAF.tags); drawAB(kg);   /* A TO B rides above the tags: nothing covers it */
           });
         };
         clearInterval(window._trafTimer);
@@ -5002,6 +5084,7 @@ function drawCard(style){
     /* everything below needs a live, unlocked map. The front tap above does not: the weather
        views are LOCKED frames (no pan, so `moved` never counts there) and need no projection. */
     if (window.LAB_LOCK || moved > 5 || !paint._proj) return;
+    if (AB.on){ abTap(x2lon(VB.Xw + mx * VB.mpp), y2lat(VB.Ymid + (H / 2 - my) * VB.mpp)); return; }   /* A TO B takes the tap whole while it is armed */
     if ((document.getElementById('geo') || {}).checked){
       var vk = document.getElementById('view').value;
       var lon = x2lon(VB.Xw + mx * VB.mpp), lat = y2lat(VB.Ymid + (H / 2 - my) * VB.mpp);
@@ -5162,6 +5245,10 @@ function copyFlavor(){
     /* a zoom is not a re-render: it must NOT go through renderAll, which would rebuild the card
        and throw the view away */
     if (ev.data && ev.data.labZoom != null){ if (window.LAB_ZOOM) window.LAB_ZOOM(+ev.data.labZoom); return; }
+    if (ev.data && ev.data.labAB){ var c = ev.data.labAB;
+      if (c === 'arm'){ AB.on = true; abClear(); abTell({ state: 'armed' }); renderAll(); }
+      else { AB.on = false; abClear(); abTell({ state: 'off' }); renderAll(); }
+      return; }
     var m = ev.data && ev.data.lab;
     if (!m) return;
     var key = VIEWS[m.view] ? m.view : document.getElementById('view').value, v = VIEWS[key];
