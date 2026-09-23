@@ -341,10 +341,17 @@ def get(url, timeout=90, tries=3):
         except Exception as e:
             last = e
             code = getattr(e, 'code', None)
-            limit = 6 if code == 429 else tries
+            # A 502/503/504 is the host down for a moment, not a dropped socket
+            # (2026-09-22: Kalshi's market API answered 503 to all three cities
+            # in three separate five-minute runs overnight; the runs either side
+            # were fine, and three tries over five seconds could not outlast a
+            # thirty-second blip, so the whole job went red). It gets the 429
+            # schedule: up to six attempts, 3-6-12-24-48 s between them.
+            patient = code in (429, 502, 503, 504)
+            limit = 6 if patient else tries
             if a + 1 >= limit:
                 break
-            if code == 429:
+            if patient:
                 wait = None
                 try:
                     wait = float(e.headers.get('Retry-After'))
