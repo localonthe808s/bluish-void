@@ -93842,15 +93842,24 @@ function closeAlertModal(){
         if (document.hidden || STAGE !== 'globe' || !isOpen() || !G.el || !W) return;
         var V = G.V; if (V.cells) V.tLat = 0;
         var dLa = V.tLat - V.lat0, dLo = V.tLon - V.lon0; if (Math.abs(dLa) > 0.01 || Math.abs(dLo) > 0.01){ var k = dragging ? 1 : Math.min(1, dt * 7); V.lat0 += dLa * k; V.lon0 += dLo * k; G.dirty = true; }
-        if (!G.dirty && !V.cells && !(FLOW.on && !FLOW.still)) return;
+        if (!G.dirty && !V.cells && !(FLOW.on && !FLOW.still) && !(DYE.on && !DYE.still)) return;
         var r = G.el.getBoundingClientRect(); if (r.bottom < 0 || r.top > innerHeight) return;
-        if (FLOW.on && !G.dirty && !V.cells){ var M0 = mats().V; FLOW.move(dt, M0); FLOW.draw(M0); return; }   /* the sphere has not changed: only the streaks move */
+        if (FLOW.on && !G.dirty && !V.cells && !DYE.on){ var M0 = mats().V; FLOW.move(dt, M0); FLOW.draw(M0); return; }   /* the sphere has not changed: only the streaks move */
+        /* the dye alone moves at 30 Hz: measured on the harness Chrome, presenting the WebGL canvas every frame on this page dropped one
+           frame in four (the JS side was 0.1 ms; the cost is the compositor), and the cloth moves a pixel or so a frame, so every
+           other frame with twice the time is the same motion at half the cost */
+        if (DYE.on && !DYE.still && !G.dirty && !V.cells){ DYE.skip = !DYE.skip; if (DYE.skip){ DYE.acc = (DYE.acc || 0) + dt; return; } dt += DYE.acc || 0; DYE.acc = 0; }
         var TOP = W < 460 ? 40 : 0;   /* phones: the two buttons get their own strip, they were covering the rim's POLAR and FERREL labels */
         R = Math.min(W, H - TOP) * (V.cells ? 0.33 : 0.445) * (V.cells ? Math.min(1.12, V.zoom) : V.zoom); CX = W / 2; CY = TOP + (H - TOP) / 2;
-        gl.uniform2f(U.uC, CX * DPR, (H - CY) * DPR); gl.uniform1f(U.uR, R * DPR); gl.uniformMatrix3fv(U.uW, false, mats().Wcol);
+        var tp0 = performance.now();
+        if (DYE.on && !DYE.still) DYE.step(dt);                                   /* pass 1: the cloth moves one step along the wind */
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, glc.width, glc.height); gl.useProgram(G.pr); gl.bindBuffer(gl.ARRAY_BUFFER, G.buf); gl.enableVertexAttribArray(G.aloc); gl.vertexAttribPointer(G.aloc, 2, gl.FLOAT, false, 0, 0);
+        gl.uniform2f(U.uC, CX * DPR, (H - CY) * DPR); gl.uniform1f(U.uR, R * DPR); gl.uniformMatrix3fv(U.uW, false, mats().Wcol); gl.uniform2f(U.uRes, glc.width, glc.height);
         gl.uniform1i(U.uBase, 0); gl.uniform1i(U.uSkin, 1); gl.uniform1i(U.uSkin2, 2); gl.uniform1f(U.uOn, G.on[0]); gl.uniform1f(U.uOn2, G.on[1]);
+        gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, T[4 + DYE.cur]); gl.uniform1i(U.uDye, 7); gl.uniform1f(U.uDyeOn, DYE.on ? 1 : 0); gl.uniform1f(U.uScheme, DYE.schemeN);
         gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-        var M = mats().V; ov.setTransform(DPR, 0, 0, DPR, 0, 0); ov.clearRect(0, 0, W, H); ov.lineJoin = 'round';
+        var M = mats().V, ovDo = G.dirty || V.cells || !DYE.on || !G.ovDrawn;   /* with the dye on, the sphere is redrawn every frame but the words and lines only when the view moved */
+        if (ovDo){ ov.setTransform(DPR, 0, 0, DPR, 0, 0); ov.clearRect(0, 0, W, H); ov.lineJoin = 'round';
         var ring = function(lat, a){ var p = []; for (var lo = -180; lo <= 180; lo += 3) p.push([lat, lo]); ov.strokeStyle = 'rgba(255,255,255,' + a + ')'; ov.lineWidth = 1; ov.setLineDash(lat ? [3, 6] : [5, 5]); path(M, p); ov.setLineDash([]); };
         ring(0, .5); [30, -30, 60, -60].forEach(function(la){ ring(la, .26); });
         if (G.coast){ ov.strokeStyle = 'rgba(234,88,12,.82)'; ov.lineWidth = W < 460 ? 0.8 : 0.95; ov.setLineDash([]); ov.lineJoin = 'round'; G.coast.forEach(function(line){ path(M, line); }); }
@@ -93859,7 +93868,9 @@ function closeAlertModal(){
         if (isFinite(la0) && isFinite(lo0)){ var h = proj(M, la0, lo0); if (h[2] > 0.03){ ov.fillStyle = '#fff'; ov.beginPath(); ov.arc(h[0], h[1], 5, 0, 6.3); ov.fill(); ov.fillStyle = '#2B22F4'; ov.beginPath(); ov.arc(h[0], h[1], 3.4, 0, 6.3); ov.fill(); word(String(loc.name || 'YOU').toUpperCase(), h[0] + 9, h[1] + 3, '#2B22F4', '800 9px system-ui,sans-serif', true); } }
         if (V.cells) drawCells(dt);
         var hn = G.el && G.el.querySelector('[data-g=hint]'), hv = V.cells ? 'hidden' : 'visible'; if (hn && hn.style.visibility !== hv) hn.style.visibility = hv;   /* the rim note owns the bottom edge */
+        } G.ovDrawn = true;
         if (FLOW.on){ if (!FLOW.still) FLOW.move(dt, M); FLOW.draw(M); }
+        G.prof = G.prof || []; G.prof.push(performance.now() - tp0); if (G.prof.length > 300) G.prof.shift();
         G.dirty = false;
       };
       G.mount = function(host){
@@ -93872,26 +93883,55 @@ function closeAlertModal(){
           + '<div data-g="hint" style="position:absolute;right:12px;bottom:10px;font:800 8px system-ui,sans-serif;letter-spacing:.1em;color:rgba(255,255,255,.7);text-shadow:0 0 6px #000;">DRAG TO TURN · PINCH TO ZOOM</div>';
         host.parentNode.insertBefore(el, host.nextSibling);
         glc = el.children[0]; flc = el.children[1]; ovc = el.children[2]; FLOW.fl = flc.getContext('2d');
-        try { gl = glc.getContext('webgl', { premultipliedAlpha: true, antialias: true }); } catch(e){ gl = null; }
+        try { gl = glc.getContext('webgl', { premultipliedAlpha: true, antialias: false })   /* the disc's edge is drawn by the shader, so MSAA only cost a resolve per frame */; } catch(e){ gl = null; }
         if (!gl) return (G.ok = false);
         ov = ovc.getContext('2d'); try { ovc.style.letterSpacing = '0px'; } catch(e){}
         var vs = 'attribute vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }';
-        var fs = 'precision highp float; uniform vec2 uC; uniform float uR; uniform mat3 uW; uniform sampler2D uBase; uniform sampler2D uSkin; uniform sampler2D uSkin2; uniform float uOn; uniform float uOn2;'
+        var fs = 'precision highp float; uniform vec2 uC; uniform float uR; uniform mat3 uW; uniform sampler2D uBase; uniform sampler2D uSkin; uniform sampler2D uSkin2; uniform float uOn; uniform float uOn2; uniform sampler2D uDye; uniform float uDyeOn; uniform float uScheme; uniform vec2 uRes;'
           + 'void main(){ vec2 p = (gl_FragCoord.xy - uC) / uR; float r2 = dot(p, p);'
           + ' if (r2 > 1.0){ float d = sqrt(r2) - 1.0; float a = exp(-d * 22.0) * 0.5; gl_FragColor = vec4(vec3(0.38, 0.62, 1.0) * a, a); return; }'
           + ' float z = sqrt(1.0 - r2); vec3 w = uW * vec3(p.x, p.y, z);'
           + ' vec2 uv = vec2(atan(w.x, w.z) / 6.2831853 + 0.5, 0.5 - asin(clamp(w.y, -1.0, 1.0)) / 3.14159265);'
           + ' vec3 b = texture2D(uBase, uv).rgb; float g = dot(b, vec3(0.3, 0.59, 0.11)); b = mix(vec3(g), b, 0.6) * vec3(0.50, 0.56, 0.72);'
           + ' vec4 s = texture2D(uSkin, uv); vec3 c = mix(b, s.rgb, s.a * 0.86 * uOn); vec4 s2 = texture2D(uSkin2, uv); c = mix(c, s2.rgb, s2.a * 0.86 * uOn2);'
+          /* THE DYE (see DYE below): two amounts, R and G, coloured here by scheme -- 0 cells: warm orange / cold ice; 1 jet: pale gold; 2 belts: teal (from the east) / orange (from the west) */
+          + ' if (uDyeOn > 0.5){ vec4 fab = texture2D(uDye, gl_FragCoord.xy / uRes); float wm = clamp(fab.r, 0.0, 1.0), cd = clamp(fab.g, 0.0, 1.0);'
+          + '   vec3 A0 = vec3(0.55, 0.16, 0.05), A1 = vec3(1.0, 0.62, 0.20), B0 = vec3(0.05, 0.25, 0.55), B1 = vec3(0.55, 0.85, 1.0);'
+          + '   if (uScheme > 0.5 && uScheme < 1.5){ A0 = vec3(0.45, 0.30, 0.10); A1 = vec3(1.0, 0.93, 0.70); }'
+          + '   if (uScheme > 1.5){ A0 = vec3(0.03, 0.35, 0.32); A1 = vec3(0.55, 0.96, 0.88); B0 = vec3(0.55, 0.20, 0.03); B1 = vec3(1.0, 0.72, 0.36); }'
+          + '   vec3 warm = mix(A0, A1, wm), cold = mix(B0, B1, cd); float m = clamp(wm + cd, 0.0, 1.0); vec3 dyec = (warm * wm + cold * cd) / max(wm + cd, 1e-3); c = mix(c, dyec, m * 0.9); }'
           + ' c *= 0.50 + 0.50 * z; c += vec3(0.30, 0.50, 0.90) * pow(1.0 - z, 3.0) * 0.35; gl_FragColor = vec4(c, 1.0); }';
         try {
           var sh = function(type, src){ var s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
           var pr = gl.createProgram(); gl.attachShader(pr, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(pr); gl.useProgram(pr);
-          var buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+          var buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW); G.buf = buf;
           var aloc = gl.getAttribLocation(pr, 'a'); gl.enableVertexAttribArray(aloc); gl.vertexAttribPointer(aloc, 2, gl.FLOAT, false, 0, 0);
-          ['uC', 'uR', 'uW', 'uBase', 'uSkin', 'uSkin2', 'uOn', 'uOn2'].forEach(function(k){ U[k] = gl.getUniformLocation(pr, k); });
+          ['uC', 'uR', 'uW', 'uBase', 'uSkin', 'uSkin2', 'uOn', 'uOn2', 'uDye', 'uDyeOn', 'uScheme', 'uRes'].forEach(function(k){ U[k] = gl.getUniformLocation(pr, k); });
+          G.pr = pr; G.aloc = aloc;
           for (var i = 0; i < 3; i++){ var t = gl.createTexture(); gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 0]));
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); T.push(t); }
+          /* the dye's own textures: 3 = the wind as RGBA8 (R east, G north, each (v/range)/2+.5), 4/5 = the cloth, ping-pong at screen size, 6 = noise, NEAREST or no speck ever crosses its threshold */
+          for (i = 3; i < 7; i++){ var t2 = gl.createTexture(); gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t2); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 0]));
+            var fl2 = i === 6 ? gl.NEAREST : gl.LINEAR, wr = (i === 3 || i === 6) ? gl.REPEAT : gl.CLAMP_TO_EDGE;
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, fl2); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, fl2); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wr); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, i === 3 ? gl.CLAMP_TO_EDGE : wr); T.push(t2); }
+          (function(){ var n = 256, d = new Uint8Array(n * n * 4); for (var q = 0; q < d.length; q++) d[q] = Math.random() * 256 | 0; gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, T[6]); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, n, n, 0, gl.RGBA, gl.UNSIGNED_BYTE, d); })();
+          DYE.fbo = [gl.createFramebuffer(), gl.createFramebuffer()];
+          var afs = 'precision highp float; uniform vec2 uC; uniform float uR; uniform mat3 uW; uniform mat3 uV; uniform vec2 uRes; uniform sampler2D uPrev; uniform sampler2D uWind; uniform sampler2D uNoise; uniform float uStep; uniform float uRange; uniform float uSeed; uniform float uFade; uniform float uDrop; uniform float uPour; uniform float uScheme;'
+            + 'void main(){ vec2 frag = gl_FragCoord.xy; vec2 p = (frag - uC) / uR; float r2 = dot(p, p); if (r2 > 1.0){ gl_FragColor = vec4(0.0); return; }'
+            + ' float nz = texture2D(uNoise, frag / 256.0 + vec2(uSeed, uSeed * 1.7)).r;'
+            + ' float z = sqrt(1.0 - r2); vec3 w = uW * vec3(p.x, p.y, z); vec2 uv = vec2(atan(w.x, w.z) / 6.2831853 + 0.5, 0.5 - asin(clamp(w.y, -1.0, 1.0)) / 3.14159265);'
+            + ' vec4 wt = texture2D(uWind, uv); vec2 wind = (wt.rg * 2.0 - 1.0) * uRange;'
+            + ' vec3 east = normalize(cross(vec3(0.0, 1.0, 0.0), w) + vec3(1e-5, 0.0, 0.0)); vec3 north = cross(w, east); vec3 dV = uV * (east * wind.x + north * wind.y); vec2 srcPx = frag - dV.xy * uStep;'
+            + ' vec2 sp = (srcPx - uC) / uR; float onSphere = step(dot(sp, sp), 0.985); vec4 prev = texture2D(uPrev, srcPx / uRes);'
+            + ' vec4 dye = prev * uFade * onSphere; float latd = degrees(asin(clamp(w.y, -1.0, 1.0))); float gate = step(uDrop, nz) * (1.0 + uPour * 6.0);'
+            + ' if (uScheme < 0.5){ float band = smoothstep(4.5, 1.5, abs(latd)), cap = smoothstep(70.0, 78.0, abs(latd)); dye.r += band * gate * 0.35; dye.g += cap * gate * 0.35; }'
+            + ' else if (uScheme < 1.5){ float lod = degrees(atan(w.x, w.z)); vec2 cell = vec2(mod(lod + 180.0, 20.0) - 10.0, mod(latd + 90.0, 10.0) - 5.0); dye.r += smoothstep(1.4, 0.4, length(cell)) * 0.07 * (1.0 + uPour * 3.0); }'
+            + ' else { float al = abs(latd); float trade = smoothstep(4.0, 8.0, al) * smoothstep(26.0, 20.0, al), west = smoothstep(33.0, 38.0, al) * smoothstep(62.0, 56.0, al); dye.r += trade * gate * 0.3; dye.g += west * gate * 0.3; }'
+            + ' gl_FragColor = vec4(min(dye.rg, vec2(1.0)), 0.0, 1.0); }';
+          var apr = gl.createProgram(); gl.attachShader(apr, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(apr, sh(gl.FRAGMENT_SHADER, afs)); gl.linkProgram(apr);
+          if (!gl.getProgramParameter(apr, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(apr));
+          DYE.pr = apr; DYE.aloc = gl.getAttribLocation(apr, 'a'); DYE.U = {};
+          ['uC', 'uR', 'uW', 'uV', 'uRes', 'uPrev', 'uWind', 'uNoise', 'uStep', 'uRange', 'uSeed', 'uFade', 'uDrop', 'uPour', 'uScheme'].forEach(function(k){ DYE.U[k] = gl.getUniformLocation(apr, k); });
         } catch(e){ return (G.ok = false); }
         G.ok = true;
         G.img(GIBS4326 + '&FORMAT=image/jpeg&LAYERS=BlueMarble_ShadedRelief_Bathymetry').then(function(im){ G.put(0, im); }).catch(function(){});
@@ -93914,7 +93954,7 @@ function closeAlertModal(){
         var rs = function(){ var r = el.getBoundingClientRect(); if (!r.width) return;
           var nar = r.width < 460, bx = el.querySelector('[data-g=home]').parentNode, hh = nar ? Math.round(r.width + 40) + 'px' : '';
           if (el.style.height !== hh){ el.style.aspectRatio = nar ? 'auto' : '1 / 1'; el.style.height = hh; bx.style.flexDirection = nar ? 'row' : 'column'; bx.style.left = nar ? '10px' : 'auto'; bx.style.justifyContent = nar ? 'space-between' : 'flex-start'; r = el.getBoundingClientRect(); }
-          W = r.width; H = r.height; [glc, flc, ovc].forEach(function(c){ c.width = Math.round(W * DPR); c.height = Math.round(H * DPR); }); gl.viewport(0, 0, glc.width, glc.height); G.dirty = true; };
+          W = r.width; H = r.height; [glc, flc, ovc].forEach(function(c){ c.width = Math.round(W * DPR); c.height = Math.round(H * DPR); }); gl.viewport(0, 0, glc.width, glc.height); DYE.fw = 0; G.dirty = true; };
         if (window.ResizeObserver) new ResizeObserver(rs).observe(el); window.addEventListener('resize', rs); G.resize = rs;
         requestAnimationFrame(frame);
         return true;
@@ -93926,12 +93966,52 @@ function closeAlertModal(){
         return Promise.all(urls.map(function(u){ return G.img(u); })).then(function(ims){ if (G.want !== want) return true; ims.forEach(function(im, i){ G.put(1 + i, im); }); G.on = [ims.length > 0 ? 1 : 0, ims.length > 1 ? 1 : 0]; G.dirty = true; return true; })
           .catch(function(){ if (G.want === want){ G.on = [0, 0]; G.dirty = true; } return false; }); };
       /* sp = { level, elev, range, mode, k, floor, skin:false? } -> true when the wind is on the sphere and moving, false when it could not be had */
-      G.flow = function(sp, iso){ var key = [sp.level, sp.elev, sp.mode, iso || ''].join('|'), want = G.fwant = key;
+      /* ---------- DYE: the wind drawing the surface (user 2026-09-22: "reinvent the visual of flow beyond just tiny lines, i want to be
+         unique" -> the FABRIC lab -> "i like dye the most"). Nothing is a line. Each frame the cloth over the disc is pushed one step
+         along the wind in SCREEN space (van Wijk's image-based flow visualisation), faded a hair, and dye is dropped at the
+         sources: scheme 0 (the cells) warm dye along the equator and cold dye at the poles; scheme 1 (the jet) pale dye from a
+         20 x 10 degree grid of sources, so the fast air streams and the calm air pools; scheme 2 (the belts) teal dye in the
+         trade belts, orange in the westerlies. Two 8-bit amounts (R, G), coloured in the globe shader, so the dye can never burn
+         to white. Screen space means no distortion at the pole; a turn of the globe smears the cloth for half a second while it
+         re-forms. One second here is a day of wind (half a day for the jet). Lab, traps and tuning: _earthlab/fabric.html. ---------- */
+      var DYE = { on: false, still: false, cur: 0, fw: 0, fh: 0, schemeN: 0, range: 30, ts: 86400, fade: 0.9993, drop: 0.99, t: 0, seed: 0.37 };
+      DYE.size = function(){ var w = glc.width, h = glc.height; if (w === DYE.fw && h === DYE.fh) return; DYE.fw = w; DYE.fh = h;
+        for (var i = 0; i < 2; i++){ gl.activeTexture(gl.TEXTURE4 + i); gl.bindTexture(gl.TEXTURE_2D, T[4 + i]); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, DYE.fbo[i]); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, T[4 + i], 0); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); }
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null); DYE.t = 0; };
+      DYE.field = function(f, range){ var w = f.u.w, h = f.u.h, U2 = f.u.d, V2 = f.v.d, d = new Uint8Array(w * h * 4); DYE.range = range;
+        for (var i = 0; i < w * h; i++){ d[i * 4] = Math.max(0, Math.min(255, (U2[i] / range * 0.5 + 0.5) * 255)); d[i * 4 + 1] = Math.max(0, Math.min(255, (V2[i] / range * 0.5 + 0.5) * 255)); d[i * 4 + 3] = 255; }
+        gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, T[3]); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, d); };
+      DYE.step = function(dt){ DYE.size(); var M = mats(), Vm = M.V, nxt = 1 - DYE.cur, TOP = W < 460 ? 40 : 0;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, DYE.fbo[nxt]); gl.viewport(0, 0, DYE.fw, DYE.fh); gl.useProgram(DYE.pr); gl.bindBuffer(gl.ARRAY_BUFFER, G.buf); gl.enableVertexAttribArray(DYE.aloc); gl.vertexAttribPointer(DYE.aloc, 2, gl.FLOAT, false, 0, 0);
+        gl.activeTexture(gl.TEXTURE4 + DYE.cur); gl.bindTexture(gl.TEXTURE_2D, T[4 + DYE.cur]); gl.uniform1i(DYE.U.uPrev, 4 + DYE.cur);
+        gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, T[3]); gl.uniform1i(DYE.U.uWind, 3); gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, T[6]); gl.uniform1i(DYE.U.uNoise, 6);
+        gl.uniform2f(DYE.U.uC, CX * DPR, (H - CY) * DPR); gl.uniform1f(DYE.U.uR, R * DPR); gl.uniformMatrix3fv(DYE.U.uW, false, M.Wcol); gl.uniform2f(DYE.U.uRes, DYE.fw, DYE.fh);
+        gl.uniformMatrix3fv(DYE.U.uV, false, new Float32Array([Vm[0][0], Vm[1][0], Vm[2][0], Vm[0][1], Vm[1][1], Vm[2][1], Vm[0][2], Vm[1][2], Vm[2][2]]));
+        DYE.seed = (DYE.seed + 0.618034) % 1; gl.uniform1f(DYE.U.uSeed, DYE.seed); gl.uniform1f(DYE.U.uStep, R * DPR * DYE.ts * dt / 6371000);
+        gl.uniform1f(DYE.U.uRange, DYE.range); gl.uniform1f(DYE.U.uFade, DYE.fade); gl.uniform1f(DYE.U.uDrop, DYE.drop); gl.uniform1f(DYE.U.uScheme, DYE.schemeN);
+        DYE.t += dt; gl.uniform1f(DYE.U.uPour, DYE.t < 2.5 ? 1 : 0);   /* the first moments pour hard, so the bands are there at once */
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); DYE.cur = nxt; gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, glc.width, glc.height); };
+      DYE.start = function(scheme){ DYE.schemeN = { cells: 0, jet: 1, belts: 2 }[scheme] || 0; DYE.ts = scheme === 'jet' ? 43200 : 86400; DYE.fw = 0; DYE.t = 0; DYE.on = true;
+        DYE.still = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches); G.dirty = true;
+        if (DYE.still && R){ for (var i = 0; i < 300; i++) DYE.step(0.033); } };      /* no motion asked for: a finished marbling, held still */
+      DYE.stop = function(){ if (!DYE.on) return; DYE.on = false; DYE.fw = 0; G.dirty = true; };
+      DYE.dbg = function(){ var st = -1; try { gl.bindFramebuffer(gl.FRAMEBUFFER, DYE.fbo[0]); st = gl.checkFramebufferStatus(gl.FRAMEBUFFER); gl.bindFramebuffer(gl.FRAMEBUFFER, null); } catch(e){}
+        var px = new Uint8Array(4 * 64); try { gl.bindFramebuffer(gl.FRAMEBUFFER, DYE.fbo[DYE.cur]); gl.readPixels(Math.round(DYE.fw / 2) - 4, Math.round(DYE.fh / 2) - 4, 8, 8, gl.RGBA, gl.UNSIGNED_BYTE, px); gl.bindFramebuffer(gl.FRAMEBUFFER, null); } catch(e){}
+        var mx = 0; for (var i = 0; i < px.length; i += 4) mx = Math.max(mx, px[i], px[i + 1]);
+        var pf = (G.prof || []).slice().sort(function(a, b){ return a - b; });
+        return { jsMs: pf.length ? { median: +pf[pf.length >> 1].toFixed(2), p95: +pf[Math.floor(pf.length * 0.95)].toFixed(2), max: +pf[pf.length - 1].toFixed(2) } : null, on: DYE.on, cur: DYE.cur, fw: DYE.fw, fh: DYE.fh, range: DYE.range, ts: DYE.ts, t: +DYE.t.toFixed(1), scheme: DYE.schemeN, err: gl.getError(), fbStatus: st, fbComplete: gl.FRAMEBUFFER_COMPLETE, centreMax: mx, R: R, W: W, H: H }; };
+      /* a view asks for dye the way it asked for flow: the same two grey pictures, decoded once, kept in FLOW's cache; false = fall back to the flat map */
+      G.dye = function(sp, scheme, iso){ var key = [sp.level, sp.elev, sp.mode, iso || ''].join('|'), want = G.fwant = key; FLOW.stop();
+        var have = FLOW.cache[key] ? Promise.resolve(FLOW.cache[key]) : Promise.all([G.img(FLOW.url(sp, 'u', iso)), G.img(FLOW.url(sp, 'v', iso))]).then(function(ims){ var f = FLOW.field(ims[0], ims[1], sp); FLOW.cache = {}; FLOW.cache[key] = f; return f; });
+        return have.then(function(f){ if (G.fwant !== want) return true; FLOW.set(f); DYE.field(f, sp.range); DYE.start(scheme); return true; }).catch(function(){ if (G.fwant === want) DYE.stop(); return false; }); };
+      G.DYE = DYE;
+      G.flow = function(sp, iso){ var key = [sp.level, sp.elev, sp.mode, iso || ''].join('|'), want = G.fwant = key; DYE.stop();
         if (sp.skin !== false) G.want = 'flow:' + key;
         var have = FLOW.cache[key] ? Promise.resolve(FLOW.cache[key]) : Promise.all([G.img(FLOW.url(sp, 'u', iso)), G.img(FLOW.url(sp, 'v', iso))]).then(function(ims){ var f = FLOW.field(ims[0], ims[1], sp); if (sp.skin !== false) f.skin = FLOW.paint(f.u, f.v, sp.mode); FLOW.cache = {}; FLOW.cache[key] = f; return f; });
         return have.then(function(f){ if (G.fwant !== want) return true; FLOW.set(f); if (sp.skin !== false){ G.put(1, f.skin); G.on = [1, 0]; } FLOW.start(sp); return true; }).catch(function(){ if (G.fwant === want) FLOW.stop(); return false; }); };
       G.FLOW = FLOW;
-      G.clear = function(){ G.fwant = ''; FLOW.stop(); G.want = ''; G.on = [0, 0]; G.annot = null; G.V.cells = null; G.dirty = true; };
+      G.clear = function(){ G.fwant = ''; FLOW.stop(); DYE.stop(); G.want = ''; G.on = [0, 0]; G.annot = null; G.V.cells = null; G.dirty = true; };
       G.show = function(on){ if (G.el) G.el.style.display = on ? 'block' : 'none'; if (on && G.resize) setTimeout(G.resize, 0); };
       return G;
     })();
@@ -94842,8 +94922,8 @@ function closeAlertModal(){
     var jetLine = function(say){ line('<span style="color:#1d4ed8;font-weight:900;letter-spacing:.06em;">THE JET STREAM</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">· the river of wind about 34,000 ft up, blowing west to east. Every streak is carried by the model’s own wind, faster where the jet is faster; colour fades in from about 50 mph and deepens through orange to dark red past 150. Press LOOK DOWN ON THE POLE to see it as what it is, a wavy ring round the top of the planet. A dip in it pulls a hurricane north and out to sea, and it steers every front and nor’easter. A strong El Niño drags the Pacific branch south and east. NOAA GFS model via Unidata, ' + GFSRUN.words() + ' · press play for the next five days.</span>' + (say || '')); };
     var jetPlayGlobe = function(){ globeBtn(null); var list = []; for (var k = 0; k < 21; k++){ var n = new Date(); n.setUTCMinutes(0, 0, 0); n.setUTCHours(Math.floor(n.getUTCHours() / 6) * 6 + 6 * k); var iso = n.toISOString().slice(0, 13) + ':00:00.000Z';
         list.push({ url: GLOBE.FLOW.url(JETF, 'u', iso, true), url2: GLOBE.FLOW.url(JETF, 'v', iso, true), label: jetWhen(n) }); }
-      GPLAY.start(list, 'JET STREAM FORECAST', function(o){ if (o.phase === 'stopped' && CUR === 'jet' && STAGE === 'globe'){ GLOBE.flow(JETF); globeBtn('▶ PLAY THE NEXT 5 DAYS', jetPlayGlobe); } }, 320,
-        function(f){ var fld = GLOBE.FLOW.field(f, f._v, JETF); GLOBE.FLOW.set(fld); GLOBE.put(1, GLOBE.FLOW.paint(fld.u, fld.v, 'speed')); GLOBE.on = [1, 0]; }); };   /* each step swaps the wind under the streaks: they keep flowing, and bend to the new field */
+      GPLAY.start(list, 'JET STREAM FORECAST', function(o){ if (o.phase === 'stopped' && CUR === 'jet' && STAGE === 'globe'){ GLOBE.dye(JETF, 'jet'); globeBtn('▶ PLAY THE NEXT 5 DAYS', jetPlayGlobe); } }, 320,
+        function(f){ var fld = GLOBE.FLOW.field(f, f._v, JETF); GLOBE.FLOW.set(fld); GLOBE.DYE.field(fld, JETF.range); if (!GLOBE.DYE.on) GLOBE.DYE.start('jet'); }); };   /* each step swaps the wind under the dye: the cloth keeps moving, and bends to the new field */
     var CELLLAB = {
       belts: [[16, 'NORTH-EAST TRADES', '#99f6e4'], [-14, 'SOUTH-EAST TRADES', '#99f6e4'], [3, 'DOLDRUMS', '#fff'], [33, 'HORSE LATITUDES · 30°', '#fff'], [47, 'WESTERLIES', '#fed7aa'], [-47, 'THE ROARING FORTIES', '#fed7aa'], [68, 'POLAR EASTERLIES', '#99f6e4'], [-66, 'POLAR EASTERLIES', '#99f6e4']],
       trades: [[16, 'NORTH-EAST TRADES', '#99f6e4'], [-14, 'SOUTH-EAST TRADES', '#99f6e4'], [3, 'DOLDRUMS', '#fff'], [33, 'HORSE LATITUDES · 30°', '#fff'], [47, 'WESTERLIES', '#fed7aa'], [-47, 'THE ROARING FORTIES', '#fed7aa']],
@@ -94856,18 +94936,19 @@ function closeAlertModal(){
       GLOBE.annot = function(c){ (CELLLAB[k] || []).forEach(function(L2){ var q = c.proj(L2[0], c.lon0); if (q[2] < 0.2) return; c.ov.font = '900 9px system-ui,sans-serif'; var w = c.ov.measureText(L2[1]).width; c.word(L2[1], q[0] - w / 2, q[1] - 3, L2[2], '900 9px system-ui,sans-serif'); }); };
       if (k === 'polar'){ GLOBE.V.cells = null; GLOBE.V.tLat = 89; GLOBE.face(89, homeLon()); } else { GLOBE.V.cells = k === 'belts' ? null : k; GLOBE.face(0, k === 'ferrel' ? homeLon() : -150); }
       var T = CELLTXT[k], cap = function(){ if (!cellCur(k) || STAGE !== 'globe') return; line('<span style="color:' + T[1] + ';font-weight:900;letter-spacing:.06em;">' + T[0] + '</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">· ' + FLOWTXT[k] + ' · NOAA GFS model via Unidata, ' + GFSRUN.words() + '.</span>' + flowSay(false)); };
-      if (CVG[k]) return GLOBE.skins(CVG[k].map(function(s2){ return gfsWorld(CELLS.params[s2]); })).then(function(ok){ if (ok && cellCur(k)) GLOBE.flow(SURF(CFLOW[k], false)).then(function(ok2){ if (ok2) cap(); }); return ok; });
-      return GLOBE.flow(SURF(CFLOW[k])).then(function(ok){ if (ok) cap(); return ok; });
+      /* the wind as DYE, not threads (2026-09-22): the belts get teal and orange dye in their belts; every cell gets the cells' dye, warm at the equator, cold at the poles */
+      if (CVG[k]) return GLOBE.skins(CVG[k].map(function(s2){ return gfsWorld(CELLS.params[s2]); })).then(function(ok){ if (ok && cellCur(k)) GLOBE.dye(SURF(CFLOW[k], false), 'cells').then(function(ok2){ if (ok2) cap(); }); return ok; });
+      return GLOBE.dye(SURF(CFLOW[k], false), k === 'belts' ? 'belts' : 'cells').then(function(ok){ if (ok) cap(); return ok; });
     };
     var CFLOW = { belts: 'ew', trades: 'ew', easterlies: 'east', hadley: 'ew', ferrel: 'west', polar: 'east' };
     var CVG = { hadley: ['MOIST'], ferrel: ['LOWS'] };      /* server-coloured skins under the streaks on the globe; the other views paint the wind itself */
     var FLOWTXT = {
-      belts: 'every streak is carried by today’s surface wind · teal blows from the east, orange from the west, deeper is stronger · the two teal belts either side of the equator are the trades, the orange swirls beyond 30° the westerlies, the patchy teal near the poles the polar easterlies',
+      belts: 'teal dye is dropped in the trade-wind belts and orange dye in the westerlies, then carried by today’s surface wind: the teal drifts west, the orange east, and the storms fold them into swirls · the colour says where the dye was dropped, the shape is the wind · a second here is a day of wind',
       trades: 'every streak is carried by today’s surface wind · teal air blows from the east, orange from the west, deeper is stronger · the two teal belts either side of the equator are the trades, running into each other at the doldrums',
       easterlies: 'the streaks are all of today’s surface wind; only wind from the east is coloured, deeper teal is stronger · the broad tropical belts are the trades, the patchy ones near the poles the polar easterlies',
-      hadley: 'the colour is how much water the air holds: the wet band is air rising, the dry gaps near 30° are air sinking · the streaks are today’s surface wind: watch the trades from both hemispheres run together under the wet band, which is the cell’s ground floor',
-      ferrel: 'the colour is air pressure at sea level: the redder, the lower it is, and every red swirl is a storm · the streaks are today’s surface wind, and in this belt they blow from the west · the storms are this cell’s real machinery',
-      polar: 'looking down on the pole · teal is wind from the east, deeper is stronger · the streaks show cold air draining off the ice and the storms circling the polar front near 60°' };
+      hadley: 'the colour underneath is how much water the air holds: the wet band is air rising, the dry gaps near 30° are air sinking · the dye on top is warm at the equator and cold at the poles, carried by today’s surface wind: watch the trades drag the warm dye west and fold it along the equator, the cell’s ground floor · a second here is a day of wind',
+      ferrel: 'the colour underneath is air pressure at sea level: the redder, the lower it is, and every red swirl is a storm · the dye is carried by today’s surface wind, and in this belt the storms fold it: they are this cell’s real machinery · a second here is a day of wind',
+      polar: 'looking down on the pole · cold dye is dropped over the ice and carried by today’s surface wind: watch it drain outward and get caught by the storms circling the polar front near 60° · a second here is a day of wind' };
     var CV = {   // the circulation views: [flat-map skins, wide frame, phone frame, flat labels]
       belts: [['EAST', 'WEST'], [[-58, -215], [77, -5]], null, 'belts'],
       trades: [['EAST', 'WEST'], [[-40, -215], [44, -5]], null, 'belts'], easterlies: [['EAST'], [[-58, -215], [77, -5]], null, 'east'], hadley: [['MOIST'], [[-42, -215], [46, -5]], null, 'hadley'],
@@ -94902,7 +94983,7 @@ function closeAlertModal(){
       amoc: { label: 'AMOC', on: function(){ AMOC(true); renderAmoc(); loadAmoc().then(function(){ if (CUR === 'amoc') renderAmoc(); }); }, off: function(){ AMOC(false); } },
       jet:  { label: 'JET STREAM', group: 'THE WIND',
         globe: function(){ GLOBE.V.cells = null; GLOBE.annot = null; GLOBE.face(46, homeLon()); jetLine();
-          return GLOBE.flow(JETF).then(function(ok){ if (ok && CUR === 'jet'){ globeBtn('\u25b6 PLAY THE NEXT 5 DAYS', jetPlayGlobe); jetLine(flowSay(true)); } return ok; }); },
+          return GLOBE.dye(JETF, 'jet').then(function(ok){ if (ok && CUR === 'jet'){ globeBtn('\u25b6 PLAY THE NEXT 5 DAYS', jetPlayGlobe); jetLine(flowSay(true)); } return ok; }); },
         flat: function(){ JET(true); }, off: function(){ JET(false); globeBtn(null); } },
       /* THE WIND, IN TWO TABS (user 2026-09-21: "cells and the other are confusing me"). WIND BELTS is what blows along the
          ground, today, all three belts in one picture; THE CELLS is the overturning that drives them, one cutaway with the cell
@@ -94978,7 +95059,7 @@ function closeAlertModal(){
       if (window.ResizeObserver) new ResizeObserver(function(){ if (PENDFIT && isOpen()) fit(PENDFIT); }).observe(EM.getContainer());
     };
     /* read-only, for the test sweeps (the CITY map's _cwMapState idiom): what the stage holds right now */
-    window._bvEarthState = function(){ return { view: CUR, cell: CELLF, stage: STAGE, skins: GLOBE.want || '', lit: (GLOBE.on || []).slice(), cells: (GLOBE.V && GLOBE.V.cells) || null, flow: !!(GLOBE.FLOW && GLOBE.FLOW.on), streaks: (GLOBE.FLOW && GLOBE.FLOW.on && GLOBE.FLOW.N) || 0, flowMode: (GLOBE.FLOW && GLOBE.FLOW.on && GLOBE.FLOW.mode) || null, playing: !!GPLAY.token, frames: (GPLAY.frames || []).length, frame: GPLAY.i }; };
+    window._bvEarthState = function(){ return { view: CUR, cell: CELLF, stage: STAGE, dye: !!(GLOBE.DYE && GLOBE.DYE.on), dyeScheme: GLOBE.DYE ? GLOBE.DYE.schemeN : null, dyeDbg: (GLOBE.DYE && GLOBE.DYE.dbg) ? GLOBE.DYE.dbg() : null, skins: GLOBE.want || '', lit: (GLOBE.on || []).slice(), cells: (GLOBE.V && GLOBE.V.cells) || null, flow: !!(GLOBE.FLOW && GLOBE.FLOW.on), streaks: (GLOBE.FLOW && GLOBE.FLOW.on && GLOBE.FLOW.N) || 0, flowMode: (GLOBE.FLOW && GLOBE.FLOW.on && GLOBE.FLOW.mode) || null, playing: !!GPLAY.token, frames: (GPLAY.frames || []).length, frame: GPLAY.i }; };
     /* ONE ROW WHEN IT FITS (user 2026-09-21, shown three short centred rows in an 1,100 px pane: "use all the width better").
        The twelve tabs are 1,204 px at full size, so the one-row form is a touch tighter and the three groups are parted by a
        hairline instead of a line break. Tried, then MEASURED: if the tabs still land on more than one line (a narrower
