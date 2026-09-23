@@ -1678,12 +1678,58 @@ function goQuakes(){
     try { window.parent.postMessage({ basinGo: 'quake' }, location.origin); } catch(e){}
   } else window.open('/', '_blank');
 }
+/* ---- WHERE YOU ARE (user 2026-09-23: "give LA the same location text box NYC has and let that box be used for
+   starting location on the A to B calculator"). THE CITY's doorstep box drives its arcs, its subway board and its
+   hood line; none of that exists here, so this is the honest half of it: a place is looked up, remembered, marked on
+   the map, and offered as the start of a route. Nominatim, bounded to the basin so "3rd street" lands in Los Angeles
+   and not in Ohio, and an address-shaped query goes through the STRUCTURED street field for the same reason THE CITY's
+   does -- free-form parsing turns "45 west 21st" into West 45th Street. ---- */
+var HOME = null, HOMEBUSY = false, HOMEERR = '';
+try { HOME = JSON.parse(localStorage.getItem('bv_la_home') || 'null'); } catch(e){}
+function homeSend(){ try { document.getElementById('lab').contentWindow.postMessage({ labHome: HOME }, '*'); } catch(e){} }
+function homeClear(){ HOME = null; HOMEERR = ''; try { localStorage.removeItem('bv_la_home'); } catch(e){} homeSend(); paint(); }
+function homeLook(){
+  var q = (document.getElementById('la-home-input') || {}).value || ''; q = q.trim();
+  if (q.length < 3) return;
+  HOMEBUSY = true; HOMEERR = ''; paint();
+  var u = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&bounded=1&viewbox=-119.00,34.90,-117.10,33.30&'
+        + (/^\d+\s/.test(q) ? 'street=' + encodeURIComponent(q) + '&city=Los Angeles' : 'q=' + encodeURIComponent(q));
+  fetch(u).then(function(r){ return r.ok ? r.json() : null; }).then(function(j){
+    HOMEBUSY = false;
+    if (!j || !j[0]){ HOMEERR = 'COULDN\u2019T PLACE THAT \u00b7 TRY A NEIGHBOURHOOD OR STREET ADDRESS'; paint(); return; }
+    var parts = String(j[0].display_name || q).split(',').map(function(x){ return x.trim(); });
+    var nm = /^\d+[A-Za-z\-]*$/.test(parts[0]) && parts[1] ? parts[0] + ' ' + parts[1] : parts[0];
+    HOME = { name: nm, lat: +j[0].lat, lon: +j[0].lon };
+    try { localStorage.setItem('bv_la_home', JSON.stringify(HOME)); } catch(e){}
+    homeSend(); paint();
+  }).catch(function(){ HOMEBUSY = false; HOMEERR = 'THE LOOKUP DID NOT ANSWER'; paint(); });
+}
+function homeBox(){
+  var val = String((HOME && HOME.name) || '').replace(/"/g, '&quot;');
+  return '<div style="display:flex;justify-content:center;margin-top:7px;">'
+    + '<div style="position:relative;">'
+    + '<input id="la-home-input" placeholder="NEIGHBOURHOOD OR ADDRESS" autocomplete="off" value="' + val + '" '
+      + 'onkeydown="if(event.key===\'Enter\'){event.preventDefault();homeLook();}" '
+      /* THE CITY's box sits on an orange cap, so its white-on-nothing works there; this strip is pale, and white text
+         on it read as a placeholder even when a place was set (looked at). Dark ink on a light field instead. */
+      + 'style="background:rgba(255,255,255,.75);border:1px solid rgba(27,35,64,.2);border-radius:8px;color:#1b2340;'
+      + 'font:600 12px system-ui,sans-serif;letter-spacing:.03em;padding:8px 32px 8px 12px;width:300px;max-width:72vw;outline:none;">'
+    + (HOME ? '<span role="button" aria-label="Clear" onclick="homeClear()" style="position:absolute;right:9px;top:50%;transform:translateY(-50%);'
+      + 'display:flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;cursor:pointer;'
+      + 'background:rgba(27,35,64,.12);color:#5b647a;font:800 10px system-ui,sans-serif;line-height:1;">\u2715</span>' : '')
+    + '</div></div>'
+    + (HOMEBUSY || HOMEERR ? '<div style="text-align:center;font:700 8px system-ui,sans-serif;letter-spacing:.09em;margin-top:4px;color:' + (HOMEERR ? '#b91c1c' : '#2B22F4') + ';">'
+        + (HOMEERR || 'LOOKING IT UP\u2026') + '</div>' : '');
+}
 /* ---- A TO B (user 2026-09-23: the same calculator THE CITY has). The lab owns the taps, the line and the arithmetic
    (see AB there); this file owns the button and the words. It rides beside the train switch, outside trafficLine(), for
    the same reason that one does: a tapped marker replaces the strip wholesale. ---- */
 var AB = { on: false, state: 'off', r: null, err: '' };
 function abSend(c){ try { document.getElementById('lab').contentWindow.postMessage({ labAB: c }, '*'); } catch(e){} }
 function abGo(){ AB.on = true; AB.state = 'armed'; AB.r = null; AB.err = ''; abSend('arm'); paint(); }
+function abFromHome(){ if (!HOME) return; AB.on = true; AB.r = null; AB.err = ''; AB.state = 'a';
+  try { document.getElementById('lab').contentWindow.postMessage({ labAB: { from: [HOME.lat, HOME.lon] } }, '*'); } catch(e){}
+  paint(); }
 function abOff(){ AB.on = false; AB.state = 'off'; AB.r = null; AB.err = ''; abSend('clear'); paint(); }
 function abToggle(){
   var pill = function(fn, t, on2){ return '<button onclick="' + fn + '" style="cursor:pointer;font:800 8px system-ui,sans-serif;letter-spacing:.09em;padding:3px 9px;border-radius:11px;margin:0 3px;'
@@ -1700,7 +1746,9 @@ function abToggle(){
       + ' \u00b7 ' + AB.r.mi + ' MI</span> <span style="color:#8a91a5;">\u00b7 ROUTE OSRM \u00b7 TIMED OFF THE FLOW ON THIS MAP, WHICH COVERS ' + AB.r.cover + '% OF IT</span>'; }
   else words = '<span style="color:#2B22F4;font-weight:800;">TAP WHERE YOU ARE STARTING</span>';
   return '<div style="text-align:center;margin-top:6px;font:600 8px system-ui,sans-serif;letter-spacing:.08em;color:#5b647a;">'
-    + (AB.on ? pill('abGo()', 'START AGAIN', true) + pill('abOff()', 'DONE', false) : pill('abGo()', 'PLAN A TO B', false)) + words + '</div>';
+    + (AB.on ? pill('abGo()', 'RESET', true) + pill('abOff()', 'DONE', false) : pill('abGo()', 'PLAN A TO B', false))
+    + (HOME ? pill('abFromHome()', 'START FROM ' + String(HOME.name).toUpperCase().slice(0, 22), false) : '')
+    + words + '</div>';
 }
 function railToggle(){
   return '<div style="text-align:center;margin-top:6px;">'
@@ -1856,7 +1904,7 @@ function paint(){
     info.innerHTML = st.surf ? surfBand() + swellDial() : st.geo && ROCK ? rockBand() : st.geo
       ? '<b>THE ROCK UNDER THE BASIN</b> &nbsp;·&nbsp; Macrostrat units, with USGS Quaternary faults: heaviest where the ground has broken in historic time, dashed where the survey infers the trace. Hatched where the ground is soft enough to amplify shaking. Every earthquake USGS has logged in the last 24 hours gets its diamond, from the same feed and in the same hand as the EARTHQUAKES widget. A quiet day is a quiet map. The basin&rsquo;s destructive ones &mdash; Northridge 1994, Sylmar 1971, Long Beach 1933 &mdash; are in the record, not on this map. Tap any of it.'
       : ((st.traffic && INCIDENT ? incidentBand() : board() + (st.traffic ? trafficLine() : ''))
-         + (st.traffic ? abToggle() + railToggle() : ''));
+         + (v.layers ? homeBox() : '') + (st.traffic ? abToggle() + railToggle() : ''));
   } else {
     info.style.display = 'none'; tag.style.display = '';
     document.getElementById('cw-wide-tag-main').textContent = v.tag;
