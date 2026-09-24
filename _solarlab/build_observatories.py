@@ -23,6 +23,13 @@ stripes) and read as broken next to the event cards' renders.
 usage: build_observatories.py
 """
 import datetime as dt, json, math, re, sys, time, urllib.parse, urllib.request
+
+# a sentence ends at . ! ? -- but not after an initial ("Vera C. Rubin") or an abbreviation ("U.S.")
+SENT = re.compile(r'(?<![\s.][A-Z]\.)(?<!\bSt\.)(?<!\bDr\.)(?<=[.!?])\s+(?=[A-Z\u201c"(])')
+
+
+def first_sentence(t, cap=480):
+    return (SENT.split(t) or [''])[0][:cap]
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -282,11 +289,11 @@ def bake_roman_card():
         g = lambda t: (re.search(r'<%s>(.*?)</%s>' % (t, t), it, re.S) or [None, ''])[1]
         desc = _h.unescape(re.sub(r'<[^>]+>', '', g('description').replace('<![CDATA[', '').replace(']]>', '')))
         desc = re.sub(r'\s+', ' ', desc).strip()
-        lead = (re.split(r'(?<=[.!?])\s+(?=[A-Z\u201c"])', desc) or [''])[0]
+        lead = first_sentence(desc)
         try: when = ms(dt.datetime.strptime(g('pubDate').strip()[:25], '%a, %d %b %Y %H:%M:%S'))
         except Exception: when = None
         posts.append({'title': _h.unescape(re.sub(r'<[^>]+>', '', g('title'))).strip(), 'link': g('link').strip(),
-                      't': when, 'lead': lead[:360]})
+                      't': when, 'lead': lead})
     if not posts: raise RuntimeError('no Roman blog posts parsed')
     out['posts'] = posts
     return out
@@ -297,6 +304,16 @@ def bake_roman_card():
 # NASA's mission blogs (public domain; each post's own lead image) and ESA/Webb's image and
 # release feeds (CC BY 4.0 -- the credit travels with every picture). Titles and lead
 # sentences verbatim.
+# Per-source credit and licence. ESA's own site (Euclid) is CC BY-SA 3.0 IGO; NOIRLab (Rubin) is
+# CC BY 4.0 like ESA/Webb; NASA is public domain.
+SRC = {'nasa':    {'from': 'NASA',     'credit': 'NASA',                  'lic': 'public domain'},
+       'esa':     {'from': 'ESA/Webb', 'credit': 'ESA/Webb, NASA & CSA',  'lic': 'CC BY 4.0'},
+       'esaint':  {'from': 'ESA',      'credit': 'ESA/Euclid/Euclid Consortium/NASA', 'lic': 'CC BY-SA 3.0 IGO'},
+       'noirlab': {'from': 'NOIRLab',  'credit': 'NSF\u2013DOE Vera C. Rubin Observatory/NOIRLab/SLAC/AURA', 'lic': 'CC BY 4.0'}}
+# NOIRLab's feeds cover all of its telescopes and its outreach: Rubin items only, and no event photos
+RUBIN_ONLY = re.compile(r'\brubin\b', re.I)
+NOT_RUBIN_SKY = re.compile(r'visitor|activit|colou?ring|workshop|panel|celebrat|graduat|recognition|career|student|school|outreach|construction|summit road|dome|mirror|camera|lsstcam', re.I)
+EUCLID_FEED = 'https://www.esa.int/rssfeed/Science_Exploration/Space_Science/Euclid'
 FEEDS = {
     'webb':   {'photos': [('esa', 'https://esawebb.org/images/feed/')],
                'news':   [('nasa', 'https://science.nasa.gov/blogs/webb/feed/'), ('esa', 'https://esawebb.org/news/feed/')]},
@@ -306,6 +323,16 @@ FEEDS = {
                'news':   [('nasa', 'https://science.nasa.gov/blogs/roman/feed/')]},
     'parker': {'photos': [('nasa', 'https://science.nasa.gov/blogs/parker-solar-probe/feed/')],
                'news':   [('nasa', 'https://science.nasa.gov/blogs/parker-solar-probe/feed/')]},
+    # added 2026-09-24 (user: "add them"): Euclid, Rubin, SPHEREx, Chandra, Voyager
+    'euclid':  {'photos': [('esaint', EUCLID_FEED)], 'news': [('esaint', EUCLID_FEED)]},
+    'rubin':   {'photos': [('noirlab', 'https://noirlab.edu/public/images/feed/'), ('noirlab', 'https://noirlab.edu/public/news/feed/')],
+                'news':   [('noirlab', 'https://noirlab.edu/public/news/feed/')]},
+    'spherex': {'photos': [('nasa', 'https://science.nasa.gov/category/missions/spherex/feed/')],
+                'news':   [('nasa', 'https://science.nasa.gov/category/missions/spherex/feed/')]},
+    'chandra': {'photos': [('nasa', 'https://science.nasa.gov/category/missions/chandra/feed/')],
+                'news':   [('nasa', 'https://science.nasa.gov/category/missions/chandra/feed/')]},
+    # Voyager takes no new pictures (its cameras were switched off in 1990): news only
+    'voyager': {'photos': [], 'news': [('nasa', 'https://science.nasa.gov/blogs/voyager/feed/')]},
 }
 
 
@@ -314,7 +341,7 @@ def _items(url):
     x = get(url).decode('utf-8', 'replace')
     out = []
     for it in re.findall(r'<item>(.*?)</item>', x, re.S)[:12]:
-        g = lambda t: (re.search(r'<%s>(.*?)</%s>' % (t, t), it, re.S) or [None, ''])[1]
+        g = lambda t: re.sub(r'^\s*<!\[CDATA\[(.*)\]\]>\s*$', r'\1', (re.search(r'<%s>(.*?)</%s>' % (t, t), it, re.S) or [None, ''])[1], flags=re.S)
         raw = g('description') + g('content:encoded')
         raw = raw.replace('<![CDATA[', '').replace(']]>', '')
         rawu = _h.unescape(raw)
@@ -323,12 +350,16 @@ def _items(url):
         alt = re.search(r'alt="([^"]*)"', tag.group(0)) if tag else None
         enc = re.search(r'<enclosure[^>]+url="([^"]+)"', it)
         txt = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', rawu)).strip()
-        lead = (re.split(r'(?<=[.!?])\s+(?=[A-Z\u201c"])', txt) or [''])[0]
+        lead = first_sentence(txt)
         cr = re.search(r'Credit[s]?:\s*([^\n<]{3,160}?)(?:\s{2,}|$|\[|\. )', txt)
-        try: when = ms(dt.datetime.strptime(g('pubDate').strip()[:25], '%a, %d %b %Y %H:%M:%S'))
+        try:
+            pd = g('pubDate').strip()
+            when = ms(dt.datetime.strptime(pd[:25], '%a, %d %b %Y %H:%M:%S'))
+            z = re.search(r'([+-])(\d\d)(\d\d)$', pd)          # ESA stamps +0200: honour the offset
+            if z: when -= (1 if z.group(1) == '+' else -1) * (int(z.group(2)) * 60 + int(z.group(3))) * 60000
         except Exception: when = None
         out.append({'title': _h.unescape(re.sub(r'<[^>]+>', '', g('title'))).strip(), 'link': g('link').strip(), 't': when,
-                    'lead': lead[:320], 'img': (enc.group(1) if enc else (img.group(1) if img else '')), 'credit': cr.group(1).strip() if cr else '',
+                    'lead': lead, 'img': (enc.group(1) if enc else (img.group(1) if img else '')), 'credit': cr.group(1).strip() if cr else '',
                     'alt': alt.group(1) if alt else '', 'desc': txt[:600]})
     return out
 
@@ -341,7 +372,11 @@ def _thumb(src, img):
     if src == 'esa':
         m = re.search(r'/archives/images/[^/]+/([^/?]+)\.(?:jpg|png|tif)', img)
         return 'https://cdn.esawebb.org/archives/images/thumb300y/%s.jpg' % m.group(1) if m else img
-    return re.sub(r'\?.*$', '', img) + '?w=640'
+    if src == 'noirlab':
+        m = re.search(r'/archives/images/[^/]+/([^/?]+)\.(?:jpg|png|tif)', img)
+        return 'https://storage.noirlab.edu/media/archives/images/thumb300y/%s.jpg' % m.group(1) if m else img
+    if src == 'esaint': return img
+    return re.sub(r'\?.*$', '', img).replace(' ', '%20') + '?w=640'
 
 
 # ONLY DEEP SPACE AND DATA (user 2026-09-24: "dont show rockets and take offs, i only want deep
@@ -349,7 +384,7 @@ def _thumb(src, img):
 # dropped; NASA's blog images must also name a science subject, because those blogs mix launch,
 # hardware and team photos in with the science. ESA/Webb's image feed is science by construction.
 NOT_SKY = re.compile(r'launch|rocket|falcon|booster|lift-?off|launch ?pad|clean ?room|technician|engineer|\bcrew\b|\bteam\b|'
-                     r'ceremony|briefing|landing|install|assembl|integrat|deploy|antenna|visor|hardware|thermal protection|'
+                     r'ceremony|briefing|amendment|\broses\b|solicitation|funding|proposals? due|landing|install|assembl|integrat|deploy|antenna|visor|hardware|thermal protection|'
                      r'\btps\b|heat shield|fitting|spacecraft|mission control|logo|meatball|insignia|astronaut|facility|'
                      r'trajectory animation|mid-course|artist.s (?:concept|illustration|rendering) of (?:the )?(?:roman|parker|webb|hubble)', re.I)
 IS_SKY = re.compile(r'galax|nebula|cluster|supernova|\bstars?\b|stellar|planet|exoplanet|\bmoons?\b|jupiter|saturn|uranus|neptune|'
@@ -359,11 +394,22 @@ IS_SKY = re.compile(r'galax|nebula|cluster|supernova|\bstars?\b|stellar|planet|e
 
 
 def _is_sky(src, it):
+    if src == 'noirlab':
+        blob = it.get('title', '') + ' ' + it.get('desc', '')
+        if not RUBIN_ONLY.search(blob) or NOT_RUBIN_SKY.search(it.get('title', '') + ' ' + it.get('alt', '')): return False
     words = ' '.join([it.get('alt', ''), it.get('title', ''), it.get('img', ''), it.get('desc', '')[:300]])
     if NOT_SKY.search(it.get('alt', '') + ' ' + it.get('img', '') + ' ' + it.get('title', '')): return False
     # a NASA mission blog's illustrations are of the SPACECRAFT (e.g. Parker drawn against the Sun)
     if src == 'nasa' and re.search(r'illustrat|artist|concept|swingby|closeup|rendering', it.get('alt', '') + ' ' + it.get('img', ''), re.I): return False
     return src == 'esa' or bool(IS_SKY.search(words))
+
+
+_HASH = {}
+
+
+def _same_picture(th, kept):
+    h = _HASH.get(th)
+    return h is not None and any(_HASH.get(k) is not None and bin(h ^ _HASH[k]).count('1') <= 6 for k in kept)
 
 
 def _looks_like_sky(th):
@@ -375,6 +421,9 @@ def _looks_like_sky(th):
         im = Image.open(_io.BytesIO(get(th, timeout=40, tries=2))).convert('RGB')
         w, h = im.size
         if w > 3 * h or h > 3 * w: return False
+        g = im.convert('L').resize((8, 8))
+        px = list(g.getdata()); avg = sum(px) / 64
+        _HASH[th] = sum(1 << i for i, v in enumerate(px) if v > avg)
         im.thumbnail((96, 96))
         st = ImageStat.Stat(im)
         mean = sum(st.mean) / 3
@@ -385,6 +434,18 @@ def _looks_like_sky(th):
         return True
 
 
+def esa_lead(url):
+    import html as _h
+    x = get(url, timeout=40, tries=2).decode('utf-8', 'replace')
+    for p in re.findall(r'<p[^>]*>(.*?)</p>', x, re.S):
+        t = re.sub(r'\s+', ' ', _h.unescape(re.sub(r'<[^>]+>', '', p))).strip()
+        if len(t) > 80:
+            t = re.sub(r'^Video:\s*[\d:]+\s*', '', t)          # an ESA video page opens with its running time
+            if len(t) < 60: continue
+            return first_sentence(t)
+    return ''
+
+
 def bake_media():
     out = {}
     for key, f in FEEDS.items():
@@ -392,20 +453,126 @@ def bake_media():
         for src, url in f['photos']:
             for it in _items(url):
                 th = _thumb(src, it['img'])
-                if not th or th in seen or not _is_sky(src, it) or not _looks_like_sky(th): continue
-                seen.add(th)
+                if not th or th in seen or it['title'] in seen or not _is_sky(src, it) or not _looks_like_sky(th): continue
+                if _same_picture(th, [p['thumb'] for p in photos]): continue
+                seen.add(th); seen.add(it['title'])      # ESA posts a release's image and its video under one title
                 photos.append({'thumb': th, 'title': it['title'], 'link': it['link'], 't': it['t'],
-                               'credit': it['credit'] or ('ESA/Webb, NASA & CSA' if src == 'esa' else 'NASA'),
-                               'lic': 'CC BY 4.0' if src == 'esa' else 'public domain'})
+                               'credit': it['credit'] or SRC[src]['credit'], 'lic': SRC[src]['lic']})
         for src, url in f['news']:
             for it in _items(url):
+                if src == 'noirlab' and not RUBIN_ONLY.search(it['title'] + ' ' + it['desc']): continue
                 news.append({'title': it['title'], 'link': it['link'], 't': it['t'], 'lead': it['lead'],
-                             'from': 'ESA/Webb' if src == 'esa' else 'NASA'})
-        news = sorted({n['link']: n for n in news}.values(), key=lambda n: -(n['t'] or 0))[:5]
+                             'from': SRC[src]['from'], 'src': src})
+        news = sorted({n['link']: n for n in news}.values(), key=lambda n: -(n['t'] or 0))
+        news = list({n['title']: n for n in reversed(news)}.values())[::-1][:5]   # one per title, the newest
+        for n in news:                    # ESA's feed carries only a picture: the lead is the article's first paragraph
+            n['lead'] = re.sub(r'^Video:\s*[\d:]+\s*', '', n['lead'])      # an ESA video item opens with its running time
+            if n.pop('src', '') == 'esaint' and len(n['lead']) < 60:
+                try: n['lead'] = esa_lead(n['link'])
+                except Exception as e: print('  esa lead failed', n['link'][-60:], e)
         photos = sorted(photos, key=lambda n: -(n['t'] or 0))[:6]
         out[key] = {'photos': photos, 'news': news}
         print('  media', key, len(photos), 'photos', len(news), 'news')
     return out
+
+
+# ── CHANDRA: the CXC short-term schedule (the week's plan, public, fixed-width) ────────────
+CXO_SCHED = 'https://cxc.harvard.edu/target_lists/stscheds/'
+
+
+def cxo_abstract(obsid):
+    """Proposal title + the aim sentence of its abstract, from the Chandra Data Archive."""
+    import html as _h
+    x = get('https://cda.harvard.edu/srservices/propAbstract.do?obsid=%s' % obsid, timeout=40, tries=2).decode('latin-1')
+    t = re.sub(r'\s+', ' ', _h.unescape(re.sub(r'<[^>]+>', ' ', x))).strip()
+    title = re.search(r'Proposal Title:\s*(.+?)\s+Proposal Number:', t)
+    pi = re.search(r'Principal Investigator:\s*(.+?)\s+Abstract:', t)
+    ab = (re.search(r'Abstract:\s*(.+)$', t) or [None, ''])[1].strip()
+    sents = re.split(r'(?<=[.!?])\s+(?=[A-Z(])', ab)
+    aim = next((x for x in sents if AIM_RX.search(x)), sents[0] if sents else '')
+    return {'title': title.group(1).strip() if title else '', 'pi': pi.group(1).strip() if pi else '', 'aim': aim.strip()[:420],
+            'page': 'https://cda.harvard.edu/chaser/startViewer.do?menuItem=details&obsid=%s' % obsid}
+
+
+def bake_chandra(prev):
+    import html as _h
+    x = get(CXO_SCHED).decode('latin-1')
+    week = re.search(r'<H4[^>]*>\s*([A-Z]{3}\d{4}[A-Z]?)\s*</H4>', x, re.I)
+    pre = re.search(r'<pre id="schedule">(.*?)(?:</pre>|<!--\s*END|<H4|$)', x, re.S | re.I)   # the page never closes its <pre>
+    if not pre: raise RuntimeError('no schedule block')
+    L = _h.unescape(re.sub(r'<[^>]+>', '', pre.group(1))).split('\n')
+    hi = next(i for i, l in enumerate(L) if l.startswith('Seq #'))
+    spans = [(m.start(), m.end()) for m in re.finditer(r'-+', L[hi + 1])]
+    rows = []
+    for ln in L[hi + 2:]:
+        if not ln.strip(): continue
+        c = [ln[a:(spans[k + 1][0] if k + 1 < len(spans) else len(ln))].strip() for k, (a, b) in enumerate(spans)]
+        m = re.match(r'(\d{4}):(\d{3}):(\d\d):(\d\d):(\d\d)', c[5])
+        if not m: continue
+        t = dt.datetime(int(m[1]), 1, 1, int(m[3]), int(m[4]), int(m[5]), tzinfo=dt.timezone.utc) + dt.timedelta(days=int(m[2]) - 1)
+        try: ks = float(c[6])
+        except ValueError: ks = 0
+        rows.append({'t': ms(t), 'ks': ks, 'target': c[4], 'obsid': c[2], 'si': c[7] if c[7] != '--' else '',
+                     'grat': c[8] if c[8] not in ('--', 'NONE') else '', 'too': c[1] in ('TOO', 'DDT'), 'cal': c[4].startswith('CAL-')})
+    if len(rows) < 5: raise RuntimeError('schedule parsed to %d rows' % len(rows))
+    rows.sort(key=lambda r: r['t'])
+    # abstracts for the science rows around now (cached by ObsID across bakes)
+    cache = dict((prev.get('chandra') or {}).get('abs') or {})
+    now = ms(NOW)
+    near = [r for r in rows if not r['cal'] and r['t'] + r['ks'] * 1000 > now - 86400000][:8]
+    for r in near:
+        if r['obsid'] in cache: continue
+        try: cache[r['obsid']] = cxo_abstract(r['obsid'])
+        except Exception as e: print('  cxo abstract failed', r['obsid'], e)
+    keep = {r['obsid'] for r in rows}
+    return {'src': CXO_SCHED, 'week': week.group(1) if week else '', 'rows': rows,
+            'abs': {k: v for k, v in cache.items() if k in keep}}
+
+
+# ── VOYAGER 1 + 2: distance from Earth and Sun, daily, off JPL Horizons ─────────────────
+def bake_voyager():
+    start = (NOW - dt.timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+    stop = start + dt.timedelta(days=62)
+    out = {'src': 'JPL Horizons, targets -31 and -32'}
+    for key, cmd in (('v1', '-31'), ('v2', '-32')):
+        e = horizons(cmd, '500@399', start.strftime('%Y-%m-%d'), stop.strftime('%Y-%m-%d'), '1d')
+        h = horizons(cmd, '500@10', start.strftime('%Y-%m-%d'), stop.strftime('%Y-%m-%d'), '1d')
+        out[key] = {'t0': ms(e[0][0]), 'step': 86400000, 'n': len(e),
+                    'earth_km': [round(math.sqrt(r[1]**2 + r[2]**2 + r[3]**2)) for r in e],
+                    'sun_km': [round(math.sqrt(r[1]**2 + r[2]**2 + r[3]**2)) for r in h],
+                    'kms': round(math.sqrt(h[0][4]**2 + h[0][5]**2 + h[0][6]**2), 2)}
+    return out
+
+
+# ── EUCLID: range from Earth (it sits in a halo round L2, like Webb) ────────────────────
+def bake_euclid():
+    start = (NOW - dt.timedelta(days=2)).replace(minute=0, second=0, microsecond=0)
+    rows = horizons('-680', '500@399', start.strftime('%Y-%m-%d %H:%M'), (start + dt.timedelta(days=40)).strftime('%Y-%m-%d %H:%M'), '6h')
+    return {'src': 'JPL Horizons, target -680', 'survey_start': ms(dt.datetime(2024, 2, 14, tzinfo=dt.timezone.utc)),
+            'range': {'t0': ms(rows[0][0]), 'step': 6 * 3600000, 'n': len(rows),
+                      'km': [round(math.sqrt(r[1]**2 + r[2]**2 + r[3]**2)) for r in rows]}}
+
+
+# ── RUBIN: the survey clock, and the Fink broker's nightly alert tally when it is fresh ─
+def bake_rubin():
+    # "Its 10-year Legacy Survey of Space and Time (LSST) began earlier this year on 29 June 2026"
+    # -- NOIRLab, Image of the Week iotw2638a
+    out = {'lsst_start': ms(dt.datetime(2026, 6, 29, tzinfo=dt.timezone.utc)), 'site': {'lat': -30.2446, 'lon': -70.7494}}
+    try:
+        j = json.loads(_fink(NOW.year))
+        last = max(j, key=lambda r: r['f:night'])
+        night = dt.datetime.strptime(last['f:night'], '%Y%m%d').replace(tzinfo=dt.timezone.utc)
+        out['fink'] = {'night': ms(night), 'alerts': int(last['f:alerts']), 'objects': int(last['f:objects']),
+                       'visits': int(last['f:visits']), 'new': int(last.get('f:is_first') or 0)}
+    except Exception as e:
+        print('  fink failed', e)
+    return out
+
+
+def _fink(year):
+    req = urllib.request.Request('https://api.lsst.fink-portal.org/api/v1/statistics', data=json.dumps({'date': str(year)}).encode(),
+                                 headers=dict(UA, **{'Content-Type': 'application/json'}))
+    return urllib.request.urlopen(req, timeout=120).read()
 
 
 def main():
@@ -416,6 +583,8 @@ def main():
     # each piece is independent: one source down keeps the last good copy of that piece
     for key, fn in (('webb', bake_webb_schedule), ('parker', bake_parker), ('roman_card', bake_roman_card), ('media', bake_media),
                     ('hubble_obs', lambda: bake_mast('HST')),
+                    ('chandra', lambda: bake_chandra(prev)), ('voyager', bake_voyager),
+                    ('euclid', bake_euclid), ('rubin', bake_rubin),
                     ('webb_obs', lambda: bake_mast('JWST'))):
         try:
             out[key] = fn(); print('ok', key)
