@@ -191,6 +191,72 @@ def bake_mast(coll):
             'items': out}
 
 
+# ── WHY: each programme's own abstract (user 2026-09-24: "could you add a reason/purpose") ──
+# STScI publishes every Hubble and Webb programme as a PDF with an ABSTRACT section written by
+# the proposers. The card quotes the sentence that states the aim, VERBATIM -- their words, not
+# ours -- plus the category (GO = science, CAL = calibration, ...). Cached by programme id in
+# observatories.json, so each PDF is fetched once. Results are not a thing we can show: these
+# observations are hours old; findings come out in papers months or years later.
+AIM_RX = re.compile(r'\b(we (?:propose|seek|will|aim|request|plan|use|intend)|this (?:program|proposal|project) (?:will|aims|is designed|seeks)|here we|our goal|the goal of|in order to|to (?:measure|determine|test|search|study|characteri[sz]e|map|constrain|monitor|detect|obtain|image|calibrate|track))', re.I)
+
+
+def program_pdf(obs, pid):
+    kind = 'jwst' if obs == 'JWST' else 'hst'
+    return 'https://www.stsci.edu/%s-program-info/download/%s/pdf/%s/' % (kind, kind, pid)
+
+
+def program_page(obs, pid):
+    return ('https://www.stsci.edu/jwst/science-execution/program-information?id=%s' % pid if obs == 'JWST'
+            else 'https://www.stsci.edu/hst-program-info/program/?program=%s' % pid)
+
+
+def fetch_abstract(obs, pid):
+    import io as _io
+    from pypdf import PdfReader
+    raw = get(program_pdf(obs, pid), timeout=60, tries=2)
+    rd = PdfReader(_io.BytesIO(raw))
+    pages = [(pg.extract_text() or '') for pg in rd.pages[:12]]
+    t = '\n'.join(pages)
+    cat = re.search(r'Proposal Category:\s*([A-Z/]+)', t)
+    i = t.find('ABSTRACT')
+    if i < 0: return {'cat': cat.group(1) if cat else '', 'aim': ''}
+    # Some PDFs interleave the visit table with the abstract (HST 17734): keep prose lines only.
+    TABLE = re.compile(r'\d{2}-[A-Z][a-z]{2}-\d{4}|^\s*\d{1,3} \(\d+\)|^\s*(?:(?:COS|STIS|WFC3|ACS|NICMOS|FGS|NIRCAM|NIRSPEC|MIRI|NIRISS)/\S+\s*)+$|^Visit|^with Visit|Proposal \d+ \(STScI|^\s*\d+\s*$|^Name Institution|\(PI\)|\(CoI\)', re.I)
+    keep = []
+    for ln in t[i + 8:].split('\n'):
+        if re.match(r'\s*(?:OBSERVING DESCRIPTION|OBSERVATION SUMMARY|TARGETS|SCIENTIFIC JUSTIFICATION|Observing Description)\b', ln): break
+        if TABLE.search(ln) or not ln.strip(): continue
+        keep.append(ln.strip())
+    body = re.sub(r'\s+', ' ', ' '.join(keep)).strip()
+    sents = re.split(r'(?<=[.!?])\s+(?=[A-Z(])', body)
+    aim = next((x for x in sents if AIM_RX.search(x)), sents[0] if sents else '')
+    return {'cat': cat.group(1) if cat else '', 'aim': aim.strip()[:420]}
+
+
+def attach_aims(out, prev):
+    cache = dict(prev.get('aims') or {})
+    want = []
+    for key, obs in (('hubble_obs', 'HST'), ('webb_obs', 'JWST')):
+        for it in (out.get(key) or {}).get('items', []):
+            if it.get('prop'): want.append((obs, str(it['prop'])))
+    for r in (out.get('webb') or {}).get('rows', []):
+        m = re.match(r'(\d+):', r.get('visit', ''))
+        if m and r['t'] + r['dur'] * 1000 > ms(NOW) - 86400000: want.append(('JWST', m.group(1)))
+    fetched = 0
+    for obs, pid in dict.fromkeys(want):
+        k = obs + ':' + pid
+        if k in cache or fetched >= 40: continue
+        try:
+            cache[k] = fetch_abstract(obs, pid); fetched += 1
+        except Exception as e:
+            print('  abstract failed', k, e)
+        cache.setdefault(k, {'cat': '', 'aim': ''})
+        cache[k]['page'] = program_page(obs, pid)
+    for k in cache: cache[k].setdefault('page', program_page(*k.split(':')))
+    out['aims'] = cache
+    print('aims cached', len(cache), 'fetched', fetched)
+
+
 def main():
     prev = {}
     try: prev = json.loads((ROOT / 'observatories.json').read_text())
@@ -205,6 +271,10 @@ def main():
         except Exception as e:
             print('FAILED', key, e)
             if key in prev: out[key] = prev[key]
+    try: attach_aims(out, prev)
+    except Exception as e:
+        print('FAILED aims', e)
+        if 'aims' in prev: out['aims'] = prev['aims']
     for label, fn in (('roman', bake_roman), ('l2', bake_l2)):
         try: print('ok', label, fn())
         except Exception as e: print('FAILED', label, e)
