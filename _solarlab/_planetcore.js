@@ -2088,7 +2088,7 @@
     pp.style.cssText = 'position:absolute;top:'+(Math.max(20,(window._lastClickY||100)-40))+'px;left:50%;transform:translateX(-50%);z-index:9999;opacity:1;width:min(480px,calc(100vw - 32px));max-height:min(85vh,720px);overflow-y:auto;scrollbar-width:none;background:rgba(255,255,255,.85);backdrop-filter:blur(24px) saturate(140%);-webkit-backdrop-filter:blur(24px) saturate(140%);border:1px solid rgba(43,34,244,.12);border-radius:14px;padding:0;box-shadow:0 24px 64px rgba(43,34,244,.18),0 0 0 1px rgba(255,255,255,.35) inset;font-family:system-ui,sans-serif;color:rgba(43,34,244,.9);';
 
     if (!h || h.length < 10) h = '<div style="padding:20px;">No data available for ' + planetKey + '</div>';
-    pp.innerHTML = '<div style="padding:10px 14px 14px;">' + h + '<div class="hz-card-footer">Sources: NASA/JPL \u00b7 NASA NSSDC Planetary Fact Sheet \u00b7 InSight/SEIS \u00b7 Juno \u00b7 Cassini \u00b7 Voyager</div></div>';
+    pp.innerHTML = '<div style="padding:10px 14px 14px;">' + h + '<div class="hz-card-footer">Sources: ' + (function(){ var m = /PIA\d{5}/.exec(h); return m ? '<a href="https://photojournal.jpl.nasa.gov/catalog/'+m[0]+'" target="_blank" rel="noopener" style="color:inherit;">NASA/JPL '+m[0]+'</a>' : 'NASA/JPL'; })() + ' \u00b7 <a href="https://nssdc.gsfc.nasa.gov/planetary/factsheet/" target="_blank" rel="noopener" style="color:inherit;">NASA NSSDC Planetary Fact Sheet</a> \u00b7 InSight/SEIS \u00b7 Juno \u00b7 Cassini \u00b7 Voyager</div></div>';
     _tabifyPlanetInsight(pp);
     // Cache the tabified HTML for fast reopen of this planet
     window._planetPopupCache[planetKey] = { html: pp.innerHTML, ts: Date.now() };
