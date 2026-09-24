@@ -1,0 +1,60 @@
+name: Rebake the ice
+
+# Keeps _maplab/ice.json (EARTH SYSTEMS -> THE ICE) fresh: NSIDC daily sea-ice extent, DMI Polar Portal
+# Greenland surface mass balance, USGS benchmark glaciers. None of them send CORS headers (and NSIDC's file
+# is 2 MB for one number), so this is a bake, not a client fetch. Each piece keeps its last good copy.
+
+on:
+  schedule:
+    - cron: '23 14 * * *'   # daily: NSIDC posts the previous day's extent by late morning Mountain time
+  workflow_dispatch: {}
+
+concurrency:
+  group: ice
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  rebake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bake
+        run: python3 _maplab/ice_bake.py
+
+      - name: Sanity-check
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import json
+          d = json.load(open('_maplab/ice.json'))
+          assert d.get('arctic') and d.get('antarctic') and d.get('greenland') and d.get('glaciers'), 'bake lost a piece'
+          EOF
+
+      - name: Commit if changed
+        run: |
+          set -euo pipefail
+          files="_maplab/ice.json"
+          if git diff --quiet -- $files && [ -z "$(git status --porcelain -- $files)" ]; then
+            echo "no change"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          tmp=$(mktemp -d); cp _maplab/ice.json "$tmp"/
+          git add $files
+          git commit -m "Ice: refresh sea ice, Greenland, glaciers"
+          # the Kalshi lanes push to main all day: replay onto theirs rather than fail
+          for i in 1 2 3; do
+            git push && exit 0
+            echo "push rejected, replaying onto origin/main (attempt $i)"
+            git fetch origin main
+            git reset --hard origin/main
+            cp "$tmp"/ice.json _maplab/ice.json
+            git add $files
+            git diff --cached --quiet && { echo "origin already has this"; exit 0; }
+            git commit -m "Ice: refresh sea ice, Greenland, glaciers"
+          done
+          exit 1

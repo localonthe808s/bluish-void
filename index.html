@@ -96456,6 +96456,183 @@ function closeAlertModal(){
     window.addEventListener('resize', function(){ if (CUR === 'ghg' && AIR.ghgDraw) AIR.ghgDraw(); });
     var airNeedsGlobe = function(){ var p = document.getElementById('es-panel'); if (p) p.innerHTML = airM('THIS VIEW IS DRAWN ON THE GLOBE, AND THIS BROWSER WOULD NOT GIVE THE PAGE ONE.', '#6b7389'); };
 
+    /* ================= THE ICE ================= */
+    /* THE ICE (user 2026-09-24: "I want to eventually track glacial loss and polar ice caps in there" -> "do all the ice stuff").
+       Three tabs on the globe, one daily bake (_maplab/ice_bake.py -> _maplab/ice.json: NSIDC, DMI, NASA, USGS; none of them
+       CORS-open, NSIDC's file is 2 MB for one number):
+         SEA ICE    today's extent at both poles against 1981-2010, its rank and the record, this year's curve; the globe wears
+                    NASA's gap-free MUR sea-ice concentration, recoloured white-blue from its own 101-colour scale and cut at
+                    15% -- the same line NSIDC counts extent from.
+         GREENLAND  every melt season's SURFACE balance since 2018 (DMI Polar Portal) -- and, said plainly, that a surface
+                    gain is not a gain: icebergs and melt from below take roughly 500 billion tons more each year, which is
+                    why the satellites that weigh the ice (GRACE) see a net loss.
+         GLACIERS   the six USGS benchmark glaciers, marked on the globe, with what each has lost since its record began. */
+    var ICE = { d: null, p: null, err: false, pole: 'N' };
+    var iceLoad = function(){
+      if (ICE.d) return Promise.resolve(ICE.d);
+      if (!ICE.p) ICE.p = fetch('/_maplab/ice.json?v=' + Math.floor(Date.now() / 3600000)).then(function(r){ if (!r.ok) throw 0; return r.json(); })
+        .then(function(j){ ICE.d = j; ICE.err = false; return j; }, function(e){ ICE.p = null; ICE.err = true; throw e; });
+      return ICE.p; };
+    var SICPAL = '1111110e000e1c001c3200324000404e004e630063710071870087950095a300a3b800b8c600c6dc00dcea00eaf800f8f100ffe300ffcd00ffbf00ffb100ff9c00ff8e00ff7f00ff6a00ff5c00ff4700ff3900ff2a00ff1500ff0700ff0010ff0021ff0031ff004aff005aff0073ff0084ff0094ff00adff00bdff00ceff00e6ff00f7ff00faf100f6e300f1d400eabf00e5b100de9c00d98e00d47f00cd6a00c95c00c24700bd3900b82a00b11500ac070faf001eb4002db90044c10053c60062cb0078d20087d7009edf00ade400bce900d2f000e1f500f8fd00fff800ffea00ffd400ffc600ffb100ffa300ff9500ff7f00ff7100ff6300ff4e00ff4000ff2a00ff1c00ff0e00ff0909ff1a1aff3333ff4444ff5555ff6f6fff8080ff9999ffaaaaffbbbbffd5d5ffe6e6ffffff', SICLUT = null;
+    /* the globe's skin: NASA's concentration picture read back to percent (exact: one colour per percent) and redrawn as ice */
+    var iceSkin = function(){
+      var want = 'ice:sic'; GLOBE.want = want;
+      return GLOBE.img(gibsWorld('GHRSST_L4_MUR25_Sea_Ice_Concentration', null)).then(function(im){
+        if (GLOBE.want !== want) return true;
+        if (!SICLUT){ SICLUT = {}; for (var i = 0; i < 101; i++) SICLUT[parseInt(SICPAL.substr(i * 6, 6), 16)] = i; }
+        var c = document.createElement('canvas'); c.width = im.width; c.height = im.height; var g = c.getContext('2d'); g.drawImage(im, 0, 0);
+        var D = g.getImageData(0, 0, c.width, c.height), a = D.data;
+        for (var q = 0; q < a.length; q += 4){
+          if (a[q + 3] < 128){ a[q + 3] = 0; continue; }
+          var v = SICLUT[(a[q] << 16) | (a[q + 1] << 8) | a[q + 2]];
+          if (v == null || v < 15){ a[q + 3] = 0; continue; }
+          var t = (v - 15) / 85; a[q] = Math.round(160 + 95 * t); a[q + 1] = Math.round(200 + 55 * t); a[q + 2] = 255; a[q + 3] = Math.round(140 + 115 * t);
+        }
+        g.putImageData(D, 0, 0); GLOBE.put(1, c); GLOBE.on = [1, 0]; GLOBE.dirty = true; return true;
+      }, function(){ return false; }); };
+    var iceM = function(x){ return x.toFixed(2); };
+    var iceSqmi = function(km){ return (km * 0.386102).toFixed(2); };
+    /* an area a reader can picture (km^2, millions) */
+    var iceLike = function(km){ var A = [['TEXAS', 0.696], ['CALIFORNIA', 0.424], ['ALASKA', 1.718], ['MEXICO', 1.964], ['GREENLAND', 2.166], ['INDIA', 3.287], ['THE LOWER 48 STATES', 8.08]], b = null;
+      A.forEach(function(x){ var r = km / x[1]; if (r > 0.8 && r < 1.25 && (!b || Math.abs(Math.log(r)) < Math.abs(Math.log(b[2])))) b = [x[0], x[1], r]; });
+      if (b) return (b[2] < 0.95 ? 'NEARLY THE SIZE OF ' : b[2] > 1.05 ? 'A LITTLE MORE THAN ' : 'ABOUT THE SIZE OF ') + b[0];
+      var tx = km / 0.696; return tx >= 1.5 ? 'ABOUT ' + Math.round(tx) + ' TEXASES' : ''; };
+    var iceOrd = function(n){ var s2 = ['TH', 'ST', 'ND', 'RD'], v = n % 100; return n + (s2[(v - 20) % 10] || s2[v] || s2[0]); };
+    var iceDate = function(iso){ var MN = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']; var d = String(iso).replace(/-/g, ''); return MN[+d.slice(4, 6) - 1] + ' ' + (+d.slice(6, 8)); };
+    /* one hemisphere's year: the 1981-2010 10th-90th band and median, the record year, last year, and this year to date */
+    var iceChart = function(cv, A, yr){
+      if (!cv) return; var DPR2 = Math.min(2, window.devicePixelRatio || 1), W = cv.clientWidth || 300, H = cv.clientHeight || 150;
+      cv.width = W * DPR2; cv.height = H * DPR2; var g = cv.getContext('2d'); g.setTransform(DPR2, 0, 0, DPR2, 0, 0); g.clearRect(0, 0, W, H);
+      var ry = String(A.recordMinYear.year), ly = String(+yr - 1), ser = A.series, lo = 1e9, hi = -1e9;
+      A.clim.forEach(function(c){ lo = Math.min(lo, c[1]); hi = Math.max(hi, c[3]); });
+      [ser[yr], ser[ly], ser[ry]].forEach(function(s2){ (s2 || []).forEach(function(p2){ lo = Math.min(lo, p2[1]); hi = Math.max(hi, p2[1]); }); });
+      lo = Math.floor(lo) - 0.5; hi = Math.ceil(hi) + 0.5;
+      var L = 26, Rr = 6, T = 8, B = 16, X = function(d){ return L + (d - 1) / 365 * (W - L - Rr); }, Y = function(v){ return T + (1 - (v - lo) / (hi - lo)) * (H - T - B); };
+      g.fillStyle = 'rgba(27,35,64,.08)'; g.beginPath(); A.clim.forEach(function(c, i){ i ? g.lineTo(X(c[0]), Y(c[3])) : g.moveTo(X(c[0]), Y(c[3])); });
+      for (var i = A.clim.length - 1; i >= 0; i--) g.lineTo(X(A.clim[i][0]), Y(A.clim[i][1])); g.closePath(); g.fill();
+      var line = function(s2, col, w, dash){ if (!s2 || !s2.length) return; g.strokeStyle = col; g.lineWidth = w; g.setLineDash(dash || []); g.beginPath(); s2.forEach(function(p2, j){ j ? g.lineTo(X(p2[0]), Y(p2[1])) : g.moveTo(X(p2[0]), Y(p2[1])); }); g.stroke(); g.setLineDash([]); };
+      line(A.clim.map(function(c){ return [c[0], c[2]]; }), 'rgba(27,35,64,.55)', 1.2, [4, 3]);
+      if (ry !== yr && ry !== ly) line(ser[ry], 'rgba(185,28,28,.6)', 1.2);
+      line(ser[ly], 'rgba(27,35,64,.3)', 1.2); line(ser[yr], '#0369a1', 2.4);
+      var lp = (ser[yr] || [])[(ser[yr] || []).length - 1]; if (lp){ g.fillStyle = '#0369a1'; g.beginPath(); g.arc(X(lp[0]), Y(lp[1]), 3.4, 0, 6.3); g.fill(); }
+      g.font = '700 8px system-ui,sans-serif'; g.fillStyle = 'rgba(27,35,64,.55)';
+      ['JAN', 'APR', 'JUL', 'OCT'].forEach(function(m, k){ g.fillText(m, X([1, 91, 182, 274][k]) - 2, H - 4); });
+      for (var v = Math.ceil(lo); v <= hi; v += (hi - lo > 12 ? 4 : 2)) g.fillText(String(v), 2, Y(v) + 3);
+    };
+    var iceKey = function(yr, ry){ var sw = function(c, dash, w){ return '<i style="display:inline-block;width:14px;height:0;border-top:' + w + 'px ' + (dash ? 'dashed' : 'solid') + ' ' + c + ';vertical-align:middle;margin:0 4px 0 10px;"></i>'; };
+      return '<div style="font:700 8px system-ui,sans-serif;letter-spacing:.06em;color:#6b7389;margin-top:4px;">' + sw('#0369a1', 0, 2.4).replace('margin:0 4px 0 10px', 'margin:0 4px 0 0') + yr + sw('rgba(27,35,64,.35)', 0, 1.2) + (yr - 1) + sw('rgba(185,28,28,.6)', 0, 1.2) + ry + ' (THE RECORD LOW YEAR)' + sw('rgba(27,35,64,.55)', 1, 1.2) + '1981–2010 MIDDLE, SHADED 10–90%</div>'; };
+    var iceCard = function(id, A, name, col, north){
+      var d = A.extent - A.median, yr = String(A.date.slice(0, 4)), like = iceLike(Math.abs(d)), mo = +A.date.slice(5, 7);
+      var season = north ? (mo >= 8 && mo <= 10 ? 'THIS YEAR’S LOW POINT SO FAR · ' + iceM(A.thisMin.extent) + ' ON ' + iceDate(A.thisMin.date) + ' · THE RECORD: ' + iceM(A.recordMinYear.extent) + ' IN ' + A.recordMinYear.year : '')
+                         : (mo >= 8 && mo <= 10 ? 'THIS YEAR’S PEAK SO FAR · ' + iceM(A.thisMax.extent) + ' ON ' + iceDate(A.thisMax.date) : '');
+      var mood = A.rank <= 3 ? 'AMONG THE THREE LOWEST FOR THE DATE SINCE SATELLITES BEGAN' : A.rank <= 10 ? 'ONE OF THE ' + (A.rank <= 5 ? 'FIVE' : 'TEN') + ' LOWEST FOR THE DATE' : '';
+      return '<div style="min-width:0;"><div style="font:900 10px system-ui,sans-serif;letter-spacing:.14em;color:' + col + ';">' + name + '</div>'
+        + '<div style="margin-top:4px;"><span style="font:900 30px/1 system-ui,sans-serif;color:' + col + ';">' + iceM(A.extent) + '</span> <span style="font:800 10px system-ui,sans-serif;letter-spacing:.1em;color:' + col + ';">MILLION KM²</span>'
+        + ' <span style="font:700 9px system-ui,sans-serif;color:#6b7389;letter-spacing:.06em;">(' + iceSqmi(A.extent) + ' MILLION SQ MI) · ' + iceDate(A.date) + '</span></div>'
+        + airM('<b style="font-weight:900;">' + iceM(Math.abs(d)) + ' MILLION KM² ' + (d < 0 ? 'BELOW' : 'ABOVE') + '</b> THE 1981–2010 MIDDLE FOR THE DATE' + (like ? ' · ' + like : ''), col)
+        + airM('THE ' + iceOrd(A.rank) + ' LOWEST FOR ' + iceDate(A.date) + ' IN ' + A.years + ' YEARS OF SATELLITE RECORDS' + (A.record ? ' · LOWEST: ' + iceM(A.record.extent) + ' IN ' + A.record.year : '') + (mood ? ' · ' + mood : ''))
+        + (season ? airM(season, '#6b7389') : '')
+        + '<canvas id="' + id + '" style="display:block;width:100%;height:150px;margin-top:8px;"></canvas>' + iceKey(+yr, A.recordMinYear.year) + '</div>'; };
+    var iceSeaPanel = function(){ var p = document.getElementById('es-panel'); if (!p || CUR !== 'seaice') return; var D = ICE.d;
+      var head = airHead('SEA ICE', '#0369a1', 'The frozen skin of the polar oceans. It grows every winter and shrinks every summer, and the number that matters is how much is left against the years before. It is counted as <b style="font-weight:700;">extent</b>: every patch of ocean at least 15% covered. The Arctic bottoms out in September; the Antarctic, in its own winter, peaks about now.');
+      if (ICE.err){ p.innerHTML = head + airM('THE ICE RECORD COULD NOT BE HAD JUST NOW.', '#b91c1c'); return; }
+      if (!D || !D.arctic){ p.innerHTML = head + airM('READING THE RECORD…', '#6b7389'); return; }
+      var yr = String(D.arctic.date.slice(0, 4));
+      p.innerHTML = head + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:18px 22px;margin-top:14px;">'
+        + iceCard('es-ice-n', D.arctic, 'THE ARCTIC', '#0369a1', true) + iceCard('es-ice-s', D.antarctic, 'THE ANTARCTIC', '#0e7490', false) + '</div>'
+        + airM('NSIDC SEA ICE INDEX, VERSION 4 (DAILY, ABOUT TWO DAYS BEHIND) · THE GLOBE: NASA’S GAP-FREE MUR SEA-ICE CONCENTRATION, WHITEST WHERE THE ICE IS PACKED TIGHTEST, CUT AT 15%', '#6b7389');
+      iceChart(document.getElementById('es-ice-n'), D.arctic, yr); iceChart(document.getElementById('es-ice-s'), D.antarctic, yr); };
+    var iceSeaAnnot = function(c){ var q = c.proj(ICE.pole === 'N' ? 90 : -90, 0); if (q[2] > 0.1){ c.ov.fillStyle = '#fff'; c.ov.beginPath(); c.ov.arc(q[0], q[1], 2.5, 0, 6.3); c.ov.fill(); c.word(ICE.pole === 'N' ? 'NORTH POLE' : 'SOUTH POLE', q[0] + 6, q[1] + 3, '#fff', '800 8px system-ui,sans-serif'); } };
+    var iceSeaGlobe = function(){ GLOBE.V.cells = null; GLOBE.annot = iceSeaAnnot; ICE.pole = 'N'; GLOBE.face(78, homeLon());
+      line('<span style="color:#0369a1;font-weight:900;letter-spacing:.06em;">SEA ICE TODAY</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">· every patch of ocean at least 15% frozen, brighter where it is packed tighter. Drag to turn; the button swaps poles.</span>');
+      var flip = function(){ ICE.pole = ICE.pole === 'N' ? 'S' : 'N'; GLOBE.V.tLat = ICE.pole === 'N' ? 78 : -76; GLOBE.dirty = true; globeBtn(ICE.pole === 'N' ? 'LOOK AT ANTARCTICA' : 'LOOK AT THE ARCTIC', flip); };
+      iceLoad().then(iceSeaPanel, iceSeaPanel);
+      return iceSkin().then(function(ok){ if (ok && CUR === 'seaice') globeBtn('LOOK AT ANTARCTICA', flip); return ok; }); };
+
+    /* ---------------- GREENLAND ---------------- */
+    var iceBars = function(cv, S2){
+      if (!cv || !S2 || !S2.length) return; var DPR2 = Math.min(2, window.devicePixelRatio || 1), W = cv.clientWidth || 300, H = cv.clientHeight || 160;
+      cv.width = W * DPR2; cv.height = H * DPR2; var g = cv.getContext('2d'); g.setTransform(DPR2, 0, 0, DPR2, 0, 0); g.clearRect(0, 0, W, H);
+      var hi = 600, n = S2.length, L = 28, T = 10, B = 18, bw = (W - L - 6) / n, Y = function(v){ return T + (1 - v / hi) * (H - T - B); };
+      g.strokeStyle = 'rgba(185,28,28,.55)'; g.setLineDash([4, 3]); g.beginPath(); g.moveTo(L, Y(500)); g.lineTo(W - 6, Y(500)); g.stroke(); g.setLineDash([]);
+      g.font = '700 8px system-ui,sans-serif'; g.fillStyle = 'rgba(185,28,28,.8)'; var cap = '≈ WHAT ICEBERGS AND UNDERWATER MELT TAKE'; g.fillText(cap, L + bw * 1.15, Y(500) - 4);     /* over the second bar on: the first bar's number sits at the line's left end */
+      S2.forEach(function(s2, i){ var v = Math.max(0, s2.total || 0), x = L + i * bw + bw * 0.14, w = bw * 0.72;
+        g.fillStyle = s2.complete ? '#0e7490' : 'rgba(14,116,144,.35)'; g.fillRect(x, Y(v), w, Y(0) - Y(v));
+        g.fillStyle = '#1b2340'; g.font = '800 8px system-ui,sans-serif'; var t = String(Math.round(v)); g.fillText(t, x + w / 2 - g.measureText(t).width / 2, Y(v) - 3);
+        g.fillStyle = 'rgba(27,35,64,.55)'; g.font = '700 7.5px system-ui,sans-serif'; var lb = "'" + s2.season.slice(-2); g.fillText(lb, x + w / 2 - g.measureText(lb).width / 2, H - 5); });
+      g.fillStyle = 'rgba(27,35,64,.55)'; [0, 200, 400, 600].forEach(function(v){ g.fillText(String(v), 2, Y(v) + 3); }); };
+    var iceGrPanel = function(){ var p = document.getElementById('es-panel'); if (!p || CUR !== 'greenland') return; var D = ICE.d;
+      var head = airHead('GREENLAND', '#0e7490', 'An ice sheet up to two miles thick, holding enough water to raise the world’s seas about 24 feet. Every year snow builds its surface and summer melts it, and on top of that, glaciers push ice into the sea as icebergs while warm ocean water eats at it from below.');
+      if (ICE.err){ p.innerHTML = head + airM('THE ICE RECORD COULD NOT BE HAD JUST NOW.', '#b91c1c'); return; }
+      if (!D || !D.greenland){ p.innerHTML = head + airM('READING THE RECORD…', '#6b7389'); return; }
+      var G2 = D.greenland, S2 = G2.seasons.filter(function(x){ return x.total != null; }), done = S2.filter(function(x){ return x.complete; }), last = done[done.length - 1], cur = S2[S2.length - 1];
+      var best = done.reduce(function(a, b){ return b.total > a.total ? b : a; }, done[0]), worst = done.reduce(function(a, b){ return b.total < a.total ? b : a; }, done[0]);
+      var sh = D.sheets, big = function(v, u, col){ return '<span style="font:900 30px/1 system-ui,sans-serif;color:' + col + ';">' + v + '</span> <span style="font:800 10px system-ui,sans-serif;letter-spacing:.1em;color:' + col + ';">' + u + '</span>'; };
+      p.innerHTML = head
+        + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:16px 22px;margin-top:14px;">'
+        + '<div><div style="font:900 10px system-ui,sans-serif;letter-spacing:.14em;color:#b91c1c;">WHAT IT LOSES, ALL IN</div><div style="margin-top:4px;">' + big(String(-sh.greenland), 'BILLION TONS A YEAR', '#b91c1c') + '</div>'
+        + airM('WEIGHED FROM SPACE BY THE GRACE SATELLITES, ' + sh.period.replace('-', '–') + ' · ENOUGH WATER TO FILL LAKE MEAD ' + Math.round(-sh.greenland / 35.9) + ' TIMES OVER, EVERY YEAR · ANTARCTICA LOSES ' + (-sh.antarctica) + ' MORE', '#b91c1c') + '</div>'
+        + '<div><div style="font:900 10px system-ui,sans-serif;letter-spacing:.14em;color:#0e7490;">WHAT ITS SURFACE KEPT LAST SEASON</div><div style="margin-top:4px;">' + big('+' + Math.round(last.total), 'BILLION TONS', '#0e7490') + '</div>'
+        + airM('SNOW IN, MELT OUT, SEPT ' + last.season.slice(0, 4) + ' TO AUG ' + (+last.season.slice(0, 4) + 1) + (last === best ? ' · THE BEST SINCE THIS RECORD BEGAN IN 2017' : '') + (G2.meltPeak ? ' · MELT PEAKED ' + iceDate(G2.meltPeak.date) + ' ON ' + Math.round(G2.meltPeak.pct) + '% OF THE SURFACE' : ''), '#0e7490') + '</div></div>'
+        + '<div style="margin-top:12px;padding:9px 11px;border-radius:9px;background:rgba(255,255,255,.6);">' + airM('<b style="font-weight:900;">A SURFACE GAIN IS NOT A GAIN.</b> ROUGHLY 500 BILLION TONS A YEAR ALSO LEAVE AS ICEBERGS AND UNDERWATER MELT, SO A SEASON HAS TO KEEP ABOUT THAT MUCH ON ITS SURFACE JUST TO BREAK EVEN. '
+          + (function(){ var ok = done.filter(function(x){ return x.total >= 500; });      /* said from the numbers, not assumed */
+              return (ok.length ? (ok.length === done.length ? 'EVERY SEASON BELOW DID, ROUGHLY. ' : 'ONLY ' + ok.map(function(x){ return x.season; }).join(' AND ') + ' KEPT THAT MUCH, AND ONLY JUST: RARE GOOD YEARS. ') : 'NO SEASON BELOW HAS. ')
+                + worst.season + (worst.season === '2018-19' ? ', THE HOT, SUNNY SUMMER OF 2019,' : '') + ' KEPT ONLY ' + Math.round(worst.total) + '.'; })(), '#1b2340').replace('margin-top:6px', 'margin-top:0') + '</div>'
+        + '<div style="font:900 10px system-ui,sans-serif;letter-spacing:.14em;color:#0e7490;margin-top:14px;">EACH SEASON’S SURFACE BALANCE, BILLION TONS</div>'
+        + '<canvas id="es-ice-gr" style="display:block;width:100%;height:170px;margin-top:6px;"></canvas>'
+        + airM((cur && !cur.complete ? 'THE PALE BAR IS THIS SEASON SO FAR (' + Math.round(cur.total) + ' THROUGH ' + iceDate(cur.end) + '). ' : '') + 'DMI POLAR PORTAL (THE DANISH METEOROLOGICAL INSTITUTE’S MODEL, CHECKED AGAINST WEATHER OBSERVATIONS) · NET LOSS: NASA, GRACE AND GRACE-FO · THE 500 IS AN ESTIMATE OF ICE DISCHARGE, ROUNDED', '#6b7389');
+      iceBars(document.getElementById('es-ice-gr'), S2); };
+    var iceGrGlobe = function(){ GLOBE.V.cells = null; ICE.pole = 'N'; GLOBE.face(70, -42);
+      GLOBE.annot = function(c){ var q = c.proj(74, -41); if (q[2] > 0.15) c.word('GREENLAND ICE SHEET', q[0] - 50, q[1], '#fff', '900 9px system-ui,sans-serif'); };
+      line('<span style="color:#0e7490;font-weight:900;letter-spacing:.06em;">GREENLAND</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">· the ice sheet with today’s sea ice around it. Drag to turn.</span>');
+      iceLoad().then(iceGrPanel, iceGrPanel);
+      return iceSkin(); };
+
+    /* ---------------- GLACIERS ---------------- */
+    var iceGlChart = function(cv, L2){
+      if (!cv || !L2 || !L2.length) return; var DPR2 = Math.min(2, window.devicePixelRatio || 1), W = cv.clientWidth || 300, H = cv.clientHeight || 200;
+      cv.width = W * DPR2; cv.height = H * DPR2; var g = cv.getContext('2d'); g.setTransform(DPR2, 0, 0, DPR2, 0, 0); g.clearRect(0, 0, W, H);
+      var mx = 0, mn = 0; L2.forEach(function(q){ q.series.forEach(function(r){ mx = Math.max(mx, r[2]); mn = Math.min(mn, r[2]); }); });
+      var y0 = 1944, y1 = 2026, lo = Math.floor(mn / 20) * 20, hi = Math.ceil(mx / 20) * 20, Lm = 28, Rm = 92, T = 8, B = 16, X = function(y){ return Lm + (y - y0) / (y1 - y0) * (W - Lm - Rm); }, Y = function(v){ return T + (1 - (v - lo) / (hi - lo)) * (H - T - B); };
+      g.strokeStyle = 'rgba(27,35,64,.25)'; g.beginPath(); g.moveTo(Lm, Y(0)); g.lineTo(W - Rm, Y(0)); g.stroke();
+      var ends = [];
+      L2.forEach(function(q){ var col = q.cum < 0 ? '#b45309' : '#0369a1', s2 = [[q.from - 1, 0]].concat(q.series.map(function(r){ return [r[0], r[2]]; }));
+        g.strokeStyle = col; g.lineWidth = q.name === 'SOUTH CASCADE' ? 2.2 : 1.4; g.beginPath(); s2.forEach(function(p2, j){ j ? g.lineTo(X(p2[0]), Y(p2[1])) : g.moveTo(X(p2[0]), Y(p2[1])); }); g.stroke();
+        ends.push({ y: Y(q.cum), t: q.name + ' ' + (q.cum > 0 ? '+' : '') + Math.round(q.cum), col: col }); });
+      ends.sort(function(a, b){ return a.y - b.y; }); for (var i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 10) ends[i].y = ends[i - 1].y + 10;
+      g.font = '800 7.5px system-ui,sans-serif'; ends.forEach(function(e){ g.fillStyle = e.col; g.fillText(e.t, W - Rm + 4, e.y + 3); });
+      g.fillStyle = 'rgba(27,35,64,.55)'; g.font = '700 8px system-ui,sans-serif'; [1950, 1975, 2000, 2025].forEach(function(y){ g.fillText(String(y), X(y) - 9, H - 4); });
+      for (var v = lo; v <= hi; v += 20) g.fillText(String(v), 2, Y(v) + 3); };
+    var iceGlPanel = function(){ var p = document.getElementById('es-panel'); if (!p || CUR !== 'glaciers') return; var D = ICE.d;
+      var head = airHead('MOUNTAIN GLACIERS', '#b45309', 'The U.S. Geological Survey has measured these glaciers every year, some since the 1940s: the snow each gains in winter against what it melts in summer, counted as a depth of water spread over the whole glacier. Add the years up and you have what it has lost since.');
+      if (ICE.err){ p.innerHTML = head + airM('THE GLACIER RECORD COULD NOT BE HAD JUST NOW.', '#b91c1c'); return; }
+      if (!D || !D.glaciers){ p.innerHTML = head + airM('READING THE RECORD…', '#6b7389'); return; }
+      var L2 = D.glaciers.slice().sort(function(a, b){ return a.cum - b.cum; }), sc = L2[0], ice = sc.cum / -0.9;
+      p.innerHTML = head
+        + '<div style="margin-top:12px;"><span style="font:900 30px/1 system-ui,sans-serif;color:#b45309;">' + Math.round(-sc.cum) + ' M</span> <span style="font:800 10px system-ui,sans-serif;letter-spacing:.1em;color:#b45309;">OF WATER GONE FROM ' + sc.name + ', ' + sc.state + ', SINCE ' + sc.from + '</span></div>'
+        + airM('ABOUT ' + Math.round(ice) + ' M OF ICE OFF ITS WHOLE SURFACE · A ' + Math.round(ice / 3.1) + '-STOREY BUILDING, MELTED FLAT', '#b45309')
+        + '<canvas id="es-ice-gl" style="display:block;width:100%;height:200px;margin-top:10px;"></canvas>'
+        + airM('RUNNING TOTAL, METRES OF WATER, EACH GLACIER FROM ITS FIRST MEASURED YEAR', '#6b7389')
+        + '<div style="margin-top:10px;">' + L2.map(function(q){ var w = q.series.reduce(function(a, r){ return r[1] < a[1] ? r : a; }, q.series[0]);
+            return airM('<b style="font-weight:900;color:' + (q.cum < 0 ? '#b45309' : '#0369a1') + ';">' + q.name + '</b> · ' + q.state + ' · ' + (q.cum > 0 ? '+' : '') + q.cum.toFixed(1) + ' M SINCE ' + q.from + ' · ' + q.to + ': ' + (q.last > 0 ? '+' : '') + q.last.toFixed(2)
+              + (w[0] === q.to ? ', ITS WORST YEAR ON RECORD' : ' · WORST: ' + w[1].toFixed(2) + ' IN ' + w[0])
+              + (q.cum > 0 ? ' · THE EXCEPTION: FED BY THE VAST JUNEAU ICEFIELD, IT ADVANCED FOR MOST OF THE CENTURY AND ONLY LATELY TURNED' : '')); }).join('') + '</div>'
+        + airM('USGS BENCHMARK GLACIER PROJECT · GLACIER-WIDE ANNUAL MASS BALANCE, CALIBRATED · THROUGH THE ' + sc.to + ' MELT SEASON', '#6b7389');
+      iceGlChart(document.getElementById('es-ice-gl'), D.glaciers); };
+    var iceGlGlobe = function(){ GLOBE.V.cells = null; ICE.pole = 'N'; GLOBE.face(54, -132);
+      GLOBE.annot = function(c){ var D = ICE.d; if (!D || !D.glaciers) return;
+        D.glaciers.forEach(function(q){ var m = c.proj(q.lat, q.lon); if (m[2] < 0.1) return; var col = q.cum < 0 ? '#f59e0b' : '#38bdf8';
+          c.ov.fillStyle = '#fff'; c.ov.beginPath(); c.ov.arc(m[0], m[1], 4.2, 0, 6.3); c.ov.fill(); c.ov.fillStyle = col; c.ov.beginPath(); c.ov.arc(m[0], m[1], 3, 0, 6.3); c.ov.fill();
+          /* sides alternate so neighbours do not stack (measured on the overlay: TAKU sat on LEMON CREEK, SPERRY on SOUTH CASCADE) */
+          var t = q.name + ' ' + (q.cum > 0 ? '+' : '') + Math.round(q.cum) + ' M', F2 = '800 8px system-ui,sans-serif', SIDE = { LemonCreek: [-1, 9], SouthCascade: [-1, 4], Wolverine: [-1, 3], Taku: [1, -3], Sperry: [1, 3], Gulkana: [1, -2] }[q.key] || [1, 3];
+          c.ov.font = F2; var tw = c.ov.measureText(t).width;
+          c.word(t, SIDE[0] > 0 ? m[0] + 7 : m[0] - 9 - tw, m[1] + SIDE[1], '#1b2340', F2, true); }); };
+      line('<span style="color:#b45309;font-weight:900;letter-spacing:.06em;">THE BENCHMARK GLACIERS</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">· six glaciers the USGS has measured for decades, with what each has lost since its record began, in metres of water. Drag to turn.</span>');
+      iceLoad().then(function(){ iceGlPanel(); GLOBE.dirty = true; }, iceGlPanel);
+      return iceSkin(); };
+    window.addEventListener('resize', function(){ if (!isOpen() || !ICE.d) return; if (CUR === 'seaice') iceSeaPanel(); else if (CUR === 'greenland') iceGrPanel(); else if (CUR === 'glaciers') iceGlPanel(); });
+
+
 
     /* ================= THE VIEWS, AND THE DROPDOWN ================= */
     /* a view is: panel() = words and data; flat() = the Leaflet map; globe() = the sphere, returning whether it could be shown
@@ -96578,7 +96755,11 @@ function closeAlertModal(){
       /* the air itself: two gases on the globe with the wind at their own height, and the greenhouse record (see THE AIR) */
       ozone: { label: 'OZONE', group: 'THE GASES', globe: ozoneGlobe, flat: airNeedsGlobe, off: function(){ globeBtn(null); } },
       co: { label: 'CARBON MONOXIDE', globe: coGlobe, flat: airNeedsGlobe, off: function(){ globeBtn(null); } },
-      ghg: { label: 'GREENHOUSE GASES', bare: true, on: ghgOn, off: function(){} }
+      ghg: { label: 'GREENHOUSE GASES', bare: true, on: ghgOn, off: function(){} },
+      /* THE ICE (see its block above) */
+      seaice: { label: 'SEA ICE', group: 'THE ICE', panel: iceSeaPanel, globe: iceSeaGlobe, flat: airNeedsGlobe, off: function(){ globeBtn(null); } },
+      greenland: { label: 'GREENLAND', panel: iceGrPanel, globe: iceGrGlobe, flat: airNeedsGlobe, off: function(){} },
+      glaciers: { label: 'GLACIERS', panel: iceGlPanel, globe: iceGlGlobe, flat: airNeedsGlobe, off: function(){} }
     };
     /* EARTH SYSTEMS header credit, per view (2026-09-23 audit: one fixed "NASA GIBS · NOAA · RAPID" for all nine) */
     window._esSrc = function(){
@@ -96590,7 +96771,10 @@ function closeAlertModal(){
         amoc: [['RAPID AMOC', 'https://rapid.ac.uk/data/data-download'], ANOM],
         jet: [GFS], belts: [GFS], cells: [GFS], ozone: [GFS],
         co: [['NASA AIRS CO', WV + 'AIRS_L2_Carbon_Monoxide_500hPa_Volume_Mixing_Ratio_Day,Coastlines_15m'], GFS],
-        ghg: [['NOAA GML CO\u2082', 'https://gml.noaa.gov/ccgg/trends/mlo.html'], ['CH\u2084', 'https://gml.noaa.gov/ccgg/trends_ch4/'], ['N\u2082O', 'https://gml.noaa.gov/ccgg/trends_n2o/']]
+        ghg: [['NOAA GML CO\u2082', 'https://gml.noaa.gov/ccgg/trends/mlo.html'], ['CH\u2084', 'https://gml.noaa.gov/ccgg/trends_ch4/'], ['N\u2082O', 'https://gml.noaa.gov/ccgg/trends_n2o/']],
+        seaice: [['NSIDC SEA ICE INDEX', 'https://nsidc.org/data/seaice_index'], ['NASA GIBS MUR SEA ICE', WV + 'GHRSST_L4_MUR25_Sea_Ice_Concentration,Coastlines_15m']],
+        greenland: [['DMI POLAR PORTAL', 'https://polarportal.dk/en/greenland/surface-conditions/'], ['NASA GRACE', 'https://science.nasa.gov/earth/explore/earth-indicators/ice-sheets/'], ['NASA GIBS MUR SEA ICE', WV + 'GHRSST_L4_MUR25_Sea_Ice_Concentration,Coastlines_15m']],
+        glaciers: [['USGS BENCHMARK GLACIERS', 'https://www.usgs.gov/programs/climate-research-and-development-program/science/usgs-benchmark-glacier-project']]
       };
       var parts = (E[CUR] || [['NASA WORLDVIEW', 'https://worldview.earthdata.nasa.gov/']]).slice();
       if (CUR !== 'ghg') parts = parts.concat(STAGE === 'globe'
