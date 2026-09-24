@@ -35994,10 +35994,26 @@ function dayRangeAround(d, days){
     // ── Part 5.5: THE BIGGER PICTURE — the NWS office's own multi-day outlook, attributed ──
     // Goes in after the summary's first sentence (the alert, when one leads; else the conditions opener), so the story of
     // the coming days sits near the top instead of behind the day's details. Dropped if the discussion is over a day old.
-    var _afd = window._afdOutlook;
+    var _afd = window._afdOutlook, _olTxt = '';
+    if (!window._seasonHist || window._seasonHist.key !== ((+(window.LOCATION||{}).lat).toFixed(2) + ',' + (+(window.LOCATION||{}).lon).toFixed(2))) { try { window._fetchSeasonHist(); } catch(e){} }
+    var _season = ''; try { _season = window._bvSeasonLine(now.getTime(), hr, daily, dTod); } catch(e){}
     if (_afd && _afd.msgs && _afd.msgs.length && !(Date.now() - _afd.issued > 86400000)){
       // quoted verbatim -- their words, their capitals (a storm's name must survive) -- and attributed
-      var _olTxt = 'NWS forecasters: \u201c' + _afd.msgs.map(function(m){ return /[.!?]$/.test(m) ? m : m + '.'; }).join(' ') + '\u201d';
+      _olTxt = 'NWS forecasters: \u201c' + _afd.msgs.map(function(m){ return /[.!?]$/.test(m) ? m : m + '.'; }).join(' ') + '\u201d';
+      /* "coastal storm" with a northeast wind and rain on the East Coast IS a nor'easter -- say so in plain words (the news
+         does; the discussion keeps to the technical term) */
+      var _L0 = window.LOCATION || {};
+      if (/coastal (?:storm|low)/i.test(_afd.msgs.join(' ')) && !/nor.?easter/i.test(_afd.msgs.join(' ')) && +_L0.lon > -82 && +_L0.lat > 30 && daily && daily.wind_direction_10m_dominant){
+        var _ne = false;
+        for (var _k = dTod; _k < Math.min(dTod + 5, daily.wind_direction_10m_dominant.length); _k++){
+          var _wd = daily.wind_direction_10m_dominant[_k], _pp = (daily.precipitation_sum || [])[_k];
+          if (_wd != null && (_wd >= 330 || _wd <= 100) && _pp != null && _pp >= 0.1) _ne = true;     // north through east: the nor'easter quarter
+        }
+        if (_ne) _olTxt += ' In plain terms, a nor\u2019easter.';
+      }
+    }
+    if (_season || _olTxt){
+      _olTxt = [_season, _olTxt].filter(Boolean).join(' ');
       var _m1 = s.trim().match(/^.*?[.!?](?=\s|$)/);
       s = _m1 ? _m1[0] + ' ' + _olTxt + s.trim().slice(_m1[0].length) : _olTxt + ' ' + s.trim();
     }
@@ -36474,6 +36490,97 @@ function dayRangeAround(d, days){
       }).catch(function(){});
   };
   setInterval(function(){ if (!document.hidden && window._nwsCwa) window._fetchAfdOutlook(); }, 2 * 3600000);
+
+  /* THE SEASON, IN A FRIENDLY VOICE (user 2026-09-24: "it would be nice if it also knew that this week felt like the first
+     chilly days in fall and had that ability to speak on current topics and references" ... "it should be personable").
+     Three months of daily highs and lows (Open-Meteo, the same model the page runs on, past_days=92, one small call cached
+     six hours per place) let the summary say when a morning is the coolest -- or an afternoon the warmest -- in a month or
+     more, and the year's own equinoxes and solstices (Meeus) let it say the season just turned. Every number it uses is in
+     the data; it stays quiet when there is nothing true to say. */
+  window._seasonHist = null;
+  window._fetchSeasonHist = function(){
+    var L = window.LOCATION || {}; if (!isFinite(+L.lat)) return;
+    var key = (+L.lat).toFixed(2) + ',' + (+L.lon).toFixed(2);
+    if (window._seasonHist && window._seasonHist.key === key && Date.now() - window._seasonHist.at < 6 * 3600000) return;
+    if (window._seasonHistBusy === key) return; window._seasonHistBusy = key;
+    try { var c = JSON.parse(localStorage.getItem('bv_season_hist2') || 'null'); if (c && c.key === key && Date.now() - c.at < 6 * 3600000){ window._seasonHist = c; window._seasonHistBusy = null; return; } } catch(e){}
+    /* two pieces: the ERA5 archive (eight months to yesterday -- the forecast API's own past_days holds only ~2 months of
+       real values, so "coolest since" stalled at July; the archive said June 2) and the forecast for today on */
+    var ll = 'latitude=' + (+L.lat).toFixed(3) + '&longitude=' + (+L.lon).toFixed(3) + '&timezone=' + encodeURIComponent(L.tz || 'auto') + '&temperature_unit=fahrenheit&daily=temperature_2m_max,temperature_2m_min';
+    var ymd = function(ms){ return new Date(ms).toISOString().slice(0, 10); };
+    var urlA = 'https://archive-api.open-meteo.com/v1/archive?' + ll + '&start_date=' + ymd(Date.now() - 240 * 86400000) + '&end_date=' + ymd(Date.now() - 86400000);
+    var urlF = 'https://api.open-meteo.com/v1/forecast?' + ll + '&past_days=3&forecast_days=7';
+    var get = function(u){ return fetch(u).then(function(r){ if (!r.ok) throw 0; return r.json(); }).catch(function(){ return window.bvProxyJSON ? window.bvProxyJSON(u) : null; }); };
+    Promise.all([get(urlA).catch(function(){ return null; }), get(urlF)]).then(function(res){ window._seasonHistBusy = null;
+      var A = res[0] && res[0].daily, F = res[1] && res[1].daily; if (!F || !F.time) return;
+      var cur = window.LOCATION || {}; if ((+cur.lat).toFixed(2) + ',' + (+cur.lon).toFixed(2) !== key) return;
+      var by = {};
+      if (A && A.time) A.time.forEach(function(d, i){ if (A.temperature_2m_min[i] != null) by[d] = [A.temperature_2m_max[i], A.temperature_2m_min[i]]; });
+      F.time.forEach(function(d, i){ if (!by[d] && F.temperature_2m_min[i] != null) by[d] = [F.temperature_2m_max[i], F.temperature_2m_min[i]]; });   // archive wins where both have a day
+      var t = Object.keys(by).sort();
+      window._seasonHist = { key: key, at: Date.now(), t: t, hi: t.map(function(d){ return by[d][0]; }), lo: t.map(function(d){ return by[d][1]; }) };
+      try { localStorage.setItem('bv_season_hist2', JSON.stringify(window._seasonHist)); } catch(e){}
+      try { updateConditionsBriefing(); } catch(e){}
+    }, function(){ window._seasonHistBusy = null; });
+  };
+  /* the year's equinoxes and solstices, Meeus ch. 27 mean terms (good to a few minutes, which is all a day name needs) */
+  window._bvSeasonTurns = function(yr){
+    var Y = (yr - 2000) / 1000, P = function(a){ return a[0] + a[1] * Y + a[2] * Y * Y + a[3] * Y * Y * Y + a[4] * Y * Y * Y * Y; }, ms = function(jd){ return (jd - 2440587.5) * 86400000; };
+    return [{ k: 'spring', t: ms(P([2451623.80984, 365242.37404, 0.05169, -0.00411, -0.00057])) },
+            { k: 'summer', t: ms(P([2451716.56767, 365241.62603, 0.00325, 0.00888, -0.00030])) },
+            { k: 'fall',   t: ms(P([2451810.21715, 365242.01767, -0.11575, 0.00337, 0.00078])) },
+            { k: 'winter', t: ms(P([2451900.05952, 365242.74049, -0.06223, -0.00823, 0.00032])) }];
+  };
+  /* the sentence: '' when there is nothing true and worth saying */
+  window._bvSeasonLine = function(now, hr, daily, dTod){
+    var H = window._seasonHist, out = [], tz = (window.LOCATION && window.LOCATION.tz) || undefined;
+    var dayName = function(ms){ try { return new Date(ms).toLocaleDateString('en-US', { weekday: 'long', timeZone: tz }); } catch(e){ return ''; } };
+    var mdName = function(iso){ var d = new Date(iso + 'T12:00:00'); return ['January','February','March','April','May','June','July','August','September','October','November','December'][d.getMonth()] + ' ' + d.getDate(); };
+    var isoToday = (function(){ try { return new Date(now).toLocaleDateString('en-CA', { timeZone: tz }); } catch(e){ return new Date(now).toISOString().slice(0, 10); } })();
+    var mo = +isoToday.slice(5, 7);
+    // (1) the first chill of fall / first warmth of spring: the week's extreme against the months behind it
+    if (H && H.t && H.t.length > 40){
+      var ti = H.t.indexOf(isoToday);
+      if (ti > 30){
+        var coolSeason = mo >= 8 && mo <= 12, warmSeason = mo >= 2 && mo <= 6;
+        var last = ti;                                       // today counts: before 10 AM its low is still the forecast, and is worded so
+        var pick = function(arr, cmp){ var bi = -1; for (var i = ti - 3; i <= last; i++){ if (arr[i] == null) continue; if (bi < 0 || cmp(arr[i], arr[bi])) bi = i; } return bi; };
+        var since = function(arr, i, cmp){ for (var j = i - 1; j >= 0; j--){ if (arr[j] != null && cmp(arr[j], arr[i])) return j; } return -1; };
+        var said = function(i){ return i === ti ? (coolSeason ? 'this morning\u2019s ' : 'this afternoon\u2019s ') : i === ti - 1 ? 'yesterday\u2019s ' : dayName(Date.parse(H.t[i] + 'T12:00:00')) + '\u2019s '; };
+        var f0 = 0; while (f0 < H.t.length && H.lo[f0] == null) f0++;          // the model's archive can start with empty days
+        var first = mdName(H.t[Math.min(f0, H.t.length - 1)]);
+        if (coolSeason){
+          var bi = pick(H.lo, function(a, b){ return a < b; });
+          if (bi >= 0){
+            var lo = Math.round(H.lo[bi]), sj = since(H.lo, bi, function(a, b){ return a <= b; }), gap = sj < 0 ? 999 : bi - sj;
+            if (gap >= 30){
+              var mood = lo <= 32 ? 'Frost season is here' : lo <= 42 ? 'Coat weather is creeping in' : lo <= 58 ? 'Sweater weather has arrived' : 'A first hint of fall in the air';
+              var sinceTxt = sj < 0 ? 'at least ' + first : mdName(H.t[sj]);
+              out.push(mood + ': ' + (bi === ti && hr < 10 ? 'this morning should bottom out near ' + lo + '\u00b0, the coolest since ' : said(bi) + lo + '\u00b0 low was the coolest since ') + sinceTxt);
+              var ahead = -1; for (var f = ti + 1; f < Math.min(H.lo.length, ti + 6); f++) if (H.lo[f] != null && H.lo[f] < H.lo[bi] - 2){ ahead = f; break; }
+              if (ahead > 0) out[out.length - 1] += ', and ' + dayName(Date.parse(H.t[ahead] + 'T12:00:00')) + ' looks chillier still';
+            }
+          }
+        } else if (warmSeason){
+          var bw = pick(H.hi, function(a, b){ return a > b; });
+          if (bw >= 0){
+            var hi = Math.round(H.hi[bw]), sw = since(H.hi, bw, function(a, b){ return a >= b; }), gw = sw < 0 ? 999 : bw - sw;
+            if (gw >= 30) out.push((hi >= 80 ? 'A taste of summer' : hi >= 65 ? 'Spring is finally showing up' : 'A little thaw') + ': ' + (bw === ti && hr < 15 ? 'this afternoon should reach ' + hi + '\u00b0, the warmest since ' : said(bw) + hi + '\u00b0 high was the warmest since ') + (sw < 0 ? 'at least ' + first : mdName(H.t[sw])));
+          }
+        }
+      }
+    }
+    // (2) the season turning, from the year's own equinox / solstice
+    var turns = window._bvSeasonTurns(+isoToday.slice(0, 4)), NAME = { spring: 'Spring', summer: 'Summer', fall: 'Fall', winter: 'Winter' };
+    turns.forEach(function(q){
+      var dd = (now - q.t) / 86400000, dn = dayName(q.t), today = dayName(now) === dn && Math.abs(dd) < 1;
+      if (today) out.push(NAME[q.k] + ' officially begins today');
+      else if (dd > 0 && dd < 7) out.push(NAME[q.k] + ' officially began ' + dn + (q.k === 'fall' ? ', and the nights now outlast the days' : q.k === 'spring' ? ', and the days now outlast the nights' : ''));
+      else if (dd < 0 && dd > -4) out.push(NAME[q.k] + ' officially arrives ' + dn);
+    });
+    if (!out.length) return '';
+    return out.length > 1 ? out[0] + ' \u2014 ' + out[1].charAt(0).toLowerCase() + out[1].slice(1) + '.' : out[0] + '.';
+  };
 
 
   /* =========================================================
