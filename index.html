@@ -15826,6 +15826,7 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
       if (window._nwsPointFor === key) return; // already have this point
       window._nwsPointFor = key;
       window._nwsStationsUrl = null;
+      window._afdOutlook = null; window._nwsCwa = null;     // another place, another forecast office
       fetch('https://api.weather.gov/points/' + key)
         .then(function(r){ return r.json(); })
         .then(function(d){
@@ -15843,6 +15844,11 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
             if(d.properties.observationStations){
               window._nwsStationsUrl = d.properties.observationStations;
               if (typeof window._fetchObsClouds === 'function') window._fetchObsClouds(0);
+            }
+            // The forecast office: its Area Forecast Discussion gives the summary its multi-day outlook
+            if(d.properties.cwa){
+              window._nwsCwa = d.properties.cwa;
+              if (typeof window._fetchAfdOutlook === 'function') window._fetchAfdOutlook();
             }
             // Gridpoint raw-data URL — feeds the sunset-score NWS cross-check
             if(d.properties.forecastGridData){
@@ -35985,6 +35991,17 @@ function dayRangeAround(d, days){
       s = fnSent + (s.trim() ? ' ' + s.trim() : '');
     }
 
+    // ── Part 5.5: THE BIGGER PICTURE — the NWS office's own multi-day outlook, attributed ──
+    // Goes in after the summary's first sentence (the alert, when one leads; else the conditions opener), so the story of
+    // the coming days sits near the top instead of behind the day's details. Dropped if the discussion is over a day old.
+    var _afd = window._afdOutlook;
+    if (_afd && _afd.msgs && _afd.msgs.length && !(Date.now() - _afd.issued > 86400000)){
+      // quoted verbatim -- their words, their capitals (a storm's name must survive) -- and attributed
+      var _olTxt = 'NWS forecasters: \u201c' + _afd.msgs.map(function(m){ return /[.!?]$/.test(m) ? m : m + '.'; }).join(' ') + '\u201d';
+      var _m1 = s.trim().match(/^.*?[.!?](?=\s|$)/);
+      s = _m1 ? _m1[0] + ' ' + _olTxt + s.trim().slice(_m1[0].length) : _olTxt + ' ' + s.trim();
+    }
+
     // ── Part 6: Tomorrow preview (index 2 = tomorrow, past_days=1) ──
     if(daily && daily.temperature_2m_max && daily.temperature_2m_max[dTom] != null){
       var tmHi = Math.round(daily.temperature_2m_max[dTom]);
@@ -36415,6 +36432,48 @@ function dayRangeAround(d, days){
     el.textContent = s;
   }
   window.updateConditionsBriefing = updateConditionsBriefing;   // tlRenderForOffset is in another closure
+
+  /* THE BIGGER PICTURE (user 2026-09-24: "the main summary has no multi day insight or context, right now all the news
+     is talking about the noreaster coming to NYC and ours is just focused on daily data"). The local NWS office's Area
+     Forecast Discussion opens with KEY MESSAGES -- the forecasters' own few-line outlook for the coming days (on 09-24,
+     OKX: "A coastal storm likely brings rainfall and gusty winds Friday into the upcoming weekend..."). The summary quotes
+     the first sentence of the first two, attributed. Offices still on the older layout get the first sentences of their
+     .SYNOPSIS instead. api.weather.gov, keyless, CORS-open; re-read every 2 hours (offices issue about four a day). */
+  window._fetchAfdOutlook = function(){
+    var cwa = window._nwsCwa; if (!cwa) return;
+    var H = { headers: { 'Accept': 'application/ld+json' } };
+    fetch('https://api.weather.gov/products/types/AFD/locations/' + cwa, H).then(function(r){ return r.json(); })
+      .then(function(j){ var g = j && j['@graph'] && j['@graph'][0]; if (!g) throw 0; return fetch('https://api.weather.gov/products/' + g.id, H).then(function(r){ return r.json(); }); })
+      .then(function(pr){
+        if (window._nwsCwa !== cwa || !pr || !pr.productText) return;
+        var t = pr.productText.replace(/\r/g, '');
+        var clean = function(x){
+          x = x.replace(/\s+/g, ' ').replace(/\.{3,}/g, '.').trim();
+          if (x.replace(/[^A-Z]/g, '').length > 0.8 * x.replace(/[^A-Za-z]/g, '').length){        // an all-caps office
+            x = x.toLowerCase().replace(/(^|[.!?]\s+)([a-z])/g, function(m, a, b){ return a + b.toUpperCase(); });
+          }
+          return x;
+        };
+        var first = function(x){ var m = x.match(/^.*?[.!?](?=\s|$)/); return m ? m[0] : x; };
+        var msgs = [], kind = '';
+        var km = t.match(/\.KEY MESSAGES\.{3}([\s\S]*?)(?:&&|\n\.[A-Z][A-Z .\/]+\.{3})/);
+        if (km){
+          /* offices number them "1)", bullet them "*" or "-", and some open with "Updated at 133 AM CDT ..." (OKX, VEF, EWX on 09-24) */
+          var body = km[1].replace(/^\s*Updated at[^\n]*\n/i, '\n');
+          var parts = body.split(/\n\s*(?:\d+\)|\*|-)\s+/);
+          (parts.length > 1 ? parts.slice(1) : parts).forEach(function(part){ var c = clean(part); if (c) msgs.push(first(c)); });
+          kind = 'key';
+        }
+        if (!msgs.length){
+          var sy = t.match(/\.SYNOPSIS\.{3}([\s\S]*?)(?:&&|\n\.[A-Z][A-Z .\/]+\.{3})/);
+          if (sy){ var c = clean(sy[1].replace(/^\s*\d+\/\d+\s*[AP]M\.?/i, '')), ss = c.match(/[^.!?]+[.!?]/g) || [c]; msgs = [ss.slice(0, 2).map(function(q){ return q.trim(); }).join(' ')]; kind = 'syn'; }
+        }
+        if (!msgs.length) return;
+        window._afdOutlook = { cwa: cwa, kind: kind, msgs: msgs.slice(0, 2), issued: Date.parse(pr.issuanceTime), link: 'https://forecast.weather.gov/product.php?site=' + cwa + '&issuedby=' + cwa + '&product=AFD' };
+        try { updateConditionsBriefing(); } catch(e){}
+      }).catch(function(){});
+  };
+  setInterval(function(){ if (!document.hidden && window._nwsCwa) window._fetchAfdOutlook(); }, 2 * 3600000);
 
 
   /* =========================================================
