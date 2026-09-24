@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MRMS Lab</title>
+<link rel="stylesheet" href="https://cdn.bluishvoid.com/vendor/leaflet/leaflet.css">
+<style>
+  :root { --bg:#eef2f4; --ink:#1d2a33; --dim:#5b6b75; --line:#cdd6db; --accent:#1f7a8c; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink); font:12px/1.45 ui-monospace,Menlo,monospace; }
+  #wrap { display:flex; height:100%; }
+  #map { flex:1; min-width:0; }
+  #side { width:400px; overflow:auto; padding:12px 14px; box-sizing:border-box; border-left:1px solid var(--line); background:#f8fafb; }
+  h1 { font-size:13px; letter-spacing:.08em; margin:0 0 8px; }
+  h2 { font-size:11px; letter-spacing:.08em; color:var(--accent); margin:14px 0 4px; }
+  pre { margin:0; white-space:pre-wrap; }
+  label { cursor:pointer; margin-right:10px; }
+  .legend-box { position:absolute; z-index:500; bottom:14px; left:10px; display:flex; gap:12px; background:rgba(255,255,255,.92); padding:8px 10px; border-radius:6px; }
+  @media (max-width:760px) { #wrap { flex-direction:column; } #side { width:auto; height:45%; border-left:0; border-top:1px solid var(--line); } }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="map"></div>
+  <div id="side">
+    <h1>MRMS HAZARD LAB</h1>
+    <div><label><input type="checkbox" id="tMesh" checked> MESH 1440</label><label><input type="checkbox" id="tRot" checked> ROTATION 1440</label></div>
+    <div id="status">loading...</div>
+    <div id="out"></div>
+  </div>
+</div>
+<div class="legend-box" id="legend"></div>
+<script src="https://cdn.bluishvoid.com/vendor/leaflet/leaflet.js"></script>
+<script src="mrms.js"></script>
+<script>
+(function () {
+  var M = window.bvMRMS, out = document.getElementById('out'), status = document.getElementById('status');
+  var BOUNDS = [[20, -130], [55, -60]];
+  var map = L.map('map', { zoomSnap: 0.25 }).fitBounds(BOUNDS);
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', { maxZoom: 16, attribution: 'Esri | NOAA MRMS' }).addTo(map);
+  document.getElementById('legend').innerHTML = M.legend('mesh') + M.legend('rotation');
+  window.__lab = { results: {} };
+  if (!M.supported()) { status.textContent = M.unsupportedMessage; return; }
+
+  function fmtT(ms) { return new Date(ms).toISOString().replace('.000Z', 'Z'); }
+  function hist(grid, edges, scale) {
+    var c = new Array(edges.length).fill(0), v = grid.values;
+    for (var i = 0; i < v.length; i++) {
+      var x = v[i] * scale;
+      for (var k = edges.length - 1; k >= 0; k--) if (x >= edges[k]) { c[k]++; break; }
+    }
+    return edges.map(function (e, k) { return '  >= ' + e + ' : ' + c[k]; }).join('\n');
+  }
+  var layers = {};
+  function section(title, text) { var d = document.createElement('div'); d.innerHTML = '<h2>' + title + '</h2><pre></pre>'; d.querySelector('pre').textContent = text; out.appendChild(d); }
+
+  function run(key, product, opts) {
+    return M.latest(product).then(function (f) {
+      return M.load(f.url, opts).then(function (g) {
+        var t0 = performance.now(), s = M.stats(g), tS = performance.now() - t0;
+        t0 = performance.now();
+        var cv = M.canvasOverlay(g, BOUNDS, null, { width: 1400 });
+        var tC = performance.now() - t0;
+        var isMesh = g.units === 'mm';
+        var r = { key: f.key, url: f.url, time: g.time, nx: g.nx, ny: g.ny, lat1: g.lat1, lon1: g.lon1, dlat: g.dlat, dlon: g.dlon,
+          stride: g.stride, units: g.units, source: g.source, missing: g.missing, timing: g.timing, stats: s, statsMs: tS, canvasMs: tC };
+        window.__lab.results[key] = r; window.__lab['grid_' + key] = g;
+        layers[key] = L.imageOverlay(cv.toDataURL(), BOUNDS, { opacity: 0.95, interactive: false }).addTo(map);
+        var tm = g.timing, sz = g.source;
+        section(key.toUpperCase() + ' ' + g.param,
+          f.key.split('/').pop() + '\nvalid ' + fmtT(g.time) + '\n' +
+          'file ' + (sz.gzBytes / 1024).toFixed(0) + ' KB gz, ' + (sz.gribBytes / 1024).toFixed(0) + ' KB grib, PNG ' + sz.bits + '-bit\n' +
+          'source grid ' + sz.nx + 'x' + sz.ny + ' @ ' + sz.dlat + ' deg, NW centre ' + sz.lat1.toFixed(4) + ', ' + sz.lon1.toFixed(4) + '\n' +
+          'R=' + sz.R + ' E=' + sz.E + ' D=' + sz.D + '  units ' + g.fileUnits + (g.fileUnits !== g.units ? ' -> ' + g.units : '') + '\n' +
+          'output ' + g.nx + 'x' + g.ny + ' stride ' + g.stride + ' (max-pooled)\n' +
+          'sentinels: ' + g.missing.note + '\n' +
+          'timing ms: fetch ' + tm.fetch.toFixed(0) + ' | gunzip ' + tm.gunzip.toFixed(0) + ' | parse ' + tm.parse.toFixed(1) +
+          ' | png inflate+unfilter ' + tm.png.toFixed(0) + ' | DECODE ' + tm.decode.toFixed(0) + '\n' +
+          'stats ' + tS.toFixed(0) + ' ms, overlay canvas ' + tC.toFixed(0) + ' ms\n' +
+          'cells > 0: ' + s.positive + ' of ' + s.cells + (s.noCoverage !== null ? ' | no-coverage ' + s.noCoverage + ' | no-hail ' + s.missing : ' | zero ' + s.missing) + '\n' +
+          'MAX ' + (isMesh ? s.max.toFixed(1) + ' mm (' + (s.max / 25.4).toFixed(2) + ' in)' : s.max.toFixed(3) + ' s^-1') +
+          ' at ' + s.maxLat.toFixed(3) + ', ' + s.maxLon.toFixed(3) + ' (row ' + s.maxRow + ', col ' + s.maxCol + ')\n' +
+          'histogram (' + (isMesh ? 'inches' : 's^-1') + '):\n' +
+          hist(g, isMesh ? [0.01, 0.25, 0.5, 0.75, 1, 1.5, 1.75, 2, 2.5, 2.75, 4] : [0.001, 0.004, 0.006, 0.008, 0.01, 0.015, 0.02, 0.03], isMesh ? 1 / 25.4 : 1));
+        return r;
+      });
+    });
+  }
+  function toggle(id, key) {
+    document.getElementById(id).addEventListener('change', function (e) {
+      if (!layers[key]) return;
+      if (e.target.checked) layers[key].addTo(map); else map.removeLayer(layers[key]);
+    });
+  }
+  toggle('tMesh', 'mesh'); toggle('tRot', 'rot');
+  map.on('click', function (e) {
+    var la = e.latlng.lat, lo = e.latlng.lng, s = '';
+    if (window.__lab.grid_mesh) { var m = M.maxNear(window.__lab.grid_mesh, la, lo, 25); s += 'MESH here ' + M.sample(window.__lab.grid_mesh, la, lo) + ' mm; max within 25 mi ' + (m.value === null ? 'none' : m.value.toFixed(1) + ' mm, ' + m.miles.toFixed(1) + ' mi away') + '<br>'; }
+    if (window.__lab.grid_rot) { var r = M.maxNear(window.__lab.grid_rot, la, lo, 25); s += 'ROT here ' + M.sample(window.__lab.grid_rot, la, lo) + ' s^-1; max within 25 mi ' + (r.value === null ? 'none' : r.value.toFixed(3) + ', ' + r.miles.toFixed(1) + ' mi away'); }
+    L.popup().setLatLng(e.latlng).setContent('<div style="font:11px ui-monospace,Menlo,monospace">' + s + '</div>').openOn(map);
+  });
+
+  var q = new URLSearchParams(location.search);
+  run('mesh', q.get('mesh') || M.products.mesh1440).then(function () {
+    return run('rot', q.get('rot') || M.products.rot1440);
+  }).then(function () {
+    if (layers.mesh) layers.mesh.bringToFront(); // hail on top of the (much wider) rotation field
+    status.textContent = 'done';
+    window.__lab.done = true;
+  }).catch(function (e) {
+    status.textContent = 'ERROR ' + e.message; window.__lab.error = String(e && e.stack || e); window.__lab.done = true;
+  });
+})();
+</script>
+</body>
+</html>

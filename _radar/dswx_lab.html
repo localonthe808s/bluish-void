@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DSWx Water Lab</title>
+<link rel="stylesheet" href="https://cdn.bluishvoid.com/vendor/leaflet/leaflet.css">
+<style>
+  :root { --bg: #f4f6f8; --ink: #1d2733; --mute: #5b6877; --line: #d5dce3; --accent: #1f6fe0; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  #map { position: absolute; inset: 0 0 0 0; }
+  #panel { position: absolute; z-index: 1000; top: 10px; right: 10px; width: 300px; max-width: calc(100% - 32px);
+    background: rgba(255,255,255,.94); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  #panel h1 { font-size: 12px; letter-spacing: .08em; margin: 0 0 6px; }
+  #panel .row { display: flex; gap: 6px; align-items: center; margin: 4px 0; flex-wrap: wrap; }
+  #panel select, #panel button, #panel input { font: inherit; }
+  #status { color: var(--mute); white-space: pre-wrap; font-family: ui-monospace, Menlo, monospace; font-size: 11px; max-height: 40vh; overflow: auto; }
+  #credit { margin-top: 6px; color: var(--mute); font-size: 11px; }
+  #credit a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel">
+  <h1>RADAR-SEEN WATER (DSWx-S1)</h1>
+  <div class="row">
+    <label>days <input id="days" type="number" value="40" min="1" max="400" style="width:60px"></label>
+    <button id="go">search view</button>
+  </div>
+  <div class="row"><select id="pass" style="max-width:100%"></select></div>
+  <div class="row">
+    <label>opacity <input id="op" type="range" min="0" max="1" step="0.05" value="0.85"></label>
+    <label><input id="outline" type="checkbox"> tile outlines</label>
+  </div>
+  <div id="status"></div>
+  <div id="credit"></div>
+</div>
+<script src="https://cdn.bluishvoid.com/vendor/leaflet/leaflet.js"></script>
+<script src="dswx.js"></script>
+<script>
+(function () {
+  var q = new URLSearchParams(location.search);
+  var map = L.map('map', { zoomControl: true }).setView([+(q.get('lat') || 40.70), +(q.get('lon') || -73.95)], +(q.get('z') || 10));
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+    { maxZoom: 16, attribution: 'Esri, HERE, Garmin, (c) OpenStreetMap contributors' }).addTo(map);
+  var stat = document.getElementById('status'), sel = document.getElementById('pass');
+  var layer = null, outlines = L.layerGroup(), passes = [], all = [];
+  window._lab = { map: map, get layer() { return layer; }, get passes() { return passes; }, ready: false };
+
+  function log(s) { stat.textContent = s; }
+
+  function show(granules) {
+    if (layer) map.removeLayer(layer);
+    layer = bvDSWx.layer(granules, { opacity: +document.getElementById('op').value }).addTo(map);
+    outlines.clearLayers();
+    granules.forEach(function (g) {
+      L.polygon(bvDSWx.tileCorners(g), { color: '#1f6fe0', weight: 1, fill: false, dashArray: '4 4' })
+        .bindTooltip(g.tile + ' ' + new Date(g.time).toISOString().slice(0, 16) + 'Z  fitErr ' + g.fitErr + ' m').addTo(outlines);
+    });
+    document.getElementById('credit').innerHTML = bvDSWx.credit(granules);
+    log(granules.map(function (g) {
+      return g.tile + '  ' + new Date(g.time).toISOString().slice(0, 16) + 'Z  ' + g.sensor + '  UL ' + g.E0 + ',' + g.N0 + '  fit ' + g.fitErr + ' m';
+    }).join('\n'));
+  }
+
+  function search() {
+    var days = +document.getElementById('days').value || 40;
+    log('searching CMR...');
+    bvDSWx.find(map.getBounds(), days).then(function (gs) {
+      all = gs;
+      passes = bvDSWx.groupPasses(gs);
+      sel.innerHTML = '';
+      passes.forEach(function (p, i) {
+        var o = document.createElement('option');
+        o.value = i; o.textContent = p.date + '  (' + p.granules.map(function (g) { return g.tile; }).join(' ') + ')';
+        sel.appendChild(o);
+      });
+      var o2 = document.createElement('option'); o2.value = 'mosaic'; o2.textContent = 'newest per tile (mosaic)'; sel.appendChild(o2);
+      var want = q.get('pass');
+      if (want) for (var i = 0; i < passes.length; i++) if (passes[i].date === want) sel.value = i;
+      if (want === 'mosaic') sel.value = 'mosaic';
+      if (!passes.length) { log('no granules in the last ' + days + ' days'); return; }
+      pick();
+      window._lab.ready = true;
+    }).catch(function (e) { log('error: ' + e.message); });
+  }
+
+  function pick() {
+    var v = sel.value;
+    show(v === 'mosaic' ? bvDSWx.newestPerTile(all) : passes[+v].granules);
+  }
+
+  if (q.get('days')) document.getElementById('days').value = q.get('days');
+  document.getElementById('go').onclick = search;
+  sel.onchange = pick;
+  document.getElementById('op').oninput = function () { if (layer) layer.setOpacity(+this.value); };
+  document.getElementById('outline').onchange = function () { if (this.checked) outlines.addTo(map); else map.removeLayer(outlines); };
+  if (q.get('outline')) { document.getElementById('outline').checked = true; outlines.addTo(map); }
+  search();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Level III Lab</title>
+<link rel="stylesheet" href="https://cdn.bluishvoid.com/vendor/leaflet/leaflet.css">
+<style>
+  :root { --bg:#eef2f4; --ink:#1d2a33; --dim:#5b6b75; --line:#cdd6db; --accent:#1f7a8c; --panel:#f8fafb; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink); font:12px/1.45 ui-monospace,Menlo,monospace; }
+  #wrap { display:flex; height:100%; }
+  #map { flex:1; min-width:0; }
+  #side { width:410px; overflow:auto; padding:12px 14px; box-sizing:border-box; border-left:1px solid var(--line); background:var(--panel); }
+  h1 { font-size:13px; letter-spacing:.08em; margin:0 0 8px; }
+  h2 { font-size:11px; letter-spacing:.08em; color:var(--accent); margin:14px 0 4px; }
+  pre { margin:0; white-space:pre-wrap; }
+  .row { display:flex; flex-wrap:wrap; gap:4px; align-items:center; margin-bottom:6px; }
+  button { font:inherit; padding:3px 8px; border:1px solid var(--line); background:#fff; color:var(--ink); border-radius:4px; cursor:pointer; }
+  button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  input[type=text] { font:inherit; width:52px; padding:3px 5px; border:1px solid var(--line); border-radius:4px; text-transform:uppercase; }
+  .hist { display:flex; align-items:flex-end; height:70px; gap:1px; border-bottom:1px solid var(--line); }
+  .hist div { flex:1; min-height:1px; }
+  .hx { display:flex; justify-content:space-between; color:var(--dim); font-size:10px; }
+  .legend-box { position:absolute; z-index:500; bottom:14px; left:10px; background:rgba(255,255,255,.92); padding:8px 10px; border-radius:6px; max-width:320px; }
+  #probe { position:absolute; z-index:500; top:10px; left:54px; background:rgba(255,255,255,.92); padding:4px 8px; border-radius:4px; }
+  @media (max-width:760px) { #wrap { flex-direction:column; } #side { width:auto; height:45%; border-left:0; border-top:1px solid var(--line); } }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="map" style="position:relative"><div id="probe">hover the map</div><div class="legend-box" id="legend"></div></div>
+  <div id="side">
+    <h1>NEXRAD LEVEL III LAB</h1>
+    <div class="row">site <input type="text" id="site" value="OKX"> <button id="go">LOAD LATEST</button></div>
+    <div class="row" id="prods"></div>
+    <div id="status">loading...</div>
+    <h2>METADATA</h2><pre id="meta"></pre>
+    <h2>SIZE + TIMING</h2><pre id="timing"></pre>
+    <h2>HISTOGRAM (valid gates)</h2><div class="hist" id="hist"></div><div class="hx" id="hx"></div><pre id="hstat"></pre>
+    <h2>SAMPLE CELLS</h2><pre id="cells"></pre>
+  </div>
+</div>
+<script src="https://cdn.bluishvoid.com/vendor/leaflet/leaflet.js"></script>
+<script src="bunzip.js"></script>
+<script src="level3.js"></script>
+<script>
+(function () {
+  var qs = new URLSearchParams(location.search);
+  var site = (qs.get('site') || 'OKX').toUpperCase(), prod = (qs.get('product') || 'N0C').toUpperCase();
+  document.getElementById('site').value = site;
+  var PRODS = ['N0C', 'N0X', 'N0K', 'DVL', 'N0B'];
+  var HR = { N0C: [0.2, 1.05], N0X: [-4, 8], N0K: [-2, 6], DVL: [0, 40], N0B: [-10, 75] };
+  var map = L.map('map', { zoomControl: true }).setView([40.87, -72.86], 7);
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+    { maxZoom: 16, attribution: 'Esri, NOAA/NWS via Unidata' }).addTo(map);
+
+  // radar layer: a container-sized canvas in the overlay pane, redrawn on move
+  var cur = null, ring = null;
+  var RadarLayer = L.Layer.extend({
+    onAdd: function (m) {
+      this._c = L.DomUtil.create('canvas', 'leaflet-zoom-hide');
+      this._c.style.position = 'absolute'; this._c.style.pointerEvents = 'none';
+      m.getPanes().overlayPane.appendChild(this._c);
+      m.on('moveend zoomend resize', this.redraw, this);
+      this.redraw();
+    },
+    onRemove: function (m) { this._c.remove(); m.off('moveend zoomend resize', this.redraw, this); },
+    redraw: function () {
+      if (!cur || !this._c) return;
+      var m = this._map, sz = m.getSize();
+      this._c.width = sz.x; this._c.height = sz.y;
+      L.DomUtil.setPosition(this._c, m.containerPointToLayerPoint([0, 0]));
+      var r = bvL3.toCanvas(cur, function (lat, lon) { return m.latLngToContainerPoint([lat, lon]); },
+        { canvas: this._c, opacity: 0.9 });
+      this.last = r;
+      showTiming();
+    }
+  });
+  var layer = new RadarLayer().addTo(map);
+
+  var pb = document.getElementById('prods');
+  PRODS.forEach(function (p) {
+    var b = document.createElement('button'); b.textContent = p; b.id = 'b' + p;
+    b.onclick = function () { prod = p; run(); };
+    pb.appendChild(b);
+  });
+  document.getElementById('go').onclick = function () { site = document.getElementById('site').value.toUpperCase(); run(); };
+
+  function fmt(x, d) { return x == null || x !== x ? '--' : x.toFixed(d == null ? 1 : d); }
+  var info = null;
+  function showTiming() {
+    if (!cur) return;
+    var t = cur.timing, b = cur.bytes;
+    document.getElementById('timing').textContent =
+      'file         ' + (b.file / 1024).toFixed(1) + ' KB (bzip2 ' + b.compressed + ')\n' +
+      'uncompressed ' + (b.uncompressed / 1024).toFixed(1) + ' KB\n' +
+      'fetch        ' + fmt(t.fetch) + ' ms\n' +
+      'bunzip       ' + fmt(t.bunzip) + ' ms\n' +
+      'parse+map    ' + fmt(t.parse) + ' ms\n' +
+      'render       ' + fmt(layer.last && layer.last.ms) + ' ms  (' + (layer.last ? layer.last.pixels : 0) + ' px filled, ' +
+        map.getSize().x + 'x' + map.getSize().y + ')';
+  }
+  window.__lab = { get cur() { return cur; }, get layer() { return layer; }, map: map };
+
+  function run() {
+    PRODS.forEach(function (p) { document.getElementById('b' + p).className = p === prod ? 'on' : ''; });
+    var st = document.getElementById('status');
+    st.textContent = 'listing ' + site + ' ' + prod + ' ...';
+    window.__labDone = false;
+    bvL3.latest(site, prod).then(function (k) {
+      info = k; st.textContent = 'fetching ' + k.key + ' ...';
+      return bvL3.load(k.url);
+    }).then(function (d) {
+      cur = d;
+      if (ring) map.removeLayer(ring);
+      ring = L.layerGroup([
+        L.circle([d.lat, d.lon], { radius: 230000, color: '#5b6b75', weight: 1, fill: false, dashArray: '3 4' }),
+        L.circleMarker([d.lat, d.lon], { radius: 3, color: '#1d2a33', weight: 1, fillOpacity: 1 })
+      ]).addTo(map);
+      if (!run.fitted || run.fitted !== site) { map.fitBounds(bvL3.bounds(d, 240)); run.fitted = site; }
+      layer.redraw();
+      document.getElementById('legend').innerHTML = bvL3.legend(d.product);
+      var nv = 0; for (var i = 0; i < d.values.length; i++) if (d.values[i] === d.values[i]) nv++;
+      document.getElementById('meta').textContent =
+        'key        ' + info.key + '\n' +
+        'site       ' + d.site + '  (' + d.lat.toFixed(3) + ', ' + d.lon.toFixed(3) + ', ' + d.heightFt + ' ft)\n' +
+        'product    ' + d.product + ' / ' + d.code + '  ' + d.name + '\n' +
+        'units      ' + (d.units || 'unitless') + '\n' +
+        'volume     ' + d.time.toISOString().replace('.000', '') + '\n' +
+        'elevation  ' + d.elevation.toFixed(1) + ' deg   VCP ' + d.meta.vcp + '\n' +
+        'radials    ' + d.radials.length + '  (first az ' + d.radials[0].az.toFixed(1) + ', width ' + d.radials[0].width.toFixed(1) + ')\n' +
+        'gates      ' + d.gates.n + ' x ' + d.gates.size + ' km, first ' + d.gates.first + ' km\n' +
+        'packets    ' + d.packets.map(function (p) { return p === 0xAF1F ? 'AF1F' : p; }).join(',') + '\n' +
+        'thresholds ' + d.meta.thresholds.slice(0, 8).join(' ') + '\n' +
+        'valid      ' + nv + ' / ' + d.values.length + ' gates';
+      var hr = HR[d.product] || [-20, 80], h = bvL3.histogram(d, 48, hr[0], hr[1]), mx = Math.max.apply(null, h.counts);
+      var sc = bvL3.scales[d.scale];
+      document.getElementById('hist').innerHTML = h.counts.map(function (c, i) {
+        var v = hr[0] + (i + 0.5) * (hr[1] - hr[0]) / 48, col = sc(v) || [200, 200, 200, 1];
+        return '<div title="' + v.toFixed(2) + ': ' + c + '" style="height:' + (c ? Math.max(2, 100 * Math.sqrt(c / mx)) : 0) +
+          '%;background:rgb(' + col[0] + ',' + col[1] + ',' + col[2] + ')"></div>';
+      }).join('');
+      document.getElementById('hx').innerHTML = '<span>' + hr[0] + '</span><span>sqrt count</span><span>' + hr[1] + '</span>';
+      var mn = Infinity, mxv = -Infinity, sum = 0;
+      for (i = 0; i < d.values.length; i++) { var v = d.values[i]; if (v === v) { if (v < mn) mn = v; if (v > mxv) mxv = v; sum += v; } }
+      document.getElementById('hstat').textContent = 'min ' + fmt(mn, 3) + '  max ' + fmt(mxv, 3) + '  mean ' + fmt(sum / nv, 3);
+      // sample cells: first four valid gates spread through the array
+      var out = [], step = Math.floor(d.values.length / 6);
+      for (var s = 0; s < 6; s++) {
+        for (var j = s * step; j < d.values.length; j++) if (d.values[j] === d.values[j]) {
+          var ri = Math.floor(j / d.gates.n), gi = j % d.gates.n, ll = bvL3.gateLatLon(d, ri, gi);
+          out.push('r' + ri + ' g' + gi + '  az ' + d.radials[ri].az.toFixed(1) + '  ' + ((gi + 0.5) * d.gates.size).toFixed(2) + ' km  code ' +
+            d.codes[j] + '  val ' + d.values[j].toFixed(4) + '  @ ' + ll[0].toFixed(4) + ',' + ll[1].toFixed(4));
+          break;
+        }
+      }
+      document.getElementById('cells').textContent = out.join('\n');
+      showTiming();
+      st.textContent = 'ok ' + info.key;
+      window.__labDone = true;
+    }).catch(function (e) { st.textContent = 'ERROR ' + e.message; window.__labDone = 'error: ' + e.message; console.error(e); });
+  }
+
+  // hover probe: lat/lon -> azimuth + ground range -> radial/gate -> value
+  map.on('mousemove', function (e) {
+    if (!cur) return;
+    var la1 = cur.lat * Math.PI / 180, la2 = e.latlng.lat * Math.PI / 180, dl = (e.latlng.lng - cur.lon) * Math.PI / 180;
+    var az = Math.atan2(Math.sin(dl) * Math.cos(la2), Math.cos(la1) * Math.sin(la2) - Math.sin(la1) * Math.cos(la2) * Math.cos(dl)) * 180 / Math.PI;
+    if (az < 0) az += 360;
+    var s = 6371 * Math.acos(Math.min(1, Math.sin(la1) * Math.sin(la2) + Math.cos(la1) * Math.cos(la2) * Math.cos(dl)));
+    var ri = -1;
+    for (var i = 0; i < cur.radials.length; i++) { var r = cur.radials[i], d = (az - r.az + 360) % 360; if (d < r.width) { ri = i; break; } }
+    var gi = -1;
+    for (var g = 0; g < cur.gates.n; g++) if (bvL3.groundRange(cur.gates.first + (g + 1) * cur.gates.size, cur.elevation) > s) { gi = g; break; }
+    var v = ri >= 0 && gi >= 0 ? cur.values[ri * cur.gates.n + gi] : NaN;
+    document.getElementById('probe').textContent = 'az ' + az.toFixed(1) + '  ' + s.toFixed(1) + ' km  ' +
+      (v === v ? v.toFixed(3) + ' ' + cur.units : 'no data');
+  });
+
+  run();
+})();
+</script>
+</body>
+</html>
