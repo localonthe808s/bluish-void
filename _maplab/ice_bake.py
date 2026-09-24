@@ -17,7 +17,7 @@ Action runs this and commits _maplab/ice.json.
 
 usage: ice_bake.py
 """
-import csv, datetime as dt, io, json, re, time, urllib.request, zipfile
+import csv, datetime as dt, io, json, re, time, urllib.parse, urllib.request, zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -139,6 +139,75 @@ def glaciers():
     return out
 
 
+# ── ICE SHEETS: IMBIE-3 (Otosaka et al.; UK Polar Data Centre, doi 10.5285/77B64C55-7166-4A06-9DEF-2E400398E452, OGL v3) ──
+# 45 satellite estimates reconciled; total mass change split into SURFACE (snow minus melt) and DYNAMICS (ice flow to the sea)
+IMBIE_DIR = '128c5e33-5224-4197-82f0-19dcc95b80a0'
+
+
+def imbie():
+    import base64
+    out = {'src': 'https://doi.org/10.5285/77B64C55-7166-4A06-9DEF-2E400398E452'}
+    for key in ('greenland', 'antarctica', 'west_antarctica', 'east_antarctica', 'antarctic_peninsula'):
+        name = 'imbie3_%s_Gt_partitioned.csv' % key
+        eid = 'synth:%s:%s' % (IMBIE_DIR, base64.b64encode(('/' + name).encode()).decode())
+        txt = get('http://ramadda.data.bas.ac.uk/repository/entry/get/%s?entryid=%s' % (name, urllib.parse.quote(eid))).decode('utf-8', 'replace')
+        rows = list(csv.reader([ln for ln in txt.splitlines() if ln and not ln.startswith('#')]))[1:]
+        yr = {}
+        for r in rows:
+            try: y, m = int(r[0][:4]), int(r[0][5:7])
+            except Exception: continue
+            if m == 12 or y not in yr: yr[y] = [y, round(float(r[3])), round(float(r[7])), round(float(r[11])), round(float(r[1]), 1)]   # year, cumulative total, surface, dynamics, rate
+        ser = [yr[y] for y in sorted(yr)]
+        last = rows[-1]
+        rate5 = sum(float(r[1]) for r in rows[-60:]) / len(rows[-60:])
+        out[key] = {'series': ser, 'end': last[0][:7], 'total': round(float(last[3])), 'surface': round(float(last[7])), 'dynamics': round(float(last[11])),
+                    'rate5': round(rate5), 'start': rows[0][0][:4]}
+    return out
+
+
+# ── SNOW: Rutgers Global Snow Lab, Northern Hemisphere land snow extent (NOAA CDR), weekly since 1966, monthly since 1967 ──
+def snow():
+    wk = [[int(a), int(b), int(c)] for a, b, c in (ln.split() for ln in get('https://climate.rutgers.edu/snowcover/files/wkcov.nhland.txt').decode().splitlines() if len(ln.split()) == 3)]
+    mo = [[int(a), int(b), int(c)] for a, b, c in (ln.split() for ln in get('https://climate.rutgers.edu/snowcover/files/moncov.nhland.txt').decode().splitlines() if len(ln.split()) == 3)]
+    clim = {}
+    for y, w, a in wk:
+        if 1991 <= y <= 2020: clim.setdefault(w, []).append(a)
+    clim = {w: round(sum(v) / len(v)) for w, v in clim.items()}
+    last = wk[-1]
+    same = sorted(a for y, w, a in wk if w == last[1] and y < last[0])
+    june = [[y, round(a / 1e6, 2)] for y, m, a in mo if m == 6]
+    this = [[w, round(a / 1e6, 2)] for y, w, a in wk if y == last[0]]
+    prev = [[w, round(a / 1e6, 2)] for y, w, a in wk if y == last[0] - 1]
+    return {'year': last[0], 'week': last[1], 'km2': last[2], 'normal': clim.get(last[1]), 'rank': 1 + sum(1 for a in same if a < last[2]), 'years': len(same) + 1,
+            'clim': [[w, round(clim[w] / 1e6, 2)] for w in sorted(clim)], 'this': this, 'prev': prev, 'june': june,
+            'src': 'https://climate.rutgers.edu/snowcover/'}
+
+
+# ── LAKE ICE: NOAA GLERL Great Lakes ice cover, daily % per lake, every winter since 1973 (column = the winter's ending year) ──
+def lakes():
+    out = {'src': 'https://www.glerl.noaa.gov/data/ice/', 'lakes': {}}
+    for k, nm in (('bas', 'ALL FIVE'), ('sup', 'SUPERIOR'), ('mic', 'MICHIGAN'), ('hur', 'HURON'), ('eri', 'ERIE'), ('ont', 'ONTARIO')):
+        L = get('https://www.glerl.noaa.gov/data/ice/glicd/daily/%s.txt' % k).decode('utf-8', 'replace').splitlines()
+        yrs = [int(x) for x in L[0].split()]
+        days, cols = [], {y: [] for y in yrs}
+        for ln in L[1:]:
+            c = ln.split()
+            if len(c) != len(yrs) + 1: continue
+            days.append(c[0])
+            for y, v in zip(yrs, c[1:]): cols[y].append(None if v == 'NA' else float(v))
+        mx = {}
+        for y in yrs:
+            vals = [(v, i) for i, v in enumerate(cols[y]) if v is not None]
+            if vals: v, i = max(vals); mx[y] = [round(v, 1), days[i]]
+        done = [y for y in yrs if y in mx]
+        avg = [None if not any(cols[y][i] is not None for y in done[:-1]) else round(sum(cols[y][i] or 0 for y in done[:-1] if cols[y][i] is not None) / max(1, sum(1 for y in done[:-1] if cols[y][i] is not None)), 1) for i in range(len(days))]
+        last = done[-1]
+        rec = {'name': nm, 'max': [[y] + mx[y] for y in done], 'last': last, 'lastMax': mx[last], 'avgMax': round(sum(mx[y][0] for y in done[:-1]) / len(done[:-1]), 1)}
+        if k == 'bas': rec.update({'days': days, 'lastCurve': cols[last], 'avgCurve': avg})
+        out['lakes'][k] = rec
+    return out
+
+
 def main():
     prev = {}
     try: prev = json.loads(OUT.read_text())
@@ -146,7 +215,8 @@ def main():
     out = {'built': NOW.strftime('%Y-%m-%dT%H:%MZ'),
            'sheets': {'greenland': -264, 'antarctica': -135, 'period': '2002-2025',
                       'src': 'https://science.nasa.gov/earth/explore/earth-indicators/ice-sheets/'}}
-    for key, fn in (('arctic', lambda: sea_ice('N')), ('antarctic', lambda: sea_ice('S')), ('greenland', greenland), ('glaciers', glaciers)):
+    for key, fn in (('arctic', lambda: sea_ice('N')), ('antarctic', lambda: sea_ice('S')), ('greenland', greenland), ('glaciers', glaciers),
+                    ('imbie', imbie), ('snow', snow), ('lakes', lakes)):
         try: out[key] = fn(); print('ok', key)
         except Exception as e:
             print('FAILED', key, e)
