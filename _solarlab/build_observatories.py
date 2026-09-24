@@ -591,6 +591,9 @@ def main():
         except Exception as e:
             print('FAILED', key, e)
             if key in prev: out[key] = prev[key]
+    # GREATEST HITS: the hand-picked list build_classics.py resolved (static; folded in so the page reads one file)
+    try: out['classics'] = json.loads((ROOT / '_solarlab/classics.json').read_text())
+    except Exception as e: print('FAILED classics', e)
     try: attach_aims(out, prev)
     except Exception as e:
         print('FAILED aims', e)
