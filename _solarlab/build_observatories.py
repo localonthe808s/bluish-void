@@ -319,6 +319,8 @@ def _items(url):
         raw = raw.replace('<![CDATA[', '').replace(']]>', '')
         rawu = _h.unescape(raw)
         img = re.search(r'<img[^>]+src="([^"]+)"', raw) or re.search(r'<img[^>]+src="([^"]+)"', rawu)
+        tag = re.search(r'<img[^>]*>', rawu)
+        alt = re.search(r'alt="([^"]*)"', tag.group(0)) if tag else None
         enc = re.search(r'<enclosure[^>]+url="([^"]+)"', it)
         txt = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', rawu)).strip()
         lead = (re.split(r'(?<=[.!?])\s+(?=[A-Z\u201c"])', txt) or [''])[0]
@@ -326,7 +328,8 @@ def _items(url):
         try: when = ms(dt.datetime.strptime(g('pubDate').strip()[:25], '%a, %d %b %Y %H:%M:%S'))
         except Exception: when = None
         out.append({'title': _h.unescape(re.sub(r'<[^>]+>', '', g('title'))).strip(), 'link': g('link').strip(), 't': when,
-                    'lead': lead[:320], 'img': (enc.group(1) if enc else (img.group(1) if img else '')), 'credit': cr.group(1).strip() if cr else ''})
+                    'lead': lead[:320], 'img': (enc.group(1) if enc else (img.group(1) if img else '')), 'credit': cr.group(1).strip() if cr else '',
+                    'alt': alt.group(1) if alt else '', 'desc': txt[:600]})
     return out
 
 
@@ -341,6 +344,47 @@ def _thumb(src, img):
     return re.sub(r'\?.*$', '', img) + '?w=640'
 
 
+# ONLY DEEP SPACE AND DATA (user 2026-09-24: "dont show rockets and take offs, i only want deep
+# space and data analysis / visuals"). Anything that reads as the mission rather than the sky is
+# dropped; NASA's blog images must also name a science subject, because those blogs mix launch,
+# hardware and team photos in with the science. ESA/Webb's image feed is science by construction.
+NOT_SKY = re.compile(r'launch|rocket|falcon|booster|lift-?off|launch ?pad|clean ?room|technician|engineer|\bcrew\b|\bteam\b|'
+                     r'ceremony|briefing|landing|install|assembl|integrat|deploy|antenna|visor|hardware|thermal protection|'
+                     r'\btps\b|heat shield|fitting|spacecraft|mission control|logo|meatball|insignia|astronaut|facility|'
+                     r'trajectory animation|mid-course|artist.s (?:concept|illustration|rendering) of (?:the )?(?:roman|parker|webb|hubble)', re.I)
+IS_SKY = re.compile(r'galax|nebula|cluster|supernova|\bstars?\b|stellar|planet|exoplanet|\bmoons?\b|jupiter|saturn|uranus|neptune|'
+                    r'comet|asteroid|kuiper|\bsun\b|solar wind|corona|\bcme\b|wispr|flare|spectr|light curve|\bdata\b|chart|graph|'
+                    r'\bplot\b|\bmap\b|visuali|simulat|deep field|universe|cosmic|\bdust\b|black hole|quasar|lens|potm|infrared|'
+                    r'x-ray|ultraviolet|protostar|disk|jet\b|remnant|dwarf|milky way|heliosphere|magnetic', re.I)
+
+
+def _is_sky(src, it):
+    words = ' '.join([it.get('alt', ''), it.get('title', ''), it.get('img', ''), it.get('desc', '')[:300]])
+    if NOT_SKY.search(it.get('alt', '') + ' ' + it.get('img', '') + ' ' + it.get('title', '')): return False
+    # a NASA mission blog's illustrations are of the SPACECRAFT (e.g. Parker drawn against the Sun)
+    if src == 'nasa' and re.search(r'illustrat|artist|concept|swingby|closeup|rendering', it.get('alt', '') + ' ' + it.get('img', ''), re.I): return False
+    return src == 'esa' or bool(IS_SKY.search(words))
+
+
+def _looks_like_sky(th):
+    """The picture itself: a text slide or banner is not the sky. Drops images wider than 3:1
+    and near-white, colourless ones (measured on the "Hubble vs. Roman" quote card, 2026-09-24)."""
+    try:
+        import io as _io
+        from PIL import Image, ImageStat
+        im = Image.open(_io.BytesIO(get(th, timeout=40, tries=2))).convert('RGB')
+        w, h = im.size
+        if w > 3 * h or h > 3 * w: return False
+        im.thumbnail((96, 96))
+        st = ImageStat.Stat(im)
+        mean = sum(st.mean) / 3
+        spread = sum(st.stddev) / 3
+        return not (mean > 200 and spread < 45)
+    except Exception as e:
+        print('  thumb check failed', th[:80], e)
+        return True
+
+
 def bake_media():
     out = {}
     for key, f in FEEDS.items():
@@ -348,7 +392,7 @@ def bake_media():
         for src, url in f['photos']:
             for it in _items(url):
                 th = _thumb(src, it['img'])
-                if not th or th in seen: continue
+                if not th or th in seen or not _is_sky(src, it) or not _looks_like_sky(th): continue
                 seen.add(th)
                 photos.append({'thumb': th, 'title': it['title'], 'link': it['link'], 't': it['t'],
                                'credit': it['credit'] or ('ESA/Webb, NASA & CSA' if src == 'esa' else 'NASA'),
