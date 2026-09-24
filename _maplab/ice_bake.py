@@ -151,6 +151,9 @@ def main():
         except Exception as e:
             print('FAILED', key, e)
             if key in prev: out[key] = prev[key]
+    # the world's glaciers (GlaMBIE per region + label points), made once by rgi_bake.py
+    try: out['world'] = json.loads((ROOT / '_maplab' / 'rgi_regions.json').read_text())
+    except Exception as e: print('no rgi_regions.json', e)
     OUT.write_text(json.dumps(out, separators=(',', ':')))
     print('wrote', OUT, len(json.dumps(out)), 'bytes')
 
