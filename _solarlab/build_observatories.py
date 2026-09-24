@@ -7,7 +7,8 @@ JPL Horizons send no CORS headers -- so a scheduled Action runs this and commits
 files the page reads from its own origin.
 
 Writes:
-  observatories.json        Webb's published observing schedule (the newest week),
+  observatories.json        Webb's published observing schedule (the newest week), Roman's
+                            range + NASA's Roman mission-blog posts,
                             what Hubble and Webb observed in the last ~2 days (NASA MAST),
                             Parker Solar Probe's distance/speed series + perihelia
   _solarlab/_roman.js       Roman's delivered trajectory, launch -> end of the current
@@ -257,13 +258,47 @@ def attach_aims(out, prev):
     print('aims cached', len(cache), 'fetched', fetched)
 
 
+# ── ROMAN: where it is and what the mission team says (user 2026-09-24: "add a 4th spot for roman updates") ──
+ROMAN_BLOG = 'https://science.nasa.gov/blogs/roman/feed/'
+
+
+def bake_roman_card():
+    """Distance from Earth (true 3-D range, 6-hourly across the delivered solution) and the
+    newest posts from NASA's Roman mission blog -- titles and the lead sentence verbatim."""
+    import html as _h
+    launch = dt.datetime(2026, 8, 30, 11, 26, 4, tzinfo=dt.timezone.utc)
+    end = solution_end('-211', '500@399', '2026-08-30 12:00') - dt.timedelta(hours=1)
+    start = max(launch + dt.timedelta(hours=1), NOW - dt.timedelta(days=2)).replace(minute=0, second=0, microsecond=0)
+    out = {'launch': ms(launch), 'arrive_approx': ms(dt.datetime(2026, 11, 30, 11, 26, tzinfo=dt.timezone.utc)),
+           'solution_end': ms(end), 'blog': 'https://science.nasa.gov/mission/roman-space-telescope/'}
+    if start < end:
+        rows = horizons('-211', '500@399', start.strftime('%Y-%m-%d %H:%M'), end.strftime('%Y-%m-%d %H:%M'), '6h')
+        out['range'] = {'t0': ms(rows[0][0]), 'step': 6 * 3600000, 'n': len(rows),
+                        'km': [round(math.sqrt(r[1]**2 + r[2]**2 + r[3]**2)) for r in rows],
+                        'kms': [round(math.sqrt(r[4]**2 + r[5]**2 + r[6]**2), 3) for r in rows]}
+    x = get(ROMAN_BLOG).decode('utf-8', 'replace')
+    posts = []
+    for it in re.findall(r'<item>(.*?)</item>', x, re.S)[:5]:
+        g = lambda t: (re.search(r'<%s>(.*?)</%s>' % (t, t), it, re.S) or [None, ''])[1]
+        desc = _h.unescape(re.sub(r'<[^>]+>', '', g('description').replace('<![CDATA[', '').replace(']]>', '')))
+        desc = re.sub(r'\s+', ' ', desc).strip()
+        lead = (re.split(r'(?<=[.!?])\s+(?=[A-Z\u201c"])', desc) or [''])[0]
+        try: when = ms(dt.datetime.strptime(g('pubDate').strip()[:25], '%a, %d %b %Y %H:%M:%S'))
+        except Exception: when = None
+        posts.append({'title': _h.unescape(re.sub(r'<[^>]+>', '', g('title'))).strip(), 'link': g('link').strip(),
+                      't': when, 'lead': lead[:360]})
+    if not posts: raise RuntimeError('no Roman blog posts parsed')
+    out['posts'] = posts
+    return out
+
+
 def main():
     prev = {}
     try: prev = json.loads((ROOT / 'observatories.json').read_text())
     except Exception: pass
     out = {'built': ms(NOW)}
     # each piece is independent: one source down keeps the last good copy of that piece
-    for key, fn in (('webb', bake_webb_schedule), ('parker', bake_parker),
+    for key, fn in (('webb', bake_webb_schedule), ('parker', bake_parker), ('roman_card', bake_roman_card),
                     ('hubble_obs', lambda: bake_mast('HST')),
                     ('webb_obs', lambda: bake_mast('JWST'))):
         try:
