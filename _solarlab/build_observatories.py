@@ -292,13 +292,85 @@ def bake_roman_card():
     return out
 
 
+# ── PHOTOS + NEWS per observatory (user 2026-09-24: "add a tab ... for their latest photos
+#    and maybe another tab for latest news") ──────────────────────────────────────────────
+# NASA's mission blogs (public domain; each post's own lead image) and ESA/Webb's image and
+# release feeds (CC BY 4.0 -- the credit travels with every picture). Titles and lead
+# sentences verbatim.
+FEEDS = {
+    'webb':   {'photos': [('esa', 'https://esawebb.org/images/feed/')],
+               'news':   [('nasa', 'https://science.nasa.gov/blogs/webb/feed/'), ('esa', 'https://esawebb.org/news/feed/')]},
+    'hubble': {'photos': [('nasa', 'https://science.nasa.gov/category/missions/hubble/feed/')],
+               'news':   [('nasa', 'https://science.nasa.gov/category/missions/hubble/feed/')]},
+    'roman':  {'photos': [('nasa', 'https://science.nasa.gov/blogs/roman/feed/')],
+               'news':   [('nasa', 'https://science.nasa.gov/blogs/roman/feed/')]},
+    'parker': {'photos': [('nasa', 'https://science.nasa.gov/blogs/parker-solar-probe/feed/')],
+               'news':   [('nasa', 'https://science.nasa.gov/blogs/parker-solar-probe/feed/')]},
+}
+
+
+def _items(url):
+    import html as _h
+    x = get(url).decode('utf-8', 'replace')
+    out = []
+    for it in re.findall(r'<item>(.*?)</item>', x, re.S)[:12]:
+        g = lambda t: (re.search(r'<%s>(.*?)</%s>' % (t, t), it, re.S) or [None, ''])[1]
+        raw = g('description') + g('content:encoded')
+        raw = raw.replace('<![CDATA[', '').replace(']]>', '')
+        rawu = _h.unescape(raw)
+        img = re.search(r'<img[^>]+src="([^"]+)"', raw) or re.search(r'<img[^>]+src="([^"]+)"', rawu)
+        enc = re.search(r'<enclosure[^>]+url="([^"]+)"', it)
+        txt = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', rawu)).strip()
+        lead = (re.split(r'(?<=[.!?])\s+(?=[A-Z\u201c"])', txt) or [''])[0]
+        cr = re.search(r'Credit[s]?:\s*([^\n<]{3,160}?)(?:\s{2,}|$|\[|\. )', txt)
+        try: when = ms(dt.datetime.strptime(g('pubDate').strip()[:25], '%a, %d %b %Y %H:%M:%S'))
+        except Exception: when = None
+        out.append({'title': _h.unescape(re.sub(r'<[^>]+>', '', g('title'))).strip(), 'link': g('link').strip(), 't': when,
+                    'lead': lead[:320], 'img': (enc.group(1) if enc else (img.group(1) if img else '')), 'credit': cr.group(1).strip() if cr else ''})
+    return out
+
+
+def _thumb(src, img):
+    # animated GIFs ignore ?w= and run to 3-8 MB (measured 2026-09-24): never on a card
+    if not img or re.search(r'\.gif(?:\?|$)', img, re.I): return ''
+    # a post that only carries the agency logo has no photo to show
+    if re.search(r'meatball|logo|insignia|nasa-worm', img, re.I): return ''
+    if src == 'esa':
+        m = re.search(r'/archives/images/[^/]+/([^/?]+)\.(?:jpg|png|tif)', img)
+        return 'https://cdn.esawebb.org/archives/images/thumb300y/%s.jpg' % m.group(1) if m else img
+    return re.sub(r'\?.*$', '', img) + '?w=640'
+
+
+def bake_media():
+    out = {}
+    for key, f in FEEDS.items():
+        photos, news, seen = [], [], set()
+        for src, url in f['photos']:
+            for it in _items(url):
+                th = _thumb(src, it['img'])
+                if not th or th in seen: continue
+                seen.add(th)
+                photos.append({'thumb': th, 'title': it['title'], 'link': it['link'], 't': it['t'],
+                               'credit': it['credit'] or ('ESA/Webb, NASA & CSA' if src == 'esa' else 'NASA'),
+                               'lic': 'CC BY 4.0' if src == 'esa' else 'public domain'})
+        for src, url in f['news']:
+            for it in _items(url):
+                news.append({'title': it['title'], 'link': it['link'], 't': it['t'], 'lead': it['lead'],
+                             'from': 'ESA/Webb' if src == 'esa' else 'NASA'})
+        news = sorted({n['link']: n for n in news}.values(), key=lambda n: -(n['t'] or 0))[:5]
+        photos = sorted(photos, key=lambda n: -(n['t'] or 0))[:6]
+        out[key] = {'photos': photos, 'news': news}
+        print('  media', key, len(photos), 'photos', len(news), 'news')
+    return out
+
+
 def main():
     prev = {}
     try: prev = json.loads((ROOT / 'observatories.json').read_text())
     except Exception: pass
     out = {'built': ms(NOW)}
     # each piece is independent: one source down keeps the last good copy of that piece
-    for key, fn in (('webb', bake_webb_schedule), ('parker', bake_parker), ('roman_card', bake_roman_card),
+    for key, fn in (('webb', bake_webb_schedule), ('parker', bake_parker), ('roman_card', bake_roman_card), ('media', bake_media),
                     ('hubble_obs', lambda: bake_mast('HST')),
                     ('webb_obs', lambda: bake_mast('JWST'))):
         try:
