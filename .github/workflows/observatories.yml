@@ -1,0 +1,63 @@
+name: Rebake observatories
+
+# Keeps observatories.json (Webb's published schedule, what Hubble and Webb observed
+# in the last two days, Parker's distance/speed and perihelia), _solarlab/_roman.js
+# (Roman's delivered trajectory) and _solarlab/_l2craft.js (JWST + Euclid at L2)
+# fresh. STScI and JPL Horizons send no CORS headers, so this is a bake, not a
+# client fetch. All sources are NASA / STScI / JPL, public domain.
+
+on:
+  schedule:
+    - cron: '41 */3 * * *'   # every 3 hours: MAST lags ~20 h, the schedule is weekly
+  workflow_dispatch: {}
+
+concurrency:
+  group: observatories
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  rebake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bake
+        run: python3 _solarlab/build_observatories.py
+
+      - name: Sanity-check
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import json
+          d = json.load(open('observatories.json'))
+          assert 'built' in d and len(d) >= 3, 'bake produced almost nothing'
+          EOF
+          node --version >/dev/null 2>&1 && node -e "require('vm').runInNewContext(require('fs').readFileSync('_solarlab/_roman.js','utf8'),{window:{}}); require('vm').runInNewContext(require('fs').readFileSync('_solarlab/_l2craft.js','utf8'),{window:{}})"
+
+      - name: Commit if changed
+        run: |
+          set -euo pipefail
+          files="observatories.json _solarlab/_roman.js _solarlab/_l2craft.js"
+          if git diff --quiet -- $files && [ -z "$(git status --porcelain -- $files)" ]; then
+            echo "no change"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          tmp=$(mktemp -d); for f in $files; do cp "$f" "$tmp"/; done
+          git add $files
+          git commit -m "Observatories: refresh Webb schedule, Hubble/Webb observations, Parker, Roman, L2"
+          # the Kalshi lanes push to main all day: replay onto theirs rather than fail
+          for i in 1 2 3; do
+            git push && exit 0
+            echo "push rejected, replaying onto origin/main (attempt $i)"
+            git fetch origin main
+            git reset --hard origin/main
+            for f in $files; do cp "$tmp"/"$(basename "$f")" "$f"; done
+            git add $files
+            git diff --cached --quiet && { echo "origin already has this"; exit 0; }
+            git commit -m "Observatories: refresh Webb schedule, Hubble/Webb observations, Parker, Roman, L2"
+          done
+          exit 1

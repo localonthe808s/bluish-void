@@ -5639,6 +5639,33 @@ var ACTIVE_MISSIONS = [
    next:'Mercury orbit insertion · Nov 2026',
    sum:"Europe and Japan's double orbiter, finishing a seven-year spiral DOWN to Mercury — the hardest planet to stop at, because falling toward the Sun means arriving too fast. Its orbit now nearly matches Mercury's own."}
 ];
+/* PARKER, MEASURED (user 2026-09-23: "build all of it"). The drawn ellipse
+   stays the Kepler propagation above; what it cannot say is when the NEXT
+   perihelion lands to the hour, or exactly how far and fast the probe is
+   this minute. observatories.json (baked every 3 h by the observatories
+   Action from JPL Horizons target -96, heliocentric) carries both: a 3-hourly
+   [AU, km/s] series from two days back to five months ahead, and the
+   perihelia as refined minima. Fetched once; if it never arrives, or the
+   series does not cover this instant, those lines are simply left out.
+   Both read the wall clock, not the map date -- they are live facts. */
+var OBS = null;
+fetch('../observatories.json').then(function(r){ return r.ok ? r.json() : null; })
+  .then(function(j){ OBS = j || null; }).catch(function(){});
+function parkerNow(){
+  var P = OBS && OBS.parker;
+  if (!P || !P.s || !P.n) return null;
+  var f = (Date.now() - P.t0) / P.step;
+  if (f < 0 || f > P.n - 1) return null;
+  var i = Math.min(Math.floor(f), P.n - 2), t = f - i, a = P.s[i], b = P.s[i + 1];
+  return {au: a[0] + (b[0] - a[0]) * t, kms: a[1] + (b[1] - a[1]) * t};
+}
+function parkerNextPeri(){
+  var P = OBS && OBS.parker, now = Date.now();
+  if (!P || !P.perihelia) return null;
+  for (var i = 0; i < P.perihelia.length; i++) if (P.perihelia[i].t > now) return P.perihelia[i];
+  return null;
+}
+var AU_MI = 92955807;
 var activeOn = false, activeBuilt = false;
 var activeNodes = {};                        // id -> {dot, label}
 var jwstNode = null, jwstLabel = null;
@@ -5752,6 +5779,29 @@ function openActivePopup(o, ev){
     row('Speed right now', Math.round(v).toLocaleString() + ' km/s · ' + Math.round(v*2236.94).toLocaleString() + ' mph') +
     row('Current orbit', o.q.toFixed(2) + ' – ' + (a*(1+o.e)).toFixed(2) + ' AU · ' + (perDays < 500 ? Math.round(perDays) + ' days' : (perDays/365.25).toFixed(1) + ' yr')) +
     row('Next up', o.next);
+  /* Parker only: the Horizons numbers (see parkerNow) -- NEXT CLOSEST PASS
+     from the refined perihelia, NOW interpolated off the 3-hourly series */
+  var hz = false;
+  if (o.id === 'parker'){
+    var pk = parkerNextPeri(), pn = parkerNow();
+    if (pk || pn){
+      hz = true;
+      h += FS('Closest passes');
+      if (pk){
+        var dd = (pk.t - Date.now()) / 86400000;
+        var inTxt = dd < 1 ? 'IN ' + Math.max(1, Math.round(dd * 24)) + ' HOURS'
+                           : 'IN ' + Math.round(dd) + (Math.round(dd) === 1 ? ' DAY' : ' DAYS');
+        h += row('Next closest pass',
+          new Date(pk.t).toLocaleDateString('en-US', {timeZone: LOCATION.tz, month:'short', day:'numeric'}).toUpperCase() +
+          ' · ' + inTxt) +
+          row('At closest', (pk.au * AU_MI / 1e6).toFixed(2) + ' million mi · ' + pk.au.toFixed(3) + ' AU · ' +
+              (Math.round(pk.kms * 2236.94 / 1000) * 1000).toLocaleString() + ' mph');
+      }
+      if (pn)
+        h += row('Now', pn.au.toFixed(3) + ' AU · ' + (pn.au * AU_MI / 1e6).toFixed(1) + ' million mi · ' +
+                 (Math.round(pn.kms * 2236.94 / 100) * 100).toLocaleString() + ' mph · ' + pn.kms.toFixed(1) + ' km/s');
+    }
+  }
   window._openInsightModal({
     centered: true,
     title: o.full,
@@ -5760,7 +5810,8 @@ function openActivePopup(o, ev){
     heroBg: o.img ? '#0b1226' : '',
     h: h,
     footer: (o.imsrc ? _src(o.imsrc, 'Spacecraft render') : 'Spacecraft render') + ' — NASA (public domain) · Osculating elements: ' +
-      _src('https://ssd.jpl.nasa.gov/horizons/app.html', 'JPL Horizons') + ', epoch 2026-07-27 · the drawn ellipse is the orbit it is riding today, good until its next gravity assist'
+      _src('https://ssd.jpl.nasa.gov/horizons/app.html', 'JPL Horizons') + ', epoch 2026-07-27 · the drawn ellipse is the orbit it is riding today, good until its next gravity assist' +
+      (hz ? ' · closest passes and NOW: ' + _src('https://ssd.jpl.nasa.gov/horizons/app.html', 'JPL Horizons') + ' ephemeris, rebaked every 3 h' : '')
   });
   requestAnimationFrame(function(){
     var pp = document.getElementById('planet-insight-popup');
@@ -6401,6 +6452,7 @@ window.focusPlanet = focusPlanet;
    comes with missionsOn via wideOn(), so the pan clamp already allows it. */
 function focusCraft(id, opts){
   var ms = MISSIONS.filter(function(x){ return x.id === id; })[0];
+  if (!ms && ACTIVE_MISSIONS.some(function(x){ return x.id === id; })) return focusActive(id, opts);
   if (!ms || !CRAFT_NOW[id]) return false;
   opts = opts || {};
   tonightOn = false;
@@ -6439,6 +6491,44 @@ function focusCraft(id, opts){
   return true;
 }
 window.focusCraft = focusCraft;
+/* The FLYING NOW craft by the same message (user 2026-09-23: the host's
+   PARKER card posts {solarCraft:'parker'}): SOLAR SYSTEM tab, FLYING NOW
+   on, camera to where the craft is on the map date, then its card -- the
+   one with NEXT CLOSEST PASS. The host pokes until booted; a poke while a
+   fly-to is under way, or while that card is already up, is a no-op. */
+var _faPending = null;
+function focusActive(id, opts){
+  var o = ACTIVE_MISSIONS.filter(function(x){ return x.id === id; })[0];
+  if (!o) return false;
+  if (_faPending === id) return true;
+  /* the insight popup exists only while open (_closePlanetPopup removes it) */
+  var pp0 = document.getElementById('planet-insight-popup');
+  if (pp0 && pp0.textContent.indexOf(o.full) > -1) return true;
+  opts = opts || {};
+  tonightOn = false;
+  setViewTab('compressed');
+  if (window.self !== window.top)
+    try { parent.postMessage({solarTabChanged:'compressed'}, '*'); } catch(err){}
+  if (!activeOn) activeOn = true;
+  buildActivePaths();
+  updateActiveMarkers();
+  updateActiveVisibility();
+  var p = cometPos(o, curMs), q = missionXY([p.r, p.lon]);
+  var w = Math.max(MIN_W, opts.w || 160);
+  var bv = baseView();
+  var x = Math.min(bv.x + bv.w - w, Math.max(bv.x, q[0] - w/2));
+  var y = Math.min(bv.y + bv.w - w, Math.max(bv.y, q[1] - w/2));
+  animateView(x, y, w);
+  render();
+  _faPending = id;
+  if (opts.popup !== false) setTimeout(function(){
+    _faPending = null;
+    openActivePopup(o, {clientY: 200});
+  }, 320);
+  else _faPending = null;
+  return true;
+}
+window.focusActive = focusActive;
 /* Same jump for a meteor shower's radiant (host's shower cards). Radiants
    live on the sky layer, which is transform-scaled with the frame — compute
    the target with the k the DESTINATION view gets (applyView re-applies the
