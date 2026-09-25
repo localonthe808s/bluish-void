@@ -97119,6 +97119,106 @@ function closeAlertModal(){
        colour from 26 m/s, full dark red by 86 m/s) and the model's wind over the viewer. The line under the globe is a caption. */
     var JETKEY = [[58, [254, 240, 190]], [92, [253, 186, 116]], [125, [234, 88, 12]], [159, [185, 28, 28]], [192, [110, 10, 20]]];
     var jetLine = function(){ line('<span style="color:#1d4ed8;font-weight:900;letter-spacing:.06em;">THE JET STREAM</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">· the wind about 34,000 ft up, drawn by the model’s own flow. Drag to turn; LOOK DOWN ON THE POLE shows the whole ring.</span>'); };
+    /* THE JET AND YOU, THE PATTERN, THE FASTEST, THE FLIGHTS (user 2026-09-24: "what else can you add here?" -> "do all 5").
+       All read off the same model frames the PLAY button loads -- 21 six-hourly u/v pairs at 250 hPa, decoded to m/s by
+       GLOBE.FLOW.grey -- so nothing new is fetched when the forecast has played (the browser has them). Every number here is
+       the model's, labelled so. */
+    var JETX = { run: null, frames: null, busy: false, err: false };
+    var jxTimes = function(){ var out = []; for (var k = 0; k < 21; k++){ var n = new Date(); n.setUTCMinutes(0, 0, 0); n.setUTCHours(Math.floor(n.getUTCHours() / 6) * 6 + 6 * k); out.push(n); } return out; };
+    var jxLoad = function(){
+      var run = GFSRUN.words(); if (JETX.busy || (JETX.frames && JETX.run === run)) return;
+      JETX.busy = true; JETX.err = false; var T = jxTimes(), F = GLOBE.FLOW;
+      Promise.all(T.map(function(n){ var iso = n.toISOString().slice(0, 13) + ':00:00.000Z';
+          return Promise.all([GLOBE.img(F.url(JETF, 'u', iso, true)), GLOBE.img(F.url(JETF, 'v', iso, true))]).then(function(ims){
+            return { t: n.getTime(), u: F.grey(ims[0], -JETF.range, JETF.range), v: F.grey(ims[1], -JETF.range, JETF.range) }; }, function(){ return null; }); }))
+        .then(function(fr){ JETX.busy = false; fr = fr.filter(Boolean); if (fr.length < 4){ JETX.err = true; } else { JETX.frames = fr; JETX.run = run; } jxRender(); if (CUR === 'jet') GLOBE.dirty = true; },
+              function(){ JETX.busy = false; JETX.err = true; jxRender(); });
+    };
+    var jxUV = function(f, la, lo){ return [GLOBE.FLOW.sample(f.u, la, lo), GLOBE.FLOW.sample(f.v, la, lo)]; };
+    var jxSpd = function(f, la, lo){ var q = jxUV(f, la, lo); return Math.sqrt(q[0] * q[0] + q[1] * q[1]); };
+    var MPH = 2.23694;
+    /* the jet's core at one longitude: the fastest wind between 20 and 75 N (or S), if it is a jet at all (>= 25 m/s) */
+    var jxCore = function(f, lo, south){ var best = 0, bl = null; for (var la = 20; la <= 75; la += 0.7){ var L2 = south ? -la : la, s2 = jxSpd(f, L2, lo); if (s2 > best){ best = s2; bl = L2; } } return best >= 25 ? { lat: bl, ms: best } : null; };
+    var jxRegion = function(la, lo){
+      if (la > 20 && la < 55 && lo > 110 && lo < 160) return 'Japan and the North Pacific';
+      if (la > 20 && lo >= 160 || la > 20 && lo < -135) return 'the North Pacific';
+      if (la > 20 && lo >= -135 && lo < -60) return 'North America';
+      if (la > 20 && lo >= -60 && lo < -10) return 'the North Atlantic';
+      if (la > 20 && lo >= -10 && lo < 40) return 'Europe';
+      if (la > 20 && lo >= 40 && lo <= 110) return 'Asia';
+      if (la < -20 && lo > 110 && lo < 180) return 'Australia and the Tasman Sea';
+      if (la < -20 && lo > -80 && lo < -30) return 'South America';
+      if (la < -35) return 'the Southern Ocean';
+      return 'the tropics'; };
+    /* great-circle points A -> B */
+    var jxGC = function(a, b, n){ var r = Math.PI / 180, la1 = a[0] * r, lo1 = a[1] * r, la2 = b[0] * r, lo2 = b[1] * r, d = 2 * Math.asin(Math.sqrt(Math.pow(Math.sin((la2 - la1) / 2), 2) + Math.cos(la1) * Math.cos(la2) * Math.pow(Math.sin((lo2 - lo1) / 2), 2))), out = [];
+      for (var i = 0; i <= n; i++){ var f = i / n, A = Math.sin((1 - f) * d) / Math.sin(d), B = Math.sin(f * d) / Math.sin(d), x = A * Math.cos(la1) * Math.cos(lo1) + B * Math.cos(la2) * Math.cos(lo2), y = A * Math.cos(la1) * Math.sin(lo1) + B * Math.cos(la2) * Math.sin(lo2), z = A * Math.sin(la1) + B * Math.sin(la2);
+        out.push([Math.atan2(z, Math.sqrt(x * x + y * y)) / r, Math.atan2(y, x) / r]); } return { pts: out, mi: d * 3958.8 }; };
+    /* mean wind along the track, positive = helping (m/s) */
+    var jxTail = function(f, g){ var s = 0, n = 0; for (var i = 0; i < g.pts.length - 1; i++){ var p = g.pts[i], q = g.pts[i + 1], dy = q[0] - p[0], dx = (q[1] - p[1]) * Math.cos(p[0] * Math.PI / 180), L = Math.sqrt(dx * dx + dy * dy) || 1, w = jxUV(f, p[0], p[1]); s += (w[0] * dx + w[1] * dy) / L; n++; } return s / n; };
+    var jxAnnot = function(c){ var X = JETX.fast; if (!X) return; var m = c.proj(X.lat, X.lon); if (m[2] < 0.15) return;
+      c.ov.strokeStyle = '#fff'; c.ov.lineWidth = 2; c.ov.beginPath(); c.ov.arc(m[0], m[1], 7, 0, 6.3); c.ov.stroke();
+      c.word('FASTEST · ' + Math.round(X.ms * MPH / 5) * 5 + ' MPH', m[0] + 10, m[1] + 3, '#fff', '900 9px system-ui,sans-serif'); };
+    var jxRender = function(){ var el = document.getElementById('es-jetx'); if (!el || CUR !== 'jet') return;
+      if (JETX.err){ el.innerHTML = airM('THE FIVE-DAY WIND COULD NOT BE HAD JUST NOW.', '#b91c1c'); return; }
+      if (!JETX.frames){ el.innerHTML = airM('READING THE NEXT FIVE DAYS OF WIND…', '#6b7389'); jxLoad(); return; }
+      var loc = window.LOCATION || {}, la0 = +loc.lat, lo0 = +loc.lon, nm = String(loc.name || 'YOU').toUpperCase(), south = la0 < 0, FR = JETX.frames, f0 = FR[0], tz = loc.tz || undefined;
+      var day = function(t){ try { return new Date(t).toLocaleDateString('en-US', { weekday: 'long', timeZone: tz }).toUpperCase(); } catch(e){ return ''; } };
+      var H = function(t){ return '<div style="font:900 10px system-ui,sans-serif;letter-spacing:.14em;color:#1d4ed8;margin-top:14px;">' + t + '</div>'; };
+      var html = '';
+      /* 1 + 2: THE JET AND YOU */
+      if (isFinite(la0)){
+        var rows = FR.map(function(f){ var c = jxCore(f, lo0, south); return { t: f.t, over: jxSpd(f, la0, lo0) * MPH, core: c }; });
+        var side = function(r){ if (!r.core) return 'none'; var d = r.core.lat - la0; if (Math.abs(d) < 2.5) return 'over'; return (south ? d > 0 : d < 0) ? 'cold' : 'warm'; };
+        var now = side(rows[0]), chg = null; for (var i = 1; i < rows.length; i++){ var s2 = side(rows[i]); if (s2 !== now && s2 !== 'none'){ chg = { i: i, s: s2 }; break; } }
+        var SIDE = { cold: 'on the COLD side of the jet: it runs south of ' + nm.toLowerCase().replace(/\b\w/g, function(c){ return c.toUpperCase(); }) + ', so polar air is over you', warm: 'on the WARM side of the jet: it runs to the north, so the air over you came up from the south', over: 'right under the jet', none: 'nowhere near a jet: the upper winds over you are light' };
+        /* a strong upper wind over you with the main jet far away = a branch broken off near you (a cut-off low): then the
+           "warm side" reads wrong, so the panel says what is really overhead (the 09-24 nor'easter sat exactly so) */
+        var cut = function(r){ return r.core && Math.abs(r.core.lat - la0) >= 8 && r.over >= 50; };
+        var line1 = cut(rows[0]) ? 'The main jet runs well ' + ((rows[0].core.lat > la0) === !south ? 'north' : 'south') + ' of you, but a broken-off loop of it is swirling close by: a cut-off low, the kind that parks a storm in place for days.'
+          : 'Right now you are ' + SIDE[now] + '.';
+        var cutNow = cut(rows[0]);
+        var easeI = -1; if (cutNow){ for (var ei = 1; ei < rows.length; ei++) if (rows[ei].over < 35){ easeI = ei; break; } }
+        if (cutNow) line1 += easeI > 0 ? ' Its wind high over you drops below 35 mph by ' + day(rows[easeI].t).toLowerCase().replace(/^\w/, function(c){ return c.toUpperCase(); }) + ' (light wind aloft can mean the low\u2019s centre is right overhead, not that it has gone).' : ' It stays with you through the next five days.';
+        else if (chg) line1 += ' That changes around ' + day(rows[chg.i].t).toLowerCase().replace(/^\w/, function(c){ return c.toUpperCase(); }) + ', when you end up ' + (chg.s === 'cold' ? 'on the cold side: cooler air follows' : chg.s === 'warm' ? 'on the warm side: milder air follows' : chg.s === 'over' ? 'right under it: stormier, windier weather rides along it' : 'away from it') + '.';
+        else line1 += ' That holds for the next five days.';
+        var mx = rows.reduce(function(a, r){ return r.over > a.over ? r : a; }, rows[0]);
+        html += H('THE JET AND YOU') + '<div style="font:500 11.5px/1.45 system-ui,sans-serif;color:#1b2340;margin-top:4px;">' + line1 + '</div>'
+          + '<canvas id="es-jetx-c" style="display:block;width:100%;height:120px;margin-top:8px;"></canvas>'
+          + airM('WIND ABOUT 34,000 FT ABOVE ' + nm + ', MPH, NEXT FIVE DAYS · STRONGEST: ' + Math.round(mx.over / 5) * 5 + ' MPH ' + day(mx.t) + ' · THE MODEL’S WIND, NOT A MEASUREMENT', '#6b7389');
+        JETX.series = rows;
+      }
+      /* 3: TROUGHS AND RIDGES over North America (the core's latitude, longitude by longitude) */
+      /* the core as the speed-weighted latitude of everything jet-strength (>= 25 m/s) between 25 and 72 N, smoothed over
+         +-6 degrees of longitude: the single-fastest-point core jumped between broken branches round this week's cut-off low
+         and put a trough and a ridge in the same place (2026-09-24) */
+      var raw = []; for (var lo = -134; lo <= -56; lo += 2){ var sw = 0, sl = 0; for (var la = 25; la <= 72; la += 0.7){ var sp3 = jxSpd(f0, la, lo); if (sp3 >= 25){ sw += sp3 - 20; sl += (sp3 - 20) * la; } } raw.push(sw > 0 ? { lo: lo, lat: sl / sw } : null); }
+      var cores = []; for (var k3 = 3; k3 < raw.length - 3; k3++){ var n3 = 0, t3 = 0; for (var d3 = -3; d3 <= 3; d3++){ if (raw[k3 + d3]){ n3++; t3 += raw[k3 + d3].lat; } } if (n3 >= 4) cores.push({ lo: -134 + k3 * 2, lat: t3 / n3 }); }
+      var zone = function(lo){ return lo < -105 ? 'the West' : lo < -90 ? 'the Plains' : lo < -75 ? 'the Great Lakes and Ohio Valley' : 'the East Coast'; };
+      if (cores.length > 12){
+        var lowest = cores.reduce(function(a, c){ return c.lat < a.lat ? c : a; }), far = cores.filter(function(c){ return Math.abs(c.lo - lowest.lo) >= 20; }),
+            highest = far.length ? far.reduce(function(a, c){ return c.lat > a.lat ? c : a; }) : null, amp = highest ? highest.lat - lowest.lat : 0;
+        var said = !highest || amp < 6 ? 'The jet runs fairly straight across the country today: weather keeps moving, nothing gets stuck.'
+          : 'A <b style="font-weight:700;">dip</b> (a trough) over ' + zone(lowest.lo) + ', where the jet sags to about ' + Math.round(lowest.lat) + '\u00b0N: cooler and unsettled under it. A <b style="font-weight:700;">bulge</b> (a ridge) over ' + zone(highest.lo) + ', up to ' + Math.round(highest.lat) + '\u00b0N: warmer and settled under that.'
+            + (amp > 14 ? ' A pattern this wavy moves slowly, so the weather under each part tends to stick around.' : '');
+        html += H('TROUGHS AND RIDGES') + '<div style="font:500 11.5px/1.45 system-ui,sans-serif;color:#1b2340;margin-top:4px;">' + said + '</div>';
+      }
+      /* 4: THE FASTEST ON EARTH, right now */
+      var fast = { ms: 0 }, W = f0.u.w, Hh = f0.u.h;
+      for (var y = 0; y < Hh; y++) for (var x = 0; x < W; x++){ var i2 = y * W + x, u = f0.u.d[i2], v = f0.v.d[i2], sp = u * u + v * v; if (sp > fast.ms){ fast = { ms: sp, lat: 90 - (y + 0.5) / Hh * 180, lon: (x + 0.5) / W * 360 - 180 }; } }
+      fast.ms = Math.sqrt(fast.ms); JETX.fast = fast;
+      html += H('THE FASTEST JET ON EARTH RIGHT NOW') + '<div style="font:500 11.5px/1.45 system-ui,sans-serif;color:#1b2340;margin-top:4px;">About <b style="font-weight:800;">' + Math.round(fast.ms * MPH / 5) * 5 + ' mph</b> over ' + jxRegion(fast.lat, fast.lon) + ', circled on the globe.' + (fast.ms * MPH > 200 ? ' Past 200 mph is rare, even in winter.' : '') + '</div>';
+      /* 5: FLIGHTS: New York <-> London on the great circle, cruising about 560 mph through the air */
+      var g = jxGC([40.64, -73.78], [51.47, -0.45], 40), tail = jxTail(f0, g) * MPH, TAS = 560, hE = g.mi / (TAS + tail), hW = g.mi / (TAS - tail), h0 = g.mi / TAS;
+      var mm = function(h){ var m = Math.round(Math.abs(h) * 60); return m >= 60 ? Math.floor(m / 60) + ' h ' + (m % 60) + ' min' : m + ' min'; };
+      html += H('FLIGHT TAILWINDS · NEW YORK ↔ LONDON') + '<div style="font:500 11.5px/1.45 system-ui,sans-serif;color:#1b2340;margin-top:4px;">'
+        + (tail >= 0 ? 'Flying east tonight, the jet adds about <b style="font-weight:800;">' + Math.round(tail) + ' mph</b> along the route: roughly <b style="font-weight:800;">' + mm(h0 - hE) + ' faster</b> than in still air, and about ' + mm(hW - h0) + ' slower coming back.'
+                     : 'Unusually, the upper wind is against eastbound flights tonight, by about ' + Math.round(-tail) + ' mph: roughly ' + mm(hE - h0) + ' slower than in still air.') + '</div>'
+        + airM('THE MODEL’S WIND AVERAGED ALONG THE STRAIGHTEST ROUTE (A GREAT CIRCLE), AT A 560 MPH CRUISE · AN ESTIMATE: AIRLINES PICK THEIR OWN TRACKS TO RIDE THE JET', '#6b7389');
+      el.innerHTML = html;
+      if (JETX.series){ var cv = document.getElementById('es-jetx-c'); iceLine2(cv, [{ pts: JETX.series.map(function(r, k){ return [k, r.over]; }), col: '#1d4ed8', w: 2.2 }],
+          { x0: 0, x1: JETX.series.length - 1, lo: 0, xt: JETX.series.map(function(r, k){ return [k, r]; }).filter(function(a){ return new Date(a[1].t).getUTCHours() === 12; }).map(function(a){ return [a[0], day(a[1].t).slice(0, 3)]; }), yfmt: function(v){ return String(Math.round(v)); } }); }
+      if (CUR === 'jet'){ GLOBE.annot = jxAnnot; GLOBE.dirty = true; } };
     var jetPanel = function(){ var p = document.getElementById('es-panel'); if (!p || CUR !== 'jet') return;
       var loc = window.LOCATION || {}, y = isFinite(+loc.lat) && isFinite(+loc.lon) && GLOBE.FLOW && GLOBE.FLOW.say ? GLOBE.FLOW.say(+loc.lat, +loc.lon) : null;
       p.innerHTML = airHead('THE JET STREAM', '#1d4ed8', 'A river of wind about 34,000 ft up, blowing west to east round the whole planet where cold polar air meets warm air from the south. Every streak on the globe is carried by the model’s own wind, faster where the jet is faster. Press <b style="font-weight:700;">LOOK DOWN ON THE POLE</b> to see it as what it is: a wavy ring round the top of the world.')
@@ -97127,9 +97227,10 @@ function closeAlertModal(){
         + (y ? airM('ABOUT 34,000 FT ABOVE ' + String(loc.name || 'YOU').toUpperCase() + ' · ' + y.mph + ' MPH FROM THE ' + y.from, '#2B22F4').replace('margin-top:6px', 'margin-top:0')
              + airM('THE MODEL’S WIND THERE, NOT A MEASUREMENT', '#6b7389')
              : airM('READING THE MODEL…', '#6b7389').replace('margin-top:6px', 'margin-top:0')) + '</div>'
+        + '<div id="es-jetx"></div>'
         + '<div style="font:900 10px system-ui,sans-serif;letter-spacing:.14em;color:#1d4ed8;margin-top:14px;">WHY IT MATTERS</div>'
         + '<div style="font:500 11.5px/1.45 system-ui,sans-serif;color:#1b2340;margin-top:4px;">It steers the weather. Storms and fronts ride along it, a dip in it pulls a hurricane north and out to sea, and when it bends south over the East it brings the cold and the nor’easters. A strong El Niño drags the Pacific branch south and east.</div>'
-        + airM('NOAA GFS MODEL VIA UNIDATA · ' + GFSRUN.words().toUpperCase() + ' · PRESS PLAY FOR THE NEXT FIVE DAYS', '#6b7389'); };
+        + airM('NOAA GFS MODEL VIA UNIDATA · ' + GFSRUN.words().toUpperCase() + ' · PRESS PLAY FOR THE NEXT FIVE DAYS', '#6b7389'); jxRender(); };
     var jetPlayGlobe = function(){ globeBtn(null); var list = []; for (var k = 0; k < 21; k++){ var n = new Date(); n.setUTCMinutes(0, 0, 0); n.setUTCHours(Math.floor(n.getUTCHours() / 6) * 6 + 6 * k); var iso = n.toISOString().slice(0, 13) + ':00:00.000Z';
         list.push({ url: GLOBE.FLOW.url(JETF, 'u', iso, true), url2: GLOBE.FLOW.url(JETF, 'v', iso, true), label: jetWhen(n) }); }
       GPLAY.start(list, 'JET STREAM FORECAST', function(o){ if (o.phase === 'stopped' && CUR === 'jet' && STAGE === 'globe'){ GLOBE.dye(JETF, 'jet'); globeBtn('▶ PLAY THE NEXT 5 DAYS', jetPlayGlobe); } }, 320,
