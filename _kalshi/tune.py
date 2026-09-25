@@ -37,8 +37,9 @@ KNOBS = collections.OrderedDict([
     ('swing_damp', [0.0, 0.05, 0.10]),   # K.SWING_DAMP, how much of a warm-up the models overdo
     ('sd_floor',   [0.25, 0.40]),        # K.SD_FLOOR, the least spread the ladder may claim
     ('drop_worst', [0, 2]),              # runs left out of the mean by trailing MAE (New York: 2, measured 2026-09-15)
+    ('wind_regime', [False, True]),      # the morning-wind lean (wind_regime.py, 2026-09-25); only where a table exists
 ])
-CFG_KNOBS = ('skill', 'bias_hl', 'sd_mult', 'drop_worst')
+CFG_KNOBS = ('skill', 'bias_hl', 'sd_mult', 'drop_worst', 'wind_regime')
 # THE LISTS GROW ON THEIR OWN (2026-09-07). A knob chosen at the END of its
 # list is a knob whose best value may lie beyond it, so the next week's list
 # for that city gains one more step in that direction, within a sane bound.
@@ -84,7 +85,7 @@ def score(hist, keys):
 
 def defaults_of(cfg):
     return {'skill': bool(cfg.get('skill', True)), 'bias_hl': cfg.get('bias_hl'), 'sd_mult': float(cfg.get('sd_mult', 1.0)),
-            'drop_worst': int(cfg.get('drop_worst') or 0), 'bias_k': K.BIAS_K, 'swing_damp': K.SWING_DAMP, 'sd_floor': K.SD_FLOOR}
+            'drop_worst': int(cfg.get('drop_worst') or 0), 'wind_regime': bool(cfg.get('wind_regime')), 'bias_k': K.BIAS_K, 'swing_damp': K.SWING_DAMP, 'sd_floor': K.SD_FLOOR}
 
 
 def replay_with(cfg, st):
@@ -95,6 +96,13 @@ def replay_with(cfg, st):
         sys.argv.append('--backfill')
     doc = R.replay(c)
     return {h['date']: h for h in doc.get('history', []) if h.get('actual') is not None and 'lock' in h}
+
+
+def _wr_keys():
+    try:
+        return set(k for k in json.load(open(os.path.join(HERE, 'wind_regime.json'))) if k.endswith('_high'))
+    except Exception:
+        return set()
 
 
 def key_of(st):
@@ -149,6 +157,8 @@ def tune(cfg, prev):
     for p in range(PASSES):
         moved = False
         for knob, vals in lists.items():
+            if knob == 'wind_regime' and key not in _wr_keys():
+                continue                 # no fitted table for this city: the replays would be identical
             best = None
             for v in vals:
                 if v == cur[knob]:

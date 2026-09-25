@@ -64,7 +64,7 @@ Kalshi prices live in the *_dollars fields.  The legacy integer-cent fields
 (yes_bid, last_price) are present but always null -- do not read them.
 """
 
-import json, math, os, statistics, sys, urllib.request, urllib.error
+import json, math, os, statistics, sys, urllib.parse, urllib.request, urllib.error
 import io, csv, re, base64, collections, datetime, time
 import threading, concurrent.futures as cf
 RUN_STARTED = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -85,10 +85,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # Chicago settles on CLIMDW, which is MIDWAY, not O'Hare -- the two routinely
 # differ by a degree and O'Hare would have been wrong all season.
 def _mkt(key, series, city, station, net, lat, lon, tz, tzl, cli, slug, wfo=None,
-         skill=True, twc_geocode=False, bias_hl=None, sd_mult=1.0, drop_worst=0):
+         skill=True, twc_geocode=False, bias_hl=None, sd_mult=1.0, drop_worst=0, wind_regime=False):
     return {'key': key, 'series': series, 'label': city + ' daily high',
             'wfo': wfo, 'skill': skill, 'twc_geocode': twc_geocode, 'bias_hl': bias_hl,
-            'sd_mult': sd_mult, 'drop_worst': drop_worst,
+            'sd_mult': sd_mult, 'drop_worst': drop_worst, 'wind_regime': wind_regime,
             'station': station, 'network': net, 'lat': lat, 'lon': lon,
             'field': 'max_temp_f', 'tz': tz, 'tzlabel': tzl,
             'city': city, 'cli': cli,
@@ -1704,7 +1704,82 @@ def point_forecast(fcm, biases, key, hour, yday):
     p = sum(v * w for v, w in zip(vals, ws)) / sum(ws)
     if yday is not None:
         p -= SWING_DAMP * max(0.0, p - yday)
+    # the models' known lean for this morning's wind (see wind_corr); 0 unless the market has it on
+    p -= wind_corr(key)
     return p
+
+
+# THE MORNING WIND REGIME (2026-09-25; wind_regime.py has the measurement). The models' peak runs cold
+# when the morning wind comes off the water from the NE-E (-0.33 degF over 231 New York days, the same in
+# 2024, 2025 and 2026) and warm when it comes off the land from the W-NW (+0.4 to +0.65). The EWMA bias cannot
+# see it: it averages a week, and the regime flips day to day. wind_regime.py fits the lean per sector
+# nightly and writes, for every past day, the correction that day would have had from EARLIER days only
+# (by_day) -- so the backfill, the residual spread and the tuner's replays carry no future information --
+# plus today's table. Today's sector comes from the airport's 8-11 AM wind, vector-averaged; before 8 AM
+# there is none and nothing is applied, and before 11 the window is partial (the replays use the full one,
+# which flatters their pre-noon hours slightly; the noon lock, which the tuner scores, is exact).
+# Applied only where cfg['wind_regime'] is on -- a tuner knob, so it ships only past the guardrails.
+_WR = {'doc': None, 'at': 0.0}
+_WR_TODAY = {}
+
+
+def _wr_doc():
+    if _WR['doc'] is None or time.time() - _WR['at'] > 3600:
+        try:
+            _WR['doc'] = json.load(open(os.path.join(HERE, 'wind_regime.json')))
+        except Exception:
+            _WR['doc'] = {}
+        _WR['at'] = time.time()
+    return _WR['doc']
+
+
+def morning_wind_sector(cfg, day_iso, station):
+    """The airport's 8-11 AM local wind today -> sector name ('NE', 'calm', ...) or None. Cached 10 min."""
+    ck = (station, day_iso)
+    hit = _WR_TODAY.get(ck)
+    if hit and time.time() - hit[0] < 600:
+        return hit[1]
+    d0 = datetime.date.fromisoformat(day_iso); d1 = d0 + datetime.timedelta(days=1)
+    tz = urllib.parse.quote(cfg.get('tz', 'America/New_York'))
+    sec = None
+    try:
+        txt = get('https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station=%s&data=drct&data=sknt'
+                  '&year1=%d&month1=%d&day1=%d&year2=%d&month2=%d&day2=%d&tz=%s&format=onlycomma&latlon=no&elev=no'
+                  '&missing=M&trace=T&direct=no&report_type=3'
+                  % (station, d0.year, d0.month, d0.day, d1.year, d1.month, d1.day, tz), timeout=30)
+        if isinstance(txt, bytes):
+            txt = txt.decode('utf-8', 'replace')
+        pairs = []
+        for r in csv.DictReader(io.StringIO(txt)):
+            v = r.get('valid') or ''
+            if v[:10] == day_iso and 8 <= int(v[11:13]) <= 11 and r.get('drct') not in (None, 'M', '') and r.get('sknt') not in (None, 'M', ''):
+                pairs.append((float(r['drct']), float(r['sknt'])))
+        if pairs:
+            u = sum(-k * math.sin(math.radians(a)) for a, k in pairs); w = sum(-k * math.cos(math.radians(a)) for a, k in pairs)
+            deg, kt = (math.degrees(math.atan2(-u, -w)) + 360) % 360, math.hypot(u, w) / len(pairs)
+            sec = 'calm' if kt < 4 else ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][int(((deg + 22.5) % 360) // 45)]
+    except Exception as e:
+        print('morning wind %s unavailable (%s)' % (station, e))
+    _WR_TODAY[ck] = (time.time(), sec)
+    return sec
+
+
+def wind_corr(key):
+    """degF to subtract from the point forecast for date `key` (a lean of -0.34 raises it by 0.34)"""
+    cfg = getattr(_TL, 'cfg', None)
+    if not cfg or not cfg.get('wind_regime'):
+        return 0.0
+    r = _wr_doc().get(cfg['key'])
+    if not r:
+        return 0.0
+    bd = (r.get('by_day') or {}).get(key)
+    if bd:
+        return float(bd.get('c') or 0.0)
+    if key == local_now(cfg).date().isoformat() and r.get('wind_station'):
+        s = morning_wind_sector(cfg, key, r['wind_station'])
+        if s:
+            return float((r.get('table') or {}).get(s, 0.0))
+    return 0.0
 
 
 def residuals(fcm, biases_of, daily, obh, hour, today_key, h0_of):
@@ -3300,7 +3375,7 @@ def restore_globals(saved):
 
 def params_of(cfg):
     p = {'skill': bool(cfg.get('skill', True)), 'bias_hl': cfg.get('bias_hl'), 'sd_mult': cfg.get('sd_mult', 1.0),
-         'drop_worst': int(cfg.get('drop_worst') or 0)}
+         'drop_worst': int(cfg.get('drop_worst') or 0), 'wind_regime': bool(cfg.get('wind_regime'))}
     p.update({k: v for k, v in (cfg.get('_globals') or {}).items() if k in TUNABLE_GLOBALS})
     return p
 
@@ -4898,7 +4973,7 @@ def main():
         for cfg in RUN:
             a = (_tuned.get(cfg['key']) or {}).get('active')
             if a and (_tuned.get(cfg['key']) or {}).get('n', 0) >= 45:
-                cfg.update({k: a[k] for k in ('skill', 'bias_hl', 'sd_mult', 'drop_worst') if k in a})
+                cfg.update({k: a[k] for k in ('skill', 'bias_hl', 'sd_mult', 'drop_worst', 'wind_regime') if k in a})
                 g = {k: a[k] for k in TUNABLE_GLOBALS if k in a}
                 if g:
                     cfg['_globals'] = g
