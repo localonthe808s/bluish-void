@@ -55650,8 +55650,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                 var mo = cwMeasureMotion(ims[0], ims[urls.length - 1], (urls.length - 1) * stepMs / 60000, wv, cwWideFetchBox(wv));
                 if (mo){
                   if (window._cwStorm && !window._cwStorm.measured) window._cwStormSteer = window._cwStorm;
-                  window._cwStorm = { toward: mo.toward, mph: Math.max(mo.mph, 5), measured: true, at: Date.now(), src: wv.id, match: mo.match };
-                  console.log('[CITY] storm motion from the radar: toward ' + mo.toward + ' at ' + mo.mph + ' mph (match ' + mo.match + ', ' + mo.n + ' echo px, ' + mo.span + ' min)');
+                  window._cwStorm = { toward: mo.toward, mph: Math.max(mo.mph, 5), measured: true, at: Date.now(), src: wv.id, match: mo.match, edge: !!mo.edge };
+                  console.log('[CITY] storm motion from the radar' + (mo.edge ? ' (edge)' : '') + ': toward ' + mo.toward + ' at ' + mo.mph + ' mph (match ' + mo.match + ', ' + mo.n + ' echo px, ' + mo.span + ' min)');
                   try { cwWideSync(); } catch (e){}
                   try { cwDrawLeadArcs(cwWideLeadOff); } catch (e){}
                 }
@@ -64002,11 +64002,75 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         }
         if (sc > best.s) best = { s: sc, dx: dx, dy: dy };
       }
-      if (best.s < 0.25 * nA || Math.abs(best.dx) >= S || Math.abs(best.dy) >= S) return null;
+      if (best.s < 0.25 * nA || Math.abs(best.dx) >= S || Math.abs(best.dy) >= S) return cwEdgeMotion(imA, imB, dtMin, bx);
       var km = Math.hypot(best.dx, best.dy) * kmPx, mph = km / dtMin * 60 / 1.609;
-      if (mph < 4) return null;                          /* sitting still: no direction to read */
+      if (mph < 4) return cwEdgeMotion(imA, imB, dtMin, bx);   /* the mass sits still: read the edge instead */
       return { toward: Math.round((Math.atan2(best.dx, -best.dy) * 180 / Math.PI + 360) % 360),
                mph: Math.round(mph), match: +(best.s / nA).toFixed(2), n: nA, kmPx: +kmPx.toFixed(2), span: dtMin };
+    }
+    /* THE EDGE, WHEN THE MASS WILL NOT MOVE (user 2026-09-25: "why are the arches facing north west?"). A coastal
+       storm's shield covered a quarter of the frame and grew westward off the ocean; slid over itself it matched
+       best at NO shift (0.99 overlap -- the interior overlaps whatever you do), read as under 4 mph and was thrown
+       out, and the arcs fell back to the 500 mb wind: from the NE, while the rain was arriving from the E/SE.
+       What decides "when does it reach me" is the edge nearest home, so: the echo's EDGE within 150 km of the
+       doorstep in the old frame, shifted to minimise its mean distance to the new frame's edge (a chamfer
+       distance, clipped at 8 px so a stray cell far off cannot drag it). Measured that night: shift toward 280
+       at 26 mph over 50 min, the mean miss halved (6.7 -> 3.7 px); over 120 min 275 at 19 mph (7.7 -> 2.5).
+       Kept only if it cuts the miss by a third and the shift is inside the window. Along a long straight edge
+       only the push ACROSS it is seen (the aperture problem), so a sliding component can hide in the answer --
+       it is the best-fitting shift of the edge, not a tracked cell. */
+    function cwEdgeMotion(imA, imB, dtMin, bx){
+      var hood = window._cityHood || { lat: 40.741, lon: -73.99 }, R2 = 6378137;
+      var boxKm = (bx.X1 - bx.X0) / 1000 * Math.cos(41.5 * Math.PI / 180);
+      var W = 300, H = Math.round(W * imA.naturalHeight / imA.naturalWidth), kmPx = boxKm / W;
+      var c = document.createElement('canvas'); c.width = W; c.height = H;
+      var g = c.getContext('2d', { willReadFrequently: true });
+      var grab = function(im){
+        g.clearRect(0, 0, W, H); g.drawImage(im, 0, 0, W, H);
+        var d = g.getImageData(0, 0, W, H).data, m = new Uint8Array(W * H);
+        for (var i = 0; i < W * H; i++) m[i] = d[i * 4 + 3] > 60 ? 1 : 0;
+        return m;
+      };
+      var A, B;
+      try { A = grab(imA); B = grab(imB); } catch (e){ return null; }
+      /* an edge pixel: echo with a clear 4-neighbour; the frame's own border is not an edge */
+      var edge = function(M){ var e = new Uint8Array(W * H);
+        for (var y = 3; y < H - 3; y++) for (var x = 3; x < W - 3; x++){ var k = y * W + x;
+          if (M[k] && !(M[k - 1] && M[k + 1] && M[k - W] && M[k + W])) e[k] = 1; }
+        return e; };
+      var EA = edge(A), EB = edge(B);
+      /* distance to the nearest NEW edge pixel, two-pass chamfer (1, 1.4) */
+      var D = new Float32Array(W * H), x, y, k, a;
+      for (k = 0; k < W * H; k++) D[k] = EB[k] ? 0 : 1e6;
+      for (y = 0; y < H; y++) for (x = 0; x < W; x++){ k = y * W + x; a = D[k];
+        if (x > 0 && D[k - 1] + 1 < a) a = D[k - 1] + 1;
+        if (y > 0){ if (D[k - W] + 1 < a) a = D[k - W] + 1;
+          if (x > 0 && D[k - W - 1] + 1.4 < a) a = D[k - W - 1] + 1.4;
+          if (x < W - 1 && D[k - W + 1] + 1.4 < a) a = D[k - W + 1] + 1.4; }
+        D[k] = a; }
+      for (y = H - 1; y >= 0; y--) for (x = W - 1; x >= 0; x--){ k = y * W + x; a = D[k];
+        if (x < W - 1 && D[k + 1] + 1 < a) a = D[k + 1] + 1;
+        if (y < H - 1){ if (D[k + W] + 1 < a) a = D[k + W] + 1;
+          if (x < W - 1 && D[k + W + 1] + 1.4 < a) a = D[k + W + 1] + 1.4;
+          if (x > 0 && D[k + W - 1] + 1.4 < a) a = D[k + W - 1] + 1.4; }
+        D[k] = a; }
+      var hx = (hood.lon * Math.PI / 180 * R2 - bx.X0) / (bx.X1 - bx.X0) * W;
+      var hy = (bx.Y1 - R2 * Math.log(Math.tan(Math.PI / 4 + hood.lat * Math.PI / 360))) / (bx.Y1 - bx.Y0) * H;
+      var xs = [], ys = [], r150 = 150 / kmPx;
+      for (y = 0; y < H; y++) for (x = 0; x < W; x++) if (EA[y * W + x] && Math.hypot(x - hx, y - hy) < r150){ xs.push(x); ys.push(y); }
+      var n = xs.length; if (n < 60) return null;
+      var CL = 8, S = Math.max(4, Math.min(60, Math.ceil(70 * 1.609 * dtMin / 60 / kmPx)));
+      var cost = function(dx, dy){ var s = 0, m = 0;
+        for (var i = 0; i < n; i++){ var x2 = xs[i] + dx, y2 = ys[i] + dy;
+          if (x2 < 0 || y2 < 0 || x2 >= W || y2 >= H) continue; var dd = D[y2 * W + x2]; s += dd < CL ? dd : CL; m++; }
+        return m >= 0.8 * n ? s / m : 1e9; };
+      var c0 = cost(0, 0), best = { c: 1e9, dx: 0, dy: 0 };
+      for (var dy = -S; dy <= S; dy++) for (var dx = -S; dx <= S; dx++){ var cc = cost(dx, dy); if (cc < best.c) best = { c: cc, dx: dx, dy: dy }; }
+      if (!(best.c < 0.67 * c0) || Math.abs(best.dx) >= S || Math.abs(best.dy) >= S) return null;
+      var mph = Math.hypot(best.dx, best.dy) * kmPx / dtMin * 60 / 1.609;
+      if (mph < 4) return null;
+      return { toward: Math.round((Math.atan2(best.dx, -best.dy) * 180 / Math.PI + 360) % 360), mph: Math.round(mph),
+               match: +(1 - best.c / c0).toFixed(2), n: n, kmPx: +kmPx.toFixed(2), span: dtMin, edge: true };
     }
     function cwDrawLeadArcs(offMin){
       var cvs = document.getElementById('cw-ov-arc');
