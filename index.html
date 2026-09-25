@@ -58352,7 +58352,10 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
                plume and its aura are recoloured IN THE TILES (140,255,30 body,
                70,190,45 aura); skipped here so the green test below does not
                turn them into flood blue like the old stormwater lime. */
-            if (q[i + 1] > 150 && q[i + 2] < 70 && q[i] < 170) continue;
+            /* ...and REMOVED (user 2026-09-25: "remove the blobs"). The baked slick was one fixed condition -- where
+               an overflow goes on an EBB tide, whether or not it was raining -- and the live specks now draw the
+               real thing (cwSpillState): so the slick is cleared to transparent here instead of being kept. */
+            if (q[i + 1] > 150 && q[i + 2] < 70 && q[i] < 170){ q[i + 3] = 0; continue; }
             if (q[i + 2] > q[i] + 25){         // blue-dominant = a flood class
               q[i] = 21; q[i + 1] = 162; q[i + 2] = 251;
             } else if (q[i + 1] > q[i] + 20 && q[i + 1] > q[i + 2] + 60){
@@ -58880,8 +58883,14 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       var how = ['MODELLED — ITS DISCHARGES ARE CALCULATED, NOT MEASURED',
                  'MONITORED — THIS ONE HAS INSTRUMENTS ON IT',
                  'OBSERVED — SOMEBODY HAS TO GO LOOK'][p2[6] || 0];
-      var state = cwLiveRain
-        ? '<span style="color:#c2410c;font-weight:800;">LIKELY SPILLING NOW</span> · rain is falling on the city'
+      /* this pipe's own sewershed (cwSpillState), the same estimate the specks are drawn from */
+      var ci = (window._cwCSO || []).indexOf(p2), SPm = cwSpillPipes(), sh = cwSpill.rain ? cwSpillState()[p2[5]] : null;
+      var state = (SPm && SPm[ci] && SPm[ci].plant)
+        ? 'A treatment plant outfall — it releases TREATED water all day; it is not a sewage overflow'
+        : sh ? (sh.on > 0 ? '<span style="color:#c2410c;font-weight:800;">LIKELY SPILLING NOW</span> · ' + sh.inch6.toFixed(2) + ' in of rain on its sewershed in 6 h'
+               : sh.ended != null ? 'Likely spilled ' + Math.round(sh.ended) + ' h ago · the overflow is still thinning out in the water'
+               : 'Probably quiet — no rain past the overflow line on its sewershed in 48 h')
+        : cwLiveRain ? '<span style="color:#c2410c;font-weight:800;">LIKELY SPILLING NOW</span> · rain is falling on the city'
         : 'Probably quiet — no rain on the city right now';
       /* HOW BIG THE PIPE IS, from NYC DEP's Citywide Outfalls joined in at bake
          time (2026-09-10). 410 of the 435 have one; the rest say so rather
@@ -63383,6 +63392,13 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       D.probe = function(lon, lat){ var F = cwFlowField, vv = cwPainted, R = 6378137; if (!F) return null;
         var x = ((lon * Math.PI / 180 * R) - vv.X0) / (vv.X1 - vv.X0) * F.W, y = (vv.Y1 - R * Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360))) / (vv.Y1 - vv.Y0) * F.H;
         var q = cwFlowGridAt(x, y); return q ? [Math.round((Math.atan2(q[0], q[1]) * 180 / Math.PI + 360) % 360), +Math.hypot(q[0], q[1]).toFixed(2)] : null; };
+      /* harness: the spill as the model sees it, and a synthetic storm to exercise the wet path (inert unless called;
+         a real fetch replaces it within twenty minutes) */
+      D.spill = function(){ var st = cwSpill.rain ? cwSpillState() : null; return { line: cwSpillLine(), sheds: st, particles: cwFlowR.length }; };
+      D.fakeRain = function(inchPerHour, hoursAgoStopped){ var now = Date.now(), R = {}; (window._cwCSOfac || []).forEach(function(f, i){
+          var t = [], pp = []; for (var h = 72; h >= 0; h--){ var tt = Math.floor(now / 3600000) * 3600000 - h * 3600000; t.push(tt);
+            pp.push(h >= (hoursAgoStopped || 0) && h < (hoursAgoStopped || 0) + 3 ? inchPerHour : 0); }
+          R[i] = { t: t, p: pp }; }); cwSpill.rain = R; cwSpill.at = now; cwSpill.stAt = 0; return cwSpillLine(); };
       /* harness: why a point draws what it draws -- the basemap colour under it, whether the mask calls it water, and the
          three stations it blends with their distances by water (km) */
       D.why = function(lon, lat){ var F = cwFlowField, vv = cwPainted, R = 6378137, M = cwFlowMask, im = document.getElementById('cw-bm-under'); if (!F || !M || !im) return null;
@@ -63431,35 +63447,155 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         g.beginPath(); g.moveTo(pt.x, pt.y); g.lineTo(nx, ny); g.stroke();
         pt.x = nx; pt.y = ny;
       }
-      /* the runoff: each outfall lets go a particle now and then, lime like the slick */
-      var cso = window._cwCSO ? { p: window._cwCSO } : null;
-      if (cso && cso.p){
+      /* THE SEWAGE: only while a sewershed is past the overflow line (cwSpillState), in proportion to its rain and
+         to the pipe's size; after the rain the plume near the pipes thins out over a day or two. Plant outfalls
+         (treated water) never. Each particle is a parcel of overflow: carried by the tide field, spread by
+         turbulence at a physical rate, held against the shore rather than deleted, and kept longer in the dead-end
+         basins that do not flush (Gowanus, Newtown Creek, the Jamaica Bay basins). */
+      cwSpillLoad();
+      var cso = window._cwCSO, SP = cso ? cwSpillPipes() : null, SS = cwSpill.rain ? cwSpillState() : null;
+      var hPerFrame = CW_FLOW_SPEEDUP * dt / 3600;                                /* model hours a frame */
+      if (cso && SP && (SS || cwLiveRain)){
         var px = function(c){ return ((c[0] * Math.PI / 180 * R2) - v.X0) / (v.X1 - v.X0) * W; };
         var py = function(c){ return (v.Y1 - R2 * Math.log(Math.tan(Math.PI / 4 + c[1] * Math.PI / 360))) / (v.Y1 - v.Y0) * H; };
-        for (var k = 0; k < cso.p.length; k++){
-          if (Math.random() > 0.03) continue;
-          var o = cso.p[k], ox = px(o), oy = py(o);
+        for (var k = 0; k < cso.length; k++){
+          var o = cso[k], meta = SP[k]; if (!meta || meta.plant) continue;
+          var sh = SS ? SS[o[5]] : { on: 1, resid: 0 };
+          if (!sh) continue;
+          var rate = sh.on > 0 ? 0.005 + 0.02 * sh.on : 0.008 * sh.resid;     /* a full storm settles near 12,000 parcels, under the cap */
+          if (rate < 0.0005 || Math.random() > rate * meta.wt) continue;
+          var ox = px(o), oy = py(o);
           if (ox < 0 || oy < 0 || ox > W || oy > H) continue;
           /* step off the pipe's mouth into the water */
           var ang = (o[2] || 0) * Math.PI / 180;
-          cwFlowR.push({ x: ox + Math.sin(ang) * 3 * dpr, y: oy - Math.cos(ang) * 3 * dpr, a: 900 + Math.random() * 600, s: 0 });
+          /* four hours of tide in open water, longer where the water does not flush */
+          var life = (4 / hPerFrame) / meta.flush * (0.75 + Math.random() * 0.5);
+          cwFlowR.push({ x: ox + Math.sin(ang) * 3 * dpr, y: oy - Math.cos(ang) * 3 * dpr, a: life, a0: life, s: 0, r: sh.on > 0 ? 1 : 0.55 });
         }
       }
+      /* turbulent spreading: an estuary mixes sideways at a few square metres a second, so a parcel wanders
+         sqrt(2 K dt) per frame -- in metres, then in canvas pixels, the same at every zoom */
+      var sig = Math.sqrt(2 * 3 * CW_FLOW_SPEEDUP * dt) / mPerPx;
       g.lineWidth = 1.5 * dpr;
       for (var j = cwFlowR.length - 1; j >= 0; j--){
         var q = cwFlowR[j];
         q.s++;
-        if (q.s > 12 && !cwFlowWater(q.x, q.y, cvs)){ cwFlowR.splice(j, 1); continue; }
         if (--q.a <= 0){ cwFlowR.splice(j, 1); continue; }
+        var onW = cwFlowWater(q.x, q.y, cvs);
+        if (!onW && q.s > 40){ cwFlowR.splice(j, 1); continue; }            /* born on land and never found the water */
         var vq = cwFlowGridAt(q.x, q.y) || [0, 0];
-        var jit = 0.45 * dpr;
-        var qx = q.x + vq[0] * pxPerKnot + (Math.random() - 0.5) * jit, qy = q.y - vq[1] * pxPerKnot + (Math.random() - 0.5) * jit;
-        var life = q.a / 1500;
-        g.strokeStyle = 'rgba(150,255,70,' + (0.15 + 0.7 * life).toFixed(2) + ')';
-        g.beginPath(); g.moveTo(q.x, q.y); g.lineTo(qx, qy); g.stroke();
+        var gx = (Math.random() + Math.random() + Math.random() - 1.5) * 2 * sig, gy = (Math.random() + Math.random() + Math.random() - 1.5) * 2 * sig;
+        var qx = q.x + vq[0] * pxPerKnot + gx, qy = q.y - vq[1] * pxPerKnot + gy;
+        /* the shore holds it: blocked, it only spreads; blocked both ways, it waits against the bank */
+        if (onW && !cwFlowWater(qx, qy, cvs)){
+          if (cwFlowWater(q.x + gx, q.y + gy, cvs)){ qx = q.x + gx; qy = q.y + gy; } else { qx = q.x; qy = q.y; }
+        }
+        var lf = q.a / q.a0;
+        /* thins as it mixes: bright at the pipe, faint by the end of its life */
+        g.strokeStyle = 'rgba(150,255,70,' + ((0.12 + 0.72 * Math.pow(lf, 0.7)) * q.r).toFixed(2) + ')';
+        g.beginPath(); g.moveTo(q.x, q.y); g.lineTo(qx + 0.01, qy); g.stroke();
         q.x = qx; q.y = qy;
       }
-      if (cwFlowR.length > 6000) cwFlowR.splice(0, cwFlowR.length - 6000);
+      if (cwFlowR.length > 14000) cwFlowR.splice(0, cwFlowR.length - 14000);   /* trims the OLDEST: a cap hit shortens plumes, so the rates stay under it */
+    }
+    /* ─ THE SPILL (user 2026-09-25: "remove the blobs and tie the specks to rain but also improve the specs so theyre
+       more accurately showing the poop water spreading") ─────────────────────────────────────────────────────────
+       A combined sewer overflows only when rain overloads it: NYC DEP says as little as a tenth of an inch can do
+       it. There is NO live feed of which pipe fired (see the CSO notes -- ruled out), so this is an ESTIMATE, and
+       the caption and the pipe card say so:
+         - RAIN PER SEWERSHED. One Open-Meteo request, hourly rain at the centre of each treatment plant's pipes
+           (15 plants), so a cell over Queens spills Bowery Bay and not Oakwood Beach.
+         - THE OVERFLOW LINE. The last six hours, the newest weighted most (e-folding 2 h, the time a sewer takes
+           to drain), past 0.08 in = spilling; its strength rises to full by half an inch. The home radar
+           (cwLiveRain) counts as rain falling now.
+         - AFTER IT STOPS the sewage is still in the water: nothing new leaves the pipes, but the plume is kept
+           alive near them at a strength that halves every ~8 h (e-folding 12 h) and is gone at 48 h -- the span
+           NYC's wet-weather advisories cover.
+       The 16 plant outfalls carry TREATED effluent all day; they never draw as an overflow. */
+    var cwSpill = { req: 0, at: 0, rain: null, st: null, stAt: 0, pipes: null };
+    var CW_CSO_LINE = 0.08;
+    /* how long a dead-end basin holds what enters it, relative to an open channel: the lab's own FLUSH table
+       (drawSewerStain), keyed here to the DEC's spellings. A judgement from geography, not a measurement. */
+    var CW_FLUSH = { 'GOWANUS CANAL': 0.32, 'GOWANUS BAY': 0.60, 'NEWTOWN CREEK': 0.32, 'NEWTOWN CREEK (E)': 0.32,
+      'ENGLISH KILLS': 0.24, 'DUTCH KILLS': 0.26, 'WAHLE CREEK': 0.26, 'MASPETH CREEK': 0.26, 'HENDRIX CANAL': 0.30,
+      'HENDRIX STREET CANAL': 0.30, 'FLUSHING RIVER': 0.30, 'FLUSHING BAY': 0.40, 'ALLEY CREEK': 0.38, 'ALLEY POND (S)': 0.38,
+      'PUGSLEY CREEK': 0.38, 'WESTCHESTER CREEK': 0.42, 'BRONX RIVER': 0.50, 'BRONX KILLS': 0.55, 'BRONK KILLS': 0.55,
+      'PAERDEGAT BASIN': 0.28, 'BERGEN BASIN': 0.28, 'FRESH CREEK BASIN': 0.28, 'THURSTON BASIN': 0.28, 'MOTT BASIN': 0.28,
+      'SPRING CREEK': 0.30, 'SHORE ROAD LAGOON': 0.30, 'NEW CREEK (W)': 0.30, 'WALLABOUT BAY': 0.45, 'ATLANTIC BASIN': 0.50,
+      'HUTCHINSON RIVER': 0.45, 'LITTLE NECK BASIN': 0.50, 'EASTCHESTER BAY': 0.65, 'BOWERY BAY': 0.70, 'LITTLE NECK BAY': 0.70,
+      'GRAVESEND BAY': 0.85 };
+    /* per pipe, once: is it a plant outfall, how much it carries, how long its water holds it */
+    function cwSpillPipes(){
+      if (cwSpill.pipes || !window._cwCSO) return cwSpill.pipes;
+      var loc = window._cwCSOloc || [], wb = window._cwCSOwb || [], szw = window._cwCSOszw || [];
+      cwSpill.pipes = window._cwCSO.map(function(c){
+        var l = (c[8] != null && c[8] >= 0) ? String(loc[c[8]] || '') : '';
+        var plant = /(W\.?\s*P\.?\s*C\.?\s*P|WPCF|WRRF|WWTP|PLANT)\.?\s*\)?\s*OUTFALL|PLANT OUTFALL/i.test(l) && !/BYPASS/i.test(l);
+        var w = (c[7] != null && c[7] >= 0) ? szw[c[7]] : null;
+        /* a bigger mouth passes more: cross-section grows as the square of the width, the flow through it by less
+           (the regulator, not the mouth, sets the rate), so a 1.5 power around the 5 ft median, clamped */
+        var wt = Math.max(0.15, Math.min(4, Math.pow((w || 5) / 5, 1.5)));
+        var fl = CW_FLUSH[String(wb[c[4]] || '').toUpperCase()] || 1;
+        return { plant: plant, wt: wt, flush: fl };
+      });
+      return cwSpill.pipes;
+    }
+    function cwSpillLoad(){
+      if (cwSpill.req || (cwSpill.at && Date.now() - cwSpill.at < 20 * 60000)) return;
+      var P = window._cwCSO, fac = window._cwCSOfac; if (!P || !fac) return;
+      cwSpill.req = 1;
+      var cx = fac.map(function(){ return [0, 0, 0]; });
+      P.forEach(function(p){ var c = cx[p[5]]; if (c){ c[0] += p[0]; c[1] += p[1]; c[2]++; } });
+      var ok = [], la = [], lo = [];
+      cx.forEach(function(c, i){ if (c[2]){ ok.push(i); lo.push((c[0] / c[2]).toFixed(3)); la.push((c[1] / c[2]).toFixed(3)); } });
+      fetch('https://api.open-meteo.com/v1/forecast?latitude=' + la.join(',') + '&longitude=' + lo.join(',')
+            + '&hourly=precipitation&precipitation_unit=inch&past_days=3&forecast_days=1&timezone=GMT')
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          var arr = Array.isArray(j) ? j : [j], rain = {};
+          ok.forEach(function(fi, k){ var h = arr[k] && arr[k].hourly;
+            if (h && h.time) rain[fi] = { t: h.time.map(function(s){ return Date.parse(s + ':00Z'); }), p: h.precipitation }; });
+          cwSpill.rain = rain; cwSpill.at = Date.now(); cwSpill.req = 0; cwSpill.stAt = 0;
+          try { cwDrawSensors(); } catch (e){}
+          if (cw.floods) cwFlowCaption();
+        }).catch(function(){ cwSpill.req = 0; cwSpill.at = Date.now() - 15 * 60000; });   /* try again in five minutes */
+    }
+    /* each sewershed now: on (0..1 while spilling), resid (0..1 after), ended (hours since it stopped), inch6 */
+    function cwSpillState(){
+      var now = Date.now();
+      if (cwSpill.st && now - cwSpill.stAt < 60000) return cwSpill.st;
+      var st = {};
+      Object.keys(cwSpill.rain || {}).forEach(function(fi){
+        var R = cwSpill.rain[fi], hrs = [];
+        for (var i = R.t.length - 1; i >= 0; i--) if (R.t[i] <= now) hrs.push([R.t[i], +R.p[i] || 0]);
+        var wet = function(k){ var s = 0; for (var h = 0; h < 6 && k + h < hrs.length; h++) s += hrs[k + h][1] * Math.exp(-h / 2); return s; };
+        var w0 = wet(0), inch6 = 0;
+        for (var h = 0; h < 6 && h < hrs.length; h++) inch6 += hrs[h][1];
+        if (cwLiveRain) w0 = Math.max(w0, CW_CSO_LINE + 0.05);          /* the radar sees it falling now */
+        var s = { on: 0, resid: 0, ended: null, inch6: inch6 };
+        if (w0 > CW_CSO_LINE) s.on = Math.min(1, (w0 - CW_CSO_LINE) / 0.4);
+        else for (var k = 1; k < 48 && k < hrs.length; k++) if (wet(k) > CW_CSO_LINE){
+          s.ended = (now - hrs[k][0]) / 3600000; s.resid = Math.exp(-s.ended / 12); break;
+        }
+        st[fi] = s;
+      });
+      cwSpill.st = st; cwSpill.stAt = now;
+      return st;
+    }
+    /* is THIS pipe overflowing right now (for its glyph and its card) */
+    function cwSpillPipeOn(c, i){
+      var P = cwSpillPipes(); if (P && P[i] && P[i].plant) return false;
+      if (!cwSpill.rain) return !!cwLiveRain;                             /* rain not in yet: the radar alone */
+      var s = cwSpillState()[c[5]]; return !!(s && s.on > 0);
+    }
+    /* one line for the caption */
+    function cwSpillLine(){
+      if (!cwSpill.rain) return cwLiveRain ? 'SEWAGE LIKELY SPILLING · rain on the city' : '';
+      var st = cwSpillState(), ks = Object.keys(st), on = 0, ended = null;
+      ks.forEach(function(k){ if (st[k].on > 0) on++; else if (st[k].ended != null && (ended == null || st[k].ended < ended)) ended = st[k].ended; });
+      if (on) return 'SEWAGE SPILLING NOW in ' + on + ' of ' + ks.length + ' sewersheds';
+      if (ended != null && ended < 48) return 'SEWAGE SPILL ENDED ' + Math.round(ended) + ' H AGO · still in the water, thinning';
+      return 'NO SEWAGE SPILLING · no rain past the overflow line in 48 h';
     }
     /* the reading: what each river is doing now and when it turns -- one
        cell a water (user 2026-09-14: "make this text look better"): the
@@ -63488,7 +63624,8 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       if (!cells.length) return;
       el.innerHTML = '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;">'
         + '<span style="font:800 9px system-ui,sans-serif;letter-spacing:.12em;color:#1b2340;margin-right:4px;">THE TIDE NOW</span>' + cells.join('') + '</div>'
-        + '<div style="font:600 8px system-ui,sans-serif;letter-spacing:.04em;color:rgba(27,35,64,.55);margin-top:5px;">' + bvA('NOAA current predictions', 'https://tidesandcurrents.noaa.gov/map/index.html?type=CurrentPredictions&region=New+York') + ' at ' + Object.keys(cwCur.series).length + ' stations, blended along the water between them and faded out past 5 km of the nearest \u00b7 the arrow is the flow\u2019s heading \u00b7 streaks point where the water is going now, drawn at 600\u00d7 its speed \u00b7 lime is the outfalls\u2019 runoff</div>';
+        + '<div style="font:600 8px system-ui,sans-serif;letter-spacing:.04em;color:rgba(27,35,64,.55);margin-top:5px;">' + bvA('NOAA current predictions', 'https://tidesandcurrents.noaa.gov/map/index.html?type=CurrentPredictions&region=New+York') + ' at ' + Object.keys(cwCur.series).length + ' stations, blended along the water between them and faded out past 5 km of the nearest \u00b7 the arrow is the flow\u2019s heading \u00b7 streaks point where the water is going now, drawn at 600\u00d7 its speed</div>'
+        + (cwSpillLine() ? '<div style="font:700 8.5px system-ui,sans-serif;letter-spacing:.06em;color:#1b2340;margin-top:4px;">' + cwSpillLine() + ' <span style="font-weight:600;color:rgba(27,35,64,.55);letter-spacing:.03em;">\u00b7 lime is the overflow, carried by the tide \u00b7 ESTIMATED from ' + bvA('rain on each sewershed', 'https://open-meteo.com/') + ' against the tenth of an inch that can trigger an overflow; no live feed of which pipe fired exists</span></div>' : '');
       el.style.display = '';
     }
     function cwDrawGhost(){
@@ -63731,9 +63868,11 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
            Compressed by a 0.4 power around a 4 ft median so a 52 ft box does
            not become a slab 13x its neighbours, then clamped. */
         var szw = window._cwCSOszw || [];
-        window._cwCSO.forEach(function(c){
+        window._cwCSO.forEach(function(c, ci){
           var x = px(c), y = py(c);
           if (x < -14 || y < -14 || x > cvs.width + 14 || y > cvs.height + 14) return;
+          /* lit per pipe from its own sewershed's rain (cwSpillPipeOn), not one radar dot for the whole city */
+          live = cwSpillPipeOn(c, ci); body = live ? '#a8ff2e' : '#3ae81c';
           var wf = (c[7] != null && c[7] >= 0) ? szw[c[7]] : null;
           var k = wf ? Math.max(0.72, Math.min(2.2, Math.pow(wf / 4, 0.4))) : 1;
           var hOut = halfOut * k, hIn = halfIn * k;
