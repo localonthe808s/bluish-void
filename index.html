@@ -63142,90 +63142,181 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
        cycle takes twelve minutes to watch. Only on FLOODING, only on the
        city map, paused when the page is hidden. An estimate between
        stations, and the caption says so. */
-    var cwCur = { stations: null, series: {}, at: 0, req: 0 }, cwFlowT = null, cwFlowP = [], cwFlowR = [], cwFlowMask = null, cwFlowClock = 0;
-    /* one second on screen is ten minutes of tide: at one minute a second a
-       two-knot current moved a tenth of a pixel a frame and nothing showed
-       (measured: 0.12% of the canvas drawn); at ten a tide cycle plays in
-       about seventy seconds and the streaks read */
+    var cwCur = { stations: null, series: {}, at: 0, req: 0 }, cwFlowT = null, cwFlowP = [], cwFlowR = [], cwFlowMask = null;
+    /* the streaks move 600x the water's speed: at 60x a two-knot current moved a tenth of a pixel a
+       frame and nothing showed (measured: 0.12% of the canvas drawn) */
     var CW_FLOW_SPEEDUP = 600;
-    var cwFlowGridV = null;
-    /* the field once per frame on a coarse grid; the particles read the grid
-       rather than each blending 28 stations (10,000 particles x 28 sorts a
-       frame was the cost) */
-    function cwFlowGridBuild(W, H, lonOf, latOf, t){
-      var gw = 48, gh = Math.max(8, Math.round(48 * H / W)), u = new Float32Array(gw * gh), vv = new Float32Array(gw * gh);
-      for (var j = 0; j < gh; j++) for (var i = 0; i < gw; i++){
-        var x = (i + 0.5) / gw * W, y = (j + 0.5) / gh * H;
-        var vec = cwFlowVec(lonOf(x), latOf(y), t);
-        if (vec){ u[j * gw + i] = vec[0]; vv[j * gw + i] = vec[1]; }
+    /* THE FIELD IS NOW (user 2026-09-25: "confirm these flows are accurate and were showing realtime flow
+       direction"). It used to fast-forward with the streaks -- ten minutes of tide a second, twelve hours
+       in seventy seconds and round again -- so what the streaks pointed at was any hour of the next
+       twelve, while the caption said NOW. The field is evaluated at the clock; only the streaks' SPEED
+       is exaggerated (600x), which is what makes a two-knot current visible at all.
+
+       DISTANCE IS BY WATER, not as the crow flies. The straight-line blend let the 4-kt Hell Gate
+       current reach across Randalls Island and turn the mid-Harlem backwards, and let an inlet station
+       invent a 1.4-kt current in the open Atlantic. Each station's distance is walked over the water
+       mask (a chamfer distance on a grid where any wet pixel makes a wet cell), a point
+       blends the three nearest stations it can reach BY WATER, and the flow fades out between 2 and 5
+       km of water from the nearest station -- past that nobody measured anything and nothing is drawn.
+       62 stations now (the Harlem at three bridges, the upper East River every mile, the Lower Bay,
+       the Rockaway and Sandy Hook channels); the subordinate ones publish only slack and strength
+       times, interpolated on the tide's own cosine. */
+    var cwFlowField = null;
+    function cwFlowFieldBuild(W, H, v){
+      var M = cwFlowMask; if (!M || !cwCur.stations) return null;
+      var dw = Math.min(M.w, 200), dh = Math.max(8, Math.round(dw * M.h / M.w)), n = dw * dh;
+      var wet = new Uint8Array(n);
+      for (var my = 0; my < M.h; my++){
+        var cy = Math.min(dh - 1, Math.floor(my / M.h * dh));
+        for (var mx = 0; mx < M.w; mx++) if (M.m[my * M.w + mx]) wet[cy * dw + Math.min(dw - 1, Math.floor(mx / M.w * dw))] = 1;
       }
-      return { gw: gw, gh: gh, u: u, v: vv, W: W, H: H };
+      /* no dilation: a cell is wet if ANY mask pixel in it is, which already keeps a 150 m river whole;
+         dilating on top bridged the Rockaway peninsula and let Jamaica Bay's flood leak into the Atlantic */
+      var R2 = 6378137, ck = (v.X1 - v.X0) / dw * Math.cos(40.7 * Math.PI / 180) / 1000, cd = ck * Math.SQRT2;   /* km per cell */
+      var sts = cwCur.stations.filter(function(s){ return cwCur.series[s.id]; });
+      var top = new Float32Array(n * 3).fill(Infinity), tix = new Int16Array(n * 3).fill(-1);
+      var d = new Float32Array(n);
+      sts.forEach(function(s, si){
+        var sx = ((s.lon * Math.PI / 180 * R2) - v.X0) / (v.X1 - v.X0) * dw;
+        var sy = (v.Y1 - R2 * Math.log(Math.tan(Math.PI / 4 + s.lat * Math.PI / 360))) / (v.Y1 - v.Y0) * dh;
+        d.fill(Infinity);
+        var seeded = 0, i, j, k;
+        if (sx >= 0 && sy >= 0 && sx < dw && sy < dh){
+          /* on the map: the station's cell, or the nearest wet cell to it (a coarse mask can put a buoy on the pier) */
+          for (j = Math.max(0, Math.floor(sy) - 4); j <= Math.min(dh - 1, Math.floor(sy) + 4); j++)
+            for (i = Math.max(0, Math.floor(sx) - 4); i <= Math.min(dw - 1, Math.floor(sx) + 4); i++){
+              k = j * dw + i; if (!wet[k]) continue;
+              var e = Math.hypot(i + 0.5 - sx, j + 0.5 - sy);
+              if (e <= 4){ d[k] = e * ck; seeded++; }
+            }
+        } else {
+          /* off the map: it enters through the wet edge cells, at their straight distance */
+          for (k = 0; k < n; k++){
+            i = k % dw; j = (k - i) / dw;
+            if (!wet[k] || (i > 0 && i < dw - 1 && j > 0 && j < dh - 1)) continue;
+            var e2 = Math.hypot(i + 0.5 - sx, j + 0.5 - sy) * ck;
+            if (e2 < 8){ d[k] = e2; seeded++; }
+          }
+        }
+        if (!seeded) return;
+        for (var it = 0; it < 10; it++){
+          var ch = 0, a, b;
+          for (j = 0; j < dh; j++) for (i = 0; i < dw; i++){
+            k = j * dw + i; if (!wet[k]) continue; a = d[k];
+            if (i > 0 && (b = d[k - 1] + ck) < a) a = b;
+            if (j > 0){ if ((b = d[k - dw] + ck) < a) a = b;
+              if (i > 0 && (b = d[k - dw - 1] + cd) < a) a = b;
+              if (i < dw - 1 && (b = d[k - dw + 1] + cd) < a) a = b; }
+            if (a < d[k]){ d[k] = a; ch++; }
+          }
+          for (j = dh - 1; j >= 0; j--) for (i = dw - 1; i >= 0; i--){
+            k = j * dw + i; if (!wet[k]) continue; a = d[k];
+            if (i < dw - 1 && (b = d[k + 1] + ck) < a) a = b;
+            if (j < dh - 1){ if ((b = d[k + dw] + ck) < a) a = b;
+              if (i < dw - 1 && (b = d[k + dw + 1] + cd) < a) a = b;
+              if (i > 0 && (b = d[k + dw - 1] + cd) < a) a = b; }
+            if (a < d[k]){ d[k] = a; ch++; }
+          }
+          if (!ch) break;
+        }
+        /* keep each cell's three nearest by water */
+        for (k = 0; k < n; k++){
+          var dk = d[k]; if (dk > 12) continue;
+          var o = k * 3;
+          if (dk < top[o + 2]){
+            if (dk < top[o + 1]){
+              top[o + 2] = top[o + 1]; tix[o + 2] = tix[o + 1];
+              if (dk < top[o]){ top[o + 1] = top[o]; tix[o + 1] = tix[o]; top[o] = dk; tix[o] = si; }
+              else { top[o + 1] = dk; tix[o + 1] = si; }
+            } else { top[o + 2] = dk; tix[o + 2] = si; }
+          }
+        }
+      });
+      return { dw: dw, dh: dh, W: W, H: H, top: top, tix: tix, sts: sts, u: new Float32Array(n), v: new Float32Array(n), fade: new Float32Array(n), vAt: 0 };
+    }
+    /* this minute's velocities into the field: the weights hold still, only the tide moves */
+    function cwFlowFieldNow(F, t){
+      var sv = F.sts.map(function(s){
+        var S = cwCur.series[s.id], x = cwCurAt(s.id, t);
+        if (x == null) return null;
+        var dir = (x >= 0 ? S.fd : S.ed) * Math.PI / 180, sp = Math.abs(x);
+        return [sp * Math.sin(dir), sp * Math.cos(dir)];
+      });
+      for (var k = 0, n = F.dw * F.dh; k < n; k++){
+        var o = k * 3, d0 = F.top[o];
+        F.u[k] = 0; F.v[k] = 0; F.fade[k] = 0;
+        if (!(d0 < 5)) continue;
+        var su = 0, sw = 0, s2 = 0, m = 0;
+        for (var q = 0; q < 3; q++){
+          var si = F.tix[o + q]; if (si < 0) break;
+          var dq = F.top[o + q]; if (dq > 7 && m) break;
+          var vec = sv[si]; if (!vec) continue;
+          var w = 1 / Math.pow(Math.max(0.3, dq), 2);
+          su += w * vec[0]; s2 += w * vec[1]; sw += w; m++;
+        }
+        if (!sw) continue;
+        var f = d0 <= 2 ? 1 : (5 - d0) / 3;
+        F.u[k] = su / sw * f; F.v[k] = s2 / sw * f; F.fade[k] = f;
+      }
+      F.vAt = t;
     }
     function cwFlowGridAt(x, y){
-      var G = cwFlowGridV; if (!G) return null;
-      var fx = Math.min(G.gw - 1.001, Math.max(0, x / G.W * G.gw - 0.5)), fy = Math.min(G.gh - 1.001, Math.max(0, y / G.H * G.gh - 0.5));
-      var i0 = Math.floor(fx), j0 = Math.floor(fy), tx = fx - i0, ty = fy - j0;
-      var k00 = j0 * G.gw + i0, k10 = k00 + 1, k01 = k00 + G.gw, k11 = k01 + 1;
-      return [G.u[k00] * (1 - tx) * (1 - ty) + G.u[k10] * tx * (1 - ty) + G.u[k01] * (1 - tx) * ty + G.u[k11] * tx * ty,
-              G.v[k00] * (1 - tx) * (1 - ty) + G.v[k10] * tx * (1 - ty) + G.v[k01] * (1 - tx) * ty + G.v[k11] * tx * ty];
+      var F = cwFlowField; if (!F) return null;
+      var i = Math.min(F.dw - 1, Math.max(0, Math.floor(x / F.W * F.dw))), j = Math.min(F.dh - 1, Math.max(0, Math.floor(y / F.H * F.dh)));
+      var k = j * F.dw + i;
+      if (F.fade[k] < 0.05) return null;
+      return [F.u[k], F.v[k]];
     }
     function cwCurLoad(){
       if (cwCur.req || (cwCur.stations && Date.now() - cwCur.at < 6 * 3600000)) return;
       cwCur.req = 1;
       fetch('city_currents.json').then(function(r){ return r.json(); }).then(function(j){
         var st = (j && j.stations) || [];
-        var d0 = new Date(); var ymd = d0.getFullYear() + ('0' + (d0.getMonth() + 1)).slice(-2) + ('0' + d0.getDate()).slice(-2);
-        var key = 'cwCurrents:' + ymd;
+        /* UTC throughout (the times used to be the station's local clock, read as the VIEWER's) -- from twelve
+           hours back, sixty hours of it, so any timezone's now sits well inside the series */
+        var d0 = new Date(Date.now() - 12 * 3600000);
+        var ymd = d0.getUTCFullYear() + ('0' + (d0.getUTCMonth() + 1)).slice(-2) + ('0' + d0.getUTCDate()).slice(-2);
+        var key = 'cwCurrents3:' + ymd + ':' + st.length;
         try { var cached = JSON.parse(localStorage.getItem(key) || 'null'); if (cached && cached.series){ cwCur.stations = st; cwCur.series = cached.series; cwCur.at = Date.now(); cwCur.req = 0; cwFlowSync(); return; } } catch (e){}
-        var left = st.length, series = {};
-        st.forEach(function(s){
+        var left = st.length, series = {}, queue = st.slice();
+        /* eight at a time: 62 stations at once is rude to NOAA */
+        function next(){
+          var s = queue.shift(); if (!s) return;
           fetch('https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?product=currents_predictions&station=' + s.id
-                + '&begin_date=' + ymd + '&range=48&time_zone=lst_ldt&units=english&interval=h&format=json')
+                + '&begin_date=' + ymd + '&range=60&time_zone=gmt&units=english&interval=h&format=json')
             .then(function(r){ return r.json(); })
             .then(function(d){
               var cp = (d && d.current_predictions && d.current_predictions.cp) || [];
-              if (cp.length) series[s.id] = { fd: +cp[0].meanFloodDir, ed: +cp[0].meanEbbDir,
-                                              t: cp.map(function(r){ return new Date(r.Time.replace(' ', 'T')).getTime(); }),
+              /* a subordinate station answers with its slack and strength events, not hours ('Type' on each row) */
+              if (cp.length) series[s.id] = { fd: +cp[0].meanFloodDir, ed: +cp[0].meanEbbDir, ev: !!cp[0].Type,
+                                              t: cp.map(function(r){ return Date.parse(r.Time.replace(' ', 'T') + ':00Z'); }),
                                               v: cp.map(function(r){ return +r.Velocity_Major; }) };
             }).catch(function(){}).then(function(){
+              next();
               if (--left) return;
-              cwCur.stations = st; cwCur.series = series; cwCur.at = Date.now(); cwCur.req = 0;
+              cwCur.stations = st; cwCur.series = series; cwCur.at = Date.now(); cwCur.req = 0; cwFlowField = null;
               try { localStorage.setItem(key, JSON.stringify({ series: series })); } catch (e){}
               cwFlowSync();
             });
-        });
+        }
+        for (var c = 0; c < 8; c++) next();
       }).catch(function(){ cwCur.req = 0; });
     }
-    /* the current at a station at time t: knots, signed (+ flood) */
+    /* the current at a station at time t: knots, signed (+ flood). Hourly series interpolate straight;
+       slack-and-strength events follow the tide's cosine between them (slack to strength is a quarter
+       wave, not a ramp) */
     function cwCurAt(id, t){
       var S = cwCur.series[id];
       if (!S || !S.t.length) return null;
       if (t <= S.t[0]) return S.v[0];
       for (var i = 1; i < S.t.length; i++){
-        if (t <= S.t[i]){ var f = (t - S.t[i - 1]) / (S.t[i] - S.t[i - 1]); return S.v[i - 1] + (S.v[i] - S.v[i - 1]) * f; }
+        if (t <= S.t[i]){
+          var f = (t - S.t[i - 1]) / (S.t[i] - S.t[i - 1]);
+          if (S.ev) f = (1 - Math.cos(Math.PI * f)) / 2;
+          return S.v[i - 1] + (S.v[i] - S.v[i - 1]) * f;
+        }
       }
       return S.v[S.v.length - 1];
-    }
-    /* the flow vector at lon/lat at time t: [east, north] in knots */
-    function cwFlowVec(lon, lat, t){
-      var st = cwCur.stations; if (!st) return null;
-      var sw = 0, su = 0, sv = 0, n = 0, kmx = Math.cos(lat * Math.PI / 180) * 111.32;
-      var near = [];
-      st.forEach(function(s){
-        var S = cwCur.series[s.id]; if (!S) return;
-        var d = Math.hypot((s.lon - lon) * kmx, (s.lat - lat) * 111.32);
-        near.push([d, s]);
-      });
-      near.sort(function(a, b){ return a[0] - b[0]; });
-      near.slice(0, 3).forEach(function(q){
-        var d = Math.max(0.3, q[0]); if (d > 7 && n) return;
-        var s = q[1], S = cwCur.series[s.id], v = cwCurAt(s.id, t);
-        if (v == null) return;
-        var dir = (v >= 0 ? S.fd : S.ed) * Math.PI / 180, sp = Math.abs(v), w = 1 / (d * d);
-        su += w * sp * Math.sin(dir); sv += w * sp * Math.cos(dir); sw += w; n++;
-      });
-      if (!sw) return null;
-      return [su / sw, sv / sw];
     }
     /* the water, sampled off the composed basemap at a sixth of its size */
     function cwFlowMaskBuild(){
@@ -63279,6 +63370,10 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       if (!cwFlowMask || (im && cwFlowMask.src !== im.src)){ cwFlowMask = cwFlowMaskBuild(); cwFlowP = []; cwFlowR = []; }
       if (!cwFlowMask || cwFlowMask.share < 0.02){ D.stage = 'no water mask' + (cwFlowMask ? ' (' + (100 * cwFlowMask.share).toFixed(1) + '%)' : ' (null: ' + (im ? im.naturalWidth : 'no img') + ')'); return; }
       D.stage = 'running'; D.share = cwFlowMask.share; D.tracers = cwFlowP.length; D.runoff = cwFlowR.length;
+      /* harness: the drawn flow at a lon/lat, [heading deg, knots] or null where nothing is drawn */
+      D.probe = function(lon, lat){ var F = cwFlowField, vv = cwPainted, R = 6378137; if (!F) return null;
+        var x = ((lon * Math.PI / 180 * R) - vv.X0) / (vv.X1 - vv.X0) * F.W, y = (vv.Y1 - R * Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360))) / (vv.Y1 - vv.Y0) * F.H;
+        var q = cwFlowGridAt(x, y); return q ? [Math.round((Math.atan2(q[0], q[1]) * 180 / Math.PI + 360) % 360), +Math.hypot(q[0], q[1]).toFixed(2)] : null; };
       var g = cvs.getContext('2d');
       if (cvs.width !== W || cvs.height !== H){ cvs.width = W; cvs.height = H; cwFlowP = []; cwFlowR = []; }
       var v = cwPainted, R2 = 6378137;
@@ -63286,15 +63381,17 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       var lonOf = function(x){ return (v.X0 + x / W * (v.X1 - v.X0)) / R2 * 180 / Math.PI; };
       var latOf = function(y){ return (2 * Math.atan(Math.exp((v.Y1 - y / H * (v.Y1 - v.Y0)) / R2)) - Math.PI / 2) * 180 / Math.PI; };
       var now = Date.now();
-      /* model time runs sixty times faster than the clock, from the moment the layer opened */
-      if (!cwFlowClock) cwFlowClock = now;
-      var tModel = now + (now - cwFlowClock) * (CW_FLOW_SPEEDUP - 1);
-      if (tModel - now > 12 * 3600000) { cwFlowClock = now; tModel = now; }    /* twelve hours out, start again at now */
       var dt = 1 / 30;                                                       /* seconds per frame, nominal */
       var pxPerKnot = 0.5144 * CW_FLOW_SPEEDUP * dt / mPerPx;                /* canvas px a knot moves per frame */
-      if (!cwFlowGridV || cwFlowGridV.W !== W || cwFlowGridV.H !== H || (now - (cwFlowGridV.at || 0)) > 500){
-        cwFlowGridV = cwFlowGridBuild(W, H, lonOf, latOf, tModel); cwFlowGridV.at = now;
+      var fkey = cwFlowMask.src + '|' + W + 'x' + H + '|' + v.X0 + ',' + v.X1 + ',' + v.Y0 + ',' + v.Y1 + '|' + cwCur.at;
+      if (!cwFlowField || cwFlowField.key !== fkey){
+        var tb = performance.now();
+        cwFlowField = cwFlowFieldBuild(W, H, v);
+        if (!cwFlowField){ D.stage = 'no field'; return; }
+        cwFlowField.key = fkey; D.buildMs = Math.round(performance.now() - tb);
+        cwFlowP = []; cwFlowR = [];
       }
+      if (now - cwFlowField.vAt > 20000) cwFlowFieldNow(cwFlowField, now);     /* the tide, re-read every twenty seconds */
       /* fade the trails */
       g.globalCompositeOperation = 'destination-out';
       g.fillStyle = 'rgba(0,0,0,.05)'; g.fillRect(0, 0, W, H);
@@ -63303,7 +63400,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       var want = Math.round(W * H / 900);
       while (cwFlowP.length < want){
         var x = Math.random() * W, y = Math.random() * H;
-        if (cwFlowWater(x, y, cvs)) cwFlowP.push({ x: x, y: y, a: 40 + Math.random() * 120 });
+        if (cwFlowWater(x, y, cvs) && cwFlowGridAt(x, y)) cwFlowP.push({ x: x, y: y, a: 40 + Math.random() * 120 });
         else if (Math.random() < 0.02) break;
       }
       g.lineCap = 'round'; g.lineWidth = 1.1 * dpr;
@@ -63373,7 +63470,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       if (!cells.length) return;
       el.innerHTML = '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;">'
         + '<span style="font:800 9px system-ui,sans-serif;letter-spacing:.12em;color:#1b2340;margin-right:4px;">THE TIDE NOW</span>' + cells.join('') + '</div>'
-        + '<div style="font:600 8px system-ui,sans-serif;letter-spacing:.04em;color:rgba(27,35,64,.55);margin-top:5px;">' + bvA('NOAA current predictions', 'https://tidesandcurrents.noaa.gov/map/index.html?type=CurrentPredictions&region=New+York') + ' at 28 harbor stations, blended between them \u00b7 the arrow is the flow\u2019s heading \u00b7 streaks ride the tide, lime is the outfalls\u2019 runoff \u00b7 one second is ten minutes of tide</div>';
+        + '<div style="font:600 8px system-ui,sans-serif;letter-spacing:.04em;color:rgba(27,35,64,.55);margin-top:5px;">' + bvA('NOAA current predictions', 'https://tidesandcurrents.noaa.gov/map/index.html?type=CurrentPredictions&region=New+York') + ' at ' + Object.keys(cwCur.series).length + ' stations, blended along the water between them and faded out past 5 km of the nearest \u00b7 the arrow is the flow\u2019s heading \u00b7 streaks point where the water is going now, drawn at 600\u00d7 its speed \u00b7 lime is the outfalls\u2019 runoff</div>';
       el.style.display = '';
     }
     function cwDrawGhost(){
