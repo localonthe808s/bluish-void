@@ -74,6 +74,9 @@
     '  vec2 q = p + vec2(0., -uT * .7);',
     '  float d1 = dome(q * .105), d2 = dome(q * .26 + 3.7), d3 = dome(q * .62 + 9.1);',   /* lobes a quarter to a third of the tower, smaller ones on them */
     '  float tw = s * .9 + .42 * d1 + .16 * d2 + .06 * d3 - .27;',
+    /* LOPSIDED, as NCAR's storm is: on the rain side (upwind) the edge evaporates into ragged shreds; the growing side stays crisp */
+    '  float rainSide = smoothstep(-.2, 1., (uCx - p.x) / max(uHW, 1.)) * clamp(uRain, 0., 1.);',
+    '  tw -= rainSide * max(0., fbm(p * .32 + vec2(0., uT * .15)) - .38) * .7;',
     /* THE ANVIL IS ICE (2026-09-26): fibrous and streaky along the wind, fraying toward its downwind tip, and pouched underneath
        -- mammatus -- where the sinking ice air hangs in lobes. No cauliflower up here. */
     '  float an = -1.;',
@@ -117,19 +120,26 @@
     '    if (uMode > .5){ float hi2 = smoothstep(58., 82., p.y), lo2 = 1. - smoothstep(30., 46., p.y); a *= 1. - .45 * hi2; c = mix(c, c * .78, lo2 * .6); c = mix(c, sunC, hi2 * .25); }',                   /* a crisp, rounded outline */
     '    col = vec4(c, a);',
     '  }',
-    /* RAIN: a pale fibrous curtain hanging from INSIDE the cloud's lower part, thinning toward the ground */
-    '  if (uRain > 0. && p.y > uGround && p.y < uBase + uH * .45){',
-    '    float ax = uCx - uHW * .35 + (uBase - p.y) * .18;',
-    '    float xw = 1. - smoothstep(uHW * .30, uHW * 1.0, abs(p.x - ax));   /* never smoothstep(hi, lo): undefined in GLSL -- it drew a veil across the whole width */',
-    '    float st = vn(vec2(p.x * 1.6 + p.y * .12, p.y * .035 + uT * .9)) * .6 + vn(vec2(p.x * 4.1, p.y * .06 + uT * 1.6)) * .4;',
-    '    float top = 1. - smoothstep(uBase + uH * .1, uBase + uH * .45, p.y), bot = .35 + .65 * smoothstep(uGround, uBase, p.y);',
-    '    float ra = clamp(uRain * xw * top * bot * (.3 + .9 * st) * .75, 0., .88);',
-    '    vec3 rc = mix(mix(vec3(.90, .89, .92), vec3(.56, .58, .64), smoothstep(.7, 1.1, uRain)), vec3(.40, .44, .55), uNight) * (.85 + .15 * st);',   /* pale; darker under a heavy storm */   /* pale, as NCAR draws it */
-    '    ra *= 1. - col.a;',   /* never OVER the cloud: painted across the base it left a step and a notch where its edge crossed */
-    '    ra *= 1. - smoothstep(uBase - 2.5, uBase + .5, p.y);   /* fades in just under the base; never a reversed smoothstep */',
-    '    col = vec4(mix(col.rgb, rc, ra / max(col.a + ra, 1e-3)), col.a + ra);',
+    /* THE RAIN SHAFT (rewatching NCAR's CM1 render, 2026-09-26): it is the storm's main feature, not a faint strip -- a thick,
+       nearly opaque milky column hanging from INSIDE the cloud's middle on its upwind side, falling in fibrous vertical sheets
+       with gaps, splaying where it meets the ground, lit like the cloud (bright toward the sun, lavender-grey in shade). It may
+       cover the lower cloud -- softly, never with a hard edge (the old curtain's hard edge made a notch in the base). */
+    '  if (uRain > 0. && p.y > uGround && p.y < uBase + uH * .55){',
+    '    float fall = clamp((uBase + uH * .55 - p.y) / max(uBase + uH * .55 - uGround, 1.), 0., 1.);',
+    '    float ax = uCx - uHW * .45 + (uBase - p.y) * .10;',                           /* on the upwind side, leaning back a little */
+    '    float halfw = uHW * (.85 + .35 * fall + .55 * smoothstep(.8, 1., fall));',     /* widening, then splaying at the ground */
+    '    float xw = 1. - smoothstep(halfw * .55, halfw, abs(p.x - ax));',
+    '    float sheets = vn(vec2(p.x * .55 + p.y * .02, p.y * .012 + uT * .5)), fib = vn(vec2(p.x * 2.2, p.y * .04 + uT * 1.4));',
+    '    float st = smoothstep(.25, .85, sheets * .7 + fib * .3);',                      /* sheets with gaps */
+    '    float top = smoothstep(0., .18, fall);',                                          /* fades in inside the cloud */
+    '    float ra = clamp(min(1., uRain * 1.7) * xw * top * (.45 + .55 * st) * (1. - .2 * fall), 0., .92);',   /* dense: NCAR's shaft is nearly opaque */
+    '    float lit = clamp(.5 + .5 * (p.x - ax) / max(halfw, 1.) * -sign(uSunDir.x), 0., 1.);',   /* the side toward the sun is brighter */
+    '    vec3 rc = mix(mix(vec3(.66, .64, .74), vec3(.95, .93, .95), lit), vec3(.34, .38, .50), uNight);',
+    '    rc *= mix(1., .80, smoothstep(.8, 1.1, uRain));',                              /* a heavy shaft is darker */
+    '    ra *= (col.a > .02 && p.y > uBase) ? .75 : 1.;',
+    '    col = vec4(mix(col.rgb, rc, ra / max(col.a + ra - col.a * ra, 1e-3) * (1. - col.a * .25)), col.a + ra - col.a * ra);',
     '  }',
-    '  gl_FragColor = vec4(col.rgb * col.a, col.a);',
+  '  gl_FragColor = vec4(col.rgb * col.a, col.a);',
     '}'
   ].join('\n');
   var GL = null;
