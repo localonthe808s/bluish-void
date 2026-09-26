@@ -19854,19 +19854,30 @@ function dayRangeAround(d, days){
   };
 
   // ── GOLDEN HOUR INSIGHT POPUP ──
-  window.showGoldenInsight = function(ev) {
+  /* ONE SCORE (2026-09-26 audit): this popup's formula is THE sunset/sunrise score. With opt.scoreOnly it renders nothing and
+     returns {score, label, bd, peak} for any event -- opt.dayIdx (index into _dailyData) and opt.isAm (sunrise) -- and the card
+     calls it (window._ghUnifiedScore), so the card and the popup can no longer disagree. */
+  window._ghUnifiedScore = function(evDate, isAm){
+    var d = window._dailyData; if (!d || !evDate) return null;
+    var arr = isAm ? d.sunrise : d.sunset, best = -1, bd = 1e15, t = evDate.getTime();
+    for (var i = 0; i < arr.length; i++){ var dd = Math.abs(new Date(arr[i]).getTime() - t); if (dd < bd){ bd = dd; best = i; } }
+    if (best < 0 || bd > 14 * 3600000) return null;
+    return window.showGoldenInsight(null, { scoreOnly: true, dayIdx: best, isAm: !!isAm });
+  };
+  window.showGoldenInsight = function(ev, opt) {
+    opt = opt || {};
     try {
     var old = document.getElementById('golden-insight-popup');
     var oldBd = document.getElementById('golden-insight-backdrop');
-    if (old) { old.remove(); if(oldBd) oldBd.remove(); return; }
+    if (old && !opt.scoreOnly) { old.remove(); if(oldBd) oldBd.remove(); return; }
 
     var tlCard = document.getElementById('today-timeline-card');
-    if (!tlCard) return;
+    if (!tlCard && !opt.scoreOnly) return;
 
     var daily = window._dailyData;
     if (!daily || !daily.sunrise || !daily.sunset) return;
     var hourly = window._hourlyData;
-    var _bdi3 = window._tlBaseDay || 0;
+    var _bdi3 = opt.dayIdx != null ? opt.dayIdx : (window._tlBaseDay || 0);
     var srDate = new Date(daily.sunrise[_bdi3]);
     var ssDate = new Date(daily.sunset[_bdi3]);
     var dayLocal = new Date(srDate.getFullYear(), srDate.getMonth(), srDate.getDate(), 12, 0, 0, 0);
@@ -19896,6 +19907,9 @@ function dayRangeAround(d, days){
     var goldPmS = _ln(solarEventTimeLocal(dayLocal, lat, lon, 6, false));
     var goldPmE = _ln(solarEventTimeLocal(dayLocal, lat, lon, -4, false));
     var noon = _ln(solarNoonLocal(dayLocal, lat, lon));
+    /* a SUNRISE (scoreOnly): the same formula on the morning's window -- the event time and golden window swap in */
+    var isAmEv = !!(opt.scoreOnly && opt.isAm);
+    if (isAmEv){ goldPmS = goldAmS; goldPmE = goldAmE; ssDate = srDate; }
 
     // ── SUN ALTITUDE ──
     var sunAlt = (function() {
@@ -19942,7 +19956,7 @@ function dayRangeAround(d, days){
         /* WEIGHTED TO THE SUNSET INSTANT (2026-09-26): the window held one hourly sample (often the one after sunset) or none --
            and with none every input was null and the score fell to ~10. Now the samples within 90 min of sunset, weighted by
            nearness (so it interpolates between the two hours around it) */
-        var _cT0 = (ssDate || goldPmS).getTime() + 5 * 60000, _wgt = 1 - Math.abs(ht.getTime() - _cT0) / (90 * 60000);
+        var _cT0 = (ssDate || goldPmS).getTime() + (isAmEv ? -5 : 5) * 60000, _wgt = 1 - Math.abs(ht.getTime() - _cT0) / (90 * 60000);
         if (_wgt > 0) {
           for (var k2 in fields) {
             var arr = hourly[fields[k2]];
@@ -20131,6 +20145,9 @@ function dayRangeAround(d, days){
     // classifier hasn't run yet on first popup open.
     var _sunBlockedB = false;
     var _cIntel = window._cloudIntel && window._cloudIntel.forecast;
+    /* the classification belongs to the CARD's event: trust it only for that one (it made every other day 'sun blocked') */
+    var _tc = window._ghTimingCache, _same = !!(_tc && _tc.sunEvent && ssDate && Math.abs(_tc.sunEvent - ssDate) < 3 * 3600000 && !!_tc.isAm === isAmEv);
+    if (!_same) _cIntel = null;
     if (_cIntel && _cIntel.length) {
       for (var _bi = 0; _bi < _cIntel.length; _bi++) {
         var _bt = _cIntel[_bi];
@@ -20142,7 +20159,7 @@ function dayRangeAround(d, days){
         if (_bt.genus === 'Cirrostratus' && (_bt.species === 'nebulosus' || _bvOpac) && (gh.cM||0) > 50) _sunBlockedB = true;
       }
     }
-    if (!_sunBlockedB && ((gh.cM||0) >= 85 || ((gh.cM||0) >= 70 && (gh.cH||0) >= 60))) _sunBlockedB = true;
+    if (!_sunBlockedB && ((gh.cM||0) >= 85 || ((gh.cM||0) >= 70 && (gh.cH||0) >= 60) || (gh.cL||0) >= 80)) _sunBlockedB = true;   /* + a low overcast: stratus hides the sun as surely as a mid deck (a 83%-low evening scored GOOD) */
 
     // 1. Mid/High cloud canvas — 25pts
     // mhAvg ≥ 90 = saturated canopy (no canvas, just a wall — zero pts).
@@ -20168,12 +20185,12 @@ function dayRangeAround(d, days){
     if (gh.cL !== null) {
       /* THE REAL WESTERN HORIZON (2026-09-26): low cloud over the city AND along the light path toward the sun, 60-400 km out
          (window._sunPathAt); the worse of the two decides. It used to be only the overhead number. */
-      var _sp2 = (window._sunPathAt && ssDate) ? window._sunPathAt(ssDate.getTime(), false) : null;
+      var _sp2 = (window._sunPathAt && ssDate) ? window._sunPathAt(ssDate.getTime(), isAmEv) : null;
       var _effL = _sp2 ? Math.max(gh.cL, Math.round(_sp2.block * 100)) : gh.cL;
       var ls = _effL<=10?18 : _effL<=25?14 : _effL<=40?9 : _effL<=60?4 : 1;
       // Bonus: clearing low clouds
       if (cloudClearing && ghPre.cL && ghPre.cL > 40 && _effL < 30) ls = Math.min(18, ls + 4);
-      score+=ls; bd2.push({l:'Western horizon clear',v:ls,m:18,n:gh.cL+'% low overhead'+(_sp2 ? ' \u00b7 path to the sun ' + Math.round(_sp2.block * 100) + '% blocked (' + _sp2.low.join('/') + '% low at 60/150/250/400 km)' : '')+(cloudClearing?' \u2193clearing':'')});
+      score+=ls; bd2.push({l:(isAmEv ? 'Eastern' : 'Western') + ' horizon clear',v:ls,m:18,n:gh.cL+'% low overhead'+(_sp2 ? ' \u00b7 path to the sun ' + Math.round(_sp2.block * 100) + '% blocked (' + _sp2.low.join('/') + '% low at 60/150/250/400 km)' : '')+(cloudClearing?' \u2193clearing':'')});
     }
 
     // 3. Aerosol/particle enhancement — 15pts
@@ -20185,25 +20202,18 @@ function dayRangeAround(d, days){
     if (_sunBlockedB) {
       aerScore = 0; aerNote = 'sun obscured by mid/high deck';
     } else {
-      aerScore = 5;
-      aerNote = '';
-      if (gh.vis !== null) {
-        if (gh.vis >= 3 && gh.vis <= 8) { aerScore = 10; aerNote = gh.vis+'mi vis'; }
-        else if (gh.vis >= 2 && gh.vis <= 12) { aerScore = 8; aerNote = gh.vis+'mi vis'; }
-        else if (gh.vis > 12) { aerScore = 5; aerNote = gh.vis+'mi (crystal clear)'; }
-        else { aerScore = 3; aerNote = gh.vis+'mi (foggy)'; }
-      }
+      /* CLEAN AIR WINS (2026-09-26 audit): haze scatters every colour alike and turns scarlet to beige -- the old rule rewarded
+         3-8 mi haze and rising PM2.5. Now: aerosol optical depth at golden hour (CAMS) first, visibility as the fallback;
+         only thin ELEVATED smoke (with clean surface air) adds a little red */
+      aerScore = 8; aerNote = '';
+      var _aod = null;
+      try { var _aqh = aqData.hourly; if (_aqh && _aqh.aerosol_optical_depth){ var _as = 0, _an = 0; for (var _ai3 = 0; _ai3 < _aqh.time.length; _ai3++){ var _at3 = new Date(_aqh.time[_ai3]); if (Math.abs(_at3 - ssDate) <= 90 * 60000 && typeof _aqh.aerosol_optical_depth[_ai3] === 'number'){ _as += _aqh.aerosol_optical_depth[_ai3]; _an++; } } if (_an) _aod = _as / _an; } } catch(_){}
+      if (_aod != null){ aerScore = _aod < 0.1 ? 15 : _aod < 0.15 ? 13 : _aod < 0.22 ? 10 : _aod < 0.32 ? 6 : _aod < 0.5 ? 3 : 1; aerNote = 'AOD ' + _aod.toFixed(2); }
+      else if (gh.vis !== null) { aerScore = gh.vis > 12 ? 13 : gh.vis > 8 ? 10 : gh.vis > 5 ? 7 : gh.vis > 3 ? 4 : 2; aerNote = gh.vis+'mi vis'; }
       var pm25Score = pm25AtGold || pm25Now;
-      if (pm25Score && pm25Score > 12 && pm25Score < 65) {
-        aerScore = Math.min(15, aerScore + Math.round((pm25Score - 12) / 8));
-        aerNote += (aerNote ? ' + ' : '') + 'PM2.5:' + Math.round(pm25Score) + (pm25AtGold ? '@GH' : '');
-      }
-      if (smokeBoost.active && smokeBoost.level !== 'trace') {
-        aerScore = Math.min(15, aerScore + 3);
-        aerNote += (aerNote ? ' + ' : '') + 'smoke';
-      }
-      if (blhTrap) { aerScore = Math.min(15, aerScore + 2); aerNote += ' + shallow BL'; }
-      if (dustAlert) { aerScore = Math.min(15, aerScore + 3); aerNote += ' + dust advisory'; }
+      if (pm25Score && pm25Score > 35) { aerScore = Math.max(0, aerScore - 3); aerNote += (aerNote ? ' \u00b7 ' : '') + 'PM2.5 ' + Math.round(pm25Score) + ' (surface haze)'; }
+      else if (smokeBoost.active && smokeBoost.level !== 'trace' && (!pm25Score || pm25Score < 20)) { aerScore = Math.min(15, aerScore + 2); aerNote += (aerNote ? ' + ' : '') + 'thin smoke aloft'; }
+      if (fogAlert) { aerScore = Math.min(aerScore, 2); aerNote += ' + fog'; }
     }
     score+=aerScore; bd2.push({l:'Aerosol enhancement',v:aerScore,m:15,n:aerNote||'--'});
 
@@ -20214,9 +20224,9 @@ function dayRangeAround(d, days){
     if (gh.rh !== null) {
       var hs;
       if (_sunBlockedB) hs = 0;
-      else hs = gh.rh>=40&&gh.rh<=70 ? 12 : gh.rh>=30&&gh.rh<=80 ? 9 : gh.rh>80 ? 6 : 5;
+      else hs = gh.rh<=55 ? 12 : gh.rh<=65 ? 10 : gh.rh<=75 ? 7 : gh.rh<=85 ? 4 : 2;   /* drier is better: humidity was the single best predictor in the Stanford sunset study (lower = better) */
       var _hsN = gh.rh+'%'+(gh.dp!==null?' (dp '+gh.dp+'\u00b0)':'') + (_sunBlockedB?' \u2014 sun blocked':'');
-      score+=hs; bd2.push({l:'Humidity Rayleigh boost',v:hs,m:12,n:_hsN});
+      score+=hs; bd2.push({l:'Dry, clear air',v:hs,m:12,n:_hsN});
     }
 
     // 5. No precipitation — 10pts
@@ -20241,7 +20251,7 @@ function dayRangeAround(d, days){
     maxS += 8;
     var pfS = 0;
     var pfNote = '';
-    if (frontalBoost.active) { pfS = 8; pfNote = frontalBoost.type + ' front ~' + frontalBoost.hoursBefore + 'h ago'; }
+    if (frontalBoost.active) { pfS = frontalBoost.type === 'cold' ? 8 : 3; pfNote = frontalBoost.type + ' front ~' + frontalBoost.hoursBefore + 'h ago' + (frontalBoost.type === 'cold' ? '' : ' (warm sector: often hazy)'); }
     else if (postStorm) { pfS = 7; pfNote = 'CAPE collapsed (storms clearing)'; }
     else if (cloudClearing && pressTrend === 'rising') { pfS = 5; pfNote = 'Clearing + rising pressure'; }
     else { pfNote = 'No frontal passage'; }
@@ -20263,6 +20273,26 @@ function dayRangeAround(d, days){
     // word \u2014 sky physically cannot render warm color through an opacus deck.
     var finalScore = maxS > 0 ? Math.round(score / maxS * 100) : 50;
     if (_sunBlockedB) finalScore = Math.min(finalScore, 25);
+    /* NWS cross-check (moved here from the card, so both see it): the human forecast's thunder / precip chance / sky cover in the
+       golden window caps a score the model's clouds can miss */
+    try{
+      var _ns = window._nwsSky;
+      if (_ns && Date.now() - _ns.fetchedAt < 3 * 3600000 && ssDate && window.LOCATION && Math.abs(_ns.lat - LOCATION.lat) < 1 && Math.abs(_ns.lon - LOCATION.lon) < 1){
+        var _evR = ssDate.getTime() - (locNowNaive().getTime() - Date.now()),   /* naive axis -> the real instant NWS hours use */ _nsCov = [], _nsPop = 0, _nsThun = false;
+        _ns.hours.forEach(function(nh){ if (Math.abs(nh.t - _evR) > 90 * 60000) return; if (nh.sky != null) _nsCov.push(nh.sky); if (nh.pop != null) _nsPop = Math.max(_nsPop, nh.pop); if (nh.thunder) _nsThun = true; });
+        if (_nsCov.length){ var _nsAvg = _nsCov.reduce(function(a, b){ return a + b; }, 0) / _nsCov.length, _mT = Math.max(gh.cL || 0, gh.cM || 0, gh.cH || 0), _cap = null, _why = '';
+          if (_nsThun && _nsPop >= 50){ _cap = 35; _why = 't-storms likely (' + Math.round(_nsPop) + '%)'; }
+          else if (_nsPop >= 60){ _cap = 40; _why = 'precip likely (' + Math.round(_nsPop) + '%)'; }
+          else if (_nsPop >= 40){ finalScore -= 12; _why = Math.round(_nsPop) + '% precip chance'; }
+          else if (_nsAvg >= 75 && _mT < 30){ _cap = 45; _why = 'mostly cloudy (' + Math.round(_nsAvg) + '%) vs a clear model'; }
+          if (_cap != null) finalScore = Math.min(finalScore, _cap);
+          if (_why) bd2.push({ l: 'NWS forecast check', v: 0, m: 0, n: _why });
+          finalScore = Math.max(0, finalScore); } }
+    }catch(_){}
+    /* LEAD TIME: a cloud forecast days out cannot resolve a sunset's clouds -- pull far scores toward the middle rather than
+       promise an EPIC five days ahead */
+    var _lead = ssDate ? (ssDate.getTime() - locNowNaive().getTime()) / 864e5 : 0, _shr = Math.min(0.55, Math.max(0, _lead - 1.5) * 0.14);
+    if (_shr > 0){ finalScore = Math.round(finalScore * (1 - _shr) + 40 * _shr); bd2.push({ l: 'Forecast range', v: 0, m: 0, n: Math.round(_lead) + ' days out: pulled ' + Math.round(_shr * 100) + '% toward average' }); }
     var scoreLabel, scoreColor, scoreEmoji;
     if (finalScore >= 85) { scoreLabel='EPIC'; scoreColor='#ff4444'; scoreEmoji=''; }
     else if (finalScore >= 70) { scoreLabel='EXCELLENT'; scoreColor='#ff6633'; scoreEmoji=''; }
@@ -20276,8 +20306,11 @@ function dayRangeAround(d, days){
     // sunset−4, all pre-sunset). Photographic peak warmth straddles the moment:
     // sun altitude ~+1° down to ~−3°, which is roughly sunset−10 to sunset+5.
     // Cutting at sunset−4 missed the climax.
-    var peakStart = ssDate ? new Date(ssDate.getTime() - 10*60000) : null;
-    var peakEnd = ssDate ? new Date(ssDate.getTime() + 5*60000) : null;
+    /* PEAK: the clouds light up 3-13 min AFTER sunset as the red edge of the Earth's shadow passes through them (audit 09-26);
+       a sunrise mirrors it */
+    var peakStart = ssDate ? new Date(ssDate.getTime() + (isAmEv ? -15 : -5)*60000) : null;
+    var peakEnd = ssDate ? new Date(ssDate.getTime() + (isAmEv ? 5 : 15)*60000) : null;
+    if (opt.scoreOnly) return { score: finalScore, label: scoreLabel, color: scoreColor, bd: bd2, peak: [peakStart, peakEnd], sunBlocked: _sunBlockedB, n: counts && counts.cL ? 1 : 0 };
 
     // ── SKY COLOR TIMELINE SVG ──
     var buildSkyTimeline = function() {
@@ -28249,6 +28282,10 @@ function dayRangeAround(d, days){
             }
           }
         }catch(e){}
+        /* ONE SCORE (2026-09-26): the card shows the same score the popup explains -- window._ghUnifiedScore runs the popup's
+           formula (light path, clean air, NWS check) for THIS card's event (sunrise or sunset, any day). The engine's number above
+           stays only as the fallback when that cannot run. */
+        try{ var _U = window._ghUnifiedScore ? window._ghUnifiedScore(ghSunEvent, ghIsAm) : null; window._ghUnified = _U; if(_U && _U.score != null) qs = _U.score; }catch(e){}
         var ql,qc;
         // Bucket cutoffs aligned with the deep-dive popup (was 80/65/50/35/20 here,
         // 85/70/55/40/25 in the popup — same data could ship as GOOD on the card and
@@ -29478,12 +29515,13 @@ function dayRangeAround(d, days){
             // PM peak orange: 10 min before sunset to 5 min after.
             // Photographically warmest light occurs from sun altitude ~+1° down to ~-3°,
             // which straddles the sunset moment — cutting off pre-sunset misses the climax.
-            _pkS=new Date(ghSunEvent.getTime()-10*60000);
-            _pkE=new Date(ghSunEvent.getTime()+5*60000);
-          } else {
-            // AM peak orange: 5 min before sunrise to 10 min after (mirror of PM window).
+            // 2026-09-26: the clouds' colour peaks 3-13 min AFTER sunset (the Earth's shadow edge lighting them from below); the
+            // window now runs sunset-5 to +15, the same as the popup. Sunrise mirrors it.
             _pkS=new Date(ghSunEvent.getTime()-5*60000);
-            _pkE=new Date(ghSunEvent.getTime()+10*60000);
+            _pkE=new Date(ghSunEvent.getTime()+15*60000);
+          } else {
+            _pkS=new Date(ghSunEvent.getTime()-15*60000);
+            _pkE=new Date(ghSunEvent.getTime()+5*60000);
           }
           var _pkDur=Math.round((_pkE-_pkS)/60000);
           var _pkPrefix=_ghOff>0?'':(ghIsTomorrow?'TMRW ':'');   // day already named in the header when paged
@@ -30247,7 +30285,7 @@ function dayRangeAround(d, days){
             pts.push({ rise: rise, km: km, lat: la2 * 180 / Math.PI, lon: lo2 * 180 / Math.PI }); }); });
         var url = 'https://api.open-meteo.com/v1/forecast?latitude=' + pts.map(function(q){ return q.lat.toFixed(3); }).join(',')
           + '&longitude=' + pts.map(function(q){ return q.lon.toFixed(3); }).join(',')
-          + '&hourly=cloud_cover_low,cloud_cover_mid,cloud_cover_high&timezone=' + encodeURIComponent(loc.tz || 'auto') + '&forecast_days=3';
+          + '&hourly=cloud_cover_low,cloud_cover_mid,cloud_cover_high&timezone=' + encodeURIComponent(loc.tz || 'auto') + '&forecast_days=7';
         fetchWithTimeout(url, null, 12000).then(function(r){ return r.json(); }).then(function(d){
           var arr = Array.isArray(d) ? d : [d]; if (arr.length !== pts.length) return;
           pts.forEach(function(q, i){ var h = arr[i] && arr[i].hourly; if (!h) return; q.t = h.time.map(function(x){ return new Date(x).getTime(); }); q.cL = h.cloud_cover_low; q.cM = h.cloud_cover_mid; q.cH = h.cloud_cover_high; });
