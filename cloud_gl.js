@@ -58,7 +58,7 @@
     '  return acc > 0. ? 1. + log(acc) / K : -1.; }',   /* wide, flat: they merge into a deck */
     'float anvil(vec2 p){ if (uAnv < .01) return -1.; float ax2 = uCx - uLean * uH * .28; float ux = p.x - ax2; float R = ux > 0. ? uAnvR : uAnvL; float r2 = abs(ux) / max(R, 1.);',
     '  float th = (2.5 + 5.5 * (1. - r2)) * uAnv * uAnvT; float cy2 = uBase + uH - 1.5; float dy = (p.y - cy2) / max(th, .6);',
-    '  if (uAnvT > 1.5){ float eX = max(0., abs(ux) - uHW * .8), thT = 2.8 * uAnvT * uAnv, thB = (1.6 + 8.5 * exp(-eX / 75.)) * uAnvT * uAnv;',   /* the sky art: a WEDGE -- flat top at the lid, the underside rising from the tower toward the tip (a constant thickness read as an arm held out) */
+    '  if (uAnvT > 1.5){ float eX = max(0., abs(ux) - uHW * .8), thT = 2.8 * uAnvT * uAnv, thB = (3.2 + 6.5 * exp(-eX / 140.)) * uAnvT * uAnv;',   /* the sky art: a WEDGE -- flat top at the lid, the underside rising from the tower toward the tip (a constant thickness read as an arm held out) */
     '    dy = p.y > cy2 ? (p.y - cy2) / max(thT, .6) : (cy2 - p.y) / max(thB, .6); }',
     '  return (1. - r2 * r2) - dy * dy; }',
     /* the height of the surface: the lobes' shape, then domes at two sizes rising through it; the anvil is ice -- smooth and
