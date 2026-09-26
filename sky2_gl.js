@@ -117,11 +117,11 @@
     'uniform vec4 uRain;',   /* storm rain: cx, half width, cloud-base y, strength */
     'float rainD(vec2 p){',   /* soft slanted CURTAINS, not hard stripes */
     '  if (uRain.w <= 0.) return 0.;',
-    '  float dx = (p.x - uRain.x + (uRain.z - p.y) * .18) / uRain.y;',
+    '  float dx = (p.x - uRain.x - (uRain.z - p.y) * .06) / uRain.y;   /* a slight slant, and it stays under the cloud */',
     '  if (abs(dx) > 1.4 || p.y > uRain.z + 4. || p.y < uHz - 2.) return 0.;',
     '  float side = 1. - smoothstep(.45, 1.25, abs(dx + (fbm(vec2(p.y * .04, 3.)) - .5) * .5));',
     '  float veil = .35 + .65 * smoothstep(.3, .7, fbm(vec2(p.x * .18 + p.y * .035, p.y * .01 + 5.)));',
-    '  float top = smoothstep(uRain.z + 4., uRain.z - 8., p.y), bot = .55 + .45 * smoothstep(uHz - 2., uHz + 22., p.y);',
+    '  float top = smoothstep(uRain.z + 4., uRain.z - 8., p.y), bot = (.55 + .45 * smoothstep(uHz - 2., uHz + 22., p.y)) * smoothstep(uHz - .5, uHz + 3., p.y);   /* ends at the horizon, not in the ground */',
     '  return side * veil * top * bot * uRain.w;',
     '}',
     'float dens(vec2 p){ return max(sheets(p), smoothstep(-.16, .5, field(p))); }',   /* soft edges, as the SVG art has */
@@ -241,7 +241,7 @@
       var r = bvSky2(ctx, Object.assign({}, o, { _pass: 1, stormX: sx, types: types.filter(function(t){ return !isLow(t) && t !== cbT; }) }));
       bvCloudGL(ctx, { W: W0, H: H0, ppu: o.ppu || 4, t: 7, ns: 0.62, ground: hz0, night: L.n, sunDir: L.d, sunCol: L.c, shdCol: L.s,
         cx: sx, base: hz0 + 18, h: sky0 * 0.62, hw: 38, lean: 0.35, anvil: 0, anvR: 1, anvL: 1, rain: 0, rag: 7, dens: 1 });   /* hw 38: about 1.6 tall to 1 wide, a mature storm's body (it measured 2.4 : 1 at hw 28); rain is the sky pass's soft curtains */   /* a SMALL flare of its own (its full anvil is a thin plate at this size): the crown spreads into the soft anvil drawn behind, so the two join instead of a band pasted across the tower */   /* the front card's proportions (hw 16 : anvR 70 : anvL 32 at its scale) */
-      bvSky2(ctx, Object.assign({}, o, { _pass: 1, stormX: sx, anvil: [sx + 30, hz0 + 10, 118, sky0 * 0.68], rain: [sx - 6, 32, hz0 + 17, 0.85], types: types.filter(function(t){ return isLow(t) && t !== cbT; }) }));   /* the anvil IN FRONT, opaque, swallowing the crown: the tower hits the lid and spreads */
+      bvSky2(ctx, Object.assign({}, o, { _pass: 1, stormX: sx, anvil: [sx + 30, hz0 + 10, 118, sky0 * 0.68], rain: [sx + 38 * 0.14, 38 * 0.68, hz0 + 19, 0.85]   /* under the base as MEASURED (x 73..139, centre ~106 for sx 101, hw 38): centred on it, inside its width */, types: types.filter(function(t){ return isLow(t) && t !== cbT; }) }));   /* the anvil IN FRONT, opaque, swallowing the crown: the tower hits the lid and spreads */
       return r;
     }
     var G = init(); if (!G) return false;
