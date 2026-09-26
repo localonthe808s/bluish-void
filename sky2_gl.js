@@ -55,9 +55,13 @@
     '    body = max(body, an + (fbm(s * vec2(.5, 2.5)) - .5) * .5 * smoothstep(.3, 1., abs(ax)));',   /* fibrous where it thins */
     '  }',
     '  if (k.x > 2.5){',   /* the ANVIL: flat top at the lid, smooth, fibrous streaks downwind -- no cauliflower */
+    '    vec2 rt = vec2((q.x + .17) / .40, (q.y - .90) / .10); body = max(body, (1. - dot(rt, rt)) * .9);',   /* the underside sags onto the tower: the crown spreads INTO the anvil */
     '    body = min(body, (1.06 - q.y) * 9.);',
+    '    vec2 ov = vec2((q.x + .17) / .27, (q.y - 1.03) / .065); body = max(body, (1. - dot(ov, ov)) * .7);',   /* the overshooting top, above the updraft */
     '    float fib = fbm(vec2(q.x * 3., q.y * 26.) + k.y * 9.);',
     '    float da = body + (fib - .5) * .45 * smoothstep(.1, .9, abs(q.x)) + (fbm(s * .8) - .5) * .18;',
+    '    float nearT = exp(-pow((q.x + .17) / .42, 2.));',   /* around the updraft the tower texture carries into the anvil; smooth fibres downwind */
+    '    da += nearT * smoothstep(-.35, .1, body) * (.30 * dome(s * 1.6) + .13 * dome(s * 3.7 + 2.) + .05 * dome(s * 8. + 5.) - .2);',
     '    da -= 2. * (smoothstep(1.15, 1.45, abs(q.x)) + (1. - smoothstep(-1.15, -.85, q.y)));',
     '    return da * k.z;',
     '  }',
@@ -217,8 +221,8 @@
       var isLow = function(t){ return t.layer === 'low' || t.layer === 'deep'; };
       var r = bvSky2(ctx, Object.assign({}, o, { _pass: 1, stormX: sx, types: types.filter(function(t){ return !isLow(t) && t !== cbT; }) }));
       bvCloudGL(ctx, { W: W0, H: H0, ppu: o.ppu || 4, t: 7, ns: 0.62, ground: hz0, night: L.n, sunDir: L.d, sunCol: L.c, shdCol: L.s,
-        cx: sx, base: hz0 + 10, h: sky0 * 0.66, hw: 28, lean: 0.35, anvil: 0, anvR: 1, anvL: 1, rain: 0.45, dens: 1 });   /* its anvil is a thin plate at this size: the sky pass draws a soft one behind */   /* the front card's proportions (hw 16 : anvR 70 : anvL 32 at its scale) */
-      bvSky2(ctx, Object.assign({}, o, { _pass: 1, stormX: sx, anvil: [sx + 14, hz0 + 10, 84, sky0 * 0.64], types: types.filter(function(t){ return isLow(t) && t !== cbT; }) }));   /* the anvil IN FRONT of the crown: the tower spreads into it */
+        cx: sx, base: hz0 + 10, h: sky0 * 0.66, hw: 28, lean: 0.35, anvil: 0, anvR: 1, anvL: 1, rain: 0.45, dens: 1 });   /* a SMALL flare of its own (its full anvil is a thin plate at this size): the crown spreads into the soft anvil drawn behind, so the two join instead of a band pasted across the tower */   /* the front card's proportions (hw 16 : anvR 70 : anvL 32 at its scale) */
+      bvSky2(ctx, Object.assign({}, o, { _pass: 1, stormX: sx, anvil: [sx + 14, hz0 + 10, 84, sky0 * 0.68], types: types.filter(function(t){ return isLow(t) && t !== cbT; }) }));   /* the anvil IN FRONT, opaque, swallowing the crown: the tower hits the lid and spreads */
       return r;
     }
     var G = init(); if (!G) return false;
