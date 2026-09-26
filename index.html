@@ -55225,6 +55225,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         /* TRAFFIC: an incident, a tagged jam or a shut road, in the same nearest-wins contest */
         if (cw.traffic && cwMapMode()){ cwTraf.tapXY = [X, Y];
           (cwTraf.hits || []).forEach(function(h){ var dm = h.poly ? cwTrafClip.polyD(X, Y, h.poly) : Math.hypot(h.X - X, h.Y - Y); offer(dm / mpp + (h.poly ? (h.d.slow ? 3 : 4.5) : 0), h.reach, cwTrafTap, h.d); }); }   /* a marked thing wins over the road under it, and where roads overlap the slow one is the one being asked about */
+        (cwSub.hits || []).forEach(function(h){ var best = Infinity;
+          for (var i = 1; i < h.pts.length; i++){ var a = h.pts[i - 1], b = h.pts[i], ax = toX(a[1]), ay = toY(a[0]), bx = toX(b[1]), by = toY(b[0]);
+            var dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy || 1, u = Math.max(0, Math.min(1, ((X - ax) * dx + (Y - ay) * dy) / L2)); best = Math.min(best, Math.hypot(ax + u * dx - X, ay + u * dy - Y)); }
+          offer(best / mpp + 2, 8, cwSubTap, h.rt); });
         if (cwStationsOn() && cwMapMode() && !cw.rock && window.BV_MTA_STOPS){   /* no station taps on the geology view (user 2026-09-07) */
           var bs = null, bsd = Infinity;
           window.BV_MTA_STOPS.forEach(function(st){
@@ -58348,6 +58352,9 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         + (ffw ? ' &nbsp;·&nbsp; <span style="color:#ff8a8a;font-weight:800;">' + mtaEsc(ffw.toUpperCase()) + '</span>' : ''));
       var coastal = ((window._nwsAlerts || []).filter(function(a){ return /coastal flood|storm surge/i.test(a.event || '') && (!a.expires || +a.expires > now2); })[0] || {}).event || '';
       var wetNow = window._lastWxCode != null && ((window._lastWxCode >= 51 && window._lastWxCode <= 67) || (window._lastWxCode >= 71 && window._lastWxCode <= 86) || window._lastWxCode >= 95);
+      if (cwSub.alerts){ var dl = Object.keys(cwSub.alerts).map(mtaRouteShow).filter(function(x, i, a){ return a.indexOf(x) === i; }).sort();
+        bars.push(lab('SUBWAY') + (dl.length ? dl.map(function(r){ return '<span style="display:inline-grid;place-items:center;width:15px;height:15px;border-radius:50%;margin:0 2px;background:' + (MTA_COLORS[r] || '#808183') + ';color:' + (MTA_DARKTEXT[r] ? '#111' : '#fff') + ';font:900 8px system-ui,sans-serif;vertical-align:middle;">' + r + '</span>'; }).join('')
+          + ' &nbsp;DELAYS OR CHANGES NOW, MARKED ON THE LINES · TAP ONE' : 'GOOD SERVICE ON EVERY LINE')); }
       var bw = document.getElementById('cw-traf-bars'), bodyEl = document.getElementById('cw-body');
       if (!bw && bodyEl){ bw = document.createElement('div'); bw.id = 'cw-traf-bars';
         bw.style.cssText = 'margin:0 14px;background:rgba(18,24,44,.94);color:#fff;border-radius:10px 10px 0 0;overflow:hidden;font:600 8.5px/1.5 system-ui,sans-serif;letter-spacing:.07em;';
@@ -59413,6 +59420,39 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       'G':'#6CBE45','J':'#996633','Z':'#996633','L':'#A7A9AC','N':'#FCCC0A','Q':'#FCCC0A','R':'#FCCC0A','W':'#FCCC0A',
       'S':'#808183','SIR':'#0039A6' };
     var MTA_DARKTEXT = { N:1, Q:1, R:1, W:1 };
+    /* SUBWAY DELAYS, LIVE (user 2026-09-26: "can the subway lines show slowdowns and delays? live"). The MTA's own alert feed
+       (keyless, CORS-open, every 2 min): alerts active NOW of the unplanned kinds -- delays, slow speeds, suspensions, reroutes --
+       drawn on the line itself. The lines are part of the painted basemap, so their paths are baked from the MTA's GTFS
+       (/city_subway_lines.json, route -> [[lat,lon]...] per branch). Planned weekend work is left to the MTA's own pages. */
+    var cwSub = { lines: null, alerts: null, at: 0, hits: [] };
+    var CW_SUB_KINDS = /delay|slow|suspend|reroute|reduced|stops skipped|express to local|local to express|no trains|part suspended/i;
+    function cwSubLoad(){
+      if (!cwSub.lines && !cwSub.linesP) cwSub.linesP = fetch('/city_subway_lines.json?v=1').then(function(r){ return r.json(); }).then(function(j){ cwSub.lines = j; cwDrawSensors(); }).catch(function(){ cwSub.linesP = null; });
+      if (Date.now() - cwSub.at < 120000) return; cwSub.at = Date.now();
+      fetch('https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/camsys%2Fsubway-alerts.json').then(function(r){ return r.json(); }).then(function(j){
+        var now = Date.now() / 1000, out = {};
+        (j.entity || []).forEach(function(e){ var a = e.alert || {}, ap = a.active_period || [];
+          if (ap.length && !ap.some(function(p){ return (p.start || 0) <= now && now <= (p.end || 9e12); })) return;
+          var mer = a['transit_realtime.mercury_alert'] || {}, kind = mer.alert_type || '';
+          if (/^planned/i.test(kind) || !CW_SUB_KINDS.test(kind)) return;
+          var hd = ((a.header_text || {}).translation || []).filter(function(t){ return t.language === 'en'; })[0];
+          var txt = hd ? hd.text : kind;
+          (a.informed_entity || []).forEach(function(ie){ var rt = ie.route_id; if (!rt) return;
+            (out[rt] = out[rt] || []).push({ kind: kind, text: txt }); });
+        });
+        cwSub.alerts = out; cwDrawSensors(); if (typeof cwTrafBand === 'function') cwTrafBand();
+      }).catch(function(){});
+    }
+    function cwSubTap(rt){
+      var el = document.getElementById('cw-info'); if (!el || !cwSub.alerts || !cwSub.alerts[rt]) return;
+      mtaPanelClose(); cwFeatClose(); el.style.display = '';
+      var seen = {}, list = cwSub.alerts[rt].filter(function(a){ if (seen[a.text]) return false; seen[a.text] = 1; return true; });
+      el.innerHTML = '<div style="display:flex;align-items:center;gap:8px;"><span style="display:inline-grid;place-items:center;width:18px;height:18px;border-radius:50%;background:' + (MTA_COLORS[mtaRouteShow(rt)] || '#808183') + ';color:' + (MTA_DARKTEXT[rt] ? '#111' : '#fff') + ';font:900 10px system-ui,sans-serif;">' + mtaEsc(mtaRouteShow(rt)) + '</span>'
+        + '<span style="font:800 12px system-ui,sans-serif;letter-spacing:.03em;color:#1b2340;">' + mtaEsc(list[0].kind.toUpperCase()) + '</span><span style="font:600 8px system-ui,sans-serif;color:#5b647a;letter-spacing:.08em;">MTA · LIVE</span>'
+        + '<button id="cw-sub-x" style="margin-left:auto;background:none;border:none;font:700 13px system-ui,sans-serif;color:#1b2340;cursor:pointer;">✕</button></div>'
+        + list.map(function(a){ return '<div style="font:500 9.5px system-ui,sans-serif;color:#3b4460;margin-top:4px;line-height:1.45;">' + mtaEsc(a.text).replace(/\[([A-Z0-9]{1,3})\]/g, '<b>$1</b>') + '</div>'; }).join('');
+      var xb = document.getElementById('cw-sub-x'); if (xb) xb.onclick = function(e){ e.stopPropagation(); cwInfoDefault(); };
+    }
     function mtaRouteShow(rt){ return (rt === 'GS' || rt === 'FS' || rt === 'H') ? 'S' : (rt === 'SI' ? 'SIR' : rt); }
     function mtaDirLbl(l){
       var u = String(l).toUpperCase();
@@ -65357,6 +65397,42 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         return [(X - v.X0) / (v.X1 - v.X0) * cvs.width,
                 (v.Y1 - Y) / (v.Y1 - v.Y0) * cvs.height];
       });
+      /* the delayed lines, over the painted ones: a dark casing, the route colour, a pulsing dashed white core, a label */
+      cwSub.hits = [];
+      if (cwMapMode() && !cw.rock && !cw.trees && !cw.floods){
+        cwSubLoad();
+        if (cwSub.lines && cwSub.alerts){
+          var sx = function(c){ return (c[1] * Math.PI / 180 * R2 - v.X0) / (v.X1 - v.X0) * cvs.width; };
+          var sy = function(c){ return (v.Y1 - R2 * Math.log(Math.tan(Math.PI / 4 + c[0] * Math.PI / 360))) / (v.Y1 - v.Y0) * cvs.height; };
+          var ph = (Date.now() / 1000) % 1.6 / 1.6, lbl = [];
+          g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
+          Object.keys(cwSub.alerts).forEach(function(rt){
+            var br = cwSub.lines[rt] || cwSub.lines[rt === 'S' ? 'GS' : rt]; if (!br) return;
+            var col = MTA_COLORS[mtaRouteShow(rt)] || '#808183';
+            br.forEach(function(line){
+              var P2 = line.map(function(c){ return [sx(c), sy(c)]; });
+              var path = function(){ g.beginPath(); P2.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); };
+              path(); g.lineWidth = 7 * dpr; g.strokeStyle = 'rgba(8,10,16,.75)'; g.stroke();
+              path(); g.lineWidth = 4.5 * dpr; g.strokeStyle = col; g.stroke();
+              path(); g.lineWidth = 1.6 * dpr; g.setLineDash([5 * dpr, 7 * dpr]); g.lineDashOffset = -ph * 12 * dpr; g.strokeStyle = 'rgba(255,255,255,.95)'; g.stroke(); g.setLineDash([]);
+              if (!lbl.some(function(L3){ return L3[1] === rt; })) lbl.push([P2, rt, col]);   /* one label per line, placed below */
+              cwSub.hits.push({ rt: rt, pts: line });
+            });
+          });
+          var taken = [];
+          lbl.forEach(function(L2){ var t2 = mtaRouteShow(L2[1]); g.font = '800 ' + (7.5 * dpr) + 'px system-ui,sans-serif';
+            var w = g.measureText('DELAYS').width + 30 * dpr, hh = 18 * dpr, q = null;
+            /* the first point along the line, from its middle outward, where the label has room and is on screen */
+            var P3 = L2[0], order = []; for (var k = 0; k < 12; k++){ var f = 0.5 + (k % 2 ? -1 : 1) * Math.ceil(k / 2) * 0.08; if (f > 0.04 && f < 0.96) order.push(P3[Math.floor(f * (P3.length - 1))]); }
+            for (var k2 = 0; k2 < order.length && !q; k2++){ var c2 = order[k2]; if (c2[0] < w / 2 || c2[1] < hh || c2[0] > cvs.width - w / 2 || c2[1] > cvs.height - hh) continue;
+              if (!taken.some(function(b){ return Math.abs(b[0] - c2[0]) < (b[2] + w) / 2 + 4 * dpr && Math.abs(b[1] - c2[1]) < hh + 3 * dpr; })) q = c2; }
+            if (!q) return; taken.push([q[0], q[1], w]); g.fillStyle = 'rgba(8,10,16,.9)'; g.beginPath(); g.roundRect ? g.roundRect(q[0] - w / 2, q[1] - 9 * dpr, w, 18 * dpr, 9 * dpr) : g.rect(q[0] - w / 2, q[1] - 9 * dpr, w, 18 * dpr); g.fill();
+            g.fillStyle = L2[2]; g.beginPath(); g.arc(q[0] - w / 2 + 9 * dpr, q[1], 6.5 * dpr, 0, 6.3); g.fill();
+            g.fillStyle = MTA_DARKTEXT[t2] ? '#111' : '#fff'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.font = '900 ' + (8 * dpr) + 'px system-ui,sans-serif'; g.fillText(t2, q[0] - w / 2 + 9 * dpr, q[1] + 0.5 * dpr);
+            g.fillStyle = '#fff'; g.font = '800 ' + (7.5 * dpr) + 'px system-ui,sans-serif'; g.textAlign = 'left'; g.fillText('DELAYS', q[0] - w / 2 + 21 * dpr, q[1] + 0.5 * dpr); });
+          g.restore();
+        }
+      }
       if (cwStationsOn() && cwMapMode() && !cw.rock && window.BV_MTA_STOPS){   /* the station dots leave with the geology, like the pipes -- and step aside for TRAFFIC unless asked back */
         /* subway-map idiom: white dot, ink ring; the tapped station glows */
         window.BV_MTA_STOPS.forEach(function(st){
