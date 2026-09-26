@@ -17,3 +17,4 @@ output footprint before sampling (anti-alias), a row-coherent destripe over the 
 ~1.8 m, ~6 km row pattern), depth-growing exaggeration and a texture term; shipped as WebP q92 (the 256-colour PNG
 posterised the ramp). trace2.py follows the Hudson Canyon's strongest incision from the head to where the cut fades
 (needs coast3_Z2x.npy, written by the bake): 343 km, head 39.67N 72.49W (139 m) -> 37.66N 70.51W (4,108 m).
+v4 (2026-09-25): bake_coast4.py -> the incision look the user preferred; reads coast3_Z2x.npy (run bake_coast3.py first).
