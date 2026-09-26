@@ -59,7 +59,7 @@
     '    vec2 sk = vec2(q.x / .88, (q.y - .22) / .28); body = max(body, (1. - dot(sk, sk)) * .8);',   /* a broad skirt the heads sit on: rounded corners, not a boxy cut */
     '    body = min(body, smoothstep(-.06, .14, q.y) * 2. - 1.);',        /* the flat base, softened */
     '  } else if (k.x < 1.5){',                                          /* PUFF: a rounded blob of 4-6 lobes, bottom rounded too */
-    '    for (int i = 0; i < 9; i++){ float fi = float(i), xi = (h1(vec2(k.y, fi)) - .5) * 1.5, yi = (h1(vec2(fi, k.y + 1.)) - .5) * .7, ri = .22 + .32 * h1(vec2(fi, k.y + 3.)) * (1. - .5 * abs(xi));',
+    '    for (int i = 0; i < 9; i++){ float fi = float(i), xi = (h1(vec2(k.y, fi)) - .5) * 1.5, yi = (h1(vec2(fi, k.y + 1.)) - .5) * .7, ri = (k.w > 1.5 ? .40 + .20 * h1(vec2(fi, k.y + 3.)) : .22 + .32 * h1(vec2(fi, k.y + 3.))) * (1. - .5 * abs(xi));   /* floccus: big merged lobes (small ones read as grapes) */',
     '      vec2 dd = vec2((q.x - xi) / ri, (q.y - .45 - yi) / (ri * 1.15)); body = max(body, 1. - dot(dd, dd)); }',
     '    body = min(body, (q.y + .15) * 3.);',   /* a flatter underside than top */
     '  } else {',                                                        /* CUMULONIMBUS: a column narrowing upward under a wide anvil */
@@ -89,9 +89,13 @@
     '  float d = body + inside * (.30 * dome(s) + .13 * dome(s * 2.3 + 2.) + .05 * dome(s * 5.1 + 5.) - .20);',
     '  float rim = smoothstep(-.55, -.15, body) * (1. - smoothstep(.0, .5, body));',   /* fray only near the outline: noise at the box edge cut straight lines */
     '  d += rim * (fbm(s * 1.7 + 3.) - .52) * .55;',   /* the outline frays: the SVG art never has a clean pill edge */
-    '  if (k.x > .5 && k.x < 1.5 && k.w > 1.5){ float vx = (q.x + q.y * .35) / .45;',   /* FLOCCUS: a ragged tuft trailing VIRGA -- fibres falling and fading below it */
-    '    float vg = (1. - vx * vx) * smoothstep(-1.1, -.1, q.y) * (1. - smoothstep(-.05, .3, q.y)) * (.45 + .55 * fbm(vec2(q.x * 14., q.y * 1.2) + k.y * 5.)) - .62;   /* virga: fine faint fibres, not tentacles */',
-    '    d = max(d, vg); d += rim * (fbm(s * 3.1 + 7.) - .5) * .35; }',
+    '  if (k.x > .5 && k.x < 1.5 && k.w > 1.5){',   /* FLOCCUS (WMO): a small tuft, the TOP rounded and cumuliform, the LOWER part ragged and fibrous, often trailing VIRGA */
+    '    float lower = 1. - smoothstep(.1, .55, q.y);',
+    '    d -= lower * (.15 + .75 * fbm(vec2(q.x * 7., q.y * 2.2) + k.y * 3.));',   /* the underside frays into fibres, no flat base */
+    '    float yv = clamp(-q.y + .15, 0., 1.3), xv = (q.x - .1 + yv * yv * .7) / (.6 - .2 * yv);',   /* virga: sheared back as it falls (the wind is slower below) */
+    '    float streak = .55 + .45 * smoothstep(.35, .7, fbm(vec2(xv * 2.4, q.y * .5) + k.y * 11.));   /* a soft veil with faint streaks (strong streaks read as tentacles) */',
+    '    float vg = max(0., 1. - xv * xv) * streak * smoothstep(-1.18, -.35, q.y) * (1. - smoothstep(.05, .4, q.y)) * .42 - .25;',   /* max ~.12: translucent */
+    '    d = max(d, vg); }',
     '  d -= 2. * (smoothstep(1.15, 1.45, abs(q.x)) + smoothstep(1.6, 1.95, q.y) + (1. - smoothstep(-1.15, -.85, q.y)));',   /* fade out before the clip box: no straight cuts */
     '  return d * k.z;',   /* UNCLAMPED: the lighting reads its slope (a clamped field is flat inside -- the pink fill) */
     '}',
@@ -346,9 +350,11 @@
             x0 += len + (10 + 34 * R()) * s3; } }
       } else if (g === 'Altocumulus' && ty.species === 'floccus'){
         /* FLOCCUS: small ragged tufts scattered in perspective, each trailing virga */
-        var nF = Math.round(14 + 26 * c);
-        for (var fk = 0; fk < nF; fk++){ var ff = Math.pow(R(), 1.2), s4 = 0.3 + 0.8 * ff, hwF = (13 + 8 * R()) * s4;
-          add(R() * W, rowY(0.3 + 0.65 * ff, hz + sky * 0.92), hwF, hwF * 0.8, 1, 0.92, 2); }
+        /* in loose GROUPS (floccus comes in fleets, not evenly spaced), sizes varied, smaller toward the horizon */
+        var nG = Math.round(8 + 9 * c);
+        for (var fg = 0; fg < nG; fg++){ var ff = Math.pow(R(), 1.1), s4 = 0.3 + 0.8 * ff, gx = R() * W, gy = rowY(0.25 + 0.68 * ff, hz + sky * 0.9), nT = 2 + Math.floor(R() * 4);
+          for (var fk = 0; fk < nT; fk++){ var hwF = (9 + 9 * R()) * s4;
+            add(gx + (R() - 0.5) * 60 * s4, gy + (R() - 0.5) * 14 * s4, hwF, hwF * (0.95 + 0.35 * R()), 1, 0.92, 2); } }
       } else if (g === 'Altocumulus' || g === 'Stratocumulus'){
         var ac = g === 'Altocumulus', rows = ac ? 10 : 6, top = ac ? hz + sky * 0.9 : hz + sky * 0.62;
         /* MASSES, NOT A GRID: patches scattered in perspective, big and merging overhead, flattening into wide strands at the
