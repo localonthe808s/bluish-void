@@ -92,13 +92,35 @@
     '}',
     'float sheets(vec2 p){',
     '  float d = 0.;',
-    '  if (uCi.w > .5 && p.y > uCi.x && p.y < uCi.y){',                    /* CIRRUS: fibres curling along the wind, hooked at the ends */
-    '    float b = smoothstep(uCi.x, uCi.x + 8., p.y) * (1. - smoothstep(uCi.y - 10., uCi.y, p.y));',
-    '    vec2 w = vec2(fbm(p * .025), fbm(p * .025 + 7.)) * 18.;',
-    '    vec2 f = (p + w) * vec2(.012, .16);',   /* long streaks: an elongated low frequency, warped so they curl */
-    '    float fib = fbm(f) * .7 + fbm(f * vec2(2.3, 1.1) + 3.) * .3;',
+    '  if (uCi.w > .5 && p.y > uCi.x && p.y < uCi.y){',   /* CIRRUS, by species (uCi.w = 1 + species: 0 fibratus, 1 uncinus, 2 spissatus, 3 intortus) */
+    '    float sp = uCi.w - 1., b = smoothstep(uCi.x, uCi.x + 12., p.y) * (1. - smoothstep(uCi.y - 10., uCi.y, p.y));',
     '    float patchy = smoothstep(1. - uCi.z, 1. - uCi.z + .35, fbm(p * vec2(.012, .05) + 11.));',
-    '    d = max(d, smoothstep(.52, .78, fib) * patchy * b * .7); }',
+    '    if (sp < .5){',   /* FIBRATUS: long fine near-straight fibres */
+    '      vec2 w = vec2(fbm(p * .02), fbm(p * .02 + 7.)) * 10.; vec2 f = (p + w) * vec2(.006, .24);',
+    '      float fib = fbm(f) * .65 + fbm(f * vec2(1.7, 2.3) + 3.) * .35;',
+    '      d = max(d, smoothstep(.54, .72, fib) * patchy * b * .6);',
+    '    } else if (sp < 1.5){',   /* UNCINUS: commas -- a tufted head, a fibrous tail sweeping away downwind */
+    '      vec2 G = vec2(46., 26.), gi = floor(p / G); float acc = 0.;',
+    '      for (int yy = -1; yy <= 1; yy++) for (int xx = -2; xx <= 1; xx++){ vec2 id = gi + vec2(float(xx), float(yy)); vec2 r = h2(id * 1.7 + 3.);',
+    '        if (r.x > .22 + .45 * uCi.z) continue;',
+    '        vec2 hd = (id + vec2(.2 + .5 * r.x, .3 + .4 * r.y)) * G; vec2 r2 = h2(id * 2.9 + 11.); float L = 34. + 46. * r2.x, dr = 4. + 7. * r2.y, sz = .7 + .6 * r2.x, u = (p.x - hd.x) / L;',
+    '        if (u < -.4 || u > 1.) continue;   /* -.4: the head is whole (-.12 clipped it into a square) */',
+    '        float uc = max(u, 0.), yc = hd.y - dr * sqrt(uc) + (r2.y - .5) * 7. * uc + 2.6 * sz * exp(-uc * 9.), th = (.6 + 1.5 * (1. - uc) * (1. - uc)) * sz;',
+    '        float dy = (p.y - yc) / th, tail = exp(-dy * dy) * (1. - uc * uc) * smoothstep(-.02, .06, u) * smoothstep(.28, .62, fbm(vec2(p.x * .12, p.y * 1.2) + id * 3.)) * 1.25;   /* wispy, broken */   /* the tail STARTS at the head (full thickness behind it drew a flag) */',
+    '        vec2 hq = (p - hd - vec2(-.4 * sz, -1.2 * sz)) / (vec2(1.9, 3.0) * sz); float head = exp(-dot(hq, hq) * 1.1) * .55 * (.55 + .6 * fbm(vec2(p.x * .9, p.y * .25) + id));   /* the HOOK is the tail turning up steeply into a soft dense tuft (an arc read as a letter C, a dot as a comet) */',
+    '        acc = max(acc, max(tail, head)); }',
+    '      d = max(d, clamp(acc, 0., 1.) * b * .42);   /* linear falloff: soft wisps, not crisp strokes */',
+    '    } else if (sp < 2.5){',   /* SPISSATUS: dense thick patches that catch the colour */
+    '      vec2 w = vec2(fbm(p * .025), fbm(p * .025 + 7.)) * 14.; vec2 f = (p + w) * vec2(.010, .07);',
+    '      float fib = fbm(f) * .7 + fbm(f * vec2(2.1, 1.3) + 3.) * .3;',
+    '      float pat = smoothstep(.40, .62, fbm(p * vec2(.01, .035) + 5.));',
+    '      d = max(d, smoothstep(.40, .66, fib) * pat * b * .92);',
+    '    } else {',   /* INTORTUS: fibres tangled by a strong curling warp */
+    '      vec2 w = vec2(fbm(p * .035), fbm(p * .035 + 7.)) * 38.; vec2 w2 = vec2(fbm((p + w) * .05 + 3.), fbm((p + w) * .05 + 9.)) * 16.;',
+    '      vec2 f = (p + w + w2) * vec2(.02, .14);',
+    '      float fib = fbm(f) * .7 + fbm(f * vec2(2.3, 1.1) + 3.) * .3;',
+    '      d = max(d, smoothstep(.53, .72, fib) * patchy * b * .62);',
+    '    } }',
     '  if (uCc.w > .5 && p.y > uCc.x && p.y < uCc.y){',                    /* CIRROCUMULUS: fine grains in ripples, patchy, finer toward the horizon */
     '    float b = smoothstep(uCc.x, uCc.x + 45., p.y) * (.55 + .45 * fbm(vec2(p.x * .02, 3.))) * (1. - smoothstep(uCc.y - 14., uCc.y, p.y));',
     '    float fy = clamp((p.y - uCc.x) / max(uCc.y - uCc.x, 1.), 0., 1.);',
@@ -201,6 +223,8 @@
     '  c *= .95 + .1 * fbm(p * .9);',
     '  c = mix(c, vec3(.29, .29, .33) * (.8 + .45 * fbm(p * vec2(.03, .08))), uDark * smoothstep(uHz + 10., uHz + 60., p.y));',   /* nimbostratus: a dark deck, only its low edge catching the light */   /* grain: the SVG art is textured, not airbrushed */   /* cream overall, shading gentle -- the SVG art reads luminous */
     '  c += uSunC * silver;',
+    '  float gold = smoothstep(.2, .4, uHazeC.r - uHazeC.b), hiW = smoothstep(uHz + (uWH.y - uHz) * .35, uHz + (uWH.y - uHz) * .85, p.y);',
+    '  c = mix(c, c * vec3(1.04, .80, .70), hiW * .5 * gold);',   /* golden hour: HIGH cloud catches the sun from below -- peach-pink, not paper white */
     '  float hz = exp(-max(0., p.y - uHz) / 28.);',                          /* haze: low clouds melt into the horizon */
     '  c = mix(c, uHazeC, hz * .55);',
     '  c = mix(c, uHazeC * 1.18, (1. - smoothstep(uHz + 20., uHz + 150., p.y)) * .30 * (1. - uDark));',   /* lower clouds take the horizon's warmth */
@@ -244,7 +268,7 @@
     var rowY = function(f, top){ return hz + (top - hz) * Math.pow(f, 1.35); };
     (o.types || []).forEach(function(ty, ti){
       var c = Math.max(0, Math.min(100, ty.cover || 0)) / 100, R = rng(97 + ti * 131), g = ty.genus;
-      if (g === 'Cirrus') bands.ci = [hz + sky * 0.52, H - 4, 0.25 + 0.65 * c, 1];
+      if (g === 'Cirrus') bands.ci = [hz + sky * (ty.species === 'spissatus' ? 0.38 : 0.45), H - 4, 0.25 + 0.65 * c, 1 + Math.max(0, ['fibratus', 'uncinus', 'spissatus', 'intortus'].indexOf(ty.species))];
       else if (g === 'Cirrostratus') veil.cs = [1, 0.2 + 0.2 * c, ty.species === 'fibratus' ? 1 : 0, 1];
       else if (g === 'Cirrocumulus' && ty.species === 'lenticularis'){   /* small high lenses */
         for (var li = 0; li < 5; li++) add(20 + R() * (W - 40), hz + sky * (0.5 + 0.4 * R()), 15 + 9 * R(), 5.5 + 2.5 * R(), 5, 0.9, Math.floor(R() * 2.2));
