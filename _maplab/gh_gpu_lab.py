@@ -93,7 +93,7 @@ page = """<!DOCTYPE html><html><head><meta charset="utf-8"><style>
   .sky{display:block;width:100%%;height:%dpx;} .row{display:grid;grid-template-columns:1fr 1fr;gap:4px;} .pan{position:relative;} .gl{position:absolute;left:0;top:0;width:100%%;height:100%%;pointer-events:none;} .tag{color:#7a8;font-weight:500;}
 </style></head><body>
 <div class="grid">%s</div>
-<script src="/cloud_gl.js?v=32"></script><script src="/sky_gl.js?v=4"></script>
+<script src="/cloud_gl.js?v=32"></script><script src="/sky_gl.js?v=4"></script><script src="/sky2_gl.js?v=7"></script>
 <script>
 var saNow = 2.5;
 window.bvF = function(c){ return c == null ? null : c * 9 / 5 + 32; }; window.bvDF = function(c){ return c == null ? null : c * 9 / 5; };   /* the site's C->F helpers (index.html top) */
@@ -117,11 +117,10 @@ SCEN.forEach(function(s){
 /* the GPU twin of each scene, animated */
 var CV = SCEN.map(function(s){ var cv = document.getElementById('cv_'+s.id); var r = cv.getBoundingClientRect(), d = 2; cv.width = r.width*d; cv.height = r.height*d;
   var g = cv.getContext('2d'); g.setTransform(cv.width/220, 0, 0, cv.height/232, 0, 0); return { s: s, cv: cv, g: g, types: classifyClouds(s.cd) }; });
-var T0 = performance.now();
-function tick(now){ requestAnimationFrame(tick); var t = (now - T0) / 1000;
-  CV.forEach(function(c){ c.g.save(); c.g.setTransform(1,0,0,1,0,0); c.g.clearRect(0,0,c.cv.width,c.cv.height); c.g.restore();
-    bvSkyGL(c.g, { W: 220, H: 232, hz: 40, sa: c.s.sa, types: c.types, t: t, ppu: 2.5 }); }); }
-requestAnimationFrame(tick);
+/* STATIC (user: "i dont think we need to animate the golden hour artworks"): each sky rendered once */
+var t0 = performance.now();
+CV.forEach(function(c){ bvSky2(c.g, { W: 220, H: 232, hz: 40, sa: c.s.sa, types: c.types, ppu: 4 }); });
+console.log('sky2 render ms', Math.round(performance.now() - t0));
 document.title='ready';
 </script></body></html>""" % (
   COLS, CELL_W, SKY_H,

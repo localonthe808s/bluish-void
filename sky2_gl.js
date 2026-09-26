@@ -1,0 +1,210 @@
+/* bvSky2 -- the golden-hour sky, rendered ONCE on the GPU (2026-09-26).
+   User: "they're not good yet, keep iterating, i dont think we need to animate the golden hour artworks". Static means the
+   whole sky can be one expensive pass: every cloud composited together (no stacked boxes), light marched toward the low
+   sun through the real density, haze toward the horizon, and detail that scales with each cloud so a far cumulus is a
+   small whole cumulus. Cells (cumulus, altocumulus / stratocumulus puffs) come from the CPU in perspective; the sheets
+   (cirrus, cirrocumulus, stratus / altostratus / nimbostratus) are procedural bands.
+   Sky units: W x H, y UP from the bottom; hz = horizon. */
+(function(){
+  var MAXC = 200;   /* cells live in a float TEXTURE (2 texels each): uniform arrays that large fail on phones */
+  var VS = 'attribute vec2 a; varying vec2 v; void main(){ v = a * .5 + .5; gl_Position = vec4(a, 0., 1.); }';
+  var FS = [
+    'precision highp float;',
+    'varying vec2 v;',
+    'uniform vec2 uWH; uniform float uHz, uNC, uDark;',
+    'uniform sampler2D uTex;',
+    'vec4 CC(int i){ return texture2D(uTex, vec2((float(i) * 2. + .5) / ' + (MAXC * 2) + '., .5)); }',
+    'vec4 KK(int i){ return texture2D(uTex, vec2((float(i) * 2. + 1.5) / ' + (MAXC * 2) + '., .5)); }',      /* cell: cx, yBase, halfW, h | kind (0 cu, 1 puff), seed, alpha, flat */
+    'uniform vec4 uCi; uniform vec4 uCc; uniform vec4 uSh; uniform vec4 uSh2;',  /* bands: y0, y1, cover, on */
+    'uniform vec2 uSun; uniform vec3 uSunC, uAmbC, uShdC, uHazeC;',
+    'float h1(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }',
+    'vec2 h2(vec2 p){ return fract(sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)))) * 43758.5453); }',
+    'float vn(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3. - 2. * f);',
+    '  return mix(mix(h1(i), h1(i + vec2(1., 0.)), f.x), mix(h1(i + vec2(0., 1.)), h1(i + vec2(1., 1.)), f.x), f.y); }',
+    'float fbm(vec2 p){ float s = 0., a = .5; for (int i = 0; i < 5; i++){ s += a * vn(p); p = p * 2.03 + vec2(1.7, 9.2); a *= .5; } return s; }',
+    'float dome(vec2 p){ vec2 i = floor(p), f = fract(p); float md = 9.;',
+    '  for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++){ vec2 g = vec2(float(x), float(y)); vec2 o = .5 + .38 * sin(6.2831 * h2(i + g)); vec2 r = g + o - f; md = min(md, dot(r, r)); }',
+    '  return max(0., 1. - md * 1.45); }',
+    /* ONE CELL: several rounded HEADS of different heights on a flat base (a cumulus silhouette), cauliflower on them,
+       all in the cell's own units so a far cloud is a small whole one. kind 0 cumulus (tall heads), 1 puff (low, wide),
+       2 cumulonimbus (a tower narrowing upward under a wide flat anvil) */
+    'float cell(vec2 p, vec4 c, vec4 k){',
+    '  vec2 q = (p - vec2(c.x, c.y)) / vec2(c.z, c.w);',
+    '  if (abs(q.x) > 1.5 || q.y < -1.2 || q.y > 2.) return -1.;',   /* -1, not 0: 0 passes the soft threshold and each cell box drew a faint rectangle */
+    '  vec2 s = (p - vec2(c.x, c.y)) / c.z * 2.2 + k.y * 17.;',
+    '  float body = -1.;',
+    '  if (k.x < .5){',                                                   /* CUMULUS: heads on a soft flat base */
+    '    for (int i = 0; i < 5; i++){ float fi = float(i), xi = (h1(vec2(k.y, fi)) - .5) * 1.1, ri = .38 + .30 * h1(vec2(fi, k.y + 3.)), hi = .55 + .45 * h1(vec2(fi + 7., k.y));',
+    '      vec2 dd = vec2((q.x - xi) / (ri * .85), (q.y - .18 - hi * .5) / (hi * .5)); body = max(body, 1. - dot(dd, dd)); }',
+    '    vec2 sk = vec2(q.x / .88, (q.y - .22) / .28); body = max(body, (1. - dot(sk, sk)) * .8);',   /* a broad skirt the heads sit on: rounded corners, not a boxy cut */
+    '    body = min(body, smoothstep(-.06, .14, q.y) * 2. - 1.);',        /* the flat base, softened */
+    '  } else if (k.x < 1.5){',                                          /* PUFF: a rounded blob of 4-6 lobes, bottom rounded too */
+    '    for (int i = 0; i < 9; i++){ float fi = float(i), xi = (h1(vec2(k.y, fi)) - .5) * 1.5, yi = (h1(vec2(fi, k.y + 1.)) - .5) * .7, ri = .22 + .32 * h1(vec2(fi, k.y + 3.)) * (1. - .5 * abs(xi));',
+    '      vec2 dd = vec2((q.x - xi) / ri, (q.y - .45 - yi) / (ri * 1.15)); body = max(body, 1. - dot(dd, dd)); }',
+    '    body = min(body, (q.y + .15) * 3.);',   /* a flatter underside than top */
+    '  } else {',                                                        /* CUMULONIMBUS: a column narrowing upward under a wide anvil */
+    '    vec2 qa = vec2(q.x, q.y * c.w / c.z);',                          /* round lobes: both axes in half-widths */
+    '    float top = c.w / c.z;',
+    '    for (int i = 0; i < 14; i++){ float fi = float(i), yi = (.04 + fi * .066) * top, xi = (h1(vec2(fi, k.y + 2.)) - .5) * .6 * (1. - fi / 20.), ri = (.30 + .18 * h1(vec2(k.y, fi + 5.))) * (1.15 - .35 * fi / 14.);',
+    '      vec2 dd = (qa - vec2(xi, yi)) / ri; body = max(body, 1. - dot(dd, dd)); }',   /* a tower of boiling heads, not a pillar */
+    '    vec2 sk = vec2(q.x / .8, (qa.y - .14) / .22); body = max(body, (1. - dot(sk, sk)) * .8);',   /* a broad dark base */
+    '    body = min(body, smoothstep(-.03, .05, q.y) * 2. - 1.);',
+    '    float ax = q.x > 0. ? q.x / 1.4 : q.x / .75, ath = .075 * (1. - .7 * ax * ax) + .022;',   /* anvil: thick over the updraft, tapering, sheared downwind */
+    '    float ay = (q.y - .98 - .03 * ax) / ath; float an = (1. - ax * ax) * .9 - ay * ay;   /* x*x, never pow(x, 2.): pow of a negative base is undefined in GLSL and ate the anvil */',
+    '    vec2 od = vec2(q.x / .22, (qa.y - top * 1.04) / .2); an = max(an, 1. - dot(od, od));',   /* the overshooting top */
+    '    body = max(body, an + (fbm(s * vec2(.5, 2.5)) - .5) * .5 * smoothstep(.3, 1., abs(ax)));',   /* fibrous where it thins */
+    '  }',
+    '  float inside = smoothstep(-.35, .1, body);',                        /* the cauliflower stays on the cloud: no fins */
+    '  float d = body + inside * (.30 * dome(s) + .13 * dome(s * 2.3 + 2.) + .05 * dome(s * 5.1 + 5.) - .20);',
+    '  float rim = smoothstep(-.55, -.15, body) * (1. - smoothstep(.0, .5, body));',   /* fray only near the outline: noise at the box edge cut straight lines */
+    '  d += rim * (fbm(s * 1.7 + 3.) - .52) * .55;',   /* the outline frays: the SVG art never has a clean pill edge */
+    '  d -= 2. * (smoothstep(1.15, 1.45, abs(q.x)) + smoothstep(1.6, 1.95, q.y) + (1. - smoothstep(-1.15, -.85, q.y)));',   /* fade out before the clip box: no straight cuts */
+    '  return d * k.z;',   /* UNCLAMPED: the lighting reads its slope (a clamped field is flat inside -- the pink fill) */
+    '}',
+    'float sheets(vec2 p){',
+    '  float d = 0.;',
+    '  if (uCi.w > .5 && p.y > uCi.x && p.y < uCi.y){',                    /* CIRRUS: fibres curling along the wind, hooked at the ends */
+    '    float b = smoothstep(uCi.x, uCi.x + 8., p.y) * (1. - smoothstep(uCi.y - 10., uCi.y, p.y));',
+    '    vec2 w = vec2(fbm(p * .025), fbm(p * .025 + 7.)) * 18.;',
+    '    vec2 f = (p + w) * vec2(.012, .16);',   /* long streaks: an elongated low frequency, warped so they curl */
+    '    float fib = fbm(f) * .7 + fbm(f * vec2(2.3, 1.1) + 3.) * .3;',
+    '    float patchy = smoothstep(1. - uCi.z, 1. - uCi.z + .35, fbm(p * vec2(.012, .05) + 11.));',
+    '    d = max(d, smoothstep(.52, .78, fib) * patchy * b * .7); }',
+    '  if (uCc.w > .5 && p.y > uCc.x && p.y < uCc.y){',                    /* CIRROCUMULUS: fine grains in ripples, patchy, finer toward the horizon */
+    '    float b = smoothstep(uCc.x, uCc.x + 45., p.y) * (.55 + .45 * fbm(vec2(p.x * .02, 3.))) * (1. - smoothstep(uCc.y - 14., uCc.y, p.y));',
+    '    float fy = clamp((p.y - uCc.x) / max(uCc.y - uCc.x, 1.), 0., 1.);',
+    '    vec2 w = vec2(fbm(p * .03), fbm(p * .03 + 5.)) * 6.;',       /* a gentle warp so the ripples wander */
+    '    float gFar = dome((p + w) * vec2(.55, 1.3)), gNear = dome((p + w) * vec2(.32, .55) + 3.);',   /* FIXED scales blended by height: a scale that varies with y shears into diagonal streaks */
+    '    float gr = mix(gFar, gNear, smoothstep(.2, .9, fy));',
+    '    float patchy = smoothstep(.58 - uCc.z * .22, .70 - uCc.z * .22, fbm(p * vec2(.018, .04) + 4.));',
+    '    d = max(d, smoothstep(.48, .76, gr) * patchy * b * .75); }',
+    '  if (uSh.w > .5){',                                                  /* STRATUS / ALTOSTRATUS / NIMBOSTRATUS: a soft sheet */
+    '    float mid = (uSh.x + uSh.y) * .5, th = (uSh.y - uSh.x) * .5;',
+    '    float out_ = abs(p.y - mid) - th - (fbm(vec2(p.x * .045, 1.)) - .5) * 14.;',   /* the edge wobbles in SKY UNITS: a wobble relative to a tall deck dripped flames */
+    '    d = max(d, smoothstep(6., -8., out_ + (fbm(p * .05) - .5) * 8.) * uSh.z); }',
+    '  if (uSh2.w > .5){',
+    '    float mid = (uSh2.x + uSh2.y) * .5, th = (uSh2.y - uSh2.x) * .5;',
+    '    float s = 1. - abs(p.y - mid) / max(th * (1. + (fbm(vec2(p.x * .03, 5.)) - .5) * .8), 1.);',
+    '    d = max(d, smoothstep(0., .35, s + (fbm(p * .035 + 9.) - .5) * .5) * uSh2.z); }',
+    '  return d;',
+    '}',
+    'float field(vec2 p){ float d = -1.; for (int i = 0; i < ' + MAXC + '; i++){ if (float(i) >= uNC) break; vec4 c = CC(i); if (abs(p.x - c.x) > c.z * 1.6 || p.y < c.y - c.w * 1.3 || p.y > c.y + c.w * 2.1) continue; d = max(d, cell(p, c, KK(i))); } return d; }',
+    'float dens(vec2 p){ return max(sheets(p), smoothstep(-.16, .5, field(p))); }',   /* soft edges, as the SVG art has */
+    'void main(){',
+    '  vec2 p = v * uWH;',
+    '  if (p.y < uHz - 2.){ gl_FragColor = vec4(0.); return; }',
+    '  float d0 = dens(p);',
+    '  if (d0 < .004){ gl_FragColor = vec4(0.); return; }',
+    '  vec2 L = normalize(uSun - p); float jit = h1(p * 31.7), acc = 0.;',
+    '  L = normalize(vec2(L.x, max(L.y, .25)));',   /* the light comes up from below but not sideways across the sky -- long level marches cut shadow wedges between clouds */
+    '  for (int i = 0; i < 10; i++) acc += dens(p + L * (.8 + (float(i) + jit) * 1.3));',
+    '  float Ts = exp(-acc * .30);',                                         /* light that reaches this point through the cloud */
+    '  float e = .7; float gx = field(p + vec2(e, 0.)) - field(p - vec2(e, 0.)), gy = field(p + vec2(0., e)) - field(p - vec2(0., e));',
+    '  vec3 N = normalize(vec3(-gx * 8., -gy * 8., 1.));   /* steep: the lobes must read as separate rounded heads */',
+    '  float lam = max(0., dot(N, normalize(vec3(L, .35)))) * .75 + .25;',
+    '  float up = clamp(N.y * .5 + .5, 0., 1.);',                            /* faces toward the sky get sky light */
+    '  float sunAng = length(p - uSun) / max(uWH.x, 1.);',
+    '  float silver = (1. - smoothstep(.0, .45, d0)) * exp(-sunAng * 4.) * .6;',   /* thin edges near the sun glow */
+    '  float lit = clamp((.25 + .75 * Ts) * lam * 1.2, 0., 1.);',
+    '  vec3 c = mix(uShdC * 1.12, uSunC * 1.1, smoothstep(-.15, .7, lit)) + uAmbC * up * .18;',
+    '  float low = exp(-max(0., p.y - uSun.y) / 60.) * exp(-abs(p.x - uSun.x) / (uWH.x * .8));',
+    '  c += vec3(.22, .07, -.06) * (1. - up) * low * (1. - uAmbC.b * .3);',   /* undersides facing the low sun catch fire */   /* a real lit side and a real shade side */
+    '  c *= .95 + .1 * fbm(p * .9);',
+    '  c = mix(c, vec3(.29, .29, .33) * (.8 + .45 * fbm(p * vec2(.03, .08))), uDark * smoothstep(uHz + 10., uHz + 60., p.y));',   /* nimbostratus: a dark deck, only its low edge catching the light */   /* grain: the SVG art is textured, not airbrushed */   /* cream overall, shading gentle -- the SVG art reads luminous */
+    '  c += uSunC * silver;',
+    '  float hz = exp(-max(0., p.y - uHz) / 28.);',                          /* haze: low clouds melt into the horizon */
+    '  c = mix(c, uHazeC, hz * .55);',
+    '  float a = clamp(d0 * 1.25, 0., 1.) * (1. - hz * .35);',
+    '  gl_FragColor = vec4(c * a, a);',
+    '}'
+  ].join('\n');
+  var GL = null;
+  function init(){
+    if (GL) return GL.ok ? GL : null;
+    GL = { ok: false };
+    try {
+      var c = document.createElement('canvas'), g = c.getContext('webgl', { premultipliedAlpha: true, alpha: true, preserveDrawingBuffer: true });
+      if (!g || !g.getExtension('OES_texture_float')) return null;
+      var sh = function(t, s){ var o = g.createShader(t); g.shaderSource(o, s); g.compileShader(o); if (!g.getShaderParameter(o, g.COMPILE_STATUS)) throw new Error(g.getShaderInfoLog(o)); return o; };
+      var pr = g.createProgram(); g.attachShader(pr, sh(g.VERTEX_SHADER, VS)); g.attachShader(pr, sh(g.FRAGMENT_SHADER, FS)); g.linkProgram(pr);
+      if (!g.getProgramParameter(pr, g.LINK_STATUS)) throw new Error(g.getProgramInfoLog(pr));
+      g.useProgram(pr);
+      var b = g.createBuffer(); g.bindBuffer(g.ARRAY_BUFFER, b); g.bufferData(g.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), g.STATIC_DRAW);
+      var loc = g.getAttribLocation(pr, 'a'); g.enableVertexAttribArray(loc); g.vertexAttribPointer(loc, 2, g.FLOAT, false, 0, 0);
+      var U = {}; ['uWH', 'uHz', 'uNC', 'uTex', 'uCi', 'uCc', 'uSh', 'uSh2', 'uDark', 'uSun', 'uSunC', 'uAmbC', 'uShdC', 'uHazeC'].forEach(function(n){ U[n] = g.getUniformLocation(pr, n); });
+      GL = { ok: true, c: c, g: g, U: U };
+    } catch (e){ GL = { ok: false, err: String(e) }; if (window.console) console.warn('bvSky2 off:', e); return null; }
+    return GL;
+  }
+  function rng(seed){ var s = seed >>> 0 || 1; return function(){ s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+  /* light by sun altitude; the sun sits on the horizon at golden hour, a little right of centre */
+  function light(sa, W, hz){
+    var sx = W * 0.62;
+    if (sa > 12) return { sun: [W * 0.3, hz + 400], sc: [1.05, 1.0, 0.95], amb: [0.55, 0.66, 0.85], shd: [0.52, 0.56, 0.66], haze: [0.78, 0.84, 0.92] };
+    if (sa > 0){ var k = sa / 12; return { sun: [sx, hz + 4 + 60 * k], sc: [1.07, 0.96 + 0.03 * k, 0.82 + 0.12 * k], amb: [0.46, 0.42, 0.48], shd: [0.74 + 0.02 * k, 0.58 + 0.06 * k, 0.52 + 0.1 * k], haze: [0.95, 0.66, 0.46] }; }   /* cream-peach lit, rose shade: the SVG art's warmth */
+    if (sa > -6){ var b = -sa / 6; return { sun: [sx, hz - 10 - 20 * b], sc: [1.06 - 0.16 * b, 0.86 - 0.16 * b, 0.72 - 0.1 * b], amb: [0.34, 0.30, 0.34], shd: [0.68 - 0.14 * b, 0.52 - 0.1 * b, 0.48 - 0.08 * b], haze: [0.80, 0.52, 0.42] }; }   /* peach-rose dimming, never lilac (the SVG keeps blue hour warm) */
+    return { sun: [W * 0.4, hz + 160], sc: [0.40, 0.44, 0.56], amb: [0.10, 0.12, 0.20], shd: [0.07, 0.08, 0.13], haze: [0.14, 0.15, 0.24] };
+  }
+  /* types -> cells + bands */
+  function compose(o, W, H, hz){
+    var sky = H - hz, C = [], K = [], bands = { ci: [0, 0, 0, 0], cc: [0, 0, 0, 0], sh: [0, 0, 0, 0], sh2: [0, 0, 0, 0] };
+    var add = function(cx, yb, hw, h, kind, a){ if (C.length >= MAXC) return; C.push([cx, yb, hw, h]); K.push([kind, Math.random() * 0 + (C.length * 0.137) % 1, a == null ? 1 : a, 0]); };
+    /* perspective: a row at height f (0 horizon .. 1 overhead) is placed at y and scaled by s */
+    var rowY = function(f, top){ return hz + (top - hz) * Math.pow(f, 1.35); };
+    (o.types || []).forEach(function(ty, ti){
+      var c = Math.max(0, Math.min(100, ty.cover || 0)) / 100, R = rng(97 + ti * 131), g = ty.genus;
+      if (g === 'Cirrus') bands.ci = [hz + sky * 0.52, H - 4, 0.25 + 0.65 * c, 1];
+      else if (g === 'Cirrostratus') bands.sh2 = [hz + sky * 0.70, H - 6, 0.35 + 0.3 * c, 1];
+      else if (g === 'Cirrocumulus') bands.cc = [hz + sky * 0.36, H - 6, 0.3 + 0.6 * c, 1];
+      else if (g === 'Altostratus') bands.sh2 = [hz + sky * 0.45, hz + sky * 0.72, 0.5 + 0.4 * c, 1];
+      else if (g === 'Stratus'){ if (!bands.ns) bands.sh = [hz + 4, hz + sky * 0.24, 0.8 + 0.2 * c, 1]; }
+      else if (g === 'Nimbostratus'){ bands.ns = 1; bands.sh = [hz + sky * 0.14, H + sky * 0.9, 0.97, 1]; }   /* the deck covers the sky; a lit gap stays at the horizon. Stratus under it must not overwrite it */
+      else if (g === 'Cumulus' || g === 'Cumulonimbus'){
+        var n = g === 'Cumulonimbus' ? 1 : Math.round(10 + 30 * c);
+        if (g === 'Cumulonimbus') add(W * 0.46, hz + 8, 72, sky * 0.68, 2, 1);
+        for (var i = 0; i < n && g !== 'Cumulonimbus'; i++){
+          var f = i === 0 ? 0.9 : Math.pow(R(), 2.0), s = 0.2 + 1.05 * f;   /* one near cloud, a crowd of far ones */                 /* most are far and small */
+          add(R() * W, rowY(f * 0.4, H) + 2, (18 + 22 * c) * s * (0.8 + 0.5 * R()), (15 + 22 * c) * s * (0.7 + 0.6 * R()), 0, 1);
+        }
+      } else if (g === 'Altocumulus' || g === 'Stratocumulus'){
+        var ac = g === 'Altocumulus', rows = ac ? 10 : 6, top = ac ? hz + sky * 0.9 : hz + sky * 0.62;
+        /* MASSES, NOT A GRID: patches scattered in perspective, big and merging overhead, flattening into wide strands at the
+           horizon; each patch sometimes a clump of 2-3 cells so they merge like the SVG art */
+        var nP = Math.round((ac ? 60 : 40) * (0.35 + 0.8 * c));
+        for (var pI = 0; pI < nP && C.length < MAXC; pI++){
+          var fr = Math.pow(R(), 1.3), yy = rowY(fr, top), s2 = 0.22 + 0.9 * fr;
+          var hw = (ac ? 20 : 26) * s2 * (0.7 + 0.6 * R()), flat = 1 - fr;                /* toward the horizon: wider and flatter */
+          var hh = hw * (ac ? 0.72 : 0.5) * (1 - 0.55 * flat), cx0 = R() * W, nC = R() < 0.4 ? 1 : 2 + Math.floor(R() * 2);
+          for (var m = 0; m < nC && C.length < MAXC; m++) add(cx0 + (m - (nC - 1) / 2) * hw * 1.1 + (R() - 0.5) * hw * 0.4, yy + (R() - 0.5) * hh * 0.6, hw * (1 + flat * 1.3) * (0.7 + 0.4 * R()), hh * (0.8 + 0.4 * R()), 1, 0.95);
+        }
+      }
+    });
+    /* a storm owns its part of the sky: mid-level puffs that would sit on the anvil are dropped */
+    var cb = C.findIndex(function(c, i){ return K[i][0] === 2; });
+    if (cb >= 0){ var C2 = [], K2 = []; C.forEach(function(c, i){ if (K[i][0] === 1 && Math.abs(c[0] - C[cb][0]) < 100 && c[1] > hz + sky * 0.42) return; C2.push(c); K2.push(K[i]); }); C = C2; K = K2; }
+    return { C: C, K: K, bands: bands };
+  }
+  window.bvSky2 = function(ctx, o){
+    var G = init(); if (!G) return false;
+    var W = o.W || 220, H = o.H || 232, hz = o.hz == null ? 40 : o.hz, ppu = o.ppu || 4;
+    var pw = Math.round(W * ppu), ph = Math.round(H * ppu);
+    if (G.c.width !== pw || G.c.height !== ph){ G.c.width = pw; G.c.height = ph; }
+    var g = G.g, U = G.U, Lg = light(o.sa == null ? 3 : o.sa, W, hz), S = compose(o, W, H, hz);
+    g.viewport(0, 0, pw, ph); g.clearColor(0, 0, 0, 0); g.clear(g.COLOR_BUFFER_BIT);
+    var T = new Float32Array(MAXC * 2 * 4);
+    S.C.forEach(function(c, i){ T.set(c, i * 8); T.set(S.K[i], i * 8 + 4); });
+    if (!G.tex){ G.tex = g.createTexture(); }
+    g.bindTexture(g.TEXTURE_2D, G.tex);
+    g.texParameteri(g.TEXTURE_2D, g.TEXTURE_MIN_FILTER, g.NEAREST); g.texParameteri(g.TEXTURE_2D, g.TEXTURE_MAG_FILTER, g.NEAREST);
+    g.texParameteri(g.TEXTURE_2D, g.TEXTURE_WRAP_S, g.CLAMP_TO_EDGE); g.texParameteri(g.TEXTURE_2D, g.TEXTURE_WRAP_T, g.CLAMP_TO_EDGE);
+    g.texImage2D(g.TEXTURE_2D, 0, g.RGBA, MAXC * 2, 1, 0, g.RGBA, g.FLOAT, T);
+    g.uniform1i(U.uTex, 0);
+    g.uniform2f(U.uWH, W, H); g.uniform1f(U.uHz, hz); g.uniform1f(U.uNC, S.C.length);
+    
+    g.uniform4fv(U.uCi, S.bands.ci); g.uniform4fv(U.uCc, S.bands.cc); g.uniform4fv(U.uSh, S.bands.sh); g.uniform4fv(U.uSh2, S.bands.sh2);
+    g.uniform1f(U.uDark, S.bands.ns ? 1 : 0); g.uniform2f(U.uSun, Lg.sun[0], Lg.sun[1]); g.uniform3fv(U.uSunC, Lg.sc); g.uniform3fv(U.uAmbC, Lg.amb); g.uniform3fv(U.uShdC, Lg.shd); g.uniform3fv(U.uHazeC, Lg.haze);
+    g.drawArrays(g.TRIANGLE_STRIP, 0, 4);
+    ctx.drawImage(G.c, 0, 0, W, H);
+    return true;
+  };
+})();
