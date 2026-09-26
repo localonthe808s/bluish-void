@@ -33,7 +33,13 @@
     '  if (abs(q.x) > 1.5 || q.y < -1.2 || q.y > 2.) return -1.;',   /* -1, not 0: 0 passes the soft threshold and each cell box drew a faint rectangle */
     '  vec2 s = (p - vec2(c.x, c.y)) / c.z * 2.2 + k.y * 17.;',
     '  float body = -1.;',
-    '  if (k.x < .5){',                                                   /* CUMULUS: heads on a soft flat base */
+    '  if (k.x > 3.5){',   /* the STORM BASE (kind 4): a dark ragged underside with scud hanging off it, over the tower's ruler-flat cut */
+    '    float slab = 1. - q.x * q.x * q.x * q.x;',
+    '    float yb = -.30 + (fbm(vec2(q.x * 3.5, k.y * 5.)) - .5) * 1.0 + (fbm(vec2(q.x * 11., k.y * 7.)) - .5) * .35;',
+    '    body = min(slab, min((q.y - yb) * 3.5, (1. - q.y) * 2.5));',
+    '    for (int i = 0; i < 6; i++){ float fi = float(i), xi = (h1(vec2(fi, k.y + 4.)) - .5) * 1.5, yi = -.40 - .32 * h1(vec2(k.y, fi + 9.)), ri = .06 + .07 * h1(vec2(fi + 3., k.y));',
+    '      vec2 dd = vec2((q.x - xi) / (ri * 1.8), (q.y - yi) / (ri * c.z / c.w)); body = max(body, (1. - dot(dd, dd)) * .8); }',   /* scud: torn, wider than tall */
+    '  } else if (k.x < .5){',                                                   /* CUMULUS: heads on a soft flat base */
     '    for (int i = 0; i < 5; i++){ float fi = float(i), xi = (h1(vec2(k.y, fi)) - .5) * 1.1, ri = .38 + .30 * h1(vec2(fi, k.y + 3.)), hi = .55 + .45 * h1(vec2(fi + 7., k.y));',
     '      vec2 dd = vec2((q.x - xi) / (ri * .85), (q.y - .18 - hi * .5) / (hi * .5)); body = max(body, 1. - dot(dd, dd)); }',
     '    vec2 sk = vec2(q.x / .88, (q.y - .22) / .28); body = max(body, (1. - dot(sk, sk)) * .8);',   /* a broad skirt the heads sit on: rounded corners, not a boxy cut */
@@ -54,13 +60,13 @@
     '    vec2 od = vec2(q.x / .22, (qa.y - top * 1.04) / .2); an = max(an, 1. - dot(od, od));',   /* the overshooting top */
     '    body = max(body, an + (fbm(s * vec2(.5, 2.5)) - .5) * .5 * smoothstep(.3, 1., abs(ax)));',   /* fibrous where it thins */
     '  }',
-    '  if (k.x > 2.5){',   /* the ANVIL: flat top at the lid, smooth, fibrous streaks downwind -- no cauliflower */
-    '    vec2 rt = vec2((q.x + .17) / .40, (q.y - .90) / .10); body = max(body, (1. - dot(rt, rt)) * .9);',   /* the underside sags onto the tower: the crown spreads INTO the anvil */
+    '  if (k.x > 2.5 && k.x < 3.5){',   /* the ANVIL: flat top at the lid, smooth, fibrous streaks downwind -- no cauliflower */
+    '    vec2 rt = vec2((q.x + .254) / .44, (q.y - .90) / .10); body = max(body, (1. - dot(rt, rt)) * .9);',   /* the underside sags onto the tower: the crown spreads INTO the anvil */
     '    body = min(body, (1.06 - q.y) * 9.);',
-    '    vec2 ov = vec2((q.x + .17) / .27, (q.y - 1.03) / .065); body = max(body, (1. - dot(ov, ov)) * .7);',   /* the overshooting top, above the updraft */
+    '    vec2 ov = vec2((q.x + .254) / .21, (q.y - 1.04) / .09); body = max(body, (1. - dot(ov, ov)) * .8);',   /* the overshooting top, above the updraft */
     '    float fib = fbm(vec2(q.x * 3., q.y * 26.) + k.y * 9.);',
     '    float da = body + (fib - .5) * .45 * smoothstep(.1, .9, abs(q.x)) + (fbm(s * .8) - .5) * .18;',
-    '    float nearT = exp(-pow((q.x + .17) / .42, 2.));',   /* around the updraft the tower texture carries into the anvil; smooth fibres downwind */
+    '    float nT = (q.x + .254) / .40; float nearT = exp(-nT * nT);',   /* around the updraft the tower texture carries into the anvil; smooth fibres downwind */
     '    da += nearT * smoothstep(-.35, .1, body) * (.30 * dome(s * 1.6) + .13 * dome(s * 3.7 + 2.) + .05 * dome(s * 8. + 5.) - .2);',
     '    da -= 2. * (smoothstep(1.15, 1.45, abs(q.x)) + (1. - smoothstep(-1.15, -.85, q.y)));',
     '    return da * k.z;',
@@ -108,12 +114,23 @@
     '  return d;',
     '}',
     'float field(vec2 p){ float d = -1.; for (int i = 0; i < ' + MAXC + '; i++){ if (float(i) >= uNC) break; vec4 c = CC(i); if (abs(p.x - c.x) > c.z * 1.6 || p.y < c.y - c.w * 1.3 || p.y > c.y + c.w * 2.1) continue; d = max(d, cell(p, c, KK(i))); } return d; }',
+    'uniform vec4 uRain;',   /* storm rain: cx, half width, cloud-base y, strength */
+    'float rainD(vec2 p){',   /* soft slanted CURTAINS, not hard stripes */
+    '  if (uRain.w <= 0.) return 0.;',
+    '  float dx = (p.x - uRain.x + (uRain.z - p.y) * .18) / uRain.y;',
+    '  if (abs(dx) > 1.4 || p.y > uRain.z + 4. || p.y < uHz - 2.) return 0.;',
+    '  float side = 1. - smoothstep(.45, 1.25, abs(dx + (fbm(vec2(p.y * .04, 3.)) - .5) * .5));',
+    '  float veil = .35 + .65 * smoothstep(.3, .7, fbm(vec2(p.x * .18 + p.y * .035, p.y * .01 + 5.)));',
+    '  float top = smoothstep(uRain.z + 4., uRain.z - 8., p.y), bot = .55 + .45 * smoothstep(uHz - 2., uHz + 22., p.y);',
+    '  return side * veil * top * bot * uRain.w;',
+    '}',
     'float dens(vec2 p){ return max(sheets(p), smoothstep(-.16, .5, field(p))); }',   /* soft edges, as the SVG art has */
     'void main(){',
     '  vec2 p = v * uWH;',
     '  if (p.y < uHz - 2.){ gl_FragColor = vec4(0.); return; }',
     '  float d0 = dens(p);',
-    '  if (d0 < .004){ gl_FragColor = vec4(0.); return; }',
+    '  float rd = rainD(p); vec3 rc = mix(vec3(.36, .35, .42), uShdC * .6, .3);',
+    '  if (d0 < .004){ gl_FragColor = vec4(rc * rd, rd); return; }',
     '  vec2 L = normalize(uSun - p); float jit = h1(p * 31.7), acc = 0.;',
     '  L = normalize(vec2(L.x, max(L.y, .25)));',   /* the light comes up from below but not sideways across the sky -- long level marches cut shadow wedges between clouds */
     '  for (int i = 0; i < 10; i++) acc += dens(p + L * (.8 + (float(i) + jit) * 1.3));',
@@ -135,7 +152,8 @@
     '  c = mix(c, uHazeC, hz * .55);',
     '  c = mix(c, uHazeC * 1.18, (1. - smoothstep(uHz + 20., uHz + 150., p.y)) * .30 * (1. - uDark));',   /* lower clouds take the horizon's warmth */
     '  float a = clamp(d0 * 1.25, 0., 1.) * (1. - hz * .35);',
-    '  gl_FragColor = vec4(c * a, a);',
+    '  if (uRain.w > 0.){ float bz = (1. - smoothstep(uRain.y * .9, uRain.y * 1.6, abs(p.x - uRain.x))) * (1. - smoothstep(uRain.z + 2., uRain.z + 20., p.y)); c = mix(c, c * vec3(.60, .58, .64), bz * .85); }',   /* the base in its own shadow */
+    '  gl_FragColor = vec4(c * a, a) + vec4(rc * rd, rd) * (1. - a);',
     '}'
   ].join('\n');
   var GL = null;
@@ -151,7 +169,7 @@
       g.useProgram(pr);
       var b = g.createBuffer(); g.bindBuffer(g.ARRAY_BUFFER, b); g.bufferData(g.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), g.STATIC_DRAW);
       var loc = g.getAttribLocation(pr, 'a'); g.enableVertexAttribArray(loc); g.vertexAttribPointer(loc, 2, g.FLOAT, false, 0, 0);
-      var U = {}; ['uWH', 'uHz', 'uNC', 'uTex', 'uCi', 'uCc', 'uSh', 'uSh2', 'uDark', 'uSun', 'uSunC', 'uAmbC', 'uShdC', 'uHazeC'].forEach(function(n){ U[n] = g.getUniformLocation(pr, n); });
+      var U = {}; ['uRain', 'uWH', 'uHz', 'uNC', 'uTex', 'uCi', 'uCc', 'uSh', 'uSh2', 'uDark', 'uSun', 'uSunC', 'uAmbC', 'uShdC', 'uHazeC'].forEach(function(n){ U[n] = g.getUniformLocation(pr, n); });
       GL = { ok: true, c: c, g: g, U: U };
     } catch (e){ GL = { ok: false, err: String(e) }; if (window.console) console.warn('bvSky2 off:', e); return null; }
     return GL;
@@ -203,6 +221,7 @@
     var cb = C.findIndex(function(c, i){ return K[i][0] === 2; }), cbX = cb >= 0 ? C[cb][0] : o.stormX;
     if (cbX != null){ var C2 = [], K2 = []; C.forEach(function(c, i){ if (K[i][0] === 1 && Math.abs(c[0] - cbX) < 100 && c[1] > hz + sky * 0.42) return; C2.push(c); K2.push(K[i]); }); C = C2; K = K2; }
     if (o.anvil){ C.push(o.anvil); K.push([3, 0.37, 1, 0]); }
+    if (o.base){ C.push(o.base); K.push([4, 0.61, 0.97, 0]); }
     return { C: C, K: K, bands: bands };
   }
   /* THE STORM is the front scenes' own tower (bvCloudGL in cloud_gl.js: cauliflower, sheared anvil, NCAR rain shaft) --
@@ -221,8 +240,8 @@
       var isLow = function(t){ return t.layer === 'low' || t.layer === 'deep'; };
       var r = bvSky2(ctx, Object.assign({}, o, { _pass: 1, stormX: sx, types: types.filter(function(t){ return !isLow(t) && t !== cbT; }) }));
       bvCloudGL(ctx, { W: W0, H: H0, ppu: o.ppu || 4, t: 7, ns: 0.62, ground: hz0, night: L.n, sunDir: L.d, sunCol: L.c, shdCol: L.s,
-        cx: sx, base: hz0 + 10, h: sky0 * 0.66, hw: 28, lean: 0.35, anvil: 0, anvR: 1, anvL: 1, rain: 0.45, dens: 1 });   /* a SMALL flare of its own (its full anvil is a thin plate at this size): the crown spreads into the soft anvil drawn behind, so the two join instead of a band pasted across the tower */   /* the front card's proportions (hw 16 : anvR 70 : anvL 32 at its scale) */
-      bvSky2(ctx, Object.assign({}, o, { _pass: 1, stormX: sx, anvil: [sx + 14, hz0 + 10, 84, sky0 * 0.68], types: types.filter(function(t){ return isLow(t) && t !== cbT; }) }));   /* the anvil IN FRONT, opaque, swallowing the crown: the tower hits the lid and spreads */
+        cx: sx, base: hz0 + 18, h: sky0 * 0.62, hw: 38, lean: 0.35, anvil: 0, anvR: 1, anvL: 1, rain: 0, rag: 7, dens: 1 });   /* hw 38: about 1.6 tall to 1 wide, a mature storm's body (it measured 2.4 : 1 at hw 28); rain is the sky pass's soft curtains */   /* a SMALL flare of its own (its full anvil is a thin plate at this size): the crown spreads into the soft anvil drawn behind, so the two join instead of a band pasted across the tower */   /* the front card's proportions (hw 16 : anvR 70 : anvL 32 at its scale) */
+      bvSky2(ctx, Object.assign({}, o, { _pass: 1, stormX: sx, anvil: [sx + 30, hz0 + 10, 118, sky0 * 0.68], rain: [sx - 6, 32, hz0 + 17, 0.85], types: types.filter(function(t){ return isLow(t) && t !== cbT; }) }));   /* the anvil IN FRONT, opaque, swallowing the crown: the tower hits the lid and spreads */
       return r;
     }
     var G = init(); if (!G) return false;
@@ -242,7 +261,7 @@
     g.uniform2f(U.uWH, W, H); g.uniform1f(U.uHz, hz); g.uniform1f(U.uNC, S.C.length);
     
     g.uniform4fv(U.uCi, S.bands.ci); g.uniform4fv(U.uCc, S.bands.cc); g.uniform4fv(U.uSh, S.bands.sh); g.uniform4fv(U.uSh2, S.bands.sh2);
-    g.uniform1f(U.uDark, S.bands.ns ? 1 : 0); g.uniform2f(U.uSun, Lg.sun[0], Lg.sun[1]); g.uniform3fv(U.uSunC, Lg.sc); g.uniform3fv(U.uAmbC, Lg.amb); g.uniform3fv(U.uShdC, Lg.shd); g.uniform3fv(U.uHazeC, Lg.haze);
+    g.uniform1f(U.uDark, S.bands.ns ? 1 : 0); g.uniform4fv(U.uRain, o.rain || [0, 0, 0, 0]); g.uniform2f(U.uSun, Lg.sun[0], Lg.sun[1]); g.uniform3fv(U.uSunC, Lg.sc); g.uniform3fv(U.uAmbC, Lg.amb); g.uniform3fv(U.uShdC, Lg.shd); g.uniform3fv(U.uHazeC, Lg.haze);
     g.drawArrays(g.TRIANGLE_STRIP, 0, 4);
     ctx.drawImage(G.c, 0, 0, W, H);
     return true;

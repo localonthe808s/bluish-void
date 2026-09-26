@@ -93,7 +93,7 @@ page = """<!DOCTYPE html><html><head><meta charset="utf-8"><style>
   .sky{display:block;width:100%%;height:%dpx;} .row{display:grid;grid-template-columns:1fr 1fr;gap:4px;} .pan{position:relative;} .gl{position:absolute;left:0;top:0;width:100%%;height:100%%;pointer-events:none;} .tag{color:#7a8;font-weight:500;}
 </style></head><body>
 <div class="grid">%s</div>
-<script src="/cloud_gl.js?v=32"></script><script src="/sky_gl.js?v=4"></script><script src="/sky2_gl.js?v=7"></script>
+<script src="/cloud_gl.js?v=33"></script><script src="/sky_gl.js?v=4"></script><script src="/sky2_gl.js?v=7"></script>
 <script>
 var saNow = 2.5;
 window.bvF = function(c){ return c == null ? null : c * 9 / 5 + 32; }; window.bvDF = function(c){ return c == null ? null : c * 9 / 5; };   /* the site's C->F helpers (index.html top) */
