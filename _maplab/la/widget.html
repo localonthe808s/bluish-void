@@ -1972,7 +1972,7 @@ function surfBand(){
    it is closed. Every figure is the publisher's -- TomTom's delay, Caltrans' sign text. */
 var INCIDENT = null, TRAFFIC = null;
 window.addEventListener('message', function(ev){
-  if (ev.data && ev.data.labIncident){ INCIDENT = ev.data.labIncident; paint(); }
+  if (ev.data && ev.data.labIncident){ if (ev.data.labIncident.kind === 'CAMERA'){ camTap(ev.data.labIncident.cam); return; } INCIDENT = ev.data.labIncident; paint(); }
   if (ev.data && ev.data.labTraffic){ TRAFFIC = ev.data.labTraffic; paint(); }
   if (ev.data && ev.data.labAB){ var o = ev.data.labAB; AB.state = o.state; AB.err = o.err || '';
     if (o.state === 'done') AB.r = o; if (o.state === 'armed' || o.state === 'a') AB.r = null; paint(); }
@@ -1993,6 +1993,70 @@ function trafficLine(){
     + ' &nbsp;·&nbsp; DELAYS OVER 15 MIN ARE TAGGED &nbsp;·&nbsp; TAP A MARKER, A CLOSURE OR A SIGN</div>';
 }
 function toggleRail(){ st.rail = !railOn(); send(); paint(); }
+/* CALTRANS CAMERAS (2026-09-26): LA's own equivalent of New York's DOT cameras -- District 7's highway cameras, keyless and
+   CORS-open. The lab draws and reports the marks; this shows the picture in a card on the map, top left over the ocean corner
+   (New York's sits over North Jersey), refreshed every 30 s (Caltrans updates each picture every ~2 min). */
+var CAMS = null;
+fetch('https://cwwp2.dot.ca.gov/data/d7/cctv/cctvStatusD07.json').then(function(r){ return r.json(); }).then(function(j){
+  CAMS = (j.data || []).map(function(o){ return o.cctv; }).filter(function(c){ return c && c.inService === 'true' && c.imageData && c.imageData.static && c.imageData.static.currentImageURL; })
+    .map(function(c){ var L = c.location || {}; return { id: c.index, n: (L.locationName || '').trim(), near: L.nearbyPlace || '', lat: +L.latitude, lon: +L.longitude, dir: L.direction || '', route: L.route || '', img: c.imageData.static.currentImageURL }; });
+  paint();
+}).catch(function(){});
+function camEsc(t){ return String(t == null ? '' : t).replace(/[&<>"]/g, function(c){ return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]; }); }
+function camSrc(c){ return c.img + '?t=' + Math.floor(Date.now() / 30000); }
+function camFig(c){ return '<figure style="margin:6px 0 0;"><img class="la-cam-img" data-src="' + camEsc(c.img) + '" src="' + camEsc(camSrc(c)) + '" alt="' + camEsc(c.n) + '" style="width:100%;aspect-ratio:320/260;object-fit:cover;border-radius:6px;display:block;background:#1b2233;">'
+  + '<figcaption style="font:600 8px system-ui,sans-serif;color:#5b647a;letter-spacing:.06em;margin-top:3px;">' + camEsc((c.route + ' ' + (c.dir ? c.dir.toUpperCase() + 'BOUND' : '')).trim() + ' · ' + c.n.replace(/^[^:]*:\s*/, '').toUpperCase()) + (c.near ? ' · ' + camEsc(c.near.toUpperCase()) : '') + '</figcaption></figure>'; }
+setInterval(function(){ if (document.hidden) return; [].slice.call(document.querySelectorAll('.la-cam-img')).forEach(function(im){ im.src = im.getAttribute('data-src') + '?t=' + Math.floor(Date.now() / 30000); }); }, 30000);
+function camCard(title, body){
+  var host = document.getElementById('cw-body'); if (!host) return;
+  var p = document.getElementById('la-cam-card');
+  if (!p){ p = document.createElement('div'); p.id = 'la-cam-card';
+    p.style.cssText = 'position:absolute;left:10px;top:10px;z-index:7;width:min(44%,400px);max-height:72%;overflow-y:auto;overscroll-behavior:contain;background:rgba(252,252,250,.96);border-radius:10px;padding:8px 10px 9px;box-shadow:0 6px 24px rgba(10,20,40,.35);font-family:system-ui,sans-serif;color:#1b2340;';
+    host.appendChild(p); }
+  p.style.display = '';
+  p.innerHTML = '<div style="display:flex;align-items:baseline;gap:8px;"><span style="font:800 11px system-ui,sans-serif;letter-spacing:.03em;">' + camEsc(title.toUpperCase()) + '</span>'
+    + '<button id="la-cam-x" style="margin-left:auto;background:none;border:none;font:700 13px system-ui,sans-serif;color:#1b2340;cursor:pointer;padding:0 2px;">✕</button></div>'
+    + '<div style="font:600 7.5px system-ui,sans-serif;color:#5b647a;letter-spacing:.08em;margin-top:1px;"><a href="https://cwwp2.dot.ca.gov/vm/iframemap.htm" target="_blank" rel="noopener" style="color:inherit;">CALTRANS DISTRICT 7 CAMERAS</a> · LIVE · PICTURES UPDATE EVERY ~2 MIN</div>' + body;
+  document.getElementById('la-cam-x').onclick = function(e){ e.stopPropagation(); p.style.display = 'none'; };
+}
+/* MANY ARE DARK: on 2026-09-26, 290 of the 475 cameras Caltrans lists as in service were serving its white "Temporarily
+   Unavailable" card. The pictures are CORS-open, so each is looked at before it is shown: a frame that is mostly white in its
+   middle band is that card. Strips keep drawing candidates until they have their live ones; a tapped dark camera says so. */
+var CAMDEAD = {};
+function camProbe(c, cb){
+  if (CAMDEAD[c.img] != null) return cb(!CAMDEAD[c.img]);
+  var im = new Image(); im.crossOrigin = 'anonymous';
+  im.onload = function(){ try { var cv = document.createElement('canvas'); cv.width = 32; cv.height = 26; var g = cv.getContext('2d'); g.drawImage(im, 0, 0, 32, 26);
+      var d = g.getImageData(0, 5, 32, 14).data, w = 0; for (var i = 0; i < d.length; i += 4) if (d[i] > 235 && d[i + 1] > 235 && d[i + 2] > 235) w++;
+      CAMDEAD[c.img] = w / (d.length / 4) > 0.6; } catch(e){ CAMDEAD[c.img] = false; } cb(!CAMDEAD[c.img]); };
+  im.onerror = function(){ CAMDEAD[c.img] = true; cb(false); };
+  im.src = camSrc(c);
+}
+function camTap(c){
+  var t = c.n.replace(/^[^:]*:\s*/, '') || c.n;
+  camCard(t, '<div style="font:600 9px system-ui,sans-serif;color:#5b647a;margin-top:8px;">LOOKING…</div>');
+  camProbe(c, function(live){ camCard(t, live ? camFig(c) : '<div style="font:700 10px system-ui,sans-serif;color:#b45309;letter-spacing:.04em;margin-top:8px;line-height:1.5;">THIS CAMERA IS OFF RIGHT NOW — CALTRANS IS SHOWING ITS “TEMPORARILY UNAVAILABLE” CARD. TRY ONE NEARBY.</div>'); });
+}
+function camNear(ll, maxM){ if (!CAMS || !ll || ll[0] == null) return null; var best = null, bd = maxM || 800, kx = Math.cos(ll[0] * Math.PI / 180) * 111320;
+  CAMS.forEach(function(c){ var dm = Math.hypot((c.lon - ll[1]) * kx, (c.lat - ll[0]) * 110574); if (dm < bd){ bd = dm; best = c; } }); return best ? { cam: best, m: Math.round(bd) } : null; }
+function camStrip(title, cands, want){
+  want = want || 12; var live = [], i = 0, busy = 0, done = false;
+  var show = function(final){ camCard(title, live.length ? '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">' + live.map(camFig).join('') + '</div>'
+      + (final && live.length < want ? '<div style="font:600 8px system-ui,sans-serif;color:#8a91a5;letter-spacing:.06em;margin-top:5px;">' + live.length + ' OF ' + cands.length + ' CAMERAS HERE ARE LIVE RIGHT NOW</div>' : '')
+      : '<div style="font:600 9px system-ui,sans-serif;color:#5b647a;margin-top:8px;">' + (final ? 'NONE OF THESE CAMERAS IS LIVE RIGHT NOW' : 'FINDING THE LIVE CAMERAS…') + '</div>'); };
+  var next = function(){ if (done) return; if (live.length >= want || (i >= cands.length && !busy)){ done = true; show(true); return; }
+    while (busy < 6 && i < cands.length && live.length + busy < want){ var c = cands[i++]; busy++;
+      (function(c){ camProbe(c, function(ok){ busy--; if (ok && live.length < want) live.push(c); next(); }); })(c); }
+    if (!busy && i >= cands.length){ done = true; show(true); } };
+  show(false); next();
+}
+function camPick(arr, n){ var out = [], step = Math.max(1, Math.floor(arr.length / n)); for (var i = 0; i < arr.length && out.length < n; i += step) out.push(arr[i]); return out; }
+function camRow(){
+  if (!CAMS) return '';
+  var b = function(id, t){ return '<button type="button" id="' + id + '" style="cursor:pointer;font:800 8px system-ui,sans-serif;letter-spacing:.09em;padding:3px 9px;border-radius:11px;background:rgba(255,255,255,.7);color:#2B22F4;border:1px solid rgba(43,34,244,.35);">' + t + '</button>'; };
+  return '<div style="font:600 8px system-ui,sans-serif;color:#5b647a;letter-spacing:.08em;text-align:center;margin-top:5px;">' + b('la-cam-coast', 'SEE THE COAST ROAD') + ' ' + b('la-cam-fwy', 'SEE THE FREEWAYS')
+    + ' &nbsp;' + CAMS.length + ' CALTRANS CAMERAS ON THE MAP · TAP ONE</div>';
+}
 /* THE RAIL SWITCH LIVES OUTSIDE THE STRIP. It began inside trafficLine(), which a tapped
    jam replaces wholesale with the incident card -- so touching any marker took the control
    off the screen. It is appended to whatever the traffic view is showing instead. */
@@ -2103,6 +2167,7 @@ function incidentBand(){
     + (d.what && d.what.toUpperCase() !== d.kind ? '<div style="font:600 9px system-ui,sans-serif;color:#1b2340;letter-spacing:.04em;margin-top:4px;">' + esc(d.what).toUpperCase() + '</div>' : '')
     + '<div style="font:600 8px system-ui,sans-serif;color:#5b647a;letter-spacing:.08em;margin-top:5px;">LIVE · ' + (/tomtom/i.test(d.source || '') ? srcA(esc(d.source).toUpperCase(), LA_SRC.tt[1]) : /caltrans/i.test(d.source || '') ? srcA(esc(d.source).toUpperCase(), LA_SRC.cms[1]) : esc(d.source).toUpperCase()) + '</div></div>'
     + (cols.join('') || '<div class="dir solo"></div>')
+    + (function(){ var nc = camNear(d.ll, 800); return nc ? '<div style="margin-top:6px;"><button type="button" id="la-cam-near" data-i="' + CAMS.indexOf(nc.cam) + '" style="cursor:pointer;font:800 8px system-ui,sans-serif;letter-spacing:.09em;padding:3px 9px;border-radius:11px;background:rgba(255,255,255,.7);color:#2B22F4;border:1px solid rgba(43,34,244,.35);">SEE THE NEAREST CAMERA · ' + (nc.m < 150 ? 'AT THE SPOT' : (nc.m / 1609).toFixed(1) + ' MI AWAY') + '</button></div>' : ''; })()
     + '<button id="cw-la-ix" style="position:absolute;right:-4px;top:-4px;background:none;border:none;font:700 13px system-ui,sans-serif;color:#1b2340;cursor:pointer;padding:0 2px;">✕</button></div>';
 }
 /* THE TRAIN BOARD, in the info bar as New York's is: a station's next departures by line and
@@ -2238,7 +2303,7 @@ function paint(){
     }, 0);
     info.innerHTML = st.surf ? surfBand() + swellDial() : st.geo && ROCK ? rockBand() : st.geo
       ? '<b>THE ROCK UNDER THE BASIN</b> &nbsp;·&nbsp; Macrostrat units, with USGS Quaternary faults: heaviest where the ground has broken in historic time, dashed where the survey infers the trace. Hatched where the ground is soft enough to amplify shaking. Every earthquake USGS has logged in the last 24 hours gets its diamond, from the same feed and in the same hand as the EARTHQUAKES widget. A quiet day is a quiet map. The basin&rsquo;s destructive ones &mdash; Northridge 1994, Sylmar 1971, Long Beach 1933 &mdash; are in the record, not on this map. Tap any of it.'
-      : ((st.traffic && INCIDENT ? incidentBand() : board() + (st.traffic ? trafficLine() : ''))
+      : ((st.traffic && INCIDENT ? incidentBand() : board() + (st.traffic ? trafficLine() + camRow() : ''))
          + (v.layers ? homeBox() : '') + (st.traffic ? abToggle() + railToggle() : ''));
   } else {
     info.style.display = 'none'; tag.style.display = '';
@@ -2255,6 +2320,10 @@ function paint(){
   if (sxb) sxb.onclick = function(){ SURFTAP = null; paint(); };
   var rxb = document.getElementById('cw-la-rx');
   if (rxb) rxb.onclick = function(){ ROCK = null; ROCKSEQ++; paint(); };
+  var cnb = document.getElementById('la-cam-near'); if (cnb) cnb.onclick = function(){ camTap(CAMS[+cnb.getAttribute('data-i')]); };
+  var ccb = document.getElementById('la-cam-coast'); if (ccb) ccb.onclick = function(){ camStrip('THE COAST ROAD', CAMS.filter(function(c){ return c.route === 'SR-1'; }).sort(function(a, b){ return b.lat - a.lat; }), 12); };
+  var cfb = document.getElementById('la-cam-fwy'); if (cfb) cfb.onclick = function(){ camStrip('THE FREEWAYS NOW', camPick(CAMS.filter(function(c){ return /^(I-|US-)/.test(c.route); }).sort(function(a, b){ return a.route < b.route ? -1 : 1; }), 60), 12); };
+  if (!st.traffic){ var lcc = document.getElementById('la-cam-card'); if (lcc) lcc.style.display = 'none'; }
   var ixb = document.getElementById('cw-la-ix');
   if (ixb) ixb.onclick = function(){ INCIDENT = null; paint(); };
   var xb = document.getElementById('cw-la-x');
