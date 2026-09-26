@@ -31,6 +31,22 @@ const WORKFLOW = 'kalshi-nyc.yml';
 const WORKFLOW_FAST = 'kalshi-nyc-fast.yml';   // Central Park alone, on the other five-minute marks
 const REF = 'main';
 
+// NYC sunset for the UTC date of `d` (NOAA's simple solar algorithm; within ~1 min -- the truth run starts early and
+// samples for 20 minutes, so a minute either way does not matter).
+function nycSunsetUTC(d) {
+  const lat = 40.708, lon = -73.969, rad = Math.PI / 180;
+  // the evening's sunset in New York falls on the UTC date after local noon; use the UTC date of the tick minus 6 h
+  const base = new Date(d.getTime() - 6 * 3600000), d0 = Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate());
+  const n = (d0 - Date.UTC(2000, 0, 1, 12)) / 864e5 + 0.5;
+  const M = (357.5291 + 0.98560028 * n) % 360, C = 1.9148 * Math.sin(M * rad) + 0.02 * Math.sin(2 * M * rad) + 0.0003 * Math.sin(3 * M * rad);
+  const L = (M + C + 180 + 102.9372) % 360;
+  const dec = Math.asin(Math.sin(L * rad) * Math.sin(23.44 * rad));
+  const w = Math.acos((Math.sin(-0.833 * rad) - Math.sin(lat * rad) * Math.sin(dec)) / (Math.cos(lat * rad) * Math.cos(dec)));
+  const nstar = n - lon / -360; const J0 = 2451545 + 0.0009 + (-lon) / 360 + Math.round(nstar - 0.0009 - (-lon) / 360);
+  const Jtr = J0 + 0.0053 * Math.sin(M * rad) - 0.0069 * Math.sin(2 * L * rad), Js = Jtr + w / (2 * Math.PI);
+  return new Date((Js - 2440587.5) * 864e5);
+}
+
 async function dispatch(env, workflow) {
   if (!env.GH_TOKEN) {
     return { ok: false, status: 0, detail: 'GH_TOKEN secret is not set' };
@@ -956,6 +972,18 @@ export default {
           console.log(`[obs-log] FAILED ${e}`);
         }
       })());
+    }
+    // THE SUNSET TRUTH (2026-09-26). Two minutes before New York's sunset, start sunset-truth.yml: it photographs the
+    // west-facing cameras at sunset +5/+10/+15/+20 and scores how the sky actually coloured, next to the site's prediction
+    // (sunset-log.yml). Dispatched from here because GitHub's own cron starts 15-60 min late -- a dispatch lands in seconds.
+    {
+      const st = new Date(event.scheduledTime || Date.now()), ss = nycSunsetUTC(st);
+      if (ss && Math.floor((ss.getTime() - 2 * 60000) / 60000) === Math.floor(st.getTime() / 60000)) {
+        ctx.waitUntil((async () => {
+          let r; try { r = await dispatch(env, 'sunset-truth.yml'); } catch (e) { r = { ok: false, status: 0, detail: String(e) }; }
+          console.log(`[sunset-truth] sunset ${ss.toISOString()} -> ${r.ok ? 'dispatched' : 'FAILED'} (http ${r.status}) ${r.detail}`);
+        })());
+      }
     }
     // TWO LANES. The full 20-city bake on :05/:20/:35/:50; Central Park alone
     // on every other five-minute mark, so the New York sheet is never more
