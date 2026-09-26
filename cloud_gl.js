@@ -16,7 +16,7 @@
   var FS = [
     'precision highp float;',
     'varying vec2 v;',
-    'uniform float uRag;',
+    'uniform float uRag, uAnvT;',   /* uAnvT: anvil thickness scale (the sky art is ~2x the scenes; they keep 1) */
     'uniform vec2 uWH; uniform float uT, uCx, uBase, uH, uHW, uLean, uAnv, uAnvR, uAnvL, uRain, uNight, uFlash, uGround, uDens, uMode, uN;',
     'uniform vec4 uP[48];',
     'uniform vec2 uSunDir; uniform vec3 uSunCol; uniform vec3 uShdCol; uniform float uShdSet; uniform vec4 uBand; uniform float uNS;',
@@ -57,7 +57,7 @@
     '  vec2 d = dd / (uLean > 5. ? vec2(q.z * 1.6, q.z * .62) : vec2(q.z * mix(mix(1.15, 1.95, big), 3.2, up), q.z * mix(mix(.95, .72, big), .38, up))); acc += exp(K * ((1. - dot(d, d)) * q.w - 1.)); }',
     '  return acc > 0. ? 1. + log(acc) / K : -1.; }',   /* wide, flat: they merge into a deck */
     'float anvil(vec2 p){ if (uAnv < .01) return -1.; float ax2 = uCx - uLean * uH * .28; float ux = p.x - ax2; float R = ux > 0. ? uAnvR : uAnvL; float r2 = abs(ux) / max(R, 1.);',
-    '  float th = (2.5 + 5.5 * (1. - r2)) * uAnv; float cy2 = uBase + uH - 1.5; float dy = (p.y - cy2) / max(th, .6); return (1. - r2 * r2) - dy * dy; }',
+    '  float th = (2.5 + 5.5 * (1. - r2)) * uAnv * uAnvT; float cy2 = uBase + uH - 1.5; float dy = (p.y - cy2) / max(th, .6); return (1. - r2 * r2) - dy * dy; }',
     /* the height of the surface: the lobes' shape, then domes at two sizes rising through it; the anvil is ice -- smooth and
        fibrous, stretched along the wind, no domes */
     'float hgt(vec2 p){',
@@ -83,9 +83,10 @@
     '  float an = -1.;',
     '  if (a > -1.){ float ax2 = uCx - uLean * uH * .28, ux = p.x - ax2, R = ux > 0. ? uAnvR : uAnvL, rr = abs(ux) / max(R, 1.), cy2 = uBase + uH - 1.5;',
     '    vec2 pr = rot(p) + 2.5 * vec2(vn(p * .08), vn(p * .08 + 5.));',
-    '    float fib = fbm(pr * vec2(.045, .30) + vec2(-uT * .05, 0.)) - .5, str = vn(vec2(pr.x * .06 - uT * .04, pr.y * .45)) - .5;',
+    '    float fib = fbm(pr * vec2(.045, .30 / uAnvT) + vec2(-uT * .05, 0.)) - .5, str = vn(vec2(pr.x * .06 - uT * .04, pr.y * .45 / uAnvT)) - .5;',
     '    an = a * .9 + fib * .45 + str * .14 - smoothstep(.55, 1., rr) * (.25 + .5 * fbm(p * .2 + 7.));',
-    '    if (ux > 0. && rr > .12 && rr < .8 && p.y < cy2){ float mm = pow(max(0., sin(p.x * .55 - uT * .15 + 2. * vn(p * .1))), 3.); an += mm * .22 * smoothstep(0., .2, uAnv) * (1. - smoothstep(.55, .8, rr)) * smoothstep(cy2 - 8., cy2 - 3., p.y); } }',   /* a soft edge, not a cut: the cut drew a ladder under the anvil */
+    '    if (uAnvT > 1.5){ float nu = ux / (uHW * 1.4); an += exp(-nu * nu) * (.42 * d1 + .16 * d2 + .06 * d3 - .20); }',   /* the sky art: over the updraft the tower's cauliflower carries up into the anvil, going smooth (ice) downwind -- as NCAR's storm does. Its x-only mammatus drew fence posts at this scale, so they are off here */
+    '    if (uAnvT < 1.5 && ux > 0. && rr > .12 && rr < .8 && p.y < cy2){ float mm = pow(max(0., sin(p.x * .55 * uNS - uT * .15 + 2. * vn(p * .1 * uNS))), 3.); an += mm * .22 * smoothstep(0., .2, uAnv) * (1. - smoothstep(.55, .8, rr)) * smoothstep(cy2 - 8. * uAnvT, cy2 - 3. * uAnvT, p.y); } }',   /* a soft edge, not a cut: the cut drew a ladder under the anvil */
     '  float bY = uBase;',
     '  if (uRag > 0.) bY += uRag * ((fbm(vec2(p.x * .05, 4.)) - .5) * 2.2 + (fbm(vec2(p.x * .16, 8.)) - .5) * .8 - 1.1 * smoothstep(.52, .72, fbm(vec2(p.x * .09, 11.))));',   /* uRag: a ragged base -- it undulates, and in places torn scud hangs lower (the sky art; the scenes keep 0) */
     '  return mix(-1., max(tw, an), smoothstep(bY - (uRag > 0. ? 1.2 : .4), bY + .9, p.y)); }',   /* below the base: OUTSIDE (-1), not 0 -- 0 passed the threshold and veiled the whole band under it */
@@ -158,7 +159,7 @@
       g.useProgram(pr);
       var b = g.createBuffer(); g.bindBuffer(g.ARRAY_BUFFER, b); g.bufferData(g.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), g.STATIC_DRAW);
       var loc = g.getAttribLocation(pr, 'a'); g.enableVertexAttribArray(loc); g.vertexAttribPointer(loc, 2, g.FLOAT, false, 0, 0);
-      var U = {}; ['uRag', 'uWH', 'uT', 'uCx', 'uBase', 'uH', 'uHW', 'uLean', 'uAnv', 'uAnvR', 'uAnvL', 'uRain', 'uNight', 'uFlash', 'uGround', 'uDens', 'uMode', 'uN', 'uP', 'uSunDir', 'uSunCol', 'uShdCol', 'uShdSet', 'uBand', 'uNS'].forEach(function(n){ U[n] = g.getUniformLocation(pr, n); });
+      var U = {}; ['uAnvT', 'uRag', 'uWH', 'uT', 'uCx', 'uBase', 'uH', 'uHW', 'uLean', 'uAnv', 'uAnvR', 'uAnvL', 'uRain', 'uNight', 'uFlash', 'uGround', 'uDens', 'uMode', 'uN', 'uP', 'uSunDir', 'uSunCol', 'uShdCol', 'uShdSet', 'uBand', 'uNS'].forEach(function(n){ U[n] = g.getUniformLocation(pr, n); });
       GL = { ok: true, c: c, g: g, U: U };
     } catch (e){ GL = { ok: false, err: String(e) }; if (window.console) console.warn('bvCloudGL off:', e); return null; }
     return GL;
@@ -181,7 +182,7 @@
     var sd = o.sunDir || [-0.5, 0.75], sc = o.sunCol || [1.04 - 0.52 * (o.night || 0), 0.98 - 0.42 * (o.night || 0), 0.90 - 0.22 * (o.night || 0)];
     g.uniform2f(U.uSunDir, sd[0], sd[1]); g.uniform3f(U.uSunCol, sc[0], sc[1], sc[2]);
     var sh = o.shdCol; g.uniform1f(U.uShdSet, sh ? 1 : 0); g.uniform3f(U.uShdCol, sh ? sh[0] : 0, sh ? sh[1] : 0, sh ? sh[2] : 0);
-    var bd = o.band || [58, 82, 30, 46]; g.uniform4f(U.uBand, bd[0], bd[1], bd[2], bd[3]); g.uniform1f(U.uNS, o.ns || 1); g.uniform1f(U.uRag, o.rag || 0);   /* altitude bands: ice from bd0..bd1 up, rain cloud below bd2..bd3 */
+    var bd = o.band || [58, 82, 30, 46]; g.uniform4f(U.uBand, bd[0], bd[1], bd[2], bd[3]); g.uniform1f(U.uNS, o.ns || 1); g.uniform1f(U.uRag, o.rag || 0); g.uniform1f(U.uAnvT, o.anvT || 1);   /* altitude bands: ice from bd0..bd1 up, rain cloud below bd2..bd3 */
     g.uniform1f(U.uMode, P.length ? 1 : 0); g.uniform1f(U.uN, Math.min(48, P.length)); g.uniform4fv(U.uP, arr);
     /* the box, in scene units: a tower from its base to above its anvil, or the puffs' extent, with room for the lobes */
     var bx0, bx1, by0, by1, pad = 6;
