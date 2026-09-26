@@ -33,21 +33,19 @@ const REF = 'main';
 
 // NYC sunset for the UTC date of `d` (NOAA's simple solar algorithm; within ~1 min -- the truth run starts early and
 // samples for 20 minutes, so a minute either way does not matter).
-function nycSunsetUTC(d) {
-  const lat = 40.708, lon = -73.969, rad = Math.PI / 180;
-  // the evening's sunset in New York falls on the UTC date after local noon; use the UTC date of the tick minus 6 h
-  const base = new Date(d.getTime() - 6 * 3600000), d0 = Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate());
-  const n = (d0 - Date.UTC(2000, 0, 1, 12)) / 864e5 + 0.5;
-  const M = (357.5291 + 0.98560028 * n) % 360, C = 1.9148 * Math.sin(M * rad) + 0.02 * Math.sin(2 * M * rad) + 0.0003 * Math.sin(3 * M * rad);
-  const L = (M + C + 180 + 102.9372) % 360;
+// the evening's sunset at (lat, lon) for the local date of `d` (Wikipedia's sunrise equation, longitude east-positive; ~1 min)
+function sunsetUTC(d, lat, lon, utcOff) {
+  const rad = Math.PI / 180, loc = new Date(d.getTime() + utcOff * 3600000);
+  const n = Math.round((Date.UTC(loc.getUTCFullYear(), loc.getUTCMonth(), loc.getUTCDate(), 12) - Date.UTC(2000, 0, 1, 12)) / 864e5);
+  const Js = n - lon / 360, M = (357.5291 + 0.98560028 * Js) % 360;
+  const C = 1.9148 * Math.sin(M * rad) + 0.02 * Math.sin(2 * M * rad) + 0.0003 * Math.sin(3 * M * rad), L = (M + C + 180 + 102.9372) % 360;
+  const Jt = 2451545 + Js + 0.0053 * Math.sin(M * rad) - 0.0069 * Math.sin(2 * L * rad);
   const dec = Math.asin(Math.sin(L * rad) * Math.sin(23.44 * rad));
   const w = Math.acos((Math.sin(-0.833 * rad) - Math.sin(lat * rad) * Math.sin(dec)) / (Math.cos(lat * rad) * Math.cos(dec)));
-  const nstar = n - lon / -360; const J0 = 2451545 + 0.0009 + (-lon) / 360 + Math.round(nstar - 0.0009 - (-lon) / 360);
-  const Jtr = J0 + 0.0053 * Math.sin(M * rad) - 0.0069 * Math.sin(2 * L * rad), Js = Jtr + w / (2 * Math.PI);
-  return new Date((Js - 2440587.5) * 864e5);
+  return new Date((Jt + w / (2 * Math.PI) - 2440587.5) * 864e5);
 }
 
-async function dispatch(env, workflow) {
+async function dispatch(env, workflow, inputs) {
   if (!env.GH_TOKEN) {
     return { ok: false, status: 0, detail: 'GH_TOKEN secret is not set' };
   }
@@ -62,7 +60,7 @@ async function dispatch(env, workflow) {
       // GitHub rejects API requests without one
       'User-Agent': 'bluishvoid-kalshi-cron'
     },
-    body: JSON.stringify({ ref: REF })
+    body: JSON.stringify(inputs ? { ref: REF, inputs } : { ref: REF })
   });
   // 204 No Content is success here; anything else carries a reason worth logging
   const detail = res.status === 204 ? '' : (await res.text()).slice(0, 300);
@@ -977,13 +975,15 @@ export default {
     // west-facing cameras at sunset +5/+10/+15/+20 and scores how the sky actually coloured, next to the site's prediction
     // (sunset-log.yml). Dispatched from here because GitHub's own cron starts 15-60 min late -- a dispatch lands in seconds.
     {
-      const st = new Date(event.scheduledTime || Date.now()), ss = nycSunsetUTC(st);
-      if (ss && Math.floor((ss.getTime() - 2 * 60000) / 60000) === Math.floor(st.getTime() / 60000)) {
+      const st = new Date(event.scheduledTime || Date.now());
+      [['nyc', 40.708, -73.969, -5], ['la', 34.05, -118.24, -8]].forEach(([city, la, lo, off]) => {
+        const ss = sunsetUTC(st, la, lo, off);
+        if (Math.floor((ss.getTime() - 2 * 60000) / 60000) !== Math.floor(st.getTime() / 60000)) return;
         ctx.waitUntil((async () => {
-          let r; try { r = await dispatch(env, 'sunset-truth.yml'); } catch (e) { r = { ok: false, status: 0, detail: String(e) }; }
-          console.log(`[sunset-truth] sunset ${ss.toISOString()} -> ${r.ok ? 'dispatched' : 'FAILED'} (http ${r.status}) ${r.detail}`);
+          let r; try { r = await dispatch(env, 'sunset-truth.yml', { city }); } catch (e) { r = { ok: false, status: 0, detail: String(e) }; }
+          console.log(`[sunset-truth] ${city} sunset ${ss.toISOString()} -> ${r.ok ? 'dispatched' : 'FAILED'} (http ${r.status}) ${r.detail}`);
         })());
-      }
+      });
     }
     // TWO LANES. The full 20-city bake on :05/:20/:35/:50; Central Park alone
     // on every other five-minute mark, so the New York sheet is never more

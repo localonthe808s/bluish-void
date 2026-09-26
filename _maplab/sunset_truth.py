@@ -14,27 +14,39 @@ from PIL import Image
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else 'out'
 os.makedirs(os.path.join(OUT, 'frames'), exist_ok=True)
-CAMS = json.load(open(os.path.join(os.path.dirname(__file__), 'sunset_cams.json')))
+CITY = os.environ.get('CITY', 'nyc')
+CFG = json.load(open(os.path.join(os.path.dirname(__file__), 'sunset_cams.json')))[CITY]
+CAMS = CFG['cams']
 WINDY = os.environ.get('WINDY_KEY', '')
 
-def nyc_sunset_utc(now):
-    lat, lon, rad = 40.708, -73.969, math.pi / 180
-    base = now - datetime.timedelta(hours=6)
-    d0 = datetime.datetime(base.year, base.month, base.day, tzinfo=datetime.timezone.utc)
-    n = (d0 - datetime.datetime(2000, 1, 1, 12, tzinfo=datetime.timezone.utc)).total_seconds() / 86400 + 0.5
-    M = (357.5291 + 0.98560028 * n) % 360
+def sunset_utc(now):
+    """the evening's sunset at the city (Wikipedia's sunrise equation, longitude east-positive; ~1 min)"""
+    lat, lon, rad = CFG['lat'], CFG['lon'], math.pi / 180
+    loc = now + datetime.timedelta(hours=CFG['utc_off'])                     # the local calendar date
+    noon = datetime.datetime(loc.year, loc.month, loc.day, 12, tzinfo=datetime.timezone.utc)
+    n = round((noon - datetime.datetime(2000, 1, 1, 12, tzinfo=datetime.timezone.utc)).total_seconds() / 86400)
+    Js = n - lon / 360
+    M = (357.5291 + 0.98560028 * Js) % 360
     C = 1.9148 * math.sin(M * rad) + 0.02 * math.sin(2 * M * rad) + 0.0003 * math.sin(3 * M * rad)
     L = (M + C + 180 + 102.9372) % 360
+    Jt = 2451545.0 + Js + 0.0053 * math.sin(M * rad) - 0.0069 * math.sin(2 * L * rad)
     dec = math.asin(math.sin(L * rad) * math.sin(23.44 * rad))
     w = math.acos((math.sin(-0.833 * rad) - math.sin(lat * rad) * math.sin(dec)) / (math.cos(lat * rad) * math.cos(dec)))
-    J0 = 2451545 + 0.0009 + (-lon) / 360 + round(n - lon / -360 - 0.0009 - (-lon) / 360)
-    Js = J0 + 0.0053 * math.sin(M * rad) - 0.0069 * math.sin(2 * L * rad) + w / (2 * math.pi)
-    return datetime.datetime.fromtimestamp((Js - 2440587.5) * 86400, datetime.timezone.utc)
+    return datetime.datetime.fromtimestamp((Jt + w / (2 * math.pi) - 2440587.5) * 86400, datetime.timezone.utc)
 
 def fetch_frame(cam):
     if cam['src'] == 'dot':
         url = 'https://webcams.nyctmc.org/api/cameras/%s/image' % cam['id']
         return urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'bluishvoid-sunset-truth'}), timeout=20).read()
+    if cam['src'] in ('caltrans', 'url'):
+        url = cam.get('url')
+        if not url:   # Caltrans picture URLs are named by location: look the camera up in the live list by its index
+            d = json.load(urllib.request.urlopen('https://cwwp2.dot.ca.gov/data/d7/cctv/cctvStatusD07.json', timeout=30))['data']
+            url = [o['cctv']['imageData']['static']['currentImageURL'] for o in d if o['cctv']['index'] == cam['id']][0]; cam['url'] = url
+        b = urllib.request.urlopen(url + '?t=%d' % time.time(), timeout=20).read()
+        a = Image.open(io.BytesIO(b)).convert('L').resize((64, 52)); px = list(a.getdata())[64 * 8:64 * 40]
+        if sum(1 for v in px if v > 235) / len(px) > 0.6: return None   # Caltrans's white 'Temporarily Unavailable' card
+        return b
     if cam['src'] == 'windy':
         if not WINDY: return None
         r = urllib.request.Request('https://api.windy.com/webcams/api/v3/webcams/%s?include=images' % cam['id'], headers={'x-windy-api-key': WINDY})
@@ -52,7 +64,7 @@ def measure(jpg, box):
 
 def main():
     now = datetime.datetime.now(datetime.timezone.utc)
-    ss = nyc_sunset_utc(now)
+    ss = sunset_utc(now)
     best, shots = None, []
     for off in (5, 10, 15, 20):
         t = ss + datetime.timedelta(minutes=off)
@@ -69,7 +81,7 @@ def main():
             print(off, cam['name'], m)
             if m['lum'] > 0.08 and (best is None or m['glow'] > best['glow']):
                 best = dict(m); im.save(os.path.join(OUT, 'frames', 'peak.jpg'), quality=85)
-    row = {'date': (ss - datetime.timedelta(hours=5)).strftime('%Y-%m-%d'), 'sunset_utc': ss.strftime('%Y-%m-%dT%H:%MZ'),
+    row = {'city': CITY, 'date': (ss + datetime.timedelta(hours=CFG['utc_off'])).strftime('%Y-%m-%d'), 'sunset_utc': ss.strftime('%Y-%m-%dT%H:%MZ'),
            'glow': best['glow'] if best else None, 'best': best, 'shots': shots}
     # a plain verdict for reading the log by eye; the number is what gets correlated
     g = row['glow']

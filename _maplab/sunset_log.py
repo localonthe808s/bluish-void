@@ -37,10 +37,18 @@ JS = r"""
 }
 """
 
-def main():
+CITIES = {   # the site boots wherever bv_lastLoc_v4 says (the location-switch harness trick)
+    'nyc': None,
+    'la': {'lat': 34.0522, 'lon': -118.2437, 'name': 'Los Angeles', 'tz': 'America/Los_Angeles'},
+}
+
+def run(city):
     with sync_playwright() as p:
         b = p.chromium.launch(args=['--use-gl=swiftshader', '--enable-unsafe-swiftshader'])
         pg = b.new_page(viewport={'width': 1300, 'height': 900})
+        if CITIES[city]:
+            seed = dict(CITIES[city]); seed['savedAt'] = int(time.time() * 1000)
+            pg.add_init_script("try{localStorage.setItem('bv_lastLoc_v4', %s)}catch(e){}" % json.dumps(json.dumps(seed)))
         pg.goto(SITE + '?log=%d' % int(time.time()), wait_until='domcontentloaded', timeout=90000)
         res = None
         for _ in range(24):                       # the forecast, NWS and light-path fetches settle in 10-40 s
@@ -54,14 +62,20 @@ def main():
                 print('not ready:', e)
         b.close()
     if not res or not res['rows']:
-        print('no rows'); sys.exit(1)
+        print(city, 'no rows'); return 0
     stamp = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%MZ')
-    with open(os.path.join(OUT, 'rows.jsonl'), 'w') as f:
+    with open(os.path.join(OUT, 'rows.jsonl'), 'a') as f:
         for r in res['rows']:
-            r['logged'] = stamp; r['loc'] = res['loc']
+            r['logged'] = stamp; r['loc'] = res['loc']; r['city'] = city
             f.write(json.dumps(r) + '\n')
     for r in res['rows']:
-        print(r['event'], r['local'], 'lead', r['lead_h'], 'h ->', r['score'], r['label'], 'path', r['path'] and r['path']['block'])
+        print(city, r['event'], r['local'], 'lead', r['lead_h'], 'h ->', r['score'], r['label'], 'path', r['path'] and r['path']['block'])
+    return len(res['rows'])
+
+def main():
+    open(os.path.join(OUT, 'rows.jsonl'), 'w').close()
+    n = sum(run(c) for c in CITIES)
+    if not n: sys.exit(1)
 
 if __name__ == '__main__':
     main()
