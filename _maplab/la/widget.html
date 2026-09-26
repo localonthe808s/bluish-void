@@ -114,7 +114,7 @@
   html.embed .wrap{ max-width:none; padding:0; }
 </style>
 <script>if (/[?&]embed=1/.test(location.search)) document.documentElement.className += ' embed';</script>
-<script src="/cloud_gl.js?v=41" defer></script>
+<script src="/cloud_gl.js?v=43" defer></script>
 </head>
 <body>
 <div class="wrap">
@@ -563,7 +563,11 @@ function bvFrontScene(cv, kind, opts){
        already climbing ahead of it. Two cells half a life apart, so something is always growing.
        `a` is a cell's age, 0..1:  0-.42 climbing   .42-.72 mature, anvil spreading   .72-1 decaying */
     var SHELF = false;   /* set while the COLD front's storms draw: they grow a shelf over the gust front */
-    var drawCb = function(cx, stage, scale, a, seedK){
+    /* a cell's shape at age a, the numbers drawCb uses -- so a second cell can be handed to the GPU as part of the same cloud */
+    var cbGeom = function(cx, stage, scale, a){ var ease = function(x){ x = x < 0 ? 0 : x > 1 ? 1 : x; return x * x * (3 - 2 * x); }, baseY = G - 29;
+      var grow = ease(a / 0.42), die = ease((a - 0.72) / 0.28), fullH = (stage >= 3 ? baseY - 9 : stage === 2 ? baseY - 16 : 24 * scale), Ht = Math.max(6, fullH * (0.16 + 0.84 * grow));
+      return { cx: cx - 15 * a * scale, h: Ht * (1 - die * 0.25), hw: (stage >= 3 ? 16 : stage === 2 ? 13 : 10) * scale * (0.55 + 0.45 * grow), die: die, grow: grow, base: (H - baseY) + die * 6 }; };
+    var drawCb = function(cx, stage, scale, a, seedK, comp){
       var baseY = G - 29, lit = st.flash > 0 ? 1 : 0;
       var ease = function(x){ x = x < 0 ? 0 : x > 1 ? 1 : x; return x * x * (3 - 2 * x); };
       var shade = function(v, up){                          // v: 0 at the base .. 1 at the top
@@ -580,9 +584,10 @@ function bvFrontScene(cv, kind, opts){
       if (window.bvCloudGL && bvCloudGL.ok()){               /* the GPU tower: the same life, drawn as a volume */
         var rk0 = stage >= 1 ? ease((a - 0.30) / 0.2) * (1 - die * 0.7) : 0;
         bvCloudGL(g, { W: W, H: H, ppu: Math.min(3, dpr), t: t + seedK * 40, cx: cx, base: (H - baseY) + die * 6, h: Ht * (1 - die * 0.25), hw: hw,
-          lean: stage >= 2 ? 1 : 0.5, anvil: spread * (1 - die * 0.5), anvR: (stage >= 3 ? 70 : 32) * scale * spread + 1, anvL: (stage >= 3 ? 32 : 15) * scale * spread + 1,
+          lean: stage >= 2 ? 1 : 0.5, anvil: spread * (1 - die * 0.5), anvR: (stage >= 3 ? 50 : 30) * scale * spread + 1, anvL: (stage >= 3 ? 24 : 14) * scale * spread + 1,   /* shorter, so the wedge has body (70 read as a blade) */
           rain: rk0 * (RAIN == null ? 0.8 : [0, 0.4, 0.75, 1.1][RAIN]), night: NF, sunDir: SUN.d, sunCol: SUN.c, also: ALSO, flash: st.flash > 0 ? 1 : 0, ground: H - G, dens: 1 - die * 0.85,
-          anvT: 2, anvK: 0.75 * scale, anvS: 0.5 * scale, rag: 2.6 * scale * grow, shelf: SHELF && stage >= 2 && a > 0.3 && a < 0.85 ? 13 * scale * grow * (1 - die) : 0 });   /* only the mature cell's outflow makes the shelf */   /* the golden-hour storm's lessons (2026-09-26): the anvil a WEDGE joined to the tower, cauliflower carried up over the updraft; a ragged base, not a ruler line */
+          anvT: 2, anvK: 1.15 * scale, anvS: 0.4 * scale, rag: 4 * scale * grow, shelf: SHELF && stage >= 2 && a > 0.3 && a < 0.85 ? 13 * scale * grow * (1 - die) : 0,
+          t2: comp ? [comp.cx, (H - baseY) + die * 6, comp.h, comp.hw] : null, t2d: comp ? (1 - comp.die) * Math.min(1, 0.4 + comp.grow) : 0 });   /* the companion cell, in the same field, on the same base */   /* only the mature cell's outflow makes the shelf */   /* the golden-hour storm's lessons (2026-09-26): the anvil a WEDGE joined to the tower, cauliflower carried up over the updraft; a ragged base, not a ruler line */
         st.shadows.push([cx - SUN.d[0] * 14, hw * 1.5, (1 - die) * (0.35 + 0.65 * grow) * 0.8]);
         if (a > 0.35 && a < 0.8) st.cbBase = [cx, baseY];
         return;
@@ -705,7 +710,14 @@ function bvFrontScene(cv, kind, opts){
       else {
         /* the older cell first (it is further back), then the one climbing in front of it */
         var a1 = (t / LIFE) % 1, a2 = (a1 + 0.5) % 1, cells = [[a1, 0], [a2, 0.43]].sort(function(p, q){ return q[0] - p[0]; });
-        SHELF = true; cells.forEach(function(c){ drawCb(xn - 8, stg, scl, c[0], c[1]); }); SHELF = false;
+        SHELF = true;
+        if (window.bvCloudGL && bvCloudGL.ok()){
+          /* ONE STORM, ONE CLOUD: the stronger cell draws, the other rides in its field (see cloud_gl uT2) */
+          var gA = cbGeom(xn - 8, stg, scl, cells[0][0]), gB = cbGeom(xn - 8, stg, scl, cells[1][0]);
+          var mainI = gA.h * (1 - gA.die) >= gB.h * (1 - gB.die) ? 0 : 1;
+          drawCb(xn - 8, stg, scl, cells[mainI][0], cells[mainI][1], mainI ? gA : gB);
+        } else cells.forEach(function(c){ drawCb(xn - 8, stg, scl, c[0], c[1]); });
+        SHELF = false;
         if (stg >= 2 && !(window.bvCloudGL && bvCloudGL.ok())) drawShelf(xn, 1);   /* the GPU storm grows its own shelf (drawCb's shelf option); this painted one is the no-WebGL fallback */
       }
     } else if (LV.flash === true && kind !== 'TROF'){
