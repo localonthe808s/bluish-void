@@ -102,7 +102,8 @@
     '  float bY = uBase;',
     '  if (uRag > 0.) bY += uRag * ((fbm(vec2(p.x * .05, 4.)) - .5) * 2.2 + (fbm(vec2(p.x * .16, 8.)) - .5) * .8 - 1.1 * smoothstep(.52, .72, fbm(vec2(p.x * .09, 11.))));',   /* uRag: a ragged base -- it undulates, and in places torn scud hangs lower (the sky art; the scenes keep 0) */
     '  float KJ = uAnvT > 1.5 ? 3. : 40.; float twan = log(exp(KJ * tw) + exp(KJ * an)) / KJ;',   /* sky art + scenes: the anvil JOINS the tower (smooth union) -- max() left a dark crease line across the crown */
-    '  float body = mix(-1., twan, smoothstep(bY - (uRag > 0. ? 1.8 : .4), bY + .9, p.y));',
+    '  float rx = (p.x - (uCx - uHW * .45)) / max(uHW, 1.), soft = uRag > 0. ? clamp(uRain, 0., 1.) * exp(-rx * rx * 1.6) * 5. : 0.;',   /* NCAR (rewatched 09-26): over the rain the base has no edge -- the cloud dissolves down into the shaft */
+    '  float body = mix(-1., twan, smoothstep(bY - (uRag > 0. ? 1.8 : .4) - soft, bY + .9 + soft * .6, p.y));',
     /* uShelf: the SHELF CLOUD grown out of the same field (2026-09-26 -- a separate lens under the storm read as a saucer): on the
        leading side the base drops away in a wedge -- its top slopes from the base down to a low lip over the gust front, the
        underside ragged. Same noise, same light as the tower, so it is one cloud */
