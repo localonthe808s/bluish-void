@@ -318,7 +318,7 @@
         if (g === 'Cumulonimbus') add(W * 0.46, hz + 8, 72, sky * 0.68, 2, 1);
         /* SPECIES: humilis small and flat (wider than tall), mediocris as tall as wide, congestus fewer and much taller */
         var sp = ty.species, hum = sp === 'humilis', con = sp === 'congestus';
-        if (g !== 'Cumulonimbus') n = con ? Math.round(4 + 5 * c) : hum ? Math.round(12 + 26 * c) : n;
+        if (g !== 'Cumulonimbus') n = Math.round((con ? 4 + 5 * c : hum ? 12 + 26 * c : n) * (o.dens || 1));   /* o.dens: a wider sky (the hero) holds more clouds */
         var placed = [];
         for (var i = 0; i < n && g !== 'Cumulonimbus'; i++){
           var f = i === 0 ? 0.9 : Math.pow(R(), 2.0), s = 0.2 + 1.05 * f;   /* one near cloud, a crowd of far ones */

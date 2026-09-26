@@ -10165,7 +10165,10 @@ var   H_SCENE_F = 0.27;
 var   H_FOG_FADE = 0.68;
 function _heroSceneDY(vbH){ return (vbH || 215) * H_SCENE_F - 90.5; }
 let   H_KX=6.2;                                 // horizontal scale — cloud runs wide (little padding to edge & moon; was 5.6, widened once centred in the 660 box)
+/* the GPU hero (hero_gl.js) draws the clouds itself and asks the SVG for the precipitation only */
+var _HERO_NOCLOUD = false;
 function heroCloud(v,sh,kyMul,dy,seed,kxMul){
+  if (_HERO_NOCLOUD) return '';
   // kyMul grows the mass vertically about the SAME anchor (local y=57 stays on
   // the moon's centre), so a taller storm builds upward while its base — where
   // the drops and bolts are spawned — does not move. dy nudges the whole mass;
@@ -10747,6 +10750,7 @@ function heroFogFull(){
    The cells used to trail virga. At phone scale it read as bare lines and was
    not worth the noise or the cost (user), so they are plain cloud now. */
 function _heroFarPrecip(vbH, tint){
+  if (_HERO_NOCLOUD) return '';
   const VH=vbH||215, dy=_heroSceneDY(VH);
   const _keep=_seed; _srand(_hash('farprecip|'+Math.round(VH)));
   const N=5;
@@ -11612,7 +11616,43 @@ window._updateHeroWx = function(code, night){
       H_FALLK = 1; H_BOLTY = 0;
       document.documentElement.classList.remove('wx-night-panel');
     }
+    try{ window._bvHeroGpu(hw, st, code, night); }catch(e){}
   }catch(e){}
+};
+/* THE GPU CLOUDS (hero_gl.js, 2026-09-26: "update them all"): after the scene is placed, its SVG clouds are swapped for the
+   lit, textured ones the fronts and golden hour use. The SVG is re-rendered with _HERO_NOCLOUD, so everything that ANIMATES
+   (rain, snow, sleet, hail, lightning, flood, snowpack) stays exactly as it was and falls from the new cloud's base. One static
+   canvas, redrawn only when the scene or the box changes. No WebGL: nothing happens and the SVG clouds stay. */
+window._bvHeroGpu = function(hw, st, code, night){
+  var GPU = /^(partly|overcast|fog|drizzle|rain|rain-heavy|freezing|snow|sleet|storm|storm-hail)$/;
+  var old = hw.querySelector(':scope > canvas.hero-gl');
+  if (!GPU.test(st) || !window.bvHeroGL || !window.bvCloudGL || !bvCloudGL.ok()){ if (old) old.remove(); return; }
+  var r = hw.getBoundingClientRect(); if (r.width < 40 || r.height < 40) return;
+  var svg = hw.querySelector(':scope > svg'); if (!svg) return;
+  var vb = svg.viewBox && svg.viewBox.baseVal, vbH = vb ? vb.height : 215;
+  var sig = st + '|' + (night ? 1 : 0) + '|' + Math.round(r.width) + 'x' + Math.round(r.height) + '|' + vbH;
+  if (old && old.getAttribute('data-sig') === sig && !svg.getAttribute('data-cloudy')) return;
+  /* the SVG again, without its clouds (only the precipitation and effects) */
+  if (!svg.getAttribute('data-noclouds')){
+    _HERO_NOCLOUD = true; var html; try { html = weatherHeroSVG(code, night, vbH); } finally { _HERO_NOCLOUD = false; }
+    var tmp = document.createElement('div'); tmp.innerHTML = html; var ns = tmp.firstElementChild;
+    if (!ns) return;
+    /* what the scene appended after the fact (flood, snowpack): its tail nodes, carried over as they are */
+    var nOld = svg.childNodes.length, nNew = (function(){ _HERO_NOCLOUD = false; var t2 = document.createElement('div'); t2.innerHTML = weatherHeroSVG(code, night, vbH); return t2.firstElementChild ? t2.firstElementChild.childNodes.length : nOld; })();
+    Array.prototype.slice.call(svg.childNodes, nNew).forEach(function(n){ ns.appendChild(n); });
+    ns.setAttribute('data-noclouds', '1'); svg.parentNode.replaceChild(ns, svg); svg = ns;
+  }
+  var dpr = Math.min(2, window.devicePixelRatio || 1), cv = old || document.createElement('canvas');
+  cv.className = 'hero-gl'; cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+  cv.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  /* where the drops spawn: scene y 150, shifted by the precip scenes' translate, in the box's px from its bottom */
+  var baseUp = null;
+  if (!/^(partly|overcast|fog)$/.test(st)){ var yv = 150 + _heroSceneDY(vbH); baseUp = r.height * (1 - yv / vbH); }
+  var g = cv.getContext('2d'); g.clearRect(0, 0, cv.width, cv.height);
+  var ok = bvHeroGL(g, { W: r.width, H: r.height, dpr: dpr, state: st, night: !!night, baseUp: baseUp, seed: (code | 0) + 3 });
+  if (!ok){ cv.remove(); return; }
+  cv.setAttribute('data-sig', sig);
+  if (!old) hw.insertBefore(cv, hw.firstChild);
 };
 })();
 </script>
@@ -11943,7 +11983,7 @@ window._updateHeroWx = function(code, night){
 
 <video class="bg-video" id="bgVideo" autoplay muted loop playsinline preload="metadata"></video>
 <script src="/bg-videos.js"></script>
-<script src="/cloud_gl.js?v=49" defer></script><script src="/sky2_gl.js?v=2" defer></script>   <!-- the GPU cloud for the front scenes (2026-09-26); scenes paint their own when it is missing -->
+<script src="/cloud_gl.js?v=49" defer></script><script src="/sky2_gl.js?v=3" defer></script><script src="/hero_gl.js?v=1" defer></script>   <!-- the GPU cloud for the front scenes (2026-09-26); scenes paint their own when it is missing -->
 <script>
   // Random pick from the shared BG_VIDEOS list on each page load.
   // Skip the ~200MB bg video download on slow/data-saver connections; the page still works
