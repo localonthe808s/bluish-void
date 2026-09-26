@@ -11983,7 +11983,7 @@ window._bvHeroGpu = function(hw, st, code, night){
 
 <video class="bg-video" id="bgVideo" autoplay muted loop playsinline preload="metadata"></video>
 <script src="/bg-videos.js"></script>
-<script src="/cloud_gl.js?v=49" defer></script><script src="/sky2_gl.js?v=3" defer></script><script src="/hero_gl.js?v=1" defer></script>   <!-- the GPU cloud for the front scenes (2026-09-26); scenes paint their own when it is missing -->
+<script src="/cloud_gl.js?v=49" defer></script><script src="/sky2_gl.js?v=4" defer></script><script src="/hero_gl.js?v=1" defer></script>   <!-- the GPU cloud for the front scenes (2026-09-26); scenes paint their own when it is missing -->
 <script>
   // Random pick from the shared BG_VIDEOS list on each page load.
   // Skip the ~200MB bg video download on slow/data-saver connections; the page still works
@@ -20473,10 +20473,32 @@ function dayRangeAround(d, days){
         return '<g opacity="'+op+'" transform="translate('+tx.toFixed(1)+','+ty.toFixed(1)+') scale('+sx.toFixed(3)+','+sy.toFixed(3)+')">'
              + window._bvCloudSVG(0, 0, 1, variant, seed, sh) + '</g>';
       };
+      /* THE GPU CLOUDS (2026-09-26, the renderer the hero, fronts and golden hour use): the three layers as real lit cloud,
+         sun low on the right -- high thin ice wisps, a mid mass, a dark low deck -- rendered once into an image. The SVG
+         layers below stay as the no-WebGL fallback. */
+      var _xsImg = null;
+      try {
+        if (window.bvCloudGL && bvCloudGL.ok()){
+          var XW = 250, XH = 70, xc = document.createElement('canvas'), xp = 4; xc.width = XW * xp; xc.height = XH * xp;
+          var xg = xc.getContext('2d'); xg.setTransform(xp, 0, 0, xp, 0, 0);
+          var rr = (function(){ var q = 90731; return function(){ q = (q * 1664525 + 1013904223) >>> 0; return q / 4294967296; }; })();
+          var LIT = { sunDir: [0.9, 0.12], sunCol: [1.2, 0.86, 0.66], shdCol: [0.40, 0.34, 0.46], ground: 8, ppu: xp, W: XW, H: XH, t: 5, base: 0, h: 1, hw: 1, cx: 0, lean: 0, ns: 1.4 };
+          var lay = function(cover, yLo, yHi, r0, extra){ if (!cover || cover <= 0) return; var P = [], n = Math.round(4 + cover / 100 * 26);
+            for (var i = 0; i < n; i++){ var x = (i + rr()) / n * (XW + 30) - 15; if (rr() > 0.35 + cover / 100 * 0.7) continue; P.push([x, yLo + rr() * (yHi - yLo), r0 * (0.7 + 0.6 * rr()), 0.8 + 0.2 * rr()]); }
+            if (P.length) bvCloudGL(xg, Object.assign({}, LIT, { puffs: P.slice(0, 48) }, extra)); };
+          lay(cH, 52, 62, 5.5, { band: [48, 52, -3, -2], dens: 0.75 });                           /* high: stretched into ice wisps */
+          lay(cM, 30, 44, 7,   { band: [9000, 9001, -3, -2], dens: 0.95 });                       /* mid: a lumpy mass */
+          lay(cL, 12, 26, 8,   { band: [9000, 9001, 22, 30], shdCol: [0.28, 0.24, 0.32], sunCol: [1.05, 0.72, 0.56], dens: 1 });   /* low: dark, lit only at its sunward edge */
+          _xsImg = xc.toDataURL('image/png');
+        }
+      } catch(e){ _xsImg = null; }
+      if (_xsImg) svg += '<image href="' + _xsImg + '" x="0" y="0" width="250" height="70" preserveAspectRatio="none"/>';
+      else {
       // high = thin cirrostratus deck · mid = altostratus mass · low = shadowed stratus
       svg += _xsLayer(cH, 'deck',    -40, 140, 41, 66, 4,  16, 'grey', 3);
       svg += _xsLayer(cM, 'broad',   -10, 110, 40, 69, 22, 18, 'grey', 11);
       svg += _xsLayer(cL, 'softlow',   0, 100, 41, 69, 42, 19, 'dark', 19);
+      }
       if (cL<50) { svg+='<line x1="210" y1="55" x2="160" y2="10" stroke="rgba(255,160,50,.12)" stroke-width="15"/><line x1="210" y1="55" x2="100" y2="15" stroke="rgba(255,160,50,.08)" stroke-width="10"/>'; }
       svg += '</g>';
       /* Labels sit on a dark sky, so they get a dark halo rather than relying on
@@ -27803,13 +27825,14 @@ function dayRangeAround(d, days){
            layers (cloud-high/mid/low, fog) are swapped for one static GPU-rendered image at the same place in the stack. No
            WebGL / float textures: bvSky2 returns false and the SVG clouds simply stay. Panel units: 220 x 232 from y=-60; the
            ridge line sits near y=110, so the horizon is 62 units up from the bottom. */
-        window._bvGpuSky = function(group, prefix, types, xOff, saOver){
+        window._bvGpuSky = function(group, prefix, types, xOff, saOver, box){
+          box = box || { y: -60, h: 232, hz: 62 };   /* the panel's viewBox rows and its horizon, units up from the bottom */
           try {
             if (!group || !window.bvSky2) return false;
             var ppu = Math.min(3, Math.max(2, (window.devicePixelRatio || 1) * 1.25));
-            var cv = document.createElement('canvas'); cv.width = Math.round(220 * ppu); cv.height = Math.round(232 * ppu);
+            var cv = document.createElement('canvas'); cv.width = Math.round(220 * ppu); cv.height = Math.round(box.h * ppu);
             var cx = cv.getContext('2d'); cx.setTransform(ppu, 0, 0, ppu, 0, 0);
-            if (!window.bvSky2(cx, { W: 220, H: 232, hz: 62, sa: (saOver != null ? saOver : (typeof saNow === 'number' ? saNow : 10)), types: types || [], ppu: ppu })) return false;
+            if (!window.bvSky2(cx, { W: 220, H: box.h, hz: box.hz, sa: (saOver != null ? saOver : (typeof saNow === 'number' ? saNow : 10)), types: types || [], ppu: ppu })) return false;
             var sel = ['cloud-high', 'cloud-mid', 'cloud-low', 'fog', 'cloud-gpu'].map(function(c){ return '.gen-cloud-' + prefix + '.' + c; }).join(',');
             var els = Array.prototype.slice.call(group.querySelectorAll(sel)), anchor = els.length ? els[0].previousSibling : null;
             while (anchor && els.indexOf(anchor) >= 0) anchor = anchor.previousSibling;   /* the image takes the first cloud layer's place in the stack */
@@ -27817,7 +27840,7 @@ function dayRangeAround(d, days){
             var first = anchor ? anchor.nextSibling : (els.length ? group.firstChild : null);
             var im = document.createElementNS('http://www.w3.org/2000/svg', 'image');
             im.setAttribute('class', 'gen-cloud-' + prefix + ' cloud-gpu');
-            im.setAttribute('x', xOff || 0); im.setAttribute('y', -60); im.setAttribute('width', 220); im.setAttribute('height', 232);
+            im.setAttribute('x', xOff || 0); im.setAttribute('y', box.y); im.setAttribute('width', 220); im.setAttribute('height', box.h);
             im.setAttribute('preserveAspectRatio', 'none');
             im.setAttribute('href', cv.toDataURL('image/png'));
             var ref = group.querySelector(prefix === 'ghNow' ? '#ghTerrainL' : '#ghTerrainR');
@@ -32122,7 +32145,9 @@ function dayRangeAround(d, days){
             var d = {}; for (var k in base) d[k] = base[k];
             d.cH = highCloud || 0; d.cM = midCloud || 0; d.cL = lowCloud || 0;
             d.cT = (typeof totalCloud === 'number') ? totalCloud : Math.max(d.cH, d.cM, d.cL);
-            window._bvRenderSkyArt(g, { prefix: 'cpSky', data: d });
+            var tCp = window._bvRenderSkyArt(g, { prefix: 'cpSky', data: d });
+            /* the same GPU sky golden hour uses (2026-09-26), sized to this panel: viewBox y -34..112, horizon at 107 */
+            if (tCp && window._bvGpuSky) window._bvGpuSky(g, 'cpSky', tCp, 0, null, { y: -34, h: 146, hz: 5 });
           },
           tabDefs: [
             { id:'layers',  label:'LAYERS'  },

@@ -162,6 +162,7 @@
        fractus, - | uFog: on, depth (sky fraction), strength, - */
     'uniform vec4 uCs, uAs, uSt, uFog;',
     'vec4 over(vec4 top, vec4 bot){ return top + bot * (1. - top.a); }',
+    'float base0(float x){ return (uWH.y - uHz) * (.06 + .05 * (fbm(vec2(x * .035, 2.)) - .5)); }',
     'vec4 veils(vec2 p){',
     '  vec4 o = vec4(0.); float sky = uWH.y - uHz, y = p.y - uHz, ds = length((p - uSun) * vec2(1., 1.1));',
     '  if (uSt.x > .5){',   /* STRATUS: a low grey deck with a soft undulating base, or torn scud (fractus) */
@@ -170,13 +171,20 @@
     '      a = smoothstep(.52, .70, fbm((p + w) * vec2(.028, .10) + 3.)) * smoothstep(sky * .02, sky * .10, y) * (1. - smoothstep(sky * .30, sky * .42, y)) * .85; }',
     '    else { float base = sky * (.06 + .05 * (fbm(vec2(p.x * .035, 2.)) - .5)), top = sky * (.55 + .12 * (fbm(vec2(p.x * .02, 7.)) - .5));',
     '      a = smoothstep(base - 5., base + 7., y) * (1. - smoothstep(top - 18., top + 6., y)) * (.86 + .14 * fbm(p * vec2(.03, .08))); }',
-    '    vec3 c = mix(uShdC * .78, uHazeC * .95, .35 * exp(-max(y, 0.) / (sky * .25)));',   /* grey, warmer where it meets the glow */
+    '    vec3 c = mix(uShdC * .7, uHazeC * .9, .22 * exp(-max(y, 0.) / (sky * .2)));',   /* grey, a little warmer where it meets the glow */
+    '    float lump = fbm(vec2(p.x * .035, p.y * .09) + 21.), rl = smoothstep(.35, .7, fbm(vec2(p.x * .06, p.y * .02) + 5.));',
+    '    c *= .8 + .32 * lump; c *= 1. - .18 * rl * (1. - smoothstep(base0(p.x) + 2., base0(p.x) + 16., y));',   /* rolls along its dark underside */
     '    c += uSunC * .22 * exp(-ds / 70.) * (uSt.z > .5 ? 1.6 : 1.);',
     '    a *= uSt.y; o = over(vec4(c * a, a), o); }',
     '  if (uAs.x > .5){',   /* ALTOSTRATUS: grey ground glass; the sun shows through translucidus as a smeared glow */
     '    float base = sky * (.14 + .06 * (fbm(vec2(p.x * .03, 4.)) - .5));',
     '    float a = smoothstep(base - 6., base + 14., y) * (.82 + .18 * fbm(p * vec2(.015, .05) + 2.)) * (.94 + .06 * fbm(p * vec2(.01, .3)));',
     '    vec3 c = mix(uShdC * .92, vec3(.62, .60, .64), .35) * (uAs.z > .5 ? .82 : 1.);',
+    /* NOT A FLAT SLAB (user 2026-09-26, the overcast popup): an altostratus deck seen from below has broad soft undulations and
+       thicker darker patches -- long wavy bands, lighter where it thins */
+    '    vec2 wa = vec2(fbm(p * .012 + 3.), 0.) * 30.;',
+    '    float und = fbm(vec2((p.x + wa.x) * .014, p.y * .075) + 7.), thin = smoothstep(.45, .75, fbm(p * vec2(.02, .06) + 13.));',
+    '    c *= .68 + .55 * und; c = mix(c, c * 1.15 + .04, thin * .55);',
     '    c += uSunC * (uAs.z > .5 ? .18 : .55) * exp(-ds / 55.) + uHazeC * .18 * exp(-y / (sky * .3));',
     '    a *= uAs.y; o = over(vec4(c * a, a), o); }',
     '  if (uCs.x > .5){',   /* CIRROSTRATUS: a thin milky veil, faint fibres (fibratus), a 22 degree halo arc */
