@@ -78,11 +78,14 @@
        spacing varying, in small patches over a faint veil. Fixed scales blended by height (a y-varying scale shears) */
     '    float rF = sin((p.y + w.y * 1.4) * 1.25 + fbm(p * vec2(.05, .02)) * 9.), rN = sin((p.y + w.y * 1.4) * .75 + fbm(p * vec2(.04, .02) + 2.) * 9.);',
     '    float rip = mix(rF, rN, smoothstep(.2, .9, fy)) * .5 + .5;',
-    '    float gF = dome((p + w) * vec2(.85, 1.35)), gN = dome((p + w) * vec2(.52, .8) + 3.);',
-    '    float gr = mix(gF, gN, smoothstep(.2, .9, fy)) * smoothstep(.05, .75, rip) * smoothstep(.36, .62, fbm(p * vec2(.07, .25) + 13.)) * (.7 + .6 * fbm(p * .12 + 7.));',
-    '    float patchy = smoothstep(.60 - uCc.z * .2, .76 - uCc.z * .2, fbm(p * vec2(.03, .07) + 4.));',
-    '    float veil = smoothstep(.45, .7, fbm(p * vec2(.02, .05) + 4.)) * .04;',
-    '    d = max(d, (smoothstep(.12, .75, gr) * .85 * patchy + veil) * b); }',
+    '    float gF = dome((p + w) * vec2(.66, 1.05)), gN = mix(dome((p + w) * vec2(.42, .64) + 3.), dome((p + w) * vec2(.30, .46) + 9.), smoothstep(.45, .65, fbm(p * .025 + 21.)));',   /* overhead, some runs coarser than others */
+    '    float run = smoothstep(.05, .75, rip) * smoothstep(.36, .62, fbm(p * vec2(.07, .25) + 13.));',
+    '    float gr = mix(gF, gN, smoothstep(.2, .9, fy)) * run * (.7 + .6 * fbm(p * .12 + 7.));',
+    '    float patchy = smoothstep(.56 - uCc.z * .2, .74 - uCc.z * .2, fbm(p * vec2(.03, .07) + 4.));',
+    '    float veil = smoothstep(.45, .7, fbm(p * vec2(.02, .05) + 4.)) * 0.;   /* the veil read as a mauve smudge */',
+    /* only the round centre of each grain, on a wide ramp: soft separate dots, not a cobblestone mesh */
+    '    float halo = run * patchy * .2;',   /* a soft bed under each run: the flecks sit in a glow, not on bare sky */
+    '    d = max(d, (max(smoothstep(.22, .95, gr) * .85 * patchy, halo) + veil) * b); }',
     '  if (uSh.w > .5){',                                                  /* STRATUS / ALTOSTRATUS / NIMBOSTRATUS: a soft sheet */
     '    float mid = (uSh.x + uSh.y) * .5, th = (uSh.y - uSh.x) * .5;',
     '    float out_ = abs(p.y - mid) - th - (fbm(vec2(p.x * .045, 1.)) - .5) * 14.;',   /* the edge wobbles in SKY UNITS: a wobble relative to a tall deck dripped flames */
@@ -119,6 +122,7 @@
     '  c += uSunC * silver;',
     '  float hz = exp(-max(0., p.y - uHz) / 28.);',                          /* haze: low clouds melt into the horizon */
     '  c = mix(c, uHazeC, hz * .55);',
+    '  c = mix(c, uHazeC * 1.18, (1. - smoothstep(uHz + 20., uHz + 150., p.y)) * .30 * (1. - uDark));',   /* lower clouds take the horizon's warmth */
     '  float a = clamp(d0 * 1.25, 0., 1.) * (1. - hz * .35);',
     '  gl_FragColor = vec4(c * a, a);',
     '}'
