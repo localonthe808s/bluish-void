@@ -51,14 +51,14 @@
     '  } else {',                                                        /* CUMULONIMBUS: a column narrowing upward under a wide anvil */
     '    vec2 qa = vec2(q.x, q.y * c.w / c.z);',                          /* round lobes: both axes in half-widths */
     '    float top = c.w / c.z;',
-    '    if (k.x < 2.5) for (int i = 0; i < 14; i++){ float fi = float(i), yi = (.04 + fi * .066) * top, xi = (h1(vec2(fi, k.y + 2.)) - .5) * .6 * (1. - fi / 20.), ri = (.30 + .18 * h1(vec2(k.y, fi + 5.))) * (1.15 - .35 * fi / 14.);',
+    '    if (k.x < 2.5) for (int i = 0; i < 14; i++){ float fi = float(i), yi = (.04 + fi * .066) * top, xi = (h1(vec2(fi, k.y + 2.)) - .5) * (k.w > .5 ? 1.05 : .6 * (1. - fi / 20.)), ri = (k.w > .5 ? .20 + .34 * h1(vec2(k.y, fi + 5.)) : (.30 + .18 * h1(vec2(k.y, fi + 5.))) * (1.15 - .35 * fi / 14.));   /* congestus: heads jut out and vary, so the outline bulges like cauliflower (even overlap made a loaf) */   /* congestus: no taper, the cauliflower top is as broad as the body */',
     '      vec2 dd = (qa - vec2(xi, yi)) / ri; body = max(body, 1. - dot(dd, dd)); }',   /* a tower of boiling heads, not a pillar */
-    '    if (k.x < 2.5){ vec2 sk = vec2(q.x / .8, (qa.y - .14) / .22); body = max(body, (1. - dot(sk, sk)) * .8); }',   /* kind 3: the ANVIL alone, behind bvCloudGL's tower */   /* a broad dark base */
+    '    if (k.x < 2.5 && k.w < .5){ vec2 sk = vec2(q.x / .8, (qa.y - .14) / .22); body = max(body, (1. - dot(sk, sk)) * .8); }',   /* kind 3: the ANVIL alone, behind bvCloudGL's tower */   /* a broad dark base */
     '    body = min(body, smoothstep(-.03, .05, q.y) * 2. - 1.);',
     '    float ax = q.x > 0. ? q.x / (k.x > 2.5 ? 1.3 : 1.4) : q.x / (k.x > 2.5 ? .72 : .75), ath = (k.x > 2.5 ? .13 : .075) * (1. - .75 * ax * ax) + .02;',   /* anvil: thick over the updraft, tapering, sheared downwind */
     '    float ay = (q.y - .98 - .03 * ax) / ath; float an = (1. - ax * ax) * .9 - ay * ay;   /* x*x, never pow(x, 2.): pow of a negative base is undefined in GLSL and ate the anvil */',
     '    if (k.x < 2.5){ vec2 od = vec2(q.x / .22, (qa.y - top * 1.04) / .2); an = max(an, 1. - dot(od, od)); }',   /* the overshooting top */
-    '    body = max(body, an + (fbm(s * vec2(.5, 2.5)) - .5) * .5 * smoothstep(.3, 1., abs(ax)));',   /* fibrous where it thins */
+    '    if (k.w < .5) body = max(body, an + (fbm(s * vec2(.5, 2.5)) - .5) * .5 * smoothstep(.3, 1., abs(ax)));',   /* fibrous where it thins. k.w = 1: a congestus tower -- the same stacked heads, no anvil */
     '  }',
     '  if (k.x > 2.5 && k.x < 3.5){',
     /* the ANVIL SHEET: smooth under the lid, fibrous (ice) downwind. It sits BEHIND the tower; where they meet, the tower's
@@ -227,7 +227,7 @@
   /* types -> cells + bands */
   function compose(o, W, H, hz){
     var sky = H - hz, C = [], K = [], bands = { ci: [0, 0, 0, 0], cc: [0, 0, 0, 0], sh: [0, 0, 0, 0], sh2: [0, 0, 0, 0] }, veil = { cs: [0, 0, 0, 0], as: [0, 0, 0, 0], st: [0, 0, 0, 0], fog: [0, 0, 0, 0] };
-    var add = function(cx, yb, hw, h, kind, a){ if (C.length >= MAXC) return; C.push([cx, yb, hw, h]); K.push([kind, Math.random() * 0 + (C.length * 0.137) % 1, a == null ? 1 : a, 0]); };
+    var add = function(cx, yb, hw, h, kind, a, fl){ if (C.length >= MAXC) return; C.push([cx, yb, hw, h]); K.push([kind, Math.random() * 0 + (C.length * 0.137) % 1, a == null ? 1 : a, fl || 0]); };
     /* perspective: a row at height f (0 horizon .. 1 overhead) is placed at y and scaled by s */
     var rowY = function(f, top){ return hz + (top - hz) * Math.pow(f, 1.35); };
     (o.types || []).forEach(function(ty, ti){
@@ -242,9 +242,19 @@
       else if (g === 'Cumulus' || g === 'Cumulonimbus'){
         var n = g === 'Cumulonimbus' ? 1 : Math.round(10 + 30 * c);
         if (g === 'Cumulonimbus') add(W * 0.46, hz + 8, 72, sky * 0.68, 2, 1);
+        /* SPECIES: humilis small and flat (wider than tall), mediocris as tall as wide, congestus fewer and much taller */
+        var sp = ty.species, hum = sp === 'humilis', con = sp === 'congestus';
+        if (g !== 'Cumulonimbus') n = con ? Math.round(4 + 5 * c) : hum ? Math.round(12 + 26 * c) : n;
+        var placed = [];
         for (var i = 0; i < n && g !== 'Cumulonimbus'; i++){
-          var f = i === 0 ? 0.9 : Math.pow(R(), 2.0), s = 0.2 + 1.05 * f;   /* one near cloud, a crowd of far ones */                 /* most are far and small */
-          add(R() * W, rowY(f * 0.4, H) + 2, (18 + 22 * c) * s * (0.8 + 0.5 * R()), (15 + 22 * c) * s * (0.7 + 0.6 * R()), 0, 1);
+          var f = i === 0 ? 0.9 : Math.pow(R(), 2.0), s = 0.2 + 1.05 * f;   /* one near cloud, a crowd of far ones */
+          var hw = (con ? 22 + 12 * c : hum ? 14 + 10 * c : 18 + 22 * c) * s * (0.8 + 0.5 * R());
+          var hh = con ? hw * (1.7 + 0.8 * R()) : hum ? hw * (0.42 + 0.18 * R()) : (15 + 22 * c) * s * (0.7 + 0.6 * R());
+          var cx = R() * W, yb = rowY(f * 0.4, H) + 2;
+          /* NO SNOWMEN: a cloud whose base would sit inside another one's body moves sideways (up to 6 tries) */
+          for (var tr = 0; tr < 6; tr++){ var hit = placed.some(function(q){ return Math.abs(q[0] - cx) < (q[2] + hw) * 0.7 && yb > q[1] + 1 && yb < q[1] + q[3]; }); if (!hit) break; cx = R() * W; }
+          placed.push([cx, yb, hw, hh]);
+          add(cx, yb, hw * (con ? 1.25 : 1), hh * (con ? 0.8 : 1), con ? 2 : 0, 1, con ? 1 : 0);   /* congestus: the tower's stacked round heads (tall cumulus heads stretched into slabs) */
         }
       } else if (g === 'Altocumulus' || g === 'Stratocumulus'){
         var ac = g === 'Altocumulus', rows = ac ? 10 : 6, top = ac ? hz + sky * 0.9 : hz + sky * 0.62;
@@ -260,7 +270,7 @@
       }
     });
     /* a storm owns its part of the sky: mid-level puffs that would sit on the anvil are dropped */
-    var cb = C.findIndex(function(c, i){ return K[i][0] === 2; }), cbX = cb >= 0 ? C[cb][0] : o.stormX;
+    var cb = C.findIndex(function(c, i){ return K[i][0] === 2 && !K[i][3]; }), cbX = cb >= 0 ? C[cb][0] : o.stormX;
     if (cbX != null){ var C2 = [], K2 = []; C.forEach(function(c, i){ if (K[i][0] === 1 && Math.abs(c[0] - cbX) < 100 && c[1] > hz + sky * 0.42) return; C2.push(c); K2.push(K[i]); }); C = C2; K = K2; }
     if (o.anvil){ C.push(o.anvil); K.push([3, 0.37, 1, 0]); }
     if (o.base){ C.push(o.base); K.push([4, 0.61, 0.97, 0]); }
@@ -279,10 +289,11 @@
     var types = o.types || [], cbT = types.filter(function(t){ return t.genus === 'Cumulonimbus'; })[0];
     if (cbT && window.bvCloudGL && bvCloudGL.ok() && !o._pass){
       var W0 = o.W || 220, H0 = o.H || 232, hz0 = o.hz == null ? 40 : o.hz, sky0 = H0 - hz0, sx = W0 * 0.46, L = stormLight(o.sa == null ? 3 : o.sa);
+      var calvus = cbT.species === 'calvus';   /* calvus: the top has not frozen into an anvil yet */
       var isLow = function(t){ return t.layer === 'low' || t.layer === 'deep'; };
       var r = bvSky2(ctx, Object.assign({}, o, { _pass: 1, stormX: sx, types: types.filter(function(t){ return !isLow(t) && t !== cbT; }) }));
       bvCloudGL(ctx, { W: W0, H: H0, ppu: o.ppu || 4, t: 7, ns: 0.62, ground: hz0, night: L.n, sunDir: L.d, sunCol: L.c, shdCol: L.s,
-        cx: sx, base: hz0 + 18, h: sky0 * 0.62, hw: 33, lean: 0.35, anvil: 1, anvR: 100, anvL: 58, anvT: 2.1, rain: 0, rag: 7, dens: 1 });   /* the anvil in the SAME field as the tower: one shape, one texture, one light -- every separate anvil read as pasted on. anvT thickens it for this scale; anvR runs it off-frame downwind */   /* hw 38: about 1.6 tall to 1 wide, a mature storm's body (it measured 2.4 : 1 at hw 28); rain is the sky pass's soft curtains */   /* a SMALL flare of its own (its full anvil is a thin plate at this size): the crown spreads into the soft anvil drawn behind, so the two join instead of a band pasted across the tower */   /* the front card's proportions (hw 16 : anvR 70 : anvL 32 at its scale) */
+        cx: sx, base: hz0 + 18, h: sky0 * 0.62, hw: 33, lean: 0.35, anvil: calvus ? 0 : 1, anvR: 100, anvL: 58, anvT: 2.1, rain: 0, rag: 7, dens: 1 });   /* the anvil in the SAME field as the tower: one shape, one texture, one light -- every separate anvil read as pasted on. anvT thickens it for this scale; anvR runs it off-frame downwind */   /* hw 38: about 1.6 tall to 1 wide, a mature storm's body (it measured 2.4 : 1 at hw 28); rain is the sky pass's soft curtains */   /* a SMALL flare of its own (its full anvil is a thin plate at this size): the crown spreads into the soft anvil drawn behind, so the two join instead of a band pasted across the tower */   /* the front card's proportions (hw 16 : anvR 70 : anvL 32 at its scale) */
       bvSky2(ctx, Object.assign({}, o, { _pass: 1, stormX: sx, rain: [sx + 33 * 0.14, 33 * 0.68, hz0 + 19, 0.85]   /* under the base as MEASURED (x 73..139, centre ~106 for sx 101, hw 38): centred on it, inside its width */, types: types.filter(function(t){ return isLow(t) && t !== cbT; }) }));   /* the anvil IN FRONT, opaque, swallowing the crown: the tower hits the lid and spreads */
       return r;
     }
