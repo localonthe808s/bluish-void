@@ -33,7 +33,11 @@
     '  if (abs(q.x) > 1.5 || q.y < -1.2 || q.y > 2.) return -1.;',   /* -1, not 0: 0 passes the soft threshold and each cell box drew a faint rectangle */
     '  vec2 s = (p - vec2(c.x, c.y)) / c.z * 2.2 + k.y * 17.;',
     '  float body = -1.;',
-    '  if (k.x > 4.5){',   /* LENTICULARIS (kind 5): SAUCERS -- a domed top, a flatter underside, ROUNDED ends, soft edges; 1-3 stacked plates (pointed lenses read as footballs) */
+    '  if (k.x > 5.5){',   /* the castellanus BANK (kind 6): a long flat-based strip, ragged ends, low lumpy top -- the turrets rise off it */
+    '    float x2 = q.x * q.x, ends = 1. - x2 * x2 - (fbm(vec2(q.y * 3., k.y * 9.)) - .5) * .3;',
+    '    float by = (fbm(vec2(q.x * 6., k.y * 4.)) - .5) * .12;',   /* the base is FLAT, barely undulating */
+    '    body = min(ends * 2., min((q.y - by - .25 * x2 * x2) * 5., ((.75 + (fbm(vec2(q.x * 9., k.y)) - .5) * .5) * (1. - .8 * x2 * x2) - q.y) * 3.));   /* the ends TAPER (they were cut square) */',
+    '  } else if (k.x > 4.5){',   /* LENTICULARIS (kind 5): SAUCERS -- a domed top, a flatter underside, ROUNDED ends, soft edges; 1-3 stacked plates (pointed lenses read as footballs) */
     '    float L = -1.;',
     '    for (int i = 0; i < 3; i++){ float fi = float(i); if (fi > k.w) break; float oy = fi * .5, ox = (h1(vec2(fi, k.y)) - .5) * .3, sc = 1. - fi * .22;',
     '      float x = (q.x - ox) / sc, e = 1. - x * x; if (e <= 0.) continue;',   /* outside the plate: skip (never 0 -- that drew boxes) */
@@ -43,7 +47,7 @@
     '    L -= 2. * (smoothstep(1.15, 1.45, abs(q.x)) + (1. - smoothstep(-1.15, -.85, q.y)));',
     '    return L * k.z;',
     '  }',
-    '  if (k.x > 3.5){',   /* the STORM BASE (kind 4): a dark ragged underside with scud hanging off it, over the tower's ruler-flat cut */
+    '  if (k.x > 5.5){ } else if (k.x > 3.5){',   /* (kind 6 bank already shaped above) the STORM BASE (kind 4): a dark ragged underside with scud hanging off it, over the tower's ruler-flat cut */
     '    float slab = 1. - q.x * q.x * q.x * q.x;',
     '    float yb = -.30 + (fbm(vec2(q.x * 3.5, k.y * 5.)) - .5) * 1.0 + (fbm(vec2(q.x * 11., k.y * 7.)) - .5) * .35;',
     '    body = min(slab, min((q.y - yb) * 3.5, (1. - q.y) * 2.5));',
@@ -61,7 +65,7 @@
     '  } else {',                                                        /* CUMULONIMBUS: a column narrowing upward under a wide anvil */
     '    vec2 qa = vec2(q.x, q.y * c.w / c.z);',                          /* round lobes: both axes in half-widths */
     '    float top = c.w / c.z;',
-    '    if (k.x < 2.5) for (int i = 0; i < 14; i++){ float fi = float(i), yi = (.04 + fi * .066) * top, xi = (h1(vec2(fi, k.y + 2.)) - .5) * (k.w > .5 ? 1.05 : .6 * (1. - fi / 20.)), ri = (k.w > .5 ? .20 + .34 * h1(vec2(k.y, fi + 5.)) : (.30 + .18 * h1(vec2(k.y, fi + 5.))) * (1.15 - .35 * fi / 14.));   /* congestus: heads jut out and vary, so the outline bulges like cauliflower (even overlap made a loaf) */   /* congestus: no taper, the cauliflower top is as broad as the body */',
+    '    if (k.x < 2.5) for (int i = 0; i < 14; i++){ float fi = float(i), yi = (.04 + fi * .066) * top, xi = (h1(vec2(fi, k.y + 2.)) - .5) * (k.w > 1.5 ? .5 : k.w > .5 ? 1.05 : .6 * (1. - fi / 20.)), ri = (k.w > 1.5 ? .58 + .2 * h1(vec2(k.y, fi + 5.)) - .12 * fi / 14. :   /* turret: big overlapping heads, a bumpy column (small ones read as beads) */ k.w > .5 ? .20 + .34 * h1(vec2(k.y, fi + 5.)) : (.30 + .18 * h1(vec2(k.y, fi + 5.))) * (1.15 - .35 * fi / 14.));   /* congestus: heads jut out and vary, so the outline bulges like cauliflower (even overlap made a loaf) */   /* congestus: no taper, the cauliflower top is as broad as the body */',
     '      vec2 dd = (qa - vec2(xi, yi)) / ri; body = max(body, 1. - dot(dd, dd)); }',   /* a tower of boiling heads, not a pillar */
     '    if (k.x < 2.5 && k.w < .5){ vec2 sk = vec2(q.x / .8, (qa.y - .14) / .22); body = max(body, (1. - dot(sk, sk)) * .8); }',   /* kind 3: the ANVIL alone, behind bvCloudGL's tower */   /* a broad dark base */
     '    body = min(body, smoothstep(-.03, .05, q.y) * 2. - 1.);',
@@ -328,13 +332,18 @@
         for (var lj = 0; lj < nL; lj++){ var fl = lj / Math.max(1, nL - 1);
           lens.push([W * (0.14 + 0.72 * fl) + (R() - 0.5) * 16, acL ? hz + sky * (0.38 + 0.38 * R()) : hz + sky * (0.14 + 0.18 * R()), (acL ? 28 : 38) + 12 * R(), (acL ? 4.2 : 5.5) + 1.8 * R(), Math.floor(R() * 3), R() * 9, 0.94]); }
       } else if (g === 'Altocumulus' && ty.species === 'castellanus'){
-        /* CASTELLANUS: turrets rising in ROWS from one shared flat base, each row a line in perspective */
-        for (var rw = 0; rw < 3; rw++){ var fr2 = 1 - rw * 0.33, yb2 = rowY(0.35 + 0.55 * fr2, hz + sky * 0.9), s3 = 0.35 + 0.65 * fr2;
-          /* CLUSTERS of 2-4 turrets, each on its own short base patch (a full-width shelf read as a bookcase) */
-          for (var xx = R() * 30 * s3; xx < W + 10; ){ var nT = 2 + Math.floor(R() * 3), tw2 = (9 + 5 * R()) * s3, cw = nT * tw2 * 1.3, yb3 = yb2 + (R() - 0.5) * 6 * s3;
-            add(xx + cw / 2 - tw2 * 0.6, yb3 - 1.5 * s3, cw * 0.62, 6 * s3, 1, 0.95);
-            for (var tq = 0; tq < nT; tq++){ var tw3 = tw2 * (0.75 + 0.5 * R()); add(xx + tq * tw2 * 1.3, yb3 + R() * 2 * s3, tw3 * 0.9, tw3 * (1.0 + 0.7 * R()), 2, 0.97, 1); }   /* round stacked heads (the congestus cell): tall cumulus heads were stretched vertically */
-            xx += cw + (18 + 30 * R()) * s3; } }
+        /* CASTELLANUS (WMO): turrets, taller than wide, rising from a COMMON horizontal base, arranged in LINES. So: banks in
+           perspective rows (near = high, big, sparse; far = low, small, crowded toward the horizon), each a flat-based strip
+           with distinct narrow turrets of varied height standing on it, gaps between them */
+        var nRow = 4;
+        for (var rw = 0; rw < nRow; rw++){ var fr2 = 1 - rw / (nRow - 0.3), yb2 = rowY(0.12 + 0.8 * Math.pow(fr2, 1.5), hz + sky * 0.84), s3 = 0.22 + 0.9 * fr2;   /* far rows crowd toward the horizon */
+          var x0 = -10 + R() * 40 * s3;
+          while (x0 < W + 10){ var len = (70 + 100 * R()) * (0.6 + 0.4 * s3), thB = 11 * s3 + 1.5;
+            add(x0 + len / 2, yb2, len / 2, thB, 6, 0.95);   /* the bank */
+            for (var tx = x0 + (5 + 6 * R()) * s3; tx < x0 + len - 8 * s3; tx += (8 + 7 * R()) * s3){
+              if (R() < 0.15) continue;   /* gaps: not every spot has a turret */
+              var tw4 = (5.5 + 4 * R()) * s3; add(tx, yb2 + thB * 0.35, tw4, tw4 * (1.3 + 1.3 * R()), 2, 0.97, 2); }
+            x0 += len + (10 + 34 * R()) * s3; } }
       } else if (g === 'Altocumulus' && ty.species === 'floccus'){
         /* FLOCCUS: small ragged tufts scattered in perspective, each trailing virga */
         var nF = Math.round(14 + 26 * c);
