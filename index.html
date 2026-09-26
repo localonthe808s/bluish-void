@@ -20166,10 +20166,14 @@ function dayRangeAround(d, days){
     // 2. Western horizon (low cloud blocking) — 18pts
     maxS += 18;
     if (gh.cL !== null) {
-      var ls = gh.cL<=10?18 : gh.cL<=25?14 : gh.cL<=40?9 : gh.cL<=60?4 : 1;
+      /* THE REAL WESTERN HORIZON (2026-09-26): low cloud over the city AND along the light path toward the sun, 60-400 km out
+         (window._sunPathAt); the worse of the two decides. It used to be only the overhead number. */
+      var _sp2 = (window._sunPathAt && ssDate) ? window._sunPathAt(ssDate.getTime(), false) : null;
+      var _effL = _sp2 ? Math.max(gh.cL, Math.round(_sp2.block * 100)) : gh.cL;
+      var ls = _effL<=10?18 : _effL<=25?14 : _effL<=40?9 : _effL<=60?4 : 1;
       // Bonus: clearing low clouds
-      if (cloudClearing && ghPre.cL && ghPre.cL > 40 && gh.cL < 30) ls = Math.min(18, ls + 4);
-      score+=ls; bd2.push({l:'Western horizon clear',v:ls,m:18,n:gh.cL+'% low'+(cloudClearing?' \u2193clearing':'')});
+      if (cloudClearing && ghPre.cL && ghPre.cL > 40 && _effL < 30) ls = Math.min(18, ls + 4);
+      score+=ls; bd2.push({l:'Western horizon clear',v:ls,m:18,n:gh.cL+'% low overhead'+(_sp2 ? ' \u00b7 path to the sun ' + Math.round(_sp2.block * 100) + '% blocked (' + _sp2.low.join('/') + '% low at 60/150/250/400 km)' : '')+(cloudClearing?' \u2193clearing':'')});
     }
 
     // 3. Aerosol/particle enhancement — 15pts
@@ -28191,6 +28195,18 @@ function dayRangeAround(d, days){
           // is climbing toward a thick mid layer, the pre-As pattern often
           // looks bad even before the score's other checks fire.
           if(_qCloudBuilding && fc.cM>50) qs-=6;
+          /* THE LIGHT PATH toward the sun (see window._sunPathAt): the strongest single control on a sunset. Blocked, the clouds
+             overhead stay grey whatever they are; clear with a canvas overhead, they light up. */
+          try{
+            var _sp = window._sunPathAt && ghSunEvent ? window._sunPathAt(ghSunEvent.getTime(), ghIsAm) : null;
+            window._ghPath = _sp;
+            if(_sp){
+              var _canvas = Math.min(1, (fc.cM + fc.cH) / 60);
+              qs -= Math.round(30 * Math.pow(_sp.block, 1.3) * (0.4 + 0.6 * _canvas));
+              if(_sp.block < 0.2 && _canvas > 0.3 && fc.cL < 40) qs += 8;
+              if(_sp.block > 0.8) qs = Math.min(qs, 30);
+            }
+          }catch(_){}
         }
         qs=Math.max(5,Math.min(100,Math.round(qs)));
         // Hard cap: sun-blocked sky physically can't render warm color regardless of
@@ -30210,6 +30226,52 @@ function dayRangeAround(d, days){
           .catch(function(){});
       };
       window._fetchNwsSky();
+
+      // ── THE LIGHT PATH (2026-09-26 audit) ──
+      // A sunset lights the clouds overhead with light that has crossed ~100-400 km of air toward the sun: low cloud (or a thick
+      // deck) out there, below our horizon, switches the show off even when the sky overhead is perfect. Sunset models that work
+      // (Sunsethue's ray model; the physics in the audit) sample along the sun's azimuth; ours only looked straight up. This samples
+      // low/mid/high cloud at 60/150/250/400 km toward the sunset AND the sunrise azimuth in one Open-Meteo call, every 2 h.
+      window._sunAz = function(lat, dayMs, rise){
+        var d = new Date(dayMs), doy = Math.floor((Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) - Date.UTC(d.getFullYear(), 0, 0)) / 864e5);
+        var dec = 23.44 * Math.sin((2 * Math.PI / 365) * (doy - 81)) * Math.PI / 180, c = Math.sin(dec) / Math.cos(lat * Math.PI / 180);
+        var A = Math.acos(Math.max(-1, Math.min(1, c))) * 180 / Math.PI;
+        return rise ? A : 360 - A; };
+      window._fetchSunPath = function(){
+        var loc = window.LOCATION || {}; if (loc.lat == null) return;
+        var KM = [60, 150, 250, 400], pts = [];
+        [false, true].forEach(function(rise){ var az = window._sunAz(loc.lat, Date.now(), rise) * Math.PI / 180;
+          KM.forEach(function(km){ var dl = km / 6371, la1 = loc.lat * Math.PI / 180, lo1 = loc.lon * Math.PI / 180;
+            var la2 = Math.asin(Math.sin(la1) * Math.cos(dl) + Math.cos(la1) * Math.sin(dl) * Math.cos(az));
+            var lo2 = lo1 + Math.atan2(Math.sin(az) * Math.sin(dl) * Math.cos(la1), Math.cos(dl) - Math.sin(la1) * Math.sin(la2));
+            pts.push({ rise: rise, km: km, lat: la2 * 180 / Math.PI, lon: lo2 * 180 / Math.PI }); }); });
+        var url = 'https://api.open-meteo.com/v1/forecast?latitude=' + pts.map(function(q){ return q.lat.toFixed(3); }).join(',')
+          + '&longitude=' + pts.map(function(q){ return q.lon.toFixed(3); }).join(',')
+          + '&hourly=cloud_cover_low,cloud_cover_mid,cloud_cover_high&timezone=' + encodeURIComponent(loc.tz || 'auto') + '&forecast_days=3';
+        fetchWithTimeout(url, null, 12000).then(function(r){ return r.json(); }).then(function(d){
+          var arr = Array.isArray(d) ? d : [d]; if (arr.length !== pts.length) return;
+          pts.forEach(function(q, i){ var h = arr[i] && arr[i].hourly; if (!h) return; q.t = h.time.map(function(x){ return new Date(x).getTime(); }); q.cL = h.cloud_cover_low; q.cM = h.cloud_cover_mid; q.cH = h.cloud_cover_high; });
+          window._sunPath = { pts: pts, fetchedAt: Date.now(), lat: loc.lat, lon: loc.lon };
+          window._lastGHRenderKey = null;
+          clearTimeout(window._ghPathRefreshTo);
+          window._ghPathRefreshTo = setTimeout(function(){ try{ if (typeof tlRenderForOffset === 'function') tlRenderForOffset(); }catch(e){} }, 900);
+        }).catch(function(){});
+      };
+      /* how blocked the light path is at a sun event: 0 clear .. 1 shut. Low cloud anywhere 60-400 km blocks it; a thick mid deck
+         far out (250-400 km) blocks the light that would reach high cloud overhead. Interpolated to the event time. */
+      window._sunPathAt = function(evMs, rise){
+        var sp = window._sunPath, loc = window.LOCATION || {};
+        if (!sp || Date.now() - sp.fetchedAt > 6 * 3600000 || Math.abs(sp.lat - loc.lat) > 0.5 || Math.abs(sp.lon - loc.lon) > 0.5) return null;
+        var at = function(q, arr){ if (!q.t || !arr) return null; for (var i = 1; i < q.t.length; i++) if (q.t[i] >= evMs){ var f = (evMs - q.t[i - 1]) / (q.t[i] - q.t[i - 1]); if (arr[i] == null || arr[i - 1] == null) return null; return arr[i - 1] + (arr[i] - arr[i - 1]) * f; } return null; };
+        var W = { 60: 0.7, 150: 1, 250: 1, 400: 0.8 }, blk = 0, low = [], mid = [], n = 0;
+        sp.pts.forEach(function(q){ if (q.rise !== !!rise) return; var l = at(q, q.cL), m = at(q, q.cM); if (l == null) return; n++;
+          low.push(Math.round(l)); mid.push(Math.round(m || 0));
+          blk = Math.max(blk, W[q.km] * l / 100, q.km >= 250 ? 0.6 * Math.max(0, (m || 0) - 60) / 40 : 0); });
+        if (!n) return null;
+        return { block: Math.min(1, blk), low: low, mid: mid, az: Math.round(window._sunAz(loc.lat, evMs, rise)) };
+      };
+      window._fetchSunPath();
+      setInterval(function(){ if (!document.hidden) window._fetchSunPath(); }, 2 * 3600000);
       setInterval(function(){ if (!document.hidden) window._fetchNwsSky(0); }, 30 * 60000);
 
       // ── RADAR NOWCAST ── "rain in ~X min" from ACTUAL radar echoes.
