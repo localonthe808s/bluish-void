@@ -52,7 +52,8 @@
        Small anchors are ROUND puffs (1.15 x .95) -- an upward bulge made lollipops on stalks --; only the big ones stretch wide to merge into a deck */
     '  float big = smoothstep(4.5, 9., q.z);',
     '  vec2 dd = p - q.xy;',
-    '  vec2 d = dd / (uLean > 5. ? vec2(q.z * 1.6, q.z * .62) : vec2(q.z * mix(1.15, 1.95, big), q.z * mix(.95, .72, big))); acc += exp(K * ((1. - dot(d, d)) * q.w - 1.)); }',
+    '  float up = smoothstep(56., 78., q.y) * (1. - big);',   /* HIGH and small = ice: a stretched wisp, not a ball (user 2026-09-26: "improve these smaller circular cloud placements") */
+    '  vec2 d = dd / (uLean > 5. ? vec2(q.z * 1.6, q.z * .62) : vec2(q.z * mix(mix(1.15, 1.95, big), 3.2, up), q.z * mix(mix(.95, .72, big), .38, up))); acc += exp(K * ((1. - dot(d, d)) * q.w - 1.)); }',
     '  return acc > 0. ? 1. + log(acc) / K : -1.; }',   /* wide, flat: they merge into a deck */
     'float anvil(vec2 p){ if (uAnv < .01) return -1.; float ax2 = uCx - uLean * uH * .28; float ux = p.x - ax2; float R = ux > 0. ? uAnvR : uAnvL; float r2 = abs(ux) / max(R, 1.);',
     '  float th = (2.5 + 5.5 * (1. - r2)) * uAnv; float cy2 = uBase + uH - 1.5; float dy = (p.y - cy2) / max(th, .6); return (1. - r2 * r2) - dy * dy; }',
@@ -124,7 +125,9 @@
     '    float top = 1. - smoothstep(uBase + uH * .1, uBase + uH * .45, p.y), bot = .35 + .65 * smoothstep(uGround, uBase, p.y);',
     '    float ra = clamp(uRain * xw * top * bot * (.3 + .9 * st) * .75, 0., .88);',
     '    vec3 rc = mix(mix(vec3(.90, .89, .92), vec3(.56, .58, .64), smoothstep(.7, 1.1, uRain)), vec3(.40, .44, .55), uNight) * (.85 + .15 * st);',   /* pale; darker under a heavy storm */   /* pale, as NCAR draws it */
-    '    col = vec4(mix(col.rgb, rc, ra * (p.y < uBase ? 1. : .55)), max(col.a, ra));',
+    '    ra *= 1. - col.a;',   /* never OVER the cloud: painted across the base it left a step and a notch where its edge crossed */
+    '    ra *= 1. - smoothstep(uBase - 2.5, uBase + .5, p.y);   /* fades in just under the base; never a reversed smoothstep */',
+    '    col = vec4(mix(col.rgb, rc, ra / max(col.a + ra, 1e-3)), col.a + ra);',
     '  }',
     '  gl_FragColor = vec4(col.rgb * col.a, col.a);',
     '}'
