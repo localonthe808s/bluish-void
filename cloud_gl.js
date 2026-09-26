@@ -71,6 +71,18 @@
     '  return (1. - r2 * r2) - dy * dy; }',
     /* the height of the surface: the lobes' shape, then domes at two sizes rising through it; the anvil is ice -- smooth and
        fibrous, stretched along the wind, no domes */
+    /* THE SHELF CLOUD (arcus on the gust front; rebuilt 2026-09-26 after the thin flap was declined): a thick wedge rooted
+       under the storm's base, reaching forward over the warm side, its LIP the lowest point -- a smooth, sloping, layered top
+       and a dark ragged underside. x -> (s 0 root .. 1 lip, top y, bottom y) */
+    /* side view of a real shelf: a WEDGE whose sloping top continues the storm's leading flank down to the lip, and whose
+       underside runs nearly level back under the base toward the rain -- thickest at the storm, thinning to the lip (a
+       constant-thickness shape read as a pipe) */
+    'vec3 shelfGeo(float x){ float drop = uShelf * .9, xr = uCx + uHW * .45, L = uShelf * 1.7, x0 = uCx - uHW * .5, xl = xr + L;',
+    '  float sx = (x - x0) / max(xl - x0, 1.), u = clamp((x - xr) / max(L, 1.), 0., 1.);',
+    '  float top = mix(uBase + uHW * .45, uBase - drop * .88, pow(u, .85));   /* continuous at the root (a switch there drew a seam) */',
+    '  float bot = mix(uBase + .5, uBase - drop * (.72 + .28 * u), smoothstep(x0, xr + L * .15, x));',   /* the underside lowers gradually from under the base -- no block */
+    '  float nq = max(0., (u - .82) / .18); top = max(bot, top - drop * .12 * nq * nq);',   /* the lip rounds under */
+    '  return vec3(sx, top, bot); }',
     'float hgt(vec2 p){',
     '  if (uMode > .5){ vec2 q1 = (p + vec2(-uT * .35, 0.)) * uNS; float s1 = puffs(p);',
     '    if (s1 < -1.) return -1.;',
@@ -107,11 +119,8 @@
     /* uShelf: the SHELF CLOUD grown out of the same field (2026-09-26 -- a separate lens under the storm read as a saucer): on the
        leading side the base drops away in a wedge -- its top slopes from the base down to a low lip over the gust front, the
        underside ragged. Same noise, same light as the tower, so it is one cloud */
-    '  if (uShelf > 0.){ float sx = (p.x - uCx - uHW * .25) / max(uShelf * 1.5, 1.), cx = clamp(sx, 0., 1.), drop = uShelf * .6;',
-    '    float topY = uBase + 1. - drop * pow(cx, 1.3);',   /* the smooth top slopes from the base down to the lip */
-    '    float bot = uBase - drop * (.72 + .28 * cx) + (fbm(vec2(p.x * .3, 3.)) - .5) * 2.2 + (d2 - .5) * 1.4;',   /* the underside hangs low and ragged */
-    '    float sh = min(min((topY - p.y) * .32, (p.y - bot) * .28), min((1.02 - sx) * 2.5, (sx + .12) * 3.)) + (d1 - .5) * .3;   /* gentle slopes: soft edges, as the tower has */',
-    '    body = max(body, sh); }',
+    '  if (uShelf > 0.){ vec3 SG = shelfGeo(p.x);',
+    '    float sh = min(min((SG.y - p.y + (d2 - .5) * 1.6) * .28, (p.y - SG.z + (fbm(vec2(p.x * .45, p.y * .6 + 3.)) - .5) * 3.) * .25), min((1. - SG.x) * 4., SG.x * 3.)) + (d1 - .5) * .22;   /* soft, textured edges like the rest of the cloud; the back fades into the base */',    '    body = max(body, sh); }',
     '  return body; }',   /* below the base: OUTSIDE (-1), not 0 -- 0 passed the threshold and veiled the whole band under it */
     'void main(){',
     '  vec2 p = v * uWH;',
@@ -142,9 +151,18 @@
     '    if (uMode < .5) c *= mix(.66, 1., smoothstep(0., .22, hb));',                    /* the base: darker, flat */
     '    if (uFlash > 0.){ float fl = exp(-length((p - vec2(uCx - 4., uBase + uH * .45)) / vec2(uHW * 1.3, uH * .6))); c += vec3(1., .98, .86) * fl * uFlash * 1.2; }',
     '    float a = smoothstep(-.02, .09, H0) * uDens;',
-    '    if (uMode < .5 && uShelf > 0. && p.y < uBase + .5 && p.x > uCx - uHW * .2){ float sd = uShelf * .6, tv = clamp((p.y - (uBase - sd)) / (sd + 1.), 0., 1.);',   /* the SHELF face: a pale sloping top catching the light, darkening down to its ragged underside, faint layers along it */
-    '      vec3 sc2 = mix(shdC * .72, mix(shdC, sunC, .62), tv * tv) * (.96 + .04 * sin(p.y * 2.6 - p.x * .6));',
-    '      c = mix(c, sc2, smoothstep(uBase + .5, uBase - 2., p.y)); a = smoothstep(-.08, .2, H0) * uDens; }',
+    '    if (uMode < .5 && uShelf > 0.){ vec3 SG = shelfGeo(p.x);',
+    '      if (SG.x > 0. && SG.x < 1.05 && p.y < SG.y + .6 && p.y < uBase + uHW * .5){',
+    '        float tv = clamp((p.y - SG.z) / max(SG.y - SG.z, .5), 0., 1.), dTop = SG.y - p.y;',
+    /* the top face: smooth and lit, in LAMINAR TIERS -- two or three bands running along the slope, each a shade darker
+       at its lower edge; the underside: dark, turbulent; the very lip a thin brighter line where the light catches the roll */
+    '        float tier = fract(dTop / max(uShelf * .28, .8) + .35 * fbm(vec2(p.x * .09, p.y * .3)));',
+    '        vec3 topC = mix(shdC, sunC, .5) * (.9 + .08 * smoothstep(.0, .7, tier)) * (.92 + .16 * fbm(p * .35));',
+    '        vec3 botC = shdC * (.58 + .1 * fbm(p * .5));',
+    '        vec3 sc2 = mix(botC, topC, smoothstep(.28, .72, tv));',
+    '        sc2 = mix(sc2, sunC * .95, exp(-abs(dTop) * 1.4) * smoothstep(.55, .95, SG.x) * .35);',
+    '        float into = smoothstep(uBase + 1.5, uBase - 1., p.y) * smoothstep(0., .25, SG.x);',
+    '        c = mix(c, sc2, into * .85); a = max(a, smoothstep(-.08, .18, H0) * uDens * into); } }',
     '    if (uLean > 5.){ float topLit = smoothstep(.0, .6, N.y) * dif;',   /* the SHELF sits in the storm's shadow: dark, only its upper face catches light */
     '      c = mix(shdC * .88, sunC * .95, clamp(topLit * .9 + .1, 0., 1.)); a = smoothstep(-.06, .16, H0) * uDens; }',
     '    if (uMode > .5){ float hi2 = smoothstep(uBand.x, uBand.y, p.y), lo2 = 1. - smoothstep(uBand.z, uBand.w, p.y); a *= 1. - .45 * hi2; c = mix(c, c * .78, lo2 * .6); c = mix(c, sunC, hi2 * .25); }',                   /* a crisp, rounded outline */
