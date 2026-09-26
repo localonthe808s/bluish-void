@@ -48,7 +48,11 @@
        shape is the scene's own puffs (x, y up, r, weight), so the physics that placed them still decides where it is */
     /* a SMOOTH union: max() left a crease between every pair of neighbours -- the shelf read as a twisted rope */
     'float puffs(vec2 p){ float acc = 0.; for (int i = 0; i < 48; i++){ if (float(i) >= uN) break; vec4 q = uP[i];',
-    '  vec2 d = (p - q.xy) / vec2(q.z * 1.95, q.z * .72); acc += exp(6. * ((1. - dot(d, d)) * q.w - 1.)); }',
+    /* NO PANCAKES (user 2026-09-26: "do the deck puffs"): a lone small anchor drawn 2.7x wider than tall was a flat disc.
+       Small anchors are ROUND puffs (1.15 x .95) -- an upward bulge made lollipops on stalks --; only the big ones stretch wide to merge into a deck */
+    '  float big = smoothstep(4.5, 9., q.z);',
+    '  vec2 dd = p - q.xy;',
+    '  vec2 d = dd / vec2(q.z * mix(1.15, 1.95, big), q.z * mix(.95, .72, big)); acc += exp(6. * ((1. - dot(d, d)) * q.w - 1.)); }',
     '  return acc > 0. ? 1. + log(acc) / 6. : -1.; }',   /* wide, flat: they merge into a deck */
     'float anvil(vec2 p){ if (uAnv < .01) return -1.; float ax2 = uCx - uLean * uH * .28; float ux = p.x - ax2; float R = ux > 0. ? uAnvR : uAnvL; float r2 = abs(ux) / max(R, 1.);',
     '  float th = (2.5 + 5.5 * (1. - r2)) * uAnv; float cy2 = uBase + uH - 1.5; float dy = (p.y - cy2) / max(th, .6); return (1. - r2 * r2) - dy * dy; }',
