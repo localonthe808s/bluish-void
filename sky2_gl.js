@@ -33,6 +33,15 @@
     '  if (abs(q.x) > 1.5 || q.y < -1.2 || q.y > 2.) return -1.;',   /* -1, not 0: 0 passes the soft threshold and each cell box drew a faint rectangle */
     '  vec2 s = (p - vec2(c.x, c.y)) / c.z * 2.2 + k.y * 17.;',
     '  float body = -1.;',
+    '  if (k.x > 4.5){',   /* LENTICULARIS (kind 5): a smooth lens / almond, pointed ends, 1-3 stacked plates, no cauliflower */
+    '    float L = -1.;',
+    '    for (int i = 0; i < 3; i++){ float fi = float(i); if (fi > k.w) break; float oy = fi * .55, ox = (h1(vec2(fi, k.y)) - .5) * .25, sc = 1. - fi * .22;',
+    '      float x = (q.x - ox) / sc, t = max(0., 1. - x * x); t = t * sqrt(t);',   /* thickness: fat middle, pointed tips */
+    '      float yy = (q.y - .5 - oy) / max(.5 * t * sc, .02); L = max(L, min(1. - yy * yy, t * 4. - .3)); }',   /* t*4-.3: the tips END (a small positive floor drew hairline needles past them) */
+    '    L += (fbm(vec2(q.x * 6., q.y * 3.) + k.y * 7.) - .5) * .18;',   /* faint layering, not lumps */
+    '    L -= 2. * (smoothstep(1.15, 1.45, abs(q.x)) + (1. - smoothstep(-1.15, -.85, q.y)));',
+    '    return L * k.z;',
+    '  }',
     '  if (k.x > 3.5){',   /* the STORM BASE (kind 4): a dark ragged underside with scud hanging off it, over the tower's ruler-flat cut */
     '    float slab = 1. - q.x * q.x * q.x * q.x;',
     '    float yb = -.30 + (fbm(vec2(q.x * 3.5, k.y * 5.)) - .5) * 1.0 + (fbm(vec2(q.x * 11., k.y * 7.)) - .5) * .35;',
@@ -75,6 +84,9 @@
     '  float d = body + inside * (.30 * dome(s) + .13 * dome(s * 2.3 + 2.) + .05 * dome(s * 5.1 + 5.) - .20);',
     '  float rim = smoothstep(-.55, -.15, body) * (1. - smoothstep(.0, .5, body));',   /* fray only near the outline: noise at the box edge cut straight lines */
     '  d += rim * (fbm(s * 1.7 + 3.) - .52) * .55;',   /* the outline frays: the SVG art never has a clean pill edge */
+    '  if (k.x > .5 && k.x < 1.5 && k.w > 1.5){ float vx = (q.x + q.y * .35) / .45;',   /* FLOCCUS: a ragged tuft trailing VIRGA -- fibres falling and fading below it */
+    '    float vg = (1. - vx * vx) * smoothstep(-1.1, -.1, q.y) * (1. - smoothstep(-.05, .3, q.y)) * (.45 + .55 * fbm(vec2(q.x * 14., q.y * 1.2) + k.y * 5.)) - .62;   /* virga: fine faint fibres, not tentacles */',
+    '    d = max(d, vg); d += rim * (fbm(s * 3.1 + 7.) - .5) * .35; }',
     '  d -= 2. * (smoothstep(1.15, 1.45, abs(q.x)) + smoothstep(1.6, 1.95, q.y) + (1. - smoothstep(-1.15, -.85, q.y)));',   /* fade out before the clip box: no straight cuts */
     '  return d * k.z;',   /* UNCLAMPED: the lighting reads its slope (a clamped field is flat inside -- the pink fill) */
     '}',
@@ -234,6 +246,9 @@
       var c = Math.max(0, Math.min(100, ty.cover || 0)) / 100, R = rng(97 + ti * 131), g = ty.genus;
       if (g === 'Cirrus') bands.ci = [hz + sky * 0.52, H - 4, 0.25 + 0.65 * c, 1];
       else if (g === 'Cirrostratus') veil.cs = [1, 0.2 + 0.2 * c, ty.species === 'fibratus' ? 1 : 0, 1];
+      else if (g === 'Cirrocumulus' && ty.species === 'lenticularis'){   /* small high lenses */
+        for (var li = 0; li < 5; li++) add(20 + R() * (W - 40), hz + sky * (0.5 + 0.4 * R()), 15 + 9 * R(), 5.5 + 2.5 * R(), 5, 0.9, Math.floor(R() * 2.2));
+      }
       else if (g === 'Cirrocumulus') bands.cc = [hz + sky * 0.14, H - 6, 0.3 + 0.6 * c, 1];
       else if (g === 'Altostratus') veil.as = [1, ty.species === 'opacus' ? 0.95 : 0.55 + 0.3 * c, ty.species === 'opacus' ? 1 : 0, 0];
       else if (g === 'Stratus'){ if (!bands.ns) veil.st = [1, 0.6 + 0.35 * c, ty.species === 'fractus' ? 1 : 0, 0]; }
@@ -256,6 +271,24 @@
           placed.push([cx, yb, hw, hh]);
           add(cx, yb, hw * (con ? 1.25 : 1), hh * (con ? 0.8 : 1), con ? 2 : 0, 1, con ? 1 : 0);   /* congestus: the tower's stacked round heads (tall cumulus heads stretched into slabs) */
         }
+      } else if ((g === 'Altocumulus' || g === 'Stratocumulus') && ty.species === 'lenticularis'){
+        /* LENTICULARIS: a few big smooth lenses parked in the wave crests, some stacked into piles of plates */
+        var acL = g === 'Altocumulus', nL = acL ? 3 + Math.round(2 * c) : 2 + Math.round(2 * c);
+        for (var lj = 0; lj < nL; lj++){ var fl = lj / Math.max(1, nL - 1);
+          add(W * (0.12 + 0.76 * fl) + (R() - 0.5) * 24, acL ? hz + sky * (0.35 + 0.4 * R()) : hz + sky * (0.12 + 0.2 * R()), (acL ? 34 : 46) + 18 * R(), (acL ? 14 : 16) + 6 * R(), 5, 0.95, Math.floor(R() * 2.6)); }
+      } else if (g === 'Altocumulus' && ty.species === 'castellanus'){
+        /* CASTELLANUS: turrets rising in ROWS from one shared flat base, each row a line in perspective */
+        for (var rw = 0; rw < 3; rw++){ var fr2 = 1 - rw * 0.33, yb2 = rowY(0.35 + 0.55 * fr2, hz + sky * 0.9), s3 = 0.35 + 0.65 * fr2;
+          /* CLUSTERS of 2-4 turrets, each on its own short base patch (a full-width shelf read as a bookcase) */
+          for (var xx = R() * 30 * s3; xx < W + 10; ){ var nT = 2 + Math.floor(R() * 3), tw2 = (9 + 5 * R()) * s3, cw = nT * tw2 * 1.3, yb3 = yb2 + (R() - 0.5) * 6 * s3;
+            add(xx + cw / 2 - tw2 * 0.6, yb3 - 1.5 * s3, cw * 0.62, 6 * s3, 1, 0.95);
+            for (var tq = 0; tq < nT; tq++){ var tw3 = tw2 * (0.75 + 0.5 * R()); add(xx + tq * tw2 * 1.3, yb3 + R() * 2 * s3, tw3, tw3 * (1.4 + 1.1 * R()), 0, 0.97); }
+            xx += cw + (18 + 30 * R()) * s3; } }
+      } else if (g === 'Altocumulus' && ty.species === 'floccus'){
+        /* FLOCCUS: small ragged tufts scattered in perspective, each trailing virga */
+        var nF = Math.round(14 + 26 * c);
+        for (var fk = 0; fk < nF; fk++){ var ff = Math.pow(R(), 1.2), s4 = 0.3 + 0.8 * ff, hwF = (13 + 8 * R()) * s4;
+          add(R() * W, rowY(0.3 + 0.65 * ff, hz + sky * 0.92), hwF, hwF * 0.8, 1, 0.92, 2); }
       } else if (g === 'Altocumulus' || g === 'Stratocumulus'){
         var ac = g === 'Altocumulus', rows = ac ? 10 : 6, top = ac ? hz + sky * 0.9 : hz + sky * 0.62;
         /* MASSES, NOT A GRID: patches scattered in perspective, big and merging overhead, flattening into wide strands at the
