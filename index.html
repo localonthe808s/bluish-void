@@ -54785,6 +54785,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         + '<img id="cw-frame-b" alt="" style="' + IMG + 'object-fit:fill;z-index:1;opacity:0;transition:opacity .3s ease;will-change:transform;">'
         + '<img id="cw-bm-ghost" alt="" style="' + IMG + 'z-index:2;opacity:.35;pointer-events:none;will-change:transform;">'
         /* THE WATER NOW (2026-09-26): live flooded land, its inflow streaks and the gauges -- over the street ghost */
+        + '<canvas id="cw-water" style="' + IMG + 'z-index:2;pointer-events:none;will-change:transform;display:none;"></canvas>'
         + '<canvas id="cw-inund" style="' + IMG + 'z-index:2;pointer-events:none;will-change:transform;display:none;"></canvas>'
         + '<canvas id="cw-ov" style="' + IMG + 'z-index:3;pointer-events:none;will-change:transform;"></canvas>'
         + '<canvas id="cw-sub" style="' + IMG + 'z-index:5;pointer-events:none;will-change:transform;"></canvas>'
@@ -54988,7 +54989,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       c._zoomed = true;
       /* painted-view layers only — the frames and floods overlay ride the
          BASE transform now (full-box registration, view-independent) */
-      var LAYERS = ['cw-bm-under','cw-rock','cw-gv','cw-flow','cw-bm-ghost','cw-inund','cw-ov','cw-ov-arc','cw-traf','cw-sub'];
+      var LAYERS = ['cw-bm-under','cw-rock','cw-gv','cw-flow','cw-bm-ghost','cw-water','cw-inund','cw-ov','cw-ov-arc','cw-traf','cw-sub'];
       var z = { k:1, tx:0, ty:0 };       // painted transform
       var zt = { k:1, tx:0, ty:0 };      // target: wheel/dblclick ease toward it
       var anim = null;
@@ -56023,7 +56024,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        is display:none unless FLOODING is on) and clobbering it would strand
        the flood layer off when the loader let go */
     var CW_CITY_LAYERS = ['cw-bm-base','cw-bm-under','cw-rock','cw-bm-ghost','cw-fl',
-                          'cw-gv','cw-flow','cw-inund','cw-frame-a','cw-frame-b','cw-ov','cw-ov-arc','cw-traf'];
+                          'cw-gv','cw-flow','cw-water','cw-inund','cw-frame-a','cw-frame-b','cw-ov','cw-ov-arc','cw-traf'];
     function cwCityLayers(show){
       CW_CITY_LAYERS.forEach(function(id){
         var e = document.getElementById(id);
@@ -64550,8 +64551,8 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
             local mean higher high water is wet at every high tide already and is not counted. A BATHTUB ESTIMATE: sea
             walls narrower than the 30 m grid, drains and the time water takes to spread are not modelled, and it says so.
          3. THE STORM IN WORDS. The NWS coastal flood warning, the Battery with its trend and next crest, the Bronx River.
-       THE FLOW: while the water rises, streaks run from the shore inland along the path the fill took (its breadth-
-       first distance from open water); falling, they run back out to the harbour. NOW draws the water at this hour,
+       THE FLOW: drawn by the water surface (cwWatDraw): while the water rises, its glints and surge bands move inland
+       along the path the fill took (its breadth-first distance from open water); falling, back out to the harbour. NOW draws the water at this hour,
        PEAK the next forecast crest -- which is why a storm between high tides still shows where it is going. */
     /* per tide gauge: the NAVD88 datum and mean higher high water, feet above MLLW (NWPS datums, 2026-09-26) */
     var CW_TG = { BATN6: [2.77, 5.05, 'The Battery'], KPTN6: [4.21, 7.8, 'Kings Point'], BGNN6: [2.949, 5.51, 'Bergen Point'],
@@ -64667,26 +64668,30 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       /* paint the flooded land: normally dry, inside the city, deeper = stronger blue */
       var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
       var cx = cv.getContext('2d'), img = cx.createImageData(W, H), px2 = img.data, cells = [], area = 0, deep = 0;
-      var wet = new Uint8Array(N);
+      var wet = new Uint8Array(N), tex = new Uint8Array(N * 4);      /* for the water shader: R depth, G fill distance, A wet */
       for (var k4 = 0; k4 < N; k4++){
         if (dist[k4] === 0 || dist[k4] === 65535 || !(f[k4] & 2)) continue;
         var y4 = (k4 / W) | 0, x4 = k4 - y4 * W;
         if (e[k4] <= bil(hh, x4, y4)) continue;
         var dep = WS[k4] - e[k4]; wet[k4] = 1; cells.push(k4); area++; if (dep > 0.6) deep++;
+        tex[k4 * 4] = Math.min(255, Math.round(dep / 1.5 * 255)); tex[k4 * 4 + 1] = Math.min(255, dist[k4]); tex[k4 * 4 + 3] = 255;
         var s = Math.min(1, dep / 1.2), o = k4 * 4;
         /* LIVE WATER is cyan, not the baked flood-zone blues it sits over: shallow bright, deep saturated */
         px2[o] = Math.round(40 - 40 * s); px2[o + 1] = Math.round(235 - 75 * s); px2[o + 2] = 255; px2[o + 3] = Math.round(200 + 55 * s);
       }
       cx.putImageData(img, 0, 0);
+      /* the dry ring around the water carries its neighbour's distance, so the shader's gradient does not turn back at the edge */
+      for (var k5 = W + 1; k5 < N - W - 1; k5++) if (!wet[k5]){ var gm = Math.max(tex[(k5 - 1) * 4 + 1] * wet[k5 - 1], tex[(k5 + 1) * 4 + 1] * wet[k5 + 1], tex[(k5 - W) * 4 + 1] * wet[k5 - W], tex[(k5 + W) * 4 + 1] * wet[k5 + W]); if (gm) tex[k5 * 4 + 1] = gm; }
       var trBat = 0; pts.forEach(function(p){ trBat += p.tr; }); trBat /= pts.length;
       /* the crest's moment, from the Battery if it has one */
       var bat = G.BATN6 && cwLiveCrest(G.BATN6);
       /* 30 m cells at this latitude: 0.03 km on a side in the grid's own mercator, times cos(lat) squared */
       var km2 = area * Math.pow((V.X1 - V.X0) / W / 1000 * Math.cos(40.68 * Math.PI / 180), 2);
-      return { mode: mode, cv: cv, dist: dist, wet: wet, cells: cells, km2: km2, deep: deep, rising: mode === 'peak' ? 1 : (trBat > 0.05 ? 1 : trBat < -0.05 ? -1 : 0), crestT: bat ? bat[0] : null, W: W, H: H };
+      return { mode: mode, cv: cv, tex: tex, dist: dist, wet: wet, cells: cells, km2: km2, deep: deep, rising: mode === 'peak' ? 1 : (trBat > 0.05 ? 1 : trBat < -0.05 ? -1 : 0), crestT: bat ? bat[0] : null, W: W, H: H };
     }
     function cwLiveSync(on){
-      var cvs = document.getElementById('cw-inund'), bars = document.getElementById('cw-fl-bars');
+      var cvs = document.getElementById('cw-inund'), bars = document.getElementById('cw-fl-bars'), wat = document.getElementById('cw-water');
+      if (wat) wat.style.display = on ? '' : 'none';
       if (!on){ if (cvs) cvs.style.display = 'none'; if (bars) bars.style.display = 'none'; if (cwLive.T){ cancelAnimationFrame(cwLive.T); cwLive.T = null; } cwLive.P = []; return; }
       cwLiveLoad();
       if (cvs) cvs.style.display = '';
@@ -64718,31 +64723,10 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       /* DEM cell -> canvas: the DEM covers CW_VIEW, the canvas the painted view */
       var sx = (V.X1 - V.X0) / (v.X1 - v.X0) * W, sy = (V.Y1 - V.Y0) / (v.Y1 - v.Y0) * H;
       var ox = (V.X0 - v.X0) / (v.X1 - v.X0) * W, oy = (v.Y1 - V.Y1) / (v.Y1 - v.Y0) * H;
-      if (F && F.cells.length){
-        g.imageSmoothingEnabled = true; g.globalAlpha = 0.95;          /* an estimate: soft edges (feedback: edges encode certainty) */
-        g.drawImage(F.cv, ox, oy, sx, sy); g.globalAlpha = 1;
-        /* THE FLOW: parcels of water walking the fill's own path */
-        var cw1 = sx / F.W, P = cwLive.P, want = Math.min(2600, Math.round(F.cells.length / 6)), dist = F.dist, wet = F.wet, FW = F.W, dir = F.rising || 1;
-        var dAt = function(k, d0){ return (wet[k] || dist[k] === 0) ? dist[k] : d0; };
-        while (P.length < want){ var k = F.cells[(Math.random() * F.cells.length) | 0]; P.push({ x: k % FW + Math.random(), y: ((k / FW) | 0) + Math.random(), a: 30 + Math.random() * 70 }); }
-        g.lineCap = 'round'; g.lineWidth = Math.max(1, 1.2 * dpr);
-        var spd = F.rising === 0 ? 0.05 : 0.22;
-        for (var i = P.length - 1; i >= 0; i--){
-          var p = P[i], kx = p.x | 0, ky = p.y | 0, kk = ky * FW + kx;
-          if (--p.a <= 0 || !wet[kk]){ P.splice(i, 1); continue; }
-          var d0 = dist[kk], gx = dAt(kk + 1, d0) - dAt(kk - 1, d0), gy = dAt(kk + FW, d0) - dAt(kk - FW, d0), gl = Math.hypot(gx, gy);
-          if (!gl){ if (dir > 0 || Math.random() < 0.05){ P.splice(i, 1); continue; } gx = Math.random() - 0.5; gy = Math.random() - 0.5; gl = Math.hypot(gx, gy); }
-          var nx = p.x + (gx / gl * dir + (Math.random() - 0.5) * 0.6) * spd, ny = p.y + (gy / gl * dir + (Math.random() - 0.5) * 0.6) * spd;
-          var X1 = ox + p.x * cw1, Y1 = oy + p.y * cw1, X2 = ox + nx * cw1, Y2 = oy + ny * cw1;
-          if (X1 > -4 && Y1 > -4 && X1 < W + 4 && Y1 < H + 4){
-            var fade = Math.min(1, p.a / 20);
-            g.strokeStyle = 'rgba(6,40,110,' + (0.8 * fade).toFixed(2) + ')';      /* dark on the cyan: white vanished into it */
-            var ex = (X2 - X1) * 5, ey = (Y2 - Y1) * 5;                 /* a streak the length of five steps: reads as motion */
-            g.beginPath(); g.moveTo(X1 - ex, Y1 - ey); g.lineTo(X2, Y2); g.stroke();
-          }
-          p.x = nx; p.y = ny;
-        }
-      }
+      /* THE WATER: the GL surface (harbour sheen + flooded land); without WebGL, the flat fill */
+      var wc = document.getElementById('cw-water'), glOk = false;
+      if (wc){ try { glOk = cwWatDraw(wc, Math.round(W * 0.75), Math.round(H * 0.75), F); } catch (e){ glOk = false; } }   /* 3/4 resolution: soft water, a third less work */
+      if (!glOk && F && F.cells.length){ g.imageSmoothingEnabled = true; g.globalAlpha = 0.95; g.drawImage(F.cv, ox, oy, sx, sy); g.globalAlpha = 1; }
       /* THE GAUGES: a dot in the category's colour, the level beside it */
       var G = cwLive.g; if (!G) return;
       var fs = Math.round(8.5 * dpr);
@@ -64789,7 +64773,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       var say = !cwLive.g || !cwLive.dem ? 'LOADING THE GAUGES AND THE GROUND…'
         : !F ? 'NOT ENOUGH GAUGES REPORTING TO DRAW THE WATER'
         : F.km2 < 0.05 ? (m === 'now' ? 'NO STREETS UNDER WATER FROM THE TIDE RIGHT NOW' : 'THE NEXT CREST STAYS OFF THE STREETS')
-        : '<span style="color:#0369a1;">' + (F.km2 < 1 ? F.km2.toFixed(1) : Math.round(F.km2)) + ' KM² UNDER WATER' + (m === 'peak' && F.crestT ? ' AT THE ' + fmtT(F.crestT) + ' CREST' : ' NOW') + '</span> <span style="color:#1b2340;">· STREAKS SHOW IT ' + (F.rising >= 0 ? 'COMING IN FROM THE SHORE' : 'DRAINING BACK OUT') + '</span>';
+        : '<span style="color:#0369a1;">' + (F.km2 < 1 ? F.km2.toFixed(1) : Math.round(F.km2)) + ' KM² UNDER WATER' + (m === 'peak' && F.crestT ? ' AT THE ' + fmtT(F.crestT) + ' CREST' : ' NOW') + '</span> <span style="color:#1b2340;">· THE SURFACE MOVES ' + (F.rising >= 0 ? 'INLAND FROM THE SHORE' : 'BACK OUT TO THE HARBOUR') + '</span>';
       rows.push('<span style="display:inline-flex;gap:4px;vertical-align:middle;margin-right:6px;">' + cwBtn('cw-fl-now', 'NOW', m === 'now' ? CWB.on : CWB.off) + cwBtn('cw-fl-peak', 'PEAK', m === 'peak' ? CWB.on : CWB.off) + '</span>' + say
         + '<div style="font-weight:600;letter-spacing:.04em;color:rgba(27,35,64,.5);margin-top:2px;">ESTIMATE: GROUND BELOW THE GAUGES’ WATER LEVEL AND JOINED TO THE HARBOUR · WALLS, DRAINS AND TIMING NOT MODELLED</div>');
       bw.style.cssText = 'margin:0 14px;background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);color:#2B22F4;border-top:1px solid rgba(43,34,244,.12);font:700 8.5px/1.5 system-ui,sans-serif;letter-spacing:.07em;';
@@ -64822,6 +64806,155 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         + svg
         + '<div style="font:600 9px system-ui,sans-serif;color:#5b647a;letter-spacing:.05em;margin-top:4px;">SOLID MEASURED, DASHED THE RIVER FORECAST CENTER’S FORECAST' + (G.lastObs ? ' · LAST READING ' + Math.round((now - G.lastObs) / 60000) + ' MIN AGO' : ' · NO RECENT READING') + '</div>',
         'https://water.noaa.gov/gauges/' + lid.toLowerCase());
+    }
+    /* ─ THE WATER SURFACE (user 2026-09-26: "move away from the speckle flow lines ... a cooler visual") ────────────
+       One WebGL layer draws all the moving water in FLOODING, as a surface instead of specks, by FLOW-MAP ADVECTION
+       (two copies of a texture slid along the flow on offset half-cycles and cross-faded, so it streams forever
+       without smearing):
+         - THE HARBOUR: a silky sheen stretched along NOAA's predicted current (cwFlowField), sliding with it; bright
+           in a full flood or ebb, nearly still at slack.
+         - FLOODED LAND (cwLive.fill): a depth-shaded body of water with caustic light moving the way the water goes,
+           soft surge fronts rolling inland from the shore along the fill's own path (outward while it drains), and a
+           foam line at the wet edge.
+       The pattern lives in map kilometres, so it keeps its scale through a zoom. The sewage parcels stay on cw-flow. */
+    var cwWat = { gl: null, bad: 0, pr: null, u: {}, tx: {}, keys: {} };
+    var CW_WAT_VS = 'attribute vec2 p; varying vec2 vUv; void main(){ vUv = vec2(p.x * .5 + .5, .5 - p.y * .5); gl_Position = vec4(p, 0., 1.); }';
+    var CW_WAT_FS = [
+      'precision highp float;',
+      'varying vec2 vUv;',
+      'uniform sampler2D uFl, uTd, uMk;',
+      'uniform vec4 uA;',                    /* CW-view uv = vUv * uA.xy + uA.zw */
+      'uniform vec2 uKm, uFlPx;',           /* the city box in km; one flood texel in CW uv */
+      'uniform float uT, uHasFl, uHasTd, uDir, uSurge, uZ;',
+      'float h(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }',
+      'float n(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3. - 2. * f);',
+      '  return mix(mix(h(i), h(i + vec2(1., 0.)), f.x), mix(h(i + vec2(0., 1.)), h(i + vec2(1., 1.)), f.x), f.y); }',
+      'float fbm(vec2 p){ float s = 0., a = .5; for (int i = 0; i < 4; i++){ s += a * n(p); p = p * 2.03 + 17.3; a *= .5; } return s; }',
+      /* caustic web: where two noise fields cross, a thin bright line (x*x, never pow of a maybe-negative base) */
+      'float caus(vec2 p){ float d = clamp(1. - abs(fbm(p) - fbm(p * 1.31 + 5.2)) * 3.2, 0., 1.); d = d * d; return d * d * d; }',
+      'void main(){',
+      '  vec2 c = vUv * uA.xy + uA.zw;',
+      '  vec2 km = c * uKm;',
+      '  vec3 col = vec3(0.); float al = 0.;',
+      /* THE HARBOUR */
+      '  if (uHasTd > .5){',
+      '    float mk = texture2D(uMk, vUv).r; vec4 td = texture2D(uTd, vUv);',
+      '    vec2 vel = (td.rg * 2. - 1.) * 4.; vel.y = -vel.y; float sp = length(vel);',
+      '    if (mk > .02 && td.b > .02){',
+      '      vec2 dir = sp > .01 ? vel / sp : vec2(1., 0.), nr = vec2(-dir.y, dir.x);',
+      '      float ph0 = fract(uT * .09), ph1 = fract(uT * .09 + .5), wl = abs(.5 - ph0) / .5;',
+      '      vec2 q = vec2(dot(km, dir) * .5, dot(km, nr) * 4.5) * uZ;',   /* long along the current, fine across it */
+      '      float adv = sp * 1.6;',
+      '      float s0 = fbm(q - vec2(ph0 * adv, 0.)), s1 = fbm(q - vec2(ph1 * adv, 0.) + 3.7);',
+      '      float s = mix(s0, s1, wl);',
+      '      float line = clamp(1. - abs(s - .5) * 10., 0., 1.); line = line * line;',   /* thin threads along the current, not a haze */
+      '      float k = clamp(sp / 1.8, .12, 1.) * td.b * smoothstep(.02, .5, mk);',
+      '      col = vec3(.80, .93, 1.); al = line * k * .5;',
+      '    }',
+      '  }',
+      /* FLOODED LAND: a calm sheet, shaded by depth, soft at the edge; sun glints drifting the way the water goes; a few
+         broad surge bands rolling inland along the SMOOTHED fill distance (raw, its 4-way steps drew contour rings) */
+      '  if (uHasFl > .5 && c.x > 0. && c.y > 0. && c.x < 1. && c.y < 1.){',
+      '    vec2 e1 = uFlPx * 1.2;',
+      '    vec4 f = texture2D(uFl, c);',
+      '    float m = (f.a * 2. + texture2D(uFl, c + vec2(e1.x, 0.)).a + texture2D(uFl, c - vec2(e1.x, 0.)).a + texture2D(uFl, c + vec2(0., e1.y)).a + texture2D(uFl, c - vec2(0., e1.y)).a) / 6.;',
+      '    if (m > .03){',
+      '      vec2 e = uFlPx * 4.;',
+      '      float dR = texture2D(uFl, c + vec2(e.x, 0.)).g, dL = texture2D(uFl, c - vec2(e.x, 0.)).g, dD = texture2D(uFl, c + vec2(0., e.y)).g, dU = texture2D(uFl, c - vec2(0., e.y)).g;',
+      '      float dist = (f.g * 2. + dR + dL + dD + dU) / 6. * 255.;',
+      '      vec2 g = vec2(dR - dL, dD - dU);',
+      '      vec2 fl = length(g) > 1e-4 ? normalize(g) * uDir : vec2(0.);',   /* up the fill distance = inland */
+      '      float dep = f.r;',
+      '      vec3 wc = mix(vec3(.36, .84, 1.), vec3(.04, .40, .80), smoothstep(0., .7, dep));',
+      /* the surface: a gentle normal from two slow noise layers, advected with the flow on offset half-cycles */
+      '      vec2 p = km * 2.2 * uZ;',
+      '      float ph0 = fract(uT * .12), ph1 = fract(uT * .12 + .5), wl = abs(.5 - ph0) / .5;',
+      '      vec2 pa = p - fl * ph0 * 1.2, pb = p - fl * ph1 * 1.2 + 4.1;',
+      '      float ea = .04;',
+      '      vec2 na = vec2(fbm(pa + vec2(ea, 0.)) - fbm(pa - vec2(ea, 0.)), fbm(pa + vec2(0., ea)) - fbm(pa - vec2(0., ea)));',
+      '      vec2 nb = vec2(fbm(pb + vec2(ea, 0.)) - fbm(pb - vec2(ea, 0.)), fbm(pb + vec2(0., ea)) - fbm(pb - vec2(0., ea)));',
+      '      vec3 nrm = normalize(vec3(mix(nb, na, wl) * 9., 1.));',
+      '      float lit = dot(nrm, normalize(vec3(-.45, -.55, .7)));',
+      '      wc *= .86 + .24 * lit;',
+      '      float gl = clamp((dot(nrm, normalize(vec3(-.3, -.4, .87))) - .955) * 22., 0., 1.);',   /* glints: only the steepest facing facets */
+      '      wc += vec3(1.) * gl * .7;',
+      /* broad surge bands, ~1 km apart, soft, broken by noise so they read as water arriving */
+      '      float wv = sin(dist * .2 - uT * 1.3 * uDir) * .5 + .5; wv = wv * wv * wv;',
+      '      wv *= (.55 + .45 * fbm(p * .5 + 9.)) * uSurge;',
+      '      wc += vec3(.55, .9, 1.) * wv * .22;',
+      /* the wet edge: a thin bright rim where the water meets the dry ground */
+      '      float rim = smoothstep(.08, .35, m) * (1. - smoothstep(.35, .75, m));',
+      '      wc = mix(wc, vec3(.9, .98, 1.), rim * .55);',
+      '      float fa = smoothstep(.06, .45, m) * (.66 + .3 * smoothstep(0., .6, dep));',   /* shallow water lets the streets show through */
+      '      col = mix(col * al, wc, fa) / max(1e-3, al + fa - al * fa); al = al + fa - al * fa;',
+      '    }',
+      '  }',
+      '  gl_FragColor = vec4(col * al, al);',
+      '}'].join('\n');
+    function cwWatInit(cvs){
+      if (cwWat.gl || cwWat.bad) return cwWat.gl;
+      var gl = cvs.getContext('webgl', { premultipliedAlpha: true, alpha: true, antialias: false });
+      if (!gl){ cwWat.bad = 1; return null; }
+      var sh = function(t, src){ var s = gl.createShader(t); gl.shaderSource(s, src); gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)){ window._cwWatErr = gl.getShaderInfoLog(s); return null; } return s; };
+      var vs = sh(gl.VERTEX_SHADER, CW_WAT_VS), fs = sh(gl.FRAGMENT_SHADER, CW_WAT_FS);
+      if (!vs || !fs){ cwWat.bad = 1; return null; }
+      var pr = gl.createProgram(); gl.attachShader(pr, vs); gl.attachShader(pr, fs); gl.linkProgram(pr);
+      if (!gl.getProgramParameter(pr, gl.LINK_STATUS)){ cwWat.bad = 1; return null; }
+      gl.useProgram(pr);
+      var b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+      var loc = gl.getAttribLocation(pr, 'p'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+      ['uFl', 'uTd', 'uMk', 'uA', 'uKm', 'uFlPx', 'uT', 'uHasFl', 'uHasTd', 'uDir', 'uSurge', 'uZ'].forEach(function(k){ cwWat.u[k] = gl.getUniformLocation(pr, k); });
+      ['fl', 'td', 'mk'].forEach(function(k, i){ var t = gl.createTexture(); gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+        cwWat.tx[k] = t; });
+      gl.uniform1i(cwWat.u.uFl, 0); gl.uniform1i(cwWat.u.uTd, 1); gl.uniform1i(cwWat.u.uMk, 2);
+      cvs.addEventListener('webglcontextlost', function(e){ e.preventDefault(); cwWat.gl = null; cwWat.keys = {}; });
+      cvs.addEventListener('webglcontextrestored', function(){ cwWat.bad = 0; });
+      cwWat.gl = gl; cwWat.pr = pr;
+      return gl;
+    }
+    function cwWatTex(k, i, w, h, fmt, data){
+      var gl = cwWat.gl; gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, cwWat.tx[k]);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, fmt, w, h, 0, fmt, gl.UNSIGNED_BYTE, data);
+    }
+    /* draw one frame; false if WebGL is unavailable (the 2D fill is the fallback) */
+    function cwWatDraw(cvs, W, H, F){
+      var gl = cwWatInit(cvs); if (!gl) return false;
+      if (cvs.width !== W || cvs.height !== H){ cvs.width = W; cvs.height = H; }
+      gl.viewport(0, 0, W, H);
+      var v = cwPainted, V = CW_VIEW, K = cwWat.keys;
+      /* the flooded land, at DEM resolution in the CW view */
+      if (F && F.tex){ if (K.fl !== F){ cwWatTex('fl', 0, F.W, F.H, gl.RGBA, F.tex); K.fl = F; } }
+      /* the harbour's current field and water mask, both in the painted view */
+      var TF = cwFlowField, M = cwFlowMask, hasTd = 0;
+      if (TF && M && TF.u){
+        if (K.td !== TF || K.tdAt !== TF.vAt){
+          var n = TF.dw * TF.dh, a = new Uint8Array(n * 4);
+          for (var k = 0; k < n; k++){ a[k * 4] = Math.max(0, Math.min(255, Math.round((TF.u[k] / 4 * 0.5 + 0.5) * 255)));
+            a[k * 4 + 1] = Math.max(0, Math.min(255, Math.round((TF.v[k] / 4 * 0.5 + 0.5) * 255))); a[k * 4 + 2] = Math.round(TF.fade[k] * 255); a[k * 4 + 3] = 255; }
+          cwWatTex('td', 1, TF.dw, TF.dh, gl.RGBA, a); K.td = TF; K.tdAt = TF.vAt;
+        }
+        if (K.mk !== M){ var mm = new Uint8Array(M.w * M.h); for (var j = 0; j < mm.length; j++) mm[j] = M.m[j] ? 255 : 0; cwWatTex('mk', 2, M.w, M.h, gl.LUMINANCE, mm); K.mk = M; }
+        hasTd = 1;
+      }
+      var U = cwWat.u;
+      gl.uniform4f(U.uA, (v.X1 - v.X0) / (V.X1 - V.X0), (v.Y1 - v.Y0) / (V.Y1 - V.Y0), (v.X0 - V.X0) / (V.X1 - V.X0), (V.Y1 - v.Y1) / (V.Y1 - V.Y0));
+      var kmx = (V.X1 - V.X0) / 1000 * Math.cos(40.7 * Math.PI / 180), kmy = (V.Y1 - V.Y0) / 1000 * Math.cos(40.7 * Math.PI / 180);
+      gl.uniform2f(U.uKm, kmx, kmy);
+      gl.uniform2f(U.uFlPx, F ? 1 / F.W : 0, F ? 1 / F.H : 0);
+      gl.uniform1f(U.uT, (performance.now() / 1000) % 1000);
+      gl.uniform1f(U.uZ, (V.X1 - V.X0) / (v.X1 - v.X0));          /* zoom: the texture keeps a steady on-screen size */
+      gl.uniform1f(U.uHasFl, F && F.tex && F.cells.length ? 1 : 0);
+      gl.uniform1f(U.uHasTd, hasTd);
+      gl.uniform1f(U.uDir, F && F.rising < 0 ? -1 : 1);
+      gl.uniform1f(U.uSurge, F && F.rising === 0 ? 0.25 : 1);
+      gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      return true;
     }
     function cwFlowSync(){
       var cvs = document.getElementById('cw-flow');
@@ -64897,23 +65030,8 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       g.globalCompositeOperation = 'destination-out';
       g.fillStyle = 'rgba(0,0,0,.05)'; g.fillRect(0, 0, W, H);
       g.globalCompositeOperation = 'source-over';
-      /* tracers on the water */
-      var want = Math.round(W * H / 900);
-      while (cwFlowP.length < want){
-        var x = Math.random() * W, y = Math.random() * H;
-        if (cwFlowWater(x, y, cvs) && cwFlowGridAt(x, y)) cwFlowP.push({ x: x, y: y, a: 40 + Math.random() * 120 });
-        else if (Math.random() < 0.02) break;
-      }
-      g.lineCap = 'round'; g.lineWidth = 1.1 * dpr;
-      for (var i = cwFlowP.length - 1; i >= 0; i--){
-        var pt = cwFlowP[i], vec = cwFlowGridAt(pt.x, pt.y);
-        if (!vec || --pt.a <= 0 || !cwFlowWater(pt.x, pt.y, cvs)){ cwFlowP.splice(i, 1); continue; }
-        var nx = pt.x + vec[0] * pxPerKnot, ny = pt.y - vec[1] * pxPerKnot;
-        var sp = Math.hypot(vec[0], vec[1]);
-        g.strokeStyle = 'rgba(190,220,255,' + Math.min(0.85, 0.25 + sp * 0.2).toFixed(2) + ')';
-        g.beginPath(); g.moveTo(pt.x, pt.y); g.lineTo(nx, ny); g.stroke();
-        pt.x = nx; pt.y = ny;
-      }
+      /* the tide's own tracers are gone (user 2026-09-26: "move away from the speckle flow lines"): the current now
+         draws as a moving surface on cw-water (cwWatDraw); this canvas keeps only the sewage parcels */
       /* THE SEWAGE: only while a sewershed is past the overflow line (cwSpillState), in proportion to its rain and
          to the pipe's size; after the rain the plume near the pipes thins out over a day or two. Plant outfalls
          (treated water) never. Each particle is a parcel of overflow: carried by the tide field, spread by
