@@ -336,18 +336,21 @@
         for (var lj = 0; lj < nL; lj++){ var fl = lj / Math.max(1, nL - 1);
           lens.push([W * (0.14 + 0.72 * fl) + (R() - 0.5) * 16, acL ? hz + sky * (0.38 + 0.38 * R()) : hz + sky * (0.14 + 0.18 * R()), (acL ? 28 : 38) + 12 * R(), (acL ? 4.2 : 5.5) + 1.8 * R(), Math.floor(R() * 3), R() * 9, 0.94]); }
       } else if (g === 'Altocumulus' && ty.species === 'castellanus'){
-        /* CASTELLANUS (WMO): turrets, taller than wide, rising from a COMMON horizontal base, arranged in LINES. So: banks in
-           perspective rows (near = high, big, sparse; far = low, small, crowded toward the horizon), each a flat-based strip
-           with distinct narrow turrets of varied height standing on it, gaps between them */
-        var nRow = 4;
-        for (var rw = 0; rw < nRow; rw++){ var fr2 = 1 - rw / (nRow - 0.3), yb2 = rowY(0.12 + 0.8 * Math.pow(fr2, 1.5), hz + sky * 0.84), s3 = 0.22 + 0.9 * fr2;   /* far rows crowd toward the horizon */
-          var x0 = -10 + R() * 40 * s3;
-          while (x0 < W + 10){ var len = (70 + 100 * R()) * (0.6 + 0.4 * s3), thB = 11 * s3 + 1.5;
-            add(x0 + len / 2, yb2, len / 2, thB, 6, 0.95);   /* the bank */
-            for (var tx = x0 + (5 + 6 * R()) * s3; tx < x0 + len - 8 * s3; tx += (8 + 7 * R()) * s3){
-              if (R() < 0.15) continue;   /* gaps: not every spot has a turret */
-              var tw4 = (5.5 + 4 * R()) * s3; add(tx, yb2 + thB * 0.35, tw4, tw4 * (1.3 + 1.3 * R()), 2, 0.97, 2); }
-            x0 += len + (10 + 34 * R()) * s3; } }
+        /* CASTELLANUS, grown out of an ordinary Ac sheet (user 2026-09-26 "do they really look like that?" -- the plates-with-
+           marshmallows version was wrong): the same lumpy cloudlets in perspective as stratiformis, and from SOME of them small,
+           irregular turrets sprout -- thin sprouts and broader ones, taller than wide. Overhead we look at the flat undersides, so
+           turrets are rare there; toward the horizon they are seen side-on and show most. Turrets line up along the patch rows */
+        var nP2 = Math.round(60 * (0.35 + 0.8 * c)), topC = hz + sky * 0.9;
+        for (var pC = 0; pC < nP2 && C.length < MAXC - 4; pC++){
+          var frC = Math.pow(R(), 1.3), yyC = rowY(frC, topC), sC = 0.22 + 0.9 * frC, flatC = 1 - frC;
+          var hwC = 20 * sC * (0.7 + 0.6 * R()), hhC = hwC * 0.72 * (1 - 0.55 * flatC), cxC = R() * W, nCC = R() < 0.4 ? 1 : 2 + Math.floor(R() * 2);
+          for (var mC = 0; mC < nCC; mC++) add(cxC + (mC - (nCC - 1) / 2) * hwC * 1.1 + (R() - 0.5) * hwC * 0.4, yyC + (R() - 0.5) * hhC * 0.6, hwC * (1 + flatC * 1.3) * (0.7 + 0.4 * R()), hhC * (0.8 + 0.4 * R()), 1, 0.95);
+          if (frC < 0.75 && R() < 0.2 + 0.6 * flatC){   /* turrets: mostly on the lower (side-on) patches, none overhead */
+            var nTu = 2 + Math.floor(R() * 3), span = hwC * nCC * 0.95;
+            for (var tu = 0; tu < nTu && C.length < MAXC; tu++){
+              var twU = hwC * (R() < 0.3 ? 0.2 + 0.08 * R() : 0.3 + 0.16 * R());   /* small cumuliform heads, some narrower (matchstick-thin read as candles) */
+              add(cxC + (tu / Math.max(1, nTu - 1) - 0.5) * span + (R() - 0.5) * hwC * 0.2, yyC + hhC * 0.25, twU, twU * (1.2 + 1.2 * R()), 2, 0.97, 2); } }   /* spread along the patch: a crenellated top */
+        }
       } else if (g === 'Altocumulus' && ty.species === 'floccus'){
         /* FLOCCUS: small ragged tufts scattered in perspective, each trailing virga */
         /* in loose GROUPS (floccus comes in fleets, not evenly spaced), sizes varied, smaller toward the horizon */
