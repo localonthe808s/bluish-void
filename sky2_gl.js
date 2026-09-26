@@ -113,6 +113,43 @@
     '    d = max(d, smoothstep(0., .35, s + (fbm(p * .035 + 9.) - .5) * .5) * uSh2.z); }',
     '  return d;',
     '}',
+    /* VEILS (2026-09-26, "theres more cloud types we havent updated"): the sheet clouds and fog get their OWN colour --
+       through the puff lighting every sheet came out as a lit cream stripe. Premultiplied rgba; drawn behind the clouds
+       (fog in front, see main). uCs: on, strength, fibratus, halo | uAs: on, strength, opacus, - | uSt: on, strength,
+       fractus, - | uFog: on, depth (sky fraction), strength, - */
+    'uniform vec4 uCs, uAs, uSt, uFog;',
+    'vec4 over(vec4 top, vec4 bot){ return top + bot * (1. - top.a); }',
+    'vec4 veils(vec2 p){',
+    '  vec4 o = vec4(0.); float sky = uWH.y - uHz, y = p.y - uHz, ds = length((p - uSun) * vec2(1., 1.1));',
+    '  if (uSt.x > .5){',   /* STRATUS: a low grey deck with a soft undulating base, or torn scud (fractus) */
+    '    float a;',
+    '    if (uSt.z > .5){ vec2 w = vec2(fbm(p * .02), 0.) * 20.;',
+    '      a = smoothstep(.52, .70, fbm((p + w) * vec2(.028, .10) + 3.)) * smoothstep(sky * .02, sky * .10, y) * (1. - smoothstep(sky * .30, sky * .42, y)) * .85; }',
+    '    else { float base = sky * (.06 + .05 * (fbm(vec2(p.x * .035, 2.)) - .5)), top = sky * (.55 + .12 * (fbm(vec2(p.x * .02, 7.)) - .5));',
+    '      a = smoothstep(base - 5., base + 7., y) * (1. - smoothstep(top - 18., top + 6., y)) * (.86 + .14 * fbm(p * vec2(.03, .08))); }',
+    '    vec3 c = mix(uShdC * .78, uHazeC * .95, .35 * exp(-max(y, 0.) / (sky * .25)));',   /* grey, warmer where it meets the glow */
+    '    c += uSunC * .22 * exp(-ds / 70.) * (uSt.z > .5 ? 1.6 : 1.);',
+    '    a *= uSt.y; o = over(vec4(c * a, a), o); }',
+    '  if (uAs.x > .5){',   /* ALTOSTRATUS: grey ground glass; the sun shows through translucidus as a smeared glow */
+    '    float base = sky * (.14 + .06 * (fbm(vec2(p.x * .03, 4.)) - .5));',
+    '    float a = smoothstep(base - 6., base + 14., y) * (.82 + .18 * fbm(p * vec2(.015, .05) + 2.)) * (.94 + .06 * fbm(p * vec2(.01, .3)));',
+    '    vec3 c = mix(uShdC * .92, vec3(.62, .60, .64), .35) * (uAs.z > .5 ? .82 : 1.);',
+    '    c += uSunC * (uAs.z > .5 ? .18 : .55) * exp(-ds / 55.) + uHazeC * .18 * exp(-y / (sky * .3));',
+    '    a *= uAs.y; o = over(vec4(c * a, a), o); }',
+    '  if (uCs.x > .5){',   /* CIRROSTRATUS: a thin milky veil, faint fibres (fibratus), a 22 degree halo arc */
+    '    float a = smoothstep(sky * .18, sky * .55, y) * (.75 + .25 * fbm(p * vec2(.012, .04) + 6.));',
+    '    if (uCs.z > .5) a *= .82 + .3 * smoothstep(.45, .75, fbm((p + vec2(fbm(p * .02) * 20., 0.)) * vec2(.008, .12)));',
+    '    vec3 c = mix(uSunC, vec3(1.), .35) * (.85 + .3 * exp(-ds / 90.));',
+    '    float R = sky * .46, rq = (ds - R) / 6., ring = exp(-rq * rq) * uCs.w * .10 * smoothstep(sky * .05, sky * .35, y);   /* a real 22 degree halo is FAINT and soft */',
+    '    c += vec3(1., .88, .74) * ring * 2.; a = max(a, 0.) + ring * .5;',
+    '    a *= uCs.y; o = over(vec4(c * a, a), o); }',
+    '  return o;',
+    '}',
+    'vec4 fogV(vec2 p){ if (uFog.x < .5) return vec4(0.); float sky = uWH.y - uHz, y = p.y - uHz, ds = length(p - uSun);',   /* FOG: sunlit haze from the horizon up, wisps at its top */
+    '  float top = sky * uFog.y * (1. + (fbm(vec2(p.x * .025, 9.)) - .5) * .5);',
+    '  float a = (1. - smoothstep(top * .35, top, y)) * (.8 + .2 * fbm(p * vec2(.02, .07))) * uFog.z;',
+    '  vec3 c = mix(uHazeC * 1.12, uSunC, .3 + .4 * exp(-ds / 60.));',
+    '  return vec4(c * a, a); }',
     'float field(vec2 p){ float d = -1.; for (int i = 0; i < ' + MAXC + '; i++){ if (float(i) >= uNC) break; vec4 c = CC(i); if (abs(p.x - c.x) > c.z * 1.6 || p.y < c.y - c.w * 1.3 || p.y > c.y + c.w * 2.1) continue; d = max(d, cell(p, c, KK(i))); } return d; }',
     'uniform vec4 uRain;',   /* storm rain: cx, half width, cloud-base y, strength */
     'float rainD(vec2 p){',   /* soft slanted CURTAINS, not hard stripes */
@@ -133,7 +170,8 @@
     '  float d0 = dens(p);',
     '  float rd = rainD(p); vec3 rc = mix(vec3(.36, .35, .42), uShdC * .6, .3);',
     '  float cr = creaseV(p); vec3 cc = uShdC * .55;',
-    '  if (d0 < .004){ vec4 o = vec4(rc * rd, rd); o = vec4(cc * cr, cr) + o * (1. - cr); gl_FragColor = o; return; }',
+    '  vec4 VL = veils(p), FG = fogV(p);',
+    '  if (d0 < .004){ vec4 o = vec4(rc * rd, rd); o = vec4(cc * cr, cr) + o * (1. - cr); gl_FragColor = over(FG, over(o, VL)); return; }',
     '  vec2 L = normalize(uSun - p); float jit = h1(p * 31.7), acc = 0.;',
     '  L = normalize(vec2(L.x, max(L.y, .25)));',   /* the light comes up from below but not sideways across the sky -- long level marches cut shadow wedges between clouds */
     '  for (int i = 0; i < 10; i++) acc += dens(p + L * (.8 + (float(i) + jit) * 1.3));',
@@ -156,7 +194,7 @@
     '  c = mix(c, uHazeC * 1.18, (1. - smoothstep(uHz + 20., uHz + 150., p.y)) * .30 * (1. - uDark));',   /* lower clouds take the horizon's warmth */
     '  float a = clamp(d0 * 1.25, 0., 1.) * (1. - hz * .35);',
     '  if (uRain.w > 0.){ float bz = (1. - smoothstep(uRain.y * .9, uRain.y * 1.6, abs(p.x - uRain.x))) * (1. - smoothstep(uRain.z + 2., uRain.z + 20., p.y)); c = mix(c, c * vec3(.60, .58, .64), bz * .85); }',   /* the base in its own shadow */
-    '  gl_FragColor = vec4(c * a, a) + (vec4(cc * cr, cr) + vec4(rc * rd, rd) * (1. - cr)) * (1. - a);',
+    '  gl_FragColor = over(FG, over(vec4(c * a, a) + (vec4(cc * cr, cr) + vec4(rc * rd, rd) * (1. - cr)) * (1. - a), VL));',
     '}'
   ].join('\n');
   var GL = null;
@@ -172,7 +210,7 @@
       g.useProgram(pr);
       var b = g.createBuffer(); g.bindBuffer(g.ARRAY_BUFFER, b); g.bufferData(g.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), g.STATIC_DRAW);
       var loc = g.getAttribLocation(pr, 'a'); g.enableVertexAttribArray(loc); g.vertexAttribPointer(loc, 2, g.FLOAT, false, 0, 0);
-      var U = {}; ['uCrease', 'uRain', 'uWH', 'uHz', 'uNC', 'uTex', 'uCi', 'uCc', 'uSh', 'uSh2', 'uDark', 'uSun', 'uSunC', 'uAmbC', 'uShdC', 'uHazeC'].forEach(function(n){ U[n] = g.getUniformLocation(pr, n); });
+      var U = {}; ['uCs', 'uAs', 'uSt', 'uFog', 'uCrease', 'uRain', 'uWH', 'uHz', 'uNC', 'uTex', 'uCi', 'uCc', 'uSh', 'uSh2', 'uDark', 'uSun', 'uSunC', 'uAmbC', 'uShdC', 'uHazeC'].forEach(function(n){ U[n] = g.getUniformLocation(pr, n); });
       GL = { ok: true, c: c, g: g, U: U };
     } catch (e){ GL = { ok: false, err: String(e) }; if (window.console) console.warn('bvSky2 off:', e); return null; }
     return GL;
@@ -188,17 +226,18 @@
   }
   /* types -> cells + bands */
   function compose(o, W, H, hz){
-    var sky = H - hz, C = [], K = [], bands = { ci: [0, 0, 0, 0], cc: [0, 0, 0, 0], sh: [0, 0, 0, 0], sh2: [0, 0, 0, 0] };
+    var sky = H - hz, C = [], K = [], bands = { ci: [0, 0, 0, 0], cc: [0, 0, 0, 0], sh: [0, 0, 0, 0], sh2: [0, 0, 0, 0] }, veil = { cs: [0, 0, 0, 0], as: [0, 0, 0, 0], st: [0, 0, 0, 0], fog: [0, 0, 0, 0] };
     var add = function(cx, yb, hw, h, kind, a){ if (C.length >= MAXC) return; C.push([cx, yb, hw, h]); K.push([kind, Math.random() * 0 + (C.length * 0.137) % 1, a == null ? 1 : a, 0]); };
     /* perspective: a row at height f (0 horizon .. 1 overhead) is placed at y and scaled by s */
     var rowY = function(f, top){ return hz + (top - hz) * Math.pow(f, 1.35); };
     (o.types || []).forEach(function(ty, ti){
       var c = Math.max(0, Math.min(100, ty.cover || 0)) / 100, R = rng(97 + ti * 131), g = ty.genus;
       if (g === 'Cirrus') bands.ci = [hz + sky * 0.52, H - 4, 0.25 + 0.65 * c, 1];
-      else if (g === 'Cirrostratus') bands.sh2 = [hz + sky * 0.70, H - 6, 0.35 + 0.3 * c, 1];
+      else if (g === 'Cirrostratus') veil.cs = [1, 0.2 + 0.2 * c, ty.species === 'fibratus' ? 1 : 0, 1];
       else if (g === 'Cirrocumulus') bands.cc = [hz + sky * 0.14, H - 6, 0.3 + 0.6 * c, 1];
-      else if (g === 'Altostratus') bands.sh2 = [hz + sky * 0.45, hz + sky * 0.72, 0.5 + 0.4 * c, 1];
-      else if (g === 'Stratus'){ if (!bands.ns) bands.sh = [hz + 4, hz + sky * 0.24, 0.8 + 0.2 * c, 1]; }
+      else if (g === 'Altostratus') veil.as = [1, ty.species === 'opacus' ? 0.95 : 0.55 + 0.3 * c, ty.species === 'opacus' ? 1 : 0, 0];
+      else if (g === 'Stratus'){ if (!bands.ns) veil.st = [1, 0.6 + 0.35 * c, ty.species === 'fractus' ? 1 : 0, 0]; }
+      else if (g === 'Fog') veil.fog = [1, ty.species === 'dense' ? 0.7 : ty.species === 'moderate' ? 0.42 : 0.2, ty.species === 'dense' ? 0.95 : ty.species === 'moderate' ? 0.85 : 0.65, 0];
       else if (g === 'Nimbostratus'){ bands.ns = 1; bands.sh = [hz + sky * 0.14, H + sky * 0.9, 0.97, 1]; }   /* the deck covers the sky; a lit gap stays at the horizon. Stratus under it must not overwrite it */
       else if (g === 'Cumulus' || g === 'Cumulonimbus'){
         var n = g === 'Cumulonimbus' ? 1 : Math.round(10 + 30 * c);
@@ -225,7 +264,7 @@
     if (cbX != null){ var C2 = [], K2 = []; C.forEach(function(c, i){ if (K[i][0] === 1 && Math.abs(c[0] - cbX) < 100 && c[1] > hz + sky * 0.42) return; C2.push(c); K2.push(K[i]); }); C = C2; K = K2; }
     if (o.anvil){ C.push(o.anvil); K.push([3, 0.37, 1, 0]); }
     if (o.base){ C.push(o.base); K.push([4, 0.61, 0.97, 0]); }
-    return { C: C, K: K, bands: bands };
+    return { C: C, K: K, bands: bands, veil: veil };
   }
   /* THE STORM is the front scenes' own tower (bvCloudGL in cloud_gl.js: cauliflower, sheared anvil, NCAR rain shaft) --
      the user: "our cumulonimbus looked better than this". The sky draws in three passes so the storm sits between layers:
@@ -264,7 +303,7 @@
     g.uniform2f(U.uWH, W, H); g.uniform1f(U.uHz, hz); g.uniform1f(U.uNC, S.C.length);
     
     g.uniform4fv(U.uCi, S.bands.ci); g.uniform4fv(U.uCc, S.bands.cc); g.uniform4fv(U.uSh, S.bands.sh); g.uniform4fv(U.uSh2, S.bands.sh2);
-    g.uniform1f(U.uDark, S.bands.ns ? 1 : 0); g.uniform4fv(U.uRain, o.rain || [0, 0, 0, 0]); g.uniform4fv(U.uCrease, o.crease || [0, 0, 0, 0]); g.uniform2f(U.uSun, Lg.sun[0], Lg.sun[1]); g.uniform3fv(U.uSunC, Lg.sc); g.uniform3fv(U.uAmbC, Lg.amb); g.uniform3fv(U.uShdC, Lg.shd); g.uniform3fv(U.uHazeC, Lg.haze);
+    g.uniform1f(U.uDark, S.bands.ns ? 1 : 0); g.uniform4fv(U.uRain, o.rain || [0, 0, 0, 0]); g.uniform4fv(U.uCrease, o.crease || [0, 0, 0, 0]); g.uniform4fv(U.uCs, S.veil.cs); g.uniform4fv(U.uAs, S.veil.as); g.uniform4fv(U.uSt, S.veil.st); g.uniform4fv(U.uFog, S.veil.fog); g.uniform2f(U.uSun, Lg.sun[0], Lg.sun[1]); g.uniform3fv(U.uSunC, Lg.sc); g.uniform3fv(U.uAmbC, Lg.amb); g.uniform3fv(U.uShdC, Lg.shd); g.uniform3fv(U.uHazeC, Lg.haze);
     g.drawArrays(g.TRIANGLE_STRIP, 0, 4);
     ctx.drawImage(G.c, 0, 0, W, H);
     return true;

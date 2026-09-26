@@ -49,6 +49,27 @@ SCEN = [
   ("Overcast rain (Ns), sunset", "gh", 2.0, cd(cL=95, cM=90, cH=60, pr=2.0, rh=95, temp=55, dp=53)),
   ("Mixed layers, blue hour", "gh", -3.0, cd(cL=40, cM=52, cH=50, temp=70, rh=47, dp=55, cape=200)),
   ("Fair cumulus, midday", "day", 45.0, cd(cL=35, cape=500, temp=82, rh=45)),
+  # every other type the classifier can emit (2026-09-26: "theres more cloud types we havent updated"); inputs found by searching classifyClouds for single-type skies
+  ("Cirrus fibratus", "gh", 2.5, cd(cL=0, cM=0, cH=45, cape=2600, w300=90, w500=60, w700=35, pr=0.6, temp=35, rh=30, vis=131000, wc=0, blh=800, li=2, dp=32)),
+  ("Cirrus uncinus", "gh", 2.5, cd(cL=0, cM=70, cH=45, cape=4200, w300=60, w500=45, w700=35, pr=0, temp=85, rh=99, vis=800, wc=0, blh=2500, li=99, dp=55)),
+  ("Cirrus spissatus", "gh", 2.5, cd(cL=0, cM=0, cH=95, cape=4200, w300=90, w500=10, w700=28, pr=0.6, temp=50, rh=70, vis=20000, wc=0, blh=300, li=2, dp=35)),
+  ("Cirrus intortus", "gh", 2.5, cd(cL=98, cM=70, cH=45, cape=30, w300=130, w500=45, w700=15, pr=0, temp=35, rh=85, vis=131000, wc=61, blh=300, li=99, dp=20)),
+  ("Cirrostratus nebulosus", "gh", 2.5, cd(cL=0, cM=70, cH=95, cape=0, w300=90, w500=60, w700=15, pr=2.5, temp=85, rh=85, vis=131000, wc=0, blh=300, li=-2, dp=84)),
+  ("Cirrostratus fibratus", "gh", 2.5, cd(cL=0, cM=70, cH=80, cape=4200, w300=30, w500=45, w700=28, pr=0, temp=85, rh=30, vis=4000, wc=0, blh=300, li=2, dp=84)),
+  ("Cirrocumulus lenticularis", "gh", 2.5, cd(cL=20, cM=0, cH=60, cape=90, w300=90, w500=10, w700=15, pr=0, temp=62, rh=93, vis=131000, wc=3, blh=800, li=-2, dp=54)),
+  ("Altocumulus lenticularis", "gh", 2.5, cd(cL=0, cM=55, cH=0, cape=0, w300=90, w500=10, w700=45, pr=0, temp=35, rh=99, vis=150, wc=0, blh=1500, li=2, dp=20)),
+  ("Altocumulus castellanus", "gh", 2.5, cd(cL=20, cM=55, cH=0, cape=450, w300=10, w500=25, w700=28, pr=0, temp=72, rh=93, vis=4000, wc=0, blh=300, li=-2, dp=69)),
+  ("Altocumulus floccus", "gh", 2.5, cd(cL=98, cM=40, cH=0, cape=30, w300=10, w500=45, w700=35, pr=2.5, temp=95, rh=93, vis=4000, wc=61, blh=1500, li=-6, dp=92)),
+  ("Altostratus translucidus", "gh", 2.5, cd(cL=20, cM=85, cH=0, cape=4200, w300=90, w500=60, w700=15, pr=0, temp=62, rh=30, vis=4000, wc=51, blh=300, li=-6, dp=32)),
+  ("Altostratus opacus", "gh", 2.5, cd(cL=0, cM=95, cH=0, cape=90, w300=30, w500=25, w700=45, pr=0.1, temp=62, rh=70, vis=131000, wc=0, blh=800, li=-6, dp=54)),
+  ("Stratocumulus lenticularis", "gh", 2.5, cd(cL=75, cM=0, cH=0, cape=90, w300=90, w500=10, w700=45, pr=2.5, temp=50, rh=93, vis=20000, wc=61, blh=2500, li=99, dp=47)),
+  ("Stratus nebulosus", "gh", 2.5, cd(cL=98, cM=70, cH=0, cape=0, w300=60, w500=10, w700=5, pr=0, temp=50, rh=85, vis=20000, wc=0, blh=1500, li=2, dp=42)),
+  ("Stratus fractus", "gh", 2.5, cd(cL=98, cM=0, cH=0, cape=30, w300=130, w500=60, w700=45, pr=0, temp=95, rh=99, vis=150, wc=45, blh=800, li=99, dp=87)),
+  ("Cumulus humilis", "gh", 2.5, cd(cL=30, cM=10, cH=0, cape=30, w300=30, w500=45, w700=45, pr=0.1, temp=95, rh=70, vis=131000, wc=0, blh=300, li=99, dp=65)),
+  ("Cumulus congestus", "gh", 2.5, cd(cL=98, cM=0, cH=0, cape=900, w300=90, w500=45, w700=15, pr=0, temp=85, rh=70, vis=131000, wc=0, blh=300, li=99, dp=70)),
+  ("Cumulonimbus calvus", "gh", 2.5, cd(cL=98, cM=10, cH=0, cape=1600, w300=10, w500=45, w700=35, pr=0.6, temp=35, rh=85, vis=131000, wc=0, blh=800, li=99, dp=5)),
+  ("Fog thin", "gh", 2.5, cd(cL=0, cM=70, cH=0, cape=90, w300=30, w500=45, w700=5, pr=0, temp=35, rh=93, vis=131000, wc=45, blh=2500, li=-2, dp=32)),
+  ("Fog moderate", "gh", 2.5, cd(cL=0, cM=0, cH=0, cape=1600, w300=60, w500=25, w700=28, pr=0, temp=62, rh=93, vis=800, wc=45, blh=1500, li=-6, dp=61)),
 ]
 FOCUS = os.environ.get("FOCUS","")
 if FOCUS:
