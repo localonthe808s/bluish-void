@@ -18,10 +18,14 @@
     'varying vec2 v;',
     'uniform vec2 uWH; uniform float uT, uCx, uBase, uH, uHW, uLean, uAnv, uAnvR, uAnvL, uRain, uNight, uFlash, uGround, uDens, uMode, uN;',
     'uniform vec4 uP[48];',
+    'uniform vec2 uSunDir; uniform vec3 uSunCol;',
     'float h1(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }',
     'vec2 h2(vec2 p){ return fract(sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)))) * 43758.5453); }',
     'float vn(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3. - 2. * f);',
     '  return mix(mix(h1(i), h1(i + vec2(1., 0.)), f.x), mix(h1(i + vec2(0., 1.)), h1(i + vec2(1., 1.)), f.x), f.y); }',
+    /* STREAKS WITHOUT BLINDS: value noise stretched hard along its own grid lines each stretched cell up into a row -- the
+       high decks and the anvil came out striped like venetian blinds. Rotated a few degrees and warped first, streaks wander. */
+    'vec2 rot(vec2 p){ return vec2(p.x * .985 + p.y * .174, -p.x * .174 + p.y * .985); }',
     'float fbm(vec2 p){ float s = 0., a = .5; for (int i = 0; i < 4; i++){ s += a * vn(p); p = p * 2.03 + vec2(1.7, 9.2); a *= .5; } return s; }',
     /* CAULIFLOWER = DOMES (2026-09-25, from NCAR's frames): cellular noise where every cell is a rounded dome; the light then
        finds each one -- lit crown, soft shade under -- which smooth noise (fog-like blobs) never gives. Cells drift, so it boils */
@@ -42,8 +46,10 @@
     '  return best; }',
     /* LAYER MODE (uMode 1): the cloud the lifted warm air makes ahead of a warm front, along a stalled or occluded one -- its
        shape is the scene's own puffs (x, y up, r, weight), so the physics that placed them still decides where it is */
-    'float puffs(vec2 p){ float best = -1.; for (int i = 0; i < 48; i++){ if (float(i) >= uN) break; vec4 q = uP[i];',
-    '  vec2 d = (p - q.xy) / vec2(q.z * 1.95, q.z * .72); best = max(best, (1. - dot(d, d)) * q.w); } return best; }',   /* wide, flat: they merge into a deck */
+    /* a SMOOTH union: max() left a crease between every pair of neighbours -- the shelf read as a twisted rope */
+    'float puffs(vec2 p){ float acc = 0.; for (int i = 0; i < 48; i++){ if (float(i) >= uN) break; vec4 q = uP[i];',
+    '  vec2 d = (p - q.xy) / vec2(q.z * 1.95, q.z * .72); acc += exp(6. * ((1. - dot(d, d)) * q.w - 1.)); }',
+    '  return acc > 0. ? 1. + log(acc) / 6. : -1.; }',   /* wide, flat: they merge into a deck */
     'float anvil(vec2 p){ if (uAnv < .01) return -1.; float ax2 = uCx - uLean * uH * .28; float ux = p.x - ax2; float R = ux > 0. ? uAnvR : uAnvL; float r2 = abs(ux) / max(R, 1.);',
     '  float th = (2.5 + 5.5 * (1. - r2)) * uAnv; float cy2 = uBase + uH - 1.5; float dy = (p.y - cy2) / max(th, .6); return (1. - r2 * r2) - dy * dy; }',
     /* the height of the surface: the lobes' shape, then domes at two sizes rising through it; the anvil is ice -- smooth and
@@ -51,12 +57,24 @@
     'float hgt(vec2 p){',
     '  if (uMode > .5){ vec2 q1 = p + vec2(-uT * .35, 0.); float s1 = puffs(p);',
     '    if (s1 < -1.) return -1.;',
-    '    return s1 * .9 + .17 * dome(q1 * .12) + .08 * dome(q1 * .31 + 3.7) - .12; }',   /* flatter lumps: a deck, not towers */
+    '    float hi = smoothstep(58., 82., p.y), lo = 1. - smoothstep(30., 46., p.y);',
+    '    if (uLean > 5.) return s1 * .95 + (fbm(q1 * .1) - .5) * .06 - .05;',   /* the SHELF (flagged lean 9): laminar and smooth -- no domes, no fibres */   /* high: thin ice, fibrous; low: rain cloud, smooth */
+    '    float lumps = (.17 * dome(q1 * .12) + .08 * dome(q1 * .31 + 3.7)) * (1. - hi) * (1. - .6 * lo);',
+    '    vec2 pq = rot(p) + 3. * vec2(vn(p * .07), vn(p * .07 + 9.));',
+    '    float fibr = (fbm(pq * vec2(.04, .28) + vec2(-uT * .04, 0.)) - .5) * .5 * hi;',
+    '    return s1 * .9 * (1. - .35 * hi) + lumps + fibr + (fbm(q1 * .08) - .5) * .12 * lo - .12; }',   /* flatter lumps: a deck, not towers */
     '  float s = tower(p), a = anvil(p);',
     '  vec2 q = p + vec2(0., -uT * .7);',
     '  float d1 = dome(q * .105), d2 = dome(q * .26 + 3.7), d3 = dome(q * .62 + 9.1);',   /* lobes a quarter to a third of the tower, smaller ones on them */
     '  float tw = s * .9 + .42 * d1 + .16 * d2 + .06 * d3 - .27;',
-    '  float an = a * .9 + (fbm(p * vec2(.06, .45) + vec2(-uT * .05, 0.)) - .5) * .5;',
+    /* THE ANVIL IS ICE (2026-09-26): fibrous and streaky along the wind, fraying toward its downwind tip, and pouched underneath
+       -- mammatus -- where the sinking ice air hangs in lobes. No cauliflower up here. */
+    '  float an = -1.;',
+    '  if (a > -1.){ float ax2 = uCx - uLean * uH * .28, ux = p.x - ax2, R = ux > 0. ? uAnvR : uAnvL, rr = abs(ux) / max(R, 1.), cy2 = uBase + uH - 1.5;',
+    '    vec2 pr = rot(p) + 2.5 * vec2(vn(p * .08), vn(p * .08 + 5.));',
+    '    float fib = fbm(pr * vec2(.045, .30) + vec2(-uT * .05, 0.)) - .5, str = vn(vec2(pr.x * .06 - uT * .04, pr.y * .45)) - .5;',
+    '    an = a * .9 + fib * .45 + str * .14 - smoothstep(.55, 1., rr) * (.25 + .5 * fbm(p * .2 + 7.));',
+    '    if (ux > 0. && rr > .12 && rr < .8 && p.y < cy2){ float mm = dome(vec2(p.x * .30, p.y * .42 + uT * .05)); an += mm * .30 * smoothstep(0., .2, uAnv) * (1. - smoothstep(.55, .8, rr)) * step(cy2 - 6., p.y); } }',
     '  return mix(-1., max(tw, an), smoothstep(uBase - .4, uBase + .9, p.y)); }',   /* below the base: OUTSIDE (-1), not 0 -- 0 passed the threshold and veiled the whole band under it */
     'void main(){',
     '  vec2 p = v * uWH;',
@@ -66,7 +84,7 @@
     '    float e = .35;',
     '    float gx = hgt(p + vec2(e, 0.)) - hgt(p - vec2(e, 0.)), gy = hgt(p + vec2(0., e)) - hgt(p - vec2(0., e));',
     '    vec3 N = normalize(vec3(-gx * 6.5, -gy * 6.5, 1.));',   /* the domes are gentle slopes: a larger normal scale so each one catches the light */
-    '    vec3 L3 = normalize(vec3(-.5, .75, .45));',
+    '    vec3 L3 = normalize(vec3(uSunDir, .45));',
     '    float dif = pow(dot(N, L3) * .5 + .5, 1.6);',                             /* half-Lambert: mostly lit, soft falloff */
     '    float crev = smoothstep(-.05, .35, H0);',
     /* THE FORM, lit as one mass: the tower's own shape (no domes), a wide step -- sun side cream-white, far side and
@@ -77,15 +95,17 @@
     '    vec3 NB = normalize(vec3(-bx * 1.3, -by * 1.3, 1.));',
     '    float form = dot(NB, L3) * .5 + .5;',                        /* shallow = between lobes: the creases */
     '    float jit = h1(p * 37.1); float acc = 0.; vec2 L = normalize(vec2(-.5, .86));',
+    '    L = normalize(uSunDir);',
     '    for (int i = 0; i < 6; i++){ float hh = hgt(p + L * (2. + (float(i) + jit) * 3.)); acc += clamp(hh * 3., 0., 1.); }',
     '    float Ts = exp(-acc * .26);',                                    /* the mass shades itself, gently */
     '    float hb = clamp((p.y - uBase) / max(uH, 1.), 0., 1.);',
-    '    vec3 sunC = mix(vec3(1.04, .98, .90), vec3(.52, .56, .68), uNight);',   /* cream in the sun */
+    '    vec3 sunC = uSunCol;',   /* cream in the sun */
     '    vec3 shdC = mix(vec3(.50, .52, .60), vec3(.08, .10, .16), uNight);',
     '    vec3 c = mix(shdC, sunC, clamp(dif * (.45 + .55 * Ts) * (.62 + .38 * crev) * (.55 + .75 * form), 0., 1.));',
     '    if (uMode < .5) c *= mix(.66, 1., smoothstep(0., .22, hb));',                    /* the base: darker, flat */
     '    if (uFlash > 0.){ float fl = exp(-length((p - vec2(uCx - 4., uBase + uH * .45)) / vec2(uHW * 1.3, uH * .6))); c += vec3(1., .98, .86) * fl * uFlash * 1.2; }',
-    '    float a = smoothstep(-.02, .09, H0) * uDens;',                   /* a crisp, rounded outline */
+    '    float a = smoothstep(-.02, .09, H0) * uDens;',
+    '    if (uMode > .5){ float hi2 = smoothstep(58., 82., p.y), lo2 = 1. - smoothstep(30., 46., p.y); a *= 1. - .45 * hi2; c = mix(c, c * .78, lo2 * .6); c = mix(c, sunC, hi2 * .25); }',                   /* a crisp, rounded outline */
     '    col = vec4(c, a);',
     '  }',
     /* RAIN: a pale fibrous curtain hanging from INSIDE the cloud's lower part, thinning toward the ground */
@@ -94,8 +114,8 @@
     '    float xw = 1. - smoothstep(uHW * .30, uHW * 1.0, abs(p.x - ax));   /* never smoothstep(hi, lo): undefined in GLSL -- it drew a veil across the whole width */',
     '    float st = vn(vec2(p.x * 1.6 + p.y * .12, p.y * .035 + uT * .9)) * .6 + vn(vec2(p.x * 4.1, p.y * .06 + uT * 1.6)) * .4;',
     '    float top = 1. - smoothstep(uBase + uH * .1, uBase + uH * .45, p.y), bot = .35 + .65 * smoothstep(uGround, uBase, p.y);',
-    '    float ra = clamp(uRain * xw * top * bot * (.25 + .9 * st) * .55, 0., .8);',
-    '    vec3 rc = mix(vec3(.90, .89, .92), vec3(.40, .44, .55), uNight) * (.85 + .15 * st);',   /* pale, as NCAR draws it */
+    '    float ra = clamp(uRain * xw * top * bot * (.3 + .9 * st) * .75, 0., .88);',
+    '    vec3 rc = mix(mix(vec3(.90, .89, .92), vec3(.56, .58, .64), smoothstep(.7, 1.1, uRain)), vec3(.40, .44, .55), uNight) * (.85 + .15 * st);',   /* pale; darker under a heavy storm */   /* pale, as NCAR draws it */
     '    col = vec4(mix(col.rgb, rc, ra * (p.y < uBase ? 1. : .55)), max(col.a, ra));',
     '  }',
     '  gl_FragColor = vec4(col.rgb * col.a, col.a);',
@@ -114,7 +134,7 @@
       g.useProgram(pr);
       var b = g.createBuffer(); g.bindBuffer(g.ARRAY_BUFFER, b); g.bufferData(g.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), g.STATIC_DRAW);
       var loc = g.getAttribLocation(pr, 'a'); g.enableVertexAttribArray(loc); g.vertexAttribPointer(loc, 2, g.FLOAT, false, 0, 0);
-      var U = {}; ['uWH', 'uT', 'uCx', 'uBase', 'uH', 'uHW', 'uLean', 'uAnv', 'uAnvR', 'uAnvL', 'uRain', 'uNight', 'uFlash', 'uGround', 'uDens', 'uMode', 'uN', 'uP'].forEach(function(n){ U[n] = g.getUniformLocation(pr, n); });
+      var U = {}; ['uWH', 'uT', 'uCx', 'uBase', 'uH', 'uHW', 'uLean', 'uAnv', 'uAnvR', 'uAnvL', 'uRain', 'uNight', 'uFlash', 'uGround', 'uDens', 'uMode', 'uN', 'uP', 'uSunDir', 'uSunCol'].forEach(function(n){ U[n] = g.getUniformLocation(pr, n); });
       GL = { ok: true, c: c, g: g, U: U };
     } catch (e){ GL = { ok: false, err: String(e) }; if (window.console) console.warn('bvCloudGL off:', e); return null; }
     return GL;
@@ -134,6 +154,8 @@
     /* layer mode: o.puffs = [[x, yUp, r, w], ...] up to 48 */
     var P = o.puffs || [], arr = new Float32Array(48 * 4);
     for (var i = 0; i < Math.min(48, P.length); i++){ arr[i * 4] = P[i][0]; arr[i * 4 + 1] = P[i][1]; arr[i * 4 + 2] = P[i][2]; arr[i * 4 + 3] = P[i][3]; }
+    var sd = o.sunDir || [-0.5, 0.75], sc = o.sunCol || [1.04 - 0.52 * (o.night || 0), 0.98 - 0.42 * (o.night || 0), 0.90 - 0.22 * (o.night || 0)];
+    g.uniform2f(U.uSunDir, sd[0], sd[1]); g.uniform3f(U.uSunCol, sc[0], sc[1], sc[2]);
     g.uniform1f(U.uMode, P.length ? 1 : 0); g.uniform1f(U.uN, Math.min(48, P.length)); g.uniform4fv(U.uP, arr);
     /* the box, in scene units: a tower from its base to above its anvil, or the puffs' extent, with room for the lobes */
     var bx0, bx1, by0, by1, pad = 6;
@@ -146,7 +168,8 @@
     g.bufferData(g.ARRAY_BUFFER, new Float32Array([nx0, ny0, nx1, ny0, nx0, ny1, nx1, ny1]), g.DYNAMIC_DRAW);
     g.drawArrays(g.TRIANGLE_STRIP, 0, 4);
     var sx = Math.floor(bx0 / W * pw), sw = Math.ceil(bx1 / W * pw) - sx, sy = Math.floor((1 - by1 / H) * ph), sh = Math.ceil((1 - by0 / H) * ph) - sy;
-    if (sw > 0 && sh > 0){ ctx.save(); ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; ctx.drawImage(G.c, sx, sy, sw, sh, sx / pw * W, sy / ph * H, sw / pw * W, sh / ph * H); ctx.restore(); }
+    if (sw > 0 && sh > 0){ ctx.save(); ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; ctx.drawImage(G.c, sx, sy, sw, sh, sx / pw * W, sy / ph * H, sw / pw * W, sh / ph * H); ctx.restore();
+      if (o.also) o.also.drawImage(G.c, sx, sy, sw, sh, sx / pw * W, sy / ph * H, sw / pw * W, sh / ph * H); }   /* o.also: a second 2D target (the sea's reflection) */
     return true;
   };
   window.bvCloudGL.ok = function(){ return !!init(); };   /* the scenes ask this, and paint their own clouds when it is false */
