@@ -47,13 +47,13 @@
     /* LAYER MODE (uMode 1): the cloud the lifted warm air makes ahead of a warm front, along a stalled or occluded one -- its
        shape is the scene's own puffs (x, y up, r, weight), so the physics that placed them still decides where it is */
     /* a SMOOTH union: max() left a crease between every pair of neighbours -- the shelf read as a twisted rope */
-    'float puffs(vec2 p){ float acc = 0.; for (int i = 0; i < 48; i++){ if (float(i) >= uN) break; vec4 q = uP[i];',
+    'float puffs(vec2 p){ float K = uLean > 5. ? 1.4 : 6.; float acc = 0.; for (int i = 0; i < 48; i++){ if (float(i) >= uN) break; vec4 q = uP[i];',
     /* NO PANCAKES (user 2026-09-26: "do the deck puffs"): a lone small anchor drawn 2.7x wider than tall was a flat disc.
        Small anchors are ROUND puffs (1.15 x .95) -- an upward bulge made lollipops on stalks --; only the big ones stretch wide to merge into a deck */
     '  float big = smoothstep(4.5, 9., q.z);',
     '  vec2 dd = p - q.xy;',
-    '  vec2 d = dd / vec2(q.z * mix(1.15, 1.95, big), q.z * mix(.95, .72, big)); acc += exp(6. * ((1. - dot(d, d)) * q.w - 1.)); }',
-    '  return acc > 0. ? 1. + log(acc) / 6. : -1.; }',   /* wide, flat: they merge into a deck */
+    '  vec2 d = dd / (uLean > 5. ? vec2(q.z * 2.3, q.z * .55) : vec2(q.z * mix(1.15, 1.95, big), q.z * mix(.95, .72, big))); acc += exp(K * ((1. - dot(d, d)) * q.w - 1.)); }',
+    '  return acc > 0. ? 1. + log(acc) / K : -1.; }',   /* wide, flat: they merge into a deck */
     'float anvil(vec2 p){ if (uAnv < .01) return -1.; float ax2 = uCx - uLean * uH * .28; float ux = p.x - ax2; float R = ux > 0. ? uAnvR : uAnvL; float r2 = abs(ux) / max(R, 1.);',
     '  float th = (2.5 + 5.5 * (1. - r2)) * uAnv; float cy2 = uBase + uH - 1.5; float dy = (p.y - cy2) / max(th, .6); return (1. - r2 * r2) - dy * dy; }',
     /* the height of the surface: the lobes' shape, then domes at two sizes rising through it; the anvil is ice -- smooth and
@@ -62,7 +62,9 @@
     '  if (uMode > .5){ vec2 q1 = p + vec2(-uT * .35, 0.); float s1 = puffs(p);',
     '    if (s1 < -1.) return -1.;',
     '    float hi = smoothstep(58., 82., p.y), lo = 1. - smoothstep(30., 46., p.y);',
-    '    if (uLean > 5.) return s1 * .95 + (fbm(q1 * .1) - .5) * .06 - .05;',   /* the SHELF (flagged lean 9): laminar and smooth -- no domes, no fibres */   /* high: thin ice, fibrous; low: rain cloud, smooth */
+    '    if (uLean > 5.){ float ctr = 0.; for (int i = 0; i < 48; i++){ if (float(i) >= uN) break; ctr += uP[i].y; } ctr /= max(uN, 1.);',
+    '      float under = 1. - smoothstep(ctr - 2., ctr + 1., p.y);',                          /* the underside is ragged scud */
+    '      return s1 * .95 - .05 + under * (fbm(vec2(p.x * .5 - uT * .3, p.y * .9)) - .55) * .55; }',   /* the top stays laminar */   /* the SHELF: one laminar wedge -- no domes, no fibres, no noise (it roped) */   /* the SHELF (flagged lean 9): laminar and smooth -- no domes, no fibres */   /* high: thin ice, fibrous; low: rain cloud, smooth */
     '    float lumps = (.17 * dome(q1 * .12) + .08 * dome(q1 * .31 + 3.7)) * (1. - hi) * (1. - .6 * lo);',
     '    vec2 pq = rot(p) + 3. * vec2(vn(p * .07), vn(p * .07 + 9.));',
     '    float fibr = (fbm(pq * vec2(.04, .28) + vec2(-uT * .04, 0.)) - .5) * .5 * hi;',
@@ -78,7 +80,7 @@
     '    vec2 pr = rot(p) + 2.5 * vec2(vn(p * .08), vn(p * .08 + 5.));',
     '    float fib = fbm(pr * vec2(.045, .30) + vec2(-uT * .05, 0.)) - .5, str = vn(vec2(pr.x * .06 - uT * .04, pr.y * .45)) - .5;',
     '    an = a * .9 + fib * .45 + str * .14 - smoothstep(.55, 1., rr) * (.25 + .5 * fbm(p * .2 + 7.));',
-    '    if (ux > 0. && rr > .12 && rr < .8 && p.y < cy2){ float mm = dome(vec2(p.x * .30, p.y * .42 + uT * .05)); an += mm * .30 * smoothstep(0., .2, uAnv) * (1. - smoothstep(.55, .8, rr)) * step(cy2 - 6., p.y); } }',
+    '    if (ux > 0. && rr > .12 && rr < .8 && p.y < cy2){ float mm = pow(max(0., sin(p.x * .55 - uT * .15 + 2. * vn(p * .1))), 3.); an += mm * .22 * smoothstep(0., .2, uAnv) * (1. - smoothstep(.55, .8, rr)) * smoothstep(cy2 - 8., cy2 - 3., p.y); } }',   /* a soft edge, not a cut: the cut drew a ladder under the anvil */
     '  return mix(-1., max(tw, an), smoothstep(uBase - .4, uBase + .9, p.y)); }',   /* below the base: OUTSIDE (-1), not 0 -- 0 passed the threshold and veiled the whole band under it */
     'void main(){',
     '  vec2 p = v * uWH;',
@@ -87,7 +89,7 @@
     '  if (H0 > -.02){',
     '    float e = .35;',
     '    float gx = hgt(p + vec2(e, 0.)) - hgt(p - vec2(e, 0.)), gy = hgt(p + vec2(0., e)) - hgt(p - vec2(0., e));',
-    '    vec3 N = normalize(vec3(-gx * 6.5, -gy * 6.5, 1.));',   /* the domes are gentle slopes: a larger normal scale so each one catches the light */
+    '    vec3 N = normalize(vec3(-gx * (uLean > 5. ? 1.2 : 6.5), -gy * (uLean > 5. ? 1.2 : 6.5), 1.));',   /* the domes are gentle slopes: a larger normal scale so each one catches the light */
     '    vec3 L3 = normalize(vec3(uSunDir, .45));',
     '    float dif = pow(dot(N, L3) * .5 + .5, 1.6);',                             /* half-Lambert: mostly lit, soft falloff */
     '    float crev = smoothstep(-.05, .35, H0);',
