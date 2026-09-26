@@ -2109,11 +2109,11 @@ function frontsRead(){
     if (a) return Date.UTC(y, +a[1] - 1, +a[2], +a[3]);
     return +ref;
   };
-  FRONTS.p = fetch('https://api.weather.gov/products?type=COD&limit=30').then(function(r){ return r.json(); })
+  FRONTS.p = fetch('https://api.weather.gov/products?type=COD&limit=40').then(function(r){ return r.json(); })
     .then(function(j){
       var g = (j['@graph'] || []).filter(function(q){ return q.productCode === 'COD'; });
       var an = g.filter(function(q){ return /^ASUS/.test(q.wmoCollectiveId || ''); }).slice(0, 8);
-      var fc = g.filter(function(q){ return /^FSUS/.test(q.wmoCollectiveId || ''); }).slice(0, 6);
+      var fc = g.filter(function(q){ return /^FSUS/.test(q.wmoCollectiveId || ''); }).slice(0, 12);   /* 12: a cycle's duplicates could fill six */
       return Promise.all(an.concat(fc).map(function(q){
         return fetch('https://api.weather.gov/products/' + q.id).then(function(r2){ return r2.json(); })
           .then(function(d){ return { id: q.wmoCollectiveId, t: q.issuanceTime, x: String(d.productText || '') }; }).catch(function(){ return null; });
@@ -2121,9 +2121,22 @@ function frontsRead(){
     }).then(function(all){
       var byValid = {}, progs = {};
       (all || []).filter(Boolean).forEach(function(d){
+        var issued = Date.parse(d.t);
+        if (/^FSUS/.test(d.id) || /FORECAST/.test(d.x.slice(0, 200))){
+          /* TWO PROGS A BULLETIN (2026-09-25, found on New York's COAST view): 12+24 HR in one, 36+48 in the next.
+             Read whole, both were dated by the first PROG VALID line -- the 24 h positions filed as 12 h, the 48 h as
+             36 h. Each section is parsed and dated on its own. */
+          d.x.split(/(?=\d+HR PROG VALID \d{6}Z)/).forEach(function(sec){
+            if (!/PROG VALID \d{6}Z/.test(sec)) return;
+            var fs = parse(sec), PS = bvFrontsParse(sec);
+            if (!fs.length && !PS.lows.length) return;
+            var vs = validOf(sec, d.t);
+            if (!progs[vs] || issued > progs[vs].issued) progs[vs] = { t: vs, f: fs, lows: PS.lows, issued: issued };
+          });
+          return;
+        }
         var f = parse(d.x); if (!f.length) return;
-        var v = validOf(d.x, d.t), fine = d.id === 'ASUS02', PC = bvFrontsParse(d.x), issued = Date.parse(d.t);
-        if (/^FSUS/.test(d.id) || /FORECAST/.test(d.x.slice(0, 200))){ if (!progs[v] || issued > progs[v].issued) progs[v] = { t: v, f: f, lows: PC.lows, issued: issued }; return; }
+        var v = validOf(d.x, d.t), fine = d.id === 'ASUS02', PC = bvFrontsParse(d.x);
         if (!byValid[v] || fine) byValid[v] = { t: v, f: f, lows: PC.lows, highs: PC.highs, fine: fine || (byValid[v] && byValid[v].fine) };
       });
       var every = Object.keys(byValid).map(function(k){ return byValid[k]; }).sort(function(a, b){ return b.t - a.t; }), runs = every.slice(0, 4);
