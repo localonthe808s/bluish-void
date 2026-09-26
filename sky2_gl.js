@@ -33,12 +33,13 @@
     '  if (abs(q.x) > 1.5 || q.y < -1.2 || q.y > 2.) return -1.;',   /* -1, not 0: 0 passes the soft threshold and each cell box drew a faint rectangle */
     '  vec2 s = (p - vec2(c.x, c.y)) / c.z * 2.2 + k.y * 17.;',
     '  float body = -1.;',
-    '  if (k.x > 4.5){',   /* LENTICULARIS (kind 5): a smooth lens / almond, pointed ends, 1-3 stacked plates, no cauliflower */
+    '  if (k.x > 4.5){',   /* LENTICULARIS (kind 5): SAUCERS -- a domed top, a flatter underside, ROUNDED ends, soft edges; 1-3 stacked plates (pointed lenses read as footballs) */
     '    float L = -1.;',
-    '    for (int i = 0; i < 3; i++){ float fi = float(i); if (fi > k.w) break; float oy = fi * .55, ox = (h1(vec2(fi, k.y)) - .5) * .25, sc = 1. - fi * .22;',
-    '      float x = (q.x - ox) / sc, t = max(0., 1. - x * x); t = t * sqrt(t);',   /* thickness: fat middle, pointed tips */
-    '      float yy = (q.y - .5 - oy) / max(.5 * t * sc, .02); L = max(L, min(1. - yy * yy, t * 4. - .3)); }',   /* t*4-.3: the tips END (a small positive floor drew hairline needles past them) */
-    '    L += (fbm(vec2(q.x * 6., q.y * 3.) + k.y * 7.) - .5) * .18;',   /* faint layering, not lumps */
+    '    for (int i = 0; i < 3; i++){ float fi = float(i); if (fi > k.w) break; float oy = fi * .5, ox = (h1(vec2(fi, k.y)) - .5) * .3, sc = 1. - fi * .22;',
+    '      float x = (q.x - ox) / sc, e = 1. - x * x; if (e <= 0.) continue;',   /* outside the plate: skip (never 0 -- that drew boxes) */
+    '      float hf = sqrt(e), dy = q.y - .35 - oy, yy = dy > 0. ? dy / (.55 * hf * sc) : dy / (.2 * hf * sc);',
+    '      L = max(L, (1. - yy * yy) * .4); }',   /* a gentle ramp: soft edges */
+    '    L += (fbm(vec2(q.x * 4., q.y * 2.) + k.y * 7.) - .5) * .2;',
     '    L -= 2. * (smoothstep(1.15, 1.45, abs(q.x)) + (1. - smoothstep(-1.15, -.85, q.y)));',
     '    return L * k.z;',
     '  }',
@@ -269,9 +270,9 @@
     (o.types || []).forEach(function(ty, ti){
       var c = Math.max(0, Math.min(100, ty.cover || 0)) / 100, R = rng(97 + ti * 131), g = ty.genus;
       if (g === 'Cirrus') bands.ci = [hz + sky * (ty.species === 'spissatus' ? 0.38 : 0.45), H - 4, 0.25 + 0.65 * c, 1 + Math.max(0, ['fibratus', 'uncinus', 'spissatus', 'intortus'].indexOf(ty.species))];
-      else if (g === 'Cirrostratus') veil.cs = [1, 0.2 + 0.2 * c, ty.species === 'fibratus' ? 1 : 0, 1];
+      else if (g === 'Cirrostratus') veil.cs = [1, 0.2 + 0.2 * c, ty.species === 'fibratus' ? 1 : 0, 0];   /* no halo arc (user: remove) */
       else if (g === 'Cirrocumulus' && ty.species === 'lenticularis'){   /* small high lenses */
-        for (var li = 0; li < 5; li++) add(20 + R() * (W - 40), hz + sky * (0.5 + 0.4 * R()), 15 + 9 * R(), 5.5 + 2.5 * R(), 5, 0.9, Math.floor(R() * 2.2));
+        for (var li = 0; li < 5; li++) add(20 + R() * (W - 40), hz + sky * (0.5 + 0.4 * R()), 14 + 8 * R(), 7 + 3 * R(), 5, 0.85, Math.floor(R() * 1.8));
       }
       else if (g === 'Cirrocumulus') bands.cc = [hz + sky * 0.14, H - 6, 0.3 + 0.6 * c, 1];
       else if (g === 'Altostratus') veil.as = [1, ty.species === 'opacus' ? 0.95 : 0.55 + 0.3 * c, ty.species === 'opacus' ? 1 : 0, 0];
@@ -299,14 +300,14 @@
         /* LENTICULARIS: a few big smooth lenses parked in the wave crests, some stacked into piles of plates */
         var acL = g === 'Altocumulus', nL = acL ? 3 + Math.round(2 * c) : 2 + Math.round(2 * c);
         for (var lj = 0; lj < nL; lj++){ var fl = lj / Math.max(1, nL - 1);
-          add(W * (0.12 + 0.76 * fl) + (R() - 0.5) * 24, acL ? hz + sky * (0.35 + 0.4 * R()) : hz + sky * (0.12 + 0.2 * R()), (acL ? 34 : 46) + 18 * R(), (acL ? 14 : 16) + 6 * R(), 5, 0.95, Math.floor(R() * 2.6)); }
+          add(W * (0.12 + 0.76 * fl) + (R() - 0.5) * 14,  acL ? hz + sky * (0.35 + 0.4 * R()) : hz + sky * (0.12 + 0.2 * R()), (acL ? 30 : 40) + 14 * R(), (acL ? 16 : 19) + 6 * R(), 5, 0.92, Math.floor(R() * 2.4)); }
       } else if (g === 'Altocumulus' && ty.species === 'castellanus'){
         /* CASTELLANUS: turrets rising in ROWS from one shared flat base, each row a line in perspective */
         for (var rw = 0; rw < 3; rw++){ var fr2 = 1 - rw * 0.33, yb2 = rowY(0.35 + 0.55 * fr2, hz + sky * 0.9), s3 = 0.35 + 0.65 * fr2;
           /* CLUSTERS of 2-4 turrets, each on its own short base patch (a full-width shelf read as a bookcase) */
           for (var xx = R() * 30 * s3; xx < W + 10; ){ var nT = 2 + Math.floor(R() * 3), tw2 = (9 + 5 * R()) * s3, cw = nT * tw2 * 1.3, yb3 = yb2 + (R() - 0.5) * 6 * s3;
             add(xx + cw / 2 - tw2 * 0.6, yb3 - 1.5 * s3, cw * 0.62, 6 * s3, 1, 0.95);
-            for (var tq = 0; tq < nT; tq++){ var tw3 = tw2 * (0.75 + 0.5 * R()); add(xx + tq * tw2 * 1.3, yb3 + R() * 2 * s3, tw3, tw3 * (1.4 + 1.1 * R()), 0, 0.97); }
+            for (var tq = 0; tq < nT; tq++){ var tw3 = tw2 * (0.75 + 0.5 * R()); add(xx + tq * tw2 * 1.3, yb3 + R() * 2 * s3, tw3 * 0.9, tw3 * (1.0 + 0.7 * R()), 2, 0.97, 1); }   /* round stacked heads (the congestus cell): tall cumulus heads were stretched vertically */
             xx += cw + (18 + 30 * R()) * s3; } }
       } else if (g === 'Altocumulus' && ty.species === 'floccus'){
         /* FLOCCUS: small ragged tufts scattered in perspective, each trailing virga */
