@@ -19939,10 +19939,14 @@ function dayRangeAround(d, days){
       for (var k in fields) { sums[k]=0; counts[k]=0; }
       for (var gi = 0; gi < hourly.time.length; gi++) {
         var ht = new Date(hourly.time[gi]);
-        if (ht >= goldPmS && ht <= endT) {
+        /* WEIGHTED TO THE SUNSET INSTANT (2026-09-26): the window held one hourly sample (often the one after sunset) or none --
+           and with none every input was null and the score fell to ~10. Now the samples within 90 min of sunset, weighted by
+           nearness (so it interpolates between the two hours around it) */
+        var _cT0 = (ssDate || goldPmS).getTime() + 5 * 60000, _wgt = 1 - Math.abs(ht.getTime() - _cT0) / (90 * 60000);
+        if (_wgt > 0) {
           for (var k2 in fields) {
             var arr = hourly[fields[k2]];
-            if (arr && typeof arr[gi]==='number') { sums[k2]+=arr[gi]; counts[k2]++; }
+            if (arr && typeof arr[gi]==='number') { sums[k2]+=arr[gi]*_wgt; counts[k2]+=_wgt; }
           }
         }
         // Pre-golden (4h before)
@@ -21302,7 +21306,7 @@ function dayRangeAround(d, days){
         window._ghTimingCache = { start:ghStart, end:ghEnd, isPM:isPM, isAm:ghIsAm, sunEvent:ghSunEvent };
 
         // ── Gather forecast data at golden hour window ──
-        var fc = {cT:0,cL:0,cM:0,cH:0,rh:0,pr:0,vis:0,temp:0,snow:0,cape:0,blh:0,fzl:0,w500:0,w700:0,w300:0,wd300:0,wd500:0,wd700:0,li:0,wc:0,dp:0,n:0};
+        var fc = {cT:0,cL:0,cM:0,cH:0,rh:0,pr:0,vis:0,temp:0,snow:0,cape:0,blh:0,fzl:0,w500:0,w700:0,w300:0,wd300:0,wd500:0,wd700:0,li:99,wc:0,dp:0,n:0};   /* li starts high: it is a min() (0 made it never positive) */
         var cn = {cT:0,cL:0,cM:0,cH:0,rh:0,pr:0,vis:99999,temp:50,snow:0,cape:0,blh:0,fzl:0,w500:0,w700:0,w300:0,wd300:0,wd500:0,wd700:0,li:0,wc:0,dp:0,n:0};
         // Use FULL hourly data for forecast (tomorrow's GH may be outside sliced day)
         var _ghHourly = window._hourlyData || hourly;
@@ -21353,7 +21357,7 @@ function dayRangeAround(d, days){
               fc.w500=Math.max(fc.w500,(_ghHourly.windspeed_500hPa?_ghHourly.windspeed_500hPa[qi]:0)||0);
               fc.w700=Math.max(fc.w700,(_ghHourly.windspeed_700hPa?_ghHourly.windspeed_700hPa[qi]:0)||0);
               fc.w300=Math.max(fc.w300,(_ghHourly.windspeed_300hPa?_ghHourly.windspeed_300hPa[qi]:0)||0);
-              fc.li=Math.min(fc.li,(_ghHourly.lifted_index?_ghHourly.lifted_index[qi]:99)||99);
+              var _liv=_ghHourly.lifted_index?_ghHourly.lifted_index[qi]:null; if(_liv!=null) fc.li=Math.min(fc.li,_liv);   /* a real 0 is a value, not missing */
               fc.dp+=(_ghHourly.dewpoint_2m?_ghHourly.dewpoint_2m[qi]:0)||0;
               fc.n++;
               // Closest-to-sun-event tracking (sample midpoint vs sun event)
@@ -28077,8 +28081,8 @@ function dayRangeAround(d, days){
             if(_hrsB>=2&&_hrsB<=8&&_ghHourly.pressure_msl){
               var _dp=(_ghHourly.pressure_msl[_fi]||0)-(_ghHourly.pressure_msl[_fi-1]||0);
               var _dWd=0;
-              if(_ghHourly.winddirection_10m){
-                _dWd=Math.abs((_ghHourly.winddirection_10m[_fi]||0)-(_ghHourly.winddirection_10m[_fi-1]||0));
+              if(_ghHourly.wind_direction_10m){   /* the API field is wind_direction_10m: the old name was undefined, so fronts never fired */
+                _dWd=Math.abs((_ghHourly.wind_direction_10m[_fi]||0)-(_ghHourly.wind_direction_10m[_fi-1]||0)); if(_dWd>180) _dWd=360-_dWd;
                 if(_dWd>180)_dWd=360-_dWd;
               }
               // Cold front: sharp pressure rise + wind shift
@@ -31927,7 +31931,7 @@ function dayRangeAround(d, days){
         }
 
         // ── GOLDEN HOUR IMPACT ──
-        var ssDate2 = window._dailyData && window._dailyData.sunset ? new Date(window._dailyData.sunset[0]) : null;
+        var ssDate2 = window._dailyData && window._dailyData.sunset ? new Date(window._dailyData.sunset[window._tlBaseDay == null ? 1 : window._tlBaseDay]) : null;   /* [0] is YESTERDAY (past_days=1) */
         var goldIdx2 = -1, ghLow2=null, ghMid2=null, ghHigh2=null, ghTotal2=null;
         if (hasL && ssDate2) {
           var goldStart2 = new Date(ssDate2.getTime() - 60*60000);
@@ -38048,7 +38052,8 @@ function dayRangeAround(d, days){
       "?latitude=" + LOCATION.lat +
       "&longitude=" + LOCATION.lon +
       "&current=us_aqi,us_aqi_pm2_5,us_aqi_pm10,us_aqi_nitrogen_dioxide,us_aqi_ozone,us_aqi_sulphur_dioxide,us_aqi_carbon_monoxide,pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone" +
-      "&hourly=us_aqi,pm2_5,pm10,ozone,nitrogen_dioxide,sulphur_dioxide,carbon_monoxide" +
+      "&hourly=us_aqi,pm2_5,pm10,ozone,nitrogen_dioxide,sulphur_dioxide,carbon_monoxide,aerosol_optical_depth,dust" +
+      "&timezone=" + encodeURIComponent(LOCATION.tz || 'auto') +   /* location-local times, as every reader parses them (without it: GMT, 4-5 h off) */
       "&forecast_days=5";
 
     fetchWithTimeout(url, null, 12000)
@@ -40043,6 +40048,11 @@ function dayRangeAround(d, days){
           if (loc.lat !== LOCATION.lat || loc.lon !== LOCATION.lon) return;
 
           window._wxRetry = 0;                 // a good load re-arms the budget
+          /* VISIBILITY UNITS (found 2026-09-26): with the imperial units this request asks for, Open-Meteo returns visibility in
+             FEET, and every reader here assumes METRES (/1000*0.621 -> miles) -- every visibility on the site read 3.3x too far.
+             Converted once, here, so all of them are right. */
+          try { if (data && data.hourly && data.hourly.visibility && data.hourly_units && data.hourly_units.visibility === 'ft' && !data._visM){
+            data.hourly.visibility = data.hourly.visibility.map(function(v){ return v == null ? v : v * 0.3048; }); data._visM = true; } } catch(_){}
           var hourly = data && data.hourly;
           var daily  = data && data.daily;
 
