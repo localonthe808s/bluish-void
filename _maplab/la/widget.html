@@ -114,6 +114,7 @@
   html.embed .wrap{ max-width:none; padding:0; }
 </style>
 <script>if (/[?&]embed=1/.test(location.search)) document.documentElement.className += ' embed';</script>
+<script src="/cloud_gl.js?v=3" defer></script>
 </head>
 <body>
 <div class="wrap">
@@ -268,6 +269,23 @@ var FRONT_TXT = {
    surface, so it cannot wander off and costs nothing. One scene runs at a time, capped at
    30 fps, asleep when off screen or hidden; its state is kept per kind so a card that is
    re-rendered picks up where it was instead of reseeding. */
+/* THE PAINTED LOOK (user 2026-09-25: "take a leap forward and really create something that look aesthetically more
+   striking and less cartoonish"). The physics is untouched; what changed is how it is laid down: noise-eroded cloud,
+   glowing front lines, hairline flow instead of dashes, curtains of rain, a glassy sea, layered silhouettes, halo type,
+   vignette and grain. Two shared textures, made once: a soft fbm alpha field (cloud erosion) and a fine grain. */
+function bvSceneTex(){
+  if (bvSceneTex.t) return bvSceneTex.t;
+  var mk = function(n){ var c = document.createElement('canvas'); c.width = c.height = n; return c; };
+  var N = mk(256), ng = N.getContext('2d'); ng.fillStyle = '#fff'; ng.fillRect(0, 0, 256, 256);
+  [[8, .55], [16, .35], [32, .22], [64, .14]].forEach(function(o){ var q = mk(o[0]), qg = q.getContext('2d'), id = qg.createImageData(o[0], o[0]);
+    for (var i = 0; i < id.data.length; i += 4){ id.data[i] = id.data[i + 1] = id.data[i + 2] = 0; id.data[i + 3] = Math.random() * 255; }
+    qg.putImageData(id, 0, 0); ng.imageSmoothingEnabled = true; ng.globalAlpha = o[1]; ng.globalCompositeOperation = 'destination-out'; ng.drawImage(q, 0, 0, 256, 256); });
+  ng.globalAlpha = 1; ng.globalCompositeOperation = 'source-over';
+  var Gr = mk(128), gg = Gr.getContext('2d'), gd = gg.createImageData(128, 128);
+  for (var j = 0; j < gd.data.length; j += 4){ var v = Math.random() * 255; gd.data[j] = gd.data[j + 1] = gd.data[j + 2] = v; gd.data[j + 3] = 255; }
+  gg.putImageData(gd, 0, 0);
+  return (bvSceneTex.t = { noise: N, grain: Gr });
+}
 function bvFrontScene(cv, kind, opts){
   opts = opts || {};
   var W = 224, H = 104, G = 86, dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -371,6 +389,10 @@ function bvFrontScene(cv, kind, opts){
         g.lineTo(x1, G); g.closePath();
         var cg = g.createLinearGradient(0, G - 60, 0, G); cg.addColorStop(0, c0); cg.addColorStop(1, c1);
         g.fillStyle = cg; g.fill();
+        /* a volume, not a block: light gathers along its surface and falls away inward */
+        g.save(); g.clip(); g.beginPath(); for (var ex = x0; ex <= x1; ex += 2) ex === x0 ? g.moveTo(ex, G - surf(ex, t)) : g.lineTo(ex, G - surf(ex, t));
+        g.strokeStyle = DN('#e3f0ff', '#6fa8e8', NF > 0.5 ? 0.16 : 0.30); g.lineWidth = 12 * MF; g.stroke();
+        g.strokeStyle = DN('#ffffff', '#9cc6f5', NF > 0.5 ? 0.20 : 0.32); g.lineWidth = 3.5 * MF; g.stroke(); g.restore();
       };
       /* a weak front is two airs that barely differ: the cold body pales toward the warm */
       g.globalAlpha = 0.45 + 0.55 * STR;
@@ -386,11 +408,14 @@ function bvFrontScene(cv, kind, opts){
     var zone = { COLD:[xn - 34, xn - 3, 0.95, 46], WARM:[xs + 8, xs + 118, 0.45, 30], STNRY:[xn - 34, xn + 14, 0.4, 24], OCFNT:[xc - 44, xc + 44, 0.7, 40], TROF:[W / 2 - 14, W / 2 + 14, 0.3, 12] }[kind];
     g.lineCap = 'round';
     var RK = RAIN == null ? 1 : [0, 0.35, 0.75, 1.1][RAIN];
+    /* a curtain first: rain seen at a distance is a veil, the drops are only its grain */
+    if (RK > 0){ var cz = g.createLinearGradient(0, G - 48, 0, G); cz.addColorStop(0, 'rgba(80,110,160,0)'); cz.addColorStop(0.5, (NF > 0.5 ? 'rgba(120,150,200,' : 'rgba(60,85,130,') + (0.10 * RK * zone[2]).toFixed(3) + ')'); cz.addColorStop(1, (NF > 0.5 ? 'rgba(120,150,200,' : 'rgba(60,85,130,') + (0.16 * RK * zone[2]).toFixed(3) + ')');
+      g.fillStyle = cz; g.beginPath(); g.moveTo(zone[0] + 4, G - 46); g.lineTo(zone[1] + 4, G - 46); g.lineTo(zone[1] - 3, G); g.lineTo(zone[0] - 3, G); g.closePath(); g.fill(); }
     st.rain.forEach(function(r, i){
       if (i / st.rain.length > zone[3] / 46 * RK) return;
       var x = lerp(zone[0], zone[1], r.u), top = G - (kind === 'TROF' ? 46 : Math.max(24, surf(x, t) + 16)) , fall = (r.v + t * r.s * (kind === 'COLD' ? 1.5 : 0.9)) % 1;
       var y = lerp(top, G, fall), len = kind === 'COLD' ? 6 : 3.5;
-      g.strokeStyle = (NF > 0.5 ? 'rgba(147,197,253,' : 'rgba(37,99,235,') + (zone[2] * (0.35 + 0.65 * Math.sin(fall * Math.PI))).toFixed(2) + ')'; g.lineWidth = kind === 'COLD' ? 1.1 : 0.8;
+      g.strokeStyle = (NF > 0.5 ? 'rgba(147,197,253,' : 'rgba(37,99,235,') + (zone[2] * (0.35 + 0.65 * Math.sin(fall * Math.PI))).toFixed(2) + ')'; g.lineWidth = (kind === 'COLD' ? 0.8 : 0.55) * MF;
       g.beginPath(); g.moveTo(x, y); g.lineTo(x - len * 0.3, Math.min(G, y + len)); g.stroke();
     });
     /* COLD AIR: a rolling head behind a cold front, a slow drift elsewhere */
@@ -405,7 +430,8 @@ function bvFrontScene(cv, kind, opts){
         p.x += 5 * p.s * dt; if (p.x > W + 6) p.x = xs + 12;
         x = p.x; y = Math.min(p.b, surf(x, t) - 4); if (y < 2 || x < xs + 8) return; x2 = x - 5; y2 = y;
       } else return;
-      g.strokeStyle = DN('#1e40af', '#93c5fd', NF > 0.5 ? 0.7 : 0.55); g.lineWidth = 1.2;
+      var lg0 = g.createLinearGradient(x2, G - y2, x, G - y); lg0.addColorStop(0, DN('#1e40af', '#bfdcff', 0)); lg0.addColorStop(1, DN('#1e40af', '#bfdcff', NF > 0.5 ? 0.75 : 0.55));
+      g.strokeStyle = lg0; g.lineWidth = 0.7 * MF;
       g.beginPath(); g.moveTo(x2, G - y2); g.lineTo(x, G - y); g.stroke();
     });
     /* WARM AIR: streaks while it is clear air, soft white once it has been lifted into cloud */
@@ -420,7 +446,7 @@ function bvFrontScene(cv, kind, opts){
         else { d = 2 + 70 * (q - 0.72) / 0.28; y = 58 + 6 * Math.sin((q - 0.72) * 9); }
         var xx = W / 2 + side * d;
         if (q >= 0.62) puffs.push([xx, G - y, (6 + 3 * Math.sin(q * 20 + p.b)) * (RAIN === 0 ? 0.6 : 1), (RAIN === 0 ? 0.14 : 0.45) * (1 - Math.max(0, (q - 0.85) / 0.15))]);
-        else { g.strokeStyle = 'rgba(71,85,105,.6)'; g.lineWidth = 1.2; g.beginPath(); g.moveTo(xx + side * 5, G - y); g.lineTo(xx, G - y - (q >= 0.5 ? 4 : 0)); g.stroke(); }
+        else { var tl = g.createLinearGradient(xx + side * 7, G - y, xx, G - y - (q >= 0.5 ? 5 : 0)); tl.addColorStop(0, DN('#334155', '#b8c7dc', 0)); tl.addColorStop(1, DN('#334155', '#b8c7dc', NF > 0.5 ? 0.6 : 0.5)); g.strokeStyle = tl; g.lineWidth = 0.65 * MF; g.beginPath(); g.moveTo(xx + side * 7, G - y); g.lineTo(xx, G - y - (q >= 0.5 ? 5 : 0)); g.stroke(); }
         return;
       }
       if (kind === 'STNRY'){ p.x0 = p.x0 == null ? xn - 74 + rnd() * (W - xn + 74) : p.x0; p.x = p.x0 - 9 * Math.sin(t * 0.8 * p.s + p.b); }
@@ -442,7 +468,8 @@ function bvFrontScene(cv, kind, opts){
            Every other parcel, a longer and fainter stroke: it reads as one flow, not a swarm. */
         if (SC > 1 && (Math.floor(p.b * 7) % 2)) return;
         var dir = U < 0 ? 1 : -1, sl = SC > 1 ? 11 : 7, b2 = warmY({ x: p.x + dir * sl, b: p.b }, t);
-        g.strokeStyle = DN('#c2410c', '#fb923c', (NF > 0.5 ? 0.78 : 0.62) * (SC > 1 ? 0.55 : 1)); g.lineWidth = 1.2 * (SC > 1 ? 0.8 : 1);
+        var lg1 = g.createLinearGradient(p.x + dir * sl, G - b2.y, p.x, y1); lg1.addColorStop(0, DN('#9a3412', '#ffb27a', 0)); lg1.addColorStop(1, DN('#9a3412', '#ffc08f', (NF > 0.5 ? 0.62 : 0.5) * (SC > 1 ? 0.8 : 1)));
+        g.strokeStyle = lg1; g.lineWidth = 0.7 * MF;
         g.beginPath(); g.moveTo(p.x + dir * sl, G - b2.y); g.lineTo(p.x, y1); g.stroke();
       }
     });
@@ -451,6 +478,19 @@ function bvFrontScene(cv, kind, opts){
       if (LV.flash === true && t > st.nextFlash){ st.flash = 0.16; st.nextFlash = t + 3.5 + rnd() * 4; st.bolt = [xn + 2 + rnd() * 10, rnd()]; }
       if (st.flash > 0) st.flash -= dt;
     }
+    /* THE CLOUD, ERODED: puffs go to an offscreen, the noise field bites into them (drifting slowly, so the edges
+       stream), and the result is laid down once -- soft structure instead of smooth circles */
+    /* THE GPU CLOUD (2026-09-25, from NCAR's CM1 render: "we're learning something the cloud artworks for golden hour never
+       could"): the same puffs, handed to bvCloudGL as the shape of a deck -- domes, light through it, warm tops and cool
+       shade -- and the painted path below only where WebGL is not to be had. The high wisps stay strokes. */
+    var glP = (window.bvCloudGL && bvCloudGL.ok()) ? puffs.filter(function(q){ return !q[4]; }) : null;
+    if (glP && glP.length){ var stp = Math.max(1, Math.ceil(glP.length / 48)), PL = [];
+      for (var pi2 = 0; pi2 < glP.length && PL.length < 48; pi2 += stp){ var q2 = glP[pi2]; PL.push([q2[0], H - q2[1], q2[2] * 1.3, Math.min(1, 0.45 + q2[3] * 1.3)]); }
+      bvCloudGL(g, { W: W, H: H, ppu: Math.min(3, dpr), t: t, puffs: PL, night: NF, flash: st.flash > 0 ? 0.7 : 0, ground: H - G, base: 0, h: 1, hw: 1, cx: 0, dens: 1 });
+      puffs.forEach(function(q){ if (!q[4]) return; g.strokeStyle = 'rgba(255,255,255,' + (q[3] + 0.3) + ')'; g.lineWidth = 0.9 * MF; g.beginPath(); g.moveTo(q[0] - 7, q[1] + 1.5); g.quadraticCurveTo(q[0], q[1] - 2, q[0] + 8, q[1] - 1); g.stroke(); });
+    } else {
+    var pOff = st.pOff || (st.pOff = document.createElement('canvas')); if (pOff.width !== W * dpr || pOff.height !== H * dpr){ pOff.width = W * dpr; pOff.height = H * dpr; }
+    var gMain = g; g = pOff.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
     puffs.forEach(function(q){
       if (q[4]) return;
       var sg = g.createRadialGradient(q[0], q[1] + 3, 0, q[0], q[1] + 3, q[2] * 1.5);
@@ -466,6 +506,10 @@ function bvFrontScene(cv, kind, opts){
       rg.addColorStop(0, 'rgba(' + cc.join(',') + ',' + Math.min(1, q[3] + lit + 0.25) + ')'); rg.addColorStop(1, 'rgba(' + cc.join(',') + ',0)');
       g.fillStyle = rg; g.beginPath(); g.arc(q[0], q[1], q[2] * 1.7, 0, 6.3); g.fill();
     });
+    var TX = bvSceneTex(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalCompositeOperation = 'destination-in';
+    var nw = pOff.width * 1.4, nx0 = -((t * 6 * dpr) % (nw - pOff.width)); g.globalAlpha = 1; g.drawImage(TX.noise, nx0, 0, nw, pOff.height * 1.2);
+    g.globalCompositeOperation = 'source-over'; g = gMain; g.setTransform(1, 0, 0, 1, 0, 0); g.drawImage(pOff, 0, 0); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
     /* THE CUMULONIMBUS, WITH ITS ANATOMY (user 2026-09-20: "improve your cumulonimbus structuring").
        It was a smear of soft puffs. A real one is built of parts, and which parts it has says how
        strong the convection is -- so the stage follows the radar along this line:
@@ -501,6 +545,14 @@ function bvFrontScene(cv, kind, opts){
       cx -= 15 * a * scale;                                  // an ageing cell is left behind by the front
       var alpha = 1 - die, lift = die * Ht * 0.45;           // dying: it fades, and the foot of it rains away first
       if (alpha <= 0.02) return;
+      if (window.bvCloudGL && bvCloudGL.ok()){               /* the GPU tower: the same life, drawn as a volume */
+        var rk0 = stage >= 1 ? ease((a - 0.30) / 0.2) * (1 - die * 0.7) : 0;
+        bvCloudGL(g, { W: W, H: H, ppu: Math.min(3, dpr), t: t + seedK * 40, cx: cx, base: (H - baseY) + die * 6, h: Ht * (1 - die * 0.25), hw: hw,
+          lean: stage >= 2 ? 1 : 0.5, anvil: spread * (1 - die * 0.5), anvR: (stage >= 3 ? 70 : 32) * scale * spread + 1, anvL: (stage >= 3 ? 32 : 15) * scale * spread + 1,
+          rain: rk0 * (RAIN == null ? 0.8 : [0, 0.4, 0.75, 1.1][RAIN]), night: NF, flash: st.flash > 0 ? 1 : 0, ground: H - G, dens: 1 - die * 0.85 });
+        if (a > 0.35 && a < 0.8) st.cbBase = [cx, baseY];
+        return;
+      }
       /* rain: none while it climbs, hardest when mature, tailing off */
       var rainK = stage >= 1 ? ease((a - 0.30) / 0.2) * (1 - die * 0.7) : 0;
       if (rainK > 0.02){
@@ -548,7 +600,9 @@ function bvFrontScene(cv, kind, opts){
       var main = g; g = off.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
       g.save(); g.beginPath(); g.rect(-10, -10, W + 20, baseY - lift + 10.5); g.clip();               // the base is FLAT: that level is where the air condenses
       col.forEach(function(o){ g.fillStyle = shade(o.v, false); g.beginPath(); g.arc(o.x, o.y, o.r, 0, 6.3); g.fill(); });
-      col.forEach(function(o){ g.fillStyle = shade(Math.min(1, o.v + 0.1), true); g.beginPath(); g.arc(o.x - o.r * 0.20, o.y - o.r * 0.24, o.r * 0.74, 0, 6.3); g.fill(); });
+      col.forEach(function(o){ var hx0 = o.x - o.r * 0.32, hy0 = o.y - o.r * 0.36, hg = g.createRadialGradient(hx0, hy0, 0, hx0, hy0, o.r * 1.05);   /* LIT LIKE A SPHERE, not a paler disc on a darker one (2026-09-25): a soft highlight falling off into the lobe */
+            hg.addColorStop(0, shade(Math.min(1, o.v + 0.18), true)); hg.addColorStop(0.55, shade(Math.min(1, o.v + 0.05), true).replace('rgb(', 'rgba(').replace(')', ',.45)')); hg.addColorStop(1, shade(o.v, false).replace('rgb(', 'rgba(').replace(')', ',0)'));
+            g.fillStyle = hg; g.beginPath(); g.arc(o.x, o.y, o.r, 0, 6.3); g.fill(); });
       if (stage >= 3 && spread > 0.3 && die < 0.4){ var ox = cx - 8 * scale, oy = topY - 1 + 0.8 * Math.sin(t * 0.9), ok2 = ease((spread - 0.3) * 2.5) * (1 - die * 2.5);
         [[0, 0, 5.2], [-4.2, 1.6, 3.6], [4.4, 1.8, 3.4]].forEach(function(c){ g.fillStyle = shade(1, false); g.beginPath(); g.arc(ox + c[0], oy + c[1] + (1 - ok2) * 5, c[2] * scale * ok2, 0, 6.3); g.fill(); g.fillStyle = shade(1, true); g.beginPath(); g.arc(ox + c[0] - 1, oy + c[1] - 1.1 + (1 - ok2) * 5, c[2] * scale * 0.62 * ok2, 0, 6.3); g.fill(); }); }
       var sh = g.createLinearGradient(cx - hw * 1.2, 0, cx + hw * 1.3, 0); sh.addColorStop(0, 'rgba(60,76,110,0)'); sh.addColorStop(0.5, 'rgba(60,76,110,0)'); sh.addColorStop(1, NF > 0.5 ? 'rgba(6,10,20,.5)' : 'rgba(60,76,110,.42)');
@@ -556,6 +610,8 @@ function bvFrontScene(cv, kind, opts){
       var sv = g.createLinearGradient(0, baseY - Ht * 0.34, 0, baseY); sv.addColorStop(0, 'rgba(52,64,92,0)'); sv.addColorStop(1, NF > 0.5 ? 'rgba(6,10,20,.55)' : 'rgba(52,64,92,.5)');
       g.fillStyle = sv; g.fillRect(-10, -10, W + 20, H + 20);
       g.globalCompositeOperation = 'source-over'; g.restore();
+      g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalCompositeOperation = 'destination-out'; g.globalAlpha = 0.5;
+      var TXc = bvSceneTex(); g.drawImage(TXc.noise, -((t * 4 * dpr) % (off.width * 0.3)), 0, off.width * 1.3, off.height * 1.1); g.restore();   /* texture into the lobes */
       g = main; g.save(); g.globalAlpha = alpha; g.drawImage(off, 0, 0, W, H); g.restore();
       /* scud under a live base */
       if (die < 0.5){ g.fillStyle = NF > 0.5 ? 'rgba(14,20,32,' + (0.85 * alpha).toFixed(2) + ')' : 'rgba(58,68,88,' + (0.8 * alpha).toFixed(2) + ')';
@@ -567,6 +623,11 @@ function bvFrontScene(cv, kind, opts){
     /* fair-weather cumulus for a dry line: they too are born, swell and thin out */
     var drawHumilis = function(cx){
       var baseY = G - 29;
+      if (window.bvCloudGL && bvCloudGL.ok()){               /* small GPU cells, born, swelling, thinning out */
+        for (var gi = 0; gi < 3; gi++){ var ag = ((t * 0.06 + gi * 0.33) % 1), swg = Math.sin(ag * Math.PI); if (swg < 0.05) continue;
+          bvCloudGL(g, { W: W, H: H, ppu: Math.min(3, dpr), t: t + gi * 17, cx: cx - 28 + gi * 26 - 10 * ag, base: H - baseY, h: 3 + 8 * swg, hw: 4 + 3 * swg, lean: 0, anvil: 0, rain: 0, night: NF, ground: H - G, dens: Math.min(1, swg * 1.5) }); }
+        return;
+      }
       for (var hi = 0; hi < 4; hi++){
         var age = ((t * 0.06 + hi * 0.27) % 1), sw = Math.sin(age * Math.PI), hx = cx - 30 + hi * 19 - 10 * age, hr = (4.4 + (hi % 2)) * (0.35 + 0.65 * sw);
         g.save(); g.globalAlpha = Math.min(1, sw * 1.6); g.beginPath(); g.rect(hx - 14, baseY - 14, 28, 14); g.clip();
@@ -581,6 +642,12 @@ function bvFrontScene(cv, kind, opts){
        over the nose of the cold air, and it slopes UP AND BACK from there to the storm's base,
        with the rain behind it. So it is anchored at `nose`, whatever the cells above are doing. */
     var drawShelf = function(nose, k){
+      if (window.bvCloudGL && bvCloudGL.ok()){               /* the shelf as GPU cloud: a wedge of lobes from the base down to its tip over the gust front */
+        var by0 = G - 29, PL = [];
+        for (var si2 = 0; si2 < 9; si2++){ var u = si2 / 8, sx3 = (nose - 24) + 28 * u, sy3 = by0 - 1 + (10.5) * Math.pow(u, 1.6); PL.push([sx3, H - sy3, 4.4 - 2.2 * u, k]); }
+        bvCloudGL(g, { W: W, H: H, ppu: Math.min(3, dpr), t: t + 91, puffs: PL, night: NF, flash: st.flash > 0 ? 0.6 : 0, ground: H - G, base: 0, h: 1, hw: 1, cx: 0, dens: 1 });
+        return;
+      }
       var baseY = G - 29, tipX = nose + 4, tipY = baseY + 9.5, backX = nose - 24, sg2 = g.createLinearGradient(0, baseY - 5, 0, tipY + 1);
       sg2.addColorStop(0, NF > 0.5 ? 'rgba(74,88,116,.95)' : 'rgba(176,186,204,.96)'); sg2.addColorStop(1, NF > 0.5 ? 'rgba(12,18,30,.95)' : 'rgba(62,74,98,.96)');
       g.save(); g.globalAlpha = k; g.fillStyle = sg2; g.beginPath();
@@ -618,17 +685,24 @@ function bvFrontScene(cv, kind, opts){
         g.beginPath(); var first = true;
         for (var x = x0; x <= x1; x += 2){ var h = surf(x, t); if (h <= 0 && kind !== 'OCFNT') continue; first ? g.moveTo(x, G - h) : g.lineTo(x, G - h); first = false; }
         if (kind === 'COLD' || kind === 'STNRY') g.lineTo(kind === 'COLD' ? xn : xn - 10 + 4 * Math.sin(t * 0.7), G);
-        g.setLineDash(dash || []); g.strokeStyle = col; g.lineWidth = 2.2 * MF; g.lineJoin = 'round'; g.stroke(); g.setLineDash([]);
+        g.setLineDash(dash || []); g.lineJoin = 'round';
+      /* LIGHT, NOT INK: a wide faint glow, a narrower one, then a fine pale core */
+      g.save(); g.globalCompositeOperation = NF > 0.4 ? 'lighter' : 'source-over'; g.strokeStyle = col; g.globalAlpha = 0.16; g.lineWidth = 7 * MF; g.stroke(); g.globalAlpha = 0.35; g.lineWidth = 2.8 * MF; g.stroke(); g.restore();
+      g.strokeStyle = 'rgba(255,255,255,.85)'; g.lineWidth = 0.8 * MF; g.stroke(); g.setLineDash([]);
       };
-      g.shadowColor = COLC[kind]; g.shadowBlur = 6;
-      if (kind === 'WARM'){ g.beginPath(); g.moveTo(xs, G); for (var x3 = xs; x3 <= W + 2; x3 += 2) g.lineTo(x3, G - surf(x3, t)); g.strokeStyle = COLC.WARM; g.lineWidth = 2.2 * MF; g.stroke(); }
+      g.shadowBlur = 0;
+      if (kind === 'WARM'){ g.beginPath(); g.moveTo(xs, G); for (var x3 = xs; x3 <= W + 2; x3 += 2) g.lineTo(x3, G - surf(x3, t));
+      g.save(); g.globalCompositeOperation = NF > 0.4 ? 'lighter' : 'source-over'; g.strokeStyle = COLC.WARM; g.globalAlpha = 0.16; g.lineWidth = 7 * MF; g.stroke(); g.globalAlpha = 0.35; g.lineWidth = 2.8 * MF; g.stroke(); g.restore();
+      g.strokeStyle = 'rgba(255,255,255,.85)'; g.lineWidth = 0.8 * MF; g.stroke(); }
       else if (kind === 'OCFNT'){ strokeSurf(-2, W + 2, COLC.OCFNT); g.beginPath(); g.moveTo(xc, G - 18); g.lineTo(xc, G); g.stroke(); }
       else if (kind === 'STNRY'){ strokeSurf(-2, W, '#3b82f6'); g.shadowBlur = 0; strokeSurf(-2, W, '#ef4444', [7, 7]); }
       else strokeSurf(-2, W, COLC.COLD);
       g.shadowBlur = 0;
     } else {
-      g.setLineDash([4, 3]); g.strokeStyle = '#a9742f'; g.lineWidth = 2; g.beginPath(); g.moveTo(W / 2, G); g.lineTo(W / 2, G - 44); g.stroke(); g.setLineDash([]);
-      g.strokeStyle = 'rgba(71,85,105,.75)'; g.lineWidth = 1.2; g.beginPath(); g.moveTo(-2, 12); g.quadraticCurveTo(W / 2, 30 + 3 * Math.sin(t * 1.3), W + 2, 12); g.stroke();
+      g.beginPath(); g.moveTo(W / 2, G); g.lineTo(W / 2, G - 44);   /* the trough's axis as light, like the fronts */
+          g.save(); g.globalCompositeOperation = NF > 0.4 ? 'lighter' : 'source-over'; g.strokeStyle = '#d8a25c'; g.globalAlpha = 0.18; g.lineWidth = 7 * MF; g.stroke(); g.globalAlpha = 0.38; g.lineWidth = 2.6 * MF; g.stroke(); g.restore();
+          g.setLineDash([3 * MF, 3 * MF]); g.strokeStyle = 'rgba(255,236,200,.85)'; g.lineWidth = 0.8 * MF; g.stroke(); g.setLineDash([]);
+      g.strokeStyle = DN('#475569', '#8fa3c0', NF > 0.5 ? 0.45 : 0.4); g.lineWidth = 0.6 * MF; g.beginPath(); g.moveTo(-2, 12); g.quadraticCurveTo(W / 2, 30 + 3 * Math.sin(t * 1.3), W + 2, 12); g.stroke();
     }
     /* THE LAND, scrolling under the front; each silhouette takes the colour of the air over it */
     var airAt = function(x){                               // 0 warm .. 1 cold, at ground level
@@ -661,32 +735,43 @@ function bvFrontScene(cv, kind, opts){
        coastline instead of vanishing whole (user 2026-09-25: "the buildings flash a bit") */
     var clipped = false;
     if (SEA){ g.save(); g.beginPath(); var l0 = null; for (var cx2 = 0; cx2 <= W + 2; cx2 += 2){ var ld = !seaAt(cx2 + 1); if (ld && l0 == null) l0 = cx2; if ((!ld || cx2 >= W) && l0 != null){ g.rect(l0, -20, cx2 - l0 + (cx2 >= W ? 20 : 0), G + 20); l0 = null; } } g.clip(); clipped = true; }
+    /* A FAR RANK FIRST, fainter and slower: depth by parallax and haze */
+    var o2 = ((st.off * 0.45 % TILE) + TILE) % TILE;
+    for (var rq = -1; rq <= 1; rq++) st.land.forEach(function(b, bi){ var x = b.x * 1.3 + 7 + o2 + rq * TILE * 1.3; if (x < -14 || x > W + 14 || b.palm) return;
+      g.fillStyle = kind === 'TROF' ? DN('#aab6c6', '#1a1c26', NF > 0.5 ? 0.9 : 0.4) : DN('#c7a58c', '#1a1c26', NF > 0.5 ? 0.9 : 0.42);   /* the sky's own haze, not a grey box */ g.fillRect(x, G - b.h * 0.72, b.w * 0.9, b.h * 0.72); });
     for (var rep = -1; rep <= 1; rep++) st.land.forEach(function(b){
       var x = b.x + o + rep * TILE; if (x < -14 || x > W + 14) return;
       var c = airAt(x), wet = x > zone[0] && x < zone[1];
       wet = wet && (RAIN == null || RAIN > 0);
-      g.fillStyle = NF > 0.6 ? '#080c14' : wet ? '#1f2937' : c > 0.8 ? '#2f4363' : c > 0.5 ? '#3d4d66' : '#5a4636';
+      g.fillStyle = NF > 0.6 ? '#07090f' : wet ? '#1b222e' : c > 0.8 ? '#253650' : c > 0.5 ? '#2f3b50' : '#3b312c';   /* deeper, quieter silhouettes */
       if (b.palm){
         g.strokeStyle = g.fillStyle; g.lineWidth = 1.1; g.beginPath(); g.moveTo(x, G); g.quadraticCurveTo(x + 1.5, G - b.h * 0.6, x + 0.5, G - b.h - 4); g.stroke();
         for (var f = 0; f < 5; f++){ var an = -2.6 + f * 0.52; g.beginPath(); g.moveTo(x + 0.5, G - b.h - 4); g.quadraticCurveTo(x + 0.5 + Math.cos(an) * 3, G - b.h - 6.5, x + 0.5 + Math.cos(an) * 5.5, G - b.h - 3 + Math.abs(Math.cos(an)) * 2); g.stroke(); }
       } else {
         g.fillRect(x, G - b.h, b.w, b.h);
         if (b.spire){ g.fillRect(x + b.w / 2 - 0.6, G - b.h - 6, 1.2, 6); }
-        if (NF > 0.45 || (!wet && c < 0.5)){ g.fillStyle = 'rgba(253,230,138,' + (NF > 0.45 ? 0.95 : 0.85) + ')'; for (var wy = G - b.h + 2; wy < G - 2; wy += 3.4) g.fillRect(x + 1.4 + ((wy * 7 + b.x) % 3), wy, 1, 1.2); }
+        if (NF > 0.45){ g.fillStyle = 'rgba(255,214,140,' + (0.35 + 0.45 * NF).toFixed(2) + ')'; for (var wy = G - b.h + 2; wy < G - 2; wy += 3.4) if (((wy * 13 + b.x * 7) | 0) % 3) g.fillRect(x + 1.4 + ((wy * 7 + b.x) % 3), wy, 0.6, 0.8); }   /* lit windows only at night, sparse and small */
       }
     });
     if (clipped) g.restore();
-    g.fillStyle = DN('#4b5b3c', '#121a12'); g.fillRect(0, G, W, 2);
-    g.fillStyle = DN('#6b4a2f', '#1c140d'); g.fillRect(0, G + 2, W, H - G - 2);
+    /* the earth: dark, with a thin lit horizon -- not a brown slab under a green stripe */
+    var eg = g.createLinearGradient(0, G, 0, H); eg.addColorStop(0, DN('#2e2a26', '#0d0c0b')); eg.addColorStop(1, DN('#171513', '#050505'));
+    g.fillStyle = eg; g.fillRect(0, G, W, H - G);
+    g.fillStyle = DN('#c9b9a0', '#3b4452', NF > 0.5 ? 0.5 : 0.55); g.fillRect(0, G, W, 0.45 * MF);
     if (SEA){                                             // the water: each stretch in ONE piece (2-unit strips left seams), a lit surface, a slow swell
       var runs = [], r0 = null;
       for (var wx = 0; wx <= W; wx += 2){ var sw0 = seaAt(wx + 1); if (sw0 && r0 == null) r0 = wx; if ((!sw0 || wx >= W) && r0 != null){ runs.push([r0, wx]); r0 = null; } }
       runs.forEach(function(R){
-        var wg = g.createLinearGradient(0, G + 0.6, 0, H - 6); wg.addColorStop(0, DN('#3b82c4', '#16406a')); wg.addColorStop(1, DN('#1e4f7d', '#0a1c30'));
-        g.fillStyle = wg; g.fillRect(R[0], G + 0.6, R[1] - R[0], H - G - 6.6);   /* a basin just below the ground line: standing above it (G - 1.5) read as boxes between stretches of land */
-        g.fillStyle = DN('#dbeafe', '#93c5fd', NF > 0.5 ? 0.35 : 0.6); g.fillRect(R[0], G + 0.6, R[1] - R[0], 0.45);   /* DN takes HEX: rgba strings came out saturated blue */
-        g.strokeStyle = DN('#ffffff', '#aacdeb', NF > 0.5 ? 0.3 : 0.5); g.lineWidth = 0.6;
-        for (var sx2 = R[0] + ((t * 5) % 9); sx2 < R[1] - 3; sx2 += 9){ var yy = G + 2.5 + ((sx2 * 13) % 7) * 0.8; if (yy > H - 8) continue; g.beginPath(); g.moveTo(sx2, yy); g.quadraticCurveTo(sx2 + 1.5, yy - 0.8, sx2 + 3, yy); g.stroke(); }
+        /* GLASS, NOT BOXES: the sky's horizon colour in the surface, darkening with depth, soft at the shores, and a few
+           long faint sheen lines drifting -- no drawn waves */
+        var wg = g.createLinearGradient(0, G, 0, H - 5); wg.addColorStop(0, DN('#a8bfd2', '#22364e')); wg.addColorStop(0.18, DN('#4f7da6', '#10263f')); wg.addColorStop(1, DN('#16324f', '#040b16'));
+        g.fillStyle = wg; g.fillRect(R[0], G, R[1] - R[0], H - G - 5);
+        [[R[0], 1], [R[1], -1]].forEach(function(e){ if (e[0] <= 0 || e[0] >= W) return; var sg3 = g.createLinearGradient(e[0], 0, e[0] + e[1] * 4, 0); sg3.addColorStop(0, DN('#2e2a26', '#0d0c0b', 0.9)); sg3.addColorStop(1, DN('#2e2a26', '#0d0c0b', 0)); g.fillStyle = sg3; g.fillRect(Math.min(e[0], e[0] + e[1] * 4), G + 0.5, 4, H - G - 5.5); });
+        g.fillStyle = DN('#ffffff', '#cfe0f5', NF > 0.5 ? 0.35 : 0.7); g.fillRect(R[0], G, R[1] - R[0], 0.4 * MF);
+        g.lineWidth = 0.35 * MF;
+        for (var sl2 = 0; sl2 < 7; sl2++){ var yy = G + 1.6 + sl2 * sl2 * 0.28, len2 = 6 + ((sl2 * 37) % 11), xx0 = R[0] + (((sl2 * 53 + t * (4 + sl2)) % (R[1] - R[0] + len2)) - len2);
+          if (yy > H - 7) break; var a0 = Math.max(R[0], xx0), a1 = Math.min(R[1], xx0 + len2); if (a1 <= a0) continue;
+          g.strokeStyle = DN('#ffffff', '#9fc2e6', (NF > 0.5 ? 0.22 : 0.4) * (1 - sl2 / 8)); g.beginPath(); g.moveTo(a0, yy); g.lineTo(a1, yy); g.stroke(); }
       });
     }
     /* A DISTANCE SCALE on the ground (user 2026-09-25): ticks every 100 mi out from the front on the scene's own
@@ -694,10 +779,11 @@ function bvFrontScene(cv, kind, opts){
     if (kind !== 'TROF'){ g.fillStyle = 'rgba(255,252,244,.55)'; g.font = '700 ' + (5.6 * TF) + 'px system-ui,sans-serif';
       try { g.letterSpacing = '0px'; } catch(e){}
       [-1, 1].forEach(function(sd){ for (var mt = 100; mt <= 800; mt += 100){ var tx = fxG + sd * (12 + mt / 4); if (tx < 3 || tx > W - 3) break;
-        g.fillRect(tx - 0.35, G + 2, 0.7, 3.2); if (mt === 100 && sd === (LV.pin && LV.pin.dir ? -LV.pin.dir : 1)){ var lb = '100 MI'; g.fillText(lb, tx - g.measureText(lb).width / 2, G + 5 + 6 * TF); } } });
+        g.fillRect(tx - 0.2 * MF, G + 1.5, 0.4 * MF, 2.6); if (mt === 100 && sd === (LV.pin && LV.pin.dir ? -LV.pin.dir : 1)){ var lb = '100 MI'; g.fillText(lb, tx - g.measureText(lb).width / 2, G + 5 + 6 * TF); } } });
     }
     /* the temperature across the line, as the ground feels it */
-    for (var xr = 0; xr < W; xr += 2){ var c2 = airAt(xr); g.fillStyle = c2 > 0.8 ? '#60a5fa' : c2 > 0.5 ? '#93c5fd' : kind === 'TROF' ? '#cbd5e1' : '#fb923c'; g.fillRect(xr, H - 5, 2, 3); }
+    var tg = g.createLinearGradient(0, 0, W, 0); for (var xr = 0; xr <= W; xr += 8){ var c2 = airAt(Math.min(W - 1, xr)); tg.addColorStop(xr / W, c2 > 0.8 ? '#5b9cf2' : c2 > 0.5 ? '#9cc3ef' : kind === 'TROF' ? '#b8c2d0' : '#f39a5b'); }
+    g.fillStyle = tg; g.globalAlpha = 0.85; g.fillRect(0, H - 3.2, W, 1.6); g.globalAlpha = 1;   /* the air at the ground, as one smooth band */
     /* YOU ARE HERE: the city, on the side of the front it is really on, as far off as it really
        is (a px is about 4 mi; past the edge it is held there and the number says the rest). It
        does not scroll with the land: the land is how the front TRAVELS, the pin is where you
@@ -705,18 +791,22 @@ function bvFrontScene(cv, kind, opts){
     var fx0 = kind === 'WARM' ? xs : kind === 'OCFNT' ? xc : kind === 'TROF' ? W / 2 : kind === 'STNRY' ? xn - 10 : xn;
     if (LV.pin && LV.pin.dir){
       var px0 = fx0 + LV.pin.dir * Math.max(12, Math.min(LV.pin.dir > 0 ? W - fx0 - 10 : fx0 - 10, 12 + LV.pin.mi / 4));
-      g.strokeStyle = NF > 0.5 ? '#fff' : '#1b2340'; g.lineWidth = 1.3; g.beginPath(); g.moveTo(px0, G); g.lineTo(px0, G - 17); g.stroke();
-      g.fillStyle = '#2B22F4'; g.beginPath(); g.moveTo(px0, G - 17); g.lineTo(px0 + 7 * (px0 > W - 40 ? -1 : 1), G - 14); g.lineTo(px0, G - 11); g.closePath(); g.fill();
-      g.fillStyle = '#fff'; g.beginPath(); g.arc(px0, G, 1.8, 0, 6.3); g.fill();
+      var pl0 = g.createLinearGradient(0, G - 18, 0, G); pl0.addColorStop(0, NF > 0.5 ? 'rgba(255,255,255,0)' : 'rgba(27,35,64,0)'); pl0.addColorStop(1, NF > 0.5 ? 'rgba(255,255,255,.9)' : 'rgba(27,35,64,.85)');
+      g.strokeStyle = pl0; g.lineWidth = 0.6 * MF; g.beginPath(); g.moveTo(px0, G); g.lineTo(px0, G - 18); g.stroke();
+      var pgl = g.createRadialGradient(px0, G, 0, px0, G, 5); pgl.addColorStop(0, 'rgba(120,160,255,.75)'); pgl.addColorStop(1, 'rgba(120,160,255,0)'); g.fillStyle = pgl; g.fillRect(px0 - 5, G - 5, 10, 10);
+      g.fillStyle = '#fff'; g.beginPath(); g.arc(px0, G, 1.1 * MF + 0.4, 0, 6.3); g.fill();
       st.pinX = px0;
     } else st.pinX = null;
     /* words, few */
-    g.font = '800 ' + (7.5 * TF) + 'px system-ui,sans-serif'; g.textBaseline = 'alphabetic';
+    g.font = '700 ' + (6.6 * TF) + 'px system-ui,sans-serif'; g.textBaseline = 'alphabetic';
     /* canvas text INHERITS the host's css letter-spacing (the orange strip sets .07em), which pushed
        WARM AIR off the right edge on the live site though never in the harness: say zero, and place
        right-hand words by their measured width */
-    try { g.letterSpacing = '0px'; } catch(e){}
-    var word = function(s, x, y, col){ var w = g.measureText(s).width; if (x < 0) x = W + x - w; g.fillStyle = 'rgba(255,252,244,.72)'; g.fillRect(x - 2 * TF, y - 7.5 * TF, w + 4 * TF, 10 * TF); g.fillStyle = col; g.fillText(s, x, y); };
+    try { g.letterSpacing = (0.9 * TF).toFixed(2) + 'px'; } catch(e){}
+    /* TYPE, NOT TAPE: letter-spaced, with a soft halo in the opposite tone instead of a pale box behind it */
+    var LCOL = { '#1e3a8a': ['#1e3a8a', '#cfe3ff'], '#9a3412': ['#8a2e0e', '#ffd0a8'], '#2B22F4': ['#2B22F4', '#dfe6ff'], '#475569': ['#3b4658', '#dbe3ee'] };
+    var word = function(s, x, y, col){ var w = g.measureText(s).width; if (x < 0) x = W + x - w; var cc = LCOL[col] || [col, col];
+      g.save(); g.shadowColor = NF > 0.5 ? 'rgba(0,0,0,.85)' : 'rgba(255,250,242,.95)'; g.shadowBlur = 3 * dpr * TF; g.fillStyle = NF > 0.5 ? cc[1] : cc[0]; g.fillText(s, x, y); g.shadowBlur = 0; g.fillText(s, x, y); g.restore(); };
     /* the city's label takes the low band on its own side; the air's word steps up out of its way */
     var upL = (LV.pin && LV.pin.dir < 0) ? 16 : 0, upR = (LV.pin && LV.pin.dir > 0) ? 16 : 0;
     if (kind === 'COLD'){ word('COLD AIR', 6, G - 22 - upL, '#1e3a8a'); word('WARM AIR', -7, G - 30 - upR, '#9a3412'); }
@@ -730,9 +820,13 @@ function bvFrontScene(cv, kind, opts){
     }
     /* which way the cut runs on the map: a letter at each end, in the earth so it crowds nothing */
     if (LV.ends && (LV.ends[0] || LV.ends[1])){
-      g.font = '800 ' + (7 * TF) + 'px system-ui,sans-serif'; g.fillStyle = 'rgba(255,252,244,.92)';
+      g.font = '700 ' + (5.8 * TF) + 'px system-ui,sans-serif'; g.fillStyle = 'rgba(255,252,244,.62)';
       if (LV.ends[0]) g.fillText(LV.ends[0], 4, H - 7.5); if (LV.ends[1]) g.fillText(LV.ends[1], W - 4 - g.measureText(LV.ends[1]).width, H - 7.5);
     }
+    /* the frame of a picture: a soft vignette, and a fine grain so gradients read as air rather than as fills */
+    var vg = g.createRadialGradient(W / 2, H * 0.45, H * 0.35, W / 2, H * 0.45, W * 0.62); vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,' + (NF > 0.5 ? 0.38 : 0.22) + ')');
+    g.fillStyle = vg; g.fillRect(0, 0, W, H);
+    try { var TXg = bvSceneTex(); g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalCompositeOperation = 'soft-light'; g.globalAlpha = 0.22; g.fillStyle = g.createPattern(TXg.grain, 'repeat'); g.fillRect(0, 0, cv.width, cv.height); g.restore(); } catch(e){}
   };
   /* SEVERAL CAN RUN (user 2026-09-20: "sometimes there will be more than one front too"): each
      scene registers its own stopper, and the caller clears the lot with bvFrontScene.stop()
