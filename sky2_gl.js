@@ -185,6 +185,31 @@
     '  float a = (1. - smoothstep(top * .35, top, y)) * (.8 + .2 * fbm(p * vec2(.02, .07))) * uFog.z;',
     '  vec3 c = mix(uHazeC * 1.12, uSunC, .3 + .4 * exp(-ds / 60.));',
     '  return vec4(c * a, a); }',
+    /* LENTICULARIS, its own pass (2026-09-26, "these still look really bad" x3 through the puff lighting): smooth plates
+       stacked in a pile, fine layered STRIATIONS, the underside glowing in the low sun, the top shaded, the ends thinning into
+       wisps. uLn[i] = cx, cy, half width, thickness | uLk[i] = plates, seed, alpha, - */
+    'uniform vec4 uLn[8]; uniform vec4 uLk[8]; uniform float uNL;',
+    'vec4 lensV(vec2 p){ vec4 o = vec4(0.);',
+    '  for (int i = 0; i < 8; i++){ if (float(i) >= uNL) break; vec4 L = uLn[i], K = uLk[i];',
+    '    if (abs(p.x - L.x) > L.z * 1.5 || abs(p.y - L.y) > L.w * 4.) continue;',
+    '    for (int j = 2; j >= 0; j--){ float fj = float(j); if (fj > K.x) continue;',   /* top plate first, the lower ones in front */
+    '      float sc = 1. - .24 * fj, yc = L.y + fj * L.w * 1.05, ox = (h1(vec2(fj, K.y)) - .5) * .35;',
+    '      float xs = ((p.x - L.x) / L.z - ox) / sc; if (abs(xs) > 1.45) continue;',
+    '      float nx = fbm(vec2(p.x * .09, fj * 3. + K.y * 5.));',
+    '      float prof = max(0., 1. - xs * xs); prof = sqrt(prof) * (.75 + .25 * prof);',   /* smooth, blunt-ended */
+    '      float th = L.w * sc * (.25 + .75 * prof) * 1.35 + .4, bow = -L.w * .45 * xs * xs;',   /* domed: the ends droop (curling up read as a bowl) */
+    '      float v = (p.y - yc - bow) / th;',   /* -1 underside .. 1 top */
+    '      float body = (1. - smoothstep(.62, 1.08, abs(v) + (nx - .5) * .35)) * (1. - smoothstep(.75, 1.35, abs(xs) + (nx - .5) * .5));',
+    '      float wisp = (1. - smoothstep(.2, .9, abs(v))) * smoothstep(.8, 1.05, abs(xs)) * (1. - smoothstep(1.05, 1.45, abs(xs))) * smoothstep(.45, .7, fbm(vec2(p.x * .05, p.y * .9) + K.y)) * .6;',   /* fibrous trailing ends */
+    '      float str = .9 + .1 * sin(v * 7.5 + nx * 5. + fj * 2.);',   /* layered striations */
+    '      float a = max(body, wisp) * str * K.z; if (a < .003) continue;',
+    '      float t = clamp(v * .5 + .5, 0., 1.);',
+    '      vec3 lo = uSunC * vec3(1.12, .86, .70) + vec3(.06, .02, 0.), hi = mix(uShdC * .95, uAmbC + uShdC * .4, .25);',
+    '      vec3 c = mix(lo, hi, smoothstep(.1, .95, t));',   /* underside lit by the low sun, the top in its own shade */
+    '      c += uSunC * .12 * exp(-abs(v + .8) * 5.) * smoothstep(.2, 1., 1. - abs(xs));',   /* a hot rim along the underside */
+    '      o = vec4(c * a, a) + o * (1. - a);',
+    '    } }',
+    '  return o; }',
     'float field(vec2 p){ float d = -1.; for (int i = 0; i < ' + MAXC + '; i++){ if (float(i) >= uNC) break; vec4 c = CC(i); if (abs(p.x - c.x) > c.z * 1.6 || p.y < c.y - c.w * 1.3 || p.y > c.y + c.w * 2.1) continue; d = max(d, cell(p, c, KK(i))); } return d; }',
     'uniform vec4 uRain;',   /* storm rain: cx, half width, cloud-base y, strength */
     'float rainD(vec2 p){',   /* soft slanted CURTAINS, not hard stripes */
@@ -206,6 +231,7 @@
     '  float rd = rainD(p); vec3 rc = mix(vec3(.36, .35, .42), uShdC * .6, .3);',
     '  float cr = creaseV(p); vec3 cc = uShdC * .55;',
     '  vec4 VL = veils(p), FG = fogV(p);',
+    '  vec4 LZ = lensV(p); VL = over(LZ, VL);',
     '  if (d0 < .004){ vec4 o = vec4(rc * rd, rd); o = vec4(cc * cr, cr) + o * (1. - cr); gl_FragColor = over(FG, over(o, VL)); return; }',
     '  vec2 L = normalize(uSun - p); float jit = h1(p * 31.7), acc = 0.;',
     '  L = normalize(vec2(L.x, max(L.y, .25)));',   /* the light comes up from below but not sideways across the sky -- long level marches cut shadow wedges between clouds */
@@ -247,7 +273,7 @@
       g.useProgram(pr);
       var b = g.createBuffer(); g.bindBuffer(g.ARRAY_BUFFER, b); g.bufferData(g.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), g.STATIC_DRAW);
       var loc = g.getAttribLocation(pr, 'a'); g.enableVertexAttribArray(loc); g.vertexAttribPointer(loc, 2, g.FLOAT, false, 0, 0);
-      var U = {}; ['uCs', 'uAs', 'uSt', 'uFog', 'uCrease', 'uRain', 'uWH', 'uHz', 'uNC', 'uTex', 'uCi', 'uCc', 'uSh', 'uSh2', 'uDark', 'uSun', 'uSunC', 'uAmbC', 'uShdC', 'uHazeC'].forEach(function(n){ U[n] = g.getUniformLocation(pr, n); });
+      var U = {}; ['uLn', 'uLk', 'uNL', 'uCs', 'uAs', 'uSt', 'uFog', 'uCrease', 'uRain', 'uWH', 'uHz', 'uNC', 'uTex', 'uCi', 'uCc', 'uSh', 'uSh2', 'uDark', 'uSun', 'uSunC', 'uAmbC', 'uShdC', 'uHazeC'].forEach(function(n){ U[n] = g.getUniformLocation(pr, n); });
       GL = { ok: true, c: c, g: g, U: U };
     } catch (e){ GL = { ok: false, err: String(e) }; if (window.console) console.warn('bvSky2 off:', e); return null; }
     return GL;
@@ -263,7 +289,7 @@
   }
   /* types -> cells + bands */
   function compose(o, W, H, hz){
-    var sky = H - hz, C = [], K = [], bands = { ci: [0, 0, 0, 0], cc: [0, 0, 0, 0], sh: [0, 0, 0, 0], sh2: [0, 0, 0, 0] }, veil = { cs: [0, 0, 0, 0], as: [0, 0, 0, 0], st: [0, 0, 0, 0], fog: [0, 0, 0, 0] };
+    var sky = H - hz, C = [], K = [], bands = { ci: [0, 0, 0, 0], cc: [0, 0, 0, 0], sh: [0, 0, 0, 0], sh2: [0, 0, 0, 0] }, lens = [], veil = { cs: [0, 0, 0, 0], as: [0, 0, 0, 0], st: [0, 0, 0, 0], fog: [0, 0, 0, 0] };
     var add = function(cx, yb, hw, h, kind, a, fl){ if (C.length >= MAXC) return; C.push([cx, yb, hw, h]); K.push([kind, Math.random() * 0 + (C.length * 0.137) % 1, a == null ? 1 : a, fl || 0]); };
     /* perspective: a row at height f (0 horizon .. 1 overhead) is placed at y and scaled by s */
     var rowY = function(f, top){ return hz + (top - hz) * Math.pow(f, 1.35); };
@@ -272,7 +298,7 @@
       if (g === 'Cirrus') bands.ci = [hz + sky * (ty.species === 'spissatus' ? 0.38 : 0.45), H - 4, 0.25 + 0.65 * c, 1 + Math.max(0, ['fibratus', 'uncinus', 'spissatus', 'intortus'].indexOf(ty.species))];
       else if (g === 'Cirrostratus') veil.cs = [1, 0.2 + 0.2 * c, ty.species === 'fibratus' ? 1 : 0, 0];   /* no halo arc (user: remove) */
       else if (g === 'Cirrocumulus' && ty.species === 'lenticularis'){   /* small high lenses */
-        for (var li = 0; li < 5; li++) add(20 + R() * (W - 40), hz + sky * (0.5 + 0.4 * R()), 14 + 8 * R(), 7 + 3 * R(), 5, 0.85, Math.floor(R() * 1.8));
+        for (var li = 0; li < 5; li++) lens.push([W * (0.1 + 0.8 * (li + 0.5) / 5) + (R() - 0.5) * 18, hz + sky * (0.5 + 0.4 * R()),   /* spread across the sky: random x clumped them */ 14 + 8 * R(), 2.6 + 1.2 * R(), Math.floor(R() * 2.2), R() * 9, 0.8]);
       }
       else if (g === 'Cirrocumulus') bands.cc = [hz + sky * 0.14, H - 6, 0.3 + 0.6 * c, 1];
       else if (g === 'Altostratus') veil.as = [1, ty.species === 'opacus' ? 0.95 : 0.55 + 0.3 * c, ty.species === 'opacus' ? 1 : 0, 0];
@@ -300,7 +326,7 @@
         /* LENTICULARIS: a few big smooth lenses parked in the wave crests, some stacked into piles of plates */
         var acL = g === 'Altocumulus', nL = acL ? 3 + Math.round(2 * c) : 2 + Math.round(2 * c);
         for (var lj = 0; lj < nL; lj++){ var fl = lj / Math.max(1, nL - 1);
-          add(W * (0.12 + 0.76 * fl) + (R() - 0.5) * 14,  acL ? hz + sky * (0.35 + 0.4 * R()) : hz + sky * (0.12 + 0.2 * R()), (acL ? 30 : 40) + 14 * R(), (acL ? 16 : 19) + 6 * R(), 5, 0.92, Math.floor(R() * 2.4)); }
+          lens.push([W * (0.14 + 0.72 * fl) + (R() - 0.5) * 16, acL ? hz + sky * (0.38 + 0.38 * R()) : hz + sky * (0.14 + 0.18 * R()), (acL ? 28 : 38) + 12 * R(), (acL ? 4.2 : 5.5) + 1.8 * R(), Math.floor(R() * 3), R() * 9, 0.94]); }
       } else if (g === 'Altocumulus' && ty.species === 'castellanus'){
         /* CASTELLANUS: turrets rising in ROWS from one shared flat base, each row a line in perspective */
         for (var rw = 0; rw < 3; rw++){ var fr2 = 1 - rw * 0.33, yb2 = rowY(0.35 + 0.55 * fr2, hz + sky * 0.9), s3 = 0.35 + 0.65 * fr2;
@@ -332,7 +358,7 @@
     if (cbX != null){ var C2 = [], K2 = []; C.forEach(function(c, i){ if (K[i][0] === 1 && Math.abs(c[0] - cbX) < 100 && c[1] > hz + sky * 0.42) return; C2.push(c); K2.push(K[i]); }); C = C2; K = K2; }
     if (o.anvil){ C.push(o.anvil); K.push([3, 0.37, 1, 0]); }
     if (o.base){ C.push(o.base); K.push([4, 0.61, 0.97, 0]); }
-    return { C: C, K: K, bands: bands, veil: veil };
+    return { C: C, K: K, bands: bands, veil: veil, lens: lens.slice(0, 8) };
   }
   /* THE STORM is the front scenes' own tower (bvCloudGL in cloud_gl.js: cauliflower, sheared anvil, NCAR rain shaft) --
      the user: "our cumulonimbus looked better than this". The sky draws in three passes so the storm sits between layers:
@@ -372,7 +398,7 @@
     g.uniform2f(U.uWH, W, H); g.uniform1f(U.uHz, hz); g.uniform1f(U.uNC, S.C.length);
     
     g.uniform4fv(U.uCi, S.bands.ci); g.uniform4fv(U.uCc, S.bands.cc); g.uniform4fv(U.uSh, S.bands.sh); g.uniform4fv(U.uSh2, S.bands.sh2);
-    g.uniform1f(U.uDark, S.bands.ns ? 1 : 0); g.uniform4fv(U.uRain, o.rain || [0, 0, 0, 0]); g.uniform4fv(U.uCrease, o.crease || [0, 0, 0, 0]); g.uniform4fv(U.uCs, S.veil.cs); g.uniform4fv(U.uAs, S.veil.as); g.uniform4fv(U.uSt, S.veil.st); g.uniform4fv(U.uFog, S.veil.fog); g.uniform2f(U.uSun, Lg.sun[0], Lg.sun[1]); g.uniform3fv(U.uSunC, Lg.sc); g.uniform3fv(U.uAmbC, Lg.amb); g.uniform3fv(U.uShdC, Lg.shd); g.uniform3fv(U.uHazeC, Lg.haze);
+    g.uniform1f(U.uDark, S.bands.ns ? 1 : 0); g.uniform4fv(U.uRain, o.rain || [0, 0, 0, 0]); g.uniform4fv(U.uCrease, o.crease || [0, 0, 0, 0]); var LN = new Float32Array(32), LK = new Float32Array(32); S.lens.forEach(function(l, i){ LN.set(l.slice(0, 4), i * 4); LK.set([l[4], l[5], l[6], 0], i * 4); }); g.uniform4fv(U.uLn, LN); g.uniform4fv(U.uLk, LK); g.uniform1f(U.uNL, S.lens.length); g.uniform4fv(U.uCs, S.veil.cs); g.uniform4fv(U.uAs, S.veil.as); g.uniform4fv(U.uSt, S.veil.st); g.uniform4fv(U.uFog, S.veil.fog); g.uniform2f(U.uSun, Lg.sun[0], Lg.sun[1]); g.uniform3fv(U.uSunC, Lg.sc); g.uniform3fv(U.uAmbC, Lg.amb); g.uniform3fv(U.uShdC, Lg.shd); g.uniform3fv(U.uHazeC, Lg.haze);
     g.drawArrays(g.TRIANGLE_STRIP, 0, 4);
     ctx.drawImage(G.c, 0, 0, W, H);
     return true;
