@@ -18,3 +18,4 @@ output footprint before sampling (anti-alias), a row-coherent destripe over the 
 posterised the ramp). trace2.py follows the Hudson Canyon's strongest incision from the head to where the cut fades
 (needs coast3_Z2x.npy, written by the bake): 343 km, head 39.67N 72.49W (139 m) -> 37.66N 70.51W (4,108 m).
 v4 (2026-09-25): bake_coast4.py -> the incision look the user preferred; reads coast3_Z2x.npy (run bake_coast3.py first).
+v5: bake_coast4.py adds a 2.5 km incision scale + raised-ground highlight; retrace.py snaps the canyon course to the thalweg on the 46 m tiles (reads canyon_trace2.json from trace2.py).

@@ -16,6 +16,14 @@ D = np.clip(-Zs, 0, 6000)
 Zsm = gaussian_filter(np.minimum(Zs, 0), (1.5, 1.0))
 inc = Zsm - uniform_filter(Zsm, int(8000 / mpp))                    # negative where the floor is cut below its surroundings
 v = np.clip(-inc / (40 + 0.10 * D), 0, 1) ** 0.85
+# FINER SCALE TOO (v4b, user: "is there no more detail to show in the ocean?"): the same cut measured against ~2.5 km,
+# so gullies, tributaries and the smaller channels glow as well -- dimmer, and only where the 8 km cut is not already lit
+Zf = gaussian_filter(np.minimum(Zs, 0), (1.2, 0.8))
+incf = Zf - uniform_filter(Zf, int(2500 / mpp))
+vf = np.clip(-incf / (18 + 0.05 * D), 0, 1) ** 0.9 * 0.6
+v = np.maximum(v, vf)
+# and the RAISED ground faintly (seamounts, slide blocks, levees): a cool highlight, never gold -- gold means a cut
+up = np.clip(inc / (60 + 0.10 * D), 0, 1) * 0.35
 # the incision map's slate ramp: light over the shelf, darkening to the abyss
 d = np.clip(D / 5000.0, 0, 1)
 base = np.stack([20 + 40 * (1 - d), 30 + 60 * (1 - d), 60 + 80 * (1 - d)], -1)
@@ -25,7 +33,8 @@ ex = 6.0 + 10.0 * np.clip(D / 3000.0, 0, 1); gx *= ex; gy *= ex
 slope = np.arctan(np.hypot(gx, gy)); aspect = np.arctan2(-gx, gy)
 hs = np.sin(math.radians(40)) * np.cos(slope) + np.cos(math.radians(40)) * np.sin(slope) * np.cos(math.radians(315) - aspect)
 rel = np.clip(hs - math.sin(math.radians(40)), -0.6, 0.6)
-base = base * (1 + 0.35 * rel[..., None])
+base = base * (1 + 0.55 * rel[..., None])     # v4b: more of the relief texture back (0.35 -> 0.55)
+base = base + up[..., None] * np.array([40, 60, 80])
 # the gold: the incision map's own blend (red and green lifted toward amber, blue left as the sea's)
 col = base.copy()
 col[..., 0] = np.maximum(base[..., 0], v * 255); col[..., 1] = np.maximum(base[..., 1], v * 200)
