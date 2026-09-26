@@ -273,7 +273,7 @@ function bvFrontScene(cv, kind, opts){
   var W = 224, H = 104, G = 86, dpr = Math.min(2, window.devicePixelRatio || 1);
   var SC = opts.scale || 1;                              // three cards across: the same scene, drawn a little smaller
   dpr *= Math.max(1, SC);                                 /* drawn LARGER (the tabbed card): more pixels, not a stretched bitmap */
-  var TF = SC > 1 ? Math.max(0.42, 1.45 / SC) : 1, MF = SC > 1 ? Math.max(0.5, 1.7 / SC) : 1;   /* words and heavy lines keep their size (see bvStormPlan) */
+  var TF = SC > 1 ? Math.min(1, Math.max(0.42, 1.45 / SC)) : 1, MF = SC > 1 ? Math.min(1, Math.max(0.5, 1.7 / SC)) : 1;   /* words and heavy lines keep their size (see bvStormPlan) */
   cv.width = W * dpr; cv.height = H * dpr; cv.style.width = Math.round(W * SC) + 'px'; cv.style.height = Math.round(H * SC) + 'px';
   var g = cv.getContext('2d');
   var S = bvFrontScene.state || (bvFrontScene.state = {}), key = kind + '|' + (opts.site || '') + (opts.storm ? '|storm' : '');
@@ -438,9 +438,12 @@ function bvFrontScene(cv, kind, opts){
         var big = RAIN === 3 ? 1.35 : RAIN === 2 ? 1.12 : RAIN === 0 ? 0.8 : 1;
         puffs.push([p.x, y1, high ? 3 : (7 + 3 * Math.sin(p.b * 3.1)) * big, (high ? 0.22 : 0.5) * fade * (RAIN === 0 ? 0.7 : 1), high && kind === 'WARM']);
       } else {
-        var dir = U < 0 ? 1 : -1, b2 = warmY({ x: p.x + dir * 7, b: p.b }, t);
-        g.strokeStyle = DN('#c2410c', '#fb923c', NF > 0.5 ? 0.78 : 0.62); g.lineWidth = 1.2;
-        g.beginPath(); g.moveTo(p.x + dir * 7, G - b2.y); g.lineTo(p.x, y1); g.stroke();
+        /* CALMER ALOFT when drawn large (user 2026-09-25): at 2.8x the streaks filled the top half and fought the front.
+           Every other parcel, a longer and fainter stroke: it reads as one flow, not a swarm. */
+        if (SC > 1 && (Math.floor(p.b * 7) % 2)) return;
+        var dir = U < 0 ? 1 : -1, sl = SC > 1 ? 11 : 7, b2 = warmY({ x: p.x + dir * sl, b: p.b }, t);
+        g.strokeStyle = DN('#c2410c', '#fb923c', (NF > 0.5 ? 0.78 : 0.62) * (SC > 1 ? 0.55 : 1)); g.lineWidth = 1.2 * (SC > 1 ? 0.8 : 1);
+        g.beginPath(); g.moveTo(p.x + dir * sl, G - b2.y); g.lineTo(p.x, y1); g.stroke();
       }
     });
     /* the flash lights the tower from inside */
@@ -635,9 +638,25 @@ function bvFrontScene(cv, kind, opts){
       if (kind === 'OCFNT') return x < xc ? 1 : 0.6;
       return 0.4;
     };
+    /* SEA WHERE THE CUT CROSSES WATER (user 2026-09-25: the nor'easter's cut ran 220 mi out over the Atlantic under
+       an unbroken skyline). LV.geo describes the cut on the Earth -- home, the unit vector the picture runs left to
+       right, and where the front sits along it (km from home) -- and the ground is sampled every 2 units against the
+       Natural Earth land in front_base.json, on the scene's own scale (the pin's: 12 units, then 4 mi a unit). Fixed
+       to the Earth like the pin; the buildings scroll across the land and stop at the shore. No geo, no sea. */
+    var fxG = kind === 'WARM' ? xs : kind === 'OCFNT' ? xc : kind === 'TROF' ? W / 2 : kind === 'STNRY' ? xn - 10 : xn, SEA = null;
+    if (LV.geo && typeof bvLandAt === 'function' && bvLandAt.ready()){
+      var sk = Math.round(fxG) + '|' + Math.round(LV.geo.fkm) + '|' + LV.geo.ax.join(',');
+      if (st.seaKey !== sk){ st.seaKey = sk; st.sea = [];
+        var hl = LV.geo.home, kx = 111.32 * Math.cos(hl[1] * Math.PI / 180);
+        for (var sx = 0; sx <= W + 2; sx += 2){ var du = sx - fxG, mi2 = (du < 0 ? -1 : 1) * Math.max(0, Math.abs(du) - 12) * 4, kmh = LV.geo.fkm + mi2 * 1.609;
+          st.sea.push(!bvLandAt(hl[0] + LV.geo.ax[0] * kmh / kx, hl[1] + LV.geo.ax[1] * kmh / 110.57)); } }
+      SEA = st.sea;
+    }
+    var seaAt = function(x){ if (!SEA) return false; var i = Math.round(x / 2); return i >= 0 && i < SEA.length && SEA[i]; };
     var TILE = opts.site === 'la' ? 234 : 224, o = ((st.off % TILE) + TILE) % TILE;
     for (var rep = -1; rep <= 1; rep++) st.land.forEach(function(b){
       var x = b.x + o + rep * TILE; if (x < -14 || x > W + 14) return;
+      if (seaAt(x) || seaAt(x + b.w)) return;                  // nothing standing in the sea
       var c = airAt(x), wet = x > zone[0] && x < zone[1];
       wet = wet && (RAIN == null || RAIN > 0);
       g.fillStyle = NF > 0.6 ? '#080c14' : wet ? '#1f2937' : c > 0.8 ? '#2f4363' : c > 0.5 ? '#3d4d66' : '#5a4636';
@@ -652,6 +671,24 @@ function bvFrontScene(cv, kind, opts){
     });
     g.fillStyle = DN('#4b5b3c', '#121a12'); g.fillRect(0, G, W, 2);
     g.fillStyle = DN('#6b4a2f', '#1c140d'); g.fillRect(0, G + 2, W, H - G - 2);
+    if (SEA){                                             // the water: each stretch in ONE piece (2-unit strips left seams), a lit surface, a slow swell
+      var runs = [], r0 = null;
+      for (var wx = 0; wx <= W; wx += 2){ var sw0 = seaAt(wx + 1); if (sw0 && r0 == null) r0 = wx; if ((!sw0 || wx >= W) && r0 != null){ runs.push([r0, wx]); r0 = null; } }
+      runs.forEach(function(R){
+        var wg = g.createLinearGradient(0, G - 1.5, 0, H - 6); wg.addColorStop(0, DN('#3b82c4', '#16406a')); wg.addColorStop(1, DN('#1e4f7d', '#0a1c30'));
+        g.fillStyle = wg; g.fillRect(R[0], G - 1.5, R[1] - R[0], H - G - 4.5);
+        g.fillStyle = DN('rgba(219,234,254,.85)', 'rgba(147,197,253,.55)'); g.fillRect(R[0], G - 1.5, R[1] - R[0], 0.6);
+        g.strokeStyle = DN('rgba(255,255,255,.5)', 'rgba(170,205,235,.35)'); g.lineWidth = 0.6;
+        for (var sx2 = R[0] + ((t * 5) % 9); sx2 < R[1] - 3; sx2 += 9){ var yy = G + 2.5 + ((sx2 * 13) % 7) * 0.8; if (yy > H - 8) continue; g.beginPath(); g.moveTo(sx2, yy); g.quadraticCurveTo(sx2 + 1.5, yy - 0.8, sx2 + 3, yy); g.stroke(); }
+      });
+    }
+    /* A DISTANCE SCALE on the ground (user 2026-09-25): ticks every 100 mi out from the front on the scene's own
+       scale (12 units, then 4 mi a unit), the first one named, so 220 MI on the flag has something to be read against */
+    if (kind !== 'TROF'){ g.fillStyle = 'rgba(255,252,244,.55)'; g.font = '700 ' + (5.6 * TF) + 'px system-ui,sans-serif';
+      try { g.letterSpacing = '0px'; } catch(e){}
+      [-1, 1].forEach(function(sd){ for (var mt = 100; mt <= 800; mt += 100){ var tx = fxG + sd * (12 + mt / 4); if (tx < 3 || tx > W - 3) break;
+        g.fillRect(tx - 0.35, G + 2, 0.7, 3.2); if (mt === 100 && sd === (LV.pin && LV.pin.dir ? -LV.pin.dir : 1)){ var lb = '100 MI'; g.fillText(lb, tx - g.measureText(lb).width / 2, G + 5 + 6 * TF); } } });
+    }
     /* the temperature across the line, as the ground feels it */
     for (var xr = 0; xr < W; xr += 2){ var c2 = airAt(xr); g.fillStyle = c2 > 0.8 ? '#60a5fa' : c2 > 0.5 ? '#93c5fd' : kind === 'TROF' ? '#cbd5e1' : '#fb923c'; g.fillRect(xr, H - 5, 2, 3); }
     /* YOU ARE HERE: the city, on the side of the front it is really on, as far off as it really
@@ -720,13 +757,30 @@ bvFrontScene.set = function(kind, site, o){ var S = bvFrontScene.state || {}, st
    (blue) everywhere else. The dashed line is where the side cut is taken. The flow is a diagram
    of the circulation, not a wind measurement. Shares bvFrontScene's stop list, so the band's one
    stop() call ends it too. */
+/* IS THIS POINT LAND? (2026-09-25) Natural Earth land less the big lakes, from the same front_base.json the plan view
+   paints -- shared, fetched once. The side cut asks it along its ground to draw sea where the cut crosses water.
+   Until the file is in, ready() is false and nothing is drawn as sea. */
+function bvLandAt(lon, lat){
+  var B = bvStormPlan.base, d = B && B.d; if (!d) return true;
+  if (!bvLandAt.rings){ var box = function(r){ var b = [1e9, 1e9, -1e9, -1e9]; for (var i = 0; i < r.length; i += 2){ b[0] = Math.min(b[0], r[i]); b[1] = Math.min(b[1], r[i + 1]); b[2] = Math.max(b[2], r[i]); b[3] = Math.max(b[3], r[i + 1]); } return b; };
+    bvLandAt.rings = { land: d.land.map(function(r){ return { r: r, b: box(r) }; }), lakes: (d.lakes || []).map(function(r){ return { r: r, b: box(r) }; }) }; }
+  var inside = function(R){ if (lon < R.b[0] || lon > R.b[2] || lat < R.b[1] || lat > R.b[3]) return false; var r = R.r, c = false;
+    for (var i = 0, j = r.length - 2; i < r.length; j = i, i += 2){ var yi = r[i + 1], yj = r[j + 1]; if ((yi > lat) !== (yj > lat) && lon < (r[j] - r[i]) * (lat - yi) / (yj - yi) + r[i]) c = !c; } return c; };
+  if (!bvLandAt.rings.land.some(inside)) return false;
+  return !bvLandAt.rings.lakes.some(inside);
+}
+bvLandAt.ready = function(){
+  var B = bvStormPlan.base || (bvStormPlan.base = { d: null, p: null });
+  if (!B.p) B.p = fetch('/_maplab/front_base.json').then(function(r){ return r.json(); }).then(function(j){ B.d = j; }).catch(function(){});
+  return !!B.d;
+};
 function bvStormPlan(cv, o){
   var W = 150, H = 104, dpr = Math.min(2, window.devicePixelRatio || 1), SC = o.scale || 1;
   dpr *= Math.max(1, SC);                                 /* drawn larger in the tabbed card: sharp, not stretched */
   /* TEXT AND MARKS STAY THEIR SIZE (user 2026-09-25: "correct the text sizing"): the map grows with the card, but a
      word drawn in map units grew 2.9x with it (a 6.5-unit label became 19 px). TF brings text back to ~1.45x its old
      screen size at any scale, MF does the same for the markers and the heaviest lines. */
-  var TF = SC > 1 ? Math.max(0.42, 1.45 / SC) : 1, MF = SC > 1 ? Math.max(0.5, 1.7 / SC) : 1;
+  var TF = SC > 1 ? Math.min(1, Math.max(0.42, 1.45 / SC)) : 1, MF = SC > 1 ? Math.min(1, Math.max(0.5, 1.7 / SC)) : 1;
   cv.width = W * dpr; cv.height = H * dpr; cv.style.width = Math.round(W * SC) + 'px'; cv.style.height = Math.round(H * SC) + 'px';
   try { cv.style.letterSpacing = '0px'; } catch(e){}
   var g = cv.getContext('2d');
@@ -742,7 +796,10 @@ function bvStormPlan(cv, o){
   var out = function(p){ return !hubLL || d2(p[0], hubLL) <= d2(p[p.length - 1], hubLL) ? p : p.slice().reverse(); };
   var cold = PAIR ? out(o.cold) : null, warm = PAIR ? out(o.warm) : null, occl = o.occl ? out(o.occl) : null;
   var all = (cold || []).concat(warm || [], occl || [], hubLL ? [hubLL] : [], o.home ? [o.home] : []);
-  FR.forEach(function(f){ all = all.concat(f.p); });
+  /* FRAME THE STORM, NOT THE WHOLE CHAIN (user 2026-09-25): every front the chart joins used to be framed, so a nor'easter
+     was a small curl in the corner of a map that ran to Texas. The card's own front (o.lead), the pair, the low and home
+     are framed; the rest of the system is still drawn and runs off the edge. */
+  if (o.lead != null && FR[o.lead]) all = all.concat(FR[o.lead].p); else if (!PAIR) FR.forEach(function(f){ all = all.concat(f.p); });
   var HI = (o.highs || []).slice(0, 3);
   /* a high stretches the frame only when it is close enough to be the city's own weather (~550 mi); a far one is drawn
      if it happens to fall inside, and otherwise lives in the words. Framing every high shrank the storm to a thumbnail (measured). */
@@ -762,7 +819,7 @@ function bvStormPlan(cv, o){
   var inWedge = function(a){ if (!PAIR) return false; var d = ((a - aC) % 6.2832 + 6.2832) % 6.2832; return d < span; };
   var S = bvStormPlan.state || (bvStormPlan.state = {}), st = S[o.site || ''];
   if (!st){ st = S[o.site || ''] = { t: 0, p: [] }; var sd = 4711, rnd = function(){ sd = (sd * 1103515245 + 12345) & 0x7fffffff; return sd / 0x7fffffff; };
-    for (var i = 0; i < 64; i++) st.p.push({ r: 7 + rnd() * 84, a: rnd() * 6.2832, k: 0.8 + rnd() * 0.4 });
+    for (var i = 0; i < 64; i++) st.p.push({ r: 7 + rnd() * 44, a: rnd() * 6.2832, k: 0.8 + rnd() * 0.4 });   /* kept near the low: 50, not 90 (2026-09-25) */
     st.h = []; for (i = 0; i < 42; i++) st.h.push({ r: 6 + rnd() * 30, a: rnd() * 6.2832, k: 0.8 + rnd() * 0.4 }); }
   var line = function(L){ g.beginPath(); g.moveTo(L[0][0], L[0][1]); for (var i = 1; i < L.length - 1; i++) g.quadraticCurveTo(L[i][0], L[i][1], (L[i][0] + L[i + 1][0]) / 2, (L[i][1] + L[i + 1][1]) / 2); g.lineTo(L[L.length - 1][0], L[L.length - 1][1]); };
   var at = function(L, f){ var tot = 0, i; for (i = 1; i < L.length; i++) tot += Math.hypot(L[i][0] - L[i - 1][0], L[i][1] - L[i - 1][1]); var want = tot * f, acc = 0;
@@ -804,9 +861,9 @@ function bvStormPlan(cv, o){
     if (hub){
       g.lineCap = 'round'; g.lineWidth = 1.2 * MF;
       st.p.forEach(function(q){
-        q.a += dt * q.k * 9 / (q.r + 12); q.r -= dt * 1.6; if (q.r < 6){ q.r = 88; }
-        var dl = 0.16 + 9 / (q.r + 10), warmAir = inWedge(q.a), fade = Math.min(1, (q.r - 6) / 10) * Math.min(1, (90 - q.r) / 12);
-        g.strokeStyle = !PAIR ? 'rgba(51,65,85,' + (0.50 * fade).toFixed(2) + ')' : warmAir ? 'rgba(217,83,14,' + (0.80 * fade).toFixed(2) + ')' : 'rgba(37,99,235,' + (0.60 * fade).toFixed(2) + ')';
+        q.a += dt * q.k * 9 / (q.r + 12); q.r -= dt * 1.6; if (q.r < 6){ q.r = 50; }
+        var dl = 0.16 + 9 / (q.r + 10), warmAir = inWedge(q.a), fade = Math.min(1, (q.r - 6) / 10) * Math.min(1, (52 - q.r) / 10);
+        g.strokeStyle = !PAIR ? 'rgba(51,65,85,' + (0.30 * fade).toFixed(2) + ')' : warmAir ? 'rgba(217,83,14,' + (0.60 * fade).toFixed(2) + ')' : 'rgba(37,99,235,' + (0.45 * fade).toFixed(2) + ')';   /* quieter (2026-09-25) */
         g.beginPath(); g.arc(hub[0], hub[1], q.r, -q.a, -q.a + dl); g.stroke();
       });
     }
@@ -816,7 +873,7 @@ function bvStormPlan(cv, o){
       st.h.forEach(function(q, qi){ if (qi % 3 !== hi) return;
         q.a -= dt * q.k * 5 / (q.r + 10); q.r += dt * 1.3; if (q.r > 36) q.r = 6;
         var fade = Math.min(1, (q.r - 6) / 8) * Math.min(1, (36 - q.r) / 10), dl = 0.2 + 5 / (q.r + 8);
-        g.strokeStyle = 'rgba(30,64,175,' + (0.45 * fade).toFixed(2) + ')'; g.beginPath(); g.arc(c[0], c[1], q.r, -q.a - dl, -q.a); g.stroke(); }); });
+        g.strokeStyle = 'rgba(30,64,175,' + (0.30 * fade).toFixed(2) + ')'; g.beginPath(); g.arc(c[0], c[1], q.r, -q.a - dl, -q.a); g.stroke(); }); });
     /* where the side cut is taken */
     var A = null, ex = 0, ey = 0;
     if (PAIR){ A = at(C, 0.45); var B = at(Wm, 0.55); ex = (B[0] - A[0]) * 0.28; ey = (B[1] - A[1]) * 0.28;
@@ -856,6 +913,8 @@ function bvStormPlan(cv, o){
     }
     if (home){ g.fillStyle = '#fff'; g.beginPath(); g.arc(home[0], home[1], 3.4 * MF, 0, 6.3); g.fill(); g.fillStyle = '#2B22F4'; g.beginPath(); g.arc(home[0], home[1], 2.3 * MF, 0, 6.3); g.fill();
       g.font = '800 ' + (6.5 * TF) + 'px system-ui,sans-serif'; word(o.name || '', home[0] - g.measureText(o.name || '').width / 2, home[1] + ((!hub || hub[1] <= home[1]) && !(hub && Math.hypot(hub[0] - home[0], hub[1] + 14 - home[1]) < 34) ? 12 : -6), '#2B22F4'); }
+    /* WHOSE CHART, AND WHEN (2026-09-25): the analysis time, where the map is quietest */
+    if (o.at){ var ts = 'WPC ' + new Date(o.at).toLocaleTimeString('en-US', { timeZone: o.tz || 'America/New_York', hour: 'numeric' }).replace(' ', ' '); g.font = '700 ' + (5.6 * TF) + 'px system-ui,sans-serif'; try { g.letterSpacing = '0px'; } catch(e){} g.fillStyle = 'rgba(27,35,64,.55)'; g.fillText(ts, 3 * TF, H - 3 * TF); }
     g.font = '800 ' + (6 * TF) + 'px system-ui,sans-serif'; g.fillStyle = '#6b7389'; g.fillText('N', W - 9 * TF, 9 * TF); g.strokeStyle = '#6b7389'; g.lineWidth = 1 * MF; g.beginPath(); g.moveTo(W - 6.8 * TF, 11 * TF); g.lineTo(W - 6.8 * TF, 18 * TF); g.stroke();
   };
   var alive = true, last = 0, raf = 0, still = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -902,6 +961,10 @@ function frontFacts(c){
       var coldLeft = c.k !== 'WARM', AB = ['N','NE','E','SE','S','SW','W','NW'], ci = Math.round(f.coldAz / 45) % 8;
       F.cityCold = f.cityCold; F.pin = { dir: (f.cityCold === coldLeft) ? -1 : 1, mi: km * 0.621, name: 'LOS ANGELES' };
       F.ends = coldLeft ? [AB[ci], AB[(ci + 4) % 8]] : [AB[(ci + 4) % 8], AB[ci]];
+      /* the cut on the Earth for the side view's sea (New York's twin): along the cold azimuth, left to right toward
+         ends[1], the city at 0 and the front km away beyond the pin */
+      var ux = Math.sin(f.coldAz * Math.PI / 180), uy = Math.cos(f.coldAz * Math.PI / 180);
+      F.geo = { home: (FRONTS && FRONTS.storm && FRONTS.storm.home) || FR_HOME, ax: coldLeft ? [-ux, -uy] : [ux, uy], fkm: -F.pin.dir * km };
     }
   }
   if (!F.pin && c.k === 'TROF' && km != null) F.pin = { dir: 1, mi: km * 0.621, name: 'LOS ANGELES' };
@@ -1047,7 +1110,7 @@ function frontPlace(v){
     if (s0 && s0.members.length >= 2){
       var mem = s0.members.filter(function(m){ return ST.f[m.idx]; });
       cards = [cards[0]]; cards[0].sys = s0;
-      cards[0].plan = { site: 'la-sys', name: FR_CITY, home: ST.home || FR_HOME, low: s0.low, track: s0.trk ? [s0.trk.lon, s0.trk.lat] : null,
+      cards[0].plan = { site: 'la-sys', at: FRONTS && FRONTS.at || null, tz: FR_TZ, name: FR_CITY, home: ST.home || FR_HOME, low: s0.low, track: s0.trk ? [s0.trk.lon, s0.trk.lat] : null,
                         highs: (ST.highs || []).slice().sort(function(a, b){ return a.km - b.km; }).slice(0, 2),
                         fronts: mem.map(function(m){ return { k: m.k, p: ST.f[m.idx].p }; }), lead: mem.map(function(m){ return m.idx; }).indexOf(cards[0].ln.ci) };
     }
@@ -1076,7 +1139,7 @@ function frontPlace(v){
     c.whenC = frontArriveWords(Ac); c.whenW = frontArriveWords(Aw);
     var om = S2.s.members.filter(function(m){ return m.k === 'OCFNT'; })[0];
     c.trk = S2.s.trk; c.occluding = !!om; c.prw = frontPressureWords(ST, S2.s.low);
-    c.plan = { site: 'la', name: FR_CITY, home: ST.home || FR_HOME, low: S2.s.low, track: c.trk ? [c.trk.lon, c.trk.lat] : null,
+    c.plan = { site: 'la', at: FRONTS && FRONTS.at || null, tz: FR_TZ, name: FR_CITY, home: ST.home || FR_HOME, low: S2.s.low, track: c.trk ? [c.trk.lon, c.trk.lat] : null,
                cold: ST.f[S2.c.ci].p, warm: ST.f[S2.w.ci].p, occl: om && ST.f[om.idx] ? ST.f[om.idx].p : null,
                highs: (ST.highs || []).slice().sort(function(a, b){ return a.km - b.km; }).slice(0, 2),
                fronts: S2.s.members.filter(function(m){ return m.idx !== S2.c.ci && m.idx !== S2.w.ci && !(om && m.idx === om.idx) && ST.f[m.idx]; }).map(function(m){ return { k: m.k, p: ST.f[m.idx].p }; }) };
