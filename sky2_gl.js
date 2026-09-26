@@ -73,11 +73,16 @@
     '  if (uCc.w > .5 && p.y > uCc.x && p.y < uCc.y){',                    /* CIRROCUMULUS: fine grains in ripples, patchy, finer toward the horizon */
     '    float b = smoothstep(uCc.x, uCc.x + 45., p.y) * (.55 + .45 * fbm(vec2(p.x * .02, 3.))) * (1. - smoothstep(uCc.y - 14., uCc.y, p.y));',
     '    float fy = clamp((p.y - uCc.x) / max(uCc.y - uCc.x, 1.), 0., 1.);',
-    '    vec2 w = vec2(fbm(p * .03), fbm(p * .03 + 5.)) * 6.;',       /* a gentle warp so the ripples wander */
-    '    float gFar = dome((p + w) * vec2(.55, 1.3)), gNear = dome((p + w) * vec2(.32, .55) + 3.);',   /* FIXED scales blended by height: a scale that varies with y shears into diagonal streaks */
-    '    float gr = mix(gFar, gNear, smoothstep(.2, .9, fy));',
-    '    float patchy = smoothstep(.58 - uCc.z * .22, .70 - uCc.z * .22, fbm(p * vec2(.018, .04) + 4.));',
-    '    d = max(d, smoothstep(.48, .76, gr) * patchy * b * .75); }',
+    '    vec2 w = vec2(fbm(p * .03), fbm(p * .03 + 5.)) * 6.;',
+    /* NOT a lattice of equal spots (the user: "leopard clouds"): fine grains strung along wavy RIPPLE ROWS, grain size and
+       spacing varying, in small patches over a faint veil. Fixed scales blended by height (a y-varying scale shears) */
+    '    float rF = sin((p.y + w.y * 1.4) * 1.25 + fbm(p * vec2(.05, .02)) * 9.), rN = sin((p.y + w.y * 1.4) * .75 + fbm(p * vec2(.04, .02) + 2.) * 9.);',
+    '    float rip = mix(rF, rN, smoothstep(.2, .9, fy)) * .5 + .5;',
+    '    float gF = dome((p + w) * vec2(.85, 1.35)), gN = dome((p + w) * vec2(.52, .8) + 3.);',
+    '    float gr = mix(gF, gN, smoothstep(.2, .9, fy)) * smoothstep(.05, .75, rip) * smoothstep(.36, .62, fbm(p * vec2(.07, .25) + 13.)) * (.7 + .6 * fbm(p * .12 + 7.));',
+    '    float patchy = smoothstep(.60 - uCc.z * .2, .76 - uCc.z * .2, fbm(p * vec2(.03, .07) + 4.));',
+    '    float veil = smoothstep(.45, .7, fbm(p * vec2(.02, .05) + 4.)) * .04;',
+    '    d = max(d, (smoothstep(.12, .75, gr) * .85 * patchy + veil) * b); }',
     '  if (uSh.w > .5){',                                                  /* STRATUS / ALTOSTRATUS / NIMBOSTRATUS: a soft sheet */
     '    float mid = (uSh.x + uSh.y) * .5, th = (uSh.y - uSh.x) * .5;',
     '    float out_ = abs(p.y - mid) - th - (fbm(vec2(p.x * .045, 1.)) - .5) * 14.;',   /* the edge wobbles in SKY UNITS: a wobble relative to a tall deck dripped flames */
@@ -155,7 +160,7 @@
       var c = Math.max(0, Math.min(100, ty.cover || 0)) / 100, R = rng(97 + ti * 131), g = ty.genus;
       if (g === 'Cirrus') bands.ci = [hz + sky * 0.52, H - 4, 0.25 + 0.65 * c, 1];
       else if (g === 'Cirrostratus') bands.sh2 = [hz + sky * 0.70, H - 6, 0.35 + 0.3 * c, 1];
-      else if (g === 'Cirrocumulus') bands.cc = [hz + sky * 0.36, H - 6, 0.3 + 0.6 * c, 1];
+      else if (g === 'Cirrocumulus') bands.cc = [hz + sky * 0.14, H - 6, 0.3 + 0.6 * c, 1];
       else if (g === 'Altostratus') bands.sh2 = [hz + sky * 0.45, hz + sky * 0.72, 0.5 + 0.4 * c, 1];
       else if (g === 'Stratus'){ if (!bands.ns) bands.sh = [hz + 4, hz + sky * 0.24, 0.8 + 0.2 * c, 1]; }
       else if (g === 'Nimbostratus'){ bands.ns = 1; bands.sh = [hz + sky * 0.14, H + sky * 0.9, 0.97, 1]; }   /* the deck covers the sky; a lit gap stays at the horizon. Stratus under it must not overwrite it */
