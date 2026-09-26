@@ -10,3 +10,10 @@ The original NE/INCOMING bake scripts were lost, so the LOOK was learned back of
   (GridServer base https://www.gmrt.org/services/GridServer ; resolution=high 404s, med and max work.)
 Tables: lut_land/lut_sea = learned off city_bathy_ne.png; inc_land/inc_sea = off city_terrain_inc.png.
 Verify any box against GIBS MODIS_Terra_L3_Land_Water_Mask (EPSG:3857 WMS): coast 98.9% within 1 px, inc_sea 98.4% at 0.
+
+v3 (2026-09-25): bake_coast3.py -> city_bathy_coast.webp. Adds GMRT max tiles t_south.nc (-73.8..-70.8, 37.2..38.9),
+t_west.nc (-76.0..-73.3, 36.8..39.2), t_east.nc (-71.4..-68.3, 38.8..41.0) beside t_canyon.nc; each smoothed to the
+output footprint before sampling (anti-alias), a row-coherent destripe over the flat abyss (the regional grid carries a
+~1.8 m, ~6 km row pattern), depth-growing exaggeration and a texture term; shipped as WebP q92 (the 256-colour PNG
+posterised the ramp). trace2.py follows the Hudson Canyon's strongest incision from the head to where the cut fades
+(needs coast3_Z2x.npy, written by the bake): 343 km, head 39.67N 72.49W (139 m) -> 37.66N 70.51W (4,108 m).
