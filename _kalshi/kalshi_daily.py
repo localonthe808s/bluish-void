@@ -546,6 +546,23 @@ def climate_day_start(cfg, day):
         return 1 if 3 <= day.month <= 11 else 0
 
 
+def decided_by_exact(hour, peak_done, exacts, rmax, own5):
+    """The day's figure once it is decided by an exact reading, else None -- the rule is argued where it
+    is used ("DECIDED BY AN EXACT FIGURE"). Pure, so the trail can replay it."""
+    if hour < 16 or not peak_done or not peak_done.get('cooling') or (peak_done.get('p') or 0) < 0.95 \
+            or peak_done.get('last') is None:
+        return None
+    exs = [x for x in exacts if x is not None]
+    if not exs:
+        return None
+    ex = max(exs)
+    if peak_done['last'] > ex - 2.0 or (rmax is not None and rmax > ex + 0.5):
+        return None
+    if own5 is not None and own5 >= round(ex) + 0.95:
+        ex = own5
+    return ex
+
+
 def running_max(obh, key, hour, h0):
     """Warmest reading so far on the climate day, from the hourly stream."""
     v = [x for h, x in (obh.get(key) or {}).items() if h0 <= h <= hour]
@@ -3910,6 +3927,32 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             pred, obs_far, sd = _exact, _exact, 0.15
             print('%s day decided: the %d-%d group read %.1f, readings since a degree under, peak behind us %.0f%% -- spread %.2f'
                   % (cfg['key'], _sw[0], _sw[1], _six, 100 * (peak_done.get('p') or 0), sd))
+    # DECIDED BY AN EXACT FIGURE, BEFORE THE AFTERNOON'S SIX-HOUR GROUP LANDS (2026-09-27).
+    # The rule above waits for the group that carried the high, which in New York is published at 7:51 PM.
+    # Until then the floor is max(estimate, exact), where the estimate is the hourly maximum plus the
+    # mean gap to the true peak (+0.75) -- and the comment that introduced it calls both "lower bounds".
+    # The estimate is not one: it is a mean, and on a day whose hourly maximum IS the day's maximum it
+    # overshoots by the whole offset. With 98 on the hourly stream the floor read 98.75, the pick moved
+    # up a bracket to 99-100, and it stayed there with the climate report printed at 98 and the market
+    # at 98% on 97-98 (Austin 09-25; the same shape on Austin 09-16, -19, -20 and Las Vegas 09-12, -19,
+    # -22). Measured on the trail, 60 city-days 09-07..09-26: the pick was right on 80% of days at 6 PM,
+    # 87% at 7 and 88% at 8, with the market at 100%. This rule (decided_by_exact, replayed on those
+    # rows) makes that 83 / 95 / 95%: it changed 14 hourly picks, all 14 to the bracket that settled.
+    # A looser form, without the archive's peak-behind-us test, reached 100% from 7 PM; not adopted.
+    # So: an exact figure in hand (today's climate report, a six-hour group, the station's daily
+    # figure), the hourly stream no higher than it, the air 2 F under it, the one-minute archive putting
+    # the peak behind us -- then the figure stands in place of the estimate. The 5-minute feed is in
+    # whole degrees Celsius on most reports (98.6 is 37 C, anything from 97.7 to 99.5 F), so it moves
+    # the figure only when it sits a whole degree past it.
+    if not day_decided:
+        _ex = decided_by_exact(now.hour, peak_done, (_ctoday, _six, daily.get(tkey)), rmax, _own5)
+        if _ex is not None:
+            day_decided = True
+            pred, obs_far, sd = _ex, _ex, 0.15
+            print('%s day decided by the exact figure %.1f (climate report %s, six-hour %s): the air at %.1f, '
+                  'peak behind us %.0f%% -- the hourly estimate %.2f is set aside'
+                  % (cfg['key'], _ex, _ctoday, _six, peak_done['last'], 100 * (peak_done.get('p') or 0),
+                     (rmax + HOURLY_PEAK_OFFSET) if rmax is not None else float('nan')))
     res_lock = residuals(fcm, bias_of, daily, obh, LOCK_HOUR, tkey, h0_of)
     sd_lock, _ = spread(res_lock, LOCK_HOUR, binding_now)
 
@@ -4086,6 +4129,10 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         and the floor is the running max through then, taken from the hourly
         stream (+ offset) rather than today's live daily max.
         """
+        # a day already decided (see "day decided") is decided for every lock made from now on as well
+        if day_decided and hour >= now.hour:
+            return (pred, sd, ladder_probs(cfg, rows, pred, sd, obs_far,
+                                           residuals(fcm, bias_of, daily, obh, hour, tkey, h0_of), True), obs_far)
         r = running_max(obh, tkey, min(hour, now.hour), h0)
         fl = (r + HOURLY_PEAK_OFFSET) if r is not None else None
         # For an hour already past, the hourly stream only ESTIMATES the running
