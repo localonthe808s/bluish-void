@@ -340,7 +340,7 @@ def _items(url):
     import html as _h
     x = get(url).decode('utf-8', 'replace')
     out = []
-    for it in re.findall(r'<item>(.*?)</item>', x, re.S)[:12]:
+    for it in re.findall(r'<item>(.*?)</item>', x, re.S)[:30]:
         g = lambda t: re.sub(r'^\s*<!\[CDATA\[(.*)\]\]>\s*$', r'\1', (re.search(r'<%s>(.*?)</%s>' % (t, t), it, re.S) or [None, ''])[1], flags=re.S)
         raw = g('description') + g('content:encoded')
         raw = raw.replace('<![CDATA[', '').replace(']]>', '')
@@ -450,8 +450,20 @@ def bake_media():
     out = {}
     for key, f in FEEDS.items():
         photos, news, seen = [], [], set()
+        # VIEW MORE (user 2026-09-27): a deeper list -- NASA's WordPress feeds carry 10 a page, so read page 2 too
+        pages = []
         for src, url in f['photos']:
-            for it in _items(url):
+            pages.append((src, url))
+            if src == 'nasa': pages.append((src, url + ('&' if '?' in url else '?') + 'paged=2'))
+        # never repeat a GREATEST HITS picture in the latest strip
+        try: cl = json.loads((ROOT / '_solarlab/classics.json').read_text()).get(key, [])
+        except Exception: cl = []
+        clk = set(re.sub(r'\W+', '', c.get('title', '').lower()) for c in cl) | set(c.get('link', '') for c in cl)
+        for src, url in pages:
+            try: items = _items(url)
+            except Exception as e: print('  feed page failed', url[-60:], e); continue
+            for it in items:
+                if re.sub(r'\W+', '', it['title'].lower()) in clk or it['link'] in clk: continue
                 th = _thumb(src, it['img'])
                 if not th or th in seen or it['title'] in seen or not _is_sky(src, it) or not _looks_like_sky(th): continue
                 if _same_picture(th, [p['thumb'] for p in photos]): continue
@@ -470,7 +482,7 @@ def bake_media():
             if n.pop('src', '') == 'esaint' and len(n['lead']) < 60:
                 try: n['lead'] = esa_lead(n['link'])
                 except Exception as e: print('  esa lead failed', n['link'][-60:], e)
-        photos = sorted(photos, key=lambda n: -(n['t'] or 0))[:6]
+        photos = sorted(photos, key=lambda n: -(n['t'] or 0))[:18]   # six in the strip, twelve more behind VIEW MORE
         out[key] = {'photos': photos, 'news': news}
         print('  media', key, len(photos), 'photos', len(news), 'news')
     return out
