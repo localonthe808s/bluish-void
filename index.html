@@ -54445,6 +54445,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        the old fold-at-settle + reset-at-land pair double-counted overlapping
        settles and wiped gestures mid-flight, which made zooming fight back. */
     var cwPainted = CW_VIEW, cwComposeBusy = 0, cwRemapZoom = null;
+    /* THE VECTOR CANVAS FOLDS EARLY (2026-09-27, user's capture of fat, soft stream dashes). Everything is drawn for
+       cwPainted and magnified by the gesture until the recompose lands, seconds later; lines magnify with it. cw-gv
+       alone is cheap to redraw, so half a second after a gesture stops it is redrawn for the view ON SCREEN (cwGvView)
+       and carries its own transform against that view until the backdrop catches up. The invariant above is untouched:
+       z stays relative to cwPainted, taps and every other layer read it as before. */
+    var cwGvView = null;
     /* the corner water-cycle shows exactly while a compose for a DIFFERENT
        view is in flight — the "rendering to its new zoom" window. Boot and
        floods toggles recompose the SAME view, so it stays quiet there. */
@@ -54989,6 +54995,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                their in-progress pinch preserved when they haven't) */
             var pOld = cwPainted;
             cwPainted = v;
+            cwGvView = null;            /* the backdrop has caught up: cw-gv goes back to the painted view (redrawn just below) */
             if (cwRemapZoom) cwRemapZoom(pOld, v);
             cwDrawSensors();
             /* first paint has landed — the water-cycle loader dissolves */
@@ -55315,11 +55322,35 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         return Math.abs(u.X0 - v2.X0) < 1 && Math.abs(u.X1 - v2.X1) < 1
             && Math.abs(u.Y0 - v2.Y0) < 1 && Math.abs(u.Y1 - v2.Y1) < 1;
       }
+      /* the view on screen: the painted view seen through the gesture */
+      function onScreen(){
+        var r = c.getBoundingClientRect(), P = cwPainted;
+        if (!r.width) return null;
+        var PXs = P.X1 - P.X0, PYs = P.Y1 - P.Y0, xs = PXs / z.k, ys = PYs / z.k;
+        var cx = (P.X0 + P.X1) / 2 - (z.tx / z.k) * (PXs / r.width), cy = (P.Y0 + P.Y1) / 2 + (z.ty / z.k) * (PYs / r.height);
+        return { X0: cx - xs / 2, Y0: cy - ys / 2, X1: cx + xs / 2, Y1: cy + ys / 2, ASPECT: P.ASPECT };
+      }
+      /* cw-gv's own transform while it is drawn for cwGvView: that view, seen as the view on screen (for cwGvView ===
+         cwPainted this is z itself) */
+      function gvT(){
+        var r = c.getBoundingClientRect(), C = onScreen(), G = cwGvView;
+        if (!C || !G) return null;
+        var Gxs = G.X1 - G.X0, Gys = G.Y1 - G.Y0, k = Gxs / (C.X1 - C.X0);
+        var tx = ((G.X0 + G.X1) / 2 - (C.X0 + C.X1) / 2) * k * r.width / Gxs, ty = ((C.Y0 + C.Y1) / 2 - (G.Y0 + G.Y1) / 2) * k * r.height / Gys;
+        return 'translate(' + tx.toFixed(1) + 'px,' + ty.toFixed(1) + 'px) scale(' + k.toFixed(3) + ')';
+      }
+      function gvFold(){
+        var C = onScreen(); if (!C) return;
+        cwGvView = C;
+        apply();                /* first: cwDrawGhost reads this canvas's own scale (its trees are sized against it) */
+        try { cwDrawGhost(); } catch(e){ cwGvView = null; apply(); }
+      }
       function apply(){
         var t = 'translate(' + z.tx.toFixed(1) + 'px,' + z.ty.toFixed(1) + 'px) scale(' + z.k.toFixed(3) + ')';
+        var tg = cwGvView ? gvT() : null;
         LAYERS.forEach(function(id){
           var el = document.getElementById(id);
-          if (el){ el.style.transformOrigin = '50% 50%'; el.style.transform = t; }
+          if (el){ el.style.transformOrigin = '50% 50%'; el.style.transform = (id === 'cw-gv' && tg) ? tg : t; }
         });
         /* full-box layers (backdrop, floods overlay, radar frames) get their
            OWN transform: they show the box B stretched to the container, so
@@ -55391,6 +55422,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         if (z.k === 1 && !z.tx && !z.ty){ cwZoomPending = false; cwZoomLoadSync(); return; }
         var r = c.getBoundingClientRect();
         if (!r.width) return;
+        gvFold();               // the lines sharpen now; the backdrop follows when its compose lands
         var B = _cityBoxCfg();
         var cur = cwPainted;    // z is painted-relative — fold against the pixels on screen
         var curXs = cur.X1 - cur.X0, curYs = cur.Y1 - cur.Y0;
@@ -66111,7 +66143,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       cvs.width = Math.round(r.width * dpr); cvs.height = Math.round(r.height * dpr);
       var g = cvs.getContext('2d');
       g.clearRect(0, 0, cvs.width, cvs.height);
-      var v = cwPainted, R2 = 6378137;
+      var v = cwGvView || cwPainted, R2 = 6378137;      /* see cwGvView: the view on screen while a recompose is pending */
       var px = function(c){ return ((c[0] * Math.PI / 180 * R2) - v.X0) / (v.X1 - v.X0) * cvs.width; };
       var py = function(c){ return (v.Y1 - R2 * Math.log(Math.tan(Math.PI / 4 + c[1] * Math.PI / 360))) / (v.Y1 - v.Y0) * cvs.height; };
       /* THE FERRY ROUTES (user 2026-09-07: "add the ferry lines to the NYC
@@ -66273,7 +66305,9 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
          zoom exactly as the outfall pipes do, and drawn under the pipes and
          the station dots -- a tree should never take a tap meant for those. */
       (function(){
-        var zk = cwZoomK();
+        /* the scale THIS canvas is stretched by: the backdrop's, unless it has folded early (cwGvView) */
+        var zm = cwGvView ? /scale\(([\d.]+)\)/.exec(cvs.style.transform || '') : null;
+        var zk = cwGvView ? ((zm && +zm[1] > 0) ? +zm[1] : 1) : cwZoomK();
         var mppScreen = (v.X1 - v.X0) / r.width / zk;      /* metres per CSS pixel */
         cwTreesFetch(v, mppScreen);
         if (!(cw.trees && cwMapMode() && !cw.rock) || mppScreen >= 6 || !cwTrees.length) return;
