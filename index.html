@@ -54572,7 +54572,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         })(tb, '/nyc-basemap-trees' + suffix + '.png?v=8');
       }
       var seq = ++cwComposeSeq;
+      var deepTileMpp = BWm / grid / TILEPX, deepU = deepTileMpp / mppNeed;
       Promise.all(jobs).then(function(parts){
+        /* deeper than the bake resolves: fetch the class map for this view as well */
+        if (deepU < 1.4 || seq !== cwComposeSeq) return parts;
+        return cwDeepClasses(v, W2, H2).then(function(cls){ parts._cls = cls; return parts; }, function(){ return parts; });
+      }).then(function(parts){
         if (seq !== cwComposeSeq){ fin(false); return; }
         var cv = document.createElement('canvas'); cv.width = W2; cv.height = H2;
         var g = cv.getContext('2d');
@@ -54596,6 +54601,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           var y0 = Math.round((v.Y1 - p.b.Y1) * sy), y1 = Math.round((v.Y1 - p.b.Y0) * sy);
           g.drawImage(p.im, x0, y0, Math.max(1, x1 - x0), Math.max(1, y1 - y0));
         });
+        if (parts._cls){ var _t0 = performance.now(); try { cwDeepSharpen(g, W2, H2, parts._cls, Math.min(16, Math.ceil(deepU * 1.6) + 2)); } catch(e){ window._cwDeepErr = String(e); } window._cwDeepMs = Math.round(performance.now() - _t0); }
         /* The theme is BAKED now (2026-09-03). Until today this composed
            canvas rasterised the five boroughs into a stencil and then walked
            4.5 M pixels twice — once to blacken everything outside the city
@@ -55850,6 +55856,109 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
          - the Gulf Stream's north wall, the sea-surface cliff that coastal
            lows deepen over */
     window._cwPaintedView = function(){ return cwPainted; };   /* harness: the painted view's mercator box */
+    /* THE MAP, SHARP ALL THE WAY IN (user 2026-09-27: "make everything more refined at zoomed in levels ... the streets and
+       textures are too blurry"). Past the deepest baked tiles (z6, 2.2 m a pixel) the compose upscales, and every edge --
+       kerb, shore, park boundary -- turns into a soft band several pixels wide. The shapes themselves are in our own
+       vector archive at z15 (~0.45 m), so for a deep view protomaps renders a CLASS MAP of the view -- water, green ground,
+       street -- and the compose (cwDeepSharpen) repaints only the soft band along every boundary between classes, each
+       pixel taking the colour of the nearest clean pixel of its own class. Interiors keep the bake's colours and
+       textures; streets are redrawn crisp at their real widths. */
+    var CW_DEEP_ROADW = { highway: 22, major_road: 15, minor_road: 9, other: 5 };
+    var CW_DEEP_GREEN = ['park','recreation_ground','garden','golf_course','village_green','forest','wood','nature_reserve','scrub','heath','pitch','playground','track','cemetery','grass','meadow'];
+    function cwDeepClasses(v, W2, H2){
+      if (typeof protomapsL === 'undefined' || !window.BV_BASEMAP_URL) return Promise.resolve(null);
+      var R = 6378137, gm = (v.X1 - v.X0) / W2 * Math.cos(40.7 * Math.PI / 180);
+      var m2lon = function(X){ return X / R * 180 / Math.PI; }, m2lat = function(Y){ return (2 * Math.atan(Math.exp(Y / R)) - Math.PI / 2) * 180 / Math.PI; };
+      var cv = document.createElement('canvas'); cv.width = W2; cv.height = H2;
+      var ctx = cv.getContext('2d');
+      var rules = [
+        { dataLayer: 'water', symbolizer: new protomapsL.PolygonSymbolizer({ fill: '#0000ff' }) },
+        { dataLayer: 'landuse', filter: function(z, f){ return CW_DEEP_GREEN.indexOf(f.props.kind) >= 0; },
+          symbolizer: new protomapsL.PolygonSymbolizer({ fill: '#00ff00' }) },
+        /* buildings: the bake's 18% footprint tint, so their edges sharpen too */
+        { dataLayer: 'buildings', symbolizer: new protomapsL.PolygonSymbolizer({ fill: '#ff00ff' }) }
+      ];
+      Object.keys(CW_DEEP_ROADW).forEach(function(k){
+        rules.push({ dataLayer: 'roads',
+          filter: function(z, f){ var kk = f.props.kind; return (kk === k || (k === 'other' && (kk === 'other' || kk === 'service'))) && !f.props.is_tunnel && !(f.props.kind_detail === 'service' && k !== 'other'); },
+          symbolizer: new protomapsL.LineSymbolizer({ color: '#ff0000', width: Math.max(1, CW_DEEP_ROADW[k] / gm), lineCap: 'butt' }) });
+      });
+      /* the bake's street style: a pale bed with a white hairline down the middle */
+      rules.push({ dataLayer: 'roads', filter: function(z, f){ return !f.props.is_tunnel && f.props.kind !== 'path' && f.props.kind !== 'rail'; },
+        symbolizer: new protomapsL.LineSymbolizer({ color: '#ffff00', width: 1.2, lineCap: 'butt' }) });
+      var st = new protomapsL.Static({ url: window.BV_BASEMAP_URL, paintRules: rules, labelRules: [], maxDataZoom: 14 });
+      var latMid = m2lat((v.Y0 + v.Y1) / 2);
+      return st.drawContextBounds(ctx, { x: m2lon(v.X0), y: latMid }, { x: m2lon(v.X1), y: latMid }, W2, H2)
+        .then(function(){ return cv; }, function(){ return null; });
+    }
+    /* g: the composed canvas; cls: the class canvas; halo: how wide the soft band is, in px */
+    function cwDeepSharpen(g, W2, H2, cls, halo){
+      var cd = cls.getContext('2d').getImageData(0, 0, W2, H2).data, id = g.getImageData(0, 0, W2, H2), d = id.data, N = W2 * H2, i;
+      var C = new Uint8Array(N);                                         /* 0 ground, 1 water, 2 green, 3 street */
+      for (i = 0; i < N; i++){ var o = i * 4, r = cd[o], gg = cd[o + 1], b = cd[o + 2], a = cd[o + 3];
+        if (a < 110) continue; C[i] = (r > 180 && gg > 180 && b < 90) ? 5 : (r > 110 && b > 110 && gg < 100) ? 4 : (r > 110 && gg < 150 && b < 110) ? 3 : b > 110 && b >= gg ? 1 : gg > 110 ? 2 : 0; }   /* 4 building, 5 street centre line */
+      var CL = new Uint8Array(N); for (i = 0; i < N; i++) if (C[i] === 5){ CL[i] = 1; C[i] = 3; }
+      /* the soft band: within `halo` px of a class change (a separable max over a boundary map) */
+      var E = new Uint8Array(N), x, y;
+      for (y = 0; y < H2; y++) for (x = 0; x < W2; x++){ i = y * W2 + x; var c0 = C[i];
+        if ((x < W2 - 1 && C[i + 1] !== c0) || (y < H2 - 1 && C[i + W2] !== c0)){ E[i] = 1; if (x < W2 - 1) E[i + 1] = 1; if (y < H2 - 1) E[i + W2] = 1; } }
+      var dist = new Uint8Array(N); for (i = 0; i < N; i++) dist[i] = E[i] ? 0 : 255;
+      for (var pass = 0; pass < halo; pass++){ var ch = 0;
+        for (y = 1; y < H2 - 1; y++) for (x = 1; x < W2 - 1; x++){ i = y * W2 + x; if (dist[i] <= pass) continue;
+          if (dist[i - 1] === pass || dist[i + 1] === pass || dist[i - W2] === pass || dist[i + W2] === pass){ dist[i] = pass + 1; ch = 1; } }
+        if (!ch) break; }
+      /* streets: their own crisp colour, flat */
+      var band = new Uint8Array(N);
+      /* only ground-coloured pixels are repainted: the bake's own lettering (dark ink, white halos) and the subway bullets
+         stay where they are */
+      /* repaintable ground: the city oranges, the soft pale of a blurred street, the park greens and the waters -- never
+         the subway lines, bullets or lettering drawn into the bake */
+      var ground = function(q){ var r1 = d[q], g1 = d[q + 1], b1 = d[q + 2];
+        if (r1 + g1 + b1 < 170) return false;                                 /* ink */
+        if (r1 > 215 && g1 > 175 && b1 < 70) return false;                    /* a yellow line or bullet (the MTA's is 252,204,10) */
+        if (r1 < 40 && g1 > 115) return false;                                /* the green lines */
+        if (b1 > 170 && r1 < 90 && g1 < 140) return false;                    /* the blue lines */
+        if (r1 > 180 && g1 < 80 && b1 < 90) return false;                     /* the red lines */
+        return true; };
+      /* the bake's lettering and bullets, with a margin: never repainted (text sits over streets and blocks alike) */
+      var P = new Uint8Array(N);
+      for (i = 0; i < N; i++){ var q0 = i * 4, r0 = d[q0], g0 = d[q0 + 1], b0 = d[q0 + 2], s0 = r0 + g0 + b0;
+        if ((s0 < 170 && C[i] !== 1)                                        /* ink */
+          || (Math.min(r0, g0, b0) > 215 && C[i] !== 3)                      /* white lettering, off the streets */
+          || (r0 > 200 && g0 > 150 && b0 < 110 && r0 - g0 < 75)              /* the yellow lines and bullets */
+          || (r0 < 40 && g0 > 115) || (b0 > 170 && r0 < 90 && g0 < 140) || (r0 > 180 && g0 < 80 && b0 < 90)) P[i] = 1; }
+      for (var pp = 0; pp < 3; pp++){ var add = [];
+        for (y = 1; y < H2 - 1; y++) for (x = 1; x < W2 - 1; x++){ i = y * W2 + x; if (!P[i] && (P[i - 1] === pp + 1 || P[i + 1] === pp + 1 || P[i - W2] === pp + 1 || P[i + W2] === pp + 1)) add.push(i); }
+        add.forEach(function(j){ P[j] = pp + 2; }); }
+      /* the two city oranges -- the lot and the building on it -- read off the view, then every orange pixel takes the one
+         its vector class says: building footprints come out as sharp as the streets, and the soft beige of a blurred
+         kerb or sidewalk goes with them (anything orange-to-cream on a lot, yellow lines excepted) */
+      var hist = [{}, {}], key;
+      for (i = 0; i < N; i += 3){ if (C[i] !== 0 && C[i] !== 4) continue; var q1 = i * 4, r2 = d[q1], g2 = d[q1 + 1], b2 = d[q1 + 2];
+        if (!(r2 > 150 && g2 > 60 && g2 < 170 && b2 < 110 && r2 - g2 > 55)) continue; key = (r2 >> 3) + ',' + (g2 >> 3) + ',' + (b2 >> 3); var hh = hist[C[i] === 4 ? 1 : 0]; hh[key] = (hh[key] || 0) + 1; }
+      var modeOf = function(h){ var bk = null, bn = 0; for (var k in h) if (h[k] > bn){ bn = h[k]; bk = k; } return bk ? bk.split(',').map(function(t){ return (+t << 3) + 4; }) : null; };
+      var lotC = modeOf(hist[0]), bldC = modeOf(hist[1]);
+      if (lotC && bldC && Math.abs(lotC[0] - bldC[0]) + Math.abs(lotC[1] - bldC[1]) > 12){
+        for (i = 0; i < N; i++){ if (P[i] || (C[i] !== 0 && C[i] !== 4)) continue; var q2 = i * 4, r3 = d[q2], g3 = d[q2 + 1], b3 = d[q2 + 2];
+          if (!(r3 > 150 && r3 >= g3 + 15 && b3 < 215) || (r3 > 215 && g3 > 175 && b3 < 70)) continue; var cc3 = C[i] === 4 ? bldC : lotC; d[q2] = cc3[0]; d[q2 + 1] = cc3[1]; d[q2 + 2] = cc3[2]; }
+      }
+      /* the street bed a shade paler than the lot it runs between, so the grid reads; a white line down it */
+      var lotB = lotC || [236, 128, 56], bed = [Math.round(lotB[0] + (255 - lotB[0]) * 0.35), Math.round(lotB[1] + (255 - lotB[1]) * 0.35), Math.round(lotB[2] + (255 - lotB[2]) * 0.35)];
+      for (i = 0; i < N; i++){ if (P[i]) continue; var q = i * 4; if (C[i] === 3){ if (ground(q)){
+          /* a street in the city: the pale-orange bed and its white line; outside the city (dark land) left as baked */
+          var inCity = d[q] > 120 || d[q + 1] > 120;
+          if (inCity){ if (CL[i]){ d[q] = 246; d[q + 1] = 246; d[q + 2] = 240; } else { d[q] = bed[0]; d[q + 1] = bed[1]; d[q + 2] = bed[2]; } } } }
+        else if (dist[i] <= halo && ground(q) && !(Math.min(d[q], d[q + 1], d[q + 2]) > 215)) band[i] = 1; }   /* white lettering is left alone */
+     
+      /* the band outside the streets: grow each class inward from its clean pixels, one ring a pass */
+      for (var ps = 0; ps < halo + 2; ps++){ var list = [];
+        for (y = 1; y < H2 - 1; y++) for (x = 1; x < W2 - 1; x++){ i = y * W2 + x; if (!band[i]) continue; var cc = C[i];
+          var nb = (!band[i - 1] && C[i - 1] === cc) ? i - 1 : (!band[i + 1] && C[i + 1] === cc) ? i + 1 : (!band[i - W2] && C[i - W2] === cc) ? i - W2 : (!band[i + W2] && C[i + W2] === cc) ? i + W2 : -1;
+          if (nb >= 0) list.push(i, nb); }
+        if (!list.length) break;
+        for (var k = 0; k < list.length; k += 2){ var a4 = list[k] * 4, b4 = list[k + 1] * 4; d[a4] = d[b4]; d[a4 + 1] = d[b4 + 1]; d[a4 + 2] = d[b4 + 2]; band[list[k]] = 0; } }
+      g.putImageData(id, 0, 0);
+    }
     window._cwCPLoad = function(){
       if (window._cwCP || window._cwCPReq) return;
       window._cwCPReq = 1;
