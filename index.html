@@ -51902,6 +51902,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     var cw = { built:false, running:false, idx:0, timer:null, cardsTimer:null, wprod:'bref',
                prod:'bref', front:true, radarOn:false, floods:false, trains:true, wide:null, rock:false,
                fl1865:true, flProne:true };   /* FLOODING's two context layers, each with its own button in the bar */
+    try { var cwFlMem = JSON.parse(localStorage.getItem('bv_cw_fl') || 'null');      /* ...and remembered on this device */
+      if (cwFlMem){ cw.fl1865 = cwFlMem.g !== 0; cw.flProne = cwFlMem.p !== 0; } } catch(e){}
     /* WHICH VIEW THE WIDGET OPENS ON (2026-09-12, user: "launch on a view based
        on the current weather"). null = undecided, 'user' = someone tapped a tab
        and the chooser must keep its hands off, anything else = the chooser has
@@ -55080,7 +55082,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
            server sends no CORS header: anything it is drawn into is tainted,
            and nothing may ever read pixels from this one. */
         + '<canvas id="cw-rock" style="' + IMG + 'z-index:0;pointer-events:none;will-change:transform;display:none;"></canvas>'
-        + '<img id="cw-fl" alt="" src="/nyc-basemap-floods.png?v=10" style="' + IMG + 'object-fit:fill;z-index:0;will-change:transform;display:none;">'
+        + '<img id="cw-fl" alt="" style="' + IMG + 'object-fit:fill;z-index:0;will-change:transform;display:none;">'
         /* the ghost-water vectors (marsh, ponds, stream courses) draw here
            per painted view at device resolution — crisp at any zoom, the
            hazard map's exact line grammar */
@@ -55196,7 +55198,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
               .then(function(j){ window._cwPonds = j; cwDrawSensors(); }).catch(function(){});
           }
         }
-        if (cw.floods && window._floodNetLoad) try{ fnArea = 'city'; _floodNetLoad(cwDrawSensors); }catch(e){}
+        if (cw.floods) cwFloodNet(function(){ cwDrawSensors(); cwLiveBars(); });
         cwDrawSensors();
       };
       /* the wide views share the TOP row with RADAR: each swaps the map body
@@ -59123,12 +59125,10 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         cb2.style.cssText = 'margin-top:5px;cursor:pointer;font:800 8px system-ui,sans-serif;letter-spacing:.09em;padding:3px 9px;border-radius:11px;background:rgba(255,255,255,.7);color:#2B22F4;border:1px solid rgba(43,34,244,.35);';
         cb2.onclick = function(e){ e.stopPropagation(); cwCamTap(nc.cam); }; el.appendChild(cb2); }
     }
-    /* the street sensors for TRAFFIC. Their loader belongs to the hazards module, which boots on its own clock: if TRAFFIC is
-       lit before it exists, this asks again every 3 s for a minute and the band says LOADING until then. */
+    /* the street sensors for TRAFFIC (see cwFloodNet: they no longer wait for the hazards module) */
     var cwTrafFN = function(){
       if (!cw.traffic || !cw.running) return;
-      if (window._floodNetLoad){ cwTraf.fnTries = 0; try { fnArea = 'city'; _floodNetLoad(function(){ cwDrawSensors(); cwTrafBand(); }); } catch(e){} }
-      else if ((cwTraf.fnTries = (cwTraf.fnTries || 0) + 1) < 25) setTimeout(cwTrafFN, 3000);
+      cwFloodNet(function(){ cwDrawSensors(); cwTrafBand(); });
     };
     function cwTrafOff(){
       var ccd = document.getElementById('cw-cam-card'); if (ccd) ccd.style.display = 'none';
@@ -59908,6 +59908,23 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
        MARSH: the surveyed wet ground and ponds of 1865-97, a flat teal inside a thin line. */
     var CW_FL_WASH = [255, 255, 255, 1];
     var CW_FL_MARSH = { fill: 'rgb(0,180,162)', a: 0.97, line: 'rgb(0,112,118)', w: 0.6 };
+    /* THE STREET SENSORS, WITHOUT WAITING FOR THE HAZARD WIDGET (2026-09-27). Their loader is built by the hazard
+       widget's flood module (initFloodNet), which sits further down the page and starts on its own clock: a reader who
+       opened FLOODING first saw no sensors at all, and TRAFFIC asked again every 3 s for a minute. initFloodNet needs
+       Leaflet and the location, not the hazard map (its layer is only attached on the hazard widget's own flood tab),
+       so whoever gets there first builds it; the other finds it built. */
+    function cwFloodNet(cb){
+      try {
+        fnArea = 'city';
+        if (window._floodNetLoad) window._floodNetLoad(cb);
+        else initFloodNet(cb);
+      } catch(e){}
+    }
+    /* the sensors' tiers as THE CITY draws them: the hazard module's own (fnTier), with its top tier moved off purple
+       onto the dark red the tide gauges here use for MAJOR FLOODING (CW_LVL). The hazard widget keeps the purple: there
+       it is the weather service's colour for a major flood, on every gauge. */
+    var CW_FN_TOP = '#7f1010';
+    function cwFnTier(mm, stale){ var t = fnTier(mm, stale); return t.label === 'FLOODING' ? { c: CW_FN_TOP, r: t.r, label: t.label } : t; }
     /* the buried courses: colour, width / dash / gap as SEEN, in screen px at the desktop's whole-city view (56 m a px) */
     var CW_FL_STREAM = { c: 'rgb(0,66,240)', w: 1.25, on: 4.6, off: 3 };
     function cwGhostDash(g, mpp, dpr){
@@ -59931,17 +59948,30 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
     function cwFlBuild(){
       if (cwFlBuilt) return;
       cwFlBuilt = true;
+      /* NOTHING IS SHOWN UNPAINTED (2026-09-27). The layer used to open on the light z1 bake as it comes off the disk
+         -- lime zones, pale blue marsh, green slick, the colours this view has since given up -- and swap to the
+         painted z2 when that landed. The z1 bake now goes through the same paint before it is shown (and is no longer
+         fetched by readers who never open FLOODING); whichever of the two lands second never undoes the finer one. */
+      var fine = false;
+      _cityTile('/nyc-basemap-floods.png?v=10').then(function(im){
+        if (fine) return;
+        var c1 = document.createElement('canvas'); c1.width = im.naturalWidth; c1.height = im.naturalHeight;
+        var g1 = c1.getContext('2d'); g1.drawImage(im, 0, 0); lay(c1, g1, false);
+      }, function(){});
       var Q = [['nw',0,0],['ne',1,0],['sw',0,1],['se',1,1]];
       Promise.all(Q.map(function(q){
         return _cityTile('/nyc-basemap-floods-z2-' + q[0] + '.png?v=10')
           .then(function(im){ return { im: im, q: q }; }, function(){ return null; });
       })).then(function(parts){
         parts = parts.filter(Boolean);
-        if (parts.length < 4) return;          // the z1 src stays as fallback
+        if (parts.length < 4) return;          // the painted z1 stays as fallback
         var w = parts[0].im.naturalWidth, h = parts[0].im.naturalHeight;
         var cv = document.createElement('canvas'); cv.width = w * 2; cv.height = h * 2;
         var g = cv.getContext('2d');
         parts.forEach(function(p){ g.drawImage(p.im, p.q[1] * w, p.q[2] * h); });
+        fine = true; lay(cv, g, true);
+      });
+      function lay(cv, g, isFine){
         /* ONLY WATER THAT IS THERE NOW IS FILLED BLUE (user 2026-09-27: "we need a way to distinguish ghost rivers
            and historical flooding on FLOODING from actively flooding areas"). Read off the paints: the old marsh
            (51,156,245), the modelled flood zones (21,162,251) and mid-depth live water (51,158,230) were one blue,
@@ -59986,11 +60016,11 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
            blurry "sausage link" dashes at depth; the canvas redraws per
            painted view at device resolution, crisp at any zoom */
         cv.toBlob(function(bl){
-          if (!bl) return;
+          if (!bl || (fine && !isFine)) return;
           var fl = document.getElementById('cw-fl');
           if (fl) fl.src = URL.createObjectURL(bl);
         }, 'image/png');
-      });
+      }
     }
     /* the FloodNet sensors, on the widget map: fnRows/fnTier are the hazard
        module's own state and grammar — same tiers, same colors, drawn to the
@@ -60635,7 +60665,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       if (p) p.style.display = 'none';
     }
     function cwFloodNetTap(row){
-      var t = fnTier(row.mm, row.stale);
+      var t = cwFnTier(row.mm, row.stale);
       var inches = row.mm / 25.4;
       var age = row.stale ? null : (row.ageMin < 60 ? Math.round(row.ageMin) + ' MIN AGO'
         : Math.round(row.ageMin / 60) + ' HR AGO');
@@ -65369,46 +65399,73 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
           /* the two context layers: the old water and the modelled zones, each on its own button, both on to begin with */
           if (b.id === 'cw-fl-1865' || b.id === 'cw-fl-prone'){
             if (b.id === 'cw-fl-1865') cw.fl1865 = !cw.fl1865; else cw.flProne = !cw.flProne;
+            try { localStorage.setItem('bv_cw_fl', JSON.stringify({ g: cw.fl1865 ? 1 : 0, p: cw.flProne ? 1 : 0 })); } catch(e3){}
             var fl4 = document.getElementById('cw-fl'); if (fl4) fl4.style.display = (cw.floods && cw.flProne) ? '' : 'none';
             cwLiveBars(); try { cwDrawSensors(); } catch(e2){}
-          } }); }
+          }
+          if (b.id === 'cw-fl-more'){ cw.flMore = !cw.flMore; cwLiveBars(); try { cwHoodPlace(); } catch(e4){} } }); }
       if (!bw) return;
       var now = Date.now(), G = cwLive.g || {}, rows = [], lab = function(t){ return '<span style="color:rgba(43,34,244,.6);">' + t + '</span> '; };
+      /* A PHONE FOLDS THE SMALL PRINT (2026-09-27): at 390 px the bar stood 263 px over a 300 px map. The readings stay;
+         the notes in brackets, the estimate's caveat and the key open on KEY. */
+      var nar = bodyEl && bodyEl.getBoundingClientRect().width < 480, fold = nar && !cw.flMore;
+      var note = function(t){ return fold ? '' : ' <span style="color:rgba(27,35,64,.5);">' + t + '</span>'; };
       var fmtT = function(t){ var d = new Date(t), td = new Date(); return (d.toDateString() === td.toDateString() ? '' : d.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase() + ' ') + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }).toUpperCase(); };
       var warn = (window._nwsAlerts || []).filter(function(a){ return /coastal flood|storm surge|flood/i.test(a.event || '') && (!a.expires || +a.expires > now); });
       rows.push(lab('NWS') + (warn.length ? warn.map(function(a){ return '<span style="color:' + (/warning/i.test(a.event) ? '#b91c1c' : '#c2410c') + ';">' + mtaEsc(a.event.toUpperCase()) + (a.expires ? ' UNTIL ' + fmtT(+a.expires) : '') + '</span>'; }).join(' &nbsp;·&nbsp; ')
         : '<span style="color:#1b2340;">NO FLOOD WARNING OR ADVISORY IN EFFECT</span>'));
+      /* THE STREET SENSORS, IN WORDS (2026-09-27): the only measured water on this map had no line in its bar. The
+         hazard card's own wording and thresholds (deep = 51 mm); a dry reading is a measurement too, so the count of
+         sensors reporting is always stated. The depths are the ones the map's dots are drawn from (each sensor's
+         reading less its own of six hours before), so the line and the map cannot disagree. Checked against the
+         feed on the day: City Island's 12.2 in was a real 309 mm on a sidewalk, draining from 733 mm at high tide. */
+      var FR = (typeof fnRows !== 'undefined' && fnRows) ? fnRows : [];
+      if (FR.length){
+        var fLive = FR.filter(function(r){ return !r.stale; }), fWet = fLive.filter(function(r){ return r.mm > 0; }).sort(function(a, b2){ return b2.mm - a.mm; });
+        var fDeep = fWet.filter(function(r){ return r.mm >= 51; }), fTop = fWet[0], fInk = { 'TRACE WATER': '#a16207', 'WATER POOLING': '#c2410c', 'DEEP WATER': '#b91c1c', 'FLOODING': CW_FN_TOP };
+        rows.push(lab('STREET SENSORS') + (fTop
+          ? '<span style="color:' + (fInk[cwFnTier(fTop.mm).label] || '#1b2340') + ';">' + (fDeep.length ? 'WATER ON THE STREET AT ' + fDeep.length : 'TRACE WATER AT ' + fWet.length) + ' OF ' + fLive.length + '</span>'
+            + '<span style="color:#1b2340;">' + (!fold && fDeep.length && fWet.length > fDeep.length ? ' · A TRACE AT ' + (fWet.length - fDeep.length) + ' MORE' : '')
+            + ' · DEEPEST ' + (fTop.mm / 25.4).toFixed(1) + ' IN, ' + mtaEsc(String(fTop.name).toUpperCase()) + '</span>'
+          : '<span style="color:#1b2340;">ALL ' + fLive.length + ' REPORTING DRY</span>')
+          + note('(FLOODNET · MEASURED AT THE KERB, ABOVE EACH SENSOR’S OWN DRY READING)'));
+      }
       var B = G.BATN6;
       if (B){ var bn = cwLiveNow(B), bt = cwLiveTrend(B), bc = cwLiveCrest(B), bk = cwLiveCat('BATN6', bn);
         rows.push(lab('THE BATTERY') + '<span style="color:' + CW_LVL[bk][1] + ';">' + (bn == null ? '--' : bn.toFixed(1) + ' FT') + '</span> <span style="color:#1b2340;">' + (bt > 0.05 ? 'RISING' : bt < -0.05 ? 'FALLING' : 'STEADY')
           + (bc ? ' · NEXT CREST <span style="color:' + CW_LVL[cwLiveCat('BATN6', bc[1])][1] + ';">' + bc[1].toFixed(1) + ' FT ' + fmtT(bc[0]) + ' · ' + CW_LVL[cwLiveCat('BATN6', bc[1])][0] + '</span>' : '') + '</span>'
-          + ' <span style="color:rgba(27,35,64,.5);">(MINOR ' + CW_TG_CAT.BATN6[1] + ', MODERATE ' + CW_TG_CAT.BATN6[2] + ', MAJOR ' + CW_TG_CAT.BATN6[3] + ')</span>'); }
+          + note('(MINOR ' + CW_TG_CAT.BATN6[1] + ', MODERATE ' + CW_TG_CAT.BATN6[2] + ', MAJOR ' + CW_TG_CAT.BATN6[3] + ')')); }
       var worst = null; Object.keys(G).forEach(function(lid){ if (G[lid].river) return; var c = cwLiveCrest(G[lid]), k = c ? cwLiveCat(lid, c[1]) : 0; if (k > 1 && (!worst || k > worst[1])) worst = [G[lid], k, c]; });
       if (worst && worst[0].lid !== 'BATN6') rows.push(lab('WORST FORECAST') + '<span style="color:' + CW_LVL[worst[1]][1] + ';">' + mtaEsc(worst[0].name.toUpperCase()) + ' ' + worst[2][1].toFixed(1) + ' FT ' + fmtT(worst[2][0]) + ' · ' + CW_LVL[worst[1]][0] + '</span>');
       var RB = G.BBGN6;
       if (RB){ var rn = cwLiveNow(RB), rc = cwLiveCrest(RB), rk = cwLiveCat('BBGN6', rn);
-        rows.push(lab('BRONX RIVER') + '<span style="color:' + CW_LVL[rk][1] + ';">' + (rn == null ? '--' : rn.toFixed(1) + ' FT · ' + CW_LVL[rk][0]) + '</span> <span style="color:rgba(27,35,64,.5);">(FLOODS AT ' + CW_TG_CAT.BBGN6[1] + ')' + (rc && rc[1] > rn + 0.2 ? ' · FORECAST ' + rc[1].toFixed(1) + ' FT ' + fmtT(rc[0]) : '') + '</span>'); }
+        /* folded, a quiet river with a quiet forecast gives its line up */
+        if (!fold || rk > 0 || (rc && cwLiveCat('BBGN6', rc[1]) > 0)) rows.push(lab('BRONX RIVER') + '<span style="color:' + CW_LVL[rk][1] + ';">' + (rn == null ? '--' : rn.toFixed(1) + ' FT · ' + CW_LVL[rk][0]) + '</span>' + note('(FLOODS AT ' + CW_TG_CAT.BBGN6[1] + ')')
+          + (rc && rc[1] > rn + 0.2 ? ' <span style="color:rgba(27,35,64,.5);">· FORECAST ' + rc[1].toFixed(1) + ' FT ' + fmtT(rc[0]) + '</span>' : '')); }
       var F = cwLive.fill, m = cwLiveMode();
       var say = !cwLive.g || !cwLive.dem ? 'LOADING THE GAUGES AND THE GROUND…'
         : !F ? 'NOT ENOUGH GAUGES REPORTING TO DRAW THE WATER'
         : F.km2 < 0.05 ? (m === 'now' ? 'NO STREETS UNDER WATER FROM THE TIDE RIGHT NOW' : 'THE NEXT CREST STAYS OFF THE STREETS')
-        : '<span style="color:#0369a1;">' + (F.km2 < 1 ? F.km2.toFixed(1) : Math.round(F.km2)) + ' KM² UNDER WATER' + (m === 'peak' && F.crestT ? ' AT THE ' + fmtT(F.crestT) + ' CREST' : ' NOW') + '</span> <span style="color:#1b2340;">· THE SURFACE MOVES ' + (F.rising >= 0 ? 'INLAND FROM THE SHORE' : 'BACK OUT TO THE HARBOUR') + '</span>';
+        : '<span style="color:#0369a1;">' + (F.km2 < 1 ? F.km2.toFixed(1) : Math.round(F.km2)) + ' KM² UNDER WATER' + (m === 'peak' && F.crestT ? ' AT THE ' + fmtT(F.crestT) + ' CREST' : ' NOW') + '</span>' + (fold ? '' : ' <span style="color:#1b2340;">· THE SURFACE MOVES ' + (F.rising >= 0 ? 'INLAND FROM THE SHORE' : 'BACK OUT TO THE HARBOUR') + '</span>');
       rows.push('<span style="display:inline-flex;gap:4px;vertical-align:middle;margin-right:6px;">' + cwBtn('cw-fl-now', 'NOW', m === 'now' ? CWB.on : CWB.off) + cwBtn('cw-fl-peak', 'PEAK', m === 'peak' ? CWB.on : CWB.off) + '</span>' + say
-        + '<div style="font-weight:600;letter-spacing:.04em;color:rgba(27,35,64,.5);margin-top:2px;">ESTIMATE: GROUND BELOW THE GAUGES’ WATER LEVEL AND JOINED TO THE HARBOUR · WALLS, DRAINS AND TIMING NOT MODELLED</div>');
+        + (fold ? '' : '<div style="font-weight:600;letter-spacing:.04em;color:rgba(27,35,64,.5);margin-top:2px;">ESTIMATE: GROUND BELOW THE GAUGES’ WATER LEVEL AND JOINED TO THE HARBOUR · WALLS, DRAINS AND TIMING NOT MODELLED</div>'));
       /* THE KEY, and the two buttons it explains (user 2026-09-27). Each swatch is the mark as it lands on the map, over
          the orange city: bright blue is water that is there, teal is the surveyed wet ground, dashes are a best
          reading, a wash is a model. A layer switched off keeps its entry, dimmed. */
-      var nar = bodyEl && bodyEl.getBoundingClientRect().width < 480;      /* a phone: short labels, two to a line */
       var SW = 'display:inline-block;vertical-align:middle;margin:-1px 5px 0 0;', it = function(sw, t, on){
         return '<span style="white-space:nowrap;display:inline-block;margin:1px 7px;color:#1b2340;' + (on ? '' : 'opacity:.32;') + '">' + sw + t + '</span>'; };
-      rows.push('<span style="display:inline-flex;gap:4px;vertical-align:middle;margin-right:4px;">' + cwBtn('cw-fl-1865', '1865 WATER', cw.fl1865 ? CWB.on : CWB.off) + cwBtn('cw-fl-prone', 'FLOOD-PRONE', cw.flProne ? CWB.on : CWB.off) + '</span>'
+      var dot = function(c){ return '<span style="display:inline-block;vertical-align:middle;margin:-1px 2px 0 0;width:7px;height:7px;border-radius:50%;background:' + c + ';box-shadow:0 0 0 1px #fff;"></span>'; };
+      rows.push('<span style="display:inline-flex;gap:4px;vertical-align:middle;margin-right:4px;">' + cwBtn('cw-fl-1865', '1865 WATER', cw.fl1865 ? CWB.on : CWB.off) + cwBtn('cw-fl-prone', 'FLOOD-PRONE', cw.flProne ? CWB.on : CWB.off)
+        + (nar ? cwBtn('cw-fl-more', cw.flMore ? 'KEY \u2212' : 'KEY +', cw.flMore ? CWB.on : CWB.off) : '') + '</span>'
+        + (fold ? '' : (nar ? '<div style="height:3px;"></div>' : '')
         + it('<span style="' + SW + 'width:15px;height:9px;border-radius:2px;background:linear-gradient(90deg,#5cd6ff,#0a66cc);box-shadow:0 0 0 1px rgba(255,255,255,.95),0 0 0 2px rgba(10,102,204,.35);"></span>', nar ? (m === 'peak' ? 'WATER AT THE CREST' : 'WATER NOW') : m === 'peak' ? 'WATER AT THE NEXT CREST' : 'WATER ON THE LAND NOW', true)
-        + it('<span style="' + SW + 'width:8px;height:8px;border-radius:50%;background:#ef4444;box-shadow:0 0 0 1px #fff;"></span>', nar ? 'WET SENSOR' : 'STREET SENSOR REPORTING WATER', true)
+        /* the sensors' four wet tiers, shallow to deep: one red dot stood for a scale of four */
+        + it(dot('#eab308') + dot('#f97316') + dot('#ef4444') + dot(CW_FN_TOP) + '<span style="margin-left:3px;"></span>', nar ? 'WET SENSOR' : 'STREET SENSOR REPORTING WATER, A TRACE TO 6 IN AND OVER', true)
         + it('<span style="' + SW + 'width:13px;height:7px;border-radius:2px;background:#64a59b;border:1px solid #3f7f7a;"></span>', nar ? 'MARSH, 1865–97' : 'MARSH AND PONDS, SURVEYED 1865–97', cw.fl1865)
         + it('<span style="' + SW + 'width:16px;height:0;border-top:1.5px dashed #535db2;"></span>', 'BURIED STREAM', cw.fl1865)
-        + it('<span style="' + SW + 'width:15px;height:9px;border-radius:2px;background:radial-gradient(closest-side,#f6dcc8,#f2b48a 60%,#ec843e);"></span>', nar ? 'FLOOD-PRONE (MODEL)' : 'FLOOD-PRONE IN HEAVY RAIN · THE CITY’S MODEL', cw.flProne));
+        + it('<span style="' + SW + 'width:15px;height:9px;border-radius:2px;background:radial-gradient(closest-side,#f6dcc8,#f2b48a 60%,#ec843e);"></span>', nar ? 'FLOOD-PRONE (MODEL)' : 'FLOOD-PRONE IN HEAVY RAIN · THE CITY’S MODEL', cw.flProne)));
       bw.style.cssText = 'margin:0 14px;background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);color:#2B22F4;border-top:1px solid rgba(43,34,244,.12);font:700 8.5px/1.5 system-ui,sans-serif;letter-spacing:.07em;';
-      bw.innerHTML = rows.map(function(b, i){ return '<div style="padding:5px 12px;text-align:center;' + (i ? 'border-top:1px solid rgba(43,34,244,.08);' : '') + '">' + b + '</div>'; }).join('');
+      bw.innerHTML = rows.map(function(b, i){ return '<div style="padding:' + (nar ? '3px 10px' : '5px 12px') + ';text-align:center;' + (i ? 'border-top:1px solid rgba(43,34,244,.08);' : '') + '">' + b + '</div>'; }).join('');
     }
     /* a gauge tapped: its curve, past day and the forecast, against the flood stages */
     function cwLiveTap(lid){
@@ -66950,7 +67007,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         if (X < v.X0 || X > v.X1 || Y < v.Y0 || Y > v.Y1) return;
         var x = (X - v.X0) / (v.X1 - v.X0) * cvs.width;
         var y = (v.Y1 - Y) / (v.Y1 - v.Y0) * cvs.height;
-        var t = fnTier(row.mm, row.stale);
+        var t = cwFnTier(row.mm, row.stale);
         var wet = !row.stale && row.mm > 0;
         /* A GAUGE RING, not a droplet (user 2026-09-02: the old glyph
            cluttered and "resemble[d] bodies of water"). The problem was that
@@ -68224,7 +68281,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         var wd = cw.wide ? cwWideDef() : null;
         if (cw.radarOn || (wd && wd.lightning)) cwLtgOpen(); else cwLtgClose();
       }, 3000);
-      if (cw.floods && window._floodNetLoad) try{ fnArea = 'city'; _floodNetLoad(cwDrawSensors); }catch(e){}
+      if (cw.floods) cwFloodNet(function(){ cwDrawSensors(); cwLiveBars(); });
       if (cw.traffic) cwTrafFN();
     }
     function stop(){
@@ -76537,7 +76594,7 @@ function initNowMicroTabs(){
     return LOCATION && LOCATION.lat > 40.40 && LOCATION.lat < 41.10
         && LOCATION.lon > -74.35 && LOCATION.lon < -73.60;
   }
-  function initFloodNet(){
+  function initFloodNet(done){          // done: THE CITY's FLOODING can be the first caller (cwFloodNet) and wants the rows
     if (window._floodNetLayer) return;      // initFloodData can re-enter; one layer only
     if (!fnInNYC()) return;
     var lat = LOCATION.lat, lon = LOCATION.lon;
@@ -76721,7 +76778,7 @@ function initNowMicroTabs(){
           if (st){ st.textContent = 'SENSORS UNAVAILABLE'; document.getElementById('floodnet-panel').style.display = ''; }
         });
     };
-    load();
+    load(typeof done === 'function' ? done : undefined);
     /* The out-of-town check also runs on demand, because on the interval alone
        a switch to Charleston left "FLOODNET NYC · 141 of 150 sensors" on screen
        for up to five minutes (verified by switching at runtime). */
