@@ -55484,6 +55484,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        naming KOKX, MTA and Viele even on the MRMS views, with no links and
        nothing for traffic, trees or the fronts. Each view lists what it draws. */
     var CW_SRC = {
+      mtart:['MTA live trains (measured delays)','https://api.mta.info/'],
       nwps:['NOAA NWPS gauges','https://water.noaa.gov/'], '3dep':['USGS 3DEP','https://www.usgs.gov/3d-elevation-program'],
       osm:['\u00a9 OpenStreetMap','https://www.openstreetmap.org/copyright'], pm:['Protomaps','https://maps.protomaps.com/builds/'],
       cudem:['NOAA CUDEM','https://www.ncei.noaa.gov/products/coastal-elevation-models'], gmrt:['GMRT','https://www.gmrt.org/GMRTMapTool/'],
@@ -55513,7 +55514,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (cw.wide === 'foliage') k = ['modis','npn','fia','s2','osrm','gmrt','osm','pm'];
       else if (cw.wide) k = ['mrms','wpc','wpcp','nws','bz','om','omm','gmrt','ne','osm','pm'];
       else if (cw.radarOn) k = (cw.prod === 'cc' ? ['kokx','l3'] : ['kokx']).concat(['okx','bz','om'], base, ['mta','ferry']);
-      else if (cw.traffic) k = (cw.trafMode === 'car' ? ['tt','pa','ny511','dotcam','osrm','fn','nws'] : ['mtaal','mtagtfs']).concat(base);
+      else if (cw.traffic) k = (cw.trafMode === 'car' ? ['tt','pa','ny511','dotcam','osrm','fn','nws'] : ['mtaal','mtart','mtagtfs']).concat(base);
       else if (cw.floods) k = ['nwps','nws','3dep','dep','fn','dotcam','coops','viele','u97','dec','outf'].concat(base);
       else if (cw.trees) k = ['trees'].concat(base);
       else if (cw.rock) k = ['macro','i2306','i2003','eq'].concat(base);
@@ -58405,7 +58406,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       var wetNow = window._lastWxCode != null && ((window._lastWxCode >= 51 && window._lastWxCode <= 67) || (window._lastWxCode >= 71 && window._lastWxCode <= 86) || window._lastWxCode >= 95);
       if (SUB){
         if (cwSub.alerts){ var bul2 = function(rt){ var r = mtaRouteShow(rt); return '<span style="display:inline-grid;place-items:center;width:15px;height:15px;border-radius:50%;margin:0 1px;background:' + (MTA_COLORS[r] || '#808183') + ';color:' + (MTA_DARKTEXT[r] ? '#111' : '#fff') + ';font:900 8px system-ui,sans-serif;vertical-align:middle;">' + r + '</span>'; };
-          bars.push(lab('DELAYS NOW') + (cwSub.alerts.length ? cwSub.alerts.slice(0, 6).map(function(al){ return al.routes.map(bul2).join('') + ' <span style="color:#1b2340;">' + (al.dir === 'N' ? '↑ UPTOWN' : al.dir === 'S' ? '↓ DOWNTOWN' : '↕ BOTH') + (al.bor.length ? ' ' + al.bor.join('+') : '') + '</span>'; }).join(' &nbsp;·&nbsp; ') + ' <span style="color:rgba(43,34,244,.55);">· TAP A LINE</span>' : '<span style="color:#05a82a;">GOOD SERVICE ON EVERY LINE</span>'));
+          bars.push(lab('DELAYS NOW') + (cwSub.alerts.length ? cwSub.alerts.slice(0, 6).map(function(al){ return al.routes.map(bul2).join('') + ' <span style="color:#1b2340;">' + (al.dir === 'N' ? '↑ UPTOWN' : al.dir === 'S' ? '↓ DOWNTOWN' : '↕ BOTH') + (al.bor.length ? ' ' + al.bor.join('+') : '') + (al.measured ? ' ' + al.short : '') + '</span>'; }).join(' &nbsp;·&nbsp; ') + ' <span style="color:rgba(43,34,244,.55);">· TAP A LINE</span>' : '<span style="color:#05a82a;">GOOD SERVICE ON EVERY LINE</span>'));
         } else bars.push(lab('DELAYS NOW') + 'READING THE MTA…');
       } else {
         if (cwTraf.cross){
@@ -59552,7 +59553,135 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       var m = /(?:between|from)\s+(.+?)\s+(?:and|to)\s+(.+?)(?:[.,\n]|$)/i.exec(t.replace(/\[[A-Z0-9]+\]/g, ''));
       return { dir: dir, bor: bor, from: m ? m[1].trim() : null, to: m ? m[2].trim() : null };
     }
+    /* ─ MEASURED DELAYS (user 2026-09-26: "how live are the subway delays?" -> "do that") ───────────────────────────────
+       The MTA's posted alerts are written by people in the control centre: minutes late, sometimes hours stale. This
+       measures delays straight from the live train feed (the same GTFS-RT the arrival boards read), every 30 s while the
+       subway lines are on screen:
+         HELD  a train reported STOPPED_AT the same station across polls for 4+ min AND its predictions slipped 3+ min
+               (terminals excluded: trains lay over; planned holds at timing points never slip the predictions)
+         LATE  a train's predicted arrival at a stop it is heading for has slipped 5+ min since we first saw it
+         GAP   a hole in service: at a station with 3+ trains coming, one interval over max(12 min, 2.5 x the scheduled
+               headway, 2.2 x the line's live median, 2.5 x that station's own median) -- judged against itself, so branches
+               that always get every other train and thin night service do not read as delays
+       They join the posted alerts as the same coloured spans with chevrons, labelled with what was measured, and tap to a
+       card that says it was measured, not posted. HELD and LATE need a few minutes of watching before they can fire. */
+    var cwMeas = { at: 0, busy: 0, hist: {}, list: [], since: 0 };
+    var CW_RT_SFX = ['', '-ace', '-bdfm', '-g', '-jz', '-nqrw', '-l'];                 /* no -si: Staten Island is ignored */
+    function cwSubMerge(){
+      cwSub.alerts = (cwSub.posted || []).concat(cwMeas.list || []);
+      try { cwDrawSensors(); } catch(e){} if (typeof cwTrafBand === 'function') cwTrafBand();
+    }
+    /* trips + vehicles from one raw feed: {tid: {rt, st: [[sid, t]...], vs, vsid}} */
+    function cwRtTrips(buf, out){
+      var b = new Uint8Array(buf), str = function(s1, e1){ var x = ''; for (var q = s1; q < e1; q++) x += String.fromCharCode(b[q]); return x; };
+      mtaFields(b, 0, b.length, function(f, v, s1, e1){
+        if (f !== 2) return;
+        mtaFields(b, s1, e1, function(f2, v2, s2, e2){
+          if (f2 !== 3 && f2 !== 4) return;
+          var tid = '', rt = '', st = [], vs = null, vsid = '';
+          mtaFields(b, s2, e2, function(f3, v3, s3, e3){
+            if (f3 === 1) mtaFields(b, s3, e3, function(f4, v4, s4, e4){ if (f4 === 1) tid = str(s4, e4); else if (f4 === 5) rt = str(s4, e4); });
+            else if (f2 === 3 && f3 === 2){ var sid = '', tt = 0;
+              mtaFields(b, s3, e3, function(f4, v4, s4, e4){
+                if (f4 === 4) sid = str(s4, e4);
+                else if (f4 === 2 || f4 === 3) mtaFields(b, s4, e4, function(f5, v5){ if (f5 === 2 && (f4 === 2 || !tt)) tt = v5; });
+              });
+              if (sid && tt) st.push([sid, tt]); }
+            else if (f2 === 4 && f3 === 4) vs = v3;
+            else if (f2 === 4 && f3 === 7) vsid = str(s3, e3);
+          });
+          if (!tid) return;
+          var T = out[tid] = out[tid] || { rt: '', st: [], vs: null, vsid: '' };
+          if (rt) T.rt = rt; if (st.length) T.st = st; if (vs != null){ T.vs = vs; T.vsid = vsid; }
+        });
+      });
+    }
+    function cwMeasLoad(){
+      if (cwMeas.busy || Date.now() - cwMeas.at < 30000) return;
+      cwMeas.busy = 1; cwMeas.at = Date.now();
+      (cwSG.p = cwSG.p || fetch('/city_subway_graph.json?v=2').then(function(r){ return r.json(); })).then(function(G){
+        cwSG.g = G;
+        var left = CW_RT_SFX.length, trips = {};
+        CW_RT_SFX.forEach(function(sfx){ mtaFeed(sfx, function(){ var c = mtaCache[sfx]; if (c && c.ab) try { cwRtTrips(c.ab, trips); } catch(e){}
+          if (--left) return; cwMeas.busy = 0; cwMeasRun(G, trips); }); });
+      }).catch(function(){ cwMeas.busy = 0; });
+    }
+    function cwMeasRun(G, trips){
+      var now = Date.now() / 1000, H = cwMeas.hist, ev = [];
+      if (!cwMeas.since) cwMeas.since = now;
+      if (!G._node){ G._node = {}; G.n.forEach(function(n){ G._node[n[0]] = n; });
+        G._in = {}; G.e.forEach(function(e){ G._in[e[2] + e[3] + '|' + e[1]] = 1; });
+        G._srv = {}; G.e.forEach(function(e){ [e[0], e[1]].forEach(function(id){ var k = e[2] + e[3]; (G._srv[k] = G._srv[k] || {})[id] = 1; }); }); }
+      var base = function(sid){ return sid.replace(/[NS]$/, ''); }, rtOf = function(rt){ return rt === 'SS' ? 'SI' : rt; };
+      var seen = {};
+      Object.keys(trips).forEach(function(tid){
+        var T = trips[tid], rt = rtOf(T.rt); if (!rt || rt === 'SI' || !T.st.length) return;
+        var dir = /N$/.test(T.st[0][0]) ? 'N' : 'S', h = H[tid] = H[tid] || { sid: '', since: now, pred: {} };
+        seen[tid] = 1;
+        var heldNow = 0;
+        /* LATE: the prediction at a stop it has not reached yet, against the first prediction we saw for that stop */
+        var worst = 0, wsid = '';
+        T.st.forEach(function(x){ if (x[1] < now || x[1] > now + 1800) return;
+          var p0 = h.pred[x[0]]; if (!p0){ h.pred[x[0]] = [x[1], now]; return; }
+          if (now - p0[1] >= 240){ var d = (x[1] - p0[0]) / 60; if (d > worst){ worst = d; wsid = x[0]; } } });
+        /* HELD: stopped at one station poll after poll; not the train's first or last stop (terminal layovers) */
+        if (T.vs === 1 && T.vsid){
+          if (h.sid !== T.vsid){ h.sid = T.vsid; h.since = now; }
+          var held = (now - h.since) / 60, last = T.st[T.st.length - 1][0] === T.vsid, origin = !G._in[rt + dir + '|' + base(T.vsid)];
+          /* ...and only if the hold was NOT planned: night trains are held at timing points (Atlantic Av, Canal St, DeKalb) to
+             even the spacing, and the MTA's predictions already carry those, so a planned hold never slips them. Seen live
+             2026-09-26: six 'held 4 min' at once, all timing points, none late. */
+          if (held >= 4 && worst >= 3 && !last && !origin && G._node[base(T.vsid)]){ ev.push({ k: 'held', rt: rt, dir: dir, sid: base(T.vsid), m: held }); heldNow = 1; }
+        } else { h.sid = ''; }
+        if (!heldNow && worst >= 5 && G._node[base(wsid)]) ev.push({ k: 'late', rt: rt, dir: dir, sid: base(wsid), m: worst });
+      });
+      Object.keys(H).forEach(function(tid){ if (!seen[tid]) delete H[tid]; });
+      /* GAP: per line and direction, how long until the next train at each station it serves */
+      var arr = {};
+      Object.keys(trips).forEach(function(tid){ var T = trips[tid], rt = rtOf(T.rt); if (!rt || rt === 'SI') return;
+        T.st.forEach(function(x){ if (x[1] < now - 30) return; var k = rt + (/N$/.test(x[0]) ? 'N' : 'S'); ((arr[k] = arr[k] || {})[base(x[0])] = arr[k][base(x[0])] || []).push(x[1]); }); });
+      Object.keys(arr).forEach(function(k){
+        var A = arr[k], srv = G._srv[k] || {}, gaps = [], waits = {};
+        var own = {};
+        Object.keys(A).forEach(function(sid){ var L = A[sid].sort(function(a, b){ return a - b; }), g2 = [];
+          for (var i = 1; i < L.length; i++){ gaps.push(L[i] - L[i - 1]); g2.push(L[i] - L[i - 1]); } waits[sid] = L[0] - now;
+          if (g2.length){ g2.sort(function(a, b){ return a - b; }); own[sid] = g2[g2.length >> 1]; } });
+        if (gaps.length < 6) return;                                            /* too few trains to judge the line's spacing */
+        gaps.sort(function(a, b){ return a - b; });
+        var med = gaps[gaps.length >> 1], hs = (G.h || {})[k] || 480, thr = Math.max(720, 2.5 * hs, 2.2 * med);
+        /* a HOLE in service: at a station with 3+ trains coming, one interval far longer than the others there (so a branch
+           that always gets every other train, and night service, are judged against themselves) */
+        Object.keys(A).forEach(function(sid){ var L = A[sid]; if (L.length < 3 || !srv[sid] || !G._node[sid]) return;
+          var g2 = []; for (var i = 1; i < L.length; i++) g2.push(L[i] - L[i - 1]);
+          var srt = g2.slice().sort(function(a, b){ return a - b; }), md = srt[(srt.length - 1) >> 1], big = srt[srt.length - 1];
+          if (!(big > Math.max(thr, 2.5 * md))) return;
+          /* only where the hole is arriving now (its leading train within 15 min): a hole travels the whole line, and marking
+             every station it will ever reach painted the entire A */
+          var gi = g2.indexOf(big); if (L[gi] - now > 900) return;
+          ev.push({ k: 'gap', rt: k.slice(0, -1), dir: k.slice(-1), sid: sid, m: big / 60 }); });
+      });
+      /* one alert per line+direction+kind, spanning the stations it touched */
+      var grp = {};
+      /* held and late stay one per train (grouping joined Bay 50 St to Atlantic Av and painted the stretch between) */
+      ev.forEach(function(e, ei){ var key = e.k === 'gap' ? e.rt + e.dir + e.k : e.rt + e.dir + e.k + ei; var g = grp[key] = grp[key] || { rt: e.rt, dir: e.dir, k: e.k, sids: [], m: 0 }; g.sids.push(e.sid); if (e.m != null && e.m > g.m) g.m = e.m; });
+      var out = [];
+      Object.keys(grp).forEach(function(key){ var g = grp[key];
+        var pts = g.sids.map(function(id){ var n = G._node[id]; return [n[2], n[3], n[1]]; });
+        var r = mtaRouteShow(g.rt), m = Math.round(g.m);
+        var short = g.k === 'held' ? (g.sids.length > 1 ? g.sids.length + ' TRAINS HELD' : 'TRAIN HELD ' + m + ' MIN') : g.k === 'late' ? 'RUNNING ' + m + ' MIN LATE' : m + ' MIN GAP';
+        var where = pts.length === 1 ? pts[0][2] : pts[0][2] + ' TO ' + pts[pts.length - 1][2];
+        var text = g.k === 'held' ? (g.sids.length > 1 ? g.sids.length + ' ' + r + ' trains are stopped at stations, the longest for ' + m + ' min (' + where + ').' : 'A ' + r + ' train has been stopped at ' + where + ' for ' + m + ' min.')
+          : g.k === 'late' ? 'A ' + r + ' train now arrives ' + m + ' min later than it was predicted to a few minutes ago (' + where + ').'
+          : 'Along ' + where + ' there is a ' + m + ' min hole between ' + r + ' trains, far longer than the spacing either side of it.';
+        out.push({ kind: 'Measured delay', measured: true, short: short, text: text + ' Measured from the MTA’s live train positions, not a posted alert.', routes: [g.rt], dir: g.dir, bor: [], pts: pts, mins: g.m });
+      });
+      out.sort(function(a, b){ return (b.mins || 0) - (a.mins || 0); });
+      cwMeas.list = out.slice(0, 10);
+      window._cwMeas = { list: cwMeas.list, trips: Object.keys(trips).length, watchingMin: Math.round((now - cwMeas.since) / 60) };
+      cwSubMerge();
+    }
     function cwSubLoad(){
+      cwMeasLoad();                                                    /* its own 30 s gate, ahead of the posted alerts' 2 min one */
       if (!cwSub.lines && !cwSub.linesP) cwSub.linesP = fetch('/city_subway_lines.json?v=2').then(function(r){ return r.json(); }).then(function(j){ cwSub.lines = j; cwDrawSensors(); }).catch(function(){ cwSub.linesP = null; });
       if (Date.now() - cwSub.at < 120000) return; cwSub.at = Date.now();
       fetch('https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/camsys%2Fsubway-alerts.json').then(function(r){ return r.json(); }).then(function(j){
@@ -59563,14 +59692,23 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
           if (/^planned/i.test(kind) || !CW_SUB_KINDS.test(kind)) return;
           var hd = ((a.header_text || {}).translation || []).filter(function(t){ return t.language === 'en'; })[0], txt = hd ? hd.text : kind;
           var routes = []; (a.informed_entity || []).forEach(function(ie){ if (ie.route_id && routes.indexOf(ie.route_id) < 0) routes.push(ie.route_id); });
+          routes = routes.filter(function(r){ return r !== 'SI' && r !== 'SIR'; });   /* no Staten Island Railway (user 2026-09-26: "ignore the staten island train") */
           if (!routes.length) return;
           var P = cwSubParse(txt, routes); list.push({ kind: kind, text: txt, routes: routes, dir: P.dir, bor: P.bor, from: P.from, to: P.to });
         });
-        cwSub.alerts = list; cwDrawSensors(); if (typeof cwTrafBand === 'function') cwTrafBand();
+        cwSub.posted = list; cwSubMerge();
       }).catch(function(){});
     }
     /* the stretch of one branch an alert covers: point-index range [a, b] on br.p (uptown order) */
     function cwSubSpan(br, al){
+      /* a measured alert names stations by position: nearest station on this branch within 300 m of each */
+      if (al.pts){ var near = function(q){ var bi = -1, bd = 3e-3; br.s.forEach(function(st, i){ var d = Math.hypot(st[1] - q[0], (st[2] - q[1]) * 0.76); if (d < bd){ bd = d; bi = i; } }); return bi; };
+        var ix = al.pts.map(near).filter(function(i){ return i >= 0; }); if (ix.length < al.pts.length) return null;
+        var lo = Math.min.apply(null, ix), hi = Math.max.apply(null, ix);
+        /* a single station: the stretch leading into it, where the trains behind it wait */
+        if (lo === hi){ if (al.dir === 'N') lo = Math.max(0, lo - 1); else hi = Math.min(br.s.length - 1, hi + 1); }
+        if (lo === hi) return null;
+        return [br.s[lo][4], br.s[hi][4], br.s[lo][0], br.s[hi][0]]; }
       var S = br.s, idx = null;
       if (al.from && al.to){ var f = function(n){ n = n.toLowerCase().replace(/[^a-z0-9]/g, ''); for (var i = 0; i < S.length; i++){ var k = S[i][0].toLowerCase().replace(/[^a-z0-9]/g, ''); if (k.indexOf(n) === 0 || n.indexOf(k) === 0) return i; } return -1; };
         var i1 = f(al.from), i2 = f(al.to); if (i1 >= 0 && i2 >= 0) idx = [Math.min(i1, i2), Math.max(i1, i2)]; }
@@ -59645,7 +59783,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       var ent = mtaCache[sfx] = { at: c ? c.at : 0, by: c ? c.by : null, pend: [cb] };
       fetch('https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs' + sfx)
         .then(function(r){ return r.arrayBuffer(); })
-        .then(function(ab){ ent.by = mtaDecode(ab); ent.at = Date.now(); window._mtaFeedOk = Date.now(); })
+        .then(function(ab){ ent.by = mtaDecode(ab); ent.ab = ab; ent.at = Date.now(); window._mtaFeedOk = Date.now(); })
         /* remember the failure: a dead feed must not read as "no trains" */
         .catch(function(){ window._mtaFeedBad = Date.now(); })
         .then(function(){ var ps = ent.pend; ent.pend = null; ps.forEach(function(p){ try{ p(ent.by); }catch(e){} }); });
@@ -66139,7 +66277,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
           var taken = [];
           labs.forEach(function(Lb){
             var al = Lb.al, dirW = al.dir === 'N' ? '↑ UPTOWN' : al.dir === 'S' ? '↓ DOWNTOWN' : '↕ BOTH WAYS', where = al.bor.length ? al.bor.join('+') : '';
-            var txt = dirW + (where ? ' · ' + where : '') + ' · ' + (/slow/i.test(al.kind) ? 'SLOW' : /suspend/i.test(al.kind) ? 'SUSPENDED' : /reroute/i.test(al.kind) ? 'REROUTED' : 'DELAYS');
+            var txt = al.measured ? dirW + ' · ' + al.short : dirW + (where ? ' · ' + where : '') + ' · ' + (/slow/i.test(al.kind) ? 'SLOW' : /suspend/i.test(al.kind) ? 'SUSPENDED' : /reroute/i.test(al.kind) ? 'REROUTED' : 'DELAYS');
             g.font = '800 ' + (7.5 * dpr) + 'px system-ui,sans-serif';
             var bw = al.routes.length * 14 * dpr + 6 * dpr, w = bw + g.measureText(txt).width + 14 * dpr, hh = 18 * dpr, q = null, P3 = Lb.Q;
             for (var k = 0; k < 14 && !q; k++){ var f = 0.5 + (k % 2 ? -1 : 1) * Math.ceil(k / 2) * 0.07; if (f <= 0.02 || f >= 0.98) continue; var c2 = P3[Math.floor(f * (P3.length - 1))];
