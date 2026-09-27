@@ -65129,16 +65129,18 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
     function cwFlowMaskBuild(){
       var im = document.getElementById('cw-bm-under');
       if (!im || !im.naturalWidth) return null;
-      var W = Math.round(im.naturalWidth / 6), H = Math.round(im.naturalHeight / 6);
-      var c = document.createElement('canvas'); c.width = W; c.height = H;
+      /* HALF resolution, and a cell is water if ANY of its pixels is (user 2026-09-27: "why isnt the gowanus bay flowing
+         green?"). At a sixth, point-sampled, a 30 m canal was one blended pixel in six and simply was not water: the
+         Gowanus Canal, Newtown Creek's arms and the Flushing River drew no current and held no sewage at all. */
+      var FW = im.naturalWidth, FH = im.naturalHeight, K = 2, W = Math.ceil(FW / K), H = Math.ceil(FH / K);
+      var c = document.createElement('canvas'); c.width = FW; c.height = FH;
       var g = c.getContext('2d', { willReadFrequently: true });
-      try { g.drawImage(im, 0, 0, W, H); var d = g.getImageData(0, 0, W, H).data; } catch (e){ return null; }
+      try { g.drawImage(im, 0, 0); var d = g.getImageData(0, 0, FW, FH).data; } catch (e){ return null; }
       var m = new Uint8Array(W * H), n = 0;
-      for (var i = 0; i < W * H; i++){
-        var r = d[i * 4], gg = d[i * 4 + 1], b = d[i * 4 + 2];
-        /* the ink bake's water: blue leads, and not the near-black land */
-        if (b > 60 && b > r + 25 && b > gg + 8){ m[i] = 1; n++; }
-      }
+      for (var y = 0; y < FH; y++){ var row = (y / K | 0) * W;
+        for (var x = 0; x < FW; x++){ var o = (y * FW + x) * 4, r = d[o], gg = d[o + 1], b = d[o + 2];
+          /* the ink bake's water: blue leads, and not the near-black land */
+          if (b > 60 && b > r + 25 && b > gg + 8){ var k = row + (x / K | 0); if (!m[k]){ m[k] = 1; n++; } } } }
       return { w: W, h: H, m: m, share: n / (W * H), src: im.src };
     }
     function cwFlowWater(x, y, cvs){
@@ -65522,7 +65524,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       'precision highp float;',
       'uniform sampler2D uPrev, uTd, uMk, uNz, uSrc;',
       'uniform vec2 uRes, uSeed;',
-      'uniform float uStep, uHere, uFadeR, uDrop, uFadeG, uHoldG, uPour, uMix, uLast, uTime, uInj, uCell, uNzF, uFloor;',
+      'uniform float uStep, uHere, uFadeR, uDrop, uFadeG, uHoldG, uPour, uMix, uLast, uTime, uInj, uCell, uNzF, uFloor, uSub;',
       'vec2 tdn(vec2 uv){ return vec2(uv.x, 1. - uv.y); }',      /* the field and mask are stored top row first */
       'float hs(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }',
       'float vn(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3. - 2. * f);',
@@ -65544,7 +65546,11 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       '  bool wet = texture2D(uMk, tdn(up)).r > .5;',
       '  vec4 a = wet ? texture2D(uPrev, up) : here;',
       '  vec2 q = wet ? up : uv;',
-      '  float gN = (texture2D(uPrev, q + vec2(px.x, 0.)).g + texture2D(uPrev, q - vec2(px.x, 0.)).g + texture2D(uPrev, q + vec2(0., px.y)).g + texture2D(uPrev, q - vec2(0., px.y)).g) * .25;',
+      /* sideways mixing among WATER neighbours only: averaged with the land's zero, a canal a few pixels wide lost a tenth
+         of its dye every step and the Gowanus never showed its plume (2026-09-27) */
+      '  float m1 = step(.5, texture2D(uMk, tdn(q + vec2(px.x, 0.))).r), m2 = step(.5, texture2D(uMk, tdn(q - vec2(px.x, 0.))).r), m3 = step(.5, texture2D(uMk, tdn(q + vec2(0., px.y))).r), m4 = step(.5, texture2D(uMk, tdn(q - vec2(0., px.y))).r);',
+      '  float mw = m1 + m2 + m3 + m4;',
+      '  float gN = mw > 0. ? (texture2D(uPrev, q + vec2(px.x, 0.)).g * m1 + texture2D(uPrev, q - vec2(px.x, 0.)).g * m2 + texture2D(uPrev, q + vec2(0., px.y)).g * m3 + texture2D(uPrev, q - vec2(0., px.y)).g * m4) / mw : a.g;',
       /* R: THE WATER'S OWN TEXTURE, image-based flow visualisation (van Wijk 2002; user 2026-09-26: "the animation is not
          consistently playing"). The whole field is carried by the current every sub-step and, once a frame, a little
          fresh grain is blended in -- grain cells that each blink on their own random phase, so what enters is itself
@@ -65558,10 +65564,11 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       /* G, B: the sewage and how long its water holds it */
       '  float g = mix(a.g, gN, uMix);',
       '  float b = a.b;',
-      '  g = g * mix(1., mix(uFadeG, uHoldG, b), uLast) - .6 / 255. * uLast;',
+      '  g = g * mix(1., mix(uFadeG, uHoldG, b), uLast) - uSub * uLast;',
       '  vec4 src = texture2D(uSrc, tdn(uv));',
-      '  g += src.r * uPour;',
+      '  g += src.r * uPour * uLast;',   /* once a frame, whole: split across sub-steps each pour was under 1/255 and rounded to nothing (the Gowanus stayed clear) */
       '  if (src.r > .02) b = max(b, src.g);',
+      '  if (src.b > .01){ g = max(g, src.b * .55); b = max(b, .9); }',   /* the standing sewage of a basin that does not flush */
       '  if (g <= 0.) b = 0.;',
       '  gl_FragColor = vec4(clamp(r, 0., 1.), clamp(g, 0., 1.), b, 1.);',
       '}'].join('\n');
@@ -65582,7 +65589,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       var b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
       [pr, pa].forEach(function(q){ var loc = gl.getAttribLocation(q, 'p'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0); });
       cwWat.ua = {};
-      ['uPrev', 'uTd', 'uMk', 'uNz', 'uSrc', 'uRes', 'uSeed', 'uStep', 'uHere', 'uFadeR', 'uDrop', 'uFadeG', 'uHoldG', 'uPour', 'uMix', 'uLast', 'uTime', 'uInj', 'uCell', 'uNzF', 'uFloor'].forEach(function(k){ cwWat.ua[k] = gl.getUniformLocation(pa, k); });
+      ['uPrev', 'uTd', 'uMk', 'uNz', 'uSrc', 'uRes', 'uSeed', 'uStep', 'uHere', 'uFadeR', 'uDrop', 'uFadeG', 'uHoldG', 'uPour', 'uMix', 'uLast', 'uTime', 'uInj', 'uCell', 'uNzF', 'uFloor', 'uSub'].forEach(function(k){ cwWat.ua[k] = gl.getUniformLocation(pa, k); });
       gl.useProgram(pa);
       gl.uniform1i(cwWat.ua.uPrev, 5); gl.uniform1i(cwWat.ua.uTd, 1); gl.uniform1i(cwWat.ua.uMk, 2); gl.uniform1i(cwWat.ua.uNz, 3); gl.uniform1i(cwWat.ua.uSrc, 4);
       cwWat.pa = pa;
@@ -65636,8 +65643,16 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       if (hasTd){
         var skey = W + 'x' + H + '|' + v.X0 + ',' + v.X1 + ',' + v.Y0 + ',' + v.Y1;
         if (cwWat.simKey !== skey){
+          /* HALF-FLOAT buffers where the GPU renders to them (2026-09-27): in 8 bits a slow plume's per-frame changes are under
+             1/255 and round away, so dye in still water (the Gowanus, the Newtown Creek arms) never spread past its pipe */
+          if (cwWat.hf == null){ var eh = gl.getExtension('OES_texture_half_float'), ec = gl.getExtension('EXT_color_buffer_half_float');
+            gl.getExtension('OES_texture_half_float_linear'); cwWat.hf = 0;
+            if (eh){ gl.activeTexture(gl.TEXTURE7); var tt = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tt);   /* a spare unit: probing on a live one unbound the water mask */ gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 4, 4, 0, gl.RGBA, eh.HALF_FLOAT_OES, null);
+              var ff = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, ff); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tt, 0);
+              if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE) cwWat.hf = eh.HALF_FLOAT_OES;
+              gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.deleteFramebuffer(ff); gl.deleteTexture(tt); } }
           ['sa', 'sb'].forEach(function(k2, i2){ gl.activeTexture(gl.TEXTURE5 + i2); gl.bindTexture(gl.TEXTURE_2D, cwWat.tx[k2]);
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null); });
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, cwWat.hf || gl.UNSIGNED_BYTE, null); });
           cwWat.simKey = skey; cwWat.cur = 'sa'; cwWat.srcSig = null; cwWat.lastT = 0; cwWat.resets = (cwWat.resets || 0) + 1; cwWat.lastKey = skey;
         }
         var SRC = cwWat.src || { sig: '', list: [] }, ssig = skey + '|' + SRC.sig;
@@ -65649,6 +65664,33 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
             var gr = sg.createRadialGradient(x, y, 0, x, y, 2.6);
             gr.addColorStop(0, 'rgba(' + Math.round(255 * q[2]) + ',' + Math.round(255 * q[3]) + ',0,1)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
             sg.fillStyle = gr; sg.fillRect(x - 3, y - 3, 6, 6); });
+          /* THE WATER THAT DOES NOT FLUSH (user 2026-09-27: "why isnt the gowanus bay flowing green?"). The dye starts empty
+             when the map opens, and in a dead-end canal with no current it creeps outward only by mixing -- a real overflow
+             has sat there for hours by then, and close in the model clock is also slowed so the plume keeps its ground
+             size. So around every pipe into slow water (hold > .45: Gowanus, Newtown Creek and its kills, the Jamaica Bay
+             basins, Flushing Creek...) the basin itself carries the sewage already: a floor of dye through the water within
+             ~600 m of the pipe (by water, not across land), strongest at the pipe. Blue channel of the source texture. */
+          var M9 = cwFlowMask;
+          if (M9 && SRC.list.length){
+            var mw9 = M9.w, mh9 = M9.h, cellM = (v.X1 - v.X0) / mw9 * Math.cos(40.7 * Math.PI / 180), R9c = Math.max(3, Math.min(400, Math.round(600 / cellM)));
+            var fl9 = new Float32Array(mw9 * mh9), dst9 = new Int32Array(mw9 * mh9), Q9 = new Int32Array(mw9 * mh9);
+            SRC.list.forEach(function(q){ if (q[3] < 0.45 || q[2] < 0.04) return;
+              var cx = Math.round(q[0] * mw9), cy = Math.round(q[1] * mh9); if (cx < -R9c || cy < -R9c || cx > mw9 + R9c || cy > mh9 + R9c) return;
+              /* the nearest water cell to the pipe */
+              var st9 = -1, bd9 = 1e9;
+              var sr9 = Math.max(4, Math.min(40, Math.round(45 / cellM)));   /* ~45 m: a pipe sits on the bank, not in the water */
+              for (var dy = -sr9; dy <= sr9; dy++) for (var dx = -sr9; dx <= sr9; dx++){ var xx = cx + dx, yy = cy + dy; if (xx < 0 || yy < 0 || xx >= mw9 || yy >= mh9) continue; var kk = yy * mw9 + xx; if (M9.m[kk] && dx * dx + dy * dy < bd9){ bd9 = dx * dx + dy * dy; st9 = kk; } }
+              if (st9 < 0) return;
+              var qh = 0, qt = 0, stamp = st9 + 1; Q9[qt++] = st9; dst9[st9] = stamp * 1024;
+              var peak = q[2] * (0.4 + 0.6 * q[3]);
+              while (qh < qt){ var k9 = Q9[qh++], d9 = dst9[k9] % 1024; var val = peak * (1 - d9 / R9c); if (val > fl9[k9]) fl9[k9] = val; if (d9 >= R9c) continue;
+                var x9 = k9 % mw9; [x9 > 0 ? k9 - 1 : -1, x9 < mw9 - 1 ? k9 + 1 : -1, k9 >= mw9 ? k9 - mw9 : -1, k9 < mw9 * (mh9 - 1) ? k9 + mw9 : -1].forEach(function(nk){
+                  if (nk < 0 || !M9.m[nk] || Math.floor(dst9[nk] / 1024) === stamp) return; dst9[nk] = stamp * 1024 + d9 + 1; Q9[qt++] = nk; }); } });
+            var bc9 = cwWat.basinCv || (cwWat.basinCv = document.createElement('canvas')); bc9.width = mw9; bc9.height = mh9;
+            var bx9 = bc9.getContext('2d'), bi9 = bx9.createImageData(mw9, mh9);
+            for (var j9 = 0; j9 < fl9.length; j9++){ if (!fl9[j9]) continue; bi9.data[j9 * 4 + 2] = Math.min(255, Math.round(fl9[j9] * 255)); bi9.data[j9 * 4 + 3] = 255; }
+            bx9.putImageData(bi9, 0, 0); sg.imageSmoothingEnabled = true; sg.drawImage(bc9, 0, 0, sw, shh);
+          }
           gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, cwWat.tx.src);
           gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sc);
           cwWat.srcSig = ssig;
@@ -65661,6 +65703,10 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         /* the current three times the tracers' pace: the river has to read as moving at a glance */
         /* px per knot this frame -- capped on screen, so a deep zoom does not turn the same current into jumps */
         var stepPx = Math.min(0.5144 * CW_FLOW_SPEEDUP * 3.6 * sdt / mpp, 0.84 * sdt * 60);   /* TIDAL preset: motion x1.2 */
+        /* close in the on-screen pace is capped, so a plume moved the same PIXELS as from far out and shrank to a few metres
+           of ground (the Gowanus showed a dot at each pipe). The dye's life stretches by the cap instead: the same ground
+           length at any zoom */
+        var zStretch = Math.max(1, (0.5144 * CW_FLOW_SPEEDUP * 3.6 * sdt / mpp) / Math.max(1e-6, stepPx));
         /* SUB-STEPS: no step may move the buffer more than a pixel at 4 knots, or a steady source leaves a row of separate
            copies (the sewage came out as combs) and a trail as dots */
         var nsub = Math.max(1, Math.min(12, Math.ceil(stepPx * 4)));
@@ -65670,7 +65716,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         gl.uniform1f(UA.uStep, stepPx / nsub);
         gl.uniform1f(UA.uTime, (performance.now() / 1000) % 1000); gl.uniform1f(UA.uInj, Math.min(0.5, 0.015 * fr)); gl.uniform1f(UA.uCell, 2); gl.uniform1f(UA.uNzF, 0.35); gl.uniform1f(UA.uFloor, 0.35);
         gl.uniform1f(UA.uHere, Math.pow(0.962, fr / nsub)); gl.uniform1f(UA.uFadeR, Math.pow(0.996, fr)); gl.uniform1f(UA.uDrop, 2.0);                                         /* no fibres: the display's LIC draws the current */
-        gl.uniform1f(UA.uFadeG, Math.pow(0.997, fr)); gl.uniform1f(UA.uHoldG, Math.pow(0.9993, fr)); gl.uniform1f(UA.uPour, Math.min(0.5, 0.16 * fr / nsub)); gl.uniform1f(UA.uMix, 0.1);
+        gl.uniform1f(UA.uFadeG, Math.pow(0.997, fr / zStretch)); gl.uniform1f(UA.uHoldG, Math.pow(0.9993, fr / zStretch)); gl.uniform1f(UA.uPour, Math.min(0.5, 0.16 * fr / Math.sqrt(zStretch))); gl.uniform1f(UA.uSub, cwWat.hf ? 0.0004 / zStretch : 0.6 / 255 / zStretch); gl.uniform1f(UA.uMix, 0.1);
         gl.bindFramebuffer(gl.FRAMEBUFFER, cwWat.fb); gl.viewport(0, 0, W, H);
         for (var ss = 0; ss < nsub; ss++){
           /* the spawn points DRIFT, never re-roll: a noise cell stays lit ~16 frames, so each speck is a source that grows a
@@ -65808,7 +65854,11 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
           if (rate < 0.0005) continue;
           /* a pipe that is spilling pours VISIBLY however light the rain (user 2026-09-26: "make sure the sewage flooding works
              properly"): a light storm read as a few faint flecks; strength still scales with the rain above that floor */
-          var st2 = sh.on > 0 ? Math.max(0.5, Math.min(1, rate * meta.wt * 40)) : Math.min(0.6, rate * meta.wt * 40), hold = Math.min(1, (1 - meta.flush) / 0.76);
+          var hold = Math.min(1, (1 - meta.flush) / 0.76);
+          /* after the rain: what is still leaving the pipes and lying in the water, strongest in the basins that do not flush
+             (user 2026-09-27: "why isnt the gowanus bay flowing green?" -- at the old rate a residual plume was 2/255 a step
+             and rounded away in the 8-bit buffer, so the Gowanus, which holds its sewage longest, drew nothing) */
+          var st2 = sh.on > 0 ? Math.max(0.5, Math.min(1, rate * meta.wt * 40)) : Math.min(0.75, sh.resid * (0.3 + 0.45 * hold) * Math.max(0.6, Math.min(1.4, meta.wt)));
           srcL.push([((o[0] * Math.PI / 180 * R2) - v.X0) / (v.X1 - v.X0), (v.Y1 - R2 * Math.log(Math.tan(Math.PI / 4 + o[1] * Math.PI / 360))) / (v.Y1 - v.Y0), st2, hold, (o[2] || 0) * Math.PI / 180]);
           srcS += k + ':' + st2.toFixed(2) + ',';
         }
