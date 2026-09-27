@@ -31,7 +31,7 @@ def six_groups(cfg):
     out={}
     for r in csv.DictReader(io.StringIO(kd.get(u,timeout=180).decode())):
         raw=r.get('metar') or ''
-        m=re.search(r'\b1([01])(\d{3})\b', raw)
+        m=next((re.fullmatch(r'1([01])(\d{3})', t) for t in (raw.split(' RMK ', 1)[1].split() if ' RMK ' in raw else []) if re.fullmatch(r'1[01]\d{3}', t)), None)   # a whole token: the peak wind matched the old search
         if not m: continue
         ts=r['valid']                       # 'YYYY-MM-DD HH:MM' UTC
         c=(int(m.group(2))/10.0)*(-1 if m.group(1)=='1' else 1)

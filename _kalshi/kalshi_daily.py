@@ -1100,7 +1100,12 @@ def metar_six_max(cfg, day):
     best = None
     for m in (j or []):
         raw = str(m.get('rawOb') or '')
-        g = re.search(r'\b1([01])(\d{3})\b', raw)
+        # A WHOLE TOKEN OF THE REMARKS (2026-09-27). Searched as \b1[01]\d{3}\b over the whole report this also
+        # matched the peak wind: "PK WND 10038/0023" (from 100 degrees at 38 knots, Austin 08-29) read as a six-hour
+        # maximum of 3.8 C. Harmless as a floor in summer, a false floor of up to 50 F on a winter day with an
+        # east wind. The lows' mirror of this bug put Las Vegas at 27 F (kalshi_lows.metar_six_min).
+        g = next((re.fullmatch(r'1([01])(\d{3})', t) for t in (raw.split(' RMK ', 1)[1].split() if ' RMK ' in raw else [])
+                  if re.fullmatch(r'1[01]\d{3}', t)), None)
         if not g:
             continue
         stamp = next((t for t in raw.split()

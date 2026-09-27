@@ -134,12 +134,56 @@ def fold_midnight(days, h0_of):
     return days
 
 
+SIX_SUSPECT_F = 3.0
+
+
+def _remark_tokens(raw):
+    """The remarks of a METAR, as whole tokens."""
+    raw = str(raw or '')
+    return raw.split(' RMK ', 1)[1].split() if ' RMK ' in raw else []
+
+
+def _t_group_f(raw, fallback_c=None):
+    """The report's own temperature to the tenth (the T group), in degF."""
+    for t in _remark_tokens(raw):
+        if re.fullmatch(r'T[01]\d{3}[01]\d{3}', t):
+            c = (int(t[2:5]) / 10.0) * (-1 if t[1] == '1' else 1)
+            return c * 9.0 / 5.0 + 32.0
+    if isinstance(fallback_c, (int, float)):
+        return fallback_c * 9.0 / 5.0 + 32.0
+    return None
+
+
 def metar_six_min(cfg, day):
-    """(degF, [start hour, end hour]) -- the day's lowest ASOS six-hour minimum
-    (the 2sTTT remark group), or (None, None). The mirror of K.metar_six_max,
-    with its window discipline: a group counts only when its whole six hours
-    sit inside the climate day, because a window that straddles the day's start
-    can carry the previous evening's minimum, which is no ceiling on today's."""
+    """(degF, [start hour, end hour], suspect) -- the day's lowest ASOS six-hour
+    minimum (the 2sTTT remark group), or (None, None, suspect). The mirror of
+    K.metar_six_max, with its window discipline: a group counts only when its
+    whole six hours sit inside the climate day, because a window that straddles
+    the day's start can carry the previous evening's minimum, which is no
+    ceiling on today's.
+
+    TWO THINGS THIS HAD WRONG UNTIL 2026-09-27, both found on the live record:
+
+    1. THE PEAK WIND READ AS A TEMPERATURE. The group was found with
+       \\b2[01]\\d{3}\\b anywhere in the remarks, and "PK WND 21027/1952" (peak
+       wind from 210 degrees at 27 knots) matches it: 2, sign 1, 02.7 -> -2.7 C
+       -> 27.14 F. Las Vegas blows from 200-210 most windy afternoons: 57
+       reports in the 95 days to 09-27 (Austin 4, Central Park 0). On 09-27 the
+       Las Vegas low read "67 or below, 100%" from 1 PM on with the market at
+       85% on 76 or above. The group is now a WHOLE TOKEN of the remarks.
+
+    2. THE GROUP CAN BE FALSE. Central Park's 11:51Z report carried 20128
+       (12.8 C, 55.04 F) on 09-19 and 09-22 while every hourly reading of those
+       six hours sat at 63 and 59; the climate report ignored it (lows 63, 59)
+       and the 8 AM lock said "56 or below, 100%" and "55 to 56, 92%". Measured
+       on 881 groups at the three stations (06-25..09-27): a group within 3 F
+       of the lowest hourly reading of its own window was never contradicted
+       by the settled low; beyond 3 F it was false 2 times of 7 (both Central
+       Park, both this month). So beyond SIX_SUSPECT_F the group is NOT a
+       ceiling, it is returned as `suspect`, and the bake names no bet on that
+       market for the day: the honest position is that we do not know. The
+       cost is the rare real dip (Central Park 09-16, 3.1 F under the hourlies
+       and true)."""
     from zoneinfo import ZoneInfo
     icao = cfg.get('icao') or ('K' + cfg['station'])
     try:
@@ -147,16 +191,20 @@ def metar_six_min(cfg, day):
                        % icao, timeout=45)
     except Exception as e:
         print('six-hourly min: %s unavailable (%s)' % (icao, e))
-        return None, None
+        return None, None, None
     z = ZoneInfo(cfg.get('tz', 'America/New_York'))
     h0 = K.climate_day_start(cfg, day)
     lo = datetime.datetime(day.year, day.month, day.day, h0, tzinfo=z)
     hi = lo + datetime.timedelta(days=1)
-    best, win = None, None
+    reads = []
     for m in (j or []):
-        raw = str(m.get('rawOb') or '')
-        # remarks only: a five-digit group starting with 2 means nothing else there
-        g = re.search(r'\b2([01])(\d{3})\b', raw.split(' RMK ', 1)[1]) if ' RMK ' in raw else None
+        ts = m.get('obsTime')
+        f = _t_group_f(m.get('rawOb'), m.get('temp'))
+        if isinstance(ts, (int, float)) and f is not None:
+            reads.append((datetime.datetime.fromtimestamp(ts, datetime.timezone.utc), f))
+    best, win, suspect = None, None, None
+    for m in (j or []):
+        g = next((t for t in _remark_tokens(m.get('rawOb')) if re.fullmatch(r'2[01]\d{3}', t)), None)
         ts = m.get('obsTime')
         if not g or not isinstance(ts, (int, float)):
             continue
@@ -167,11 +215,19 @@ def metar_six_min(cfg, day):
         st = end - datetime.timedelta(hours=6)
         if not (st.astimezone(z) >= lo and end.astimezone(z) <= hi):
             continue
-        c = (int(g.group(2)) / 10.0) * (-1 if g.group(1) == '1' else 1)
+        c = (int(g[2:]) / 10.0) * (-1 if g[1] == '1' else 1)
         f = round(c * 9.0 / 5.0 + 32.0, 2)
+        w = [st.astimezone(z).hour, end.astimezone(z).hour]
+        hourly = [v for t, v in reads if st - datetime.timedelta(minutes=15) <= t <= end]
+        if len(hourly) >= 4 and min(hourly) - f > SIX_SUSPECT_F:
+            print('six-hourly min: %s group %.2f is %.1f F under the lowest hourly of its own window (%.2f) -- '
+                  'not taken as a ceiling' % (icao, f, min(hourly) - f, min(hourly)))
+            if suspect is None or f < suspect['v']:
+                suspect = {'v': f, 'hourly': round(min(hourly), 2), 'window': w}
+            continue
         if best is None or f < best:
-            best, win = f, [st.astimezone(z).hour, end.astimezone(z).hour]
-    return best, win
+            best, win = f, w
+    return best, win, suspect
 
 
 def cli_min_today(cfg, day):
@@ -520,7 +576,7 @@ def run_market(cfg, dry_dir=None):
         print('%s market unavailable (%s)' % (cfg['key'], e))
     rows_neg = neg_rows(rows) if rows else []
     # the exact ceiling: the station's own six-hour minimum and the climate report's
-    six, six_win = metar_six_min(cfg, today)
+    six, six_win, six_sus = metar_six_min(cfg, today)
     cmin, cmin_at = cli_min_today(cfg, today)
     caps = [x for x in (six, cmin) if x is not None]
     cap = min(caps) if caps else None
@@ -539,7 +595,7 @@ def run_market(cfg, dry_dir=None):
     lows = [x for x in ((-run_today if run_today is not None else None), cap) if x is not None]
     T['obs_so_far'] = round(min(lows), 2) if lows else None
     T.update({'obs_hourly': (round(-run_today, 2) if run_today is not None else None),
-              'six_min': six, 'six_window': six_win, 'cli_min': cmin, 'cli_min_at': cmin_at})
+              'six_min': six, 'six_window': six_win, 'six_suspect': six_sus, 'cli_min': cmin, 'cli_min_at': cmin_at})
     if s:
         lad = ladder_out(rows, rows_neg, s['ps'])
         best = max(range(len(lad)), key=lambda i: lad[i]['ours'] or 0)
@@ -553,7 +609,9 @@ def run_market(cfg, dry_dir=None):
                   'models': {m: (round(-(max(fcm[m][tkey].values()) - b), 1) if fcm[m].get(tkey) and b is not None else None)
                              for m, b in s['biases'].items()},
                   'bias': {m: (round(-b, 2) if b is not None else None) for m, b in s['biases'].items()}})
-        bet, book = (None, []) if T['day_over'] else best_line(lad)
+        # a six-hour group we could not believe: the low is not known well enough to price (see metar_six_min),
+        # unless the climate report has since printed a minimum of its own
+        bet, book = (None, []) if (T['day_over'] or (six_sus and cmin is None)) else best_line(lad)
         T['bet'], T['book'] = bet, book
         # the morning lock, once, at the first bake at or after LOCK_HOUR
         h = hist.setdefault(tkey, {'date': tkey, 'event': T['event']})
