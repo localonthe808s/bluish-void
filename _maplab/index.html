@@ -91,6 +91,7 @@
 </p>
 
 <script src="https://cdn.bluishvoid.com/vendor/protomaps-leaflet/protomaps-leaflet-5.1.0.js"></script>
+<script src="sea_gl.js?v=1"></script>
 <script>
 /* Served from the site itself, the lab can read the real archive — the CDN's CORS
    allows bluishvoid.com and Static takes a .pmtiles URL directly, exactly as
@@ -4373,6 +4374,9 @@ function drawCard(style){
   railCv.style.cssText = 'position:absolute;left:0;background:transparent;pointer-events:none;z-index:3;';
   var swellCv = hiCanvas();                       // the moving crests: above the map, under every label
   swellCv.style.cssText = 'position:absolute;left:0;background:transparent;pointer-events:none;';
+  /* THE SEA ON THE GPU (sea_gl.js, 2026-09-27): the same place in the stack; the 2D canvas stays as the fallback */
+  var swellGl = document.createElement('canvas'); swellGl.width = Math.round(W * HS); swellGl.height = Math.round(H * HS);
+  swellGl.style.cssText = 'position:absolute;left:0;background:transparent;pointer-events:none;visibility:hidden;';
   var trafCv = hiCanvas();
   trafCv.style.cssText = 'position:absolute;left:0;background:transparent;pointer-events:none;';
   card.appendChild(trafCv);
@@ -4391,8 +4395,8 @@ function drawCard(style){
      can see, which is exactly what happened the first time. */
   tagCv.style.cssText = 'position:absolute;left:0;background:transparent;pointer-events:none;z-index:4;';
   card.appendChild(tagCv);
-  card.insertBefore(swellCv, trafCv);
-  [swellCv, trafCv, geoCv, railCv, tagCv].forEach(function(c){ c.style.width = '100%'; c.style.height = 'auto'; });
+  card.insertBefore(swellCv, trafCv); card.insertBefore(swellGl, trafCv);
+  [swellCv, swellGl, trafCv, geoCv, railCv, tagCv].forEach(function(c){ c.style.width = '100%'; c.style.height = 'auto'; });
   var row = document.createElement('div'); row.className = 'row';
   ['earth','water','major','city_label','buildings'].forEach(function(k){
     var b = document.createElement('button'); b.className = 'sw';
@@ -4469,7 +4473,7 @@ function drawCard(style){
     railCv.getContext('2d').clearRect(0, 0, W, H);
     tagCv.getContext('2d').clearRect(0, 0, W, H);
     stopSatLoop();
-    cancelAnimationFrame(window._swellRAF); swellCv.getContext('2d').clearRect(0, 0, W, H);
+    cancelAnimationFrame(window._swellRAF); swellCv.getContext('2d').clearRect(0, 0, W, H); swellGl.style.visibility = 'hidden';
     clearTimeout(timer);
     timer = setTimeout(paint, 260);
   }
@@ -4484,7 +4488,7 @@ function drawCard(style){
     /* the lettering's canvas: the dense one in the widget preview, the card itself in the lab */
     var tctx = window.LAB_EMBED ? railCv.getContext('2d') : ctx;
     railCv.getContext('2d').clearRect(0, 0, W, H); railCv.style.top = cv.offsetTop + 'px';
-    cancelAnimationFrame(window._swellRAF); swellCv.getContext('2d').clearRect(0, 0, W, H); swellCv.style.top = cv.offsetTop + 'px';
+    cancelAnimationFrame(window._swellRAF); swellCv.getContext('2d').clearRect(0, 0, W, H); swellCv.style.top = cv.offsetTop + 'px'; swellGl.style.visibility = 'hidden'; swellGl.style.top = cv.offsetTop + 'px';
     var dark = !(style.base === 'light');
     var stale = function(){ return token !== busy; };
     var st = new protomapsL.Static({
@@ -4998,6 +5002,26 @@ function drawCard(style){
         var w2 = second ? Math.min(0.55, second.hs / Math.max(lead.hs || 0.6, 0.2)) : 0, r2 = second ? T / second.tp : 0;
         var cw = chop ? Math.min(0.5, chop.hs * 0.7) : 0, cth = chop ? (chop.dir + 180) * Math.PI / 180 : 0;
         var cvx = Math.sin(cth) * 9, cvy = -Math.cos(cth) * 9;                 // texels a second, downwind (screen y runs south)
+        /* THE GPU SEA first (sea_gl.js); the loop below is the fallback when WebGL is missing */
+        var glDraw = null;
+        window._bvSeaState = 'reached';
+        try {
+          if (window.bvSeaGL) glDraw = bvSeaGL({ cv: swellGl, RW: RW, RH: RH, N: N, IDX: IDX, PH: PH, UU: UU, LI: LIf, AM: AMf, BR: BRf, SP: SPf, SH: SHf, PH2: PH2, A2: A2f, NZ: NZ, map: cv,
+            consts: { amp: amp, w2: w2, r2: r2, TV: 2.8, lead: { dir: lead.dir, tp: lead.tp, hs: lead.hs },
+              mpp: VB.mpp * Math.cos(y2lat(VB.Ymid) * Math.PI / 180) * W / RW,
+              geo: { w: x2lon(VB.Xw), e: x2lon(VB.Xw + W * VB.mpp), n: y2lat(VB.Ymid + H / 2 * VB.mpp), s: y2lat(VB.Ymid - H / 2 * VB.mpp) } },
+            stale: stale });
+        } catch (e){ glDraw = null; window._bvSeaErr = String(e); }
+        window._bvSeaState = glDraw ? 'gl' : 'cpu';
+        if (glDraw){
+          var sg0 = swellCv.getContext('2d'); sg0.clearRect(0, 0, W, H); swellGl.style.visibility = '';
+          var glFrame = function(now){
+            if (stale() || !surfOn()){ swellGl.style.visibility = 'hidden'; return; }
+            if (!document.hidden) glDraw(now);
+            window._swellRAF = requestAnimationFrame(glFrame);
+          };
+          cancelAnimationFrame(window._swellRAF); window._swellRAF = requestAnimationFrame(glFrame);
+        } else {
         var sg = swellCv.getContext('2d'), t0 = performance.now(), lastDraw = 0, TV = 2.8;            // seconds a crest takes to advance one wavelength on screen
         var frame = function(now){
           if (stale() || !surfOn()){ sg.clearRect(0, 0, W, H); return; }
@@ -5045,6 +5069,7 @@ function drawCard(style){
         };
         cancelAnimationFrame(window._swellRAF);
         window._swellRAF = requestAnimationFrame(frame);
+        }
         try { if (window.parent !== window) window.parent.postMessage({ labSwell: { dir: lead.dir, tp: lead.tp, model: !!lead.model,
           L: Math.round(L0), toScale: Lshown <= L0 * 1.001, bent: !!sol, hs: lead.hs } }, '*'); } catch(e){}
       })
