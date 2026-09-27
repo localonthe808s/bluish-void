@@ -51900,7 +51900,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         && LOCATION.lon > -74.35 && LOCATION.lon < -73.60;
     }
     var cw = { built:false, running:false, idx:0, timer:null, cardsTimer:null, wprod:'bref',
-               prod:'bref', front:true, radarOn:false, floods:false, trains:true, wide:null, rock:false };
+               prod:'bref', front:true, radarOn:false, floods:false, trains:true, wide:null, rock:false,
+               fl1865:true, flProne:true };   /* FLOODING's two context layers, each with its own button in the bar */
     /* WHICH VIEW THE WIDGET OPENS ON (2026-09-12, user: "launch on a view based
        on the current weather"). null = undecided, 'user' = someone tapped a tab
        and the chooser must keep its hands off, anything else = the chooser has
@@ -55182,13 +55183,13 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         paintTabs();
         /* instant: the overlay is its own registered layer, no recompose */
         var fl2 = document.getElementById('cw-fl');
-        if (fl2) fl2.style.display = cw.floods ? '' : 'none';
+        if (fl2) fl2.style.display = (cw.floods && cw.flProne) ? '' : 'none';
         cwFlowSync();
         if (cw.floods){
           cwFlBuild();
           /* ghost-water data for the vector canvas: shared loader + the
              named ponds file, each redrawing when it lands */
-          if (window._ghostRivers) _ghostRivers(function(){ cwDrawSensors(); });
+          cwGhostLoad(function(){ cwDrawSensors(); });
           if (!window._cwPonds && !window._cwPondsReq){
             window._cwPondsReq = 1;
             fetch('ghost_streams.json').then(function(r2){ return r2.json(); })
@@ -55603,7 +55604,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           window._bvPeregrines.rows.forEach(function(pf){ var d = Math.hypot(toX(pf.lon) - X, toY(pf.lat) - Y); if (d < bpd){ bpd = d; bp = pf; } });
           if (bp) offer(bpd / mpp, r.width < 420 ? 18 : 12, cwPeregrineTap, bp);
         }
-        if (cw.floods){
+        if (cw.floods && cw.fl1865){
           /* point-to-segment against the buried courses; the NAMED draft
              (which carries the stories) wins ties over the traced set */
           var hit = null, hd = Infinity;
@@ -59902,6 +59903,31 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
        ONCE to the four z2 quadrants stitched at native 35 m/px — sharp at
        depth, still a single view-independent texture, never recomposed */
     var cwFlBuilt = false;
+    /* FLOODING's context paints, in one place. All three are drawn UNDER #cw-bm-ghost (see cwFlBuild for the sum).
+       WASH: the modelled flood zones, r g b and the strength of the tiles' own alpha.
+       MARSH: the surveyed wet ground and ponds of 1865-97, a flat teal inside a thin line. */
+    var CW_FL_WASH = [255, 255, 255, 1];
+    var CW_FL_MARSH = { fill: 'rgb(0,180,162)', a: 0.97, line: 'rgb(0,112,118)', w: 0.6 };
+    /* the buried courses: colour, width / dash / gap as SEEN, in screen px at the desktop's whole-city view (56 m a px) */
+    var CW_FL_STREAM = { c: 'rgb(0,66,240)', w: 1.25, on: 4.6, off: 3 };
+    function cwGhostDash(g, mpp, dpr){
+      var k = Math.max(0.8, Math.min(1.35, Math.pow(56 / mpp, 0.25))), w = CW_FL_STREAM.w * k;
+      g.lineWidth = w * dpr;
+      g.setLineDash([Math.max(0.5, CW_FL_STREAM.on * k - w) * dpr, (CW_FL_STREAM.off * k + w) * dpr]);
+    }
+    /* the buried water's data. The loader lives in the hazard widget's flood module, which a reader who opens FLOODING
+       before scrolling that far has not started yet: the streams and the marsh were silently missing for them. */
+    function cwGhostLoad(cb){
+      if (window._ghostRivers) return window._ghostRivers(cb);
+      if (window._ghostData) return cb(window._ghostData);
+      if (cwGhostLoad.q) return cwGhostLoad.q.push(cb);
+      cwGhostLoad.q = [cb];
+      var done = function(d){ var q2 = cwGhostLoad.q; cwGhostLoad.q = null; if (d) window._ghostData = d; q2.forEach(function(f){ try { f(d); } catch(e){} }); };
+      Promise.all([
+        fetch('ghost-rivers.json?v=2').then(function(r){ return r.json(); }),
+        fetch('ghost-marsh.json?v=2').then(function(r){ return r.json(); })
+      ]).then(function(a){ done({ streams: a[0], marsh: a[1] }); }, function(){ done(null); });
+    }
     function cwFlBuild(){
       if (cwFlBuilt) return;
       cwFlBuilt = true;
@@ -59916,63 +59942,41 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         var cv = document.createElement('canvas'); cv.width = w * 2; cv.height = h * 2;
         var g = cv.getContext('2d');
         parts.forEach(function(p){ g.drawImage(p.im, p.q[1] * w, p.q[2] * h); });
-        /* RECOLOUR THE FLOOD BLUES (user 2026-09-02: "check the flooding
-           layer colors"). The city's own map is drawn for a WHITE basemap, so
-           its water is a pale 155,195,234 — and this layer sits under
-           #cw-bm-ghost, which puts 35% of the orange city back on top.
-           Measured, that pale blue composites to 182,172,174: grey, with more
-           red than blue. Every blue class died the same way while the orange
-           and dark classes came through untouched, because they already match
-           the map beneath.
-           Two things are wrong at once, so compensation alone is not enough:
-           the source is too pale AND the ghost eats a third of it. Blue-
-           dominant pixels are therefore remapped to a single saturated paint
-           that lands at about 95,150,185 over the city — properly blue. Done
-           ONCE here, while the tiles are already in a canvas, rather than as a
-           CSS filter the compositor would re-run every frame (and which would
-           have dragged the orange classes with it). */
+        /* ONLY WATER THAT IS THERE NOW IS FILLED BLUE (user 2026-09-27: "we need a way to distinguish ghost rivers
+           and historical flooding on FLOODING from actively flooding areas"). Read off the paints: the old marsh
+           (51,156,245), the modelled flood zones (21,162,251) and mid-depth live water (51,158,230) were one blue,
+           so on a dry day the map read as a flooded city and on a wet one the real water was lost in it.
+           This raster now carries ONE thing, the city's stormwater MODEL, as a pale wash with no edge (a model is
+           a gradient); the old marsh is drawn by the vector canvas in teal (cwDrawGhost); and the
+           bright, white-rimmed blue belongs to cw-water alone.
+           HISTORY, because the traps are still there: the layer sits under #cw-bm-ghost, which puts 35% of the
+           orange city back on top, so a paint P at alpha a lands at city + .65a(P - city). Blue and that orange
+           are complements: any half-strength blue composites to grey (the tiles' own pale blue measured
+           182,172,174), which is why 2026-09-02/03/07 pushed every class to one saturated blue. A wash cannot be
+           saturated, so it is WHITE instead: it bleaches the ground rather than tinting it.
+           Done ONCE here, while the tiles are already in a canvas, rather than as a CSS filter the compositor
+           would re-run every frame. */
         try {
-          var idat = g.getImageData(0, 0, cv.width, cv.height), q = idat.data;
+          var idat = g.getImageData(0, 0, cv.width, cv.height), q = idat.data, WS = CW_FL_WASH;
           for (var i = 0; i < q.length; i += 4){
             if (q[i + 3] < 30) continue;
-            /* THE SEWER SLICK IS GREEN NOW (user 2026-09-07: "make the sewage
-               runoff in the rivers radioactive green"). The lab's near-black
-               plume and its aura are recoloured IN THE TILES (140,255,30 body,
-               70,190,45 aura); skipped here so the green test below does not
-               turn them into flood blue like the old stormwater lime. */
-            /* ...and REMOVED (user 2026-09-25: "remove the blobs"). The baked slick was one fixed condition -- where
-               an overflow goes on an EBB tide, whether or not it was raining -- and the live specks now draw the
-               real thing (cwSpillState): so the slick is cleared to transparent here instead of being kept. */
-            if (q[i + 1] > 150 && q[i + 2] < 70 && q[i] < 170){ q[i + 3] = 0; continue; }
-            if (q[i + 2] > q[i] + 25){         // blue-dominant = a flood class
-              q[i] = 21; q[i + 1] = 162; q[i + 2] = 251;
-            } else if (q[i + 1] > q[i] + 20 && q[i + 1] > q[i + 2] + 60){
-              /* THE STORMWATER MAP JOINS THE WATER (user 2026-09-03: "what is
-                 the flooding thats yellow... can we make that the same blue as
-                 the others"). The lab draws it in a radioactive lime, chosen
-                 so it would read as a WARNING rather than as water — nothing
-                 else on the map came near that colour. It now takes the same
-                 rgb(21,162,251) as every other flood class, which is what was
-                 asked for; the cost is that the two now look alike.
-                 Only the RGB moves, so the alpha the lab used to separate
-                 nuisance from deep flooding survives — the deep class stays
-                 the more solid of the two.
-                 Green-dominant is a safe test here: this overlay is a DIFF of
-                 the story layers against the core, so park green cancels out
-                 and never reaches it. */
-              q[i] = 21; q[i + 1] = 162; q[i + 2] = 251;
-            } else if (q[i] > 140 && q[i + 1] > 128 && q[i + 1] > q[i + 2] + 40){
-              /* THE SHOULDER TOO (user 2026-09-07: "we still have flood prone
-                 waters looking yellow"). The lab lays the stormwater lime down
-                 in soft passes, so most of its pixels are lime already MIXED
-                 with the orange grid at some strength — yellow-oranges the
-                 green test above never sees. Read that strength back off the
-                 green channel (orange land sits at G=114, the lime at 255) and
-                 lay the same flood blue at the same strength, as alpha, so the
-                 wash still fades into the ground the way the lab drew it. */
+            var slick = q[i + 1] > 150 && q[i + 2] < 70 && q[i] < 170;      /* the tiles' sewer green: 140,255,30 body */
+            if (!slick && q[i + 1] > q[i] + 20 && q[i + 1] > q[i + 2] + 60){
+              /* the stormwater lime at full strength (green-dominant is a safe test: the overlay is a DIFF of the
+                 story layers against the core, so park green cancels out and never reaches it) */
+              q[i] = WS[0]; q[i + 1] = WS[1]; q[i + 2] = WS[2]; q[i + 3] = Math.round(q[i + 3] * WS[3]);
+            } else if (!slick && q[i] > 140 && q[i + 1] > 116 && q[i + 1] > q[i + 2] + 40){
+              /* THE SHOULDER: the lab lays the lime down in soft passes, so most of its pixels are lime already
+                 MIXED with the orange grid. Its strength is read back off the green channel (orange land sits at
+                 G=114, the lime at 255) and becomes the wash's alpha, with NO floor, so the zone fades into the
+                 ground instead of stopping at a step. */
               var t = Math.min(1, (q[i + 1] - 114) / 141);
-              q[i] = 21; q[i + 1] = 162; q[i + 2] = 251;
-              q[i + 3] = Math.round(q[i + 3] * Math.max(0.25, t));
+              q[i] = WS[0]; q[i + 1] = WS[1]; q[i + 2] = WS[2]; q[i + 3] = Math.round(q[i + 3] * WS[3] * Math.min(1, t * 2.2));
+            } else {
+              /* everything else goes: the sewer slick (user 2026-09-25: "remove the blobs"; the live dye draws the
+                 real thing), the lab's copy of the marsh (blue-dominant; the vectors carry it now) and the diff's
+                 own residue (the marsh's edge, doubled lettering) */
+              q[i + 3] = 0;
             }
           }
           g.putImageData(idat, 0, 0);
@@ -65361,7 +65365,13 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       if (!on){ if (bw) bw.style.display = 'none'; return; }
       if (!bw && bodyEl){ bw = document.createElement('div'); bw.id = 'cw-fl-bars'; bodyEl.parentNode.insertBefore(bw, bodyEl);
         bw.addEventListener('click', function(e){ var b = e.target.closest && e.target.closest('button'); if (!b) return;
-          if (b.id === 'cw-fl-now' || b.id === 'cw-fl-peak'){ cwLive.mode = b.id === 'cw-fl-now' ? 'now' : 'peak'; cwLiveEnsure(); cwLiveBars(); } }); }
+          if (b.id === 'cw-fl-now' || b.id === 'cw-fl-peak'){ cwLive.mode = b.id === 'cw-fl-now' ? 'now' : 'peak'; cwLiveEnsure(); cwLiveBars(); }
+          /* the two context layers: the old water and the modelled zones, each on its own button, both on to begin with */
+          if (b.id === 'cw-fl-1865' || b.id === 'cw-fl-prone'){
+            if (b.id === 'cw-fl-1865') cw.fl1865 = !cw.fl1865; else cw.flProne = !cw.flProne;
+            var fl4 = document.getElementById('cw-fl'); if (fl4) fl4.style.display = (cw.floods && cw.flProne) ? '' : 'none';
+            cwLiveBars(); try { cwDrawSensors(); } catch(e2){}
+          } }); }
       if (!bw) return;
       var now = Date.now(), G = cwLive.g || {}, rows = [], lab = function(t){ return '<span style="color:rgba(43,34,244,.6);">' + t + '</span> '; };
       var fmtT = function(t){ var d = new Date(t), td = new Date(); return (d.toDateString() === td.toDateString() ? '' : d.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase() + ' ') + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }).toUpperCase(); };
@@ -65385,6 +65395,18 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         : '<span style="color:#0369a1;">' + (F.km2 < 1 ? F.km2.toFixed(1) : Math.round(F.km2)) + ' KM² UNDER WATER' + (m === 'peak' && F.crestT ? ' AT THE ' + fmtT(F.crestT) + ' CREST' : ' NOW') + '</span> <span style="color:#1b2340;">· THE SURFACE MOVES ' + (F.rising >= 0 ? 'INLAND FROM THE SHORE' : 'BACK OUT TO THE HARBOUR') + '</span>';
       rows.push('<span style="display:inline-flex;gap:4px;vertical-align:middle;margin-right:6px;">' + cwBtn('cw-fl-now', 'NOW', m === 'now' ? CWB.on : CWB.off) + cwBtn('cw-fl-peak', 'PEAK', m === 'peak' ? CWB.on : CWB.off) + '</span>' + say
         + '<div style="font-weight:600;letter-spacing:.04em;color:rgba(27,35,64,.5);margin-top:2px;">ESTIMATE: GROUND BELOW THE GAUGES’ WATER LEVEL AND JOINED TO THE HARBOUR · WALLS, DRAINS AND TIMING NOT MODELLED</div>');
+      /* THE KEY, and the two buttons it explains (user 2026-09-27). Each swatch is the mark as it lands on the map, over
+         the orange city: bright blue is water that is there, teal is the surveyed wet ground, dashes are a best
+         reading, a wash is a model. A layer switched off keeps its entry, dimmed. */
+      var nar = bodyEl && bodyEl.getBoundingClientRect().width < 480;      /* a phone: short labels, two to a line */
+      var SW = 'display:inline-block;vertical-align:middle;margin:-1px 5px 0 0;', it = function(sw, t, on){
+        return '<span style="white-space:nowrap;display:inline-block;margin:1px 7px;color:#1b2340;' + (on ? '' : 'opacity:.32;') + '">' + sw + t + '</span>'; };
+      rows.push('<span style="display:inline-flex;gap:4px;vertical-align:middle;margin-right:4px;">' + cwBtn('cw-fl-1865', '1865 WATER', cw.fl1865 ? CWB.on : CWB.off) + cwBtn('cw-fl-prone', 'FLOOD-PRONE', cw.flProne ? CWB.on : CWB.off) + '</span>'
+        + it('<span style="' + SW + 'width:15px;height:9px;border-radius:2px;background:linear-gradient(90deg,#5cd6ff,#0a66cc);box-shadow:0 0 0 1px rgba(255,255,255,.95),0 0 0 2px rgba(10,102,204,.35);"></span>', nar ? (m === 'peak' ? 'WATER AT THE CREST' : 'WATER NOW') : m === 'peak' ? 'WATER AT THE NEXT CREST' : 'WATER ON THE LAND NOW', true)
+        + it('<span style="' + SW + 'width:8px;height:8px;border-radius:50%;background:#ef4444;box-shadow:0 0 0 1px #fff;"></span>', nar ? 'WET SENSOR' : 'STREET SENSOR REPORTING WATER', true)
+        + it('<span style="' + SW + 'width:13px;height:7px;border-radius:2px;background:#64a59b;border:1px solid #3f7f7a;"></span>', nar ? 'MARSH, 1865–97' : 'MARSH AND PONDS, SURVEYED 1865–97', cw.fl1865)
+        + it('<span style="' + SW + 'width:16px;height:0;border-top:1.5px dashed #535db2;"></span>', 'BURIED STREAM', cw.fl1865)
+        + it('<span style="' + SW + 'width:15px;height:9px;border-radius:2px;background:radial-gradient(closest-side,#f6dcc8,#f2b48a 60%,#ec843e);"></span>', nar ? 'FLOOD-PRONE (MODEL)' : 'FLOOD-PRONE IN HEAVY RAIN · THE CITY’S MODEL', cw.flProne));
       bw.style.cssText = 'margin:0 14px;background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);color:#2B22F4;border-top:1px solid rgba(43,34,244,.12);font:700 8.5px/1.5 system-ui,sans-serif;letter-spacing:.07em;';
       bw.innerHTML = rows.map(function(b, i){ return '<div style="padding:5px 12px;text-align:center;' + (i ? 'border-top:1px solid rgba(43,34,244,.08);' : '') + '">' + b + '</div>'; }).join('');
     }
@@ -65482,7 +65504,10 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       '      vec2 g = vec2(dR - dL, dD - dU);',
       '      vec2 fl = length(g) > 1e-4 ? normalize(g) * uDir : vec2(0.);',   /* up the fill distance = inland */
       '      float dep = f.r;',
-      '      vec3 wc = mix(vec3(.36, .84, 1.), vec3(.04, .40, .80), smoothstep(0., .7, dep));',
+      /* BRIGHTER AND MORE OPAQUE IN THE SHALLOWS (user 2026-09-27). At .66 over the orange grid the shallow water landed
+         a dull 142,180,187, too close to the historic marsh beside it. The streets
+         still show through, faintly. */
+      '      vec3 wc = mix(vec3(.30, .90, 1.), vec3(.04, .40, .80), smoothstep(0., .7, dep));',
       /* the surface: a gentle normal from two slow noise layers, advected with the flow on offset half-cycles */
       '      vec2 p = km * 2.2 * uZ;',
       '      float ph0 = fract(uT * .12), ph1 = fract(uT * .12 + .5), wl = abs(.5 - ph0) / .5;',
@@ -65502,7 +65527,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       /* the wet edge: a thin bright rim where the water meets the dry ground */
       '      float rim = smoothstep(.08, .35, m) * (1. - smoothstep(.35, .75, m));',
       '      wc = mix(wc, vec3(.9, .98, 1.), rim * .55);',
-      '      float fa = smoothstep(.06, .45, m) * (.66 + .3 * smoothstep(0., .6, dep));',   /* shallow water lets the streets show through */
+      '      float fa = smoothstep(.06, .45, m) * (.88 + .1 * smoothstep(0., .6, dep));',   /* was .66 + .3: see the note on wc */
       '      col = mix(col * al, wc, fa) / max(1e-3, al + fa - al * fa); al = al + fa - al * fa;',
       '    }',
       '  }',
@@ -66289,7 +66314,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
           g.restore();
         });
       }
-      if (!cw.floods) return;
+      if (!cw.floods || !cw.fl1865) return;
       var d = window._ghostData, gp = window._cwPonds;
       if (!d && !gp) return;
       var tracePoly = function(gm){
@@ -66302,44 +66327,53 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         });
       };
       if (d && d.marsh){
-        /* STRONGER (user 2026-09-02: "too weak"). This canvas pays the ghost
-           tax — #cw-bm-ghost puts 35% of the basemap back on top — and a pale
-           #d6e2f4 at .62 was composited to 225,167,135 over the city: redder
-           than it was blue, so the old marsh read as washed-out orange rather
-           than as water. The ghost also imposes a floor of 81 red over the
-           orange, so a soft navy is simply unreachable here; the only way to
-           read as water is a saturated paint at near-full opacity. This lands
-           at 120,145,175 over the city and stays blue over park green and
-           open water too. It looks garish read cold — that is the point. */
-        g.fillStyle = 'rgb(51,156,245)'; g.globalAlpha = 0.95;
-        (d.marsh.features || []).forEach(function(ft){
-          if (!ft.geometry) return;
-          g.beginPath(); tracePoly(ft.geometry); g.fill('evenodd');
-        });
-        g.globalAlpha = 1;
+        /* HISTORIC WATER IS TEAL, LIVE WATER IS BLUE (user 2026-09-27: "do teal no stripes"). The marsh and the live
+           water had been one flat blue (51,156,245 against the water's mid-depth 51,158,230), so JFK read as an
+           airport under water. Wetland is not open water, and teal says so by hue alone: no pattern, no edge effect.
+           Turned down on the way here, the same day: a pale bleached tint ("i dont think i like the historical ponds
+           being pale"), the survey's level-line hatch ("try something else instead of those lines") and blue with a
+           deeper edge band; a darker blue lands violet under the ghost. The paint is greener than it looks on
+           screen: the ghost lays a third of the orange city back over it, and (0,180,162) lands near 100,165,155.
+           One path for the lot, so overlapping sheets do not stack. */
+        var MS = CW_FL_MARSH;
+        g.beginPath();
+        (d.marsh.features || []).forEach(function(ft){ if (ft.geometry) tracePoly(ft.geometry); });
+        g.fillStyle = MS.fill; g.globalAlpha = MS.a; g.fill('evenodd');
+        /* the line is sized to the ground: at full weight on a phone's whole-city view (92 m to a canvas pixel against
+           a desktop's 28) the outlines of 267 small fields closed up into dark blots */
+        var mppM = (v.X1 - v.X0) / cvs.width;
+        g.globalAlpha = 1; g.strokeStyle = MS.line; g.lineJoin = 'round';
+        g.lineWidth = MS.w * dpr * Math.max(0.45, Math.min(1.35, Math.sqrt(28 / mppM)));
+        g.stroke();
       }
       if (gp){
+        /* the named ponds (Collect, Sunfish): the same paint, their shore dashed like the courses that fed them */
         (gp.features || []).forEach(function(ft){
           if (!ft.geometry || ft.geometry.type !== 'Polygon') return;
           g.beginPath(); tracePoly(ft.geometry);
-          /* same story: #2e5f9e at .85 came out 129,110,115, a flat grey */
-          g.fillStyle = 'rgb(21,116,220)'; g.globalAlpha = 1; g.fill('evenodd');
-          g.globalAlpha = 1; g.strokeStyle = 'rgb(0,26,255)'; g.lineWidth = 1.4 * dpr;
-          g.setLineDash([5 * dpr, 4 * dpr]); g.stroke(); g.setLineDash([]);
+          g.fillStyle = CW_FL_MARSH.fill; g.globalAlpha = CW_FL_MARSH.a; g.fill('evenodd');
+          g.globalAlpha = 1; g.strokeStyle = CW_FL_STREAM.c; g.lineCap = 'round'; g.lineJoin = 'round';
+          cwGhostDash(g, (v.X1 - v.X0) / cvs.width * dpr, dpr); g.stroke(); g.setLineDash([]);
         });
       }
       if (d && d.streams){
-        /* the ghost puts a floor of ~81 red under anything on this canvas, so
-           the site's ink blue #2B22F4 was landing at 109,67,180 — visibly
-           violet. rgb(0,26,255) is the bluest a line here can be: 81,62,188. */
-        g.strokeStyle = 'rgb(0,26,255)'; g.globalAlpha = 1;
-        g.lineWidth = 1.6 * dpr;
+        /* REFINED (user 2026-09-27: "refine these dark blue lines"). They had been 1.6 px with round caps on a 5/4
+           dash, and a round cap adds the line's own width to each dash: 6.6 on, 2.4 off, a chain of sausages. The
+           courses are short (median 373 m, a single dash on the whole-city view) and traced at a point every 66 m,
+           so each corner showed as a kink. Now: a finer line, the dash set by what is SEEN (the cap's width taken
+           back out of it), the path run as curves through the midpoints of its points, and the blue taken off
+           violet -- the ghost puts a floor of ~81 red under anything on this canvas, so (0,26,255) landed at
+           81,62,188; (0,72,240) lands near 83,93,178. */
+        g.strokeStyle = CW_FL_STREAM.c; g.globalAlpha = 1;
         g.lineCap = 'round'; g.lineJoin = 'round';
-        g.setLineDash([5 * dpr, 4 * dpr]);
+        cwGhostDash(g, (v.X1 - v.X0) / cvs.width * dpr, dpr);
         (d.streams.features || []).forEach(function(ft){
           if (!ft.geometry || ft.geometry.type !== 'LineString') return;
-          g.beginPath();
-          ft.geometry.coordinates.forEach(function(c, i){ if (i) g.lineTo(px(c), py(c)); else g.moveTo(px(c), py(c)); });
+          var P = ft.geometry.coordinates.map(function(c){ return [px(c), py(c)]; }), n = P.length;
+          if (n < 2) return;
+          g.beginPath(); g.moveTo(P[0][0], P[0][1]);
+          for (var i = 1; i < n - 1; i++) g.quadraticCurveTo(P[i][0], P[i][1], (P[i][0] + P[i + 1][0]) / 2, (P[i][1] + P[i + 1][1]) / 2);
+          g.lineTo(P[n - 1][0], P[n - 1][1]);
           g.stroke();
         });
         g.setLineDash([]);
