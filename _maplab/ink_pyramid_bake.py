@@ -189,6 +189,10 @@ class Lab:
     def render(self, w, s, e, n):
         self.js("""(function(){
           VIEWS.city.flood = null;          /* the lime trap */
+          VIEWS.city.cso = null;            /* THE STAIN TRAP (2026-09-27): with the outfalls on, drawSewerStain paints a
+                                               near-black plume into the river at every pipe, cut square at the tile's
+                                               edge. The 386 tiles of v2 carry it; the widget lifts it at compose
+                                               (cwStainLift) until they are baked again. UNTESTED: not yet run. */
           VIEWS.city.w = %r; VIEWS.city.e = %r;
           VIEWS.city.s = %r; VIEWS.city.n = %r;
           renderAll(); return 1;

@@ -54444,6 +54444,51 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        cwRemapZoom) — while radar frames and flood tiles kept composes slow,
        the old fold-at-settle + reset-at-land pair double-counted overlapping
        settles and wiped gestures mid-flight, which made zooming fight back. */
+    /* THE BLACK WATER COMES OFF THE DEEP TILES (user 2026-09-27, of the East River at Domino Park: "why doesnt the
+       water trace the hudson properly? theres a lot of spacing"). The two deepest levels (z5, z6, on R2) were baked
+       with the lab's sewer stain still on -- the bake nulls the flood layer and not the outfalls -- so at depth the
+       river wears a near-black plume (45,33,40) off every overflow pipe, cut off square at the tile it was drawn in.
+       It is 8% of the tile at Greenpoint. The moving water on FLOODING is a tone laid over the map's own blue and
+       counts only blue pixels as water, so it stopped at the stain: the gap between the current and the bank.
+       z1 to z4 are clean. So wherever a deep level is drawn, the z3 tiles under the view ride along as the reference:
+       a pixel that is dark, not blue and not park green, where the clean level (or its next pixel: its shore is
+       17 m coarse) has water, takes the clean level's water colour. Measured on z5 r7c8: 8.4% repainted, median
+       45,33,40 -> 16,46,92. The overflow itself is drawn live, in green, from the rain (cwSpillState).
+       Goes away with a re-bake of z5/z6 with the outfalls nulled (_maplab/ink_pyramid_bake.py now does). */
+    function cwStainLift(g, W, H, refs, v){
+      /* half resolution: at a quarter the clean level's shading came back in 4 px blocks */
+      var K = 2, rw = Math.ceil(W / K), rh = Math.ceil(H / K);
+      var rc = document.createElement('canvas'); rc.width = rw; rc.height = rh;
+      var rg = rc.getContext('2d', { willReadFrequently: true });
+      var kx = rw / (v.X1 - v.X0), ky = rh / (v.Y1 - v.Y0);
+      refs.forEach(function(p){ rg.drawImage(p.im, (p.b.X0 - v.X0) * kx, (v.Y1 - p.b.Y1) * ky, (p.b.X1 - p.b.X0) * kx, (p.b.Y1 - p.b.Y0) * ky); });
+      var R = rg.getImageData(0, 0, rw, rh).data, wat = new Uint8Array(rw * rh), nw = 0;
+      /* the water's own navy only: a bridge's pale edge blended over the river is blue-leading too, and handed its
+         grey to the pixels beside it (the Williamsburg Bridge came out as a row of blocks) */
+      for (var i = 0; i < wat.length; i++){ var o = i * 4; if (R[o + 2] > 60 && R[o + 2] > R[o] + 25 && R[o + 2] > R[o + 1] + 8 && R[o] < 70 && R[o + 1] < 110){ wat[i] = 1; nw++; } }
+      if (!nw) return { n: 0 };
+      /* six reference pixels of reach (about 40 m at the first deep level) past the clean level's own shore and
+         under its bridges, pointing at the water it reached from: at two, the stain under the Williamsburg Bridge
+         stayed as a brown band beside the span */
+      var src = new Int32Array(rw * rh);
+      for (var y = 0; y < rh; y++) for (var x = 0; x < rw; x++){ var k = y * rw + x, f = -1;
+        if (wat[k]) f = k;
+        else for (var d = 1; d <= 6 && f < 0; d++)
+          f = (x >= d && wat[k - d]) ? k - d : (x < rw - d && wat[k + d]) ? k + d : (y >= d && wat[k - d * rw]) ? k - d * rw : (y < rh - d && wat[k + d * rw]) ? k + d * rw : -1;
+        src[k] = f; }
+      var I = g.getImageData(0, 0, W, H), D = I.data, n = 0;
+      for (var y2 = 0; y2 < H; y2++){ var ry = Math.min(rh - 1, (y2 / K) | 0) * rw;
+        for (var x2 = 0; x2 < W; x2++){ var o2 = (y2 * W + x2) * 4, r = D[o2], gg = D[o2 + 1], b = D[o2 + 2];
+          if (r > 110 || gg > 110 || b > 110) continue;                       /* not dark */
+          if (b > 60 && b > r + 25 && b > gg + 8) continue;                   /* water already */
+          if (gg > r + 20 && gg > b + 15) continue;                           /* park green */
+          if (r < 28 && gg < 28 && b < 36) continue;                          /* the land outside the city: 16,16,24 */
+          var s2 = src[ry + Math.min(rw - 1, (x2 / K) | 0)];
+          if (s2 < 0) continue;
+          D[o2] = R[s2 * 4]; D[o2 + 1] = R[s2 * 4 + 1]; D[o2 + 2] = R[s2 * 4 + 2]; n++; } }
+      if (n) g.putImageData(I, 0, 0);
+      return { n: n, share: n / (W * H) };
+    }
     var cwPainted = CW_VIEW, cwComposeBusy = 0, cwRemapZoom = null;
     /* THE VECTOR CANVAS FOLDS EARLY (2026-09-27, user's capture of fat, soft stream dashes). Everything is drawn for
        cwPainted and magnified by the gesture until the recompose lands, seconds later; lines magnify with it. cw-gv
@@ -54580,6 +54625,13 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                                        function(){ return null; }));
         })(tb, '/nyc-basemap-trees' + suffix + '.png?v=8');
       }
+      /* THE CLEAN LEVEL, FOR cwStainLift: the z3 tiles under this view ride along whenever the deep levels are drawn */
+      if (grid >= 16) for (var rr3 = 0; rr3 < 4; rr3++) for (var rc3 = 0; rc3 < 4; rc3++){
+        var rb3 = { X0: B.X0 + BXs * rc3 / 4, X1: B.X0 + BXs * (rc3 + 1) / 4, Y1: B.Y1 - BYs * rr3 / 4, Y0: B.Y1 - BYs * (rr3 + 1) / 4 };
+        if (!(rb3.X1 > v.X0 && rb3.X0 < v.X1 && rb3.Y1 > v.Y0 && rb3.Y0 < v.Y1)) continue;
+        (function(bb, uu){ jobs.push(_cityTile(uu).then(function(im){ return { im: im, b: bb, z: 0, ref: 1 }; }, function(){ return null; })); })
+          (rb3, '/nyc-basemap-ink-dry-z3-r' + rr3 + 'c' + rc3 + '.png?v=9');
+      }
       var seq = ++cwComposeSeq;
       var deepTileMpp = BWm / grid / TILEPX, deepU = deepTileMpp / mppNeed;
       Promise.all(jobs).then(function(parts){
@@ -54605,11 +54657,13 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
            w = x1 - x0. Rounding position and size independently is what opens
            1 px gaps, whereas this way tile B's left edge is by construction the
            same integer as tile A's right edge. */
-        parts.filter(Boolean).sort(function(a, b2){ return a.z - b2.z; }).forEach(function(p){
+        var refs3 = parts.filter(function(p){ return p && p.ref; });
+        parts.filter(function(p){ return p && !p.ref; }).sort(function(a, b2){ return a.z - b2.z; }).forEach(function(p){
           var x0 = Math.round((p.b.X0 - v.X0) * sx), x1 = Math.round((p.b.X1 - v.X0) * sx);
           var y0 = Math.round((v.Y1 - p.b.Y1) * sy), y1 = Math.round((v.Y1 - p.b.Y0) * sy);
           g.drawImage(p.im, x0, y0, Math.max(1, x1 - x0), Math.max(1, y1 - y0));
         });
+        if (refs3.length){ var _ts = performance.now(); try { window._cwStain = cwStainLift(g, W2, H2, refs3, v); } catch(e){ window._cwStain = { err: String(e) }; } if (window._cwStain) window._cwStain.ms = Math.round(performance.now() - _ts); }
         if (parts._cls){ var _t0 = performance.now(); try { cwDeepSharpen(g, W2, H2, parts._cls, Math.min(16, Math.ceil(deepU * 1.6) + 2)); } catch(e){ window._cwDeepErr = String(e); } window._cwDeepMs = Math.round(performance.now() - _t0); }
         /* The theme is BAKED now (2026-09-03). Until today this composed
            canvas rasterised the five boroughs into a stencil and then walked
