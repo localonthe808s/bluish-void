@@ -2357,7 +2357,70 @@ def measured_cap():
 
 
 
-def best_bet(rows, ps):
+# ------------------------------------------------------ the edge court ----
+# A BET IS NAMED ONLY WHERE THE RECORD HAS EARNED ONE (2026-09-27, user: "do them all").
+#
+# Measured that day on everything live: 54 bets named at the locks since launch won 39% where the
+# sheet had said 72%, and returned -19% on the stake (highs 36 bets, -28%). The market's ladder
+# beat ours at the noon lock in all three cities (log-loss .786 against 1.036 over 68 city-days; the
+# best blend put a weight of ZERO on ours) and at every hour from 6 AM to 6 PM on the trail. And the
+# bets are chosen where we disagree with the price most, which is where we were most often the wrong
+# one: the pick hit on 6 of 14 bet days against 7 of 9 quiet days in New York, 3 of 9 against 10 of
+# 13 in Las Vegas. No slice of the 54 paid on a sample worth the name.
+#
+# So each market and each leg (the noon lock, the evening plan) has a court over its own last
+# EDGE_WINDOW graded bets, one contract each at the price and fee recorded: the gate opens when
+# there are at least EDGE_MIN_N of them and their return on the stake is at least its own standard
+# error above nothing. Closed, the bake still works out the bet it WOULD have named, writes it down
+# as `shadow` beside the lock and grades it at settlement like any other -- the court reads both, so
+# a market earns its bets back on the record and not by anyone's say-so. Nothing here is typed to
+# fit: the two constants are a sample size and a window.
+EDGE_WINDOW, EDGE_MIN_N = 30, 20
+EDGE_GATE = {}          # (market key, leg) -> the court's ruling, set at the start of each run
+
+
+def edge_court(history, leg='lock'):
+    rows = []
+    for h in sorted((x for x in (history or []) if not x.get('backtest') and x.get('actual_bracket') is not None),
+                    key=lambda x: x['date']):
+        blk = h.get(leg) or {}
+        b = blk.get('bet') or blk.get('shadow')
+        if not isinstance(b, dict) or b.get('price') is None or not b.get('label'):
+            continue
+        won = (b['label'] == h['actual_bracket']) if b.get('dir') == 'for' else (b['label'] != h['actual_bracket'])
+        price = float(b['price'])
+        fee = float(b['fee']) if b.get('fee') is not None else fee_of(price)
+        rows.append((h['date'], price, ((1.0 - price) if won else -price) - fee, bool(won)))
+    rows = rows[-EDGE_WINDOW:]
+    n = len(rows)
+    out = {'open': False, 'leg': leg, 'n': n, 'won': sum(1 for r in rows if r[3]), 'ret': None, 'se': None,
+           'need_n': EDGE_MIN_N, 'window': EDGE_WINDOW}
+    if n:
+        stake = sum(r[1] for r in rows)
+        ret = sum(r[2] for r in rows) / stake
+        var = sum((r[2] - ret * r[1]) ** 2 for r in rows) / max(1, n - 1)
+        se = math.sqrt(var / n) / (stake / n)
+        out.update({'ret': round(ret, 3), 'se': round(se, 3), 'since': rows[0][0]})
+        out['open'] = bool(n >= EDGE_MIN_N and ret >= se)
+    return out
+
+
+def gate_open(leg='lock'):
+    cfg = getattr(_TL, 'cfg', None) or {}
+    g = EDGE_GATE.get((cfg.get('key'), leg))
+    return True if g is None else bool(g.get('open'))
+
+
+def best_bet(rows, ps, leg='lock'):
+    """The bet to name, or None: see the edge court."""
+    return shadow_bet(rows, ps) if gate_open(leg) else None
+
+
+def lock_book(rows, ps, leg='lock'):
+    return shadow_book(rows, ps) if gate_open(leg) else []
+
+
+def shadow_bet(rows, ps):
     """The largest gap between our probability and what a side actually costs,
     after the fee.  Both directions: on a six-way ladder buying NO is usually
     where the value sits, because there are five ways to be right."""
@@ -2388,7 +2451,7 @@ def best_bet(rows, ps):
     return best
 
 
-def lock_book(rows, ps):
+def shadow_book(rows, ps):
     """Every bet the plan names at lock -- the headline and the ALSOs -- so the
     record can grade the whole plan, not just its first line. 2026-09-05's plan
     was NO 79-80 and YES 78-or-below; both lost; only the first was scored."""
@@ -2874,6 +2937,7 @@ def redact_money(doc):
             blk = h.get(leg)
             if isinstance(blk, dict):
                 _strip_bet(blk.get('bet'))
+                _strip_bet(blk.get('shadow'))
                 for b in (blk.get('book') or []):
                     _strip_bet(b)
         h.pop('plan_ret', None)
@@ -2883,8 +2947,10 @@ def redact_money(doc):
         blk = t.get(leg)
         if isinstance(blk, dict):
             _strip_bet(blk.get('bet'))
+            _strip_bet(blk.get('shadow'))
             for b in (blk.get('book') or []):
                 _strip_bet(b)
+    _strip_bet(t.get('shadow_bet'))
 
     # book_value() sizes its fills as (bankroll * f) / cost, so `stake` and
     # `ev` are dollars off the same real balance. They read 0.00 on a day with
@@ -3356,6 +3422,10 @@ def trail_row(doc, now):
         'mpick': T.get('market_pick'), 'mp': T.get('market_p'), 'agree': T.get('agree'),
         'bet': ({'dir': b['dir'], 'label': b['label'], 'price': b['price'], 'ev': b['ev'], 'q': b.get('q'),
                  'kelly': b.get('kelly'), 'size': b.get('size')} if b else None),
+        # the bet the edge court is withholding, and its ruling (absent on rows from before 2026-09-27)
+        'sbet': ((lambda sb: {'dir': sb['dir'], 'label': sb['label'], 'price': sb['price'], 'ev': sb['ev'], 'q': sb.get('q')}
+                  if sb else None)(T.get('shadow_bet'))),
+        'gate': (lambda g: ({'open': g.get('open'), 'n': g.get('n'), 'ret': g.get('ret')} if g else None))(T.get('edge_gate')),
         'locked': bool(T.get('locked')), 'over': bool(T.get('day_over')), 'decided': bool(T.get('day_decided')),
         'blend_w': T.get('blend_w'), 'peak_p': pk.get('p') if isinstance(pk, dict) else None,
         'obs': {'hmax': T.get('obs_so_far'), 'now': T.get('now_temp'), 'now_at': T.get('now_at'),
@@ -3419,6 +3489,17 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     today = now.date()
     tkey = today.isoformat()
     OUT = os.path.join(HERE, '..', cfg['out'])
+    try:
+        _h0 = load_log(OUT).get('history') or []
+    except Exception:
+        _h0 = []
+    for _leg in ('lock', 'eve'):
+        EDGE_GATE[(cfg['key'], _leg)] = edge_court(_h0, _leg)
+        _g = EDGE_GATE[(cfg['key'], _leg)]
+        print('%s edge court, %s: %s -- %d graded bets, %d won, return %s per $1 (needs %d and at least %s)'
+              % (cfg['key'], _leg, 'OPEN' if _g['open'] else 'closed, no bet is named', _g['n'], _g['won'],
+                 ('%+.2f' % _g['ret']) if _g['ret'] is not None else '-', EDGE_MIN_N,
+                 ('%+.2f' % _g['se']) if _g['se'] is not None else 'its own margin of error'))
 
     rows = fetch_market(cfg, event_ticker(cfg, today))
     if not rows:
@@ -4076,8 +4157,10 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
                         if cfg.get('url') else None,
                 # the bet and the book the panel used to compute for itself, so
                 # the overnight plan is written down and can be graded
-                'bet': best_bet(trows, tps),
-                'book': lock_book(trows, tps),
+                'bet': best_bet(trows, tps, 'eve'),
+                'book': lock_book(trows, tps, 'eve'),
+                'shadow': (None if gate_open('eve') else shadow_bet(trows, tps)),
+                'edge_gate': EDGE_GATE.get((cfg['key'], 'eve')),
             }
             tom.update({k: v for k, v in t_prep.items() if k not in ('pred', 'sd')})
         elif not trows:
@@ -4095,16 +4178,18 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     # evening draft pays or how often the morning reverses it. The first bake
     # at or after EVE_HOUR local writes it once into tomorrow's entry; the
     # day's scoring grades it beside the noon lock (eve_result, eve_hit).
-    if tom and tom.get('bet') and now.hour >= EVE_HOUR:
+    if tom and (tom.get('bet') or tom.get('shadow')) and now.hour >= EVE_HOUR:
         e2 = hist.get(tom['date']) or {'date': tom['date'], 'event': tom['event']}
         if 'eve' not in e2:
             e2['eve'] = {'at': now.strftime('%H:%M'), 'pred': tom.get('pred'), 'sd': tom.get('sd'),
                          'pick': tom.get('pick'), 'p': tom.get('p'),
                          'market_pick': tom.get('market_pick'), 'market_p': tom.get('market_p'),
-                         'bet': tom['bet'], 'book': tom.get('book')}
+                         'bet': tom.get('bet'), 'book': tom.get('book'), 'shadow': tom.get('shadow')}
             hist[tom['date']] = e2
-            print('%s overnight plan logged for %s: %s %s at %.2f' % (
-                cfg['key'], tom['date'], tom['bet']['dir'], tom['bet']['label'], tom['bet']['price']))
+            _b = tom.get('bet') or tom['shadow']
+            print('%s overnight plan logged for %s: %s%s %s at %.2f' % (
+                cfg['key'], tom['date'], '' if tom.get('bet') else '(not named, the edge court is closed) ',
+                _b['dir'], _b['label'], _b['price']))
 
     if '--backfill' in sys.argv:
         added = 0
@@ -4225,6 +4310,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             # priced_on_time().
             'bet': best_bet(rows, ps),
             'book': lock_book(rows, ps),
+            # what the plan would have been, graded at settlement for the edge court
+            'shadow': (None if gate_open('lock') else shadow_bet(rows, ps)),
         }
 
     # INTRADAY PRICE TRAIL.  Kalshi's candlestick endpoint 404s, so there is no
@@ -4385,8 +4472,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         g = grade_bet(h['lock'].get('bet'), truth)
         if g:
             h['bet_result'] = g
-        if h.get('eve') and h['eve'].get('bet'):
-            ge = grade_bet(h['eve']['bet'], truth)
+        if h.get('eve') and (h['eve'].get('bet') or h['eve'].get('shadow')):
+            ge = grade_bet(h['eve'].get('bet'), truth)
             if ge:
                 h['eve_result'] = ge
             h['eve_hit'] = (h['eve'].get('pick') == truth)
@@ -4883,6 +4970,9 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             # settled days. Falls back to the assumed accuracy curve otherwise.
             'exit': measured_exit(cfg),
             'bet': best_bet(rows, ps),
+            # the edge court's ruling, and the bet it is withholding (see edge_court)
+            'edge_gate': EDGE_GATE.get((cfg['key'], 'lock')),
+            'shadow_bet': (None if gate_open('lock') else shadow_bet(rows, ps)),
             'calib': _CALIB.get(cfg['key']) or None,
             'edge_floor': {'min': EDGE_FLOOR, 'priced': EDGE_FLOOR_PRICED, 'price': EDGE_PRICE},
             # which distribution priced the open-day ladder (kernel.json ruling)
@@ -4958,7 +5048,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     st_now = t.get('state') or {}
     decided = (t.get('p') or 0) >= 0.95 or (t.get('sd') is not None and t['sd'] <= 0.4) \
               or bool(t.get('day_over'))
-    tradable = bool(rows) and st_now.get('status') == 'open' and not decided
+    tradable = bool(rows) and st_now.get('status') == 'open' and not decided and gate_open('lock')
     bb = best_bet(rows, ps) if tradable else None
     take = book_value(rows, ps) if tradable else {'ev': 0.0, 'stake': 0.0, 'n': 0}
     return {'key': cfg['key'], 'city': cfg.get('city', cfg['key']),

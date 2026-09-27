@@ -129,7 +129,110 @@ def beats(cand, base):
     return ok, gain, {'why': why, 'n': len(days), 'cand': c['all'], 'base': b['all']}
 
 
+# ------------------------------------------------ the live spread court ----
+# THE REPLAY DOES NOT GET THE LAST WORD ON THE SPREAD (2026-09-27, user: "do them all").
+#
+# The replay is kinder than the day was. It scores Las Vegas 55 of 67 where the live noon locks stand
+# at 13 of 22, New York 47 of 65 against 13 of 23: its inputs are refetched, its archive has no
+# decimals, and it cannot see a late or a missing report. On 2026-09-27 the search narrowed Las
+# Vegas from 0.75 to 0.5 on a replay gain of 0.0157 -- and on the 22 live locks that setting scores a
+# log-loss near 1.00 against 0.83 for the one it replaced. Every city's live record in fact asks for
+# a WIDER ladder than it had (the spread that would have scored best: New York x1.2, Las Vegas
+# x1.1, Austin x1.6; Austin's live error ran sd 1.19 against a stated 0.81).
+#
+# So after the search, the spread multiplier is put to the live locks, which are the only rows that
+# were ever priced for real. Each lock carries its forecast, its spread and the multiplier in force
+# (lock.params); a normal on those reproduces the bake's own ladder to within 0.001-0.02 a rung, so
+# a candidate multiplier is scored by rescaling the spread and reading the settled bracket's log-loss.
+#   1. A multiplier the search chose is REFUSED if it scores worse on the live locks than the one
+#      those locks were made with.
+#   2. Then one step (0.25) either way is taken if it gains LIVE_GAIN of log-loss AND wins both the
+#      older and the newer half of the live record.
+# Needs LIVE_MIN_N live locks; with fewer the search's choice stands. One step a week at most, so a
+# bad month cannot swing the ladder, and everything it did is written into tuned.json (live_court).
+LIVE_MIN_N, LIVE_GAIN, LIVE_STEP = 20, 0.02, 0.25
+
+
+def live_locks(cfg):
+    import math
+    try:
+        doc = json.load(open(os.path.join(HERE, '..', cfg['out'])))
+    except Exception:
+        return []
+    rows = []
+    for h in sorted(doc.get('history') or [], key=lambda x: x.get('date') or ''):
+        L = h.get('lock') or {}
+        lad = L.get('ladder') or []
+        if h.get('backtest') or h.get('actual') is None or not lad or not L.get('sd') or L.get('pred') is None:
+            continue
+        k = [i for i, r in enumerate(lad) if (r.get('lo') is None or h['actual'] >= r['lo'])
+             and (r.get('hi') is None or h['actual'] <= r['hi'])]
+        if len(k) != 1:
+            continue
+        rows.append({'date': h['date'], 'pred': float(L['pred']), 'sd': float(L['sd']), 'lad': lad, 'k': k[0],
+                     'm': (L.get('params') or {}).get('sd_mult')})
+    return rows
+
+
+def live_ll(rows, mult, made_with):
+    """mean log-loss of the settled bracket with every lock's spread rescaled to `mult`"""
+    import math
+    phi = lambda z: 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+    tot = 0.0
+    for r in rows:
+        sd = max(0.05, r['sd'] * float(mult) / float(r['m'] or made_with))
+        ps = []
+        for b in r['lad']:
+            lo = -1e9 if b.get('lo') is None else b['lo'] - 0.5
+            hi = 1e9 if b.get('hi') is None else b['hi'] + 0.5
+            ps.append(max(1e-4, phi((hi - r['pred']) / sd) - phi((lo - r['pred']) / sd)))
+        tot += -math.log(ps[r['k']] / sum(ps))
+    return tot / len(rows)
+
+
+def live_spread_court(cfg, chosen, cands):
+    rows = live_locks(cfg)
+    stamped = [r['m'] for r in rows[-14:] if r['m'] is not None]
+    made_with = collections.Counter(stamped).most_common(1)[0][0] if stamped else float(cfg.get('sd_mult', 1.0))
+    out = {'n': len(rows), 'made_with': made_with, 'asked': chosen, 'ruled': chosen, 'why': 'too few live locks: the search stands'}
+    if len(rows) < LIVE_MIN_N:
+        return chosen, out
+    half = len(rows) // 2
+    ll = lambda m, R=rows: live_ll(R, m, made_with)
+    grid = sorted(set([round(float(x), 2) for x in cands if x is not None] + [round(float(chosen), 2), round(float(made_with), 2)]))
+    out['ll'] = {str(m): round(ll(m), 4) for m in grid}
+    ruled, why = float(chosen), []
+    if abs(ruled - float(made_with)) > 1e-9 and ll(ruled) > ll(made_with):
+        why.append('%s refused: %.3f on the live locks against %.3f for %s, which they were made with'
+                   % (ruled, ll(ruled), ll(made_with), made_with))
+        ruled = float(made_with)
+    near = [m for m in grid if abs(m - ruled) <= LIVE_STEP + 1e-9 and abs(m - ruled) > 1e-9]
+    best = min(near, key=ll) if near else None
+    if best is not None and ll(ruled) - ll(best) >= LIVE_GAIN \
+            and live_ll(rows[:half], best, made_with) < live_ll(rows[:half], ruled, made_with) \
+            and live_ll(rows[half:], best, made_with) < live_ll(rows[half:], ruled, made_with):
+        why.append('%s -> %s: %.3f against %.3f on %d live locks, and on both halves of them'
+                   % (ruled, best, ll(best), ll(ruled), len(rows)))
+        ruled = best
+    out.update({'ruled': ruled, 'why': '; '.join(why) if why else 'the search\'s %s stands on the live locks' % chosen})
+    return ruled, out
+
+
 def tune(cfg, prev):
+    r = _tune(cfg, prev)
+    a = r.get('active')
+    if a and a.get('sd_mult') is not None:
+        ruled, rep_ = live_spread_court(cfg, a['sd_mult'], (r.get('lists') or {}).get('sd_mult') or KNOBS['sd_mult'])
+        r['live_court'] = rep_
+        if abs(float(ruled) - float(a['sd_mult'])) > 1e-9:
+            a['sd_mult'] = ruled
+            r['why'] = (r.get('why') or '') + ' | LIVE COURT: ' + rep_['why']
+            r['chosen_at'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+        print('  live court: %s' % rep_['why'], flush=True)
+    return r
+
+
+def _tune(cfg, prev):
     key = cfg['key']
     if not os.path.exists(os.path.join(HERE, '..', cfg['out'])):
         return {'active': None, 'why': 'no record'}
@@ -189,6 +292,26 @@ def tune(cfg, prev):
 
 def main():
     prev = json.load(open(OUT)) if os.path.exists(OUT) else {}
+    if '--live-court' in sys.argv:
+        # the court alone, on the settings already chosen: no replays (seconds, not the search's half hour)
+        for cfg in K.MARKETS:
+            r = prev.get(cfg['key']) or {}
+            a = r.get('active')
+            if not a or a.get('sd_mult') is None:
+                continue
+            ruled, rep_ = live_spread_court(cfg, a['sd_mult'], (r.get('lists') or {}).get('sd_mult') or KNOBS['sd_mult'])
+            r['live_court'] = rep_
+            if abs(float(ruled) - float(a['sd_mult'])) > 1e-9:
+                a['sd_mult'] = ruled
+                r['why'] = (r.get('why') or '') + ' | LIVE COURT: ' + rep_['why']
+                r['chosen_at'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+            print('%s live court (%d live locks, made with %s): %s' % (cfg['key'], rep_['n'], rep_['made_with'], rep_['why']))
+            print('    log-loss by multiplier: %s' % rep_.get('ll'))
+        prev['_built'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
+        if '--dry' not in sys.argv:
+            json.dump(prev, open(OUT, 'w'), indent=1)
+            print('wrote', OUT)
+        return
     only = None
     if '--city' in sys.argv:
         only = sys.argv[sys.argv.index('--city') + 1].split(',')

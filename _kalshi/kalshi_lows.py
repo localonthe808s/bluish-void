@@ -568,6 +568,15 @@ def run_market(cfg, dry_dir=None):
             if ge:
                 h['eve_result'] = ge
 
+    # THE EDGE COURT (kalshi_daily.edge_court): a bet is named on a leg only where that leg's own graded bets
+    # have earned it; closed, the bet is kept as `shadow` and graded all the same, so the gate can reopen
+    gate_lock = K.edge_court(list(hist.values()), 'lock')
+    gate_eve = K.edge_court(list(hist.values()), 'eve')
+    for _g in (gate_lock, gate_eve):
+        print('%s edge court, %s: %s -- %d graded bets, %d won, return %s per $1' % (
+            cfg['key'], _g['leg'], 'OPEN' if _g['open'] else 'closed, no bet is named', _g['n'], _g['won'],
+            ('%+.2f' % _g['ret']) if _g['ret'] is not None else '-'))
+
     # ---- today
     rows = []
     try:
@@ -612,7 +621,10 @@ def run_market(cfg, dry_dir=None):
         # a six-hour group we could not believe: the low is not known well enough to price (see metar_six_min),
         # unless the climate report has since printed a minimum of its own
         bet, book = (None, []) if (T['day_over'] or (six_sus and cmin is None)) else best_line(lad)
-        T['bet'], T['book'] = bet, book
+        shadow = None
+        if not gate_lock['open']:
+            shadow, bet, book = bet, None, []
+        T['bet'], T['book'], T['shadow_bet'], T['edge_gate'] = bet, book, shadow, gate_lock
         # the morning lock, once, at the first bake at or after LOCK_HOUR
         h = hist.setdefault(tkey, {'date': tkey, 'event': T['event']})
         if hour >= LOCK_HOUR and 'lock' not in h:
@@ -620,7 +632,7 @@ def run_market(cfg, dry_dir=None):
                          'pred': T['pred'], 'sd': T['sd'], 'obs_at_lock': T['obs_so_far'], 'binding': s['bind'],
                          'ladder': [{'label': r['label'], 'lo': r['lo'], 'hi': r['hi'], 'ours': r['ours'], 'market': r['market']} for r in lad],
                          'market_pick': T['market_pick'], 'market_p': T['market_p'], 'bet': bet, 'book': book,
-                         'priced_at': hour}
+                         'shadow': shadow, 'priced_at': hour}
             print('%s LOCKED %s: %s (%.0f%%), market %s (%.0f%%)' % (cfg['key'], tkey, T['pick'], 100 * (T['p'] or 0),
                                                                     T['market_pick'], 100 * (T['market_p'] or 0)))
         T['locked'] = h.get('lock')
@@ -641,9 +653,13 @@ def run_market(cfg, dry_dir=None):
             tb = max(range(len(tl)), key=lambda i: tl[i]['ours'] or 0)
             tm = max(range(len(tl)), key=lambda i: tl[i]['market'] or 0)
             tbet, tbook = best_line(tl)
+            tshadow = None
+            if not gate_eve['open']:
+                tshadow, tbet, tbook = tbet, None, []
             tom = {'date': tkey2, 'event': K.event_ticker(cfg, tdate), 'state': K.market_state(cfg, trows, now),
                    'pred': round(-st['pred'], 2), 'sd': round(st['sd'], 3), 'pick': tl[tb]['label'], 'p': tl[tb]['ours'],
                    'market_pick': tl[tm]['label'], 'market_p': tl[tm]['market'], 'ladder': tl, 'bet': tbet, 'book': tbook,
+                   'shadow': tshadow, 'edge_gate': gate_eve,
                    'models': {m: (round(-(max(fcm[m][tkey2].values()) - b), 1) if fcm[m].get(tkey2) and b is not None else None)
                               for m, b in st['biases'].items()}}
             # the EVE lock for tomorrow, once, from EVE_HOUR on
@@ -651,7 +667,7 @@ def run_market(cfg, dry_dir=None):
             if hour >= EVE_HOUR and 'eve' not in h2:
                 h2['eve'] = {'at': now.strftime('%Y-%m-%dT%H:%M ') + cfg['tzlabel'], 'pick': tom['pick'], 'p': tom['p'],
                              'pred': tom['pred'], 'sd': tom['sd'], 'market_pick': tom['market_pick'],
-                             'market_p': tom['market_p'], 'bet': tbet, 'book': tbook}
+                             'market_p': tom['market_p'], 'bet': tbet, 'book': tbook, 'shadow': tshadow}
                 print('%s EVE %s: %s (%.0f%%), market %s' % (cfg['key'], tkey2, tom['pick'], 100 * (tom['p'] or 0), tom['market_pick']))
         elif trows:
             tom = {'date': tkey2, 'event': K.event_ticker(cfg, tdate), 'state': K.market_state(cfg, trows, now)}
