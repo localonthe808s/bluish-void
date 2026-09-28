@@ -51522,7 +51522,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
      entries on purpose so that transient failures retry.
      The path carries its own version: a re-bake ships as v2 rather than trying
      to purge a CDN. */
-  var CITY_DEEP_BASE = 'https://cdn.bluishvoid.com/basemap/ink/v2';
+  /* v3 (2026-09-27): every deep tile baked again with the outfalls' stain off, the two deep levels extended over
+     the four waters (the Hudson to its far bank, the East River, the Upper Bay, Jamaica Bay), and a third, z7
+     (0.84 m of ground a pixel), over those waters and their banks alone. */
+  var CITY_DEEP_BASE = 'https://cdn.bluishvoid.com/basemap/ink/v3';
   var _cityDeepMan = null, _cityDeepReq = 0, _cityDeepRetryAt = 0;
   function _cityDeepReady(){
     if (_cityDeepMan) return true;
@@ -51548,6 +51551,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     var s = _cityDeepMan && _cityDeepMan[String(level)];
     return !!s && s.has(r + ',' + c);
   }
+  function _cityDeepLevel(level){ var s = _cityDeepMan && _cityDeepMan[String(level)]; return !!(s && s.size); }
   function _cityZoomLive(){ return fcastState.range === 'live' && fcastState.area === 'city-nyc'; }
   function _cityZoomApply(){
     var t = 'translate(-50%,-50%) translate(' + _cityZoom.tx.toFixed(1) + 'px,'
@@ -54444,51 +54448,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        cwRemapZoom) — while radar frames and flood tiles kept composes slow,
        the old fold-at-settle + reset-at-land pair double-counted overlapping
        settles and wiped gestures mid-flight, which made zooming fight back. */
-    /* THE BLACK WATER COMES OFF THE DEEP TILES (user 2026-09-27, of the East River at Domino Park: "why doesnt the
-       water trace the hudson properly? theres a lot of spacing"). The two deepest levels (z5, z6, on R2) were baked
-       with the lab's sewer stain still on -- the bake nulls the flood layer and not the outfalls -- so at depth the
-       river wears a near-black plume (45,33,40) off every overflow pipe, cut off square at the tile it was drawn in.
-       It is 8% of the tile at Greenpoint. The moving water on FLOODING is a tone laid over the map's own blue and
-       counts only blue pixels as water, so it stopped at the stain: the gap between the current and the bank.
-       z1 to z4 are clean. So wherever a deep level is drawn, the z3 tiles under the view ride along as the reference:
-       a pixel that is dark, not blue and not park green, where the clean level (or its next pixel: its shore is
-       17 m coarse) has water, takes the clean level's water colour. Measured on z5 r7c8: 8.4% repainted, median
-       45,33,40 -> 16,46,92. The overflow itself is drawn live, in green, from the rain (cwSpillState).
-       Goes away with a re-bake of z5/z6 with the outfalls nulled (_maplab/ink_pyramid_bake.py now does). */
-    function cwStainLift(g, W, H, refs, v){
-      /* half resolution: at a quarter the clean level's shading came back in 4 px blocks */
-      var K = 2, rw = Math.ceil(W / K), rh = Math.ceil(H / K);
-      var rc = document.createElement('canvas'); rc.width = rw; rc.height = rh;
-      var rg = rc.getContext('2d', { willReadFrequently: true });
-      var kx = rw / (v.X1 - v.X0), ky = rh / (v.Y1 - v.Y0);
-      refs.forEach(function(p){ rg.drawImage(p.im, (p.b.X0 - v.X0) * kx, (v.Y1 - p.b.Y1) * ky, (p.b.X1 - p.b.X0) * kx, (p.b.Y1 - p.b.Y0) * ky); });
-      var R = rg.getImageData(0, 0, rw, rh).data, wat = new Uint8Array(rw * rh), nw = 0;
-      /* the water's own navy only: a bridge's pale edge blended over the river is blue-leading too, and handed its
-         grey to the pixels beside it (the Williamsburg Bridge came out as a row of blocks) */
-      for (var i = 0; i < wat.length; i++){ var o = i * 4; if (R[o + 2] > 60 && R[o + 2] > R[o] + 25 && R[o + 2] > R[o + 1] + 8 && R[o] < 70 && R[o + 1] < 110){ wat[i] = 1; nw++; } }
-      if (!nw) return { n: 0 };
-      /* six reference pixels of reach (about 40 m at the first deep level) past the clean level's own shore and
-         under its bridges, pointing at the water it reached from: at two, the stain under the Williamsburg Bridge
-         stayed as a brown band beside the span */
-      var src = new Int32Array(rw * rh);
-      for (var y = 0; y < rh; y++) for (var x = 0; x < rw; x++){ var k = y * rw + x, f = -1;
-        if (wat[k]) f = k;
-        else for (var d = 1; d <= 6 && f < 0; d++)
-          f = (x >= d && wat[k - d]) ? k - d : (x < rw - d && wat[k + d]) ? k + d : (y >= d && wat[k - d * rw]) ? k - d * rw : (y < rh - d && wat[k + d * rw]) ? k + d * rw : -1;
-        src[k] = f; }
-      var I = g.getImageData(0, 0, W, H), D = I.data, n = 0;
-      for (var y2 = 0; y2 < H; y2++){ var ry = Math.min(rh - 1, (y2 / K) | 0) * rw;
-        for (var x2 = 0; x2 < W; x2++){ var o2 = (y2 * W + x2) * 4, r = D[o2], gg = D[o2 + 1], b = D[o2 + 2];
-          if (r > 110 || gg > 110 || b > 110) continue;                       /* not dark */
-          if (b > 60 && b > r + 25 && b > gg + 8) continue;                   /* water already */
-          if (gg > r + 20 && gg > b + 15) continue;                           /* park green */
-          if (r < 28 && gg < 28 && b < 36) continue;                          /* the land outside the city: 16,16,24 */
-          var s2 = src[ry + Math.min(rw - 1, (x2 / K) | 0)];
-          if (s2 < 0) continue;
-          D[o2] = R[s2 * 4]; D[o2 + 1] = R[s2 * 4 + 1]; D[o2 + 2] = R[s2 * 4 + 2]; n++; } }
-      if (n) g.putImageData(I, 0, 0);
-      return { n: n, share: n / (W * H) };
-    }
+    /* THE BLACK WATER (2026-09-27, the East River at Domino Park: "why doesnt the water trace the hudson properly?
+       theres a lot of spacing"). The deep tiles of v2 were baked with the lab's sewer stain on, a near-black plume in
+       the river at every outfall, cut square at the tile's edge; the moving water counts only blue as water and
+       stopped at it. For one evening the compose repainted it from the clean z3 level (cwStainLift, 130-270 ms a
+       deep compose). v3 is baked without it and the repaint is gone. */
     var cwPainted = CW_VIEW, cwComposeBusy = 0, cwRemapZoom = null;
     /* THE VECTOR CANVAS FOLDS EARLY (2026-09-27, user's capture of fat, soft stream dashes). Everything is drawn for
        cwPainted and magnified by the gesture until the recompose lands, seconds later; lines magnify with it. cw-gv
@@ -54543,7 +54507,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
          fetches all 16 z3 tiles whenever grid >= 2, so they were being
          downloaded and then not used. */
       var TILEPX = 1100, BWm = B.X1 - B.X0;
-      var grid = mppNeed < BWm / 16 / TILEPX ? 32
+      var grid = mppNeed < BWm / 32 / TILEPX ? 64
+               : mppNeed < BWm / 16 / TILEPX ? 32
                : mppNeed < BWm / 8 / TILEPX ? 16
                : mppNeed < BWm / 4 / TILEPX ? 8
                : mppNeed < BWm / 2 / TILEPX ? 4
@@ -54552,6 +54517,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
          lands, stay on z4 — the first deep compose asks for it and the next one
          gets the sharper picture, rather than firing hundreds of 404s. */
       if (grid >= 16 && !_cityDeepReady()) grid = 8;
+      if (grid === 64 && !_cityDeepLevel(7)) grid = 32;
       /* WARM THE NEXT RUNG UNDER THE POINTER (2026-09-12).
          The ladder's discipline is that z5 and z6 are never pre-warmed, and
          that still holds for the LEVEL — warming 256 or 1,024 tiles would be
@@ -54562,8 +54528,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
          arrives late. One tile of speculative bandwidth buys that back.
          Only when the manifest is in hand, and only for a tile it lists, so
          this never speculates into the ocean. */
-      if (grid >= 8 && grid < 32 && _cityDeepMan){
-        var _ng = grid * 2, _nl = (_ng === 16) ? 5 : 6;
+      if (grid >= 8 && grid < 64 && _cityDeepMan){
+        var _ng = grid * 2, _nl = (_ng === 16) ? 5 : (_ng === 32) ? 6 : 7;
         var _cx = (v.X0 + v.X1) / 2, _cy = (v.Y0 + v.Y1) / 2;
         var _nc = Math.floor((_cx - B.X0) / ((B.X1 - B.X0) / _ng));
         var _nr = Math.floor((B.Y1 - _cy) / ((B.Y1 - B.Y0) / _ng));
@@ -54582,26 +54548,37 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (grid >= 2 && grid < 8) cwWarmTiles(3);
       var jobs = [];
       var BXs = B.X1 - B.X0, BYs = B.Y1 - B.Y0;
-      for (var gr = 0; gr < grid; gr++) for (var gq = 0; gq < grid; gq++){
-        var tb = { X0: B.X0 + BXs * gq / grid, X1: B.X0 + BXs * (gq + 1) / grid,
-                   Y1: B.Y1 - BYs * gr / grid, Y0: B.Y1 - BYs * (gr + 1) / grid };
-        if (!(tb.X1 > v.X0 && tb.X0 < v.X1 && tb.Y1 > v.Y0 && tb.Y0 < v.Y1)) continue;
+      /* grid 1,2,4,8,16,32,64 -> z1..z7. z5 to z7 are on R2 and sparse: the two first cover the boroughs and the four
+         waters, the last the waters alone. A CELL THE MANIFEST DOES NOT LIST IS DRAWN FROM THE LEVEL ABOVE IT
+         (2026-09-27), and that one from the level above, up to z4, which is whole: before, such a cell fell through
+         to the 70 m image under the map, which with z7 laid only along the water would have been every street a
+         block inland. Parents are drawn first, so the finest tile a place has is the one on top. */
+      var lvlTop = grid === 1 ? 1 : grid === 2 ? 2 : grid === 4 ? 3 : grid === 8 ? 4 : grid === 16 ? 5 : grid === 32 ? 6 : 7;
+      var cells = [], seenCell = {}, coarsest = lvlTop;
+      var wantCell = function(lvl, gr, gq){
+        var k = lvl + ':' + gr + ',' + gq; if (seenCell[k]) return; seenCell[k] = 1;
+        if (lvl >= 5 && !_cityDeepHas(lvl, gr, gq)){ wantCell(lvl - 1, gr >> 1, gq >> 1); return; }
+        if (lvl < coarsest) coarsest = lvl;
+        cells.push([lvl, gr, gq]);
+      };
+      for (var gr0 = 0; gr0 < grid; gr0++) for (var gq0 = 0; gq0 < grid; gq0++){
+        var t0 = { X0: B.X0 + BXs * gq0 / grid, X1: B.X0 + BXs * (gq0 + 1) / grid,
+                   Y1: B.Y1 - BYs * gr0 / grid, Y0: B.Y1 - BYs * (gr0 + 1) / grid };
+        if (t0.X1 > v.X0 && t0.X0 < v.X1 && t0.Y1 > v.Y0 && t0.Y0 < v.Y1) wantCell(lvlTop, gr0, gq0);
+      }
+      for (var ci = 0; ci < cells.length; ci++){
+        var lvl = cells[ci][0], gr = cells[ci][1], gq = cells[ci][2], gN = 1 << (lvl - 1);
+        var tb = { X0: B.X0 + BXs * gq / gN, X1: B.X0 + BXs * (gq + 1) / gN,
+                   Y1: B.Y1 - BYs * gr / gN, Y0: B.Y1 - BYs * (gr + 1) / gN, z: lvl - lvlTop };
         /* the CORE map only — story layers (floods, radar) are their own
            full-box registered elements now, never baked into the compose */
-        /* grid 1,2,4,8,16,32 -> z1..z6. The deep two are on R2 and exist only
-           over the boroughs, so a cell the manifest does not list is skipped and
-           the full-extent z1 image underneath shows through — which is what
-           those stretches of water look like today in any case. */
-        var lvl = grid === 1 ? 1 : grid === 2 ? 2 : grid === 4 ? 3
-                : grid === 8 ? 4 : grid === 16 ? 5 : 6;
-        if (lvl >= 5 && !_cityDeepHas(lvl, gr, gq)) continue;
         var suffix = lvl === 1 ? '' : lvl === 2 ? '-z2-' + (gr ? 's' : 'n') + (gq ? 'e' : 'w')
                    : '-z' + lvl + '-r' + gr + 'c' + gq;
         var tu = lvl >= 5 ? (CITY_DEEP_BASE + '/nyc-basemap-ink-dry' + suffix + '.png')
                           : ('/nyc-basemap-ink-dry' + suffix + '.png?v=9');
         (function(bb, uu){
           /* a missing tile drops out instead of blanking the whole map */
-          jobs.push(_cityTile(uu).then(function(im){ return { im: im, b: bb, z: 0 }; },
+          jobs.push(_cityTile(uu).then(function(im){ return { im: im, b: bb, z: bb.z }; },
                                        function(){ return null; }));
         })(tb, tu);
         /* STREET TREES (user 2026-09-03) ride IN the compose, not on an
@@ -54620,20 +54597,17 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         /* lvl <= 4: there are no trees tiles at z5/z6, and at the shallow end of
            z5 the view is still ~20 km wide, i.e. past the 7 km threshold — so
            without this clamp the compose asks for tiles that were never baked */
-        if (cw.trees && lvl <= 4 && (v.X1 - v.X0) > 7000) (function(bb, uu){
+        /* lvlTop, not lvl: a z4 cell standing in for a missing deep one must not be the only cell wearing a canopy */
+        if (cw.trees && lvlTop <= 4 && (v.X1 - v.X0) > 7000) (function(bb, uu){
           jobs.push(_cityTile(uu).then(function(im){ return { im: im, b: bb, z: 1 }; },
                                        function(){ return null; }));
         })(tb, '/nyc-basemap-trees' + suffix + '.png?v=8');
       }
-      /* THE CLEAN LEVEL, FOR cwStainLift: the z3 tiles under this view ride along whenever the deep levels are drawn */
-      if (grid >= 16) for (var rr3 = 0; rr3 < 4; rr3++) for (var rc3 = 0; rc3 < 4; rc3++){
-        var rb3 = { X0: B.X0 + BXs * rc3 / 4, X1: B.X0 + BXs * (rc3 + 1) / 4, Y1: B.Y1 - BYs * rr3 / 4, Y0: B.Y1 - BYs * (rr3 + 1) / 4 };
-        if (!(rb3.X1 > v.X0 && rb3.X0 < v.X1 && rb3.Y1 > v.Y0 && rb3.Y0 < v.Y1)) continue;
-        (function(bb, uu){ jobs.push(_cityTile(uu).then(function(im){ return { im: im, b: bb, z: 0, ref: 1 }; }, function(){ return null; })); })
-          (rb3, '/nyc-basemap-ink-dry-z3-r' + rr3 + 'c' + rc3 + '.png?v=9');
-      }
       var seq = ++cwComposeSeq;
-      var deepTileMpp = BWm / grid / TILEPX, deepU = deepTileMpp / mppNeed;
+      /* the coarsest level in the picture sets whether the class map is wanted: a view that is z7 along the water and
+         z6 a block inland is sharpened as the z6 view it was before */
+      var deepTileMpp = BWm / (1 << (coarsest - 1)) / TILEPX, deepU = deepTileMpp / mppNeed;
+      window._cwTilesUsed = { top: lvlTop, coarsest: coarsest, n: cells.length, by: cells.reduce(function(o, c2){ o[c2[0]] = (o[c2[0]] || 0) + 1; return o; }, {}) };
       Promise.all(jobs).then(function(parts){
         /* deeper than the bake resolves: fetch the class map for this view as well */
         if (deepU < 1.4 || seq !== cwComposeSeq) return parts;
@@ -54657,13 +54631,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
            w = x1 - x0. Rounding position and size independently is what opens
            1 px gaps, whereas this way tile B's left edge is by construction the
            same integer as tile A's right edge. */
-        var refs3 = parts.filter(function(p){ return p && p.ref; });
-        parts.filter(function(p){ return p && !p.ref; }).sort(function(a, b2){ return a.z - b2.z; }).forEach(function(p){
+        parts.filter(Boolean).sort(function(a, b2){ return a.z - b2.z; }).forEach(function(p){
           var x0 = Math.round((p.b.X0 - v.X0) * sx), x1 = Math.round((p.b.X1 - v.X0) * sx);
           var y0 = Math.round((v.Y1 - p.b.Y1) * sy), y1 = Math.round((v.Y1 - p.b.Y0) * sy);
           g.drawImage(p.im, x0, y0, Math.max(1, x1 - x0), Math.max(1, y1 - y0));
         });
-        if (refs3.length){ var _ts = performance.now(); try { window._cwStain = cwStainLift(g, W2, H2, refs3, v); } catch(e){ window._cwStain = { err: String(e) }; } if (window._cwStain) window._cwStain.ms = Math.round(performance.now() - _ts); }
         if (parts._cls){ var _t0 = performance.now(); try { cwDeepSharpen(g, W2, H2, parts._cls, Math.min(16, Math.ceil(deepU * 1.6) + 2)); } catch(e){ window._cwDeepErr = String(e); } window._cwDeepMs = Math.round(performance.now() - _t0); }
         /* The theme is BAKED now (2026-09-03). Until today this composed
            canvas rasterised the five boroughs into a stencil and then walked
@@ -65636,8 +65608,11 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       var m = new Uint8Array(W * H), n = 0;
       for (var y = 0; y < FH; y++){ var row = (y / K | 0) * W;
         for (var x = 0; x < FW; x++){ var o = (y * FW + x) * 4, r = d[o], gg = d[o + 1], b = d[o + 2];
-          /* the ink bake's water: blue leads, and not the near-black land */
-          if (b > 60 && b > r + 25 && b > gg + 8){ var k = row + (x / K | 0); if (!m[k]){ m[k] = 1; n++; } } } }
+          /* the ink bake's water: blue leads, and not the near-black land. DOWN TO THE DEEPEST NAVY (2026-09-27): the
+             floor was b > 60, and the bake's deepest water is 8,23,59 -- Newtown Creek, the creeks' arms and the
+             dredged channel of the East River, 5% of the Greenpoint tile, missed by one. The land outside the city
+             is 16,16,24: blue leads it by 8, not 25. */
+          if (b > 40 && b > r + 25 && b > gg + 8){ var k = row + (x / K | 0); if (!m[k]){ m[k] = 1; n++; } } } }
       return { w: W, h: H, m: m, share: n / (W * H), src: im.src };
     }
     function cwFlowWater(x, y, cvs){

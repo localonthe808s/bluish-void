@@ -96,11 +96,44 @@ def land_union():
     return unary_union([per[b] for b in KEEP])
 
 
-def tiles_for(level, min_land):
+# THE WATERS (2026-09-27, user: "redo the rivers ... at a farther refined zoom level that promises accuracy
+# for the hudson / east river / harbor / jamaica bay"). The deep levels were baked only where a tile touched
+# one of the four boroughs, so the far bank of the Hudson, the middle of the Upper Bay and most of Jamaica Bay
+# fell through to the 70 m/px image underneath. These boxes (w, s, e, n) name the four waters; a tile is kept
+# where it meets one of them AND the clean z3 level shows water in it, both banks included.
+WATERS = {
+    'hudson':      [(-74.050, 40.690, -73.990, 40.760), (-74.025, 40.755, -73.925, 40.855), (-73.985, 40.850, -73.885, 40.935)],
+    'east river':  [(-74.005, 40.695, -73.900, 40.805), (-73.940, 40.775, -73.775, 40.825), (-73.945, 40.795, -73.905, 40.880)],
+    'harbor':      [(-74.105, 40.590, -73.990, 40.712)],
+    'jamaica bay': [(-73.955, 40.545, -73.725, 40.672)],
+}
+WATER_MIN = 0.01          # of the tile, on the clean level
+
+
+def water_grid():
+    """-> (mask, W, H): the box's water from the sixteen z3 tiles in the repo (17.6 m a pixel), as a numpy bool."""
+    import numpy as np
+    from PIL import Image
+    full = None
+    for r in range(4):
+        for c in range(4):
+            im = Image.open(os.path.join(HERE, '..', 'nyc-basemap-ink-dry-z3-r%dc%d.png' % (r, c))).convert('RGB')
+            if full is None:
+                tw, th = im.size
+                full = np.zeros((th * 4, tw * 4, 3), dtype='int16')
+            full[r * th:(r + 1) * th, c * tw:(c + 1) * tw] = np.asarray(im)
+    rr, gg, bb = full[..., 0], full[..., 1], full[..., 2]
+    return (bb > 60) & (bb > rr + 25) & (bb > gg + 8)
+
+
+def tiles_for(level, min_land, waters=True, only_water=False):
     """-> [(r, c, w, s, e, n)] for every tile worth baking at this level."""
     from shapely.geometry import box as sbox
+    from shapely.ops import unary_union
     land = land_union()
-    grid = 2 ** (level - 1)                     # z5 -> 16, z6 -> 32
+    grid = 2 ** (level - 1)                     # z5 -> 16, z6 -> 32, z7 -> 64
+    wm = water_grid() if waters else None
+    zones = unary_union([sbox(*(merc(w, s) + merc(e, n))) for bx in WATERS.values() for (w, s, e, n) in bx]) if waters else None
     out = []
     for r in range(grid):
         for c in range(grid):
@@ -109,9 +142,14 @@ def tiles_for(level, min_land):
             ty1 = Y1 - (Y1 - Y0) * r / grid
             ty0 = Y1 - (Y1 - Y0) * (r + 1) / grid
             t = sbox(tx0, ty0, tx1, ty1)
-            if not t.intersects(land):
-                continue
-            if min_land > 0 and t.intersection(land).area / t.area < min_land:
+            keep = False
+            if not only_water and t.intersects(land):
+                keep = not (min_land > 0 and t.intersection(land).area / t.area < min_land)
+            if not keep and waters and t.intersects(zones):
+                hh, ww = wm.shape
+                cell = wm[int(hh * r / grid):int(hh * (r + 1) / grid), int(ww * c / grid):int(ww * (c + 1) / grid)]
+                keep = cell.size > 0 and cell.mean() >= WATER_MIN
+            if not keep:
                 continue
             w, s = unmerc(tx0, ty0)
             e, n = unmerc(tx1, ty1)
@@ -198,6 +236,9 @@ class Lab:
           renderAll(); return 1;
         })()""" % (w, e, s, n))
 
+    # THE CARD'S OWN CANVAS IS canvas.pannable (2026-09-27). Each card has carried six overlay canvases since
+    # 09-19 (rail, traffic, tags, the sea), so '#grid canvas'[1] is a blank overlay of the FIRST card: a bake
+    # with the old selector wrote 386 identical transparent tiles in twelve seconds each and reported success.
     def settled(self, quiet=2, poll=1.5, floor=6.0, ceiling=90.0):
         """Wait until the INK canvas stops changing.
 
@@ -210,7 +251,7 @@ class Lab:
         while time.time() - t0 < ceiling:
             time.sleep(poll)
             sig = self.js("""(function(){
-              var c = document.querySelectorAll('#grid canvas')[1];
+              var c = document.querySelectorAll('#grid canvas.pannable')[1];
               if (!c) return '';
               var g = c.getContext('2d'), n = 0, step = 97;
               var d = g.getImageData(0, 0, c.width, c.height).data;
@@ -227,7 +268,7 @@ class Lab:
         return False
 
     def grab(self, path):
-        data = self.js("(function(){var c=document.querySelectorAll('#grid canvas')[1];"
+        data = self.js("(function(){var c=document.querySelectorAll('#grid canvas.pannable')[1];"
                        "return c ? c.toDataURL('image/png') : null;})()")
         if not data:
             raise RuntimeError('no INK canvas to read')
@@ -239,15 +280,30 @@ class Lab:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--level', type=int, required=True, choices=(5, 6))
+    ap.add_argument('--level', type=int, required=True, choices=(5, 6, 7))
+    ap.add_argument('--only-water', action='store_true', help='the four waters alone, not the boroughs (z7)')
+    ap.add_argument('--all', action='store_true', help='with --only: any tile of the grid, not just the selected set')
     ap.add_argument('--out', required=True, help='directory for the PNGs')
     ap.add_argument('--min-land', type=float, default=0.0,
                     help='skip tiles with less than this fraction of land (0-1)')
     ap.add_argument('--limit', type=int, default=0, help='stop after N tiles (a trial run)')
     ap.add_argument('--dry', action='store_true', help='list the work and exit')
+    ap.add_argument('--port', type=int, default=PORT, help='the debugging Chrome\'s port')
+    ap.add_argument('--only', default='', help='bake just these tiles, "r,c r,c" (a trial)')
     a = ap.parse_args()
+    globals()['PORT'] = a.port
 
-    grid, tiles = tiles_for(a.level, a.min_land)
+    grid, tiles = tiles_for(a.level, a.min_land, only_water=a.only_water)
+    if a.only:
+        want = set(tuple(int(v) for v in t.split(',')) for t in a.only.split())
+        if a.all:
+            tiles = []
+            for (r, c) in sorted(want):
+                w, s = unmerc(X0 + (X1 - X0) * c / grid, Y1 - (Y1 - Y0) * (r + 1) / grid)
+                e, n = unmerc(X0 + (X1 - X0) * (c + 1) / grid, Y1 - (Y1 - Y0) * r / grid)
+                tiles.append((r, c, w, s, e, n))
+        else:
+            tiles = [t for t in tiles if (t[0], t[1]) in want]
     mpp = (X1 - X0) / grid / TILEPX
     print('z%d: %dx%d grid, %d tiles to bake, %.2f mercator m/px (%.2f ground)'
           % (a.level, grid, grid, len(tiles), mpp, mpp / 1.317))
@@ -274,9 +330,24 @@ def main():
             skipped += 1
             continue
         try:
-            lab.render(w, s, e, n)
-            ok = lab.settled()
-            size = lab.grab(path)
+            # THE SOCKET CAN DROP (2026-09-27: "Connection to remote host was lost" at tile 42 of 107, and the 65
+            # after it failed on the dead socket in under a second). One drop must cost one retry, not the level.
+            for attempt in (1, 2, 3):
+                try:
+                    lab.render(w, s, e, n)
+                    ok = lab.settled()
+                    size = lab.grab(path)
+                    break
+                except Exception as exc:
+                    if attempt == 3:
+                        raise
+                    print('      (%s -- reconnecting, try %d)' % (str(exc)[:60], attempt + 1))
+                    time.sleep(5 * attempt)
+                    lab = Lab()
+                    if lab.js("typeof VIEWS") != 'object':
+                        lab.send('Page.reload')
+                        time.sleep(25)
+                        lab = Lab()
             done.append((r, c))
             el = time.time() - t_start
             left = (len(tiles) - i) * (el / max(1, i - skipped)) if i > skipped else 0
