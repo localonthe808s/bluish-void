@@ -66114,8 +66114,10 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
        RGBA8: a bare multiply stalls below ~30/255 (rounding), so every fade also subtracts a count. */
     var CW_WAT_ADV = [
       'precision highp float;',
-      'uniform sampler2D uPrev, uTd, uMk, uNz, uSrc;',
-      'uniform vec2 uRes, uSeed;',
+      'uniform sampler2D uPrev, uTd, uMk, uNz, uSrc, uBg;',
+      'uniform vec2 uRes, uSeed, uMixD;',
+      'uniform vec4 uBgA;',
+      'uniform float uBgK;',
       'uniform float uStep, uHere, uFadeR, uDrop, uFadeG, uHoldG, uPour, uMix, uLast, uTime, uInj, uCell, uNzF, uFloor, uSub;',
       'vec2 tdn(vec2 uv){ return vec2(uv.x, 1. - uv.y); }',      /* the field and mask are stored top row first */
       'float hs(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }',
@@ -66140,9 +66142,17 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       '  vec2 q = wet ? up : uv;',
       /* sideways mixing among WATER neighbours only: averaged with the land's zero, a canal a few pixels wide lost a tenth
          of its dye every step and the Gowanus never showed its plume (2026-09-27) */
-      '  float m1 = step(.5, texture2D(uMk, tdn(q + vec2(px.x, 0.))).r), m2 = step(.5, texture2D(uMk, tdn(q - vec2(px.x, 0.))).r), m3 = step(.5, texture2D(uMk, tdn(q + vec2(0., px.y))).r), m4 = step(.5, texture2D(uMk, tdn(q - vec2(0., px.y))).r);',
+      /* THE REACH OF THE MIXING IS IN METRES (user 2026-09-28: "it looks a bit coarse for the zoom levels weve developed
+         yesterday"). It was one pixel, a tenth a step, at every depth: tuned with the whole city in view, where it
+         comes to 1.7 m2/s of ground. Close in every pipe drew a pencil line with a hard side and the shore a comb.
+         It now grows with the square root of the zoom (x4 at 16, x7 at the deepest): between the pencil and what
+         1.7 m2/s would be in these pixels, which thinned a single pipe's plume to nothing in a hundred. uMixD is the
+         reach in px, turned a little every sub-step so four taps make a round kernel; a tap counts only if the water
+         is unbroken out to it (half way is wet too), or a plume would step over a pier. */
+      '  vec2 d1 = uMixD * px, d2 = vec2(-uMixD.y, uMixD.x) * px;',
+      '  float m1 = step(.5, texture2D(uMk, tdn(q + d1)).r) * step(.5, texture2D(uMk, tdn(q + d1 * .5)).r), m2 = step(.5, texture2D(uMk, tdn(q - d1)).r) * step(.5, texture2D(uMk, tdn(q - d1 * .5)).r), m3 = step(.5, texture2D(uMk, tdn(q + d2)).r) * step(.5, texture2D(uMk, tdn(q + d2 * .5)).r), m4 = step(.5, texture2D(uMk, tdn(q - d2)).r) * step(.5, texture2D(uMk, tdn(q - d2 * .5)).r);',
       '  float mw = m1 + m2 + m3 + m4;',
-      '  float gN = mw > 0. ? (texture2D(uPrev, q + vec2(px.x, 0.)).g * m1 + texture2D(uPrev, q - vec2(px.x, 0.)).g * m2 + texture2D(uPrev, q + vec2(0., px.y)).g * m3 + texture2D(uPrev, q - vec2(0., px.y)).g * m4) / mw : a.g;',
+      '  float gN = mw > 0. ? (texture2D(uPrev, q + d1).g * m1 + texture2D(uPrev, q - d1).g * m2 + texture2D(uPrev, q + d2).g * m3 + texture2D(uPrev, q - d2).g * m4) / mw : a.g;',
       /* R: THE WATER'S OWN TEXTURE, image-based flow visualisation (van Wijk 2002; user 2026-09-26: "the animation is not
          consistently playing"). The whole field is carried by the current every sub-step and, once a frame, a little
          fresh grain is blended in -- grain cells that each blink on their own random phase, so what enters is itself
@@ -66161,6 +66171,12 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       '  g += src.r * uPour * uLast;',   /* once a frame, whole: split across sub-steps each pour was under 1/255 and rounded to nothing (the Gowanus stayed clear) */
       '  if (src.r > .02) b = max(b, src.g);',
       '  if (src.b > .01){ g = max(g, src.b * .55); b = max(b, .9); }',   /* the standing sewage of a basin that does not flush */
+      /* THE REST OF THE CITY'S SEWAGE (2026-09-28). The simulation is this view only: close in, nothing arrived from the
+         pipes upstream of the screen's edge, so a river that read solid lime with the whole city in view showed a few
+         streaks at street level in the same storm. uBg is the whole-city dye, kept from the last time that view ran
+         (cwWatDraw); under any other view it is the least the water here carries, and the first thing a new view shows. */
+      '  if (uBgK > 0.){ vec2 hb = uv * uBgA.xy + uBgA.zw;',
+      '    if (hb.x > 0. && hb.y > 0. && hb.x < 1. && hb.y < 1.){ vec4 bg = texture2D(uBg, hb); if (bg.g * uBgK > g){ g = bg.g * uBgK; b = max(b, bg.b); } } }',
       '  if (g <= 0.) b = 0.;',
       '  gl_FragColor = vec4(clamp(r, 0., 1.), clamp(g, 0., 1.), b, 1.);',
       '}'].join('\n');
@@ -66181,10 +66197,20 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       var b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
       [pr, pa].forEach(function(q){ var loc = gl.getAttribLocation(q, 'p'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0); });
       cwWat.ua = {};
-      ['uPrev', 'uTd', 'uMk', 'uNz', 'uSrc', 'uRes', 'uSeed', 'uStep', 'uHere', 'uFadeR', 'uDrop', 'uFadeG', 'uHoldG', 'uPour', 'uMix', 'uLast', 'uTime', 'uInj', 'uCell', 'uNzF', 'uFloor', 'uSub'].forEach(function(k){ cwWat.ua[k] = gl.getUniformLocation(pa, k); });
+      ['uPrev', 'uTd', 'uMk', 'uNz', 'uSrc', 'uRes', 'uSeed', 'uStep', 'uHere', 'uFadeR', 'uDrop', 'uFadeG', 'uHoldG', 'uPour', 'uMix', 'uLast', 'uTime', 'uInj', 'uCell', 'uNzF', 'uFloor', 'uSub', 'uMixD', 'uBg', 'uBgA', 'uBgK'].forEach(function(k){ cwWat.ua[k] = gl.getUniformLocation(pa, k); });
       gl.useProgram(pa);
-      gl.uniform1i(cwWat.ua.uPrev, 5); gl.uniform1i(cwWat.ua.uTd, 1); gl.uniform1i(cwWat.ua.uMk, 2); gl.uniform1i(cwWat.ua.uNz, 3); gl.uniform1i(cwWat.ua.uSrc, 4);
+      gl.uniform1i(cwWat.ua.uPrev, 5); gl.uniform1i(cwWat.ua.uTd, 1); gl.uniform1i(cwWat.ua.uMk, 2); gl.uniform1i(cwWat.ua.uNz, 3); gl.uniform1i(cwWat.ua.uSrc, 4); gl.uniform1i(cwWat.ua.uBg, 7);
       cwWat.pa = pa;
+      /* the keeper of the whole-city dye: the simulation at half size, spread one texel onto the land so that a bank drawn
+         finer close in still finds its water's value */
+      var fc = sh(gl.FRAGMENT_SHADER, ['precision highp float;', 'uniform sampler2D uPrev, uMk;', 'uniform vec2 uRes;',
+        'void main(){ vec2 uv = gl_FragCoord.xy / uRes, e = 1. / uRes; vec4 c = texture2D(uPrev, uv);',
+        '  if (texture2D(uMk, vec2(uv.x, 1. - uv.y)).r < .5){ for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) c = max(c, texture2D(uPrev, uv + vec2(float(i), float(j)) * e)); }',
+        '  gl_FragColor = c; }'].join('\n'));
+      if (fc){ var pc = gl.createProgram(); gl.attachShader(pc, vs); gl.attachShader(pc, fc); gl.linkProgram(pc);
+        if (gl.getProgramParameter(pc, gl.LINK_STATUS)){ var lc = gl.getAttribLocation(pc, 'p'); gl.enableVertexAttribArray(lc); gl.vertexAttribPointer(lc, 2, gl.FLOAT, false, 0, 0);
+          gl.useProgram(pc); gl.uniform1i(gl.getUniformLocation(pc, 'uPrev'), 5); gl.uniform1i(gl.getUniformLocation(pc, 'uMk'), 2);
+          cwWat.pc = pc; cwWat.pcRes = gl.getUniformLocation(pc, 'uRes'); } }
       gl.useProgram(pr);
       ['uFl', 'uTd', 'uMk', 'uSim', 'uRes', 'uA', 'uKm', 'uFlPx', 'uT', 'uHasFl', 'uHasTd', 'uDir', 'uSurge', 'uZ', 'uPxK'].forEach(function(k){ cwWat.u[k] = gl.getUniformLocation(pr, k); });
       /* 0 flood, 1 tide field, 2 water mask, 3 noise (NEAREST: linear averages the specks away -- the fabric lab's trap),
@@ -66199,7 +66225,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       cwWatTex('nz', 3, 256, 256, gl.RGBA, nzd);
       cwWat.fb = gl.createFramebuffer();
       gl.uniform1i(cwWat.u.uFl, 0); gl.uniform1i(cwWat.u.uTd, 1); gl.uniform1i(cwWat.u.uMk, 2); gl.uniform1i(cwWat.u.uSim, 5);
-      cvs.addEventListener('webglcontextlost', function(e){ e.preventDefault(); cwWat.gl = null; cwWat.keys = {}; });
+      cvs.addEventListener('webglcontextlost', function(e){ e.preventDefault(); cwWat.gl = null; cwWat.keys = {}; cwWat.txBg = null; cwWat.bgAt = 0; });
       cvs.addEventListener('webglcontextrestored', function(){ cwWat.bad = 0; });
       cwWat.gl = gl; cwWat.pr = pr;
       return gl;
@@ -66246,42 +66272,86 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
               gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.deleteFramebuffer(ff); gl.deleteTexture(tt); } }
           ['sa', 'sb'].forEach(function(k2, i2){ gl.activeTexture(gl.TEXTURE5 + i2); gl.bindTexture(gl.TEXTURE_2D, cwWat.tx[k2]);
             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, cwWat.hf || gl.UNSIGNED_BYTE, null); });
-          cwWat.simKey = skey; cwWat.cur = 'sa'; cwWat.srcSig = null; cwWat.lastT = 0; cwWat.resets = (cwWat.resets || 0) + 1; cwWat.lastKey = skey;
+          cwWat.simKey = skey; cwWat.cur = 'sa'; cwWat.srcSig = null; cwWat.lastT = 0; cwWat.resets = (cwWat.resets || 0) + 1; cwWat.lastKey = skey; cwWat.simN = 0;
+          cwWatTex('src', 4, 1, 1, gl.RGBA, new Uint8Array(4));           /* the old view's pipes pour nothing into the new one */
         }
+        /* THE PIPES OF THIS VIEW, NOT THE LAST ONE (2026-09-28; user: "it looks a bit coarse for the zoom levels weve
+           developed yesterday"). The list is laid out by cwFlowStep and this draw runs first in the frame a new view
+           lands: the picture was built from the OLD view's positions and mask, signed with the NEW view's key, and
+           never rebuilt, because the list's own signature is strengths only. Close in the plume was the whole city's
+           source map magnified up to 46 times: slabs and coastline-shaped edges in mid-river. The list now says which
+           view and mask it was laid out for, and nothing is built until that is this one. */
         var SRC = cwWat.src || { sig: '', list: [] }, ssig = skey + '|' + SRC.sig;
-        if (cwWat.srcSig !== ssig){
+        var srcFresh = SRC.vk === v.X0 + ',' + v.X1 + ',' + v.Y0 + ',' + v.Y1 && SRC.mk === cwFlowMask;
+        if (cwWat.srcSig !== ssig && srcFresh){
           var sw = Math.max(1, W >> 1), shh = Math.max(1, H >> 1), sc = cwWat.srcCv || (cwWat.srcCv = document.createElement('canvas'));
           sc.width = sw; sc.height = shh; var sg = sc.getContext('2d'); sg.globalCompositeOperation = 'lighter';
+          /* A PIPE POURS INTO THE WATER, NOT ONTO ITS BANK. The mapped outfall sits on the bulkhead, up to 45 m from the
+             water; with the whole city in view the dot (100 m across) covers both, close in it is 3 m across and lay
+             wholly on land, where the simulation keeps nothing: at depth no pipe poured at all (measured at the
+             Williamsburg Bridge, 8 pipes in view, not one green pixel in a storm). So the dot moves to the nearest
+             water when that is further off than the dot reaches, and is never less than 24 m of ground across (a
+             4 m dot poured, and its streak mixed away within fifty pixels). */
+          var M9 = cwFlowMask, mw9 = M9 ? M9.w : 1, mh9 = M9 ? M9.h : 1, cellM = (v.X1 - v.X0) / mw9 * Math.cos(40.7 * Math.PI / 180);
+          var sr9 = Math.max(4, Math.min(64, Math.round(45 / cellM)));   /* ~45 m: a pipe sits on the bank, not in the water */
+          var rd9 = Math.max(2.6, Math.min(12, 12 / (cellM * mw9 / sw)));
           SRC.list.forEach(function(q){ var x = q[0] * sw + Math.sin(q[4]) * 2, y = q[1] * shh - Math.cos(q[4]) * 2;
-            if (x < -4 || y < -4 || x > sw + 4 || y > shh + 4) return;
-            var gr = sg.createRadialGradient(x, y, 0, x, y, 2.6);
+            q[5] = -1;
+            if (M9){ var cx = Math.round(q[0] * mw9), cy = Math.round(q[1] * mh9);
+              if (cx >= -sr9 && cy >= -sr9 && cx < mw9 + sr9 && cy < mh9 + sr9){
+                var st9 = -1, bd9 = 1e9;
+                for (var dy = -sr9; dy <= sr9; dy++) for (var dx = -sr9; dx <= sr9; dx++){ var xx = cx + dx, yy = cy + dy; if (xx < 0 || yy < 0 || xx >= mw9 || yy >= mh9) continue; var kk = yy * mw9 + xx; if (M9.m[kk] && dx * dx + dy * dy < bd9){ bd9 = dx * dx + dy * dy; st9 = kk; } }
+                q[5] = st9;
+                if (st9 >= 0){ var wx = ((st9 % mw9) + 0.5) / mw9 * sw, wy = (((st9 / mw9) | 0) + 0.5) / mh9 * shh, wd = Math.hypot(wx - x, wy - y);
+                  if (wd > rd9 * 0.5){ x = wx + (wx - x) / wd * rd9 * 0.5; y = wy + (wy - y) / wd * rd9 * 0.5; } }
+              } }
+            if (x < -rd9 - 2 || y < -rd9 - 2 || x > sw + rd9 + 2 || y > shh + rd9 + 2) return;
+            var gr = sg.createRadialGradient(x, y, 0, x, y, rd9);
             gr.addColorStop(0, 'rgba(' + Math.round(255 * q[2]) + ',' + Math.round(255 * q[3]) + ',0,1)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
-            sg.fillStyle = gr; sg.fillRect(x - 3, y - 3, 6, 6); });
+            sg.fillStyle = gr; sg.fillRect(x - rd9 - 1, y - rd9 - 1, rd9 * 2 + 2, rd9 * 2 + 2); });
           /* THE WATER THAT DOES NOT FLUSH (user 2026-09-27: "why isnt the gowanus bay flowing green?"). The dye starts empty
              when the map opens, and in a dead-end canal with no current it creeps outward only by mixing -- a real overflow
              has sat there for hours by then, and close in the model clock is also slowed so the plume keeps its ground
              size. So around every pipe into slow water (hold > .45: Gowanus, Newtown Creek and its kills, the Jamaica Bay
              basins, Flushing Creek...) the basin itself carries the sewage already: a floor of dye through the water within
              ~600 m of the pipe (by water, not across land), strongest at the pipe. Blue channel of the source texture. */
-          var M9 = cwFlowMask;
           if (M9 && SRC.list.length){
-            var mw9 = M9.w, mh9 = M9.h, cellM = (v.X1 - v.X0) / mw9 * Math.cos(40.7 * Math.PI / 180), R9c = Math.max(3, Math.min(400, Math.round(600 / cellM)));
+            var R9c = Math.max(3, Math.min(400, Math.round(600 / cellM)));
             var fl9 = new Float32Array(mw9 * mh9), dst9 = new Int32Array(mw9 * mh9), Q9 = new Int32Array(mw9 * mh9);
             SRC.list.forEach(function(q){ if (q[3] < 0.45 || q[2] < 0.04) return;
-              var cx = Math.round(q[0] * mw9), cy = Math.round(q[1] * mh9); if (cx < -R9c || cy < -R9c || cx > mw9 + R9c || cy > mh9 + R9c) return;
-              /* the nearest water cell to the pipe */
-              var st9 = -1, bd9 = 1e9;
-              var sr9 = Math.max(4, Math.min(40, Math.round(45 / cellM)));   /* ~45 m: a pipe sits on the bank, not in the water */
-              for (var dy = -sr9; dy <= sr9; dy++) for (var dx = -sr9; dx <= sr9; dx++){ var xx = cx + dx, yy = cy + dy; if (xx < 0 || yy < 0 || xx >= mw9 || yy >= mh9) continue; var kk = yy * mw9 + xx; if (M9.m[kk] && dx * dx + dy * dy < bd9){ bd9 = dx * dx + dy * dy; st9 = kk; } }
-              if (st9 < 0) return;
+              var st9 = q[5];                                                /* the nearest water cell to the pipe, found above */
+              if (st9 == null || st9 < 0) return;
               var qh = 0, qt = 0, stamp = st9 + 1; Q9[qt++] = st9; dst9[st9] = stamp * 1024;
               var peak = q[2] * (0.4 + 0.6 * q[3]);
-              while (qh < qt){ var k9 = Q9[qh++], d9 = dst9[k9] % 1024; var val = peak * (1 - d9 / R9c); if (val > fl9[k9]) fl9[k9] = val; if (d9 >= R9c) continue;
+              /* ROUND AND SOFT (2026-09-28, the same complaint as the mixing: coarse close in). The floor fell off in a
+                 straight line with the walk's own count of steps, which is a city-block distance: every pipe drew a
+                 DIAMOND, the diamonds overlapped by whichever was larger, and at depth, where 600 m is the whole
+                 screen, the basin read as stacked slabs with creases. Now the distance is the straight one to the pipe
+                 (the walk still says what the water reaches, and takes over round a bend, where it is the longer),
+                 the fall is an S-curve with no edge at either end, and pipes add up as a union, not a maximum. */
+              var sx9 = st9 % mw9, sy9 = (st9 / mw9) | 0, Rb9 = Math.min(1000, Math.ceil(R9c * 1.4142));
+              while (qh < qt){ var k9 = Q9[qh++], d9 = dst9[k9] % 1024;
+                var ex9 = (k9 % mw9) - sx9, ey9 = ((k9 / mw9) | 0) - sy9, t9 = Math.max(Math.sqrt(ex9 * ex9 + ey9 * ey9), d9 / 1.4142) / R9c;
+                if (t9 < 1) fl9[k9] = 1 - (1 - fl9[k9]) * (1 - peak * (1 - t9 * t9 * (3 - 2 * t9)));
+                if (d9 >= Rb9) continue;
                 var x9 = k9 % mw9; [x9 > 0 ? k9 - 1 : -1, x9 < mw9 - 1 ? k9 + 1 : -1, k9 >= mw9 ? k9 - mw9 : -1, k9 < mw9 * (mh9 - 1) ? k9 + mw9 : -1].forEach(function(nk){
                   if (nk < 0 || !M9.m[nk] || Math.floor(dst9[nk] / 1024) === stamp) return; dst9[nk] = stamp * 1024 + d9 + 1; Q9[qt++] = nk; }); } });
+            /* ... AND IT KEEPS TO THE BANKS. 600 m from a pipe at Williamsburg is the middle of the East River, and close in
+               the fill sat there as a round green island in two knots of current. Standing water is a basin's or a
+               bulkhead's: whole within 60 m of land, gone by 180 (a canal is all bank; a river keeps a margin). The
+               distance is a two-pass chamfer over the mask. */
+            var dl9 = new Float32Array(mw9 * mh9), any9 = 0;
+            for (var a9 = 0; a9 < dl9.length; a9++){ if (fl9[a9]) any9 = 1; dl9[a9] = M9.m[a9] ? 1e6 : 0; }
+            if (any9){
+              for (var y9 = 0; y9 < mh9; y9++) for (var x8 = 0; x8 < mw9; x8++){ var i9 = y9 * mw9 + x8, d8 = dl9[i9]; if (!d8) continue;
+                if (x8 > 0) d8 = Math.min(d8, dl9[i9 - 1] + 1); if (y9 > 0){ d8 = Math.min(d8, dl9[i9 - mw9] + 1); if (x8 > 0) d8 = Math.min(d8, dl9[i9 - mw9 - 1] + 1.414); if (x8 < mw9 - 1) d8 = Math.min(d8, dl9[i9 - mw9 + 1] + 1.414); } dl9[i9] = d8; }
+              for (var y7 = mh9 - 1; y7 >= 0; y7--) for (var x7 = mw9 - 1; x7 >= 0; x7--){ var i7 = y7 * mw9 + x7, d7 = dl9[i7]; if (!d7) continue;
+                if (x7 < mw9 - 1) d7 = Math.min(d7, dl9[i7 + 1] + 1); if (y7 < mh9 - 1){ d7 = Math.min(d7, dl9[i7 + mw9] + 1); if (x7 < mw9 - 1) d7 = Math.min(d7, dl9[i7 + mw9 + 1] + 1.414); if (x7 > 0) d7 = Math.min(d7, dl9[i7 + mw9 - 1] + 1.414); } dl9[i7] = d7; }
+              for (var b9 = 0; b9 < fl9.length; b9++){ if (!fl9[b9]) continue; var tb = Math.max(0, Math.min(1, (dl9[b9] * cellM - 60) / 120)); fl9[b9] *= 1 - tb * tb * (3 - 2 * tb); }
+            }
             var bc9 = cwWat.basinCv || (cwWat.basinCv = document.createElement('canvas')); bc9.width = mw9; bc9.height = mh9;
             var bx9 = bc9.getContext('2d'), bi9 = bx9.createImageData(mw9, mh9);
-            for (var j9 = 0; j9 < fl9.length; j9++){ if (!fl9[j9]) continue; bi9.data[j9 * 4 + 2] = Math.min(255, Math.round(fl9[j9] * 255)); bi9.data[j9 * 4 + 3] = 255; }
+            for (var j9 = 0; j9 < fl9.length; j9++){ if (!fl9[j9]) continue; bi9.data[j9 * 4 + 2] = Math.min(255, Math.floor(fl9[j9] * 255 + Math.random()));   /* dithered: 8 bits of a slow ramp drew contour lines */ bi9.data[j9 * 4 + 3] = 255; }
             bx9.putImageData(bi9, 0, 0); sg.imageSmoothingEnabled = true; sg.drawImage(bc9, 0, 0, sw, shh);
           }
           gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, cwWat.tx.src);
@@ -66309,7 +66379,21 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         gl.uniform1f(UA.uStep, stepPx / nsub);
         gl.uniform1f(UA.uTime, (performance.now() / 1000) % 1000); gl.uniform1f(UA.uInj, Math.min(0.5, 0.015 * fr)); gl.uniform1f(UA.uCell, 2); gl.uniform1f(UA.uNzF, 0.35); gl.uniform1f(UA.uFloor, 0.35);
         gl.uniform1f(UA.uHere, Math.pow(0.962, fr / nsub)); gl.uniform1f(UA.uFadeR, Math.pow(0.996, fr)); gl.uniform1f(UA.uDrop, 2.0);                                         /* no fibres: the display's LIC draws the current */
-        gl.uniform1f(UA.uFadeG, Math.pow(0.997, fr / zStretch)); gl.uniform1f(UA.uHoldG, Math.pow(0.9993, fr / zStretch)); gl.uniform1f(UA.uPour, Math.min(0.5, 0.16 * fr / Math.sqrt(zStretch))); gl.uniform1f(UA.uSub, cwWat.hf ? 0.0004 / zStretch : 0.6 / 255 / zStretch); gl.uniform1f(UA.uMix, 0.1);
+        gl.uniform1f(UA.uFadeG, Math.pow(0.997, fr / zStretch)); gl.uniform1f(UA.uHoldG, Math.pow(0.9993, fr / zStretch)); gl.uniform1f(UA.uPour, Math.min(0.5, 0.16 * fr / Math.sqrt(Math.min(zStretch, 1.7))));   /* the whole-city pour at every depth: divided by the full stretch, the pipes poured a sixth close in and their plumes mixed away */ gl.uniform1f(UA.uSub, cwWat.hf ? 0.0004 / zStretch : 0.6 / 255 / zStretch);
+        /* sideways mixing: the old fixed pixel with the whole city in view (that view keeps its look), times the square
+           root of the zoom. Four taps at reach r and weight m spread m r2 / 4 px2 a sub-step */
+        var mixD = Math.min(2, 0.025 * nsub * Math.sqrt(Math.max(1, (V.X1 - V.X0) / (v.X1 - v.X0)))) / nsub;
+        var mixR = Math.max(1, Math.min(5, Math.sqrt(4 * mixD / 0.3))), mixM = Math.min(0.3, 4 * mixD / (mixR * mixR));
+        gl.uniform1f(UA.uMix, mixM); cwWat.mix = [mixR, mixM, nsub];
+        /* the whole city's dye under this view: whole for ten minutes after it was last kept, gone by twenty (the tide has
+           turned by then and the storm may be over); in the whole-city view itself only as the first frame's start */
+        var atHome = Math.abs(v.X0 - V.X0) + Math.abs(v.X1 - V.X1) + Math.abs(v.Y0 - V.Y0) + Math.abs(v.Y1 - V.Y1) < 1;
+        var bgAge = cwWat.bgAt ? (tn - cwWat.bgAt) / 1000 : 1e9, bgK = !cwWat.txBg ? 0 : Math.max(0, Math.min(1, 2 - bgAge / 600));
+        if (atHome && cwWat.simN > 0) bgK = 0;
+        if (cwWat.txBg){ gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, cwWat.txBg); }
+        gl.uniform1f(UA.uBgK, bgK);
+        gl.uniform4f(UA.uBgA, (v.X1 - v.X0) / (V.X1 - V.X0), (v.Y1 - v.Y0) / (V.Y1 - V.Y0), (v.X0 - V.X0) / (V.X1 - V.X0), (v.Y0 - V.Y0) / (V.Y1 - V.Y0));
+        cwWat.bgK = bgK;
         gl.bindFramebuffer(gl.FRAMEBUFFER, cwWat.fb); gl.viewport(0, 0, W, H);
         for (var ss = 0; ss < nsub; ss++){
           /* the spawn points DRIFT, never re-roll: a noise cell stays lit ~16 frames, so each speck is a source that grows a
@@ -66318,11 +66402,31 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
           cwWat.seed[0] = (cwWat.seed[0] + 0.00004 * fr / nsub) % 1; cwWat.seed[1] = (cwWat.seed[1] + 0.000027 * fr / nsub) % 1;
           gl.uniform2f(UA.uSeed, cwWat.seed[0], cwWat.seed[1]);
           gl.uniform1f(UA.uLast, ss === nsub - 1 ? 1 : 0);
+          cwWat.mixA = ((cwWat.mixA || 0) + 0.6981) % 6.2832;                 /* 40 degrees on: no two sub-steps share an axis */
+          gl.uniform2f(UA.uMixD, Math.cos(cwWat.mixA) * mixR, Math.sin(cwWat.mixA) * mixR);
           var rd = cwWat.cur, wr = rd === 'sa' ? 'sb' : 'sa';
           gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, cwWat.tx[rd]);
           gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, cwWat.tx[wr], 0);
           gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
           cwWat.cur = wr;
+        }
+        cwWat.simN = (cwWat.simN || 0) + 1;
+        /* keep the whole-city dye, every twentieth frame of that view, once its mask is that view's own */
+        if (atHome && cwWat.pc && cwWat.simN % 20 === 0 && K.mk === cwFlowMask && srcFresh){
+          var bw = Math.max(1, W >> 1), bh = Math.max(1, H >> 1);
+          if (!cwWat.txBg || cwWat.bgW !== bw || cwWat.bgH !== bh){
+            if (cwWat.txBg) gl.deleteTexture(cwWat.txBg);
+            cwWat.txBg = gl.createTexture(); gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, cwWat.txBg);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, bw, bh, 0, gl.RGBA, cwWat.hf || gl.UNSIGNED_BYTE, null);
+            cwWat.bgW = bw; cwWat.bgH = bh;
+          }
+          gl.useProgram(cwWat.pc); gl.uniform2f(cwWat.pcRes, bw, bh);
+          gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, cwWat.tx[cwWat.cur]);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, cwWat.txBg, 0);
+          gl.viewport(0, 0, bw, bh); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          cwWat.bgAt = tn; cwWat.bgN = (cwWat.bgN || 0) + 1;
         }
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, cwWat.tx[cwWat.cur]);
@@ -66460,7 +66564,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
           srcS += k + ':' + st2.toFixed(2) + ',';
         }
       }
-      cwWat.src = { sig: srcS, list: srcL };
+      cwWat.src = { sig: srcS, list: srcL, vk: v.X0 + ',' + v.X1 + ',' + v.Y0 + ',' + v.Y1, mk: cwFlowMask };
       /* turbulent spreading: an estuary mixes sideways at a few square metres a second, so a parcel wanders
          sqrt(2 K dt) per frame -- in metres, then in canvas pixels, the same at every zoom */
       var sig = Math.sqrt(2 * 3 * CW_FLOW_SPEEDUP * dt) / mPerPx;
