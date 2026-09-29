@@ -45,7 +45,13 @@
            big and lumpy, each further one lower, smaller and hazier, a thin lighter seam of sky-glow between them. Each rank is
            its own call (a separate layer at its own depth) */
         var ranks = [[H + 10, H * 0.56, 30, 1], [H * 0.6, H * 0.42, 20, 0.92], [H * 0.45, H * 0.31, 13, 0.85], [H * 0.33, H * 0.24, 8, 0.78]];
-        ranks.forEach(function(rk, ri){ var Q = [], rr0 = rk[2] * L.rMul;
+        ranks.forEach(function(rk, ri){ var Q = [];
+          /* NO MORE LOBES THAN THE RENDERER TAKES (2026-09-29). bvCloudGL draws 48 puffs a call and the rest were cut: on
+             a desktop panel (184 units tall) the nearest rank wants ~56, on a phone's (760 tall) 150, and it came out as a
+             field of separate dark pills. The lobes grow, 5% at a time, until the rank fits -- a tall panel is a ceiling
+             seen from closer */
+          var rr0 = rk[2] * L.rMul, need = function(q){ return Math.ceil((rk[0] - rk[1]) / (q * 0.8)) * ((W + 1.5 * q) / (1.25 * q)) + (W + q) / (1.1 * q); };
+          for (var gi = 0; gi < 40 && need(rr0) > 46; gi++) rr0 *= 1.05;
           for (var yy = rk[0]; yy > rk[1]; yy -= rr0 * 0.8) for (var xx = -rr0 * 0.5 + R() * rr0; xx < W + rr0; xx += rr0 * (1.0 + 0.5 * R())) Q.push([xx, yy + (R() - 0.5) * rr0 * 0.5, rr0 * (0.7 + 0.5 * R()), 0.85 + 0.15 * R()]);
           for (var xb2 = R() * rr0; xb2 < W + rr0; xb2 += rr0 * (0.8 + 0.6 * R())) Q.push([xb2, rk[1] + rr0 * 0.1 - R() * R() * rr0 * 0.6, rr0 * (0.45 + 0.35 * R()), 0.8]);   /* the rank's torn underside */
           Q.sort(function(a, b){ return b[3] - a[3]; });
