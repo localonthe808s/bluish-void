@@ -42,21 +42,28 @@
        is topMin below the layer's top edge */
     if (o.hold != null && o.baseUp != null && !o._pass){
       var lift = Math.max(0, o.lift || 0), sq = 1, got = null, res = false, tm = o.topMin == null ? 0 : o.topMin;
+      /* THE FITTING IS DONE SMALL (2026-09-29): the passes that only find the outline draw the main mass alone, one GPU
+         pixel a unit on a canvas 393 wide -- a ninth of the pixels and a fifth of the draws; the picture itself is
+         drawn once, at the end. Fitted at full size, a rain hero was six whole renders */
+      var mc = document.createElement('canvas'), mk = 393 / o.W; mc.width = 393; mc.height = Math.max(1, Math.round(o.H * mk));
+      var mx = mc.getContext('2d', { willReadFrequently: true }), mo = Object.assign({}, o, { dpr: mk });
       for (var pass = 0; pass < 6; pass++){
-        ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height); ctx.restore();
-        res = window.bvHeroGL(ctx, Object.assign({}, o, { _pass: 1, lift: lift, squash: sq, baseUp: o.baseUp - lift }));
+        mx.setTransform(1, 0, 0, 1, 0, 0); mx.clearRect(0, 0, mc.width, mc.height);
+        res = window.bvHeroGL(mx, Object.assign({}, mo, { _pass: 1, _measure: 1, lift: lift, squash: sq, baseUp: o.baseUp - lift }));
         if (!res) return false;
-        got = underside(ctx, o); if (got == null) break;
+        got = underside(mx, mo); if (got == null) break;
         var miss = o.hold - got.bottom, over = tm - got.top;
         if ((Math.abs(miss) < 3 && over < 3) || pass === 5) break;
         var nl = Math.max(0, lift + miss), ns = sq;
         if (over >= 3) ns = Math.max(0.3, sq * Math.max(0.5, ((got.bottom - got.top) - over * 1.15) / Math.max(20, got.bottom - got.top)));
         if (nl === lift && ns === sq) break; lift = nl; sq = ns;
       }
+      res = window.bvHeroGL(ctx, Object.assign({}, o, { _pass: 1, lift: lift, squash: sq, baseUp: o.baseUp - lift }));
+      if (!res) return false;
       return { bottom: got ? got.bottom : null, top: got ? got.top : null, lift: lift, squash: sq };
     }
     var W = 393, H = Math.round(393 * o.H / o.W), st = o.state, night = !!o.night, R = rng(o.seed || 7);
-    var ppu = Math.min(3, Math.max(1.5, o.W / 393 * (o.dpr || 1) * 0.75));
+    var ppu = o._measure ? 1 : Math.min(3, Math.max(1.5, o.W / 393 * (o.dpr || 1) * 0.75));
     ctx.save(); ctx.setTransform(o.W / W * (o.dpr || 1), 0, 0, o.W / W * (o.dpr || 1), 0, 0);
     try {
       if (st === 'partly' || st === 'fog'){
@@ -121,6 +128,7 @@
       }
       if (P){ P.sort(function(a, b){ return b[3] - a[3]; }); P = P.slice(0, 48);
       bvCloudGL(ctx, Object.assign({}, common, { puffs: P, lean: 0, strat: 0, base: 0, h: 1, hw: 1, cx: 0, dens: 1 })); }
+      if (o._measure) return true;                                    /* the outline is all a fitting pass is for */
       /* seen from below, a rain cloud is darkest at its base: tone the cloud pixels only */
       var yB = H - b0, g1 = ctx.createLinearGradient(0, yB - (L.full ? H : 90), 0, yB + 30);
       g1.addColorStop(0, sc(shd, 0)); g1.addColorStop(1, sc(shd.map(function(v){ return v * 0.75; }), L.full ? 0.22 : 0.45));

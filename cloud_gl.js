@@ -9,6 +9,39 @@
      - rain: a streaky veil from the base, slanting, fading toward the ground
    One shared WebGL canvas renders every cloud and is copied into the caller's 2D canvas (browsers cap GL contexts).
    Units are the scene's own: x 0..224, y measured UP from the bottom of the 104-unit scene. */
+/* THE GUARD (2026-09-29; user: "the site wasnt loading for me at work, the browser would crash"). These clouds are drawn in
+   one synchronous task on the page's own thread, and on a machine without a fast GPU that task is the page: measured
+   with Chrome's software renderer, 7 s frozen for the overcast hero, 13 s for partly cloudy, 17 s on load for the
+   golden-hour skies -- and a driver that chokes on the shader takes the tab with it. So:
+     - no context at all where the browser says it would be slow (failIfMajorPerformanceCaveat)
+     - every draw is timed; one slow draw, or too much in a load, and the GPU clouds are OFF for this machine for a week
+     - a mark is left in localStorage while a renderer compiles and makes its first draw, and taken away after: a load
+       that finds the mark still there never finished (it hung or crashed), and draws nothing on the GPU
+   Off means every caller paints its own clouds, as it does where there is no WebGL. ?gpu=1 in the address starts again. */
+window.bvGpuGuard = window.bvGpuGuard || (function(){
+  var KEY = 'bv_gpu_clouds', VER = '52', WEEK = 7 * 864e5, off = null, depth = 0, t0 = 0, total = 0, seen = {}, marked = false;
+  var rd = function(){ try { return JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e){ return null; } };
+  var wr = function(o){ try { o.v = VER; o.at = Date.now(); localStorage.setItem(KEY, JSON.stringify(o)); } catch (e){} };
+  try { if (/[?&]gpu=1\b/.test(location.search)) localStorage.removeItem(KEY); } catch (e){}
+  var st = rd();
+  if (st && st.v === VER && Date.now() - st.at < WEEK){
+    if (st.s === 'off') off = st.why || 'off';
+    else if (st.s === 'try'){ off = 'the last load never finished drawing (' + (st.who || '?') + ')'; wr({ s: 'off', why: off }); }
+  }
+  var kill = function(why){ if (off) return; off = why; wr({ s: 'off', why: why }); if (window.console) console.warn('GPU clouds off:', why); };
+  return {
+    off: function(){ return off; },
+    /* who: the renderer's name. false = do not draw */
+    begin: function(who){ if (off) return false;
+      if (!depth++){ t0 = performance.now(); if (!seen[who]){ marked = true; wr({ s: 'try', who: who }); } }
+      return true; },
+    end: function(who){ if (depth > 0 && --depth) return; if (off) return; var ms = performance.now() - t0, first = !seen[who]; seen[who] = 1; total += ms;
+      if (ms > (first ? 2500 : 450)) kill(who + ' took ' + Math.round(ms) + ' ms');
+      else if (total > 4000 && performance.now() < 30000) kill(Math.round(total) + ' ms of cloud drawing in the first half minute');
+      else if (marked){ marked = false; wr({ s: 'ok' }); } },
+    disable: kill, caveat: true
+  };
+})();
 (function(){
   var VS = 'attribute vec2 a; varying vec2 v; void main(){ v = a * 0.5 + 0.5; gl_Position = vec4(a, 0., 1.); }';
   /* ONLY THE CLOUD'S OWN BOX is shaded (2026-09-26: ten scenes at once ran 10 fps, GPU-bound -- most of every pass was sky):
@@ -227,7 +260,7 @@
     if (GL) return GL.ok ? GL : null;
     GL = { ok: false };
     try {
-      var c = document.createElement('canvas'), g = c.getContext('webgl', { premultipliedAlpha: true, alpha: true, preserveDrawingBuffer: true });
+      var c = document.createElement('canvas'), g = c.getContext('webgl', { premultipliedAlpha: true, alpha: true, preserveDrawingBuffer: true, failIfMajorPerformanceCaveat: true });
       if (!g) return null;
       var sh = function(t, s){ var o = g.createShader(t); g.shaderSource(o, s); g.compileShader(o); if (!g.getShaderParameter(o, g.COMPILE_STATUS)) throw new Error(g.getShaderInfoLog(o)); return o; };
       var pr = g.createProgram(); g.attachShader(pr, sh(g.VERTEX_SHADER, VS)); g.attachShader(pr, sh(g.FRAGMENT_SHADER, FS)); g.linkProgram(pr);
@@ -242,9 +275,14 @@
   }
   /* draw one cloud into a 2D context. o: {W,H (scene units), ppu (GL pixels per unit), t, cx, base (up), h, hw, lean,
      anvil 0..1, anvR, anvL, rain 0..1, night 0..1, flash 0..1, ground (up), dens}. Returns false when WebGL is unavailable. */
+  var GD = window.bvGpuGuard;
   window.bvCloudGL = function(ctx, o){
+    if (!GD.begin('cloud')) return false;
+    try { return !!init() && probe() && draw(ctx, o); } finally { GD.end('cloud'); }
+  };
+  function draw(ctx, o){
     var G = init(); if (!G) return false;
-    var ppu = Math.min(o.ppu || 3, window.innerWidth <= 480 ? 2 : 3);   /* phones: 2 GPU pixels a unit, the pictures are smaller there anyway */
+    var ppu = o._raw ? o.ppu : Math.min(o.ppu || 3, window.innerWidth <= 480 ? 2 : 3);   /* phones: 2 GPU pixels a unit, the pictures are smaller there anyway */
     var W = o.W || 224, H = o.H || 104, pw = Math.round(W * ppu), ph = Math.round(H * ppu);
     if (G.c.width !== pw || G.c.height !== ph){ G.c.width = pw; G.c.height = ph; }
     var g = G.g, U = G.U;
@@ -275,7 +313,24 @@
     if (sw > 0 && sh > 0){ ctx.save(); ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; ctx.drawImage(G.c, sx, sy, sw, sh, sx / pw * W, sy / ph * H, sw / pw * W, sh / ph * H); ctx.restore();
       if (o.also) o.also.drawImage(G.c, sx, sy, sw, sh, sx / pw * W, sy / ph * H, sw / pw * W, sh / ph * H); }   /* o.also: a second 2D target (the sea's reflection) */
     return true;
-  };
-  window.bvCloudGL.ok = function(){ return !!init(); };   /* the scenes ask this, and paint their own clouds when it is false */
-  window.bvCloudGL.status = function(){ var G = init(); return G ? 'on' : ('off' + (GL && GL.err ? ': ' + GL.err : '')); };
+  }
+  /* THE PROBE: before the first real cloud, a small one (400 x 200 px, the hero's own costliest settings), drawn twice and
+     read back; the second is the measure. Measured: an Apple M2 12 to 17 ms, Chrome's software renderer 215 -- and the
+     overcast hero that stands behind it froze that page 8.6 s. Over 60 ms, the GPU clouds are off for this machine */
+  var probed = false;
+  function probe(){
+    if (probed) return !GD.off(); probed = true;
+    try {
+      var c = document.createElement('canvas'); c.width = 400; c.height = 200; var x = c.getContext('2d', { willReadFrequently: true }), P = [], ms = 0;
+      for (var i = 0; i < 48; i++) P.push([6 + (i % 12) * 8, 12 + Math.floor(i / 12) * 9, 9, 1]);
+      for (var k = 0; k < 2; k++){ var a = performance.now();
+        draw(x, { W: 100, H: 50, ppu: 4, _raw: 1, t: 3, puffs: P, lean: 0, base: 0, h: 1, hw: 1, cx: 0, dens: 1, ns: 0.62, tex: 1, texB: 10, band: [9000, 9001, -3, -2], ground: 0 });
+        x.getImageData(200, 100, 1, 1); ms = performance.now() - a; }
+      window.bvCloudGL.probeMs = Math.round(ms * 10) / 10;
+      if (ms > 60) GD.disable('the probe cloud took ' + Math.round(ms) + ' ms');
+    } catch (e){ GD.disable('the probe failed: ' + e); }
+    return !GD.off();
+  }
+  window.bvCloudGL.ok = function(){ if (!GD.begin('cloud')) return false; try { return !!init() && probe(); } finally { GD.end('cloud'); } };   /* the scenes ask this, and paint their own clouds when it is false */
+  window.bvCloudGL.status = function(){ if (GD.off()) return 'off: ' + GD.off(); var G = init(); return G ? 'on' : ('off' + (GL && GL.err ? ': ' + GL.err : '')); };
 })();

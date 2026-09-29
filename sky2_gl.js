@@ -281,7 +281,7 @@
     if (GL) return GL.ok ? GL : null;
     GL = { ok: false };
     try {
-      var c = document.createElement('canvas'), g = c.getContext('webgl', { premultipliedAlpha: true, alpha: true, preserveDrawingBuffer: true });
+      var c = document.createElement('canvas'), g = c.getContext('webgl', { premultipliedAlpha: true, alpha: true, preserveDrawingBuffer: true, failIfMajorPerformanceCaveat: true });
       if (!g || !g.getExtension('OES_texture_float')) return null;
       var sh = function(t, s){ var o = g.createShader(t); g.shaderSource(o, s); g.compileShader(o); if (!g.getShaderParameter(o, g.COMPILE_STATUS)) throw new Error(g.getShaderInfoLog(o)); return o; };
       var pr = g.createProgram(); g.attachShader(pr, sh(g.VERTEX_SHADER, VS)); g.attachShader(pr, sh(g.FRAGMENT_SHADER, FS)); g.linkProgram(pr);
@@ -395,16 +395,23 @@
     if (sa > -6){ var b = -sa / 6; return { d: [0.9, -0.35], c: [1.10 - 0.3 * b, 0.78 - 0.2 * b, 0.64 - 0.12 * b], s: [0.42 - 0.12 * b, 0.32 - 0.1 * b, 0.34 - 0.08 * b], n: 0.3 * b }; }
     return { d: [0.2, 0.9], c: [0.50, 0.54, 0.68], s: [0.08, 0.10, 0.16], n: 1 };
   }
+  /* timed and marked by the guard in cloud_gl.js (a slow or crashing machine gets the painted clouds) */
   window.bvSky2 = function(ctx, o){
+    var GD = window.bvGpuGuard; if (!GD) return sky2(ctx, o);
+    if (!GD.begin('sky')) return false;
+    try { if (window.bvCloudGL && !bvCloudGL.ok()) return false;      /* its probe speaks for this renderer too */
+      return sky2(ctx, o); } finally { GD.end('sky'); }
+  };
+  function sky2(ctx, o){
     var types = o.types || [], cbT = types.filter(function(t){ return t.genus === 'Cumulonimbus'; })[0];
     if (cbT && window.bvCloudGL && bvCloudGL.ok() && !o._pass){
       var W0 = o.W || 220, H0 = o.H || 232, hz0 = o.hz == null ? 40 : o.hz, sky0 = H0 - hz0, sx = W0 * 0.46, L = stormLight(o.sa == null ? 3 : o.sa);
       var calvus = cbT.species === 'calvus';   /* calvus: the top has not frozen into an anvil yet */
       var isLow = function(t){ return t.layer === 'low' || t.layer === 'deep'; };
-      var r = bvSky2(ctx, Object.assign({}, o, { _pass: 1, stormX: sx, types: types.filter(function(t){ return !isLow(t) && t !== cbT; }) }));
+      var r = sky2(ctx, Object.assign({}, o, { _pass: 1, stormX: sx, types: types.filter(function(t){ return !isLow(t) && t !== cbT; }) }));
       bvCloudGL(ctx, { W: W0, H: H0, ppu: o.ppu || 4, t: 7, ns: 0.62, ground: hz0, night: L.n, sunDir: L.d, sunCol: L.c, shdCol: L.s,
         cx: sx, base: hz0 + 18, h: sky0 * 0.62, hw: 33, lean: 0.35, anvil: calvus ? 0 : 1, anvR: 100, anvL: 58, anvT: 2.1, rain: 0, rag: 7, dens: 1 });   /* the anvil in the SAME field as the tower: one shape, one texture, one light -- every separate anvil read as pasted on. anvT thickens it for this scale; anvR runs it off-frame downwind */   /* hw 38: about 1.6 tall to 1 wide, a mature storm's body (it measured 2.4 : 1 at hw 28); rain is the sky pass's soft curtains */   /* a SMALL flare of its own (its full anvil is a thin plate at this size): the crown spreads into the soft anvil drawn behind, so the two join instead of a band pasted across the tower */   /* the front card's proportions (hw 16 : anvR 70 : anvL 32 at its scale) */
-      bvSky2(ctx, Object.assign({}, o, { _pass: 1, stormX: sx, rain: [sx + 33 * 0.14, 33 * 0.68, hz0 + 19, 0.85]   /* under the base as MEASURED (x 73..139, centre ~106 for sx 101, hw 38): centred on it, inside its width */, types: types.filter(function(t){ return isLow(t) && t !== cbT; }) }));   /* the anvil IN FRONT, opaque, swallowing the crown: the tower hits the lid and spreads */
+      sky2(ctx, Object.assign({}, o, { _pass: 1, stormX: sx, rain: [sx + 33 * 0.14, 33 * 0.68, hz0 + 19, 0.85]   /* under the base as MEASURED (x 73..139, centre ~106 for sx 101, hw 38): centred on it, inside its width */, types: types.filter(function(t){ return isLow(t) && t !== cbT; }) }));   /* the anvil IN FRONT, opaque, swallowing the crown: the tower hits the lid and spreads */
       return r;
     }
     var G = init(); if (!G) return false;
@@ -428,5 +435,5 @@
     g.drawArrays(g.TRIANGLE_STRIP, 0, 4);
     ctx.drawImage(G.c, 0, 0, W, H);
     return true;
-  };
+  }
 })();
