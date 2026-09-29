@@ -20,6 +20,7 @@
     'uniform vec2 uWH; uniform float uT, uCx, uBase, uH, uHW, uLean, uAnv, uAnvR, uAnvL, uRain, uNight, uFlash, uGround, uDens, uMode, uN;',
     'uniform vec4 uP[48];',
     'uniform vec2 uSunDir; uniform vec3 uSunCol; uniform vec3 uShdCol; uniform float uShdSet; uniform vec4 uBand; uniform float uNS;',
+    'uniform float uTex, uTexB; uniform vec4 uTexP, uTexQ;',   /* uTex 1: the hero's texture (below); 0 leaves every other scene exactly as it was */
     'float h1(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }',
     'vec2 h2(vec2 p){ return fract(sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)))) * 43758.5453); }',
     'float vn(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3. - 2. * f);',
@@ -34,6 +35,26 @@
     '  for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++){ vec2 g = vec2(float(x), float(y)); vec2 o = h2(i + g);',
     '    o = .5 + .38 * sin(uT * .25 + 6.2831 * o); vec2 r = g + o - f; md = min(md, dot(r, r)); }',
     '  return max(0., 1. - md * 1.45); }',
+    /* THE HERO'S TEXTURE (uTex 1; user 2026-09-29, of the rain cloud: "i want to see if we can improve the texture of the
+       cloud further"). What was there: domes of two sizes on a regular grid, every pair meeting in a sharp valley, the
+       normal finding each valley as a dark line -- one size of scale all over, the cloud read as quilted. Now:
+         - the valleys are ROUND (a smooth minimum over the cells, uTexP.y its sharpness), so a crease is a soft shade
+         - the grid is WARPED first (uTexP.x), so no two cells are the same polygon
+         - FOUR sizes, each about half the last and half as tall: big billows carry small ones (uTexP.z the biggest's height)
+         - a fine grain (uTexP.w) so the smooth parts are not plastic
+       uTexB: below this height the billows flatten -- a rain cloud's base is level, its top is heaped */
+    'float domeS(vec2 p){ vec2 i = floor(p), f = fract(p); float k = uTexP.y, acc = 0.;',
+    '  for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++){ vec2 g = vec2(float(x), float(y)); vec2 o = h2(i + g);',
+    '    o = .5 + .38 * sin(uT * .25 + 6.2831 * o); vec2 r = g + o - f; acc += exp(-k * dot(r, r)); }',
+    '  return clamp(1. + log(acc) / k * 1.45, 0., 1.15); }',
+    'float billow(vec2 q, float y){',
+    '  vec2 w = vec2(fbm(q * .045 + 2.3), fbm(q * .045 + 8.1)) - .5;',
+    '  vec2 qw = q + w * uTexP.x;',
+    '  float up = uTexB > -900. ? smoothstep(uTexB - 3., uTexB + 26., y) : 1.;',
+    '  float A = uTexP.z;',
+    '  float b = A * (domeS(qw * .034) - .45) * (.2 + .8 * up) + A * .42 * (domeS(qw * .08 + 3.7) - .45) * (.4 + .6 * up)',
+    '          + A * .15 * (domeS(qw * .19 + 9.1) - .45) + A * .05 * (domeS(qw * .44 + 5.3) - .45);',
+    '  return b + (fbm(q * .7 + 1.3) - .5) * uTexP.w; }',
     'float towerOne(vec2 p, float cX, float bS, float hH, float hW, float sd){',
     '  float best = -1.;',
     '  for (int i = 0; i < 9; i++){ float fi = float(i);',
@@ -56,13 +77,13 @@
     /* LAYER MODE (uMode 1): the cloud the lifted warm air makes ahead of a warm front, along a stalled or occluded one -- its
        shape is the scene's own puffs (x, y up, r, weight), so the physics that placed them still decides where it is */
     /* a SMOOTH union: max() left a crease between every pair of neighbours -- the shelf read as a twisted rope */
-    'float puffs(vec2 p){ float K = uLean > 5. ? 1.4 : 6.; float acc = 0.; for (int i = 0; i < 48; i++){ if (float(i) >= uN) break; vec4 q = uP[i];',
+    'float puffs(vec2 p){ float K = uLean > 5. ? 1.4 : (uTex > .5 ? uTexQ.x : 6.); float acc = 0.; for (int i = 0; i < 48; i++){ if (float(i) >= uN) break; vec4 q = uP[i];',
     /* NO PANCAKES (user 2026-09-26: "do the deck puffs"): a lone small anchor drawn 2.7x wider than tall was a flat disc.
        Small anchors are ROUND puffs (1.15 x .95) -- an upward bulge made lollipops on stalks --; only the big ones stretch wide to merge into a deck */
     '  float big = smoothstep(4.5 / uNS, 9. / uNS, q.z);',
     '  vec2 dd = p - q.xy;',
     '  float up = smoothstep(uBand.x - 2., uBand.y - 4., q.y) * (1. - big);',   /* HIGH and small = ice: a stretched wisp, not a ball (user 2026-09-26: "improve these smaller circular cloud placements") */
-    '  vec2 d = dd / (uLean > 5. ? vec2(q.z * 1.6, q.z * .62) : vec2(q.z * mix(mix(1.15, 1.95, big), 3.2, up), q.z * mix(mix(.95, .72, big), .38, up))); acc += exp(K * ((1. - dot(d, d)) * q.w - 1.)); }',
+    '  vec2 d = dd / (uLean > 5. ? vec2(q.z * 1.6, q.z * .62) : (uTex > .5 ? vec2(q.z * mix(1.15, uTexQ.w, big), q.z * mix(.95, .86, big)) : vec2(q.z * mix(mix(1.15, 1.95, big), 3.2, up), q.z * mix(mix(.95, .72, big), .38, up)))); acc += exp(K * ((1. - dot(d, d)) * q.w - 1.)); }',
     '  return acc > 0. ? 1. + log(acc) / K : -1.; }',   /* wide, flat: they merge into a deck */
     'float anvil(vec2 p){ if (uAnv < .01) return -1.; float ax2 = uCx - uLean * uH * .28; float ux = p.x - ax2; float R = ux > 0. ? uAnvR : uAnvL; float r2 = abs(ux) / max(R, 1.);',
     '  float th = (2.5 + 5.5 * (1. - r2)) * uAnv * uAnvT; float cy2 = uBase + uH - 1.5; float dy = (p.y - cy2) / max(th, .6);',
@@ -90,6 +111,7 @@
     '    if (uLean > 5.){ float ctr = 0.; for (int i = 0; i < 48; i++){ if (float(i) >= uN) break; ctr += uP[i].y; } ctr /= max(uN, 1.);',
     '      float under = 1. - smoothstep(ctr - 2., ctr + 1., p.y);',                          /* the underside is ragged scud */
     '      return s1 * .95 - .05 + under * (fbm(vec2(p.x * .5 - uT * .3, p.y * .9)) - .55) * .55; }',   /* the top stays laminar */   /* the SHELF: one laminar wedge -- no domes, no fibres, no noise (it roped) */   /* the SHELF (flagged lean 9): laminar and smooth -- no domes, no fibres */   /* high: thin ice, fibrous; low: rain cloud, smooth */
+    '    if (uTex > .5) return s1 * .9 + billow(q1, p.y) * (1. - .5 * uStrat) + uStrat * ((fbm(vec2(p.x * .03, p.y * .22)) - .5) * .14) - .02;',
     '    float lumps = (.17 * dome(q1 * .12) + .08 * dome(q1 * .31 + 3.7)) * (1. - hi) * (1. - .6 * lo) * (1. - .5 * uStrat);',   /* uStrat: a frontal STRATIFORM deck (altostratus / nimbostratus) -- the golden-hour sky's lesson: sheets are layered, not cauliflower */
     '    vec2 pq = rot(p) + 3. * vec2(vn(p * .07), vn(p * .07 + 9.));',
     '    float fibr = (fbm(pq * vec2(.04, .28) + vec2(-uT * .04, 0.)) - .5) * .5 * hi;',
@@ -99,6 +121,7 @@
     '  vec2 q = (p + vec2(0., -uT * .7)) * uNS;',   /* uNS: the lobes' size follows the sky's scale (golden hour's panel is 2x the scenes) */
     '  float d1 = dome(q * .105), d2 = dome(q * .26 + 3.7), d3 = dome(q * .62 + 9.1);',   /* lobes a quarter to a third of the tower, smaller ones on them */
     '  float tw = s * .9 + .42 * d1 + .16 * d2 + .06 * d3 - .27;',
+    '  if (uTex > .5) tw = s * .9 + billow(q, p.y + 40.) * 1.25 + .02;',   /* the tower through the hero's storm: the same cloud */
     /* LOPSIDED, as NCAR's storm is: on the rain side (upwind) the edge evaporates into ragged shreds; the growing side stays crisp */
     '  float rainSide = smoothstep(-.2, 1., (uCx - p.x) / max(uHW, 1.)) * clamp(uRain, 0., 1.);',
     '  tw -= rainSide * max(0., fbm(p * .32 + vec2(0., uT * .15)) - .38) * .7;',
@@ -127,9 +150,10 @@
     '  float H0 = hgt(p);',
     '  vec4 col = vec4(0.);',
     '  if (H0 > -.02){',
-    '    float e = .35;',
+    '    float e = uTex > .5 ? uTexQ.z : .35;',   /* the hero: the light reads the FORM (a wide sample), not every wrinkle */
     '    float gx = hgt(p + vec2(e, 0.)) - hgt(p - vec2(e, 0.)), gy = hgt(p + vec2(0., e)) - hgt(p - vec2(0., e));',
-    '    vec3 N = normalize(vec3(-gx * (uLean > 5. ? 1.2 : 6.5), -gy * (uLean > 5. ? 1.2 : 6.5), 1.));',   /* the domes are gentle slopes: a larger normal scale so each one catches the light */
+    '    float nk = uLean > 5. ? 1.2 : (uTex > .5 ? uTexQ.y : 6.5);',
+    '    vec3 N = normalize(vec3(-gx * nk, -gy * nk, 1.));',   /* the domes are gentle slopes: a larger normal scale so each one catches the light */
     '    vec3 L3 = normalize(vec3(uSunDir, .45));',
     '    float dif = pow(dot(N, L3) * .5 + .5, 1.6);',                             /* half-Lambert: mostly lit, soft falloff */
     '    float crev = smoothstep(-.05, .35, H0);',
@@ -142,7 +166,9 @@
     '    float form = dot(NB, L3) * .5 + .5;',                        /* shallow = between lobes: the creases */
     '    float jit = h1(p * 37.1); float acc = 0.; vec2 L = normalize(vec2(-.5, .86));',
     '    L = normalize(uSunDir);',
-    '    for (int i = 0; i < 6; i++){ float hh = hgt(p + L * (2. + (float(i) + jit) * 3.)); acc += clamp(hh * 3., 0., 1.); }',
+    '    float stp = uTex > .5 ? 5.5 : 3.;',
+    '    if (uTex > .5) jit = .5 + (vn(p * 1.7) - .5) * .5;',   /* a smooth offset: the per-pixel one, over the longer step, hatched the lit tops */
+    '    for (int i = 0; i < 6; i++){ float hh = hgt(p + L * (2. + (float(i) + jit) * stp)); acc += clamp(hh * 3., 0., 1.); }',
     '    float Ts = exp(-acc * .26);',                                    /* the mass shades itself, gently */
     '    float hb = clamp((p.y - uBase) / max(uH, 1.), 0., 1.);',
     '    vec3 sunC = uSunCol;',   /* cream in the sun */
@@ -151,6 +177,12 @@
     '    if (uMode < .5) c *= mix(.66, 1., smoothstep(0., .22, hb));',                    /* the base: darker, flat */
     '    if (uFlash > 0.){ float fl = exp(-length((p - vec2(uCx - 4., uBase + uH * .45)) / vec2(uHW * 1.3, uH * .6))); c += vec3(1., .98, .86) * fl * uFlash * 1.2; }',
     '    float a = smoothstep(-.02, .09, H0) * uDens;',
+    /* the hero: thin edges are lit THROUGH (a silver rim, not a grey one), and the outline is a little softer */
+    '    if (uTex > .5){',
+    /* the whole mass: lit crown, shaded underside (what makes a loaf a cloud), then the rim */
+    '      float vg = uTexB > -900. ? smoothstep(uTexB - 6., uTexB + 70., p.y) : .7;',
+    '      c = mix(shdC, sunC, clamp(1.22 * pow(dif, 1.2) * (.30 + .70 * Ts) * (.50 + .50 * crev) * (.50 + .80 * form) * (.55 + .62 * vg), 0., 1.));',
+    '      float rim = 1. - smoothstep(0., .34, H0); c = mix(c, sunC, rim * .22 * (.4 + .6 * vg)); a = smoothstep(-.03, .13, H0) * uDens; }',
     '    if (uMode < .5 && uShelf > 0.){ vec3 SG = shelfGeo(p.x);',
     '      if (SG.x > 0. && SG.x < 1.05 && p.y < SG.y + .6 && p.y < uBase + uHW * .5){',
     '        float tv = clamp((p.y - SG.z) / max(SG.y - SG.z, .5), 0., 1.), dTop = SG.y - p.y;',
@@ -203,7 +235,7 @@
       g.useProgram(pr);
       var b = g.createBuffer(); g.bindBuffer(g.ARRAY_BUFFER, b); g.bufferData(g.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), g.STATIC_DRAW);
       var loc = g.getAttribLocation(pr, 'a'); g.enableVertexAttribArray(loc); g.vertexAttribPointer(loc, 2, g.FLOAT, false, 0, 0);
-      var U = {}; ['uT2', 'uT2d', 'uStrat', 'uShelf', 'uAnvK', 'uAnvS', 'uAnvT', 'uRag', 'uWH', 'uT', 'uCx', 'uBase', 'uH', 'uHW', 'uLean', 'uAnv', 'uAnvR', 'uAnvL', 'uRain', 'uNight', 'uFlash', 'uGround', 'uDens', 'uMode', 'uN', 'uP', 'uSunDir', 'uSunCol', 'uShdCol', 'uShdSet', 'uBand', 'uNS'].forEach(function(n){ U[n] = g.getUniformLocation(pr, n); });
+      var U = {}; ['uT2', 'uT2d', 'uStrat', 'uShelf', 'uAnvK', 'uAnvS', 'uAnvT', 'uRag', 'uWH', 'uT', 'uCx', 'uBase', 'uH', 'uHW', 'uLean', 'uAnv', 'uAnvR', 'uAnvL', 'uRain', 'uNight', 'uFlash', 'uGround', 'uDens', 'uMode', 'uN', 'uP', 'uSunDir', 'uSunCol', 'uShdCol', 'uShdSet', 'uBand', 'uNS', 'uTex', 'uTexB', 'uTexP', 'uTexQ'].forEach(function(n){ U[n] = g.getUniformLocation(pr, n); });
       GL = { ok: true, c: c, g: g, U: U };
     } catch (e){ GL = { ok: false, err: String(e) }; if (window.console) console.warn('bvCloudGL off:', e); return null; }
     return GL;
@@ -227,6 +259,7 @@
     g.uniform2f(U.uSunDir, sd[0], sd[1]); g.uniform3f(U.uSunCol, sc[0], sc[1], sc[2]);
     var sh = o.shdCol; g.uniform1f(U.uShdSet, sh ? 1 : 0); g.uniform3f(U.uShdCol, sh ? sh[0] : 0, sh ? sh[1] : 0, sh ? sh[2] : 0);
     var bd = o.band || [58, 82, 30, 46]; g.uniform4f(U.uBand, bd[0], bd[1], bd[2], bd[3]); g.uniform1f(U.uNS, o.ns || 1); g.uniform1f(U.uRag, o.rag || 0); g.uniform1f(U.uAnvT, o.anvT || 1); g.uniform1f(U.uAnvK, o.anvK || o.anvT || 1); g.uniform1f(U.uAnvS, o.anvS || 1); g.uniform1f(U.uShelf, o.shelf || 0); g.uniform1f(U.uStrat, o.strat || 0); var t2 = o.t2 || [0, 0, 0, 0]; g.uniform4f(U.uT2, t2[0], t2[1], t2[2], t2[3]); g.uniform1f(U.uT2d, o.t2 ? (o.t2d == null ? 1 : o.t2d) : 0);   /* altitude bands: ice from bd0..bd1 up, rain cloud below bd2..bd3 */
+    var tp = o.texP || [22, 6, 0.6, 0.02]; g.uniform1f(U.uTex, o.tex ? 1 : 0); g.uniform1f(U.uTexB, o.texB == null ? -1000 : o.texB); g.uniform4f(U.uTexP, tp[0], tp[1], tp[2], tp[3]); var tq = o.texQ || [13, 2.8, 1.3, 1.3]; g.uniform4f(U.uTexQ, tq[0], tq[1], tq[2], tq[3]);
     g.uniform1f(U.uMode, P.length ? 1 : 0); g.uniform1f(U.uN, Math.min(48, P.length)); g.uniform4fv(U.uP, arr);
     /* the box, in scene units: a tower from its base to above its anvil, or the puffs' extent, with room for the lobes */
     var bx0, bx1, by0, by1, pad = 6;
