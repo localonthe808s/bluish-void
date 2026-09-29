@@ -65613,7 +65613,70 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
              dredged channel of the East River, 5% of the Greenpoint tile, missed by one. The land outside the city
              is 16,16,24: blue leads it by 8, not 25. */
           if (b > 40 && b > r + 25 && b > gg + 8){ var k = row + (x / K | 0); if (!m[k]){ m[k] = 1; n++; } } } }
-      return { w: W, h: H, m: m, share: n / (W * H), src: im.src };
+      /* m is where water RUNS, d is where water is SEEN: the same until a bridge is wide enough to cut the first */
+      var d0 = m.slice(), nb = cwFlowBridges(m, d0, W, H) + cwFlowThin(m, W, H);
+      return { w: W, h: H, m: m, d: d0, bridged: nb, share: (n + nb) / (W * H), src: im.src + (window._cwBridges ? '#b' : '') };
+    }
+    /* ... AND UNDER EVERY LINE THE MAP DRAWS ACROSS IT. The bridges were not the only walls: the subway's tunnels are
+       painted over the water in their lines' own colours, and measured the same day the F train shut the East River
+       two hundred metres east of the Manhattan Bridge, the four tunnels off the Battery shut it again. The page's
+       subway geometry is station to station, too coarse to find a painted line, so this one is read off the mask:
+       a dry cell with water next to it on one side and within two cells on the other is a line, not a shore, and the
+       water runs through it. Two cells is 4 px of the picture: a drawn line at any depth, never a pier once the map
+       is close enough to show one as a pier (Roosevelt Island is six cells wide with the whole city in view). */
+    function cwFlowThin(m, W, H){
+      var add = [], AX = [1, W, W + 1, W - 1];
+      for (var y = 2; y < H - 2; y++) for (var x = 2; x < W - 2; x++){
+        var k = y * W + x; if (m[k]) continue;
+        for (var a = 0; a < 4; a++){
+          var s = AX[a], p1 = m[k + s], n1 = m[k - s];
+          if ((p1 && (n1 || m[k - 2 * s])) || (n1 && m[k + 2 * s])){ add.push(k); break; }
+        }
+      }
+      for (var i = 0; i < add.length; i++) m[add[i]] = 1;
+      return add.length;
+    }
+    /* THE RIVER RUNS UNDER ITS BRIDGES (user 2026-09-28, of the East River at the Williamsburg Bridge: "the flows are
+       getting stopped by the bridges which wouldnt happen"). The mask is read off the map's own pixels, and close in
+       a bridge is a pale band thirty metres wide from bank to bank: not blue, so not water, so a wall. The current
+       field stopped at it, the streaks died against it and the overflow's plume piled up on one side.
+       The spans are known (city_bridges.json, the 420 OSM ways the map already draws), so under each one the water is
+       put back: along the span, wherever there is water on BOTH sides of it, the cells within 32 m of its line become
+       water for the simulation. Both sides, so an approach over land, a viaduct along a shore and a pier stay what
+       they were. The picture keeps the pixels' own mask (d), so nothing is painted over the deck: the water goes
+       under and comes out the other side.
+       Far out the band is no thinner than the map's own line for a road, a cell or so of this mask (measured on the
+       live site with the whole city in view: the East River shut for one cell at the Williamsburg Bridge), so the
+       reach is never less than a cell. */
+    function cwFlowBridges(m, d0, W, H){
+      var B = window._cwBridges; if (!B || !B.length) return 0;
+      var v = cwPainted, R = 6378137, kx = W / (v.X1 - v.X0), ky = H / (v.Y1 - v.Y0);
+      var gm = (v.X1 - v.X0) / W * Math.cos(40.7 * Math.PI / 180);           /* ground metres a cell */
+      var half = Math.max(32 / gm, 1), p0 = half + Math.max(6 / gm, 1), p1 = half + Math.max(45 / gm, 3);
+      var wat = function(x, y){ x = Math.round(x); y = Math.round(y); return x >= 0 && y >= 0 && x < W && y < H && d0[y * W + x] === 1; };
+      var n = 0;
+      B.forEach(function(ft){
+        var P = ft.c.map(function(c){ return [((c[0] * Math.PI / 180 * R) - v.X0) * kx, (v.Y1 - R * Math.log(Math.tan(Math.PI / 4 + c[1] * Math.PI / 360))) * ky]; });
+        for (var i = 1; i < P.length; i++){
+          var a = P[i - 1], b = P[i];
+          if (Math.max(a[0], b[0]) < -p1 || Math.min(a[0], b[0]) > W + p1 || Math.max(a[1], b[1]) < -p1 || Math.min(a[1], b[1]) > H + p1) continue;
+          var len = Math.hypot(b[0] - a[0], b[1] - a[1]); if (len < 1e-6) continue;
+          var ux = (b[0] - a[0]) / len, uy = (b[1] - a[1]) / len, nx = -uy, ny = ux, steps = Math.ceil(len / 0.5);
+          for (var st = 0; st <= steps; st++){
+            var x = a[0] + ux * len * st / steps, y = a[1] + uy * len * st / steps;
+            if (x < -half || y < -half || x > W + half || y > H + half) continue;
+            var lft = false, rgt = false;
+            for (var q = 0; q <= 4; q++){ var dd = p0 + (p1 - p0) * q / 4; if (!lft && wat(x + nx * dd, y + ny * dd)) lft = true; if (!rgt && wat(x - nx * dd, y - ny * dd)) rgt = true; }
+            if (!lft || !rgt) continue;
+            for (var e = -half; e <= half; e += 0.5){
+              var cx = Math.round(x + nx * e), cy = Math.round(y + ny * e);
+              if (cx < 0 || cy < 0 || cx >= W || cy >= H) continue;
+              var k = cy * W + cx; if (!m[k]){ m[k] = 1; n++; }
+            }
+          }
+        }
+      });
+      return n;
     }
     function cwFlowWater(x, y, cvs){
       var M = cwFlowMask; if (!M) return false;
@@ -65982,7 +66045,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
          periodic kernel slid along the line moves light down it at the local speed. Nothing spawns, nothing pops, no
          reach goes bare. Two half-cycles cross-fade every 16 s so neighbouring speeds never shear the pattern apart. */
       /* THE CURRENT AS TONE, from the simulation's streaming texture (R): a shade lighter / darker than the water's own blue */
-      '    float mk = texture2D(uMk, vUv).r;',
+      '    float mk = texture2D(uMk, vUv).a;',                        /* the DRAWN mask: a bridge's deck stays on top of its river */
       '    if (mk > .02){',
       '      float tq = clamp((sm.r - .5) * 3.84, -1., 1.), mm = smoothstep(.02, .5, mk);',   /* the TIDAL preset of _waterlab (2026-09-26) */
       '      if (tq > 0.){ col = vec3(.36, .60, .86); al = tq * .33 * mm; } else { col = vec3(.01, .05, .15); al = -tq * .374 * mm; }',
@@ -65991,7 +66054,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       '    float sg = clamp(sm.g, 0., 1.);',
       '    if (sg > .012){',
       '      vec3 lc = mix(vec3(.40, .74, .14), vec3(.62, 1., .22), smoothstep(.05, .5, sg));',
-      '      float la = smoothstep(.012, .28, sg) * .85;',   /* thin dye shows: the tail of a plume was drawn nearly clear */
+      '      float la = smoothstep(.012, .28, sg) * .85 * smoothstep(0., .3, mk);',   /* thin dye shows: the tail of a plume was drawn nearly clear; none on a deck */
       '      col = mix(col * al, lc, la) / max(1e-3, al + la - al * la); al = al + la - al * la;',
       '    }',
       '  }',
@@ -66164,7 +66227,8 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
             a[k * 4 + 1] = Math.max(0, Math.min(255, Math.round((TF.v[k] / 4 * 0.5 + 0.5) * 255))); a[k * 4 + 2] = Math.round(TF.fade[k] * 255); a[k * 4 + 3] = 255; }
           cwWatTex('td', 1, TF.dw, TF.dh, gl.RGBA, a); K.td = TF; K.tdAt = TF.vAt;
         }
-        if (K.mk !== M){ var mm = new Uint8Array(M.w * M.h); for (var j = 0; j < mm.length; j++) mm[j] = M.m[j] ? 255 : 0; cwWatTex('mk', 2, M.w, M.h, gl.LUMINANCE, mm); K.mk = M; }
+        /* two masks in one texture: L (read as .r) where the water runs, A where it is drawn (see cwFlowBridges) */
+        if (K.mk !== M){ var mm = new Uint8Array(M.w * M.h * 2), md = M.d || M.m; for (var j = 0; j < M.w * M.h; j++){ mm[j * 2] = M.m[j] ? 255 : 0; mm[j * 2 + 1] = md[j] ? 255 : 0; } cwWatTex('mk', 2, M.w, M.h, gl.LUMINANCE_ALPHA, mm); K.mk = M; }
         hasTd = 1;
       }
       /* THE SIMULATION: buffers the size of this canvas (cleared on a new view: the trails belong to the old one),
@@ -66310,7 +66374,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       var dpr = Math.min(2, window.devicePixelRatio || 1);
       var W = Math.round(r.width * dpr), H = Math.round(r.height * dpr);
       var im = document.getElementById('cw-bm-under');
-      if (!cwFlowMask || (im && cwFlowMask.src !== im.src)){ cwFlowMask = cwFlowMaskBuild(); cwFlowP = []; cwFlowR = []; }
+      if (!cwFlowMask || (im && cwFlowMask.src !== im.src + (window._cwBridges ? '#b' : ''))){ cwFlowMask = cwFlowMaskBuild(); cwFlowP = []; cwFlowR = []; }
       if (!cwFlowMask || cwFlowMask.share < 0.02){ D.stage = 'no water mask' + (cwFlowMask ? ' (' + (100 * cwFlowMask.share).toFixed(1) + '%)' : ' (null: ' + (im ? im.naturalWidth : 'no img') + ')'); return; }
       D.stage = 'running'; D.share = cwFlowMask.share; D.tracers = cwFlowP.length; D.runoff = cwFlowR.length;
       /* harness: the drawn flow at a lon/lat, [heading deg, knots] or null where nothing is drawn */
@@ -66341,7 +66405,8 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         var px = Array.prototype.slice.call(g2.getImageData(0, 0, 1, 1).data, 0, 3);
         var k = Math.min(F.dh - 1, Math.floor(fy * F.dh)) * F.dw + Math.min(F.dw - 1, Math.floor(fx * F.dw)), o = k * 3, near = [];
         for (var q2 = 0; q2 < 3; q2++) if (F.tix[o + q2] >= 0) near.push(F.sts[F.tix[o + q2]].name + ' ' + F.top[o + q2].toFixed(1));
-        return { rgb: px, water: M.m[Math.floor(fy * M.h) * M.w + Math.floor(fx * M.w)] === 1, near: near }; };
+        var mk9 = Math.floor(fy * M.h) * M.w + Math.floor(fx * M.w);
+        return { rgb: px, water: M.m[mk9] === 1, seen: (M.d || M.m)[mk9] === 1, bridged: M.bridged || 0, near: near }; };
       var g = cvs.getContext('2d');
       if (cvs.width !== W || cvs.height !== H){ cvs.width = W; cvs.height = H; cwFlowP = []; cwFlowR = []; }
       var v = cwPainted, R2 = 6378137;
