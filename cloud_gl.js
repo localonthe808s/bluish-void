@@ -24,7 +24,8 @@ window.bvGpuGuard = window.bvGpuGuard || (function(){
   var wr = function(o){ try { o.v = VER; o.at = Date.now(); localStorage.setItem(KEY, JSON.stringify(o)); } catch (e){} };
   try { if (/[?&]gpu=1\b/.test(location.search)) localStorage.removeItem(KEY); } catch (e){}
   var st = rd();
-  if (st && st.v === VER && Date.now() - st.at < WEEK){
+  if (window.BV_LITE) off = 'lite mode';                     /* the page's own lite switch (index.html head) */
+  if (!off && st && st.v === VER && Date.now() - st.at < WEEK){
     if (st.s === 'off') off = st.why || 'off';
     else if (st.s === 'try'){ off = 'the last load never finished drawing (' + (st.who || '?') + ')'; wr({ s: 'off', why: off }); }
   }
