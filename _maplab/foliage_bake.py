@@ -28,6 +28,12 @@ OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path
 os.makedirs(OUT, exist_ok=True)
 BOX = (-8927823, 4607718, -7636517, 5716479)        # the 12-hour view, EPSG:3857
 W, H = 1400, 1202
+# THE PICTURES ARE DRAWN AT TWICE THAT (2026-09-29; user, of the last-season loop: "i dont think every layer was
+# completely detailed, a few layers look blobby still"). 1400 px across this box is 920 m a pixel, 3.7x coarser than
+# the 250 m composite, and the page then scales it up again; every frame the reader SEES (latest.webp, latest_blobs,
+# the season weeks) is now fetched and drawn at HI x -- 460 m a pixel -- while every number (region and county curves,
+# the masks) stays at 1x. A season week is ~1.5 MB instead of ~500 KB.
+HI = int(os.environ.get('FOLIAGE_HI', '2'))
 LAYER = 'MODIS_Terra_NDVI_8Day'
 WMS = 'https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi'
 CMAP = 'https://gibs.earthdata.nasa.gov/colormaps/v1.3/MODIS_NDVI.xml'
@@ -71,9 +77,9 @@ def colormap():
     return keys, vals
 
 
-def ndvi(date, keys, vals):
+def ndvi(date, keys, vals, hi=1):
     u = (WMS + '?SERVICE=WMS&REQUEST=GetMap&VERSION=1.3.0&LAYERS=%s&CRS=EPSG:3857&BBOX=%d,%d,%d,%d'
-         '&WIDTH=%d&HEIGHT=%d&FORMAT=image/png&TIME=%s' % (LAYER, BOX[0], BOX[1], BOX[2], BOX[3], W, H, date.isoformat()))
+         '&WIDTH=%d&HEIGHT=%d&FORMAT=image/png&TIME=%s' % (LAYER, BOX[0], BOX[1], BOX[2], BOX[3], W * hi, H * hi, date.isoformat()))
     a = np.array(Image.open(io.BytesIO(get(u, 240))).convert('RGB'))
     flat = a.reshape(-1, 3)
     out = np.full(flat.shape[0], np.nan)
@@ -85,16 +91,23 @@ def ndvi(date, keys, vals):
         out[i:i + 250000] = np.where(ok, vals[idx], np.nan)
     v = out.reshape(a.shape[:2])
     share = float(np.isfinite(v).mean())
-    print('  %s valid %.2f' % (date, share), flush=True)
-    return v if share > 0.3 else None       # a blank (unpublished) composite decodes to nothing
+    print('  %s valid %.2f%s' % (date, share, ' (x%d)' % hi if hi > 1 else ''), flush=True)
+    return v if share > 0.3 else None
 
 
-def relief():
+def up(a, hi):
+    """a 1x mask or field, repeated to the HI grid (nearest)"""
+    if a is None or hi == 1:
+        return a
+    return np.repeat(np.repeat(a, hi, axis=0), hi, axis=1)       # a blank (unpublished) composite decodes to nothing
+
+
+def relief(hi=1):
     """ASTER GDEM greyscale shaded relief for the box, 0..255 (mean ~127), or
     None. Multiplied into the ramp so the mountains read through the green
     (user 2026-09-13: "add the topography as an undertone")."""
     u = (WMS + '?SERVICE=WMS&REQUEST=GetMap&VERSION=1.3.0&LAYERS=ASTER_GDEM_Greyscale_Shaded_Relief'
-         '&CRS=EPSG:3857&BBOX=%d,%d,%d,%d&WIDTH=%d&HEIGHT=%d&FORMAT=image/png' % (BOX + (W, H)))
+         '&CRS=EPSG:3857&BBOX=%d,%d,%d,%d&WIDTH=%d&HEIGHT=%d&FORMAT=image/png' % (BOX + (W * hi, H * hi)))
     try:
         return np.array(Image.open(io.BytesIO(get(u, 240))).convert('L')).astype(np.float32)
     except Exception as e:
@@ -135,7 +148,7 @@ def ramp(p, alpha=0.80, shade=None):
     return Image.fromarray(img)
 
 
-def bands(p, shade, sigma=7, blobs=False):
+def bands(p, shade, sigma=7, blobs=False, hi=1):
     """THE BANDS LOOK (user 2026-09-13: "id rather see bands"): the index
     blurred to landscape scale (sigma 7 px ~ 6 km) and posterised to the
     ramp's own stops, so the colour comes as bands that follow the hills
@@ -149,6 +162,7 @@ def bands(p, shade, sigma=7, blobs=False):
     pv = np.where(fin, p, 0.0).astype(np.float32)
     mk = fin.astype(np.float32)
     to = lambda a: Image.fromarray((np.clip(a, 0, 1) * 250).astype(np.uint8))           # noqa: E731
+    sigma = sigma * hi                                                                     # the same 6 km on the HI grid
     bp = np.array(to(pv).filter(ImageFilter.GaussianBlur(sigma))).astype(np.float32) / 250.0
     bm = np.array(to(mk).filter(ImageFilter.GaussianBlur(sigma))).astype(np.float32) / 250.0
     with np.errstate(invalid='ignore', divide='ignore'):
@@ -226,6 +240,13 @@ def on_cdn(path):
         return False
 
 
+def save_frames(pp, shade_hi, stem):
+    """the three pictures of one index: the detail, the bands, the blob outlines"""
+    frame(pp, shade_hi).save(stem + '.webp', 'WEBP', quality=80, method=6)
+    bands(pp, shade_hi, hi=HI).save(stem + '_bands.webp', 'WEBP', quality=80, method=6)
+    bands(pp, shade_hi, blobs=True, hi=HI).save(stem + '_blobs.webp', 'WEBP', quality=80, method=6)
+
+
 def season_frames(year, keys, vals, shade):
     """Weekly frames for a past season, Sep 15 - Dec 1, rendered only for
     dates not already on the CDN. Returns the list of dates that exist (on
@@ -233,8 +254,8 @@ def season_frames(year, keys, vals, shade):
     dates, todo = [], []
     d = datetime.date(year, 9, 15)
     while d <= datetime.date(year, *SEASON_END):
-        if on_cdn('season/%d/%s.webp' % (year, d.isoformat())) and on_cdn('season/%d/%s_bands.webp' % (year, d.isoformat())) \
-                and on_cdn('season/%d/%s_blobs.webp' % (year, d.isoformat())):
+        if not os.environ.get('FOLIAGE_SEASON') and on_cdn('season/%d/%s.webp' % (year, d.isoformat())) and on_cdn('season/%d/%s_bands.webp' % (year, d.isoformat())) \
+                and on_cdn('season/%d/%s_blobs.webp' % (year, d.isoformat())):   # FOLIAGE_SEASON=1: the season again (a new picture size)
             dates.append(d.isoformat())
         else:
             todo.append(d)
@@ -242,20 +263,19 @@ def season_frames(year, keys, vals, shade):
     if todo:
         print('season %d: rendering %d frames' % (year, len(todo)), flush=True)
         aug = [datetime.date(year, 8, 5), datetime.date(year, 8, 13), datetime.date(year, 8, 21), datetime.date(year, 8, 29)]
-        bimgs = [v for v in (ndvi(x, keys, vals) for x in aug) if v is not None]
+        bimgs = [v for v in (ndvi(x, keys, vals, HI) for x in aug) if v is not None]
         if bimgs:
             base = np.nanmax(np.stack(bimgs), 0)
+            shade_hi, mask_hi = (relief(HI) if HI > 1 else shade), up(FOREST_MASK, HI)
             os.makedirs(os.path.join(OUT, 'season', str(year)), exist_ok=True)
             for d in todo:
-                v = ndvi(d, keys, vals)
-                v2 = ndvi(d - datetime.timedelta(days=6), keys, vals)
+                v = ndvi(d, keys, vals, HI)
+                v2 = ndvi(d - datetime.timedelta(days=6), keys, vals, HI)
                 if v is None:
                     continue
                 cur = np.nanmax(np.stack([x for x in (v, v2) if x is not None]), 0)
-                pp = index_of(cur, base, FOREST_MASK)
-                frame(pp, shade).save(os.path.join(OUT, 'season', str(year), d.isoformat() + '.webp'), 'WEBP', quality=82, method=6)
-                bands(pp, shade).save(os.path.join(OUT, 'season', str(year), d.isoformat() + '_bands.webp'), 'WEBP', quality=82, method=6)
-                bands(pp, shade, blobs=True).save(os.path.join(OUT, 'season', str(year), d.isoformat() + '_blobs.webp'), 'WEBP', quality=82, method=6)
+                pp = index_of(cur, base, mask_hi)
+                save_frames(pp, shade_hi, os.path.join(OUT, 'season', str(year), d.isoformat()))
                 dates.append(d.isoformat())
     return {'year': year, 'dates': sorted(dates), 'base': CDN + 'season/%d/' % year}
 
@@ -1253,9 +1273,14 @@ def main():
         print('forest mask: unavailable (%s), falling back to greenness' % e)
         FOREST_MASK = None
     p = index_of(cur, base, FOREST_MASK)
-    frame(p, shade).save(os.path.join(OUT, 'latest.webp'), 'WEBP', quality=82, method=6)   # ~1/6 the PNG, alpha kept
-    bands(p, shade).save(os.path.join(OUT, 'latest_bands.webp'), 'WEBP', quality=82, method=6)
-    bands(p, shade, blobs=True).save(os.path.join(OUT, 'latest_blobs.webp'), 'WEBP', quality=82, method=6)
+    # the pictures at HI x: the same composites fetched again at that size (the 1x arrays above carry every number)
+    if HI > 1:
+        print('the pictures at x%d:' % HI, flush=True)
+        base_hi = np.nanmax(np.stack([v for v in (ndvi(d, keys, vals, HI) for d in aug) if v is not None]), 0)
+        cur_hi = np.nanmax(np.stack([v for v in (ndvi(d, keys, vals, HI) for d, _ in pair) if v is not None]), 0) if pair else base_hi
+        save_frames(index_of(cur_hi, base_hi, up(FOREST_MASK, HI)), relief(HI), os.path.join(OUT, 'latest'))
+    else:
+        save_frames(p, shade, os.path.join(OUT, 'latest'))
     counties_now = county_means(labels, ids, p)
     try:
         fcodes = FOREST_CODES if FOREST_CODES is not None else forest(shade, prev)
