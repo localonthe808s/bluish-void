@@ -108,7 +108,11 @@ const CACHE_RULES = {
   'api.open-meteo.com':           300,
   'air-quality-api.open-meteo.com': 600,
   'marine-api.open-meteo.com':    600,
-  'geocoding-api.open-meteo.com': 86400
+  'geocoding-api.open-meteo.com': 86400,
+  // ── NEUTRINO HUNTERS (2026-09-30). Super-K's realtime monitor picture, one GIF the observatory rewrites every
+  //    ~22 s; the page reads the event's hit counts off it (needs the bytes, so the proxy), 20 s of edge cache
+  //    so every viewer shares one fetch. Their site has no CORS header. ──
+  'www-sk.icrr.u-tokyo.ac.jp':    20
 };
 
 // SHAPES: an upstream that is far too big to hand a phone is cut down HERE, once, and the
