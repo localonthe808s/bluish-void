@@ -1,0 +1,64 @@
+name: Rebake LA train timetable
+
+# THE BASIN's station board reads _maplab/la/rail_sched.json, which holds LA Metro's and
+# Metrolink's published timetable PER DATE for eight days (Metro's calendar changes daily).
+# It was baked once by hand on 2026-09-19 and ran out on 09-26: the board then read
+# "THE TIMETABLE ON FILE DOES NOT REACH TODAY". This re-bakes it every night.
+
+on:
+  schedule:
+    - cron: '17 9 * * *'    # 2:17 AM Pacific (daylight time): after the service day's last trains
+  workflow_dispatch: {}
+
+concurrency:
+  group: la-sched
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  rebake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install what la_bake.py imports
+        run: pip install --quiet numpy scipy shapely scikit-image tifffile
+
+      - name: Bake the timetable
+        run: |
+          set -euo pipefail
+          cd _maplab/la
+          python3 la_bake.py sched
+          # a real bake holds ~178 stations and today's date; an outage must not publish an empty file
+          python3 - <<'EOF'
+          import json, datetime
+          from zoneinfo import ZoneInfo
+          d = json.load(open('rail_sched.json'))
+          today = datetime.datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%Y%m%d')
+          assert len(d) >= 120, 'only %d stations' % len(d)
+          rows = d['80138S']['rows']
+          assert any(today in r['d'] for r in rows), 'today (%s) is not in the bake' % today
+          print('%d stations, today %s present' % (len(d), today))
+          EOF
+
+      - name: Commit if changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet _maplab/la/rail_sched.json; then
+            echo "no change"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add _maplab/la/rail_sched.json
+          git commit -m "Rebake the LA train timetable (scheduled)"
+          for i in 1 2 3; do
+            git pull --rebase && git push && exit 0
+            sleep 5
+          done
+          exit 1
