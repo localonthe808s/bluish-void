@@ -452,11 +452,12 @@ async function obsSnapshot(env) {
     try {
       // The station's LOCAL date, which is what IEM's daily row is keyed by --
       // asking UTC would request tomorrow for half the day in the west.
-      const d = new Date().toLocaleDateString('en-CA', { timeZone: {
-        ny_high: 'America/New_York', chi_high: 'America/Chicago',
-        mia_high: 'America/New_York', aus_high: 'America/Chicago',
-        den_high: 'America/Denver',   lax_high: 'America/Los_Angeles',
-        phl_high: 'America/New_York' }[key] });
+      // THE ZONE COMES FROM APT5, the one table that lists every active market (2026-09-30). This used to be its
+      // own list, from the seven-city days, with no las_high in it: Las Vegas fell back to UTC, so from 5 PM Pacific
+      // every snapshot was filed under TOMORROW. The day's 5-minute row froze at the last pre-5 PM tick (its 'last'
+      // stuck at the day's peak, which kept the bake's day "not cooling" all evening), and tomorrow's lead row opened
+      // carrying tonight's TWC maximum.
+      const d = new Date().toLocaleDateString('en-CA', { timeZone: (APT5[key] && APT5[key].tz) || 'America/New_York' });
       row.day = d;
       const [Y, M, D] = d.split('-').map(Number);
       const r = await fetch('https://mesonet.agron.iastate.edu/cgi-bin/request/daily.py'
