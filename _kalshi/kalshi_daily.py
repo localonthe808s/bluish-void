@@ -2216,7 +2216,7 @@ def backfill(fcm, bias_of, daily, obh, settled, sd_lock,
             past = [r for r in res if r[0] < k]
             if len(past) >= 20:
                 sd_k, _ = spread(past, LOCK_HOUR)
-        ps = distribution(lad, pred, sd_k, obs)
+        ps = distribution(lad, pred, sd_k, run if run > -90 else None)   # cut at the reading, not reading + offset
         bi = max(range(len(lad)), key=lambda i: ps[i])
         ai = which(lad, a)
         truth = next((r['label'] for r in lad if r['yes']), None) \
@@ -4000,7 +4000,15 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         if _hobs2:
             _lastv = _hobs2[max(_hobs2)]
         _o5 = own5_row(cfg, today) if _own5 is not None else None
-        if _o5 and isinstance(_o5.get('last'), (int, float)):
+        # the 5-minute reading is the fresher one only WHEN IT IS: the worker's log for Las Vegas stopped at 4:40 PM
+        # on 09-30, and its 'last' (93.2, the day's peak) kept the day "not cooling" all evening while the hourly
+        # reports fell to 85 -- so the day was never decided and the sheet held 94-95 against a settled 92-93.
+        _o5h = None
+        try:
+            _o5h = int(str((_o5 or {}).get('at') or '').split(':')[0])
+        except ValueError:
+            pass
+        if _o5 and isinstance(_o5.get('last'), (int, float)) and (not _hobs2 or (_o5h is not None and _o5h >= max(_hobs2))):
             _lastv = _o5['last']
         _runmax = max(x for x in (rmax, _own5) if x is not None) if (rmax is not None or _own5 is not None) else None
         cooling = (_lastv is not None and _runmax is not None and _lastv <= _runmax - 1.0)
@@ -4094,7 +4102,17 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         fresh_peaks = None
         print('fresh runs unavailable: %s' % e)
 
-    ps = ladder_probs(cfg, rows, pred, sd, obs_far, res, binding_now)
+    # THE CUT IS WHAT WAS MEASURED, NOT WHAT WAS ESTIMATED (2026-09-30). The ladder deletes every outcome under
+    # its floor, and that floor was max(hourly max + the mean gap to the true peak, 5-minute max + its gap, exact
+    # figures). The two estimates are MEANS: on a day whose hourly reading IS the peak they overshoot, and the
+    # cut then deleted the bracket that settles. Las Vegas 09-30: 93.02 read at 4:56 PM, the estimate 93.81, the
+    # cut at 93.31 -- 94-95 at 87% against a market at 99.5% on 92-93. The estimates still set the CENTRE (pred);
+    # the cut is the exact bounds, the warmest hourly reading itself, and the 5-minute maximum less its Celsius
+    # rounding (0.9 F). Trail replay 09-07..30, 6,082 open-day rows in three cities: log loss .910 -> .813
+    # (Las Vegas .862 -> .649), better in every city both binding and open; top pick 3,905 -> 3,912.
+    _cut_c = [x for x in (_live_x, rmax, (_own5 - 0.9) if _own5 is not None else None) if x is not None]
+    cut_far = obs_far if (day_decided or not _cut_c) else max(_cut_c)
+    ps = ladder_probs(cfg, rows, pred, sd, cut_far, res, binding_now)
     # THE AFTERNOON BLEND (2026-09-13). After 1 PM the ladder was still a
     # symmetric forecast around a number; the afternoon table (afternoon.json)
     # says, for this city, season and hour, how the official max actually ends
@@ -4316,7 +4334,11 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             sdh = min(sdh, max(EXACT_FLOOR_SD_MIN,
                                math.sqrt(max(sdh * sdh - OFFSET_SD * OFFSET_SD, 0.0)))
                            if exact else OFFSET_SD)
-        return pr, sdh, ladder_probs(cfg, rows, pr, sdh, fl, _res_h, bind), fl
+        # the cut is the reading itself, not reading + offset (see "THE CUT IS WHAT WAS MEASURED")
+        cut_h = r
+        if live is not None and ((hour >= now.hour) or (peak_h is not None and peak_h <= hour)):
+            cut_h = live if cut_h is None else max(cut_h, live)
+        return pr, sdh, ladder_probs(cfg, rows, pr, sdh, cut_h if cut_h is not None else fl, _res_h, bind), fl
 
     def make_lock(hour):
         snap = snapshot(hour)
