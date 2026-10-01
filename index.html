@@ -89438,7 +89438,7 @@ function initNowMicroTabs(){
         // Build spaghetti model tracks for each active storm
         storms.forEach(function(storm) {
           var bin = _resolveStormBin(storm);
-          if (bin) _buildSpaghettiTracks(bin, (storm.name || 'Unnamed').toUpperCase(), hurricaneIntensityColor(parseInt(storm.intensity || 0)));
+          if (bin) _buildSpaghettiTracks(bin, (storm.name || 'Unnamed').toUpperCase(), hurricaneIntensityColor(parseInt(storm.intensity || 0)), storm.id || storm.atcfID || '');
         });
 
         // If storms are active, also show their names in the active count
@@ -90987,31 +90987,55 @@ function initNowMicroTabs(){
     'COTC': { name: 'OFCL',   color: '#c4b5fd', full: 'NHC Official (prev cycle for verification)' },
     'OFCL': { name: 'NHC',    color: '#c4b5fd', full: 'NHC Official Forecast' },
     'TVCA': { name: 'Consensus', color: '#ffffff', full: 'TVCA Multi-model Consensus' },
+    'TVCN': { name: 'Consensus', color: '#ffffff', full: 'TVCN Variable Consensus' },
+    'AVNI': { name: 'GFS',    color: '#ef4444', full: 'GFS Interpolated' },
+    'HFAI': { name: 'HAFS-A', color: '#06b6d4', full: 'HAFS-A Interpolated' },
+    'HFBI': { name: 'HAFS-B', color: '#0ea5e9', full: 'HAFS-B Interpolated' },
     'ICON': { name: 'ICON',   color: '#f472b6', full: 'DWD ICON Global (Germany)' }
   };
 
-  function _buildSpaghettiTracks(stormBin, name, color) {
+  /* REAL MODEL TRACKS (2026-09-30). Every render had been the synthetic Track A-G spread, for three reasons:
+     the a-deck name was built from the BIN, which is a display slot (Rachel is storm 18 in slot EP3, so it asked
+     for ep03, a June storm); the server publishes only .dat.gz, so the plain .dat 404'd; and the parser kept
+     only the newest cycle, which for hours after 00/06/12/18Z holds just the interpolated aids (5 of 13 models).
+     And each storm's build wiped the one before it, so only the last storm ever had tracks. Now: the storm's own
+     id, the .gz unpacked in the browser, the newest cycle that carries the models, layers kept per storm. */
+  var _spagByStorm = {};
+  function _spagForget(key){
+    (_spagByStorm[key] || []).forEach(function(l){ try{ _hurricaneMap.removeLayer(l); }catch(e){} });
+    _spaghettiLayers = _spaghettiLayers.filter(function(l){ return (_spagByStorm[key] || []).indexOf(l) < 0; });
+    _spagByStorm[key] = [];
+  }
+  function _spagKeep(key, from){ _spagByStorm[key] = (_spagByStorm[key] || []).concat(_spaghettiLayers.slice(from)); }
+  function _atcfText(r){
+    /* a .gz answer is unpacked here; anything else is already text */
+    var gz = /\.gz/.test(r.url || '') || /gzip/.test(r.headers.get('content-type') || '');
+    if (!gz || typeof DecompressionStream === 'undefined') return r.text();
+    return new Response(r.body.pipeThrough(new DecompressionStream('gzip'))).text();
+  }
+  function _buildSpaghettiTracks(stormBin, name, color, stormId) {
     if (!_hurricaneMap) return;
-    _spaghettiLayers.forEach(function(l){ try{ _hurricaneMap.removeLayer(l); }catch(e){} });
-    _spaghettiLayers = [];
+    var _key = (stormId || stormBin || name).toLowerCase(), _from = _spaghettiLayers.length;
+    _spagForget(_key);
+    _from = _spaghettiLayers.length;
+    var _done = function(){ _spagKeep(_key, _from); };
 
-    // Derive ATCF ID from bin (AT1 → al01, EP3 → ep03)
-    var atcfId = '';
-    if (stormBin) {
+    // Derive ATCF ID: the storm's own id first (ep182026); the bin is only a slot (EP3) and names the wrong file
+    var atcfId = /^[a-z]{2}\d{6}$/i.test(stormId || '') ? stormId.toLowerCase() : '';
+    if (!atcfId && stormBin) {
       var b = stormBin.substring(0, 2).toLowerCase();
       var n = parseInt(stormBin.substring(2));
       if (b === 'at') b = 'al';
       atcfId = b + (n < 10 ? '0' : '') + n + new Date().getFullYear();
     }
 
-    if (!atcfId) { _buildSyntheticSpaghetti(stormBin, name, color); return; }
+    if (!atcfId) { _buildSyntheticSpaghetti(stormBin, name, color, _done); return; }
 
     // Check cache first — avoid re-fetching on every 10-min refresh if data hasn't changed
     var cacheKey = '_atcfCache_' + atcfId;
     var cached = window[cacheKey];
     if (cached && cached.ts && (Date.now() - cached.ts < 600000) && cached.data) {
-      _renderRealModelTracks(cached.data, name);
-      console.info('ATCF: Using cached model tracks for', name);
+      _renderRealModelTracks(cached.data, name); _done();
       return;
     }
 
@@ -91024,26 +91048,28 @@ function initNowMicroTabs(){
     // ftp.nhc.noaa.gov sends no CORS header — direct fetches ALWAYS failed
     // (every past render was the synthetic fallback). Route through our worker.
     var _atcfUrl = 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://ftp.nhc.noaa.gov/atcf/aid_public/a' + atcfId + '.dat');
+    var _atcfGz = 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://ftp.nhc.noaa.gov/atcf/aid_public/a' + atcfId + '.dat.gz');
     var sources = [
+      { url: _atcfGz, label: 'proxy gz', delay: 0 },
+      { url: _atcfGz, label: 'proxy gz retry', delay: 2500 },
       { url: _atcfUrl, label: 'proxy', delay: 0 },
-      { url: _atcfUrl, label: 'proxy retry', delay: 2500 },
     ];
 
     var attemptIdx = 0;
     function tryNextSource() {
       if (attemptIdx >= sources.length) {
         console.warn('ATCF: All sources exhausted for', atcfId, '— using synthetic');
-        _buildSyntheticSpaghetti(stormBin, name, color);
+        _buildSyntheticSpaghetti(stormBin, name, color, _done);
         return;
       }
       var src = sources[attemptIdx];
       attemptIdx++;
 
       var doFetch = function() {
-        monitoredFetch('atcf-' + src.label.replace(/\s/g,'') + '-' + atcfId, src.url, { timeout: 10000 })
+        monitoredFetch('atcf-' + src.label.replace(/\s/g,'') + '-' + atcfId, src.url, { timeout: 20000 })
           .then(function(r) {
             if (!r.ok) throw new Error('HTTP ' + r.status);
-            return r.text();
+            return _atcfText(r);
           })
           .then(function(text) {
             if (!text || text.length < 50) throw new Error('Empty response');
@@ -91051,8 +91077,7 @@ function initNowMicroTabs(){
             if (parsed && Object.keys(parsed).length >= 2) {
               // Cache successful result
               window[cacheKey] = { ts: Date.now(), data: parsed };
-              _renderRealModelTracks(parsed, name);
-              console.info('ATCF: Loaded real model tracks for', name, 'via', src.label, '—', Object.keys(parsed).length, 'models');
+              _renderRealModelTracks(parsed, name); _done();
             } else {
               console.warn('ATCF:', src.label, '— insufficient models for', name, '(' + Object.keys(parsed||{}).length + '), trying next');
               tryNextSource();
@@ -91080,14 +91105,19 @@ function initNowMicroTabs(){
   function _parseATCFaDeck(text, stormId) {
     var models = {};
     var lines = text.split('\n');
-    // Find the latest advisory DTG (most recent date-time group)
-    var latestDTG = '';
+    // The newest cycle that CARRIES THE MODELS. The newest one of all holds only the interpolated aids for
+    // hours after each synoptic time, so it is taken only once it has at least four track models of its own.
+    var byDTG = {};
     lines.forEach(function(line) {
       var parts = line.split(',');
       if (parts.length < 9) return;
-      var dtg = (parts[2] || '').trim();
-      if (dtg > latestDTG) latestDTG = dtg;
+      var dtg = (parts[2] || '').trim(), tech = (parts[4] || '').trim().toUpperCase();
+      if (!_ATCF_MODELS[tech] || tech === 'OFCL' || tech === 'TVCA' || tech === 'TVCN' || tech === 'COTC') return;
+      (byDTG[dtg] = byDTG[dtg] || {})[_ATCF_MODELS[tech].name] = 1;
     });
+    var latestDTG = '';
+    Object.keys(byDTG).sort().reverse().some(function(d){ if (Object.keys(byDTG[d]).length >= 4){ latestDTG = d; return true; } return false; });
+    if (!latestDTG) return {};
 
     // Only parse lines from the latest advisory cycle
     lines.forEach(function(line) {
@@ -91104,7 +91134,7 @@ function initNowMicroTabs(){
       var vmax = parseInt((parts[8] || '').trim());
 
       // Skip non-track models (statistical, probability, etc.)
-      if (!_ATCF_MODELS[tech] && tech !== 'OFCL' && tech !== 'TVCA') return;
+      if (!_ATCF_MODELS[tech] && tech !== 'OFCL' && tech !== 'TVCA' && tech !== 'TVCN') return;
       if (isNaN(tau) || tau < 0 || tau > 168) return;
 
       // Parse lat/lon — format: 183N = 18.3°N, 857W = 85.7°W
@@ -91132,7 +91162,7 @@ function initNowMicroTabs(){
     var renderedModels = [];
 
     // Prioritize key models — render in order so important ones are on top
-    var priority = ['OFCL','TVCA','AVNO','GFSO','AEMN','EMXI','HWRF','HMON','HAFS','HFSA','HFSB','UKX','UKXI','CMC','CMCI','NVGM','NGXI','ICON'];
+    var priority = ['OFCL','TVCA','TVCN','AVNO','AVNI','HFAI','HFBI','GFSO','AEMN','EMXI','HWRF','HMON','HAFS','HFSA','HFSB','UKX','UKXI','CMC','CMCI','NVGM','NGXI','ICON'];
     var rendered = {};
 
     priority.forEach(function(tech) {
@@ -91140,14 +91170,14 @@ function initNowMicroTabs(){
       var def = _ATCF_MODELS[tech] || { name: tech, color: 'rgba(255,255,255,.4)', full: tech };
 
       // Skip if we already rendered this model name (e.g., AVNO and GFSO are both "GFS")
-      if (rendered[def.name] && tech !== 'OFCL' && tech !== 'TVCA') return;
+      if (rendered[def.name] && tech !== 'OFCL') return;
       rendered[def.name] = true;
 
       var coords = models[tech].map(function(p) { return [p.lat, _hzLon(p.lon)]; });
 
       // NHC official track gets a solid, thicker line; others dashed
       var isOfficial = tech === 'OFCL';
-      var isConsensus = tech === 'TVCA';
+      var isConsensus = tech === 'TVCA' || tech === 'TVCN';
       var lineStyle = {
         color: def.color,
         weight: isOfficial ? 2.5 : isConsensus ? 2 : 1.5,
@@ -91197,7 +91227,7 @@ function initNowMicroTabs(){
       if (!dists.length) return;
       var listUrl = 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://ftp.nhc.noaa.gov/atcf/aid_public/');
       fetchWithTimeout(listUrl, null, 15000).then(function(r){ return r.text(); }).then(function(html){
-        var re = /a((?:al|ep)9\d\d{4})\.dat<\/a>\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2})/g, m, cands = [];
+        var re = /a((?:al|ep)9\d\d{4})\.dat(?:\.gz)?<\/a>\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2})/g, m, cands = [];
         var yr = String(new Date().getFullYear());
         while ((m = re.exec(html))) {
           if (m[1].indexOf(yr) === -1) continue;
@@ -91205,8 +91235,8 @@ function initNowMicroTabs(){
           if (age < 48 * 3600 * 1000) cands.push(m[1]);
         }
         cands.slice(0, 3).forEach(function(id){
-          var u = 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://ftp.nhc.noaa.gov/atcf/aid_public/a' + id + '.dat');
-          fetchWithTimeout(u, null, 15000).then(function(r){ return r.text(); }).then(function(text){
+          var u = 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://ftp.nhc.noaa.gov/atcf/aid_public/a' + id + '.dat.gz');
+          fetchWithTimeout(u, null, 20000).then(function(r){ return _atcfText(r); }).then(function(text){
             var parsed = _parseATCFaDeck(text, id);
             var techs = Object.keys(parsed || {});
             if (techs.length < 2) return;
@@ -91260,7 +91290,7 @@ function initNowMicroTabs(){
   }
 
   // ── Synthetic fallback — used when ATCF data is unavailable ──
-  function _buildSyntheticSpaghetti(stormBin, name, color) {
+  function _buildSyntheticSpaghetti(stormBin, name, color, done) {
     if (!_hurricaneMap) return;
     var baseUrl = 'https://mapservices.weather.noaa.gov/tropical/rest/services/tropical/NHC_tropical_weather/MapServer/';
     var q = '?where=1%3D1&outFields=*&f=geojson&outSR=4326';
@@ -91330,6 +91360,7 @@ function initNowMicroTabs(){
         });
 
         _buildModelTrackLegend(syntheticDefs.map(function(m){ return { name: m.name, color: m.color, full: 'Synthetic' }; }), true);
+        if (done) done();
       }).catch(function(e){ console.warn('Synthetic spaghetti failed:', e); });
   }
 
