@@ -546,21 +546,42 @@ def climate_day_start(cfg, day):
         return 1 if 3 <= day.month <= 11 else 0
 
 
-def decided_by_exact(hour, peak_done, exacts, rmax, own5):
+def own5_past(ex, own5):
+    """The exact figure, moved by the 5-minute maximum only when that sits a whole degree past it: the feed is
+    whole-degree Celsius on most reports, so 98.6 is 37 C and anything from 97.7 to 99.5 F."""
+    if ex is not None and own5 is not None and own5 >= round(ex) + 0.95:
+        return own5
+    return ex
+
+
+def decided_by_exact(hour, peak_done, exacts, rmax, own5, hourly=None):
     """The day's figure once it is decided by an exact reading, else None -- the rule is argued where it
-    is used ("DECIDED BY AN EXACT FIGURE"). Pure, so the trail can replay it."""
+    is used ("DECIDED BY AN EXACT FIGURE"). Pure, so the trail can replay it.
+
+    `exacts` holds figures or (figure, as-of local hour) pairs. AN EXACT FIGURE IS EXACT ONLY UP TO ITS OWN
+    AS-OF TIME (2026-09-30): with `hourly` ({hour: degF}, the :51 reports) in hand it stands only if every
+    report taken after that time is at least a degree under it. A figure with no as-of time is taken to
+    reach no further than the warmest hourly report."""
     if hour < 16 or not peak_done or not peak_done.get('cooling') or (peak_done.get('p') or 0) < 0.95 \
             or peak_done.get('last') is None:
         return None
-    exs = [x for x in exacts if x is not None]
+    exs = [(x if isinstance(x, (tuple, list)) else (x, None)) for x in exacts]
+    exs = [(v, a) for v, a in exs if v is not None]
     if not exs:
         return None
-    ex = max(exs)
+    ex = max(v for v, a in exs)
     if peak_done['last'] > ex - 2.0 or (rmax is not None and rmax > ex + 0.5):
         return None
-    if own5 is not None and own5 >= round(ex) + 0.95:
-        ex = own5
-    return ex
+    if hourly:
+        _hs = {h: v for h, v in hourly.items() if v is not None}
+        _pk = max(_hs, key=lambda h: (_hs[h], -h)) if _hs else None
+        # the latest as-of among the figures that say the same whole degree; an undated one reaches the
+        # hour before the warmest report, so that report itself has to sit a degree under it
+        _asof = max((a if a is not None else (_pk - 0.5 if _pk is not None else -1.0))
+                    for v, a in exs if v >= ex - 0.5)
+        if any(v > ex - 1.0 for h, v in _hs.items() if h + 0.85 > _asof):
+            return None
+    return own5_past(ex, own5)
 
 
 def running_max(obh, key, hour, h0):
@@ -964,6 +985,7 @@ def portal_day(cfg, day):
 
 
 SIX_WINDOW = {}          # per market: [start hour, end hour] of the group that holds six_max
+SIX_THROUGH = {}         # per market: local hour (24+ past midnight) the newest group of the day runs to
 
 # THE SETTLEMENT SENSOR'S OWN 5-MINUTE FEED. Central Park has none in public,
 # but Las Vegas settles on Harry Reid (KLAS) and Austin on Bergstrom (KAUS):
@@ -1115,6 +1137,8 @@ def metar_six_max(cfg, day):
           + datetime.timedelta(minutes=1) + (datetime.timedelta(hours=1) if h0 == 1
                                              else datetime.timedelta(0)))
     best = None
+    through = None
+    SIX_THROUGH.pop(cfg['key'], None)
     for m in (j or []):
         raw = str(m.get('rawOb') or '')
         # A WHOLE TOKEN OF THE REMARKS (2026-09-27). Searched as \b1[01]\d{3}\b over the whole report this also
@@ -1143,11 +1167,16 @@ def metar_six_max(cfg, day):
             continue
         c = (int(g.group(2)) / 10.0) * (-1 if g.group(1) == '1' else 1)
         f = round(c * 9.0 / 5.0 + 32.0, 2)   # exact; see the hourly reader
+        _thr = (end.astimezone(z) - datetime.datetime(day.year, day.month, day.day, tzinfo=z)).total_seconds() / 3600.0
+        if through is None or _thr > through:
+            through = _thr
         if best is None or f > best:
             best = f
             # the window that carried it, in local hours, so the panel can say
             # "2-8 AM" against "8 AM-2 PM" -- the second is the one that matters
             SIX_WINDOW[cfg['key']] = [st.astimezone(z).hour, end.astimezone(z).hour]
+    if through is not None:
+        SIX_THROUGH[cfg['key']] = through
     return best
 
 
@@ -1276,8 +1305,14 @@ def _cli_parse(text):
     # the WMO header's DDHHMM decides WHICH final came first, and that is the
     # whole ballgame -- see cli_read()
     w = re.search(r'CDUS\d+\s+\w+\s+(\d{6})', text)
+    # "VALID TODAY AS OF 0400 PM LOCAL TIME": the wall clock (New York's is issued at 4:39 PM daylight time),
+    # unlike the LST column the time of the maximum sits in. What the figure is a maximum THROUGH.
+    asof = None
+    v = re.search(r'VALID.{0,12}AS OF\s+(\d{1,2}):?(\d{2})\s*(AM|PM)', text)
+    if v:
+        asof = int(v.group(1)) % 12 + (12 if v.group(3) == 'PM' else 0) + int(v.group(2)) / 60.0
     return {'day': day.isoformat(), 'max': val, 'issued': w.group(1) if w else None,
-            'at': at or None,
+            'at': at or None, 'asof': asof,
             'final': not re.search(r'VALID.{0,12}AS OF', text)}
 
 
@@ -1426,7 +1461,7 @@ def cli_read(cfg, deep=False):
                     not (oi and ni) and p['max'] > (old.get('max') or -999.0))
             if better:
                 mine[p['day']] = {'max': p['max'], 'final': p['final'],
-                                  'issued': p.get('issued'), 'at': p.get('at')}
+                                  'issued': p.get('issued'), 'at': p.get('at'), 'asof': p.get('asof')}
                 fresh += 1
     if fresh:
         try:
@@ -3823,6 +3858,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         live = _six if live is None else max(live, _six)
     # the settlement sensor's own 5-minute maximum: exact, and fresher than
     # the hourly report by up to 55 minutes
+    _live_x = live          # the exact bounds alone: the 5-minute feed is whole-degree Celsius
     if _own5 is not None:
         live = _own5 if live is None else max(live, _own5)
     # TWC'S RUNNING MAXIMUM IS NOT A FLOOR, AND CANNOT BE MADE ONE.
@@ -3986,7 +4022,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     _sw = SIX_WINDOW.get(cfg['key'])
     if _six is not None and _sw and now.hour >= _sw[1] and peak_done and peak_done.get('cooling') \
             and (peak_done.get('p') or 0) >= 0.95:
-        _after = [v for h, v in (obh.get(tkey) or {}).items() if h > _sw[1] and v is not None]
+        # the :51 report keyed at the window's end hour is the first one AFTER the group (h > end skipped it)
+        _after = [v for h, v in (obh.get(tkey) or {}).items() if h >= _sw[1] and v is not None]
         _since_ok = all(v <= _six - 0.5 for v in _after)
         _hourly_ok = (rmax is None or rmax <= _six + 0.5)
         if _since_ok and _hourly_ok:
@@ -4004,7 +4041,11 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             # Confidently wrong, in the direction of the open position.
             # `live` carries the exact bounds and `_ctoday` the settlement
             # source; including both makes this monotone by construction.
-            _exact = max(x for x in (_six, _own5, _ctoday, live) if x is not None)
+            # THE 5-MINUTE MAXIMUM IS NOT ONE OF THEM (2026-09-30). It is whole-degree Celsius: 37 C reads
+            # 98.6 F under a group that measured 98.06, and max() took it -- 99-100 at 75% from 7 PM on
+            # Austin 09-20, -25, -28 and -30 (and Las Vegas 09-07), every one settled a bracket lower with
+            # the market at 99.5%. It moves the figure only a whole degree past it, as in decided_by_exact.
+            _exact = own5_past(max(x for x in (_six, _ctoday, _live_x) if x is not None), _own5)
             pred, obs_far, sd = _exact, _exact, 0.15
             print('%s day decided: the %d-%d group read %.1f, readings since a degree under, peak behind us %.0f%% -- spread %.2f'
                   % (cfg['key'], _sw[0], _sw[1], _six, 100 * (peak_done.get('p') or 0), sd))
@@ -4026,7 +4067,17 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     # whole degrees Celsius on most reports (98.6 is 37 C, anything from 97.7 to 99.5 F), so it moves
     # the figure only when it sits a whole degree past it.
     if not day_decided:
-        _ex = decided_by_exact(now.hour, peak_done, (_ctoday, _six, daily.get(tkey)), rmax, _own5)
+        # ...AND ONLY AS FAR AS THE FIGURE REACHES (2026-09-30). New York's 4 PM report said 73; the 4:51 PM
+        # reading was 73.04, the sheet rightly moved to 74-75, and at 5:55 PM this rule took the report's 73
+        # back as the day's figure -- 72-73 at 100%, the 6 PM final, against a 74 settlement and a market
+        # already at 99.5%. A figure is exact through its own as-of time and says nothing about a reading
+        # taken after it: each travels with that time, and one hourly report after it within a degree
+        # leaves the estimate standing.
+        _crow = _cli.get(tkey) or {}
+        _casof = 99.0 if _crow.get('final') else _crow.get('asof')
+        _ex = decided_by_exact(now.hour, peak_done,
+                               ((_ctoday, _casof), (_six, SIX_THROUGH.get(cfg['key'])), (daily.get(tkey), None)),
+                               rmax, _own5, {h: v for h, v in (obh.get(tkey) or {}).items() if h0 <= h <= now.hour})
         if _ex is not None:
             day_decided = True
             pred, obs_far, sd = _ex, _ex, 0.15
