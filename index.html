@@ -17001,6 +17001,7 @@ function floodRateThreshold(lat, lon, soilMoisture){
       }).catch(function(){});
   }
   window._loadTides = loadTides;
+  window._loadFloodNet = loadFloodNet;   /* both are private to this block; the callers below reach them through window */
   window._nearestTideStation = nearestTideStation;
   function _tideRow(p){
     // "2026-07-19 13:19" is station-local wall clock — parse it as local, the
@@ -36851,7 +36852,7 @@ function dayRangeAround(d, days){
            (_smi.illum || 0) <= 20 ? ' — dark skies favor deep-sky viewing' : ''));
       }
       if (typeof getMilkyWayStatus === 'function'){
-        var _mws = getMilkyWayStatus();
+        var _mws = getMilkyWayStatus(new Date(), LOCATION.lat, LOCATION.lon);   /* was called bare and threw on the missing date */
         if (_mws && _mws.visible) spaceNotes.push('🌌 Milky Way core is above the horizon tonight');
       }
       var _issP = window._issNextPass;
@@ -42248,7 +42249,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                 }).catch(function(){}).finally(nasaDone);
 
               // DONKI notifications — space weather events
-              ftch('https://api.nasa.gov/DONKI/notifications?api_key='+KEY+'&type=all&startDate='+fmt(start)+'&endDate='+fmt(today), 5000)
+              /* DONKI moved 2026-09-30: api.nasa.gov/DONKI and kauai.ccmc now 301 to a news page with no CORS; the new base is keyless */
+              ftch('https://ccmc.gsfc.nasa.gov/DONKI-API/get/notifications?type=all&startDate='+fmt(start)+'&endDate='+fmt(today), 5000)
                 .then(function(r){return r.json();})
                 .then(function(arr){
                   if(!Array.isArray(arr))return;
@@ -42269,12 +42271,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                       title=lines[0]?type+': '+lines[0].slice(0,120):'';
                     }
                     if(title) allItems.push({ label:label, title:title,
-                      date:n.messageIssueTime||'', link:n.messageURL||'https://kauai.ccmc.gsfc.nasa.gov/DONKI/' });
+                      date:n.messageIssueTime||'', link:n.messageURL||'https://ccmc.gsfc.nasa.gov/DONKI/' });
                   });
                 }).catch(function(){}).finally(nasaDone);
 
               // Solar flares
-              ftch('https://api.nasa.gov/DONKI/FLR?api_key='+KEY+'&startDate='+fmt(start)+'&endDate='+fmt(today), 5000)
+              ftch('https://ccmc.gsfc.nasa.gov/DONKI-API/get/FLR?startDate='+fmt(start)+'&endDate='+fmt(today), 5000)
                 .then(function(r){return r.json();})
                 .then(function(arr){
                   if(!Array.isArray(arr))return;
@@ -42282,7 +42284,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                     var cls=f.classType||'';
                     var title='Solar Flare '+cls+' detected'+(f.sourceLocation?' at '+f.sourceLocation:'');
                     allItems.push({ label:'FLARE', title:title, date:f.beginTime||f.peakTime||'',
-                      link:f.link||'https://kauai.ccmc.gsfc.nasa.gov/DONKI/' });
+                      link:f.link||'https://ccmc.gsfc.nasa.gov/DONKI/' });
                   });
                 }).catch(function(){}).finally(nasaDone);
             }
@@ -46461,6 +46463,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var hourly = window._wxHourly;
       var ni = window._wxNearestIdx;
       if (!hourly || !hourly.time || !hourly.cloudcover || ni == null) return;
+      /* the advice block above keeps its own moonIll inside its closure; this one read it out of scope */
+      var moonIll = window._moonPhase != null ? Math.round(window._moonPhase * 100) : null;
 
       // Find tonight's sunset and tomorrow's sunrise
       var ssTime = wx.sunset ? new Date(wx.sunset) : null;
@@ -74818,6 +74822,10 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
     if (searchInput){
       searchInput.addEventListener("keydown", function(e){
         if (e.key !== "Enter") return;
+        /* THE AUTOCOMPLETE HANDLER BELOW OWNS ENTER (2026-09-30). Both used to run: every Enter geocoded twice and
+           switched location twice, and this one searched the raw text with no alias or ", state" handling, so
+           "Afton, Virginia" raised its not-found alert while the other handler was finding the town. */
+        if (document.getElementById("loc-suggestions")) return;
         var q = searchInput.value.trim();
         if (!q) return;
         searchInput.disabled = true;
@@ -74964,8 +74972,12 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       searchInput.setAttribute('autocomplete', 'off');
 
       // Common city abbreviations/nicknames → full searchable names
+      /* THE GEOCODER MATCHES PLACE NAMES ONLY (2026-09-30): 30 of these read 'Tokyo Japan', 'Honolulu Hawaii',
+         'Washington DC' and returned nothing, so typing london / paris / dc / anchorage gave no suggestions and a
+         'Location not found' alert. A target that needs a state or country says so after a comma, and
+         expandPlace() below feeds that to the same region ranking a typed 'City, State' gets. */
       var cityAliases = {
-        'la':'Los Angeles','nyc':'New York City','sf':'San Francisco','dc':'Washington DC',
+        'la':'Los Angeles','nyc':'New York City','sf':'San Francisco','dc':'Washington, District of Columbia',
         'nola':'New Orleans','philly':'Philadelphia','vegas':'Las Vegas','lv':'Las Vegas',
         'chi':'Chicago','atl':'Atlanta','bos':'Boston','dal':'Dallas','hou':'Houston',
         'sa':'San Antonio','sd':'San Diego','sj':'San Jose','sjc':'San Jose',
@@ -74977,27 +74989,27 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         'mia':'Miami','ftl':'Fort Lauderdale','tpa':'Tampa','orl':'Orlando',
         'msy':'New Orleans','mem':'Memphis','bna':'Nashville','sfo':'San Francisco',
         'lax':'Los Angeles','jfk':'New York City','ord':'Chicago','dfw':'Dallas',
-        'iah':'Houston','phl':'Philadelphia','bklyn':'Brooklyn','queens':'Queens NY',
-        'soho':'Manhattan New York','dtla':'Downtown Los Angeles',
-        'the bay':'San Francisco Bay Area','twin cities':'Minneapolis Saint Paul',
-        'Silicon Valley':'San Jose California','hamptons':'East Hampton New York',
-        'cape cod':'Cape Cod Massachusetts','big island':'Hilo Hawaii',
-        'dmv':'Washington DC','tristate':'New York City','socal':'Los Angeles',
+        'iah':'Houston','phl':'Philadelphia','bklyn':'Brooklyn','queens':'Queens, New York',
+        'soho':'Manhattan, New York','dtla':'Los Angeles, California',
+        'the bay':'San Francisco, California','twin cities':'Minneapolis, Minnesota',
+        'silicon valley':'San Jose, California','hamptons':'East Hampton, New York',
+        'cape cod':'Hyannis, Massachusetts','big island':'Hilo, Hawaii',
+        'dmv':'Washington, District of Columbia','tristate':'New York City','socal':'Los Angeles',
         'norcal':'San Francisco','chiraq':'Chicago','hotlanta':'Atlanta',
         'bean town':'Boston','motor city':'Detroit','the big easy':'New Orleans',
         'mile high':'Denver','emerald city':'Seattle','windy city':'Chicago',
         'city of angels':'Los Angeles','big apple':'New York City',
         'charm city':'Baltimore','steel city':'Pittsburgh','space city':'Houston',
         'sin city':'Las Vegas','alamo city':'San Antonio','river city':'Sacramento',
-        'indy':'Indianapolis','cincy':'Cincinnati','cbus':'Columbus Ohio',
-        'reno':'Reno Nevada','tuscon':'Tucson','ftw':'Fort Worth','mcallen':'McAllen Texas',
-        'anchorage':'Anchorage Alaska','honolulu':'Honolulu Hawaii',
-        'london':'London England','paris':'Paris France','tokyo':'Tokyo Japan',
-        'toronto':'Toronto Canada','montreal':'Montreal Canada','vancouver':'Vancouver Canada',
-        'cdmx':'Mexico City','mexico city':'Ciudad de Mexico','sydney':'Sydney Australia',
-        'melb':'Melbourne Australia','berlin':'Berlin Germany','madrid':'Madrid Spain',
-        'rome':'Rome Italy','amsterdam':'Amsterdam Netherlands','dubai':'Dubai UAE',
-        'hk':'Hong Kong','sg':'Singapore','bkk':'Bangkok Thailand'
+        'indy':'Indianapolis','cincy':'Cincinnati','cbus':'Columbus, Ohio',
+        'reno':'Reno, Nevada','tuscon':'Tucson','ftw':'Fort Worth','mcallen':'McAllen, Texas',
+        'anchorage':'Anchorage, Alaska','honolulu':'Honolulu, Hawaii',
+        'london':'London, United Kingdom','paris':'Paris, France','tokyo':'Tokyo, Japan',
+        'toronto':'Toronto, Canada','montreal':'Montreal, Canada','vancouver':'Vancouver, Canada',
+        'cdmx':'Mexico City','mexico city':'Mexico City, Mexico','sydney':'Sydney, Australia',
+        'melb':'Melbourne, Australia','berlin':'Berlin, Germany','madrid':'Madrid, Spain',
+        'rome':'Rome, Italy','amsterdam':'Amsterdam, NL','dubai':'Dubai, United Arab Emirates',
+        'hk':'Hong Kong','sg':'Singapore','bkk':'Bangkok, Thailand'
       };
       
       function expandCityAlias(q){
@@ -75016,6 +75028,12 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         var ci = name.lastIndexOf(',');
         if (ci > 0){ region = name.slice(ci + 1).trim().toLowerCase(); name = name.slice(0, ci).trim(); }
         return { name: name, region: region };
+      }
+      /* what was typed -> { name, region }, with a nickname expanded and its own region kept */
+      function expandPlace(raw){
+        var pr = parsePlaceRegion(raw), al = expandCityAlias(pr.name);
+        if (al !== pr.name){ var p2 = parsePlaceRegion(al); pr = { name: p2.name, region: p2.region || pr.region }; }
+        return pr;
       }
       // 2-letter US state/territory code → lowercase full name. Own map, NOT
       // window._stateFull — that one returns the abbrev unchanged on mobile
@@ -75040,8 +75058,8 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
 
       // Autocomplete on typing
       searchInput.addEventListener('input', function(){
-        var pr = parsePlaceRegion(searchInput.value);
-        var q = expandCityAlias(pr.name);
+        var pr = expandPlace(searchInput.value);
+        var q = pr.name;
         clearTimeout(suggestDebounce);
         if (q.length < 2){ hideSuggestions(); return; }
         suggestDebounce = setTimeout(function(){
@@ -75094,8 +75112,8 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
           } else if (suggestResults.length > 0){
             pickSuggestion(suggestResults[0]);
           } else {
-            var _pr = parsePlaceRegion(searchInput.value);
-            var q = expandCityAlias(_pr.name);
+            var _pr = expandPlace(searchInput.value);
+            var q = _pr.name;
             if (!q) return;
             searchInput.disabled = true;
             searchInput.placeholder = "Searching...";
@@ -75116,7 +75134,10 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
                   resolveAndSwitch(Math.round(r.latitude*10000)/10000, Math.round(r.longitude*10000)/10000, r.name || "Custom", r.timezone || null);
                   searchInput.value = "";
                 } else {
-                  alert("Location not found.");
+                  /* said in the box, not in a blocking dialog */
+                  searchInput.value = "";
+                  searchInput.placeholder = "NOT FOUND \u00B7 TRY ANOTHER";
+                  setTimeout(function(){ searchInput.placeholder = "LOOK UP HERE"; }, 2600);
                 }
               }).catch(function(){
                 searchInput.disabled = false;
@@ -75270,7 +75291,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       // location's tide table (and its rain-line note) after a switch. Clear it
       // and reload; loadTides no-ops cleanly when the new location isn't coastal.
       window._tideData = null;
-      try{ loadTides(LOCATION.lat, LOCATION.lon); }catch(e){}
+      try{ window._loadTides(LOCATION.lat, LOCATION.lon); }catch(e){}   /* was a bare loadTides: out of scope here, threw into the catch, and the tide table never followed a switch */
       switchRadarMode("reflectivity");
       startRadarNwsLoop();
       // Update GOES satellite and sector from new location
@@ -85790,14 +85811,14 @@ function initNowMicroTabs(){
       .then(function(r) { return r.json(); })
       .then(function(data) {
         if (!data.elevation || data.elevation.length < 49) return;
-        processTerrainData(data.elevation, directions, distances, lat, lon);
+        processTerrainData(data.elevation, directions, distances, lat, lon, _ep);
       })
       .catch(function(e) {
         console.warn('Terrain intelligence fetch failed:', e);
       });
   }
 
-  function processTerrainData(elevations, directions, distances, lat, lon) {
+  function processTerrainData(elevations, directions, distances, lat, lon, _ep) {   /* _ep: the caller's location epoch (was read out of scope: ReferenceError, terrain never stored) */
     var userElev = elevations[0]; // meters
     var intel = {
       userElevation: userElev,
@@ -91609,6 +91630,12 @@ function initNowMicroTabs(){
 
     var userLat = LOCATION ? LOCATION.lat : 40.7;
     var userLon = LOCATION ? LOCATION.lon : -74.0;
+    /* the ISS block's haversineMi is private to it; calling it from here threw and no closest approach was ever computed */
+    var haversineMi = function(lat1, lon1, lat2, lon2){
+      var R = 3959, r = Math.PI / 180, dLat = (lat2 - lat1) * r, dLon = (lon2 - lon1) * r;
+      var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1 * r) * Math.cos(lat2 * r) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    };
 
     monitoredFetch('cpa-fcst-' + stormBin, baseUrl + fcstPtsLyr + '/query' + q)
       .then(function(r){ return r.json(); })
@@ -95043,8 +95070,9 @@ function initNowMicroTabs(){
         // Flood Watch/Warning may need to override the model's number
         try{ if (window._applyRainLine) window._applyRainLine(window._nowcastStr); }catch(e){}
         try{ if (window._applyTabAlert) window._applyTabAlert(); }catch(e){}
-        try{ if (!window._tideData) loadTides(LOCATION.lat, LOCATION.lon); }catch(e){}
-        try{ loadFloodNet(LOCATION.lat, LOCATION.lon); }catch(e){}
+        /* through window: the bare names are out of scope here and both calls threw silently */
+        try{ if (!window._tideData) window._loadTides(LOCATION.lat, LOCATION.lon); }catch(e){}
+        try{ window._loadFloodNet(LOCATION.lat, LOCATION.lon); }catch(e){}
         
         // Also check SPC tornado outlook for user's location
         checkSPCTornadoRisk(function(spcAlert){
