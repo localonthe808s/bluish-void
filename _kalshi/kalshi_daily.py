@@ -584,6 +584,24 @@ def decided_by_exact(hour, peak_done, exacts, rmax, own5, hourly=None):
     return own5_past(ex, own5)
 
 
+def iem_today_floor(v, hours, h0, rmax):
+    """IEM's running daily maximum for today, or None when it may be the PREVIOUS climate day's.
+
+    IEM keys its daily row by the calendar day on the local clock; the climate day runs on STANDARD time, so under
+    daylight saving the midnight hour (00:00-00:59) belongs to yesterday's climate day. At 12:56 AM on 2026-10-02
+    IEM's 10-02 row held 72.0 -- the 12:51 AM reading -- and the bake took it as today's floor. Harmless under an
+    83 forecast; on a day that is warmest at midnight and cools behind a front (10 of 187 days change their maximum
+    this way, see climate_day_start) it would sit above the true high and delete the bracket that settles, all day.
+    So: when a report from before the climate day starts reaches IEM's figure and no report inside the day does,
+    IEM's figure is not used."""
+    if v is None or not h0:
+        return v
+    pre = [x for h, x in hours.items() if h < h0 and x is not None]
+    if pre and max(pre) >= v - 0.5 and (rmax is None or rmax < v - 0.5):
+        return None
+    return v
+
+
 def running_max(obh, key, hour, h0):
     """Warmest reading so far on the climate day, from the hourly stream."""
     v = [x for h, x in (obh.get(key) or {}).items() if h0 <= h <= hour]
@@ -3790,7 +3808,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     _est5 = (_own5 + _gap5) if _own5 is not None else None
     if _est5 is not None and (est is None or _est5 > est):
         est = _est5
-    live = daily.get(tkey)
+    live = iem_today_floor(daily.get(tkey), obh.get(tkey) or {}, h0, rmax)
     # TWC IS SHOWN, NOT TRUSTED. It was briefly folded into this floor and that
     # was a mistake, caught by backtest before it could cost anything.
     #
@@ -4084,7 +4102,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         _crow = _cli.get(tkey) or {}
         _casof = 99.0 if _crow.get('final') else _crow.get('asof')
         _ex = decided_by_exact(now.hour, peak_done,
-                               ((_ctoday, _casof), (_six, SIX_THROUGH.get(cfg['key'])), (daily.get(tkey), None)),
+                               ((_ctoday, _casof), (_six, SIX_THROUGH.get(cfg['key'])), (iem_today_floor(daily.get(tkey), obh.get(tkey) or {}, h0, rmax), None)),
                                rmax, _own5, {h: v for h, v in (obh.get(tkey) or {}).items() if h0 <= h <= now.hour})
         if _ex is not None:
             day_decided = True
