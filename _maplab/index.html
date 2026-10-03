@@ -159,7 +159,7 @@ var VIEWS = {
               subway:'la/rail_lines.json', stops:'la/rail_stops.json', bullets:'la/rail_colours.json',
               /* shaded relief, not terraces: the veils (la/land_relief.json) were built for
                  New York's 120 m of relief and barely registered against 3,000 m */
-              landReliefs:'la/land_index.json', veg:'la/veg_index.json', airfields:'la/airfields.json', surf:'la/surf_spots.json',
+              landReliefs:'la/land_index.json', land1m:'la/land1m_index.json', veg:'la/veg_index.json', airfields:'la/airfields.json', surf:'la/surf_spots.json',
               parks:'la/parks.json',
               wxGeo:'la/weather_geo.json', tz:'America/Los_Angeles',
               depthFade:[-119.60,33.20,-117.30,34.75],
@@ -737,7 +737,9 @@ function drawBathy(ctx, geo, proj, dark, view, ramp){
 var RELIEF_IMGS = {};
 function reliefImage(src){
   if (!RELIEF_IMGS[src]) RELIEF_IMGS[src] = new Promise(function(res, rej){
-    var im = new Image(); im.onload = function(){ res(im); }; im.onerror = rej; im.src = src;
+    var im = new Image(); im.onload = function(){ res(im); }; im.onerror = rej;
+    if (/^https?:/.test(src)) im.crossOrigin = 'anonymous';     /* the 1 m tiles live on the CDN: an untainted canvas, or every later pixel read throws */
+    im.src = src;
   });
   return RELIEF_IMGS[src];
 }
@@ -824,10 +826,13 @@ function drawReliefList(ctx, list, view, mpp, proj, stale, exclusive, alpha){
         var tl = proj({ x:r.w, y:r.n }), br = proj({ x:r.e, y:r.s });
         target.clearRect(tl.x, Math.round(tl.y), br.x - tl.x, Math.round(br.y) - Math.round(tl.y));
       }
+      /* `alpha` fades the COARSE tiers only; a `fine` tier (the 1 m lidar) is the detail itself and goes down whole */
+      target.globalAlpha = (r.fine || alpha == null) ? 1 : alpha;
       drawRelief(target, img, r, proj, r.maxMpp ? 24 : 48);
+      target.globalAlpha = 1;
     }).catch(function(){});
   });
-  return chain.then(function(){ if (off && !stale()){ ctx.save(); ctx.globalAlpha = alpha == null ? 1 : alpha; ctx.drawImage(off, 0, 0, cvW(ctx), cvH(ctx)); ctx.restore(); } });
+  return chain.then(function(){ if (off && !stale()) ctx.drawImage(off, 0, 0, cvW(ctx), cvH(ctx)); });
 }
 
 function drawBoroughs(ctx, geo, proj, dark, growPx){
@@ -4628,8 +4633,25 @@ function drawCard(style){
                  blocks as soft orange blotches. Full strength to 9 m/px, gone by 3 m/px; below that not drawn
                  (or fetched) at all. */
               var hsA = Math.max(0, Math.min(1, (VB.mpp - 3) / 6));
-              if (hsA <= 0.01) return;
-              return viewJson(vkey, 'landReliefs').then(function(list){
+              /* ONE METRE (lidar_bake.py, 2026-10-02): below 12 m/px the 3DEP lidar tiles join the list as its finest
+                 tier. Each one clears the coarse shading under it (the list is exclusive), so inside the home frame the
+                 fade above never shows; outside it, the coarse tiers still fade as before. The index is a grid and a
+                 list of the tiles present, expanded here, and fetched only once the view is this close. */
+              var want1m = VB.mpp < 12;
+              if (hsA <= 0.01 && !want1m) return;
+              return Promise.all([hsA > 0.01 ? viewJson(vkey, 'landReliefs') : null, want1m ? viewJson(vkey, 'land1m') : null]).then(function(L){
+                var list = (L[0] || []).slice(), X = L[1];
+                /* three levels (4 m, 2 m, 1 m), each only in its own band of scale, so a view loads 4-9 files */
+                if (X && X.levels) X.levels.forEach(function(Lv){
+                  if (VB.mpp > Lv.maxMpp || VB.mpp <= Lv.minMpp) return;
+                  Lv.tiles.forEach(function(t){
+                    var m = /^r(\d+)c(\d+)$/.exec(t); if (!m) return;
+                    var w = X.w0 + (+m[2]) * Lv.d, so = X.s0 + (+m[1]) * Lv.d;
+                    if (w > view.e || w + Lv.d < view.w || so > view.n || so + Lv.d < view.s) return;
+                    list.push({ img: Lv.base + t + '.png', w: w, s: so, e: w + Lv.d, n: so + Lv.d, maxMpp: Lv.maxMpp, fine: true });
+                  });
+                });
+                if (!list.length || stale()) return;
                 return drawReliefList(ctx, list, view, VB.mpp, out.project, stale, true, hsA);
               });
             })
