@@ -28,12 +28,45 @@ SEASON = {12: 'DJF', 1: 'DJF', 2: 'DJF', 3: 'MAM', 4: 'MAM', 5: 'MAM',
           6: 'JJA', 7: 'JJA', 8: 'JJA', 9: 'SON', 10: 'SON', 11: 'SON'}
 
 
+def _download(url, ua, timeout):
+    """IEM SAYS NO SOMETIMES (2026-10-02): the nightly refit runs eight studies back to back against the Iowa
+    Environmental Mesonet, which answers 429 'too many requests' or 503 'server over capacity'. Las Vegas's daily
+    file hit that two nights running and the city silently dropped out of kernel.json and dayahead.json. Wait and
+    retry the busy answers; anything else raises at once."""
+    import re, urllib.error
+    # ONE YEAR AT A TIME: a multi-year daily.py request is the one IEM refuses with 503 'server over capacity'
+    # (a single year answers in 0.4 s), so split it by year, pause between the pieces, and join them.
+    m = re.search(r'year1=(\d{4})&month1=(\d+)&day1=(\d+)&year2=(\d{4})&month2=(\d+)&day2=(\d+)', url)
+    if 'daily.py' in url and m and m.group(1) != m.group(4):
+        y1, y2, parts = int(m.group(1)), int(m.group(4)), []
+        for y in range(y1, y2 + 1):
+            a = (m.group(2), m.group(3)) if y == y1 else ('1', '1')
+            b = (m.group(5), m.group(6)) if y == y2 else ('12', '31')
+            u = url.replace(m.group(0), 'year1=%d&month1=%s&day1=%s&year2=%d&month2=%s&day2=%s' % (y, a[0], a[1], y, b[0], b[1]))
+            txt = _download(u, ua, timeout).decode('utf-8', 'replace').splitlines(True)
+            parts.extend(txt if not parts else txt[1:])
+            time.sleep(3)
+        return ''.join(parts).encode('utf-8')
+    for i, wait in enumerate((0, 20, 60, 120)):
+        if wait: time.sleep(wait)
+        try:
+            return urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': ua}), timeout=timeout).read()
+        except urllib.error.HTTPError as e:
+            if e.code not in (429, 500, 502, 503, 504) or i == 3: raise
+            print('  %s busy (%d), retrying in %ds' % (url.split('/')[2], e.code, (20, 60, 120)[i]), flush=True)
+
+
 def fetch(name, url):
     os.makedirs(CACHE, exist_ok=True)
     p = os.path.join(CACHE, name)
     if not os.path.exists(p) or time.time() - os.path.getmtime(p) > 20 * 3600:
-        req = urllib.request.Request(url, headers={'User-Agent': 'bluishvoid.com afternoon study'})
-        data = urllib.request.urlopen(req, timeout=240).read()
+        try:
+            data = _download(url, 'bluishvoid.com afternoon study', 240)
+        except Exception as e:
+            if not os.path.exists(p):
+                raise
+            print('  %s: download failed (%s), using the cached copy' % (name, e), flush=True)   # a day-old copy beats dropping the city
+            return io.open(p, encoding='utf-8', errors='replace').read()
         with open(p, 'wb') as fh:
             fh.write(data)
     return io.open(p, encoding='utf-8', errors='replace').read()

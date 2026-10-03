@@ -34,14 +34,47 @@ OFFSET, RESID_M, SD_FLOOR, HOURS = 0.70, 45, 0.25, (9, 12)
 SINCE = '2025-01-01'
 
 
+def _download(url, ua, timeout):
+    """IEM SAYS NO SOMETIMES (2026-10-02): the nightly refit runs eight studies back to back against the Iowa
+    Environmental Mesonet, which answers 429 'too many requests' or 503 'server over capacity'. Las Vegas's daily
+    file hit that two nights running and the city silently dropped out of kernel.json and dayahead.json. Wait and
+    retry the busy answers; anything else raises at once."""
+    import re, urllib.error
+    # ONE YEAR AT A TIME: a multi-year daily.py request is the one IEM refuses with 503 'server over capacity'
+    # (a single year answers in 0.4 s), so split it by year, pause between the pieces, and join them.
+    m = re.search(r'year1=(\d{4})&month1=(\d+)&day1=(\d+)&year2=(\d{4})&month2=(\d+)&day2=(\d+)', url)
+    if 'daily.py' in url and m and m.group(1) != m.group(4):
+        y1, y2, parts = int(m.group(1)), int(m.group(4)), []
+        for y in range(y1, y2 + 1):
+            a = (m.group(2), m.group(3)) if y == y1 else ('1', '1')
+            b = (m.group(5), m.group(6)) if y == y2 else ('12', '31')
+            u = url.replace(m.group(0), 'year1=%d&month1=%s&day1=%s&year2=%d&month2=%s&day2=%s' % (y, a[0], a[1], y, b[0], b[1]))
+            txt = _download(u, ua, timeout).decode('utf-8', 'replace').splitlines(True)
+            parts.extend(txt if not parts else txt[1:])
+            time.sleep(3)
+        return ''.join(parts).encode('utf-8')
+    for i, wait in enumerate((0, 20, 60, 120)):
+        if wait: time.sleep(wait)
+        try:
+            return urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': ua}), timeout=timeout).read()
+        except urllib.error.HTTPError as e:
+            if e.code not in (429, 500, 502, 503, 504) or i == 3: raise
+            print('  %s busy (%d), retrying in %ds' % (url.split('/')[2], e.code, (20, 60, 120)[i]), flush=True)
+
+
 def fetch(name, url):
     """Cached a day in _study/ (gitignored); the daily/hourly files are the
     same names and URLs afternoon_stats.py uses, so CI fetches each once."""
     os.makedirs(D, exist_ok=True)
     p = os.path.join(D, name)
     if not os.path.exists(p) or time.time() - os.path.getmtime(p) > 20 * 3600:
-        req = urllib.request.Request(url, headers={'User-Agent': 'bluishvoid.com kernel study'})
-        data = urllib.request.urlopen(req, timeout=300).read()
+        try:
+            data = _download(url, 'bluishvoid.com kernel study', 300)
+        except Exception as e:
+            if not os.path.exists(p):
+                raise
+            print('  %s: download failed (%s), using the cached copy' % (name, e), flush=True)   # a day-old copy beats dropping the city
+            return p
         with open(p, 'wb') as fh:
             fh.write(data)
     return p
@@ -234,6 +267,17 @@ def main():
                 doc['cities'][c + '_high'] = r
         except Exception as e:
             print('%s: kernel study failed (%s)' % (c, e))
+    # A CITY THAT FAILED KEEPS LAST NIGHT'S RULING (2026-10-02): dropping it left the bake with no ruling at all for
+    # that city (Las Vegas, 10-01 and 10-02, an IEM 503). Marked 'carried' with the night it was really made.
+    if not only:
+        try:
+            old = json.load(open(OUT))
+            for k, v in (old.get('cities') or {}).items():
+                if k not in doc['cities'] and isinstance(v, dict):
+                    doc['cities'][k] = dict(v, carried=v.get('carried') or old.get('built'))
+                    print('%s: kept the ruling from %s' % (k, doc['cities'][k]['carried']))
+        except Exception:
+            pass
     if doc['cities'] and not only:
         with open(OUT, 'w') as fh:
             json.dump(doc, fh, indent=0, sort_keys=True)
