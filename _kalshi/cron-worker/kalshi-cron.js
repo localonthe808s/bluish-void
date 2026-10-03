@@ -341,6 +341,37 @@ const OBS_MARKETS = [
 //     so the rest of the worker keeps seeing oldest-last readings stamped in
 //     the market's own zone, which is what every caller already assumes.
 const NWS_UA = 'bluishvoid-kalshi (nicolas7iana@outlook.com)';
+// MADIS, FIRST, FOR LAS VEGAS AND AUSTIN (2026-10-02). NOAA's MADIS public query serves the same 5-minute ASOS rows the
+// weather service does, and gets them out sooner: raced for two hours, the median reading reached MADIS 12.8 min after
+// it was taken at KLAS and 12.2 at KAUS, against 19.6 and 18.0 on api.weather.gov; MADIS was first on 15 of 19 and 19
+// of 22 readings, by 5-8 minutes. Central Park is not in MADIS's public data (its fast stream is government-only), so
+// New York is unchanged. MADIS is slow to answer (~12 s) and dropped 2 requests in 2 hours, so it runs ALONGSIDE the
+// weather service, never instead of it: readings from both are merged minute by minute. One station per query (a list
+// is ignored); the answer is kept 60 s in the edge cache so the sheet's minute poll does not wait on it each time.
+const MADIS_STATIONS = new Set(['KLAS', 'KAUS']);
+const MADIS_Q = 'https://madis-data.ncep.noaa.gov/madisPublic1/cgi-bin/madisXmlPublicDir?rdr=&time=0&minbck=-29&minfwd=0&recwin=4'
+  + '&timefilter=0&state=&dfltrsel=3&stasel=1&pvdrsel=0&varsel=2&qctype=0&qcsel=0&xml=5&csvmiss=0&stanam=';
+async function madisRecent(stid) {
+  const key = new Request(`https://madis-cache.bluishvoid.invalid/${stid}`);
+  let cache = null;
+  try { cache = caches.default; const hit = await cache.match(key); if (hit) return await hit.json(); } catch (e) { /* no cache: fetch */ }
+  const ac = new AbortController(), timer = setTimeout(() => ac.abort(), 12000);   // 30 minutes back answers in ~4 s; 2 hours took 20
+  try {
+    const r = await fetch(MADIS_Q + stid, { signal: ac.signal,
+      headers: { 'Authorization': 'Basic ' + btoa('anonymous:anonymous'), 'User-Agent': 'bluishvoid-kalshi' } });
+    if (!r.ok) return [];
+    const rows = [];
+    for (const line of (await r.text()).split('\n')) {
+      const p = line.split(',').map((x) => x.trim());
+      if (p.length < 11 || p[0] !== stid || !/^ASOS/.test(p[3])) continue;
+      const m = /^(\d\d)\/(\d\d)\/(\d{4})$/.exec(p[1]), k = Number(p[9]);
+      if (!m || !/^\d\d:\d\d$/.test(p[2]) || !(k > 150 && k < 350)) continue;
+      rows.push([`${m[3]}-${m[1]}-${m[2]}T${p[2]}:00Z`, Math.round((k - 273.15) * 100) / 100]);
+    }
+    if (cache) { try { await cache.put(key, new Response(JSON.stringify(rows), { headers: { 'content-type': 'application/json', 'cache-control': 'max-age=60' } })); } catch (e) { /* fine */ } }
+    return rows;
+  } catch (e) { return []; } finally { clearTimeout(timer); }
+}
 async function readSensors(recentMin, withSeries) {
   const out = {};
   const tzOf = {};
@@ -349,30 +380,39 @@ async function readSensors(recentMin, withSeries) {
   await Promise.all(Object.keys(tzOf).map(async (stid) => {
     const tz = tzOf[stid];
     try {
-      const r = await fetch(`https://api.weather.gov/stations/${stid}/observations?start=${start}`,
-        { headers: { 'User-Agent': NWS_UA, 'Accept': 'application/geo+json' } });
-      if (!r.ok) return;
-      const j = await r.json();
+      // both sources at once; either can be missing
+      const [nws, mad] = await Promise.all([
+        fetch(`https://api.weather.gov/stations/${stid}/observations?start=${start}`,
+          { headers: { 'User-Agent': NWS_UA, 'Accept': 'application/geo+json' } })
+          .then((r) => r.ok ? r.json() : null).catch(() => null),
+        MADIS_STATIONS.has(stid) ? madisRecent(stid) : Promise.resolve([])
+      ]);
       // Local calendar date and local HH:MM for a UTC stamp, in the station's
       // own zone -- the same two fields the Synoptic `obtimezone=local` form
       // used to hand back already split.
       const dayFmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
       const hmFmt = new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
       const today = dayFmt.format(new Date());
-      // Oldest first, so `last` ends on the newest reading the way the old
-      // top-to-bottom Synoptic loop did.
-      const feats = (j.features || []).slice().reverse();
-      let mx = null, mxAt = null, last = null, lastAt = null, n = 0;
-      const series = [], seen = new Set();
-      for (const f of feats) {
+      // every reading from both sources as [time, Celsius]; the weather service's first, so on a minute both carry,
+      // its reading is the one kept (the values are the same sensor's)
+      const obs = [];
+      for (const f of ((nws && nws.features) || [])) {
         const p = (f && f.properties) || {};
         const c = p.temperature && p.temperature.value;
-        if (typeof c !== 'number' || !p.timestamp) continue;
-        const d = new Date(p.timestamp);
+        if (typeof c === 'number' && p.timestamp) obs.push([new Date(p.timestamp), c, 'nws']);
+      }
+      for (const [t, c] of mad) obs.push([new Date(t), c, 'madis']);
+      // Oldest first, so `last` ends on the newest reading the way the old
+      // top-to-bottom Synoptic loop did.
+      obs.sort((a, b) => a[0] - b[0] || (a[2] === 'nws' ? -1 : 1));
+      let mx = null, mxAt = null, last = null, lastAt = null, n = 0, nMadis = 0;
+      const series = [], seen = new Set();
+      for (const [d, c, src] of obs) {
         if (isNaN(d)) continue;
         const day = dayFmt.format(d), hm = hmFmt.format(d);
         // A minute can arrive twice (the :51 METAR alongside a :50 five-minute
-        // row is not a dupe, but a re-issued ob is). Last one in wins.
+        // row is not a dupe, but a re-issued ob is, and so is the same reading
+        // from both sources). First one in wins.
         const key = day + hm;
         if (seen.has(key)) continue;
         seen.add(key);
@@ -383,13 +423,14 @@ async function readSensors(recentMin, withSeries) {
         // hourly METARs land on x.x6 and x.x8, not on a tenth of a degree F.
         const v = Math.round((c * 9 / 5 + 32) * 100) / 100;
         const hh = Number(hm.slice(0, 2));
-        n++;
+        n++; if (src === 'madis') nMadis++;
         if (day === today && hh >= 7 && (mx == null || v > mx)) { mx = v; mxAt = hm; }
         last = v; lastAt = hm;
         if (withSeries && day === today) series.push([hh * 60 + Number(hm.slice(3, 5)), v]);
       }
       if (!n) return;
       out[stid] = { max7: mx, maxAt: mxAt, last, at: lastAt, n };
+      if (MADIS_STATIONS.has(stid)) out[stid].madis = nMadis;     // readings only MADIS had
       if (withSeries) out[stid].series = series;
     } catch (e) { /* one dead station must not cost the read */ }
   }));
