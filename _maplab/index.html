@@ -743,10 +743,10 @@ function reliefImage(src){
 }
 function drawRelief(ctx, img, r, proj, strips){
   strips = strips || 48;
-  var CW = ctx.canvas.width, CH = ctx.canvas.height;
+  var CW = cvW(ctx), CH = cvH(ctx);
   var tl = proj({ x:r.w, y:r.n }), br = proj({ x:r.e, y:r.s });
   if (br.x < 0 || br.y < 0 || tl.x > CW || tl.y > CH) return;   // survey not in frame
-  var off = document.createElement('canvas'); off.width = CW; off.height = CH;
+  var off = twinOf(ctx);                                         // device-dense on the widget's card (2026-10-02)
   var g = off.getContext('2d');
   for (var i = 0; i < strips; i++){
     var lat0 = r.n + (r.s - r.n) * (i / strips);
@@ -780,13 +780,13 @@ function drawRelief(ctx, img, r, proj, strips){
     fade(tl.x,      br.y - fy, br.x,      br.y,      0, br.y, 0, br.y - fy);   // south
     g.globalCompositeOperation = 'source-over';
   }
-  ctx.drawImage(off, 0, 0);
+  ctx.drawImage(off, 0, 0, CW, CH);
 }
 
 /* A TIERED RELIEF (Los Angeles): an index of images, coarse to fine, each carrying the
    m/px below which it is worth decoding. Drawn in order, so the finest model in frame is
    the one left showing. Used twice -- the seafloor and the mountains. */
-function drawReliefList(ctx, list, view, mpp, proj, stale, exclusive){
+function drawReliefList(ctx, list, view, mpp, proj, stale, exclusive, alpha){
   /* `exclusive` is for TRANSLUCENT relief (the mountains). Opaque tiers can simply lie on
      each other; alpha tiers STACK, and the hills came out shaded two and three times over
      wherever the 3", 1" and 1/3" images overlapped. So the list is assembled on its own
@@ -795,7 +795,7 @@ function drawReliefList(ctx, list, view, mpp, proj, stale, exclusive){
      it is baked with the complementary ramp (see la_bake.py, region). */
   var target = ctx, off = null;
   if (exclusive){
-    off = document.createElement('canvas'); off.width = ctx.canvas.width; off.height = ctx.canvas.height;
+    off = twinOf(ctx);
     target = off.getContext('2d');
   }
   var chain = Promise.resolve();
@@ -827,7 +827,7 @@ function drawReliefList(ctx, list, view, mpp, proj, stale, exclusive){
       drawRelief(target, img, r, proj, r.maxMpp ? 24 : 48);
     }).catch(function(){});
   });
-  return chain.then(function(){ if (off && !stale()) ctx.drawImage(off, 0, 0); });
+  return chain.then(function(){ if (off && !stale()){ ctx.save(); ctx.globalAlpha = alpha == null ? 1 : alpha; ctx.drawImage(off, 0, 0, cvW(ctx), cvH(ctx)); ctx.restore(); } });
 }
 
 function drawBoroughs(ctx, geo, proj, dark, growPx){
@@ -3096,6 +3096,15 @@ function makeMachinery(ctx, geo, R, proj, mpp, view, mode, frontRuns, cold, moti
 /* A canvas may be DENSER than the map's 1100 x 967 units (see hiCanvas in drawCard); anything
    that asks a canvas how big it is, to keep a label inside the frame, wants the map's units. */
 function cvW(ctx){ return ctx.canvas._lw || ctx.canvas.width; }
+/* an offscreen canvas the same DEVICE size as ctx's, pre-scaled the same way, so a painter works in the map's
+   1100-unit space on it and the result goes back with ctx.drawImage(c, 0, 0, cvW(ctx), cvH(ctx)). On a plain lab
+   card (no _lw) it is exactly the W x H canvas it replaces. */
+function twinOf(ctx){
+  var c = document.createElement('canvas'); c.width = ctx.canvas.width; c.height = ctx.canvas.height;
+  c._lw = cvW(ctx); c._lh = cvH(ctx);
+  c.getContext('2d').setTransform(c.width / c._lw, 0, 0, c.height / c._lh, 0, 0);
+  return c;
+}
 function cvH(ctx){ return ctx.canvas._lh || ctx.canvas.height; }
 /* SKY NAMES: a mark and a name beside it, in the neighbourhood names' own hand. A place is
    a dot, a summit a small open triangle. Same two-step as drawHoodNames -- claim the space
@@ -3747,7 +3756,7 @@ function radarOverlay(ctx, W, H, X0, Y0, X1, Y1){
     + Math.round(X1) + ',' + Math.round(Y1) + '&WIDTH=' + W + '&HEIGHT=' + H + '&FORMAT=image/png&TRANSPARENT=true';
   var snapOf = function(){
     var snap = document.createElement('canvas'); snap.width = W; snap.height = H;
-    snap.getContext('2d').drawImage(ctx.canvas, 0, 0);
+    snap.getContext('2d').drawImage(ctx.canvas, 0, 0, W, H);
     return snap;
   };
   /* one way of showing a run of frames, whatever made them: the map underneath, the cloud
@@ -4406,7 +4415,15 @@ function drawCard(style){
   card.appendChild(row);
   document.getElementById('grid').appendChild(card);
 
+  /* THE MAP ITSELF AT DEVICE RESOLUTION (user 2026-10-02: "make sure [LA's] zoom clarity is as high as NYCs").
+     The lettering moved to dense overlays on 09-19, but the map under it -- roads, coast, relief -- was still drawn
+     on a 1100 x 967 card the browser stretched about 2x on a retina screen, while THE CITY composes at the card's
+     width x dpr. In the widget the card now gets a backing store HS times denser with its context pre-scaled, so
+     every painter still works in the 1100-unit space (protomaps' own drawCanvas does exactly this); _lw/_lh tell
+     cvW/cvH and twinOf the logical size. A plain lab page -- what the pyramid bake drives -- is unchanged. */
+  if (window.LAB_EMBED && HS > 1){ cv.width = Math.round(W * HS); cv.height = Math.round(H * HS); cv._lw = W; cv._lh = H; }
   var ctx = cv.getContext('2d');
+  if (cv._lw) ctx.setTransform(cv.width / W, 0, 0, cv.height / H, 0, 0);
   var R = 6378137, PI = Math.PI;
   var lon2x = function(lo){ return lo * R * PI / 180; };
   var x2lon = function(X){ return X / R * 180 / PI; };
@@ -4453,7 +4470,7 @@ function drawCard(style){
   /* While the mouse is down there is no time to redraw — a full pass is a second or
      more — so the last finished bitmap is transformed into place as a preview, and the
      real render happens once the pointer goes quiet. */
-  var last = document.createElement('canvas'); last.width = W; last.height = H;
+  var last = document.createElement('canvas'); last.width = cv.width; last.height = cv.height;   /* as dense as the card */
   var lastBox = null, timer = null, busy = 0;
   function preview(){
     if (!lastBox) return;
@@ -4606,8 +4623,14 @@ function drawCard(style){
               /* THE MOUNTAINS, as light and shade (la/land_index.json). Same slot as the
                  veils: over the mask, the parks and the blocks, UNDER the street grid, so
                  a canyon road still reads as a white thread up a shaded slope. */
+              /* FADED AT STREET LEVEL (user 2026-10-02: "fade the hillshade"). The finest tier is the 1/3" survey,
+                 about 10 m a pixel, so past ~9 m/px it is only being enlarged, and at 2 m/px it lay across the
+                 blocks as soft orange blotches. Full strength to 9 m/px, gone by 3 m/px; below that not drawn
+                 (or fetched) at all. */
+              var hsA = Math.max(0, Math.min(1, (VB.mpp - 3) / 6));
+              if (hsA <= 0.01) return;
               return viewJson(vkey, 'landReliefs').then(function(list){
-                return drawReliefList(ctx, list, view, VB.mpp, out.project, stale, true);
+                return drawReliefList(ctx, list, view, VB.mpp, out.project, stale, true, hsA);
               });
             })
             .then(function(){ return wetFor(vkey); })
@@ -4631,7 +4654,7 @@ function drawCard(style){
                  twice and cut against the borough mask: the full grid kept
                  INSIDE, motorways only and dimmed to a third kept OUTSIDE. */
               var roadCv = function(rules){
-                var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+                var cv = twinOf(ctx);                          /* as dense as the card: the street grid is most of what is seen */
                 return new protomapsL.Static({ url: document.getElementById('src').value,
                   paintRules: rules, labelRules: [], maxDataZoom: 14 })
                   .drawContextBounds(cv.getContext('2d'),
@@ -4656,8 +4679,8 @@ function drawCard(style){
                 if (stale()) return;
                 var ci = inCv.getContext('2d');
                 ci.globalCompositeOperation = 'destination-in';
-                ci.drawImage(boroMaskCv, 0, 0);
-                ctx.drawImage(inCv, 0, 0);
+                ci.drawImage(boroMaskCv, 0, 0, W, H);
+                ctx.drawImage(inCv, 0, 0, W, H);
               });
             })
             .then(function(){
