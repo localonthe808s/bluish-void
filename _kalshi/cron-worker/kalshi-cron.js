@@ -1022,10 +1022,23 @@ function nyEventTicker(dayIso) {
   const [y, m, d] = dayIso.split('-').map(Number);
   return `KXHIGHNY-${String(y).slice(2)}${['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][m - 1]}${String(d).padStart(2, '0')}`;
 }
-async function kpub(path) {
-  const r = await fetch(`${KAPI}${path}`, { headers: { 'User-Agent': 'bluishvoid-dark-flow', 'Accept': 'application/json' } });
-  if (!r.ok) throw new Error(`kalshi ${r.status}`);
-  return r.json();
+async function kpub(env, path) {
+  /* SIGNED, NOT ANONYMOUS (2026-10-03). The first live morning every tick died on "kalshi 429": Kalshi throttles
+     anonymous calls from Cloudflare's shared egress (the same request from home answered 200 eight times running),
+     so the record never got past fetching the market list. Signed with the worker's own READ-ONLY key the calls
+     count against our account's limit instead. One retry after a short wait on a 429 either way. */
+  const [p, q] = path.split('?');
+  for (let i = 0; i < 2; i++) {
+    try {
+      if (env && env.KALSHI_API_KEY_ID && env.KALSHI_PRIVATE_KEY) return await kalshiGet(env, '/trade-api/v2' + p, q ? '?' + q : '');
+      const r = await fetch(`${KAPI}${path}`, { headers: { 'User-Agent': 'bluishvoid-dark-flow', 'Accept': 'application/json' } });
+      if (!r.ok) throw new Error(`kalshi ${r.status}`);
+      return r.json();
+    } catch (e) {
+      if (i === 0 && /429/.test(String(e))) { await new Promise((res) => setTimeout(res, 1500)); continue; }
+      throw e;
+    }
+  }
 }
 async function darkTick(env, sched) {
   if (!env.OBS) return 'no KV';
@@ -1035,7 +1048,7 @@ async function darkTick(env, sched) {
   const rec = (await env.OBS.get(key, { type: 'json' })) || { day, event: nyEventTicker(day), markets: null, bursts: [], releases: [], twc: null };
   const before = JSON.stringify(rec);
   if (!rec.markets) {
-    const j = await kpub(`/markets?event_ticker=${rec.event}`);
+    const j = await kpub(env, `/markets?event_ticker=${rec.event}`);
     rec.markets = (j.markets || []).map((m) => ({ tk: m.ticker, lab: rungLabel(rungBounds(m)) }));
   }
   // THE PUBLIC CLOCK, kept in the record so the sheet can draw it
@@ -1075,7 +1088,7 @@ async function darkTick(env, sched) {
   const mStart = (new Date(sched).getUTCMinutes() % 5 === 1) ? m0 - 60000 : m0;
   for (const mk of rec.markets) {
     let tr;
-    try { tr = (await kpub(`/markets/trades?ticker=${mk.tk}&min_ts=${mStart / 1000}&max_ts=${m1 / 1000 - 1}&limit=1000`)).trades || []; }
+    try { tr = (await kpub(env, `/markets/trades?ticker=${mk.tk}&min_ts=${mStart / 1000}&max_ts=${m1 / 1000 - 1}&limit=1000`)).trades || []; }
     catch (e) { continue; }
     for (let mm = mStart; mm < m1; mm += 60000) {
     let net = 0, ys = 0, yn = 0, ns = 0, nn = 0;
