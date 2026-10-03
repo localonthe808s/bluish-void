@@ -139,8 +139,20 @@ def bake_webb_schedule():
     idx = get(SCHED_IDX).decode('utf-8', 'replace')
     links = sorted(set(re.findall(r'href="([^"]*_documents/(\d{8})_report_\d{8}\.txt)"', idx)), key=lambda x: x[1])
     if not links: raise RuntimeError('no schedule links on the index page')
-    href, week = links[-1]
-    url = href if href.startswith('http') else 'https://www.stsci.edu' + href
+    # STScI posts next week's file before this week ends, and the newest can START in the future (2026-10-03: the
+    # 10-05 file was newest; the card went blank and the WEBB tab vanished). Read the last two and merge them.
+    rows = []
+    for href, week in links[-2:]:
+        url = href if href.startswith('http') else 'https://www.stsci.edu' + href
+        try: rows += _sched_rows(url)
+        except Exception as e: print('  schedule file failed', url[-40:], e)
+    rows = sorted({(r['visit'], r['t']): r for r in rows}.values(), key=lambda r: r['t'])
+    if len(rows) < 5: raise RuntimeError('schedule parsed to %d rows' % len(rows))
+    return {'src': url, 'page': SCHED_IDX, 'week': week, 'start': rows[0]['t'],
+            'end': max(r['t'] + r['dur'] * 1000 for r in rows), 'rows': rows}
+
+
+def _sched_rows(url):
     txt = get(url).decode('utf-8', 'replace').split('\n')
     hi = next(i for i, l in enumerate(txt) if l.startswith('VISIT ID'))
     dashes = txt[hi + 1]
@@ -158,10 +170,7 @@ def bake_webb_schedule():
         rows.append({'t': ms(t), 'dur': dur, 'inst': f.get('SCIENCE INSTRUMENT AND MODE', ''),
                      'target': f.get('TARGET NAME', ''), 'cat': f.get('CATEGORY', ''),
                      'kw': f.get('KEYWORDS', ''), 'visit': f.get('VISIT ID', '')})
-    if len(rows) < 5: raise RuntimeError('schedule parsed to %d rows' % len(rows))
-    rows.sort(key=lambda r: r['t'])
-    return {'src': url, 'page': SCHED_IDX, 'week': week, 'start': rows[0]['t'],
-            'end': max(r['t'] + r['dur'] * 1000 for r in rows), 'rows': rows}
+    return rows
 
 
 # ── NASA MAST: what Hubble and Webb observed lately ──────────────────────────
@@ -184,6 +193,7 @@ def mjd_ms(m): return int((m - 40587) * 86400000)
 
 def bake_mast(coll):
     rows = mast(coll)
+    if not rows: rows = mast(coll, 6)              # Webb's MAST rows can lag past two days (0 on 2026-10-03)
     newest = {}
     for r in rows:                                  # one line per target: its latest visit
         k = r['target_name']
@@ -309,6 +319,7 @@ def bake_roman_card():
 SRC = {'nasa':    {'from': 'NASA',     'credit': 'NASA',                  'lic': 'public domain'},
        'esa':     {'from': 'ESA/Webb', 'credit': 'ESA/Webb, NASA & CSA',  'lic': 'CC BY 4.0'},
        'esaint':  {'from': 'ESA',      'credit': 'ESA/Euclid/Euclid Consortium/NASA', 'lic': 'CC BY-SA 3.0 IGO'},
+       'esahst':  {'from': 'ESA/Hubble', 'credit': 'ESA/Hubble & NASA',  'lic': 'CC BY 4.0'},
        'noirlab': {'from': 'NOIRLab',  'credit': 'NSF\u2013DOE Vera C. Rubin Observatory/NOIRLab/SLAC/AURA', 'lic': 'CC BY 4.0'}}
 # NOIRLab's feeds cover all of its telescopes and its outreach: Rubin items only, and no event photos
 RUBIN_ONLY = re.compile(r'\brubin\b', re.I)
@@ -317,7 +328,8 @@ EUCLID_FEED = 'https://www.esa.int/rssfeed/Science_Exploration/Space_Science/Euc
 FEEDS = {
     'webb':   {'photos': [('esa', 'https://esawebb.org/images/feed/')],
                'news':   [('nasa', 'https://science.nasa.gov/blogs/webb/feed/'), ('esa', 'https://esawebb.org/news/feed/')]},
-    'hubble': {'photos': [('nasa', 'https://science.nasa.gov/category/missions/hubble/feed/')],
+    # ESA/Hubble's picture of the month (weekly until 2025; its old /potw/ feed stopped at 2552a, this one is current)
+    'hubble': {'photos': [('nasa', 'https://science.nasa.gov/category/missions/hubble/feed/'), ('esahst', 'https://feeds.feedburner.com/hubble_potw')],
                'news':   [('nasa', 'https://science.nasa.gov/category/missions/hubble/feed/')]},
     'roman':  {'photos': [('nasa', 'https://science.nasa.gov/blogs/roman/feed/')],
                'news':   [('nasa', 'https://science.nasa.gov/blogs/roman/feed/')]},
@@ -333,6 +345,11 @@ FEEDS = {
                 'news':   [('nasa', 'https://science.nasa.gov/category/missions/chandra/feed/')]},
     # Voyager takes no new pictures (its cameras were switched off in 1990): news only
     'voyager': {'photos': [], 'news': [('nasa', 'https://science.nasa.gov/blogs/voyager/feed/')]},
+    # added 2026-10-03 (user: "do all of them"): Juno at Jupiter, New Horizons in the Kuiper belt
+    'juno':    {'photos': [('nasa', 'https://science.nasa.gov/category/missions/juno/feed/')],
+                'news':   [('nasa', 'https://science.nasa.gov/category/missions/juno/feed/')]},
+    'nh':      {'photos': [('nasa', 'https://science.nasa.gov/category/missions/new-horizons/feed/')],
+                'news':   [('nasa', 'https://science.nasa.gov/category/missions/new-horizons/feed/')]},
 }
 
 
@@ -372,6 +389,9 @@ def _thumb(src, img):
     if src == 'esa':
         m = re.search(r'/archives/images/[^/]+/([^/?]+)\.(?:jpg|png|tif)', img)
         return 'https://cdn.esawebb.org/archives/images/thumb300y/%s.jpg' % m.group(1) if m else img
+    if src == 'esahst':
+        m = re.search(r'/archives/images/[^/]+/([^/?]+)\.(?:jpg|png|tif)', img)
+        return 'https://cdn.esahubble.org/archives/images/thumb300y/%s.jpg' % m.group(1) if m else img
     if src == 'noirlab':
         m = re.search(r'/archives/images/[^/]+/([^/?]+)\.(?:jpg|png|tif)', img)
         return 'https://storage.noirlab.edu/media/archives/images/thumb300y/%s.jpg' % m.group(1) if m else img
@@ -388,7 +408,7 @@ NOT_SKY = re.compile(r'launch|rocket|falcon|booster|lift-?off|launch ?pad|clean 
                      r'\btps\b|heat shield|fitting|spacecraft|mission control|logo|meatball|insignia|astronaut|facility|'
                      r'trajectory animation|mid-course|artist.s (?:concept|illustration|rendering) of (?:the )?(?:roman|parker|webb|hubble)', re.I)
 IS_SKY = re.compile(r'galax|nebula|cluster|supernova|\bstars?\b|stellar|planet|exoplanet|\bmoons?\b|jupiter|saturn|uranus|neptune|'
-                    r'comet|asteroid|kuiper|\bsun\b|solar wind|corona|\bcme\b|wispr|flare|spectr|light curve|\bdata\b|chart|graph|'
+                    r'comet|asteroid|kuiper|\bio\b|europa|ganymede|callisto|pluto|charon|arrokoth|aurora|\bsun\b|solar wind|corona|\bcme\b|wispr|flare|spectr|light curve|\bdata\b|chart|graph|'
                     r'\bplot\b|\bmap\b|visuali|simulat|deep field|universe|cosmic|\bdust\b|black hole|quasar|lens|potm|infrared|'
                     r'x-ray|ultraviolet|protostar|disk|jet\b|remnant|dwarf|milky way|heliosphere|magnetic', re.I)
 
@@ -542,11 +562,11 @@ def bake_chandra(prev):
 
 
 # ── VOYAGER 1 + 2: distance from Earth and Sun, daily, off JPL Horizons ─────────────────
-def bake_voyager():
+def bake_voyager(pairs=(('v1', '-31'), ('v2', '-32'))):
     start = (NOW - dt.timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
     stop = start + dt.timedelta(days=62)
-    out = {'src': 'JPL Horizons, targets -31 and -32'}
-    for key, cmd in (('v1', '-31'), ('v2', '-32')):
+    out = {'src': 'JPL Horizons, targets ' + ' and '.join(c for _, c in pairs)}
+    for key, cmd in pairs:
         e = horizons(cmd, '500@399', start.strftime('%Y-%m-%d'), stop.strftime('%Y-%m-%d'), '1d')
         h = horizons(cmd, '500@10', start.strftime('%Y-%m-%d'), stop.strftime('%Y-%m-%d'), '1d')
         out[key] = {'t0': ms(e[0][0]), 'step': 86400000, 'n': len(e),
@@ -554,6 +574,57 @@ def bake_voyager():
                     'sun_km': [round(math.sqrt(r[1]**2 + r[2]**2 + r[3]**2)) for r in h],
                     'kms': round(math.sqrt(h[0][4]**2 + h[0][5]**2 + h[0][6]**2), 2)}
     return out
+
+
+# ── JUNO + NEW HORIZONS (2026-10-03): same daily Earth/Sun ranges as Voyager -- light-time is the card's number.
+#    Juno also gets its range from Jupiter, which says where in its 33-day orbit it is (perijove = the close pass).
+def bake_far():
+    out = bake_voyager((('juno', '-61'), ('nh', '-98')))
+    start = (NOW - dt.timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+    j = horizons('-61', '500@599', start.strftime('%Y-%m-%d'), (start + dt.timedelta(days=62)).strftime('%Y-%m-%d'), '1h')
+    rj = [math.sqrt(r[1]**2 + r[2]**2 + r[3]**2) for r in j]
+    out['juno']['perijoves'] = [ms(j[i][0]) for i in range(1, len(rj) - 1) if rj[i] < 200000 and rj[i] <= rj[i - 1] and rj[i] < rj[i + 1]]
+    out['juno']['jup_km'] = [round(rj[i]) for i in range(0, len(rj), 24)]
+    return out
+
+
+# ── THE NEWEST PUBLIC FRAME (2026-10-03): what MAST released in the last ten days -- a calibrated, combined image (Webb
+#    i2d / Hubble drz), never a raw flt or a parallel field -- downsized here and committed, so the page never hotlinks a
+#    multi-MB preview. One filter, so it is greyscale: the card says which. Public domain (NASA/STScI).
+def bake_newest(coll):
+    from PIL import Image
+    import io
+    now = time.time() / 86400 + 40587
+    req = {'service': 'Mast.Caom.Filtered', 'format': 'json', 'pagesize': 2000, 'page': 1,
+           'params': {'columns': 'instrument_name,target_name,t_min,obs_id,jpegURL,t_obs_release,filters,target_classification,proposal_id,obs_title',
+                      'filters': [{'paramName': 'obs_collection', 'values': [coll]}, {'paramName': 'intentType', 'values': ['science']},
+                                  {'paramName': 'dataproduct_type', 'values': ['image']}, {'paramName': 'calib_level', 'values': [3]},
+                                  {'paramName': 't_obs_release', 'values': [{'min': now - 10, 'max': now}]}]}}
+    j = json.loads(get('https://mast.stsci.edu/api/v0/invoke', data=urllib.parse.urlencode({'request': json.dumps(req)}).encode(), timeout=180))
+    rows = [r for r in j.get('data') or [] if r.get('jpegURL') and re.search(r'_(i2d|drz|drc)\.jpg$', r['jpegURL'])
+            and (r['target_name'] or 'ANY').upper() not in ('ANY', 'NONE') and not re.search(r'CALIB|DARK|FLAT|BIAS|PARALLEL|UNIDENTIFIED', (r['target_classification'] or '').upper())]
+    for r in sorted(rows, key=lambda r: -r['t_obs_release'])[:6]:
+        try:
+            raw = get('https://mast.stsci.edu/api/v0.1/Download/file?uri=' + urllib.parse.quote(r['jpegURL'], safe=':/'), timeout=120)
+            im = Image.open(io.BytesIO(raw)).convert('L')
+        except Exception as e:
+            print('  newest', coll, r['obs_id'], e); continue
+        px = list(im.resize((64, 64)).getdata())
+        if max(px) - min(px) < 40: continue                     # a blank or saturated preview
+        # MAST pads the mosaic with white: flood it dark from the border only -- a blanket threshold also
+        # punched black holes in every saturated star core
+        from PIL import ImageDraw
+        W, H = im.size
+        for xy in [(0, 0), (W - 1, 0), (0, H - 1), (W - 1, H - 1), (W // 2, 0), (W // 2, H - 1), (0, H // 2), (W - 1, H // 2)]:
+            if im.getpixel(xy) >= 245: ImageDraw.floodfill(im, xy, 0, thresh=12)
+        im.thumbnail((900, 900))
+        rel = '_solarlab/newest/%s.jpg' % coll.lower()
+        (ROOT / '_solarlab/newest').mkdir(exist_ok=True)
+        im.save(ROOT / rel, 'JPEG', quality=80, optimize=True, progressive=True)
+        return {'img': '/' + rel, 'v': mjd_ms(r['t_obs_release']) // 1000, 'target': r['target_name'], 'inst': r['instrument_name'], 'filter': r['filters'],
+                't_obs': mjd_ms(r['t_min']), 't_rel': mjd_ms(r['t_obs_release']), 'obs_id': r['obs_id'], 'prop': r['proposal_id'],
+                'title': (r['obs_title'] or '').strip(), 'cls': r['target_classification'] or ''}
+    raise RuntimeError('no usable %s frame in the last 10 days' % coll)
 
 
 # ── EUCLID: range from Earth (it sits in a halo round L2, like Webb) ────────────────────
@@ -596,7 +667,8 @@ def main():
     for key, fn in (('webb', bake_webb_schedule), ('parker', bake_parker), ('roman_card', bake_roman_card), ('media', bake_media),
                     ('hubble_obs', lambda: bake_mast('HST')),
                     ('chandra', lambda: bake_chandra(prev)), ('voyager', bake_voyager),
-                    ('euclid', bake_euclid), ('rubin', bake_rubin),
+                    ('euclid', bake_euclid), ('rubin', bake_rubin), ('far', bake_far),
+                    ('webb_new', lambda: bake_newest('JWST')), ('hubble_new', lambda: bake_newest('HST')),
                     ('webb_obs', lambda: bake_mast('JWST'))):
         try:
             out[key] = fn(); print('ok', key)
