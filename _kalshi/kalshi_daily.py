@@ -184,7 +184,11 @@ MARKETS = [
 ACTIVE = ('ny_high', 'las_high', 'aus_high')
 MARKETS = [m for m in MARKETS if m['key'] in ACTIVE]
 
-WORKERS = 4                               # markets in flight at once (see main)
+WORKERS = 1                               # markets in flight at once (see main). 1, not 4 (2026-10-02, found by the
+                                          # nightly review): SD_MULT, HOURLY_PEAK_OFFSET, OFFSET_SD and the tuned
+                                          # BIAS_K/SWING_DAMP/SD_FLOOR are module globals set per market, so parallel
+                                          # markets read each other's -- Austin's 10-01 noon lock ran on Las Vegas's
+                                          # sd_mult (sd 0.59 where its own 1.25 gave 0.98) while stamping 1.25.
 BIAS_K  = int(os.environ.get('BV_BIAS_K', '30') or 30)   # days in the rolling bias window (BV_BIAS_K for backlog tests) (21 -> 30 on 2026-09-06: Brier .499 -> .491 with the skill weights, 20 cities)
 BIAS_MIN = 7                              # need this many before trusting it
 LOCK_HOUR = 12                            # noon ET: morning obs in hand, peak ahead
