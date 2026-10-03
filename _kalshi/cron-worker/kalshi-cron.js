@@ -925,6 +925,115 @@ async function alertTick(env) {
   return out.length ? out.join(', ') : `quiet (${held.length} watched position${held.length === 1 ? '' : 's'})`;
 }
 
+// DARK FLOW (2026-10-02). The informed-flow study (_kalshi/insider_study.py, 28 days) found New York bursts of
+// one-sided aggressive buying that land with NO public reading behind them ("dark") returned +2.7% (se 3.3) where
+// the crowd's reactions to public readings returned -5.8% -- suggestive, unproven. This watches it live, so the
+// sheet can draw it and the report can grade it on days the study never saw.
+// Every minute 7 AM-8 PM ET: the minute two minutes ago, for every range of today's New York event, signed
+// aggressive dollars (YES takers +, NO takers -). A minute with >= $150 one way is a BURST (about 56 a day, measured).
+// It is a REACTION when a public release covers it -- a Central Park report (routine or special, +9 min), a climate
+// report (+10), a rise in TWC's running maximum (+6) -- and DARK otherwise. One KV record per day, written only
+// when something changes (the free plan allows 1,000 writes a day). Public at /dark: the tape is public anyway.
+const DARK_MIN_USD = 150, DARK_ALERT_USD = 500;
+const DARK_WIN = { metar: 9, cli: 10, twc: 6 };
+const KAPI = 'https://api.elections.kalshi.com/trade-api/v2';
+function nyEventTicker(dayIso) {
+  const [y, m, d] = dayIso.split('-').map(Number);
+  return `KXHIGHNY-${String(y).slice(2)}${['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][m - 1]}${String(d).padStart(2, '0')}`;
+}
+async function kpub(path) {
+  const r = await fetch(`${KAPI}${path}`, { headers: { 'User-Agent': 'bluishvoid-dark-flow', 'Accept': 'application/json' } });
+  if (!r.ok) throw new Error(`kalshi ${r.status}`);
+  return r.json();
+}
+async function darkTick(env, sched) {
+  if (!env.OBS) return 'no KV';
+  const nyHour = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false }).format(new Date(sched)));
+  if (nyHour < 7 || nyHour >= 20) return 'outside 7 AM-8 PM ET';
+  const day = localDate(0), key = `dark:${day}`;
+  const rec = (await env.OBS.get(key, { type: 'json' })) || { day, event: nyEventTicker(day), markets: null, bursts: [], releases: [], twc: null };
+  const before = JSON.stringify(rec);
+  if (!rec.markets) {
+    const j = await kpub(`/markets?event_ticker=${rec.event}`);
+    rec.markets = (j.markets || []).map((m) => ({ tk: m.ticker, lab: rungLabel(rungBounds(m)) }));
+  }
+  // THE PUBLIC CLOCK, kept in the record so the sheet can draw it
+  const seen = new Set(rec.releases.map((r) => r.k + r.t));
+  const addRel = (k, t) => { if (!seen.has(k + t)) { rec.releases.push({ k, t }); seen.add(k + t); } };
+  try {
+    const mr = await fetch('https://aviationweather.gov/api/data/metar?ids=KNYC&format=json&hours=3', { headers: { 'User-Agent': 'bluishvoid-dark-flow' } });
+    if (mr.ok) for (const m of await mr.json()) if (m && m.obsTime) addRel('metar', new Date(m.obsTime * 1000).toISOString());
+  } catch (e) { /* the clock is best-effort; a missing release only makes a burst look dark */ }
+  try {
+    const tx = await (await fetch('https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil=CLINYC&limit=3&fmt=text')).text();
+    const now = new Date(sched);
+    for (const m of tx.matchAll(/^CDUS\d+ K[A-Z]{3} (\d\d)(\d\d)(\d\d)\s*$/gm)) {
+      const t = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), Number(m[1]), Number(m[2]), Number(m[3])));
+      if (t > now) t.setUTCMonth(t.getUTCMonth() - 1);
+      if (now - t < 36 * 3600e3) addRel('cli', t.toISOString());
+    }
+  } catch (e) { /* as above */ }
+  try {
+    const tw = await (await fetch(`https://api.weather.com/v3/wx/observations/current?icaoCode=KNYC&units=e&language=en-US&format=json&apiKey=${TWC_KEY}`)).json();
+    const v = tw && tw.temperatureMaxSince7Am;
+    if (typeof v === 'number' && nyHour >= 7) {
+      if (rec.twc != null && v > rec.twc) addRel('twc', new Date(sched - 60000).toISOString());
+      rec.twc = v;
+    }
+  } catch (e) { /* as above */ }
+  // THE MINUTE TWO MINUTES AGO, complete on every feed
+  const m0 = Math.floor(sched / 60000) * 60000 - 120000, m1 = m0 + 60000;
+  const covered = (t) => rec.releases.some((r) => { const a = Date.parse(r.t); return t >= a && t <= a + DARK_WIN[r.k] * 60000; });
+  const out = [];
+  // its OWN cooldown record: alertTick reads and writes ALERT_KEY in the same minute, and two writers of one key race
+  const state = (await env.OBS.get('dark:alerts', { type: 'json' })) || {};
+  const sBefore = JSON.stringify(state);
+  /* the five-minute ticks already spend most of the free plan's ~50 outbound requests (alerts + the obs log), so this
+     skips them and the next tick takes both minutes */
+  const mStart = (new Date(sched).getUTCMinutes() % 5 === 1) ? m0 - 60000 : m0;
+  for (const mk of rec.markets) {
+    let tr;
+    try { tr = (await kpub(`/markets/trades?ticker=${mk.tk}&min_ts=${mStart / 1000}&max_ts=${m1 / 1000 - 1}&limit=1000`)).trades || []; }
+    catch (e) { continue; }
+    for (let mm = mStart; mm < m1; mm += 60000) {
+    let net = 0, ys = 0, yn = 0, ns = 0, nn = 0;
+    for (const t of tr) {
+      const tt = Date.parse(t.created_time); if (tt < mm || tt >= mm + 60000) continue;
+      const p = Number(t.yes_price_dollars), n = Number(t.count_fp);
+      if (t.taker_side === 'yes') { net += n * p; ys += n * p; yn += n; } else { net -= n * (1 - p); ns += n * (1 - p); nn += n; }
+    }
+    if (Math.abs(net) < DARK_MIN_USD) continue;
+    const side = net > 0 ? 'yes' : 'no';
+    const at = new Date(mm).toISOString();
+    if (rec.bursts.some((b) => b.t === at && b.tk === mk.tk)) continue;
+    const cls = (covered(mm) || covered(mm + 59999)) ? 'reaction' : 'dark';
+    const vwap = side === 'yes' ? (yn ? ys / yn : null) : (nn ? 1 - ns / nn : null);      // the YES price they traded at
+    rec.bursts.push({ t: at, tk: mk.tk, lab: mk.lab, side, usd: Math.round(Math.abs(net)), px: vwap == null ? null : Math.round(vwap * 100) / 100, cls });
+    out.push(`${cls} ${side} ${mk.lab} $${Math.round(Math.abs(net))}`);
+    if (cls === 'dark' && Math.abs(net) >= DARK_ALERT_USD && env.NTFY_TOPIC) {
+      const hm = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }).format(new Date(mm));
+      const last = rec.releases.filter((r) => Date.parse(r.t) <= mm).map((r) => Date.parse(r.t)).sort().pop();
+      const since = last ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }).format(new Date(last)) : 'this morning';
+      await notify(env, state, `dark:${mk.tk}:${side}`, `Dark flow · NY ${mk.lab}`,
+        `${hm}: $${Math.round(Math.abs(net)).toLocaleString('en-US')} buying ${side.toUpperCase()} on ${mk.lab}, at ${vwap == null ? '?' : Math.round(vwap * 100)}c YES, with no public reading since ${since}. Unproven signal (study +2.7% +/-3.3).`);
+    }
+    }
+  }
+  if (JSON.stringify(state) !== sBefore) await env.OBS.put('dark:alerts', JSON.stringify(state));
+  if (JSON.stringify(rec) !== before) {
+    rec.updated = new Date().toISOString();
+    await env.OBS.put(key, JSON.stringify(rec), { expirationTtl: 60 * 60 * 24 * 120 });
+  }
+  return out.length ? out.join(', ') : 'no burst';
+}
+async function darkRead(request, env) {
+  const url = new URL(request.url);
+  const d = /^\d{4}-\d\d-\d\d$/.test(url.searchParams.get('d') || '') ? url.searchParams.get('d') : localDate(0);
+  const rec = env.OBS ? await env.OBS.get(`dark:${d}`, { type: 'json' }) : null;
+  return new Response(JSON.stringify(rec || { day: d, bursts: [], releases: [] }), {
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'public, max-age=30', ...cors(ALLOWED) } });
+}
+
 export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil((async () => {
@@ -953,6 +1062,10 @@ export default {
     // late tick was silently skipping bakes and KV writes too (one of seven in a
     // 36-minute sample). event.scheduledTime is the tick the cron asked for.
     const minute = new Date(event.scheduledTime || Date.now()).getUTCMinutes();
+    if (minute % 5 !== 0) ctx.waitUntil((async () => {
+      try { console.log(`[dark] ${new Date().toISOString()} ${await darkTick(env, event.scheduledTime || Date.now())}`); }
+      catch (e) { console.log(`[dark] FAILED ${e}`); }
+    })());
     // HOURLY, NOT ONCE AT 13:00Z. The 09-11 New York crash was invisible for
     // eighteen hours because the only check ran at 13:00Z and read the run's
     // conclusion, which was green. Three API calls and one 25 KB log an hour is
@@ -1025,6 +1138,7 @@ export default {
     if (url.pathname === '/positions') return positions(request, env);
     if (url.pathname === '/obs') return obsDump(request, env);
     if (url.pathname === '/obs/lead') return obsLead(request, env);
+    if (url.pathname === '/dark') return darkRead(request, env);
     if (url.pathname === '/sensors') {
       // PUBLIC, LIVE: the 5-minute stations' latest reading and high since 7 AM,
       // read from api.weather.gov on each request (keyless, so no secret). The
