@@ -29,6 +29,22 @@ def query(service, fields, offset, layer=0):
     return d['features']
 
 
+# WHAT IS DRILLED FOR (2026-10-03; user: "could you color code them on the map?"). EIA's play layer carries lithology, not
+# the target, so this is OUR reading of what each play mainly produces (EIA / USGS production profiles): 'oil', 'gas', or
+# 'both' where both are produced in volume. The map's legend says so. Unlisted -> 'both'.
+TARGET = {
+    'Bakken': 'oil', 'Three Forks': 'oil', 'Eagle Ford': 'oil', 'Niobrara': 'oil', 'Niobrara-Mowry': 'oil',
+    'Pierre-Niobrara': 'oil', 'Monterey': 'oil', 'Monterey-Temblor': 'oil', 'Tuscaloosa': 'oil', 'Heath': 'oil',
+    'Abo-Yeso': 'oil', 'Glorieta-Yeso': 'oil', 'Bone Spring': 'oil', 'Delaware': 'oil', 'Wolfcamp': 'oil',
+    'Wolfcamp-Midland': 'oil', 'Spraberry': 'oil',
+    'Marcellus': 'gas', 'Utica': 'gas', 'Devonian (Ohio)': 'gas', 'Haynesville-Bossier': 'gas', 'Barnett': 'gas',
+    'Fayetteville': 'gas', 'Antrim': 'gas', 'New Albany': 'gas', 'Woodford-Caney': 'gas', 'Excello-Mulky': 'gas',
+    'Chattanooga': 'gas', 'Floyd-Chattanooga': 'gas', 'Floyd-Neal': 'gas', 'Conasauga': 'gas', 'Lewis': 'gas',
+    'Mancos': 'gas', 'HilliardBaxterMancos-Niobrara': 'gas', 'Cody': 'gas', 'Manning Canyon': 'gas',
+    'Woodford': 'both', 'Hermosa': 'both', 'Mowry': 'both', 'Bend': 'both',
+}
+
+
 def rings(geom, min_pts=4):
     out = []
     for r in (geom or {}).get('rings') or []:
@@ -50,7 +66,8 @@ def main():
         for r in rings(f.get('geometry')):
             if area(r) < 0.02:
                 continue                                   # slivers left by simplification
-            plays.append({'n': name, 'b': (a.get('Basin') or '').strip(), 'l': (a.get('Lithology') or '').strip(), 'p': r})
+            plays.append({'n': name, 'b': (a.get('Basin') or '').strip(), 'l': (a.get('Lithology') or '').strip(),
+                          't': TARGET.get(name, 'both'), 'p': r})
     try:
         bf = query('SedimentaryBasins_US_EIA', '*', 0.03, 109)   # the service's one layer is 109, not 0
     except Exception as e:
