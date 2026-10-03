@@ -650,14 +650,23 @@ function inRung(v, b) {
   const r = Math.round(v);
   return (b[0] == null || r >= b[0]) && (b[1] == null || r <= b[1]);
 }
+/* AN ACCOUNT, NOT AN ADDRESS (2026-10-03). ntfy.sh counts an anonymous publisher's daily quota by IP, and a Worker
+   publishes from Cloudflare's shared egress: from there every POST answered 429 "daily message quota reached", so no
+   alert from this worker reached the phone (the 8 AM review digest, a portal alert at 08:01, all of them) while the
+   state recorded them as sent. With NTFY_TOKEN (an access token from a free ntfy.sh account, `wrangler secret put
+   NTFY_TOKEN`) the quota is the account's own. */
+function ntfyHeaders(env, h) {
+  return env.NTFY_TOKEN ? Object.assign({ 'Authorization': `Bearer ${env.NTFY_TOKEN}` }, h) : h;
+}
 async function notify(env, state, key, title, body, priority) {
   const now = Date.now();
   const last = (state.sent || {})[key] || 0;
   if (now - last < ALERT_COOLDOWN_MS) return false;
   const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, {
     method: 'POST', body,
-    headers: { 'Title': title, 'Priority': priority || 'default' }
+    headers: ntfyHeaders(env, { 'Title': title, 'Priority': priority || 'default' })
   });
+  if (!r.ok) console.log(`[ntfy] ${r.status} ${(await r.text()).slice(0, 160)} -- "${title}" NOT delivered`);
   state.sent = state.sent || {};
   state.sent[key] = now;
   return r.ok;
@@ -792,7 +801,8 @@ async function reviewDigest(env) {
       .concat(fixes.length ? [`Branch ${branch} -- nothing ships until you merge it.`] : []).join('\n');
     if (f.some((x) => x.severity === 'high')) pri = 'high';
   }
-  const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, { method: 'POST', body, headers: { 'Title': title, 'Priority': pri } });
+  const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, { method: 'POST', body, headers: ntfyHeaders(env, { 'Title': title, 'Priority': pri }) });
+  if (!r.ok) console.log(`[ntfy] ${r.status} ${(await r.text()).slice(0, 160)} -- review digest NOT delivered`);
   if (r.ok) await env.OBS.put(key, '1', { expirationTtl: 60 * 60 * 48 });
   return `${title} (ntfy ${r.status})`;
 }
