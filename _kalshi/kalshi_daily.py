@@ -5003,6 +5003,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             # New York +2.0 on the afternoon that made the case for it.
             'six_max': _six, 'six_window': SIX_WINDOW.get(cfg['key']),
             'own5_max': _own5, 'own5_station': OWN5.get(cfg['key']),
+            # trail_row() reads its 'last' and 'at'; never written, so every trail row had them null
+            'own5_row': own5_row(cfg, today) if _own5 is not None else None,
             'apt_max': _aptmax, 'twc_corroborated': _twc_corr,
             'model_resid': model_resid,
             # the afternoon read: how much of the market's number to fold into
