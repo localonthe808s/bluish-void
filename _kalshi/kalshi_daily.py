@@ -4379,7 +4379,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
                 if fl is not None:
                     fadj_fresh = max(fadj_fresh, fl)
         return {
-            'at': now.strftime('%Y-%m-%dT%H:%M') + ' ET',
+            'at': now.strftime('%Y-%m-%dT%H:%M') + ' ' + cfg.get('tzlabel', 'ET'),
             'pick': rows[best]['label'], 'ticker': rows[best]['ticker'],
             'p': round(ps[best], 4), 'pred': round(pred, 2), 'sd': round(sd, 2),
             'as_of': '%02d:00 %s' % (hour, cfg.get('tzlabel', 'ET')),
