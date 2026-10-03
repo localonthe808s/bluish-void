@@ -75831,7 +75831,7 @@ function initNowMicroTabs(){
       s = [['USGS Latest Quakes','https://earthquake.usgs.gov/earthquakes/map/']];
       if (window._quakeGeoVisible) s.push(['Macrostrat','https://macrostrat.org/map'],['PBDB','https://paleobiodb.org/navigator/']);
       if (typeof _tectOn !== 'undefined' && _tectOn) s.push(['USGS 2014 NSHM faults','https://www.usgs.gov/programs/earthquake-hazards/science/2014-united-states-lower-48-seismic-hazard-long-term-model']);
-      if (typeof _energyOn !== 'undefined' && _energyOn) s.push(['EIA Shale Plays','https://atlas.eia.gov/search?q=shale%20plays']);
+      if (typeof _energyOn !== 'undefined' && _energyOn) s.push(['EIA Shale Plays + Sedimentary Basins','https://atlas.eia.gov/search?q=shale%20plays']);
     } else if (tab === 'tornado'){
       var tr = (typeof tornadoCurrentRange !== 'undefined') ? tornadoCurrentRange : 'today';
       var mr = window._hzMrms && window._hzMrms.on;
@@ -94314,8 +94314,13 @@ function initNowMicroTabs(){
       if (r.width) placed.push({ x: r.left - hb.left, y: r.top - hb.top,
                                  w: r.width, h: r.height });
     });
+    var zz = hazardMap.getZoom();
     _geoLabels.forEach(function(m){
       if (!m._icon || !m._map) return;
+      /* THE OIL AND GAS LABELS THIN WITH THE ZOOM (2026-10-03): 50 plays and 32 basins named at once stacked into a column
+         that ran off into Mexico. Basins are named from zoom 6; plays by size -- the big ones nationally, every one from 6. */
+      if (m._lab){ var need = m._lab.kind === 'basin' ? 6 : (m._lab.area >= 0.75 ? 0 : 6);   /* the Permian pieces, Eagle Ford, Haynesville are ~0.8-1.3 sq deg: named nationally */
+        m._icon.style.display = zz >= need ? '' : 'none'; if (zz < need) return; }
       var el = m._icon.firstChild || m._icon;
       el.style.marginTop = '0px';
       var pt = hazardMap.latLngToContainerPoint(m.getLatLng());
@@ -94329,7 +94334,7 @@ function initNowMicroTabs(){
          overflows it. Every box measured here was phantom-sized until then -
          390 icons on the map and only 2 reported wider than 60px. */
       var r = el.getBoundingClientRect();
-      items.push({ el: el, y: pt.y, x: pt.x,
+      items.push({ el: el, y: pt.y, x: pt.x, drop: !!m._lab, icon: m._icon,
                    w: Math.max(40, r.width || el.offsetWidth || 90),
                    h: Math.max(10, r.height || el.offsetHeight || 12) });
     });
@@ -94343,6 +94348,8 @@ function initNowMicroTabs(){
           y = q.y + q.h + 3; i = -1; guard++;
         }
       }
+      /* an oil-and-gas label that would have to travel away from its own area is left out, not pushed down the map */
+      if (it.drop && y - it.y > 26){ it.icon.style.display = 'none'; return; }
       it.el.style.marginTop = Math.round(y - it.y) + 'px';
       placed.push({ x: it.x, y: y, w: it.w, h: it.h });
     });
@@ -94386,9 +94393,12 @@ function initNowMicroTabs(){
      Bakken fills the Williston. Earth tones, soft fills, no stroke - a play
      boundary is an economic estimate, not a surveyed line. */
   var _energyLayer = null, _energyOn = false;
-  var PLAY_LABEL = { Bakken:'BAKKEN', Marcellus:'MARCELLUS', EagleFord:'EAGLE FORD',
-                     Delaware:'DELAWARE \u00b7 PERMIAN', BoneSpring:'BONE SPRING \u00b7 PERMIAN',
-                     Niobrara:'NIOBRARA', AboYeso:'ABO\u2013YESO', GlorietaYeso:'GLORIETA\u2013YESO' };
+  /* ALL OF EIA'S PLAYS (2026-10-03, _maplab/us_energy_bake.py; user: "bake all 50 and add the basins"). The file held 8 picked
+     plays; it now has EIA's 50 tight-oil / shale-gas plays and the sedimentary basins they lie in. A play named in more
+     than one basin (Woodford, Niobrara, Monterey...) is labelled with its basin, and the Permian ones keep "· PERMIAN". */
+  var PLAY_RENAME = { 'HilliardBaxterMancos-Niobrara': 'Hilliard\u2013Baxter\u2013Mancos', 'Devonian (Ohio)': 'Ohio Devonian' };
+  var playLabel = function(pl, multi){ var n = (PLAY_RENAME[pl.n] || pl.n).replace(/-/g, '\u2013').toUpperCase();
+    return (multi[pl.n] || /permian/i.test(pl.b || '')) && pl.b ? n + ' \u00b7 ' + pl.b.replace(/ Basin$/i, '').toUpperCase() : n; };
   window.toggleEnergyDeposits = function(){
     if (!hazardMap) return;
     _energyOn = !_energyOn;
@@ -94408,19 +94418,33 @@ function initNowMicroTabs(){
       window._hzPaneAt(hazardMap, 'hz-geo-fill', 'overlayPane');
     }
     _energyLayer = L.layerGroup().addTo(hazardMap);
-    fetch('/us_energy.json').then(function(r){ return r.json(); }).then(function(d){
-      var seen = {};
+    fetch('/us_energy.json?v=2').then(function(r){ return r.json(); }).then(function(d){
+      var centre = function(p){ var la = 0, lo = 0; p.forEach(function(c){ la += c[0]; lo += c[1]; }); return [la / p.length, lo / p.length]; };
+      var areaOf = function(p){ var a = 0; for (var i = 0; i < p.length - 1; i++) a += p[i][1] * p[i + 1][0] - p[i + 1][1] * p[i][0]; return Math.abs(a) / 2; };   /* square degrees */
+      var tag = function(m, kind, p){ m._lab = { kind: kind, area: areaOf(p) }; return m; };
+      /* THE BASINS first, under the plays: a faint dashed outline and the lightest wash, their names muted -- the basin is
+         the setting, the play is the target */
+      var bseen = {};
+      (d.basins || []).forEach(function(bs){
+        L.polygon(bs.p, { color:'#b8a07a', weight:1, opacity:0.45, dashArray:'4 4', fillColor:'#b8a07a', fillOpacity:0.06, interactive:false, pane:'hz-geo-fill' }).addTo(_energyLayer);
+        if (bs.n && !bseen[bs.n]){ bseen[bs.n] = 1;
+          var nm = bs.n.replace(/ Basin$/i, '').replace(/^Tx-La-Ms/i, 'TX\u2013LA\u2013MS').toUpperCase() + ' BASIN';
+          _geoLabels.push(tag(L.marker(centre(bs.p), { interactive:false, icon: L.divIcon({ className:'', iconAnchor:[0,6],
+            html:'<div style="display:inline-block"><div style="font-family:system-ui,sans-serif;font-size:.38rem;font-weight:700;letter-spacing:.09em;color:rgba(212,190,150,.62);text-shadow:0 0 8px #000,0 0 14px #000;white-space:nowrap;">' + nm + '</div></div>' }) }), 'basin', bs.p).addTo(_energyLayer)); }
+      });
+      var multi = {}, cnt = {};
+      (d.plays || []).forEach(function(pl){ cnt[pl.n] = (cnt[pl.n] || {}); cnt[pl.n][pl.b] = 1; });
+      Object.keys(cnt).forEach(function(n){ if (Object.keys(cnt[n]).length > 1) multi[n] = 1; });
+      var best = {};
       (d.plays || []).forEach(function(pl){
-        L.polygon(pl.p, { stroke:false, fillColor:'#c98a3c', fillOpacity:0.20, interactive:true, pane:'hz-geo-fill' })
-          .bindTooltip((PLAY_LABEL[pl.n] || pl.n) + ' shale play', { sticky:true, className:'hz-tooltip', opacity:1 })
-          .addTo(_energyLayer);
-        if (!seen[pl.n]){
-          seen[pl.n] = 1;
-          var la=0, lo=0;
-          pl.p.forEach(function(c){ la+=c[0]; lo+=c[1]; });
-          _geoLabels.push(L.marker([la/pl.p.length, lo/pl.p.length], { interactive:false, icon: L.divIcon({ className:'', iconAnchor:[0,6],
-            html:'<div style="display:inline-block"><div style="font-family:system-ui,sans-serif;font-size:.44rem;font-weight:900;letter-spacing:.07em;color:#e0a458;text-shadow:0 0 8px #000,0 0 14px #000;white-space:nowrap;">' + (PLAY_LABEL[pl.n] || pl.n) + '</div></div>' }) }).addTo(_energyLayer));
-        }
+        var lab = playLabel(pl, multi);
+        L.polygon(pl.p, { stroke:false, fillColor:'#c98a3c', fillOpacity:0.20, interactive:false, pane:'hz-geo-fill' }).addTo(_energyLayer);
+        if (!best[lab] || areaOf(pl.p) > areaOf(best[lab])) best[lab] = pl.p;
+      });
+      /* biggest first, so in a crowd the major plays keep their names */
+      Object.keys(best).sort(function(x, y){ return areaOf(best[y]) - areaOf(best[x]); }).forEach(function(lab){
+        _geoLabels.push(tag(L.marker(centre(best[lab]), { interactive:false, icon: L.divIcon({ className:'', iconAnchor:[0,6],
+          html:'<div style="display:inline-block"><div style="font-family:system-ui,sans-serif;font-size:.44rem;font-weight:900;letter-spacing:.07em;color:#e0a458;text-shadow:0 0 8px #000,0 0 14px #000;white-space:nowrap;">' + lab + '</div></div>' }) }), 'play', best[lab]).addTo(_energyLayer));
       });
       setTimeout(_geoStackLabels, 60);
       hazardMap.off('zoomend moveend', _geoStackLabels).on('zoomend moveend', _geoStackLabels);
