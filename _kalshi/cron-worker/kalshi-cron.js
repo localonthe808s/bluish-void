@@ -1325,7 +1325,7 @@ export default {
       // page confidently reported a cadence the worker was not running.
       // Cloudflare does not expose a worker's own triggers to its code, so
       // this has to be kept in step with [triggers] in wrangler.toml by hand.
-      schedule_utc: ['* 12-23 * * *', '* 0-4 * * *'],
+      schedule_utc: ['* 11-23 * * *', '* 0-4 * * *'],
       dispatch_minutes: [5, 20, 35, 50],
       fast_lane_minutes: [0, 10, 15, 25, 30, 40, 45, 55],
       obs_log: env.OBS ? 'KV bound' : 'NO KV BINDING - not logging',
