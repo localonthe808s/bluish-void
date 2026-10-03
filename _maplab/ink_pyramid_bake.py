@@ -52,6 +52,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BOROS = os.path.join(HERE, 'bathy', 'nyc_boroughs.json')
 LAB = 'bluishvoid.com/_maplab'
 PORT = 9222
+BAKE_LEVEL = 9
 
 # the radar box the whole ladder is arithmetic on (_cityBoxCfg in index.html)
 X0, Y0, X1, Y1 = -8273078, 4936445, -8195528, 5004638
@@ -225,12 +226,16 @@ class Lab:
         return (r.get('result') or {}).get('value')
 
     def render(self, w, s, e, n):
+        self.js('window.__BAKE_LEVEL = %d; 1' % BAKE_LEVEL)
         self.js("""(function(){
           VIEWS.city.flood = null;          /* the lime trap */
           VIEWS.city.cso = null;            /* THE STAIN TRAP (2026-09-27): with the outfalls on, drawSewerStain paints a
                                                near-black plume into the river at every pipe, cut square at the tile's
                                                edge. The 386 tiles of v2 carry it; the widget lifts it at compose
                                                (cwStainLift) until they are baked again. UNTESTED: not yet run. */
+          if (window.__BAKE_LEVEL <= 4){ VIEWS.city.ghosts = null; VIEWS.city.wet = null; }   /* THE GHOST TRAP (2026-10-03): at
+                                               z3/z4 scales the lab paints the buried streams and the old marsh in pale blue; the
+                                               widget draws them as their own overlay, and the shipped z3/z4 never carried them */
           VIEWS.city.w = %r; VIEWS.city.e = %r;
           VIEWS.city.s = %r; VIEWS.city.n = %r;
           renderAll(); return 1;
@@ -296,6 +301,7 @@ def main():
     globals()['PORT'] = a.port
 
     grid, tiles = tiles_for(a.level, a.min_land, only_water=a.only_water)
+    globals()['BAKE_LEVEL'] = a.level
     if a.only:
         want = set(tuple(int(v) for v in t.split(',')) for t in a.only.split())
         if a.all:
