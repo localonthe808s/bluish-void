@@ -28,13 +28,39 @@ import tifffile
 from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(HERE, 'hs1m')
+# TWO REGIONS (2026-10-03, NYC added: user chose to bake the shading INTO the CITY pyramid). `--region nyc` bakes the
+# five boroughs' 1 m relief for the lab's city view; only tiles touching a borough are pulled (the frame is mostly
+# water and New Jersey, which the CITY map draws dark).
+REGION = sys.argv[sys.argv.index('--region') + 1] if '--region' in sys.argv else 'la'
+if REGION == 'nyc':
+    HERE = os.path.join(os.path.dirname(HERE), 'bathy')
+OUT = os.path.join(HERE, 'nyc_hs1m' if REGION == 'nyc' else 'hs1m')
 SRC = 'https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage'
 W0, S0, D = -118.85, 33.69, 0.01                  # HOME_LAND's south-west corner, tile size in degrees
 NC, NR = 90, 66                                     # to -117.95 E, 34.35 N (HOME_LAND reaches 34.346)
-M = 6                                               # margin pixels each side, cropped after shading
+if REGION == 'nyc':
+    W0, S0, NC, NR = -74.26, 40.49, 57, 43          # Tottenville to Glen Oaks, Great Kills to Riverdale
+M = 48 if REGION == 'nyc' else 6                    # margin pixels each side, cropped after shading (NYC: > 3 x its 16 px smoothing)
 ZFAC = 1.0                                          # the 1/3" tier's own
-BASE = 'https://cdn.bluishvoid.com/la/lidar/v1/'      # + hs1m/ hs2m/ hs4m/
+BASE = 'https://cdn.bluishvoid.com/%s/lidar/v1/' % REGION   # + hs1m/ hs2m/ hs4m/
+INDEX = 'nyc_land1m_index.json' if REGION == 'nyc' else 'land1m_index.json'
+
+
+def borough_tiles():
+    """NYC only: the (r, c) whose box touches a borough. bathy/nyc_boroughs.json keeps each landmass as its own ring
+    (the ring trap in ink_pyramid_bake.py), so every ring is unioned as a polygon of its own."""
+    from shapely.geometry import Polygon, box
+    from shapely.ops import unary_union
+    polys = []
+    for f in json.load(open(os.path.join(HERE, 'nyc_boroughs.json')))['features']:
+        g = f['geometry']
+        for part in (g['coordinates'] if g['type'] == 'MultiPolygon' else [g['coordinates']]):
+            for ring in part:
+                if len(ring) >= 4:
+                    pg = Polygon(ring).buffer(0)
+                    if pg.area > 0: polys.append(pg)
+    U = unary_union(polys)
+    return set((r, c) for r in range(NR) for c in range(NC) if U.intersects(box(*box_of(r, c))))
 
 
 def box_of(r, c):
@@ -72,9 +98,20 @@ def shade(a, box):
     w, s, e, n = box
     H, Wd = a.shape
     land = a > 0.5
-    g = ndimage.gaussian_filter(np.where(a < -9000, 0, np.clip(a, 0, None)), 0.8)
     my = (n - s) / H * 111320.0
     mx = (e - w) / Wd * 111320.0 * math.cos(math.radians((s + n) / 2))
+    a0 = np.where(a < -9000, 0, np.clip(a, 0, None))
+    if REGION != 'nyc':
+        g = ndimage.gaussian_filter(a0, 0.8)
+    else:
+        # THE CITY'S BARE EARTH IS FACETED. The 3DEP model removes every building and fills its footprint with flat
+        # triangles, so a plain hillshade draws a field of shards across every block (seen at Inwood, 2026-10-03).
+        # Smooth by TERRAIN: broadly (14 px) where the ground is flat at a 16 px scale, the 1 m detail (1.2 px) blended
+        # back in where it really slopes, 5-12 degrees -- Inwood Hill's cliffs, the moraine, Todt Hill stay crisp.
+        g_lo, g_hi = ndimage.gaussian_filter(a0, 1.2), ndimage.gaussian_filter(a0, 14)
+        sy, sx = np.gradient(ndimage.gaussian_filter(a0, 16), my, mx)
+        wt = ndimage.gaussian_filter(np.clip((np.degrees(np.arctan(np.hypot(sx, sy))) - 5) / 7, 0, 1), 6)
+        g = g_hi + wt * (g_lo - g_hi)
     gy, gx = np.gradient(g * ZFAC, my, mx)
     slope = np.arctan(np.hypot(gx, gy))
     aspect = np.arctan2(gy, -gx)
@@ -123,20 +160,26 @@ def bake_tile(r, c):
 # light (L 255) or shade (L 0) with an alpha, so a mixed block becomes a grey with the summed weight, which the
 # canvas draws exactly as the four would have looked from that far.
 LEVELS = [(4, 6, 12), (2, 3, 6), (1, 0, 3)]          # (metres a pixel, minMpp, maxMpp), coarse first: the lab draws in order
+if REGION == 'nyc':                                   # the CITY pyramid is baked at every scale down from 70 m/px
+    LEVELS = [(16, 24, 1e9), (4, 6, 24), (2, 3, 6), (1, 0, 3)]
 
 
 def level_dir(k):
-    return OUT if k == 1 else os.path.join(HERE, 'hs%dm' % k)
+    return OUT if k == 1 else os.path.join(HERE, ('nyc_hs%dm' if REGION == 'nyc' else 'hs%dm') % k)
 
 
 def build_level(k):
+    src = 1 if k <= 4 else k // 4                        # 16 m is built from 4 m: from 1 m it would be a 17,808 px mosaic
+    SRC = level_dir(src)
     os.makedirs(level_dir(k), exist_ok=True)
-    have = set(f[:-4] for f in os.listdir(OUT) if f.endswith('.png'))
+    have = set(f[:-4] for f in os.listdir(SRC) if f.endswith('.png'))
+    NRs, NCs = (NR + src - 1) // src, (NC + src - 1) // src
+    k_out, k = k, k // src                                # k is now the fan-in from the source level
     made = 0
-    for R in range((NR + k - 1) // k):
-        for C in range((NC + k - 1) // k):
+    for R in range((NRs + k - 1) // k):
+        for C in range((NCs + k - 1) // k):
             name = 'r%02dc%02d' % (R, C)
-            p = os.path.join(level_dir(k), name + '.png')
+            p = os.path.join(level_dir(k_out), name + '.png')
             kids = [(R * k + i, C * k + j) for i in range(k) for j in range(k)]
             if not any('r%02dc%02d' % kc in have for kc in kids):
                 continue
@@ -147,7 +190,7 @@ def build_level(k):
             for i in range(k):
                 for j in range(k):
                     rr, cc = R * k + i, C * k + j
-                    f = os.path.join(OUT, 'r%02dc%02d.png' % (rr, cc))
+                    f = os.path.join(SRC, 'r%02dc%02d.png' % (rr, cc))
                     if not os.path.exists(f):
                         continue
                     im = np.asarray(Image.open(f).convert('LA').resize((tw, th))).astype('float32')
@@ -163,19 +206,19 @@ def build_level(k):
             out[..., 1] = np.clip(np.round(sa * 255 / 4) * 4, 0, 255)
             Image.fromarray(out).save(p + '.part', format='PNG', optimize=True); os.replace(p + '.part', p)
             made += 1
-    print('level %d m: %d tiles' % (k, made), flush=True)
+    print('level %d m: %d tiles' % (k_out, made), flush=True)
 
 
 def write_index():
     levels = []
+    for k in sorted(k for k, _, _ in LEVELS if k != 1):      # finest first: the 16 m level is built FROM the 4 m one
+        build_level(k)
     for k, lo, hi in LEVELS:
-        if k != 1:
-            build_level(k)
         tiles = sorted(f[:-4] for f in os.listdir(level_dir(k)) if f.endswith('.png'))
         levels.append({'base': '%shs%dm/' % (BASE, k), 'd': D * k, 'minMpp': lo, 'maxMpp': hi, 'tiles': tiles})
     doc = {'w0': W0, 's0': S0, 'levels': levels,
            'note': '3DEP 1 m lidar hillshade (la/lidar_bake.py), averaged to 2 m and 4 m; tile rRRcCC spans w0+C*d..+d, s0+R*d..+d'}
-    with open(os.path.join(HERE, 'land1m_index.json'), 'w') as f:
+    with open(os.path.join(HERE, INDEX), 'w') as f:
         json.dump(doc, f, separators=(',', ':'))
     print('index: %s' % ', '.join('%d m %d' % (k, len(l['tiles'])) for (k, _, _), l in zip(LEVELS, levels)))
 
@@ -190,8 +233,9 @@ def main():
         return
     seaf = os.path.join(OUT, '_sea.txt')
     sea = set(open(seaf).read().split()) if os.path.exists(seaf) else set()
+    keep = borough_tiles() if REGION == 'nyc' else None
     todo = [(r, c) for r in range(NR) for c in range(NC)
-            if 'r%02dc%02d' % (r, c) not in sea and not os.path.exists(os.path.join(OUT, 'r%02dc%02d.png' % (r, c)))]
+            if (keep is None or (r, c) in keep) and 'r%02dc%02d' % (r, c) not in sea and not os.path.exists(os.path.join(OUT, 'r%02dc%02d.png' % (r, c)))]
     print('%d tiles to bake (%d done, %d sea)' % (len(todo), NR * NC - len(todo) - len(sea), len(sea)), flush=True)
     t0, done = time.time(), 0
     with cf.ThreadPoolExecutor(max_workers=3) as ex:

@@ -142,7 +142,7 @@ def tiles_for(level, min_land, waters=True, only_water=False):
             ty1 = Y1 - (Y1 - Y0) * r / grid
             ty0 = Y1 - (Y1 - Y0) * (r + 1) / grid
             t = sbox(tx0, ty0, tx1, ty1)
-            keep = False
+            keep = level <= 4                     # z3/z4 are the whole box, every tile (they live in the repo)
             if not only_water and t.intersects(land):
                 keep = not (min_land > 0 and t.intersection(land).area / t.area < min_land)
             if not keep and waters and t.intersects(zones):
@@ -280,7 +280,9 @@ class Lab:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--level', type=int, required=True, choices=(5, 6, 7))
+    # z3 / z4 ADDED 2026-10-03 (the lidar relief re-bake): the whole box, every tile, written under the repo's own names.
+    # z1 / z2 stay as captured -- at 35-70 m/px the relief does not read and they predate this harness.
+    ap.add_argument('--level', type=int, required=True, choices=(3, 4, 5, 6, 7))
     ap.add_argument('--only-water', action='store_true', help='the four waters alone, not the boroughs (z7)')
     ap.add_argument('--all', action='store_true', help='with --only: any tile of the grid, not just the selected set')
     ap.add_argument('--out', required=True, help='directory for the PNGs')
@@ -321,7 +323,7 @@ def main():
     for i, (r, c, w, s, e, n) in enumerate(tiles, 1):
         if a.limit and i > a.limit:
             break
-        name = 'nyc-basemap-ink-dry-z%d-r%dc%d.png' % (a.level, r, c)
+        name = 'nyc-basemap-ink-dry-z%d-r%dc%d.png' % (a.level, r, c)        # z3/z4 share the repo's naming
         path = os.path.join(a.out, name)
         # RESUMABLE: a five-figure file is a real tile; anything smaller is a
         # half-written one from an interrupted run and gets done again.
