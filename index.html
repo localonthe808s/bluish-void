@@ -13103,6 +13103,7 @@ window._bvHeroGpu = function(hw, st, code, night){
                         </div>
                         <div class="hz-dash-summary" id="hz-summary-fireballs" style="font-size:.52rem;color:rgba(30,30,50,.5);line-height:1.4;margin-top:2px;"></div>
                         <div class="hz-detail-wrap" style="flex:1;min-height:0;overflow-y:auto;scrollbar-width:none;-ms-overflow-style:none;border-top:1px solid rgba(250,204,21,.2);padding-top:4px;margin-top:2px;">
+                          <div id="hz-dash-fireballs-neo" style="display:none;font-size:.64rem;color:rgba(30,30,50,.65);line-height:1.45;"></div>
                           <div id="hz-dash-fireballs-detail" style="font-size:.64rem;color:rgba(30,30,50,.65);line-height:1.45;">Loading…</div>
                         </div>
                       </div>
@@ -97676,7 +97677,8 @@ function initNowMicroTabs(){
     // FIREBALL THIS WEEK: flash the overview card head (count + noun) red when
     // any CNEOS detection is within the last 7 days. Called by both fireball
     // renderers (this prefetch and the hazard-init fbRender) with the raw rows.
-    /* Flashes for a full week from when a detection first APPEARS in the feed, not
+    /* (2026-10-02: the PILL no longer uses first-seen times -- it goes by the event's own date; see below.)
+       Flashes for a full week from when a detection first APPEARS in the feed, not
        from when the fireball happened: CNEOS routinely publishes bolides weeks
        late, and keying off the event date meant a brand-new entry could arrive
        already expired and never flash at all. First-seen times are kept in
@@ -97725,12 +97727,65 @@ function initNowMicroTabs(){
         /* ONLY A BOLIDE THAT FELL THIS WEEK (user 2026-10-02: "it should only say NEW BOLIDE when theres a bolide
            that week"): CNEOS posts some events weeks late, and a late entry for 09/15 was lighting the pill on
            10/02 because it was new to this browser. The pill now goes by the EVENT's date alone. */
-        var txt = weekN ? (weekN === 1 ? newTxt() : weekN + ' NEW BOLIDES') : '';
+        /* AND WHAT ELSE CAME CLOSE (user 2026-10-02: "if theres an asteroid that week it should be saying NEW ASTEROID";
+           the card covers "anything that falls in the sky"): an asteroid passing inside the Moon's distance within a week
+           either side of now (JPL close-approach feed, window._fbNeoFetch). Reentries are left out on purpose: about eight
+           objects come down every day, so a reentry pill would never go dark. */
+        window._fbLastRows = rows;
+        var neoN = (window._fbNeo || []).filter(function(a){ return Math.abs(a.t - now) <= WEEK; }).length;
+        if (!window._fbNeoP && window._fbNeoFetch) window._fbNeoFetch();
+        var parts = [];
+        if (neoN) parts.push(neoN === 1 ? 'NEW ASTEROID' : neoN + ' NEW ASTEROIDS');
+        if (weekN) parts.push(weekN === 1 ? newTxt() : weekN + ' NEW BOLIDES');
+        var txt = parts.join(' · ');
         wk.textContent = txt; wk.title = txt; wk.style.display = txt ? 'inline-block' : 'none';
         wk.classList.toggle('fb-recent-flash', !!txt);
       }
       var bd = document.getElementById('hazard-badge-fireballs');
-      if (bd){ bd.textContent = weekN ? String(weekN) : ''; bd.style.display = weekN ? 'inline-flex' : 'none'; }
+      if (bd){ var nb = weekN + (neoN || 0); bd.textContent = nb ? String(nb) : ''; bd.style.display = nb ? 'inline-flex' : 'none'; }
+    };
+    /* ASTEROIDS PASSING CLOSE (2026-10-02). JPL's close-approach feed, keyless, through the shared proxy: every known
+       asteroid passing inside one lunar distance from a week ago to a week ahead. Drawn as its own short list at the top
+       of the fireballs card, and it lights NEW ASTEROID in the pill. Sizes are ESTIMATED from brightness (H, albedo
+       0.14), so they carry a "~"; distances are JPL's nominal miss distance. */
+    window._fbNeo = null;
+    window._fbNeoFetch = function(){
+      if (window._fbNeoP && Date.now() - (window._fbNeoTs || 0) < 30 * 60 * 1000) return window._fbNeoP;
+      var day = 86400000, d0 = new Date(Date.now() - 7 * day).toISOString().slice(0, 10), d1 = new Date(Date.now() + 8 * day).toISOString().slice(0, 10);
+      var MON = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5, Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11 };
+      window._fbNeoTs = Date.now();
+      window._fbNeoP = window.bvProxyJSON('https://ssd-api.jpl.nasa.gov/cad.api?date-min=' + d0 + '&date-max=' + d1 + '&dist-max=1LD&sort=date', { timeout: 12000 })
+        .then(function(d){
+          var f = (d && d.fields) || [], ix = function(k){ return f.indexOf(k); };
+          window._fbNeo = ((d && d.data) || []).map(function(r){
+            var m = /^(\d{4})-(\w{3})-(\d\d) (\d\d):(\d\d)/.exec(r[ix('cd')] || '');
+            return { des: r[ix('des')], t: m ? Date.UTC(+m[1], MON[m[2]], +m[3], +m[4], +m[5]) : NaN,
+                     au: parseFloat(r[ix('dist')]), h: parseFloat(r[ix('h')]), v: parseFloat(r[ix('v_rel')]) };
+          }).filter(function(a){ return isFinite(a.t) && isFinite(a.au); });
+          try { window._fbNeoDraw(); } catch (e){}
+          try { if (window._fbLastRows) window._fbFlashRecent(window._fbLastRows); } catch (e){}
+          return window._fbNeo;
+        });
+      window._fbNeoP.catch(function(){ window._fbNeoTs = 0; window._fbNeoP = null; });
+      return window._fbNeoP;
+    };
+    window._fbNeoDraw = function(){
+      var el = document.getElementById('hz-dash-fireballs-neo'); if (!el) return;
+      var A = (window._fbNeo || []).slice().sort(function(a, b){ return a.au - b.au; });
+      if (!A.length){ el.style.display = 'none'; el.innerHTML = ''; return; }
+      var now = Date.now();
+      var h = '<div style="color:rgba(202,138,4,.85);font-weight:700;margin:5px 0 2px;font-size:.52rem;letter-spacing:.07em;display:flex;align-items:center;gap:3px;"><span style="font-size:.48rem;opacity:.5;">•</span>ASTEROIDS PASSING CLOSE</div>';
+      A.slice(0, 3).forEach(function(a){
+        var ld = a.au * 389.17, mi = a.au * 92955807;
+        var dM = isFinite(a.h) ? 1329000 / Math.sqrt(0.14) * Math.pow(10, -a.h / 5) : NaN;      /* metres, estimated */
+        var ft = dM * 3.281, sz = !isFinite(ft) ? '' : ' · ~' + (ft >= 1000 ? (ft / 5280).toFixed(1) + ' mi' : (ft >= 100 ? Math.round(ft / 10) * 10 : Math.round(ft)) + ' ft');
+        var dt = new Date(a.t), when = (dt.getMonth() + 1 < 10 ? '0' : '') + (dt.getMonth() + 1) + '/' + (dt.getDate() < 10 ? '0' : '') + dt.getDate();
+        var lhs = a.des + (a.t > now ? ' <span style="color:rgba(30,30,50,.42);font-weight:500;">(coming)</span>' : '');
+        h += '<div style="display:flex;justify-content:space-between;align-items:baseline;padding:3.5px 0;border-bottom:1px solid rgba(30,30,50,.06);font-size:.7rem;gap:8px;"><span style="color:rgba(30,30,50,.55);white-space:nowrap;">' + lhs + '</span>'
+          + '<span style="color:rgba(30,30,50,.82);font-weight:600;text-align:right;"><span style="color:rgba(30,30,50,.42);font-weight:500;">' + when + ' · </span>'
+          + (ld < 1 ? ld.toFixed(2) + ' Moon distances' : '1 Moon distance') + ' (' + Math.round(mi / 1000).toLocaleString('en-US') + 'k mi)' + sz + '</span></div>';
+      });
+      el.innerHTML = h; el.style.display = '';
     };
 
     function _prefetchFireballs(){
