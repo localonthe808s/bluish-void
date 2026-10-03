@@ -22,22 +22,25 @@ in one day are not independent). Read-only: it reads Kalshi's public API, IEM, a
 
 Writes insider_study.json (committed summary) and caches raw trades in insider_cache/ (gitignored).
 """
-import collections, datetime, json, math, os, re, sys, time, urllib.request
+import bisect, collections, datetime, json, math, os, re, sys, time, urllib.request
 from zoneinfo import ZoneInfo
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import dark_lib as DL                          # noqa: E402  the rulebook shared with dark_grade.py
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE = os.path.join(HERE, 'insider_cache')
 API = 'https://api.elections.kalshi.com/trade-api/v2'
 UA = {'User-Agent': 'bluishvoid-insider-study'}
 CITIES = {
-    'ny_high':  {'series': 'KXHIGHNY',  'station': 'NYC', 'network': 'NY_ASOS', 'cli': 'CLINYC', 'tz': 'America/New_York',    'five_min_public': False},
-    'las_high': {'series': 'KXHIGHTLV', 'station': 'LAS', 'network': 'NV_ASOS', 'cli': 'CLILAS', 'tz': 'America/Los_Angeles', 'five_min_public': True},
-    'aus_high': {'series': 'KXHIGHAUS', 'station': 'AUS', 'network': 'TX_ASOS', 'cli': 'CLIAUS', 'tz': 'America/Chicago',     'five_min_public': True},
+    'ny_high':  {'series': 'KXHIGHNY',  'station': 'NYC', 'network': 'NY_ASOS', 'cli': 'CLINYC', 'fcst': 'ZFPOKX,AFDOKX', 'tz': 'America/New_York',    'five_min_public': False},
+    'las_high': {'series': 'KXHIGHTLV', 'station': 'LAS', 'network': 'NV_ASOS', 'cli': 'CLILAS', 'fcst': 'ZFPVEF,AFDVEF', 'tz': 'America/Los_Angeles', 'five_min_public': True},
+    'aus_high': {'series': 'KXHIGHAUS', 'station': 'AUS', 'network': 'TX_ASOS', 'cli': 'CLIAUS', 'fcst': 'ZFPEWX,AFDEWX', 'tz': 'America/Chicago',     'five_min_public': True},
 }
 SINCE = datetime.date(2026, 9, 4)            # the live record starts here
 WINDOW_H = (7, 20)                           # local hours scored: the trading day, before the climate report decides it
 METAR_WIN = 9                                # minutes after an observation that count as "reaction"
 CLI_WIN = 10
+FCST_WIN = 10                                # an NWS zone forecast or discussion issued (2026-10-02): its high is public
 TWC_WIN = 6
 FIVE_MIN_LAG = 12                            # api.weather.gov publishes the 5-minute rows ~10-15 min late
 OFFLINE = '--offline' in sys.argv
@@ -141,6 +144,21 @@ def cli_times(c, d0, d1):
     return [datetime.datetime.fromisoformat(x) for x in cached('cli_%s_%s_%s.json' % (c['cli'], d0, d1), fetch) or []]
 
 
+def fcst_times(c, d0, d1):
+    """Issue time of every NWS zone forecast and forecast discussion for the office (UTC), same archive as the CLI."""
+    def fetch():
+        txt = get_text('https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil=%s&sdate=%s&edate=%s&limit=9999&fmt=text'
+                       % (c['fcst'], d0, d1 + datetime.timedelta(days=2)))
+        out = []
+        for m in re.finditer(r'(?m)^(?:FPUS|FXUS)\d+ K[A-Z]{3} (\d\d)(\d\d)(\d\d)\s*$', txt):
+            dd, hh, mi = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            for base in (d0 + datetime.timedelta(days=k) for k in range(-1, (d1 - d0).days + 3)):
+                if base.day == dd:
+                    out.append(datetime.datetime(base.year, base.month, dd, hh, mi).isoformat() + '+00:00'); break
+        return sorted(set(out))
+    return [datetime.datetime.fromisoformat(x) for x in cached('fcst_%s_%s_%s.json' % (c['fcst'].replace(',', '_'), d0, d1), fetch) or []]
+
+
 def twc_bumps(key):
     """Windows in which TWC's public running maximum went up (from the local 5-10 minute obs trail)."""
     rows = []
@@ -194,6 +212,8 @@ def main():
         print('%s: %d settled days %s..%s' % (key, len(evs), d0, d1), flush=True)
         releases = [(t, t + datetime.timedelta(minutes=METAR_WIN), 'metar') for t in metar_times(c, d0, d1 + datetime.timedelta(days=1))]
         releases += [(t, t + datetime.timedelta(minutes=CLI_WIN), 'cli') for t in cli_times(c, d0, d1)]
+        releases += [(t, t + datetime.timedelta(minutes=FCST_WIN), 'fcst') for t in fcst_times(c, d0, d1)]
+        reports = sorted(t for t in metar_times(c, d0, d1 + datetime.timedelta(days=1)))
         releases += [(a, b + datetime.timedelta(minutes=TWC_WIN), 'twc') for a, b in twc_bumps(key)]
         releases.sort()
         starts = [r[0] for r in releases]
@@ -207,7 +227,7 @@ def main():
         bursts = collections.defaultdict(lambda: collections.defaultdict(lambda: [0.0, 0.0]))
         blind = collections.defaultdict(lambda: collections.defaultdict(lambda: [0.0, 0.0]))
         allflow = collections.defaultdict(lambda: [0.0, 0.0])
-        nb = collections.Counter(); leads = []
+        nb = collections.Counter(); leads = []; moves = []
         for ev, mk in sorted(evs.items()):
             day = event_day(ev)
             for m in mk:
@@ -226,34 +246,29 @@ def main():
                                     ('price', '1-5c' if pc <= .05 else '6-20c' if pc <= .20 else '21-50c' if pc <= .5 else '51-80c' if pc <= .8 else '81-95c' if pc <= .95 else '96-99c'),
                                     ('hour', '%02d' % lt.hour)):
                         g = blind[name + ':' + b][day]; g[0] += s; g[1] += pay
-                # minute buckets of signed aggressive money
-                mins = collections.OrderedDict()
-                for tt, lt, p, n, side in fills:
-                    k = tt.replace(second=0, microsecond=0)
-                    e = mins.setdefault(k, [0.0, []])
-                    e[0] += (1 if side == 'yes' else -1) * n * (p if side == 'yes' else 1 - p)
-                    e[1].append((p, n, side))
-                if not mins: continue
-                mags = sorted(abs(v[0]) for v in mins.values())
-                thr = max(50.0, mags[int(0.95 * (len(mags) - 1))])
-                for k, (net, fl) in mins.items():
-                    if abs(net) < thr: continue
-                    side = 'yes' if net > 0 else 'no'
+                # THE SHARED RULEBOOK (dark_lib): the study's threshold, split orders merged, markouts and the
+                # move across the next report scored on the whole tape (a 7:55 PM burst still has its 60 minutes)
+                tape = sorted((ts(t), p, n, side) for t, p, n, side in tr)
+                times = [x[0] for x in tape]
+                _, bl = DL.bursts([(tt, p, n, side) for tt, lt, p, n, side in fills])
+                for b in bl:
                     S = P = 0.0
-                    for p, n, sd in fl:
-                        if sd != side: continue
-                        s, pay = taker_leg(p, n, sd, won); S += s; P += pay
-                    pub = public_at(k)
+                    for p, n, sd in b['fills']:
+                        s_, pay = taker_leg(p, n, sd, won); S += s_; P += pay
+                    pub = public_at(b['t0'])
                     cls = 'reaction' if pub else 'dark'
                     g = bursts[cls][day]; g[0] += S; g[1] += P
                     nb[cls] += 1
+                    moves.append((day, cls, DL.markouts(b, times, tape), DL.release_move(b, times, tape, reports)))
                     if cls == 'dark' and (P > S):          # a dark burst that won: how long before the next release?
-                        i = bisect.bisect_right(starts, k)
-                        if i < len(starts): leads.append((starts[i] - k).total_seconds() / 60)
+                        i = bisect.bisect_right(starts, b['t0'])
+                        if i < len(starts): leads.append((starts[i] - b['t0']).total_seconds() / 60)
         res = {
             'days': len(evs),
             'all_taker_flow': clustered(allflow),
             'bursts': {cls: dict(clustered(bursts[cls]) or {}, n=nb[cls]) for cls in ('dark', 'reaction')},
+            'moves': DL.summarize_moves(moves),
+            'rule': 'max($%d, p%d minute) per market-day; same side within %d min merged' % (DL.FLOOR_USD, DL.PCTL * 100, DL.MERGE_GAP_MIN),
             'dark_winner_lead_min': (round(sorted(leads)[len(leads) // 2], 1) if leads else None),
             'blind': {k: clustered(v) for k, v in sorted(blind.items())},
             'note': ('5-minute readings are public here, so almost no minute is dark: the burst split is not a test'
@@ -261,6 +276,7 @@ def main():
         }
         out['cities'][key] = res
         print(json.dumps(res['bursts']), flush=True)
+        print('  moves', json.dumps(res['moves']), flush=True)
     with open(os.path.join(HERE, 'insider_study.json'), 'w') as f:
         json.dump(out, f, indent=1)
     return out

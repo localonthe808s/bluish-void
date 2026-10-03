@@ -1008,10 +1008,15 @@ async function alertTick(env) {
 // Every minute 7 AM-8 PM ET: the minute two minutes ago, for every range of today's New York event, signed
 // aggressive dollars (YES takers +, NO takers -). A minute with >= $150 one way is a BURST (about 56 a day, measured).
 // It is a REACTION when a public release covers it -- a Central Park report (routine or special, +9 min), a climate
-// report (+10), a rise in TWC's running maximum (+6) -- and DARK otherwise. One KV record per day, written only
+// report (+10), an NWS zone forecast or forecast discussion for New York (+10; added 2026-10-02 -- a forecast issue
+// is public news, and bursts after one were being called dark), a rise in TWC's running maximum (+6) -- and DARK
+// otherwise. SPLIT ORDERS (2026-10-02): a burst on the same range and side within 3 minutes of the last one is the same
+// trader's order sliced, so it is folded into that burst (t1, minutes) instead of counted again. The nightly grader
+// (dark_grade.py) rebuilds every day from the tape with the study's own adaptive threshold; this flat $150 is the live
+// approximation the sheet draws. One KV record per day, written only
 // when something changes (the free plan allows 1,000 writes a day). Public at /dark: the tape is public anyway.
 const DARK_MIN_USD = 150, DARK_ALERT_USD = 500;
-const DARK_WIN = { metar: 9, cli: 10, twc: 6 };
+const DARK_WIN = { metar: 9, cli: 10, twc: 6, fcst: 10 }, DARK_MERGE_MIN = 3;
 const KAPI = 'https://api.elections.kalshi.com/trade-api/v2';
 function nyEventTicker(dayIso) {
   const [y, m, d] = dayIso.split('-').map(Number);
@@ -1041,12 +1046,13 @@ async function darkTick(env, sched) {
     if (mr.ok) for (const m of await mr.json()) if (m && m.obsTime) addRel('metar', new Date(m.obsTime * 1000).toISOString());
   } catch (e) { /* the clock is best-effort; a missing release only makes a burst look dark */ }
   try {
-    const tx = await (await fetch('https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil=CLINYC&limit=3&fmt=text')).text();
+    // one request for three products: the climate report and the two forecast products (zone forecast, discussion)
+    const tx = await (await fetch('https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil=CLINYC,ZFPOKX,AFDOKX&limit=8&fmt=text')).text();
     const now = new Date(sched);
-    for (const m of tx.matchAll(/^CDUS\d+ K[A-Z]{3} (\d\d)(\d\d)(\d\d)\s*$/gm)) {
-      const t = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), Number(m[1]), Number(m[2]), Number(m[3])));
+    for (const m of tx.matchAll(/^(CDUS|FPUS|FXUS)\d+ K[A-Z]{3} (\d\d)(\d\d)(\d\d)\s*$/gm)) {
+      const t = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), Number(m[2]), Number(m[3]), Number(m[4])));
       if (t > now) t.setUTCMonth(t.getUTCMonth() - 1);
-      if (now - t < 36 * 3600e3) addRel('cli', t.toISOString());
+      if (now - t < 36 * 3600e3) addRel(m[1] === 'CDUS' ? 'cli' : 'fcst', t.toISOString());
     }
   } catch (e) { /* as above */ }
   try {
@@ -1081,17 +1087,28 @@ async function darkTick(env, sched) {
     if (Math.abs(net) < DARK_MIN_USD) continue;
     const side = net > 0 ? 'yes' : 'no';
     const at = new Date(mm).toISOString();
-    if (rec.bursts.some((b) => b.t === at && b.tk === mk.tk)) continue;
-    const cls = (covered(mm) || covered(mm + 59999)) ? 'reaction' : 'dark';
+    if (rec.bursts.some((b) => (b.t === at || b.t1 === at) && b.tk === mk.tk)) continue;
     const vwap = side === 'yes' ? (yn ? ys / yn : null) : (nn ? 1 - ns / nn : null);      // the YES price they traded at
-    rec.bursts.push({ t: at, tk: mk.tk, lab: mk.lab, side, usd: Math.round(Math.abs(net)), px: vwap == null ? null : Math.round(vwap * 100) / 100, cls });
-    out.push(`${cls} ${side} ${mk.lab} $${Math.round(Math.abs(net))}`);
-    if (cls === 'dark' && Math.abs(net) >= DARK_ALERT_USD && env.NTFY_TOPIC) {
-      const hm = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }).format(new Date(mm));
+    const usd = Math.round(Math.abs(net));
+    const prev = rec.bursts.filter((b) => b.tk === mk.tk && b.side === side
+      && mm - Date.parse(b.t1 || b.t) <= DARK_MERGE_MIN * 60000 && mm > Date.parse(b.t1 || b.t)).pop();
+    let bb;
+    if (prev) {                                // the same order, sliced: fold it in (price weighted by money)
+      if (vwap != null) prev.px = prev.px == null ? Math.round(vwap * 100) / 100 : Math.round((prev.px * prev.usd + vwap * usd) / (prev.usd + usd) * 100) / 100;
+      prev.usd += usd; prev.t1 = at; prev.minutes = (prev.minutes || 1) + 1; bb = prev;
+    } else {
+      bb = { t: at, t1: at, tk: mk.tk, lab: mk.lab, side, usd, px: vwap == null ? null : Math.round(vwap * 100) / 100, minutes: 1,
+             cls: (covered(mm) || covered(mm + 59999)) ? 'reaction' : 'dark' };
+      rec.bursts.push(bb);
+    }
+    const cls = bb.cls;
+    out.push(`${cls} ${side} ${mk.lab} $${usd}${prev ? ' (merged, $' + bb.usd + ')' : ''}`);
+    if (cls === 'dark' && bb.usd >= DARK_ALERT_USD && env.NTFY_TOPIC) {
+      const hm = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }).format(new Date(Date.parse(bb.t)));
       const last = rec.releases.filter((r) => Date.parse(r.t) <= mm).map((r) => Date.parse(r.t)).sort().pop();
       const since = last ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }).format(new Date(last)) : 'this morning';
       await notify(env, state, `dark:${mk.tk}:${side}`, `Dark flow · NY ${mk.lab}`,
-        `${hm}: $${Math.round(Math.abs(net)).toLocaleString('en-US')} buying ${side.toUpperCase()} on ${mk.lab}, at ${vwap == null ? '?' : Math.round(vwap * 100)}c YES, with no public reading since ${since}. Unproven signal (study +2.7% +/-3.3).`);
+        `${hm}: $${bb.usd.toLocaleString('en-US')} buying ${side.toUpperCase()} on ${mk.lab}${bb.minutes > 1 ? ' over ' + bb.minutes + ' minutes' : ''}, at ${bb.px == null ? '?' : Math.round(bb.px * 100)}c YES, with no public reading since ${since}. Unproven: in the study, dark buyers did not call the next report (see the REPORT tab).`);
     }
     }
   }
