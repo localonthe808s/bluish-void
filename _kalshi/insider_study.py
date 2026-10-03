@@ -65,9 +65,11 @@ def ts(s):
     return datetime.datetime.fromisoformat(m.group(1) + '+00:00')
 
 
-def cached(name, fn):
+def cached(name, fn, max_age_h=None):
     p = os.path.join(CACHE, name)
-    if os.path.exists(p):
+    # the settled-event list grows every day: re-read it once it is older than max_age_h (the nightly re-run,
+    # 2026-10-02); trades, METAR and CLI files are keyed by settled ticker or date range and never change
+    if os.path.exists(p) and not (max_age_h and not OFFLINE and time.time() - os.path.getmtime(p) > max_age_h * 3600):
         with open(p) as f: return json.load(f)
     if OFFLINE: return None
     v = fn()
@@ -184,7 +186,7 @@ def main():
     out = {'built': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%MZ'), 'cities': {}}
     for key, c in CITIES.items():
         z = ZoneInfo(c['tz'])
-        evs = cached('events_%s.json' % c['series'], lambda: settled_events(c['series'])) or {}
+        evs = cached('events_%s.json' % c['series'], lambda: settled_events(c['series']), max_age_h=6) or {}
         evs = {e: m for e, m in evs.items() if event_day(e) >= SINCE and any(x['result'] == 'yes' for x in m)}
         if not evs: continue
         days = sorted(event_day(e) for e in evs)

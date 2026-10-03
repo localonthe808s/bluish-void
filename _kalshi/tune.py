@@ -4,7 +4,8 @@ SELF-TUNING WITH GUARDRAILS (2026-09-07). The per-city settings -- skill-weighte
 consensus or the equal mean, the recency window on the bias, the spread
 multiplier -- and three constants that were typed by hand (the bias window
 length, the warm-up damping, the spread floor) are replayed over the frozen
-record with the current model and re-chosen every week. Written to tuned.json
+record with the current model and re-chosen every night since 2026-10-02 (weekly
+before; the guardrails below are what make nightly safe). Written to tuned.json
 for the bake to apply per city.
 
 COORDINATE SEARCH, not a grid: with six knobs a full grid is hundreds of
@@ -150,7 +151,9 @@ def beats(cand, base):
 #      older and the newer half of the live record.
 # Needs LIVE_MIN_N live locks; with fewer the search's choice stands. One step a week at most, so a
 # bad month cannot swing the ladder, and everything it did is written into tuned.json (live_court).
-LIVE_MIN_N, LIVE_GAIN, LIVE_STEP = 20, 0.02, 0.25
+# NIGHTLY SINCE 2026-10-02: the week is now a cooldown (stepped_at), not the schedule. The search
+# itself needs no cooldown -- undoing a change would have to beat it by MIN_GAIN on both halves.
+LIVE_MIN_N, LIVE_GAIN, LIVE_STEP, LIVE_COOLDOWN_D = 20, 0.02, 0.25, 7
 
 
 def live_locks(cfg):
@@ -190,8 +193,10 @@ def live_ll(rows, mult, made_with):
     return tot / len(rows)
 
 
-def live_spread_court(cfg, chosen, cands):
+def live_spread_court(cfg, chosen, cands, last_step=None):
     rows = live_locks(cfg)
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    can_step = not last_step or (today - datetime.date.fromisoformat(last_step)).days >= LIVE_COOLDOWN_D
     stamped = [r['m'] for r in rows[-14:] if r['m'] is not None]
     made_with = collections.Counter(stamped).most_common(1)[0][0] if stamped else float(cfg.get('sd_mult', 1.0))
     out = {'n': len(rows), 'made_with': made_with, 'asked': chosen, 'ruled': chosen, 'why': 'too few live locks: the search stands'}
@@ -208,12 +213,18 @@ def live_spread_court(cfg, chosen, cands):
         ruled = float(made_with)
     near = [m for m in grid if abs(m - ruled) <= LIVE_STEP + 1e-9 and abs(m - ruled) > 1e-9]
     best = min(near, key=ll) if near else None
+    if best is not None and not can_step:
+        why.append('step to %s waits: the last live step was %s' % (best, last_step))
+        best = None
     if best is not None and ll(ruled) - ll(best) >= LIVE_GAIN \
             and live_ll(rows[:half], best, made_with) < live_ll(rows[:half], ruled, made_with) \
             and live_ll(rows[half:], best, made_with) < live_ll(rows[half:], ruled, made_with):
         why.append('%s -> %s: %.3f against %.3f on %d live locks, and on both halves of them'
                    % (ruled, best, ll(best), ll(ruled), len(rows)))
         ruled = best
+        out['stepped_at'] = today.isoformat()
+    elif last_step:
+        out['stepped_at'] = last_step
     out.update({'ruled': ruled, 'why': '; '.join(why) if why else 'the search\'s %s stands on the live locks' % chosen})
     return ruled, out
 
@@ -222,7 +233,8 @@ def tune(cfg, prev):
     r = _tune(cfg, prev)
     a = r.get('active')
     if a and a.get('sd_mult') is not None:
-        ruled, rep_ = live_spread_court(cfg, a['sd_mult'], (r.get('lists') or {}).get('sd_mult') or KNOBS['sd_mult'])
+        ruled, rep_ = live_spread_court(cfg, a['sd_mult'], (r.get('lists') or {}).get('sd_mult') or KNOBS['sd_mult'],
+                                        ((prev.get(cfg['key']) or {}).get('live_court') or {}).get('stepped_at'))
         r['live_court'] = rep_
         if abs(float(ruled) - float(a['sd_mult'])) > 1e-9:
             a['sd_mult'] = ruled
@@ -299,7 +311,8 @@ def main():
             a = r.get('active')
             if not a or a.get('sd_mult') is None:
                 continue
-            ruled, rep_ = live_spread_court(cfg, a['sd_mult'], (r.get('lists') or {}).get('sd_mult') or KNOBS['sd_mult'])
+            ruled, rep_ = live_spread_court(cfg, a['sd_mult'], (r.get('lists') or {}).get('sd_mult') or KNOBS['sd_mult'],
+                                            (r.get('live_court') or {}).get('stepped_at'))
             r['live_court'] = rep_
             if abs(float(ruled) - float(a['sd_mult'])) > 1e-9:
                 a['sd_mult'] = ruled

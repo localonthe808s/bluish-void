@@ -5,6 +5,11 @@
 # the system will take notes from what happened in all 3 markets today").
 # This replays yesterday's real quotes into it once the day has settled, so
 # tomorrow's windows and verdicts include today.
+#
+# NIGHTLY SELF-IMPROVEMENT (2026-10-02, "it should improve itself daily
+# overnight"): the per-city tuner (was Sunday-only, kalshi-tune.yml) and the
+# informed-flow study now run here too, after the studies they read. The
+# tuner's guardrails are unchanged; the live court keeps a 7-day cooldown.
 name: Kalshi nightly refit
 on:
   schedule:
@@ -18,7 +23,7 @@ permissions:
 jobs:
   refit:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 110
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -26,6 +31,12 @@ jobs:
           python-version: '3.12'
       - name: Install signing library
         run: pip install --quiet cryptography
+      # the informed-flow study's raw tape (~20 MB): settled trades never change, so carry them night to night
+      - uses: actions/cache@v4
+        with:
+          path: _kalshi/insider_cache
+          key: insider-${{ github.run_id }}
+          restore-keys: insider-
       - name: Refit the timing, exit and calibration studies on the three cities
         run: |
           python3 -u _kalshi/price_study.py --city ny,las,aus
@@ -36,17 +47,23 @@ jobs:
           python3 -u _kalshi/kernel_study.py || echo "kernel study failed (kept going)"
           python3 -u _kalshi/ensemble_log.py || echo "spread log failed (kept going)"
           python3 -u _kalshi/wind_regime.py || echo "wind regime failed (kept going)"
+          python3 -u _kalshi/insider_study.py > /tmp/insider.txt 2>&1 || echo "insider_study FAILED: nonzero exit (kept going)"
+          tail -n 12 /tmp/insider.txt || true
+      - name: Re-tune every city under the guardrails (was weekly)
+        run: |
+          set -o pipefail
+          python3 -u _kalshi/tune.py 2>&1 | tee /tmp/tune.txt || echo "tune FAILED: nonzero exit (kept going)"
       - name: Commit if changed
         run: |
           set -euo pipefail
           # stage FIRST: a file the study writes for the first time is untracked,
           # and `git diff --quiet` never sees an untracked file -- trail_study.json
           # was written every night and never committed (found 2026-09-07)
-          git add _kalshi/price_study.json _kalshi/peak_stats.json _kalshi/trail_study.json _kalshi/afternoon.json _kalshi/dayahead.json _kalshi/kernel.json _kalshi/ensemble_log.json _kalshi/wind_regime.json
+          git add _kalshi/price_study.json _kalshi/peak_stats.json _kalshi/trail_study.json _kalshi/afternoon.json _kalshi/dayahead.json _kalshi/kernel.json _kalshi/ensemble_log.json _kalshi/wind_regime.json _kalshi/insider_study.json _kalshi/tuned.json
           if git diff --cached --quiet; then echo "no change"; exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -m "Kalshi nightly refit: hour windows, exit policy and calibration on the three cities"
+          git commit -m "Kalshi nightly refit: studies, informed flow and per-city tune on the three cities"
           # THE PUSH RACE (found 2026-09-07): the bake pushes every five minutes,
           # so a plain push is rejected about half the time. The study scripts
           # also leave modified caches in the tree, and `git rebase` refuses
@@ -58,7 +75,11 @@ jobs:
           for i in 1 2 3 4 5; do
             git push && exit 0
             git fetch origin main
-            git rebase origin/main || { git rebase --abort || true; git reset --hard origin/main; git checkout "$OURS" -- _kalshi/price_study.json _kalshi/peak_stats.json _kalshi/trail_study.json _kalshi/afternoon.json _kalshi/dayahead.json _kalshi/kernel.json _kalshi/ensemble_log.json _kalshi/wind_regime.json; git commit -m "Kalshi nightly refit"; }
+            git rebase origin/main || { git rebase --abort || true; git reset --hard origin/main; git checkout "$OURS" -- _kalshi/price_study.json _kalshi/peak_stats.json _kalshi/trail_study.json _kalshi/afternoon.json _kalshi/dayahead.json _kalshi/kernel.json _kalshi/ensemble_log.json _kalshi/wind_regime.json _kalshi/insider_study.json _kalshi/tuned.json; git commit -m "Kalshi nightly refit"; }
             sleep $((RANDOM % 20 + 5))
           done
           exit 1
+      - name: Put the tune in the run summary
+        if: always()
+        run: |
+          { echo '## Kalshi nightly tune'; echo; echo '```'; grep -v -e '^---' -e 'offset measured' -e '^wrote ' -e 'LOCKED' -e 'backfilled' -e 'no open market' /tmp/tune.txt 2>/dev/null || echo 'no tune output'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

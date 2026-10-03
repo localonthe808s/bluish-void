@@ -675,7 +675,7 @@ function localDate(offsetDays) {
 // alerts. Keyed by day so a failure pages once, not every tick.
 const WATCHED = [
   { wf: 'kalshi-nightly.yml', name: 'nightly refit',    maxAgeH: 30, scanLog: true },
-  { wf: 'kalshi-tune.yml',    name: 'weekly tune',      maxAgeH: 8 * 24, weekday: 1 },   // Mondays, after Sunday's run
+  // kalshi-tune.yml left the list 2026-10-02: the tune runs inside the nightly refit now (manual-only file)
   { wf: 'kalshi-nyc.yml',     name: 'five-minute bake', maxAgeH: 1, scanLog: true }
 ];
 // A GREEN RUN IS NOT A WORKING RUN (2026-09-11). main() catches each market's
@@ -760,6 +760,41 @@ async function jobWatch(env) {
   }
   if (JSON.stringify(state) !== before) await env.OBS.put(ALERT_KEY, JSON.stringify(state));
   return out.join(' | ');
+}
+// THE MORNING REVIEW DIGEST (2026-10-02, "it should improve itself daily overnight"). A cloud Claude session
+// (routine "Kalshi nightly review", 10:00Z) reviews the settled day, hunts for bugs and pushes its findings --
+// and any proposed fix -- to the branch claude/kalshi-review-<date>, never to main. At 12:00Z (8 AM ET) this
+// reads that branch's _kalshi/reviews/latest.json and pages a short summary, or says the review never landed.
+// Its own KV key (review:<date>): alert:state is shared by two other jobs in the same minute.
+async function reviewDigest(env) {
+  if (!env.NTFY_TOPIC || !env.OBS) return 'digest off';
+  const day = localDate(0);
+  const key = `review:${day}`;
+  if (await env.OBS.get(key)) return 'already sent';
+  const branch = `claude/kalshi-review-${day}`;
+  let doc = null, why = '';
+  try {
+    // the repo is public: raw needs no token, so the GH token's scope does not matter here
+    const r = await fetch(`https://raw.githubusercontent.com/${OWNER}/${REPO}/${branch}/_kalshi/reviews/latest.json?t=${Date.now()}`,
+      { headers: { 'User-Agent': 'bluishvoid-kalshi-cron' } });
+    if (r.ok) doc = await r.json(); else why = `no review on ${branch} (http ${r.status})`;
+  } catch (e) { why = String(e).slice(0, 80); }
+  let title, body, pri = 'default';
+  if (!doc || doc.date !== day) {
+    title = 'Kalshi nightly review: nothing landed';
+    body = `${why || 'the review file is for ' + (doc && doc.date)}. The routine is at claude.ai/code/routines; the bake and the nightly tune ran on their own.`;
+    pri = 'high';
+  } else {
+    const f = doc.findings || [];
+    const fixes = f.filter((x) => x.fix);
+    title = `Kalshi review: ${f.length} finding${f.length === 1 ? '' : 's'}, ${fixes.length} fix${fixes.length === 1 ? '' : 'es'} proposed`;
+    body = [doc.headline || ''].concat(f.slice(0, 5).map((x) => `- [${x.severity || 'note'}] ${x.title}${x.fix ? ' (fix on branch)' : ''}`))
+      .concat(fixes.length ? [`Branch ${branch} -- nothing ships until you merge it.`] : []).join('\n');
+    if (f.some((x) => x.severity === 'high')) pri = 'high';
+  }
+  const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, { method: 'POST', body, headers: { 'Title': title, 'Priority': pri } });
+  if (r.ok) await env.OBS.put(key, '1', { expirationTtl: 60 * 60 * 48 });
+  return `${title} (ntfy ${r.status})`;
 }
 async function alertTick(env) {
   if (!env.NTFY_TOPIC || !env.OBS) return 'alerts off';
@@ -1115,6 +1150,10 @@ export default {
       ctx.waitUntil((async () => {
         try { console.log(`[watchdog] :${minute} ${new Date().toISOString()} ${await jobWatch(env)}`); }
         catch (e) { console.log(`[watchdog] FAILED ${e}`); }
+      })());
+      if (new Date(event.scheduledTime || Date.now()).getUTCHours() === 12) ctx.waitUntil((async () => {
+        try { console.log(`[review] ${new Date().toISOString()} ${await reviewDigest(env)}`); }
+        catch (e) { console.log(`[review] FAILED ${e}`); }
       })());
     }
     if (minute % 5 === 0) {
