@@ -485,6 +485,33 @@ def esa_lead(url):
     return ''
 
 
+# ── ZOOM RENDITION (2026-10-03; tap-to-zoom in the panel). ESA/Webb, ESA/Hubble and NOIRLab keep several sizes of each
+#    picture beside the 300 px thumb; "large" runs from 1 MB to 777 MB (noirlab2618a), so it is never assumed: HEAD the
+#    publication JPEG, then large under 8 MB, then the 1280 px screen copy. NASA's resizer takes ?w=2400 (no probe needed).
+_FULL_CACHE = {}
+def _full_for(url):
+    m = re.match(r'(https://(?:cdn\.esawebb\.org|cdn\.esahubble\.org|storage\.noirlab\.edu/media)/archives/images)/[a-z0-9]+/([^/?]+)\.jpg', url or '')
+    if not m:
+        m2 = re.match(r'https://(esawebb|esahubble)\.org/images/([^/]+)/', url or '') or re.match(r'https://(noirlab)\.edu/public/images/([^/]+)/', url or '')
+        if not m2: return None
+        base = {'esawebb': 'https://cdn.esawebb.org/archives/images', 'esahubble': 'https://cdn.esahubble.org/archives/images',
+                'noirlab': 'https://storage.noirlab.edu/media/archives/images'}[m2.group(1)]
+        key = (base, m2.group(2))
+    else:
+        key = (m.group(1), m.group(2))
+    if key in _FULL_CACHE: return _FULL_CACHE[key]
+    best = None
+    for size, cap in (('publicationjpg', 8e6), ('large', 8e6), ('screen', 3e6)):
+        u = '%s/%s/%s.jpg' % (key[0], size, key[1])
+        try:
+            r = urllib.request.urlopen(urllib.request.Request(u, method='HEAD', headers=UA), timeout=30)
+            n = int(r.headers.get('Content-Length') or 0)
+            if r.status == 200 and 0 < n <= cap: best = u; break
+        except Exception: pass
+    _FULL_CACHE[key] = best
+    return best
+
+
 def bake_media():
     out = {}
     for key, f in FEEDS.items():
@@ -507,7 +534,8 @@ def bake_media():
                 if not th or th in seen or it['title'] in seen or not _is_sky(src, it) or not _looks_like_sky(th): continue
                 if _same_picture(th, [p['thumb'] for p in photos]): continue
                 seen.add(th); seen.add(it['title'])      # ESA posts a release's image and its video under one title
-                photos.append({'thumb': th, 'title': it['title'], 'link': it['link'], 't': it['t'],
+                full = th.replace('?w=640', '?w=2400') if th.endswith('?w=640') else _full_for(th)
+                photos.append({'thumb': th, 'full': full, 'title': it['title'], 'link': it['link'], 't': it['t'],
                                'credit': it['credit'] or SRC[src]['credit'], 'lic': SRC[src]['lic']})
         for src, url in f['news']:
             for it in _items(url):
@@ -735,7 +763,11 @@ def main():
             print('FAILED', key, e)
             if key in prev: out[key] = prev[key]
     # GREATEST HITS: the hand-picked list build_classics.py resolved (static; folded in so the page reads one file)
-    try: out['classics'] = json.loads((ROOT / '_solarlab/classics.json').read_text())
+    try:
+        out['classics'] = json.loads((ROOT / '_solarlab/classics.json').read_text())
+        old = {c['link']: c.get('full') for v in (prev.get('classics') or {}).values() for c in v}
+        for v in out['classics'].values():
+            for c in v: c['full'] = old.get(c['link']) or _full_for(c['link'])
     except Exception as e: print('FAILED classics', e)
     try: attach_aims(out, prev)
     except Exception as e:
