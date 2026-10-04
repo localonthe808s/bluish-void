@@ -658,6 +658,21 @@ function inRung(v, b) {
 function ntfyHeaders(env, h) {
   return env.NTFY_TOKEN ? Object.assign({ 'Authorization': `Bearer ${env.NTFY_TOKEN}` }, h) : h;
 }
+/* ONE DELIVERY TEST PER TOKEN CHANGE (2026-10-03): after NTFY_TOKEN went in, the first tick sends one alert and logs
+   ntfy's answer, so "the token works" is a 200 seen on the phone, not an assumption. Bump NTFY_TEST to re-run; the KV
+   mark keeps it to one message however many ticks follow. */
+const NTFY_TEST = '2026-10-03-token';
+async function ntfySelfTest(env) {
+  if (!env.NTFY_TOPIC || !env.OBS) return;
+  const k = `ntfy:selftest:${NTFY_TEST}`;
+  if (await env.OBS.get(k)) return;
+  await env.OBS.put(k, new Date().toISOString());
+  const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, { method: 'POST',
+    body: `Alerts are reaching this phone again: the worker now sends with its own ntfy account (${env.NTFY_TOKEN ? 'token set' : 'NO TOKEN'}).`,
+    headers: ntfyHeaders(env, { 'Title': 'Kalshi alerts: delivery test', 'Priority': 'default' }) });
+  console.log(`[ntfy-test] ${r.status} ${r.ok ? 'delivered' : (await r.text()).slice(0, 160)}`);
+}
+
 async function notify(env, state, key, title, body, priority) {
   const now = Date.now();
   const last = (state.sent || {})[key] || 0;
@@ -1152,6 +1167,7 @@ async function darkRead(request, env) {
 
 export default {
   async scheduled(event, env, ctx) {
+    ctx.waitUntil(ntfySelfTest(env).catch(e => console.log(`[ntfy-test] FAILED ${e}`)));
     ctx.waitUntil((async () => {
       try {
         console.log(`[alerts] ${new Date().toISOString()} ${await alertTick(env)}`);
