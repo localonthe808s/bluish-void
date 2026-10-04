@@ -69365,6 +69365,57 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       var tb = document.getElementById('cw-tabs-fol');   /* the foliage bar is the cap now */
       if (tb){ tb.style.marginTop = '0'; tb.style.borderRadius = '0'; }
     }
+    /* THE GUST FRONT DETECTOR (user 2026-10-04: "yes build the NYC outflow detector"). A storm's rain-cooled outflow, or a
+       cold front, crossing an airport shows in its 5-minute record as three things at once: the air drops 5 F or more, the
+       pressure jumps 0.55 hPa or more, and the wind comes up past ~17 mph (and 5 mph above where it was), all within 20
+       minutes. Tuned on the week to 2026-10-04: the only event was the Oct 2 evening line (Somerville 21:10Z, Newark 21:50,
+       Teterboro 22:00, LGA 22:10 -- fitted ENE ~49 mph); 6 F caught only Newark, 5 F catches three, and nothing else in
+       the week's ~22,000 readings came near. An October week has no sea-breeze days, so summer is the untested case. A sea breeze cools but has no pressure jump, so it does not pass. Ten FAA airports around the city report
+       every 5 minutes with pressure (checked 2026-10-04: KMMU and KLDJ are hourly-ish, left out). With three or more hit,
+       a plane fitted to their arrival times gives the edge's heading and speed. The feed lags 10-15 min (measured for the
+       Kalshi logger), so the line says PASSED, with the time. Measured, never modelled; it says nothing when nothing passed. */
+    var CW_OF_ST = { KLGA:['LGA',40.7769,-73.8740], KJFK:['JFK',40.6398,-73.7789], KEWR:['NEWARK',40.6925,-74.1687], KTEB:['TETERBORO',40.8501,-74.0608],
+                     KHPN:['WHITE PLAINS',41.0670,-73.7076], KISP:['ISLIP',40.7952,-73.1002], KFRG:['FARMINGDALE',40.7288,-73.4134], KCDW:['CALDWELL',40.8752,-74.2814],
+                     KBDR:['BRIDGEPORT',41.1635,-73.1262], KSMQ:['SOMERVILLE',40.6260,-74.6702] };
+    window.cwOutflow = function(){
+      var el = document.getElementById('cw-outflow'); if (!el) return;
+      var v = function(o){ return o && o.value != null ? o.value : null; };
+      Promise.all(Object.keys(CW_OF_ST).map(function(id){
+        return fetch('https://api.weather.gov/stations/' + id + '/observations?limit=40').then(function(r){ return r.ok ? r.json() : null; }).then(function(j){
+          if (!j || !j.features) return null;
+          var ob = j.features.map(function(f){ var q = f.properties; return { t: Date.parse(q.timestamp), T: v(q.temperature), P: v(q.barometricPressure), W: v(q.windSpeed), G: v(q.windGust) }; })
+            .filter(function(o){ return o.T != null && o.P != null; }).sort(function(a, b){ return a.t - b.t; });
+          var hit = null;
+          for (var i = 0; i < ob.length; i++){
+            var a = ob[i], w0 = a.W || 0, minT = a.T, maxP = a.P, maxW = 0, tDrop = null;
+            for (var k = i + 1; k < ob.length && ob[k].t - a.t <= 20 * 60000; k++){
+              var b = ob[k]; if (b.T < minT){ minT = b.T; if (tDrop == null && a.T - b.T >= 2) tDrop = b.t; } if (b.P > maxP) maxP = b.P; maxW = Math.max(maxW, b.W || 0, b.G || 0); }
+            if (a.T - minT >= 2.78 && maxP - a.P >= 55 && maxW >= 27 && maxW - w0 >= 8){
+              var at = tDrop || a.t; if (!hit || at > hit.t) hit = { id: id, t: at, dT: a.T - minT, dP: (maxP - a.P) / 100, gust: maxW };
+              while (i + 1 < ob.length && ob[i + 1].t <= at + 30 * 60000) i++;   /* one passage, not every 5-min step of it */
+            }
+          }
+          return hit; }).catch(function(){ return null; }); })).then(function(hits){
+        hits = hits.filter(function(h){ return h && Date.now() - h.t < 120 * 60000; }).sort(function(a, b){ return a.t - b.t; });
+        if (!hits.length){ el.style.display = 'none'; el.textContent = ''; return; }
+        var last = hits[hits.length - 1], st = CW_OF_ST[last.id], mv = '';
+        if (hits.length >= 3){      /* t = sx*x + sy*y + c, least squares, x/y in km; heading is along the slowness vector */
+          var la0 = 40.75, X = hits.map(function(h){ var c = CW_OF_ST[h.id]; return [(c[2] + 74) * 111.32 * Math.cos(la0 * Math.PI / 180), (c[1] - la0) * 110.57, (h.t - hits[0].t) / 60000]; });
+          var n = X.length, Sx = 0, Sy = 0, St = 0, Sxx = 0, Syy = 0, Sxy = 0, Sxt = 0, Syt = 0;
+          X.forEach(function(r){ Sx += r[0]; Sy += r[1]; St += r[2]; Sxx += r[0] * r[0]; Syy += r[1] * r[1]; Sxy += r[0] * r[1]; Sxt += r[0] * r[2]; Syt += r[1] * r[2]; });
+          var cxx = Sxx - Sx * Sx / n, cyy = Syy - Sy * Sy / n, cxy = Sxy - Sx * Sy / n, cxt = Sxt - Sx * St / n, cyt = Syt - Sy * St / n, det = cxx * cyy - cxy * cxy;
+          if (Math.abs(det) > 1e-6){ var sx = (cxt * cyy - cyt * cxy) / det, sy = (cyt * cxx - cxt * cxy) / det, sl = Math.hypot(sx, sy);
+            if (sl > 0){ var kmh = 60 / sl, brg = (Math.atan2(sx, sy) * 180 / Math.PI + 360) % 360, dd = ['N','NE','E','SE','S','SW','W','NW'];
+              if (kmh > 8 && kmh < 120) mv = ' · MOVING ' + dd[Math.round(brg / 45) % 8] + ' ~' + Math.round(kmh * 0.621) + ' MPH'; } }
+        }
+        var hh = new Date(last.t), tm = hh.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).toUpperCase();
+        el.textContent = 'GUST FRONT PASSED ' + st[0] + ' ' + tm + ' · AIR DOWN ' + Math.round(bvDF(last.dT)) + '°F · WIND TO ' + Math.round(last.gust * 0.621) + ' MPH · PRESSURE UP ' + last.dP.toFixed(1) + ' HPA'
+          + mv + ' · ' + hits.length + ' OF ' + Object.keys(CW_OF_ST).length + ' AIRPORTS';
+        el.style.display = 'block';
+      });
+    };
+    setTimeout(function(){ window.cwOutflow(); }, 5000);
+    setInterval(function(){ var w = document.getElementById('city-widget'); if (!document.hidden && w && w.offsetParent) window.cwOutflow(); }, 5 * 60000);
     function cwCardsSync(){
       var rowEl = document.getElementById('cw-cards');
       if (!rowEl) return;
@@ -69400,8 +69451,11 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
           + '<span data-dot style="flex-shrink:0;font-weight:700;color:rgba(255,255,255,.95);"></span>'
           + '<span style="min-width:0;text-align:right;"><span id="cw-hood-text" style="display:block;font:700 10.5px system-ui,sans-serif;color:rgba(255,255,255,.95);letter-spacing:.02em;white-space:nowrap;">WILL IT RAIN ON YOU? PICK YOUR NEIGHBORHOOD</span>'
           + '<span id="cw-sm-sub" style="display:block;font-weight:600;font-size:7.5px;color:rgba(255,255,255,.72);letter-spacing:.06em;white-space:nowrap;">STORM MOTION \u00b7 \u2026</span></span>'
-          + '</span></span>';
+          + '</span></span>'
+          /* the gust-front line (see cwOutflow): shown only after a passage */
+          + '<span id="cw-outflow" style="display:none;font:800 9.5px system-ui,sans-serif;letter-spacing:.06em;color:#fff;background:rgba(127,29,29,.55);border-radius:6px;padding:4px 8px;"></span>';
         rowEl.appendChild(smEl);
+        setTimeout(function(){ if (window.cwOutflow) window.cwOutflow(); }, 0);
       }
       try{
         var chy = window._wxHourly, cni = window._wxNearestIdx || 0;
