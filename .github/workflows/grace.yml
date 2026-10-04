@@ -1,0 +1,46 @@
+# WHERE THE WATER WENT (2026-10-04): GRACE / GRACE-FO monthly mass change for EARTH SYSTEMS -> GRAVITY.
+# UT Austin CSR's public RL06.3 mascon NetCDF (no login) is updated about monthly, a couple of months behind;
+# _maplab/grace_bake.py renders the trend, the yearly frames and the newest twelve months, and this uploads them
+# to R2 at earth/gravity/water/. Twice a month is plenty.
+name: GRACE water bake
+
+on:
+  schedule:
+    - cron: '37 9 3,18 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bake
+        run: |
+          pip install --quiet netCDF4 numpy pillow
+          python3 -u _maplab/grace_bake.py out
+          python3 - <<'EOF'
+          import json
+          d = json.load(open('out/water.json'))
+          assert d['months'] > 200 and len(d['frames']) > 15, 'bake produced too little'
+          assert -400 < d['greenland']['gt_per_yr'] < -100, 'Greenland trend out of range: %s' % d['greenland']['gt_per_yr']
+          EOF
+          rm -f out/_*.nc
+      - name: Upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          for f in out/*.webp; do
+            aws s3 cp "$f" "s3://bluishvoid-bg/earth/gravity/water/$(basename "$f")" \
+              --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+              --content-type image/webp --cache-control "public, max-age=86400"
+          done
+          aws s3 cp out/water.json "s3://bluishvoid-bg/earth/gravity/water/water.json" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --content-type application/json --cache-control "public, max-age=3600"
