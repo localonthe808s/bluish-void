@@ -102763,14 +102763,22 @@ function closeAlertModal(){
                  { k: 'himawari', n: 'HIMAWARI-9', lon: 140.7, rf: 0.4942 }, { k: 'meteosat-12', n: 'METEOSAT-12', lon: 0, rf: 0.4885 },
                  { k: 'gk2a', n: 'GK2A', lon: 128.2, rf: 0.4927 } ];
     var ENOWG = { seq: 0, ages: null };
-    var enowSat = function(sat){
-      return window.bvProxyJSON('https://slider.cira.colostate.edu/data/json/' + sat.k + '/full_disk/cira_geoproxy/latest_times.json?_=' + Math.floor(Date.now() / 60000))   /* a fresh list: some of the proxies in the race cache (GOES-19 read 1.8 h old) */.then(function(j){
-        var ts = String(((j && j.timestamps_int) || [])[0] || ''); if (!/^\d{14}$/.test(ts)) throw 0;
-        var u = 'https://slider.cira.colostate.edu/data/imagery/' + ts.slice(0,4) + '/' + ts.slice(4,6) + '/' + ts.slice(6,8) + '/' + sat.k + '---full_disk/cira_geoproxy/' + ts + '/00/000_000.png';
-        return GLOBE.img('https://proxy.bluishvoid.com/?url=' + encodeURIComponent(u)).then(function(im){
-          var c = document.createElement('canvas'); c.width = im.naturalWidth; c.height = im.naturalHeight; var g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(im, 0, 0);
-          return { sat: sat, w: c.width, h: c.height, d: g.getImageData(0, 0, c.width, c.height).data,
-                   t: Date.UTC(+ts.slice(0,4), +ts.slice(4,6) - 1, +ts.slice(6,8), +ts.slice(8,10), +ts.slice(10,12)) }; }); }).catch(function(){ return null; });
+    var SLIDE = function(sat, ts){ return 'https://slider.cira.colostate.edu/data/imagery/' + ts.slice(0,4) + '/' + ts.slice(4,6) + '/' + ts.slice(6,8) + '/' + sat.k + '---full_disk/cira_geoproxy/' + ts + '/00/000_000.png'; };
+    var tsMs = function(ts){ return Date.UTC(+ts.slice(0,4), +ts.slice(4,6) - 1, +ts.slice(6,8), +ts.slice(8,10), +ts.slice(10,12)); };
+    var enowList = function(sat){
+      return window.bvProxyJSON('https://slider.cira.colostate.edu/data/json/' + sat.k + '/full_disk/cira_geoproxy/latest_times.json?_=' + Math.floor(Date.now() / 60000))   /* a fresh list: some of the proxies in the race cache (GOES-19 read 1.8 h old) */
+        .then(function(j){ var L = ((j && j.timestamps_int) || []).map(String).filter(function(t){ return /^\d{14}$/.test(t); }); if (!L.length) throw 0; return { sat: sat, L: L }; }).catch(function(){ return null; });
+    };
+    var enowDisk = function(sat, ts){
+      return GLOBE.img('https://proxy.bluishvoid.com/?url=' + encodeURIComponent(SLIDE(sat, ts))).then(function(im){
+        var c = document.createElement('canvas'); c.width = im.naturalWidth; c.height = im.naturalHeight; var g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(im, 0, 0);
+        return { sat: sat, w: c.width, h: c.height, d: g.getImageData(0, 0, c.width, c.height).data, t: tsMs(ts) }; }).catch(function(){ return null; });
+    };
+    /* frame k: each satellite's picture nearest to (its newest - k x 30 min), within 12 min; a satellite with none sits that frame out */
+    var enowFrame = function(lists, k){
+      return Promise.all(lists.map(function(o){ var want = tsMs(o.L[0]) - k * 1800000, best = null, bd = 1e15;
+        o.L.forEach(function(t){ var d = Math.abs(tsMs(t) - want); if (d < bd){ bd = d; best = t; } });
+        return best && bd <= 720000 ? enowDisk(o.sat, best) : null; })).then(function(ds){ return ds.filter(Boolean); });
     };
     var enowCompose = function(disks){
       var OW = 2048, OH = 1024, A = 6378.137, B = 6356.752, HS = 42164.16, rad = Math.PI / 180, LX = Math.asin(A / HS), LY = Math.asin(B / HS);
@@ -102797,23 +102805,63 @@ function closeAlertModal(){
         step(); });
     };
     var enowAge = function(t){ var mi = Math.max(0, Math.round((Date.now() - t) / 60000)); return mi < 90 ? mi + ' MIN' : (mi / 60).toFixed(1) + ' H'; };
+    /* THE LAST THREE HOURS, LOOPED (user 2026-10-04: "now animate it, loop the last few hours"). The newest frame goes up
+       at once as the still; then six older frames (30 min apart, oldest first) are stitched in the background, each turned
+       into a blob URL, and handed to GPLAY -- the jet's player: its badge, tap to pause, X to stop, reduced motion starts
+       paused, and setView stops it. Each step CROSSFADES on the globe's second skin unit instead of jumping, because 30
+       minutes of cloud is a visible jump. About 4 MB a frame, so the loop is skipped when the browser asks to save data. */
+    var ENOWP = { urls: [], fade: 0 };
+    var enowFree = function(){ ENOWP.urls.forEach(function(u){ try { URL.revokeObjectURL(u); } catch(e){} }); ENOWP.urls = []; ENOWP.fade++; };
+    var enowApply = function(im){
+      var tok = ++ENOWP.fade, t0 = performance.now(), dur = 560, FULL = 1 / 0.86;
+      GLOBE.put(2, im); GLOBE.on = [FULL, 0];
+      var go = function(now){ if (tok !== ENOWP.fade || CUR !== 'earthnow') return; var u = Math.min(1, (now - t0) / dur);
+        GLOBE.on = [FULL, FULL * u * u * (3 - 2 * u)]; GLOBE.dirty = true;
+        if (u < 1) requestAnimationFrame(go); else { GLOBE.put(1, im); GLOBE.on = [FULL, 0]; GLOBE.dirty = true; } };
+      requestAnimationFrame(go);
+    };
+    var enowCaption = function(ds, extra){
+      line('<div style="text-align:center;letter-spacing:.04em;">THE WHOLE EARTH NOW \u00b7 ' + ds.map(function(k){ return k.sat.n + ' ' + enowAge(k.t); }).join(' \u00b7 ')
+        + (extra ? ' \u00b7 ' + extra : '') + ' \u00b7 DAYLIGHT IN TRUE COLOUR, NIGHT AS INFRARED CLOUD OVER CITY LIGHTS \u00b7 THE POLES ARE BEYOND EVERY GEOSTATIONARY SATELLITE \u00b7 DRAG TO SPIN</div>');
+    };
     var enowGlobe = function(){
-      var seq = ++ENOWG.seq;
-      return Promise.all(ESAT.map(enowSat)).then(function(ds){ ds = ds.filter(Boolean); if (seq !== ENOWG.seq || CUR !== 'earthnow') return true; if (ds.length < 2) return false;
-        globeNote('STITCHING ' + ds.length + ' SATELLITES…');
-        return enowCompose(ds).then(function(c){ if (!c || seq !== ENOWG.seq || CUR !== 'earthnow') return true; globeNote(null);
-          GLOBE.put(1, c); GLOBE.on = [1 / 0.86, 0]; GLOBE.dirty = true;      /* the skin covers fully: the shader caps a skin at 0.86 */
-          line('<div style="text-align:center;letter-spacing:.04em;">THE WHOLE EARTH NOW · ' + ds.map(function(k){ return k.sat.n + ' ' + enowAge(k.t); }).join(' · ')
-            + ' · DAYLIGHT IN TRUE COLOUR, NIGHT AS INFRARED CLOUD OVER CITY LIGHTS · THE POLES ARE BEYOND EVERY GEOSTATIONARY SATELLITE · DRAG TO SPIN</div>');
-          return true; }); });
+      var seq = ++ENOWG.seq; GPLAY.stop(true); enowFree();
+      return Promise.all(ESAT.map(enowList)).then(function(lists){ lists = lists.filter(Boolean); if (seq !== ENOWG.seq || CUR !== 'earthnow') return true; if (lists.length < 2) return false;
+        return enowFrame(lists, 0).then(function(ds){ if (seq !== ENOWG.seq || CUR !== 'earthnow') return true; if (ds.length < 2) return false;
+          globeNote('STITCHING ' + ds.length + ' SATELLITES\u2026');
+          return enowCompose(ds).then(function(c){ if (!c || seq !== ENOWG.seq || CUR !== 'earthnow') return true; globeNote(null);
+            GLOBE.put(1, c); GLOBE.on = [1 / 0.86, 0]; GLOBE.dirty = true;      /* the skin covers fully: the shader caps a skin at 0.86 */
+            var save = navigator.connection && navigator.connection.saveData;
+            enowCaption(ds, save ? '' : 'LOADING THE LAST 3 HOURS\u2026');
+            if (!save) enowLoop(lists, c, ds, seq);
+            return true; }); }); });
+    };
+    var enowLoop = function(lists, c0, ds0, seq){
+      var frames = [], N = 6, lab = function(ds){ var t = ds[0] ? ds[0].t : Date.now(); return new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).toUpperCase(); };
+      var blob = function(c){ return new Promise(function(res){ c.toBlob(function(b){ res(b ? URL.createObjectURL(b) : null); }, 'image/png'); }); };
+      /* the downloads ran one frame at a time (74 s to play on a cold cache); now up to three frames are fetched ahead while
+         the stitching goes in order */
+      var want = {}, fetchK = function(kk){ if (kk >= 1 && kk <= N && !want[kk]) want[kk] = enowFrame(lists, kk); return want[kk]; };
+      var k = N, next = function(){
+        if (seq !== ENOWG.seq || CUR !== 'earthnow') return;
+        if (k === 0){ blob(c0).then(function(u0){ if (seq !== ENOWG.seq || CUR !== 'earthnow') return; if (u0){ ENOWP.urls.push(u0); frames.push({ url: u0, label: lab(ds0) }); }
+            enowCaption(ds0, '');
+            GPLAY.start(frames, 'THE LAST 3 HOURS', null, 820, enowApply); });
+          return; }
+        fetchK(k); fetchK(k - 1); fetchK(k - 2);
+        want[k].then(function(ds){ delete want[k]; if (seq !== ENOWG.seq || CUR !== 'earthnow') return;
+          enowCaption(ds0, 'LOADING THE LAST 3 HOURS ' + (N - k + 1) + '/' + (N + 1));
+          return (ds.length >= 2 ? enowCompose(ds).then(function(c){ return c ? blob(c).then(function(u){ if (u){ ENOWP.urls.push(u); frames.push({ url: u, label: lab(ds) }); } }) : null; }) : null); })
+          .then(function(){ k--; setTimeout(next, 0); }, function(){ k--; setTimeout(next, 0); }); };
+      next();
     };
     var VIEWS = {
       earthnow: { label: 'EARTH NOW', group: 'EARTH NOW',
         globe: function(){ GLOBE.V.cells = null; GLOBE.annot = null; GLOBE.plain = true; var la = +((window.LOCATION || {}).lat); GLOBE.face(isFinite(la) ? Math.max(-50, Math.min(50, la)) : 20, homeLon());
-          clearInterval(ENOW.timer); ENOW.timer = setInterval(function(){ if (CUR === 'earthnow' && isOpen() && !document.hidden && STAGE === 'globe') enowGlobe(); }, 600000);
+          clearInterval(ENOW.timer); ENOW.timer = setInterval(function(){ if (CUR === 'earthnow' && isOpen() && !document.hidden && STAGE === 'globe') enowGlobe(); }, 1800000);   /* the loop is ~28 MB: renewed every 30 min, not 10 */
           return enowGlobe(); },
         flat: function(){ stageSet('bare'); enowOn(); },      /* no globe: the GOES-19 disk, as before */
-        off: function(){ ENOWG.seq++; clearInterval(ENOW.timer); ENOW.timer = null; } },
+        off: function(){ ENOWG.seq++; enowFree(); clearInterval(ENOW.timer); ENOW.timer = null; } },
       enso: { label: 'EL NIÑO', group: 'THE OCEAN',
         panel: function(){ render(); ensoLine(); load().then(function(){ if (CUR !== 'enso') return; render(); if (STAGE === 'globe'){ GLOBE.dirty = true; mapPlay(); if (S.cmp !== 'now') skin(); } else { skin(); ninoBox(true); }
             /* THE VIEW OPENS MOVING (user 2026-09-22: "make the el nino visual animated, it has the scroller already you just need to press play"):
