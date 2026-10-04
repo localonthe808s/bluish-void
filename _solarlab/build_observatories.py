@@ -38,6 +38,8 @@ NOW = dt.datetime.now(dt.timezone.utc)
 
 
 def get(url, data=None, timeout=120, tries=3):
+    # NASA image paths can hold a curly apostrophe; urllib refuses non-ASCII (2026-10-03: a NISAR volcano image was dropped)
+    url = urllib.parse.quote(url, safe=":/?&=%#+,;@~!$'()*[]")
     for i in range(tries):
         try:
             req = urllib.request.Request(url, data=data, headers=UA)
@@ -322,6 +324,7 @@ SRC = {'nasa':    {'from': 'NASA',     'credit': 'NASA',                  'lic':
        'esasolo': {'from': 'ESA',      'credit': 'ESA & NASA/Solar Orbiter', 'lic': 'CC BY-SA 3.0 IGO'},
        'nrao':    {'from': 'NRAO',     'credit': 'NRAO/AUI/NSF',          'lic': 'CC BY 4.0'},
        'nso':     {'from': 'NSO',      'credit': 'NSF/NSO/AURA',          'lic': 'CC BY 4.0'},
+       'esagaia': {'from': 'ESA',      'credit': 'ESA/Gaia/DPAC',         'lic': 'CC BY-SA 3.0 IGO'},
        'esahst':  {'from': 'ESA/Hubble', 'credit': 'ESA/Hubble & NASA',  'lic': 'CC BY 4.0'},
        'noirlab': {'from': 'NOIRLab',  'credit': 'NSF\u2013DOE Vera C. Rubin Observatory/NOIRLab/SLAC/AURA', 'lic': 'CC BY 4.0'}}
 # NOIRLab's feeds cover all of its telescopes and its outreach: Rubin items only, and no event photos
@@ -358,6 +361,11 @@ FEEDS = {
     'nrao':    {'photos': [('nrao', 'https://public.nrao.edu/gallery/feed/')],
                 'news':   [('nrao', 'https://public.nrao.edu/news/feed/')]},
     'inouye':  {'photos': [], 'news': [('nso', 'https://nso.edu/feed/')]},
+    # added 2026-10-03 (user: "retired GAIA data / INSAR / NISAR volcanos?")
+    'gaia':    {'photos': [('esagaia', 'https://www.esa.int/rssfeed/Science_Exploration/Space_Science/Gaia')],
+                'news':   [('esagaia', 'https://www.esa.int/rssfeed/Science_Exploration/Space_Science/Gaia')]},
+    'nisar':   {'photos': [('nasa', 'https://science.nasa.gov/category/missions/nisar/feed/')],
+                'news':   [('nasa', 'https://science.nasa.gov/category/missions/nisar/feed/')]},
     'nh':      {'photos': [('nasa', 'https://science.nasa.gov/category/missions/new-horizons/feed/')],
                 'news':   [('nasa', 'https://science.nasa.gov/category/missions/new-horizons/feed/')]},
 }
@@ -406,7 +414,7 @@ def _thumb(src, img):
     if src == 'noirlab':
         m = re.search(r'/archives/images/[^/]+/([^/?]+)\.(?:jpg|png|tif)', img)
         return 'https://storage.noirlab.edu/media/archives/images/thumb300y/%s.jpg' % m.group(1) if m else img
-    if src in ('esaint', 'esasolo', 'nrao'): return img
+    if src in ('esaint', 'esasolo', 'esagaia', 'nrao'): return img
     return re.sub(r'\?.*$', '', img).replace(' ', '%20') + '?w=640'
 
 
@@ -419,7 +427,7 @@ NOT_SKY = re.compile(r'launch|rocket|falcon|booster|lift-?off|launch ?pad|clean 
                      r'\btps\b|heat shield|fitting|spacecraft|mission control|logo|meatball|insignia|astronaut|facility|'
                      r'trajectory animation|mid-course|artist.s (?:concept|illustration|rendering) of (?:the )?(?:roman|parker|webb|hubble)', re.I)
 IS_SKY = re.compile(r'galax|nebula|cluster|supernova|\bstars?\b|stellar|planet|exoplanet|\bmoons?\b|jupiter|saturn|uranus|neptune|'
-                    r'comet|asteroid|kuiper|\bio\b|europa|ganymede|callisto|pluto|charon|arrokoth|aurora|\bsun\b|solar wind|corona|\bcme\b|wispr|flare|spectr|light curve|\bdata\b|chart|graph|'
+                    r'volcan|erupt|lava|comet|asteroid|kuiper|\bio\b|europa|ganymede|callisto|pluto|charon|arrokoth|aurora|\bsun\b|solar wind|corona|\bcme\b|wispr|flare|spectr|light curve|\bdata\b|chart|graph|'
                     r'\bplot\b|\bmap\b|visuali|simulat|deep field|universe|cosmic|\bdust\b|black hole|quasar|lens|potm|infrared|'
                     r'x-ray|ultraviolet|protostar|disk|jet\b|remnant|dwarf|milky way|heliosphere|magnetic', re.I)
 
@@ -510,7 +518,7 @@ def bake_media():
         news = list({n['title']: n for n in reversed(news)}.values())[::-1][:5]   # one per title, the newest
         for n in news:                    # ESA's feed carries only a picture: the lead is the article's first paragraph
             n['lead'] = re.sub(r'^Video:\s*[\d:]+\s*', '', n['lead'])      # an ESA video item opens with its running time
-            if n.pop('src', '') in ('esaint', 'esasolo') and len(n['lead']) < 60:
+            if n.pop('src', '') in ('esaint', 'esasolo', 'esagaia') and len(n['lead']) < 60:
                 try: n['lead'] = esa_lead(n['link'])
                 except Exception as e: print('  esa lead failed', n['link'][-60:], e)
         photos = sorted(photos, key=lambda n: -(n['t'] or 0))[:18]   # six in the strip, twelve more behind VIEW MORE
@@ -662,6 +670,22 @@ def bake_solo():
             'max_lat': max(abs(r[1]) for r in rows), 'perihelia': [ms(start) + i * 86400000 for i in peri]}
 
 
+# ── ATHENA-FIDUS (2026-10-03; user: "french italian ATHENA"): a French-Italian military + civil-protection comms
+#    satellite in geostationary orbit. Nothing about its traffic is public; where it is parked is. Read off the site's
+#    own CelesTrak bake (_solarlab/_tle.js: [name, epoch ms, rev/day, ecc, inc, raan, argp, M, launch year]).
+def bake_athena():
+    t = (ROOT / '_solarlab/_tle.js').read_text()
+    m = re.search(r'\["ATHENA-FIDUS",(\d+),([\d.]+),([\d.]+),([\d.]+),([\d.]+),([\d.]+),([\d.]+),(\d+)\]', t)
+    if not m: raise RuntimeError('ATHENA-FIDUS not in _tle.js')
+    ep, n, e, inc, raan, argp, M = int(m.group(1)), *(float(m.group(k)) for k in range(2, 8))
+    jd = ep / 86400000 + 2440587.5
+    gmst = (280.46061837 + 360.98564736629 * (jd - 2451545)) % 360
+    lon = (raan + argp + M - gmst) % 360
+    a = (398600.4418 / (n * 2 * math.pi / 86400) ** 2) ** (1 / 3)
+    return {'lon': round(lon - 360 if lon > 180 else lon, 2), 'inc': inc, 'alt_km': round(a - 6378.137), 'epoch': ep,
+            'src': 'CelesTrak elements via _tle.js'}
+
+
 # ── EUCLID: range from Earth (it sits in a halo round L2, like Webb) ────────────────────
 def bake_euclid():
     start = (NOW - dt.timedelta(days=2)).replace(minute=0, second=0, microsecond=0)
@@ -702,7 +726,7 @@ def main():
     for key, fn in (('webb', bake_webb_schedule), ('parker', bake_parker), ('roman_card', bake_roman_card), ('media', bake_media),
                     ('hubble_obs', lambda: bake_mast('HST')),
                     ('chandra', lambda: bake_chandra(prev)), ('voyager', bake_voyager),
-                    ('euclid', bake_euclid), ('rubin', bake_rubin), ('far', bake_far), ('solo', bake_solo),
+                    ('euclid', bake_euclid), ('rubin', bake_rubin), ('far', bake_far), ('solo', bake_solo), ('athena', bake_athena),
                     ('webb_new', lambda: bake_newest('JWST')), ('hubble_new', lambda: bake_newest('HST')),
                     ('webb_obs', lambda: bake_mast('JWST'))):
         try:
