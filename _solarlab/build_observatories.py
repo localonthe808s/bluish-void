@@ -22,7 +22,7 @@ stripes) and read as broken next to the event cards' renders.
 
 usage: build_observatories.py
 """
-import datetime as dt, json, math, re, sys, time, urllib.parse, urllib.request
+import datetime as dt, html, json, math, re, sys, time, urllib.parse, urllib.request
 
 # a sentence ends at . ! ? -- but not after an initial ("Vera C. Rubin") or an abbreviation ("U.S.")
 SENT = re.compile(r'(?<![\s.][A-Z]\.)(?<!\bSt\.)(?<!\bDr\.)(?<=[.!?])\s+(?=[A-Z\u201c"(])')
@@ -358,7 +358,8 @@ FEEDS = {
     'solo':    {'photos': [('esasolo', 'https://www.esa.int/rssfeed/Science_Exploration/Space_Science/Solar_Orbiter')],
                 'news':   [('esasolo', 'https://www.esa.int/rssfeed/Science_Exploration/Space_Science/Solar_Orbiter'),
                            ('nasa', 'https://science.nasa.gov/category/missions/solar-orbiter/feed/')]},
-    'nrao':    {'photos': [('nrao', 'https://public.nrao.edu/gallery/feed/')],
+    # NRAO's gallery is site photography and illustrations (dropped 2026-10-03); its NEWS posts lead with the radio maps
+    'nrao':    {'photos': [('nrao', 'https://public.nrao.edu/news/feed/')],
                 'news':   [('nrao', 'https://public.nrao.edu/news/feed/')]},
     'inouye':  {'photos': [], 'news': [('nso', 'https://nso.edu/feed/')]},
     # added 2026-10-03 (user: "retired GAIA data / INSAR / NISAR volcanos?")
@@ -436,15 +437,42 @@ IS_SKY = re.compile(r'galax|nebula|cluster|supernova|\bstars?\b|stellar|planet|e
 # NO ARTIST'S CONCEPTS (user 2026-10-03: "make a rule to never show artist concepts as photos for the satellites"). A
 # picture strip under a telescope reads as what it SAW; an illustration there is a fake photo. Dropped when the title,
 # alt text or the opening of the description says so, or the credit is an art studio (ESA/ATG medialab).
-ARTIST = re.compile(r"artist\W{0,3}s?\W+(?:concept|impression|illustration|rendering|depiction|conception|view)|"
+ARTIST = re.compile(r"artist\W{0,3}s?\W+(?:concept|impression|illustration|rendering|depiction|conception|view|representation|interpretation)|"
                     r"\billustration\b|\bconcept art\b|\banimation still\b|\brendering of\b|\bartwork\b|\billustrated\b", re.I)
 ART_CREDIT = re.compile(r"ATG medialab|ATG Europe|Science Office|illustration", re.I)
+
+
+# ONLY WHAT THEY SEE (user 2026-10-03: "i dont like the land based photos either, i dont want to show the equipment and
+# sites, i mostly want to focus on the data and photos theyre getting"). Telescopes at night, signs, antennas, buildings,
+# staff and event graphics are dropped from every strip -- by title/alt words and by the tell-tale filenames (NRAO's
+# PIG-nnn public-information graphics are its illustrations; *_pano, DSC0000 camera files, headers and collages).
+SITE = re.compile(r"\b(?:antennas?|dish(?:es)?|signs?|street ?light|tower|transporter|control building|workers?|suit up|"
+                  r"model for ar|construction|dedication|sundial|panoramic|blue hour|moonrise|moonset|lightning|operations support|"
+                  r"facility|clean ?room|open house|staff|meeting|ceremony|summit|dome|mirrors?|technicians?|engineers?|"
+                  r"under the stars|at night)\b", re.I)
+# + array "config" shots (VLA in D configuration), planes, pre-2000 years (historic photos), camera file codes (J3B6463, IMG 1234)
+SITE_FN = re.compile(r"config|\bplane\b|aircraft|\b(?:18|19)\d\d\b|\b[a-z]\d[a-z]\d{4}\b|\bimg \d{3,}|night|pano|moonset|moonrise|\bdsc\s?\d|header|graphic|collage|open house|staff|\baas\b|\bill\s?\d|\bill\b|pig\s?\d", re.I)
+
+
+# people at work (the alt text describes them -- NOT NASA's crop=faces URL hint, which is on every image), a spacecraft drawn "in space", and
+# aurora photographed from the ground ("Aurora near Mallorca") are not what the telescope took either
+PEOPLE_ALT = re.compile(r"\b(?:women|men|people|person|team members?|seen from behind|monitors|in space)\b", re.I)
+GROUND_SKY = re.compile(r"aurora\W+(?:near|over|above|in|from|at)\W", re.I)
+
+
+def is_site(it):
+    raw = it.get('img') or it.get('thumb') or ''
+    fn = re.sub(r'[_\-]+', ' ', re.sub(r'\?.*$', '', raw).rsplit('/', 1)[-1])
+    return bool(SITE.search(it.get('title', '') + ' ' + it.get('alt', '')) or SITE_FN.search(fn)
+                or PEOPLE_ALT.search(it.get('alt', ''))
+                or re.search(r'\bStories$', it.get('title', ''))   # a NASA listing page: its lead picture is whatever post is on top (a team photo)
+                or GROUND_SKY.search(it.get('title', '') + ' ' + fn))
 
 
 def is_artwork(it):
     # the picture's own filename often says it when no caption does (ESA: LKH_Milky_Way_merger_artist_s_impression.jpg)
     fn = re.sub(r'[_\-]+', ' ', re.sub(r'\?.*$', '', it.get('img') or it.get('thumb') or '').rsplit('/', 1)[-1])
-    return bool(ARTIST.search(' '.join([it.get('title', ''), it.get('alt', ''), (it.get('desc', '') or '')[:300], fn]))
+    return bool(ARTIST.search(' '.join([it.get('title', ''), it.get('alt', ''), (it.get('desc', '') or '')[:600], fn]))
                 or ART_CREDIT.search(it.get('credit', '') or ''))
 
 
@@ -536,18 +564,47 @@ def bake_media():
         pages = []
         for src, url in f['photos']:
             pages.append((src, url))
-            if src in ('nasa', 'nrao'): pages.append((src, url + ('&' if '?' in url else '?') + 'paged=2'))   # NRAO: most new gallery items are illustrations
+            if src in ('nasa', 'nrao'): pages.append((src, url + ('&' if '?' in url else '?') + 'paged=2'))   # NRAO: few data images per page
         # never repeat a GREATEST HITS picture in the latest strip
         try: cl = json.loads((ROOT / '_solarlab/classics.json').read_text()).get(key, [])
         except Exception: cl = []
         clk = set(re.sub(r'\W+', '', c.get('title', '').lower()) for c in cl) | set(c.get('link', '') for c in cl)
+        page_items = []
         for src, url in pages:
-            try: items = _items(url)
-            except Exception as e: print('  feed page failed', url[-60:], e); continue
+            try: page_items.append((src, _items(url)))
+            except Exception as e: print('  feed page failed', url[-60:], e)
+        if key == 'nrao':
+            # NRAO reuses gallery illustrations under news headlines that never say so: the gallery's own title for the
+            # same file, and the caption on the news page ("This artist's representation ..."), decide
+            gal = []
+            for gp in ('https://public.nrao.edu/gallery/feed/', 'https://public.nrao.edu/gallery/feed/?paged=2'):
+                try: gal += _items(gp)
+                except Exception as e: print('  nrao gallery failed', e)
+            page_items.append(('nrao-ban', gal))
+            for _, its in page_items:
+                for it in its:
+                    if _ != 'nrao-ban' and it.get('link'):
+                        try:
+                            t = re.sub(r'<[^>]+>', ' ', re.sub(r'<script.*?</script>|<style.*?</style>', '', get(it['link'], timeout=40, tries=2).decode('utf-8', 'replace'), flags=re.S))
+                            raw_t = html.unescape(t)
+                            cm = re.search(r'Credit:[ \t]*([^\n]{3,220}?)(?:\s{3,}|\n|$)', raw_t)   # the credit line, before the article's whitespace
+                            t = re.sub(r'\s+', ' ', raw_t); i = t.find('Credit:')
+                            it['desc'] = (t[max(0, i - 300):i] + ' ' + it.get('desc', '')) if i > 0 else it.get('desc', '')
+                            # the page's own credit: NRAO posts carry other observatories' pictures
+                            if cm:
+                                it['credit'] = cm.group(1).strip()
+                                if not re.match(r'(?:NSF/)?(?:AUI/)?NSF NRAO|NRAO/AUI/NSF|NSF/AUI/NSF', it['credit']): it['lic'] = 'licence: see source'
+                        except Exception as e: print('  nrao page failed', it['link'][-50:], e)
+        _base = lambda u: re.sub(r'-\d+x\d+$', '', re.sub(r'\?.*$', '', u or '').rsplit('/', 1)[-1].rsplit('.', 1)[0]).lower()
+        banned = set(_base(it['img']) for _, its in page_items for it in its if it.get('img') and (is_artwork(it) or is_site(it)))
+        for src, items in page_items:
+            if src == 'nrao-ban': continue
             for it in items:
                 if re.sub(r'\W+', '', it['title'].lower()) in clk or it['link'] in clk: continue
-                if is_artwork(it): continue
+                if is_artwork(it) or is_site(it) or _base(it.get('img')) in banned: continue
                 # NISAR's feed also carries NASA's airborne radar campaigns: a jet on a runway is not the satellite's picture
+                # NRAO's tab shows what ITS telescopes took: the credit must name one (a Rubin photo led one radio story)
+                if key == 'nrao' and not re.search(r'NRAO|ALMA|\bVLA\b|VLBA|Green Bank|GBT', it.get('credit', '')): continue
                 if key == 'nisar' and re.search(r'\bflights?\b|aircraft|C-20A|airborne|UAVSAR', it['title'] + ' ' + it.get('alt', ''), re.I): continue
                 th = _thumb(src, it['img'])
                 if not th or th in seen or it['title'] in seen or not _is_sky(src, it) or not _looks_like_sky(th): continue
@@ -555,7 +612,7 @@ def bake_media():
                 seen.add(th); seen.add(it['title'])      # ESA posts a release's image and its video under one title
                 full = th.replace('?w=640', '?w=2400') if th.endswith('?w=640') else _full_for(th)
                 photos.append({'thumb': th, 'full': full, 'title': it['title'], 'link': it['link'], 't': it['t'],
-                               'credit': it['credit'] or SRC[src]['credit'], 'lic': SRC[src]['lic']})
+                               'credit': it['credit'] or SRC[src]['credit'], 'lic': it.get('lic') or SRC[src]['lic']})
         for src, url in f['news']:
             for it in _items(url):
                 if src == 'noirlab' and not RUBIN_ONLY.search(it['title'] + ' ' + it['desc']): continue
@@ -769,7 +826,7 @@ def main():
     try:
         out['classics'] = json.loads((ROOT / '_solarlab/classics.json').read_text())
         old = {c['link']: c.get('full') for v in (prev.get('classics') or {}).values() for c in v}
-        out['classics'] = {k: [c for c in v if not is_artwork(c)] for k, v in out['classics'].items()}
+        out['classics'] = {k: [c for c in v if not (is_artwork(c) or is_site(c))] for k, v in out['classics'].items()}
         for v in out['classics'].values():
             for c in v: c['full'] = old.get(c['link']) or _full_for(c['link'])
     except Exception as e: print('FAILED classics', e)
