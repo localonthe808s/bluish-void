@@ -321,6 +321,7 @@ SRC = {'nasa':    {'from': 'NASA',     'credit': 'NASA',                  'lic':
        'esaint':  {'from': 'ESA',      'credit': 'ESA/Euclid/Euclid Consortium/NASA', 'lic': 'CC BY-SA 3.0 IGO'},
        'esasolo': {'from': 'ESA',      'credit': 'ESA & NASA/Solar Orbiter', 'lic': 'CC BY-SA 3.0 IGO'},
        'nrao':    {'from': 'NRAO',     'credit': 'NRAO/AUI/NSF',          'lic': 'CC BY 4.0'},
+       'nso':     {'from': 'NSO',      'credit': 'NSF/NSO/AURA',          'lic': 'CC BY 4.0'},
        'esahst':  {'from': 'ESA/Hubble', 'credit': 'ESA/Hubble & NASA',  'lic': 'CC BY 4.0'},
        'noirlab': {'from': 'NOIRLab',  'credit': 'NSF\u2013DOE Vera C. Rubin Observatory/NOIRLab/SLAC/AURA', 'lic': 'CC BY 4.0'}}
 # NOIRLab's feeds cover all of its telescopes and its outreach: Rubin items only, and no event photos
@@ -356,6 +357,7 @@ FEEDS = {
                            ('nasa', 'https://science.nasa.gov/category/missions/solar-orbiter/feed/')]},
     'nrao':    {'photos': [('nrao', 'https://public.nrao.edu/gallery/feed/')],
                 'news':   [('nrao', 'https://public.nrao.edu/news/feed/')]},
+    'inouye':  {'photos': [], 'news': [('nso', 'https://nso.edu/feed/')]},
     'nh':      {'photos': [('nasa', 'https://science.nasa.gov/category/missions/new-horizons/feed/')],
                 'news':   [('nasa', 'https://science.nasa.gov/category/missions/new-horizons/feed/')]},
 }
