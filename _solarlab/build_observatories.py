@@ -511,7 +511,15 @@ def _looks_like_sky(th):
         st = ImageStat.Stat(im)
         mean = sum(st.mean) / 3
         spread = sum(st.stddev) / 3
-        return not (mean > 200 and spread < 45)
+        if mean > 200 and spread < 45: return False
+        # LOOKS BROKEN (user 2026-10-03: "some look incomplete"): a panel padded with a big flat mid-grey (Juno JIRAM's
+        # half-grey frame: 48% one value). A near-empty dark frame (Juno's tiny Thebe) is NOT tested: by brightness it is
+        # indistinguishable from Rubin's faint deep field (0.16% vs 0.09% bright pixels), so a rule would drop real data
+        from collections import Counter
+        gp = list(im.convert('L').resize((96, 96)).getdata()); n = len(gp)
+        mode, cnt = Counter(gp).most_common(1)[0]
+        if 40 < mode < 220 and cnt / n > 0.4: return False
+        return True
     except Exception as e:
         print('  thumb check failed', th[:80], e)
         return True
