@@ -388,6 +388,7 @@ def _items(url):
         txt = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', rawu)).strip()
         lead = first_sentence(txt)
         cr = re.search(r'Credit[s]?:\s*([^\n<]{3,160}?)(?:\s{2,}|$|\[|\. )', txt)
+        if cr and re.search(r'Navigation|Photojournal\s+\w+\s+Photojournal|Share|Download', cr.group(1)): cr = None   # page menus scraped as a credit
         try:
             pd = g('pubDate').strip()
             when = ms(dt.datetime.strptime(pd[:25], '%a, %d %b %Y %H:%M:%S'))
@@ -430,6 +431,21 @@ IS_SKY = re.compile(r'galax|nebula|cluster|supernova|\bstars?\b|stellar|planet|e
                     r'volcan|erupt|lava|comet|asteroid|kuiper|\bio\b|europa|ganymede|callisto|pluto|charon|arrokoth|aurora|\bsun\b|solar wind|corona|\bcme\b|wispr|flare|spectr|light curve|\bdata\b|chart|graph|'
                     r'\bplot\b|\bmap\b|visuali|simulat|deep field|universe|cosmic|\bdust\b|black hole|quasar|lens|potm|infrared|'
                     r'x-ray|ultraviolet|protostar|disk|jet\b|remnant|dwarf|milky way|heliosphere|magnetic', re.I)
+
+
+# NO ARTIST'S CONCEPTS (user 2026-10-03: "make a rule to never show artist concepts as photos for the satellites"). A
+# picture strip under a telescope reads as what it SAW; an illustration there is a fake photo. Dropped when the title,
+# alt text or the opening of the description says so, or the credit is an art studio (ESA/ATG medialab).
+ARTIST = re.compile(r"artist\W{0,3}s?\W+(?:concept|impression|illustration|rendering|depiction|conception|view)|"
+                    r"\billustration\b|\bconcept art\b|\banimation still\b|\brendering of\b|\bartwork\b|\billustrated\b", re.I)
+ART_CREDIT = re.compile(r"ATG medialab|ATG Europe|Science Office|illustration", re.I)
+
+
+def is_artwork(it):
+    # the picture's own filename often says it when no caption does (ESA: LKH_Milky_Way_merger_artist_s_impression.jpg)
+    fn = re.sub(r'[_\-]+', ' ', re.sub(r'\?.*$', '', it.get('img') or it.get('thumb') or '').rsplit('/', 1)[-1])
+    return bool(ARTIST.search(' '.join([it.get('title', ''), it.get('alt', ''), (it.get('desc', '') or '')[:300], fn]))
+                or ART_CREDIT.search(it.get('credit', '') or ''))
 
 
 def _is_sky(src, it):
@@ -520,7 +536,7 @@ def bake_media():
         pages = []
         for src, url in f['photos']:
             pages.append((src, url))
-            if src == 'nasa': pages.append((src, url + ('&' if '?' in url else '?') + 'paged=2'))
+            if src in ('nasa', 'nrao'): pages.append((src, url + ('&' if '?' in url else '?') + 'paged=2'))   # NRAO: most new gallery items are illustrations
         # never repeat a GREATEST HITS picture in the latest strip
         try: cl = json.loads((ROOT / '_solarlab/classics.json').read_text()).get(key, [])
         except Exception: cl = []
@@ -530,6 +546,9 @@ def bake_media():
             except Exception as e: print('  feed page failed', url[-60:], e); continue
             for it in items:
                 if re.sub(r'\W+', '', it['title'].lower()) in clk or it['link'] in clk: continue
+                if is_artwork(it): continue
+                # NISAR's feed also carries NASA's airborne radar campaigns: a jet on a runway is not the satellite's picture
+                if key == 'nisar' and re.search(r'\bflights?\b|aircraft|C-20A|airborne|UAVSAR', it['title'] + ' ' + it.get('alt', ''), re.I): continue
                 th = _thumb(src, it['img'])
                 if not th or th in seen or it['title'] in seen or not _is_sky(src, it) or not _looks_like_sky(th): continue
                 if _same_picture(th, [p['thumb'] for p in photos]): continue
@@ -698,22 +717,6 @@ def bake_solo():
             'max_lat': max(abs(r[1]) for r in rows), 'perihelia': [ms(start) + i * 86400000 for i in peri]}
 
 
-# ── ATHENA-FIDUS (2026-10-03; user: "french italian ATHENA"): a French-Italian military + civil-protection comms
-#    satellite in geostationary orbit. Nothing about its traffic is public; where it is parked is. Read off the site's
-#    own CelesTrak bake (_solarlab/_tle.js: [name, epoch ms, rev/day, ecc, inc, raan, argp, M, launch year]).
-def bake_athena():
-    t = (ROOT / '_solarlab/_tle.js').read_text()
-    m = re.search(r'\["ATHENA-FIDUS",(\d+),([\d.]+),([\d.]+),([\d.]+),([\d.]+),([\d.]+),([\d.]+),(\d+)\]', t)
-    if not m: raise RuntimeError('ATHENA-FIDUS not in _tle.js')
-    ep, n, e, inc, raan, argp, M = int(m.group(1)), *(float(m.group(k)) for k in range(2, 8))
-    jd = ep / 86400000 + 2440587.5
-    gmst = (280.46061837 + 360.98564736629 * (jd - 2451545)) % 360
-    lon = (raan + argp + M - gmst) % 360
-    a = (398600.4418 / (n * 2 * math.pi / 86400) ** 2) ** (1 / 3)
-    return {'lon': round(lon - 360 if lon > 180 else lon, 2), 'inc': inc, 'alt_km': round(a - 6378.137), 'epoch': ep,
-            'src': 'CelesTrak elements via _tle.js'}
-
-
 # ── EUCLID: range from Earth (it sits in a halo round L2, like Webb) ────────────────────
 def bake_euclid():
     start = (NOW - dt.timedelta(days=2)).replace(minute=0, second=0, microsecond=0)
@@ -754,7 +757,7 @@ def main():
     for key, fn in (('webb', bake_webb_schedule), ('parker', bake_parker), ('roman_card', bake_roman_card), ('media', bake_media),
                     ('hubble_obs', lambda: bake_mast('HST')),
                     ('chandra', lambda: bake_chandra(prev)), ('voyager', bake_voyager),
-                    ('euclid', bake_euclid), ('rubin', bake_rubin), ('far', bake_far), ('solo', bake_solo), ('athena', bake_athena),
+                    ('euclid', bake_euclid), ('rubin', bake_rubin), ('far', bake_far), ('solo', bake_solo),
                     ('webb_new', lambda: bake_newest('JWST')), ('hubble_new', lambda: bake_newest('HST')),
                     ('webb_obs', lambda: bake_mast('JWST'))):
         try:
@@ -766,6 +769,7 @@ def main():
     try:
         out['classics'] = json.loads((ROOT / '_solarlab/classics.json').read_text())
         old = {c['link']: c.get('full') for v in (prev.get('classics') or {}).values() for c in v}
+        out['classics'] = {k: [c for c in v if not is_artwork(c)] for k, v in out['classics'].items()}
         for v in out['classics'].values():
             for c in v: c['full'] = old.get(c['link']) or _full_for(c['link'])
     except Exception as e: print('FAILED classics', e)
