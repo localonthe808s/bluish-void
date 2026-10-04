@@ -319,6 +319,8 @@ def bake_roman_card():
 SRC = {'nasa':    {'from': 'NASA',     'credit': 'NASA',                  'lic': 'public domain'},
        'esa':     {'from': 'ESA/Webb', 'credit': 'ESA/Webb, NASA & CSA',  'lic': 'CC BY 4.0'},
        'esaint':  {'from': 'ESA',      'credit': 'ESA/Euclid/Euclid Consortium/NASA', 'lic': 'CC BY-SA 3.0 IGO'},
+       'esasolo': {'from': 'ESA',      'credit': 'ESA & NASA/Solar Orbiter', 'lic': 'CC BY-SA 3.0 IGO'},
+       'nrao':    {'from': 'NRAO',     'credit': 'NRAO/AUI/NSF',          'lic': 'CC BY 4.0'},
        'esahst':  {'from': 'ESA/Hubble', 'credit': 'ESA/Hubble & NASA',  'lic': 'CC BY 4.0'},
        'noirlab': {'from': 'NOIRLab',  'credit': 'NSF\u2013DOE Vera C. Rubin Observatory/NOIRLab/SLAC/AURA', 'lic': 'CC BY 4.0'}}
 # NOIRLab's feeds cover all of its telescopes and its outreach: Rubin items only, and no event photos
@@ -348,6 +350,12 @@ FEEDS = {
     # added 2026-10-03 (user: "do all of them"): Juno at Jupiter, New Horizons in the Kuiper belt
     'juno':    {'photos': [('nasa', 'https://science.nasa.gov/category/missions/juno/feed/')],
                 'news':   [('nasa', 'https://science.nasa.gov/category/missions/juno/feed/')]},
+    # added 2026-10-03 (user: "more on satellites - ... NRAO, SOLAR ORBITER"): NRAO's own gallery is CC BY 4.0
+    'solo':    {'photos': [('esasolo', 'https://www.esa.int/rssfeed/Science_Exploration/Space_Science/Solar_Orbiter')],
+                'news':   [('esasolo', 'https://www.esa.int/rssfeed/Science_Exploration/Space_Science/Solar_Orbiter'),
+                           ('nasa', 'https://science.nasa.gov/category/missions/solar-orbiter/feed/')]},
+    'nrao':    {'photos': [('nrao', 'https://public.nrao.edu/gallery/feed/')],
+                'news':   [('nrao', 'https://public.nrao.edu/news/feed/')]},
     'nh':      {'photos': [('nasa', 'https://science.nasa.gov/category/missions/new-horizons/feed/')],
                 'news':   [('nasa', 'https://science.nasa.gov/category/missions/new-horizons/feed/')]},
 }
@@ -361,11 +369,12 @@ def _items(url):
         g = lambda t: re.sub(r'^\s*<!\[CDATA\[(.*)\]\]>\s*$', r'\1', (re.search(r'<%s>(.*?)</%s>' % (t, t), it, re.S) or [None, ''])[1], flags=re.S)
         raw = g('description') + g('content:encoded')
         raw = raw.replace('<![CDATA[', '').replace(']]>', '')
+        raw = re.sub(r'<p>\s*The post .*?appeared first on .*?</p>', '', raw, flags=re.S)   # WordPress feed boilerplate (NRAO) was read as a credit
         rawu = _h.unescape(raw)
         img = re.search(r'<img[^>]+src="([^"]+)"', raw) or re.search(r'<img[^>]+src="([^"]+)"', rawu)
         tag = re.search(r'<img[^>]*>', rawu)
         alt = re.search(r'alt="([^"]*)"', tag.group(0)) if tag else None
-        enc = re.search(r'<enclosure[^>]+url="([^"]+)"', it)
+        enc = re.search(r'<enclosure[^>]+url="([^"]+)"', it) or re.search(r'<media:content[^>]+url="([^"]+)"', it)   # NRAO's gallery carries its picture only as media:content
         txt = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', rawu)).strip()
         lead = first_sentence(txt)
         cr = re.search(r'Credit[s]?:\s*([^\n<]{3,160}?)(?:\s{2,}|$|\[|\. )', txt)
@@ -395,7 +404,7 @@ def _thumb(src, img):
     if src == 'noirlab':
         m = re.search(r'/archives/images/[^/]+/([^/?]+)\.(?:jpg|png|tif)', img)
         return 'https://storage.noirlab.edu/media/archives/images/thumb300y/%s.jpg' % m.group(1) if m else img
-    if src == 'esaint': return img
+    if src in ('esaint', 'esasolo', 'nrao'): return img
     return re.sub(r'\?.*$', '', img).replace(' ', '%20') + '?w=640'
 
 
@@ -499,7 +508,7 @@ def bake_media():
         news = list({n['title']: n for n in reversed(news)}.values())[::-1][:5]   # one per title, the newest
         for n in news:                    # ESA's feed carries only a picture: the lead is the article's first paragraph
             n['lead'] = re.sub(r'^Video:\s*[\d:]+\s*', '', n['lead'])      # an ESA video item opens with its running time
-            if n.pop('src', '') == 'esaint' and len(n['lead']) < 60:
+            if n.pop('src', '') in ('esaint', 'esasolo') and len(n['lead']) < 60:
                 try: n['lead'] = esa_lead(n['link'])
                 except Exception as e: print('  esa lead failed', n['link'][-60:], e)
         photos = sorted(photos, key=lambda n: -(n['t'] or 0))[:18]   # six in the strip, twelve more behind VIEW MORE
@@ -627,6 +636,30 @@ def bake_newest(coll):
     raise RuntimeError('no usable %s frame in the last 10 days' % coll)
 
 
+# ── SOLAR ORBITER (2026-10-03): distance from the Sun, and its latitude above the Sun's equator -- the point of the
+#    mission, which Venus flybys keep tilting so it can see the poles. Frame IAU_SUN (Horizons REF_PLANE BODY).
+def bake_solo():
+    AU = 149597870.7
+    start = (NOW - dt.timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+    stop = start + dt.timedelta(days=200)
+    p = {'format': 'json', 'COMMAND': "'-144'", 'OBJ_DATA': 'NO', 'MAKE_EPHEM': 'YES', 'EPHEM_TYPE': 'VECTORS',
+         'CENTER': "'500@10'", 'REF_PLANE': 'BODY', 'START_TIME': "'%s'" % start.strftime('%Y-%m-%d'),
+         'STOP_TIME': "'%s'" % stop.strftime('%Y-%m-%d'), 'STEP_SIZE': "'1d'", 'VEC_TABLE': '2', 'OUT_UNITS': 'KM-S', 'CSV_FORMAT': 'YES'}
+    t = json.loads(get('https://ssd.jpl.nasa.gov/api/horizons.api?' + urllib.parse.urlencode(p)))['result']
+    a, b = t.find('$$SOE'), t.find('$$EOE')
+    if a < 0: raise RuntimeError(t[-400:])
+    rows = []
+    for line in t[a + 5:b].strip().split('\n'):
+        c = [x.strip() for x in line.split(',')]
+        x, y, z = (float(v) for v in c[2:5]); r = math.sqrt(x * x + y * y + z * z)
+        rows.append([round(r / AU, 4), round(math.degrees(math.asin(z / r)), 2)])
+    e = horizons('-144', '500@399', start.strftime('%Y-%m-%d'), stop.strftime('%Y-%m-%d'), '1d')
+    peri = [i for i in range(1, len(rows) - 1) if rows[i][0] < rows[i - 1][0] and rows[i][0] <= rows[i + 1][0]]
+    return {'src': 'JPL Horizons, target -144, Sun-centred, IAU_SUN equator', 't0': ms(start), 'step': 86400000, 'n': len(rows),
+            's': rows, 'earth_km': [round(math.sqrt(r[1]**2 + r[2]**2 + r[3]**2)) for r in e],
+            'max_lat': max(abs(r[1]) for r in rows), 'perihelia': [ms(start) + i * 86400000 for i in peri]}
+
+
 # ── EUCLID: range from Earth (it sits in a halo round L2, like Webb) ────────────────────
 def bake_euclid():
     start = (NOW - dt.timedelta(days=2)).replace(minute=0, second=0, microsecond=0)
@@ -667,7 +700,7 @@ def main():
     for key, fn in (('webb', bake_webb_schedule), ('parker', bake_parker), ('roman_card', bake_roman_card), ('media', bake_media),
                     ('hubble_obs', lambda: bake_mast('HST')),
                     ('chandra', lambda: bake_chandra(prev)), ('voyager', bake_voyager),
-                    ('euclid', bake_euclid), ('rubin', bake_rubin), ('far', bake_far),
+                    ('euclid', bake_euclid), ('rubin', bake_rubin), ('far', bake_far), ('solo', bake_solo),
                     ('webb_new', lambda: bake_newest('JWST')), ('hubble_new', lambda: bake_newest('HST')),
                     ('webb_obs', lambda: bake_mast('JWST'))):
         try:
