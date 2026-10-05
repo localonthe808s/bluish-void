@@ -619,8 +619,13 @@ def bake_media():
                 if _same_picture(th, [p['thumb'] for p in photos]): continue
                 seen.add(th); seen.add(it['title'])      # ESA posts a release's image and its video under one title
                 full = th.replace('?w=640', '?w=2400') if th.endswith('?w=640') else _full_for(th)
+                # A STORY'S LEAD MEDIA CAN BE A MOVIE (2026-10-05: Parker's WISPR footage of comet 3I/ATLAS came through as
+                # .../Parker-atlas_3i_WISPR_Processed.mp4?w=640 and the page put it in an <img> -- a broken picture). Mark it
+                # so the page draws a muted looping <video>; the ?w= resize means nothing to a movie, so it goes.
+                vid = bool(re.search(r'\.(?:mp4|webm|mov|m4v)(?:\?|$)', th, re.I))
+                if vid: th = full = re.sub(r'\?.*$', '', th)
                 photos.append({'thumb': th, 'full': full, 'title': it['title'], 'link': it['link'], 't': it['t'],
-                               'credit': it['credit'] or SRC[src]['credit'], 'lic': it.get('lic') or SRC[src]['lic']})
+                               'credit': it['credit'] or SRC[src]['credit'], 'lic': it.get('lic') or SRC[src]['lic'], **({'video': True} if vid else {})})
         for src, url in f['news']:
             for it in _items(url):
                 if src == 'noirlab' and not RUBIN_ONLY.search(it['title'] + ' ' + it['desc']): continue
