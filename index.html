@@ -4980,7 +4980,32 @@ window._bvContinentalNames = function(map, opts){
   #obs-now-cards .obs-vids figcaption b, #obs-now-cards .obs-sound b{ letter-spacing:.08em; color:var(--ink); }
   #obs-now-cards .obs-vids figcaption a, #obs-now-cards .obs-sound a{ color:inherit; opacity:.75; }
   #obs-now-cards .obs-sounds{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px 14px; }
-  #obs-now-cards .obs-sound audio{ width:100%; height:32px; margin-top:auto; }   /* players line up along the bottom whatever the text length */
+  /* OBSERVATION VIDEOS PLAY THEMSELVES (user 2026-10-05: "drop the video playback options too just have them autoplay, i
+     dont want to see those when observation videos are loading"): no controls attribute, and no browser play badge either
+     (iOS draws one over a muted autoplay it has not started yet) */
+  #obs-now-cards video::-webkit-media-controls, #obs-now-cards video::-webkit-media-controls-start-playback-button,
+  #obs-now-cards video::-webkit-media-controls-overlay-play-button{ display:none !important; -webkit-appearance:none; }
+  /* THE SOUNDS, SHOWN (user 2026-10-05: "show these sounds better"). Each one is its SPECTROGRAM -- pitch up, time across,
+     baked once per sound with the steady background subtracted so the wave's own shape stands out (the Langmuir bursts,
+     the whistler clumps, the chirp's arc, Venus' hum rising and falling) -- with a playhead that sweeps it while it plays;
+     a tap on the picture jumps there. Under it a round play button and the time. The browser's white audio bar is gone.
+     Every column is a SUBGRID of the row, so titles, pictures, buttons and text line up across all five whatever a
+     title's length. */
+  #obs-now-cards .obs-sounds{ grid-auto-rows:auto; }
+  #obs-now-cards .obs-sound{ display:grid; grid-row:span 5; grid-template-rows:subgrid; row-gap:6px; align-content:start; }
+  #obs-now-cards .obs-sound > b{ align-self:end; }
+  #obs-now-cards .obs-sound audio{ display:none; }
+  #obs-now-cards .snd-spec{ position:relative; height:64px; border-radius:6px; cursor:pointer; overflow:hidden;
+    background:rgba(43,34,244,.05) center/100% 100% no-repeat; }
+  #obs-now-cards .snd-spec i{ position:absolute; top:0; bottom:0; left:0; width:2px; background:rgba(234,88,12,.95); box-shadow:0 0 6px rgba(234,88,12,.6);
+    opacity:0; transition:opacity .2s; pointer-events:none; }
+  #obs-now-cards .snd-spec u{ position:absolute; top:0; bottom:0; left:0; width:0; background:rgba(43,34,244,.07); pointer-events:none; }
+  #obs-now-cards .obs-sound.on .snd-spec i{ opacity:1; }
+  #obs-now-cards .snd-ctl{ display:flex; align-items:center; justify-content:center; gap:10px; }
+  #obs-now-cards .snd-play{ width:30px; height:30px; border-radius:50%; border:none; padding:0; cursor:pointer; background:#2B22F4; color:#fff;
+    display:inline-flex; align-items:center; justify-content:center; box-shadow:0 2px 8px rgba(43,34,244,.3); }
+  #obs-now-cards .snd-play svg{ width:12px; height:12px; display:block; }
+  #obs-now-cards .snd-t{ font:700 .62rem ui-monospace, Menlo, monospace; letter-spacing:.04em; color:var(--ink); min-width:76px; text-align:left; }
   @media (max-width:700px){ #obs-now-cards .obs-vids{ grid-template-columns:1fr; } }
   #obs-now-cards .obs-pk{ display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.25fr); gap:12px; align-items:center; }
   #obs-now-cards .obs-pk video{ width:100%; display:block; border-radius:8px; background:#05070a; }
@@ -44382,16 +44407,62 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     var inouyeHtml = function(){
       var V = MED.inouye || []; if (!V.length) return '';
       return '<div class="obs-sec"><div class="obs-colh">ZOOMED INTO THE SUN</div><div class="obs-vids">' + V.map(function(v, i){
-        return '<figure><video src="' + esc(v.url) + '" poster="' + esc(v.poster) + '" muted loop playsinline controls preload="none" data-auto="1"></video>'
+        return '<figure><video src="' + esc(v.url) + '" poster="' + esc(v.poster) + '" muted loop playsinline preload="none" data-auto="1"></video>'
           + '<figcaption><b>' + esc(v.title).toUpperCase() + '</b><span>' + esc(v.what) + '</span>'
           + '<a href="' + esc(v.source_page) + '" target="_blank" rel="noopener" onclick="event.stopPropagation()">' + esc(v.credit) + ' · CC BY 4.0 · ' + esc(v.released) + ' ↗</a></figcaption></figure>';
       }).join('') + '</div></div>';
     };
+    var SND_PLAY = '<svg viewBox="0 0 12 12"><path d="M3 1.5 L10.5 6 L3 10.5 Z" fill="currentColor"/></svg>',
+        SND_PAUSE = '<svg viewBox="0 0 12 12"><rect x="2.5" y="1.5" width="2.6" height="9" rx=".6" fill="currentColor"/><rect x="6.9" y="1.5" width="2.6" height="9" rx=".6" fill="currentColor"/></svg>';
+    /* the sound players: one delegated handler for the whole panel (it is re-rendered as data arrive). One sound at a
+       time; the playhead runs on animation frames while playing, the time label on timeupdate. */
+    if (!window._bvSndWired){
+      window._bvSndWired = true;
+      var sndFmt = function(x){ x = Math.max(0, Math.floor(x || 0)); return Math.floor(x / 60) + ':' + ('0' + (x % 60)).slice(-2); };
+      var sndPaint = function(box){
+        var au = box.querySelector('audio'), d = au.duration, f = d ? Math.min(1, au.currentTime / d) : 0;
+        var hd = box.querySelector('.snd-spec i'), fl = box.querySelector('.snd-spec u'), t = box.querySelector('.snd-t');
+        if (hd) hd.style.left = 'calc(' + (f * 100).toFixed(2) + '% - 1px)';
+        if (fl) fl.style.width = (f * 100).toFixed(2) + '%';
+        if (t) t.textContent = sndFmt(au.currentTime) + (d && isFinite(d) ? ' / ' + sndFmt(d) : '');
+      };
+      var sndLoop = function(box){ if (!box.isConnected || !box.classList.contains('on')) return; sndPaint(box); requestAnimationFrame(function(){ sndLoop(box); }); };
+      var sndSet = function(box, on){
+        var b = box.querySelector('.snd-play'); box.classList.toggle('on', on);
+        if (b){ b.innerHTML = on ? SND_PAUSE : SND_PLAY; b.setAttribute('aria-label', on ? 'pause' : 'play'); }
+        if (on) sndLoop(box); else sndPaint(box);
+      };
+      var sndStart = function(box){
+        document.querySelectorAll('#obs-now-cards .obs-sound.on').forEach(function(o){ if (o !== box){ o.querySelector('audio').pause(); } });
+        var au = box.querySelector('audio');
+        if (!au._bvWired){ au._bvWired = true;
+          au.addEventListener('play', function(){ sndSet(box, true); });
+          au.addEventListener('pause', function(){ sndSet(box, false); });
+          au.addEventListener('ended', function(){ au.currentTime = 0; sndSet(box, false); });
+          au.addEventListener('loadedmetadata', function(){ sndPaint(box); }); }
+        var p = au.play(); if (p && p.catch) p.catch(function(){});
+      };
+      document.addEventListener('click', function(e){
+        var box = e.target.closest && e.target.closest('#obs-now-cards .obs-sound'); if (!box) return;
+        var au = box.querySelector('audio'); if (!au) return;
+        if (e.target.closest('.snd-play')){ e.stopPropagation(); if (au.paused) sndStart(box); else au.pause(); return; }
+        var sp = e.target.closest('.snd-spec');
+        if (sp){ e.stopPropagation(); var r = sp.getBoundingClientRect(), fr = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+          var go = function(){ if (au.duration) au.currentTime = fr * au.duration; sndStart(box); };
+          if (au.readyState >= 1) go(); else { au.addEventListener('loadedmetadata', go, { once: true }); au.load(); } }
+      }, true);
+      /* the durations show as soon as the metadata lands (preload="metadata": a few KB per sound) */
+      document.addEventListener('loadedmetadata', function(e){ var box = e.target.closest && e.target.closest('#obs-now-cards .obs-sound'); if (box) sndPaint(box); }, true);
+    }
     var soundsHtml = function(){
       var A = MED.parker_sounds || []; if (!A.length) return '';
       return '<div class="obs-sec"><div class="obs-colh">SOUNDS FROM THE PROBE</div><div class="obs-sounds">' + A.map(function(a){
-        return '<div class="obs-sound"><b>' + esc(a.title).toUpperCase() + '</b><span>' + esc(a.what) + '</span>'
-          + '<audio controls preload="none" src="' + esc(a.url) + '"></audio>'
+        var spec = String(a.url).replace(/\.m4a$/, '-spec.png');   /* baked beside each sound on R2 (2026-10-05) */
+        return '<div class="obs-sound"><b>' + esc(a.title).toUpperCase() + '</b>'
+          + '<div class="snd-spec" style="background-image:url(' + esc(spec) + ')" title="tap to play from here"><u></u><i></i></div>'
+          + '<div class="snd-ctl"><button class="snd-play" aria-label="play">' + SND_PLAY + '</button><span class="snd-t">0:00</span></div>'
+          + '<span>' + esc(a.what) + '</span>'
+          + '<audio preload="metadata" src="' + esc(a.url) + '"></audio>'
           + '<a href="' + esc(a.source_page) + '" target="_blank" rel="noopener" onclick="event.stopPropagation()">' + esc(a.credit) + (a.date_recorded && a.date_recorded !== 'None' ? ' · RECORDED ' + esc(a.date_recorded) : '') + ' ↗</a></div>';
       }).join('') + '</div><div class="obs-extra">THE PROBE’S ELECTRIC AND MAGNETIC FIELD SENSORS (FIELDS) PICK UP WAVES IN THE SOLAR WIND. NONE OF THIS IS SOUND IN SPACE: THE DATA ARE SPED UP INTO THE RANGE WE CAN HEAR.</div></div>';
     };
@@ -44472,7 +44543,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         return '<div class="obs-extra">LOADING THE REPLAY…</div>'; }
       var R = pkRep, P = R.perihelion, K = R.peaks, M = R.movie;
       return '<div class="obs-pk">'
-        + '<video src="' + esc(M.url) + '" poster="' + esc(M.poster) + '" autoplay muted loop playsinline controls></video>'
+        + '<video src="' + esc(M.url) + '" poster="' + esc(M.poster) + '" autoplay muted loop playsinline></video>'
         + '<div>' + pkChart(R) + '</div></div>'
         + '<div class="obs-extra">CLOSEST ' + day(Date.parse(P.time_utc)) + ' · ' + P.r_sun.toFixed(1) + ' SOLAR RADII · ' + Math.round(P.km * 0.621371 / 1e6 * 10) / 10 + ' MILLION MI FROM THE SUN’S CENTRE (' + Math.round((P.km - 695700) * 0.621371 / 1e6 * 10) / 10 + ' FROM ITS SURFACE) · ' + Math.round(P.speed_kms * 2236.94).toLocaleString() + ' MPH<br>'
         + 'FASTEST WIND ' + K.max_vr.value + ' KM/S · STRONGEST FIELD ' + K.max_b.value.toLocaleString() + ' NT · '
