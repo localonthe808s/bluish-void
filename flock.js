@@ -141,7 +141,7 @@
        arc, pour. */
     var LD = { x: 0, y: 0, vx: 0, vy: 0, wp: [], hx: new Float32Array(300), hy: new Float32Array(300), hn: 0, hh: 0, ht: 0 };
     var KN = { x: 0, y: 0, tx: 0, ty: 0, dx: 0, dy: 0 }, SH = { cth: 1, sth: 0, ctl: 1, stl: 0, morph: 1 };
-    var FORM = { i: 0, t: 0, D: 0.5, kf: 0.6, Dt: 0.5, kft: 0.6, name: 'ball', w: 1, wt: 1, mAmp: 0.35, mAmpT: 0.35, drift: 1, driftT: 1, sat: 0.15, motion: 'clip' };
+    var FORM = { swap: 0, i: 0, t: 0, D: 0.5, kf: 0.6, Dt: 0.5, kft: 0.6, name: 'ball', w: 1, wt: 1, mAmp: 0.35, mAmpT: 0.35, drift: 1, driftT: 1, sat: 0.15, motion: 'clip' };
     /* THE REPERTOIRE (user 2026-10-05: "my video should be just one of its motions"). Each motion is a phrase list; the
        flock plays them in a shuffled order, never the same twice running.
          clip   -- the user's roost clip, as read off it (knot, columns, S-sways, pours; ~60 s)
@@ -157,7 +157,10 @@
       sweep:  [['sweep', 7], ['fold', 5], ['sweep', 7], ['fold', 5], ['pour', 4]],
       cordon: [['split', 12], ['pour', 5], ['ball', 3]]
     }, MKEYS = ['clip', 'blob', 'roam', 'sweep', 'cordon'], SEQ = MOTIONS.clip;
-    function nextMotion(){ var k; do { k = MKEYS[(R() * MKEYS.length) | 0]; } while (k === FORM.motion); FORM.motion = k; SEQ = MOTIONS[k]; FORM.i = 0; FORM.t = 0; startPhrase(SEQ[0][0]); }
+    /* between motions a large share of the flock goes home into the moon and the next scene fills from it: the moon as
+       the doorway between scenes (the arrivals come out of it because the count dropped below the target) */
+    function nextMotion(){ var k; do { k = MKEYS[(R() * MKEYS.length) | 0]; } while (k === FORM.motion); FORM.motion = k; SEQ = MOTIONS[k]; FORM.i = 0; FORM.t = 0; startPhrase(SEQ[0][0]);
+      if (o.moon && N > 30) FORM.swap = Math.round(N * (0.35 + R() * 0.15)); }
     /* the sky the form plays in: clear of the moon -- left of it when it sits at the right (desktop), below it when it
        sits centred above the readout (phone; excluding by x there left a 100 px sliver) */
     function box(){ var m = o.moon, x0 = W * 0.1, x1 = W * 0.9, y0 = o.band[0] * H;
@@ -223,7 +226,17 @@
     }
     /* where bird i is aiming: its point on the ribbon, or its place in the knot; each slot breathes a little so the
        inside of the shapes keeps churning */
+    /* THE MOON IS A DOORWAY, NOT A HIDE (user 2026-10-05: "avoid having the birds hangout behind the moon, use the moon
+       as a place for them to start and end in as scenes change"): any place in the form that falls on or near the disc is
+       moved out to its rim + margin, so the shapes play beside the moon, never behind it */
     function formTarget(i){
+      var p = formTarget0(i), m = o.moon; if (!m) return p;
+      var dx = p[0] - m.x, dy = p[1] - m.y, d = Math.hypot(dx, dy), R0 = m.r * 1.6;
+      if (d >= R0) return p;
+      if (d < 1){ dx = -1; dy = 0.4; d = Math.hypot(dx, dy); }
+      return [m.x + dx / d * R0, m.y + dy / d * R0, p[2]];
+    }
+    function formTarget0(i){
       var a = 1 - FORM.kf, u = uk[i], br = Math.max(0, 1 - FORM.D / 1.5), L = FORM.loose;
       var wob = 0.35 * Math.sin(t * 0.6 + ph2[i]);
       if (uh[i] < FORM.sat){
@@ -270,15 +283,17 @@
     function populate(dt){
       var tg = target(), m = plan.mode, hm = home(), c0 = 0;
       for (var i = 0; i < N; i++) if (role[i] === 0) c0++;
-      if (c0 > tg + (m === 'roost' ? 0 : 4) && (pop.leave -= dt) <= 0){
-        pop.leave = m === 'roost' ? 0.25 + R() * 0.3 : 0.8 + R() * 0.8;
+      var swapping = FORM.swap > 0 && (m === 'day' || m === 'murmur');
+      if ((swapping || c0 > tg + (m === 'roost' ? 0 : 4)) && (pop.leave -= dt) <= 0){
+        pop.leave = m === 'roost' || swapping ? 0.25 + R() * 0.3 : 0.8 + R() * 0.8;
         var lead = -1, best = 1e18;
         for (var i2 = 0; i2 < N; i2++){ if (role[i2]) continue; var dx = px[i2] - hm.x, dy = py[i2] - hm.y, d2 = dx * dx + dy * dy; if (d2 < best){ best = d2; lead = i2; } }
-        var want = Math.min(c0 - tg, 30), got = 0;
+        var want = swapping ? Math.min(FORM.swap, 30) : Math.min(c0 - tg, 30), got = 0;
         for (var j = 0; j < N && got < want && lead >= 0; j++){ if (role[j]) continue;
           var ex = px[j] - px[lead], ey = py[j] - py[lead]; if (ex * ex + ey * ey < 3600 * S * S){ role[j] = 2; got++; } }
+        if (swapping) FORM.swap = got ? Math.max(0, FORM.swap - got) : 0;
       }
-      else if (c0 < tg && (pop.arrive -= dt) <= 0){
+      if (c0 < tg && (pop.arrive -= dt) <= 0){   /* (not else: during a swap they go in and come out at once) */
         var burst = m === 'emerge';
         pop.arrive = burst ? 0.9 + R() * 1.4 : 0.6 + R() * 1.0;
         var g = Math.min(tg - c0, burst ? 25 + (R() * 40 | 0) : 8 + (R() * 22 | 0), MAX - N);
@@ -323,9 +338,23 @@
       TR.x.length = TR.y.length = TR.t.length = 0; TR.ux = jet.ux; TR.uy = jet.uy;
     }
     /* the peregrine: from above the sky, beside the flock, diving at it */
+    /* how close the segment a->b comes to the moon's centre (px), or Infinity without a moon */
+    function moonGap(ax, ay, bx, by){ var m = o.moon; if (!m) return 1e9; var vx0 = bx - ax, vy0 = by - ay, l2 = vx0 * vx0 + vy0 * vy0 || 1;
+      var u = Math.max(0, Math.min(1, ((m.x - ax) * vx0 + (m.y - ay) * vy0) / l2)); return Math.hypot(ax + vx0 * u - m.x, ay + vy0 * u - m.y) - m.r; }
+    /* THE DIVE IS ALWAYS IN THE OPEN (user 2026-10-05: "i dont like seeing falcon dives hidden by the moon"): it only
+       attacks when its line down to the flock, and on past it, clears the disc by a margin -- trying both sides and a few
+       offsets -- and holds off a few seconds when none does or the flock is beside the moon */
     function launchHawk(){
-      var c0 = centroid(), side = R() < 0.5 ? -1 : 1;
-      hawk.x = Math.max(40, Math.min(W - 40, c0[0] + side * (140 + R() * 120) * S)); hawk.y = -40;
+      var c0 = centroid(), m = o.moon, ok = false, hx = 0, mg = 30 * S + 10;
+      if (m && Math.hypot(c0[0] - m.x, c0[1] - m.y) < m.r * 2.2){ hawk.next = t + 4; return; }
+      for (var tr = 0; tr < 8 && !ok; tr++){
+        var side = (tr & 1) ? -1 : 1; if (R() < 0.5) side = -side;
+        hx = Math.max(40, Math.min(W - 40, c0[0] + side * (140 + R() * 120) * S));
+        var ex2 = c0[0] + (c0[0] - hx) * 0.4, ey2 = c0[1] + (c0[1] + 40) * 0.4;     /* and the punch-through beyond */
+        ok = moonGap(hx, -40, c0[0], c0[1]) > mg && moonGap(c0[0], c0[1], ex2, ey2) > mg;
+      }
+      if (!ok){ hawk.next = t + 4; return; }
+      hawk.x = hx; hawk.y = -40;
       var dx = c0[0] - hawk.x, dy = c0[1] - hawk.y, d = Math.hypot(dx, dy) || 1, sp = 470 * S;
       hawk.vx = dx / d * sp; hawk.vy = dy / d * sp; hawk.on = true; hawk.phase = 0; hawk.w = 0.1; hawk.pt = 0; hawk.roll = 0; hawk.flap = 1; hawk.gliding = true;
     }
@@ -381,7 +410,8 @@
             var CR = 170 * S / 0.95, hsp = Math.hypot(hawk.vx, hawk.vy) || 1, mn2 = o.moon;
             var ccx = hawk.x - hawk.vy / hsp * CR * hawk.dir, ccy = hawk.y + hawk.vx / hsp * CR * hawk.dir;
             var xmax = W - CR - 50; if (mn2) xmax = Math.min(xmax, mn2.x - mn2.r - CR - 10);
-            hawk.cx = Math.max(CR + 50, Math.min(Math.max(CR + 50, xmax), ccx)); hawk.cy = Math.max(CR + 30, Math.min(Math.max(CR + 30, fl - CR - 50), ccy)); hawk.cr = CR;
+            var ymin = CR + 30; if (mn2 && mn2.x <= W * 0.7){ xmax = W - CR - 50; ymin = Math.max(ymin, mn2.y + mn2.r + CR + 15); }   /* phone: the moon sits centred above, so stay below it */
+            hawk.cx = Math.max(CR + 50, Math.min(Math.max(CR + 50, xmax), ccx)); hawk.cy = Math.max(ymin, Math.min(Math.max(ymin, fl - CR - 50), ccy)); hawk.cr = CR;
           }
         } else if (hawk.phase === 2){
           /* circling: a steady turn, speed settling, nudged back off the edges, the floor and the very top */
@@ -392,9 +422,14 @@
           if (hawk.pt > hawk.loops * 6.283 / 0.95){ hawk.phase = 3; hawk.pt = 0; }
         } else {
           /* leaving: off the nearer side, climbing */
-          var ea = Math.atan2(-0.5, hawk.x < W / 2 ? -1 : 1);
+          var ea = Math.atan2(-0.5, o.moon && o.moon.x > W * 0.6 ? -1 : o.moon && o.moon.x < W * 0.4 ? 1 : (hawk.x < W / 2 ? -1 : 1));   /* leave on the side AWAY from the moon */
           na = ca + Math.max(-2 * dt, Math.min(2 * dt, wrap(ea - ca))); ns = hs + (260 * S - hs) * Math.min(1, dt);
         }
+        /* and it never flies behind the moon: heading toward the disc and within two radii of it, it turns away hard */
+        if (o.moon){ var mx0 = hawk.x - o.moon.x, my0 = hawk.y - o.moon.y, md0 = Math.hypot(mx0, my0) || 1;
+          if (md0 < o.moon.r * 2.2 && Math.cos(na) * mx0 + Math.sin(na) * my0 < 0){
+            var away = Math.atan2(my0, mx0), tg0 = away + (wrap(na - away) > 0 ? 1 : -1) * Math.PI / 2 * Math.min(1, (md0 - o.moon.r) / (o.moon.r * 1.2));
+            na = ca + Math.max(-4 * dt, Math.min(4 * dt, wrap(tg0 - ca))); } }
         /* banking follows the turn rate: it rolls into its turns */
         var om = wrap(na - ca) / dt; hawk.roll += (Math.max(-0.85, Math.min(0.85, om * 0.45)) - hawk.roll) * Math.min(1, dt * 4);
         hawk.vx = Math.cos(na) * ns; hawk.vy = Math.sin(na) * ns;
@@ -472,8 +507,8 @@
           if (y < b0) fy += (b0 - y) * 2.2; else if (y > b1) fy -= (y - b1) * 2.2;
           var sm = 90 * S + 20; if (x < sm) fx += (sm - x) * 3; else if (x > W - sm) fx -= (x - W + sm) * 3;
           /* keep off the moon unless going home (a bird just out of it is pushed clear) */
-          if (mn){ var ox = x - mn.x, oy = y - mn.y, od = Math.hypot(ox, oy) || 1, orr = mn.r * 1.3;
-            if (od < orr){ var ok = (1 - od / orr) * 420 * S; fx += ox / od * ok; fy += oy / od * ok; } }
+          if (mn){ var ox = x - mn.x, oy = y - mn.y, od = Math.hypot(ox, oy) || 1, orr = mn.r * 1.6;
+            if (od < orr){ var ok = (1 - od / orr) * 750 * S; fx += ox / od * ok; fy += oy / od * ok; } }
         } else {
           /* going home: into the moon, the group funnelling as it nears the disc */
           var qx = hm.x - x, qy = hm.y - y, qd = Math.hypot(qx, qy) || 1, fun = 1 + 1.5 * (1 - Math.min(1, qd / (hm.r * 4)));
@@ -721,7 +756,6 @@
   window.bvFlock.dayPlan = dayPlan;
   window.bvFlock.contrail = contrail;
 })();
-
 
 /* THE CLEAR-DAY HERO'S FLOCK ON THE SITE (2026-10-05, user: "lets push the clear day flock live").
    _updateHeroWx calls window._bvFlockSync(state, #hero-wx) at its end, every time it runs. The flock does NOT live inside
