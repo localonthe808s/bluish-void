@@ -1,0 +1,61 @@
+name: Bake night-sky satellites
+
+# The clear-night hero's satellites (nightsats.js): two-line elements for the stations, the brightest objects and
+# Starlink, from CelesTrak, baked by sats_bake.py into cdn.bluishvoid.com/sats/core.json + sats/starlink.json (R2).
+# Daily: SGP4 from elements a day old is good to a fraction of a degree; a week old drifts by degrees for LEO.
+# Not committed to git -- ~1.9 MB a day would bloat the repo.
+#
+# CelesTrak answers 403 "has not updated since your last download" for a group fetched within ~2 h; that counts as
+# "nothing new" and the run ends without uploading. Floors guard against an error page reaching the baker.
+#
+# Requires the same three repo secrets as moon-frame.yml: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY.
+
+on:
+  schedule:
+    - cron: '41 7 * * *'   # daily
+  workflow_dispatch: {}
+
+concurrency:
+  group: sats-night
+  cancel-in-progress: false
+
+jobs:
+  bake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: sats_bake.py
+          sparse-checkout-cone-mode: false
+      - name: Download, bake and upload
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p tle out
+          for g in stations visual starlink; do
+            code=$(curl -s -o "tle/$g.tle" -w '%{http_code}' --retry 3 --retry-delay 10 \
+              "https://celestrak.org/NORAD/elements/gp.php?GROUP=$g&FORMAT=tle")
+            if [ "$code" = "403" ] && grep -q "has not updated" "tle/$g.tle"; then
+              echo "CelesTrak: $g not updated since the last download -- nothing new, no upload"; exit 0
+            fi
+            test "$code" = "200"
+            n=$(( $(grep -c '^1 ' "tle/$g.tle") ))
+            echo "$g: $n objects"
+            case $g in stations) min=5;; visual) min=100;; starlink) min=5000;; esac
+            test "$n" -ge "$min"
+            sleep 3
+          done
+          python3 sats_bake.py tle out
+          for f in core starlink; do
+            test "$(stat -c%s out/$f.json)" -gt 20000
+            aws s3 cp "out/$f.json" "s3://bluishvoid-bg/sats/$f.json" \
+              --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+              --content-type "application/json" \
+              --cache-control "public, max-age=3600" \
+              --only-show-errors
+          done
+          echo "Published sats/core.json and sats/starlink.json"
