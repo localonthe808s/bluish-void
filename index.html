@@ -44516,26 +44516,63 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
        density and magnetic field, 10-minute bins from SWEAP + FIELDS, drawn as hourly medians
        (_solarlab/build_parker_replay.py). Density is the raw Level-3 moment, quality flags not applied -- said so. */
     var pkRep = null, pkBusy = false;
+    /* THE ENCOUNTER CHART (rebuilt 2026-10-05, user: "can you put speed in MPH? i dont think these graphs are complete, its
+       not showing all measuremeants, what do they mean"). The data WERE complete (1,446 ten-minute readings, Mar 6-16, none
+       missing); the chart hid most of them -- one hourly median per hour, no dates, no distance. Now every reading is
+       drawn as a faint band (each hour's min-max) under the hourly median line, a date axis runs along the bottom, and a
+       fourth row shows the probe's distance from the Sun, which is WHY density and field peak at closest approach. Speed
+       in MPH (the site's units); density and field on log scales (they change a hundredfold). */
     var pkChart = function(R){
-      var S = R.series, n = S.t.length, t0 = Date.parse(S.t[0]), t1 = Date.parse(S.t[n - 1]), W = 560, rowH = 70, pad = 4;
-      var med = function(a){ a = a.filter(function(v){ return v != null && isFinite(v); }).sort(function(x, y){ return x - y; }); return a.length ? a[a.length >> 1] : null; };
+      var S = R.series, n = S.t.length, t0 = Date.parse(S.t[0]), t1 = Date.parse(S.t[n - 1]), W = 560, rowH = 62, pad = 4, AX = 18;
+      var MPH = 2236.94, MMI = 695700 * 0.621371 / 1e6;   /* km/s -> mph; solar radii -> million miles */
+      var ok = function(v){ return v != null && isFinite(v); };
       var hrs = [], i;
-      for (i = 0; i < n; i += 6){ var sl = function(k){ return med(S[k].slice(i, i + 6)); }; hrs.push({ t: Date.parse(S.t[i]) + 1800000, vr: sl('vr'), dens: sl('dens'), b: sl('b') }); }
+      for (i = 0; i < n; i += 6){
+        var h = { t: Date.parse(S.t[i]) + 1800000 };
+        ['vr', 'dens', 'b', 'r_sun'].forEach(function(k){
+          var a = S[k].slice(i, i + 6).filter(ok).sort(function(x, y){ return x - y; });
+          h[k] = a.length ? a[a.length >> 1] : null; h[k + '_lo'] = a.length ? a[0] : null; h[k + '_hi'] = a.length ? a[a.length - 1] : null;
+        });
+        hrs.push(h);
+      }
       var X = function(t){ return pad + (t - t0) / (t1 - t0) * (W - 2 * pad); };
-      var ROWS = [['vr', 'SPEED KM/S', '#1f6fd1', false], ['dens', 'DENSITY /CM³ (LOG)', '#0e9f8e', true], ['b', 'MAGNETIC FIELD NT (LOG)', '#b5651d', true]];
-      var peri = Date.parse(R.perihelion.time_utc), svg = '';
+      var big = function(v){ return v >= 1e6 ? (Math.round(v / 1e5) / 10) + ' MILLION' : Math.round(v / 1000) * 1000 >= 1000 ? Math.round(v / 1000).toLocaleString() + ',000' : Math.round(v).toLocaleString(); };
+      /* [key, label, colour, log?, scale, range text] */
+      var ROWS = [
+        ['vr', 'SOLAR WIND SPEED · MPH', '#1f6fd1', false, MPH, function(lo, hi){ return big(lo) + ' TO ' + big(hi); }],
+        ['dens', 'PARTICLES PER CM³ · LOG SCALE', '#0e9f8e', true, 1, function(lo, hi){ return Math.round(lo).toLocaleString() + ' TO ' + Math.round(hi).toLocaleString(); }],
+        ['b', 'MAGNETIC FIELD · NANOTESLA · LOG SCALE', '#b5651d', true, 1, function(lo, hi){ return Math.round(lo).toLocaleString() + ' TO ' + Math.round(hi).toLocaleString(); }],
+        ['r_sun', 'DISTANCE FROM THE SUN · MILLION MI', '#7a7f8c', false, MMI, function(lo, hi){ return (Math.round(lo * 10) / 10) + ' TO ' + (Math.round(hi * 10) / 10); }]
+      ];
+      var peri = Date.parse(R.perihelion.time_utc), svg = '', H = ROWS.length * rowH;
       ROWS.forEach(function(r, k){
-        var v = hrs.map(function(h){ return h[r[0]]; }).filter(function(x){ return x != null && x > 0; });
-        var f = function(x){ return r[3] ? Math.log10(x) : x; }, lo = f(Math.min.apply(null, v)), hi = f(Math.max.apply(null, v)), y0 = k * rowH;
+        var key = r[0], sc = r[4], f = function(x){ return r[3] ? Math.log10(x) : x; };
+        var all = []; hrs.forEach(function(h){ [h[key + '_lo'], h[key + '_hi']].forEach(function(x){ if (ok(x) && x > 0) all.push(x * sc); }); });
+        if (!all.length) return;
+        var lo = f(Math.min.apply(null, all)), hi = f(Math.max.apply(null, all)), y0 = k * rowH;
+        var Y = function(x){ return y0 + rowH - 6 - (f(x * sc) - lo) / (hi - lo || 1) * (rowH - 20); };
+        /* the band: every ten-minute reading of the hour, top edge forward and bottom edge back */
+        var top = [], bot = [];
+        hrs.forEach(function(h){ if (ok(h[key + '_lo']) && h[key + '_lo'] > 0){ top.push(X(h.t).toFixed(1) + ' ' + Y(h[key + '_hi']).toFixed(1)); bot.unshift(X(h.t).toFixed(1) + ' ' + Y(h[key + '_lo']).toFixed(1)); } });
         var d = '', pen = false;
-        hrs.forEach(function(h){ var x = h[r[0]]; if (x == null || !(x > 0)){ pen = false; return; }
-          d += (pen ? 'L' : 'M') + X(h.t).toFixed(1) + ' ' + (y0 + rowH - 8 - (f(x) - lo) / (hi - lo || 1) * (rowH - 22)).toFixed(1); pen = true; });
-        svg += '<text x="' + pad + '" y="' + (y0 + 11) + '" font-size="9" letter-spacing=".08em" fill="' + r[2] + '">' + r[1] + ' · ' + Math.round(r[3] ? Math.pow(10, lo) : lo) + '–' + Math.round(r[3] ? Math.pow(10, hi) : hi) + '</text>'
+        hrs.forEach(function(h){ var x = h[key]; if (!ok(x) || !(x > 0)){ pen = false; return; } d += (pen ? 'L' : 'M') + X(h.t).toFixed(1) + ' ' + Y(x).toFixed(1); pen = true; });
+        svg += '<text x="' + pad + '" y="' + (y0 + 10) + '" font-size="8.5" letter-spacing=".07em" fill="' + r[2] + '">' + r[1] + ' · ' + r[5](r[3] ? Math.pow(10, lo) : lo, r[3] ? Math.pow(10, hi) : hi) + '</text>'
+          + (top.length ? '<path d="M' + top.join(' L') + ' L' + bot.join(' L') + ' Z" fill="' + r[2] + '" fill-opacity=".16" stroke="none"/>' : '')
           + '<path d="' + d + '" fill="none" stroke="' + r[2] + '" stroke-width="1.4"/>';
       });
-      svg += '<line x1="' + X(peri) + '" x2="' + X(peri) + '" y1="0" y2="' + (3 * rowH) + '" stroke="#888" stroke-dasharray="3 3"/>'
-        + '<text x="' + (X(peri) + 4) + '" y="' + (3 * rowH - 4) + '" font-size="9" fill="#888">CLOSEST ' + day(peri) + '</text>';
-      return '<svg viewBox="0 0 ' + W + ' ' + (3 * rowH) + '" style="width:100%;height:auto;display:block;">' + svg + '</svg>';
+      /* the date axis: a tick at each UTC midnight, every other one named when they crowd */
+      var day0 = new Date(t0); day0.setUTCHours(24, 0, 0, 0);
+      var nd = Math.round((t1 - day0.getTime()) / 864e5) + 1, every = (W / nd) < 46 ? 2 : 1, MON = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+      for (var q = 0; q < nd; q++){
+        var tq = day0.getTime() + q * 864e5; if (tq > t1) break;
+        var xq = X(tq).toFixed(1), dq = new Date(tq);
+        svg += '<line x1="' + xq + '" x2="' + xq + '" y1="' + H + '" y2="' + (H + 4) + '" stroke="#888"/>'
+          + (q % every === 0 ? '<text x="' + xq + '" y="' + (H + 14) + '" font-size="8" text-anchor="middle" fill="#888" letter-spacing=".05em">' + MON[dq.getUTCMonth()] + ' ' + dq.getUTCDate() + '</text>' : '');
+      }
+      svg += '<line x1="' + pad + '" x2="' + (W - pad) + '" y1="' + H + '" y2="' + H + '" stroke="#888" stroke-opacity=".5"/>'
+        + '<line x1="' + X(peri) + '" x2="' + X(peri) + '" y1="0" y2="' + H + '" stroke="#888" stroke-dasharray="3 3"/>'
+        + '<text x="' + (X(peri) + 4) + '" y="' + ((ROWS.length - 1) * rowH + 22) + '" font-size="8.5" fill="#888">CLOSEST ' + day(peri) + '</text>';   /* top of the distance row: at the bottom it sat on the curve's low point */
+      return '<svg viewBox="0 0 ' + W + ' ' + (H + AX) + '" style="width:100%;height:auto;display:block;">' + svg + '</svg>';
     };
     var pkHtml = function(){
       if (!pkRep){ if (!pkBusy){ pkBusy = true; fetch('/_solarlab/parker/enc27.json').then(function(r){ if (!r.ok) throw 0; return r.json(); })
@@ -44546,8 +44583,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         + '<video src="' + esc(M.url) + '" poster="' + esc(M.poster) + '" autoplay muted loop playsinline></video>'
         + '<div>' + pkChart(R) + '</div></div>'
         + '<div class="obs-extra">CLOSEST ' + day(Date.parse(P.time_utc)) + ' · ' + P.r_sun.toFixed(1) + ' SOLAR RADII · ' + Math.round(P.km * 0.621371 / 1e6 * 10) / 10 + ' MILLION MI FROM THE SUN’S CENTRE (' + Math.round((P.km - 695700) * 0.621371 / 1e6 * 10) / 10 + ' FROM ITS SURFACE) · ' + Math.round(P.speed_kms * 2236.94).toLocaleString() + ' MPH<br>'
-        + 'FASTEST WIND ' + K.max_vr.value + ' KM/S · STRONGEST FIELD ' + K.max_b.value.toLocaleString() + ' NT · '
-        + 'DENSITY IS THE RAW INSTRUMENT MOMENT (QUALITY FLAGS NOT APPLIED): ITS SINGLE-BIN SPIKES MAY BE ARTEFACTS, SO THE CHART DRAWS HOURLY MEDIANS<br>'
+        + 'FASTEST WIND ' + (Math.round(K.max_vr.value * 2236.94 / 1000) * 1000).toLocaleString() + ' MPH · STRONGEST FIELD ' + K.max_b.value.toLocaleString() + ' NANOTESLA<br>'
+        + 'WHAT THE LINES ARE: ALL MEASURED AT THE PROBE AS IT SWUNG PAST THE SUN. SPEED IS HOW FAST THE SOLAR WIND BLEW PAST IT; PARTICLES ARE HOW MANY SOLAR-WIND IONS FILLED EACH CUBIC CENTIMETRE; THE FIELD IS THE STRENGTH OF THE SUN’S MAGNETISM WHERE IT WAS. '
+        + 'DENSITY AND FIELD CLIMB AS THE DISTANCE FALLS: THE PROBE IS DIVING INTO THE SUN’S THICKER, MORE MAGNETIC OUTER ATMOSPHERE, AND THEY FALL AGAIN AS IT CLIMBS OUT. '
+        + 'THE LINE IS EACH HOUR’S MEDIAN; THE FAINT BAND BEHIND IT IS EVERY 10-MINUTE READING IN THAT HOUR (DENSITY IS THE RAW INSTRUMENT MOMENT, SO ITS LONE SPIKES MAY BE ARTEFACTS)<br>'
         + 'MOVIE: WISPR, ' + esc(M.credit) + ' · DATA: SWEAP (SAO) + FIELDS (UC BERKELEY) VIA NASA CDAWEB</div>';
     };
     /* DEEP SPACE NETWORK, NOW (2026-10-03): which of NASA's big dishes are talking to which spacecraft this minute,
