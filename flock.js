@@ -773,6 +773,16 @@
   var C = { f: null, cv: null, wait: 0, bad: 0, slow: false, airKey: '', airT: 0, tick: 0, last: null };
   function off(){ if (C.f){ try { C.f.destroy(); } catch(e){} C.f = null; } if (C.cv && C.cv.parentNode) C.cv.parentNode.removeChild(C.cv); C.cv = null;
     if (C.tick){ clearInterval(C.tick); C.tick = 0; } }
+  /* the sun's altitude at lat/lon now -- OWN COPY: the site's _sunAltNow lives inside the wx-icons script's IIFE and is
+     not reachable from here (found live 10-05: every call threw, the flock sat at its midday fallback). Same low-
+     precision formula, plus the equation of time (_sunAltNow leaves it out: sunset ~11 min late in October). */
+  function sunAltAt(lat, lon){
+    var d = new Date(), rad = Math.PI / 180, n = Math.floor((d - new Date(Date.UTC(d.getUTCFullYear(), 0, 0))) / 864e5), B = rad * 360 / 365 * (n - 81);
+    var eot = 9.87 * Math.sin(2 * B) - 7.53 * Math.cos(B) - 1.5 * Math.sin(B);
+    var decl = -23.44 * Math.cos(rad * (360 / 365) * (n + 10)), solT = d.getUTCHours() + d.getUTCMinutes() / 60 + d.getUTCSeconds() / 3600 + lon / 15 + eot / 60, ha = (solT - 12) * 15;
+    var s = Math.sin(rad * lat) * Math.sin(rad * decl) + Math.cos(rad * lat) * Math.cos(rad * decl) * Math.cos(rad * ha);
+    return Math.asin(Math.max(-1, Math.min(1, s))) / rad;
+  }
   function reduced(){ try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch(e){ return false; } }
   function phone(){ try { return window.matchMedia('(max-width: 768px)').matches; } catch(e){ return false; } }
   function geom(sb, hw){
@@ -791,7 +801,7 @@
   function box(g){ var p = { floor: g.floor, moon: g.moon, band: g.band, sun: sun() }; if (g.W !== C.gw || g.H !== C.gh){ p.W = g.W; p.H = g.H; C.gw = g.W; C.gh = g.H; } return p; }
   function sun(){
     var today = (window._tlDayOffset || 0) === 0, alt = 45, d = new Date();
-    try { if (today && window.LOCATION) alt = _sunAltNow(LOCATION.lat, LOCATION.lon); } catch(e){}
+    try { if (today && window.LOCATION) alt = sunAltAt(LOCATION.lat, LOCATION.lon); } catch(e){}
     try { if (window.locNowNaive) d = window.locNowNaive(); } catch(e){}
     return { alt: alt, eve: today ? d.getHours() >= 12 : false, month: d.getMonth() + 1 };
   }
@@ -845,4 +855,6 @@
     } catch(e){}
   };
   window.addEventListener('resize', function(){ var h = document.getElementById('hero-wx'); if (C.f && h) window._bvFlockSync(C.last, h); });
+  /* for checking from the console: the running flock (stats(), form()) or null */
+  window._bvFlock = function(){ return C.f; };
 })();

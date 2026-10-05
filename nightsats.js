@@ -178,10 +178,20 @@
   var C = { s: null, cv: null, wait: 0, tick: 0, last: null, gw: 0, gh: 0, ghz: 0, gtop: 0 };
   function off(){ if (C.s){ try { C.s.destroy(); } catch(e){} C.s = null; } if (C.cv && C.cv.parentNode) C.cv.parentNode.removeChild(C.cv); C.cv = null;
     if (C.tick){ clearInterval(C.tick); C.tick = 0; } }
+  /* the sun's altitude at lat/lon now -- OWN COPY: the site's _sunAltNow lives inside the wx-icons script's IIFE and is
+     not reachable from here (found live 10-05: every call threw, the flock sat at its midday fallback). Same low-
+     precision formula, plus the equation of time (_sunAltNow leaves it out: sunset ~11 min late in October). */
+  function sunAltAt(lat, lon){
+    var d = new Date(), rad = Math.PI / 180, n = Math.floor((d - new Date(Date.UTC(d.getUTCFullYear(), 0, 0))) / 864e5), B = rad * 360 / 365 * (n - 81);
+    var eot = 9.87 * Math.sin(2 * B) - 7.53 * Math.cos(B) - 1.5 * Math.sin(B);
+    var decl = -23.44 * Math.cos(rad * (360 / 365) * (n + 10)), solT = d.getUTCHours() + d.getUTCMinutes() / 60 + d.getUTCSeconds() / 3600 + lon / 15 + eot / 60, ha = (solT - 12) * 15;
+    var s = Math.sin(rad * lat) * Math.sin(rad * decl) + Math.cos(rad * lat) * Math.cos(rad * decl) * Math.cos(rad * ha);
+    return Math.asin(Math.max(-1, Math.min(1, s))) / rad;
+  }
   function reduced(){ try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch(e){ return false; } }
   function phone(){ try { return window.matchMedia('(max-width: 768px)').matches; } catch(e){ return false; } }
   function url(f){ return 'https://cdn.bluishvoid.com/sats/' + f + '.json?h=' + new Date().toISOString().slice(0, 13); }
-  function sunAlt(){ try { return _sunAltNow(LOCATION.lat, LOCATION.lon); } catch(e){ return -20; } }
+  function sunAlt(){ try { return sunAltAt(LOCATION.lat, LOCATION.lon); } catch(e){ return -20; } }
   function geom(sb, hw){
     var sr = sb.getBoundingClientRect(), W = Math.round(sb.clientWidth || sr.width), H = Math.round(hw.offsetHeight || parseInt(hw.style.height, 10) || 0);
     var hz = Math.round(H * 0.78), pt = document.getElementById('today-tl-planet-tracks');
