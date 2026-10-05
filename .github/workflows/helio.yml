@@ -1,0 +1,48 @@
+name: Bake helioseismology
+
+# The SOLAR IMAGER's helioseismology band: helio_bake.py turns Stanford JSOC's SDO/HMI products into clean pictures and a
+# small data file on R2 (cdn.bluishvoid.com/solar/helio/): strip.png (the whole Sun, 360 deg, every 12 h upstream),
+# farside.png (time-distance far side, every 12 h), flows.json (subsurface flows, one per solar rotation), meta.json.
+# Every 6 h so a new map shows within hours. The Sun sounds (solar/helio/sounds/) are static and not baked here.
+#
+# Requires the same three repo secrets as moon-frame.yml: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY.
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: helio
+  cancel-in-progress: false
+
+jobs:
+  bake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: helio_bake.py
+          sparse-checkout-cone-mode: false
+      - name: Bake and upload
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install -q numpy pillow astropy
+          python3 helio_bake.py out
+          # sanity: real pictures and data, not an error page
+          test "$(stat -c%s out/strip.png)" -gt 100000
+          test "$(stat -c%s out/farside.png)" -gt 100000
+          test "$(stat -c%s out/flows.json)" -gt 20000
+          E="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          for f in strip.png farside.png; do
+            aws s3 cp "out/$f" "s3://bluishvoid-bg/solar/helio/$f" --endpoint-url "$E" --content-type image/png --cache-control "public, max-age=3600" --only-show-errors
+          done
+          for f in flows.json meta.json; do
+            aws s3 cp "out/$f" "s3://bluishvoid-bg/solar/helio/$f" --endpoint-url "$E" --content-type application/json --cache-control "public, max-age=3600" --only-show-errors
+          done
+          echo "Published solar/helio/"
