@@ -792,6 +792,39 @@ function drawRelief(ctx, img, r, proj, strips){
 /* A TIERED RELIEF (Los Angeles): an index of images, coarse to fine, each carrying the
    m/px below which it is worth decoding. Drawn in order, so the finest model in frame is
    the one left showing. Used twice -- the seafloor and the mountains. */
+/* The tiers drawReliefList will actually fetch at this view and scale (its rule, below, lifted out so the
+   preload in labWarm asks for exactly these and never for one a finer tier buries). */
+function reliefWanted(list, view, mpp){
+  var live = (list || []).filter(function(r){
+    return !(r.maxMpp && mpp > r.maxMpp) && !(r.e < view.w || r.w > view.e || r.n < view.s || r.s > view.n);
+  });
+  var area = function(r){ return (r.e - r.w) * (r.n - r.s); };
+  var buried = function(r){
+    return live.some(function(f){
+      if (f === r || area(f) >= area(r)) return false;
+      var ix = (f.e - f.w) * 0.07, iy = (f.n - f.s) * 0.07;
+      return view.w >= f.w + ix && view.e <= f.e - ix && view.s >= f.s + iy && view.n <= f.n - iy;
+    });
+  };
+  return live.filter(function(r){ return !buried(r); });
+}
+/* EVERYTHING THE PASSES WILL ASK FOR, ASKED FOR AT ONCE (2026-10-05). The paint is a chain -- vector pass, then the
+   green, the city mask, the hills, the parks, the sea, the airfields, the hood names, the rail -- and each link fetched
+   its own file only when its turn came: on a first visit to THE BASIN the files arrived one after another from 4.9 s to
+   8.0 s with the line idle between them. The order of DRAWING has to stay (each layer lies on the last); the order of
+   FETCHING does not. viewJson and reliefImage are caches keyed by URL, so a later pass that asks gets the request
+   already in flight. Embed only (the widget): the lab's own views and styles keep their lazy loading. */
+function labWarm(vkey, view, mpp){
+  if (!window.LAB_EMBED) return;
+  ['boroughs', 'parks', 'airfields', 'hoodNames', 'subway', 'stops', 'bullets'].forEach(function(k){
+    viewJson(vkey, k).catch(function(){});
+  });
+  ['veg', 'landReliefs', 'reliefs'].forEach(function(k){
+    viewJson(vkey, k).then(function(list){
+      reliefWanted(list, view, mpp).forEach(function(r){ reliefImage(r.img).catch(function(){}); });
+    }).catch(function(){});
+  });
+}
 function drawReliefList(ctx, list, view, mpp, proj, stale, exclusive, alpha){
   /* `exclusive` is for TRANSLUCENT relief (the mountains). Opaque tiers can simply lie on
      each other; alpha tiers STACK, and the hills came out shaded two and three times over
@@ -811,19 +844,7 @@ function drawReliefList(ctx, list, view, mpp, proj, stale, exclusive, alpha){
      wholly inside the pull box. A tier is skipped when some finer tier that WILL draw at this
      scale contains the whole view, inset by its feathered rim so the blend at a pull-box
      edge still has its partner whenever that edge is actually on screen. */
-  var live = (list || []).filter(function(r){
-    return !(r.maxMpp && mpp > r.maxMpp) && !(r.e < view.w || r.w > view.e || r.n < view.s || r.s > view.n);
-  });
-  var area = function(r){ return (r.e - r.w) * (r.n - r.s); };
-  var buried = function(r){
-    return live.some(function(f){
-      if (f === r || area(f) >= area(r)) return false;
-      var ix = (f.e - f.w) * 0.07, iy = (f.n - f.s) * 0.07;
-      return view.w >= f.w + ix && view.e <= f.e - ix && view.s >= f.s + iy && view.n <= f.n - iy;
-    });
-  };
-  live.forEach(function(r){
-    if (buried(r)) return;
+  reliefWanted(list, view, mpp).forEach(function(r){
     chain = chain.then(function(){ return reliefImage(r.img); }).then(function(img){
       if (stale()) return;
       if (exclusive && !r.feather){
@@ -3967,7 +3988,10 @@ function trafficData(v){
      LA's own equivalent of New York's DOT cameras (the city's LADOT cameras are not public) -- never New York's. */
   if (!TRAF.cams || now - TRAF.camsAt > 600000){
     TRAF.camsAt = now;
-    jobs.push(fetch('https://cwwp2.dot.ca.gov/data/d7/cctv/cctvStatusD07.json').then(function(r){ return r.json(); }).then(function(j){
+    /* ONE COPY OF THE CAMERA LIST (2026-10-05): it is 1.85 MB, and the widget around this frame fetched it too -- twice
+       per load. The widget keeps it (window.LA_CCTV, 10-minute freshness); this frame borrows it when framed. */
+    var camP = null; try { if (window.parent !== window && window.parent.LA_CCTV) camP = window.parent.LA_CCTV(); } catch(e){}
+    jobs.push((camP || fetch('https://cwwp2.dot.ca.gov/data/d7/cctv/cctvStatusD07.json').then(function(r){ return r.json(); })).then(function(j){
       TRAF.cams = (j.data || []).map(function(o){ return o.cctv; }).filter(function(c){ return c && c.inService === 'true' && c.imageData && c.imageData.static && c.imageData.static.currentImageURL; })
         .map(function(c){ var L = c.location || {}; return { id: c.index, n: (L.locationName || '').trim(), near: L.nearbyPlace || '', lat: +L.latitude, lon: +L.longitude,
           dir: L.direction || '', route: L.route || '', img: c.imageData.static.currentImageURL, every: +c.imageData.static.currentImageUpdateFrequency || 2 }; })
@@ -4507,6 +4531,7 @@ function drawCard(style){
   function paint(){
     var view = box(), token = ++busy, boroMaskCv = null, paintHoods = null;
     var vkey = document.getElementById('view').value;
+    labWarm(vkey, view, VB.mpp);
     /* the scale every "show it below N m/px" rule reads: New York's, whatever the box */
     var nmpp = function(){ return VB.mpp / ((VIEWS[vkey] || {}).mppK || 1); };
     var geoOn = function(){ return !!(document.getElementById('geo') || {}).checked; };
