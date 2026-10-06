@@ -116,25 +116,49 @@ function pemToDer(pem) {
   return out.buffer;
 }
 
-async function kalshiGet(env, path, query) {
-  const key = await crypto.subtle.importKey(
-    'pkcs8', pemToDer(env.KALSHI_PRIVATE_KEY),
-    { name: 'RSA-PSS', hash: 'SHA-256' }, false, ['sign']);
+// THE CPU BUDGET (2026-10-05). The free plan allows 10 ms of CPU per invocation, and an idle tick already spends 4-5.
+// From 2026-10-03 the dark-flow watcher signed every call -- one per range, ~7 a minute -- and each one re-imported
+// the key and ran a fresh RSA signature: 513 of 1,367 ticks were killed for CPU in one day, every minute from 9 AM to
+// 8 PM ET. So the imported key lives for the isolate, and a signature is reused for the same path for a few seconds:
+// it covers timestamp + GET + path and NOT the query, so the six trades calls in one tick are the same message.
+// A reused signature that comes back 401 is dropped and the call is signed fresh, once.
+let _kKey = null, _kPem = null;
+const _kSig = new Map();                       // path -> { ts, sig }
+const KSIG_REUSE_MS = 5000;
+async function kalshiSig(env, path, fresh) {
+  if (_kPem !== env.KALSHI_PRIVATE_KEY) {
+    _kKey = await crypto.subtle.importKey(
+      'pkcs8', pemToDer(env.KALSHI_PRIVATE_KEY),
+      { name: 'RSA-PSS', hash: 'SHA-256' }, false, ['sign']);
+    _kPem = env.KALSHI_PRIVATE_KEY; _kSig.clear();
+  }
+  const hit = _kSig.get(path);
+  if (!fresh && hit && Date.now() - Number(hit.ts) < KSIG_REUSE_MS) return { ...hit, reused: true };
   const ts = String(Date.now());
   const sig = await crypto.subtle.sign(
-    { name: 'RSA-PSS', saltLength: 32 }, key,
+    { name: 'RSA-PSS', saltLength: 32 }, _kKey,
     new TextEncoder().encode(ts + 'GET' + path));
-  const res = await fetch(KALSHI + path + (query || ''), {
-    headers: {
-      'KALSHI-ACCESS-KEY': env.KALSHI_API_KEY_ID,
-      'KALSHI-ACCESS-TIMESTAMP': ts,
-      'KALSHI-ACCESS-SIGNATURE': btoa(String.fromCharCode(...new Uint8Array(sig))),
-      'Accept': 'application/json',
-      'User-Agent': 'bluishvoid-kalshi-cron'
-    }
-  });
-  if (!res.ok) throw new Error('kalshi ' + path + ' -> ' + res.status);
-  return res.json();
+  const out = { ts, sig: btoa(String.fromCharCode(...new Uint8Array(sig))) };
+  _kSig.set(path, out);
+  return out;
+}
+
+async function kalshiGet(env, path, query) {
+  for (let fresh = false; ; fresh = true) {
+    const s = await kalshiSig(env, path, fresh);
+    const res = await fetch(KALSHI + path + (query || ''), {
+      headers: {
+        'KALSHI-ACCESS-KEY': env.KALSHI_API_KEY_ID,
+        'KALSHI-ACCESS-TIMESTAMP': s.ts,
+        'KALSHI-ACCESS-SIGNATURE': s.sig,
+        'Accept': 'application/json',
+        'User-Agent': 'bluishvoid-kalshi-cron'
+      }
+    });
+    if (res.status === 401 && s.reused) { console.log(`[kalshi] reused signature refused on ${path}; signing fresh`); _kSig.delete(path); continue; }
+    if (!res.ok) throw new Error('kalshi ' + path + ' -> ' + res.status);
+    return res.json();
+  }
 }
 
 // Constant-time-ish compare, so a failure does not leak the token by timing.
