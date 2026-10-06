@@ -92,8 +92,13 @@
       frame = m;
     };
     wk.postMessage({ lib: o.lib, tle: o.tle });
+    /* OFF SCREEN = OFF (user 2026-10-05: "pause the satellites when off screen"): the flock's rule -- an observer on the
+       canvas; scrolled away (or a hidden tab) the draw loop stops asking for frames and the worker is not asked for
+       positions. Coming back asks at once, so the sky is right on the first frame instead of a second later. */
+    var visible = true;
+    function live(){ return alive && visible && !document.hidden; }
     function ask(first){
-      if (!ready || !alive) return;
+      if (!ready || !live()) return;
       var span = Math.max(1, o.speed) * 1.0;
       wk.postMessage({ t: labNow(), span: span, lat: o.lat, lon: o.lon, wantNames: !names || first });
     }
@@ -108,7 +113,7 @@
     function lerpAz(a, b, f){ var d = ((b - a + 540) % 360) - 180; return (a + d * f + 360) % 360; }
     var shown = [];
     function draw(){
-      raf = 0; if (!alive) return;
+      raf = 0; if (!live()) return;
       var t0 = performance.now();
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, o.W, o.H); shown = [];
       if (frame && names){
@@ -144,6 +149,10 @@
       raf = requestAnimationFrame(draw);
     }
     raf = requestAnimationFrame(draw);
+    function wake(){ if (!live()) return; ask(false); if (!raf) raf = requestAnimationFrame(draw); }
+    var io = ('IntersectionObserver' in window) ? new IntersectionObserver(function(es){ visible = es[es.length - 1].isIntersecting; wake(); }) : null;
+    if (io) io.observe(cv);
+    document.addEventListener('visibilitychange', wake);
 
     return {
       set: function(p){
@@ -159,7 +168,7 @@
       list: function(){ return shown.slice().sort(function(a, b){ return a.mag - b.mag; }); },
       pick: function(x, y){ var best = null, bd = 14 * 14; shown.forEach(function(s){ var d = (s.x - x) * (s.x - x) + (s.y - y) * (s.y - y); if (d < bd){ bd = d; best = s; } }); return best; },
       stats: function(){ return { ready: ready, objects: st.n, aboveHorizon: st.rows, shown: st.shown, workerMs: st.ms, drawMs: st.draw }; },
-      destroy: function(){ alive = false; clearInterval(timer); if (raf) cancelAnimationFrame(raf); wk.terminate(); URL.revokeObjectURL(url); }
+      destroy: function(){ alive = false; clearInterval(timer); if (raf) cancelAnimationFrame(raf); if (io) io.disconnect(); document.removeEventListener('visibilitychange', wake); wk.terminate(); URL.revokeObjectURL(url); }
     };
   };
 })();
