@@ -12275,7 +12275,67 @@ window._bvHeroGpu = function(hw, st, code, night){
     var pick = BG_VIDEOS[Math.floor(Math.random() * BG_VIDEOS.length)];
     // typeof guard: index.html and bg-videos.js cache separately — a stale
     // bg-videos.js without the helper must not blank the background
-    v.src = (typeof bgVideoUrl === 'function') ? bgVideoUrl(pick) : pick;
+    var phone = window.matchMedia && window.matchMedia('(max-width:768px)').matches;
+    if (phone){ v.src = (typeof bgVideoUrl === 'function') ? bgVideoUrl(pick) : pick; return; }
+    /* DESKTOP: LIGHT FIRST, 4K ONLY WHEN THE LINE CARRIES IT (user 2026-10-05: "yes", and VOID stays 4K -- this is
+       index.html only; /void/ and bg-videos.js are untouched). Measured that night: the 4K files are 243-1,036 MB
+       (bvbg08: 278 MB for 97 s, ~23 Mbit/s) on a ~7 Mbit/s line -- 0.3 s buffered, 12% of frames dropped, and a
+       download that never ends took the whole connection from everything else on the page (THE BASIN's tiles).
+       So: play the -m rendition (1920 px, 23-127 MB), time a 4 MB range of the 4K file, and switch only if the line
+       moves at 1.6x the 4K bitrate; the 4K copy loads in a hidden element and takes over once it has 8 s buffered.
+       Two stalls within a minute of switching put the light copy back, and the session stays light. */
+    var full = pick, light = full.replace(/\.mp4$/, '-m.mp4');
+    v.src = light;
+    var stay = false; try { stay = sessionStorage.getItem('bvbg-light') === '1'; } catch(e){}
+    if ((stay && !/[?&]bg4k=1/.test(location.search)) || typeof fetch !== 'function' || !window.performance) return;
+    function goLight(){ try { sessionStorage.setItem('bvbg-light', '1'); } catch(e){} }
+    function probe(){
+      var t0 = performance.now(), PROBE = 4e6;
+      fetch(full, { headers: { Range: 'bytes=0-' + (PROBE - 1) }, cache: 'no-store' }).then(function(r){
+        var cr = r.headers.get('content-range') || '', total = Number((cr.split('/')[1]) || 0);
+        return r.arrayBuffer().then(function(b){ return { bytes: b.byteLength, total: total, ms: performance.now() - t0 }; });
+      }).then(function(p){
+        var cur = document.getElementById('bgVideo'), dur = cur && cur.duration;
+        if (!p.total || !p.bytes || !isFinite(dur) || dur <= 0) return;
+        var need = p.total * 8 / dur, have = p.bytes * 8 / (p.ms / 1000);
+        window._bvBgProbe = { needMbps: +(need / 1e6).toFixed(1), haveMbps: +(have / 1e6).toFixed(1) };
+        if (have < need * 1.6){ goLight(); return; }
+        upgrade(cur);
+      }).catch(function(){});
+    }
+    function upgrade(cur){
+      var nv = cur.cloneNode(false); nv.removeAttribute('id'); nv.removeAttribute('autoplay');
+      nv.preload = 'auto'; nv.muted = true; nv.style.opacity = '0'; nv.style.transition = 'opacity 1.2s';
+      nv.src = full; cur.parentNode.insertBefore(nv, cur.nextSibling);
+      var gaveUp = setTimeout(function(){ nv.remove(); goLight(); }, 60000);
+      /* load from a little AHEAD of the light copy, so the takeover lands close to where it is (crossfaded; a few
+         seconds either way in an ambient loop is invisible). Seeking after the buffer filled from 0 would stall. */
+      nv.addEventListener('loadedmetadata', function(){ nv.currentTime = (cur.currentTime + 15) % nv.duration; }, { once: true });
+      function ready(){
+        var b = nv.buffered, ok = false;
+        for (var i = 0; i < b.length; i++) if (b.start(i) <= nv.currentTime + 0.1 && b.end(i) - nv.currentTime >= 8) ok = true;
+        if (!ok) return;
+        nv.removeEventListener('progress', ready); clearTimeout(gaveUp);
+        nv.play().then(function(){
+          nv.style.opacity = '1';
+          setTimeout(function(){ cur.remove(); nv.id = 'bgVideo'; watch(nv); }, 1300);
+        }).catch(function(){ nv.remove(); });
+      }
+      nv.addEventListener('progress', ready);
+    }
+    function watch(nv){
+      var stalls = 0, t0 = Date.now();
+      nv.addEventListener('waiting', function w(){
+        if (Date.now() - t0 > 60000){ nv.removeEventListener('waiting', w); return; }
+        if (++stalls < 2) return;
+        nv.removeEventListener('waiting', w); goLight();
+        var at = nv.currentTime; nv.src = light;
+        nv.addEventListener('loadedmetadata', function(){ nv.currentTime = at % nv.duration; nv.play().catch(function(){}); }, { once: true });
+      });
+    }
+    /* ?bg4k=1 skips the probe and takes the 4K copy (to check the takeover on any line) */
+    var force = /[?&]bg4k=1/.test(location.search);
+    v.addEventListener('playing', function once(){ v.removeEventListener('playing', once); setTimeout(force ? function(){ upgrade(v); } : probe, 4000); });
   })();
 </script>
 
