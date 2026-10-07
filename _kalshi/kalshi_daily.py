@@ -181,7 +181,10 @@ MARKETS = [
 # cities except for the 3 we have now ... drop the rest of the baggage"). The
 # other seventeen configs stay above so any can be re-admitted by adding its
 # key here; their files stopped updating on 2026-09-06.
-ACTIVE = ('ny_high', 'las_high', 'aus_high')
+# AUSTIN DROPPED 2026-10-06 (user: "lets drop austin from kalshi, its not going well there"). Its config stays above,
+# like the other seventeen; re-admit by adding 'aus_high' back here (and to kalshi_lows.py, report.py, the nightly
+# price study's --city list, the worker's OBS_MARKETS and index.html's CWK_CITIES).
+ACTIVE = ('ny_high', 'las_high')
 MARKETS = [m for m in MARKETS if m['key'] in ACTIVE]
 
 WORKERS = 1                               # markets in flight at once (see main). 1, not 4 (2026-10-02, found by the

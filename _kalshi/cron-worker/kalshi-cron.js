@@ -334,8 +334,9 @@ const OBS_MARKETS = [
   // key,      ICAO,   IEM network, IEM station -- the three cities the sheet
   // trades (2026-09-06); the other four were dropped with the rest
   ['ny_high',  'KNYC', 'NY_ASOS', 'NYC'],
-  ['las_high', 'KLAS', 'NV_ASOS', 'LAS'],
-  ['aus_high', 'KAUS', 'TX_ASOS', 'AUS']
+  ['las_high', 'KLAS', 'NV_ASOS', 'LAS']
+  // Austin dropped 2026-10-06 (user: "its not going well there"). APT5 and ALERT_MARKETS keep it, so an Austin
+  // position still open gets its alerts until it settles.
 ];
 // THE 5-MINUTE FEEDS, per market. New York's settlement sensor (Central Park)
 // has no public 5-minute stream, so the three airports stand in for it. Las

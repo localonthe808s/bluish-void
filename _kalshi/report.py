@@ -33,10 +33,8 @@ LOG = os.path.join(HERE, 'report_log.json')
 MARKETS = [
     ('ny_high',  'kalshi_ny.json',      'New York high',  'high', 'New York'),
     ('las_high', 'kalshi_las.json',     'Las Vegas high', 'high', 'Las Vegas'),
-    ('aus_high', 'kalshi_aus.json',     'Austin high',    'high', 'Austin'),
     ('ny_low',   'kalshi_low_ny.json',  'New York low',   'low',  'New York'),
     ('las_low',  'kalshi_low_las.json', 'Las Vegas low',  'low',  'Las Vegas'),
-    ('aus_low',  'kalshi_low_aus.json', 'Austin low',     'low',  'Austin'),
 ]
 # the leg a bet is made on: a high at the noon lock, a low the evening before
 BET_LEGS = {'high': ('lock', 'eve'), 'low': ('eve', 'lock')}
