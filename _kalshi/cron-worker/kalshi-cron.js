@@ -845,14 +845,17 @@ async function reviewDigest(env) {
   if (r.ok) await env.OBS.put(key, '1', { expirationTtl: 60 * 60 * 48 });
   return `${title} (ntfy ${r.status})`;
 }
-async function alertTick(env) {
+async function alertTick(env, sched) {
   if (!env.NTFY_TOPIC || !env.OBS) return 'alerts off';
   const state = (await env.OBS.get(ALERT_KEY, { type: 'json' })) || {};
   const before = JSON.stringify(state);
   const out = [];
-  // 1. the portal, yesterday and today
+  // 1. the portal, yesterday and today -- EVERY FIVE MINUTES (2026-10-06), not every minute: two fetches a minute for a
+  // status that changes a couple of times a day were a sixth of the tick's outbound requests against a 10 ms CPU budget
+  // (see THE CPU BUDGET). Minute 2 of each five, off the bake and obs minutes.
   state.portal = state.portal || {};
-  for (const off of [-1, 0]) {
+  const portalNow = new Date(sched || Date.now()).getUTCMinutes() % 5 === 2;
+  for (const off of (portalNow ? [-1, 0] : [])) {
     const day = localDate(off);
     try {
       const j = await (await fetch(`https://weather.com/kalshi/api/climate/primary?date=${day}`,
@@ -1065,6 +1068,8 @@ async function alertTick(env) {
 // approximation the sheet draws. One KV record per day, written only
 // when something changes (the free plan allows 1,000 writes a day). Public at /dark: the tape is public anyway.
 const DARK_MIN_USD = 150, DARK_ALERT_USD = 500;
+/* the triggers that carry their own jobs (wrangler.toml [triggers]; must match it character for character) */
+const DARK_CRON = '*/1 0,11-23 * * *', OBS_CRON = '*/5 0-4,11-23 * * *';
 const DARK_WIN = { metar: 9, cli: 10, twc: 6, fcst: 10 }, DARK_MERGE_MIN = 3;
 const KAPI = 'https://api.elections.kalshi.com/trade-api/v2';
 function nyEventTicker(dayIso) {
@@ -1130,8 +1135,9 @@ async function darkTick(env, sched) {
   const covered = (t) => rec.releases.some((r) => { const a = Date.parse(r.t); return t >= a && t <= a + DARK_WIN[r.k] * 60000; });
   const out = [];
   // its OWN cooldown record: alertTick reads and writes ALERT_KEY in the same minute, and two writers of one key race
-  const state = (await env.OBS.get('dark:alerts', { type: 'json' })) || {};
-  const sBefore = JSON.stringify(state);
+  // read only when an alert might go out (2026-10-06): one KV read a minute, nearly always for nothing
+  let state = null, sBefore = '';
+  const alertState = async () => { if (!state){ state = (await env.OBS.get('dark:alerts', { type: 'json' })) || {}; sBefore = JSON.stringify(state); } return state; };
   /* the five-minute ticks already spend most of the free plan's ~50 outbound requests (alerts + the obs log), so this
      skips them and the next tick takes both minutes */
   const mStart = (new Date(sched).getUTCMinutes() % 5 === 1) ? m0 - 60000 : m0;
@@ -1169,12 +1175,12 @@ async function darkTick(env, sched) {
       const hm = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }).format(new Date(Date.parse(bb.t)));
       const last = rec.releases.filter((r) => Date.parse(r.t) <= mm).map((r) => Date.parse(r.t)).sort().pop();
       const since = last ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }).format(new Date(last)) : 'this morning';
-      await notify(env, state, `dark:${mk.tk}:${side}`, `Dark flow · NY ${mk.lab}`,
+      await notify(env, await alertState(), `dark:${mk.tk}:${side}`, `Dark flow · NY ${mk.lab}`,
         `${hm}: $${bb.usd.toLocaleString('en-US')} buying ${side.toUpperCase()} on ${mk.lab}${bb.minutes > 1 ? ' over ' + bb.minutes + ' minutes' : ''}, at ${bb.px == null ? '?' : Math.round(bb.px * 100)}c YES, with no public reading since ${since}. Unproven: in the study, dark buyers did not call the next report (see the REPORT tab).`);
     }
     }
   }
-  if (JSON.stringify(state) !== sBefore) await env.OBS.put('dark:alerts', JSON.stringify(state));
+  if (state && JSON.stringify(state) !== sBefore) await env.OBS.put('dark:alerts', JSON.stringify(state));
   if (JSON.stringify(rec) !== before) {
     rec.updated = new Date().toISOString();
     await env.OBS.put(key, JSON.stringify(rec), { expirationTtl: 60 * 60 * 24 * 120 });
@@ -1191,10 +1197,32 @@ async function darkRead(request, env) {
 
 export default {
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(ntfySelfTest(env).catch(e => console.log(`[ntfy-test] FAILED ${e}`)));
+    /* ONE JOB PER TRIGGER (2026-10-06). The free plan gives each invocation 10 ms of CPU, with some leniency for an
+       occasional overrun. One invocation used to carry everything: a dark-flow minute made 12 outbound requests at
+       12.5-18 ms, the five-minute minute (obs log + bake) 41-47 ms -- and on 10-06 a heavy :20 tick tipped the account
+       into strict enforcement, after which EVERY tick died 6-9 requests in, 14:16-14:26 and 17:20-17:59 UTC. Each cron
+       trigger fires its own invocation with its own budget (5 triggers per account on the free plan; this worker now
+       uses 4), so the dark-flow watcher and the obs log ride their own triggers, and the original two keep the alerts,
+       the bake dispatch, the watchdog and the sunset jobs. The one-time ntfy self-test is no longer read every minute.
+       Routed by event.cron, which is the trigger's expression exactly as written in wrangler.toml. */
+    const sched = event.scheduledTime || Date.now();
+    if (event.cron === DARK_CRON){
+      if (new Date(sched).getUTCMinutes() % 5 !== 0) ctx.waitUntil((async () => {
+        try { console.log(`[dark] ${new Date().toISOString()} ${await darkTick(env, sched)}`); }
+        catch (e) { console.log(`[dark] FAILED ${e}`); }
+      })());
+      return;
+    }
+    if (event.cron === OBS_CRON){
+      ctx.waitUntil((async () => {
+        try { console.log(`[obs-log] ${new Date().toISOString()} ${await logObs(env)}`); }
+        catch (e) { console.log(`[obs-log] FAILED ${e}`); }
+      })());
+      return;
+    }
     ctx.waitUntil((async () => {
       try {
-        console.log(`[alerts] ${new Date().toISOString()} ${await alertTick(env)}`);
+        console.log(`[alerts] ${new Date().toISOString()} ${await alertTick(env, sched)}`);
       } catch (e) {
         console.log(`[alerts] FAILED ${e}`);
       }
@@ -1218,10 +1246,6 @@ export default {
     // late tick was silently skipping bakes and KV writes too (one of seven in a
     // 36-minute sample). event.scheduledTime is the tick the cron asked for.
     const minute = new Date(event.scheduledTime || Date.now()).getUTCMinutes();
-    if (minute % 5 !== 0) ctx.waitUntil((async () => {
-      try { console.log(`[dark] ${new Date().toISOString()} ${await darkTick(env, event.scheduledTime || Date.now())}`); }
-      catch (e) { console.log(`[dark] FAILED ${e}`); }
-    })());
     // HOURLY, NOT ONCE AT 13:00Z. The 09-11 New York crash was invisible for
     // eighteen hours because the only check ran at 13:00Z and read the run's
     // conclusion, which was green. Three API calls and one 25 KB log an hour is
@@ -1234,15 +1258,6 @@ export default {
       if (new Date(event.scheduledTime || Date.now()).getUTCHours() === 12) ctx.waitUntil((async () => {
         try { console.log(`[review] ${new Date().toISOString()} ${await reviewDigest(env)}`); }
         catch (e) { console.log(`[review] FAILED ${e}`); }
-      })());
-    }
-    if (minute % 5 === 0) {
-      ctx.waitUntil((async () => {
-        try {
-          console.log(`[obs-log] ${new Date().toISOString()} ${await logObs(env)}`);
-        } catch (e) {
-          console.log(`[obs-log] FAILED ${e}`);
-        }
       })());
     }
     // THE SUNSET TRUTH (2026-09-26). Two minutes before New York's sunset, start sunset-truth.yml: it photographs the
