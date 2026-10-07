@@ -184,7 +184,9 @@ MARKETS = [
 # AUSTIN DROPPED 2026-10-06 (user: "lets drop austin from kalshi, its not going well there"). Its config stays above,
 # like the other seventeen; re-admit by adding 'aus_high' back here (and to kalshi_lows.py, report.py, the nightly
 # price study's --city list, the worker's OBS_MARKETS and index.html's CWK_CITIES).
-ACTIVE = ('ny_high', 'las_high')
+# LAS VEGAS DROPPED THE SAME DAY (user: "lets remove vegas too if its not going well, we're going to focus on NY HIGH
+# and LOW"). The list now lives in active.py, which every study reads too.
+from active import ACTIVE                 # noqa: E402
 MARKETS = [m for m in MARKETS if m['key'] in ACTIVE]
 
 WORKERS = 1                               # markets in flight at once (see main). 1, not 4 (2026-10-02, found by the

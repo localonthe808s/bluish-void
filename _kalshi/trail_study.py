@@ -20,7 +20,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 OUT = os.path.join(HERE, 'trail_study.json')
 BASE = 'https://cdn.bluishvoid.com/kalshi/trail/'
-KEYS = ('ny_high', 'las_high', 'aus_high')
+from active import ACTIVE                                   # noqa: E402  the traded markets (2026-10-06)
+KEYS = tuple(k for k in ('ny_high', 'las_high', 'aus_high') if k in ACTIVE)
 DAYS = 60
 WIN = {'ny_high': (7, 13), 'las_high': (7, 19), 'aus_high': (12, 17)}   # fallback windows; by_hour overrides when present
 

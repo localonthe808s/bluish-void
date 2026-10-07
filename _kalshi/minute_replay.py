@@ -41,6 +41,9 @@ CITIES = {
     'las_high': {'park': 'LAS', 'apts': ['VGT'],               'cli': 'CLILAS', 'tz': 'America/Los_Angeles', 'utc_off': -7},
     'aus_high': {'park': 'AUS', 'apts': ['ATT'],               'cli': 'CLIAUS', 'tz': 'America/Chicago',     'utc_off': -5},
 }
+from active import ACTIVE                                   # noqa: E402  the traded markets (2026-10-06)
+CITIES = {k: v for k, v in CITIES.items() if k in ACTIVE}
+
 NAMES = {'LGA': 'LaGuardia', 'EWR': 'Newark', 'JFK': 'JFK', 'VGT': 'North Las Vegas', 'ATT': 'Camp Mabry'}
 WINDOW_DAYS = 45                          # how far back the replay reaches
 REFRESH_HOURS = 6                         # the archive moves ~daily; do not hammer IEM

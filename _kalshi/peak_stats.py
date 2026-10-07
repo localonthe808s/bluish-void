@@ -23,6 +23,9 @@ CITIES = {
     'las_high': ('LAS', 'America/Los_Angeles'),
     'aus_high': ('AUS', 'America/Chicago'),
 }
+from active import ACTIVE                                   # noqa: E402  the traded markets (2026-10-06)
+CITIES = {k: v for k, v in CITIES.items() if k in ACTIVE}
+
 DAYS = 60
 COOL = 1.0          # degF below the running max that counts as "cooling"
 

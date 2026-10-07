@@ -36,6 +36,9 @@ CITIES = {
     'las_high': {'series': 'KXHIGHTLV', 'station': 'LAS', 'network': 'NV_ASOS', 'cli': 'CLILAS', 'fcst': 'ZFPVEF,AFDVEF', 'tz': 'America/Los_Angeles', 'five_min_public': True},
     'aus_high': {'series': 'KXHIGHAUS', 'station': 'AUS', 'network': 'TX_ASOS', 'cli': 'CLIAUS', 'fcst': 'ZFPEWX,AFDEWX', 'tz': 'America/Chicago',     'five_min_public': True},
 }
+from active import ACTIVE                                   # noqa: E402  the traded markets (2026-10-06)
+CITIES = {k: v for k, v in CITIES.items() if k in ACTIVE}
+
 SINCE = datetime.date(2026, 9, 4)            # the live record starts here
 WINDOW_H = (7, 20)                           # local hours scored: the trading day, before the climate report decides it
 METAR_WIN = 9                                # minutes after an observation that count as "reaction"

@@ -78,7 +78,8 @@ def low_cfg(base_key, series, out, label, slug):
 
 MARKETS = [
     low_cfg('ny_high',  'KXLOWTNYC', 'kalshi_low_ny.json',  'New York daily low',  'lowest-temperature-in-nyc'),
-    low_cfg('las_high', 'KXLOWTLV',  'kalshi_low_las.json', 'Las Vegas daily low', 'las-vegas-daily-low-temperature'),
+    # Las Vegas dropped 2026-10-06 (see active.py):
+    # low_cfg('las_high', 'KXLOWTLV',  'kalshi_low_las.json', 'Las Vegas daily low', 'las-vegas-daily-low-temperature'),
     # Austin dropped 2026-10-06 with the highs (see ACTIVE in kalshi_daily.py):
     # low_cfg('aus_high', 'KXLOWTAUS', 'kalshi_low_aus.json', 'Austin daily low',    'lowest-temperature-in-austin'),
 ]
