@@ -3493,6 +3493,13 @@ function buildBelts(){
   buildBigAsteroids();
   gBelts.innerHTML = '';
   beltLabels = [];
+  /* THE ROCKS AS ONE PICTURE (2026-10-06). Each rock was its own <g transform opacity> -- ~1,460 of them -- and every
+     one is a separate paint chunk that Chrome re-layerizes on EVERY frame the page paints anything, solar map on
+     screen or not: measured on the live site, Layerize 81% of the main thread, ~5 fps around this widget. The rocks
+     never move once built (only a scale change rebuilds them), so they are built off the page exactly as before and
+     handed to the sky as ONE SVG image: same markup, same two lighting gradients carried inside it, drawn as vectors
+     (an SVG image stays sharp at any zoom). The belt labels stay live text. Anything failing keeps the live rocks. */
+  var rocksG = document.createElementNS(NS, 'g'), rockBox = [Infinity, Infinity, -Infinity, -Infinity];
   BELTS.forEach(function(b){
     var rnd = metRnd('belt/' + b.id);
     for (var i=0;i<b.n;i++){
@@ -3506,9 +3513,12 @@ function buildBelts(){
       /* rotate so +x faces away from the Sun — see rockLit. A few degrees of
          slop keeps them from looking mechanically aligned. */
       var lit = -th*180/Math.PI + (rnd()-.5)*22;
-      var gr  = mk('g',{transform:'translate('+(R*Math.cos(th)).toFixed(1)+','+
-                        (-R*Math.sin(th)).toFixed(1)+') rotate('+lit.toFixed(0)+')',
-                        opacity:(b.op * (0.62 + rnd()*0.38)).toFixed(2)},gBelts);
+      var gx = R*Math.cos(th), gy = -R*Math.sin(th);
+      rockBox[0] = Math.min(rockBox[0], gx - rr*2); rockBox[1] = Math.min(rockBox[1], gy - rr*2);
+      rockBox[2] = Math.max(rockBox[2], gx + rr*2); rockBox[3] = Math.max(rockBox[3], gy + rr*2);
+      var gr  = mk('g',{transform:'translate('+gx.toFixed(1)+','+
+                        gy.toFixed(1)+') rotate('+lit.toFixed(0)+')',
+                        opacity:(b.op * (0.62 + rnd()*0.38)).toFixed(2)},rocksG);
       mk('path',{d:rockPath(rnd, rr, b.rough),
                  fill:'url(#'+(b.rough > 0.6 ? 'rockLit' : 'iceLit')+')'},gr);
       /* the bigger grains get a pit or two so they are not flat fills */
@@ -3529,6 +3539,26 @@ function buildBelts(){
     tl.textContent = b.label;
     beltLabels.push({el:tl, R:Rl});
   });
+  beltRocksPlace(rocksG, rockBox);
+}
+var _beltRocksURL = null;
+function beltRocksPlace(rocksG, box){
+  var live = function(){ gBelts.insertBefore(rocksG, gBelts.firstChild); };
+  try {
+    if (!(box[2] > box[0]) || !window.Blob || !window.URL) return live();
+    var x = Math.floor(box[0]), y = Math.floor(box[1]), w = Math.ceil(box[2]) - x, h = Math.ceil(box[3]) - y;
+    var grads = ['rockLit', 'iceLit'].map(function(id){ var gEl = document.getElementById(id); return gEl ? gEl.outerHTML : ''; }).join('');
+    var xml = '<svg xmlns="' + NS + '" viewBox="' + [x, y, w, h].join(' ') + '" width="' + w + '" height="' + h + '"><defs>' + grads + '</defs>'
+      + new XMLSerializer().serializeToString(rocksG).replace(/ xmlns="[^"]*"/, '') + '</svg>';
+    if (_beltRocksURL) URL.revokeObjectURL(_beltRocksURL);
+    _beltRocksURL = URL.createObjectURL(new Blob([xml], { type: 'image/svg+xml' }));
+    var im = document.createElementNS(NS, 'image');
+    im.setAttribute('x', x); im.setAttribute('y', y); im.setAttribute('width', w); im.setAttribute('height', h);
+    im.setAttribute('preserveAspectRatio', 'none');
+    im.addEventListener('error', function(){ if (im.parentNode){ im.parentNode.removeChild(im); live(); } });
+    im.setAttribute('href', _beltRocksURL);
+    gBelts.insertBefore(im, gBelts.firstChild);
+  } catch (e){ live(); }
 }
 
 /* map coordinates for a [r AU, lon deg] sample */
