@@ -2392,6 +2392,15 @@ def measured_floor():
             'measured': bool(d.get('cheap_measured')) and bool(d.get('priced_measured')), 'changed': changed}
 
 
+def _mkt_p(r):
+    """The market's probability for a rung. The working rows carry it as `mid` (fetch_ladder); only the written
+    ladder renames it `market`. Found 2026-10-07: every reader here asked for `market`, got None, and so the
+    disagreement cap (_wild, since 09-05) never fired in the bake -- only the panel, which reads the written ladder,
+    applied it -- and picks_agree saw no market and said yes."""
+    v = r.get('market')
+    return v if v is not None else r.get('mid')
+
+
 def _wild(q, market_p):
     """True when our number is too far from the market's to be believed."""
     return market_p is not None and abs(q - market_p) > MAX_DISAGREE
@@ -2487,7 +2496,7 @@ def picks_agree(rows, ps):
     if cfg.get('kind') == 'low':
         return True
     ours = [(p, r['label']) for r, p in zip(rows, ps) if p is not None]
-    mkt = [(r['market'], r['label']) for r in rows if r.get('market') is not None]
+    mkt = [(_mkt_p(r), r['label']) for r in rows if _mkt_p(r) is not None]
     if not ours or len(mkt) < 2:
         return True                              # no market to disagree with: the court alone decides
     return max(ours)[1] == max(mkt)[1]
@@ -2527,7 +2536,7 @@ def shadow_bet(rows, ps):
             if price is None or not (MIN_PRICE <= price < 1):
                 continue
             # our q for this side vs the market's own number for the same side
-            mp = r.get('market')
+            mp = _mkt_p(r)
             if mp is not None and side == 'against':
                 mp = 1.0 - mp
             if _wild(q, mp):
@@ -2556,7 +2565,7 @@ def shadow_book(rows, ps):
         for side, price, q in (('for', r.get('ask'), p), ('against', r.get('nask'), 1.0 - p)):
             if price is None or not (MIN_PRICE <= price < 1):
                 continue
-            mp = r.get('market')
+            mp = _mkt_p(r)
             if mp is not None and side == 'against':
                 mp = 1.0 - mp
             if _wild(q, mp):
@@ -2592,7 +2601,7 @@ def book_value(rows, ps, bankroll=None):
                                      ('against', r.get('nask'), 1.0 - p, r.get('nsize'))):
             if price is None or not (MIN_PRICE <= price < 1):
                 continue
-            mp = r.get('market')
+            mp = _mkt_p(r)
             if mp is not None and side == 'against':
                 mp = 1.0 - mp
             if _wild(q, mp):
