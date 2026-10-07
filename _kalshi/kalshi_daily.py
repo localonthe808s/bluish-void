@@ -2449,6 +2449,8 @@ def edge_court(history, leg='lock'):
         b = blk.get('bet') or blk.get('shadow')
         if not isinstance(b, dict) or b.get('price') is None or not b.get('label'):
             continue
+        if b.get('why') == 'disagree':          # withheld by picks_agree, not by this court: not its evidence
+            continue
         won = (b['label'] == h['actual_bracket']) if b.get('dir') == 'for' else (b['label'] != h['actual_bracket'])
         price = float(b['price'])
         fee = float(b['fee']) if b.get('fee') is not None else fee_of(price)
@@ -2473,13 +2475,45 @@ def gate_open(leg='lock'):
     return True if g is None else bool(g.get('open'))
 
 
+# THE PICKS MUST AGREE (2026-10-07, user: "go for it" on the New York review). New York's high, settled
+# 09-04..10-06: the noon bets on days our top range was ALSO the market's won 11 of 15 and returned +0.19 a contract;
+# on days the two picks differed they won 2 of 7 (-0.06), and the evening plan the same way (-0.02 against -0.13).
+# When the picks differ the market was right 5 times to our 1 -- the adverse selection the 09-27 review found in all
+# three cities. So a HIGH bet is named only when our most likely range is the market's most likely range. The lows
+# are untouched (their own court is shut). The bet that WOULD have been named is still written as a shadow marked
+# why='disagree', so the report keeps grading the rule; the edge court skips those, since they are not its evidence.
+def picks_agree(rows, ps):
+    cfg = getattr(_TL, 'cfg', None) or {}
+    if cfg.get('kind') == 'low':
+        return True
+    ours = [(p, r['label']) for r, p in zip(rows, ps) if p is not None]
+    mkt = [(r['market'], r['label']) for r in rows if r.get('market') is not None]
+    if not ours or len(mkt) < 2:
+        return True                              # no market to disagree with: the court alone decides
+    return max(ours)[1] == max(mkt)[1]
+
+
+def bet_allowed(rows, ps, leg='lock'):
+    return gate_open(leg) and picks_agree(rows, ps)
+
+
+def withheld(rows, ps, leg='lock'):
+    """The bet the sheet would have named and did not -- by the court or by picks_agree -- for the record."""
+    if bet_allowed(rows, ps, leg):
+        return None
+    b = shadow_bet(rows, ps)
+    if b and gate_open(leg):
+        b = dict(b, why='disagree')
+    return b
+
+
 def best_bet(rows, ps, leg='lock'):
-    """The bet to name, or None: see the edge court."""
-    return shadow_bet(rows, ps) if gate_open(leg) else None
+    """The bet to name, or None: see the edge court and picks_agree."""
+    return shadow_bet(rows, ps) if bet_allowed(rows, ps, leg) else None
 
 
 def lock_book(rows, ps, leg='lock'):
-    return shadow_book(rows, ps) if gate_open(leg) else []
+    return shadow_book(rows, ps) if bet_allowed(rows, ps, leg) else []
 
 
 def shadow_bet(rows, ps):
@@ -4255,7 +4289,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
                 # the overnight plan is written down and can be graded
                 'bet': best_bet(trows, tps, 'eve'),
                 'book': lock_book(trows, tps, 'eve'),
-                'shadow': (None if gate_open('eve') else shadow_bet(trows, tps)),
+                'shadow': withheld(trows, tps, 'eve'),
+                'picks_agree': picks_agree(trows, tps),
                 'edge_gate': EDGE_GATE.get((cfg['key'], 'eve')),
             }
             tom.update({k: v for k, v in t_prep.items() if k not in ('pred', 'sd')})
@@ -4411,7 +4446,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             'bet': best_bet(rows, ps),
             'book': lock_book(rows, ps),
             # what the plan would have been, graded at settlement for the edge court
-            'shadow': (None if gate_open('lock') else shadow_bet(rows, ps)),
+            'shadow': withheld(rows, ps, 'lock'),
         }
 
     # INTRADAY PRICE TRAIL.  Kalshi's candlestick endpoint 404s, so there is no
@@ -5072,7 +5107,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             'bet': best_bet(rows, ps),
             # the edge court's ruling, and the bet it is withholding (see edge_court)
             'edge_gate': EDGE_GATE.get((cfg['key'], 'lock')),
-            'shadow_bet': (None if gate_open('lock') else shadow_bet(rows, ps)),
+            'shadow_bet': withheld(rows, ps, 'lock'),
+            'picks_agree': picks_agree(rows, ps),
             'calib': _CALIB.get(cfg['key']) or None,
             'edge_floor': {'min': EDGE_FLOOR, 'priced': EDGE_FLOOR_PRICED, 'price': EDGE_PRICE},
             # which distribution priced the open-day ladder (kernel.json ruling)
