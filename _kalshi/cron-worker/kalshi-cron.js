@@ -697,17 +697,25 @@ async function ntfySelfTest(env) {
   console.log(`[ntfy-test] ${r.status} ${r.ok ? 'delivered' : (await r.text()).slice(0, 160)}`);
 }
 
-async function notify(env, state, key, title, body, priority) {
+// THE COOL-DOWN IS SAVED BEFORE THE PUSH (2026-10-07). It used to be stamped in memory here and written to KV by the
+// caller at the end of its tick -- after ntfy had already been posted. On the day KV's daily write cap was reached
+// (944 of the free plan's 1,000, the 90 % mail arrived at 4:58 PM) that end-of-tick put would have thrown, the
+// cool-down would never have landed, and the same page would have gone out every minute until midnight UTC. Now the
+// state is put under its own key FIRST; if that write fails, notify throws and nothing is posted -- a quiet minute,
+// not a paging loop (the tick's own log line names it). The caller's end-of-tick put still runs; one extra write per
+// alert is nothing on Workers Paid.
+async function notify(env, state, key, title, body, priority, stateKey) {
   const now = Date.now();
   const last = (state.sent || {})[key] || 0;
   if (now - last < ALERT_COOLDOWN_MS) return false;
+  state.sent = state.sent || {};
+  state.sent[key] = now;
+  await env.OBS.put(stateKey || ALERT_KEY, JSON.stringify(state));
   const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, {
     method: 'POST', body,
     headers: ntfyHeaders(env, { 'Title': title, 'Priority': priority || 'default' })
   });
   if (!r.ok) console.log(`[ntfy] ${r.status} ${(await r.text()).slice(0, 160)} -- "${title}" NOT delivered`);
-  state.sent = state.sent || {};
-  state.sent[key] = now;
   return r.ok;
 }
 function localDate(offsetDays) {
@@ -840,9 +848,10 @@ async function reviewDigest(env) {
       .concat(fixes.length ? [`Branch ${branch} -- nothing ships until you merge it.`] : []).join('\n');
     if (f.some((x) => x.severity === 'high')) pri = 'high';
   }
+  // the day's mark goes in BEFORE the post, like notify(): a put that fails after a post would repeat the digest
+  await env.OBS.put(key, '1', { expirationTtl: 60 * 60 * 48 });
   const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, { method: 'POST', body, headers: ntfyHeaders(env, { 'Title': title, 'Priority': pri }) });
   if (!r.ok) console.log(`[ntfy] ${r.status} ${(await r.text()).slice(0, 160)} -- review digest NOT delivered`);
-  if (r.ok) await env.OBS.put(key, '1', { expirationTtl: 60 * 60 * 48 });
   return `${title} (ntfy ${r.status})`;
 }
 async function alertTick(env, sched) {
@@ -1125,8 +1134,12 @@ async function darkTick(env, sched) {
   try {
     const tw = await (await fetch(`https://api.weather.com/v3/wx/observations/current?icaoCode=KNYC&units=e&language=en-US&format=json&apiKey=${TWC_KEY}`)).json();
     const v = tw && tw.temperatureMaxSince7Am;
-    if (typeof v === 'number' && nyHour >= 7) {
-      if (rec.twc != null && v > rec.twc) addRel('twc', new Date(sched - 60000).toISOString());
+    // THE DAY'S HIGH, NOT THE LATEST VALUE (2026-10-07). temperatureMaxSince7Am is a running max on paper, but the
+    // field is blended and FLAPS: 66, 65, 66 ... On 10-07 it logged 45 "twc" releases in pairs two minutes apart, and
+    // every flap was a KV write (down) and a release plus a write (up) -- most of the day's write budget, and a flap
+    // back to a value the public already had is not a new reading. Only a value above the day's recorded high counts.
+    if (typeof v === 'number' && nyHour >= 7 && (rec.twc == null || v > rec.twc)) {
+      if (rec.twc != null) addRel('twc', new Date(sched - 60000).toISOString());
       rec.twc = v;
     }
   } catch (e) { /* as above */ }
@@ -1176,7 +1189,7 @@ async function darkTick(env, sched) {
       const last = rec.releases.filter((r) => Date.parse(r.t) <= mm).map((r) => Date.parse(r.t)).sort().pop();
       const since = last ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }).format(new Date(last)) : 'this morning';
       await notify(env, await alertState(), `dark:${mk.tk}:${side}`, `Dark flow · NY ${mk.lab}`,
-        `${hm}: $${bb.usd.toLocaleString('en-US')} buying ${side.toUpperCase()} on ${mk.lab}${bb.minutes > 1 ? ' over ' + bb.minutes + ' minutes' : ''}, at ${bb.px == null ? '?' : Math.round(bb.px * 100)}c YES, with no public reading since ${since}. Unproven: in the study, dark buyers did not call the next report (see the REPORT tab).`);
+        `${hm}: $${bb.usd.toLocaleString('en-US')} buying ${side.toUpperCase()} on ${mk.lab}${bb.minutes > 1 ? ' over ' + bb.minutes + ' minutes' : ''}, at ${bb.px == null ? '?' : Math.round(bb.px * 100)}c YES, with no public reading since ${since}. Unproven: in the study, dark buyers did not call the next report (see the REPORT tab).`, undefined, 'dark:alerts');
     }
     }
   }
