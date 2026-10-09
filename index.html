@@ -132,6 +132,29 @@
         return r.json();
       }).then(function(d){ clearTimeout(t); return d; })
         .catch(function(){ clearTimeout(t); return null; });
+      /* CLEAR-NIGHT HERO PRELOAD (2026-10-09). On a clear night the hero's largest paint is milkyway.webp
+         (0.56 MB), fetched only once the hero renders, ~3 s in; measured LCP 5.8 s cold. Same rule as
+         heroState(): weather code 0 or 1 at the current hour, between today's sunset and tomorrow's
+         sunrise -> warm the image cache now, so the hero finds it already there. Any doubt: do nothing. */
+      window._earlyWxFetch.then(function(d){
+        try {
+          if (!d || !d.hourly || !d.daily) return;
+          var fmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+          var parts = {}; fmt.formatToParts(new Date()).forEach(function(x){ parts[x.type] = x.value; });
+          if (parts.hour === '24') parts.hour = '00';
+          var nowLocal = parts.year + '-' + parts.month + '-' + parts.day + 'T' + parts.hour + ':' + parts.minute;
+          var hi = (d.hourly.time || []).indexOf(nowLocal.slice(0, 13) + ':00');
+          var code = hi >= 0 && d.hourly.weathercode ? d.hourly.weathercode[hi] : null;
+          if (code !== 0 && code !== 1) return;
+          // daily index 1 = today (past_days=1); night = after today's sunset or before today's sunrise
+          var sr = d.daily.sunrise && d.daily.sunrise[1], ss = d.daily.sunset && d.daily.sunset[1];
+          if (!sr || !ss) return;
+          var night = nowLocal >= ss.slice(0, 16) || nowLocal < sr.slice(0, 16);
+          if (!night) return;
+          var im = new Image(); im.decoding = 'async'; im.src = '/milkyway.webp';
+          window._bvMwPreloaded = true;
+        } catch(e){}
+      });
     } catch(e){}
   })();
 
@@ -86030,12 +86053,29 @@ function initNowMicroTabs(){
       recentDays[String(rdt.getFullYear()).slice(-2) + String(rdt.getMonth()+1).padStart(2,'0') + String(rdt.getDate()).padStart(2,'0')] = true;
     }
 
+    var cachedDays = (cached && cached.days) ? cached.days : {};
+
+    /* THE NIGHTLY BAKE (2026-10-09): _maplab/tornado_year.json (tornado-year.yml) holds every elapsed day's
+       record in exactly this cache's shape, so a first visit merges it and fetches only the revision window
+       below, instead of one CSV per elapsed day (280 requests by October). The bake wins over whatever the
+       local cache has for a day -- it is at most a day older than SPC and SPC revises. Any failure here falls
+       through to the old per-day loop unchanged. */
+    var bakeCtl = ('AbortController' in window) ? new AbortController() : null;
+    var bakeT = bakeCtl ? setTimeout(function(){ bakeCtl.abort(); }, 4000) : 0;
+    fetch('/_maplab/tornado_year.json?d=' + todayStr, bakeCtl ? { signal: bakeCtl.signal } : undefined)
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(b){
+        if (!b || b.year !== fullYear || !b.days) return;
+        Object.keys(b.days).forEach(function(ds){ if (!recentDays[ds]) cachedDays[ds] = b.days[ds]; });
+      })
+      .catch(function(){})
+      .then(function(){ clearTimeout(bakeT); run(); });
+
+    function run(){
     // Restore cached state: past-day counts + top reports
     var totalYear = 0;
     tornadoTopReports = [];
-    var cachedDays = {};
-    if (cached && cached.days) {
-      cachedDays = cached.days;
+    if (cached && cached.days || Object.keys(cachedDays).length) {
       Object.keys(cachedDays).forEach(function(ds){
         if (recentDays[ds]) return; // revision window — always re-fetch
         var entry = cachedDays[ds];
@@ -86051,6 +86091,10 @@ function initNowMicroTabs(){
         });
       });
       if (yearCountEl) yearCountEl.textContent = totalYear.toLocaleString();
+      var sp0 = document.getElementById('tornado-status-pill');
+      if (sp0 && sp0.innerHTML.indexOf(fullYear + ':') >= 0){
+        sp0.innerHTML = sp0.innerHTML.replace(new RegExp(fullYear + ': [^<]*'), fullYear + ': ' + totalYear.toLocaleString());
+      }
       updateTop5Dropdown();
     }
 
@@ -86111,7 +86155,7 @@ function initNowMicroTabs(){
           var sp = document.getElementById('tornado-status-pill');
           var yearStr = String(fullYear);
           if (sp && sp.innerHTML.indexOf(yearStr + ':') >= 0){
-            sp.innerHTML = sp.innerHTML.replace(new RegExp(yearStr + ': [^<]+'), yearStr + ': ' + totalYear.toLocaleString());
+            sp.innerHTML = sp.innerHTML.replace(new RegExp(yearStr + ': [^<]*'), yearStr + ': ' + totalYear.toLocaleString());
           }
           updateTop5Dropdown();
           fetched++;
@@ -86123,6 +86167,7 @@ function initNowMicroTabs(){
     for (var i = 0; i < daysToFetch.length; i++){
       fetchDayYear(daysToFetch[i], i * 50);
     }
+    } /* run */
   }
 
   // TOP 5 STRONGEST removed — EF ratings take days/weeks to be officially
@@ -86146,7 +86191,7 @@ function initNowMicroTabs(){
         }).join(' · ');
     }
     if (statusEl){
-      var yearText = yearCountEl ? yearCountEl.textContent : '--';
+      var yearText = (yearCountEl && yearCountEl.textContent) || '--';
       statusEl.innerHTML = count + ' TORNADOES (' + rangeLabel + ') · <span style="color:#ff6b6b;">' + (new Date()).getFullYear() + ': ' + yearText + '</span>';
       // Also update unified pill
       var uPill = document.getElementById('hz-pill-tornado');

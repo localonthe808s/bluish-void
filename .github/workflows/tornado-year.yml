@@ -1,0 +1,64 @@
+name: Rebake the tornado year count
+
+# Keeps _maplab/tornado_year.json (HAZARDS -> TORNADOES, the "<year>: N" figure) fresh: SPC's per-day storm
+# reports since Jan 1, counted once a night here instead of one CSV per elapsed day on every visitor's first
+# visit (280 requests by October). The page merges this file into its per-day cache and still fetches the
+# last three days live, so revisions SPC makes to recent days are never missed.
+
+on:
+  schedule:
+    - cron: '41 9 * * *'   # daily 09:41 UTC: yesterday's SPC file is final by then
+  workflow_dispatch: {}
+
+concurrency:
+  group: tornado-year
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  rebake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bake
+        run: python3 _maplab/tornado_year_bake.py
+
+      - name: Sanity-check
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import json, datetime as dt
+          d = json.load(open('_maplab/tornado_year.json'))
+          today = dt.datetime.now(dt.timezone.utc).date()
+          elapsed = (today - dt.date(today.year, 1, 1)).days
+          assert d['year'] == today.year, 'wrong year'
+          assert len(d['days']) >= elapsed - 3, f"only {len(d['days'])} of {elapsed} days"
+          EOF
+
+      - name: Commit if changed
+        run: |
+          set -euo pipefail
+          files="_maplab/tornado_year.json"
+          if git diff --quiet -- $files && [ -z "$(git status --porcelain -- $files)" ]; then
+            echo "no change"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          tmp=$(mktemp -d); cp _maplab/tornado_year.json "$tmp"/
+          git add $files
+          git commit -m "Tornado year count: refresh"
+          # the Kalshi lanes push to main all day: replay onto theirs rather than fail
+          for i in 1 2 3; do
+            git push && exit 0
+            echo "push rejected, replaying onto origin/main (attempt $i)"
+            git fetch origin main
+            git reset --hard origin/main
+            cp "$tmp"/tornado_year.json _maplab/tornado_year.json
+            git add $files
+            git diff --cached --quiet && { echo "origin already has this"; exit 0; }
+            git commit -m "Tornado year count: refresh"
+          done
+          exit 1
