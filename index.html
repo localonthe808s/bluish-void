@@ -1533,13 +1533,14 @@ window._bvContinentalNames = function(map, opts){
     transition:all .25s ease;
     flex-shrink:0;
     color:#f59e0b;
-    text-shadow:0 0 4px rgba(245,158,11,.6), 0 0 8px rgba(245,158,11,.3);
+    text-shadow:0 0 6px rgba(245,158,11,.75), 0 0 11px rgba(245,158,11,.4);
     line-height:1;
+    /* pulses opacity, not text-shadow: a shadow animation repaints every frame (perf 2026-10-09) */
     animation:starPulse 2.4s ease-in-out infinite;
   }
   @keyframes starPulse{
-    0%,100%{ text-shadow:0 0 3px rgba(245,158,11,.5), 0 0 8px rgba(245,158,11,.2); }
-    50%{ text-shadow:0 0 8px rgba(255,170,20,1), 0 0 14px rgba(245,158,11,.6); }
+    0%,100%{ opacity:.7; }
+    50%{ opacity:1; }
   }
   @keyframes geoStatusPulse{
     0%,100%{ opacity:.5; }
@@ -4794,13 +4795,14 @@ window._bvContinentalNames = function(map, opts){
   .fc7-today .forecast7-bar::after{
     content:'';
     position:absolute;
-    top:0; left:-40%; width:40%; height:100%;
+    top:0; left:0; width:40%; height:100%;
     background:linear-gradient(90deg, transparent, rgba(255,255,255,.25), transparent);
+    /* animates transform, not left: a left animation re-lays-out every frame (perf 2026-10-09) */
     animation:fc7-shimmer 2.5s ease-in-out infinite;
   }
   @keyframes fc7-shimmer{
-    0%{ left:-40%; }
-    100%{ left:140%; }
+    0%{ transform:translateX(-100%); }
+    100%{ transform:translateX(350%); }
   }
 
   .forecast7-chip .forecast7-bar-block{
@@ -9802,6 +9804,19 @@ body > #dynamic-alert-modal {
      awake would be frozen — indistinguishable from a broken one. An id beats
      the .bv-asleep descendant selector, so this always wins. */
   #solar-loading, #solar-loading *, .sl-loading, .sl-loading * { animation-play-state: running !important; }
+  /* OFF-SCREEN PAUSE (2026-10-09). Measured idle at the top of the page: every running
+     CSS animation whose per-frame change is not a simple composited one (rotation,
+     left/top, text-shadow, filter, any SVG transform) makes Blink re-layerize all ~87
+     composited layers EVERY frame -- ~2 ms of main thread per frame -- even when the
+     element sits 8,000 px below the fold (the Super-K loader orbs alone cost 2.2 ms).
+     Pausing the 45 off-screen animations took idle main-thread work from 4.6 to
+     2.8 ms/frame. _bvOffscreenPause (end of body) toggles .bv-offscreen on .widget and
+     .weather-card containers more than 200 px outside the viewport. Loaders are paused
+     on purpose (nobody sees them); the one thing that must keep running inside an
+     off-screen container is a modal that floats over the page. */
+  .bv-offscreen *, .bv-offscreen .sl-loading *, .bv-offscreen #solar-loading * { animation-play-state: paused !important; }
+  .bv-offscreen .widget-modal-overlay, .bv-offscreen .widget-modal-overlay *,
+  .bv-offscreen .space-info-popup, .bv-offscreen .space-info-popup * { animation-play-state: running !important; }
   /* Shared container for the orbiting-planets loader when it appears in the
      other space widgets (sun imager, coronagraph, aurora, geospace, dark sky).
      Same look as #solar-loading; z-index clears Leaflet's panes/controls. */
@@ -51656,6 +51671,16 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (!el) return;
     if (!force && window._bvBmPending) return;
     el.style.opacity = '0';
+    /* after the .3s fade take it out of the render tree: its orbit spinners kept
+       rotating (and re-layerizing the page every frame) behind opacity 0 */
+    clearTimeout(el._bvHideT);
+    el._bvHideT = setTimeout(function(){ if (el.style.opacity === '0') el.style.display = 'none'; }, 400);
+  };
+  window._fcastShowLoader = function(el){
+    if (!el) return;
+    clearTimeout(el._bvHideT);
+    el.style.display = '';
+    el.style.opacity = '1';
   };
   window._syncCityBasemap = function(){
     // mode: 'city' (static NYC asset) | 'local' (per-station stitched map) | null
@@ -51729,7 +51754,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
            too: the 10s timeout lives inside loadFcastRadar, which a plain
            basemap swap does not always call. */
         var _ldr = document.getElementById('fcast-loading');
-        if (_ldr) _ldr.style.opacity = '1';
+        if (_ldr) window._fcastShowLoader(_ldr);
         clearTimeout(window._bvBmWait);
         window._bvBmWait = setTimeout(function(){
           window._bvBmPending = false;
@@ -70590,11 +70615,11 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
 
     if (!back || !front) return;
     var loader = document.getElementById('fcast-loading');
-    if (loader && !lastGoodSrc) loader.style.opacity = '1';
+    if (loader && !lastGoodSrc) window._fcastShowLoader(loader);
     if (!url){
       // WMS mode holding for its scan list — the _fetchScanTimes callback
       // calls loadFcastRadar again when it lands; retry on a timer as backup
-      if (loader) loader.style.opacity = '1';
+      if (loader) window._fcastShowLoader(loader);
       setTimeout(function(){ if (fcastState.range === 'live') loadFcastRadar(); }, 900);
       return;
     }
@@ -104065,15 +104090,15 @@ function closeAlertModal(){
         rgba(255, 240, 195, 0) 100%);
   }
   @keyframes void-glow {
+    /* opacity + scale only: a filter keyframe cannot run on the compositor and
+       re-layerized the whole page every frame (perf 2026-10-09); the blur is static */
     0%, 100% {
       opacity: 0.92;
       transform: scale(1);
-      filter: blur(18px);
     }
     50% {
       opacity: 1;
       transform: scale(1.06);
-      filter: blur(22px);
     }
   }
   @media (prefers-reduced-motion: reduce) {
@@ -107346,6 +107371,30 @@ function closeAlertModal(){
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', build);
   else build();
+})();
+</script>
+<script>
+/* OFF-SCREEN PAUSE -- see the .bv-offscreen rules in the CSS. Containers more than
+   200 px outside the viewport get .bv-offscreen, which pauses every CSS animation
+   inside them. Re-scans catch widgets built after boot. */
+(function(){
+  'use strict';
+  if (!('IntersectionObserver' in window) || !window.WeakSet) return;
+  var io = new IntersectionObserver(function(entries){
+    for (var i = 0; i < entries.length; i++){
+      entries[i].target.classList.toggle('bv-offscreen', !entries[i].isIntersecting);
+    }
+  }, { rootMargin: '200px 0px' });
+  var seen = new WeakSet();
+  function scan(){
+    var els = document.querySelectorAll('.widget, .weather-card');
+    for (var i = 0; i < els.length; i++){
+      if (!seen.has(els[i])){ seen.add(els[i]); io.observe(els[i]); }
+    }
+  }
+  function start(){ scan(); setTimeout(scan, 5000); setTimeout(scan, 20000); setInterval(scan, 60000); }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();
+  window._bvOffscreenScan = scan;
 })();
 </script>
 </body>
