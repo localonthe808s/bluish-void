@@ -1,0 +1,37 @@
+# Purge Cloudflare's edge cache of bluishvoid.com after GitHub Pages has published.
+#
+# Since 2026-10-09 the apex is proxied through Cloudflare with a Cache Rule that keeps
+# the HTML for 10 minutes (GitHub's own max-age=600). Without this, a push can take up
+# to 10 minutes to reach visitors. The purge must run AFTER the Pages deploy finishes,
+# otherwise the edge would just re-cache the stale copy -- hence workflow_run on
+# GitHub's internal "pages build and deployment" job rather than on push.
+#
+# Secret: CF_PURGE_TOKEN -- a Cloudflare API token with the single permission
+# Zone / Cache Purge / Purge, scoped to the bluishvoid.com zone.
+name: purge cloudflare cache
+
+on:
+  workflow_run:
+    workflows: ["pages build and deployment"]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  purge:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Purge everything on the bluishvoid.com zone
+        env:
+          CF_PURGE_TOKEN: ${{ secrets.CF_PURGE_TOKEN }}
+          CF_ZONE_ID: 700b0c254f2d56782c2b3619b1c0521d
+        run: |
+          set -eu
+          sleep 10   # let the fresh Pages build settle on GitHub's CDN before the edge refetches
+          resp=$(curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" \
+            -H "Authorization: Bearer ${CF_PURGE_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data '{"purge_everything":true}')
+          echo "$resp"
+          echo "$resp" | grep -q '"success":true'
