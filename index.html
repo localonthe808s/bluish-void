@@ -105893,11 +105893,12 @@ function closeAlertModal(){
   // thumbnail that already comes back; the hero fetches its own, once, cached.
   function heroPhoto(sid, img, thumb){
     if (!img) return;
-    // The hero <img> is loading=lazy, but at boot the half-built page puts the BIRDS
-    // widget inside Chrome's lazy margin, so the 1920 px Wikipedia photo loaded at
-    // 1.4 s on every visit (measured 2026-10-09). Set the src through the boot arm
-    // (_bvLazyArm: 4 s after boot, immediate after that) so lazy sees the settled page.
-    var setSrc = function(u){ window._bvLazyArm(function(){ img.src = u; fitPhoto(img); }); };
+    // The hero <img> is loading=lazy, yet its photo loaded at 1.2-1.4 s on every boot
+    // (measured 2026-10-09): at boot the hero sits in a hidden tab with no layout box,
+    // and Chrome loads a lazy image it cannot measure at once. So the src is held in
+    // img._bvWant and set the first time the image is actually seen (IntersectionObserver,
+    // 600 px margin -- a hidden element never intersects). Later calls just update the want.
+    var setSrc = function(u){ heroSrcWhenSeen(img, u); };
     if (thumb) setSrc(thumb);
     if (!sid) return;
     var ck = 'bvherophoto:' + sid, c = null;
@@ -105916,6 +105917,20 @@ function closeAlertModal(){
         if (o){ try{ sessionStorage.setItem(ck, JSON.stringify(o)); }catch(e){} }
         apply(o);
       }).catch(function(){});
+  }
+
+  // Set a hero photo's src only once the <img> is on screen (or within 600 px of it).
+  // A hidden tab's image never intersects, so nothing downloads for a hero nobody sees.
+  function heroSrcWhenSeen(img, url){
+    img._bvWant = url;
+    if (img._bvSeen || !('IntersectionObserver' in window)){ img.src = url; fitPhoto(img); return; }
+    if (img._bvSeenIO) return;
+    img._bvSeenIO = new IntersectionObserver(function(es){
+      if (!es.some(function(e){ return e.isIntersecting; })) return;
+      img._bvSeenIO.disconnect(); img._bvSeenIO = null; img._bvSeen = true;
+      if (img._bvWant){ img.src = img._bvWant; fitPhoto(img); }
+    }, { rootMargin: '600px 0px' });
+    img._bvSeenIO.observe(img);
   }
 
   // the big first/last-song bird opens its popup too
@@ -105988,6 +106003,11 @@ function closeAlertModal(){
         var pages = ((j.query||{}).pages) || {}, k = Object.keys(pages)[0];
         var th = k && (pages[k]||{}).thumbnail;
         if (!th || !th.source) return;
+        if (!img._bvSeen){            // not shown yet: the hi-res is simply what loads when it is
+          heroSrcWhenSeen(img, th.source);
+          if (cb) cb(th.source);
+          return;
+        }
         var hi = new Image();
         hi.onload = function(){
           img.src = th.source;
