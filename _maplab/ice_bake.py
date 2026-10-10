@@ -17,7 +17,8 @@ Action runs this and commits _maplab/ice.json.
 
 usage: ice_bake.py
 """
-import csv, datetime as dt, io, json, re, time, urllib.parse, urllib.request, zipfile
+import csv, datetime as dt, io, json, math, re, time, urllib.parse, urllib.request, zipfile
+from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -36,6 +37,88 @@ def get(url, timeout=120, tries=3):
 
 # ── SEA ICE ────────────────────────────────────────────────────────────────────────────────────
 NS = 'https://noaadata.apps.nsidc.org/NOAA/G02135/%s/daily/data/%s_seaice_extent_%s_v4.0.csv'
+
+# ── ICE EDGES FOR THE GLOBE (2026-10-09, user: "are there any visuals to add to the map for that?") ──────────
+# Three outlines in lat/lon for the SEA ICE globe: where the edge USUALLY sits on this day of year (NSIDC's 1981-2010
+# median polyline, published per day of year), the edge on the day of THIS YEAR'S low, and the edge on the record-low
+# day (both traced from the daily extent GeoTIFF: the boundary between ice cells (1) and OPEN-WATER cells (0) -- an
+# ice-to-land boundary is a coast, not an ice edge). Grid: 25 km polar stereographic (EPSG:3411 north, 3412 south),
+# origin from the GeoTIFF tags. Lines are chained from unit segments and thinned (Douglas-Peucker, 0.12 deg) to a
+# few KB each. Needs pillow, pyshp and pyproj; a missing library or a 404 leaves that edge out, nothing else fails.
+NS_BASE = 'https://noaadata.apps.nsidc.org/NOAA/G02135'
+_MON = ['', '01_Jan', '02_Feb', '03_Mar', '04_Apr', '05_May', '06_Jun', '07_Jul', '08_Aug', '09_Sep', '10_Oct', '11_Nov', '12_Dec']
+
+def _to_ll(hemi):
+    import pyproj
+    tr = pyproj.Transformer.from_crs('EPSG:3411' if hemi == 'N' else 'EPSG:3412', 'EPSG:4326', always_xy=True)
+    def f(x, y):
+        lo, la = tr.transform(x, y); return [round(la, 2), round(lo, 2)]
+    return f
+
+def _rdp(pts, tol):
+    if len(pts) < 3: return pts
+    def d(p, a, b):
+        ax, ay, bx, by, px, py = a[1], a[0], b[1], b[0], p[1], p[0]
+        dx, dy = bx - ax, by - ay; L = dx * dx + dy * dy
+        t = 0 if L == 0 else max(0, min(1, ((px - ax) * dx + (py - ay) * dy) / L))
+        return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+    imax, dmax = 0, 0
+    for i in range(1, len(pts) - 1):
+        dd = d(pts[i], pts[0], pts[-1])
+        if dd > dmax: imax, dmax = i, dd
+    if dmax > tol: return _rdp(pts[:imax + 1], tol)[:-1] + _rdp(pts[imax:], tol)
+    return [pts[0], pts[-1]]
+
+def _median_edge(hemi, doy):
+    import shapefile
+    H = 'north' if hemi == 'N' else 'south'
+    z = zipfile.ZipFile(io.BytesIO(get('%s/%s/daily/shapefiles/dayofyear_median/median_extent_%s_%03d_1981-2010_polyline_v4.0.zip' % (NS_BASE, H, hemi, doy))))
+    names = {n.rsplit('.', 1)[1]: n for n in z.namelist() if '.' in n}
+    r = shapefile.Reader(shp=io.BytesIO(z.read(names['shp'])), shx=io.BytesIO(z.read(names['shx'])), dbf=io.BytesIO(z.read(names['dbf'])))
+    f = _to_ll(hemi); parts = []
+    for sh in r.shapes():
+        idx = list(sh.parts) + [len(sh.points)]
+        for a, b in zip(idx, idx[1:]):
+            seg = [f(x, y) for x, y in sh.points[a:b]]
+            if len(seg) >= 3: parts.append(seg)
+    return {'doy': doy, 'parts': parts}
+
+def _extent_edge(hemi, day):
+    from PIL import Image
+    H = 'north' if hemi == 'N' else 'south'
+    im = Image.open(io.BytesIO(get('%s/%s/daily/geotiff/%d/%s/%s_%s_extent_v4.0.tif' % (NS_BASE, H, day.year, _MON[day.month], hemi, day.strftime('%Y%m%d')))))
+    W, Hh = im.size; px = im.load(); t = im.tag_v2; sx, sy = t[33550][0], t[33550][1]; x0, y0 = t[33922][3], t[33922][4]
+    ice = lambda x, y: 0 <= x < W and 0 <= y < Hh and px[x, y] == 1
+    water = lambda x, y: 0 <= x < W and 0 <= y < Hh and px[x, y] == 0
+    segs = []
+    for y in range(Hh):
+        for x in range(W):
+            if not ice(x, y): continue
+            if water(x + 1, y): segs.append(((x + 1, y), (x + 1, y + 1)))
+            if water(x - 1, y): segs.append(((x, y), (x, y + 1)))
+            if water(x, y + 1): segs.append(((x, y + 1), (x + 1, y + 1)))
+            if water(x, y - 1): segs.append(((x, y), (x + 1, y)))
+    adj = defaultdict(list)
+    for i, (a, b) in enumerate(segs): adj[a].append(i); adj[b].append(i)
+    used = [False] * len(segs); lines = []
+    for i in range(len(segs)):
+        if used[i]: continue
+        used[i] = True; a, b = segs[i]; line = [a, b]
+        for fwd in (True, False):
+            cur = line[-1] if fwd else line[0]
+            while True:
+                nxt = [j for j in adj[cur] if not used[j]]
+                if not nxt: break
+                j = nxt[0]; used[j] = True; p, q = segs[j]; cur = q if p == cur else p
+                if fwd: line.append(cur)
+                else: line.insert(0, cur)
+        lines.append(line)
+    f = _to_ll(hemi); out = []
+    for line in lines:
+        if len(line) < 4: continue
+        pts = _rdp([f(x0 + gx * sx, y0 - gy * sy) for gx, gy in line], 0.12)
+        if len(pts) >= 3: out.append(pts)
+    return {'date': day.isoformat(), 'parts': out}
 
 
 def sea_ice(hemi):
@@ -71,6 +154,11 @@ def sea_ice(hemi):
     this = sorted((d, val) for d, val in rows.items() if d.year == last.year)
     lo_this = min(this, key=lambda r: r[1]); hi_this = max(this, key=lambda r: r[1])
     series = lambda yr: [[d.timetuple().tm_yday, round(val, 3)] for d, val in sorted(rows.items()) if d.year == yr]
+    edges = {}
+    for k, fn in (('median', lambda: _median_edge(hemi, doy)), ('min', lambda: _extent_edge(hemi, lo_this[0])), ('record', lambda: _extent_edge(hemi, ymin[ry][1]))):
+        try: edges[k] = fn()
+        except Exception as e: print('  edge', hemi, k, 'failed', e)
+    if 'record' in edges: edges['record']['year'] = ry
     return {'date': last.isoformat(), 'extent': round(v, 3), 'doy': doy,
             'median': clim.get(doy, {}).get('p50'), 'avg': clim.get(doy, {}).get('avg'),
             'rank': rank, 'years': len(same) + 1, 'record': {'extent': round(rec[0], 3), 'year': rec[1]} if rec else None,
@@ -79,6 +167,7 @@ def sea_ice(hemi):
             'recordMinYear': {'year': ry, 'extent': round(ymin[ry][0], 3), 'date': ymin[ry][1].isoformat()},
             # EVERY YEAR'S LOW POINT AND PEAK (2026-10-09, user: "can earth systems show sea ice minimums"): [year, extent, date]
             # for each complete year; the page adds this year's from thisMin/thisMax and says whether its season is over
+            'edges': edges,
             'mins': [[y, round(ymin[y][0], 3), ymin[y][1].isoformat()] for y in sorted(ymin)],
             'maxs': [[y, round(ymax[y][0], 3), ymax[y][1].isoformat()] for y in sorted(ymax)],
             'clim': [[k, clim[k]['p10'], clim[k]['p50'], clim[k]['p90']] for k in sorted(clim)],
