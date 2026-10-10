@@ -181,6 +181,48 @@ json.dump({'what': 'the local universe out to ~230 Mpc; supergalactic xyz in Mpc
           open(os.path.join(OUT, 'laniakea.json'), 'w'), separators=(',', ':'))
 print('laniakea: %d galaxies, %d landmarks' % (len(gal), len(lm)))
 
+# ---- 4b. LANIAKEA from Cosmicflows-4: measured distances, grouped, plus a gravity flow field -----------------------
+# (2026-10-10, user: "lets improve laniakea, is there a better source?") Tully+ 2023, VizieR J/ApJ/944/94/table2:
+#   SELECT TOP 60000 PGC, "1PGC", Vcmb, DM, e_DM, SGL, SGB  -> cf4.json. 55,877 galaxies with distance moduli (TF, FP,
+# SNIa, SBF, TRGB, Cepheids, masers) and supergalactic coordinates. Galaxies sharing a group (1PGC) get one distance,
+# the inverse-variance mean of their moduli -- the group averaging Tully uses, which tames the 20% scatter of a
+# single Tully-Fisher distance. The flow field: the smoothed galaxy density in the supergalactic plane, its gradient
+# baked on a grid; the lab draws streamlines down that gradient (linear theory: matter drains toward overdensity).
+cf = jload('cf4.json'); groups = {}
+for g in cf:
+    if g['DM'] is None or g['SGL'] is None: continue
+    k = g['1PGC'] or g['PGC']; w = 1.0 / max(0.05, g['e_DM'] or 0.4) ** 2
+    G = groups.setdefault(k, {'wdm': 0.0, 'w': 0.0, 'n': 0, 'sgl': 0.0, 'sgb': 0.0, 'v': 0.0})
+    G['wdm'] += w * g['DM']; G['w'] += w; G['n'] += 1; G['sgl'] += g['SGL']; G['sgb'] += g['SGB']; G['v'] += (g['Vcmb'] or 0)
+cf_pts = []
+for k, G in groups.items():
+    dm = G['wdm'] / G['w']; d = 10 ** ((dm - 25) / 5); sgl = G['sgl'] / G['n']; sgb = G['sgb'] / G['n']
+    if d > 260: continue
+    v = unit(sgl, sgb) * d; cf_pts.append([r1(v[0]), r1(v[1]), r1(v[2]), G['n']])
+# the density field: groups within 40 Mpc of the plane, each weighted by its members and by d^2 (flux-limit correction)
+L = 140; NG = 112; grid = np.zeros((NG, NG)); cell = 2 * L / NG
+for x, y, z, n in cf_pts:
+    if abs(z) > 40 or abs(x) >= L or abs(y) >= L: continue
+    i = int((y + L) / cell); j = int((x + L) / cell); grid[i, j] += n * min(4.0, max(1.0, (math.hypot(x, y, z) / 40.0) ** 2))   # complete to ~40 Mpc, thinning beyond
+# the zone of avoidance: the Galactic plane runs along the SGX axis, so a wedge of ~10 deg either side of it is unseen;
+# fill each hidden cell with the mean of the cells at the same radius 10-22 deg away (the usual cloning treatment)
+Y, X = np.mgrid[0:NG, 0:NG]; cx = (X + .5) * cell - L; cy = (Y + .5) * cell - L; R = np.hypot(cx, cy); PHI = np.degrees(np.arctan2(cy, cx))
+offaxis = np.minimum(np.abs(PHI), np.abs(np.abs(PHI) - 180))
+hidden = offaxis < 10; donor = (offaxis >= 10) & (offaxis < 22)
+rb = np.clip((R / 8).astype(int), 0, 99)
+for b in range(100):
+    dsel = donor & (rb == b); hsel = hidden & (rb == b)
+    if dsel.any() and hsel.any(): grid[hsel] = grid[dsel].mean()
+from scipy.ndimage import gaussian_filter
+dens = gaussian_filter(grid, sigma=10.0 / cell)
+dens = dens / dens.mean() - 1.0                                     # overdensity delta
+gy, gx = np.gradient(dens)                                          # d/dy (rows), d/dx (cols), per cell
+mag = np.hypot(gx, gy); print('cf4: %d groups kept, density grid %dx%d, delta max %.1f, |grad| p99 %.3f' % (len(cf_pts), NG, NG, dens.max(), np.percentile(mag, 99)))
+json.dump({'what': 'Cosmicflows-4 groups: supergalactic xyz in Mpc from MEASURED distance moduli (inverse-variance group means), members; plus the overdensity field in the supergalactic plane (|SGZ|<40 Mpc, zone of avoidance filled from neighbouring latitudes, 10 Mpc smoothing) and its gradient on a grid spanning +-140 Mpc',
+           'groups': cf_pts, 'grid': {'L': L, 'n': NG, 'delta': [[round(float(v), 2) for v in row] for row in dens], 'gx': [[round(float(v), 3) for v in row] for row in gx], 'gy': [[round(float(v), 3) for v in row] for row in gy]},
+           'landmarks': lm, 'credit': 'Cosmicflows-4, Tully+ 2023 (55,877 galaxies with measured distances); flow: linear theory on the catalog\'s own density'},
+          open(os.path.join(OUT, 'laniakea_cf4.json'), 'w'), separators=(',', ':'))
+
 # ---- 5. COSMIC WEB: SDSS galaxies in a 2.5-degree equatorial stripe ------------------------------------------------
 rows = []
 with open(os.path.join(SRC, 'sdss.csv')) as f:

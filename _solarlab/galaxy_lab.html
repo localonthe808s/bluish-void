@@ -65,7 +65,7 @@
 <script>
 'use strict';
 var EMBEDDED = window.self !== window.top;
-var GAL_BUILD = '2026-10-10d';                      /* bump when galaxy/*.json changes, so browsers refetch */
+var GAL_BUILD = '2026-10-10e';                      /* bump when galaxy/*.json changes, so browsers refetch */
 var LY_KPC = 3261.56, MLY_MPC = 3.26156;
 var stage = document.getElementById('stage'), cv = document.getElementById('gal'), fcv = document.getElementById('fade');
 var ctx = cv.getContext('2d');
@@ -86,9 +86,9 @@ var FRAMES = {
   localgroup: { file:'localgroup.json', unit:'kpc', radius:1500, tab:'universe', title:'THE LOCAL GROUP',
     caption:'Five million light-years across: about a hundred galaxies, two of them big. Andromeda is 2.5 million light-years away and closing at 70 miles a second; nearly everything else is a dwarf bound to one of the two. The soft ring is roughly where the group’s gravity gives way to the expansion of space.',
     credit:'McConnachie 2012, the Local Group census · Andromeda’s approach: HST proper motions, van der Marel+ 2012', draw: drawLocalGroup },
-  laniakea: { file:'laniakea.json', unit:'Mpc', radius:135, tab:'universe', title:'LANIAKEA',
-    caption:'The local universe, 900 million light-years across, seen in the supergalactic plane where most nearby galaxies lie. Every dot is a galaxy with a measured redshift; the Virgo Cluster is our nearest city, and the whole region drifts toward the Great Attractor near the Norma Cluster. The two empty wedges are where our own Milky Way blocks the view.',
-    credit:'2MASS Redshift Survey, Huchra+ 2012 · distances from redshift (H₀ = 70) · Laniakea: Tully+ 2014', draw: drawLaniakea },
+  laniakea: { file:'laniakea_cf4.json', unit:'Mpc', radius:135, tab:'universe', title:'LANIAKEA',
+    caption:'The local universe, 900 million light-years across, in the supergalactic plane. Every dot is a galaxy group whose distance was actually measured, from Cosmicflows-4, the catalog the Laniakea map was built from. The faint lines show which way matter drains under the galaxies’ own gravity, and the tinted region is the part of that flow that drains toward Laniakea’s attractors. The Great Attractor itself lies behind the Milky Way, where few galaxies can be counted; Tully’s team found it from measured velocities, which this map does not have. The empty wedges are where our own Milky Way blocks the view.',
+    credit:'Cosmicflows-4, Tully+ 2023 (55,877 measured distances) · Laniakea: Tully, Courtois, Hoffman & Pomarède 2014 · flow lines: linear theory on the catalog’s own density', draw: drawLaniakea },
   universe: { file:'universe.json', unit:'Gly', radius:4.0, tab:'universe', title:'THE COSMIC WEB',
     caption:'Eight billion light-years across. Each dot is one of 50,000 galaxies whose light the Sloan telescope split into a spectrum, drawn by direction and distance in a slice 2.5 degrees thick along the celestial equator; the filaments and voids are real. The far edge is a limit of this survey, not of the universe: the oldest light we can see left 13.8 billion years ago.',
     credit:'SDSS DR18 spectroscopic galaxies · comoving distances, flat ΛCDM', draw: drawUniverse },
@@ -299,13 +299,43 @@ function drawLocalGroup(d, v){
 }
 
 /* ---- 4. LANIAKEA ---- */
+/* REBUILT 2026-10-10 (user: "lets improve laniakea, is there a better source?"): Cosmicflows-4 (Tully+ 2023), the catalog
+   the Laniakea map was made from -- galaxy groups at MEASURED distances, not redshifts. The flow field is the simplest
+   honest version of what Tully's team did: matter drains toward overdensity, so streamlines run up the gradient of the
+   smoothed galaxy density (baked). The Laniakea basin = every seed whose streamline ends at one of Laniakea's known
+   attractors (Virgo, Centaurus, Hydra, Norma / the Great Attractor, Antlia, Pavo-Indus, Fornax). Perseus-Pisces, Coma,
+   Leo and Shapley are neighbours, so their basins are not tinted. A model, drawn soft. */
+var LAN_CACHE = null;
+function laniakeaFlow(d){
+  if (LAN_CACHE) return LAN_CACHE;
+  var g = d.grid, L = g.L, n = g.n, cell = 2 * L / n;
+  var samp = function(F, x, y){ var fi = (y + L) / cell - .5, fj = (x + L) / cell - .5; var i = Math.floor(fi), j = Math.floor(fj); if (i < 0 || j < 0 || i >= n - 1 || j >= n - 1) return 0;
+    var ti = fi - i, tj = fj - j; return F[i][j] * (1 - ti) * (1 - tj) + F[i][j + 1] * (1 - ti) * tj + F[i + 1][j] * ti * (1 - tj) + F[i + 1][j + 1] * ti * tj; };
+  var members = /Virgo|Centaurus|Hydra|Great Attractor|Antlia|Pavo|Fornax/;
+  var sinks = d.landmarks.filter(function(l){ return members.test(l[0]); });
+  var lines = [], basin = [], step = 2.2;
+  for (var sy = -132; sy <= 132; sy += 6) for (var sx = -132; sx <= 132; sx += 6){
+    if (Math.hypot(sx, sy) > 128) continue;                         /* the far field is too thinly sampled to trust */
+    var x = sx, y = sy, pts = [[x, y]], k;
+    for (k = 0; k < 110; k++){ var vx = samp(g.gx, x, y), vy = samp(g.gy, x, y), m = Math.hypot(vx, vy); if (m < 0.004) break; x += vx / m * step; y += vy / m * step; if (Math.abs(x) > L || Math.abs(y) > L) break; pts.push([x, y]); }
+    var inL = sinks.some(function(l){ return Math.hypot(l[1] - x, l[2] - y) < 32; });
+    if (pts.length > 4) lines.push({pts: pts, lan: inL}); if (inL) basin.push([sx, sy]);
+  }
+  LAN_CACHE = {lines: lines, basin: basin}; return LAN_CACHE;
+}
 function drawLaniakea(d, v){
   var s = v.s;
-  /* supergalactic X right, Y up; depth fades with |SGZ| */
   var S = function(x, y){ return [v.cx + x * s, v.cy - y * s]; };
-  d.galaxies.forEach(function(g){ var z = Math.abs(g[2]); if (z > 60) return; var q = S(g[0], g[1]); ctx.globalAlpha = .18 + .6 * Math.max(0, 1 - z / 40); ctx.fillStyle = '#d6e6ff'; ctx.fillRect(q[0] - .6, q[1] - .6, 1.2, 1.2); });
+  var F = laniakeaFlow(d);
+  /* the basin, a soft tint over the seed cells that drain to Laniakea's attractors */
+  ctx.save(); F.basin.forEach(function(b){ var q = S(b[0], b[1]); var rg = ctx.createRadialGradient(q[0], q[1], 0, q[0], q[1], 9 * s); rg.addColorStop(0, C.gold + '.05)'); rg.addColorStop(1, C.gold + '0)'); ctx.fillStyle = rg; ctx.fillRect(q[0] - 9 * s, q[1] - 9 * s, 18 * s, 18 * s); }); ctx.restore();
+  /* the flow: streamlines up the density gradient, brighter inside the basin */
+  ctx.save(); ctx.lineWidth = .8; ctx.lineJoin = 'round';
+  F.lines.forEach(function(ln){ ctx.strokeStyle = ln.lan ? C.gold + '.17)' : 'rgba(188,214,239,.085)'; ctx.beginPath(); ln.pts.forEach(function(p, i){ var q = S(p[0], p[1]); if (i) ctx.lineTo(q[0], q[1]); else ctx.moveTo(q[0], q[1]); }); ctx.stroke(); });
+  ctx.restore();
+  /* the groups at their measured distances, bigger with more members, dimmer away from the plane */
+  d.groups.forEach(function(g){ var z = Math.abs(g[2]); if (z > 60) return; var q = S(g[0], g[1]); var r = Math.min(2.4, 0.55 + 0.35 * Math.sqrt(g[3])); ctx.globalAlpha = .22 + .6 * Math.max(0, 1 - z / 45); ctx.fillStyle = '#d6e6ff'; ctx.beginPath(); ctx.arc(q[0], q[1], r, 0, Math.PI*2); ctx.fill(); });
   ctx.globalAlpha = 1;
-  /* the zone of avoidance: our own disc hides two wedges along +-SGX */
   scaleRings(v, [100 / MLY_MPC, 200 / MLY_MPC, 300 / MLY_MPC, 400 / MLY_MPC], function(u){ return Math.round(u * MLY_MPC / 100) * 100 + ' MILLION|LIGHT-YEARS'; });
   here(v.cx, v.cy, 'THE LOCAL GROUP', 'MILKY WAY + ANDROMEDA, ONE DOT');
   footprint(v.cx, v.cy, 1.5 * s, 'THE LOCAL GROUP FRAME'); free(v.cx + 85, v.cy - 19, 150, 13);
@@ -314,10 +344,11 @@ function drawLaniakea(d, v){
   var BIG = /Virgo|Great Attractor|Perseus|Coma|Shapley/;
   var lms = d.landmarks.slice().sort(function(a, b){ return (BIG.test(b[0]) ? 1 : 0) - (BIG.test(a[0]) ? 1 : 0); });
   lms.forEach(function(l){ if (Math.abs(l[3]) > 90) return; var q = S(l[1], l[2]); if (Math.hypot(q[0] - v.cx, q[1] - v.cy) > 135 * s) return; var big = BIG.test(l[0]); var t = l[0].toUpperCase(), y = q[1] - (big ? 13 : 11);
+    if (/Virgo/.test(l[0])){ ring(q[0], q[1], 7, C.goldS, 1, .75); label(q[0] - 46, q[1] - 14, t, {size:9.5, color:C.goldS, weight:700, alpha:.95, ls:.12}); free(q[0] - 46, q[1] - 14, 100, 13); return; }   /* always named: it is our nearest city */
     if (!free(q[0], y, t.length * (big ? 7 : 6) + 10, 13)) { y = q[1] + (big ? 15 : 13); if (!free(q[0], y, t.length * (big ? 7 : 6) + 10, 13)) return; }
     ring(q[0], q[1], big ? 7 : 5, C.goldS, 1, .75); label(q[0], y, t, {size:big ? 9.5 : 8.5, color:C.goldS, weight:big ? 700 : 500, alpha:big ? .95 : .75, ls:.12});
-    if (/Great Attractor/.test(l[0]) && free(q[0], y + 13, 300, 13)) label(q[0], y + 13, 'LANIAKEA’S BASIN: EVERYTHING HERE DRIFTS THIS WAY', {size:8, color:C.goldS, alpha:.6, ls:.12}); });
-  label(W - 14, H - 14, 'EACH DOT ONE GALAXY · BRIGHTER = NEARER THE SUPERGALACTIC PLANE · DISTANCES FROM REDSHIFT, SO CLUSTERS SMEAR ALONG THE LINE OF SIGHT', {size:8, alpha:.5, align:'right', ls:.1});
+    if (/Great Attractor/.test(l[0]) && free(q[0], y + 13, 300, 13)) label(q[0], y + 13, 'BEHIND THE MILKY WAY · FOUND BY THE GALAXIES FALLING TOWARD IT', {size:8, color:C.goldS, alpha:.6, ls:.12}); });
+  label(W - 14, H - 14, 'DOTS: COSMICFLOWS-4 GROUPS AT MEASURED DISTANCES, BIGGER WITH MORE MEMBERS · LINES: WHERE MATTER DRAINS, A MODEL FROM THE GALAXIES’ OWN GRAVITY · TINT: THE LANIAKEA BASIN', {size:8, alpha:.5, align:'right', ls:.1});
 }
 
 /* ---- 5. THE COSMIC WEB ---- */
