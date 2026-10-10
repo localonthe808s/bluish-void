@@ -199,4 +199,51 @@ json.dump({'what': 'SDSS spectroscopic galaxies within 1.25 deg of the celestial
            'credit': 'SDSS DR18 (SkyServer), %d of %d galaxies in the stripe' % (len(rows), len(rows))},
           open(os.path.join(OUT, 'universe.json'), 'w'), separators=(',', ':'))
 print('universe: %d galaxies' % len(rows))
+# ---- 6. THE OBSERVABLE UNIVERSE: quasars to the horizon, the rim coloured by the real microwave sky ------------------
+# (2026-10-10, user: "can the unobservable universe surround the observable cosmic web?") Same equatorial slice as the
+# cosmic web, now out to redshift 7 with SDSS quasars; the last-scattering surface is sampled from NASA's WMAP 9-year
+# ILC map (public domain) along the celestial equator, one value per degree of RA, each the mean of a 5x5 patch.
+#   quasars.csv   SkyServer: SELECT ra, z FROM SpecObj WHERE class='QSO' AND zWarning=0 AND dec BETWEEN -1.25 AND 1.25
+#                 AND z BETWEEN 0.3 AND 7  (format=csv)
+#   wmap_ilc.fits https://lambda.gsfc.nasa.gov/data/map/dr5/dfp/ilc/wmap_ilc_9yr_v5.fits  (HEALPix nside 512, NESTED, mK)
+qs = []
+with open(os.path.join(SRC, 'quasars.csv')) as f:
+    for ln in f:
+        if ln.startswith('#') or ln.startswith('ra'): continue
+        ra, z = ln.strip().split(','); qs.append([round(float(ra), 2), round(float(z), 3)])
+random.seed(11); random.shuffle(qs); qs = qs[:32000]
+def ang2pix_nest(nside, theta, phi):
+    z = math.cos(theta); za = abs(z); tt = (phi % (2*math.pi)) * 2 / math.pi
+    if za <= 2/3:
+        t1 = nside * (0.5 + tt); t2 = nside * z * 0.75; jp = int(t1 - t2); jm = int(t1 + t2)
+        ifp = jp // nside; ifm = jm // nside
+        face = (ifp & 3) + 4 if ifp == ifm else ((ifp & 3) if ifp < ifm else (ifm & 3) + 8)
+        ix = jm & (nside - 1); iy = nside - (jp & (nside - 1)) - 1
+    else:
+        ntt = min(3, int(tt)); tp = tt - ntt; tmp = nside * math.sqrt(3 * (1 - za))
+        jp = min(int(tp * tmp), nside - 1); jm = min(int((1 - tp) * tmp), nside - 1)
+        if z >= 0: face = ntt; ix = nside - jm - 1; iy = nside - jp - 1
+        else: face = ntt + 8; ix = jp; iy = jm
+    ipf = 0
+    for b in range(16): ipf |= ((ix >> b) & 1) << (2*b); ipf |= ((iy >> b) & 1) << (2*b + 1)
+    return ipf + face * nside * nside
+wm = fits.open(os.path.join(SRC, 'wmap_ilc.fits'))[1]; TMAP = np.asarray(wm.data['TEMPERATURE'], float).ravel(); NSIDE = int(wm.header['NSIDE'])
+cmb = []
+for ra in range(360):
+    acc = []
+    for dra in (-0.4, -0.2, 0, 0.2, 0.4):
+        for ddec in (-0.4, -0.2, 0, 0.2, 0.4):
+            v = EQ2GAL.dot(unit(ra + dra, ddec)); l = math.atan2(v[1], v[0]) % (2*math.pi); b = math.asin(max(-1, min(1, v[2])))
+            acc.append(TMAP[ang2pix_nest(NSIDE, math.pi/2 - b, l)])
+    cmb.append(round(float(np.mean(acc)) * 1000, 1))       # microkelvin
+sm = np.array(cmb); print('cmb along the equator: std %.1f uK, median step %.1f uK (noise-like would be ~%.1f)' % (sm.std(), np.median(np.abs(np.diff(sm))), sm.std()*1.4))
+table7 = [[round(z, 2), round(dc(z, 800), 3)] for z in np.arange(0, 7.001, 0.02)]
+json.dump({'what': 'the observable universe in the same equatorial slice: SDSS quasars [RA deg, z] to z 7; the microwave background along the celestial equator (WMAP 9-yr ILC, microkelvin, one per degree of RA); horizons in billions of light-years (Planck 2018 cosmology, Davis & Lineweaver 2004)',
+           'quasars': qs, 'cmb_uK': cmb, 'comoving_gly': table7,
+           'horizons': {'hubble': 14.4, 'event': 16.0, 'last_scattering': 45.7, 'particle': 46.5},
+           'farthest': [['JADES-GS-z14-0', 14.32, 33.8], ['MoM-z14', 14.44, 33.9]],
+           'beyond': 'the whole universe is at least ~250 times wider than the observable one if finite (Vardanyan, Trotta & Silk 2011)',
+           'credit': 'SDSS DR18 quasars · WMAP 9-year ILC map (NASA / LAMBDA) · Planck 2018 · Davis & Lineweaver 2004'},
+          open(os.path.join(OUT, 'observable.json'), 'w'), separators=(',', ':'))
+print('observable: %d quasars, cmb %d samples' % (len(qs), len(cmb)))
 for n in sorted(os.listdir(OUT)): print(' ', n, os.path.getsize(os.path.join(OUT, n)), 'bytes')
