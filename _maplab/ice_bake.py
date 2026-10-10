@@ -144,14 +144,20 @@ def sea_ice(hemi):
     lower = sorted((val, y) for y, val in same.items())
     rank = 1 + sum(1 for val, y in lower if val < v)
     rec = lower[0] if lower else None
-    # each complete year's minimum: the record-low year for the season's low point
+    # each complete year's minimum and maximum, on NSIDC's own footing: FIVE-DAY TRAILING MEANS (audit 2026-10-10: the
+    # single-day values put 2012's record at 3.34 on Sep 16 where NSIDC publishes 3.39 on Sep 17, and ranked 2026 12th
+    # where NSIDC says tied 10th). A day needs all five days present.
+    sm = {}
+    for d in rows:
+        w = [rows.get(d - dt.timedelta(days=k)) for k in range(5)]
+        if all(x is not None for x in w): sm[d] = sum(w) / 5
     ymin, ymax = {}, {}
-    for d, val in rows.items():
+    for d, val in sm.items():
         if d.year < last.year and d.year > 1978 and (d.year not in ymin or val < ymin[d.year][0]): ymin[d.year] = (val, d)
         if d.year < last.year and d.year > 1978 and (d.year not in ymax or val > ymax[d.year][0]): ymax[d.year] = (val, d)
     ry = min(ymin, key=lambda y: ymin[y][0])
-    # this year so far: its lowest (N: the September minimum) and highest
-    this = sorted((d, val) for d, val in rows.items() if d.year == last.year)
+    # this year so far: its lowest (N: the September minimum) and highest, five-day means too
+    this = sorted((d, val) for d, val in sm.items() if d.year == last.year)
     lo_this = min(this, key=lambda r: r[1]); hi_this = max(this, key=lambda r: r[1])
     series = lambda yr: [[d.timetuple().tm_yday, round(val, 3)] for d, val in sorted(rows.items()) if d.year == yr]
     edges = {}
@@ -182,7 +188,12 @@ def dmi_rows(name):
     out = []
     for ln in get(DMI + name).decode('utf-8', 'replace').splitlines():
         m = re.match(r'\s*(\d{8})\s+(-?[\d.]+)(?:\s+(-?[\d.]+))?', ln)      # date, daily (Gt or melt %), running total
-        if m: out.append((m.group(1), float(m.group(2)), float(m.group(3)) if m.group(3) else None))
+        if m:
+            a, b = float(m.group(2)), (float(m.group(3)) if m.group(3) else None)
+            # DMI writes -9999 for not-yet-computed values (the new season's running total from Sep 10 on, audit 2026-10-10)
+            if a <= -9000: a = None
+            if b is not None and b <= -9000: b = None
+            out.append((m.group(1), a, b))
     return out
 
 
@@ -192,10 +203,12 @@ def greenland():
         try: r = dmi_rows('GSMB_%d.txt' % y)
         except Exception: continue
         if not r: continue
-        last = r[-1]
+        valid = [x for x in r if x[2] is not None]
+        if not valid: continue
+        last = valid[-1]                                               # the last row with a real running total
         complete = last[0][4:6] == '08' and int(last[0][6:]) >= 29      # the 2025-26 file stops at Aug 30
         seasons.append({'season': '%d-%s' % (y - 1, str(y)[2:]), 'end': last[0], 'total': last[2], 'complete': complete,
-                        'daily': [[x[0], x[2]] for x in r[::3]]})
+                        'daily': [[x[0], x[2]] for x in r[::3] if x[2] is not None]})
     melt = []
     try:
         mr = dmi_rows('GSMB_MELTA_%d.txt' % (NOW.year if NOW.month >= 8 else NOW.year - 1))     # the latest summer's melt
@@ -240,7 +253,8 @@ IMBIE_DIR = '128c5e33-5224-4197-82f0-19dcc95b80a0'
 
 def imbie():
     import base64
-    out = {'src': 'https://doi.org/10.5285/77B64C55-7166-4A06-9DEF-2E400398E452'}
+    # the dataset actually read is IMBIE's 2026 release (1970s-2023), not the 2023 IMBIE-3 paper's (audit 2026-10-10)
+    out = {'src': 'https://doi.org/10.5285/128c5e33-5224-4197-82f0-19dcc95b80a0', 'cite': 'IMBIE (2026), MASS BALANCE OF THE GREENLAND AND ANTARCTIC ICE SHEETS FROM THE 1970S TO 2023'}
     for key in ('greenland', 'antarctica', 'west_antarctica', 'east_antarctica', 'antarctic_peninsula'):
         name = 'imbie3_%s_Gt_partitioned.csv' % key
         eid = 'synth:%s:%s' % (IMBIE_DIR, base64.b64encode(('/' + name).encode()).decode())
@@ -302,6 +316,22 @@ def lakes():
     return out
 
 
+def gibs_dates():
+    """the latest day GIBS holds for the two satellite skins the ICE globes draw undated, so the page can say the date
+    (audit 2026-10-10: the snow composite was 2.5 weeks old and the SMAP map 3 days old, both captioned as today)"""
+    xml = get('https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&REQUEST=GetCapabilities&VERSION=1.3.0', timeout=180).decode('utf-8', 'replace')
+    out = {}
+    for key, layer in (('snow', 'MODIS_Terra_L3_Snow_Extent_8Day'), ('smap', 'SMAP_L3_Passive_Day_Freeze_Thaw'), ('smapNight', 'SMAP_L3_Passive_Night_Freeze_Thaw')):
+        i = xml.find('<Name>' + layer + '</Name>')
+        if i < 0: continue
+        j = xml.find('</Layer>', i); seg = xml[i:j]
+        m = re.search(r'<Dimension[^>]*name="time"[^>]*>([^<]*)</Dimension>', seg)
+        if not m: continue
+        ends = re.findall(r'(\d{4}-\d{2}-\d{2})(?=/P)', m.group(1)) or re.findall(r'\d{4}-\d{2}-\d{2}', m.group(1))
+        if ends: out[key] = max(ends)
+    return out
+
+
 def main():
     prev = {}
     try: prev = json.loads(OUT.read_text())
@@ -310,7 +340,7 @@ def main():
            'sheets': {'greenland': -264, 'antarctica': -135, 'period': '2002-2025',
                       'src': 'https://science.nasa.gov/earth/explore/earth-indicators/ice-sheets/'}}
     for key, fn in (('arctic', lambda: sea_ice('N')), ('antarctic', lambda: sea_ice('S')), ('greenland', greenland), ('glaciers', glaciers),
-                    ('imbie', imbie), ('snow', snow), ('lakes', lakes)):
+                    ('imbie', imbie), ('snow', snow), ('lakes', lakes), ('gibs', gibs_dates)):
         try: out[key] = fn(); print('ok', key)
         except Exception as e:
             print('FAILED', key, e)
