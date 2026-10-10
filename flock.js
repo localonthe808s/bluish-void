@@ -837,14 +837,21 @@
       if (HK2.flap > 0){ HK2.fph += dt * 4.5; HK2.flap -= dt; } else if (R() < dt * 0.06) HK2.flap = 1.2 + R();
       if (t > HK2.next){ HK2.away = true; var d = HK2.x < W / 2 ? -1 : 1; HK2.vx = d * 55 * S; HK2.vy = -6 * S; HK2.next = t + 18 + R() * 10; }
     }
-    /* ---- gulls: a few, loafing on their own slow sines ---- */
-    var GULL = []; for (var g = 0; g < 4; g++) GULL.push({ ox: R(), oy: R(), f1: 0.05 + R() * 0.05, f2: 0.04 + R() * 0.05, p1: R() * 6.28, p2: R() * 6.28, fph: R() * 6.28, fl: R() < 0.5 ? 1 : 0, ft: R() * 5, x: 0, y: 0, vx: 1, vy: 0 });
-    function gullStep(dt){ var top = o.band[0] * H, low = o.floor * H;
-      GULL.forEach(function(q){ var nx = W * (0.12 + 0.76 * (0.5 + 0.5 * Math.sin(t * q.f1 + q.p1 + q.ox * 6))), ny = top + (low - top) * (0.25 + 0.45 * (0.5 + 0.5 * Math.sin(t * q.f2 + q.p2 + q.oy * 6)));
+    /* ---- gulls: not a flock (user 2026-10-10: "remove the flock of seagulls and just let them scatter and float in
+       the wind") -- three birds scattered far apart, each hanging on the sea breeze: facing into it, wings held out,
+       rocking a little, drifting slowly along, a beat or two now and then ---- */
+    var GULL = []; for (var g = 0; g < 3; g++) GULL.push({ ax: (0.15 + 0.7 * R()), ay: (0.2 + 0.5 * R()), dx: (R() - 0.5) * 6, dy: (R() - 0.5) * 3, sw: 2.6 + R() * 2, p1: R() * 6.28, p2: R() * 6.28, roll: 0, fph: 0, flap: 0, x: 0, y: 0, hd: -1, on: false });
+    function gullStep(dt){ var top = o.band[0] * H, low = o.floor * H, wind = (o.wind || 0);
+      GULL.forEach(function(q){
+        q.ax += q.dx * S * dt / W; q.ay += q.dy * S * dt / H;                                  /* a slow drift along */
+        if (q.ax < 0.08 || q.ax > 0.92) q.dx = -q.dx; if (q.ay < 0.12 || q.ay > 0.78) q.dy = -q.dy;
+        var nx = W * q.ax + Math.sin(t / q.sw * 6.28 + q.p1) * 9 * S, ny = top + (low - top) * q.ay + Math.sin(t / (q.sw * 1.7) * 6.28 + q.p2) * 6 * S;   /* hanging: a small rock and lift */
         var mp = moonPush(nx, ny, 40 * S); nx += mp[0]; ny += mp[1];
         if (!q.on){ q.on = true; q.x = nx; q.y = ny; }
-        q.vx = (nx - q.x) / Math.max(dt, 0.016); q.vy = (ny - q.y) / Math.max(dt, 0.016); q.x = nx; q.y = ny;
-        if (t > q.ft){ q.fl = q.fl ? 0 : 1; q.ft = t + (q.fl ? 1.5 + R() * 1.5 : 2.5 + R() * 3); } if (q.fl) q.fph += dt * 6; }); }
+        q.x += (nx - q.x) * Math.min(1, dt * 3); q.y += (ny - q.y) * Math.min(1, dt * 3);
+        q.hd = wind > 2 ? 1 : -1;                                                            /* into the breeze: from the west unless the air says otherwise */
+        q.roll = Math.sin(t / q.sw * 6.28 + q.p1) * 0.35;
+        if (q.flap > 0){ q.fph += dt * 5.5; q.flap -= dt; } else if (R() < dt * 0.05) q.flap = 0.8 + R() * 0.8; }); }
     /* ---- drawing ---- */
     function wing(sd, span, sweep, lean, tipL, hand, col){ var fs = 1 - 0.5 * lean, tipx = -2.6 - 1.8 * (1 - span) - sweep, tipy = sd * (1.2 + tipL * span) * fs;
       ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(1.6, sd * 0.8);
@@ -868,9 +875,9 @@
       ctx.fillStyle = 'rgb(206,196,176)'; ctx.beginPath(); ctx.moveTo(3.4, 0); ctx.quadraticCurveTo(3.1, -0.85, 1.8, -0.9); ctx.quadraticCurveTo(-1, -0.95, -2.4, -0.5); ctx.lineTo(-2.4, 0.5); ctx.quadraticCurveTo(-1, 0.95, 1.8, 0.9); ctx.quadraticCurveTo(3.1, 0.85, 3.4, 0); ctx.fill();
       ctx.fillStyle = 'rgb(92,70,52)'; ctx.beginPath(); ctx.ellipse(2.8, 0, 0.95, 0.75, 0, 0, 6.2832); ctx.fill();
       ctx.restore(); }
-    function drawGull(q){ var k = 0.9 * S + 0.3, fl = q.fl ? 0.7 + 0.3 * Math.abs(Math.sin(q.fph)) : 1;
-      ctx.save(); ctx.translate(q.x, q.y); ctx.rotate(Math.atan2(q.vy, q.vx)); ctx.scale(k, k);
-      [-1, 1].forEach(function(sd){ wing(sd, fl, 0, 0, 8.2, false, 'rgb(150,154,160)'); ctx.fillStyle = 'rgb(40,40,46)'; ctx.beginPath(); ctx.moveTo(-2.4 - 1.6 * (1 - fl), sd * (1.2 + 8.2 * fl)); ctx.lineTo(-1.6, sd * (1.2 + 6.4 * fl)); ctx.lineTo(-2.9, sd * (1.0 + 6.0 * fl)); ctx.closePath(); ctx.fill(); });
+    function drawGull(q){ var k = 0.9 * S + 0.3, fl = q.flap > 0 ? 0.7 + 0.3 * Math.abs(Math.sin(q.fph)) : 1;
+      ctx.save(); ctx.translate(q.x, q.y); ctx.rotate(q.hd < 0 ? Math.PI + q.roll * 0.25 : q.roll * 0.25); ctx.scale(k, k);
+      [-1, 1].forEach(function(sd){ var lean = Math.max(0, sd * q.roll); wing(sd, fl, 0, lean, 8.2, false, 'rgb(150,154,160)'); ctx.fillStyle = 'rgb(40,40,46)'; ctx.beginPath(); ctx.moveTo(-2.4 - 1.6 * (1 - fl), sd * (1.2 + 8.2 * fl)); ctx.lineTo(-1.6, sd * (1.2 + 6.4 * fl)); ctx.lineTo(-2.9, sd * (1.0 + 6.0 * fl)); ctx.closePath(); ctx.fill(); });
       ctx.fillStyle = 'rgb(236,238,240)'; ctx.beginPath(); ctx.ellipse(0.4, 0, 3.0, 0.8, 0, 0, 6.2832); ctx.fill(); ctx.restore(); }
     function draw(){ ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H); if (isNight) return;
       ctx.globalAlpha = dusk; GULL.forEach(function(q){ if (q.on) drawGull(q); }); drawHawk2();
@@ -891,7 +898,7 @@
     applySun(o.sun); for (var w0 = 0; w0 < 90; w0++) step(1 / 60);   /* a short warm-up so the hawk is already turning */
     kick();
     return {
-      set: function(p){ if (!p) return; var rs = false; if (p.W && p.H && (p.W !== W || p.H !== H)){ rs = true; } ['floor', 'moon', 'band', 'size'].forEach(function(k){ if (p[k] !== undefined) o[k] = p[k]; }); if (rs){ dims(p.W, p.H); hawkHome(); } if (p.sun) applySun(p.sun); kick(); },
+      set: function(p){ if (!p) return; var rs = false; if (p.W && p.H && (p.W !== W || p.H !== H)){ rs = true; } ['floor', 'moon', 'band', 'size', 'wind'].forEach(function(k){ if (p[k] !== undefined) o[k] = p[k]; }); if (rs){ dims(p.W, p.H); hawkHome(); } if (p.sun) applySun(p.sun); kick(); },
       stats: function(){ return { fps: st.fps, sim: st.sim, draw: st.draw, frames: st.frames, steps: st.steps, kind: 'coast' }; },
       form: function(){ return { kind: 'coast', pass: LEAD.on, pelicans: PEL.filter(function(p){ return p.on; }).length, hawk: !HK2.away, next: Math.max(0, LEAD.next - t) }; },
       destroy: function(){ alive = false; if (raf) cancelAnimationFrame(raf); if (io) io.disconnect(); document.removeEventListener('visibilitychange', onVis); try { ctx.clearRect(0, 0, cv.width, cv.height); } catch(e){} }
