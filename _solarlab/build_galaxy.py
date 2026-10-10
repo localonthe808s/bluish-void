@@ -156,8 +156,26 @@ for g in jload('localgroup.json'):
     if nm in ('The Galaxy', 'Canis Major'): continue
     x, y, z = eq_to_gal_xyz(g['RAJ2000'], g['DEJ2000'], g['D'])
     lg.append([nm, r1(x), r1(y), r1(z), g['VMag'] if g['VMag'] is not None else -6, (g['MType'] or '').strip(), sub])
-json.dump({'what': 'the Local Group; heliocentric Galactic xyz in kpc (the Sun sits 8 kpc from the Milky Way centre, invisible at this scale)',
-           'galaxies': lg, 'credit': 'McConnachie 2012, The Observed Properties of Dwarf Galaxies in and around the Local Group'},
+# the discs of the big ones, as seen from above the Galactic plane: each galaxy's sky orientation (position angle east
+# of north, inclination) gives its disc normal; the disc is a circle of radius R around the centre, rotated into
+# Galactic xyz and projected on xy. (2026-10-10, user: "the local group feels very minimal still")
+#   M31: PA 38, i 77, R 34 kpc (~220,000 ly across) -- de Vaucouleurs; M33: PA 23, i 56, R 9; LMC: PA 170, i 35, R 4.5;
+#   SMC: PA 45, i 65, R 2.5. Milky Way: in the plane, R 15, centred 8.15 kpc toward l=0.
+def disc(name, ra, dec, d, pa, inc, R, n=48):
+    r = unit(ra, dec); north = np.array([-math.sin(math.radians(dec))*math.cos(math.radians(ra)), -math.sin(math.radians(dec))*math.sin(math.radians(ra)), math.cos(math.radians(dec))])
+    east = np.cross(np.array([0, 0, 1.0]), r); east /= np.linalg.norm(east)
+    major = math.cos(math.radians(pa)) * north + math.sin(math.radians(pa)) * east
+    minor = np.cross(r, major); N = math.cos(math.radians(inc)) * r + math.sin(math.radians(inc)) * minor
+    a = major; b = np.cross(N, a); c = r * d
+    pts = []
+    for k in range(n):
+        th = 2 * math.pi * k / n; v = EQ2GAL.dot(c + R * (math.cos(th) * a + math.sin(th) * b)); pts.append([r1(v[0]), r1(v[1])])
+    cg = EQ2GAL.dot(c); return {'name': name, 'cx': r1(cg[0]), 'cy': r1(cg[1]), 'R': R, 'pts': pts}
+discs = [disc('Andromeda', 10.6847, 41.2690, 783, 38, 77, 34), disc('Triangulum', 23.4621, 30.6602, 809, 23, 56, 9),
+         disc('LMC', 80.8937, -69.7561, 51, 170, 35, 4.5), disc('SMC', 13.1867, -72.8286, 64, 45, 65, 2.5),
+         {'name': 'Milky Way', 'cx': R0, 'cy': 0.0, 'R': 15, 'pts': [[r1(R0 + 15 * math.cos(2*math.pi*k/48)), r1(15 * math.sin(2*math.pi*k/48))] for k in range(48)]}]
+json.dump({'what': 'the Local Group; heliocentric Galactic xyz in kpc (the Sun sits 8 kpc from the Milky Way centre, invisible at this scale); discs = the big galaxies projected on the Galactic plane from their sky orientation',
+           'galaxies': lg, 'discs': discs, 'credit': 'McConnachie 2012, The Observed Properties of Dwarf Galaxies in and around the Local Group'},
           open(os.path.join(OUT, 'localgroup.json'), 'w'), separators=(',', ':'))
 print('local group: %d galaxies' % len(lg))
 
