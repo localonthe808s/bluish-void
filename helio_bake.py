@@ -162,8 +162,10 @@ print('flows CR', cr, 'speeds p99 %.1f m/s' % np.percentile(np.hypot(gx, gy), 99
 # has none. The page reads meta.gong and shows HMI's far side (farside.png above) instead when ok is false.
 try:
     G = 'https://farside.nso.edu/oQR/f6r/'
-    # through the site's proxy worker: farside.nso.edu never answers GitHub's runners (every fetch timed out on the first
-    # run), while Cloudflare's network reaches it in a quarter of a second; direct is the fallback for a local run
+    # farside.nso.edu answers home connections in a quarter of a second and drops every datacenter: GitHub's runners,
+    # Cloudflare's network (the proxy worker gets 522), allorigins, codetabs (all tried 2026-10-10). So from Actions this
+    # check FAILS and meta.gong is simply absent -- the page then behaves as before. Kept for a local run, or a
+    # future vantage that NSO does not block; the proxy route is tried first in case that ever changes.
     import urllib.parse
     def getg(u):
         try: return get('https://proxy.bluishvoid.com/?url=' + urllib.parse.quote(u, safe=''), tries=2)

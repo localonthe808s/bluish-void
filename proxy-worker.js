@@ -58,9 +58,12 @@ const CACHE_RULES = {
   'thredds.ucar.edu':             1800,
   'api.rss2json.com':             600,
   'kauai.ccmc.gsfc.nasa.gov':     300,
-  // NSO's GONG far-side maps, read by helio_bake.py through here because GitHub's runners cannot reach farside.nso.edu
-  // at all (every fetch timed out, 2026-10-10); a map changes twice a day
+  // NSO's GONG far-side server (one box behind three names). DEAD ENTRIES, kept as the record: it drops every
+  // datacenter connection -- GitHub's runners, Cloudflare (522 from here), allorigins, codetabs -- and answers
+  // only home connections (2026-10-10), so the helio bake's placeholder check cannot run from anywhere we have.
   'farside.nso.edu':              1800,
+  'gong2.nso.edu':                1800,
+  'gong.nso.edu':                 1800,
   'api.nasa.gov':                 300,
   'ssd-api.jpl.nasa.gov':         1800,
   // ── ISS live position (fast-moving; short TTL) ──
