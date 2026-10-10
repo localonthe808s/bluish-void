@@ -155,6 +155,30 @@ with open(os.path.join(OUT, 'flows.json'), 'w') as f:
                'vx': [round(v, 1) for v in gx.ravel().tolist()], 'vy': [round(v, 1) for v in gy.ravel().tolist()]}, f, separators=(',', ':'))
 print('flows CR', cr, 'speeds p99 %.1f m/s' % np.percentile(np.hypot(gx, gy), 99))
 
+# ---- 4. GONG'S FAR-SIDE MAP: is today's a map at all? ------------------------------------------------------------
+# (2026-10-10, user screenshot: the imager's FAR-SIDE tab showed NSO's "INSUFFICIENT DATA TO PRODUCE FARSIDE MAPS"
+# placeholder.) GONG needs a good day of data for a map; when it is short, NSO publishes that red-on-black picture
+# under the normal filename. The newest file is fetched and measured: the placeholder is ~2.8% pure red, a real map
+# has none. The page reads meta.gong and shows HMI's far side (farside.png above) instead when ok is false.
+try:
+    G = 'https://farside.nso.edu/oQR/f6r/'
+    def gong_newest():
+        for back in (0, 1):                                            # this month, then last month at a month's start
+            ym = time.strftime('%Y%m', time.gmtime(time.time() - back * 28 * 86400))
+            html = get(G + ym + '/')[0].decode('utf8', 'ignore'); days = sorted(set(re.findall(r'mrf6r(\d{6})/', html)))
+            for d in reversed(days):
+                h2 = get(G + ym + '/mrf6r' + d + '/')[0].decode('utf8', 'ignore'); files = sorted(set(re.findall(r'(mrf6r\d{6}t\d{4}\.jpg)', h2)))
+                if files: return G + ym + '/mrf6r' + d + '/' + files[-1]
+        return None
+    gu = gong_newest(); gi = Image.open(io.BytesIO(get(gu)[0])).convert('RGB'); ga = np.asarray(gi).astype(int)
+    red = float(((ga[..., 0] > 150) & (ga[..., 1] < 90) & (ga[..., 2] < 90)).mean())
+    gm = re.search(r'mrf6r(\d\d)(\d\d)(\d\d)t(\d\d)(\d\d)', gu)
+    meta['gong'] = {'newest': gu, 'time': '20%s-%s-%sT%s:%s:00Z' % gm.groups(), 'ok': red < 0.005, 'red': round(red, 4),
+                    'what': 'NSO GONG far-side map; ok=false means NSO published its INSUFFICIENT DATA placeholder'}
+    print('gong', gu, 'red share %.4f' % red, 'ok' if red < 0.005 else 'PLACEHOLDER')
+except Exception as e:
+    print('gong check failed', e)
+
 with open(os.path.join(OUT, 'meta.json'), 'w') as f: json.dump(meta, f, indent=1)
 for n in ['strip.jpg', 'farside.png', 'flows.json', 'meta.json']:
     print(n, os.path.getsize(os.path.join(OUT, n)), 'bytes')
