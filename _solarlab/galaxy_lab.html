@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GALAXY · UNIVERSE — our place at larger scales</title>
+<!--
+  THE GALAXY / UNIVERSE LAB (2026-10-10, user: "create tabs for the galaxy and universe ... show our place in larger
+  scales"). The third and fourth rungs after EARTH VIEW and SOLAR SYSTEM: five frames, each drawn from a catalog
+  (build_galaxy.py -> galaxy/*.json), never from a painting, with the same stage, font and palette as solar_lab.html.
+
+    NEIGHBORHOOD  1,000 light-years: HYG stars with distances, Gaia DR3 clusters, the Local Bubble shell, the Radcliffe Wave
+    MILKY WAY     the disc face-on: 7,167 Gaia clusters, 199 maser parallaxes, spiral arms fitted to the masers, the Sun's orbit
+    LOCAL GROUP   100 galaxies within ~5 million light-years (McConnachie 2012)
+    LANIAKEA      39,700 galaxies with redshift distances in the supergalactic plane (2MASS Redshift Survey)
+    COSMIC WEB    50,000 SDSS galaxies in a thin equatorial stripe, the classic fan
+
+  Conventions: the Galactic Centre is UP in the first two frames and the Sun's rotation runs to the left (looking down
+  from the north Galactic pole); every frame marks where we are in gold, shows the previous frame's footprint as a
+  faint ring, and labels its scale rings in light-years. Measured points are crisp; modelled shapes (the bar, the arm
+  curves beyond their masers, the Local Group's edge) are soft or fade -- edges encode certainty.
+  Embedded, the host owns the tab bar: {solarTab:'galaxy'|'universe'} picks a frame, and crossing between the two
+  groups on the ladder posts {solarTabChanged} back so the bar follows.
+-->
+<style>
+  @font-face{ font-family:"QelliaRegular"; src:url('https://cdn.bluishvoid.com/qellia.woff2?v=1') format('woff2'); font-display:swap; }
+  :root{ --ink:#2B22F4; --ink-dim:rgba(43,34,244,.55); }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  html,body{height:100%;}
+  body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:transparent; color:var(--ink);
+        overflow:hidden; display:flex; flex-direction:column; height:100vh; }
+  #stage{ position:relative; flex:1; min-height:0; order:1; overflow:hidden; background:#0a1122; }
+  #stage canvas{ position:absolute; left:0; top:0; width:100%; height:100%; display:block; }
+  #fade{ pointer-events:none; opacity:0; transition:opacity .45s ease; }
+  /* ---- HUD under the map: the ladder of frames (styled like the solar lab's zoom rungs) and the caption ---- */
+  #hud{ order:2; display:flex; flex-direction:column; gap:4px; padding:8px 12px 10px; }
+  #ladder{ display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:2px 4px; }
+  #ladder button{ border:none; background:transparent; padding:3px 10px; font-size:.62rem; line-height:1.15; border-radius:999px;
+                  color:#2B22F4; font-weight:800; letter-spacing:.05em; opacity:.45; transition:opacity .15s; cursor:pointer; font-family:inherit; }
+  #ladder button:hover{ opacity:.8; } #ladder button.active{ opacity:1; }
+  #ladder .sep{ width:1px; height:12px; background:rgba(43,34,244,.25); margin:0 6px; }
+  #caption{ text-align:center; font-size:.62rem; line-height:1.45; color:var(--ink-dim); font-weight:600; letter-spacing:.02em; max-width:900px; margin:0 auto; }
+  #credit{ text-align:center; font-size:.52rem; letter-spacing:.1em; text-transform:uppercase; color:rgba(43,34,244,.45); font-weight:800; }
+  #credit a{ color:inherit; text-decoration:none; }
+  /* embedded on desktop the host pins the map height and sizes the frame to our content, as the other labs do */
+  html.fixed-map body{ height:auto; min-height:0; } html.fixed-map #stage{ flex:none; }
+  @media (max-width:640px){ #ladder button{ font-size:.56rem; padding:3px 7px; } #caption{ font-size:.58rem; } }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="gal"></canvas><canvas id="fade"></canvas></div>
+<div id="hud">
+  <div id="ladder">
+    <button data-f="neighborhood" data-tab="galaxy">NEIGHBORHOOD</button>
+    <button data-f="milkyway" data-tab="galaxy" class="active">MILKY WAY</button>
+    <span class="sep"></span>
+    <button data-f="localgroup" data-tab="universe">LOCAL GROUP</button>
+    <button data-f="laniakea" data-tab="universe">LANIAKEA</button>
+    <button data-f="universe" data-tab="universe">COSMIC WEB</button>
+  </div>
+  <div id="caption"></div>
+  <div id="credit"></div>
+</div>
+<script>
+'use strict';
+var EMBEDDED = window.self !== window.top;
+var LY_KPC = 3261.56, MLY_MPC = 3.26156;
+var stage = document.getElementById('stage'), cv = document.getElementById('gal'), fcv = document.getElementById('fade');
+var ctx = cv.getContext('2d');
+var DATA = {}, cur = 'milkyway', W = 0, H = 0, DPR = 1;
+var FONT = '"QelliaRegular","Bodoni Moda",Georgia,serif';
+/* palette: the navy stage, pale blue-white for the universe, gold for us */
+var C = { bg:'#0a1122', star:'#e6eefc', faint:'rgba(188,214,239,', blue:'rgba(120,180,255,', gold:'rgba(255,210,127,', white:'rgba(230,240,255,',
+          label:'#bcd6ef', title:'#e2eeff', goldS:'#ffd27f' };
+
+/* ---- the frames: what each draws, in its own units; every frame gets (ctx, view) with view = {s px/unit, cx, cy} ---- */
+var FRAMES = {
+  neighborhood: { file:'neighborhood.json', unit:'ly', radius:1000, tab:'galaxy', title:'THE NEIGHBORHOOD',
+    caption:'A thousand light-years across. Every naked-eye star with a measured distance, drawn where it really sits in the Galactic plane; the clusters are Gaia’s; the Local Bubble is the hot, nearly empty cavity the Sun has been crossing for a few million years, and the Radcliffe Wave is the 9,000-light-year ribbon of star-forming gas just outside it. The Galactic Centre is up.',
+    credit:'HYG v4.1 · Gaia DR3 clusters, Hunt & Reffert 2023 · Local Bubble, Pelgrims+ 2020 · Radcliffe Wave, Alves+ 2020', draw: drawNeighborhood },
+  milkyway: { file:'milkyway.json', unit:'kpc', radius:16.5, tab:'galaxy', title:'THE MILKY WAY',
+    caption:'The disc face-on, 100,000 light-years across. The dots are 7,167 star clusters with Gaia distances and 199 masers whose parallaxes were measured with radio telescopes; the spiral arms are curves fitted here to those masers and drawn only where masers trace them. The Sun sits 26,000 light-years out, between the Sagittarius and Perseus arms, and circles the centre once every 230 million years.',
+    credit:'maser parallaxes, Reid+ 2019 (BeSSeL / VERA) · clusters, Hunt & Reffert 2023 · bar: Wegg+ 2015 (model)', draw: drawMilkyWay },
+  localgroup: { file:'localgroup.json', unit:'kpc', radius:1500, tab:'universe', title:'THE LOCAL GROUP',
+    caption:'Five million light-years across: about a hundred galaxies, two of them big. Andromeda is 2.5 million light-years away and closing at 70 miles a second; nearly everything else is a dwarf bound to one of the two. The soft ring is roughly where the group’s gravity gives way to the expansion of space.',
+    credit:'McConnachie 2012, the Local Group census · Andromeda’s approach: HST proper motions, van der Marel+ 2012', draw: drawLocalGroup },
+  laniakea: { file:'laniakea.json', unit:'Mpc', radius:135, tab:'universe', title:'LANIAKEA',
+    caption:'The local universe, 900 million light-years across, seen in the supergalactic plane where most nearby galaxies lie. Every dot is a galaxy with a measured redshift; the Virgo Cluster is our nearest city, and the whole region drifts toward the Great Attractor near the Norma Cluster. The two empty wedges are where our own Milky Way blocks the view.',
+    credit:'2MASS Redshift Survey, Huchra+ 2012 · distances from redshift (H₀ = 70) · Laniakea: Tully+ 2014', draw: drawLaniakea },
+  universe: { file:'universe.json', unit:'Gly', radius:4.0, tab:'universe', title:'THE COSMIC WEB',
+    caption:'Eight billion light-years across. Each dot is one of 50,000 galaxies whose light the Sloan telescope split into a spectrum, drawn by direction and distance in a slice 2.5 degrees thick along the celestial equator; the filaments and voids are real. The far edge is a limit of this survey, not of the universe: the oldest light we can see left 13.8 billion years ago.',
+    credit:'SDSS DR18 spectroscopic galaxies · comoving distances, flat ΛCDM', draw: drawUniverse }
+};
+
+/* ---- plumbing ---- */
+function resize(){
+  var r = stage.getBoundingClientRect(); DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = Math.max(1, Math.round(r.width)); H = Math.max(1, Math.round(r.height));
+  [cv, fcv].forEach(function(c){ c.width = Math.round(W * DPR); c.height = Math.round(H * DPR); });
+  render();
+}
+function load(f){
+  if (DATA[f]) return Promise.resolve(DATA[f]);
+  return fetch('galaxy/' + FRAMES[f].file).then(function(r){ return r.json(); }).then(function(j){ DATA[f] = j; return j; });
+}
+function show(f, viaHost){
+  if (!FRAMES[f]) return;
+  var prev = cur; cur = f;
+  document.querySelectorAll('#ladder button').forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-f') === f); });
+  document.getElementById('caption').textContent = FRAMES[f].caption;
+  document.getElementById('credit').textContent = FRAMES[f].credit;
+  if (EMBEDDED && !viaHost && FRAMES[prev].tab !== FRAMES[f].tab){ try{ parent.postMessage({solarTabChanged: FRAMES[f].tab}, '*'); }catch(_){} }
+  /* cross-fade: the old picture is copied onto the fade canvas and dissolved over the new one */
+  if (prev !== f && W){ var fc = fcv.getContext('2d'); fc.clearRect(0, 0, fcv.width, fcv.height); fc.drawImage(cv, 0, 0); fcv.style.transition = 'none'; fcv.style.opacity = 1;
+    requestAnimationFrame(function(){ fcv.style.transition = ''; fcv.style.opacity = 0; }); }
+  load(f).then(function(){ if (cur === f) render(); });
+}
+document.querySelectorAll('#ladder button').forEach(function(b){ b.addEventListener('click', function(){ show(b.getAttribute('data-f')); }); });
+window.addEventListener('resize', resize);
+window.addEventListener('message', function(e){
+  if (!e.data) return;
+  if (e.data.solarTab === 'galaxy') show(FRAMES[cur].tab === 'galaxy' ? cur : 'milkyway', true);
+  if (e.data.solarTab === 'universe') show(FRAMES[cur].tab === 'universe' ? cur : 'universe', true);
+  if (e.data.galaxyFrame && FRAMES[e.data.galaxyFrame]) show(e.data.galaxyFrame, true);
+  if (typeof e.data.spaceMapH === 'number'){ var h = e.data.spaceMapH | 0; document.documentElement.classList.toggle('fixed-map', h > 0); stage.style.height = h > 0 ? h + 'px' : ''; resize();
+    try{ parent.postMessage({spaceHeight: document.body.scrollHeight}, '*'); }catch(_){} }
+});
+var q = location.search.match(/[?&]frame=([a-z]+)/); if (q && FRAMES[q[1]]) cur = q[1];
+
+/* ---- drawing helpers ---- */
+function view(frame, pad){ var R = FRAMES[frame].radius, s = Math.min(W, H) * (0.5 - (pad || 0.06)) / R; return { s:s, cx:W/2, cy:H/2 }; }
+function label(x, y, text, o){
+  o = o || {}; var size = (o.size || 11), ls = o.ls === undefined ? 0.16 : o.ls;
+  ctx.save(); ctx.font = (o.weight || 500) + ' ' + size + 'px ' + FONT; ctx.fillStyle = o.color || C.label; ctx.globalAlpha = o.alpha === undefined ? .85 : o.alpha;
+  ctx.textAlign = o.align || 'center'; ctx.textBaseline = o.base || 'middle';
+  if ('letterSpacing' in ctx) ctx.letterSpacing = (size * ls) + 'px';
+  if (o.shadow !== false){ ctx.shadowColor = 'rgba(10,17,34,.95)'; ctx.shadowBlur = 4; }
+  ctx.fillText(text, x, y); ctx.restore();
+}
+function ring(cx, cy, r, color, width, alpha){ ctx.save(); ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.lineWidth = width; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.stroke(); ctx.restore(); }
+function dot(x, y, r, color, alpha){ ctx.save(); ctx.globalAlpha = alpha === undefined ? 1 : alpha; ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill(); ctx.restore(); }
+function glow(x, y, r, color, a0){ var g = ctx.createRadialGradient(x, y, 0, x, y, r); g.addColorStop(0, color + a0 + ')'); g.addColorStop(.4, color + (a0 * .35) + ')'); g.addColorStop(1, color + '0)'); ctx.fillStyle = g; ctx.fillRect(x - r, y - r, 2*r, 2*r); }
+var PLACED = [];
+function free(x, y, w, h){ w = w || 70; h = h || 13; if (PLACED.some(function(p){ return Math.abs(p[0] - x) < (w + p[2]) / 2 && Math.abs(p[1] - y) < (h + p[3]) / 2; })) return false; PLACED.push([x, y, w, h]); return true; }
+function scaleRings(v, steps, fmt, ang){ var a = (ang === undefined ? 45 : ang) * Math.PI/180; steps.forEach(function(u){ var r = u * v.s; ring(v.cx, v.cy, r, '#bcd6ef', 1, .13);
+  var x = v.cx + r * Math.cos(a), y = v.cy - r * Math.sin(a), txt = fmt(u); if (ang === 90){ label(x, y - 7, txt, {size:9.5, alpha:.5, ls:.14}); free(x, y - 7, txt.length * 6.5, 13); } else { label(x + 6, y - 6, txt, {size:9.5, alpha:.5, align:'left', ls:.14}); free(x + 6 + txt.length * 3.2, y - 6, txt.length * 6.5, 13); } }); }
+function here(x, y, text, sub){ glow(x, y, 26, C.gold, .35); dot(x, y, 3.2, C.goldS); ring(x, y, 8, C.goldS, 1, .7); label(x, y + 20, text, {color:C.goldS, size:10.5, weight:700, alpha:.95}); free(x, y + 20, 110, 14); if (sub){ label(x, y + 33, sub, {color:C.goldS, size:8.5, alpha:.7, ls:.12}); free(x, y + 33, sub.length * 6, 13); } }
+function footprint(x, y, r, text){ ring(x, y, r, C.goldS, 1, .35); var o = Math.max(r * .7071, 14); if (text) label(x + o + 5, y - o - 5, text, {color:C.goldS, size:8.5, alpha:.55, align:'left', ls:.12}); }
+function titleCard(f){ label(W/2, 24, FRAMES[f].title, {color:C.title, size:16, weight:500, alpha:.95, ls:.2}); }
+function starColor(ci){ /* B-V -> a warm/cool tint */ var t = Math.max(-0.3, Math.min(1.8, ci)); if (t < 0.3) return 'rgb(190,210,255)'; if (t < 0.7) return 'rgb(236,242,255)'; if (t < 1.1) return 'rgb(255,232,190)'; return 'rgb(255,200,150)'; }
+/* heliocentric Galactic xy (x to the centre, y along l=90) -> screen: centre UP, l=90 to the LEFT (seen from the north pole) */
+function gxy(v, x, y, s){ s = s || v.s; return [v.cx - y * s, v.cy - x * s]; }
+function clear(){ ctx.setTransform(DPR, 0, 0, DPR, 0, 0); ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H); }
+function render(){ if (!W) return; clear(); PLACED = []; var d = DATA[cur]; if (!d){ label(W/2, H/2, 'LOADING', {size:11, alpha:.5}); return; } FRAMES[cur].draw(d, view(cur)); titleCard(cur); }
+
+/* ---- 1. THE NEIGHBORHOOD ---- */
+var CLUSTER_NAMES = { 'Melotte 22':'PLEIADES', 'Melotte 25':'HYADES', 'NGC 2632':'PRAESEPE (M44)', 'Melotte 20':'ALPHA PERSEI', 'Melotte 111':'COMA STAR CLUSTER',
+  'IC 2602':'SOUTHERN PLEIADES', 'IC 2391':'OMICRON VELORUM', 'NGC 2516':'NGC 2516', 'NGC 3532':'NGC 3532', 'NGC 6475':'PTOLEMY’S CLUSTER (M7)', 'NGC 6633':'NGC 6633',
+  'Collinder 70':'ORION’S BELT', 'NGC 1980':'ORION NEBULA CLUSTER', 'NGC 2451A':'NGC 2451', 'NGC 2547':'NGC 2547', 'NGC 7092':'M39', 'IC 4665':'IC 4665', 'NGC 2232':'NGC 2232', 'Blanco 1':'BLANCO 1', 'NGC 2422':'M47', 'NGC 2287':'M41', 'NGC 6405':'BUTTERFLY CLUSTER (M6)', 'NGC 752':'NGC 752', 'Stock 2':'STOCK 2', 'NGC 2264':'CHRISTMAS TREE CLUSTER', 'NGC 2362':'TAU CANIS MAJORIS', 'IC 348':'IC 348', 'ASCC 19':'ASCC 19', 'UPK 606':'' };
+function drawNeighborhood(d, v){
+  var s = v.s;
+  /* the Radcliffe Wave: a soft ribbon */
+  ctx.save(); ctx.strokeStyle = C.blue + '.22)'; ctx.lineWidth = 14; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.beginPath();
+  d.radcliffe.forEach(function(p, i){ var q = gxy(v, p[0], p[1]); if (i) ctx.lineTo(q[0], q[1]); else ctx.moveTo(q[0], q[1]); }); ctx.stroke();
+  ctx.strokeStyle = C.blue + '.45)'; ctx.lineWidth = 2; ctx.stroke(); ctx.restore();
+  /* the Local Bubble shell */
+  ctx.save(); ctx.beginPath(); d.bubble.forEach(function(b, i){ var l = b[0] * Math.PI/180, r = b[1]; var q = gxy(v, r * Math.cos(l), r * Math.sin(l)); if (i) ctx.lineTo(q[0], q[1]); else ctx.moveTo(q[0], q[1]); }); ctx.closePath();
+  ctx.fillStyle = C.gold + '.05)'; ctx.fill(); ctx.strokeStyle = C.gold + '.18)'; ctx.lineWidth = 10; ctx.stroke(); ctx.strokeStyle = C.gold + '.6)'; ctx.lineWidth = 1.2; ctx.stroke(); ctx.restore();
+  /* clusters: soft discs */
+  var near = d.clusters.filter(function(c){ return Math.hypot(c[1], c[2]) <= 1040; });
+  near.forEach(function(c){ var q = gxy(v, c[1], c[2]); var r = Math.max(2.5, c[6] * s * 0.9); glow(q[0], q[1], r * 2.0, C.blue, .22); dot(q[0], q[1], Math.max(1.4, r * .3), '#cfe2ff', .85); });
+  /* stars */
+  d.stars.forEach(function(st){ var q = gxy(v, st[0], st[1]); var r = Math.max(.6, 2.6 - st[3] * .38), far = Math.min(1, Math.abs(st[2]) / 600); ctx.globalAlpha = (0.95 - far * .55); ctx.fillStyle = starColor(st[4]); ctx.beginPath(); ctx.arc(q[0], q[1], r, 0, Math.PI*2); ctx.fill(); });
+  ctx.globalAlpha = 1;
+  /* names: the bright and the near, with a crude collision pass */
+  /* words first, so star names yield to them */
+  scaleRings(v, [250, 500, 750, 1000], function(u){ return u.toLocaleString() + ' LIGHT-YEARS'; });
+  here(v.cx, v.cy, 'THE SUN', 'THE SOLAR SYSTEM WOULD BE SMALLER THAN THIS DOT');
+  var bq = gxy(v, 330, 260); label(bq[0], bq[1], 'LOCAL BUBBLE', {color:C.goldS, size:10.5, weight:700, alpha:.85}); label(bq[0], bq[1] + 13, 'THE HOT, NEARLY EMPTY CAVITY WE LIVE IN', {color:C.goldS, size:8, alpha:.6, ls:.12}); free(bq[0], bq[1] + 6, 230, 28);
+  var rq = gxy(v, -600, 700); label(rq[0], rq[1], 'RADCLIFFE WAVE', {color:'#9fc5ff', size:10.5, weight:700, alpha:.85}); label(rq[0], rq[1] + 13, '9,000 LIGHT-YEARS OF STAR-FORMING GAS', {color:'#9fc5ff', size:8, alpha:.6, ls:.12}); free(rq[0], rq[1] + 6, 230, 28);
+  label(v.cx, 48, '↑ TO THE GALACTIC CENTRE · 26,000 LIGHT-YEARS', {size:9.5, alpha:.55}); free(v.cx, 48, 300, 14);
+  label(28, v.cy, '← THE SUN’S ORBIT RUNS THIS WAY · 500,000 MPH', {size:9.5, alpha:.55, align:'left'}); free(170, v.cy, 290, 14);
+  /* names: the brightest and the nearest, each only where there is room */
+  var cand = d.named.filter(function(n){ var dist = Math.hypot(n[1], n[2], n[3]); return n[4] <= 1.6 || dist <= 12; }).sort(function(a, b){ return a[4] - b[4]; });
+  cand.forEach(function(n){ var q = gxy(v, n[1], n[2]); var y = q[1] - 9, t = n[0].toUpperCase(); if (!free(q[0], y, t.length * 6.2 + 10, 13)) return; label(q[0], y, t, {size:9, alpha:.8, ls:.12}); });
+  near.forEach(function(c){ var nm = CLUSTER_NAMES[c[0]]; if (nm === undefined && c[4] < 1500) return; if (nm === '') return; var q = gxy(v, c[1], c[2]); var y = q[1] + 12, t = nm || c[0].toUpperCase(); if (!free(q[0], y, t.length * 6 + 10, 13)) return; label(q[0], y, t, {size:8.5, color:'#cfe2ff', alpha:.75, ls:.12}); });
+}
+
+/* ---- 2. THE MILKY WAY ---- */
+function drawMilkyWay(d, v){
+  var s = v.s, R0 = d.R0;
+  var G = function(X, Y){ return [v.cx - Y * s, v.cy - X * s]; };   /* galactocentric: centre at (0,0), Sun at (-R0, 0) -> below */
+  /* the disc: an exponential glow, soft (model) */
+  ctx.save(); var g = ctx.createRadialGradient(v.cx, v.cy, 0, v.cx, v.cy, 15 * s);
+  g.addColorStop(0, 'rgba(255,226,180,.34)'); g.addColorStop(.16, 'rgba(210,222,255,.20)'); g.addColorStop(.5, 'rgba(130,170,235,.10)'); g.addColorStop(.85, 'rgba(120,160,230,.03)'); g.addColorStop(1, 'rgba(120,160,230,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  /* the bar */
+  /* the bar's near end points into the first quadrant (l ~ 20-30, so +Y, which is screen-left and toward the Sun) */
+  var ba = d.bar.angle * Math.PI/180, bx = -Math.cos(ba), by = Math.sin(ba);            /* galactocentric unit vector toward the near end */
+  var e1 = G(bx * d.bar.half_len, by * d.bar.half_len);
+  var rot = Math.atan2(e1[1] - v.cy, e1[0] - v.cx);
+  ctx.translate(v.cx, v.cy); ctx.rotate(rot); ctx.scale(1, d.bar.half_wid / d.bar.half_len);
+  var bg = ctx.createRadialGradient(0, 0, 0, 0, 0, d.bar.half_len * s); bg.addColorStop(0, 'rgba(255,220,170,.30)'); bg.addColorStop(.6, 'rgba(255,220,170,.12)'); bg.addColorStop(1, 'rgba(255,220,170,0)');
+  ctx.fillStyle = bg; ctx.beginPath(); ctx.arc(0, 0, d.bar.half_len * s, 0, Math.PI*2); ctx.fill(); ctx.restore();
+  /* clusters: the disc traced by Gaia, tinted by age */
+  d.clusters.forEach(function(c){ var q = G(c[0], c[1]); var young = c[2] < 7.6; ctx.globalAlpha = young ? .8 : .5; ctx.fillStyle = young ? '#bfe0ff' : '#f2e7cf'; ctx.beginPath(); ctx.arc(q[0], q[1], young ? 1.3 : 1.0, 0, Math.PI*2); ctx.fill(); });
+  ctx.globalAlpha = 1;
+  /* the arms: fitted log spirals, fading at both ends of their measured span */
+  d.arms.forEach(function(a){ var n = a.pts.length; for (var i = 1; i < n; i++){ var p = G(a.pts[i-1][0], a.pts[i-1][1]), q = G(a.pts[i][0], a.pts[i][1]); var t = Math.min(i, n - i) / (n * .18); var al = Math.min(1, t);
+      ctx.save(); ctx.strokeStyle = C.blue + (.10 * al) + ')'; ctx.lineWidth = 16; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]); ctx.stroke();
+      ctx.strokeStyle = C.white + (.55 * al) + ')'; ctx.lineWidth = 1.6; ctx.stroke(); ctx.restore(); } });
+  /* the masers: crisp gold, measured */
+  d.masers.forEach(function(m){ var q = G(m[1], m[2]); dot(q[0], q[1], 2.1, C.goldS, .95); });
+  /* words */
+  scaleRings(v, [5, 10, 15], function(u){ return Math.round(u * LY_KPC / 1000) + ',000 LIGHT-YEARS FROM THE CENTRE'; });
+  dot(v.cx, v.cy, 2.2, '#ffffff'); glow(v.cx, v.cy, 14, C.white, .5); label(v.cx, v.cy - 14, 'SAGITTARIUS A*', {size:9.5, color:C.title, alpha:.9}); free(v.cx, v.cy - 14, 110, 14); label(v.cx, v.cy + 13, 'A BLACK HOLE OF FOUR MILLION SUNS', {size:8, alpha:.6, ls:.12}); free(v.cx, v.cy + 13, 220, 13);
+  var bq = G(-bx * d.bar.half_len * .7, -by * d.bar.half_len * .7); label(bq[0], bq[1] - 10, 'THE BAR', {size:9, color:'#f2d9a8', alpha:.6, ls:.14}); free(bq[0], bq[1] - 10, 60, 13);
+  /* the Sun, its orbit on the open (fourth-quadrant) side, the previous frame's footprint */
+  var sun = G(-R0, 0);
+  ring(v.cx, v.cy, R0 * s, C.goldS, 1, .22);
+  var oq = G(-R0 * .7071, -R0 * .7071); label(oq[0] + 8, oq[1], 'THE SUN’S ORBIT · ONCE EVERY 230 MILLION YEARS', {size:8.5, color:C.goldS, alpha:.6, align:'left', ls:.12}); free(oq[0] + 130, oq[1], 250, 13);
+  here(sun[0], sun[1], 'THE SUN', '26,000 LIGHT-YEARS FROM THE CENTRE');
+  footprint(sun[0], sun[1], 1000 / LY_KPC * s, 'THE NEIGHBORHOOD FRAME'); free(sun[0] + 85, sun[1] - 19, 150, 13);
+  /* arm names at whichever end of the fitted curve lies farther from the Sun's crowd, only where there is room */
+  d.arms.forEach(function(a){ var n = a.pts.length, p0 = a.pts[Math.round(n * .12)], p1 = a.pts[Math.round(n * .88)], far = (Math.hypot(p0[0] + R0, p0[1]) > Math.hypot(p1[0] + R0, p1[1])) ? p0 : p1;
+    var q = G(far[0], far[1]); var nm = a.name.toUpperCase().replace(' (ORION)', ' ARM').replace(' (FAR SIDE)', ' ARM, FAR SIDE'); if (nm.indexOf('ARM') < 0) nm += ' ARM';
+    var ux = q[0] - v.cx, uy = q[1] - v.cy, L = Math.hypot(ux, uy) || 1; var x = q[0] + ux / L * 14, y = q[1] + uy / L * 14;
+    if (!free(x, y, nm.length * 6.5 + 10, 14)) { x = q[0] - ux / L * 14; y = q[1] - uy / L * 14; if (!free(x, y, nm.length * 6.5 + 10, 14)) return; }
+    label(x, y, nm, {size:9.5, color:'#cfe2ff', alpha:.85, ls:.14}); });
+  label(W - 14, H - 14, 'GOLD DOTS: MASERS WITH RADIO PARALLAXES (MEASURED) · PALE DOTS: GAIA CLUSTERS, BLUE WHEN YOUNG · ARMS AND BAR: MODELS', {size:8, alpha:.5, align:'right', ls:.1});
+}
+
+/* ---- 3. THE LOCAL GROUP ---- */
+function drawLocalGroup(d, v){
+  var s = v.s;
+  /* soft zero-velocity surface, ~1 Mpc: the model edge */
+  var g = ctx.createRadialGradient(v.cx, v.cy, 700 * s, v.cx, v.cy, 1150 * s); g.addColorStop(0, 'rgba(120,180,255,0)'); g.addColorStop(.75, 'rgba(120,180,255,.07)'); g.addColorStop(1, 'rgba(120,180,255,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  label(v.cx, v.cy - 1050 * s, 'ROUGHLY WHERE THE GROUP’S GRAVITY GIVES WAY TO EXPANSION', {size:8.5, alpha:.5, ls:.12});
+  var big = { 'Andromeda':1, 'Triangulum':1, 'LMC':1, 'SMC':1 };
+  var labelMag = -13.2, labels = [];
+  d.galaxies.forEach(function(gx){ var q = gxy(v, gx[1], gx[2]); var M = gx[0] === 'Andromeda' ? -21.8 : gx[4]; var r = Math.max(1.2, (M + 6) * -0.55); var isBig = big[gx[0]];
+    if (isBig){ glow(q[0], q[1], r * 4, C.white, .5); }
+    dot(q[0], q[1], Math.min(r, 9), isBig ? '#f4f7ff' : '#cfe2ff', isBig ? 1 : .85);
+    if (M <= labelMag || isBig) labels.push([q[0], q[1] + Math.min(r, 9) + 10, gx[0].toUpperCase(), isBig]); });
+  scaleRings(v, [306.6, 613.2, 919.8, 1226.4], function(u){ return Math.round(u / 306.6) + ' MILLION LIGHT-YEARS'; });
+  glow(v.cx, v.cy, 40, C.gold, .4); here(v.cx, v.cy, 'THE MILKY WAY', 'THE SUN IS 26,000 LIGHT-YEARS FROM ITS CENTRE, INSIDE THIS DOT'); footprint(v.cx, v.cy, 16 * s, 'THE MILKY WAY FRAME'); free(v.cx + 85, v.cy - 19, 150, 13);
+  labels.sort(function(a, b){ return (b[3] ? 1 : 0) - (a[3] ? 1 : 0); }).forEach(function(l){ if (!free(l[0], l[1], l[2].length * (l[3] ? 7.5 : 6) + 10, 13)) return; label(l[0], l[1], l[2], {size:l[3] ? 10.5 : 8.5, weight:l[3] ? 700 : 500, color:l[3] ? C.title : C.label, alpha:l[3] ? .95 : .75, ls:.12}); });
+  /* Andromeda's distance and approach */
+  var m31 = d.galaxies.filter(function(x){ return x[0] === 'Andromeda'; })[0];
+  if (m31){ var q = gxy(v, m31[1], m31[2]); if (free(q[0], q[1] + 32, 330, 13)) label(q[0], q[1] + 32, '2.5 MILLION LIGHT-YEARS AWAY · CLOSING AT 70 MILES A SECOND', {size:8, alpha:.6, ls:.12});
+    ctx.save(); ctx.strokeStyle = C.white + '.35)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(q[0], q[1]); var t = .09; ctx.lineTo(q[0] + (v.cx - q[0]) * t, q[1] + (v.cy - q[1]) * t); ctx.stroke(); ctx.restore(); }
+}
+
+/* ---- 4. LANIAKEA ---- */
+function drawLaniakea(d, v){
+  var s = v.s;
+  /* supergalactic X right, Y up; depth fades with |SGZ| */
+  var S = function(x, y){ return [v.cx + x * s, v.cy - y * s]; };
+  d.galaxies.forEach(function(g){ var z = Math.abs(g[2]); if (z > 60) return; var q = S(g[0], g[1]); ctx.globalAlpha = .18 + .6 * Math.max(0, 1 - z / 40); ctx.fillStyle = '#d6e6ff'; ctx.fillRect(q[0] - .6, q[1] - .6, 1.2, 1.2); });
+  ctx.globalAlpha = 1;
+  /* the zone of avoidance: our own disc hides two wedges along +-SGX */
+  scaleRings(v, [100 / MLY_MPC, 200 / MLY_MPC, 300 / MLY_MPC, 400 / MLY_MPC], function(u){ return Math.round(u * MLY_MPC / 100) * 100 + ' MILLION LIGHT-YEARS'; });
+  here(v.cx, v.cy, 'THE LOCAL GROUP', 'MILKY WAY + ANDROMEDA, ONE DOT');
+  footprint(v.cx, v.cy, 1.5 * s, 'THE LOCAL GROUP FRAME'); free(v.cx + 85, v.cy - 19, 150, 13);
+  [1, -1].forEach(function(sg){ var q = S(sg * 110, 0); if (free(q[0], q[1], 190, 13)) label(q[0], q[1], 'HIDDEN BEHIND THE MILKY WAY', {size:8.5, alpha:.45, ls:.12}); });
+  /* landmarks, crisp names, the big ones first */
+  var BIG = /Virgo|Great Attractor|Perseus|Coma|Shapley/;
+  var lms = d.landmarks.slice().sort(function(a, b){ return (BIG.test(b[0]) ? 1 : 0) - (BIG.test(a[0]) ? 1 : 0); });
+  lms.forEach(function(l){ if (Math.abs(l[3]) > 90) return; var q = S(l[1], l[2]); if (Math.hypot(q[0] - v.cx, q[1] - v.cy) > 135 * s) return; var big = BIG.test(l[0]); var t = l[0].toUpperCase(), y = q[1] - (big ? 13 : 11);
+    if (!free(q[0], y, t.length * (big ? 7 : 6) + 10, 13)) { y = q[1] + (big ? 15 : 13); if (!free(q[0], y, t.length * (big ? 7 : 6) + 10, 13)) return; }
+    ring(q[0], q[1], big ? 7 : 5, C.goldS, 1, .75); label(q[0], y, t, {size:big ? 9.5 : 8.5, color:C.goldS, weight:big ? 700 : 500, alpha:big ? .95 : .75, ls:.12});
+    if (/Great Attractor/.test(l[0]) && free(q[0], y + 13, 300, 13)) label(q[0], y + 13, 'LANIAKEA’S BASIN: EVERYTHING HERE DRIFTS THIS WAY', {size:8, color:C.goldS, alpha:.6, ls:.12}); });
+  label(W - 14, H - 14, 'EACH DOT ONE GALAXY · BRIGHTER = NEARER THE SUPERGALACTIC PLANE · DISTANCES FROM REDSHIFT, SO CLUSTERS SMEAR ALONG THE LINE OF SIGHT', {size:8, alpha:.5, align:'right', ls:.1});
+}
+
+/* ---- 5. THE COSMIC WEB ---- */
+function drawUniverse(d, v){
+  var s = v.s, tab = d.comoving_gly;
+  var dc = function(z){ var i = Math.min(tab.length - 2, Math.max(0, Math.floor(z / 0.004))); var t = (z - tab[i][0]) / 0.004; return tab[i][1] + (tab[i+1][1] - tab[i][1]) * t; };
+  /* RA 0 to the right, increasing counter-clockwise; distance outward */
+  var P = function(ra, g){ var a = ra * Math.PI/180; return [v.cx + g * s * Math.cos(a), v.cy - g * s * Math.sin(a)]; };
+  ctx.fillStyle = '#dbe8ff';
+  d.galaxies.forEach(function(g){ var q = P(g[0], dc(g[1])); ctx.globalAlpha = .55 + .35 * Math.max(0, 1 - g[1] / 0.2); ctx.fillRect(q[0] - .55, q[1] - .55, 1.1, 1.1); });
+  ctx.globalAlpha = 1;
+  scaleRings(v, [1, 2, 3], function(u){ return u + ' BILLION LIGHT-YEARS · LIGHT ' + (u === 1 ? '0.9' : u === 2 ? '1.8' : '2.6') + ' BILLION YEARS OLD'; }, 90);
+  /* the survey's edge, and the honest note about what lies beyond */
+  ring(v.cx, v.cy, 3.95 * s, '#bcd6ef', 1, .18);
+  label(v.cx, v.cy + 3.95 * s + 14, 'THIS SURVEY ENDS HERE · THE OBSERVABLE UNIVERSE REACHES 46 BILLION LIGHT-YEARS · THE OLDEST LIGHT IS 13.8 BILLION YEARS OLD', {size:8.5, alpha:.55, ls:.12});
+  /* landmarks */
+  var sgw = P(190, 1.06); ring(sgw[0], sgw[1], 6, C.goldS, 1, .7); label(sgw[0] - 10, sgw[1] - 12, 'SLOAN GREAT WALL', {size:9.5, color:C.goldS, weight:700, alpha:.9, ls:.14, align:'right'}); label(sgw[0] - 10, sgw[1] + 1, '1.4 BILLION LIGHT-YEARS LONG', {size:8, color:C.goldS, alpha:.6, ls:.12, align:'right'});
+  var n1 = P(185, 2.9); label(n1[0], n1[1], 'THE NORTHERN GALACTIC SKY', {size:8.5, alpha:.5, ls:.12});
+  var n2 = P(0, 2.9); label(n2[0], n2[1] + 14, 'THE SOUTHERN STRIPE', {size:8.5, alpha:.5, ls:.12});
+  var gap = P(275, 2.0); label(gap[0], gap[1], 'NOT SURVEYED: OUR OWN GALAXY IS IN THE WAY', {size:8, alpha:.45, ls:.1});
+  footprint(v.cx, v.cy, 0.75 * s, 'THE LANIAKEA FRAME');
+  here(v.cx, v.cy, 'HERE', 'LANIAKEA, THE LOCAL GROUP, THE MILKY WAY, THE SUN');
+  label(W - 14, H - 14, 'EACH DOT ONE GALAXY WITH A MEASURED SPECTRUM · A SLICE 2.5° THICK ALONG THE CELESTIAL EQUATOR · DIRECTION = RIGHT ASCENSION', {size:8, alpha:.5, align:'right', ls:.1});
+}
+
+/* ---- boot ---- */
+if (EMBEDDED) document.documentElement.classList.add('embedded');
+document.getElementById('caption').textContent = FRAMES[cur].caption; document.getElementById('credit').textContent = FRAMES[cur].credit;
+document.querySelectorAll('#ladder button').forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-f') === cur); });
+resize();
+(document.fonts && document.fonts.load ? document.fonts.load('500 12px "QelliaRegular"').catch(function(){}) : Promise.resolve()).then(function(){ return load(cur); }).then(function(){ render(); try{ if (EMBEDDED) parent.postMessage({galaxyReady:true}, '*'); }catch(_){} });
+/* warm the other frames in the background so the ladder feels instant */
+setTimeout(function(){ Object.keys(FRAMES).forEach(function(f){ if (f !== cur) load(f); }); }, 1500);
+</script>
+</body>
+</html>
