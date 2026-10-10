@@ -770,6 +770,134 @@
    9 ms a frame for 8 s running (then off for the session). Waits for the loading curtain to lift. Phone: fewer birds and
    no jet (the old rule). The air at cruise height for the contrails: Open-Meteo ECMWF 250 hPa (CORS open), hourly. */
 (function(){
+  /* ================================================================================================================
+     THE COAST (2026-10-10, user: "LA should have its own clear day birds / the pigeon flock and peregrine falcon feel off
+     for LA, lets only use that version for NYC clear days"). The Los Angeles clear-sky birds: a squadron of BROWN
+     PELICANS gliding low in a staggered line, the flap running down the line bird by bird the way it does over the
+     surf; a RED-TAILED HAWK soaring in slow circles on a thermal, high and to the left of the moon; a few WESTERN GULLS
+     loafing in the middle air. Same contract as bvFlock: set / stats / destroy / form; same clock, scale and moon rules;
+     nothing at night. The controller below picks this for any location inside the LA basin. */
+  window.bvCoast = function(cv, o){
+    o = Object.assign({ W: 1180, H: 620, seed: 7, fps: 30, band: [0.10, 0.55], floor: 0.78, moon: null, sun: null, size: 1 }, o || {});
+    var rng2 = function(seed){ var s = seed >>> 0 || 1; return function(){ s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; };   /* own copy: the engine's rng lives in another closure */
+    var ctx = cv.getContext('2d'), R = rng2(o.seed), dpr = Math.min(2, window.devicePixelRatio || 1);
+    var W, H, S, t = 0, isNight = false, dusk = 1;
+    var st = { sim: 0, draw: 0, fps: 0, frames: 0, steps: 0 };
+    function dims(w, h){ W = w; H = h; S = Math.max(0.45, Math.min(1, W / 1180)); cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); cv.style.width = W + 'px'; cv.style.height = H + 'px'; }
+    dims(o.W, o.H);
+    function moon(){ return o.moon; }
+    function moonPush(x, y, pad){ var m = moon(); if (!m) return [0, 0]; var dx = x - m.x, dy = y - m.y, d = Math.hypot(dx, dy) || 1, r = m.r + pad; return d < r ? [dx / d * (r - d), dy / d * (r - d)] : [0, 0]; }
+    /* ---- the pelican line: a leader flying passes, followers riding its trail at fixed lags ---- */
+    var NP = 9, PEL = [], LEAD = { on: false, x: 0, y: 0, vx: 0, vy: 0, dir: 1, t0: 0, next: 1.5 + R() * 3, y0: 0, amp: 0, per: 7, hx: new Float32Array(600), hy: new Float32Array(600), hn: 0, hh: 0, ht: 0, flapT: 0, flapping: true };
+    for (var i = 0; i < NP; i++) PEL.push({ x: -200, y: 0, vx: 0, vy: 0, on: false, lag: 0.62 + i * 0.58 + R() * 0.08, up: (i % 2) * 0.55 + R() * 0.2, k: 0.92 + R() * 0.16, fl: 1, fph: R() * 6.28 });
+    function leadStart(){
+      var low = o.floor * H, top = o.band[0] * H; LEAD.on = true; LEAD.dir = R() < 0.5 ? -1 : 1;
+      LEAD.y0 = low - (0.10 + 0.22 * R()) * (low - top); LEAD.amp = (0.025 + 0.03 * R()) * H; LEAD.per = 6 + 4 * R();
+      LEAD.x = LEAD.dir > 0 ? -90 * S : W + 90 * S; LEAD.y = LEAD.y0; LEAD.t0 = t; LEAD.hn = 0; LEAD.hh = 0; LEAD.ht = t; LEAD.flapT = t; LEAD.flapping = true;
+      PEL.forEach(function(p){ p.on = false; p.x = LEAD.x; p.y = LEAD.y; });
+    }
+    function leadStep(dt){
+      if (!LEAD.on){ if (t > LEAD.next) leadStart(); return; }
+      var sp = 62 * S * (0.95 + 0.1 * Math.sin(t * 0.37)), ph = (t - LEAD.t0) / LEAD.per * 6.2832;
+      var ty = LEAD.y0 + LEAD.amp * Math.sin(ph) + 0.6 * LEAD.amp * Math.sin(ph * 0.37 + 1.3);
+      var mp = moonPush(LEAD.x, ty, 60 * S); ty += mp[1] * 1.5;
+      LEAD.vx = LEAD.dir * sp; LEAD.vy = (ty - LEAD.y) * 1.6; LEAD.x += LEAD.vx * dt; LEAD.y += LEAD.vy * dt;
+      /* flap-and-glide: ~2.5 s of beats, ~4.5 s of glide */
+      if (t - LEAD.flapT > (LEAD.flapping ? 2.4 + R() * 0.6 : 3.8 + R() * 2)){ LEAD.flapping = !LEAD.flapping; LEAD.flapT = t; }
+      /* the trail: 30 Hz ring of where the leader was */
+      if (t - LEAD.ht >= 1 / 30){ LEAD.hx[LEAD.hh] = LEAD.x; LEAD.hy[LEAD.hh] = LEAD.y; LEAD.hh = (LEAD.hh + 1) % 600; if (LEAD.hn < 600) LEAD.hn++; LEAD.ht = t; }
+      var gone = LEAD.dir > 0 ? LEAD.x > W + 260 * S : LEAD.x < -260 * S;
+      if (gone){ LEAD.on = false; LEAD.next = t + 14 + R() * 22; }
+    }
+    function trailAt(lag){ var k = Math.min(LEAD.hn - 1, Math.round(lag * 30)); if (k < 0) return null; var j = ((LEAD.hh - 1 - k) % 600 + 600) % 600; return [LEAD.hx[j], LEAD.hy[j]]; }
+    function pelStep(dt){
+      for (var i = 0; i < NP; i++){ var p = PEL[i], q = LEAD.on || LEAD.hn ? trailAt(p.lag) : null;
+        if (!q){ p.on = false; continue; }
+        var tx = q[0], ty = q[1] - p.up * 14 * S;   /* the echelon: every other bird rides a little higher */
+        if (!p.on){ p.on = true; p.x = tx; p.y = ty; }
+        var ax = (tx - p.x) * 6, ay = (ty - p.y) * 6; p.vx += (ax - p.vx) * Math.min(1, dt * 4); p.vy += (ay - p.vy) * Math.min(1, dt * 4);
+        p.x += p.vx * dt; p.y += p.vy * dt;
+        /* the flap wave: each bird takes up the leader's beat a little later than the one ahead */
+        var since = t - LEAD.flapT - i * 0.32, flapping = since < 0 ? !LEAD.flapping : LEAD.flapping;
+        p.fl += ((flapping ? 0 : 1) - p.fl) * Math.min(1, dt * 3);
+        if (flapping) p.fph += dt * 5.2 * (0.95 + 0.1 * Math.sin(i)); }
+    }
+    /* ---- the hawk on its thermal ---- */
+    var HK2 = { x: 0, y: 0, cx: 0, cy: 0, r: 90 * S, a: 0, w: 0.34, dir: 1, drift: 0, away: false, next: 45 + R() * 30, roll: 0, fph: 0, flap: 0, vx: 1, vy: 0 };
+    function hawkHome(){ var m = moon(), top = o.band[0] * H, low = o.floor * H; var cx = W * (0.22 + 0.3 * R()), cy = top + (0.12 + 0.3 * R()) * (low - top);
+      if (m && Math.hypot(cx - m.x, cy - m.y) < m.r + HK2.r + 30 * S){ cx = Math.max(60 * S + HK2.r, m.x - m.r - HK2.r - 40 * S); } HK2.cx = cx; HK2.cy = cy; }
+    hawkHome(); HK2.a = R() * 6.28;
+    function hawkStep(dt){
+      if (HK2.away){ HK2.x += HK2.vx * dt; HK2.y += HK2.vy * dt; if (t > HK2.next){ HK2.away = false; hawkHome(); HK2.a = Math.atan2(HK2.y - HK2.cy, HK2.x - HK2.cx); HK2.next = t + 45 + R() * 30; } return; }
+      HK2.a += HK2.w * HK2.dir * dt; HK2.cx += Math.sin(t * 0.07) * 6 * S * dt; HK2.cy += Math.cos(t * 0.05) * 4 * S * dt - 1.2 * S * dt * (HK2.cy > o.band[0] * H + 40 * S ? 1 : 0);   /* a thermal lifts it slowly */
+      var nx = HK2.cx + HK2.r * Math.cos(HK2.a), ny = HK2.cy + HK2.r * 0.62 * Math.sin(HK2.a);
+      HK2.vx = (nx - HK2.x) / Math.max(dt, 0.016); HK2.vy = (ny - HK2.y) / Math.max(dt, 0.016); HK2.x = nx; HK2.y = ny;
+      HK2.roll += ((HK2.dir * 0.55) - HK2.roll) * Math.min(1, dt * 2);
+      /* a few beats now and then, mostly a glide */
+      if (HK2.flap > 0){ HK2.fph += dt * 4.5; HK2.flap -= dt; } else if (R() < dt * 0.06) HK2.flap = 1.2 + R();
+      if (t > HK2.next){ HK2.away = true; var d = HK2.x < W / 2 ? -1 : 1; HK2.vx = d * 55 * S; HK2.vy = -6 * S; HK2.next = t + 18 + R() * 10; }
+    }
+    /* ---- gulls: a few, loafing on their own slow sines ---- */
+    var GULL = []; for (var g = 0; g < 4; g++) GULL.push({ ox: R(), oy: R(), f1: 0.05 + R() * 0.05, f2: 0.04 + R() * 0.05, p1: R() * 6.28, p2: R() * 6.28, fph: R() * 6.28, fl: R() < 0.5 ? 1 : 0, ft: R() * 5, x: 0, y: 0, vx: 1, vy: 0 });
+    function gullStep(dt){ var top = o.band[0] * H, low = o.floor * H;
+      GULL.forEach(function(q){ var nx = W * (0.12 + 0.76 * (0.5 + 0.5 * Math.sin(t * q.f1 + q.p1 + q.ox * 6))), ny = top + (low - top) * (0.25 + 0.45 * (0.5 + 0.5 * Math.sin(t * q.f2 + q.p2 + q.oy * 6)));
+        var mp = moonPush(nx, ny, 40 * S); nx += mp[0]; ny += mp[1];
+        if (!q.on){ q.on = true; q.x = nx; q.y = ny; }
+        q.vx = (nx - q.x) / Math.max(dt, 0.016); q.vy = (ny - q.y) / Math.max(dt, 0.016); q.x = nx; q.y = ny;
+        if (t > q.ft){ q.fl = q.fl ? 0 : 1; q.ft = t + (q.fl ? 1.5 + R() * 1.5 : 2.5 + R() * 3); } if (q.fl) q.fph += dt * 6; }); }
+    /* ---- drawing ---- */
+    function wing(sd, span, sweep, lean, tipL, hand, col){ var fs = 1 - 0.5 * lean, tipx = -2.6 - 1.8 * (1 - span) - sweep, tipy = sd * (1.2 + tipL * span) * fs;
+      ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(1.6, sd * 0.8);
+      ctx.quadraticCurveTo(1.3 - sweep * 0.4, sd * (1.1 + tipL * 0.75 * span) * fs, tipx, tipy);
+      ctx.bezierCurveTo(-2.4 - sweep * 0.5, sd * (1.1 + tipL * 0.66 * span) * fs, -2.2, sd * (0.9 + 2.0 * span) * fs, -1.3, sd * 0.6); ctx.closePath(); ctx.fill();
+      if (hand && span > 0.5){ ctx.strokeStyle = 'rgba(20,20,26,.55)'; ctx.lineWidth = 0.5; for (var f = 0; f < 4; f++){ var u = 0.55 + f * 0.12, fx = tipx * u + 0.8, fy = tipy * (0.62 + f * 0.1); ctx.beginPath(); ctx.moveTo(fx, fy); ctx.lineTo(fx - 1.4 - f * 0.3, fy + sd * 0.35 * fs); ctx.stroke(); } } }
+    function drawPelican(p){ var k = (1.55 * S + 0.45) * p.k, dirx = p.vx >= 0 ? 1 : -1, span = 0.8 + 0.2 * p.fl - 0.25 * (1 - p.fl) * Math.max(0, Math.sin(p.fph)), sweep = (1 - p.fl) * 0.9 * Math.max(0, Math.sin(p.fph + 1));
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(Math.atan2(p.vy, Math.abs(p.vx) < 1 ? 1 : p.vx)); if (dirx < 0) ctx.scale(1, 1); ctx.scale(k, k);
+      var dip = (1 - p.fl) * Math.sin(p.fph) * 0.25;                     /* the downstroke darkens the near wing */
+      [-1, 1].forEach(function(sd){ wing(sd, span, sweep, Math.max(0, sd * dip), 9.5, true, sd * dip > 0 ? 'rgb(58,52,46)' : 'rgb(74,66,58)'); });
+      /* the body, long and dark; a pale head carried back on the shoulders; the bill laid along the breast */
+      ctx.fillStyle = 'rgb(70,62,54)'; ctx.beginPath(); ctx.moveTo(4.2, 0); ctx.quadraticCurveTo(3.8, -0.9, 2.2, -0.95); ctx.quadraticCurveTo(-1, -1.0, -3.6, -0.45); ctx.lineTo(-4.4, 0); ctx.lineTo(-3.6, 0.45); ctx.quadraticCurveTo(-1, 1.0, 2.2, 0.95); ctx.quadraticCurveTo(3.8, 0.9, 4.2, 0); ctx.fill();
+      ctx.fillStyle = 'rgb(214,206,186)'; ctx.beginPath(); ctx.ellipse(3.1, 0, 1.15, 0.8, 0, 0, 6.2832); ctx.fill();
+      ctx.strokeStyle = 'rgb(120,98,70)'; ctx.lineWidth = 0.55; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(3.9, 0.15); ctx.lineTo(7.6, 0.35); ctx.stroke();
+      ctx.restore(); }
+    function drawHawk2(){ if (isNight) return; var k = 1.15 * S + 0.35, fl = HK2.flap > 0 ? 0.75 + 0.25 * Math.abs(Math.sin(HK2.fph)) : 1, roll = HK2.roll;
+      ctx.save(); ctx.translate(HK2.x, HK2.y); ctx.rotate(Math.atan2(HK2.vy, HK2.vx)); ctx.scale(k, k);
+      [-1, 1].forEach(function(sd){ var lean = Math.max(0, sd * roll); wing(sd, fl, 0, lean, 8.6, true, lean > 0.2 ? 'rgb(66,58,50)' : 'rgb(86,76,64)');
+        ctx.fillStyle = 'rgba(36,30,26,.7)'; ctx.beginPath(); ctx.moveTo(0.2, sd * 1.4); ctx.lineTo(-0.9, sd * 4.4 * (1 - 0.5 * lean)); ctx.lineTo(-1.5, sd * 4.0 * (1 - 0.5 * lean)); ctx.lineTo(-0.5, sd * 1.3); ctx.closePath(); ctx.fill(); });   /* the patagial bar */
+      ctx.fillStyle = 'rgb(176,92,58)'; ctx.beginPath(); ctx.moveTo(-2.2, -0.5); ctx.lineTo(-5.2, -2.3); ctx.quadraticCurveTo(-5.9, 0, -5.2, 2.3); ctx.lineTo(-2.2, 0.5); ctx.closePath(); ctx.fill();   /* the red tail, fanned */
+      ctx.fillStyle = 'rgb(206,196,176)'; ctx.beginPath(); ctx.moveTo(3.4, 0); ctx.quadraticCurveTo(3.1, -0.85, 1.8, -0.9); ctx.quadraticCurveTo(-1, -0.95, -2.4, -0.5); ctx.lineTo(-2.4, 0.5); ctx.quadraticCurveTo(-1, 0.95, 1.8, 0.9); ctx.quadraticCurveTo(3.1, 0.85, 3.4, 0); ctx.fill();
+      ctx.fillStyle = 'rgb(92,70,52)'; ctx.beginPath(); ctx.ellipse(2.8, 0, 0.95, 0.75, 0, 0, 6.2832); ctx.fill();
+      ctx.restore(); }
+    function drawGull(q){ var k = 0.9 * S + 0.3, fl = q.fl ? 0.7 + 0.3 * Math.abs(Math.sin(q.fph)) : 1;
+      ctx.save(); ctx.translate(q.x, q.y); ctx.rotate(Math.atan2(q.vy, q.vx)); ctx.scale(k, k);
+      [-1, 1].forEach(function(sd){ wing(sd, fl, 0, 0, 8.2, false, 'rgb(150,154,160)'); ctx.fillStyle = 'rgb(40,40,46)'; ctx.beginPath(); ctx.moveTo(-2.4 - 1.6 * (1 - fl), sd * (1.2 + 8.2 * fl)); ctx.lineTo(-1.6, sd * (1.2 + 6.4 * fl)); ctx.lineTo(-2.9, sd * (1.0 + 6.0 * fl)); ctx.closePath(); ctx.fill(); });
+      ctx.fillStyle = 'rgb(236,238,240)'; ctx.beginPath(); ctx.ellipse(0.4, 0, 3.0, 0.8, 0, 0, 6.2832); ctx.fill(); ctx.restore(); }
+    function draw(){ ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H); if (isNight) return;
+      ctx.globalAlpha = dusk; GULL.forEach(function(q){ if (q.on) drawGull(q); }); drawHawk2();
+      for (var i = NP - 1; i >= 0; i--) if (PEL[i].on) drawPelican(PEL[i]); ctx.globalAlpha = 1; }
+    function step(dt){ t += dt; leadStep(dt); pelStep(dt); hawkStep(dt); gullStep(dt); }
+    /* the clock, as bvFlock's */
+    var raf = 0, last = 0, acc = 0, lastDraw = 0, visible = true, alive = true, fpsT = 0, fpsN = 0;
+    function frame(now){ raf = 0; if (!alive) return; if (!visible || document.hidden){ last = 0; return; }
+      if (!last) last = now; var minGap = 1000 / o.fps - 1.5; if (now - lastDraw < minGap){ raf = requestAnimationFrame(frame); return; }
+      var dt = Math.min(0.1, (now - last) / 1000); last = now; lastDraw = now; acc += dt;
+      var a = performance.now(); while (acc >= 1 / 60){ step(1 / 60); acc -= 1 / 60; st.steps++; } var b = performance.now(); draw(); var c = performance.now();
+      st.sim = st.sim * 0.9 + (b - a) * 0.1; st.draw = st.draw * 0.9 + (c - b) * 0.1; st.frames++; fpsN++; if (now - fpsT > 1000){ st.fps = fpsN * 1000 / (now - fpsT); fpsN = 0; fpsT = now; }
+      raf = requestAnimationFrame(frame); }
+    function kick(){ if (!raf && alive) raf = requestAnimationFrame(frame); }
+    var io = null; try { io = new IntersectionObserver(function(es){ visible = es[0].isIntersecting; if (visible) kick(); }, { threshold: 0.02 }); io.observe(cv); } catch(e){}
+    function onVis(){ if (!document.hidden) kick(); } document.addEventListener('visibilitychange', onVis);
+    function applySun(sun){ if (!sun) return; isNight = sun.alt < -0.83; dusk = Math.max(0.35, Math.min(1, (sun.alt + 2) / 8)); }
+    applySun(o.sun); for (var w0 = 0; w0 < 90; w0++) step(1 / 60);   /* a short warm-up so the hawk is already turning */
+    kick();
+    return {
+      set: function(p){ if (!p) return; var rs = false; if (p.W && p.H && (p.W !== W || p.H !== H)){ rs = true; } ['floor', 'moon', 'band', 'size'].forEach(function(k){ if (p[k] !== undefined) o[k] = p[k]; }); if (rs){ dims(p.W, p.H); hawkHome(); } if (p.sun) applySun(p.sun); kick(); },
+      stats: function(){ return { fps: st.fps, sim: st.sim, draw: st.draw, frames: st.frames, steps: st.steps, kind: 'coast' }; },
+      form: function(){ return { kind: 'coast', pass: LEAD.on, pelicans: PEL.filter(function(p){ return p.on; }).length, hawk: !HK2.away, next: Math.max(0, LEAD.next - t) }; },
+      destroy: function(){ alive = false; if (raf) cancelAnimationFrame(raf); if (io) io.disconnect(); document.removeEventListener('visibilitychange', onVis); try { ctx.clearRect(0, 0, cv.width, cv.height); } catch(e){} }
+    };
+  };
+
   var C = { f: null, cv: null, wait: 0, bad: 0, slow: false, airKey: '', airT: 0, tick: 0, last: null };
   function off(){ if (C.f){ try { C.f.destroy(); } catch(e){} C.f = null; } if (C.cv && C.cv.parentNode) C.cv.parentNode.removeChild(C.cv); C.cv = null;
     if (C.tick){ clearInterval(C.tick); C.tick = 0; } }
@@ -833,10 +961,14 @@
       if (!C.cv){ C.cv = document.createElement('canvas'); C.cv.id = 'hero-flock'; C.cv.style.cssText = 'position:absolute;left:0;top:0;z-index:0;pointer-events:none;'; }
       if (C.cv.parentNode !== sb || C.cv.previousSibling !== hw) sb.insertBefore(C.cv, hw.nextSibling);
       var g = geom(sb, hw); if (g.W < 40 || g.H < 60) return;
+      /* which birds: the LA basin gets the coast (pelicans, a red-tail, gulls); everywhere else the murmuration and the peregrine */
+      var la = (function(){ var L = window.LOCATION; return !!(L && L.lat > 33.60 && L.lat < 34.50 && L.lon > -119.00 && L.lon < -117.60); })(), kind = la ? 'coast' : 'flock';
+      if (C.f && C.kind !== kind){ off(); if (!C.cv){ C.cv = document.createElement('canvas'); C.cv.id = 'hero-flock'; C.cv.style.cssText = 'position:absolute;left:0;top:0;z-index:0;pointer-events:none;'; } sb.insertBefore(C.cv, hw.nextSibling); }
       if (!C.f){
         var ph = phone();
-        C.gw = g.W; C.gh = g.H;
-        C.f = bvFlock(C.cv, { W: g.W, H: g.H, floor: g.floor, moon: g.moon, band: g.band, sun: sun(), n: ph ? 380 : 650, jet: !ph, seed: (Date.now() / 864e5) | 0 });
+        C.gw = g.W; C.gh = g.H; C.kind = kind;
+        C.f = la ? bvCoast(C.cv, { W: g.W, H: g.H, floor: g.floor, moon: g.moon, band: g.band, sun: sun(), seed: (Date.now() / 864e5) | 0 })
+                 : bvFlock(C.cv, { W: g.W, H: g.H, floor: g.floor, moon: g.moon, band: g.band, sun: sun(), n: ph ? 380 : 650, jet: !ph, seed: (Date.now() / 864e5) | 0 });
         air();
         /* the sun moves, the moon and the panel settle: re-read every 20 s; the watchdog every 2 s */
         var n = 0;
