@@ -37489,12 +37489,39 @@ function dayRangeAround(d, days){
      never carry the name into the summary; NHC's own forecast does both. Every active storm's forecast advisory (TCM text, the
      positions and winds out to 5 days) is read through the proxy, the track is walked hour by hour, and the closest pass to the
      viewer kept: name, when, how near, and what the storm is forecast to be then. Re-read hourly while any storm is active. */
+  /* THE OVERVIEW CARD READS THE SAME LIST AS THE MAP (user 2026-10-09: "this card feels misleading" -- it said
+     0 HURRICANES · Active storms: None, green dot, while the hurricane view showed Isaias at Category 3 in the Gulf and
+     two East Pacific storms). window._activeStorms, the list the card, its dot and the tab badge count, was never written
+     by anything, and the view's own NHC fetch runs only once its map is built. This setter feeds the card from NHC's
+     CurrentStorms.json; the boot-time summary fetch below and the hurricane view's fetch both call it. */
+  window._hzSetActiveStorms = function(list){
+    var storms = Array.isArray(list) ? list : [];
+    var CLS = { HU: 'Hurricane', TS: 'Tropical Storm', TD: 'Tropical Depression', STS: 'Subtropical Storm', SD: 'Subtropical Depression', PTC: 'Potential Tropical Cyclone' };
+    window._activeStorms = storms.map(function(x){
+      var kt = parseInt(x.intensity || 0) || 0, cls = String(x.classification || '').toUpperCase();
+      var bin = String(x.binNumber || x.id || x.atcfID || '').toUpperCase(), lon = parseFloat(x.longitudeNumeric);
+      var cat = kt >= 137 ? 5 : kt >= 113 ? 4 : kt >= 96 ? 3 : kt >= 83 ? 2 : kt >= 64 ? 1 : 0;
+      var nm = String(x.name || 'Unnamed').toLowerCase().replace(/(^|\s)\w/g, function(c){ return c.toUpperCase(); });
+      return { name: nm, category: cat, winds: kt, mph: Math.round(kt * 1.15078 / 5) * 5, cls: CLS[cls] || cls || 'System',
+               basin: (/^(EP|CP)/.test(bin) || (!/^(AT|AL)/.test(bin) && lon < -100)) ? 'East Pacific' : 'Atlantic' };
+    });
+    var badge = document.getElementById('hazard-badge-hurricane');
+    if (badge){
+      if (storms.length){
+        var major = storms.some(function(x){ return parseInt(x.intensity || 0) >= 96; }), hu = storms.some(function(x){ return parseInt(x.intensity || 0) >= 64; });
+        badge.textContent = storms.length; badge.style.display = 'inline-flex';
+        badge.setAttribute('data-urgency', major ? 'critical' : hu ? 'elevated' : storms.length >= 3 ? 'elevated' : 'moderate');
+      } else { badge.textContent = ''; badge.style.display = 'none'; }
+    }
+    try { window._hzDashUpdate && window._hzDashUpdate(); } catch(e){}
+  };
   window._tropicalNear = null;
   window._fetchTropical = function(){
     var L = window.LOCATION || {}, la0 = +L.lat, lo0 = +L.lon; if (!isFinite(la0)) return;
     var PX = function(u){ return 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent(u); };
     var get = window.bvProxyJSON ? window.bvProxyJSON('https://www.nhc.noaa.gov/CurrentStorms.json', { timeout: 12000 }) : fetch(PX('https://www.nhc.noaa.gov/CurrentStorms.json')).then(function(r){ return r.json(); });
     get.then(function(d){
+      try { window._hzSetActiveStorms((d && d.activeStorms) || []); } catch(e){}
       var st = ((d && d.activeStorms) || []).filter(function(x){ return x.forecastAdvisory && x.forecastAdvisory.url; });
       if (!st.length){ window._tropicalNear = null; return; }
       return Promise.all(st.map(function(x){ return fetch(PX(x.forecastAdvisory.url)).then(function(r){ return r.text(); }).then(function(t){ return window._bvTropicalPass(x, t, la0, lo0); }, function(){ return null; }); }))
@@ -90665,6 +90692,7 @@ function initNowMicroTabs(){
         _clearHurricaneStorms();
         var storms = data.activeStorms || [];
         window._nhcActiveStorms = storms;
+        try { if (window._hzSetActiveStorms) window._hzSetActiveStorms(storms); } catch(e){}   /* the overview card */
         // Refresh the inline season insight now that storm data is in
         try { if (typeof updateHazardInsight === 'function') updateHazardInsight(); } catch(e){}
         window._hzSystems = window._hzSystems || {};
@@ -100463,7 +100491,8 @@ function closeAlertModal(){
       var tornadoLen = window._tornadoCount || (window._tornadoReports || []).length;
       var floodLen = window._floodGaugesAboveNormal || 0;
       var alertLen = (window._hazardAlerts || []).length;
-      var hash = fireLen + '|' + quakeLen + '|' + tornadoLen + '|' + floodLen + '|' + alertLen;
+      var stormLen = (window._activeStorms || []).length;
+      var hash = fireLen + '|' + quakeLen + '|' + tornadoLen + '|' + floodLen + '|' + alertLen + '|' + stormLen;
       if (hash === _hzDashHash) return;
 
       var _d=function(id,v){var e=document.getElementById(id);if(e)e.textContent=String(v);};
@@ -101040,7 +101069,7 @@ function closeAlertModal(){
       if(hc&&window._activeStorms){
         hd+=H('ACTIVE SYSTEMS','rgba(139,92,246,.75)');
         window._activeStorms.slice(0,4).forEach(function(s){
-          hd+=R(s.name||'System',(s.category?'Cat '+s.category:'TD')+(s.winds?' · '+s.winds+'kt':''));
+          hd+=R(s.name||'System',(s.category?'<span style="color:#ef4444;font-weight:700">Cat '+s.category+'</span>':(s.cls||'TD'))+(s.mph?' · '+s.mph+' mph':'')+(s.basin?' · '+s.basin:''));
         });
         if(hc>4) hd+=R('Additional systems',hc-4);
       }
