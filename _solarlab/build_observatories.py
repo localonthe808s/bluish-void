@@ -575,83 +575,90 @@ def _full_for(url):
     return best
 
 
-def bake_media():
+def bake_media(prev_media=None):
+    # EACH OBSERVATORY ON ITS OWN (2026-10-09: NRAO answered GitHub's runners with 403 and the exception left the news
+    # loop, so the WHOLE media block fell back to the previous bake -- four strips kept a YouTube embed as a broken
+    # picture for a day). A source that fails keeps only its own last good copy; the others refresh.
     out = {}
     for key, f in FEEDS.items():
-        photos, news, seen = [], [], set()
-        # VIEW MORE (user 2026-09-27): a deeper list -- NASA's WordPress feeds carry 10 a page, so read page 2 too
-        pages = []
-        for src, url in f['photos']:
-            pages.append((src, url))
-            if src in ('nasa', 'nrao'): pages.append((src, url + ('&' if '?' in url else '?') + 'paged=2'))   # NRAO: few data images per page
-        # never repeat a GREATEST HITS picture in the latest strip
-        try: cl = json.loads((ROOT / '_solarlab/classics.json').read_text()).get(key, [])
-        except Exception: cl = []
-        clk = set(re.sub(r'\W+', '', c.get('title', '').lower()) for c in cl) | set(c.get('link', '') for c in cl)
-        page_items = []
-        for src, url in pages:
-            try: page_items.append((src, _items(url)))
-            except Exception as e: print('  feed page failed', url[-60:], e)
-        if key == 'nrao':
-            # NRAO reuses gallery illustrations under news headlines that never say so: the gallery's own title for the
-            # same file, and the caption on the news page ("This artist's representation ..."), decide
-            gal = []
-            for gp in ('https://public.nrao.edu/gallery/feed/', 'https://public.nrao.edu/gallery/feed/?paged=2'):
-                try: gal += _items(gp)
-                except Exception as e: print('  nrao gallery failed', e)
-            page_items.append(('nrao-ban', gal))
-            for _, its in page_items:
-                for it in its:
-                    if _ != 'nrao-ban' and it.get('link'):
-                        try:
-                            t = re.sub(r'<[^>]+>', ' ', re.sub(r'<script.*?</script>|<style.*?</style>', '', get(it['link'], timeout=40, tries=2).decode('utf-8', 'replace'), flags=re.S))
-                            raw_t = html.unescape(t)
-                            cm = re.search(r'Credit:[ \t]*([^\n]{3,220}?)(?:\s{3,}|\n|$)', raw_t)   # the credit line, before the article's whitespace
-                            t = re.sub(r'\s+', ' ', raw_t); i = t.find('Credit:')
-                            it['desc'] = (t[max(0, i - 300):i] + ' ' + it.get('desc', '')) if i > 0 else it.get('desc', '')
-                            # the page's own credit: NRAO posts carry other observatories' pictures
-                            if cm:
-                                it['credit'] = cm.group(1).strip()
-                                if not re.match(r'(?:NSF/)?(?:AUI/)?NSF NRAO|NRAO/AUI/NSF|NSF/AUI/NSF', it['credit']): it['lic'] = 'licence: see source'
-                        except Exception as e: print('  nrao page failed', it['link'][-50:], e)
-        _base = lambda u: re.sub(r'-\d+x\d+$', '', re.sub(r'\?.*$', '', u or '').rsplit('/', 1)[-1].rsplit('.', 1)[0]).lower()
-        banned = set(_base(it['img']) for _, its in page_items for it in its if it.get('img') and (is_artwork(it) or is_site(it)))
-        for src, items in page_items:
-            if src == 'nrao-ban': continue
-            for it in items:
-                if re.sub(r'\W+', '', it['title'].lower()) in clk or it['link'] in clk: continue
-                if is_artwork(it) or is_site(it) or _base(it.get('img')) in banned: continue
-                # NISAR's feed also carries NASA's airborne radar campaigns: a jet on a runway is not the satellite's picture
-                # NRAO's tab shows what ITS telescopes took: the credit must name one (a Rubin photo led one radio story)
-                if key == 'nrao' and not re.search(r'NRAO|ALMA|\bVLA\b|VLBA|Green Bank|GBT', it.get('credit', '')): continue
-                if key == 'nisar' and re.search(r'\bflights?\b|aircraft|C-20A|airborne|UAVSAR', it['title'] + ' ' + it.get('alt', ''), re.I): continue
-                th = _thumb(src, it['img'])
-                if not th or th in seen or it['title'] in seen or not _is_sky(src, it) or not _looks_like_sky(th): continue
-                if _same_picture(th, [p['thumb'] for p in photos]): continue
-                seen.add(th); seen.add(it['title'])      # ESA posts a release's image and its video under one title
-                full = th.replace('?w=640', '?w=2400') if th.endswith('?w=640') else _full_for(th)
-                # A STORY'S LEAD MEDIA CAN BE A MOVIE (2026-10-05: Parker's WISPR footage of comet 3I/ATLAS came through as
-                # .../Parker-atlas_3i_WISPR_Processed.mp4?w=640 and the page put it in an <img> -- a broken picture). Mark it
-                # so the page draws a muted looping <video>; the ?w= resize means nothing to a movie, so it goes.
-                vid = bool(re.search(r'\.(?:mp4|webm|mov|m4v)(?:\?|$)', th, re.I))
-                if vid: th = full = re.sub(r'\?.*$', '', th)
-                photos.append({'thumb': th, 'full': full, 'title': it['title'], 'link': it['link'], 't': it['t'],
-                               'credit': it['credit'] or SRC[src]['credit'], 'lic': it.get('lic') or SRC[src]['lic'], **({'video': True} if vid else {})})
-        for src, url in f['news']:
-            for it in _items(url):
-                if src == 'noirlab' and not RUBIN_ONLY.search(it['title'] + ' ' + it['desc']): continue
-                news.append({'title': it['title'], 'link': it['link'], 't': it['t'], 'lead': it['lead'],
-                             'from': SRC[src]['from'], 'src': src})
-        news = sorted({n['link']: n for n in news}.values(), key=lambda n: -(n['t'] or 0))
-        news = list({n['title']: n for n in reversed(news)}.values())[::-1][:5]   # one per title, the newest
-        for n in news:                    # ESA's feed carries only a picture: the lead is the article's first paragraph
-            n['lead'] = re.sub(r'^Video:\s*[\d:]+\s*', '', n['lead'])      # an ESA video item opens with its running time
-            if n.pop('src', '') in ('esaint', 'esasolo', 'esagaia') and len(n['lead']) < 60:
-                try: n['lead'] = esa_lead(n['link'])
-                except Exception as e: print('  esa lead failed', n['link'][-60:], e)
-        photos = sorted(photos, key=lambda n: -(n['t'] or 0))[:18]   # six in the strip, twelve more behind VIEW MORE
-        out[key] = {'photos': photos, 'news': news}
-        print('  media', key, len(photos), 'photos', len(news), 'news')
+      try:
+            photos, news, seen = [], [], set()
+            # VIEW MORE (user 2026-09-27): a deeper list -- NASA's WordPress feeds carry 10 a page, so read page 2 too
+            pages = []
+            for src, url in f['photos']:
+                pages.append((src, url))
+                if src in ('nasa', 'nrao'): pages.append((src, url + ('&' if '?' in url else '?') + 'paged=2'))   # NRAO: few data images per page
+            # never repeat a GREATEST HITS picture in the latest strip
+            try: cl = json.loads((ROOT / '_solarlab/classics.json').read_text()).get(key, [])
+            except Exception: cl = []
+            clk = set(re.sub(r'\W+', '', c.get('title', '').lower()) for c in cl) | set(c.get('link', '') for c in cl)
+            page_items = []
+            for src, url in pages:
+                try: page_items.append((src, _items(url)))
+                except Exception as e: print('  feed page failed', url[-60:], e)
+            if key == 'nrao':
+                # NRAO reuses gallery illustrations under news headlines that never say so: the gallery's own title for the
+                # same file, and the caption on the news page ("This artist's representation ..."), decide
+                gal = []
+                for gp in ('https://public.nrao.edu/gallery/feed/', 'https://public.nrao.edu/gallery/feed/?paged=2'):
+                    try: gal += _items(gp)
+                    except Exception as e: print('  nrao gallery failed', e)
+                page_items.append(('nrao-ban', gal))
+                for _, its in page_items:
+                    for it in its:
+                        if _ != 'nrao-ban' and it.get('link'):
+                            try:
+                                t = re.sub(r'<[^>]+>', ' ', re.sub(r'<script.*?</script>|<style.*?</style>', '', get(it['link'], timeout=40, tries=2).decode('utf-8', 'replace'), flags=re.S))
+                                raw_t = html.unescape(t)
+                                cm = re.search(r'Credit:[ \t]*([^\n]{3,220}?)(?:\s{3,}|\n|$)', raw_t)   # the credit line, before the article's whitespace
+                                t = re.sub(r'\s+', ' ', raw_t); i = t.find('Credit:')
+                                it['desc'] = (t[max(0, i - 300):i] + ' ' + it.get('desc', '')) if i > 0 else it.get('desc', '')
+                                # the page's own credit: NRAO posts carry other observatories' pictures
+                                if cm:
+                                    it['credit'] = cm.group(1).strip()
+                                    if not re.match(r'(?:NSF/)?(?:AUI/)?NSF NRAO|NRAO/AUI/NSF|NSF/AUI/NSF', it['credit']): it['lic'] = 'licence: see source'
+                            except Exception as e: print('  nrao page failed', it['link'][-50:], e)
+            _base = lambda u: re.sub(r'-\d+x\d+$', '', re.sub(r'\?.*$', '', u or '').rsplit('/', 1)[-1].rsplit('.', 1)[0]).lower()
+            banned = set(_base(it['img']) for _, its in page_items for it in its if it.get('img') and (is_artwork(it) or is_site(it)))
+            for src, items in page_items:
+                if src == 'nrao-ban': continue
+                for it in items:
+                    if re.sub(r'\W+', '', it['title'].lower()) in clk or it['link'] in clk: continue
+                    if is_artwork(it) or is_site(it) or _base(it.get('img')) in banned: continue
+                    # NISAR's feed also carries NASA's airborne radar campaigns: a jet on a runway is not the satellite's picture
+                    # NRAO's tab shows what ITS telescopes took: the credit must name one (a Rubin photo led one radio story)
+                    if key == 'nrao' and not re.search(r'NRAO|ALMA|\bVLA\b|VLBA|Green Bank|GBT', it.get('credit', '')): continue
+                    if key == 'nisar' and re.search(r'\bflights?\b|aircraft|C-20A|airborne|UAVSAR', it['title'] + ' ' + it.get('alt', ''), re.I): continue
+                    th = _thumb(src, it['img'])
+                    if not th or th in seen or it['title'] in seen or not _is_sky(src, it) or not _looks_like_sky(th): continue
+                    if _same_picture(th, [p['thumb'] for p in photos]): continue
+                    seen.add(th); seen.add(it['title'])      # ESA posts a release's image and its video under one title
+                    full = th.replace('?w=640', '?w=2400') if th.endswith('?w=640') else _full_for(th)
+                    # A STORY'S LEAD MEDIA CAN BE A MOVIE (2026-10-05: Parker's WISPR footage of comet 3I/ATLAS came through as
+                    # .../Parker-atlas_3i_WISPR_Processed.mp4?w=640 and the page put it in an <img> -- a broken picture). Mark it
+                    # so the page draws a muted looping <video>; the ?w= resize means nothing to a movie, so it goes.
+                    vid = bool(re.search(r'\.(?:mp4|webm|mov|m4v)(?:\?|$)', th, re.I))
+                    if vid: th = full = re.sub(r'\?.*$', '', th)
+                    photos.append({'thumb': th, 'full': full, 'title': it['title'], 'link': it['link'], 't': it['t'],
+                                   'credit': it['credit'] or SRC[src]['credit'], 'lic': it.get('lic') or SRC[src]['lic'], **({'video': True} if vid else {})})
+            for src, url in f['news']:
+                for it in _items(url):
+                    if src == 'noirlab' and not RUBIN_ONLY.search(it['title'] + ' ' + it['desc']): continue
+                    news.append({'title': it['title'], 'link': it['link'], 't': it['t'], 'lead': it['lead'],
+                                 'from': SRC[src]['from'], 'src': src})
+            news = sorted({n['link']: n for n in news}.values(), key=lambda n: -(n['t'] or 0))
+            news = list({n['title']: n for n in reversed(news)}.values())[::-1][:5]   # one per title, the newest
+            for n in news:                    # ESA's feed carries only a picture: the lead is the article's first paragraph
+                n['lead'] = re.sub(r'^Video:\s*[\d:]+\s*', '', n['lead'])      # an ESA video item opens with its running time
+                if n.pop('src', '') in ('esaint', 'esasolo', 'esagaia') and len(n['lead']) < 60:
+                    try: n['lead'] = esa_lead(n['link'])
+                    except Exception as e: print('  esa lead failed', n['link'][-60:], e)
+            photos = sorted(photos, key=lambda n: -(n['t'] or 0))[:18]   # six in the strip, twelve more behind VIEW MORE
+            out[key] = {'photos': photos, 'news': news}
+            print('  media', key, len(photos), 'photos', len(news), 'news')
+      except Exception as e:
+        print('  media', key, 'FAILED', e)
+        if prev_media and key in prev_media: out[key] = prev_media[key]
     return out
 
 
@@ -835,7 +842,7 @@ def main():
     except Exception: pass
     out = {'built': ms(NOW)}
     # each piece is independent: one source down keeps the last good copy of that piece
-    for key, fn in (('webb', bake_webb_schedule), ('parker', bake_parker), ('roman_card', bake_roman_card), ('media', bake_media),
+    for key, fn in (('webb', bake_webb_schedule), ('parker', bake_parker), ('roman_card', bake_roman_card), ('media', lambda: bake_media(prev.get('media') or {})),
                     ('hubble_obs', lambda: bake_mast('HST')),
                     ('chandra', lambda: bake_chandra(prev)), ('voyager', bake_voyager),
                     ('euclid', bake_euclid), ('rubin', bake_rubin), ('far', bake_far), ('solo', bake_solo),
