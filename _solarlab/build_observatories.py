@@ -386,9 +386,19 @@ def _items(url):
         tag = re.search(r'<img[^>]*>', rawu)
         alt = re.search(r'alt="([^"]*)"', tag.group(0)) if tag else None
         enc = re.search(r'<enclosure[^>]+url="([^"]+)"', it) or re.search(r'<media:content[^>]+url="([^"]+)"', it)   # NRAO's gallery carries its picture only as media:content
+        # A STORY LED BY A VIDEO (2026-10-09: four strips showed a YouTube embed as a broken picture): NASA's feed puts the
+        # embed in media:content medium="video"; that is no picture, so the body's first <img> stands in for it.
+        if enc and (re.search(r'medium="video"', enc.group(0)) or re.search(r'youtube\.com|youtu\.be|vimeo\.com', enc.group(1))): enc = None
         txt = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', rawu)).strip()
         lead = first_sentence(txt)
-        cr = re.search(r'Credit[s]?:\s*([^\n<]{3,160}?)(?:\s{2,}|$|\[|\. )', txt)
+        # THE CREDIT ENDS AT ITS OWN ELEMENT (2026-10-09: "Artwork: NASA, ESA, Leah Hustak (STScI) Diligent sleuthing by
+        # astronomers has broken open..." -- the old search ran on the tag-stripped text, where the caption and the first
+        # paragraph had become one run, and cut "L. Jenkins" at the initial). Read it from the HTML, up to the next tag.
+        # Every tag becomes a line break: a caption's text stays on its own line, NASA's "<span>Credits: </span><span>Artwork:
+        # ...</span>" joins across the break, and a credit buried in an alt attribute vanishes with its tag.
+        lines = _h.unescape(re.sub(r'<[^>]+>', '\n', raw))
+        cr = re.search(r'Credit[s]?:\s*([^\n]{3,220}?)\s*(?:\n|$)', lines)
+        if not cr: cr = re.search(r'Credit[s]?:\s*([^\n<]{3,160}?)(?:\s{2,}|$|\[|\. )', txt)
         if cr and re.search(r'Navigation|Photojournal\s+\w+\s+Photojournal|Share|Download', cr.group(1)): cr = None   # page menus scraped as a credit
         try:
             pd = g('pubDate').strip()
@@ -405,6 +415,7 @@ def _items(url):
 def _thumb(src, img):
     # animated GIFs ignore ?w= and run to 3-8 MB (measured 2026-09-24): never on a card
     if not img or re.search(r'\.gif(?:\?|$)', img, re.I): return ''
+    if re.search(r'youtube\.com|youtu\.be|vimeo\.com', img, re.I): return ''   # a video page is not a picture
     # a post that only carries the agency logo has no photo to show
     if re.search(r'meatball|logo|insignia|nasa-worm', img, re.I): return ''
     if src == 'esa':
@@ -439,7 +450,7 @@ IS_SKY = re.compile(r'galax|nebula|cluster|supernova|\bstars?\b|stellar|planet|e
 # alt text or the opening of the description says so, or the credit is an art studio (ESA/ATG medialab).
 ARTIST = re.compile(r"artist\W{0,3}s?\W+(?:concept|impression|illustration|rendering|depiction|conception|view|representation|interpretation)|"
                     r"\billustration\b|\bconcept art\b|\banimation still\b|\brendering of\b|\bartwork\b|\billustrated\b", re.I)
-ART_CREDIT = re.compile(r"ATG medialab|ATG Europe|Science Office|illustration", re.I)
+ART_CREDIT = re.compile(r"ATG medialab|ATG Europe|Science Office|illustration|^\s*(?:artwork|animation|concept|rendering)\s*:", re.I)
 
 
 # ONLY WHAT THEY SEE (user 2026-10-03: "i dont like the land based photos either, i dont want to show the equipment and
