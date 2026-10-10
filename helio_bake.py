@@ -155,35 +155,55 @@ with open(os.path.join(OUT, 'flows.json'), 'w') as f:
                'vx': [round(v, 1) for v in gx.ravel().tolist()], 'vy': [round(v, 1) for v in gy.ravel().tolist()]}, f, separators=(',', ':'))
 print('flows CR', cr, 'speeds p99 %.1f m/s' % np.percentile(np.hypot(gx, gy), 99))
 
-# ---- 4. GONG'S FAR-SIDE MAP: is today's a map at all? ------------------------------------------------------------
+# ---- 4. GONG'S FAR-SIDE MAP: is today's a map at all, and which is the last real one? -----------------------------
 # (2026-10-10, user screenshot: the imager's FAR-SIDE tab showed NSO's "INSUFFICIENT DATA TO PRODUCE FARSIDE MAPS"
-# placeholder.) GONG needs a good day of data for a map; when it is short, NSO publishes that red-on-black picture
-# under the normal filename. The newest file is fetched and measured: the placeholder is ~2.8% pure red, a real map
-# has none. The page reads meta.gong and shows HMI's far side (farside.png above) instead when ok is false.
+# placeholder; then "can you hold on to the last one until theres a new one?") GONG needs a good day of data for a map;
+# when it is short, NSO publishes that red-on-black picture under the normal filename, and it may regenerate the file
+# into a real map within 48 h. The candidate files (every 12 h, newest first) are fetched and measured: the placeholder
+# is ~2-3% pure red, a real map has none. meta.gong records the newest file (ok true/false) and lastGood, the newest
+# REAL map; the page shows lastGood while the newest is the placeholder, and HMI's far side (farside.png above) only
+# when no real map is found at all.
 try:
     G = 'https://farside.nso.edu/oQR/f6r/'
     # farside.nso.edu answers home connections in a quarter of a second and drops every datacenter: GitHub's runners,
-    # Cloudflare's network (the proxy worker gets 522), allorigins, codetabs (all tried 2026-10-10). So from Actions this
-    # check FAILS and meta.gong is simply absent -- the page then behaves as before. Kept for a local run, or a
-    # future vantage that NSO does not block; the proxy route is tried first in case that ever changes.
-    import urllib.parse
-    def getg(u):
-        try: return get('https://proxy.bluishvoid.com/?url=' + urllib.parse.quote(u, safe=''), tries=2)
+    # Cloudflare's network (the proxy worker gets 522), allorigins, codetabs (all tried 2026-10-10). The one vantage that
+    # works is wsrv.nl (images.weserv.nl), an open image proxy NSO does not block: it fetches the file live (404s on an
+    # unpublished map), re-encodes it (the red share survives) and caches it for a year keyed on the full source URL --
+    # so files young enough to be regenerated carry a per-run query, which NSO ignores. Direct fetch stays as the
+    # fallback for a local run.
+    import urllib.parse, urllib.error
+    def getg(u, bust=''):
+        w = 'https://wsrv.nl/?url=' + urllib.parse.quote(u + bust, safe='') + '&output=jpg'
+        try: return get(w, tries=1)
+        except urllib.error.HTTPError as e:
+            if e.code == 404: raise                                    # not published (yet)
+        try: return get(w, tries=1)
         except Exception: return get(u, tries=1)
-    def gong_newest():
-        for back in (0, 1):                                            # this month, then last month at a month's start
-            ym = time.strftime('%Y%m', time.gmtime(time.time() - back * 28 * 86400))
-            html = getg(G + ym + '/')[0].decode('utf8', 'ignore'); days = sorted(set(re.findall(r'mrf6r(\d{6})/', html)))
-            for d in reversed(days):
-                h2 = getg(G + ym + '/mrf6r' + d + '/')[0].decode('utf8', 'ignore'); files = sorted(set(re.findall(r'(mrf6r\d{6}t\d{4}\.jpg)', h2)))
-                if files: return G + ym + '/mrf6r' + d + '/' + files[-1]
-        return None
-    gu = gong_newest(); gi = Image.open(io.BytesIO(getg(gu)[0])).convert('RGB'); ga = np.asarray(gi).astype(int)
-    red = float(((ga[..., 0] > 150) & (ga[..., 1] < 90) & (ga[..., 2] < 90)).mean())
-    gm = re.search(r'mrf6r(\d\d)(\d\d)(\d\d)t(\d\d)(\d\d)', gu)
-    meta['gong'] = {'newest': gu, 'time': '20%s-%s-%sT%s:%s:00Z' % gm.groups(), 'ok': red < 0.005, 'red': round(red, 4),
-                    'what': 'NSO GONG far-side map; ok=false means NSO published its INSUFFICIENT DATA placeholder'}
-    print('gong', gu, 'red share %.4f' % red, 'ok' if red < 0.005 else 'PLACEHOLDER')
+    def gong_cands(days=12):
+        out = []
+        for back in range(days):
+            t = time.gmtime(time.time() - back * 86400); ym = time.strftime('%Y%m', t); d = time.strftime('%y%m%d', t)
+            for hhmm in ('1200', '0000'): out.append((G + ym + '/mrf6r' + d + '/mrf6r' + d + 't' + hhmm + '.jpg', back))
+        return out
+    def gong_time(u):
+        gm = re.search(r'mrf6r(\d\d)(\d\d)(\d\d)t(\d\d)(\d\d)', u); return '20%s-%s-%sT%s:%s:00Z' % gm.groups()
+    def gong_red(body):
+        ga = np.asarray(Image.open(io.BytesIO(body)).convert('RGB')).astype(int)
+        return float(((ga[..., 0] > 150) & (ga[..., 1] < 90) & (ga[..., 2] < 90)).mean())
+    newest = None; good = None; run_bust = '?r=' + time.strftime('%Y%m%d%H', time.gmtime())
+    for u, back in gong_cands():
+        try: body = getg(u, run_bust if back <= 2 else '')[0]       # young files may still turn into a real map
+        except urllib.error.HTTPError as e:
+            if e.code == 404: continue
+            raise
+        red = gong_red(body); ok = red < 0.005
+        print('gong', u.rsplit('/', 1)[-1], 'red share %.4f' % red, 'ok' if ok else 'PLACEHOLDER')
+        if newest is None: newest = (u, red, ok)
+        if ok: good = u; break
+    if newest is None: raise RuntimeError('no GONG file published in %d days' % 12)
+    meta['gong'] = {'newest': newest[0], 'time': gong_time(newest[0]), 'ok': newest[2], 'red': round(newest[1], 4),
+                    'lastGood': good, 'lastGoodTime': gong_time(good) if good else None,
+                    'what': 'NSO GONG far-side map; ok=false means NSO published its INSUFFICIENT DATA placeholder; lastGood is the newest real map (checked via wsrv.nl)'}
 except Exception as e:
     print('gong check failed', e)
 
