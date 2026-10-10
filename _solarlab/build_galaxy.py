@@ -149,13 +149,27 @@ json.dump({'what': 'the Milky Way face-on; galactocentric kpc, Galactic Centre a
 print('milky way: %d clusters, %d masers, %d arms' % (len(mw_cl), len(masers), len(arms)))
 
 # ---- 3. LOCAL GROUP: galactic kpc, Milky Way at the origin -------------------------------------------------------
+# SOURCE SWITCHED 2026-10-10 (user: "is there not a better source?"): Pace 2024, the Local Volume Database
+# (github.com/apace7/local_volume_database, CC0), the maintained census current work cites -- every dwarf found since
+# McConnachie 2012 (Antlia II, Crater II, the ultra-faints), distances with references, and each dwarf's HOST.
+#   lvdb_dwarf_mw.csv, lvdb_dwarf_m31.csv, lvdb_dwarf_local_field.csv from raw.githubusercontent.com/apace7/local_volume_database/main/data/
+# Kept: confirmed galaxies within 1.5 Mpc whose host is the Milky Way, the LMC, Andromeda, Triangulum, or none.
+# Andromeda and Triangulum themselves are added by hand (they are not dwarfs). The 2012 census stays for the record.
+HOSTS = {'mw': 'MW', 'lmc': 'MW', 'm_031': 'M31', 'm_033': 'M31', '': 'Rest'}
 lg = []
-for g in jload('localgroup.json'):
-    if g['D'] is None: continue
-    nm = (g['Name'] or '').strip(); sub = (g['SubG'] or '').strip()
-    if nm in ('The Galaxy', 'Canis Major'): continue
-    x, y, z = eq_to_gal_xyz(g['RAJ2000'], g['DEJ2000'], g['D'])
-    lg.append([nm, r1(x), r1(y), r1(z), g['VMag'] if g['VMag'] is not None else -6, (g['MType'] or '').strip(), sub])
+for fn in ('lvdb_dwarf_mw.csv', 'lvdb_dwarf_m31.csv', 'lvdb_dwarf_local_field.csv'):
+    with open(os.path.join(SRC, fn), newline='') as f:
+        for r in csv.DictReader(f):
+            if r['confirmed_galaxy'] != '1' or r['host'] not in HOSTS: continue
+            try: d = float(r['distance']); mv = float(r['M_V'] or -6)
+            except ValueError: continue
+            if d > 1500: continue
+            x, y, z = eq_to_gal_xyz(float(r['ra']), float(r['dec']), d)
+            rh = float(r['rhalf_physical']) if r['rhalf_physical'] else 0
+            lg.append([r['name'], r1(x), r1(y), r1(z), round(mv, 1), '', HOSTS[r['host']], int(rh)])
+for nm, ra, dec, d, mv in (('Andromeda', 10.6847, 41.2690, 783, -21.8), ('Triangulum', 23.4621, 30.6602, 809, -18.8)):
+    x, y, z = eq_to_gal_xyz(ra, dec, d); lg.append([nm, r1(x), r1(y), r1(z), mv, 'spiral', 'M31', 0])
+print('local group (LVDB): %d galaxies' % len(lg), {h: sum(1 for g in lg if g[6] == h) for h in ('MW', 'M31', 'Rest')})
 # the discs of the big ones, as seen from above the Galactic plane: each galaxy's sky orientation (position angle east
 # of north, inclination) gives its disc normal; the disc is a circle of radius R around the centre, rotated into
 # Galactic xyz and projected on xy. (2026-10-10, user: "the local group feels very minimal still")
@@ -175,7 +189,7 @@ discs = [disc('Andromeda', 10.6847, 41.2690, 783, 38, 77, 34), disc('Triangulum'
          disc('LMC', 80.8937, -69.7561, 51, 170, 35, 4.5), disc('SMC', 13.1867, -72.8286, 64, 45, 65, 2.5),
          {'name': 'Milky Way', 'cx': R0, 'cy': 0.0, 'R': 15, 'pts': [[r1(R0 + 15 * math.cos(2*math.pi*k/48)), r1(15 * math.sin(2*math.pi*k/48))] for k in range(48)]}]
 json.dump({'what': 'the Local Group; heliocentric Galactic xyz in kpc (the Sun sits 8 kpc from the Milky Way centre, invisible at this scale); discs = the big galaxies projected on the Galactic plane from their sky orientation',
-           'galaxies': lg, 'discs': discs, 'credit': 'McConnachie 2012, The Observed Properties of Dwarf Galaxies in and around the Local Group'},
+           'galaxies': lg, 'discs': discs, 'barycentre_frac': 0.58, 'credit': 'Local Volume Database (Pace 2024, CC0) · discs: de Vaucouleurs orientations'},
           open(os.path.join(OUT, 'localgroup.json'), 'w'), separators=(',', ':'))
 print('local group: %d galaxies' % len(lg))
 
