@@ -62,9 +62,10 @@ def sea_ice(hemi):
     rank = 1 + sum(1 for val, y in lower if val < v)
     rec = lower[0] if lower else None
     # each complete year's minimum: the record-low year for the season's low point
-    ymin = {}
+    ymin, ymax = {}, {}
     for d, val in rows.items():
         if d.year < last.year and d.year > 1978 and (d.year not in ymin or val < ymin[d.year][0]): ymin[d.year] = (val, d)
+        if d.year < last.year and d.year > 1978 and (d.year not in ymax or val > ymax[d.year][0]): ymax[d.year] = (val, d)
     ry = min(ymin, key=lambda y: ymin[y][0])
     # this year so far: its lowest (N: the September minimum) and highest
     this = sorted((d, val) for d, val in rows.items() if d.year == last.year)
@@ -76,6 +77,10 @@ def sea_ice(hemi):
             'thisMin': {'extent': round(lo_this[1], 3), 'date': lo_this[0].isoformat()},
             'thisMax': {'extent': round(hi_this[1], 3), 'date': hi_this[0].isoformat()},
             'recordMinYear': {'year': ry, 'extent': round(ymin[ry][0], 3), 'date': ymin[ry][1].isoformat()},
+            # EVERY YEAR'S LOW POINT AND PEAK (2026-10-09, user: "can earth systems show sea ice minimums"): [year, extent, date]
+            # for each complete year; the page adds this year's from thisMin/thisMax and says whether its season is over
+            'mins': [[y, round(ymin[y][0], 3), ymin[y][1].isoformat()] for y in sorted(ymin)],
+            'maxs': [[y, round(ymax[y][0], 3), ymax[y][1].isoformat()] for y in sorted(ymax)],
             'clim': [[k, clim[k]['p10'], clim[k]['p50'], clim[k]['p90']] for k in sorted(clim)],
             'series': {str(last.year): series(last.year), str(last.year - 1): series(last.year - 1), str(ry): series(ry)}}
 
