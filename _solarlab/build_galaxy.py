@@ -138,11 +138,12 @@ for arm, pts in by_arm.items():
     pitch = math.degrees(math.atan(abs(k) * 180 / math.pi))
     lo, hi = float(beta.min()) - 8, float(beta.max()) + 8
     pts_out = [[r2(math.exp(a + k*bb) * math.cos(math.radians(bb))), r2(math.exp(a + k*bb) * math.sin(math.radians(bb)))] for bb in np.linspace(lo, hi, 60)]
-    arms.append({'name': arm, 'n': len(pts), 'pitch': round(pitch, 1), 'pts': pts_out})
+    arms.append({'name': arm, 'n': len(pts), 'pitch': round(pitch, 1), 'pts': pts_out, 'a': round(float(a), 5), 'k': round(float(k), 6), 'lo': round(lo, 1), 'hi': round(hi, 1)})
     print('  arm %-20s %3d masers  pitch %.1f deg  beta %.0f..%.0f' % (arm, len(pts), pitch, lo, hi))
 json.dump({'what': 'the Milky Way face-on; galactocentric kpc, Galactic Centre at the origin, Sun at (-8.15, 0); x toward the Sun is negative, y along l=90',
            'R0': R0, 'clusters': mw_cl, 'masers': masers, 'arms': arms,
            'bar': {'half_len': 5.0, 'half_wid': 1.5, 'angle': 28, 'note': 'model: a bar ~10 kpc long at ~28 deg to the Sun-centre line (Wegg+ 2015)'},
+           'arm_model': 'each arm: ln R = a + k * beta (beta = atan2(y, x) in degrees, unwrapped around the arm), measured over beta lo..hi; the lab extends it beyond that span as a fading model',
            'credit': 'maser parallaxes: Reid+ 2019 (BeSSeL/VERA) · clusters: Hunt & Reffert 2023 (Gaia DR3) · arms: log spirals fitted here to the masers'},
           open(os.path.join(OUT, 'milkyway.json'), 'w'), separators=(',', ':'))
 print('milky way: %d clusters, %d masers, %d arms' % (len(mw_cl), len(masers), len(arms)))
