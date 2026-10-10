@@ -136,6 +136,8 @@ function label(x, y, text, o){
   ctx.textAlign = o.align || 'center'; ctx.textBaseline = o.base || 'middle';
   if ('letterSpacing' in ctx) ctx.letterSpacing = (size * ls) + 'px';
   if (o.shadow !== false){ ctx.shadowColor = 'rgba(10,17,34,.95)'; ctx.shadowBlur = 4; }
+  /* a dark halo under the letters: labels sit on the bright disc of the NASA picture (user: "the text is hard to read") */
+  ctx.lineJoin = 'round'; ctx.strokeStyle = 'rgba(10,17,34,.78)'; ctx.lineWidth = Math.max(2, size * .3); ctx.strokeText(text, x, y);
   ctx.fillText(text, x, y); ctx.restore();
 }
 function ring(cx, cy, r, color, width, alpha){ ctx.save(); ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.lineWidth = width; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.stroke(); ctx.restore(); }
@@ -195,6 +197,13 @@ function drawNeighborhood(d, v){
    Registration comes from that grid: the Galactic Centre is the picture's centre and the Sun marker sits 1,070 of
    5,600 px straight below it, which the picture calls ~26,000 ly; here that distance is R0 = 8.15 kpc, so the picture is
    scaled to put its Sun on ours. Its longitude 90 is to the left, like this frame. The measurements sit crisp on top. */
+function mulberry(seed){ return function(){ seed |= 0; seed = seed + 0x6D2B79F5 | 0; var t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function starfield(seed, n){
+  var rnd = mulberry(seed);
+  for (var i = 0; i < n; i++){ var x = rnd() * W, y = rnd() * H, b = rnd(); var r = b > .97 ? 1.7 : b > .85 ? 1.2 : .75;
+    ctx.globalAlpha = .3 + .65 * rnd(); ctx.fillStyle = b > .9 ? '#ffffff' : (rnd() < .5 ? '#dfe8ff' : '#f6efe0'); ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill(); }
+  ctx.globalAlpha = 1;
+}
 var MW_IMG = { url: 'https://cdn.bluishvoid.com/galaxy/milkyway_hurt.webp', px: 2048, gc: [1024, 1024], sunDy: 1070 * 2048 / 5600, img: null, failed: false };
 function milkyWayPicture(){
   if (MW_IMG.img || MW_IMG.failed) return MW_IMG.img;
@@ -204,13 +213,16 @@ function milkyWayPicture(){
 function drawMilkyWay(d, v){
   var s = v.s, R0 = d.R0;
   var G = function(X, Y){ return [v.cx - Y * s, v.cy - X * s]; };   /* galactocentric: centre at (0,0), Sun at (-R0, 0) -> below */
+  starfield(20261010, Math.round(W * H / 420));          /* behind the picture: it shows past the disc's feathered edge */
   var pic = milkyWayPicture();
   if (pic){ var k = (R0 * s) / MW_IMG.sunDy, side = MW_IMG.px * k;        /* picture px -> screen px, pinned by the Sun's distance */
-    ctx.save(); ctx.beginPath(); ctx.arc(v.cx, v.cy, side * .49, 0, Math.PI*2); ctx.clip();
-    ctx.drawImage(pic, v.cx - MW_IMG.gc[0] * k, v.cy - MW_IMG.gc[1] * k, side, side); ctx.restore();
-    /* the picture's black square dissolves into the stage's navy */
-    var fe = ctx.createRadialGradient(v.cx, v.cy, side * .36, v.cx, v.cy, side * .49); fe.addColorStop(0, 'rgba(10,17,34,0)'); fe.addColorStop(1, 'rgba(10,17,34,1)');
-    ctx.fillStyle = fe; ctx.fillRect(0, 0, W, H); }
+    /* composited ADDITIVELY: the picture's black is then transparent, so the starfield behind shows wherever the
+       picture is dark (user: "add stars to the borders of the image beyond the galaxy"); a soft radial alpha on an
+       offscreen copy hides the square's edge and its jpeg-dark noise */
+    if (!MW_IMG.off || MW_IMG.off.width !== Math.round(side * DPR)){ var off = document.createElement('canvas'); off.width = off.height = Math.round(side * DPR); var ox = off.getContext('2d'); ox.setTransform(DPR, 0, 0, DPR, 0, 0);
+      ox.drawImage(pic, 0, 0, side, side); ox.globalCompositeOperation = 'destination-in';
+      var fa = ox.createRadialGradient(side/2, side/2, side * .40, side/2, side/2, side * .50); fa.addColorStop(0, 'rgba(0,0,0,1)'); fa.addColorStop(1, 'rgba(0,0,0,0)'); ox.fillStyle = fa; ox.fillRect(0, 0, side, side); MW_IMG.off = off; }
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.drawImage(MW_IMG.off, v.cx - MW_IMG.gc[0] * k, v.cy - MW_IMG.gc[1] * k, side, side); ctx.restore(); }
   else { var g = ctx.createRadialGradient(v.cx, v.cy, 0, v.cx, v.cy, 15 * s); g.addColorStop(0, 'rgba(255,226,180,.3)'); g.addColorStop(.5, 'rgba(130,170,235,.08)'); g.addColorStop(1, 'rgba(120,160,230,0)'); ctx.fillStyle = g; ctx.fillRect(0, 0, W, H); }
   /* the measurements, crisp on top: Gaia clusters pale (blue when young), masers gold */
   d.clusters.forEach(function(c){ var q = G(c[0], c[1]); var young = c[2] < 7.6; ctx.globalAlpha = young ? .7 : .38; ctx.fillStyle = young ? '#bfe0ff' : '#f2e7cf'; ctx.beginPath(); ctx.arc(q[0], q[1], young ? 1.15 : 0.85, 0, Math.PI*2); ctx.fill(); });
@@ -232,7 +244,7 @@ function drawMilkyWay(d, v){
     var q = G(far[0], far[1]); var nm = a.name.toUpperCase().replace(' (ORION)', ' ARM').replace(' (FAR SIDE)', ' ARM, FAR SIDE'); if (nm.indexOf('ARM') < 0) nm += ' ARM';
     var ux = q[0] - v.cx, uy = q[1] - v.cy, L = Math.hypot(ux, uy) || 1; var x = q[0] + ux / L * 14, y = q[1] + uy / L * 14;
     if (!free(x, y, nm.length * 6.5 + 10, 14)) { x = q[0] - ux / L * 14; y = q[1] - uy / L * 14; if (!free(x, y, nm.length * 6.5 + 10, 14)) return; }
-    label(x, y, nm, {size:9.5, color:'#cfe2ff', alpha:.85, ls:.14}); });
+    label(x, y, nm, {size:10, color:'#e4eeff', alpha:.95, ls:.14}); });
   label(W - 14, H - 14, 'THE PICTURE: NASA/JPL-CALTECH/R. HURT, FROM SPITZER’S INFRARED SURVEY OF THE DISC · GOLD: MASERS WITH RADIO PARALLAXES · PALE DOTS: GAIA CLUSTERS, BLUE WHEN YOUNG', {size:8, alpha:.5, align:'right', ls:.1});
 }
 
