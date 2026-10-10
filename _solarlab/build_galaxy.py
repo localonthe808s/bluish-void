@@ -60,7 +60,7 @@ with open(os.path.join(SRC, 'hyg.csv'), newline='') as f:
     for r in csv.DictReader(f):
         try: d = float(r['dist']); mag = float(r['mag'])
         except ValueError: continue
-        if d >= 99999 or d > 1000 / PC_LY: continue           # inside 1,000 ly
+        if d >= 99999 or d > 1750 / PC_LY: continue           # out to the frame's corners (1,000-ly ring, 1.75x to the corner)
         if r['proper'] == 'Sol': continue
         if not (mag <= 6.5 or d < 12): continue                # naked-eye, plus everything within 40 ly
         x, y, z = eq_to_gal_xyz(float(r['ra']) * 15, float(r['dec']), d) * PC_LY
@@ -101,7 +101,7 @@ rad = []
 rows = [ln.split('\t') for ln in open(os.path.join(SRC, 'radcliffe.tab')).read().strip().split('\n')[1:]]
 for i in range(0, len(rows), 8):
     x, y, z = (float(v) * PC_LY for v in rows[i][:3]); rad.append([r1(x), r1(y), r1(z)])
-json.dump({'what': 'the solar neighborhood, 1,000 light-years across; heliocentric Galactic xyz in light-years (x to the Galactic Centre, y along rotation l=90, z to the north Galactic pole)',
+json.dump({'what': 'the solar neighborhood, 1,000 light-years radius (stars and clusters kept to 1,750 ly for the corners); heliocentric Galactic xyz in light-years (x to the Galactic Centre, y along rotation l=90, z to the north Galactic pole)',
            'stars': stars, 'named': named, 'clusters': clusters, 'bubble': bubble, 'radcliffe': rad,
            'credit': 'HYG v4.1 (CC BY-SA) · Gaia DR3 clusters: Hunt & Reffert 2023 · Local Bubble shell: Pelgrims+ 2020 · Radcliffe Wave: Alves+ 2020'},
           open(os.path.join(OUT, 'neighborhood.json'), 'w'), separators=(',', ':'))
