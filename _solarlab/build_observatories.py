@@ -438,7 +438,10 @@ def _thumb(src, img):
 NOT_SKY = re.compile(r'launch|rocket|falcon|booster|lift-?off|launch ?pad|clean ?room|technician|engineer|\bcrew\b|\bteam\b|'
                      r'ceremony|briefing|amendment|\broses\b|solicitation|funding|proposals? due|landing|install|assembl|integrat|deploy|antenna|visor|hardware|thermal protection|'
                      r'\btps\b|heat shield|fitting|spacecraft|mission control|logo|meatball|insignia|astronaut|facility|'
-                     r'trajectory animation|mid-course|artist.s (?:concept|illustration|rendering) of (?:the )?(?:roman|parker|webb|hubble)', re.I)
+                     r'trajectory animation|mid-course|artist.s (?:concept|illustration|rendering) of (?:the )?(?:roman|parker|webb|hubble)|'
+                     # 2026-10-10 (user: "hubble has a model of itself in the latest photos, i dont want that for any of them, just space photos"):
+                     # NASA's education turntable of two telescopes, a citizen-science cartoon, a bridge, an infographic
+                     r'turntable|/education/|transparent background|\bvs\.? |citizen scien|\bbridges?\b|infographic|checks? in\b', re.I)
 IS_SKY = re.compile(r'galax|nebula|cluster|supernova|\bstars?\b|stellar|planet|exoplanet|\bmoons?\b|jupiter|saturn|uranus|neptune|'
                     r'volcan|erupt|lava|comet|asteroid|kuiper|\bio\b|europa|ganymede|callisto|pluto|charon|arrokoth|aurora|\bsun\b|solar wind|corona|\bcme\b|wispr|flare|spectr|light curve|\bdata\b|chart|graph|'
                     r'\bplot\b|\bmap\b|visuali|simulat|deep field|universe|cosmic|\bdust\b|black hole|quasar|lens|potm|infrared|'
@@ -448,7 +451,7 @@ IS_SKY = re.compile(r'galax|nebula|cluster|supernova|\bstars?\b|stellar|planet|e
 # NO ARTIST'S CONCEPTS (user 2026-10-03: "make a rule to never show artist concepts as photos for the satellites"). A
 # picture strip under a telescope reads as what it SAW; an illustration there is a fake photo. Dropped when the title,
 # alt text or the opening of the description says so, or the credit is an art studio (ESA/ATG medialab).
-ARTIST = re.compile(r"artist\W{0,3}s?\W+(?:concept|impression|illustration|rendering|depiction|conception|view|representation|interpretation)|"
+ARTIST = re.compile(r"artist\W{0,3}s?\W+(?:concept|impression|illustration|rendering|depiction|conception|view|representation|interpretation|animation)|"
                     r"\billustration\b|\bconcept art\b|\banimation still\b|\brendering of\b|\bartwork\b|\billustrated\b", re.I)
 ART_CREDIT = re.compile(r"ATG medialab|ATG Europe|Science Office|illustration|^\s*(?:artwork|animation|concept|rendering)\s*:", re.I)
 
@@ -462,7 +465,7 @@ SITE = re.compile(r"\b(?:antennas?|dish(?:es)?|signs?|street ?light|tower|transp
                   r"facility|clean ?room|open house|staff|meeting|ceremony|summit|dome|mirrors?|technicians?|engineers?|"
                   r"under the stars|at night)\b", re.I)
 # + array "config" shots (VLA in D configuration), planes, pre-2000 years (historic photos), camera file codes (J3B6463, IMG 1234)
-SITE_FN = re.compile(r"config|\bplane\b|aircraft|\b(?:18|19)\d\d\b|\b[a-z]\d[a-z]\d{4}\b|\bimg \d{3,}|night|pano|moonset|moonrise|\bdsc\s?\d|header|graphic|collage|open house|staff|\baas\b|\bill\s?\d|\bill\b|pig\s?\d", re.I)
+SITE_FN = re.compile(r"config|mirror|\bplane\b|aircraft|\b(?:18|19)\d\d\b|\b[a-z]\d[a-z]\d{4}\b|\bimg \d{3,}|night|pano|moonset|moonrise|\bdsc\s?\d|header|graphic|collage|open house|staff|\baas\b|\bill\s?\d|\bill\b|pig\s?\d", re.I)
 
 
 # people at work (the alt text describes them -- NOT NASA's crop=faces URL hint, which is on every image), a spacecraft drawn "in space", and
@@ -493,6 +496,8 @@ def _is_sky(src, it):
         if not RUBIN_ONLY.search(blob) or NOT_RUBIN_SKY.search(it.get('title', '') + ' ' + it.get('alt', '')): return False
     words = ' '.join([it.get('alt', ''), it.get('title', ''), it.get('img', ''), it.get('desc', '')[:300]])
     if NOT_SKY.search(it.get('alt', '') + ' ' + it.get('img', '') + ' ' + it.get('title', '')): return False
+    # an ESA explainer card ("Why Solar Orbiter is angling towards the Sun's poles") is an infographic, not a picture of the sky
+    if src.startswith('esa') and re.match(r'why\b', it.get('title', ''), re.I): return False
     # a NASA mission blog's illustrations are of the SPACECRAFT (e.g. Parker drawn against the Sun)
     if src == 'nasa' and re.search(r'illustrat|artist|concept|swingby|closeup|rendering', it.get('alt', '') + ' ' + it.get('img', ''), re.I): return False
     return src == 'esa' or bool(IS_SKY.search(words))
