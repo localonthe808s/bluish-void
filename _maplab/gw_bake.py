@@ -51,6 +51,11 @@ for rec in alerts[:40]:
     if pa:
         try: rec['cls'] = {k: round(v, 4) for k, v in jget(files[pa[0]]).items()}
         except Exception: pass
+    if 'mchirp_source.json' in files:   # the chirp-mass bin the alert publishes (suns), most likely bin's edges
+        try:
+            mc = jget(files['mchirp_source.json']); pr = mc['probabilities']; k = max(range(len(pr)), key=lambda i: pr[i])
+            if pr[k] > 0: rec['mchirp'] = [mc['bin_edges'][k], mc['bin_edges'][k + 1], round(pr[k], 3)]
+        except Exception: pass
     if 'em_bright.json' in files:
         try: eb = jget(files['em_bright.json']); rec['hasNS'] = eb.get('HasNS'); rec['hasRemnant'] = eb.get('HasRemnant')
         except Exception: pass
