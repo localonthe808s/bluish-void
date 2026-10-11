@@ -28,14 +28,15 @@ os.makedirs(OUT, exist_ok=True)
 J = 'http://jsoc.stanford.edu'
 UA = {'User-Agent': 'bluishvoid.com helioseismology bake (+https://bluishvoid.com)'}
 
-def get(url, tries=3):
+def get(url, tries=5):
+    # 5 tries, waits growing 10 -> 40 s (2026-10-11: JSOC's listing timed out three times in a row once and failed the run)
     for k in range(tries):
         try:
             with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=60) as r:
                 return r.read(), r.headers.get('Last-Modified')
         except Exception as e:
             if k == tries - 1: raise
-            time.sleep(5)
+            time.sleep(min(40, 10 * (k + 1)))
 
 def newest(listing_url, pattern):
     html = get(listing_url + '?C=M;O=D')[0].decode('utf8', 'ignore')
