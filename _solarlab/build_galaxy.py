@@ -250,9 +250,37 @@ dens = gaussian_filter(grid, sigma=10.0 / cell)
 dens = dens / dens.mean() - 1.0                                     # overdensity delta
 gy, gx = np.gradient(dens)                                          # d/dy (rows), d/dx (cols), per cell
 mag = np.hypot(gx, gy); print('cf4: %d groups kept, density grid %dx%d, delta max %.1f, |grad| p99 %.3f' % (len(cf_pts), NG, NG, dens.max(), np.percentile(mag, 99)))
+# ---- 4c. THE OFFICIAL FLOW AND BOUNDARY (2026-10-11 review, user: "confirm you drew laniakea correctly"). The density-
+# gradient streamlines above drained everything INTO VIRGO (the nearest density peak), the reverse of the measured flow,
+# where Virgo and the Local Group fall toward the Great Attractor. Replaced by the Cosmicflows team's own products
+# (projets.ip2i.in2p3.fr/cosmicflows, keyless):
+#   CF4_new_64-z008_velocity.fits     Courtois+ 2023 A&A 670 L15: Wiener-filter velocity, 3 x 64^3 over 1000 Mpc/h, axes AND
+#                                     components (SGZ, SGY, SGX), values x52 = km/s. At us it gives 550 km/s within ~30 deg
+#                                     of the CMB dipole; the component order was settled by flow-basin consistency (18/24
+#                                     Laniakea seeds stay in Laniakea with (Z,Y,X) vs 5/22 with (X,Y,Z)).
+#   CF4_new_128-z008_BoA.fits         Dupuy & Courtois 2023: basins of attraction, 128^3 over 1000 Mpc/h, label 1 = LANIAKEA
+#                                     (we are in it; Virgo, Fornax, Antlia, Centaurus, Norma/GA, Pavo-Indus in; Perseus,
+#                                     Coma, Shapley out; Hydra just outside). Mpc/h -> Mpc with h = 0.75 (CF4's scale).
+from astropy.io import fits
+from scipy.ndimage import map_coordinates
+hh = 0.75; VEL = fits.open(os.path.join(SRC, 'CF4_new_64-z008_velocity.fits'))[0].data.astype(float) * 52
+BOA = fits.open(os.path.join(SRC, 'CF4_new_128-z008_BoA.fits'))[0].data
+LV = 150; NV = 60; cv_ = (np.arange(NV) + .5) / NV * 2 * LV - LV       # Mpc, the plane SGZ = 0
+VX = np.zeros((NV, NV)); VY = np.zeros((NV, NV)); LAN = np.zeros((NV, NV), int)
+for i, yy in enumerate(cv_):
+    for j, xx in enumerate(cv_):
+        px, py = xx * hh, yy * hh                                              # Mpc/h
+        idx = [[0 / 15.625 + 31.5], [py / 15.625 + 31.5], [px / 15.625 + 31.5]]
+        VX[i, j] = map_coordinates(VEL[2], idx, order=1)[0]; VY[i, j] = map_coordinates(VEL[1], idx, order=1)[0]
+        bi = int(np.floor(py / 7.8125 + 64)); bj = int(np.floor(px / 7.8125 + 64))
+        LAN[i, j] = 1 if (BOA[63, bi, bj] == 1 or BOA[64, bi, bj] == 1) else 0
+vs = np.percentile(np.hypot(VX, VY), 99)
+print('cf4 official: |v| p99 %.0f km/s, Laniakea cells in the plane %d of %d' % (vs, LAN.sum(), NV * NV))
+flow = {'L': LV, 'n': NV, 'vx': [[round(float(v / vs), 3) for v in row] for row in VX], 'vy': [[round(float(v / vs), 3) for v in row] for row in VY],
+        'lan': [''.join(str(v) for v in row) for row in LAN], 'vscale_kms': round(float(vs))}
 json.dump({'what': 'Cosmicflows-4 groups: supergalactic xyz in Mpc from MEASURED distance moduli (inverse-variance group means), members; plus the overdensity field in the supergalactic plane (|SGZ|<40 Mpc, zone of avoidance filled from neighbouring latitudes, 10 Mpc smoothing) and its gradient on a grid spanning +-140 Mpc',
-           'groups': cf_pts, 'grid': {'L': L, 'n': NG, 'delta': [[round(float(v), 2) for v in row] for row in dens], 'gx': [[round(float(v), 3) for v in row] for row in gx], 'gy': [[round(float(v), 3) for v in row] for row in gy]},
-           'landmarks': lm, 'credit': 'Cosmicflows-4, Tully+ 2023 (55,877 galaxies with measured distances); flow: linear theory on the catalog\'s own density'},
+           'groups': cf_pts, 'flow': flow, 'grid': {'L': L, 'n': NG, 'delta': [[round(float(v), 2) for v in row] for row in dens], 'gx': [[round(float(v), 3) for v in row] for row in gx], 'gy': [[round(float(v), 3) for v in row] for row in gy]},
+           'landmarks': lm, 'credit': 'Cosmicflows-4, Tully+ 2023 (55,877 galaxies with measured distances); flow: Courtois+ 2023 CF4 velocity field; Laniakea: Dupuy & Courtois 2023 basins of attraction'},
           open(os.path.join(OUT, 'laniakea_cf4.json'), 'w'), separators=(',', ':'))
 
 # ---- 5. COSMIC WEB: SDSS galaxies in a 2.5-degree equatorial stripe ------------------------------------------------
@@ -314,7 +342,7 @@ sm = np.array(cmb); print('cmb along the equator: std %.1f uK, median step %.1f 
 table7 = [[round(z, 2), round(dc(z, 800), 3)] for z in np.arange(0, 7.001, 0.02)]
 json.dump({'what': 'the observable universe in the same equatorial slice: SDSS quasars [RA deg, z] to z 7; the microwave background along the celestial equator (WMAP 9-yr ILC, microkelvin, one per degree of RA); horizons in billions of light-years (Planck 2018 cosmology, Davis & Lineweaver 2004)',
            'quasars': qs, 'cmb_uK': cmb, 'comoving_gly': table7,
-           'horizons': {'hubble': 14.4, 'event': 16.0, 'last_scattering': 45.7, 'particle': 46.5},
+           'horizons': {'hubble': 14.4, 'event': 16.0, 'last_scattering': 45.2, 'particle': 46.5},
            'farthest': [['JADES-GS-z14-0', 14.32, 33.8], ['MoM-z14', 14.44, 33.9]],
            'beyond': 'the whole universe is at least ~250 times wider than the observable one if finite (Vardanyan, Trotta & Silk 2011)',
            'credit': 'SDSS DR18 quasars · WMAP 9-year ILC map (NASA / LAMBDA) · Planck 2018 · Davis & Lineweaver 2004'},
