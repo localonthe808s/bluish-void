@@ -7,7 +7,13 @@
    it with its own clock (Earth View's timeline, TONIGHT's night scrubber), so paused it shows the true face for that
    minute and played it spins at the played rate.
 
-   BVGlobe.make({ size, cx, r, onframe(dataUrl, sub) }) -> { set(ms) }. cx, r: disc centre and radius as fractions of the
+   POLE MODE (o.pole, 2026-10-11, user: "in earth view were looking at the earth from the poles right? that wouldnt be how
+   the earth would look at this angle"): both labs draw space from ABOVE the north pole, so the globe is the northern
+   hemisphere seen from over the pole, the noon meridian pointed at the drawn Sun (set(ms, sunAngleDeg), maths angle,
+   counter-clockwise, y up); east runs counter-clockwise, the way Earth turns seen from the north. onframe also gets the
+   pole-view centroid {lat:90, lon} that the labs' orthographic pin code expects.
+
+   BVGlobe.make({ size, cx, r, onframe(dataUrl, sub), pole }) -> { set(ms[, sunAngleDeg]) }. cx, r: disc centre and radius as fractions of the
    square canvas, matching the EPIC image geometry each lab already uses. Renders at most ~15 times a second and only when
    the face has turned by 0.2 degrees or more. Falls back silently (the lab keeps its EPIC still) if the map cannot load. */
 (function(){
@@ -39,9 +45,14 @@
     var N = o.size || 512, cx = (o.cx == null ? 0.5 : o.cx) * N, rr = (o.r || 0.392) * N;
     var cv = document.createElement('canvas'); cv.width = cv.height = N; var g = cv.getContext('2d');
     var img = g.createImageData(N, N), px = img.data;
-    var grid = null, gridLat = null, idx = [], lastLon = null, lastLat = null, want = null, busy = false, lastT = 0;
+    var grid = null, gridLat = null, idx = [], lastLon = null, lastLat = null, want = null, wantAng = 0, busy = false, lastT = 0, POLE = !!o.pole;
     /* per disc pixel: latitude and longitude offset for the current centre latitude (changes slowly: rebuild at 0.25 deg) */
     function build(lat0){
+      if (POLE){ gridLat = lat0; idx = []; grid = [];   /* from over the north pole: rho = cos(lat), angle = longitude offset */
+        for (var y = 0; y < N; y++) for (var x = 0; x < N; x++){ var u = (x + 0.5 - cx) / rr, v = (cx - y - 0.5) / rr, rho = Math.sqrt(u * u + v * v); if (rho >= 1) continue;
+          var lat = Math.acos(rho), th = Math.atan2(v, u) / D, shade = 0.72 + 0.28 * Math.pow(Math.sqrt(1 - rho * rho), 0.6);
+          idx.push((y * N + x) * 4); grid.push(((90 - lat / D) / 180 * TH) | 0, th, shade); }
+        return; }
       gridLat = lat0; var p0 = lat0 * D, sp = Math.sin(p0), cp = Math.cos(p0); idx = []; grid = [];
       for (var y = 0; y < N; y++) for (var x = 0; x < N; x++){
         var u = (x + 0.5 - cx) / rr, v = (cx - y - 0.5) / rr, rho = Math.sqrt(u * u + v * v); if (rho >= 1) continue;
@@ -52,25 +63,26 @@
       }
     }
     function draw(sub){
-      if (gridLat == null || Math.abs(sub.lat - gridLat) > 0.25) build(sub.lat);
+      if (gridLat == null || (!POLE && Math.abs(sub.lat - gridLat) > 0.25)) build(sub.lat);
+      var off = POLE ? sub.lon - wantAng : sub.lon;   /* pole: screen angle th shows longitude subLon + (th - sunAngle) */
       for (var k = 0, j = 0; k < idx.length; k++, j += 3){
-        var row = Math.min(TH - 1, grid[j]), lon = sub.lon + grid[j + 1];
+        var row = Math.min(TH - 1, grid[j]), lon = off + grid[j + 1];
         var col = ((((lon + 180) / 360) % 1 + 1) % 1 * TW) | 0, s = (row * TW + col) * 4, d = idx[k], sh = grid[j + 2];
         px[d] = TEX[s] * sh; px[d + 1] = TEX[s + 1] * sh; px[d + 2] = TEX[s + 2] * sh; px[d + 3] = 255;
       }
       g.putImageData(img, 0, 0);
-      lastLon = sub.lon; lastLat = sub.lat;
-      o.onframe && o.onframe(cv.toDataURL('image/jpeg', 0.86), sub);
+      lastLon = off; lastLat = sub.lat;
+      o.onframe && o.onframe(cv.toDataURL('image/jpeg', 0.86), POLE ? { lat: 90, lon: sub.lon - wantAng - 90, sub: sub } : sub);
     }
     function pump(){
       if (busy || want == null || !TEX) return;
-      var sub = subsolar(want);
-      if (lastLon != null && Math.abs(((sub.lon - lastLon + 540) % 360) - 180) < 0.2 && Math.abs(sub.lat - lastLat) < 0.05) return;
+      var sub = subsolar(want), off = POLE ? sub.lon - wantAng : sub.lon;
+      if (lastLon != null && Math.abs(((off - lastLon + 540) % 360) - 180) < 0.2 && (POLE || Math.abs(sub.lat - lastLat) < 0.05)) return;
       var wait = Math.max(0, 66 - (Date.now() - lastT)); busy = true;
       setTimeout(function(){ busy = false; lastT = Date.now(); draw(subsolar(want)); }, wait);
     }
     if (!TEX){ waiting.push(pump); if (waiting.length === 1) loadTex(0); }
-    return { set: function(ms){ want = ms; pump(); }, subsolar: subsolar };
+    return { set: function(ms, ang){ want = ms; if (ang != null) wantAng = ang; pump(); }, subsolar: subsolar };
   }
   window.BVGlobe = { make: make, subsolar: subsolar };
 })();
