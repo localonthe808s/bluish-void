@@ -278,8 +278,8 @@ vs = np.percentile(np.hypot(VX, VY), 99)
 print('cf4 official: |v| p99 %.0f km/s, Laniakea cells in the plane %d of %d' % (vs, LAN.sum(), NV * NV))
 flow = {'L': LV, 'n': NV, 'vx': [[round(float(v / vs), 3) for v in row] for row in VX], 'vy': [[round(float(v / vs), 3) for v in row] for row in VY],
         'lan': [''.join(str(v) for v in row) for row in LAN], 'vscale_kms': round(float(vs))}
-json.dump({'what': 'Cosmicflows-4 groups: supergalactic xyz in Mpc from MEASURED distance moduli (inverse-variance group means), members; plus the overdensity field in the supergalactic plane (|SGZ|<40 Mpc, zone of avoidance filled from neighbouring latitudes, 10 Mpc smoothing) and its gradient on a grid spanning +-140 Mpc',
-           'groups': cf_pts, 'flow': flow, 'grid': {'L': L, 'n': NG, 'delta': [[round(float(v), 2) for v in row] for row in dens], 'gx': [[round(float(v), 3) for v in row] for row in gx], 'gy': [[round(float(v), 3) for v in row] for row in gy]},
+json.dump({'what': 'Cosmicflows-4 groups: supergalactic xyz in Mpc from MEASURED distance moduli (inverse-variance group means), members; plus the Cosmicflows team\'s velocity field and Laniakea basin on the supergalactic plane (flow)',
+           'groups': cf_pts, 'flow': flow,   # the density 'grid' is no longer written: the lab draws the official flow (perf review 2026-10-11)
            'landmarks': lm, 'credit': 'Cosmicflows-4, Tully+ 2023 (55,877 galaxies with measured distances); flow: Courtois+ 2023 CF4 velocity field; Laniakea: Dupuy & Courtois 2023 basins of attraction'},
           open(os.path.join(OUT, 'laniakea_cf4.json'), 'w'), separators=(',', ':'))
 
