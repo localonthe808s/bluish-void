@@ -823,34 +823,35 @@
         if (flapping) p.fph += dt * 5.2 * (0.95 + 0.1 * Math.sin(i)); }
     }
     /* ---- the hawk on its thermal ---- */
-    var HK2 = { x: 0, y: 0, cx: 0, cy: 0, r: 90 * S, a: 0, w: 0.34, dir: 1, drift: 0, away: false, next: 45 + R() * 30, roll: 0, fph: 0, flap: 0, vx: 1, vy: 0 };
-    function hawkHome(){ var m = moon(), top = o.band[0] * H, low = o.floor * H; var cx = W * (0.22 + 0.3 * R()), cy = top + (0.12 + 0.3 * R()) * (low - top);
-      if (m && Math.hypot(cx - m.x, cy - m.y) < m.r + HK2.r + 30 * S){ cx = Math.max(60 * S + HK2.r, m.x - m.r - HK2.r - 40 * S); } HK2.cx = cx; HK2.cy = cy; }
-    hawkHome(); HK2.a = R() * 6.28;
-    function hawkStep(dt){
-      if (HK2.away){ HK2.x += HK2.vx * dt; HK2.y += HK2.vy * dt; if (t > HK2.next){ HK2.away = false; hawkHome(); HK2.a = Math.atan2(HK2.y - HK2.cy, HK2.x - HK2.cx); HK2.next = t + 45 + R() * 30; } return; }
-      HK2.a += HK2.w * HK2.dir * dt; HK2.cx += Math.sin(t * 0.07) * 6 * S * dt; HK2.cy += Math.cos(t * 0.05) * 4 * S * dt - 1.2 * S * dt * (HK2.cy > o.band[0] * H + 40 * S ? 1 : 0);   /* a thermal lifts it slowly */
-      var nx = HK2.cx + HK2.r * Math.cos(HK2.a), ny = HK2.cy + HK2.r * 0.62 * Math.sin(HK2.a);
-      HK2.vx = (nx - HK2.x) / Math.max(dt, 0.016); HK2.vy = (ny - HK2.y) / Math.max(dt, 0.016); HK2.x = nx; HK2.y = ny;
-      HK2.roll += ((HK2.dir * 0.55) - HK2.roll) * Math.min(1, dt * 2);
-      /* a few beats now and then, mostly a glide */
-      if (HK2.flap > 0){ HK2.fph += dt * 4.5; HK2.flap -= dt; } else if (R() < dt * 0.06) HK2.flap = 1.2 + R();
-      if (t > HK2.next){ HK2.away = true; var d = HK2.x < W / 2 ? -1 : 1; HK2.vx = d * 55 * S; HK2.vy = -6 * S; HK2.next = t + 18 + R() * 10; }
-    }
+    /* MORE COASTING HIGH (user 2026-10-10): two red-tails on two thermals, high in the band, wide slow circles, one
+       turning each way; each leaves and comes back on its own clock */
+    var HAWKS = [0, 1].map(function(i){ return { x: 0, y: 0, cx: 0, cy: 0, r: (100 + 40 * R()) * S, a: R() * 6.28, w: 0.26 + 0.1 * R(), dir: i ? -1 : 1, away: false, next: 55 + R() * 40 + i * 20, roll: 0, fph: 0, flap: 0, vx: 1, vy: 0, side: i }; });
+    function hawkHome(h){ var m = moon(), top = o.band[0] * H, low = o.floor * H; var cx = W * (h.side ? 0.58 + 0.22 * R() : 0.14 + 0.26 * R()), cy = top + (0.04 + 0.22 * R()) * (low - top);
+      if (m && Math.hypot(cx - m.x, cy - m.y) < m.r + h.r + 30 * S){ cx = Math.max(60 * S + h.r, m.x - m.r - h.r - 40 * S); } h.cx = cx; h.cy = cy; }
+    HAWKS.forEach(hawkHome); var HK2 = HAWKS[0];
+    function hawkStep(dt){ HAWKS.forEach(function(h){
+      if (h.away){ h.x += h.vx * dt; h.y += h.vy * dt; if (t > h.next){ h.away = false; hawkHome(h); h.a = Math.atan2(h.y - h.cy, h.x - h.cx); h.next = t + 55 + R() * 40; } return; }
+      h.a += h.w * h.dir * dt; h.cx += Math.sin(t * 0.07 + h.side * 2) * 6 * S * dt; h.cy += Math.cos(t * 0.05 + h.side) * 4 * S * dt - 1.0 * S * dt * (h.cy > o.band[0] * H + 30 * S ? 1 : 0);   /* the thermal lifts it slowly */
+      var nx = h.cx + h.r * Math.cos(h.a), ny = h.cy + h.r * 0.62 * Math.sin(h.a);
+      h.vx = (nx - h.x) / Math.max(dt, 0.016); h.vy = (ny - h.y) / Math.max(dt, 0.016); h.x = nx; h.y = ny;
+      h.roll += ((h.dir * 0.55) - h.roll) * Math.min(1, dt * 2);
+      if (h.flap > 0){ h.fph += dt * 4.5; h.flap -= dt; } else if (R() < dt * 0.04) h.flap = 1.2 + R();   /* a few beats now and then, mostly a glide */
+      if (t > h.next){ h.away = true; var d = h.x < W / 2 ? -1 : 1; h.vx = d * 55 * S; h.vy = -6 * S; h.next = t + 18 + R() * 10; } }); }
     /* ---- gulls: not a flock (user 2026-10-10: "remove the flock of seagulls and just let them scatter and float in
        the wind") -- three birds scattered far apart, each hanging on the sea breeze: facing into it, wings held out,
        rocking a little, drifting slowly along, a beat or two now and then ---- */
-    var GULL = []; for (var g = 0; g < 3; g++) GULL.push({ ax: (0.15 + 0.7 * R()), ay: (0.2 + 0.5 * R()), dx: (R() - 0.5) * 6, dy: (R() - 0.5) * 3, sw: 2.6 + R() * 2, p1: R() * 6.28, p2: R() * 6.28, roll: 0, fph: 0, flap: 0, x: 0, y: 0, hd: -1, on: false });
+    var GULL = []; for (var g = 0; g < 4; g++) GULL.push({ ax: (0.12 + 0.76 * R()), ay: (0.04 + 0.36 * R()), ca: R() * 6.28, cw: (0.12 + 0.08 * R()) * (R() < 0.5 ? -1 : 1), cr: (40 + 50 * R()) * S, dx: (R() - 0.5) * 6, dy: (R() - 0.5) * 3, sw: 2.6 + R() * 2, p1: R() * 6.28, p2: R() * 6.28, roll: 0, fph: 0, flap: 0, x: 0, y: 0, hd: -1, on: false });
     function gullStep(dt){ var top = o.band[0] * H, low = o.floor * H, wind = (o.wind || 0);
       GULL.forEach(function(q){
         q.ax += q.dx * S * dt / W; q.ay += q.dy * S * dt / H;                                  /* a slow drift along */
-        if (q.ax < 0.08 || q.ax > 0.92) q.dx = -q.dx; if (q.ay < 0.12 || q.ay > 0.78) q.dy = -q.dy;
-        var nx = W * q.ax + Math.sin(t / q.sw * 6.28 + q.p1) * 9 * S, ny = top + (low - top) * q.ay + Math.sin(t / (q.sw * 1.7) * 6.28 + q.p2) * 6 * S;   /* hanging: a small rock and lift */
+        if (q.ax < 0.08 || q.ax > 0.92) q.dx = -q.dx; if (q.ay < 0.03 || q.ay > 0.5) q.dy = -q.dy;
+        q.ca += q.cw * dt;                                                                       /* coasting high: a wide lazy circle on the breeze */
+        var nx = W * q.ax + Math.cos(q.ca) * q.cr + Math.sin(t / q.sw * 6.28 + q.p1) * 6 * S, ny = top + (low - top) * q.ay + Math.sin(q.ca) * q.cr * 0.55 + Math.sin(t / (q.sw * 1.7) * 6.28 + q.p2) * 5 * S;
         var mp = moonPush(nx, ny, 40 * S); nx += mp[0]; ny += mp[1];
         if (!q.on){ q.on = true; q.x = nx; q.y = ny; }
         q.x += (nx - q.x) * Math.min(1, dt * 3); q.y += (ny - q.y) * Math.min(1, dt * 3);
-        q.hd = wind > 2 ? 1 : -1;                                                            /* into the breeze: from the west unless the air says otherwise */
-        q.roll = Math.sin(t / q.sw * 6.28 + q.p1) * 0.35;
+        q.hd = Math.cos(q.ca + Math.PI / 2) * q.cw >= 0 ? 1 : -1;                             /* heading follows the circle */
+        q.roll = (q.cw > 0 ? 0.3 : -0.3) + Math.sin(t / q.sw * 6.28 + q.p1) * 0.18;
         if (q.flap > 0){ q.fph += dt * 5.5; q.flap -= dt; } else if (R() < dt * 0.05) q.flap = 0.8 + R() * 0.8; }); }
     /* ---- drawing ---- */
     function wing(sd, span, sweep, lean, tipL, hand, col){ var fs = 1 - 0.5 * lean, tipx = -2.6 - 1.8 * (1 - span) - sweep, tipy = sd * (1.2 + tipL * span) * fs;
@@ -867,7 +868,7 @@
       ctx.fillStyle = 'rgb(214,206,186)'; ctx.beginPath(); ctx.ellipse(3.1, 0, 1.15, 0.8, 0, 0, 6.2832); ctx.fill();
       ctx.strokeStyle = 'rgb(120,98,70)'; ctx.lineWidth = 0.55; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(3.9, 0.15); ctx.lineTo(7.6, 0.35); ctx.stroke();
       ctx.restore(); }
-    function drawHawk2(){ if (isNight) return; var k = 1.15 * S + 0.35, fl = HK2.flap > 0 ? 0.75 + 0.25 * Math.abs(Math.sin(HK2.fph)) : 1, roll = HK2.roll;
+    function drawHawk2(HK2){ if (isNight) return; var k = 1.15 * S + 0.35, fl = HK2.flap > 0 ? 0.75 + 0.25 * Math.abs(Math.sin(HK2.fph)) : 1, roll = HK2.roll;
       ctx.save(); ctx.translate(HK2.x, HK2.y); ctx.rotate(Math.atan2(HK2.vy, HK2.vx)); ctx.scale(k, k);
       [-1, 1].forEach(function(sd){ var lean = Math.max(0, sd * roll); wing(sd, fl, 0, lean, 8.6, true, lean > 0.2 ? 'rgb(66,58,50)' : 'rgb(86,76,64)');
         ctx.fillStyle = 'rgba(36,30,26,.7)'; ctx.beginPath(); ctx.moveTo(0.2, sd * 1.4); ctx.lineTo(-0.9, sd * 4.4 * (1 - 0.5 * lean)); ctx.lineTo(-1.5, sd * 4.0 * (1 - 0.5 * lean)); ctx.lineTo(-0.5, sd * 1.3); ctx.closePath(); ctx.fill(); });   /* the patagial bar */
@@ -880,7 +881,7 @@
       [-1, 1].forEach(function(sd){ var lean = Math.max(0, sd * q.roll); wing(sd, fl, 0, lean, 8.2, false, 'rgb(150,154,160)'); ctx.fillStyle = 'rgb(40,40,46)'; ctx.beginPath(); ctx.moveTo(-2.4 - 1.6 * (1 - fl), sd * (1.2 + 8.2 * fl)); ctx.lineTo(-1.6, sd * (1.2 + 6.4 * fl)); ctx.lineTo(-2.9, sd * (1.0 + 6.0 * fl)); ctx.closePath(); ctx.fill(); });
       ctx.fillStyle = 'rgb(236,238,240)'; ctx.beginPath(); ctx.ellipse(0.4, 0, 3.0, 0.8, 0, 0, 6.2832); ctx.fill(); ctx.restore(); }
     function draw(){ ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H); if (isNight) return;
-      ctx.globalAlpha = dusk; GULL.forEach(function(q){ if (q.on) drawGull(q); }); drawHawk2();
+      ctx.globalAlpha = dusk; GULL.forEach(function(q){ if (q.on) drawGull(q); }); HAWKS.forEach(drawHawk2);
       for (var i = NP - 1; i >= 0; i--) if (PEL[i].on) drawPelican(PEL[i]); ctx.globalAlpha = 1; }
     /* the pelican line is OFF (user 2026-10-10: "remove these bird trains from LAs clear day"): leadStep/pelStep stay for the lab, the live scene is the hawk and the scattered gulls */
     function step(dt){ t += dt; if (o.pelicans) { leadStep(dt); pelStep(dt); } hawkStep(dt); gullStep(dt); }
@@ -899,9 +900,9 @@
     applySun(o.sun); for (var w0 = 0; w0 < 90; w0++) step(1 / 60);   /* a short warm-up so the hawk is already turning */
     kick();
     return {
-      set: function(p){ if (!p) return; var rs = false; if (p.W && p.H && (p.W !== W || p.H !== H)){ rs = true; } ['floor', 'moon', 'band', 'size', 'wind'].forEach(function(k){ if (p[k] !== undefined) o[k] = p[k]; }); if (rs){ dims(p.W, p.H); hawkHome(); } if (p.sun) applySun(p.sun); kick(); },
+      set: function(p){ if (!p) return; var rs = false; if (p.W && p.H && (p.W !== W || p.H !== H)){ rs = true; } ['floor', 'moon', 'band', 'size', 'wind'].forEach(function(k){ if (p[k] !== undefined) o[k] = p[k]; }); if (rs){ dims(p.W, p.H); HAWKS.forEach(hawkHome); } if (p.sun) applySun(p.sun); kick(); },
       stats: function(){ return { fps: st.fps, sim: st.sim, draw: st.draw, frames: st.frames, steps: st.steps, kind: 'coast' }; },
-      form: function(){ return { kind: 'coast', pass: LEAD.on, pelicans: PEL.filter(function(p){ return p.on; }).length, hawk: !HK2.away, next: Math.max(0, LEAD.next - t) }; },
+      form: function(){ return { kind: 'coast', pass: LEAD.on, pelicans: PEL.filter(function(p){ return p.on; }).length, hawks: HAWKS.filter(function(h){ return !h.away; }).length, next: Math.max(0, LEAD.next - t) }; },
       destroy: function(){ alive = false; if (raf) cancelAnimationFrame(raf); if (io) io.disconnect(); document.removeEventListener('visibilitychange', onVis); try { ctx.clearRect(0, 0, cv.width, cv.height); } catch(e){} }
     };
   };
