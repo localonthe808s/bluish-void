@@ -778,7 +778,7 @@
      loafing in the middle air. Same contract as bvFlock: set / stats / destroy / form; same clock, scale and moon rules;
      nothing at night. The controller below picks this for any location inside the LA basin. */
   window.bvCoast = function(cv, o){
-    o = Object.assign({ W: 1180, H: 620, seed: 7, fps: 30, band: [0.10, 0.55], floor: 0.78, moon: null, sun: null, size: 1 }, o || {});
+    o = Object.assign({ W: 1180, H: 620, seed: 7, fps: 30, band: [0.10, 0.55], floor: 0.78, moon: null, sun: null, size: 1, pelicans: false }, o || {});
     var rng2 = function(seed){ var s = seed >>> 0 || 1; return function(){ s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; };   /* own copy: the engine's rng lives in another closure */
     var ctx = cv.getContext('2d'), R = rng2(o.seed), dpr = Math.min(2, window.devicePixelRatio || 1);
     var W, H, S, t = 0, isNight = false, dusk = 1;
@@ -882,7 +882,8 @@
     function draw(){ ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H); if (isNight) return;
       ctx.globalAlpha = dusk; GULL.forEach(function(q){ if (q.on) drawGull(q); }); drawHawk2();
       for (var i = NP - 1; i >= 0; i--) if (PEL[i].on) drawPelican(PEL[i]); ctx.globalAlpha = 1; }
-    function step(dt){ t += dt; leadStep(dt); pelStep(dt); hawkStep(dt); gullStep(dt); }
+    /* the pelican line is OFF (user 2026-10-10: "remove these bird trains from LAs clear day"): leadStep/pelStep stay for the lab, the live scene is the hawk and the scattered gulls */
+    function step(dt){ t += dt; if (o.pelicans) { leadStep(dt); pelStep(dt); } hawkStep(dt); gullStep(dt); }
     /* the clock, as bvFlock's */
     var raf = 0, last = 0, acc = 0, lastDraw = 0, visible = true, alive = true, fpsT = 0, fpsN = 0;
     function frame(now){ raf = 0; if (!alive) return; if (!visible || document.hidden){ last = 0; return; }
