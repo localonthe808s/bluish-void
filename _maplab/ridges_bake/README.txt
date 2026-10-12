@@ -14,3 +14,6 @@ the mountains' eastern foot, the Fall Line, and three live sample points with th
 front_snap.py measured the USGS line vs the steepest slope: median 4.5 km off, so it draws as a soft band. Rise across it
 measured at 40 points: median 384 m (~1,300 ft).
 Zones: zones_fetch.py <out.json> -> every OH/WV/VA/MD/PA forecast+county zone touching the box, merged into city_ne_zones.json.
+More landscape (2026-10-11): geo_more.py adds belt rock/made lines, four named sections (Catskills, two rift basins,
+Hudson Valley) and the Wisconsin + pre-Wisconsin glacial limits (USGS Generalized Glacial Limit Lines, King & Beikman 1974,
+1:2.5M, from https://stacks.stanford.edu/object/vz874sc7648). Run it on the geo_build.py output, not on its own output twice.
