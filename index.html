@@ -34002,42 +34002,76 @@ function dayRangeAround(d, days){
               var HZ=window._bvHZ||{}, FADE=HZ.fade||120;   // longer, so the sky hazes down instead of dropping off (user 2026-10-12: "smoother")
               heroEls.forEach(function(e){ var st=e.style; st.webkitMaskImage=st.maskImage='none'; st.webkitMaskPosition=st.maskPosition=''; st.webkitMaskSize=st.maskSize=''; st.webkitMaskRepeat=st.maskRepeat=''; st.webkitMaskComposite=st.maskComposite=''; });
               var bs=S.bands.style; bs.webkitMaskImage=bs.maskImage='linear-gradient(to bottom,transparent '+Math.max(0,hh-2)+'px,black '+hh+'px)'; bs.webkitMaskPosition=bs.maskPosition=''; bs.webkitMaskSize=bs.maskSize=''; bs.webkitMaskRepeat=bs.maskRepeat='';
+              /* THE HERO AS IT IS REALLY PAINTED (user 2026-10-12: "other days take too long to blend correctly and some just
+                 stop"). The sky can live on #hero-skybg (a scene backdrop), on #hero-wx (its own gradient), as an SVG deck, or as
+                 a canvas -- by day and by weather. Composite every visible layer bottom-up exactly as stacked (gradient bottom
+                 colour, then its SVG and canvas art), read the last row across the width, and paint the skirt with it. Watched
+                 on BOTH layers, resampled ~0.35 s after any change and again after a day switch. */
               var hw0=heroEls[0], sk=document.getElementById('hero-skirt');
-              var bgI=hw0?getComputedStyle(hw0).backgroundImage:'', mm=bgI&&bgI.match(/rgba?\([^)]*\)/g), col=mm&&mm.length?mm[mm.length-1]:null;
-              var svg0=hw0&&hw0.querySelector('svg');
-              if(!hw0||(!col&&!svg0)){ if(sk) sk.style.display='none'; hw0&&(hw0.style.webkitMaskImage=hw0.style.maskImage='linear-gradient(to bottom,black calc(100% - 8px),transparent)'); return; }   // nothing painted at all: the old short handover
-              if(!col) col='rgba(0,0,0,0)';   // an overcast / rain deck has no backdrop gradient, only its SVG: the skirt samples that (user 2026-10-12, LA in rain: the 8 px cut showed as a hard line)
+              /* LIVE MIRROR (user 2026-10-12: "other days take too long to blend correctly and some just stop"). Sampling a
+                 rebuilt copy of the hero can never be exact or instant -- it misses page CSS, relative images (the night's
+                 Milky Way), canvases, and always runs a beat behind a day switch. Where the browser supports it, the hero
+                 REFLECTS its own bottom edge below the divider instead: the browser renders the continuation itself, pixel-
+                 exact and always in step, faded out over FADE px. The sampled skirt below stays as the Firefox fallback. */
+              var REFL = window.CSS && CSS.supports && CSS.supports('-webkit-box-reflect','below 0px');
+              if (REFL){
+                var rm=(function(){ var st=[]; for(var i=0;i<=16;i++){ var t=i/16, e=1-t*t*t*(t*(t*6-15)+10); st.push('rgba(0,0,0,'+e.toFixed(3)+') '+(t*FADE).toFixed(1)+'px'); } return 'linear-gradient(to top,'+st.join(',')+',transparent)'; })();   // to top: the mask is laid on the element before the mirror flips it
+                ['hero-skybg','hero-wx'].forEach(function(id){ var e=document.getElementById(id); if(e) e.style.webkitBoxReflect='below 0px '+rm; });
+                if (sk) sk.style.display='none';
+                return;
+              }
+              var vis=function(e){ if(!e) return false; var c=getComputedStyle(e); return c.display!=='none' && c.visibility!=='hidden' && +c.opacity>0.02 && e.clientWidth>0; };
+              var layers=[document.getElementById('hero-skybg'), hw0].filter(vis);
+              /* the bottom colour of an element's whole background: CSS lists layers top first, so composite each layer's LAST
+                 stop bottom-up (a scene backdrop is a tint gradient over the sky gradient) */
+              var lastStop=function(e){ var c=getComputedStyle(e), bi=c.backgroundImage, acc=null;
+                var bc=c.backgroundColor; if(bc&&!/rgba\(0, 0, 0, 0\)/.test(bc)) acc=bc.match(/[\d.]+/g).map(Number);
+                if(bi&&bi!=='none'){ var parts=bi.split(/,(?![^(]*\))(?=\s*(?:linear|radial|conic|url|repeating))/).reverse();
+                  parts.forEach(function(pt){ var mm=pt.match(/rgba?\([^)]*\)/g); if(!mm) return; var v=mm[mm.length-1].match(/[\d.]+/g).map(Number); var a=v.length>3?v[3]:1;
+                    if(!acc){ acc=[v[0],v[1],v[2],a]; return; } var A=acc.length>3?acc[3]:1, oa=a+A*(1-a); if(oa<=0) return;
+                    acc=[0,1,2].map(function(i){ return (v[i]*a+acc[i]*A*(1-a))/oa; }).concat([oa]); }); }
+                if(!acc) return null; return 'rgba('+Math.round(acc[0])+','+Math.round(acc[1])+','+Math.round(acc[2])+','+(acc.length>3?acc[3]:1).toFixed(3)+')'; };
+              var sigOf=function(){ return layers.map(function(e){ var sv=e.querySelector('svg'); return getComputedStyle(e).backgroundImage+'|'+(sv?sv.innerHTML.length+':'+sv.innerHTML.slice(-160):'')+'|'+e.querySelectorAll('canvas').length; }).join('#'); };
+              var hasSky=layers.some(function(e){ return !!lastStop(e); });
+              var hasArt=layers.some(function(e){ return e.querySelector('svg,canvas'); });
+              if(!hw0||(!hasSky&&!hasArt)){ if(sk) sk.style.display='none'; hw0&&(hw0.style.webkitMaskImage=hw0.style.maskImage='linear-gradient(to bottom,black calc(100% - 8px),transparent)'); return; }   // nothing painted at all: the old short handover
               if(!sk){ sk=document.createElement('div'); sk.id='hero-skirt'; hw0.parentNode.insertBefore(sk, hw0.nextSibling); }
-              /* keep it in step with the sky (user 2026-10-12, a page left open from afternoon to sunset: the hero turned orange
-                 but the skirt kept the afternoon blue it sampled -- "whats going on with the line here"). The hero repaints its
-                 gradient / SVG on the live tick without the day-arc repainting, so watch the hero itself and resample after its
-                 1.2 s background transition settles. */
-              if(!hw0._bvSkirtObs && window.MutationObserver){
-                var tmo=null; hw0._bvSkirtObs=new MutationObserver(function(){ clearTimeout(tmo); tmo=setTimeout(function(){ var sv=hw0.querySelector('svg'), sig=getComputedStyle(hw0).backgroundImage+'|'+(sv?sv.innerHTML.length+':'+sv.innerHTML.slice(-200):''); if(sig!==hw0._bvSkirtSig && window._bvHorizonMask) window._bvHorizonMask(); },1400); });   /* only when the paint really changed: our own mask writes must not loop */
-                hw0._bvSkirtObs.observe(hw0,{attributes:true,attributeFilter:['style'],childList:true,subtree:true});
-              }
+              ['hero-skybg','hero-wx'].forEach(function(id){ var e=document.getElementById(id); if(!e||e._bvSkirtObs||!window.MutationObserver) return;
+                var tmo=null; e._bvSkirtObs=new MutationObserver(function(){ clearTimeout(tmo); tmo=setTimeout(function(){ if(window._bvSkirtSig!==window._bvSkirtSigNow() && window._bvHorizonMask) window._bvHorizonMask(); },350); });   /* only when the paint really changed: our own writes must not loop */
+                e._bvSkirtObs.observe(e,{attributes:true,attributeFilter:['style','class'],childList:true,subtree:true}); });
+              window._bvSkirtSigNow=function(){ layers=[document.getElementById('hero-skybg'), document.getElementById('hero-wx')].filter(vis); return sigOf(); };
+              window._bvSkirtSig=sigOf();
               var fm=(function(){ var st=[]; for(var i=0;i<=16;i++){ var t=i/16, e=1-t*t*t*(t*(t*6-15)+10); st.push('rgba(0,0,0,'+e.toFixed(3)+') '+(t*100).toFixed(1)+'%'); } return 'linear-gradient(to bottom,'+st.join(',')+')'; })();   // smootherstep, 17 stops: no visible bends
-              var deep='linear-gradient(to bottom,rgba(20,34,84,0) 0%,rgba(20,34,84,.18) 35%,rgba(16,26,66,.42) 70%,rgba(10,16,44,.6) 100%)';   // deepen toward navy as it fades, so blue over night never reads as grey
-              sk.style.cssText='display:block;position:absolute;left:0;right:0;top:'+(hh-1)+'px;height:'+(FADE+1)+'px;z-index:0;pointer-events:none;background:'+deep+','+col+';-webkit-mask-image:'+fm+';mask-image:'+fm+';';
-              /* MATCH THE HERO'S REAL BOTTOM ROW (user 2026-10-12: "thats a hard line"): the hero's gradient is painted over by
-                 its SVG sky panel, lighter at the horizon and varying across, so a flat colour stepped at the divider. Render that
-                 SVG offscreen, read its last row across the width, and paint the skirt with exactly those colours. */
-              var svg=hw0.querySelector('svg'); hw0._bvSkirtSig=getComputedStyle(hw0).backgroundImage+'|'+(svg?svg.innerHTML.length+':'+svg.innerHTML.slice(-200):'');
-              if(svg && window.XMLSerializer){
-                var seq=(window._bvSkirtSeq=(window._bvSkirtSeq||0)+1), SW=Math.max(2,Math.round(hw0.clientWidth)), SHh=Math.max(2,Math.round(hw0.clientHeight));
-                var xml=new XMLSerializer().serializeToString(svg); if(!/xmlns=/.test(xml)) xml=xml.replace('<svg','<svg xmlns="http://www.w3.org/2000/svg"');
-                var img=new Image();
-                img.onload=function(){ try{
-                  if(seq!==window._bvSkirtSeq) return;
-                  var cv=document.createElement('canvas'); cv.width=SW; cv.height=SHh; var g=cv.getContext('2d');
-                  g.fillStyle=col; g.fillRect(0,0,SW,SHh); g.drawImage(img,0,0,SW,SHh);
-                  var row=g.getImageData(0,SHh-3,SW,2).data, N=32, stops=[];
-                  for(var i=0;i<=N;i++){ var x=Math.min(SW-1,Math.round(i/N*(SW-1))), k=x*4, k2=(SW+x)*4;
-                    stops.push('rgba('+((row[k]+row[k2])>>1)+','+((row[k+1]+row[k2+1])>>1)+','+((row[k+2]+row[k2+2])>>1)+','+(((row[k+3]+row[k2+3])/2)/255).toFixed(3)+') '+(i/N*100).toFixed(1)+'%'); }
-                  sk.style.background=(col==='rgba(0,0,0,0)'?'':deep+',')+'linear-gradient(to right,'+stops.join(',')+')';   // no navy deepening under a grey deck
-                }catch(e){} };
-                img.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(xml);
-              }
+              var deep='linear-gradient(to bottom,rgba(20,34,84,0) 0%,rgba(20,34,84,.18) 35%,rgba(16,26,66,.42) 70%,rgba(10,16,44,.6) 100%)';   // deepen toward navy as it fades (clear skies only), so blue over night never reads as grey
+              var keepBg=sk.style.background;   // keep the last good paint while the new one composes (no flash of a flat colour)
+              sk.style.cssText='display:block;position:absolute;left:0;right:0;top:'+(hh-1)+'px;height:'+(FADE+1)+'px;z-index:0;pointer-events:none;-webkit-mask-image:'+fm+';mask-image:'+fm+';';
+              var base=null; layers.forEach(function(e){ var c=lastStop(e); if(c) base=c; });
+              sk.style.background=keepBg || base || 'transparent';
+              var seq=(window._bvSkirtSeq=(window._bvSkirtSeq||0)+1), SW=Math.max(2,Math.round(hw0.clientWidth)), SHh=Math.max(2,Math.round(hh));
+              var cv=document.createElement('canvas'); cv.width=SW; cv.height=SHh; var g=cv.getContext('2d');
+              var chain=Promise.resolve();
+              layers.forEach(function(e){
+                var top0=e.getBoundingClientRect().top, ref=hw0.getBoundingClientRect().top;
+                chain=chain.then(function(){ var c=lastStop(e); if(c){ g.fillStyle=c; g.fillRect(0,SHh-6,SW,6); } });
+                [].forEach.call(e.querySelectorAll(':scope > svg, :scope > canvas, :scope > * > canvas'), function(n){
+                  chain=chain.then(function(){ return new Promise(function(res){
+                    var r=n.getBoundingClientRect(), dx=r.left-hw0.getBoundingClientRect().left, dy=r.top-ref;
+                    if(n.tagName.toLowerCase()==='canvas'){ try{ g.drawImage(n,dx,dy,r.width,r.height); }catch(err){} res(); return; }
+                    try{ var xml=new XMLSerializer().serializeToString(n); if(!/xmlns=/.test(xml)) xml=xml.replace('<svg','<svg xmlns="http://www.w3.org/2000/svg"');
+                      var im=new Image(); im.onload=function(){ try{ g.drawImage(im,dx,dy,r.width,r.height); }catch(err){} res(); }; im.onerror=function(){ res(); };
+                      im.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(xml); }catch(err){ res(); } }); });
+                });
+              });
+              chain.then(function(){ try{
+                if(seq!==window._bvSkirtSeq) return;
+                var row; try { row=g.getImageData(0,SHh-3,SW,2).data; } catch(err){ window._bvSkirtDbg={tainted:String(err).slice(0,80)}; return; }
+                window._bvSkirtDbg={base:base,layers:layers.map(function(e){return e.id;}),px:[row[0],row[1],row[2],row[3]]};
+                var N=32, stops=[], any=0;
+                for(var i=0;i<=N;i++){ var x=Math.min(SW-1,Math.round(i/N*(SW-1))), k=x*4, k2=(SW+x)*4, a=((row[k+3]+row[k2+3])/2)/255; any=Math.max(any,a);
+                  stops.push('rgba('+((row[k]+row[k2])>>1)+','+((row[k+1]+row[k2+1])>>1)+','+((row[k+2]+row[k2+2])>>1)+','+a.toFixed(3)+') '+(i/N*100).toFixed(1)+'%'); }
+                if(any<0.02){ sk.style.background=base||'transparent'; return; }
+                sk.style.background=(hasSky?deep+',':'')+'linear-gradient(to right,'+stops.join(',')+')';
+              }catch(e){} });
             }catch(e){}
           };
           var _tlRT=null; window.addEventListener('resize',function(){clearTimeout(_tlRT);_tlRT=setTimeout(function(){if(window._tlPaintSky)window._tlPaintSky();},200);});
@@ -98734,6 +98768,7 @@ function initNowMicroTabs(){
   };
 
   window.tlNavDay = function(delta) {
+    [450, 1600].forEach(function(ms){ setTimeout(function(){ if(window._bvHorizonMask) window._bvHorizonMask(); }, ms); });   /* the hero skirt follows the new day's sky (user 2026-10-12) */
     var newOffset = window._tlDayOffset + delta;
     if (newOffset < -1) return; // can't go before yesterday
     var h = window._hourlyData, d = window._dailyData;
