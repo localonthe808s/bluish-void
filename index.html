@@ -63649,10 +63649,18 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       var Y = null; H.forEach(function(x){ if (x.date === yd) Y = x; });
       var base = Y && ((Y.final && Y.final.ladder) || (Y.lock && Y.lock.ladder));
       if (!Y || !base || !(Y.trail || []).length) return null;
-      var hours = Y.trail.map(function(r){ return r.h; });
-      var h = (window._bvWhereH != null && hours.indexOf(window._bvWhereH) >= 0) ? window._bvWhereH
-            : (hours.indexOf(12) >= 0 ? 12 : hours[hours.length - 1]);
-      var tr = Y.trail[hours.indexOf(h)];
+      /* FOUR MOMENTS AND THE CLOSE (user 2026-10-12: "do 1 but make sure the intelligence itself is never overlooking
+         any info outside those hours"): the hours the record and the bets are graded on, plus the close so nothing after
+         6 PM is dropped. Each moment is CUMULATIVE, never a single hour's snapshot, and cut AT its time (+5 min, so the
+         12:02 lock bake and the 6:01 final are in): the trail row is the latest at or before it (a missing hour falls
+         back, it is not skipped), the running high is the day's to that point, the prices are the last bake's before it,
+         and the dark flow counts every burst before it. The close takes everything. */
+      var hours = Y.trail.map(function(r){ return r.h; }), lastH = hours[hours.length - 1];
+      var moments = [[8, '8 AM \u00b7 MODELS IN'], [12, 'NOON \u00b7 LOCK'], [14, '2 PM \u00b7 WINDOW SHUTS'], [18, '6 PM \u00b7 FINAL CALL'], [Math.max(23, lastH), 'CLOSE']]
+        .filter(function(m){ return hours.some(function(x){ return x <= m[0]; }); });
+      var h = (window._bvWhereH != null && moments.some(function(m){ return m[0] === window._bvWhereH; })) ? window._bvWhereH : 12;
+      if (!moments.some(function(m){ return m[0] === h; })) h = moments.length ? moments[moments.length - 1][0] : lastH;
+      var tr = null; Y.trail.forEach(function(r){ if (r.h <= h) tr = r; }); tr = tr || Y.trail[0];
       /* the bake's own row nearest the end of that hour: prices and the reading then (R2, fetched once) */
       var TR = (window._bvYTrail || {})[CITY.key + '|' + yd], row = null;
       if (TR === undefined){
@@ -63666,7 +63674,8 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
             if (window._bvWhereDay === 'y'){ var p = document.getElementById('cw-kalshi-panel'), sc = p ? p.scrollTop : 0; cwKalshiTap(); var p2 = document.getElementById('cw-kalshi-panel'); if (p2) p2.scrollTop = sc; }
           }).catch(function(){});
       } else if (TR && TR.length){
-        TR.forEach(function(r){ var lh = parseInt(String(r.lt || '').slice(0, 2), 10); if (r.date === yd && lh <= h) row = r; });
+        TR.forEach(function(r){ var lt = String(r.lt || ''), lm = parseInt(lt.slice(0, 2), 10) * 60 + parseInt(lt.slice(3, 5), 10);
+          if (r.date === yd && (h >= 23 || lm <= h * 60 + 5)) row = r; });
       }
       var byLabel = {}; if (row) (row.ladder || []).forEach(function(q){ byLabel[q[0]] = q; });
       var lad = base.map(function(r, i){
@@ -63676,7 +63685,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       });
       var top = function(k){ var b = null; lad.forEach(function(r){ if (r[k] != null && (!b || r[k] > b[k])) b = r; }); return b ? b.label : null; };
       var o = row && row.obs || {};
-      return { date: yd, _h: h, _hours: hours, _settled: Y.actual, _truth: Y.truth_source === 'settlement' ? 'KALSHI SETTLED' : 'OBSERVED HIGH',
+      return { date: yd, _h: h, _moments: moments, _settled: Y.actual, _truth: Y.truth_source === 'settlement' ? 'KALSHI SETTLED' : 'OBSERVED HIGH',
                ladder: lad, pred: tr.pred, sd: tr.sd, obs_so_far: tr.obs, obs_through: h,
                now_temp: o.now != null ? o.now : null, now_at: o.now_at || null,
                twc_fc: tr.twc_fc, nws_fc: tr.nws_fc, six_max: o.six != null ? o.six : null, six_window: o.six_win || null,
@@ -64705,7 +64714,16 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
             var hm = function(iso){ return new Date(iso).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }); };
             var minOf = function(iso){ var q = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', hour12: false })
               .formatToParts(new Date(iso)).reduce(function(o, x){ o[x.type] = x.value; return o; }, {}); return (+q.hour % 24) * 60 + (+q.minute); };
-            if (dayY) B = B.filter(function(b){ return minOf(b.t) < (dayY._h + 1) * 60; });
+            /* an absolute cutoff, in the city's own time: the end of the moment's hour on that date (the close takes
+               the whole market, which trades from the morning before until 1 AM after). Clock minutes alone put a
+               12:30 AM burst into 7 AM and dropped the evening before. */
+            if (dayY){
+              var noonUTC = new Date(dayY.date + 'T12:00:00Z');
+              var offH = 12 - (+new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false }).format(noonUTC) % 24);
+              var cutMs = Date.parse(dayY.date + 'T00:00:00Z') + (dayY._h + offH) * 3600000 + 5 * 60000;
+              if (dayY._h >= 23) cutMs += 3 * 3600000;
+              B = B.filter(function(b){ return Date.parse(b.t) < cutMs; });
+            }
             var dark = B.filter(function(b){ return b.cls === 'dark'; });
             var DIM = '#2c7f66', LAB = 'font:800 7px system-ui,sans-serif;letter-spacing:.09em;color:' + DIM + ';';
             var h = '';
@@ -64719,7 +64737,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
                 + (b.px != null ? ' at ' + Math.round((b.side === 'yes' ? b.px : 1 - b.px) * 100) + '¢' : '')
                 + ' · <span style="color:#9fd9c4;">no public reading since ' + (rel ? hm(rel.t) : 'the morning') + '</span></div>';
             } else {
-              h += '<div style="' + LAB + '">DARK FLOW · NONE ' + (dayY ? 'BY ' + ((dayY._h + 1) % 12 || 12) + (dayY._h + 1 < 12 || dayY._h + 1 === 24 ? ' AM' : ' PM') : 'TODAY') + (B.length ? ' · ' + B.length + ' REACTION BURST' + (B.length === 1 ? '' : 'S') : '') + '</div>';
+              h += '<div style="' + LAB + '">DARK FLOW · NONE ' + (dayY ? (dayY._h >= 23 ? 'ALL DAY' : 'BY ' + (dayY._h % 12 || 12) + (dayY._h < 12 ? ' AM' : ' PM')) : 'TODAY') + (B.length ? ' · ' + B.length + ' REACTION BURST' + (B.length === 1 ? '' : 'S') : '') + '</div>';
             }
             /* each range's net dark money today: YES minus NO */
             var net = {};
@@ -65584,7 +65602,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       scaleFor(SDAY);
       if (SDAY !== T) verdict = '';
       var whereHdr = (SDAY === T) ? 'WHERE THE DAY STANDS'
-        : (SDAY === YD) ? 'WHERE ' + (dayName(YD.date) || 'YESTERDAY').toUpperCase() + ' STOOD \u00B7 ' + hrY(YD._h) + ' \u00B7 SETTLED ' + T1(YD._settled) + '\u00B0'
+        : (SDAY === YD) ? 'WHERE ' + (dayName(YD.date) || 'YESTERDAY').toUpperCase() + ' STOOD \u00B7 ' + (YD._h >= 23 ? 'AT THE CLOSE' : 'AT ' + hrY(YD._h)) + ' \u00B7 SETTLED ' + T1(YD._settled) + '\u00B0'
         : 'WHERE ' + (dayName(SDAY.date) || 'TOMORROW').toUpperCase() + ' STANDS \u00B7 FORECAST';
       /* the switch, and in yesterday's view one pill per hour the bake recorded */
       var pill = function(on, txt, js){
@@ -65594,8 +65612,8 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       var whereSwitch = YD ? '<div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin:6px 6px 2px;">'
         + pill(SDAY !== YD, (SDAY === T || SDAY === YD) ? 'TODAY' : (dayName(SDAY.date) || 'TOMORROW').toUpperCase(), "window._bvWhereSet(null)")
         + pill(SDAY === YD, 'YESTERDAY', "window._bvWhereSet('y')")
-        + (SDAY === YD ? '<span style="width:8px;"></span>' + YD._hours.map(function(h){
-            return pill(h === YD._h, hrY(h), "window._bvWhereSet('y'," + h + ")"); }).join('') : '')
+        + (SDAY === YD ? '<span style="width:8px;"></span>' + YD._moments.map(function(m){
+            return pill(m[0] === YD._h, m[1], "window._bvWhereSet('y'," + m[0] + ")"); }).join('') : '')
         + '</div>' : '';
 
       /* ---- where the VALUE is, which is not the same as where the odds are ----
