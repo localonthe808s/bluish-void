@@ -63631,6 +63631,53 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       }
     }
 
+    /* yesterday's day object, in today's shape, at the chosen hour (see WHERE ... STOOD) */
+    function cwkYesterday(T, H, CITY){
+      if (!T || !T.date || !H) return null;
+      var d0 = new Date(T.date + 'T12:00:00Z'); d0.setUTCDate(d0.getUTCDate() - 1);
+      var yd = d0.toISOString().slice(0, 10);
+      var Y = null; H.forEach(function(x){ if (x.date === yd) Y = x; });
+      var base = Y && ((Y.final && Y.final.ladder) || (Y.lock && Y.lock.ladder));
+      if (!Y || !base || !(Y.trail || []).length) return null;
+      var hours = Y.trail.map(function(r){ return r.h; });
+      var h = (window._bvWhereH != null && hours.indexOf(window._bvWhereH) >= 0) ? window._bvWhereH
+            : (hours.indexOf(12) >= 0 ? 12 : hours[hours.length - 1]);
+      var tr = Y.trail[hours.indexOf(h)];
+      /* the bake's own row nearest the end of that hour: prices and the reading then (R2, fetched once) */
+      var TR = (window._bvYTrail || {})[CITY.key + '|' + yd], row = null;
+      if (TR === undefined){
+        window._bvYTrail = window._bvYTrail || {}; window._bvYTrail[CITY.key + '|' + yd] = null;
+        var key = (CITY.key === 'ny' ? 'ny_high' : CITY.key + '_high');
+        fetch('https://cdn.bluishvoid.com/kalshi/trail/' + key + '_' + yd + '.jsonl')
+          .then(function(r){ return r.ok ? r.text() : ''; })
+          .then(function(tx){
+            var rows = []; tx.split('\n').forEach(function(l){ try { if (l) rows.push(JSON.parse(l)); } catch (e){} });
+            window._bvYTrail[CITY.key + '|' + yd] = rows;
+            if (window._bvWhereDay === 'y'){ var p = document.getElementById('cw-kalshi-panel'), sc = p ? p.scrollTop : 0; cwKalshiTap(); var p2 = document.getElementById('cw-kalshi-panel'); if (p2) p2.scrollTop = sc; }
+          }).catch(function(){});
+      } else if (TR && TR.length){
+        TR.forEach(function(r){ var lh = parseInt(String(r.lt || '').slice(0, 2), 10); if (r.date === yd && lh <= h) row = r; });
+      }
+      var byLabel = {}; if (row) (row.ladder || []).forEach(function(q){ byLabel[q[0]] = q; });
+      var lad = base.map(function(r, i){
+        var q = byLabel[r.label];
+        return { label: r.label, lo: r.lo, hi: r.hi, ours: (tr.ours || [])[i], market: (tr.mkt || [])[i],
+                 ask: q ? q[1] : null, nask: q ? q[3] : null };
+      });
+      var top = function(k){ var b = null; lad.forEach(function(r){ if (r[k] != null && (!b || r[k] > b[k])) b = r; }); return b ? b.label : null; };
+      var o = row && row.obs || {};
+      return { date: yd, _h: h, _hours: hours, _settled: Y.actual, _truth: Y.truth_source === 'settlement' ? 'KALSHI SETTLED' : 'OBSERVED HIGH',
+               ladder: lad, pred: tr.pred, sd: tr.sd, obs_so_far: tr.obs, obs_through: h,
+               now_temp: o.now != null ? o.now : null, now_at: o.now_at || null,
+               twc_fc: tr.twc_fc, nws_fc: tr.nws_fc, six_max: o.six != null ? o.six : null, six_window: o.six_win || null,
+               pick: top('ours'), market_pick: top('market'), bet: row && row.bet || null, state: {}, day_over: h >= 18 };
+    }
+    window._bvWhereSet = function(day, h){
+      window._bvWhereDay = day; if (h != null) window._bvWhereH = h;
+      var p = document.getElementById('cw-kalshi-panel'), sc = p ? p.scrollTop : 0;
+      try { cwKalshiTap(); } catch (e){}
+      var p2 = document.getElementById('cw-kalshi-panel'); if (p2) p2.scrollTop = sc;
+    };
     function cwKalshiTap(){
       var K = window._cwKalshi; if (!K || !K.today) return;
       /* opening from closed always lands on New York; a redraw while the sheet
@@ -65464,6 +65511,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
             ? t12(sw[0] + ':00').replace(':00', '') + '–' + t12(sw[1] + ':00').replace(':00', '') : '';
           under.push([[D1(T.six_max) + '° 6-HR MAX', swTxt], T.six_max, '#2fbfa8']);
         }
+        if (T._settled != null) under.push([[T1(T._settled) + '\u00B0 SETTLED', T._truth || 'THE DAY\u2019S HIGH'], T._settled, '#f5f0e6']);
         if (T.twc_max != null && T.obs_so_far != null && T.twc_max > T.obs_so_far + 0.3 && !dayDone)
           under.push([[D1(T.twc_max) + '° TWC', 'RUNNING MAX'], T.twc_max, '#f2833f']);
         var lastX = -99, row = 0;
@@ -65512,10 +65560,30 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         } finally { T = keepT; }
       };
       var SDAY = (dayDone && T.tomorrow && (T.tomorrow.ladder || []).length) ? T.tomorrow : T;
+      /* YESTERDAY, AS IT STOOD (user 2026-10-12: "make an option for me to see how yesterday stood in this view").
+         The same axis, rebuilt from the day's own record: history keeps yesterday's hourly trail (our odds, the
+         market's, the forecast, the running high, TWC and NWS) and its noon and 6 PM ladders; the bake trail on R2
+         adds that hour's prices and the reading then. An hour picker steps through the day; the settled high is
+         marked. Nothing here is recomputed -- every number is what the bake wrote at that hour. */
+      var hrY = function(h){ return (h % 12 || 12) + (h < 12 ? ' AM' : ' PM'); };
+      var YD = cwkYesterday(T, H, CITY);
+      if (YD && window._bvWhereDay === 'y') SDAY = YD;
       scaleFor(SDAY);
       if (SDAY !== T) verdict = '';
       var whereHdr = (SDAY === T) ? 'WHERE THE DAY STANDS'
+        : (SDAY === YD) ? 'WHERE ' + (dayName(YD.date) || 'YESTERDAY').toUpperCase() + ' STOOD \u00B7 ' + hrY(YD._h) + ' \u00B7 SETTLED ' + T1(YD._settled) + '\u00B0'
         : 'WHERE ' + (dayName(SDAY.date) || 'TOMORROW').toUpperCase() + ' STANDS \u00B7 FORECAST';
+      /* the switch, and in yesterday's view one pill per hour the bake recorded */
+      var pill = function(on, txt, js){
+        return '<button onclick="' + js + '" style="font:800 7px system-ui,sans-serif;letter-spacing:.08em;padding:3px 8px;border-radius:999px;cursor:pointer;'
+          + (on ? 'background:rgba(0,210,152,.22);color:#63dbb6;border:1px solid rgba(0,210,152,.55);' : 'background:transparent;color:#2c7f66;border:1px solid rgba(0,210,152,.18);') + '">' + txt + '</button>';
+      };
+      var whereSwitch = YD ? '<div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin:6px 6px 2px;">'
+        + pill(SDAY !== YD, (SDAY === T || SDAY === YD) ? 'TODAY' : (dayName(SDAY.date) || 'TOMORROW').toUpperCase(), "window._bvWhereSet(null)")
+        + pill(SDAY === YD, 'YESTERDAY', "window._bvWhereSet('y')")
+        + (SDAY === YD ? '<span style="width:8px;"></span>' + YD._hours.map(function(h){
+            return pill(h === YD._h, hrY(h), "window._bvWhereSet('y'," + h + ")"); }).join('') : '')
+        + '</div>' : '';
 
       /* ---- where the VALUE is, which is not the same as where the odds are ----
          The likeliest bracket is usually the worst bet, because the market has
@@ -67342,6 +67410,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
            2026-09-06, 3 PM with the peak still an hour off). The plan box is
            what a done day switches off, not the picture of the day. */
         + hdr(whereHdr)
+        + whereSwitch
         + (isNY ? '<div id="bv-dark-line" style="margin:4px 6px 2px;min-height:12px;"></div>' : '')
         + scale + timing
         + '<div id="bv-minute-replay"></div>'
