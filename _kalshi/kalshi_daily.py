@@ -3155,6 +3155,24 @@ def measured_calib(cfg):
 
 _CALIB = {}
 
+# THE CALIBRATION SHADOW (2026-10-12, user: "start on the calibration fix"). Over the 103 scored noon ladders the
+# favourite said 65% and landed 71%, the runner-up said 28% and landed 22%, the tails were right. Moving a share of
+# the runner-up's probability to the favourite fixes that IN SAMPLE (k=0.1-0.2 better on Brier and log loss in every
+# slice), but leave-one-day-out it LOSES (Brier .413 vs .408, log loss .716 vs .712): the days that pull k down are
+# the misses, where the shift costs most. So it is not applied. It rides beside every lock as ladder[].cal and the
+# report scores it against the real call on the same days (report.py, 'calib_shadow'); it goes live only if it wins
+# forward on both scores.
+CALIB_SHADOW_K = 0.15
+
+
+def calib_shadow(ps):
+    if len(ps) < 2:
+        return list(ps)
+    order = sorted(range(len(ps)), key=lambda i: -ps[i])
+    q = list(ps); m = q[order[1]] * CALIB_SHADOW_K
+    q[order[1]] -= m; q[order[0]] += m
+    return q
+
 
 def q_sized(q, cfg=None):
     """The probability Kelly is sized from: q, less the measured haircut of its
@@ -4447,8 +4465,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             # bounds are stored with the lock so a past day can be scored even
             # if the live ladder has since changed shape
             'ladder': [{'label': r['label'], 'lo': r['lo'], 'hi': r['hi'],
-                        'ours': round(p, 4), 'market': r['mid']}
-                       for r, p in zip(rows, ps)],
+                        'ours': round(p, 4), 'market': r['mid'], 'cal': round(c, 4)}
+                       for r, p, c in zip(rows, ps, calib_shadow(ps))],
             # what would actually have been staked, at the prices on the screen
             # at this moment. Only counted later if those prices were live -- see
             # priced_on_time().

@@ -91,6 +91,10 @@ def market_day(key, label, kind, h):
     if lad and h.get('actual_bracket'):
         out['p_ours'] = settled_prob(lad, h['actual_bracket'], 'ours')
         out['p_mkt'] = settled_prob(lad, h['actual_bracket'], 'market')
+        if all(r.get('cal') is not None for r in lad):        # the calibration shadow (kalshi_daily.calib_shadow)
+            out['p_cal'] = settled_prob(lad, h['actual_bracket'], 'cal')
+            br = lambda f: sum((float(r.get(f) or 0) - (1.0 if r.get('label') == h['actual_bracket'] else 0.0)) ** 2 for r in lad)
+            out['brier_ours'], out['brier_cal'] = br('ours'), br('cal')
     if h.get('eve'):
         out['eve_pick'] = h['eve'].get('pick')
         out['eve_hit'] = (h['eve'].get('pick') == h.get('actual_bracket'))
@@ -173,6 +177,13 @@ def tally(ms):
         out['ll_n'] = len(both)
         out['ll_ours'] = round(sum(-math.log(m['p_ours']) for m in both) / len(both), 3)
         out['ll_mkt'] = round(sum(-math.log(m['p_mkt']) for m in both) / len(both), 3)
+    cs = [m for m in ms if m.get('p_cal') is not None and m.get('p_ours') is not None]
+    if cs:      # the calibration shadow, forward, on the same days as the real call
+        out['calib_shadow'] = {'n': len(cs),
+            'll_ours': round(sum(-math.log(m['p_ours']) for m in cs) / len(cs), 3),
+            'll_cal': round(sum(-math.log(m['p_cal']) for m in cs) / len(cs), 3),
+            'brier_ours': round(sum(m['brier_ours'] for m in cs) / len(cs), 4),
+            'brier_cal': round(sum(m['brier_cal'] for m in cs) / len(cs), 4)}
     out['bets'] = bet_tally([b for m in ms for b in m['bets']])
     legs = collections.OrderedDict()
     for m in ms:
