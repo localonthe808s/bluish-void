@@ -78,8 +78,16 @@ def study():
     try:
         ny = json.load(open(os.path.join(HERE, 'insider_study.json')))['cities']['ny_high']
         d = ny['bursts']['dark']; mv = (ny.get('moves') or {}).get('dark') or {}
-        return {'ret': d.get('ret'), 'se': d.get('se'), 'days': ny.get('days'), 'n': d.get('n'),
-                'mo60': mv.get('60'), 'next_report': mv.get('next_report'), 'rule': ny.get('rule')}
+        rv = (ny.get('moves') or {}).get('reaction') or {}
+        out = {'ret': d.get('ret'), 'se': d.get('se'), 'days': ny.get('days'), 'n': d.get('n'),
+               'mo5': mv.get('5'), 'mo15': mv.get('15'), 'mo60': mv.get('60'), 'next_report': mv.get('next_report'),
+               'react_mo5': rv.get('5'), 'rule': ny.get('rule')}
+        # the accumulation test (dark_trend_study.py): net dark money per range by a moment vs where the day settled
+        try:
+            out['trend'] = json.load(open(os.path.join(HERE, 'dark_trend_study.json')))
+        except Exception:
+            pass
+        return out
     except Exception:
         return {}
 
