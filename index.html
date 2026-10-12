@@ -61219,6 +61219,16 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         fetch('city_faults.json?v=1').then(function(r2){ return r2.json(); })
           .then(function(j){ if (j && j.f){ window._cwFaults = j.f; cwDrawSensors(); } }).catch(function(){});
       }
+      /* THE GROUND'S SHAPE under the rock (user 2026-10-12: "the geology tab has no geological topography baked in to
+         show the hills and remnants"): a LANDFORM shading over the rock colours, so the moraine, Manhattan's and the
+         Bronx's ridges, the Palisades and Staten Island's hills read as land, not as flat paint. USGS 3DEP bare earth
+         (~10 m), smoothed and exaggerated 5x (_maplab/geo_relief/bake.py, R2 nyc/landform/v1). Not the ink map's 1 m
+         lidar: that was baked faint for the street map and mostly draws highways and embankments. */
+      if (!window._cwLidar && !window._cwLidarReq){
+        window._cwLidarReq = 1;
+        fetch('city_landform_index.json?v=1').then(function(r2){ return r2.json(); })
+          .then(function(j){ if (j && j.levels){ window._cwLidar = j; cwRockDraw(); } }).catch(function(){ window._cwLidarReq = 0; });
+      }
       var body = document.getElementById('cw-body');
       var r = body ? body.getBoundingClientRect() : null;
       if (!r || !r.width) return;
@@ -61237,11 +61247,27 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
           jobs.push(_rockTile('https://tiles.macrostrat.org/carto/' + zz + '/' + x + '/' + y + '.png')
             .then(function(im){ return { im: im, x: x, y: y }; }, function(){ return null; }));
         })(tx, ty);
+      var LX = window._cwLidar, relief = [];
+      if (LX){
+        var vw = v.X0 / R2 * 180 / Math.PI, ve = v.X1 / R2 * 180 / Math.PI;
+        var vs = (2 * Math.atan(Math.exp(v.Y0 / R2)) - Math.PI / 2) * 180 / Math.PI, vn = (2 * Math.atan(Math.exp(v.Y1 / R2)) - Math.PI / 2) * 180 / Math.PI;
+        var mppG = mpp * Math.cos(40.7 * Math.PI / 180);       /* the levels are ground metres a pixel; a mercator metre here is ~0.76 of one */
+        var Lv = LX.levels.filter(function(l){ return mppG > l.minMpp && mppG <= l.maxMpp; })[0] || LX.levels[0];
+        Lv.tiles.forEach(function(t){
+          var m = /^r(\d+)c(\d+)$/.exec(t); if (!m) return;
+          var w = LX.w0 + (+m[2]) * Lv.d, so = LX.s0 + (+m[1]) * Lv.d;
+          if (w > ve || w + Lv.d < vw || so > vn || so + Lv.d < vs) return;
+          relief.push(_rockTile(Lv.base + t + '.png').then(function(im){ return { im: im, w: w, s: so, e: w + Lv.d, n: so + Lv.d }; }, function(){ return null; }));
+        });
+      }
+      key += '|' + relief.length;
+      jobs.push(Promise.all(relief).then(function(rl){ return { relief: rl.filter(Boolean) }; }));
       Promise.all(jobs).then(function(parts){
         if (!cw.rock || !cwMapMode()) return;
+        var RL = (parts.pop() || {}).relief || [];
         var cvs2 = document.getElementById('cw-rock');
         if (!cvs2) return;
-        var key2 = key + '|' + parts.filter(Boolean).length;
+        var key2 = key + '|' + parts.filter(Boolean).length + '|' + RL.length;
         if (key2 === _rockKey && cvs2.width === W && cvs2.height === H) return;   /* nothing moved */
         _rockKey = key2;
         cvs2.width = W; cvs2.height = H;
@@ -61265,6 +61291,25 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
           var X0 = p2.x * tileM - HALF, Y1 = HALF - p2.y * tileM;
           g.drawImage(p2.im, (X0 - v.X0) * sx, (v.Y1 - Y1) * sy, tileM * sx, tileM * sy);
         });
+        /* the relief, over the rock and inside the same borough clip. The tiles are a lat/lon grid and the map is
+           mercator, so each goes down in thin bands (the lab's drawRelief); band edges snap to whole pixels so the
+           translucent shading never doubles along a seam. One level at a time, so tiles never stack. */
+        var mx = function(lon){ return (lon * Math.PI / 180 * R2 - v.X0) * sx; };
+        var my = function(lat){ return (v.Y1 - R2 * Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360))) * sy; };
+        [1].forEach(function(al){
+          g.globalAlpha = al;
+          RL.forEach(function(t){
+            var x0 = mx(t.w), x1 = mx(t.e), STR = 24;
+            if (x1 < 0 || x0 > W || my(t.s) < 0 || my(t.n) > H) return;
+            for (var i = 0; i < STR; i++){
+              var la0 = t.n + (t.s - t.n) * (i / STR), la1 = t.n + (t.s - t.n) * ((i + 1) / STR);
+              var y0 = Math.round(my(la0)), y1 = Math.round(my(la1));
+              if (y1 <= y0) continue;
+              g.drawImage(t.im, 0, t.im.height * (i / STR), t.im.width, t.im.height / STR, x0, y0, x1 - x0, y1 - y0);
+            }
+          });
+        });
+        g.globalAlpha = 1;
         cvs2.style.display = '';
       });
     }
