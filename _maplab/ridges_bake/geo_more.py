@@ -1,23 +1,22 @@
-"""THE RIDGES, the landscape told further (2026-10-11, user: "describe the geology's landscape further in the ridges view").
-Adds to city_ridges_geo.json:
-  belt[].rock / belt[].made : what each belt is made of, and how it got its shape (standard regional geology, no numbers invented:
-                              ages are the textbook ones -- Grenville basement ~1.1 billion yrs, the Alleghanian collision ~300
-                              million, the Triassic rift basins ~200 million, the last ice sheet's edge ~20,000 yrs)
-  sec[]  : named SECTIONS of the same USGS physiographic map (Fenneman & Johnson 1946), each at a point inside its own polygon
-  ice[]  : the Wisconsin and pre-Wisconsin glacial limits, USGS "Generalized Glacial Limit Lines" (King & Beikman 1974 geologic
-           map, 1:2,500,000; Stanford purl vz874sc7648), clipped to the box -- GENERALISED, so the page draws them soft
-python3 geo_more.py <city_ridges_geo.json> <dl/physio/physio> <glac_ridges.json>"""
+"""THE RIDGES, what the ground does to the weather (2026-10-11). First pass added rock and ice-age geology; the user corrected it:
+"we dont need actual geology info i just meant how these geological features would affect weather and areas of interest for
+storm development". So each belt now carries two weather lines (belt[].rock / belt[].made, kept as field names), and sec[] names
+the Catskills and the Hudson Valley -- sections of the same USGS physiographic map (Fenneman & Johnson 1946) -- with theirs.
+Only the well-known terrain effects: upslope and lake snow on the plateau, valley channelling and cold pools, storms firing on
+the Blue Ridge, cold-air damming and the lee trough over the Piedmont, colder highlands, the sea-breeze front on the plain.
+python3 geo_more.py <city_ridges_geo.json> <dl/physio/physio>   (run on geo_build.py's output)"""
 import sys, json, shapefile
 from shapely.geometry import shape, box, Point
 from shapely.ops import unary_union
 G = json.load(open(sys.argv[1]))
-ROCK = {
-    'ALLEGHENY PLATEAU': ('FLAT LAYERS OF SANDSTONE, SHALE, COAL', 'LIFTED WHOLE, THEN CUT BY RIVERS'),
-    'RIDGE AND VALLEY':  ('THE SAME LAYERS, FOLDED LIKE A RUG', 'WHEN AFRICA HIT ~300 MILLION YRS AGO'),
-    'BLUE RIDGE':        ('GRANITE AND GNEISS ~1.1 BILLION YRS', 'THE OLDEST ROCK ON THIS MAP'),
-    'PIEDMONT':          ('ROOTS OF OLD MOUNTAINS: SCHIST, GNEISS', 'WORN DOWN TO ROLLING HILLS'),
-    'HIGHLANDS':         ('GNEISS ~1.1 BILLION YRS', 'THE BLUE RIDGE’S ROCK, SURFACING AGAIN'),
-    'COASTAL PLAIN':     ('LOOSE SAND, GRAVEL AND CLAY', 'WASHED OFF THE MOUNTAINS, TILTING SEAWARD'),
+ROCK = {   # (user 2026-10-11: "we dont need actual geology info ... how these features would affect weather and areas of
+           #  interest for storm development") -- what each belt does to the air, the well-known patterns only
+    'ALLEGHENY PLATEAU': ('WEST WINDS LIFTED ONTO IT: UPSLOPE SNOW', 'LAKE ERIE\u2019S SNOW BANDS RUN ACROSS IT'),
+    'RIDGE AND VALLEY':  ('VALLEYS STEER WIND SOUTHWEST\u2013NORTHEAST', 'COLD AIR POOLS IN THEM: NIGHT FOG, FROST'),
+    'BLUE RIDGE':        ('SUMMER STORMS OFTEN FIRE ON ITS CRESTS', 'COLD AIR GETS WEDGED ON ITS EAST SIDE'),
+    'PIEDMONT':          ('WHERE THAT WEDGE SITS: ICE, STUCK CLOUD', 'LEE TROUGH: STORMS OFTEN RE-FIRE HERE'),
+    'HIGHLANDS':         ('A FEW DEGREES COLDER THAN THE CITY', 'OFTEN SNOW HERE WHILE THE CITY RAINS'),
+    'COASTAL PLAIN':     ('THE SEA BREEZE PUSHES INLAND ACROSS IT', 'ITS FRONT CAN SET OFF AFTERNOON STORMS'),
 }
 # two anchors move to open ground INSIDE their own belt (checked against the polygons): with three lines they found no room
 # beside the NYC alerts and the NJ flood zones -- the Hudson Highlands at Bear Mountain, southern Maryland's coastal plain
@@ -38,16 +37,10 @@ def add(k, i, lines, at=None):
     pt = Point(at) if at else p.representative_point()
     assert p.contains(pt), (k, at)
     SEC.append({'n': lines, 'c': [round(pt.x, 3), round(pt.y, 3)]})
-add(('APPALACHIAN PLATEAUS', 'CATSKILL'), 0, ['THE CATSKILLS', 'A PLATEAU CARVED INTO PEAKS'])
-add(('PIEDMONT', 'PIEDMONT LOWLANDS'), 0, ['RIFT BASIN', 'RED SANDSTONE, PANGAEA', 'PULLING APART ~200 MILLION YRS AGO'])
-add(('PIEDMONT', 'PIEDMONT LOWLANDS'), 1, ['RIFT BASIN', 'RED SANDSTONE ~200 MILLION YRS'], at=(-74.95, 40.47))
-add(('VALLEY AND RIDGE', 'HUDSON VALLEY'), 0, ['HUDSON VALLEY', 'A LOWLAND OF SOFT SHALE'])
+add(('APPALACHIAN PLATEAUS', 'CATSKILL'), 0, ['THE CATSKILLS', 'EAST WINDS IN A NOR\u2019EASTER', 'WRING OUT HEAVY SNOW AND RAIN'])
+add(('VALLEY AND RIDGE', 'HUDSON VALLEY'), 0, ['HUDSON VALLEY', 'FUNNELS WIND NORTH\u2013SOUTH', 'HOLDS COLD AIR: FREEZING RAIN'], at=(-73.75, 42.6))   # the upper valley near Albany: open ground for a label, inside the section
 G['sec'] = SEC
-GL = json.load(open(sys.argv[3]))
-def labat(L, lon):
-    pts = list(zip(L[0::2], L[1::2])); q = min(pts, key=lambda p: abs(p[0] - lon)); return [q[0], q[1]]
-G['ice'] = [{'k': 'w', 'r': L, 'lab': labat(L, -79.6), 'n': ['THE LAST ICE SHEET STOPPED HERE', '~20,000 YRS AGO']} for L in GL['w']] + \
-           [{'k': 'p', 'r': L, 'lab': labat(L, -76.3), 'n': ['AN OLDER ICE AGE’S EDGE']} for L in GL['p']]
-G['src'] += '; sections: same map; glacial limits: USGS Generalized Glacial Limit Lines (King & Beikman 1974, 1:2.5M)'
+G.pop('ice', None)
+G['src'] += '; sections: same map'
 json.dump(G, open(sys.argv[1], 'w'), separators=(',', ':'))
-print(len(SEC), 'sections', len(G['ice']), 'ice lines', [b.get('rock') for b in G['belt']])
+print(len(SEC), 'sections', [b.get('rock') for b in G['belt']])
