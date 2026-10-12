@@ -462,7 +462,8 @@ async function readSensors(recentMin, withSeries) {
 }
 const APT5 = {
   // KNYC rides along for the trend line: Central Park reports HOURLY (its
-  // 5-minute stream is NWS-run and not in the FAA feed; MADIS pending), so its
+  // 5-minute stream is NWS-run and not in the FAA feed; MADIS is closed to us:
+  // 1-minute ASOS is government-only and its public 5-minute feed lacks KNYC), so its
   // points are the hourly reports, drawn as such. Never OWN5 for NY.
   ny_high:  { stids: 'KLGA,KJFK,KEWR,KNYC', tz: 'America/New_York' },
   las_high: { stids: 'KLAS,KVGT',      tz: 'America/Los_Angeles' },
