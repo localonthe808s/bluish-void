@@ -16,23 +16,67 @@ name: purge cloudflare cache
 on:
   deployment_status:
 
-permissions: {}
+permissions:
+  contents: read      # the compare API: which files this deploy changed
+  deployments: read   # the previous successful github-pages deploy
 
 jobs:
   purge:
     if: ${{ github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'github-pages' }}
     runs-on: ubuntu-24.04   # pinned 2026-10-11: ubuntu-latest becomes Ubuntu 26 from 2026-10-19
     steps:
-      - name: Purge everything on the bluishvoid.com zone
+      # TARGETED WHEN SAFE (2026-10-12, perf review: the Kalshi bake commits ~200 times a day and every one wiped the
+      # whole zone -- 68 full purges in a day, so the map bakes, tiles and fonts kept going cold at the edge).
+      # A deploy whose changes are ONLY bake data that the page always fetches with a time-bucketed ?v= query
+      # (kalshi_*.json, _kalshi/...) or files that are never served (.py .md .txt .github/) purges just those plain URLs.
+      # Anything else -- index.html, a map bake, a script -- or any doubt at all (API error, no previous deploy, too many
+      # files) falls back to purge_everything, exactly as before.
+      - name: Purge (targeted for bake-only deploys, else everything)
         env:
           CF_PURGE_TOKEN: ${{ secrets.CF_PURGE_TOKEN }}
           CF_ZONE_ID: 700b0c254f2d56782c2b3619b1c0521d
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.deployment.sha }}
+          DEPLOY_ID: ${{ github.event.deployment.id }}
         run: |
-          set -eu
+          set -u
           sleep 10   # let the fresh Pages build settle on GitHub's CDN before the edge refetches
+          everything() {
+            echo "PURGE EVERYTHING: $1"
+            resp=$(curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" \
+              -H "Authorization: Bearer ${CF_PURGE_TOKEN}" -H "Content-Type: application/json" \
+              --data '{"purge_everything":true}')
+            echo "$resp"; echo "$resp" | grep -q '"success":true'; exit $?
+          }
+          # the newest earlier github-pages deployment that went live
+          prev=""
+          ids=$(gh api "repos/${REPO}/deployments?environment=github-pages&per_page=30" --jq '.[] | "\(.id) \(.sha)"') || everything "deployments API failed"
+          while read -r id sha; do
+            [ "$id" = "$DEPLOY_ID" ] && continue
+            st=$(gh api "repos/${REPO}/deployments/${id}/statuses?per_page=1" --jq '.[0].state' 2>/dev/null) || continue
+            if [ "$st" = "success" ]; then prev="$sha"; break; fi
+          done <<< "$ids"
+          [ -n "$prev" ] || everything "no previous successful deploy found"
+          [ "$prev" = "$HEAD_SHA" ] && everything "same sha as the previous deploy"
+          files=$(gh api "repos/${REPO}/compare/${prev}...${HEAD_SHA}" --jq '.files[].filename') || everything "compare API failed"
+          n=$(printf '%s\n' "$files" | grep -c . || true)
+          echo "changed since ${prev:0:9}: $n file(s)"; printf '%s\n' "$files" | head -40
+          [ "$n" -ge 1 ] && [ "$n" -le 250 ] || everything "file count $n out of range"
+          urls=""
+          while read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              kalshi_*.json|_kalshi/*.json) urls="$urls https://bluishvoid.com/$f" ;;
+              *.py|*.md|*.txt|.github/*|_kalshi/*) ;;   # never served to the page: nothing to purge
+              *) everything "non-bake file changed: $f" ;;
+            esac
+          done <<< "$files"
+          [ -z "${urls// }" ] && { echo "nothing served changed: no purge needed"; exit 0; }
+          set -- $urls
+          json=$(printf '"%s",' "$@"); json="{\"files\":[${json%,}]}"
+          echo "PURGE FILES: $*"
           resp=$(curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" \
-            -H "Authorization: Bearer ${CF_PURGE_TOKEN}" \
-            -H "Content-Type: application/json" \
-            --data '{"purge_everything":true}')
+            -H "Authorization: Bearer ${CF_PURGE_TOKEN}" -H "Content-Type: application/json" --data "$json")
           echo "$resp"
-          echo "$resp" | grep -q '"success":true'
+          echo "$resp" | grep -q '"success":true' || everything "targeted purge refused"
