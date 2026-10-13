@@ -118,7 +118,10 @@ const CACHE_RULES = {
   // ── NEUTRINO HUNTERS (2026-09-30). Super-K's realtime monitor picture, one GIF the observatory rewrites every
   //    ~22 s; the page reads the event's hit counts off it (needs the bytes, so the proxy), 20 s of edge cache
   //    so every viewer shares one fetch. Their site has no CORS header. ──
-  'www-sk.icrr.u-tokyo.ac.jp':    20
+  'www-sk.icrr.u-tokyo.ac.jp':    20,
+  // ── Caltrans District 7 camera list (THE BASIN). 1.85 MB raw, asked for with &shape=d7cctv, which keeps the in-service
+  //    cameras and only the fields the widget reads (perf review 2026-10-12). The pages refresh it every 10 min. ──
+  'cwwp2.dot.ca.gov':             600
 };
 
 // SHAPES: an upstream that is far too big to hand a phone is cut down HERE, once, and the
@@ -136,6 +139,19 @@ const SHAPES = {
       (e.EventType === 'closures' || e.EventType === 'accidentsAndIncidents')
     ).map(e => { const o = {}; keep.forEach(k => { o[k] = e[k]; }); return o; });
     return JSON.stringify(out);
+  },
+  // Caltrans D7 cameras: same {data:[{cctv:{...}}]} structure the pages parse, cut to in-service cameras with a current
+  // picture, and to index / location (name, place, lat, lon, direction, route) / inService / imageData.static (url, rate).
+  d7cctv(text) {
+    const all = JSON.parse(text);
+    const data = ((all && all.data) || []).map(o => o && o.cctv).filter(c => c && c.inService === 'true' &&
+      c.imageData && c.imageData.static && c.imageData.static.currentImageURL).map(c => {
+      const L = c.location || {}, S = c.imageData.static;
+      return { cctv: { index: c.index, inService: c.inService,
+        location: { locationName: L.locationName, nearbyPlace: L.nearbyPlace, latitude: L.latitude, longitude: L.longitude, direction: L.direction, route: L.route },
+        imageData: { static: { currentImageURL: S.currentImageURL, currentImageUpdateFrequency: S.currentImageUpdateFrequency } } } };
+    });
+    return JSON.stringify({ data });
   }
 };
 
