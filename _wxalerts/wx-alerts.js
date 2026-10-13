@@ -13,7 +13,7 @@ const ORIGIN = 'https://bluishvoid.com';
 const UA = '(bluishvoid.com weather alerts, https://bluishvoid.com)';
 const TYPES = ['umbrella', 'rain', 'severe', 'swing', 'aurora'];
 const PUSH_HOSTS = /(^|\.)(push\.apple\.com|fcm\.googleapis\.com|push\.services\.mozilla\.com|notify\.windows\.com)$/;
-const BATCH = 12;            /* places per tick: 2 subrequests each + the pushes, under the free plan's 50 */
+const BATCH = 1500;          /* places per tick (2 calls each + pushes): the account is on Workers Paid (10,000 calls per run), so every place is checked every tick; the cursor only rotates past 1,500 */
 
 const cors = { 'Access-Control-Allow-Origin': ORIGIN, 'Access-Control-Allow-Headers': 'content-type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Vary': 'Origin' };
