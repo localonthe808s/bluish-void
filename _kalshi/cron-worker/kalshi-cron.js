@@ -686,16 +686,20 @@ function ntfyHeaders(env, h) {
 /* ONE DELIVERY TEST PER TOKEN CHANGE (2026-10-03): after NTFY_TOKEN went in, the first tick sends one alert and logs
    ntfy's answer, so "the token works" is a 200 seen on the phone, not an assumption. Bump NTFY_TEST to re-run; the KV
    mark keeps it to one message however many ticks follow. */
-const NTFY_TEST = '2026-10-03-token';
+const NTFY_TEST = '2026-10-13-recheck';
+/* the self-test only runs before this moment, so outside a test window the ticks never read its KV mark */
+const NTFY_TEST_UNTIL = Date.parse('2026-10-14T04:00:00Z');
 async function ntfySelfTest(env) {
   if (!env.NTFY_TOPIC || !env.OBS) return;
   const k = `ntfy:selftest:${NTFY_TEST}`;
   if (await env.OBS.get(k)) return;
   await env.OBS.put(k, new Date().toISOString());
   const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, { method: 'POST',
-    body: `Alerts are reaching this phone again: the worker now sends with its own ntfy account (${env.NTFY_TOKEN ? 'token set' : 'NO TOKEN'}).`,
+    body: `Delivery test from the Kalshi worker (${env.NTFY_TOKEN ? 'token set' : 'NO TOKEN'}). If this reached your phone, worker alerts are getting through.`,
     headers: ntfyHeaders(env, { 'Title': 'Kalshi alerts: delivery test', 'Priority': 'default' }) });
-  console.log(`[ntfy-test] ${r.status} ${r.ok ? 'delivered' : (await r.text()).slice(0, 160)}`);
+  const ans = `${r.status} ${r.ok ? 'delivered' : (await r.text()).slice(0, 300)}`;
+  console.log(`[ntfy-test] ${ans}`);
+  await env.OBS.put(`${k}:result`, JSON.stringify({ at: new Date().toISOString(), token: !!env.NTFY_TOKEN, answer: ans }));   /* readable afterwards, not only in the live log */
 }
 
 // THE COOL-DOWN IS SAVED BEFORE THE PUSH (2026-10-07). It used to be stamped in memory here and written to KV by the
@@ -1234,6 +1238,7 @@ export default {
       })());
       return;
     }
+    if (sched < NTFY_TEST_UNTIL) ctx.waitUntil(ntfySelfTest(env).catch((e) => console.log(`[ntfy-test] FAILED ${e}`)));
     ctx.waitUntil((async () => {
       try {
         console.log(`[alerts] ${new Date().toISOString()} ${await alertTick(env, sched)}`);
