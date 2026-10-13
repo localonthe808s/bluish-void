@@ -51171,6 +51171,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           if (!R.estimatedShockArrivalTime) bits.unshift('<span style="color:#15803d;">EARTH: NOT IN ITS PATH</span>');
           el.innerHTML = '<span style="font-weight:800;letter-spacing:.08em;color:' + SEV[0] + ';">CME ARRIVALS</span> \u00b7 ' + bits.join(' \u00b7 ')
             + ' <span style="opacity:.55;">\u00b7 run ' + when(R.modelCompletionTime) + ' \u00b7 <a href="' + (R.link || 'https://ccmc.gsfc.nasa.gov/DONKI/') + '" target="_blank" rel="noopener" style="color:inherit;">NASA CCMC DONKI</a></span>';
+          window._swCme = R.estimatedShockArrivalTime ? { t: Date.parse(R.estimatedShockArrivalTime), gb: !!R.isEarthGB } : null; if (window._swActivity) window._swActivity();
           el.setAttribute('data-has', '1'); el.style.display = (window._solarWindView || 'forecast') === 'forecast' ? '' : 'none';
         }).catch(function(){ el.style.display = 'none'; });
     };
@@ -109626,6 +109627,9 @@ function closeAlertModal(){
     background:radial-gradient(120% 140% at 50% 50%, #ffffff 55%, rgba(255,255,255,.88) 80%, rgba(255,255,255,.55) 100%);
     box-shadow:0 0 7px 2px rgba(255,255,255,.45); filter:blur(4px); }
   #ab-tier .ot-sep{ width:1px; height:12px; background:rgba(255,255,255,.35); }
+  /* activity: the tab glows red (user 2026-10-13) */
+  #ab-tier .ot-tab.sw-hot, #solarwind-widget .widget-head .geo-tab.sw-hot{ color:#ff2a2a !important; text-shadow:0 0 6px rgba(255,42,42,.95), 0 0 14px rgba(255,42,42,.6); animation:sw-hot-pulse 2.4s ease-in-out infinite; }
+  @keyframes sw-hot-pulse{ 0%,100%{ text-shadow:0 0 5px rgba(255,42,42,.85), 0 0 12px rgba(255,42,42,.45); } 50%{ text-shadow:0 0 8px rgba(255,42,42,1), 0 0 18px rgba(255,42,42,.75); } }
   #aurora-borealis-widget .ab-sub{ background:none !important; box-shadow:none !important; backdrop-filter:none !important; -webkit-backdrop-filter:none !important; border-radius:0 0 18px 18px !important; margin:0; height:auto; overflow:hidden; }
   #aurora-borealis-widget .ab-sub > .widget-head{ border-radius:0 0 14px 14px !important; }
   #aurora-borealis-widget .ab-sub > .widget-head .widget-title{ display:none !important; }
@@ -109818,6 +109822,32 @@ function closeAlertModal(){
       var acv = document.getElementById('aurora-canvas');
       if (acv && !document.getElementById('aurora-canvas-s')){ var scv = document.createElement('canvas'); scv.id = 'aurora-canvas-s'; acv.parentNode.insertBefore(scv, acv.nextSibling);
         if (window._auroraSouthStart && window.auroraAnim && auroraAnim.frames && auroraAnim.frames.length) window._auroraSouthStart(); }
+      /* SOLAR WIND GLOWS RED ON ACTIVITY (user 2026-10-13): each tab lights from its own instrument, the SOLAR WIND tier tab
+         when any does. Thresholds are NOAA's own: a CME DONKI predicts will reach Earth (FORECAST, from up to 3 days before to 18 h after
+         the predicted shock); a G1+ storm, Bz <= -10 nT or wind >= 600 km/s from the page's RTSW/Kp reads (FIELD & PLASMA);
+         GOES >=2 MeV electrons >= 1000 pfu, the electron alert (IONS & ELECTRONS); GOES >=10 MeV protons >= 10 pfu, an S1
+         radiation storm (RADIATION). The tab's tooltip says which. */
+      var GP = { p: null, e: null, at: 0 };
+      var goesPull = function(){
+        if (document.hidden) return; GP.at = Date.now();
+        var last = function(rows, en){ var v = null; (rows || []).forEach(function(r){ if (r && r.energy === en && r.flux != null) v = +r.flux; }); return v; };
+        fetch('https://services.swpc.noaa.gov/json/goes/primary/integral-protons-6-hour.json').then(function(r){ return r.json(); }).then(function(j){ GP.p = last(j, '>=10 MeV'); window._swActivity(); }).catch(function(){});
+        fetch('https://services.swpc.noaa.gov/json/goes/primary/integral-electrons-6-hour.json').then(function(r){ return r.json(); }).then(function(j){ GP.e = last(j, '>=2 MeV'); window._swActivity(); }).catch(function(){});
+      };
+      window._swActivity = function(){
+        var D = window._swData || {}, now = Date.now(), why = {};
+        var c = window._swCme; if (c && c.t && now > c.t - 72 * 3600e3 && now < c.t + 18 * 3600e3) why.forecast = 'CME predicted at Earth' + (c.gb ? ' (glancing blow)' : '');
+        var g = parseInt(String(D.gScale || '').replace(/\D/g, ''), 10) || 0, pl = [];
+        if (g >= 1) pl.push('G' + g + ' geomagnetic storm'); if (D.bz != null && D.bz <= -10) pl.push('Bz ' + D.bz.toFixed(1) + ' nT'); if (D.speed != null && D.speed >= 600) pl.push(D.speed + ' km/s wind');
+        if (pl.length) why.plasma = pl.join(', ');
+        if (GP.e != null && GP.e >= 1000) why.particles = '>=2 MeV electrons ' + Math.round(GP.e) + ' pfu';
+        if (GP.p != null && GP.p >= 10) why.radiation = '>=10 MeV protons ' + GP.p.toFixed(0) + ' pfu (S1+)';
+        [].forEach.call(document.querySelectorAll('#solarwind-tabs .geo-tab'), function(b){ var k = b.getAttribute('data-sw'), w = why[k]; b.classList.toggle('sw-hot', !!w); if (w) b.title = w; else b.removeAttribute('title'); });
+        var tt = document.querySelector('#ab-tier .ot-tab[data-p="solarwind-widget"]'), any = Object.keys(why);
+        if (tt){ tt.classList.toggle('sw-hot', any.length > 0); if (any.length) tt.title = any.map(function(k){ return why[k]; }).join(' \u00b7 '); else tt.removeAttribute('title'); }
+      };
+      goesPull(); setInterval(goesPull, 10 * 60 * 1000); setInterval(window._swActivity, 60 * 1000); setTimeout(window._swActivity, 8000);
+      setTimeout(function(){ try { if (window._bvCmeArrivals && !window._swCme) window._bvCmeArrivals(); } catch(e){} }, 9000);   /* the CME read, without waiting for the SOLAR WIND pane to be opened */
       window._bvAuroraPick = apick;
       [].forEach.call(abt.querySelectorAll('.ot-tab'), function(b){ b.onclick = function(e){ e.stopPropagation(); apick(b.getAttribute('data-p')); }; });
       apick('aurora-widget');
