@@ -15778,7 +15778,7 @@ window._bvHeroGpu = function(hw, st, code, night){
                   #ds-parks-footer .ds-parks-head{ margin:0 0 4px !important; padding-top:0 !important; border-top:none !important; text-align:center; }
                   #ds-parks-footer #darksky-parks-rows{ display:flex !important; flex-flow:row wrap !important; justify-content:center !important; gap:3px 18px !important; }
                   #ds-parks-footer .ds-park{ border-top:none !important; padding:0 !important; }
-                  #ds-parks-footer .ds-foot-tip{ font-size:.42rem !important; margin-top:4px !important; text-align:center; }
+                  #ds-parks-footer .ds-foot-tip{ font-size:.42rem !important; margin-top:4px !important; text-align:center; color:#05DB32 !important; font-weight:800 !important; text-transform:uppercase; letter-spacing:.1em !important; }
                   /* Location stat left of the legend: horizontal "Bortle X.X … CLASS". */
                   #ds-hdr-legend #darksky-bortle{ display:flex; align-items:flex-start; justify-content:space-between; flex:1 1 auto; flex-wrap:nowrap; gap:0 12px; padding:0 !important; margin:0 !important; background:none; box-shadow:none; border-left:none !important; }
                   #ds-hdr-legend #darksky-bortle-head{ display:none !important; }
@@ -15833,7 +15833,7 @@ window._bvHeroGpu = function(hw, st, code, night){
                   <div class="ds-parks-head" style="font-size:.46rem;font-weight:800;letter-spacing:.06em;color:rgba(255,255,255,.75);text-transform:uppercase;margin:6px 0 3px;border-top:1px solid rgba(43,34,244,.12);padding-top:5px;">Darkest parks nearby <span style="opacity:.6;font-weight:600;">≤ B3</span></div>
                   <div id="darksky-parks-rows" style="pointer-events:auto;display:flex;flex-direction:column;gap:1px;"></div>
                   <div class="ds-foot" style="font-size:.4rem;color:rgba(43,34,244,.42);line-height:1.45;margin-top:5px;border-top:1px solid rgba(43,34,244,.12);padding-top:4px;">Estimated zenith sky brightness from the <a href="https://djlorenz.github.io/astronomy/lp/" target="_blank" rel="noopener" style="color:rgba(43,34,244,.6);">Lorenz Atlas</a> / VIIRS — Bortle is an approximation, not a measured reading.</div>
-                  <div class="ds-foot-tip" style="pointer-events:auto;font-size:.42rem;color:rgba(255,255,255,.55);margin-top:3px;">Long-press map for any point</div>
+                  <div class="ds-foot-tip" style="pointer-events:auto;font-size:.42rem;color:#05DB32;font-weight:800;letter-spacing:.06em;margin-top:3px;">Press and hold on the map to see any location</div>
                 </div>
                 <!-- Mobile-only: location stat stack (top-left) — #darksky-bortle is moved here -->
                 <div id="ds-loc-box" style="position:absolute;top:10px;left:10px;z-index:700;display:none;pointer-events:none;padding:6px 9px;border-radius:9px;background:rgba(255,255,255,.62);-webkit-backdrop-filter:blur(14px) saturate(120%);backdrop-filter:blur(14px) saturate(120%);box-shadow:0 4px 16px rgba(43,34,244,.14),inset 0 1px 0 rgba(255,255,255,.5);max-width:calc(100vw - 20px);"></div>
@@ -15996,6 +15996,11 @@ window._bvHeroGpu = function(hw, st, code, night){
             // rows short so they fit without truncation). No-op if already abbreviated.
             var US_ST={Alabama:'AL',Alaska:'AK',Arizona:'AZ',Arkansas:'AR',California:'CA',Colorado:'CO',Connecticut:'CT',Delaware:'DE','District of Columbia':'DC',Florida:'FL',Georgia:'GA',Hawaii:'HI',Idaho:'ID',Illinois:'IL',Indiana:'IN',Iowa:'IA',Kansas:'KS',Kentucky:'KY',Louisiana:'LA',Maine:'ME',Maryland:'MD',Massachusetts:'MA',Michigan:'MI',Minnesota:'MN',Mississippi:'MS',Missouri:'MO',Montana:'MT',Nebraska:'NE',Nevada:'NV','New Hampshire':'NH','New Jersey':'NJ','New Mexico':'NM','New York':'NY','North Carolina':'NC','North Dakota':'ND',Ohio:'OH',Oklahoma:'OK',Oregon:'OR',Pennsylvania:'PA','Rhode Island':'RI','South Carolina':'SC','South Dakota':'SD',Tennessee:'TN',Texas:'TX',Utah:'UT',Vermont:'VT',Virginia:'VA',Washington:'WA','West Virginia':'WV',Wisconsin:'WI',Wyoming:'WY'};
             function abbrevState(s){ if(!s) return s; var m=s.match(/^(.*),\s*([A-Za-z .]+)$/); return (m && US_ST[m[2]]) ? (m[1]+', '+US_ST[m[2]]) : s; }
+            /* all at once: sampleBortle reads cached tiles, so the candidates no longer queue one by one (perf 2026-10-13) */
+            function sampleAll(list, done){
+              var left = list.length; if (!left){ done(); return; }
+              list.forEach(function(p){ sampleBortle(p.lat, p.lon, function(sqm){ p.bortle = (sqm != null) ? bortleDecimal(sqm) : null; if (--left === 0) done(); }); });
+            }
             function sampleList(list, i, done){
               if(i>=list.length){ done(); return; }
               sampleBortle(list[i].lat, list[i].lon, function(sqm){ list[i].bortle = (sqm!=null)? bortleDecimal(sqm) : null; sampleList(list, i+1, done); });
@@ -16323,24 +16328,45 @@ window._bvHeroGpu = function(hw, st, code, night){
               function findDarkParks(lat, lon){
                 var _ep = window._locEpoch || 0;  // stale guard: Overpass can take 25s
                 var rowsEl=document.getElementById('darksky-parks-rows');
-                if (rowsEl) rowsEl.innerHTML='<div style="font-size:.44rem;color:rgba(255,255,255,.55);">Searching…</div>';
+                /* SOONER (user 2026-10-13: "see if you can get the dark sky locations to load sooner"): (1) a remembered list for this
+                   spot paints at once (7 days); (2) otherwise the nearest curated dark-sky sites paint as soon as their sky is read,
+                   ~0.5 s, while the 200 km OpenStreetMap search runs; (3) that search's candidates are read in parallel, not in turn. */
+                var CK = 'bv_dsparks:' + lat.toFixed(1) + ',' + lon.toFixed(1), cached = null;
+                try { cached = JSON.parse(localStorage.getItem(CK) || 'null'); } catch(e){}
+                var fresh = cached && cached.t && Date.now() - cached.t < 7 * 86400000 && cached.list && cached.list.length;
+                if (fresh) renderParks(cached.list);
+                else if (rowsEl) rowsEl.innerHTML='<div style="font-size:.44rem;color:rgba(255,255,255,.55);">Searching…</div>';
+                var _final = false;
                 var cosL=Math.cos(lat*Math.PI/180);
                 var wDirs=['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
                 function distOf(plat,plon){ var dLat=plat-lat, dLon=(plon-lon)*cosL; return Math.sqrt(dLat*dLat+dLon*dLon)*69; }
                 function dirOf(plat,plon){ var x=Math.sin((plon-lon)*Math.PI/180)*Math.cos(plat*Math.PI/180); var y=Math.cos(lat*Math.PI/180)*Math.sin(plat*Math.PI/180)-Math.sin(lat*Math.PI/180)*Math.cos(plat*Math.PI/180)*Math.cos((plon-lon)*Math.PI/180); var br=Math.atan2(x,y)*180/Math.PI; if(br<0)br+=360; return wDirs[Math.round(br/22.5)%16]; }
                 // Always end with 3 options: nearby ≤B3 parks first, then the nearest
                 // curated dark-sky destinations (even if far) to fill any gaps.
+                var keep = function(list){ _final = true; renderParks(list); try { localStorage.setItem(CK, JSON.stringify({ t: Date.now(), list: list })); } catch(e){} };
                 function fillCurated(results){
                   if (_ep !== (window._locEpoch || 0)) return; // stale-location resolve
-                  if (results.length>=7){ renderParks(results.slice(0,7)); return; }
+                  if (results.length>=7){ keep(results.slice(0,7)); return; }
                   var have={}; results.forEach(function(r){ have[r.name]=1; });
                   var cur=CURATED.filter(function(p){ return !have[p.name]; })
                     .map(function(p){ return {name:p.name, lat:p.lat, lon:p.lon, dist:distOf(p.lat,p.lon), dir:dirOf(p.lat,p.lon)}; })
                     .sort(function(a,b){ return a.dist-b.dist; }).slice(0,12);
-                  sampleList(cur, 0, function(){
+                  sampleAll(cur, function(){
+                    if (_ep !== (window._locEpoch || 0)) return;
                     cur.forEach(function(p){ if(results.length<7 && p.bortle!=null && p.bortle<=3.0 && results.indexOf(p)<0) results.push(p); });
                     cur.forEach(function(p){ if(results.length<7 && results.indexOf(p)<0) results.push(p); }); // ensure 3, even if >B3
-                    renderParks(results.slice(0,7));
+                    keep(results.slice(0,7));
+                  });
+                }
+                /* the quick first answer: curated sites only, shown while the search runs (never over a final or remembered list) */
+                if (!fresh){
+                  var quick = CURATED.map(function(p){ return {name:p.name, lat:p.lat, lon:p.lon, dist:distOf(p.lat,p.lon), dir:dirOf(p.lat,p.lon)}; })
+                    .sort(function(a,b){ return a.dist-b.dist; }).slice(0,10);
+                  sampleAll(quick, function(){
+                    if (_final || _ep !== (window._locEpoch || 0)) return;
+                    var q = quick.filter(function(p){ return p.bortle != null && p.bortle <= 3.0; });
+                    quick.forEach(function(p){ if (q.length < 7 && q.indexOf(p) < 0) q.push(p); });
+                    if (q.length) renderParks(q.slice(0,7));
                   });
                 }
                 var Rm=200000;
@@ -16364,16 +16390,11 @@ window._bvHeroGpu = function(hw, st, code, night){
                       cands.push({name:t.name, lat:c.lat, lon:c.lon, dist:distOf(c.lat,c.lon), dir:dirOf(c.lat,c.lon)});
                     });
                     cands.sort(function(a,b){ return a.dist-b.dist; });
-                    var results=[];
-                    function step(i){
-                      if (results.length>=7 || i>=cands.length || i>=45){ fillCurated(results); return; }
-                      var p=cands[i];
-                      sampleBortle(p.lat, p.lon, function(sqm){
-                        if (sqm!=null){ var bd=bortleDecimal(sqm); if (bd<=3.0){ p.bortle=bd; results.push(p); } }
-                        step(i+1);
-                      });
-                    }
-                    step(0);
+                    var top = cands.slice(0, 45);
+                    sampleAll(top, function(){
+                      var results = top.filter(function(p){ return p.bortle != null && p.bortle <= 3.0; }).slice(0, 7);   /* nearest first, as before */
+                      fillCurated(results);
+                    });
                   })
                   .catch(function(){ fillCurated([]); });
               }
