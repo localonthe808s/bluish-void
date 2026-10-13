@@ -3647,6 +3647,12 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     if not fcm:
         print('no forecast models available')
         return 0
+    # the archive ends yesterday, so when the live call fails no run has today's hours and the
+    # forecast drops out: pred became the morning's running max at the morning's spread -- New York
+    # 10-07 07:41, 10-10 07:36, 10-12 10:26 printed 100% on a bracket under the market's. Keep the last bake.
+    if not any(v.get(tkey) for v in fcm.values()):
+        print("%s: no run carries today's hours (live forecast unavailable); keeping the last bake" % cfg['key'])
+        return 0
     fc = fcm.get(MODELS[0]) or list(fcm.values())[0]
     # the observation window is deliberately wider than the model window: it also
     # has to score history entries (kept 120 days) and backfill against every
