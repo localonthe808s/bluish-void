@@ -438,8 +438,10 @@
         hawk.w += ((hawk.phase ? 1 : 0.08) - hawk.w) * Math.min(1, dt * 7);
         if (hawk.phase === 2){ hawk.gt -= dt; if (hawk.gt <= 0){ hawk.gliding = !hawk.gliding; hawk.gt = hawk.gliding ? 1.2 + R() * 1.2 : 0.7 + R() * 0.6; } }
         else hawk.gliding = hawk.phase === 0;
-        if (hawk.gliding) hawk.flap += (1 - hawk.flap) * Math.min(1, dt * 5);
-        else { hawk.fph += dt * 2 * Math.PI * 4.2; hawk.flap = 0.5 + 0.5 * Math.sin(hawk.fph); }
+        /* the beat fades in and out (no snap between glide and flap), the downstroke quicker than the recovery (2026-10-13) */
+        hawk.fa = (hawk.fa || 0) + ((hawk.gliding ? 0 : 1) - (hawk.fa || 0)) * Math.min(1, dt * 6);
+        if (hawk.fa > 0.01) hawk.fph += dt * 2 * Math.PI * 4.2;
+        var fp0 = hawk.fph + 0.38 * Math.sin(hawk.fph); hawk.flap = 1 - hawk.fa * (0.5 - 0.5 * Math.sin(fp0));
         hawk.x += hawk.vx * dt; hawk.y += hawk.vy * dt;
         if (hawk.y > fl){ hawk.y = fl; if (hawk.phase === 0){ hawk.phase = 1; hawk.pt = 0; } }
         if (hawk.phase >= 1 && (hawk.x < -80 || hawk.x > W + 80 || hawk.y < -80)){ hawk.on = false; hawk.next = t + 15 + R() * 10; }
@@ -619,13 +621,15 @@
     var HK = { arm: [60, 68, 86], hand: [16, 20, 30], slate: [30, 37, 52], belly: [64, 72, 90], flank: [22, 28, 40], hood: [12, 15, 23], tail: [44, 51, 67] };
     function drawHawk(){
       if (!hawk.on) return;
-      var k = 0.71 * S + 0.22;   /* spread span ~3.5x a starling's (real: ~2.6x; user picked a little over life so the stoop still reads): ~21 px desktop, ~12 px phone */
-      var w = hawk.w, fl = hawk.flap, span = w * (0.72 + 0.28 * fl), sweep = w > 0.5 ? (1 - fl) * 2.0 : 0, roll = hawk.roll;
+      var k = (0.71 * S + 0.22) * (o.zoom || 1);   /* spread span ~3.5x a starling's (real: ~2.6x; user picked a little over life so the stoop still reads): ~21 px desktop, ~12 px phone */
+      var w = hawk.w, fl = hawk.flap, span = w * (0.72 + 0.28 * fl), sweep = w > 0.5 ? (1 - fl) * 2.0 : 0;
+      /* gliding on open wings the air rocks it a little about its long axis (less while it beats), 2026-10-13 */
+      var roll = hawk.roll + (hawk.phase >= 1 ? (1 - (hawk.fa || 0)) * w * (0.09 * Math.sin(t * 0.9) + 0.05 * Math.sin(t * 2.3 + 1)) : 0);
       var tw = 0.7 + 0.5 * w + (hawk.phase === 1 ? 0.35 : 0);       /* the tail fans as it brakes out of the stoop */
       ctx.save(); ctx.translate(hawk.x, hawk.y); ctx.rotate(Math.atan2(hawk.vy, hawk.vx)); ctx.scale(k, k);
       /* the wings, under the body */
       [-1, 1].forEach(function(sd){
-        var lean = Math.max(0, sd * roll), fs = 1 - 0.55 * lean;                 /* the far, tilted wing */
+        var lean = Math.max(0, sd * roll), fs = (1 - 0.55 * lean) * (1 + 0.04 * w * (1 - (hawk.fa || 0)) * Math.sin(t * 1.5 + sd * 1.3));   /* the far, tilted wing; open wings flex a little */
         var tipx = -3.4 - 2.6 * (1 - span) - sweep, tipy = sd * (1.5 + 9.8 * span) * fs;
         var wx = 0.4 - sweep * 0.45, wy = sd * (1.2 + 6.2 * span) * fs;          /* the wrist */
         var g = ctx.createLinearGradient(1.2, sd * 0.9, tipx, tipy);
@@ -642,10 +646,11 @@
           ctx.quadraticCurveTo(0.2 - sweep * 0.3, wy * 0.7, wx - 0.9, wy * 0.92); ctx.stroke();
         }
       });
-      /* the tail: paler, with a dark band near the tip */
+      /* the tail: paler, with a dark band near the tip; it twists into the turn */
+      ctx.save(); ctx.translate(-3.0, 0); ctx.rotate(-roll * 0.3); ctx.translate(3.0, 0);
       ctx.fillStyle = lerpC(HK.tail, HK.slate, Math.abs(roll) * 0.5); ctx.beginPath();
       ctx.moveTo(-3.0, -0.6); ctx.lineTo(-7.0, -0.85 * tw); ctx.quadraticCurveTo(-7.5, 0, -7.0, 0.85 * tw); ctx.lineTo(-3.0, 0.6); ctx.closePath(); ctx.fill();
-      ctx.strokeStyle = 'rgba(16,20,30,.8)'; ctx.lineWidth = 0.5; ctx.beginPath(); ctx.moveTo(-6.45, -0.78 * tw); ctx.lineTo(-6.45, 0.78 * tw); ctx.stroke();
+      ctx.strokeStyle = 'rgba(16,20,30,.8)'; ctx.lineWidth = 0.5; ctx.beginPath(); ctx.moveTo(-6.45, -0.78 * tw); ctx.lineTo(-6.45, 0.78 * tw); ctx.stroke(); ctx.restore();
       /* the body: pale down the middle, dark at the flanks (the roll shifts the light to one side) */
       var gb = ctx.createLinearGradient(0, -1.05, 0, 1.05), mid = 0.5 + roll * 0.25;
       gb.addColorStop(0, lerpC(HK.flank, HK.flank, 0)); gb.addColorStop(Math.max(0.15, Math.min(0.85, mid)), lerpC(HK.belly, HK.belly, 0)); gb.addColorStop(1, lerpC(HK.flank, HK.flank, 0));
@@ -732,7 +737,7 @@
         if (p.W != null || p.H != null){ var ow = W, oh = H; dims(p.W || W, p.H || H);
           for (var i = 0; i < N; i++){ px[i] *= W / ow; py[i] *= H / oh; } }
         if (p.sun) applySun(p.sun);
-        ['fps', 'falcon', 'showFalcon', 'size', 'band', 'floor', 'moon', 'jet', 'wind', 'trail', 'spread', 'contrail', 'n'].forEach(function(k){ if (p[k] !== undefined) o[k] = p[k]; });
+        ['fps', 'falcon', 'showFalcon', 'size', 'band', 'floor', 'moon', 'jet', 'wind', 'trail', 'spread', 'contrail', 'n', 'zoom'].forEach(function(k){ if (p[k] !== undefined) o[k] = p[k]; });
         if (!o.sun && p.n != null) setN(o.n);
         if (!o.jet && jet.on){ jet.on = false; jet.next = t + 5; }
         if (!o.contrail){ TR.x.length = TR.y.length = TR.t.length = 0; }
@@ -822,37 +827,72 @@
         p.fl += ((flapping ? 0 : 1) - p.fl) * Math.min(1, dt * 3);
         if (flapping) p.fph += dt * 5.2 * (0.95 + 0.1 * Math.sin(i)); }
     }
+    /* ---- shared flight feel (2026-10-13, user: "they seem stiff when coasting, turning, flying") ----
+       Every bird now flies off its own motion: the heading eases after where it is actually going, the turn rate is
+       measured from that, and it ROLLS into the turn by how hard it is turning -- not a fixed lean. On top, the air
+       rocks it: two slow gust waves teeter it about its long axis. Wings: the beat is an elevation cycle seen from below
+       (a raised wing foreshortens), the downstroke quicker than the recovery, the hand folding on the upstroke; the beat
+       fades in and out (an amplitude, eased) instead of switching on; between beats the wings flex and the hand bends
+       a little with the gusts. Banked, the wing on the high side foreshortens more and shows its upper side. */
+    function wrapA(a){ while (a > Math.PI) a -= 6.283185; while (a < -Math.PI) a += 6.283185; return a; }
+    function attitude(b, dt, tc, rollK, rock){
+      if (!b.at){ b.at = 1; b.lx = b.x; b.ly = b.y; b.svx = 0; b.svy = 0; b.om = 0; b.rl = 0; b.ang = b.ang || 0; b.gp = R() * 6.28; return; }
+      var vx = (b.x - b.lx) / dt, vy = (b.y - b.ly) / dt; b.lx = b.x; b.ly = b.y;
+      var k = Math.min(1, dt * tc); b.svx += (vx - b.svx) * k; b.svy += (vy - b.svy) * k;
+      var turn = 0;
+      if (Math.hypot(b.svx, b.svy) > 1.2 * S){ var d = wrapA(Math.atan2(b.svy, b.svx) - b.ang); turn = d * Math.min(1, dt * tc); b.ang = wrapA(b.ang + turn); }
+      b.om += (turn / dt - b.om) * Math.min(1, dt * 2.5);
+      var gust = rock * (Math.sin(t * 0.83 + b.gp) * 0.65 + Math.sin(t * 2.1 + b.gp * 1.7) * 0.35);
+      b.rl += (Math.max(-0.95, Math.min(0.95, b.om * rollK)) + gust - b.rl) * Math.min(1, dt * 3);
+    }
+    /* the wingbeat: fa eases to 1 while beating, to 0 gliding; returns [elevation (rad, + = raised), fold 0..1] */
+    function beat(b, dt, on, hz, amp){
+      b.fa = (b.fa || 0) + ((on ? 1 : 0) - (b.fa || 0)) * Math.min(1, dt * 4);
+      if (b.fa > 0.01) b.fph = (b.fph || 0) + dt * 6.2832 * hz; else b.fph = 0;
+      var p = b.fph + 0.38 * Math.sin(b.fph);              /* warped: the downstroke (sin falling) takes less of the cycle */
+      return [b.fa * amp * Math.sin(p), b.fa * Math.max(0, Math.cos(p)) * 0.75];
+    }
     /* ---- the hawk on its thermal ---- */
     /* MORE COASTING HIGH (user 2026-10-10): two red-tails on two thermals, high in the band, wide slow circles, one
-       turning each way; each leaves and comes back on its own clock */
-    var HAWKS = [0, 1].map(function(i){ return { x: 0, y: 0, cx: 0, cy: 0, r: (100 + 40 * R()) * S, a: R() * 6.28, w: 0.26 + 0.1 * R(), dir: i ? -1 : 1, away: false, next: 55 + R() * 40 + i * 20, roll: 0, fph: 0, flap: 0, vx: 1, vy: 0, side: i }; });
+       turning each way; each leaves and comes back on its own clock. The circle is an ellipse (a circle seen at a
+       slant), so the turn tightens at the ends and the bank deepens there and eases along the sides. */
+    var HAWKS = [0, 1].map(function(i){ return { x: 0, y: 0, cx: 0, cy: 0, r: (100 + 40 * R()) * S, a: R() * 6.28, w: 0.26 + 0.1 * R(), dir: i ? -1 : 1, away: false, next: 55 + R() * 40 + i * 20, flap: 0, vx: 1, vy: 0, side: i, ang: 0, wob: R() * 6.28 }; });
     function hawkHome(h){ var m = moon(), top = o.band[0] * H, low = o.floor * H; var cx = W * (h.side ? 0.58 + 0.22 * R() : 0.14 + 0.26 * R()), cy = top + (0.04 + 0.22 * R()) * (low - top);
       if (m && Math.hypot(cx - m.x, cy - m.y) < m.r + h.r + 30 * S){ cx = Math.max(60 * S + h.r, m.x - m.r - h.r - 40 * S); } h.cx = cx; h.cy = cy; }
     HAWKS.forEach(hawkHome); var HK2 = HAWKS[0];
     function hawkStep(dt){ HAWKS.forEach(function(h){
-      if (h.away){ h.x += h.vx * dt; h.y += h.vy * dt; if (t > h.next){ h.away = false; hawkHome(h); h.a = Math.atan2(h.y - h.cy, h.x - h.cx); h.next = t + 55 + R() * 40; } return; }
-      h.a += h.w * h.dir * dt; h.cx += Math.sin(t * 0.07 + h.side * 2) * 6 * S * dt; h.cy += Math.cos(t * 0.05 + h.side) * 4 * S * dt - 1.0 * S * dt * (h.cy > o.band[0] * H + 30 * S ? 1 : 0);   /* the thermal lifts it slowly */
-      var nx = h.cx + h.r * Math.cos(h.a), ny = h.cy + h.r * 0.62 * Math.sin(h.a);
-      h.vx = (nx - h.x) / Math.max(dt, 0.016); h.vy = (ny - h.y) / Math.max(dt, 0.016); h.x = nx; h.y = ny;
-      h.roll += ((h.dir * 0.55) - h.roll) * Math.min(1, dt * 2);
-      if (h.flap > 0){ h.fph += dt * 4.5; h.flap -= dt; } else if (R() < dt * 0.04) h.flap = 1.2 + R();   /* a few beats now and then, mostly a glide */
-      if (t > h.next){ h.away = true; var d = h.x < W / 2 ? -1 : 1; h.vx = d * 55 * S; h.vy = -6 * S; h.next = t + 18 + R() * 10; } }); }
+      if (h.away){
+        /* leaving on a long glide that still wanders and sinks a little, not a ruler line */
+        h.x += h.vx * dt; h.y += (h.vy + Math.sin(t * 0.5 + h.wob) * 9 * S) * dt;
+        if (t > h.next){ h.away = false; hawkHome(h); h.a = Math.atan2(h.y - h.cy, h.x - h.cx); h.next = t + 55 + R() * 40; }
+      } else {
+        /* the circle breathes and drifts with the thermal; speed along it varies a little (it slows climbing into the wind) */
+        h.a += h.w * h.dir * dt * (1 + 0.18 * Math.sin(h.a + h.wob)); h.cx += Math.sin(t * 0.07 + h.side * 2) * 6 * S * dt; h.cy += Math.cos(t * 0.05 + h.side) * 4 * S * dt - 1.0 * S * dt * (h.cy > o.band[0] * H + 30 * S ? 1 : 0);
+        var rr = h.r * (1 + 0.08 * Math.sin(t * 0.13 + h.wob));
+        h.x = h.cx + rr * Math.cos(h.a); h.y = h.cy + rr * 0.62 * Math.sin(h.a);
+        if (t > h.next){ h.away = true; var d = h.x < W / 2 ? -1 : 1; h.vx = d * 55 * S; h.vy = -6 * S; h.next = t + 18 + R() * 10; }
+      }
+      attitude(h, dt, 2.2, 1.0, 0.10);
+      /* a few beats now and then (more when it sets off), mostly the glide */
+      if (h.flap > 0) h.flap -= dt; else if (R() < dt * (h.away ? 0.12 : 0.035)) h.flap = 0.9 + R() * 0.9;
+      h.wing = beat(h, dt, h.flap > 0, 2.6, 0.75); }); }
     /* ---- gulls: not a flock (user 2026-10-10: "remove the flock of seagulls and just let them scatter and float in
-       the wind") -- three birds scattered far apart, each hanging on the sea breeze: facing into it, wings held out,
-       rocking a little, drifting slowly along, a beat or two now and then ---- */
-    var GULL = []; for (var g = 0; g < 4; g++) GULL.push({ ax: (0.12 + 0.76 * R()), ay: (0.04 + 0.36 * R()), ca: R() * 6.28, cw: (0.12 + 0.08 * R()) * (R() < 0.5 ? -1 : 1), cr: (40 + 50 * R()) * S, dx: (R() - 0.5) * 6, dy: (R() - 0.5) * 3, sw: 2.6 + R() * 2, p1: R() * 6.28, p2: R() * 6.28, roll: 0, fph: 0, flap: 0, x: 0, y: 0, hd: -1, on: false });
-    function gullStep(dt){ var top = o.band[0] * H, low = o.floor * H, wind = (o.wind || 0);
+       the wind") -- birds scattered far apart, each hanging on the sea breeze, drifting slowly along, a few beats now
+       and then. 10-13: the heading follows where it is really going (it used to flip end for end), and the bird hangs
+       and slides on the gusts: the wings crook and flex, the body teeters. ---- */
+    var GULL = []; for (var g = 0; g < 4; g++) GULL.push({ ax: (0.12 + 0.76 * R()), ay: (0.04 + 0.36 * R()), ca: R() * 6.28, cw: (0.12 + 0.08 * R()) * (R() < 0.5 ? -1 : 1), cr: (40 + 50 * R()) * S, dx: (R() - 0.5) * 6, dy: (R() - 0.5) * 3, sw: 2.6 + R() * 2, p1: R() * 6.28, p2: R() * 6.28, flap: 0, x: 0, y: 0, on: false, ang: 0 });
+    function gullStep(dt){ var top = o.band[0] * H, low = o.floor * H;
       GULL.forEach(function(q){
         q.ax += q.dx * S * dt / W; q.ay += q.dy * S * dt / H;                                  /* a slow drift along */
         if (q.ax < 0.08 || q.ax > 0.92) q.dx = -q.dx; if (q.ay < 0.03 || q.ay > 0.5) q.dy = -q.dy;
-        q.ca += q.cw * dt;                                                                       /* coasting high: a wide lazy circle on the breeze */
+        q.ca += q.cw * dt * (1 + 0.25 * Math.sin(t * 0.21 + q.p2));                             /* coasting high: a wide lazy circle on the breeze, faster and slower */
         var nx = W * q.ax + Math.cos(q.ca) * q.cr + Math.sin(t / q.sw * 6.28 + q.p1) * 6 * S, ny = top + (low - top) * q.ay + Math.sin(q.ca) * q.cr * 0.55 + Math.sin(t / (q.sw * 1.7) * 6.28 + q.p2) * 5 * S;
         var mp = moonPush(nx, ny, 40 * S); nx += mp[0]; ny += mp[1];
-        if (!q.on){ q.on = true; q.x = nx; q.y = ny; }
+        if (!q.on){ q.on = true; q.x = nx; q.y = ny; q.ang = Math.atan2(Math.sin(q.ca + Math.PI / 2) * q.cw, Math.cos(q.ca + Math.PI / 2) * q.cw); }
         q.x += (nx - q.x) * Math.min(1, dt * 3); q.y += (ny - q.y) * Math.min(1, dt * 3);
-        q.hd = Math.cos(q.ca + Math.PI / 2) * q.cw >= 0 ? 1 : -1;                             /* heading follows the circle */
-        q.roll = (q.cw > 0 ? 0.3 : -0.3) + Math.sin(t / q.sw * 6.28 + q.p1) * 0.18;
-        if (q.flap > 0){ q.fph += dt * 5.5; q.flap -= dt; } else if (R() < dt * 0.05) q.flap = 0.8 + R() * 0.8; }); }
+        attitude(q, dt, 1.6, 1.8, 0.16);
+        if (q.flap > 0) q.flap -= dt; else if (R() < dt * 0.05) q.flap = 0.7 + R() * 0.9;
+        q.wing = beat(q, dt, q.flap > 0, 2.9, 0.8); }); }
     /* ---- drawing ---- */
     function wing(sd, span, sweep, lean, tipL, hand, col){ var fs = 1 - 0.5 * lean, tipx = -2.6 - 1.8 * (1 - span) - sweep, tipy = sd * (1.2 + tipL * span) * fs;
       ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(1.6, sd * 0.8);
@@ -868,20 +908,88 @@
       ctx.fillStyle = 'rgb(214,206,186)'; ctx.beginPath(); ctx.ellipse(3.1, 0, 1.15, 0.8, 0, 0, 6.2832); ctx.fill();
       ctx.strokeStyle = 'rgb(120,98,70)'; ctx.lineWidth = 0.55; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(3.9, 0.15); ctx.lineTo(7.6, 0.35); ctx.stroke();
       ctx.restore(); }
-    function drawHawk2(HK2){ if (isNight) return; var k = 1.15 * S + 0.35, fl = HK2.flap > 0 ? 0.75 + 0.25 * Math.abs(Math.sin(HK2.fph)) : 1, roll = HK2.roll;
-      ctx.save(); ctx.translate(HK2.x, HK2.y); ctx.rotate(Math.atan2(HK2.vy, HK2.vx)); ctx.scale(k, k);
-      [-1, 1].forEach(function(sd){ var lean = Math.max(0, sd * roll); wing(sd, fl, 0, lean, 8.6, true, lean > 0.2 ? 'rgb(66,58,50)' : 'rgb(86,76,64)');
-        ctx.fillStyle = 'rgba(36,30,26,.7)'; ctx.beginPath(); ctx.moveTo(0.2, sd * 1.4); ctx.lineTo(-0.9, sd * 4.4 * (1 - 0.5 * lean)); ctx.lineTo(-1.5, sd * 4.0 * (1 - 0.5 * lean)); ctx.lineTo(-0.5, sd * 1.3); ctx.closePath(); ctx.fill(); });   /* the patagial bar */
-      ctx.fillStyle = 'rgb(176,92,58)'; ctx.beginPath(); ctx.moveTo(-2.2, -0.5); ctx.lineTo(-5.2, -2.3); ctx.quadraticCurveTo(-5.9, 0, -5.2, 2.3); ctx.lineTo(-2.2, 0.5); ctx.closePath(); ctx.fill();   /* the red tail, fanned */
-      ctx.fillStyle = 'rgb(206,196,176)'; ctx.beginPath(); ctx.moveTo(3.4, 0); ctx.quadraticCurveTo(3.1, -0.85, 1.8, -0.9); ctx.quadraticCurveTo(-1, -0.95, -2.4, -0.5); ctx.lineTo(-2.4, 0.5); ctx.quadraticCurveTo(-1, 0.95, 1.8, 0.9); ctx.quadraticCurveTo(3.1, 0.85, 3.4, 0); ctx.fill();
-      ctx.fillStyle = 'rgb(92,70,52)'; ctx.beginPath(); ctx.ellipse(2.8, 0, 0.95, 0.75, 0, 0, 6.2832); ctx.fill();
+    function mixC(a, b, f){ f = Math.max(0, Math.min(1, f)); return 'rgb(' + Math.round(a[0] + (b[0] - a[0]) * f) + ',' + Math.round(a[1] + (b[1] - a[1]) * f) + ',' + Math.round(a[2] + (b[2] - a[2]) * f) + ')'; }
+    /* one wing seen from below, pointing +x, side sd: L = how far it reaches across (its foreshortening), c = the crook
+       at the wrist (gull: arm forward, hand swept back), f = the upstroke fold. G = the planform: shoulder, wrist, tip
+       and the trailing edge's inner bulge, in body units; returns the key points for the markings */
+    function wingPath(sd, L, c, f, G){
+      var wx = G.wx + G.wc * c - 1.6 * f, wy = sd * (G.wy - 1.4 * f) * L;
+      var tx = G.tx - G.tc * c - 2.2 * f, ty = sd * (G.ty - 3.4 * f - 0.6 * c) * L;
+      var bx = G.bx - 0.4 * c - 0.9 * f, by = sd * (G.by - 1.1 * f) * L;
+      ctx.beginPath(); ctx.moveTo(G.sx, sd * G.sy);
+      ctx.quadraticCurveTo((G.sx + wx) / 2 + 0.35, (sd * G.sy + wy) / 2 + sd * 0.2 * L, wx, wy);   /* the arm's leading edge */
+      ctx.quadraticCurveTo((wx + tx) / 2 + 0.5 + 0.3 * c, (wy + ty) / 2 + sd * 0.3 * L, tx, ty);       /* the hand */
+      ctx.quadraticCurveTo((tx + bx) / 2 - G.tb, (ty + by) / 2 + sd * 0.4 * L, bx, by);               /* the trailing edge, bulging */
+      ctx.quadraticCurveTo((bx + G.rx) / 2 - 0.4, (by + sd * G.ry) / 2, G.rx, sd * G.ry);
+      ctx.closePath();
+      return { wx: wx, wy: wy, tx: tx, ty: ty, bx: bx, by: by };
+    }
+    function sideLook(sd, b, dih){
+      /* this wing's tilt away from us: the glide dihedral, the beat's elevation, and the roll (the high-side wing tips away) */
+      var e = dih + b.wing[0] + sd * b.rl * 0.9;
+      return { L: Math.max(0.18, Math.cos(e)), up: Math.max(0, Math.min(1, (Math.sin(e) - 0.42) * 2.4)) };   /* its upper side shows only once it is tipped well away */
+    }
+    /* RED-TAILED HAWK from below: broad rounded wings, fingered tips, pale underwing with the dark patagial bar on the
+       leading edge and a dark comma at the wrist, dark trailing edge; the rufous tail fanned, twisting with the bank */
+    var RT = { sx: 1.5, sy: 0.75, wx: 1.25, wc: 0, wy: 4.4, tx: -0.9, tc: 0.4, ty: 8.7, bx: -2.5, by: 5.0, tb: 0.9, rx: -1.7, ry: 0.7 };
+    function drawHawk2(HK2){ if (isNight) return; var h = HK2, k = (1.15 * S + 0.35) * (o.zoom || 1);
+      ctx.save(); ctx.translate(h.x, h.y); ctx.rotate(h.ang); ctx.scale(k, k);
+      var flex = Math.sin(t * 1.3 + h.wob) * 0.05;
+      [-1, 1].forEach(function(sd){
+        var lk = sideLook(sd, h, 0.22 + flex * sd), f = h.wing[1];
+        var P = wingPath(sd, lk.L, 0, f, RT);
+        ctx.fillStyle = mixC([226, 214, 196], [112, 88, 66], lk.up); ctx.fill();
+        /* the fingers: five primaries splayed at the tip, closing when the hand folds */
+        ctx.strokeStyle = mixC([60, 48, 40], [52, 40, 32], lk.up); ctx.lineWidth = 0.42; ctx.lineCap = 'round';
+        var spread = 1 - f;
+        for (var j = 0; j < 5; j++){ var u = (j - 2) / 2, ax = P.tx + 0.45 + u * 0.55, ay = P.ty - sd * (0.9 - Math.abs(u) * 0.2) * lk.L;
+          ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(ax - (0.8 + 0.5 * spread) + u * 0.5 * spread, ay + sd * (1.0 + 0.25 * spread) * lk.L); ctx.stroke(); }
+        if (lk.up < 0.6){
+          ctx.save(); ctx.globalAlpha *= 1 - lk.up;
+          ctx.strokeStyle = 'rgba(58,42,32,.85)'; ctx.lineWidth = 0.75;   /* the patagial bar */
+          ctx.beginPath(); ctx.moveTo(1.2, sd * 1.0 * lk.L); ctx.quadraticCurveTo(1.55, sd * 2.6 * lk.L, P.wx + 0.1, P.wy * 0.92); ctx.stroke();
+          ctx.fillStyle = 'rgba(52,38,30,.85)'; ctx.beginPath(); ctx.ellipse(P.wx - 0.45, P.wy * 1.02, 0.42, 0.62 * lk.L, 0, 0, 6.2832); ctx.fill();   /* the carpal comma */
+          ctx.strokeStyle = 'rgba(60,46,36,.6)'; ctx.lineWidth = 0.4;   /* the dark trailing edge */
+          ctx.beginPath(); ctx.moveTo(P.tx - 0.6, P.ty * 0.93); ctx.quadraticCurveTo((P.tx + P.bx) / 2 - RT.tb, (P.ty + P.by) / 2 + sd * 0.4 * lk.L, P.bx, P.by); ctx.stroke();
+          ctx.restore();
+        }
+      });
+      /* the tail: fanned in the turn, twisted toward it */
+      var fan = 1.9 + Math.min(0.9, Math.abs(h.om) * 1.6) + 0.15 * Math.sin(t * 1.7 + h.wob);
+      ctx.save(); ctx.translate(-2.1, 0); ctx.rotate(-h.om * 0.18); ctx.fillStyle = 'rgb(190,104,66)'; ctx.beginPath();
+      ctx.moveTo(0, -0.5); ctx.lineTo(-3.0, -fan); ctx.quadraticCurveTo(-3.75, 0, -3.0, fan); ctx.lineTo(0, 0.5); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = 'rgba(70,40,26,.55)'; ctx.lineWidth = 0.3; ctx.beginPath(); ctx.moveTo(-3.0, -fan * 0.92); ctx.quadraticCurveTo(-3.6, 0, -3.0, fan * 0.92); ctx.stroke(); ctx.restore();
+      /* the body: pale breast, a streaked belly band, the brown head turned a touch into the turn */
+      ctx.fillStyle = 'rgb(222,210,190)'; ctx.beginPath(); ctx.moveTo(3.3, 0); ctx.quadraticCurveTo(3.0, -0.9, 1.8, -0.95); ctx.quadraticCurveTo(-1, -1.0, -2.3, -0.5); ctx.lineTo(-2.3, 0.5); ctx.quadraticCurveTo(-1, 1.0, 1.8, 0.95); ctx.quadraticCurveTo(3.0, 0.9, 3.3, 0); ctx.fill();
+      ctx.fillStyle = 'rgba(96,70,50,.75)'; ctx.beginPath(); ctx.ellipse(-0.2, 0, 0.55, 0.9, 0, 0, 6.2832); ctx.fill();
+      ctx.save(); ctx.translate(2.7, 0); ctx.rotate(h.om * 0.25); ctx.fillStyle = 'rgb(98,72,52)'; ctx.beginPath(); ctx.ellipse(0.1, 0, 0.95, 0.74, 0, 0, 6.2832); ctx.fill(); ctx.restore();
       ctx.restore(); }
-    function drawGull(q){ var k = 0.9 * S + 0.3, fl = q.flap > 0 ? 0.7 + 0.3 * Math.abs(Math.sin(q.fph)) : 1;
-      ctx.save(); ctx.translate(q.x, q.y); ctx.rotate(q.hd < 0 ? Math.PI + q.roll * 0.25 : q.roll * 0.25); ctx.scale(k, k);
-      [-1, 1].forEach(function(sd){ var lean = Math.max(0, sd * q.roll); wing(sd, fl, 0, lean, 8.2, false, 'rgb(150,154,160)'); ctx.fillStyle = 'rgb(40,40,46)'; ctx.beginPath(); ctx.moveTo(-2.4 - 1.6 * (1 - fl), sd * (1.2 + 8.2 * fl)); ctx.lineTo(-1.6, sd * (1.2 + 6.4 * fl)); ctx.lineTo(-2.9, sd * (1.0 + 6.0 * fl)); ctx.closePath(); ctx.fill(); });
-      ctx.fillStyle = 'rgb(236,238,240)'; ctx.beginPath(); ctx.ellipse(0.4, 0, 3.0, 0.8, 0, 0, 6.2832); ctx.fill(); ctx.restore(); }
+    /* WESTERN GULL from below: long narrow wings crooked at the wrist (the arm reaching forward, the hand swept back),
+       white beneath with a dusky trailing edge and black tips; a banked wing shows the dark slate of its upper side.
+       The crook deepens in the gusts and opens on the downstroke. */
+    var GU = { sx: 1.1, sy: 0.55, wx: 1.0, wc: 0.7, wy: 4.6, tx: -2.3, tc: 1.5, ty: 9.8, bx: -1.2, by: 4.1, tb: 0.4, rx: -0.9, ry: 0.5 };
+    function drawGull(q){ var k = (0.9 * S + 0.3) * (o.zoom || 1);
+      ctx.save(); ctx.translate(q.x, q.y); ctx.rotate(q.ang); ctx.scale(k, k);
+      var crook = 0.55 + 0.2 * Math.sin(t * 0.9 + q.p1) + 0.12 * Math.sin(t * 2.3 + q.p2) - 0.35 * (q.fa || 0);
+      [-1, 1].forEach(function(sd){
+        var lk = sideLook(sd, q, 0.12 + 0.06 * Math.sin(t * 1.1 + q.p2 + sd)), f = q.wing[1];
+        var P = wingPath(sd, lk.L, crook, f, GU);
+        ctx.fillStyle = mixC([234, 236, 238], [96, 102, 112], lk.up); ctx.fill();
+        /* the black tip: the outer hand */
+        ctx.fillStyle = 'rgb(30,30,36)'; ctx.beginPath(); ctx.moveTo(P.tx, P.ty);
+        ctx.lineTo(P.tx + 1.15 + 0.3 * crook, P.ty - sd * 1.5 * lk.L); ctx.lineTo(P.tx + 0.55, P.ty - sd * 2.2 * lk.L); ctx.lineTo(P.tx - 0.55, P.ty - sd * 0.9 * lk.L); ctx.closePath(); ctx.fill();
+        if (lk.up < 0.5){ ctx.strokeStyle = 'rgba(120,124,132,' + (0.5 * (1 - lk.up * 2)).toFixed(2) + ')'; ctx.lineWidth = 0.45;   /* the dusky trailing edge */
+          ctx.beginPath(); ctx.moveTo(P.bx, P.by); ctx.quadraticCurveTo((P.tx + P.bx) / 2 - GU.tb, (P.ty + P.by) / 2 + sd * 0.4 * lk.L, P.tx - 0.4, P.ty * 0.9); ctx.stroke(); }
+      });
+      /* the tail, short and square-ish, twisting with the turn */
+      ctx.save(); ctx.translate(-1.9, 0); ctx.rotate(-q.om * 0.2); ctx.fillStyle = 'rgb(244,245,246)'; ctx.beginPath(); ctx.moveTo(0, -0.45); ctx.lineTo(-1.6, -0.9); ctx.lineTo(-1.75, 0.9); ctx.lineTo(0, 0.45); ctx.closePath(); ctx.fill(); ctx.restore();
+      /* the body, white; the head turned a little into the turn, the yellow bill */
+      ctx.fillStyle = 'rgb(246,247,248)'; ctx.beginPath(); ctx.ellipse(0.2, 0, 2.5, 0.72, 0, 0, 6.2832); ctx.fill();
+      ctx.save(); ctx.translate(2.5, 0); ctx.rotate(q.om * 0.3); ctx.beginPath(); ctx.ellipse(0.1, 0, 0.75, 0.6, 0, 0, 6.2832); ctx.fill();
+      ctx.strokeStyle = 'rgb(236,196,70)'; ctx.lineWidth = 0.42; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(0.75, 0); ctx.lineTo(1.6, 0.05); ctx.stroke(); ctx.restore();
+      ctx.restore(); }
     function draw(){ ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H); if (isNight) return;
-      ctx.globalAlpha = dusk; GULL.forEach(function(q){ if (q.on) drawGull(q); }); HAWKS.forEach(drawHawk2);
+      ctx.globalAlpha = dusk; GULL.forEach(function(q){ if (q.on && q.wing) drawGull(q); }); HAWKS.forEach(function(h){ if (h.wing) drawHawk2(h); });
       for (var i = NP - 1; i >= 0; i--) if (PEL[i].on) drawPelican(PEL[i]); ctx.globalAlpha = 1; }
     /* the pelican line is OFF (user 2026-10-10: "remove these bird trains from LAs clear day"): leadStep/pelStep stay for the lab, the live scene is the hawk and the scattered gulls */
     function step(dt){ t += dt; if (o.pelicans) { leadStep(dt); pelStep(dt); } hawkStep(dt); gullStep(dt); }
@@ -900,8 +1008,9 @@
     applySun(o.sun); for (var w0 = 0; w0 < 90; w0++) step(1 / 60);   /* a short warm-up so the hawk is already turning */
     kick();
     return {
-      set: function(p){ if (!p) return; var rs = false; if (p.W && p.H && (p.W !== W || p.H !== H)){ rs = true; } ['floor', 'moon', 'band', 'size', 'wind'].forEach(function(k){ if (p[k] !== undefined) o[k] = p[k]; }); if (rs){ dims(p.W, p.H); HAWKS.forEach(hawkHome); } if (p.sun) applySun(p.sun); kick(); },
+      set: function(p){ if (!p) return; var rs = false; if (p.W && p.H && (p.W !== W || p.H !== H)){ rs = true; } ['floor', 'moon', 'band', 'size', 'wind', 'zoom'].forEach(function(k){ if (p[k] !== undefined) o[k] = p[k]; }); if (rs){ dims(p.W, p.H); HAWKS.forEach(hawkHome); } if (p.sun) applySun(p.sun); kick(); },
       stats: function(){ return { fps: st.fps, sim: st.sim, draw: st.draw, frames: st.frames, steps: st.steps, kind: 'coast' }; },
+      birds: function(){ return { hawks: HAWKS, gulls: GULL }; },
       form: function(){ return { kind: 'coast', pass: LEAD.on, pelicans: PEL.filter(function(p){ return p.on; }).length, hawks: HAWKS.filter(function(h){ return !h.away; }).length, next: Math.max(0, LEAD.next - t) }; },
       destroy: function(){ alive = false; if (raf) cancelAnimationFrame(raf); if (io) io.disconnect(); document.removeEventListener('visibilitychange', onVis); try { ctx.clearRect(0, 0, cv.width, cv.height); } catch(e){} }
     };
@@ -971,13 +1080,16 @@
       if (C.cv.parentNode !== sb || C.cv.previousSibling !== hw) sb.insertBefore(C.cv, hw.nextSibling);
       var g = geom(sb, hw); if (g.W < 40 || g.H < 60) return;
       /* which birds: the LA basin gets the coast (pelicans, a red-tail, gulls); everywhere else the murmuration and the peregrine */
-      var la = (function(){ var L = window.LOCATION; return !!(L && L.lat > 33.60 && L.lat < 34.50 && L.lon > -119.00 && L.lon < -117.60); })(), kind = la ? 'coast' : 'flock';
+      var la = (function(){ var L = window.LOCATION; return !!(L && L.lat > 33.60 && L.lat < 34.50 && L.lon > -119.00 && L.lon < -117.60); })();
+      /* the peregrine's attacks are NYC's alone (user 2026-10-13: "no other place but NYC should have the peregrine attacks") */
+      var nyc = (function(){ var L = window.LOCATION; return !!(L && L.lat > 40.40 && L.lat < 41.10 && L.lon > -74.35 && L.lon < -73.60); })();
+      var kind = la ? 'coast' : nyc ? 'flock-nyc' : 'flock';
       if (C.f && C.kind !== kind){ off(); if (!C.cv){ C.cv = document.createElement('canvas'); C.cv.id = 'hero-flock'; C.cv.style.cssText = 'position:absolute;left:0;top:0;z-index:0;pointer-events:none;'; } sb.insertBefore(C.cv, hw.nextSibling); }
       if (!C.f){
         var ph = phone();
         C.gw = g.W; C.gh = g.H; C.kind = kind;
         C.f = la ? bvCoast(C.cv, { W: g.W, H: g.H, floor: g.floor, moon: g.moon, band: g.band, sun: sun(), seed: (Date.now() / 864e5) | 0 })
-                 : bvFlock(C.cv, { W: g.W, H: g.H, floor: g.floor, moon: g.moon, band: g.band, sun: sun(), n: ph ? 380 : 650, jet: !ph, seed: (Date.now() / 864e5) | 0 });
+                 : bvFlock(C.cv, { W: g.W, H: g.H, floor: g.floor, moon: g.moon, band: g.band, sun: sun(), n: ph ? 380 : 650, jet: !ph, falcon: nyc, seed: (Date.now() / 864e5) | 0 });
         air();
         /* the sun moves, the moon and the panel settle: re-read every 20 s; the watchdog every 2 s */
         var n = 0;
