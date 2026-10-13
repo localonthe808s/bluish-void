@@ -212,6 +212,9 @@ async function obsDump(request, env) {
   const url = new URL(request.url);
   const given = (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '')
                 || url.searchParams.get('t') || '';
+  if (env.VIEWER_TOKEN && tokenOk(given, env.VIEWER_TOKEN)) {   /* a viewer key never sees the account */
+    return new Response(JSON.stringify({ error: 'viewer' }), { status: 403, headers: { 'content-type': 'application/json', ...cors(ALLOWED) } });
+  }
   if (!tokenOk(given, env.PANEL_TOKEN)) {
     return new Response(JSON.stringify({ error: 'unauthorized' }), {
       status: 401, headers: { 'content-type': 'application/json', ...cors(ALLOWED) } });
@@ -250,6 +253,9 @@ async function positions(request, env) {
   const url = new URL(request.url);
   const given = (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '')
                 || url.searchParams.get('t') || '';
+  if (env.VIEWER_TOKEN && tokenOk(given, env.VIEWER_TOKEN)) {   /* a viewer key never sees the account */
+    return new Response(JSON.stringify({ error: 'viewer' }), { status: 403, headers: { 'content-type': 'application/json', ...cors(ALLOWED) } });
+  }
   if (!tokenOk(given, env.PANEL_TOKEN)) {
     return new Response(JSON.stringify({ error: 'unauthorized' }), {
       status: 401,
@@ -720,7 +726,10 @@ async function notify(env, state, key, title, body, priority, stateKey) {
   await env.OBS.put(stateKey || ALERT_KEY, JSON.stringify(state));
   /* two roads to the phone (2026-10-13): our own web push to the BLUISH home-screen app, and ntfy. Either landing counts;
      both outcomes are kept in KV (push:last) so a silent failure shows up on the sheet instead of nowhere. */
-  const pu = await pushAll(env, { title, body, tag: key, url: '/' }, priority === 'urgent' || priority === 'high' ? 'high' : 'normal').catch((e) => ({ sent: 0, failed: 1, note: String(e) }));
+  /* who sees it: dark flow and the settlement read are about the market, so every subscribed phone; everything else
+     (your positions, your jobs) only your own phones */
+  const aud = /^(dark|portal):/.test(key) ? 'all' : 'owner';
+  const pu = await pushAll(env, { title, body, tag: key, url: '/' }, priority === 'urgent' || priority === 'high' ? 'high' : 'normal', aud).catch((e) => ({ sent: 0, failed: 1, note: String(e) }));
   let ok = false, nt = 'no topic';
   if (env.NTFY_TOPIC) {
     const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, {
@@ -865,7 +874,7 @@ async function reviewDigest(env) {
   }
   // the day's mark goes in BEFORE the post, like notify(): a put that fails after a post would repeat the digest
   await env.OBS.put(key, '1', { expirationTtl: 60 * 60 * 48 });
-  const pu = await pushAll(env, { title, body, tag: 'review', url: '/' }, pri === 'high' ? 'high' : 'normal').catch(() => ({ sent: 0 }));
+  const pu = await pushAll(env, { title, body, tag: 'review', url: '/' }, pri === 'high' ? 'high' : 'normal', 'owner').catch(() => ({ sent: 0 }));
   const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, { method: 'POST', body, headers: ntfyHeaders(env, { 'Title': title, 'Priority': pri }) });
   if (!r.ok) console.log(`[ntfy] ${r.status} ${(await r.text()).slice(0, 160)} -- review digest NOT delivered`);
   return `${title} (ntfy ${r.status}, push ${pu.sent})`;
@@ -1234,17 +1243,26 @@ async function pushRoute(request, env, url) {
   if (!env.VAPID_JWK || !env.OBS) return J({ error: 'push not configured' }, 503);
   const jwk = JSON.parse(env.VAPID_JWK);
   if (url.pathname === '/push/key') return J({ key: vapidPublic(jwk) });
+  /* two keys: PANEL_TOKEN is the owner's (your account, your alerts); VIEWER_TOKEN is the one you hand out -- it can
+     sign a phone up for the market alerts and nothing else (2026-10-13) */
   const given = (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
-  if (!tokenOk(given, env.PANEL_TOKEN)) return J({ error: 'unauthorized' }, 401);
+  const role = tokenOk(given, env.PANEL_TOKEN) ? 'owner' : (env.VIEWER_TOKEN && tokenOk(given, env.VIEWER_TOKEN)) ? 'viewer' : null;
+  if (!role) return J({ error: 'unauthorized' }, 401);
   const subs = (await env.OBS.get(PUSH_KEY, { type: 'json' })) || [];
-  if (url.pathname === '/push/status') return J({ phones: subs.length, last: await env.OBS.get('push:last', { type: 'json' }) });
+  if (url.pathname === '/push/status'){
+    if (role !== 'owner') return J({ error: 'owner only' }, 403);
+    return J({ phones: subs.length, owners: subs.filter((x) => (x.role || 'owner') === 'owner').length, last: await env.OBS.get('push:last', { type: 'json' }) });
+  }
   if (request.method !== 'POST') return J({ error: 'POST' }, 405);
   let b = {}; try { b = await request.json(); } catch (_) {}
   if (url.pathname === '/push/subscribe') {
     const s = b.sub;
     if (!s || !/^https:\/\//.test(s.endpoint || '') || !s.keys || !s.keys.p256dh || !s.keys.auth) return J({ error: 'bad subscription' }, 400);
-    const keep = subs.filter((x) => x.endpoint !== s.endpoint).slice(-9);   /* ten phones at most */
-    keep.push({ endpoint: s.endpoint, keys: { p256dh: s.keys.p256dh, auth: s.keys.auth }, at: new Date().toISOString(), ua: String(b.ua || '').slice(0, 80) });
+    /* the owner's phones always keep their place; viewers are capped at the newest 50 */
+    const rest = subs.filter((x) => x.endpoint !== s.endpoint);
+    const owners = rest.filter((x) => (x.role || 'owner') === 'owner').slice(-5), viewers = rest.filter((x) => x.role === 'viewer').slice(-49);
+    const keep = owners.concat(viewers);
+    keep.push({ endpoint: s.endpoint, keys: { p256dh: s.keys.p256dh, auth: s.keys.auth }, role, at: new Date().toISOString(), ua: String(b.ua || '').slice(0, 80) });
     await env.OBS.put(PUSH_KEY, JSON.stringify(keep));
     return J({ ok: true, phones: keep.length });
   }
@@ -1254,7 +1272,10 @@ async function pushRoute(request, env, url) {
     return J({ ok: true, phones: keep.length });
   }
   if (url.pathname === '/push/test') {
-    const r = await pushAll(env, { title: 'BLUISH alerts are on', body: 'This phone will get your Kalshi alerts from now on.', tag: 'push-test', url: '/' }, 'high');
+    /* the test goes to the asking phone only, never to everyone */
+    const mine = subs.find((x) => x.endpoint === b.endpoint);
+    if (!mine) return J({ error: 'this phone is not signed up' }, 404);
+    const r = await pushAll(env, { title: 'BLUISH alerts are on', body: mine.role === 'viewer' ? 'This phone will get the Kalshi market alerts: dark flow and the Central Park settlement.' : 'This phone will get your Kalshi alerts from now on.', tag: 'push-test', url: '/' }, 'high', b.endpoint);
     return J({ ok: r.sent > 0, ...r });
   }
   return J({ error: 'not found' }, 404);

@@ -80,14 +80,20 @@ export async function pushOne(sub, msg, jwk, urgency) {
   return { status: r.status, text: r.ok ? '' : (await r.text()).slice(0, 200) };
 }
 
-/* every subscribed phone; dead subscriptions are pruned. msg = { title, body, tag, url } */
-export async function pushAll(env, msg, urgency) {
+/* every subscribed phone in the audience; dead subscriptions are pruned. msg = { title, body, tag, url }.
+   audience: 'owner' (default -- your positions, jobs) | 'all' (owner + viewers: dark flow, settlement) | an endpoint
+   string (that one phone, for SEND A TEST). Subscriptions carry role 'owner' or 'viewer' (2026-10-13, user: "dont share
+   my kalshi on the site" -> "only I see it"). */
+export async function pushAll(env, msg, urgency, audience) {
   if (!env.VAPID_JWK || !env.OBS) return { sent: 0, failed: 0, note: 'not configured' };
   const jwk = typeof env.VAPID_JWK === 'string' ? JSON.parse(env.VAPID_JWK) : env.VAPID_JWK;
   const subs = (await env.OBS.get(PUSH_KEY, { type: 'json' })) || [];
   if (!subs.length) return { sent: 0, failed: 0, note: 'no phones subscribed' };
   let sent = 0, failed = 0; const keep = [], errs = [];
+  const aud = audience || 'owner';
+  const wants = (x) => aud === 'all' ? true : aud === 'owner' ? (x.role || 'owner') === 'owner' : x.endpoint === aud;
   for (const s of subs) {
+    if (!wants(s)) { keep.push(s); continue; }
     try {
       const r = await pushOne(s, msg, jwk, urgency);
       if (r.status === 404 || r.status === 410) continue;           // gone: drop it
