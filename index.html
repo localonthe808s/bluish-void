@@ -16172,12 +16172,48 @@ window._bvHeroGpu = function(hw, st, code, night){
               var _bvRasterDS = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', { maxNativeZoom:16, maxZoom:19 }).addTo(map);
               var _bvBase = window._bvVectorBase && window._bvVectorBase(map);
               if (_bvBase) window._bvManageRaster(map, _bvRasterDS);
-              L.tileLayer('https://djlorenz.github.io/astronomy/image_tiles/tiles2024/tile_{z}_{x}_{y}.png', {
-                minZoom: 2, maxNativeZoom: 8, maxZoom: 19,
-                tileSize: 1024, zoomOffset: -2, opacity: 0.6,
-                crossOrigin: 'anonymous',
-                errorTileUrl: 'https://djlorenz.github.io/astronomy/image_tiles/tiles2024/black.png'
-              }).addTo(map);
+              /* Lorenz's 1024px images are cut into 256px canvas tiles, each drawn one pixel
+                 wider and taller from the image's own next row/column, so neighbouring tiles
+                 overlap with real pixels. As plain <img> tiles the image edges went soft at
+                 fractional scales and the undimmed base showed through as a light hairline
+                 across the map at the tile row (user 2026-10-13). Source zoom = map zoom - 2,
+                 capped at 6 (the deepest level the set reliably has); deeper zooms upscale. */
+              var _lzImgs = {};
+              function _lzImg(z, x, y, cb){
+                var k = z + '_' + x + '_' + y, e = _lzImgs[k];
+                if (e){ if (e.ok !== undefined) cb(e.ok ? e.img : null); else e.q.push(cb); return; }
+                e = _lzImgs[k] = { q: [cb], img: new Image() };
+                e.img.crossOrigin = 'anonymous';
+                e.img.onload = function(){ e.ok = true; e.q.forEach(function(f){ f(e.img); }); e.q = null; };
+                e.img.onerror = function(){ e.ok = false; e.q.forEach(function(f){ f(null); }); e.q = null; };
+                e.img.src = 'https://djlorenz.github.io/astronomy/image_tiles/tiles2024/tile_' + k + '.png';
+              }
+              var LzLayer = L.GridLayer.extend({
+                createTile: function(c, done){
+                  var t = document.createElement('canvas'), dpr = Math.min(window.devicePixelRatio || 1, 2);
+                  t.width = Math.round(257 * dpr); t.height = Math.round(257 * dpr);
+                  var sz = Math.max(0, Math.min(c.z - 2, 6)), f = Math.pow(2, c.z - 2 - sz);   // f map pixels per source pixel
+                  var px = c.x * 256 / f, py = c.y * 256 / f;                                     // tile origin in source-level pixels
+                  var sx = Math.floor(px / 1024), sy = Math.floor(py / 1024), ox = px - sx * 1024, oy = py - sy * 1024;
+                  _lzImg(sz, sx, sy, function(img){
+                    var g = t.getContext('2d');
+                    if (!img){ g.fillStyle = '#000'; g.fillRect(0, 0, t.width, t.height); done(null, t); return; }
+                    var w = 257 / f, h = 257 / f;                                                  // one extra map pixel of source
+                    var sw = Math.min(w, 1024 - ox), sh = Math.min(h, 1024 - oy);
+                    g.drawImage(img, ox, oy, sw, sh, 0, 0, t.width * sw / w, t.height * sh / h);
+                    // the extra row/column past the image edge comes from the neighbouring image
+                    var rest = function(dx, dy, x0, y0, w0, h0, cx, cy){
+                      _lzImg(sz, (sx + dx) % Math.pow(2, sz), sy + dy, function(im2){ if (im2) g.drawImage(im2, x0, y0, w0, h0, cx, cy, t.width * w0 / w, t.height * h0 / h); });
+                    };
+                    if (sw < w) rest(1, 0, 0, oy, w - sw, sh, t.width * sw / w, 0);
+                    if (sh < h && sy + 1 < Math.pow(2, sz)) rest(0, 1, ox, 0, sw, h - sh, 0, t.height * sh / h);
+                    done(null, t);
+                  });
+                  t.style.width = '257px'; t.style.height = '257px';
+                  return t;
+                }
+              });
+              new LzLayer({ minZoom: 2, maxZoom: 19, tileSize: 256, opacity: 0.6 }).addTo(map);
               // labels ride above the pollution wash — ours when the vector base loaded,
               // Esri's reference tiles when it did not
               if (_bvBase) window._bvVectorBase(map, { labels: true });
