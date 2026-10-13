@@ -48802,8 +48802,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     function resizeToDisplaySize(){
       var parent = auroraCanvas.parentElement;
       if (!parent) return;
-      var w = Math.max(1, parent.clientWidth);
-      var h = Math.max(1, parent.clientHeight);
+      var w = Math.max(1, auroraCanvas.clientWidth || parent.clientWidth);    /* its own box: in the two-pole view it is half the body */
+      var h = Math.max(1, auroraCanvas.clientHeight || parent.clientHeight);
       if (auroraCanvas.width !== w || auroraCanvas.height !== h){
         auroraCanvas.width = w;
         auroraCanvas.height = h;
@@ -48891,6 +48891,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             if (auroraFallbackImg) auroraFallbackImg.style.display = "none";
             SH.ok('swpc-aurora');
             startAuroraAnimation();
+            if (window._auroraSouthStart) window._auroraSouthStart();
           } else {
             throw new Error("No frames");
           }
@@ -48927,6 +48928,45 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       step();
     }
 
+    /* BOTH POLES (user 2026-10-13: "are you able to fit both north and south poles in view for aurora forecast?"): in the
+       AURORA BOREALIS widget a second canvas beside the northern one runs the southern OVATION loop on its own clock -- the
+       same last-6-hours frames, the same local-time label, the same sleep rules. Started once, with the north. */
+    var SA = { frames: [], times: [], idx: 0, timer: null, img: null, t0: 0 };
+    function southLoad(){
+      fetchWithTimeout('https://services.swpc.noaa.gov/products/animations/ovation_south_24h.json', null, 15000)
+        .then(function(r){ return r.json(); }).then(function(data){
+          if (!data || !data.length) return;
+          var newest = Date.parse(data[data.length - 1].time_tag), recent = data.filter(function(f){ return Date.parse(f.time_tag) >= newest - 6 * 3600e3; });
+          if (recent.length >= 6) data = recent;
+          var objs = thinFrames(data.map(function(f){ return { url: 'https://services.swpc.noaa.gov' + f.url, t: f.time_tag }; }), 70);
+          SA.frames = objs.map(function(o){ return o.url; }); SA.frames._origLen = objs._origLen; SA.times = objs.map(function(o){ return o.t; }); SA.idx = 0;
+          if (!SA.timer) southStep();
+        }).catch(function(){});
+    }
+    function southDraw(){
+      var cv = document.getElementById('aurora-canvas-s'); if (!cv || !SA.img.naturalWidth) return;
+      var w = Math.max(1, cv.clientWidth), h = Math.max(1, cv.clientHeight); if (cv.width !== w || cv.height !== h){ cv.width = w; cv.height = h; }
+      var ctx = cv.getContext('2d'), iw = SA.img.naturalWidth, ih = SA.img.naturalHeight, sc = Math.max(w / iw, h / ih), dw = iw * sc, dh = ih * sc, dx = (w - dw) / 2, dy = (h - dh) / 2;
+      ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h); ctx.drawImage(SA.img, dx, dy, dw, dh);
+      var ms = Date.parse(SA.cur || ''); if (isNaN(ms)) return;
+      var d = new Date(ms), hh = d.getHours(), label = (hh % 12 || 12) + ':' + (d.getMinutes() < 10 ? '0' : '') + d.getMinutes() + (hh < 12 ? 'AM' : 'PM');
+      var back = Math.round((Date.parse(SA.times[SA.times.length - 1]) - ms) / 3600e3 * 2) / 2; label += back >= 0.5 ? ' \u00b7 ' + back + 'H EARLIER' : ' \u00b7 NEWEST';
+      ctx.save(); ctx.font = '600 11px system-ui'; var tw = ctx.measureText(label).width, x = Math.min(w - 4 - tw, Math.max(4, dx + dw * 0.42)), y = Math.max(2, dy + dh * 0.085);
+      ctx.shadowColor = 'rgba(0,0,0,.85)'; ctx.shadowBlur = 3; ctx.fillStyle = '#ffd54a'; ctx.textBaseline = 'top'; ctx.fillText(label, x, y); ctx.restore();
+    }
+    function southStep(){
+      var cv = document.getElementById('aurora-canvas-s');
+      if (!SA.img){ SA.img = new Image(); SA.img.crossOrigin = 'anonymous'; SA.img.onload = function(){ try { southDraw(); } catch(e){} }; }
+      if (cv && cv.offsetParent && !document.hidden && auroraAnim.playing && !(window._bvzSleep || {}).aurora && SA.frames.length){
+        SA.cur = SA.times[SA.idx]; SA.img.src = SA.frames[SA.idx]; SA.idx = (SA.idx + 1) % SA.frames.length;
+      }
+      SA.timer = setTimeout(southStep, SA.idx === 0 && SA.frames.length > 1 ? 2500 : adjustedDelay(5, SA.frames));
+    }
+    window._auroraSouthStart = function(){
+      if (!document.getElementById('aurora-canvas-s')) return;
+      if (!SA.t0){ SA.t0 = Date.now(); southLoad(); setInterval(function(){ if (!document.hidden && !(window._bvzSleep || {}).aurora) southLoad(); }, 5 * 60 * 1000); }
+    };
+    window.addEventListener('resize', function(){ try { southDraw(); } catch(e){} });
     auroraAnim.reload = loadFrames; // let the NORTHERN/SOUTHERN tab trigger a reload
     loadFrames();
 
@@ -109597,7 +109637,16 @@ function closeAlertModal(){
   }
   /* the two square views (coronagraphs, the OVATION map) stay square at full width: centred on black, no taller than 640 px */
   #aurora-borealis-widget #aurora-widget.ab-sub{ background:#000 !important; }
-  #aurora-borealis-widget #aurora-widget.ab-sub > .widget-body{ max-width:640px; margin:0 auto; }
+  /* BOTH POLES side by side (user 2026-10-13): north left, south right, each square; stacked on phones; no hemisphere tabs */
+  #aurora-borealis-widget #aurora-widget.ab-sub > .widget-body{ max-width:none; aspect-ratio:2/1 !important; }
+  #aurora-borealis-widget #aurora-canvas, #aurora-borealis-widget #aurora-img-fallback{ inset:0 auto 0 0 !important; width:50% !important; height:100% !important; }
+  #aurora-borealis-widget #aurora-canvas-s{ position:absolute; top:0; left:50%; width:50%; height:100%; display:block; background:#000; }
+  #aurora-borealis-widget #aurora-tabs{ display:none !important; }
+  @media (max-width:768px){
+    #aurora-borealis-widget #aurora-widget.ab-sub > .widget-body{ aspect-ratio:1/2 !important; }
+    #aurora-borealis-widget #aurora-canvas, #aurora-borealis-widget #aurora-img-fallback{ width:100% !important; height:50% !important; }
+    #aurora-borealis-widget #aurora-canvas-s{ top:50%; left:0; width:100%; height:50%; }
+  }
   /* CORONAGRAPHS, DUAL PANEL (user 2026-10-13): LASCO C2's inner corona on the left, the wide view (LASCO C3 or CCOR-1, by tab)
      on the right. FULL CIRCLES, NO BLACK (user: "i dont want the black trim, are these able to be shown as full circles?"): each
      frame is masked to the largest circle inside it (NOAA's squares crop the instruments' round fields at the sides, so that
@@ -109765,6 +109814,10 @@ function closeAlertModal(){
         abw.setAttribute('data-pane', k);
         try { window.dispatchEvent(new Event('resize')); } catch(e){}
       };
+      /* both poles in the aurora pane: the south canvas beside the north one; the hemisphere tabs go (both are always shown) */
+      var acv = document.getElementById('aurora-canvas');
+      if (acv && !document.getElementById('aurora-canvas-s')){ var scv = document.createElement('canvas'); scv.id = 'aurora-canvas-s'; acv.parentNode.insertBefore(scv, acv.nextSibling);
+        if (window._auroraSouthStart && window.auroraAnim && auroraAnim.frames && auroraAnim.frames.length) window._auroraSouthStart(); }
       window._bvAuroraPick = apick;
       [].forEach.call(abt.querySelectorAll('.ot-tab'), function(b){ b.onclick = function(e){ e.stopPropagation(); apick(b.getAttribute('data-p')); }; });
       apick('aurora-widget');
