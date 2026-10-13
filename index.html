@@ -17783,33 +17783,25 @@ function floodRateThreshold(lat, lon, soilMoisture){
           // low-confidence rows are the network's own noise floor
           ev = ev.filter(function(e){ return (e.event_confidence == null) || e.event_confidence >= 0.5; });
           if (!ev.length){ window._floodNetNow = null; return; }
-          var first = ev[ev.length - 1], dep = byId[ev[0].deployment_id] || {};
-          window._floodNetNow = {
-            count: ev.length,
-            place: String(dep.name || '').replace(/^[A-Z]{1,2}\s*-\s*/, ''),   // strip the borough prefix
-            since: first.start_time
-          };
-          try{ if (window._applyRainLine) window._applyRainLine(window._nowcastStr); }catch(e){}
-
-          // ── HOW DEEP, AND STILL RISING? ────────────────────────────────
-          // Depth is only meaningful per sensor. Raw millimetres cannot be
-          // trusted or compared: some units carry a permanent offset (two sat
-          // at ~45mm every hour of a dry week) and the stream throws occasional
-          // one-sample spikes into the hundreds. So depth is read ONLY at
-          // sensors an event already flagged, measured as a RISE above that
-          // same sensor's own floor in the window, from a median of its recent
-          // readings rather than its newest one. An offset cancels; a spike is
-          // outvoted; a real flood still reads true — Utopia Pkwy climbed 0 to
-          // 29" over 17 one-minute samples on 2026-07-18.
+          /* SANITY CHECK BEFORE THE RAIN LINE (user 2026-10-12: "if you think its an obstruction don't fire it"). Measured that
+             night: Lee Ave/Middleton St (mounted over a sidewalk) went 0 -> 11" inside one minute at 20:37 with no rain anywhere
+             since dawn, then held 10.8-11" dead flat -- something set under the sensor, not water. FloodNet's own detector
+             flagged it at 0.91. So a sensor only reaches the rain line once its own trace is read: with NO rain in the last 6 h
+             (hourly precip < 0.02", no radar echo, no NWS flood alert), a reading that arrived as a STEP or sits FLAT is an
+             obstruction and is dropped. Real water rises over minutes and moves; a main break with no rain still varies. */
+          var hrs = window._wxHourly, wet6 = 0;
+          try { var tN = Date.now(); (hrs && hrs.time || []).forEach(function(t, k){ var ts = new Date(t).getTime(); if (ts <= tN && tN - ts < 6 * 3600000) wet6 += +(hrs.precipitation || [])[k] || 0; }); } catch(e){}
+          var floodAlert = (window._nwsAlerts || []).some(function(a){ return /flood/i.test(String((a && a.event) || '')); });
+          var rainy = wet6 >= 0.02 || !!window._nowcastStr || floodAlert;
           var evIds = ev.slice(0, 8).map(function(e){ return JSON.stringify(e.deployment_id); }).join(',');
-          var dSince = new Date(Date.now() - 90*60000).toISOString().slice(0,19);
+          var dSince = new Date(Date.now() - 180*60000).toISOString().slice(0,19);
           // newest-first: with a row cap, ascending order silently drops the
           // CURRENT readings and every sensor looks dry.
           fnQuery('{ depth_data(where:{deployment_id:{_in:[' + evIds + ']}, time:{_gte:"' + dSince + '"}},'
-                + ' order_by:{time:desc}, limit:700){ deployment_id time depth_proc_mm } }')
+                + ' order_by:{time:desc}, limit:1600){ deployment_id time depth_proc_mm } }')
             .then(function(dd){
+              if (_ep !== (window._locEpoch || 0)) return;
               var rows = (dd && dd.depth_data) || [];
-              if (!rows.length) return;
               var per = {}, tNow = Date.now();
               rows.forEach(function(r){
                 var ts = new Date(r.time + (/[Zz+]/.test(r.time) ? '' : 'Z')).getTime();
@@ -17820,41 +17812,57 @@ function floodRateThreshold(lat, lon, soilMoisture){
                 var b = a.slice().sort(function(x,y){ return x-y; });
                 return b.length ? b[Math.floor(b.length/2)] : 0;
               };
+              /* obstruction test for one sensor's trace (newest first) */
+              var obstructed = function(v){
+                if (rainy || v.length < 8) return false;
+                var asc = v.slice().reverse(), lo = Math.min.apply(null, asc.map(function(x){ return x.d; })), hi = Math.max.apply(null, asc.map(function(x){ return x.d; }));
+                var rise = hi - lo; if (rise < 25) return false;
+                var bigStep = 0; for (var q = 1; q < asc.length; q++) bigStep = Math.max(bigStep, asc[q].d - asc[q - 1].d);
+                var last = v.filter(function(x){ return x.age < 30; }).map(function(x){ return x.d; });
+                var flat = last.length >= 6 && (Math.max.apply(null, last) - Math.min.apply(null, last)) < 15;
+                return bigStep > rise * 0.7 || flat;
+              };
+              var okIds = {}, dropped = [];
+              ev.forEach(function(e){ var v = per[e.deployment_id]; if (v && obstructed(v)) dropped.push(e.deployment_id); else okIds[e.deployment_id] = 1; });
+              window._floodNetDropped = dropped;   // read-only, for checks
+              var ok = ev.filter(function(e){ return okIds[e.deployment_id]; });
+              if (!ok.length){ window._floodNetNow = null; try{ if (window._applyRainLine) window._applyRainLine(window._nowcastStr); }catch(e){} return; }
+              var first = ok[ok.length - 1], dep = byId[ok[0].deployment_id] || {};
+              window._floodNetNow = {
+                count: ok.length,
+                place: String(dep.name || '').replace(/^[A-Z]{1,2}\s*-\s*/, ''),   // strip the borough prefix
+                since: first.start_time
+              };
+              // ── HOW DEEP, AND STILL RISING? ── depth only as a RISE above each sensor's own floor, from a median of
+              // recent readings (offsets cancel, spikes are outvoted); trend is now vs ~12 min ago (see FloodNet notes).
               var best = null;
               Object.keys(per).forEach(function(k){
-                var v = per[k];                       // newest first
+                if (!okIds[k]) return;
+                var v = per[k].filter(function(x){ return x.age < 90; });   // newest first, the last 90 min as before
+                if (!v.length) return;
                 var pick = function(lo, hi){
                   return v.filter(function(x){ return x.age >= lo && x.age < hi; })
                           .map(function(x){ return x.d; });
                 };
                 var nowD = med(pick(0, 6));           // spike-proof current depth
-                // Trend is now vs ~12 min ago. Two failure modes were measured
-                // against Saturday's traces: comparing against the window START
-                // says "rising" straight through the drain-down (the window
-                // opens on dry ground), and a 20-min lookback still called 18:00Z
-                // rising while Utopia Pkwy fell from 29" to 9". Twelve minutes
-                // catches the turn and softens to HOLDING when it is ambiguous —
-                // during a flood, a false "still rising" is the worst thing to say.
                 var thenD = med(pick(9, 16));
                 var floor = Math.min.apply(null, v.map(function(x){ return x.d; }));
                 var rise = nowD - floor;
                 if (rise < 25) return;                // under an inch is not news
                 if (!best || rise > best.rise){
-                  // Needs a real gap: comparing two medians that merely tie
-                  // reads as "still rising" while the water is plainly draining.
-                  var trend = !pick(9, 16).length ? ''            // nothing to compare against yet
+                  var trend = !pick(9, 16).length ? ''
                             : nowD > thenD + 5 ? 'STILL RISING'
                             : nowD < thenD - 5 ? 'RECEDING' : 'HOLDING';
                   best = { rise: rise, trend: trend,
                            name: String((byId[k] || {}).name || '').replace(/^[A-Z]{1,2}\s*-\s*/, '') };
                 }
               });
-              if (best && window._floodNetNow){
+              if (best){
                 window._floodNetNow.depthIn = best.rise / 25.4;
                 window._floodNetNow.trend = best.trend;
                 window._floodNetNow.place = best.name || window._floodNetNow.place;
-                try{ if (window._applyRainLine) window._applyRainLine(window._nowcastStr); }catch(e){}
               }
+              try{ if (window._applyRainLine) window._applyRainLine(window._nowcastStr); }catch(e){}
             }).catch(function(){});
         }).catch(function(){});
     };
