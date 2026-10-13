@@ -2121,6 +2121,8 @@ window._bvContinentalNames = function(map, opts){
   #hz-hurricane-season-pill.hz-takeover > #hz-storm-takeover{ display:block; column-span:all; }
   #hz-storm-takeover > .hz-storm-detail{ column-width:290px; column-gap:28px; padding:0; }
   #hz-storm-takeover > .hz-storm-detail > *{ break-inside:avoid; }
+  .hz-dsat-b{ padding:3px 9px; border-radius:6px; border:1px solid rgba(27,35,64,.12); background:rgba(27,35,64,.04); color:rgba(27,35,64,.6); font:700 .56rem system-ui,sans-serif; cursor:pointer; }
+  .hz-dsat-b.on{ border-color:rgba(43,34,244,.45); background:rgba(43,34,244,.1); color:#2B22F4; }
   #hz-storm-back{ margin:0 0 10px; padding:5px 12px; border:none; border-radius:8px; background:rgba(234,88,12,.92); color:#fff; font:800 .56rem system-ui,sans-serif; letter-spacing:.1em; cursor:pointer; }
   .hz-sd-light .sd-head{ font-size:.9rem; }
   .hz-sd-light .sd-sub{ font-size:.6rem; color:rgba(27,35,64,.6); }
@@ -95033,14 +95035,19 @@ function initNowMicroTabs(){
           try {
             var twoM = xml.match(/<title>(?:<!\[CDATA\[)?[^<]*Tropical Weather Outlook[\s\S]*?<description>([\s\S]*?)<\/description>/);
             if (twoM) {
-              var blocks = [], header = null, lastP2 = null;
+              var blocks = [], header = null, lastP2 = null, para = [];
               twoM[1].split(/<br\s*\/?\s*>/i).forEach(function(ln){
                 ln = ln.replace(/<[^>]+>/g, '').replace(/^\s+|\s+$/g, '');
-                if (/^[A-Z][A-Za-z .,'()-]{3,60}:$/.test(ln) && ln.indexOf('For the') !== 0) header = ln.slice(0, -1);
+                /* a block's heading may stand alone ("Central Tropical Atlantic:") or open its own paragraph ("South of Southern
+                   Mexico (EP93): Showers and..."); "Active Systems" is NHC's note about named storms, not a disturbance */
+                var hm = ln.match(/^([A-Z][A-Za-z0-9 .,'()-]{3,60}):\s*(.*)$/);
+                if (hm && ln.indexOf('For the') !== 0 && !/^(Active Systems|Forecaster|NNNN)/i.test(hm[1])){ header = hm[1]; para = hm[2] ? [hm[2]] : []; return; }
+                if (hm && /^Active Systems/i.test(hm[1])){ header = null; para = []; return; }
                 var c2 = ln.match(/Formation chance through 48 hours[^\d]*(\d+)\s*percent/i);
                 if (c2) lastP2 = parseInt(c2[1], 10);
                 var c7 = ln.match(/Formation chance through 7 days[^\d]*(\d+)\s*percent/i);
-                if (c7) { blocks.push({ region: header, p2: lastP2, p7: parseInt(c7[1], 10) }); lastP2 = null; }
+                if (c7) { blocks.push({ region: header, p2: lastP2, p7: parseInt(c7[1], 10), text: para.join(' ').replace(/\s+/g, ' ').trim() }); lastP2 = null; para = []; return; }
+                if (header && ln && !c2 && !/^\*/.test(ln)) para.push(ln);   /* the outlook's own words for this disturbance (2026-10-12: the disturbance card) */
               });
               window._hzTwoBlocks = window._hzTwoBlocks || {};
               window._hzTwoBlocks[entry.label] = blocks;
@@ -95223,6 +95230,62 @@ function initNowMicroTabs(){
     el.style.display = '';
   };
 
+  /* A DISTURBANCE'S CARD (user 2026-10-12: "yes add that for the disturbances"): clicking a disturbance on the map or its
+     CURRENT SYSTEMS row takes over the subview like a named storm does -- formation chances (+ trend), where it is, NHC's own
+     outlook words, what the models do with it, and a satellite view centred on it. Built from what the page already holds. */
+  window._hzSatCrop = function(lat, lon, key, big){
+    var sLon = lon > 180 ? lon - 360 : lon, west = sLon < -100, h = 7, px = big ? 1200 : 640;
+    var LY = { GEOCOLOR: 'GeoColor', IR: 'Band13_Clean_Infrared', AIRMASS: 'Air_Mass' };
+    return { west: west, url: 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&SRS=EPSG:4326&BBOX='
+      + (sLon - h).toFixed(2) + ',' + (lat - h).toFixed(2) + ',' + (sLon + h).toFixed(2) + ',' + (lat + h).toFixed(2)
+      + '&WIDTH=' + px + '&HEIGHT=' + px + '&FORMAT=image/jpeg&STYLES=&LAYERS=GOES-' + (west ? 'West' : 'East') + '_ABI_' + (LY[key] || 'GeoColor') };
+  };
+  window._hzShowDist = function(lat, lon){
+    var ds = (window._hzSystems || {}).dists || [], d = null, bd = 1.5;
+    ds.forEach(function(x){ var dd = Math.abs(x.lat - lat) + Math.abs(x.lon - lon); if (dd < bd){ bd = dd; d = x; } });
+    if (!d || !window._hzStormTakeover) return;
+    var isPac = d.basin ? String(d.basin).indexOf('PAC') >= 0 : /PAC/.test(d.name);
+    var blk = null, feed = (window._hzTwoBlocks || {})[isPac ? 'EPAC' : 'ATL'] || [];
+    for (var i = 0; i < feed.length; i++){ if (feed[i].p7 === d.p7 && (feed[i].p2 == null || feed[i].p2 === d.p2)){ blk = feed[i]; break; } }
+    var tierCol = d.tier === 'HIGH' ? '#dc2626' : d.tier === 'MEDIUM' ? '#f97316' : '#ca8a04';
+    var bar = function(lbl, v){ return '<div class="sd-row"><span class="sd-label">' + lbl + '</span><span class="sd-val" style="color:' + (v >= 60 ? '#dc2626' : v >= 40 ? '#f97316' : '#ca8a04') + ';">' + v + '%</span></div>'
+      + '<div class="sd-bar-track"><div class="sd-bar-fill" style="width:' + Math.max(2, v) + '%;background:' + (v >= 60 ? '#dc2626' : v >= 40 ? '#f97316' : '#facc15') + ';"></div></div>'; };
+    var trend = '';
+    try { (JSON.parse(localStorage.getItem('bv_hz_trend') || '[]')).some(function(e){ if (Math.abs(e.lat - d.lat) + Math.abs(e.lon - d.lon) < 6 && e.prevP7 != null && e.prevP7 !== d.p7){
+      trend = (d.p7 > e.prevP7 ? 'Up' : 'Down') + ' from ' + e.prevP7 + '% in the previous outlook'; return true; } return false; }); } catch(e){}
+    var L0 = (typeof LOCATION !== 'undefined') ? LOCATION : null, distTxt = '';
+    if (L0 && L0.lat != null){ var toR = Math.PI / 180, aa = Math.sin((d.lat - L0.lat) * toR / 2), bb = Math.sin((d.lon - L0.lon) * toR / 2);
+      distTxt = (Math.round(2 * 3959 * Math.asin(Math.sqrt(aa * aa + Math.cos(L0.lat * toR) * Math.cos(d.lat * toR) * bb * bb)) / 100) * 100).toLocaleString() + ' mi from ' + (L0.name || 'you'); }
+    var fmtLL = function(v, p, n){ return Math.abs(v).toFixed(1) + '\u00b0' + (v >= 0 ? p : n); };
+    var c0 = window._hzSatCrop(d.lat, d.lon, 'GEOCOLOR');
+    var h = '<div class="hz-storm-detail">'
+      + '<div class="sd-head" style="color:' + tierCol + ';">' + d.name + '</div>'
+      + '<div class="sd-sub">Tropical disturbance \u00b7 ' + (isPac ? 'Eastern Pacific' : 'Atlantic') + (blk && blk.region ? ' \u00b7 ' + blk.region : '') + ' \u00b7 NHC Tropical Weather Outlook</div>'
+      + '<div><div class="sd-section">FORMATION CHANCE</div>' + bar('Through 48 hours', d.p2) + bar('Through 7 days', d.p7)
+      + '<div class="sd-row"><span class="sd-label">NHC risk</span><span class="sd-val" style="color:' + tierCol + ';">' + d.tier + '</span></div>'
+      + (trend ? '<div class="sd-sub" style="margin:4px 0 0;">' + trend + '</div>' : '') + '</div>'
+      + '<div><div class="sd-section">POSITION</div>'
+      + '<div class="sd-row"><span class="sd-label">Centre</span><span class="sd-val">' + fmtLL(d.lat, 'N', 'S') + ', ' + fmtLL(d.lon, 'E', 'W') + '</span></div>'
+      + (distTxt ? '<div class="sd-row"><span class="sd-label">Distance</span><span class="sd-val">' + distTxt + '</span></div>' : '')
+      + (d.eta ? '<div class="sd-row"><span class="sd-label">Lesser Antilles</span><span class="sd-val">' + d.eta.replace(' to Antilles', '') + '</span></div>' : '')
+      + (d.model ? '<div class="sd-row"><span class="sd-label">Models (lowest pressure, 7 days)</span><span class="sd-val">' + d.model.replace(/^models /, '') + '</span></div>' : '')
+      + '</div>'
+      + (blk && blk.text ? '<div><div class="sd-section">NHC OUTLOOK</div><div style="font-size:.6rem;line-height:1.5;color:#1b2340;">' + blk.text + '</div></div>' : '')
+      + '<div><div class="sd-section">SATELLITE IMAGERY</div><div class="hz-dsat-tabs" style="display:flex;gap:4px;margin-bottom:5px;">'
+      + [['GEOCOLOR', 'GeoColor'], ['IR', 'Enhanced IR'], ['AIRMASS', 'Air Mass']].map(function(p, i){ return '<button type="button" data-k="' + p[0] + '" class="hz-dsat-b' + (i ? '' : ' on') + '">' + p[1] + '</button>'; }).join('')
+      + '</div><img class="hz-dsat-img" src="' + c0.url + '" alt="' + d.name + ' satellite" style="width:100%;display:block;border-radius:8px;cursor:pointer;background:#0b1020;aspect-ratio:1/1;">'
+      + '<div class="sd-sub" style="margin-top:4px;">NOAA GOES-' + (c0.west ? '18' : '19') + ' ABI via NASA GIBS \u00b7 latest scan, centred on the disturbance \u00b7 click to enlarge</div></div>'
+      + '<div><div class="sd-section">NHC RESOURCES</div><a class="sd-link" href="https://www.nhc.noaa.gov/gtwo.php?basin=' + (isPac ? 'epac' : 'atlc') + '&fdays=7" target="_blank" rel="noopener">Tropical Weather Outlook</a></div>'
+      + '</div>';
+    window._hzStormTakeover(h, function(){
+      var tk = document.getElementById('hz-storm-takeover'); if (!tk) return;
+      var img = tk.querySelector('.hz-dsat-img'), cur = 'GEOCOLOR';
+      [].forEach.call(tk.querySelectorAll('.hz-dsat-b'), function(b){ b.onclick = function(e){ e.stopPropagation(); cur = b.getAttribute('data-k');
+        [].forEach.call(tk.querySelectorAll('.hz-dsat-b'), function(x){ x.classList.toggle('on', x === b); }); img.src = window._hzSatCrop(d.lat, d.lon, cur).url; }; });
+      if (img) img.onclick = function(e){ e.stopPropagation(); window.open(window._hzSatCrop(d.lat, d.lon, cur, true).url, '_blank'); };
+    });
+  };
+
   // Flash the matching CURRENT SYSTEMS row when its map marker is clicked
   window._hzFlashSystemsRow = function(key){
     var el = document.querySelector('#hz-systems-line [data-hz-dist="' + key + '"]');
@@ -95255,10 +95318,11 @@ function initNowMicroTabs(){
     try { map.flyTo([lat, lon], Math.max(map.getZoom(), 5), { duration: 1.1 }); } catch(e){}
     var markers = (typeof _hurricaneLayerObjs !== 'undefined' && _hurricaneLayerObjs.disturbanceMarkers) || [];
     /* a named storm's row opens its card in the subview, same as tapping it on the map (2026-10-12) */
-    ((typeof _hurricaneLayerObjs !== 'undefined' && _hurricaneLayerObjs.stormMarkers) || []).some(function(m){
+    var _isStorm = ((typeof _hurricaneLayerObjs !== 'undefined' && _hurricaneLayerObjs.stormMarkers) || []).some(function(m){
       try { var sl = m.getLatLng(); if (Math.abs(sl.lat - lat) < 0.6 && Math.abs(sl.lng - lon) < 0.6){ m.fire('click'); return true; } } catch(e){}
       return false;
     });
+    if (!_isStorm && window._hzShowDist) window._hzShowDist(lat, lon);   /* a disturbance row opens its card too */
     markers.forEach(function(m){
       try {
         var ll = m.getLatLng();
@@ -95385,6 +95449,7 @@ function initNowMicroTabs(){
       + ' <span style="color:rgba(30,30,50,.55);font-weight:600;">· risk</span> <b style="color:' + sty.label + ';">' + sty.tier + '</b>'
       + ' <span style="color:rgba(30,30,50,.4);font-weight:600;">· NHC Tropical Weather Outlook</span>';
     marker.on('click mouseover', function(){ if (window._hzExploreLine) window._hzExploreLine(exploreHtml); });
+    marker.on('click', function(){ if (window._hzShowDist) window._hzShowDist(lat, lon); });   /* its card in the subview (2026-10-12) */
     marker.on('click', function(){ if (window._hzFlashSystemsRow) window._hzFlashSystemsRow(lat.toFixed(1) + '_' + lon.toFixed(1)); });
     return marker;
   }
