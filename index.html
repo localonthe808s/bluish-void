@@ -51114,6 +51114,62 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   }
 
   function loadGeospaceAnimations(){
+    /* GEOSPACE FRAMES ON BLACK (user 2026-10-13: "invert the white in the widget to black for all 3 ... keep the rest normal, invert
+       the text in the image too"). SWPC's PNGs are CORS-open, so each frame is read once on a canvas: near-grey pixels (the white
+       page, black type, the grey Earth disc, axes) are inverted, coloured pixels (the plot itself, the colour bar) are left exactly
+       as they are. One blob URL per frame, cached; the <img> tags are swapped to it as the animation sets their src. */
+    (function(){
+      var cache = {}, pending = {}, masks = {};
+      window._geoDark = function(url){
+        if (cache[url]) return Promise.resolve(cache[url]);
+        if (pending[url]) return pending[url];
+        pending[url] = new Promise(function(res){
+          var im = new Image(); im.crossOrigin = 'anonymous';
+          im.onload = function(){ try {
+            var c = document.createElement('canvas'); c.width = im.naturalWidth; c.height = im.naturalHeight;
+            var g = c.getContext('2d'); g.drawImage(im, 0, 0);
+            var d = g.getImageData(0, 0, c.width, c.height), p = d.data;
+            /* the plots and the colour bar are DATA (their white bands are values): find their boxes from where the colour is, and
+               invert only the grey page, type and axes outside them */
+            var W = c.width, H = c.height, sat = new Uint8Array(W * H), mkey = (url.match(/geospace\/(\w+)/) || [])[1] + '|' + W + 'x' + H;
+            for (var q = 0, k = 0; q < W * H; q++, k += 4){ var r = p[k], gg = p[k+1], b = p[k+2], mx = Math.max(r, gg, b), mn = Math.min(r, gg, b); sat[q] = (mx - mn >= 26) ? 1 : 0; }
+            var prot = masks[mkey];   /* the boxes are the same in every frame of a product: found once, kept as a mask */
+            if (!prot){
+            var boxes = [], colN = new Uint32Array(W);
+            for (var y = 0; y < H; y++) for (var x = 0; x < W; x++) colN[x] += sat[y * W + x];
+            for (var x0 = 0; x0 < W;){ if (colN[x0] < H * 0.25){ x0++; continue; } var x1 = x0; while (x1 < W && colN[x1] >= H * 0.25) x1++;
+              if (x1 - x0 > 40){ var ya = -1, yb = -1; for (var yy = 0; yy < H; yy++){ var n = 0; for (var xx = x0; xx < x1; xx++) n += sat[yy * W + xx]; if (n > (x1 - x0) * 0.3){ if (ya < 0) ya = yy; yb = yy; } }
+                if (ya >= 0) boxes.push([x0, ya, x1, yb]); }
+              x0 = x1; }
+            var inBox = function(x, y){ for (var i2 = 0; i2 < boxes.length; i2++){ var B = boxes[i2]; if (x >= B[0] && x < B[2] && y >= B[1] && y <= B[3]) return true; } return false; };
+            /* the colour bar: rows outside the plots with a long colour run; its box is that run's extent */
+            var cb = null;
+            for (var y2 = 0; y2 < H; y2++){ var run = 0, best = 0, bs = 0, be = 0, st = 0; for (var x2 = 0; x2 < W; x2++){ if (sat[y2 * W + x2] && !inBox(x2, y2)){ if (!run) st = x2; run++; if (run > best){ best = run; bs = st; be = x2; } } else run = 0; }
+              if (best > W * 0.18){ if (!cb) cb = [bs, y2, be + 1, y2]; else { cb[0] = Math.min(cb[0], bs); cb[2] = Math.max(cb[2], be + 1); cb[3] = y2; } } }
+            prot = new Uint8Array(W * H); boxes.forEach(function(B){ for (var yb2 = Math.max(0, B[1]); yb2 <= Math.min(H - 1, B[3]); yb2++) prot.fill(1, yb2 * W + Math.max(0, B[0]), yb2 * W + Math.min(W, B[2])); });
+            /* the colour bar: per row, only from its first to its last coloured pixel (so the page round its arrow tips still inverts) */
+            if (cb) for (var yc = cb[1]; yc <= cb[3]; yc++){ var f = -1, l = -1; for (var xc = cb[0]; xc < cb[2]; xc++) if (sat[yc * W + xc]){ if (f < 0) f = xc; l = xc; } if (f >= 0) prot.fill(1, yc * W + f, yc * W + l + 1); }
+            masks[mkey] = prot;
+            }
+            for (var y3 = 0, k3 = 0; y3 < H; y3++) for (var x3 = 0; x3 < W; x3++, k3 += 4){ var q3 = y3 * W + x3; if (sat[q3] || prot[q3]) continue;
+              p[k3] = 255 - p[k3]; p[k3+1] = 255 - p[k3+1]; p[k3+2] = 255 - p[k3+2]; }
+            g.putImageData(d, 0, 0);
+            c.toBlob(function(bl){ cache[url] = bl ? URL.createObjectURL(bl) : url; delete pending[url]; res(cache[url]); }, 'image/png');
+          } catch(e){ cache[url] = url; delete pending[url]; res(url); } };
+          im.onerror = function(){ delete pending[url]; res(url); };
+          im.src = url;
+        });
+        return pending[url];
+      };
+      var hook = function(){
+        ['geo-vel-img', 'geo-den-img', 'geo-pre-img'].forEach(function(id){ var el = document.getElementById(id); if (!el || el._geoDarkObs) return;
+          var fix = function(){ var u = el.getAttribute('src') || ''; if (!/^https:\/\/services\.swpc\.noaa\.gov\//.test(u)) return;
+            if (cache[u]){ el.src = cache[u]; return; }
+            window._geoDark(u).then(function(b){ if (el.getAttribute('src') === u) el.src = b; }); };
+          el._geoDarkObs = new MutationObserver(fix); el._geoDarkObs.observe(el, { attributes: true, attributeFilter: ['src'] }); fix(); });
+      };
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', hook); else hook();
+    })();
     var geoWidgets = [
       { id: "geo-vel-img", liveId: "geo-vel-live", jsonUrl: "https://services.swpc.noaa.gov/products/animations/geospace/velocity.json" },
       { id: "geo-den-img", liveId: "geo-den-live", jsonUrl: "https://services.swpc.noaa.gov/products/animations/geospace/density.json" },
@@ -51171,6 +51227,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var animStarted = false;
 
         function loadOne(i, cb){
+          if (window._geoDark){ window._geoDark(frames[i]).then(function(){ loaded++; if (cb) cb(); }); return; }   /* fetch + darken in one go */
           var img = new Image();
           img.onload = img.onerror = function(){ loaded++; if (cb) cb(); };
           img.src = frames[i];
@@ -106017,7 +106074,7 @@ function closeAlertModal(){
 <div id="bv-data-credit" style="padding:12px 22px 14px;font-size:.58rem;letter-spacing:.08em;text-transform:uppercase;color:rgba(43,34,244,.95);font-family:inherit;line-height:1.45;width:fit-content;max-width:calc(100% - 24px);margin:16px auto 22px;background:rgba(255,255,255,.55);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border:1px solid rgba(255,255,255,.45);border-radius:14px;box-shadow:0 4px 24px rgba(43,34,244,.06);">
   <!-- a long source line wraps to a 2nd row between sources, never off the edge (user 2026-09-24) -->
   <style>/* site blue panel, white source links, site-green category titles (user 2026-10-13) */
-         #bv-data-credit{ background:rgba(43,34,244,.92) !important; color:#fff !important; box-shadow:0 0 22px rgba(43,34,244,.35) !important; }
+         #bv-data-credit{ background:rgba(43,34,244,.92) !important; color:#fff !important; box-shadow:0 0 18px 10px rgba(43,34,244,.6) !important; border:none !important; }   /* blurry edge (user 2026-10-13): the blue feathers out instead of ending on a hard rim */
          #bv-data-credit > div > span:nth-child(odd){ color:#05DB32 !important; }
          #bv-data-credit > div > span:nth-child(2n) a{ color:#fff !important; text-decoration-color:rgba(255,255,255,.45) !important; }
          #bv-data-credit > div > span:nth-child(2n){ display:flex; flex-wrap:wrap; align-items:baseline; min-width:0; }
