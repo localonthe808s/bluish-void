@@ -346,8 +346,21 @@ async function tick(env) {
 export default {
   fetch: route,
   async scheduled(event, env, ctx) {
-    if (event.cron === '* * * * *') { ctx.waitUntil(fastTick(env).then((r) => console.log(`[wx] ${r}`)).catch((e) => console.log(`[wx] fast FAILED ${e}`))); return; }
-    ctx.waitUntil(tick(env).then((r) => console.log(`[wx] ${r}`)).catch((e) => console.log(`[wx] FAILED ${e}`)));
+    /* one trigger, two lanes: the fast lane every minute, the 10-minute lane on minutes ending in 0 -- read off
+       event.scheduledTime, not the wall clock (a late tick must not skip its slot) */
+    /* heartbeat: when the trigger last ran and how it was labelled (a deployed schedule that never fired went unnoticed for an hour on 10-13) */
+    ctx.waitUntil(env.WX.put('beat', JSON.stringify({ at: new Date().toISOString(), cron: event.cron, sched: new Date(event.scheduledTime || 0).toISOString() })).catch(() => {}));
+    /* FAST_ONLY: the bluish-hazard-fast worker (same code, every-minute trigger) runs just the fast lane and stamps
+       beat:fast; this worker then leaves the fast lane to it, so no warning goes out twice */
+    if (env.FAST_ONLY) {
+      ctx.waitUntil(env.WX.put('beat:fast', String(Date.now())).catch(() => {}));
+      ctx.waitUntil(fastTick(env).then((r) => console.log(`[fast] ${r}`)).catch((e) => console.log(`[fast] FAILED ${e}`)));
+      return;
+    }
+    const fb = +(await env.WX.get('beat:fast').catch(() => 0)) || 0;
+    if (Date.now() - fb > 3 * 60e3) ctx.waitUntil(fastTick(env).then((r) => console.log(`[wx] ${r}`)).catch((e) => console.log(`[wx] fast FAILED ${e}`)));
+    if (new Date(event.scheduledTime || Date.now()).getUTCMinutes() % 10 === 0)
+      ctx.waitUntil(tick(env).then((r) => console.log(`[wx] ${r}`)).catch((e) => console.log(`[wx] FAILED ${e}`)));
   },
   // exported for tests
   _t: { umbrella, rainSoon, swings, aurora, minKp, localNow, severe, inGeom, warnMsg, quakeAt, firesNear, airNow, fastTick }
