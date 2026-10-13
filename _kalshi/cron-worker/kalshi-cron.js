@@ -1266,6 +1266,7 @@ async function pushRoute(request, env, url) {
     await env.OBS.put(PUSH_KEY, JSON.stringify(keep));
     return J({ ok: true, phones: keep.length });
   }
+  if (url.pathname === '/push/mine') return J({ on: subs.some((x) => x.endpoint === b.endpoint) });   /* is this phone signed up here */
   if (url.pathname === '/push/unsubscribe') {
     const keep = subs.filter((x) => x.endpoint !== (b.endpoint || ''));
     await env.OBS.put(PUSH_KEY, JSON.stringify(keep));
