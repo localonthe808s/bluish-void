@@ -4,6 +4,7 @@
 //   SEVERE      a National Weather Service WARNING for that exact point, the moment it is active (US only)
 //   SWINGS      7 PM local: frost tonight, heat tomorrow, or tomorrow 20+ degrees colder than today
 //   AURORA      7 PM local: tonight's forecast Kp puts the aurora in view from there, with mostly clear skies
+//   LIGHTNING   strikes within 10 miles (Blitzortung's live network), then the all-clear 30 minutes after the last one
 // Open to anyone, no key: the weather is not private. Locations are rounded to 0.01 deg (~1 km) before they are kept,
 // and phones within that box share one forecast check. Pushes use the same VAPID key and the same bv-sw.js as the
 // Kalshi alerts (webpush.js is shared), so a phone has one subscription for both.
@@ -11,7 +12,7 @@ import { pushOne } from '../_kalshi/cron-worker/webpush.js';
 
 const ORIGIN = 'https://bluishvoid.com';
 const UA = '(bluishvoid.com weather alerts, https://bluishvoid.com)';
-const TYPES = ['umbrella', 'rain', 'severe', 'swing', 'aurora'];
+const TYPES = ['umbrella', 'rain', 'severe', 'swing', 'aurora', 'lightning'];
 const PUSH_HOSTS = /(^|\.)(push\.apple\.com|fcm\.googleapis\.com|push\.services\.mozilla\.com|notify\.windows\.com)$/;
 const BATCH = 1500;          /* places per tick (2 calls each + pushes): the account is on Workers Paid (10,000 calls per run), so every place is checked every tick; the cursor only rotates past 1,500 */
 
@@ -58,7 +59,7 @@ async function route(request, env) {
   }
   return J({ error: 'not found' }, 404);
 }
-const label = (t) => ({ umbrella: 'umbrella', rain: 'rain soon', severe: 'severe warnings', swing: 'big swings', aurora: 'aurora' })[t] || t;
+const label = (t) => ({ umbrella: 'umbrella', rain: 'rain soon', severe: 'severe warnings', swing: 'big swings', aurora: 'aurora', lightning: 'lightning' })[t] || t;
 const jwk = (env) => (typeof env.VAPID_JWK === 'string' ? JSON.parse(env.VAPID_JWK) : env.VAPID_JWK);
 
 /* ---------------------------------------------------------------- the checks --------------------------------------- */
@@ -66,7 +67,7 @@ const hm = (h, m) => { const ap = h < 12 ? 'AM' : 'PM', h12 = h % 12 || 12; retu
 
 /* the place's forecast: hourly rain odds/amounts and cloud, daily highs/lows (yesterday..tomorrow), the 15-minute rain */
 async function forecast(lat, lon) {
-  const u = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=precipitation_probability,precipitation,cloud_cover`
+  const u = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=precipitation_probability,precipitation,cloud_cover,weather_code,cape`
     + '&daily=temperature_2m_max,temperature_2m_min&minutely_15=precipitation&forecast_minutely_15=12&past_minutely_15=2'
     + '&past_days=1&forecast_days=2&temperature_unit=fahrenheit&precipitation_unit=inch&timezone=auto';
   const r = await fetch(u); if (!r.ok) throw new Error(`open-meteo ${r.status}`);
@@ -150,6 +151,45 @@ async function severe(lat, lon) {
   });
 }
 
+/* ---------------------------------------------------------------- lightning ---------------------------------------- */
+/* Blitzortung (volunteer VLF network, free for non-commercial use with credit): the same public socket the site's radar
+   reads. The whole planet comes down it (~5 strikes/s), so it is opened only when some place could have a storm --
+   a rain chance of 20% or more (or thunder) now or within two hours -- or a storm is already near,
+   and only for a short sample each tick. */
+const LTG_HOSTS = ['ws1', 'ws7', 'ws8'], LTG_MI = 10;
+function lzw(b) { const e = {}, d = String(b).split(''); let c = d[0], f = c, o = 256, k; const out = [c];
+  for (let i = 1; i < d.length; i++) { const cc = d[i].charCodeAt(0); k = cc < 256 ? d[i] : (e[cc] !== undefined ? e[cc] : f + c); out.push(k); c = k.charAt(0); e[o++] = f + c; f = k; }
+  return out.join(''); }
+const miles = (a, b, c, d) => { const R = 3958.8, r = Math.PI / 180, x = Math.sin((c - a) * r / 2), y = Math.sin((d - b) * r / 2);
+  return 2 * R * Math.asin(Math.sqrt(x * x + Math.cos(a * r) * Math.cos(c * r) * y * y)); };
+const compass = (a, b, c, d) => { const r = Math.PI / 180, y = Math.sin((d - b) * r) * Math.cos(c * r), x = Math.cos(a * r) * Math.sin(c * r) - Math.sin(a * r) * Math.cos(c * r) * Math.cos((d - b) * r);
+  return ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(((Math.atan2(y, x) / r + 360) % 360) / 45) % 8]; };
+function stormy(f, now) {
+  const H = f.hourly; if (!H || !H.weather_code) return false;
+  for (let i = 0; i < H.time.length; i++) { const t = H.time[i]; if (t < now.iso.slice(0, 13) || t > hourPlus(now.iso, 2)) continue;
+    /* any real rain chance, not just forecast thunder: on 2026-10-13 a storm was striking near Ogdensburg NY under a
+       forecast of rain with CAPE 0 and no thunder code -- a thunder-only gate would have missed it */
+    if ((H.weather_code[i] || 0) >= 95 || (H.precipitation_probability[i] || 0) >= 20) return true; }
+  return false;
+}
+const hourPlus = (iso, h) => new Date(Date.parse(iso.slice(0, 13) + ':00:00Z') + h * 3600e3).toISOString().slice(0, 13);
+/* listen for `ms`, keep strikes within ~25 mi of any of the given places: [lat, lon, tMs] */
+async function sampleStrikes(places, ms) {
+  const out = [];
+  for (let h = 0; h < LTG_HOSTS.length; h++) {
+    let ws; try { const r = await fetch(`https://${LTG_HOSTS[h]}.blitzortung.org/`, { headers: { Upgrade: 'websocket', Origin: 'https://map.blitzortung.org' } }); ws = r.webSocket; } catch (_) {}
+    if (!ws) continue;
+    ws.accept(); ws.send('{"a":111}');
+    ws.addEventListener('message', (ev) => { let j; try { j = JSON.parse(lzw(ev.data)); } catch (_) { return; }
+      if (typeof j.lat !== 'number') return;
+      for (const p of places) if (Math.abs(j.lat - p.lat) < 0.4 && Math.abs(j.lon - p.lon) < 0.5) { out.push([j.lat, j.lon, Date.now()]); break; } });
+    await new Promise((r) => setTimeout(r, ms));
+    try { ws.close(); } catch (_) {}
+    return { ok: true, strikes: out, secs: ms / 1000 };
+  }
+  return { ok: false, strikes: out };
+}
+
 /* ---------------------------------------------------------------- the tick ----------------------------------------- */
 async function tick(env) {
   const subs = await getSubs(env); if (!subs.length) return 'no phones';
@@ -160,10 +200,33 @@ async function tick(env) {
   const todo = keys.length > BATCH ? keys.slice(cur, cur + BATCH).concat(keys.slice(0, Math.max(0, cur + BATCH - keys.length))) : keys;
   const state = (await env.WX.get('state', { type: 'json' })) || {}, before = JSON.stringify(state), now = Date.now(), cache = {};
   let sent = 0, dead = new Set(), log = [];
+  const F = {};
+  for (const k of todo) { try { F[k] = await forecast(groups[k].lat, groups[k].lon); } catch (e) { log.push(`${k} ${e.message}`); } }
+  /* lightning: which places need listening (storm-capable forecast, or a storm already near), then one shared sample */
+  const ltgWho = todo.filter((k) => F[k] && groups[k].who.some((w) => w.s.types.indexOf('lightning') >= 0)
+    && (stormy(F[k], localNow(F[k])) || state[`${k}|ltg:on`]));
+  let LTG = null;
+  if (ltgWho.length) { LTG = await sampleStrikes(ltgWho.map((k) => groups[k]), ltgWho.some((k) => state[`${k}|ltg:on`]) ? 150000 : 90000); log.push(`ltg ${ltgWho.length} places, ${LTG.strikes.length} strikes${LTG.ok ? '' : ' (no socket)'}`); }
   for (const k of todo) {
-    const g = groups[k]; let f;
-    try { f = await forecast(g.lat, g.lon); } catch (e) { log.push(`${k} ${e.message}`); continue; }
+    const g = groups[k], f = F[k]; if (!f) continue;
     const ln = localNow(f), found = [];
+    if (LTG && LTG.ok && ltgWho.indexOf(k) >= 0) {
+      const near = LTG.strikes.map((p) => ({ p, d: miles(g.lat, g.lon, p[0], p[1]) })).filter((x) => x.d <= LTG_MI).sort((a, b) => a.d - b.d);
+      const on = state[`${k}|ltg:on`];
+      if (near.length) {
+        state[`${k}|ltg:last`] = now; state[`${k}|ltg:quiet`] = 0;
+        if (!on) { state[`${k}|ltg:on`] = now;
+          const n0 = near[0];
+          found.push(['lightning', { key: `ltg:${now}`, title: 'Lightning nearby', urg: 'high',
+            body: `Strikes within ${LTG_MI} miles: the nearest ${Math.max(1, Math.round(n0.d))} mile${Math.max(1, Math.round(n0.d)) > 1 ? 's' : ''} ${compass(g.lat, g.lon, n0.p[0], n0.p[1])}, ${near.length} in the last ${LTG.secs >= 150 ? 'two and a half minutes' : 'minute and a half'}. Get indoors and stay in until 30 minutes after the last thunder.`}]); }
+      } else if (on) {
+        /* the all-clear: 30 minutes since the last strike we saw AND three quiet samples in a row (we listen in samples, not continuously) */
+        state[`${k}|ltg:quiet`] = (state[`${k}|ltg:quiet`] || 0) + 1;
+        if (now - (state[`${k}|ltg:last`] || on) >= 30 * 60e3 && state[`${k}|ltg:quiet`] >= 3) {
+          delete state[`${k}|ltg:on`]; delete state[`${k}|ltg:quiet`];
+          found.push(['lightning', { key: `ltgclear:${now}`, title: 'Lightning all clear', urg: 'normal', body: `No lightning detected within ${LTG_MI} miles for 30 minutes.` }]); }
+      }
+    }
     const wantsAny = (t) => g.who.some((w) => w.s.types.indexOf(t) >= 0);
     if (wantsAny('umbrella')) { const a = umbrella(f, ln); if (a) found.push(['umbrella', a]); }
     if (wantsAny('rain')) { const a = rainSoon(f, ln); if (a) found.push(['rain', a]); }
@@ -183,7 +246,7 @@ async function tick(env) {
       }
     }
   }
-  for (const sk of Object.keys(state)) if (now - state[sk] > 4 * 864e5) delete state[sk];
+  for (const sk of Object.keys(state)) if (state[sk] > 1e12 && now - state[sk] > 4 * 864e5) delete state[sk];   /* timestamps only: counters (ltg:quiet) are not times */
   if (JSON.stringify(state) !== before) await env.WX.put('state', JSON.stringify(state));
   if (dead.size) await env.WX.put('subs', JSON.stringify(subs.filter((s) => !dead.has(s.endpoint))));
   if (keys.length > BATCH) await env.WX.put('cursor', String((cur + BATCH) % keys.length));
