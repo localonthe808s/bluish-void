@@ -5,6 +5,14 @@
 //   SWINGS      7 PM local: frost tonight, heat tomorrow, or tomorrow 20+ degrees colder than today
 //   AURORA      7 PM local: tonight's forecast Kp puts the aurora in view from there, with mostly clear skies
 //   LIGHTNING   strikes within 10 miles (Blitzortung's live network), then the all-clear 30 minutes after the last one
+//   EARTHQUAKE  every minute: a USGS quake (worldwide, M2.5+) whose shaking is likely felt at the place
+//   WILDFIRE    a new wildfire within 15 miles (NIFC incidents, US)
+//   AIR         the air turning unhealthy (US AQI 151+, Open-Meteo air quality), once a day
+// SEVERE is split in two lanes (2026-10-13, user: "flash flooding / tornados / earthquakes most importantly" -> "make
+// sure all hazards are covered"): the storm-based warnings drawn as polygons (tornado, flash flood, severe thunderstorm,
+// extreme wind, snow squall) are read nationally EVERY MINUTE and matched to each place by the warning's own outline;
+// every other NWS warning (hurricane, storm surge, tsunami, flood, winter storm, blizzard, ice storm, extreme heat and
+// cold, high wind, red flag, dust storm, avalanche ...) is read per place every 10 minutes.
 // Open to anyone, no key: the weather is not private. Locations are rounded to 0.01 deg (~1 km) before they are kept,
 // and phones within that box share one forecast check. Pushes use the same VAPID key and the same bv-sw.js as the
 // Kalshi alerts (webpush.js is shared), so a phone has one subscription for both.
@@ -12,7 +20,7 @@ import { pushOne } from '../_kalshi/cron-worker/webpush.js';
 
 const ORIGIN = 'https://bluishvoid.com';
 const UA = '(bluishvoid.com weather alerts, https://bluishvoid.com)';
-const TYPES = ['umbrella', 'rain', 'severe', 'swing', 'aurora', 'lightning'];
+const TYPES = ['umbrella', 'rain', 'severe', 'swing', 'aurora', 'lightning', 'quake', 'fire', 'air'];
 const PUSH_HOSTS = /(^|\.)(push\.apple\.com|fcm\.googleapis\.com|push\.services\.mozilla\.com|notify\.windows\.com)$/;
 const BATCH = 1500;          /* places per tick (2 calls each + pushes): the account is on Workers Paid (10,000 calls per run), so every place is checked every tick; the cursor only rotates past 1,500 */
 
@@ -59,7 +67,7 @@ async function route(request, env) {
   }
   return J({ error: 'not found' }, 404);
 }
-const label = (t) => ({ umbrella: 'umbrella', rain: 'rain soon', severe: 'severe warnings', swing: 'big swings', aurora: 'aurora', lightning: 'lightning' })[t] || t;
+const label = (t) => ({ umbrella: 'umbrella', rain: 'rain soon', severe: 'severe warnings', swing: 'big swings', aurora: 'aurora', lightning: 'lightning', quake: 'earthquakes', fire: 'wildfires', air: 'unhealthy air' })[t] || t;
 const jwk = (env) => (typeof env.VAPID_JWK === 'string' ? JSON.parse(env.VAPID_JWK) : env.VAPID_JWK);
 
 /* ---------------------------------------------------------------- the checks --------------------------------------- */
@@ -143,7 +151,7 @@ async function severe(lat, lon) {
   const r = await fetch(`https://api.weather.gov/alerts/active?point=${lat},${lon}`, { headers: { 'User-Agent': UA, 'Accept': 'application/geo+json' } });
   if (!r.ok) return [];
   const j = await r.json();
-  return (j.features || []).map((x) => x.properties || {}).filter((p) => /Warning$/.test(p.event || '') && p.status !== 'Test').map((p) => {
+  return (j.features || []).map((x) => x.properties || {}).filter((p) => /Warning$/.test(p.event || '') && p.status !== 'Test' && POLY_EVENTS.indexOf(p.event) < 0).map((p) => {
     const until = p.ends || p.expires; let u = '';
     if (until) { const m = /T(\d\d):(\d\d)/.exec(until); if (m) u = `Until ${hm(+m[1], +m[2])}. `; }
     const ins = String(p.instruction || '').replace(/\s+/g, ' ').trim().split(/(?<=\.)\s/)[0] || '';
@@ -190,6 +198,86 @@ async function sampleStrikes(places, ms) {
   return { ok: false, strikes: out };
 }
 
+/* ---------------------------------------------------------------- hazards: fast lane ------------------------------- */
+const POLY_EVENTS = ['Tornado Warning', 'Flash Flood Warning', 'Severe Thunderstorm Warning', 'Extreme Wind Warning', 'Snow Squall Warning'];
+function inRing(lon, lat, ring) { let c = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+    if (((yi > lat) !== (yj > lat)) && (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi)) c = !c; }
+  return c; }
+function inGeom(lon, lat, g) { if (!g) return false;
+  const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
+  return polys.some((P) => inRing(lon, lat, P[0]) && !P.slice(1).some((h) => inRing(lon, lat, h))); }
+async function polyWarnings() {
+  const r = await fetch('https://api.weather.gov/alerts/active?status=actual&event=' + POLY_EVENTS.map(encodeURIComponent).join(','), { headers: { 'User-Agent': UA, 'Accept': 'application/geo+json' } });
+  if (!r.ok) throw new Error(`nws ${r.status}`);
+  return ((await r.json()).features || []).filter((f) => f.geometry);
+}
+function warnMsg(f) {
+  const p = f.properties || {}, P = p.parameters || {}, first = (k) => (P[k] && P[k][0]) || '';
+  const cat = first('tornadoDamageThreat') === 'CATASTROPHIC' || first('flashFloodDamageThreat') === 'CATASTROPHIC';
+  const pds = first('tornadoDamageThreat') === 'CONSIDERABLE' || first('flashFloodDamageThreat') === 'CONSIDERABLE';
+  let title = p.event;
+  if (cat) title = p.event === 'Tornado Warning' ? 'TORNADO EMERGENCY' : p.event === 'Flash Flood Warning' ? 'FLASH FLOOD EMERGENCY' : p.event;
+  const det = first('tornadoDetection'); const until = p.ends || p.expires; let u = '';
+  if (until) { const m = /T(\d\d):(\d\d)/.exec(until); if (m) u = `Until ${hm(+m[1], +m[2])}. `; }
+  const lead = p.event === 'Tornado Warning' ? (det === 'OBSERVED' ? 'A tornado has been observed. ' : 'Radar indicates a tornado. ') + 'Take shelter now: lowest floor, interior room, away from windows. '
+    : p.event === 'Flash Flood Warning' ? 'Move to higher ground now. Never drive into flooded roads. ' : '';
+  const ins = String(p.instruction || '').replace(/\s+/g, ' ').trim().split(/(?<=\.)\s/)[0] || '';
+  return { key: `nws:${p.id}`, title: (pds && !cat ? title + ' (particularly dangerous)' : title), body: (u + (lead || ins || p.headline || '')).slice(0, 230), urg: 'high' };
+}
+/* felt shaking, roughly: intensity from magnitude and hypocentral distance (a California-style attenuation, MMI ~
+   3.67 + 1.17 M - 3.19 log10(km)); 3 and up is felt by some -- 3.5 missed an M4.5 at 40 mi and an M6 at 120 mi */
+const MMI_WORD = (x) => x >= 8 ? 'severe' : x >= 7 ? 'very strong' : x >= 6 ? 'strong' : x >= 5 ? 'moderate' : x >= 4 ? 'light' : 'weak, felt by some';
+function quakeAt(q, lat, lon) {
+  const [qlon, qlat, depth] = q.geometry.coordinates, d = miles(lat, lon, qlat, qlon), km = Math.hypot(d * 1.609, depth || 10);
+  const mmi = 3.67 + 1.17 * q.properties.mag - 3.19 * Math.log10(Math.max(km, 5));
+  return { mi: d, mmi, dir: compass(lat, lon, qlat, qlon) };
+}
+async function fastTick(env) {
+  const subs = await getSubs(env);
+  const want = subs.filter((s) => s.types.indexOf('severe') >= 0 || s.types.indexOf('quake') >= 0); if (!want.length) return 'no phones';
+  const state = (await env.WX.get('state:fast', { type: 'json' })) || {}, before = JSON.stringify(state), now = Date.now();
+  let W = [], Q = [], sent = 0; const log = [], dead = new Set();
+  if (want.some((s) => s.types.indexOf('severe') >= 0)) { try { W = await polyWarnings(); } catch (e) { log.push(String(e)); } }
+  if (want.some((s) => s.types.indexOf('quake') >= 0)) { try { const r = await fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_hour.geojson'); Q = r.ok ? ((await r.json()).features || []).filter((q) => now - q.properties.time < 45 * 60e3) : []; } catch (e) { log.push(String(e)); } }
+  for (const s of want) for (const l of s.locs) {
+    const out = [];
+    if (s.types.indexOf('severe') >= 0) for (const f of W) if (inGeom(l.lon, l.lat, f.geometry)) out.push(warnMsg(f));
+    if (s.types.indexOf('quake') >= 0) for (const q of Q) { const a = quakeAt(q, l.lat, l.lon); if (a.mmi < 3) continue;
+      const P = q.properties, ago = Math.max(1, Math.round((now - P.time) / 60e3));
+      out.push({ key: `eq:${q.id}`, title: `M${P.mag.toFixed(1)} earthquake`, urg: a.mmi >= 5 ? 'high' : 'normal',
+        body: `${Math.round(a.mi)} miles ${a.dir} of ${l.name}, ${ago} min ago (${P.place}). Shaking there likely ${MMI_WORD(a.mmi)}.${P.tsunami ? ' A tsunami message was issued: check tsunami.gov.' : ''} If shaking: drop, cover, hold on.` }); }
+    for (const a of out) {
+      const sk = `${gkey(l)}|${s.endpoint.slice(-24)}|${a.key}`; if (state[sk]) continue; state[sk] = now;
+      try { const r = await pushOne(s, { title: `${a.title} · ${l.name}`, body: a.body, tag: a.key, url: '/' }, jwk(env), a.urg);
+        if (r.status === 404 || r.status === 410) dead.add(s.endpoint); else if (r.status < 300) sent++; else log.push(`push ${r.status}`); } catch (e) { log.push(String(e)); }
+    }
+  }
+  for (const sk of Object.keys(state)) if (now - state[sk] > 3 * 864e5) delete state[sk];
+  if (JSON.stringify(state) !== before) await env.WX.put('state:fast', JSON.stringify(state));
+  if (dead.size) await env.WX.put('subs', JSON.stringify(subs.filter((x) => !dead.has(x.endpoint))));
+  return `fast: ${W.length} polygon warnings, ${Q.length} quakes, ${sent} sent${log.length ? ' | ' + log.join(' | ') : ''}`;
+}
+
+/* ---------------------------------------------------------------- hazards: 10-minute lane ------------------------- */
+let FIRES = null;
+async function firesNear(lat, lon) {
+  if (lat < 17 || lat > 72 || lon > -60) return [];
+  if (!FIRES) { const r = await fetch('https://services9.arcgis.com/RHVPKKiFTONKtxq3/arcgis/rest/services/USA_Wildfires_v1/FeatureServer/0/query?where=' + encodeURIComponent("IncidentTypeCategory='WF' AND (PercentContained IS NULL OR PercentContained<100)") + '&outFields=IrwinID,IncidentName,DailyAcres,PercentContained,FireDiscoveryDateTime&outSR=4326&f=geojson');
+    FIRES = r.ok ? ((await r.json()).features || []) : []; }
+  return FIRES.filter((f) => f.geometry && f.geometry.coordinates).map((f) => ({ f, d: miles(lat, lon, f.geometry.coordinates[1], f.geometry.coordinates[0]) })).filter((x) => x.d <= 15)
+    .map(({ f, d }) => { const P = f.properties, c = f.geometry.coordinates;
+      return { key: `fire:${P.IrwinID || P.IncidentName}`, cool: 30 * 864e5, title: 'Wildfire nearby', urg: d <= 5 ? 'high' : 'normal',
+        body: `${P.IncidentName || 'A wildfire'} is ${Math.max(1, Math.round(d))} miles ${compass(lat, lon, c[1], c[0])}${P.DailyAcres ? `, ${Math.round(P.DailyAcres).toLocaleString('en-US')} acres` : ''}${P.PercentContained != null ? `, ${P.PercentContained}% contained` : ''}. Follow local evacuation orders.` }; });
+}
+async function airNow(lat, lon, now) {
+  const r = await fetch(`https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&current=us_aqi,pm2_5,ozone`); if (!r.ok) return null;
+  const c = (await r.json()).current || {}; const a = c.us_aqi; if (a == null || a < 151) return null;
+  const lvl = a >= 301 ? 'hazardous' : a >= 201 ? 'very unhealthy' : 'unhealthy';
+  return { key: `air:${now.date}`, title: 'Unhealthy air', urg: a >= 201 ? 'high' : 'normal',
+    body: `US AQI ${a} (${lvl}) right now. Limit time outdoors${a >= 201 ? ', keep windows closed and use a filter if you have one' : ''}.` };
+}
+
 /* ---------------------------------------------------------------- the tick ----------------------------------------- */
 async function tick(env) {
   const subs = await getSubs(env); if (!subs.length) return 'no phones';
@@ -233,6 +321,8 @@ async function tick(env) {
     if (wantsAny('swing')) { const a = swings(f, ln); if (a) found.push(['swing', a]); }
     if (wantsAny('aurora') && ln.h === 19) { const a = aurora(f, ln, await kpTonightFor(cache, f.utc_offset_seconds || 0, ln.date), g.lat); if (a) found.push(['aurora', a]); }
     if (wantsAny('severe')) { try { for (const a of await severe(g.lat, g.lon)) found.push(['severe', a]); } catch (_) {} }
+    if (wantsAny('fire')) { try { for (const a of await firesNear(g.lat, g.lon)) found.push(['fire', a]); } catch (_) {} }
+    if (wantsAny('air')) { try { const a = await airNow(g.lat, g.lon, ln); if (a) found.push(['air', a]); } catch (_) {} }
     for (const [type, a] of found) {
       const sk = `${k}|${a.key}`, last = state[sk] || 0;
       if (a.cool ? now - last < a.cool : last) continue;                               /* dated keys: once ever; others: cool-down */
@@ -256,8 +346,9 @@ async function tick(env) {
 export default {
   fetch: route,
   async scheduled(event, env, ctx) {
+    if (event.cron === '* * * * *') { ctx.waitUntil(fastTick(env).then((r) => console.log(`[wx] ${r}`)).catch((e) => console.log(`[wx] fast FAILED ${e}`))); return; }
     ctx.waitUntil(tick(env).then((r) => console.log(`[wx] ${r}`)).catch((e) => console.log(`[wx] FAILED ${e}`)));
   },
   // exported for tests
-  _t: { umbrella, rainSoon, swings, aurora, minKp, localNow, severe }
+  _t: { umbrella, rainSoon, swings, aurora, minKp, localNow, severe, inGeom, warnMsg, quakeAt, firesNear, airNow, fastTick }
 };
