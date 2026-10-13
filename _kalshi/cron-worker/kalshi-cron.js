@@ -25,6 +25,7 @@
 // an open trigger endpoint is an invitation to abuse — so use `wrangler tail` or
 // the Actions tab to watch the dispatches land.
 
+import { pushAll, PUSH_KEY, vapidPublic } from './webpush.js';
 const OWNER = 'localonthe808s';
 const REPO = 'bluish-void';
 const WORKFLOW = 'kalshi-nyc.yml';
@@ -177,7 +178,8 @@ function tokenOk(given, want) {
 function cors(origin) {
   return {
     'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Headers': 'authorization',
+    'Access-Control-Allow-Headers': 'authorization, content-type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Max-Age': '86400',
     'Vary': 'Origin'
   };
@@ -716,12 +718,20 @@ async function notify(env, state, key, title, body, priority, stateKey) {
   state.sent = state.sent || {};
   state.sent[key] = now;
   await env.OBS.put(stateKey || ALERT_KEY, JSON.stringify(state));
-  const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, {
-    method: 'POST', body,
-    headers: ntfyHeaders(env, { 'Title': title, 'Priority': priority || 'default' })
-  });
-  if (!r.ok) console.log(`[ntfy] ${r.status} ${(await r.text()).slice(0, 160)} -- "${title}" NOT delivered`);
-  return r.ok;
+  /* two roads to the phone (2026-10-13): our own web push to the BLUISH home-screen app, and ntfy. Either landing counts;
+     both outcomes are kept in KV (push:last) so a silent failure shows up on the sheet instead of nowhere. */
+  const pu = await pushAll(env, { title, body, tag: key, url: '/' }, priority === 'urgent' || priority === 'high' ? 'high' : 'normal').catch((e) => ({ sent: 0, failed: 1, note: String(e) }));
+  let ok = false, nt = 'no topic';
+  if (env.NTFY_TOPIC) {
+    const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, {
+      method: 'POST', body,
+      headers: ntfyHeaders(env, { 'Title': title, 'Priority': priority || 'default' })
+    });
+    ok = r.ok; nt = String(r.status);
+    if (!r.ok) console.log(`[ntfy] ${r.status} ${(await r.text()).slice(0, 160)} -- "${title}" NOT delivered`);
+  }
+  try { await env.OBS.put('push:last', JSON.stringify({ at: new Date().toISOString(), title, ntfy: nt, push: pu })); } catch (_) {}
+  return ok || pu.sent > 0;
 }
 function localDate(offsetDays) {
   const d = new Date(Date.now() + offsetDays * 86400000);
@@ -855,9 +865,10 @@ async function reviewDigest(env) {
   }
   // the day's mark goes in BEFORE the post, like notify(): a put that fails after a post would repeat the digest
   await env.OBS.put(key, '1', { expirationTtl: 60 * 60 * 48 });
+  const pu = await pushAll(env, { title, body, tag: 'review', url: '/' }, pri === 'high' ? 'high' : 'normal').catch(() => ({ sent: 0 }));
   const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, { method: 'POST', body, headers: ntfyHeaders(env, { 'Title': title, 'Priority': pri }) });
   if (!r.ok) console.log(`[ntfy] ${r.status} ${(await r.text()).slice(0, 160)} -- review digest NOT delivered`);
-  return `${title} (ntfy ${r.status})`;
+  return `${title} (ntfy ${r.status}, push ${pu.sent})`;
 }
 async function alertTick(env, sched) {
   if (!env.NTFY_TOPIC || !env.OBS) return 'alerts off';
@@ -1213,6 +1224,42 @@ async function darkRead(request, env) {
     headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'public, max-age=30', ...cors(ALLOWED) } });
 }
 
+/* WEB PUSH ROUTES (2026-10-13). GET /push/key -- the public key the page subscribes with (public by design).
+   POST /push/subscribe, /push/unsubscribe, /push/test -- gated by the same PANEL_TOKEN as /positions: the alerts carry
+   your positions, so only a browser that already holds the token can sign a phone up. GET /push/status -- the last
+   delivery (gated too). */
+async function pushRoute(request, env, url) {
+  const H = { 'content-type': 'application/json', ...cors(ALLOWED) };
+  const J = (o, st) => new Response(JSON.stringify(o), { status: st || 200, headers: H });
+  if (!env.VAPID_JWK || !env.OBS) return J({ error: 'push not configured' }, 503);
+  const jwk = JSON.parse(env.VAPID_JWK);
+  if (url.pathname === '/push/key') return J({ key: vapidPublic(jwk) });
+  const given = (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
+  if (!tokenOk(given, env.PANEL_TOKEN)) return J({ error: 'unauthorized' }, 401);
+  const subs = (await env.OBS.get(PUSH_KEY, { type: 'json' })) || [];
+  if (url.pathname === '/push/status') return J({ phones: subs.length, last: await env.OBS.get('push:last', { type: 'json' }) });
+  if (request.method !== 'POST') return J({ error: 'POST' }, 405);
+  let b = {}; try { b = await request.json(); } catch (_) {}
+  if (url.pathname === '/push/subscribe') {
+    const s = b.sub;
+    if (!s || !/^https:\/\//.test(s.endpoint || '') || !s.keys || !s.keys.p256dh || !s.keys.auth) return J({ error: 'bad subscription' }, 400);
+    const keep = subs.filter((x) => x.endpoint !== s.endpoint).slice(-9);   /* ten phones at most */
+    keep.push({ endpoint: s.endpoint, keys: { p256dh: s.keys.p256dh, auth: s.keys.auth }, at: new Date().toISOString(), ua: String(b.ua || '').slice(0, 80) });
+    await env.OBS.put(PUSH_KEY, JSON.stringify(keep));
+    return J({ ok: true, phones: keep.length });
+  }
+  if (url.pathname === '/push/unsubscribe') {
+    const keep = subs.filter((x) => x.endpoint !== (b.endpoint || ''));
+    await env.OBS.put(PUSH_KEY, JSON.stringify(keep));
+    return J({ ok: true, phones: keep.length });
+  }
+  if (url.pathname === '/push/test') {
+    const r = await pushAll(env, { title: 'BLUISH alerts are on', body: 'This phone will get your Kalshi alerts from now on.', tag: 'push-test', url: '/' }, 'high');
+    return J({ ok: r.sent > 0, ...r });
+  }
+  return J({ error: 'not found' }, 404);
+}
+
 export default {
   async scheduled(event, env, ctx) {
     /* ONE JOB PER TRIGGER (2026-10-06). The free plan gives each invocation 10 ms of CPU, with some leniency for an
@@ -1330,6 +1377,7 @@ export default {
       return new Response(null, { status: 204, headers: cors(ALLOWED) });
     }
     if (url.pathname === '/positions') return positions(request, env);
+    if (url.pathname.startsWith('/push/')) return pushRoute(request, env, url);
     if (url.pathname === '/obs') return obsDump(request, env);
     if (url.pathname === '/obs/lead') return obsLead(request, env);
     if (url.pathname === '/dark') return darkRead(request, env);
