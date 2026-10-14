@@ -110061,7 +110061,7 @@ function closeAlertModal(){
   /* ADD A PLACE (user 2026-10-14: "let them add it or a neighborhood", "use what we use in the NYC / LA apps"): like
      the city maps' A-to-B pins -- tap a small map to drop the pin -- or type an address or neighborhood (Photon,
      OpenStreetMap's free search, CORS open). The panel is built once and moved between renders so the map survives. */
-  var CUR = null, PANEL = null, PMAP = null, PIN = null, PICK = null, qT = 0;
+  var CUR = null, PANEL = null, PMAP = null, PIN = null, PICK = null, qT = 0, VSTATE;
   function setPick(lat, lon, label, fly){
     PICK = { lat: +lat, lon: +lon, label: label || '' };
     var el = document.getElementById('bv-wxa-picked'); if (el) el.textContent = label ? label : (lat.toFixed(4) + ', ' + lon.toFixed(4));
@@ -110088,8 +110088,13 @@ function closeAlertModal(){
            when the view is in or near the city or the words name it; its hits lead, OpenStreetMap's follow. */
         var L0 = window.LOCATION || {}, nycNear = L0.lat > 40.3 && L0.lat < 41.2 && L0.lon > -74.5 && L0.lon < -73.4;
         var nycAsk = nycNear || /\b(ny|nyc|new york|brooklyn|queens|bronx|manhattan|staten island)\b/i.test(v);
-        var city = nycAsk && /\d/.test(v) ? fetch('https://geosearch.planninglabs.nyc/v2/autocomplete?text=' + encodeURIComponent(v)).then(function(r){ return r.json(); })
-          .then(function(j){ return (j.features || []).filter(function(f){ return f.geometry && /\d/.test(f.properties.label || ''); }).slice(0, 3)
+        var city = (nycAsk || /^\s*\d/.test(v)) && /\d/.test(v) ? fetch('https://geosearch.planninglabs.nyc/v2/autocomplete?text=' + encodeURIComponent(v)).then(function(r){ return r.json(); })
+          .then(function(j){ var qn = (v.match(/^\s*([\d-]+)/) || [])[1], qs = (v.replace(/^\s*[\d-]+\s*/, '').match(/^(?:\w+\s+)?(\d+)/) || [])[1];
+            return (j.features || []).filter(function(f){ if (!f.geometry || !/\d/.test(f.properties.label || '')) return false;
+              if (!qn || nycNear && !/^\s*\d/.test(v)) return true;
+              /* far from NYC, keep only the exact building: same house number (hyphens ignored) and same numbered street */
+              var L = String(f.properties.label), hn = (L.match(/^([\d-]+)/) || [])[1] || '', sn = (L.replace(/^[\d-]+\s*/, '').match(/^(?:\w+\s+)?(\d+)/) || [])[1];
+              return hn.replace(/-/g, '') === qn.replace(/-/g, '') && (!qs || qs === sn); }).slice(0, 3)
             .map(function(f){ var P = f.properties; return { type: 'Feature', geometry: f.geometry, properties: { name: String(P.label || '').replace(/, USA$/, '').replace(/\b(\d+) (PLACE|STREET|AVENUE|ROAD|DRIVE|LANE|BOULEVARD|COURT|TERRACE)\b/, function(m, n, w){ return n + (/1$/.test(n) && !/11$/.test(n) ? 'st' : /2$/.test(n) && !/12$/.test(n) ? 'nd' : /3$/.test(n) && !/13$/.test(n) ? 'rd' : 'th') + ' ' + w; }).toLowerCase().replace(/\b\w/g, function(c){ return c.toUpperCase(); }).replace(/, Ny$/, ', NY') } }; }); })
           .catch(function(){ return []; }) : Promise.resolve([]);
         var osm = fetch('https://photon.komoot.io/api/?limit=5&lang=en&q=' + encodeURIComponent(v) + bias).then(function(r){ return r.json(); }).then(function(j){ return j.features || []; }).catch(function(){ return []; });
@@ -110100,10 +110105,29 @@ function closeAlertModal(){
             : fetch('/_maplab/bathy/hood_labels.json').then(function(r){ return r.json(); }).then(function(j){ window._cityHoods = j.features || []; return window._cityHoods; }).catch(function(){ return []; }))
           .then(function(H){ var w = v.toLowerCase(), seen = {}; return H.filter(function(f){ var n = f.properties.name; if (seen[n] || n.toLowerCase().indexOf(w) !== 0) return false; seen[n] = 1; return true; }).slice(0, 3)
             .map(function(f){ return { type: 'Feature', geometry: f.geometry, properties: { name: f.properties.name, city: BORO[f.properties.b] || 'New York' } }; }); });
-        Promise.all([hoods, city, osm]).then(function(a){ return { features: a[0].concat(a[1], a[2]).slice(0, 6) }; }).then(function(j){
+        /* ANY US STREET ADDRESS: the Census Bureau's address finder (user 2026-10-14: "7239 chandan boulevard illinois" --
+           OpenStreetMap had the street, not the house), through our proxy (no CORS on their side). Asked for anything that
+           starts with a house number; outside the US it simply finds nothing */
+        var census = function(addr){ return fetch('https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?benchmark=Public_AR_Current&format=json&address=' + encodeURIComponent(addr)))
+            .then(function(r){ return r.json(); }).then(function(j){ return (((j || {}).result || {}).addressMatches || []); }).catch(function(){ return []; }); };
+        /* the Census needs a town or state: with neither typed, try the state of the place on screen, then the user's saved places' states */
+        var viewState = function(){ if (VSTATE !== undefined) return Promise.resolve(VSTATE); var L1 = window.LOCATION || {};
+          return fetch('https://photon.komoot.io/reverse?lang=en&lat=' + L1.lat + '&lon=' + L1.lon).then(function(r){ return r.json(); }).then(function(j){ VSTATE = (((j.features || [])[0] || {}).properties || {}).state || ''; return VSTATE; }).catch(function(){ return ''; }); };
+        var us = /^\s*\d/.test(v) ? census(v).then(function(M){ if (M.length || /,|\b\d{5}\b/.test(v)) return M; return viewState().then(function(st){ return st ? census(v + ', ' + st) : []; }); })
+            .then(function(M){ return M.slice(0, 2).map(function(m){
+              var A = String(m.matchedAddress || '').split(', ');
+              var tc = function(x){ return String(x || '').toLowerCase().replace(/\b\w/g, function(c){ return c.toUpperCase(); }); };
+              return { type: 'Feature', geometry: { type: 'Point', coordinates: [m.coordinates.x, m.coordinates.y] }, properties: { name: tc(A[0]) + ', ' + tc(A[1]) + (A[2] ? ', ' + A[2] : '') } }; }); }).catch(function(){ return []; })
+          : Promise.resolve([]);
+        Promise.all([hoods, city, us, osm]).then(function(a){
+          /* the NYC search answers fuzzily for places far away: keep its hits only when the Census found nothing better outside NYC */
+          var cityHits = a[1], usHits = a[2], farUS = usHits.some(function(f){ var c = f.geometry.coordinates; return !(c[1] > 40.4 && c[1] < 41.1 && c[0] > -74.35 && c[0] < -73.6); });
+          return { features: a[0].concat(farUS ? [] : cityHits, usHits, a[3]).slice(0, 6) }; }).then(function(j){
           var F = (j.features || []).filter(function(f){ return f.geometry && f.geometry.coordinates; });
+          var exact = F.some(function(f){ return /^\d/.test(place(f)); });
           res.innerHTML = F.length ? F.map(function(f, i){ return '<div data-i="' + i + '" style="cursor:pointer;padding:6px 10px;border-radius:8px;font:600 .72rem system-ui;color:#2B22F4;background:rgba(43,34,244,.05);margin-bottom:3px;">' + esc(place(f)) + '</div>'; }).join('')
-            : '<div style="font:600 .66rem system-ui;color:rgba(43,34,244,.55);">No match. Try a street and city, or drop the pin on the map.</div>';
+            : '<div style="font:600 .66rem system-ui;color:rgba(43,34,244,.55);">No match. Add the town and state (for example 7239 Chandan Blvd, Machesney Park IL), or drop the pin on the map.</div>';
+          if (F.length && /^\s*\d/.test(v) && !exact) res.innerHTML += '<div style="font:600 .64rem system-ui;color:rgba(255,255,255,.7);margin-top:2px;">No exact house found. Add the town and state to the address, or tap the map.</div>';
           [].forEach.call(res.querySelectorAll('[data-i]'), function(d){ d.onclick = function(){ var f = F[+d.getAttribute('data-i')], co = f.geometry.coordinates; setPick(co[1], co[0], place(f), true); res.innerHTML = ''; q.value = place(f); }; });
         }).catch(function(){ res.innerHTML = '<div style="font:600 .66rem system-ui;color:#c2410c;">Search is unavailable right now. Drop the pin on the map instead.</div>'; });
       }, 300); });

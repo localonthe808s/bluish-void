@@ -121,7 +121,10 @@ const CACHE_RULES = {
   'www-sk.icrr.u-tokyo.ac.jp':    20,
   // ── Caltrans District 7 camera list (THE BASIN). 1.85 MB raw, asked for with &shape=d7cctv, which keeps the in-service
   //    cameras and only the fields the widget reads (perf review 2026-10-12). The pages refresh it every 10 min. ──
-  'cwwp2.dot.ca.gov':             600
+  'cwwp2.dot.ca.gov':             600,
+  // ── US Census address finder (2026-10-14): house numbers OpenStreetMap lacks ("7239 Chandan Blvd" found only the
+  //    street there), for the phone-alerts place search. No CORS header on their side. A day of edge cache. ──
+  'geocoding.geo.census.gov':     86400
 };
 
 // SHAPES: an upstream that is far too big to hand a phone is cut down HERE, once, and the
