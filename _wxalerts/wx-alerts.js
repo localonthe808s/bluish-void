@@ -198,6 +198,29 @@ async function sampleStrikes(places, ms) {
   return { ok: false, strikes: out };
 }
 
+/* ONE ALERT, NOT TWO (user 2026-10-14: "if work and home are nearby only show one without mentioning HOME or WORK / dont send
+   one for both"). Each phone's alerts from one tick are collected first; the same event (same type and key, the place's own
+   box stripped off) at places within NEAR_MI of each other goes out ONCE, with no place name. Far-apart places keep theirs. */
+const NEAR_MI = 15;
+async function sendMerged(env, pend, dead, log) {
+  let sent = 0;
+  for (const ep of Object.keys(pend)) {
+    const items = pend[ep], used = new Array(items.length).fill(false);
+    for (let i = 0; i < items.length; i++) {
+      if (used[i]) continue; used[i] = true;
+      const A = items[i], group = [A];
+      for (let j = i + 1; j < items.length; j++) { const B = items[j];
+        if (!used[j] && B.type === A.type && B.ekey === A.ekey && group.some((g) => miles(g.lat, g.lon, B.lat, B.lon) <= NEAR_MI)) { used[j] = true; group.push(B); } }
+      const one = group.length > 1, a = A.a;
+      const body = one ? String(a.body).replace(new RegExp(' of ' + A.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b'), '') : a.body;
+      if (dead.has(ep)) continue;
+      try { const r = await pushOne(A.s, { title: one ? a.title : `${a.title} \u00b7 ${A.name}`, body, tag: `${A.type}:${A.ekey}`, url: '/' }, jwk(env), a.urg);
+        if (r.status === 404 || r.status === 410) dead.add(ep); else if (r.status < 300) sent++; else log.push(`push ${r.status}`); } catch (e) { log.push(String(e)); }
+    }
+  }
+  return sent;
+}
+
 /* ---------------------------------------------------------------- hazards: fast lane ------------------------------- */
 const POLY_EVENTS = ['Tornado Warning', 'Flash Flood Warning', 'Severe Thunderstorm Warning', 'Extreme Wind Warning', 'Snow Squall Warning'];
 function inRing(lon, lat, ring) { let c = false;
@@ -237,7 +260,7 @@ async function fastTick(env) {
   const subs = await getSubs(env);
   const want = subs.filter((s) => s.types.indexOf('severe') >= 0 || s.types.indexOf('quake') >= 0); if (!want.length) return 'no phones';
   const state = (await env.WX.get('state:fast', { type: 'json' })) || {}, before = JSON.stringify(state), now = Date.now();
-  let W = [], Q = [], sent = 0; const log = [], dead = new Set();
+  let W = [], Q = [], sent = 0; const log = [], dead = new Set(), PEND = {};
   if (want.some((s) => s.types.indexOf('severe') >= 0)) { try { W = await polyWarnings(); } catch (e) { log.push(String(e)); } }
   if (want.some((s) => s.types.indexOf('quake') >= 0)) { try { const r = await fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_hour.geojson'); Q = r.ok ? ((await r.json()).features || []).filter((q) => now - q.properties.time < 45 * 60e3) : []; } catch (e) { log.push(String(e)); } }
   for (const s of want) for (const l of s.locs) {
@@ -249,10 +272,10 @@ async function fastTick(env) {
         body: `${Math.round(a.mi)} miles ${a.dir} of ${l.name}, ${ago} min ago (${P.place}). Shaking there likely ${MMI_WORD(a.mmi)}.${P.tsunami ? ' A tsunami message was issued: check tsunami.gov.' : ''} If shaking: drop, cover, hold on.` }); }
     for (const a of out) {
       const sk = `${gkey(l)}|${s.endpoint.slice(-24)}|${a.key}`; if (state[sk]) continue; state[sk] = now;
-      try { const r = await pushOne(s, { title: `${a.title} · ${l.name}`, body: a.body, tag: a.key, url: '/' }, jwk(env), a.urg);
-        if (r.status === 404 || r.status === 410) dead.add(s.endpoint); else if (r.status < 300) sent++; else log.push(`push ${r.status}`); } catch (e) { log.push(String(e)); }
+      (PEND[s.endpoint] = PEND[s.endpoint] || []).push({ s, type: a.key.split(':')[0], ekey: a.key, a, name: l.name, lat: l.lat, lon: l.lon });
     }
   }
+  sent += await sendMerged(env, PEND, dead, log);
   for (const sk of Object.keys(state)) if (now - state[sk] > 3 * 864e5) delete state[sk];
   if (JSON.stringify(state) !== before) await env.WX.put('state:fast', JSON.stringify(state));
   if (dead.size) await env.WX.put('subs', JSON.stringify(subs.filter((x) => !dead.has(x.endpoint))));
@@ -287,7 +310,7 @@ async function tick(env) {
   let cur = 0; if (keys.length > BATCH) cur = (+(await env.WX.get('cursor')) || 0) % keys.length;
   const todo = keys.length > BATCH ? keys.slice(cur, cur + BATCH).concat(keys.slice(0, Math.max(0, cur + BATCH - keys.length))) : keys;
   const state = (await env.WX.get('state', { type: 'json' })) || {}, before = JSON.stringify(state), now = Date.now(), cache = {};
-  let sent = 0, dead = new Set(), log = [];
+  let sent = 0, dead = new Set(), log = []; const PEND = {};
   const F = {};
   for (const k of todo) { try { F[k] = await forecast(groups[k].lat, groups[k].lon); } catch (e) { log.push(`${k} ${e.message}`); } }
   /* lightning: which places need listening (storm-capable forecast, or a storm already near), then one shared sample */
@@ -327,15 +350,15 @@ async function tick(env) {
       const sk = `${k}|${a.key}`, last = state[sk] || 0;
       if (a.cool ? now - last < a.cool : last) continue;                               /* dated keys: once ever; others: cool-down */
       state[sk] = now;
+      /* the event's own identity, without the box: lightning episodes and the rain-soon nudge are per place, so they match by type */
+      const ekey = /^(ltg|ltgclear):/.test(a.key) ? a.key.split(':')[0] : a.key;
       for (const w of g.who) {
-        if (w.s.types.indexOf(type) < 0 || dead.has(w.s.endpoint)) continue;
-        try {
-          const r = await pushOne(w.s, { title: `${a.title} · ${w.name}`, body: a.body, tag: `${type}:${k}`, url: '/' }, jwk(env), a.urg);
-          if (r.status === 404 || r.status === 410) dead.add(w.s.endpoint); else if (r.status < 300) sent++; else log.push(`push ${r.status}`);
-        } catch (e) { log.push(String(e)); }
+        if (w.s.types.indexOf(type) < 0) continue;
+        (PEND[w.s.endpoint] = PEND[w.s.endpoint] || []).push({ s: w.s, type, ekey, a, name: w.name, lat: g.lat, lon: g.lon });
       }
     }
   }
+  sent += await sendMerged(env, PEND, dead, log);
   for (const sk of Object.keys(state)) if (state[sk] > 1e12 && now - state[sk] > 4 * 864e5) delete state[sk];   /* timestamps only: counters (ltg:quiet) are not times */
   if (JSON.stringify(state) !== before) await env.WX.put('state', JSON.stringify(state));
   if (dead.size) await env.WX.put('subs', JSON.stringify(subs.filter((s) => !dead.has(s.endpoint))));
@@ -363,5 +386,5 @@ export default {
       ctx.waitUntil(tick(env).then((r) => console.log(`[wx] ${r}`)).catch((e) => console.log(`[wx] FAILED ${e}`)));
   },
   // exported for tests
-  _t: { umbrella, rainSoon, swings, aurora, minKp, localNow, severe, inGeom, warnMsg, quakeAt, firesNear, airNow, fastTick }
+  _t: { umbrella, rainSoon, swings, aurora, minKp, localNow, severe, inGeom, warnMsg, quakeAt, firesNear, airNow, fastTick, sendMerged }
 };
