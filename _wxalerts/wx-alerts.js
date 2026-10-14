@@ -26,7 +26,7 @@ const PUSH_HOSTS = /(^|\.)(push\.apple\.com|fcm\.googleapis\.com|push\.services\
 const BATCH = 1500;          /* places per tick (2 calls each + pushes): the account is on Workers Paid (10,000 calls per run), so every place is checked every tick; the cursor only rotates past 1,500 */
 
 const cors = { 'Access-Control-Allow-Origin': ORIGIN, 'Access-Control-Allow-Headers': 'content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Vary': 'Origin' };
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Vary': 'Origin' };
 const J = (o, st) => new Response(JSON.stringify(o), { status: st || 200, headers: { 'content-type': 'application/json', ...cors } });
 const r2 = (x) => Math.round(x * 100) / 100;
 const gkey = (l) => `${l.lat.toFixed(2)},${l.lon.toFixed(2)}`;
@@ -37,6 +37,10 @@ async function getSubs(env){ return (await env.WX.get('subs', { type: 'json' }))
 async function route(request, env) {
   const url = new URL(request.url);
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
+  if (url.pathname === '/health') {   /* the Kalshi worker's watchdog reads this */
+    const b0 = await env.WX.get('beat', { type: 'json' }).catch(() => null);
+    return J({ ok: !!b0, last: b0 && b0.at, ageMin: b0 ? Math.round((Date.now() - Date.parse(b0.at)) / 6e4) : null });
+  }
   if (request.method !== 'POST') return J({ error: 'POST' }, 405);
   let b = {}; try { b = await request.json(); } catch (_) {}
   const subs = await getSubs(env);
@@ -152,10 +156,10 @@ async function severe(lat, lon) {
   const r = await fetch(`https://api.weather.gov/alerts/active?point=${lat},${lon}`, { headers: { 'User-Agent': UA, 'Accept': 'application/geo+json' } });
   if (!r.ok) return [];
   const j = await r.json();
-  return (j.features || []).map((x) => x.properties || {}).filter((p) => /Warning$/.test(p.event || '') && p.status !== 'Test' && POLY_EVENTS.indexOf(p.event) < 0).map((p) => {
+  return (j.features || []).map((x) => x.properties || {}).filter((p) => /Warning$/.test(p.event || '') && p.status !== 'Test' && POLY_EVENTS.indexOf(p.event) < 0 && vtecKey(p)).map((p) => {
     const until = p.ends || p.expires; let u = '';
     if (until) { const m = /T(\d\d):(\d\d)/.exec(until); if (m) u = `Until ${hm(+m[1], +m[2])}. `; }
-    return { key: `nws:${p.id}`, cool: 3 * 864e5, title: p.event, body: (u + warnFacts(p)).slice(0, 220), urg: 'high' };
+    return { key: vtecKey(p), cool: 3 * 864e5, title: p.event, body: (u + warnFacts(p)).slice(0, 220), urg: 'high' };
   });
 }
 
@@ -240,6 +244,15 @@ function inRing(lon, lat, ring) { let c = false;
 function inGeom(lon, lat, g) { if (!g) return false;
   const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
   return polys.some((P) => inRing(lon, lat, P[0]) && !P.slice(1).some((h) => inRing(lon, lat, h))); }
+/* THE WARNING'S OWN EVENT NUMBER (2026-10-14): NWS reissues a warning under a new id every time it is extended or updated,
+   which alerted the same tornado twice. VTEC ("/O.EXT.KOKX.TO.W.0012.261014T2100Z-.../") names the event: office +
+   phenomenon + significance + event number + year stays the same through every update. Cancellations/expiries return null. */
+function vtecKey(p) {
+  const v = ((p.parameters || {}).VTEC || [])[0] || '', m = /\/O\.(\w{3})\.(\w{4})\.(\w{2})\.(\w)\.(\d{4})\.(\d{2})?/.exec(v);
+  if (!m) return `nws:${p.id}`;
+  if (m[1] === 'CAN' || m[1] === 'EXP') return null;
+  return `nws:${m[2]}.${m[3]}.${m[4]}.${m[5]}`;   /* no year: a CON reissue writes its start as 000000; event numbers recur yearly, far beyond the 3-day memory */
+}
 /* the hazard itself from the NWS text ("* WHAT...Snow. Total accumulations 6 to 10 inches."), never the instructions */
 function warnFacts(p) {
   const d = String(p.description || '').replace(/\s+/g, ' ');
@@ -269,7 +282,7 @@ function warnMsg(f) {
   if (until) { const m = /T(\d\d):(\d\d)/.exec(until); if (m) u = `Until ${hm(+m[1], +m[2])}. `; }
   const lead = p.event === 'Tornado Warning' ? (det === 'OBSERVED' ? 'Tornado observed. ' : 'Tornado indicated by radar. ') : '';
   const hail = first('maxHailSize'), wind = first('maxWindGust'), extra = [hail && +hail > 0 ? `hail up to ${hail} in` : '', wind ? `gusts to ${String(wind).replace(/\s*MPH/i, ' mph')}` : ''].filter(Boolean).join(', ');
-  return { key: `nws:${p.id}`, title: (pds && !cat ? title + ' (particularly dangerous)' : title), body: (u + lead + (extra ? extra.charAt(0).toUpperCase() + extra.slice(1) + '. ' : '') + (lead || extra ? '' : warnFacts(p))).trim().slice(0, 230), urg: 'high' };
+  return { key: vtecKey(p), title: (pds && !cat ? title + ' (particularly dangerous)' : title), body: (u + lead + (extra ? extra.charAt(0).toUpperCase() + extra.slice(1) + '. ' : '') + (lead || extra ? '' : warnFacts(p))).trim().slice(0, 230), urg: 'high' };
 }
 /* felt shaking, roughly: intensity from magnitude and hypocentral distance (a California-style attenuation, MMI ~
    3.67 + 1.17 M - 3.19 log10(km)); 3 and up is felt by some -- 3.5 missed an M4.5 at 40 mi and an M6 at 120 mi */
@@ -288,7 +301,7 @@ async function fastTick(env) {
   if (want.some((s) => s.types.indexOf('quake') >= 0)) { try { const r = await fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_hour.geojson'); Q = r.ok ? ((await r.json()).features || []).filter((q) => now - q.properties.time < 45 * 60e3) : []; } catch (e) { log.push(String(e)); } }
   for (const s of want) for (const l of s.locs) {
     const out = [];
-    if (s.types.indexOf('severe') >= 0) for (const f of W) if (inGeom(l.lon, l.lat, f.geometry)) out.push(warnMsg(f));
+    if (s.types.indexOf('severe') >= 0) for (const f of W) if (vtecKey(f.properties || {}) && inGeom(l.lon, l.lat, f.geometry)) out.push(warnMsg(f));
     if (s.types.indexOf('quake') >= 0) for (const q of Q) { const a = quakeAt(q, l.lat, l.lon); if (a.mmi < 3) continue;
       const P = q.properties, ago = Math.max(1, Math.round((now - P.time) / 60e3));
       out.push({ key: `eq:${q.id}`, title: `M${P.mag.toFixed(1)} earthquake`, urg: a.mmi >= 5 ? 'high' : 'normal',
@@ -477,5 +490,5 @@ export default {
       ctx.waitUntil(tick(env).then((r) => console.log(`[wx] ${r}`)).catch((e) => console.log(`[wx] FAILED ${e}`)));
   },
   // exported for tests
-  _t: { umbrella, rainSoon, swings, aurora, minKp, localNow, severe, warnFacts, stormLength, inGeom, warnMsg, quakeAt, firesNear, airNow, fastTick, sendMerged, sunsetScore, sunsetAlert, sunsetAz }
+  _t: { vtecKey, umbrella, rainSoon, swings, aurora, minKp, localNow, severe, warnFacts, stormLength, inGeom, warnMsg, quakeAt, firesNear, airNow, fastTick, sendMerged, sunsetScore, sunsetAlert, sunsetAz }
 };

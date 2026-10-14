@@ -730,17 +730,9 @@ async function notify(env, state, key, title, body, priority, stateKey) {
      (your positions, your jobs) only your own phones */
   const aud = /^(dark|portal):/.test(key) ? 'all' : 'owner';
   const pu = await pushAll(env, { title, body, tag: key, url: '/' }, priority === 'urgent' || priority === 'high' ? 'high' : 'normal', aud).catch((e) => ({ sent: 0, failed: 1, note: String(e) }));
-  let ok = false, nt = 'no topic';
-  if (env.NTFY_TOPIC) {
-    const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, {
-      method: 'POST', body,
-      headers: ntfyHeaders(env, { 'Title': String(title).toUpperCase(), 'Priority': priority || 'default' })
-    });
-    ok = r.ok; nt = String(r.status);
-    if (!r.ok) console.log(`[ntfy] ${r.status} ${(await r.text()).slice(0, 160)} -- "${title}" NOT delivered`);
-  }
-  try { await env.OBS.put('push:last', JSON.stringify({ at: new Date().toISOString(), title, ntfy: nt, push: pu })); } catch (_) {}
-  return ok || pu.sent > 0;
+  /* ntfy dropped (user 2026-10-14): it refused every post with its daily-limit 429 since 10-03; BLUISH's own push carries them */
+  try { await env.OBS.put('push:last', JSON.stringify({ at: new Date().toISOString(), title, push: pu })); } catch (_) {}
+  return pu.sent > 0;
 }
 function localDate(offsetDays) {
   const d = new Date(Date.now() + offsetDays * 86400000);
@@ -795,7 +787,7 @@ async function logFailures(env, runId) {
   return { hits };
 }
 async function jobWatch(env) {
-  if (!env.NTFY_TOPIC || !env.OBS || !env.GH_TOKEN) return 'watchdog off';
+  if (!env.VAPID_JWK || !env.OBS || !env.GH_TOKEN) return 'watchdog off';
   const state = (await env.OBS.get(ALERT_KEY, { type: 'json' })) || {};
   const before = JSON.stringify(state);
   const today = new Date().toISOString().slice(0, 10);
@@ -817,7 +809,7 @@ async function jobWatch(env) {
       : ageH > w.maxAgeH ? `last run ${ageH.toFixed(0)} h ago` : null;
     if (bad) {
       await notify(env, state, `job:${w.wf}:${today}`, `Kalshi ${w.name}: ${bad}`,
-        `${w.wf} -- ${bad}. ${r ? r.html_url : ''} The sheet keeps serving the last good study; nothing learns until this is fixed.`, 'high');
+        `${w.wf} \u00b7 ${bad}. ${r ? r.html_url : ''}`, 'high');
       out.push(`${w.name}: ${bad} (paged)`);
       continue;
     }
@@ -847,7 +839,7 @@ async function jobWatch(env) {
 // reads that branch's _kalshi/reviews/latest.json and pages a short summary, or says the review never landed.
 // Its own KV key (review:<date>): alert:state is shared by two other jobs in the same minute.
 async function reviewDigest(env) {
-  if (!env.NTFY_TOPIC || !env.OBS) return 'digest off';
+  if (!env.VAPID_JWK || !env.OBS) return 'digest off';
   const day = localDate(0);
   const key = `review:${day}`;
   if (await env.OBS.get(key)) return 'already sent';
@@ -875,15 +867,26 @@ async function reviewDigest(env) {
   // the day's mark goes in BEFORE the post, like notify(): a put that fails after a post would repeat the digest
   await env.OBS.put(key, '1', { expirationTtl: 60 * 60 * 48 });
   const pu = await pushAll(env, { title, body, tag: 'review', url: '/' }, pri === 'high' ? 'high' : 'normal', 'owner').catch(() => ({ sent: 0 }));
-  const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, { method: 'POST', body, headers: ntfyHeaders(env, { 'Title': String(title).toUpperCase(), 'Priority': pri }) });
-  if (!r.ok) console.log(`[ntfy] ${r.status} ${(await r.text()).slice(0, 160)} -- review digest NOT delivered`);
-  return `${title} (ntfy ${r.status}, push ${pu.sent})`;
+  return `${title} (push ${pu.sent})`;
 }
 async function alertTick(env, sched) {
-  if (!env.NTFY_TOPIC || !env.OBS) return 'alerts off';
+  if (!env.VAPID_JWK || !env.OBS) return 'alerts off';
   const state = (await env.OBS.get(ALERT_KEY, { type: 'json' })) || {};
   const before = JSON.stringify(state);
   const out = [];
+  /* 0. WATCH THE WEATHER-ALERTS WORKER (2026-10-14, user picked "nothing watches the watcher"): every 10 minutes ask its
+     /health; a heartbeat older than 30 minutes -- or no answer -- pages the owner's phones once an hour until it is back */
+  if (new Date(sched || Date.now()).getUTCMinutes() % 10 === 7) {
+    let age = null, why = '';
+    try { const h = await (await fetch('https://bluish-wx-alerts.junkyjunkjunkjunkjunk.workers.dev/health')).json(); age = h.ageMin; }
+    catch (e) { why = 'no answer'; }
+    if (age == null || age > 30) {
+      const hr = new Date().toISOString().slice(0, 13);
+      await notify(env, state, `wxdown:${hr}`, 'Weather alerts are down',
+        age == null ? `The weather-alerts worker gave ${why || 'no heartbeat'}. Weather and hazard alerts are not being checked.` : `The weather-alerts worker last ran ${Math.round(age)} minutes ago. Weather and hazard alerts are not being checked.`, 'high');
+      out.push(`wx watchdog: ${age == null ? why || 'no beat' : Math.round(age) + ' min'}`);
+    }
+  }
   // 1. the portal, yesterday and today -- EVERY FIVE MINUTES (2026-10-06), not every minute: two fetches a minute for a
   // status that changes a couple of times a day were a sixth of the tick's outbound requests against a 10 ms CPU budget
   // (see THE CPU BUDGET). Minute 2 of each five, off the bake and obs minutes.
@@ -901,8 +904,7 @@ async function alertTick(env, sched) {
       if (st !== 'no_report' && st !== was) {
         await notify(env, state, `portal:${day}:${st}`,
           `Central Park ${day}: ${st.toUpperCase()} ${v}°`,
-          `weather.com/kalshi shows the ${day} high as ${v}° (${st}). ` +
-          (st === 'official' ? 'This is the number that pays.' : 'Preliminary; the final comes ~3 AM.'),
+          `weather.com/kalshi shows the ${day} high as ${v}° (${st}).`,
           st === 'official' ? 'high' : 'default');
         out.push(`portal ${day} ${st} ${v}`);
       }
@@ -992,8 +994,7 @@ async function alertTick(env, sched) {
         await notify(env, state, `mkt:${h.ticker}:${Math.round(mid * 4)}`,
           `${label}: market ${dir} ${Math.round(anchor * 100)}¢ → ${Math.round(mid * 100)}¢`,
           `You hold ${Math.abs(h.n)} ${side}. The YES price moved from ${Math.round(anchor * 100)}¢ to ` +
-          `${Math.round(mid * 100)}¢ -- ${good ? 'in your favour' : 'against you'}. ` +
-          `The afternoon market prices the hourly readings, not the peak; the plan is to hold.`,
+          `${Math.round(mid * 100)}¢, ${good ? 'in your favor' : 'against you'}.`,
           good ? 'default' : 'high');
         out.push(`${h.ticker} ${anchor}->${mid}`);
         state.mkt[h.ticker] = mid;
@@ -1008,9 +1009,9 @@ async function alertTick(env, sched) {
       const bad = (side === 'YES') ? (above) : (inNow);
       const local = new Date(rp.at).toLocaleTimeString('en-US', { timeZone: h.am.tz, hour: 'numeric', minute: '2-digit' });
       await notify(env, state, `metar:${h.ticker}:${rp.at}`,
-        `${h.am.name} ${local} report: ${rp.f}° -- ${inNow ? 'inside' : above ? 'above' : 'below'} ${label}`,
-        `The ${rp.raw.trim() === 'SPECI' ? 'special' : 'hourly'} report from ${h.am.icao} reads ${rp.f}°. ` +
-        `You hold ${Math.abs(h.n)} ${side} on ${label}${bad ? ' -- this reading is against you' : ''}. ` +
+        `${h.am.name} ${local} report: ${rp.f}° \u00b7 ${inNow ? 'inside' : above ? 'above' : 'below'} ${label}`,
+        `The ${rp.raw.trim() === 'SPECI' ? 'special' : 'hourly'} ${h.am.name} report reads ${rp.f}°. ` +
+        `You hold ${Math.abs(h.n)} ${side} on ${label}${bad ? ', this reading is against you' : ''}.` +
         `The market prices this report within about two minutes; a reading between reports is invisible until the climate report.`,
         bad ? 'urgent' : 'default');
       out.push(`metar ${h.am.icao} ${rp.f}`);
@@ -1046,9 +1047,9 @@ async function alertTick(env, sched) {
       if (prevOwn != null && (wasIn !== nowIn || wasAbove !== nowAbove)) {
         const bad = (side === 'YES') ? !nowIn : nowIn;
         await notify(env, state, `own5:${h.ticker}:${Math.round(ownMax)}`,
-          `${h.am.name} sensor ${ownMax}° at ${ownAt} -- ${nowIn ? 'inside' : nowAbove ? 'above' : 'below'} ${label}`,
-          `${ownSt}'s own 5-minute reading set a new high of ${ownMax}° at ${ownAt} local. ` +
-          `You hold ${Math.abs(h.n)} ${side} on ${label}${bad ? ' -- this is against you' : ' -- in your favour'}. ` +
+          `${h.am.name} sensor ${ownMax}° at ${ownAt} \u00b7 ${nowIn ? 'inside' : nowAbove ? 'above' : 'below'} ${label}`,
+          `${h.am.name}'s 5-minute sensor set a new high of ${ownMax}° at ${ownAt} local. ` +
+          `You hold ${Math.abs(h.n)} ${side} on ${label}, ${bad ? 'against you' : 'in your favor'}.` +
           `This is the settlement sensor; the hourly report and the market see it up to 55 minutes later.`,
           bad ? 'urgent' : 'high');
         out.push(`own5 ${ownSt} ${prevOwn}->${ownMax}`);
@@ -1056,8 +1057,8 @@ async function alertTick(env, sched) {
         // within half a degree of the top edge: one warning, before it crosses
         await notify(env, state, `own5near:${h.ticker}`,
           `${h.am.name} sensor ${ownMax}°, near the top of ${label}`,
-          `${ownSt} read ${ownMax}° at ${ownAt}, within half a degree of ${label}'s top edge. ` +
-          `You hold ${Math.abs(h.n)} ${side}. One more tick decides it.`, 'high');
+          `${h.am.name}'s sensor read ${ownMax}° at ${ownAt}, within half a degree of ${label}'s top edge. ` +
+          `You hold ${Math.abs(h.n)} ${side}.`, 'high');
         out.push(`own5 near ${ownSt} ${ownMax}`);
       }
       state.own5[ownSt] = { d: ownDay, v: ownMax, at: ownAt };
@@ -1069,11 +1070,10 @@ async function alertTick(env, sched) {
       if (wasIn !== nowIn || wasAbove !== nowAbove) {
         const bad = (side === 'YES') ? !nowIn : nowIn;
         await notify(env, state, `max7:${h.ticker}:${max7}`,
-          `${h.am.name} running max ${max7}° (TWC)`,
-          `TWC's temperatureMaxSince7Am went ${prevMax7}° → ${max7}°, ` +
+          `${h.am.name} running high ${max7}° (weather.com)`,
+          `weather.com's running high since 7 AM went ${prevMax7}° → ${max7}°, ` +
           (nowIn ? `inside ${label}` : nowAbove ? `above ${label}` : `below ${label}`) +
-          `. You hold ${Math.abs(h.n)} ${side} on ${label}${bad ? ' -- this is against you' : ''}. ` +
-          `max7 is a blended field and has read high before; the climate report decides.`,
+          `. You hold ${Math.abs(h.n)} ${side} on ${label}${bad ? ', against you' : ''}.`,
           bad ? 'high' : 'default');
         out.push(`max7 ${h.am.series} ${prevMax7}->${max7}`);
       }
@@ -1209,12 +1209,12 @@ async function darkTick(env, sched) {
     }
     const cls = bb.cls;
     out.push(`${cls} ${side} ${mk.lab} $${usd}${prev ? ' (merged, $' + bb.usd + ')' : ''}`);
-    if (cls === 'dark' && bb.usd >= DARK_ALERT_USD && env.NTFY_TOPIC) {
+    if (cls === 'dark' && bb.usd >= DARK_ALERT_USD && env.VAPID_JWK) {
       const hm = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }).format(new Date(Date.parse(bb.t)));
       const last = rec.releases.filter((r) => Date.parse(r.t) <= mm).map((r) => Date.parse(r.t)).sort().pop();
       const since = last ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }).format(new Date(last)) : 'this morning';
       await notify(env, await alertState(), `dark:${mk.tk}:${side}`, `Dark flow · NY ${mk.lab}`,
-        `${hm}: $${bb.usd.toLocaleString('en-US')} buying ${side.toUpperCase()} on ${mk.lab}${bb.minutes > 1 ? ' over ' + bb.minutes + ' minutes' : ''}, at ${bb.px == null ? '?' : Math.round(bb.px * 100)}c YES, with no public reading since ${since}. Unproven: in the study, dark buyers did not call the next report (see the REPORT tab).`, undefined, 'dark:alerts');
+        `${hm}: $${bb.usd.toLocaleString('en-US')} buying ${side.toUpperCase()} on ${mk.lab}${bb.minutes > 1 ? ' over ' + bb.minutes + ' minutes' : ''}, at ${bb.px == null ? '?' : Math.round(bb.px * 100)}¢ YES, with no public reading since ${since}.`, undefined, 'dark:alerts');
     }
     }
   }
@@ -1473,8 +1473,8 @@ export default {
       dispatch_minutes: [5, 20, 35, 50],
       fast_lane_minutes: [0, 10, 15, 25, 30, 40, 45, 55],
       obs_log: env.OBS ? 'KV bound' : 'NO KV BINDING - not logging',
-      alerts: env.NTFY_TOPIC ? 'ntfy topic set; New York positions watched every 5 min' : 'off (no NTFY_TOPIC)',
-      watchdog: (env.NTFY_TOPIC && env.GH_TOKEN) ? 'nightly refit, weekly tune and the bake checked hourly; a failed, missing or stale run pages, and so does a green run whose log says a market FAILED' : 'off',
+      alerts: env.VAPID_JWK ? 'web push to the BLUISH app; New York positions watched every 5 min' : 'off (no VAPID_JWK)',
+      watchdog: (env.VAPID_JWK && env.GH_TOKEN) ? 'nightly refit, weekly tune and the bake checked hourly; a failed, missing or stale run pages, and so does a green run whose log says a market FAILED' : 'off',
       now_utc: new Date().toISOString(),
       note: 'Triggering is cron-only. Runs appear at github.com/' + OWNER + '/' + REPO + '/actions'
     };
