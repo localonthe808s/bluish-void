@@ -31582,7 +31582,7 @@ function dayRangeAround(d, days){
             window._lastGHRenderKey = null;
             clearTimeout(window._ghObsRefreshTo);
             window._ghObsRefreshTo = setTimeout(function(){
-              try{ if (typeof tlRenderForOffset === 'function') tlRenderForOffset(); }catch(e){}
+              try{ if (typeof tlRenderForOffset === 'function') (window._tlRenderSoon || tlRenderForOffset)(); }catch(e){}
             }, 800);
           })
           .catch(function(){});
@@ -31692,7 +31692,7 @@ function dayRangeAround(d, days){
             window._lastGHRenderKey = null;
             clearTimeout(window._ghNwsRefreshTo);
             window._ghNwsRefreshTo = setTimeout(function(){
-              try{ if (typeof tlRenderForOffset === 'function') tlRenderForOffset(); }catch(e){}
+              try{ if (typeof tlRenderForOffset === 'function') (window._tlRenderSoon || tlRenderForOffset)(); }catch(e){}
             }, 900);
           })
           .catch(function(){});
@@ -31726,7 +31726,7 @@ function dayRangeAround(d, days){
           window._sunPath = { pts: pts, fetchedAt: Date.now(), lat: loc.lat, lon: loc.lon };
           window._lastGHRenderKey = null;
           clearTimeout(window._ghPathRefreshTo);
-          window._ghPathRefreshTo = setTimeout(function(){ try{ if (typeof tlRenderForOffset === 'function') tlRenderForOffset(); }catch(e){} }, 900);
+          window._ghPathRefreshTo = setTimeout(function(){ try{ if (typeof tlRenderForOffset === 'function') (window._tlRenderSoon || tlRenderForOffset)(); }catch(e){} }, 900);
         }).catch(function(){});
       };
       /* how blocked the light path is at a sun event: 0 clear .. 1 shut. Low cloud anywhere 60-400 km blocks it; a thick mid deck
@@ -39766,7 +39766,7 @@ function dayRangeAround(d, days){
             if (typeof tlRenderForOffset === 'function') {
               clearTimeout(window._ghPm25RefreshTo);
               window._ghPm25RefreshTo = setTimeout(function(){
-                try { window._lastFullTlRender = Date.now(); tlRenderForOffset(); } catch(e){}
+                try { window._lastFullTlRender = Date.now(); (window._tlRenderSoon || tlRenderForOffset)(); } catch(e){}
               }, 150);
             }
           }
@@ -42160,7 +42160,7 @@ function dayRangeAround(d, days){
             window._hourlyData = hourly;
             window._kpDataCache = kpData;
             window._tlDayOffset = 0;
-            try { tlRenderForOffset(); } catch(e) {
+            try { (window._tlRenderSoon || tlRenderForOffset)(); } catch(e) {
               renderTodayTimeline(hourly, daily, nearestIndex, kpData);
             }
           });
@@ -72381,8 +72381,12 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       bw.built = true;
       if ('IntersectionObserver' in window){
         new IntersectionObserver(function(en, ob){
-          if (en[0].isIntersecting && inLABox()){ frame(); ob.disconnect(); }
+          if (en[0].isIntersecting && inLABox()){ ob.disconnect(); settle(); }
         }, { rootMargin: '600px 0px' }).observe(w);
+      /* the frame is a whole second page (map tiles, protomaps): building it while a thumb flicks past cost ~1.5 s of
+         dropped frames at phone speed (2026-10-14), so it waits for the scroll to pause */
+      var lastS = 0; window.addEventListener('scroll', function(){ lastS = Date.now(); }, { passive: true });
+      function settle(){ if (Date.now() - lastS < 350){ setTimeout(settle, 350); return; } frame(); }
       } else frame();
     }
     function gate(){
@@ -89873,7 +89877,7 @@ function initNowMicroTabs(){
     if (typeof tlRenderForOffset === 'function') {
       clearTimeout(window._ghSmokeRefreshTo);
       window._ghSmokeRefreshTo = setTimeout(function(){
-        try { window._lastFullTlRender = Date.now(); tlRenderForOffset(); } catch(e){}
+        try { window._lastFullTlRender = Date.now(); (window._tlRenderSoon || tlRenderForOffset)(); } catch(e){}
       }, 150);
     }
 
@@ -99427,6 +99431,25 @@ function initNowMicroTabs(){
     tlRenderForOffset();
   };
 
+  /* LAUNCH SCROLL (user 2026-10-14: "make sure scrolling is optimized on launch"). Measured at phone speed: weather, Kp,
+     PM2.5, smoke intel, obs clouds, NWS sky and the sun path each fired a FULL timeline re-render (~300-400 ms apiece) in the
+     first seconds, mid-scroll. The background refreshes now go through _tlRenderSoon: one render for a burst, held until the
+     scroll has paused (never longer than 2.5 s). The first render and day-nav taps stay immediate. */
+  (function(){
+    var to = 0, first = 0, lastScroll = 0;
+    window.addEventListener('scroll', function(){ lastScroll = Date.now(); }, { passive: true });
+    window._tlRenderSoon = function(){
+      if (!first) first = Date.now();
+      clearTimeout(to);
+      (function wait(){
+        to = setTimeout(function(){
+          if (Date.now() - lastScroll < 220 && Date.now() - first < 2500){ wait(); return; }
+          first = 0;
+          try { window._lastFullTlRender = Date.now(); tlRenderForOffset(); } catch(e){}
+        }, 300);
+      })();
+    };
+  })();
   function tlRenderForOffset() {
     var data = tlSliceDay(window._tlDayOffset);
     if (!data) return;
@@ -105841,8 +105864,10 @@ function closeAlertModal(){
         return { k: k, cd: cd, sd: sd, cx: k.w / 2 - 0.5, cy: k.h / 2 - 0.5, rx: k.w * k.sat.rf, ry: k.w * k.sat.rf * 0.997, fresh: Math.pow(0.5, Math.max(0, Date.now() - k.t) / 3600000) }; });
       var row = 0, seq = ENOWG.seq;
       return new Promise(function(res){
-        var step = function(){ if (seq !== ENOWG.seq){ res(null); return; } var end = Math.min(OH, row + 48);
-          for (; row < end; row++){ var la = (90 - (row + 0.5) * 180 / OH) * rad, cp = Math.cos(la), sp = Math.sin(la), z = B * sp, z2 = z * z;
+        /* time-sliced (2026-10-14 launch-scroll pass): 48 rows a slice was a 200+ ms freeze per slice at phone speed, mid-scroll;
+           now each slice stops after ~8 ms and yields */
+        var step = function(){ if (seq !== ENOWG.seq){ res(null); return; } var tEnd = performance.now() + 8;
+          for (; row < OH && (row % 4 || performance.now() < tEnd); row++){ var la = (90 - (row + 0.5) * 180 / OH) * rad, cp = Math.cos(la), sp = Math.sin(la), z = B * sp, z2 = z * z;
             for (var j = 0; j < OW; j++){ var r = 0, gg = 0, bb = 0, wsum = 0, best = 0;
               for (var q = 0; q < D.length; q++){ var s0 = D[q], x = A * cp * s0.cd[j], y = A * cp * s0.sd[j], dx = HS - x, vis = dx * x - y * y - z2; if (vis <= 0) continue;
                 var pr = Math.sqrt(x * x + y * y + z2), dr = Math.sqrt(dx * dx + y * y + z2), cv = vis / (pr * dr); if (cv < 0.2) continue;
@@ -110580,6 +110605,9 @@ function closeAlertModal(){
   /* 3. the sixteen GOES bands fold behind one BANDS button; the composites and areas stay out */
   #goes-bands-panel.bv-bands-shut .bv-bandx{ display:none !important; }
   #bv-bands-toggle{ display:inline-block !important; }
+  /* the panel is right-aligned for desktop's side column; on a phone the rows centre (user 2026-10-14: "have those tabs centered") */
+  #goes-bands-panel{ text-align:center !important; }
+  #goes-bands-panel #live-view-row, #goes-bands-panel #live-sector-row, #goes-bands-panel #live-primary-row{ justify-content:center !important; }
   /* 5. OBSERVATORIES' glass needs a blur phones don't get, so its pale type sat on the clouds: give it a light backing */
   #observatories-widget > .widget-body{ background:rgba(241,244,251,.86) !important; }
   /* 6. every insight popup sizes to its content instead of filling the screen (the sources sheet already did) */
@@ -110594,16 +110622,22 @@ function closeAlertModal(){
 (function(){
   var mq = window.matchMedia ? window.matchMedia('(max-width:768px)') : { matches: false };
   /* 1 + 7: one passive scroll listener */
-  var lastY = window.pageYOffset, hero = null, ticking = false;
+  var lastY = window.pageYOffset, ticking = false, atEnd = false, railEl = null;
+  /* no layout reads on scroll: observers say when the hero has gone and when the page end is in view (a once-a-second
+     getBoundingClientRect still forced ~450 ms of layout at phone speed while the page was building) */
+  function watch(){
+    if (!('IntersectionObserver' in window)) return;
+    var hero = document.querySelector('.today-tl-sky-bar'), end = document.getElementById('bv-data-credit');
+    if (hero && !hero._bvIO){ hero._bvIO = 1; new IntersectionObserver(function(en){ var e = en[0];
+      document.body.classList.toggle('bv-past-hero', !e.isIntersecting && e.boundingClientRect.top < 0); }, { rootMargin: '-60px 0px 0px 0px' }).observe(hero); }
+    if (end && !end._bvIO){ end._bvIO = 1; new IntersectionObserver(function(en){ atEnd = en[0].isIntersecting; if (atEnd && railEl) railEl.classList.remove('bvr-away'); }).observe(end); }
+  }
   function onScroll(){
     ticking = false; if (!mq.matches) return;
     var y = window.pageYOffset;
-    hero = hero || document.querySelector('.today-tl-sky-bar');
-    if (hero){ var b = hero.getBoundingClientRect().bottom; document.body.classList.toggle('bv-past-hero', b < 60); }
-    var rail = document.getElementById('bv-rail');
+    var rail = railEl || (railEl = document.getElementById('bv-rail'));
     if (rail){
-      var nearEnd = y + window.innerHeight > document.documentElement.scrollHeight - 80;
-      if (y < 120 || nearEnd) rail.classList.remove('bvr-away');
+      if (y < 120 || atEnd) rail.classList.remove('bvr-away');
       else if (y > lastY + 6) rail.classList.add('bvr-away');
       else if (y < lastY - 6) rail.classList.remove('bvr-away');
     }
@@ -110638,26 +110672,40 @@ function closeAlertModal(){
 
   /* 4: a 10px floor for type on phones (measured 362 runs under 9px). Text in maps, charts, the rail and the footer is left alone. */
   var SKIP = 'svg, canvas, .leaflet-container, #bv-rail, #bv-data-credit, #bluishvoid-nav, #basin-frame';
+  var PASS = 0, lastScroll = 0;
+  window.addEventListener('scroll', function(){ lastScroll = Date.now(); }, { passive: true });
   function floor(){
     if (!mq.matches || !document.body) return;
-    var w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null), n, seen = [];
+    /* O(n): a per-pass stamp instead of indexOf (the first version was quadratic and cost ~1 s at phone speed on launch) */
+    var w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null), n, seen = [], pass = ++PASS;
     while ((n = w.nextNode())){
-      var e = n.parentElement; if (!e || e._bvFs || !n.nodeValue.trim() || seen.indexOf(e) >= 0) continue;
-      seen.push(e);
+      var e = n.parentElement; if (!e || e._bvFs || e._bvFsP === pass || !n.nodeValue.trim()) continue;
+      e._bvFsP = pass; seen.push(e);
     }
-    seen.forEach(function(e){
-      if (e.closest(SKIP)){ e._bvFs = 1; return; }
-      if (!e.getClientRects().length) return;            /* not drawn yet: look again next pass */
-      e._bvFs = 1;
-      var fs = parseFloat(getComputedStyle(e).fontSize);
-      if (fs && fs < 10) e.style.setProperty('font-size', '10px', 'important');
-    });
+    /* the style reads go in small idle slices (one pass at launch was ~700 ms of main thread at phone speed) */
+    var i = 0, ric = window.requestIdleCallback || function(f){ return setTimeout(function(){ f({ timeRemaining: function(){ return 6; } }); }, 16); };
+    (function chunk(dl){
+      if (Date.now() - lastScroll < 300){ setTimeout(function(){ ric(chunk, { timeout: 3000 }); }, 300); return; }
+      var t0 = performance.now();
+      for (; i < seen.length && (performance.now() - t0) < Math.min(8, Math.max(3, dl && dl.timeRemaining ? dl.timeRemaining() : 6)); i++){
+        var e = seen[i];
+        if (e.closest(SKIP)){ e._bvFs = 1; continue; }
+        if (!e.getClientRects().length) continue;            /* not drawn yet: look again next pass */
+        e._bvFs = 1;
+        var fs = parseFloat(getComputedStyle(e).fontSize);
+        if (fs && fs < 10) e.style.setProperty('font-size', '10px', 'important');
+      }
+      if (i < seen.length) ric(chunk, { timeout: 3000 });
+    })();
   }
   var pend = 0;
-  function soon(){ clearTimeout(pend); pend = setTimeout(function(){ try { floor(); } catch (er){} }, 450); }
+  /* never mid-scroll: wait for a pause, then run when the browser is idle */
+  function idle(fn){ (function go(){ if (Date.now() - lastScroll < 300){ setTimeout(go, 300); return; }
+    (window.requestIdleCallback || function(f){ return setTimeout(f, 1); })(function(){ try { fn(); } catch (er){} }, { timeout: 2000 }); })(); }
+  function soon(){ clearTimeout(pend); pend = setTimeout(function(){ idle(floor); }, 450); }
   document.addEventListener('click', soon, true);
-  [1500, 4000, 9000, 18000, 35000].forEach(function(ms){ setTimeout(function(){ try { bands(); floor(); onScroll(); } catch (er){} }, ms); });
-  setInterval(function(){ try { if (!document.hidden) floor(); } catch (er){} }, 20000);
+  [1500, 4000, 9000, 18000, 35000].forEach(function(ms){ setTimeout(function(){ try { bands(); watch(); onScroll(); } catch (er){} idle(floor); }, ms); });
+  setInterval(function(){ if (!document.hidden) idle(floor); }, 20000);
 })();
 </script>
 </body>
