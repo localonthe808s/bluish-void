@@ -72,6 +72,7 @@ export async function encryptFor(sub, payload) {
 /* one push to one phone. Returns the push service's status: 201 delivered to the service, 404/410 = the subscription
    is gone (the phone unsubscribed or reinstalled) and should be dropped. */
 export async function pushOne(sub, msg, jwk, urgency) {
+  if (msg && msg.title) msg = Object.assign({}, msg, { title: String(msg.title).toUpperCase() });   /* every title in capitals (user 2026-10-14) */
   const body = await encryptFor(sub, JSON.stringify(msg));
   const r = await fetch(sub.endpoint, { method: 'POST', body, headers: {
     'Authorization': await vapidAuth(sub.endpoint, jwk),

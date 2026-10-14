@@ -734,7 +734,7 @@ async function notify(env, state, key, title, body, priority, stateKey) {
   if (env.NTFY_TOPIC) {
     const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, {
       method: 'POST', body,
-      headers: ntfyHeaders(env, { 'Title': title, 'Priority': priority || 'default' })
+      headers: ntfyHeaders(env, { 'Title': String(title).toUpperCase(), 'Priority': priority || 'default' })
     });
     ok = r.ok; nt = String(r.status);
     if (!r.ok) console.log(`[ntfy] ${r.status} ${(await r.text()).slice(0, 160)} -- "${title}" NOT delivered`);
@@ -875,7 +875,7 @@ async function reviewDigest(env) {
   // the day's mark goes in BEFORE the post, like notify(): a put that fails after a post would repeat the digest
   await env.OBS.put(key, '1', { expirationTtl: 60 * 60 * 48 });
   const pu = await pushAll(env, { title, body, tag: 'review', url: '/' }, pri === 'high' ? 'high' : 'normal', 'owner').catch(() => ({ sent: 0 }));
-  const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, { method: 'POST', body, headers: ntfyHeaders(env, { 'Title': title, 'Priority': pri }) });
+  const r = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, { method: 'POST', body, headers: ntfyHeaders(env, { 'Title': String(title).toUpperCase(), 'Priority': pri }) });
   if (!r.ok) console.log(`[ntfy] ${r.status} ${(await r.text()).slice(0, 160)} -- review digest NOT delivered`);
   return `${title} (ntfy ${r.status}, push ${pu.sent})`;
 }
