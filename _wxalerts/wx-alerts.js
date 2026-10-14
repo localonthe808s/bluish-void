@@ -366,7 +366,7 @@ async function sunsetAlert(f, now, lat, lon) {
   if ((S.cM + S.cH) / 2 < 15) return null;   /* no clouds to light: clean dry air alone scores 70 (LA, 10-14) but a bare sky is not a show */
   const t = (iso, add) => { const d = new Date(Date.parse(iso + ':00Z') + add * 60e3); return hm(d.getUTCHours(), d.getUTCMinutes()); };
   const sky = `${Math.round((S.cM + S.cH) / 2)}% mid and high cloud to catch the color`;
-  return { key: `sunset:${now.date}`, title: `GOLDEN HOUR TONIGHT \u00b7 ${S.label === 'EPIC' ? 'EPIC' : 'GREAT'}`, sep: ' | ', urg: 'normal',   /* user 2026-10-14 */
+  return { key: `sunset:${now.date}`, title: `GOLDEN HOUR \u00b7 ${S.label === 'EPIC' ? 'EPIC' : 'GREAT'}`, sep: ' | ', urg: 'normal',   /* user 2026-10-14 */
     body: `${S.label} (score ${S.score}). Sunset ${t(ss, 0)}, best color about ${t(ss, -5).replace(/ [AP]M$/, '')}–${t(ss, 15)}: ${sky}${S.block != null && S.block < 0.25 ? ', clear toward the sun' : ''}.` };
 }
 
