@@ -8,6 +8,7 @@
 //   EARTHQUAKE  every minute: a USGS quake (worldwide, M2.5+) whose shaking is likely felt at the place
 //   WILDFIRE    a new wildfire within 15 miles (NIFC incidents, US)
 //   AIR         the air turning unhealthy (US AQI 151+, Open-Meteo air quality), once a day
+//   SUNSET      about an hour before sunset, when tonight's sunset scores EXCELLENT or EPIC (70+) on the site's own formula
 // SEVERE is split in two lanes (2026-10-13, user: "flash flooding / tornados / earthquakes most importantly" -> "make
 // sure all hazards are covered"): the storm-based warnings drawn as polygons (tornado, flash flood, severe thunderstorm,
 // extreme wind, snow squall) are read nationally EVERY MINUTE and matched to each place by the warning's own outline;
@@ -20,7 +21,7 @@ import { pushOne } from '../_kalshi/cron-worker/webpush.js';
 
 const ORIGIN = 'https://bluishvoid.com';
 const UA = '(bluishvoid.com weather alerts, https://bluishvoid.com)';
-const TYPES = ['umbrella', 'rain', 'severe', 'swing', 'aurora', 'lightning', 'quake', 'fire', 'air'];
+const TYPES = ['umbrella', 'rain', 'severe', 'swing', 'aurora', 'lightning', 'quake', 'fire', 'air', 'sunset'];
 const PUSH_HOSTS = /(^|\.)(push\.apple\.com|fcm\.googleapis\.com|push\.services\.mozilla\.com|notify\.windows\.com)$/;
 const BATCH = 1500;          /* places per tick (2 calls each + pushes): the account is on Workers Paid (10,000 calls per run), so every place is checked every tick; the cursor only rotates past 1,500 */
 
@@ -67,7 +68,7 @@ async function route(request, env) {
   }
   return J({ error: 'not found' }, 404);
 }
-const label = (t) => ({ umbrella: 'umbrella', rain: 'rain soon', severe: 'severe warnings', swing: 'big swings', aurora: 'aurora', lightning: 'lightning', quake: 'earthquakes', fire: 'wildfires', air: 'unhealthy air' })[t] || t;
+const label = (t) => ({ umbrella: 'umbrella', rain: 'rain soon', severe: 'severe warnings', swing: 'big swings', aurora: 'aurora', lightning: 'lightning', quake: 'earthquakes', fire: 'wildfires', air: 'unhealthy air', sunset: 'great sunsets' })[t] || t;
 const jwk = (env) => (typeof env.VAPID_JWK === 'string' ? JSON.parse(env.VAPID_JWK) : env.VAPID_JWK);
 
 /* ---------------------------------------------------------------- the checks --------------------------------------- */
@@ -75,8 +76,8 @@ const hm = (h, m) => { const ap = h < 12 ? 'AM' : 'PM', h12 = h % 12 || 12; retu
 
 /* the place's forecast: hourly rain odds/amounts and cloud, daily highs/lows (yesterday..tomorrow), the 15-minute rain */
 async function forecast(lat, lon) {
-  const u = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=precipitation_probability,precipitation,cloud_cover,weather_code,cape`
-    + '&daily=temperature_2m_max,temperature_2m_min&minutely_15=precipitation&forecast_minutely_15=12&past_minutely_15=2'
+  const u = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=precipitation_probability,precipitation,cloud_cover,weather_code,cape,cloud_cover_low,cloud_cover_mid,cloud_cover_high,relative_humidity_2m,pressure_msl,wind_speed_300hPa`
+    + '&daily=temperature_2m_max,temperature_2m_min,sunset&minutely_15=precipitation&forecast_minutely_15=12&past_minutely_15=2'
     + '&past_days=1&forecast_days=2&temperature_unit=fahrenheit&precipitation_unit=inch&timezone=auto';
   const r = await fetch(u); if (!r.ok) throw new Error(`open-meteo ${r.status}`);
   return r.json();
@@ -301,6 +302,74 @@ async function airNow(lat, lon, now) {
     body: `US AQI ${a} (${lvl}) right now. Limit time outdoors${a >= 201 ? ', keep windows closed and use a filter if you have one' : ''}.` };
 }
 
+/* ---------------------------------------------------------------- sunset ------------------------------------------- */
+/* THE SITE'S OWN SUNSET SCORE, server side (user 2026-10-14: "make an alert for good sunsets"). index.html's showGoldenInsight
+   (scoreOnly) is THE score; this is its formula on the same inputs the worker can reach: the 100-point budget -- cloud canvas
+   (mid+high) 25, western horizon clear 18 (low cloud overhead AND along the light path 60-400 km toward the sun), aerosol 15
+   (CAMS AOD), dry air 12, dry conditions 10, pressure 8, clearing bonus 8, upper winds 4 -- the sun-blocked cap 25 and the
+   light-path cap/penalty. Left out: the card's cloud-genus read, the NWS cross-check and the smoke/front intel (page-only).
+   Fires 55-75 min before sunset, once a day per place, at 70+ (EXCELLENT / EPIC, the site's cutoffs) AND some mid/high cloud. */
+function sunsetAz(lat, dateIso) {
+  const d = new Date(dateIso + 'T12:00:00Z'), n = Math.floor((d - Date.UTC(d.getUTCFullYear(), 0, 0)) / 864e5), r = Math.PI / 180;
+  const dec = -23.44 * Math.cos(r * 360 / 365 * (n + 10)), c = Math.sin(dec * r) / Math.cos(lat * r);
+  return 360 - Math.acos(Math.max(-1, Math.min(1, c))) / r;            /* degrees from north, west of south at sunset */
+}
+function dest(lat, lon, km, az) { const R = 6371, r = Math.PI / 180, d = km / R, b = az * r, la = lat * r, lo = lon * r;
+  const la2 = Math.asin(Math.sin(la) * Math.cos(d) + Math.cos(la) * Math.sin(d) * Math.cos(b));
+  const lo2 = lo + Math.atan2(Math.sin(b) * Math.sin(d) * Math.cos(la), Math.cos(d) - Math.sin(la) * Math.sin(la2));
+  return [la2 / r, lo2 / r]; }
+async function sunsetScore(f, lat, lon, ssIso) {
+  const H = f.hourly, T = Date.parse(ssIso + ':00Z');
+  const near = (arr) => { let s = 0, w = 0; for (let i = 0; i < H.time.length; i++) { const dt = Math.abs(Date.parse(H.time[i] + ':00Z') - T) / 60e3; if (dt > 90 || arr[i] == null) continue; const k = 1 - dt / 120; s += arr[i] * k; w += k; } return w ? s / w : null; };
+  const at = (arr, h) => { let best = null, bd = 1e12; for (let i = 0; i < H.time.length; i++) { const dt = Math.abs(Date.parse(H.time[i] + ':00Z') - (T - h * 3600e3)); if (dt < bd && arr[i] != null) { bd = dt; best = arr[i]; } } return best; };
+  const cL = Math.round(near(H.cloud_cover_low) || 0), cM = Math.round(near(H.cloud_cover_mid) || 0), cH = Math.round(near(H.cloud_cover_high) || 0);
+  const rh = near(H.relative_humidity_2m), pr = near(H.precipitation), pNow = at(H.pressure_msl, 0), p3 = at(H.pressure_msl, 3), w300 = near(H.wind_speed_300hPa);
+  const pre = at(H.precipitation, 4), preL = at(H.cloud_cover_low, 4);
+  /* the light path: low (and thick mid) cloud 60/150/250/400 km toward the setting sun, weighted as the page does */
+  const az = sunsetAz(lat, ssIso.slice(0, 10)), KM = [60, 150, 250, 400], WT = { 60: 0.7, 150: 1, 250: 1, 400: 0.8 };
+  let block = null, lows = [];
+  try { const P = KM.map((k) => dest(lat, lon, k, az));
+    const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${P.map((p) => p[0].toFixed(3)).join(',')}&longitude=${P.map((p) => p[1].toFixed(3)).join(',')}&hourly=cloud_cover_low,cloud_cover_mid&forecast_days=2&timezone=GMT`);
+    const J = r.ok ? await r.json() : null; const A = Array.isArray(J) ? J : J ? [J] : [];
+    if (A.length === 4) { block = 0; A.forEach((j, i) => { const h = j.hourly; let bi = 0, bd = 1e12; for (let q = 0; q < h.time.length; q++) { const dt = Math.abs(Date.parse(h.time[q] + ':00Z') - (T - (f.utc_offset_seconds || 0) * 1000)); if (dt < bd) { bd = dt; bi = q; } }
+      const l = h.cloud_cover_low[bi] || 0, m = h.cloud_cover_mid[bi] || 0; lows.push(Math.round(l)); block = Math.max(block, WT[KM[i]] * l / 100, KM[i] >= 250 ? 0.6 * Math.max(0, m - 60) / 40 : 0); }); block = Math.min(1, block); } } catch (_) {}
+  let aod = null;
+  try { const r = await fetch(`https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&hourly=aerosol_optical_depth&forecast_days=2&timezone=auto`);
+    if (r.ok) { const j = await r.json(), h = j.hourly; let s2 = 0, n2 = 0; for (let i = 0; i < h.time.length; i++) { if (Math.abs(Date.parse(h.time[i] + ':00Z') - T) <= 90 * 60e3 && h.aerosol_optical_depth[i] != null) { s2 += h.aerosol_optical_depth[i]; n2++; } } if (n2) aod = s2 / n2; } } catch (_) {}
+  const blocked = cM >= 85 || (cM >= 70 && cH >= 60) || cL >= 80;
+  let sc = 0; const mh = (cM + cH) / 2;
+  sc += mh >= 90 ? 0 : mh >= 80 ? 4 : (mh >= 30 && mh <= 70) ? 25 : (mh >= 20 && mh <= 80) ? 19 : mh >= 10 ? 12 : 8;
+  const effL = block != null ? Math.max(cL, Math.round(block * 100)) : cL;
+  let ls = effL <= 10 ? 18 : effL <= 25 ? 14 : effL <= 40 ? 9 : effL <= 60 ? 4 : 1;
+  if (preL != null && preL > 40 && effL < 30) ls = Math.min(18, ls + 4); sc += ls;
+  sc += blocked ? 0 : aod != null ? (aod < 0.1 ? 15 : aod < 0.15 ? 13 : aod < 0.22 ? 10 : aod < 0.32 ? 6 : aod < 0.5 ? 3 : 1) : 8;
+  sc += rh == null ? 0 : blocked ? 0 : rh <= 55 ? 12 : rh <= 65 ? 10 : rh <= 75 ? 7 : rh <= 85 ? 4 : 2;
+  sc += pr == null ? 0 : pr <= 0 ? 10 : pr < 0.02 ? 7 : pr < 0.1 ? 3 : 0;
+  const trend = pNow != null && p3 != null ? pNow - p3 : 0;
+  sc += pNow == null ? 4 : trend > 0.5 ? (pNow >= 1016 ? 8 : 6) : Math.abs(trend) <= 0.5 ? (pNow >= 1020 ? 7 : 5) : 3;
+  sc += (pre != null && pre > 0.01 && (pr || 0) <= 0 && trend > 0.5) ? 5 : 0;                    /* clearing after rain, pressure up */
+  sc += blocked ? 0 : w300 == null ? 1 : w300 > 60 ? 4 : w300 > 40 ? 3 : 1;
+  let fin = Math.round(sc);
+  if (blocked) fin = Math.min(fin, 25);
+  if (block != null) { const cv = Math.min(1, (cM + cH) / 60);
+    if (block > 0.8) fin = Math.min(fin, 30); else if (block > 0.4) fin -= Math.round(18 * (block - 0.4) / 0.4 * (0.4 + 0.6 * cv)); else if (block < 0.2 && cv > 0.3 && cL < 40) fin = Math.min(100, fin + 6); }
+  fin = Math.max(0, Math.min(100, fin));
+  const label = fin >= 85 ? 'EPIC' : fin >= 70 ? 'EXCELLENT' : fin >= 55 ? 'GOOD' : fin >= 40 ? 'FAIR' : fin >= 25 ? 'POOR' : 'UNLIKELY';
+  return { score: fin, label, cL, cM, cH, block, aod, rh };
+}
+async function sunsetAlert(f, now, lat, lon) {
+  const D = f.daily; if (!D || !D.sunset) return null;
+  const ss = D.sunset.find((x) => x && x.slice(0, 10) === now.date); if (!ss) return null;
+  const mins = (Date.parse(ss + ':00Z') - Date.parse(now.iso + ':00Z')) / 60e3;
+  if (mins < 55 || mins > 75) return null;
+  const S = await sunsetScore(f, lat, lon, ss); if (S.score < 70) return null;
+  if ((S.cM + S.cH) / 2 < 15) return null;   /* no clouds to light: clean dry air alone scores 70 (LA, 10-14) but a bare sky is not a show */
+  const t = (iso, add) => { const d = new Date(Date.parse(iso + ':00Z') + add * 60e3); return hm(d.getUTCHours(), d.getUTCMinutes()); };
+  const sky = `${Math.round((S.cM + S.cH) / 2)}% mid and high cloud to catch the colour`;
+  return { key: `sunset:${now.date}`, title: S.label === 'EPIC' ? 'Epic sunset tonight' : 'Great sunset tonight', urg: 'normal',
+    body: `Scores ${S.score} (${S.label}). Sunset ${t(ss, 0)}, best colour about ${t(ss, -5).replace(/ [AP]M$/, '')}–${t(ss, 15)}: ${sky}${S.block != null && S.block < 0.25 ? ', clear toward the sun' : ''}.` };
+}
+
 /* ---------------------------------------------------------------- the tick ----------------------------------------- */
 async function tick(env) {
   const subs = await getSubs(env); if (!subs.length) return 'no phones';
@@ -346,6 +415,7 @@ async function tick(env) {
     if (wantsAny('severe')) { try { for (const a of await severe(g.lat, g.lon)) found.push(['severe', a]); } catch (_) {} }
     if (wantsAny('fire')) { try { for (const a of await firesNear(g.lat, g.lon)) found.push(['fire', a]); } catch (_) {} }
     if (wantsAny('air')) { try { const a = await airNow(g.lat, g.lon, ln); if (a) found.push(['air', a]); } catch (_) {} }
+    if (wantsAny('sunset')) { try { const a = await sunsetAlert(f, ln, g.lat, g.lon); if (a) found.push(['sunset', a]); } catch (_) {} }
     for (const [type, a] of found) {
       const sk = `${k}|${a.key}`, last = state[sk] || 0;
       if (a.cool ? now - last < a.cool : last) continue;                               /* dated keys: once ever; others: cool-down */
@@ -386,5 +456,5 @@ export default {
       ctx.waitUntil(tick(env).then((r) => console.log(`[wx] ${r}`)).catch((e) => console.log(`[wx] FAILED ${e}`)));
   },
   // exported for tests
-  _t: { umbrella, rainSoon, swings, aurora, minKp, localNow, severe, inGeom, warnMsg, quakeAt, firesNear, airNow, fastTick, sendMerged }
+  _t: { umbrella, rainSoon, swings, aurora, minKp, localNow, severe, inGeom, warnMsg, quakeAt, firesNear, airNow, fastTick, sendMerged, sunsetScore, sunsetAlert, sunsetAz }
 };
