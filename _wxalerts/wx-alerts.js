@@ -365,9 +365,9 @@ async function sunsetAlert(f, now, lat, lon) {
   const S = await sunsetScore(f, lat, lon, ss); if (S.score < 70) return null;
   if ((S.cM + S.cH) / 2 < 15) return null;   /* no clouds to light: clean dry air alone scores 70 (LA, 10-14) but a bare sky is not a show */
   const t = (iso, add) => { const d = new Date(Date.parse(iso + ':00Z') + add * 60e3); return hm(d.getUTCHours(), d.getUTCMinutes()); };
-  const sky = `${Math.round((S.cM + S.cH) / 2)}% mid and high cloud to catch the colour`;
+  const sky = `${Math.round((S.cM + S.cH) / 2)}% mid and high cloud to catch the color`;
   return { key: `sunset:${now.date}`, title: S.label === 'EPIC' ? 'Epic sunset tonight' : 'Great sunset tonight', urg: 'normal',
-    body: `Scores ${S.score} (${S.label}). Sunset ${t(ss, 0)}, best colour about ${t(ss, -5).replace(/ [AP]M$/, '')}–${t(ss, 15)}: ${sky}${S.block != null && S.block < 0.25 ? ', clear toward the sun' : ''}.` };
+    body: `${S.label} (score ${S.score}). Sunset ${t(ss, 0)}, best color about ${t(ss, -5).replace(/ [AP]M$/, '')}–${t(ss, 15)}: ${sky}${S.block != null && S.block < 0.25 ? ', clear toward the sun' : ''}.` };
 }
 
 /* ---------------------------------------------------------------- the tick ----------------------------------------- */
