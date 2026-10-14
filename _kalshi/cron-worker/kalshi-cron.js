@@ -878,8 +878,12 @@ async function alertTick(env, sched) {
      /health; a heartbeat older than 30 minutes -- or no answer -- pages the owner's phones once an hour until it is back */
   if (new Date(sched || Date.now()).getUTCMinutes() % 10 === 7) {
     let age = null, why = '';
-    try { const h = await (await fetch('https://bluish-wx-alerts.junkyjunkjunkjunkjunk.workers.dev/health')).json(); age = h.ageMin; }
-    catch (e) { why = 'no answer'; }
+    /* read its heartbeat straight from its KV (binding WXKV): the workers.dev fetch from this worker never reached it -- the
+       first live run (11:07 UTC 2026-10-14, alertTick is off 05-10 UTC) paged "no answer" while it ran every minute fine */
+    try {
+      if (env.WXKV){ const b = await env.WXKV.get('beat', { type: 'json' }); if (b && b.at) age = (Date.now() - Date.parse(b.at)) / 6e4; else why = 'no heartbeat'; }
+      else { const h = await (await fetch('https://bluish-wx-alerts.junkyjunkjunkjunkjunk.workers.dev/health')).json(); age = h.ageMin; }
+    } catch (e) { why = 'no answer'; }
     if (age == null || age > 30) {
       const hr = new Date().toISOString().slice(0, 13);
       await notify(env, state, `wxdown:${hr}`, 'Weather alerts are down',
