@@ -136,7 +136,7 @@ function aurora(f, now, kpTonight, lat) {
     if ((t.slice(0, 10) === now.date && h >= 21) || (t.slice(0, 10) > now.date && h <= 2)) cc.push(H.cloud_cover[i] || 0); }
   const cloud = cc.length ? cc.reduce((a, b) => a + b, 0) / cc.length : 100; if (cloud > 60) return null;
   return { key: `aurora:${now.date}`, title: 'Aurora tonight',
-    body: `The northern lights may be visible low to the north after dark (Kp ${kpTonight.toFixed(0)} forecast). Skies look ${cloud < 30 ? 'clear' : 'mostly clear'}; get away from city lights.`, urg: 'high' };
+    body: `The northern lights may be visible low to the north after dark (Kp ${kpTonight.toFixed(0)} forecast). Skies ${cloud < 30 ? 'clear' : 'mostly clear'} (${Math.round(cloud)}% cloud).`, urg: 'high' };
 }
 async function kpTonightFor(cache, offsetSec, date) {
   if (!cache.kp) { try { const r = await fetch('https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json'); cache.kp = r.ok ? await r.json() : []; } catch (_) { cache.kp = []; } }
@@ -155,8 +155,7 @@ async function severe(lat, lon) {
   return (j.features || []).map((x) => x.properties || {}).filter((p) => /Warning$/.test(p.event || '') && p.status !== 'Test' && POLY_EVENTS.indexOf(p.event) < 0).map((p) => {
     const until = p.ends || p.expires; let u = '';
     if (until) { const m = /T(\d\d):(\d\d)/.exec(until); if (m) u = `Until ${hm(+m[1], +m[2])}. `; }
-    const ins = String(p.instruction || '').replace(/\s+/g, ' ').trim().split(/(?<=\.)\s/)[0] || '';
-    return { key: `nws:${p.id}`, cool: 3 * 864e5, title: p.event, body: (u + (ins || p.headline || '')).slice(0, 220), urg: 'high' };
+    return { key: `nws:${p.id}`, cool: 3 * 864e5, title: p.event, body: (u + warnFacts(p)).slice(0, 220), urg: 'high' };
   });
 }
 
@@ -180,6 +179,16 @@ function stormy(f, now) {
        forecast of rain with CAPE 0 and no thunder code -- a thunder-only gate would have missed it */
     if ((H.weather_code[i] || 0) >= 95 || (H.precipitation_probability[i] || 0) >= 20) return true; }
   return false;
+}
+/* how long the storm should last there: consecutive hours from now with thunder in the forecast or a 50%+ rain chance */
+function stormLength(f, now) {
+  const H = f.hourly; let n = 0, started = false;
+  for (let i = 0; i < H.time.length; i++) { const t = H.time[i]; if (t.slice(0, 13) < now.iso.slice(0, 13)) continue;
+    const wet = (H.weather_code[i] || 0) >= 95 || (H.precipitation_probability[i] || 0) >= 50;
+    if (wet) { n++; started = true; } else if (started || n === 0 && t.slice(0, 13) > now.iso.slice(0, 13)) break; }
+  if (n <= 1) return 'Looks like a short storm, under an hour.';
+  const end = new Date(Date.parse(now.iso.slice(0, 13) + ':00:00Z') + n * 3600e3);
+  return n >= 4 ? `Looks like a long storm, about ${n} hours (until around ${hm(end.getUTCHours())}).` : `Should last about ${n} hours, until around ${hm(end.getUTCHours())}.`;
 }
 const hourPlus = (iso, h) => new Date(Date.parse(iso.slice(0, 13) + ':00:00Z') + h * 3600e3).toISOString().slice(0, 13);
 /* listen for `ms`, keep strikes within ~25 mi of any of the given places: [lat, lon, tMs] */
@@ -231,6 +240,20 @@ function inRing(lon, lat, ring) { let c = false;
 function inGeom(lon, lat, g) { if (!g) return false;
   const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
   return polys.some((P) => inRing(lon, lat, P[0]) && !P.slice(1).some((h) => inRing(lon, lat, h))); }
+/* the hazard itself from the NWS text ("* WHAT...Snow. Total accumulations 6 to 10 inches."), never the instructions */
+function warnFacts(p) {
+  const d = String(p.description || '').replace(/\s+/g, ' ');
+  const w = /\*\s*WHAT\.\.\.(.*?)(?=\*\s*[A-Z ]{3,}\.\.\.|$)/.exec(d);
+  const tidy = (x) => x.trim().replace(/\.+$/, '') + '.';
+  if (w) return tidy(w[1]);
+  const h = /HAZARD\.\.\.(.*?)(?=SOURCE\.\.\.|IMPACT\.\.\.|$)/.exec(d);
+  if (h) return tidy(h[1]);
+  /* fire-weather style: the measured lines (WINDS / RELATIVE HUMIDITY / TEMPERATURES ...) */
+  const parts = []; const rx = /\*\s*(WINDS?|RELATIVE HUMIDITY|HUMIDITY|TEMPERATURES?|SNOW|ICE|VISIBILITY)\.\.\.(.*?)(?=\*\s*[A-Z ]{3,}\.\.\.|$)/g; let m;
+  while ((m = rx.exec(d)) && parts.length < 3) parts.push(m[1].charAt(0) + m[1].slice(1).toLowerCase() + ': ' + m[2].trim().replace(/\.+$/, ''));
+  if (parts.length) return parts.join('. ') + '.';
+  return String(p.headline || '').replace(/ issued .*? by NWS.*$/i, '');
+}
 async function polyWarnings() {
   const r = await fetch('https://api.weather.gov/alerts/active?status=actual&event=' + POLY_EVENTS.map(encodeURIComponent).join(','), { headers: { 'User-Agent': UA, 'Accept': 'application/geo+json' } });
   if (!r.ok) throw new Error(`nws ${r.status}`);
@@ -244,10 +267,9 @@ function warnMsg(f) {
   if (cat) title = p.event === 'Tornado Warning' ? 'TORNADO EMERGENCY' : p.event === 'Flash Flood Warning' ? 'FLASH FLOOD EMERGENCY' : p.event;
   const det = first('tornadoDetection'); const until = p.ends || p.expires; let u = '';
   if (until) { const m = /T(\d\d):(\d\d)/.exec(until); if (m) u = `Until ${hm(+m[1], +m[2])}. `; }
-  const lead = p.event === 'Tornado Warning' ? (det === 'OBSERVED' ? 'A tornado has been observed. ' : 'Radar indicates a tornado. ') + 'Take shelter now: lowest floor, interior room, away from windows. '
-    : p.event === 'Flash Flood Warning' ? 'Move to higher ground now. Never drive into flooded roads. ' : '';
-  const ins = String(p.instruction || '').replace(/\s+/g, ' ').trim().split(/(?<=\.)\s/)[0] || '';
-  return { key: `nws:${p.id}`, title: (pds && !cat ? title + ' (particularly dangerous)' : title), body: (u + (lead || ins || p.headline || '')).slice(0, 230), urg: 'high' };
+  const lead = p.event === 'Tornado Warning' ? (det === 'OBSERVED' ? 'Tornado observed. ' : 'Tornado indicated by radar. ') : '';
+  const hail = first('maxHailSize'), wind = first('maxWindGust'), extra = [hail && +hail > 0 ? `hail up to ${hail} in` : '', wind ? `gusts to ${String(wind).replace(/\s*MPH/i, ' mph')}` : ''].filter(Boolean).join(', ');
+  return { key: `nws:${p.id}`, title: (pds && !cat ? title + ' (particularly dangerous)' : title), body: (u + lead + (extra ? extra.charAt(0).toUpperCase() + extra.slice(1) + '. ' : '') + (lead || extra ? '' : warnFacts(p))).trim().slice(0, 230), urg: 'high' };
 }
 /* felt shaking, roughly: intensity from magnitude and hypocentral distance (a California-style attenuation, MMI ~
    3.67 + 1.17 M - 3.19 log10(km)); 3 and up is felt by some -- 3.5 missed an M4.5 at 40 mi and an M6 at 120 mi */
@@ -270,7 +292,7 @@ async function fastTick(env) {
     if (s.types.indexOf('quake') >= 0) for (const q of Q) { const a = quakeAt(q, l.lat, l.lon); if (a.mmi < 3) continue;
       const P = q.properties, ago = Math.max(1, Math.round((now - P.time) / 60e3));
       out.push({ key: `eq:${q.id}`, title: `M${P.mag.toFixed(1)} earthquake`, urg: a.mmi >= 5 ? 'high' : 'normal',
-        body: `${Math.round(a.mi)} miles ${a.dir} of ${l.name}, ${ago} min ago (${P.place}). Shaking there likely ${MMI_WORD(a.mmi)}.${P.tsunami ? ' A tsunami message was issued: check tsunami.gov.' : ''} If shaking: drop, cover, hold on.` }); }
+        body: `${Math.round(a.mi)} miles ${a.dir} of ${l.name}, ${ago} min ago (${P.place}). Shaking there likely ${MMI_WORD(a.mmi)}.${P.tsunami ? ' Tsunami message issued.' : ''}` }); }
     for (const a of out) {
       const sk = `${gkey(l)}|${s.endpoint.slice(-24)}|${a.key}`; if (state[sk]) continue; state[sk] = now;
       (PEND[s.endpoint] = PEND[s.endpoint] || []).push({ s, type: a.key.split(':')[0], ekey: a.key, a, name: l.name, lat: l.lat, lon: l.lon });
@@ -292,14 +314,14 @@ async function firesNear(lat, lon) {
   return FIRES.filter((f) => f.geometry && f.geometry.coordinates).map((f) => ({ f, d: miles(lat, lon, f.geometry.coordinates[1], f.geometry.coordinates[0]) })).filter((x) => x.d <= 15)
     .map(({ f, d }) => { const P = f.properties, c = f.geometry.coordinates;
       return { key: `fire:${P.IrwinID || P.IncidentName}`, cool: 30 * 864e5, title: 'Wildfire nearby', urg: d <= 5 ? 'high' : 'normal',
-        body: `${P.IncidentName || 'A wildfire'} is ${Math.max(1, Math.round(d))} miles ${compass(lat, lon, c[1], c[0])}${P.DailyAcres ? `, ${Math.round(P.DailyAcres).toLocaleString('en-US')} acres` : ''}${P.PercentContained != null ? `, ${P.PercentContained}% contained` : ''}. Follow local evacuation orders.` }; });
+        body: `${P.IncidentName || 'A wildfire'} is ${Math.max(1, Math.round(d))} miles ${compass(lat, lon, c[1], c[0])}${P.DailyAcres ? `, ${Math.round(P.DailyAcres).toLocaleString('en-US')} acres` : ''}${P.PercentContained != null ? `, ${P.PercentContained}% contained` : ''}.` }; });
 }
 async function airNow(lat, lon, now) {
   const r = await fetch(`https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&current=us_aqi,pm2_5,ozone`); if (!r.ok) return null;
   const c = (await r.json()).current || {}; const a = c.us_aqi; if (a == null || a < 151) return null;
   const lvl = a >= 301 ? 'hazardous' : a >= 201 ? 'very unhealthy' : 'unhealthy';
   return { key: `air:${now.date}`, title: 'Unhealthy air', urg: a >= 201 ? 'high' : 'normal',
-    body: `US AQI ${a} (${lvl}) right now. Limit time outdoors${a >= 201 ? ', keep windows closed and use a filter if you have one' : ''}.` };
+    body: `US AQI ${a} (${lvl}) right now${c.pm2_5 != null ? `, PM2.5 ${Math.round(c.pm2_5)} \u00b5g/m\u00b3` : ''}.` };
 }
 
 /* ---------------------------------------------------------------- sunset ------------------------------------------- */
@@ -396,15 +418,14 @@ async function tick(env) {
       if (near.length) {
         state[`${k}|ltg:last`] = now; state[`${k}|ltg:quiet`] = 0;
         if (!on) { state[`${k}|ltg:on`] = now;
-          const n0 = near[0];
+          const n0 = near[0], len = stormLength(f, ln);
           found.push(['lightning', { key: `ltg:${now}`, title: 'Lightning nearby', urg: 'high',
-            body: `Strikes within ${LTG_MI} miles: the nearest ${Math.max(1, Math.round(n0.d))} mile${Math.max(1, Math.round(n0.d)) > 1 ? 's' : ''} ${compass(g.lat, g.lon, n0.p[0], n0.p[1])}, ${near.length} in the last ${LTG.secs >= 150 ? 'two and a half minutes' : 'minute and a half'}. Get indoors and stay in until 30 minutes after the last thunder.`}]); }
+            body: `Strikes within ${LTG_MI} miles: the nearest ${Math.max(1, Math.round(n0.d))} mile${Math.max(1, Math.round(n0.d)) > 1 ? 's' : ''} ${compass(g.lat, g.lon, n0.p[0], n0.p[1])}, ${near.length} in the last ${LTG.secs >= 150 ? 'two and a half minutes' : 'minute and a half'}. ${len}`}]); }
       } else if (on) {
         /* the all-clear: 30 minutes since the last strike we saw AND three quiet samples in a row (we listen in samples, not continuously) */
         state[`${k}|ltg:quiet`] = (state[`${k}|ltg:quiet`] || 0) + 1;
         if (now - (state[`${k}|ltg:last`] || on) >= 30 * 60e3 && state[`${k}|ltg:quiet`] >= 3) {
-          delete state[`${k}|ltg:on`]; delete state[`${k}|ltg:quiet`];
-          found.push(['lightning', { key: `ltgclear:${now}`, title: 'Lightning all clear', urg: 'normal', body: `No lightning detected within ${LTG_MI} miles for 30 minutes.` }]); }
+          delete state[`${k}|ltg:on`]; delete state[`${k}|ltg:quiet`]; }   /* the episode closes quietly: no all-clear alert (user 2026-10-14) */
       }
     }
     const wantsAny = (t) => g.who.some((w) => w.s.types.indexOf(t) >= 0);
@@ -456,5 +477,5 @@ export default {
       ctx.waitUntil(tick(env).then((r) => console.log(`[wx] ${r}`)).catch((e) => console.log(`[wx] FAILED ${e}`)));
   },
   // exported for tests
-  _t: { umbrella, rainSoon, swings, aurora, minKp, localNow, severe, inGeom, warnMsg, quakeAt, firesNear, airNow, fastTick, sendMerged, sunsetScore, sunsetAlert, sunsetAz }
+  _t: { umbrella, rainSoon, swings, aurora, minKp, localNow, severe, warnFacts, stormLength, inGeom, warnMsg, quakeAt, firesNear, airNow, fastTick, sendMerged, sunsetScore, sunsetAlert, sunsetAz }
 };
