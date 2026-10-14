@@ -729,7 +729,7 @@ async function notify(env, state, key, title, body, priority, stateKey) {
   /* who sees it: dark flow and the settlement read are about the market, so every subscribed phone; everything else
      (your positions, your jobs) only your own phones */
   const aud = /^(dark|portal):/.test(key) ? 'all' : 'owner';
-  const pu = await pushAll(env, { title, body, tag: key, url: '/' }, priority === 'urgent' || priority === 'high' ? 'high' : 'normal', aud).catch((e) => ({ sent: 0, failed: 1, note: String(e) }));
+  const pu = await pushAll(env, { title, body, tag: key, url: /^wxdown:/.test(key) ? '/' : '/#go=kalshi' }, priority === 'urgent' || priority === 'high' ? 'high' : 'normal', aud).catch((e) => ({ sent: 0, failed: 1, note: String(e) }));
   /* ntfy dropped (user 2026-10-14): it refused every post with its daily-limit 429 since 10-03; BLUISH's own push carries them */
   try { await env.OBS.put('push:last', JSON.stringify({ at: new Date().toISOString(), title, push: pu })); } catch (_) {}
   return pu.sent > 0;
@@ -866,7 +866,7 @@ async function reviewDigest(env) {
   }
   // the day's mark goes in BEFORE the post, like notify(): a put that fails after a post would repeat the digest
   await env.OBS.put(key, '1', { expirationTtl: 60 * 60 * 48 });
-  const pu = await pushAll(env, { title, body, tag: 'review', url: '/' }, pri === 'high' ? 'high' : 'normal', 'owner').catch(() => ({ sent: 0 }));
+  const pu = await pushAll(env, { title, body, tag: 'review', url: '/#go=kalshi' }, pri === 'high' ? 'high' : 'normal', 'owner').catch(() => ({ sent: 0 }));
   return `${title} (push ${pu.sent})`;
 }
 async function alertTick(env, sched) {

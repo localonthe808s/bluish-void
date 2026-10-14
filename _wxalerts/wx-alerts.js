@@ -216,6 +216,8 @@ async function sampleStrikes(places, ms) {
    one for both"). Each phone's alerts from one tick are collected first; the same event (same type and key, the place's own
    box stripped off) at places within NEAR_MI of each other goes out ONCE, with no place name. Far-apart places keep theirs. */
 const NEAR_MI = 15;
+/* where a tap lands (user 2026-10-14): the view that shows the thing the alert is about */
+const GO = { severe: 'radar', rain: 'radar', lightning: 'radar', umbrella: 'radar', quake: 'hazards', fire: 'hazards', air: 'hazards', aurora: 'aurora', sunset: 'golden', swing: 'top' };
 async function sendMerged(env, pend, dead, log) {
   let sent = 0;
   for (const ep of Object.keys(pend)) {
@@ -228,7 +230,7 @@ async function sendMerged(env, pend, dead, log) {
       const one = group.length > 1, a = A.a;
       const body = one ? String(a.body).replace(new RegExp(' of ' + A.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b'), '') : a.body;
       if (dead.has(ep)) continue;
-      try { const r = await pushOne(A.s, { title: one ? a.title : `${a.title}${a.sep || ' \u00b7 '}${A.name}`, body, tag: `${A.type}:${A.ekey}`, url: '/' }, jwk(env), a.urg);
+      try { const r = await pushOne(A.s, { title: one ? a.title : `${a.title}${a.sep || ' \u00b7 '}${A.name}`, body, tag: `${A.type}:${A.ekey}`, url: '/#go=' + (GO[A.type] || 'top') }, jwk(env), a.urg);
         if (r.status === 404 || r.status === 410) dead.add(ep); else if (r.status < 300) sent++; else log.push(`push ${r.status}`); } catch (e) { log.push(String(e)); }
     }
   }
@@ -330,6 +332,7 @@ async function firesNear(lat, lon) {
         body: `${P.IncidentName || 'A wildfire'} is ${Math.max(1, Math.round(d))} miles ${compass(lat, lon, c[1], c[0])}${P.DailyAcres ? `, ${Math.round(P.DailyAcres).toLocaleString('en-US')} acres` : ''}${P.PercentContained != null ? `, ${P.PercentContained}% contained` : ''}.` }; });
 }
 async function airNow(lat, lon, now) {
+  if (now.h < 7 || now.h >= 22) return null;   /* quiet hours (user 2026-10-14): unhealthy air waits for 7 AM; the day's key lets the morning tick send it */
   const r = await fetch(`https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&current=us_aqi,pm2_5,ozone`); if (!r.ok) return null;
   const c = (await r.json()).current || {}; const a = c.us_aqi; if (a == null || a < 151) return null;
   const lvl = a >= 301 ? 'hazardous' : a >= 201 ? 'very unhealthy' : 'unhealthy';
