@@ -62,8 +62,12 @@ async function route(request, env) {
     if (!s || !s.keys || !s.keys.p256dh || !s.keys.auth || !PUSH_HOSTS.test(host)) return J({ error: 'bad subscription' }, 400);
     const locs = (Array.isArray(b.locs) ? b.locs : []).slice(0, 5).map((l) => ({
       name: String(l.name || 'HERE').toUpperCase().replace(/[^A-Z0-9 ]/g, '').slice(0, 14) || 'HERE',
-      lat: r2(+l.lat), lon: r2(+l.lon) })).filter((l) => isFinite(l.lat) && isFinite(l.lon) && Math.abs(l.lat) <= 90 && Math.abs(l.lon) <= 180);
-    const types = TYPES.filter((t) => Array.isArray(b.types) && b.types.indexOf(t) >= 0);
+      lat: r2(+l.lat), lon: r2(+l.lon),
+      /* each place its own alerts (user 2026-10-14); a place without a list takes the phone's */
+      types: Array.isArray(l.types) ? TYPES.filter((t) => l.types.indexOf(t) >= 0) : null })).filter((l) => isFinite(l.lat) && isFinite(l.lon) && Math.abs(l.lat) <= 90 && Math.abs(l.lon) <= 180);
+    const given = TYPES.filter((t) => Array.isArray(b.types) && b.types.indexOf(t) >= 0);
+    const types = locs.some((l) => l.types) ? TYPES.filter((t) => locs.some((l) => (l.types || given).indexOf(t) >= 0)) : given;
+    locs.forEach((l) => { if (!l.types) delete l.types; });
     if (!locs.length || !types.length) return J({ error: 'pick at least one place and one alert' }, 400);
     const keep = subs.filter((x) => x.endpoint !== s.endpoint).slice(-1999);
     keep.push({ endpoint: s.endpoint, keys: { p256dh: s.keys.p256dh, auth: s.keys.auth }, locs, types, at: new Date().toISOString() });
@@ -303,8 +307,9 @@ async function fastTick(env) {
   if (want.some((s) => s.types.indexOf('quake') >= 0)) { try { const r = await fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_hour.geojson'); Q = r.ok ? ((await r.json()).features || []).filter((q) => now - q.properties.time < 45 * 60e3) : []; } catch (e) { log.push(String(e)); } }
   for (const s of want) for (const l of s.locs) {
     const out = [];
-    if (s.types.indexOf('severe') >= 0) for (const f of W) if (vtecKey(f.properties || {}) && inGeom(l.lon, l.lat, f.geometry)) out.push(warnMsg(f));
-    if (s.types.indexOf('quake') >= 0) for (const q of Q) { const a = quakeAt(q, l.lat, l.lon); if (a.mmi < 3) continue;
+    const lt = l.types || s.types;   /* this place's own alerts */
+    if (lt.indexOf('severe') >= 0) for (const f of W) if (vtecKey(f.properties || {}) && inGeom(l.lon, l.lat, f.geometry)) out.push(warnMsg(f));
+    if (lt.indexOf('quake') >= 0) for (const q of Q) { const a = quakeAt(q, l.lat, l.lon); if (a.mmi < 3) continue;
       const P = q.properties, ago = Math.max(1, Math.round((now - P.time) / 60e3));
       out.push({ key: `eq:${q.id}`, title: `M${P.mag.toFixed(1)} earthquake`, urg: a.mmi >= 5 ? 'high' : 'normal',
         body: `${Math.round(a.mi)} miles ${a.dir} of ${l.name}, ${ago} min ago (${P.place}). Shaking there likely ${MMI_WORD(a.mmi)}.${P.tsunami ? ' Tsunami message issued.' : ''}` }); }
@@ -412,7 +417,7 @@ async function sunsetAlert(f, now, lat, lon) {
 async function tick(env) {
   const subs = await getSubs(env); if (!subs.length) return 'no phones';
   const groups = {};
-  for (const s of subs) for (const l of s.locs) { const k = gkey(l); (groups[k] = groups[k] || { lat: l.lat, lon: l.lon, who: [] }).who.push({ s, name: l.name }); }
+  for (const s of subs) for (const l of s.locs) { const k = gkey(l); (groups[k] = groups[k] || { lat: l.lat, lon: l.lon, who: [] }).who.push({ s, name: l.name, types: l.types || s.types }); }
   const keys = Object.keys(groups).sort();
   let cur = 0; if (keys.length > BATCH) cur = (+(await env.WX.get('cursor')) || 0) % keys.length;
   const todo = keys.length > BATCH ? keys.slice(cur, cur + BATCH).concat(keys.slice(0, Math.max(0, cur + BATCH - keys.length))) : keys;
@@ -421,7 +426,7 @@ async function tick(env) {
   const F = {};
   for (const k of todo) { try { F[k] = await forecast(groups[k].lat, groups[k].lon); } catch (e) { log.push(`${k} ${e.message}`); } }
   /* lightning: which places need listening (storm-capable forecast, or a storm already near), then one shared sample */
-  const ltgWho = todo.filter((k) => F[k] && groups[k].who.some((w) => w.s.types.indexOf('lightning') >= 0)
+  const ltgWho = todo.filter((k) => F[k] && groups[k].who.some((w) => w.types.indexOf('lightning') >= 0)
     && (stormy(F[k], localNow(F[k])) || state[`${k}|ltg:on`]));
   let LTG = null;
   if (ltgWho.length) { LTG = await sampleStrikes(ltgWho.map((k) => groups[k]), ltgWho.some((k) => state[`${k}|ltg:on`]) ? 150000 : 90000); log.push(`ltg ${ltgWho.length} places, ${LTG.strikes.length} strikes${LTG.ok ? '' : ' (no socket)'}`); }
@@ -444,7 +449,7 @@ async function tick(env) {
           delete state[`${k}|ltg:on`]; delete state[`${k}|ltg:quiet`]; }   /* the episode closes quietly: no all-clear alert (user 2026-10-14) */
       }
     }
-    const wantsAny = (t) => g.who.some((w) => w.s.types.indexOf(t) >= 0);
+    const wantsAny = (t) => g.who.some((w) => w.types.indexOf(t) >= 0);
     if (wantsAny('umbrella')) { const a = umbrella(f, ln); if (a) found.push(['umbrella', a]); }
     if (wantsAny('rain')) { const a = rainSoon(f, ln); if (a) found.push(['rain', a]); }
     if (wantsAny('swing')) { const a = swings(f, ln); if (a) found.push(['swing', a]); }
@@ -460,7 +465,7 @@ async function tick(env) {
       /* the event's own identity, without the box: lightning episodes and the rain-soon nudge are per place, so they match by type */
       const ekey = /^(ltg|ltgclear):/.test(a.key) ? a.key.split(':')[0] : a.key;
       for (const w of g.who) {
-        if (w.s.types.indexOf(type) < 0) continue;
+        if (w.types.indexOf(type) < 0) continue;
         (PEND[w.s.endpoint] = PEND[w.s.endpoint] || []).push({ s: w.s, type, ekey, a, name: w.name, lat: g.lat, lon: g.lon });
       }
     }
