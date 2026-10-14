@@ -89874,7 +89874,13 @@ function initNowMicroTabs(){
     // Refresh golden hour widget — palette/score/conditions depend on smoke intel,
     // and otherwise won't pick it up until the next 5-min slow tick. Debounced
     // to coalesce with a near-simultaneous PM2.5 update.
-    if (typeof tlRenderForOffset === 'function') {
+    // Only when the intel CHANGED: the boot precompute reruns this at 0/3/6 s after the fire
+    // prefetch, and each identical pass cost a full timeline render (~200-500 ms at phone speed).
+    var _siSig = null;
+    try { _siSig = JSON.stringify(intel, function(k, v){ return k === 'timestamp' ? undefined : v; }); } catch(e){}
+    var _siSame = _siSig !== null && _siSig === window._smokeIntelSig;
+    window._smokeIntelSig = _siSig;
+    if (!_siSame && typeof tlRenderForOffset === 'function') {
       clearTimeout(window._ghSmokeRefreshTo);
       window._ghSmokeRefreshTo = setTimeout(function(){
         try { window._lastFullTlRender = Date.now(); (window._tlRenderSoon || tlRenderForOffset)(); } catch(e){}
@@ -99438,12 +99444,17 @@ function initNowMicroTabs(){
   (function(){
     var to = 0, first = 0, lastScroll = 0;
     window.addEventListener('scroll', function(){ lastScroll = Date.now(); }, { passive: true });
+    /* 2026-10-14 (user: "the app was frozen for almost 10 seconds on launch"): the 300 ms quiet window still let every
+       launch arrival through on its own -- they land ~1 s apart (Kp 4.3 s, PM2.5 6.3, obs + NWS 7.5, sun path 8.2), so it
+       was still five full renders in five seconds. Now a background render also waits until 2.5 s after the LAST render
+       of any kind (stamped in tlRenderForOffset); nothing waits more than 4 s from its first ask. */
     window._tlRenderSoon = function(){
       if (!first) first = Date.now();
       clearTimeout(to);
       (function wait(){
         to = setTimeout(function(){
-          if (Date.now() - lastScroll < 220 && Date.now() - first < 2500){ wait(); return; }
+          var now = Date.now();
+          if ((now - lastScroll < 220 || now - (window._tlLastRenderT || 0) < 2500) && now - first < 4000){ wait(); return; }
           first = 0;
           try { window._lastFullTlRender = Date.now(); tlRenderForOffset(); } catch(e){}
         }, 300);
@@ -99453,6 +99464,7 @@ function initNowMicroTabs(){
   function tlRenderForOffset() {
     var data = tlSliceDay(window._tlDayOffset);
     if (!data) return;
+    window._tlLastRenderT = Date.now();
 
     tlUpdateDateLabel();
 
