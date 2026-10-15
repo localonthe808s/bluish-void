@@ -57170,7 +57170,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
            z5 the view is still ~20 km wide, i.e. past the 7 km threshold — so
            without this clamp the compose asks for tiles that were never baked */
         /* lvlTop, not lvl: a z4 cell standing in for a missing deep one must not be the only cell wearing a canopy */
-        if (cw.trees && lvlTop <= 4 && (v.X1 - v.X0) > 7000) (function(bb, uu){
+        if (cw.trees && lvlTop <= 4 && (v.X1 - v.X0) >= 9000) (function(bb, uu){   /* 9000 = CW_TREE_W: the census points take over below it */
           jobs.push(_cityTile(uu).then(function(im){ return { im: im, b: bb, z: 1 }; },
                                        function(){ return null; }));
         })(tb, '/nyc-basemap-trees' + suffix + '.png?v=8');
@@ -61989,40 +61989,62 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
     }
     var CW_TREE_URL = 'https://data.cityofnewyork.us/resource/uvpi-gqnh.json';
     var cwTreeBoxes = {}, cwTrees = [];
+    /* THE TREES COME FROM OUR OWN TILES (user 2026-10-15: "trees only appear at the furthest zoom level", "we need to fix how
+       we access the trees"). The map used to ask NYC Open Data for the trees in view on every settle -- 2,000 rows a box,
+       6,000 held -- so a dense block came back a few dots long, and the points only loaded under 6 m a screen pixel: on a
+       phone that is a view 2.2 km wide, while the baked canopy steps aside at 7 km, so between the two nothing drew at
+       all. The whole 2015 census (683,788 trees) is now baked into 0.01-degree tiles (_maplab/trees_bake.py -> /trees/),
+       fetched from this origin for the view, and the points take over at ONE width on every screen, the same width the
+       canopy stands down at (CW_TREE_W). A tap still asks the city for that tree's full record (cwTreeTap). */
+    var CW_TREE_W = 9000;   /* mercator metres across the view: points below it, the baked canopy above (see the compose) */
+    var cwTreeIx = null, cwTreeTiles = {}, cwTreeWant = [], CW_TREE_HS = [['Alive', 'Good'], ['Alive', 'Fair'], ['Alive', 'Poor'], ['Alive', ''], ['Dead', ''], ['Stump', '']];
     function cwTreeKey(a, b, c2, d2){ return [a, b, c2, d2].map(function(x){ return x.toFixed(3); }).join(','); }
+    function cwTreeRebuild(){
+      var out = [];
+      cwTreeWant.forEach(function(k){ var T = cwTreeTiles[k]; if (T && T.length) for (var i = 0; i < T.length; i++) out.push(T[i]); });
+      cwTrees = out;
+    }
     function cwTreesFetch(v, mppScreen){
-      /* below about a metre and a half per pixel a street tree is a disc
-         rather than a speck; above it the raster still reads better */
-      if (!(cw.trees && cwMapMode() && !cw.rock) || !(mppScreen < 6)) return;
+      if (!(cw.trees && cwMapMode() && !cw.rock)) return;
+      if ((v.X1 - v.X0) / cwZoomK() >= CW_TREE_W){ if (cwTreeWant.length){ cwTreeWant = []; cwTrees = []; } return; }
+      if (!cwTreeIx){
+        if (!cwTreesFetch._ix){ cwTreesFetch._ix = 1;
+          fetch('/trees/index.json?v=1').then(function(r){ return r.json(); }).then(function(j){
+            j.has = {}; j.tiles.forEach(function(k){ j.has[k] = 1; }); cwTreeIx = j; cwTreesFetch(cwPainted || v, mppScreen);
+          }).catch(function(){ cwTreesFetch._ix = 0; });
+        }
+        return;
+      }
       var R2 = 6378137;
       var lon0 = v.X0 / R2 * 180 / Math.PI, lon1 = v.X1 / R2 * 180 / Math.PI;
       var lat0 = (2 * Math.atan(Math.exp(v.Y0 / R2)) - Math.PI / 2) * 180 / Math.PI;
       var lat1 = (2 * Math.atan(Math.exp(v.Y1 / R2)) - Math.PI / 2) * 180 / Math.PI;
-      /* snap to a grid so panning re-uses what is already in hand */
-      var g = 0.004;
-      var a = Math.floor(lat0 / g) * g, b = Math.ceil(lat1 / g) * g;
-      var c2 = Math.floor(lon0 / g) * g, d2 = Math.ceil(lon1 / g) * g;
-      if ((b - a) > 0.05 || (d2 - c2) > 0.05) return;      /* too much ground to ask for */
-      var key = cwTreeKey(a, b, c2, d2);
-      if (cwTreeBoxes[key]) return;
-      cwTreeBoxes[key] = 1;
-      var q = CW_TREE_URL + '?$limit=2000&$select=tree_id,spc_common,spc_latin,tree_dbh,status,health,address,latitude,longitude,steward,sidewalk,problems,curb_loc'
-        + '&$where=' + encodeURIComponent('latitude between ' + a.toFixed(5) + ' and ' + b.toFixed(5)
-          + ' and longitude between ' + c2.toFixed(5) + ' and ' + d2.toFixed(5));
-      fetch(q).then(function(r){ return r.ok ? r.json() : null; })
-        .then(function(j){
-          if (!j || !j.length) return;
-          var seen = {};
-          cwTrees.forEach(function(t){ seen[t.tree_id] = 1; });
-          j.forEach(function(t){
-            if (seen[t.tree_id] || t.latitude == null || t.longitude == null) return;
-            t._lon = +t.longitude; t._lat = +t.latitude; t._d = +t.tree_dbh || 0;
-            cwTrees.push(t);
-          });
-          if (cwTrees.length > 6000) cwTrees.splice(0, cwTrees.length - 6000);
-          cwDrawSensors();
-        })
-        .catch(function(){ delete cwTreeBoxes[key]; });
+      var C = cwTreeIx.cell, y0 = Math.floor(lat0 / C), y1 = Math.floor(lat1 / C), x0 = Math.floor(lon0 / C), x1 = Math.floor(lon1 / C);
+      if ((y1 - y0 + 1) * (x1 - x0 + 1) > 200) return;
+      var want = [];
+      for (var ty = y0; ty <= y1; ty++) for (var tx = x0; tx <= x1; tx++){
+        var key = ty + '_' + tx; if (!cwTreeIx.has[key]) continue;
+        want.push(key);
+        if (cwTreeTiles[key] || cwTreeBoxes[key]) continue;
+        cwTreeBoxes[key] = 1;
+        (function(key, ty, tx){
+          fetch('/trees/t_' + key + '.json?v=1').then(function(r){ return r.ok ? r.json() : null; }).then(function(rows){
+            delete cwTreeBoxes[key];
+            if (!rows) return;
+            var S = cwTreeIx.sp, s0 = ty * C, w0 = tx * C;
+            cwTreeTiles[key] = rows.map(function(q){
+              var sp = q[4] >= 0 ? S[q[4]] : null, hs = CW_TREE_HS[q[5]] || CW_TREE_HS[3];
+              return { tree_id: String(q[0]), _lat: s0 + q[1] / 1e5, _lon: w0 + q[2] / 1e5, _d: q[3], spc_common: sp ? sp[0] : '', spc_latin: sp ? sp[1] : '', status: hs[0], health: hs[1] };
+            });
+            cwTreeRebuild(); cwDrawSensors();
+          }).catch(function(){ delete cwTreeBoxes[key]; });
+        })(key, ty, tx);
+      }
+      cwTreeWant = want;
+      /* hold what is near: tiles out of view are dropped past 300 */
+      var held = Object.keys(cwTreeTiles);
+      if (held.length > 300){ var keep = {}; want.forEach(function(k){ keep[k] = 1; }); held.forEach(function(k){ if (!keep[k]) delete cwTreeTiles[k]; }); }
+      cwTreeRebuild();
     }
     /* THE ZOOM HAS TO POKE THE FETCH. The gesture only re-transforms the
        layers -- it never redraws this canvas and never recomposes, so nothing
@@ -62075,6 +62097,19 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
     function cwTreeTap(t){
       var el = document.getElementById('cw-info');
       if (!el) return;
+      /* the baked tile carries species, trunk and health; the address, steward and sidewalk come from the city on the tap */
+      if (!t._full && !t._asking){
+        t._asking = 1;
+        fetch(CW_TREE_URL + '?tree_id=' + encodeURIComponent(t.tree_id) + '&$select=address,steward,sidewalk,problems,curb_loc')
+          .then(function(r){ return r.ok ? r.json() : null; }).then(function(j){
+            t._asking = 0; if (!j || !j[0]) return;
+            ['address', 'steward', 'sidewalk', 'problems', 'curb_loc'].forEach(function(k){ if (j[0][k] != null) t[k] = j[0][k]; });
+            t._full = 1;
+            if (el._tree === t) cwTreeTap(t);
+          }).catch(function(){ t._asking = 0; });
+      }
+      el._tree = t;
+      el.classList.add('cw-blue');   /* the tree's card in site blue, green labels (user 2026-10-15) */
       var cap = function(x){ x = String(x || '').trim(); return x ? x.charAt(0).toUpperCase() + x.slice(1) : ''; };
       var dbh = t._d ? t._d + '\u2033 TRUNK' : '';
       var alive = String(t.status || '').toLowerCase() === 'alive';
@@ -63377,6 +63412,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
          or rock; with nothing tapped it takes no room above the map. */
       var el = document.getElementById('cw-info');
       if (!el || mtaSel) return;
+      el._tree = null;
       el.classList.toggle('cw-blue', !!((cw.rock || cw.floods) && cwMapMode()));   /* GEOLOGY and FLOODING read in site blue (user 2026-10-14) */
       if (cw.rock && cwMapMode()){ cwRockLegend(el); return; }
       if (cw.floods && cwMapMode() && !cw.wide && cwCur.stations){ cwFlowCaption(); return; }
@@ -70165,7 +70201,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         var zk = cwGvView ? ((zm && +zm[1] > 0) ? +zm[1] : 1) : cwZoomK();
         var mppScreen = (v.X1 - v.X0) / r.width / zk;      /* metres per CSS pixel */
         cwTreesFetch(v, mppScreen);
-        if (!(cw.trees && cwMapMode() && !cw.rock) || mppScreen >= 6 || !cwTrees.length) return;
+        if (!(cw.trees && cwMapMode() && !cw.rock) || mppScreen * r.width >= CW_TREE_W || !cwTrees.length) return;
         var mppT = (v.X1 - v.X0) / cvs.width;
         cwTrees.forEach(function(t){
           var x = px([t._lon, t._lat]), y = py([t._lon, t._lat]);
@@ -70178,8 +70214,9 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
              back to canvas pixels divides by the gesture scale, because this
              canvas is drawn once and then stretched by it. */
           var rm = Math.max(1.3, (t._d || 4) * 0.22);
-          var rScreen = Math.max(1.6, Math.min(7, rm / mppScreen));
+          var rScreen = Math.max(mppScreen > 4 ? 0.9 : 1.6, Math.min(7, rm / mppScreen));   /* a fine stipple at mid zoom, a disc close in */
           var rr = rScreen * dpr / zk;
+          if (rScreen < 1.5){ g.fillStyle = cwTreeColor(t); g.fillRect(x - rr, y - rr, rr * 2, rr * 2); return; }   /* tens of thousands in view: a dot, no rings */
           /* a pale ring first: the census green on the map's orange needs a
              separation the way the ferry routes needed one on navy */
           g.beginPath(); g.arc(x, y, rr, 0, Math.PI * 2);
@@ -111101,6 +111138,10 @@ function closeAlertModal(){
   #cw-info.cw-blue > .cw-g-note{ text-align:center; margin-top:6px !important; }   /* and GEOLOGY's note, centered under the whole key */
 }
 #cw-info.cw-blue .cw-g-sw{ flex:0 0 34px; width:34px !important; transform:scaleY(1.5); border-top-color:#ff5a4e !important; box-shadow:0 0 0 1.5px #fff !important; margin-right:2px; }
+/* the info cards' slate labels go green, their secondary ink soft white (the tree card, the rock and fault taps) */
+:is(#cw-hood-mta, #city-widget .cw-blue) :is([style*="color:#5b647a"], [style*="color: rgb(91, 100, 122)"]):not([style*="background"]){ color:#05DB32 !important; }
+:is(#cw-hood-mta, #city-widget .cw-blue) :is([style*="color:#3b4460"], [style*="color: rgb(59, 68, 96)"]):not([style*="background"]){ color:rgba(255,255,255,.82) !important; }
+#city-widget .cw-blue #cw-tree-x{ color:#fff !important; }
 /* the buttons: lit ones go green (blue on blue would vanish), the rest are white outlines */
 #city-widget .cw-blue :is(button[style*="background:#2B22F4"], button[style*="background: rgb(43, 34, 244)"], button[style*="background-color: rgb(43, 34, 244)"]){ background:#05DB32 !important; border-color:#05DB32 !important; color:#fff !important; }
 :is(#cw-hood-mta, #city-widget .cw-blue) :is(button[style*="rgba(255,255,255,.75)"], button[style*="rgba(255, 255, 255, 0.75)"]), #cw-hood-mta #cw-mta-all{ background:transparent !important; color:#fff !important; border:1px solid rgba(255,255,255,.55) !important; }
