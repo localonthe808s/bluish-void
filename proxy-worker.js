@@ -79,6 +79,12 @@ const CACHE_RULES = {
   'svs.gsfc.nasa.gov':            3600,
   'soho.nascom.nasa.gov':         3600,
   'apod.nasa.gov':                3600,
+  /* SPACE NEWS (2026-10-15): the three RSS feeds the news list reads (all public news feeds), and APOD's new home, whose
+     page is the only place today's title lives now that the APOD API returns "NASA Science" for every date */
+  'science.nasa.gov':             3600,
+  'phys.org':                     900,
+  'www.esa.int':                  1800,
+  'hirise.lpl.arizona.edu':       3600,
   'images-assets.nasa.gov':       86400,
   'djlorenz.github.io':           86400,
   // ── NYC Ferry (2026-09-07): GTFS-RT trip updates + the static schedule zip.
