@@ -6,9 +6,12 @@ dense neighbourhood came back a few dots a block, and nothing showed until the c
 view draws, from a mid zoom down.
 
 Input: the census as CSV (tree_id, latitude, longitude, tree_dbh, status, health, spc_common, spc_latin), e.g.
-  https://data.cityofnewyork.us/resource/uvpi-gqnh.csv?$select=tree_id,latitude,longitude,tree_dbh,status,health,spc_common,spc_latin&$limit=800000&$order=tree_id
+  https://data.cityofnewyork.us/resource/uvpi-gqnh.csv?$select=tree_id,latitude,longitude,tree_dbh,status,health,spc_common,spc_latin,nta,nta_name,boroname,block_id&$limit=800000&$order=tree_id
 Output: trees/index.json  {"cell":0.01, "sp":[[common, latin], ...], "tiles":[key, ...], "n": count}
-        trees/t_<lat*100>_<lon*100>.json  [[tree_id, dlat, dlon, dbh, sp, hs], ...]
+        trees/t_<lat*100>_<lon*100>.json  [[tree_id, dlat, dlon, dbh, sp, hs, nta], ...]
+        trees/nta.json  {"nta":[[code, name, borough, live trees, blocks, good share, [top sp, ...]], ...], "median": trees a block}
+          (2026-10-15, the FOLIAGE tab's NYC STREET TREES card: the neighborhood a tree stands in, and each
+          neighborhood's street trees per census block, for the ranking)
           dlat/dlon: metres-ish ints, (lat - tile south) * 1e5 and (lon - tile west) * 1e5
           sp: index into index.json's sp (-1 = unidentified)
           hs: 0 good, 1 fair, 2 poor, 3 alive with no health recorded, 4 dead, 5 stump
@@ -24,6 +27,7 @@ CELL = 0.01
 sp_ix, sp = {}, []
 tiles = {}
 n = 0
+nta_ix, nta = {}, []          # code -> index; [code, name, boro, live, blocks(set), good, species counts]
 with open(src, newline='') as f:
     for r in csv.DictReader(f):
         try:
@@ -45,7 +49,15 @@ with open(src, newline='') as f:
             dbh = int(float(r.get('tree_dbh') or 0))
         except ValueError:
             dbh = 0
-        tiles.setdefault((ty, tx), []).append([int(r['tree_id']), round((la - ty * CELL) * 1e5), round((lo - tx * CELL) * 1e5), min(dbh, 255), s, hs])
+        code = (r.get('nta') or '').strip()
+        if code not in nta_ix:
+            nta_ix[code] = len(nta); nta.append([code, (r.get('nta_name') or '').strip(), (r.get('boroname') or '').strip(), 0, set(), 0, {}])
+        ni = nta_ix[code]
+        N = nta[ni]
+        if hs <= 3:
+            N[3] += 1; N[4].add(r.get('block_id')); N[5] += 1 if hs == 0 else 0
+            if s >= 0: N[6][s] = N[6].get(s, 0) + 1
+        tiles.setdefault((ty, tx), []).append([int(r['tree_id']), round((la - ty * CELL) * 1e5), round((lo - tx * CELL) * 1e5), min(dbh, 255), s, hs, ni])
         n += 1
 keys = []
 for (ty, tx), rows in tiles.items():
@@ -55,4 +67,12 @@ for (ty, tx), rows in tiles.items():
         json.dump(rows, f, separators=(',', ':'))
 with open(os.path.join(out, 'index.json'), 'w') as f:
     json.dump({'cell': CELL, 'sp': sp, 'tiles': sorted(keys), 'n': n, 'src': '2015 Street Tree Census, NYC Open Data uvpi-gqnh'}, f, separators=(',', ':'))
+rows = []
+for code, name, boro, live, blocks, good, spc in nta:
+    top = [k for k, v in sorted(spc.items(), key=lambda kv: -kv[1])[:3]]
+    rows.append([code, name, boro, live, len(blocks), round(good / live, 3) if live else 0, top])
+per = sorted(r[3] / r[4] for r in rows if r[4])
+with open(os.path.join(out, 'nta.json'), 'w') as f:
+    json.dump({'nta': rows, 'median': round(per[len(per) // 2], 2)}, f, separators=(',', ':'))
+print(len(rows), 'neighborhoods, median', round(per[len(per) // 2], 2), 'trees a block')
 print(n, 'trees,', len(keys), 'tiles,', len(sp), 'species')
