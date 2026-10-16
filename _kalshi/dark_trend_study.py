@@ -31,7 +31,8 @@ days = sorted(S.event_day(e) for e in evs); d0, d1 = days[0], days[-1]
 rel = [(t, t + datetime.timedelta(minutes=S.METAR_WIN), 'metar') for t in S.metar_times(c, d0, d1 + datetime.timedelta(days=1))]
 rel += [(t, t + datetime.timedelta(minutes=S.CLI_WIN), 'cli') for t in S.cli_times(c, d0, d1)]
 rel += [(t, t + datetime.timedelta(minutes=S.FCST_WIN), 'fcst') for t in S.fcst_times(c, d0, d1)]
-rel += [(a, b + datetime.timedelta(minutes=S.TWC_WIN), 'twc') for a, b in S.twc_bumps(key)]
+rel += [(a, b + datetime.timedelta(minutes=S.TWC_WIN), 'twc') for a, b in S.twc_bumps(key, d0, d1)]
+rel += [(a, b, 'apt') for a, b in S.apt_bumps(c, d0, d1)]
 rel.sort(); starts = [r[0] for r in rel]
 def public_at(t):
     i = bisect.bisect_right(starts, t)

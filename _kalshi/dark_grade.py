@@ -29,7 +29,7 @@ OUT = os.path.join(HERE, '..', 'kalshi_dark.json')
 WORKER = 'https://bluish-void-kalshi-cron.junkyjunkjunkjunkjunk.workers.dev'
 KAPI = 'https://api.elections.kalshi.com/trade-api/v2'
 START = datetime.date(2026, 10, 3)            # the first full day the live watcher ran
-WIN = {'metar': 9, 'cli': 10, 'twc': 6, 'fcst': 10}   # minutes a release covers, as in the worker and the study
+WIN = {'metar': 9, 'cli': 10, 'twc': 6, 'fcst': 10, 'apt': 15}   # minutes a release covers, as in the worker and the study
 UA = {'User-Agent': 'bluishvoid-dark-grade'}
 ET = ZoneInfo('America/New_York')
 
@@ -107,6 +107,8 @@ def grade_day(d, rec):
     rel += [(t, t + datetime.timedelta(minutes=WIN['metar']), 'metar') for t in reports]
     rel += [(t, t + datetime.timedelta(minutes=WIN['cli']), 'cli') for t in IS.cli_times(c, d0, d1)]
     rel += [(t, t + datetime.timedelta(minutes=WIN['fcst']), 'fcst') for t in IS.fcst_times(c, d0, d1)]
+    rel += [(a, b, 'apt') for a, b in IS.apt_bumps(c, d0, d1)]          # the airports' new highs, as the study counts them
+    rel += [(a, b + datetime.timedelta(minutes=WIN['twc']), 'twc') for a, b in IS.twc_bumps('ny_high', d0, d1)]   # TWC from all three records
     covered = lambda t: any(a <= t <= b for a, b, _ in rel)
     lo = datetime.datetime(d.year, d.month, d.day, 7, tzinfo=ET); hi = datetime.datetime(d.year, d.month, d.day, 20, tzinfo=ET)
     out = []
@@ -129,7 +131,7 @@ def grade_day(d, rec):
                 cs, cpay = leg(b['side'], tp[i][1], won_yes)
                 g.update(copy_px=tp[i][1], copy_ret=round(cpay / cs - 1, 3))
             out.append(g)
-    return {'event': ev, 'bursts': out, 'live_bursts': len(rec.get('bursts') or []), 'releases': len(rel), 'rule': 'dark_lib'}
+    return {'event': ev, 'bursts': out, 'live_bursts': len(rec.get('bursts') or []), 'releases': len(rel), 'rule': 'dark_lib2'}
 
 
 def main():
@@ -144,7 +146,7 @@ def main():
     graded_now = 0
     while d < today:
         ds = d.isoformat()
-        if (ds not in days or days[ds].get('rule') != 'dark_lib' and days[ds].get('event')) and graded_now < 2:
+        if (ds not in days or days[ds].get('rule') != 'dark_lib2' and days[ds].get('event')) and graded_now < 2:
             try:
                 rec = get_json('%s/dark?d=%s' % (WORKER, ds))
                 if rec.get('event'):

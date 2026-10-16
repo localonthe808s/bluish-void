@@ -22,7 +22,7 @@ in one day are not independent). Read-only: it reads Kalshi's public API, IEM, a
 
 Writes insider_study.json (committed summary) and caches raw trades in insider_cache/ (gitignored).
 """
-import bisect, collections, datetime, json, math, os, re, sys, time, urllib.request
+import bisect, collections, datetime, json, math, os, re, sys, time, urllib.parse, urllib.request
 from zoneinfo import ZoneInfo
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dark_lib as DL                          # noqa: E402  the rulebook shared with dark_grade.py
@@ -32,7 +32,7 @@ CACHE = os.path.join(HERE, 'insider_cache')
 API = 'https://api.elections.kalshi.com/trade-api/v2'
 UA = {'User-Agent': 'bluishvoid-insider-study'}
 CITIES = {
-    'ny_high':  {'series': 'KXHIGHNY',  'station': 'NYC', 'network': 'NY_ASOS', 'cli': 'CLINYC', 'fcst': 'ZFPOKX,AFDOKX', 'tz': 'America/New_York',    'five_min_public': False},
+    'ny_high':  {'series': 'KXHIGHNY',  'station': 'NYC', 'network': 'NY_ASOS', 'cli': 'CLINYC', 'fcst': 'ZFPOKX,AFDOKX', 'tz': 'America/New_York',    'five_min_public': False, 'apts': ['LGA', 'EWR', 'JFK']},
     'las_high': {'series': 'KXHIGHTLV', 'station': 'LAS', 'network': 'NV_ASOS', 'cli': 'CLILAS', 'fcst': 'ZFPVEF,AFDVEF', 'tz': 'America/Los_Angeles', 'five_min_public': True},
     'aus_high': {'series': 'KXHIGHAUS', 'station': 'AUS', 'network': 'TX_ASOS', 'cli': 'CLIAUS', 'fcst': 'ZFPEWX,AFDEWX', 'tz': 'America/Chicago',     'five_min_public': True},
 }
@@ -45,6 +45,8 @@ METAR_WIN = 9                                # minutes after an observation that
 CLI_WIN = 10
 FCST_WIN = 10                                # an NWS zone forecast or discussion issued (2026-10-02): its high is public
 TWC_WIN = 6
+WORKER = 'https://bluish-void-kalshi-cron.junkyjunkjunkjunkjunk.workers.dev'
+APT_WIN = 15                                 # an airport's new high on the public 5-minute feed (2026-10-16): ~10 min to publish, then the reaction
 FIVE_MIN_LAG = 12                            # api.weather.gov publishes the 5-minute rows ~10-15 min late
 OFFLINE = '--offline' in sys.argv
 
@@ -162,20 +164,94 @@ def fcst_times(c, d0, d1):
     return [datetime.datetime.fromisoformat(x) for x in cached('fcst_%s_%s_%s.json' % (c['fcst'].replace(',', '_'), d0, d1), fetch) or []]
 
 
-def twc_bumps(key):
-    """Windows in which TWC's public running maximum went up (from the local 5-10 minute obs trail)."""
-    rows = []
+def twc_bumps(key, d0=None, d1=None):
+    """Windows in which TWC's public running maximum went up. THREE RECORDS, UNIONED (2026-10-16), because each misses
+    what the others catch:
+      * the worker's minute log (dark:<day> releases, since 10-02): exact to the minute, but until 10-16 it took TWC's
+        7:00 AM value -- still YESTERDAY's high -- as the baseline and logged nothing on a cooler day (10-09/10/11/13/15);
+      * the bake trail on R2 (obs.twc, every ~5 min since 09-06): complete, but only as fine as the bake;
+      * the local obs trail (the Mac's logger): gappy -- it runs only while the Mac is awake -- and gitignored, so the
+        nightly run on GitHub never had it: every burst after a TWC rise was scored DARK there (641 of 1,324 on 10-15).
+    Each is read the same way: from 7:20 AM local (the field resets a few minutes after 7), and only a value above the
+    day's high so far counts -- the field is blended and flaps (66, 65, 66); a flap back up is not a new reading."""
+    z = ZoneInfo(CITIES[key]['tz']) if key in CITIES else ZoneInfo('America/New_York')
+    def ok(t):
+        lt = t.astimezone(z); return lt.hour * 60 + lt.minute >= 7 * 60 + 20
+    def rises(rows):
+        rows = sorted(r for r in rows if ok(r[0])); out = []; hi = {}
+        for a, b in zip(rows, rows[1:]):
+            if b[1] != a[1]: continue
+            h = max(hi.get(a[1], a[2]), a[2]); hi[a[1]] = h
+            if b[2] > h: out.append((a[0], b[0])); hi[a[1]] = b[2]       # it rose somewhere in (a, b]
+        return out
+    local = []
     for f in ('2026-09.jsonl', '2026-10.jsonl'):
         p = os.path.join(HERE, 'obs_trail', f)
         if not os.path.exists(p): continue
         for l in open(p):
             try: r = json.loads(l)
             except Exception: continue
-            if r.get('key') == key and isinstance(r.get('max7'), (int, float)): rows.append((ts(r['t']), r['day'], r['max7']))
-    rows.sort(); out = []
-    for a, b in zip(rows, rows[1:]):
-        if b[1] == a[1] and b[2] > a[2]: out.append((a[0], b[0]))       # it rose somewhere in (a, b]
-    return out
+            if r.get('key') == key and isinstance(r.get('max7'), (int, float)): local.append((ts(r['t']), r['day'], r['max7']))
+    out = rises(local)
+    if d0 and d1:
+        today = datetime.date.today(); r2 = []; worker = []
+        for k in range((d1 - d0).days + 1):
+            d = (d0 + datetime.timedelta(days=k)).isoformat()
+            settled = (today - datetime.date.fromisoformat(d)).days >= 2
+            def fetch_r2(d=d):
+                try: txt = get_text('https://cdn.bluishvoid.com/kalshi/trail/%s_%s.jsonl' % (key, d))
+                except Exception: return []
+                rows = []
+                for l in txt.splitlines():
+                    try: r = json.loads(l)
+                    except Exception: continue
+                    v = (r.get('obs') or {}).get('twc')
+                    if isinstance(v, (int, float)): rows.append([r['t'], v])
+                return rows
+            got = cached('trail_%s_%s.json' % (key, d), fetch_r2) if settled else (None if OFFLINE else fetch_r2())
+            r2 += [(ts(t), d, v) for t, v in (got or [])]
+            if key == 'ny_high':
+                def fetch_wk(d=d):
+                    try: j = json.loads(get_text('%s/dark?d=%s' % (WORKER, d)))
+                    except Exception: return []
+                    return [r['t'] for r in j.get('releases') or [] if r.get('k') == 'twc']
+                tw = cached('wtwc_%s.json' % d, fetch_wk) if settled else (None if OFFLINE else fetch_wk())
+                worker += [ts(t) for t in (tw or []) if ok(ts(t))]
+        out += rises(r2)
+        out += [(t - datetime.timedelta(minutes=1), t) for t in worker]
+    return sorted(out)
+
+
+def apt_bumps(c, d0, d1):
+    """Windows opened by an airport setting a new high for its day on the public 5-minute feed (2026-10-16). LaGuardia,
+    Newark and JFK lead the park, and their feed is public: a burst a few minutes after one jumps is a reaction, not dark.
+    History from IEM's 1-minute archive (~2 days behind), sampled at the feed's :00/:05 marks and rounded to whole
+    Celsius the way the 5-minute feed reports it. Each new high SINCE 7 AM is public from its minute to APT_WIN after."""
+    out = []
+    for st in c.get('apts') or []:
+        def fetch(st=st):
+            q = urllib.parse.urlencode({'station': st, 'vars': 'tmpf', 'sts': '%sT00:00Z' % d0, 'ets': '%sT12:00Z' % (d1 + datetime.timedelta(days=1)),
+                                        'sample': '1min', 'what': 'view', 'tz': 'UTC'})
+            txt = get_text('https://mesonet.agron.iastate.edu/cgi-bin/request/asos1min.py?' + q)
+            rows = []
+            for line in txt.splitlines()[1:]:
+                p = line.split(',')
+                if len(p) < 4 or p[3].strip() in ('', 'M'): continue
+                t = p[2].strip()
+                if int(t[-2:]) % 5: continue
+                try: rows.append([t.replace(' ', 'T') + ':00+00:00', float(p[3])])
+                except ValueError: continue
+            return rows
+        rows = cached('apt1m_%s_%s_%s.json' % (st, d0, d1), fetch) or []
+        z = ZoneInfo(c['tz']); day = None; mx = None
+        for t, f in rows:
+            tt = datetime.datetime.fromisoformat(t); lt = tt.astimezone(z); ld = lt.date()
+            if lt.hour < 7: continue                                     # since 7 AM, like TWC's running high: a warm night must not swallow the day
+            v = round(round((f - 32) * 5 / 9) * 9 / 5 + 32, 1)          # whole Celsius, as the 5-minute feed carries it
+            if ld != day: day, mx = ld, v; continue
+            if v > mx + 0.05:
+                mx = v; out.append((tt, tt + datetime.timedelta(minutes=APT_WIN)))
+    return sorted(out)
 
 
 # ------------------------------------------------------------- scoring ----
@@ -217,7 +293,8 @@ def main():
         releases += [(t, t + datetime.timedelta(minutes=CLI_WIN), 'cli') for t in cli_times(c, d0, d1)]
         releases += [(t, t + datetime.timedelta(minutes=FCST_WIN), 'fcst') for t in fcst_times(c, d0, d1)]
         reports = sorted(t for t in metar_times(c, d0, d1 + datetime.timedelta(days=1)))
-        releases += [(a, b + datetime.timedelta(minutes=TWC_WIN), 'twc') for a, b in twc_bumps(key)]
+        releases += [(a, b + datetime.timedelta(minutes=TWC_WIN), 'twc') for a, b in twc_bumps(key, d0, d1)]
+        releases += [(a, b, 'apt') for a, b in apt_bumps(c, d0, d1)]
         releases.sort()
         starts = [r[0] for r in releases]
         import bisect
@@ -272,7 +349,7 @@ def main():
             'all_taker_flow': clustered(allflow),
             'bursts': {cls: dict(clustered(bursts[cls]) or {}, n=nb[cls]) for cls in ('dark', 'reaction')},
             'moves': DL.summarize_moves(moves),
-            'rule': 'max($%d, p%d minute) per market-day; same side within %d min merged' % (DL.FLOOR_USD, DL.PCTL * 100, DL.MERGE_GAP_MIN),
+            'rule': 'max($%d, p%d of the market\'s minutes so far that day); same side within %d min merged; 95c+ sweeps excluded' % (DL.FLOOR_USD, DL.PCTL * 100, DL.MERGE_GAP_MIN),
             'dark_winner_lead_min': (round(sorted(leads)[len(leads) // 2], 1) if leads else None),
             'blind': {k: clustered(v) for k, v in sorted(blind.items())},
             'note': ('5-minute readings are public here, so almost no minute is dark: the burst split is not a test'

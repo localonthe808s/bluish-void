@@ -925,6 +925,8 @@ async function alertTick(env, sched) {
       .map((h) => ({ ...h, am: ALERT_MARKETS.find((a) => h.ticker.startsWith(a.series + '-')) }))
       .filter((h) => h.n !== 0 && h.am);
   } catch (e) { out.push('positions err'); }
+  /* what you hold, for darkTick: a dark burst is pushed only when it goes against one of these (2026-10-16) */
+  state.held = held.map((h) => ({ tk: h.ticker, n: h.n }));
   if (!held.length) {
     state.mkt = {}; state.max7 = null; state.max7by = {};
     if (JSON.stringify(state) !== before) await env.OBS.put(ALERT_KEY, JSON.stringify(state));
@@ -1106,11 +1108,14 @@ async function alertTick(env, sched) {
 // (dark_grade.py) rebuilds every day from the tape with the study's own adaptive threshold; this flat $150 is the live
 // approximation the sheet draws. One KV record per day, written only
 // when something changes (the free plan allows 1,000 writes a day). Public at /dark: the tape is public anyway.
-const DARK_MIN_USD = 150, DARK_ALERT_USD = 500;
+/* ONE RULEBOOK WITH THE STUDY (2026-10-16): a burst is a minute whose signed aggressive money clears max($50, the 95th
+   percentile of that market's minutes SO FAR today, this one included) -- dark_lib.bursts, which went causal the same day.
+   It was a flat $150 here, so the sheet and the alerts showed a different set of bursts than the study graded. */
+const DARK_FLOOR_USD = 50, DARK_PCTL = 0.95, DARK_ALERT_USD = 500;
 const DARK_SURE_PX = 0.95;      // a burst paying this much for its side is a sweep, not dark (dark_lib.SURE_PX)
 /* the triggers that carry their own jobs (wrangler.toml [triggers]; must match it character for character) */
 const DARK_CRON = '*/1 0,11-23 * * *', OBS_CRON = '*/5 0-4,11-23 * * *';
-const DARK_WIN = { metar: 9, cli: 10, twc: 6, fcst: 10 }, DARK_MERGE_MIN = 3;
+const DARK_WIN = { metar: 9, cli: 10, twc: 6, fcst: 10, apt: 15 }, DARK_MERGE_MIN = 3;
 const KAPI = 'https://api.elections.kalshi.com/trade-api/v2';
 function nyEventTicker(dayIso) {
   const [y, m, d] = dayIso.split('-').map(Number);
@@ -1169,18 +1174,49 @@ async function darkTick(env, sched) {
     // field is blended and FLAPS: 66, 65, 66 ... On 10-07 it logged 45 "twc" releases in pairs two minutes apart, and
     // every flap was a KV write (down) and a release plus a write (up) -- most of the day's write budget, and a flap
     // back to a value the public already had is not a new reading. Only a value above the day's recorded high counts.
-    if (typeof v === 'number' && nyHour >= 7 && (rec.twc == null || v > rec.twc)) {
-      if (rec.twc != null) addRel('twc', new Date(sched - 60000).toISOString());
-      rec.twc = v;
+    /* NOT BEFORE 7:20, AND A BIG DROP IS A RESET (2026-10-16). At 7:00 the field still carries YESTERDAY's high for a
+       few minutes; taken as the baseline it hid every rise on a cooler day (10-13: baseline 71 from 10-12, the day
+       topped at 70, so no TWC release all day, and every burst after one was called dark). A fall of 3+ is the reset
+       arriving late, not a flap: re-base without a release. */
+    const nyMin = nyHour * 60 + Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', minute: 'numeric' }).format(new Date(sched)));
+    if (typeof v === 'number' && nyMin >= 7 * 60 + 20) {
+      if (rec.twc != null && v <= rec.twc - 3) rec.twc = v;
+      else if (rec.twc == null || v > rec.twc) {
+        if (rec.twc != null) addRel('twc', new Date(sched - 60000).toISOString());
+        rec.twc = v;
+      }
     }
   } catch (e) { /* as above */ }
   // THE MINUTE TWO MINUTES AGO, complete on every feed
   const m0 = Math.floor(sched / 60000) * 60000 - 120000, m1 = m0 + 60000;
   const covered = (t) => rec.releases.some((r) => { const a = Date.parse(r.t); return t >= a && t <= a + DARK_WIN[r.k] * 60000; });
+  /* THE AIRPORTS' NEW HIGHS ARE PUBLIC TOO (2026-10-16). LaGuardia, Newark and JFK lead the park on a public 5-minute
+     feed; a burst after one sets a new high for its day is a reaction. Fetched only when it can matter -- a burst to
+     label this tick, or a dark one in the last 25 minutes that the feed (10-15 min behind) may now explain -- and a
+     dark burst it explains is relabelled REACTION. Same definition as insider_study.apt_bumps: whole Celsius, a new
+     high since 7 AM (a warm night would otherwise swallow the whole day), public for 15 minutes. */
+  let aptDone = false;
+  const aptCheck = async () => {
+    if (aptDone) return; aptDone = true;
+    const z = 'America/New_York', hrOf = (d) => Number(new Intl.DateTimeFormat('en-US', { timeZone: z, hour: 'numeric', hour12: false }).format(d)) % 24, dayOf = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: z, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+    const start = day + 'T03:00:00Z';     // before local midnight in EDT and EST; the day filter below trims it
+    await Promise.all(['KLGA', 'KEWR', 'KJFK'].map(async (st) => {
+      try {
+        const j = await (await fetch(`https://api.weather.gov/stations/${st}/observations?start=${start}`, { headers: { 'User-Agent': NWS_UA, 'Accept': 'application/geo+json' } })).json();
+        const obs = ((j && j.features) || []).map((f) => [new Date(f.properties.timestamp), f.properties.temperature && f.properties.temperature.value])
+          .filter((o) => typeof o[1] === 'number' && !isNaN(o[0]) && dayOf(o[0]) === day && hrOf(o[0]) >= 7).sort((a, b) => a[0] - b[0]);
+        let mx = null;
+        for (const [d, c] of obs) { const v = Math.round(c); if (mx != null && v > mx) addRel('apt', d.toISOString()); if (mx == null || v > mx) mx = v; }
+      } catch (e) { /* best-effort, like the rest of the clock */ }
+    }));
+    for (const b of rec.bursts) if (b.cls === 'dark' && (covered(Date.parse(b.t)) || covered(Date.parse(b.t) + 59999))) b.cls = 'reaction';
+  };
+  if (rec.bursts.some((b) => b.cls === 'dark' && sched - Date.parse(b.t) < 25 * 60000)) await aptCheck();
+  rec.mags = rec.mags || {}; rec.magsTo = rec.magsTo || {};
   const out = [];
   // its OWN cooldown record: alertTick reads and writes ALERT_KEY in the same minute, and two writers of one key race
   // read only when an alert might go out (2026-10-06): one KV read a minute, nearly always for nothing
-  let state = null, sBefore = '';
+  let state = null, sBefore = '', heldNow = null;
   const alertState = async () => { if (!state){ state = (await env.OBS.get('dark:alerts', { type: 'json' })) || {}; sBefore = JSON.stringify(state); } return state; };
   /* the five-minute ticks already spend most of the free plan's ~50 outbound requests (alerts + the obs log), so this
      skips them and the next tick takes both minutes */
@@ -1190,13 +1226,22 @@ async function darkTick(env, sched) {
     try { tr = (await kpub(env, `/markets/trades?ticker=${mk.tk}&min_ts=${mStart / 1000}&max_ts=${m1 / 1000 - 1}&limit=1000`)).trades || []; }
     catch (e) { continue; }
     for (let mm = mStart; mm < m1; mm += 60000) {
-    let net = 0, ys = 0, yn = 0, ns = 0, nn = 0;
+    let net = 0, ys = 0, yn = 0, ns = 0, nn = 0, nt = 0;
     for (const t of tr) {
       const tt = Date.parse(t.created_time); if (tt < mm || tt >= mm + 60000) continue;
-      const p = Number(t.yes_price_dollars), n = Number(t.count_fp);
+      const p = Number(t.yes_price_dollars), n = Number(t.count_fp); nt++;
       if (t.taker_side === 'yes') { net += n * p; ys += n * p; yn += n; } else { net -= n * (1 - p); ns += n * (1 - p); nn += n; }
     }
-    if (Math.abs(net) < DARK_MIN_USD) continue;
+    if (!nt) continue;
+    // the minute joins the day's distribution once (the five-minute ticks re-read a minute), then the causal threshold
+    const mg = rec.mags[mk.tk] = rec.mags[mk.tk] || [];
+    if (!(rec.magsTo[mk.tk] >= mm)) {
+      const v = Math.round(Math.abs(net) * 100) / 100; let i = 0; while (i < mg.length && mg[i] < v) i++; mg.splice(i, 0, v);
+      rec.magsTo[mk.tk] = mm;
+    }
+    const thr = Math.max(DARK_FLOOR_USD, mg.length ? mg[Math.floor(DARK_PCTL * (mg.length - 1))] : 0);
+    if (Math.abs(net) < thr) continue;
+    await aptCheck();
     const side = net > 0 ? 'yes' : 'no';
     const at = new Date(mm).toISOString();
     if (rec.bursts.some((b) => (b.t === at || b.t1 === at) && b.tk === mk.tk)) continue;
@@ -1218,11 +1263,19 @@ async function darkTick(env, sched) {
     }
     const cls = bb.cls;
     out.push(`${cls} ${side} ${mk.lab} $${usd}${prev ? ' (merged, $' + bb.usd + ')' : ''}`);
+    /* PUSHED ONLY WHEN IT GOES AGAINST WHAT YOU HOLD (2026-10-16). Over 41 days dark bursts did not predict the next
+       report (+0.06c +- 0.54) or beat their price, so a dark burst on its own is not news; one leaning against your
+       position is the case worth a look. darkpos: keys go to the owner's phones only (notify's audience rule). */
+    let mine = null;
     if (cls === 'dark' && bb.usd >= DARK_ALERT_USD && env.VAPID_JWK) {
+      if (heldNow === null) heldNow = ((await env.OBS.get(ALERT_KEY, { type: 'json' })) || {}).held || [];
+      mine = heldNow.find((x) => x.tk === mk.tk && ((x.n > 0 && side === 'no') || (x.n < 0 && side === 'yes'))) || null;
+    }
+    if (mine) {
       const hm = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }).format(new Date(Date.parse(bb.t)));
       const last = rec.releases.filter((r) => Date.parse(r.t) <= mm).map((r) => Date.parse(r.t)).sort().pop();
       const since = last ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }).format(new Date(last)) : 'this morning';
-      await notify(env, await alertState(), `dark:${mk.tk}:${side}`, `Dark flow · NY ${mk.lab}`,
+      await notify(env, await alertState(), `darkpos:${mk.tk}:${side}`, `Dark flow against your ${mine.n > 0 ? 'YES' : 'NO'} · ${mk.lab}`,
         `$${bb.usd.toLocaleString('en-US')} ${side.toUpperCase()}${bb.px == null ? '' : ' at ' + Math.round((side === 'yes' ? bb.px : 1 - bb.px) * 100) + '¢'} \u00b7 ${hm} \u00b7 no reading since ${since}.`, undefined, 'dark:alerts');
     }
     }

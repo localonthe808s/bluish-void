@@ -42,11 +42,15 @@ def bursts(fills):
         e['fills'].append((p, n, side))
     if not mins:
         return None, []
-    mags = sorted(abs(v['net']) for v in mins.values())
-    thr = max(FLOOR_USD, mags[int(PCTL * (len(mags) - 1))])
+    # THE THRESHOLD IS CAUSAL (2026-10-16): max($FLOOR, the PCTL of this market's minutes SO FAR today, this one
+    # included). The whole day's percentile looked ahead -- the worker cannot know it at 10 AM -- so the study graded a
+    # different set of bursts than the sheet and the alerts showed. Now the worker applies this exact rule live.
+    mags, thr = [], FLOOR_USD
     raw = []
     for k in sorted(mins):
         v = mins[k]
+        bisect.insort(mags, abs(v['net']))
+        thr = max(FLOOR_USD, mags[int(PCTL * (len(mags) - 1))])
         if abs(v['net']) < thr:
             continue
         side = 'yes' if v['net'] > 0 else 'no'
