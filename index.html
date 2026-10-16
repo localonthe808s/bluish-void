@@ -803,11 +803,10 @@ window._bvPaintPlus = function(rules, F){
      BEFORE the water polygons, so a river running through a lake or into the sea goes under the water's own fill. At z10
      the OSM lines take over. */
   var bigRiver = { dataLayer: 'rivers', dataSource: 'rivers', maxzoom: 9,
-    /* the basemap's river ink (#13294a) vanishes on dark land at these scales; a brighter blue, settling back toward it by
-       z9 so the hand-off to the OSM lines at z10 is not a jump. Light maps keep their own ink. */
-    symbolizer: new P.LineSymbolizer({ color: function(z){ return F.desert ? (z <= 7 ? '#2d5a99' : z === 8 ? '#24497f' : '#1c3b68') : (F.river || F.water); }, lineCap: 'round', lineJoin: 'round',
-      width: function(z, f){ var a = +((f && f.props && f.props.a) || 300), t = Math.max(0, Math.min(1, Math.log(a / 300) / Math.LN10 / 4));
-        return (0.45 + 2.6 * t) * (0.6 + 0.4 * Math.min(1, Math.max(0, (z - 3) / 6))); } }) };
+    /* light maps: in the base, under the water fill, in their own ink. Dark maps draw the rivers in their own layer ABOVE
+       the relief instead (_bvRivers), so a hillshade's shadow never swallows a valley's river. */
+    symbolizer: new P.LineSymbolizer({ color: F.river || F.water, lineCap: 'round', lineJoin: 'round',
+      width: function(z, f){ return window._bvRiverW(z, +((f && f.props && f.props.a) || 300)); } }) };
   var wetDone = false;
   rules.forEach(function(r){
     /* NO COUNTY LINES (user 2026-10-16: "dont show county lines"): county and city-limit boundaries (kind county / locality,
@@ -818,7 +817,7 @@ window._bvPaintPlus = function(rules, F){
       var wa = r.symbolizer.width, g0 = wa.get.bind(wa); wa.get = function(z, f){ return g0(z, f) * roadK(z); }; r.symbolizer._bvThin = true; }
     if (r.dataLayer === 'water' && r.minzoom === 14 && r.symbolizer instanceof P.LineSymbolizer) return;    /* theirs, z14 only */
     var waterPoly = r.dataLayer === 'water' && r.symbolizer instanceof P.PolygonSymbolizer;
-    if (waterPoly && !wetDone){ out.push(wet); sandRules.forEach(function(x){ out.push(x); }); out.push(bigRiver); wetDone = true; }
+    if (waterPoly && !wetDone){ out.push(wet); sandRules.forEach(function(x){ out.push(x); }); if (!F.desert) out.push(bigRiver); wetDone = true; }
     out.push(r);
     if (waterPoly) lines.forEach(function(l){ out.push(l); });
   });
@@ -883,7 +882,34 @@ window._bvBridgeRules = function(F){
     o.filter = function(z, f){ var p = (f && f.props) || {}; if (!p.is_bridge && p.kind_detail !== 'pier') return false; return f0 ? f0(z, f) : true; };
     return o; });
 };
-window.BV_RIVERS_URL = 'https://cdn.bluishvoid.com/rivers/v1/{z}/{x}/{y}.mvt';
+window.BV_RIVERS_URL = 'https://cdn.bluishvoid.com/rivers/v2/{z}/{x}/{y}.mvt';
+/* RIVER WIDTH (refined 2026-10-16, user: "improve and refine your river illustrations"). Real channels widen roughly with a
+   power of the land they drain, not its log: the log curve drew a 300 km2 creek at a third of the Mississippi's width.
+   Now the fourth root -- a 300 km2 reach ~0.8 px, 30,000 km2 ~1.6, the lower Mississippi ~4.3 px at z9 -- and narrower
+   at continental scale. */
+window._bvRiverW = function(z, a){ return (0.4 + 0.38 * Math.pow(Math.max(a, 300) / 300, 0.25)) * (0.55 + 0.45 * Math.min(1, Math.max(0, (z - 3) / 6))); };
+/* THE CONTINENT'S RIVERS ON DARK MAPS: their own vector layer at z-index 3, above the relief and the bathymetry (2), below
+   every overlay. The bake (_riverbake/) has already cut them out of the lakes and smoothed their bends, so drawing on top
+   costs nothing at a shore. Hierarchy: small reaches fainter, the big trunks brighter with a thin ink casing that lifts
+   them off the hillshade. z3-9; at z10 the basemap's OSM river lines and channel polygons take over. */
+window._bvRivers = function(map){
+  if (!map || map._bvRiverLayer || typeof protomapsL === 'undefined' || typeof L === 'undefined') return null;
+  var P = protomapsL, A = function(f){ return +((f && f.props && f.props.a) || 300); };
+  var tOf = function(a){ return Math.max(0, Math.min(1, Math.log(a / 300) / Math.LN10 / 3.5)); };
+  var ink = function(z, a){ var t = tOf(a); return z <= 7 ? (t > 0.55 ? '#3c70b8' : '#2f5d9e') : z === 8 ? (t > 0.55 ? '#33619f' : '#2a528c') : (t > 0.55 ? '#2a5089' : '#224577'); };
+  var rules = [
+    { dataLayer: 'rivers', filter: function(z, f){ return A(f) >= 20000; },
+      symbolizer: new P.LineSymbolizer({ color: 'rgba(5,7,12,.5)', lineCap: 'round', lineJoin: 'round', width: function(z, f){ return window._bvRiverW(z, A(f)) + 1.6; } }) },
+    { dataLayer: 'rivers',
+      symbolizer: new P.LineSymbolizer({ color: function(z, f){ return ink(z, A(f)); }, opacity: function(z, f){ return 0.55 + 0.45 * tOf(A(f)); },
+        lineCap: 'round', lineJoin: 'round', width: function(z, f){ return window._bvRiverW(z, A(f)); } }) }
+  ];
+  try {
+    var lay = P.leafletLayer({ url: window.BV_RIVERS_URL, maxDataZoom: 8, minZoom: 3, maxZoom: 9, paintRules: rules, labelRules: [], zIndex: 3,
+      bounds: L.latLngBounds([[7, -180], [84, -50]]), attribution: '' });
+    lay.addTo(map); map._bvRiverLayer = lay; return lay;
+  } catch(e){ return null; }
+};
 window._bvVectorBase = function(map, opts){
   opts = opts || {};
   if (typeof protomapsL === 'undefined' || !window.BV_BASEMAP_URL) return null;
@@ -918,8 +944,8 @@ window._bvVectorBase = function(map, opts){
       if (!opts.labels){
         cfg.sources = { '': { url: window.BV_BASEMAP_URL, maxDataZoom: t.data } };
         if (F.desert) cfg.sources.desert = { url: window.BV_BASEMAP_URL, maxDataZoom: Math.min(7, t.data) };
-        /* the continent's rivers, z3-8 vector tiles over-zoomed to z9 (see _bvPaintPlus) -- only the tier that reaches them */
-        if (t.min <= 9) cfg.sources.rivers = { url: window.BV_RIVERS_URL, maxDataZoom: 8 };
+        /* light maps: the continent's rivers in the base (see _bvPaintPlus); dark maps get _bvRivers' own layer instead */
+        if (t.min <= 9 && !F.desert) cfg.sources.rivers = { url: window.BV_RIVERS_URL, maxDataZoom: 8 };
       }
       var layer = protomapsL.leafletLayer(cfg);
       layer.addTo(map);
@@ -934,6 +960,7 @@ window._bvVectorBase = function(map, opts){
        stand down for it; past that the real basemap labels return. */
     if (!opts.labels && opts.flavor !== 'light' && !opts.noRelief && window._bvRelief) window._bvRelief(map);
     if (!opts.labels && opts.flavor !== 'light' && !opts.noBathy && window._bvBathy) window._bvBathy(map);
+    if (!opts.labels && opts.flavor !== 'light' && !opts.noRivers && window._bvRivers) window._bvRivers(map);
     if (opts.labels && window._bvContinentalNames)
       window._bvContinentalNames(map, { light: opts.flavor === 'light' });
   } catch(e){ console.warn('[basemap] vector layer failed, staying on raster', e); added.forEach(function(l){ try{ map.removeLayer(l); }catch(e2){} }); return null; }

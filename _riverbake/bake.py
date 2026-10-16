@@ -13,7 +13,13 @@ Output: one PMTiles archive of vector tiles (layer "rivers", property a = km2 dr
 rivers that read at that scale (thresholds below), simplified to ~half a pixel. The page draws it with protomaps-leaflet
 (_bvPaintPlus) up to z9, over-zooming z8; width by drainage.
 
-    python3 bake.py streams.gpkg model.parquet meta.parquet OUT.pmtiles
+    python3 bake.py streams.gpkg model.parquet meta.parquet OUT.pmtiles [lakes.gpkg]
+
+REFINED (2026-10-16, user: "improve and refine your river illustrations"): the lines are drawn ABOVE the relief now
+(_bvRivers in index.html), so they are cut out of every lake here -- GEOGLOWS' own global_lakes.gpkg, the same TDX
+survey, so a river stops exactly at the shore it was traced to -- and each reach is rounded with two passes of Chaikin
+corner-cutting after simplification. TDX lines are walked off a 12 m elevation grid and come out faintly stair-stepped;
+the endpoints are kept, so reaches still meet at their junctions.
 """
 import math, sqlite3, struct, sys, gzip
 import numpy as np, pandas as pd
@@ -41,7 +47,29 @@ def tile_bounds(z, x, y):
     nn = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / n)))); s = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * (y + 1) / n))))
     return w, s, e, nn
 
-def main(gpkg, model, meta, out):
+def chaikin(g, n=2):
+    from shapely.geometry import LineString, MultiLineString
+    def one(ls):
+        P = np.asarray(ls.coords)
+        for _ in range(n):
+            if len(P) < 3: break
+            Q = np.empty((2 * (len(P) - 1), 2)); Q[0::2] = 0.75 * P[:-1] + 0.25 * P[1:]; Q[1::2] = 0.25 * P[:-1] + 0.75 * P[1:]
+            P = np.vstack([P[:1], Q, P[-1:]])
+        return LineString(P)
+    if g.geom_type == 'LineString': return one(g)
+    if g.geom_type == 'MultiLineString': return MultiLineString([one(x) for x in g.geoms])
+    return g
+
+def load_lakes(path):
+    c = sqlite3.connect(path)
+    out = []
+    for (b,) in c.execute("select l.geom from global_lakes l join rtree_global_lakes_geom r on l.fid = r.id where r.minx > -180 and r.maxx < -50 and r.miny > 7 and r.maxy < 84"):
+        g = gpkg_geom(b)
+        if not g.is_valid: g = g.buffer(0)
+        out.append(g.simplify(0.002))
+    return out
+
+def main(gpkg, model, meta, out, lakes_path=None):
     m = pd.read_parquet(model, columns=['LINKNO', 'DSContArea', 'VPUCode'])
     m = m[m.VPUCode.isin(VPUS) & (m.DSContArea >= THR[8] * 1e6)]
     area = dict(zip(m.LINKNO.astype(np.int64), (m.DSContArea / 1e6).round().astype(np.int64)))
@@ -53,12 +81,22 @@ def main(gpkg, model, meta, out):
         if a is None: continue
         feats.append((a, gpkg_geom(g)))
     print('geometries', len(feats), flush=True)
+    lakes = load_lakes(lakes_path) if lakes_path else []
+    ltree = STRtree(lakes) if lakes else None
+    print('lakes', len(lakes), flush=True)
     with open(out, 'wb') as f:
         W = Writer(f); n_t = 0
         for z in range(3, 9):
             sub = [(a, g) for a, g in feats if a >= THR[z]]
             px = 360.0 / (256 * 2 ** z)
-            geoms = [g.simplify(px * 0.5, preserve_topology=False) for a, g in sub]
+            geoms = []
+            for a, g in sub:
+                g = chaikin(g.simplify(px * 0.5, preserve_topology=False))
+                if ltree is not None:
+                    hit = ltree.query(g)
+                    for k in hit:
+                        if lakes[k].intersects(g): g = g.difference(lakes[k])
+                geoms.append(g)
             tree = STRtree(geoms)
             x0, y0 = lonlat_tile(-180, 84, z); x1, y1 = lonlat_tile(-50, 7, z)
             cnt = 0
@@ -93,4 +131,4 @@ def main(gpkg, model, meta, out):
     print('tiles', n_t)
 
 if __name__ == '__main__':
-    main(*sys.argv[1:5])
+    main(*sys.argv[1:6])
