@@ -223,7 +223,7 @@ async function sampleStrikes(places, ms) {
 const NEAR_MI = 15;
 /* where a tap lands (user 2026-10-14): the view that shows the thing the alert is about */
 const GO = { severe: 'radar', rain: 'radar', lightning: 'radar', umbrella: 'radar', quake: 'hazards', fire: 'hazards', air: 'hazards', aurora: 'aurora', sunset: 'golden', swing: 'top', iss: 'space', eclipse: 'space', meteor: 'space' };
-async function sendMerged(env, pend, dead, log) {
+async function sendMerged(env, pend, dead, log, state) {
   let sent = 0;
   for (const ep of Object.keys(pend)) {
     const items = pend[ep], used = new Array(items.length).fill(false);
@@ -231,10 +231,27 @@ async function sendMerged(env, pend, dead, log) {
       if (used[i]) continue; used[i] = true;
       const A = items[i], group = [A];
       for (let j = i + 1; j < items.length; j++) { const B = items[j];
-        if (!used[j] && B.type === A.type && B.ekey === A.ekey && group.some((g) => miles(g.lat, g.lon, B.lat, B.lon) <= NEAR_MI)) { used[j] = true; group.push(B); } }
+        if (!used[j] && B.type === A.type && B.ekey === A.ekey && (A.type === 'meteor' || group.some((g) => miles(g.lat, g.lon, B.lat, B.lon) <= NEAR_MI))) { used[j] = true; group.push(B); } }
       const one = group.length > 1, a = A.a;
-      const body = one ? String(a.body).replace(new RegExp(' of ' + A.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b'), '') : a.body;
+      let body = one ? String(a.body).replace(new RegExp(' of ' + A.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b'), '') : a.body;
+      /* A METEOR SHOWER IS ONE NOTIFICATION, however far apart the places (user 2026-10-16: "if you follow multiple areas and
+         theyre all saying theres a meteor shower, can you merge them into one"): the shared numbers once, each place only
+         where it differs (its clouds, or its rate and best hour) */
+      if (A.type === 'meteor' && one && a.parts) {
+        const P = group.map((g) => ({ n: g.name, p: g.a.parts })).filter((x) => x.p);
+        const top = Math.max(...P.map((x) => x.p.rate));
+        const same = P.every((x) => x.p.best === P[0].p.best && x.p.rate >= 0.9 * top);   /* 86 vs 88 an hour is the same night */
+        const cl = (x) => (x.p.cc != null ? `clouds ${x.p.cc}%` : '');
+        body = same
+          ? `Up to about ${top} an hour under dark skies, best around ${P[0].p.best} with the radiant ${P[0].p.alt}° up in the ${P[0].p.dir}. `
+            + (P.some((x) => x.p.cc != null) ? P.map((x) => `${x.n} ${cl(x) || 'clouds unknown'}`).join(', ') + '. ' : '') + P[0].p.moon
+          : P.map((x) => `${x.n}: about ${x.p.rate}/hr, best ${x.p.best}${cl(x) ? ', ' + cl(x) : ''}`).join('. ') + '. ' + P[0].p.moon;
+      }
       if (dead.has(ep)) continue;
+      /* and once per phone: places in other time zones reach 7 PM in a later tick */
+      const once = A.type === 'meteor' && state ? `ep:${ep.slice(-24)}|${A.ekey}` : null;
+      if (once && state[once]) continue;
+      if (once) state[once] = Date.now();
       try { const r = await pushOne(A.s, { title: one ? a.title : `${a.title}${a.sep || ' \u00b7 '}${A.name}`, body, tag: `${A.type}:${A.ekey}`, url: '/#go=' + (GO[A.type] || 'top') }, jwk(env), a.urg);
         if (r.status === 404 || r.status === 410) dead.add(ep); else if (r.status < 300) sent++; else log.push(`push ${r.status}`); } catch (e) { log.push(String(e)); }
     }
@@ -479,7 +496,7 @@ async function tick(env) {
       }
     }
   }
-  sent += await sendMerged(env, PEND, dead, log);
+  sent += await sendMerged(env, PEND, dead, log, state);
   for (const sk of Object.keys(state)) if (state[sk] > 1e12 && now - state[sk] > 4 * 864e5) delete state[sk];   /* timestamps only: counters (ltg:quiet) are not times */
   if (JSON.stringify(state) !== before) await env.WX.put('state', JSON.stringify(state));
   if (dead.size) await env.WX.put('subs', JSON.stringify(subs.filter((s) => !dead.has(s.endpoint))));

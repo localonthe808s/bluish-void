@@ -190,6 +190,8 @@ export function meteorAlert(g, f, ln) {
   const lit = Math.round(100 * A.Illumination(A.Body.Moon, new Date(best.t)).phase_fraction);
   const rate = Math.max(1, Math.round(sh.zhr * Math.sin(best.alt * D2R)));
   return { key: `meteor:${sh.name}:${y}`, title: `${sh.name} peak tonight`, urg: 'normal',
+    /* the pieces, for one notification across several places (sendMerged) */
+    parts: { rate, best: clock(best.t, f), alt: Math.round(best.alt), dir: dir8(best.az), cc, moon: `Moon ${lit}% lit${moonUp ? ' and up then' : ', down then'}.` },
     body: `Up to about ${rate} an hour under dark skies, best around ${clock(best.t, f)} with the radiant ${Math.round(best.alt)}° up in the ${dir8(best.az)}. `
       + `Moon ${lit}% lit${moonUp ? ' and up then' : ', down then'}.${cc != null ? ` Clouds ${cc}%.` : ''}` };
 }
