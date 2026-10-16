@@ -778,6 +778,10 @@ window._bvPaintPlus = function(rules, F){
   var roadK = function(z){ return z <= 10 ? 0.7 : z >= 15 ? 0.5 : 0.7 - (z - 10) * 0.04; };
   var wetDone = false;
   rules.forEach(function(r){
+    /* NO COUNTY LINES (user 2026-10-16: "dont show county lines"): county and city-limit boundaries (kind county / locality,
+       kind_detail 6 / 8) are dropped from every boundary rule; states and countries stay */
+    if (r.dataLayer === 'boundaries' && !r._bvNoCounty){ var bf = r.filter; r.filter = function(z, f){ var k = kind(f), kd = +((f && f.props && f.props.kind_detail) || 0);
+      if (k === 'county' || k === 'locality' || kd >= 5) return false; return bf ? bf(z, f) : true; }; r._bvNoCounty = true; }
     if (r.dataLayer === 'roads' && r.symbolizer instanceof P.LineSymbolizer && r.symbolizer.width && r.symbolizer.width.get && !r.symbolizer._bvThin){
       var wa = r.symbolizer.width, g0 = wa.get.bind(wa); wa.get = function(z, f){ return g0(z, f) * roadK(z); }; r.symbolizer._bvThin = true; }
     if (r.dataLayer === 'water' && r.minzoom === 14 && r.symbolizer instanceof P.LineSymbolizer) return;    /* theirs, z14 only */
@@ -787,6 +791,38 @@ window._bvPaintPlus = function(rules, F){
     if (waterPoly) lines.forEach(function(l){ out.push(l); });
   });
   return out;
+};
+/* BATHYMETRY (user 2026-10-16: "add coastal and river bathymetry to the national map, bake it in to a high detail").
+   _bathybake/ bakes NOAA NCEI's DEM_all (CUDEM 1/9" where it exists, the Coastal Relief Models elsewhere, Great Lakes
+   included) into 256 px WebP tiles z5-13 on R2: depth-colored water with a soft floor hillshade and faint isobaths,
+   transparent off the water and wherever the model has no floor (inland lakes and rivers read their SURFACE there, so the
+   basemap's own water shows). cover.json lists the z8 tiles holding any baked tile, so a map over dry land asks for nothing.
+   It sits above the vector base (z-index 2), so bridges and piers are drawn again in the labels layer above it. Dark maps
+   only. */
+window.BV_BATHY = { url: 'https://cdn.bluishvoid.com/bathy/v1/{z}/{x}/{y}.webp', cover: null, coverP: null };
+window._bvBathy = function(map){
+  if (!map || map._bvBathyLayer || typeof L === 'undefined') return null;
+  var B = window.BV_BATHY;
+  if (!B.coverP) B.coverP = fetch('https://cdn.bluishvoid.com/bathy/v1/cover.json').then(function(r){ return r.ok ? r.json() : []; }).then(function(a){ B.cover = new Set(a || []); return B.cover; }).catch(function(){ B.cover = new Set(); return B.cover; });
+  var BL = L.TileLayer.extend({
+    createTile: function(c, done){
+      var cov = B.cover;
+      if (c.z >= 8 && (!cov || !cov.has((c.x >> (c.z - 8)) + '/' + (c.y >> (c.z - 8))))){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }   /* a bare <img> draws a broken-image outline */
+      return L.TileLayer.prototype.createTile.call(this, c, done);
+    }
+  });
+  var lay = new BL(B.url, { minZoom: 5, maxNativeZoom: 13, maxZoom: 19, zIndex: 2, opacity: 1, keepBuffer: 1, updateWhenIdle: true,
+    errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', bounds: L.latLngBounds([[15, -180], [72, -60]]) });
+  map._bvBathyLayer = lay;
+  B.coverP.then(function(){ lay.addTo(map); });
+  return lay;
+};
+/* bridges and piers again, over the bathymetry: every road line rule kept for features flagged is_bridge, plus the pier rule */
+window._bvBridgeRules = function(F){
+  return window._bvPaintPlus(protomapsL.paintRules(F), F).filter(function(r){ return r.dataLayer === 'roads' && r.symbolizer instanceof protomapsL.LineSymbolizer; }).map(function(r){
+    var o = {}, f0 = r.filter; for (var k in r) o[k] = r[k];
+    o.filter = function(z, f){ var p = (f && f.props) || {}; if (!p.is_bridge && p.kind_detail !== 'pier') return false; return f0 ? f0(z, f) : true; };
+    return o; });
 };
 window._bvVectorBase = function(map, opts){
   opts = opts || {};
@@ -808,7 +844,8 @@ window._bvVectorBase = function(map, opts){
         url: window.BV_BASEMAP_URL,
         maxDataZoom: t.data,
         minZoom: t.min, maxZoom: t.max,
-        paintRules: opts.labels ? [] : window._bvPaintPlus(protomapsL.paintRules(F), F),
+        paintRules: opts.labels ? (map._bvBathyLayer ? window._bvBridgeRules(F) : [])
+                                : window._bvPaintPlus(protomapsL.paintRules(F), F),
         labelRules: opts.labels ? _bvPlaceFloor(protomapsL.labelRules(F, 'en'), opts.ourNames !== false) : [],
         // ODbL: the tiles are ours to serve, the data is OpenStreetMap's to credit
         attribution: opts.labels ? '' : '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
@@ -828,6 +865,7 @@ window._bvVectorBase = function(map, opts){
        drift apart. Every caller that asks for labels gets it, so every view
        names the same places. Only z2-6, where protomaps' own localities
        stand down for it; past that the real basemap labels return. */
+    if (!opts.labels && opts.flavor !== 'light' && !opts.noBathy && window._bvBathy) window._bvBathy(map);
     if (opts.labels && window._bvContinentalNames)
       window._bvContinentalNames(map, { light: opts.flavor === 'light' });
   } catch(e){ console.warn('[basemap] vector layer failed, staying on raster', e); added.forEach(function(l){ try{ map.removeLayer(l); }catch(e2){} }); return null; }
