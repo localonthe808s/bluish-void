@@ -989,6 +989,15 @@ async function alertTick(env, sched) {
     const b = rungBounds(m), label = rungLabel(b), side = h.n > 0 ? 'YES' : 'NO';
     const bid = Number(m.yes_bid_dollars), ask = Number(m.yes_ask_dollars);
     const mid = (isFinite(bid) && isFinite(ask) && ask > 0) ? (bid + ask) / 2 : null;
+    /* THE CONTEXT EVERY POSITION ALERT CARRIES (user 2026-10-16: "that's not enough info" after the bodies were cut to a
+       bare range): how far a reading is from the range, the other live number (TWC's high or the last report), and what
+       the position is worth right now at the bid. */
+    const sideBid = side === 'YES' ? bid : (isFinite(ask) ? 1 - ask : NaN);
+    const holdTxt = `You hold ${Math.abs(h.n)} ${side}` + (isFinite(sideBid) && sideBid > 0 ? `, bid ${Math.round(sideBid * 100)}¢` : '') + '.';
+    const rp0 = rep[h.am.icao];
+    const repTxt = rp0 ? `Last report ${rp0.f}° at ${new Date(rp0.at).toLocaleTimeString('en-US', { timeZone: h.am.tz, hour: 'numeric', minute: '2-digit' })}` : '';
+    const gap = (v) => { const r = Math.round(v);
+      return inRung(v, b) ? `In ${label}` : (b[1] != null && r > b[1]) ? `${r - b[1]}° above ${label}` : `${b[0] - r}° below ${label}`; };
     // 3. the market moved on your rung
     if (mid != null) {
       const anchor = state.mkt[h.ticker];
@@ -997,7 +1006,7 @@ async function alertTick(env, sched) {
         const good = (side === 'YES') === (mid > anchor);
         await notify(env, state, `mkt:${h.ticker}:${Math.round(mid * 4)}`,
           `${label} ${dir} ${Math.round(anchor * 100)}¢ → ${Math.round(mid * 100)}¢`,
-          `${good ? 'Good' : 'Bad'} for your ${side}.`,
+          `${good ? 'Good' : 'Bad'} for your ${side}. ${repTxt ? repTxt + (max7 != null ? ', TWC high ' + max7 + '°' : '') + '. ' : ''}${holdTxt}`,
           good ? 'default' : 'high');
         out.push(`${h.ticker} ${anchor}->${mid}`);
         state.mkt[h.ticker] = mid;
@@ -1013,7 +1022,7 @@ async function alertTick(env, sched) {
       const local = new Date(rp.at).toLocaleTimeString('en-US', { timeZone: h.am.tz, hour: 'numeric', minute: '2-digit' });
       await notify(env, state, `metar:${h.ticker}:${rp.at}`,
         `${h.am.name} ${rp.f}° \u00b7 ${local}${rp.raw.trim() === 'SPECI' ? ' special' : ''}`,
-        `${inNow ? 'Inside' : above ? 'Above' : 'Below'} ${label} \u00b7 ${bad ? 'bad for your ' + side : 'you hold ' + side}.`,
+        `${gap(rp.f)}${bad ? ', bad for your ' + side : ''}. ${max7 != null ? 'TWC high so far ' + max7 + '°. ' : ''}${holdTxt}`,
         bad ? 'urgent' : 'default');
       out.push(`metar ${h.am.icao} ${rp.f}`);
     }
@@ -1069,7 +1078,7 @@ async function alertTick(env, sched) {
         const bad = (side === 'YES') ? !nowIn : nowIn;
         await notify(env, state, `max7:${h.ticker}:${max7}`,
           `${h.am.name} TWC high ${max7}°`,
-          `Up from ${prevMax7}°, ${nowIn ? 'inside' : nowAbove ? 'above' : 'below'} ${label} \u00b7 ${bad ? 'bad for your ' + side : 'you hold ' + side}.`,
+          `Up from ${prevMax7}°: ${gap(max7).replace(/^In /, 'in ')}${bad ? ', bad for your ' + side : ''}. ${repTxt ? repTxt + '. ' : ''}${holdTxt}`,
           bad ? 'high' : 'default');
         out.push(`max7 ${h.am.series} ${prevMax7}->${max7}`);
       }
