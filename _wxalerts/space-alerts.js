@@ -8,8 +8,8 @@
 //   METEOR      7 PM on a major shower's peak night, when the radiant gets 10 deg+ up in the dark hours and the best
 //               hours look mostly clear
 // The astronomy is two libraries, not hand-rolled: astronomy-engine (eclipses with local circumstances, sun/moon
-// positions, a radiant's altitude) and satellite.js (SGP4, the standard model for a TLE -- here CelesTrak's ISS
-// elements, refreshed twice a day). The page's tap target is the space-events widget (#go=space).
+// positions, a radiant's altitude) and satellite.js (SGP4, the standard model for a TLE -- the ISS elements from
+// ARISS / AMSAT / CelesTrak, refreshed twice a day). The page's tap target is the space-events widget (#go=space).
 import * as A from 'astronomy-engine';
 import * as S from 'satellite.js';
 
@@ -36,15 +36,22 @@ const sunAlt = (obs, ms) => { const eq = A.Equator(A.Body.Sun, new Date(ms), obs
 /* ------------------------------------------------------------------------------------------------ the ISS -------- */
 /* once per tick: the station 8 to 34 minutes ahead every 30 s, Earth-fixed, and whether it is in sunlight */
 export async function issTrack(env, UA) {
+  /* THREE SOURCES, AND A BACK-OFF (2026-10-16). CelesTrak blocks an address for 2 hours on "excessive downloads" -- it blocked
+     our tests within an hour, and a worker shares Cloudflare's addresses with everyone else who fetches it. So the ARISS and
+     AMSAT copies first (the same NORAD elements, ARISS refreshed with each new set), CelesTrak last; a failed round waits an
+     hour (KV key with a TTL) instead of retrying every ten minutes, which is what gets a source to block us. */
   let tle = await env.WX.get('tle:iss', { type: 'json' });
-  if (!tle || Date.now() - tle.at > 12 * 3600e3) {
-    try {
-      const L = (await (await fetch('https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=TLE', { headers: { 'User-Agent': UA } })).text()).trim().split(/\r?\n/);
-      if (L.length >= 3 && /^1 25544/.test(L[1].trim()) && /^2 25544/.test(L[2].trim())) {
-        tle = { l1: L[1].trim(), l2: L[2].trim(), at: Date.now() };
-        await env.WX.put('tle:iss', JSON.stringify(tle));
-      }
-    } catch (_) { /* keep the elements we have; a few days old is still close */ }
+  if ((!tle || Date.now() - tle.at > 12 * 3600e3) && !(await env.WX.get('tle:iss:wait'))) {
+    let got = null;
+    for (const u of ['https://live.ariss.org/iss.txt', 'https://www.amsat.org/tle/current/nasabare.txt', 'https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=TLE']) {
+      try {
+        const r = await fetch(u, { headers: { 'User-Agent': UA } }); if (!r.ok) continue;
+        const L = (await r.text()).split(/\r?\n/).map((x) => x.trim()), i = L.findIndex((x) => /^1 25544/.test(x));
+        if (i >= 0 && /^2 25544/.test(L[i + 1] || '')) { got = { l1: L[i], l2: L[i + 1], at: Date.now(), src: u.split('/')[2] }; break; }
+      } catch (_) { /* next source */ }
+    }
+    if (got) { tle = got; await env.WX.put('tle:iss', JSON.stringify(tle)); }
+    else await env.WX.put('tle:iss:wait', '1', { expirationTtl: 3600 });   /* keep the elements we have; a few days old is still close */
   }
   if (!tle) return null;
   const rec = S.twoline2satrec(tle.l1, tle.l2), t0 = Date.now() + 8 * 60e3, pts = [];
