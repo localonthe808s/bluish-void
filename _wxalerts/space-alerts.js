@@ -126,7 +126,9 @@ function localEclipse(E, g, f) {
       + (L.peak.altitude > 0 ? ` at ${at(pk, f)}, the sun ${Math.round(L.peak.altitude)}° up` : ', with the most of it below the horizon')
       + `. ${aUp ? 'Starts' : 'Already under way at sunrise,'} ${at(a, f)}, ${bUp ? 'ends' : 'the sun sets still eclipsed at'} ${at(b, f)}.`
       + ' Never look at the sun without eclipse glasses.';
-    return { id: new Date(E.peak).toISOString().slice(0, 16), start: a, end: b, title: `${kind === 'PARTIAL' ? 'Partial' : kind === 'TOTAL' ? 'Total' : 'Annular'} solar eclipse`, words };
+    return { id: new Date(E.peak).toISOString().slice(0, 16), start: a, end: b, title: `${kind === 'PARTIAL' ? 'Partial' : kind === 'TOTAL' ? 'Total' : 'Annular'} solar eclipse`, words,
+      short: `${kind === 'PARTIAL' ? pct + '% covered' : kind === 'TOTAL' ? 'totality' : 'ring of fire'}${L.peak.altitude > 0 ? ' at ' + at(pk, f) : ''}, ${at(a, f)}–${at(b, f)}`,
+      safe: 'Never look at the sun without eclipse glasses.' };
   }
   /* lunar: visible wherever the moon is up during the umbral phases */
   const pb = E.peak - E.sdP * 60e3, pe = E.peak + E.sdP * 60e3, tb = E.peak - (E.sdT || 0) * 60e3, te = E.peak + (E.sdT || 0) * 60e3;
@@ -143,7 +145,9 @@ function localEclipse(E, g, f) {
     + (E.kind === 'total' ? (totVis ? (totLast < te - 3e5 ? `, fully red from ${at(tb, f)} until it sets at ${at(totLast, f)}` : `, fully red ${at(Math.max(tb, totFirst), f)}–${at(te, f)}`) : ', but totality happens with the moon down') : `, most covered at ${at(E.peak, f)}`)
     + (last < pe - 6e5 ? (totVis && totLast < te - 3e5 ? '.' : `, and sets still eclipsed at ${at(last, f)}.`) : `, and leaves the shadow at ${at(pe, f)}.`)
     + ' Safe to watch with the naked eye.';
-  return { id: new Date(E.peak).toISOString().slice(0, 16), start: first, end: last, title: `${E.kind === 'total' ? 'Total' : 'Partial'} lunar eclipse`, words };
+  return { id: new Date(E.peak).toISOString().slice(0, 16), start: first, end: last, title: `${E.kind === 'total' ? 'Total' : 'Partial'} lunar eclipse`, words,
+    short: `${at(first, f)}–${at(last, f)}${E.kind === 'total' ? (totVis ? ', fully red from ' + at(Math.max(tb, totFirst), f) : ', not the totality') : ''}`,
+    safe: 'Safe to watch with the naked eye.' };
 }
 
 /* the week-ahead and morning-of notices (8 AM local) and the 30-minute warning, for every eclipse this place sees */
@@ -153,13 +157,14 @@ export function eclipseAlerts(EC, g, f, ln) {
     let L; try { L = localEclipse(E, g, f); } catch (_) { L = null; }
     if (!L || L.end < now) continue;
     const toStart = L.start - now, cc = cloudAt(f, L.start), cloud = cc != null ? ` Clouds forecast ${cc}%.` : '';
+    const parts = { base: L.title, words: L.words, short: L.short, safe: L.safe, cc };   /* for one notification across places (sendMerged) */
     if (ln.h === 8 && toStart > 6.5 * 864e5 && toStart <= 7.5 * 864e5)
-      out.push({ key: `ecl:${L.id}:week`, title: `${L.title} in a week`, urg: 'normal', body: L.words });
+      out.push({ key: `ecl:${L.id}:week`, title: `${L.title} in a week`, urg: 'normal', body: L.words, parts: { ...parts, cc: null } });
     if (ln.h === 8 && toStart > 0 && toStart <= 864e5)
-      out.push({ key: `ecl:${L.id}:day`, title: `${L.title} ${E.body === 'moon' && (localHour(L.start, f) >= 18 || localHour(L.start, f) < 6) ? 'tonight' : 'today'}`, urg: 'normal', body: L.words + cloud });
+      out.push({ key: `ecl:${L.id}:day`, title: `${L.title} ${E.body === 'moon' && (localHour(L.start, f) >= 18 || localHour(L.start, f) < 6) ? 'tonight' : 'today'}`, urg: 'normal', body: L.words + cloud, parts });
     const h0 = localHour(L.start, f);
     if (toStart >= 20 * 60e3 && toStart < 40 * 60e3 && h0 >= 6 && h0 < 23)
-      out.push({ key: `ecl:${L.id}:soon`, title: `${L.title} starts ${at(L.start, f)}`, urg: 'high', body: L.words + cloud });
+      out.push({ key: `ecl:${L.id}:soon`, title: `${L.title} starts ${at(L.start, f)}`, urg: 'high', body: L.words + cloud, parts });
   }
   return out;
 }

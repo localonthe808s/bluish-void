@@ -231,7 +231,7 @@ async function sendMerged(env, pend, dead, log, state) {
       if (used[i]) continue; used[i] = true;
       const A = items[i], group = [A];
       for (let j = i + 1; j < items.length; j++) { const B = items[j];
-        if (!used[j] && B.type === A.type && B.ekey === A.ekey && (A.type === 'meteor' || group.some((g) => miles(g.lat, g.lon, B.lat, B.lon) <= NEAR_MI))) { used[j] = true; group.push(B); } }
+        if (!used[j] && B.type === A.type && B.ekey === A.ekey && (A.type === 'meteor' || A.type === 'eclipse' || group.some((g) => miles(g.lat, g.lon, B.lat, B.lon) <= NEAR_MI))) { used[j] = true; group.push(B); } }
       const one = group.length > 1, a = A.a;
       let body = one ? String(a.body).replace(new RegExp(' of ' + A.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b'), '') : a.body;
       /* A METEOR SHOWER IS ONE NOTIFICATION, however far apart the places (user 2026-10-16: "if you follow multiple areas and
@@ -247,12 +247,25 @@ async function sendMerged(env, pend, dead, log, state) {
             + (P.some((x) => x.p.cc != null) ? P.map((x) => `${x.n} ${cl(x) || 'clouds unknown'}`).join(', ') + '. ' : '') + P[0].p.moon
           : P.map((x) => `${x.n}: about ${x.p.rate}/hr, best ${x.p.best}${cl(x) ? ', ' + cl(x) : ''}`).join('. ') + '. ' + P[0].p.moon;
       }
+      /* AN ECLIPSE TOO (user 2026-10-16: "merge eclipse alerts across places too"): one notification; said once when every place
+         sees the same thing, else a short line per place (coverage and times differ a lot across a continent) */
+      let title = one ? a.title : `${a.title}${a.sep || ' \u00b7 '}${A.name}`;
+      if (A.type === 'eclipse' && one && a.parts) {
+        const P = group.map((g) => ({ n: g.name, p: g.a.parts })).filter((x) => x.p);
+        const cl = (x) => (x.p.cc != null ? `clouds ${x.p.cc}%` : '');
+        body = P.every((x) => x.p.words === P[0].p.words)
+          ? P[0].p.words + (P.some((x) => x.p.cc != null) ? ' ' + P.map((x) => `${x.n} ${cl(x) || 'clouds unknown'}`).join(', ') + '.' : '')
+          : (() => { const by = {}; P.forEach((x) => { const k = x.p.short + (cl(x) ? ', ' + cl(x) : ''); (by[k] = by[k] || []).push(x.n); });   /* places that see it alike share a line */
+              return Object.keys(by).map((k) => `${by[k].join(', ')}: ${k}`).join('. ') + '. ' + P[0].p.safe; })();
+        if (/:soon$/.test(A.ekey) && P.some((x) => x.p.short !== P[0].p.short)) title = `${P[0].p.base} starts soon`;
+      }
       if (dead.has(ep)) continue;
-      /* and once per phone: places in other time zones reach 7 PM in a later tick */
-      const once = A.type === 'meteor' && state ? `ep:${ep.slice(-24)}|${A.ekey}` : null;
+      /* and once per phone: places in other time zones reach 7 PM (a shower) or 8 AM (an eclipse notice) in a later tick; the
+         30-minute eclipse warning stays per place -- a different place's eclipse starts at a different moment */
+      const once = state && (A.type === 'meteor' || (A.type === 'eclipse' && /:(week|day)$/.test(A.ekey))) ? `ep:${ep.slice(-24)}|${A.ekey}` : null;
       if (once && state[once]) continue;
       if (once) state[once] = Date.now();
-      try { const r = await pushOne(A.s, { title: one ? a.title : `${a.title}${a.sep || ' \u00b7 '}${A.name}`, body, tag: `${A.type}:${A.ekey}`, url: '/#go=' + (GO[A.type] || 'top') }, jwk(env), a.urg);
+      try { const r = await pushOne(A.s, { title, body, tag: `${A.type}:${A.ekey}`, url: '/#go=' + (GO[A.type] || 'top') }, jwk(env), a.urg);
         if (r.status === 404 || r.status === 410) dead.add(ep); else if (r.status < 300) sent++; else log.push(`push ${r.status}`); } catch (e) { log.push(String(e)); }
     }
   }
