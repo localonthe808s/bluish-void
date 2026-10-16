@@ -927,6 +927,30 @@ async function alertTick(env, sched) {
   } catch (e) { out.push('positions err'); }
   /* what you hold, for darkTick: a dark burst is pushed only when it goes against one of these (2026-10-16) */
   state.held = held.map((h) => ({ tk: h.ticker, n: h.n }));
+  /* 1b. THE NOON LOCK CAN BE TOO LATE (2026-10-16, user: "the high was hit really early today ... a notification when the
+     noon lock may be too late"). 10-16 named YES 74 or below at 82-88c with a 10-17c edge from 7 AM; at 10:45 the price ran
+     to 93c and the bet was gone an hour before the lock. Measured on 39 days of the trail: 12 days had a morning bet and
+     none at noon; bets first named BEFORE 9 AM won 13 of 18 (+40% a bet), those first named 9 AM-noon 5 of 8 (-2%), and
+     chasing the last morning sighting lost (-8.5%). So: once a day, 7-9 AM ET, every five minutes (minute 3, after the
+     bake lands), read the five-minute bake; a bet named before the lock on a market you do not already hold is pushed. */
+  const nyNow = new Date(sched || Date.now()), nyH = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false }).format(nyNow)) % 24;
+  if (nyH >= 7 && nyH < 9 && nyNow.getUTCMinutes() % 5 === 3) {
+    const day = localDate(0);
+    if (!(state.sent || {})[`early:${day}`]) {
+      try {
+        const r = await fetch(`https://raw.githubusercontent.com/${OWNER}/${REPO}/main/kalshi_ny.json?t=${Date.now()}`, { headers: { 'User-Agent': 'bluishvoid-kalshi-cron' } });
+        const T = r.ok ? ((await r.json()).today || {}) : {};
+        const b = T.bet, rung = b && (T.ladder || []).find((x) => x.label === b.label);
+        if (T.date === day && b && !T.locked && b.price != null && !(rung && held.some((h) => h.ticker === rung.ticker))) {
+          const side = b.dir === 'against' ? 'NO' : 'YES', lab = b.label;
+          await notify(env, state, `early:${day}`, `Morning bet · ${side} ${lab} at ${Math.round(b.price * 100)}¢`,
+            `Model ${Math.round(b.q * 100)}% on ${side}, edge ${Math.round(b.ev * 100)}¢ after the fee. The noon lock may be too late: ` +
+            `bets first named before 9 AM won 13 of 18; on 12 of 39 days the bet was gone by noon.`, 'high');
+          out.push(`early bet ${side} ${lab} ${b.price}`);
+        }
+      } catch (e) { out.push('early bet err'); }
+    }
+  }
   if (!held.length) {
     state.mkt = {}; state.max7 = null; state.max7by = {};
     if (JSON.stringify(state) !== before) await env.OBS.put(ALERT_KEY, JSON.stringify(state));
