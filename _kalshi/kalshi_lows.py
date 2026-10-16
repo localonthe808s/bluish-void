@@ -711,6 +711,20 @@ def run_market(cfg, dry_dir=None):
         p = out_path
     with open(p, 'w') as f:
         json.dump(doc, f, separators=(',', ':'))
+    # THE BAKE TRAIL FOR LOWS (2026-10-16, user: "add the lows trail too"): the highs' row (kalshi_daily.trail_row), with
+    # the readings swapped for the low's own -- hmax carries the low so far, six/cli the six-hour and climate minimums.
+    # The workflow's R2 step pushes every _kalshi/trail_out/*.jsonl, so ny_low_<date>.jsonl rides along.
+    if not dry_dir and T.get('date'):
+        try:
+            row = K.trail_row(doc, now); row['k'] = cfg['key']
+            row['obs'].update({'hourly': T.get('obs_hourly'), 'six': T.get('six_min'), 'six_win': T.get('six_window'),
+                               'six_suspect': bool(T.get('six_suspect')), 'cli': T.get('cli_min'), 'cli_at': T.get('cli_min_at'),
+                               'binding': T.get('binding')})
+            tdir = os.path.join(HERE, 'trail_out'); os.makedirs(tdir, exist_ok=True)
+            with open(os.path.join(tdir, '%s_%s.jsonl' % (cfg['key'], T['date'])), 'a') as tf:
+                tf.write(json.dumps(row, separators=(',', ':')) + '\n')
+        except Exception as e:
+            print('%s trail row skipped (%s)' % (cfg['key'], e))
     print('%s: %d scored (%d/%d), live %d/%d, offset %.2f (n=%d), today %s %s%% | %s'
           % (cfg['key'], record['n'], record['hits'], record['n'], record['live']['hits'], record['live']['n'],
              offset['mean'], offset['n'], T.get('pick'), round(100 * (T.get('p') or 0)), K.timing_report()))
