@@ -1015,7 +1015,7 @@ async function alertTick(env, sched) {
       await notify(env, state, `metar:${h.ticker}:${rp.at}`,
         `${h.am.name} ${local} report: ${rp.f}° \u00b7 ${inNow ? 'inside' : above ? 'above' : 'below'} ${label}`,
         `The ${rp.raw.trim() === 'SPECI' ? 'special' : 'hourly'} ${h.am.name} report reads ${rp.f}°. ` +
-        `You hold ${Math.abs(h.n)} ${side} on ${label}${bad ? ', this reading is against you' : ''}.` +
+        `You hold ${Math.abs(h.n)} ${side} on ${label}${bad ? ', this reading is against you' : ''}. ` +
         `The market prices this report within about two minutes; a reading between reports is invisible until the climate report.`,
         bad ? 'urgent' : 'default');
       out.push(`metar ${h.am.icao} ${rp.f}`);
@@ -1053,7 +1053,7 @@ async function alertTick(env, sched) {
         await notify(env, state, `own5:${h.ticker}:${Math.round(ownMax)}`,
           `${h.am.name} sensor ${ownMax}° at ${ownAt} \u00b7 ${nowIn ? 'inside' : nowAbove ? 'above' : 'below'} ${label}`,
           `${h.am.name}'s 5-minute sensor set a new high of ${ownMax}° at ${ownAt} local. ` +
-          `You hold ${Math.abs(h.n)} ${side} on ${label}, ${bad ? 'against you' : 'in your favor'}.` +
+          `You hold ${Math.abs(h.n)} ${side} on ${label}, ${bad ? 'against you' : 'in your favor'}. ` +
           `This is the settlement sensor; the hourly report and the market see it up to 55 minutes later.`,
           bad ? 'urgent' : 'high');
         out.push(`own5 ${ownSt} ${prevOwn}->${ownMax}`);
