@@ -5,24 +5,25 @@ from api.weather.gov can be 1.25 MB (NCZ196, the Outer Banks), so the outlines a
 shapefiles, the way city_ne_zones.json was for THE CITY:
     z_DDmmYY  public forecast zones  -> UGC  ST + 'Z' + ZONE   (SCZ050)
     c_DDmmYY  counties               -> UGC  ST + 'C' + FIPS[2:] (SCC019)
-Simplified to ~500 m, coordinates to 3 decimals, outer rings only. One file per state plus states.json, the bounding
+Simplified to ~100 m, coordinates to 4 decimals, outer rings only (v2, 2026-10-16, user: the hazard county lines looked
+cruder than the other lines -- v1 was ~500 m and 3 decimals, visibly angular at the LOCAL map's z9). One file per state plus states.json, the bounding
 box of each, so the page fetches only the states its map touches.
 
-    python3 bake.py ZONES.shp COUNTIES.shp OUTDIR      # then: rclone copy OUTDIR r2:bluishvoid-bg/zones/v1
+    python3 bake.py ZONES.shp COUNTIES.shp OUTDIR      # then: rclone copy OUTDIR r2:bluishvoid-bg/zones/v2
 """
 import json, os, sys
 import shapefile
 from shapely.geometry import shape
 
-TOL = 0.005
+TOL = 0.001
 
 def rings(geom):
     g = shape(geom).simplify(TOL, preserve_topology=True)
     polys = [g] if g.geom_type == 'Polygon' else list(getattr(g, 'geoms', []))
     out = []
     for p in polys:
-        if p.is_empty or p.area < 1e-6: continue
-        out.append([[round(x, 3), round(y, 3)] for x, y in p.exterior.coords])
+        if p.is_empty or p.area < 1e-7: continue
+        out.append([[round(x, 4), round(y, 4)] for x, y in p.exterior.coords])
     return out
 
 def main(zshp, cshp, out):
