@@ -54,7 +54,12 @@ async function route(request, env) {
   }
   if (url.pathname === '/test') {
     const m = subs.find((x) => x.endpoint === ep); if (!m) return J({ error: 'not signed up' }, 404);
-    const r = await pushOne(m, { title: 'BLUISH weather alerts are on', body: `For ${m.locs.map((l) => l.name).join(' and ')}: ${m.types.map(label).join(', ')}.`, tag: 'wx-test', url: '/' }, jwk(env), 'high');
+    /* kind 'space' (2026-10-16, user: "send me a test space alert"): a FIXED sample in the real ISS format, marked as a test --
+       the caller picks only which sample, never the words, so this cannot be used to push arbitrary text */
+    const msg = b.kind === 'space'
+      ? { title: 'TEST · ISS overhead · 5:51 AM', body: 'Visible 5:51 AM for 6 min: appears 24° up in the SW, 65° up in the SE, sets in the NE. (A sample: the real one comes 10-20 minutes before a pass you can see.)', tag: 'wx-test-space', url: '/#go=space' }
+      : { title: 'BLUISH weather alerts are on', body: `For ${m.locs.map((l) => l.name).join(' and ')}: ${m.types.map(label).join(', ')}.`, tag: 'wx-test', url: '/' };
+    const r = await pushOne(m, msg, jwk(env), 'high');
     return J({ ok: r.status >= 200 && r.status < 300 });
   }
   if (url.pathname === '/subscribe') {
