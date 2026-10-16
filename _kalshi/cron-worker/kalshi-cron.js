@@ -993,7 +993,7 @@ async function alertTick(env, sched) {
        bare range): how far a reading is from the range, the other live number (TWC's high or the last report), and what
        the position is worth right now at the bid. */
     const sideBid = side === 'YES' ? bid : (isFinite(ask) ? 1 - ask : NaN);
-    const holdTxt = `You hold ${Math.abs(h.n)} ${side}` + (isFinite(sideBid) && sideBid > 0 ? `, bid ${Math.round(sideBid * 100)}¢` : '') + '.';
+    const holdTxt = `You hold ${Math.abs(h.n)} ${side} on ${label}` + (isFinite(sideBid) && sideBid > 0 ? `, bid ${Math.round(sideBid * 100)}¢` : '') + '.';
     const rp0 = rep[h.am.icao];
     const repTxt = rp0 ? `Last report ${rp0.f}° at ${new Date(rp0.at).toLocaleTimeString('en-US', { timeZone: h.am.tz, hour: 'numeric', minute: '2-digit' })}` : '';
     const gap = (v) => { const r = Math.round(v);
