@@ -907,8 +907,8 @@ async function alertTick(env, sched) {
       const was = state.portal[day];
       if (st !== 'no_report' && st !== was) {
         await notify(env, state, `portal:${day}:${st}`,
-          `Central Park ${day}: ${st.toUpperCase()} ${v}°`,
-          `weather.com/kalshi shows the ${day} high as ${v}° (${st}).`,
+          `Central Park ${day.slice(5).replace('-', '/')} high ${v}° \u00b7 ${st}`,
+          st === 'official' ? 'Official. The market settles on this.' : 'Not final yet; the official number can still change.',
           st === 'official' ? 'high' : 'default');
         out.push(`portal ${day} ${st} ${v}`);
       }
@@ -996,9 +996,8 @@ async function alertTick(env, sched) {
         const dir = mid > anchor ? 'up' : 'down';
         const good = (side === 'YES') === (mid > anchor);
         await notify(env, state, `mkt:${h.ticker}:${Math.round(mid * 4)}`,
-          `${label}: market ${dir} ${Math.round(anchor * 100)}¢ → ${Math.round(mid * 100)}¢`,
-          `You hold ${Math.abs(h.n)} ${side}. The YES price moved from ${Math.round(anchor * 100)}¢ to ` +
-          `${Math.round(mid * 100)}¢, ${good ? 'in your favor' : 'against you'}.`,
+          `${label} ${dir} ${Math.round(anchor * 100)}¢ → ${Math.round(mid * 100)}¢`,
+          `${good ? 'For' : 'Against'} your ${Math.abs(h.n)} ${side}.`,
           good ? 'default' : 'high');
         out.push(`${h.ticker} ${anchor}->${mid}`);
         state.mkt[h.ticker] = mid;
@@ -1013,10 +1012,8 @@ async function alertTick(env, sched) {
       const bad = (side === 'YES') ? (above) : (inNow);
       const local = new Date(rp.at).toLocaleTimeString('en-US', { timeZone: h.am.tz, hour: 'numeric', minute: '2-digit' });
       await notify(env, state, `metar:${h.ticker}:${rp.at}`,
-        `${h.am.name} ${local} report: ${rp.f}° \u00b7 ${inNow ? 'inside' : above ? 'above' : 'below'} ${label}`,
-        `The ${rp.raw.trim() === 'SPECI' ? 'special' : 'hourly'} ${h.am.name} report reads ${rp.f}°. ` +
-        `You hold ${Math.abs(h.n)} ${side} on ${label}${bad ? ', this reading is against you' : ''}. ` +
-        `The market prices this report within about two minutes; a reading between reports is invisible until the climate report.`,
+        `${h.am.name} ${rp.f}° \u00b7 ${local}${rp.raw.trim() === 'SPECI' ? ' special' : ''}`,
+        `${inNow ? 'Inside' : above ? 'Above' : 'Below'} ${label} \u00b7 ${bad ? 'against ' : ''}your ${Math.abs(h.n)} ${side}.`,
         bad ? 'urgent' : 'default');
       out.push(`metar ${h.am.icao} ${rp.f}`);
     }
@@ -1051,18 +1048,15 @@ async function alertTick(env, sched) {
       if (prevOwn != null && (wasIn !== nowIn || wasAbove !== nowAbove)) {
         const bad = (side === 'YES') ? !nowIn : nowIn;
         await notify(env, state, `own5:${h.ticker}:${Math.round(ownMax)}`,
-          `${h.am.name} sensor ${ownMax}° at ${ownAt} \u00b7 ${nowIn ? 'inside' : nowAbove ? 'above' : 'below'} ${label}`,
-          `${h.am.name}'s 5-minute sensor set a new high of ${ownMax}° at ${ownAt} local. ` +
-          `You hold ${Math.abs(h.n)} ${side} on ${label}, ${bad ? 'against you' : 'in your favor'}. ` +
-          `This is the settlement sensor; the hourly report and the market see it up to 55 minutes later.`,
+          `${h.am.name} sensor ${ownMax}° \u00b7 ${ownAt}`,
+          `New high, ${nowIn ? 'inside' : nowAbove ? 'above' : 'below'} ${label} \u00b7 ${bad ? 'against' : 'for'} your ${Math.abs(h.n)} ${side}. The market sees it at the next hourly report.`,
           bad ? 'urgent' : 'high');
         out.push(`own5 ${ownSt} ${prevOwn}->${ownMax}`);
       } else if (b[1] != null && ownMax <= b[1] + 0.5 && ownMax >= b[1] - 0.4 && (prevOwn == null || prevOwn < b[1] - 0.4)) {
         // within half a degree of the top edge: one warning, before it crosses
         await notify(env, state, `own5near:${h.ticker}`,
-          `${h.am.name} sensor ${ownMax}°, near the top of ${label}`,
-          `${h.am.name}'s sensor read ${ownMax}° at ${ownAt}, within half a degree of ${label}'s top edge. ` +
-          `You hold ${Math.abs(h.n)} ${side}.`, 'high');
+          `${h.am.name} sensor ${ownMax}° \u00b7 ${ownAt}`,
+          `Within 0.5° of the top of ${label} \u00b7 your ${Math.abs(h.n)} ${side}.`, 'high');
         out.push(`own5 near ${ownSt} ${ownMax}`);
       }
       state.own5[ownSt] = { d: ownDay, v: ownMax, at: ownAt };
@@ -1074,10 +1068,8 @@ async function alertTick(env, sched) {
       if (wasIn !== nowIn || wasAbove !== nowAbove) {
         const bad = (side === 'YES') ? !nowIn : nowIn;
         await notify(env, state, `max7:${h.ticker}:${max7}`,
-          `${h.am.name} running high ${max7}° (weather.com)`,
-          `weather.com's running high since 7 AM went ${prevMax7}° → ${max7}°, ` +
-          (nowIn ? `inside ${label}` : nowAbove ? `above ${label}` : `below ${label}`) +
-          `. You hold ${Math.abs(h.n)} ${side} on ${label}${bad ? ', against you' : ''}.`,
+          `${h.am.name} TWC high ${max7}°`,
+          `Up from ${prevMax7}°, ${nowIn ? 'inside' : nowAbove ? 'above' : 'below'} ${label} \u00b7 ${bad ? 'against ' : ''}your ${Math.abs(h.n)} ${side}.`,
           bad ? 'high' : 'default');
         out.push(`max7 ${h.am.series} ${prevMax7}->${max7}`);
       }
@@ -1222,7 +1214,7 @@ async function darkTick(env, sched) {
       const last = rec.releases.filter((r) => Date.parse(r.t) <= mm).map((r) => Date.parse(r.t)).sort().pop();
       const since = last ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }).format(new Date(last)) : 'this morning';
       await notify(env, await alertState(), `dark:${mk.tk}:${side}`, `Dark flow · NY ${mk.lab}`,
-        `${hm}: $${bb.usd.toLocaleString('en-US')} buying ${side.toUpperCase()} on ${mk.lab}${bb.minutes > 1 ? ' over ' + bb.minutes + ' minutes' : ''}, at ${bb.px == null ? '?' : Math.round(bb.px * 100)}¢ YES, with no public reading since ${since}.`, undefined, 'dark:alerts');
+        `$${bb.usd.toLocaleString('en-US')} ${side.toUpperCase()}${bb.px == null ? '' : ' at ' + Math.round((side === 'yes' ? bb.px : 1 - bb.px) * 100) + '¢'} \u00b7 ${hm} \u00b7 no reading since ${since}.`, undefined, 'dark:alerts');
     }
     }
   }
