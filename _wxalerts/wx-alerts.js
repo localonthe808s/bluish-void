@@ -18,10 +18,11 @@
 // and phones within that box share one forecast check. Pushes use the same VAPID key and the same bv-sw.js as the
 // Kalshi alerts (webpush.js is shared), so a phone has one subscription for both.
 import { pushOne } from '../_kalshi/cron-worker/webpush.js';
+import { issTrack, issAlert, eclipsesSoon, eclipseAlerts, meteorAlert } from './space-alerts.js';
 
 const ORIGIN = 'https://bluishvoid.com';
 const UA = '(bluishvoid.com weather alerts, https://bluishvoid.com)';
-const TYPES = ['umbrella', 'rain', 'severe', 'swing', 'aurora', 'lightning', 'quake', 'fire', 'air', 'sunset'];
+const TYPES = ['umbrella', 'rain', 'severe', 'swing', 'aurora', 'lightning', 'quake', 'fire', 'air', 'sunset', 'iss', 'eclipse', 'meteor'];
 const PUSH_HOSTS = /(^|\.)(push\.apple\.com|fcm\.googleapis\.com|push\.services\.mozilla\.com|notify\.windows\.com)$/;
 const BATCH = 1500;          /* places per tick (2 calls each + pushes): the account is on Workers Paid (10,000 calls per run), so every place is checked every tick; the cursor only rotates past 1,500 */
 
@@ -76,7 +77,7 @@ async function route(request, env) {
   }
   return J({ error: 'not found' }, 404);
 }
-const label = (t) => ({ umbrella: 'umbrella', rain: 'rain soon', severe: 'severe warnings', swing: 'big swings', aurora: 'aurora', lightning: 'lightning', quake: 'earthquakes', fire: 'wildfires', air: 'unhealthy air', sunset: 'great sunsets' })[t] || t;
+const label = (t) => ({ umbrella: 'umbrella', rain: 'rain soon', severe: 'severe warnings', swing: 'big swings', aurora: 'aurora', lightning: 'lightning', quake: 'earthquakes', fire: 'wildfires', air: 'unhealthy air', sunset: 'great sunsets', iss: 'ISS overhead', eclipse: 'eclipses', meteor: 'meteor showers' })[t] || t;
 const jwk = (env) => (typeof env.VAPID_JWK === 'string' ? JSON.parse(env.VAPID_JWK) : env.VAPID_JWK);
 
 /* ---------------------------------------------------------------- the checks --------------------------------------- */
@@ -221,7 +222,7 @@ async function sampleStrikes(places, ms) {
    box stripped off) at places within NEAR_MI of each other goes out ONCE, with no place name. Far-apart places keep theirs. */
 const NEAR_MI = 15;
 /* where a tap lands (user 2026-10-14): the view that shows the thing the alert is about */
-const GO = { severe: 'radar', rain: 'radar', lightning: 'radar', umbrella: 'radar', quake: 'hazards', fire: 'hazards', air: 'hazards', aurora: 'aurora', sunset: 'golden', swing: 'top' };
+const GO = { severe: 'radar', rain: 'radar', lightning: 'radar', umbrella: 'radar', quake: 'hazards', fire: 'hazards', air: 'hazards', aurora: 'aurora', sunset: 'golden', swing: 'top', iss: 'space', eclipse: 'space', meteor: 'space' };
 async function sendMerged(env, pend, dead, log) {
   let sent = 0;
   for (const ep of Object.keys(pend)) {
@@ -428,6 +429,11 @@ async function tick(env) {
   /* lightning: which places need listening (storm-capable forecast, or a storm already near), then one shared sample */
   const ltgWho = todo.filter((k) => F[k] && groups[k].who.some((w) => w.types.indexOf('lightning') >= 0)
     && (stormy(F[k], localNow(F[k])) || state[`${k}|ltg:on`]));
+  /* space (2026-10-16): the ISS track and the coming eclipses are worked out once per tick, then read per place */
+  const wantsT = (t) => todo.some((k) => groups[k].who.some((w) => w.types.indexOf(t) >= 0));
+  let ISS = null, ECL = null;
+  if (wantsT('iss')) { try { ISS = await issTrack(env, UA); } catch (e) { log.push('iss ' + e.message); } }
+  if (wantsT('eclipse')) { try { ECL = eclipsesSoon(); } catch (e) { log.push('eclipse ' + e.message); } }
   let LTG = null;
   if (ltgWho.length) { LTG = await sampleStrikes(ltgWho.map((k) => groups[k]), ltgWho.some((k) => state[`${k}|ltg:on`]) ? 150000 : 90000); log.push(`ltg ${ltgWho.length} places, ${LTG.strikes.length} strikes${LTG.ok ? '' : ' (no socket)'}`); }
   for (const k of todo) {
@@ -458,6 +464,9 @@ async function tick(env) {
     if (wantsAny('fire')) { try { for (const a of await firesNear(g.lat, g.lon)) found.push(['fire', a]); } catch (_) {} }
     if (wantsAny('air')) { try { const a = await airNow(g.lat, g.lon, ln); if (a) found.push(['air', a]); } catch (_) {} }
     if (wantsAny('sunset')) { try { const a = await sunsetAlert(f, ln, g.lat, g.lon); if (a) found.push(['sunset', a]); } catch (_) {} }
+    if (wantsAny('iss') && ISS) { try { const a = issAlert(ISS, g, f); if (a) found.push(['iss', a]); } catch (_) {} }
+    if (wantsAny('eclipse') && ECL && ECL.length) { try { for (const a of eclipseAlerts(ECL, g, f, ln)) found.push(['eclipse', a]); } catch (_) {} }
+    if (wantsAny('meteor')) { try { const a = meteorAlert(g, f, ln); if (a) found.push(['meteor', a]); } catch (_) {} }
     for (const [type, a] of found) {
       const sk = `${k}|${a.key}`, last = state[sk] || 0;
       if (a.cool ? now - last < a.cool : last) continue;                               /* dated keys: once ever; others: cool-down */
