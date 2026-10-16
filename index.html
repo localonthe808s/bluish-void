@@ -104122,7 +104122,8 @@ function closeAlertModal(){
     var A = function(n, h){ return '<a href="' + h + '" target="_blank" rel="noopener">' + n + '</a>'; };
     var SRC = { radar: function(){ return A('NOAA MRMS', 'https://www.nssl.noaa.gov/projects/mrms/') + A('NOAA NEXRAD ' + R.sid.toUpperCase() + ' (NCEP OPENGEO)', 'https://opengeo.ncep.noaa.gov/geoserver/' + R.sid + '/ows?service=WMS&request=GetCapabilities') + A('NWS ALERTS', 'https://www.weather.gov/alerts') + A('OPENSTREETMAP', 'https://www.openstreetmap.org/copyright') + A('PROTOMAPS', 'https://protomaps.com'); },
       map: function(){ return A('OPENSTREETMAP', 'https://www.openstreetmap.org/copyright') + A('PROTOMAPS', 'https://protomaps.com'); },
-      rock: function(){ return A('MACROSTRAT', 'https://macrostrat.org') + A('OPENSTREETMAP', 'https://www.openstreetmap.org/copyright') + A('PROTOMAPS', 'https://protomaps.com'); },
+      rock: function(){ return A('MACROSTRAT', 'https://macrostrat.org') + A('USGS QUATERNARY FAULTS', 'https://www.usgs.gov/programs/earthquake-hazards/faults') + A('USGS EARTHQUAKE CATALOG (COMCAT)', 'https://earthquake.usgs.gov/earthquakes/search/')
+        + A('OPENSTREETMAP', 'https://www.openstreetmap.org/copyright') + A('PROTOMAPS', 'https://protomaps.com'); },
       tide: function(){ var st = T.st || {}; return A('NOAA TIDES AND CURRENTS ' + esc(st.id || ''), 'https://tidesandcurrents.noaa.gov/stationhome.html?id=' + (st.id || ''))
         + (T.fc ? A('NWS WATER FORECAST ' + esc(String(st.shef || '').toUpperCase()), 'https://water.noaa.gov/gauges/' + String(st.shef || '').toLowerCase()) : '')
         + A('NOAA SEA LEVEL RISE VIEWER (FLOOD DEPTH MAP)', 'https://coast.noaa.gov/slr/') + A('NWS ALERTS', 'https://www.weather.gov/alerts')
@@ -104158,7 +104159,7 @@ function closeAlertModal(){
       if (cn) cn(M, { themed: true });
       (labs || []).forEach(function(l){ var c = l.getContainer && l.getContainer(); if (c) M.getPane('lcLabels').appendChild(c); });   /* names over the radar and the rock */
       here = L.circleMarker([+L0.lat, +L0.lon], { radius: 5, color: '#fff', weight: 2, fillColor: '#2B22F4', fillOpacity: 1, pane: 'lcLabels' }).addTo(M);
-      M.on('moveend', function(){ if (VIEW === 'radar') R.rebuild(); if (VIEW === 'river'){ clearTimeout(RV.deb); RV.deb = setTimeout(RV.fetch, 400); } });
+      M.on('moveend', function(){ if (VIEW === 'radar') R.rebuild(); if (VIEW === 'river'){ clearTimeout(RV.deb); RV.deb = setTimeout(RV.fetch, 400); } if (VIEW === 'rock'){ clearTimeout(FQ.deb); FQ.deb = setTimeout(FQ.fetch, 500); } });
       M.on('click', function(e){ if (VIEW === 'rock') rockTap(e.latlng); });
     };
     /* ---------------------------------------------------------------- RADAR ------ */
@@ -104235,7 +104236,9 @@ function closeAlertModal(){
         var lith = String(d.lith || '').replace(/Major:\{|Minor:\{|\}/g, '').replace(/,\s*/g, ', ').trim();
         var age = d.b_int_name === d.t_int_name ? d.b_int_name : d.b_int_name + ' to ' + d.t_int_name;
         var yrs = isFinite(d.b_int_age) && isFinite(d.t_int_age) ? ' (' + ages(d.b_int_age) + ' to ' + ages(d.t_int_age) + ' years ago)' : '';
-        strip.innerHTML = '<b>' + esc(lith.toUpperCase() || 'UNNAMED UNIT') + '</b> · ' + esc(String(age || '').toUpperCase()) + esc(yrs.toUpperCase());
+        var zn = FQ.zoneAt(ll);
+        fqInfo('<b>' + esc(lith.toUpperCase() || 'UNNAMED UNIT') + '</b> · ' + esc(String(age || '').toUpperCase()) + esc(yrs.toUpperCase())
+          + (zn ? ' · INSIDE THE USGS FAULT ZONE "' + esc(String(zn.fault_area_name || '').toUpperCase()) + '"' : ''));
       }).catch(function(){ strip.textContent = 'MACROSTRAT DID NOT ANSWER'; });
     };
     /* ---------------------------------------------------------------- TIDES ------ */
@@ -104441,6 +104444,91 @@ function closeAlertModal(){
     };
     window.addEventListener('resize', function(){ if (VIEW === 'tide' && pane.style.display !== 'none') T.chart(); });
 
+    /* ---------------------------------------------------------------- FAULTS + QUAKES (GEOLOGY) */
+    /* FAULT LINES AND PAST EARTHQUAKES (user 2026-10-16: "add fault lines and past earthquakes to geology"). Both live from USGS
+       for the map's view, keyless, CORS:
+       - faults = the Quaternary fault database (Qfaults): layer 21 the national traces, layer 22 the fault AREAS (where the
+         evidence is a zone, not a line -- Charleston's whole record is one: "Charleston liquefaction features", the sand blows
+         of 1886). Site rule: the age of last movement sets the weight, the edge says how sure the survey is (solid = well or
+         moderately constrained, dashed = inferred, dotted = concealed). Traces only from z6 (a state's worth is ~0.5 MB at z9).
+       - quakes = ComCat, magnitude 2.5 and up since 1700, the 400 largest in view; circle area by magnitude, color by era.
+         Pre-instrument quakes (magnitude types mfa / fa) were sized and placed from felt reports: the card says so, and many
+         sit on one rounded point (Charleston's 1886 aftershocks all at 32.9, -80.0). */
+    var FQ = { fl: null, ql: null, deb: null, rq: 0, n: 0, big: null, more: false, areas: [] };
+    var inRing = function(x, y, R2){ var c = false; for (var i = 0, j = R2.length - 1; i < R2.length; j = i++){ var a = R2[i], b = R2[j]; if ((a[1] > y) !== (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]) c = !c; } return c; };
+    FQ.zoneAt = function(ll){ var hit = null; (FQ.areas || []).forEach(function(f){ var g = f.geometry, P = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
+      P.forEach(function(poly){ if (poly[0] && inRing(ll.lng, ll.lat, poly[0]) && !poly.slice(1).some(function(h){ return inRing(ll.lng, ll.lat, h); })) hit = f.properties; }); }); return hit; };
+    var QF = 'https://earthquake.usgs.gov/arcgis/rest/services/haz/Qfaults/MapServer/';
+    var AGEW = { 'historic': ['MOVED IN THE LAST 150 YEARS', 3.4], 'latest Quaternary': ['LAST MOVED WITHIN 15,000 YEARS', 2.8], 'late Quaternary': ['LAST MOVED WITHIN 130,000 YEARS', 2.2],
+      'middle and late Quaternary': ['LAST MOVED WITHIN 750,000 YEARS', 1.7], 'undifferentiated Quaternary': ['LAST MOVED WITHIN 1.6 MILLION YEARS', 1.3], 'Class B': ['NOT PROVEN ACTIVE (CLASS B)', 1.1] };
+    var MMI = ['', 'NOT FELT', 'WEAK', 'WEAK', 'LIGHT', 'MODERATE', 'STRONG', 'VERY STRONG', 'SEVERE', 'VIOLENT', 'EXTREME', 'EXTREME', 'EXTREME'];
+    var ROM = ['', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII'];
+    var qCol = function(y){ return y < 1900 ? '#fef3c7' : y < 2000 ? '#fbbf24' : '#f97316'; };
+    var rateW = function(r){ var m = String(r || '').match(/([\d.]+)\s*and\s*([\d.]+)/i), m2 = String(r || '').match(/(less|greater) than\s*([\d.]+)/i), inc = function(v){ var x = v * 3.937; return x < 1 ? x.toFixed(1) : Math.round(x); };
+      if (m) return m[1] + ' TO ' + m[2] + ' MM A YEAR (' + inc(+m[1]) + ' TO ' + inc(+m[2]) + ' IN A CENTURY)';
+      if (m2) return m2[1].toUpperCase() + ' THAN ' + m2[2] + ' MM A YEAR (' + inc(+m2[2]) + ' IN A CENTURY)'; return ''; };
+    var fqInfo = function(html){ strip.innerHTML = html + ' <button type="button" class="lc-pill" id="lc-fq-x">BACK</button>'; var x = strip.querySelector('#lc-fq-x'); if (x) x.onclick = function(e){ e.stopPropagation(); FQ.summary(); }; };
+    FQ.faultTap = function(p, area){
+      var a = AGEW[String(p.age || '').trim()] || null, ss = String(p.slip_sense || p.slipsense || '').trim(), rt = rateW(p.slip_rate), lt = String(p.linetype || '').trim();
+      var nm = area ? p.fault_area_name : (p.fault_name + (p.section_name && String(p.section_name).trim() ? ', ' + p.section_name : ''));
+      fqInfo('<b>' + esc(String(nm || 'UNNAMED FAULT').toUpperCase()) + '</b>' + (area ? ' · A FAULT ZONE, NOT A MAPPED LINE' : '') + (a ? ' · ' + a[0] : (p.age ? ' · ' + esc(String(p.age).toUpperCase()) : ''))
+        + (ss && !/no data/i.test(ss) ? ' · ' + esc(ss.toUpperCase()) : '') + (rt ? ' · SLIPS ' + rt : '') + (lt ? ' · ' + esc(lt.toUpperCase()) : '')
+        + ((p.fault_url || p.url) ? ' · <a href="' + esc(p.fault_url || p.url) + '" target="_blank" rel="noopener" style="color:#fff;">USGS REPORT</a>' : ''));
+    };
+    FQ.quakeTap = function(f){
+      var p = f.properties || {}, y = +loc(p.time, { year: 'numeric' }) || new Date(p.time).getUTCFullYear(), est = /^(mfa|fa)$/i.test(p.magType || '') || y < 1900,   /* nothing before 1900 was measured by seismograph */ mi = Math.round(+p.mmi || 0), dep = (f.geometry.coordinates || [])[2];
+      fqInfo('<b>M' + (+p.mag).toFixed(1) + ' · ' + esc(md(p.time)) + ' ' + y + '</b> · ' + esc(String(p.place || '').toUpperCase())
+        + (mi ? ' · STRONGEST SHAKING ' + ROM[mi] + ' (' + MMI[mi] + ')' : '') + (p.felt ? ' · FELT REPORTS ' + (+p.felt).toLocaleString('en-US') : '')
+        + (isFinite(dep) && !est && dep > 0 ? ' · ' + Math.round(dep * 0.621) + ' MI DEEP' : '')
+        + (est ? ' · BEFORE SEISMOGRAPHS: SIZE AND PLACE ESTIMATED FROM WHERE IT WAS FELT' : '')
+        + (p.url ? ' · <a href="' + esc(p.url) + '" target="_blank" rel="noopener" style="color:#fff;">USGS EVENT</a>' : ''));
+    };
+    FQ.summary = function(){
+      if (VIEW !== 'rock') return;
+      var b = FQ.big, z = M.getZoom();
+      strip.innerHTML = 'TAP THE GROUND, A FAULT OR A QUAKE · '
+        + (FQ.n ? FQ.n + (FQ.more ? '+' : '') + ' QUAKES M2.5 AND UP ON RECORD IN VIEW' + (b ? ', LARGEST M' + (+b.properties.mag).toFixed(1) + ' IN ' + new Date(b.properties.time).getUTCFullYear() : '') : 'NO QUAKES M2.5 AND UP ON RECORD IN VIEW')
+        + (z < 6 ? ' · ZOOM IN FOR FAULTS' : FQ.nf === 0 ? ' · NO MAPPED ACTIVE FAULTS IN VIEW' : '')
+        + '<br><span class="lr-k"><span class="lr-dot" style="background:#fef3c7;"></span>BEFORE 1900</span> <span class="lr-k"><span class="lr-dot" style="background:#fbbf24;"></span>1900 TO 1999</span> <span class="lr-k"><span class="lr-dot" style="background:#f97316;"></span>SINCE 2000</span>'
+        + ' <span class="lr-k" style="margin-left:9px;"><span style="display:inline-block;width:16px;height:0;border-top:3px solid #ff2d2d;vertical-align:3px;margin-right:4px;"></span>FAULT, THICKER = MORE RECENT · DASHED = LESS CERTAIN</span>';
+    };
+    FQ.fetch = function(){
+      if (!M || VIEW !== 'rock') return;
+      var b = M.getBounds(), q = ++FQ.rq, z = M.getZoom(), env = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].map(function(v){ return v.toFixed(4); }).join(',');
+      var tol = (b.getEast() - b.getWest()) / M.getSize().x * 0.8;   /* about one pixel */
+      var qs = 'query?f=geojson&geometry=' + env + '&geometryType=esriGeometryEnvelope&inSR=4326&outSR=4326&spatialRel=esriSpatialRelIntersects&returnGeometry=true&geometryPrecision=5&maxAllowableOffset=' + tol.toFixed(6);
+      var lines = z >= 6 ? J(QF + '21/' + qs + '&outFields=fault_name,section_name,age,linetype,slip_rate,slip_sense,fault_url') : Promise.resolve({ features: [] });
+      var areas = J(QF + '22/' + qs + '&outFields=fault_area_name,age,slipsense,url');
+      var quakes = J('https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&minlatitude=' + Math.max(-90, b.getSouth()).toFixed(3) + '&maxlatitude=' + Math.min(90, b.getNorth()).toFixed(3)
+        + '&minlongitude=' + Math.max(-180, b.getWest()).toFixed(3) + '&maxlongitude=' + Math.min(180, b.getEast()).toFixed(3) + '&minmagnitude=2.5&starttime=1700-01-01&orderby=magnitude&limit=400');
+      Promise.all([lines, areas, quakes]).then(function(r){
+        if (q !== FQ.rq || VIEW !== 'rock') return;
+        if (FQ.fl) M.removeLayer(FQ.fl); if (FQ.ql) M.removeLayer(FQ.ql);
+        FQ.fl = L.layerGroup().addTo(M);
+        var AF = ((r[1] || {}).features || []).filter(function(f){ return f.geometry; });
+        FQ.areas = AF;
+        if (AF.length){   /* the fill is not tappable (Charleston's zone covers the whole city and would eat every ground tap); its edge is */
+          L.geoJSON({ type: 'FeatureCollection', features: AF }, { interactive: false, style: { stroke: false, fillColor: '#ff2d2d', fillOpacity: 0.1 } }).addTo(FQ.fl);
+          L.geoJSON({ type: 'FeatureCollection', features: AF }, { style: { color: '#ff2d2d', weight: 2, dashArray: '6 4', fill: false }, bubblingMouseEvents: false,
+            onEachFeature: function(f, l){ l.on('click', function(e){ L.DomEvent.stopPropagation(e); FQ.faultTap(f.properties || {}, true); }); } }).addTo(FQ.fl); }
+        var LF = ((r[0] || {}).features || []).filter(function(f){ return f.geometry; }); FQ.nf = LF.length + AF.length;
+        if (LF.length){
+          L.geoJSON({ type: 'FeatureCollection', features: LF }, { interactive: false, style: function(f){ var a = AGEW[String(f.properties.age || '').trim()]; return { color: 'rgba(10,12,18,.75)', weight: (a ? a[1] : 1.2) + 2.2, opacity: 1 }; } }).addTo(FQ.fl);
+          L.geoJSON({ type: 'FeatureCollection', features: LF }, { bubblingMouseEvents: false, style: function(f){ var p = f.properties, a = AGEW[String(p.age || '').trim()], lt = String(p.linetype || '');
+              return { color: '#ff2d2d', weight: a ? a[1] : 1.2, opacity: 1, dashArray: /Inferred|Approximat/i.test(lt) ? '6 5' : /Concealed/i.test(lt) ? '1.5 4' : null, lineCap: 'round' }; },
+            onEachFeature: function(f, l){ l.on('click', function(e){ L.DomEvent.stopPropagation(e); FQ.faultTap(f.properties || {}, false); }); } }).addTo(FQ.fl);
+        }
+        var QK = ((r[2] || {}).features || []).filter(function(f){ return f.geometry && isFinite(+f.properties.mag); });
+        FQ.n = QK.length; FQ.more = QK.length >= 400; FQ.big = QK[0] || null;
+        FQ.ql = L.layerGroup().addTo(M);
+        QK.slice().reverse().forEach(function(f){ var p = f.properties, c = f.geometry.coordinates, m = +p.mag, y = new Date(p.time).getUTCFullYear();
+          var cm = L.circleMarker([c[1], c[0]], { radius: Math.max(2.5, 2 + (m - 2.5) * 2.4), color: 'rgba(10,12,18,.8)', weight: 1, fillColor: qCol(y), fillOpacity: 0.88, bubblingMouseEvents: false });
+          cm.on('click', function(e){ L.DomEvent.stopPropagation(e); FQ.quakeTap(f); }); cm.addTo(FQ.ql); });
+        FQ.summary();
+      });
+    };
+    FQ.off = function(){ FQ.rq++; if (M){ if (FQ.fl){ M.removeLayer(FQ.fl); FQ.fl = null; } if (FQ.ql){ M.removeLayer(FQ.ql); FQ.ql = null; } } };
+
     /* ---------------------------------------------------------------- RIVERS ----- */
     /* RIVER GAUGES (user 2026-10-16: "add river gauges to version 3"). The NWS National Water Prediction Service (keyless, CORS):
        every gauge in the map's view with its latest reading and flood category (gauges?bbox), and for the one picked its
@@ -104589,11 +104677,12 @@ function closeAlertModal(){
       VIEW = v; build(); if (!M) return;
       [].forEach.call(pane.querySelectorAll('#lc-tabs button'), function(b){ b.classList.toggle('on', b.getAttribute('data-v') === v); });
       if (v !== 'radar') R.clear();
-      if (v === 'rock'){ if (!rockL) rockL = L.tileLayer('https://tiles.macrostrat.org/carto/{z}/{x}/{y}.png', { opacity: .78, zIndex: 5, maxZoom: 18, maxNativeZoom: 14 }); rockL.addTo(M); strip.textContent = 'TAP ANYWHERE TO SAY WHAT THE GROUND IS'; }
+      if (v === 'rock'){ if (!rockL) rockL = L.tileLayer('https://tiles.macrostrat.org/carto/{z}/{x}/{y}.png', { opacity: .78, zIndex: 5, maxZoom: 18, maxNativeZoom: 14 }); rockL.addTo(M); strip.textContent = 'TAP ANYWHERE TO SAY WHAT THE GROUND IS'; FQ.fetch(); }
       else if (rockL && M.hasLayer(rockL)) M.removeLayer(rockL);
       if (v === 'radar'){ R.rebuild(true); alerts(); }
       else if (alertsL){ M.removeLayer(alertsL); alertsL = null; }
       if (v === 'map') strip.textContent = placeName() + ' AND AROUND · DRAG AND ZOOM';
+      if (v !== 'rock') FQ.off();
       if (v === 'tide') T.on(); else T.off();
       if (v === 'river') RV.on(); else RV.off();
       src.innerHTML = SRC[v](); headOn(true);
