@@ -1106,6 +1106,7 @@ async function alertTick(env, sched) {
 // approximation the sheet draws. One KV record per day, written only
 // when something changes (the free plan allows 1,000 writes a day). Public at /dark: the tape is public anyway.
 const DARK_MIN_USD = 150, DARK_ALERT_USD = 500;
+const DARK_SURE_PX = 0.95;      // a burst paying this much for its side is a sweep, not dark (dark_lib.SURE_PX)
 /* the triggers that carry their own jobs (wrangler.toml [triggers]; must match it character for character) */
 const DARK_CRON = '*/1 0,11-23 * * *', OBS_CRON = '*/5 0-4,11-23 * * *';
 const DARK_WIN = { metar: 9, cli: 10, twc: 6, fcst: 10 }, DARK_MERGE_MIN = 3;
@@ -1207,8 +1208,11 @@ async function darkTick(env, sched) {
       if (vwap != null) prev.px = prev.px == null ? Math.round(vwap * 100) / 100 : Math.round((prev.px * prev.usd + vwap * usd) / (prev.usd + usd) * 100) / 100;
       prev.usd += usd; prev.t1 = at; prev.minutes = (prev.minutes || 1) + 1; bb = prev;
     } else {
+      /* SWEEPS ARE NOT DARK (2026-10-16): paying 95c+ for a side is collecting the last cents on a near-certain range
+         (a $1,526 YES at 99c at 4:17 PM was alerted as dark). Same cut as dark_lib.is_sweep and the page. */
+      const sideCost = vwap == null ? null : (side === 'yes' ? vwap : 1 - vwap);
       bb = { t: at, t1: at, tk: mk.tk, lab: mk.lab, side, usd, px: vwap == null ? null : Math.round(vwap * 100) / 100, minutes: 1,
-             cls: (covered(mm) || covered(mm + 59999)) ? 'reaction' : 'dark' };
+             cls: (sideCost != null && sideCost >= DARK_SURE_PX) ? 'sweep' : (covered(mm) || covered(mm + 59999)) ? 'reaction' : 'dark' };
       rec.bursts.push(bb);
     }
     const cls = bb.cls;

@@ -65,6 +65,16 @@ def bursts(fills):
     return thr, out
 
 
+SURE_PX = 0.95
+def is_sweep(b):
+    """a burst paying SURE_PX or more for its side is someone collecting the last cents on a near-certain range, not
+    money that knows something (user 2026-10-16: "someone throwing a lot of money at the end of the day on the 99% pick
+    is not really a dark flow choice"). Same cut in the worker (kalshi-cron.js DARK_SURE_PX) and on the page."""
+    px = b.get('px')
+    if px is None: return False
+    return (px if b['side'] == 'yes' else 1 - px) >= SURE_PX
+
+
 def px_near(times, fills, t, half_min=2, back_min=30):
     """the YES price at t: VWAP of the trades within +-half_min, else the last trade in the back_min before it"""
     a = bisect.bisect_left(times, t - half_min * MIN); b = bisect.bisect_right(times, t + half_min * MIN)

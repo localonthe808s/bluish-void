@@ -255,6 +255,7 @@ def main():
                 times = [x[0] for x in tape]
                 _, bl = DL.bursts([(tt, p, n, side) for tt, lt, p, n, side in fills])
                 for b in bl:
+                    if DL.is_sweep(b): continue           # a 95c+ sweep is neither dark nor reaction
                     S = P = 0.0
                     for p, n, sd in b['fills']:
                         s_, pay = taker_leg(p, n, sd, won); S += s_; P += pay

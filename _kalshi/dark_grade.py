@@ -116,7 +116,7 @@ def grade_day(d, rec):
         won_yes = result == 'yes'
         _, bl = DL.bursts([x for x in tp if lo <= x[0] < hi])
         for b in bl:
-            if b['px'] is None: continue
+            if b['px'] is None or DL.is_sweep(b): continue     # a 95c+ sweep is not graded as dark flow
             s_, p_ = leg(b['side'], b['px'], won_yes)
             g = {'t': b['t0'].isoformat().replace('+00:00', 'Z'), 't1': b['t1'].isoformat().replace('+00:00', 'Z'), 'tk': tk,
                  'lab': labs.get(tk, tk.split('-')[-1]), 'side': b['side'], 'usd': round(b['usd']), 'px': round(b['px'], 3),

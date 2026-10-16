@@ -61,7 +61,7 @@ for ev, mk in sorted(evs.items()):
             if px is None: continue
             net = {'dark': 0.0, 'reaction': 0.0}
             for b in bl:
-                if b['t0'] >= cut: continue
+                if b['t0'] >= cut or DL.is_sweep(b): continue
                 cls = 'reaction' if public_at(b['t0']) else 'dark'
                 net[cls] += b['usd'] * (1 if b['side'] == 'yes' else -1)
             for cls in net:
