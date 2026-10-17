@@ -823,6 +823,57 @@ def twc_history(cfg, day):
     return out
 
 
+# THE FRONT THAT CROSSES THE CLIMATE DAY'S FIRST MINUTE (2026-10-17). Under daylight time the climate day starts at
+# 1:00 AM local, and the hourly stream's first reading inside it is the 1:51. Everything above trusts that the minutes
+# before it are "night, which cannot hold a daily maximum". On 2026-10-17 they held it: Central Park read 63 at 12:51 AM
+# (the PREVIOUS climate day) and 58 at 1:51 AM; a cold front reached LaGuardia and JFK at about 1:25 AM, so the park was
+# still about 62-63 for the climate day's first twenty minutes. The model, seeing 58 and falling, printed "61 or below"
+# at 100% against a market at 85% on 62-63 -- and TWC's own "63" could not help, since its calendar-day history counts
+# the 12:51 reading too.
+# When the last reading before the boundary sits more than a degree over everything inside the day, the day's high is
+# somewhere between the two. Where it lands is read off the neighbouring 5-minute stations (New York's three airports):
+# the park's 12:51 reading carried forward by how much they changed between their own :51 and the boundary minute. The
+# estimate is a CENTRE with a spread, never a floor; today's climate report (which covers the whole climate day) settles it.
+NBR5 = {'ny': ['KLGA', 'KJFK', 'KEWR']}
+
+
+def boundary_straddle(cfg, day, obh, tkey, h0, rmax):
+    if not h0 or rmax is None:
+        return None
+    prev = (obh.get(tkey) or {}).get(h0 - 1)
+    if prev is None or prev <= rmax + 1.0:
+        return None
+    from zoneinfo import ZoneInfo
+    z = ZoneInfo(cfg.get('tz', 'America/New_York')); utc = datetime.timezone.utc
+    b = datetime.datetime(day.year, day.month, day.day, h0, tzinfo=z).astimezone(utc)
+    p51 = b - datetime.timedelta(minutes=9)
+    deltas = []
+    for st in NBR5.get(cfg['key'].split('_')[0], []):
+        try:
+            j = get_json('https://api.weather.gov/stations/%s/observations?start=%s&end=%s' % (
+                st, (b - datetime.timedelta(minutes=20)).strftime('%Y-%m-%dT%H:%M:%SZ'), (b + datetime.timedelta(minutes=15)).strftime('%Y-%m-%dT%H:%M:%SZ')), timeout=30)
+        except Exception as e:
+            print('straddle: %s unavailable (%s)' % (st, e)); continue
+        rows = []
+        for f in (j or {}).get('features') or []:
+            pr = f.get('properties') or {}; v = (pr.get('temperature') or {}).get('value')
+            try: t = datetime.datetime.fromisoformat(pr['timestamp'].replace('Z', '+00:00'))
+            except Exception: continue
+            if isinstance(v, (int, float)): rows.append((t, v * 9 / 5 + 32))
+        a = [r for r in rows if abs((r[0] - p51).total_seconds()) <= 240]
+        c = sorted([r for r in rows if datetime.timedelta(0) <= r[0] - b <= datetime.timedelta(minutes=10)])
+        if a and c:
+            deltas.append(c[0][1] - min(a, key=lambda r: abs((r[0] - p51).total_seconds()))[1])
+    if deltas:
+        deltas.sort(); dmed = deltas[len(deltas) // 2]
+        est = min(prev, max(rmax, prev + dmed)); sd = max(0.7, (prev - rmax) / 4.0)
+    else:
+        dmed = None; est = (prev + rmax) / 2.0; sd = max(1.0, (prev - rmax) / 2.5)
+    print('%s straddle: %.1f before the climate day, %.1f inside it; airports moved %s by the boundary -> centre %.1f, spread %.2f'
+          % (cfg['key'], prev, rmax, 'n/a' if dmed is None else '%+.1f' % dmed, est, sd))
+    return {'prev': round(prev, 1), 'inside': round(rmax, 1), 'est': round(est, 1), 'sd': round(sd, 2), 'n': len(deltas), 'delta': None if dmed is None else round(dmed, 1)}
+
+
 def twc_today(cfg, day):
     """The settlement feed's own view of today -> {'max','now','hist','max7'}.
 
@@ -4181,6 +4232,17 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
                   'peak behind us %.0f%% -- the hourly estimate %.2f is set aside'
                   % (cfg['key'], _ex, _ctoday, _six, peak_done['last'], 100 * (peak_done.get('p') or 0),
                      (rmax + HOURLY_PEAK_OFFSET) if rmax is not None else float('nan')))
+    # THE BOUNDARY STRADDLE (see boundary_straddle): until today's climate report is in hand, a front that crossed the
+    # climate day's first minute keeps the day open between the two readings, whatever the exact-figure rules decided
+    # from the hours after it (the six-hour groups start at 2 AM and cannot see 1:00-1:51).
+    try:
+        _bs = boundary_straddle(cfg, today, obh, tkey, h0, rmax) if cfg['key'].endswith('high') else None
+    except Exception as e:
+        _bs = None; print('straddle check failed (%s)' % e)
+    if _bs is not None and _ctoday is None:
+        day_decided = False
+        pred = max(pred, _bs['est']); sd = max(sd, _bs['sd'])
+        print('%s straddle holds the day open: centre %.1f, spread %.2f' % (cfg['key'], pred, sd))
     res_lock = residuals(fcm, bias_of, daily, obh, LOCK_HOUR, tkey, h0_of)
     sd_lock, _ = spread(res_lock, LOCK_HOUR, binding_now)
 
@@ -5101,7 +5163,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             'now_at': ob_last[0][0][11:16] if ob_last else None,
             'fc_peak': round(fpeak, 2) if fpeak is not None else None,
             'peak_hour': peak_hour,
-            'peak_done': peak_done, 'day_decided': day_decided,
+            'peak_done': peak_done, 'day_decided': day_decided, 'straddle': _bs,
             # the afternoon table's row for the report in hand (see climb_now),
             # and the weight the ladder gave it this bake (0 = plain forecast)
             'climb': _climb_now, 'emp_w': round(emp_w, 2),
