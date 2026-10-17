@@ -1311,6 +1311,82 @@ async function darkTick(env, sched) {
   }
   return out.length ? out.join(', ') : 'no burst';
 }
+/* THE MIDNIGHT HOUR, WATCHED (2026-10-17). Under daylight time New York's climate day runs 1:00 AM - 12:59 AM, so
+   12:00-12:59 AM is the LAST hour of the day before and 1:00 AM is where today starts. Nothing else covered it: the obs
+   log stops at 04:55Z, the bake is not dispatched overnight, and api.weather.gov only keeps about a week. On 10-17 the
+   park read 63 at 12:51 AM and 58 at 1:51 AM; the airports held 63-64 until ~1:25 AM, so today's high was set in the
+   first minutes of the day by a reading no hourly report saw. This run, at 1:10, 1:25 and 1:40 AM EDT, keeps the whole
+   window -- 11:45 PM to 1:20 AM -- for the park (hourly) and the three airports (5-minute), plus the derived numbers:
+     tail   each station's max/min from 12:00 to 12:59 AM (yesterday's climate day)
+     at1    each station's first reading at or after 1:00 AM
+     delta  each airport's change from its reading nearest 12:51 to that first reading
+     est    the park's 12:51 carried forward by the airports' median delta: the park's temperature as today begins
+   KV `boundary:ny|<today>`, kept a year; GET /boundary?d= is public (it is public weather data). Silent in winter, when
+   the climate day and the calendar day start together. */
+const BOUNDARY_CRON = '10,25,40 5 * * *';
+async function boundaryWatch(env, sched) {
+  const z = 'America/New_York';
+  const now = new Date(sched);
+  const parts = (d) => Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: z, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(d).map((p) => [p.type, p.value]));
+  const p = parts(now);
+  const day = `${p.year}-${p.month}-${p.day}`;
+  // 1:00 AM local as UTC: 05:00Z under EDT. In EST 05:00Z is MIDNIGHT, the climate day already starts on the calendar's
+  const b = new Date(`${day}T05:00:00Z`);
+  if (parts(b).hour !== '01') return `${day}: standard time, no straddle hour`;
+  const t0 = new Date(b.getTime() - 75 * 60000), t1 = new Date(b.getTime() + 20 * 60000);
+  const iso = (d) => d.toISOString().replace(/\.\d+Z$/, 'Z');
+  const out = { day, boundary: iso(b), at: iso(now), st: {} };
+  await Promise.all(['KNYC', 'KLGA', 'KJFK', 'KEWR'].map(async (st) => {
+    try {
+      const r = await fetch(`https://api.weather.gov/stations/${st}/observations?start=${iso(t0)}&end=${iso(t1)}`,
+        { headers: { 'User-Agent': NWS_UA, 'Accept': 'application/geo+json' } });
+      if (!r.ok) { out.st[st] = { err: `http ${r.status}` }; return; }
+      const j = await r.json();
+      const seen = new Set(), ser = [];
+      for (const f of (j.features || [])) {
+        const q = f.properties || {}, c = q.temperature && q.temperature.value;
+        if (typeof c !== 'number' || !q.timestamp) continue;
+        const t = new Date(q.timestamp); const k = iso(t).slice(0, 16);
+        if (isNaN(t) || seen.has(k)) continue; seen.add(k);
+        ser.push([iso(t), Math.round((c * 9 / 5 + 32) * 100) / 100]);
+      }
+      ser.sort((a, c) => (a[0] < c[0] ? -1 : 1));
+      const ms = (x) => Date.parse(x[0]);
+      const tail = ser.filter((x) => ms(x) >= b.getTime() - 3600000 && ms(x) < b.getTime());
+      const after = ser.filter((x) => ms(x) >= b.getTime());
+      const p51 = b.getTime() - 9 * 60000;
+      const near = ser.filter((x) => Math.abs(ms(x) - p51) <= 240000).sort((a, c) => Math.abs(ms(a) - p51) - Math.abs(ms(c) - p51))[0];
+      const o = { n: ser.length, ser };
+      if (tail.length) { o.tailMax = Math.max(...tail.map((x) => x[1])); o.tailMin = Math.min(...tail.map((x) => x[1])); }
+      if (near) o.p51 = near;
+      if (after.length && ms(after[0]) - b.getTime() <= 10 * 60000) o.at1 = after[0];
+      if (near && o.at1) o.delta = Math.round((o.at1[1] - near[1]) * 100) / 100;
+      out.st[st] = o;
+    } catch (e) { out.st[st] = { err: String(e).slice(0, 60) }; }
+  }));
+  const ds = ['KLGA', 'KJFK', 'KEWR'].map((s) => out.st[s] && out.st[s].delta).filter((v) => typeof v === 'number').sort((a, c) => a - c);
+  const park = out.st.KNYC && out.st.KNYC.p51;
+  if (ds.length) out.delta = ds[Math.floor(ds.length / 2)];
+  if (park) out.park51 = park[1];
+  if (park && ds.length) out.est = Math.round((park[1] + out.delta) * 10) / 10;
+  if (env.OBS) {
+    // a later run only replaces an earlier one when it saw at least as many airports reach the boundary
+    const prev = await env.OBS.get(`boundary:ny|${day}`, { type: 'json' });
+    if (!prev || !(prev.nAirports > ds.length)) {
+      out.nAirports = ds.length;
+      await env.OBS.put(`boundary:ny|${day}`, JSON.stringify(out), { expirationTtl: 60 * 60 * 24 * 366 });
+    }
+  }
+  return `${day} park 12:51 ${park ? park[1] : '-'}, airports ${ds.length ? (out.delta >= 0 ? '+' : '') + out.delta : 'n/a'} -> ${out.est != null ? out.est : '-'} at 1:00 AM`;
+}
+async function boundaryRead(request, env) {
+  const url = new URL(request.url);
+  const d = /^\d{4}-\d\d-\d\d$/.test(url.searchParams.get('d') || '') ? url.searchParams.get('d') : localDate(0);
+  const rec = env.OBS ? await env.OBS.get(`boundary:ny|${d}`, { type: 'json' }) : null;
+  return new Response(JSON.stringify(rec || { day: d, none: true }), {
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'public, max-age=60', ...cors(ALLOWED) } });
+}
+
 async function darkRead(request, env) {
   const url = new URL(request.url);
   const d = /^\d{4}-\d\d-\d\d$/.test(url.searchParams.get('d') || '') ? url.searchParams.get('d') : localDate(0);
@@ -1383,6 +1459,13 @@ export default {
       if (new Date(sched).getUTCMinutes() % 5 !== 0) ctx.waitUntil((async () => {
         try { console.log(`[dark] ${new Date().toISOString()} ${await darkTick(env, sched)}`); }
         catch (e) { console.log(`[dark] FAILED ${e}`); }
+      })());
+      return;
+    }
+    if (event.cron === BOUNDARY_CRON){
+      ctx.waitUntil((async () => {
+        try { console.log(`[boundary] ${new Date().toISOString()} ${await boundaryWatch(env, sched)}`); }
+        catch (e) { console.log(`[boundary] FAILED ${e}`); }
       })());
       return;
     }
@@ -1489,6 +1572,7 @@ export default {
     if (url.pathname === '/obs') return obsDump(request, env);
     if (url.pathname === '/obs/lead') return obsLead(request, env);
     if (url.pathname === '/dark') return darkRead(request, env);
+    if (url.pathname === '/boundary') return boundaryRead(request, env);
     if (url.pathname === '/sensors') {
       // PUBLIC, LIVE: the 5-minute stations' latest reading and high since 7 AM,
       // read from api.weather.gov on each request (keyless, so no secret). The
@@ -1555,7 +1639,7 @@ export default {
       // page confidently reported a cadence the worker was not running.
       // Cloudflare does not expose a worker's own triggers to its code, so
       // this has to be kept in step with [triggers] in wrangler.toml by hand.
-      schedule_utc: ['* 11-23 * * *', '* 0-4 * * *'],
+      schedule_utc: ['* 11-23 * * *', '* 0-4 * * *', BOUNDARY_CRON],
       dispatch_minutes: [5, 20, 35, 50],
       fast_lane_minutes: [0, 10, 15, 25, 30, 40, 45, 55],
       obs_log: env.OBS ? 'KV bound' : 'NO KV BINDING - not logging',

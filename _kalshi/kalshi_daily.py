@@ -835,6 +835,7 @@ def twc_history(cfg, day):
 # the park's 12:51 reading carried forward by how much they changed between their own :51 and the boundary minute. The
 # estimate is a CENTRE with a spread, never a floor; today's climate report (which covers the whole climate day) settles it.
 NBR5 = {'ny': ['KLGA', 'KJFK', 'KEWR']}
+BOUNDARY_URL = 'https://bluish-void-kalshi-cron.junkyjunkjunkjunkjunk.workers.dev/boundary'
 
 
 def boundary_straddle(cfg, day, obh, tkey, h0, rmax):
@@ -848,7 +849,16 @@ def boundary_straddle(cfg, day, obh, tkey, h0, rmax):
     b = datetime.datetime(day.year, day.month, day.day, h0, tzinfo=z).astimezone(utc)
     p51 = b - datetime.timedelta(minutes=9)
     deltas = []
-    for st in NBR5.get(cfg['key'].split('_')[0], []):
+    # THE WORKER'S OWN RECORD FIRST (2026-10-17): it reads the window at 1:10, 1:25 and 1:40 AM and keeps it a year,
+    # where api.weather.gov keeps about a week. The live read below is the fallback.
+    if cfg['key'].startswith('ny'):
+        try:
+            rec = get_json(BOUNDARY_URL + '?d=' + day.isoformat(), timeout=15) or {}
+            deltas = [v['delta'] for k, v in (rec.get('st') or {}).items()
+                      if k != 'KNYC' and isinstance(v, dict) and isinstance(v.get('delta'), (int, float))]
+        except Exception as e:
+            print('straddle: boundary record unavailable (%s)' % e)
+    for st in ([] if deltas else NBR5.get(cfg['key'].split('_')[0], [])):
         try:
             j = get_json('https://api.weather.gov/stations/%s/observations?start=%s&end=%s' % (
                 st, (b - datetime.timedelta(minutes=20)).strftime('%Y-%m-%dT%H:%M:%SZ'), (b + datetime.timedelta(minutes=15)).strftime('%Y-%m-%dT%H:%M:%SZ')), timeout=30)
