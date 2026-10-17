@@ -13,7 +13,7 @@
   'varying vec2 vUv;',
   'uniform sampler2D t1, t2, t3, t4, t5, nz, dt, dp, wm;',
   'uniform vec2 uRes;',
-  'uniform float uT, uTV, uAmp, uW2, uR2, uCr, uCw, uTr, uTx, uFo, uDrift, uMpp, uWind, uEx, uBrk, uRag, uPl, uZone, uDbg, uLpx, uHb0, uWd;',
+  'uniform float uT, uTV, uAmp, uW2, uR2, uCr, uCw, uTr, uTx, uFo, uDrift, uMpp, uWind, uEx, uBrk, uRag, uPl, uZone, uDbg, uLpx, uHb0, uWd, uReal;',
   'uniform vec2 uDir, uWdir;',
   'uniform vec2 uM[4], uDc[4];',                            /* river mouths, in pixels, and each one\u2019s downcoast way */
   'uniform float uMn;',
@@ -38,6 +38,13 @@
      fraction-of-a-wavelength pieces lined up into a checkerboard. One noise cell here is 12 wavelengths along a crest */
   '  float len = .35 + .65 * smoothstep(.25, .75, texture2D(nz, vec2(uu / 12. + 97., (wl - cyc) / 2.5) / 16.).r);',
   '  float hgt = clamp(AM, .3, 2.2), s = sin(6.2832 * wl - wt);',
+  /* REAL SURF ROWS (national map, uReal; user 2026-10-17: "shorelines dont have nearly 20 rows of waves"). From the air an
+     unbroken swell is a faint blue corrugation; it steepens and catches the light only in the last few hundred metres before
+     it breaks, and the white is the 2-4 lines of the surf zone. So the crests keep a third of their tone over the shelf and
+     come up to full only where the real depth is within ~2.5x the breaking depth, and shoaling lifts their height at most 1.4x */
+  '  vec4 Pd0 = texture2D(dp, vUv); float dep0 = (Pd0.r * 65280. + Pd0.g * 255.) / 65535.; dep0 = dep0 * dep0 * 60.;',
+  '  float hbN = uHb0 / .78 * (uReal > .5 ? 1. : uWd), gate = 1.;',
+  '  if (uReal > .5){ hgt = min(hgt, 1.4); gate = mix(.3, 1., 1. - smoothstep(hbN * 1.2, hbN * 2.5, dep0)); }',
   /* NO SECOND CREST TRAIN (user 2026-09-26: "rows perpendicular to the coast ... evenly spaced, checkerboarding"): two perfectly
      regular trains summed print an exact interference lattice -- worse here because the short swell is stretched to a drawable
      wavelength. The crossing swell lives on only as the gentle irregularity of the sets. */
@@ -59,9 +66,9 @@
   '  over(c, vec3(.50, .70, .90), paw * max(0., rip) * .30 * uTx);',
   '  over(c, vec3(.42, .64, .88), slick * .10 * uTx);',
   /* the swell: trough shade and crest tone, as before */
-  '  if (s < 0.) over(c, vec3(.01, .05, .13), (-s) * .30 * a * (1. - .5 * SP) * uTr * calmIn);',
+  '  if (s < 0.) over(c, vec3(.01, .05, .13), (-s) * .30 * a * (1. - .5 * SP) * uTr * calmIn * gate);',
   '  if (s > 0.){ float s2 = s * s, lit = s2 * (1. - SP + SP * s2 * s2) * (.36 + .10 * SP) * a * (hgt > 1. ? 1. + (hgt - 1.) * .5 : 1.);',
-  '    over(c, mix(vec3(.50, .72, .92), vec3(.91, .96, 1.), uCw), lit * 1.25 * uCr * (1. - paw * .35) * calmIn); }',
+  '    over(c, mix(vec3(.50, .72, .92), vec3(.91, .96, 1.), uCw * gate), lit * 1.25 * uCr * (1. - paw * .35) * calmIn * gate); }',
   /* THE BREAK (user 2026-09-26: "improve the crashing of the waves"). Each crest reaching the break line turns into a white
      lip, rolls in toward the sand as a bore of whitewater, and leaves a lace of foam that thins and breaks up until the next
      crest arrives. The break line sits where the waves are big enough to break (bigger sets break further out); sandbars
@@ -71,7 +78,7 @@
      its breaker height / 0.78. The breaker grows with the swell reaching this stretch and with the set, so big sets break on
      the outer bar or reef while the small ones reach the shore; points and reefs break wherever their shelf is shallow
      enough, far from the sand if need be; a deep rip channel stays dark by itself. */
-  '  vec4 Pd = texture2D(dp, vUv); float dep = (Pd.r * 65280. + Pd.g * 255.) / 65535.; dep = dep * dep * 60.;',
+  '  float dep = dep0;',
   '  float fw = 0.;',
   '  vec2 ex1 = 1. / uRes; vec2 gr = vec2(texture2D(dt, vUv + vec2(ex1.x * 7., 0.)).r - texture2D(dt, vUv - vec2(ex1.x * 7., 0.)).r, texture2D(dt, vUv + vec2(0., ex1.y * 7.)).r - texture2D(dt, vUv - vec2(0., ex1.y * 7.)).r);',   /* a wide gradient: the offshore direction must not jitter pixel to pixel */
   '  vec2 nrm0 = length(gr) > 1e-5 ? normalize(gr) : vec2(0.), off = vUv + nrm0 * 35. * ex1;',
@@ -81,7 +88,12 @@
   '  LIo = LIo / max(nW, 1.) * 2.;',   /* 7x7 over ~70 px offshore, water only: the light was built on the 250 m grid and comes in blocks at the shore */
   '  float expo = clamp(LIo * 1.2, 0., 1.);',
   '  float Hb = uHb0 * pow(max(expo, .02), .8) * (.7 + .45 * env);',                  /* the breaker here, this set */
-  '  float hb = Hb / .78 * uWd;',                                                       /* the depth it breaks in (widened for the view) */
+  '  float hb = Hb / .78 * (uReal > .5 ? 1. : uWd);',                                  /* the depth it breaks in (widened for the view) */
+  /* THE SURF ZONE WHERE IT REALLY IS (uReal): breaking at the real breaker depth, never widened in depth -- widening assumed a
+     1:44 beach, and on the Outer Banks' 1:150 shelf it spread the break a kilometre out into ~15 white rows. It is widened in
+     DISTANCE instead, only as far as needed to be seen: within wMin px of the sand the depth is read as at most a ramp to the
+     breaking depth, so the zone is never thinner than ~100 m on the ground (2-8 px) and never wider than the real one. */
+  '  if (uReal > .5){ float wMin = clamp(100. / uMpp, 2., 8.); dep = min(dep, hb * dz / wMin); }',
   '  if (dep < hb * 1.3 && Hb > .12){',
   '    float inz = 1. - smoothstep(hb * .85, hb * 1.1, dep);',
   '    float en = clamp(.45 + .55 * expo, 0., 1.) * clamp(Hb / .9, .25, 1.2) * frame * smoothstep(.06, .3, LIs);',   /* the swell that reaches THIS spot: harbour basins behind their breakwaters stay still */
@@ -183,7 +195,7 @@
       gl.useProgram(pr);
       var b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
       var l = gl.getAttribLocation(pr, 'p'); gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l, 2, gl.FLOAT, false, 0, 0);
-      var U = {}; ['uRes', 'uT', 'uTV', 'uAmp', 'uW2', 'uR2', 'uCr', 'uCw', 'uTr', 'uTx', 'uFo', 'uDrift', 'uDir', 'uMpp', 'uWind', 'uWdir', 'uEx', 'uBrk', 'uRag', 'uPl', 'uM', 'uMn', 'uDc', 'uZone', 'uDbg', 'uLpx', 'uHb0', 'uWd'].forEach(function(k){ U[k] = gl.getUniformLocation(pr, k); });
+      var U = {}; ['uRes', 'uT', 'uTV', 'uAmp', 'uW2', 'uR2', 'uCr', 'uCw', 'uTr', 'uTx', 'uFo', 'uDrift', 'uDir', 'uMpp', 'uWind', 'uWdir', 'uEx', 'uBrk', 'uRag', 'uPl', 'uM', 'uMn', 'uDc', 'uZone', 'uDbg', 'uLpx', 'uHb0', 'uWd', 'uReal'].forEach(function(k){ U[k] = gl.getUniformLocation(pr, k); });
       ['t1', 't2', 't3', 't4', 't5', 'nz', 'dt', 'dp', 'wm'].forEach(function(k, i){ gl.uniform1i(gl.getUniformLocation(pr, k), i); });
       cv._gl = gl; cv._pr = pr; cv._U = U;
       cv.addEventListener('webglcontextlost', function(e){ e.preventDefault(); cv._gl = null; });
@@ -268,7 +280,7 @@
       if (x > -200 && y > -200 && x < RW + 200 && y < RH + 200 && M.length < 8){ M.push(x, y); DC.push(q[2], q[3]); } });
     var mf = new Float32Array(8); mf.set(M); gl.uniform2fv(U.uM, mf); gl.uniform1f(U.uMn, M.length / 2); var df = new Float32Array(8); df.set(DC); gl.uniform2fv(U.uDc, df);
     ['uCr', 'uCw', 'uTr', 'uTx', 'uFo', 'uEx', 'uBrk', 'uRag'].forEach(function(k){ gl.uniform1f(U[k], TUNE[k]); });
-    gl.uniform1f(U.uDbg, 0);
+    gl.uniform1f(U.uDbg, 0); gl.uniform1f(U.uReal, o.real ? 1 : 0);
     var t0 = performance.now();
     return function draw(now){
       if (!cv._gl) return false;

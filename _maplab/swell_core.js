@@ -60,7 +60,10 @@
        leaves no seed at all, every edge is seeded as before. */
     var okSeed = null;
     if (C){
-      okSeed = function(x, y){ return exposure(D, C, D.W + (x + 0.5) * D.step, D.N - (y + 0.5) * D.step, dirFrom, 0) >= 0.3; };
+      /* AND ONLY FROM WATER DEEPER THAN 10 M (2026-10-17): the coarse mask's ~1 km cells miss a barrier island a few hundred
+         metres wide, so from inside Pamlico Sound the fan "saw" open sea straight through Hatteras Island and the sound was
+         seeded as ocean. The sound is 2-7 m deep; the open sea at any upstream edge of a view is far deeper. */
+      okSeed = function(x, y){ return D.depth[y * w + x] >= 10 && exposure(D, C, D.W + (x + 0.5) * D.step, D.N - (y + 0.5) * D.step, dirFrom, 0) >= 0.3; };
     }
     var seeded = 0;
     var seed = function(x, y){
