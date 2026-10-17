@@ -104932,6 +104932,11 @@ function closeAlertModal(){
         var ln = [t1, t2].filter(Boolean);
         if (ln.length) TL.push({ lines: ln, cand: [{ x: x + 7 * dpr, y: y }], col: 'rgba(165,225,255,.95)', rank: 58, fz: 8.2 });
       });
+      var fnWet = [];
+      if (RAD && OV.fn.dep) OV.fn.dep.forEach(function(d){ var q = P(d.lon, d.lat); if (!inV(q, -4)) return; var w = OV.fn.wet[d.id];
+        if (w){ fnWet.push(d); g.beginPath(); g.arc(q[0], q[1], 5.5 * dpr, 0, 6.3); g.fillStyle = w === 'now' ? 'rgba(34,211,238,.95)' : 'rgba(34,211,238,.5)'; g.fill(); g.lineWidth = 1.6 * dpr; g.strokeStyle = '#fff'; g.stroke();
+          if (M.getZoom() >= 13) TL.push({ lines: [d.n.toUpperCase(), w === 'now' ? 'WATER ON THE STREET' : 'DRAINED IN THE LAST 30 MIN'], cand: [{ x: q[0] + 8 * dpr, y: q[1] }], col: 'rgba(165,240,250,.95)', rank: 70, fz: 8.2 }); }
+        else if (M.getZoom() >= 12){ g.beginPath(); g.arc(q[0], q[1], 1.8 * dpr, 0, 6.3); g.fillStyle = 'rgba(34,211,238,.45)'; g.fill(); } });
       /* LABELS OFF THE LINES (user 2026-10-16: "try avoid putting text over graphic features even though they need to be near
          what theyre referencing"). Each label tries its anchor and eight spots around it, and takes the one that sits on the
          fewest drawn features -- measured, not guessed: the pixels under the box are sampled from this overlay (alert
@@ -104939,7 +104944,7 @@ function closeAlertModal(){
          tile canvases (the river and coast layers, and the basemap's water, so a lake is not written over). A spot that is
          clear wins over a nearer one that is not; the anchor's own spot wins ties. Placements are kept while the view holds
          still, so the 2.5 s redraw does not re-measure. */
-      var cornerH = RAD ? (14 + 12 * (Object.keys(count).length + (nStrike ? 1 : 0) + TOP.length)) * dpr : 0;
+      var cornerH = RAD ? (14 + 12 * (Object.keys(count).length + (nStrike ? 1 : 0) + TOP.length + 1)) * dpr : 0;
       var vkey = M.getZoom() + '|' + M.getCenter().lat.toFixed(4) + '|' + M.getCenter().lng.toFixed(4) + '|' + W + 'x' + H;
       if (OV.labKey !== vkey){ OV.labKey = vkey; OV.lab = {}; }
       var mapRect = mapEl.getBoundingClientRect();
@@ -105006,6 +105011,7 @@ function closeAlertModal(){
       if (!RAD) return;
       /* the corner: every kind in frame, lifted toward white to read over echo; right of the zoom buttons */
       var rows = Object.keys(count).sort(function(a, b){ return ovRank(b) - ovRank(a) || count[b] - count[a]; });
+      if (fnWet.length) TOP = TOP.concat([{ t: fnWet.length + ' FLOODNET STREET SENSOR' + (fnWet.length === 1 ? '' : 'S') + ' WET', c: '#67e8f9' }]);
       var lines = TOP.concat(rows.map(function(e){ return { t: count[e] + ' ' + ovPlural(e, count[e]), c: ovLift(ovCol(e), .35) }; }));
       if (!rows.length && OV.alAt) lines.push({ t: 'NO NWS ALERTS IN VIEW', c: '#c9d1d9' });
       /* lightning is named only when there is some (user 2026-10-16: "you dont have to mention lightning if theres no lightning") */
@@ -105119,6 +105125,29 @@ function closeAlertModal(){
       else if (nc) out.push({ t: 'RAIN REACHES ' + nm + ' IN ~' + (nc.min < 7.5 ? 5 : Math.round(nc.min / 5) * 5) + ' MIN', c: '#9fe0ff' });
       return out;
     };
+    /* FLOODNET (step 3, NYC only): THE CITY's street flood sensors (api.floodnet.nyc, open GraphQL, CORS). The ~430
+       deployments drawn as small dots on the radar once close; a sensor counts as WET when a flood event is running there
+       (no end time, or ended within 30 minutes; confidence 0.5 and up; future-stamped events from broken clocks ignored --
+       THE CITY's rules). Wet sensors are bright and named in the corner: measured water on the street, not a forecast. */
+    var FN_BOX = [-74.30, 40.48, -73.65, 40.95];
+    OV.fn = { dep: null, wet: {}, at: 0 };
+    OV.fnRead = function(){
+      if (!M) return; var b = M.getBounds();
+      if (!(FN_BOX[0] <= b.getEast() && FN_BOX[2] >= b.getWest() && FN_BOX[1] <= b.getNorth() && FN_BOX[3] >= b.getSouth())) return;
+      var q = function(gq){ return fetch('https://api.floodnet.nyc/v1/graphql', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: gq }) }).then(function(r){ return r.json(); }); };
+      if (!OV.fn.dep && !OV.fn.depP) OV.fn.depP = q('{ deployments{ deployment_id name location } }').then(function(j){
+        OV.fn.dep = ((j.data || {}).deployments || []).map(function(d){ var c = (d.location || {}).coordinates; return c ? { id: d.deployment_id, n: String(d.name || '').replace(/^[A-Z]{1,2}\s*-\s*/, ''), lon: c[0], lat: c[1] } : null; }).filter(Boolean);
+        OV.draw(); }).catch(function(){ OV.fn.depP = null; });
+      if (Date.now() - OV.fn.at < 120000) return; OV.fn.at = Date.now();
+      var since = new Date(Date.now() - 12 * 3600000).toISOString().slice(0, 19);
+      q('{ flood_events(where:{_and:[{start_time:{_gte:"' + since + '"}},{event_confidence:{_gte:0.5}}]}, order_by:{start_time:desc}, limit:300){ deployment_id start_time end_time } }').then(function(j){
+        var now = Date.now(), wet = {}, ts = function(t){ return new Date(t + (/[Zz+]/.test(t) ? '' : 'Z')).getTime(); };
+        ((j.data || {}).flood_events || []).forEach(function(e){
+          if (e.start_time && ts(e.start_time) > now + 5 * 6e4) return;
+          var end = e.end_time ? ts(e.end_time) : null; if (end != null && end > now + 5 * 6e4) return;
+          if (end == null || end > now - 30 * 6e4) wet[e.deployment_id] = end == null ? 'now' : 'drained'; });
+        OV.fn.wet = wet; OV.draw(); }).catch(function(){});
+    };
     OV.buoyRead = function(force){
       if (!M || OV.mode !== 'radar' || !window._bvBuoys) return;
       var b = M.getBounds().pad(.25), key = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].map(function(v){ return Math.round(v); }).join(',');
@@ -105158,11 +105187,11 @@ function closeAlertModal(){
         OV.cv = document.createElement('canvas'); OV.cv.style.position = 'absolute'; M.getPane('lcOv').appendChild(OV.cv);
         M.on('zoomstart', function(){ if (OV.cv) OV.cv.style.visibility = 'hidden'; });
         M.on('moveend zoomend resize', function(){ if (!OV.on) return; OV.cv.style.visibility = ''; OV.draw(); clearTimeout(OV.deb);
-          OV.deb = setTimeout(function(){ OV.liveRead(); if (OV.mode !== 'radar') return; OV.read(); OV.buoyRead(); OV.satSync(); if (window.bvLightning) window.bvLightning.want('local', true, OV.box()); }, 500); });
+          OV.deb = setTimeout(function(){ OV.liveRead(); if (OV.mode !== 'radar') return; OV.read(); OV.buoyRead(); OV.satSync(); OV.fnRead(); if (window.bvLightning) window.bvLightning.want('local', true, OV.box()); }, 500); });
       }
       OV.on = true; OV.cv.style.display = ''; OV.cv.style.visibility = '';
       var RADm = OV.mode === 'radar';
-      if (RADm){ OV.read(true); if (window._cwFrontsRead) try { window._cwFrontsRead(); } catch(e){} OV.buoyRead(true); }
+      if (RADm){ OV.read(true); if (window._cwFrontsRead) try { window._cwFrontsRead(); } catch(e){} OV.buoyRead(true); OV.fnRead(); }
       OV.satSync(true);
       if (window.bvLightning) window.bvLightning.want('local', RADm, RADm ? OV.box() : null);
       OV.liveRead(); OV.draw();
@@ -105171,7 +105200,7 @@ function closeAlertModal(){
         if (window.bvLightning) window.bvLightning.want('local', rad, rad ? OV.box() : null);
         if (!vis) return;
         OV.liveRead();
-        if (rad){ OV.read(); if (window._cwFrontsRead) try { window._cwFrontsRead(); } catch(e){} OV.buoyRead(); OV.satSync(); }
+        if (rad){ OV.read(); if (window._cwFrontsRead) try { window._cwFrontsRead(); } catch(e){} OV.buoyRead(); OV.satSync(); OV.fnRead(); }
         OV.draw();
       }, 2500);
     };
