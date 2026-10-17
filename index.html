@@ -875,12 +875,122 @@ window._bvRelief = function(map){
   B.coverP.then(function(){ lay.addTo(map); });
   return lay;
 };
+/* THE SEA FLOOR'S SHAPE AND NAMES (user 2026-10-16: "highlight all underwater geology like rivers and mountains especially
+   on the west coast"). Two layers for every dark map:
+   - _bvSeafloor: the deep-ocean hillshade (_reliefbake/render_sea.py over the AWS Terrain Tiles' global bathymetry), z3-9
+     on R2 seafloor/v1, under the detailed coastal bathymetry. The Gorda and Juan de Fuca ridges, the Mendocino and Blanco
+     fracture zones, the seamount fields and the fans now have relief where the map was flat navy.
+   - _bvSeaNames: the GEBCO Gazetteer of Undersea Feature Names (_seabake/names.py, 1,094 in North America's seas): the
+     underwater rivers (canyons, sea channels) drawn along their courses in a soft amber, the long structures (ridges,
+     fracture zones, escarpments) as faint lines, the underwater mountains (seamounts, guyots, knolls) as small peaks, each
+     named from the zoom its size earns. Its own canvas pane, redrawn when the view settles. */
+window.BV_SEAFLOOR = { url: 'https://cdn.bluishvoid.com/seafloor/v1', cover: null, coverP: null };
+window._bvSeafloor = function(map){
+  if (!map || map._bvSeafloorLayer || typeof L === 'undefined') return null;
+  var B = window.BV_SEAFLOOR;
+  if (!B.coverP) B.coverP = fetch(B.url + '/cover.json').then(function(r){ return r.ok ? r.json() : []; }).then(function(a){ B.cover = new Set(a || []); return B.cover; }).catch(function(){ B.cover = new Set(); return B.cover; });
+  var SL = L.TileLayer.extend({
+    createTile: function(c, done){
+      var cov = B.cover;
+      if (c.z >= 8 && (!cov || !cov.has((c.x >> (c.z - 8)) + '/' + (c.y >> (c.z - 8))))){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }
+      return L.TileLayer.prototype.createTile.call(this, c, done);
+    }
+  });
+  var lay = new SL(B.url + '/{z}/{x}/{y}.webp', { minZoom: 3, maxNativeZoom: 9, maxZoom: 19, zIndex: 2, opacity: 1, keepBuffer: 1, updateWhenIdle: true,
+    errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', bounds: L.latLngBounds([[5, -180], [80, -40]]) });
+  map._bvSeafloorLayer = lay;
+  B.coverP.then(function(){ lay.addTo(map); });
+  return lay;
+};
+window._bvSeaNames = function(map){
+  if (!map || map._bvSeaNamesOn || typeof L === 'undefined') return;
+  map._bvSeaNamesOn = true;
+  var D = window._bvSeaNamesData;
+  var load = D ? Promise.resolve(D) : fetch('https://cdn.bluishvoid.com/seafloor/names_v1.json').then(function(r){ return r.json(); }).then(function(j){ window._bvSeaNamesData = j; return j; });
+  load.then(function(J){
+    if (!J || !J.f) return;
+    var pane = map.getPane('bvSea') || map.createPane('bvSea'); pane.style.zIndex = 430; pane.style.pointerEvents = 'none';
+    var cv = document.createElement('canvas'); cv.style.position = 'absolute'; pane.appendChild(cv); map._bvSeaCv = cv;
+    var draw = function(){
+      var sz = map.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr), z = map.getZoom();
+      if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
+      L.DomUtil.setPosition(cv, map.containerPointToLayerPoint([0, 0])); cv.style.visibility = '';
+      var g = cv.getContext('2d'); g.clearRect(0, 0, W, H); if (z < 3) return;
+      var P = function(c){ var q = map.latLngToContainerPoint([c[1], c[0]]); return [q.x * dpr, q.y * dpr]; };
+      var inV = function(q, m){ return q[0] > -m && q[1] > -m && q[0] < W + m && q[1] < H + m; };
+      var COL = { canyon: 'rgba(255,206,140,', ridge: 'rgba(170,205,240,', mount: 'rgba(170,205,240,', basin: 'rgba(150,180,215,' };
+      g.lineJoin = 'round'; g.lineCap = 'round';
+      J.f.forEach(function(f){
+        if (z < f.z - 1 || !f.g) return;
+        var line = function(c){ var Q = c.map(P); if (!Q.some(function(q){ return inV(q, 40); })) return null; g.beginPath(); Q.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); return Q; };
+        if (f.g.l) f.g.l.forEach(function(c){ if (!line(c)) return;
+          if (f.k === 'canyon'){ g.lineWidth = 5 * dpr; g.strokeStyle = COL.canyon + '.10)'; g.stroke(); g.lineWidth = 1.3 * dpr; g.strokeStyle = COL.canyon + '.55)'; g.stroke(); }
+          else { g.setLineDash([5 * dpr, 4 * dpr]); g.lineWidth = 1 * dpr; g.strokeStyle = COL[f.k] + '.38)'; g.stroke(); g.setLineDash([]); } });
+        if (f.g.p && z >= f.z) f.g.p.forEach(function(c){ if (!line(c)) return; g.closePath(); g.lineWidth = .8 * dpr; g.strokeStyle = COL[f.k] + '.30)'; g.stroke(); });
+      });
+      /* names: biggest first, one per spot; mountains get a small peak at their point */
+      var placed = [];
+      g.textBaseline = 'middle';
+      J.f.forEach(function(f){
+        if (z < f.z) return;
+        var q = P(f.c); if (!inV(q, -10)) return;
+        if (f.k === 'mount'){ var s = 3.2 * dpr; g.beginPath(); g.moveTo(q[0] - s, q[1] + s * .7); g.lineTo(q[0], q[1] - s); g.lineTo(q[0] + s, q[1] + s * .7); g.closePath(); g.fillStyle = COL.mount + '.75)'; g.fill(); }
+        var fz = (f.z <= 4 ? 8.6 : 7.8) * dpr; g.font = 'italic 700 ' + fz + 'px system-ui,sans-serif';
+        var w = g.measureText(f.n).width, x = q[0] + 6 * dpr, y = q[1];
+        if (x + w > W - 4) x = q[0] - 6 * dpr - w;
+        var r = [x - 3 * dpr, y - fz * .7, x + w + 3 * dpr, y + fz * .7];
+        if (placed.some(function(p){ return r[0] < p[2] && r[2] > p[0] && r[1] < p[3] && r[3] > p[1]; })) return;
+        placed.push(r);
+        g.lineWidth = 3 * dpr; g.strokeStyle = 'rgba(8,14,28,.8)'; g.strokeText(f.n, x, y);
+        g.fillStyle = (f.k === 'canyon' ? COL.canyon : COL[f.k]) + '.85)'; g.fillText(f.n, x, y);
+      });
+    };
+    map.on('zoomstart', function(){ cv.style.visibility = 'hidden'; });
+    map.on('moveend zoomend resize', draw); draw();
+  }).catch(function(){});
+};
 /* bridges and piers again, over the bathymetry: every road line rule kept for features flagged is_bridge, plus the pier rule */
 window._bvBridgeRules = function(F){
   return window._bvPaintPlus(protomapsL.paintRules(F), F).filter(function(r){ return r.dataLayer === 'roads' && r.symbolizer instanceof protomapsL.LineSymbolizer; }).map(function(r){
     var o = {}, f0 = r.filter; for (var k in r) o[k] = r[k];
     o.filter = function(z, f){ var p = (f && f.props) || {}; if (!p.is_bridge && p.kind_detail !== 'pier') return false; return f0 ? f0(z, f) : true; };
     return o; });
+};
+/* THE CLOUD VEIL, shared (moved here from THE CITY's cwSatSync, 2026-10-16): IEM's colour-enhanced GOES clean infrared
+   (band 13) re-painted in place on a canvas holding it -- grey brightness -> how cold, any enhanced colour -> cold tops;
+   opacity rises with coldness to 0.62, so low cloud is a haze, tall storm tops the most solid, and the map reads through. */
+window._bvSatVeilPaint = function(g, W, H){
+  var d = g.getImageData(0, 0, W, H), q = d.data;
+  for (var i = 0; i < q.length; i += 4){
+    var r = q[i], gg = q[i + 1], bb = q[i + 2];
+    var mx = Math.max(r, gg, bb), mn = Math.min(r, gg, bb), cold;
+    if (mx - mn > 45) cold = 0.78 + (r > bb ? 0.22 * gg / 255 : 0);          /* the enhanced ramp: cold tops */
+    else cold = Math.max(0, Math.min(1, ((r + gg + bb) / 3 - 115) / 110)) * 0.72;
+    q[i] = 205 + 45 * cold; q[i + 1] = 215 + 37 * cold; q[i + 2] = 255;
+    q[i + 3] = Math.round(255 * 0.62 * Math.pow(Math.min(1, cold), 1.3));
+  }
+  g.putImageData(d, 0, 0);
+};
+/* NDBC MOORED BUOYS, shared: the latest report of the last three hours in a lon/lat box, from NOAA's ERDDAP mirror
+   (cwwcNDBCMet) through the proxy (no CORS header there). Numbered moored buoys only (41/42/44/45 Atlantic, Gulf and
+   Lakes, 46 Pacific, 51 Hawaii): the C-MAN and harbour stations sit on land or in bays. Wind m/s -> knots; PTDY is the
+   three-hour pressure change. THE CITY's COAST view keeps its own reader (cwBuoyRead) for its fixed box. */
+window._bvBuoys = function(w, s, e, n){
+  if (!window.bvProxyJSON) return Promise.resolve([]);
+  return window.bvProxyJSON('https://coastwatch.pfeg.noaa.gov/erddap/tabledap/cwwcNDBCMet.json?station,longitude,latitude,time,WD,WSPD,GST,BAR,PTDY,WVHT'
+      + '&time%3E=now-3hours&latitude%3E=' + s.toFixed(2) + '&latitude%3C=' + n.toFixed(2) + '&longitude%3E=' + w.toFixed(2) + '&longitude%3C=' + e.toFixed(2), { timeout: 15000 })
+    .then(function(j){
+      var T = j && j.table; if (!T || !T.rows) return [];
+      var C = T.columnNames, ix = function(k){ return C.indexOf(k); }, last = {};
+      T.rows.forEach(function(r){
+        var id = String(r[ix('station')] || '');
+        if (!/^(4[1-6]|51)\d{3}$/.test(id)) return;
+        if (!last[id] || r[ix('time')] > last[id].t) last[id] = { id: id, lon: r[ix('longitude')], lat: r[ix('latitude')], t: r[ix('time')],
+          wd: r[ix('WD')], kt: r[ix('WSPD')] != null ? r[ix('WSPD')] * 1.944 : null, gkt: r[ix('GST')] != null ? r[ix('GST')] * 1.944 : null,
+          mb: r[ix('BAR')], d3: r[ix('PTDY')], wv: r[ix('WVHT')] };
+      });
+      return Object.keys(last).map(function(k){ return last[k]; });
+    }).catch(function(){ return []; });
 };
 window.BV_RIVERS_URL = 'https://cdn.bluishvoid.com/rivers/v2/{z}/{x}/{y}.mvt';
 /* RIVER WIDTH (refined 2026-10-16, user: "improve and refine your river illustrations"). Real channels widen roughly with a
@@ -977,10 +1087,12 @@ window._bvVectorBase = function(map, opts){
        drift apart. Every caller that asks for labels gets it, so every view
        names the same places. Only z2-6, where protomaps' own localities
        stand down for it; past that the real basemap labels return. */
+    if (!opts.labels && opts.flavor !== 'light' && !opts.noSeafloor && window._bvSeafloor) window._bvSeafloor(map);
     if (!opts.labels && opts.flavor !== 'light' && !opts.noRelief && window._bvRelief) window._bvRelief(map);
     if (!opts.labels && opts.flavor !== 'light' && !opts.noBathy && window._bvBathy) window._bvBathy(map);
     if (!opts.labels && opts.flavor !== 'light' && !opts.noRivers && window._bvRivers) window._bvRivers(map);
     if (!opts.labels && opts.flavor !== 'light' && !opts.noCoast && window._bvCoast) window._bvCoast(map);
+    if (!opts.labels && opts.flavor !== 'light' && !opts.noSeaNames && window._bvSeaNames) window._bvSeaNames(map);
     if (opts.labels && window._bvContinentalNames)
       window._bvContinentalNames(map, { light: opts.flavor === 'light' });
   } catch(e){ console.warn('[basemap] vector layer failed, staying on raster', e); added.forEach(function(l){ try{ map.removeLayer(l); }catch(e2){} }); return null; }
@@ -54636,6 +54748,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                prod:'bref', front:true, radarOn:false, floods:false, trains:true, wide:null, rock:false,
                fl1865:true, flProne:true };   /* FLOODING's two context layers, each with its own button in the bar */
     window._cwFrontsRead = cwFrontsRead;      /* LOCAL's radar draws the same WPC fronts (2026-10-16); the reader is national */
+    /* ONE MOTION METHOD FOR EVERY MAP (2026-10-16, step 1 of "one map engine"): the national map measures storm motion with
+       THE CITY's own cross-correlation and edge fallback. box: the frames' EPSG:3857 extent; opt: { lat, hood }. */
+    window._bvMeasureMotion = function(imA, imB, dtMin, box, opt){ return cwMeasureMotion(imA, imB, dtMin, { box: box }, box, opt || {}); };
     try { var cwFlMem = JSON.parse(localStorage.getItem('bv_cw_fl') || 'null');      /* ...and remembered on this device */
       if (cwFlMem){ cw.fl1865 = cwFlMem.g !== 0; cw.flProne = cwFlMem.p !== 0; } } catch(e){}
     /* WHICH VIEW THE WIDGET OPENS ON (2026-09-12, user: "launch on a view based
@@ -59977,16 +60092,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             c.width = W; c.height = H;
             var g = c.getContext('2d', { willReadFrequently: true });
             g.clearRect(0, 0, W, H); g.drawImage(im, 0, 0, W, H);
-            var d = g.getImageData(0, 0, W, H), q = d.data;
-            for (var i = 0; i < q.length; i += 4){
-              var r = q[i], gg = q[i + 1], bb = q[i + 2];
-              var mx = Math.max(r, gg, bb), mn = Math.min(r, gg, bb), cold;
-              if (mx - mn > 45) cold = 0.78 + (r > bb ? 0.22 * gg / 255 : 0);          /* the enhanced ramp: cold tops */
-              else cold = Math.max(0, Math.min(1, ((r + gg + bb) / 3 - 115) / 110)) * 0.72;
-              q[i] = 205 + 45 * cold; q[i + 1] = 215 + 37 * cold; q[i + 2] = 255;
-              q[i + 3] = Math.round(255 * 0.62 * Math.pow(Math.min(1, cold), 1.3));
-            }
-            g.putImageData(d, 0, 0);
+            window._bvSatVeilPaint(g, W, H);        /* shared with the national map (2026-10-16) */
             c.style.display = '';
           } catch (e){ c.style.display = 'none'; }
         };
@@ -70843,10 +70949,12 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
        is the motion. Kept only with a coherent match (a quarter of the
        echo lands), a displacement inside the search window, and something
        actually moving; otherwise the steering wind stands. */
-    function cwMeasureMotion(imA, imB, dtMin, wv, fetchBox){
+    function cwMeasureMotion(imA, imB, dtMin, wv, fetchBox, opt){
       if (!imA || !imB || !imA.naturalWidth || !imB.naturalWidth || !(dtMin >= 8)) return null;
       var bx = fetchBox || wv.box;                    /* the frames may cover a padded box (cwWidePad); the km per pixel must be theirs */
-      var boxKm = (bx.X1 - bx.X0) / 1000 * Math.cos(41.5 * Math.PI / 180);
+      /* opt (2026-10-16, the national map reuses this): { lat: the box's latitude for km per pixel, hood: the home the edge
+         fallback reads around }. THE CITY passes none: 41.5 N and _cityHood, as before. */
+      var boxKm = (bx.X1 - bx.X0) / 1000 * Math.cos(((opt && opt.lat) || 41.5) * Math.PI / 180);
       var W = Math.max(200, Math.min(600, Math.round(boxKm / 2.2)));
       var H = Math.round(W * imA.naturalHeight / imA.naturalWidth), kmPx = boxKm / W;
       var c = document.createElement('canvas'); c.width = W; c.height = H;
@@ -70874,9 +70982,9 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         }
         if (sc > best.s) best = { s: sc, dx: dx, dy: dy };
       }
-      if (best.s < 0.25 * nA || Math.abs(best.dx) >= S || Math.abs(best.dy) >= S) return cwEdgeMotion(imA, imB, dtMin, bx);
+      if (best.s < 0.25 * nA || Math.abs(best.dx) >= S || Math.abs(best.dy) >= S) return cwEdgeMotion(imA, imB, dtMin, bx, opt);
       var km = Math.hypot(best.dx, best.dy) * kmPx, mph = km / dtMin * 60 / 1.609;
-      if (mph < 4) return cwEdgeMotion(imA, imB, dtMin, bx);   /* the mass sits still: read the edge instead */
+      if (mph < 4) return cwEdgeMotion(imA, imB, dtMin, bx, opt);   /* the mass sits still: read the edge instead */
       return { toward: Math.round((Math.atan2(best.dx, -best.dy) * 180 / Math.PI + 360) % 360),
                mph: Math.round(mph), match: +(best.s / nA).toFixed(2), n: nA, kmPx: +kmPx.toFixed(2), span: dtMin };
     }
@@ -70891,9 +70999,9 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
        Kept only if it cuts the miss by a third and the shift is inside the window. Along a long straight edge
        only the push ACROSS it is seen (the aperture problem), so a sliding component can hide in the answer --
        it is the best-fitting shift of the edge, not a tracked cell. */
-    function cwEdgeMotion(imA, imB, dtMin, bx){
-      var hood = window._cityHood || { lat: 40.741, lon: -73.99 }, R2 = 6378137;
-      var boxKm = (bx.X1 - bx.X0) / 1000 * Math.cos(41.5 * Math.PI / 180);
+    function cwEdgeMotion(imA, imB, dtMin, bx, opt){
+      var hood = (opt && opt.hood) || window._cityHood || { lat: 40.741, lon: -73.99 }, R2 = 6378137;
+      var boxKm = (bx.X1 - bx.X0) / 1000 * Math.cos(((opt && opt.lat) || 41.5) * Math.PI / 180);
       var W = 300, H = Math.round(W * imA.naturalHeight / imA.naturalWidth), kmPx = boxKm / W;
       var c = document.createElement('canvas'); c.width = W; c.height = H;
       var g = c.getContext('2d', { willReadFrequently: true });
@@ -104377,7 +104485,8 @@ function closeAlertModal(){
     var A = function(n, h){ return '<a href="' + h + '" target="_blank" rel="noopener">' + n + '</a>'; };
     var SRC = { radar: function(){ return A('NOAA MRMS', 'https://www.nssl.noaa.gov/projects/mrms/') + A('NOAA NEXRAD ' + R.sid.toUpperCase() + ' (NCEP OPENGEO)', 'https://opengeo.ncep.noaa.gov/geoserver/' + R.sid + '/ows?service=WMS&request=GetCapabilities') + A('NWS ALERTS', 'https://www.weather.gov/alerts') + A('NWS ZONE MAPS', 'https://www.weather.gov/gis/PublicZones')
         + A('BLITZORTUNG', 'https://map.blitzortung.org/#7/' + (+(window.LOCATION || {}).lat).toFixed(2) + '/' + (+(window.LOCATION || {}).lon).toFixed(2))
-        + A('WPC SURFACE FRONTS', 'https://www.wpc.ncep.noaa.gov/html/sfc-zoom.php') + A('USGS PHYSIOGRAPHIC DIVISIONS', 'https://water.usgs.gov/GIS/metadata/usgswrd/XML/physio.xml') + A('USGS 3DEP ELEVATION', 'https://www.usgs.gov/3d-elevation-program') + A('OPEN-METEO (WIND ACROSS THE EDGES)', 'https://open-meteo.com') + A('GEOGLOWS / NGA TDX-HYDRO RIVERS (CC BY-SA)', 'https://geoglows.org') + A('AWS TERRAIN TILES (RELIEF BEYOND THE US)', 'https://registry.opendata.aws/terrain-tiles/') + A('OPENSTREETMAP', 'https://www.openstreetmap.org/copyright') + A('PROTOMAPS', 'https://protomaps.com'); },
+        + A('WPC SURFACE FRONTS', 'https://www.wpc.ncep.noaa.gov/html/sfc-zoom.php') + A('NOAA GOES CLEAN INFRARED (IEM)', 'https://mesonet.agron.iastate.edu/GIS/goes.phtml')
+        + A('NDBC BUOYS (NOAA ERDDAP)', 'https://coastwatch.pfeg.noaa.gov/erddap/tabledap/cwwcNDBCMet.html') + A('USGS PHYSIOGRAPHIC DIVISIONS', 'https://water.usgs.gov/GIS/metadata/usgswrd/XML/physio.xml') + A('USGS 3DEP ELEVATION', 'https://www.usgs.gov/3d-elevation-program') + A('OPEN-METEO (WIND ACROSS THE EDGES)', 'https://open-meteo.com') + A('GEOGLOWS / NGA TDX-HYDRO RIVERS (CC BY-SA)', 'https://geoglows.org') + A('AWS TERRAIN TILES (RELIEF BEYOND THE US)', 'https://registry.opendata.aws/terrain-tiles/') + A('OPENSTREETMAP', 'https://www.openstreetmap.org/copyright') + A('PROTOMAPS', 'https://protomaps.com'); },
       map: function(){ return A('USGS PHYSIOGRAPHIC DIVISIONS', 'https://water.usgs.gov/GIS/metadata/usgswrd/XML/physio.xml') + A('USGS 3DEP ELEVATION', 'https://www.usgs.gov/3d-elevation-program') + A('OPEN-METEO (WIND ACROSS THE EDGES)', 'https://open-meteo.com') + A('GEOGLOWS / NGA TDX-HYDRO RIVERS (CC BY-SA)', 'https://geoglows.org') + A('AWS TERRAIN TILES (RELIEF BEYOND THE US)', 'https://registry.opendata.aws/terrain-tiles/') + A('OPENSTREETMAP', 'https://www.openstreetmap.org/copyright') + A('PROTOMAPS', 'https://protomaps.com'); },
       rock: function(){ return A('MACROSTRAT', 'https://macrostrat.org') + A('USGS QUATERNARY FAULTS', 'https://www.usgs.gov/programs/earthquake-hazards/faults') + A('USGS EARTHQUAKE CATALOG (COMCAT)', 'https://earthquake.usgs.gov/earthquakes/search/')
         + A('OPENSTREETMAP', 'https://www.openstreetmap.org/copyright') + A('PROTOMAPS', 'https://protomaps.com'); },
@@ -104450,8 +104559,11 @@ function closeAlertModal(){
       var nm = String((window.LOCATION || {}).radarName || '').toUpperCase();
       strip.innerHTML = (R.prod === 'bref' ? 'MRMS RADAR MOSAIC (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)' : esc(R.sid.toUpperCase()) + (nm ? ' · ' + esc(nm) : '')) + ' · ' + esc(w) + ' SCAN'
         + '<span style="float:right;"><button type="button" class="lc-pill' + (R.prod === 'bref' ? ' on' : '') + '" data-p="bref">REFLECTIVITY</button>'
-        + '<button type="button" class="lc-pill' + (R.prod === 'bvel' ? ' on' : '') + '" data-p="bvel">VELOCITY</button></span>';
-      [].forEach.call(strip.querySelectorAll('.lc-pill'), function(b){ b.onclick = function(e){ e.stopPropagation(); R.prod = b.getAttribute('data-p'); R.rebuild(true); }; }); };
+        + '<button type="button" class="lc-pill' + (R.prod === 'bvel' ? ' on' : '') + '" data-p="bvel">VELOCITY</button>'
+        + '<button type="button" class="lc-pill' + (OV.satOn ? ' on' : '') + '" data-s="1">SATELLITE</button></span>';
+      [].forEach.call(strip.querySelectorAll('.lc-pill'), function(b){ b.onclick = function(e){ e.stopPropagation();
+        if (b.getAttribute('data-s')){ OV.satOn = !OV.satOn; try { localStorage.setItem('bv_lc_sat', OV.satOn ? '1' : '0'); } catch(e2){} b.classList.toggle('on', OV.satOn); OV.satSync(true); return; }
+        R.prod = b.getAttribute('data-p'); R.rebuild(true); }; }); };
     R.rebuild = function(now){
       clearTimeout(R.deb);
       R.deb = setTimeout(function(){
@@ -104460,8 +104572,9 @@ function closeAlertModal(){
           R.clear();
           var ts = (R.times[R.prod] || []).slice(-10); if (!ts.length){ strip.textContent = 'NO RECENT SCANS FROM ' + R.sid.toUpperCase() + ' RIGHT NOW'; return; }
           var bb = M.getBounds();
-          ts.forEach(function(t, k){ var o = L.imageOverlay(R.url(t), bb, { opacity: 0, interactive: false }).addTo(M); R.ov.push({ l: o, t: t }); });
+          ts.forEach(function(t, k){ var o = L.imageOverlay(R.url(t), bb, { opacity: 0, interactive: false, crossOrigin: 'anonymous', zIndex: 3 }).addTo(M); R.ov.push({ l: o, t: t }); });
           R.i = R.ov.length - 1; R.ov[R.i].l.setOpacity(.82); R.label();
+          if (R.prod === 'bref') OV.motionFrom(R.ov.slice(), bb);
           var hold = 0;
           R.timer = setInterval(function(){ if (document.hidden || pane.style.display === 'none') return;
             if (R.i === R.ov.length - 1 && hold++ < 3) return; hold = 0;            /* rest on the newest scan */
@@ -104729,6 +104842,40 @@ function closeAlertModal(){
           if (f > .75){ g.beginPath(); g.arc(q[0], q[1], 1.1 * dpr, 0, 6.284); g.fillStyle = 'rgba(255,255,255,.92)'; g.fill(); } });
         g.restore(); g.globalAlpha = 1;
       }
+      /* 4. LEAD ARCS AND BUOYS (step 1): 1 and 2 hours of the storms' motion upwind of the place, the on-path sector
+         brighter; then the buoys in view */
+      var TOP = RAD ? OV.topLines() : [];
+      if (RAD && TOP.length && OV.motion && isFinite(+L0.lat)){
+        var mo = OV.motion, up = (mo.toward + 180) % 360, kmh = mo.mph * 1.609;
+        g.save(); g.lineCap = 'round';
+        [[1, .62], [2, .38]].forEach(function(hh){
+          var r = kmh * hh[0], Q = [];
+          for (var b = -70; b <= 70; b += 4){ var ll = destLL(+L0.lat, +L0.lon, r, up + b); Q.push(P(ll[1], ll[0])); }
+          if (!Q.some(function(q){ return inV(q, 0); })) return;
+          var hq = P(+L0.lon, +L0.lat), mq = Q[Math.floor(Q.length / 2)];
+          if (Math.hypot(mq[0] - hq[0], mq[1] - hq[1]) < 45 * dpr) return;     /* a slow storm at this zoom: the arc would sit on the dot */
+          g.setLineDash([6 * dpr, 5 * dpr]); g.lineWidth = 3.4 * dpr; g.strokeStyle = 'rgba(8,10,16,.45)'; g.beginPath(); Q.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); g.stroke();
+          g.lineWidth = 1.4 * dpr; g.strokeStyle = 'rgba(232,240,250,' + hh[1] + ')'; g.stroke(); g.setLineDash([]);
+          var mid = Q[Math.floor(Q.length / 2)];
+          if (inV(mid, -10)) TL.push({ lines: [hh[0] + ' HR'], cand: [{ x: mid[0] + 6 * dpr, y: mid[1] }], col: 'rgba(232,240,250,.9)', rank: 74, fz: 8.6 });
+        });
+        g.restore();
+      }
+      if (RAD) (OV.buoys || []).forEach(function(q){
+        var p0 = P(q.lon, q.lat); if (!inV(p0, -6)) return; var x = p0[0], y = p0[1];
+        g.beginPath(); g.arc(x, y, 3.4 * dpr, 0, 6.284); g.lineWidth = 3 * dpr; g.strokeStyle = 'rgba(8,10,16,.85)'; g.stroke(); g.lineWidth = 1.5 * dpr; g.strokeStyle = 'rgba(125,211,252,.95)'; g.stroke();
+        if (q.wd != null && q.kt != null && q.kt >= 1){
+          var ang = ((q.wd + 180) % 360) * Math.PI / 180, len = (9 + Math.min(40, q.kt) * 0.9) * dpr, x2 = x + Math.sin(ang) * len, y2 = y - Math.cos(ang) * len;
+          g.beginPath(); g.moveTo(x + Math.sin(ang) * 4 * dpr, y - Math.cos(ang) * 4 * dpr); g.lineTo(x2, y2);
+          g.lineWidth = 3.4 * dpr; g.strokeStyle = 'rgba(8,10,16,.8)'; g.stroke(); g.lineWidth = 1.6 * dpr; g.strokeStyle = 'rgba(125,211,252,.95)'; g.stroke();
+          var ah = 4.5 * dpr, a1 = ang + 2.6, a2 = ang - 2.6;
+          g.beginPath(); g.moveTo(x2, y2); g.lineTo(x2 + Math.sin(a1) * ah, y2 - Math.cos(a1) * ah); g.lineTo(x2 + Math.sin(a2) * ah, y2 - Math.cos(a2) * ah); g.closePath(); g.fillStyle = 'rgba(125,211,252,.95)'; g.fill();
+        }
+        var t1 = (q.kt != null ? Math.round(q.kt) + (q.gkt != null && q.gkt > q.kt + 5 ? 'G' + Math.round(q.gkt) : '') + ' KT' : '') + (q.wv != null ? (q.kt != null ? ' \u00b7 ' : '') + Math.round(q.wv * 3.281) + ' FT SEAS' : '');
+        var t2 = (q.mb != null ? Math.round(q.mb) + ' MB' : '') + (q.d3 != null && Math.abs(q.d3) >= 0.5 ? (q.d3 < 0 ? ' FALLING ' : ' RISING ') + Math.abs(q.d3).toFixed(1) : '');
+        var ln = [t1, t2].filter(Boolean);
+        if (ln.length) TL.push({ lines: ln, cand: [{ x: x + 7 * dpr, y: y }], col: 'rgba(165,225,255,.95)', rank: 58, fz: 8.2 });
+      });
       /* LABELS OFF THE LINES (user 2026-10-16: "try avoid putting text over graphic features even though they need to be near
          what theyre referencing"). Each label tries its anchor and eight spots around it, and takes the one that sits on the
          fewest drawn features -- measured, not guessed: the pixels under the box are sampled from this overlay (alert
@@ -104736,7 +104883,7 @@ function closeAlertModal(){
          tile canvases (the river and coast layers, and the basemap's water, so a lake is not written over). A spot that is
          clear wins over a nearer one that is not; the anchor's own spot wins ties. Placements are kept while the view holds
          still, so the 2.5 s redraw does not re-measure. */
-      var cornerH = RAD ? (14 + 12 * (Object.keys(count).length + (nStrike ? 1 : 0))) * dpr : 0;
+      var cornerH = RAD ? (14 + 12 * (Object.keys(count).length + (nStrike ? 1 : 0) + TOP.length)) * dpr : 0;
       var vkey = M.getZoom() + '|' + M.getCenter().lat.toFixed(4) + '|' + M.getCenter().lng.toFixed(4) + '|' + W + 'x' + H;
       if (OV.labKey !== vkey){ OV.labKey = vkey; OV.lab = {}; }
       var mapRect = mapEl.getBoundingClientRect();
@@ -104803,7 +104950,7 @@ function closeAlertModal(){
       if (!RAD) return;
       /* the corner: every kind in frame, lifted toward white to read over echo; right of the zoom buttons */
       var rows = Object.keys(count).sort(function(a, b){ return ovRank(b) - ovRank(a) || count[b] - count[a]; });
-      var lines = rows.map(function(e){ return { t: count[e] + ' ' + ovPlural(e, count[e]), c: ovLift(ovCol(e), .35) }; });
+      var lines = TOP.concat(rows.map(function(e){ return { t: count[e] + ' ' + ovPlural(e, count[e]), c: ovLift(ovCol(e), .35) }; }));
       if (!rows.length && OV.alAt) lines.push({ t: 'NO NWS ALERTS IN VIEW', c: '#c9d1d9' });
       /* lightning is named only when there is some (user 2026-10-16: "you dont have to mention lightning if theres no lightning") */
       if (nStrike) lines.push({ t: nStrike + ' LIGHTNING STRIKE' + (nStrike === 1 ? '' : 'S') + ' IN 20 MIN', c: '#f3c264' });
@@ -104847,6 +104994,106 @@ function closeAlertModal(){
         }).catch(function(){});
     };
     OV.box = function(){ var c = M.getCenter(); return [c.lng - 12, c.lat - 9, c.lng + 12, c.lat + 9]; };
+    /* STEP 1 OF ONE MAP ENGINE (user 2026-10-16: "start step 1"): THE CITY's national-scope tools, carried to any place.
+       - STORM MOTION, MEASURED off this loop with THE CITY's own method (window._bvMeasureMotion = cwMeasureMotion, its
+         edge fallback around the place): the oldest scan against the newest. When the echo will not yield a motion,
+         the 500 hPa wind x 0.85 stands in and is labelled (STEERING WIND), as THE CITY labels it.
+       - THE NOWCAST: from the place, upwind along that motion, a 12 km-wide path sampled on the newest scan; the first
+         echo gives the arrival time. Echo over the place itself reads "RAIN OVER ... NOW".
+       - LEAD ARCS: 1 and 2 hours of that motion upwind of the place, so "when does that reach me" reads off the map.
+       - BUOYS: NDBC's moored buoys in view (window._bvBuoys), wind arrow, knots, gusts, seas, pressure and its 3 h trend.
+       - THE CLOUD VEIL: IEM's GOES clean infrared under the radar, re-painted cold-tops-solid (window._bvSatVeilPaint);
+         GOES-East over the east, GOES-West over the west, its Alaska and Hawaii sectors there. SATELLITE pill, remembered. */
+    OV.motion = null; OV.nc = null; OV.buoys = []; OV.frame = null; OV.satLay = null; OV.satAt = 0; OV.satKey = '';
+    try { OV.satOn = localStorage.getItem('bv_lc_sat') !== '0'; } catch(e){ OV.satOn = true; }
+    var COMPASS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+    var compass = function(d){ return COMPASS[Math.round(((d % 360) + 360) % 360 / 22.5) % 16]; };
+    var destLL = function(la, lo, km, brDeg){ var dl = km / 6371, br = brDeg * Math.PI / 180, la1 = la * Math.PI / 180, lo1 = lo * Math.PI / 180;
+      var la2 = Math.asin(Math.sin(la1) * Math.cos(dl) + Math.cos(la1) * Math.sin(dl) * Math.cos(br));
+      var lo2 = lo1 + Math.atan2(Math.sin(br) * Math.sin(dl) * Math.cos(la1), Math.cos(dl) - Math.sin(la1) * Math.sin(la2));
+      return [la2 * 180 / Math.PI, lo2 * 180 / Math.PI]; };
+    OV.motionFrom = function(ov, bb){
+      if (!ov || ov.length < 2) return;
+      var a = ov[0], b = ov[ov.length - 1], tries = 0;
+      var go = function(){
+        var ea = a.l.getElement(), eb = b.l.getElement();
+        if (!(ea && eb && ea.complete && eb.complete && ea.naturalWidth && eb.naturalWidth)){ if (tries++ < 30) setTimeout(go, 1000); return; }
+        var sw = L.CRS.EPSG3857.project(bb.getSouthWest()), ne = L.CRS.EPSG3857.project(bb.getNorthEast());
+        var box = { X0: sw.x, Y0: sw.y, X1: ne.x, Y1: ne.y }, L1 = window.LOCATION || {};
+        OV.frame = { el: eb, box: box, t: b.t };
+        var mo = null;
+        try { mo = window._bvMeasureMotion ? window._bvMeasureMotion(ea, eb, (b.t - a.t) / 60000, box, { lat: bb.getCenter().lat, hood: { lat: +L1.lat, lon: +L1.lon } }) : null; } catch(e){}
+        if (mo && mo.mph >= 4) OV.motion = { toward: mo.toward, mph: Math.max(5, mo.mph), src: 'RADAR', at: Date.now() };
+        else if (!OV.motion || OV.motion.src !== 'RADAR' || Date.now() - OV.motion.at > 45 * 6e4) { OV.steer(); return; }
+        OV.nowcast(); OV.draw();
+      };
+      go();
+    };
+    OV.steer = function(){
+      var L1 = window.LOCATION || {};
+      fetch('https://api.open-meteo.com/v1/forecast?latitude=' + (+L1.lat).toFixed(3) + '&longitude=' + (+L1.lon).toFixed(3) + '&current=wind_speed_500hPa,wind_direction_500hPa&wind_speed_unit=mph')
+        .then(function(r){ return r.json(); }).then(function(j){ var c = j && j.current; if (!c || !isFinite(c.wind_speed_500hPa)) return;
+          OV.motion = { toward: (c.wind_direction_500hPa + 180) % 360, mph: Math.max(5, Math.round(c.wind_speed_500hPa * 0.85)), src: 'STEERING WIND', at: Date.now() };
+          OV.nowcast(); OV.draw(); }).catch(function(){});
+    };
+    OV.nowcast = function(){
+      OV.nc = null; var F = OV.frame, mo = OV.motion, L1 = window.LOCATION || {};
+      if (!F || !mo || !F.el.naturalWidth) return;
+      var w = F.el.naturalWidth, h = F.el.naturalHeight, c = OV.ncCv || (OV.ncCv = document.createElement('canvas')); c.width = w; c.height = h;
+      var g2 = c.getContext('2d', { willReadFrequently: true }), d;
+      try { g2.clearRect(0, 0, w, h); g2.drawImage(F.el, 0, 0); d = g2.getImageData(0, 0, w, h).data; } catch(e){ return; }
+      var R2 = 6378137, at = function(p){ var X = p[1] * Math.PI / 180 * R2, Y = R2 * Math.log(Math.tan(Math.PI / 4 + p[0] * Math.PI / 360));
+        var x = Math.round((X - F.box.X0) / (F.box.X1 - F.box.X0) * w), y = Math.round((F.box.Y1 - Y) / (F.box.Y1 - F.box.Y0) * h);
+        if (x < 0 || y < 0 || x >= w || y >= h) return -1; return d[(y * w + x) * 4 + 3] > 60 ? 1 : 0; };
+      var la = +L1.lat, lo = +L1.lon, up = (mo.toward + 180) % 360, kmh = mo.mph * 1.609, near = 0;
+      [0, 2, 4].forEach(function(r){ [0, 90, 180, 270].forEach(function(b){ if (at(destLL(la, lo, r, b)) === 1) near++; }); });
+      if (near >= 3){ OV.nc = { now: true }; return; }
+      for (var km = 2; km <= Math.min(kmh * 2.5, 320); km += 1.5){
+        var p0 = destLL(la, lo, km, up), out = 0, hit = false;
+        [0, -6, 6].forEach(function(off){ if (hit) return; var q = off ? destLL(p0[0], p0[1], Math.abs(off), up + (off < 0 ? -90 : 90)) : p0, v = at(q); if (v === -1) out++; else if (v === 1) hit = true; });
+        if (hit){ OV.nc = { min: km / kmh * 60, km: km }; return; }
+        if (out === 3) return;                                         /* off the scan: nothing measured beyond */
+      }
+    };
+    OV.topLines = function(){
+      var out = [], mo = OV.motion, nc = OV.nc, nm = placeName();
+      if (!mo || !(nc || mo.src === 'RADAR')) return out;
+      out.push({ t: 'STORMS MOVING ' + compass(mo.toward) + ' ' + mo.mph + ' MPH (' + mo.src + ')', c: '#e6edf7' });
+      if (nc && nc.now) out.push({ t: 'RAIN OVER ' + nm + ' NOW', c: '#9fe0ff' });
+      else if (nc) out.push({ t: 'RAIN REACHES ' + nm + ' IN ~' + (nc.min < 7.5 ? 5 : Math.round(nc.min / 5) * 5) + ' MIN', c: '#9fe0ff' });
+      return out;
+    };
+    OV.buoyRead = function(force){
+      if (!M || OV.mode !== 'radar' || !window._bvBuoys) return;
+      var b = M.getBounds().pad(.25), key = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].map(function(v){ return Math.round(v); }).join(',');
+      if (!force && key === OV.buoyKey && Date.now() - (OV.buoyAt || 0) < 10 * 6e4) return;
+      OV.buoyKey = key; OV.buoyAt = Date.now();
+      window._bvBuoys(b.getWest(), b.getSouth(), b.getEast(), b.getNorth()).then(function(list){ if (key !== OV.buoyKey) return; OV.buoys = list || []; OV.draw(); });
+    };
+    OV.satSync = function(force){
+      if (!M) return;
+      var want = OV.satOn && OV.on && OV.mode === 'radar';
+      if (!want){ if (OV.satLay){ M.removeLayer(OV.satLay); OV.satLay = null; } OV.satKey = ''; return; }
+      var bb = M.getBounds(), c0 = bb.getCenter(), sz = M.getSize();
+      var key = M.getZoom() + '|' + c0.lat.toFixed(3) + '|' + c0.lng.toFixed(3);
+      if (!force && key === OV.satKey && Date.now() - OV.satAt < 10 * 6e4) return;
+      OV.satKey = key; OV.satAt = Date.now();
+      var west = c0.lng < -105, lay = (c0.lng < -150 && c0.lat < 30) ? 'hawaii_ch13' : (c0.lat > 50 && c0.lng < -129) ? 'alaska_ch13' : 'conus_ch13';
+      var sw = L.CRS.EPSG3857.project(bb.getSouthWest()), ne = L.CRS.EPSG3857.project(bb.getNorthEast());
+      var W = Math.min(1100, sz.x), H = Math.round(W * sz.y / sz.x);
+      var im = new Image(); im.crossOrigin = 'anonymous';
+      im.onload = function(){
+        if (key !== OV.satKey || !OV.satOn) return;
+        try {
+          var c = document.createElement('canvas'); c.width = W; c.height = H;
+          var g2 = c.getContext('2d', { willReadFrequently: true }); g2.drawImage(im, 0, 0, W, H); window._bvSatVeilPaint(g2, W, H);
+          var nl = L.imageOverlay(c.toDataURL('image/png'), bb, { interactive: false, zIndex: 2 }).addTo(M);
+          if (OV.satLay) M.removeLayer(OV.satLay); OV.satLay = nl;
+        } catch(e){}
+      };
+      im.src = 'https://mesonet.agron.iastate.edu/cgi-bin/wms/' + (west || lay !== 'conus_ch13' ? 'goes_west' : 'goes_east') + '.cgi?service=WMS&version=1.1.1&request=GetMap&layers=' + lay
+        + '&styles=&srs=EPSG:3857&bbox=' + [sw.x, sw.y, ne.x, ne.y].map(function(v){ return v.toFixed(0); }).join(',') + '&width=' + W + '&height=' + H + '&format=image/png&transparent=true&_=' + Math.floor(Date.now() / 300000);
+    };
     OV.start = function(mode){
       if (!M) return;
       OV.mode = mode || 'radar'; OV.terrLoad();
@@ -104855,11 +105102,12 @@ function closeAlertModal(){
         OV.cv = document.createElement('canvas'); OV.cv.style.position = 'absolute'; M.getPane('lcOv').appendChild(OV.cv);
         M.on('zoomstart', function(){ if (OV.cv) OV.cv.style.visibility = 'hidden'; });
         M.on('moveend zoomend resize', function(){ if (!OV.on) return; OV.cv.style.visibility = ''; OV.draw(); clearTimeout(OV.deb);
-          OV.deb = setTimeout(function(){ OV.liveRead(); if (OV.mode !== 'radar') return; OV.read(); if (window.bvLightning) window.bvLightning.want('local', true, OV.box()); }, 500); });
+          OV.deb = setTimeout(function(){ OV.liveRead(); if (OV.mode !== 'radar') return; OV.read(); OV.buoyRead(); OV.satSync(); if (window.bvLightning) window.bvLightning.want('local', true, OV.box()); }, 500); });
       }
       OV.on = true; OV.cv.style.display = ''; OV.cv.style.visibility = '';
       var RADm = OV.mode === 'radar';
-      if (RADm){ OV.read(true); if (window._cwFrontsRead) try { window._cwFrontsRead(); } catch(e){} }
+      if (RADm){ OV.read(true); if (window._cwFrontsRead) try { window._cwFrontsRead(); } catch(e){} OV.buoyRead(true); }
+      OV.satSync(true);
       if (window.bvLightning) window.bvLightning.want('local', RADm, RADm ? OV.box() : null);
       OV.liveRead(); OV.draw();
       if (!OV.timer) OV.timer = setInterval(function(){
@@ -104867,12 +105115,12 @@ function closeAlertModal(){
         if (window.bvLightning) window.bvLightning.want('local', rad, rad ? OV.box() : null);
         if (!vis) return;
         OV.liveRead();
-        if (rad){ OV.read(); if (window._cwFrontsRead) try { window._cwFrontsRead(); } catch(e){} }
+        if (rad){ OV.read(); if (window._cwFrontsRead) try { window._cwFrontsRead(); } catch(e){} OV.buoyRead(); OV.satSync(); }
         OV.draw();
       }, 2500);
     };
     OV.stop = function(){
-      OV.on = false; if (OV.cv) OV.cv.style.display = 'none';
+      OV.on = false; if (OV.cv) OV.cv.style.display = 'none'; OV.satSync();
       if (OV.timer){ clearInterval(OV.timer); OV.timer = null; }
       if (window.bvLightning) window.bvLightning.want('local', false);
     };
