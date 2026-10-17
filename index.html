@@ -104750,7 +104750,7 @@ function closeAlertModal(){
       M._lcLabs = labs || [];
       here = L.circleMarker([+L0.lat, +L0.lon], { radius: 5, color: '#fff', weight: 2, fillColor: '#2B22F4', fillOpacity: 1, pane: 'lcLabels' }).addTo(M);
       M.on('moveend', function(){ GH.sync(); if (VIEW === 'radar') R.rebuild(); if (VIEW === 'river'){ clearTimeout(RV.deb); RV.deb = setTimeout(RV.fetch, 400); } if (VIEW === 'rock'){ clearTimeout(FQ.deb); FQ.deb = setTimeout(FQ.fetch, 500); } });
-      M.on('click', function(e){ if (VIEW === 'rock') rockTap(e.latlng); });
+      M.on('click', function(e){ if (VIEW === 'rock') rockTap(e.latlng); if (VIEW === 'leaf') LF.tap(e); });
     };
     /* ---------------------------------------------------------------- RADAR ------ */
     var R = { sid: '', prod: 'bref', times: { bref: [], bvel: [] }, ov: [], i: 0, timer: null, capsAt: 0, deb: null };
@@ -106811,25 +106811,215 @@ function closeAlertModal(){
        (peak), red, brown 40%+ (bare) -- on forest that turns (deciduous, mixed, larch), with the USA-NPN "colored leaves"
        reports of the last fortnight as discs (bigger and warmer = more colour). A version of the map of its own: no roads,
        no weather-ground labels, no undersea names. */
-    var LF = { lay: null, meta: null, pts: null, lit: false };
-    var LF_CLS = [['LESS THAN 5% COLORED', '#7fbf5a'], ['5-24%', '#c8d24a'], ['25-49%', '#f0c43c'], ['50-74%', '#ee8a2c'], ['75-94%', '#d8432a'], ['95%+', '#a63a22']];
-    LF.on = function(){ if (!M) return; LF.lit = true;
-      if (!LF.lay) LF.lay = L.tileLayer('https://cdn.bluishvoid.com/foliage/na/{z}/{x}/{y}.webp?d=' + new Date().toISOString().slice(0, 10), { minZoom: 3, maxNativeZoom: 8, maxZoom: 19, zIndex: 5, opacity: 1,
-        bounds: L.latLngBounds([[24, -170], [70, -52]]), errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==' });
-      LF.lay.addTo(M);
-      if (M.getZoom() > 8) M.setZoom(7);
-      var fin = function(){ if (!LF.lit) return; var m = LF.meta || {};
-        if (LF.pts) M.removeLayer(LF.pts); LF.pts = L.layerGroup().addTo(M);
-        (m.points || []).forEach(function(q){ var c = LF_CLS[q[2]] || LF_CLS[0];
-          L.circleMarker([q[0], q[1]], { radius: 3 + q[2] * .7, color: 'rgba(8,10,16,.85)', weight: 1, fillColor: c[1], fillOpacity: .95 })
-            .bindTooltip(esc(String(q[4] || 'TREE').toUpperCase()) + ' \u00b7 ' + c[0] + ' \u00b7 ' + esc(q[3] || ''), { direction: 'top', offset: [0, -4] }).addTo(LF.pts); });
-        var k = function(c, t){ return '<span class="lr-k"><span class="lr-dot" style="background:' + c + ';"></span>' + t + '</span>'; };
-        strip.innerHTML = 'FALL COLOR' + (m.composites ? ' \u00b7 NASA MODIS GREENNESS, WEEK OF ' + esc(String(m.composites[0]).slice(5).replace('-', '/')) + ' AGAINST AUGUST' : '')
-          + (m.points && m.points.length ? ' \u00b7 DISCS: ' + m.points.length + ' FIELD REPORTS, LAST TWO WEEKS' : '') + '<br>'
-          + k('rgb(34,120,40)', 'STILL GREEN') + k('rgb(240,200,40)', 'TURNING') + k('rgb(235,120,30)', 'PEAK') + k('rgb(200,40,30)', 'PAST PEAK') + k('rgb(120,60,30)', 'BARE'); };
-      if (LF.meta) fin(); else fetch('https://cdn.bluishvoid.com/foliage/na/meta.json?d=' + new Date().toISOString().slice(0, 13)).then(function(r){ return r.json(); }).then(function(j){ LF.meta = j; fin(); }).catch(function(){ LF.meta = {}; fin(); });
+    /* THE CITY'S FOLIAGE, NATIONAL (user 2026-10-17: "foliage in the new widget compared to the city is not there yet, the city has
+       so much more detail and information"). THE CITY's UPSTATE FOLIAGE, carried to any place:
+         - the header: the regions nearest the place, each one's share turned and its change on the week
+         - THIS WEEK / LAST SEASON, WEEK BY WEEK / THIS SEASON SO FAR (weekly frames that play) and the two looks,
+           FOLIAGE FORECAST (the map with its signs) and THE FOREST (what grows where, USFS Forest Atlas)
+         - the legend as color chips with the share of summer greenness each stands for
+         - on the map: a sign per region (its name a word a line, its share, colored by its band), the county outlines,
+           and the field reports as discs, the stronger ones naming the tree and its share turned; nothing collides
+         - a tap reads out the region (band, last year's peak, the week's change), the report, the county or the forest
+       Data: _foliagebake/na.py -> cdn foliage/na/meta.json (regions, history, counties, season_last/this, last_year,
+       forest_legend) and its tile pyramids. Every piece fails soft: what the file does not carry is simply not offered. */
+    var LF = { lay: null, meta: null, metaAt: 0, lit: false, mode: 'now', look: 'detail', cv: null, fl: {}, fi: 0, timer: null, play: true,
+               cty: null, ctyReq: 0, forest: null, info: '', hits: [] };
+    var LF_CLS = [['LESS THAN 5% COLORED', 'rgba(120,190,80,.95)'], ['5-24%', 'rgba(190,210,60,.95)'], ['25-49%', 'rgba(245,205,50,.97)'],
+                  ['50-74%', 'rgba(240,130,40,.97)'], ['75-94%', 'rgba(210,50,40,.97)'], ['95%+', 'rgba(120,60,30,.97)']];
+    var LF_SHORT = ['<5%', '5-24%', '25-49%', '50-74%', '75-94%', '95%+'];
+    var LF_BANDC = { 'NOT YET': 'rgba(200,230,170,.95)', 'STARTING': 'rgba(235,225,90,.97)', 'NEAR PEAK': 'rgba(250,180,60,.97)', 'PEAK': 'rgba(255,90,60,.97)', 'PAST PEAK': 'rgba(210,150,110,.95)' };
+    var LF_RAMP = [['34,120,40', '0%'], ['150,190,40', '8%'], ['240,200,40', '15%'], ['235,120,30', '20% PEAK'], ['200,40,30', '28%'], ['120,60,30', '40%+ BARE']];
+    /* the USFS Forest Inventory type groups, by the atlas's own codes, for a tap on THE FOREST */
+    var LF_FTG = { 100: 'WHITE, RED, JACK PINE', 120: 'SPRUCE, FIR', 140: 'LONGLEAF, SLASH PINE', 160: 'LOBLOLLY, SHORTLEAF PINE', 180: 'PINYON, JUNIPER',
+      200: 'DOUGLAS-FIR', 220: 'PONDEROSA PINE', 240: 'WESTERN WHITE PINE', 260: 'FIR, SPRUCE, MOUNTAIN HEMLOCK', 280: 'LODGEPOLE PINE', 300: 'HEMLOCK, SITKA SPRUCE',
+      320: 'WESTERN LARCH', 340: 'REDWOOD', 360: 'OTHER WESTERN SOFTWOODS', 370: 'CALIFORNIA MIXED CONIFER', 380: 'EXOTIC SOFTWOODS', 400: 'OAK, PINE', 500: 'OAK, HICKORY',
+      600: 'OAK, GUM, CYPRESS', 700: 'ELM, ASH, COTTONWOOD', 800: 'MAPLE, BEECH, BIRCH', 900: 'ASPEN, BIRCH', 910: 'ALDER, MAPLE', 920: 'WESTERN OAK', 940: 'TANOAK, LAUREL',
+      950: 'OTHER WESTERN HARDWOODS', 960: 'OTHER HARDWOODS', 970: 'WOODLAND HARDWOODS', 980: 'TROPICAL HARDWOODS', 990: 'EXOTIC HARDWOODS' };
+    var LF_FTG_FALL = { 800: 'THE SHOW: RED, ORANGE, YELLOW', 900: 'GOLD', 700: 'YELLOW', 500: 'LATE, RUSSET', 400: 'LATE, RUSSET', 600: 'LATE, RUSSET', 320: 'LARCH GOLD, NEEDLES DROP',
+      910: 'YELLOW', 920: 'LATE, BROWN' };
+    var LF_BOUNDS = L.latLngBounds([[24, -170], [70, -52]]), LF_GIF = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
+    var lfStack = function(name){ var t = String(name).toUpperCase(); ['NEW YORK CITY', 'LONG ISLAND', 'WATER GAP', 'BLUE RIDGE', 'UPPER PENINSULA', 'NORTH SHORE', 'DOOR COUNTY',
+        'BLACK HILLS', 'WHITE MOUNTAINS', 'GREEN MOUNTAINS', 'GREAT SMOKY', 'CAPE BRETON', 'NORTH CASCADES', 'EASTERN SIERRA', 'HUDSON VALLEY', 'FINGER LAKES', 'LITCHFIELD HILLS']
+        .forEach(function(ph){ t = t.split(ph).join(ph.replace(/ /g, '|')); });
+      var out = []; t.split(/\s+/).forEach(function(w){ w = w.replace(/\|/g, ' '); if (w === '&' && out.length) out[out.length - 1] += ' &'; else if (w) out.push(w); }); return out; };
+    var lfBandRel = function(pct, lvl){ var out = 'NOT YET'; [[0.35, 'STARTING'], [0.75, 'NEAR PEAK'], [0.95, 'PEAK'], [1.3, 'PAST PEAK']].forEach(function(b){ if (pct >= b[0] * lvl) out = b[1]; }); return out; };
+    var lfMD = function(d){ return String(d || '').slice(5).replace('-', '/'); };
+    LF.load = function(cb){
+      if (LF.meta && Date.now() - LF.metaAt < 1800000) return cb();
+      fetch('https://cdn.bluishvoid.com/foliage/na/meta.json?d=' + new Date().toISOString().slice(0, 13)).then(function(r){ return r.json(); })
+        .then(function(j){ LF.meta = j || {}; LF.metaAt = Date.now(); cb(); }).catch(function(){ LF.meta = LF.meta || {}; LF.metaAt = Date.now() - 1500000; cb(); });
     };
-    LF.off = function(){ LF.lit = false; if (M){ if (LF.lay && M.hasLayer(LF.lay)) M.removeLayer(LF.lay); if (LF.pts){ M.removeLayer(LF.pts); LF.pts = null; } } };
+    LF.ctyLoad = function(){ var m = LF.meta || {}; if (LF.cty || LF.ctyReq || !m.counties_url) return; LF.ctyReq = 1;
+      fetch(m.counties_url).then(function(r){ return r.json(); }).then(function(j){ LF.cty = j; LF.draw(); }).catch(function(){ LF.ctyReq = 0; }); };
+    /* the frames a season mode plays: [{date, i, url}] */
+    LF.frames = function(){ var m = LF.meta || {}, S = LF.mode === 'last' ? m.season_last : LF.mode === 'this' ? m.season_this : null;
+      if (!S || !S.dates || !S.base) return []; return S.dates.map(function(d, i){ return { date: d, i: i, year: S.year, url: S.base + d + '/{z}/{x}/{y}.webp' }; }); };
+    /* each region's share for what is on show: today's, or that week's when a season plays */
+    LF.regionPct = function(rg, fr){ var m = LF.meta || {};
+      if (!fr) return { pct: rg.pct, band: rg.band, d7: rg.delta7 };
+      var v = null;
+      if (LF.mode === 'last' && m.last_year && m.last_year.regions && m.last_year.dates){ var k = m.last_year.dates.indexOf(fr.date); var a = m.last_year.regions[rg.name]; if (k >= 0 && a) v = a[k]; }
+      else if (m.history){ var row = null; m.history.forEach(function(h){ if (h.date <= fr.date && (!row || h.date > row.date)) row = h; }); if (row && row.pct) v = row.pct[rg.name]; }
+      if (v == null) return null; return { pct: v, band: rg.peak_level ? lfBandRel(v, rg.peak_level) : null, d7: null }; };
+    LF.cur = function(){ var fs = LF.frames(); return LF.mode === 'now' || !fs.length ? null : fs[Math.min(LF.fi, fs.length - 1)]; };
+    LF.layers = function(){
+      if (!M) return;
+      var fs = LF.frames(), fr = LF.cur(), want = {};
+      if (LF.look === 'forest'){
+        if (!LF.forest) LF.forest = L.tileLayer((LF.meta && LF.meta.forest_url) || 'https://cdn.bluishvoid.com/foliage/na/forest/{z}/{x}/{y}.webp', { minZoom: 3, maxNativeZoom: 9, maxZoom: 19, zIndex: 5, opacity: .92, bounds: LF_BOUNDS, errorTileUrl: LF_GIF });
+        if (!M.hasLayer(LF.forest)) LF.forest.addTo(M);
+      } else if (LF.forest && M.hasLayer(LF.forest)) M.removeLayer(LF.forest);
+      if (!LF.lay) LF.lay = L.tileLayer('https://cdn.bluishvoid.com/foliage/na/{z}/{x}/{y}.webp?d=' + new Date().toISOString().slice(0, 10), { minZoom: 3, maxNativeZoom: 8, maxZoom: 19, zIndex: 5, opacity: 1, bounds: LF_BOUNDS, errorTileUrl: LF_GIF });
+      var showNow = LF.look !== 'forest' && !fr;
+      if (showNow && !M.hasLayer(LF.lay)) LF.lay.addTo(M); else if (!showNow && M.hasLayer(LF.lay)) M.removeLayer(LF.lay);
+      /* every frame of the season on the map at once, only the one on show opaque: the loop does not wait on tiles */
+      if (LF.look !== 'forest') fs.forEach(function(f){ var k = f.year + '/' + f.date; want[k] = 1;
+        if (!LF.fl[k]) LF.fl[k] = L.tileLayer(f.url, { minZoom: 3, maxNativeZoom: 7, maxZoom: 19, zIndex: 5, opacity: 0, bounds: LF_BOUNDS, errorTileUrl: LF_GIF });
+        if (!M.hasLayer(LF.fl[k])) LF.fl[k].addTo(M); LF.fl[k].setOpacity(fr && fr.date === f.date ? 1 : 0); });
+      Object.keys(LF.fl).forEach(function(k){ if (!want[k] && M.hasLayer(LF.fl[k])) M.removeLayer(LF.fl[k]); });
+    };
+    LF.loop = function(){ clearInterval(LF.timer); LF.timer = null; var fs = LF.frames(); if (LF.mode === 'now' || fs.length < 2 || !LF.play) return;
+      LF.timer = setInterval(function(){ if (!LF.lit || document.hidden || pane.style.display === 'none') return; LF.fi = (LF.fi + 1) % LF.frames().length; LF.layers(); LF.strip(); LF.draw(); }, 1400); };
+    LF.near = function(){ var m = LF.meta || {}, L0 = window.LOCATION || {}, la = +L0.lat, lo = +L0.lon;
+      return (m.regions || []).filter(function(r){ return r.lat != null; }).map(function(r){ var dx = (r.lon - lo) * Math.cos(la * Math.PI / 180), dy = r.lat - la; return { r: r, d: Math.sqrt(dx * dx + dy * dy) * 111 }; })
+        .sort(function(a, b){ return a.d - b.d; }).slice(0, 4).map(function(q){ return q.r; }); };
+    LF.strip = function(){
+      if (!LF.lit) return; var m = LF.meta || {}, fr = LF.cur(), fs = LF.frames();
+      var pill = function(attr, v, txt, on){ return '<button type="button" class="lc-pill' + (on ? ' on' : '') + '" ' + attr + '="' + v + '" style="margin:0 6px 4px 0;">' + txt + '</button>'; };
+      var head;
+      if (LF.look === 'forest') head = 'THE FOREST · WHAT GROWS WHERE (USFS FOREST ATLAS, 250 M) · TAP THE MAP FOR THE FOREST THERE';
+      else {
+        var near = LF.near().map(function(r){ var q = LF.regionPct(r, fr); if (!q) return null;
+          return esc(String(r.name).toUpperCase()) + ' ' + q.pct + '%' + (q.d7 ? ' (' + (q.d7 > 0 ? '+' : '−') + Math.abs(q.d7) + ')' : ''); }).filter(Boolean);
+        var d = fr ? fr.date : (m.composites && m.composites[0]);
+        head = (fr ? (LF.mode === 'last' ? 'LAST SEASON' : 'THIS SEASON') + ' · WEEK OF ' + lfMD(fr.date) + (fr.year !== new Date().getFullYear() ? ', ' + fr.year : '') : 'FALL FOLIAGE')
+          + (!fr && d ? ' · AS OF ' + lfMD(d) : '') + (near.length ? ' · ' + near.join(' · ') : (m.regions ? '' : ' · NASA MODIS GREENNESS AGAINST AUGUST'));
+      }
+      var modes = pill('data-fm', 'now', 'THIS WEEK', LF.mode === 'now')
+        + (m.season_last && m.season_last.dates && m.season_last.dates.length ? pill('data-fm', 'last', 'LAST SEASON, WEEK BY WEEK', LF.mode === 'last') : '')
+        + (m.season_this && m.season_this.dates && m.season_this.dates.length > 1 ? pill('data-fm', 'this', 'THIS SEASON SO FAR', LF.mode === 'this') : '')
+        + '<span style="margin:0 8px 0 2px;opacity:.7;">·</span>' + pill('data-fl', 'detail', 'FOLIAGE FORECAST', LF.look === 'detail') + (m.forest_legend ? pill('data-fl', 'forest', 'THE FOREST', LF.look === 'forest') : '');
+      var weeks = fr && fs.length > 1 ? '<div style="margin-top:2px;">' + fs.map(function(f){ return pill('data-fw', f.i, lfMD(f.date), f.i === fr.i); }).join('')
+        + pill('data-fp', '1', LF.play ? 'PAUSE' : 'PLAY', false) + '</div>' : '';
+      var chip = function(rgb, t){ return '<span style="display:inline-flex;align-items:center;gap:4px;margin-right:9px;white-space:nowrap;"><span style="display:inline-block;width:11px;height:11px;border-radius:2px;background:rgb(' + rgb + ');box-shadow:0 0 0 1px rgba(0,0,0,.35);"></span>' + t + '</span>'; };
+      var legend = LF.look === 'forest'
+        ? ((m.forest_legend || []).map(function(r){ return chip((r[2] || [128, 128, 128]).join(','), esc(r[0]) + (r[1] ? ' · ' + esc(r[1]) : '')); }).join('') || 'USFS FOREST TYPE GROUPS')
+        : '<span style="margin-right:9px;white-space:nowrap;">GREENNESS GONE SINCE AUGUST</span>' + ((m.ramp && m.ramp.length === 6) ? m.ramp.map(function(r, i){ return chip(LF_RAMP[i][0], esc(r[1])); }).join('') : LF_RAMP.map(function(r){ return chip(r[0], r[1]); }).join(''))
+          + '<span style="white-space:nowrap;">· PEAK COLOR IS ORANGE, BARE TREES BROWN</span>'
+          + (!fr && m.points && m.points.length ? '<span style="white-space:nowrap;"> · DISCS: ' + m.points.length + ' FIELD REPORTS, LAST TWO WEEKS</span>' : '');
+      strip.innerHTML = '<div>' + head + '</div><div style="margin-top:4px;">' + modes + '</div>' + weeks
+        + '<div style="margin-top:2px;font-size:.92em;line-height:1.7;">' + legend + '</div>'
+        + '<div id="lc-fol-info" style="margin-top:3px;color:#fff;' + (LF.info ? '' : 'display:none;') + '">' + LF.info + '</div>';
+      [].forEach.call(strip.querySelectorAll('[data-fm],[data-fl],[data-fw],[data-fp]'), function(b){ b.onclick = function(e){ e.stopPropagation(); LF.info = '';
+        if (b.hasAttribute('data-fm')){ LF.mode = b.getAttribute('data-fm'); var n = LF.frames().length; LF.fi = LF.mode === 'last' ? 0 : Math.max(0, n - 1); LF.play = LF.mode !== 'this' || n > 1; }
+        else if (b.hasAttribute('data-fl')) LF.look = b.getAttribute('data-fl');
+        else if (b.hasAttribute('data-fw')){ LF.fi = +b.getAttribute('data-fw'); LF.play = false; }
+        else LF.play = !LF.play;
+        LF.layers(); LF.loop(); LF.strip(); LF.draw(); LF.park(); }; });
+    };
+    LF.draw = function(){
+      if (!LF.cv || !M) return; var cv = LF.cv;
+      if (!LF.lit){ cv.style.display = 'none'; return; } cv.style.display = '';
+      var sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr), z = M.getZoom();
+      if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
+      L.DomUtil.setPosition(cv, M.containerPointToLayerPoint([0, 0]));
+      var g = cv.getContext('2d'); g.clearRect(0, 0, W, H); LF.hits = [];
+      if (LF.look === 'forest') return;
+      var m = LF.meta || {}, fr = LF.cur(), P = function(lo, la){ var q = M.latLngToContainerPoint([la, lo]); return [q.x * dpr, q.y * dpr]; };
+      var inV = function(q, mg){ return q[0] > -mg && q[1] > -mg && q[0] < W + mg && q[1] < H + mg; };
+      /* the county outlines: the geography a drive is planned on, the share read out on a tap */
+      if (LF.cty && z >= 6){ var bb = M.getBounds().pad(0.1); g.beginPath();
+        Object.keys(LF.cty).forEach(function(f){ (LF.cty[f].r || []).forEach(function(ring){ var r0 = ring[0]; if (!r0) return;
+          var any = false; for (var i = 0; i < ring.length; i += 6){ if (bb.contains([ring[i][1], ring[i][0]])){ any = true; break; } } if (!any) return;
+          ring.forEach(function(pt, i){ var q = P(pt[0], pt[1]); if (i) g.lineTo(q[0], q[1]); else g.moveTo(q[0], q[1]); }); g.closePath(); }); });
+        g.lineWidth = 1.6 * dpr; g.strokeStyle = 'rgba(8,10,16,.35)'; g.stroke(); g.lineWidth = 0.7 * dpr; g.strokeStyle = 'rgba(255,255,255,.5)'; g.stroke(); }
+      var Q = [];
+      /* the field reports: a disc each, the stronger ones naming the tree and its share */
+      if (!fr) (m.points || []).forEach(function(p){ var q = P(p[1], p[0]); if (!inV(q, 6)) return; var cls = Math.max(0, Math.min(5, p[2] | 0)), rad = (2.4 + cls * 0.9) * dpr;
+        g.beginPath(); g.arc(q[0], q[1], rad + 1.4 * dpr, 0, 6.284); g.fillStyle = 'rgba(8,10,16,.8)'; g.fill();
+        g.beginPath(); g.arc(q[0], q[1], rad, 0, 6.284); g.fillStyle = LF_CLS[cls][1]; g.fill();
+        LF.hits.push({ x: q[0], y: q[1], k: 'pt', p: p });
+        if (cls >= 3 && p[4] && z >= 5) Q.push({ lines: [String(p[4]).toUpperCase() + ' ' + LF_SHORT[cls]], x: q[0] + rad + 4 * dpr, y: q[1], col: 'rgba(255,240,220,.92)', pri: 60, font: '700 ' + (8.2 * dpr) + 'px system-ui,sans-serif' }); });
+      /* the signs: one per region, the name a word a line, the share, colored by its band */
+      (m.regions || []).forEach(function(rg){ if (rg.lat == null) return; var q = P(rg.lon, rg.lat); if (!inV(q, 0)) return; var v = LF.regionPct(rg, fr); if (!v) return;
+        g.beginPath(); g.arc(q[0], q[1], 2.2 * dpr, 0, 6.284); g.fillStyle = 'rgba(255,255,255,.85)'; g.fill();
+        LF.hits.push({ x: q[0], y: q[1], k: 'rg', rg: rg, v: v });
+        Q.push({ lines: lfStack(rg.name).concat([v.pct + '%']), x: q[0] + 6 * dpr, y: q[1], col: LF_BANDC[v.band] || '#fff', pri: rg.pri || 70, font: '800 ' + (8.6 * dpr) + 'px system-ui,sans-serif' }); });
+      /* the lookouts, where the file names them: a hollow triangle each, the name at low priority */
+      if (!fr) (m.spots || []).forEach(function(sp){ if (sp.lat == null) return; var q = P(sp.lon, sp.lat); if (!inV(q, 0)) return; var r3 = 3.6 * dpr;
+        g.beginPath(); g.moveTo(q[0], q[1] - r3); g.lineTo(q[0] + r3, q[1] + r3 * 0.8); g.lineTo(q[0] - r3, q[1] + r3 * 0.8); g.closePath();
+        g.lineWidth = 2.6 * dpr; g.strokeStyle = 'rgba(8,10,16,.8)'; g.stroke(); g.lineWidth = 1.2 * dpr; g.strokeStyle = 'rgba(255,255,255,.95)'; g.stroke();
+        LF.hits.push({ x: q[0], y: q[1], k: 'sp', sp: sp });
+        if (z >= 6) Q.push({ lines: [String(sp.name).toUpperCase()], x: q[0] + 6 * dpr, y: q[1], col: 'rgba(235,240,255,.9)', pri: 55, font: '700 ' + (7.6 * dpr) + 'px system-ui,sans-serif' }); });
+      /* placement: by priority, right of the mark, else left; a label that cannot sit clear is dropped (the tap still reads it) */
+      var put = []; Q.sort(function(a, b){ return b.pri - a.pri; });
+      Q.forEach(function(it){ g.font = it.font; var lh = parseFloat(it.font.split(' ')[1]) * 1.18, w = 0; it.lines.forEach(function(t){ w = Math.max(w, g.measureText(t).width); });
+        var h = lh * it.lines.length, cands = [[it.x, it.y - h / 2], [it.x - 12 * dpr - w, it.y - h / 2]];
+        for (var c = 0; c < cands.length; c++){ var x0 = cands[c][0], y0 = cands[c][1], r = [x0 - 2, y0 - 2, x0 + w + 2, y0 + h + 2];
+          if (r[0] < 0 || r[1] < 0 || r[2] > W || r[3] > H) continue;
+          if (put.some(function(o){ return !(r[2] < o[0] || r[0] > o[2] || r[3] < o[1] || r[1] > o[3]); })) continue;
+          put.push(r); g.textAlign = 'left'; g.textBaseline = 'top'; g.lineJoin = 'round';
+          it.lines.forEach(function(t, i){ g.lineWidth = 3 * dpr; g.strokeStyle = 'rgba(8,10,16,.85)'; g.strokeText(t, x0, y0 + i * lh); g.fillStyle = it.col; g.fillText(t, x0, y0 + i * lh); });
+          break; } });
+    };
+    LF.say = function(html){ LF.info = html; var el = document.getElementById('lc-fol-info'); if (el){ el.innerHTML = html; el.style.display = html ? '' : 'none'; } };
+    LF.tap = function(e){
+      if (!LF.lit || !M) return; var dpr = Math.min(2, window.devicePixelRatio || 1), c = M.latLngToContainerPoint(e.latlng), x = c.x * dpr, y = c.y * dpr, m = LF.meta || {};
+      if (LF.look === 'forest'){
+        LF.say('READING THE FOREST…');
+        var G0 = encodeURIComponent(JSON.stringify({ x: e.latlng.lng, y: e.latlng.lat, spatialReference: { wkid: 4326 } }));
+        fetch('https://imagery.geoplatform.gov/iipp/rest/services/Vegetation/USFS_EDW_FIA_ForestAtlas_ForestTypeGroups_109_CONUS/ImageServer/identify?geometry=' + G0 + '&geometryType=esriGeometryPoint&returnGeometry=false&returnCatalogItems=false&f=json')
+          .then(function(r){ return r.json(); }).then(function(j){ var v = parseInt(j && j.value, 10), nm = LF_FTG[v];
+            LF.say(nm ? 'THE FOREST HERE · <b>' + nm + '</b>' + (LF_FTG_FALL[v] ? ' · IN FALL: ' + LF_FTG_FALL[v] : ' · EVERGREEN, DOES NOT TURN') + ' · USFS FOREST ATLAS, 250 M'
+              : 'NO TYPED FOREST HERE (OPEN LAND, WATER, TOWN, OR OUTSIDE THE LOWER 48)'); })
+          .catch(function(){ LF.say('THE FOREST ATLAS DID NOT ANSWER'); });
+        return;
+      }
+      var best = null, bd = 1e9; LF.hits.forEach(function(h){ var d = Math.hypot(h.x - x, h.y - y); if (d < bd){ bd = d; best = h; } });
+      if (best && bd < 16 * dpr){
+        if (best.k === 'rg'){ var rg = best.rg, v = best.v;
+          LF.say('<b>' + esc(String(rg.name).toUpperCase()) + ' ' + v.pct + '%</b>' + (v.band ? ' · ' + v.band : '') + (v.d7 ? ' · ' + (v.d7 > 0 ? '+' : '−') + Math.abs(v.d7) + ' ON THE WEEK' : '')
+            + (rg.peak_last_year ? ' · PEAKED ' + lfMD(rg.peak_last_year) + ' LAST YEAR' : '') + ' · SHARE OF THE FOREST’S SUMMER GREENNESS GONE'); }
+        else if (best.k === 'sp'){ var sp = best.sp; LF.say('<b>' + esc(String(sp.name).toUpperCase()) + '</b>' + (sp.region ? ' \u00b7 ' + esc(String(sp.region).toUpperCase()) : '') + (sp.how ? ' \u00b7 ' + esc(String(sp.how).toUpperCase()) : '')); }
+        else { var p = best.p; LF.say('<b>' + esc(String(p[4] || 'A TREE').toUpperCase()) + '</b> · ' + LF_CLS[p[2]][0] + ' · REPORTED ' + lfMD(p[3]) + ' · USA NATIONAL PHENOLOGY NETWORK'); }
+        return;
+      }
+      if (LF.cty){ var la = e.latlng.lat, lo = e.latlng.lng, hit = null;
+        Object.keys(LF.cty).some(function(f){ return (LF.cty[f].r || []).some(function(r){ var ins = false;
+          for (var i = 0, j = r.length - 1; i < r.length; j = i++) if (((r[i][1] > la) !== (r[j][1] > la)) && (lo < (r[j][0] - r[i][0]) * (la - r[i][1]) / (r[j][1] - r[i][1]) + r[i][0])) ins = !ins;
+          if (ins) hit = f; return ins; }); });
+        if (hit){ var C = LF.cty[hit], pv = (m.counties || {})[hit];
+          LF.say('<b>' + esc(String(C.n || '').toUpperCase()) + ' COUNTY, ' + esc(C.s || '') + '</b> · ' + (pv != null ? pv + '% OF ITS SUMMER GREENNESS GONE' : 'TOO LITTLE TURNING FOREST TO READ')); return; }
+      }
+      LF.say('');
+    };
+    LF.on = function(){ if (!M) return; LF.lit = true;
+      if (!LF.cv){ var pn = M.getPane('lcFol') || M.createPane('lcFol'); pn.style.zIndex = 440; pn.style.pointerEvents = 'none';
+        LF.cv = document.createElement('canvas'); LF.cv.style.position = 'absolute'; pn.appendChild(LF.cv);
+        M.on('moveend zoomend resize', function(){ if (LF.lit) LF.draw(); }); }
+      if (M.getZoom() > 8) M.setZoom(7);
+      LF.load(function(){ if (!LF.lit) return; LF.ctyLoad(); LF.layers(); LF.loop(); LF.strip(); LF.draw(); });
+      LF.park();
+    };
+    /* THE PARK INSET, NYC ONLY (THE CITY's: Central Park's own canopy on the same legend, the share and the date on the
+       reservoir), from THE CITY's Northeast file; in a map corner, as THE CITY sets it over the Atlantic */
+    LF.park = function(){
+      var el = document.getElementById('lc-fol-park');
+      if (!LF.lit || !nycHere() || LF.look === 'forest' || LF.mode !== 'now'){ if (el) el.style.display = 'none'; return; }
+      var show = function(P){ if (!P || !P.url || !LF.lit) return;
+        if (!el){ el = document.createElement('div'); el.id = 'lc-fol-park'; el.style.cssText = 'position:absolute;right:10px;bottom:34px;z-index:800;pointer-events:none;height:46%;max-height:300px;aspect-ratio:' + (P.w || 103) + '/' + (P.h || 449) + ';';
+          mapEl.appendChild(el); }
+        el.style.display = '';
+        el.innerHTML = '<img src="' + P.url + '" style="width:100%;height:100%;display:block;border-radius:3px;box-shadow:0 0 0 1px rgba(255,255,255,.35),0 2px 8px rgba(0,0,0,.5);">'
+          + '<div style="position:absolute;left:0;right:0;top:31%;text-align:center;color:#fff;font:800 13px system-ui,sans-serif;text-shadow:0 0 3px #080a10,0 0 3px #080a10;">' + (P.pct != null ? P.pct + '%' : '')
+          + '<div style="font:800 7px system-ui,sans-serif;letter-spacing:.08em;margin-top:1px;">' + (P.as_of ? ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][+P.as_of.slice(5, 7) - 1] + ' ' + (+P.as_of.slice(8, 10)) : '') + '</div>'
+          + '<div style="font:800 6.5px system-ui,sans-serif;letter-spacing:.08em;margin-top:2px;opacity:.85;">CENTRAL PARK</div></div>'; };
+      if (LF.ne) return show(LF.ne.park);
+      fetch('https://cdn.bluishvoid.com/foliage/latest.json?v=' + Math.floor(Date.now() / 1800000)).then(function(r){ return r.json(); }).then(function(j){ LF.ne = j; LF.park(); }).catch(function(){});
+    };
+    LF.off = function(){ LF.lit = false; clearInterval(LF.timer); LF.timer = null; LF.info = '';
+      if (M){ [LF.lay, LF.forest].concat(Object.keys(LF.fl).map(function(k){ return LF.fl[k]; })).forEach(function(l){ if (l && M.hasLayer(l)) M.removeLayer(l); }); }
+      if (LF.cv) LF.cv.style.display = 'none'; LF.park(); };
     /* ---------------------------------------------------------------- WATER ---- */
     /* TIDES AND RIVERS, ONE TAB (user 2026-10-17: "merge rivers and tides, make the name dynamically show both or one
        depending on the area for the user"). The two views stay as they were; one button leads to them, named for what is
