@@ -911,15 +911,23 @@ window._bvRivers = function(map){
   } catch(e){ return null; }
 };
 /* THE GREEN COAST (user 2026-10-16: "i want the continental map to have its fine thin continental green outline but make sure
-   its highly accurate and refined"). THE CITY's wide views trim their coasts in a thin green (rgba(5,219,50,.75), 0.9 px,
-   baked per box off GMRT). Every dark map now carries the same line, traced off the basemap's own EARTH layer -- the OSM
-   land polygons, the very edge the water fill stops at -- so it sits exactly on the shore at every zoom, is generalized
-   by the archive per zoom, and costs no new data. The earth layer is the sea's edge only (lakes are drawn over it), so the
-   Great Lakes are not outlined, as on THE CITY. Painted in the labels layer, above the relief and the bathymetry. */
-window._bvCoastRules = function(){
-  if (typeof protomapsL === 'undefined' || !protomapsL.LineSymbolizer) return [];
-  return [{ dataLayer: 'earth', symbolizer: new protomapsL.LineSymbolizer({ color: 'rgba(5,219,50,.75)', lineJoin: 'round', lineCap: 'round',
+   its highly accurate and refined" -> "refine the green trim to the real coastlines"). THE CITY's wide views trim their
+   coasts in a thin green (rgba(5,219,50,.75), 0.9 px). Every dark map carries the same line. The first version stroked the
+   basemap's 'earth' layer, which the archive generalizes hard per zoom and which closes every river mouth with a straight
+   OSM closing line over open water. Now it is our own bake (_coastbake/): the full-resolution OSM coastline for North
+   America, Greenland, the Caribbean and Hawaii, closing lines found and removed (a coastline segment lying on a river or
+   estuary water area), simplified to a third of a pixel per zoom z3-10 and overzoomed as vector beyond. Its own layer at
+   z-index 4, above the relief, bathymetry and rivers. The sea's edge only: lakes are not outlined, as on THE CITY. */
+window.BV_COAST_URL = 'https://cdn.bluishvoid.com/coast/v1/{z}/{x}/{y}.mvt';
+window._bvCoast = function(map){
+  if (!map || map._bvCoastLayer || typeof protomapsL === 'undefined' || typeof L === 'undefined') return null;
+  var rules = [{ dataLayer: 'coast', symbolizer: new protomapsL.LineSymbolizer({ color: 'rgba(5,219,50,.75)', lineJoin: 'round', lineCap: 'round',
     width: function(z){ return z <= 4 ? 0.7 : z >= 12 ? 1.1 : 0.9; } }) }];
+  try {
+    var lay = protomapsL.leafletLayer({ url: window.BV_COAST_URL, maxDataZoom: 10, minZoom: 3, paintRules: rules, labelRules: [], zIndex: 4,
+      bounds: L.latLngBounds([[7, -180], [84, -10]]), attribution: '' });
+    lay.addTo(map); map._bvCoastLayer = lay; return lay;
+  } catch(e){ return null; }
 };
 window._bvVectorBase = function(map, opts){
   opts = opts || {};
@@ -941,7 +949,7 @@ window._bvVectorBase = function(map, opts){
         url: window.BV_BASEMAP_URL,
         maxDataZoom: t.data,
         minZoom: t.min, maxZoom: t.max,
-        paintRules: opts.labels ? (map._bvBathyLayer ? window._bvBridgeRules(F) : []).concat(opts.flavor !== 'light' && map._bvVectorLayers ? window._bvCoastRules() : [])
+        paintRules: opts.labels ? (map._bvBathyLayer ? window._bvBridgeRules(F) : [])
                                 : window._bvPaintPlus(protomapsL.paintRules(F), F),
         labelRules: opts.labels ? _bvPlaceFloor(protomapsL.labelRules(F, 'en'), opts.ourNames !== false) : [],
         // ODbL: the tiles are ours to serve, the data is OpenStreetMap's to credit
@@ -972,6 +980,7 @@ window._bvVectorBase = function(map, opts){
     if (!opts.labels && opts.flavor !== 'light' && !opts.noRelief && window._bvRelief) window._bvRelief(map);
     if (!opts.labels && opts.flavor !== 'light' && !opts.noBathy && window._bvBathy) window._bvBathy(map);
     if (!opts.labels && opts.flavor !== 'light' && !opts.noRivers && window._bvRivers) window._bvRivers(map);
+    if (!opts.labels && opts.flavor !== 'light' && !opts.noCoast && window._bvCoast) window._bvCoast(map);
     if (opts.labels && window._bvContinentalNames)
       window._bvContinentalNames(map, { light: opts.flavor === 'light' });
   } catch(e){ console.warn('[basemap] vector layer failed, staying on raster', e); added.forEach(function(l){ try{ map.removeLayer(l); }catch(e2){} }); return null; }
@@ -60650,29 +60659,41 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         });
         /* the county wash — each drawn EXACTLY ONCE, and lighter than before:
            it is context for the storm polygon, not the headline */
-        if (Z) Object.keys(owner).forEach(function(zid){
-          var col = cwAlertCol(owner[zid]);
-          Z[zid].forEach(function(ring){
-            g.beginPath();
-            ring.forEach(function(p, i){ i ? g.lineTo(px(p), py(p)) : g.moveTo(px(p), py(p)); });
-            g.closePath();
-            g.fillStyle = cwHexA(col, .085); g.fill();
-            g.lineWidth = 1.6 * dpr; g.strokeStyle = 'rgba(8,10,16,.40)'; g.stroke();
-            g.lineWidth = 0.8 * dpr; g.strokeStyle = cwHexA(col, .60); g.stroke();
+        /* ONE FRAME PER ALERT AREA (user 2026-10-16: "refine the framing for special weather advisors and watches, any
+           hazard framing to make sure its not coarse"; LOCAL's radar does the same). The counties of each kind are filled
+           once with a faint seam between them, and the whole area gets a single clean frame: every ring stroked on a
+           scratch canvas, then the union's inside erased (destination-out), leaving the stroke's outer half hugging the
+           area. Separately simplified county borders no longer double up. Storm polygons keep their issued shape. */
+        var cvW = cvs.width, cvH = cvs.height;
+        var oc = window._cwFrameCv || (window._cwFrameCv = document.createElement('canvas'));
+        if (oc.width !== cvW || oc.height !== cvH){ oc.width = cvW; oc.height = cvH; }
+        var ringPath = function(c2, ring){ ring.forEach(function(p, i){ i ? c2.lineTo(px(p), py(p)) : c2.moveTo(px(p), py(p)); }); c2.closePath(); };
+        var frame = function(rings, col, strong){
+          var o = oc.getContext('2d'); o.clearRect(0, 0, cvW, cvH); o.lineJoin = 'round'; o.lineCap = 'round';
+          o.beginPath(); rings.forEach(function(r){ ringPath(o, r); });
+          o.lineWidth = (strong ? 5.2 : 3.6) * dpr; o.strokeStyle = 'rgba(8,10,16,.62)'; o.stroke();
+          o.lineWidth = (strong ? 2.6 : 1.7) * dpr; o.strokeStyle = strong ? col : cwHexA(col, .9); o.stroke();
+          o.globalCompositeOperation = 'destination-out'; o.fillStyle = '#000'; o.fill('nonzero'); o.globalCompositeOperation = 'source-over';
+          g.drawImage(oc, 0, 0);
+        };
+        if (Z){
+          var grp = {};
+          Object.keys(owner).forEach(function(zid){ (grp[owner[zid]] = grp[owner[zid]] || []).push(zid); });
+          Object.keys(grp).sort(function(a, b){ return rankOf(a) - rankOf(b); }).forEach(function(ev){
+            var col = cwAlertCol(ev), rings = [];
+            grp[ev].forEach(function(zid){ Z[zid].forEach(function(ring){ if (ring && ring.length > 2) rings.push(ring); }); });
+            if (!rings.length) return;
+            g.fillStyle = cwHexA(col, .085); rings.forEach(function(r){ g.beginPath(); ringPath(g, r); g.fill(); });
+            g.lineWidth = 0.6 * dpr; g.strokeStyle = cwHexA(col, .22); rings.forEach(function(r){ g.beginPath(); ringPath(g, r); g.stroke(); });
+            frame(rings, col, false);
           });
-        });
+        }
         /* the storm polygons on top — these are the shapes that matter */
         (AL.poly || []).forEach(function(a){
-          var col = cwAlertCol(a.e);
-          a.r.forEach(function(ring){
-            if (!ring || ring.length < 3) return;
-            g.beginPath();
-            ring.forEach(function(p, i){ i ? g.lineTo(px(p), py(p)) : g.moveTo(px(p), py(p)); });
-            g.closePath();
-            g.fillStyle = cwHexA(col, .16); g.fill();
-            g.lineWidth = 3.4 * dpr; g.strokeStyle = 'rgba(8,10,16,.7)'; g.stroke();
-            g.lineWidth = 1.8 * dpr; g.strokeStyle = col; g.stroke();
-          });
+          var col = cwAlertCol(a.e), rings = (a.r || []).filter(function(r){ return r && r.length >= 3; });
+          if (!rings.length) return;
+          g.fillStyle = cwHexA(col, .16); rings.forEach(function(r){ g.beginPath(); ringPath(g, r); g.fill(); });
+          frame(rings, col, rankOf(a.e) >= 70);
         });
         /* ONE label per KIND of alert. Four identical severe thunderstorm
            warnings wrote those two words four times; the shapes are already
@@ -104575,7 +104596,7 @@ function closeAlertModal(){
             g.beginPath(); g.moveTo(x1 - ux * ah - uy * ah * .7, y1 - uy * ah + ux * ah * .7); g.lineTo(x1, y1); g.lineTo(x1 - ux * ah + uy * ah * .7, y1 - uy * ah - ux * ah * .7); g.stroke();
           });
           if (cand.length && kmTo(e.parts.map(function(pt){ return pt.c; })) <= 250){ var on = st === 'up' || st === 'down';
-            TL.push({ lines: on ? [e.n].concat(st === 'up' ? e.u : e.d).concat(['~' + lv.mph + ' MPH ACROSS IT']) : [e.n, e.q], cand: cand, col: on ? 'rgba(246,232,206,.92)' : EARTH + '.66)', rank: on ? 78 : 50, fz: 8.6 }); }
+            TL.push({ lines: on ? [e.n, (st === 'up' ? e.u : e.d)[0] + ' \u00b7 ~' + lv.mph + ' MPH', (st === 'up' ? e.u : e.d)[1]] : [e.n, e.q], cand: cand, col: on ? 'rgba(246,232,206,.92)' : EARTH + '.66)', rank: on ? 78 : 50, fz: 8.6 }); }
         });
         /* the named spots: a ring and two lines */
         T0.spot.forEach(function(sp){ var q = P(sp.c[0], sp.c[1]); if (!inV(q, -10)) return;
@@ -104602,7 +104623,7 @@ function closeAlertModal(){
           /* zoomed in past every anchor, the ground under the place still names itself, beside its dot */
           if (home){ var hq = P(+L0.lon, +L0.lat); if (inV(hq)) [[0, -46], [0, 46], [-150, 0], [150, 0]].forEach(function(o, k){ cand.push({ d: 1e6 + k, x: hq[0] + o[0] * dpr, y: hq[1] + o[1] * dpr }); }); }
           if (!cand.length) return;
-          var ht = sc.ft == null ? '' : sc.ft < 150 ? ' \u00b7 NEAR SEA LEVEL' : ' \u00b7 ~' + sc.ft.toLocaleString() + ' FT';
+          var ht = sc.ft == null ? '' : sc.ft < 150 ? ' \u00b7 SEA LEVEL' : ' \u00b7 ~' + sc.ft.toLocaleString() + ' FT';
           TL.push({ lines: [sc.n + ht].concat(sc.l), cand: cand, col: home ? 'rgba(240,226,200,.88)' : EARTH + '.58)', rank: home ? 60 : 44, fz: 8.4, mid: true });
         });
         g.restore();
@@ -104617,12 +104638,37 @@ function closeAlertModal(){
         if (rr.ar > b.ar){ b.ar = rr.ar; b.c = rr.c; b.where = where; } };
       (RAD ? OV.al : []).forEach(function(a){ a._on = false; if (!a.rings) a.ugc.forEach(function(u){ var z = OV.zones[u.slice(0, 2)]; if (z && z[u] && (!owner[u] || ovRank(a.e) > ovRank(owner[u]))) owner[u] = a.e; }); });
       g.save(); g.lineJoin = 'round';
-      Object.keys(owner).forEach(function(u){ var col = ovCol(owner[u]);
-        OV.zones[u.slice(0, 2)][u].forEach(function(r){ var rr = ring(r); if (!rr.on) return; path(rr.Q);
-          g.fillStyle = ovA(col, .085); g.fill(); g.lineWidth = 1.6 * dpr; g.strokeStyle = 'rgba(8,10,16,.40)'; g.stroke(); g.lineWidth = .8 * dpr; g.strokeStyle = ovA(col, .6); g.stroke(); }); });
+      /* ONE FRAME PER ALERT AREA (user 2026-10-16: "refine the framing for special weather advisors and watches, any hazard
+         framing to make sure its not coarse"). Each county used to be stroked on its own, so a 30-county watch was 30
+         overlapping outlines whose shared borders, simplified separately, never quite met. Now the counties of each kind
+         are filled once, a faint seam marks the county lines inside, and the AREA gets a single clean frame: on a scratch
+         canvas every ring is stroked, then everything inside the union is erased (destination-out fill), leaving only the
+         outer half of the stroke -- a crisp edge hugging the area from outside, the interior borders gone. Storm polygons
+         (warnings, special weather statements) are the forecaster's own shape and are kept exactly, framed the same way. */
+      var oc = OV.oc || (OV.oc = document.createElement('canvas'));
+      if (oc.width !== W || oc.height !== H){ oc.width = W; oc.height = H; }
+      var frame = function(rings, col, strong){
+        var o = oc.getContext('2d'); o.clearRect(0, 0, W, H); o.lineJoin = 'round'; o.lineCap = 'round';
+        o.beginPath(); rings.forEach(function(Q){ Q.forEach(function(q, i){ i ? o.lineTo(q[0], q[1]) : o.moveTo(q[0], q[1]); }); o.closePath(); });
+        o.lineWidth = (strong ? 5.2 : 3.6) * dpr; o.strokeStyle = 'rgba(8,10,16,.62)'; o.stroke();
+        o.lineWidth = (strong ? 2.6 : 1.7) * dpr; o.strokeStyle = strong ? col : ovA(col, .9); o.stroke();
+        o.globalCompositeOperation = 'destination-out'; o.fillStyle = '#000'; o.fill('nonzero'); o.globalCompositeOperation = 'source-over';
+        g.drawImage(oc, 0, 0);
+      };
+      var groups = {};
+      Object.keys(owner).forEach(function(u){ (groups[owner[u]] = groups[owner[u]] || []).push(u); });
+      Object.keys(groups).sort(function(a, b){ return ovRank(a) - ovRank(b); }).forEach(function(ev){
+        var col = ovCol(ev), Qs = [];
+        groups[ev].forEach(function(u){ OV.zones[u.slice(0, 2)][u].forEach(function(r){ var rr = ring(r); if (rr.on) Qs.push(rr.Q); }); });
+        if (!Qs.length) return;
+        g.fillStyle = ovA(col, .085); Qs.forEach(function(Q){ path(Q); g.fill(); });
+        g.lineWidth = .6 * dpr; g.strokeStyle = ovA(col, .22); Qs.forEach(function(Q){ path(Q); g.stroke(); });      /* the county seams, faint */
+        frame(Qs, col, false);
+      });
       (RAD ? OV.al : []).forEach(function(a){
-        if (a.rings) a.rings.forEach(function(r){ if (!r || r.length < 3) return; var rr = ring(r); if (!rr.on) return; var col = ovCol(a.e); path(rr.Q);
-          g.fillStyle = ovA(col, .16); g.fill(); g.lineWidth = 3.4 * dpr; g.strokeStyle = 'rgba(8,10,16,.7)'; g.stroke(); g.lineWidth = 1.8 * dpr; g.strokeStyle = col; g.stroke(); seen(a, rr, a.ad[0] || ''); });
+        if (a.rings){ var col = ovCol(a.e), Qs = [];
+          a.rings.forEach(function(r){ if (!r || r.length < 3) return; var rr = ring(r); if (!rr.on) return; Qs.push(rr.Q); seen(a, rr, a.ad[0] || ''); });
+          if (Qs.length){ g.fillStyle = ovA(col, .16); Qs.forEach(function(Q){ path(Q); g.fill(); }); frame(Qs, col, ovRank(a.e) >= 70); } }
         else a.ugc.forEach(function(u, k){ var z = OV.zones[u.slice(0, 2)]; if (z && z[u]) z[u].forEach(function(r){ seen(a, ring(r), a.ad[k] || a.ad[0] || ''); }); });
         if (a._on) count[a.e] = (count[a.e] || 0) + 1;
       });
@@ -104683,43 +104729,89 @@ function closeAlertModal(){
           if (f > .75){ g.beginPath(); g.arc(q[0], q[1], 1.1 * dpr, 0, 6.284); g.fillStyle = 'rgba(255,255,255,.92)'; g.fill(); } });
         g.restore(); g.globalAlpha = 1;
       }
-      /* one label per kind, worst first; a label that would land on one already placed steps aside */
+      /* LABELS OFF THE LINES (user 2026-10-16: "try avoid putting text over graphic features even though they need to be near
+         what theyre referencing"). Each label tries its anchor and eight spots around it, and takes the one that sits on the
+         fewest drawn features -- measured, not guessed: the pixels under the box are sampled from this overlay (alert
+         frames, fronts, boundaries, strikes, labels already placed; the faint washes do not count) and from the map's own
+         tile canvases (the river and coast layers, and the basemap's water, so a lake is not written over). A spot that is
+         clear wins over a nearer one that is not; the anchor's own spot wins ties. Placements are kept while the view holds
+         still, so the 2.5 s redraw does not re-measure. */
+      var cornerH = RAD ? (14 + 12 * (Object.keys(count).length + (nStrike ? 1 : 0))) * dpr : 0;
+      var vkey = M.getZoom() + '|' + M.getCenter().lat.toFixed(4) + '|' + M.getCenter().lng.toFixed(4) + '|' + W + 'x' + H;
+      if (OV.labKey !== vkey){ OV.labKey = vkey; OV.lab = {}; }
+      var mapRect = mapEl.getBoundingClientRect();
+      var tileCanvases = function(){
+        var out = [], lays = (M._bvVectorLayers || []).concat([M._bvRiverLayer, M._bvCoastLayer]);
+        lays.forEach(function(ly, li){ if (!ly || !ly._tiles) return; var water = li < (M._bvVectorLayers || []).length;
+          Object.keys(ly._tiles).forEach(function(k){ var t = ly._tiles[k]; if (!t.current || !t.el || t.el.tagName !== 'CANVAS' || !t.el.width) return;
+            var r = t.el.getBoundingClientRect(); out.push({ el: t.el, water: water, x: r.left - mapRect.left, y: r.top - mapRect.top, w: r.width, h: r.height }); }); });
+        return out; };
+      var TC = null;
+      var busy = function(x, y, w, h){       /* x, y, w, h in overlay pixels; returns the share of sampled points on a feature */
+        var n = 0, hit = 0, st = 3 * dpr;
+        try {
+          var d = g.getImageData(Math.round(x), Math.round(y), Math.max(1, Math.round(w)), Math.max(1, Math.round(h))).data, rw = Math.max(1, Math.round(w));
+          for (var yy = 0; yy < h; yy += st) for (var xx = 0; xx < w; xx += st){ n++; if (d[((yy | 0) * rw + (xx | 0)) * 4 + 3] > 90) hit++; }
+        } catch(e){}
+        if (!TC) TC = tileCanvases();
+        var X0 = x / dpr, Y0 = y / dpr, X1 = (x + w) / dpr, Y1 = (y + h) / dpr, flag = {};
+        TC.forEach(function(t){
+          var ax = Math.max(X0, t.x), ay = Math.max(Y0, t.y), bx = Math.min(X1, t.x + t.w), by = Math.min(Y1, t.y + t.h); if (bx <= ax || by <= ay) return;
+          var k = t.el.width / t.w, sx = Math.floor((ax - t.x) * k), sy = Math.floor((ay - t.y) * k), sw = Math.max(1, Math.floor((bx - ax) * k)), sh = Math.max(1, Math.floor((by - ay) * k));
+          var dd; try { dd = t.el.getContext('2d').getImageData(sx, sy, sw, sh).data; } catch(e){ return; }
+          for (var yy = 0; yy < sh; yy += 3 * k) for (var xx = 0; xx < sw; xx += 3 * k){
+            var o = ((yy | 0) * sw + (xx | 0)) * 4, on = t.water ? (dd[o + 2] - dd[o] > 30 && dd[o + 2] > 55) : dd[o + 3] > 70;
+            if (on){ var key = Math.round(ax + xx / k) + ',' + Math.round(ay + yy / k); if (!flag[key]){ flag[key] = 1; hit++; } } }
+        });
+        return n ? Math.min(1, hit / n) : 0;
+      };
+      var place = function(lines, fz, col, cands, mid){
+        g.font = font(fz); var w = Math.max.apply(null, lines.map(function(t){ return g.measureText(t).width; })), h = lines.length * fz * 1.22 * dpr;
+        var key = lines.join('|'), best = null;
+        var ok = function(x, y){
+          if (x < 2 || y < 2 || x + w > W - 2 || y + h > H - 2) return false;
+          if (x < 52 * dpr && y < 70 * dpr) return false;                     /* the zoom buttons */
+          if (RAD && x < 300 * dpr && y < cornerH) return false;              /* the corner list's room */
+          return !placed.some(function(p){ return x < p[2] + 6 * dpr && x + w > p[0] - 6 * dpr && y < p[3] + 4 * dpr && y + h > p[1] - 4 * dpr; }); };
+        var kept = OV.lab[key];
+        if (kept && ok(kept[0], kept[1])) best = { x: kept[0], y: kept[1] };
+        else {
+          cands.slice().sort(function(a, b){ return (a.d || 0) - (b.d || 0); }).slice(0, 4).forEach(function(c, ci){
+            var bx = mid ? c.x - w / 2 : c.x, by = c.y - h / 2, gx = w / 2 + 12 * dpr, gy = h / 2 + 10 * dpr;
+            [[0, 0], [0, -gy], [0, gy], [gx, 0], [-gx, 0], [gx, -gy], [-gx, -gy], [gx, gy], [-gx, gy]].forEach(function(o, oi){
+              var x = bx + o[0], y = by + o[1];
+              if (!mid && x + w > W - 4 * dpr) x = c.x - 16 * dpr - w;          /* off the right edge: flip to the left of its anchor */
+              if (!ok(x, y)) return;
+              var sc = busy(x, y, w, h) + (oi ? 0.06 : 0) + ci * 0.04;
+              if (!best || sc < best.s) best = { x: x, y: y, s: sc };
+            });
+          });
+          if (best && best.s > 0.7) best = null;                               /* nowhere clean enough near it: leave it out */
+          if (best) OV.lab[key] = [best.x, best.y];
+        }
+        if (!best) return;
+        placed.push([best.x, best.y, best.x + w, best.y + h]); text(lines, best.x, best.y, col, fz);
+      };
+      /* the hazards first, worst first, then the ground's labels by rank into the room they left */
       var placed = [];
       Object.keys(byEv).map(function(k){ return byEv[k]; }).sort(function(a, b){ return ovRank(b.e) - ovRank(a.e); }).forEach(function(v){
         if (!inV(v.c, -20)) return;
         var rk = ovRank(v.e), fz = rk >= 90 ? 10.5 : rk >= 70 ? 8.8 : 8, lines = [v.e.toUpperCase()].concat(v.where ? [v.where.toUpperCase()] : []);
-        g.font = font(fz); var w = Math.max.apply(null, lines.map(function(t){ return g.measureText(t).width; })), h = lines.length * fz * 1.22 * dpr;
-        var x = v.c[0] + 5 * dpr, y = v.c[1] - h / 2;
-        if (placed.some(function(p){ return x < p[2] && x + w > p[0] && y < p[3] && y + h > p[1]; })) return;
-        placed.push([x, y, x + w, y + h]); text(lines, x, y, ovCol(v.e), fz);
+        place(lines, fz, ovCol(v.e), [{ x: v.c[0], y: v.c[1], d: 0 }], true);
       });
-      /* then the ground's labels, by rank, into whatever room the hazards left (one label per place, never stacked) */
-      /* each tries its places nearest the middle first, up to eight, and is dropped only when none is clear */
-      var cornerH = RAD ? (14 + 12 * (Object.keys(count).length + 2)) * dpr : 0;
-      TL.sort(function(a, b){ return b.rank - a.rank; }).forEach(function(l){
-        g.font = font(l.fz); var w = Math.max.apply(null, l.lines.map(function(t){ return g.measureText(t).width; })), h = l.lines.length * l.fz * 1.22 * dpr;
-        l.cand.sort(function(a, b){ return (a.d || 0) - (b.d || 0); });
-        l.cand.slice(0, 8).some(function(c){
-          var x = l.mid ? c.x - w / 2 : c.x, y = c.y - h / 2;
-          if (x + w > W - 4 * dpr && !l.mid) x = c.x - 16 * dpr - w;        /* off the right edge: flip to the left of its anchor */
-          if (x < 2 || y < 2 || x + w > W - 2 || y + h > H - 2) return false;
-          if (x < 52 * dpr && y < 70 * dpr) return false;                     /* the zoom buttons */
-          if (RAD && x < 300 * dpr && y < cornerH) return false;              /* the corner list's room */
-          if (placed.some(function(p){ return x < p[2] + 6 * dpr && x + w > p[0] - 6 * dpr && y < p[3] + 4 * dpr && y + h > p[1] - 4 * dpr; })) return false;
-          placed.push([x, y, x + w, y + h]); text(l.lines, x, y, l.col, l.fz); return true;
-        });
-      });
+      TL.sort(function(a, b){ return b.rank - a.rank; }).forEach(function(l){ place(l.lines, l.fz, l.col, l.cand, !!l.mid); });
       if (!RAD) return;
       /* the corner: every kind in frame, lifted toward white to read over echo; right of the zoom buttons */
       var rows = Object.keys(count).sort(function(a, b){ return ovRank(b) - ovRank(a) || count[b] - count[a]; });
       var lines = rows.map(function(e){ return { t: count[e] + ' ' + ovPlural(e, count[e]), c: ovLift(ovCol(e), .35) }; });
       if (!rows.length && OV.alAt) lines.push({ t: 'NO NWS ALERTS IN VIEW', c: '#c9d1d9' });
-      if (window.bvLightning && (nStrike || window.bvLightning.live())) lines.push({ t: nStrike ? nStrike + ' LIGHTNING STRIKE' + (nStrike === 1 ? '' : 'S') + ' IN 20 MIN' : 'NO LIGHTNING IN 20 MIN', c: '#f3c264' });
+      /* lightning is named only when there is some (user 2026-10-16: "you dont have to mention lightning if theres no lightning") */
+      if (nStrike) lines.push({ t: nStrike + ' LIGHTNING STRIKE' + (nStrike === 1 ? '' : 'S') + ' IN 20 MIN', c: '#f3c264' });
       lines.forEach(function(l, i){ text([l.t], 50 * dpr, (10 + i * 12) * dpr, l.c, 9.2); });
     };
     /* the ground: one national file (_terrainbake/bake.py), fetched once */
     OV.terrLoad = function(){ if (OV.terr || OV.terrReq) return; OV.terrReq = 1;
-      fetch('https://cdn.bluishvoid.com/terrain/v1/us.json').then(function(r){ return r.json(); }).then(function(j){ OV.terr = j; OV.draw(); OV.liveRead(); }).catch(function(){ OV.terrReq = 0; }); };
+      fetch('https://cdn.bluishvoid.com/terrain/v2/us.json').then(function(r){ return r.json(); }).then(function(j){ OV.terr = j; OV.draw(); OV.liveRead(); }).catch(function(){ OV.terrReq = 0; }); };
     /* WHAT THE WIND IS DOING TO EACH EDGE IN VIEW: three points along the part on screen, the wind at the edge's level
        (850 hPa for the eastern edges, 700 over the West's high ground) resolved across the line; 12 mph or more uphill is
        'up', downhill 'down'. Open-Meteo model analysis, one call, every 20 minutes or when the view brings new edges. */
