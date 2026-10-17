@@ -7,8 +7,7 @@ never difference one composite); baseline = max of the August composites; progre
 (MODIS IGBP land cover: the five forest classes and woody savanna) where August greenness > 0.55; a 5-px median; the same
 peak-centred colour ramp (green -> yellow -> orange at 20% = peak -> red -> brown 40%+ bare).
 
-Cut into a tile pyramid instead of one frame: computed at z7 (~1.2 km at 45 N; 1 km is what a continent needs, and it
-keeps a daily bake inside a CI runner), in 2048 px blocks over 24-70 N, -170..-52, then z3-6 by averaging. Blocks with no
+Cut into a tile pyramid instead of one frame: computed at z8 (~600 m at 45 N), in 2048 px blocks over 24-70 N, -170..-52, then z3-7 by averaging. Blocks with no
 forest are skipped. The August baseline and the forest mask are fixed for the season, so each is cached per block as a
 .npz (BASE_DIR) and only the two current composites are fetched daily.
 Plus the USA-NPN "colored leaves" reports of the last fortnight for every state (points.json).
@@ -39,7 +38,8 @@ RAMP = [(0.0, (34, 120, 40)), (0.08, (150, 190, 40)), (0.15, (240, 200, 40)),
 STATES = ['AL','AZ','AR','CA','CO','CT','DE','FL','GA','ID','IL','IN','IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT',
           'NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY','AK','DC']
 CLASSES = {'Less than 5%': 0, '5-24%': 1, '25-49%': 2, '50-74%': 3, '75-94%': 4, '95% or more': 5}
-Z = 7; BLK = 2048; R = 6378137.0; WORLD = 2 * math.pi * R
+# z8 (~600 m at 45 N; was z7, blocky past z9 -- 2026-10-17)
+Z = 8; BLK = 2048; R = 6378137.0; WORLD = 2 * math.pi * R
 LON0, LON1, LAT0, LAT1 = -170.0, -52.0, 24.0, 70.0
 
 def get(u, timeout=240):
@@ -132,7 +132,9 @@ def main():
     global LUT
     LUT = colormap(); today = datetime.date.today(); yr = today.year
     probe = bbox_of(*tile_px(-74.5, 44.0), 64, 64)
-    d1 = published(probe, today); d2 = published(probe, d1 - datetime.timedelta(days=6)) if d1 else None
+    # two days back (2026-10-17): the newest rolling composite is still being filled in on GIBS -- a straight seam along a
+    # GIBS tile edge at -73.1 (Vermont) where neighbouring tiles held different days
+    d1 = published(probe, today - datetime.timedelta(days=2)); d2 = published(probe, d1 - datetime.timedelta(days=6)) if d1 else None
     print('composites', d1, d2)
     aug = [datetime.date(yr, 8, d) for d in (8, 16, 24, 31)]
     x0, y0 = tile_px(LON0, LAT1); x1, y1 = tile_px(LON1, LAT0)
