@@ -1579,7 +1579,9 @@ export default {
       // panel polls this every minute while it is open (2026-09-06: "it's about
       // seeing the latest information and knowing first when temp changes").
       let sens = {};
-      try { sens = await readSensors(1080, true); } catch (e) { /* empty */ }
+      // 26 HOURS, not 18 (2026-10-17): the panel's chart now runs midnight to midnight, and an 18-hour window lost the
+      // overnight hours -- the 1 AM climate-day boundary among them -- from 6 PM on
+      try { sens = await readSensors(1560, true); } catch (e) { /* empty */ }
       return new Response(JSON.stringify({ at: new Date().toISOString(), s: sens }), {
         headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...cors(ALLOWED) } });
     }
