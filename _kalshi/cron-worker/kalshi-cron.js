@@ -1138,7 +1138,7 @@ async function alertTick(env, sched) {
 const DARK_FLOOR_USD = 50, DARK_PCTL = 0.95, DARK_ALERT_USD = 500;
 const DARK_SURE_PX = 0.95;      // a burst paying this much for its side is a sweep, not dark (dark_lib.SURE_PX)
 /* the triggers that carry their own jobs (wrangler.toml [triggers]; must match it character for character) */
-const DARK_CRON = '*/1 0,11-23 * * *', OBS_CRON = '*/5 0-4,11-23 * * *';
+const DARK_CRON = '* * * * *', OBS_CRON = '*/5 * * * *';
 const DARK_WIN = { metar: 9, cli: 10, twc: 6, fcst: 10, apt: 15 }, DARK_MERGE_MIN = 3;
 const KAPI = 'https://api.elections.kalshi.com/trade-api/v2';
 function nyEventTicker(dayIso) {
@@ -1166,7 +1166,8 @@ async function kpub(env, path) {
 async function darkTick(env, sched) {
   if (!env.OBS) return 'no KV';
   const nyHour = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false }).format(new Date(sched)));
-  if (nyHour < 7 || nyHour >= 20) return 'outside 7 AM-8 PM ET';
+  /* AROUND THE CLOCK (user 2026-10-17: "track the bets and pool money everything else overnight too"): was 7 AM-8 PM ET,
+     and 10-15 and 10-17 were decided by a front at 1 AM, hours before the watcher woke */
   const day = localDate(0), key = `dark:${day}`;
   const rec = (await env.OBS.get(key, { type: 'json' })) || { day, event: nyEventTicker(day), markets: null, bursts: [], releases: [], twc: null };
   const before = JSON.stringify(rec);
@@ -1477,7 +1478,11 @@ export default {
       return;
     }
     if (sched < NTFY_TEST_UNTIL) ctx.waitUntil(ntfySelfTest(env).catch((e) => console.log(`[ntfy-test] FAILED ${e}`)));
-    ctx.waitUntil((async () => {
+    /* QUIET HOURS (2026-10-17). The trigger runs through the night now ("* 0-10"), but only for the bake dispatch: the
+       phone alerts and the watchdog keep their old hours and stay off 05-10 UTC (1-6 AM daylight time), so nothing pages
+       overnight -- the climate report's ~3 AM final included. */
+    const quiet = (() => { const h = new Date(sched).getUTCHours(); return h >= 5 && h <= 10; })();
+    if (!quiet) ctx.waitUntil((async () => {
       try {
         console.log(`[alerts] ${new Date().toISOString()} ${await alertTick(env, sched)}`);
       } catch (e) {
@@ -1507,7 +1512,7 @@ export default {
     // eighteen hours because the only check ran at 13:00Z and read the run's
     // conclusion, which was green. Three API calls and one 25 KB log an hour is
     // nothing, and paging stays keyed by day, so a failure still pages once.
-    if (minute === 0) {
+    if (minute === 0 && !quiet) {
       ctx.waitUntil((async () => {
         try { console.log(`[watchdog] :${minute} ${new Date().toISOString()} ${await jobWatch(env)}`); }
         catch (e) { console.log(`[watchdog] FAILED ${e}`); }
@@ -1641,7 +1646,7 @@ export default {
       // page confidently reported a cadence the worker was not running.
       // Cloudflare does not expose a worker's own triggers to its code, so
       // this has to be kept in step with [triggers] in wrangler.toml by hand.
-      schedule_utc: ['* 11-23 * * *', '* 0-4 * * *', BOUNDARY_CRON],
+      schedule_utc: ['* 11-23 * * *', '* 0-10 * * *', BOUNDARY_CRON, DARK_CRON, OBS_CRON],
       dispatch_minutes: [5, 20, 35, 50],
       fast_lane_minutes: [0, 10, 15, 25, 30, 40, 45, 55],
       obs_log: env.OBS ? 'KV bound' : 'NO KV BINDING - not logging',
