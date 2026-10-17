@@ -48,7 +48,10 @@ import kalshi_daily as K                                   # noqa: E402
 
 OUT = os.path.join(HERE, 'price_study.json')
 CACHE = os.path.join(HERE, '.price_cache.json')
-HOURS = list(range(7, 23))
+# EVERY HOUR OF THE CLIMATE DAY (user 2026-10-17: "track the bets and pool money everything else overnight too"). The study
+# began at 7 AM, so a day decided at 1 AM by a front (10-15, 10-17) had no measured hours for the stretch that decided it.
+# Hours before the climate day's first (midnight under daylight time) are skipped in the replay.
+HOURS = list(range(0, 23))
 
 
 # ------------------------------------------------------------- the market ----
@@ -102,13 +105,16 @@ def candles(cfg, ticker, day, tzoff):
     out = {}
     try:
         for x in K.get_json(u, timeout=45).get('candlesticks') or []:
-            t = datetime.datetime.utcfromtimestamp(
-                x['end_period_ts']) - datetime.timedelta(hours=tzoff)
+            # HOURS SINCE THIS DAY'S MIDNIGHT, not the clock hour: the window runs 30 h, and keyed by t.hour the next
+            # morning's midnight-5 AM candles overwrote this morning's (harmless while the study began at 7 AM)
+            hh = int((x['end_period_ts'] - start) // 3600)
+            if hh < 0 or hh > 23:
+                continue
             b = (x.get('yes_bid') or {}).get('close_dollars')
             a = (x.get('yes_ask') or {}).get('close_dollars')
             if b is None and a is None:
                 continue
-            out[t.hour] = (float(b) if b is not None else None,
+            out[hh] = (float(b) if b is not None else None,
                            float(a) if a is not None else None,
                            float(x.get('open_interest_fp') or 0))
     except Exception:
@@ -144,6 +150,8 @@ def replay(cfg, dates):
         h0 = h0_of(k)
         per = {}
         for h in HOURS:
+            if h < h0:
+                continue
             r = K.running_max(obh, k, h, h0)
             fl = (r + K.HOURLY_PEAK_OFFSET) if r is not None else None
             pf = K.point_forecast(fcm, biases, k, h, yday)
