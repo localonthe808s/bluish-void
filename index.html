@@ -881,6 +881,54 @@ window._bvRelief = function(map){
   B.coverP.then(function(){ lay.addTo(map); });
   return lay;
 };
+/* 1 M LIDAR (user 2026-10-17: "add lidar 1m to the national basemap bake"). From z13 in, USGS 3DEP's best available elevation
+   -- 1 m lidar across most of the lower 48 -- as a hillshade, through tiles.bluishvoid.com/lidar/v1 (the tile worker fetches
+   each tile from 3DEP once and keeps it in R2: a lazy national bake). The gray hillshade (flat ground 180) is turned into
+   the relief layer's own look -- sunlit slopes white to ~16%, shadows black to ~66%, flat ground clear -- so the two meet
+   without a seam; the relief fades to a third under it, or the 10 m shading and the 1 m would stack. ?lidar=0 turns it
+   off; ?lidar=usgs reads 3DEP directly (a test before the worker route exists). Dark maps only. */
+window._bvLidar = function(map){
+  if (!map || map._bvLidarLayer || typeof L === 'undefined') return null;
+  var q = null; try { q = new URLSearchParams(location.search).get('lidar'); } catch(e){}
+  if (q === '0') return null;
+  var W = 2 * Math.PI * 6378137;
+  var src = function(c){
+    if (q !== 'usgs') return 'https://tiles.bluishvoid.com/lidar/v1/' + c.z + '/' + c.x + '/' + c.y + '.png';
+    var sz = W / Math.pow(2, c.z), bb = [-W / 2 + c.x * sz, W / 2 - (c.y + 1) * sz, -W / 2 + (c.x + 1) * sz, W / 2 - c.y * sz].map(function(v){ return v.toFixed(2); }).join(',');
+    return 'https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage?f=image&format=png&bbox=' + bb
+      + '&bboxSR=3857&imageSR=3857&size=256,256&interpolation=RSP_BilinearInterpolation&renderingRule=' + encodeURIComponent('{"rasterFunction":"Hillshade Gray"}');
+  };
+  var LL = L.GridLayer.extend({
+    createTile: function(c, done){
+      var cv = document.createElement('canvas'); cv.width = cv.height = 256;
+      var im = new Image(); im.crossOrigin = 'anonymous';
+      im.onload = function(){
+        try {
+          var g = cv.getContext('2d', { willReadFrequently: true }); g.drawImage(im, 0, 0, 256, 256);
+          var d = g.getImageData(0, 0, 256, 256), a = d.data;
+          for (var i = 0; i < a.length; i += 4){
+            var v = a[i], al = a[i + 3];
+            if (al < 128){ a[i + 3] = 0; continue; }
+            if (v > 184){ a[i] = a[i + 1] = a[i + 2] = 255; a[i + 3] = Math.min(42, (v - 184) * 0.8); }
+            else if (v < 176){ a[i] = a[i + 1] = a[i + 2] = 0; a[i + 3] = Math.min(170, (180 - v) * 1.7); }
+            else a[i + 3] = 0;
+          }
+          g.putImageData(d, 0, 0);
+        } catch(e){}
+        done(null, cv);
+      };
+      im.onerror = function(){ done(null, cv); };
+      im.src = src(c);
+      return cv;
+    }
+  });
+  var lay = new LL({ minZoom: 13, maxNativeZoom: 17, maxZoom: 19, zIndex: 3, opacity: 1, keepBuffer: 1, updateWhenIdle: true, tileSize: 256,
+    bounds: L.latLngBounds([[17, -180], [72, -64]]) });
+  map._bvLidarLayer = lay; lay.addTo(map);
+  var fade = function(){ var r = map._bvReliefLayer; if (r && r.setOpacity) r.setOpacity(map.getZoom() >= 13 ? 0.35 : 1); };
+  map.on('zoomend', fade); fade();
+  return lay;
+};
 /* THE SEA FLOOR'S SHAPE AND NAMES (user 2026-10-16: "highlight all underwater geology like rivers and mountains especially
    on the west coast"). Two layers for every dark map:
    - _bvSeafloor: the deep-ocean hillshade (_reliefbake/render_sea.py over the AWS Terrain Tiles' global bathymetry), z3-9
@@ -1157,6 +1205,7 @@ window._bvVectorBase = function(map, opts){
        stand down for it; past that the real basemap labels return. */
     if (!opts.labels && opts.flavor !== 'light' && !opts.noSeafloor && window._bvSeafloor) window._bvSeafloor(map);
     if (!opts.labels && opts.flavor !== 'light' && !opts.noRelief && window._bvRelief) window._bvRelief(map);
+    if (!opts.labels && opts.flavor !== 'light' && !opts.noRelief && window._bvLidar) window._bvLidar(map);
     if (!opts.labels && opts.flavor !== 'light' && !opts.noBathy && window._bvBathy) window._bvBathy(map);
     if (!opts.labels && opts.flavor !== 'light' && !opts.noRivers && window._bvRivers) window._bvRivers(map);
     /* THE GREEN COAST IS OFF (user 2026-10-17: "remove the green continental trim from the map, its giving too much trouble

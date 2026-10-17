@@ -34,6 +34,61 @@ export default {
     if (request.method !== 'GET') return new Response('GET only', { status: 405, headers: cors });
     const url = new URL(request.url);
     if (url.pathname === '/' || url.pathname === '/health') return new Response(JSON.stringify({ ok: true, archives: Object.keys(ARCHIVES) }), { headers: { 'Content-Type': 'application/json', ...cors } });
+    /* MACROSTRAT, CACHED (2026-10-17, user: "do ... the macrostrat caching too"): /macrostrat/carto/{z}/{x}/{y}.png passes
+       through to tiles.macrostrat.org (CC-BY, credited on the page) and keeps each tile at the edge for a week -- the geologic
+       map changes rarely, and their server answers in ~300 ms where our edge answers in tens. */
+    const mm = url.pathname.match(/^\/macrostrat\/(carto|carto-slim)\/(\d{1,2})\/(\d+)\/(\d+)\.png$/);
+    if (mm){
+      const z = +mm[2], x = +mm[3], y = +mm[4];
+      if (z > 18 || x >= 2 ** z || y >= 2 ** z) return new Response('bad tile', { status: 400, headers: cors });
+      const cache = caches.default, key = new Request(url.origin + url.pathname, { method: 'GET' });
+      let hit = await cache.match(key), tag = 'HIT';
+      if (!hit){
+        tag = 'MISS';
+        const up = await fetch('https://tiles.macrostrat.org/' + mm[1] + '/' + z + '/' + x + '/' + y + '.png', { headers: { 'User-Agent': 'bluishvoid.com tile cache' } });
+        if (!up.ok) return new Response(null, { status: up.status === 404 ? 404 : 502, headers: { ...cors, 'Cache-Control': 'public, max-age=300' } });
+        hit = new Response(await up.arrayBuffer(), { status: 200, headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400, s-maxage=604800' } });
+        ctx.waitUntil(cache.put(key, hit.clone()));
+      }
+      hit = new Response(hit.body, hit); hit.headers.set('X-Tile-Cache', tag);
+      for (const k in cors) hit.headers.set(k, cors[k]);
+      return hit;
+    }
+    /* 1 M LIDAR, NATIONAL (2026-10-17, user: "add lidar 1m to the national basemap bake"). USGS 3DEP's best available
+       elevation -- 1 m lidar wherever the program has flown it, which is most of the lower 48 -- rendered by its own image
+       service as a hillshade (single light, NW, flat ground = 180), one 256 px tile per request, z12-17. A full national
+       pyramid at those zooms is tens of millions of tiles, so the bake is LAZY: the first request for a tile fetches it
+       from USGS and writes it to R2 (lidar/v1/{z}/{x}/{y}.png); every request after reads R2 through the edge cache. The
+       page turns the gray into the relief layer's look (white light, black shadow, flat ground clear). */
+    const ml = url.pathname.match(/^\/lidar\/v1\/(\d{1,2})\/(\d+)\/(\d+)\.png$/);
+    if (ml){
+      const z = +ml[1], x = +ml[2], y = +ml[3];
+      if (z < 12 || z > 17 || x >= 2 ** z || y >= 2 ** z) return new Response('bad tile', { status: 400, headers: cors });
+      const cache = caches.default, key = new Request(url.origin + url.pathname, { method: 'GET' }), rk = 'lidar/v1/' + z + '/' + x + '/' + y + '.png';
+      let hit = await cache.match(key), tag = 'EDGE';
+      if (!hit){
+        const ob = await env.BUCKET.get(rk);
+        if (ob){ tag = 'R2'; hit = new Response(ob.body, { status: 200, headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=604800, s-maxage=2592000' } }); }
+        else {
+          tag = 'USGS';
+          const W = 2 * Math.PI * 6378137, sz = W / 2 ** z, bb = [-W / 2 + x * sz, W / 2 - (y + 1) * sz, -W / 2 + (x + 1) * sz, W / 2 - y * sz].map((v) => v.toFixed(2)).join(',');
+          const q = 'f=image&format=png&bbox=' + bb + '&bboxSR=3857&imageSR=3857&size=256,256&interpolation=RSP_BilinearInterpolation&renderingRule='
+            + encodeURIComponent(JSON.stringify({ rasterFunction: 'Hillshade Gray' }));
+          let up;
+          try { up = await fetch('https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage?' + q, { headers: { 'User-Agent': 'bluishvoid.com lidar cache' } }); }
+          catch (e) { return new Response(null, { status: 502, headers: { ...cors, 'Cache-Control': 'no-store' } }); }
+          const ct = up.headers.get('content-type') || '';
+          if (!up.ok || ct.indexOf('image') < 0) return new Response(null, { status: 502, headers: { ...cors, 'Cache-Control': 'no-store' } });
+          const buf = await up.arrayBuffer();
+          ctx.waitUntil(env.BUCKET.put(rk, buf, { httpMetadata: { contentType: 'image/png', cacheControl: 'public, max-age=604800' } }));
+          hit = new Response(buf, { status: 200, headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=604800, s-maxage=2592000' } });
+        }
+        ctx.waitUntil(cache.put(key, hit.clone()));
+      }
+      hit = new Response(hit.body, hit); hit.headers.set('X-Tile-Cache', tag);
+      for (const k in cors) hit.headers.set(k, cors[k]);
+      return hit;
+    }
     const m = url.pathname.match(TILE);
     if (!m || !ARCHIVES[m[1]]) return new Response('not found', { status: 404, headers: cors });
     const z = +m[2], x = +m[3], y = +m[4];
