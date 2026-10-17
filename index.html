@@ -104496,7 +104496,7 @@ function closeAlertModal(){
     var TB = 'flex:1 1 0;min-width:0;padding:7px 6px;border-radius:7px;border:1px solid transparent;background:rgba(255,255,255,.12);color:#fff;'
       + 'font:800 .66rem system-ui,sans-serif;letter-spacing:.1em;cursor:pointer;';
     pane.innerHTML = '<div id="lc-tabs" style="display:flex;gap:5px;padding:8px 8px 6px;">'
-      + '<button type="button" data-v="radar" style="' + TB + '">RADAR</button><button type="button" data-v="map" style="' + TB + '">MAP</button><button type="button" data-v="rock" style="' + TB + '">GEOLOGY</button><button type="button" data-v="tide" style="' + TB + 'display:none;">TIDES</button><button type="button" data-v="river" style="' + TB + '">RIVERS</button></div>'
+      + '<button type="button" data-v="radar" style="' + TB + '">RADAR</button><button type="button" data-v="map" style="' + TB + '">MAP</button><button type="button" data-v="rock" style="' + TB + '">GEOLOGY</button><button type="button" data-v="tide" style="' + TB + 'display:none;">TIDES</button><button type="button" data-v="river" style="' + TB + '">RIVERS</button><button type="button" data-v="traffic" style="' + TB + '">TRAFFIC</button></div>'
       + '<div id="lc-tide" style="display:none;padding:0 12px 8px;color:#fff;"></div>'
       + '<div id="lc-river" style="display:none;padding:0 12px 8px;color:#fff;"></div>'
       + '<div id="lc-strip" style="padding:2px 12px 8px;font:800 .62rem/1.5 system-ui,sans-serif;letter-spacing:.06em;color:#fff;min-height:1.5em;"></div>'
@@ -104546,6 +104546,7 @@ function closeAlertModal(){
         + (T.fc ? A('NWS WATER FORECAST ' + esc(String(st.shef || '').toUpperCase()), 'https://water.noaa.gov/gauges/' + String(st.shef || '').toLowerCase()) : '')
         + A('NOAA SEA LEVEL RISE VIEWER (FLOOD DEPTH MAP)', 'https://coast.noaa.gov/slr/') + A('NWS ALERTS', 'https://www.weather.gov/alerts')
         + A('OPENSTREETMAP', 'https://www.openstreetmap.org/copyright') + A('PROTOMAPS', 'https://protomaps.com'); },
+      traffic: function(){ return A('\u00a9 TOMTOM TRAFFIC FLOW AND INCIDENTS', 'https://www.tomtom.com/traffic-index/') + A('OPENSTREETMAP', 'https://www.openstreetmap.org/copyright') + A('PROTOMAPS', 'https://protomaps.com'); },
       river: function(){ var g = RV.sel; return A('NWS NATIONAL WATER PREDICTION SERVICE', 'https://water.noaa.gov') + (g ? A('GAUGE ' + esc(g.lid.toUpperCase()), 'https://water.noaa.gov/gauges/' + g.lid.toLowerCase()) : '')
         + A('USGS AND PARTNERS (GAUGE OPERATORS)', 'https://waterdata.usgs.gov') + A('OPENSTREETMAP', 'https://www.openstreetmap.org/copyright') + A('PROTOMAPS', 'https://protomaps.com'); } };
     /* ---------------------------------------------------------------- the map ---- */
@@ -105645,6 +105646,136 @@ function closeAlertModal(){
     RV.off = function(){ if (RV.timer){ clearInterval(RV.timer); RV.timer = null; } if (RV.lay && M){ M.removeLayer(RV.lay); RV.lay = null; } riverEl.style.display = 'none'; };
     window.addEventListener('resize', function(){ if (VIEW === 'river' && pane.style.display !== 'none') RV.chart(); });
 
+    /* ---------------------------------------------------------------- TRAFFIC ---- */
+    /* STEP 2 OF ONE MAP ENGINE (user 2026-10-16: "start step 2"): THE CITY's TRAFFIC tab for any place. TomTom's flow vector
+       tiles and incidents are national, the same referer-locked key THE CITY uses (CW_TT_KEY). The look is THE CITY's own:
+       - FLOW: roads moving freely in the site green (#05DB32, the big roads cased; secondary roads a thin green; local
+         streets only once zoomed in), roads running slow in THE CITY's yellow -> orange -> red -> deep red by how far below
+         free flow they are (cwFlowColour's thresholds, per road class). Rendered by protomaps straight off TomTom's tiles.
+       - INCIDENTS: a red "!" for crashes and hazards, closures as dashed dark red, works and lane closures as amber dots,
+         flooding as a blue disc, and every jam costing 15 minutes or more tagged "+N MIN" with its road. One call per view
+         area (snapped to a 0.2 degree grid), kept 20 minutes in memory and on the device -- the incident quota is small --
+         and none at all wider than ~100 km. */
+    var TR = { lay: null, inc: null, incKey: '', incAt: 0, incP: null, cv: null, lit: false };
+    var TT_KEY = 'Zz5RohucCbv94eXOc733BHxMVkqLMI4N';
+    var TT_CLASS = { 'Motorway': 0, 'International road': 1, 'Major road': 1, 'Secondary road': 2, 'Connecting road': 2, 'Major local road': 2, 'Local road': 3, 'Minor local road': 3 };
+    var TT_RULE = [{ slow: .80, w: 3.0 }, { slow: .55, w: 2.4 }, { slow: .45, w: 1.9 }, { slow: .35, w: 1.5 }];
+    var TT_CAT = { 0: 'EVENT RESTRICTION', 1: 'ACCIDENT', 2: 'FOG', 3: 'DANGEROUS CONDITIONS', 4: 'RAIN', 5: 'ICE', 6: 'JAM', 7: 'LANE CLOSED', 8: 'ROAD CLOSED', 9: 'ROAD WORKS', 10: 'WIND', 11: 'FLOODING', 14: 'BROKEN DOWN VEHICLE' };
+    var ttCls = function(f){ var c = TT_CLASS[(f.props || {}).road_type]; return c == null ? 3 : c; };
+    var ttLv = function(f){ return +((f.props || {}).traffic_level); };
+    var ttSlow = function(f){ var lv = ttLv(f); return isFinite(lv) && lv < TT_RULE[ttCls(f)].slow; };
+    var ttCol = function(f){ var k = ttLv(f) / TT_RULE[ttCls(f)].slow; return k < .30 ? '#B80020' : k < .55 ? '#FF1B1B' : k < .80 ? '#FF6B00' : '#FFE500'; };
+    var ttJamRoad = function(p){
+      var from = p.from || '', roads = p.roadNumbers || [], m = from.match(/\(([^()]+)\)\s*$/), route = m ? m[1].trim() : null;
+      if (route){ for (var i = 0; i < roads.length; i++) if (roads[i].indexOf(route) === 0) return roads[i].toUpperCase(); return route.toUpperCase(); }
+      var r0 = roads.filter(function(r){ return /^(I|US|SR|[A-Z]{2})-\d/.test(r); })[0] || roads[0];
+      if (r0) return String(r0).toUpperCase();
+      var street = from.replace(/\([^()]*\)/g, '').split('/')[0].trim();
+      return street ? street.toUpperCase().slice(0, 18) : ''; };
+    TR.layer = function(){
+      var P = protomapsL, LS = function(o){ return new P.LineSymbolizer(Object.assign({ lineCap: 'round', lineJoin: 'round' }, o)); };
+      var fl = 'Traffic flow', calm = function(z, f){ return !ttSlow(f) && !(f.props || {}).road_closure; };
+      var rules = [
+        { dataLayer: fl, filter: function(z, f){ return calm(z, f) && ttCls(f) <= 1; }, symbolizer: LS({ color: 'rgba(8,10,16,.5)', width: function(z, f){ return TT_RULE[ttCls(f)].w + 1.0; } }) },
+        { dataLayer: fl, filter: function(z, f){ return calm(z, f) && ttCls(f) <= 1; }, symbolizer: LS({ color: '#05DB32', width: function(z, f){ return Math.max(1, TT_RULE[ttCls(f)].w - 0.7); } }) },
+        /* free-moving side roads stay quiet: secondary from z11, local streets from z14, thin and half-strength, so the jams are what reads */
+        { dataLayer: fl, filter: function(z, f){ return calm(z, f) && ((ttCls(f) === 2 && z >= 11) || (ttCls(f) === 3 && z >= 14)); }, symbolizer: LS({ color: 'rgba(5,219,50,.42)', width: 1.1 }) },
+        { dataLayer: fl, filter: function(z, f){ return ttSlow(f) && !(f.props || {}).road_closure; }, symbolizer: LS({ color: 'rgba(8,10,16,.85)', width: function(z, f){ return TT_RULE[ttCls(f)].w + 2.0; } }) },
+        { dataLayer: fl, filter: function(z, f){ return ttSlow(f) && !(f.props || {}).road_closure; }, symbolizer: LS({ color: function(z, f){ return ttCol(f); }, width: function(z, f){ return TT_RULE[ttCls(f)].w + 0.9; } }) }
+      ];
+      return P.leafletLayer({ url: 'https://api.tomtom.com/traffic/map/4/tile/flow/relative/{z}/{x}/{y}.pbf?key=' + TT_KEY, maxDataZoom: 18, paintRules: rules, labelRules: [], zIndex: 7, attribution: '' });
+    };
+    TR.read = function(){
+      if (!M) return Promise.resolve();
+      var b = M.getBounds(), sn = function(v, up){ return (up ? Math.ceil(v * 5) : Math.floor(v * 5)) / 5; };
+      var w = sn(b.getWest()), s2 = sn(b.getSouth()), e = sn(b.getEast(), 1), n = sn(b.getNorth(), 1);
+      var km2 = (e - w) * 111 * Math.cos((s2 + n) / 2 * Math.PI / 180) * (n - s2) * 111;
+      if (km2 > 10000){ TR.inc = null; TR.incKey = 'wide'; return Promise.resolve(); }
+      var key = [w, s2, e, n].map(function(v){ return v.toFixed(1); }).join(','), now = Date.now(), TTL = 1200000;
+      if (TR.incKey === key && TR.inc && now - TR.incAt < TTL) return Promise.resolve();
+      try { var sv = JSON.parse(localStorage.getItem('bv_tt_inc_local') || 'null'); if (sv && sv.key === key && now - sv.at < TTL){ TR.inc = sv.inc; TR.incKey = key; TR.incAt = sv.at; return Promise.resolve(); } } catch(e2){}
+      if (TR.incP && TR.incPKey === key) return TR.incP;
+      TR.incPKey = key;
+      return TR.incP = fetch('https://api.tomtom.com/traffic/services/5/incidentDetails?key=' + TT_KEY + '&bbox=' + key + '&language=en-US&timeValidityFilter=present&fields='
+          + encodeURIComponent('{incidents{type,geometry{type,coordinates},properties{id,iconCategory,magnitudeOfDelay,events{description},startTime,endTime,from,to,length,delay,roadNumbers}}}'))
+        .then(function(r){ return r.json(); }).then(function(j){
+          TR.inc = j.incidents || []; TR.incKey = key; TR.incAt = Date.now();
+          try { localStorage.setItem('bv_tt_inc_local', JSON.stringify({ key: key, at: TR.incAt, inc: TR.inc })); } catch(e3){}
+        }).catch(function(){ TR.inc = TR.inc || []; }).then(function(){ TR.incP = null; });
+    };
+    TR.draw = function(){
+      if (!TR.lit || !M || !TR.cv) return;
+      var cv = TR.cv, sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr);
+      if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
+      L.DomUtil.setPosition(cv, M.containerPointToLayerPoint([0, 0])); cv.style.visibility = '';
+      var g = cv.getContext('2d'); g.clearRect(0, 0, W, H);
+      var P = function(c){ var q = M.latLngToContainerPoint([c[1], c[0]]); return [q.x * dpr, q.y * dpr]; };
+      var inF = function(q){ return q[0] > -20 && q[1] > -20 && q[0] < W + 20 && q[1] < H + 20; }, z = M.getZoom();
+      var counts = {}, jams = 0, tags = [], avoid = [];
+      (TR.inc || []).slice().sort(function(a, b){ var pa = a.properties || {}, pb = b.properties || {};
+        return (pb.iconCategory === 6 ? (pb.delay || 0) : -1) - (pa.iconCategory === 6 ? (pa.delay || 0) : -1); }).forEach(function(it){
+        var p = it.properties || {}, cat = p.iconCategory, geo = it.geometry || {}, pts = geo.type === 'Point' ? [geo.coordinates] : (geo.coordinates || []);
+        if (!pts.length) return;
+        var Q = pts.map(P), mid = Q[Math.floor(Q.length / 2)];
+        if (!Q.some(inF)) return;
+        counts[cat] = (counts[cat] || 0) + 1;
+        g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
+        var line = function(){ g.beginPath(); Q.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); };
+        if (cat === 8){ line(); g.lineWidth = 3.4 * dpr; g.strokeStyle = 'rgba(255,250,240,.85)'; g.stroke(); g.setLineDash([4 * dpr, 3 * dpr]); g.lineWidth = 1.8 * dpr; g.strokeStyle = '#7f1d1d'; g.stroke(); }
+        else if (cat === 6){ var mins = Math.round((p.delay || 0) / 60);
+          if (mins >= 15 && inF(mid)){ jams++;
+            var road = ttJamRoad(p), t = '+' + mins + ' MIN';
+            g.font = '800 ' + (11 * dpr) + 'px system-ui,sans-serif'; var w1 = g.measureText(t).width;
+            g.font = '800 ' + (8.5 * dpr) + 'px system-ui,sans-serif'; var w2 = road ? g.measureText(road).width : 0;
+            var bw = Math.max(w1, w2) + 12 * dpr, bh = (road ? 27 : 18) * dpr, bx = mid[0] - bw / 2, by = mid[1] - bh / 2;
+            if (avoid.some(function(r){ return bx < r[2] && r[0] < bx + bw && by < r[3] && r[1] < by + bh; })){ g.restore(); return; }
+            avoid.push([bx - 2, by - 2, bx + bw + 2, by + bh + 2]); tags.push({ bx: bx, by: by, bw: bw, bh: bh, road: road, t: t, sev: mins >= 30 }); } }
+        else if (cat === 0){ if (Q.length > 1){ line(); g.lineWidth = 3 * dpr; g.strokeStyle = 'rgba(255,252,244,.8)'; g.stroke(); g.setLineDash([3 * dpr, 3 * dpr]); g.lineWidth = 1.6 * dpr; g.strokeStyle = '#2B22F4'; g.stroke(); } }
+        else if (cat === 9 || cat === 7){ if (z >= 12 && inF(mid)){ g.beginPath(); g.arc(mid[0], mid[1], 3.2 * dpr, 0, 6.3); g.fillStyle = '#f59e0b'; g.fill(); g.lineWidth = 1.4 * dpr; g.strokeStyle = 'rgba(8,10,16,.9)'; g.stroke(); } }
+        else if (cat === 11 && inF(mid)){ g.beginPath(); g.arc(mid[0], mid[1], 6.5 * dpr, 0, 6.3); g.fillStyle = '#0369a1'; g.fill(); g.lineWidth = 1.6 * dpr; g.strokeStyle = '#fff'; g.stroke();
+          g.fillStyle = '#fff'; g.font = '900 ' + (10 * dpr) + 'px system-ui,sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('\u2248', mid[0], mid[1] + .5 * dpr); }
+        else if (inF(mid)){ g.beginPath(); g.arc(mid[0], mid[1], 6 * dpr, 0, 6.3); g.fillStyle = '#fff'; g.fill(); g.lineWidth = 2 * dpr; g.strokeStyle = '#b91c1c'; g.stroke();
+          g.fillStyle = '#b91c1c'; g.font = '900 ' + (9.5 * dpr) + 'px system-ui,sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('!', mid[0], mid[1] + .5 * dpr); }
+        g.restore();
+      });
+      tags.forEach(function(tg){
+        g.fillStyle = tg.sev ? '#B80020' : 'rgba(18,20,28,.92)'; g.strokeStyle = tg.sev ? '#fff' : '#FF6B00'; g.lineWidth = 1.4 * dpr;
+        g.beginPath(); if (g.roundRect) g.roundRect(tg.bx, tg.by, tg.bw, tg.bh, 5 * dpr); else g.rect(tg.bx, tg.by, tg.bw, tg.bh); g.fill(); g.stroke();
+        g.fillStyle = '#fff'; g.textAlign = 'center'; g.textBaseline = 'top';
+        g.font = '800 ' + (11 * dpr) + 'px system-ui,sans-serif'; g.fillText(tg.t, tg.bx + tg.bw / 2, tg.by + 3 * dpr);
+        if (tg.road){ g.font = '800 ' + (8.5 * dpr) + 'px system-ui,sans-serif'; g.fillStyle = 'rgba(255,255,255,.85)'; g.fillText(tg.road, tg.bx + tg.bw / 2, tg.by + 16 * dpr); }
+      });
+      /* the band: what is going on in view, then the key */
+      var parts = [];
+      if (TR.incKey === 'wide') parts.push('ZOOM IN TO SEE CRASHES AND CLOSURES');
+      else {
+        if (jams) parts.push(jams + ' JAM' + (jams === 1 ? '' : 'S') + ' COSTING 15+ MIN');
+        if (counts[1]) parts.push(counts[1] + ' CRASH' + (counts[1] === 1 ? '' : 'ES'));
+        if (counts[8]) parts.push(counts[8] + ' ROAD' + (counts[8] === 1 ? '' : 'S') + ' CLOSED');
+        if ((counts[9] || 0) + (counts[7] || 0)) parts.push(((counts[9] || 0) + (counts[7] || 0)) + ' WORK ZONES AND LANE CLOSURES');
+        if (counts[11]) parts.push(counts[11] + ' FLOODED');
+        if (!parts.length && TR.inc) parts.push('NO CRASHES OR CLOSURES IN VIEW');
+      }
+      var k = function(c, t){ return '<span class="lr-k"><span class="lr-dot" style="background:' + c + ';"></span>' + t + '</span>'; };
+      strip.innerHTML = 'TRAFFIC NOW' + (parts.length ? ' \u00b7 ' + parts.join(' \u00b7 ') : '')
+        + '<br>' + k('#05DB32', 'MOVING FREELY') + k('#FFE500', 'SLOWER') + k('#FF6B00', 'SLOW') + k('#FF1B1B', 'VERY SLOW') + k('#B80020', 'NEARLY STOPPED');
+    };
+    TR.on = function(){
+      if (!M) return; TR.lit = true;
+      if (!TR.cv){ var pn = M.getPane('lcTraf') || M.createPane('lcTraf'); pn.style.zIndex = 445; pn.style.pointerEvents = 'none';
+        TR.cv = document.createElement('canvas'); TR.cv.style.position = 'absolute'; pn.appendChild(TR.cv);
+        M.on('zoomstart', function(){ if (TR.cv) TR.cv.style.visibility = 'hidden'; });
+        M.on('moveend zoomend resize', function(){ if (TR.lit !== true) return; TR.draw(); clearTimeout(TR.deb); TR.deb = setTimeout(function(){ TR.read().then(TR.draw); }, 600); }); }
+      TR.cv.style.display = '';
+      if (!TR.lay) TR.lay = TR.layer();
+      if (!M.hasLayer(TR.lay)) TR.lay.addTo(M);
+      strip.textContent = 'READING THE ROADS\u2026';
+      TR.read().then(TR.draw);
+      if (!TR.timer) TR.timer = setInterval(function(){ if (TR.lit !== true || pane.style.display === 'none' || document.hidden) return;
+        if (TR.lay && TR.lay.rerenderTiles) TR.lay.rerenderTiles(); TR.read().then(TR.draw); }, 5 * 6e4);
+    };
+    TR.off = function(){ if (TR.lit !== true) return; TR.lit = false; if (TR.lay && M && M.hasLayer(TR.lay)) M.removeLayer(TR.lay); if (TR.cv) TR.cv.style.display = 'none';
+      if (TR.timer){ clearInterval(TR.timer); TR.timer = null; } };
     /* ---------------------------------------------------------------- views ------ */
     var view = function(v){
       VIEW = v; build(); if (!M) return;
@@ -105656,6 +105787,7 @@ function closeAlertModal(){
       if (v === 'radar'){ R.rebuild(true); OV.start('radar'); }
       else if (v === 'map') OV.start('map');
       else OV.stop();
+      if (v === 'traffic') TR.on(); else TR.off();
       if (v === 'map') strip.textContent = placeName() + ' AND AROUND · DRAG AND ZOOM';
       if (v !== 'rock') FQ.off();
       if (v === 'tide') T.on(); else T.off();
