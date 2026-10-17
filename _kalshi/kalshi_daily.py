@@ -880,12 +880,15 @@ def boundary_straddle(cfg, day, obh, tkey, h0, rmax, sign=1):
     # the settled high minus the park's own 12:51 reading was 0 on 22 nights, -1 on 10, +1 on 4, +-2/3 on 4 -- mean -0.19,
     # spread 0.91. The 12:51 reading IS the estimate; the air rarely falls far in the nine minutes before the boundary, the
     # front usually arriving after it. The midpoint between it and the day's later readings, the old fallback, ran 1.3
-    # low. The airports' change over those nine minutes still nudges it (today: -0.4).
+    # low.
+    # THE AIRPORTS DO NOT HELP (same 40 nights, re-run with their 1-minute record): the 12:51 reading alone missed the
+    # settlement by 0.91 (36 of 40 within a degree); nudged by the airports' change to 1:00 by 0.99 (34 of 38); the park's
+    # own 1:00 minute by 2.20 (the high often lands a few minutes after). So the estimate is the 12:51 reading less its
+    # measured 0.2 bias; the airports' change is kept in the record, not used.
+    dmed = None
     if deltas:
         deltas.sort(); dmed = deltas[len(deltas) // 2]
-        est = min(prev, max(rmax, prev + dmed)); sd = 0.9
-    else:
-        dmed = None; est = max(rmax, prev - 0.2); sd = 0.95
+    est = max(rmax, prev - 0.2); sd = 0.9
     print('%s straddle: %.1f before the climate day, %.1f inside it; airports moved %s by the boundary -> centre %.1f, spread %.2f'
           % (cfg['key'], sign * prev, sign * rmax, 'n/a' if dmed is None else '%+.1f' % (sign * dmed), sign * est, sd))
     return {'prev': round(prev, 1), 'inside': round(rmax, 1), 'est': round(est, 1), 'sd': round(sd, 2), 'n': len(deltas), 'delta': None if dmed is None else round(dmed, 1)}
