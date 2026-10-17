@@ -55606,7 +55606,20 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     }
     /* host/hood (2026-10-17): the national map's FOLIAGE view draws the same card into its own element for the place in the
        search box (window._bvNycTrees); THE CITY calls it bare, as before */
-    function cwNycTrees(host, hood){
+    /* the national inventory's per-city state, cities list and season table (cdn trees/v1) */
+    var cwNtCities = null, cwNtSeason = null, cwNtCS = {};
+    function cwNtCityState(c){ return cwNtCS[c.slug] || (cwNtCS[c.slug] = { ix: null, nta: null, tiles: {}, asked: {} }); }
+    function cwNtCityLoad(c, cb){ var st2 = cwNtCityState(c); if (st2.ix && st2.nta && cwNtSeason) return cb();
+      if (st2._p){ st2._p.push(cb); return; } st2._p = [cb]; var B = 'https://cdn.bluishvoid.com/trees/v1/';
+      Promise.all([fetch(B + c.slug + '/index.json').then(function(r){ return r.json(); }), fetch(B + c.slug + '/nta.json').then(function(r){ return r.json(); }),
+                   cwNtSeason ? Promise.resolve(cwNtSeason) : fetch(B + 'season.json').then(function(r){ return r.json(); })])
+        .then(function(a){ a[0].has = {}; a[0].tiles.forEach(function(k){ a[0].has[k] = 1; }); st2.ix = a[0]; st2.nta = a[1]; cwNtSeason = a[2];
+          var q = st2._p; st2._p = null; q.forEach(function(f2){ try { f2(); } catch(e){} }); }).catch(function(){ st2._p = null; }); }
+    window._bvTreesCity = function(lat, lon, cb){
+      var pick = function(){ cb((cwNtCities || []).filter(function(c){ var b = c.bbox; return lon >= b[0] && lon <= b[2] && lat >= b[1] && lat <= b[3]; })[0] || null); };
+      if (cwNtCities) return pick();
+      fetch('https://cdn.bluishvoid.com/trees/v1/cities.json').then(function(r){ return r.json(); }).then(function(j){ cwNtCities = j || []; pick(); }).catch(function(){ cwNtCities = []; pick(); }); };
+    function cwNycTrees(host, hood, city){
       var card, h;
       if (host){ card = host; h = hood; }
       else {
@@ -55620,23 +55633,29 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       h = window._cityHood;
       }
       if (!h || !isFinite(+h.lat)){ card.innerHTML = '<div class="cw-nt-l"><b>NYC STREET TREES</b> · PICK A NEIGHBORHOOD OR ADDRESS ABOVE TO SEE THE TREES AROUND IT</div>'; return; }
-      var key = (+h.lat).toFixed(5) + ',' + (+h.lon).toFixed(5) + ',' + new Date().getMonth();
+      /* ANY CITY WITH AN INVENTORY (2026-10-17): city = an entry of cdn trees/v1/cities.json (McCoy et al. 2022, CC0) -- the same
+         card from that city's tiles, its own count year, its own neighborhoods ranked per hectare, and the season calendar
+         moved to its climate (shift); New York keeps its 2015 census exactly as before */
+      var st = city ? cwNtCityState(city) : cwNt, load = city ? function(cb){ cwNtCityLoad(city, cb); } : cwNtLoad;
+      var base = city ? 'https://cdn.bluishvoid.com/trees/v1/' + city.slug + '/' : '/trees/';
+      var TITLE = city ? mtaEsc(String(city.name).toUpperCase()) + ' STREET TREES' : 'NYC STREET TREES';
+      var key = (city ? city.slug + ',' : '') + (+h.lat).toFixed(5) + ',' + (+h.lon).toFixed(5) + ',' + new Date().getMonth();
       if (card._key === key) return;
-      cwNtLoad(function(){
-        var lat = +h.lat, lon = +h.lon, C = cwNt.ix.cell, need = [];
+      load(function(){
+        var lat = +h.lat, lon = +h.lon, C = st.ix.cell, need = [];
         for (var ty = Math.floor((lat - 0.0025) / C); ty <= Math.floor((lat + 0.0025) / C); ty++)
-          for (var tx = Math.floor((lon - 0.0033) / C); tx <= Math.floor((lon + 0.0033) / C); tx++){ var k = ty + '_' + tx; if (cwNt.ix.has[k]) need.push([k, ty, tx]); }
-        var miss = need.filter(function(n){ return !cwNt.tiles[n[0]]; });
+          for (var tx = Math.floor((lon - 0.0033) / C); tx <= Math.floor((lon + 0.0033) / C); tx++){ var k = ty + '_' + tx; if (st.ix.has[k]) need.push([k, ty, tx]); }
+        var miss = need.filter(function(n){ return !st.tiles[n[0]]; });
         if (miss.length){
-          miss.forEach(function(n){ if (cwNt.asked[n[0]]) return; cwNt.asked[n[0]] = 1;
-            fetch('/trees/t_' + n[0] + '.json?v=2').then(function(r){ return r.json(); }).then(function(rows){ cwNt.tiles[n[0]] = { rows: rows, ty: n[1], tx: n[2] }; cwNycTrees(host, hood); })
-              .catch(function(){ delete cwNt.asked[n[0]]; }); });
-          if (!card.innerHTML) card.innerHTML = '<div class="cw-nt-l"><b>NYC STREET TREES</b> · READING THE CENSUS…</div>';
+          miss.forEach(function(n){ if (st.asked[n[0]]) return; st.asked[n[0]] = 1;
+            fetch(base + 't_' + n[0] + '.json?v=2').then(function(r){ return r.json(); }).then(function(rows){ st.tiles[n[0]] = { rows: rows, ty: n[1], tx: n[2] }; cwNycTrees(host, hood, city); })
+              .catch(function(){ delete st.asked[n[0]]; }); });
+          if (!card.innerHTML) card.innerHTML = '<div class="cw-nt-l"><b>' + TITLE + '</b> · READING THE CENSUS…</div>';
           return;
         }
         card._key = key;
-        var S = cwNt.ix.sp, kx = Math.cos(lat * Math.PI / 180) * 111320, near = [], best = null, bestD = 1e9;
-        need.forEach(function(n){ var T = cwNt.tiles[n[0]]; T.rows.forEach(function(q){
+        var S = st.ix.sp, kx = Math.cos(lat * Math.PI / 180) * 111320, near = [], best = null, bestD = 1e9;
+        need.forEach(function(n){ var T = st.tiles[n[0]]; T.rows.forEach(function(q){
           var la = T.ty * C + q[1] / 1e5, lo = T.tx * C + q[2] / 1e5, dx = (lo - lon) * kx, dy = (la - lat) * 110540, d = Math.sqrt(dx * dx + dy * dy);
           if (d < bestD){ bestD = d; best = q; }
           if (d <= 200 && q[5] <= 3) near.push(q); }); });
@@ -55647,19 +55666,27 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var where = mtaEsc(String(h.name || '').toUpperCase());
         var L = function(lab, body){ return '<div class="cw-nt-l"><span class="cw-nt-k">' + lab + '</span>' + body + '</div>'; };
         var ph = window.innerWidth <= 768;   /* phones: the same three lines, said shorter */
-        var html = '<div class="cw-nt-h"><b>NYC STREET TREES</b><span>· ' + where + '</span><span class="cw-nt-src">' + bvA(ph ? '2015 CENSUS' : '2015 STREET TREE CENSUS', 'https://data.cityofnewyork.us/Environment/2015-Street-Tree-Census-Tree-Data/uvpi-gqnh') + '</span></div>';
+        var yr = city ? (city.year ? String(city.year) : '') : '2015';
+        var html = '<div class="cw-nt-h"><b>' + TITLE + '</b><span>· ' + where + '</span><span class="cw-nt-src">' + (city
+          ? bvA(ph ? 'CITY INVENTORY' : (yr ? yr + ' ' : '') + 'CITY TREE INVENTORY \u00b7 MCCOY ET AL. 2022', 'https://datadryad.org/dataset/doi:10.5061/dryad.2jm63xsrf')
+          : bvA(ph ? '2015 CENSUS' : '2015 STREET TREE CENSUS', 'https://data.cityofnewyork.us/Environment/2015-Street-Tree-Census-Tree-Data/uvpi-gqnh')) + '</span></div>';
         /* 1. the block */
         html += L('YOUR BLOCK', near.length
           ? '<b>' + near.length + ' TREES</b> WITHIN ' + (ph ? '2 BLOCKS' : '200 M (ABOUT TWO BLOCKS)') + ' · MOSTLY ' + top.slice(0, ph ? 2 : 3).map(function(i){ return nm(i) + ' ' + spc[i]; }).join(', ')
             + (big && big[3] && !ph ? ' · BIGGEST: A ' + big[3] + '″ ' + (big[4] >= 0 ? nm(big[4]) : 'TREE') : '')
-            + ' · <b>' + Math.round(100 * good / near.length) + '%</b> IN GOOD HEALTH'
+            + (near.some(function(q){ return q[5] < 3; }) ? ' · <b>' + Math.round(100 * good / near.length) + '%</b> IN GOOD HEALTH' : '')
           : 'NO STREET TREES COUNTED WITHIN 200 M');
         /* 2. the season, for the species actually around */
         var now = new Date(), mv = now.getMonth() + 1 + (now.getDate() - 1) / 31, said = [];
-        var mine = top.filter(function(i){ return spc[i] >= 2 && CW_TREE_SEASON[S[i][0]]; }).slice(0, ph ? 3 : 5);
+        /* New York's calendar, or another city's: every month moved by its climate shift (spring, fall) */
+        var SH = city && city.shift, seasonOf = function(name){ var z0 = CW_TREE_SEASON[name] || (city && cwNtSeason && cwNtSeason[String(name).toLowerCase()]); if (!z0 || !SH) return z0;
+          var mv2 = function(a, d){ return a ? [a[0] + d, a[1] + d].concat(a.slice(2)) : a; };
+          return { p: mv2(z0.p, SH[0] || 0), b: mv2(z0.b, SH[0] || 0), f: SH[1] == null ? null : mv2(z0.f, SH[1]), ev: z0.ev }; };
+        var mine = top.filter(function(i){ return spc[i] >= 2 && seasonOf(S[i][0]); }).slice(0, ph ? 3 : 5);
         mine.forEach(function(i){
-          var z = CW_TREE_SEASON[S[i][0]], n0 = nm(i);
-          if (mv >= 8.8 && mv < 12){
+          var z = seasonOf(S[i][0]), n0 = nm(i);
+          if (z.ev){ if (mv >= 8.8 && mv < 12) said.push(n0 + ' EVERGREEN'); return; }
+          if (mv >= 8.8 && mv < 12.5){
             if (!z.f) return;
             said.push(mv < z.f[0] - 0.25 ? n0 + ' TURNS ' + z.f[2].toUpperCase() + ' AROUND ' + cwTreeWhen(z.f[0])
               : mv <= z.f[1] ? n0 + ' <b>TURNING ' + z.f[2].toUpperCase() + ' NOW</b>' : n0 + ' MOSTLY BARE');
@@ -55680,19 +55707,19 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         if (mv >= 12 || mv < 2.3) said.unshift('BARE UNTIL SPRING');
         html += L('THIS SEASON', said.length ? said.join(' · ') : 'NOTHING SEASONAL TO SAY FOR THESE SPECIES RIGHT NOW');
         /* 3. the neighborhood */
-        var NT = cwNt.nta.nta, me = best ? NT[best[6]] : null;
+        var NT = st.nta.nta, me = best ? NT[best[6]] : null;
         if (me && me[4]){
           var rk = NT.filter(function(r){ return r[4] >= 30; }).map(function(r){ return [r[0], r[3] / r[4]]; }).sort(function(a, b){ return b[1] - a[1]; });
           var pos = 0; rk.forEach(function(r, i){ if (r[0] === me[0]) pos = i + 1; });
-          html += L('NEIGHBORHOOD', '<strong>' + mtaEsc(me[1]).toUpperCase() + '</strong> · <b>' + (me[3] / me[4]).toFixed(1) + '</b> STREET TREES A BLOCK'
-            + (pos ? ' · <b>#' + pos + ' OF ' + rk.length + '</b>' : '') + ' (CITY MEDIAN ' + cwNt.nta.median.toFixed(1) + ')'
+          html += L('NEIGHBORHOOD', '<strong>' + mtaEsc(me[1]).toUpperCase() + '</strong> · <b>' + (me[3] / me[4]).toFixed(1) + '</b> STREET TREES ' + (city ? 'A HECTARE' : 'A BLOCK')
+            + (pos ? ' · <b>#' + pos + ' OF ' + rk.length + '</b>' : '') + ' (CITY MEDIAN ' + st.nta.median.toFixed(1) + ')'
             + (me[6] && me[6].length && !ph ? ' · MOST COMMON: ' + me[6].map(nm).join(', ') : ''));
         }
-        html += '<div class="cw-nt-n">' + (ph ? 'TYPICAL SEASON TIMES, NOT READ FROM YOUR BLOCK' : 'COUNTED IN 2015 · SEASON TIMES ARE THE SPECIES’ TYPICAL NEW YORK CALENDAR, NOT READ FROM YOUR BLOCK') + '</div>';
+        html += '<div class="cw-nt-n">' + (ph ? 'TYPICAL SEASON TIMES, NOT READ FROM YOUR BLOCK' : (city ? (yr ? 'COUNTED ' + yr + ' · ' : '') + 'SEASON TIMES ARE THE SPECIES\u2019 TYPICAL CALENDAR MOVED TO THIS CLIMATE, NOT READ FROM YOUR BLOCK' : 'COUNTED IN 2015 · SEASON TIMES ARE THE SPECIES’ TYPICAL NEW YORK CALENDAR, NOT READ FROM YOUR BLOCK')) + '</div>';
         card.innerHTML = html;
       });
     }
-    window._bvNycTrees = function(host, hood){ try { cwNycTrees(host, hood); } catch (e){} };
+    window._bvNycTrees = function(host, hood, city){ try { cwNycTrees(host, hood, city); } catch (e){} };
     function cwMapModeWide(){ return !!cw.wide; }
     function cwFoliageSync(wv){
       var tm = document.getElementById('cw-wide-tag-main');
@@ -107362,9 +107389,14 @@ function closeAlertModal(){
     /* THE STREET TREES CARD, NYC ONLY (THE CITY's own, window._bvNycTrees): above the caption, for the place itself */
     LF.trees = function(){
       var el = document.getElementById('lc-nyctrees'), L1 = window.LOCATION || {};
-      if (!LF.lit || !nycHere() || !window._bvNycTrees){ if (el) el.style.display = 'none'; return; }
-      if (!el){ el = document.createElement('div'); el.id = 'lc-nyctrees'; strip.parentNode.insertBefore(el, strip); }
-      el.style.display = ''; window._bvNycTrees(el, { lat: +L1.lat, lon: +L1.lon });
+      /* NYC from its 2015 census; any of the 47 cities in the national inventory from theirs; elsewhere no card */
+      var show = function(city){ if (!LF.lit) return;
+        if (!el){ el = document.createElement('div'); el.id = 'lc-nyctrees'; strip.parentNode.insertBefore(el, strip); }
+        el.style.display = ''; window._bvNycTrees(el, { lat: +L1.lat, lon: +L1.lon, name: L1.name }, city || undefined); };
+      if (!LF.lit || !window._bvNycTrees){ if (el) el.style.display = 'none'; return; }
+      if (nycHere()) return show(null);
+      if (!window._bvTreesCity){ if (el) el.style.display = 'none'; return; }
+      window._bvTreesCity(+L1.lat, +L1.lon, function(c){ if (c) show(c); else if (el) el.style.display = 'none'; });
     };
     LF.park = function(){
       LF.trees();
