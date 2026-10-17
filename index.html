@@ -104775,7 +104775,7 @@ function closeAlertModal(){
       M.on('click', function(e){ if (VIEW === 'rock') rockTap(e.latlng); if (VIEW === 'leaf') LF.tap(e); });
     };
     /* ---------------------------------------------------------------- RADAR ------ */
-    var R = { sid: '', prod: 'bref', times: { bref: [], bvel: [] }, ov: [], i: 0, timer: null, capsAt: 0, deb: null };
+    var R = { sid: '', prod: 'bref', times: { bref: [], bvel: [], bdhc: [], boha: [], bdsa: [] }, ov: [], i: 0, timer: null, capsAt: 0, deb: null };
     /* REFLECTIVITY IS MRMS, VELOCITY IS THE STATION (2026-10-16): the station's raw super-res reflectivity at night was clear-air
        speckle over half the map (insects, sea clutter); NOAA's MRMS QC'd base reflectivity -- the same radars, KCLX among them,
        with non-weather echoes removed -- every 2 min. Velocity has no national mosaic, so it stays the station's own scan. */
@@ -104786,7 +104786,36 @@ function closeAlertModal(){
     R.hi = function(){ return R.prod === 'bref' && M && M.getZoom() >= 9 && !!window._bvDespeckle; };
     R.key = function(){ return R.hi() ? 'srbref' : R.prod; };
     R.ws = function(){ return R.prod === 'bref' && !R.hi() ? 'conus' : R.sid; };
-    R.layer = function(){ return R.prod === 'bref' ? (R.hi() ? R.sid + '_sr_bref' : 'conus_bref_qcd') : R.sid + '_sr_bvel'; };
+    R.layer = function(){ return R.prod === 'bref' ? (R.hi() ? R.sid + '_sr_bref' : 'conus_bref_qcd') : R.prod === 'bvel' ? R.sid + '_sr_bvel' : R.sid + '_' + R.prod; };
+    /* DUAL-POL, FOR EVERY STATION (user 2026-10-17: "add dual pol radar to all views with their local option in the RADAR view").
+       THE CITY's four products, read from whichever radar is local: what is falling (the hydrometeor class, bdhc), the last
+       hour's rain and the storm total (boha, bdsa) -- all three on the same NOAA per-station map service as velocity -- and
+       the correlation coefficient, decoded in the page from the station's Level III file (_radar/level3.js, Unidata's
+       bucket) and masked to echoes of 20 dBZ and up, as THE CITY masks it. One CC scan, refreshed every 4 minutes. */
+    R.PRODS = [['bref', 'REFLECTIVITY'], ['bvel', 'VELOCITY'], ['bdhc', 'PRECIP TYPE'], ['boha', '1-HR RAIN'], ['bdsa', 'STORM TOTAL'], ['cc', 'DUAL-POL CC']];
+    R.HC = [['156,156,156', 'BIRDS, BUGS'], ['118,118,118', 'GROUND CLUTTER'], ['255,176,176', 'ICE CRYSTALS'], ['0,255,255', 'DRY SNOW'], ['0,144,255', 'WET SNOW'],
+      ['0,251,144', 'RAIN'], ['0,187,0', 'HEAVY RAIN'], ['208,208,96', 'BIG DROPS'], ['210,132,132', 'GRAUPEL'], ['255,0,0', 'HAIL AND RAIN'], ['160,20,20', 'LARGE HAIL'],
+      ['255,255,0', 'GIANT HAIL'], ['231,0,255', 'UNKNOWN']];
+    R.legend = function(){ var chip = function(rgb, t){ return '<span style="display:inline-flex;align-items:center;gap:3px;margin-right:8px;white-space:nowrap;"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:rgb(' + rgb + ');"></span>' + t + '</span>'; };
+      if (R.prod === 'bdhc') return R.HC.map(function(c){ return chip(c[0], c[1]); }).join('');
+      if (R.prod === 'boha' || R.prod === 'bdsa') return '<span style="white-space:nowrap;">INCHES</span> <img alt="" src="' + R.base() + '?service=WMS&request=GetLegendGraphic&format=image/png&layer=' + R.layer() + '" style="height:15px;vertical-align:middle;border-radius:2px;max-width:70%;">';
+      if (R.prod === 'cc') return 'NEAR 1: PURE RAIN OR SNOW \u00b7 LOWER: HAIL, THE MELTING LAYER, LOFTED TORNADO DEBRIS \u00b7 ONLY WHERE THE ECHO IS 20 DBZ OR MORE' + (R.ccErr ? ' \u00b7 <span style="color:#ffd7a0;">THIS STATION\u2019S CC SCAN DID NOT LOAD</span>' : '');
+      return ''; };
+    R.l3 = function(){ var p = function(src){ return new Promise(function(res, rej){ if (document.querySelector('script[src="' + src + '"]')) return res();
+        var sc = document.createElement('script'); sc.src = src; sc.onload = function(){ res(); }; sc.onerror = rej; document.head.appendChild(sc); }); };
+      return p('/_radar/bunzip.js').then(function(){ return p('/_radar/level3.js'); }); };
+    R.ccLoad = function(bb){
+      var site = R.sid.slice(1).toUpperCase(), sz = M.getSize(), k = Math.min(1, 1400 / Math.max(sz.x, sz.y)), W = Math.round(sz.x * k), H = Math.round(sz.y * k);
+      var nw = L.CRS.EPSG3857.project(bb.getNorthWest()), se = L.CRS.EPSG3857.project(bb.getSouthEast()), Rm = 6378137, D = Math.PI / 180;
+      var proj = function(lat, lon){ var x = Rm * lon * D, y = Rm * Math.log(Math.tan(Math.PI / 4 + lat * D / 2)); return [(x - nw.x) / (se.x - nw.x) * W, (nw.y - y) / (nw.y - se.y) * H]; };
+      return R.l3().then(function(){ return Promise.all([window.bvL3.latest(site, 'N0C'), window.bvL3.latest(site, 'N0B')]); })
+        .then(function(ls){ return Promise.all([window.bvL3.load(ls[0].url), window.bvL3.load(ls[1].url)]); })
+        .then(function(dd){ var d = dd[0], z = dd[1], nz = z.gates.n, n = d.gates.n, zaz = z.radials.map(function(r){ return r.az; });
+          for (var i = 0; i < d.radials.length; i++){ var az = d.radials[i].az, bj = 0, bd = 999;
+            for (var j = 0; j < zaz.length; j++){ var q = Math.abs(((zaz[j] - az + 540) % 360) - 180); if (q < bd){ bd = q; bj = j; } }
+            for (var g = 0; g < n; g++){ var rk = d.gates.first + (g + 0.5) * d.gates.size, zg = Math.round((rk - z.gates.first) / z.gates.size - 0.5);
+              var zv = (zg >= 0 && zg < nz) ? z.values[bj * nz + zg] : NaN; if (!(zv >= 20)){ d.values[i * n + g] = NaN; d.codes[i * n + g] = 0; } } }
+          var r = window.bvL3.toCanvas(d, proj, { width: W, height: H, scale: 'cc' }); return { url: r.canvas.toDataURL('image/png'), t: d.time }; }); };
     R.base = function(){ return 'https://opengeo.ncep.noaa.gov/geoserver/' + R.ws() + '/ows'; };
     R.caps = function(cb){
       R.capsAt = Date.now();
@@ -104810,9 +104839,9 @@ function closeAlertModal(){
       var tz = (window.LOCATION || {}).tz, w; try { w = new Date(o.t).toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }); } catch(e){ w = ''; }
       var nm = String((window.LOCATION || {}).radarName || '').toUpperCase();
       strip.innerHTML = (R.prod === 'bref' && !R.hi() ? 'MRMS RADAR MOSAIC (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)' : esc(R.sid.toUpperCase()) + (R.hi() ? ' SUPER-RES' : '') + (nm ? ' · ' + esc(nm) : '')) + ' · ' + esc(w) + ' SCAN'
-        + '<span style="float:right;"><button type="button" class="lc-pill' + (R.prod === 'bref' ? ' on' : '') + '" data-p="bref">REFLECTIVITY</button>'
-        + '<button type="button" class="lc-pill' + (R.prod === 'bvel' ? ' on' : '') + '" data-p="bvel">VELOCITY</button>'
-        + '<button type="button" class="lc-pill' + (OV.satOn ? ' on' : '') + '" data-s="1">SATELLITE</button></span>';
+        + '<span style="float:right;">' + R.PRODS.map(function(q){ return '<button type="button" class="lc-pill' + (R.prod === q[0] ? ' on' : '') + '" data-p="' + q[0] + '">' + q[1] + '</button>'; }).join('')
+        + '<button type="button" class="lc-pill' + (OV.satOn ? ' on' : '') + '" data-s="1">SATELLITE</button></span>'
+        + (R.legend() ? '<div style="clear:both;margin-top:3px;font-size:.92em;line-height:1.6;">' + R.legend() + '</div>' : '');
       [].forEach.call(strip.querySelectorAll('.lc-pill'), function(b){ b.onclick = function(e){ e.stopPropagation();
         if (b.getAttribute('data-s')){ OV.satOn = !OV.satOn; try { localStorage.setItem('bv_lc_sat', OV.satOn ? '1' : '0'); } catch(e2){} b.classList.toggle('on', OV.satOn); OV.satSync(true); return; }
         R.prod = b.getAttribute('data-p'); R.rebuild(true); }; }); };
@@ -104820,6 +104849,14 @@ function closeAlertModal(){
       clearTimeout(R.deb);
       R.deb = setTimeout(function(){
         if (!M || VIEW !== 'radar') return;
+        if (R.prod === 'cc'){
+          R.clear(); var bb0 = M.getBounds(), gen = R.ccGen = (R.ccGen || 0) + 1;
+          var once = function(){ R.ccLoad(bb0).then(function(o){ if (gen !== R.ccGen || R.prod !== 'cc' || VIEW !== 'radar') return; R.ccErr = false;
+              R.ov.forEach(function(q){ M.removeLayer(q.l); }); R.ov = [{ l: L.imageOverlay(o.url, bb0, { opacity: .85, interactive: false, zIndex: 3 }).addTo(M), t: o.t }]; R.i = 0; R.label(); })
+            .catch(function(){ if (gen !== R.ccGen) return; R.ccErr = true; R.ov = []; strip.innerHTML = 'NO CC SCAN FROM ' + esc(R.sid.toUpperCase()) + ' RIGHT NOW'; R.ov = [{ l: L.layerGroup(), t: Date.now() }]; R.i = 0; R.label(); }); };
+          once(); R.timer = setInterval(function(){ if (!document.hidden && pane.style.display !== 'none') once(); }, 240000);
+          return;
+        }
         var go = function(){
           R.clear();
           var ts = (R.times[R.key()] || []).slice(-10); if (!ts.length){ strip.textContent = 'NO RECENT SCANS FROM ' + R.sid.toUpperCase() + ' RIGHT NOW'; return; }
