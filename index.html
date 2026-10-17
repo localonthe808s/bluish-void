@@ -54233,6 +54233,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       _dsMain(url, cb, shut);
     });
   }
+  /* shared with the national map's LOCAL radar (2026-10-16, one map engine): THE CITY's palette scrub + mosaic gate */
+  window._bvDespeckle = function(url, cb){ _despeckleWms(url, cb, _localMaskUrl(url)); };
   function _dsMain(url, cb, shut){
     if (_despeckleCache[url]) return cb(_despeckleCache[url]);
     var im = new Image();
@@ -104589,12 +104591,18 @@ function closeAlertModal(){
     /* REFLECTIVITY IS MRMS, VELOCITY IS THE STATION (2026-10-16): the station's raw super-res reflectivity at night was clear-air
        speckle over half the map (insects, sea clutter); NOAA's MRMS QC'd base reflectivity -- the same radars, KCLX among them,
        with non-weather echoes removed -- every 2 min. Velocity has no national mosaic, so it stays the station's own scan. */
-    R.ws = function(){ return R.prod === 'bref' ? 'conus' : R.sid; };
-    R.layer = function(){ return R.prod === 'bref' ? 'conus_bref_qcd' : R.sid + '_sr_bvel'; };
+    /* SUPER-RES UP CLOSE (2026-10-16, step 3: THE CITY's radar on the national map). MRMS is ~1 km a pixel: blocks at city
+       zoom. From z9 in, reflectivity is the nearest station's own super-res scan (~250 m), run through THE CITY's despeckler
+       (window._bvDespeckle: the palette scrub that removes clear-air bloom, and the MRMS gate that blanks a frame the QC'd
+       mosaic calls dry). Wider than that, the mosaic -- which spans every station -- stays. */
+    R.hi = function(){ return R.prod === 'bref' && M && M.getZoom() >= 9 && !!window._bvDespeckle; };
+    R.key = function(){ return R.hi() ? 'srbref' : R.prod; };
+    R.ws = function(){ return R.prod === 'bref' && !R.hi() ? 'conus' : R.sid; };
+    R.layer = function(){ return R.prod === 'bref' ? (R.hi() ? R.sid + '_sr_bref' : 'conus_bref_qcd') : R.sid + '_sr_bvel'; };
     R.base = function(){ return 'https://opengeo.ncep.noaa.gov/geoserver/' + R.ws() + '/ows'; };
     R.caps = function(cb){
       R.capsAt = Date.now();
-      var p = R.prod, lay = R.layer();
+      var p = R.key(), lay = R.layer();
       fetch(R.base() + '?service=WMS&request=GetCapabilities').then(function(r){ return r.ok ? r.text() : ''; }).then(function(x){
         var li = x.indexOf('<Name>' + lay + '</Name>');
         if (li >= 0){ var di = x.indexOf('<Dimension name="time"', li), de = x.indexOf('</Dimension>', di);
@@ -104613,7 +104621,7 @@ function closeAlertModal(){
     R.label = function(){ var o = R.ov[R.i]; if (!o) return;
       var tz = (window.LOCATION || {}).tz, w; try { w = new Date(o.t).toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }); } catch(e){ w = ''; }
       var nm = String((window.LOCATION || {}).radarName || '').toUpperCase();
-      strip.innerHTML = (R.prod === 'bref' ? 'MRMS RADAR MOSAIC (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)' : esc(R.sid.toUpperCase()) + (nm ? ' · ' + esc(nm) : '')) + ' · ' + esc(w) + ' SCAN'
+      strip.innerHTML = (R.prod === 'bref' && !R.hi() ? 'MRMS RADAR MOSAIC (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)' : esc(R.sid.toUpperCase()) + (R.hi() ? ' SUPER-RES' : '') + (nm ? ' · ' + esc(nm) : '')) + ' · ' + esc(w) + ' SCAN'
         + '<span style="float:right;"><button type="button" class="lc-pill' + (R.prod === 'bref' ? ' on' : '') + '" data-p="bref">REFLECTIVITY</button>'
         + '<button type="button" class="lc-pill' + (R.prod === 'bvel' ? ' on' : '') + '" data-p="bvel">VELOCITY</button>'
         + '<button type="button" class="lc-pill' + (OV.satOn ? ' on' : '') + '" data-s="1">SATELLITE</button></span>';
@@ -104626,9 +104634,12 @@ function closeAlertModal(){
         if (!M || VIEW !== 'radar') return;
         var go = function(){
           R.clear();
-          var ts = (R.times[R.prod] || []).slice(-10); if (!ts.length){ strip.textContent = 'NO RECENT SCANS FROM ' + R.sid.toUpperCase() + ' RIGHT NOW'; return; }
+          var ts = (R.times[R.key()] || []).slice(-10); if (!ts.length){ strip.textContent = 'NO RECENT SCANS FROM ' + R.sid.toUpperCase() + ' RIGHT NOW'; return; }
           var bb = M.getBounds();
-          ts.forEach(function(t, k){ var o = L.imageOverlay(R.url(t), bb, { opacity: 0, interactive: false, crossOrigin: 'anonymous', zIndex: 3 }).addTo(M); R.ov.push({ l: o, t: t }); });
+          var hi = R.hi();
+          ts.forEach(function(t, k){ var u0 = R.url(t), o = L.imageOverlay(hi ? 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==' : u0, bb, { opacity: 0, interactive: false, crossOrigin: 'anonymous', zIndex: 3 }).addTo(M);
+            R.ov.push({ l: o, t: t });
+            if (hi) window._bvDespeckle(u0, function(u1){ if (R.ov.indexOf(R.ov.filter(function(q){ return q.l === o; })[0]) >= 0) o.setUrl(u1); }); });
           R.i = R.ov.length - 1; R.ov[R.i].l.setOpacity(.82); R.label();
           if (R.prod === 'bref') OV.motionFrom(R.ov.slice(), bb);
           var hold = 0;
@@ -104636,7 +104647,7 @@ function closeAlertModal(){
             if (R.i === R.ov.length - 1 && hold++ < 3) return; hold = 0;            /* rest on the newest scan */
             R.ov[R.i].l.setOpacity(0); R.i = (R.i + 1) % R.ov.length; R.ov[R.i].l.setOpacity(.82); R.label(); }, 550);
         };
-        if (now === true || Date.now() - R.capsAt > 120000 || !(R.times[R.prod] || []).length) R.caps(go); else go();
+        if (now === true || Date.now() - R.capsAt > 120000 || !(R.times[R.key()] || []).length || R.lastKey !== R.key()){ R.lastKey = R.key(); R.caps(go); } else go();
       }, now === true ? 0 : 250);
     };
     /* HAZARDS, LIGHTNING AND FRONTS over the radar (user 2026-10-16: "the charleston radar should have hazards showing and
@@ -105079,7 +105090,7 @@ function closeAlertModal(){
       var a = ov[0], b = ov[ov.length - 1], tries = 0;
       var go = function(){
         var ea = a.l.getElement(), eb = b.l.getElement();
-        if (!(ea && eb && ea.complete && eb.complete && ea.naturalWidth && eb.naturalWidth)){ if (tries++ < 30) setTimeout(go, 1000); return; }
+        if (!(ea && eb && ea.complete && eb.complete && ea.naturalWidth > 10 && eb.naturalWidth > 10)){ if (tries++ < 40) setTimeout(go, 1000); return; }   /* > 10: not the 1 px placeholder a despeckled frame waits in */
         var sw = L.CRS.EPSG3857.project(bb.getSouthWest()), ne = L.CRS.EPSG3857.project(bb.getNorthEast());
         var box = { X0: sw.x, Y0: sw.y, X1: ne.x, Y1: ne.y }, L1 = window.LOCATION || {};
         OV.frame = { el: eb, box: box, t: b.t };
@@ -105100,7 +105111,7 @@ function closeAlertModal(){
     };
     OV.nowcast = function(){
       OV.nc = null; var F = OV.frame, mo = OV.motion, L1 = window.LOCATION || {};
-      if (!F || !mo || !F.el.naturalWidth) return;
+      if (!F || !mo || !(F.el.naturalWidth > 10)) return;
       var w = F.el.naturalWidth, h = F.el.naturalHeight, c = OV.ncCv || (OV.ncCv = document.createElement('canvas')); c.width = w; c.height = h;
       var g2 = c.getContext('2d', { willReadFrequently: true }), d;
       try { g2.clearRect(0, 0, w, h); g2.drawImage(F.el, 0, 0); d = g2.getImageData(0, 0, w, h).data; } catch(e){ return; }
