@@ -38,6 +38,62 @@ def na(lon, lat):
         (-70.2 <= lon <= -68.2 and lat >= 11.9) or (-62 <= lon <= -60.4 and lat >= 10) or (-61.9 <= lon <= -61.3 and lat >= 11.9)))  # ...but keep ABC, Trinidad-Tobago, Grenada
     return lat > 59 and lon < -11                                     # Greenland
 
+def in_hudson(lon, lat):
+    """the corridor of _maplab/coast_bake/hudson_cut.py (2026-10-11), Battery to Troy"""
+    if lat < 40.705 or lat > 42.80: return False
+    if lat < 40.86: return -74.05 < lon < (-74.017 + (lat - 40.70) * 0.6)
+    if lat < 41.1: return -73.99 < lon < -73.84
+    if lat < 41.6: return -74.04 < lon < -73.84
+    return -74.08 < lon < -73.60
+
+def outer_only(lines, mouth=4.0, minpath=8.0, ratio=3.0, step=0.25):
+    """THE GREEN STAYS ON THE OUTER LAND (user 2026-10-16: "is there a way you could break up the line and not have the line
+    cross over the water ... maybe just let the green stick to the outer land"). Where the coastline wanders into a water
+    body through a mouth under `mouth` km and comes back out more than max(`minpath`, `ratio` x the mouth) km of shore
+    later, that stretch is an inlet, sound or estuary interior and is dropped: the line breaks at the mouth, nothing crosses.
+    Inlet or peninsula is told by the turn: the sea is on the LEFT of each line, so a loop that encloses water runs
+    COUNTER-CLOCKWISE (positive signed area, x east / y north) and is cut; a peninsula's loop runs clockwise and stays.
+    Works on the merged lines, resampled to ~250 m for the neighbour search."""
+    from scipy.spatial import cKDTree
+    from shapely.ops import linemerge
+    merged = linemerge(MultiLineString(lines)) if len(lines) > 1 else lines[0]
+    merged = list(merged.geoms) if merged.geom_type == 'MultiLineString' else [merged]
+    out, cut_km = [], 0.0
+    for ln in merged:
+        P = np.asarray(ln.coords)
+        if len(P) < 4: out.append(ln); continue
+        X = P[:, 0] * 111.32 * np.cos(np.radians(P[:, 1])); Y = P[:, 1] * 111.32
+        sl = np.concatenate([[0], np.cumsum(np.hypot(np.diff(X), np.diff(Y)))])
+        if sl[-1] < minpath: out.append(ln); continue
+        keep = [0]
+        for i in range(1, len(P)):
+            if sl[i] - sl[keep[-1]] >= step: keep.append(i)
+        keep = np.array(keep)
+        if len(keep) < 4: out.append(ln); continue
+        tree = cKDTree(np.column_stack([X[keep], Y[keep]]))
+        drop = np.zeros(len(P), bool); intervals = []
+        for a, nb in enumerate(tree.query_ball_point(np.column_stack([X[keep], Y[keep]]), mouth)):
+            i = keep[a]; far = None
+            for b in nb:
+                if b <= a: continue
+                j = keep[b]; d = math.hypot(X[j] - X[i], Y[j] - Y[i]); ds = sl[j] - sl[i]
+                if ds > max(minpath, ratio * max(d, 0.05)) and (far is None or j > far): far = j
+            if far is None: continue
+            xs, ys = X[i:far + 1], Y[i:far + 1]
+            area = 0.5 * (np.dot(xs[:-1], ys[1:]) - np.dot(xs[1:], ys[:-1]) + xs[-1] * ys[0] - xs[0] * ys[-1])
+            if area > 0: intervals.append((i, far))
+        for i, j in intervals: drop[i + 1:j] = True
+        cut_km += float(np.sum(np.diff(sl)[drop[1:] & drop[:-1]]))
+        run = []
+        for k in range(len(P)):
+            if drop[k]:
+                if len(run) > 1: out.append(LineString(run))
+                run = []
+            else: run.append(P[k])
+        if len(run) > 1: out.append(LineString(run))
+    print('outer coast: %d lines, %.0f km of inlet and sound shores dropped' % (len(out), cut_km), flush=True)
+    return out
+
 def water11(tiles, cache):
     """non-ocean water polygons (lon/lat) from the basemap's z11 tiles, cached"""
     import pickle, urllib.request
@@ -109,11 +165,24 @@ def main(shp, out, cache=None):
     from shapely import make_valid
     polys = [make_valid(q) for q in polys]                   # the tiles carry a few self-touching rings (one at -128.03, 52.15)
     print('water polygons', len(polys), flush=True)
-    from shapely import points as _points
-    tree = STRtree(polys)
-    hit = tree.query(_points(probes), predicate='within')
+    # fast: an index over the PROBES, each water polygon picks its candidates by box, then one vectorized point-in-polygon
+    from shapely import points as _points, contains_xy
+    ptree = STRtree(_points(probes)); inside = set()
+    for k, q in enumerate(polys):
+        idx = ptree.query(q)
+        if len(idx): inside.update(idx[contains_xy(q, probes[idx, 0], probes[idx, 1])].tolist())
+        if k % 3000 == 2999: print('  polygons tested', k + 1, flush=True)
     cut = {}
-    for qi in sorted(set(hit[0].tolist())): li, si = owner[qi]; cut.setdefault(li, set()).add(si)
+    for qi in sorted(inside): li, si = owner[qi]; cut.setdefault(li, set()).add(si)
+    # THE HUDSON IS NOT TRIMMED (user 2026-10-16: "cut the hudson from the coast trim too", as THE CITY's trims were on
+    # 2026-10-11): every segment inside the Battery-to-Troy corridor of _maplab/coast_bake/hudson_cut.py is dropped
+    nh = 0
+    for li, P in enumerate(raw):
+        m = (P[1:] + P[:-1]) / 2
+        if not ((P[:, 1] > 40.70).any() and (P[:, 1] < 42.80).any() and (P[:, 0] > -74.08).any() and (P[:, 0] < -73.60).any()): continue
+        for si in range(len(m)):
+            if in_hudson(m[si, 0], m[si, 1]): cut.setdefault(li, set()).add(si); nh += 1
+    print('hudson segments dropped', nh, flush=True)
     print('closing segments dropped', sum(len(v) for v in cut.values()), flush=True)
     lines = []
     for li, P in enumerate(raw):
@@ -126,6 +195,7 @@ def main(shp, out, cache=None):
                 cur = [P[si + 1]]
             else: cur.append(P[si + 1])
         if len(cur) > 1: lines.append(LineString(cur))
+    lines = outer_only(lines)
     n_t = 0
     for z in range(3, 11):
         px = 360.0 / (256 * 2 ** z)
