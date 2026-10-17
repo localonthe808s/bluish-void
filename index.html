@@ -17501,8 +17501,9 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
   }
 
   function init(){
-    // Open default tab
-    switchCiraTab('goes');
+    // Open default tab -- unless a tab was already picked before this lazy init ran (2026-10-16: in LA the LOCAL tab
+    // was thrown back to the satellite the moment the widget scrolled into view)
+    if (!window._currentCiraTab || window._currentCiraTab === 'goes') switchCiraTab('goes');
     // Load LOD posts — feeds both Events and Archive tabs.
     // Try direct first, fall back through CORS proxies if blocked
     // (satlib.cira.colostate.edu is sometimes CORS-strict from
@@ -105449,7 +105450,7 @@ function closeAlertModal(){
       if (!M.hasLayer(T.slr)) T.slr.addTo(M);
       strip.innerHTML = '<div>' + LV.map(function(x){ return '<button type="button" class="lc-pill' + (x.k === cur.k ? ' on' : '') + '" data-l="' + x.k + '" style="margin:0 6px 4px 0;">' + x.n + '</button>'; }).join('') + '</div>'
         + '<div>' + (above < -0.25 ? 'AT ' + esc(cur.w) + ' THE WATER STAYS BELOW THE AVERAGE HIGH TIDE LINE · NOTHING ON LAND FLOODS'
-          : 'BLUE: LAND UNDER WATER AT ' + esc(cur.w) + ', ' + ft(Math.max(0, above)) + ' FT ABOVE THE AVERAGE HIGH TIDE (MAPPED IN HALF-FOOT STEPS: ' + step.toFixed(1) + ') · PALE IS A FEW INCHES, DEEP BLUE IS DEEP · SEA-GREEN: LOW GROUND CUT OFF FROM THE WATER, WHICH FLOODS WHEN DRAINS BACK UP') + '</div>';
+          : 'BLUE: LAND UNDER WATER AT ' + esc(cur.w) + ', ' + ft(Math.max(0, above)) + ' FT ABOVE THE AVERAGE HIGH TIDE (MAPPED IN HALF-FOOT STEPS: ' + step.toFixed(1) + ') · PALE IS A FEW INCHES, DEEP BLUE IS DEEP · SEA-GREEN: LOW GROUND CUT OFF FROM THE WATER, WHICH FLOODS WHEN DRAINS BACK UP') + '</div>' + '<div id="lc-sea-line" style="margin-top:3px;">' + (SEA.line ? SEA.line() : '') + '</div>';
       [].forEach.call(strip.querySelectorAll('.lc-pill'), function(b){ b.onclick = function(e){ e.stopPropagation(); T.lvl = b.getAttribute('data-l'); T.map(); }; });
     };
     T.off = function(){ if (T.timer){ clearInterval(T.timer); T.timer = null; } if (M){ if (T.slr && M.hasLayer(T.slr)) M.removeLayer(T.slr); if (T.mk && M.hasLayer(T.mk)) M.removeLayer(T.mk); } tideEl.style.display = 'none'; };
@@ -105689,6 +105690,99 @@ function closeAlertModal(){
     RV.off = function(){ if (RV.timer){ clearInterval(RV.timer); RV.timer = null; } if (RV.lay && M){ M.removeLayer(RV.lay); RV.lay = null; } riverEl.style.display = 'none'; };
     window.addEventListener('resize', function(){ if (VIEW === 'river' && pane.style.display !== 'none') RV.chart(); });
 
+    /* ---------------------------------------------------------------- THE SEA ---- */
+    /* TIDAL CURRENTS AND WAVES ON THE TIDES VIEW (user 2026-10-16: "do 2 3" -- tidal flow and surf, for any coast; earlier:
+       "we could try adding real waves and current to the oceans for areas near the ocean").
+       - CURRENTS: NOAA's tidal current predictions (2,575 stations, baked list cdn sea/currents_v1.json; the day's slack and
+         maximum-flood/ebb events per station from api.tidesandcurrents.noaa.gov, CORS open). Speed now is read between
+         events on the tide's own curve (a sine from slack to the maximum and back), direction from the station's mean
+         flood or ebb heading. Arrows the way the water runs, longer and brighter as it runs faster, teal on the flood
+         (coming in), amber on the ebb (going out), knots beside the strong ones; up to 40 stations nearest the middle.
+       - WAVES: the Open-Meteo marine model (ECMWF WAM / NOAA WW3 blend) on a lattice over the water in view: an arrow the way
+         the swell travels, sized by height, height in feet and period in seconds -- what a surfer reads. Land cells come back
+         empty and are skipped. Model analysis, not a buoy; the buoys on the radar are the measurement. */
+    var SEA = { st: null, cp: {}, cpAt: {}, wav: null, wavKey: '', cv: null, lit: false };
+    var seaSpeed = function(ev, t){
+      if (!ev || ev.length < 2) return null;
+      for (var i = 0; i < ev.length - 1; i++){ var a = ev[i], b = ev[i + 1]; if (t < a.t || t > b.t) continue;
+        var f = (t - a.t) / (b.t - a.t);
+        if (a.v === 0 && b.v !== 0) return { v: b.v * Math.sin(f * Math.PI / 2), fd: b.fd, ed: b.ed };
+        if (a.v !== 0 && b.v === 0) return { v: a.v * Math.cos(f * Math.PI / 2), fd: a.fd, ed: a.ed };
+        return { v: a.v + (b.v - a.v) * f, fd: a.fd, ed: a.ed }; }
+      return null; };
+    SEA.read = function(){
+      if (!M) return;
+      if (!SEA.st){ if (!SEA.stP) SEA.stP = fetch('https://cdn.bluishvoid.com/sea/currents_v1.json').then(function(r){ return r.json(); }).then(function(j){ SEA.st = j.s || []; SEA.read(); }).catch(function(){ SEA.st = []; }); return; }
+      var b = M.getBounds(), c = M.getCenter(), now = Date.now();
+      var inV = SEA.st.filter(function(q){ return b.contains([q.la, q.lo]); }).sort(function(p, q){ return Math.hypot(p.la - c.lat, p.lo - c.lng) - Math.hypot(q.la - c.lat, q.lo - c.lng); }).slice(0, 40);
+      SEA.inView = inV;
+      var d0 = new Date(now - 864e5).toISOString().slice(0, 10).replace(/-/g, '');
+      inV.forEach(function(q){ if (now - (SEA.cpAt[q.i] || 0) < 6 * 3600e3) return; SEA.cpAt[q.i] = now;
+        fetch('https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?product=currents_predictions&station=' + q.i + (q.b ? '&bin=' + q.b : '') + '&begin_date=' + d0 + '&range=72&units=english&time_zone=gmt&format=json&application=bluishvoid')
+          .then(function(r){ return r.json(); }).then(function(j){ var cp = ((j.current_predictions || {}).cp || []);
+            SEA.cp[q.i] = cp.map(function(e){ return { t: Date.parse(e.Time.replace(' ', 'T') + 'Z'), v: +e.Velocity_Major || 0, fd: +e.meanFloodDir, ed: +e.meanEbbDir }; }).filter(function(e){ return isFinite(e.t); });
+            SEA.draw(); }).catch(function(){ SEA.cp[q.i] = []; }); });
+      /* waves: a 9 x 7 lattice over the view, once per view, refreshed hourly */
+      var key = M.getZoom() + '|' + c.lat.toFixed(2) + '|' + c.lng.toFixed(2);
+      if (key !== SEA.wavKey || now - (SEA.wavAt || 0) > 3600e3){ SEA.wavKey = key; SEA.wavAt = now;
+        var las = [], los = [], w = b.getWest(), e = b.getEast(), s2 = b.getSouth(), n = b.getNorth();
+        for (var iy = 0; iy < 7; iy++) for (var ix = 0; ix < 9; ix++){ las.push((s2 + (iy + .5) / 7 * (n - s2)).toFixed(3)); los.push((w + (ix + .5) / 9 * (e - w)).toFixed(3)); }
+        fetch('https://marine-api.open-meteo.com/v1/marine?latitude=' + las.join(',') + '&longitude=' + los.join(',') + '&current=wave_height,wave_direction,wave_period,swell_wave_height,swell_wave_direction,swell_wave_period')
+          .then(function(r){ return r.json(); }).then(function(j){ if (key !== SEA.wavKey || !Array.isArray(j)) return;
+            /* the model answers a land point with its nearest SEA cell, so keep a point only when it sits inside that cell (the
+               grid is ~0.083 deg; within 0.045 of the cell centre) and draw it where it was asked for, not on the shore */
+            SEA.wav = j.map(function(o, k){ var c2 = o.current || {}; return { la: +las[k], lo: +los[k], ok: Math.abs(o.latitude - las[k]) < .045 && Math.abs(o.longitude - los[k]) < .045,
+                h: c2.wave_height, d: c2.wave_direction, p: c2.wave_period, sh: c2.swell_wave_height, sd: c2.swell_wave_direction, sp: c2.swell_wave_period }; })
+              .filter(function(q){ return q.ok && q.h != null && isFinite(q.h); });
+            SEA.draw(); }).catch(function(){}); }
+    };
+    SEA.draw = function(){
+      if (!SEA.lit || !M || !SEA.cv) return;
+      var cv = SEA.cv, sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr);
+      if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
+      L.DomUtil.setPosition(cv, M.containerPointToLayerPoint([0, 0])); cv.style.visibility = '';
+      var g = cv.getContext('2d'); g.clearRect(0, 0, W, H);
+      var P = function(lo, la){ var q = M.latLngToContainerPoint([la, lo]); return [q.x * dpr, q.y * dpr]; };
+      var arrow = function(x, y, dir, len, col, wid){ var a = dir * Math.PI / 180, ux = Math.sin(a), uy = -Math.cos(a);
+        var x0 = x - ux * len / 2, y0 = y - uy * len / 2, x1 = x + ux * len / 2, y1 = y + uy * len / 2, ah = Math.min(7, len * .4) * dpr;
+        [[wid + 2.2, 'rgba(8,10,16,.75)'], [wid, col]].forEach(function(k){ g.lineWidth = k[0] * dpr; g.strokeStyle = k[1]; g.lineCap = 'round';
+          g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.moveTo(x1 - ux * ah - uy * ah * .6, y1 - uy * ah + ux * ah * .6); g.lineTo(x1, y1); g.lineTo(x1 - ux * ah + uy * ah * .6, y1 - uy * ah - ux * ah * .6); g.stroke(); }); };
+      var txt = function(t, x, y, col){ g.font = '800 ' + (8.4 * dpr) + 'px system-ui,sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle'; g.lineWidth = 3 * dpr; g.strokeStyle = 'rgba(8,10,16,.85)'; g.strokeText(t, x, y); g.fillStyle = col; g.fillText(t, x, y); };
+      /* waves first, under the currents */
+      var maxH = 0, nW = 0;
+      (SEA.wav || []).forEach(function(q){ var p0 = P(q.lo, q.la); if (p0[0] < 0 || p0[1] < 0 || p0[0] > W || p0[1] > H) return;
+        var ft = q.h * 3.281; maxH = Math.max(maxH, ft); nW++;
+        arrow(p0[0], p0[1], ((q.sd != null ? q.sd : q.d) + 180) % 360, (14 + Math.min(10, ft) * 3.2) * dpr, 'rgba(186,230,253,.82)', 1.6 + Math.min(8, ft) * .18);
+        txt(ft.toFixed(ft < 10 ? 1 : 0) + ' FT \u00b7 ' + Math.round(q.sp || q.p || 0) + ' S', p0[0] + 10 * dpr, p0[1] + 10 * dpr, 'rgba(206,238,255,.92)'); });
+      /* currents */
+      var now = Date.now(), nC = 0, fastest = null;
+      var taken = [];
+      (SEA.inView || []).forEach(function(q){ var r = seaSpeed(SEA.cp[q.i], now); if (!r) return; var p0 = P(q.lo, q.la); var kt = Math.abs(r.v); nC++;
+        if (!fastest || kt > fastest.kt) fastest = { kt: kt, n: q.n, fl: r.v > 0 };
+        if (taken.some(function(t){ return Math.hypot(t[0] - p0[0], t[1] - p0[1]) < 26 * dpr; })) return;      /* one arrow per spot: nearest the middle wins */
+        taken.push(p0);
+        if (!fastest || kt > fastest.kt) fastest = { kt: kt, n: q.n, fl: r.v > 0 };
+        if (kt < 0.1){ g.beginPath(); g.arc(p0[0], p0[1], 2.4 * dpr, 0, 6.3); g.fillStyle = 'rgba(230,236,245,.7)'; g.fill(); return; }
+        var col = r.v > 0 ? 'rgba(94,234,212,.95)' : 'rgba(251,191,36,.95)';
+        arrow(p0[0], p0[1], r.v > 0 ? r.fd : r.ed, (12 + Math.min(4, kt) * 9) * dpr, col, 1.8 + Math.min(4, kt) * .5);
+        if (kt >= 0.8 && M.getZoom() >= 11) txt(kt.toFixed(1) + ' KT', p0[0] + 9 * dpr, p0[1] - 9 * dpr, col); });
+      SEA.sum = { nW: nW, maxH: maxH, nC: nC, fastest: fastest };
+      if (SEA.onSum) SEA.onSum();
+    };
+    SEA.line = function(){ var S0 = SEA.sum; if (!S0) return '';
+      var k = function(c, t){ return '<span class="lr-k"><span class="lr-dot" style="background:' + c + ';"></span>' + t + '</span>'; }, out = [];
+      if (S0.nW) out.push('SEAS UP TO ' + S0.maxH.toFixed(S0.maxH < 10 ? 1 : 0) + ' FT');
+      if (S0.fastest && S0.fastest.kt >= 0.3) out.push('FASTEST CURRENT ' + S0.fastest.kt.toFixed(1) + ' KT ' + (S0.fastest.fl ? 'FLOODING' : 'EBBING') + ' AT ' + esc(String(S0.fastest.n).toUpperCase()));
+      return (out.length ? out.join(' \u00b7 ') + '<br>' : '') + k('#5eead4', 'TIDE COMING IN') + k('#fbbf24', 'TIDE GOING OUT') + k('#bae6fd', 'SWELL: WAY IT TRAVELS, HEIGHT, SECONDS BETWEEN WAVES'); };
+    SEA.onSum = function(){ var el = document.getElementById('lc-sea-line'); if (el) el.innerHTML = SEA.line(); };
+    SEA.on = function(){ if (!M) return; SEA.lit = true;
+      if (!SEA.cv){ var pn = M.getPane('lcSea') || M.createPane('lcSea'); pn.style.zIndex = 446; pn.style.pointerEvents = 'none';
+        SEA.cv = document.createElement('canvas'); SEA.cv.style.position = 'absolute'; pn.appendChild(SEA.cv);
+        M.on('zoomstart', function(){ if (SEA.cv) SEA.cv.style.visibility = 'hidden'; });
+        M.on('moveend zoomend resize', function(){ if (!SEA.lit) return; SEA.draw(); clearTimeout(SEA.deb); SEA.deb = setTimeout(SEA.read, 500); }); }
+      SEA.cv.style.display = ''; SEA.read(); SEA.draw();
+      if (!SEA.timer) SEA.timer = setInterval(function(){ if (SEA.lit && pane.style.display !== 'none' && !document.hidden){ SEA.read(); SEA.draw(); } }, 60000); };
+    SEA.off = function(){ SEA.lit = false; if (SEA.cv) SEA.cv.style.display = 'none'; if (SEA.timer){ clearInterval(SEA.timer); SEA.timer = null; } };
     /* ---------------------------------------------------------------- TRAFFIC ---- */
     /* STEP 2 OF ONE MAP ENGINE (user 2026-10-16: "start step 2"): THE CITY's TRAFFIC tab for any place. TomTom's flow vector
        tiles and incidents are national, the same referer-locked key THE CITY uses (CW_TT_KEY). The look is THE CITY's own:
@@ -105929,7 +106023,7 @@ function closeAlertModal(){
       if (v === 'traffic') TR.on(); else TR.off();
       if (v === 'map') strip.textContent = placeName() + ' AND AROUND · DRAG AND ZOOM';
       if (v !== 'rock') FQ.off();
-      if (v === 'tide') T.on(); else T.off();
+      if (v === 'tide'){ T.on(); SEA.on(); } else { T.off(); SEA.off(); }
       if (v === 'river') RV.on(); else RV.off();
       src.innerHTML = SRC[v](); headOn(true);
       setTimeout(function(){ try { M.invalidateSize(); } catch(e){} }, 30);
