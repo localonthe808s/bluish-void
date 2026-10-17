@@ -106731,11 +106731,21 @@ function closeAlertModal(){
         { dataLayer: fl, filter: function(z, f){ return ttSlow(f) && !(f.props || {}).road_closure; }, symbolizer: LS({ color: 'rgba(8,10,16,.85)', width: function(z, f){ return TT_RULE[ttCls(f)].w + 2.0; } }) },
         { dataLayer: fl, filter: function(z, f){ return ttSlow(f) && !(f.props || {}).road_closure; }, symbolizer: LS({ color: function(z, f){ return ttCol(f); }, width: function(z, f){ return TT_RULE[ttCls(f)].w + 0.9; } }) }
       ];
-      return P.leafletLayer({ url: 'https://api.tomtom.com/traffic/map/4/tile/flow/relative/{z}/{x}/{y}.pbf?key=' + TT_KEY, maxDataZoom: 18, paintRules: rules, labelRules: [], zIndex: 7, attribution: '' });
+      var lb = TR.liveBox();
+      return P.leafletLayer(Object.assign({ url: 'https://api.tomtom.com/traffic/map/4/tile/flow/relative/{z}/{x}/{y}.pbf?key=' + TT_KEY, maxDataZoom: 18, paintRules: rules, labelRules: [], zIndex: 7, attribution: '' },
+        lb ? { bounds: lb } : {}));
     };
+    /* LIVE ONLY NEAR THE PLACE (user 2026-10-17: "live only needs to be near your location"). TomTom's flow tiles and incident
+       reads are asked for only inside a box ~290 km across round the place in the search box, so the free daily allowance is
+       spent where the user is; everywhere else the wide view is the baked road mesh (TR.mesh) and nothing live. */
+    TR.liveBox = function(){ var L0 = window.LOCATION || {}, la = +L0.lat, lo = +L0.lon;
+      return isFinite(la) && isFinite(lo) ? L.latLngBounds([[la - 1.3, lo - 1.75], [la + 1.3, lo + 1.75]]) : null; };
     TR.read = function(){
       if (!M) return Promise.resolve();
-      var b = M.getBounds(), sn = function(v, up){ return (up ? Math.ceil(v * 5) : Math.floor(v * 5)) / 5; };
+      var b0 = M.getBounds(), lb = TR.liveBox();
+      if (lb && !lb.intersects(b0)){ TR.inc = null; TR.incKey = 'far'; return Promise.resolve(); }
+      var b = lb ? L.latLngBounds([[Math.max(b0.getSouth(), lb.getSouth()), Math.max(b0.getWest(), lb.getWest())], [Math.min(b0.getNorth(), lb.getNorth()), Math.min(b0.getEast(), lb.getEast())]]) : b0,
+        sn = function(v, up){ return (up ? Math.ceil(v * 5) : Math.floor(v * 5)) / 5; };
       var w = sn(b.getWest()), s2 = sn(b.getSouth()), e = sn(b.getEast(), 1), n = sn(b.getNorth(), 1);
       var km2 = (e - w) * 111 * Math.cos((s2 + n) / 2 * Math.PI / 180) * (n - s2) * 111;
       if (km2 > 10000){ TR.inc = null; TR.incKey = 'wide'; return Promise.resolve(); }
@@ -106868,15 +106878,39 @@ function closeAlertModal(){
         M.on('click', TR.camTap);
         M.on('moveend zoomend resize', function(){ if (TR.lit !== true) return; TR.draw(); clearTimeout(TR.deb); TR.deb = setTimeout(function(){ TR.read().then(TR.draw); TR.transit(); }, 600); }); }
       TR.cv.style.display = '';
-      if (!TR.lay) TR.lay = TR.layer();
+      /* the live layer is rebuilt when the place changes, so its box follows the search */
+      var lk = (function(){ var L0 = window.LOCATION || {}; return (+L0.lat).toFixed(2) + ',' + (+L0.lon).toFixed(2); })();
+      if (TR.lay && TR.layKey !== lk){ if (M.hasLayer(TR.lay)) M.removeLayer(TR.lay); TR.lay = null; }
+      if (!TR.lay){ TR.lay = TR.layer(); TR.layKey = lk; }
       if (!M.hasLayer(TR.lay)) TR.lay.addTo(M);
+      TR.meshOn();
       strip.textContent = 'READING THE ROADS\u2026';
       TR.read().then(TR.draw); TR.transit();
       if (!TR.vtimer) TR.vtimer = setInterval(function(){ if (TR.lit === true && pane.style.display !== 'none' && !document.hidden) TR.transit(); }, 30000);
       if (!TR.timer) TR.timer = setInterval(function(){ if (TR.lit !== true || pane.style.display === 'none' || document.hidden) return;
         if (TR.lay && TR.lay.rerenderTiles) TR.lay.rerenderTiles(); TR.read().then(TR.draw); }, 5 * 6e4);
     };
-    TR.off = function(){ if (TR.lit !== true) return; TR.boardClose(); TR.lit = false; if (TR.lay && M && M.hasLayer(TR.lay)) M.removeLayer(TR.lay); if (TR.cv) TR.cv.style.display = 'none';
+    /* THE ROAD MESH (user 2026-10-17: "do the right one"): every road from motorways to tertiary, baked from our own basemap
+       (_roadmesh/ -> cdn roads/mesh/v1, z4-9, the traffic tab's calm green), so the wide view shows the whole network at no
+       TomTom cost; the live layer draws jams over it near the place. Only z6 tiles cover.json lists are asked for. Gone from
+       z10 in, where the live layer (near the place) or the basemap's own roads take over. */
+    TR.meshCover = null;
+    TR.meshOn = function(){
+      if (!M) return;
+      if (TR.mesh){ if (!M.hasLayer(TR.mesh)) TR.mesh.addTo(M); return; }
+      if (TR.meshReq) return; TR.meshReq = 1;
+      fetch('https://cdn.bluishvoid.com/roads/mesh/v1/cover.json?h=' + new Date().toISOString().slice(0, 13))   /* hourly key: a 404 cached before the bake landed cannot stick */.then(function(r){ return r.ok ? r.json() : null; }).then(function(a){
+        if (!a || !a.length){ TR.meshReq = 0; return; }
+        TR.meshCover = new Set(a);
+        var ML = L.TileLayer.extend({ createTile: function(c, done){
+          if (c.z >= 6 && !TR.meshCover.has((c.x >> (c.z - 6)) + '/' + (c.y >> (c.z - 6)))){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }
+          return L.TileLayer.prototype.createTile.call(this, c, done); } });
+        TR.mesh = new ML('https://cdn.bluishvoid.com/roads/mesh/v1/{z}/{x}/{y}.webp', { minZoom: 4, maxZoom: 9, maxNativeZoom: 9, zIndex: 6, opacity: 1, keepBuffer: 1, updateWhenIdle: true,
+          errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', bounds: L.latLngBounds([[23, -130], [57, -50]]) });
+        if (TR.lit === true) TR.mesh.addTo(M);
+      }).catch(function(){ TR.meshReq = 0; });
+    };
+    TR.off = function(){ if (TR.lit !== true) return; TR.boardClose(); TR.lit = false; if (TR.lay && M && M.hasLayer(TR.lay)) M.removeLayer(TR.lay); if (TR.mesh && M && M.hasLayer(TR.mesh)) M.removeLayer(TR.mesh); if (TR.cv) TR.cv.style.display = 'none';
       if (TR.timer){ clearInterval(TR.timer); TR.timer = null; } if (TR.vtimer){ clearInterval(TR.vtimer); TR.vtimer = null; } };
     /* ---------------------------------------------------------------- ICE AGE -- */
     /* THE ICE SHEET ON GEOLOGY (user 2026-10-17: "can geology have glacial info like NYC did"). THE CITY draws where the ice
