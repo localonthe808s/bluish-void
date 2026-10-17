@@ -69502,13 +69502,14 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       return S.v[S.v.length - 1];
     }
     /* the water, sampled off the composed basemap at a sixth of its size */
-    function cwFlowMaskBuild(){
-      var im = document.getElementById('cw-bm-under');
-      if (!im || !im.naturalWidth) return null;
+    function cwFlowMaskBuild(imA){
+      /* imA: a composed picture of another view (window._bvCityWat, LOCAL's national map); default THE CITY's own */
+      var im = imA || document.getElementById('cw-bm-under');
+      if (!im || !(im.naturalWidth || (imA && im.width))) return null;
       /* HALF resolution, and a cell is water if ANY of its pixels is (user 2026-09-27: "why isnt the gowanus bay flowing
          green?"). At a sixth, point-sampled, a 30 m canal was one blended pixel in six and simply was not water: the
          Gowanus Canal, Newtown Creek's arms and the Flushing River drew no current and held no sewage at all. */
-      var FW = im.naturalWidth, FH = im.naturalHeight, K = 2, W = Math.ceil(FW / K), H = Math.ceil(FH / K);
+      var FW = im.naturalWidth || im.width, FH = im.naturalHeight || im.height, K = 2, W = Math.ceil(FW / K), H = Math.ceil(FH / K);
       var c = document.createElement('canvas'); c.width = FW; c.height = FH;
       var g = c.getContext('2d', { willReadFrequently: true });
       try { g.drawImage(im, 0, 0); var d = g.getImageData(0, 0, FW, FH).data; } catch (e){ return null; }
@@ -69522,7 +69523,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
           if (b > 40 && b > r + 25 && b > gg + 8){ var k = row + (x / K | 0); if (!m[k]){ m[k] = 1; n++; } } } }
       /* m is where water RUNS, d is where water is SEEN: the same until a bridge is wide enough to cut the first */
       var d0 = m.slice(), nb = cwFlowBridges(m, d0, W, H) + cwFlowThin(m, W, H);
-      return { w: W, h: H, m: m, d: d0, bridged: nb, share: (n + nb) / (W * H), src: im.src + (window._cwBridges ? '#b' : '') };
+      return { w: W, h: H, m: m, d: d0, bridged: nb, share: (n + nb) / (W * H), src: (imA ? imA._bvKey : im.src) + (window._cwBridges ? '#b' : '') };
     }
     /* ... AND UNDER EVERY LINE THE MAP DRAWS ACROSS IT. The bridges were not the only walls: the subway's tunnels are
        painted over the water in their lines' own colours, and measured the same day the F train shut the East River
@@ -70421,10 +70422,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       /* harness: light the zones as if these sensors were wet, [[lon, lat, mm], ...]; null puts the real ones back.
          The picture only: the dots and the bar keep telling the truth. */
       D.fakeWet = function(list){ cwFlWetTest = list ? list.map(function(q){ return { lon: q[0], lat: q[1], mm: q[2], stale: false }; }) : null; cwFlWet(); cwLiveBars(); return cwFlWetN; };
-      D.fakeRain = function(inchPerHour, hoursAgoStopped){ var now = Date.now(), R = {}; (window._cwCSOfac || []).forEach(function(f, i){
-          var t = [], pp = []; for (var h = 72; h >= 0; h--){ var tt = Math.floor(now / 3600000) * 3600000 - h * 3600000; t.push(tt);
-            pp.push(h >= (hoursAgoStopped || 0) && h < (hoursAgoStopped || 0) + 3 ? inchPerHour : 0); }
-          R[i] = { t: t, p: pp }; }); cwSpill.rain = R; cwSpill.at = now; cwSpill.stAt = 0; return cwSpillLine(); };
+      D.fakeRain = cwFakeRain;
       /* harness: why a point draws what it draws -- the basemap colour under it, whether the mask calls it water, and the
          three stations it blends with their distances by water (km) */
       D.why = function(lon, lat){ var F = cwFlowField, vv = cwPainted, R = 6378137, M = cwFlowMask, im = document.getElementById('cw-bm-under'); if (!F || !M || !im) return null;
@@ -70465,30 +70463,10 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
          turbulence at a physical rate, held against the shore rather than deleted, and kept longer in the dead-end
          basins that do not flush (Gowanus, Newtown Creek, the Jamaica Bay basins). */
       cwSpillLoad();
-      var cso = window._cwCSO, SP = cso ? cwSpillPipes() : null, SS = cwSpill.rain ? cwSpillState() : null;
       var hPerFrame = CW_FLOW_SPEEDUP * dt / 3600;                                /* model hours a frame */
       /* now a SOURCE per pipe for the water surface's dye (cwWatDraw) -- strength by the shed's rain and the pipe's size,
          hold by how badly its water flushes; the old parcels are gone with the tide tracers */
-      var srcL = [], srcS = '';
-      if (cso && SP && (SS || cwLiveRain)){
-        for (var k = 0; k < cso.length; k++){
-          var o = cso[k], meta = SP[k]; if (!meta || meta.plant) continue;
-          var sh = SS ? SS[o[5]] : { on: 1, resid: 0 };
-          if (!sh) continue;
-          var rate = sh.on > 0 ? 0.005 + 0.02 * sh.on : 0.008 * sh.resid;
-          if (rate < 0.0005) continue;
-          /* a pipe that is spilling pours VISIBLY however light the rain (user 2026-09-26: "make sure the sewage flooding works
-             properly"): a light storm read as a few faint flecks; strength still scales with the rain above that floor */
-          var hold = Math.min(1, (1 - meta.flush) / 0.76);
-          /* after the rain: what is still leaving the pipes and lying in the water, strongest in the basins that do not flush
-             (user 2026-09-27: "why isnt the gowanus bay flowing green?" -- at the old rate a residual plume was 2/255 a step
-             and rounded away in the 8-bit buffer, so the Gowanus, which holds its sewage longest, drew nothing) */
-          var st2 = sh.on > 0 ? Math.max(0.5, Math.min(1, rate * meta.wt * 40)) : Math.min(0.75, sh.resid * (0.3 + 0.45 * hold) * Math.max(0.6, Math.min(1.4, meta.wt)));
-          srcL.push([((o[0] * Math.PI / 180 * R2) - v.X0) / (v.X1 - v.X0), (v.Y1 - R2 * Math.log(Math.tan(Math.PI / 4 + o[1] * Math.PI / 360))) / (v.Y1 - v.Y0), st2, hold, (o[2] || 0) * Math.PI / 180]);
-          srcS += k + ':' + st2.toFixed(2) + ',';
-        }
-      }
-      cwWat.src = { sig: srcS, list: srcL, vk: v.X0 + ',' + v.X1 + ',' + v.Y0 + ',' + v.Y1, mk: cwFlowMask };
+      cwWat.src = cwWatSources(v);
       /* turbulent spreading: an estuary mixes sideways at a few square metres a second, so a parcel wanders
          sqrt(2 K dt) per frame -- in metres, then in canvas pixels, the same at every zoom */
       var sig = Math.sqrt(2 * 3 * CW_FLOW_SPEEDUP * dt) / mPerPx;
@@ -70514,6 +70492,145 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       }
       if (cwFlowR.length > 14000) cwFlowR.splice(0, cwFlowR.length - 14000);   /* trims the OLDEST: a cap hit shortens plumes, so the rates stay under it */
     }
+    /* the overflowing pipes as dye sources for the view v (cwWatDraw); THE CITY each frame, and LOCAL's national map
+       through window._bvCityWat with its own view swapped in */
+    function cwWatSources(v){
+      var R2 = 6378137;
+      var cso = window._cwCSO, SP = cso ? cwSpillPipes() : null, SS = cwSpill.rain ? cwSpillState() : null;
+      var srcL = [], srcS = '';
+      if (cso && SP && (SS || cwLiveRain)){
+        for (var k = 0; k < cso.length; k++){
+          var o = cso[k], meta = SP[k]; if (!meta || meta.plant) continue;
+          var sh = SS ? SS[o[5]] : { on: 1, resid: 0 };
+          if (!sh) continue;
+          var rate = sh.on > 0 ? 0.005 + 0.02 * sh.on : 0.008 * sh.resid;
+          if (rate < 0.0005) continue;
+          /* a pipe that is spilling pours VISIBLY however light the rain (user 2026-09-26: "make sure the sewage flooding works
+             properly"): a light storm read as a few faint flecks; strength still scales with the rain above that floor */
+          var hold = Math.min(1, (1 - meta.flush) / 0.76);
+          /* after the rain: what is still leaving the pipes and lying in the water, strongest in the basins that do not flush
+             (user 2026-09-27: "why isnt the gowanus bay flowing green?" -- at the old rate a residual plume was 2/255 a step
+             and rounded away in the 8-bit buffer, so the Gowanus, which holds its sewage longest, drew nothing) */
+          var st2 = sh.on > 0 ? Math.max(0.5, Math.min(1, rate * meta.wt * 40)) : Math.min(0.75, sh.resid * (0.3 + 0.45 * hold) * Math.max(0.6, Math.min(1.4, meta.wt)));
+          srcL.push([((o[0] * Math.PI / 180 * R2) - v.X0) / (v.X1 - v.X0), (v.Y1 - R2 * Math.log(Math.tan(Math.PI / 4 + o[1] * Math.PI / 360))) / (v.Y1 - v.Y0), st2, hold, (o[2] || 0) * Math.PI / 180]);
+          srcS += k + ':' + st2.toFixed(2) + ',';
+        }
+      }
+      return { sig: srcS, list: srcL, vk: v.X0 + ',' + v.X1 + ',' + v.Y0 + ',' + v.Y1, mk: cwFlowMask };
+    }
+    /* harness: a synthetic storm on every sewershed (inert unless called; a real fetch replaces it within twenty minutes) */
+    function cwFakeRain(inchPerHour, hoursAgoStopped){ var now = Date.now(), R = {}; (window._cwCSOfac || []).forEach(function(f, i){
+      var t = [], pp = []; for (var h = 72; h >= 0; h--){ var tt = Math.floor(now / 3600000) * 3600000 - h * 3600000; t.push(tt);
+        pp.push(h >= (hoursAgoStopped || 0) && h < (hoursAgoStopped || 0) + 3 ? inchPerHour : 0); }
+      R[i] = { t: t, p: pp }; }); cwSpill.rain = R; cwSpill.at = now; cwSpill.stAt = 0; return cwSpillLine(); }
+    /* the CSO outfall pipes, baked from NYS DEC (9KB); THE CITY's start() and LOCAL's national map (window._bvCityWat) */
+    function cwCsoLoad(){
+      if (!window._cwCSO && !window._cwCSOReq){
+        window._cwCSOReq = 1;
+        fetch('city_cso.json').then(function(r){ return r.json(); })
+          .then(function(j){ if (j && j.p){ window._cwCSO = j.p; window._cwCSOwb = j.wb || []; window._cwCSOfac = j.fac || [];
+            /* sz = DEP's own size string per pipe ("13' X 13'", '48" DIA'),
+               szw = that size's WIDTH IN FEET, parsed at bake time so the
+               renderer never parses a string. 410 of the 435 carry one. */
+            window._cwCSOsz = j.sz || []; window._cwCSOszw = j.szw || [];
+            /* p[8] indexes `loc` (DEP's own description of the spot, 411 of 435);
+               `plant` is indexed like `fac`, so p[5] reads both. */
+            window._cwCSOloc = j.loc || []; window._cwCSOplant = j.plant || [];
+            cwDrawSensors(); } }).catch(function(){});
+      }
+    }
+    /* the bridge spans the water runs under (cwFlowBridges) and the map draws */
+    function cwBridgesLoad(){
+      if (!window._cwBridges && !window._cwBridgesReq){
+        window._cwBridgesReq = 1;
+        fetch('city_bridges.json').then(function(r){ return r.json(); })
+          .then(function(j){ if (j && j.w){ window._cwBridges = j.w; cwDrawSensors(); } }).catch(function(){});
+      }
+    }
+    /* ─ THE CITY's WATER ON THE NATIONAL MAP (user 2026-10-17: "i want the green flow the most, have we sacrificed any of
+       that quality by switching to this map?"). LOCAL's TIDES view runs THIS simulation, not a copy: the same field build
+       (cwFlowFieldBuild over the 62 stations, by water), the same sources (cwWatSources: the 435 outfalls, the sewershed
+       rain, the flush table), the same advection and display shaders (cwWatDraw) and the same water mask rule
+       (cwFlowMaskBuild, bridges and painted lines opened) read off the same ink pyramid tiles, composed for the national
+       map's own view at its own device pixels. Each caller owns a context {wat, field, mask, view}; run() swaps it in for
+       THE CITY's globals for one synchronous call and puts THE CITY's back, so the two never share a buffer. */
+    window._bvCityWat = (function(){
+      var B = _cityBoxCfg();
+      var swap = function(c, fn){
+        var s0 = cwWat, s1 = cwFlowField, s2 = cwFlowMask, s3 = cwPainted, s4 = window._cwWat;
+        cwWat = c.wat; cwFlowField = c.field; cwFlowMask = c.mask; cwPainted = c.view || CW_VIEW;
+        try { return fn(); }
+        finally { c.wat = cwWat; c.field = cwFlowField; c.mask = cwFlowMask; cwWat = s0; cwFlowField = s1; cwFlowMask = s2; cwPainted = s3; window._cwWat = s4; }
+      };
+      /* the ink pyramid for any view inside the box, at W2 x H2: compose()'s own ladder (the level that is not upscaled, a
+         missing deep cell drawn from its parent, deep cells over their z4 parent with the 1865 blue cut out, edges snapped to
+         whole pixels). The core map only: the water is all the mask reads. */
+      var ink = function(v, W2, H2){
+        var mppNeed = (v.X1 - v.X0) / W2, TILEPX = 1100, BWm = B.X1 - B.X0, BXs = BWm, BYs = B.Y1 - B.Y0;
+        var grid = mppNeed < BWm / 32 / TILEPX ? 64 : mppNeed < BWm / 16 / TILEPX ? 32 : mppNeed < BWm / 8 / TILEPX ? 16
+                 : mppNeed < BWm / 4 / TILEPX ? 8 : mppNeed < BWm / 2 / TILEPX ? 4 : mppNeed < BWm / TILEPX ? 2 : 1;
+        if (grid >= 16 && !_cityDeepReady()) grid = 8;
+        if (grid === 64 && !_cityDeepLevel(7)) grid = 32;
+        var lvlTop = grid === 1 ? 1 : grid === 2 ? 2 : grid === 4 ? 3 : grid === 8 ? 4 : grid === 16 ? 5 : grid === 32 ? 6 : 7;
+        var cells = [], seen = {};
+        var want = function(lvl, gr, gq){ var k = lvl + ':' + gr + ',' + gq; if (seen[k]) return; seen[k] = 1;
+          if (lvl >= 5 && !_cityDeepHas(lvl, gr, gq)){ want(lvl - 1, gr >> 1, gq >> 1); return; }
+          cells.push([lvl, gr, gq]); };
+        for (var gr0 = 0; gr0 < grid; gr0++) for (var gq0 = 0; gq0 < grid; gq0++){
+          var t0 = { X0: B.X0 + BXs * gq0 / grid, X1: B.X0 + BXs * (gq0 + 1) / grid, Y1: B.Y1 - BYs * gr0 / grid, Y0: B.Y1 - BYs * (gr0 + 1) / grid };
+          if (t0.X1 > v.X0 && t0.X0 < v.X1 && t0.Y1 > v.Y0 && t0.Y0 < v.Y1) want(lvlTop, gr0, gq0);
+        }
+        if (lvlTop >= 5) cells.slice().forEach(function(c3){ if (c3[0] >= 5){ var sh = c3[0] - 4; want(4, c3[1] >> sh, c3[2] >> sh); } });
+        var jobs = cells.map(function(c){
+          var lvl = c[0], gr = c[1], gq = c[2], gN = 1 << (lvl - 1);
+          var tb = { X0: B.X0 + BXs * gq / gN, X1: B.X0 + BXs * (gq + 1) / gN, Y1: B.Y1 - BYs * gr / gN, Y0: B.Y1 - BYs * (gr + 1) / gN, z: lvl - lvlTop };
+          var suffix = lvl === 1 ? '' : lvl === 2 ? '-z2-' + (gr ? 's' : 'n') + (gq ? 'e' : 'w') : '-z' + lvl + '-r' + gr + 'c' + gq;
+          var tu = lvl >= 5 ? (CITY_DEEP_BASE + '/nyc-basemap-ink-dry' + suffix + '.png') : ('/nyc-basemap-ink-dry' + suffix + '.png?v=9');
+          return _cityTile(tu).then(function(im){ return { im: lvl >= 5 ? _cityDeGhost(tu, im) : im, b: tb, z: tb.z }; }, function(){ return null; });
+        });
+        return Promise.all(jobs).then(function(parts){
+          var cv = document.createElement('canvas'); cv.width = W2; cv.height = H2;
+          var g = cv.getContext('2d'), sx = W2 / (v.X1 - v.X0), sy = H2 / (v.Y1 - v.Y0);
+          parts.filter(Boolean).sort(function(a, b2){ return a.z - b2.z; }).forEach(function(p){
+            var x0 = Math.round((p.b.X0 - v.X0) * sx), x1 = Math.round((p.b.X1 - v.X0) * sx), y0 = Math.round((v.Y1 - p.b.Y1) * sy), y1 = Math.round((v.Y1 - p.b.Y0) * sy);
+            g.drawImage(p.im, x0, y0, Math.max(1, x1 - x0), Math.max(1, y1 - y0)); });
+          cv._bvKey = 'ink:' + grid + ':' + [v.X0, v.X1, v.Y0, v.Y1].map(Math.round).join(',') + ':' + W2;
+          cv._bvGrid = grid; cv._bvTiles = parts.filter(Boolean).length + '/' + parts.length;
+          return cv;
+        });
+      };
+      return {
+        home: CW_VIEW, box: B,
+        ensure: function(){ cwCsoLoad(); cwBridgesLoad(); cwCurLoad(); cwSpillLoad(); try { cwLiveLoad(); } catch (e){} try { _cityDeepReady(); } catch (e){} },
+        ready: function(){ return !!(window._cwCSO && cwCur.stations); },
+        bridges: function(){ return !!window._cwBridges; },
+        deepReady: function(){ return _cityDeepReady(); },
+        curAt: function(){ return cwCur.at; },
+        stations: function(){ return Object.keys(cwCur.series).length; },
+        ctx: function(){ return { wat: { gl: null, bad: 0, pr: null, u: {}, tx: {}, keys: {} }, field: null, mask: null, view: null }; },
+        ink: ink,
+        /* a new view: its water mask from a composed picture of it (ink()), the field rebuilt on the next frame */
+        setView: function(c, v, im){ c.view = v; return swap(c, function(){ cwFlowMask = cwFlowMaskBuild(im); cwFlowField = null; return cwFlowMask; }); },
+        /* one frame of THE CITY's water for context c onto its WebGL canvas cvs (W x H device px) */
+        frame: function(c, cvs, W, H){
+          return swap(c, function(){
+            var v = cwPainted, now = Date.now();
+            if (!cwFlowMask || !cwCur.stations) return false;
+            var fk = cwFlowMask.src + '|' + W + 'x' + H + '|' + cwCur.at;
+            if (!cwFlowField || cwFlowField._bvKey !== fk){ cwFlowField = cwFlowFieldBuild(W, H, v); if (!cwFlowField) return false; cwFlowField._bvKey = fk; }
+            if (now - cwFlowField.vAt > 20000) cwFlowFieldNow(cwFlowField, now);     /* the tide, re-read every twenty seconds */
+            cwSpillLoad(); if (Date.now() - cwCur.at > 6 * 3600000) cwCurLoad();
+            cwWat.src = cwWatSources(v);
+            var F = null; try { F = cwLiveEnsure(); } catch (e){}
+            return cwWatDraw(cvs, W, H, F);
+          });
+        },
+        /* how many pipes pour now (0: no dye anywhere, the whole-city keeper can rest) */
+        pouring: function(){ return cwWatSources(CW_VIEW).list.length; },
+        pipes: function(g, cvs, dpr, v, px, py){ if (window._cwCSO) cwPipesDraw(g, cvs, dpr, v, px, py); },
+        reads: cwFlowReads, spillLine: cwSpillLine, fakeRain: cwFakeRain
+      };
+    })();
     /* ─ THE SPILL (user 2026-09-25: "remove the blobs and tie the specks to rain but also improve the specs so theyre
        more accurately showing the poop water spreading") ─────────────────────────────────────────────────────────
        A combined sewer overflows only when rain overloads it: NYC DEP says as little as a tenth of an inch can do
@@ -70617,17 +70734,27 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
        cell a water (user 2026-09-14: "make this text look better"): the
        name, an arrow turned to the flow's heading, the state in the flood's
        teal or the ebb's orange, the speed, and when it turns */
-    function cwFlowCaption(){
-      var el = document.getElementById('cw-info');
-      if (!el || !cwCur.stations) return;
+    /* each key water now: name, knots signed (+ flood), heading, slack, when it turns (also LOCAL's national map) */
+    function cwFlowReads(){
       var KEY = [['Hudson', 'NYH1928'], ['East River', 'NYH1924'], ['Harlem River', 'NYH1926'], ['The Narrows', 'n03020'], ['Kill Van Kull', 'n06010'], ['Jamaica Bay', 'NYH1934']];
-      var now = Date.now(), cells = [];
+      var now = Date.now(), out = [];
+      if (!cwCur.stations) return out;
       KEY.forEach(function(k){
         var S = cwCur.series[k[1]]; if (!S) return;
         var v = cwCurAt(k[1], now); if (v == null) return;
         var turn = null;
         for (var i = 1; i < S.t.length; i++){ if (S.t[i] > now && (S.v[i] >= 0) !== (v >= 0)){ turn = S.t[i - 1] + (S.t[i] - S.t[i - 1]) * Math.abs(S.v[i - 1]) / (Math.abs(S.v[i - 1]) + Math.abs(S.v[i]) || 1); break; } }
-        var deg = (v >= 0 ? S.fd : S.ed), slack = Math.abs(v) < 0.2;
+        out.push({ name: k[0], id: k[1], v: v, deg: (v >= 0 ? S.fd : S.ed), slack: Math.abs(v) < 0.2, turn: turn });
+      });
+      return out;
+    }
+    function cwFlowCaption(){
+      var el = document.getElementById('cw-info');
+      if (!el || !cwCur.stations) return;
+      var cells = [];
+      cwFlowReads().forEach(function(rd){
+        var k = [rd.name], v = rd.v, turn = rd.turn;
+        var deg = rd.deg, slack = rd.slack;
         var col = slack ? 'rgba(27,35,64,.55)' : (v >= 0 ? 'rgba(8,145,178,1)' : 'rgba(234,88,12,1)');
         var tt = turn ? new Date(turn).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }).toUpperCase() : null;
         cells.push('<span class="cw-tide-c" style="display:inline-flex;align-items:center;gap:7px;padding:4px 9px;border-radius:8px;background:rgba(27,35,64,.06);white-space:nowrap;">'
@@ -70643,6 +70770,76 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         + '<div style="font:600 8px system-ui,sans-serif;letter-spacing:.04em;color:rgba(27,35,64,.55);margin-top:5px;">' + bvA('NOAA current predictions', 'https://tidesandcurrents.noaa.gov/map/index.html?type=CurrentPredictions&region=New+York') + ' at ' + Object.keys(cwCur.series).length + ' stations<span class="cw-ph-x">, blended along the water between them and faded out past 3 mi of the nearest \u00b7 the arrow is the flow\u2019s heading \u00b7 streaks point where the water is going now, drawn at 600\u00d7 its speed</span></div>'
         + (cwSpillLine() ? '<div' + (/^NO SEWAGE/.test(cwSpillLine()) ? ' class="cw-none-m"' : '') + ' style="font:700 8.5px system-ui,sans-serif;letter-spacing:.06em;color:#1b2340;margin-top:4px;">' + cwSpillLine() + ' <span style="font-weight:600;color:rgba(27,35,64,.55);letter-spacing:.03em;"><span class="cw-ph-x">\u00b7 lime is the overflow, carried by the tide </span>\u00b7 ESTIMATED<span class="cw-ph-x"> from ' + bvA('rain on each sewershed', 'https://open-meteo.com/') + ' against the tenth of an inch that can trigger an overflow; no live feed of which pipe fired exists</span></span></div>' : '');
       el.style.display = '';
+    }
+    /* the 435 outfall glyphs onto a 2D context g for the view v (mercator), px/py lon-lat -> canvas px: THE CITY's cw-gv,
+       and LOCAL's national map through window._bvCityWat */
+    function cwPipesDraw(g, cvs, dpr, v, px, py){
+      /* the glyph is drawn, not a dash: a tapered barrel running out from
+         the bulkhead to a squared mouth, with a headwall bar where it
+         leaves the land. Ink outline so it stays crisp on orange land and
+         dark water alike (user 2026-09-01: cleaner, less generic) */
+      var live = !!cwLiveRain;
+      /* GREEN, NOT RED (user 2026-09-07: "dont use red anymore"). The
+         canvas sits under #cw-bm-ghost, so a third of the orange city lands
+         on top: a pure, low-red green is what survives that as green. The
+         slick in the floods tiles is the same family. */
+      var body = live ? '#a8ff2e' : '#3ae81c';
+      /* SLIMMER (user 2026-09-02: "are they too fat?" — they were). The
+         barrel ran 9 long by 4.6 across at the mouth, barely 2:1, which
+         reads as a stub rather than a pipe; a real outfall is far longer
+         than it is wide. Now 10 by 2.9, about 3.4:1, with a lighter outline
+         and a narrower headwall so 435 of them stop shouting. */
+      /* SIZED TO THE GROUND (user 2026-09-07: "too large on launch"). A
+         fixed 10 px made 435 pipes shout at the home framing and shrink to
+         nothing zoomed in. The barrel is now 90 m of ground: about 2 px
+         at launch on a desktop, a real pipe shape by the third zoom step;
+         clamped so it never vanishes and never becomes a slab. */
+      var mppC = (v.X1 - v.X0) / cvs.width;
+      var cwPh = cvs.width / dpr < 600;   /* a phone: the whole-city view packs the shore, so the floors drop or the pipes read as green slabs (user 2026-10-14: "fix the sewage pipes on mobile") */
+      var Lg = Math.max(cwPh ? 2.2 : 3.4, Math.min(11, 90 / mppC)) * dpr;    /* 3.4 px floor: a tick at launch, a pipe by the third zoom */
+      var L = Lg, halfIn = Math.max(cwPh ? 0.3 : 0.5, 0.085 * Lg / dpr) * dpr, halfOut = Math.max(cwPh ? 0.45 : 0.8, 0.145 * Lg / dpr) * dpr;
+      /* THE MOUTH NOW CARRIES THE REAL SIZE (2026-09-10). DEP's of_size,
+         joined in city_cso.json: these pipes run from a 10-inch stub to a
+         52-foot box, and drawing them all one width threw that away.
+         WIDTH ONLY, and deliberately:
+           - not LENGTH, because nothing in this data says how far a pipe
+             reaches into the water. Both agencies record the bulkhead (DEP's
+             median outfall is 2.0 ft from the surveyed shoreline), so a
+             longer barrel would be an invention.
+           - not the BARREL COUNT, because one row reads "72BL" and is surely
+             a typo; the count belongs in the readout where it can be judged.
+         Compressed by a 0.4 power around a 4 ft median so a 52 ft box does
+         not become a slab 13x its neighbours, then clamped. */
+      var szw = window._cwCSOszw || [];
+      window._cwCSO.forEach(function(c, ci){
+        var x = px(c), y = py(c);
+        if (x < -14 || y < -14 || x > cvs.width + 14 || y > cvs.height + 14) return;
+        /* lit per pipe from its own sewershed's rain (cwSpillPipeOn), not one radar dot for the whole city */
+        live = cwSpillPipeOn(c, ci); body = live ? '#a8ff2e' : '#3ae81c';
+        var wf = (c[7] != null && c[7] >= 0) ? szw[c[7]] : null;
+        var k = wf ? Math.max(0.72, Math.min(cwPh ? 1.6 : 2.2, Math.pow(wf / 4, 0.4))) : 1;
+        var hOut = halfOut * k, hIn = halfIn * k;
+        g.save();
+        g.translate(x, y);
+        g.rotate((c[2] || 0) * Math.PI / 180);
+        var x0 = -L * 0.34, x1 = L * 0.66;
+        g.beginPath();                       // barrel: narrow at the wall, open at the mouth
+        g.moveTo(x0, -hIn); g.lineTo(x1, -hOut);
+        g.lineTo(x1, hOut); g.lineTo(x0, hIn);
+        g.closePath();
+        g.fillStyle = body; g.fill();
+        g.lineWidth = (cwPh ? 0.3 : 0.5) * dpr; g.strokeStyle = 'rgba(26,20,18,.8)'; g.stroke();
+        g.beginPath();                       // headwall where it meets the shore
+        g.moveTo(x0, -hIn * 2.3); g.lineTo(x0, hIn * 2.3);
+        g.lineWidth = (cwPh ? 0.6 : 1.1) * dpr; g.strokeStyle = 'rgba(26,20,18,.75)'; g.stroke();
+        if (live){                           // a mouth flare while the sewers are likely spilling
+          g.beginPath();
+          g.moveTo(x1, -hOut); g.lineTo(x1 + 2.2 * dpr, 0); g.lineTo(x1, hOut);
+          g.closePath();
+          g.fillStyle = 'rgba(255,32,22,.5)'; g.fill();
+        }
+        g.restore();
+      });
     }
     function cwDrawGhost(){
       var cvs = document.getElementById('cw-gv');
@@ -70868,72 +71065,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
          the water along each outfall's baked water-facing angle (sampled
          from the basemap at bake time). No glow. Always on. */
       if (window._cwCSO && cwMapMode() && !cw.rock && !cw.traffic){   /* no outfall pipes on the geology view (user 2026-09-07) nor under the traffic (user 2026-09-21) */
-        /* the glyph is drawn, not a dash: a tapered barrel running out from
-           the bulkhead to a squared mouth, with a headwall bar where it
-           leaves the land. Ink outline so it stays crisp on orange land and
-           dark water alike (user 2026-09-01: cleaner, less generic) */
-        var live = !!cwLiveRain;
-        /* GREEN, NOT RED (user 2026-09-07: "dont use red anymore"). The
-           canvas sits under #cw-bm-ghost, so a third of the orange city lands
-           on top: a pure, low-red green is what survives that as green. The
-           slick in the floods tiles is the same family. */
-        var body = live ? '#a8ff2e' : '#3ae81c';
-        /* SLIMMER (user 2026-09-02: "are they too fat?" — they were). The
-           barrel ran 9 long by 4.6 across at the mouth, barely 2:1, which
-           reads as a stub rather than a pipe; a real outfall is far longer
-           than it is wide. Now 10 by 2.9, about 3.4:1, with a lighter outline
-           and a narrower headwall so 435 of them stop shouting. */
-        /* SIZED TO THE GROUND (user 2026-09-07: "too large on launch"). A
-           fixed 10 px made 435 pipes shout at the home framing and shrink to
-           nothing zoomed in. The barrel is now 90 m of ground: about 2 px
-           at launch on a desktop, a real pipe shape by the third zoom step;
-           clamped so it never vanishes and never becomes a slab. */
-        var mppC = (v.X1 - v.X0) / cvs.width;
-        var cwPh = cvs.width / dpr < 600;   /* a phone: the whole-city view packs the shore, so the floors drop or the pipes read as green slabs (user 2026-10-14: "fix the sewage pipes on mobile") */
-        var Lg = Math.max(cwPh ? 2.2 : 3.4, Math.min(11, 90 / mppC)) * dpr;    /* 3.4 px floor: a tick at launch, a pipe by the third zoom */
-        var L = Lg, halfIn = Math.max(cwPh ? 0.3 : 0.5, 0.085 * Lg / dpr) * dpr, halfOut = Math.max(cwPh ? 0.45 : 0.8, 0.145 * Lg / dpr) * dpr;
-        /* THE MOUTH NOW CARRIES THE REAL SIZE (2026-09-10). DEP's of_size,
-           joined in city_cso.json: these pipes run from a 10-inch stub to a
-           52-foot box, and drawing them all one width threw that away.
-           WIDTH ONLY, and deliberately:
-             - not LENGTH, because nothing in this data says how far a pipe
-               reaches into the water. Both agencies record the bulkhead (DEP's
-               median outfall is 2.0 ft from the surveyed shoreline), so a
-               longer barrel would be an invention.
-             - not the BARREL COUNT, because one row reads "72BL" and is surely
-               a typo; the count belongs in the readout where it can be judged.
-           Compressed by a 0.4 power around a 4 ft median so a 52 ft box does
-           not become a slab 13x its neighbours, then clamped. */
-        var szw = window._cwCSOszw || [];
-        window._cwCSO.forEach(function(c, ci){
-          var x = px(c), y = py(c);
-          if (x < -14 || y < -14 || x > cvs.width + 14 || y > cvs.height + 14) return;
-          /* lit per pipe from its own sewershed's rain (cwSpillPipeOn), not one radar dot for the whole city */
-          live = cwSpillPipeOn(c, ci); body = live ? '#a8ff2e' : '#3ae81c';
-          var wf = (c[7] != null && c[7] >= 0) ? szw[c[7]] : null;
-          var k = wf ? Math.max(0.72, Math.min(cwPh ? 1.6 : 2.2, Math.pow(wf / 4, 0.4))) : 1;
-          var hOut = halfOut * k, hIn = halfIn * k;
-          g.save();
-          g.translate(x, y);
-          g.rotate((c[2] || 0) * Math.PI / 180);
-          var x0 = -L * 0.34, x1 = L * 0.66;
-          g.beginPath();                       // barrel: narrow at the wall, open at the mouth
-          g.moveTo(x0, -hIn); g.lineTo(x1, -hOut);
-          g.lineTo(x1, hOut); g.lineTo(x0, hIn);
-          g.closePath();
-          g.fillStyle = body; g.fill();
-          g.lineWidth = (cwPh ? 0.3 : 0.5) * dpr; g.strokeStyle = 'rgba(26,20,18,.8)'; g.stroke();
-          g.beginPath();                       // headwall where it meets the shore
-          g.moveTo(x0, -hIn * 2.3); g.lineTo(x0, hIn * 2.3);
-          g.lineWidth = (cwPh ? 0.6 : 1.1) * dpr; g.strokeStyle = 'rgba(26,20,18,.75)'; g.stroke();
-          if (live){                           // a mouth flare while the sewers are likely spilling
-            g.beginPath();
-            g.moveTo(x1, -hOut); g.lineTo(x1 + 2.2 * dpr, 0); g.lineTo(x1, hOut);
-            g.closePath();
-            g.fillStyle = 'rgba(255,32,22,.5)'; g.fill();
-          }
-          g.restore();
-        });
+        cwPipesDraw(g, cvs, dpr, v, px, py);
       }
       if (!cw.floods || !cw.fl1865) return;
       var d = window._ghostData, gp = window._cwPonds;
@@ -72996,19 +73128,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
          roster so the dots land on first paint */
       mtaStops(function(){ cwDrawSensors(); });
       /* the CSO outfall pipes, baked from NYS DEC (9KB) */
-      if (!window._cwCSO && !window._cwCSOReq){
-        window._cwCSOReq = 1;
-        fetch('city_cso.json').then(function(r){ return r.json(); })
-          .then(function(j){ if (j && j.p){ window._cwCSO = j.p; window._cwCSOwb = j.wb || []; window._cwCSOfac = j.fac || [];
-            /* sz = DEP's own size string per pipe ("13' X 13'", '48" DIA'),
-               szw = that size's WIDTH IN FEET, parsed at bake time so the
-               renderer never parses a string. 410 of the 435 carry one. */
-            window._cwCSOsz = j.sz || []; window._cwCSOszw = j.szw || [];
-            /* p[8] indexes `loc` (DEP's own description of the spot, 411 of 435);
-               `plant` is indexed like `fac`, so p[5] reads both. */
-            window._cwCSOloc = j.loc || []; window._cwCSOplant = j.plant || [];
-            cwDrawSensors(); } }).catch(function(){});
-      }
+      cwCsoLoad();
       /* BELVEDERE CASTLE — the Kalshi daily-high market. Central Park is the
          official thermometer the market settles on (CLINYC), and the castle
          is where it stands, so the marker sits on the instrument itself.
@@ -73042,11 +73162,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         fetch('city_ferries.json').then(function(r){ return r.json(); })
           .then(function(j){ if (j && j.f){ window._cwFerries = j.f; cwDrawSensors(); } }).catch(function(){});
       }
-      if (!window._cwBridges && !window._cwBridgesReq){
-        window._cwBridgesReq = 1;
-        fetch('city_bridges.json').then(function(r){ return r.json(); })
-          .then(function(j){ if (j && j.w){ window._cwBridges = j.w; cwDrawSensors(); } }).catch(function(){});
-      }
+      cwBridgesLoad();
       /* a compose that never lands must not strand the loader forever */
       setTimeout(function(){
         var ld = document.getElementById('cw-loading');
@@ -106037,6 +106153,160 @@ function closeAlertModal(){
       clearTimeout(SWL.deb); SWL.deb = setTimeout(SWL.build, 60);
     };
     SWL.off = function(){ SWL.gen++; clearTimeout(SWL.deb); swlHide(); SWL.info = null; if (SWL.cv) SWL.cv.style.display = 'none'; };
+    /* ---------------------------------------------------------------- THE CITY's WATER ---- */
+    /* THE HARBOR'S CURRENT AND THE SEWAGE DYE, AT THE CITY's QUALITY (user 2026-10-17: "i want the green flow the most, have we
+       sacrificed any of that quality by switching to this map?"). Inside THE CITY's box, on TIDES, the national map runs THE
+       CITY's own water simulation through window._bvCityWat -- not a copy and not THE CITY's canvas stretched: the same 62
+       NOAA stations blended by water, the same 435 outfalls poured by the same sewershed rain, the same advection and display
+       shaders, and the same water mask read off the same ink pyramid, composed for THIS map's view. The simulation runs in
+       this map's own pixels: one buffer pixel per device pixel (capped near 4.2 Mpx), over the view and an eighth of it each
+       side, so a pan inside that margin keeps every trail (the canvas rides in its pane); a zoom or a pan past it starts the
+       view again, with the whole city's dye under it as the floor, as THE CITY does. That floor is kept by a second context
+       on the whole-city view at THE CITY's desktop size, stepped every other frame while any pipe pours, copied in every ~40
+       of its steps. The outfall glyphs are THE CITY's own (cwPipesDraw), on the map from zoom 11. Animated only while TIDES
+       is open, the city is in view and the page is visible. */
+    var CF = { lit: false, raf: 0, V: null, H: null, cv: null, pc: null, hcv: null, gen: 0, hgen: 0, sv: null, n: 0, hN: 0, inView: false, pour: 0, pourAt: 0, timer: null };
+    window._bvLcCityFlow = CF;      /* the harness reads CF.stat / CF.err / CF.ms */
+    var CF_R = 6378137, CF_PR = Math.PI * 6378137, CF_CAP = 4.2e6;
+    var cfX = function(){ return window._bvCityWat; };
+    var cfScale = function(){ return 256 * Math.pow(2, M.getZoom()) / (2 * CF_PR); };      /* layer px per mercator metre */
+    var cfOverlap = function(){ var X = cfX(); if (!X || !M) return false; var b = M.getBounds(), B = X.box;
+      return B.w < b.getEast() && B.e > b.getWest() && B.s < b.getNorth() && B.n > b.getSouth(); };
+    var cfCanvas = function(){
+      if (CF.cv) return;
+      var pn = M.getPane('lcCityWat') || M.createPane('lcCityWat'); pn.style.zIndex = 438; pn.style.pointerEvents = 'none';
+      CF.cv = document.createElement('canvas'); CF.cv.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none;visibility:hidden;'; pn.appendChild(CF.cv);
+      var pp = M.getPane('lcCityPipes') || M.createPane('lcCityPipes'); pp.style.zIndex = 439; pp.style.pointerEvents = 'none';
+      CF.pc = document.createElement('canvas'); CF.pc.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none;'; pp.appendChild(CF.pc);
+    };
+    var cfHide = function(){ if (CF.cv) CF.cv.style.visibility = 'hidden'; if (CF.pc) CF.pc.style.visibility = 'hidden'; };
+    var cfPlace = function(){ var v = CF.sv; if (!v || !CF.cv) return; var S = cfScale(), o = M.getPixelOrigin();
+      L.DomUtil.setPosition(CF.cv, L.point((v.X0 + CF_PR) * S - o.x, (CF_PR - v.Y1) * S - o.y)); };
+    var cfStart = function(){ if (!CF.raf && CF.lit && CF.inView && pane.style.display !== 'none' && !document.hidden) CF.raf = requestAnimationFrame(cfFrame); };
+    CF.rekey = function(){
+      if (!CF.lit || !M) return;
+      var X = cfX(); if (!X) return;
+      CF.inView = cfOverlap();
+      if (!CF.inView){ cfHide(); CF.sv = null; return; }
+      X.ensure();
+      if (!X.ready()){ clearTimeout(CF.rt); CF.rt = setTimeout(CF.rekey, 700); return; }
+      cfCanvas();
+      var S = cfScale(), pb = M.getPixelBounds(), sz = M.getSize(), B = X.box, Hm = X.home, z = M.getZoom(), cur = CF.sv;
+      var vis = { X0: Math.max(B.X0, pb.min.x / S - CF_PR), X1: Math.min(B.X1, pb.max.x / S - CF_PR), Y0: Math.max(B.Y0, CF_PR - pb.max.y / S), Y1: Math.min(B.Y1, CF_PR - pb.min.y / S) };
+      /* still inside the running view at this zoom: it keeps running, its pane carried it */
+      if (cur && cur.z === z && CF.V && CF.V.mask && vis.X0 >= cur.X0 - 1 && vis.X1 <= cur.X1 + 1 && vis.Y0 >= cur.Y0 - 1 && vis.Y1 <= cur.Y1 + 1){ cfPlace(); return; }
+      var mx = sz.x * 0.12, my = sz.y * 0.12;
+      var v = { X0: Math.max(B.X0, (pb.min.x - mx) / S - CF_PR), X1: Math.min(B.X1, (pb.max.x + mx) / S - CF_PR), Y0: Math.max(B.Y0, CF_PR - (pb.max.y + my) / S), Y1: Math.min(B.Y1, CF_PR - (pb.min.y - my) / S) };
+      if (!(v.X1 > v.X0 && v.Y1 > v.Y0)){ cfHide(); return; }
+      /* the whole city in reach: THE CITY's own whole-city view, which keeps the dye every closer view stands on */
+      var home = v.X0 <= Hm.X0 && v.X1 >= Hm.X1 && v.Y0 <= Hm.Y0 && v.Y1 >= Hm.Y1;
+      if (home) v = { X0: Hm.X0, X1: Hm.X1, Y0: Hm.Y0, Y1: Hm.Y1, ASPECT: Hm.ASPECT };
+      v.z = z;
+      var cw = (v.X1 - v.X0) * S, ch = (v.Y1 - v.Y0) * S, dpr = Math.min(2, window.devicePixelRatio || 1);
+      var s = Math.min(dpr, Math.sqrt(CF_CAP / Math.max(1, cw * ch)), 4096 / Math.max(cw, ch));
+      var W = Math.max(2, Math.round(cw * s)), H = Math.max(2, Math.round(ch * s));
+      var gen = ++CF.gen, W2 = Math.min(3000, W), H2 = Math.max(2, Math.round(W2 * H / W)), deep0 = X.deepReady(), t0 = Date.now();
+      X.ink(v, W2, H2).then(function(im){
+        if (gen !== CF.gen || !CF.lit || M.getZoom() !== z) return;
+        if (!CF.V) CF.V = X.ctx();
+        var mk = X.setView(CF.V, v, im);
+        CF.sv = v; CF.VW = W; CF.VH = H; CF.home = home;
+        CF.needBr = !X.bridges(); CF.needDeep = !deep0 && im._bvGrid === 8;
+        CF.cv.style.width = cw + 'px'; CF.cv.style.height = ch + 'px'; CF.cv.style.visibility = 'hidden'; CF.cv.style.display = '';
+        cfPlace();
+        CF.stat = { W: W, H: H, css: Math.round(cw) + 'x' + Math.round(ch), scale: +s.toFixed(3), grid: im._bvGrid, tiles: im._bvTiles, mask: mk ? mk.w + 'x' + mk.h : null,
+          share: mk ? +mk.share.toFixed(3) : 0, bridged: mk ? mk.bridged : 0, home: home, z: z, ms: Date.now() - t0 };
+        cfStart();
+      }).catch(function(e){ CF.err = String(e); });
+    };
+    /* the whole-city keeper: a second context on THE CITY's whole-city view at its desktop size (2200 px composed, the
+       simulation at three quarters, as THE CITY sizes it) */
+    var cfHome = function(){
+      var X = cfX(); if (CF.H || CF.hgen || !X) return; CF.hgen = 1;
+      var Hm = X.home, W2 = 2200, H2 = Math.round(W2 / Hm.ASPECT);
+      X.ink(Hm, W2, H2).then(function(im){ var c = X.ctx(); X.setView(c, { X0: Hm.X0, X1: Hm.X1, Y0: Hm.Y0, Y1: Hm.Y1, ASPECT: Hm.ASPECT }, im);
+        CF.hcv = document.createElement('canvas'); CF.HW = Math.round(W2 * 0.75); CF.HH = Math.round(H2 * 0.75); CF.H = c; }).catch(function(e){ CF.hgen = 0; CF.err = String(e); });
+    };
+    /* its kept dye (THE CITY's txBg, half size) into this view's context as the floor: read back, uploaded on unit 7 */
+    var cfFloor = function(){
+      var hw = CF.H && CF.H.wat, vw = CF.V && CF.V.wat, g1 = hw && hw.gl, g2 = vw && vw.gl;
+      if (!g1 || !g2 || !hw.txBg || !hw.bgW || CF.floorBad) return;
+      var w = hw.bgW, h = hw.bgH, n = w * h * 4, px8 = CF.p8 && CF.p8.length === n ? CF.p8 : (CF.p8 = new Uint8Array(n));
+      var fb = g1.createFramebuffer(); g1.bindFramebuffer(g1.FRAMEBUFFER, fb);
+      g1.framebufferTexture2D(g1.FRAMEBUFFER, g1.COLOR_ATTACHMENT0, g1.TEXTURE_2D, hw.txBg, 0);
+      var ok = g1.checkFramebufferStatus(g1.FRAMEBUFFER) === g1.FRAMEBUFFER_COMPLETE;
+      if (ok && hw.hf){ var f = CF.pf && CF.pf.length === n ? CF.pf : (CF.pf = new Float32Array(n)); g1.readPixels(0, 0, w, h, g1.RGBA, g1.FLOAT, f);
+        if (g1.getError()) ok = false; else for (var i = 0; i < n; i++){ var q = f[i] * 255 + 0.5; px8[i] = q < 0 ? 0 : q > 255 ? 255 : q; } }
+      else if (ok){ g1.readPixels(0, 0, w, h, g1.RGBA, g1.UNSIGNED_BYTE, px8); if (g1.getError()) ok = false; }
+      g1.bindFramebuffer(g1.FRAMEBUFFER, null); g1.deleteFramebuffer(fb);
+      if (!ok){ CF.floorBad = 1; return; }
+      if (!vw.txBg || vw.bgW !== w || vw.bgH !== h){ if (vw.txBg) g2.deleteTexture(vw.txBg); vw.txBg = g2.createTexture(); g2.activeTexture(g2.TEXTURE7); g2.bindTexture(g2.TEXTURE_2D, vw.txBg);
+        g2.texParameteri(g2.TEXTURE_2D, g2.TEXTURE_MIN_FILTER, g2.LINEAR); g2.texParameteri(g2.TEXTURE_2D, g2.TEXTURE_MAG_FILTER, g2.LINEAR);
+        g2.texParameteri(g2.TEXTURE_2D, g2.TEXTURE_WRAP_S, g2.CLAMP_TO_EDGE); g2.texParameteri(g2.TEXTURE_2D, g2.TEXTURE_WRAP_T, g2.CLAMP_TO_EDGE); }
+      g2.activeTexture(g2.TEXTURE7); g2.bindTexture(g2.TEXTURE_2D, vw.txBg); g2.pixelStorei(g2.UNPACK_ALIGNMENT, 1);
+      g2.texImage2D(g2.TEXTURE_2D, 0, g2.RGBA, w, h, 0, g2.RGBA, g2.UNSIGNED_BYTE, px8);
+      vw.bgW = w; vw.bgH = h; vw.bgAt = performance.now(); CF.floorN = (CF.floorN || 0) + 1;
+    };
+    var cfFrame = function(){
+      CF.raf = 0;
+      if (!CF.lit || !CF.inView || pane.style.display === 'none' || document.hidden) return;
+      CF.raf = requestAnimationFrame(cfFrame);
+      var X = cfX(), v = CF.sv; if (!X || !v || !CF.V || !CF.V.mask || CF.zooming || v.z !== M.getZoom()) return;
+      var t0 = performance.now(); CF.n++;
+      if (t0 - CF.pourAt > 2000){ CF.pourAt = t0; CF.pour = X.pouring(); if (CF.pour) cfHome(); }
+      if (!CF.home && CF.pour && CF.H && (CF.n & 1)){
+        try { X.frame(CF.H, CF.hcv, CF.HW, CF.HH); if ((++CF.hN) % 40 === 0) cfFloor(); } catch (e){ CF.err = String(e); }
+      }
+      var ok = false; try { ok = X.frame(CF.V, CF.cv, CF.VW, CF.VH); } catch (e){ CF.err = String(e); }
+      if (ok && CF.cv.style.visibility === 'hidden') CF.cv.style.visibility = '';
+      CF.ms = Math.round((performance.now() - t0) * 10) / 10;
+    };
+    /* THE CITY's outfall glyphs over the whole map, redrawn when it stops (and as the spill state moves) */
+    var cfPipes = function(){
+      var X = cfX(); if (!CF.pc || !X || !M) return;
+      var sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr), c = CF.pc;
+      if (c.width !== W || c.height !== H){ c.width = W; c.height = H; c.style.width = sz.x + 'px'; c.style.height = sz.y + 'px'; }
+      L.DomUtil.setPosition(c, M.containerPointToLayerPoint([0, 0])); c.style.visibility = '';
+      var g = c.getContext('2d'); g.clearRect(0, 0, W, H);
+      if (!CF.lit || !CF.inView || M.getZoom() < 11) return;
+      var S = cfScale(), pb = M.getPixelBounds(), v = { X0: pb.min.x / S - CF_PR, X1: pb.max.x / S - CF_PR, Y0: CF_PR - pb.max.y / S, Y1: CF_PR - pb.min.y / S };
+      var px = function(q){ return ((q[0] * Math.PI / 180 * CF_R) - v.X0) / (v.X1 - v.X0) * W; };
+      var py = function(q){ return (v.Y1 - CF_R * Math.log(Math.tan(Math.PI / 4 + q[1] * Math.PI / 360))) / (v.Y1 - v.Y0) * H; };
+      try { X.pipes(g, c, dpr, v, px, py); } catch (e){ CF.err = String(e); }
+    };
+    /* THE CITY's reading of the water, in this strip's colors (flood teal, ebb amber, as the arrows' key) */
+    CF.line = function(){
+      var X = cfX(); if (!X || !CF.lit || !CF.inView) return '';
+      var R0 = X.reads(); if (!R0.length) return '<div>READING NOAA’S CURRENT PREDICTIONS AT THE HARBOR’S STATIONS…</div>';
+      var cells = R0.map(function(r){ var col = r.slack ? 'rgba(255,255,255,.8)' : (r.v >= 0 ? '#5eead4' : '#fbbf24');
+        return '<span class="lr-k" style="display:inline-block;margin:0 10px 1px 0;">' + esc(r.name.toUpperCase())
+          + ' <span style="display:inline-block;color:' + col + ';transform:rotate(' + r.deg + 'deg);">' + (r.slack ? '·' : '↑') + '</span> <span style="color:' + col + ';">'
+          + (r.slack ? 'SLACK' : (r.v >= 0 ? 'FLOOD ' : 'EBB ') + Math.abs(r.v).toFixed(1) + ' KT') + '</span>' + (r.turn ? ' <span style="opacity:.78;">TURNS ' + esc(String(hm(r.turn)).toUpperCase()) + '</span>' : '') + '</span>'; });
+      var sp = X.spillLine();
+      return '<div>THE TIDE NOW · ' + cells.join('') + '</div>'
+        + '<div style="opacity:.78;font-weight:700;">NOAA CURRENT PREDICTIONS AT ' + X.stations() + ' STATIONS, BLENDED ALONG THE WATER BETWEEN THEM AND FADED OUT PAST 3 MI OF THE NEAREST · THE WATER’S GRAIN STREAMS WHERE IT IS GOING NOW, DRAWN AT 600× ITS SPEED</div>'
+        + (sp ? '<div><span class="lr-dot" style="background:#9eff38;margin-left:0;"></span>' + esc(sp.toUpperCase()) + ' <span style="opacity:.78;font-weight:700;">· LIME IS THE OVERFLOW, CARRIED BY THE TIDE · ESTIMATED FROM RAIN ON EACH SEWERSHED AGAINST THE TENTH OF AN INCH THAT CAN TRIGGER AN OVERFLOW; NO LIVE FEED OF WHICH PIPE FIRED EXISTS</span></div>' : '');
+    };
+    CF.on = function(){
+      if (!M) return; CF.lit = true; var X = cfX(); if (X) X.ensure();
+      if (!CF.wired){ CF.wired = true;
+        M.on('zoomstart', function(){ CF.zooming = true; cfHide(); });
+        M.on('zoomend', function(){ CF.zooming = false; });
+        M.on('moveend resize', function(){ if (!CF.lit) return; var was = CF.inView; CF.rekey(); cfPipes(); cfStart(); if (was !== CF.inView) SEA.onSum(); });
+        document.addEventListener('visibilitychange', function(){ if (!document.hidden && CF.lit){ cfPipes(); cfStart(); } }); }
+      CF.rekey(); cfPipes(); cfStart(); SEA.onSum();
+      if (!CF.timer) CF.timer = setInterval(function(){ if (!CF.lit || pane.style.display === 'none' || document.hidden) return; var X2 = cfX();
+        if (X2 && ((CF.needBr && X2.bridges()) || (CF.needDeep && X2.deepReady()))){ CF.sv = null; CF.rekey(); }
+        if (!CF.inView) CF.rekey();
+        cfPipes(); SEA.onSum(); cfStart(); }, 15000);
+    };
+    CF.off = function(){ CF.lit = false; CF.gen++; clearTimeout(CF.rt); if (CF.raf){ cancelAnimationFrame(CF.raf); CF.raf = 0; } cfHide();
+      if (CF.timer){ clearInterval(CF.timer); CF.timer = null; } };
+    /* TIDES turns it on and off with the sea; its reading leads the strip's sea line */
+    var cfSeaOn = SEA.on, cfSeaOff = SEA.off, cfSeaLine = SEA.line;
+    SEA.on = function(){ cfSeaOn(); CF.on(); };
+    SEA.off = function(){ cfSeaOff(); CF.off(); };
+    SEA.line = function(){ var a = CF.line(); return (a ? a + '<div style="height:4px;"></div>' : '') + cfSeaLine(); };
     /* ---------------------------------------------------------------- TRAFFIC ---- */
     /* STEP 2 OF ONE MAP ENGINE (user 2026-10-16: "start step 2"): THE CITY's TRAFFIC tab for any place. TomTom's flow vector
        tiles and incidents are national, the same referer-locked key THE CITY uses (CW_TT_KEY). The look is THE CITY's own:
