@@ -1023,7 +1023,8 @@ window._bvLandOnly = function(url, opts){
         g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
         if (ub && ub.naturalWidth) g.drawImage(ub, (c.x % uk) * 256 / uk, (c.y % uk) * 256 / uk, 256 / uk, 256 / uk, 0, 0, cv.width, cv.height);
         if (im.naturalWidth) g.drawImage(im, sx * 256 / k, sy * 256 / k, 256 / k, 256 / k, 0, 0, cv.width, cv.height);
-        if (opts.tint){ g.globalCompositeOperation = 'source-atop'; g.fillStyle = 'rgba(' + opts.tint.join(',') + ')'; g.fillRect(0, 0, cv.width, cv.height); }
+        if (opts.recolor && im._bvReadable){ try { var D = g.getImageData(0, 0, cv.width, cv.height); opts.recolor(D.data); g.putImageData(D, 0, 0); } catch(e){ im._bvReadable = false; } }
+        if (opts.tint && !(opts.recolor && im._bvReadable)){ g.globalCompositeOperation = 'source-atop'; g.fillStyle = 'rgba(' + opts.tint.join(',') + ')'; g.fillRect(0, 0, cv.width, cv.height); }
         g.globalCompositeOperation = 'source-over';
         if (!view){ done(null, cv); return; }
         view.getDisplayTile({ x: c.x, y: c.y, z: c.z }).then(function(pt){
@@ -1032,8 +1033,12 @@ window._bvLandOnly = function(url, opts){
           g.restore(); done(null, cv);
         }).catch(function(){ done(null, cv); });
       };
-      im.onerror = function(){ if (--pending === 0) paint(); };
-      im.src = url.replace('{z}', nz).replace('{x}', c.x >> (c.z - nz)).replace('{y}', c.y >> (c.z - nz));
+      var src0 = url.replace('{z}', nz).replace('{x}', c.x >> (c.z - nz)).replace('{y}', c.y >> (c.z - nz));
+      /* opts.proxy: read the tile through our CORS proxy so opts.recolor can rewrite its pixels; if that fails, the tile
+         is loaded directly (drawable, not readable) and opts.tint stands in */
+      im.onerror = function(){ if (im._bvReadable){ im._bvReadable = false; im.removeAttribute('crossorigin'); im.src = src0; return; } if (--pending === 0) paint(); };
+      if (opts.proxy){ im._bvReadable = true; im.crossOrigin = 'anonymous'; im.src = opts.proxy(src0); }
+      else im.src = src0;
       return cv;
     }
   });
@@ -105357,6 +105362,21 @@ function closeAlertModal(){
       svg.onpointerdown = svg.onpointermove = function(e){ if (e.pointerType === 'mouse' || e.type === 'pointerdown') at(e); };
       svg.onpointerleave = function(){ svg.querySelector('#lc-tide-cur').innerHTML = ''; rd.innerHTML = legend; };
     };
+    /* NOAA'S DEPTH RAMP, REDRAWN IN THE SITE'S (user 2026-10-16: "add coast.noaa.gov to the proxy and deploy it", so the tiles
+       are readable). NOAA paints flood depth from pale blue (shallow) to saturated navy (9,9,145, deep) and low ground cut
+       off from the water in lime (85,255,0). Here depth is read back off the ramp's brightness and redrawn from a light
+       aqua film to a clear deep blue, more opaque as it deepens, so a few inches over a lawn reads as a sheen and a channel
+       of standing water as solid; the cut-off low ground is a muted sea-green. */
+    var slrRecolor = function(d){
+      for (var i = 0; i < d.length; i += 4){
+        var a = d[i + 3]; if (a < 8) continue;
+        var r = d[i], gg = d[i + 1], b = d[i + 2];
+        if (gg > 180 && r < 140 && b < 90){ d[i] = 92; d[i + 1] = 196; d[i + 2] = 150; d[i + 3] = 150; continue; }   /* low ground, cut off */
+        var t = Math.max(0, Math.min(1, 1 - (((r + gg + b) / 3) - 54) / 170));      /* 0 shallow ... 1 deep */
+        d[i] = Math.round(150 - 96 * t); d[i + 1] = Math.round(222 - 100 * t); d[i + 2] = Math.round(246 - 36 * t);
+        d[i + 3] = Math.round(a * (0.36 + 0.36 * t));                          /* deep tops out at .72: the streets still read through */
+      }
+    };
     /* the flood-depth map at the level picked */
     T.levels = function(){ var d = T.d, F = d.F, now = Date.now(), L2 = [];
       var nx = d.hilo.filter(function(x){ return x.H && x.t > now; })[0];
@@ -105379,12 +105399,13 @@ function closeAlertModal(){
          permanent water is erased so only ground that floods is colored, NOAA's saturated navy pulled toward the map's
          blue, the green low ground softened to sea-green, and the source's 3 m stair-steps softened */
       if (!T.slr || T.slr._bvName !== name){ if (T.slr) M.removeLayer(T.slr);
-        T.slr = window._bvLandOnly ? window._bvLandOnly(url.replace('{z}/{y}/{x}', '{z}/{y}/{x}'), { opacity: .82, zIndex: 6, maxNative: 16, tint: [70, 150, 225, .42], soft: .5 })
+        T.slr = window._bvLandOnly ? window._bvLandOnly(url, { opacity: 1, zIndex: 6, maxNative: 16, soft: .5, tint: [70, 150, 225, .42],
+            proxy: function(u){ return 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent(u) + '&ttl=86400'; }, recolor: slrRecolor })
           : L.tileLayer(url, { opacity: .8, zIndex: 6, maxZoom: 18, maxNativeZoom: 16 }); T.slr._bvName = name; }
       if (!M.hasLayer(T.slr)) T.slr.addTo(M);
       strip.innerHTML = '<div>' + LV.map(function(x){ return '<button type="button" class="lc-pill' + (x.k === cur.k ? ' on' : '') + '" data-l="' + x.k + '" style="margin:0 6px 4px 0;">' + x.n + '</button>'; }).join('') + '</div>'
         + '<div>' + (above < -0.25 ? 'AT ' + esc(cur.w) + ' THE WATER STAYS BELOW THE AVERAGE HIGH TIDE LINE · NOTHING ON LAND FLOODS'
-          : 'BLUE: WHERE WATER STANDS AT ' + esc(cur.w) + ', ' + ft(Math.max(0, above)) + ' FT ABOVE THE AVERAGE HIGH TIDE (MAPPED IN HALF-FOOT STEPS: ' + step.toFixed(1) + ') · DEEPER BLUE IS DEEPER · GREEN: LOW GROUND CUT OFF FROM THE WATER, WHICH FLOODS WHEN DRAINS BACK UP') + '</div>';
+          : 'BLUE: LAND UNDER WATER AT ' + esc(cur.w) + ', ' + ft(Math.max(0, above)) + ' FT ABOVE THE AVERAGE HIGH TIDE (MAPPED IN HALF-FOOT STEPS: ' + step.toFixed(1) + ') · PALE IS A FEW INCHES, DEEP BLUE IS DEEP · SEA-GREEN: LOW GROUND CUT OFF FROM THE WATER, WHICH FLOODS WHEN DRAINS BACK UP') + '</div>';
       [].forEach.call(strip.querySelectorAll('.lc-pill'), function(b){ b.onclick = function(e){ e.stopPropagation(); T.lvl = b.getAttribute('data-l'); T.map(); }; });
     };
     T.off = function(){ if (T.timer){ clearInterval(T.timer); T.timer = null; } if (M){ if (T.slr && M.hasLayer(T.slr)) M.removeLayer(T.slr); if (T.mk && M.hasLayer(T.mk)) M.removeLayer(T.mk); } tideEl.style.display = 'none'; };

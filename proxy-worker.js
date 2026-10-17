@@ -45,6 +45,7 @@ const CACHE_RULES = {
   // ── forecasts / advisories (5–10 minutes) ──
   'api.weather.gov':              300,
   'water.noaa.gov':               300,
+  'coast.noaa.gov':               86400,  // Sea Level Rise Viewer flood-depth tiles (static; the LOCAL tide map recolors them)
   'www.nhc.noaa.gov':             600,
   // ATCF a-deck model tracks (spaghetti) — no CORS upstream
   'ftp.nhc.noaa.gov':             600,
