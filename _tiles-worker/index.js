@@ -74,12 +74,18 @@ export default {
           const W = 2 * Math.PI * 6378137, sz = W / 2 ** z, bb = [-W / 2 + x * sz, W / 2 - (y + 1) * sz, -W / 2 + (x + 1) * sz, W / 2 - y * sz].map((v) => v.toFixed(2)).join(',');
           const q = 'f=image&format=png&bbox=' + bb + '&bboxSR=3857&imageSR=3857&size=256,256&interpolation=RSP_BilinearInterpolation&renderingRule='
             + encodeURIComponent(JSON.stringify({ rasterFunction: 'Hillshade Gray' }));
-          let up;
-          try { up = await fetch('https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage?' + q, { headers: { 'User-Agent': 'bluishvoid.com lidar cache' } }); }
-          catch (e) { return new Response(null, { status: 502, headers: { ...cors, 'Cache-Control': 'no-store' } }); }
-          const ct = up.headers.get('content-type') || '';
-          if (!up.ok || ct.indexOf('image') < 0) return new Response(null, { status: 502, headers: { ...cors, 'Cache-Control': 'no-store' } });
-          const buf = await up.arrayBuffer();
+          /* USGS turns away about one first request in three from the edge, fast (~0.4 s), and serves the same tile on
+             the next try: three tries, a short backoff between */
+          let buf = null, why = '';
+          for (let attempt = 0; attempt < 3 && !buf; attempt++){
+            if (attempt) await new Promise((r) => setTimeout(r, attempt * 400));
+            try {
+              const up = await fetch('https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage?' + q, { headers: { 'User-Agent': 'bluishvoid.com lidar cache' } });
+              const ct = up.headers.get('content-type') || '';
+              if (up.ok && ct.indexOf('image') >= 0) buf = await up.arrayBuffer(); else why = up.status + ' ' + ct.slice(0, 30);
+            } catch (e) { why = String(e).slice(0, 60); }
+          }
+          if (!buf) return new Response(null, { status: 502, headers: { ...cors, 'Cache-Control': 'no-store', 'X-Upstream': why } });
           ctx.waitUntil(env.BUCKET.put(rk, buf, { httpMetadata: { contentType: 'image/png', cacheControl: 'public, max-age=604800' } }));
           hit = new Response(buf, { status: 200, headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=604800, s-maxage=2592000' } });
         }
