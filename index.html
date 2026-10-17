@@ -104489,7 +104489,10 @@ function closeAlertModal(){
     var eligible = function(){ var L0 = window.LOCATION || {}, la = +L0.lat, lo = +L0.lon;
       if (!L0.radar || !isFinite(la) || !isFinite(lo)) return false;
       if (!(la > 17 && la < 72 && lo > -170 && lo < -64)) return false;             /* NEXRAD: the US and its territories */
-      return !shown('city-widget') && !shown('basin-widget'); };
+      /* STEP 3 OF ONE MAP ENGINE (user 2026-10-16: "do 1 2 (3 those features should only show for NYC and LA) do 4"): the
+         national map is offered in New York and Los Angeles too, beside THE CITY and THE BASIN, so their city-only layers
+         can move onto it (cameras first, below). */
+      return true; };
     /* the pane */
     var pane = document.createElement('div'); pane.id = 'cw-pane-local'; pane.className = 'cw-xpane'; pane.style.display = 'none';
     body.parentNode.insertBefore(pane, body.nextSibling);
@@ -105712,6 +105715,38 @@ function closeAlertModal(){
           try { TR.veh[f.id] = gtfsVehicles(ab); } catch(e2){ TR.veh[f.id] = []; } TR.draw(); }).catch(function(){});
       });
     };
+    /* CITY CAMERAS (step 3, NYC and LA only): THE CITY's NYC DOT cameras (baked /nyc_cams.json; images straight off
+       webcams.nyctmc.org) and THE BASIN's Caltrans District 7 cameras (through the proxy's d7cctv shape). Small marks on the
+       TRAFFIC view, only when the map is over that city; tap one for its live picture, refreshed while it is open. */
+    var CAMSRC = [
+      { k: 'nyc', box: [-74.30, 40.48, -73.65, 40.95], load: function(){ return fetch('/nyc_cams.json?v=2').then(function(r){ return r.json(); }).then(function(j){
+          return (j.cams || []).map(function(c){ return { id: c[0], n: c[1], lat: c[2], lon: c[3] }; }); }); },
+        img: function(c){ return 'https://webcams.nyctmc.org/api/cameras/' + c.id + '/image?t=' + Math.floor(Date.now() / 10000); }, by: 'NYC DOT' },
+      { k: 'la', box: [-119.0, 33.6, -117.6, 34.5], load: function(){ return fetch('https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://cwwp2.dot.ca.gov/data/d7/cctv/cctvStatusD07.json') + '&shape=d7cctv')
+          .then(function(r){ return r.json(); }).then(function(j){ return (j.data || []).map(function(o){ var c = o.cctv || {}, L2 = c.location || {};
+            return { id: c.index, n: (L2.locationName || '').trim(), lat: +L2.latitude, lon: +L2.longitude, u: ((c.imageData || {}).static || {}).currentImageURL }; })
+            .filter(function(c){ return isFinite(c.lat) && isFinite(c.lon) && c.u; }); }); },
+        img: function(c){ return c.u + '?t=' + Math.floor(Date.now() / 10000); }, by: 'CALTRANS' }
+    ];
+    TR.cams = {}; TR.camHits = [];
+    TR.camsInView = function(){
+      var b = M.getBounds(), out = [];
+      CAMSRC.forEach(function(S){ var B = S.box; if (!(B[0] <= b.getEast() && B[2] >= b.getWest() && B[1] <= b.getNorth() && B[3] >= b.getSouth())) return;
+        if (!TR.cams[S.k]){ TR.cams[S.k] = 'loading'; S.load().then(function(list){ TR.cams[S.k] = list || []; TR.draw(); }).catch(function(){ TR.cams[S.k] = []; }); return; }
+        if (Array.isArray(TR.cams[S.k])) TR.cams[S.k].forEach(function(c){ out.push({ c: c, S: S }); }); });
+      return out; };
+    TR.camTap = function(e){
+      if (TR.lit !== true || !TR.camHits.length) return;
+      var q = M.latLngToContainerPoint(e.latlng), best = null;
+      TR.camHits.forEach(function(h){ var d = Math.hypot(h.x - q.x, h.y - q.y); if (d < 14 && (!best || d < best.d)) best = { d: d, h: h }; });
+      if (!best) return;
+      var c = best.h.c, S = best.h.S, id = 'lc-cam-' + Math.random().toString(36).slice(2, 8);
+      L.popup({ maxWidth: 340, className: 'hz-popup' }).setLatLng([c.lat, c.lon])
+        .setContent('<div style="font:800 10px system-ui,sans-serif;letter-spacing:.05em;color:#fff;margin-bottom:5px;">' + esc(String(c.n || '').toUpperCase()) + '</div>'
+          + '<img id="' + id + '" src="' + S.img(c) + '" style="display:block;width:320px;max-width:100%;border-radius:6px;background:#111;" alt="">'
+          + '<div style="font:700 8px system-ui,sans-serif;letter-spacing:.06em;color:rgba(255,255,255,.6);margin-top:4px;">LIVE \u00b7 ' + S.by + ' CAMERA</div>').openOn(M);
+      var t = setInterval(function(){ var im = document.getElementById(id); if (!im){ clearInterval(t); return; } im.src = S.img(c); }, 10000);
+    };
     TR.layer = function(){
       var P = protomapsL, LS = function(o){ return new P.LineSymbolizer(Object.assign({ lineCap: 'round', lineJoin: 'round' }, o)); };
       var fl = 'Traffic flow', calm = function(z, f){ return !ttSlow(f) && !(f.props || {}).road_closure; };
@@ -105785,6 +105820,14 @@ function closeAlertModal(){
         g.font = '800 ' + (11 * dpr) + 'px system-ui,sans-serif'; g.fillText(tg.t, tg.bx + tg.bw / 2, tg.by + 3 * dpr);
         if (tg.road){ g.font = '800 ' + (8.5 * dpr) + 'px system-ui,sans-serif'; g.fillStyle = 'rgba(255,255,255,.85)'; g.fillText(tg.road, tg.bx + tg.bw / 2, tg.by + 16 * dpr); }
       });
+      /* the city cameras (NYC, LA), small, under the vehicles */
+      TR.camHits = [];
+      if (z >= 11) TR.camsInView().forEach(function(o){ var q = P([o.c.lon, o.c.lat]); if (!inF(q)) return;
+        TR.camHits.push({ x: q[0] / dpr, y: q[1] / dpr, c: o.c, S: o.S });
+        if (z < 14){ g.beginPath(); g.arc(q[0], q[1], 1.6 * dpr, 0, 6.3); g.fillStyle = 'rgba(232,236,245,.45)'; g.fill(); return; }   /* THE CITY's rule: dots until close */
+        g.save(); g.translate(q[0], q[1]); g.fillStyle = 'rgba(232,236,245,.92)'; g.strokeStyle = 'rgba(8,10,16,.9)'; g.lineWidth = 1.1 * dpr;
+        g.beginPath(); if (g.roundRect) g.roundRect(-4 * dpr, -2.8 * dpr, 6 * dpr, 5.6 * dpr, 1.2 * dpr); else g.rect(-4 * dpr, -2.8 * dpr, 6 * dpr, 5.6 * dpr); g.fill(); g.stroke();
+        g.beginPath(); g.moveTo(2 * dpr, -1.2 * dpr); g.lineTo(4.6 * dpr, -2.6 * dpr); g.lineTo(4.6 * dpr, 2.6 * dpr); g.lineTo(2 * dpr, 1.2 * dpr); g.closePath(); g.fill(); g.stroke(); g.restore(); });
       /* the vehicles, over the incidents */
       var nVeh = 0, agencies = [];
       (TR.inView || []).forEach(function(f){ var V = TR.veh[f.id]; if (!V) return; var shown = 0;
@@ -105812,13 +105855,14 @@ function closeAlertModal(){
       var k = function(c, t){ return '<span class="lr-k"><span class="lr-dot" style="background:' + c + ';"></span>' + t + '</span>'; };
       if (nVeh) parts.push(nVeh + ' BUSES AND TRAINS LIVE (' + agencies.slice(0, 3).map(function(a){ return esc(a.toUpperCase()); }).join(', ') + (agencies.length > 3 ? ' +' + (agencies.length - 3) : '') + ')');
       strip.innerHTML = 'TRAFFIC NOW' + (parts.length ? ' \u00b7 ' + parts.join(' \u00b7 ') : '')
-        + '<br>' + k('#7dd3fc', 'BUS OR TRAIN, POINTING THE WAY IT IS GOING') + k('#05DB32', 'MOVING FREELY') + k('#FFE500', 'SLOWER') + k('#FF6B00', 'SLOW') + k('#FF1B1B', 'VERY SLOW') + k('#B80020', 'NEARLY STOPPED');
+        + '<br>' + (TR.camHits.length ? '<span class="lr-k">TAP A \u25A0 FOR ITS LIVE CAMERA</span>' : '') + k('#7dd3fc', 'BUS OR TRAIN, POINTING THE WAY IT IS GOING') + k('#05DB32', 'MOVING FREELY') + k('#FFE500', 'SLOWER') + k('#FF6B00', 'SLOW') + k('#FF1B1B', 'VERY SLOW') + k('#B80020', 'NEARLY STOPPED');
     };
     TR.on = function(){
       if (!M) return; TR.lit = true;
       if (!TR.cv){ var pn = M.getPane('lcTraf') || M.createPane('lcTraf'); pn.style.zIndex = 445; pn.style.pointerEvents = 'none';
         TR.cv = document.createElement('canvas'); TR.cv.style.position = 'absolute'; pn.appendChild(TR.cv);
         M.on('zoomstart', function(){ if (TR.cv) TR.cv.style.visibility = 'hidden'; });
+        M.on('click', TR.camTap);
         M.on('moveend zoomend resize', function(){ if (TR.lit !== true) return; TR.draw(); clearTimeout(TR.deb); TR.deb = setTimeout(function(){ TR.read().then(TR.draw); TR.transit(); }, 600); }); }
       TR.cv.style.display = '';
       if (!TR.lay) TR.lay = TR.layer();
