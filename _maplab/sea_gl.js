@@ -114,9 +114,17 @@
   var MOUTHS = [[34.0320, -118.6810, 0.97, 0.24], [33.9625, -118.4590, 0.45, 0.89], [33.7610, -118.2045, 0.55, 0.83], [33.7430, -118.1150, 0.7, 0.7]];
   var TUNE = { uCr: 1.0, uCw: 0.25, uTr: 1.0, uTx: 1.0, uFo: 1.0, uSp: 1.0, uEx: 0.8, uBrk: 1.0, uRag: 1.0 };
   var ENV = window._bvSeaEnv = window._bvSeaEnv || { wind: 4, wdir: 250, rain72: 0, at: 0 };
-  function envLoad(){
+  /* THE WIND WHERE THE SEA IS (2026-10-17): the national map draws this sea on any coast, so o.envAt { lat, lon } reads the
+     wind and rain there (one reading per ~0.5 degree, kept 20 minutes); without it, the lab's Santa Monica Bay as before */
+  var ENVS = {};
+  function envFor(at){
+    if (!at) return ENV;
+    var k = (Math.round(at.lat * 2) / 2) + ',' + (Math.round(at.lon * 2) / 2);
+    return ENVS[k] || (ENVS[k] = { wind: 4, wdir: 250, rain72: 0, at: 0, lat: +(+at.lat).toFixed(2), lon: +(+at.lon).toFixed(2) });
+  }
+  function envLoad(ENV){
     if (Date.now() - ENV.at < 20 * 60000) return; ENV.at = Date.now();
-    fetch('https://api.open-meteo.com/v1/forecast?latitude=33.9&longitude=-118.55&current=wind_speed_10m,wind_direction_10m&hourly=precipitation&past_days=3&forecast_days=1&wind_speed_unit=ms&precipitation_unit=inch&timezone=GMT')
+    fetch('https://api.open-meteo.com/v1/forecast?latitude=' + (ENV.lat != null ? ENV.lat : 33.9) + '&longitude=' + (ENV.lon != null ? ENV.lon : -118.55) + '&current=wind_speed_10m,wind_direction_10m&hourly=precipitation&past_days=3&forecast_days=1&wind_speed_unit=ms&precipitation_unit=inch&timezone=GMT')
       .then(function(r){ return r.json(); }).then(function(j){
         ENV.wind = +j.current.wind_speed_10m; ENV.wdir = +j.current.wind_direction_10m;
         var now = Date.now(), r = 0; j.hourly.time.forEach(function(t, i){ var ms = Date.parse(t + ':00Z'); if (ms <= now && ms > now - 72 * 3600000) r += +j.hourly.precipitation[i] || 0; });
@@ -156,6 +164,8 @@
   }
   function tex(gl, unit, w, h, data, linear, repeat){
     var t = gl.createTexture(); gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t);
+    /* one texture per unit, reused: a map that rebuilds its sea on every pan would otherwise leak GPU memory */
+    var c = gl.canvas, old = c._tx && c._tx[unit]; if (old) gl.deleteTexture(old); (c._tx = c._tx || {})[unit] = t;
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, linear ? gl.LINEAR : gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, linear ? gl.LINEAR : gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, repeat ? gl.REPEAT : gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, repeat ? gl.REPEAT : gl.CLAMP_TO_EDGE);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, data); return t;
@@ -179,7 +189,7 @@
       cv.addEventListener('webglcontextlost', function(e){ e.preventDefault(); cv._gl = null; });
     }
     gl = cv._gl; var U = cv._U; gl.useProgram(cv._pr);
-    envLoad();
+    var ENV = envFor(o.envAt); envLoad(ENV);
     var RW = o.RW, RH = o.RH, N = RW * RH, C = o.consts, k, i;
     /* the swell field, packed as the lab's bake packs it */
     var q16 = function(v, per){ var f = ((v % per) + per) % per / per; return Math.min(65535, Math.round(f * 65535)); };
@@ -239,7 +249,8 @@
       depTex(dep);
     };
     ctxCache = ctxCache || {};
-    if (ctxCache[ckey]) useDepth(ctxCache[ckey]);
+    if (o.depth && o.depth.length >= N) useDepth(o.depth);    /* the caller already read the survey for this view */
+    else if (ctxCache[ckey]) useDepth(ctxCache[ckey]);
     else fetch('https://gis.ngdc.noaa.gov/arcgis/rest/services/DEM_mosaics/DEM_all/ImageServer/exportImage?bbox=' + [X(G.w), Y(G.s), X(G.e), Y(G.n)].join(',')
         + '&bboxSR=3857&imageSR=3857&size=' + RW + ',' + RH + '&format=bip&pixelType=F32&interpolation=RSP_BilinearInterpolation&f=image')
       .then(function(r){ return r.arrayBuffer(); }).then(function(ab){ if (ab.byteLength < N * 4) return; var a = new Float32Array(ab.slice(0, N * 4)); ctxCache[ckey] = a; useDepth(a); })
