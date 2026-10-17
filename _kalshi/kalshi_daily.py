@@ -876,11 +876,16 @@ def boundary_straddle(cfg, day, obh, tkey, h0, rmax, sign=1):
         c = sorted([r for r in rows if datetime.timedelta(0) <= r[0] - b <= datetime.timedelta(minutes=10)])
         if a and c:
             deltas.append(sign * (c[0][1] - min(a, key=lambda r: abs((r[0] - p51).total_seconds()))[1]))
+    # MEASURED (2026-10-17, 40 daylight-time front nights 2015-2026 in Central Park's hourly record and the settled CLI):
+    # the settled high minus the park's own 12:51 reading was 0 on 22 nights, -1 on 10, +1 on 4, +-2/3 on 4 -- mean -0.19,
+    # spread 0.91. The 12:51 reading IS the estimate; the air rarely falls far in the nine minutes before the boundary, the
+    # front usually arriving after it. The midpoint between it and the day's later readings, the old fallback, ran 1.3
+    # low. The airports' change over those nine minutes still nudges it (today: -0.4).
     if deltas:
         deltas.sort(); dmed = deltas[len(deltas) // 2]
-        est = min(prev, max(rmax, prev + dmed)); sd = max(0.7, (prev - rmax) / 4.0)
+        est = min(prev, max(rmax, prev + dmed)); sd = 0.9
     else:
-        dmed = None; est = (prev + rmax) / 2.0; sd = max(1.0, (prev - rmax) / 2.5)
+        dmed = None; est = max(rmax, prev - 0.2); sd = 0.95
     print('%s straddle: %.1f before the climate day, %.1f inside it; airports moved %s by the boundary -> centre %.1f, spread %.2f'
           % (cfg['key'], sign * prev, sign * rmax, 'n/a' if dmed is None else '%+.1f' % (sign * dmed), sign * est, sd))
     return {'prev': round(prev, 1), 'inside': round(rmax, 1), 'est': round(est, 1), 'sd': round(sd, 2), 'n': len(deltas), 'delta': None if dmed is None else round(dmed, 1)}
@@ -4478,6 +4483,16 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         and the floor is the running max through then, taken from the hourly
         stream (+ offset) rather than today's live daily max.
         """
+        # THE STRADDLE BINDS THE LOCK TOO (2026-10-17). Rebuilt from scratch for its hour, the lock never saw the 1 AM
+        # boundary: on 10-17 the live call said 62-63 at 92% while the noon lock was written "61 or below, 100%". Until the
+        # climate report is in, a lock on a front day is the boundary estimate -- unless the forecast for the rest of the
+        # day comes within a degree of it, when the spread widens to let the afternoon win.
+        if _bs is not None and _ctoday is None:
+            pf_s = point_forecast(fcm, biases, tkey, hour, yday)
+            pr_s = max(_bs['est'], pf_s if pf_s is not None else -999.0)
+            sd_s = _bs['sd'] if (pf_s is None or pf_s < _bs['est'] - 1.0) else max(_bs['sd'], 1.2)
+            return (pr_s, sd_s, ladder_probs(cfg, rows, pr_s, sd_s, rmax,
+                                             residuals(fcm, bias_of, daily, obh, hour, tkey, h0_of), False), rmax)
         # a day already decided (see "day decided") is decided for every lock made from now on as well
         if day_decided and hour >= now.hour:
             return (pred, sd, ladder_probs(cfg, rows, pred, sd, obs_far,
