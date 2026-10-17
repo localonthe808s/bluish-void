@@ -992,6 +992,53 @@ window._bvBuoys = function(w, s, e, n){
       return Object.keys(last).map(function(k){ return last[k]; });
     }).catch(function(){ return []; });
 };
+/* LAND-ONLY RASTER OVERLAYS (user 2026-10-16: "are you able to improve macrostrats placement or trim? whats going on here" /
+   "can you improve what the tides visual looks like"). Macrostrat's geology tiles are generalized map units whose edges
+   ignore the shore -- they spill over rivers and harbors and leave dark gaps where a unit stops short of the water -- and
+   NOAA's flood-depth tiles repaint every river and harbor in saturated navy. This layer draws such a tile, then ERASES
+   every water body using the basemap's own water polygons (the same OSM shapes the map draws, via protomaps' View and
+   paint, composited destination-out), so the overlay sits only on land and the map's own water shows through, exact to
+   the shore at every zoom. A canvas may composite cross-origin images it cannot read, so this needs no CORS (NOAA sends
+   none). opts.tint [r,g,b,a] pulls the tile's colors toward the site palette (source-atop), opts.soft a slight blur that
+   softens the source's pixel stair-steps. */
+window._bvLandOnly = function(url, opts){
+  opts = opts || {};
+  var P = protomapsL, view = null;
+  try { view = P.sourcesToViews({ url: window.BV_BASEMAP_URL, maxDataZoom: 14 }).get(''); } catch(e){}
+  var water = [{ dataLayer: 'water', symbolizer: new P.PolygonSymbolizer({ fill: '#000' }), filter: function(z, f){ return f.geomType === 3; } }];
+  var Lay = L.GridLayer.extend({
+    createTile: function(c, done){
+      var dpr = Math.min(2, window.devicePixelRatio || 1), cv = document.createElement('canvas'); cv.width = cv.height = 256 * dpr;
+      if (opts.soft) cv.style.filter = 'blur(' + opts.soft + 'px)';
+      var g = cv.getContext('2d'), im = new Image(), nz = Math.min(c.z, opts.maxNative || 18), k = 1 << (c.z - nz);
+      var sx = c.x % k, sy = c.y % k;
+      /* opts.under: the same source N zooms coarser drawn first. Macrostrat picks a map scale per TILE, so a tile on the
+         detailed local map leaves gaps (along rivers, marsh) its neighbours on the regional map fill -- rectangles of
+         nothing. The coarser tile is always on the regional map and fills them with the same unit. */
+      var ub = null, uz = opts.under ? Math.max(0, nz - opts.under) : -1, uk = 1 << (c.z - uz), pending = opts.under ? 2 : 1;
+      if (opts.under){ ub = new Image(); ub.crossOrigin = 'anonymous'; ub.onload = ub.onerror = function(){ if (--pending === 0) paint(); };
+        ub.src = url.replace('{z}', uz).replace('{x}', c.x >> (c.z - uz)).replace('{y}', c.y >> (c.z - uz)); }
+      im.onload = function(){ if (--pending === 0) paint(); };
+      var paint = function(){
+        g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
+        if (ub && ub.naturalWidth) g.drawImage(ub, (c.x % uk) * 256 / uk, (c.y % uk) * 256 / uk, 256 / uk, 256 / uk, 0, 0, cv.width, cv.height);
+        if (im.naturalWidth) g.drawImage(im, sx * 256 / k, sy * 256 / k, 256 / k, 256 / k, 0, 0, cv.width, cv.height);
+        if (opts.tint){ g.globalCompositeOperation = 'source-atop'; g.fillStyle = 'rgba(' + opts.tint.join(',') + ')'; g.fillRect(0, 0, cv.width, cv.height); }
+        g.globalCompositeOperation = 'source-over';
+        if (!view){ done(null, cv); return; }
+        view.getDisplayTile({ x: c.x, y: c.y, z: c.z }).then(function(pt){
+          g.save(); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.globalCompositeOperation = 'destination-out';
+          P.paint(g, c.z, new Map([['', [pt]]]), null, water, { minX: 256 * c.x - 16, minY: 256 * c.y - 16, maxX: 256 * (c.x + 1) + 16, maxY: 256 * (c.y + 1) + 16 }, { x: 256 * c.x, y: 256 * c.y }, false, null);
+          g.restore(); done(null, cv);
+        }).catch(function(){ done(null, cv); });
+      };
+      im.onerror = function(){ if (--pending === 0) paint(); };
+      im.src = url.replace('{z}', nz).replace('{x}', c.x >> (c.z - nz)).replace('{y}', c.y >> (c.z - nz));
+      return cv;
+    }
+  });
+  return new Lay({ opacity: opts.opacity == null ? 1 : opts.opacity, zIndex: opts.zIndex || 5, maxZoom: 19, keepBuffer: 1, updateWhenIdle: true });
+};
 window.BV_RIVERS_URL = 'https://cdn.bluishvoid.com/rivers/v2/{z}/{x}/{y}.mvt';
 /* RIVER WIDTH (refined 2026-10-16, user: "improve and refine your river illustrations"). Real channels widen roughly with a
    power of the land they drain, not its log: the log curve drew a 300 km2 creek at a third of the Mississippi's width.
@@ -105328,7 +105375,12 @@ function closeAlertModal(){
       T.lvl = cur.k;
       var above = cur.v - T.d.mhhw, step = Math.max(0, Math.min(10, Math.round(above * 2) / 2)), name = 'slr_' + String(step).replace('.', '_') + 'ft';
       var url = 'https://coast.noaa.gov/arcgis/rest/services/dc_slr/' + name + '/MapServer/tile/{z}/{y}/{x}';
-      if (!T.slr || T.slr._bvName !== name){ if (T.slr) M.removeLayer(T.slr); T.slr = L.tileLayer(url, { opacity: .8, zIndex: 6, maxZoom: 18, maxNativeZoom: 16 }); T.slr._bvName = name; }
+      /* land only, toned to the site's blues (user 2026-10-16: "can you improve what the tides visual looks like"): the
+         permanent water is erased so only ground that floods is colored, NOAA's saturated navy pulled toward the map's
+         blue, the green low ground softened to sea-green, and the source's 3 m stair-steps softened */
+      if (!T.slr || T.slr._bvName !== name){ if (T.slr) M.removeLayer(T.slr);
+        T.slr = window._bvLandOnly ? window._bvLandOnly(url.replace('{z}/{y}/{x}', '{z}/{y}/{x}'), { opacity: .82, zIndex: 6, maxNative: 16, tint: [70, 150, 225, .42], soft: .5 })
+          : L.tileLayer(url, { opacity: .8, zIndex: 6, maxZoom: 18, maxNativeZoom: 16 }); T.slr._bvName = name; }
       if (!M.hasLayer(T.slr)) T.slr.addTo(M);
       strip.innerHTML = '<div>' + LV.map(function(x){ return '<button type="button" class="lc-pill' + (x.k === cur.k ? ' on' : '') + '" data-l="' + x.k + '" style="margin:0 6px 4px 0;">' + x.n + '</button>'; }).join('') + '</div>'
         + '<div>' + (above < -0.25 ? 'AT ' + esc(cur.w) + ' THE WATER STAYS BELOW THE AVERAGE HIGH TIDE LINE · NOTHING ON LAND FLOODS'
@@ -105577,7 +105629,8 @@ function closeAlertModal(){
       VIEW = v; build(); if (!M) return;
       [].forEach.call(pane.querySelectorAll('#lc-tabs button'), function(b){ b.classList.toggle('on', b.getAttribute('data-v') === v); });
       if (v !== 'radar') R.clear();
-      if (v === 'rock'){ if (!rockL) rockL = L.tileLayer('https://tiles.macrostrat.org/carto/{z}/{x}/{y}.png', { opacity: .78, zIndex: 5, maxZoom: 18, maxNativeZoom: 14 }); rockL.addTo(M); strip.textContent = 'TAP ANYWHERE TO SAY WHAT THE GROUND IS'; FQ.fetch(); }
+      if (v === 'rock'){ if (!rockL) rockL = window._bvLandOnly ? window._bvLandOnly('https://tiles.macrostrat.org/carto/{z}/{x}/{y}.png', { opacity: .78, zIndex: 5, maxNative: 14, under: 2 })
+        : L.tileLayer('https://tiles.macrostrat.org/carto/{z}/{x}/{y}.png', { opacity: .78, zIndex: 5, maxZoom: 18, maxNativeZoom: 14 }); rockL.addTo(M); strip.textContent = 'TAP ANYWHERE TO SAY WHAT THE GROUND IS'; FQ.fetch(); }
       else if (rockL && M.hasLayer(rockL)) M.removeLayer(rockL);
       if (v === 'radar'){ R.rebuild(true); OV.start('radar'); }
       else if (v === 'map') OV.start('map');
