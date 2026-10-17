@@ -607,10 +607,20 @@ def run_market(cfg, dry_dir=None):
     T['obs_so_far'] = round(min(lows), 2) if lows else None
     T.update({'obs_hourly': (round(-run_today, 2) if run_today is not None else None),
               'six_min': six, 'six_window': six_win, 'six_suspect': six_sus, 'cli_min': cmin, 'cli_min_at': cmin_at})
+    # THE BOUNDARY STRADDLE, MIRRORED (2026-10-17; kalshi_daily.boundary_straddle). A night that WARMS through 1 AM
+    # puts the day's low in its first minutes, colder than any hourly report inside it. Negated space, so the highs'
+    # test reads as-is; held open (no gap table, which assumes the low is still ahead) until the climate report.
+    bs = K.boundary_straddle(cfg, today, obh, tkey, h0_of(tkey), run_today, sign=-1) if (s and cmin is None) else None
+    if bs is not None:
+        s['pred'] = max(s['pred'], bs['est']); s['sd'] = max(s['sd'], bs['sd']); s['emp'] = None
+        s['ps'] = K.distribution(rows_neg, s['pred'], s['sd'], s['fl'])
+        T['straddle'] = {'prev': -bs['prev'], 'inside': -bs['inside'], 'est': -bs['est'], 'sd': bs['sd'],
+                         'n': bs['n'], 'delta': (None if bs['delta'] is None else -bs['delta'])}
     if s:
         lad = ladder_out(rows, rows_neg, s['ps'])
         best = max(range(len(lad)), key=lambda i: lad[i]['ours'] or 0)
         mbest = max(range(len(lad)), key=lambda i: lad[i]['market'] or 0)
+        T['context'] = K.day_context(daily, fcm, s['biases'], today, low=True)
         T.update({'pred': round(-s['pred'], 2), 'sd': round(s['sd'], 3), 'fc_low': (round(-s['pf'], 2) if s['pf'] is not None else None),
                   'binding': s['bind'], 'exact': s['exact'], 'gap_table': s.get('emp'),
                   'day_over': bool(s['over']), 'day_decided': False,

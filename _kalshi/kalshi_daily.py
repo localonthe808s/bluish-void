@@ -838,7 +838,9 @@ NBR5 = {'ny': ['KLGA', 'KJFK', 'KEWR']}
 BOUNDARY_URL = 'https://bluish-void-kalshi-cron.junkyjunkjunkjunkjunk.workers.dev/boundary'
 
 
-def boundary_straddle(cfg, day, obh, tkey, h0, rmax):
+def boundary_straddle(cfg, day, obh, tkey, h0, rmax, sign=1):
+    """sign=-1 for the lows, whose obh/rmax arrive negated: the airports' deltas are negated to match, and the
+    same test then reads 'the 12:51 reading sat more than a degree BELOW everything inside the day'."""
     if not h0 or rmax is None:
         return None
     prev = (obh.get(tkey) or {}).get(h0 - 1)
@@ -854,7 +856,7 @@ def boundary_straddle(cfg, day, obh, tkey, h0, rmax):
     if cfg['key'].startswith('ny'):
         try:
             rec = get_json(BOUNDARY_URL + '?d=' + day.isoformat(), timeout=15) or {}
-            deltas = [v['delta'] for k, v in (rec.get('st') or {}).items()
+            deltas = [sign * v['delta'] for k, v in (rec.get('st') or {}).items()
                       if k != 'KNYC' and isinstance(v, dict) and isinstance(v.get('delta'), (int, float))]
         except Exception as e:
             print('straddle: boundary record unavailable (%s)' % e)
@@ -873,15 +875,47 @@ def boundary_straddle(cfg, day, obh, tkey, h0, rmax):
         a = [r for r in rows if abs((r[0] - p51).total_seconds()) <= 240]
         c = sorted([r for r in rows if datetime.timedelta(0) <= r[0] - b <= datetime.timedelta(minutes=10)])
         if a and c:
-            deltas.append(c[0][1] - min(a, key=lambda r: abs((r[0] - p51).total_seconds()))[1])
+            deltas.append(sign * (c[0][1] - min(a, key=lambda r: abs((r[0] - p51).total_seconds()))[1]))
     if deltas:
         deltas.sort(); dmed = deltas[len(deltas) // 2]
         est = min(prev, max(rmax, prev + dmed)); sd = max(0.7, (prev - rmax) / 4.0)
     else:
         dmed = None; est = (prev + rmax) / 2.0; sd = max(1.0, (prev - rmax) / 2.5)
     print('%s straddle: %.1f before the climate day, %.1f inside it; airports moved %s by the boundary -> centre %.1f, spread %.2f'
-          % (cfg['key'], prev, rmax, 'n/a' if dmed is None else '%+.1f' % dmed, est, sd))
+          % (cfg['key'], sign * prev, sign * rmax, 'n/a' if dmed is None else '%+.1f' % (sign * dmed), sign * est, sd))
     return {'prev': round(prev, 1), 'inside': round(rmax, 1), 'est': round(est, 1), 'sd': round(sd, 2), 'n': len(deltas), 'delta': None if dmed is None else round(dmed, 1)}
+
+
+def day_context(daily, fcm, biases, today, low=False):
+    """THE WEEK AROUND THE DAY (2026-10-17), for the card: the last four settled days, the next two days the runs
+    see (bias-corrected, median across runs), and the swing between them. Context, not an input: measured over 108
+    highs and 102 lows, the noon lock's error barely moves with the trend (-0.3 to +0.6 F across cooling to warming),
+    so nothing here shifts the prediction. What a big swing DOES do is put the extreme at the climate day's edge --
+    a high at 1 AM ahead of a front, a low at 12:59 AM behind one -- which boundary_straddle handles.
+    `daily`, `fcm` and `biases` in the caller's own sign (the lows pass them negated, with low=True)."""
+    sg = -1 if low else 1
+    past = []
+    for i in range(4, 0, -1):
+        k = (today - datetime.timedelta(days=i)).isoformat()
+        if daily.get(k) is not None:
+            past.append([k, round(sg * daily[k], 1)])
+    nxt = []
+    for i in (1, 2):
+        k = (today + datetime.timedelta(days=i)).isoformat()
+        vs = []
+        for m, runs in fcm.items():
+            hrs = (runs or {}).get(k) or {}
+            if len(hrs) < 18:
+                continue
+            b = (biases or {}).get(m)
+            vs.append(max(hrs.values()) - (b if isinstance(b, (int, float)) else 0.0))
+        if vs:
+            vs.sort(); nxt.append([k, round(sg * vs[len(vs) // 2], 1)])
+    if len(past) < 2 or not nxt:
+        return None
+    swing = round(statistics.mean(v for _, v in nxt) - statistics.mean(v for _, v in past[-2:]), 1)
+    word = 'COOLING' if swing <= -4 else 'WARMING' if swing >= 4 else 'STEADY'
+    return {'past': past, 'next': nxt, 'swing': swing, 'trend': word}
 
 
 def twc_today(cfg, day):
@@ -5174,6 +5208,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             'fc_peak': round(fpeak, 2) if fpeak is not None else None,
             'peak_hour': peak_hour,
             'peak_done': peak_done, 'day_decided': day_decided, 'straddle': _bs,
+            'context': day_context(daily, fcm, biases, today),
             # the afternoon table's row for the report in hand (see climb_now),
             # and the weight the ladder gave it this bake (0 = plain forecast)
             'climb': _climb_now, 'emp_w': round(emp_w, 2),
