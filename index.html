@@ -104912,7 +104912,7 @@ function closeAlertModal(){
       (labs || []).forEach(function(l){ var c = l.getContainer && l.getContainer(); if (c) M.getPane('lcLabels').appendChild(c); });   /* names over the radar and the rock */
       M._lcLabs = labs || [];
       here = L.circleMarker([+L0.lat, +L0.lon], { radius: 5, color: '#fff', weight: 2, fillColor: '#2B22F4', fillOpacity: 1, pane: 'lcLabels' }).addTo(M);
-      M.on('moveend', function(){ GH.sync(); if (VIEW === 'radar') R.rebuild(); if (VIEW === 'river'){ clearTimeout(RV.deb); RV.deb = setTimeout(RV.fetch, 400); } if (VIEW === 'rock'){ clearTimeout(FQ.deb); FQ.deb = setTimeout(FQ.fetch, 500); } });
+      M.on('moveend', function(){ GH.sync(); CD.sync(); if (VIEW === 'radar') R.rebuild(); if (VIEW === 'river'){ clearTimeout(RV.deb); RV.deb = setTimeout(RV.fetch, 400); } if (VIEW === 'rock'){ clearTimeout(FQ.deb); FQ.deb = setTimeout(FQ.fetch, 500); } });
       M.on('click', function(e){ if (VIEW === 'rock') rockTap(e.latlng); if (VIEW === 'leaf') LF.tap(e); });
     };
     /* ---------------------------------------------------------------- RADAR ------ */
@@ -106118,6 +106118,209 @@ function closeAlertModal(){
         host.innerHTML = '<button type="button" class="lc-pill' + (GH.on ? ' on' : '') + '">1865 WATER</button>';
         host.firstChild.onclick = function(e){ e.stopPropagation(); GH.on = !GH.on; try { localStorage.setItem('bv_lc_1865', GH.on ? '1' : '0'); } catch(e2){} GH.sync(); };
       } else if (host) host.remove();
+    };
+    /* ---------------------------------------------------------------- THE CITY'S GROUNDS */
+    /* PARKS, CEMETERIES AND AIRPORTS IN DETAIL ON THE NATIONAL MAP, NYC ONLY (user 2026-10-17: "add this to the map for NYC
+       in the new map - THE CITY's park, cemetery and airport detail"; buildings not wanted). THE CITY's own vectors, drawn
+       with its hierarchy and at the ground resolution it draws each at, the palette turned for the dark base map:
+       - every NYC Parks property (/city_parks.json, 2,061 lots) in the base map's own park green, through a LIGHTEN pane so
+         it only takes plain ground -- water, roads and the base map's parks show through, as THE CITY recolors only ground;
+       - under ~8 m a device pixel (z13 on a retina screen): each park's detail (/city_parkdetail.json: lawns, gardens,
+         woods, lakes, pools, marsh, sand, golf, ball fields and courts, playgrounds, rock outcrops, bridges, fountains --
+         the park buildings left out) and the paths at true width (/city_parkpaths.json: drives 5 m, bike 3 m, foot 2.2 m,
+         stairs 2 m dashed);
+       - the 121 cemeteries (/city_cemeteries.json): carriage drives at 4.5 m, footpaths under 20 m a pixel, mausoleums and
+         tombs; the 991,203 headstones found in the NYS orthoimagery (/city_stones.json) under 3.5 m a pixel;
+       - beaches (/city_beaches.json), the three airfields (/city_airports.json: field, runways at 50 m, terminals) with
+         their aprons, taxiways at 23 m and hangars (/city_airdetail.json), and the six ballparks and arenas
+         (/city_stadiums.json) outlined in blue.
+       One canvas pair redrawn on moveend from what is in view (each ring culled by its mercator box), scaled with the map
+       during a zoom; the big files load only when the zoom first needs them. Drawn on MAP (all its views) and TRAFFIC;
+       not on RADAR (it would sit under the echoes as clutter), GEOLOGY or FOLIAGE. Shares THE CITY's window._cw* caches. */
+    var CD = { lay: null, req: {}, raf: 0 };
+    var CD_R = 6378137, CD_PI = Math.PI * CD_R, CD_COS = Math.cos(40.7 * Math.PI / 180);
+    /* each ring's mercator box, as THE CITY's _cwCPLoad sets it (r._b), so either map can reuse the other's load */
+    CD.box = function(rr){ var x0 = 1e12, y0 = 1e12, x1 = -1e12, y1 = -1e12;
+      rr.forEach(function(c9){ var X9 = c9[0] * Math.PI / 180 * CD_R, Y9 = CD_R * Math.log(Math.tan(Math.PI / 4 + c9[1] * Math.PI / 360));
+        if (X9 < x0) x0 = X9; if (X9 > x1) x1 = X9; if (Y9 < y0) y0 = Y9; if (Y9 > y1) y1 = Y9; }); rr._b = [x0, y0, x1, y1]; };
+    CD.get = function(key, url, prep){
+      if (window[key]) return window[key];
+      if (CD.req[key] || window[key + 'Req']) return null;
+      CD.req[key] = 1;
+      fetch(url).then(function(r){ return r.json(); }).then(function(j){ if (!window[key]){ try { if (prep) prep(j); } catch(e){} window[key] = j; } CD.redraw(); })
+        .catch(function(){ CD.req[key] = 0; });
+      return null; };
+    CD.prepCP = function(j){ Object.keys(j).forEach(function(k){ (j[k] || []).forEach(function(f){ CD.box(f.r || f); }); }); };
+    CD.prepParks = function(j){ j.forEach(function(pp){ (pp.p || []).forEach(function(poly){ if (poly[0]) CD.box(poly[0]); }); }); };
+    CD.prepCem = function(j){ (j.c || []).forEach(function(poly){ if (poly[0]) CD.box(poly[0]); }); (j.d || []).concat(j.p || [], j.t || []).forEach(CD.box); };
+    CD.want = function(){ return !!M && (WAT.inMap(VIEW) || VIEW === 'traffic') && GH.inCity(); };
+    CD.redraw = function(){ if (CD.raf || !CD.lay || !M || !M.hasLayer(CD.lay)) return; CD.raf = requestAnimationFrame(function(){ CD.raf = 0; try { CD.lay._draw(); } catch(e){ window._lcCityErr = String(e); } }); };
+    CD.make = function(){
+      var PAD = 0.15;
+      var Lay = L.Layer.extend({
+        onAdd: function(map){
+          var mk = function(name, z, blend){ var pn = map.getPane(name) || map.createPane(name); pn.style.zIndex = z; pn.style.pointerEvents = 'none'; if (blend) pn.style.mixBlendMode = blend;
+            var c = L.DomUtil.create('canvas', 'leaflet-zoom-animated', pn); c.style.position = 'absolute'; c.style.pointerEvents = 'none'; return c; };
+          this._gnd = mk('lcCityGround', 414, 'lighten');   /* only over plain ground */
+          this._cv = mk('lcCity', 415, null);
+          map.on('moveend', this._draw, this); map.on('zoomanim', this._anim, this); map.on('resize', this._draw, this);
+          this._draw(); },
+        onRemove: function(map){ map.off('moveend', this._draw, this); map.off('zoomanim', this._anim, this); map.off('resize', this._draw, this);
+          L.DomUtil.remove(this._gnd); L.DomUtil.remove(this._cv); this._gnd = this._cv = null; },
+        _anim: function(e){ if (!this._tl) return; var sc = M.getZoomScale(e.zoom), off = M._latLngToNewLayerPoint(this._tl, e.zoom, e.center);
+          L.DomUtil.setTransform(this._gnd, off, sc); L.DomUtil.setTransform(this._cv, off, sc); },
+        _draw: function(){
+          if (!this._cv) return;
+          var sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), px0 = -PAD * sz.x, py0 = -PAD * sz.y;
+          var cssW = Math.round(sz.x * (1 + 2 * PAD)), cssH = Math.round(sz.y * (1 + 2 * PAD)), W2 = Math.round(cssW * dpr), H2 = Math.round(cssH * dpr);
+          var tlP = M.containerPointToLayerPoint([px0, py0]); this._tl = M.containerPointToLatLng([px0, py0]);
+          var pb = M.getPixelBounds(), s = 256 * Math.pow(2, M.getZoom()) / (2 * CD_PI), ox = pb.min.x + px0, oy = pb.min.y + py0;
+          /* THE CITY's view box and scale (canvas px are device px), so its drawing code ports as it is */
+          var sx = s * dpr, sy = sx, v = { X0: ox / s - CD_PI, Y1: CD_PI - oy / s };
+          v.X1 = v.X0 + W2 / sx; v.Y0 = v.Y1 - H2 / sy;
+          var gm = CD_COS / sx;   /* ground metres per canvas px, THE CITY's gmC / gmP / gm6 / mpp4 */
+          [this._gnd, this._cv].forEach(function(c){ if (c.width !== W2) c.width = W2; if (c.height !== H2) c.height = H2; c.style.width = cssW + 'px'; c.style.height = cssH + 'px'; L.DomUtil.setPosition(c, tlP); });
+          var g0 = this._gnd.getContext('2d'), g = this._cv.getContext('2d');
+          g0.setTransform(1, 0, 0, 1, 0, 0); g0.clearRect(0, 0, W2, H2); g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, W2, H2);
+          var vis = function(rr){ if (!rr._b) CD.box(rr); var b9 = rr._b; return b9[2] > v.X0 && b9[0] < v.X1 && b9[3] > v.Y0 && b9[1] < v.Y1; };   /* a box set on first sight when THE CITY made the load */
+          var ring = function(cx, rr, close){ rr.forEach(function(c9, i9){
+              var x9 = (c9[0] * Math.PI / 180 * CD_R - v.X0) * sx, y9 = (v.Y1 - CD_R * Math.log(Math.tan(Math.PI / 4 + c9[1] * Math.PI / 360))) * sy;
+              i9 ? cx.lineTo(x9, y9) : cx.moveTo(x9, y9); }); if (close) cx.closePath(); };
+          var fillList = function(list, fill, edge, ew){ if (!list) return; g.beginPath(); var any9 = false;
+            list.forEach(function(r){ var rr = r.r || r; if (!vis(rr)) return; ring(g, rr, true); any9 = true; });
+            if (!any9) return; if (fill){ g.fillStyle = fill; g.fill(); } if (edge){ g.strokeStyle = edge; g.lineWidth = ew; g.stroke(); } };
+          /* 1. the parks properties: the base map's park green (park_b), lightened onto the ground */
+          var PK = CD.get('_cwParks', '/city_parks.json?v=1', CD.prepParks);
+          if (PK){ g0.fillStyle = 'rgb(21,47,31)';
+            PK.forEach(function(pp){ if (pp.w) return; (pp.p || []).forEach(function(poly){ if (!poly[0] || !vis(poly[0])) return; g0.beginPath(); poly.forEach(function(rg){ ring(g0, rg, true); }); g0.fill('evenodd'); }); }); }
+          var CM = CD.get('_cwCem', '/city_cemeteries.json?v=1', CD.prepCem);
+          if (CM){ g0.fillStyle = 'rgb(24,42,32)';   /* the cemetery grounds: a greyer green than the parks */
+            (CM.c || []).forEach(function(poly){ if (!poly[0] || !vis(poly[0])) return; g0.beginPath(); poly.forEach(function(rg){ ring(g0, rg, true); }); g0.fill('evenodd'); }); }
+          g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
+          /* 2. each park's ground, under ~8 m a pixel (THE CITY's cpOn) */
+          var cpOn = gm < 8, CP = cpOn ? CD.get('_cwCP', '/city_parkdetail.json?v=2', CD.prepCP) : null;
+          if (CP){
+            fillList(CP.gr, 'rgb(30,70,42)');                                          /* lawns and meadows: the brightest green */
+            fillList(CP.g, 'rgb(34,74,46)', 'rgba(0,0,0,.3)', Math.max(0.5, 0.6 / gm));   /* gardens */
+            fillList(CP.wd, 'rgb(15,38,25)');                                          /* the woods: darker than the park */
+            fillList(CP.w, 'rgb(19,41,74)');                                           /* the lakes, the Reservoir: the base map's water */
+            fillList(CP.w2, 'rgb(36,86,122)', 'rgba(255,255,255,.35)', Math.max(0.5, 0.8 / gm));   /* the pools and the rink */
+            fillList(CP.wl, 'rgb(22,56,52)');                                          /* salt marsh and wetland */
+            fillList(CP.sd, 'rgb(79,67,47)');                                          /* beach and sand: the base map's beach */
+            fillList(CP.gf, 'rgb(36,86,50)');                                          /* golf fairways */
+            fillList(CP.gg, 'rgb(48,106,60)', 'rgba(0,0,0,.3)', Math.max(0.5, 0.6 / gm));  /* golf greens and tees */
+            fillList(CP.gb, 'rgb(96,84,60)');                                          /* bunkers */
+          }
+          /* 3. the paths in the parks at true width, under ~8 m a pixel */
+          var PP = cpOn ? CD.get('_cwParkPaths', '/city_parkpaths.json?v=1') : null;
+          if (PP){
+            var qP = PP.q, pxX = function(ix){ return (PP.x0 + ix * qP - v.X0) * sx; }, pxY = function(iy){ return (v.Y1 - (PP.y1 - iy * qP)) * sy; };
+            var mX0 = (v.X0 - PP.x0) / qP - 400, mX1 = (v.X1 - PP.x0) / qP + 400, mY0 = (PP.y1 - v.Y1) / qP - 400, mY1 = (PP.y1 - v.Y0) / qP + 400;
+            var runP = function(list, edge, fill, wM, dash){
+              var wpx = Math.max(0.7, wM / gm);
+              [[edge, wpx + Math.max(0.6, 0.9 / gm * 1.2)], [fill, wpx]].forEach(function(pass, pi){
+                if (!pass[0]) return;
+                g.strokeStyle = pass[0]; g.lineWidth = pass[1]; g.setLineDash(dash && pi ? [Math.max(1, 0.5 / gm), Math.max(1, 0.5 / gm)] : []);
+                g.beginPath();
+                list.forEach(function(f){ var ix = f[0], iy = f[1];
+                  if (ix < mX0 || ix > mX1 || iy < mY0 || iy > mY1){ var any = false, jx = ix, jy = iy; for (var k = 2; k < f.length && !any; k += 2){ jx += f[k]; jy += f[k + 1]; if (jx > mX0 && jx < mX1 && jy > mY0 && jy < mY1) any = true; } if (!any) return; }
+                  g.moveTo(pxX(ix), pxY(iy));
+                  for (var k2 = 2; k2 < f.length; k2 += 2){ ix += f[k2]; iy += f[k2 + 1]; g.lineTo(pxX(ix), pxY(iy)); }
+                });
+                g.stroke();
+              });
+              g.setLineDash([]);
+            };
+            var WP = PP.w;
+            if (WP['0']) runP(WP['0'], 'rgba(0,0,0,.4)', 'rgb(96,94,84)', 5);          /* drives */
+            if (WP['2']) runP(WP['2'], 'rgba(0,0,0,.35)', 'rgb(90,88,79)', 3);         /* bike paths */
+            if (WP['1']) runP(WP['1'], gm < 3 ? 'rgba(0,0,0,.3)' : null, 'rgb(84,82,73)', 2.2);   /* footpaths */
+            if (WP['3']) runP(WP['3'], null, 'rgb(70,68,61)', 2, true);                /* stairs, dashed */
+          }
+          /* 4. what stands on the ground: ball fields, playgrounds, rocks, bridges, fountains (no buildings) */
+          if (CP){
+            var ew = Math.max(0.5, 0.7 / gm);
+            (CP.f || []).forEach(function(f){ if (!vis(f.r)) return;
+              var clay = /baseball|softball/.test(f.s), court = /tennis|basketball|handball|volleyball/.test(f.s);
+              fillList([f.r], court ? 'rgb(30,62,58)' : 'rgb(34,80,46)', 'rgba(255,255,255,.5)', ew);
+              if (clay && gm < 3){
+                var cx = 0, cy = 0; f.r.forEach(function(c9){ cx += c9[0]; cy += c9[1]; }); cx /= f.r.length; cy /= f.r.length;
+                var X9 = (cx * Math.PI / 180 * CD_R - v.X0) * sx, Y9 = (v.Y1 - CD_R * Math.log(Math.tan(Math.PI / 4 + cy * Math.PI / 360))) * sy, rr = 14 / gm;
+                g.fillStyle = 'rgba(122,86,58,.85)'; g.beginPath(); g.moveTo(X9, Y9 - rr); g.lineTo(X9 + rr, Y9); g.lineTo(X9, Y9 + rr); g.lineTo(X9 - rr, Y9); g.closePath(); g.fill();
+              }
+            });
+            fillList(CP.p, 'rgb(74,64,46)', 'rgba(0,0,0,.45)', ew);       /* playgrounds */
+            fillList(CP.r, 'rgb(62,64,62)', 'rgba(0,0,0,.55)', ew);       /* the rock outcrops: schist grey */
+            fillList(CP.br, 'rgb(84,84,80)', 'rgba(0,0,0,.55)', ew);      /* the bridges and arches */
+            fillList(CP.fn, 'rgb(54,100,130)', 'rgba(0,0,0,.5)', ew);     /* fountains */
+          }
+          /* 5. the cemeteries: headstones under 3.5 m a pixel, then the drives, footpaths and tombs over them */
+          if (CM){
+            var ST = gm < 3.5 ? CD.get('_cwStones', '/city_stones.json?v=1') : null;
+            if (ST){
+              var cz = ST.cell, sz6 = Math.max(1, Math.round(1.1 / gm)), al6 = gm > 2.5 ? 0.6 : 0.8;
+              g.fillStyle = 'rgba(150,152,142,' + al6 + ')';
+              var i0 = Math.floor((v.X0 - ST.x0) / cz), i1 = Math.floor((v.X1 - ST.x0) / cz), j0 = Math.floor((v.Y0 - ST.y0) / cz), j1 = Math.floor((v.Y1 - ST.y0) / cz);
+              for (var ci = i0; ci <= i1; ci++) for (var cj = j0; cj <= j1; cj++){
+                var cell = ST.c[ci + ',' + cj]; if (!cell) continue;
+                if (typeof cell === 'string'){ var bin = atob(cell), u8 = new Uint8Array(bin.length); for (var bi = 0; bi < bin.length; bi++) u8[bi] = bin.charCodeAt(bi); ST.c[ci + ',' + cj] = cell = u8; }
+                var bx = ST.x0 + ci * cz, by = ST.y0 + cj * cz, st6 = cz / 256;
+                for (var k6 = 0; k6 + 1 < cell.length; k6 += 2){
+                  var xs6 = (bx + (cell[k6] + 0.5) * st6 - v.X0) * sx, ys6 = (v.Y1 - (by + (cell[k6 + 1] + 0.5) * st6)) * sy;
+                  g.fillRect(Math.round(xs6 - sz6 / 2), Math.round(ys6 - sz6 / 2), sz6, sz6);
+                }
+              }
+            }
+            var dW = Math.max(0.8, 4.5 / gm);
+            if (gm < 4){ g.strokeStyle = 'rgba(0,0,0,.4)'; g.lineWidth = dW + Math.max(0.6, 1.1 / gm);
+              g.beginPath(); CM.d.forEach(function(ln){ if (vis(ln)) ring(g, ln, false); }); g.stroke(); }
+            g.strokeStyle = 'rgb(88,86,78)'; g.lineWidth = dW;
+            g.beginPath(); CM.d.forEach(function(ln){ if (vis(ln)) ring(g, ln, false); }); g.stroke();
+            if (gm < 20){ g.strokeStyle = gm < 4 ? 'rgb(80,78,71)' : 'rgba(88,86,78,.6)'; g.lineWidth = Math.max(0.5, 1.5 / gm);
+              g.beginPath(); CM.p.forEach(function(ln){ if (vis(ln)) ring(g, ln, false); }); g.stroke(); }
+            g.fillStyle = 'rgb(112,112,104)'; g.strokeStyle = 'rgba(0,0,0,.55)'; g.lineWidth = Math.max(0.4, 0.6 / gm * 2);
+            CM.t.forEach(function(rg){ if (!vis(rg)) return; g.beginPath(); ring(g, rg, true); g.fill(); if (gm < 4) g.stroke(); });
+          }
+          /* 6. beaches, the airfields, the ballparks */
+          var BC = CD.get('_cwBeaches', '/city_beaches.json'), AP = CD.get('_cwAirports', '/city_airports.json'), AD = CD.get('_cwAirDetail', '/city_airdetail.json'), SD = CD.get('_cwStadiums', '/city_stadiums.json');
+          g.lineCap = 'butt';
+          (BC || []).forEach(function(b4){ if (!b4.r || b4.r.length < 4) return; g.beginPath(); ring(g, b4.r, true); g.fillStyle = 'rgb(79,67,47)'; g.fill(); });
+          /* THE CITY's airfield greys turned over: field darkest, then aprons, taxiways, runways the lightest; terminals and
+             hangars dark blocks with a lit edge. Taxiways 23 m, runways 50 m, at true width */
+          if (AD && AD.air){
+            var txw = Math.max(0.6, 23 / gm);
+            Object.keys(AD.air).forEach(function(k){ var f = AD.air[k];
+              g.fillStyle = 'rgb(46,50,58)'; (f.ap || []).forEach(function(rg){ g.beginPath(); ring(g, rg, true); g.fill(); });
+              g.strokeStyle = 'rgb(62,67,77)'; g.lineWidth = txw; (f.tx || []).forEach(function(ln){ if (ln.length < 2) return; g.beginPath(); ring(g, ln, false); g.stroke(); });
+              g.fillStyle = 'rgb(22,24,29)'; g.strokeStyle = 'rgb(84,90,102)'; g.lineWidth = Math.max(0.5, 0.7 * dpr);
+              (f.hg || []).forEach(function(rg){ g.beginPath(); ring(g, rg, true); g.fill(); g.stroke(); });
+            });
+          }
+          var rww4 = Math.max(1, 50 / gm);
+          (AP || []).forEach(function(a4){
+            /* the field under its detail: drawn once behind it, so only the field ground, then the runways over the aprons */
+            g.save(); g.globalCompositeOperation = 'destination-over'; g.beginPath(); ring(g, a4.r, true); g.fillStyle = 'rgb(30,32,38)'; g.fill(); g.restore();
+            g.strokeStyle = 'rgb(104,110,124)'; g.lineWidth = rww4;
+            (a4.rw || []).forEach(function(w4){ if (w4.length < 2) return; g.beginPath(); ring(g, w4, false); g.stroke(); });
+            g.fillStyle = 'rgb(22,24,29)'; g.strokeStyle = 'rgb(84,90,102)'; g.lineWidth = Math.max(0.5, 0.7 * dpr);
+            (a4.tm || []).forEach(function(t4){ if (!t4.r || t4.r.length < 4) return; g.beginPath(); ring(g, t4.r, true); g.fill(); g.stroke(); });
+            g.beginPath(); ring(g, a4.r, true); g.lineWidth = Math.max(1, 0.7 * dpr); g.strokeStyle = 'rgb(74,78,88)'; g.stroke();
+          });
+          if (SD && SD.length){
+            g.lineWidth = Math.max(1.2, 1.1 * dpr);
+            SD.forEach(function(s4){ (s4.r || []).forEach(function(rg){ if (!rg || rg.length < 4) return;
+              g.beginPath(); ring(g, rg, true); g.fillStyle = 'rgba(70,140,255,.20)'; g.fill(); g.strokeStyle = 'rgb(70,140,255)'; g.stroke(); }); });
+          }
+          g.restore();
+        }
+      });
+      CD.lay = new Lay();
+    };
+    CD.sync = function(){
+      if (!M) return; var want = CD.want();
+      if (want && !CD.lay) CD.make();
+      if (!CD.lay) return;
+      if (want && !M.hasLayer(CD.lay)) CD.lay.addTo(M); else if (!want && M.hasLayer(CD.lay)) M.removeLayer(CD.lay);
     };
     /* ---------------------------------------------------------------- THE SEA ---- */
     /* TIDAL CURRENTS AND WAVES ON THE TIDES VIEW (user 2026-10-16: "do 2 3" -- tidal flow and surf, for any coast; earlier:
@@ -107778,7 +107981,7 @@ function closeAlertModal(){
       if (v === 'leaf') LF.on(); else LF.off();
       if (v === 'rock') ICE.on(); else ICE.off();
       if (v === 'map') strip.textContent = placeName() + ' AND AROUND · DRAG AND ZOOM';
-      GH.sync();
+      GH.sync(); CD.sync();
       if (v === 'map') LAY.pills();
       if (v !== 'rock') FQ.off();
       if (v === 'tide'){ T.on(); SEA.on(); } else { T.off(); SEA.off(); }
