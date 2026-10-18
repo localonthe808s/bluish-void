@@ -1077,6 +1077,43 @@ window._bvBuoys = function(w, s, e, n){
       return Object.keys(last).map(function(k){ return last[k]; });
     }).catch(function(){ return []; });
 };
+/* ONE FETCH AND ONE DECODE PER TILE (perf 2026-10-18). Every protomaps layer builds its own ZxySource + TileCache, so LOCAL's
+   base map, its labels copy and the outline's water mask (three tiers each) each fetched and decoded the SAME .mvt -- 3-4
+   requests per tile per pan, ~420 ms of decode per pan, and ~3 MB of decoded geometry per tile held once PER LAYER (58
+   cached tiles = 180 MB of heap). Decoded tiles are read-only (paint and label rules only read props/geom) and keyed by
+   data tile z/x/y at one tile size, so one cache per (url, tileSize) serves every layer. Each view gets a thin per-view
+   face over it that keeps the library's zoom cancelling per CONSUMER: a view moving to a new zoom drops its own pending
+   tiles, and a shared fetch is aborted only once nobody is waiting on it (the desert source at z7 and the main tiles at
+   z10 must not abort each other, as one shared ZxySource would). The controller is taken off zxy.zoomaborts right after
+   get() -- the library pushes it synchronously (5.1.0, vendored). Any failure leaves the layer's own cache in place. */
+window._bvTileShare = function(url, ts){
+  var P = protomapsL, S = window._bvTileShares = window._bvTileShares || {}, k = url + '|' + ts, sh = S[k];
+  if (!sh){
+    var zxy = new P.ZxySource(url, false), live = new Map();
+    var src = { get: function(e, t){ var p = zxy.get(e, t), za = zxy.zoomaborts.pop(), key = P.toIndex(e), ent = { ac: za && za.controller, n: 0 };
+      live.set(key, ent); var off = function(){ if (live.get(key) === ent) live.delete(key); };
+      return p.then(function(d){ off(); return d; }, function(er){ off(); throw er; }); } };
+    sh = S[k] = { tc: new P.TileCache(src, ts), live: live };
+  }
+  var face = Object.create(sh.tc), pend = new Map(), z0 = null;
+  face.get = function(e){
+    if (z0 !== e.z){ z0 = e.z; pend.forEach(function(z, key){ if (z === e.z) return; pend.delete(key); var ent = sh.live.get(key); if (ent && --ent.n <= 0 && ent.ac) ent.ac.abort(); }); }
+    var key = P.toIndex(e), pr = sh.tc.get(e), ent = sh.live.get(key);
+    if (ent && !pend.has(key)){ ent.n++; pend.set(key, e.z); }
+    var done = function(){ pend.delete(key); };
+    pr.then(done, done);
+    return pr;
+  };
+  return face;
+};
+/* point every view of a protomaps layer (leafletLayer, or a sourcesToViews map) at the shared caches; srcs = the cfg it was built from */
+window._bvShareViews = function(views, cfg){
+  try { if (!views || !protomapsL.ZxySource || !protomapsL.toIndex) return;
+    views.forEach(function(v, name){ var s = cfg.sources ? cfg.sources[name] : cfg, u = s && s.url;
+      if (typeof u !== 'string' || /\.pmtiles(\?|$)/.test(u) || !v.tileCache) return;
+      v.tileCache = window._bvTileShare(u, v.tileCache.tileSize); });
+  } catch(e){}
+};
 /* LAND-ONLY RASTER OVERLAYS (user 2026-10-16: "are you able to improve macrostrats placement or trim? whats going on here" /
    "can you improve what the tides visual looks like"). Macrostrat's geology tiles are generalized map units whose edges
    ignore the shore -- they spill over rivers and harbors and leave dark gaps where a unit stops short of the water -- and
@@ -1089,7 +1126,7 @@ window._bvBuoys = function(w, s, e, n){
 window._bvLandOnly = function(url, opts){
   opts = opts || {};
   var P = protomapsL, view = null;
-  try { view = P.sourcesToViews({ url: window.BV_BASEMAP_URL, maxDataZoom: 14 }).get(''); } catch(e){}
+  try { var vs = P.sourcesToViews({ url: window.BV_BASEMAP_URL, maxDataZoom: 14 }); window._bvShareViews(vs, { url: window.BV_BASEMAP_URL }); view = vs.get(''); } catch(e){}
   var water = [{ dataLayer: 'water', symbolizer: new P.PolygonSymbolizer({ fill: '#000' }), filter: function(z, f){ return f.geomType === 3; } }];
   var Lay = L.GridLayer.extend({
     createTile: function(c, done){
@@ -1222,6 +1259,7 @@ window._bvVectorBase = function(map, opts){
       (cfg.paintRules || []).concat(cfg.labelRules || []).forEach(function(r){ if (r.dataLayer !== 'roads' || r._bvRoadGate) return; var f0 = r.filter;
         r.filter = function(z, f){ if (map._bvNoRoads) return false; return f0 ? f0(z, f) : true; }; r._bvRoadGate = true; });
       var layer = protomapsL.leafletLayer(cfg);
+      window._bvShareViews(layer.views, cfg);   /* one fetch + decode per tile across base, labels and mask (see _bvTileShare) */
       layer.addTo(map);
       added.push(layer);
       (map._bvAllBase = map._bvAllBase || []).push(layer);
@@ -106948,6 +106986,7 @@ function closeAlertModal(){
               paintRules: window._bvPaintPlus(protomapsL.paintRules(F0), F0).filter(function(r){ return r.dataLayer === 'roads'; }),
               labelRules: [],   /* lines only: its street names covered the whole city and ignored LABELS (user 2026-10-18: "there should not be street names") */
               bounds: L.latLngBounds([[GH_BOX[1], GH_BOX[0]], [GH_BOX[3], GH_BOX[2]]]) });
+            window._bvShareViews(GH.roads.views, { url: window.BV_BASEMAP_URL });
           } catch(e){ GH.roads = null; }
           var streams = [];
           [[R3[1], false], [R3[2], true]].forEach(function(pr){ if (!pr[0]) return;
@@ -109353,7 +109392,7 @@ function closeAlertModal(){
             paintRules: [{ dataLayer: 'water', symbolizer: new protomapsL.PolygonSymbolizer({ fill: '#000', opacity: 1 }),
               filter: function(z, f){ var k = (f.props || {}).kind || (f.props || {}).pmap_kind; return f.geomType === 3 && !NOPE[k] && big(f); } }] };   /* polygons only: the water layer also carries river CENTERLINES, and a line filled as a shape closed into a sliver across Queens */
           if (t.bounds) cfg.bounds = L.latLngBounds(t.bounds);
-          var l = protomapsL.leafletLayer(cfg); l.addTo(M);
+          var l = protomapsL.leafletLayer(cfg); window._bvShareViews(l.views, cfg); l.addTo(M);
           l.on('load', function(){ clearTimeout(OL.mdeb); OL.mdeb = setTimeout(function(){ OL.draw(true); if (CD.redraw) CD.redraw(); }, 120); });
           return l; });
       } catch(e){ OL.mask = []; }
