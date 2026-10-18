@@ -82,6 +82,7 @@ const CACHE_RULES = {
   'kart.connexionz.net': 15,
   'kttracker.com': 15,
   'mdotmta-gtfs-rt.s3.amazonaws.com': 15,
+  'gtfsrt.prod.obanyc.com': 15,       // MTA Bus Time vehicle positions (keyless; LOCAL TRAFFIC, NYC buses)
   'metromap.cityofmadison.com': 15,
   'myride.bft.org': 15,
   'myride.shoretransit.org': 15,
