@@ -996,7 +996,7 @@ window._bvSeaNames = function(map){
     var pane = map.getPane('bvSea') || map.createPane('bvSea'); pane.style.zIndex = 430; pane.style.pointerEvents = 'none';
     var cv = document.createElement('canvas'); cv.style.position = 'absolute'; pane.appendChild(cv); map._bvSeaCv = cv;
     var draw = function(){
-      cv.style.display = map._bvSeaOff ? 'none' : ''; if (map._bvSeaOff) return;          /* a view that should not carry them (LOCAL: only MAP and TIDES) */
+      cv.style.display = map._bvSeaOff ? 'none' : ''; if (map._bvSeaOff){ if (cv.width){ cv.width = 0; cv.height = 0; } return; }   /* a view that should not carry them (LOCAL: only MAP and TIDES); off, it holds no pixels -- re-sized below when back on (perf 2026-10-18) */
       var sz = map.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr), z = map.getZoom();
       if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
       L.DomUtil.setPosition(cv, map.containerPointToLayerPoint([0, 0])); cv.style.visibility = '';
@@ -105107,6 +105107,11 @@ function closeAlertModal(){
     /* NEW YORK OPENS AS THE CITY DID (user 2026-10-17: "for new york, the map should start at the same view level the CITY
        had with traffic on and kalshi as a dot again"): framed to THE CITY's own box (Bronx top to Breezy Point, Newark Bay to
        the Queens line) on TRAFFIC, the castle a dot on it. Once per place: a view picked after that is kept. */
+    /* A HIDDEN CANVAS HOLDS NO PIXELS (perf 2026-10-18: LOCAL took +359 MB of canvas backing store when opened -- every view's
+       layer kept its full-view, full-dpr canvas after its view was left, so five views stacked ~16-52 MB each). A canvas whose layer
+       is not drawn is shrunk to 0 x 0; every draw below already re-sizes on width / height !== the view's, so it comes back on
+       its next draw at the same resolution as before */
+    var cvFree = function(c){ if (c && (c.width || c.height)){ c.width = 0; c.height = 0; } };
     var NYS = { done: '' };
     NYS.inBox = function(){ var L1 = window.LOCATION || {}, la = +L1.lat, lo = +L1.lon; return la > 40.48 && la < 40.95 && lo > -74.30 && lo < -73.65; };
     /* before the first view of a place: pick TRAFFIC; the frame waits until the map has its size (fit) */
@@ -105248,8 +105253,9 @@ function closeAlertModal(){
         ARC.cv = document.createElement('canvas'); ARC.cv.style.position = 'absolute'; pn.appendChild(ARC.cv);
         M.on('zoomstart', function(){ ARC.cv.style.visibility = 'hidden'; }); M.on('moveend resize', function(){ ARC.cv.style.visibility = ''; ARC.draw(); }); }
       var cv = ARC.cv, sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr);
-      if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
       var L0 = window.LOCATION || {}, mo = OV.motion, o = R.ov && R.ov[R.i];
+      if (VIEW !== 'radar' || !OV.on || !mo || !(mo.mph >= 4) || !isFinite(+L0.lat) || !o){ cvFree(cv); ARC.key = ''; return; }   /* no arcs: no pixels (perf 2026-10-18) */
+      if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
       /* the radar loop asks every 550 ms; an unchanged frame, view and motion keeps the last drawing (perf 2026-10-18) */
       var ck = [o && o.t, VIEW, OV.on, mo && mo.mph, mo && mo.toward, L0.lat, L0.lon, W, H, M.getZoom(), M.getCenter().lat, M.getCenter().lng].join('|');
       if (ck === ARC.key && Date.now() - ARC.at < 30000) return; ARC.key = ck; ARC.at = Date.now();
@@ -105971,6 +105977,7 @@ function closeAlertModal(){
       var w = F.el.naturalWidth, h = F.el.naturalHeight, c = OV.ncCv || (OV.ncCv = document.createElement('canvas')); c.width = w; c.height = h;
       var g2 = c.getContext('2d', { willReadFrequently: true }), d;
       try { g2.clearRect(0, 0, w, h); g2.drawImage(F.el, 0, 0); d = g2.getImageData(0, 0, w, h).data; } catch(e){ return; }
+      cvFree(c);   /* the pixels are read; the scratch is re-sized on the next call anyway (perf 2026-10-18) */
       var R2 = 6378137, at = function(p){ var X = p[1] * Math.PI / 180 * R2, Y = R2 * Math.log(Math.tan(Math.PI / 4 + p[0] * Math.PI / 360));
         var x = Math.round((X - F.box.X0) / (F.box.X1 - F.box.X0) * w), y = Math.round((F.box.Y1 - Y) / (F.box.Y1 - F.box.Y0) * h);
         if (x < 0 || y < 0 || x >= w || y >= h) return -1; return d[(y * w + x) * 4 + 3] > 60 ? 1 : 0; };
@@ -106086,7 +106093,7 @@ function closeAlertModal(){
       }, 2500);
     };
     OV.stop = function(){
-      OV.on = false; if (OV.cv) OV.cv.style.display = 'none'; OV.satSync();
+      OV.on = false; if (OV.cv) OV.cv.style.display = 'none'; cvFree(OV.cv); cvFree(OV.oc); OV.satSync();   /* OV.draw re-sizes both (perf 2026-10-18) */
       if (OV.timer){ clearInterval(OV.timer); OV.timer = null; }
       if (window.bvLightning) window.bvLightning.want('local', false);
     };
@@ -106211,7 +106218,7 @@ function closeAlertModal(){
     NG.want = function(){ return VIEW === 'rock' && nycHere() && !!window._bvCwGeo; };
     NG.sync = function(){
       if (!M) return;
-      if (!NG.want()){ NG.lit = false; NG.hits = []; if (NG.cv) NG.cv.style.display = 'none'; return; }
+      if (!NG.want()){ NG.lit = false; NG.hits = []; if (NG.cv){ NG.cv.style.display = 'none'; cvFree(NG.cv); } return; }   /* ~36 MB at dpr 2, freed off GEOLOGY (perf 2026-10-18) */
       NG.lit = true;
       if (!NG.cv){ var pn = M.getPane('lcNyGeo') || M.createPane('lcNyGeo'); pn.style.zIndex = 432; pn.style.pointerEvents = 'none';
         NG.cv = document.createElement('canvas'); NG.cv.style.position = 'absolute'; pn.appendChild(NG.cv);
@@ -106928,7 +106935,7 @@ function closeAlertModal(){
       Promise.all(['/ghost-marsh.json?v=2', '/ghost-rivers.json?v=2', '/ghost_streams.json'].map(function(u){ return fetch(u).then(function(r){ return r.json(); }).catch(function(){ return null; }); }))
         .then(function(R3){
           var pn = M.getPane('lcGhost') || M.createPane('lcGhost'); pn.style.zIndex = 420;
-          var rd = L.canvas({ padding: .4, pane: 'lcGhost', tolerance: 6 }), g = L.layerGroup();
+          var rd = GH.rd = L.canvas({ padding: .4, pane: 'lcGhost', tolerance: 6 }), g = L.layerGroup();
           var dash = function(){ var k = Math.max(.8, Math.min(1.35, Math.pow(M.getZoom() / 13, 1.4))); return (4.6 * k).toFixed(1) + ',' + (3 * k + 1.2).toFixed(1); };
           var tip = function(p, pond){ var ft = p.len_m ? Math.round(p.len_m * 3.281).toLocaleString() : null;
             return '<div style="font:800 10px system-ui,sans-serif;letter-spacing:.05em;color:#fff;">' + esc(String(p.name || 'UNNAMED WATERCOURSE').toUpperCase()) + '</div>'
@@ -106971,6 +106978,12 @@ function closeAlertModal(){
       var gp = M.getPane('lcGhost'), gr = M.getPane('lcGhostRoads'); if (gp) gp.style.zIndex = VIEW === 'radar' ? 396 : 420; if (gr) gr.style.zIndex = VIEW === 'radar' ? 397 : 421;
       if (want && !GH.lay){ GH.build(); return; }
       if (GH.lay){ if (want && !M.hasLayer(GH.lay)) GH.lay.addTo(M); else if (!want && M.hasLayer(GH.lay)) M.removeLayer(GH.lay); }
+      /* THE RENDERER LEAVES WITH THE STREAMS (perf 2026-10-18): Leaflet keeps a canvas renderer on the map after its last path
+         is removed and re-sizes it (1.8 x the view, retina 2x: ~52 MB) on every moveend, so GHOST RIVERS cost its canvas on
+         TRAFFIC, GEOLOGY, FOLIAGE and after a move away from NYC. Removed with the group; a path re-added puts it back
+         (Path.beforeAdd adds its renderer) with a fresh canvas. Leaflet 1.9.4's _destroyContainer cancels the pending frame but keeps
+         its id, and _requestRedraw only asks when that id is empty -- left set, the streams came back undrawn; cleared here */
+      if (GH.rd && !want && M.hasLayer(GH.rd) && !(GH.lay && M.hasLayer(GH.lay))){ M.removeLayer(GH.rd); GH.rd._redrawRequest = null; }
       if (GH.roads){ if (want && !M.hasLayer(GH.roads) && !M._bvNoRoads) GH.roads.addTo(M); else if ((!want || M._bvNoRoads) && M.hasLayer(GH.roads)) M.removeLayer(GH.roads); }
       var host = document.getElementById('lc-gh-pill');
       if (false){   /* GHOST RIVERS now sits in MAP's layer row (LAY.pills, user 2026-10-17: "bring ghost river over to the others") */
@@ -107274,7 +107287,7 @@ function closeAlertModal(){
         M.on('moveend resize', function(){ if (!SEA.lit) return; SEA.draw(); clearTimeout(SEA.deb); SEA.deb = setTimeout(SEA.read, 500); }); }
       SEA.cv.style.display = ''; SEA.read(); SEA.draw(); SWL.on();
       if (!SEA.timer) SEA.timer = setInterval(function(){ if (SEA.lit && paneOn() && !document.hidden){ SEA.read(); SEA.draw(); } }, 60000); };
-    SEA.off = function(){ SEA.lit = false; if (SEA.cv) SEA.cv.style.display = 'none'; if (SEA.timer){ clearInterval(SEA.timer); SEA.timer = null; } SWL.off(); };
+    SEA.off = function(){ SEA.lit = false; if (SEA.cv) SEA.cv.style.display = 'none'; cvFree(SEA.cv); if (SEA.timer){ clearInterval(SEA.timer); SEA.timer = null; } SWL.off(); };
     /* ---------------------------------------------------------------- THE MOVING SEA ---- */
     /* THE BASIN's SURF SEA FOR ANY COAST (2026-10-17, user: "make sure the waves youre making are at the same high value weve
        already built for LA and NYC"). Not a new look: the map lab's own solver (_maplab/swell_core.js, its swellTravelTime /
@@ -107531,7 +107544,7 @@ function closeAlertModal(){
         if (!SWL.timer) SWL.timer = setInterval(function(){ if (SEA.lit && !document.hidden && paneOn()) SWL.build(); }, 10 * 60000); }
       clearTimeout(SWL.deb); SWL.deb = setTimeout(SWL.build, 60);
     };
-    SWL.off = function(){ SWL.gen++; clearTimeout(SWL.deb); swlHide(); SWL.info = null; if (SWL.cv) SWL.cv.style.display = 'none'; };
+    SWL.off = function(){ SWL.gen++; clearTimeout(SWL.deb); swlHide(); SWL.info = null; if (SWL.cv) SWL.cv.style.display = 'none'; cvFree(SWL.cv); };   /* SWL.build sets its size anew */
     /* ---------------------------------------------------------------- THE CITY's WATER ---- */
     /* THE HARBOR'S CURRENT AND THE SEWAGE DYE, AT THE CITY's QUALITY (user 2026-10-17: "i want the green flow the most, have we
        sacrificed any of that quality by switching to this map?"). Inside THE CITY's box, on TIDES, the national map runs THE
@@ -107713,6 +107726,7 @@ function closeAlertModal(){
         cfPipes(); SEA.onSum(); cfStart(); }, 15000);
     };
     CF.off = function(){ CF.lit = false; CF.gen++; clearTimeout(CF.rt); if (CF.raf){ cancelAnimationFrame(CF.raf); CF.raf = 0; } cfHide();
+      cvFree(CF.cv); cvFree(CF.pc); cvFree(CF.hcv);   /* cwWatDraw and cfPipes re-size them on the next frame (perf 2026-10-18) */
       if (CF.timer){ clearInterval(CF.timer); CF.timer = null; } };
     /* TIDES turns it on and off with the sea; its reading leads the strip's sea line */
     var cfSeaOn = SEA.on, cfSeaOff = SEA.off, cfSeaLine = SEA.line;
@@ -108500,7 +108514,7 @@ function closeAlertModal(){
         if (TR.lit === true) TR.mesh.addTo(M);
       }).catch(function(){ TR.meshReq = 0; });
     };
-    TR.off = function(){ if (TR.lit !== true) return; TR.lit = false; TR.boardClose(); var tp = document.getElementById('lc-traf-pills'); if (tp) tp.style.display = 'none'; if (TR.lay && M && M.hasLayer(TR.lay)) M.removeLayer(TR.lay); if (TR.mesh && M && M.hasLayer(TR.mesh)) M.removeLayer(TR.mesh); if (TR.cv) TR.cv.style.display = 'none';
+    TR.off = function(){ if (TR.lit !== true) return; TR.lit = false; TR.boardClose(); var tp = document.getElementById('lc-traf-pills'); if (tp) tp.style.display = 'none'; if (TR.lay && M && M.hasLayer(TR.lay)) M.removeLayer(TR.lay); if (TR.mesh && M && M.hasLayer(TR.mesh)) M.removeLayer(TR.mesh); if (TR.cv) TR.cv.style.display = 'none'; cvFree(TR.cv);
       if (TR.timer){ clearInterval(TR.timer); TR.timer = null; } if (TR.vtimer){ clearInterval(TR.vtimer); TR.vtimer = null; } };
     /* ---------------------------------------------------------------- ICE AGE -- */
     /* THE ICE SHEET ON GEOLOGY (user 2026-10-17: "can geology have glacial info like NYC did"). THE CITY draws where the ice
@@ -108527,9 +108541,9 @@ function closeAlertModal(){
     ICE.on = function(){ if (!M) return; ICE.lit = true;
       /* in NYC THE CITY's surveyed moraine (NG) draws the ice edge; NADI-1's coarse line ran straight across Jersey and Manhattan beside it */
       var here = !nycHere();
-      var build = function(){ if (!ICE.lit || ICE.lay) { if (ICE.lay && ICE.lit && here && !M.hasLayer(ICE.lay)) ICE.lay.addTo(M); if (ICE.lay && !here && M.hasLayer(ICE.lay)) M.removeLayer(ICE.lay); return; }
+      var build = function(){ if (!ICE.lit || ICE.lay) { if (ICE.lay && ICE.lit && here && !M.hasLayer(ICE.lay)) ICE.lay.addTo(M); if (ICE.lay && !here && M.hasLayer(ICE.lay)) M.removeLayer(ICE.lay); if (!here) ICE.drop(); return; }
         var pn = M.getPane('lcIce') || M.createPane('lcIce'); pn.style.zIndex = 425; pn.style.pointerEvents = 'none';
-        var rd = L.canvas({ pane: 'lcIce', padding: .3 }), g = L.layerGroup();
+        var rd = ICE.rd = L.canvas({ pane: 'lcIce', padding: .3 }), g = L.layerGroup();
         var area = function(st){ var a = 0; st.p.forEach(function(poly){ var r = poly[0]; for (var i = 1; i < r.length; i++) a += (r[i - 1][0] * r[i][1] - r[i][0] * r[i - 1][1]); }); return Math.abs(a); };
         var big = ICE.d.s.filter(function(st){ return st.ka >= 18; }).sort(function(a, b){ return area(b) - area(a); })[0];
         var lines = function(st){ var out = []; st.p.forEach(function(poly){ poly.forEach(function(r){ out.push(r.map(function(q){ return [q[1], q[0]]; })); }); }); return out; };
@@ -108542,7 +108556,10 @@ function closeAlertModal(){
         ICE.lay = g; if (here) g.addTo(M); };
       if (ICE.d) build(); else if (!ICE.p) ICE.p = fetch('https://cdn.bluishvoid.com/geo/ice_na_v1.json').then(function(r){ return r.json(); }).then(function(j){ ICE.d = j; build(); }).catch(function(){ ICE.p = null; });
     };
-    ICE.off = function(){ ICE.lit = false; if (ICE.lay && M && M.hasLayer(ICE.lay)) M.removeLayer(ICE.lay); };
+    /* ITS RENDERER GOES WITH IT (perf 2026-10-18): as GHOST RIVERS' -- Leaflet leaves an emptied canvas renderer on the map, re-sized
+       to 1.6 x the view (~41 MB on a 2x desktop) on every move, on every view after GEOLOGY. Path.beforeAdd brings it back */
+    ICE.drop = function(){ if (ICE.rd && M && M.hasLayer(ICE.rd)){ M.removeLayer(ICE.rd); ICE.rd._redrawRequest = null; } };   /* the stale frame id, as GH.sync clears it */
+    ICE.off = function(){ ICE.lit = false; if (ICE.lay && M && M.hasLayer(ICE.lay)) M.removeLayer(ICE.lay); ICE.drop(); };
     /* ---------------------------------------------------------------- FOLIAGE -- */
     /* FALL FOLIAGE FOR NORTH AMERICA (user 2026-10-17: "can you do what weve done for northeast foliage for north america?" /
        "dont show roads on foliage"). The Northeast tab's method as a tile pyramid (_foliagebake/na.py, daily Sep-Nov, cdn
@@ -108662,7 +108679,7 @@ function closeAlertModal(){
     };
     LF.draw = function(){
       if (!LF.cv || !M) return; var cv = LF.cv;
-      if (!LF.lit){ cv.style.display = 'none'; return; } cv.style.display = '';
+      if (!LF.lit){ cv.style.display = 'none'; cvFree(cv); return; } cv.style.display = '';
       var sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr), z = M.getZoom();
       if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
       L.DomUtil.setPosition(cv, M.containerPointToLayerPoint([0, 0]));
@@ -108792,7 +108809,7 @@ function closeAlertModal(){
     };
     LF.off = function(){ LF.lit = false; clearInterval(LF.timer); LF.timer = null; LF.info = '';
       if (M){ [LF.lay, LF.forest].concat(Object.keys(LF.fl).map(function(k){ return LF.fl[k]; })).forEach(function(l){ if (l && M.hasLayer(l)) M.removeLayer(l); }); }
-      if (LF.cv) LF.cv.style.display = 'none'; LF.park(); };
+      if (LF.cv){ LF.cv.style.display = 'none'; cvFree(LF.cv); } LF.park(); };
     /* ------------------------------------------------------- LIVE TIDAL FLOOD -- */
     /* WATER ON THE LAND, NYC ONLY (user 2026-10-17: "do live tidal flooding"): THE CITY's live fill (window._bvLiveFlood) on
        TIDES -- the land the harbor is over NOW, or at the NEXT CREST the NWS forecasts -- cyan, deeper is stronger; the 11
@@ -109435,7 +109452,11 @@ function closeAlertModal(){
       OL.grow(A, 2 * k + w, B); tint(B, 'rgba(6,10,18,.5)');                                   /* the outer casing */
       OL.grow(A, k + w, D); cut(D); tint(D, 'rgba(234,88,12,.96)');                             /* the line, in the pane's own orange (user 2026-10-17: "make the location only theme orange") */
       OL.grow(A, k, B); cut(B); tint(B, 'rgba(6,10,18,.5)');                                    /* the inner casing */
-      cut(A); OL.ms = Math.round(performance.now() - t0); };   /* the harness reads OL.ms */
+      cut(A); OL.ms = Math.round(performance.now() - t0);   /* the harness reads OL.ms */
+      /* THE SCRATCH GOES WHEN THE LINE IS DONE (perf 2026-10-18): A-D and the half-size pair are four full-view, full-dpr canvases
+         (~120 MB on a 2x desktop) that only a redraw uses, and the pocket fill's typed arrays. Kept while redraws come close together (a zoom, the water tiles landing),
+         dropped 4 s after the last one; the next draw makes them again. The line itself (OL.cv) keeps its full dpr */
+      clearTimeout(OL.relT); OL.relT = setTimeout(function(){ ['A', 'B', 'C', 'D', 'HS', 'HS2'].forEach(function(k){ cvFree(OL[k]); OL[k] = null; }); OL.lab = OL.stk = OL.memB = OL.out = null; }, 4000); };
     /* ---------------------------------------------------------------- the tab ---- */
     var wt = document.getElementById('radar-widget-title'), savedT = null;
     var headOn = function(on){
