@@ -104901,6 +104901,7 @@ function closeAlertModal(){
       else mapEl.addEventListener('mouseleave', lock);
       say();
       M.createPane('lcLabels'); M.getPane('lcLabels').style.zIndex = 450; M.getPane('lcLabels').style.pointerEvents = 'none';
+      OL.init(); OL.want();                        /* the place's outline, over the radar (user 2026-10-17) */
       if (window._bvVectorBase) window._bvVectorBase(M);
       if (window._bvSeaNames) window._bvSeaNames(M);
       /* OUR NAMING RULE (user 2026-10-16): no basemap town or water names at any zoom; only the site's space-themed places
@@ -107790,6 +107791,119 @@ function closeAlertModal(){
     };
     [].forEach.call(pane.querySelectorAll('#lc-tabs button'), function(b){ b.onclick = function(e){ e.stopPropagation(); var dv = b.getAttribute('data-v');
       view(dv === 'map' ? (WAT.inMap(VIEW) ? 'map' : (WAT.mapLast === 'tide' && !WAT.has().t) || (WAT.mapLast === 'river' && !WAT.has().r) ? 'map' : WAT.mapLast) : dv); }; });
+    /* ---------------------------------------------------------------- THE PLACE'S OUTLINE ---- */
+    /* ONE LINE AROUND THE PLACE (user 2026-10-17: "add the 5 borough outline, dont individualize them just go the total outline,
+       and do this for all locations, make a border around the location name, where thats state, town, city, address, and make
+       that outline stand over radar when its happening"). On every LOCAL view, one outline of what the place's name names:
+         - inside the five boroughs (nycHere): New York City whole -- THE CITY's own ~90 m borough outlines (city_boroughs.json
+           'hi'), drawn as their union, so the Brooklyn-Queens line and Marble Hill's are not drawn;
+         - a state (the name is a state's, or the geocoder's feature code is ADM1): that state;
+         - a county (ADM2, or a name ending in County / Parish / Borough): that county;
+         - a city, town or village: the boundary of that name around the point (Nominatim search, bounded to ~25 km, an
+           administrative boundary preferred over a census place);
+         - anything else (an address, a point, a park): the city or town that contains it (Nominatim reverse at city level),
+           else its county.
+       OpenStreetMap through Nominatim, keyless; at most three requests for a new place, a second apart, and none on pan; the
+       answer is kept in localStorage (the last 8 places, simplified to ~50 m, ~10 m coordinates). Drawn on its own canvas
+       pane (448) above the radar frames (overlay pane, 400), the radar overlays (lcOv 440) and every LOCAL layer, under the
+       themed names and the place dot (lcLabels 450); it takes no taps. The band lies just OUTSIDE the territory: white
+       between two dark casings, so it reads on the dark basemap and over any radar color. */
+    var OL = { key: '', polys: null, cv: null, req: 0, failAt: 0 };
+    OL.STATES = ['alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado', 'connecticut', 'delaware', 'florida', 'georgia', 'hawaii', 'idaho', 'illinois',
+      'indiana', 'iowa', 'kansas', 'kentucky', 'louisiana', 'maine', 'maryland', 'massachusetts', 'michigan', 'minnesota', 'mississippi', 'missouri', 'montana',
+      'nebraska', 'nevada', 'new hampshire', 'new jersey', 'new mexico', 'new york state', 'north carolina', 'north dakota', 'ohio', 'oklahoma', 'oregon',
+      'pennsylvania', 'rhode island', 'south carolina', 'south dakota', 'tennessee', 'texas', 'utah', 'vermont', 'virginia', 'washington state', 'west virginia',
+      'wisconsin', 'wyoming', 'district of columbia', 'puerto rico'];   /* New York and Washington are cities by name; their states say "state" */
+    OL.kind = function(){
+      var L1 = window.LOCATION || {}, n = String(L1.name || '').split(',')[0].trim().toLowerCase(), fc = String((window._geoMeta || {}).featureCode || '');
+      if (nycHere()) return 'nyc';
+      if (fc === 'ADM1' || OL.STATES.indexOf(n) >= 0) return 'state';
+      if (fc === 'ADM2' || /\s(county|parish|borough)$/.test(n)) return 'county';
+      return 'place'; };
+    /* GeoJSON (Polygon / MultiPolygon) -> [[ring, ...], ...], rings of [lon, lat] rounded to ~10 m */
+    OL.polysOf = function(g){
+      if (!g || (g.type !== 'Polygon' && g.type !== 'MultiPolygon')) return null;
+      var ps = g.type === 'Polygon' ? [g.coordinates] : g.coordinates;
+      return ps.map(function(p){ return p.map(function(r){ return r.map(function(c){ return [Math.round(c[0] * 1e4) / 1e4, Math.round(c[1] * 1e4) / 1e4]; }); }); }); };
+    /* inside (even-odd over a polygon's rings), or within ~2 km of its line: a town's point can sit on its own edge */
+    OL.has = function(polys, la, lo){
+      return (polys || []).some(function(p){ var c = false, near = false, kx = Math.cos(la * Math.PI / 180);
+        p.forEach(function(r){ for (var i = 0, j = r.length - 1; i < r.length; j = i++){
+          if (((r[i][1] > la) !== (r[j][1] > la)) && (lo < (r[j][0] - r[i][0]) * (la - r[i][1]) / (r[j][1] - r[i][1]) + r[i][0])) c = !c;
+          if (!near){ var dx = (r[i][0] - lo) * kx, dy = r[i][1] - la; if (dx * dx + dy * dy < 3.3e-4) near = true; } } });
+        return c || near; }); };
+    OL.get = function(u){
+      return Promise.race([fetch(u).then(function(r){ if (!r.ok) throw new Error('http ' + r.status); return r.json(); }),
+        new Promise(function(res, rej){ setTimeout(function(){ rej(new Error('timeout')); }, 15000); })]); };
+    OL.wait = function(ms){ return function(x){ return new Promise(function(res){ setTimeout(function(){ res(x); }, ms); }); }; };
+    OL.fetch = function(kind, la, lo, name){
+      var NB = 'https://nominatim.openstreetmap.org/', tail = '&polygon_geojson=1&format=jsonv2&accept-language=en&polygon_threshold=';
+      /* reverse at one level; passes an earlier answer straight through, and waits a second after asking (Nominatim's 1/s) */
+      var rev = function(z, th){ return function(prev){ if (prev) return prev;
+        return OL.get(NB + 'reverse?lat=' + la.toFixed(5) + '&lon=' + lo.toFixed(5) + '&zoom=' + z + tail + th).then(function(j){
+          var p = OL.polysOf(j && j.geojson); return p && OL.has(p, la, lo) ? p : null; }).then(OL.wait(1100)); }; };
+      if (kind === 'state') return rev(5, '0.003')(null);
+      if (kind === 'county') return rev(8, '0.001')(null).then(rev(10, '0.0005'));
+      var dl = 0.25 / Math.cos(la * Math.PI / 180);
+      return OL.get(NB + 'search?q=' + encodeURIComponent(name) + '&viewbox=' + (lo - dl).toFixed(3) + ',' + (la + 0.22).toFixed(3) + ',' + (lo + dl).toFixed(3) + ',' + (la - 0.22).toFixed(3)
+        + '&bounded=1&limit=6' + tail + '0.0005').then(function(a){
+          var best = null, bs = -1;
+          (a || []).forEach(function(r){ var cat = r.category || r['class'], p = OL.polysOf(r.geojson);
+            if (!p || (cat !== 'boundary' && cat !== 'place') || !OL.has(p, la, lo)) return;
+            var s = (r.type === 'administrative' ? 2 : r.type === 'census' ? 0 : 1); if (s > bs){ bs = s; best = p; } });
+          return best; }).catch(function(){ return null; }).then(OL.wait(1100))
+        .then(rev(10, '0.0005')).then(rev(8, '0.001')); };
+    OL.want = function(){
+      if (!M) return;
+      var L1 = window.LOCATION || {}, la = +L1.lat, lo = +L1.lon;
+      if (!isFinite(la) || !isFinite(lo) || NYB === null) return;            /* NYC is known only once the boroughs are in */
+      var kind = OL.kind(), name = String(L1.name || '').split(',')[0].trim(), key = kind + '|' + la.toFixed(3) + ',' + lo.toFixed(3) + '|' + name.toLowerCase();
+      if (key === OL.key && (OL.polys || OL.req || Date.now() - OL.failAt < 12e4)) return;    /* a miss is asked again after 2 min */
+      if (key !== OL.key){ OL.key = key; OL.polys = null; OL.draw(); }
+      var ck = 'bv_outline_v1_' + key;
+      if (kind === 'nyc'){ OL.req = 1;
+        fetch('/city_boroughs.json?v=3').then(function(r){ return r.json(); }).then(function(j){ OL.req = 0; if (OL.key !== key) return;
+          OL.polys = (j.hi || j.b || []).map(function(bo){ return bo.r || []; }); OL.draw(); }).catch(function(){ OL.req = 0; OL.failAt = Date.now(); });
+        return; }
+      try { var c0 = JSON.parse(localStorage.getItem(ck) || 'null'); if (c0 && c0.p){ OL.polys = c0.p; OL.draw(); return; } } catch(e){}
+      OL.req = 1;
+      OL.fetch(kind, la, lo, name).then(function(p){ OL.req = 0; if (OL.key !== key) return;
+        if (!p){ OL.failAt = Date.now(); return; }
+        OL.polys = p; OL.draw();
+        try { var s = JSON.stringify({ p: p, at: Date.now() });
+          if (s.length < 300000){ var idx = JSON.parse(localStorage.getItem('bv_outline_v1_idx') || '[]').filter(function(k){ return k !== ck; });
+            idx.push(ck); while (idx.length > 8) localStorage.removeItem(idx.shift());
+            localStorage.setItem(ck, s); localStorage.setItem('bv_outline_v1_idx', JSON.stringify(idx)); } } catch(e){}
+      }).catch(function(){ OL.req = 0; if (OL.key === key) OL.failAt = Date.now(); }); };
+    OL.init = function(){
+      if (OL.cv || !M) return;
+      var pn = M.getPane('lcOutline') || M.createPane('lcOutline'); pn.style.zIndex = 448; pn.style.pointerEvents = 'none';
+      OL.cv = document.createElement('canvas'); OL.cv.style.position = 'absolute'; pn.appendChild(OL.cv);
+      M.on('zoomstart', function(){ if (OL.cv) OL.cv.style.visibility = 'hidden'; });
+      M.on('moveend zoomend resize', function(){ OL.draw(); }); };
+    /* vector, redrawn at every zoom (never a stretched bitmap), on a canvas 30% wider than the view on each side so a pan
+       does not run off its edge before moveend redraws it */
+    OL.draw = function(){
+      var cv = OL.cv; if (!cv || !M) return;
+      var sz = M.getSize(), px = Math.round(sz.x * 0.3), py = Math.round(sz.y * 0.3), Wd = sz.x + 2 * px, Ht = sz.y + 2 * py, dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+      if (cv.width !== Math.round(Wd * dpr) || cv.height !== Math.round(Ht * dpr)){ cv.width = Math.round(Wd * dpr); cv.height = Math.round(Ht * dpr); cv.style.width = Wd + 'px'; cv.style.height = Ht + 'px'; }
+      L.DomUtil.setPosition(cv, M.containerPointToLayerPoint([-px, -py]));
+      var x = cv.getContext('2d'); x.setTransform(1, 0, 0, 1, 0, 0); x.clearRect(0, 0, cv.width, cv.height); cv.style.visibility = '';
+      if (!OL.polys || !OL.polys.length || sz.x < 2) return;
+      x.setTransform(dpr, 0, 0, dpr, 0, 0); x.lineJoin = 'round'; x.lineCap = 'round';
+      var path = function(p){ p.forEach(function(r){ r.forEach(function(c, i){ var q = M.latLngToContainerPoint([c[1], c[0]]); if (i) x.lineTo(q.x + px, q.y + py); else x.moveTo(q.x + px, q.y + py); }); x.closePath(); }); };
+      var all = function(){ x.beginPath(); OL.polys.forEach(path); };
+      /* widths grow a little with zoom: ~1.8 px of white at a state's view, 2.8 px at the street */
+      var z = M.getZoom(), w = Math.max(1.6, Math.min(2.8, 1.5 + 0.11 * (z - 5))), k = 1.1;
+      var band = function(op, col, half){ x.globalCompositeOperation = op; x.strokeStyle = col; x.lineWidth = 2 * half; all(); x.stroke(); };
+      band('source-over', 'rgba(6,10,18,.5)', w + 2 * k);                                          /* the outer casing */
+      band('destination-out', '#000', w + k); band('source-over', 'rgba(255,255,255,.9)', w + k);  /* the line */
+      band('destination-out', '#000', k); band('source-over', 'rgba(6,10,18,.5)', k);              /* the inner casing */
+      /* the territory itself erased, polygon by polygon (even-odd keeps a hole's edge): the inner half of every stroke goes,
+         and with it every line two boroughs share */
+      x.globalCompositeOperation = 'destination-out'; x.fillStyle = '#000';
+      OL.polys.forEach(function(p){ x.beginPath(); path(p); x.fill('evenodd'); });
+      x.globalCompositeOperation = 'source-over'; };
     /* ---------------------------------------------------------------- the tab ---- */
     var wt = document.getElementById('radar-widget-title'), savedT = null;
     var headOn = function(on){
@@ -107822,6 +107936,7 @@ function closeAlertModal(){
       var ok = eligible(); btn.style.display = ok ? '' : 'none'; btn.textContent = placeName();
       if (sep) sep.style.display = (ok || shown('city-widget')) ? '' : 'none';
       var L0 = window.LOCATION || {}, key = L0.lat + ',' + L0.lon;
+      OL.want();                                   /* the outline follows the place (keyed: a no-op until it moves) */
       if (key !== lastKey){ lastKey = key;
         if (M){ if (NYS.want()) setTimeout(NYS.fit, 60); else M.setView([+L0.lat, +L0.lon], M.getZoom()); if (here) here.setLatLng([+L0.lat, +L0.lon]); }
         R.sid = String(L0.radar || '').toLowerCase(); R.capsAt = 0; T.d = null;
