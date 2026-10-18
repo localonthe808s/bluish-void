@@ -141,6 +141,68 @@ def snap(coords, up, cache, corr=15.0, minstep=18.0, pull=0.6, jump=0.15, mode='
         out.append(P)
     return out, {'len': Ltot, 'kept': float(keep.sum()), 'medoff': float(np.median(np.abs(offs[path]))), 'medrise': float(np.median(g))}
 
+def splice(coords, seed, near=0.15):
+    """A SEED LINE THROUGH THE REAL TOWNS where Fenneman's border is not the landform (user 2026-10-18: "the line stops at
+    Fenneman's Edwards Plateau border so the Austin-Waco stretch is missing"; "it follows Fenneman's section border west
+    around the Royal Gorge area"). The seed replaces the Fenneman vertices between the ones nearest its two ends, or -- when
+    one end lies past the line's end -- extends it (write that seed to END at the line). Not near this part: unchanged."""
+    c = [list(map(float, p)) for p in coords]; S = [list(map(float, p)) for p in seed]
+    d = lambda p: [math.hypot(q[0] - p[0], q[1] - p[1]) for q in c]
+    d0, d1 = d(S[0]), d(S[-1])
+    if min(min(d0), min(d1)) > near: return c, False
+    i, j = int(np.argmin(d0)), int(np.argmin(d1))
+    if i <= j: return c[:i] + S + c[j + 1:], True
+    return c[:j] + S[::-1] + c[i + 1:], True
+
+def lip(a, b, plateau, seed, cache, T=30.0, close=2.0, opn=1.0, dl=0.0025, pad=0.6):
+    """THE RIM AROUND THE CANYONS (user 2026-10-18: "two stretches cut across canyon country instead of wrapping the
+    escarpment around the canyons ... trace the rim as an elevation contour/lip on the DEM"). For a tableland whose edge is
+    cut by canyons (the Llano Estacado: Palo Duro, Tule, Quitaque, Blanco), a corridor snap cannot follow a canyon 40 km in
+    and back out. Instead the tableland itself is found: its top surface is fitted (a cubic in lon/lat over the ground well
+    inside the section, the playas and draws rejected), and the lip is where the ground falls T m below that surface. Draws
+    narrower than ~2*close km are bridged, slivers thinner than ~2*opn km dropped, the piece holding `seed` kept, and its
+    outline is cut between the points nearest a and b (the Fenneman line's two ends), running a -> b.
+    plateau: the section polygon (shapely). Returns an Nx2 lon/lat array."""
+    from shapely import vectorized
+    from scipy import ndimage as ndi
+    from skimage import measure
+    from skimage.morphology import remove_small_holes
+    w = min(a[0], b[0]) - pad * 2; e = max(a[0], b[0]) + pad; s = min(a[1], b[1]) - pad; n = max(a[1], b[1]) + pad
+    lat0 = (s + n) / 2; lo = np.arange(w, e, dl); la = np.arange(n, s, -dl * math.cos(math.radians(lat0)))
+    LO, LA = np.meshgrid(lo, la)
+    Zr = elev(LO.ravel(), LA.ravel(), cache).reshape(LO.shape)
+    Zs = gaussian_filter1d(gaussian_filter1d(Zr, 1, axis=0), 1, axis=1)
+    m = vectorized.contains(plateau.buffer(-0.35), LO, LA)
+    x0, y0 = float(LO[m].mean()), float(LA[m].mean())
+    X = lambda x, y: np.c_[np.ones_like(x), x, y, x * x, x * y, y * y, x ** 3, y ** 3, x * x * y, x * y * y]
+    x, y, z = LO[m][::7] - x0, LA[m][::7] - y0, Zs[m][::7]; keep = np.ones(len(z), bool)
+    for _ in range(6):
+        cf = np.linalg.lstsq(X(x[keep], y[keep]), z[keep], rcond=None)[0]
+        r = z - X(x, y) @ cf; keep = r > -2 * np.std(r[keep])
+    R = Zs - (X(LO.ravel() - x0, LA.ravel() - y0) @ cf).reshape(LO.shape)
+    px = dl * 111.32 * math.cos(math.radians(lat0))
+    M = (R > -T) & vectorized.contains(plateau.buffer(0.12), LO, LA)
+    M = remove_small_holes(M, int(60 / px ** 2))                     # playas
+    disk = lambda r: np.hypot(*np.mgrid[-r:r + 1, -r:r + 1]) <= r
+    M = ndi.binary_closing(M, disk(max(1, round(close / px))), border_value=1)
+    M = ndi.binary_opening(M, disk(max(1, round(opn / px))), border_value=1)
+    lab, _ = ndi.label(M)
+    k = lab[int(np.argmin(np.abs(la - seed[1]))), int(np.argmin(np.abs(lo - seed[0])))]
+    M = remove_small_holes(lab == k, int(60 / px ** 2))
+    F = ndi.gaussian_filter(M.astype(float), 2.0)
+    C = max(measure.find_contours(F, 0.5), key=len)
+    P = np.c_[np.interp(C[:, 1], np.arange(len(lo)), lo), np.interp(C[:, 0], np.arange(len(la)), la)]
+    # cut: from the outline point nearest b, walk toward a and stop at the FIRST pass within 3 km of it (the outline can
+    # come back near a after looping round a spur; the nearest point overall may be that later pass)
+    da = np.hypot((P[:, 0] - a[0]) * math.cos(math.radians(lat0)), P[:, 1] - a[1]) * 111.32
+    ib = int(np.argmin(np.hypot(P[:, 0] - b[0], P[:, 1] - b[1])))
+    ia = int(np.argmin(da)); step = 1 if ia > ib else -1
+    near = np.nonzero(da[ib::step] < 3.0)[0]
+    if len(near): ia = ib + step * int(near[0])
+    P = P[ia:ib + 1] if ia <= ib else P[ib:ia + 1][::-1]
+    P = np.c_[gaussian_filter1d(P[:, 0], 2, mode='nearest'), gaussian_filter1d(P[:, 1], 2, mode='nearest')]   # ~0.5 km
+    return P
+
 def simp(P, tol):
     ls = LineString(P).simplify(tol, preserve_topology=False)
     return [[round(x, 4), round(y, 4)] for x, y in ls.coords]
