@@ -105134,6 +105134,93 @@ function closeAlertModal(){
         + '&bbox=' + [sw.x, sw.y, ne.x, ne.y].map(function(v){ return v.toFixed(0); }).join(',') + '&width=' + Math.round(z.x * k) + '&height=' + Math.round(z.y * k) + '&time=' + new Date(t).toISOString().replace('.000', '');
     };
     R.clear = function(){ if (R.timer){ clearInterval(R.timer); R.timer = null; } R.ov.forEach(function(o){ M.removeLayer(o.l); }); R.ov = []; };
+    /* ---------------------------------------------------------------- LEAD ARCS ---- */
+    /* THE CITY's ARCS, FOR EVERY PLACE (user 2026-10-18: "radar arches should mirror the NYC and LA map, they have arches in the path
+       of the storm coming and the time on each arch dynmically updates as the radar video plays and it gets closer, the arches also
+       have colored centers to highlight what part of the storm is on path for their location"). cwDrawLeadArcs and the wide views'
+       arcs, on their own canvas so they redraw with every frame of the loop:
+         - rings of constant TRAVEL time upwind of the place along the measured storm motion, fanned 62 degrees each side;
+           10 / 20 / 30 MIN at the doorstep, 1 / 2 HR, 6 / 12 HR or 12 / 24 HR as the view widens (the first set whose inner
+           ring clears the dot);
+         - ON TARGET, NOT JUST IN RANGE: a cell d off the upwind apex passes the place at r*sin(d), so each ring is stroked in
+           segments weighted 1 / (1 + (r sin d / SIGMA)^2) -- brightest and widest at the apex, fading where a cell would pass
+           wide; SIGMA 4 km at the doorstep, 22 km on the hour rings (THE CITY's values);
+         - each ring carries its ARRIVAL as a clock time: the frame on screen plus the ring's travel time, so the times move as
+           the loop plays (past frames earlier, forecast frames later), NOW once it is overhead, the day on a second row when
+           it is not today. */
+    var ARC = { cv: null };
+    ARC.SETS = [{ m: [10, 20, 30], op: [1, .95, .85], sig: 4 }, { m: [60, 120], op: [.98, .85], sig: 22 }, { m: [360, 720], op: [.98, .85], sig: 22 }, { m: [720, 1440], op: [.98, .85], sig: 22 }];
+    ARC.draw = function(){
+      if (!M) return;
+      if (!ARC.cv){ var pn = M.getPane('lcArc') || M.createPane('lcArc'); pn.style.zIndex = 441; pn.style.pointerEvents = 'none';
+        ARC.cv = document.createElement('canvas'); ARC.cv.style.position = 'absolute'; pn.appendChild(ARC.cv);
+        M.on('zoomstart', function(){ ARC.cv.style.visibility = 'hidden'; }); M.on('moveend zoomend resize', function(){ ARC.cv.style.visibility = ''; ARC.draw(); }); }
+      var cv = ARC.cv, sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr);
+      if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
+      L.DomUtil.setPosition(cv, M.containerPointToLayerPoint([0, 0]));
+      var g = cv.getContext('2d'); g.clearRect(0, 0, W, H);
+      var L0 = window.LOCATION || {}, mo = OV.motion, o = R.ov && R.ov[R.i];
+      if (VIEW !== 'radar' || !OV.on || !mo || !(mo.mph >= 4) || !isFinite(+L0.lat) || !o) return;
+      var hp = M.latLngToContainerPoint([+L0.lat, +L0.lon]), hx = hp.x * dpr, hy = hp.y * dpr;
+      var e1 = M.latLngToContainerPoint([+L0.lat, +L0.lon + 1]), pxKm = Math.abs(e1.x - hp.x) * dpr / (111.32 * Math.cos(+L0.lat * Math.PI / 180));
+      var kmMin = mo.mph * 1.609 / 60, set = null;
+      for (var i = 0; i < ARC.SETS.length && !set; i++) if (kmMin * ARC.SETS[i].m[0] * pxKm >= 30 * dpr) set = ARC.SETS[i];
+      if (!set) return;
+      var from = (mo.toward + 180) % 360, a0 = (from - 62) * Math.PI / 180, a1 = (from + 62) * Math.PI / 180, mid = (a0 + a1) / 2, SIG = set.sig * pxKm;
+      var tz = L0.tz, now = Date.now(), fmt = function(t, o2){ try { return new Date(t).toLocaleString('en-US', Object.assign({ timeZone: tz }, o2)); } catch(e){ return new Date(t).toLocaleString('en-US', o2); } };
+      var today = fmt(now, { year: 'numeric', month: 'numeric', day: 'numeric' });
+      g.save(); g.lineCap = 'round'; g.textBaseline = 'middle';
+      g.font = '800 ' + (10 * dpr) + 'px system-ui,sans-serif';
+      set.m.forEach(function(mn, k){
+        var rr = kmMin * mn * pxKm; if (rr < 10 * dpr || rr > W * 1.4) return;
+        g.setLineDash([14 * dpr, 9 * dpr]); g.lineWidth = 5.6 * dpr; g.strokeStyle = 'rgba(8,10,16,.85)';
+        g.beginPath(); g.arc(hx, hy, rr, a0 - Math.PI / 2, a1 - Math.PI / 2); g.stroke();
+        var SEG = 44, segLen = rr * (a1 - a0) / SEG;
+        for (var s2 = 0; s2 < SEG; s2++){
+          var t0 = a0 + (a1 - a0) * s2 / SEG, t1 = a0 + (a1 - a0) * (s2 + 1) / SEG, miss = rr * Math.sin(Math.min(Math.abs((t0 + t1) / 2 - mid), Math.PI / 2)), w = 1 / (1 + (miss / SIG) * (miss / SIG));
+          g.lineDashOffset = -segLen * s2; g.lineWidth = (1.5 + 2.4 * w) * dpr;
+          g.strokeStyle = 'rgba(255,255,255,' + (set.op[k] * (0.22 + 0.78 * w)).toFixed(3) + ')';
+          g.beginPath(); g.arc(hx, hy, rr, t0 - Math.PI / 2, t1 - Math.PI / 2); g.stroke(); }
+        g.lineDashOffset = 0; g.setLineDash([]);
+        /* the arrival: the frame on screen + the ring's travel time */
+        var arr = o.t + mn * 60000, rows = arr <= now ? ['NOW'] : [fmt(arr, { hour: 'numeric', minute: '2-digit' }).toUpperCase()];
+        if (arr > now && fmt(arr, { year: 'numeric', month: 'numeric', day: 'numeric' }) !== today) rows.push(fmt(arr, { weekday: 'short' }).toUpperCase());
+        var tw = Math.max.apply(null, rows.map(function(t){ return g.measureText(t).width; })), LH = 12 * dpr, rl = rr + 15 * dpr, ok = false, lx, ly, ux;
+        for (var dd = 0; dd <= 62 && !ok; dd += 6) for (var sg = 0; sg < (dd ? 2 : 1) && !ok; sg++){
+          var la = (from + (sg ? -dd : dd)) * Math.PI / 180 - Math.PI / 2; ux = Math.cos(la); var uy = Math.sin(la);
+          lx = hx + ux * rl; ly = hy + uy * rl;
+          var x0 = Math.abs(ux) < 0.35 ? lx - tw / 2 : (ux < 0 ? lx - tw : lx);
+          ok = x0 > 48 * dpr && x0 + tw < W - 8 * dpr && ly - LH * rows.length / 2 > 8 * dpr && ly + LH * rows.length / 2 < H - 26 * dpr; }
+        if (!ok) return;
+        g.textAlign = Math.abs(ux) < 0.35 ? 'center' : (ux < 0 ? 'right' : 'left');
+        rows.forEach(function(t, j){ var y = ly + (j - (rows.length - 1) / 2) * LH;
+          g.lineWidth = 3.4 * dpr; g.strokeStyle = 'rgba(8,10,16,.9)'; g.strokeText(t, lx, y); g.fillStyle = 'rgba(255,255,255,' + set.op[k] + ')'; g.fillText(t, lx, y); });
+      });
+      g.restore();
+    };
+    /* THE PLACE'S OWN RADAR (user 2026-10-18: "every location should use its local station"): the nearest site by distance put
+       DUMBO on KDIX (Fort Dix, 92 km) over KOKX (Upton, 96 km) -- the NWS assigns each point its radar (api.weather.gov/points
+       radarStation; NYC = KOKX). Asked once per place, kept on the device; the nearest site stands until it answers, and stays
+       outside the NWS's area. LOCATION.radar / radarName follow, so the rest of the page reads the same station. */
+    R.pickSid = function(){
+      var L0 = window.LOCATION || {}, la = +L0.lat, lo = +L0.lon; if (!isFinite(la) || !isFinite(lo)) return;
+      var key = 'bv_lc_radar2_' + la.toFixed(2) + ',' + lo.toFixed(2), use = function(q){ if (!q || !q.id) return; var sid = q.id.toLowerCase();
+        if (L0 !== window.LOCATION) return; L0.radar = q.id.toUpperCase(); if (q.nm) L0.radarName = q.nm;
+        if (sid !== R.sid){ R.sid = sid; R.capsAt = 0; if (VIEW === 'radar') R.rebuild(true); } };
+      try { var c0 = JSON.parse(localStorage.getItem(key) || 'null'); if (c0 && c0.id){ use(c0); return; } } catch(e){}
+      fetch('https://api.weather.gov/points/' + la.toFixed(4) + ',' + lo.toFixed(4)).then(function(r){ return r.ok ? r.json() : null; }).then(function(j){
+        var pr = (j && j.properties) || {}, near = pr.radarStation, wfo = pr.gridId || pr.cwa; if (!near && !wfo) return;
+        /* the points API's radarStation is ITSELF the nearest site (KDIX for DUMBO, KOKX for Central Park), so the local station
+           is the forecast OFFICE's own radar: K + the office (OKX -> KOKX) when that site exists and covers the place (within
+           230 km); offices without one of that name (PSR, LOX) keep the nearest */
+        var ofr = wfo ? fetch('https://api.weather.gov/radar/stations/K' + wfo).then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; }) : Promise.resolve(null);
+        var ofn = wfo ? fetch('https://api.weather.gov/offices/' + wfo).then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; }) : Promise.resolve(null);
+        return Promise.all([ofr, ofn]).then(function(A){
+          var st = A[0], c = st && st.geometry && st.geometry.coordinates, id = near;
+          if (c && isFinite(c[0])){ var kx = Math.cos(la * Math.PI / 180), dkm = Math.hypot((c[0] - lo) * kx, c[1] - la) * 111.2; if (dkm <= 230) id = 'K' + wfo; }
+          if (!id) return;
+          var city = A[1] && A[1].address && A[1].address.addressLocality, q = { id: id, nm: city ? 'NWS ' + city : null };
+          try { localStorage.setItem(key, JSON.stringify(q)); } catch(e){} use(q); }); }).catch(function(){}); };
     R.label = function(){ var o = R.ov[R.i]; if (!o) return;
       var tz = (window.LOCATION || {}).tz, w; try { w = new Date(o.t).toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }); } catch(e){ w = ''; }
       var nm = String((window.LOCATION || {}).radarName || '').toUpperCase();
@@ -105153,7 +105240,7 @@ function closeAlertModal(){
         if (b.getAttribute('data-g')){ GH.on = !GH.on; try { localStorage.setItem('bv_lc_1865', GH.on ? '1' : '0'); } catch(e2){} GH.sync(); R.label(); return; }
         if (b.getAttribute('data-w')){ OV.barbOn = !OV.barbOn; try { localStorage.setItem('bv_lc_barbs', OV.barbOn ? '1' : '0'); } catch(e2){} b.classList.toggle('on', OV.barbOn); OV.mxRead(); OV.draw(); return; }
         if (b.getAttribute('data-s')){ OV.satOn = !OV.satOn; try { localStorage.setItem('bv_lc_sat', OV.satOn ? '1' : '0'); } catch(e2){} b.classList.toggle('on', OV.satOn); OV.satSync(true); return; }
-        R.prod = b.getAttribute('data-p'); R.rebuild(true); }; }); };
+        R.prod = b.getAttribute('data-p'); R.rebuild(true); }; }); ARC.draw(); };
     R.rebuild = function(now){
       clearTimeout(R.deb);
       R.deb = setTimeout(function(){
@@ -105474,25 +105561,8 @@ function closeAlertModal(){
           if (f > .75){ g.beginPath(); g.arc(q[0], q[1], 1.1 * dpr, 0, 6.284); g.fillStyle = 'rgba(255,255,255,.92)'; g.fill(); } });
         g.restore(); g.globalAlpha = 1;
       }
-      /* 4. LEAD ARCS AND BUOYS (step 1): 1 and 2 hours of the storms' motion upwind of the place, the on-path sector
-         brighter; then the buoys in view */
+      /* 4. BUOYS. The lead arcs moved to their own canvas (ARC, below): THE CITY's arcs, redrawn with every radar frame */
       var TOP = RAD ? OV.topLines() : [];
-      if (RAD && TOP.length && OV.motion && isFinite(+L0.lat)){
-        var mo = OV.motion, up = (mo.toward + 180) % 360, kmh = mo.mph * 1.609;
-        g.save(); g.lineCap = 'round';
-        [[1, .62], [2, .38]].forEach(function(hh){
-          var r = kmh * hh[0], Q = [];
-          for (var b = -70; b <= 70; b += 4){ var ll = destLL(+L0.lat, +L0.lon, r, up + b); Q.push(P(ll[1], ll[0])); }
-          if (!Q.some(function(q){ return inV(q, 0); })) return;
-          var hq = P(+L0.lon, +L0.lat), mq = Q[Math.floor(Q.length / 2)];
-          if (Math.hypot(mq[0] - hq[0], mq[1] - hq[1]) < 45 * dpr) return;     /* a slow storm at this zoom: the arc would sit on the dot */
-          g.setLineDash([6 * dpr, 5 * dpr]); g.lineWidth = 3.4 * dpr; g.strokeStyle = 'rgba(8,10,16,.45)'; g.beginPath(); Q.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); g.stroke();
-          g.lineWidth = 1.4 * dpr; g.strokeStyle = 'rgba(232,240,250,' + hh[1] + ')'; g.stroke(); g.setLineDash([]);
-          var mid = Q[Math.floor(Q.length / 2)];
-          if (inV(mid, -10)) TL.push({ lines: [hh[0] + ' HR'], cand: [{ x: mid[0] + 6 * dpr, y: mid[1] }], col: 'rgba(232,240,250,.9)', rank: 74, fz: 8.6 });
-        });
-        g.restore();
-      }
       if (RAD) (OV.buoys || []).forEach(function(q){
         var p0 = P(q.lon, q.lat); if (!inV(p0, -6)) return; var x = p0[0], y = p0[1];
         g.beginPath(); g.arc(x, y, 3.4 * dpr, 0, 6.284); g.lineWidth = 3 * dpr; g.strokeStyle = 'rgba(8,10,16,.85)'; g.stroke(); g.lineWidth = 1.5 * dpr; g.strokeStyle = 'rgba(125,211,252,.95)'; g.stroke();
@@ -108884,7 +108954,7 @@ function closeAlertModal(){
         LAY.save(); LAY.apply(); LAY.pills(); }; });
     };
     var view = function(v){
-      VIEW = v; build(); if (!M) return; INFO.hide();
+      VIEW = v; build(); if (!M) return; INFO.hide(); ARC.draw();
       [].forEach.call(pane.querySelectorAll('#lc-tabs button'), function(b){ var dv = b.getAttribute('data-v'); b.classList.toggle('on', dv === v || (dv === 'map' && WAT.inMap(v))); });
       WAT.sub();
       LAY.apply();
@@ -109131,7 +109201,7 @@ function closeAlertModal(){
       W.classList.add('cw-extra'); pane.style.display = '';
       [].forEach.call(row2.querySelectorAll('.cira-tab'), function(b){ if (b !== btn){ b.style.color = 'rgba(255,255,255,.7)'; b.style.background = 'none'; b.style.border = '1px solid transparent'; b.style.boxShadow = 'none'; } });
       style2(); headOn(true);
-      R.sid = String((window.LOCATION || {}).radar || '').toLowerCase();
+      R.sid = String((window.LOCATION || {}).radar || '').toLowerCase(); R.pickSid();
       T.pick(); WAT.check();
       NYS.want();
       view(VIEW);
@@ -109148,7 +109218,7 @@ function closeAlertModal(){
       OL.want();                                   /* the outline follows the place (keyed: a no-op until it moves) */
       if (key !== lastKey){ lastKey = key;
         if (M){ if (NYS.want()) setTimeout(NYS.fit, 60); else M.setView([+L0.lat, +L0.lon], M.getZoom()); if (here) here.setLatLng([+L0.lat, +L0.lon]); }
-        R.sid = String(L0.radar || '').toLowerCase(); R.capsAt = 0; T.d = null;
+        R.sid = String(L0.radar || '').toLowerCase(); R.capsAt = 0; T.d = null; R.pickSid();
         WAT.check();
         if (window._currentCiraTab === 'local'){ if (ok){ T.pick().then(function(){ view(VIEW); }); } else window.switchCiraTab('goes'); } }
     };
