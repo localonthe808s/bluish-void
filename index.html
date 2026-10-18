@@ -46,6 +46,14 @@
 <link rel="preconnect" href="https://geocoding-api.open-meteo.com" crossorigin>
 <link rel="preconnect" href="https://api.open-meteo.com" crossorigin>
 <script>
+/* A Leaflet tile's box in container pixels, from its coordinates -- no getBoundingClientRect, so a move handler scanning
+   tiles never forces a layout (perf 2026-10-18) */
+window._bvTileRect = function(M, ly, t){
+  var c = t && t.coords; if (!c || !ly || !ly.getTileSize) return null;
+  var ts = ly.getTileSize(), s = M.getZoomScale(M.getZoom(), c.z), p = M.latLngToContainerPoint(M.unproject(L.point(c.x * ts.x, c.y * ts.y), c.z));
+  return { x: p.x, y: p.y, w: ts.x * s, h: ts.y * s }; };
+</script>
+<script>
 /* Shed backdrop-filter blur during active scroll (see .bv-scrolling CSS) —
    the single biggest scroll-FPS win on desktop. */
 (function(){
@@ -105013,6 +105021,11 @@ function closeAlertModal(){
     /* the pane */
     var pane = document.createElement('div'); pane.id = 'cw-pane-local'; pane.className = 'cw-xpane'; pane.style.display = 'none';
     body.parentNode.insertBefore(pane, body.nextSibling);
+    /* OFF SCREEN IS PAUSED (perf 2026-10-18: scrolled past, the radar loop, water sims and the bus feed -- ~31 MB an hour -- ran on):
+       every LOCAL loop asks paneOn(), the pane shown AND near the viewport; coming back restarts the frame loops (LCRES) */
+    var LCV = true, LCRES = [], paneOn = function(){ return pane.style.display !== 'none' && LCV; };
+    try { new IntersectionObserver(function(es){ var was = LCV; LCV = es[es.length - 1].isIntersecting;
+      if (LCV && !was) LCRES.forEach(function(f){ try { f(); } catch(e){} }); }, { rootMargin: '300px 0px' }).observe(pane); } catch(e){}
     var TB = 'flex:1 1 0;min-width:0;padding:7px 6px;border-radius:7px;border:1px solid transparent;background:rgba(255,255,255,.12);color:#fff;'
       + 'font:800 .66rem system-ui,sans-serif;letter-spacing:.1em;cursor:pointer;';
     pane.innerHTML = '<div id="lc-tabs" style="display:flex;gap:5px;padding:8px 8px 6px;">'
@@ -105205,9 +105218,10 @@ function closeAlertModal(){
         if (cb) cb();
       }).catch(function(){ if (cb) cb(); });
     };
-    R.url = function(t){
-      var b = M.getBounds(), sw = L.CRS.EPSG3857.project(b.getSouthWest()), ne = L.CRS.EPSG3857.project(b.getNorthEast()), z = M.getSize();
-      var k = Math.min(1, 1100 / Math.max(z.x, z.y));
+    R.url = function(t, b){
+      b = b || M.getBounds(); var sw = L.CRS.EPSG3857.project(b.getSouthWest()), ne = L.CRS.EPSG3857.project(b.getNorthEast()), z0 = M.getSize();
+      var fx = b.getEast() > b.getWest() ? (b.getEast() - b.getWest()) / Math.max(1e-9, M.getBounds().getEast() - M.getBounds().getWest()) : 1, z = { x: z0.x * fx, y: z0.y * fx };   /* a padded box keeps the view's pixel density */
+      var k = Math.min(1, 1650 / Math.max(z.x, z.y));
       return R.base() + '?service=WMS&version=1.1.1&request=GetMap&layers=' + R.layer() + '&styles=&format=image/png&transparent=true&srs=EPSG:3857'
         + '&bbox=' + [sw.x, sw.y, ne.x, ne.y].map(function(v){ return v.toFixed(0); }).join(',') + '&width=' + Math.round(z.x * k) + '&height=' + Math.round(z.y * k) + '&time=' + new Date(t).toISOString().replace('.000', '');
     };
@@ -105232,12 +105246,15 @@ function closeAlertModal(){
       if (!M) return;
       if (!ARC.cv){ var pn = M.getPane('lcArc') || M.createPane('lcArc'); pn.style.zIndex = 441; pn.style.pointerEvents = 'none';
         ARC.cv = document.createElement('canvas'); ARC.cv.style.position = 'absolute'; pn.appendChild(ARC.cv);
-        M.on('zoomstart', function(){ ARC.cv.style.visibility = 'hidden'; }); M.on('moveend zoomend resize', function(){ ARC.cv.style.visibility = ''; ARC.draw(); }); }
+        M.on('zoomstart', function(){ ARC.cv.style.visibility = 'hidden'; }); M.on('moveend resize', function(){ ARC.cv.style.visibility = ''; ARC.draw(); }); }
       var cv = ARC.cv, sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr);
       if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
+      var L0 = window.LOCATION || {}, mo = OV.motion, o = R.ov && R.ov[R.i];
+      /* the radar loop asks every 550 ms; an unchanged frame, view and motion keeps the last drawing (perf 2026-10-18) */
+      var ck = [o && o.t, VIEW, OV.on, mo && mo.mph, mo && mo.toward, L0.lat, L0.lon, W, H, M.getZoom(), M.getCenter().lat, M.getCenter().lng].join('|');
+      if (ck === ARC.key && Date.now() - ARC.at < 30000) return; ARC.key = ck; ARC.at = Date.now();
       L.DomUtil.setPosition(cv, M.containerPointToLayerPoint([0, 0]));
       var g = cv.getContext('2d'); g.clearRect(0, 0, W, H);
-      var L0 = window.LOCATION || {}, mo = OV.motion, o = R.ov && R.ov[R.i];
       if (VIEW !== 'radar' || !OV.on || !mo || !(mo.mph >= 4) || !isFinite(+L0.lat) || !o) return;
       var hp = M.latLngToContainerPoint([+L0.lat, +L0.lon]), hx = hp.x * dpr, hy = hp.y * dpr;
       var e1 = M.latLngToContainerPoint([+L0.lat, +L0.lon + 1]), pxKm = Math.abs(e1.x - hp.x) * dpr / (111.32 * Math.cos(+L0.lat * Math.PI / 180));
@@ -105251,7 +105268,9 @@ function closeAlertModal(){
       if (!pick.length) return;
       var set = { m: pick, op: pick.map(function(x, i){ return Math.max(.7, 1 - i * .05); }), sig: null };
       var from = (mo.toward + 180) % 360, a0 = (from - 62) * Math.PI / 180, a1 = (from + 62) * Math.PI / 180, mid = (a0 + a1) / 2;
-      var tz = L0.tz, now = Date.now(), fmt = function(t, o2){ try { return new Date(t).toLocaleString('en-US', Object.assign({ timeZone: tz }, o2)); } catch(e){ return new Date(t).toLocaleString('en-US', o2); } };
+      var tz = L0.tz, now = Date.now(), FC2 = ARC.fc || (ARC.fc = {}), fmt = function(t, o2){ var fk = tz + JSON.stringify(o2), f = FC2[fk];   /* one formatter per zone and pattern, kept */
+        if (!f){ try { f = new Intl.DateTimeFormat('en-US', Object.assign({ timeZone: tz }, o2)); } catch(e){ f = new Intl.DateTimeFormat('en-US', o2); } FC2[fk] = f; }
+        return f.format(new Date(t)); };
       var today = fmt(now, { year: 'numeric', month: 'numeric', day: 'numeric' });
       g.save(); g.lineCap = 'round'; g.textBaseline = 'middle'; var LBL = [];
       g.font = '800 ' + (10 * dpr) + 'px system-ui,sans-serif';
@@ -105316,15 +105335,18 @@ function closeAlertModal(){
       var nm = String((window.LOCATION || {}).radarName || '').toUpperCase();
       /* a forecast frame says so, in amber, with the motion it was moved along -- never a clock time it was not scanned at */
       var when = o.fc ? '<span style="color:#ffd27a;">+' + o.fc + ' MIN FORECAST' + (o.src ? ' (' + esc(o.src) + ' MOTION)' : '') + '</span>' : esc(w) + ' SCAN';
-      strip.innerHTML = (R.prod === 'cref' ? 'MRMS COMPOSITE MOSAIC (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)' : R.prod === 'etop' ? 'MRMS ECHO TOPS (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)'
-          : R.prod === 'bref' && !R.hi() ? 'MRMS RADAR MOSAIC (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)' : esc(R.sid.toUpperCase()) + (R.hi() ? ' SUPER-RES' : '') + (nm ? ' · ' + esc(nm) : '')) + ' · ' + when
-        + '<span style="float:right;">' + R.PRODS.map(function(q){ return '<button type="button" class="lc-pill' + (R.prod === q[0] ? ' on' : '') + '" data-p="' + q[0] + '">' + q[1] + '</button>'; }).join('')
+      var head = (R.prod === 'cref' ? 'MRMS COMPOSITE MOSAIC (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)' : R.prod === 'etop' ? 'MRMS ECHO TOPS (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)'
+          : R.prod === 'bref' && !R.hi() ? 'MRMS RADAR MOSAIC (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)' : esc(R.sid.toUpperCase()) + (R.hi() ? ' SUPER-RES' : '') + (nm ? ' · ' + esc(nm) : '')) + ' · ' + when;
+      /* ONLY THE TIME CHANGES FRAME TO FRAME (perf 2026-10-18): the pills and legend are rebuilt and re-bound only when they differ */
+      var lg = R.legend(), pills = '<span style="float:right;">' + R.PRODS.map(function(q){ return '<button type="button" class="lc-pill' + (R.prod === q[0] ? ' on' : '') + '" data-p="' + q[0] + '">' + q[1] + '</button>'; }).join('')
         + '<button type="button" class="lc-pill' + (OV.satOn ? ' on' : '') + '" data-s="1">SATELLITE</button>'
         + '<button type="button" class="lc-pill' + (OV.terrRad ? ' on' : '') + '" data-g2="1">GEOLOGY &amp; WEATHER</button>'
         + '<button type="button" class="lc-pill' + (OV.barbOn ? ' on' : '') + '" data-w="1" title="' + (M && M.getZoom() < 6 ? 'zoom in to see them' : 'airport wind reports') + '">WIND BARBS</button>'
         + (FLD.can() ? '<button type="button" class="lc-pill' + (FLD.on ? ' on' : '') + '" data-f="1">FLOODING</button>' : '')
         + (GH.inCity() ? '<button type="button" class="lc-pill' + (GH.on ? ' on' : '') + '" data-g="1">GHOST RIVERS</button>' : '') + '</span>'
-        + (R.legend() ? '<div style="clear:both;margin-top:3px;font-size:.92em;line-height:1.6;">' + R.legend() + '</div>' : '');
+        + (lg ? '<div style="clear:both;margin-top:3px;font-size:.92em;line-height:1.6;">' + lg + '</div>' : '');
+      if (R.sHd && R.sHd.parentNode === strip && R.sPills === pills){ if (R.sHead !== head){ R.sHd.innerHTML = head; R.sHead = head; } ARC.draw(); return; }
+      strip.innerHTML = '<span class="lc-rhd">' + head + '</span>' + pills; R.sHd = strip.firstChild; R.sHead = head; R.sPills = pills;
       [].forEach.call(strip.querySelectorAll('.lc-pill'), function(b){ b.onclick = function(e){ e.stopPropagation();
         if (b.getAttribute('data-f')){ FLD.on = !FLD.on; if (FLD.on && GH.inCity()){ GH.on = true; try { localStorage.setItem('bv_lc_1865', '1'); } catch(e3){} }
           try { localStorage.setItem('bv_lc_flood', FLD.on ? '1' : '0'); } catch(e2){} FLD.apply(); R.label(); return; }
@@ -105342,22 +105364,26 @@ function closeAlertModal(){
           var once = function(){ R.ccLoad(bb0).then(function(o){ if (gen !== R.ccGen || R.prod !== 'cc' || VIEW !== 'radar') return; R.ccErr = false;
               R.ov.forEach(function(q){ M.removeLayer(q.l); }); R.ov = [{ l: L.imageOverlay(o.url, bb0, { opacity: .85, interactive: false, zIndex: 3 }).addTo(M), t: o.t }]; R.i = 0; R.label(); })
             .catch(function(){ if (gen !== R.ccGen) return; R.ccErr = true; R.ov = []; strip.innerHTML = 'NO CC SCAN FROM ' + esc(R.sid.toUpperCase()) + ' RIGHT NOW'; R.ov = [{ l: L.layerGroup(), t: Date.now() }]; R.i = 0; R.label(); }); };
-          once(); R.timer = setInterval(function(){ if (!document.hidden && pane.style.display !== 'none') once(); }, 240000);
+          once(); R.timer = setInterval(function(){ if (!document.hidden && paneOn()) once(); }, 240000);
           return;
         }
+        if (now !== true && R.bb && R.ov.length && R.lastKey === R.key() && R.bhi === R.hi() && Math.abs(M.getZoom() - R.bz) < 1
+            && R.bb.contains(M.getBounds()) && Date.now() - R.capsAt <= 120000){ ARC.draw(); return; }
         var go = function(){
           R.clear();
           var ts = (R.times[R.key()] || []).slice(-10); if (!ts.length){ strip.textContent = 'NO RECENT SCANS FROM ' + R.sid.toUpperCase() + ' RIGHT NOW'; return; }
-          var bb = M.getBounds();
-          var hi = R.hi();
-          ts.forEach(function(t, k){ var u0 = R.url(t), o = L.imageOverlay(hi ? 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==' : u0, bb, { opacity: 0, interactive: false, crossOrigin: 'anonymous', zIndex: 3 }).addTo(M);
+          /* A BOX HALF AGAIN THE VIEW (perf 2026-10-18: all ten frames were asked again on every pan): a pan or a part-step zoom
+             inside it keeps the loop; leaving it, a whole step of zoom, or the super-res switch rebuilds */
+          var bb = M.getBounds().pad(0.25);
+          var hi = R.hi(); R.bz = M.getZoom(); R.bhi = hi;
+          ts.forEach(function(t, k){ var u0 = R.url(t, bb), o = L.imageOverlay(hi ? 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==' : u0, bb, { opacity: 0, interactive: false, crossOrigin: 'anonymous', zIndex: 3 }).addTo(M);
             R.ov.push({ l: o, t: t });
             if (hi) window._bvDespeckle(u0, function(u1){ if (R.ov.indexOf(R.ov.filter(function(q){ return q.l === o; })[0]) >= 0) o.setUrl(u1); }); });
           R.nObs = R.ov.length; R.bb = bb;
           R.i = R.ov.length - 1; R.ov[R.i].l.setOpacity(.82); R.label();
           if (R.prod === 'bref' || R.prod === 'cref') OV.motionFrom(R.ov.slice(), bb);
           var hold = 0;
-          R.timer = setInterval(function(){ if (document.hidden || pane.style.display === 'none') return;
+          R.timer = setInterval(function(){ if (document.hidden || !paneOn()) return;
             if (R.i === R.nObs - 1 && hold++ < 3) return; hold = 0;            /* rest on the newest scan (the forecast frames run after it) */
             R.ov[R.i].l.setOpacity(0); R.i = (R.i + 1) % R.ov.length; R.ov[R.i].l.setOpacity(R.ov[R.i].op || .82); R.label(); }, 550);
         };
@@ -105732,12 +105758,11 @@ function closeAlertModal(){
       }
       var vkey = M.getZoom() + '|' + M.getCenter().lat.toFixed(4) + '|' + M.getCenter().lng.toFixed(4) + '|' + W + 'x' + H;
       if (OV.labKey !== vkey){ OV.labKey = vkey; OV.lab = {}; }
-      var mapRect = mapEl.getBoundingClientRect();
       var tileCanvases = function(){
         var out = [], lays = (M._bvVectorLayers || []).concat([M._bvRiverLayer, M._bvCoastLayer]);
         lays.forEach(function(ly, li){ if (!ly || !ly._tiles) return; var water = li < (M._bvVectorLayers || []).length;
           Object.keys(ly._tiles).forEach(function(k){ var t = ly._tiles[k]; if (!t.current || !t.el || t.el.tagName !== 'CANVAS' || !t.el.width) return;
-            var r = t.el.getBoundingClientRect(); out.push({ el: t.el, water: water, x: r.left - mapRect.left, y: r.top - mapRect.top, w: r.width, h: r.height }); }); });
+            var r = window._bvTileRect(M, ly, t); if (r) out.push({ el: t.el, water: water, x: r.x, y: r.y, w: r.w, h: r.h }); }); });
         return out; };
       var TC = null;
       var busy = function(x, y, w, h){       /* x, y, w, h in overlay pixels; returns the share of sampled points on a feature */
@@ -106011,22 +106036,25 @@ function closeAlertModal(){
     OV.satSync = function(force){
       if (!M) return;
       var want = OV.satOn && OV.on && OV.mode === 'radar';
-      if (!want){ if (OV.satLay){ M.removeLayer(OV.satLay); OV.satLay = null; } OV.satKey = ''; return; }
-      var bb = M.getBounds(), c0 = bb.getCenter(), sz = M.getSize();
+      if (!want){ if (OV.satLay){ M.removeLayer(OV.satLay); OV.satLay = null; } OV.satKey = ''; OV.satBB = null; return; }
+      /* a box half again the view, kept while the view stays inside it at the same zoom (perf 2026-10-18: every move asked GOES again) */
+      if (!force && OV.satBB && OV.satZ === M.getZoom() && OV.satBB.contains(M.getBounds()) && Date.now() - OV.satAt < 10 * 6e4) return;
+      var bb = M.getBounds().pad(0.25), c0 = bb.getCenter(), sz = M.getSize();
       var key = M.getZoom() + '|' + c0.lat.toFixed(3) + '|' + c0.lng.toFixed(3);
-      if (!force && key === OV.satKey && Date.now() - OV.satAt < 10 * 6e4) return;
-      OV.satKey = key; OV.satAt = Date.now();
+      OV.satKey = key; OV.satAt = Date.now(); OV.satBB = bb; OV.satZ = M.getZoom();
       var west = c0.lng < -105, lay = (c0.lng < -150 && c0.lat < 30) ? 'hawaii_ch13' : (c0.lat > 50 && c0.lng < -129) ? 'alaska_ch13' : 'conus_ch13';
       var sw = L.CRS.EPSG3857.project(bb.getSouthWest()), ne = L.CRS.EPSG3857.project(bb.getNorthEast());
-      var W = Math.min(1100, sz.x), H = Math.round(W * sz.y / sz.x);
+      var W = Math.round(Math.min(1650, sz.x * 1.5)), H = Math.round(W * sz.y / sz.x);
       var im = new Image(); im.crossOrigin = 'anonymous';
       im.onload = function(){
         if (key !== OV.satKey || !OV.satOn) return;
         try {
           var c = document.createElement('canvas'); c.width = W; c.height = H;
           var g2 = c.getContext('2d', { willReadFrequently: true }); g2.drawImage(im, 0, 0, W, H); window._bvSatVeilPaint(g2, W, H);
-          var nl = L.imageOverlay(c.toDataURL('image/png'), bb, { interactive: false, zIndex: 2 }).addTo(M);
-          if (OV.satLay) M.removeLayer(OV.satLay); OV.satLay = nl;
+          /* encoded off the main thread (toDataURL blocked it), shown from an object URL; the last one is let go */
+          c.toBlob(function(bl){ if (!bl || key !== OV.satKey || !OV.satOn || !M) return;
+            var u = URL.createObjectURL(bl), nl = L.imageOverlay(u, bb, { interactive: false, zIndex: 2 }).addTo(M);
+            if (OV.satLay) M.removeLayer(OV.satLay); if (OV.satUrl) URL.revokeObjectURL(OV.satUrl); OV.satLay = nl; OV.satUrl = u; }, 'image/png');
         } catch(e){}
       };
       im.src = 'https://mesonet.agron.iastate.edu/cgi-bin/wms/' + (west || lay !== 'conus_ch13' ? 'goes_west' : 'goes_east') + '.cgi?service=WMS&version=1.1.1&request=GetMap&layers=' + lay
@@ -106039,7 +106067,7 @@ function closeAlertModal(){
         M.createPane('lcOv'); M.getPane('lcOv').style.zIndex = 440; M.getPane('lcOv').style.pointerEvents = 'none';
         OV.cv = document.createElement('canvas'); OV.cv.style.position = 'absolute'; M.getPane('lcOv').appendChild(OV.cv);
         M.on('zoomstart', function(){ if (OV.cv) OV.cv.style.visibility = 'hidden'; });
-        M.on('moveend zoomend resize', function(){ if (!OV.on) return; OV.cv.style.visibility = ''; OV.draw(); clearTimeout(OV.deb);
+        M.on('moveend resize', function(){ if (!OV.on) return; OV.cv.style.visibility = ''; OV.draw(); clearTimeout(OV.deb);
           OV.deb = setTimeout(function(){ OV.liveRead(); if (OV.mode !== 'radar') return; OV.read(); OV.buoyRead(); OV.satSync(); OV.fnRead(); OV.mxRead(); if (window.bvLightning) window.bvLightning.want('local', true, OV.box()); }, 500); });
       }
       OV.on = true; OV.cv.style.display = ''; OV.cv.style.visibility = '';
@@ -106049,7 +106077,7 @@ function closeAlertModal(){
       if (window.bvLightning) window.bvLightning.want('local', RADm, RADm ? OV.box() : null);
       OV.liveRead(); OV.draw();
       if (!OV.timer) OV.timer = setInterval(function(){
-        var vis = OV.on && pane.style.display !== 'none' && !document.hidden, rad = vis && OV.mode === 'radar';
+        var vis = OV.on && paneOn() && !document.hidden, rad = vis && OV.mode === 'radar';
         if (window.bvLightning) window.bvLightning.want('local', rad, rad ? OV.box() : null);
         if (!vis){ if (FC.open) FC.sync(); return; }          /* pane hidden: the front card's scenes stop with it */
         OV.liveRead();
@@ -106188,7 +106216,7 @@ function closeAlertModal(){
       if (!NG.cv){ var pn = M.getPane('lcNyGeo') || M.createPane('lcNyGeo'); pn.style.zIndex = 432; pn.style.pointerEvents = 'none';
         NG.cv = document.createElement('canvas'); NG.cv.style.position = 'absolute'; pn.appendChild(NG.cv);
         M.on('zoomstart', function(){ if (NG.cv) NG.cv.style.visibility = 'hidden'; });
-        M.on('moveend zoomend resize', function(){ if (NG.lit) NG.draw(); }); }
+        M.on('moveend resize', function(){ if (NG.lit) NG.draw(); }); }
       NG.cv.style.display = '';
       window._bvCwGeo.load(function(){ if (!NG.lit) return; NG.draw(); FQ.summary(); });
       NG.draw();
@@ -106651,7 +106679,7 @@ function closeAlertModal(){
       tideEl.style.display = ''; T.draw();                    /* the strip is RADAR's now */
       T.pick().then(function(st){ if (!tideOn()) return; if (!st){ T.off(); SEA.off(); return; }
         if (!T.d || Date.now() - T.d.at > 6 * 6e4) T.load(); else { T.draw(); T.map(); } });
-      if (!T.timer) T.timer = setInterval(function(){ if (tideOn() && pane.style.display !== 'none' && !document.hidden) T.load(); }, 6 * 6e4);
+      if (!T.timer) T.timer = setInterval(function(){ if (tideOn() && paneOn() && !document.hidden) T.load(); }, 6 * 6e4);
     };
     window.addEventListener('resize', function(){ if (tideOn() && pane.style.display !== 'none') T.chart(); });
 
@@ -106879,7 +106907,7 @@ function closeAlertModal(){
       var key = (window.LOCATION || {}).lat + ',' + (window.LOCATION || {}).lon;
       if (RV.zoomed !== key && !tideOn()){ RV.zoomed = key; RV.sel = null; var L1 = window.LOCATION || {}; M.setView([+L1.lat, +L1.lon], 9); }
       RV.fetch();
-      if (!RV.timer) RV.timer = setInterval(function(){ if (riverOn() && pane.style.display !== 'none' && !document.hidden){ RV.fetch(); if (RV.sel){ RV.sf[RV.sel.lid.toLowerCase()] = null; RV.choose(RV.sel.lid); } } }, 10 * 6e4);
+      if (!RV.timer) RV.timer = setInterval(function(){ if (riverOn() && paneOn() && !document.hidden){ RV.fetch(); if (RV.sel){ RV.sf[RV.sel.lid.toLowerCase()] = null; RV.choose(RV.sel.lid); } } }, 10 * 6e4);
     };
     RV.off = function(){ if (RV.timer){ clearInterval(RV.timer); RV.timer = null; } if (RV.lay && M){ M.removeLayer(RV.lay); RV.lay = null; } riverEl.style.display = 'none'; };
     window.addEventListener('resize', function(){ if (riverOn() && pane.style.display !== 'none') RV.chart(); });
@@ -107243,9 +107271,9 @@ function closeAlertModal(){
       if (!SEA.cv){ var pn = M.getPane('lcSea') || M.createPane('lcSea'); pn.style.zIndex = 446; pn.style.pointerEvents = 'none';
         SEA.cv = document.createElement('canvas'); SEA.cv.style.position = 'absolute'; pn.appendChild(SEA.cv);
         M.on('zoomstart', function(){ if (SEA.cv) SEA.cv.style.visibility = 'hidden'; });
-        M.on('moveend zoomend resize', function(){ if (!SEA.lit) return; SEA.draw(); clearTimeout(SEA.deb); SEA.deb = setTimeout(SEA.read, 500); }); }
+        M.on('moveend resize', function(){ if (!SEA.lit) return; SEA.draw(); clearTimeout(SEA.deb); SEA.deb = setTimeout(SEA.read, 500); }); }
       SEA.cv.style.display = ''; SEA.read(); SEA.draw(); SWL.on();
-      if (!SEA.timer) SEA.timer = setInterval(function(){ if (SEA.lit && pane.style.display !== 'none' && !document.hidden){ SEA.read(); SEA.draw(); } }, 60000); };
+      if (!SEA.timer) SEA.timer = setInterval(function(){ if (SEA.lit && paneOn() && !document.hidden){ SEA.read(); SEA.draw(); } }, 60000); };
     SEA.off = function(){ SEA.lit = false; if (SEA.cv) SEA.cv.style.display = 'none'; if (SEA.timer){ clearInterval(SEA.timer); SEA.timer = null; } SWL.off(); };
     /* ---------------------------------------------------------------- THE MOVING SEA ---- */
     /* THE BASIN's SURF SEA FOR ANY COAST (2026-10-17, user: "make sure the waves youre making are at the same high value weve
@@ -107486,7 +107514,7 @@ function closeAlertModal(){
             /* the field keeps moving while the next one is built: it sits in a map pane, so it stays put under a pan */
             var frame = function(now){
               if (!SEA.lit || SWL.draw !== dr){ if (SWL.draw === dr) SWL.raf = 0; return; }
-              if (!document.hidden && pane.style.display !== 'none' && cv.style.visibility !== 'hidden') SWL.draw(now);
+              if (!document.hidden && paneOn() && cv.style.visibility !== 'hidden') SWL.draw(now);
               SWL.raf = requestAnimationFrame(frame);
             };
             SWL.raf = requestAnimationFrame(frame);
@@ -107500,7 +107528,7 @@ function closeAlertModal(){
         M.on('zoomstart', function(){ if (SWL.cv) SWL.cv.style.visibility = 'hidden'; });
         M.on('moveend resize', function(){ if (!SEA.lit) return; clearTimeout(SWL.deb); SWL.deb = setTimeout(SWL.build, 450); });
         document.addEventListener('visibilitychange', function(){ if (!document.hidden && SEA.lit && SWL.draw && !SWL.raf) SWL.build(); });
-        if (!SWL.timer) SWL.timer = setInterval(function(){ if (SEA.lit && !document.hidden && pane.style.display !== 'none') SWL.build(); }, 10 * 60000); }
+        if (!SWL.timer) SWL.timer = setInterval(function(){ if (SEA.lit && !document.hidden && paneOn()) SWL.build(); }, 10 * 60000); }
       clearTimeout(SWL.deb); SWL.deb = setTimeout(SWL.build, 60);
     };
     SWL.off = function(){ SWL.gen++; clearTimeout(SWL.deb); swlHide(); SWL.info = null; if (SWL.cv) SWL.cv.style.display = 'none'; };
@@ -107566,7 +107594,7 @@ function closeAlertModal(){
     var cfHide = function(){ if (CF.cv) CF.cv.style.visibility = 'hidden'; if (CF.pc) CF.pc.style.visibility = 'hidden'; };
     var cfPlace = function(){ var v = CF.sv; if (!v || !CF.cv) return; var S = cfScale(), o = M.getPixelOrigin();
       L.DomUtil.setPosition(CF.cv, L.point((v.X0 + CF_PR) * S - o.x, (CF_PR - v.Y1) * S - o.y)); };
-    var cfStart = function(){ if (!CF.raf && CF.lit && CF.inView && pane.style.display !== 'none' && !document.hidden) CF.raf = requestAnimationFrame(cfFrame); };
+    var cfStart = function(){ if (!CF.raf && CF.lit && CF.inView && paneOn() && !document.hidden) CF.raf = requestAnimationFrame(cfFrame); };
     CF.rekey = function(){
       if (!CF.lit || !M) return;
       var X = cfX(); if (!X) return;
@@ -107633,7 +107661,7 @@ function closeAlertModal(){
     };
     var cfFrame = function(){
       CF.raf = 0;
-      if (!CF.lit || !CF.inView || pane.style.display === 'none' || document.hidden) return;
+      if (!CF.lit || !CF.inView || !paneOn() || document.hidden) return;
       CF.raf = requestAnimationFrame(cfFrame);
       var X = cfX(), v = CF.sv; if (!X || !v || !CF.V || !CF.V.mask || CF.zooming || v.z !== M.getZoom()) return;
       var t0 = performance.now(); CF.n++;
@@ -107677,9 +107705,9 @@ function closeAlertModal(){
         M.on('zoomstart', function(){ CF.zooming = true; cfHide(); });
         M.on('zoomend', function(){ CF.zooming = false; });
         M.on('moveend resize', function(){ if (!CF.lit) return; var was = CF.inView; CF.rekey(); cfPipes(); cfStart(); if (was !== CF.inView) SEA.onSum(); });
-        document.addEventListener('visibilitychange', function(){ if (!document.hidden && CF.lit){ cfPipes(); cfStart(); } }); }
+        document.addEventListener('visibilitychange', function(){ if (!document.hidden && CF.lit){ cfPipes(); cfStart(); } }); LCRES.push(function(){ if (CF.lit){ cfPipes(); cfStart(); } }); }
       CF.rekey(); cfPipes(); cfStart(); SEA.onSum();
-      if (!CF.timer) CF.timer = setInterval(function(){ if (!CF.lit || pane.style.display === 'none' || document.hidden) return; var X2 = cfX();
+      if (!CF.timer) CF.timer = setInterval(function(){ if (!CF.lit || !paneOn() || document.hidden) return; var X2 = cfX();
         if (X2 && ((CF.needBr && X2.bridges()) || (CF.needDeep && X2.deepReady()))){ CF.sv = null; CF.rekey(); }
         if (!CF.inView) CF.rekey();
         cfPipes(); SEA.onSum(); cfStart(); }, 15000);
@@ -107896,7 +107924,7 @@ function closeAlertModal(){
       var el = TR.boardEl();
       if (TR.lit !== true || TR.board || !nycHere() || !window._bvMta || !TR.show.rail){ if (!TR.board && el.getAttribute('data-home')){ el.style.display = 'none'; el.innerHTML = ''; el.removeAttribute('data-home'); } if (TR.hTimer && (TR.lit !== true || !nycHere())){ clearInterval(TR.hTimer); TR.hTimer = null; } return; }
       var M5 = window._bvMta, L1 = window.LOCATION || {}, la0 = +L1.lat, lo0 = +L1.lon;
-      if (!TR.hTimer) TR.hTimer = setInterval(function(){ if (TR.lit === true && !TR.board && !document.hidden && pane.style.display !== 'none') TR.home(); }, 30000);
+      if (!TR.hTimer) TR.hTimer = setInterval(function(){ if (TR.lit === true && !TR.board && !document.hidden && paneOn()) TR.home(); }, 30000);
       M5.stops(function(stops){
         if (!stops || TR.board || TR.lit !== true) return;
         var kx = Math.cos(la0 * Math.PI / 180) * 111320, byCx = {};
@@ -107998,7 +108026,7 @@ function closeAlertModal(){
       if (bi && (!bs || bi.d < bs.d) && (!bc || bi.d <= bc.d)){ TR.incTap(bi.h.d); return; }
       if (bs && (!bc || bs.d <= bc.d)){ TR.board = { st: bs.h.st }; TR.boardEl().innerHTML = '<div style="font:800 12px system-ui,sans-serif;">' + esc(String(bs.h.st.n).toUpperCase()) + '</div><div style="font:600 9px system-ui,sans-serif;opacity:.75;margin-top:4px;">LOADING ' + (bs.h.st.k === 'nyc' ? 'ARRIVALS' : 'TIMETABLE') + '\u2026</div>';
         TR.boardEl().style.display = ''; TR.boardRender(); TR.draw();
-        if (TR.bTimer) clearInterval(TR.bTimer); TR.bTimer = setInterval(function(){ if (TR.board && TR.lit === true && !document.hidden) TR.boardRender(); }, 30000); return; }
+        if (TR.bTimer) clearInterval(TR.bTimer); TR.bTimer = setInterval(function(){ if (TR.board && TR.lit === true && !document.hidden && paneOn()) TR.boardRender(); }, 30000); return; }
       var q = M.latLngToContainerPoint(e.latlng), best = null;
       TR.camHits.forEach(function(h){ var d = Math.hypot(h.x - q.x, h.y - q.y); if (d < 14 && (!best || d < best.d)) best = { d: d, h: h }; });
       if (!best){ TR.flowTap(e.latlng); return; }      /* nothing else there: the road itself (THE CITY's cwTrafFlowTap) */
@@ -108433,7 +108461,7 @@ function closeAlertModal(){
         TR.cv = document.createElement('canvas'); TR.cv.style.position = 'absolute'; pn.appendChild(TR.cv);
         M.on('zoomstart', function(){ if (TR.cv) TR.cv.style.visibility = 'hidden'; });
         M.on('click', TR.camTap);
-        M.on('moveend zoomend resize', function(){ if (TR.lit !== true) return; TR.draw(); clearTimeout(TR.deb); TR.deb = setTimeout(function(){ TR.read().then(TR.draw); TR.transit(); }, 600); }); }
+        M.on('moveend resize', function(){ if (TR.lit !== true) return; TR.draw(); clearTimeout(TR.deb); TR.deb = setTimeout(function(){ TR.read().then(TR.draw); TR.transit(); }, 600); }); }
       TR.cv.style.display = '';
       /* the live layer is rebuilt when the place changes, so its box follows the search */
       var lk = (function(){ var L0 = window.LOCATION || {}; return (+L0.lat).toFixed(2) + ',' + (+L0.lon).toFixed(2); })();
@@ -108443,8 +108471,8 @@ function closeAlertModal(){
       TR.meshOn(); TR.pills();
       strip.textContent = 'READING THE ROADS\u2026';
       TR.read().then(TR.draw); TR.transit(); TR.home();
-      if (!TR.vtimer) TR.vtimer = setInterval(function(){ if (TR.lit === true && pane.style.display !== 'none' && !document.hidden) TR.transit(); }, 30000);
-      if (!TR.timer) TR.timer = setInterval(function(){ if (TR.lit !== true || pane.style.display === 'none' || document.hidden) return;
+      if (!TR.vtimer) TR.vtimer = setInterval(function(){ if (TR.lit === true && paneOn() && !document.hidden) TR.transit(); }, 30000);
+      if (!TR.timer) TR.timer = setInterval(function(){ if (TR.lit !== true || !paneOn() || document.hidden) return;
         if (TR.lay && TR.lay.rerenderTiles) TR.lay.rerenderTiles(); TR.read().then(TR.draw); }, 5 * 6e4);
     };
     /* THE ROAD MESH (user 2026-10-17: "do the right one"): every road from motorways to tertiary, baked from our own basemap
@@ -108591,7 +108619,7 @@ function closeAlertModal(){
       Object.keys(LF.fl).forEach(function(k){ if (!want[k] && M.hasLayer(LF.fl[k])) M.removeLayer(LF.fl[k]); });
     };
     LF.loop = function(){ clearInterval(LF.timer); LF.timer = null; var fs = LF.frames(); if (LF.mode === 'now' || fs.length < 2 || !LF.play) return;
-      LF.timer = setInterval(function(){ if (!LF.lit || document.hidden || pane.style.display === 'none') return; LF.fi = (LF.fi + 1) % LF.frames().length; LF.layers(); LF.strip(); LF.draw(); }, 1400); };
+      LF.timer = setInterval(function(){ if (!LF.lit || document.hidden || !paneOn()) return; LF.fi = (LF.fi + 1) % LF.frames().length; LF.layers(); LF.strip(); LF.draw(); }, 1400); };
     LF.near = function(){ var m = LF.meta || {}, L0 = window.LOCATION || {}, la = +L0.lat, lo = +L0.lon;
       return (m.regions || []).filter(function(r){ return r.lat != null; }).map(function(r){ var dx = (r.lon - lo) * Math.cos(la * Math.PI / 180), dy = r.lat - la; return { r: r, d: Math.sqrt(dx * dx + dy * dy) * 111 }; })
         .sort(function(a, b){ return a.d - b.d; }).slice(0, 4).map(function(q){ return q.r; }); };
@@ -108726,7 +108754,7 @@ function closeAlertModal(){
     LF.on = function(){ if (!M) return; LF.lit = true;
       if (!LF.cv){ var pn = M.getPane('lcFol') || M.createPane('lcFol'); pn.style.zIndex = 440; pn.style.pointerEvents = 'none';
         LF.cv = document.createElement('canvas'); LF.cv.style.position = 'absolute'; pn.appendChild(LF.cv);
-        M.on('moveend zoomend resize', function(){ if (LF.lit) LF.draw(); }); }
+        M.on('moveend resize', function(){ if (LF.lit) LF.draw(); }); }
       /* the index is native to z9 (~220 m, the NDVI composite's own 250 m) and overzooms past it; only a street-level
          view is pulled back, to where the forest reads */
       if (M.getZoom() > 11) M.setZoom(10);
@@ -108801,7 +108829,7 @@ function closeAlertModal(){
       var LF2 = window._bvLiveFlood;
       if (!M || !tideOn() || !nycHere() || !LF2){ LV.off(); return; }
       LF2.load();
-      if (!LV.timer) LV.timer = setInterval(function(){ if (tideOn() && !document.hidden) LV.sync(); }, 60000);
+      if (!LV.timer) LV.timer = setInterval(function(){ if (tideOn() && !document.hidden && paneOn()) LV.sync(); }, 60000);
       if (!LF2.ready()){ setTimeout(function(){ if (tideOn()) LV.sync(); }, 1500); return; }
       var key = LF2.at() + '|' + LV.mode;
       var B = LF2.box, R2 = 6378137, ll = function(X, Y){ return [(2 * Math.atan(Math.exp(Y / R2)) - Math.PI / 2) * 180 / Math.PI, X / R2 * 180 / Math.PI]; };
@@ -109313,11 +109341,11 @@ function closeAlertModal(){
               filter: function(z, f){ var k = (f.props || {}).kind || (f.props || {}).pmap_kind; return f.geomType === 3 && !NOPE[k] && big(f); } }] };   /* polygons only: the water layer also carries river CENTERLINES, and a line filled as a shape closed into a sliver across Queens */
           if (t.bounds) cfg.bounds = L.latLngBounds(t.bounds);
           var l = protomapsL.leafletLayer(cfg); l.addTo(M);
-          l.on('load', function(){ clearTimeout(OL.mdeb); OL.mdeb = setTimeout(function(){ OL.draw(); if (CD.redraw) CD.redraw(); }, 120); });
+          l.on('load', function(){ clearTimeout(OL.mdeb); OL.mdeb = setTimeout(function(){ OL.draw(true); if (CD.redraw) CD.redraw(); }, 120); });
           return l; });
       } catch(e){ OL.mask = []; }
       M.on('zoomstart', function(){ if (OL.cv) OL.cv.style.visibility = 'hidden'; });
-      M.on('moveend zoomend resize', function(){ OL.draw(); }); };
+      M.on('moveend resize', function(){ OL.draw(); }); };
     /* CUT TO THE LAND, DRAWN AROUND WHAT IS LEFT (user 2026-10-17: "make sure you have accurate outlined the area and coastline
        properly, there can be islands circled and rivers outlined but doesnt cross bodies of water randomly or have crude lines
        on any locations, i want thse to compliment our high quality coasts and mountains, this should be true everywhere").
@@ -109335,9 +109363,16 @@ function closeAlertModal(){
       for (var i = 0; i < n; i++){ var a = 2 * Math.PI * i / n; g.drawImage(src, Math.round(Math.cos(a) * r * 4) / 4, Math.round(Math.sin(a) * r * 4) / 4); }
       if (r > 2.2) for (var i2 = 0; i2 < 8; i2++){ var a2 = 2 * Math.PI * (i2 + .5) / 8; g.drawImage(src, Math.cos(a2) * r * .55, Math.sin(a2) * r * .55); }
       return tmp; };
-    OL.draw = function(){
+    OL.draw = function(force){
       var cv = OL.cv; if (!cv || !M) return; var t0 = performance.now();
       var sz = M.getSize(), px = Math.round(sz.x * 0.15), py = Math.round(sz.y * 0.15), Wd = sz.x + 2 * px, Ht = sz.y + 2 * py, dpr = Math.min(window.devicePixelRatio || 1, 3);   /* a phone's full 3x: the line is drawn at the screen's own pixels */
+      /* A PAN INSIDE THE MARGIN KEEPS THE LAST DRAW (perf 2026-10-18: a full redraw was 220-350 ms a move in NYC): the canvas sits in
+         a map pane 15% past the view on every side, so it rides along with a drag. Redrawn only when the zoom, size, pixel origin or
+         outline changes, the view leaves the margin, or the water tiles land (force) */
+      var o0 = M.containerPointToLayerPoint([0, 0]), po = M.getPixelOrigin(), LS = OL.last;
+      if (!force && LS && LS.z === M.getZoom() && LS.w === sz.x && LS.h === sz.y && LS.p === OL.polys && LS.dpr === dpr && LS.pox === po.x && LS.poy === po.y
+          && Math.abs(o0.x - LS.ox) <= px && Math.abs(o0.y - LS.oy) <= py){ cv.style.visibility = ''; return; }
+      OL.last = { z: M.getZoom(), w: sz.x, h: sz.y, p: OL.polys, dpr: dpr, pox: po.x, poy: po.y, ox: o0.x, oy: o0.y };
       var W = Math.round(Wd * dpr), H = Math.round(Ht * dpr);
       if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = Wd + 'px'; cv.style.height = Ht + 'px'; }
       L.DomUtil.setPosition(cv, M.containerPointToLayerPoint([-px, -py]));
@@ -109353,11 +109388,10 @@ function closeAlertModal(){
       a.setTransform(dpr, 0, 0, dpr, 0, 0); a.fillStyle = '#fff'; a.strokeStyle = '#fff'; a.lineJoin = 'round'; a.lineWidth = 1.6;
       OL.polys.forEach(function(p){ a.beginPath(); p.forEach(function(r){ r.forEach(function(c, i){ var q = M.latLngToContainerPoint([c[1], c[0]]); if (i) a.lineTo(q.x + px, q.y + py); else a.moveTo(q.x + px, q.y + py); }); a.closePath(); }); a.fill('evenodd'); a.stroke(); });
       a.setTransform(1, 0, 0, 1, 0, 0); a.globalCompositeOperation = 'destination-out';
-      var mr = M.getContainer().getBoundingClientRect();
       (OL.mask || []).forEach(function(l){ if (!M.hasLayer(l) || !l._tiles) return; Object.keys(l._tiles).forEach(function(key){ var t = l._tiles[key], el = t && t.el; if (!el || !t.loaded || !el.width) return;
         if (t.coords && t.coords.z !== l._tileZoom) return;
-        var r = el.getBoundingClientRect(); if (r.width < 1) return;
-        try { a.drawImage(el, (r.left - mr.left + px) * dpr, (r.top - mr.top + py) * dpr, r.width * dpr, r.height * dpr); } catch(e){} }); });
+        var r = window._bvTileRect(M, l, t); if (!r || r.w < 1) return;
+        try { a.drawImage(el, (r.x + px) * dpr, (r.y + py) * dpr, r.w * dpr, r.h * dpr); } catch(e){} }); });
       a.globalCompositeOperation = 'source-over';
       /* WATER TOO THIN TO SEE IS NOT A SHORE: T is CLOSED by ~2.4 px (grown, then shrunk back -- the shrink is the grow of its
          inverse), so a creek, pond or reservoir under ~5 px wide at this zoom no longer cuts the line into dashes, while the Hudson, the
@@ -109374,12 +109408,14 @@ function closeAlertModal(){
         var hw = Math.max(2, W >> 1), hh = Math.max(2, H >> 1), HS = OL.HS && OL.HS.width === hw && OL.HS.height === hh ? OL.HS : (OL.HS = OL.can(hw, hh));
         var hg = HS.getContext('2d', { willReadFrequently: true }); hg.clearRect(0, 0, hw, hh); hg.drawImage(A, 0, 0, hw, hh);
         var id = hg.getImageData(0, 0, hw, hh), dd = id.data, n = hw * hh, lab = OL.lab && OL.lab.length === n ? OL.lab : (OL.lab = new Int32Array(n)), stk = OL.stk && OL.stk.length === n ? OL.stk : (OL.stk = new Int32Array(n));
-        lab.fill(0); var lim = (z >= 13 ? 144 : 400) * (dpr / 2) * (dpr / 2),   /* closer in, smaller pockets keep their shore */ fillAny = false, out = hg.createImageData(hw, hh), od = out.data, comp = 0;
+        lab.fill(0); var lim = (z >= 13 ? 144 : 400) * (dpr / 2) * (dpr / 2),   /* closer in, smaller pockets keep their shore */ fillAny = false, out = OL.out && OL.out.width === hw && OL.out.height === hh ? OL.out : (OL.out = hg.createImageData(hw, hh)), od = out.data, comp = 0,
+          mem = OL.memB && OL.memB.length === n ? OL.memB : (OL.memB = new Int32Array(n)), mn;   /* buffers kept between draws: no garbage per redraw */
+        od.fill(0);
         for (var p0 = 0; p0 < n; p0++){
           if (lab[p0] || dd[p0 * 4 + 3] > 127) continue;
           comp++; var sp = 0, cnt = 0, edge = false, first = p0; stk[sp++] = p0; lab[p0] = comp;
-          var mem = [];   /* every pixel: an enclosed pocket of any size is filled now */
-          while (sp){ var q = stk[--sp]; cnt++; mem.push(q); var qx = q % hw, qy = (q - qx) / hw;
+          mn = 0;   /* every pixel: an enclosed pocket of any size is filled now */
+          while (sp){ var q = stk[--sp]; cnt++; mem[mn++] = q; var qx = q % hw, qy = (q - qx) / hw;
             if (qx === 0 || qy === 0 || qx === hw - 1 || qy === hh - 1) edge = true;
             if (qx > 0 && !lab[q - 1] && dd[(q - 1) * 4 + 3] <= 127){ lab[q - 1] = comp; stk[sp++] = q - 1; }
             if (qx < hw - 1 && !lab[q + 1] && dd[(q + 1) * 4 + 3] <= 127){ lab[q + 1] = comp; stk[sp++] = q + 1; }
@@ -109388,7 +109424,7 @@ function closeAlertModal(){
           /* WATER INSIDE THE PLACE IS NOT A BORDER (user 2026-10-18: Central Park's Lake and ponds "shouldnt be outlined as borders for
              the location"): every pocket of non-territory the territory closes around -- a park lake, a reservoir, a pond of any
              size -- is filled; only water that reaches the open (past the canvas, where the harbor and the sea run) stays a cut */
-          if (!edge){ fillAny = true; for (var mi = 0; mi < mem.length; mi++){ var o4 = mem[mi] * 4; od[o4] = od[o4 + 1] = od[o4 + 2] = od[o4 + 3] = 255; } } }
+          if (!edge){ fillAny = true; for (var mi = 0; mi < mn; mi++){ var o4 = mem[mi] * 4; od[o4] = od[o4 + 1] = od[o4 + 2] = od[o4 + 3] = 255; } } }
         if (fillAny){ hg.clearRect(0, 0, hw, hh); hg.putImageData(out, 0, 0); var fg = OL.grow(HS, 1.5, OL.HS2 && OL.HS2.width === hw && OL.HS2.height === hh ? OL.HS2 : (OL.HS2 = OL.can(hw, hh)));
           a.drawImage(fg, 0, 0, W, H); }
       } catch(e){}
