@@ -2667,6 +2667,9 @@ window._bvContinentalNames = function(map, opts){
   #hazard-flood-overlays.hz-in-subview .fl-strip > div:first-child span { font-size: .46rem !important; font-weight: 900 !important; letter-spacing: .08em !important; }
   /* the FloodNet row carries a sentence: let it take a whole line */
   #hazard-flood-overlays.hz-in-subview #floodnet-panel.fl-strip { flex: 1 1 100% !important; }
+  /* NYC ONLY (perf 17, 2026-10-18): the strip rule's display:flex !important beat the panel's own display:none, so Phoenix's
+     FLOODS row read THE CITY · FLOODNET NYC and GHOST RIVERS; the FloodNet module marks it .fn-here inside the NYC box */
+  #hazard-flood-overlays.hz-in-subview #floodnet-panel.fl-strip:not(.fn-here) { display: none !important; }
   #hazard-flood-overlays.hz-in-subview .fl-strip > div[style*="display:flex"],
   #hazard-flood-overlays.hz-in-subview .fl-strip > div[style*="display: flex"] { display: flex !important; flex-wrap: wrap !important; gap: 3px !important; }
   #hazard-flood-overlays.hz-in-subview .fl-strip .flood-fcst-btn,
@@ -17769,6 +17772,12 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
   var LOCATION = LOCATIONS[0];
   window.LOCATION = LOCATION; // expose to non-IIFE consumers (detectLandscape, etc.)
   var TZ = LOCATION.tz;
+  /* THE SAVED PLACE AT PARSE TIME (perf 17, 2026-10-18: "no other location should be seeing or loading NYC specific data"):
+     LOCATION stays the default NYC until geoThenBoot, ~84k lines below, applies the saved place, so a widget gated at parse
+     time (THE CITY builds in its slot before first paint) read Phoenix as New York and pulled the 259 KB ink bake. Its place
+     test reads this until then: the same cache and the same 30-day rule geoThenBoot applies; cleared there. */
+  window._bvBootPlace = (function(){ try { var d = JSON.parse(localStorage.getItem('bv_lastLoc_v4') || 'null');
+    return d && d.lat != null && d.lon != null && d.savedAt && Date.now() - d.savedAt <= 30 * 24 * 60 * 60 * 1000 ? { lat: +d.lat, lon: +d.lon } : null; } catch(e){ return null; } })();
 
   // Derive US state code + nearest observation station from coordinates.
   // Re-runs on every location change via loadWeatherForLocation — the
@@ -54926,10 +54935,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
      view) are reused, shared DOM is not. */
   (function(){
     function inNYCBox(){
-      return typeof LOCATION !== 'undefined'
-        && LOCATION.lat > 40.40 && LOCATION.lat < 41.10
-        && LOCATION.lon > -74.35 && LOCATION.lon < -73.60;
+      var P = window._bvBootPlace || (typeof LOCATION !== 'undefined' ? LOCATION : null);   /* at parse time, the saved place (see _bvBootPlace) */
+      return !!P
+        && P.lat > 40.40 && P.lat < 41.10
+        && P.lon > -74.35 && P.lon < -73.60;
     }
+    window._bvInNYC = inNYCBox;   /* THE CITY's place test, for the NYC-only feeds outside this IIFE (perf 17) */
     var cw = { built:false, running:false, idx:0, timer:null, cardsTimer:null, wprod:'bref',
                prod:'bref', front:true, radarOn:false, floods:false, trains:true, wide:null, rock:false,
                fl1865:true, flProne:true };   /* FLOODING's two context layers, each with its own button in the bar */
@@ -73513,7 +73524,6 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         });
       };
       readActive();
-      setInterval(readActive, 300000);
       step();
       cwCardsSync();
       cwWarm();
@@ -73561,11 +73571,10 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         var ld = document.getElementById('cw-loading');
         if (ld && !ld._done){ ld._done = 1; ld.style.opacity = '0'; setTimeout(function(){ ld.style.display = 'none'; }, 450); }
       }, 12000);
-      cw.timer = setInterval(step, 1200);
       cwLiveClock();
       /* cwWarmTiles(2) rides this guarded tick, not a one-shot timer — a
          one-shot that fires while the tab is hidden burns its only chance */
-      cw.cardsTimer = setInterval(function(){
+      var cards = function(){
         if (document.hidden){ cwLtgClose(); return; }
         cwCardsSync(); cwDrawSensors(); cwWarm(); cwLiveClock(); cwWarmTiles(2); cwUmbrella();
         try { cwNycTrees(); } catch (e){}   /* the address may have changed */
@@ -73586,14 +73595,25 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         else if (cw.radarOn) cwAlertRead();   // the city radar draws them too now
         var wd = cw.wide ? cwWideDef() : null;
         if (cw.radarOn || (wd && wd.lightning)) cwLtgOpen(); else cwLtgClose();
-      }, 3000);
+      };
+      /* THE THREE TICKS, ARMED AND DISARMED TOGETHER (perf 17, 2026-10-18): the 1.2 s frame loop, the 3 s cards tick and the
+         5 min radar read. A hidden tab disarms them and keeps the composed map (no recompose on return); stop() disarms too.
+         The radar read was a fresh setInterval on every start(), so each scroll back in stacked another, all ticking off screen. */
+      cw.arm = function(){ if (cw.timer) return; cw.timer = setInterval(step, 1200); cw.cardsTimer = setInterval(cards, 3000); cw.readTimer = setInterval(readActive, 300000); };
+      cw.resume = function(){ if (!cw.running || cw.timer) return; cw.arm(); readActive(); cards(); };
+      cw.arm();
       if (cw.floods) cwFloodNet(function(){ cwDrawSensors(); cwLiveBars(); cwFlEvents(function(){ cwFlWet(); cwLiveBars(); }); });
       if (cw.traffic) cwTrafFN();
     }
-    function stop(){
-      cw.running = false;
+    function disarm(){
       if (cw.timer){ clearInterval(cw.timer); cw.timer = null; }
       if (cw.cardsTimer){ clearInterval(cw.cardsTimer); cw.cardsTimer = null; }
+      if (cw.readTimer){ clearInterval(cw.readTimer); cw.readTimer = null; }
+      try { cwLtgClose(); } catch(e){}   /* the cards tick that closes the strike socket is gone with it */
+    }
+    function stop(){
+      cw.running = false;
+      disarm();
     }
     /* the on-screen watcher that starts and stops the map. It used to be attached
        once, inside the 3 s boot tick, so a page that booted OUTSIDE the box and was
@@ -73606,12 +73626,17 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       if (!w) return;
       cw.watched = true;
       try{
+        /* OPEN, NEAR THE VIEWPORT AND THE TAB SHOWN (perf 17, 2026-10-18): the map, the 1.2 s loop, the 3 s cards tick (and the
+           eight subway feeds it pulls through cwDrawSensors) run only then. A hidden tab kept both ticks firing, each bailing on
+           document.hidden; now it disarms them (the map stays composed), and coming back re-arms them if the widget is still on screen. */
+        cw.vis = false;
+        var want = function(){ if (!inNYCBox()) return;
+          if (!cw.vis){ if (cw.running) stop(); return; }
+          if (document.hidden){ if (cw.running) disarm(); return; }
+          if (!cw.running) start(); else if (cw.resume) cw.resume(); };
         if ('IntersectionObserver' in window){
-          new IntersectionObserver(function(en){
-            if (!inNYCBox()) return;
-            if (en[0].isIntersecting){ if (!cw.running) start(); }
-            else stop();
-          }, { threshold: 0.05 }).observe(w);
+          new IntersectionObserver(function(en){ cw.vis = en[en.length - 1].isIntersecting; want(); }, { threshold: 0.05, rootMargin: '200px 0px' }).observe(w);
+          document.addEventListener('visibilitychange', want);
         } else if (inNYCBox()) start();
       }catch(e){}
     }
@@ -81979,7 +82004,7 @@ function initNowMicroTabs(){
   function fnPaintPanel(){
     var panel = document.getElementById('floodnet-panel');
     if (!panel) return;
-    panel.style.display = '';
+    panel.style.display = ''; panel.classList.toggle('fn-here', fnInNYC());
     var st = document.getElementById('floodnet-status');
     var de = document.getElementById('floodnet-detail');
     var live = fnRows.filter(function(r){ return !r.stale; });
@@ -82188,7 +82213,7 @@ function initNowMicroTabs(){
             });
         }).catch(function(){
           var st = document.getElementById('floodnet-status');
-          if (st){ st.textContent = 'SENSORS UNAVAILABLE'; document.getElementById('floodnet-panel').style.display = ''; }
+          if (st){ st.textContent = 'SENSORS UNAVAILABLE'; var pn1 = document.getElementById('floodnet-panel'); pn1.style.display = ''; pn1.classList.toggle('fn-here', fnInNYC()); }
         });
     };
     load(typeof done === 'function' ? done : undefined);
@@ -82200,7 +82225,7 @@ function initNowMicroTabs(){
       fnRows = [];
       if (window._floodNetLayer) window._floodNetLayer.clearLayers();
       var pn0 = document.getElementById('floodnet-panel');
-      if (pn0) pn0.style.display = 'none';
+      if (pn0){ pn0.style.display = 'none'; pn0.classList.remove('fn-here'); }
       return true;
     };
     window._floodNetLoad = load;   // THE CITY widget's FLOODS layer drives this too
@@ -86117,7 +86142,7 @@ function initNowMicroTabs(){
           + SI('next 3 h', nxt3.toFixed(2) + '"', nxt3 >= 1.5 ? '#ef4444' : nxt3 >= 0.75 ? '#f97316' : null)
           + SI('last 24 h', last24.toFixed(2) + '"', last24 >= 2 ? '#ef4444' : last24 >= 1 ? '#f97316' : null)
           + SI('peak rate next 24 h', peakNext.toFixed(2) + ' in/hr', peakNext >= 1.75 ? '#ef4444' : peakNext >= 0.5 ? '#f97316' : null)
-          + '<span style="font-size:.42rem;color:rgba(30,30,50,.45);">NYC drains ~1.75 in/hr</span>', nc ? ncCol : '#0284c7');
+          + (window._bvInNYC && window._bvInNYC() ? '<span style="font-size:.42rem;color:rgba(30,30,50,.45);">NYC drains ~1.75 in/hr</span>' : ''), nc ? ncCol : '#0284c7');   /* the city's sewer design rate: NYC only (perf 17) */
 
         // NEXT HIGH TIDE — rendered as a full-width strip under the grid (user)
         var tideStrip = '';
@@ -101858,6 +101883,7 @@ function initNowMicroTabs(){
       } catch(e){}
     };
 
+    window._bvBootPlace = null;   /* LOCATION is the place now (see its parse-time read by LOCATION) */
     runTieredBoot();
   })();
 
@@ -107546,15 +107572,20 @@ function closeAlertModal(){
        is open, the city is in view and the page is visible. */
     /* NYC ONLY (user 2026-10-17: "only show that stuff when a user is in NYC"): the place itself inside the five boroughs'
        box, not merely a view that reaches it */
-    var NYB = null;
-    fetch('/city_boroughs.json').then(function(r){ return r.json(); }).then(function(j){ NYB = j.b || []; NG.hi = j.hi || null; if (NG.lit) NG.draw(); FP.sync(); if (CF.rekey) CF.rekey(); }).catch(function(){ NYB = []; });
+    /* ...AND THE OUTLINES THEMSELVES ONLY THERE (perf 17, 2026-10-18): they were fetched at boot for every place (29 KB to Phoenix);
+       now when the place is in the box, at boot or on the first test after a move into it, and the view is re-laid when they land */
+    var NYB = null, NYBreq = false, nybBox = function(){ var L1 = window.LOCATION || {}, la = +L1.lat, lo = +L1.lon; return la > 40.48 && la < 40.95 && lo > -74.30 && lo < -73.65; };
+    var nybLoad = function(){ if (NYBreq || !nybBox()) return; NYBreq = true;
+      fetch('/city_boroughs.json').then(function(r){ return r.json(); }).then(function(j){ NYB = j.b || []; NG.hi = j.hi || null; if (NG.lit) NG.draw(); FP.sync(); if (CF.rekey) CF.rekey();
+        try { if (M && window._currentCiraTab === 'local' && nycHere()) view(VIEW); } catch(e){} }).catch(function(){ NYB = []; }); };
+    nybLoad();
     /* LA BY THE PLACE (2026-10-17, the parity audit: LA had no place gate at all, only map-view boxes): THE BASIN's own
        rule (inLABox), the urban basin and its valleys, Malibu to Pomona, San Pedro to Santa Clarita */
     var laHere = function(){ var L1 = window.LOCATION || {}, la = +L1.lat, lo = +L1.lon; return la > 33.60 && la < 34.50 && lo > -119.00 && lo < -117.60; };
     /* a city's own layers load only when the PLACE is that city -- not when a view from Newark or Pasadena overlaps its box */
     var cityHere = function(k){ return k === 'nyc' ? nycHere() : k === 'la' ? laHere() : false; };
     var nycHere = function(){ var L1 = window.LOCATION || {}, la = +L1.lat, lo = +L1.lon;
-      if (!(la > 40.48 && la < 40.95 && lo > -74.30 && lo < -73.65) || !NYB) return false;          /* the box first, then the five boroughs (Newark is in the box) */
+      if (!nybBox()) return false; if (!NYB){ nybLoad(); return false; }          /* the box first, then the five boroughs (Newark is in the box) */
       var inside = function(la2, lo2){ return NYB.some(function(bo){ return (bo.r || []).some(function(r){ var c = false;   /* bo.r: rings of [lon,lat] */
         for (var i = 0, j = r.length - 1; i < r.length; j = i++) if (((r[i][1] > la2) !== (r[j][1] > la2)) && (lo2 < (r[j][0] - r[i][0]) * (la2 - r[i][1]) / (r[j][1] - r[i][1]) + r[i][0])) c = !c;
         return c; }); }); };
@@ -107700,7 +107731,7 @@ function closeAlertModal(){
         + (sp ? '<div><span class="lr-dot" style="background:#9eff38;margin-left:0;"></span>' + esc(sp.toUpperCase()) + ' <span style="opacity:.78;font-weight:700;">· LIME IS THE OVERFLOW, CARRIED BY THE TIDE · ESTIMATED FROM RAIN ON EACH SEWERSHED AGAINST THE TENTH OF AN INCH THAT CAN TRIGGER AN OVERFLOW; NO LIVE FEED OF WHICH PIPE FIRED EXISTS</span></div>' : '');
     };
     CF.on = function(){
-      if (!M) return; CF.lit = true; var X = cfX(); if (X) X.ensure();
+      if (!M) return; CF.lit = true; var X = cfX(); if (X && nycHere()) X.ensure();   /* NYC only: its harbor bakes (city_currents, city_cso, city_bridges, city_dem 2.5 MB) went to Philadelphia; rekey ensures them on a move in */
       if (!CF.wired){ CF.wired = true;
         M.on('zoomstart', function(){ CF.zooming = true; cfHide(); });
         M.on('zoomend', function(){ CF.zooming = false; });
