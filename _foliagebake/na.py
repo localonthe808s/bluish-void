@@ -59,7 +59,7 @@ CLASSES = {'Less than 5%': 0, '5-24%': 1, '25-49%': 2, '50-74%': 3, '75-94%': 4,
 # z9 (user 2026-10-18: "finer foliage"). The pixel is 306 m at the equator, 216 m at 45 N, 105 m at 70 N: the NDVI
 # composite's own 250 m (MODIS 250 m red/NIR bands), so z9 is the ceiling -- z10 would only resample it. The forest mask
 # is coarser where it comes from IGBP (500 m); the FIA golds are 250 m. Was z8 (~430 m at 45 N) on 2026-10-17, z7 before.
-# Four times the blocks of z8 (308 in the box, ~140 with forest), so the cache is its own (na_base9 on R2).
+# Four times the blocks of z8 (308 in the box, 102 with forest), so the cache is its own (na_base9 on R2).
 Z = 9; BLK = 2048; R = 6378137.0; WORLD = 2 * math.pi * R
 LON0, LON1, LAT0, LAT1 = -170.0, -52.0, 24.0, 70.0
 AUG_DAYS = (8, 16, 24, 31)
