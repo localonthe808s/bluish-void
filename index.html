@@ -996,7 +996,7 @@ window._bvSeaNames = function(map){
     var pane = map.getPane('bvSea') || map.createPane('bvSea'); pane.style.zIndex = 430; pane.style.pointerEvents = 'none';
     var cv = document.createElement('canvas'); cv.style.position = 'absolute'; pane.appendChild(cv); map._bvSeaCv = cv;
     var draw = function(){
-      cv.style.display = map._bvSeaOff ? 'none' : ''; if (map._bvSeaOff) return;          /* a view that should not carry them (LOCAL: only MAP and TIDES) */
+      cv.style.display = map._bvSeaOff ? 'none' : ''; if (map._bvSeaOff){ if (cv.width){ cv.width = 0; cv.height = 0; } return; }   /* a view that should not carry them (LOCAL: only MAP and TIDES); off, it holds no pixels -- re-sized below when back on (perf 2026-10-18) */
       var sz = map.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr), z = map.getZoom();
       if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
       L.DomUtil.setPosition(cv, map.containerPointToLayerPoint([0, 0])); cv.style.visibility = '';
@@ -1077,6 +1077,43 @@ window._bvBuoys = function(w, s, e, n){
       return Object.keys(last).map(function(k){ return last[k]; });
     }).catch(function(){ return []; });
 };
+/* ONE FETCH AND ONE DECODE PER TILE (perf 2026-10-18). Every protomaps layer builds its own ZxySource + TileCache, so LOCAL's
+   base map, its labels copy and the outline's water mask (three tiers each) each fetched and decoded the SAME .mvt -- 3-4
+   requests per tile per pan, ~420 ms of decode per pan, and ~3 MB of decoded geometry per tile held once PER LAYER (58
+   cached tiles = 180 MB of heap). Decoded tiles are read-only (paint and label rules only read props/geom) and keyed by
+   data tile z/x/y at one tile size, so one cache per (url, tileSize) serves every layer. Each view gets a thin per-view
+   face over it that keeps the library's zoom cancelling per CONSUMER: a view moving to a new zoom drops its own pending
+   tiles, and a shared fetch is aborted only once nobody is waiting on it (the desert source at z7 and the main tiles at
+   z10 must not abort each other, as one shared ZxySource would). The controller is taken off zxy.zoomaborts right after
+   get() -- the library pushes it synchronously (5.1.0, vendored). Any failure leaves the layer's own cache in place. */
+window._bvTileShare = function(url, ts){
+  var P = protomapsL, S = window._bvTileShares = window._bvTileShares || {}, k = url + '|' + ts, sh = S[k];
+  if (!sh){
+    var zxy = new P.ZxySource(url, false), live = new Map();
+    var src = { get: function(e, t){ var p = zxy.get(e, t), za = zxy.zoomaborts.pop(), key = P.toIndex(e), ent = { ac: za && za.controller, n: 0 };
+      live.set(key, ent); var off = function(){ if (live.get(key) === ent) live.delete(key); };
+      return p.then(function(d){ off(); return d; }, function(er){ off(); throw er; }); } };
+    sh = S[k] = { tc: new P.TileCache(src, ts), live: live };
+  }
+  var face = Object.create(sh.tc), pend = new Map(), z0 = null;
+  face.get = function(e){
+    if (z0 !== e.z){ z0 = e.z; pend.forEach(function(z, key){ if (z === e.z) return; pend.delete(key); var ent = sh.live.get(key); if (ent && --ent.n <= 0 && ent.ac) ent.ac.abort(); }); }
+    var key = P.toIndex(e), pr = sh.tc.get(e), ent = sh.live.get(key);
+    if (ent && !pend.has(key)){ ent.n++; pend.set(key, e.z); }
+    var done = function(){ pend.delete(key); };
+    pr.then(done, done);
+    return pr;
+  };
+  return face;
+};
+/* point every view of a protomaps layer (leafletLayer, or a sourcesToViews map) at the shared caches; srcs = the cfg it was built from */
+window._bvShareViews = function(views, cfg){
+  try { if (!views || !protomapsL.ZxySource || !protomapsL.toIndex) return;
+    views.forEach(function(v, name){ var s = cfg.sources ? cfg.sources[name] : cfg, u = s && s.url;
+      if (typeof u !== 'string' || /\.pmtiles(\?|$)/.test(u) || !v.tileCache) return;
+      v.tileCache = window._bvTileShare(u, v.tileCache.tileSize); });
+  } catch(e){}
+};
 /* LAND-ONLY RASTER OVERLAYS (user 2026-10-16: "are you able to improve macrostrats placement or trim? whats going on here" /
    "can you improve what the tides visual looks like"). Macrostrat's geology tiles are generalized map units whose edges
    ignore the shore -- they spill over rivers and harbors and leave dark gaps where a unit stops short of the water -- and
@@ -1089,7 +1126,7 @@ window._bvBuoys = function(w, s, e, n){
 window._bvLandOnly = function(url, opts){
   opts = opts || {};
   var P = protomapsL, view = null;
-  try { view = P.sourcesToViews({ url: window.BV_BASEMAP_URL, maxDataZoom: 14 }).get(''); } catch(e){}
+  try { var vs = P.sourcesToViews({ url: window.BV_BASEMAP_URL, maxDataZoom: 14 }); window._bvShareViews(vs, { url: window.BV_BASEMAP_URL }); view = vs.get(''); } catch(e){}
   var water = [{ dataLayer: 'water', symbolizer: new P.PolygonSymbolizer({ fill: '#000' }), filter: function(z, f){ return f.geomType === 3; } }];
   var Lay = L.GridLayer.extend({
     createTile: function(c, done){
@@ -1222,6 +1259,7 @@ window._bvVectorBase = function(map, opts){
       (cfg.paintRules || []).concat(cfg.labelRules || []).forEach(function(r){ if (r.dataLayer !== 'roads' || r._bvRoadGate) return; var f0 = r.filter;
         r.filter = function(z, f){ if (map._bvNoRoads) return false; return f0 ? f0(z, f) : true; }; r._bvRoadGate = true; });
       var layer = protomapsL.leafletLayer(cfg);
+      window._bvShareViews(layer.views, cfg);   /* one fetch + decode per tile across base, labels and mask (see _bvTileShare) */
       layer.addTo(map);
       added.push(layer);
       (map._bvAllBase = map._bvAllBase || []).push(layer);
@@ -105133,6 +105171,11 @@ function closeAlertModal(){
     /* NEW YORK OPENS AS THE CITY DID (user 2026-10-17: "for new york, the map should start at the same view level the CITY
        had with traffic on and kalshi as a dot again"): framed to THE CITY's own box (Bronx top to Breezy Point, Newark Bay to
        the Queens line) on TRAFFIC, the castle a dot on it. Once per place: a view picked after that is kept. */
+    /* A HIDDEN CANVAS HOLDS NO PIXELS (perf 2026-10-18: LOCAL took +359 MB of canvas backing store when opened -- every view's
+       layer kept its full-view, full-dpr canvas after its view was left, so five views stacked ~16-52 MB each). A canvas whose layer
+       is not drawn is shrunk to 0 x 0; every draw below already re-sizes on width / height !== the view's, so it comes back on
+       its next draw at the same resolution as before */
+    var cvFree = function(c){ if (c && (c.width || c.height)){ c.width = 0; c.height = 0; } };
     var NYS = { done: '' };
     NYS.inBox = function(){ var L1 = window.LOCATION || {}, la = +L1.lat, lo = +L1.lon; return la > 40.48 && la < 40.95 && lo > -74.30 && lo < -73.65; };
     /* before the first view of a place: pick TRAFFIC; the frame waits until the map has its size (fit) */
@@ -105274,8 +105317,9 @@ function closeAlertModal(){
         ARC.cv = document.createElement('canvas'); ARC.cv.style.position = 'absolute'; pn.appendChild(ARC.cv);
         M.on('zoomstart', function(){ ARC.cv.style.visibility = 'hidden'; }); M.on('moveend resize', function(){ ARC.cv.style.visibility = ''; ARC.draw(); }); }
       var cv = ARC.cv, sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr);
-      if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
       var L0 = window.LOCATION || {}, mo = OV.motion, o = R.ov && R.ov[R.i];
+      if (VIEW !== 'radar' || !OV.on || !mo || !(mo.mph >= 4) || !isFinite(+L0.lat) || !o){ cvFree(cv); ARC.key = ''; return; }   /* no arcs: no pixels (perf 2026-10-18) */
+      if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
       /* the radar loop asks every 550 ms; an unchanged frame, view and motion keeps the last drawing (perf 2026-10-18) */
       var ck = [o && o.t, VIEW, OV.on, mo && mo.mph, mo && mo.toward, L0.lat, L0.lon, W, H, M.getZoom(), M.getCenter().lat, M.getCenter().lng].join('|');
       if (ck === ARC.key && Date.now() - ARC.at < 30000) return; ARC.key = ck; ARC.at = Date.now();
@@ -105997,6 +106041,7 @@ function closeAlertModal(){
       var w = F.el.naturalWidth, h = F.el.naturalHeight, c = OV.ncCv || (OV.ncCv = document.createElement('canvas')); c.width = w; c.height = h;
       var g2 = c.getContext('2d', { willReadFrequently: true }), d;
       try { g2.clearRect(0, 0, w, h); g2.drawImage(F.el, 0, 0); d = g2.getImageData(0, 0, w, h).data; } catch(e){ return; }
+      cvFree(c);   /* the pixels are read; the scratch is re-sized on the next call anyway (perf 2026-10-18) */
       var R2 = 6378137, at = function(p){ var X = p[1] * Math.PI / 180 * R2, Y = R2 * Math.log(Math.tan(Math.PI / 4 + p[0] * Math.PI / 360));
         var x = Math.round((X - F.box.X0) / (F.box.X1 - F.box.X0) * w), y = Math.round((F.box.Y1 - Y) / (F.box.Y1 - F.box.Y0) * h);
         if (x < 0 || y < 0 || x >= w || y >= h) return -1; return d[(y * w + x) * 4 + 3] > 60 ? 1 : 0; };
@@ -106112,7 +106157,7 @@ function closeAlertModal(){
       }, 2500);
     };
     OV.stop = function(){
-      OV.on = false; if (OV.cv) OV.cv.style.display = 'none'; OV.satSync();
+      OV.on = false; if (OV.cv) OV.cv.style.display = 'none'; cvFree(OV.cv); cvFree(OV.oc); OV.satSync();   /* OV.draw re-sizes both (perf 2026-10-18) */
       if (OV.timer){ clearInterval(OV.timer); OV.timer = null; }
       if (window.bvLightning) window.bvLightning.want('local', false);
     };
@@ -106237,7 +106282,7 @@ function closeAlertModal(){
     NG.want = function(){ return VIEW === 'rock' && nycHere() && !!window._bvCwGeo; };
     NG.sync = function(){
       if (!M) return;
-      if (!NG.want()){ NG.lit = false; NG.hits = []; if (NG.cv) NG.cv.style.display = 'none'; return; }
+      if (!NG.want()){ NG.lit = false; NG.hits = []; if (NG.cv){ NG.cv.style.display = 'none'; cvFree(NG.cv); } return; }   /* ~36 MB at dpr 2, freed off GEOLOGY (perf 2026-10-18) */
       NG.lit = true;
       if (!NG.cv){ var pn = M.getPane('lcNyGeo') || M.createPane('lcNyGeo'); pn.style.zIndex = 432; pn.style.pointerEvents = 'none';
         NG.cv = document.createElement('canvas'); NG.cv.style.position = 'absolute'; pn.appendChild(NG.cv);
@@ -106954,7 +106999,7 @@ function closeAlertModal(){
       Promise.all(['/ghost-marsh.json?v=2', '/ghost-rivers.json?v=2', '/ghost_streams.json'].map(function(u){ return fetch(u).then(function(r){ return r.json(); }).catch(function(){ return null; }); }))
         .then(function(R3){
           var pn = M.getPane('lcGhost') || M.createPane('lcGhost'); pn.style.zIndex = 420;
-          var rd = L.canvas({ padding: .4, pane: 'lcGhost', tolerance: 6 }), g = L.layerGroup();
+          var rd = GH.rd = L.canvas({ padding: .4, pane: 'lcGhost', tolerance: 6 }), g = L.layerGroup();
           var dash = function(){ var k = Math.max(.8, Math.min(1.35, Math.pow(M.getZoom() / 13, 1.4))); return (4.6 * k).toFixed(1) + ',' + (3 * k + 1.2).toFixed(1); };
           var tip = function(p, pond){ var ft = p.len_m ? Math.round(p.len_m * 3.281).toLocaleString() : null;
             return '<div style="font:800 10px system-ui,sans-serif;letter-spacing:.05em;color:#fff;">' + esc(String(p.name || 'UNNAMED WATERCOURSE').toUpperCase()) + '</div>'
@@ -106974,6 +107019,7 @@ function closeAlertModal(){
               paintRules: window._bvPaintPlus(protomapsL.paintRules(F0), F0).filter(function(r){ return r.dataLayer === 'roads'; }),
               labelRules: [],   /* lines only: its street names covered the whole city and ignored LABELS (user 2026-10-18: "there should not be street names") */
               bounds: L.latLngBounds([[GH_BOX[1], GH_BOX[0]], [GH_BOX[3], GH_BOX[2]]]) });
+            window._bvShareViews(GH.roads.views, { url: window.BV_BASEMAP_URL });
           } catch(e){ GH.roads = null; }
           var streams = [];
           [[R3[1], false], [R3[2], true]].forEach(function(pr){ if (!pr[0]) return;
@@ -106997,6 +107043,12 @@ function closeAlertModal(){
       var gp = M.getPane('lcGhost'), gr = M.getPane('lcGhostRoads'); if (gp) gp.style.zIndex = VIEW === 'radar' ? 396 : 420; if (gr) gr.style.zIndex = VIEW === 'radar' ? 397 : 421;
       if (want && !GH.lay){ GH.build(); return; }
       if (GH.lay){ if (want && !M.hasLayer(GH.lay)) GH.lay.addTo(M); else if (!want && M.hasLayer(GH.lay)) M.removeLayer(GH.lay); }
+      /* THE RENDERER LEAVES WITH THE STREAMS (perf 2026-10-18): Leaflet keeps a canvas renderer on the map after its last path
+         is removed and re-sizes it (1.8 x the view, retina 2x: ~52 MB) on every moveend, so GHOST RIVERS cost its canvas on
+         TRAFFIC, GEOLOGY, FOLIAGE and after a move away from NYC. Removed with the group; a path re-added puts it back
+         (Path.beforeAdd adds its renderer) with a fresh canvas. Leaflet 1.9.4's _destroyContainer cancels the pending frame but keeps
+         its id, and _requestRedraw only asks when that id is empty -- left set, the streams came back undrawn; cleared here */
+      if (GH.rd && !want && M.hasLayer(GH.rd) && !(GH.lay && M.hasLayer(GH.lay))){ M.removeLayer(GH.rd); GH.rd._redrawRequest = null; }
       if (GH.roads){ if (want && !M.hasLayer(GH.roads) && !M._bvNoRoads) GH.roads.addTo(M); else if ((!want || M._bvNoRoads) && M.hasLayer(GH.roads)) M.removeLayer(GH.roads); }
       var host = document.getElementById('lc-gh-pill');
       if (false){   /* GHOST RIVERS now sits in MAP's layer row (LAY.pills, user 2026-10-17: "bring ghost river over to the others") */
@@ -107300,7 +107352,7 @@ function closeAlertModal(){
         M.on('moveend resize', function(){ if (!SEA.lit) return; SEA.draw(); clearTimeout(SEA.deb); SEA.deb = setTimeout(SEA.read, 500); }); }
       SEA.cv.style.display = ''; SEA.read(); SEA.draw(); SWL.on();
       if (!SEA.timer) SEA.timer = setInterval(function(){ if (SEA.lit && paneOn() && !document.hidden){ SEA.read(); SEA.draw(); } }, 60000); };
-    SEA.off = function(){ SEA.lit = false; if (SEA.cv) SEA.cv.style.display = 'none'; if (SEA.timer){ clearInterval(SEA.timer); SEA.timer = null; } SWL.off(); };
+    SEA.off = function(){ SEA.lit = false; if (SEA.cv) SEA.cv.style.display = 'none'; cvFree(SEA.cv); if (SEA.timer){ clearInterval(SEA.timer); SEA.timer = null; } SWL.off(); };
     /* ---------------------------------------------------------------- THE MOVING SEA ---- */
     /* THE BASIN's SURF SEA FOR ANY COAST (2026-10-17, user: "make sure the waves youre making are at the same high value weve
        already built for LA and NYC"). Not a new look: the map lab's own solver (_maplab/swell_core.js, its swellTravelTime /
@@ -107557,7 +107609,7 @@ function closeAlertModal(){
         if (!SWL.timer) SWL.timer = setInterval(function(){ if (SEA.lit && !document.hidden && paneOn()) SWL.build(); }, 10 * 60000); }
       clearTimeout(SWL.deb); SWL.deb = setTimeout(SWL.build, 60);
     };
-    SWL.off = function(){ SWL.gen++; clearTimeout(SWL.deb); swlHide(); SWL.info = null; if (SWL.cv) SWL.cv.style.display = 'none'; };
+    SWL.off = function(){ SWL.gen++; clearTimeout(SWL.deb); swlHide(); SWL.info = null; if (SWL.cv) SWL.cv.style.display = 'none'; cvFree(SWL.cv); };   /* SWL.build sets its size anew */
     /* ---------------------------------------------------------------- THE CITY's WATER ---- */
     /* THE HARBOR'S CURRENT AND THE SEWAGE DYE, AT THE CITY's QUALITY (user 2026-10-17: "i want the green flow the most, have we
        sacrificed any of that quality by switching to this map?"). Inside THE CITY's box, on TIDES, the national map runs THE
@@ -107744,6 +107796,7 @@ function closeAlertModal(){
         cfPipes(); SEA.onSum(); cfStart(); }, 15000);
     };
     CF.off = function(){ CF.lit = false; CF.gen++; clearTimeout(CF.rt); if (CF.raf){ cancelAnimationFrame(CF.raf); CF.raf = 0; } cfHide();
+      cvFree(CF.cv); cvFree(CF.pc); cvFree(CF.hcv);   /* cwWatDraw and cfPipes re-size them on the next frame (perf 2026-10-18) */
       if (CF.timer){ clearInterval(CF.timer); CF.timer = null; } };
     /* TIDES turns it on and off with the sea; its reading leads the strip's sea line */
     var cfSeaOn = SEA.on, cfSeaOff = SEA.off, cfSeaLine = SEA.line;
@@ -107811,9 +107864,9 @@ function closeAlertModal(){
        heading, its route named beside it once the view is close; refreshed every 30 s while TRAFFIC is open. Decoded by
        hand like THE CITY's MTA reader (no protobuf library): FeedEntity 4 = VehiclePosition -> trip 1 (route_id 5),
        position 2 (lat 1, lon 2, bearing 3 as fixed32 floats), vehicle 8 (label 2). */
-    TR.feeds = null; TR.veh = {}; TR.vehAt = {};
+    TR.feeds = null; TR.veh = {}; TR.vehAt = {}; TR.vehBox = {}; TR.vehSeq = {};
     TR.NYX = [{ id: 'mta-mnr', n: 'Metro-North Railroad', u: 'https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/mnr%2Fgtfs-mnr', c: 1, b: [-74.3, 40.7, -72.9, 41.9], k: 'rail' },
-      { id: 'mta-bus', n: 'MTA Bus', u: 'https://gtfsrt.prod.obanyc.com/vehiclePositions', c: 0, b: [-74.26, 40.49, -73.69, 40.92], k: 'bus', nyc: 1, z: 12 }];
+      { id: 'mta-bus', n: 'MTA Bus', u: 'https://gtfsrt.prod.obanyc.com/vehiclePositions', c: 0, b: [-74.26, 40.49, -73.69, 40.92], k: 'bus', nyc: 1, z: 12, vb: 1 }];
     TR.kind = function(f){ return f.k || (/lirr|metro-north|railroad|rail road|marc|metra|caltrain|commuter/i.test(f.n + ' ' + f.u) ? 'rail' : 'bus'); };
     var pbVar = function(b, i){ var v = 0, k = 1; for (;;){ var x = b[i++]; v += (x & 127) * k; if (!(x & 128)) return [v, i]; k *= 128; } };
     var pbWalk = function(b, dv, s0, e0, cb){
@@ -107846,11 +107899,24 @@ function closeAlertModal(){
          MTA's bus positions (Bus Time GTFS-rt, keyless, no CORS: through the proxy) when the place is NYC and the map is close */
       var extra = TR.NYX.filter(function(f){ return !f.nyc || (nycHere() && M.getZoom() >= (f.z || 0)); });
       TR.inView = TR.feeds.concat(extra).filter(function(f){ return f.u.indexOf('nyct%2Fgtfs') < 0 && f.b[0] <= e && f.b[2] >= w && f.b[1] <= n && f.b[3] >= s2; }).slice(0, 8);
+      /* ONLY THE BUSES IN VIEW (perf item 16, 2026-10-18): the MTA bus feed (vb) is ~252 KB / ~70 KB brotli for all ~1,960 buses
+         every 30 s, yet only the box on screen is drawn. Asked with &vbox= (the view padded a quarter each side), the proxy cuts it
+         at the edge and answers JSON {box, v:[[route, lat, lon, bearing, time]]} -- float32 values sent shortest and Math.fround'ed
+         back, so each mark is the double the decoder below makes. A pan out of the cut box refetches at once (not the 30 s wait);
+         a late answer for an older box is dropped. A proxy without the mode ignores vbox and answers the raw feed: read as before
+         (full city, box null). An error from the mode falls back to the plain raw url. */
+      var vbIn = function(B){ return !B || (B[0] <= w && B[1] <= s2 && B[2] >= e && B[3] >= n); };
       TR.inView.forEach(function(f){
-        if (now - (TR.vehAt[f.id] || 0) < 28000) return; TR.vehAt[f.id] = now;
-        var u = f.c ? f.u : 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent(f.u) + '&ttl=15';
-        fetch(u).then(function(r){ return r.ok ? r.arrayBuffer() : null; }).then(function(ab){ if (!ab) return;
-          try { TR.veh[f.id] = gtfsVehicles(ab); } catch(e2){ TR.veh[f.id] = []; } TR.draw(); }).catch(function(){});
+        if (now - (TR.vehAt[f.id] || 0) < 28000 && (!f.vb || vbIn(TR.vehBox[f.id]))) return; TR.vehAt[f.id] = now;
+        var raw = f.c ? f.u : 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent(f.u) + '&ttl=15', u = raw, sq = TR.vehSeq[f.id] = (TR.vehSeq[f.id] || 0) + 1;
+        if (f.vb && !f.c){ var pw = (e - w) / 4, ph = (n - s2) / 4;
+          u = raw + '&vbox=' + [w - pw, s2 - ph, e + pw, n + ph].map(function(x){ return x.toFixed(3); }).join(','); }
+        var take = function(r){ if (!r.ok) return null; return u !== raw && /json/.test(r.headers.get('Content-Type') || '') ? r.json().then(function(j){ return { j: j }; }) : r.arrayBuffer().then(function(ab){ return { ab: ab }; }); };
+        var fr = function(x){ return x === null ? null : Math.fround(x); };
+        fetch(u).then(take).catch(function(){ return null; }).then(function(R){ return R || u === raw ? R : fetch(raw).then(take); }).then(function(R){ if (!R || sq !== TR.vehSeq[f.id]) return;
+          if (R.j){ TR.veh[f.id] = (R.j.v || []).map(function(a){ return { r: a[0], la: fr(a[1]), lo: fr(a[2]), br: fr(a[3]), t: a[4] }; }); TR.vehBox[f.id] = R.j.box || null; }
+          else { try { TR.veh[f.id] = gtfsVehicles(R.ab); } catch(e2){ TR.veh[f.id] = []; } TR.vehBox[f.id] = null; }
+          TR.draw(); }).catch(function(){});
       });
     };
     /* CITY CAMERAS (step 3, NYC and LA only): THE CITY's NYC DOT cameras (baked /nyc_cams.json; images straight off
@@ -108531,7 +108597,7 @@ function closeAlertModal(){
         if (TR.lit === true) TR.mesh.addTo(M);
       }).catch(function(){ TR.meshReq = 0; });
     };
-    TR.off = function(){ if (TR.lit !== true) return; TR.lit = false; TR.boardClose(); var tp = document.getElementById('lc-traf-pills'); if (tp) tp.style.display = 'none'; if (TR.lay && M && M.hasLayer(TR.lay)) M.removeLayer(TR.lay); if (TR.mesh && M && M.hasLayer(TR.mesh)) M.removeLayer(TR.mesh); if (TR.cv) TR.cv.style.display = 'none';
+    TR.off = function(){ if (TR.lit !== true) return; TR.lit = false; TR.boardClose(); var tp = document.getElementById('lc-traf-pills'); if (tp) tp.style.display = 'none'; if (TR.lay && M && M.hasLayer(TR.lay)) M.removeLayer(TR.lay); if (TR.mesh && M && M.hasLayer(TR.mesh)) M.removeLayer(TR.mesh); if (TR.cv) TR.cv.style.display = 'none'; cvFree(TR.cv);
       if (TR.timer){ clearInterval(TR.timer); TR.timer = null; } if (TR.vtimer){ clearInterval(TR.vtimer); TR.vtimer = null; } };
     /* ---------------------------------------------------------------- ICE AGE -- */
     /* THE ICE SHEET ON GEOLOGY (user 2026-10-17: "can geology have glacial info like NYC did"). THE CITY draws where the ice
@@ -108558,9 +108624,9 @@ function closeAlertModal(){
     ICE.on = function(){ if (!M) return; ICE.lit = true;
       /* in NYC THE CITY's surveyed moraine (NG) draws the ice edge; NADI-1's coarse line ran straight across Jersey and Manhattan beside it */
       var here = !nycHere();
-      var build = function(){ if (!ICE.lit || ICE.lay) { if (ICE.lay && ICE.lit && here && !M.hasLayer(ICE.lay)) ICE.lay.addTo(M); if (ICE.lay && !here && M.hasLayer(ICE.lay)) M.removeLayer(ICE.lay); return; }
+      var build = function(){ if (!ICE.lit || ICE.lay) { if (ICE.lay && ICE.lit && here && !M.hasLayer(ICE.lay)) ICE.lay.addTo(M); if (ICE.lay && !here && M.hasLayer(ICE.lay)) M.removeLayer(ICE.lay); if (!here) ICE.drop(); return; }
         var pn = M.getPane('lcIce') || M.createPane('lcIce'); pn.style.zIndex = 425; pn.style.pointerEvents = 'none';
-        var rd = L.canvas({ pane: 'lcIce', padding: .3 }), g = L.layerGroup();
+        var rd = ICE.rd = L.canvas({ pane: 'lcIce', padding: .3 }), g = L.layerGroup();
         var area = function(st){ var a = 0; st.p.forEach(function(poly){ var r = poly[0]; for (var i = 1; i < r.length; i++) a += (r[i - 1][0] * r[i][1] - r[i][0] * r[i - 1][1]); }); return Math.abs(a); };
         var big = ICE.d.s.filter(function(st){ return st.ka >= 18; }).sort(function(a, b){ return area(b) - area(a); })[0];
         var lines = function(st){ var out = []; st.p.forEach(function(poly){ poly.forEach(function(r){ out.push(r.map(function(q){ return [q[1], q[0]]; })); }); }); return out; };
@@ -108573,7 +108639,10 @@ function closeAlertModal(){
         ICE.lay = g; if (here) g.addTo(M); };
       if (ICE.d) build(); else if (!ICE.p) ICE.p = fetch('https://cdn.bluishvoid.com/geo/ice_na_v1.json').then(function(r){ return r.json(); }).then(function(j){ ICE.d = j; build(); }).catch(function(){ ICE.p = null; });
     };
-    ICE.off = function(){ ICE.lit = false; if (ICE.lay && M && M.hasLayer(ICE.lay)) M.removeLayer(ICE.lay); };
+    /* ITS RENDERER GOES WITH IT (perf 2026-10-18): as GHOST RIVERS' -- Leaflet leaves an emptied canvas renderer on the map, re-sized
+       to 1.6 x the view (~41 MB on a 2x desktop) on every move, on every view after GEOLOGY. Path.beforeAdd brings it back */
+    ICE.drop = function(){ if (ICE.rd && M && M.hasLayer(ICE.rd)){ M.removeLayer(ICE.rd); ICE.rd._redrawRequest = null; } };   /* the stale frame id, as GH.sync clears it */
+    ICE.off = function(){ ICE.lit = false; if (ICE.lay && M && M.hasLayer(ICE.lay)) M.removeLayer(ICE.lay); ICE.drop(); };
     /* ---------------------------------------------------------------- FOLIAGE -- */
     /* FALL FOLIAGE FOR NORTH AMERICA (user 2026-10-17: "can you do what weve done for northeast foliage for north america?" /
        "dont show roads on foliage"). The Northeast tab's method as a tile pyramid (_foliagebake/na.py, daily Sep-Nov, cdn
@@ -108693,7 +108762,7 @@ function closeAlertModal(){
     };
     LF.draw = function(){
       if (!LF.cv || !M) return; var cv = LF.cv;
-      if (!LF.lit){ cv.style.display = 'none'; return; } cv.style.display = '';
+      if (!LF.lit){ cv.style.display = 'none'; cvFree(cv); return; } cv.style.display = '';
       var sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr), z = M.getZoom();
       if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
       L.DomUtil.setPosition(cv, M.containerPointToLayerPoint([0, 0]));
@@ -108823,7 +108892,7 @@ function closeAlertModal(){
     };
     LF.off = function(){ LF.lit = false; clearInterval(LF.timer); LF.timer = null; LF.info = '';
       if (M){ [LF.lay, LF.forest].concat(Object.keys(LF.fl).map(function(k){ return LF.fl[k]; })).forEach(function(l){ if (l && M.hasLayer(l)) M.removeLayer(l); }); }
-      if (LF.cv) LF.cv.style.display = 'none'; LF.park(); };
+      if (LF.cv){ LF.cv.style.display = 'none'; cvFree(LF.cv); } LF.park(); };
     /* ------------------------------------------------------- LIVE TIDAL FLOOD -- */
     /* WATER ON THE LAND, NYC ONLY (user 2026-10-17: "do live tidal flooding"): THE CITY's live fill (window._bvLiveFlood) on
        TIDES -- the land the harbor is over NOW, or at the NEXT CREST the NWS forecasts -- cyan, deeper is stronger; the 11
@@ -109371,7 +109440,7 @@ function closeAlertModal(){
             paintRules: [{ dataLayer: 'water', symbolizer: new protomapsL.PolygonSymbolizer({ fill: '#000', opacity: 1 }),
               filter: function(z, f){ var k = (f.props || {}).kind || (f.props || {}).pmap_kind; return f.geomType === 3 && !NOPE[k] && big(f); } }] };   /* polygons only: the water layer also carries river CENTERLINES, and a line filled as a shape closed into a sliver across Queens */
           if (t.bounds) cfg.bounds = L.latLngBounds(t.bounds);
-          var l = protomapsL.leafletLayer(cfg); l.addTo(M);
+          var l = protomapsL.leafletLayer(cfg); window._bvShareViews(l.views, cfg); l.addTo(M);
           l.on('load', function(){ clearTimeout(OL.mdeb); OL.mdeb = setTimeout(function(){ OL.draw(true); if (CD.redraw) CD.redraw(); }, 120); });
           return l; });
       } catch(e){ OL.mask = []; }
@@ -109466,7 +109535,11 @@ function closeAlertModal(){
       OL.grow(A, 2 * k + w, B); tint(B, 'rgba(6,10,18,.5)');                                   /* the outer casing */
       OL.grow(A, k + w, D); cut(D); tint(D, 'rgba(234,88,12,.96)');                             /* the line, in the pane's own orange (user 2026-10-17: "make the location only theme orange") */
       OL.grow(A, k, B); cut(B); tint(B, 'rgba(6,10,18,.5)');                                    /* the inner casing */
-      cut(A); OL.ms = Math.round(performance.now() - t0); };   /* the harness reads OL.ms */
+      cut(A); OL.ms = Math.round(performance.now() - t0);   /* the harness reads OL.ms */
+      /* THE SCRATCH GOES WHEN THE LINE IS DONE (perf 2026-10-18): A-D and the half-size pair are four full-view, full-dpr canvases
+         (~120 MB on a 2x desktop) that only a redraw uses, and the pocket fill's typed arrays. Kept while redraws come close together (a zoom, the water tiles landing),
+         dropped 4 s after the last one; the next draw makes them again. The line itself (OL.cv) keeps its full dpr */
+      clearTimeout(OL.relT); OL.relT = setTimeout(function(){ ['A', 'B', 'C', 'D', 'HS', 'HS2'].forEach(function(k){ cvFree(OL[k]); OL[k] = null; }); OL.lab = OL.stk = OL.memB = OL.out = null; }, 4000); };
     /* ---------------------------------------------------------------- the tab ---- */
     var wt = document.getElementById('radar-widget-title'), savedT = null;
     var headOn = function(on){

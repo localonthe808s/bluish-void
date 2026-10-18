@@ -264,6 +264,86 @@ function json(obj, status, cors) {
   });
 }
 
+// ── VEHICLE BOX (2026-10-18, perf item 16): &vbox=w,s,e,n on a GTFS-realtime vehicle-positions url. The LOCAL map's
+//    TRAFFIC view drew only the buses in its box, yet pulled the MTA's whole city every 30 s (~252 KB protobuf, ~70 KB
+//    brotli, ~1,960 buses). Here the feed is fetched ONCE per TTL under the SAME cache key as the plain path (so the raw
+//    copy the old page path reads is shared, never refetched twice), decoded with the page's own walk, cut to the box
+//    and sent as {box, v:[[route, lat, lon, bearing|null, timestamp], ...]}. The box is snapped OUTWARD to 0.05 degrees
+//    so nearby pans share one cached cut. lat/lon/bearing are float32 on the wire: they go out as the SHORTEST string
+//    that is still the same float32, and the page Math.frounds them back -- the very doubles its own decoder makes.
+//    An old page never sends vbox, and an old worker ignores it (answers raw), so either side can ship first. ──
+function vbParse(s) {
+  const p = String(s || '').split(',').map(Number);
+  if (p.length !== 4 || !p.every(Number.isFinite)) return null;
+  const b = [Math.floor(p[0] * 20) / 20, Math.floor(p[1] * 20) / 20, Math.ceil(p[2] * 20) / 20, Math.ceil(p[3] * 20) / 20];
+  if (!(b[0] < b[2] && b[1] < b[3]) || b[0] < -180 || b[2] > 180 || b[1] < -90 || b[3] > 90) return null;
+  return b.map(x => Number(x.toFixed(2)));
+}
+function vbF32(v) {   // shortest decimal that is still this float32
+  for (let p = 6; p < 10; p++) { const x = Number(v.toPrecision(p)); if (Math.fround(x) === v) return x; }
+  return v;
+}
+function vbDecode(buf, box) {   // same walk as the page's gtfsVehicles(): FeedEntity 2 > vehicle 4 > trip 1 (route 5), position 2 (lat 1, lon 2, bearing 3), timestamp 5
+  const b = new Uint8Array(buf), dv = new DataView(buf), out = [];
+  const pv = (i) => { let v = 0, k = 1; for (;;) { const x = b[i++]; v += (x & 127) * k; if (!(x & 128)) return [v, i]; k *= 128; } };
+  const walk = (s0, e0, cb) => { let i = s0, t;
+    while (i < e0) { t = pv(i); i = t[1]; const fn = Math.floor(t[0] / 8), wt = t[0] & 7;
+      if (wt === 0) { t = pv(i); cb(fn, 0, t[0], 0, 0); i = t[1]; }
+      else if (wt === 2) { t = pv(i); i = t[1]; cb(fn, 2, 0, i, i + t[0]); i += t[0]; }
+      else if (wt === 5) { cb(fn, 5, dv.getFloat32(i, true), 0, 0); i += 4; }
+      else if (wt === 1) i += 8; else return; } };
+  const str = (s0, e0) => { let o = ''; for (let q = s0; q < e0; q++) o += String.fromCharCode(b[q]); return o; };
+  walk(0, b.length, (f, w, v, s0, e0) => { if (f !== 2 || w !== 2) return;
+    walk(s0, e0, (f2, w2, v2, s2, e2) => { if (f2 !== 4 || w2 !== 2) return;
+      const o = { r: '', la: null, lo: null, br: null, t: 0 };
+      walk(s2, e2, (f3, w3, v3, s3, e3) => {
+        if (f3 === 1 && w3 === 2) walk(s3, e3, (f4, w4, v4, s4, e4) => { if (f4 === 5 && w4 === 2) o.r = str(s4, e4); });
+        else if (f3 === 2 && w3 === 2) walk(s3, e3, (f4, w4, v4) => { if (w4 === 5) { if (f4 === 1) o.la = v4; else if (f4 === 2) o.lo = v4; else if (f4 === 3) o.br = v4; } });
+        else if (f3 === 5 && w3 === 0) o.t = v3;
+      });
+      if (Number.isFinite(o.la) && Number.isFinite(o.lo) && Math.abs(o.la) > 1 &&
+          o.lo >= box[0] && o.la >= box[1] && o.lo <= box[2] && o.la <= box[3])
+        out.push([o.r, vbF32(o.la), vbF32(o.lo), Number.isFinite(o.br) ? vbF32(o.br) : null, o.t]); }); });
+  return out;
+}
+async function vehicleBox(targetUrl, box, ttl, cors, ctx) {
+  const cache = caches.default;
+  const rawKey = new Request(targetUrl.toString(), { method: 'GET' });   // the plain path's key: one raw copy serves both
+  const bk = new URL(targetUrl.toString()); bk.searchParams.set('__bvvbox', box.join(','));
+  const boxKey = new Request(bk.toString(), { method: 'GET' });
+  const ageOf = (r) => (Date.now() - Number(r.headers.get('X-BV-Cached-At') || 0)) / 1000;
+  // 1) a fresh cut of this box (its age is the RAW copy's, so cutting never stacks a second TTL on the data)
+  let cut = null;
+  try { cut = await cache.match(boxKey); } catch (e) { cut = null; }
+  if (cut) { const a = ageOf(cut); if (a >= 0 && a < ttl) return withCors(cut, cors, 'HIT', Math.floor(a)); }
+  // 2) the raw feed: the shared cached copy if fresh, else the origin (stored exactly as the plain path stores it)
+  let raw = null, rawBuf = null, rawAt = 0, state = 'MISS';
+  try { raw = await cache.match(rawKey); } catch (e) { raw = null; }
+  if (raw && ageOf(raw) >= 0 && ageOf(raw) < ttl) { rawAt = Number(raw.headers.get('X-BV-Cached-At') || 0); rawBuf = await raw.arrayBuffer(); state = 'RAW-HIT'; }
+  else {
+    let up = null;
+    try { up = await fetch(targetUrl.toString(), { headers: { 'User-Agent': 'bluishvoid-edge/1.0 (+https://bluishvoid.com)' } }); } catch (e) { up = null; }
+    if (up && up.ok) {
+      rawBuf = await up.arrayBuffer(); rawAt = Date.now();
+      const rh = { 'Content-Type': up.headers.get('Content-Type') || 'application/octet-stream', 'Cache-Control': `public, max-age=${ttl}`,
+                   'X-BV-Cached-At': String(rawAt), 'X-BV-Upstream': targetUrl.hostname };
+      try { ctx.waitUntil(cache.put(rawKey, new Response(rawBuf, { status: 200, headers: rh }))); } catch (e) { /* best-effort */ }
+    } else if (cut) return withCors(cut, cors, 'STALE-ERR', null);
+    else if (raw) { rawAt = Number(raw.headers.get('X-BV-Cached-At') || 0); rawBuf = await raw.arrayBuffer(); state = 'STALE-ERR'; }
+    else return json({ error: 'Upstream fetch failed', status: up ? up.status : 0 }, 502, cors);
+  }
+  // 3) cut it; a decode failure serves the last cut if there is one
+  let body;
+  try { body = JSON.stringify({ box, v: vbDecode(rawBuf, box) }); }
+  catch (e) {
+    if (cut) return withCors(cut, cors, 'STALE-ERR', null);
+    return json({ error: 'Vehicle decode failed', detail: String(e) }, 502, cors);
+  }
+  const sh = { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${ttl}`, 'X-BV-Cached-At': String(rawAt), 'X-BV-Upstream': targetUrl.hostname };
+  if (state !== 'STALE-ERR') { try { ctx.waitUntil(cache.put(boxKey, new Response(body, { status: 200, headers: sh }))); } catch (e) { /* best-effort */ } }
+  return withCors(new Response(body, { status: 200, headers: sh }), cors, state, Math.max(0, Math.floor((Date.now() - rawAt) / 1000)));
+}
+
 export default {
   async fetch(request, env, ctx) {
     const reqUrl = new URL(request.url);
@@ -299,6 +379,13 @@ export default {
 
     const override = parseInt(reqUrl.searchParams.get('ttl') || '', 10);
     const ttl = ttlFor(targetUrl.hostname, override);
+    // VEHICLE BOX (above): only when the page asks for it; every other request takes the unchanged path below
+    if (reqUrl.searchParams.has('vbox')) {
+      const box = vbParse(reqUrl.searchParams.get('vbox'));
+      if (!box) return json({ error: 'Invalid vbox (want w,s,e,n)' }, 400, cors);
+      try { return await vehicleBox(targetUrl, box, ttl, cors, ctx); }
+      catch (e) { return json({ error: 'Vehicle box failed', detail: String(e) }, 502, cors); }   // the page then reads the raw feed
+    }
     const cache = caches.default;
     // a shaped copy is a different object from the raw one: it gets its own cache key
     const shapeName = reqUrl.searchParams.get('shape') || '';
