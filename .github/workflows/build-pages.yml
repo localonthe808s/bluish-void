@@ -26,6 +26,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  deployments: read
 
 # the bake workflows push several times a day; only the newest push needs to deploy
 concurrency:
@@ -33,7 +34,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # A BAKE'S FINISH BUILDS ONLY WHEN IT MOVED MAIN (2026-10-18 perf review): workflow_run fires for failed runs and for
+  # runs that found nothing new and pushed nothing, and each of those rebuilt and redeployed the same commit. Now a
+  # workflow_run build goes ahead only if the bake succeeded AND main's head is not already the live deploy.
+  # Pushes and manual runs always build.
+  gate:
+    runs-on: ubuntu-24.04
+    outputs:
+      go: ${{ steps.g.outputs.go }}
+    steps:
+      - id: g
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          CONCL: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          go=true
+          if [ "$EVENT" = "workflow_run" ]; then
+            if [ "$CONCL" != "success" ]; then echo "bake ended '$CONCL': no build"; go=false
+            else
+              head=$(gh api "repos/${REPO}/commits/main" --jq .sha 2>/dev/null || true)
+              live=""
+              for id in $(gh api "repos/${REPO}/deployments?environment=github-pages&per_page=10" --jq '.[].id' 2>/dev/null); do
+                st=$(gh api "repos/${REPO}/deployments/${id}/statuses?per_page=1" --jq '.[0].state' 2>/dev/null || true)
+                if [ "$st" = "success" ]; then live=$(gh api "repos/${REPO}/deployments/${id}" --jq .sha); break; fi
+              done
+              if [ -n "$head" ] && [ "$head" = "$live" ]; then echo "main ${head:0:9} is already live: no build"; go=false; fi
+            fi
+          fi
+          echo "go=$go" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: gate
+    if: needs.gate.outputs.go == 'true'
     runs-on: ubuntu-24.04   # pinned 2026-10-11: ubuntu-latest becomes Ubuntu 26 from 2026-10-19
     steps:
       - uses: actions/checkout@v4

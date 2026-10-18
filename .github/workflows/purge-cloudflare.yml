@@ -25,13 +25,14 @@ jobs:
     if: ${{ github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'github-pages' }}
     runs-on: ubuntu-24.04   # pinned 2026-10-11: ubuntu-latest becomes Ubuntu 26 from 2026-10-19
     steps:
-      # TARGETED WHEN SAFE (2026-10-12, perf review: the Kalshi bake commits ~200 times a day and every one wiped the
-      # whole zone -- 68 full purges in a day, so the map bakes, tiles and fonts kept going cold at the edge).
-      # A deploy whose changes are ONLY bake data that the page always fetches with a time-bucketed ?v= query
-      # (kalshi_*.json, _kalshi/...) or files that are never served (.py .md .txt .github/) purges just those plain URLs.
-      # Anything else -- index.html, a map bake, a script -- or any doubt at all (API error, no previous deploy, too many
-      # files) falls back to purge_everything, exactly as before.
-      - name: Purge (targeted for bake-only deploys, else everything)
+      # BY URL, ALWAYS (2026-10-18, second perf review: purge_everything still ran ~50 times a day -- every index.html or
+      # map-bake push fell back to it -- and each one also emptied the edge's copies of the map tiles, the cdn and the
+      # proxy answers, so they kept going cold). Now every deploy purges exactly the URLs it changed: index.html as / and
+      # /index.html, a folder's index.html as the folder, any other served file as its own path. Files never served
+      # (.py .md, .github/, _build/, the bake scripts) purge nothing. A rebuild of the same commit purges nothing.
+      # purge_everything is left only for real doubt: an API error, no earlier deploy to compare with, or 300+ changed
+      # files (where the compare API stops listing). Cloudflare takes 30 URLs a call, so the list goes in batches.
+      - name: Purge the changed URLs
         env:
           CF_PURGE_TOKEN: ${{ secrets.CF_PURGE_TOKEN }}
           CF_ZONE_ID: 700b0c254f2d56782c2b3619b1c0521d
@@ -42,6 +43,7 @@ jobs:
         run: |
           set -u
           sleep 10   # let the fresh Pages build settle on GitHub's CDN before the edge refetches
+          SITE=https://bluishvoid.com
           everything() {
             echo "PURGE EVERYTHING: $1"
             resp=$(curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" \
@@ -58,25 +60,39 @@ jobs:
             if [ "$st" = "success" ]; then prev="$sha"; break; fi
           done <<< "$ids"
           [ -n "$prev" ] || everything "no previous successful deploy found"
-          [ "$prev" = "$HEAD_SHA" ] && everything "same sha as the previous deploy"
-          files=$(gh api "repos/${REPO}/compare/${prev}...${HEAD_SHA}" --jq '.files[].filename') || everything "compare API failed"
+          [ "$prev" = "$HEAD_SHA" ] && { echo "same commit as the previous deploy: nothing to purge"; exit 0; }
+          # every file touched (a rename's old name too, so its stale copy goes)
+          files=$(gh api "repos/${REPO}/compare/${prev}...${HEAD_SHA}" --jq '.files[] | .filename, (.previous_filename // empty)') || everything "compare API failed"
           n=$(printf '%s\n' "$files" | grep -c . || true)
           echo "changed since ${prev:0:9}: $n file(s)"; printf '%s\n' "$files" | head -40
-          [ "$n" -ge 1 ] && [ "$n" -le 250 ] || everything "file count $n out of range"
-          urls=""
+          [ "$n" -ge 1 ] || { echo "no files changed: nothing to purge"; exit 0; }
+          [ "$n" -lt 300 ] || everything "file count $n: the compare API stops listing at 300"
+          urls=()
           while read -r f; do
             [ -z "$f" ] && continue
             case "$f" in
-              kalshi_*.json|_kalshi/*.json) urls="$urls https://bluishvoid.com/$f" ;;
-              *.py|*.md|*.txt|.github/*|_kalshi/*) ;;   # never served to the page: nothing to purge
-              *) everything "non-bake file changed: $f" ;;
+              robots.txt|ads.txt|*/robots.txt) ;;                                  # served: purged below
+              .*|*/.*|*.py|*.md|*.txt|.github/*|_build/*|node_modules/*) continue ;;  # never served
+              _kalshi/*.json) ;;
+              _kalshi/*) continue ;;
+            esac
+            e=$(printf '%s' "$f" | jq -sRr '@uri' | sed 's/%2F/\//g')
+            case "$e" in
+              index.html) urls+=("$SITE/" "$SITE/index.html") ;;
+              */index.html) d="${e%index.html}"; urls+=("$SITE/$d" "$SITE/${d%/}" "$SITE/$e") ;;
+              *) urls+=("$SITE/$e") ;;
             esac
           done <<< "$files"
-          [ -z "${urls// }" ] && { echo "nothing served changed: no purge needed"; exit 0; }
-          set -- $urls
-          json=$(printf '"%s",' "$@"); json="{\"files\":[${json%,}]}"
-          echo "PURGE FILES: $*"
-          resp=$(curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" \
-            -H "Authorization: Bearer ${CF_PURGE_TOKEN}" -H "Content-Type: application/json" --data "$json")
-          echo "$resp"
-          echo "$resp" | grep -q '"success":true' || everything "targeted purge refused"
+          [ "${#urls[@]}" -eq 0 ] && { echo "nothing served changed: no purge needed"; exit 0; }
+          echo "PURGE ${#urls[@]} URL(s)"
+          i=0
+          while [ $i -lt ${#urls[@]} ]; do
+            batch=("${urls[@]:$i:30}")
+            json=$(printf '%s\n' "${batch[@]}" | jq -R . | jq -sc '{files: .}')
+            printf '  %s\n' "${batch[@]}"
+            resp=$(curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" \
+              -H "Authorization: Bearer ${CF_PURGE_TOKEN}" -H "Content-Type: application/json" --data "$json")
+            echo "$resp" | grep -q '"success":true' || { echo "$resp"; everything "targeted purge refused"; }
+            i=$((i + 30))
+          done
+          echo "purged ${#urls[@]} URL(s)"
