@@ -107652,14 +107652,19 @@ function closeAlertModal(){
         return; }
       (TR.stHits || []).forEach(function(h){ var d = Math.hypot(h.x - q0.x, h.y - q0.y); if (d < (h.st.k === 'la' ? 16 : 14) && (!bs || d < bs.d)) bs = { d: d, h: h }; });
       var bc = null; (TR.camHits || []).forEach(function(h){ var d = Math.hypot(h.x - q0.x, h.y - q0.y); if (d < 14 && (!bc || d < bc.d)) bc = { d: d }; });
+      /* a crash, a closure, a jam's tag or a shut road (THE CITY's cwTrafTap): the nearest mark wins against a station or a camera */
+      var bi = null; (TR.incHits || []).forEach(function(h){ var d = h.poly ? TR.dPoly(q0.x, q0.y, h.poly) : Math.hypot(h.x - q0.x, h.y - q0.y);
+        if (d < h.reach && (!bi || d < bi.d)) bi = { d: d, h: h }; });
+      if (bi && (!bs || bi.d < bs.d) && (!bc || bi.d <= bc.d)){ TR.incTap(bi.h.d); return; }
       if (bs && (!bc || bs.d <= bc.d)){ TR.board = { st: bs.h.st }; TR.boardEl().innerHTML = '<div style="font:800 12px system-ui,sans-serif;">' + esc(String(bs.h.st.n).toUpperCase()) + '</div><div style="font:600 9px system-ui,sans-serif;opacity:.75;margin-top:4px;">LOADING ' + (bs.h.st.k === 'nyc' ? 'ARRIVALS' : 'TIMETABLE') + '\u2026</div>';
         TR.boardEl().style.display = ''; TR.boardRender(); TR.draw();
         if (TR.bTimer) clearInterval(TR.bTimer); TR.bTimer = setInterval(function(){ if (TR.board && TR.lit === true && !document.hidden) TR.boardRender(); }, 30000); return; }
-      if (!TR.camHits.length) return;
       var q = M.latLngToContainerPoint(e.latlng), best = null;
       TR.camHits.forEach(function(h){ var d = Math.hypot(h.x - q.x, h.y - q.y); if (d < 14 && (!best || d < best.d)) best = { d: d, h: h }; });
-      if (!best) return;
-      var c = best.h.c, S = best.h.S;
+      if (!best){ TR.flowTap(e.latlng); return; }      /* nothing else there: the road itself (THE CITY's cwTrafFlowTap) */
+      TR.camOpen(best.h.c, best.h.S);
+    };
+    TR.camOpen = function(c, S){
       /* A ROW OF LIVE PICTURES ABOVE THE MAP (user 2026-10-18: "mirror what THE CITY did for ... cameras ... the cameras showed in a
          row view"): THE CITY's camera strip -- the tapped camera first, then the three nearest of the same network -- in LOCAL's
          panel; a picture taps open THE CITY's full-screen viewer (arrows step through the row); all refresh every 10 s */
@@ -107685,6 +107690,140 @@ function closeAlertModal(){
           + '<img id="' + id + '" src="' + S.img(c) + '" style="display:block;width:320px;max-width:100%;border-radius:6px;background:#111;" alt="">'
           + '<div style="font:700 8px system-ui,sans-serif;letter-spacing:.06em;color:rgba(255,255,255,.6);margin-top:4px;">LIVE \u00b7 ' + S.by + ' CAMERA</div>').openOn(M);
       var t = setInterval(function(){ var im = document.getElementById(id); if (!im){ clearInterval(t); return; } im.src = S.img(c); }, 10000);
+    };
+    /* ---- CAR TRAFFIC EXTRAS (user 2026-10-18: "car traffic extras: incident and road taps, 511NY closures, Hudson crossing
+       times ... do all these"): THE CITY's car view, on the national map's TRAFFIC for an NYC place. The same feeds, through
+       the same proxy and on the same clocks: PANYNJ's crossing times every 2 min, 511NY's events (the worker's nyc511 shape)
+       every 10 min, FloodNet's curb sensors (THE CITY's reader) every 5. The readings open in LOCAL's dark panel (INFO). */
+    TR.dPoly = function(px, py, P2){ var best = Infinity;
+      for (var i = 1; i < P2.length; i++){ var ax = P2[i - 1][0], ay = P2[i - 1][1], dx = P2[i][0] - ax, dy = P2[i][1] - ay, L2 = dx * dx + dy * dy,
+          t = L2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / L2)) : 0, d = Math.hypot(px - ax - t * dx, py - ay - t * dy); if (d < best) best = d; }
+      return best; };
+    TR.crossAt = 0; TR.evAt = 0; TR.fnAt = 0; TR.cross = null; TR.ev = null;
+    TR.extras = function(){
+      var now = Date.now(), PX = 'https://proxy.bluishvoid.com/?url=';
+      if (now - TR.crossAt > 120000){ TR.crossAt = now;
+        fetch(PX + encodeURIComponent('https://www.panynj.gov/bin/portauthority/crossingtimesapi.json') + '&ttl=120')
+          .then(function(r){ return r.ok ? r.json() : null; }).then(function(j){ TR.cross = Array.isArray(j) ? j : null; if (TR.lit === true) TR.draw(); }).catch(function(){ TR.cross = null; }); }
+      if (now - TR.evAt > 600000){ TR.evAt = now;
+        fetch(PX + encodeURIComponent('https://511ny.org/api/getevents?format=json') + '&shape=nyc511&ttl=300')
+          .then(function(r){ return r.ok ? r.json() : null; }).then(function(j){
+            /* as THE CITY: an answer WITHOUT the shape (the whole state) is refused */
+            TR.ev = (Array.isArray(j) && j.length < 600) ? j : null; if (TR.lit === true) TR.draw(); }).catch(function(){ TR.ev = null; }); }
+      var FNx = window._bvFloodNet;
+      if (FNx && now - TR.fnAt > 300000){ TR.fnAt = now; FNx.load(function(){ FNx.events(function(){ if (TR.lit === true) TR.draw(); }); if (TR.lit === true) TR.draw(); }); }
+    };
+    /* 511NY writes its dates DAY FIRST ("27/07/2026 16:26:08"): said the American way (THE CITY's cwEvDate) */
+    TR.evDate = function(sv){
+      var m = String(sv || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2}))?/); if (!m) return '';
+      var mo = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][+m[2] - 1]; if (!mo) return '';
+      return mo + ' ' + (+m[1]) + ', ' + m[3] + (m[4] ? ' ' + ((+m[4] % 12) || 12) + ':' + m[5] + (+m[4] < 12 ? ' AM' : ' PM') : ''); };
+    /* the strip's NYC lines: THE CITY's HUDSON CROSSINGS (GWB, Lincoln, Holland always; the others only when closed or slow)
+       and WATER ON THE STREET, in the strip's white with the slow and closed ones in the panel's warm red */
+    TR.extraLines = function(){
+      var lab = function(t){ return '<span style="opacity:.6;">' + t + '</span> '; }, out = '', now2 = Date.now();
+      if (TR.cross){
+        var rows = TR.cross.filter(function(x){ return x.isCrossingClosed || (x.routeTravelTime > 0 && x.routeTravelTimeHist > 0); });
+        var nm = function(x){ return String(x.crossingDisplayName).replace('George Washington Bridge', 'GWB').replace(' Tunnel', '').replace(' Bridge', '').replace(' Crossing', '').toUpperCase() + (x.facilityModifier ? ' ' + String(x.facilityModifier).toUpperCase() : ''); };
+        var say = function(x){ var slow = !x.isCrossingClosed && x.routeTravelTime >= 1.5 * x.routeTravelTimeHist && x.routeTravelTime - x.routeTravelTimeHist >= 4;
+          return '<span style="white-space:nowrap;' + (x.isCrossingClosed || slow ? 'color:#ffb4a8;' : '') + '">' + esc(nm(x)) + (x.travelDirection === 'ToNJ' ? ' →NJ ' : ' →NY ')
+            + (x.isCrossingClosed ? 'CLOSED' : x.routeTravelTime + 'M' + (slow ? ' (USU. ' + x.routeTravelTimeHist + ')' : '')) + '</span>'; };
+        var main = rows.filter(function(x){ return /Washington|Lincoln|Holland/.test(x.crossingDisplayName); }), rest = rows.filter(function(x){ return !/Washington|Lincoln|Holland/.test(x.crossingDisplayName) && (x.isCrossingClosed || x.routeTravelTime >= 1.5 * x.routeTravelTimeHist); });
+        if (main.length) out += '<div style="margin-top:3px;">' + lab('HUDSON CROSSINGS') + main.concat(rest).map(say).join(' · ')
+          + ' <a href="https://www.panynj.gov/bridges-tunnels/en/crossing-time-app---b-t.html" target="_blank" rel="noopener" style="color:inherit;opacity:.6;">(PORT AUTHORITY)</a></div>';
+      } else out += '<div style="margin-top:3px;">' + lab('HUDSON CROSSINGS') + 'READING THE PORT AUTHORITY…</div>';
+      var FNx = window._bvFloodNet, FR = FNx ? FNx.rows() : [];
+      var ffw = ((window._nwsAlerts || []).filter(function(a){ return /flood/i.test(a.event || '') && /warning/i.test(a.event || '') && (!a.expires || +a.expires > now2); })[0] || {}).event || '';
+      var coastal = ((window._nwsAlerts || []).filter(function(a){ return /coastal flood|storm surge/i.test(a.event || '') && (!a.expires || +a.expires > now2); })[0] || {}).event || '';
+      if (FNx){ var live = FR.filter(function(r){ return !r.stale; }), wetN = live.filter(function(r){ return r.mm >= FNx.wet && FNx.open(r.id); }).length;
+        out += '<div style="margin-top:3px;">' + lab('WATER ON THE STREET') + (wetN ? '<span style="color:#7dd3fc;">' + wetN + ' SENSOR' + (wetN === 1 ? '' : 'S') + ' REPORT WATER</span>'
+            : (live.length && FNx.ready() ? 'NONE OF ' + live.length + ' SENSORS REPORTS WATER' : 'SENSORS LOADING…'))
+          + (ffw || coastal ? ' · <span style="color:#ffb4a8;">' + esc((ffw || coastal).toUpperCase()) + '</span>' : '') + ' <span style="opacity:.6;">(FLOODNET)</span></div>'; }
+      return out; };
+    /* the reading panel's small grey label, as THE CITY's, lifted for the dark box */
+    TR.lab = function(t){ return '<span style="font:800 7px system-ui,sans-serif;letter-spacing:.1em;color:rgba(255,255,255,.6);margin-right:6px;">' + t + '</span>'; };
+    /* the nearest city camera to a spot (NYC DOT or Caltrans), loading that city's list if it is not in yet */
+    TR.camNear = function(lat, lon, maxM, cb){
+      var S = CAMSRC.filter(function(s){ return lon >= s.box[0] && lat >= s.box[1] && lon <= s.box[2] && lat <= s.box[3]; })[0]; if (!S) return cb(null);
+      var go = function(){ var L2 = TR.cams[S.k]; if (!Array.isArray(L2)) return cb(null); var best = null, bd = maxM, kx = Math.cos(lat * Math.PI / 180) * 111320;
+        L2.forEach(function(c){ var dm = Math.hypot((c.lon - lon) * kx, (c.lat - lat) * 110574); if (dm < bd){ bd = dm; best = c; } });
+        cb(best ? { c: best, S: S, m: Math.round(bd) } : null); };
+      if (Array.isArray(TR.cams[S.k])) return go();
+      if (TR.cams[S.k] !== 'loading'){ TR.cams[S.k] = 'loading'; S.load().then(function(list){ TR.cams[S.k] = list || []; go(); }).catch(function(){ TR.cams[S.k] = []; cb(null); }); }
+      else setTimeout(function(){ if (Array.isArray(TR.cams[S.k])) go(); else cb(null); }, 2500); };
+    /* THE INCIDENT CARD (THE CITY's cwTrafTap): kind and delay, the roads and the source, what was reported, from / to /
+       length / since / until / updated, and SEE THE NEAREST CAMERA when a city camera is within 450 m */
+    TR.incTap = function(d){
+      var seq = TR.tapSeq = (TR.tapSeq || 0) + 1, lab = TR.lab;
+      var when = function(sv){ if (!sv) return ''; var t = Date.parse(sv); if (!isFinite(t)) return esc(String(sv));
+        try { return new Intl.DateTimeFormat('en-US', { timeZone: (window.LOCATION || {}).tz || undefined, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(t)).toUpperCase(); }
+        catch (e){ return new Date(t).toLocaleString('en-US').toUpperCase(); } };
+      var det = [d.from ? lab('FROM') + esc(String(d.from).toUpperCase()) : '', d.to ? lab('TO') + esc(String(d.to).toUpperCase()) : '', d.lengthM ? lab('LENGTH') + (d.lengthM / 1609).toFixed(1) + ' MI' : '',
+        d.since ? lab('SINCE') + when(d.since) : '', d.sinceTxt ? lab('SINCE') + d.sinceTxt : '', d.untilTxt ? lab('PLANNED TO END') + d.untilTxt : '', d.updated ? lab('UPDATED') + esc(String(d.updated)) : ''].filter(Boolean).join(' &nbsp;·&nbsp; ');
+      INFO.show(d.kind + (d.delayMin ? ' · +' + d.delayMin + ' MIN' : ''), (d.roads ? String(d.roads).toUpperCase() + ' · ' : '') + (d.source === '511NY' ? '511NY' : 'TOMTOM'),
+        (d.what ? '<div style="font:500 10px/1.45 system-ui,sans-serif;color:rgba(255,255,255,.88);margin-top:4px;">' + esc(d.what) + '</div>' : '')
+          + (det ? '<div style="font:600 8.5px/1.7 system-ui,sans-serif;letter-spacing:.06em;color:#fff;margin-top:4px;">' + det + '</div>' : '') + '<div id="lc-inc-cam"></div>',
+        d.source === '511NY' ? 'https://511ny.org/list/events/traffic' : 'https://plan.tomtom.com/');
+      var tl = INFO.el().querySelector('span'); if (tl) tl.style.color = d.kind === 'JAM' ? '#FFB067' : /CLOSED|ACCIDENT/.test(d.kind) ? '#ff8a80' : '#fff';
+      if (d.ll) TR.camNear(d.ll[0], d.ll[1], 450, function(nc){ if (TR.tapSeq !== seq || !nc) return; var host = document.getElementById('lc-inc-cam'); if (!host) return;
+        host.innerHTML = '<button type="button" class="lc-pill" style="margin:6px 0 0;">SEE THE NEAREST CAMERA · ' + (nc.m < 100 ? 'AT THE SPOT' : Math.round(nc.m / 10) * 10 + ' M AWAY') + '</button>';
+        host.firstChild.onclick = function(e){ e.stopPropagation(); TR.camOpen(nc.c, nc.S); }; }); };
+    /* the road's name for a tapped spot: OSM's reverse geocoder at street zoom, one call per spot, remembered (THE CITY's
+       cwRoadName, the same device cache) */
+    TR.roadName = function(lat, lon){
+      var key = 'bv_road_' + lat.toFixed(4) + '_' + lon.toFixed(4);
+      try { var c = localStorage.getItem(key); if (c != null) return Promise.resolve(c || null); } catch(e){}
+      return fetch('https://nominatim.openstreetmap.org/reverse?lat=' + lat.toFixed(5) + '&lon=' + lon.toFixed(5) + '&format=json&zoom=17&addressdetails=1&accept-language=en')
+        .then(function(r){ return r.ok ? r.json() : null; })
+        .then(function(j){ var a = (j && j.address) || {}, n = a.road || a.pedestrian || ''; if (n && (a.neighbourhood || a.suburb)) n += ', ' + (a.neighbourhood || a.suburb); try { localStorage.setItem(key, n); } catch(e){} return n || null; })
+        .catch(function(){ return null; }); };
+    /* THE ROAD TAP (THE CITY's cwTrafFlowTap): the live layer draws in protomaps, so the stretch under the finger is found the
+       way A TO B finds its roads -- the flow tile at the view's zoom through THE CITY's decoder (window._bvMvtFlow), the
+       nearest drawn line within 7 px. Its own ratio gives the state at once; TomTom's flowSegmentData then gives the speeds
+       and OSM the road's name. Tiles held for the 5-minute picture. */
+    TR.flowTiles = {};
+    TR.flowTap = function(ll){
+      if (!TR.show.roads || !TR.lay || !M.hasLayer(TR.lay) || !window._bvMvtFlow) return;
+      var lb = TR.liveBox(); if (lb && !lb.contains(ll)) return;
+      var WORLD = 20037508.342789244, R2 = 6378137, X = ll.lng * Math.PI / 180 * R2, Y = R2 * Math.log(Math.tan(Math.PI / 4 + ll.lat * Math.PI / 360));
+      var mz = M.getZoom(), z = Math.max(6, Math.min(16, Math.round(mz))), span = 2 * WORLD / Math.pow(2, z), tx = Math.floor((X + WORLD) / span), ty = Math.floor((WORLD - Y) / span);
+      var mpp = 2 * WORLD / (256 * Math.pow(2, mz)), reach = 7 * mpp, bucket = Math.floor(Date.now() / 300000), tk = z + '/' + tx + '/' + ty;
+      if (TR.flowBucket !== bucket){ TR.flowBucket = bucket; TR.flowTiles = {}; }
+      var seq = TR.tapSeq = (TR.tapSeq || 0) + 1;
+      (TR.flowTiles[tk] = TR.flowTiles[tk] || fetch('https://api.tomtom.com/traffic/map/4/tile/flow/relative/' + tk + '.pbf?key=' + TT_KEY)
+        .then(function(r){ return r.ok ? r.arrayBuffer() : null; }).then(function(ab){ return ab ? window._bvMvtFlow(ab) : null; }).catch(function(){ return null; }))
+        .then(function(t){
+          if (!t || TR.tapSeq !== seq) return;
+          /* the two directions of a road share one line: within 1.5 px of a tie the slower wins, as the slow paint lies on top */
+          var ox = tx * span - WORLD, oy = WORLD - ty * span, k2 = span / t.extent, best = null, tie = 1.5 * mpp;
+          t.feats.forEach(function(f){ var lv = +f.p.traffic_level; if (f.p.road_closure || !isFinite(lv)) return;
+            f.lines.forEach(function(ln){ var d = TR.dPoly(X, Y, ln.map(function(c){ return [ox + c[0] * k2, oy - c[1] * k2]; })); if (d < reach && (!best || d < best.d - tie || (d <= best.d + tie && lv < best.lv))) best = { d: d, f: f, lv: lv }; }); });
+          if (!best) return;
+          var cls = TT_CLASS[best.f.p.road_type]; if (cls == null) cls = 3;
+          TR.flowCard(ll.lat, ll.lng, best.lv, TT_RULE[cls].slow, cls, seq); });
+    };
+    TR.flowCard = function(lat, lon, r, at, cls, seq){
+      var k = r / at, slow = r < at, lab = TR.lab;
+      /* the state in the live layer's own colors (ttCol), the darkest lifted for the dark panel */
+      var state = !slow ? ['MOVING', '#05DB32'] : k < 0.30 ? ['STOPPED', '#ff6b6b'] : k < 0.55 ? ['CRAWLING', '#FF1B1B'] : k < 0.80 ? ['SLOW', '#FF6B00'] : ['SLOWING', '#FFE500'];
+      var CLS = ['HIGHWAY', 'MAJOR ROAD', 'SECONDARY ROAD', 'LOCAL STREET'][cls] || 'ROAD';
+      var road = null, seg = null, say = function(more){
+        if (TR.tapSeq !== seq) return;
+        INFO.show(state[0] + ' · ' + Math.round(r * 100) + '% OF FREE-FLOW SPEED', (road ? String(road).toUpperCase() + ' · ' + CLS : CLS) + ' · TOMTOM',
+          '<div style="font:600 8.5px/1.7 system-ui,sans-serif;letter-spacing:.06em;color:#fff;margin-top:4px;">' + more + '</div>', 'https://plan.tomtom.com/en/?p=' + lat.toFixed(4) + ',' + lon.toFixed(4) + ',14z');
+        var tl = INFO.el().querySelector('span'); if (tl) tl.style.color = state[1]; };
+      var full = function(){ var parts = [];
+        if (seg){ parts.push(lab('NOW') + Math.round(seg.currentSpeed) + ' MPH'); parts.push(lab('FREE-FLOW') + Math.round(seg.freeFlowSpeed) + ' MPH');
+          var extra = (seg.currentTravelTime || 0) - (seg.freeFlowTravelTime || 0); if (extra >= 60) parts.push(lab('DELAY') + Math.round(extra / 60) + ' MIN ON THIS STRETCH');
+          if (seg.confidence != null) parts.push(lab('CONFIDENCE') + Math.round(seg.confidence * 100) + '%'); }
+        else if (seg === false) parts.push('TOMTOM HAS NO SPEED READING FOR THIS SPOT');
+        else parts.push('READING THE ROAD…');
+        parts.push(lab('MEASURED BY') + 'TOMTOM PROBES, THIS 5-MINUTE PICTURE');
+        say(parts.join(' &nbsp;·&nbsp; ')); };
+      full();
+      TR.roadName(lat, lon).then(function(n){ road = n; full(); });
+      fetch('https://api.tomtom.com/traffic/services/4/flowSegmentData/relative0/10/json?point=' + lat.toFixed(5) + ',' + lon.toFixed(5) + '&unit=mph&key=' + TT_KEY)
+        .then(function(r2){ return r2.ok ? r2.json() : null; }).then(function(j){ seg = (j && j.flowSegmentData) || false; full(); }).catch(function(){ seg = false; full(); });
     };
     TR.layer = function(){
       var P = protomapsL, LS = function(o){ return new P.LineSymbolizer(Object.assign({ lineCap: 'round', lineJoin: 'round' }, o)); };
@@ -107739,6 +107878,18 @@ function closeAlertModal(){
       var P = function(c){ var q = M.latLngToContainerPoint([c[1], c[0]]); return [q.x * dpr, q.y * dpr]; };
       var inF = function(q){ return q[0] > -20 && q[1] > -20 && q[0] < W + 20 && q[1] < H + 20; }, z = M.getZoom();
       var counts = {}, jams = 0, tags = [], avoid = [];
+      /* EVERY MARK CAN BE TAPPED (user 2026-10-18: "car traffic extras: incident and road taps ... do all these"): each drawn
+         incident and closure records where it sits on screen (a point, or its line), as TR.camHits does for the cameras */
+      TR.incHits = []; TR.evShut = 0;
+      /* 511NY, NYC ONLY -- THE CITY's cwTrafExtras: only what the state says is SHUT (all lanes) gets a mark, the white disc
+         with the dark red bar; the rest is not drawn (LanesAffected is the one field trusted, see cwEvShut) */
+      if (TR.show.roads && nycHere()){ TR.extras();
+        (TR.ev || []).forEach(function(e){ if (!/^all lanes (closed|blocked)/i.test(String(e.LanesAffected || ''))) return;
+          var q = P([+e.Longitude, +e.Latitude]); if (!inF(q)) return; TR.evShut++;
+          g.save(); g.translate(q[0], q[1]); g.fillStyle = '#fff'; g.strokeStyle = '#7f1d1d'; g.lineWidth = 1.6 * dpr;
+          g.beginPath(); g.arc(0, 0, 5.2 * dpr, 0, 6.3); g.fill(); g.stroke(); g.fillStyle = '#7f1d1d'; g.fillRect(-3.2 * dpr, -1 * dpr, 6.4 * dpr, 2 * dpr); g.restore();
+          TR.incHits.push({ x: q[0] / dpr, y: q[1] / dpr, reach: 13, d: { ll: [+e.Latitude, +e.Longitude], kind: 'ALL LANES CLOSED', what: e.Description, roads: e.RoadwayName,
+            sinceTxt: TR.evDate(e.StartDate), untilTxt: TR.evDate(e.PlannedEndDate), updated: TR.evDate(e.LastUpdated), source: '511NY' } }); }); }
       (TR.show.roads ? TR.inc || [] : []).slice().sort(function(a, b){ var pa = a.properties || {}, pb = b.properties || {};
         return (pb.iconCategory === 6 ? (pb.delay || 0) : -1) - (pa.iconCategory === 6 ? (pa.delay || 0) : -1); }).forEach(function(it){
         var p = it.properties || {}, cat = p.iconCategory, geo = it.geometry || {}, pts = geo.type === 'Point' ? [geo.coordinates] : (geo.coordinates || []);
@@ -107764,6 +107915,12 @@ function closeAlertModal(){
         else if (inF(mid)){ g.beginPath(); g.arc(mid[0], mid[1], 6 * dpr, 0, 6.3); g.fillStyle = '#fff'; g.fill(); g.lineWidth = 2 * dpr; g.strokeStyle = '#b91c1c'; g.stroke();
           g.fillStyle = '#b91c1c'; g.font = '900 ' + (9.5 * dpr) + 'px system-ui,sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('!', mid[0], mid[1] + .5 * dpr); }
         g.restore();
+        /* only what was drawn is tappable: work zones from z12, jams with a tag, event restrictions as a line */
+        var dmn = Math.round((p.delay || 0) / 60), mll = pts[Math.floor(pts.length / 2)], lineK = (cat === 8 || cat === 0) && Q.length > 1;
+        if ((inF(mid) || lineK) && !((cat === 9 || cat === 7) && z < 12) && !(cat === 6 && dmn < 15) && !(cat === 0 && Q.length < 2))
+          TR.incHits.push({ x: mid[0] / dpr, y: mid[1] / dpr, poly: lineK ? Q.map(function(q){ return [q[0] / dpr, q[1] / dpr]; }) : null, reach: lineK ? 10 : 14,
+            d: { ll: [mll[1], mll[0]], kind: TT_CAT[cat] || 'INCIDENT', what: (p.events || []).map(function(e2){ return e2.description; }).join(' · '),
+              from: p.from, to: p.to, roads: (p.roadNumbers || []).join(' '), delayMin: p.delay ? dmn : null, lengthM: p.length ? Math.round(p.length) : null, since: p.startTime, source: 'TomTom' } });
       });
       /* the jam tags are drawn LAST (user 2026-10-17: "the times are covered"): rail lines, vehicles and delays were painted over them */
       var drawTags = function(){ tags.forEach(function(tg){
@@ -107844,6 +108001,7 @@ function closeAlertModal(){
         if (counts[8]) parts.push(counts[8] + ' ROAD' + (counts[8] === 1 ? '' : 'S') + ' CLOSED');
         var wz = (counts[9] || 0) + (counts[7] || 0); if (wz) parts.push(wz === 1 ? '1 WORK ZONE OR LANE CLOSURE' : wz + ' WORK ZONES AND LANE CLOSURES');
         if (counts[11]) parts.push(counts[11] + ' FLOODED');
+        if (TR.evShut) parts.push(TR.evShut + ' SHUT, ALL LANES (511NY)');
         if (!parts.length && TR.inc) parts.push('NO CRASHES OR CLOSURES IN VIEW');
       }
       /* THE SUBWAY DELAYS, NYC ONLY (THE CITY's, through window._bvSubDelays): each alert's stretch in its route's color,
@@ -107897,10 +108055,11 @@ function closeAlertModal(){
       if (nVeh) parts.push(nVeh + ' BUSES AND TRAINS LIVE (' + agencies.slice(0, 3).map(function(a){ return esc(a.toUpperCase()); }).join(', ') + (agencies.length > 3 ? ' +' + (agencies.length - 3) : '') + ')');
       /* only what is on the map is spoken: with ROAD TRAFFIC off, no road summary and no road colors in the key */
       var keyL = (TR.show.cams && TR.camHits.length ? k('#05DB32', 'TAP FOR ITS LIVE CAMERA') : '') + (TR.show.veh ? k('#7dd3fc', 'BUS OR TRAIN, POINTING THE WAY IT IS GOING') : '')
-        + (TR.show.roads ? k('#05DB32', 'MOVING FREELY') + k('#FFE500', 'SLOWER') + k('#FF6B00', 'SLOW') + k('#FF1B1B', 'VERY SLOW') + k('#B80020', 'NEARLY STOPPED') : '');
+        + (TR.show.roads ? '<span class="lr-k" style="opacity:.7;margin-right:4px;">TAP A ROAD OR A MARK ·</span>' + k('#05DB32', 'MOVING FREELY') + k('#FFE500', 'SLOWER') + k('#FF6B00', 'SLOW') + k('#FF1B1B', 'VERY SLOW') + k('#B80020', 'NEARLY STOPPED') : '');
       var headL = TR.show.roads ? 'TRAFFIC NOW' + (parts.length ? ' \u00b7 ' + parts.join(' \u00b7 ') : '') : (TR.show.veh && nVeh ? parts.filter(function(x){ return /LIVE/.test(x); }).join(' \u00b7 ') : '');
       strip.innerHTML = headL + (headL && keyL ? '<br>' : '') + keyL;
       if (subLine) strip.insertAdjacentHTML('beforeend', subLine);
+      if (TR.show.roads && nycHere()) strip.insertAdjacentHTML('beforeend', TR.extraLines());
       try { AB.draw(g, P, dpr); } catch (e){}
       drawTags();
       strip.insertAdjacentHTML('beforeend', AB.say()); AB.wire();
