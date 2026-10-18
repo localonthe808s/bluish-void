@@ -59222,7 +59222,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       modis:['NASA MODIS NDVI','https://worldview.earthdata.nasa.gov/?l=MODIS_Terra_NDVI_8Day'], npn:['USA-NPN','https://www.usanpn.org/data/observational'],
       fia:['USFS forest types','https://data.fs.usda.gov/geodata/rastergateway/forest_type/'], s2:['Sentinel-2','https://planetarycomputer.microsoft.com/dataset/sentinel-2-l2a'],
       osrm:['OSRM','https://map.project-osrm.org/'], tt:['\u00a9 TomTom','https://plan.tomtom.com/en/?p=40.73,-73.98,11z'],
-      pa:['Port Authority','https://www.panynj.gov/bridges-tunnels/en/crossing-time-app---b-t.html'], ny511:['511NY','https://511ny.org/list/events/traffic'], mtaal:['MTA service alerts','https://new.mta.info/alerts'], mtagtfs:['MTA timetable (GTFS)','https://new.mta.info/developers'], dotcam:['NYC DOT cameras','https://webcams.nyctmc.org/'],
+      pa:['Port Authority','https://www.panynj.gov/bridges-tunnels/en/crossing-time-app---b-t.html'], ny511:['511NY','https://511ny.org/'], mtaal:['MTA service alerts','https://new.mta.info/alerts'], mtagtfs:['MTA timetable (GTFS)','https://new.mta.info/developers'], dotcam:['NYC DOT cameras','https://webcams.nyctmc.org/'],
       fn:['FloodNet','https://dataviz.floodnet.nyc/'], dep:['NYC DEP flood map','https://data.cityofnewyork.us/Environment/NYC-Stormwater-Flood-Maps/9i7c-xyvv'],
       coops:['NOAA currents','https://tidesandcurrents.noaa.gov/map/index.html?type=CurrentPredictions&region=New+York'],
       viele:['Viele 1865','https://mapwarper.net/maps/36301'], u97:['USGS 1897','https://ngmdb.usgs.gov/topoview/'],
@@ -61866,9 +61866,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                         (TomTom incidentDetails) are markers; a closed road is a dashed line.
          2  CROSSINGS   the Port Authority's own minutes-now against minutes-usual for the GWB
                         (both levels), Lincoln, Holland, Bayonne, Goethals and Outerbridge.
-         3  CLOSURES    511NY's planned closures and incidents, cut to the city in the proxy
-                        worker (&shape=nyc511: 2.7 MB -> ~90 KB).
-       2 and 3 send no CORS header and come through proxy.bluishvoid.com; until the worker is
+         3  CLOSURES    511NY's road closures, read DIRECT from the new 511NY app's own feed
+                        (keyless, CORS-open; see window._bv511), cut to the city here.
+       2 sends no CORS header and comes through proxy.bluishvoid.com; until the worker is
        deployed with those hosts the band simply leaves those lines out -- it never guesses.
        NOT USED: NYC DOT's link speeds. Probed 2026-09-20 they were 1 h 40 min stale and half
        the bridge links read 0 mph / 0 s.
@@ -62098,20 +62098,61 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       }
       if (now - cwTraf.evAt > 600000){
         cwTraf.evAt = now;
-        fetch(PX + encodeURIComponent('https://511ny.org/api/getevents?format=json') + '&shape=nyc511&ttl=300')
-          .then(function(r){ return r.ok ? r.json() : null; }).then(function(j){
-            /* defensive: if the worker answers WITHOUT the shape (an old deploy) this would be the whole state -- refuse it */
-            cwTraf.ev = (Array.isArray(j) && j.length < 600) ? j : null; cwTraf.key = ''; cwTrafDraw(); cwTrafBand();
-          }).catch(function(){ cwTraf.ev = null; });
+        window._bv511.load(function(list){ cwTraf.ev = list; cwTraf.key = ''; cwTrafDraw(); cwTrafBand(); });
       }
     }
+    /* ---- 511NY CLOSURES (user 2026-10-18: "511NY: closures still have no data. Their site moved to a new API, possibly
+       needing a developer key"). The old api/getevents now answers the new web app's HTML. The new app (Castle Rock's
+       CARS platform) reads its map from api-511x-nysdot.carsprogram.org, which answers WITHOUT a key and with
+       Access-Control-Allow-Origin: *, so it is read DIRECT -- no proxy, no worker deploy. The closures layer is the one the
+       app itself draws (eventClassifications=closures, ~180 features / ~650 KB for the whole state, measured 2026-10-18),
+       and every one of them is a "Road closed". A feature is SHUT NOW only when the state marks it active; the rest are
+       scheduled (overnight work, later dates) and get no mark. Each feature is turned into the old getevents record
+       (Latitude, Longitude, RoadwayName, Description, LanesAffected, StartDate, PlannedEndDate, LastUpdated) so THE CITY
+       and LOCAL's TRAFFIC draw and tap exactly as before; the dates are now epoch milliseconds. ONE fetch serves both
+       (5-minute memo), cut to the five boroughs' box. ---- */
+    window._bv511 = window._bv511 || (function(){
+      var S = { at: 0, list: null, p: null, cbs: [] };
+      function shape(j){
+        var out = [];
+        ((j && j.features) || []).forEach(function(f){
+          var p = (f && f.properties) || {}, er = p.eventReport || {}, ed = er.eventDescription || {}, g = (f && f.geometry) || {}, c = null;
+          if (g.type === 'Point') c = g.coordinates;
+          else if (g.type === 'LineString' && g.coordinates && g.coordinates.length) c = g.coordinates[Math.floor(g.coordinates.length / 2)];
+          if (!c || !(c[1] > 40.49 && c[1] < 40.92 && c[0] > -74.27 && c[0] < -73.68)) return;
+          var shut = p.active === true && /road closed/i.test(String(ed.headlinePhrase || p.title || ''));
+          var what = String(ed.descriptionFull || p.description || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim() || p.tooltip || '';
+          out.push({ ID: p.id, Latitude: +c[1], Longitude: +c[0], RoadwayName: p.route || (er.location || {}).routeDesignator || '',
+            Description: what, LanesAffected: shut ? 'All lanes closed' : 'Scheduled',
+            StartDate: (er.beginTime && er.beginTime.time) || null, PlannedEndDate: (er.endTime && er.endTime.time) || null, LastUpdated: p.updated || null,
+            link: p.id ? 'https://511ny.org/events/' + encodeURIComponent(p.id) + '?eventClassifications=closures' : 'https://511ny.org/' });
+        });
+        return out;
+      }
+      S.load = function(cb){
+        if (S.list && Date.now() - S.at < 300000){ cb(S.list); return; }
+        S.cbs.push(cb); if (S.p) return;
+        S.p = fetch('https://api-511x-nysdot.carsprogram.org/events/map-features?eventClassifications=closures&maxBeginDateOffset=300000')
+          .then(function(r){ return r.ok ? r.json() : null; }).then(function(j){ var l = j ? shape(j) : null; if (l){ S.list = l; S.at = Date.now(); } return l; })
+          .catch(function(){ return null; }).then(function(l){ var q = S.cbs; S.cbs = []; S.p = null; q.forEach(function(f){ try { f(l); } catch (e){} }); });
+      };
+      /* the American way, in New York's own clock: "OCT 18, 2026 4:26 PM" */
+      S.date = function(ms){
+        try { return new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })
+          .format(new Date(ms)).toUpperCase().replace(/,(\s+\d{1,2}:)/, '$1'); }
+        catch (e){ return new Date(ms).toLocaleString('en-US').toUpperCase(); }
+      };
+      return S;
+    })();
     /* a 511NY record worth a mark on the map: the state itself says ALL LANES are closed. Only the
        LanesAffected field is trusted. The first cut also read the free-text Description, which is
        permit boilerplate: it "found" 120 shut roads out of 126, where the field says 9 and
        publishes "No Data" for 113 (measured 2026-09-20). Unknown is not shut. */
     function cwEvShut(e){ return /^all lanes (closed|blocked)/i.test(String(e.LanesAffected || '')); }
-    /* 511NY writes its dates DAY FIRST ("27/07/2026 16:26:08"): never show that raw to an American reader */
+    /* 511NY writes its dates DAY FIRST ("27/07/2026 16:26:08"): never show that raw to an American reader. The new feed
+       (window._bv511) gives epoch milliseconds instead, said in New York's time. */
     function cwEvDate(sv){
+      if (typeof sv === 'number') return window._bv511.date(sv);
       var m = String(sv || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2}))?/); if (!m) return '';
       var mo = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][+m[2] - 1]; if (!mo) return '';
       return mo + ' ' + (+m[1]) + ', ' + m[3] + (m[4] ? ' ' + ((+m[4] % 12) || 12) + ':' + m[5] + (+m[4] < 12 ? ' AM' : ' PM') : '');
@@ -62302,7 +62343,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
           var q = P([e.Longitude, e.Latitude]); if (!inF(q) || !cwTrafClip.keep([[MX(e.Longitude), MY(e.Latitude)]])) return;
           g.save(); g.translate(q[0], q[1]); g.fillStyle = '#fff'; g.strokeStyle = '#7f1d1d'; g.lineWidth = 1.6 * dpr;
           g.beginPath(); g.arc(0, 0, 5.2 * dpr, 0, 6.3); g.fill(); g.stroke(); g.fillStyle = '#7f1d1d'; g.fillRect(-3.2 * dpr, -1 * dpr, 6.4 * dpr, 2 * dpr); g.restore();
-          hits.push({ X: MX(e.Longitude), Y: MY(e.Latitude), reach: 13, d: { ll: [e.Latitude, e.Longitude], kind: 'ALL LANES CLOSED', what: e.Description, roads: e.RoadwayName, sinceTxt: cwEvDate(e.StartDate), untilTxt: cwEvDate(e.PlannedEndDate), updated: cwEvDate(e.LastUpdated), source: '511NY' } });
+          hits.push({ X: MX(e.Longitude), Y: MY(e.Latitude), reach: 13, d: { ll: [e.Latitude, e.Longitude], kind: 'ALL LANES CLOSED', what: e.Description, roads: e.RoadwayName, sinceTxt: cwEvDate(e.StartDate), untilTxt: cwEvDate(e.PlannedEndDate), updated: cwEvDate(e.LastUpdated), link: e.link, source: '511NY' } });
         });
         var incList = (cwTraf.inc || []).slice().sort(function(a, b){ var pa = a.properties || {}, pb = b.properties || {};
           return (pb.iconCategory === 6 ? (pb.delay || 0) : -1) - (pa.iconCategory === 6 ? (pa.delay || 0) : -1); });
@@ -107920,16 +107961,16 @@ function closeAlertModal(){
       if (now - TR.crossAt > 120000){ TR.crossAt = now;
         fetch(PX + encodeURIComponent('https://www.panynj.gov/bin/portauthority/crossingtimesapi.json') + '&ttl=120')
           .then(function(r){ return r.ok ? r.json() : null; }).then(function(j){ TR.cross = Array.isArray(j) ? j : null; if (TR.lit === true) TR.draw(); }).catch(function(){ TR.cross = null; }); }
-      if (now - TR.evAt > 600000){ TR.evAt = now;
-        fetch(PX + encodeURIComponent('https://511ny.org/api/getevents?format=json') + '&shape=nyc511&ttl=300')
-          .then(function(r){ return r.ok ? r.json() : null; }).then(function(j){
-            /* as THE CITY: an answer WITHOUT the shape (the whole state) is refused */
-            TR.ev = (Array.isArray(j) && j.length < 600) ? j : null; if (TR.lit === true) TR.draw(); }).catch(function(){ TR.ev = null; }); }
+      /* 511NY closures: THE CITY's one shared reader (window._bv511, the new keyless feed; user 2026-10-18: "511NY:
+         closures still have no data") -- both maps share the same fetch */
+      if (now - TR.evAt > 600000 && window._bv511){ TR.evAt = now;
+        window._bv511.load(function(list){ TR.ev = list; if (TR.lit === true) TR.draw(); }); }
       var FNx = window._bvFloodNet;
       if (FNx && now - TR.fnAt > 300000){ TR.fnAt = now; FNx.load(function(){ FNx.events(function(){ if (TR.lit === true) TR.draw(); }); if (TR.lit === true) TR.draw(); }); }
     };
     /* 511NY writes its dates DAY FIRST ("27/07/2026 16:26:08"): said the American way (THE CITY's cwEvDate) */
     TR.evDate = function(sv){
+      if (typeof sv === 'number') return window._bv511 ? window._bv511.date(sv) : '';
       var m = String(sv || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2}))?/); if (!m) return '';
       var mo = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][+m[2] - 1]; if (!mo) return '';
       return mo + ' ' + (+m[1]) + ', ' + m[3] + (m[4] ? ' ' + ((+m[4] % 12) || 12) + ':' + m[5] + (+m[4] < 12 ? ' AM' : ' PM') : ''); };
@@ -107978,7 +108019,7 @@ function closeAlertModal(){
       INFO.show(d.kind + (d.delayMin ? ' · +' + d.delayMin + ' MIN' : ''), (d.roads ? String(d.roads).toUpperCase() + ' · ' : '') + (d.source === '511NY' ? '511NY' : 'TOMTOM'),
         (d.what ? '<div style="font:500 10px/1.45 system-ui,sans-serif;color:rgba(255,255,255,.88);margin-top:4px;">' + esc(d.what) + '</div>' : '')
           + (det ? '<div style="font:600 8.5px/1.7 system-ui,sans-serif;letter-spacing:.06em;color:#fff;margin-top:4px;">' + det + '</div>' : '') + '<div id="lc-inc-cam"></div>',
-        d.source === '511NY' ? 'https://511ny.org/list/events/traffic' : 'https://plan.tomtom.com/');
+        d.source === '511NY' ? (d.link || 'https://511ny.org/') : 'https://plan.tomtom.com/');
       var tl = INFO.el().querySelector('span'); if (tl) tl.style.color = d.kind === 'JAM' ? '#FFB067' : /CLOSED|ACCIDENT/.test(d.kind) ? '#ff8a80' : '#fff';
       if (d.ll) TR.camNear(d.ll[0], d.ll[1], 450, function(nc){ if (TR.tapSeq !== seq || !nc) return; var host = document.getElementById('lc-inc-cam'); if (!host) return;
         host.innerHTML = '<button type="button" class="lc-pill" style="margin:6px 0 0;">SEE THE NEAREST CAMERA · ' + (nc.m < 100 ? 'AT THE SPOT' : Math.round(nc.m / 10) * 10 + ' M AWAY') + '</button>';
@@ -108104,7 +108145,7 @@ function closeAlertModal(){
           g.save(); g.translate(q[0], q[1]); g.fillStyle = '#fff'; g.strokeStyle = '#7f1d1d'; g.lineWidth = 1.6 * dpr;
           g.beginPath(); g.arc(0, 0, 5.2 * dpr, 0, 6.3); g.fill(); g.stroke(); g.fillStyle = '#7f1d1d'; g.fillRect(-3.2 * dpr, -1 * dpr, 6.4 * dpr, 2 * dpr); g.restore();
           TR.incHits.push({ x: q[0] / dpr, y: q[1] / dpr, reach: 13, d: { ll: [+e.Latitude, +e.Longitude], kind: 'ALL LANES CLOSED', what: e.Description, roads: e.RoadwayName,
-            sinceTxt: TR.evDate(e.StartDate), untilTxt: TR.evDate(e.PlannedEndDate), updated: TR.evDate(e.LastUpdated), source: '511NY' } }); }); }
+            sinceTxt: TR.evDate(e.StartDate), untilTxt: TR.evDate(e.PlannedEndDate), updated: TR.evDate(e.LastUpdated), link: e.link, source: '511NY' } }); }); }
       (TR.show.roads ? TR.inc || [] : []).slice().sort(function(a, b){ var pa = a.properties || {}, pb = b.properties || {};
         return (pb.iconCategory === 6 ? (pb.delay || 0) : -1) - (pa.iconCategory === 6 ? (pa.delay || 0) : -1); }).forEach(function(it){
         var p = it.properties || {}, cat = p.iconCategory, geo = it.geometry || {}, pts = geo.type === 'Point' ? [geo.coordinates] : (geo.coordinates || []);
@@ -112377,7 +112418,7 @@ function closeAlertModal(){
     <span><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">OpenStreetMap</a>·<a href="https://maps.protomaps.com/builds/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">Protomaps</a>·<a href="https://www.naturalearthdata.com/downloads/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">Natural Earth</a>·<a href="https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">Esri World Imagery</a>·<a href="https://www.arcgis.com/home/item.html?id=1e126e7520f9466c9ca28b8f28b5e500" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">Esri Ocean</a>·<a href="https://nominatim.openstreetmap.org/ui/search.html" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">Nominatim</a>·<a href="https://overpass-turbo.eu/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">Overpass</a>·<a href="https://www.gmrt.org/GMRTMapTool/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">GMRT</a>·<a href="https://www.ncei.noaa.gov/products/coastal-elevation-models" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">NOAA CUDEM</a>·<a href="https://www.usgs.gov/3d-elevation-program" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">USGS 3DEP</a>·<a href="https://esa-worldcover.org/en" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">ESA WorldCover</a>·<a href="https://www.census.gov/geographies/mapping-files/time-series/geo/tiger-line-file.html" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">Census TIGER</a>·<a href="https://www.nyc.gov/content/planning/pages/resources/datasets" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">NYC Planning</a>·<a href="https://data.cityofnewyork.us/Environment/2015-Street-Tree-Census-Tree-Data/uvpi-gqnh" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">NYC Street Trees</a>·<a href="https://egis-lacounty.hub.arcgis.com/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">LA County GIS</a>·<a href="https://webcams.nyctmc.org/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">NYC DOT Cameras</a>·<a href="https://orthos.its.ny.gov/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">NYS Orthoimagery</a>·<a href="https://www.usgs.gov/programs/national-geospatial-program/national-map" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">USGS National Map</a>·<a href="https://planetarycomputer.microsoft.com/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">Planetary Computer</a></span>
 
     <span style="font-style:italic;letter-spacing:.10em;color:#f97316;text-align:right;white-space:nowrap;">Transit</span>
-    <span><a href="https://plan.tomtom.com/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">TomTom Traffic</a>·<a href="https://api.mta.info/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">MTA</a>·<a href="https://www.ferry.nyc/routes-and-schedules/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">NYC Ferry</a>·<a href="https://www.panynj.gov/bridges-tunnels/en/crossing-time-app---b-t.html" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">Port Authority</a>·<a href="https://511ny.org/map" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">511NY</a>·<a href="https://map.project-osrm.org/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">OSRM</a>·<a href="https://cad.chp.ca.gov/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">CHP</a>·<a href="https://quickmap.dot.ca.gov/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">Caltrans QuickMap</a>·<a href="https://developer.metro.net/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">LA Metro</a>·<a href="https://metrolinktrains.com/about/gtfs/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">Metrolink</a></span>
+    <span><a href="https://plan.tomtom.com/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">TomTom Traffic</a>·<a href="https://api.mta.info/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">MTA</a>·<a href="https://www.ferry.nyc/routes-and-schedules/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">NYC Ferry</a>·<a href="https://www.panynj.gov/bridges-tunnels/en/crossing-time-app---b-t.html" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">Port Authority</a>·<a href="https://511ny.org/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">511NY</a>·<a href="https://map.project-osrm.org/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">OSRM</a>·<a href="https://cad.chp.ca.gov/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">CHP</a>·<a href="https://quickmap.dot.ca.gov/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">Caltrans QuickMap</a>·<a href="https://developer.metro.net/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">LA Metro</a>·<a href="https://metrolinktrains.com/about/gtfs/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(43,34,244,.55);margin:0 4px;">Metrolink</a></span>
 
 
     <span style="font-style:italic;letter-spacing:.10em;color:#f97316;text-align:right;white-space:nowrap;">Music</span>
