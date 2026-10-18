@@ -61271,8 +61271,14 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           taken.push([x, y]);
           var kt = o.s, L = 16 * dpr;
           /* the shaft points INTO the wind: a barb at 270 lies to the west,
-             which is where the air is coming from */
-          var a = (o.d + 180) * Math.PI / 180 - Math.PI / 2;
+             which is where the air is coming from. Fixed 2026-10-18 (user:
+             the angle "reportedly pointing the shaft downwind"): the old
+             (d + 180) - 90 put 270 at +x, east, downwind. On a y-down canvas
+             the bearing d sits at (sin d, -cos d), the angle d - 90: 270 ->
+             (-1, 0) west, 0 -> (0, -1) north. Same vector as LOCAL's barbs
+             (u = (sin d, -cos d), n = 90 deg clockwise), feathers on the
+             low-pressure side: a west wind's feathers lean north. */
+          var a = (o.d - 90) * Math.PI / 180;
           var ux = Math.cos(a), uy = Math.sin(a);
           var nx = -uy, ny = ux;
           g.strokeStyle = 'rgba(8,10,16,.8)'; g.lineWidth = 3.4 * dpr;
@@ -105323,6 +105329,7 @@ function closeAlertModal(){
        - WPC's analysed fronts (THE CITY's own reader, which is national) with their last analyses as a wake, the
          forecasters' next two prog positions dashed and stamped with their time, and the analysed lows and highs. */
     var OV = { cv: null, al: [], alAt: 0, alKey: '', zones: {}, zReq: {}, states: null, timer: null, on: false, mode: 'radar', terr: null, terrReq: 0, live: {}, liveAt: 0, liveKey: '' };
+    window._bvLcRadar = { OV: OV, R: R };   /* the harness reads OV.nc / OV.motion against the forecast frames in R.ov */
     var OVZ = 'https://cdn.bluishvoid.com/zones/v2/';   /* v2 (2026-10-16): ~100 m outlines, v1 was ~500 m */
     /* THE CITY's rules, kept (cwAlertCol / rankOf there): its colors, one owner per county (the worst thing happening to
        it), one label per KIND naming the ground it points at, and every kind spelled out in the corner, no "+N MORE" */
@@ -105835,21 +105842,32 @@ function closeAlertModal(){
       var R2 = 6378137, at = function(p){ var X = p[1] * Math.PI / 180 * R2, Y = R2 * Math.log(Math.tan(Math.PI / 4 + p[0] * Math.PI / 360));
         var x = Math.round((X - F.box.X0) / (F.box.X1 - F.box.X0) * w), y = Math.round((F.box.Y1 - Y) / (F.box.Y1 - F.box.Y0) * h);
         if (x < 0 || y < 0 || x >= w || y >= h) return -1; return d[(y * w + x) * 4 + 3] > 60 ? 1 : 0; };
-      var la = +L1.lat, lo = +L1.lon, up = (mo.toward + 180) % 360, kmh = mo.mph * 1.609, near = 0;
-      [0, 2, 4].forEach(function(r){ [0, 90, 180, 270].forEach(function(b){ if (at(destLL(la, lo, r, b)) === 1) near++; }); });
-      if (near >= 3){ OV.nc = { now: true }; return; }
-      for (var km = 2; km <= Math.min(kmh * 2.5, 320); km += 1.5){
-        var p0 = destLL(la, lo, km, up), out = 0, hit = false;
-        [0, -6, 6].forEach(function(off){ if (hit) return; var q = off ? destLL(p0[0], p0[1], Math.abs(off), up + (off < 0 ? -90 : 90)) : p0, v = at(q); if (v === -1) out++; else if (v === 1) hit = true; });
-        if (hit){ OV.nc = { min: km / kmh * 60, km: km }; return; }
-        if (out === 3) return;                                         /* off the scan: nothing measured beyond */
+      /* THE TEXT READS THE FORECAST FRAMES (user 2026-10-18: "RAIN REACHES <place> IN ~N MIN" could contradict the frames).
+         The old reading walked a 12 km-wide path upwind as far as 2.5 hours of motion, so it named arrivals the +60 MIN
+         frames never showed, and a wide path caught echo that would slide past. Now it is the frames' own method, done on
+         the pixels: R.fc carries the newest scan along OV.motion, so the echo over the place at +t minutes is whatever the
+         newest scan holds t minutes of motion UPWIND of it. Each minute from now to +60 the disk 2 km around that upwind
+         point is read; the first minute with echo in it is the arrival, minute 0 is "RAIN OVER ... NOW". Nothing in the
+         hour: if echo sits within 25 km on the downwind side the rain has gone by ("RAIN MOVING AWAY"), else no line. */
+      var la = +L1.lat, lo = +L1.lon, up = (mo.toward + 180) % 360, kmh = mo.mph * 1.609;
+      var disk = function(c){ var hit = 0, seen = 0;                 /* the center and 8 bearings at 1 and 2 km: 2 wet of 17 = echo */
+        [[0, 0]].concat([1, 2].reduce(function(A, r){ for (var b = 0; b < 360; b += 45) A.push([r, b]); return A; }, [])).forEach(function(q){
+          var v = at(q[0] ? destLL(c[0], c[1], q[0], q[1]) : c); if (v >= 0) seen++; if (v === 1) hit++; });
+        return seen ? (hit >= 2 ? 1 : 0) : -1; };
+      for (var t = 0; t <= 60; t++){
+        var v = disk(t ? destLL(la, lo, kmh * t / 60, up) : [la, lo]);
+        if (v === 1){ OV.nc = t === 0 ? { now: true } : { min: t, km: kmh * t / 60 }; return; }
+        if (v === -1) break;                                          /* off the scan: nothing measured beyond */
       }
+      for (var r = 4; r <= 25; r += 3) for (var bo = -60; bo <= 60; bo += 20)
+        if (at(destLL(la, lo, r, mo.toward + bo)) === 1){ OV.nc = { away: true }; return; }
     };
     OV.topLines = function(){
       var out = [], mo = OV.motion, nc = OV.nc, nm = placeName();
       if (!mo || !(nc || mo.src === 'RADAR')) return out;
       out.push({ t: 'STORMS MOVING ' + compass(mo.toward) + ' ' + mo.mph + ' MPH (' + mo.src + ')', c: '#e6edf7' });
       if (nc && nc.now) out.push({ t: 'RAIN OVER ' + nm + ' NOW', c: '#9fe0ff' });
+      else if (nc && nc.away) out.push({ t: 'RAIN MOVING AWAY FROM ' + nm, c: '#9fe0ff' });
       else if (nc) out.push({ t: 'RAIN REACHES ' + nm + ' IN ~' + (nc.min < 7.5 ? 5 : Math.round(nc.min / 5) * 5) + ' MIN', c: '#9fe0ff' });
       return out;
     };
@@ -109126,18 +109144,49 @@ function closeAlertModal(){
       if (key === OL.key && (OL.polys || OL.req || Date.now() - OL.failAt < 12e4)) return;    /* a miss is asked again after 2 min */
       if (key !== OL.key){ OL.key = key; OL.polys = null; OL.draw(); }
       var ck = 'bv_outline_v2_' + key;
-      try { var c0 = JSON.parse(localStorage.getItem(ck) || 'null'); if (c0 && c0.p){ OL.polys = c0.p; OL.draw(); return; } } catch(e){}
+      try { var c0 = JSON.parse(localStorage.getItem(ck) || 'null'); if (c0 && c0.p){ OL.polys = c0.p; OL.draw(); OL.fit(key, kind); return; } } catch(e){}
       OL.req = 1;
       OL.fetch(kind, la, lo, name).then(function(p){ OL.req = 0; if (OL.key !== key) return;
         if (!p){ OL.failAt = Date.now(); return; }
-        OL.polys = p; OL.draw();
+        OL.polys = p; OL.draw(); OL.fit(key, kind);
         try { var s = JSON.stringify({ p: p, at: Date.now() });
           if (s.length < 900000){ var idx = JSON.parse(localStorage.getItem('bv_outline_v2_idx') || '[]').filter(function(k){ return k !== ck; });
             idx.push(ck); while (idx.length > 5) localStorage.removeItem(idx.shift());
             localStorage.setItem(ck, s); localStorage.setItem('bv_outline_v2_idx', JSON.stringify(idx)); } } catch(e){}
       }).catch(function(){ OL.req = 0; if (OL.key === key) OL.failAt = Date.now(); }); };
+    /* A STATE OPENS WHOLE (user 2026-10-18: "when the location is a state ... the map opens at zoom 9 so only part of the
+       border shows"): the first time a state's outline lands for a place -- or a county's that runs past the view -- the map
+       is fitted to it once, ~20 px in from the edges. Once per place only: never on a later redraw, a cached reload of the
+       same place's outline after the fit, or once the visitor has dragged, pinched, wheeled or pressed +/- since the place
+       was picked (OL.moved, set by those gestures in OL.init). Deferred a beat so the place's own re-centre in sync() lands
+       first, and held until the map has a size (it is built hidden behind other tabs). */
+    OL.fitted = {}; OL.moved = '';
+    OL.fit = function(key, kind){
+      if (OL.fitted[key] || (kind !== 'state' && kind !== 'county')) return;
+      var tries = 0, go = function(){
+        if (!M || OL.key !== key || !OL.polys || OL.fitted[key]) return;
+        if (OL.moved === key){ OL.fitted[key] = 1; return; }                 /* the visitor got there first: their view stands */
+        var sz = M.getSize(); if (sz.x < 50 || sz.y < 50){ if (tries++ < 600) setTimeout(go, 500); return; }
+        var box = function(wrap){ var w = 1e3, so = 90, e = -1e3, n = -90;
+          OL.polys.forEach(function(p){ (p[0] || []).forEach(function(c){ var x = wrap && c[0] > 0 ? c[0] - 360 : c[0]; if (x < w) w = x; if (x > e) e = x; if (c[1] < so) so = c[1]; if (c[1] > n) n = c[1]; }); });
+          return [w, so, e, n]; };
+        var bx = box(false); if (bx[2] - bx[0] > 180) bx = box(true);       /* Alaska's Aleutians run past 180: west of it, not round the world */
+        var w = bx[0], so = bx[1], e = bx[2], n = bx[3];
+        if (!(e > w && n > so)) return;
+        var ob = L.latLngBounds([so, w], [n, e]);
+        OL.fitted[key] = 1;
+        if (kind === 'county' && M.getBounds().contains(ob)) return;          /* a county that already fits keeps the opening view */
+        M.invalidateSize(); M.fitBounds(ob, { padding: [20, 20], animate: false });
+      };
+      setTimeout(go, 150); };
     OL.init = function(){
       if (OL.cv || !M) return;
+      /* the visitor's own moves (programmatic setView / fitBounds fire none of these) */
+      var mk = function(){ OL.moved = OL.key; }, ct = M.getContainer();
+      M.on('dragstart', mk); M.on('dblclick', mk);
+      ct.addEventListener('wheel', function(){ if (M.scrollWheelZoom.enabled()) mk(); }, { passive: true });
+      ct.addEventListener('touchstart', function(e){ if (e.touches && e.touches.length > 1) mk(); }, { passive: true });
+      ct.addEventListener('click', function(e){ if (e.target && e.target.closest && e.target.closest('.leaflet-control-zoom')) mk(); }, true);
       var pn = M.getPane('lcOutline') || M.createPane('lcOutline'); pn.style.zIndex = 448; pn.style.pointerEvents = 'none';
       OL.cv = document.createElement('canvas'); OL.cv.style.position = 'absolute'; pn.appendChild(OL.cv);
       /* THE BASEMAP'S OWN WATER, UNSEEN: the same archive and tiers as the map, painting only its water polygons (black) in a
@@ -109767,7 +109816,23 @@ function closeAlertModal(){
     var F = function(c){ var f = c * 1.8; return (f > 0 ? '+' : f < 0 ? '−' : '') + Math.abs(f).toFixed(1) + '°F'; };
     var C = function(c){ return (c > 0 ? '+' : c < 0 ? '−' : '') + Math.abs(c).toFixed(1) + '°C'; };
     var FC = function(c){ return F(c); };   /* Fahrenheit only on this site (audit 2026-10-10); C() stays for any internal use */
-    var txt = function(u){ return fetch(PROXY + encodeURIComponent(u)).then(function(r){ if (!r.ok) throw 0; return r.text(); }); };
+    /* CPC SENDS NO CORS HEADER, so every read goes through our proxy (a direct fetch cannot work). The first read of a cold
+       load failed about half the time (user 2026-10-18: "THE CLIMATE PREDICTION CENTER DID NOT ANSWER" on ~half of first
+       loads), so a failed read is retried twice with backoff (1.5 s, then 4 s), each try capped at 12 s, and the last
+       resort is allorigins, the site-wide fallback in bvProxyJSON's chain. */
+    var txt = function(u){
+      var one = function(url, wrap){
+        var ctl = ('AbortController' in window) ? new AbortController() : null, tm = setTimeout(function(){ if (ctl) ctl.abort(); }, 12000);
+        return fetch(url, ctl ? { signal: ctl.signal } : undefined).then(function(r){ clearTimeout(tm); if (!r.ok) throw 0; return wrap ? r.json().then(function(j){ if (!j || typeof j.contents !== 'string' || !j.contents) throw 0; return j.contents; }) : r.text(); },
+          function(e){ clearTimeout(tm); throw e; });
+      };
+      var wait = function(ms){ return new Promise(function(res){ setTimeout(res, ms); }); };
+      var via = function(){ return one(PROXY + encodeURIComponent(u), false); };
+      return via()
+        .catch(function(){ return wait(1500).then(via); })
+        .catch(function(){ return wait(4000).then(via); })
+        .catch(function(){ return one('https://api.allorigins.win/get?url=' + encodeURIComponent(u), true); });
+    };
     var MON = { JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11 };
     function parseWeekly(t){
       var out = [];
@@ -109810,7 +109875,11 @@ function closeAlertModal(){
         txt(CPC + 'data/indices/RONI.ascii.txt').then(lastSeason).catch(function(){ return null; }),
         txt(CPC + 'products/analysis_monitoring/enso_advisory/ensodisc.shtml').then(parseDisc).catch(function(){ return null; }),
         newestDay().catch(function(){ return null; })
+        /* the Kelvin bake is our own file and stands on its own (user 2026-10-18: the sub-tab "never appears even though
+           enso/kelvin.json loaded" when CPC failed): the moment it lands the sub-tab button is offered, even while the CPC
+           reads are still retrying or after they have all failed */
         ,fetch('https://cdn.bluishvoid.com/enso/kelvin.json?d=' + new Date().toISOString().slice(0, 13)).then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; })
+          .then(function(k){ if (k){ S.kel = k; if (CUR === 'enso' && !S.wk && !S.disc && !S.day) try { render(); } catch(e){} } return k; })
       ]).then(function(r){ S.wk = r[0] && r[0].length ? r[0] : S.wk; S.oni = r[1] || S.oni; S.roni = r[2] || S.roni; S.disc = r[3] || S.disc; S.day = r[4] || S.day; S.kel = r[5] || S.kel; S.at = Date.now(); S.busy = false; });
     }
     /* THE KELVIN WAVE AND THE WEST COAST'S WATER (user 2026-10-17: "can you track the kelvin wave from the el nino and coastal
@@ -110025,7 +110094,6 @@ function closeAlertModal(){
     }
     function render(){
       var root = document.getElementById('es-panel'); if (!root) return;
-      if (!S.wk && !S.disc && !S.day){ root.innerHTML = '<div style="font:700 10px system-ui,sans-serif;letter-spacing:.1em;color:#6b7389;padding:30px 0;text-align:center;">' + (S.busy ? 'READING THE PACIFIC…' : 'THE CLIMATE PREDICTION CENTER DID NOT ANSWER · TRY AGAIN SHORTLY') + '</div>'; return; }
       var wk = S.wk, L = wk && wk[wk.length - 1], D = S.disc, st = D ? D.status.toUpperCase() : '';
       var sign = /NIÑO|NINO/.test(st) ? 1 : /NIÑA|NINA/.test(st) ? -1 : (L && L.n34 >= 0.5 ? 1 : L && L.n34 <= -0.5 ? -1 : 0);
       if (/WATCH/.test(st) && L && Math.abs(L.n34) < 0.5) sign = 0;
@@ -110048,6 +110116,8 @@ function closeAlertModal(){
       var wireSub = function(){ [].slice.call(root.querySelectorAll('[data-ensosub]')).forEach(function(b){ b.onclick = function(e){ e.stopPropagation(); if (S.sub === b.getAttribute('data-ensosub')) return; S.sub = b.getAttribute('data-ensosub'); if (S.sub === 'kelvin') stopAnim(); render(); }; }); };
       if (S.sub === 'kelvin' && S.kel && S.kel.eq){ root.innerHTML = subRow + kelHtml(true); wireSub(); try { kelStage(); } catch(e){} return; }
       try { kelStage(); } catch(e){}   /* back on EL NIÑO: the stage goes and the globe returns */
+      /* nothing from CPC (yet): the note, under the sub-tab row so THE KELVIN WAVE stays one tap away */
+      if (!S.wk && !S.disc && !S.day){ root.innerHTML = subRow + '<div style="font:700 10px system-ui,sans-serif;letter-spacing:.1em;color:#6b7389;padding:30px 0;text-align:center;">' + (S.busy ? 'READING THE PACIFIC…' : 'THE CLIMATE PREDICTION CENTER DID NOT ANSWER · TRY AGAIN SHORTLY') + '</div>'; wireSub(); return; }
       root.innerHTML = subRow +
         '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;">'
         + (D ? '<span style="font:900 10px system-ui,sans-serif;letter-spacing:.14em;color:#fff;background:' + chip + ';padding:5px 11px;border-radius:13px;">' + st + '</span>' : '')
