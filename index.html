@@ -108265,6 +108265,29 @@ function closeAlertModal(){
     var LV = { lay: null, dots: null, mode: 'now', key: '', timer: null, pp: null,
       /* THE CITY's flood-stage colors, lifted for the dark box (they were chosen for a white bar); the sensors' wet tiers */
       B: ['#8cc8ff', '#ffd24a', '#ffa24a', '#ff6b5e', '#ff3b3b'], FINK: { 'TRACE WATER': '#facc15', 'WATER POOLING': '#fb923c', 'DEEP WATER': '#ef4444', 'FLOODING': '#ff2b2b' } };
+    /* BRIGHT WATER WITH A WHITE RIM (user 2026-10-18: "do all these" -- the live water on LOCAL read too dim): THE CITY's
+       own fill (its wet cells and depths, F.wet / F.tex) repainted in cw-water's colors -- shallow .30,.90,1 to deep
+       .04,.40,.80 over 0-.7 of the depth scale, the wet edge mixed toward .9,.98,1 -- at three pixels a cell, so the rim
+       is a crisp line rather than a smoothed-away cell; THE CITY's own canvas (F.cv) is left as it is. Only the box around
+       the wet cells is drawn (a whole-city canvas at 3x would be 20 million pixels), coarser if a storm floods most of it */
+    LV.paint = function(F){
+      var W = F.W, H = F.H, wet = F.wet, tex = F.tex, N = W * H, x0 = W, y0 = H, x1 = 0, y1 = 0;
+      for (var q = 0; q < N; q++) if (wet[q]){ var qy = (q / W) | 0, qx = q - qy * W; if (qx < x0) x0 = qx; if (qx > x1) x1 = qx; if (qy < y0) y0 = qy; if (qy > y1) y1 = qy; }
+      x1++; y1++; if (x1 <= x0){ x0 = 0; y0 = 0; x1 = 1; y1 = 1; }
+      var S = Math.max(1, Math.min(3, Math.floor(Math.sqrt(6e6 / ((x1 - x0) * (y1 - y0))))));
+      var cv = document.createElement('canvas'); cv.width = (x1 - x0) * S; cv.height = (y1 - y0) * S;
+      var cx = cv.getContext('2d'), img = cx.createImageData(cv.width, cv.height), d = img.data, RW = cv.width;
+      var sm = function(a, b, x){ var t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+      for (var k = 0; k < N; k++){ if (!wet[k]) continue;
+        var y = (k / W) | 0, x = k - y * W, t = sm(0, .7, tex[k * 4] / 255);
+        var r = .30 + (.04 - .30) * t, g = .90 + (.40 - .90) * t, b = 1 + (.80 - 1) * t;
+        /* which sides meet dry ground: those sub-pixel rows / columns are the rim */
+        var eL = x > 0 && !wet[k - 1], eR = x < W - 1 && !wet[k + 1], eU = y > 0 && !wet[k - W], eD = y < H - 1 && !wet[k + W];
+        for (var sy = 0; sy < S; sy++) for (var sx = 0; sx < S; sx++){
+          var rim = (eL && sx === 0) || (eR && sx === S - 1) || (eU && sy === 0) || (eD && sy === S - 1), m = rim ? .8 : 0;
+          var o = (((y - y0) * S + sy) * RW + (x - x0) * S + sx) * 4;
+          d[o] = Math.round(255 * (r + (.9 - r) * m)); d[o + 1] = Math.round(255 * (g + (.98 - g) * m)); d[o + 2] = Math.round(255 * (b + (1 - b) * m)); d[o + 3] = rim ? 255 : 240; } }
+      cx.putImageData(img, 0, 0); return { cv: cv, x0: x0, y0: y0, x1: x1, y1: y1 }; };
     LV.off = function(){ if (LV.pp && M && M.hasLayer(LV.pp)) M.closePopup(LV.pp); LV.pp = null; if (LV.lay && M.hasLayer(LV.lay)) M.removeLayer(LV.lay); if (LV.dots && M.hasLayer(LV.dots)) M.removeLayer(LV.dots); var e = document.getElementById('lc-lv-line'); if (e) e.remove();
       if (LV.timer){ clearInterval(LV.timer); LV.timer = null; } };
     LV.sync = function(){
@@ -108279,7 +108302,8 @@ function closeAlertModal(){
         LV.key = key; var F = LF2.fill(LV.mode); LV.F = F;
         if (LV.lay){ M.removeLayer(LV.lay); LV.lay = null; }
         if (F && F.cells && F.cells.length){ var pn = M.getPane('lcLiveFlood') || M.createPane('lcLiveFlood'); pn.style.zIndex = 434; pn.style.pointerEvents = 'none';
-          LV.lay = L.imageOverlay(F.cv.toDataURL('image/png'), [ll(B.X0, B.Y0), ll(B.X1, B.Y1)], { pane: 'lcLiveFlood', opacity: .92, interactive: false }); }
+          var P = LV.paint(F), cX = (B.X1 - B.X0) / F.W, cY = (B.Y1 - B.Y0) / F.H;
+          LV.lay = L.imageOverlay(P.cv.toDataURL('image/png'), [ll(B.X0 + P.x0 * cX, B.Y1 - P.y1 * cY), ll(B.X0 + P.x1 * cX, B.Y1 - P.y0 * cY)], { pane: 'lcLiveFlood', opacity: 1, interactive: false }); }
       }
       if (LV.lay && !M.hasLayer(LV.lay)) LV.lay.addTo(M);
       /* the gauges */
@@ -108293,7 +108317,7 @@ function closeAlertModal(){
       Object.keys(G).forEach(function(lid){ var q = G[lid], pk = LV.mode === 'peak' && !q.river, cr = pk ? LF2.crest(q) : null, lv = pk ? (cr ? cr[1] : null) : LF2.now(q), c = lv == null ? '#8b93a7' : LF2.lvl[LF2.cat(lid, lv)][1], tr = LF2.trend(q);
         L.marker([q.lat, q.lon], { interactive: true, keyboard: false, pane: 'lcLvDots', icon: L.divIcon({ className: '', iconSize: [0, 0], iconAnchor: [0, 0],
           html: '<div style="display:flex;align-items:center;gap:4px;transform:translate(-7px,-7px);cursor:pointer;"><span style="display:inline-block;flex:none;width:11px;height:11px;border-radius:50%;background:' + c + ';box-shadow:0 0 0 2px #fff;"></span>'
-            + (lv == null ? '' : '<span style="font:800 8.5px system-ui,sans-serif;color:' + c + ';background:rgba(255,255,255,.92);padding:1px 5px;border-radius:4px;white-space:nowrap;">' + lv.toFixed(1) + ' FT' + (Math.abs(tr) > .05 ? (tr > 0 ? ' \u2191' : ' \u2193') : '') + '</span>') + '</div>' }) })
+            + (lv == null ? '' : '<span style="font:800 8.5px system-ui,sans-serif;color:#fff;background:rgba(10,13,22,.86);padding:2px 6px;border-radius:5px;white-space:nowrap;box-shadow:0 0 0 1px ' + c + ';">' + lv.toFixed(1) + ' FT' + (Math.abs(tr) > .05 ? (tr > 0 ? ' \u2191' : ' \u2193') : '') + '</span>') + '</div>' }) })
           .on('click', function(){ LV.pop([q.lat, q.lon], LV.gaugeCard(lid), 340); }).addTo(LV.dots); });   /* THE CITY's gauge card (user 2026-10-17: "add the flooding taps") */
       /* THE STREET SENSORS (user 2026-10-17: "add the floodnet bar for NYC location"): THE CITY's FloodNet reading, loaded
          by THE CITY's own loader, asked again every 5 min; dry sensors a small cyan dot from z12, wet ones in their tier */
@@ -109321,7 +109345,7 @@ function closeAlertModal(){
     /* a whole-world GFS picture from THREDDS, through the proxy (WebGL needs the CORS header the proxy adds) */
     var gfsWorld = function(params, iso, small){ var wh = small ? 'WIDTH=1024&HEIGHT=512' : 'WIDTH=2048&HEIGHT=1024';
       return 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent(GFSRUN.base() + '?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&CRS=CRS:84&BBOX=-180,-90,180,90&' + wh + '&FORMAT=image/png&TRANSPARENT=true&NUMCOLORBANDS=40&' + params + '&TIME=' + (iso || GFSRUN.iso())); };
-    var stageSet = function(which){ STAGE = which; try { if (window._esSrc) window._esSrc(); } catch(e){} var bd = document.getElementById('es-body'); if (bd) bd.classList.toggle('side', which === 'globe' && window.innerWidth > 1100); var m = document.getElementById('es-map'); if (m) m.style.display = which === 'map' ? 'block' : 'none'; GLOBE.show(which === 'globe'); if (which === 'map') sized(); };
+    var stageSet = function(which){ STAGE = which; try { if (window._esSrc) window._esSrc(); } catch(e){} var bd = document.getElementById('es-body'); if (bd) bd.classList.toggle('side', which === 'globe' && window.innerWidth > 1100); var m = document.getElementById('es-map'); if (m) m.style.display = which === 'map' ? 'block' : 'none'; GLOBE.show(which === 'globe'); if (which === 'map') sized(); try { kelStage(); } catch(e){} };   /* the Kelvin stage keeps the globe's place (user 2026-10-18) */
     /* THE GLOBE'S PLAYER: a list of whole-world pictures swapped through the first skin. Same callback shape as the flat map's. */
     var GPLAY = (function(){
       var P = { frames: [], i: 0, timer: null, token: null, paused: false, badge: null, cb: null, rest: 1600, step: 180 };
@@ -109416,7 +109440,7 @@ function closeAlertModal(){
          storms), the highest water of the last week, and this month's highest tide with that extra water on top, each
          against the gauge's own minor flood level. */
     function kelHov(cv, D, xs, mode){
-      var W = cv.clientWidth || 300, H = mode.big ? 360 : 210, dpr = Math.min(2, window.devicePixelRatio || 1);
+      var W = cv.clientWidth || 300, H = mode.h || (mode.big ? 360 : 210), dpr = Math.min(2, window.devicePixelRatio || 1);
       cv.width = W * dpr; cv.height = H * dpr; cv.style.height = H + 'px';
       var g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
       /* a box smooth before drawing: single shore cells and single days are jittery; the waves are weeks long and hundreds of km wide */
@@ -109428,10 +109452,19 @@ function closeAlertModal(){
       var sc = mode.scale || 15, col = function(v){ if (v == null) return 'rgba(0,0,0,0)'; var t = Math.max(-1, Math.min(1, v / sc));
         return t >= 0 ? 'rgb(' + Math.round(255 - 40 * t) + ',' + Math.round(250 - 205 * t) + ',' + Math.round(245 - 210 * t) + ')' : 'rgb(' + Math.round(245 + 210 * t) + ',' + Math.round(250 + 160 * t) + ',255)'; };
       for (var i = 0; i < n; i++) for (var j = 0; j < m; j++){ g.fillStyle = col(D[n - 1 - i][j]); g.fillRect(L + j * cw, T + i * ch, cw + .6, ch + .6); }
-      g.font = '700 7.5px system-ui,sans-serif'; g.fillStyle = '#6b7389'; g.textBaseline = 'middle';
+      /* THE TRACKED CREST (user 2026-10-18: "do all these" -- the equator chart with the tracked wave path): the bake's
+         path, [longitude, day] pairs, as a dark line with a white casing through those cells, a dot on the newest */
+      if (mode.path && mode.path.length > 1){ var pp = [];
+        mode.path.forEach(function(q){ var j = xs.indexOf(q[0]), r = mode.dates.indexOf(q[1]); if (j < 0 || r < 0) return; pp.push([L + (j + .5) * cw, T + (n - 1 - r + .5) * ch]); });
+        if (pp.length > 1){ g.lineJoin = 'round'; g.lineCap = 'round';
+          [['#fff', 4], ['#111827', 1.8]].forEach(function(st){ g.strokeStyle = st[0]; g.lineWidth = st[1]; g.beginPath(); pp.forEach(function(q, i){ if (i) g.lineTo(q[0], q[1]); else g.moveTo(q[0], q[1]); }); g.stroke(); });
+          var e = pp[pp.length - 1]; g.fillStyle = '#fff'; g.beginPath(); g.arc(e[0], e[1], 4.2, 0, 7); g.fill(); g.fillStyle = '#111827'; g.beginPath(); g.arc(e[0], e[1], 2.6, 0, 7); g.fill(); } }
+      g.font = '700 7.5px system-ui,sans-serif'; g.fillStyle = mode.ink || '#6b7389'; g.textBaseline = 'middle';
       var dates = mode.dates; [0, 60, 120, 179].forEach(function(k){ if (k >= n) return; var d = dates[n - 1 - k]; g.fillText(d.slice(5).replace('-', '/'), 0, T + (k + .5) * ch); });
       g.textBaseline = 'alphabetic';
-      mode.ticks.forEach(function(tk){ var j = xs.indexOf(tk[0]); if (j < 0) return; var x = L + (j + .5) * cw; g.fillRect(x, H - B + 1, 1, 3); g.fillText(tk[1], Math.min(W - 26, Math.max(L, x - 10)), H - 5); });
+      /* a tick name that would run into the one before it is left off (the stage's narrow charts, 2026-10-18: "SAN DIEGO" ran into "WA") */
+      var tEnd = -1e9; mode.ticks.forEach(function(tk){ var j = xs.indexOf(tk[0]); if (j < 0) return; var x = L + (j + .5) * cw, tw = g.measureText(tk[1]).width, tx = Math.min(W - tw - 2, Math.max(L, x - 10)); g.fillRect(x, H - B + 1, 1, 3);
+        if (tx < tEnd + 4) return; g.fillText(tk[1], tx, H - 5); tEnd = tx + tw; });
     }
     function kelHtml(big){
       var K = S.kel; if (!K || !K.eq) return '';
@@ -109455,9 +109488,10 @@ function closeAlertModal(){
       var avg = function(a2){ return a2.length ? a2.reduce(function(x, y){ return x + y; }, 0) / a2.length : null; }, eA = avg(east), wA = avg(west);
       var tilt = eA != null ? 'THE EAST PACIFIC\u2019S SEA STANDS ' + (eA * 0.3937).toFixed(0) + ' IN (' + eA.toFixed(0) + ' CM) ABOVE NORMAL' + (wA != null ? ', THE WEST ' + (wA >= 0 ? (wA * 0.3937).toFixed(0) + ' IN ABOVE' : (-wA * 0.3937).toFixed(0) + ' IN BELOW') : '') + ' \u2014 EL NIÑO\u2019S STANDING TILT. THE PICTURES TAKE THAT OUT (EACH PLACE AGAINST ITS OWN LAST 45 DAYS) SO THE WAVES RIDING ON IT SHOW.' : '';
       return (big ? '' : '') + hd('THE KELVIN WAVE', 'SATELLITE SEA LEVEL, THE LAST 180 DAYS, NEWEST AT THE TOP \u00b7 RED = A PULSE OF HIGHER SEA, BLUE = LOWER')
-        + '<div style="display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:10px;margin-top:5px;">'
+        + (big ? ''   /* the two pictures are on the stage now, where the globe stood (user 2026-10-18) */
+          : '<div style="display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:10px;margin-top:5px;">'
         + '<div style="min-width:0;"><div style="font:700 8px system-ui,sans-serif;letter-spacing:.08em;color:#6b7389;">ALONG THE EQUATOR, INDONESIA TO ECUADOR</div><canvas id="kel-eq" style="display:block;width:100%;"></canvas></div>'
-        + '<div style="min-width:0;"><div style="font:700 8px system-ui,sans-serif;letter-spacing:.08em;color:#6b7389;">THEN UP THE COAST, ECUADOR TO WASHINGTON</div><canvas id="kel-co" style="display:block;width:100%;"></canvas></div></div>'
+        + '<div style="min-width:0;"><div style="font:700 8px system-ui,sans-serif;letter-spacing:.08em;color:#6b7389;">THEN UP THE COAST, ECUADOR TO WASHINGTON</div><canvas id="kel-co" style="display:block;width:100%;"></canvas></div></div>')
         + '<div style="font:600 8.5px/1.45 system-ui,sans-serif;letter-spacing:.06em;color:#1b2340;margin-top:4px;">' + wl + '</div>'
         + (tilt ? '<div style="font:600 8px/1.45 system-ui,sans-serif;letter-spacing:.06em;color:#6b7389;margin-top:3px;">' + tilt + '</div>' : '')
         + '<div style="font:500 10.5px/1.4 system-ui,sans-serif;color:#3b4460;margin-top:5px;">When the trade winds stall over the western Pacific they set off a Kelvin wave: a bulge of warm water a few inches high on top and hundreds of feet deep below, riding the equator east for about two months. It is what carries an El Niño\u2019s heat to South America. There it splits and runs north along the coast, raising the sea off Mexico and California, which is why El Niño winters bring the West Coast its worst king-tide flooding and beach erosion.</div>'
@@ -109467,10 +109501,97 @@ function closeAlertModal(){
         + rows + '</table></div>'
         + '<div style="font:600 8px system-ui,sans-serif;letter-spacing:.06em;color:#6b7389;margin-top:6px;">THE TOP TIDE IS THE TIDE TABLE\u2019S HIGHEST FOR THE NEXT 30 DAYS WITH THIS MONTH\u2019S EXTRA WATER ADDED \u00b7 STORMS AND SURF ADD MORE \u00b7 SOURCES \u00b7 NOAA COASTWATCH BLENDED ALTIMETRY \u00b7 NOAA CO-OPS \u00b7 TAO/TRITON \u00b7 BUILT ' + String(K.built || '').replace(/[<>&"]/g, '') + '</div>';
     }
-    function kelDraw(big){
-      var K = S.kel; if (!K || !K.eq) return;
-      var a = document.getElementById('kel-eq'); if (a) kelHov(a, K.eq.hp || K.eq.cm, K.eq.lons, { dates: K.eq.dates, big: big, sm: [1, 0], scale: K.eq.hp ? 8 : 15, ticks: [[130, '130\u00b0E'], [160, '160\u00b0E'], [190, '170\u00b0W'], [220, '140\u00b0W'], [250, '110\u00b0W'], [275, '85\u00b0W']] });
-      var b = document.getElementById('kel-co'); if (b && K.coast && K.coast.cm.length) kelHov(b, (K.coast.hp && K.coast.hp.length) ? K.coast.hp : K.coast.cm, K.coast.lats, { dates: K.coast.dates, big: big, sm: [2, 1], scale: K.coast.hp ? 8 : 15, ticks: [[0, 'EQ'], [15, '15\u00b0N'], [33, 'SAN DIEGO'], [47, 'WA']].filter(function(t){ return K.coast.lats.indexOf(t[0]) >= 0; }) });
+    function kelDraw(big, xo){
+      var K = S.kel; if (!K || !K.eq) return; xo = xo || {};
+      var a = document.getElementById('kel-eq'); if (a) kelHov(a, K.eq.hp || K.eq.cm, K.eq.lons, { dates: K.eq.dates, big: big, h: xo.h, ink: xo.ink, path: xo.ink && K.wave ? K.wave.path : null, sm: [1, 0], scale: K.eq.hp ? 8 : 15, ticks: [[130, '130\u00b0E'], [160, '160\u00b0E'], [190, '170\u00b0W'], [220, '140\u00b0W'], [250, '110\u00b0W'], [275, '85\u00b0W']] });
+      var b = document.getElementById('kel-co'); if (b && K.coast && K.coast.cm.length) kelHov(b, (K.coast.hp && K.coast.hp.length) ? K.coast.hp : K.coast.cm, K.coast.lats, { dates: K.coast.dates, big: big, h: xo.h, ink: xo.ink, sm: [2, 1], scale: K.coast.hp ? 8 : 15, ticks: [[0, 'EQ'], [15, '15\u00b0N'], [33, 'SAN DIEGO'], [47, 'WA']].filter(function(t){ return K.coast.lats.indexOf(t[0]) >= 0; }) });
+    }
+    /* THE KELVIN CHARTS TAKE THE STAGE (user 2026-10-18: "do all these" -- the Kelvin view "still shows a globe; replace the
+       globe there with the Kelvin charts themselves ... sized like the globe was", and "plot the 13 CO-OPS West Coast gauges
+       ... as dots on a West Coast map"). While THE KELVIN WAVE sub-tab is up the globe (or the flat map) is hidden and this
+       stage stands where it stood, the same square (the globe's 1:1, at most 540 px): on the left the equator's sea level
+       with the tracked crest drawn on it, and under it the coast's; on the right a West Coast map of the tide gauges, each
+       dot in its flood-nearness color with its name and this month's extra water in feet, tap for the card. On a phone the
+       two charts sit side by side and the map goes under them. Called from render() and from stageSet(), so any switch
+       that puts the globe back up takes this stage away again. */
+    var KMAP = null, kesc = function(x){ return String(x == null ? '' : x).replace(/[&<>"]/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+    var kelCol = function(g2){ var mn = g2.minor_mhhw, kp = g2.king_plus, near = mn != null && kp != null ? kp - mn : null;
+      /* the table's own reading: the month's top tide plus the extra water, against the minor flood level */
+      return near == null ? ['#8b93a7', 'NO FLOOD LEVEL SET'] : near >= 0 ? ['#ef4444', 'TOP TIDE REACHES MINOR FLOODING'] : near > -0.5 ? ['#f97316', 'TOP TIDE WITHIN HALF A FOOT OF MINOR FLOODING']
+        : near > -1 ? ['#facc15', 'TOP TIDE WITHIN A FOOT OF MINOR FLOODING'] : ['#22d3ee', 'TOP TIDE MORE THAN A FOOT BELOW MINOR FLOODING']; };
+    function kelStage(force){
+      var K = S.kel, want = force !== false && CUR === 'enso' && S.sub === 'kelvin' && !!(K && K.eq);
+      var st = document.getElementById('es-kel-stage'), mp = document.getElementById('es-map'), lf = document.getElementById('es-left');
+      if (!want){
+        if (!st) return;
+        if (KMAP){ try { KMAP.remove(); } catch(e){} KMAP = null; } st.parentNode.removeChild(st);
+        if (mp) mp.style.display = STAGE === 'map' ? 'block' : 'none'; if (GLOBE.el) GLOBE.show(STAGE === 'globe');
+        if (CUR === 'enso') try { ensoLine(); } catch(e){} return; }
+      if (!lf || !mp) return;
+      mp.style.display = 'none'; if (GLOBE.el) GLOBE.el.style.display = 'none';
+      /* the caption under the stage says what the stage shows, not the sea-temperature skin that is hidden */
+      line('<span style="color:#b91c1c;font-weight:900;letter-spacing:.06em;">SEA LEVEL AGAINST NORMAL</span> <span style="color:rgba(30,30,50,.6);font-weight:600;">· red is a higher sea, blue lower. A Kelvin wave is a red band slanting right along the equator; weeks later it runs up the coast and lifts the West Coast’s tides.</span>');
+      var Wl = lf.clientWidth || 600, narrow = Wl < 560, key = (K.built || '') + '|' + Math.round(Wl / 20);
+      if (st && st.getAttribute('data-k') === key) return;
+      if (KMAP){ try { KMAP.remove(); } catch(e){} KMAP = null; }
+      if (!st){ st = document.createElement('div'); st.id = 'es-kel-stage'; lf.insertBefore(st, mp); }
+      st.setAttribute('data-k', key);
+      var side = Math.min(540, Wl), pad = 10, t8 = 'font:800 8px system-ui,sans-serif;letter-spacing:.09em;color:rgba(255,255,255,.72);margin:0 0 3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+      st.style.cssText = 'position:relative;box-sizing:border-box;width:100%;padding:' + pad + 'px;background:#0b1020;border-radius:12px;display:grid;gap:10px;'
+        + (narrow ? 'grid-template-columns:minmax(0,1fr);' : 'height:' + side + 'px;grid-template-columns:minmax(0,3fr) minmax(0,2fr);');
+      var hC = narrow ? 230 : Math.floor((side - 2 * pad - 10 - 2 * 14) / 2);
+      st.innerHTML = '<div style="min-width:0;display:grid;gap:10px;' + (narrow ? 'grid-template-columns:minmax(0,3fr) minmax(0,2fr);' : 'align-content:start;') + '">'
+        + '<div style="min-width:0;"><div style="' + t8 + '">' + (K.wave ? (narrow ? 'THE EQUATOR' : 'THE EQUATOR, INDONESIA TO ECUADOR') + ' · <span style="color:#fff;">LINE = TRACKED CREST</span>' : 'ALONG THE EQUATOR, INDONESIA TO ECUADOR') + '</div><canvas id="kel-eq" style="display:block;width:100%;"></canvas></div>'
+        + '<div style="min-width:0;"><div style="' + t8 + '">' + (narrow ? 'UP THE COAST' : 'THEN UP THE COAST, ECUADOR TO WASHINGTON') + '</div><canvas id="kel-co" style="display:block;width:100%;"></canvas></div></div>'
+        + '<div style="min-width:0;display:flex;flex-direction:column;"><div style="' + t8 + '">THE WEST COAST’S TIDE GAUGES · EXTRA WATER, 30 DAYS</div>'
+        + '<div id="kel-map" style="position:relative;flex:1 1 auto;min-height:' + (narrow ? 340 : 200) + 'px;border-radius:8px;overflow:hidden;background:#0b1020;"></div></div>';
+      try { kelDraw(true, { h: hC, ink: 'rgba(255,255,255,.7)' }); } catch(e){}
+      kelMap(document.getElementById('kel-map'), K);
+    }
+    function kelMap(el, K){
+      if (!el || !window.L) return;
+      var G = (K.gauges || []).filter(function(g2){ return isFinite(+g2.lat) && isFinite(+g2.lon); }); if (!G.length) return;
+      var M2 = KMAP = L.map(el, { zoomControl: false, attributionControl: true, scrollWheelZoom: false, zoomSnap: 0.25, minZoom: 3, maxZoom: 9 });
+      L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', { attribution: '<a href="https://www.arcgis.com/home/item.html?id=1e126e7520f9466c9ca28b8f28b5e500" target="_blank" rel="noopener">© Esri, Garmin, GEBCO, NOAA NGDC</a>', maxZoom: 13, className: 'hurricane-basemap-inverted' }).addTo(M2);   /* the widget's own dark ocean base */
+      /* the coast at the right, the open Pacific to its left for the names */
+      M2.fitBounds([[31.6, -131], [49.4, -116.4]], { padding: [4, 4] });
+      var ft = function(v){ return (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(1) + ' FT'; }, md = function(d){ return new Date(String(d).slice(0, 10) + 'T12:00:00Z').toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric' }).toUpperCase(); };
+      var card = document.createElement('div'); card.style.cssText = 'position:absolute;left:8px;right:8px;bottom:22px;z-index:700;display:none;padding:8px 10px;border-radius:9px;background:rgba(10,13,22,.94);color:#fff;font:700 8.5px/1.5 system-ui,sans-serif;letter-spacing:.05em;cursor:pointer;';
+      /* the key to the dot colors, top right over the land */
+      var key = document.createElement('div'); key.style.cssText = 'position:absolute;right:6px;top:6px;z-index:660;padding:4px 7px;border-radius:7px;background:rgba(10,13,22,.86);color:#fff;font:800 7px/1.6 system-ui,sans-serif;letter-spacing:.06em;pointer-events:none;';
+      key.innerHTML = '<div style="opacity:.6;">TOP TIDE + EXTRA WATER</div>' + [['#ef4444', 'AT MINOR FLOODING'], ['#f97316', 'WITHIN 0.5 FT'], ['#facc15', 'WITHIN 1 FT'], ['#22d3ee', 'MORE THAN 1 FT BELOW']].map(function(k2){ return '<div><span style="display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:' + k2[0] + ';"></span>' + k2[1] + '</div>'; }).join('');
+      el.appendChild(key);
+      el.appendChild(card); card.addEventListener('click', function(e){ e.stopPropagation(); card.style.display = 'none'; });
+      L.DomEvent.disableClickPropagation(card);
+      var show = function(g2){ var c = kelCol(g2), wk2 = g2.week_max;
+        card.innerHTML = '<div style="display:flex;align-items:center;gap:7px;font:800 10px system-ui,sans-serif;letter-spacing:.06em;"><span style="width:9px;height:9px;border-radius:50%;flex:none;background:' + c[0] + ';box-shadow:0 0 0 1.5px #fff;"></span>' + kesc(String(g2.name).toUpperCase()) + '<span style="margin-left:auto;opacity:.55;font-size:9px;">✕</span></div>'
+          + '<div style="color:' + c[0] + ';margin-top:2px;">' + c[1] + '</div>'
+          + '<div>SEA ABOVE THE TIDE TABLE, 30 DAYS ' + (g2.anom30_ft != null ? '<b>' + ft(g2.anom30_ft) + '</b>' : '—') + '</div>'
+          + (wk2 ? '<div>HIGHEST LAST WEEK ' + wk2[1].toFixed(1) + ' FT, ' + md(wk2[0]) + (g2.minor_mhhw != null && wk2[1] >= g2.minor_mhhw ? ' · <b style="color:#ef4444;">FLOODED</b>' : '') + '</div>' : '')
+          + (g2.next_king ? '<div>THIS MONTH’S TOP TIDE + THAT ' + (g2.king_plus != null ? g2.king_plus : g2.next_king[1]).toFixed(1) + ' FT, ' + md(g2.next_king[0]) + (g2.minor_mhhw != null ? ' · MINOR FLOODING AT ' + g2.minor_mhhw.toFixed(1) + ' FT' : '') + '</div>' : '')
+          + '<div style="opacity:.55;margin-top:2px;">FEET ABOVE THE AVERAGE DAILY HIGH TIDE · NOAA CO-OPS ' + kesc(String(g2.id || '')) + '</div>';
+        card.style.display = 'block'; };
+      G.forEach(function(g2){ L.circleMarker([+g2.lat, +g2.lon], { radius: 5.5, color: '#fff', weight: 1.6, fillColor: kelCol(g2)[0], fillOpacity: 1, bubblingMouseEvents: false })
+        .on('click', function(){ show(g2); }).addTo(M2); });
+      /* THE NAMES IN A COLUMN OVER THE OCEAN: the three Southern California gauges sit within a few pixels of each other at
+         this scale, so each tag is set at its dot's height, pushed down past the one above, and tied back by a thin line */
+      var lay = document.createElement('div'); lay.style.cssText = 'position:absolute;inset:0;z-index:650;pointer-events:none;'; el.appendChild(lay);
+      var place = function(){
+        var P = G.map(function(g2){ var q = M2.latLngToContainerPoint([+g2.lat, +g2.lon]); return { g: g2, x: q.x, y: q.y }; }).sort(function(a, b){ return a.y - b.y; });
+        var x0 = Math.min.apply(null, P.map(function(q){ return q.x; })) - 14, last = -99, Hh = el.clientHeight || 300, Ww = el.clientWidth || 200, out = [];
+        P.forEach(function(q){ q.ty = Math.max(q.y, last + 13); last = q.ty; });
+        /* the column would run off the foot: pull it back up from the bottom */
+        if (last > Hh - 24) for (var i = P.length - 1, lim = Hh - 24; i >= 0; i--){ P[i].ty = Math.min(P[i].ty, lim); lim = P[i].ty - 13; }
+        var svg = '<svg width="' + Ww + '" height="' + Hh + '" style="position:absolute;left:0;top:0;overflow:visible;">';
+        P.forEach(function(q){ svg += '<line x1="' + (x0 + 2) + '" y1="' + q.ty + '" x2="' + q.x + '" y2="' + q.y + '" stroke="rgba(255,255,255,.5)" stroke-width="1"/>'; });
+        lay.innerHTML = svg + '</svg>';
+        P.forEach(function(q){ var c = kelCol(q.g)[0];
+          out.push('<div data-kg="' + kesc(String(q.g.id)) + '" style="position:absolute;right:' + Math.round(Ww - x0) + 'px;top:' + Math.round(q.ty - 6) + 'px;pointer-events:auto;cursor:pointer;white-space:nowrap;font:800 7.5px/1.35 system-ui,sans-serif;letter-spacing:.05em;color:#fff;background:rgba(10,13,22,.88);padding:0 5px;border-radius:4px;box-shadow:0 0 0 1px ' + c + ';">'
+            + kesc(String(q.g.name).toUpperCase()) + (q.g.anom30_ft != null ? ' <span style="color:' + c + ';">' + ft(q.g.anom30_ft) + '</span>' : '') + '</div>'); });
+        lay.insertAdjacentHTML('beforeend', out.join(''));
+        [].slice.call(lay.querySelectorAll('[data-kg]')).forEach(function(d){ L.DomEvent.disableClickPropagation(d); d.onclick = function(e){ e.stopPropagation(); var id = d.getAttribute('data-kg'); G.forEach(function(g2){ if (String(g2.id) === id) show(g2); }); }; });
+      };
+      M2.on('zoomend moveend resize', place); setTimeout(function(){ try { M2.invalidateSize(); M2.fitBounds([[31.6, -131], [49.4, -116.4]], { padding: [4, 4] }); place(); } catch(e){} }, 0);
     }
     /* which way the dice are loaded, by where the viewer is. NOAA's typical pattern for the cold half of the year;
        a tendency over many events, never a forecast for this one. `s` is +1 El Nino, -1 La Nina. */
@@ -109542,7 +109663,8 @@ function closeAlertModal(){
       var subBtn = function(k, t){ var on = S.sub === k; return '<button type="button" data-ensosub="' + k + '" style="cursor:pointer;font:800 9px system-ui,sans-serif;letter-spacing:.1em;padding:6px 13px;border-radius:13px;border:1px solid #1b2340;background:' + (on ? '#1b2340' : 'rgba(255,255,255,.7)') + ';color:' + (on ? '#fff' : '#1b2340') + ';">' + t + '</button>'; };
       var subRow = '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">' + subBtn('enso', 'EL NIÑO') + (S.kel && S.kel.eq ? subBtn('kelvin', 'THE KELVIN WAVE \u00b7 WEST COAST WATER') : '') + '</div>';
       var wireSub = function(){ [].slice.call(root.querySelectorAll('[data-ensosub]')).forEach(function(b){ b.onclick = function(e){ e.stopPropagation(); if (S.sub === b.getAttribute('data-ensosub')) return; S.sub = b.getAttribute('data-ensosub'); if (S.sub === 'kelvin') stopAnim(); render(); }; }); };
-      if (S.sub === 'kelvin' && S.kel && S.kel.eq){ root.innerHTML = subRow + kelHtml(true); wireSub(); try { kelDraw(true); } catch(e){} return; }
+      if (S.sub === 'kelvin' && S.kel && S.kel.eq){ root.innerHTML = subRow + kelHtml(true); wireSub(); try { kelStage(); } catch(e){} return; }
+      try { kelStage(); } catch(e){}   /* back on EL NIÑO: the stage goes and the globe returns */
       root.innerHTML = subRow +
         '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;">'
         + (D ? '<span style="font:900 10px system-ui,sans-serif;letter-spacing:.14em;color:#fff;background:' + chip + ';padding:5px 11px;border-radius:13px;">' + st + '</span>' : '')
@@ -109603,7 +109725,7 @@ function closeAlertModal(){
     var mapPlay = function(){
       var host = STAGE === 'globe' ? GLOBE.el : document.getElementById('es-map'), b = document.getElementById('es-enso-mapplay');
       if (b && b.parentNode !== host){ b.parentNode.removeChild(b); b = null; }                     // the stage changed under it
-      var want = !!host && CUR === 'enso' && !S.anim && !!S.day;
+      var want = !!host && CUR === 'enso' && !S.anim && !!S.day && S.sub !== 'kelvin';
       if (!want){ if (b && b.parentNode) b.parentNode.removeChild(b); return; }
       if (b) return;
       b = document.createElement('button'); b.id = 'es-enso-mapplay'; b.type = 'button';
@@ -109623,7 +109745,7 @@ function closeAlertModal(){
       NINO.push(L.marker([-5, -170], { interactive: false, pane: 'es-anno', icon: L.divIcon({ className: '', iconAnchor: [0, -4],
         html: '<div style="display:inline-block;font:800 9px system-ui,sans-serif;letter-spacing:.06em;color:#1b2340;background:rgba(255,252,244,.9);padding:2px 6px;border-radius:4px;white-space:nowrap;">NIÑO 3.4 · THE BOX THAT IS WATCHED' + (Lw && S.cmp === 'now' ? ' · ' + F(Lw.n34) + ' THIS WEEK' : '') + '</div>' }) }).addTo(EM));
     };
-    window.addEventListener('resize', function(){ if (CUR === 'enso' && isOpen()){ var cv = document.getElementById('enso-chart'); if (cv) chart(cv); } });
+    window.addEventListener('resize', function(){ if (CUR === 'enso' && isOpen()){ var cv = document.getElementById('enso-chart'); if (cv) chart(cv); try { kelStage(); } catch(e){} } });
 
     /* ON THE GLOBE the same three controls drive the sphere instead of the flat map: the skin is one whole-world picture,
        and PLAY swaps 46 of them (1,024 px each) through the first skin slot. The panel, its buttons and its scrubber do not
@@ -109637,6 +109759,7 @@ function closeAlertModal(){
     };
     stopAnim = function(){ if (GPLAY.stop(true)){ S.anim = null; if (CUR === 'enso' && STAGE === 'globe') skin(); } stopAnimFlat(); };
     startAnim = function(){
+      if (S.sub === 'kelvin') return;                              /* the globe is hidden under the Kelvin stage: nothing to play */
       if (STAGE !== 'globe') return startAnimFlat();
       if (!S.day || CUR !== 'enso') return;
       S.cmp = 'now'; S.anim = 'loading'; render();
@@ -111410,7 +111533,7 @@ function closeAlertModal(){
             if (!still && !S.anim) setTimeout(function(){ if (CUR === 'enso' && !S.anim) startAnim(); }, 400); }).catch(function(){ if (CUR === 'enso') render(); }); },
         globe: function(){ GLOBE.V.cells = null; GLOBE.annot = ensoAnnot; GLOBE.face(2, -140); return skin(); },
         flat: function(){ fit(wide() ? [[-32, -215], [52, -60]] : [[-26, -178], [36, -78]]); skin(); ninoBox(true); },
-        off: function(){ stopAnim(); S.cmp = 'now'; ninoBox(false); skinSet(null); } },
+        off: function(){ stopAnim(); S.cmp = 'now'; ninoBox(false); skinSet(null); try { kelStage(false); } catch(e){} } },
       gulf: { label: 'GULF STREAM', on: function(){ GULF(true); }, off: function(){ GULF(false); } },
       amoc: { label: 'AMOC', on: function(){ AMOC(true); renderAmoc(); loadAmoc().then(function(){ if (CUR === 'amoc') renderAmoc(); }); }, off: function(){ AMOC(false); } },
       jet:  { label: 'JET STREAM', group: 'THE WIND', panel: jetPanel,
