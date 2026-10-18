@@ -7,7 +7,8 @@ never difference one composite); baseline = max of the August composites; progre
 (MODIS IGBP land cover: the five forest classes and woody savanna) where August greenness > 0.55; a 5-px median; the same
 peak-centred colour ramp (green -> yellow -> orange at 20% = peak -> red -> brown 40%+ bare).
 
-Cut into a tile pyramid instead of one frame: computed at z8 (~600 m at 45 N), in 2048 px blocks over 24-70 N, -170..-52, then z3-7 by averaging. Blocks with no
+Cut into a tile pyramid instead of one frame: computed at z9 (~216 m at 45 N, the composite's own 250 m; was z8 until
+2026-10-18), in 2048 px blocks over 24-70 N, -170..-52, then z3-8 by averaging. Blocks with no
 forest are skipped. The August baseline and the forest mask are fixed for the season, so each is cached per block as a
 .npz (BASE_DIR) and only the two current composites are fetched daily.
 Plus the USA-NPN "colored leaves" reports of the last fortnight for every state (points.json).
@@ -55,8 +56,11 @@ RAMP_LEGEND = [(0, '0%'), (8, '8%'), (15, '15%'), (20, '20% PEAK'), (28, '28%'),
 STATES = ['AL','AZ','AR','CA','CO','CT','DE','FL','GA','ID','IL','IN','IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT',
           'NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY','AK','DC']
 CLASSES = {'Less than 5%': 0, '5-24%': 1, '25-49%': 2, '50-74%': 3, '75-94%': 4, '95% or more': 5}
-# z8 (~600 m at 45 N; was z7, blocky past z9 -- 2026-10-17)
-Z = 8; BLK = 2048; R = 6378137.0; WORLD = 2 * math.pi * R
+# z9 (user 2026-10-18: "finer foliage"). The pixel is 306 m at the equator, 216 m at 45 N, 105 m at 70 N: the NDVI
+# composite's own 250 m (MODIS 250 m red/NIR bands), so z9 is the ceiling -- z10 would only resample it. The forest mask
+# is coarser where it comes from IGBP (500 m); the FIA golds are 250 m. Was z8 (~430 m at 45 N) on 2026-10-17, z7 before.
+# Four times the blocks of z8 (308 in the box, ~140 with forest), so the cache is its own (na_base9 on R2).
+Z = 9; BLK = 2048; R = 6378137.0; WORLD = 2 * math.pi * R
 LON0, LON1, LAT0, LAT1 = -170.0, -52.0, 24.0, 70.0
 AUG_DAYS = (8, 16, 24, 31)
 SEASON_START, SEASON_END = (9, 15), (12, 1)
@@ -128,8 +132,12 @@ BANDS = [(0, 'NOT YET'), (8, 'STARTING'), (15, 'NEAR PEAK'), (20, 'PEAK'), (30, 
 REL = [(0.0, 'NOT YET'), (0.35, 'STARTING'), (0.75, 'NEAR PEAK'), (0.95, 'PEAK'), (1.3, 'PAST PEAK')]
 PEAK_RISE = 8.0     # points of index in a week: the colour phase's steep week
 PEAK_FRAC = 0.40    # share of the season's whole loss
-# a county needs this many forest pixels for a block: the Northeast's 400 at its 922 m frame pixel, as the same ground at z8
-COUNTY_MIN_PX = 900
+# a county needs this many forest pixels for a block: the Northeast's 400 at its 922 m frame pixel, as the same ground at z9
+# (900 at z8)
+COUNTY_MIN_PX = 3600
+# the weekly archive keeps z3-8: the page plays the season frames at native z7 (z9 would be four times the upload for
+# nothing it draws)
+ARCHIVE_ZMAX = 8
 
 
 def get(u, timeout=240):
@@ -299,7 +307,7 @@ def block_tiles(p, bx, by, out):
     return n
 
 def pyramid(grids, out, zmin=3):
-    """z7..zmin from the z8 progress grids ({(bx, by): path of a u8 .npy}): average the children's progress (ignoring
+    """Z-1..zmin from the Z progress grids ({(bx, by): path of a u8 .npy}): average the children's progress (ignoring
     non-forest), then the same ramp"""
     for zz in range(Z - 1, zmin - 1, -1):
         k = 2 ** (Z - zz); tiles = {}
@@ -458,7 +466,7 @@ def archive_this_season(today, prev, out):
     last = max(have) if have else None
     if (last is None or (today - datetime.date.fromisoformat(last)).days >= 7) and datetime.date(today.year, *SEASON_START) <= today <= datetime.date(today.year, *SEASON_END):
         dst = os.path.join(out, 'season', str(today.year), today.isoformat())
-        for zz in range(3, Z + 1):
+        for zz in range(3, min(Z, ARCHIVE_ZMAX) + 1):
             if os.path.isdir(os.path.join(out, str(zz))):
                 shutil.copytree(os.path.join(out, str(zz)), os.path.join(dst, str(zz)), dirs_exist_ok=True)
         have.append(today.isoformat()); print('season: archived', today.isoformat())
@@ -560,6 +568,7 @@ def main():
             'season_this': season_this, 'forest': fdoc or None, 'species': sdoc or None}
     pts = npn(today)
     doc = {'built': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%MZ'), 'composites': [str(d1), str(d2)],
+           'minzoom': 3, 'maxzoom': Z,
            'baseline': [str(d) for d in aug], 'points': pts, 'ramp': RAMP_LEGEND, 'ramp_stops': RAMP,
            'regions': regions, 'bands': BANDS, 'rel_bands': REL,
            'history': hist, 'last_year': ly,
@@ -570,7 +579,7 @@ def main():
            'species': sdoc or None, 'species_url': sdoc.get('url'), 'species_legend': sdoc.get('legend')}
     json.dump(doc, open(os.path.join(OUT, 'meta.json'), 'w'), separators=(',', ':'))
     json.dump(keep, open(carry_p, 'w'), separators=(',', ':'))
-    print('tiles z8', tot, '| regions', len(regions), '| counties', len(counties_now), '| history', len(hist),
+    print('tiles z%d' % Z, tot, '| regions', len(regions), '| counties', len(counties_now), '| history', len(hist),
           '| season_last', len((season_last or {}).get('dates') or []), '| season_this', len(season_this['dates']))
 
 

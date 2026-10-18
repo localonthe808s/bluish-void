@@ -62,7 +62,7 @@ def main():
         if not os.path.isdir(os.path.join(dst, '3')):
             n = 0
             for (bx, by), f in grids.items(): n += na.block_tiles(na.from_u8(np.load(f)), bx, by, dst)
-            print(d, 'z8:', n, 'tiles', flush=True)
+            print(d, 'z%d:' % na.Z, n, 'tiles', flush=True)
             na.pyramid(grids, dst)
         rm = na.region_means(grids); cm = na.county_means(grids, fbase, ids)
         have.append(d.isoformat())
