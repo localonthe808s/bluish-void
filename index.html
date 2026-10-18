@@ -107780,9 +107780,9 @@ function closeAlertModal(){
        heading, its route named beside it once the view is close; refreshed every 30 s while TRAFFIC is open. Decoded by
        hand like THE CITY's MTA reader (no protobuf library): FeedEntity 4 = VehiclePosition -> trip 1 (route_id 5),
        position 2 (lat 1, lon 2, bearing 3 as fixed32 floats), vehicle 8 (label 2). */
-    TR.feeds = null; TR.veh = {}; TR.vehAt = {};
+    TR.feeds = null; TR.veh = {}; TR.vehAt = {}; TR.vehBox = {}; TR.vehSeq = {};
     TR.NYX = [{ id: 'mta-mnr', n: 'Metro-North Railroad', u: 'https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/mnr%2Fgtfs-mnr', c: 1, b: [-74.3, 40.7, -72.9, 41.9], k: 'rail' },
-      { id: 'mta-bus', n: 'MTA Bus', u: 'https://gtfsrt.prod.obanyc.com/vehiclePositions', c: 0, b: [-74.26, 40.49, -73.69, 40.92], k: 'bus', nyc: 1, z: 12 }];
+      { id: 'mta-bus', n: 'MTA Bus', u: 'https://gtfsrt.prod.obanyc.com/vehiclePositions', c: 0, b: [-74.26, 40.49, -73.69, 40.92], k: 'bus', nyc: 1, z: 12, vb: 1 }];
     TR.kind = function(f){ return f.k || (/lirr|metro-north|railroad|rail road|marc|metra|caltrain|commuter/i.test(f.n + ' ' + f.u) ? 'rail' : 'bus'); };
     var pbVar = function(b, i){ var v = 0, k = 1; for (;;){ var x = b[i++]; v += (x & 127) * k; if (!(x & 128)) return [v, i]; k *= 128; } };
     var pbWalk = function(b, dv, s0, e0, cb){
@@ -107815,11 +107815,24 @@ function closeAlertModal(){
          MTA's bus positions (Bus Time GTFS-rt, keyless, no CORS: through the proxy) when the place is NYC and the map is close */
       var extra = TR.NYX.filter(function(f){ return !f.nyc || (nycHere() && M.getZoom() >= (f.z || 0)); });
       TR.inView = TR.feeds.concat(extra).filter(function(f){ return f.u.indexOf('nyct%2Fgtfs') < 0 && f.b[0] <= e && f.b[2] >= w && f.b[1] <= n && f.b[3] >= s2; }).slice(0, 8);
+      /* ONLY THE BUSES IN VIEW (perf item 16, 2026-10-18): the MTA bus feed (vb) is ~252 KB / ~70 KB brotli for all ~1,960 buses
+         every 30 s, yet only the box on screen is drawn. Asked with &vbox= (the view padded a quarter each side), the proxy cuts it
+         at the edge and answers JSON {box, v:[[route, lat, lon, bearing, time]]} -- float32 values sent shortest and Math.fround'ed
+         back, so each mark is the double the decoder below makes. A pan out of the cut box refetches at once (not the 30 s wait);
+         a late answer for an older box is dropped. A proxy without the mode ignores vbox and answers the raw feed: read as before
+         (full city, box null). An error from the mode falls back to the plain raw url. */
+      var vbIn = function(B){ return !B || (B[0] <= w && B[1] <= s2 && B[2] >= e && B[3] >= n); };
       TR.inView.forEach(function(f){
-        if (now - (TR.vehAt[f.id] || 0) < 28000) return; TR.vehAt[f.id] = now;
-        var u = f.c ? f.u : 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent(f.u) + '&ttl=15';
-        fetch(u).then(function(r){ return r.ok ? r.arrayBuffer() : null; }).then(function(ab){ if (!ab) return;
-          try { TR.veh[f.id] = gtfsVehicles(ab); } catch(e2){ TR.veh[f.id] = []; } TR.draw(); }).catch(function(){});
+        if (now - (TR.vehAt[f.id] || 0) < 28000 && (!f.vb || vbIn(TR.vehBox[f.id]))) return; TR.vehAt[f.id] = now;
+        var raw = f.c ? f.u : 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent(f.u) + '&ttl=15', u = raw, sq = TR.vehSeq[f.id] = (TR.vehSeq[f.id] || 0) + 1;
+        if (f.vb && !f.c){ var pw = (e - w) / 4, ph = (n - s2) / 4;
+          u = raw + '&vbox=' + [w - pw, s2 - ph, e + pw, n + ph].map(function(x){ return x.toFixed(3); }).join(','); }
+        var take = function(r){ if (!r.ok) return null; return u !== raw && /json/.test(r.headers.get('Content-Type') || '') ? r.json().then(function(j){ return { j: j }; }) : r.arrayBuffer().then(function(ab){ return { ab: ab }; }); };
+        var fr = function(x){ return x === null ? null : Math.fround(x); };
+        fetch(u).then(take).catch(function(){ return null; }).then(function(R){ return R || u === raw ? R : fetch(raw).then(take); }).then(function(R){ if (!R || sq !== TR.vehSeq[f.id]) return;
+          if (R.j){ TR.veh[f.id] = (R.j.v || []).map(function(a){ return { r: a[0], la: fr(a[1]), lo: fr(a[2]), br: fr(a[3]), t: a[4] }; }); TR.vehBox[f.id] = R.j.box || null; }
+          else { try { TR.veh[f.id] = gtfsVehicles(R.ab); } catch(e2){ TR.veh[f.id] = []; } TR.vehBox[f.id] = null; }
+          TR.draw(); }).catch(function(){});
       });
     };
     /* CITY CAMERAS (step 3, NYC and LA only): THE CITY's NYC DOT cameras (baked /nyc_cams.json; images straight off
