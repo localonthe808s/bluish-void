@@ -134,7 +134,11 @@ EDGE = [
   {'mode': 'foot'}, ''),
  ('ROCKY MOUNTAIN FRONT', [('SOUTHERN ROCKY MOUNTAINS', ''), ('MIDDLE ROCKY MOUNTAINS', ''), ('NORTHERN ROCKY MOUNTAINS', '')],
   [('GREAT PLAINS', 'COLORADO PIEDMONT'), ('GREAT PLAINS', 'HIGH PLAINS'), ('GREAT PLAINS', 'RATON'), ('GREAT PLAINS', 'MISSOURI PLATEAU, UNGLACIATED'), ('GREAT PLAINS', 'MISSOURI PLATEAU, GLACIATED')], 700,
-  {'mode': 'foot'}, 'CHINOOK: WARM GUSTS BELOW'),
+  # THE FOOT, NOT THE SECTION SEAM (user 2026-10-18: "jog near Cañon City (it follows Fenneman's section border west around
+  # the Royal Gorge area)"): from Colorado Springs the trace is seeded along the mountain foot -- Cheyenne Mountain, Cañon
+  # City, then down the Wet Mountains' east face past Florence, Wetmore, Beulah and Rye -- before rejoining the border
+  {'mode': 'foot', 'seeds': [[(-104.86, 38.86), (-104.88, 38.74), (-104.97, 38.62), (-105.08, 38.52), (-105.20, 38.46), (-105.13, 38.37),
+                              (-105.08, 38.23), (-104.99, 38.08), (-104.95, 37.93), (-104.98, 37.86)]]}, 'CHINOOK: WARM GUSTS BELOW'),
  ('SIERRA WEST SLOPE', [('CASCADE-SIERRA MOUNTAINS', 'SIERRA NEVADA')], [('PACIFIC BORDER', 'CALIFORNIA TROUGH')], 700,
   {'mode': 'foot'}, 'DRY EAST WINDS: FIRE WEATHER'),
  ('SIERRA ESCARPMENT', [('CASCADE-SIERRA MOUNTAINS', 'SIERRA NEVADA')], [('BASIN AND RANGE', 'GREAT BASIN')], 700,
@@ -149,23 +153,40 @@ EDGE = [
   [('BASIN AND RANGE', 'MEXICAN HIGHLAND'), ('BASIN AND RANGE', 'SONORAN DESERT')], 700,
   {'mode': 'rim', 'minstep': 10}, ''),
  ('BALCONES ESCARPMENT', [('GREAT PLAINS', 'EDWARDS PLATEAU')], [('COASTAL PLAIN', 'WEST GULF COASTAL PLAIN')], 850,
-  {'corr': 20, 'minstep': 7}, ''),
+  # ON TO WACO (user 2026-10-18: "the line stops at Fenneman's Edwards Plateau border so the Austin-Waco stretch is
+  # missing"): north of Austin the Balcones Fault Zone divides the Lampasas Cut Plain from the Blackland Prairie, which
+  # Fenneman files under other sections; a seed through Georgetown, Salado, Belton and Moody, snapped to the steepest face
+  {'corr': 20, 'minstep': 5, 'seeds': [[(-97.15, 31.55), (-97.30, 31.38), (-97.40, 31.20), (-97.49, 31.03), (-97.57, 30.86), (-97.68, 30.64),
+                                        (-97.73, 30.46), (-97.79, 30.30)]]}, ''),
  # the Fenneman Caprock line runs 25-35 km east of the real lip of the Llano Estacado: a wider corridor, a weaker pull
  ('CAPROCK ESCARPMENT', [('GREAT PLAINS', 'HIGH PLAINS')], [('CENTRAL LOWLAND', 'OSAGE PLAINS')], 850,
-  {'corr': 40, 'minstep': 7, 'mode': 'rim', 'pull': 0.25}, ''),
+  # ...and its lip wraps the canyons (user 2026-10-18: "cut across canyon country instead of wrapping the escarpment around
+  # the canyons"): the long stretch is the tableland's own outline (snap.lip), seeded at Lubbock, from where the old trace
+  # began south of the Canadian breaks (-100.15, 35.45: north of it the outline wanders the breaks) to Big Spring
+  {'corr': 40, 'minstep': 7, 'mode': 'rim', 'pull': 0.25, 'lip': {'seed': (-101.85, 33.58), 'T': 45, 'close': 2.5, 'opn': 1.5, 'a': (-100.15, 35.45)}}, ''),
  ('WASATCH FRONT', [('MIDDLE ROCKY MOUNTAINS', ''), ('COLORADO PLATEAUS', 'HIGH PLATEAUS OF UTAH')], [('BASIN AND RANGE', 'GREAT BASIN')], 700,
   {'mode': 'foot'}, 'CANYON WINDS GUST BELOW'),
 ]
+# SPOTS THAT READ THE WIND (user 2026-10-18: "SPOT NOTES react to the current wind ... make their notes live like the edges";
+# "Only well-established patterns"). Each spot: kind `k`, the level its wind is read at (`lev`: 850 / 700 hPa, or 10 for the
+# 10 m wind, since the Gorge gap wind and the Front Range upslope are shallow), and `dir` -- the wind directions (FROM, deg,
+# clockwise from a to b) that set it off, each with where it acts. The page writes the note (index.html, OV.liveRead):
+#   lake   : wind across the lake toward the belt and air cold enough to steam off it (850 hPa -8 C or colder; the Great
+#            Salt Lake sits high, so its 700 hPa -12 C) -> 'WIND ACROSS THE LAKE · SNOW BANDS LIKELY' + the belt;
+#   gorge  : the gap wind either way (east: dry gusts, ice where it rains on frozen ground; west: marine air pushing inland);
+#   pscz   : onshore west-northwest flow split by the Olympics, meeting north of Seattle -> a shower (or snow) band;
+#   upslope: north to east winds climbing the Palmer Divide -> more snow, or storms and hail when unstable.
+# `min` is the least wind (mph) that counts. Otherwise the name alone, dim. `l` stays for pages still on the old reader.
 SPOT = [
- ('LAKE SUPERIOR', -87.5, 47.6, ['SNOW BELTS: SOUTH, EAST SHORES']),
- ('LAKE MICHIGAN', -87.0, 43.8, ['WEST WINDS: EAST-SHORE SNOW']),
- ('LAKE HURON', -82.4, 44.8, ['WEST WINDS: EAST-SHORE SNOW']),
- ('LAKE ERIE', -81.2, 42.2, ['SNOW BELTS: EAST, SOUTHEAST']),
- ('LAKE ONTARIO', -77.8, 43.6, ['HEAVIEST BANDS: TUG HILL']),
- ('GREAT SALT LAKE', -112.5, 41.1, ['LAKE-EFFECT SNOW SOUTH, EAST']),
- ('COLUMBIA RIVER GORGE', -121.9, 45.65, ['SEA-LEVEL GAP IN THE CASCADES', 'EAST WINDS: ICE STORMS WEST']),
- ('PUGET SOUND CONVERGENCE ZONE', -122.25, 47.95, ['WINDS SPLIT BY OLYMPICS MEET', 'A BAND OF SHOWERS OR SNOW']),
- ('PALMER DIVIDE', -104.65, 39.15, ['HIGHER RIDGE: MORE SNOW, HAIL']),
+ ('LAKE SUPERIOR', -87.5, 47.6, ['SNOW BELTS: SOUTH, EAST SHORES'], 'lake', 850, 10, [[290, 30, 'BANDS ON THE SOUTH SHORE'], [240, 289, 'BANDS INTO THE EAST END']]),
+ ('LAKE MICHIGAN', -87.0, 43.8, ['WEST WINDS: EAST-SHORE SNOW'], 'lake', 850, 10, [[240, 330, 'BANDS ON THE MICHIGAN SHORE'], [331, 20, 'BANDS INTO NW INDIANA'], [21, 70, 'BANDS ON THE CHICAGO SHORE']]),
+ ('LAKE HURON', -82.4, 44.8, ['WEST WINDS: EAST-SHORE SNOW'], 'lake', 850, 10, [[240, 340, 'BANDS ON THE ONTARIO SHORE']]),
+ ('LAKE ERIE', -81.2, 42.2, ['SNOW BELTS: EAST, SOUTHEAST'], 'lake', 850, 10, [[220, 255, 'BANDS INTO BUFFALO'], [256, 340, 'BANDS: OHIO–PENNSYLVANIA SNOW BELT']]),
+ ('LAKE ONTARIO', -77.8, 43.6, ['HEAVIEST BANDS: TUG HILL'], 'lake', 850, 10, [[240, 285, 'BANDS INTO TUG HILL'], [286, 340, 'BANDS INTO OSWEGO, SYRACUSE']]),
+ ('GREAT SALT LAKE', -112.5, 41.1, ['LAKE-EFFECT SNOW SOUTH, EAST'], 'lake', 700, 10, [[290, 360, 'BANDS INTO THE SALT LAKE VALLEY']]),
+ ('COLUMBIA RIVER GORGE', -121.9, 45.65, ['SEA-LEVEL GAP IN THE CASCADES', 'EAST WINDS: ICE STORMS WEST'], 'gorge', 10, 15, [[45, 135, 'EAST'], [225, 315, 'WEST']]),
+ ('PUGET SOUND CONVERGENCE ZONE', -122.25, 47.95, ['WINDS SPLIT BY OLYMPICS MEET', 'A BAND OF SHOWERS OR SNOW'], 'pscz', 850, 10, [[230, 320, '']]),
+ ('PALMER DIVIDE', -104.65, 39.15, ['HIGHER RIDGE: MORE SNOW, HAIL'], 'upslope', 10, 8, [[340, 120, '']]),
 ]
 W0, S0, DX = -125.0, 24.0, 59.0 / 2360
 
@@ -232,7 +253,15 @@ def main(shp, dem, cache, dst):
                 if np.isfinite(a1) and np.isfinite(a2): rise.append(a1 - a2)
             if not rise or float(np.median(rise)) * 3.28084 < 150: continue   # no real step (a valley seam): not this edge
             # ON THE REAL GROUND: the trace off the terrain tiles, then two simplifications
-            pcs, st = snap.snap(list(p.coords), up, cache, **prm)
+            kw = {a: b for a, b in prm.items() if a not in ('seeds', 'lip')}; cs = list(p.coords)
+            for sd in prm.get('seeds', []):
+                cs, hit = snap.splice(cs, sd); print('   seed', nm, hit)
+            if 'lip' in prm and p.length > 2:
+                L = dict(prm['lip']); a, b = L.pop('a', cs[0]), L.pop('b', cs[-1]); print('   lip', nm, cs[0], cs[-1], '->', a, b)
+                P = snap.lip(a, b, H, cache=cache, **L)
+                pcs, st = [P], {'pts': float(len(P))}
+            else:
+                pcs, st = snap.snap(cs, up, cache, **kw)
             print('  ', nm, {a: round(b, 1) for a, b in st.items()}, [len(q) for q in pcs])
             for P in pcs:
                 c = snap.simp(P, 0.002); c6 = snap.simp(P, 0.01)
@@ -241,7 +270,7 @@ def main(shp, dem, cache, dst):
         edges.append({'n': nm, 'lev': lev, 'dg': dg, 'parts': out})
         print(nm, len(out), 'parts', sum(len(o['c']) for o in out), 'points')
     J = {'v': 3, 'src': 'USGS Physiographic Divisions of the Conterminous U.S. (Fenneman & Johnson 1946); edges traced on AWS Terrain Tiles (USGS 3DEP); heights USGS 3DEP',
-         'sec': secs, 'edge': edges, 'spot': [{'n': n, 'c': [lo, la], 'l': l} for n, lo, la, l in SPOT]}
+         'sec': secs, 'edge': edges, 'spot': [{'n': n, 'c': [lo, la], 'l': l, 'k': k, 'lev': lev, 'min': mn, 'dir': dr} for n, lo, la, l, k, lev, mn, dr in SPOT]}
     json.dump(J, open(dst, 'w'), separators=(',', ':'), ensure_ascii=False)
     print(len(secs), 'sections', os.path.getsize(dst), 'bytes')
 
