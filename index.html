@@ -80827,7 +80827,12 @@ function initNowMicroTabs(){
         hurricane: null  // hurricane has its own map, no fly needed
       };
       var ft = flyTargets[tab];
-      if(ft) hazardMap.flyTo(ft.center, ft.zoom, { duration: 0.8 });
+      /* a map still 0 x 0 (just shown from under the overview, or its pane just opened) cannot fly: its projection gives
+         NaN ("Invalid LatLng object: (NaN, NaN)" on phones, 2026-10-19). Measure first; if it still has no size, jump */
+      if(ft){ try { hazardMap.invalidateSize(false); } catch(e){}
+        var _hs = hazardMap.getSize();
+        if (_hs.x > 0 && _hs.y > 0) hazardMap.flyTo(ft.center, ft.zoom, { duration: 0.8 });
+        else hazardMap.setView(ft.center, ft.zoom, { animate: false }); }
     }
 
     // Toggle legends per tab
@@ -100284,7 +100289,8 @@ function initNowMicroTabs(){
     }
     
     // 1. Scroll to hazard map widget
-    var widget = document.getElementById('hazard-widget');
+    if (window._bvHzTab) window._bvHzTab();   /* the hazards are a CLOUDS pane now */
+    var widget = document.getElementById(window._bvHzTab ? 'clouds-radar-widget' : 'hazard-widget');
     if (widget) widget.scrollIntoView({ behavior:'smooth', block:'center' });
     
     // 2. Switch to appropriate tab if matched, ensure alert layer visible
@@ -104767,6 +104773,61 @@ function closeAlertModal(){
       if (lb && window._bvInNYC && window._bvInNYC() && lb.style.display !== 'none' && window._currentCiraTab !== 'local') window.switchCiraTab('local'); };
     showBtn(); style2();
     setInterval(showBtn, 3000);   /* THE CITY's own 60 s gate hides the widget without calling _cityGate (a saved place outside NYC at boot) */
+  })();
+
+  /* NATURAL HAZARDS INTO CLOUDS (user 2026-10-19: "lets add this line [the hazard tabs] above location and forecasts as a middle
+     row" -> "move it in"). THE CITY's pattern again: the whole #hazard-widget moves into a CLOUDS pane (ids and code intact), and
+     its own tab strip (#hazard-tab-bar: OVERVIEW, WILDFIRES ... BOLIDES with their live counts and handlers) moves into the
+     second row as a full-width line above the place and FORECASTS + MODELS. A tap on a hazard opens the pane on that view; the
+     widget's own title row goes (CLOUDS' title reads the view, its SOURCES list stands in the header). */
+  (function(){
+    var W = document.getElementById('clouds-radar-widget'), body = document.getElementById('radar-widget-body'), row2 = document.getElementById('cira-tab-bar2');
+    var hw = document.getElementById('hazard-widget'), tb = document.getElementById('hazard-tab-bar');
+    if (!W || !body || !row2 || !hw || !tb || document.getElementById('cw-pane-hz')) return;
+    var oldRow = hw.parentElement;
+    var pane = document.createElement('div'); pane.id = 'cw-pane-hz'; pane.className = 'cw-xpane'; pane.style.display = 'none';
+    body.parentNode.insertBefore(pane, body.nextSibling);
+    pane.appendChild(hw); hw.style.margin = '0';
+    if (oldRow && oldRow.classList.contains('widgets-row') && !oldRow.querySelector('.widget')) oldRow.style.display = 'none';   /* its row is empty now */
+    /* the strip, as the top line of the second row */
+    row2.style.flexWrap = 'wrap';
+    row2.insertBefore(tb, row2.firstChild);
+    var css = document.createElement('style'); css.id = 'cw-hz-tab-css';
+    css.textContent = '#cira-tab-bar2 > #hazard-tab-bar{ position:static !important; flex:1 1 100% !important; width:100%; background:none !important; box-shadow:none !important;'
+      + ' backdrop-filter:none !important; -webkit-backdrop-filter:none !important; border-radius:0 !important; padding:0 0 2px !important; z-index:auto !important; order:0 !important; }'
+      /* off the pane, no hazard tab reads as picked */
+      + '#clouds-radar-widget:not(.cw-hz) #hazard-tab-bar .geo-tab{ background:none !important; border-color:transparent !important; box-shadow:none !important; }'
+      + '#cw-pane-hz #hazard-widget{ border-radius:0 0 18px 18px; box-shadow:none; }'
+      + '#cw-pane-hz #hazard-widget > .widget-head{ display:none !important; }'
+      + '#cw-pane-hz #hazard-widget #hazard-overview-dashboard{ top:0 !important; padding-top:0 !important; }';     /* the strip it made room for is up in the bar */
+    document.head.appendChild(css);
+    /* the header: CLOUDS' title follows the hazard view's own (switchHazardTab names it), its sources stand in for the satellite's */
+    var wt = document.getElementById('radar-widget-title'), fsw = document.getElementById('fcast-src-wrap'), ht = document.getElementById('hazard-title'), hs = document.getElementById('hazard-sources');
+    var savedT = null, on = false;
+    var title = function(){ if (on && wt && ht) wt.textContent = (ht.textContent || 'NATURAL HAZARDS').trim(); };
+    if (ht && window.MutationObserver) new MutationObserver(title).observe(ht, { childList: true, characterData: true, subtree: true });
+    /* CLOUDS' own start-up (when it first scrolls into view) writes its title late, over the pane's: put the view's name back */
+    if (wt && window.MutationObserver) new MutationObserver(function(){ if (on && ht && wt.textContent.trim() !== (ht.textContent || 'NATURAL HAZARDS').trim()) title(); }).observe(wt, { childList: true, characterData: true, subtree: true });
+    var head = function(v){ on = v;
+      if (v){ if (wt && savedT === null) savedT = wt.innerHTML; title();
+        if (hs && fsw){ if (hs.parentNode !== fsw.parentNode) fsw.parentNode.insertBefore(hs, fsw.nextSibling); hs.style.display = 'inline-flex'; fsw.style.display = 'none'; } }
+      else { if (wt && savedT !== null){ wt.innerHTML = savedT; savedT = null; }
+        if (hs && fsw && hs.parentNode === fsw.parentNode){ hs.style.display = 'none'; fsw.style.display = ''; } } };
+    if (hs && fsw) { fsw.parentNode.insertBefore(hs, fsw.nextSibling); hs.style.display = 'none'; }
+    var prev = window.switchCiraTab;
+    window.switchCiraTab = function(tab){
+      if (tab !== 'hz'){ if (pane.style.display !== 'none'){ pane.style.display = 'none'; W.classList.remove('cw-hz'); head(false); } return prev.apply(this, arguments); }
+      prev.call(this, 'earth');                    /* park CLOUDS: every pane and radar panel hidden, nothing loads (the GOLDEN HOUR trick) */
+      window._currentCiraTab = 'hz'; body.setAttribute('data-cira-tab', 'hz');
+      W.classList.add('cw-extra'); W.classList.add('cw-hz'); pane.style.display = '';
+      head(true);
+      /* the map was built (or will be) while hidden: measure it now */
+      setTimeout(function(){ try { window.dispatchEvent(new Event('resize')); if (window.hazardMap && window.hazardMap.invalidateSize) window.hazardMap.invalidateSize(); } catch(e){} }, 30);
+    };
+    /* a hazard tab opens the pane first; its own onclick then picks the view */
+    tb.addEventListener('click', function(e){ if (e.target.closest('.geo-tab') && window._currentCiraTab !== 'hz') window.switchCiraTab('hz'); }, true);
+    /* for the rail, #go=hazards and the alert modal: open the pane (optionally on a view) */
+    window._bvHzTab = function(view){ if (window._currentCiraTab !== 'hz') window.switchCiraTab('hz'); if (view && window.switchHazardTab) try { window.switchHazardTab(view); } catch(e){} };
   })();
 
   /* LOCAL: RADAR / MAP / GEOLOGY FOR ANY US PLACE (user 2026-10-16: "how can we reuse the the city tab for locations besides NYC
@@ -117902,7 +117963,7 @@ function closeAlertModal(){
     (function step(){
       var el = null;
       if (go === 'radar') el = at('radar-widget-title');
-      else if (go === 'hazards') el = at('hazard-title');
+      else if (go === 'hazards'){ if (window._bvHzTab){ window._bvHzTab(); el = at('radar-widget-title'); } else el = at('hazard-title'); }
       else if (go === 'golden'){ var b = document.querySelector('[data-tab="golden"]'); if (b){ b.click(); var chk = 0; (function keep(){ var p = document.getElementById('cw-pane-golden');   /* the clouds widget's own start-up can switch back: re-open until it holds, then scroll */
           if (p && getComputedStyle(p).display === 'none') b.click();
           if (++chk < 8) setTimeout(keep, 700); else window._bvGo('radar'); })(); setTimeout(function(){ window._bvGo('radar'); }, 900); return; } }
@@ -117957,7 +118018,7 @@ function closeAlertModal(){
       { id:'clouds',  label:'CLOUDS & RADAR',  anchor:'radar-widget-title',
         bg:'linear-gradient(160deg,#5a86b8,#88aed4)',
         html:(window.railCloudIcon ? window.railCloudIcon() : '') },
-      { id:'hazards', label:'NATURAL HAZARDS', anchor:'hazard-title', bare:true,
+      { id:'hazards', label:'NATURAL HAZARDS', anchor:'radar-widget-title', hz:true, bare:true,   /* in CLOUDS since 2026-10-19 */
         html:'<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="width:38px;height:38px;display:block;overflow:visible;filter:drop-shadow(0 0 3px rgba(255,45,25,.95)) drop-shadow(0 0 8px rgba(255,45,25,.6));"><g transform="translate(12,14.6) scale(0.87) translate(-12,-14.6)"><path d="M12 3.2 L22.4 21H1.6Z" fill="none" stroke="#ee2417" stroke-width="2.18" stroke-linejoin="round"/><path d="M12 9.9v4.6" stroke="#ee2417" stroke-width="2.01" stroke-linecap="round"/><circle cx="12" cy="17.5" r="1.15" fill="#ee2417"/></g></svg>' },
       // Mini solar system, drawn on transparency — `bare` so it gets no porthole
       // circle at all, the same treatment as the temperature readout. Replaces
@@ -117998,6 +118059,7 @@ function closeAlertModal(){
         if (it.id === 'top'){ window.scrollTo({top:0, behavior:'smooth'}); return; }
         if (it.id === 'alerts'){ if (window._bvWxAlertsOpen) window._bvWxAlertsOpen(); return; }
         if (it.pick && window._bvTierPick) window._bvTierPick(it.pick);   /* BEHIND THE BLUE lives under the merged tier now */
+        if (it.hz && window._bvHzTab) window._bvHzTab();                   /* NATURAL HAZARDS is a CLOUDS pane now */
         var y = targetY(it.anchor, it.exact);
         if (y === null) return;
         window.scrollTo({top:y, behavior:'smooth'});
@@ -118055,6 +118117,7 @@ function closeAlertModal(){
       var act = 0;
       for (var i = 1; i < spyAnchors.length; i++){
         var el = document.getElementById(spyAnchors[i]);
+        if (spyAnchors[i] === 'hazard-title' && window._bvHzTab){ if (window._currentCiraTab !== 'hz') continue; el = document.getElementById('radar-widget-title'); }   /* a CLOUDS pane now */
         if (!el) continue;
         var w = el.closest('.widget') || el;
         if (w.getBoundingClientRect().top + window.pageYOffset <= mark) act = i;
