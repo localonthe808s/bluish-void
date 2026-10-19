@@ -4,9 +4,18 @@
 stopping). Resumable: every tile is written as it is made, and empty ones are listed in done.txt.
 
     python3 bake.py --out OUT [--box W,S,E,N] [--maxz 13] [--workers 6]
-    python3 bake.py --out OUT --cover        # write cover.json: the z8 tiles that hold any baked tile (the client's index)
+    python3 bake.py --out OUT --cover [--merge OLD/cover.json]   # write cover.json: the z8 tiles that hold any baked tile
+                                                                  # (the client's index), joined with an earlier bake's
 
 Regions: the lower 48 + Great Lakes, Hawaii, Puerto Rico / USVI to z13; Alaska to z10 (its shelf alone would double the bake).
+
+THE ATLANTIC EXTENSION (2026-10-19, user: "extend our seafloor across the whole atlantic"): --set ext bakes EXT_REGIONS into a
+new OUT, with --have pointing at the first bake so its z10+ tiles stand (they are neither re-rendered nor copied):
+  - the lower 48 again at z5-9 only, out to 135 W: the mosaic-hole fix (render.py) for the wide tiles, and the old box edge
+    at 125.5 W (a tone step off northern California from z7) moved out to the z5 tile edge;
+  - the Atlantic basin, the Gulf and the Caribbean, out to Africa and Europe, 10 S to the Arctic circle, z5-10;
+  - the east Pacific storm belt south of the lower 48, z5-10.
+Upload OUT over bathy/v1, with cover.json merged with the first bake's (--cover --merge).
 """
 import argparse, json, math, os, sys, threading, time
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +25,7 @@ import render as RD
 
 REGIONS = [((-125.5, 24.0, -66.5, 49.6), 13), ((-160.6, 18.5, -154.4, 22.6), 13), ((-68.2, 17.5, -64.3, 18.8), 13),
            ((-179.9, 51.0, -129.5, 71.6), 10)]
+EXT_REGIONS = [((-135.0, 24.0, -66.5, 49.6), 9), ((-100.0, -10.0, 20.0, 66.6), 10), ((-135.0, -10.0, -100.0, 24.0), 10)]
 
 def lonlat_tile(lon, lat, z):
     n = 2 ** z; lat = max(-85, min(85, lat))
@@ -29,6 +39,7 @@ def tile_lonlat_box(z, x, y):
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument('--out', required=True); ap.add_argument('--box'); ap.add_argument('--maxz', type=int, default=13)
     ap.add_argument('--minz', type=int, default=5); ap.add_argument('--workers', type=int, default=6); ap.add_argument('--cover', action='store_true')
+    ap.add_argument('--set', choices=('us', 'ext'), default='us'); ap.add_argument('--have'); ap.add_argument('--merge')
     A = ap.parse_args(); os.makedirs(A.out, exist_ok=True)
     if A.cover:
         cov = set()
@@ -38,9 +49,13 @@ def main():
             for x in os.listdir(os.path.join(A.out, z)):
                 for f in os.listdir(os.path.join(A.out, z, x)):
                     if f.endswith('.webp'): cov.add('%d/%d' % (int(x) // k, int(f[:-5]) // k))
+        if A.merge: cov |= set(json.load(open(A.merge)))
         json.dump(sorted(cov), open(os.path.join(A.out, 'cover.json'), 'w'), separators=(',', ':')); print('cover', len(cov)); return
-    regions = [((tuple(float(v) for v in A.box.split(','))), A.maxz)] if A.box else REGIONS
+    regions = [((tuple(float(v) for v in A.box.split(','))), A.maxz)] if A.box else (EXT_REGIONS if A.set == 'ext' else REGIONS)
     donef = os.path.join(A.out, 'done.txt'); done = set(open(donef).read().split()) if os.path.exists(donef) else set()
+    hdone = set()
+    if A.have and os.path.exists(os.path.join(A.have, 'done.txt')):
+        hdone = {k for k in open(os.path.join(A.have, 'done.txt')).read().split() if int(k.split('/')[0]) >= 10}
     lock = threading.Lock(); stats = {'made': 0, 'empty': 0, 'err': 0, 't0': time.time()}; dlog = open(donef, 'a')
     def path(z, x, y): return os.path.join(A.out, str(z), str(x), '%d.webp' % y)
     def inbox(z, x, y, box):
@@ -48,7 +63,10 @@ def main():
     def work(z, x, y):
         """returns (has_water, shelf) for the descent"""
         key = '%d/%d/%d' % (z, x, y); p = path(z, x, y)
-        if key in done: return (False, False)
+        if key in done or key in hdone: return (False, False)
+        if A.have and z >= 10:                           # the first bake's tile stands
+            hp = os.path.join(A.have, str(z), str(x), '%d.webp' % y)
+            if os.path.exists(hp + '.m'): return (True, open(hp + '.m').read().split()[0] == '1')
         meta = p + '.m'
         if os.path.exists(p) and os.path.exists(meta): m = open(meta).read().split(); return (True, m[0] == '1')
         for attempt in range(4):

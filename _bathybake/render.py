@@ -26,11 +26,18 @@ def tile_bounds(z, x, y):
     return x0, y1 - s, x0 + s, y1
 
 PAD = 2
-def fetch_dem(z, x, y):
+# THE MOSAIC'S HOLES (2026-10-19). DEM_all mosaics at most 100 rasters per request (maxMosaicImageCount) and puts its global
+# background, ETOPO 2022, last. A wide tile over a coast dense with surveys (the Louisiana shelf at z6, Florida's at z5-8)
+# touches more than 100, ETOPO is dropped, and the pixels no surviving raster covers come back as exactly 0 m -- not NaN.
+# Those read as dry, so the bake left them clear: rectangles of the basemap's lighter water inside the depth ramp. They are
+# filled from ETOPO 2022 15" bed elevation, the mosaic's own background, asked for alone (lock raster) over the same box.
+ETOPO_BED = 2530
+def fetch_dem(z, x, y, lock=None):
     b = tile_bounds(z, x, y); px = (b[2] - b[0]) / N
     b = (b[0] - PAD * px, b[1] - PAD * px, b[2] + PAD * px, b[3] + PAD * px)
     q = dict(bbox=','.join('%.3f' % v for v in b), bboxSR=3857, imageSR=3857, size='%d,%d' % (N + 2 * PAD, N + 2 * PAD), format='tiff',
              pixelType='F32', interpolation='RSP_BilinearInterpolation', f='image')
+    if lock: q['mosaicRule'] = '{"mosaicMethod":"esriMosaicLockRaster","lockRasterIds":[%d]}' % lock
     raw = urllib.request.urlopen(SRC + '?' + urllib.parse.urlencode(q), timeout=120).read()
     a = tifffile.imread(io.BytesIO(raw)).astype(np.float32)
     a[(a < -1e5) | (a > 1e5)] = np.nan
@@ -73,6 +80,13 @@ ISO = [2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 3000]
 def render(z, x, y, want_shelf=False):
     A = fetch_dem(z, x, y)
     w = water_mask(z, x, y)
+    hole = np.zeros(A.shape, bool); hole[PAD:-PAD, PAD:-PAD] = w
+    hole &= ~np.isfinite(A) | (np.abs(A) < 1e-3)
+    if z <= 9 and hole.sum() >= 20:                     # only wide tiles reach the 100-raster limit; one exact 0 is not a hole
+        E = fetch_dem(z, x, y, lock=ETOPO_BED)
+        g = np.zeros(A.shape, bool); g[PAD:-PAD, PAD:-PAD] = True
+        fill = (~np.isfinite(A) | (np.abs(A) < 1e-3)) & np.isfinite(E) & ~(g & ~hole)   # the holes, and the pad ring for the hillshade
+        A = np.where(fill, E, A)
     a = A[PAD:-PAD, PAD:-PAD]
     depth = -a
     ok = w & np.isfinite(depth) & (depth > 0.05)        # only water the model says has a floor below the surface (inland lakes read their surface)
