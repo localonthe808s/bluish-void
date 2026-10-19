@@ -13771,7 +13771,7 @@ window._kxCtxLine = function(T, low){
             <div class="loc-search-box" id="loc-search-box">
               <input type="text" class="loc-search-input" id="loc-search-input" placeholder="LOOK UP HERE" maxlength="60" autocomplete="off" />
               <button class="loc-search-close" id="loc-search-close" aria-label="Close search">✕</button>
-              <div id="loc-suggestions" style="position:absolute; top:calc(100% + 14px); left:0; right:0; z-index:10000; background:#2B22F4; border:none; border-radius:16px; max-height:220px; overflow-y:auto; display:none; box-shadow:0 0 10px 6px #2B22F4, 0 0 26px 12px rgba(43,34,244,.45);"></div>
+              <div id="loc-suggestions" style="position:absolute; top:calc(100% + 14px); left:0; right:0; z-index:10000; background:#2B22F4; border:none; border-radius:16px; max-height:300px; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; display:none; box-shadow:0 0 10px 6px #2B22F4, 0 0 26px 12px rgba(43,34,244,.45);"></div>
             </div>
           </div>
           <div id="loc-meta" style="font-size:.52rem;opacity:.6;text-transform:uppercase;letter-spacing:.08em;color:rgba(255,255,255,.5);padding:0 0 0 4px;margin-top:1px;line-height:1;font-weight:600;">---</div>
@@ -79641,13 +79641,14 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
 
     function showSuggestions(results){
       if (!suggestionsEl || !results || results.length === 0){ hideSuggestions(); return; }
-      suggestResults = results.slice(0, 5);
+      suggestResults = results.slice(0, 15);   /* a scrolling list (user 2026-10-19: "locations should be a scrollable list too, we can offer more") */
       suggestIndex = -1;
       var html = '';
       suggestResults.forEach(function(r, i){
         var region = r.admin1 || '';
         var country = r.country_code || r.country || '';
         var sub = [region, country].filter(Boolean).join(', ');
+        if (r._kind) sub = r._kind + (sub ? ' \u00B7 ' + sub : '');   /* NEIGHBORHOOD / ADDRESS / STREET ... from the shared finder */
         var fc = r.feature_code || '';
         var icon = '';
         if (fc.indexOf('PPL') === 0) icon = '';
@@ -79690,7 +79691,16 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       });
     }
 
+    /* THE PLACE'S OWN TIME ZONE for a pick that did not bring one (an address, a neighborhood): the longitude guess below put
+       Phoenix on Denver time. Open-Meteo answers timezone=auto for any point; 2.5 s, then the guess. */
+    window._bvTzFor = function(lat, lon){
+      return new Promise(function(res){ var done = false, t = setTimeout(function(){ if (!done){ done = true; res(null); } }, 2500);
+        fetch('https://api.open-meteo.com/v1/forecast?latitude=' + lat + '&longitude=' + lon + '&timezone=auto&forecast_days=1&daily=temperature_2m_max')
+          .then(function(r){ return r.json(); }).then(function(j){ if (!done){ done = true; clearTimeout(t); res((j && j.timezone) || null); } })
+          .catch(function(){ if (!done){ done = true; clearTimeout(t); res(null); } }); }); };
     function pickSuggestion(r){
+      if (!r.timezone && !r._tzAsked && window._bvTzFor){ r._tzAsked = true; hideSuggestions(); searchInput.value = ''; closeSearchBox();
+        window._bvTzFor(Math.round(r.latitude*10000)/10000, Math.round(r.longitude*10000)/10000).then(function(tz){ r.timezone = tz; pickSuggestion(r); }); return; }
       hideSuggestions();
       searchInput.value = '';
       closeSearchBox();
@@ -79798,17 +79808,54 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         return cn === region || cc === region;
       }
 
+      /* the finder's GeoJSON -> the geocoder's row shape (name, admin1, latitude, longitude), with what kind of place it is.
+         Towns the finder also returns are left to the geocoder, which knows their time zone and population */
+      var _locSeq = 0;
+      var KIND = { neighbourhood: 'NEIGHBORHOOD', suburb: 'NEIGHBORHOOD', quarter: 'NEIGHBORHOOD', borough: 'BOROUGH', city_block: 'NEIGHBORHOOD',
+                   house: 'ADDRESS', building: 'ADDRESS', street: 'STREET', locality: 'PLACE', district: 'DISTRICT' };
+      function _locFromFinder(F, addr){
+        var out = [];
+        (F || []).forEach(function(f){ var P = f.properties || {}, co = f.geometry.coordinates;
+          var full = window._bvPlaceLabel ? window._bvPlaceLabel(f) : (P.name || ''), parts = full.split(', ');
+          var t = P.type || '', ov = P.osm_value || '', ok = P.osm_key || '';
+          /* what it is, from the result's own type: OpenStreetMap says house / street / a place kind; the NYC list and the
+             Census send bare names (a neighborhood with its borough; an address that starts with its number) */
+          var kind = P._street || t === 'street' || ok === 'highway' ? 'STREET'
+            : (t === 'house' || P.housenumber) ? (/^\d/.test(full) ? 'ADDRESS' : 'LANDMARK')   /* "Dumbo Market" is a building with a name, not an address */
+            : (!ok && !t) ? (P.city ? 'NEIGHBORHOOD' : /^\d/.test(full) ? 'ADDRESS' : 'PLACE')
+            : KIND[ov] || KIND[t] || (ok === 'place' ? 'PLACE' : 'LANDMARK');
+          if (!addr && /^(city|town|village|hamlet|county|state|country)$/.test(ov || t)) return;   /* the geocoder's job */
+          if (!addr && kind === 'STREET') return;                                                   /* a street is an answer only to an address */
+          var row = { name: parts[0], admin1: parts.slice(1).join(', '), latitude: co[1], longitude: co[0], timezone: null, _kind: kind };
+          /* one row per place: the NYC list and OpenStreetMap both know DUMBO; the city and the Census both know a building */
+          if (out.some(function(o){ return Math.abs(o.latitude - row.latitude) < 0.01 && Math.abs(o.longitude - row.longitude) < 0.012
+                && (o.name.toLowerCase() === row.name.toLowerCase() || (kind === 'ADDRESS' && o._kind === 'ADDRESS')); })) return;
+          out.push(row); });
+        return out;
+      }
+      /* is a row in the place on screen's own area (~100 km)? */
+      function _locNear(r){ var L0 = window.LOCATION || {}; if (!isFinite(+L0.lat)) return false;
+        var dy = (r.latitude - L0.lat) * 111, dx = (r.longitude - L0.lon) * 111 * Math.cos(L0.lat * Math.PI / 180); return dx * dx + dy * dy < 100 * 100; }
+
       // Autocomplete on typing
       searchInput.addEventListener('input', function(){
         var pr = expandPlace(searchInput.value);
         var q = pr.name;
         clearTimeout(suggestDebounce);
         if (q.length < 2){ hideSuggestions(); return; }
+        var raw = searchInput.value.trim(), mySeq = ++_locSeq;
         suggestDebounce = setTimeout(function(){
-          fetch('https://geocoding-api.open-meteo.com/v1/search?name=' + encodeURIComponent(q) + '&count=10&language=en&format=json')
-            .then(function(r){ return r.json(); })
-            .then(function(data){
-              if (!data.results || !data.results.length){ hideSuggestions(); return; }
+          /* TOWNS AND CITIES (the geocoder) AND NEIGHBORHOODS, ADDRESSES, STREETS (the site's one finder, _bvFindPlace), asked
+             together and merged: a typed house number puts the addresses first, otherwise the towns lead and the neighborhoods
+             follow (user 2026-10-19: "make that location box where the neighborhood tool, specific addresses, towns, cities fit") */
+          var addr = /^\s*\d/.test(raw);
+          var finder = (window._bvFindPlace && raw.length >= 3) ? window._bvFindPlace(raw).then(function(R){ return (R && R.F) || []; }).catch(function(){ return []; }) : Promise.resolve([]);
+          var geo = addr ? Promise.resolve({}) : fetch('https://geocoding-api.open-meteo.com/v1/search?name=' + encodeURIComponent(q) + '&count=20&language=en&format=json')
+            .then(function(r){ return r.json(); }).catch(function(){ return {}; });
+          Promise.all([geo, finder]).then(function(both){
+              if (mySeq !== _locSeq) return;                 /* a newer keystroke owns the list */
+              var data = both[0] || {}, extra = _locFromFinder(both[1], addr);
+              if (!data.results || !data.results.length){ if (extra.length) showSuggestions(extra); else hideSuggestions(); return; }
               // Re-rank: a matched ", region" wins outright, then name-starts-with
               // > name-contains > alternate-name match, ties broken by population
               // descending. So "Afton, Virginia" surfaces Afton VA (pop unknown)
@@ -79826,7 +79873,16 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
                 if (a.tier !== b.tier) return a.tier - b.tier;
                 return b.pop - a.pop;
               }).map(function(x){ return x.r; });
-              showSuggestions(ranked);
+              /* the towns (4 at most), and the neighborhoods the geocoder does not know -- one near a listed town of the same name is that town.
+                 A NEIGHBORHOOD IN THE AREA ON SCREEN LEADS unless the best town is a real city (100k+) or matched the typed state:
+                 "dumbo" in New York is Brooklyn's, not Cameroon's; "phoenix" is still Arizona's */
+              var towns = ranked.slice(0, extra.length ? 8 : 15);
+              var more = extra.filter(function(e){ return !towns.some(function(t){ return Math.abs(t.latitude - e.latitude) < 0.03 && Math.abs(t.longitude - e.longitude) < 0.03 && String(t.name).toLowerCase() === String(e.name).toLowerCase(); }); });
+              var top = towns[0] || {}, big = (top.population || 0) >= 100000 || _regionMatch(top, pr.region);
+              var local = big ? [] : more.filter(function(e){ return (e._kind === 'NEIGHBORHOOD' || e._kind === 'BOROUGH') && _locNear(e); });
+              /* a typed area that is a CITY, not a state ("silver lake, los angeles"): the rows inside it lead */
+              if (pr.region && !_regionMatch(top, pr.region)) local = more.filter(function(e){ return String(e.admin1).toLowerCase().indexOf(pr.region) >= 0; }).concat(local.filter(function(e){ return String(e.admin1).toLowerCase().indexOf(pr.region) < 0; }));
+              showSuggestions(local.concat(towns, more.filter(function(e){ return local.indexOf(e) < 0; })));
             }).catch(function(){ hideSuggestions(); });
         }, 250);
       });
@@ -79876,10 +79932,15 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
                   resolveAndSwitch(Math.round(r.latitude*10000)/10000, Math.round(r.longitude*10000)/10000, r.name || "Custom", r.timezone || null);
                   searchInput.value = "";
                 } else {
-                  /* said in the box, not in a blocking dialog */
-                  searchInput.value = "";
-                  searchInput.placeholder = "NOT FOUND \u00B7 TRY ANOTHER";
-                  setTimeout(function(){ searchInput.placeholder = "LOOK UP HERE"; }, 2600);
+                  /* the geocoder knows towns only: an address or a neighborhood goes to the site's finder before NOT FOUND */
+                  var _raw = searchInput.value.trim();
+                  (window._bvFindPlace ? window._bvFindPlace(_raw).then(function(R){ return _locFromFinder(R && R.F, /^\s*\d/.test(_raw)); }).catch(function(){ return []; }) : Promise.resolve([]))
+                    .then(function(X){
+                      if (X.length){ pickSuggestion(X[0]); return; }
+                      /* said in the box, not in a blocking dialog */
+                      searchInput.value = "";
+                      searchInput.placeholder = "NOT FOUND \u00B7 TRY ANOTHER";
+                      setTimeout(function(){ searchInput.placeholder = "LOOK UP HERE"; }, 2600); });
                 }
               }).catch(function(){
                 searchInput.disabled = false;
@@ -117782,20 +117843,14 @@ function closeAlertModal(){
       if (fly) PMAP.setView([lat, lon], Math.max(PMAP.getZoom(), 14)); }
   }
   var place = function(p){ var P = p.properties || {}; return [P.name, P.housenumber ? P.housenumber + ' ' + (P.street || '') : P.street, P.district || P.locality, P.city, P.state].filter(function(x, i, a){ return x && a.indexOf(x) === i; }).slice(0, 3).join(', '); };
-  function addPanel(){
-    if (PANEL){ setTimeout(function(){ if (PMAP) PMAP.invalidateSize(); }, 30); return PANEL; }
-    var here = window.LOCATION || {};
-    PANEL = document.createElement('div');
-    PANEL.innerHTML = '<div style="font:800 .6rem system-ui;letter-spacing:.12em;color:#05DB32;margin:12px 0 6px;">ADD A PLACE</div>'
-      + '<input id="bv-wxa-q" type="text" placeholder="Address or neighborhood" autocomplete="off" style="width:100%;box-sizing:border-box;padding:8px 12px;border-radius:10px;border:1px solid rgba(43,34,244,.2);background:rgba(255,255,255,.75);font:600 .78rem system-ui;color:#2B22F4;outline:none;">'
-      + '<div id="bv-wxa-res" style="margin:4px 0 0;"></div>'
-      + '<div id="bv-wxa-map" style="height:190px;margin:8px 0 6px;border-radius:12px;overflow:hidden;background:#0b0d14;"></div>'
-      + '<div style="font:600 .62rem system-ui;color:rgba(43,34,244,.6);margin-bottom:6px;">Tap the map to move the pin. Picked: <b id="bv-wxa-picked" style="color:#2B22F4;"></b></div>'
-      + '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;"><span style="font:700 .66rem system-ui;color:#2B22F4;">Save it as</span><button type="button" data-as="HOME" style="' + W + '">HOME</button><button type="button" data-as="WORK" style="' + W + '">WORK</button><button type="button" data-as="" style="' + W + '">OTHER…</button></div>';
-    var q = PANEL.querySelector('#bv-wxa-q'), res = PANEL.querySelector('#bv-wxa-res');
-    q.addEventListener('input', function(){ clearTimeout(qT); var v = q.value.trim(); if (v.length < 3){ res.innerHTML = ''; return; }
-      var mySeq = ++QSEQ;   /* only the newest search may write the list: a slow answer to an older query was overwriting it */
-      qT = setTimeout(function(){
+  /* ONE PLACE FINDER FOR THE SITE (user 2026-10-19: "make the main location tool the main function for all locations on the
+     site ... where the neighborhood tool, specific addresses, towns, cities fit"). This was the alerts sheet's ADD A PLACE
+     search, moved out whole: NYC's own building search and neighborhoods, the Census for any US house, OpenStreetMap (Photon)
+     for places, neighborhoods and streets. Both the alerts sheet and the top location box (LOOK UP HERE) call it.
+     Resolves { F: features (GeoJSON points, label via _bvPlaceLabel), exact: false when a house number was typed and no
+     result carries it }. */
+  window._bvPlaceLabel = function(f){ return place(f); };
+  window._bvFindPlace = function(v){
         var bias = window.LOCATION ? '&lat=' + LOCATION.lat + '&lon=' + LOCATION.lon : '';
         /* NEW YORK CITY ADDRESSES come from the city's own GeoSearch (user 2026-10-14: "4755 39th pl" found only the street
            in OpenStreetMap -- Queens' hyphenated numbers are mostly missing there; the city knows every building). Asked
@@ -117811,7 +117866,7 @@ function closeAlertModal(){
               return hn.replace(/-/g, '') === qn.replace(/-/g, '') && (!qs || qs === sn); }).slice(0, 3)
             .map(function(f){ var P = f.properties; return { type: 'Feature', geometry: f.geometry, properties: { name: String(P.label || '').replace(/, USA$/, '').replace(/\b(\d+) (PLACE|STREET|AVENUE|ROAD|DRIVE|LANE|BOULEVARD|COURT|TERRACE)\b/, function(m, n, w){ return n + (/1$/.test(n) && !/11$/.test(n) ? 'st' : /2$/.test(n) && !/12$/.test(n) ? 'nd' : /3$/.test(n) && !/13$/.test(n) ? 'rd' : 'th') + ' ' + w; }).toLowerCase().replace(/\b\w/g, function(c){ return c.toUpperCase(); }).replace(/, Ny$/, ', NY') } }; }); })
           .catch(function(){ return []; }) : Promise.resolve([]);
-        var osm = fetch('https://photon.komoot.io/api/?limit=5&lang=en&q=' + encodeURIComponent(v) + bias).then(function(r){ return r.json(); }).then(function(j){ return j.features || []; }).catch(function(){ return []; });
+        var osm = fetch('https://photon.komoot.io/api/?limit=10&lang=en&q=' + encodeURIComponent(v) + bias).then(function(r){ return r.json(); }).then(function(j){ return j.features || []; }).catch(function(){ return []; });
         /* THE NYC WIDGET'S OWN NEIGHBORHOODS (user 2026-10-14: "use what our NYC widget uses"): the same 340 names THE CITY's
            search offers (hood_labels.json, window._cityHoods), matched first by name */
         var BORO = { M: 'Manhattan', B: 'Brooklyn', Q: 'Queens', X: 'Bronx', S: 'Staten Island', K: 'Brooklyn' };
@@ -117851,17 +117906,35 @@ function closeAlertModal(){
           : Promise.resolve([]);
         var streetHits = streets.then(function(F2){ return F2.slice(0, 3).map(function(f){ var P = f.properties;
             return { type: 'Feature', geometry: f.geometry, properties: { name: P.name, district: P.city || P.district || P.county, state: SAB[P.state] || P.state, _street: 1 } }; }); });
-        Promise.all([hoods, city, us, osm, streetHits]).then(function(a){
+        return Promise.all([hoods, city, us, osm, streetHits]).then(function(a){
           /* the NYC search answers fuzzily for places far away: keep its hits only when the Census found nothing better outside NYC */
           var cityHits = a[1], usHits = a[2], farUS = usHits.some(function(f){ var c = f.geometry.coordinates; return !(c[1] > 40.4 && c[1] < 41.1 && c[0] > -74.35 && c[0] < -73.6); });
           /* the streets themselves come last, and only when no house was found */
-          return { features: a[0].concat((farUS && nycNear) ? [] : cityHits, usHits, a[3], usHits.length ? [] : a[4]).slice(0, 7) }; }).then(function(j){
-          if (mySeq !== QSEQ) return;
+          return { features: a[0].concat((farUS && nycNear) ? [] : cityHits, usHits, a[3], usHits.length ? [] : a[4]).slice(0, 12) }; }).then(function(j){
           var F = (j.features || []).filter(function(f){ return f.geometry && f.geometry.coordinates; });
           var qh = ((v.match(/^\s*([\d-]+)/) || [])[1] || '').replace(/-/g, ''), exact = !qh || F.some(function(f){ return (place(f).match(/^([\d-]+)/) || [])[1] && place(f).match(/^([\d-]+)/)[1].replace(/-/g, '') === qh; });
           if (qh) F = F.filter(function(f){ var h = (place(f).match(/^([\d-]+)\b/) || [])[1]; return !h || h.replace(/-/g, '') === qh; });   /* a different house number is not this address */
           var qw = (v.replace(/^\s*[\d-]+\s*/, '').match(/[a-z]{3,}/i) || [])[0];
           if (qh && qw) F = F.filter(function(f){ return place(f).toLowerCase().indexOf(qw.toLowerCase()) >= 0; });   /* and a result must name the street typed */
+          return { F: F, exact: exact }; });
+  };
+  function addPanel(){
+    if (PANEL){ setTimeout(function(){ if (PMAP) PMAP.invalidateSize(); }, 30); return PANEL; }
+    var here = window.LOCATION || {};
+    PANEL = document.createElement('div');
+    PANEL.innerHTML = '<div style="font:800 .6rem system-ui;letter-spacing:.12em;color:#05DB32;margin:12px 0 6px;">ADD A PLACE</div>'
+      + '<input id="bv-wxa-q" type="text" placeholder="Address or neighborhood" autocomplete="off" style="width:100%;box-sizing:border-box;padding:8px 12px;border-radius:10px;border:1px solid rgba(43,34,244,.2);background:rgba(255,255,255,.75);font:600 .78rem system-ui;color:#2B22F4;outline:none;">'
+      + '<div id="bv-wxa-res" style="margin:4px 0 0;"></div>'
+      + '<div id="bv-wxa-map" style="height:190px;margin:8px 0 6px;border-radius:12px;overflow:hidden;background:#0b0d14;"></div>'
+      + '<div style="font:600 .62rem system-ui;color:rgba(43,34,244,.6);margin-bottom:6px;">Tap the map to move the pin. Picked: <b id="bv-wxa-picked" style="color:#2B22F4;"></b></div>'
+      + '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;"><span style="font:700 .66rem system-ui;color:#2B22F4;">Save it as</span><button type="button" data-as="HOME" style="' + W + '">HOME</button><button type="button" data-as="WORK" style="' + W + '">WORK</button><button type="button" data-as="" style="' + W + '">OTHER…</button></div>';
+    var q = PANEL.querySelector('#bv-wxa-q'), res = PANEL.querySelector('#bv-wxa-res');
+    q.addEventListener('input', function(){ clearTimeout(qT); var v = q.value.trim(); if (v.length < 3){ res.innerHTML = ''; return; }
+      var mySeq = ++QSEQ;   /* only the newest search may write the list: a slow answer to an older query was overwriting it */
+      qT = setTimeout(function(){
+        window._bvFindPlace(v).then(function(R){
+          if (mySeq !== QSEQ) return;
+          var F = R.F, exact = R.exact;
           res.innerHTML = F.length ? F.map(function(f, i){ return '<div data-i="' + i + '" style="cursor:pointer;padding:6px 10px;border-radius:8px;font:600 .72rem system-ui;color:#2B22F4;background:rgba(43,34,244,.05);margin-bottom:3px;">' + esc(place(f)) + '</div>'; }).join('')
             : '<div style="font:600 .66rem system-ui;color:rgba(43,34,244,.55);">No match. Add the town and state (for example 7239 Chandan Blvd, Machesney Park IL), or drop the pin on the map.</div>';
           if (F.length && /^\s*\d/.test(v) && !exact) res.innerHTML += '<div style="font:600 .64rem system-ui;color:rgba(255,255,255,.7);margin-top:2px;">No exact house found. Add the town and state to the address, or tap the map.</div>';
