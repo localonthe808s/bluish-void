@@ -874,14 +874,26 @@ window._bvPaintPlus = function(rules, F){
    It sits above the vector base (z-index 2), so bridges and piers are drawn again in the labels layer above it. Dark maps
    only. */
 window.BV_BATHY = { url: 'https://cdn.bluishvoid.com/bathy/v1/{z}/{x}/{y}.webp', cover: null, coverP: null };
+/* THE Z8 INDEX AT EVERY ZOOM (2026-10-19, console noise: ~40 red 404s a LOCAL visit were z5-7 tiles over dry land or open sea,
+   which the index never gated). From z8 in: the z8 cell holding the tile. Above z8: any indexed z8 cell under it -- the
+   pyramids are nested, a z5-7 tile was baked only over baked z8 tiles (checked against the R2 listing: exact for bathy/v1 and
+   depth/v1; relief/v1 differs only in 37 edge tiles outside its bounds). Not for seafloor/v1, whose deep sea stops at z6-7.
+   An index that failed to load (empty) leaves z5-7 open, as before. */
+window._bvCovHas = function(B, z, x, y){
+  var cov = B.cover; if (!cov) return false;
+  if (z >= 8) return cov.has((x >> (z - 8)) + '/' + (y >> (z - 8)));
+  if (!cov.size) return true;
+  var U = B.up || (B.up = {}), S = U[z];
+  if (!S){ S = U[z] = new Set(); var sh = 8 - z; cov.forEach(function(k){ var q = k.split('/'); S.add((q[0] >> sh) + '/' + (q[1] >> sh)); }); }
+  return S.has(x + '/' + y);
+};
 window._bvBathy = function(map){
   if (!map || map._bvBathyLayer || typeof L === 'undefined') return null;
   var B = window.BV_BATHY;
   if (!B.coverP) B.coverP = fetch('https://cdn.bluishvoid.com/bathy/v1/cover.json').then(function(r){ return r.ok ? r.json() : []; }).then(function(a){ B.cover = new Set(a || []); return B.cover; }).catch(function(){ B.cover = new Set(); return B.cover; });
   var BL = L.TileLayer.extend({
     createTile: function(c, done){
-      var cov = B.cover;
-      if (c.z >= 8 && (!cov || !cov.has((c.x >> (c.z - 8)) + '/' + (c.y >> (c.z - 8))))){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }   /* a bare <img> draws a broken-image outline */
+      if (!window._bvCovHas(B, c.z, c.x, c.y)){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }   /* a bare <img> draws a broken-image outline */
       return L.TileLayer.prototype.createTile.call(this, c, done);
     }
   });
@@ -912,8 +924,7 @@ window._bvRelief = function(map){
   if (!B.coverP) B.coverP = fetch(B.url + '/cover.json').then(function(r){ return r.ok ? r.json() : []; }).then(function(a){ B.cover = new Set(a || []); return B.cover; }).catch(function(){ B.cover = new Set(); return B.cover; });
   var RL = L.TileLayer.extend({
     createTile: function(c, done){
-      var cov = B.cover;
-      if (c.z >= 8 && (!cov || !cov.has((c.x >> (c.z - 8)) + '/' + (c.y >> (c.z - 8))))){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }
+      if (!window._bvCovHas(B, c.z, c.x, c.y)){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }
       return L.TileLayer.prototype.createTile.call(this, c, done);
     }
   });
@@ -1173,6 +1184,17 @@ window._bvTileShare = function(url, ts){
   };
   return face;
 };
+/* A TILE THE BAKE NEVER WROTE IS AN EMPTY TILE (2026-10-19). The vendored ZxySource parses whatever comes back, and a missing
+   .mvt comes back as the CDN's 27 KB HTML 404 page, which the decoder logged as "Error: Unimplemented type: 4". This is a
+   { getZxy } for the url option: the library wraps any non-string url in its PmtilesSource, which parses getZxy's data and
+   takes nothing as an empty tile. Non-2xx and HTML answer nothing. (The 404 itself is still a red network line: see the
+   coverage note in _bvCovHas.) */
+window._bvZxyQuiet = function(url){
+  return { getZxy: function(z, x, y, sig){
+    return fetch(url.replace('{z}', z).replace('{x}', x).replace('{y}', y), { signal: sig }).then(function(r){
+      if (!r.ok || /html/i.test(r.headers.get('content-type') || '')) return null;
+      return r.arrayBuffer().then(function(b){ return b.byteLength ? { data: b } : null; }); }); } };
+};
 /* point every view of a protomaps layer (leafletLayer, or a sourcesToViews map) at the shared caches; srcs = the cfg it was built from */
 window._bvShareViews = function(views, cfg){
   try { if (!views || !protomapsL.ZxySource || !protomapsL.toIndex) return;
@@ -1318,7 +1340,7 @@ window._bvRivers = function(map){
         lineCap: 'round', lineJoin: 'round', width: function(z, f){ return window._bvRiverW(z, A(f)); } }) }
   ];
   try {
-    var lay = P.leafletLayer({ url: window.BV_RIVERS_URL, maxDataZoom: 8, minZoom: 3, maxZoom: 9, paintRules: rules, labelRules: [], zIndex: 3,
+    var lay = P.leafletLayer({ url: window._bvZxyQuiet(window.BV_RIVERS_URL), maxDataZoom: 8, minZoom: 3, maxZoom: 9, paintRules: rules, labelRules: [], zIndex: 3,
       bounds: L.latLngBounds([[7, -180], [84, -50]]), attribution: '' });
     lay.addTo(map); map._bvRiverLayer = lay; return lay;
   } catch(e){ return null; }
@@ -1337,7 +1359,7 @@ window._bvCoast = function(map){
   var rules = [{ dataLayer: 'coast', symbolizer: new protomapsL.LineSymbolizer({ color: 'rgba(5,219,50,.75)', lineJoin: 'round', lineCap: 'round',
     width: function(z){ return z <= 4 ? 0.7 : z >= 12 ? 1.1 : 0.9; } }) }];
   try {
-    var lay = protomapsL.leafletLayer({ url: window.BV_COAST_URL, maxDataZoom: 10, minZoom: 3, paintRules: rules, labelRules: [], zIndex: 4,
+    var lay = protomapsL.leafletLayer({ url: window._bvZxyQuiet(window.BV_COAST_URL), maxDataZoom: 10, minZoom: 3, paintRules: rules, labelRules: [], zIndex: 4,
       bounds: L.latLngBounds([[7, -180], [84, -10]]), attribution: '' });
     lay.addTo(map); map._bvCoastLayer = lay; return lay;
   } catch(e){ return null; }
@@ -1381,7 +1403,7 @@ window._bvVectorBase = function(map, opts){
         cfg.sources = { '': { url: window.BV_BASEMAP_URL, maxDataZoom: t.data } };
         if (F.desert) cfg.sources.desert = { url: window.BV_BASEMAP_URL, maxDataZoom: Math.min(7, t.data) };
         /* light maps: the continent's rivers in the base (see _bvPaintPlus); dark maps get _bvRivers' own layer instead */
-        if (t.min <= 9 && !F.desert) cfg.sources.rivers = { url: window.BV_RIVERS_URL, maxDataZoom: 8 };
+        if (t.min <= 9 && !F.desert) cfg.sources.rivers = { url: window._bvZxyQuiet(window.BV_RIVERS_URL), maxDataZoom: 8 };
       }
       /* ROADS OFF PER MAP (user 2026-10-17: "dont show roads on foliage"): every road line and road name checks map._bvNoRoads;
          window._bvRoads(map, on) flips it and repaints */
@@ -79343,6 +79365,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
     {id:"PHWA",name:"NWS South Shore",lat:19.09,lon:-155.57,region:"HAWAII"},
     {id:"TJUA",name:"NWS San Juan",lat:18.12,lon:-66.08,region:"CARIB"}
   ];
+  window._bvRadarIds = RADAR_SITES.reduce(function(o, s){ o[s.id] = 1; return o; }, {});   /* LOCAL asks only for sites that exist */
 
   /* =========================================================
      LOCATION SWITCHER
@@ -105594,7 +105617,8 @@ function closeAlertModal(){
         /* the points API's radarStation is ITSELF the nearest site (KDIX for DUMBO, KOKX for Central Park), so the local station
            is the forecast OFFICE's own radar: K + the office (OKX -> KOKX) when that site exists and covers the place (within
            230 km); offices without one of that name (PSR, LOX) keep the nearest */
-        var ofr = wfo ? fetch('https://api.weather.gov/radar/stations/K' + wfo).then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; }) : Promise.resolve(null);
+        var ids = window._bvRadarIds;   /* no such site (LOX, PSR): no call, rather than a red 404 on every first visit */
+        var ofr = wfo && (!ids || ids['K' + wfo]) ? fetch('https://api.weather.gov/radar/stations/K' + wfo).then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; }) : Promise.resolve(null);
         var ofn = wfo ? fetch('https://api.weather.gov/offices/' + wfo).then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; }) : Promise.resolve(null);
         return Promise.all([ofr, ofn]).then(function(A){
           var st = A[0], c = st && st.geometry && st.geometry.coordinates, id = near;
@@ -107860,14 +107884,30 @@ function closeAlertModal(){
        past z9 only over the shelf). Same result shape as the live exportImage below, which stays the fallback when the
        tiles hold nothing for the box. */
     SWL.tiles = {};
+    /* ASK ONLY FOR TILES THE BAKE WROTE (2026-10-19: ~38 red 404s a visit in LA, z10-12 asked over dry land). z5-8 go by the
+       bake's z8 index (cover.json, read at every zoom by _bvCovHas). Past z8 the bake descended only where there is sea, so a
+       tile is asked for only when its parent's quarter holds a sea pixel -- checked against the R2 listing round LA; where it
+       does not, the coarser tile already says land, and the passes below fall back to it as before */
+    SWL.cov = { cover: null, coverP: null };
+    var swlGate = function(z, x, y){
+      if (z > 8) return swlTile(z - 1, x >> 1, y >> 1).then(function(P){ if (!P) return false; var ox = (x & 1) * 128, oy = (y & 1) * 128;
+        for (var j = oy; j < oy + 128; j++) for (var i = ox; i < ox + 128; i++){ var o = (j * 256 + i) * 4; if (P[o + 3] >= 128 && P[o + 2] < 128) return true; }
+        return false; });
+      var C = SWL.cov; if (!C.coverP) C.coverP = fetch('https://cdn.bluishvoid.com/depth/v1/cover.json').then(function(r){ return r.ok ? r.json() : []; })
+        .then(function(a){ C.cover = new Set(a || []); }).catch(function(){ C.cover = new Set(); });
+      return C.coverP.then(function(){ return !C.cover.size || window._bvCovHas(C, z, x, y); });
+    };
     var swlTile = function(z, x, y){
       var k = z + '/' + x + '/' + y; if (SWL.tiles[k] !== undefined) return SWL.tiles[k];
       var ks = Object.keys(SWL.tiles); if (ks.length > 400) delete SWL.tiles[ks[0]];
-      return (SWL.tiles[k] = new Promise(function(res){ var im = new Image(); im.crossOrigin = 'anonymous';
+      return (SWL.tiles[k] = swlGate(z, x, y).then(function(ok){ return ok ? swlLoad(k) : null; }));
+    };
+    var swlLoad = function(k){
+      return new Promise(function(res){ var im = new Image(); im.crossOrigin = 'anonymous';
         im.onload = function(){ try { var c = document.createElement('canvas'); c.width = c.height = 256; var g = c.getContext('2d', { willReadFrequently: true });
           g.drawImage(im, 0, 0); res(g.getImageData(0, 0, 256, 256).data); } catch(e){ res(null); } };
         im.onerror = function(){ res(null); };
-        im.src = 'https://cdn.bluishvoid.com/depth/v1/' + k + '.webp'; }));
+        im.src = 'https://cdn.bluishvoid.com/depth/v1/' + k + '.webp'; });
     };
     var swlDemCdn = function(bbox, sr, w, h){
       var PR = Math.PI * 6378137, toM = function(lon, lat){ return [swlX(lon), swlY(lat)]; };
@@ -109956,7 +109996,7 @@ function closeAlertModal(){
       /* ---- the band: a grid layer on the coastline bake, cut to the water */
       S.layer = function(){
         var P = protomapsL, cv0 = null, wv0 = null;
-        try { var vs = P.sourcesToViews({ url: window.BV_COAST_URL, maxDataZoom: 10 }); cv0 = vs.get(''); } catch(e){}
+        try { var vs = P.sourcesToViews({ url: window._bvZxyQuiet(window.BV_COAST_URL), maxDataZoom: 10 }); cv0 = vs.get(''); } catch(e){}
         try { var vw = P.sourcesToViews({ url: window.BV_BASEMAP_URL, maxDataZoom: 14 }); window._bvShareViews(vw, { url: window.BV_BASEMAP_URL }); wv0 = vw.get(''); } catch(e){}
         var water = [{ dataLayer: 'water', symbolizer: new P.PolygonSymbolizer({ fill: '#000' }), filter: function(z, f){ return f.geomType === 3; } }];
         var pn = M.getPane('lcSurge') || M.createPane('lcSurge'); pn.style.zIndex = 433; pn.style.pointerEvents = 'none';
