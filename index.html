@@ -105296,6 +105296,8 @@ function closeAlertModal(){
       + '#lc-cap .lc-ar{ display:inline-block; font:800 13px system-ui,sans-serif; transition:transform .5s; }'
       + '#lc-cap .lc-hood{ display:block; font:700 10.5px system-ui,sans-serif; letter-spacing:.02em; }'
       + '#lc-cap .lc-sub{ display:block; font:600 7.5px system-ui,sans-serif; letter-spacing:.06em; color:rgba(255,255,255,.72); }'
+      + '#lc-cap .lc-nb{ font:700 8.5px/1.5 system-ui,sans-serif; letter-spacing:.06em; color:rgba(255,255,255,.85); }'
+      + '#lc-cap .lc-nb a{ color:inherit; }'
       + '#lc-cap .lc-of{ font:800 9.5px system-ui,sans-serif; letter-spacing:.06em; background:rgba(127,29,29,.55); border-radius:6px; padding:4px 8px; }'
       + '#lc-strip .lc-fuel{ opacity:.85; }'
       + '@media (max-width:768px){ #cw-pane-local #lc-map{ aspect-ratio:auto; height:62vh; min-height:360px; } }';
@@ -105378,7 +105380,7 @@ function closeAlertModal(){
       else mapEl.addEventListener('mouseleave', lock);
       say();
       M.createPane('lcLabels'); M.getPane('lcLabels').style.zIndex = 450; M.getPane('lcLabels').style.pointerEvents = 'none';
-      OL.init(); OL.want();                        /* the place's outline, over the radar (user 2026-10-17) */
+      OL.init(); OL.want(); NB.want();             /* the place's outline, over the radar (user 2026-10-17), and its neighborhood's */
       if (window._bvVectorBase) window._bvVectorBase(M);
       if (window._bvSeaNames) window._bvSeaNames(M);
       /* OUR NAMING RULE (user 2026-10-16): no basemap town or water names at any zoom; only the site's space-themed places
@@ -106424,11 +106426,13 @@ function closeAlertModal(){
       var el = CAP.el || (CAP.el = pane.querySelector('#lc-cap')); if (!el) return;
       var L1 = window.LOCATION || {}; if (!isFinite(+L1.lat)){ el.style.display = 'none'; return; }
       var mo = OV.motion, meas = mo && mo.src === 'RADAR', umb = CAP.umbText();
-      var sub = placeName() + (mo ? ' · STORM MOTION · ' + compass(mo.toward) + ' ' + mo.mph + ' MPH (' + (meas ? 'RADAR' : 'STEERING WIND') + ')' : '');
+      var nbl = NB ? NB.label() : '', nbs = NB ? NB.stats() : '';   /* the neighborhood, with its place (NB, by the outline) */
+      var sub = (nbl || placeName()) + (mo ? ' · STORM MOTION · ' + compass(mo.toward) + ' ' + mo.mph + ' MPH (' + (meas ? 'RADAR' : 'STEERING WIND') + ')' : '');
       var html = '<div class="lc-c2"><span class="lc-umb">' + esc(umb || '') + '</span><span class="lc-dr">'
         + (mo ? '<span class="lc-ar" style="transform:rotate(' + Math.round(mo.toward) + 'deg);opacity:' + (meas ? 1 : .6) + ';" title="' + (meas ? 'measured off the radar loop' : 'the 500 hPa steering wind x 0.85: a model, not a measurement') + '">↑</span>' : '')
         + '<span><span class="lc-hood">' + esc(CAP.hoodText()) + '</span><span class="lc-sub">' + esc(sub) + '</span></span></span></div>'
-        + (CAP.of ? '<div class="lc-of">' + esc(CAP.of) + '</div>' : '');
+        + (CAP.of ? '<div class="lc-of">' + esc(CAP.of) + '</div>' : '')
+        + (nbs ? '<div class="lc-nb">' + nbs + '</div>' : '');
       if (html !== CAP.html){ el.innerHTML = html; CAP.html = html; }
       el.style.display = 'flex';
     };
@@ -110116,7 +110120,14 @@ function closeAlertModal(){
           if (((r[i][1] > la) !== (r[j][1] > la)) && (lo < (r[j][0] - r[i][0]) * (la - r[i][1]) / (r[j][1] - r[i][1]) + r[i][0])) c = !c;
           if (!near){ var dx = (r[i][0] - lo) * kx, dy = r[i][1] - la; if (dx * dx + dy * dy < 3.3e-4) near = true; } } });
         return c || near; }); };
+    /* ONE QUEUE FOR NOMINATIM (2026-10-19): the outline and the neighborhood (NB, below) both ask it for a new place; every
+       request through here starts at least 1.1 s after the one before, whoever made it (its policy: one a second) */
+    OL.nAt = 0;
     OL.get = function(u){
+      if (u.indexOf('nominatim.openstreetmap.org') >= 0){ var now = Date.now(), at = Math.max(now, OL.nAt + 1100); OL.nAt = at;
+        if (at > now) return new Promise(function(res){ setTimeout(res, at - now); }).then(function(){ return OL.get1(u); }); }
+      return OL.get1(u); };
+    OL.get1 = function(u){
       return Promise.race([fetch(u).then(function(r){ if (!r.ok) throw new Error('http ' + r.status); return r.json(); }),
         new Promise(function(res, rej){ setTimeout(function(){ rej(new Error('timeout')); }, 15000); })]); };
     OL.wait = function(ms){ return function(x){ return new Promise(function(res){ setTimeout(function(){ res(x); }, ms); }); }; };
@@ -110144,7 +110155,8 @@ function closeAlertModal(){
     OL.want = function(){
       if (!M) return;
       var L1 = window.LOCATION || {}, la = +L1.lat, lo = +L1.lon;
-      if (!isFinite(la) || !isFinite(lo) || NYB === null) return;            /* NYC is known only once the boroughs are in */
+      if (!isFinite(la) || !isFinite(lo) || (nybBox() && NYB === null)) return;   /* in the NYC box, NYC is known only once the boroughs are in (outside it they are
+                                                                                   never fetched, baf48df88, and this wait had kept every other place's outline from loading) */
       var kind = OL.kind(), name = String(L1.name || '').split(',')[0].trim(), key = kind + '|' + la.toFixed(3) + ',' + lo.toFixed(3) + '|' + name.toLowerCase();
       if (key === OL.key && (OL.polys || OL.req || Date.now() - OL.failAt < 12e4)) return;    /* a miss is asked again after 2 min */
       if (key !== OL.key){ OL.key = key; OL.polys = null; OL.draw(); }
@@ -110192,6 +110204,7 @@ function closeAlertModal(){
       ct.addEventListener('wheel', function(){ if (M.scrollWheelZoom.enabled()) mk(); }, { passive: true });
       ct.addEventListener('touchstart', function(e){ if (e.touches && e.touches.length > 1) mk(); }, { passive: true });
       ct.addEventListener('click', function(e){ if (e.target && e.target.closest && e.target.closest('.leaflet-control-zoom')) mk(); }, true);
+      NB.init();                                   /* the neighborhood's pane first: in DOM order (every pane is flattened to 400) it lies under the place's line */
       var pn = M.getPane('lcOutline') || M.createPane('lcOutline'); pn.style.zIndex = 448; pn.style.pointerEvents = 'none';
       OL.cv = document.createElement('canvas'); OL.cv.style.position = 'absolute'; pn.appendChild(OL.cv);
       /* THE BASEMAP'S OWN WATER, UNSEEN: the same archive and tiers as the map, painting only its water polygons (black) in a
@@ -110308,6 +110321,115 @@ function closeAlertModal(){
          (~120 MB on a 2x desktop) that only a redraw uses, and the pocket fill's typed arrays. Kept while redraws come close together (a zoom, the water tiles landing),
          dropped 4 s after the last one; the next draw makes them again. The line itself (OL.cv) keeps its full dpr */
       clearTimeout(OL.relT); OL.relT = setTimeout(function(){ ['A', 'B', 'C', 'D', 'HS', 'HS2'].forEach(function(k){ cvFree(OL[k]); OL[k] = null; }); OL.lab = OL.stk = OL.memB = OL.out = null; }, 4000); };
+    /* ---------------------------------------------------------------- THE NEIGHBORHOOD ---- */
+    /* THE NEIGHBORHOOD THE PLACE STANDS IN (user 2026-10-19: "yes build it that way"): "PARK SLOPE · BROOKLYN", "CHINATOWN · SAN
+       FRANCISCO" -- always with the place above it -- in the header's place line (CAP.paint), and its outline drawn as a quieter
+       companion to the place's orange line. Looked up BY THE PLACE'S POINT (window.LOCATION, never the map's centre while
+       panning), never by name, so two Chinatowns cannot collide:
+         - inside the five boroughs (nycHere): the city's own 2020 Neighborhood Tabulation Areas (city_nta2020.json, baked by
+           _maplab/nta2020_bake.py from NYC Open Data, fetched only when the place is in NYC), point in polygon, with THE CITY's
+           NEIGHBORHOOD reading from its street-tree card -- trees a census block, the rank, the most common species;
+         - anywhere else: Nominatim's reverse at neighborhood, quarter and suburb level (zoom 15, 14, 13, through OL.get's
+           one-a-second queue). Each answer that is a neighborhood-class place names an OSM object; the outline is then asked
+           for BY THAT ID (lookup?osm_ids=, the way NYC's own is pinned to R175905) and kept only if it truly contains the
+           point -- the smallest that does wins. A neighborhood OSM has only as a point is named with no outline, and only
+           when Nominatim's own address for the point names it and it stands within 800 m. Nothing found = nothing shown, never a guess.
+       Asked once per place (localStorage, the last 12 places, keyed to the point at ~10 m), 1-5 requests, none on pan. */
+    var NB = { key: '', res: null, req: 0, failAt: 0, lay: null, nta: null, ntaReq: false };
+    window._bvLcHood = NB;         /* the harness reads NB.res */
+    NB.HOOD = { neighbourhood: 1, quarter: 1, suburb: 1 };    /* not city_district / borough: those were council districts (Pasadena) and NYC's boroughs */
+    /* strictly inside (even-odd over a polygon's rings): no slack, unlike OL.has */
+    NB.inside = function(polys, la, lo){
+      return (polys || []).some(function(p){ var c = false;
+        p.forEach(function(r){ for (var i = 0, j = r.length - 1; i < r.length; j = i++)
+          if (((r[i][1] > la) !== (r[j][1] > la)) && (lo < (r[j][0] - r[i][0]) * (la - r[i][1]) / (r[j][1] - r[i][1]) + r[i][0])) c = !c; });
+        return c; }); };
+    NB.label = function(){ var r = NB.res; return r && r.n ? (r.n + (r.pa ? ' · ' + r.pa : '')).toUpperCase() : ''; };
+    /* NYC: the 2020 NTAs, loaded only for a place inside the five boroughs */
+    NB.nyc = function(la, lo){
+      var pick = function(){ var A = (NB.nta && NB.nta.a) || [], hit = null;
+        A.forEach(function(r){ var b = r[8]; if (!hit && lo >= b[0] && lo <= b[2] && la >= b[1] && la <= b[3] && NB.inside(r[9], la, lo)) hit = r; });
+        return hit ? { n: hit[1], pa: hit[2], p: hit[9], nta: hit, src: 'nta' } : { none: 1 }; };
+      if (NB.nta) return Promise.resolve(pick());
+      NB.ntaReq = true;
+      return fetch('/city_nta2020.json').then(function(r){ if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+        .then(function(j){ NB.nta = j; return pick(); }, function(e){ NB.ntaReq = false; throw e; }); };
+    /* anywhere else: OpenStreetMap through Nominatim */
+    NB.osm = function(la, lo){
+      var NU = 'https://nominatim.openstreetmap.org/', q = NU + 'reverse?lat=' + la.toFixed(5) + '&lon=' + lo.toFixed(5) + '&format=jsonv2&addressdetails=1&layer=address&accept-language=en&zoom=';
+      var addr = null, cands = [], looked = {}, names = {};
+      var parent = function(a){ return a.city || a.town || a.village || a.municipality || a.county || a.state || ''; };
+      var take = function(j){
+        if (!j || j.error) return;
+        if (!addr && j.address){ addr = j.address; Object.keys(NB.HOOD).forEach(function(k){ var v = addr[k]; if (v && !/\scounty$/i.test(v)) names[v] = 1; }); }
+        if ((j.category === 'place' || j.category === 'boundary') && NB.HOOD[j.addresstype] && j.name && !/\scounty$/i.test(j.name)
+            && !cands.some(function(c){ return c.osm_type === j.osm_type && c.osm_id === j.osm_id; })) cands.push(j); };
+      var rev = function(z){ return OL.get(q + z).then(take); };
+      /* the area candidates not yet looked up, by OSM ID in one request: the first (finest zoom) that contains the point */
+      var areas = function(){
+        var C = cands.filter(function(c){ return (c.osm_type === 'way' || c.osm_type === 'relation') && !looked[c.osm_type + c.osm_id]; });
+        if (!C.length) return Promise.resolve(null);
+        C.forEach(function(c){ looked[c.osm_type + c.osm_id] = 1; });
+        return OL.get(NU + 'lookup?osm_ids=' + C.map(function(c){ return c.osm_type.charAt(0).toUpperCase() + c.osm_id; }).join(',')
+          + '&format=jsonv2&polygon_geojson=1&polygon_threshold=0.00005&accept-language=en').then(function(a){
+            var P = {}; (a || []).forEach(function(r){ var p = OL.polysOf(r.geojson); if (p) P[r.osm_type + r.osm_id] = p; });
+            for (var i = 0; i < C.length; i++){ var p2 = P[C[i].osm_type + C[i].osm_id]; if (p2 && NB.inside(p2, la, lo)) return { c: C[i], p: p2 }; }
+            return null; }); };
+      var done = function(hit){ var pa = parent(addr || {});
+        if (!hit || String(hit.c.name).toLowerCase() === String(pa).toLowerCase()) return { none: 1 };
+        return { n: hit.c.name, pa: pa, p: hit.p || null, id: hit.c.osm_type.charAt(0).toUpperCase() + hit.c.osm_id, src: 'osm' }; };
+      return rev(15).then(function(){
+        if (!Object.keys(names).length) return { none: 1 };            /* the point's own address names no neighborhood: nothing to find */
+        return areas().then(function(h){ if (h) return done(h);
+          return rev(14).then(function(){ return rev(13); }).then(areas).then(function(h2){ if (h2) return done(h2);
+            /* no area holds the point: a neighborhood OSM has only as a point, if the point's own address names it and it stands
+               within 800 m -- the nearest such (a farther one was the wrong side of town: Seattle's CBD for Capitol Hill, 1.3 km) */
+            var km = function(c){ return Math.hypot(+c.lat - la, (+c.lon - lo) * Math.cos(la * Math.PI / 180)) * 111.2; };
+            var nd = cands.filter(function(c){ return c.osm_type === 'node' && names[c.name] && km(c) <= 0.8; }).sort(function(a, b){ return km(a) - km(b); })[0];
+            return done(nd ? { c: nd, p: null } : null); }); }); }); };
+    NB.want = function(){
+      if (!M) return;
+      var L1 = window.LOCATION || {}, la = +L1.lat, lo = +L1.lon;
+      if (!isFinite(la) || !isFinite(lo)) return;
+      var nyc = nycHere(); if (!nyc && nybBox() && NYB === null) return;    /* in the NYC box, wait for the boroughs to say which side */
+      var key = (nyc ? 'nyc|' : 'osm|') + la.toFixed(4) + ',' + lo.toFixed(4);
+      if (key === NB.key && (NB.res || NB.req || Date.now() - NB.failAt < 12e4)) return;    /* a failed ask is tried again after 2 min */
+      if (key !== NB.key){ NB.key = key; NB.res = null; NB.draw(); CAP.paint(); }
+      var ck = 'bv_hood_v1_' + key;
+      if (!nyc) try { var c0 = JSON.parse(localStorage.getItem(ck) || 'null'); if (c0 && (c0.n || c0.none)){ NB.res = c0; NB.draw(); CAP.paint(); return; } } catch(e){}
+      NB.req = 1;
+      (nyc ? NB.nyc(la, lo) : NB.osm(la, lo)).then(function(r){ NB.req = 0; if (NB.key !== key) return;
+        NB.res = r; NB.draw(); CAP.paint();
+        if (!nyc) try { var s = JSON.stringify({ n: r.n, pa: r.pa, p: r.p, id: r.id, none: r.none, src: r.src, at: Date.now() });
+          if (s.length < 400000){ var idx = JSON.parse(localStorage.getItem('bv_hood_v1_idx') || '[]').filter(function(k){ return k !== ck; });
+            idx.push(ck); while (idx.length > 12) localStorage.removeItem(idx.shift());
+            localStorage.setItem(ck, s); localStorage.setItem('bv_hood_v1_idx', JSON.stringify(idx)); } } catch(e){}
+      }).catch(function(){ NB.req = 0; if (NB.key === key) NB.failAt = Date.now(); }); };
+    /* the line: the place's orange, thinner and fainter, on its own pane just under the place's (NB.init runs first in OL.init);
+       it takes no taps */
+    NB.init = function(){
+      if (NB.pane || !M) return;
+      NB.pane = M.getPane('lcNb') || M.createPane('lcNb'); NB.pane.style.zIndex = 447; NB.pane.style.pointerEvents = 'none';
+      NB.rend = L.svg({ pane: 'lcNb', padding: 0.3 }); };
+    NB.draw = function(){
+      if (!M || !NB.rend) return;
+      if (NB.lay){ M.removeLayer(NB.lay); NB.lay = null; }
+      var r = NB.res; if (!r || !r.p || !r.p.length) return;
+      var ll = r.p.map(function(p){ return p.map(function(ring){ return ring.map(function(c){ return [c[1], c[0]]; }); }); });
+      NB.lay = L.polygon(ll, { renderer: NB.rend, pane: 'lcNb', interactive: false, fill: false, color: '#fb923c', weight: 1, opacity: 0.6, lineJoin: 'round' }).addTo(M); };
+    /* THE CITY's NEIGHBORHOOD line (cwNycTrees, step 3), for the 2020 area: NYC only */
+    NB.stats = function(){
+      var r = NB.res; if (!r || r.src !== 'nta' || !NB.nta) return '';
+      var me = r.nta, AA = NB.nta.a, ph = window.innerWidth <= 768;
+      var h = 'NEIGHBORHOOD · <strong>' + esc(String(me[1]).toUpperCase()) + '</strong>';
+      if (me[5]){
+        var rk = AA.filter(function(q){ return q[3] === 0 && q[5] >= 30; }).map(function(q){ return [q[0], q[4] / q[5]]; }).sort(function(a, b){ return b[1] - a[1]; });
+        var pos = 0; rk.forEach(function(q, i){ if (q[0] === me[0]) pos = i + 1; });
+        h += ' · <b>' + (me[4] / me[5]).toFixed(1) + '</b> STREET TREES A BLOCK' + (pos ? ' · <b>#' + pos + ' OF ' + rk.length + '</b>' : '') + ' (CITY MEDIAN ' + (+NB.nta.median).toFixed(1) + ')'
+          + (me[7] && me[7].length && !ph ? ' · MOST COMMON: ' + me[7].map(function(s){ return esc(String(s).toUpperCase()); }).join(', ') : '');
+      }
+      return h + ' <span style="opacity:.6;">(' + A(ph ? 'NYC 2020 NTAS' : 'NYC 2020 NEIGHBORHOOD TABULATION AREAS', 'https://data.cityofnewyork.us/City-Government/2020-Neighborhood-Tabulation-Areas-NTAs-/9nt8-h7nd')
+        + ' · ' + A(ph ? '2015 TREE CENSUS' : '2015 STREET TREE CENSUS', 'https://data.cityofnewyork.us/Environment/2015-Street-Tree-Census-Tree-Data/uvpi-gqnh') + ')</span>'; };
     /* ---------------------------------------------------------------- the tab ---- */
     var wt = document.getElementById('radar-widget-title'), savedT = null;
     var headOn = function(on){
@@ -110340,7 +110462,7 @@ function closeAlertModal(){
       var ok = eligible(); btn.style.display = ok ? '' : 'none'; btn.textContent = placeName();
       if (sep) sep.style.display = (ok || shown('city-widget')) ? '' : 'none';
       var L0 = window.LOCATION || {}, key = L0.lat + ',' + L0.lon;
-      OL.want();                                   /* the outline follows the place (keyed: a no-op until it moves) */
+      OL.want(); NB.want();                        /* the outline and the neighborhood follow the place (keyed: a no-op until it moves) */
       if (key !== lastKey){ lastKey = key;
         if (M){ if (NYS.want()) setTimeout(NYS.fit, 60); else M.setView([+L0.lat, +L0.lon], M.getZoom()); if (here) here.setLatLng([+L0.lat, +L0.lon]); }
         R.sid = String(L0.radar || '').toLowerCase(); R.capsAt = 0; T.d = null; R.pickSid();
