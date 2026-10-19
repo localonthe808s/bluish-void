@@ -905,6 +905,39 @@ window._bvRelief = function(map){
   B.coverP.then(function(){ lay.addTo(map); });
   return lay;
 };
+/* THE DESERT IS GROUND, NOT A HOLE, NATIONALLY (user 2026-10-19: "all deserts in the new map should be properly colored").
+   THE BASIN's rule (_maplab, 2026-09-19) for the whole arid West: _desertbake/bake.py weights ESA WorldCover 2021's bare
+   ground, shrubland and grassland by how un-green MODIS says they get at their greenest, and bakes one tan, rgb(140,120,90),
+   in 16 alpha steps, z4-9 palette PNGs on R2 desert/v1 (cover.json = the z7 tiles holding any, so the rest of the continent
+   asks for nothing). Drawn at THE BASIN's 0.6: over the ink ground the Mojave measured luminance ~85 where the 10-16 vector
+   browns left it at 36 against 20-26 for Ohio and Iowa. In the tile pane just BEFORE the first z-index-2 layer (relief,
+   seafloor, bathymetry -- the rock layer's trick), so the hillshade falls across the sand and the sea's own colors cover any
+   shoreline bleed; water is zero in the bake (WorldCover class 80; the sea has no tile). Dark maps only. ?desert=0 turns it
+   off; ?desert=<base url> reads another pyramid. */
+window.BV_DESERT = { url: 'https://cdn.bluishvoid.com/desert/v1', cover: null, coverP: null };
+window._bvDesert = function(map){
+  if (!map || map._bvDesertLayer || typeof L === 'undefined') return null;
+  var B = window.BV_DESERT, q = null;
+  try { q = new URLSearchParams(location.search).get('desert'); } catch(e){}
+  if (q === '0') return null;
+  if (q && /^https?:\/\//.test(q)) B.url = q.replace(/\/$/, '');
+  if (!B.coverP) B.coverP = fetch(B.url + '/cover.json?v=1').then(function(r){ return r.ok ? r.json() : []; }).then(function(a){ B.cover = new Set(a || []); return B.cover; }).catch(function(){ B.cover = new Set(); return B.cover; });
+  var DL = L.TileLayer.extend({
+    createTile: function(c, done){
+      var cov = B.cover;
+      if (c.z >= 7 && (!cov || !cov.has((c.x >> (c.z - 7)) + '/' + (c.y >> (c.z - 7))))){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }
+      return L.TileLayer.prototype.createTile.call(this, c, done);
+    }
+  });
+  /* bounds = the bake's box (the arid West and northern Mexico to -93); z4 below that would be the whole box in one tile */
+  var lay = new DL(B.url + '/{z}/{x}/{y}.png?v=1', { minZoom: 4, maxNativeZoom: 9, maxZoom: 19, zIndex: 2, opacity: 0.6, keepBuffer: 1, updateWhenIdle: true,
+    errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', bounds: L.latLngBounds([[22, -125], [49.5, -93]]) });
+  map._bvDesertLayer = lay;
+  var under = function(){ try { var c = lay.getContainer(), pn = c && c.parentNode; if (!pn) return;
+    var first = [].filter.call(pn.children, function(k){ return k !== c && k.style.zIndex === '2'; })[0]; if (first) pn.insertBefore(c, first); } catch(e){} };
+  B.coverP.then(function(){ lay.addTo(map); under(); });
+  return lay;
+};
 /* 1 M LIDAR (user 2026-10-17: "add lidar 1m to the national basemap bake"). From z13 in, USGS 3DEP's best available elevation
    -- 1 m lidar across most of the lower 48 -- as a hillshade, through tiles.bluishvoid.com/lidar/v1 (the tile worker fetches
    each tile from 3DEP once and keeps it in R2: a lazy national bake). The gray hillshade (flat ground 180) is turned into
@@ -937,7 +970,7 @@ window._bvLidarDefacet = function(a, z, ty){
       var mx = -1, mn = 999, cnt = 0, e = d * S + S, v;
       if (fast){ for (k = d * S; k < e; k++){ v = g[i + DI[k]]; if (v > mx) mx = v; if (v < mn) mn = v; if (mx - mn > t) break; } cnt = k - d * S; }
       else for (k = d * S; k < e; k++){ var xx = x + DX[k], yy = y + DY[k]; if (xx < 0 || yy < 0 || xx >= N || yy >= N) continue; j = yy * N + xx; if (!ok[j]) continue; v = g[j]; if (v > mx) mx = v; if (v < mn) mn = v; cnt++; if (mx - mn > t) break; }
-      if (cnt >= 5 && mx - mn <= t){ c[i] = 1; break; }   /* off-tile samples are skipped, not clamped: a clamped edge would read as flat */
+      if (cnt >= S && mx - mn <= t){ c[i] = 1; break; }   /* a direction counts only with its whole +-4 px run on the tile: off-tile samples are skipped, not clamped (a clamped edge would read as flat), and a half run at the border read as flat far more often -- the mask stood 5-20x higher along every tile edge and drew a seam (audit 2026-10-19) */
     }
   }
   var box = function(s, r){
@@ -955,7 +988,17 @@ window._bvLidarDefacet = function(a, z, ty){
   for (i = 0; i < n; i++) dev[i] = ok[i] ? o8[i] - 180 : 0;
   var lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (ty + 0.5) / Math.pow(2, z)))), mpp = 156543.03 * Math.cos(lat) / Math.pow(2, z);
   var rl = Math.max(1, Math.min(120, Math.round(40 / mpp))), lo = box(box(box(dev, rl), rl), rl);
-  for (i = 0; i < n; i++){ var mm = Math.min(1, m[i] * 1.5); if (mm > 0) o8[i] = 180 + dev[i] * (1 - mm) + lo[i] * mm; }
+  /* ONLY WHERE THE GROUND IS LIDAR (audit 2026-10-19): a TIN facet is smooth, but so is a Nebraska field, a 10 m DEM stretched
+     to z16 in Nevada, Alaska's coarse model -- the planar test can't tell them apart (Anchorage z16 read 98% planar, downtown
+     LA 49%), so the blur erased road ditches and terraces and left blotches on coarse ground. What differs is the
+     surroundings: a city's facets sit among streets, curbs and yards that carry lidar's speckle. So the blend is weighted by
+     speckle density over ~33 px (a 4-neighbor Laplacian of 4+ grey levels: cities 21-35%, smooth or coarse ground 3-14%),
+     knee 10-20% */
+  var sp = new Float32Array(n), xl, xr, yu, yd;
+  for (y = 0; y < N; y++) for (x = 0; x < N; x++){ i = y * N + x; xl = x > 0 ? i - 1 : i; xr = x < N - 1 ? i + 1 : i; yu = y > 0 ? i - N : i; yd = y < N - 1 ? i + N : i;
+    if (Math.abs(4 * g[i] - g[xl] - g[xr] - g[yu] - g[yd]) >= 4) sp[i] = 1; }
+  sp = box(sp, 16);
+  for (i = 0; i < n; i++){ var w = Math.min(1, Math.max(0, (sp[i] - 0.1) / 0.1)), mm = Math.min(1, m[i] * 1.5) * w * w * (3 - 2 * w); if (mm > 0) o8[i] = 180 + dev[i] * (1 - mm) + lo[i] * mm; }
   return o8;
 };
 window._bvLidar = function(map){
@@ -105300,6 +105343,13 @@ function closeAlertModal(){
       + '#lc-cap .lc-nb a{ color:inherit; }'
       + '#lc-cap .lc-of{ font:800 9.5px system-ui,sans-serif; letter-spacing:.06em; background:rgba(127,29,29,.55); border-radius:6px; padding:4px 8px; }'
       + '#lc-strip .lc-fuel{ opacity:.85; }'
+      /* THE BASIN's header lines on LOCAL (LAX): the marine layer, the surf, the basin's reads */
+      + '#lc-cap .lc-mar{ display:flex; flex-direction:column; gap:3px; }'
+      + '#lc-cap .lc-mar-l{ font:800 9.5px/1.5 system-ui,sans-serif; letter-spacing:.06em; }'
+      + '#lc-cap .lc-mar-s{ font:700 8px system-ui,sans-serif; letter-spacing:.06em; color:rgba(255,255,255,.75); }'
+      + '#lc-cap .lc-mar-s a, #lc-cap .lc-mar-x a{ color:inherit; }'
+      + '#lc-cap .lc-mar-x{ font:700 8px/1.6 system-ui,sans-serif; letter-spacing:.06em; color:rgba(255,255,255,.85); }'
+      + '#lc-cap .lc-mar .lc-pill{ margin-left:4px; padding:1px 7px; font-size:.5rem; }'
       + '@media (max-width:768px){ #cw-pane-local #lc-map{ aspect-ratio:auto; height:62vh; min-height:360px; } }';
     document.head.appendChild(css);
     var strip = pane.querySelector('#lc-strip'), tstrip = pane.querySelector('#lc-tstrip'), mapEl = pane.querySelector('#lc-map'), tideEl = pane.querySelector('#lc-tide'), tideBtn = pane.querySelector('#lc-tabs button[data-v="water"]'), riverEl = pane.querySelector('#lc-river');
@@ -108082,7 +108132,7 @@ function closeAlertModal(){
        rule (inLABox), the urban basin and its valleys, Malibu to Pomona, San Pedro to Santa Clarita */
     var laHere = function(){ var L1 = window.LOCATION || {}, la = +L1.lat, lo = +L1.lon; return la > 33.60 && la < 34.50 && lo > -119.00 && lo < -117.60; };
     /* a city's own layers load only when the PLACE is that city -- not when a view from Newark or Pasadena overlaps its box */
-    var cityHere = function(k){ return k === 'nyc' ? nycHere() : k === 'la' ? laHere() : false; };
+    var cityHere = function(k){ return k === 'nyc' ? nycHere() : k === 'la' ? laHere() : k === 'ct' ? LAX.ctD() > 0 : false; };   /* ct: the place's Caltrans district (LAX) */
     var nycHere = function(){ var L1 = window.LOCATION || {}, la = +L1.lat, lo = +L1.lon;
       if (!nybBox()) return false; if (!NYB){ nybLoad(); return false; }          /* the box first, then the five boroughs (Newark is in the box) */
       var inside = function(la2, lo2){ return NYB.some(function(bo){ return (bo.r || []).some(function(r){ var c = false;   /* bo.r: rings of [lon,lat] */
@@ -108373,9 +108423,13 @@ function closeAlertModal(){
       { k: 'nyc', box: [-74.30, 40.48, -73.65, 40.95], load: function(){ return fetch('/nyc_cams.json?v=2').then(function(r){ return r.json(); }).then(function(j){
           return (j.cams || []).map(function(c){ return { id: c[0], n: c[1], lat: c[2], lon: c[3] }; }); }); },
         img: function(c){ return 'https://webcams.nyctmc.org/api/cameras/' + c.id + '/image?t=' + Math.floor(Date.now() / 10000); }, by: 'NYC DOT' },
-      { k: 'la', box: [-119.0, 33.6, -117.6, 34.5], load: function(){ return fetch('https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://cwwp2.dot.ca.gov/data/d7/cctv/cctvStatusD07.json') + '&shape=d7cctv')
+      /* CALTRANS BY DISTRICT (2026-10-19, THE BASIN's retirement): every district publishes the same camera list, so a place in
+         California reads its OWN district's (LAX.ctD, the place's district; nothing outside the state), through the proxy's slim
+         shape (named for District 7, the first one; it keeps the same fields for any district) */
+      { k: 'ct', box: [-124.5, 32.5, -114.1, 42.1], load: function(){ var d = LAX.ctD(), dd = (d < 10 ? '0' : '') + d;
+          return fetch('https://proxy.bluishvoid.com/?url=' + encodeURIComponent('https://cwwp2.dot.ca.gov/data/d' + d + '/cctv/cctvStatusD' + dd + '.json') + '&shape=d7cctv')
           .then(function(r){ return r.json(); }).then(function(j){ return (j.data || []).map(function(o){ var c = o.cctv || {}, L2 = c.location || {};
-            return { id: c.index, n: (L2.locationName || '').trim(), lat: +L2.latitude, lon: +L2.longitude, u: ((c.imageData || {}).static || {}).currentImageURL }; })
+            return { id: c.index, n: (L2.locationName || '').trim(), lat: +L2.latitude, lon: +L2.longitude, route: L2.route || '', u: ((c.imageData || {}).static || {}).currentImageURL }; })
             .filter(function(c){ return isFinite(c.lat) && isFinite(c.lon) && c.u; }); }); },
         img: function(c){ return c.u + '?t=' + Math.floor(Date.now() / 10000); }, by: 'CALTRANS' }
     ];
@@ -108656,7 +108710,7 @@ function closeAlertModal(){
     TR.lab = function(t){ return '<span style="font:800 7px system-ui,sans-serif;letter-spacing:.1em;color:rgba(255,255,255,.6);margin-right:6px;">' + t + '</span>'; };
     /* the nearest city camera to a spot (NYC DOT or Caltrans), loading that city's list if it is not in yet */
     TR.camNear = function(lat, lon, maxM, cb){
-      var S = CAMSRC.filter(function(s){ return lon >= s.box[0] && lat >= s.box[1] && lon <= s.box[2] && lat <= s.box[3]; })[0]; if (!S) return cb(null);
+      var S = CAMSRC.filter(function(s){ return cityHere(s.k) && lon >= s.box[0] && lat >= s.box[1] && lon <= s.box[2] && lat <= s.box[3]; })[0]; if (!S) return cb(null);   /* the place's own network only */
       var go = function(){ var L2 = TR.cams[S.k]; if (!Array.isArray(L2)) return cb(null); var best = null, bd = maxM, kx = Math.cos(lat * Math.PI / 180) * 111320;
         L2.forEach(function(c){ var dm = Math.hypot((c.lon - lon) * kx, (c.lat - lat) * 110574); if (dm < bd){ bd = dm; best = c; } });
         cb(best ? { c: best, S: S, m: Math.round(bd) } : null); };
@@ -108972,6 +109026,7 @@ function closeAlertModal(){
           g.restore();
         }
       }
+      if (TR.extra) try { TR.extra(g, P, inF, dpr, z, parts); } catch (e){}   /* California's lit freeway signs (LAX): under the chips and the jam tags */
       var k = function(c, t){ return '<span class="lr-k"><span class="lr-dot" style="background:' + c + ';"></span>' + t + '</span>'; };
       if (nVeh) parts.push(nVeh + ' BUSES AND TRAINS LIVE (' + agencies.slice(0, 3).map(function(a){ return esc(a.toUpperCase()); }).join(', ') + (agencies.length > 3 ? ' +' + (agencies.length - 3) : '') + ')');
       /* only what is on the map is spoken: with ROAD TRAFFIC off, no road summary and no road colors in the key */
@@ -108995,7 +109050,7 @@ function closeAlertModal(){
       var city = nycHere() || laHere(), row = document.getElementById('lc-traf-pills');
       if (!row){ row = document.createElement('div'); row.id = 'lc-traf-pills'; row.style.cssText = 'padding:0 12px 6px;'; strip.parentNode.insertBefore(row, strip); }
       row.style.display = TR.lit === true ? '' : 'none';
-      var P2 = [['roads', 'ROAD TRAFFIC']].concat(city ? [['rail', nycHere() ? 'SUBWAY' : 'METRO RAIL'], ['cams', 'CAMERAS']] : []).concat([['veh', 'BUSES & TRAINS']]);
+      var P2 = [['roads', 'ROAD TRAFFIC']].concat(city ? [['rail', nycHere() ? 'SUBWAY' : 'METRO RAIL']] : []).concat(city || LAX.ctD() ? [['cams', 'CAMERAS']] : []).concat([['veh', 'BUSES & TRAINS']]);   /* cameras: also any Caltrans district (LAX) */
       row.innerHTML = P2.map(function(q){ return '<button type="button" class="lc-pill' + (TR.show[q[0]] ? ' on' : '') + '" data-t="' + q[0] + '" style="margin:0 6px 0 0;">' + q[1] + '</button>'; }).join('');
       [].forEach.call(row.querySelectorAll('[data-t]'), function(b){ b.onclick = function(e){ e.stopPropagation(); var k = b.getAttribute('data-t'); TR.show[k] = !TR.show[k];
         try { localStorage.setItem('bv_lc_traf', JSON.stringify(TR.show)); } catch(e2){}
@@ -110166,7 +110221,7 @@ function closeAlertModal(){
       OL.fetch(kind, la, lo, name).then(function(p){ OL.req = 0; if (OL.key !== key) return;
         if (!p){ OL.failAt = Date.now(); return; }
         OL.polys = p; OL.draw(); OL.fit(key, kind);
-        try { var s = JSON.stringify({ p: p, at: Date.now() });
+        if (kind !== 'la') try { var s = JSON.stringify({ p: p, at: Date.now() });   /* THE BASIN's footprint (LAX) is a file the browser caches: not copied to the device */
           if (s.length < 900000){ var idx = JSON.parse(localStorage.getItem('bv_outline_v2_idx') || '[]').filter(function(k){ return k !== ck; });
             idx.push(ck); while (idx.length > 5) localStorage.removeItem(idx.shift());
             localStorage.setItem(ck, s); localStorage.setItem('bv_outline_v2_idx', JSON.stringify(idx)); } } catch(e){}
@@ -110392,7 +110447,7 @@ function closeAlertModal(){
       var L1 = window.LOCATION || {}, la = +L1.lat, lo = +L1.lon;
       if (!isFinite(la) || !isFinite(lo)) return;
       var nyc = nycHere(); if (!nyc && nybBox() && NYB === null) return;    /* in the NYC box, wait for the boroughs to say which side */
-      var key = (nyc ? 'nyc|' : 'osm|') + la.toFixed(4) + ',' + lo.toFixed(4);
+      var key = (nyc ? 'nyc|' : laHere() ? 'la|' : 'osm|') + la.toFixed(4) + ',' + lo.toFixed(4);
       if (key === NB.key && (NB.res || NB.req || Date.now() - NB.failAt < 12e4)) return;    /* a failed ask is tried again after 2 min */
       if (key !== NB.key){ NB.key = key; NB.res = null; NB.draw(); CAP.paint(); }
       var ck = 'bv_hood_v1_' + key;
@@ -110430,6 +110485,564 @@ function closeAlertModal(){
       }
       return h + ' <span style="opacity:.6;">(' + A(ph ? 'NYC 2020 NTAS' : 'NYC 2020 NEIGHBORHOOD TABULATION AREAS', 'https://data.cityofnewyork.us/City-Government/2020-Neighborhood-Tabulation-Areas-NTAs-/9nt8-h7nd')
         + ' · ' + A(ph ? '2015 TREE CENSUS' : '2015 STREET TREE CENSUS', 'https://data.cityofnewyork.us/Environment/2015-Street-Tree-Census-Tree-Data/uvpi-gqnh') + ')</span>'; };
+    /* ---------------------------------------------------------------- THE BASIN AND THE COASTS ---- */
+    /* THE BASIN'S LAST PIECES, ON THE NATIONAL MAP (user 2026-10-19: "do the same for LA as we did for NYC, dont make other
+       locations load unncessary things from LA"). THE BASIN (_maplab/la/widget.html, the LA iframe) is being retired the way
+       THE CITY is; what it had that LOCAL did not is carried here, each piece behind the narrowest gate that is still right:
+         LA ONLY (laHere, THE BASIN's own box; nothing below is asked for anywhere else)
+         - THE OUTLINE is THE BASIN's urban footprint (la_urban.json, the Census urban area and the ones joined to it), not the
+           City of LA's limits ("keep as is, nonpretentious outline"; THE BASIN: "its all LA") -- for any place inside it, so
+           Santa Monica, Long Beach and Pasadena get the same line downtown does. A place in the box but off the footprint
+           (Malibu, the canyons) keeps its own boundary;
+         - THE NEIGHBORHOOD in the header from LA's own areas (la/hoods.json, the County's statistical areas and Census places,
+           baked by la/hoods_bake.py) instead of Nominatim, as NYC uses its NTAs, with its outline;
+         - THE NEIGHBORHOOD NAMES on the map (la/hood_labels.json, THE BASIN's 349), in LOCAL's own type, one ledger with the
+           place dot and the themed names so nothing is printed on anything;
+         - THE MACHINERY (la/weather_geo.json): the ranges, the wind gaps, the Gulf surge, the passes and the cold edge of the sea,
+           lit only when they run, with THE BASIN's reads (the LAX-Daggett gradient, the 925 mb lid, the sea off Point
+           Conception and in the Bight) -- on MAP and RADAR when GEOLOGY & WEATHER is lit.
+         CALIFORNIA, BY CALTRANS DISTRICT (ctDistrict: the place's own district, nothing outside the state)
+         - the lit changeable message signs on TRAFFIC (a tap: THE SIGN SAYS), the SIGNS LIT count, and the COAST ROAD / FREEWAYS
+           camera strips with THE BASIN's dead-camera probe; the district's cameras replace THE BASIN's District 7 list.
+         THE COASTS, BY DATA (lcCoast: a baked table, no request to decide it -- see _coastbake/marine_gate.py)
+         - THE MARINE LAYER in the header (THE BASIN's call: overhead / clear / patchy, and when it returns or clears; low cloud
+           and wind, the model's) and a MARINE LAYER pill on RADAR, GOES GeoColor cut to its cloud (THE BASIN's cloudOnly),
+           looping the last hour -- only where the warm-season climatology says the marine layer is an everyday thing;
+         - THE SURF in the header: the NWS surf zone forecast for the nearest surf zone (surf height, rip current risk) and the
+           nearest wave buoy with THE BASIN's trend (building, easing) -- only where the NWS issues one within reach. */
+    var LAX = (function(){
+      var X = { hoods: null, hoodsP: null, urbP: null, labs: null, labsP: null, mar: null, marKey: '', marAt: 0, srf: null, srfKey: '', srfAt: 0, buoy: null,
+        wx: null, wxAt: 0, wxP: null, cold: null, coldAt: 0, geo: null, geoP: null, ml: { on: null, lay: [], timer: null, key: '', bb: null, z: null, at: 0, gen: 0, i: 0, n: 0, sat: '' },
+        ct: { d: 0, cms: {}, cmsAt: {}, dead: {} }, place: '', more: false };
+      window._bvLcBasin = X;        /* the harness reads X.mar / X.srf / X.wx / X.ct and calls X.gate() */
+      var J = function(u, o){ return fetch(u, o).then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; }); };
+      /* Open-Meteo answers a busy address with 429: the proxy worker's edge copy (5 min) stands in, as the forecast's own fallback does */
+      var JO = function(u){ return J(u).then(function(j){ return j || J('https://proxy.bluishvoid.com/?url=' + encodeURIComponent(u) + '&ttl=300'); }); };
+      var pt = function(){ var L1 = window.LOCATION || {}; return { la: +L1.lat, lo: +L1.lon }; };
+      var pad2 = function(n){ return (n < 10 ? '0' : '') + n; };
+      var ft = function(m){ return Math.round(m * 3.281 * 10) / 10; };
+      /* ======== THE GATES ======== */
+      /* the coastal gate (_coastbake/marine_gate.py, baked 2026-10-19) */
+      /* COASTAL GATE (baked by _coastbake/marine_gate.py): for any US place, how far the open sea is, whether a
+         marine layer is an everyday thing there, and which NWS Surf Zone Forecast covers its beaches. Zero requests.
+         Nodes sit on a 0.25-degree lattice (row = (lat - y0) / g, col = (lon - x0) / g), one alphabet character each:
+         v % 28 is the signed distance to the open coast, (v % 28) * 4 - 8 km (negative = over open water, 100 = 100 km or
+         more); v >= 28 means a marine layer is an everyday thing there. r holds "row:col:chars[:base:srf]" segments; the
+         optional srf string runs parallel to chars and names, per node, the nearest Surf Zone Forecast zone within 40 km
+         ('.' = none, else zone number base + alphabet index; trailing dots trimmed). z holds "WFO:UGC lon lat,..." per issuing
+         office ('|' between offices) in the order the zone numbers count; lon lat is the zone's point on its own beach.
+         Fetch https://api.weather.gov/products/types/SRF/locations/{WFO}, then the latest product, and read the segment
+         headed by the zone's UGC (ranges like CAZ362-364 or NJZ014>026 included). */
+      var LC_GATE = {
+        g: 0.25, x0: -161.0, y0: 18.5,
+        a: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+/',
+        r: '1:20:000:64:011,2:20:03000:49:0FGGG,3:20:065200:49:00GGGG,4:19:017B9510:49:000GHHGH,5:19:038B620:50:0000GGG,6:19:004520:50:000HGG,7:17:00:63:.0,7:20:0200:50:0HHH,8:16:011000:62:.00115,9:15:0201630:48:.00BECC,10:11:00000001000:47:9977.110DDD,11:11:001011000:44:0CAA..33G,12:3:0,12:10:02610000:44:10D22,13:2:010000:43:..00AA,13:10:0010:45:000C,14:2:0013500:43:..00999,14:12:0:45:0,15:3:000100:51:.00011,16:5:000:51:001,23:315:000,24:312:0000110000,25:311:000000032200,26:317:0002220:90:.....00,27:318:0057610:90:...0000,28:254:7,28:318:016C610:87:00.3333,29:251:RLGA40:18:....00,29:316:0004AE830:87:00000.333,30:251:RNHB50:18:...000,30:316:0269EHC50:87:00000.322,31:251:RMGA40:18:...000,31:315:004AFJJC600:87:w0000..2222,32:251:QKE820:17:..0000,32:314:0137CIOJD710:88:vvvvv....000,33:251:OIC600:16:..0000,33:314:039CGLQKE810:88:uvvv....0000,34:251:OIB50:16:..000,34:313:006BGLPNIC600:88:ttuuu....EEE0,35:251:OIC600:16:..000E,35:313:039EKPRLF930:101:ggghh...0011,36:251:PJD820:30:..0001,36:312:016BFLQOJD710:100:fggg.....0111,37:251:RMGA500:29:...2220,37:312:0227DJPLGA50:100:aafff....000,38:252:OJE9400:29:..22033,38:312:0479EKPJD720:105:VVaaa...0011,39:252:RNID84100:29:...00333,39:312:028EJNOIC600:105:ZZZa....0011,40:253:RMIEA73000:32:....0000,40:312:016CIOMHC710:103:aaaa...00111,41:254:RNJGC963000:32:....00,41:283:0,41:286:000,41:312:017DJOJE830:99:dddd...0455,42:255:RPLIFC96300,42:278:000100000100,42:311:0037DJLGA500:99:ccddd...0000,43:257:ROLIFC84100,43:273:00000024312313400,43:304:0:135:0,43:310:0045AGLJD720:99:ccccc...0000,44:259:ROLHDA520000000011224896585110,44:302:00000:134:01111,44:309:0048CEJMGA500:75:.+++++...200O,45:261:QMIEB86432135751259DFDC96421,45:301:00463000037CHKOKE820:77:vvvwwwww..yyy...0000,46:262:RNKHFCB9989BEA77AEILIC6133000000000:107:............................0011122,46:299:00036B750037CGLQOIC610:74:wxxxyzzzzz........0223,47:263:RQNLJIGGFGIJGEEGJNPJE9641121222100000258BFD9769CGLPRNHB50:74:..........................XXXYYZZZbbwxxxx.zzz........0002,48:266:RQONMMNOPMLLNPRRNJFC975666268765568BEHKIFEDFILP:107:.......................0001112344PPQQQ,48:314:RMGA40:74:..0000,49:270:RR,49:275:RRRR,49:282:ROLIFDCDD847DEDCCDEHKNQOMLKLOR:107:........000123334PP,49:314:RLF930:73:..6660,50:284:ROMKJJHDBDGLKJJKLNQR,50:306:RRRR,50:314:RLF9300:78:..11100,51:196:R,51:286:RRQQMJIJMPRQQRR,51:314:RMHB620:78:...0000,52:193:EJOR,52:290:RQPQR,52:315:PJE830:24:..0000,53:190:AEHKNR,53:315:RMHB500:22:...1100,54:187:CDEGJNQR,54:316:OJE9500:22:..00003,55:175:026CG:130:000,55:184:IHGIKKMPR,55:316:RNID83100:25:...300002,56:170:00,56:174:00XBFKP:130:00000,56:183:RPONPRRR,56:317:QLFA83100:25:..3301122,57:169:0000,57:174:SUZejNR:130:0000,57:317:ROJGC985100:25:..000122222,58:165:000,58:169:010,58:174:SVagKP:130:0000,58:318:RPLIGEA6200:25:..00222222l,59:165:0300000SSTYdiLR:130:.......11000,59:320:QOMJEA840:27:...0000jj,60:165:0001010SUYcglOR:86:.....00jjiii,60:322:RNJGB6100:71:...111100,60:332:0:70:0,61:162:00000000SVWZdhlpR:85:......0011kkk,61:323:ROJEA510000:70:...21111000,62:161:0122310S2UZcfimOR:84:.....000122ll,62:324:RNJEA865400:69:....2211100,63:161:000000VZaadhlorR:82:00011222333,63:325:RNJGECB7200:68:.....22110R,63:338:0:94:0,64:160:00U3355adhhjKOR:82:000001122,64:326:RPNLJFB7300000:68:......10RRPQQQ,65:160:SSXAABCEHmopQR:81:0000122,65:328:RROKGC9644400:93:.....22200111,66:160:SSXBHIIKNQR:80:0000,66:330:RPLIFDBB840000:93:....2001111455,67:159:SSWZCHNPQR:80:00000,67:332:ROLJIHD96420:94:.....0003444,68:158:SSVYBGKP:80:00000,68:334:RQPMIFC830:97:......0111,69:157:00WZdFJOR:80:ZZ000,69:337:RMHC720:96:...0022,70:156:0027CGKNR:115:00000,70:337:PKE9400:96:...0000,71:155:0037BFKPR:115:00000,71:336:RNIC71:1:...000,71:342:0:96:0,72:155:STYdGKOR:115:0000,72:335:RNJGB500:1:...11100,73:154:SSSVbgKP:113:012221,73:334:ROJEA730:2:....0000,74:154:STVXchKQ:113:001111,74:334:RMHC71000:2:....00022,75:153:0SYcdgkNR:113:000111,75:334:QLFA51310:4:.....0000,76:151:SSSUZejJNR:113:..0000,76:333:RPLGA621400:3:......11000,77:151:STSUaflOR:112:00011,77:332:ROKGEB6113100:3:.......000000,78:151:SUVYchmP:112:00000,78:332:PKFB863033620:0:.......333330,79:150:SSUZehlpR:112:00000,79:331:ROID7334125A500:0:........3330000,80:149:SSUXAEJOR:112:000000,80:331:ROJE977237AC610:121:...........0000,81:148:SS:35:00,81:150:U:112:0,81:151:Y:35:0,81:152:BEINR:112:0,81:332:QMIFC6136B84000:121:..........00022,82:148:STYdFJNR:35:0000,82:333:RNJD9326A511100:121:.........02222,83:148:SVafINR:35:0000,83:333:ROJD842684135100:123:..........000011,84:148:0V8DJOR:35:0000,84:334:PLGC852737A9610:124:..........00011,85:147:0049EJO:35:00000,85:334:RPLHD98AACFEA500:125:............0000,86:146:0037BGLQ:35:.0000,86:335:RPLIFFGHILHB610:125:...........0000,87:145:0SWZdFJOR:34:00000,87:337:QOMMNOOJEA72000:120:.........22220,88:145:0SXcgJNR:34:000000,88:339:RRRRNID7220000000:117:........55330001,89:146:SUZdGLQ:34:00000,89:342:ROJFB875664200000:116:.....00341122222,90:146:SSXcFKQ:34:00000,90:343:RNKHD8410113320:116:....00441222222,90:358:00000000:11:44000111,91:146:SSWbEKP:34:0000,91:344:RPKGDA753221:118:.........000,91:356:2010010120:11:2242000111,92:146:SSWbEJO:33:00000,92:345:RPLIGDB99987743221010:9:..........44445021111,93:146:SUXAFKP:33:0000,93:347:ROMKHGGGFEDBA743230:8:.........5551102222,94:145:00U6CHMR:92:00000,94:349:RQONNMMLJHDA40120:7:.........22011333,95:145:0SXcgINR:92:00000,95:354:RRNIE9520000:6:....00122444,96:145:0TXchKs:91:11100,96:355:RNID84200:5:...100000,97:145:0UYdins:91:000000,97:356:PKGB6100:5:...00000,98:145:0TYdins:91:000000,98:356:QLGB7200:36:...66600,99:145:0SXcglqR:91:000000,99:356:RNJEA5100:36:...600000,100:145:0SUZejot:91:000000,100:357:QMHC851000000:36:...0001123344,101:146:STYdins:91:00000,101:357:RPLGC9532010000:19:....IIIIJKKLLL0,102:146:SSXchmr:128:0000,102:358:ROKHDBA854121000:19:....IIJJKLLLL00,103:146:SSWbglqR:128:0000,103:359:RPMJIGEB6236200000:19:....JJKKLM0000111,104:146:SSWbgkpR:128:00000,104:361:RQOMIEA77A7532001:19:...KKKMM000011111,105:146:SSVafkpR:128:00000,105:364:QMIGDDFDB97512:19:...00000111111,106:147:SUZejMQ:128:0000,106:365:ROMKKLJHGD941:19:......0111111,107:147:SUYdiLQ:127:0000,107:367:RRRRPOKGC97:20:.......0000,108:147:SUYdiLQ:127:0000,108:372:ROLIG:20:...00,109:147:0UYdimr:127:0000,109:373:RQO,110:147:STYchmr:126:00000,111:146:00UZdinr:126:3300000,111:362:NOPR,112:146:0SVafkorqqsR:126:333330,112:362:GHJMQ,113:146:SSVafjmkjjlorR:129:000000,113:363:BEILPR,114:146:STXcglhdcdgjnrR:129:00000,114:363:6AEHLPR,115:145:0SUYdhieZVXbfkpR,115:364:59DGKOR,116:145:0049DHGeZVWbfkpR,116:365:58CGKOR,117:144:0025ADDCA6UWbfjns,117:366:48CFJMO,118:144:0268766553VUYdimr,119:144:0143001002YZcfjns,120:144:0013X6413UXcgknrR,121:144:3589,121:150:62UTXcgkpR,122:150:1TUVZeimqR,123:150:02Xacgkos',
+        z: 'AKQ:MDZ025 -75.125 38.247,NCZ102 -75.827 36.405,VAZ098 -75.947 36.771,VAZ099 -75.557 37.737,VAZ100 -75.995 37.365|BOX:MAZ007 -70.757 42.693,MAZ015 -70.961 42.369,MAZ016 -71.023 42.222,MAZ019 -70.637 42.051,MAZ020 -70.925 41.583,MAZ022 -70.301 41.739,MAZ023 -70.715 41.415,MAZ024 -70.097 41.301,RIZ006 -71.573 41.367,RIZ007 -71.261 41.475,RIZ008 -71.555 41.181|BRO:TXZ451 -97.361 26.901,TXZ454 -97.259 26.535,TXZ455 -97.163 26.145|CAR:MEZ029 -68.165 44.337,MEZ030 -67.427 44.559|CHS:GAZ217 -81.208 31.811,GAZ219 -80.963 31.875,GAZ239 -81.131 31.665,GAZ241 -81.245 31.419,SCZ148 -80.729 32.301,SCZ149 -80.465 32.493,SCZ150 -79.859 32.745,SCZ151 -81.008 32.273|CRP:TXZ345 -96.917 27.993,TXZ442 -97.295 27.417,TXZ443 -97.151 27.693,TXZ447 -96.635 28.215|EKA:CAZ101 -124.151 41.715,CAZ103 -124.181 40.845,CAZ109 -123.827 39.375|GYX:MEZ023 -70.553 43.311,MEZ024 -70.163 43.671,MEZ025 -69.707 43.791,MEZ026 -69.467 43.881,MEZ027 -69.071 44.127,MEZ028 -68.993 44.289,NHZ014 -70.757 42.981|HFO:HIZ003 -159.678 21.955,HIZ006 -158.184 21.427,HIZ007 -158.105 21.607,HIZ009 -157.715 21.399,HIZ017 -156.507 20.944,HIZ018 -156.680 20.872,HIZ023 -155.913 19.410,HIZ026 -155.895 19.917,HIZ029 -159.521 22.219,HIZ030 -159.335 22.029,HIZ031 -159.486 21.879,HIZ032 -157.725 21.277,HIZ033 -157.887 21.301,HIZ034 -158.012 21.306,HIZ035 -157.872 21.573,HIZ045 -156.443 20.902,HIZ046 -156.477 20.788,HIZ047 -156.158 20.868,HIZ048 -156.027 20.677,HIZ049 -156.449 20.715,HIZ050 -156.230 20.611,HIZ051 -155.783 18.993,HIZ052 -155.339 19.225,HIZ053 -155.079 19.735,HIZ054 -155.594 20.128|ILM:NCZ106 -77.615 34.371,NCZ108 -77.843 34.131,NCZ110 -78.197 33.909,SCZ054 -78.833 33.723,SCZ056 -79.157 33.327|JAX:FLZ124 -81.431 30.639,FLZ125 -81.389 30.351,FLZ138 -81.155 29.547,FLZ233 -81.335 30.099,FLZ333 -81.251 29.781,GAZ154 -81.395 31.125,GAZ166 -81.455 30.975|LOX:CAZ340 -120.875 35.367,CAZ346 -120.611 34.713,CAZ349 -120.299 34.461,CAZ350 -119.699 34.395,CAZ354 -119.255 34.197,CAZ362 -118.673 34.029,CAZ364 -118.397 33.837|MFL:FLZ069 -81.605 25.887,FLZ168 -80.027 26.703,FLZ172 -80.099 26.139,FLZ173 -80.303 25.587|MFR:ORZ021 -124.403 43.197,ORZ022 -124.421 42.303|MHX:NCZ195 -76.877 34.683,NCZ196 -76.379 34.785,NCZ199 -77.261 34.569,NCZ203 -75.629 35.979,NCZ204 -75.917 35.121,NCZ205 -75.485 35.385|MLB:FLZ141 -80.945 29.121,FLZ154 -80.369 27.711,FLZ159 -80.267 27.423,FLZ164 -80.135 27.117,FLZ347 -80.828 28.600,FLZ447 -80.597 28.617,FLZ647 -80.668 28.118,FLZ747 -80.597 28.239|MOB:ALZ265 -88.271 30.375,ALZ266 -87.617 30.255,FLZ202 -87.299 30.315,FLZ204 -86.945 30.363,FLZ206 -86.579 30.387|MTR:CAZ505 -122.987 38.253,CAZ509 -122.417 37.371,CAZ529 -121.907 36.963,CAZ530 -121.835 36.651|OKX:NYZ075 -73.955 40.563,NYZ080 -73.151 40.641,NYZ081 -72.425 40.851,NYZ178 -73.793 40.581,NYZ179 -73.589 40.581|PHI:DEZ004 -75.059 38.613,NJZ014 -73.985 40.257,NJZ024 -74.735 39.069,NJZ025 -74.429 39.351,NJZ026 -74.087 39.789|PQR:ORZ101 -123.941 46.071,ORZ102 -123.971 45.387,ORZ103 -124.085 44.517,WAZ201 -124.067 46.509|SGX:CAZ043 -117.263 32.925,CAZ552 -117.887 33.591|TAE:FLZ108 -86.201 30.333,FLZ112 -85.763 30.141,FLZ114 -85.373 29.889,FLZ115 -84.683 29.769|TBW:FLZ050 -82.835 27.969,FLZ139 -82.913 29.163,FLZ142 -82.697 28.893,FLZ148 -82.661 28.569,FLZ149 -82.739 28.305,FLZ151 -82.547 27.843,FLZ155 -82.637 27.549,FLZ160 -82.475 27.123,FLZ162 -82.289 26.817,FLZ165 -81.977 26.463'
+      };
+      function lcGateDecode() {
+        var G = LC_GATE, m, k, i, j, p, c;
+        if (G.m) return G;
+        G.m = {}; G.f = {}; G.zl = []; G.w = [];
+        p = G.r.split(',');
+        for (i = 0; i < p.length; i++) {
+          k = p[i].split(':');
+          m = (+k[0]) * 1000 + (+k[1]);
+          for (j = 0; j < k[2].length; j++) G.m[m + j] = G.a.indexOf(k[2].charAt(j));
+          if (k.length > 3) for (j = 0; j < k[4].length; j++) {
+            c = k[4].charAt(j);
+            if (c !== '.') G.f[m + j] = (+k[3]) + G.a.indexOf(c);
+          }
+        }
+        p = G.z.split('|');
+        for (i = 0; i < p.length; i++) {
+          m = p[i].split(':'); G.w.push(m[0]); k = m[1].split(',');
+          for (j = 0; j < k.length; j++) {
+            c = k[j].split(' ');
+            G.zl.push({ ugc: c[0], wfo: m[0], lo: +c[1], la: +c[2] });
+          }
+        }
+        return G;
+      }
+      /* lcCoast(lat, lon) -> null when the open coast is 100 km or more away and no surf zone is near; otherwise
+         { d: km to the open coast (0 on the water; bilinear between nodes), mar: bool, srf: { ugc, wfo, la, lo } | null } */
+      function lcCoast(lat, lon) {
+        var G = lcGateDecode(), x = (lon - G.x0) / G.g, y = (lat - G.y0) / G.g;
+        var c0 = Math.floor(x), r0 = Math.floor(y), fx = x - c0, fy = y - r0;
+        var dr, dc, v, w, key, sw = 0, sd = 0, sm = 0, best = -1, bw = -1, z;
+        for (dr = 0; dr < 2; dr++) for (dc = 0; dc < 2; dc++) {
+          w = (dc ? fx : 1 - fx) * (dr ? fy : 1 - fy); key = (r0 + dr) * 1000 + c0 + dc;
+          v = G.m[key]; sw += w;
+          if (v === undefined) { sd += w * 100; continue; }
+          sd += w * ((v % 28) * 4 - 8);
+          if (v >= 28) sm += w;
+          if (G.f[key] !== undefined && w > bw) { bw = w; best = G.f[key]; }
+        }
+        sd = sw ? sd / sw : 100;
+        z = best >= 0 ? G.zl[best] : null;
+        if (sd >= 100 && !z) return null;
+        return { d: Math.max(0, Math.round(sd)), mar: sd < 100 && sm >= 0.5 * sw, srf: z };
+      }
+
+      /* Caltrans district boundaries (caltrans-gis.dot.ca.gov CHboundary/District_Tiger_Lines, the official 12),
+         simplified 0.010 deg with shared edges kept shared, islands under ~200 km2 dropped. Stored delta-coded
+         (integers in 1/100 deg: first vertex absolute, then steps) and decoded once into
+         CT_DIST = [[district, [[lon, lat], ...]], ...]. ctDistrict(lat, lon) -> 1..12, or 0 outside California. */
+      var CT_DIST = (function(E){ return E.map(function(e){ var f = e[1], r = [], x = 0, y = 0;
+        for (var i = 0; i < f.length; i += 2){ x += f[i]; y += f[i + 1]; r.push([x / 100, y / 100]); } return [e[0], r]; }); })([[1,[-12240,3886,2,-5,-2,-1,0,-3,-6,-6,-17,-4,-2,4,-5,0,-5,9,-7,5,-26,0,0,-1,-6,0,0,-3,-23,0,0,-3,-13,0,-2,-2,-11,0,-15,13,-3,5,0,4,5,3,0,3,-8,15,-5,15,0,11,2,5,4,5,-3,12,-3,3,-2,10,-4,3,-3,5,-10,9,-5,3,-2,6,-8,3,-18,14,-2,3,0,10,-5,7,8,18,17,26,3,8,2,5,-5,5,-2,8,1,4,4,1,4,11,-6,1,-2,4,3,4,7,0,1,5,-3,11,-3,3,-2,7,0,4,-18,9,-5,7,4,5,11,-3,1,4,-1,3,0,4,-4,3,81,0,-2,-1,1,-3,-3,-5,-3,0,-2,-3,-3,1,-3,-5,-3,-1,3,-3,-2,-2,3,-7,-3,-4,1,-4,-2,0,-2,-3,4,-1,-1,-4,4,-1,1,-6,3,-2,-5,-8,18,-1,2,-9,2,-1,-2,-3,5,-6,-2,-2,-1,-7,-2,0,0,-2,3,-1,2,-3,0,-2,-4,-5,0,-2,-3,-3,-8,4,-3,-2,-3,0,2,-5,-1,0,3,-1,-1,-1,3,-2,1,-4,-2,-1,3,-5,0,-76,61,0,0,-3,2,-1,-4,-3,-1,-6,2,-5,0,-5,3,0,0,-4,2,0,0,-13,15,0,0,-20,-5,0,5,-2,-4,-5,11,-9,15,-1,4,-4,1,-3,-3,0,0,-2,1,-7,8,-3,0,-6,7,-4,-6,1,-2,-3]],[2,[-12294,3980,-2,5,1,6,4,3,-2,1,0,3,-61,0,0,76,-3,5,2,1,-1,4,-3,2,1,1,-3,1,1,0,-2,5,3,0,3,2,8,-4,3,3,0,2,4,5,0,2,-2,3,-3,1,0,2,2,0,1,7,2,2,-5,6,2,3,-2,1,-2,9,-18,1,5,8,-3,2,-1,6,-4,1,1,4,-4,1,2,3,2,0,-1,4,3,4,-3,7,2,2,-3,3,3,1,3,5,3,-1,2,3,3,0,3,5,-1,3,2,1,114,1,238,-2,0,-227,-2,-1,-63,0,-3,-3,-7,4,-4,-1,-3,4,-2,0,-3,3,-6,-4,-2,-7,-13,-7,-2,2,-4,1,0,3,-7,4,0,3,-8,4,-4,6,-2,0,-1,3,-4,0,-1,4,-2,0,0,1,2,1,-1,10,2,1,0,2,2,0,1,2,-1,4,-2,1,0,3,-4,0,-1,-3,-3,0,-3,-2,-8,0,0,-4,-4,-2,-2,-6,-5,0,-8,-9,-27,-1,-2,-4,2,-4]],[3,[-12294,3980,89,0,-2,4,2,4,27,1,8,9,5,0,2,6,4,2,0,4,8,0,3,2,3,0,1,3,4,0,0,-3,2,-1,1,-4,-1,-2,-2,0,0,-2,-2,-1,1,-10,-2,-1,0,-1,2,0,1,-4,4,0,1,-3,2,0,4,-6,8,-4,0,-3,7,-4,0,-3,4,-1,2,-2,13,7,2,7,6,4,3,-3,2,0,3,-4,4,1,7,-4,3,3,63,0,2,1,0,-72,10,-7,2,-6,-3,-1,-4,-8,-13,-8,0,1,-3,0,-3,-7,-7,-1,-2,-4,-4,-3,-31,-6,-5,0,-9,5,-9,1,-12,-4,-1,1,-7,-1,-2,-1,0,-21,-4,0,-10,-4,-11,-1,-6,-2,-6,0,-3,2,-4,1,-6,-6,-1,-5,-4,-3,2,-2,-2,0,-9,-1,-3,-5,-8,-2,-4,0,-4,5,2,1,4,-2,6,3,3,-1,2,8,8,4,1,2,-1,8,2,1,-10,0,0,22,-2,1,-8,-2,-7,2,-8,-1,-7,-4,-5,3,-4,-1,-4,10,-1,2,-2,-1,0,3,-5,5,-7,14,-6,0,-5,2,-2,4,2,3,6,-1,-7,4,0,6,-8,3,-1,7,0,2,3,0,-1,3,-4,4,-15,1,-11,9,4,5,-5,2,5,0,0,20,-15,0,0,13,-2,0,0,4,-3,0]],[4,[-12363,3876,11,0,2,2,13,0,0,3,23,0,0,3,6,0,0,1,26,0,7,-5,5,-9,5,0,2,-4,17,4,6,6,0,3,2,1,-2,5,5,-2,6,0,7,-14,5,-5,0,-3,2,1,1,-2,4,-10,4,1,5,-3,7,4,8,1,7,-2,8,2,2,-1,0,-22,10,0,-2,-1,1,-8,-1,-2,-8,-4,-2,-8,-3,1,-6,-3,-4,2,-2,-1,4,-5,4,0,8,2,3,5,9,1,1,-2,-1,-4,1,0,1,-2,-2,-1,1,-1,-1,-2,3,-6,-3,-6,5,-1,-3,-3,0,-28,6,-2,3,-3,-2,-2,3,-2,-1,-3,1,-2,5,-1,-1,-3,1,-5,-5,-3,0,-3,4,-4,1,-5,2,-1,3,4,3,-2,4,1,5,-2,2,-4,-2,-3,3,-3,-4,-3,2,-3,-1,-2,3,-2,-21,0,-3,3,-4,-1,-9,-9,-1,4,-3,1,-2,-1,-2,3,-4,1,0,2,-4,0,2,2,-4,4,-10,5,-13,4,-16,15,0,-7,-9,-1,0,-2,-8,0,3,-8,-2,-6,-7,2,-2,4,-7,7,-1,7,1,10,-4,9,-4,2,-2,4,-2,8,2,6,-2,15,-9,6,-4,0,-5,2,-12,10,-6,-3,-12,2,-2,5,8,14,-4,6,-8,9,0,5,-9,9,-14,7,-15,17]],[5,[-12231,3705,2,6,-3,8,8,0,0,2,9,1,0,7,16,-15,13,-4,10,-5,4,-4,-2,-2,4,0,0,-2,4,-1,2,-3,2,1,3,-1,1,-4,9,9,4,1,3,-3,21,0,-2,-3,1,-2,4,0,4,-7,22,-10,32,-25,0,-16,-6,-1,-2,-3,0,-4,5,-5,-2,-3,-2,-1,2,-5,5,-1,1,-3,6,-3,0,-2,5,-1,5,-4,7,-1,4,-5,4,0,3,-3,1,-1,-2,-3,4,-2,0,-3,3,0,0,-18,10,0,0,-8,9,-6,1,-3,11,0,0,-9,7,0,0,-9,14,0,0,-9,12,1,-1,-9,7,0,0,-1,2,0,0,-18,3,0,0,-46,-1,-2,0,-2,-3,-2,-2,-5,-12,4,-9,-3,-9,3,-8,-1,-14,5,-13,1,-31,-3,-6,3,-4,7,-12,4,-3,4,5,13,-4,5,3,9,-5,3,-1,3,4,13,0,7,-11,2,-12,7,-4,6,4,10,-1,4,-11,3,-11,10,-5,6,-12,4,-5,6,-2,8,-11,8,-6,10,-7,4,-4,8,-6,7,-15,8,-7,7,-3,14,-6,16,4,7,-8,26,-17,8]],[6,[-12092,3674,26,21,7,0,0,4,-1,1,12,10,14,2,5,3,22,3,31,24,11,0,0,4,4,0,-1,3,4,0,0,7,27,22,4,-4,5,-3,3,3,7,-1,5,-5,5,-10,10,-3,7,-7,5,1,4,-5,-3,-5,2,-2,-2,-3,5,-2,2,1,6,-7,-3,-3,2,-8,3,-1,5,0,15,-8,2,-7,6,-10,0,-5,-3,-1,2,-8,3,-2,1,-2,-4,-2,4,-2,-1,-1,2,-3,4,-3,-1,-1,0,-3,5,-4,1,-3,-2,-1,3,-2,1,-2,5,-1,2,-1,-2,-3,6,-4,-3,-7,2,-6,5,-5,-1,-3,0,-4,2,-2,1,-7,4,-3,-2,-2,4,-3,0,-6,-3,-1,0,-7,-29,0,0,-52,-33,-1,0,-44,-22,0,0,-2,-4,2,1,-3,-10,0,0,2,-26,0,0,5,-4,0,0,1,-10,0,0,3,-6,0,-3,0,0,18,-2,0,0,1,-7,0,1,9,-12,-1,0,9,-14,0,0,9,-7,0,0,9,-11,0,-1,3,-9,6,0,8,-10,0,0,18,-3,0,0,3,-4,2,2,3,-1,1,-3,3,-4,0,-4,5,-7,1,-5,4,-5,1,0,2,-6,3,-1,3,-5,1,-2,5,2,1,2,3,-5,5,0,4,2,3,6,1,0,16]],[7,[-11950,3433,2,5,3,2,0,2,1,2,0,46,6,0,0,-3,10,0,0,-1,4,0,0,-5,26,0,0,-2,10,0,-1,3,4,-2,0,2,22,0,96,0,0,-26,2,-27,-8,-27,-4,0,0,-2,-2,0,-1,-2,2,-3,-20,0,0,-5,-8,-5,-4,-7,1,-2,-3,-2,-1,-4,-11,-1,-3,-3,-5,0,-15,7,-2,2,1,5,3,5,-11,14,-17,-1,-8,-3,-8,4,-33,7,-7,8,-4,10,-14,5]],[8,[-11778,3395,-2,3,1,2,2,0,0,2,4,0,8,27,-2,27,0,26,4,0,0,83,1,0,0,3,-3,0,0,3,2,0,0,9,189,-1,0,2,9,0,102,-81,0,-13,4,-3,4,-7,8,-6,1,-5,4,-5,-2,-2,6,-6,-1,-7,5,-1,11,-8,5,-2,4,-5,1,-4,-4,0,-6,-7,-19,-8,-1,-2,-1,-7,-9,-8,2,-4,-2,0,3,-3,-3,-1,0,-5,4,-10,-4,-4,2,-1,-2,-1,1,-4,-2,-2,2,-4,-7,-5,-4,-7,-261,0,0,2,-13,4,1,1,-15,1,0,2,10,13,-7,4,-5,1,-1,5,-4,1,-12,12,-1,1]],[9,[-11927,3774,7,6,-2,2,2,3,-2,0,2,3,-11,7,-1,2,1,5,-2,4,-10,6,-1,-2,-2,0,-4,6,-1,-2,-4,0,-3,2,-1,3,-4,1,0,3,3,1,-2,1,1,1,-4,3,1,6,3,2,-1,3,6,1,-1,2,3,5,-6,11,-2,2,1,6,2,1,0,3,200,-142,194,-148,-9,0,0,-2,-189,1,0,-9,-2,0,0,-3,3,0,0,-3,-1,0,0,-83,-4,0,-96,0,0,44,33,1,0,52,29,0,0,7,3,1,0,6,-4,3,2,2,-4,3,-1,7,-2,2,0,4,1,3,-5,5,-2,6,3,7,-6,4,2,3,-2,1,-5,1,-1,2,-3,2,2,1,-1,3,-5,4,0,3,1,1,-4,3,-2,3,1,1,-4,2,4,2,-1,2,-3,2,-2,8,3,1,0,5,-6,10,-2,7,-15,8,-5,0,-3,1,-2,8,3,3,-6,7,-2,-1,-5,2,2,3,-2,2,3,5,-4,5,-5,-1,-7,7,-10,3,-5,10,-5,5,-7,1,-3,-3]],[10,[-12158,3810,2,0,-2,2,4,3,1,5,6,6,4,-1,3,-2,6,0,6,2,11,1,10,4,4,0,0,21,2,1,7,1,1,-1,12,4,9,-1,9,-5,5,0,31,6,4,3,2,4,7,1,3,7,3,0,0,-1,13,8,4,8,3,1,-2,6,31,-22,0,-3,-2,-1,-1,-6,2,-2,6,-11,-3,-5,1,-2,-6,-1,1,-3,-3,-2,-1,-6,4,-3,-1,-1,2,-1,-3,-1,0,-3,4,-1,1,-3,3,-2,4,0,1,2,4,-6,2,0,1,2,10,-6,2,-4,-1,-5,1,-2,11,-7,-2,-3,2,0,-2,-3,2,-2,-7,-6,-4,4,-27,-22,0,-7,-4,0,1,-3,-4,0,0,-4,-11,0,-31,-24,-22,-3,-5,-3,-14,-2,-12,-10,1,-1,0,-4,-7,0,-26,-21,-22,10,-4,7,-4,0,-1,2,2,3,-3,2,1,2,-2,3,4,3,-3,3,2,3,-2,4,-5,2,-4,-1,-3,2,-3,-4,-2,1,-1,5,-4,4,0,3,5,3,-1,5,1,3,-5,1,-1,2,1,3,-3,2,2,2,-3,3,-6,2,0,28,3,3,-5,1,3,6,-3,6,1,2,-1,1,2,1,-1,2,-1,0,1,4]],[11,[-11761,3333,3,12,7,2,0,4,15,-1,-1,-1,13,-4,0,-2,261,0,-2,-2,-8,-1,3,-5,-3,-5,6,-4,-2,-1,2,-3,-1,-4,-3,-9,2,-1,3,-5,1,2,3,-2,10,0,3,-6,2,0,-1,-3,2,-3,-1,-7,-6,-4,0,-4,-1,-1,-8,-2,-8,2,-2,-3,-248,-19,-2,9,-6,0,-4,7,-2,15,2,6,-6,18,-6,10,-11,11]],[12,[-11813,3370,1,4,3,2,-1,2,4,7,8,5,0,5,20,0,7,-5,1,-1,12,-12,4,-1,1,-5,5,-1,7,-4,-10,-13,0,-2,0,-4,-7,-2,-3,-12,-10,8,-3,0,-8,8,-23,13]]]);
+      function ctDistrict(lat, lon){
+        for (var k = 0; k < CT_DIST.length; k++){
+          var r = CT_DIST[k][1], c = false;
+          for (var i = 0, j = r.length - 1; i < r.length; j = i++)
+            if (((r[i][1] > lat) !== (r[j][1] > lat)) && (lon < (r[j][0] - r[i][0]) * (lat - r[i][1]) / (r[j][1] - r[i][1]) + r[i][0])) c = !c;
+          if (c) return CT_DIST[k][0];
+        }
+        return 0;
+      }
+      /* the surf is said only for places near the beaches (within ~30 km of the open coast): a zone 40 km from Pasadena is not Pasadena's */
+      X.gate = function(){ var p = pt(); if (!isFinite(p.la) || !isFinite(p.lo)) return null; var G = lcCoast(p.la, p.lo);
+        if (G && G.srf && G.d > 30) G.srf = null; return G; };
+      X.ctD = function(){ var p = pt(); if (!isFinite(p.la)) return 0; var d = ctDistrict(p.la, p.lo);
+        /* a beach town can sit just outside the simplified shore (~1 km): the nearest district a few km inland, never past the state line */
+        if (!d && p.la > 32.4 && p.la < 42.1 && p.lo > -124.6 && p.lo < -114) [[0, .03], [0, -.03], [.03, 0], [-.03, 0], [.03, .03], [-.03, .03]].some(function(o){ d = ctDistrict(p.la + o[0], p.lo + o[1]); return d; });
+        return d; };
+      /* ======== THE OUTLINE: THE BASIN'S FOOTPRINT ======== */
+      X.urban = function(){
+        if (!X.urbP) X.urbP = fetch('/_maplab/la/la_urban.json').then(function(r){ if (!r.ok) throw new Error('http ' + r.status); return r.json(); }).then(function(j){
+          var out = []; (j.features || []).forEach(function(f){ var p = OL.polysOf(f.geometry); if (p) out = out.concat(p); }); return out.length ? out : null; })
+          .catch(function(){ X.urbP = null; return null; });
+        return X.urbP; };
+      var olKind = OL.kind; OL.kind = function(){ var k = olKind.apply(this, arguments); return k === 'place' && laHere() ? 'la' : k; };
+      var olFetch = OL.fetch; OL.fetch = function(kind, la, lo, name){
+        if (kind !== 'la') return olFetch.apply(this, arguments);
+        return X.urban().then(function(p){ return p && NB.inside(p, la, lo) ? p : olFetch('place', la, lo, name); }); };
+      /* ======== THE NEIGHBORHOOD: LA'S OWN AREAS ======== */
+      X.hoodsLoad = function(){
+        if (!X.hoodsP) X.hoodsP = fetch('/_maplab/la/hoods.json').then(function(r){ if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+          .then(function(j){ X.hoods = (j && j.a) || []; return X.hoods; }).catch(function(){ X.hoodsP = null; return null; });
+        return X.hoodsP; };
+      var nbOsm = NB.osm; NB.osm = function(la, lo){
+        if (!laHere()) return nbOsm.apply(this, arguments);
+        return X.hoodsLoad().then(function(H){ var hit = null;
+          (H || []).forEach(function(r){ var b = r[2]; if (!hit && lo >= b[0] && lo <= b[2] && la >= b[1] && la <= b[3] && NB.inside(r[3], la, lo)) hit = r; });
+          return hit ? { n: hit[0], pa: hit[1], p: hit[3], src: 'la' } : nbOsm(la, lo); }); };
+      /* ======== ONE LABEL CANVAS: THE NEIGHBORHOOD NAMES AND THE MACHINERY'S WORDS ======== */
+      X.canvas = function(name, z){
+        var p = M.getPane(name);
+        if (!p){ p = M.createPane(name); p.style.zIndex = z; p.style.pointerEvents = 'none';
+          /* every pane is flattened to one level, so DOM order stacks them: just under the place dot and the themed names (lcLabels),
+             and so under TRAFFIC's canvas, which TR.top keeps last */
+          var lb = M.getPane('lcLabels'); if (lb && lb.parentNode) lb.parentNode.insertBefore(p, lb); }
+        var cv = document.createElement('canvas'); cv.style.position = 'absolute'; p.appendChild(cv); return cv; };
+      X.fit = function(cv){
+        var sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr);
+        if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
+        L.DomUtil.setPosition(cv, M.containerPointToLayerPoint([0, 0])); cv.style.visibility = '';
+        var g = cv.getContext('2d'); g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, W, H); g.setTransform(dpr, 0, 0, dpr, 0, 0); return g; };
+      X.labsLoad = function(){
+        if (!X.labsP) X.labsP = fetch('/_maplab/la/hood_labels.json').then(function(r){ if (!r.ok) throw new Error('http ' + r.status); return r.json(); }).then(function(j){
+          X.labs = (j.features || []).map(function(f){ var p = f.properties || {}, c = (f.geometry || {}).coordinates || [], b = p.bbox || [c[0], c[1], c[0], c[1]];
+            return { n: p.name, r: p.rank || 3, lo: c[0], la: c[1], a: Math.abs((b[2] - b[0]) * (b[3] - b[1])) }; }).filter(function(q){ return q.n && isFinite(q.la); });
+          X.draw(); return X.labs; }).catch(function(){ X.labsP = null; return null; });
+        return X.labsP; };
+      /* WHERE A NAME IS SPOKEN: from zoom 10 the dozen marquee places, from 12 the next 140, from 13 the rest -- THE BASIN's ranks;
+         on MAP only while LABELS is lit */
+      X.hoodsOn = function(){ return !!M && laHere() && (VIEW !== 'map' || LAY.st.lab); };
+      X.draw = function(){
+        if (!M) return;
+        if (!X.lcv){ X.lcv = X.canvas('lcBasinNames', 449); X.mcv = X.canvas('lcBasinMach', 446);
+          M.on('zoomstart', function(){ X.lcv.style.visibility = 'hidden'; X.mcv.style.visibility = 'hidden'; });
+          M.on('moveend resize', function(){ X.draw(); }); }
+        var g = X.fit(X.lcv), gm = X.fit(X.mcv), sz = M.getSize(), z = M.getZoom(), q = [];
+        if (pane.style.display === 'none') return;
+        X.machDraw(gm, q);
+        if (X.hoodsOn()){ if (!X.labs) X.labsLoad();
+          else { var b = M.getBounds().pad(0.05);
+            X.labs.forEach(function(h){ if ((h.r === 1 && z < 10) || (h.r === 2 && z < 12) || (h.r === 3 && z < 13)) return;
+              if (!b.contains([h.la, h.lo])) return;
+              var p = M.latLngToContainerPoint([h.la, h.lo]); q.push({ x: p.x, y: p.y, lines: [h.n], rank: 50 - h.r * 10 + Math.min(9, h.a * 400), hood: h.r }); }); } }
+        if (!q.length) return;
+        /* the ledger: the place dot and the themed names already on screen, then each name in rank order; a name with nowhere
+           clean to sit is dropped, never stacked (THE CITY's flushLabels rule) */
+        var taken = [], mr = mapEl.getBoundingClientRect();
+        [].forEach.call(mapEl.querySelectorAll('.bv-conus-name b'), function(e){ var r = e.getBoundingClientRect(); if (r.width) taken.push([r.left - mr.left - 3, r.top - mr.top - 3, r.right - mr.left + 3, r.bottom - mr.top + 3]); });
+        if (here){ var hp = M.latLngToContainerPoint(here.getLatLng()); taken.push([hp.x - 9, hp.y - 9, hp.x + 9, hp.y + 9]); }
+        var rock = VIEW === 'rock', traf = VIEW === 'traffic';
+        q.sort(function(a, b){ return b.rank - a.rank; }).forEach(function(l){
+          var fs = l.hood ? (l.hood === 1 ? 10 : l.hood === 2 ? 9 : 8.5) : 9, wt = l.hood === 3 ? 500 : 600;
+          var fonts = l.lines.map(function(t, i){ return i === 0 ? wt + ' ' + fs + 'px system-ui,sans-serif' : '700 7.5px system-ui,sans-serif'; });
+          var w = 0; l.lines.forEach(function(t, i){ g.font = fonts[i]; w = Math.max(w, g.measureText(t).width); });
+          var h = fs + 3 + (l.lines.length - 1) * 10, x0 = l.x - w / 2 - 3, y0 = l.y - h / 2 - 2, x1 = l.x + w / 2 + 3, y1 = l.y + h / 2 + 2;
+          if (x0 < 2 || y0 < 2 || x1 > sz.x - 2 || y1 > sz.y - 2) return;
+          if (taken.some(function(r){ return x0 < r[2] && r[0] < x1 && y0 < r[3] && r[1] < y1; })) return;
+          taken.push([x0, y0, x1, y1]);
+          if (traf){ g.fillStyle = 'rgba(8,10,16,.88)'; g.beginPath(); if (g.roundRect) g.roundRect(x0, y0, x1 - x0, y1 - y0, 3); else g.rect(x0, y0, x1 - x0, y1 - y0); g.fill(); }
+          g.textAlign = 'center'; g.textBaseline = 'middle'; g.lineJoin = 'round';
+          l.lines.forEach(function(t, i){ var yy = l.y - (l.lines.length - 1) * 5 + i * 10;
+            g.font = fonts[i];
+            var col = rock ? '#10161f' : (l.col && i === 0 ? l.col : i ? 'rgba(255,255,255,.86)' : l.hood === 1 ? '#fff' : 'rgba(255,255,255,.88)');
+            if (!traf){ g.lineWidth = 3; g.strokeStyle = rock ? 'rgba(255,255,255,.92)' : 'rgba(8,10,16,.9)'; g.strokeText(t, l.x, yy); }
+            g.fillStyle = col; g.fillText(t, l.x, yy); });
+        });
+      };
+      /* ======== THE MACHINERY (LA): weather_geo.json and THE BASIN's reads ======== */
+      X.machOn = function(){ return !!M && laHere() && ((VIEW === 'map' && LAY.st.terr) || (VIEW === 'radar' && OV.terrRad)); };
+      X.WXP = [['lax', 33.94, -118.41], ['dag', 34.85, -116.79], ['sea', 33.50, -121.00], ['sgm', 34.30, -118.00], ['sie', 37.20, -119.60], ['baj', 31.00, -115.80],
+        ['yum', 32.70, -114.60], ['don', 39.32, -120.33], ['tej', 34.80, -118.88]];
+      X.wxRead = function(){
+        if (X.wxP || (X.wx && Date.now() - X.wxAt < 6e5)) return;
+        X.wxAt = Date.now();
+        var u = 'https://api.open-meteo.com/v1/forecast?latitude=' + X.WXP.map(function(q){ return q[1]; }).join(',') + '&longitude=' + X.WXP.map(function(q){ return q[2]; }).join(',')
+          + '&current=pressure_msl,temperature_2m,freezing_level_height,total_column_integrated_water_vapour,temperature_925hPa,wind_speed_850hPa,wind_direction_850hPa&wind_speed_unit=kn&temperature_unit=fahrenheit';
+        var m = 'https://marine-api.open-meteo.com/v1/marine?latitude=34.458,33.625&longitude=-120.875,-118.708&current=sea_surface_temperature&temperature_unit=fahrenheit';
+        X.wxP = Promise.all([JO(u), J(m)]).then(function(r){ X.wxP = null;
+          if (!Array.isArray(r[0])) return;
+          var P = {}; r[0].forEach(function(q, i){ P[X.WXP[i][0]] = q.current || {}; });
+          /* THE BASIN's rules (_maplab/index.html wxReads): a Santa Ana is LAX at least 3 mb BELOW Daggett with Daggett's 850 mb wind out of
+             the north-east quadrant; the Gulf surge is 35 mm of water over Yuma on a southerly */
+          var R = { pt: P, grad: P.lax.pressure_msl - P.dag.pressure_msl, at: Date.now() }, d = P.dag.wind_direction_850hPa;
+          R.santaAna = R.grad <= -3 && (d >= 330 || d <= 120);
+          R.surge = P.yum.total_column_integrated_water_vapour >= 35 && P.yum.wind_direction_850hPa >= 110 && P.yum.wind_direction_850hPa <= 215;
+          R.lid = P.lax.temperature_925hPa - P.lax.temperature_2m;
+          R.sst = Array.isArray(r[1]) && r[1].length === 2 && r[1][0].current && r[1][1].current ? { cool: r[1][0].current.sea_surface_temperature, warm: r[1][1].current.sea_surface_temperature } : null;
+          X.wx = R; X.draw(); CAP.paint(); }); };
+      /* THE COLD EDGE (THE BASIN's coldEdgeRead): one marine call over an 8 x 14 grid of the Bight, walked west from the warm side
+         for the line where the sea drops through its own middle temperature by 2.5 F or more */
+      X.coldRead = function(){
+        if (X.coldP || (X.cold && Date.now() - X.coldAt < 18e5)) return;
+        X.coldAt = Date.now();
+        var lats = [], lons = [], P = [];
+        for (var i = 0; i < 8; i++) lats.push(33.3 + 0.2 * i);
+        for (var j = 0; j < 14; j++) lons.push(-121.6 + j / 6);
+        lats.forEach(function(la){ lons.forEach(function(lo){ P.push([la, lo]); }); });
+        X.coldP = JO('https://marine-api.open-meteo.com/v1/marine?latitude=' + P.map(function(q){ return q[0].toFixed(3); }).join(',') + '&longitude=' + P.map(function(q){ return q[1].toFixed(3); }).join(',')
+          + '&current=sea_surface_temperature&temperature_unit=fahrenheit').then(function(d){ X.coldP = null;
+          if (!Array.isArray(d)) return;
+          var T = function(r, c){ var o = d[r * lons.length + c], v = o && o.current && o.current.sea_surface_temperature; return v == null ? NaN : +v; };
+          var all = []; for (var r = 0; r < lats.length; r++) for (var c = 0; c < lons.length; c++){ var v = T(r, c); if (isFinite(v)) all.push(v); }
+          if (all.length < 40) return;
+          all.sort(function(a, b){ return a - b; });
+          var mid = (all[Math.floor(all.length * 0.15)] + all[Math.floor(all.length * 0.85)]) / 2, line = [];
+          for (r = lats.length - 1; r >= 0; r--) for (c = lons.length - 1; c > 0; c--){
+            var e = T(r, c), w = T(r, c - 1); if (!isFinite(e) || !isFinite(w) || !(e >= mid && w < mid)) continue;
+            var e2 = T(r, Math.min(lons.length - 1, c + 1)), w2 = T(r, Math.max(0, c - 2));
+            if (isFinite(e2) && isFinite(w2) && e2 - w2 >= 2.5) line.push({ lon: lons[c] - (e - mid) / (e - w) / 6, lat: lats[r], cool: w2, warm: e2, coolAt: [lons[Math.max(0, c - 2)], lats[r]], warmAt: [lons[Math.min(lons.length - 1, c + 1)], lats[r]] });
+            break; }
+          X.cold = line.length >= 3 ? line : []; X.draw(); }); };
+      X.geoLoad = function(){
+        if (!X.geoP) X.geoP = J('/_maplab/la/weather_geo.json').then(function(j){ X.geo = j || { upland: [], corridor: [], pass: [] }; X.draw(); });
+        return X.geoP; };
+      /* THE BASIN's grammar (makeMachinery): standing ground dim, only what RUNS brightens -- a range when the 850 mb flow climbs its
+         wet face (within 50 degrees, 20 kt, 18 mm of water), the wind gaps in a Santa Ana, the surge corridor when the low desert is
+         loaded, a pass when the freezing level is within 2,500 ft of the road; quiet names fainter, never gone */
+      X.machDraw = function(g, q){
+        if (!X.machOn()) return;
+        if (!X.geo){ X.geoLoad(); return; }
+        X.wxRead(); X.coldRead();
+        var R = X.wx, z = M.getZoom(), kind = z >= 8 ? 'near' : 'far', b = M.getBounds().pad(0.2);
+        var P = function(c){ var p = M.latLngToContainerPoint([c[1], c[0]]); return [p.x, p.y]; };
+        var ang = function(a, c){ var d = Math.abs(a - c) % 360; return d > 180 ? 360 - d : d; };
+        var inB = function(r){ return r.some(function(c){ return b.contains([c[1], c[0]]); }); };
+        var path = function(r, close){ g.beginPath(); r.forEach(function(c, i){ var p = P(c); if (i) g.lineTo(p[0], p[1]); else g.moveTo(p[0], p[1]); }); if (close) g.closePath(); };
+        g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
+        (X.geo.upland || []).forEach(function(u){ if (u.v !== kind || !u.r || !inB(u.r)) return;
+          var c = R && R.pt[/SIERRA NEVADA|WHITE|SPRING/.test(u.n) ? 'sie' : /PEDRO|PENINSULAR/.test(u.n) ? 'baj' : 'sea'];
+          var on = !!(c && ang(c.wind_direction_850hPa, u.face) <= 50 && c.wind_speed_850hPa >= 20 && c.total_column_integrated_water_vapour >= 18);
+          path(u.r, !u.open); g.lineWidth = on ? 2 : 1.2; g.strokeStyle = on ? 'rgba(246,214,150,.95)' : 'rgba(216,196,158,.40)'; g.stroke();
+          var cp = P(u.c); q.push({ x: cp[0], y: cp[1], lines: on ? [u.n, 'FLOW CLIMBING · 850 MB FROM ' + Math.round(c.wind_direction_850hPa) + '° AT ' + Math.round(c.wind_speed_850hPa * 1.151) + ' MPH'] : [u.n],
+            col: on ? 'rgb(252,236,200)' : 'rgba(232,216,184,.9)', rank: on ? 78 : 30 }); });
+        (X.geo.corridor || []).forEach(function(k){ if (k.v !== kind || !k.l || !inB(k.l)) return;
+          var surge = /SURGE/.test(k.n), on = !!(R && (surge ? R.surge : R.santaAna));
+          path(k.l, false); g.setLineDash(k.kind === 'gap' ? [2, 4] : [6, 4]); g.lineWidth = on ? 2.2 : 1.2; g.strokeStyle = on ? 'rgba(210,250,240,.95)' : 'rgba(126,206,192,.42)'; g.stroke(); g.setLineDash([]);
+          if (!k.n) return;
+          var mp = P(k.l[Math.floor(k.l.length / 2)]);
+          q.push({ x: mp[0], y: mp[1], lines: on ? [k.n, surge ? 'MONSOON MOISTURE RUNNING NORTH · ' + (R.pt.yum.total_column_integrated_water_vapour / 25.4).toFixed(1) + ' IN OF WATER AT YUMA'
+              : 'SANTA ANA BLOWING · LAX ' + Math.abs(R.grad).toFixed(1) + ' MB BELOW DAGGETT'] : [k.n], col: on ? 'rgb(210,250,240)' : 'rgba(156,224,210,.9)', rank: on ? 78 : 28 }); });
+        (X.geo.pass || []).forEach(function(ps){ if (ps.v !== kind || !R || !b.contains([ps.c[1], ps.c[0]])) return;
+          var c = R.pt[/DONNER/.test(ps.n) ? 'don' : /CAJON/.test(ps.n) ? 'sgm' : 'tej'], fz = c && c.freezing_level_height * 3.281;
+          if (!(fz <= ps.ft + 2500)) return;
+          var pp = P(ps.c); g.beginPath(); g.arc(pp[0], pp[1], 3, 0, 6.3); g.fillStyle = 'rgba(225,238,255,.95)'; g.fill();
+          q.push({ x: pp[0], y: pp[1] - 12, lines: [ps.n, 'FREEZING LEVEL ' + (Math.round(fz / 100) * 100).toLocaleString() + ' FT · THE ROAD IS AT ' + ps.ft.toLocaleString() + ' FT'], col: 'rgb(225,238,255)', rank: 79 }); });
+        if (X.cold && X.cold.length >= 3){ var CL = X.cold, m = CL[Math.floor(CL.length / 2)];
+          path(CL.map(function(c){ return [c.lon, c.lat]; }), false); g.setLineDash([5, 4]); g.lineWidth = 1.4; g.strokeStyle = 'rgba(170,210,255,.75)'; g.stroke(); g.setLineDash([]);
+          var a = P([m.lon, m.lat]), c1 = P([m.coolAt[0] - 0.12, m.coolAt[1] - 0.1]), c2 = P([m.warmAt[0] + 0.12, m.warmAt[1] - 0.1]);
+          q.push({ x: a[0], y: a[1], lines: ['THE COLD EDGE'], col: 'rgba(170,210,255,.95)', rank: 41 });
+          q.push({ x: c1[0], y: c1[1], lines: ['COOL WATER ' + Math.round(m.cool) + '°F'], col: 'rgba(170,210,255,.95)', rank: 40 });
+          q.push({ x: c2[0], y: c2[1], lines: ['WARM WATER ' + Math.round(m.warm) + '°F'], col: 'rgba(255,214,170,.95)', rank: 40 }); }
+        g.restore(); };
+      /* the reads, said in the header in THE BASIN's order (what decides the marine layer: the sea, the lid, the desert's pull) */
+      X.machLine = function(){
+        var R = X.wx; if (!R || !X.machOn()) return '';
+        var out = [];
+        if (R.sst) out.push('SEA ' + Math.round(R.sst.cool) + '°F OFF POINT CONCEPTION · ' + Math.round(R.sst.warm) + '°F IN THE BIGHT');
+        if (isFinite(R.lid)) out.push('OVER LAX THE AIR AT 925 MB IS ' + Math.abs(R.lid).toFixed(0) + '°F ' + (R.lid >= 0 ? 'WARMER' : 'COOLER') + ' THAN THE SURFACE' + (R.lid >= 3 ? ' · A LID ON THE MARINE LAYER' : ''));
+        if (isFinite(R.grad)) out.push('LAX ' + Math.abs(R.grad).toFixed(1) + ' MB ' + (R.grad >= 0 ? 'ABOVE' : 'BELOW') + ' DAGGETT · '
+          + (R.santaAna ? 'SANTA ANA BLOWING · THE CLOUD IS PUSHED OUT TO SEA' : R.grad >= 0 ? 'ONSHORE · THE DESERT IS DRAWING IT IN' : 'OFFSHORE, NOT YET A SANTA ANA'));
+        if (R.surge) out.push('GULF SURGE · MONSOON MOISTURE RUNNING NORTH');
+        return out.join(' · ') + ' · MODEL READS'; };
+      /* ======== THE MARINE LAYER IN THE HEADER (THE BASIN's capRun) ======== */
+      /* Open-Meteo's model low cloud at the place, hourly on its own clock: over ~60% is the layer overhead, under ~30% clear; the call
+         says when it clears or comes back from the next hours of the same run. NOT a marine layer when it is raining: low cloud
+         under a storm is the storm's (the summary must fit the sky), so the line steps aside while precipitation falls. */
+      X.marRead = function(){
+        var G = X.gate(), k = capKey(); if (!G || !G.mar){ X.mar = null; return; }
+        if (X.marKey === k && Date.now() - X.marAt < 9e5) return; X.marKey = k; X.marAt = Date.now();
+        var p = pt();
+        JO('https://api.open-meteo.com/v1/forecast?latitude=' + p.la.toFixed(3) + '&longitude=' + p.lo.toFixed(3) + '&hourly=cloud_cover_low&current=cloud_cover_low,precipitation,wind_speed_10m,wind_direction_10m'
+          + '&wind_speed_unit=mph&timezone=auto&forecast_days=2').then(function(j){
+          if (!j || !j.hourly){ if (k === capKey()) X.marAt = Date.now() - 8.4e5; return; }   /* a miss (a 429) is asked again in a minute */
+          if (k !== capKey()) return;
+          var T = j.hourly.time, Lc = j.hourly.cloud_cover_low, cu = j.current || {}, nowS = String(cu.time || '').slice(0, 13), i0 = Math.max(0, T.findIndex(function(t){ return t.slice(0, 13) === nowS; }));
+          var lo = cu.cloud_cover_low != null ? cu.cloud_cover_low : Lc[i0], c;
+          var hr = function(t){ var h = +t.slice(11, 13); return (h % 12 || 12) + (h < 12 ? ' AM' : ' PM'); };
+          var find = function(test){ for (var i = i0 + 1; i < Math.min(T.length, i0 + 20); i++) if (test(Lc[i])) return T[i]; return null; };
+          if (lo >= 60){ var t1 = find(function(v){ return v < 30; }); c = 'MARINE LAYER OVERHEAD · ' + (t1 ? 'CLEARS ABOUT ' + hr(t1) : 'HOLDS THROUGH TOMORROW'); }
+          else if (lo < 30){ var t2 = find(function(v){ return v >= 60; }); c = 'CLEAR OF THE MARINE LAYER' + (t2 ? ' · IT RETURNS ABOUT ' + hr(t2) : ''); }
+          else { var t3 = find(function(v){ return v < 30; }); c = 'PATCHY MARINE LAYER' + (t3 ? ' · CLEARS ABOUT ' + hr(t3) : ''); }
+          X.mar = { call: c, low: Math.round(lo), wet: (cu.precipitation || 0) > 0, wind: cu.wind_speed_10m != null ? compass(cu.wind_direction_10m) + ' ' + Math.round(cu.wind_speed_10m) + ' MPH' : '' };
+          CAP.paint(); }).then(null, function(){ X.marAt = Date.now() - 6e5; }); };
+      /* ======== THE SURF (the NWS surf zone forecast + the nearest wave buoy) ======== */
+      /* a product's segments are headed by UGC lines: "CAZ362-200400-", "NYZ075-178-179-", "FLZ168>172-" (a state code carries over,
+         ">" is a range, the six-digit token is the expiry) */
+      X.ugcs = function(hdr){ var out = [], st = '';
+        hdr.replace(/\s+/g, '').split('-').forEach(function(tok){ var m = tok.match(/^([A-Z]{2}[ZC])?(\d{3})(?:>(\d{3}))?$/); if (!m) return; if (m[1]) st = m[1]; if (!st) return;
+          for (var i = +m[2]; i <= +(m[3] || m[2]); i++) out.push(st + ('00' + i).slice(-3)); });
+        return out; };
+      /* TODAY's rows of one segment, read tolerantly: offices write "Rip Current Risk*......Low.", "RIP CURRENT RISK...MODERATE",
+         or prose "Rip Current Risk: High. Surf Height: 2 to 3 feet." -- the first of each after the segment's head is today's */
+      X.srfRows = function(seg){
+        var one = function(re){ var m = seg.match(re); return m ? m[1].replace(/\s+/g, ' ').replace(/[.\s]+$/, '').trim() : null; };
+        var rip = one(/rip current risk\*?\s*(?:\.{2,}|:)\s*(low|moderate|high)/i);   /* the leader or a colon, never the headline ("...HIGH RIP CURRENT RISK...") */
+        var surf = one(/(?:surf height|breaking surf|surf)\s*[.:]{1,}\s*([^\n]+?)(?=\.\s|\.$|\n|$)/i) || one(/surf height\s+([^\n]+)/i);
+        var water = one(/water temperature\s*[.:]{1,}\s*([^\n]+?)(?=\.\s|\.$|\n|$)/i);
+        var rem = one(/remarks\s*[.:]{1,}\s*([^\n]+?)(?=\n|$)/i);
+        return { rip: rip, surf: surf, water: water && !/missing/i.test(water) ? water : null, remarks: rem }; };
+      X.srfRead = function(){
+        var G = X.gate(), k = capKey(); if (!G || !G.srf){ X.srf = null; X.buoy = null; return; }
+        if (X.srfKey === k && Date.now() - X.srfAt < 18e5) return; X.srfKey = k; X.srfAt = Date.now();
+        var z = G.srf, H = { headers: { Accept: 'application/ld+json' } };
+        J('https://api.weather.gov/products/types/SRF/locations/' + z.wfo, H).then(function(j){
+          var g = j && (j['@graph'] || [])[0]; return g ? J('https://api.weather.gov/products/' + g.id, H) : null; }).then(function(p){
+          if (!p || k !== capKey()) return;
+          var txt = String(p.productText || ''), segs = txt.split('$$'), seg = null, name = '';
+          segs.forEach(function(s){ if (seg) return; var m = s.match(/^\s*((?:[A-Z]{2}[ZC][\d>\-\s]+)+)\n/m); if (!m) return;
+            var U = X.ugcs(m[1]), ix = U.indexOf(z.ugc);
+            if (ix >= 0){ seg = s; var after = s.slice(s.indexOf(m[1]) + m[1].length).split('\n').map(function(t){ return t.trim(); }).filter(Boolean);
+              var nm = after.filter(function(t){ return /-$/.test(t); }); name = (nm[ix] || nm[0] || '').replace(/-$/, ''); } });   /* the zone names follow the codes, one each, in order */
+          /* MANY OFFICES ISSUE IT IN SEASON ONLY (the Atlantic's from late spring to early fall): an old product is no forecast */
+          if (!seg || !(Date.now() - Date.parse(p.issuanceTime) < 36 * 36e5)){ X.srf = { none: true }; CAP.paint(); return; }
+          var R = X.srfRows(seg); R.zone = name; R.ugc = z.ugc; R.wfo = z.wfo; R.at = Date.parse(p.issuanceTime) || null; R.id = p.id;
+          X.srf = R; CAP.paint(); X.buoyRead(z); }); };   /* the buoy only once there is a forecast to stand beside */
+      /* THE BUOY (THE BASIN's surfReads): the nearest NDBC wave buoy reporting in the last five hours within ~120 km of the surf zone,
+         read through ERDDAP (our proxy, as LOCAL's moving sea reads it); IS IT BUILDING? the change across those hours, half a foot
+         the bar -- under that it is the sea breathing */
+      X.buoyRead = function(z){
+        var la = z.la, lo = z.lo, k = capKey();
+        var erd = 'https://coastwatch.pfeg.noaa.gov/erddap/tabledap/cwwcNDBCMet.json?station,time,latitude,longitude,WVHT,DPD,MWD,WTMP'
+          + '&time%3E=now-5hours&latitude%3E=' + (la - 1.2).toFixed(2) + '&latitude%3C=' + (la + 1.2).toFixed(2) + '&longitude%3E=' + (lo - 1.5).toFixed(2) + '&longitude%3C=' + (lo + 1.5).toFixed(2) + '&WVHT%3E0';
+        Promise.race([new Promise(function(res){ setTimeout(function(){ res(null); }, 7000); }),
+          (window.bvProxyJSON ? window.bvProxyJSON(erd, { timeout: 5000, noDirect: true }).catch(function(){ return null; }) : J('https://proxy.bluishvoid.com/?url=' + encodeURIComponent(erd) + '&ttl=600'))]).then(function(j){
+          if (k !== capKey()) return;
+          if (!j || !j.table){ X.buoy = null; CAP.paint(); return; }
+          var c = j.table.columnNames, ix = function(n){ return c.indexOf(n); }, first = {}, last = {};
+          j.table.rows.forEach(function(w){ var id = w[ix('station')], hs = w[ix('WVHT')]; if (hs == null || !(hs > 0)) return;
+            var o = { id: id, t: w[ix('time')], lat: w[ix('latitude')], lon: w[ix('longitude')], hs: hs, tp: w[ix('DPD')], dir: w[ix('MWD')], wt: w[ix('WTMP')] };
+            if (!first[id]) first[id] = o; last[id] = o; });
+          var best = null, km = function(b){ return Math.hypot(b.lat - la, (b.lon - lo) * Math.cos(la * Math.PI / 180)) * 111.2; };
+          Object.keys(last).forEach(function(id){ var b = last[id]; b.km = km(b); if (b.km <= 120 && (!best || b.km < best.km)) best = b; });
+          if (best){ var f = first[best.id], hrs = (Date.parse(best.t) - Date.parse(f.t)) / 36e5, dh = best.hs - f.hs;
+            if (hrs >= 1) best.trend = { d: dh, hrs: hrs, word: dh >= 0.15 ? 'BUILDING' : dh <= -0.15 ? 'EASING' : 'HOLDING' }; }
+          X.buoy = best; CAP.paint(); }); };
+      /* ======== THE HEADER LINES ======== */
+      X.capHtml = function(){
+        var out = '', G = X.gate();
+        var M0 = X.mar;
+        if (G && G.mar && M0 && !M0.wet) out += '<div class="lc-mar-l"><b>' + esc(M0.call) + '</b> <span class="lc-mar-s">LOW CLOUD ' + M0.low + '%' + (M0.wind ? ' · WIND ' + esc(M0.wind) : '') + ' · MODEL</span></div>';
+        var S = X.srf;
+        if (G && G.srf && S && !S.none && (S.surf || S.rip)){
+          var rc = /high/i.test(S.rip || '') ? '#ffd0d0' : /mod/i.test(S.rip || '') ? '#fde68a' : '#d9fbe5', B = X.buoy, tw = B && B.trend;
+          out += '<div class="lc-mar-l"><b>SURF ' + esc(String(S.surf || '—').toUpperCase().replace(/\bFEET\b/, 'FT')) + '</b>'
+            + (S.rip ? ' · RIP CURRENTS <b style="color:' + rc + ';">' + esc(S.rip.toUpperCase()) + '</b>' : '')
+            + ' <span class="lc-mar-s">' + esc(String(S.zone || S.ugc).toUpperCase()) + ' · <a href="https://forecast.weather.gov/product.php?site=' + S.wfo + '&issuedby=' + S.wfo + '&product=SRF" target="_blank" rel="noopener">NWS SURF ZONE FORECAST</a></span>'
+            + ' <button type="button" class="lc-pill lc-mar-more">' + (X.more ? 'LESS ▴' : 'MORE ▾') + '</button></div>';
+          if (X.more){
+            var bl = B ? 'BUOY ' + esc(B.id) + ' · ' + ft(B.hs) + ' FT' + (B.tp ? ' AT ' + Math.round(B.tp) + ' S' : '') + (B.dir != null ? ' FROM ' + compass(B.dir) : '')
+              + (tw ? ' · ' + (tw.word === 'BUILDING' ? '↑ ' : tw.word === 'EASING' ? '↓ ' : '– ') + tw.word + (Math.abs(tw.d) * 3.281 >= 0.05 ? ' ' + (Math.abs(tw.d) * 3.281).toFixed(1) + ' FT' : '') + ' IN ' + Math.round(tw.hrs) + ' H, MEASURED' : '')
+              + (B.wt != null ? ' · WATER ' + Math.round(B.wt * 9 / 5 + 32) + '°F' : '') + ' · ' + Math.round(B.km) + ' KM OUT' : 'NO WAVE BUOY READING RIGHT NOW (NONE WITHIN ~75 MI, OR THE FEED DID NOT ANSWER)';
+            out += '<div class="lc-mar-x">' + (S.remarks ? esc(S.remarks.toUpperCase()) + '<br>' : '') + (S.water ? 'WATER ' + esc(S.water.toUpperCase()) + '<br>' : '')
+              + bl + (B ? ' · <a href="https://www.ndbc.noaa.gov/station_page.php?station=' + encodeURIComponent(B.id) + '" target="_blank" rel="noopener">NOAA NDBC</a>' : '') + '</div>';
+          }
+        }
+        var ml = X.machLine(); if (ml) out += '<div class="lc-mar-x">' + esc(ml) + '</div>';
+        return out; };
+      var capPaint = CAP.paint; CAP.paint = function(){
+        capPaint.apply(this, arguments);
+        var el = CAP.el; if (!el || el.style.display === 'none') return;
+        var html = X.capHtml(), d = el.querySelector('.lc-mar');
+        if (!html){ if (d) d.parentNode.removeChild(d); return; }
+        if (!d){ d = document.createElement('div'); d.className = 'lc-mar'; el.appendChild(d); d._h = null; }
+        if (d._h === html) return; d.innerHTML = html; d._h = html;
+        var mb = d.querySelector('.lc-mar-more'); if (mb) mb.onclick = function(e){ e.stopPropagation(); X.more = !X.more; CAP.paint(); }; };
+      var capTick = CAP.tick; CAP.tick = function(){ capTick.apply(this, arguments); X.marRead(); X.srfRead(); X.placeCheck(); };
+      /* ======== THE MARINE LAYER ON RADAR (GOES GeoColor, cut to its cloud) ======== */
+      /* THE BASIN's loop: GIBS publishes GOES ~50 min behind the clock and its archive has holes (an empty slot is a valid empty PNG),
+         so 16 ten-minute slots are probed at 64 x 48 and up to 8 with a picture are fetched full size, oldest to newest, a beat held
+         on the newest. Each frame is CUT TO ITS CLOUD (cloudOnly: bright and nearly grey -- stratus luminance 193 at chroma 2, clear
+         desert 124 at chroma 44; softer after dark), so the map keeps its ground. GOES-West for the West, GOES-East for the East. */
+      X.ml.want = function(){ var G = X.gate(); return !!M && VIEW === 'radar' && !!G && G.mar && X.mlOn(); };
+      X.mlOn = function(){ if (X.ml.on == null){ var s = null; try { s = localStorage.getItem('bv_lc_marine'); } catch(e){}
+          X.ml.on = s == null ? pt().lo < -114 : s === '1'; }      /* on by default on the West Coast, where it is the everyday weather; off in the East */
+        return X.ml.on; };
+      X.ml.clear = function(){ if (X.ml.timer){ clearInterval(X.ml.timer); X.ml.timer = null; } X.ml.lay.forEach(function(o){ M.removeLayer(o.l); if (o.u) URL.revokeObjectURL(o.u); }); X.ml.lay = []; X.ml.key = ''; X.ml.bb = null; };
+      X.cloudOnly = function(im, W, H){
+        var c = document.createElement('canvas'); c.width = W; c.height = H;
+        var g2 = c.getContext('2d', { willReadFrequently: true }); g2.drawImage(im, 0, 0, W, H);
+        var id; try { id = g2.getImageData(0, 0, W, H); } catch(e){ return null; }
+        var d = id.data, n = d.length >> 2, samp = [], i;
+        for (i = 0; i < n; i += 97) samp.push(0.2126 * d[i * 4] + 0.7152 * d[i * 4 + 1] + 0.0722 * d[i * 4 + 2]);
+        samp.sort(function(a, b){ return a - b; });
+        var night = samp.length && samp[samp.length >> 1] < 70, L0 = night ? 40 : 120, L1 = night ? 100 : 190, C0 = night ? 70 : 30, C1 = night ? 45 : 10;
+        for (i = 0; i < d.length; i += 4){ if (!d[i + 3]) continue;
+          var r = d[i], gg = d[i + 1], bb = d[i + 2], Lm = 0.2126 * r + 0.7152 * gg + 0.0722 * bb, S2 = Math.max(r, gg, bb) - Math.min(r, gg, bb);
+          var t = (Lm - L0) / (L1 - L0); t = t < 0 ? 0 : t > 1 ? 1 : t; var u = (C0 - S2) / (C0 - C1); u = u < 0 ? 0 : u > 1 ? 1 : u; d[i + 3] = d[i + 3] * t * u; }
+        g2.putImageData(id, 0, 0); return c; };
+      X.ml.sync = function(force){
+        var S = X.ml;
+        if (!X.ml.want()){ if (S.lay.length || S.timer) S.clear(); return; }
+        if (!force && S.bb && S.z === M.getZoom() && S.bb.contains(M.getBounds()) && Date.now() - S.at < 10 * 6e4){ if (!S.timer) S.play(); return; }
+        S.clear();
+        var bb = M.getBounds().pad(0.25), sz = M.getSize(), c0 = bb.getCenter(), gen = ++S.gen;
+        S.bb = bb; S.z = M.getZoom(); S.at = Date.now();
+        var lay = c0.lng < -100 ? 'GOES-West_ABI_GeoColor' : 'GOES-East_ABI_GeoColor'; S.sat = /West/.test(lay) ? 'GOES-WEST' : 'GOES-EAST';
+        var sw = L.CRS.EPSG3857.project(bb.getSouthWest()), ne = L.CRS.EPSG3857.project(bb.getNorthEast());
+        var W = Math.round(Math.min(1400, sz.x * 1.5)), H = Math.round(W * (ne.y - sw.y) / (ne.x - sw.x));
+        var url = function(w, h, iso){ return 'https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi?SERVICE=WMS&REQUEST=GetMap&VERSION=1.1.1&LAYERS=' + lay + '&SRS=EPSG:3857&BBOX='
+          + [sw.x, sw.y, ne.x, ne.y].map(function(v){ return Math.round(v); }).join(',') + '&WIDTH=' + w + '&HEIGHT=' + h + '&FORMAT=image/png&TRANSPARENT=true' + (iso ? '&TIME=' + iso : ''); };
+        var load = function(u){ return new Promise(function(res){ var im = new Image(), t = setTimeout(function(){ res(null); }, 15000); im.crossOrigin = 'anonymous';   /* a stalled slot must not hold the loop */
+          im.onload = function(){ clearTimeout(t); res(im); }; im.onerror = function(){ clearTimeout(t); res(null); }; im.src = u; }); };
+        var has = function(im){ if (!im) return false; var c = document.createElement('canvas'); c.width = 24; c.height = 18; var g3 = c.getContext('2d');
+          try { g3.drawImage(im, 0, 0, 24, 18); var d = g3.getImageData(0, 0, 24, 18).data, k = 0; for (var i = 3; i < d.length; i += 4) if (d[i] > 8) k++; return k > 24 * 18 * 0.5; } catch(e){ return true; } };
+        var t = new Date(); t.setUTCSeconds(0, 0); t.setUTCMinutes(Math.floor(t.getUTCMinutes() / 10) * 10);
+        var slots = []; for (var i = 0; i < 16; i++) slots.push(new Date(t - i * 6e5).toISOString().replace(/\.\d+Z$/, 'Z'));
+        Promise.all(slots.map(function(iso){ return load(url(64, 48, iso)); })).then(function(pr){
+          if (gen !== S.gen) return null;
+          var good = []; for (var i2 = 0; i2 < slots.length && good.length < 8; i2++) if (has(pr[i2])) good.push(slots[i2]);
+          good.reverse(); if (!good.length) good = [null];
+          return Promise.all(good.map(function(iso){ return load(url(W, H, iso)).then(function(im){ return { im: im, t: iso ? Date.parse(iso) : Date.now() }; }); })); }).then(function(fr){
+          if (!fr || gen !== S.gen || !X.ml.want()) return;
+          fr.forEach(function(f){ if (!f.im) return; var c = X.cloudOnly(f.im, W, H); if (!c) return;
+            c.toBlob(function(bl){ if (!bl || gen !== S.gen) return; var u = URL.createObjectURL(bl);
+              S.lay.push({ l: L.imageOverlay(u, bb, { interactive: false, zIndex: 2, opacity: 0 }).addTo(M), t: f.t, u: u });
+              S.lay.sort(function(a, b){ return a.t - b.t; }); if (!S.timer) S.play(); }, 'image/png'); }); }); };
+      X.ml.play = function(){ var S = X.ml; if (S.timer) clearInterval(S.timer); S.i = 0;
+        var show = function(){ var n = S.lay.length; if (!n) return; var k = Math.min(S.i, n - 1); S.lay.forEach(function(o, j){ o.l.setOpacity(j === k ? 0.9 : 0); }); S.cur = S.lay[k]; };
+        show(); S.timer = setInterval(function(){ if (document.hidden || !paneOn()) return; S.i = (S.i + 1) % (S.lay.length + 2); show(); }, 620); };
+      /* its pill rides with RADAR's own (R.label rebuilds that row; the pill is put back each time it does) */
+      var rLabel = R.label; R.label = function(){
+        rLabel.apply(this, arguments);
+        var G = X.gate(), row = strip.querySelector('.lc-rhd + span'); if (!row || !G || !G.mar || VIEW !== 'radar') return;
+        if (row.querySelector('[data-mar]')) return;
+        var b = document.createElement('button'); b.type = 'button'; b.className = 'lc-pill' + (X.mlOn() ? ' on' : ''); b.setAttribute('data-mar', '1'); b.textContent = 'MARINE LAYER';
+        b.title = (X.ml.sat || (pt().lo < -100 ? 'GOES-WEST' : 'GOES-EAST')) + ' GEOCOLOR, THE CLOUD ONLY, THE LAST HOUR, ~50 MIN BEHIND THE CLOCK';
+        b.onclick = function(e){ e.stopPropagation(); X.ml.on = !X.mlOn(); try { localStorage.setItem('bv_lc_marine', X.ml.on ? '1' : '0'); } catch(e2){} b.classList.toggle('on', X.ml.on); X.ml.sync(true); };
+        var sat = row.querySelector('[data-s]'); if (sat && sat.nextSibling) row.insertBefore(b, sat.nextSibling); else row.appendChild(b);
+        if (X.mlOn() && !X.ml.timer && !X.ml.lay.length) X.ml.sync(); };
+      /* ======== CALTRANS, BY DISTRICT (TRAFFIC) ======== */
+      X.cmsRead = function(d){
+        if (X.ct.cmsAt[d] && Date.now() - X.ct.cmsAt[d] < 3e5) return; X.ct.cmsAt[d] = Date.now();
+        J('https://cwwp2.dot.ca.gov/data/d' + d + '/cms/cmsStatusD' + pad2(d) + '.json').then(function(j){
+          if (!j){ X.ct.cmsAt[d] = Date.now() - 24e4; return; }
+          /* THE BASIN's reader: in service, showing something (not Blank / Not Reported), both phases' lines in order */
+          X.ct.cms[d] = (j.data || []).map(function(o){ return o.cms; }).filter(function(c){ var m = (c && c.message) || {}; return c && /^true$/i.test(c.inService) && m.display && m.display !== 'Blank' && m.display !== 'Not Reported'; })   /* "true" or "True" by district */
+            .map(function(c){ var Ln = [], m = c.message, Lc = c.location || {};
+              ['phase1', 'phase2'].forEach(function(ph){ var q = m[ph] || {}; [1, 2, 3].forEach(function(k){ var t = String(q[ph + 'Line' + k] || '').trim(); if (t && t !== 'Not Reported' && Ln.indexOf(t) < 0) Ln.push(t); }); });
+              return { lon: +Lc.longitude, lat: +Lc.latitude, where: String(Lc.locationName || '').trim(), road: ((Lc.route || '') + ' ' + (Lc.direction || '')).trim(), text: Ln }; })
+            .filter(function(c){ return c.text.length && isFinite(c.lon) && isFinite(c.lat); });
+          if (TR.lit === true) TR.draw(); }); };
+      /* called from TR.draw before the subway chips and the jam tags, so a sign never covers a "+22 MIN" (THE BASIN's draw order) */
+      TR.extra = function(g, P, inF, dpr, z, parts){
+        var d = X.ctD(); if (!d || !TR.show.roads) return;
+        X.cmsRead(d); var list = X.ct.cms[d]; if (!list) return;
+        var n = 0;
+        list.forEach(function(c){ var q = P([c.lon, c.lat]); if (!inF(q)) return; n++;
+          if (z < 9) return;
+          var s = dpr; g.save(); g.fillStyle = 'rgba(8,10,16,.92)'; g.strokeStyle = '#fde68a'; g.lineWidth = 1.2 * s;
+          g.beginPath(); g.rect(q[0] - 6 * s, q[1] - 4 * s, 12 * s, 8 * s); g.fill(); g.stroke();
+          g.fillStyle = '#fde68a'; g.fillRect(q[0] - 4 * s, q[1] - 1.8 * s, 8 * s, 1.2 * s); g.fillRect(q[0] - 4 * s, q[1] + 0.8 * s, 5.5 * s, 1.2 * s); g.restore();
+          TR.incHits.push({ x: q[0] / dpr, y: q[1] / dpr, reach: 12, d: { kind: 'FREEWAY SIGN', sign: c.text, where: c.where, roads: c.road, dist: d, ll: [c.lat, c.lon] } }); });
+        if (n) parts.push(n + ' FREEWAY SIGN' + (n === 1 ? '' : 'S') + ' LIT'); };
+      var incTap = TR.incTap; TR.incTap = function(d){
+        if (!d || !d.sign) return incTap.apply(this, arguments);
+        var seq = TR.tapSeq = (TR.tapSeq || 0) + 1, lab = TR.lab;
+        INFO.show('FREEWAY SIGN', (d.roads ? String(d.roads).toUpperCase() + ' · ' : '') + 'CALTRANS DISTRICT ' + d.dist + ' · LIVE',
+          '<div style="margin-top:6px;">' + lab('THE SIGN SAYS') + '</div><div style="margin-top:3px;"><span style="display:inline-block;font:800 12px ui-monospace,Menlo,monospace;letter-spacing:.06em;line-height:1.35;background:#0b0e16;color:#fde68a;padding:4px 9px;border-radius:4px;">'
+            + d.sign.map(esc).join('<br>') + '</span></div>' + (d.where ? '<div style="font:600 8.5px/1.7 system-ui,sans-serif;letter-spacing:.06em;margin-top:4px;">' + lab('WHERE') + esc(String(d.where).toUpperCase()) + '</div>' : '') + '<div id="lc-inc-cam"></div>',
+          'https://quickmap.dot.ca.gov/');
+        if (d.ll) TR.camNear(d.ll[0], d.ll[1], 800, function(nc){ if (TR.tapSeq !== seq || !nc) return; var host = document.getElementById('lc-inc-cam'); if (!host) return;
+          host.innerHTML = '<button type="button" class="lc-pill" style="margin:6px 0 0;">SEE THE NEAREST CAMERA · ' + (nc.m < 150 ? 'AT THE SPOT' : (nc.m / 1609).toFixed(1) + ' MI AWAY') + '</button>';
+          host.firstChild.onclick = function(e){ e.stopPropagation(); TR.camOpen(nc.c, nc.S); }; }); };
+      /* MANY CALTRANS CAMERAS ARE DARK (THE BASIN, 2026-09-26: 290 of 475 "in service" were serving the white "Temporarily Unavailable"
+         card). The pictures are CORS-open, so each is looked at before it is shown: mostly white in its middle band = that card. */
+      X.camProbe = function(c, cb){
+        var D = X.ct.dead; if (D[c.u] != null) return cb(!D[c.u]);
+        var im = new Image(); im.crossOrigin = 'anonymous';
+        im.onload = function(){ try { var cv = document.createElement('canvas'); cv.width = 32; cv.height = 26; var g = cv.getContext('2d'); g.drawImage(im, 0, 0, 32, 26);
+            var d = g.getImageData(0, 5, 32, 14).data, w = 0; for (var i = 0; i < d.length; i += 4) if (d[i] > 235 && d[i + 1] > 235 && d[i + 2] > 235) w++;
+            D[c.u] = w / (d.length / 4) > 0.6; } catch(e){ D[c.u] = false; } cb(!D[c.u]); };
+        im.onerror = function(){ D[c.u] = true; cb(false); };
+        im.src = c.u + '?t=' + Math.floor(Date.now() / 30000); };
+      X.camStrip = function(title, cands, want){
+        var live = [], i = 0, busy = 0, done = false, by = 'CALTRANS DISTRICT ' + X.ctD() + ' CAMERAS · LIVE · REFRESH EVERY 10 S';
+        var fig = function(o){ return '<figure style="margin:0;min-width:0;"><img class="la-cam-img" data-src="' + esc(o.u) + '" src="' + esc(o.u + '?t=' + Math.floor(Date.now() / 10000)) + '" alt="' + esc(o.n || '') + '"'
+          + ' style="width:100%;aspect-ratio:320/260;object-fit:cover;border-radius:6px;display:block;background:#1b2233;"><figcaption style="font:700 8px system-ui,sans-serif;color:rgba(255,255,255,.7);letter-spacing:.06em;margin-top:3px;">'
+          + esc(String((o.route ? o.route + ' · ' : '') + String(o.n || '').replace(/^[^:]*:\s*/, '')).toUpperCase()) + '</figcaption></figure>'; };
+        var show = function(fin){ CAMC.show(title, by, live.length ? '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px;">' + live.map(fig).join('') + '</div>'
+            + (fin && live.length < want ? '<div style="font:700 8px system-ui,sans-serif;letter-spacing:.06em;opacity:.7;margin-top:5px;">' + live.length + ' OF ' + cands.length + ' CAMERAS HERE ARE LIVE RIGHT NOW</div>' : '')
+            : '<div style="font:700 9px system-ui,sans-serif;opacity:.8;margin-top:8px;">' + (fin ? 'NONE OF THESE CAMERAS IS LIVE RIGHT NOW' : 'FINDING THE LIVE CAMERAS…') + '</div>', 'https://cwwp2.dot.ca.gov/'); };
+        var next = function(){ if (done) return; if (live.length >= want || (i >= cands.length && !busy)){ done = true; show(true); X.camTick(); return; }
+          while (busy < 6 && i < cands.length && live.length + busy < want){ var c = cands[i++]; busy++;
+            (function(c2){ X.camProbe(c2, function(ok){ busy--; if (ok && live.length < want) live.push(c2); next(); }); })(c); }
+          if (!busy && i >= cands.length){ done = true; show(true); X.camTick(); } };
+        show(false); next(); };
+      X.camTick = function(){ clearInterval(TR.camT); TR.camT = setInterval(function(){ var el = document.getElementById('lc-cam-card'); if (!el || el.style.display === 'none'){ clearInterval(TR.camT); return; }
+        [].forEach.call(el.querySelectorAll('.la-cam-img'), function(im){ im.src = im.getAttribute('data-src') + '?t=' + Math.floor(Date.now() / 10000); }); }, 10000); };
+      var trPills = TR.pills; TR.pills = function(){
+        trPills.apply(this, arguments);
+        var row = document.getElementById('lc-traf-pills'), list = TR.cams.ct; if (!row || !X.ctD() || TR.lit !== true) return;
+        if (list == null){ var p0 = pt(); TR.camNear(p0.la, p0.lo, 1, function(){ if (Array.isArray(TR.cams.ct) && TR.cams.ct.length) TR.pills(); }); return; }   /* the district's list, once */
+        if (!Array.isArray(list) || !list.length) return;
+        var coast = list.filter(function(c){ return c.route === 'SR-1'; }).sort(function(a, b){ return b.lat - a.lat; });
+        var fwy = list.filter(function(c){ return /^(I-|US-)/.test(c.route || ''); }).sort(function(a, b){ return a.route < b.route ? -1 : a.route > b.route ? 1 : 0; });
+        var pick = function(a, n){ var o = [], st = Math.max(1, Math.floor(a.length / n)); for (var i = 0; i < a.length && o.length < n; i += st) o.push(a[i]); return o; };
+        var add = function(t, f){ var b = document.createElement('button'); b.type = 'button'; b.className = 'lc-pill'; b.style.margin = '0 6px 0 0'; b.textContent = t; b.onclick = function(e){ e.stopPropagation(); f(); }; row.appendChild(b); };
+        if (coast.length) add('SEE THE COAST ROAD', function(){ X.camStrip('THE COAST ROAD', coast, 12); });
+        if (fwy.length) add('SEE THE FREEWAYS', function(){ X.camStrip('THE FREEWAYS NOW', pick(fwy, 60), 12); }); };
+      /* ======== THE PLACE MOVED / THE VIEW CHANGED ======== */
+      X.placeCheck = function(){
+        var p = pt(), k = isFinite(p.la) ? p.la.toFixed(3) + ',' + p.lo.toFixed(3) : '';
+        if (k === X.place) return; X.place = k;
+        var d = X.ctD(); if (d !== X.ct.d){ X.ct.d = d; TR.cams.ct = null; }
+        X.mar = null; X.srf = null; X.buoy = null; X.more = false; X.marKey = X.srfKey = ''; X.ml.on = null; X.ml.clear(); X.draw(); };
+      var lView = view; view = function(v){ lView.apply(this, arguments);
+        /* the arid West as sand (window._bvDesert, the national desert tint): on every view but GEOLOGY, whose rock would sit under it */
+        if (M && window._bvDesert){ window._bvDesert(M); if (M._bvDesertLayer && M._bvDesertLayer.setOpacity) M._bvDesertLayer.setOpacity(v === 'rock' ? 0 : 0.6); }
+        X.placeCheck(); X.draw(); X.ml.sync(); };
+      var layApply = LAY.apply; LAY.apply = function(){ layApply.apply(this, arguments); X.draw(); CAP.paint(); };
+      var ovDraw = OV.draw; OV.draw = function(){ ovDraw.apply(this, arguments); if (VIEW === 'radar' && X.machOn() !== !!X.machWas){ X.machWas = X.machOn(); X.draw(); CAP.paint(); } };
+      setInterval(function(){ if (document.hidden || !paneOn() || !M) return; X.placeCheck(); if (VIEW === 'radar') X.ml.sync(); }, 4000);
+      LCRES.push(function(){ if (VIEW === 'radar') X.ml.sync(); });
+      /* the credits name what is drawn */
+      X.src = function(v){ var G = X.gate(), s = '';
+        if (laHere()) s += A('CENSUS 2020 URBAN AREAS (THE BASIN’S FOOTPRINT)', 'https://www.census.gov/programs-surveys/geography/guidance/geo-areas/urban-rural.html') + A('LA COUNTY COUNTYWIDE STATISTICAL AREAS', 'https://egis-lacounty.hub.arcgis.com/');
+        if (laHere() && (v === 'map' || v === 'radar')) s += A('OPEN-METEO AND OPEN-METEO MARINE (THE BASIN’S READS)', 'https://open-meteo.com');
+        if (v === 'traffic' && X.ctD()) s += A('CALTRANS DISTRICT ' + X.ctD() + ' SIGNS AND CAMERAS', 'https://cwwp2.dot.ca.gov/');
+        if (G && G.mar && v === 'radar') s += A('NASA GIBS ' + (pt().lo < -100 ? 'GOES-WEST' : 'GOES-EAST') + ' GEOCOLOR', 'https://worldview.earthdata.nasa.gov/');
+        if (G && G.mar) s += A('OPEN-METEO LOW CLOUD (MARINE LAYER)', 'https://open-meteo.com');
+        var p0 = pt(); if (v !== 'rock' && p0.la > 22 && p0.la < 49.5 && p0.lo > -125 && p0.lo < -93) s += A('ESA WORLDCOVER 2021 (CC BY 4.0) + NASA MODIS NDVI (DESERT TINT)', 'https://esa-worldcover.org');
+        if (G && G.srf) s += A('NWS SURF ZONE FORECAST ' + G.srf.wfo, 'https://forecast.weather.gov/product.php?site=' + G.srf.wfo + '&issuedby=' + G.srf.wfo + '&product=SRF') + A('NOAA NDBC WAVE BUOYS (ERDDAP)', 'https://www.ndbc.noaa.gov');
+        return s; };
+      ['radar', 'map', 'rock', 'leaf', 'traffic'].forEach(function(k){ var f = SRC[k]; SRC[k] = function(){ return f.apply(this, arguments) + X.src(k); }; });
+      return X;
+    })();
     /* ---------------------------------------------------------------- the tab ---- */
     var wt = document.getElementById('radar-widget-title'), savedT = null;
     var headOn = function(on){
