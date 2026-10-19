@@ -13,8 +13,10 @@ THE ATLANTIC EXTENSION (2026-10-19, user: "extend our seafloor across the whole 
 new OUT, with --have pointing at the first bake so its z10+ tiles stand (they are neither re-rendered nor copied):
   - the lower 48 again at z5-9 only, out to 135 W: the mosaic-hole fix (render.py) for the wide tiles, and the old box edge
     at 125.5 W (a tone step off northern California from z7) moved out to the z5 tile edge;
-  - the Atlantic basin, the Gulf and the Caribbean, out to Africa and Europe, 10 S to the Arctic circle, z5-10;
-  - the east Pacific storm belt south of the lower 48, z5-10.
+  - the Atlantic basin, the Gulf and the Caribbean, out to Africa and Europe, 10 S to the Arctic circle, z5-9;
+  - the east Pacific storm belt south of the lower 48, z5-9.
+  z9 is the floor beyond the US (like Alaska's z10, a full shelf descent would be most of a day against NOAA's server): the
+  client's under-layer stretches z9 from z10 up, so the hurricane map (max z10) and LOCAL still read depth there.
 Upload OUT over bathy/v1, with cover.json merged with the first bake's (--cover --merge).
 """
 import argparse, json, math, os, sys, threading, time
@@ -25,7 +27,7 @@ import render as RD
 
 REGIONS = [((-125.5, 24.0, -66.5, 49.6), 13), ((-160.6, 18.5, -154.4, 22.6), 13), ((-68.2, 17.5, -64.3, 18.8), 13),
            ((-179.9, 51.0, -129.5, 71.6), 10)]
-EXT_REGIONS = [((-135.0, 24.0, -66.5, 49.6), 9), ((-100.0, -10.0, 20.0, 66.6), 10), ((-135.0, -10.0, -100.0, 24.0), 10)]
+EXT_REGIONS = [((-135.0, 24.0, -66.5, 49.6), 9), ((-100.0, -10.0, 20.0, 66.6), 9), ((-135.0, -10.0, -100.0, 24.0), 9)]
 
 def lonlat_tile(lon, lat, z):
     n = 2 ** z; lat = max(-85, min(85, lat))

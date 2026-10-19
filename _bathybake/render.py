@@ -91,7 +91,13 @@ def render(z, x, y, want_shelf=False):
     depth = -a
     ok = w & np.isfinite(depth) & (depth > 0.05)        # only water the model says has a floor below the surface (inland lakes read their surface)
     lon0, lat0, lon1, lat1 = tile_lonlat(z, x, y)
-    if lon1 > -116.2 and lon0 < -115.4 and lat1 > 32.9 and lat0 < 33.6: return (None, False) if want_shelf else None   # the Salton Sea's surface is -69 m
+    # the Salton Sea's surface is -69 m: its pixels are dropped. (Until 2026-10-19 this returned the WHOLE tile empty, so the z5
+    # tile holding it, 5/5/12, came back empty and nothing under it was ever baked: no bathymetry on the California coast from
+    # 32 to 41 N at any zoom, and a hard tone edge off northern California where the neighbouring tiles' depth ramp stopped.)
+    if lon1 > -116.2 and lon0 < -115.4 and lat1 > 32.9 and lat0 < 33.6:
+        n = 2 ** z; plon = lon0 + (np.arange(N) + 0.5) / N * (lon1 - lon0)
+        plat = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + (np.arange(N) + 0.5) / N) / n))))
+        ok &= ~(((plat > 32.9) & (plat < 33.6))[:, None] & ((plon > -116.2) & (plon < -115.4))[None, :])
     if ok.sum() < 20: return (None, False) if want_shelf else None
     shelf = bool((depth[ok] < 200).any())
     d = np.where(ok, np.clip(depth, 0, None), 0)

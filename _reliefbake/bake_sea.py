@@ -8,8 +8,8 @@ r2:bluishvoid-bg/seafloor/v1 (with cover.json via bake.py --cover).
 THE ATLANTIC EXTENSION (2026-10-19, user: "extend our seafloor across the whole atlantic"): the first run stopped at 40 W and
 5 N, so the Main Development Region and the eastern Atlantic were flat navy. Two more boxes, baked into a new OUT and
 uploaded over seafloor/v1 (tiles on the old edge come out byte-identical, every tile is shaded from its own neighbors only):
-    --box -40,-10,20,80      the eastern Atlantic to Africa and Europe, the Mediterranean's west, down to 10 S
-    --box -180,-10,-40,5     the strip south of 5 N across both basins (the hurricane map reaches 10 S)
+    --box=-40,-10,20,80     the eastern Atlantic to Africa and Europe, the Mediterranean's west, down to 10 S
+    --box=-180,-10,-40,5    the strip south of 5 N across both basins (the hurricane map reaches 10 S)
 then cover.json = this OUT's z8 index joined with the first bake's (bake.py --cover --merge).
 """
 import argparse, os, sys, threading, time
