@@ -80250,7 +80250,11 @@ function initNowMicroTabs(){
      A capture-phase click listener on the widget re-renders after any toggle. */
   function _hzSourcesFor(tab){
     var loc = (typeof LOCATION !== 'undefined' && LOCATION) ? LOCATION : null;
-    var BASE = [['Esri World Imagery','https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9'],['© OpenStreetMap','https://www.openstreetmap.org/copyright']];
+    /* the base credit follows the base: our own stack (OSM + Protomaps, USGS 3DEP relief, NOAA NCEI bathymetry, the AWS
+       Terrain Tiles seafloor) or, with ?vector=0, the old Esri imagery */
+    var BASE = (typeof hazardMap !== 'undefined' && hazardMap && hazardMap._bvVectorLayers)
+      ? [['© OpenStreetMap','https://www.openstreetmap.org/copyright'],['Protomaps','https://protomaps.com'],['USGS 3DEP','https://www.usgs.gov/3d-elevation-program'],['NOAA NCEI DEM','https://www.ncei.noaa.gov/products/coastal-relief-model'],['AWS Terrain Tiles','https://registry.opendata.aws/terrain-tiles/']]
+      : [['Esri World Imagery','https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9'],['© OpenStreetMap','https://www.openstreetmap.org/copyright']];
     var NWS = ['NWS Alerts','https://www.weather.gov/alerts'];
     var OM  = ['Open-Meteo','https://open-meteo.com/en/docs'];
     var NIFC = ['NIFC WFIGS','https://www.arcgis.com/home/item.html?id=d957997ccee7408287a963600a77f61f'];
@@ -80357,7 +80361,6 @@ function initNowMicroTabs(){
     if (!window._hazardInited || typeof hazardMap === 'undefined' || !hazardMap) {
       window._hazardInited = true;
       try { initUnifiedHazardMap(); } catch(e){ console.error('hazard init', e); }
-      setTimeout(function(){ try { initGeologyMaps(); } catch(e){ console.error('[init] initGeologyMaps failed:', e); } }, 200);
       // Map just inited — clear the desktop wheel-lock; on mobile the guard
       // pill stays as the "tap to interact" hint (synced at the end below).
       if(window.dismissMapGuard) window.dismissMapGuard();
@@ -80535,7 +80538,7 @@ function initNowMicroTabs(){
         // Force tile layers to re-request tiles for the now-correct size/zoom —
         // invalidateSize alone can leave stretched low-res tiles from the hidden
         // (0-size) init on mobile.
-        hazardMap.eachLayer(function(l){ if(l.redraw && l._url){ try{ l.redraw(); }catch(e){} } });
+        _hzRedrawTiles(hazardMap, true);
       };
       requestAnimationFrame(_hzFixMap);
       setTimeout(_hzFixMap, 200);
@@ -81569,6 +81572,42 @@ function initNowMicroTabs(){
   window._hazardAlerts = [];
   var alertFilters = { warning: true, watch: true, advisory: true };
 
+  /* ONE NWS ALERTS FETCH PER QUERY (2026-10-19). The hazard widget asked api.weather.gov/alerts/active for the same
+     point up to three times at boot (the alert panel, the alerts tab, the tornado zoom) and the tornado radar asked for
+     the warnings on its own. window._bvNwsAlerts(query) is the one door: query is the part after '?', e.g.
+     'point=40.7,-74' (rounded to the 4 decimals NWS keeps, so the callers' spellings meet), 'area=NY' or
+     'event=Tornado%20Warning'. Identical requests in flight share one fetch, a settled answer is reused for 60 s,
+     a failure is never kept. Same request the callers made: no headers but Accept: application/geo+json (a safelisted
+     header, so no preflight; a browser cannot set User-Agent). Each caller gets its own copy of the top object and the
+     features array, so a sort in one cannot reorder another's. Open to other modules (LOCAL, THE CITY, CLOUDS) later. */
+  var _nwsAlertCache = {};
+  function _nwsAlertCopy(j){
+    if (!j || typeof j !== 'object') return j;
+    var o = {}; for (var k in j) o[k] = j[k];
+    if (Array.isArray(j.features)) o.features = j.features.slice();
+    return o;
+  }
+  window._bvNwsAlerts = function(query, ms){
+    var q = String(query || '').replace(/^\?/, '').replace(/(^|&)point=(-?[\d.]+),(-?[\d.]+)/, function(m, a, la, lo){
+      return a + 'point=' + (+la).toFixed(4) + ',' + (+lo).toFixed(4);
+    });
+    var now = Date.now(), c = _nwsAlertCache[q];
+    if (c && (c.pending || now - c.t < 60000)) return c.p.then(_nwsAlertCopy);
+    Object.keys(_nwsAlertCache).forEach(function(k){ var x = _nwsAlertCache[k]; if (!x.pending && now - x.t > 600000) delete _nwsAlertCache[k]; });
+    var e = { t: now, pending: true };
+    e.p = fetchWithTimeout('https://api.weather.gov/alerts/active' + (q ? '?' + q : ''), { headers: { 'Accept': 'application/geo+json' } }, ms || 12000)
+      .then(function(r){
+        return r.json().then(function(j){
+          e.pending = false; e.t = Date.now();
+          if (!r.ok && _nwsAlertCache[q] === e) delete _nwsAlertCache[q];   /* an error body is handed on, as before, but not kept */
+          return j;
+        });
+      })
+      .catch(function(err){ e.pending = false; if (_nwsAlertCache[q] === e) delete _nwsAlertCache[q]; throw err; });
+    _nwsAlertCache[q] = e;
+    return e.p.then(_nwsAlertCopy);
+  };
+
   function initAlertsData(){
     if(!hazardMap) return;
     window._alertLayerGroup = L.layerGroup();
@@ -81601,9 +81640,9 @@ function initNowMicroTabs(){
     var lat = LOCATION.lat, lon = LOCATION.lon;
 
     // Fetch regional alerts (wider area)
-    var url = 'https://api.weather.gov/alerts/active?point=' + lat.toFixed(4) + ',' + lon.toFixed(4);
+    var pointQ = 'point=' + lat.toFixed(4) + ',' + lon.toFixed(4);
     // Also fetch state-wide for the map view
-    var stateUrl = 'https://api.weather.gov/alerts/active?area=' + (window._userState || 'NY');
+    var stateQ = 'area=' + (window._userState || 'NY');
 
     var allAlerts = [];
     var fetched = 0;
@@ -81722,8 +81761,7 @@ function initNowMicroTabs(){
     }
 
     // Fetch point alerts
-    fetchWithTimeout(url, null, 10000)
-      .then(function(r){ return r.json(); })
+    window._bvNwsAlerts(pointQ, 10000)
       .then(function(data){
         processAlerts(data);
         fetched++;
@@ -81732,8 +81770,7 @@ function initNowMicroTabs(){
       .catch(function(){ fetched++; if(fetched >= 2) finishAlerts(); });
 
     // Fetch state alerts for broader map view
-    fetchWithTimeout(stateUrl, null, 12000)
-      .then(function(r){ return r.json(); })
+    window._bvNwsAlerts(stateQ, 12000)
       .then(function(data){
         processAlerts(data);
         fetched++;
@@ -86948,286 +86985,28 @@ function initNowMicroTabs(){
   var fireMarkers = [];
   var quakeMarkers = [];
 
-  // Light map tiles
-  var DARK_TILES = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}';
-  var LIGHT_REF_TILES = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}';
   var TILE_ATTRIB = '&copy; <a href="https://www.esri.com">Esri</a> &copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>';
-
-  // ============ NATIONAL RADAR MAP (CONUS) ============
-  var nationalRadarMap = null;
-  var nationalRadarFrames = [];
-  var nationalRadarIndex = 0;
-  var nationalRadarTimer = null;
-  var nationalRadarRefreshTimer = null;
-  var nationalRadarHost = '';
-
-  // ── ACTIVE WARNING POLYGONS ON THE NATIONAL RADAR ──────────────────────
-  // The local radar is an NWS RIDGE GIF with warnings already drawn on it, and
-  // the hazard map plots them on its Alerts tab — but the national radar shows
-  // only echoes, so there is no way to see which storms are actually warned.
-  // Short-fused warnings only: watches cover whole states and would bury the
-  // map, and advisories are not what you scan a national radar for.
-  var _radarAlertLayer = null, _radarAlertTimer = null;
-  var RADAR_ALERT_COLORS = {
-    'Tornado Warning':             '#ff2d2d',
-    'Severe Thunderstorm Warning': '#ffd400',
-    'Flash Flood Warning':         '#22d34c',
-    'Snow Squall Warning':         '#ff7ad9',
-    'Ice Storm Warning':           '#b07cff',
-    'Blizzard Warning':            '#ff8c1a',
-    'Hurricane Warning':           '#ff5cf0',
-    'Tropical Storm Warning':      '#ff5cf0',
-    'Extreme Wind Warning':        '#ff5cf0'
-  };
-  function loadRadarAlerts(){
-    if (!nationalRadarMap) return;
-    var events = Object.keys(RADAR_ALERT_COLORS).join(',');
-    fetch('https://api.weather.gov/alerts/active?status=actual&message_type=alert&event='
-          + encodeURIComponent(events), { headers:{ 'Accept':'application/geo+json' } })
-      .then(function(r){ return r.ok ? r.json() : null; })
-      .then(function(d){
-        if (!d || !nationalRadarMap) return;
-        if (_radarAlertLayer) nationalRadarMap.removeLayer(_radarAlertLayer);
-        _radarAlertLayer = L.layerGroup();
-        (d.features || []).forEach(function(f){
-          if (!f.geometry) return;                       // many alerts are zone-only
-          var ev = (f.properties && f.properties.event) || '';
-          var col = RADAR_ALERT_COLORS[ev] || '#ffffff';
-          // outline-led, barely filled: the echo underneath is the point
-          L.geoJSON(f.geometry, {
-            style: { color:col, weight:1.6, opacity:0.95, fillColor:col, fillOpacity:0.10 }
-          }).bindTooltip(ev + ' — ' + ((f.properties && f.properties.areaDesc) || ''),
-                         { sticky:true, direction:'top' })
-            .addTo(_radarAlertLayer);
-        });
-        _radarAlertLayer.addTo(nationalRadarMap);
-      }).catch(function(){});
-  }
-
-  function initNationalRadarMap(){
-    var container = document.getElementById("national-radar-map");
-    var liveEl = document.getElementById("national-radar-live");
-    
-    if (!container || typeof L === "undefined") return;
-
-    if (nationalRadarMap) nationalRadarMap.remove();
-    nationalRadarMap = L.map(container, {
-      center: [39.0, -98.0],
-      zoom: 3,
-      zoomControl: false,
-      attributionControl: false,
-      minZoom: 2,
-      maxZoom: 10
-    });
-
-    // Pure black background
-    nationalRadarMap.getContainer().style.background = '#000';
-    
-    // Dark base layer (no features, just black tiles) — Esri underneath, our own
-    // vector tiles over it wherever the archive reaches
-    var _bvRasterRadar = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
-      attribution: '',
-      maxNativeZoom: 16,
-      maxZoom: 19,
-      updateWhenZooming: false,
-      updateWhenIdle: true,
-      keepBuffer: 4
-    });
-    _bvRasterRadar.addTo(nationalRadarMap);
-    if (window._bvVectorBase && window._bvVectorBase(nationalRadarMap)) {
-      /* our own continental terrain between the paint pass and the labels:
-         seafloor, hillshade, parks, rivers and watershed divides, then roads
-         and state lines back on top of it, then the labels last */
-      if (window._bvContinentalTerrain) {
-        window._bvContinentalTerrain(nationalRadarMap);
-        window._bvContinentalNames(nationalRadarMap);
-      }
-      window._bvVectorBase(nationalRadarMap, { labels: true });
-      window._bvManageRaster(nationalRadarMap, _bvRasterRadar);
-    }
-
-    // Add CSS for smooth radar transitions (once — this init re-runs per
-    // location switch and used to append another <style> node each time)
-    if (!document.getElementById('natrad-css')) {
-      var style = document.createElement('style');
-      style.id = 'natrad-css';
-      style.textContent = '#national-radar-map .leaflet-layer { transition: opacity 0.25s ease-in-out; }';
-      document.head.appendChild(style);
-    }
-
-    // active warning outlines over the mosaic
-    loadRadarAlerts();
-    if (_radarAlertTimer) clearInterval(_radarAlertTimer);
-    _radarAlertTimer = setInterval(function(){
-      if (!document.hidden && nationalRadarMap) loadRadarAlerts();
-    }, 3 * 60 * 1000);
-
-    // Add radar legend with precip types
-    var radarLegend = L.control({ position: 'bottomleft' });
-    radarLegend.onAdd = function(map) {
-      var div = L.DomUtil.create('div', 'radar-legend');
-      div.style.background = 'rgba(0,0,0,.7)';
-      div.style.backdropFilter = 'blur(8px)';
-      div.style.padding = '5px 10px';
-      div.style.borderRadius = '6px';
-      div.style.fontSize = '.45rem';
-      div.style.fontWeight = '700';
-      div.style.fontFamily = 'system-ui,sans-serif';
-      div.style.color = 'rgba(255,255,255,.85)';
-      div.style.boxShadow = '0 2px 8px rgba(0,0,0,.3)';
-      div.style.letterSpacing = '.04em';
-      div.style.textTransform = 'uppercase';
-      div.innerHTML = 
-        '<div style="display:flex;align-items:center;gap:10px;">' +
-          '<div style="display:flex;align-items:center;gap:3px;"><span style="width:8px;height:8px;background:linear-gradient(135deg,#02fd02,#fdf802,#fd0000);border-radius:2px;display:inline-block;"></span><span>Rain</span></div>' +
-          '<div style="display:flex;align-items:center;gap:3px;"><span style="width:8px;height:8px;background:linear-gradient(135deg,#04e9e7,#019ff4,#ff80ff);border-radius:2px;display:inline-block;"></span><span>Snow</span></div>' +
-          '<div style="display:flex;align-items:center;gap:3px;"><span style="width:8px;height:8px;background:#f800fd;border-radius:2px;display:inline-block;"></span><span>Mix</span></div>' +
-          '<div style="display:flex;gap:1px;align-items:center;margin-left:6px;">' +
-            '<span style="width:10px;height:5px;background:#04e9e7;display:inline-block;"></span>' +
-            '<span style="width:10px;height:5px;background:#02fd02;display:inline-block;"></span>' +
-            '<span style="width:10px;height:5px;background:#fdf802;display:inline-block;"></span>' +
-            '<span style="width:10px;height:5px;background:#fd9500;display:inline-block;"></span>' +
-            '<span style="width:10px;height:5px;background:#fd0000;display:inline-block;"></span>' +
-            '<span style="width:10px;height:5px;background:#f800fd;display:inline-block;"></span>' +
-          '</div>' +
-        '</div>';
-      return div;
-    };
-    radarLegend.addTo(nationalRadarMap);
-
-    // Setup scrubber interaction (wire once — the slider element persists
-    // across destroyHazardMaps, and the handlers resolve the loop functions
-    // at call time)
-    var slider = document.getElementById("national-radar-slider");
-    if (slider && !slider.dataset.wired){
-      slider.dataset.wired = '1';
-      slider.addEventListener("input", function(){
-        nationalRadarIndex = parseInt(this.value);
-        showNationalRadarFrame(nationalRadarIndex);
-      });
-      slider.addEventListener("mousedown", function(){ stopNationalRadarLoop(); });
-      slider.addEventListener("touchstart", function(){ stopNationalRadarLoop(); });
-      slider.addEventListener("mouseup", function(){ startNationalRadarLoop(); });
-      slider.addEventListener("touchend", function(){ startNationalRadarLoop(); });
-    }
-
-    loadNationalRadarFrames();
-    if (nationalRadarRefreshTimer) clearInterval(nationalRadarRefreshTimer);
-    nationalRadarRefreshTimer = setInterval(function(){ if (document.hidden) return; loadNationalRadarFrames(); }, 5 * 60 * 1000);
-
-    if (liveEl) liveEl.textContent = "• LIVE";
-  }
-
-  function loadNationalRadarFrames(){
-    if (!nationalRadarMap) return;
-
-    window._rvMapsFetch()
-      .then(function(apiData){
-        if (!apiData.radar || !apiData.radar.past || apiData.radar.past.length === 0) return;
-        
-        nationalRadarHost = apiData.host;
-        
-        // Combine past + nowcast for max coverage (~2.5 hours)
-        var allFrames = apiData.radar.past.slice();
-        if (apiData.radar.nowcast && apiData.radar.nowcast.length > 0){
-          allFrames = allFrames.concat(apiData.radar.nowcast);
-        }
-        nationalRadarFrames = allFrames;
-        
-        var slider = document.getElementById("national-radar-slider");
-        if (slider){
-          slider.max = nationalRadarFrames.length - 1;
-          slider.value = apiData.radar.past.length - 1;
-        }
-        
-        // Remove old layer
-        nationalRadarLayers.forEach(function(layer){
-          if (layer) {
-            if (nationalRadarMap.hasLayer(layer)) nationalRadarMap.removeLayer(layer);
-            layer.remove();
-          }
-        });
-        nationalRadarLayers = [];
-        _nationalRadarActiveLayer = null;
-        
-        nationalRadarIndex = apiData.radar.past.length - 1;
-        showNationalRadarFrame(nationalRadarIndex);
-        startNationalRadarLoop();
-        SH.ok('rainviewer');
-      })
-      .catch(function(err){
-        SH.fail('rainviewer', function(){ loadNationalRadarFrames(); });
-        console.log('RainViewer API error:', err);
-      });
-  }
-
-  var nationalRadarLayers = []; // Single-layer swap for efficient animation
-  var _nationalRadarActiveLayer = null;
-
-  function showNationalRadarFrame(index){
-    if (!nationalRadarMap || nationalRadarFrames.length === 0) return;
-    if (index < 0 || index >= nationalRadarFrames.length) return;
-
-    var frame = nationalRadarFrames[index];
-    var radarUrl = nationalRadarHost + frame.path + '/256/{z}/{x}/{y}/4/1_1.png';
-
-    // Swap URL on single layer instead of toggling many layers
-    if (_nationalRadarActiveLayer) {
-      _nationalRadarActiveLayer.setUrl(radarUrl);
-    } else {
-      _nationalRadarActiveLayer = L.tileLayer(radarUrl, {
-        opacity: 0.85,
-        maxZoom: 10
-      }).addTo(nationalRadarMap);
-      nationalRadarLayers = [_nationalRadarActiveLayer];
-    }
-
-    // Update timestamp (local time)
-    var tsEl = document.getElementById("national-radar-timestamp");
-    if (tsEl && frame.time){
-      var d = new Date(frame.time * 1000);
-      var h = d.getHours();
-      var m = d.getMinutes();
-      var ampm = h >= 12 ? 'PM' : 'AM';
-      h = h % 12; if (h === 0) h = 12;
-      var timeStr = h + ':' + (m < 10 ? '0' + m : m) + ' ' + ampm;
-      tsEl.textContent = timeStr;
-    }
-
-    // Update slider
-    var slider = document.getElementById("national-radar-slider");
-    if (slider) slider.value = index;
-  }
-
-  function startNationalRadarLoop(){
-    stopNationalRadarLoop();
-    var loopDelay = 350;
-    var endPause = 2000;
-
-    function step(){
-      nationalRadarIndex = (nationalRadarIndex + 1) % nationalRadarFrames.length;
-      showNationalRadarFrame(nationalRadarIndex);
-      var delay = (nationalRadarIndex === nationalRadarFrames.length - 1) ? endPause : loopDelay;
-      nationalRadarTimer = setTimeout(step, delay);
-    }
-    nationalRadarTimer = setTimeout(step, loopDelay);
-  }
-
-  function stopNationalRadarLoop(){
-    if (nationalRadarTimer){
-      clearTimeout(nationalRadarTimer);
-      nationalRadarTimer = null;
-    }
-  }
-
 
   function initHazardMaps(){
     initLightningMap();
-    initNationalRadarMap();
     initUnifiedHazardMap();
-    initGeologyMaps();
   }
 
+  /* RE-REQUEST THE RASTER TILES after the map finds its real size. Leaflet 1.9's redraw() sets the tile zoom without the
+     layer's minZoom/maxZoom check, so at z4 it asked our z5+ relief and bathymetry for z4 tiles that do not exist (242
+     requests, 75 404s, ~4.5 MB on one first open, measured 2026-10-19): a layer whose range excludes the view is left
+     alone. skipBase (the tab-switch fix-up) also leaves our own base rasters alone -- they were sized right by the first
+     reveal, and a redraw only blanks and re-decodes them, three times per tab switch. */
+  function _hzRedrawTiles(m, skipBase){
+    if (!m) return;
+    var z = m.getZoom(), base = [m._bvReliefLayer, m._bvBathyLayer, m._bvBathyUnder, m._bvSeafloorLayer];
+    m.eachLayer(function(l){
+      if (!l.redraw || !l._url || !l.options) return;
+      if ((l.options.minZoom != null && z < l.options.minZoom) || (l.options.maxZoom != null && z > l.options.maxZoom)) return;
+      if (skipBase && base.indexOf(l) >= 0) return;
+      try { l.redraw(); } catch(e){}
+    });
+  }
   function initUnifiedHazardMap(){
     var container = document.getElementById('hazard-map');
     // If the map can't be built yet (element missing, or Leaflet not loaded on
@@ -87413,33 +87192,49 @@ function initNowMicroTabs(){
       if(isMobile && guard){ renderGuard(); guard.classList.add('visible'); }
     })();
 
-    // Satellite basemap
-    var baseTiles = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-      attribution: '&copy; Esri',
-      errorTileUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
-      // High-DPI tiles so the satellite imagery is crisp on retina phones
-      // (iPhone DPR 2-3 was upscaling standard tiles → blurry "low quality map").
-      detectRetina: true,
-      maxNativeZoom: 17,
-      updateWhenZooming: false,
-      updateWhenIdle: true,
-      // Mobile: keep a leaner off-screen tile buffer. With detectRetina loading
-      // ~4x tiles on a DPR-3 phone, a 4-ring buffer means a lot of satellite
-      // tiles on cellular; 2 rings is plenty for smooth panning.
-      keepBuffer: isMobile ? 2 : 4
-    }).addTo(hazardMap);
+    /* OUR OWN BASEMAP (user 2026-10-19: "swap the shared hazard map onto our own basemap"). The stack the LOCAL map
+       draws: the dark vector base, the seafloor relief (z3+), the land relief (z5+) and 1 m lidar (z13+), the coastal
+       bathymetry (z5+) and the rivers, with the label pass on top. All of it lives in the tile pane (200), so every
+       hazard pane -- the tornado radar (360), HMS smoke (380), the coast glow (395), the data (400), the markers (600)
+       and the smoke models (620) -- stays above it and tappable. Esri's dark gray base joins only where our tiles stop
+       (z10+ outside North America, z12+ outside the lower 48: _bvManageRaster), so a first open asks Esri for nothing.
+       ?vector=0, or no protomaps, falls back to the World_Imagery stack below, unchanged. */
+    var _hzVec = window._bvVectorBase ? window._bvVectorBase(hazardMap) : null;
+    var baseTiles = null;
+    if (_hzVec && _hzVec.length) {
+      var _hzRaster = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+        attribution: '', maxNativeZoom: 16, maxZoom: 19, updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 2
+      });
+      if (window._bvManageRaster) window._bvManageRaster(hazardMap, _hzRaster);
+    } else {
+      // Satellite basemap (the fallback)
+      baseTiles = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        attribution: '&copy; Esri',
+        errorTileUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        // High-DPI tiles so the satellite imagery is crisp on retina phones
+        // (iPhone DPR 2-3 was upscaling standard tiles → blurry "low quality map").
+        detectRetina: true,
+        maxNativeZoom: 17,
+        updateWhenZooming: false,
+        updateWhenIdle: true,
+        // Mobile: keep a leaner off-screen tile buffer. With detectRetina loading
+        // ~4x tiles on a DPR-3 phone, a 4-ring buffer means a lot of satellite
+        // tiles on cellular; 2 rings is plenty for smooth panning.
+        keepBuffer: isMobile ? 2 : 4
+      }).addTo(hazardMap);
 
-    // Retry failed tiles once after a short delay
-    baseTiles.on('tileerror', function(e){
-      var tile = e.tile;
-      var src = tile._originalSrc || tile.src;
-      var retries = tile._retryCount || 0;
-      if(retries < 2 && src.includes('arcgisonline')){
-        tile._retryCount = retries + 1;
-        tile._originalSrc = src;
-        setTimeout(function(){ tile.src = src; }, 2000 * Math.pow(2, retries));
-      }
-    });
+      // Retry failed tiles once after a short delay
+      baseTiles.on('tileerror', function(e){
+        var tile = e.tile;
+        var src = tile._originalSrc || tile.src;
+        var retries = tile._retryCount || 0;
+        if(retries < 2 && src.includes('arcgisonline')){
+          tile._retryCount = retries + 1;
+          tile._originalSrc = src;
+          setTimeout(function(){ tile.src = src; }, 2000 * Math.pow(2, retries));
+        }
+      });
+    }
 
     // Bulletproof mobile fix: the map is often created while #hazard-map is
     // display:none (overview active), so Leaflet measures it as 0×0 and renders
@@ -87451,13 +87246,13 @@ function initNowMicroTabs(){
       if(container.clientHeight > 20 && container.clientWidth > 20){
         hazardMap.invalidateSize(false);
         hazardMap.setView(hazardMap.getCenter(), hazardMap.getZoom(), { animate:false });
-        hazardMap.eachLayer(function(l){ if(l.redraw && l._url){ try{ l.redraw(); }catch(e){} } });
+        _hzRedrawTiles(hazardMap, false);
       } else if(tries < 120){
         requestAnimationFrame(function(){ _hzWaitForSize(tries + 1); });
       }
     })(0);
 
-    // Hide preview image once satellite tiles have fully loaded
+    // Hide preview image once the base tiles have fully loaded
     // Use 'load' event which fires when ALL visible tiles finish, not just some
     var _previewHidden = false;
     function hidePreview(){
@@ -87468,34 +87263,44 @@ function initNowMicroTabs(){
         if(el){ el.style.transition='opacity .6s ease'; el.style.opacity='0'; el._tilesLoaded=true; setTimeout(function(){ el.style.display='none'; },700); }
       });
     }
-    baseTiles.on('load', hidePreview);
+    if (baseTiles) baseTiles.on('load', hidePreview);
+    else _hzVec.forEach(function(l){ if (l.once) l.once('load', hidePreview); });   /* whichever zoom tier is drawing */
     // Safety fallback: hide preview after 8s even if some tiles are slow
     setTimeout(hidePreview, 8000);
 
-    // Labels on top — ours over the satellite imagery when the archive loads.
-    // The base stays Esri World_Imagery: photography, not something vector tiles
-    // can stand in for.
-    var _bvRefHaz = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}', {
-      attribution: TILE_ATTRIB,
-      pane: 'shadowPane',
-      updateWhenZooming: false,
-      updateWhenIdle: true,
-      keepBuffer: 4
-    }).addTo(hazardMap);
-    /* OUR MAP AS THE BACKGROUND (user 2026-09-04). The continental tiles were
-       tried here first and were wrong twice over — semi-transparent, so they
-       tinted the photography instead of replacing it, and boxed to the lower
-       48, so the edge lay across Canada. _bvNaTerrain is the answer to both:
-       opaque, continent-wide, feathered into the ocean at its edges.
-       BACKGROUND ONLY. Nothing else in this widget changes — the layer goes
-       in ahead of the labels pass so the labels stay above it, the Esri
-       imagery stays underneath and takes over again past z7 where a hazard is
-       actually inspected, and no hazard layer, control or datum is touched. */
-    if (window._bvNaTerrain) window._bvNaTerrain(hazardMap, { dimSurround: true });
-    /* the green coastline, above the smoke polygons (380) and below the data (400) */
-    if (window._bvCoastGlow) window._bvCoastGlow(hazardMap, { z: 395 });
-    if (window._bvVectorBase && window._bvVectorBase(hazardMap, { labels: true })) {
-      hazardMap.removeLayer(_bvRefHaz);
+    if (_hzVec) {
+      /* the label pass last: above the relief, the bathymetry (z-index 2) and the rivers (3), still inside the tile pane
+         and so under every hazard pane */
+      var _hzLabs = window._bvVectorBase(hazardMap, { labels: true });
+      (_hzLabs || []).forEach(function(l){ if (l.setZIndex) l.setZIndex(5); });
+      /* the green coastline, above the smoke polygons (380) and below the data (400) */
+      if (window._bvCoastGlow) window._bvCoastGlow(hazardMap, { z: 395 });
+    } else {
+      // Labels on top — ours over the satellite imagery when the archive loads.
+      // The base stays Esri World_Imagery: photography, not something vector tiles
+      // can stand in for.
+      var _bvRefHaz = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}', {
+        attribution: TILE_ATTRIB,
+        pane: 'shadowPane',
+        updateWhenZooming: false,
+        updateWhenIdle: true,
+        keepBuffer: 4
+      }).addTo(hazardMap);
+      /* OUR MAP AS THE BACKGROUND (user 2026-09-04). The continental tiles were
+         tried here first and were wrong twice over — semi-transparent, so they
+         tinted the photography instead of replacing it, and boxed to the lower
+         48, so the edge lay across Canada. _bvNaTerrain is the answer to both:
+         opaque, continent-wide, feathered into the ocean at its edges.
+         BACKGROUND ONLY. Nothing else in this widget changes — the layer goes
+         in ahead of the labels pass so the labels stay above it, the Esri
+         imagery stays underneath and takes over again past z7 where a hazard is
+         actually inspected, and no hazard layer, control or datum is touched. */
+      if (window._bvNaTerrain) window._bvNaTerrain(hazardMap, { dimSurround: true });
+      /* the green coastline, above the smoke polygons (380) and below the data (400) */
+      if (window._bvCoastGlow) window._bvCoastGlow(hazardMap, { z: 395 });
+      if (window._bvVectorBase && window._bvVectorBase(hazardMap, { labels: true })) {
+        hazardMap.removeLayer(_bvRefHaz);
+      }
     }
 
     // Create layer groups for each hazard type
@@ -88668,17 +88473,8 @@ function initNowMicroTabs(){
     }
     if (radarRefreshTimer){ clearInterval(radarRefreshTimer); radarRefreshTimer = null; }
     if (hydroRefreshTimer){ clearInterval(hydroRefreshTimer); hydroRefreshTimer = null; }
-    if (nationalRadarTimer){ clearTimeout(nationalRadarTimer); nationalRadarTimer = null; }
-    if (nationalRadarRefreshTimer){ clearInterval(nationalRadarRefreshTimer); nationalRadarRefreshTimer = null; }
-    // Destroy national radar layer
-    if (_nationalRadarActiveLayer){ _nationalRadarActiveLayer.remove(); _nationalRadarActiveLayer = null; }
-    nationalRadarLayers = [];
-    if (nationalRadarMap){ nationalRadarMap.remove(); nationalRadarMap = null; }
     if (lightningMap){ lightningMap.remove(); lightningMap = null; }
     if (hazardMap){ hazardMap.remove(); hazardMap = null; fireMap = null; tornadoMap = null; quakeMap = null; }
-    if (bedrockMap){ bedrockMap.remove(); bedrockMap = null; }
-    if (lithologyMap){ lithologyMap.remove(); lithologyMap = null; }
-    if (stratMap){ stratMap.remove(); stratMap = null; }
     lightningMarkers = [];
     fireMarkers = [];
     quakeMarkers = [];
@@ -88828,9 +88624,8 @@ function initNowMicroTabs(){
 
   function checkTornadoLocalZoom(){
     if (!tornadoMap) return;
-    var url = 'https://api.weather.gov/alerts/active?point=' + LOCATION.lat + ',' + LOCATION.lon;
-    fetch(url).then(function(r){ return r.json(); }).then(function(data){
-      if (!data.features) return;
+    window._bvNwsAlerts('point=' + LOCATION.lat + ',' + LOCATION.lon).then(function(data){
+      if (!data || !data.features) return;
       var tornadoAlert = null;
       var severeAlert = null;
       for (var i = 0; i < data.features.length; i++){
@@ -93277,9 +93072,15 @@ function initNowMicroTabs(){
       _hurricaneMap.getPane(p).style.pointerEvents = 'none';
     });
 
+    /* TEST ONLY (2026-10-19, the bathymetry comparison): ?hzocean=bv draws our own stack instead (the vector base,
+       seafloor relief, coastal bathymetry, land relief: what LOCAL draws); ?hzocean=esri draws Esri's inverted ocean
+       alone, without the basin terrain over it. With no flag the map is exactly as it was. */
+    var _hzOceanQ = null;
+    try { _hzOceanQ = new URLSearchParams(location.search).get('hzocean'); } catch(e){}
+    var _hzOwnOcean = _hzOceanQ === 'bv' && window._bvVectorBase && window._bvVectorBase(_hurricaneMap);
     // Ocean basemap — Esri Ocean Base, color-inverted via className so labels and
     // overlays in the default panes render unfiltered on top.
-    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', {
+    if (!_hzOwnOcean) L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', {
       attribution: '© Esri, GEBCO, NOAA',
       maxZoom: 13, opacity: 1, updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 4,
       className: 'hurricane-basemap-inverted'
@@ -93290,7 +93091,7 @@ function initNowMicroTabs(){
     var _bvRefHur = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}', {
       attribution: '', maxZoom: 16, opacity: 0.85, updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 4
     }).addTo(_hurricaneMap);
-    if (window._bvBasinTerrain) window._bvBasinTerrain(_hurricaneMap);
+    if (window._bvBasinTerrain && !_hzOceanQ) window._bvBasinTerrain(_hurricaneMap);
     /* the green coastline, above every raster view (SST..WV end at 250) and below the outlook areas (310) */
     if (window._bvCoastGlow) window._bvCoastGlow(_hurricaneMap, { z: 300 });
     /* ATLANTIC / PACIFIC. Both views sit wholly inside the terrain box
@@ -93412,8 +93213,10 @@ function initNowMicroTabs(){
       if (wide && cur !== 'both') window._hzSetBasin('both');
       else if (!wide && cur === 'both'){ var k = null; try { k = localStorage.getItem('bv_hz_basin'); } catch(e){} window._hzSetBasin(k === 'pac' ? 'pac' : 'atl'); }
     });
-    if (window._bvVectorBase && window._bvVectorBase(_hurricaneMap, { labels: true })) {
+    var _hzHurLabs = window._bvVectorBase && window._bvVectorBase(_hurricaneMap, { labels: true });
+    if (_hzHurLabs) {
       _hurricaneMap.removeLayer(_bvRefHur);
+      if (_hzOwnOcean) _hzHurLabs.forEach(function(l){ if (l.setZIndex) l.setZIndex(5); });   /* over the test stack's bathymetry (2) and rivers (3) */
     }
 
     // Draw the classic African wave / hurricane genesis pathway annotation
@@ -98146,262 +97949,8 @@ function initNowMicroTabs(){
   
   
 
-  // ============ MACROSTRAT GEOLOGY MAPS ============
-  var bedrockMap = null;
-  var lithologyMap = null;
-  var stratMap = null;
-  
-  // Macrostrat tile and API endpoints
-  var MACROSTRAT_TILES = 'https://tiles.bluishvoid.com/macrostrat/carto/{z}/{x}/{y}.png';
+  // Macrostrat units API (the quake tab's long-press geology popup reads it below)
   var MACROSTRAT_API = 'https://macrostrat.org/api/v2/geologic_units/map';
-  
-  // Cache for geology data to avoid repeated API calls
-  var geologyCache = {};
-  
-  function initGeologyMaps(){
-    initBedrockMap();
-    initLithologyMap();
-    initStratMap();
-  }
-  
-  // ============ BEDROCK GEOLOGY MAP ============
-  function initBedrockMap(){
-    var container = document.getElementById("bedrock-map");
-    var infoPill = document.getElementById("bedrock-info-pill");
-    
-    if (!container || typeof L === "undefined") return;
-
-    if (bedrockMap) bedrockMap.remove();
-    bedrockMap = L.map(container, {
-      center: [LOCATION.lat, LOCATION.lon],
-      zoom: 8,
-      zoomControl: false,
-      attributionControl: false,
-      minZoom: 3,
-      maxZoom: 14
-    });
-
-    // Base layer - light map
-    var _bvRaster_bedrockMap = L.tileLayer(DARK_TILES, { attribution: TILE_ATTRIB, updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 3 }).addTo(bedrockMap);
-    var _bvRef_bedrockMap = L.tileLayer(LIGHT_REF_TILES, { maxNativeZoom: 16, pane: 'shadowPane', updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 3 }).addTo(bedrockMap);
-    // our own tiles over the Esri raster; Esri's labels come off only if ours loaded
-    if (window._bvVectorBase && window._bvVectorBase(bedrockMap, { flavor: 'light' })) {
-      bedrockMap.removeLayer(_bvRef_bedrockMap);
-      window._bvVectorBase(bedrockMap, { flavor: 'light', labels: true });
-      window._bvManageRaster(bedrockMap, _bvRaster_bedrockMap);
-    }
-
-    // Macrostrat geology overlay
-    L.tileLayer(MACROSTRAT_TILES, {
-      attribution: '&copy; <a href="https://macrostrat.org">Macrostrat</a>',
-      opacity: 0.75, updateWhenZooming: false, updateWhenIdle: true
-    }).addTo(bedrockMap);
-    
-    // Location marker removed for cleaner map
-
-    // Click handler for geology info
-    bedrockMap.on('click', function(e){
-      fetchGeologyAtPoint(e.latlng.lat, e.latlng.lng, 'bedrock', infoPill);
-    });
-    
-    // Load initial geology for current location
-    fetchGeologyAtPoint(LOCATION.lat, LOCATION.lon, 'bedrock', infoPill);
-  }
-  
-  // ============ LITHOLOGY MAP ============
-  function initLithologyMap(){
-    var container = document.getElementById("lithology-map");
-    var infoPill = document.getElementById("lithology-info-pill");
-    
-    if (!container || typeof L === "undefined") return;
-
-    if (lithologyMap) lithologyMap.remove();
-    lithologyMap = L.map(container, {
-      center: [LOCATION.lat, LOCATION.lon],
-      zoom: 9,
-      zoomControl: false,
-      attributionControl: false,
-      minZoom: 3,
-      maxZoom: 14
-    });
-
-    // Base layer
-    var _bvRaster_lithologyMap = L.tileLayer(DARK_TILES, { attribution: TILE_ATTRIB, updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 3 }).addTo(lithologyMap);
-    var _bvRef_lithologyMap = L.tileLayer(LIGHT_REF_TILES, { maxNativeZoom: 16, pane: 'shadowPane', updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 3 }).addTo(lithologyMap);
-    // our own tiles over the Esri raster; Esri's labels come off only if ours loaded
-    if (window._bvVectorBase && window._bvVectorBase(lithologyMap, { flavor: 'light' })) {
-      lithologyMap.removeLayer(_bvRef_lithologyMap);
-      window._bvVectorBase(lithologyMap, { flavor: 'light', labels: true });
-      window._bvManageRaster(lithologyMap, _bvRaster_lithologyMap);
-    }
-
-    // Macrostrat geology overlay with higher opacity for lithology focus
-    L.tileLayer(MACROSTRAT_TILES, {
-      attribution: '&copy; <a href="https://macrostrat.org">Macrostrat</a>',
-      opacity: 0.85, updateWhenZooming: false, updateWhenIdle: true
-    }).addTo(lithologyMap);
-    
-
-
-    // Click handler
-    lithologyMap.on('click', function(e){
-      fetchGeologyAtPoint(e.latlng.lat, e.latlng.lng, 'lithology', infoPill);
-    });
-    
-    // Load initial
-    fetchGeologyAtPoint(LOCATION.lat, LOCATION.lon, 'lithology', infoPill);
-  }
-  
-  // ============ STRATIGRAPHY MAP ============
-  function initStratMap(){
-    var container = document.getElementById("strat-map");
-    var infoPill = document.getElementById("strat-info-pill");
-    
-    if (!container || typeof L === "undefined") return;
-
-    if (stratMap) stratMap.remove();
-    stratMap = L.map(container, {
-      center: [LOCATION.lat, LOCATION.lon],
-      zoom: 7,
-      zoomControl: false,
-      attributionControl: false,
-      minZoom: 3,
-      maxZoom: 14
-    });
-
-    // Base layer
-    var _bvRaster_stratMap = L.tileLayer(DARK_TILES, { attribution: TILE_ATTRIB, updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 3 }).addTo(stratMap);
-    var _bvRef_stratMap = L.tileLayer(LIGHT_REF_TILES, { maxNativeZoom: 16, pane: 'shadowPane', updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 3 }).addTo(stratMap);
-    // our own tiles over the Esri raster; Esri's labels come off only if ours loaded
-    if (window._bvVectorBase && window._bvVectorBase(stratMap, { flavor: 'light' })) {
-      stratMap.removeLayer(_bvRef_stratMap);
-      window._bvVectorBase(stratMap, { flavor: 'light', labels: true });
-      window._bvManageRaster(stratMap, _bvRaster_stratMap);
-    }
-
-    // Macrostrat geology overlay
-    L.tileLayer(MACROSTRAT_TILES, {
-      attribution: '&copy; <a href="https://macrostrat.org">Macrostrat</a>',
-      opacity: 0.70, updateWhenZooming: false, updateWhenIdle: true
-    }).addTo(stratMap);
-    
-    // Location marker removed for cleaner map
-
-    // Click handler
-    stratMap.on('click', function(e){
-      fetchGeologyAtPoint(e.latlng.lat, e.latlng.lng, 'strat', infoPill);
-    });
-    
-    // Load initial
-    fetchGeologyAtPoint(LOCATION.lat, LOCATION.lon, 'strat', infoPill);
-  }
-  
-  // ============ FETCH GEOLOGY DATA FROM MACROSTRAT ============
-  function fetchGeologyAtPoint(lat, lng, mapType, infoPill){
-    var cacheKey = lat.toFixed(4) + ',' + lng.toFixed(4);
-    
-    // Check cache first
-    if (geologyCache[cacheKey]){
-      displayGeologyInfo(geologyCache[cacheKey], mapType, infoPill);
-      return;
-    }
-    
-    var url = MACROSTRAT_API + '?lat=' + lat + '&lng=' + lng;
-    
-    fetchWithTimeout(url, null, 10000)
-      .then(function(r){ return r.json(); })
-      .then(function(data){
-        if (data && data.success && data.success.data && data.success.data.length > 0){
-          geologyCache[cacheKey] = data.success.data;
-          displayGeologyInfo(data.success.data, mapType, infoPill);
-        } else {
-          hideGeologyInfo(mapType, infoPill);
-        }
-      })
-      .catch(function(err){
-        console.log("Macrostrat API error:", err);
-        hideGeologyInfo(mapType, infoPill);
-      });
-  }
-  
-  function displayGeologyInfo(units, mapType, infoPill){
-    if (!infoPill || !units || units.length === 0) return;
-    
-    var unit = units[0]; // Primary unit at surface
-    
-    if (mapType === 'bedrock'){
-      var nameEl = document.getElementById("bedrock-unit-name");
-      var ageEl = document.getElementById("bedrock-age");
-      var lithEl = document.getElementById("bedrock-lith");
-      
-      if (nameEl) nameEl.textContent = unit.strat_name || unit.name || "Unknown Unit";
-      if (ageEl){
-        var ageStr = "";
-        if (unit.b_int_name && unit.t_int_name){
-          if (unit.b_int_name === unit.t_int_name){
-            ageStr = unit.b_int_name;
-          } else {
-            ageStr = unit.t_int_name + " – " + unit.b_int_name;
-          }
-        } else if (unit.b_age && unit.t_age){
-          ageStr = unit.t_age.toFixed(1) + " – " + unit.b_age.toFixed(1) + " Ma";
-        }
-        ageEl.textContent = ageStr ? "" + ageStr : "";
-      }
-      if (lithEl){
-        var liths = unit.lith ? unit.lith.map(function(l){ return l.name || l; }).join(", ") : "";
-        lithEl.textContent = liths ? "MACROSTRAT " + liths : "";
-      }
-    } else if (mapType === 'lithology'){
-      var primaryEl = document.getElementById("lithology-primary");
-      var descEl = document.getElementById("lithology-desc");
-      
-      var primaryLith = "";
-      var lithDesc = "";
-      
-      if (unit.lith && unit.lith.length > 0){
-        // Sort by proportion if available
-        var sorted = unit.lith.slice().sort(function(a,b){
-          return (b.prop || 0) - (a.prop || 0);
-        });
-        primaryLith = sorted[0].name || sorted[0];
-        
-        // Build description with proportions
-        lithDesc = sorted.map(function(l){
-          var pct = l.prop ? Math.round(l.prop * 100) + "%" : "";
-          return (l.name || l) + (pct ? " (" + pct + ")" : "");
-        }).join(", ");
-      }
-      
-      if (primaryEl) primaryEl.textContent = primaryLith ? "MACROSTRAT " + primaryLith : "Unknown Lithology";
-      if (descEl) descEl.textContent = lithDesc || (unit.descrip || "");
-    } else if (mapType === 'strat'){
-      var columnEl = document.getElementById("strat-column");
-      var unitsEl = document.getElementById("strat-units");
-      var thickEl = document.getElementById("strat-thickness");
-      
-      if (columnEl) columnEl.textContent = unit.col_name || unit.strat_name || "Stratigraphic Column";
-      
-      // Show all units at this location
-      var unitNames = units.map(function(u){ return u.strat_name || u.name || "Unnamed"; });
-      if (unitsEl) unitsEl.textContent = "" + unitNames.slice(0, 5).join(" → ") + (units.length > 5 ? " +" + (units.length - 5) + " more" : "");
-      
-      // Total thickness
-      var totalThick = 0;
-      units.forEach(function(u){
-        if (u.max_thick) totalThick += u.max_thick;
-      });
-      if (thickEl) thickEl.textContent = totalThick > 0 ? "~" + bvFtN(totalThick) + " ft total thickness" : "";
-    }
-    
-    infoPill.style.display = "block";
-  }
-  
-  function hideGeologyInfo(mapType, infoPill){
-    if (infoPill){
-      infoPill.style.display = "none";
-    }
-  }
 
   // ============ EARTHQUAKE MAP ============
   function initQuakeData(){
@@ -99167,8 +98716,8 @@ function initNowMicroTabs(){
       R.at = new Date();
     }
     function warnings(){
-      fetch('https://api.weather.gov/alerts/active?event=Tornado%20Warning', { headers: { 'Accept': 'application/geo+json' } })
-        .then(function(r){ return r.json(); }).then(function(j){
+      window._bvNwsAlerts('event=Tornado%20Warning')
+        .then(function(j){
           if (!R.on) return;
           var fs = (j.features || []).filter(function(f){ return f && f.geometry; });
           if (R.warn){ try { hazardMap.removeLayer(R.warn); } catch(e){} }
@@ -100105,11 +99654,9 @@ function initNowMicroTabs(){
       return;
     }
     
-    var url = "https://api.weather.gov/alerts/active?point=" + LOCATION.lat + "," + LOCATION.lon;
     var _ep = window._locEpoch || 0;   // stale-location guard epoch
     
-    fetchWithTimeout(url, null, 12000)
-      .then(function(r){ return r.json(); })
+    window._bvNwsAlerts("point=" + LOCATION.lat + "," + LOCATION.lon, 12000)   /* shared with the alerts tab and the tornado zoom */
       .then(function(data){
         // a pre-switch tick resolving late must not paint the old city's
         // warnings into the new city's panel/rain line
@@ -101271,11 +100818,6 @@ function initNowMicroTabs(){
     'nightsky': { title: 'NIGHT SKY', subtitle: 'Planet Visibility' }
   };
 
-  var MAP_CONFIG = {
-    'lightning-map': { title: 'LIGHTNING', subtitle: 'Blitzortung + Macrostrat', sourceUrl: 'https://www.blitzortung.org/en/live_lightning_maps.php', sourceMap: function(){ return lightningMap; }, markers: function(){ return lightningMarkers; } },
-    'national-radar-map': { title: 'NATIONAL RADAR', subtitle: 'IEM NEXRAD', sourceUrl: 'https://mesonet.agron.iastate.edu/GIS/ridge.phtml', sourceMap: function(){ return nationalRadarMap; }, markers: function(){ return []; } }
-  };
-
   function clearModalAnimations(){
     modalAnimationTimers.forEach(function(t){ clearInterval(t); clearTimeout(t); });
     modalAnimationTimers = [];
@@ -101378,105 +100920,6 @@ function initNowMicroTabs(){
     positionModalAtViewport(widgetModal);
   }
 
-  function openMapModal(config, containerId){
-    if (!widgetModal || !widgetModalBody) return;
-    clearModalAnimations();
-    
-    updateModalHeader(config.title, config.subtitle, config.sourceUrl);
-    widgetModalBody.className = 'widget-modal-body content-map';
-    widgetModalBody.innerHTML = '<div class="modal-map-container" id="modal-map-container" style="position:relative;"></div>';
-    
-    positionModalAtViewport(widgetModal);
-    
-    setTimeout(function(){
-      var mapContainer = document.getElementById('modal-map-container');
-      if (!mapContainer || typeof L === 'undefined') return;
-      
-      var sourceMap = config.sourceMap ? config.sourceMap() : null;
-      var markers = config.markers ? config.markers() : [];
-      if (!sourceMap) return;
-      
-      var center = sourceMap.getCenter();
-      var zoom = sourceMap.getZoom();
-      
-      window.modalMap = L.map(mapContainer, { center: center, zoom: zoom, zoomControl: true, attributionControl: false });
-      
-      // Add base layers based on map type
-      if (containerId === 'fire-map') {
-        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { attribution: '&copy; Esri' }).addTo(window.modalMap);
-        // Add smoke heatmap if available
-        if (typeof L.heatLayer === 'function' && fireMarkers.length > 0) {
-          var smokePoints = [];
-          fireMarkers.forEach(function(marker) {
-            var latlng = marker.getLatLng();
-            var radius = marker.options.radius || 3;
-            var intensity = (radius <= 2.5) ? 0.05 : Math.min(radius / 10, 0.7);
-            smokePoints.push([latlng.lat, latlng.lng, intensity]);
-          });
-          L.heatLayer(smokePoints, {
-            radius: 6, blur: 3, maxZoom: 4, max: 1.0, minOpacity: 0.25,
-            gradient: { 0.0: 'rgba(255,255,200,0)', 0.15: 'rgba(255,240,150,0.55)', 0.3: 'rgba(255,200,80,0.7)', 0.5: 'rgba(255,140,40,0.8)', 0.7: 'rgba(240,80,20,0.88)', 0.85: 'rgba(200,30,30,0.92)', 1.0: 'rgba(140,20,60,0.97)' }
-          }).addTo(window.modalMap);
-        }
-      } else if (containerId === 'national-radar-map') {
-        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', { opacity: 0.7 }).addTo(window.modalMap);
-        var _bvRefNat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}', { opacity: 0.5 }).addTo(window.modalMap);
-        if (window._bvVectorBase && window._bvVectorBase(window.modalMap)) {
-          window.modalMap.removeLayer(_bvRefNat);
-          window._bvVectorBase(window.modalMap, { labels: true });
-        }
-        L.tileLayer('https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png?_=' + Date.now(), { opacity: 0.75 }).addTo(window.modalMap);
-      } else if (containerId === 'lightning-map') {
-        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', { attribution: TILE_ATTRIB }).addTo(window.modalMap);
-        if (window._bvVectorBase && window._bvVectorBase(window.modalMap)) window._bvVectorBase(window.modalMap, { labels: true });
-      } else {
-        var _bvRasterModal = L.tileLayer(DARK_TILES, { attribution: TILE_ATTRIB }).addTo(window.modalMap);
-        var _bvRefModal = L.tileLayer(LIGHT_REF_TILES, { maxNativeZoom: 16, pane: 'shadowPane' }).addTo(window.modalMap);
-        if (window._bvVectorBase && window._bvVectorBase(window.modalMap, { flavor: 'light' })) {
-          window.modalMap.removeLayer(_bvRefModal);
-          window._bvVectorBase(window.modalMap, { flavor: 'light', labels: true });
-          window._bvManageRaster(window.modalMap, _bvRasterModal);
-        }
-        L.tileLayer('https://tiles.bluishvoid.com/macrostrat/carto/{z}/{x}/{y}.png', { opacity: containerId === 'quake-map' ? 0.70 : 0.35 }).addTo(window.modalMap);
-      }
-      
-      // Add location marker (except for national radar which shows whole country)
-      if (containerId !== 'national-radar-map') {
-        L.circleMarker([LOCATION.lat, LOCATION.lon], { radius: 8, fillColor: '#2B22F4', fillOpacity: 0.9, color: '#fff', weight: 2 }).addTo(window.modalMap).bindTooltip("" + LOCATION.name, { permanent: false });
-      }
-      
-      // Clone markers with popups
-      markers.forEach(function(marker){
-        var latlng = marker.getLatLng();
-        var options = marker.options;
-        var newMarker = L.circleMarker(latlng, { radius: options.radius || 5, fillColor: options.fillColor || '#f00', fillOpacity: options.fillOpacity || 0.8, color: options.color || '#fff', weight: options.weight || 1 }).addTo(window.modalMap);
-        var tooltip = marker.getTooltip();
-        var popup = marker.getPopup();
-        if (tooltip) newMarker.bindTooltip(tooltip.getContent(), { permanent: false });
-        if (popup) newMarker.bindPopup(popup.getContent(), { closeButton: false });
-      });
-      
-      // Move UI overlays (pills, toggles, legends) into modal map — preserves event handlers
-      var sourceWidget = document.getElementById(containerId);
-      window._modalOverlaySources = [];
-      if (sourceWidget) {
-        var parent = sourceWidget.closest('.widget-body');
-        if (parent) {
-          var overlays = parent.querySelectorAll('[id$="-pill"], [id$="-status-pill"], [id$="-toggle"], .fire-status-wrap, .quake-status-wrap, .smoke-status-pill, .fire-legend, .radar-legend, [id$="-aqi-pill"], [id$="-labels-toggle"]');
-          overlays.forEach(function(overlay) {
-            window._modalOverlaySources.push({ el: overlay, parent: parent, next: overlay.nextSibling });
-            overlay.style.zIndex = '1000';
-            overlay.style.pointerEvents = 'auto';
-            mapContainer.appendChild(overlay);
-          });
-        }
-      }
-      
-      setTimeout(function(){ if (window.modalMap) window.modalMap.invalidateSize(); }, 100);
-      setTimeout(function(){ if (window.modalMap) window.modalMap.invalidateSize(); }, 300);
-    }, 50);
-  }
-
   function restoreModalOverlays(){
     if (window._modalOverlaySources) {
       window._modalOverlaySources.forEach(function(item) {
@@ -101522,23 +100965,12 @@ function initNowMicroTabs(){
       var imgId = img ? img.id : (canvas ? canvas.id : null);
       var config = imgId ? WIDGET_CONFIG[imgId] : null;
       
+      /* the one map widget (NATURAL HAZARDS) keeps its pointer header; its zoom modal (openMapModal) never opened --
+         the first [id$=-map] in it is hazard-map, which MAP_CONFIG never listed -- and was removed 2026-10-19 */
       if (isMapWidget) {
         widget.classList.add("clickable-widget");
         var header = widget.querySelector(".widget-head");
-        if (header) {
-          header.style.cursor = "pointer";
-          var mapContainer = widget.querySelector("[id$='-map']");
-          if (!mapContainer) mapContainer = widget.querySelector("iframe[id$='-iframe']");
-          var mapId = mapContainer ? mapContainer.id.replace('-iframe', '-map') : null;
-          var mapConfig = mapId ? MAP_CONFIG[mapId] : null;
-          if (mapConfig) {
-            header.addEventListener("click", function(e){
-              if (e.target.closest("a")) return;
-              if (widget.querySelector(".widget-cover")) return; // cover still present
-              openMapModal(mapConfig, mapId);
-            });
-          }
-        }
+        if (header) header.style.cursor = "pointer";
         return;
       }
       
@@ -102317,7 +101749,6 @@ function initNowMicroTabs(){
         if (_hvStarted) return; _hvStarted = true;
         try { startGoesAutoplay(); } catch(e){}
         try { initFcastWidgets(); } catch(e){ console.error('[init] initFcastWidgets failed:', e); }
-        try { initNationalRadarMap(); } catch(e){ console.error('[init] initNationalRadarMap failed:', e); }
       };
       var _crw = document.getElementById('clouds-radar-widget');
       if (_crw && 'IntersectionObserver' in window) {
@@ -102768,7 +102199,6 @@ function initNowMicroTabs(){
     // left _hazardInited stuck true (which also blocked the click-init
     // fallback below).
     window.initUnifiedHazardMap = initUnifiedHazardMap;
-    window.initGeologyMaps = initGeologyMaps;
 
     // ─── Hazard widget: click ANYWHERE on it to init ───
     (function(){
@@ -102782,7 +102212,6 @@ function initNowMicroTabs(){
         var prev = document.getElementById('hazard-preview-img');
         // Init the map
         try { initUnifiedHazardMap(); } catch(e){ console.error('hazard init', e); }
-        setTimeout(function(){ try { initGeologyMaps(); } catch(e){ console.error('[init] initGeologyMaps failed:', e); } }, 200);
         // Show overlay controls now that map is active
         var fireOv = document.getElementById('hazard-fire-overlays');
         if (fireOv) fireOv.style.display = '';
@@ -103667,13 +103096,9 @@ function initNowMicroTabs(){
         try { startGoesAutoplay(); } catch(e){}
         try { initGfsWidget(); } catch(e){ console.error('[init] initGfsWidget failed:', e); }
         try { initFcastWidgets(); } catch(e){ console.error('[init] initFcastWidgets failed:', e); }
-        try { initNationalRadarMap(); } catch(e){ console.error('[init] initNationalRadarMap failed:', e); }
         break;
       case 'hazard':
         try { initUnifiedHazardMap(); } catch(e){ console.error('[init] initUnifiedHazardMap failed:', e); }
-        setTimeout(function(){
-          try { initGeologyMaps(); } catch(e){ console.error('[init] initGeologyMaps failed:', e); }
-        }, 200);
         break;
       case 'solar':
         try { initPfss(); } catch(e){ console.error('[init] initPfss failed:', e); }
@@ -105028,14 +104453,17 @@ function closeAlertModal(){
   // rows the moment their data lands — esp. on mobile where prefetch is delayed
   // past the fixed timeouts below.
   window._hzDashUpdate = _hzDashUpdate;
-  // Run after data has had time to load, then every 3s
   // Initial updates after data loads, then every 5s only when visible
   setTimeout(_hzDashUpdate, 1500);
   setTimeout(_hzDashUpdate, 5000);
+  /* THE DASH REFRESH WAS DEAD (2026-10-19): it looked up #hazard-dashboard, which no page has ever had, so it returned
+     every tick and the cards only changed when a loader called _hzDashUpdate itself. The overview dashboard is
+     #hazard-overview-dashboard. Still only while it can be seen -- tab shown, overview open (display:none gives an empty
+     rect), on screen -- and _hzDashUpdate's own dirty check returns at once when no count has changed. */
   setInterval(function(){
     if(document.hidden) return;
-    var el = document.getElementById('hazard-dashboard');
-    if (!el) return;
+    var el = document.getElementById('hazard-overview-dashboard');
+    if (!el || !el.offsetWidth) return;
     var rect = el.getBoundingClientRect();
     if (rect.bottom > 0 && rect.top < window.innerHeight) _hzDashUpdate();
   }, 5000);
