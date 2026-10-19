@@ -62606,7 +62606,11 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         + 'font:700 8.5px/1.8 system-ui,sans-serif;letter-spacing:.07em;color:#2B22F4;text-align:center;';
       var lab = function(t){ return '<span style="font-weight:800;color:rgba(43,34,244,.5);margin-right:8px;white-space:nowrap;">' + t + '</span>'; };
       var bars = [], now2 = Date.now();
-      var rowsFN = (typeof fnRows !== 'undefined' && fnRows) ? fnRows : [], wetN = rowsFN.filter(function(r2){ return !r2.stale && r2.mm >= CW_FN_WET; }).length;
+      /* WATER ONLY WHERE A FLOOD IS OPEN (audit 2026-10-18): the car view counted every live sensor over the wet line, while the
+         FLOODING view (cwFlWet) and LOCAL count only those with an open FloodNet flood event -- a sensor reads damp after the
+         water is gone, and a null end_time is never trusted alone. The same rule here; until the events are read, LOADING */
+      if (!cwFlEv) cwFlEvents(function(){ cwTrafBand(); });
+      var rowsFN = (typeof fnRows !== 'undefined' && fnRows) ? fnRows : [], wetN = rowsFN.filter(function(r2){ return !r2.stale && r2.mm >= CW_FN_WET && !!(cwFlEv && cwFlEv.ids[r2.id]); }).length;
       var ffw = ((window._nwsAlerts || []).filter(function(a){ return /flood/i.test(a.event || '') && /warning/i.test(a.event || '') && (!a.expires || +a.expires > now2); })[0] || {}).event || '';
       var coastal = ((window._nwsAlerts || []).filter(function(a){ return /coastal flood|storm surge/i.test(a.event || '') && (!a.expires || +a.expires > now2); })[0] || {}).event || '';
       var wetNow = window._lastWxCode != null && ((window._lastWxCode >= 51 && window._lastWxCode <= 67) || (window._lastWxCode >= 71 && window._lastWxCode <= 86) || window._lastWxCode >= 95);
@@ -62625,7 +62629,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
           if (main.length) bars.push(lab('HUDSON CROSSINGS') + main.concat(rest).map(say).join(' &nbsp;·&nbsp; '));
         }
         bars.push(lab('WATER ON THE STREET') + (wetN ? '<span style="color:#0369a1;">' + wetN + ' SENSOR' + (wetN === 1 ? '' : 'S') + ' REPORT WATER</span> <span style="color:#1b2340;">· BLUE DOTS, TAP ONE</span>'
-            : '<span style="color:#1b2340;">' + (rowsFN.length ? 'NONE OF ' + rowsFN.length + ' SENSORS REPORTS WATER' : 'SENSORS LOADING…') + '</span>')
+            : '<span style="color:#1b2340;">' + (rowsFN.length && cwFlEv ? 'NONE OF ' + rowsFN.length + ' SENSORS REPORTS WATER' : 'SENSORS LOADING…') + '</span>')
           + (ffw || coastal ? ' &nbsp;·&nbsp; <span style="color:#b91c1c;">' + mtaEsc((ffw || coastal).toUpperCase()) + '</span>' : ''));
       }
       var bw = document.getElementById('cw-traf-bars'), bodyEl = document.getElementById('cw-body');
@@ -106951,6 +106955,7 @@ function closeAlertModal(){
       if (!RV.sf[l] || Date.now() - RV.sf[l].at > 6e5) need.push(J(B + '/stageflow').then(function(j){ RV.sf[l] = { j: j || {}, at: Date.now() }; }));
       if (need.length) Promise.all(need).then(function(){ if (RV.sel === g) RV.panel(); });
     };
+    RV.FCOL = { action: '#fde68a', minor: '#ffb15c', moderate: '#ff7a3d', major: '#ff3b3b' };   /* the stage lines' colors, chart and panel alike */
     RV.panel = function(){
       if (!riverEl) return;
       var inF = RV.G.filter(function(g){ return RANK[g.status.observed.floodCategory] >= 3; }), near = RV.G.filter(function(g){ return g.status.observed.floodCategory === 'action'; }), fcF = RV.G.filter(function(g){ return fcCat(g); });
@@ -106973,8 +106978,15 @@ function closeAlertModal(){
         if (!D || !SF) h += '<div class="lt-l">READING THE GAUGE…</div>';
         else {
           var cats = ((D.flood || {}).categories) || {}, Fv = {}; ['action', 'minor', 'moderate', 'major'].forEach(function(k){ var v = (cats[k] || {}).stage; if (v != null && v > -900) Fv[k] = +v; });
-          if (last && Fv.minor != null) h += '<div class="lt-l">FLOOD STAGE ' + ft(Fv.minor) + ' ' + esc(unit) + (last[1] < Fv.minor ? ', ' + ft(Fv.minor - last[1]) + ' BELOW IT NOW' : ', ' + ft(last[1] - Fv.minor) + ' ABOVE IT NOW') + (Fv.moderate != null ? ' · MODERATE ' + ft(Fv.moderate) : '') + (Fv.major != null ? ' · MAJOR ' + ft(Fv.major) : '') + '</div>';
-          else h += '<div class="lt-l lt-dim">NO FLOOD STAGE IS SET FOR THIS GAUGE</div>';
+          /* THE STAGES ARE WRITTEN HERE, NOT ON THE CHART (user 2026-10-18: "this info should be in the topview not on the map"):
+             the chart printed "ACTION 7.0" and "FLOOD STAGE 7.0" over each other where two stages share a height. Every stage
+             the NWS sets, in feet, is one line of text up here, each led by a swatch of its line on the chart (flood stage solid,
+             the others dashed); the chart keeps the lines only */
+          var stg = function(k, n){ return Fv[k] == null ? '' : '<span style="white-space:nowrap;"><span style="display:inline-block;width:12px;border-top:2px ' + (k === 'minor' ? 'solid' : 'dashed') + ' ' + RV.FCOL[k] + ';vertical-align:middle;margin-right:4px;"></span>' + n + ' ' + ft(Fv[k]) + ' ' + esc(unit) + '</span>'; };
+          var stL = [stg('action', 'ACTION'), stg('minor', 'FLOOD STAGE'), stg('moderate', 'MODERATE'), stg('major', 'MAJOR')].filter(Boolean);
+          if (stL.length) h += '<div class="lt-l">' + stL.join(' \u00b7 ') + '</div>';
+          if (last && Fv.minor != null) h += '<div class="lt-l lt-dim">' + (last[1] < Fv.minor ? ft(Fv.minor - last[1]) + ' ' + esc(unit) + ' BELOW FLOOD STAGE NOW' : ft(last[1] - Fv.minor) + ' ' + esc(unit) + ' ABOVE FLOOD STAGE NOW') + '</div>';
+          else if (Fv.minor == null) h += '<div class="lt-l lt-dim">NO FLOOD STAGE IS SET FOR THIS GAUGE</div>';
           var o30 = ob.filter(function(x){ return x[0] > Date.now() - 30 * 864e5; });
           var swings = 0, ext = null, dir = 0; ob.filter(function(x){ return x[0] > Date.now() - 3 * 864e5; }).forEach(function(x){   /* tidal reaches named like rivers (Edisto below Jacksonboro) */
             if (ext == null){ ext = x[1]; return; } var d2 = x[1] - ext;
@@ -107023,10 +107035,10 @@ function closeAlertModal(){
       var dstep = (t1 - t0) > 12 * 864e5 ? 3 : 2;
       for (var k = 0; k < 25; k += dstep){ var tk = now - 10 * 864e5 + k * 864e5; if (tk > t1) break; var lab = md(tk);
         g += '<text x="' + X(tk) + '" y="' + (Hh - 5) + '" text-anchor="middle" fill="rgba(255,255,255,.8)" font-size="8" font-weight="800" letter-spacing=".06em">' + esc(lab) + '</text>'; }
-      var FCOL = { action: '#fde68a', minor: '#ffb15c', moderate: '#ff7a3d', major: '#ff3b3b' };
+      var FCOL = RV.FCOL;
+      /* lines only (user 2026-10-18: the stage names and values are written above the chart now, see RV.panel) */
       ['action', 'minor', 'moderate', 'major'].forEach(function(k){ var v2 = C.F[k]; if (v2 == null || v2 > hi || v2 < lo) return;
-        g += '<line x1="' + padL + '" x2="' + (Wd - padR) + '" y1="' + Y(v2) + '" y2="' + Y(v2) + '" stroke="' + FCOL[k] + '" stroke-width="1.2"' + (k === 'minor' ? '' : ' stroke-dasharray="5 3"') + '/>'
-          + '<text x="' + (padL + 4) + '" y="' + (Y(v2) - 3) + '" fill="' + FCOL[k] + '" font-size="7.5" font-weight="900" letter-spacing=".08em">' + (k === 'minor' ? 'FLOOD STAGE' : k === 'action' ? 'ACTION' : k.toUpperCase()) + ' ' + ft(v2) + '</text>'; });
+        g += '<line x1="' + padL + '" x2="' + (Wd - padR) + '" y1="' + Y(v2) + '" y2="' + Y(v2) + '" stroke="' + FCOL[k] + '" stroke-width="1.2"' + (k === 'minor' ? '' : ' stroke-dasharray="5 3"') + '/>'; });
       if (C.fc.length) g += path(C.fc, 'stroke="#5eead4" stroke-width="2"');
       g += path(ob, 'stroke="#fff" stroke-width="2"');
       g += '<line x1="' + X(now) + '" x2="' + X(now) + '" y1="' + padT + '" y2="' + (Hh - padB) + '" stroke="#fff" stroke-dasharray="2 2"/><g id="lc-river-cur"></g>';
@@ -108543,7 +108555,7 @@ function closeAlertModal(){
       /* THE SUBWAY DELAYS, NYC ONLY (THE CITY's, through window._bvSubDelays): each alert's stretch in its route's color,
          side by side where lines share a track, chevrons pointing the delayed way, one bullet label per alert; posted
          alerts and the delays measured from the live train feed alike. From z10 in; DELAYS NOW in the strip. */
-      var subLine = ''; TR.subHits = [];
+      var subLine = '', chips = []; TR.subHits = [];
       var SD = window._bvSubDelays;
       if (SD && nycHere() && TR.show.rail){
         SD.onChange = function(){ if (TR.lit === true) TR.draw(); }; SD.load();
@@ -108578,11 +108590,16 @@ function closeAlertModal(){
               var cx = c2[0] + 14 * dpr, cy = c2[1] - 14 * dpr; if (cx < 4 || cy < hh || cx + w > W - 4 || cy > H - hh) continue;
               if (!taken.some(function(bx){ return cx < bx[0] + bx[2] + 4 * dpr && bx[0] < cx + w + 4 * dpr && Math.abs(bx[1] - cy) < hh + 3 * dpr; })) q = [cx, cy, c2]; }
             if (!q) return; taken.push([q[0], q[1], w]);
+            /* THE CHIPS GO DOWN LAST (user 2026-10-18: "fix that" -- the lines ran through the A/C/D bullets): each alert's chip was
+               painted straight after its own stretch, so the next alert's stretch, the vehicles and the A to B route crossed it.
+               As in THE CITY, every stretch is drawn first and the chips after all of it (only the jam tags, kept last on purpose, go over) */
+            chips.push(function(){ g.save();
             g.strokeStyle = 'rgba(8,10,16,.7)'; g.lineWidth = 1 * dpr; g.beginPath(); g.moveTo(q[2][0], q[2][1]); g.lineTo(q[0] + 4 * dpr, q[1]); g.stroke();
             g.fillStyle = 'rgba(8,10,16,.92)'; g.beginPath(); if (g.roundRect) g.roundRect(q[0], q[1] - hh / 2, w, hh, hh / 2); else g.rect(q[0], q[1] - hh / 2, w, hh); g.fill();
             al.routes.forEach(function(rt, ri){ var bx = q[0] + 9 * dpr + ri * 14 * dpr; g.fillStyle = SD.col(rt); g.beginPath(); g.arc(bx, q[1], 6.3 * dpr, 0, 6.3); g.fill();
               g.fillStyle = SD.dark(rt) ? '#111' : '#fff'; g.font = '900 ' + (7.5 * dpr) + 'px system-ui,sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(SD.show(rt), bx, q[1] + 0.5 * dpr); });
             g.fillStyle = '#fff'; g.font = '800 ' + (7.5 * dpr) + 'px system-ui,sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle'; g.fillText(txt, q[0] + bw + 6 * dpr, q[1] + 0.5 * dpr);
+            g.restore(); });
           });
           g.restore();
         }
@@ -108597,6 +108614,7 @@ function closeAlertModal(){
       if (subLine) strip.insertAdjacentHTML('beforeend', subLine);
       if (TR.show.roads && nycHere()) strip.insertAdjacentHTML('beforeend', TR.extraLines());
       try { AB.draw(g, P, dpr); } catch (e){}
+      chips.forEach(function(f){ try { f(); } catch (e){} });
       drawTags();
       strip.insertAdjacentHTML('beforeend', AB.say()); AB.wire();
     };
@@ -108624,9 +108642,18 @@ function closeAlertModal(){
       if (!TR.cv){ var pn = M.getPane('lcTraf') || M.createPane('lcTraf'); pn.style.zIndex = 445; pn.style.pointerEvents = 'none';
         TR.cv = document.createElement('canvas'); TR.cv.style.position = 'absolute'; pn.appendChild(TR.cv);
         M.on('zoomstart', function(){ if (TR.cv) TR.cv.style.visibility = 'hidden'; });
+        /* TRAFFIC'S CANVAS OVER THE GROUND (user 2026-10-18 on the subway delay chips: "fix that" -- the lines cut through the
+           bullets, THE CITY draws them on top). Every pane is flattened to z 400, so stacking is DOM order, and the panes made
+           after this one -- the parks and ground fills (lcCityGround/lcCity, meant 396/397), the lidar shading (lcLidar, 398),
+           the sea (bvSea, 430) -- painted over the subway and its chips although each is meant UNDER 445. This pane is put back
+           after them whenever a layer is added, with the flood gauges' (lcLvDots) and the castle's (lcKx) still last */
+        TR.top = function(){ var q = M.getPane('lcTraf'); if (!q || !q.parentNode) return; var par = q.parentNode, moved = 0;
+          ['lcCityGround', 'lcCity', 'lcLidar', 'bvSea'].forEach(function(n){ var o = M.getPane(n); if (o && o.parentNode === par && (q.compareDocumentPosition(o) & 4)) moved = 1; });
+          if (!moved) return; par.appendChild(q); ['lcLvDots', 'lcKx'].forEach(function(n){ var o = M.getPane(n); if (o && o.parentNode === par) par.appendChild(o); }); };
+        M.on('layeradd', TR.top);
         M.on('click', TR.camTap);
         M.on('moveend resize', function(){ if (TR.lit !== true) return; TR.draw(); clearTimeout(TR.deb); TR.deb = setTimeout(function(){ TR.read().then(TR.draw); TR.transit(); }, 600); }); }
-      TR.cv.style.display = '';
+      TR.cv.style.display = ''; TR.top();
       /* the live layer is rebuilt when the place changes, so its box follows the search */
       var lk = (function(){ var L0 = window.LOCATION || {}; return (+L0.lat).toFixed(2) + ',' + (+L0.lon).toFixed(2); })();
       if (TR.lay && TR.layKey !== lk){ if (M.hasLayer(TR.lay)) M.removeLayer(TR.lay); TR.lay = null; }
@@ -108750,23 +108777,36 @@ function closeAlertModal(){
       var out = []; t.split(/\s+/).forEach(function(w){ w = w.replace(/\|/g, ' '); if (w === '&' && out.length) out[out.length - 1] += ' &'; else if (w) out.push(w); }); return out; };
     var lfBandRel = function(pct, lvl){ var out = 'NOT YET'; [[0.35, 'STARTING'], [0.75, 'NEAR PEAK'], [0.95, 'PEAK'], [1.3, 'PAST PEAK']].forEach(function(b){ if (pct >= b[0] * lvl) out = b[1]; }); return out; };
     var lfMD = function(d){ return String(d || '').slice(5).replace('-', '/'); };
+    /* ONE SOURCE OF TRUTH FOR THE NORTHEAST (2026-10-18, user: "fix and improve"; the audit: LOCAL read "AS OF 10/16, NEW YORK
+       CITY & LONG ISLAND 3%" while THE CITY read "AS OF 10/17, THE CITY 7%, ADIRONDACKS 29%, CATSKILLS 19%"). Two bakes measure the
+       same twelve regions: _foliagebake/na.py (national, IGBP deciduous mask, newest composite held two days back for its GIBS
+       seam, history only since 10-17) and _maplab/foliage_bake.py (the Northeast frame THE CITY shows: USFS typed forest, the
+       newest composite, daily history since 09-13, drive times, pace, last season). The Northeast file is a day fresher and its
+       mask is the honest one, so for its twelve regions, its counties and its lookouts it is the number on BOTH views; the
+       national file carries the rest of the continent. Fetched with meta.json (one file, ~115 KB) so the first paint agrees. */
     LF.load = function(cb){
       if (LF.meta && Date.now() - LF.metaAt < 1800000) return cb();
+      var n = 2, done = function(){ if (--n === 0) cb(); };
       fetch('https://cdn.bluishvoid.com/foliage/na/meta.json?d=' + new Date().toISOString().slice(0, 13)).then(function(r){ return r.json(); })
-        .then(function(j){ LF.meta = j || {}; LF.metaAt = Date.now(); cb(); }).catch(function(){ LF.meta = LF.meta || {}; LF.metaAt = Date.now() - 1500000; cb(); });
+        .then(function(j){ LF.meta = j || {}; LF.metaAt = Date.now(); done(); }).catch(function(){ LF.meta = LF.meta || {}; LF.metaAt = Date.now() - 1500000; done(); });
+      fetch('https://cdn.bluishvoid.com/foliage/latest.json?v=' + Math.floor(Date.now() / 1800000)).then(function(r){ return r.json(); })
+        .then(function(j){ if (j && j.regions) LF.ne = j; done(); }).catch(function(){ done(); });
     };
+    /* the Northeast file's region of that name, or null (its twelve are the national file's first twelve, same names and boxes) */
+    LF.neR = function(name){ var R0 = LF.ne && LF.ne.regions; if (!R0) return null; for (var i = 0; i < R0.length; i++) if (R0[i].name === name) return R0[i]; return null; };
     LF.ctyLoad = function(){ var m = LF.meta || {}; if (LF.cty || LF.ctyReq || !m.counties_url) return; LF.ctyReq = 1;
       fetch(m.counties_url).then(function(r){ return r.json(); }).then(function(j){ LF.cty = j; LF.draw(); }).catch(function(){ LF.ctyReq = 0; }); };
     /* the frames a season mode plays: [{date, i, url}] */
     LF.frames = function(){ var m = LF.meta || {}, S = LF.mode === 'last' ? m.season_last : LF.mode === 'this' ? m.season_this : null;
       if (!S || !S.dates || !S.base) return []; return S.dates.map(function(d, i){ return { date: d, i: i, year: S.year, url: S.base + d + '/{z}/{x}/{y}.webp' }; }); };
     /* each region's share for what is on show: today's, or that week's when a season plays */
-    LF.regionPct = function(rg, fr){ var m = LF.meta || {};
-      if (!fr) return { pct: rg.pct, band: rg.band, d7: rg.delta7 };
-      var v = null;
-      if (LF.mode === 'last' && m.last_year && m.last_year.regions && m.last_year.dates){ var k = m.last_year.dates.indexOf(fr.date); var a = m.last_year.regions[rg.name]; if (k >= 0 && a) v = a[k]; }
-      else if (m.history){ var row = null; m.history.forEach(function(h){ if (h.date <= fr.date && (!row || h.date > row.date)) row = h; }); if (row && row.pct) v = row.pct[rg.name]; }
-      if (v == null) return null; return { pct: v, band: rg.peak_level ? lfBandRel(v, rg.peak_level) : null, d7: null }; };
+    LF.regionPct = function(rg, fr){ var m = LF.meta || {}, ne = LF.neR(rg.name), N = LF.ne || {}, s = ne || rg;
+      if (!fr) return { pct: s.pct, band: s.band, d7: s.delta7, ne: !!ne };
+      var v = null, look = function(LY){ if (!LY || !LY.regions || !LY.dates) return null; var k = LY.dates.indexOf(fr.date), a = LY.regions[rg.name]; return k >= 0 && a && a[k] != null ? a[k] : null; },
+        hist = function(H){ var row = null; (H || []).forEach(function(h){ if (h.date <= fr.date && (!row || h.date > row.date)) row = h; }); return row && row.pct && row.pct[rg.name] != null ? row.pct[rg.name] : null; };
+      if (LF.mode === 'last'){ if (ne) v = look(N.last_year); if (v == null) v = look(m.last_year); }
+      else { if (ne) v = hist(N.history); if (v == null) v = hist(m.history); }
+      if (v == null) return null; return { pct: v, band: s.peak_level ? lfBandRel(v, s.peak_level) : null, d7: null, ne: !!ne }; };
     LF.cur = function(){ var fs = LF.frames(); return LF.mode === 'now' || !fs.length ? null : fs[Math.min(LF.fi, fs.length - 1)]; };
     LF.layers = function(){
       if (!M) return;
@@ -108784,7 +108824,17 @@ function closeAlertModal(){
         if (!LF.fl[k]) LF.fl[k] = L.tileLayer(f.url, { minZoom: 3, maxNativeZoom: 7, maxZoom: 19, zIndex: 5, opacity: 0, bounds: LF_BOUNDS, errorTileUrl: LF_GIF });
         if (!M.hasLayer(LF.fl[k])) LF.fl[k].addTo(M); LF.fl[k].setOpacity(fr && fr.date === f.date ? 1 : 0); });
       Object.keys(LF.fl).forEach(function(k){ if (!want[k] && M.hasLayer(LF.fl[k])) M.removeLayer(LF.fl[k]); });
+      LF.soft();
     };
+    /* SMOOTH PAST THE NATIVE ZOOM (2026-10-18, user: "fix and improve"; the audit: the tiles "look blocky with a seam"). The
+       pyramid is native to z9 (meta.maxzoom, the NDVI composite's own 250 m); the forest mask under it is IGBP's 500 m, so past
+       z9 every pixel edge is a 2-4 px stair, each tile is scaled on its own (its edge pixels clamp: a line every 256 source px),
+       and the bake's 2048 px blocks meet with a step (each block is its own GIBS request and its own 5-px median). One CSS
+       blur on the layer's container, half a source pixel wide at the zoom on show, smooths all three across tile edges; at
+       or under the native zoom nothing is blurred. The season frames are native to z7 and get the same rule from there. */
+    LF.soft = function(){ if (!M) return; var z = M.getZoom(), set = function(lay, nat){ var c = lay && lay._container; if (!c) return;
+        var k = z > nat ? Math.min(6, 0.55 * Math.pow(2, z - nat)) : 0, f = k ? 'blur(' + k.toFixed(1) + 'px)' : ''; if (c.style.filter !== f) c.style.filter = f; };
+      set(LF.lay, (LF.meta && LF.meta.maxzoom) || 8); Object.keys(LF.fl).forEach(function(k){ set(LF.fl[k], 7); }); };
     LF.loop = function(){ clearInterval(LF.timer); LF.timer = null; var fs = LF.frames(); if (LF.mode === 'now' || fs.length < 2 || !LF.play) return;
       LF.timer = setInterval(function(){ if (!LF.lit || document.hidden || !paneOn()) return; LF.fi = (LF.fi + 1) % LF.frames().length; LF.layers(); LF.strip(); LF.draw(); }, 1400); };
     LF.near = function(){ var m = LF.meta || {}, L0 = window.LOCATION || {}, la = +L0.lat, lo = +L0.lon;
@@ -108797,9 +108847,13 @@ function closeAlertModal(){
       if (LF.look === 'forest') head = m.species_legend ? 'THE FOREST \u00b7 WHICH TREE LEADS (USFS SPECIES BASAL AREA, 30 M) \u00b7 TAP THE MAP FOR THE FOREST TYPE THERE'
         : 'THE FOREST \u00b7 WHAT GROWS WHERE (USFS FOREST ATLAS, 250 M) \u00b7 TAP THE MAP FOR THE FOREST THERE';
       else {
-        var near = LF.near().map(function(r){ var q = LF.regionPct(r, fr); if (!q) return null;
-          return esc(String(r.name).toUpperCase()) + ' ' + q.pct + '%' + (q.d7 ? ' (' + (q.d7 > 0 ? '+' : '−') + Math.abs(q.d7) + ')' : ''); }).filter(Boolean);
-        var d = fr ? fr.date : (m.composites && m.composites[0]);
+        /* NYC's header is THE CITY's, word for word: ADIRONDACKS, CATSKILLS, HUDSON VALLEY, THE CITY, from the same file */
+        var NYW = { 'Adirondacks': 'ADIRONDACKS', 'Catskills': 'CATSKILLS', 'Hudson Valley': 'HUDSON VALLEY', 'New York City & Long Island': 'THE CITY' };
+        var nyHead = nycHere() && LF.ne && LF.ne.regions, neUsed = false;
+        var near = (nyHead ? LF.ne.regions.filter(function(r){ return NYW[r.name]; }) : LF.near()).map(function(r){ var q = LF.regionPct(r, fr); if (!q) return null; if (q.ne) neUsed = true;
+          return esc(nyHead ? NYW[r.name] : String(r.name).toUpperCase()) + ' ' + q.pct + '%' + (q.d7 ? ' (' + (q.d7 > 0 ? '+' : '−') + Math.abs(q.d7) + ')' : ''); }).filter(Boolean);
+        /* the date is the file the numbers came from: the Northeast's composite when its regions lead the header */
+        var d = fr ? fr.date : ((neUsed && LF.ne.composites && LF.ne.composites[0]) || (m.composites && m.composites[0]));
         head = (fr ? (LF.mode === 'last' ? 'LAST SEASON' : 'THIS SEASON') + ' · WEEK OF ' + lfMD(fr.date) + (fr.year !== new Date().getFullYear() ? ', ' + fr.year : '') : 'FALL FOLIAGE')
           + (!fr && d ? ' · AS OF ' + lfMD(d) : '') + (near.length ? ' · ' + near.join(' · ') : (m.regions ? '' : ' · NASA MODIS GREENNESS AGAINST AUGUST'));
       }
@@ -108871,7 +108925,12 @@ function closeAlertModal(){
         LF.hits.push({ x: q[0], y: q[1], k: 'rg', rg: rg, v: v });
         Q.push({ lines: lfStack(rg.name).concat([v.pct + '%']), x: q[0] + 6 * dpr, y: q[1], col: LF_BANDC[v.band] || '#fff', pri: rg.pri || 70, font: '800 ' + (8.6 * dpr) + 'px system-ui,sans-serif' }); });
       /* the lookouts, where the file names them: a hollow triangle each, the name at low priority */
-      if (!fr) (m.spots || []).forEach(function(sp){ if (sp.lat == null) return; var q = P(sp.lon, sp.lat); if (!inV(q, 0)) return; var r3 = 3.6 * dpr;
+      /* THE CITY's lookouts and its one named water, the Hudson's highest source, from the Northeast file */
+      if (!fr && (LF.ne || {}).spots) [{ name: 'Lake Tear of the Clouds', lat: 44.1069, lon: -73.9354, water: 1, region: 'Adirondacks', how: 'the Hudson’s highest source, 1,309 m on Mount Marcy' }].forEach(function(wt){
+        var q = P(wt.lon, wt.lat); if (!inV(q, 0)) return; g.beginPath(); g.arc(q[0], q[1], 3 * dpr, 0, 6.284); g.lineWidth = 2.4 * dpr; g.strokeStyle = 'rgba(8,10,16,.8)'; g.stroke();
+        g.lineWidth = 1.2 * dpr; g.strokeStyle = 'rgba(150,200,255,.95)'; g.stroke(); LF.hits.push({ x: q[0], y: q[1], k: 'sp', sp: wt });
+        if (z >= 6) Q.push({ lines: ['LAKE TEAR OF THE CLOUDS'], x: q[0] + 6 * dpr, y: q[1], col: 'rgba(160,205,255,.95)', pri: 57, font: '700 ' + (7.6 * dpr) + 'px system-ui,sans-serif' }); });
+      if (!fr) (((LF.ne || {}).spots) || m.spots || []).forEach(function(sp){ if (sp.lat == null) return; var q = P(sp.lon, sp.lat); if (!inV(q, 0)) return; var r3 = 3.6 * dpr;
         g.beginPath(); g.moveTo(q[0], q[1] - r3); g.lineTo(q[0] + r3, q[1] + r3 * 0.8); g.lineTo(q[0] - r3, q[1] + r3 * 0.8); g.closePath();
         g.lineWidth = 2.6 * dpr; g.strokeStyle = 'rgba(8,10,16,.8)'; g.stroke(); g.lineWidth = 1.2 * dpr; g.strokeStyle = 'rgba(255,255,255,.95)'; g.stroke();
         LF.hits.push({ x: q[0], y: q[1], k: 'sp', sp: sp });
@@ -108902,9 +108961,13 @@ function closeAlertModal(){
       }
       var best = null, bd = 1e9; LF.hits.forEach(function(h){ var d = Math.hypot(h.x - x, h.y - y); if (d < bd){ bd = d; best = h; } });
       if (best && bd < 16 * dpr){
-        if (best.k === 'rg'){ var rg = best.rg, v = best.v;
+        if (best.k === 'rg'){ var rg = LF.neR(best.rg.name) || best.rg, v = best.v, N1 = LF.ne || {};
+          /* the Northeast's regions read as THE CITY reads them: the pace against last season, the drive from the city */
           LF.say('<b>' + esc(String(rg.name).toUpperCase()) + ' ' + v.pct + '%</b>' + (v.band ? ' · ' + v.band : '') + (v.d7 ? ' · ' + (v.d7 > 0 ? '+' : '−') + Math.abs(v.d7) + ' ON THE WEEK' : '')
-            + (rg.peak_last_year ? ' · PEAKED ' + lfMD(rg.peak_last_year) + ' LAST YEAR' : '') + ' · SHARE OF THE FOREST’S SUMMER GREENNESS GONE'); }
+            + (rg.peak_last_year ? ' · PEAKED ' + lfMD(rg.peak_last_year) + ' LAST YEAR' : '')
+            + (!LF.cur() && rg.pace_days != null ? (Math.abs(rg.pace_days) < 3 ? ', ON PACE' : ', ' + Math.abs(rg.pace_days) + ' DAYS ' + (rg.pace_days > 0 ? 'AHEAD' : 'BEHIND')) : '')
+            + (nycHere() && rg.drive && rg.drive.min ? ' · ' + Math.floor(rg.drive.min / 60) + ' H ' + (rg.drive.min % 60) + ' MIN DRIVE' + (rg.drive.mi ? ', ' + rg.drive.mi + ' MI' : '') : '')
+            + ' · SHARE OF THE FOREST’S SUMMER GREENNESS GONE' + (v.ne && N1.composites ? ' · AS OF ' + lfMD(N1.composites[0]) : '')); }
         else if (best.k === 'sp'){ var sp = best.sp; LF.say('<b>' + esc(String(sp.name).toUpperCase()) + '</b>' + (sp.region ? ' \u00b7 ' + esc(String(sp.region).toUpperCase()) : '') + (sp.how ? ' \u00b7 ' + esc(String(sp.how).toUpperCase()) : '')); }
         else { var p = best.p; LF.say('<b>' + esc(String(p[4] || 'A TREE').toUpperCase()) + '</b> · ' + LF_CLS[p[2]][0] + ' · REPORTED ' + lfMD(p[3]) + ' · USA NATIONAL PHENOLOGY NETWORK'); }
         return;
@@ -108913,19 +108976,38 @@ function closeAlertModal(){
         Object.keys(LF.cty).some(function(f){ return (LF.cty[f].r || []).some(function(r){ var ins = false;
           for (var i = 0, j = r.length - 1; i < r.length; j = i++) if (((r[i][1] > la) !== (r[j][1] > la)) && (lo < (r[j][0] - r[i][0]) * (la - r[i][1]) / (r[j][1] - r[i][1]) + r[i][0])) ins = !ins;
           if (ins) hit = f; return ins; }); });
-        if (hit){ var C = LF.cty[hit], pv = (m.counties || {})[hit];
+        if (hit){ var C = LF.cty[hit], nv = ((LF.ne || {}).counties || {})[hit], pv = nv != null ? nv : (m.counties || {})[hit];   /* the Northeast file first, as the regions */
           LF.say('<b>' + esc(String(C.n || '').toUpperCase()) + ' COUNTY, ' + esc(C.s || '') + '</b> · ' + (pv != null ? pv + '% OF ITS SUMMER GREENNESS GONE' : 'TOO LITTLE TURNING FOREST TO READ')); return; }
       }
       LF.say('');
     };
-    LF.on = function(){ if (!M) return; LF.lit = true;
+    /* OPEN WHERE THE COLOR IS (2026-10-18, user: "fix and improve"; the audit: FOLIAGE opened at zoom 10 on the city, where almost
+       nothing has turned). New York and the rest of the Northeast open on THE CITY's own frame, the Adirondacks to the Delmarva,
+       Lake Erie to Cape Cod; anywhere else on the regions round the place, stretched to the nearest one that is coloring
+       (12%+) when that is within a day's drive. Nothing near: the place at z7. The view the reader came from is put back on
+       the way out unless they moved the map. */
+    LF.NE_BOX = [[39.0, -79.5], [45.3, -69.6]];   /* THE CITY's foliage frame (EPSG:3857 -8927823..-7636517, 4607718..5716479, i.e.
+       38.15-45.6 N, 80.2-68.6 W) trimmed by its margins so it holds at z7 on a desktop map (the whole box needs z6.6, and the
+       map snaps whole zooms: z6 put the Upper Peninsula and Labrador in and the signs went small) */
+    LF.fit = function(){ var L1 = window.LOCATION || {}, la = +L1.lat, lo = +L1.lon; if (!isFinite(la) || !isFinite(lo)) return;
+      var key = la.toFixed(3) + ',' + lo.toFixed(3); if (LF.fitKey === key) return; LF.fitKey = key;
+      if (la > 38.15 && la < 45.6 && lo > -80.2 && lo < -68.6){ M.fitBounds(LF.NE_BOX, { animate: false }); }
+      else {
+        var km = function(r){ var dx = (r.lon - lo) * Math.cos(la * Math.PI / 180), dy = r.lat - la; return Math.sqrt(dx * dx + dy * dy) * 111; };
+        var rs = ((LF.meta || {}).regions || []).filter(function(r){ return r.lat != null; }).map(function(r){ var s = LF.neR(r.name) || r; return { r: r, d: km(r), pct: s.pct }; }).sort(function(a, b){ return a.d - b.d; });
+        var pts = [[la, lo]]; rs.filter(function(q){ return q.d < 450; }).slice(0, 4).forEach(function(q){ pts.push([q.r.lat, q.r.lon]); });
+        var hot = rs.filter(function(q){ return q.pct >= 12 && q.d < 550; })[0]; if (hot) pts.push([hot.r.lat, hot.r.lon]);
+        if (pts.length < 2) M.setView([la, lo], 7, { animate: false });
+        else M.fitBounds(L.latLngBounds(pts).pad(0.3), { animate: false, padding: [20, 20], maxZoom: 8 });
+        if (M.getZoom() < 5) M.setZoom(5, { animate: false });
+      }
+      LF.fitV = { c: M.getCenter(), z: M.getZoom() };
+    };
+    LF.on = function(){ if (!M) return; if (!LF.lit){ LF.prev = { c: M.getCenter(), z: M.getZoom() }; LF.fitKey = null; } LF.lit = true;
       if (!LF.cv){ var pn = M.getPane('lcFol') || M.createPane('lcFol'); pn.style.zIndex = 440; pn.style.pointerEvents = 'none';
         LF.cv = document.createElement('canvas'); LF.cv.style.position = 'absolute'; pn.appendChild(LF.cv);
-        M.on('moveend resize', function(){ if (LF.lit) LF.draw(); }); }
-      /* the index is native to z9 (~220 m, the NDVI composite's own 250 m) and overzooms past it; only a street-level
-         view is pulled back, to where the forest reads */
-      if (M.getZoom() > 11) M.setZoom(10);
-      LF.load(function(){ if (!LF.lit) return; LF.ctyLoad(); LF.layers(); LF.loop(); LF.strip(); LF.draw(); });
+        M.on('moveend resize', function(){ if (LF.lit) LF.draw(); }); M.on('zoomend', function(){ if (LF.lit) LF.soft(); }); }
+      LF.load(function(){ if (!LF.lit) return; LF.fit(); LF.ctyLoad(); LF.layers(); LF.loop(); LF.strip(); LF.draw(); });
       LF.park();
     };
     /* THE PARK INSET, NYC ONLY (THE CITY's: Central Park's own canopy on the same legend, the share and the date on the
@@ -108957,7 +109039,9 @@ function closeAlertModal(){
       if (LF.ne) return show(LF.ne.park);
       fetch('https://cdn.bluishvoid.com/foliage/latest.json?v=' + Math.floor(Date.now() / 1800000)).then(function(r){ return r.json(); }).then(function(j){ LF.ne = j; LF.park(); }).catch(function(){});
     };
-    LF.off = function(){ LF.lit = false; clearInterval(LF.timer); LF.timer = null; LF.info = '';
+    LF.off = function(){
+      if (LF.lit && M && LF.prev && LF.fitV && M.getZoom() === LF.fitV.z && M.getCenter().distanceTo(LF.fitV.c) < 50) M.setView(LF.prev.c, LF.prev.z, { animate: false });
+      LF.prev = LF.fitV = null; LF.lit = false; clearInterval(LF.timer); LF.timer = null; LF.info = '';
       if (M){ [LF.lay, LF.forest].concat(Object.keys(LF.fl).map(function(k){ return LF.fl[k]; })).forEach(function(l){ if (l && M.hasLayer(l)) M.removeLayer(l); }); }
       if (LF.cv){ LF.cv.style.display = 'none'; cvFree(LF.cv); } LF.park(); };
     /* ------------------------------------------------------- LIVE TIDAL FLOOD -- */
