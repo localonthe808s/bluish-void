@@ -302,6 +302,25 @@ window._bvTileRect = function(M, ly, t){
      leaflet-heat (extends L; used only in handlers) and jszip (feature-checked
      via window.JSZip) are safe to defer — they load after Leaflet and don't
      block first paint. -->
+<script>
+/* RAINVIEWER'S PIXELS AS DBZ (2026-10-19). Every reader asks for color scheme 2, smooth 0, snow 0 ("/2/0_0.png"), which is
+   RainViewer's "Universal Blue" (their rainviewer_api_colors_table.csv): a translucent tan under 15 dBZ -- drizzle, clear-air
+   bloom, clutter -- then blues 15-34, yellow to orange 35-44, reds 45-54, pinks 55-64, white above. The old tests guessed the
+   NWS ramp, and their "yellow" and "green" both caught the tan: a dry LA night (tile 6/11/25: 2,959 such pixels, 44 at 20 dBZ
+   and up) read "BRING AN UMBRELLA · MODERATE RAIN IN 22 MIN". _bvRvDbz is the nearest stop of that table, -10..69 dBZ (null for
+   a near-clear pixel); _bvRvTier is the doorstep words on it: under 20 dBZ none, 20-29 LIGHT, 30-39 MODERATE, 40-49 HEAVY, 50 and
+   up INTENSE (Marshall-Palmer: about 0.6, 2.7, 12 and 49 mm an hour at the breaks). */
+(function(){
+  var HEX = '63615966635a69665c6c685d6f6b5f726e617570627873647c75657f7867827b69857d6a88806c8b826d8e856f9288719e9375aa9e79b6a97ec2b482cec087d2c48bd6c88fdacc93ded09788ddee6cd1eb51c5e836bae51baee200a3e0009ad50091ca0088bf007fb40077aa0070a300699c006295005b8e005588005180004e78004a70004768ffee00ffe000ffd200ffc500ffb700ffaa00ff9f00ff9500ff8b00ff8100ff4400f23600e62800d91b00cd0d00c10000a800008f00007600005d0000ffaaffff9fffff95ffff8bffff81ffff77ffff6cffff62ffff58ffff4effffffffffffffffffffffffffffffff', P = [], C = {};
+  for (var i = 0; i < HEX.length; i += 6) P.push([parseInt(HEX.substr(i, 2), 16), parseInt(HEX.substr(i + 2, 2), 16), parseInt(HEX.substr(i + 4, 2), 16)]);
+  window._bvRvDbz = function(r, g, b, a){
+    if (!(a >= 12)) return null; var k = (r << 16) | (g << 8) | b; if (C[k] !== undefined) return C[k];
+    var bi = 0, bd = 1e9; for (var j = 0; j < P.length; j++){ var dr = P[j][0] - r, dg = P[j][1] - g, db = P[j][2] - b, d = dr * dr + dg * dg + db * db; if (d < bd){ bd = d; bi = j; } }
+    return (C[k] = bi - 10); };
+  window._bvRvTier = function(r, g, b, a){ var d = window._bvRvDbz(r, g, b, a); return d == null || d < 20 ? 0 : d < 30 ? 1 : d < 40 ? 2 : d < 50 ? 3 : 4; };
+  window._bvRvMmHr = function(dbz){ return Math.pow(Math.pow(10, Math.min(dbz, 53) / 10) / 200, 1 / 1.6); };   /* Marshall-Palmer Z = 200 R^1.6, held at the NWS hail cap (53 dBZ, ~100 mm an hour) */
+})();
+</script>
 <script src="https://cdn.bluishvoid.com/vendor/leaflet/leaflet.js"></script>
 <script defer src="https://cdn.bluishvoid.com/vendor/protomaps-leaflet/protomaps-leaflet-5.1.0.js"></script>
 <script defer src="https://cdn.bluishvoid.com/vendor/leaflet-heat/leaflet-heat.js"></script>
@@ -37502,6 +37521,9 @@ function dayRangeAround(d, days){
           // Z-R ballpark). Used for the intensity word AND accumulation.
           var tier = function(c){
             if (!c || c[3] < 35) return null;
+            /* Universal Blue decoded (_bvRvDbz, 2026-10-19): the tan under 20 dBZ is not rain; rate is Marshall-Palmer on the dBZ */
+            if (window._bvRvDbz){ var dz = window._bvRvDbz(c[0], c[1], c[2], c[3]); if (dz == null || dz < 20) return null;
+              return { l: ['LIGHT', 'MODERATE', 'HEAVY', 'INTENSE'][Math.min(3, Math.floor((dz - 20) / 10))], mm: Math.round(window._bvRvMmHr(dz) * 10) / 10 }; }
             var r = c[0], g = c[1], b = c[2];
             if (r > 140 && b > 110 && g < 130) return { l:'INTENSE', mm:60 };        // magenta/purple
             if (r > 165 && g < 115 && b < 115) return { l:'HEAVY', mm:35 };          // red
@@ -58228,6 +58250,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       };
       var tier = function(c){
         if (!c || c[3] < 35) return null;
+        if (window._bvRvTier){ var tv = window._bvRvTier(c[0], c[1], c[2], c[3]); return tv ? { l: [0, 'LIGHT', 'MODERATE', 'HEAVY', 'INTENSE'][tv] } : null; }   /* Universal Blue decoded: the tan is not rain */
         var r = c[0], g = c[1], b = c[2];
         if (r > 140 && b > 110 && g < 130) return { l:'INTENSE' };
         if (r > 165 && g < 115 && b < 115) return { l:'HEAVY' };
@@ -72749,7 +72772,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
           var dest = (F.s[lastId] || [])[0] || F.h[t[1]] || '';
           var mins = flat[i + 1], live = rt && rt[tid] && rt[tid][stopId];
           var at;
-          if (live){ var lv = new Date(live * 1000); at = lv.getHours() * 60 + lv.getMinutes(); }
+          if (live){ var lv = new Date(live * 1000 + Math.round((now - Date.now()) / 6e4) * 6e4); at = lv.getHours() * 60 + lv.getMinutes(); }   /* in now's frame: LOCAL hands in New York's wall clock (lcNaive) */
           else at = mins;
           if (at < nowMin - 2) continue;               /* gone */
           out.push({ rid: t[0], dest: dest, dir: t[3], min: at, live: !!live });
@@ -73641,6 +73664,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         /* green or heavier on the RainViewer universal palette */
         var wet = function(c){
           if (!c || c[3] < 35) return false;
+          if (window._bvRvTier) return window._bvRvTier(c[0], c[1], c[2], c[3]) >= 1;   /* 20 dBZ and up, Universal Blue decoded (2026-10-19) */
           var r = c[0], g2 = c[1], b2 = c[2];
           if (r > 140 && b2 > 110 && g2 < 130) return true;      /* magenta */
           if (r > 165 && g2 < 115 && b2 < 115) return true;      /* red */
@@ -105738,6 +105762,7 @@ function closeAlertModal(){
       if (cv.width !== Math.round(sz.x * dpr) || cv.height !== Math.round(sz.y * dpr)){ cv.width = Math.round(sz.x * dpr); cv.height = Math.round(sz.y * dpr); cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
       L.DomUtil.setPosition(cv, M.containerPointToLayerPoint([0, 0]));
       var g = cv.getContext('2d'), W = cv.width, H = cv.height; g.clearRect(0, 0, W, H);
+      if (!(W > 0 && H > 0)) return;   /* a map with no size yet (pane hidden): drawImage of a 0 x 0 scratch throws InvalidStateError */
       var P = function(lo, la){ var q = M.latLngToContainerPoint([la, lo]); return [q.x * dpr, q.y * dpr]; };
       var inV = function(q, m){ m = m || 0; return q[0] > -m && q[1] > -m && q[0] < W + m && q[1] < H + m; };
       var font = function(px, wt){ return (wt || 800) + ' ' + (px * dpr) + 'px system-ui,sans-serif'; };
@@ -106489,7 +106514,8 @@ function closeAlertModal(){
       if (ALR.key === key && Date.now() - ALR.at < 5 * 6e4) return; ALR.key = key; ALR.at = Date.now();
       var z = 6, ts = 256, at = function(lo2, la2){ var n = Math.pow(2, z), xf = (lo2 + 180) / 360 * n, lr = la2 * Math.PI / 180, yf = (1 - Math.log(Math.tan(lr) + 1 / Math.cos(lr)) / Math.PI) / 2 * n;
         var xt = Math.floor(xf), yt = Math.floor(yf); return { xt: xt, yt: yt, px: Math.min(ts - 1, Math.floor((xf - xt) * ts)), py: Math.min(ts - 1, Math.floor((yf - yt) * ts)) }; };
-      var wet = function(c){ if (!c || c[3] < 35) return false; var r = c[0], g2 = c[1], b2 = c[2];
+      var wet = function(c){ if (!c || c[3] < 35) return false; if (window._bvRvTier) return window._bvRvTier(c[0], c[1], c[2], c[3]) >= 1;   /* 20 dBZ and up (_bvRvDbz): the tan under it is not rain */
+        var r = c[0], g2 = c[1], b2 = c[2];
         return (r > 140 && b2 > 110 && g2 < 130) || (r > 165 && g2 < 115 && b2 < 115) || (r > 195 && g2 >= 110 && g2 < 195 && b2 < 120) || (r > 175 && g2 > 175 && b2 < 150) || (g2 > 120 && r < 195 && b2 < 175); };
       var pts = [at(lo, la)], kx = 1 / Math.cos(la * Math.PI / 180);
       for (var i = -3; i <= 3; i++) for (var j = -3; j <= 3; j++) pts.push(at(lo + j * 0.33 * kx, la + i * 0.33));
@@ -106551,6 +106577,7 @@ function closeAlertModal(){
       OV.satKey = key; OV.satAt = Date.now(); OV.satBB = bb; OV.satZ = M.getZoom();
       var west = c0.lng < -105, lay = (c0.lng < -150 && c0.lat < 30) ? 'hawaii_ch13' : (c0.lat > 50 && c0.lng < -129) ? 'alaska_ch13' : 'conus_ch13';
       var sw = L.CRS.EPSG3857.project(bb.getSouthWest()), ne = L.CRS.EPSG3857.project(bb.getNorthEast());
+      if (!(sz.x > 0 && sz.y > 0)){ OV.satKey = ''; OV.satBB = null; return; }   /* no map size yet: a 0-high canvas cannot take the picture */
       var W = Math.round(Math.min(1650, sz.x * 1.5)), H = Math.round(W * sz.y / sz.x);
       var im = new Image(); im.crossOrigin = 'anonymous';
       im.onload = function(){
@@ -108436,7 +108463,7 @@ function closeAlertModal(){
       var FY = window._bvFerry, F = window.BV_FERRY, L1 = window.LOCATION || {}; if (!FY) return '';
       if (!F){ FY.roster(function(){ TR.home(); }); return ''; }
       var p = FY.near(F, +L1.lat, +L1.lon, 1)[0]; if (!p || p.d > 3000) return '';
-      var all = FY.sailings(F, p.id, new Date()), s2 = all[0], lz = all[all.length - 1];
+      var all = FY.sailings(F, p.id, lcNaive()), s2 = all[0], lz = all[all.length - 1];
       var teaser = esc(String(p.st[0]).toUpperCase()) + (!s2 ? ' \u00b7 NO MORE BOATS TODAY' : all.length === 1 ? ' \u00b7 LAST BOAT ' + FY.timeAP(s2.min) : ' \u00b7 NEXT ' + FY.time(s2.min) + ' \u00b7 LAST ' + FY.timeAP(lz.min));
       return '<div id="lc-ferry-line" style="display:flex;align-items:center;gap:10px;margin-top:7px;padding-top:6px;border-top:1px solid rgba(255,255,255,.14);cursor:pointer;">'
         + '<span style="font:800 9px system-ui,sans-serif;letter-spacing:.1em;color:#7ee8fa;white-space:nowrap;">NYC FERRY</span>'
@@ -108444,7 +108471,7 @@ function closeAlertModal(){
         + '<span style="font:800 8px system-ui,sans-serif;letter-spacing:.09em;opacity:.8;white-space:nowrap;">ARRIVALS \u25BE</span></div>';
     };
     TR.ferryBuild = function(){
-      var FY = window._bvFerry, F = window.BV_FERRY, L1 = window.LOCATION || {}, now = new Date(), nowMin = now.getHours() * 60 + now.getMinutes(); if (!FY || !F) return '';
+      var FY = window._bvFerry, F = window.BV_FERRY, L1 = window.LOCATION || {}, now = lcNaive(), nowMin = now.getHours() * 60 + now.getMinutes(); if (!FY || !F) return '';
       var secs = FY.near(F, +L1.lat, +L1.lon, 3).filter(function(p){ return p.d < 4000; }).map(function(p){
         var sail = FY.sailings(F, p.id, now), groups = {}, order = [];
         sail.forEach(function(s2){ if (!groups[s2.dest]){ groups[s2.dest] = { rid: s2.rid, list: [] }; order.push(s2.dest); } groups[s2.dest].list.push(s2); });
@@ -108506,7 +108533,12 @@ function closeAlertModal(){
     };
     /* hmD, not hm: a second `var hm` here replaced the tide strip's own hm (it takes ms) in this shared scope and threw
        "d.getHours is not a function", leaving TIDES stuck on READING THE GAUGE */
-    var hmD = function(d){ return (d.getHours() % 12 || 12) + ':' + ('0' + d.getMinutes()).slice(-2); };
+    /* THE PLACE'S CLOCK, NOT THE DEVICE'S (user 2026-10-19: "it should be local time for the location, dont give NY time for LA
+       trains"): lcNaive reads a real instant back as the viewed place's wall clock in a Date's own fields (the site's locNaive),
+       so getHours / getDate / getDay below are the place's hour and service day wherever the phone is */
+    var lcNaive = function(d){ d = d || new Date(); var q = {}; try { new Intl.DateTimeFormat('en-US', { timeZone: (window.LOCATION || {}).tz || undefined, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      .formatToParts(d).forEach(function(x){ q[x.type] = x.value; }); return new Date(+q.year, +q.month - 1, +q.day, +q.hour % 24, +q.minute, +q.second); } catch(e){ return d; } };
+    var hmD = function(d){ d = lcNaive(d); return (d.getHours() % 12 || 12) + ':' + ('0' + d.getMinutes()).slice(-2); };
     var grp = function(lbl, rows){ return '<div><div style="font:700 8px system-ui,sans-serif;color:rgba(255,255,255,.72);letter-spacing:.1em;margin:7px 0 3px;">' + lbl + '</div>' + rows + '</div>'; };
     var row = function(chip, times){ return '<div style="display:flex;align-items:center;gap:7px;margin:2px 0;">' + chip + '<span style="font:600 11px system-ui,sans-serif;font-variant-numeric:tabular-nums;">' + times + '</span></div>'; };
     var head = function(name, chips, src){ return '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font:800 12px system-ui,sans-serif;letter-spacing:.03em;">' + esc(String(name).toUpperCase()) + '</span>'
@@ -108530,8 +108562,8 @@ function closeAlertModal(){
         return;
       }
       /* LA: the timetable */
-      var go = function(S){ if (TR.board !== B) return; var rec = S[st.id], now = new Date(), mins = now.getHours() * 60 + now.getMinutes();
-        var ymd = function(d){ return d.getFullYear() + ('0' + (d.getMonth() + 1)).slice(-2) + ('0' + d.getDate()).slice(-2); }, today = ymd(now), yest = ymd(new Date(now - 864e5));
+      var go = function(S){ if (TR.board !== B) return; var rec = S[st.id], now = lcNaive(), mins = now.getHours() * 60 + now.getMinutes();
+        var ymd = function(d){ return d.getFullYear() + ('0' + (d.getMonth() + 1)).slice(-2) + ('0' + d.getDate()).slice(-2); }, today = ymd(now), yest = ymd(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
         var dirs = {}, laChip = function(rt){ return '<span style="display:inline-grid;place-items:center;width:15px;height:15px;border-radius:50%;background:' + (TR.laCol[rt] || '#33383F') + ';color:#fff;font:700 ' + (rt.length > 1 ? 6 : 8) + 'px system-ui,sans-serif;">' + esc(rt.slice(0, 3)) + '</span>'; };
         ((rec && rec.rows) || []).forEach(function(r2){ var ts = [];
           if (r2.d[yest] != null) (r2.t[r2.d[yest]] || []).forEach(function(t){ if (t >= 1440) ts.push(t - 1440); });
@@ -108540,14 +108572,14 @@ function closeAlertModal(){
         var keys = Object.keys(dirs), win = keys.length <= 2 ? 90 : 60, groups = [];
         keys.slice(0, 4).forEach(function(k){ var D = dirs[k]; D.ts.sort(function(a, b){ return a - b; });
           var next = D.ts.filter(function(t){ return t >= mins - .5 && t <= mins + win; }).slice(0, keys.length <= 2 ? 6 : 4), later = D.ts.filter(function(t){ return t > mins; });
-          var fmt = function(t){ var d = new Date(now); d.setHours(0, Math.round(t), 0, 0); return t - mins < 1 ? NOW : hmD(d); }, txt;
+          var fmt = function(t){ var m = Math.round(t) % 1440; return t - mins < 1 ? NOW : (Math.floor(m / 60) % 12 || 12) + ':' + ('0' + m % 60).slice(-2); }, txt;   /* timetable minutes are already the place's */
           if (next.length) txt = next.map(fmt).join(SEP) + (later.length === next.length ? ' <span style="color:#ff8a8a;font-weight:800;">LAST TRAIN TONIGHT</span>' : '');
           else txt = later.length ? 'FIRST TRAIN ' + fmt(later[0]) : '<span style="opacity:.75;">NO MORE TRAINS TODAY</span>';
           groups.push(grp('TO ' + esc(String(D.h).toUpperCase()), row(laChip(D.r), txt))); });
         el.innerHTML = head(st.n, (st.r || []).map(laChip).join(''), 'TIMETABLE \u00b7 LA METRO / METROLINK \u00b7 SCHEDULED, NOT LIVE')
           + (groups.length ? '<div style="display:grid;align-items:start;gap:0 22px;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));">' + groups.join('') + '</div>' : '<div style="font:600 10px system-ui,sans-serif;opacity:.8;margin-top:6px;">NO TIMETABLE FOR THIS STOP</div>');
         el.style.display = ''; var x = document.getElementById('lc-board-x'); if (x) x.onclick = function(e){ e.stopPropagation(); TR.boardClose(); }; };
-      if (TR.laSched) go(TR.laSched); else fetch('/_maplab/la/rail_sched.json').then(function(r){ return r.json(); }).then(function(j){ TR.laSched = j; go(j); }).catch(function(){});
+      if (TR.laSched) go(TR.laSched); else fetch('/_maplab/la/rail_sched.json?d=' + new Date().toISOString().slice(0, 10)).then(function(r){ return r.json(); }).then(function(j){ TR.laSched = j; go(j); }).catch(function(){});
     };
     TR.camTap = function(e){
       if (TR.lit !== true) return;
@@ -110258,7 +110290,7 @@ function closeAlertModal(){
       if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = Wd + 'px'; cv.style.height = Ht + 'px'; }
       L.DomUtil.setPosition(cv, M.containerPointToLayerPoint([-px, -py]));
       var x = cv.getContext('2d'); x.setTransform(1, 0, 0, 1, 0, 0); x.globalCompositeOperation = 'source-over'; x.clearRect(0, 0, W, H); cv.style.visibility = '';
-      if (!OL.polys || !OL.polys.length || sz.x < 2) return;
+      if (!OL.polys || !OL.polys.length || sz.x < 2 || sz.y < 2) return;
       /* THINNER (user 2026-10-18: "improve your orange outlining further at the highest detail, be thinner to avoid overlap"): ~1.0 px of
          orange at a state's view to 1.6 px at the street, dark edges 0.6 px -- neighboring piers and islands no longer run together */
       var z = M.getZoom(), w = Math.max(1.0, Math.min(1.6, 0.9 + 0.07 * (z - 5))) * dpr, k = 0.6 * dpr;
