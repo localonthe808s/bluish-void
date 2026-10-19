@@ -62544,7 +62544,11 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         + 'font:700 8.5px/1.8 system-ui,sans-serif;letter-spacing:.07em;color:#2B22F4;text-align:center;';
       var lab = function(t){ return '<span style="font-weight:800;color:rgba(43,34,244,.5);margin-right:8px;white-space:nowrap;">' + t + '</span>'; };
       var bars = [], now2 = Date.now();
-      var rowsFN = (typeof fnRows !== 'undefined' && fnRows) ? fnRows : [], wetN = rowsFN.filter(function(r2){ return !r2.stale && r2.mm >= CW_FN_WET; }).length;
+      /* WATER ONLY WHERE A FLOOD IS OPEN (audit 2026-10-18): the car view counted every live sensor over the wet line, while the
+         FLOODING view (cwFlWet) and LOCAL count only those with an open FloodNet flood event -- a sensor reads damp after the
+         water is gone, and a null end_time is never trusted alone. The same rule here; until the events are read, LOADING */
+      if (!cwFlEv) cwFlEvents(function(){ cwTrafBand(); });
+      var rowsFN = (typeof fnRows !== 'undefined' && fnRows) ? fnRows : [], wetN = rowsFN.filter(function(r2){ return !r2.stale && r2.mm >= CW_FN_WET && !!(cwFlEv && cwFlEv.ids[r2.id]); }).length;
       var ffw = ((window._nwsAlerts || []).filter(function(a){ return /flood/i.test(a.event || '') && /warning/i.test(a.event || '') && (!a.expires || +a.expires > now2); })[0] || {}).event || '';
       var coastal = ((window._nwsAlerts || []).filter(function(a){ return /coastal flood|storm surge/i.test(a.event || '') && (!a.expires || +a.expires > now2); })[0] || {}).event || '';
       var wetNow = window._lastWxCode != null && ((window._lastWxCode >= 51 && window._lastWxCode <= 67) || (window._lastWxCode >= 71 && window._lastWxCode <= 86) || window._lastWxCode >= 95);
@@ -62563,7 +62567,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
           if (main.length) bars.push(lab('HUDSON CROSSINGS') + main.concat(rest).map(say).join(' &nbsp;·&nbsp; '));
         }
         bars.push(lab('WATER ON THE STREET') + (wetN ? '<span style="color:#0369a1;">' + wetN + ' SENSOR' + (wetN === 1 ? '' : 'S') + ' REPORT WATER</span> <span style="color:#1b2340;">· BLUE DOTS, TAP ONE</span>'
-            : '<span style="color:#1b2340;">' + (rowsFN.length ? 'NONE OF ' + rowsFN.length + ' SENSORS REPORTS WATER' : 'SENSORS LOADING…') + '</span>')
+            : '<span style="color:#1b2340;">' + (rowsFN.length && cwFlEv ? 'NONE OF ' + rowsFN.length + ' SENSORS REPORTS WATER' : 'SENSORS LOADING…') + '</span>')
           + (ffw || coastal ? ' &nbsp;·&nbsp; <span style="color:#b91c1c;">' + mtaEsc((ffw || coastal).toUpperCase()) + '</span>' : ''));
       }
       var bw = document.getElementById('cw-traf-bars'), bodyEl = document.getElementById('cw-body');
@@ -106889,6 +106893,7 @@ function closeAlertModal(){
       if (!RV.sf[l] || Date.now() - RV.sf[l].at > 6e5) need.push(J(B + '/stageflow').then(function(j){ RV.sf[l] = { j: j || {}, at: Date.now() }; }));
       if (need.length) Promise.all(need).then(function(){ if (RV.sel === g) RV.panel(); });
     };
+    RV.FCOL = { action: '#fde68a', minor: '#ffb15c', moderate: '#ff7a3d', major: '#ff3b3b' };   /* the stage lines' colors, chart and panel alike */
     RV.panel = function(){
       if (!riverEl) return;
       var inF = RV.G.filter(function(g){ return RANK[g.status.observed.floodCategory] >= 3; }), near = RV.G.filter(function(g){ return g.status.observed.floodCategory === 'action'; }), fcF = RV.G.filter(function(g){ return fcCat(g); });
@@ -106911,8 +106916,15 @@ function closeAlertModal(){
         if (!D || !SF) h += '<div class="lt-l">READING THE GAUGE…</div>';
         else {
           var cats = ((D.flood || {}).categories) || {}, Fv = {}; ['action', 'minor', 'moderate', 'major'].forEach(function(k){ var v = (cats[k] || {}).stage; if (v != null && v > -900) Fv[k] = +v; });
-          if (last && Fv.minor != null) h += '<div class="lt-l">FLOOD STAGE ' + ft(Fv.minor) + ' ' + esc(unit) + (last[1] < Fv.minor ? ', ' + ft(Fv.minor - last[1]) + ' BELOW IT NOW' : ', ' + ft(last[1] - Fv.minor) + ' ABOVE IT NOW') + (Fv.moderate != null ? ' · MODERATE ' + ft(Fv.moderate) : '') + (Fv.major != null ? ' · MAJOR ' + ft(Fv.major) : '') + '</div>';
-          else h += '<div class="lt-l lt-dim">NO FLOOD STAGE IS SET FOR THIS GAUGE</div>';
+          /* THE STAGES ARE WRITTEN HERE, NOT ON THE CHART (user 2026-10-18: "this info should be in the topview not on the map"):
+             the chart printed "ACTION 7.0" and "FLOOD STAGE 7.0" over each other where two stages share a height. Every stage
+             the NWS sets, in feet, is one line of text up here, each led by a swatch of its line on the chart (flood stage solid,
+             the others dashed); the chart keeps the lines only */
+          var stg = function(k, n){ return Fv[k] == null ? '' : '<span style="white-space:nowrap;"><span style="display:inline-block;width:12px;border-top:2px ' + (k === 'minor' ? 'solid' : 'dashed') + ' ' + RV.FCOL[k] + ';vertical-align:middle;margin-right:4px;"></span>' + n + ' ' + ft(Fv[k]) + ' ' + esc(unit) + '</span>'; };
+          var stL = [stg('action', 'ACTION'), stg('minor', 'FLOOD STAGE'), stg('moderate', 'MODERATE'), stg('major', 'MAJOR')].filter(Boolean);
+          if (stL.length) h += '<div class="lt-l">' + stL.join(' \u00b7 ') + '</div>';
+          if (last && Fv.minor != null) h += '<div class="lt-l lt-dim">' + (last[1] < Fv.minor ? ft(Fv.minor - last[1]) + ' ' + esc(unit) + ' BELOW FLOOD STAGE NOW' : ft(last[1] - Fv.minor) + ' ' + esc(unit) + ' ABOVE FLOOD STAGE NOW') + '</div>';
+          else if (Fv.minor == null) h += '<div class="lt-l lt-dim">NO FLOOD STAGE IS SET FOR THIS GAUGE</div>';
           var o30 = ob.filter(function(x){ return x[0] > Date.now() - 30 * 864e5; });
           var swings = 0, ext = null, dir = 0; ob.filter(function(x){ return x[0] > Date.now() - 3 * 864e5; }).forEach(function(x){   /* tidal reaches named like rivers (Edisto below Jacksonboro) */
             if (ext == null){ ext = x[1]; return; } var d2 = x[1] - ext;
@@ -106961,10 +106973,10 @@ function closeAlertModal(){
       var dstep = (t1 - t0) > 12 * 864e5 ? 3 : 2;
       for (var k = 0; k < 25; k += dstep){ var tk = now - 10 * 864e5 + k * 864e5; if (tk > t1) break; var lab = md(tk);
         g += '<text x="' + X(tk) + '" y="' + (Hh - 5) + '" text-anchor="middle" fill="rgba(255,255,255,.8)" font-size="8" font-weight="800" letter-spacing=".06em">' + esc(lab) + '</text>'; }
-      var FCOL = { action: '#fde68a', minor: '#ffb15c', moderate: '#ff7a3d', major: '#ff3b3b' };
+      var FCOL = RV.FCOL;
+      /* lines only (user 2026-10-18: the stage names and values are written above the chart now, see RV.panel) */
       ['action', 'minor', 'moderate', 'major'].forEach(function(k){ var v2 = C.F[k]; if (v2 == null || v2 > hi || v2 < lo) return;
-        g += '<line x1="' + padL + '" x2="' + (Wd - padR) + '" y1="' + Y(v2) + '" y2="' + Y(v2) + '" stroke="' + FCOL[k] + '" stroke-width="1.2"' + (k === 'minor' ? '' : ' stroke-dasharray="5 3"') + '/>'
-          + '<text x="' + (padL + 4) + '" y="' + (Y(v2) - 3) + '" fill="' + FCOL[k] + '" font-size="7.5" font-weight="900" letter-spacing=".08em">' + (k === 'minor' ? 'FLOOD STAGE' : k === 'action' ? 'ACTION' : k.toUpperCase()) + ' ' + ft(v2) + '</text>'; });
+        g += '<line x1="' + padL + '" x2="' + (Wd - padR) + '" y1="' + Y(v2) + '" y2="' + Y(v2) + '" stroke="' + FCOL[k] + '" stroke-width="1.2"' + (k === 'minor' ? '' : ' stroke-dasharray="5 3"') + '/>'; });
       if (C.fc.length) g += path(C.fc, 'stroke="#5eead4" stroke-width="2"');
       g += path(ob, 'stroke="#fff" stroke-width="2"');
       g += '<line x1="' + X(now) + '" x2="' + X(now) + '" y1="' + padT + '" y2="' + (Hh - padB) + '" stroke="#fff" stroke-dasharray="2 2"/><g id="lc-river-cur"></g>';
@@ -108481,7 +108493,7 @@ function closeAlertModal(){
       /* THE SUBWAY DELAYS, NYC ONLY (THE CITY's, through window._bvSubDelays): each alert's stretch in its route's color,
          side by side where lines share a track, chevrons pointing the delayed way, one bullet label per alert; posted
          alerts and the delays measured from the live train feed alike. From z10 in; DELAYS NOW in the strip. */
-      var subLine = ''; TR.subHits = [];
+      var subLine = '', chips = []; TR.subHits = [];
       var SD = window._bvSubDelays;
       if (SD && nycHere() && TR.show.rail){
         SD.onChange = function(){ if (TR.lit === true) TR.draw(); }; SD.load();
@@ -108516,11 +108528,16 @@ function closeAlertModal(){
               var cx = c2[0] + 14 * dpr, cy = c2[1] - 14 * dpr; if (cx < 4 || cy < hh || cx + w > W - 4 || cy > H - hh) continue;
               if (!taken.some(function(bx){ return cx < bx[0] + bx[2] + 4 * dpr && bx[0] < cx + w + 4 * dpr && Math.abs(bx[1] - cy) < hh + 3 * dpr; })) q = [cx, cy, c2]; }
             if (!q) return; taken.push([q[0], q[1], w]);
+            /* THE CHIPS GO DOWN LAST (user 2026-10-18: "fix that" -- the lines ran through the A/C/D bullets): each alert's chip was
+               painted straight after its own stretch, so the next alert's stretch, the vehicles and the A to B route crossed it.
+               As in THE CITY, every stretch is drawn first and the chips after all of it (only the jam tags, kept last on purpose, go over) */
+            chips.push(function(){ g.save();
             g.strokeStyle = 'rgba(8,10,16,.7)'; g.lineWidth = 1 * dpr; g.beginPath(); g.moveTo(q[2][0], q[2][1]); g.lineTo(q[0] + 4 * dpr, q[1]); g.stroke();
             g.fillStyle = 'rgba(8,10,16,.92)'; g.beginPath(); if (g.roundRect) g.roundRect(q[0], q[1] - hh / 2, w, hh, hh / 2); else g.rect(q[0], q[1] - hh / 2, w, hh); g.fill();
             al.routes.forEach(function(rt, ri){ var bx = q[0] + 9 * dpr + ri * 14 * dpr; g.fillStyle = SD.col(rt); g.beginPath(); g.arc(bx, q[1], 6.3 * dpr, 0, 6.3); g.fill();
               g.fillStyle = SD.dark(rt) ? '#111' : '#fff'; g.font = '900 ' + (7.5 * dpr) + 'px system-ui,sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(SD.show(rt), bx, q[1] + 0.5 * dpr); });
             g.fillStyle = '#fff'; g.font = '800 ' + (7.5 * dpr) + 'px system-ui,sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle'; g.fillText(txt, q[0] + bw + 6 * dpr, q[1] + 0.5 * dpr);
+            g.restore(); });
           });
           g.restore();
         }
@@ -108535,6 +108552,7 @@ function closeAlertModal(){
       if (subLine) strip.insertAdjacentHTML('beforeend', subLine);
       if (TR.show.roads && nycHere()) strip.insertAdjacentHTML('beforeend', TR.extraLines());
       try { AB.draw(g, P, dpr); } catch (e){}
+      chips.forEach(function(f){ try { f(); } catch (e){} });
       drawTags();
       strip.insertAdjacentHTML('beforeend', AB.say()); AB.wire();
     };
@@ -108562,9 +108580,18 @@ function closeAlertModal(){
       if (!TR.cv){ var pn = M.getPane('lcTraf') || M.createPane('lcTraf'); pn.style.zIndex = 445; pn.style.pointerEvents = 'none';
         TR.cv = document.createElement('canvas'); TR.cv.style.position = 'absolute'; pn.appendChild(TR.cv);
         M.on('zoomstart', function(){ if (TR.cv) TR.cv.style.visibility = 'hidden'; });
+        /* TRAFFIC'S CANVAS OVER THE GROUND (user 2026-10-18 on the subway delay chips: "fix that" -- the lines cut through the
+           bullets, THE CITY draws them on top). Every pane is flattened to z 400, so stacking is DOM order, and the panes made
+           after this one -- the parks and ground fills (lcCityGround/lcCity, meant 396/397), the lidar shading (lcLidar, 398),
+           the sea (bvSea, 430) -- painted over the subway and its chips although each is meant UNDER 445. This pane is put back
+           after them whenever a layer is added, with the flood gauges' (lcLvDots) and the castle's (lcKx) still last */
+        TR.top = function(){ var q = M.getPane('lcTraf'); if (!q || !q.parentNode) return; var par = q.parentNode, moved = 0;
+          ['lcCityGround', 'lcCity', 'lcLidar', 'bvSea'].forEach(function(n){ var o = M.getPane(n); if (o && o.parentNode === par && (q.compareDocumentPosition(o) & 4)) moved = 1; });
+          if (!moved) return; par.appendChild(q); ['lcLvDots', 'lcKx'].forEach(function(n){ var o = M.getPane(n); if (o && o.parentNode === par) par.appendChild(o); }); };
+        M.on('layeradd', TR.top);
         M.on('click', TR.camTap);
         M.on('moveend resize', function(){ if (TR.lit !== true) return; TR.draw(); clearTimeout(TR.deb); TR.deb = setTimeout(function(){ TR.read().then(TR.draw); TR.transit(); }, 600); }); }
-      TR.cv.style.display = '';
+      TR.cv.style.display = ''; TR.top();
       /* the live layer is rebuilt when the place changes, so its box follows the search */
       var lk = (function(){ var L0 = window.LOCATION || {}; return (+L0.lat).toFixed(2) + ',' + (+L0.lon).toFixed(2); })();
       if (TR.lay && TR.layKey !== lk){ if (M.hasLayer(TR.lay)) M.removeLayer(TR.lay); TR.lay = null; }
