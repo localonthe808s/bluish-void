@@ -1166,6 +1166,68 @@ window._bvLandOnly = function(url, opts){
   });
   return new Lay({ opacity: opts.opacity == null ? 1 : opts.opacity, zIndex: opts.zIndex || 5, maxZoom: 19, keepBuffer: 1, updateWhenIdle: true });
 };
+/* GEOLOGY FROM MACROSTRAT'S VECTORS, NOT ITS PICTURES (2026-10-18, user: "fix and improve, i noticed it does not look great up
+   close"). LOCAL's GEOLOGY drew Macrostrat's carto PNGs, and those are a PATCHWORK at the source: its raster server picks a
+   map (and so a palette and a generalization) per TILE, so the same ground came back as squares of different tones -- New
+   Jersey's Newark basin in two blues, Queens grey beside Brooklyn's greens, a square of nothing on Long Island -- and the
+   'under' fill (the same source two zooms coarser, stretched 4x) filled those gaps with blurry grey blobs. Past z14 every
+   PNG was a stretched picture besides. Macrostrat's carto VECTOR tiles are the same units, colors and source maps, cut
+   seamlessly, so the rock is now drawn from those, here, like the basemap:
+     - crisp at every zoom (overzoomed geometry past z14, never a stretched picture) and one tone per unit everywhere;
+     - every unit edge a hairline, so neighbouring units of near colors still read as two;
+     - the shore cut by the basemap's own water polygons (as _bvLandOnly: same OSM shapes, shared tile cache, no new fetch);
+     - Macrostrat's mapped faults a thin dark line (what the PNGs printed in black);
+     - at z12+ the unit's name, once per unit within a few hundred pixels, small, where the piece is wide enough to hold it;
+     - UNDER the relief: the layer goes into the tile pane just before the hillshade (and z13+ lidar), so the ground's shape
+       shades the rock the way THE CITY's landform shades its colors, instead of the rock burying it at 78% opacity.
+   Two layers, because carto's z6-7 tiles are the medium-scale map whole (1-2 MB each): to z8 the small-scale map (data z5),
+   from z9 data z8+ (a z10 view is ~6 tiles, ~250 KB gzipped, where the PNGs were ~20 tiles, ~2 MB). Keyless, CORS open. */
+window.BV_ROCK_MVT = 'https://tiles.macrostrat.org/carto/{z}/{x}/{y}.mvt';
+window._bvRockLayer = function(map, opts){
+  opts = opts || {};
+  var P = protomapsL, HEX = /^#[0-9a-f]{3}([0-9a-f]{3})?$/i;
+  var unit = function(z, f){ var p = f.props || {}; return f.geomType === 3 && HEX.test(p.color || '') && p.name !== 'water'; };
+  var trace = function(ctx, geom){ ctx.beginPath(); for (var i = 0; i < geom.length; i++){ var r = geom[i]; for (var j = 0; j < r.length; j++){ if (j) ctx.lineTo(r[j].x, r[j].y); else ctx.moveTo(r[j].x, r[j].y); } } };
+  /* the water cut: the basemap's water polygons composited destination-out (paint() saves and restores around each rule) */
+  var cut = { draw: function(ctx, geom){ ctx.globalCompositeOperation = 'destination-out'; ctx.globalAlpha = 1; ctx.fillStyle = '#000'; trace(ctx, geom); ctx.fill(); ctx.globalCompositeOperation = 'source-over'; } };
+  var paintRules = [
+    { dataSource: 'rock', dataLayer: 'units', filter: unit, symbolizer: new P.PolygonSymbolizer({ fill: function(z, f){ return f.props.color; } }) },
+    { dataSource: 'rock', dataLayer: 'units', filter: unit, symbolizer: new P.LineSymbolizer({ color: 'rgba(14,18,28,.5)', width: function(z){ return z < 10 ? 0.35 : z < 13 ? 0.6 : z < 15 ? 0.8 : 1; } }) },
+    { dataSource: 'rock', dataLayer: 'lines', minzoom: 7, filter: function(z, f){ return /fault/i.test((f.props || {}).type || ''); },
+      symbolizer: new P.LineSymbolizer({ color: 'rgba(8,10,16,.72)', width: function(z){ return z < 10 ? 0.7 : z < 13 ? 1 : 1.3; }, lineCap: 'round' }) },
+    { dataSource: 'base', dataLayer: 'water', filter: function(z, f){ return f.geomType === 3; }, symbolizer: cut }
+  ];
+  /* THE NAMES: a point well inside the piece (the bbox middle, else the middle of the widest scan line), only where the
+     piece is wider than its name; the labeler keeps one per unit name within ~380 px, across tiles */
+  var txt = new P.CenteredTextSymbolizer({ labelProps: ['_lab'], font: '600 9.5px system-ui, -apple-system, sans-serif', fill: 'rgba(255,255,255,.94)', stroke: 'rgba(10,13,20,.7)', width: 1.4, letterSpacing: 0.5, lineHeight: 1.5, maxLineChars: 18 });
+  var lab = { place: function(e, geom, f){
+    var p = f.props || {}, nm = String(p.name || '').replace(/,?\s*undivided$/i, '').replace(/\s+/g, ' ').trim();
+    if (!nm || nm.length > 38) return;
+    var R = geom[0]; if (!R || R.length < 4) return;
+    var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9; R.forEach(function(q){ if (q.x < x0) x0 = q.x; if (q.x > x1) x1 = q.x; if (q.y < y0) y0 = q.y; if (q.y > y1) y1 = q.y; });
+    var w = nm.length * 6.4 + 16; if (x1 - x0 < w || y1 - y0 < 22) return;
+    var span = function(y){ var xs = []; for (var i = 0, j = R.length - 1; i < R.length; j = i++){ var a = R[i], b = R[j]; if ((a.y > y) !== (b.y > y)) xs.push(a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y)); }
+      xs.sort(function(m, n){ return m - n; }); var best = null; for (var k = 0; k + 1 < xs.length; k += 2) if (!best || xs[k + 1] - xs[k] > best[1] - best[0]) best = [xs[k], xs[k + 1]]; return best; };
+    var at = null; [0.5, 0.38, 0.62, 0.28, 0.72].some(function(t){ var y = y0 + (y1 - y0) * t, s = span(y); if (s && s[1] - s[0] >= w){ at = { x: (s[0] + s[1]) / 2, y: y }; return true; } return false; });
+    if (!at) return;
+    f.props._lab = nm.toUpperCase();
+    at.dist = function(b){ return Math.sqrt((this.x - b.x) * (this.x - b.x) + (this.y - b.y) * (this.y - b.y)); };   /* the labeler's dedup calls anchor.dist(); its Point class is not exported */
+    var r = txt.place(e, [[at]], f); if (!r) return;
+    r.forEach(function(o){ o.deduplicationKey = nm; o.deduplicationDistance = 380; }); return r;
+  } };
+  var mk = function(minZ, maxZ, dataZ, labels){
+    var cfg = { sources: { rock: { url: window.BV_ROCK_MVT, maxDataZoom: dataZ }, base: { url: window.BV_BASEMAP_URL, maxDataZoom: 14 } },
+      paintRules: paintRules, labelRules: labels ? [{ dataSource: 'rock', dataLayer: 'units', minzoom: 12, filter: unit, symbolizer: lab }] : [],
+      minZoom: minZ, maxZoom: maxZ, opacity: opts.opacity == null ? 0.8 : opts.opacity, zIndex: 2, attribution: '' };
+    var lay = P.leafletLayer(cfg);
+    window._bvShareViews(lay.views, cfg);                    /* the water mask reads the basemap's own decoded tiles */
+    /* into the tile pane just BEFORE the first z-index-2 layer (relief, bathymetry): same stacking value, earlier in the DOM */
+    var oa = lay.onAdd; lay.onAdd = function(m){ oa.call(this, m); try { var c = this.getContainer(), pn = c && c.parentNode;
+      if (pn){ var first = [].filter.call(pn.children, function(k){ return k !== c && k.style.zIndex === '2'; })[0]; if (first) pn.insertBefore(c, first); } } catch(e){} };
+    return lay;
+  };
+  return L.layerGroup([mk(0, 8, 5, false), mk(9, 19, 14, true)]);
+};
 window.BV_RIVERS_URL = 'https://cdn.bluishvoid.com/rivers/v2/{z}/{x}/{y}.mvt';
 /* RIVER WIDTH (refined 2026-10-16, user: "improve and refine your river illustrations"). Real channels widen roughly with a
    power of the land they drain, not its log: the log curve drew a 300 km2 creek at a third of the Mississippi's width.
@@ -109283,8 +109345,8 @@ function closeAlertModal(){
       LAY.apply();
       if (window._bvRoads) window._bvRoads(M, v !== 'leaf');
       if (v !== 'radar') R.clear();
-      if (v === 'rock'){ if (!rockL) rockL = window._bvLandOnly ? window._bvLandOnly('https://tiles.bluishvoid.com/macrostrat/carto/{z}/{x}/{y}.png', { opacity: .78, zIndex: 5, maxNative: 14, under: 2 })
-        : L.tileLayer('https://tiles.bluishvoid.com/macrostrat/carto/{z}/{x}/{y}.png', { opacity: .78, zIndex: 5, maxZoom: 18, maxNativeZoom: 14 }); rockL.addTo(M); strip.textContent = 'TAP ANYWHERE TO SAY WHAT THE GROUND IS'; FQ.fetch(); }
+      /* the rock from Macrostrat's vector tiles, under the relief (2026-10-18, see _bvRockLayer); the PNGs only if protomaps is missing */
+      if (v === 'rock'){ if (!rockL) rockL = (window._bvRockLayer && typeof protomapsL !== 'undefined') ? window._bvRockLayer(M) : L.tileLayer('https://tiles.bluishvoid.com/macrostrat/carto/{z}/{x}/{y}.png', { opacity: .78, zIndex: 5, maxZoom: 18, maxNativeZoom: 14 }); rockL.addTo(M); strip.textContent = 'TAP ANYWHERE TO SAY WHAT THE GROUND IS'; FQ.fetch(); }
       else if (rockL && M.hasLayer(rockL)) M.removeLayer(rockL);
       if (v === 'radar'){ R.rebuild(true); OV.start('radar'); }
       else if (v === 'map') OV.start('map');
