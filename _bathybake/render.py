@@ -4,8 +4,8 @@ national map, bake it in to a high detail").
 
 Per web-mercator tile: NOAA NCEI DEM_all (CUDEM 1/9" where it exists, else the Coastal Relief Models; Great Lakes included)
 pulled for the tile's own box at 512 px, masked to WATER by our own basemap's water polygons for the same tile (so land below
-sea level -- New Orleans behind its levees -- is never painted as sea), colored by depth in the site's navy family with a
-soft hillshade and faint isobaths. Inland rivers have no depth in this source (Memphis/St. Louis read the water SURFACE).
+sea level -- New Orleans behind its levees -- is never painted as sea), colored by depth in the site's navy family,
+shaded with a multidirectional hillshade of the floor (v2) and faint isobaths. Inland rivers have no depth in this source (Memphis/St. Louis read the water SURFACE).
 Output: 256 px WebP, transparent off the water.
 """
 import io, math, sys, urllib.parse, urllib.request
@@ -25,22 +25,39 @@ def tile_bounds(z, x, y):
     n = 2 ** z; s = 2 * math.pi * R / n; x0 = -math.pi * R + x * s; y1 = math.pi * R - y * s
     return x0, y1 - s, x0 + s, y1
 
-PAD = 2
+PAD = 8   # v2: 8 px at 512 (the hillshade's smoothing reads past the tile edge, so neighbours shade the same pixels the same)
 # THE MOSAIC'S HOLES (2026-10-19). DEM_all mosaics at most 100 rasters per request (maxMosaicImageCount) and puts its global
 # background, ETOPO 2022, last. A wide tile over a coast dense with surveys (the Louisiana shelf at z6, Florida's at z5-8)
 # touches more than 100, ETOPO is dropped, and the pixels no surviving raster covers come back as exactly 0 m -- not NaN.
 # Those read as dry, so the bake left them clear: rectangles of the basemap's lighter water inside the depth ramp. They are
 # filled from ETOPO 2022 15" bed elevation, the mosaic's own background, asked for alone (lock raster) over the same box.
 ETOPO_BED = 2530
-def fetch_dem(z, x, y, lock=None):
-    b = tile_bounds(z, x, y); px = (b[2] - b[0]) / N
-    b = (b[0] - PAD * px, b[1] - PAD * px, b[2] + PAD * px, b[3] + PAD * px)
-    q = dict(bbox=','.join('%.3f' % v for v in b), bboxSR=3857, imageSR=3857, size='%d,%d' % (N + 2 * PAD, N + 2 * PAD), format='tiff',
-             pixelType='F32', interpolation='RSP_BilinearInterpolation', f='image')
+# v2 (2026-10-19): fetched as LERC (max error 5 cm) instead of a float TIFF -- a fifth of the bytes for the same floor, which
+# is what bounds the rate at z13 -- and for a BLOCK of B x B tiles in one request at z12-13 (the block's footprint stays at
+# most a z11 tile, so it never reaches the 100-raster limit the wide tiles hit).
+LERC_TOL = 0.05
+INTERP = 'RSP_CubicConvolution'   # bilinear facets a coarse source (ETOPO 15", the 3" CRM) into flat-lit triangles past z10
+def block_bounds(z, bx, by, B):
+    x0, _, _, y1 = tile_bounds(z, bx * B, by * B)
+    _, y0, x1, _ = tile_bounds(z, bx * B + B - 1, by * B + B - 1)
+    return x0, y0, x1, y1
+
+def fetch_dem(z, bx, by, B=1, lock=None):
+    """float32 elevations (m) for the B x B block of 512 px tiles, PAD px all round; NaN off the data"""
+    import imagecodecs
+    b = block_bounds(z, bx, by, B); px = (b[2] - b[0]) / (B * N)
+    b = (b[0] - PAD * px, b[1] - PAD * px, b[2] + PAD * px, b[3] + PAD * px); n = B * N + 2 * PAD
+    q = dict(bbox=','.join('%.3f' % v for v in b), bboxSR=3857, imageSR=3857, size='%d,%d' % (n, n), format='lerc',
+             compressionTolerance=LERC_TOL, pixelType='F32', interpolation=INTERP, f='image')
     if lock: q['mosaicRule'] = '{"mosaicMethod":"esriMosaicLockRaster","lockRasterIds":[%d]}' % lock
-    raw = urllib.request.urlopen(SRC + '?' + urllib.parse.urlencode(q), timeout=120).read()
-    a = tifffile.imread(io.BytesIO(raw)).astype(np.float32)
-    a[(a < -1e5) | (a > 1e5)] = np.nan
+    req = urllib.request.Request(SRC + '?' + urllib.parse.urlencode(q), headers={'User-Agent': 'bluishvoid.com bathymetry bake'})
+    raw = urllib.request.urlopen(req, timeout=180).read()
+    if not raw.startswith(b'CntZImage'): raise IOError('not LERC: %r' % raw[:120])
+    a = imagecodecs.lerc_decode(raw)
+    if isinstance(a, tuple): a = a[0]
+    a = np.asarray(a, np.float32)
+    if a.shape != (n, n): raise IOError('shape %r' % (a.shape,))
+    a = a.copy(); a[(a < -1e5) | (a > 1e5)] = np.nan
     return a
 
 def water_mask(z, x, y):
@@ -77,52 +94,99 @@ def ramp(d):
 
 ISO = [2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 3000]
 
-def render(z, x, y, want_shelf=False):
-    A = fetch_dem(z, x, y)
-    w = water_mask(z, x, y)
-    hole = np.zeros(A.shape, bool); hole[PAD:-PAD, PAD:-PAD] = w
-    hole &= ~np.isfinite(A) | (np.abs(A) < 1e-3)
+# THE FLOOR'S SHAPE (v2, 2026-10-19, user: the bathymetry read "nearly flat" and, now over the whole Gulf, hid the seafloor
+# relief below it). The same multidirectional hillshade as the land and seafloor relief (_reliefbake/render.py shade()),
+# from this layer's own DEM: the depth ramp darkens toward black in shadow and lifts toward a pale blue on sunlit flanks,
+# exaggerated more as the zoom falls. From z5 to z8 the page draws the coarser seafloor relief ABOVE this layer, so the shading
+# here is held back there (STRENGTH) and does not double up; from z9 in it is this layer's job alone. Pilot: bv2w/pilot.py.
+P = dict(e0=2.6, k=1.35, emin=2.0, emax=12.0, lit=0.42, dark=0.70, Ls=0.18, Ds=0.32, sig=0.8)
+SIGZ = {11: 1.8, 12: 2.4, 13: 3.0}                     # x sig: the smoothing grows with the zoom (PAD 8 > 3 sigma)
+STRENGTH = {5: 0.45, 6: 0.45, 7: 0.5, 8: 0.7}
+LIT = np.array([168, 204, 238], np.float32); DARK = np.array([2, 6, 18], np.float32)
+def exaggeration(z, p=None):
+    p = p or P; return float(np.clip(p['e0'] * p['k'] ** (12 - z), p['emin'], p['emax']))
+
+def shade_block(A, z, bx, by, B, p=None):
+    """A: padded DEM block. Returns (lit alpha, dark alpha) for the unpadded block, 0..1"""
+    from scipy.ndimage import gaussian_filter
+    p = p or P
+    Z = np.where(np.isfinite(A), np.minimum(A, 0.0), 0.0).astype(np.float64)   # land flattened to the shore: no cliff at the coast
+    sig = p['sig'] * SIGZ.get(z, 1.0)                                          # survey ripple, LERC steps and the 90 m Coastal Relief
+    if sig > 0: Z = gaussian_filter(Z, sig, mode='nearest')                    # Model's pixel steps (blocky from z11), not landforms
+    b = block_bounds(z, bx, by, B); px = (b[2] - b[0]) / (B * N); n = A.shape[0]
+    ym = b[3] + PAD * px - (np.arange(n) + 0.5) * px                            # each row's mercator y: ground metres per row,
+    ground = px * np.cos(np.arctan(np.sinh(ym / R)))[:, None]                   # so a tile's top and bottom match its neighbours
+    gy, gx = np.gradient(Z); ex = exaggeration(z, p)
+    gx = gx / ground * ex; gy = gy / ground * ex
+    slope = np.arctan(np.hypot(gx, gy)); aspect = np.arctan2(-gx, gy); alt = math.radians(45)
+    hs = 0.0; ws = 0.0
+    for az, w in ((315, .5), (270, .2), (360, .2), (225, .1)):
+        a = math.radians(az); hs = hs + w * (math.sin(alt) * np.cos(slope) + math.cos(alt) * np.sin(slope) * np.cos(a - aspect)); ws += w
+    d = (hs / ws - math.sin(alt))[PAD:-PAD, PAD:-PAD]
+    st = STRENGTH.get(z, 1.0)
+    a_lit = st * p['lit'] * np.clip(d / p['Ls'], 0, 1) ** 0.85
+    a_dark = st * p['dark'] * np.clip(-d / p['Ds'], 0, 1) ** 0.8
+    return a_lit, a_dark
+
+def render_block(z, bx, by, B=1, want=None, p=None):
+    """{(x, y): (image or None, shelf)} for the block's tiles (only those in want, when given)"""
+    A = fetch_dem(z, bx, by, B)
+    tiles = [(bx * B + i, by * B + j) for i in range(B) for j in range(B)]
+    if want is not None: tiles = [t for t in tiles if t in want]
+    W = np.zeros((B * N, B * N), bool)
+    for (x, y) in tiles:
+        i, j = x - bx * B, y - by * B; W[j * N:(j + 1) * N, i * N:(i + 1) * N] = water_mask(z, x, y)
+    near0 = lambda v: ~np.isfinite(v) | (np.abs(v) < 0.06)       # a hole is exactly 0 m; LERC keeps it within its 5 cm
+    hole = np.zeros(A.shape, bool); hole[PAD:-PAD, PAD:-PAD] = W
+    hole &= near0(A)
     if z <= 9 and hole.sum() >= 20:                     # only wide tiles reach the 100-raster limit; one exact 0 is not a hole
-        E = fetch_dem(z, x, y, lock=ETOPO_BED)
+        E = fetch_dem(z, bx, by, B, lock=ETOPO_BED)
         g = np.zeros(A.shape, bool); g[PAD:-PAD, PAD:-PAD] = True
-        fill = (~np.isfinite(A) | (np.abs(A) < 1e-3)) & np.isfinite(E) & ~(g & ~hole)   # the holes, and the pad ring for the hillshade
+        fill = near0(A) & np.isfinite(E) & ~(g & ~hole)   # the holes, and the pad ring for the hillshade
         A = np.where(fill, E, A)
-    a = A[PAD:-PAD, PAD:-PAD]
-    depth = -a
-    ok = w & np.isfinite(depth) & (depth > 0.05)        # only water the model says has a floor below the surface (inland lakes read their surface)
-    lon0, lat0, lon1, lat1 = tile_lonlat(z, x, y)
-    # the Salton Sea's surface is -69 m: its pixels are dropped. (Until 2026-10-19 this returned the WHOLE tile empty, so the z5
-    # tile holding it, 5/5/12, came back empty and nothing under it was ever baked: no bathymetry on the California coast from
-    # 32 to 41 N at any zoom, and a hard tone edge off northern California where the neighbouring tiles' depth ramp stopped.)
-    if lon1 > -116.2 and lon0 < -115.4 and lat1 > 32.9 and lat0 < 33.6:
-        n = 2 ** z; plon = lon0 + (np.arange(N) + 0.5) / N * (lon1 - lon0)
-        plat = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + (np.arange(N) + 0.5) / N) / n))))
-        ok &= ~(((plat > 32.9) & (plat < 33.6))[:, None] & ((plon > -116.2) & (plon < -115.4))[None, :])
-    if ok.sum() < 20: return (None, False) if want_shelf else None
-    shelf = bool((depth[ok] < 200).any())
-    d = np.where(ok, np.clip(depth, 0, None), 0)
-    rgb = ramp(d)
-    # hillshade of the floor (sun NW, 40 deg), exaggerated by zoom so shelves still read
-    mpp = 2 * math.pi * R / (2 ** z) / N
-    zf = np.where(np.isfinite(A), A, 0).astype(float)
-    gy, gx = np.gradient(zf, mpp); gy, gx = gy[PAD:-PAD, PAD:-PAD], gx[PAD:-PAD, PAD:-PAD]
-    ex = 6.0 if z < 10 else 3.0
-    slope = np.arctan(ex * np.hypot(gx, gy)); asp = np.arctan2(-gx, gy)
-    az, alt = math.radians(315), math.radians(40)
-    hs = np.sin(alt) * np.cos(slope) + np.cos(alt) * np.sin(slope) * np.cos(az - asp)
-    rgb = rgb * (0.78 + 0.32 * np.clip(hs, 0, 1))[..., None]
-    # isobaths: thin lighter lines where the depth crosses a contour
+    a_lit, a_dark = shade_block(A, z, bx, by, B, p)
     DP = np.clip(-np.where(np.isfinite(A), A, 0), 0, None)
-    for lv in ISO:
-        B = DP >= lv
-        edge = (B[PAD:-PAD, PAD:-PAD] ^ B[PAD - 1:-PAD - 1, PAD:-PAD]) | (B[PAD:-PAD, PAD:-PAD] ^ B[PAD:-PAD, PAD - 1:-PAD - 1])
-        edge = ok & edge
-        rgb[edge] = rgb[edge] * 0.62 + np.array([110, 160, 205]) * 0.38
-    alpha = np.where(ok, 255, 0).astype(np.uint8)
-    im = Image.fromarray(np.dstack([np.clip(rgb, 0, 255).astype(np.uint8), alpha]), 'RGBA')
-    # soften the shoreline by one pixel so the mask edge is not a stair
-    al = im.getchannel('A').filter(ImageFilter.GaussianBlur(0.8)); im.putalpha(al)
-    im = im.resize((256, 256), Image.LANCZOS)
+    out = {}
+    for (x, y) in tiles:
+        i, j = x - bx * B, y - by * B
+        sl = (slice(j * N, (j + 1) * N), slice(i * N, (i + 1) * N))
+        a = A[PAD:-PAD, PAD:-PAD][sl]; w = W[sl]
+        depth = -a
+        ok = w & np.isfinite(depth) & (depth > 0.05)        # only water the model says has a floor below the surface (inland lakes read their surface)
+        lon0, lat0, lon1, lat1 = tile_lonlat(z, x, y)
+        # the Salton Sea's surface is -69 m: its pixels are dropped. (Until 2026-10-19 this returned the WHOLE tile empty, so the z5
+        # tile holding it, 5/5/12, came back empty and nothing under it was ever baked: no bathymetry on the California coast from
+        # 32 to 41 N at any zoom, and a hard tone edge off northern California where the neighbouring tiles' depth ramp stopped.)
+        if lon1 > -116.2 and lon0 < -115.4 and lat1 > 32.9 and lat0 < 33.6:
+            n = 2 ** z; plon = lon0 + (np.arange(N) + 0.5) / N * (lon1 - lon0)
+            plat = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + (np.arange(N) + 0.5) / N) / n))))
+            ok &= ~(((plat > 32.9) & (plat < 33.6))[:, None] & ((plon > -116.2) & (plon < -115.4))[None, :])
+        if ok.sum() < 20: out[(x, y)] = (None, False); continue
+        shelf = bool((depth[ok] < 200).any())
+        rgb = ramp(np.where(ok, np.clip(depth, 0, None), 0))
+        al, ad = a_lit[sl][..., None], a_dark[sl][..., None]
+        rgb = rgb * (1 - ad) + DARK * ad
+        rgb = rgb * (1 - al) + LIT * al
+        # isobaths: thin lighter lines where the depth crosses a contour
+        r0, c0 = PAD + j * N, PAD + i * N
+        for lv in ISO:
+            Bm = DP >= lv
+            cur = Bm[r0:r0 + N, c0:c0 + N]
+            edge = (cur ^ Bm[r0 - 1:r0 - 1 + N, c0:c0 + N]) | (cur ^ Bm[r0:r0 + N, c0 - 1:c0 - 1 + N])
+            edge = ok & edge
+            rgb[edge] = rgb[edge] * 0.62 + np.array([110, 160, 205]) * 0.38
+        alpha = np.where(ok, 255, 0).astype(np.uint8)
+        im = Image.fromarray(np.dstack([np.clip(rgb, 0, 255).astype(np.uint8), alpha]), 'RGBA')
+        # soften the shoreline by one pixel so the mask edge is not a stair
+        im.putalpha(im.getchannel('A').filter(ImageFilter.GaussianBlur(0.8)))
+        out[(x, y)] = (im.resize((256, 256), Image.LANCZOS), shelf)
+    return out
+
+def block_size(z):
+    return 4 if z >= 13 else 2 if z == 12 else 1
+
+def render(z, x, y, want_shelf=False, p=None):
+    im, shelf = render_block(z, x, y, 1, None, p)[(x, y)]
     return (im, shelf) if want_shelf else im
 
 if __name__ == '__main__':
