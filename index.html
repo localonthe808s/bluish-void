@@ -919,6 +919,22 @@ window._bvBathy = function(map){
    colors stay and only gain shape. Same machinery as the bathymetry: cover.json (z8 index) so the sea asks for nothing,
    z-index 2 under the bathymetry, dark maps only. ?relief=0 turns it off; ?relief=<base url> reads another pyramid. */
 window.BV_RELIEF = { url: 'https://cdn.bluishvoid.com/relief/v1', cover: null, coverP: null };
+/* SHARPER AT THE OPENING VIEWS (user 2026-10-19: "would we be able to add detail to the starting zoom level? realistically most
+   people will only see those views and not click in so even though its extra weight it may be worth it"). On a high-density
+   screen (phones, Retina Macs) a raster base layer gets a twin for z <= 6 that draws the NEXT zoom's tiles at half size
+   (tileSize 128, zoomOffset 1): twice the detail in the shading and the sea floor where the hazard, hurricane and LOCAL maps
+   open, four times the tiles there and nowhere else. The main layer takes over from z7. The twin mirrors the main layer's
+   opacity (the views that dim or hide it go through setOpacity), and map._bvLowTwins lists them for redraw skips. A layer's
+   createTile reads its tile zoom as c.z + zoomOffset. ?lowsharp=0 turns it off. */
+window._bvLowTwin = function(map, lay, Cls, url){
+  var q = null; try { q = new URLSearchParams(location.search).get('lowsharp'); } catch(e){}
+  if (q === '0' || (window.devicePixelRatio || 1) < 1.5 || !lay || (lay.options.minZoom || 0) > 6) return null;
+  var tw = new Cls(url, L.extend({}, lay.options, { tileSize: 128, zoomOffset: 1, maxZoom: 6, maxNativeZoom: Math.max(0, (lay.options.maxNativeZoom || 19) - 1) }));
+  lay.options.minZoom = 7;
+  var so = lay.setOpacity; lay.setOpacity = function(v){ so.call(lay, v); tw.setOpacity(v); return lay; };
+  lay._bvLow = tw; (map._bvLowTwins = map._bvLowTwins || []).push(tw);
+  return tw;
+};
 window._bvRelief = function(map){
   if (!map || map._bvReliefLayer || typeof L === 'undefined') return null;
   var B = window.BV_RELIEF, q = null;
@@ -928,15 +944,18 @@ window._bvRelief = function(map){
   if (!B.coverP) B.coverP = fetch(B.url + '/cover.json').then(function(r){ return r.ok ? r.json() : []; }).then(function(a){ B.cover = new Set(a || []); return B.cover; }).catch(function(){ B.cover = new Set(); return B.cover; });
   var RL = L.TileLayer.extend({
     createTile: function(c, done){
-      if (!window._bvCovHas(B, c.z, c.x, c.y)){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }
+      if (!window._bvCovHas(B, c.z + (this.options.zoomOffset || 0), c.x, c.y)){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }
       return L.TileLayer.prototype.createTile.call(this, c, done);
     }
   });
-  /* bounds: all of North America and the Caribbean since the bake_na.py run (Panama to Ellesmere, the Aleutians to Greenland) */
-  var lay = new RL(B.url + '/{z}/{x}/{y}.webp', { minZoom: 5, maxNativeZoom: 12, maxZoom: 19, zIndex: 2, opacity: 1, keepBuffer: 1, updateWhenIdle: true,
+  /* bounds: all of North America and the Caribbean since the bake_na.py run (Panama to Ellesmere, the Aleutians to Greenland).
+     From z3 since 2026-10-19 (_reliefbake/bake_low.py: z3-4 from the AWS Terrain Tiles, the exaggeration curve carried on below
+     z5), so the continent the hazard map opens on has its ranges; z3-4 sit in the same pyramid, under the z8 index's cells */
+  var lay = new RL(B.url + '/{z}/{x}/{y}.webp?b=2', {   /* ?b=2: z3-4 were 204 at the edge before their upload */ minZoom: 3, maxNativeZoom: 12, maxZoom: 19, zIndex: 2, opacity: 1, keepBuffer: 1, updateWhenIdle: true,
     errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', bounds: L.latLngBounds([[7, -180], [84, -10]]) });
   map._bvReliefLayer = lay;
-  B.coverP.then(function(){ lay.addTo(map); });
+  var low = window._bvLowTwin(map, lay, RL, B.url + '/{z}/{x}/{y}.webp?b=2');
+  B.coverP.then(function(){ if (low) low.addTo(map); lay.addTo(map); });
   return lay;
 };
 /* THE DESERT IS GROUND, NOT A HOLE, NATIONALLY (user 2026-10-19: "all deserts in the new map should be properly colored").
@@ -959,7 +978,8 @@ window._bvDesert = function(map){
   var DL = L.TileLayer.extend({
     createTile: function(c, done){
       var cov = B.cover;
-      if (c.z >= 7 && (!cov || !cov.has((c.x >> (c.z - 7)) + '/' + (c.y >> (c.z - 7))))){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }
+      var z = c.z + (this.options.zoomOffset || 0);
+      if (z >= 7 && (!cov || !cov.has((c.x >> (z - 7)) + '/' + (c.y >> (z - 7))))){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }
       return L.TileLayer.prototype.createTile.call(this, c, done);
     }
   });
@@ -967,9 +987,10 @@ window._bvDesert = function(map){
   var lay = new DL(B.url + '/{z}/{x}/{y}.png?v=1', { minZoom: 4, maxNativeZoom: 9, maxZoom: 19, zIndex: 2, opacity: 0.6, keepBuffer: 1, updateWhenIdle: true,
     errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', bounds: L.latLngBounds([[22, -125], [49.5, -93]]) });
   map._bvDesertLayer = lay;
-  var under = function(){ try { var c = lay.getContainer(), pn = c && c.parentNode; if (!pn) return;
-    var first = [].filter.call(pn.children, function(k){ return k !== c && k.style.zIndex === '2'; })[0]; if (first) pn.insertBefore(c, first); } catch(e){} };
-  B.coverP.then(function(){ lay.addTo(map); under(); });
+  var low = window._bvLowTwin(map, lay, DL, B.url + '/{z}/{x}/{y}.png?v=1');
+  var under = function(L1){ try { var c = L1.getContainer(), pn = c && c.parentNode; if (!pn) return;
+    var first = [].filter.call(pn.children, function(k){ return k !== c && k.style.zIndex === '2' && !(low && k === low.getContainer()) && k !== lay.getContainer(); })[0]; if (first) pn.insertBefore(c, first); } catch(e){} };
+  B.coverP.then(function(){ lay.addTo(map); under(lay); if (low){ low.addTo(map); under(low); } });
   return lay;
 };
 /* 1 M LIDAR (user 2026-10-17: "add lidar 1m to the national basemap bake"). From z13 in, USGS 3DEP's best available elevation
@@ -1102,14 +1123,16 @@ window._bvSeafloor = function(map){
   var SL = L.TileLayer.extend({
     createTile: function(c, done){
       var cov = B.cover;
-      if (c.z >= 8 && (!cov || !cov.has((c.x >> (c.z - 8)) + '/' + (c.y >> (c.z - 8))))){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }
+      var z = c.z + (this.options.zoomOffset || 0);
+      if (z >= 8 && (!cov || !cov.has((c.x >> (z - 8)) + '/' + (c.y >> (z - 8))))){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }
       return L.TileLayer.prototype.createTile.call(this, c, done);
     }
   });
   var lay = new SL(B.url + '/{z}/{x}/{y}.webp?b=2', { minZoom: 3, maxNativeZoom: 9, maxZoom: 19, zIndex: 2, opacity: 1, keepBuffer: 1, updateWhenIdle: true,
     errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', bounds: L.latLngBounds([[-10, -180], [80, 20]]) });   /* the whole Atlantic to 20 E and 10 S since 2026-10-19 (the hurricane map's reach) */
   map._bvSeafloorLayer = lay;
-  B.coverP.then(function(){ lay.addTo(map); });
+  var low = window._bvLowTwin(map, lay, SL, B.url + '/{z}/{x}/{y}.webp?b=2');
+  B.coverP.then(function(){ if (low) low.addTo(map); lay.addTo(map); });
   return lay;
 };
 window._bvSeaNames = function(map){
@@ -87190,7 +87213,7 @@ function initNowMicroTabs(){
      reveal, and a redraw only blanks and re-decodes them, three times per tab switch. */
   function _hzRedrawTiles(m, skipBase){
     if (!m) return;
-    var z = m.getZoom(), base = [m._bvReliefLayer, m._bvBathyLayer, m._bvBathyUnder, m._bvSeafloorLayer];
+    var z = m.getZoom(), base = [m._bvReliefLayer, m._bvBathyLayer, m._bvBathyUnder, m._bvSeafloorLayer].concat(m._bvLowTwins || []);
     m.eachLayer(function(l){
       if (!l.redraw || !l._url || !l.options) return;
       if ((l.options.minZoom != null && z < l.options.minZoom) || (l.options.maxZoom != null && z > l.options.maxZoom)) return;
