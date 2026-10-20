@@ -745,6 +745,54 @@ window._bvManageRaster = function(map, rasterLayer){
    site's cityLbl list simply leaves them out. _maplab/index.html (THE BASIN) keeps the same list in labelsFor(). */
 window.BV_NO_PLACE = ['san francisco'];
 window._bvBannedPlace = function(f){ var p = (f && f.props) || {}, nm = String(p['name:en'] || p.name || '').toLowerCase(); return window.BV_NO_PLACE.indexOf(nm) >= 0; };
+/* NAMES ON OUR MAPS: NO STREETS, AND PARKS ONLY WHERE THE NAME FITS (user 2026-10-19: "we shouldnt be labeling streets / parks and
+   green spaces should be labeled and properly sized at all levels necessary, they shouldnt show from high up unless its a large
+   national park something that can fit the text properly but i dont want to see a flood of texts, id rather the text fit inside
+   them"). protomaps' road-name rules are dropped. The archive's park POLYGONS carry no names (measured: 0 of 112 at z10, 0 of
+   97 at z12 over New York) -- the name is on a POI point inside each. So, per tile, a first rule notes the park points (it
+   places nothing) and a second labels a park polygon only when one of those points falls inside it AND the name, set in at
+   most two lines, fits inside the polygon with a margin at that point's height. Small parks drop out by themselves as the view
+   widens; under z9 only national parks, preserves and protected land are tried. One name per park across tiles. */
+window._bvParkLabels = function(rules, F){
+  var P = protomapsL; if (!P || !P.CenteredTextSymbolizer) return rules;
+  var PARK = /^(park|national_park|nature_reserve|protected_area|garden|recreation_ground|golf_course|cemetery|forest|wood|village_green|common|zoo|conservation)$/;
+  var BIG = /^(national_park|nature_reserve|protected_area|forest|conservation)$/;
+  var pts = { z: -1, a: [] }, ST = window._bvParkStat = { noted: 0, tried: 0, hit: 0, fit: 0, placed: 0 };
+  var note = { place: function(layout, geom, f){ var z = layout.zoom, p = f.props || {}; if (!p.name || !PARK.test(p.kind || '')) return;
+      if (pts.z !== z || pts.a.length > 6000){ pts.z = z; pts.a = []; }
+      var q = geom && geom[0] && geom[0][0]; ST.noted++; if (q) pts.a.push({ x: q.x, y: q.y, name: String(p.name), kind: p.kind }); } };
+  var size = function(z){ return z >= 16 ? 11 : z >= 14 ? 10 : 9; };
+  var txt = new P.CenteredTextSymbolizer({ labelProps: ['_plab'], font: function(z){ return '600 ' + size(z) + 'px system-ui, -apple-system, sans-serif'; },
+    fill: F && F.desert ? 'rgba(178,232,180,.95)' : 'rgba(36,96,48,.95)', stroke: F && F.desert ? 'rgba(8,14,10,.85)' : 'rgba(255,255,255,.85)', width: 1.6,
+    letterSpacing: 0.3, lineHeight: 1.3, maxLineChars: 16 });
+  var inside = function(R, x, y){ var c = false; for (var i = 0, j = R.length - 1; i < R.length; j = i++){ var a = R[i], b = R[j];
+    if (((a.y > y) !== (b.y > y)) && (x < (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x)) c = !c; } return c; };
+  var span = function(R, x, y){ var xs = []; for (var i = 0, j = R.length - 1; i < R.length; j = i++){ var a = R[i], b = R[j];
+      if ((a.y > y) !== (b.y > y)) xs.push(a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y)); }
+    xs.sort(function(m, n){ return m - n; }); for (var k = 0; k + 1 < xs.length; k += 2) if (xs[k] <= x && x <= xs[k + 1]) return [xs[k], xs[k + 1]]; return null; };
+  var lab = { place: function(layout, geom, f){
+    var z = layout.zoom, k = (f.props || {}).kind || ''; if (!PARK.test(k) || (z < 9 && !BIG.test(k))) return;
+    var R = geom && geom[0]; ST.tried++; if (!R || R.length < 4 || pts.z !== z) return;
+    var hit = null; for (var i = 0; i < pts.a.length; i++){ var q = pts.a[i]; if (inside(R, q.x, q.y)){ hit = q; break; } }
+    if (!hit) return; ST.hit++;
+    var nm = hit.name.replace(/\s+/g, ' ').trim(); if (!nm || nm.length > 40) return;
+    if (window._bvParkOwn && window._bvParkOwn[nm]) return;                        /* New York's parks name themselves and their parts (LOCAL) */
+    if (/\d/.test(nm) && !/[a-z]{3}/.test(nm)) return;                            /* a code, not a name ("Us-Tn-87-5") */
+    /* the name in at most two lines of <= 16 characters; its box, with a margin, must sit inside the park at the point's height
+       (and a line above and below it) */
+    var words = nm.split(' '), lines = [''], fs = size(z);
+    words.forEach(function(w){ var L0 = lines[lines.length - 1]; if ((L0 + ' ' + w).trim().length > 16 && L0) lines.push(w); else lines[lines.length - 1] = (L0 + ' ' + w).trim(); });
+    if (lines.length > 2) return;
+    var w = Math.max.apply(null, lines.map(function(L1){ return L1.length; })) * fs * 0.62 + 14, h = lines.length * fs * 1.3 + 8;
+    var ok = [hit.y - h / 2, hit.y, hit.y + h / 2].every(function(y){ var sp = span(R, hit.x, y); return sp && sp[1] - sp[0] >= w && hit.x - sp[0] >= w / 2 - 2 && sp[1] - hit.x >= w / 2 - 2; });
+    if (!ok) return; ST.fit++;
+    f.props._plab = nm;
+    var at = { x: hit.x, y: hit.y, dist: function(b){ return Math.sqrt((this.x - b.x) * (this.x - b.x) + (this.y - b.y) * (this.y - b.y)); } };
+    var r = txt.place(layout, [[at]], f); if (!r) return; ST.placed++;
+    r.forEach(function(o){ o.deduplicationKey = 'park:' + nm; o.deduplicationDistance = 600; }); return r; } };
+  return rules.filter(function(r){ return r.dataLayer !== 'roads'; })
+    .concat([{ dataLayer: 'pois', symbolizer: note }, { dataLayer: 'landuse', symbolizer: lab }]);
+};
 window._bvPlaceFloor = function(rules, ourNames){
   var MIN = function(z){ return z <= 4 ? 250000 : (z <= 6 ? 100000 : 0); };
   return rules.map(function(r){
@@ -798,10 +846,13 @@ window._bvPlaceFloor = function(rules, ourNames){
 window._bvPaintPlus = function(rules, F){
   var P = protomapsL, out = [], kind = function(f){ return (f && f.props && f.props.kind) || ''; };
   if (!P || !P.LineSymbolizer || !P.exp) return rules;
-  var riverW = P.exp(1.6, [[9, 0.6], [11, 1.1], [13, 1.8], [15, 3.5], [18, 10]]), streamW = P.exp(1.6, [[12, 0.4], [14, 0.8], [16, 1.6], [18, 3.5]]);
+  /* z10 picks up where the continental layer leaves z9 (~1.2-1.6 px for a mid-size river, 2026-10-19): 0.6 px there read as the
+     river thinning on a zoom in */
+  var riverW = P.exp(1.6, [[9, 1.0], [11, 1.4], [13, 2.0], [15, 3.5], [18, 10]]), streamW = P.exp(1.6, [[12, 0.4], [14, 0.8], [16, 1.6], [18, 3.5]]);
+  var riverC = F.desert ? '#1a3560' : (F.river || F.water);   /* dark maps: the same water-blue the continental rivers ease into at z9 */
   var wet = { dataLayer: 'landuse', symbolizer: new P.PolygonSymbolizer({ fill: F.wetland || F.park_a, opacity: function(z){ return z < 7 ? 0 : z === 7 ? 0.5 : 1; } }), filter: function(z, f){ return kind(f) === 'wetland'; } };
   var lines = [
-    { dataLayer: 'water', minzoom: 10, symbolizer: new P.LineSymbolizer({ color: F.river || F.water, width: function(z){ return riverW(z); }, lineCap: 'round' }), filter: function(z, f){ return f.geomType === 2 && /^(river|canal)$/.test(kind(f)); } },
+    { dataLayer: 'water', minzoom: 10, symbolizer: new P.LineSymbolizer({ color: riverC, width: function(z){ return riverW(z); }, lineCap: 'round', lineJoin: 'round' }), filter: function(z, f){ return f.geomType === 2 && /^(river|canal)$/.test(kind(f)); } },
     { dataLayer: 'water', minzoom: 12, symbolizer: new P.LineSymbolizer({ color: F.river || F.water, width: function(z){ return streamW(z); }, lineCap: 'round' }), filter: function(z, f){ return f.geomType === 2 && !/^(river|canal)$/.test(kind(f)); } }
   ];
   /* THINNER ROADS (user 2026-10-16: "refine roads, make them thinner on launch and zooming in"): every road line and its
@@ -861,9 +912,11 @@ window._bvPaintPlus = function(rules, F){
       var wa = r.symbolizer.width, g0 = wa.get.bind(wa); wa.get = function(z, f){ return g0(z, f) * roadK(z); }; r.symbolizer._bvThin = true; }
     if (r.dataLayer === 'water' && r.minzoom === 14 && r.symbolizer instanceof P.LineSymbolizer) return;    /* theirs, z14 only */
     var waterPoly = r.dataLayer === 'water' && r.symbolizer instanceof P.PolygonSymbolizer;
-    if (waterPoly && !wetDone){ if (parkRule) out.push(parkRule); out.push(wet); sandRules.forEach(function(x){ out.push(x); }); if (!F.desert) out.push(bigRiver); wetDone = true; }
+    /* RIVER LINES UNDER THE WATER (user 2026-10-19: "remove river lines, i dont want to see those" -- an OSM centerline drawn down
+       the middle of the Mississippi's own channel): the river and canal lines go in BEFORE the water polygons, so wherever a
+       river has its real channel drawn the fill covers its line, and the line shows only where it is the river itself */
+    if (waterPoly && !wetDone){ if (parkRule) out.push(parkRule); out.push(wet); sandRules.forEach(function(x){ out.push(x); }); if (!F.desert) out.push(bigRiver); lines.forEach(function(l){ out.push(l); }); wetDone = true; }
     out.push(r);
-    if (waterPoly) lines.forEach(function(l){ out.push(l); });
   });
   return out;
 };
@@ -1131,7 +1184,11 @@ window._bvSeafloor = function(map){
       return L.TileLayer.prototype.createTile.call(this, c, done);
     }
   });
-  var lay = new SL(B.url + '/{z}/{x}/{y}.webp?b=2', { minZoom: 3, maxNativeZoom: 9, maxZoom: 19, zIndex: 2, opacity: 1, keepBuffer: 1, updateWhenIdle: true,
+  /* OVER THE BATHYMETRY, OUT TO z9 (user 2026-10-19: "we had more ocean bathymetry here, now its duller"): the coastal bathymetry
+     (z-index 2) was extended across the whole Gulf and Atlantic that day, and its depth colors buried this shading -- the Sigsbee
+     Escarpment, the salt domes, the Cayman Trench. So the relief draws above it (3: under the labels at 5, on water only) through
+     z9, where its ~1 km source still holds up, and is gone from z10, where the bathymetry's own finer floor takes over */
+  var lay = new SL(B.url + '/{z}/{x}/{y}.webp?b=2', { minZoom: 3, maxNativeZoom: 9, maxZoom: 9, zIndex: 3, opacity: 1, keepBuffer: 1, updateWhenIdle: true,
     errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', bounds: L.latLngBounds([[-10, -180], [80, 20]]) });   /* the whole Atlantic to 20 E and 10 S since 2026-10-19 (the hurricane map's reach) */
   map._bvSeafloorLayer = lay;
   var low = window._bvLowTwin(map, lay, SL, B.url + '/{z}/{x}/{y}.webp?b=2');
@@ -1401,17 +1458,34 @@ window._bvRiverW = function(z, a){ return (0.4 + 0.38 * Math.pow(Math.max(a, 300
    every overlay. The bake (_riverbake/) has already cut them out of the lakes and smoothed their bends, so drawing on top
    costs nothing at a shore. Hierarchy: small reaches fainter, the big trunks brighter with a thin ink casing that lifts
    them off the hillshade. z3-9; at z10 the basemap's OSM river lines and channel polygons take over. */
+/* ONE RIVER ACROSS THE ZOOMS (user 2026-10-19: "improve how the rivers look across zoom levels ... make sure theyre detailed and
+   not crudely pasted ever, are there widths correct at each zoom level?"). Measured at the Mississippi (Memphis) and the Ohio
+   (Cincinnati), z4-14: this layer ran bright blue to z9 and the basemap's OSM water took over at z10 in its navy, so a river
+   changed color and jumped in width in one zoom step -- the lower Mississippi drawn 4.3 px at z9 against a ~1.2 km channel
+   (~6 px there) at z10. Now:
+   - WIDTH is never narrower than the real channel: hydraulic geometry gives width ~ sqrt(drainage area), w ~ 1 m x sqrt(km2)
+     (the Ohio at Cincinnati, 200,000 km2: ~450 m, measured 400-500; the Mississippi at Memphis, 2.4 M km2: ~1,550 m, measured
+     ~1,000-1,500); in pixels at the map's latitude, so from z8 the big rivers carry their real width into z10's polygons.
+   - COLOR stays the continental blue to z7, then eases into the basemap's water (#13294a, a step lighter so a ribbon still
+     reads over dark ground) through z8-9, so z10's OSM channels continue it rather than replace it. The ink casing goes at z9. */
+window._bvRiverTrueW = function(z, a, lat){ var mpp = 156543.03 * Math.cos((lat || 38) * Math.PI / 180) / Math.pow(2, z);
+  return Math.min(1800, Math.sqrt(Math.max(a, 1))) / mpp; };
 window._bvRivers = function(map){
   if (!map || map._bvRiverLayer || typeof protomapsL === 'undefined' || typeof L === 'undefined') return null;
   var P = protomapsL, A = function(f){ return +((f && f.props && f.props.a) || 300); };
   var tOf = function(a){ return Math.max(0, Math.min(1, Math.log(a / 300) / Math.LN10 / 3.5)); };
-  var ink = function(z, a){ var t = tOf(a); return z <= 7 ? (t > 0.55 ? '#3c70b8' : '#2f5d9e') : z === 8 ? (t > 0.55 ? '#33619f' : '#2a528c') : (t > 0.55 ? '#2a5089' : '#224577'); };
+  var lat = function(){ try { return map.getCenter().lat; } catch(e){ return 38; } };
+  var mix = function(c1, c2, k){ var h = function(c, i){ return parseInt(c.slice(1 + 2 * i, 3 + 2 * i), 16); };
+    return 'rgb(' + [0, 1, 2].map(function(i){ return Math.round(h(c1, i) + (h(c2, i) - h(c1, i)) * k); }).join(',') + ')'; };
+  var WATER = '#1a3560';                                     /* the dark flavor's water (#13294a), a step lighter */
+  var ink = function(z, a){ var t = tOf(a), c = t > 0.55 ? '#3c70b8' : '#2f5d9e'; return z <= 7 ? c : mix(c, WATER, z === 8 ? 0.45 : 0.85); };
+  var W = function(z, f){ var a = A(f); return Math.max(window._bvRiverW(z, a), window._bvRiverTrueW(z, a, lat())); };
   var rules = [
-    { dataLayer: 'rivers', filter: function(z, f){ return A(f) >= 20000; },
-      symbolizer: new P.LineSymbolizer({ color: 'rgba(5,7,12,.5)', lineCap: 'round', lineJoin: 'round', width: function(z, f){ return window._bvRiverW(z, A(f)) + 1.6; } }) },
+    { dataLayer: 'rivers', filter: function(z, f){ return z <= 8 && A(f) >= 20000; },
+      symbolizer: new P.LineSymbolizer({ color: 'rgba(5,7,12,.5)', lineCap: 'round', lineJoin: 'round', width: function(z, f){ return W(z, f) + 1.6; } }) },
     { dataLayer: 'rivers',
-      symbolizer: new P.LineSymbolizer({ color: function(z, f){ return ink(z, A(f)); }, opacity: function(z, f){ return 0.55 + 0.45 * tOf(A(f)); },
-        lineCap: 'round', lineJoin: 'round', width: function(z, f){ return window._bvRiverW(z, A(f)); } }) }
+      symbolizer: new P.LineSymbolizer({ color: function(z, f){ return ink(z, A(f)); }, opacity: function(z, f){ var t = tOf(A(f)); return z >= 9 ? 0.8 + 0.2 * t : 0.55 + 0.45 * t; },
+        lineCap: 'round', lineJoin: 'round', width: W }) }
   ];
   try {
     var lay = P.leafletLayer({ url: window._bvZxyQuiet(window.BV_RIVERS_URL), maxDataZoom: 8, minZoom: 3, maxZoom: 9, paintRules: rules, labelRules: [], zIndex: 3,
@@ -1464,7 +1538,7 @@ window._bvVectorBase = function(map, opts){
         minZoom: t.min, maxZoom: t.max,
         paintRules: opts.labels ? (map._bvBathyLayer ? window._bvBridgeRules(F) : [])
                                 : window._bvPaintPlus(protomapsL.paintRules(F), F),
-        labelRules: opts.labels ? _bvPlaceFloor(protomapsL.labelRules(F, 'en'), opts.ourNames !== false) : [],
+        labelRules: opts.labels ? window._bvParkLabels(_bvPlaceFloor(protomapsL.labelRules(F, 'en'), opts.ourNames !== false), F) : [],
         // ODbL: the tiles are ours to serve, the data is OpenStreetMap's to credit
         attribution: opts.labels ? '' : '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
       };
@@ -1761,9 +1835,10 @@ window._bvContinentalNames = function(map, opts){
   /* the continental themed names, matching the static render: a haloed dot
      with the name set to its right, and never catching a pointer */
   .bv-conus-name { pointer-events: none !important; white-space: nowrap; }
-  /* OVER THE ROAD MESH (user 2026-10-17: "it looks like the roads are covering text"): on LOCAL's TRAFFIC view the names sit on
-     a dark tag, since a soft shadow is lost against the bright green network */
-  .lc-traf .bv-conus-name b { background: rgba(8,10,16,.88); padding: 2px 5px 3px; border-radius: 3px; top: -8px; text-shadow: none; }
+  /* OVER THE ROAD MESH (user 2026-10-17: "it looks like the roads are covering text"): on LOCAL's TRAFFIC view the names get a
+     heavier, wider halo, since a soft shadow is lost against the bright green network. No box behind them (user 2026-10-19:
+     "dont give locations a black background") */
+  .lc-traf .bv-conus-name b { text-shadow: 0 0 2px rgba(8,10,16,1), 0 0 4px rgba(8,10,16,1), 0 0 7px rgba(8,10,16,.95), 0 1px 2px rgba(8,10,16,1); }
   .bv-conus-name i {
     position: absolute; left: -2px; top: -2px; width: 4px; height: 4px;
     border-radius: 50%; background: #fff; box-shadow: 0 0 0 1.2px rgba(8,10,16,.9);
@@ -20206,14 +20281,17 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
             var tr = document.getElementById('bv-dark-track');
             if (tr){
               var h0 = tr.hasAttribute('data-h0') ? +tr.getAttribute('data-h0') : 7, nH = +tr.getAttribute('data-n') || 16, gap = 2;
-              var W = Math.max(200, tr.clientWidth || 600), H = 30, mid = 15;
+              var W = Math.max(200, tr.clientWidth || 600), H = 30, mid = 15, G = [];
               var colW = (W - gap * (nH - 1)) / nH;
               var xOf = function(min){ var hh = min / 60 - h0; if (hh < 0 || hh > nH) return null;
                 var i = Math.min(nH - 1, Math.floor(hh)), f = hh - i; return i * (colW + gap) + f * colW; };
               /* ONE COLOR PER SIDE (user 2026-10-15, "do all five"): a color per range took a seven-swatch legend to
                  read; YES/NO is what the eye needs at a glance, the range is a tap away (#bv-dark-read) */
               var colOf = function(b){ return b.cls === 'sweep' ? '#6b7a8c' : b.side === 'yes' ? YESC : NOC; };
-              var tipOf = function(b){ return hm(b.t) + ' \u00B7 ' + (b.cls === 'dark' ? 'DARK' : b.cls === 'sweep' ? 'SWEEP' : 'REACTION') + ' \u00B7 $' + (b.usd || 0).toLocaleString('en-US') + ' buying '
+              var tipOf = function(b){ if (b.n > 1) return hm(b.t) + '\u2013' + hm(b.t1) + ' \u00B7 ' + b.n + ' ' + (b.cls === 'dark' ? 'DARK' : b.cls === 'sweep' ? 'SWEEP' : 'REACTION') + ' BURSTS \u00B7 $' + (b.usd || 0).toLocaleString('en-US') + ' buying '
+                  + b.side.toUpperCase() + ' on ' + Object.keys(b.labs).map(function(l){ return deg(String(l).replace(' to ', '\u2013')); }).join(', ')
+                  + (b.cls === 'dark' ? ' \u00B7 no public reading behind them' : b.cls === 'sweep' ? ' \u00B7 collecting the last cents on a near-certain range' : ' \u00B7 after a public reading');
+                return hm(b.t) + ' \u00B7 ' + (b.cls === 'dark' ? 'DARK' : b.cls === 'sweep' ? 'SWEEP' : 'REACTION') + ' \u00B7 $' + (b.usd || 0).toLocaleString('en-US') + ' buying '
                 + b.side.toUpperCase() + ' on ' + deg(String(b.lab).replace(' to ', '\u2013')) + (b.minutes > 1 ? ' over ' + b.minutes + ' min' : '')
                 + (b.px != null ? ' at ' + Math.round((b.side === 'yes' ? b.px : 1 - b.px) * 100) + '\u00a2' : '')
                 + (b.cls === 'dark' ? ' \u00B7 no public reading behind it' : b.cls === 'sweep' ? ' \u00B7 collecting the last cents on a near-certain range, not information' : ' \u00B7 after a public reading'); };
@@ -20222,17 +20300,37 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
               /* today's releases only (2026-10-03): the record keeps 36 h of them so a morning burst knows what was
                  already public, and yesterday's 4:34 PM climate report was being drawn at 4:34 PM today */
               var etDay = function(iso){ return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(iso)); };
-              (D.releases || []).forEach(function(r){ if (D.day && etDay(r.t) !== D.day) return; var x = xOf(minOf(r.t)); if (x == null) return;
+              /* QUIETER (user 2026-10-19: "can you improve this visual bar, its very useful just noisy - maybe keep the lines behind the
+                 triangles"): a kind of reading repeated within 12 minutes is one line (TWC and the airports re-post every few
+                 minutes and stacked into a comb), every line is faint, and the hollow marks are filled with the strip's ground so
+                 the lines pass BEHIND them; same-side bursts that would overlap are one mark, sized by their dollars together */
+              var REL = [], lastK = {};
+              (D.releases || []).slice().sort(function(a, b2){ return a.t < b2.t ? -1 : 1; }).forEach(function(r){ if (D.day && etDay(r.t) !== D.day) return;
+                var m = minOf(r.t); if (lastK[r.k] != null && m - lastK[r.k] < 12 && m >= lastK[r.k]) return; lastK[r.k] = m; REL.push(r); });
+              /* lines that would touch (within 3 px) are one: the most telling kind wins -- the climate report, then the park's
+                 own report, a forecast, an airport, TWC */
+              var RANK = { cli: 0, metar: 1, fcst: 2, apt: 3, twc: 4 }, taken = [];
+              REL.sort(function(a, b2){ return (RANK[a.k] == null ? 5 : RANK[a.k]) - (RANK[b2.k] == null ? 5 : RANK[b2.k]); });
+              REL = REL.filter(function(r){ var x = xOf(minOf(r.t)); if (x == null) return false;
+                if (taken.some(function(t2){ return Math.abs(t2 - x) < 3; })) return false; taken.push(x); return true; });
+              REL.forEach(function(r){ var x = xOf(minOf(r.t)); if (x == null) return;
                 o += '<line x1="' + x.toFixed(1) + '" x2="' + x.toFixed(1) + '" y1="1" y2="' + (H - 1) + '" stroke="' + (r.k === 'cli' ? '#f5a524' : r.k === 'twc' ? '#9fd9c4' : r.k === 'fcst' ? '#4aa3e0' : r.k === 'apt' ? '#2fbfa8' : 'rgba(255,255,255,.35)')
-                  + '" stroke-width="' + (r.k === 'metar' ? 0.8 : 1) + '" stroke-dasharray="' + (r.k === 'twc' ? '2 2' : r.k === 'fcst' ? '1 2' : r.k === 'apt' ? '3 2' : '') + '"><title>' + (r.k === 'metar' ? 'Central Park report' : r.k === 'cli' ? 'climate report' : r.k === 'fcst' ? 'NWS forecast issued' : r.k === 'apt' ? 'an airport set a new high' : 'TWC running max rose') + ' ' + hm(r.t) + '</title></line>'; });
-              B.forEach(function(b, bi){ var x = xOf(minOf(b.t) + 0.5); if (x == null) return;
-                var sz = Math.max(2.2, Math.min(7, Math.sqrt((b.usd || 0) / 150) * 2.6)), up = b.side === 'yes';
+                  + '" stroke-opacity="' + (r.k === 'metar' ? 0.55 : r.k === 'cli' ? 0.75 : 0.4) + '" stroke-width="' + (r.k === 'metar' ? 0.7 : 0.8) + '" stroke-dasharray="' + (r.k === 'twc' ? '2 2' : r.k === 'fcst' ? '1 2' : r.k === 'apt' ? '3 2' : '') + '"><title>' + (r.k === 'metar' ? 'Central Park report' : r.k === 'cli' ? 'climate report' : r.k === 'fcst' ? 'NWS forecast issued' : r.k === 'apt' ? 'an airport set a new high' : 'TWC running max rose') + ' ' + hm(r.t) + '</title></line>'; });
+              var szOf = function(usd){ return Math.max(2.2, Math.min(7.5, Math.sqrt((usd || 0) / 150) * 2.6)); };
+              G.length = 0;
+              B.forEach(function(b){ var x = xOf(minOf(b.t) + 0.5); if (x == null) return;
+                var g = null; for (var gi = G.length - 1; gi >= 0 && gi >= G.length - 6; gi--){ var q = G[gi];
+                  if (q.side === b.side && q.cls === b.cls && Math.abs(q.x - x) < szOf(q.usd) + szOf(b.usd) - 1){ g = q; break; } }
+                if (!g){ g = { side: b.side, cls: b.cls, t: b.t, lab: b.lab, px: b.px, minutes: b.minutes, usd: 0, x: x, n: 0, labs: {}, t1: b.t }; G.push(g); }
+                g.x = (g.x * g.usd + x * (b.usd || 0)) / Math.max(1, g.usd + (b.usd || 0)) || x; g.usd += (b.usd || 0); g.n++; g.labs[b.lab] = 1; g.t1 = b.t; });
+              G.forEach(function(b, bi){ var x = b.x;
+                var sz = szOf(b.usd), up = b.side === 'yes';
                 var y0 = up ? mid - 2 : mid + 2, y1 = up ? y0 - sz * 1.6 : y0 + sz * 1.6, c = colOf(b);
                 var pts = (x - sz).toFixed(1) + ',' + y0.toFixed(1) + ' ' + (x + sz).toFixed(1) + ',' + y0.toFixed(1) + ' ' + x.toFixed(1) + ',' + y1.toFixed(1);
-                o += '<polygon class="bv-dark-b" data-i="' + bi + '" points="' + pts + '" fill="' + (b.cls === 'dark' ? c : 'none') + '" stroke="' + c + '" stroke-width="' + (b.cls === 'dark' ? 0.6 : 0.9) + '" stroke-opacity="' + (b.cls === 'dark' ? 1 : 0.55) + '" style="cursor:pointer;">'
+                o += '<polygon class="bv-dark-b" data-i="' + bi + '" points="' + pts + '" fill="' + (b.cls === 'dark' ? c : '#0d1117') + '" stroke="' + c + '" stroke-width="' + (b.cls === 'dark' ? 0.6 : 0.9) + '" stroke-opacity="' + (b.cls === 'dark' ? 1 : 0.55) + '" style="cursor:pointer;">'
                   + '<title>' + tipOf(b) + '</title></polygon>'; });
               o += '</svg>';
-              var selB = null; B.forEach(function(b){ if (window._bvDarkSel === b.t + '|' + b.lab) selB = b; });
+              var selB = null; G.forEach(function(b){ if (window._bvDarkSel === b.t + '|' + b.lab) selB = b; });
               tr.innerHTML = o + '<div id="bv-dark-read" style="font:700 9px system-ui,sans-serif;color:#fff;margin-top:2px;">'
                 + (selB ? '<span style="color:' + colOf(selB) + ';">' + (selB.side === 'yes' ? '\u25B2' : '\u25BC') + '</span> ' + tipOf(selB) : '') + '</div>'
                 + '<div style="display:flex;flex-wrap:wrap;gap:3px 10px;margin-top:2px;' + LAB + 'font-weight:700;">'
@@ -20241,7 +20339,7 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
               tr.onclick = function(e){
                 var t = e.target && e.target.closest ? e.target.closest('.bv-dark-b') : null; if (!t) return;
                 e.stopPropagation();
-                var i = +t.getAttribute('data-i'), b = B[i]; if (!b) return;
+                var i = +t.getAttribute('data-i'), b = G[i]; if (!b) return;
                 window._bvDarkSel = b.t + '|' + b.lab;
                 var rd = document.getElementById('bv-dark-read');
                 if (rd) rd.innerHTML = '<span style="color:' + colOf(b) + ';">' + (b.side === 'yes' ? '\u25B2' : '\u25BC') + '</span> ' + tipOf(b);
@@ -21281,12 +21379,25 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
            n >= need_n and ret >= se */
         var bar = (g.se != null ? 'at least <b>+' + cents(g.se) + ' per $1</b>' : 'more than') + ' \u2014 the margin of error, so the profit is not just luck';
         if (!g.n) return 'No bet named here has settled yet. Betting starts once ' + g.need_n + ' have been graded and they earn ' + bar + '. ';
-        return 'The last <b>' + g.n + '</b> bets it named won <b>' + g.won + '</b> and '
+        return 'The last <b>' + g.n + '</b> bets it picked, named or withheld, won <b>' + g.won + '</b> and '
             + (g.ret >= 0 ? 'made' : 'lost') + ' <b>' + cents(Math.abs(g.ret)) + ' per $1</b> held to settlement. '
           + (g.n < g.need_n
               ? 'Betting resumes once at least ' + g.need_n + ' are graded' + (g.se != null && g.ret < g.se ? ' and they earn ' + bar : '') + '. '
               : 'Betting resumes when the last ' + g.window + ' earn ' + bar + '. ')
           + 'Until then every pick is still logged and graded, so the record can earn its way back. ';
+      };
+      /* THE EVENING-BEFORE BET, PAUSED ON ITS OWN RECORD (2026-10-19). The bake's court judges the evening leg only by
+         the evening leg's graded picks (named and withheld): 37 graded to 10-18, 18 won, -2c per $1 against a 16c
+         margin. One line, so the box says plainly that it is paused and why; the rule is the same n >= need_n and
+         ret >= se, and the noon leg's record never reopens it. */
+      var eveGateTxt = function(g){
+        if (!g) return '';
+        if (!g.n) return '<b>The evening-before bet is paused</b> until ' + g.need_n + ' of its picks have settled and earned more than their margin of error.';
+        return '<b>The evening-before bet is paused:</b> its last ' + g.n + ' picks won ' + g.won + ' and '
+          + (g.ret >= 0 ? 'made ' : 'lost ') + cents(Math.abs(g.ret)) + ' per $1; it comes back on its own once '
+          + (g.n < g.need_n ? 'at least ' + g.need_n + ' are graded and ' : '') + 'they make more than '
+          + (g.se != null ? 'the ' + cents(g.se) + ' margin of error' : 'their margin of error')
+          + '. Every pick is still logged and graded.';
       };
       var kTradable = function(r, dir, px, q){
         if (px == null || px < KMIN_PRICE || px >= 1) return false;
@@ -21813,11 +21924,11 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
                 : '')
             + stakeLine(tv.dir, tv.r, tv.ask, tq);
         } else if (gateShutT){
-          steps = '<div style="font:800 13px system-ui,sans-serif;color:#f2833f;">NOT A BET \u00B7 THE RECORD HAS NOT EARNED ONE</div>'
-            + line('WHY NOT', ((tv && kEdgeOk(tv.ev, tv.ask))
-                ? '<b style="color:#f2833f;">The model likes ' + (tv.dir === 'against' ? 'NO' : 'YES') + ' on ' + deg(tv.r.label)
-                  + ' at ' + cents(tv.ask) + '</b> (worth ' + cents(tv.ev) + ' more than it costs, on paper)<b style="color:#f2833f;">, but betting is paused.</b> '
-                : '') + gateTxt(EGT));
+          steps = '<div style="font:800 13px system-ui,sans-serif;color:#f2833f;">NOT A BET \u00B7 THE EVENING-BEFORE BET IS PAUSED</div>'
+            + line('WHY NOT', eveGateTxt(EGT) + ((tv && kEdgeOk(tv.ev, tv.ask))
+                ? ' The model likes ' + (tv.dir === 'against' ? 'NO' : 'YES') + ' on ' + deg(tv.r.label)
+                  + ' at ' + cents(tv.ask) + ' on paper; it is logged as a withheld pick.'
+                : ''));
         } else if (pickSplitT){
           steps = '<div style="font:800 13px system-ui,sans-serif;color:#f2833f;">NOT A BET \u00B7 WE DISAGREE WITH THE MARKET\u2019S PICK</div>'
             + line('WHY NOT', ((tv && kEdgeOk(tv.ev, tv.ask))
@@ -22905,7 +23016,7 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
         var mBet = null;
         if (TM && TM.ladder && TM.ladder.length){
           if (tv && kEdgeOk(tv.ev, tv.ask) && !gateShutT && !pickSplitT) mBet = betTxt(tv.dir, tv.r.label, tv.ask, (clockH != null && (clockH >= 17 || clockH < 8)) ? 'DRAFT BET' : 'BET');
-          else if (gateShutT) mBet = noTxt('BETTING PAUSED, THE RECORD HAS NOT EARNED ONE', true);
+          else if (gateShutT) mBet = noTxt('EVENING-BEFORE BET PAUSED, ITS OWN RECORD HAS NOT EARNED ONE', true);
           else if (pickSplitT) mBet = noTxt('WE DISAGREE WITH THE MARKET’S PICK', true);
           else mBet = noTxt(tv ? edgeWhy(tv.ev, tv.ask) : 'NOTHING PRICED UNDER ITS WORTH');
         }
@@ -59019,7 +59130,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var W = 1024, H = Math.round(W * spanY / spanX);
       if (!isFinite(H) || H < 10 || H > 4000) { cb(null); return; }
       var F = flavor || window.BV_MAP_FLAVOR;
-      var lr = protomapsL.labelRules(F, 'en').map(function(r){   /* the never-labelled places (BV_NO_PLACE) */
+      var lr = protomapsL.labelRules(F, 'en').filter(function(r){ return r.dataLayer !== 'roads'; }).map(function(r){   /* the never-labelled places (BV_NO_PLACE); no street names (user 2026-10-19) */
         if (r.dataLayer !== 'places') return r;
         var b0 = r.filter, o0 = {}; for (var k0 in r) o0[k0] = r[k0];
         o0.filter = function(z, f){ if (window._bvBannedPlace(f)) return false; return b0 ? b0(z, f) : true; };
@@ -69519,6 +69630,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
             } else if (f3 === 2) stus.push([s3, e3]);
           });
           route = mtaRouteShow(route);
+          var seqA = [];   /* the trip's stops in order: each arrival keeps the NEXT one (LOCAL vs EXPRESS, 2026-10-19) */
           stus.forEach(function(se){
             var sid = '', tt = 0;
             mtaFields(b, se[0], se[1], function(f4, v4, s4, e4){
@@ -69527,8 +69639,10 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
                 mtaFields(b, s4, e4, function(f5, v5){ if (f5 === 2 && (f4 === 2 || !tt)) tt = v5; });
               }
             });
-            if (sid && tt) (by[sid] = by[sid] || []).push({ rt: route, t: tt });
+            if (sid && tt) seqA.push([sid, tt]);
           });
+          var dest = seqA.length ? seqA[seqA.length - 1][0] : null;   /* where the train ends: the railroads' boards say it */
+          seqA.forEach(function(x, xi){ (by[x[0]] = by[x[0]] || []).push({ rt: route, t: x[1], nx: seqA[xi + 1] ? seqA[xi + 1][0] : null, dest: dest }); });
         });
       });
       for (var k in by) by[k].sort(function(a, c){ return a.t - c.t; });
@@ -69552,7 +69666,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       sfxs.forEach(function(sfx){
         mtaFeed(sfx, function(by){
           if (by) ['N','S'].forEach(function(d){
-            (by[st[0] + d] || []).forEach(function(a){ out.push({ rt: a.rt, dir: d, t: a.t }); });
+            (by[st[0] + d] || []).forEach(function(a){ out.push({ rt: a.rt, dir: d, t: a.t, nx: a.nx, pf: st[0] + d }); });
           });
           if (!--left){ out.sort(function(a, c){ return a.t - c.t; }); cb(out); }
         });
@@ -69922,8 +70036,16 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       });
     }
     /* THE CITY's subway machinery, shared with the national map's TRAFFIC view (2026-10-17, one map engine) */
-    window._bvMta = { stops: mtaStops, complex: function(st, cb){ mtaComplexArrivals(st, cb); }, chip: function(rt, px){ return mtaChip(rt, px); },
-      dirLbl: function(d){ return mtaDirLbl(d); }, show: function(r){ return mtaRouteShow(r); }, colors: MTA_COLORS };
+    /* LOCAL OR EXPRESS, PER TRAIN (user 2026-10-19: "say UPTOWN LOCAL UPTOWN EXPRESS on mobile show the icons circle diamond"):
+       /_mta_local_next.json (_mtabake/local_next.py, the MTA's static GTFS) holds each platform's next LOCAL stop wherever both
+       kinds call; a live train whose own next stop is another one is running express past it. 'E' / 'L' there, null where the
+       platform has only one kind (no word needed) or the feed did not say */
+    var mtaLN = null, mtaLNp = null;
+    var mtaLocalNext = function(cb){ if (mtaLN){ cb(mtaLN); return; } if (!mtaLNp) mtaLNp = fetch('/_mta_local_next.json').then(function(r){ return r.ok ? r.json() : {}; }).catch(function(){ return {}; }).then(function(j){ mtaLN = j || {}; return mtaLN; });
+      mtaLNp.then(cb); };
+    var mtaKind = function(a){ if (!mtaLN || !a || !a.pf || !a.nx) return null; var ln = mtaLN[a.pf]; if (!ln) return null; return a.nx === ln ? 'L' : 'E'; };
+    window._bvMta = { stops: mtaStops, complex: function(st, cb){ mtaLocalNext(function(){ mtaComplexArrivals(st, cb); }); }, kind: mtaKind, chip: function(rt, px){ return mtaChip(rt, px); },
+      dirLbl: function(d){ return mtaDirLbl(d); }, show: function(r){ return mtaRouteShow(r); }, colors: MTA_COLORS, decode: mtaDecode };
     function mtaPanelFill(st){
       mtaComplexArrivals(st, function(members, acc){ mtaPanelRender(st, members, acc); });
     }
@@ -105085,7 +105207,7 @@ function closeAlertModal(){
       /* NYC opens on the subway alone (user 2026-10-17: "launch with car traffic off for NYC only, just show subway lines and subway
          delays with the kalshi widget"): road traffic, cameras and vehicles start off -- not saved, so a switch flipped after
          stands -- the lines, stations, delays and the castle on */
-      TR.show = { roads: false, rail: true, cams: false, veh: false };
+      TR.show = { roads: false, rail: true, cams: false, veh: false, rr: true };   /* the railroads' lines and trains on (user 2026-10-19) */
       return true; };
     NYS.fit = function(){ if (!M || !NYS.fitDue) return; var sz = M.getSize(); if (sz.x < 50 || sz.y < 50){ setTimeout(NYS.fit, 120); return; }
       NYS.fitDue = false; M.invalidateSize();
@@ -105125,6 +105247,15 @@ function closeAlertModal(){
       if (cn) cn(M, { themed: true });
       (labs || []).forEach(function(l){ var c = l.getContainer && l.getContainer(); if (c) M.getPane('lcLabels').appendChild(c); });   /* names over the radar and the rock */
       M._lcLabs = labs || [];
+      /* NAMES ABOVE THE GROUND LAYERS (2026-10-19, the park names): every pane is flattened to z 400, so this pane, made first,
+         sat under New York's parks and ground (lcCityGround / lcCity), the 1865 water, the lidar and the sea, and every name in
+         the city was hidden -- Central Park's included. It is kept just before the traffic, flood-gauge and castle panes (those
+         stay last, TR.top), after everything else, whenever a layer is added */
+      var labsUp = function(){ var lp = M.getPane('lcLabels'), par = lp && lp.parentNode; if (!par) return;
+        var before = null; [].some.call(par.children, function(k){ if (/leaflet-(lcTraf|lcLvDots|lcKx)-pane/.test(k.className)){ before = k; return true; } return false; });
+        if (before ? lp.nextSibling !== before : lp !== par.lastChild){ if (before) par.insertBefore(lp, before); else par.appendChild(lp); } };
+      M.on('layeradd', labsUp); labsUp();
+      M.on('moveend', function(){ PKL.draw(); }); PKL.draw();   /* the parks' own parts, New York only */
       here = L.circleMarker([+L0.lat, +L0.lon], { radius: 5, color: '#fff', weight: 2, fillColor: '#2B22F4', fillOpacity: 1, pane: 'lcLabels' }).addTo(M);
       M.on('moveend', function(){ GH.sync(); CD.sync(); if (VIEW === 'radar') R.rebuild(); if (riverOn()){ clearTimeout(RV.deb); RV.deb = setTimeout(RV.fetch, 400); } if (VIEW === 'rock'){ clearTimeout(FQ.deb); FQ.deb = setTimeout(FQ.fetch, 500); } });
       M.on('click', function(e){ if (VIEW === 'rock' && !NG.tap(e)) rockTap(e.latlng); if (VIEW === 'leaf') LF.tap(e); if (VIEW === 'radar' && !(tideOn() && LV.csoTap(e))) FC.tap(e); });
@@ -107213,6 +107344,76 @@ function closeAlertModal(){
        ground they drained, /ghost-marsh.json, filled rgb(0,180,162) with a thin rgb(0,112,118) shore; the named ponds and
        brooks (/ghost_streams.json: the Collect, Minetta Brook...) win a tap. On the MAP view, inside the city only, an
        "1865 WATER" pill toggles it (remembered). Tap a stream for its name, story and traced length. */
+    /* THE PARKS' OWN PARTS, NAMED INSIDE THEM (user 2026-10-19: "at a low zoom where things fit, i want central park and prospect
+       park, flushing meadows corona park, to have all of their subsections labeled inside their parks"). city_park_parts.json
+       (_parkbake/bake.py, OpenStreetMap): 96 named areas -- The Great Lawn, Sheep Meadow, The Ramble, Harlem Meer, Long Meadow,
+       The Nethermead, Prospect Lake, Meadow Lake, the Unisphere -- each with its outline and the interior point with the most
+       room, plus the named hills, and the three parks themselves. New York only (the file is asked for inside the city).
+       A name is drawn only where it fits: in at most three lines, its box with a margin must sit inside the area's outline at the
+       label point and a half-line above and below; the bigger areas go first and a name never overlaps another. Hills, which
+       have no outline, from z16. Water in a blue, the rest in the park green, over a dark halo, like the basemap's park names. */
+    var PKL = window._bvPKL = { d: null, req: false, g: null };   /* window: read by the test sweeps */
+    PKL.draw = function(){
+      if (!M) return;
+      if (!PKL.g) PKL.g = L.layerGroup().addTo(M);
+      PKL.g.clearLayers();
+      var labOff = (M._lcLabs || [])[0] && M._lcLabs[0].options && M._lcLabs[0].options.opacity === 0;
+      if (!nycHere() || labOff || M.getZoom() < 13) return;
+      if (!PKL.d){ if (!PKL.req){ PKL.req = true; fetch('/city_park_parts.json').then(function(r){ return r.ok ? r.json() : []; }).then(function(d){
+          PKL.d = d || []; var own = {}; PKL.d.forEach(function(o){ own[o.n] = 1; }); window._bvParkOwn = own;
+          /* the basemap's park names were laid out before this list arrived: lay them out again so "Central Park" is not said twice */
+          (M._lcLabs || []).forEach(function(l){ try { if (l.clearLayout) l.clearLayout(); if (l.rerenderTiles) l.rerenderTiles(); } catch(e){} });
+          PKL.d.forEach(function(o){ if (!o.g) { o.ar = 0; return; } var a = 0; for (var i = 0, j = o.g.length - 1; i < o.g.length; j = i++) a += (o.g[j][0] + o.g[i][0]) * (o.g[j][1] - o.g[i][1]); o.ar = Math.abs(a); });
+          /* the parts first, biggest first; the parks' own names last, so they take what room is left instead of the middle of the
+             Great Lawn and the Long Meadow */
+          PKL.d.sort(function(a, b){ return (a.k === 'park') - (b.k === 'park') || b.ar - a.ar; }); PKL.draw(); }).catch(function(){}); } return; }
+      var z = M.getZoom(), fs = z >= 17 ? 11 : z >= 15 ? 10 : 9, B = M.getBounds().pad(0.1), placed = [];
+      var span = function(Q, x, y){ var xs = []; for (var i = 0, j = Q.length - 1; i < Q.length; j = i++){ var a = Q[i], b = Q[j];
+          if ((a.y > y) !== (b.y > y)) xs.push(a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y)); }
+        xs.sort(function(m, n){ return m - n; }); for (var k = 0; k + 1 < xs.length; k += 2) if (xs[k] <= x && x <= xs[k + 1]) return [xs[k], xs[k + 1]]; return null; };
+      PKL.d.forEach(function(o){
+        if (!B.contains([o.c[1], o.c[0]])) return;
+        var peak = o.k === 'peak'; if (peak && z < 16) return;
+        if (o.k === 'park' && z >= 15) return;                                  /* close in, the parts name the park */
+        var words = o.n.split(' '), lines = [''];
+        words.forEach(function(w){ var L0 = lines[lines.length - 1]; if ((L0 + ' ' + w).trim().length > 16 && L0) lines.push(w); else lines[lines.length - 1] = (L0 + ' ' + w).trim(); });
+        if (lines.length > 3) return;
+        var w = Math.max.apply(null, lines.map(function(x){ return x.length; })) * fs * 0.6 + 10, h = lines.length * fs * 1.25 + 6;
+        var c = M.latLngToContainerPoint([o.c[1], o.c[0]]), at = c, rot = 0;
+        if (!peak){
+          /* the baked point is the one farthest from every edge; a name is wide, so it is centred on the area's run at that height
+             (and at a few heights round it), then its top, middle and bottom rows must all fit */
+          var Q = o.g.map(function(p){ return M.latLngToContainerPoint([p[1], p[0]]); });
+          at = null;
+          [0, -0.5, 0.5, -1, 1, -1.6, 1.6].some(function(k){ var y = c.y + k * h, sp = span(Q, c.x, y); if (!sp) return false;
+            var x = (sp[0] + sp[1]) / 2;
+            if ([y - h / 2, y, y + h / 2].every(function(yy){ var s2 = span(Q, x, yy); return s2 && x - s2[0] >= w / 2 && s2[1] - x >= w / 2; })){ at = L.point(x, y); return true; }
+            return false; });
+          /* still no room: along the area's long axis (o.a, baked), the same test in the turned frame */
+          if (!at && o.a != null && Math.abs(o.a) > 8){
+            var t = -o.a * Math.PI / 180, ct = Math.cos(t), st = Math.sin(t);
+            var Rq = Q.map(function(q){ var dx = q.x - c.x, dy = q.y - c.y; return L.point(c.x + dx * ct - dy * st, c.y + dx * st + dy * ct); });
+            [0, -0.5, 0.5, -1, 1].some(function(k){ var y = c.y + k * h, sp = span(Rq, c.x, y); if (!sp) return false;
+              var x = (sp[0] + sp[1]) / 2;
+              if ([y - h / 2, y, y + h / 2].every(function(yy){ var s2 = span(Rq, x, yy); return s2 && x - s2[0] >= w / 2 && s2[1] - x >= w / 2; })){
+                var dx = x - c.x, dy = y - c.y; at = L.point(c.x + dx * ct + dy * st, c.y - dx * st + dy * ct); rot = o.a; return true; }
+              return false; });
+          }
+          if (!at) return;
+        }
+        c = at;
+        var rr = rot ? Math.abs(rot) * Math.PI / 180 : 0, bw = w * Math.cos(rr) + h * Math.sin(rr), bh = w * Math.sin(rr) + h * Math.cos(rr);   /* the turned name's own footprint */
+        var box = [c.x - bw / 2, c.y - bh / 2, c.x + bw / 2, c.y + bh / 2];
+        if (placed.some(function(b){ return !(box[2] < b[0] || box[0] > b[2] || box[3] < b[1] || box[1] > b[3]); })) return;
+        placed.push(box);
+        var wet = /^(natural:water|water:)/.test(o.k);
+        var col = wet ? 'rgba(160,205,245,.95)' : o.k === 'park' ? 'rgba(200,240,200,.97)' : 'rgba(178,232,180,.95)';
+        var html = '<div style="transform:translate(-50%,-50%)' + (rot ? ' rotate(' + rot + 'deg)' : '') + ';white-space:nowrap;text-align:center;font:' + (wet ? 'italic ' : '') + (o.k === 'park' ? '700 ' : '600 ') + fs + 'px/1.25 system-ui,-apple-system,sans-serif;'
+          + 'letter-spacing:.02em;color:' + col + ';text-shadow:0 0 2px rgba(8,14,10,.95),0 0 4px rgba(8,14,10,.85),0 1px 2px rgba(8,14,10,.9);">'
+          + lines.map(function(x){ return x.replace(/&/g, '&amp;').replace(/</g, '&lt;'); }).join('<br>') + '</div>';
+        L.marker(M.containerPointToLatLng(c), { pane: 'lcLabels', interactive: false, keyboard: false, icon: L.divIcon({ className: '', iconSize: [0, 0], html: html }) }).addTo(PKL.g);
+      });
+    };
     var GH = { on: true, lay: null, loading: false };
     try { GH.on = localStorage.getItem('bv_lc_1865') !== '0'; } catch(e){}
     var GH_BOX = [-74.30, 40.48, -73.65, 40.95];
@@ -108127,9 +108328,10 @@ function closeAlertModal(){
       var b = new Uint8Array(buf), dv = new DataView(buf), out = [];
       pbWalk(b, dv, 0, b.length, function(f, w, v, s0, e0){ if (f !== 2 || w !== 2) return;
         pbWalk(b, dv, s0, e0, function(f2, w2, v2, s2, e2){ if (f2 !== 4 || w2 !== 2) return;
-          var o = { r: '', la: null, lo: null, br: null, t: 0 };
+          var o = { r: '', la: null, lo: null, br: null, t: 0, id: '' };
           pbWalk(b, dv, s2, e2, function(f3, w3, v3, s3, e3){
-            if (f3 === 1 && w3 === 2) pbWalk(b, dv, s3, e3, function(f4, w4, v4, s4, e4){ if (f4 === 5 && w4 === 2) o.r = pbStr(b, s4, e4); });
+            if (f3 === 1 && w3 === 2) pbWalk(b, dv, s3, e3, function(f4, w4, v4, s4, e4){ if (f4 === 5 && w4 === 2) o.r = pbStr(b, s4, e4); else if (f4 === 1 && w4 === 2 && !o.id) o.id = 't' + pbStr(b, s4, e4); });
+            else if (f3 === 8 && w3 === 2) pbWalk(b, dv, s3, e3, function(f4, w4, v4, s4, e4){ if (f4 === 1 && w4 === 2) o.id = 'v' + pbStr(b, s4, e4); });
             else if (f3 === 2 && w3 === 2) pbWalk(b, dv, s3, e3, function(f4, w4, v4){ if (w4 === 5){ if (f4 === 1) o.la = v4; else if (f4 === 2) o.lo = v4; else if (f4 === 3) o.br = v4; } });
             else if (f3 === 5 && w3 === 0) o.t = v3;
           });
@@ -108153,6 +108355,11 @@ function closeAlertModal(){
          (full city, box null). An error from the mode falls back to the plain raw url. */
       var vbIn = function(B){ return !B || (B[0] <= w && B[1] <= s2 && B[2] >= e && B[3] >= n); };
       TR.inView.forEach(function(f){
+        /* A SWITCHED-OFF LAYER LOADS NOTHING (2026-10-20, measured: with METRO NORTH & LIRR off the raw LIRR and Metro-North feeds were
+           still read every 30 s, ~53 KB a minute): the railroads answer to their switch in New York, every other feed to BUSES */
+        var rrF = nycHere() && /lirr|long island|metro-north|mnr/i.test((f.n || '') + (f.u || '') + (f.id || ''));
+        if (rrF ? !TR.show.rr : !TR.show.veh){ delete TR.veh[f.id]; return; }
+        if (TR.show.rr && nycHere() && now - TR.glWok < 60000 && /lirr|long island|metro-north|mnr/i.test((f.n || '') + (f.u || '') + (f.id || ''))){ delete TR.veh[f.id]; return; }   /* our worker has them (TR.glW) */
         if (now - (TR.vehAt[f.id] || 0) < 28000 && (!f.vb || vbIn(TR.vehBox[f.id]))) return; TR.vehAt[f.id] = now;
         var raw = f.c ? f.u : 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent(f.u) + '&ttl=15', u = raw, sq = TR.vehSeq[f.id] = (TR.vehSeq[f.id] || 0) + 1;
         if (f.vb && !f.c){ var pw = (e - w) / 4, ph = (n - s2) / 4;
@@ -108161,7 +108368,15 @@ function closeAlertModal(){
         var fr = function(x){ return x === null ? null : Math.fround(x); };
         fetch(u).then(take).catch(function(){ return null; }).then(function(R){ return R || u === raw ? R : fetch(raw).then(take); }).then(function(R){ if (!R || sq !== TR.vehSeq[f.id]) return;
           if (R.j){ TR.veh[f.id] = (R.j.v || []).map(function(a){ return { r: a[0], la: fr(a[1]), lo: fr(a[2]), br: fr(a[3]), t: a[4] }; }); TR.vehBox[f.id] = R.j.box || null; }
-          else { try { TR.veh[f.id] = gtfsVehicles(R.ab); } catch(e2){ TR.veh[f.id] = []; } TR.vehBox[f.id] = null; }
+          else { try { TR.veh[f.id] = gtfsVehicles(R.ab); } catch(e2){ TR.veh[f.id] = []; } TR.vehBox[f.id] = null;
+            /* WHICH WAY IT IS GOING (2026-10-19, the mini trains need a front): where the feed gives no bearing, the move since the
+               last read (20 m or more) does; a train standing still keeps the heading it last had */
+            var mem = TR.vehMem = TR.vehMem || {};
+            TR.veh[f.id].forEach(function(o){ if (!o.id) return; var k = f.id + '|' + o.id, pv = mem[k];
+              if (pv){ var dy = (o.la - pv.la) * 111320, dx = (o.lo - pv.lo) * 111320 * Math.cos(o.la * Math.PI / 180);
+                o.mv = Math.hypot(dx, dy) >= 20 ? (Math.atan2(dx, dy) * 180 / Math.PI + 360) % 360 : pv.mv; }
+              mem[k] = { la: o.la, lo: o.lo, mv: o.mv }; });
+            if (nycHere() && Date.now() - TR.glWok > 60000 && /lirr|long island|metro-north|mnr/i.test((f.n || '') + (f.u || '') + (f.id || ''))) try { TR.glIn(f.id, TR.veh[f.id]); } catch(e3){} }
           TR.draw(); }).catch(function(){});
       });
     };
@@ -108190,8 +108405,21 @@ function closeAlertModal(){
       'A':'#0039A6','C':'#0039A6','E':'#0039A6','B':'#FF6319','D':'#FF6319','F':'#FF6319','FX':'#FF6319','M':'#FF6319','G':'#6CBE45','J':'#996633','Z':'#996633',
       'L':'#A7A9AC','N':'#FCCC0A','Q':'#FCCC0A','R':'#FCCC0A','W':'#FCCC0A','FS':'#808183','GS':'#808183','H':'#808183','SI':'#0039A6' };
     var RAILSRC = [
-      { k: 'nyc', box: [-74.30, 40.48, -73.65, 40.95], load: function(){ return fetch('/city_subway_lines.json').then(function(r){ return r.json(); }).then(function(j){ var out = [];
-          Object.keys(j).forEach(function(rt){ if (rt === 'SI') return; (j[rt] || []).forEach(function(seg){ out.push({ c: MTA_C[rt] || '#808183', cw: 2.6, bw: 1.4, p: (seg.p || []).map(function(q){ return [q[1], q[0]]; }) }); }); }); return out; }); } },
+      /* THE LIRR AND METRO-NORTH (user 2026-10-19: "we dont show the MNR / LIRR train lines" -- their live trains were dots on no
+         line): city_commuter_rail.json (_mtabake/rail.py, both railroads' static GTFS), each branch in its railroad's own color,
+         thin like LA's Metrolink and first in the list so the subway draws over it; ~8 m to z15, ~1.5 m from z16 */
+      { k: 'nyc', id: 'nycrr', box: [-74.6, 40.5, -71.8, 41.9], load: function(){ return fetch('/city_commuter_rail.json?v=2').then(function(r){ return r.json(); }).then(function(j){
+          /* thicker than the first pass (user 2026-10-19: "they can be thicker than this too"); the stations and the branch names ride along */
+          TR.rrRt = j.routes || {}; TR.rrSt = (j.stations || []).map(function(o){ var R = TR.rrRt[o.rr] || {}, c = (R[(o.rts || [])[0]] || [])[1] || '#9aa4b8';
+            return { k: 'rr', id: o.id, rr: o.rr, n: o.n, la: o.la, lo: o.lo, rts: o.rts || [], c: c }; });
+          return (j.lines || []).map(function(o){ return { c: o.c, cw: 3.6, bw: 2.0, p: o.p, ph: o.ph, rr: o.rr }; }); }); } },
+      /* THE MTA'S OWN TRACK (user 2026-10-19: "are the subway lines accurately drawn at every level?" -> "yes do it, and fill in the
+         missing route colors"): city_subway_shapes.json (_mtabake/shapes.py) is every route's shapes from the MTA's static GTFS,
+         variants kept where they add track -- the 5 on the Flatbush branch, the A to Rockaway Park, the E's, F's, N's and R's
+         patterns that THE CITY's station-to-station file lacked -- at ~8 m for z<=15 (p) and ~1 m from z16 (ph), where the
+         old lines sat 3-7 px off an elevated line's curve */
+      { k: 'nyc', box: [-74.30, 40.48, -73.65, 40.95], load: function(){ return fetch('/city_subway_shapes.json').then(function(r){ return r.json(); }).then(function(j){ var out = [];
+          Object.keys(j).forEach(function(rt){ if (rt === 'SI') return; var R = j[rt] || {}; (R.lo || []).forEach(function(seg, i){ out.push({ c: MTA_C[rt] || '#808183', cw: 2.6, bw: 1.4, p: seg, ph: (R.hi || [])[i] }); }); }); return out; }); } },
       { k: 'la', box: [-119.0, 33.6, -117.0, 34.6], load: function(){ return fetch('/_maplab/la/rail_lines.json').then(function(r){ return r.json(); }).then(function(j){
           return (j.features || []).map(function(f){ var g2 = f.geometry || {}, pr = f.properties || {}, cm = pr.kind === 'commuter'; return { c: pr.colour || '#33383F', la: 1, cw: cm ? 2.4 : 4.2, bw: cm ? 1.1 : 2.2,
             p: g2.type === 'LineString' ? g2.coordinates : [].concat.apply([], g2.coordinates || []) }; }); }); } }
@@ -108202,16 +108430,23 @@ function closeAlertModal(){
         if (!cityHere(S[0])) return;
         if (!(B[0] <= b.getEast() && B[2] >= b.getWest() && B[1] <= b.getNorth() && B[3] >= b.getSouth())) return;
         if (!TR.stops[S[0]]){ TR.stops[S[0]] = 'loading';
-          if (S[0] === 'nyc'){ if (window._bvMta) window._bvMta.stops(function(list){ TR.stops.nyc = (list || []).map(function(e){ return { k: 'nyc', e: e, n: e[1], la: e[2], lo: e[3] }; }); TR.draw(); }); }
+          /* no Staten Island Railway stops (user 2026-10-19: "just remove these dots"): its line is left out as THE CITY leaves it, so
+             its stations were dots on no line. Staten Island is everything west of -74.05 and south of 40.66 (St. George is
+             -74.074; Bay Ridge-95 St, the nearest subway stop, -74.031) */
+          if (S[0] === 'nyc'){ if (window._bvMta) window._bvMta.stops(function(list){ TR.stops.nyc = (list || []).filter(function(e){ return !(+e[3] < -74.05 && +e[2] < 40.66); })
+            .map(function(e){ return { k: 'nyc', e: e, n: e[1], la: e[2], lo: e[3] }; }); TR.draw(); }); }
           else Promise.all([fetch('/_maplab/la/rail_stops.json').then(function(r){ return r.json(); }), fetch('/_maplab/la/rail_colours.json').then(function(r){ return r.json(); })]).then(function(R2){
             TR.laCol = R2[1] || {}; TR.stops.la = (R2[0].features || []).map(function(f){ var p2 = f.properties || {}, c2 = f.geometry.coordinates; return { k: 'la', id: p2.id, n: p2.name, r: p2.routes || [], la: c2[1], lo: c2[0] }; }); TR.draw(); }).catch(function(){ TR.stops.la = []; });
           return; }
-        if (Array.isArray(TR.stops[S[0]])) out = out.concat(TR.stops[S[0]]); });
+        if (Array.isArray(TR.stops[S[0]]) && TR.show.rail) out = out.concat(TR.stops[S[0]]); });
+      if (TR.show.rr && nycHere() && TR.rrSt) out = out.concat(TR.rrSt.filter(function(o){ return b.contains([o.la, o.lo]); }));
       return out; };
     TR.railInView = function(){ var b = M.getBounds(), out = [];
-      RAILSRC.forEach(function(S){ var B = S.box; if (!cityHere(S.k) || !(B[0] <= b.getEast() && B[2] >= b.getWest() && B[1] <= b.getNorth() && B[3] >= b.getSouth())) return;
-        if (!TR.rail[S.k]){ TR.rail[S.k] = 'loading'; S.load().then(function(l){ TR.rail[S.k] = l || []; TR.draw(); }).catch(function(){ TR.rail[S.k] = []; }); return; }
-        if (Array.isArray(TR.rail[S.k])) out = out.concat(TR.rail[S.k]); });
+      RAILSRC.forEach(function(S){ var B = S.box; if (S.id === 'nycrr' ? !TR.show.rr : !TR.show.rail) return;
+        if (!cityHere(S.k) || !(B[0] <= b.getEast() && B[2] >= b.getWest() && B[1] <= b.getNorth() && B[3] >= b.getSouth())) return;
+        var key = S.id || S.k;   /* one cache per source: New York has two (the railroads, the subway) */
+        if (!TR.rail[key]){ TR.rail[key] = 'loading'; S.load().then(function(l){ TR.rail[key] = l || []; TR.draw(); }).catch(function(){ TR.rail[key] = []; }); return; }
+        if (Array.isArray(TR.rail[key])) out = out.concat(TR.rail[key]); });
       return out; };
     TR.camsInView = function(){
       var b = M.getBounds(), out = [];
@@ -108289,8 +108524,9 @@ function closeAlertModal(){
           members.forEach(function(m){ String(m[4] || '').split(/\s+/).forEach(function(rt){ if (rt && !seen[rt]){ seen[rt] = 1; chips += M5.chip(rt, 13); } }); });
           members.forEach(function(m, mi){ var by = { N: {}, S: {} };
             (acc[mi] || []).forEach(function(a){ var mm = (a.t - nw) / 60; if (mm < -.5 || mm > 45) return; (by[a.dir][a.rt] = by[a.dir][a.rt] || []).push(a); });
-            [['N', m[5] || 'NORTHBOUND'], ['S', m[6] || 'SOUTHBOUND']].forEach(function(dd){ Object.keys(by[dd[0]]).sort().forEach(function(rt){
-              lines.push(row(M5.chip(rt), '<span style="opacity:.7;font-size:.85em;margin-right:5px;">' + esc(M5.dirLbl(dd[1])) + '</span>' + by[dd[0]][rt].slice(0, 3).map(function(a){ var mm = (a.t - nw) / 60; return mm < 1 ? NOW : Math.round(mm) + ' MIN'; }).join(SEP))); }); }); });
+            [['N', m[5] || 'NORTHBOUND'], ['S', m[6] || 'SOUTHBOUND']].forEach(function(dd){ Object.keys(by[dd[0]]).sort().forEach(function(rt){ var KS = kindSplit(M5, by[dd[0]][rt]);
+              ['L', '', 'E'].forEach(function(k){ if (!KS[k]) return;
+              lines.push(row(kindChip(M5, rt, k), '<span style="opacity:.7;font-size:.85em;margin-right:5px;">' + esc(kindWord(M5.dirLbl(dd[1]), k)) + '</span>' + KS[k].slice(0, 3).map(function(a){ var mm = (a.t - nw) / 60; return mm < 1 ? NOW : Math.round(mm) + ' MIN'; }).join(SEP))); }); }); }); });
           var walk = Math.max(1, Math.round(e2.d * 1.3 / 80));
           out[i] = '<div style="min-width:0;"><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;"><span style="font:800 11px system-ui,sans-serif;letter-spacing:.03em;">' + esc(String(e2.st[1]).toUpperCase()) + '</span>' + chips
             + '<span style="font:700 8px system-ui,sans-serif;letter-spacing:.08em;opacity:.7;">' + walk + ' MIN WALK</span></div>' + (lines.length ? lines.slice(0, 6).join('') : '<div style="font:600 10px system-ui,sans-serif;opacity:.7;margin-top:3px;">NO TRAINS DUE IN 45 MIN</div>') + '</div>';
@@ -108321,17 +108557,53 @@ function closeAlertModal(){
       + '<span style="display:inline-flex;gap:3px;align-items:center;">' + chips + '</span><span style="font:600 8px system-ui,sans-serif;color:rgba(255,255,255,.7);letter-spacing:.08em;">' + src + '</span>'
       + '<button type="button" id="lc-board-x" style="margin-left:auto;background:none;border:none;color:#fff;font:700 13px system-ui,sans-serif;cursor:pointer;">\u2715</button></div>'; };
     var NOW = '<span style="color:#5bf28f;font-weight:800;">NOW</span>', SEP = '<span style="opacity:.4;"> | </span>';
+    /* the LOCAL / EXPRESS split: arrivals of one route in one direction grouped by what each train is doing; on a phone the word
+       goes and the chip carries it -- a circle for the local, the MTA's diamond for the express */
+    var subPhone = function(){ return !!(window.matchMedia && matchMedia('(max-width: 560px)').matches); };
+    var kindSplit = function(M5, list){ var g = {}; list.forEach(function(a){ var k = (M5.kind && M5.kind(a)) || ''; (g[k] = g[k] || []).push(a); }); return g; };
+    var kindChip = function(M5, rt, k, px){ if (k !== 'E' || !subPhone()) return M5.chip(rt, px);
+      var col = (M5.colors || {})[M5.show ? M5.show(rt) : rt] || '#808183', dp = Math.round((px || 17) * 0.82), dark = /^[NQRW]$/.test(rt);
+      return '<span title="express" style="display:inline-flex;align-items:center;justify-content:center;width:' + dp + 'px;height:' + dp + 'px;background:' + col + ';color:' + (dark ? '#1b2340' : '#fff')
+        + ';transform:rotate(45deg);border-radius:2px;flex-shrink:0;vertical-align:middle;margin:0 2px;"><span style="transform:rotate(-45deg);font:700 ' + Math.round((px || 17) * 0.56) + 'px system-ui,sans-serif;">' + esc(rt) + '</span></span>'; };
+    var kindWord = function(lbl, k){ if (!k || subPhone()) return lbl; return String(lbl).replace(/^TO /, '') + (k === 'E' ? ' EXPRESS' : ' LOCAL'); };
+    /* THE RAILROADS' BOARDS (user 2026-10-19: "can clicking the station show their upcoming train times?"): the LIRR's and
+       Metro-North's own GTFS-realtime feeds (keyless, CORS-open, like the subway's), decoded by THE CITY's reader; a station's
+       trains in the next three hours by where they end, each with its branch's color, at the place's clock */
+    TR.rrFeed = {};
+    TR.rrBoard = function(st, el){
+      var M5 = window._bvMta; if (!M5 || !M5.decode) return;
+      var f = TR.rrFeed[st.rr], nowMs = Date.now();
+      var draw = function(by){ if (TR.board && TR.board.st !== st) return;
+        var nw = nowMs / 1000, names = {}; (TR.rrSt || []).forEach(function(o){ if (o.rr === st.rr) names[o.id] = o.n; });
+        var R = TR.rrRt[st.rr] || {}, rows = {};
+        (by[st.id] || []).forEach(function(a){ if (a.t < nw - 30 || a.t > nw + 3 * 3600 || a.dest === st.id) return; var k = a.dest || '?'; (rows[k] = rows[k] || []).push(a); });
+        var keys = Object.keys(rows).sort(function(a, b){ return rows[a][0].t - rows[b][0].t; });
+        var chip = function(rt){ var c = (R[rt] || [])[1] || '#9aa4b8'; return '<span title="' + esc((R[rt] || [])[0] || '') + '" style="display:inline-block;width:11px;height:11px;border-radius:50%;background:' + c + ';box-shadow:0 0 0 1.5px rgba(255,255,255,.85);flex-shrink:0;"></span>'; };
+        var html2 = head(st.n, '', 'LIVE \u00b7 ' + (st.rr === 'LIRR' ? 'LIRR' : 'METRO-NORTH'));
+        html2 += keys.length ? '<div style="display:grid;align-items:start;gap:0 22px;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));">' + keys.slice(0, 8).map(function(k){
+            var L2 = rows[k].sort(function(a, b){ return a.t - b.t; });
+            return grp('TO ' + esc(String(names[k] || 'ITS LAST STOP').toUpperCase()), row(chip(L2[0].rt), L2.slice(0, 4).map(function(a){ return (a.t - nw) < 60 ? NOW : hmD(new Date(a.t * 1000)); }).join(SEP))); }).join('') + '</div>'
+          : '<div style="font:600 10px system-ui,sans-serif;opacity:.8;margin-top:6px;">NO TRAINS DUE IN THE NEXT THREE HOURS</div>';
+        el.innerHTML = html2; el.style.display = ''; var x = document.getElementById('lc-board-x'); if (x) x.onclick = function(e){ e.stopPropagation(); TR.boardClose(); }; };
+      if (f && f.by && nowMs - f.at < 30000){ draw(f.by); return; }
+      fetch('https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/' + (st.rr === 'LIRR' ? 'lirr%2Fgtfs-lirr' : 'mnr%2Fgtfs-mnr'))
+        .then(function(r){ return r.arrayBuffer(); }).then(function(ab){ var by = M5.decode(ab); TR.rrFeed[st.rr] = { at: Date.now(), by: by }; draw(by); })
+        .catch(function(){ el.innerHTML = head(st.n, '', 'LIVE') + '<div style="font:600 10px system-ui,sans-serif;opacity:.8;margin-top:6px;">THE RAILROAD\u2019S FEED DID NOT ANSWER</div>'; });
+    };
     TR.boardRender = function(){
       var B = TR.board; if (!B) return; var el = TR.boardEl(), st = B.st, html;
+      if (st.k === 'rr'){ TR.rrBoard(st, el); return; }
       if (st.k === 'nyc'){
         var M5 = window._bvMta; if (!M5) return;
         M5.complex(st.e, function(members, acc){ if (TR.board !== B) return; var nw = Date.now() / 1000, seen = {}, chips = '', groups = [];
           members.forEach(function(m){ String(m[4] || '').split(/\s+/).forEach(function(rt){ if (rt && !seen[rt]){ seen[rt] = 1; chips += M5.chip(rt, 15); } }); });
           members.forEach(function(m, mi){ var by = { N: {}, S: {} };
-            (acc[mi] || []).forEach(function(a){ var mm = (a.t - nw) / 60; if (mm < -.5 || mm > 60) return; (by[a.dir][a.rt] = by[a.dir][a.rt] || []).push({ mm: mm, t: a.t }); });
+            (acc[mi] || []).forEach(function(a){ var mm = (a.t - nw) / 60; if (mm < -.5 || mm > 60) return; (by[a.dir][a.rt] = by[a.dir][a.rt] || []).push({ mm: mm, t: a.t, nx: a.nx, pf: a.pf }); });
             [['N', m[5] || 'NORTHBOUND'], ['S', m[6] || 'SOUTHBOUND']].forEach(function(dd){ var rts = Object.keys(by[dd[0]]).sort(); if (!rts.length) return;
               var lbl = esc(M5.dirLbl(dd[1])); if (m[1] !== st.e[1]) lbl = esc(String(m[1]).toUpperCase()) + ' \u00b7 ' + lbl;
-              groups.push(grp(lbl, rts.map(function(rt){ return row(M5.chip(rt), by[dd[0]][rt].slice(0, 4).map(function(a){ return a.mm < 1 ? NOW : hmD(new Date(a.t * 1000)); }).join(SEP)); }).join(''))); }); });
+              groups.push(grp(lbl, rts.map(function(rt){ var KS = kindSplit(M5, by[dd[0]][rt]); return ['L', '', 'E'].filter(function(k){ return KS[k]; }).map(function(k){
+                return row(kindChip(M5, rt, k, 15), (k && !subPhone() ? '<span style="opacity:.7;font-size:.85em;margin-right:5px;">' + (k === 'E' ? 'EXPRESS' : 'LOCAL') + '</span>' : '')
+                  + KS[k].slice(0, 4).map(function(a){ return a.mm < 1 ? NOW : hmD(new Date(a.t * 1000)); }).join(SEP)); }).join(''); }).join(''))); }); });
           el.innerHTML = head(st.n, chips, 'LIVE \u00b7 MTA') + (groups.length ? '<div style="display:grid;align-items:start;gap:0 22px;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));">' + groups.join('') + '</div>'
             : '<div style="font:600 10px system-ui,sans-serif;opacity:.8;margin-top:6px;">NO TRAINS DUE IN THE NEXT HOUR</div>');
           el.style.display = ''; var x = document.getElementById('lc-board-x'); if (x) x.onclick = function(e){ e.stopPropagation(); TR.boardClose(); }; });
@@ -108363,6 +108635,11 @@ function closeAlertModal(){
       var q0 = M.latLngToContainerPoint(e.latlng), bs = null;
       /* a tap on a delayed stretch reads the alert, as THE CITY's does */
       var sh = null; (TR.subHits || []).forEach(function(h){ var d = Math.hypot(h.x - q0.x, h.y - q0.y); if (d < 10 && (!sh || d < sh.d)) sh = { d: d, al: h.al }; });
+      /* A STATION UNDER THE FINGER WINS (user 2026-10-19: "the times should be in the text above, not as popups"): a delay line runs
+         through its stations, so a tap on Jamaica opened the E's delay popup instead of the station's board above the map */
+      var bs0 = null; (TR.stHits || []).forEach(function(h){ var d = Math.hypot(h.x - q0.x, h.y - q0.y); if (d < (h.st.k === 'la' ? 16 : 14) && (!bs0 || d < bs0.d)) bs0 = { d: d }; });
+      if (bs0) sh = null;
+      /* trains are not tapped (user 2026-10-20: "trains dont need to be clickable, just the stations") */
       if (sh && window._bvSubDelays){ var al = sh.al, SD = window._bvSubDelays;
         L.popup({ maxWidth: 320, className: 'hz-popup' }).setLatLng(e.latlng).setContent('<div style="font:800 10px system-ui,sans-serif;letter-spacing:.04em;color:#fff;margin-bottom:4px;">'
           + al.routes.map(function(rt){ return '<span style="display:inline-grid;place-items:center;width:16px;height:16px;border-radius:50%;margin-right:3px;background:' + SD.col(rt) + ';color:' + (SD.dark(rt) ? '#111' : '#fff') + ';font:900 9px system-ui,sans-serif;">' + esc(SD.show(rt)) + '</span>'; }).join('')
@@ -108589,6 +108866,156 @@ function closeAlertModal(){
           try { localStorage.setItem('bv_tt_inc_local', JSON.stringify({ key: key, at: TR.incAt, inc: TR.inc })); } catch(e3){}
         }).catch(function(){ TR.inc = TR.inc || []; }).then(function(){ TR.incP = null; });
     };
+    TR.carDraw = function(g, q, ang, front, brC, dpr, z){
+            var k2 = (z >= 12 ? 1 : .85) * dpr, Lc = 17 * k2, Wc = 6.2 * k2, Nz = front ? 4.6 * k2 : 0;
+      g.save(); g.translate(q[0], q[1]); if (ang != null) g.rotate(ang);
+      g.shadowColor = 'rgba(0,0,0,.55)'; g.shadowBlur = 3 * dpr;
+      g.beginPath(); g.moveTo(-Lc / 2 + 1.6 * k2, -Wc / 2); g.lineTo(Lc / 2 - Nz, -Wc / 2);
+      if (front){ g.quadraticCurveTo(Lc / 2 - Nz * 0.2, -Wc / 2, Lc / 2, 0); g.quadraticCurveTo(Lc / 2 - Nz * 0.2, Wc / 2, Lc / 2 - Nz, Wc / 2); }
+      else { g.quadraticCurveTo(Lc / 2, -Wc / 2, Lc / 2, 0); g.quadraticCurveTo(Lc / 2, Wc / 2, Lc / 2 - 1.6 * k2, Wc / 2); }
+      g.lineTo(-Lc / 2 + 1.6 * k2, Wc / 2); g.quadraticCurveTo(-Lc / 2, Wc / 2, -Lc / 2, 0); g.quadraticCurveTo(-Lc / 2, -Wc / 2, -Lc / 2 + 1.6 * k2, -Wc / 2); g.closePath();
+      g.fillStyle = brC === '#e2e8f0' ? '#4b5568' : brC; g.fill(); g.shadowBlur = 0;
+      g.fillStyle = 'rgba(10,12,18,.55)'; g.fillRect(-Lc / 2 + 1.4 * k2, -Wc * 0.28, Lc - Nz - 2.8 * k2, Wc * 0.56);   /* the dark band the windows sit in */
+      g.fillStyle = '#ffd98a'; var nw2 = 4, span2 = Lc - Nz - 4.2 * k2, ww = span2 / nw2 * 0.62;
+      for (var wi = 0; wi < nw2; wi++){ g.fillRect(-Lc / 2 + 2.1 * k2 + wi * span2 / nw2, -Wc * 0.17, ww, Wc * 0.34); }
+      if (front){ g.shadowColor = 'rgba(255,255,230,.95)'; g.shadowBlur = 6 * dpr; g.fillStyle = '#ffffff';
+        g.beginPath(); g.arc(Lc / 2 - 1.5 * k2, 0, 1.25 * k2, 0, 6.3); g.fill(); g.shadowBlur = 0;
+        g.fillStyle = '#ff3b30'; g.fillRect(-Lc / 2 + .3 * k2, -Wc / 2 + 1 * k2, 1.1 * k2, 1.2 * k2); g.fillRect(-Lc / 2 + .3 * k2, Wc / 2 - 2.2 * k2, 1.1 * k2, 1.2 * k2); }
+      g.restore(); };
+    /* TRAINS THAT GLIDE (user 2026-10-19: "can you improve their motion, so its consistent, the MNR is very consistent so assumming
+       its general position between stations may be possible to do smoothly"). The LIRR's and Metro-North's feeds move a train once
+       every 30 s or so. Each read, every train is snapped onto its branch's track (city_commuter_rail.json, in metres) and its
+       speed along the track measured from its last read; between reads it runs on at that speed, never past the next station
+       (trains stop there -- the next read moves it on), and a new read is eased into over 4 s, never jumped to. A train more than
+       150 m from any track, or not yet seen twice, sits where the feed puts it. Its own canvas over the traffic layer, redrawn
+       ~10 times a second only while the railroads are shown: a few dozen trains, a few hundred segment tests each read. */
+    TR.gl = window._bvTRgl = { tr: null, trains: {} };   /* window: read by the test sweeps */
+    var GK = Math.cos(40.75 * Math.PI / 180) * 111320, GY = 111320;
+    TR.glTrack = function(){ if (TR.gl.tr) return TR.gl.tr; var L0 = TR.rail.nycrr; if (!Array.isArray(L0) || !TR.rrSt) return null;
+      var tr = L0.map(function(ln){ var P = ln.p.map(function(c){ return [c[0] * GK, c[1] * GY]; }), S = [0], x0 = 1e12, y0 = 1e12, x1 = -1e12, y1 = -1e12;
+        for (var i = 0; i < P.length; i++){ if (i) S.push(S[i - 1] + Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1]));
+          x0 = Math.min(x0, P[i][0]); y0 = Math.min(y0, P[i][1]); x1 = Math.max(x1, P[i][0]); y1 = Math.max(y1, P[i][1]); }
+        return { P: P, S: S, len: S[S.length - 1], bb: [x0 - 300, y0 - 300, x1 + 300, y1 + 300], stops: [] }; });
+      tr.forEach(function(T){ TR.rrSt.forEach(function(o){ var pr = TR.glLine(T, o.lo * GK, o.la * GY); if (pr && pr.d < 80) T.stops.push(pr.s); });
+        T.stops.sort(function(a, b){ return a - b; }); });
+      return (TR.gl.tr = tr); };
+    TR.glLine = function(T, x, y){ if (x < T.bb[0] || x > T.bb[2] || y < T.bb[1] || y > T.bb[3]) return null; var best = null;
+      for (var i = 1; i < T.P.length; i++){ var a = T.P[i - 1], b = T.P[i], dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy || 1e-9;
+        var t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / L2)), d = Math.hypot(a[0] + t * dx - x, a[1] + t * dy - y);
+        if (!best || d < best.d) best = { d: d, s: T.S[i - 1] + t * Math.sqrt(L2) }; }
+      return best; };
+    TR.glAt = function(T, s){ s = Math.max(0, Math.min(T.len, s)); var lo = 1, hi = T.S.length - 1;
+      while (lo < hi){ var mid = (lo + hi) >> 1; if (T.S[mid] < s) lo = mid + 1; else hi = mid; }
+      var a = T.P[lo - 1], b = T.P[lo], seg = (T.S[lo] - T.S[lo - 1]) || 1e-9, t = (s - T.S[lo - 1]) / seg;
+      return { x: a[0] + t * (b[0] - a[0]), y: a[1] + t * (b[1] - a[1]), ang: Math.atan2(b[1] - a[1], b[0] - a[0]) }; };
+    TR.glIn = function(fid, list){
+      var tr = TR.glTrack(), now = Date.now(), seen = {};
+      (list || []).forEach(function(o){ if (!o.id) return; var k = fid + '|' + o.id; seen[k] = 1;
+        var tm = (o.t && o.t * 1000 > now - 300000 && o.t * 1000 < now + 60000) ? o.t * 1000 : now, rec = TR.gl.trains[k];
+        if (rec && rec.t1 === tm && !rec.off){ rec.seen = now; return; }              /* the same reading again: keep gliding */
+        var best = null; if (tr) tr.forEach(function(T, li){ var pr = TR.glLine(T, o.lo * GK, o.la * GY); if (pr && (!best || pr.d < best.d)){ best = pr; best.li = li; } });
+        if (!best || best.d > 150){ TR.gl.trains[k] = { off: true, la: o.la, lo: o.lo, seen: now, dir: rec ? rec.dir : 0 }; return; }
+        var v = 0, dir = rec ? rec.dir || 0 : 0, cur = rec && !rec.off ? TR.glS(rec, now) : null;
+        if (rec && !rec.off && rec.li === best.li && tm > rec.t1 + 1000){ var ds = best.s - rec.s1, dt = (tm - rec.t1) / 1000;
+          if (Math.abs(ds) >= 25){ v = ds / dt; if (Math.abs(v) > 50) v = 0; else dir = v > 0 ? 1 : -1; } }
+        TR.gl.trains[k] = { li: best.li, s1: best.s, t1: tm, v: v, dir: dir, from: (cur != null && rec.li === best.li) ? cur : best.s, fromT: now, seen: now }; });
+      Object.keys(TR.gl.trains).forEach(function(k){ if (k.indexOf(fid + '|') === 0 && !seen[k]) delete TR.gl.trains[k]; }); };
+    window._bvTRglS = function(rec, now){ return TR.glS(rec, now); };
+    TR.glS = function(rec, now){ var T = TR.gl.tr[rec.li]; if (!T) return rec.s1;
+      /* ARRIVING ON TIME: with the worker's next station and its predicted arrival, the train runs from its last fix so that it
+         reaches the platform exactly then, however old the fix (the feeds' positions run 10 s to minutes behind) */
+      var tgt = function(t){ if (rec.v && rec.nx != null && rec.na > rec.t1 + 1000) return rec.s1 + (rec.nx - rec.s1) * Math.max(0, Math.min(1, (t - rec.t1) / (rec.na - rec.t1)));
+        var s1 = rec.s1 + rec.v * Math.min(Math.max(0, (t - rec.t1) / 1000), 45);
+        if (rec.v && rec.nx != null) s1 = rec.v > 0 ? Math.min(s1, rec.nx) : Math.max(s1, rec.nx);    /* the worker's next station */
+        else if (rec.v){ var nx = null; T.stops.forEach(function(st){ if (rec.v > 0 ? (st > rec.s1 + 30 && (nx == null || st < nx)) : (st < rec.s1 - 30 && (nx == null || st > nx))) nx = st; });
+          if (nx != null) s1 = rec.v > 0 ? Math.min(s1, nx) : Math.max(s1, nx); }
+        return s1; };
+      var e = Math.max(0, 1 - (now - rec.fromT) / 4000); e = e * e * (3 - 2 * e);
+      return tgt(now) + (rec.from - tgt(rec.fromT)) * e; };
+    TR.glDraw = function(){
+      var cv = TR.tcv; if (!cv || !M) return; var g = cv.getContext('2d');
+      var subOn = TR.show.rail && nycHere() && M.getZoom() >= 14;
+      if (TR.lit !== true || !(TR.show.rr || subOn) || !nycHere() || M._animatingZoom){ if (!(TR.lit === true && M._animatingZoom)) g.clearRect(0, 0, cv.width, cv.height); TR.subHits = []; return; }
+      var sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr), z = M.getZoom();
+      if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
+      L.DomUtil.setPosition(cv, M.containerPointToLayerPoint([0, 0])); cv.style.visibility = ''; g.clearRect(0, 0, W, H);
+      if (z < 9) return;
+      var now = Date.now(), PL = function(la, lo){ var q = M.latLngToContainerPoint([la, lo]); return [q.x * dpr, q.y * dpr]; };
+      if (subOn) TR.subDraw(g, dpr, z, W, H); else TR.subHits = [];
+      if (TR.show.rr) Object.keys(TR.gl.trains).forEach(function(k){ var rec = TR.gl.trains[k], q, ang = null;
+        if (rec.off || !TR.gl.tr){ q = PL(rec.la, rec.lo); }
+        else { var T = TR.gl.tr[rec.li], A = TR.glAt(T, TR.glS(rec, now)); q = PL(A.y / GY, A.x / GK); ang = -A.ang + (rec.dir < 0 ? Math.PI : 0); }
+        if (q[0] < -30 || q[1] < -30 || q[0] > W + 30 || q[1] > H + 30) return;
+        TR.carDraw(g, q, ang, !rec.off && !!rec.dir, rec.c || '#e2e8f0', dpr, z); }); };
+    /* FROM OUR WORKER (user 2026-10-20: "yes build and deploy it"): tiles.bluishvoid.com/rail/v1/nyc.json (_tiles-worker/rail.js)
+       reads both railroads' feeds once per ~10 s per edge and sends each train already on its track, with its next station's
+       place along it and when it gets there -- ~2.4 KB a read instead of ~27 KB of protobuf, and a train glides from the first
+       read (its speed is the feed's own prediction, not two reads apart). Read every 15 s; while it answers, the raw feeds are
+       not fetched (TR.transit) and their per-train reads are skipped; if it fails for a minute, they come back on their own. */
+    TR.glWAt = 0; TR.glWok = 0;
+    TR.glW = function(){ TR.glWAt = Date.now();
+      fetch('https://tiles.bluishvoid.com/rail/v1/nyc.json').then(function(r){ return r.ok ? r.json() : null; }).then(function(D){
+        if (!D || !Array.isArray(D.trains)) return; var tr = TR.glTrack(); if (!tr || D.n !== tr.length) return;   /* the track not loaded yet, or a different build of it */
+        var now = Date.now(), seen = {}; TR.glWok = now;
+        D.trains.forEach(function(o){ var k = o.id, prev = TR.gl.trains[k]; seen[k] = 1;
+          var R = TR.rrRt && TR.rrRt[o.rr], col = R && R[o.r] ? R[o.r][1] : null;
+          if (o.li == null){ TR.gl.trains[k] = { off: true, la: o.la, lo: o.lo, seen: now, dir: 0, c: col }; return; }
+          if (prev && !prev.off && prev.t1 === o.t && prev.li === o.li){ prev.seen = now; return; }     /* the same reading: keep gliding */
+          var cur = prev && !prev.off && prev.li === o.li ? TR.glS(prev, now) : null;
+          TR.gl.trains[k] = { li: o.li, s1: o.s, t1: o.t, v: o.v || 0, dir: o.dir || (prev ? prev.dir : 0), nx: o.nx, na: o.na, nd: o.nd, c: col,
+            from: cur != null ? cur : o.s, fromT: now, seen: now }; });
+        Object.keys(TR.gl.trains).forEach(function(k){ if (!seen[k]) delete TR.gl.trains[k]; });
+      }).catch(function(){}); };
+    /* SUBWAY TRAINS, FROM z14 (user 2026-10-20: "yes build it from zoom 14, have them be aware of active delays and alerts").
+       tiles.bluishvoid.com/subway/v1/nyc.json (_tiles-worker/rail.js) gives each train's route, the station it is coming from and
+       the one it is due at, both as places along the route's track (city_subway_shapes.json, metres at cos 40.7), the scheduled
+       run and the feed's predicted arrival; the train is drawn at sN - (sN - sP) * (time to arrival) / run, so it glides and
+       reaches the platform when the MTA says. Each direction rides its own side of the line (to the right of travel), in its
+       route's color with its letter from z15. AWARE OF TROUBLE: an amber glow when the train is held at a platform 2.5+ min,
+       running past its predicted arrival, or its route and direction carry an active alert or a measured delay (THE CITY's
+       _bvSubDelays); HELD / LATE written beside it from z15. Read every
+       15 s, and only while the map is at z14+ with SUBWAY on. */
+    TR.subAt = 0; TR.subD = null; TR.subTr = null; TR.subHits = [];
+    var SK = Math.cos(40.7 * Math.PI / 180) * 111320, SY = 111320;
+    TR.subTrack = function(){ if (TR.subTr) return TR.subTr; if (TR.subTrP) return null;
+      TR.subTrP = fetch('/city_subway_shapes.json').then(function(r){ return r.json(); }).then(function(j){ var T = {};
+        Object.keys(j).forEach(function(rt){ T[rt] = (j[rt].hi || []).map(function(g2){ var P = g2.map(function(c){ return [c[0] * SK, c[1] * SY]; }), S = [0];
+          for (var i = 1; i < P.length; i++) S.push(S[i - 1] + Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1])); return { P: P, S: S, len: S[S.length - 1] }; }); });
+        TR.subTr = T; }).catch(function(){ TR.subTrP = null; });
+      return null; };
+    TR.subW = function(){ TR.subAt = Date.now(); TR.subTrack();
+      fetch('https://tiles.bluishvoid.com/subway/v1/nyc.json').then(function(r){ return r.ok ? r.json() : null; }).then(function(D){ if (D && Array.isArray(D.trains)) TR.subD = D; }).catch(function(){}); };
+    TR.subAlert = function(rt, dir){ var SD = window._bvSubDelays; if (!SD) return null; var A = (SD.get() || {}).alerts || [], rs = SD.show ? SD.show(rt) : rt;
+      for (var i = 0; i < A.length; i++){ var al = A[i]; if (!al || !al.routes) continue;
+        if ((al.routes.indexOf(rt) >= 0 || al.routes.indexOf(rs) >= 0) && (!al.dir || al.dir === dir || (al.dir !== 'N' && al.dir !== 'S'))) return al; }
+      return null; };
+    TR.subPos = function(r, nowS){ var T = TR.subTr && TR.subTr[r[1]] && TR.subTr[r[1]][r[2]]; if (!T) return null;
+      var sP = r[3], sN = r[4], s;
+      if (r[7]) s = sN; else if (r[9] || nowS >= r[6]) s = sN - (sN - sP) * 0.04; else s = sN - (sN - sP) * Math.max(0, Math.min(1, (r[6] - nowS) / Math.max(20, r[5])));
+      var dir = sN >= sP ? 1 : -1, at = TR.glAt(T, s), ah = TR.glAt(T, s + dir * 6);
+      return { la: at.y / SY, lo: at.x / SK, la2: ah.y / SY, lo2: ah.x / SK }; };
+    TR.subDraw = function(g, dpr, z, W, H){
+      TR.subHits = []; if (!TR.subD || !TR.subTr) return;
+      var M5 = window._bvMta, col = function(rt){ var c = M5 && M5.colors ? M5.colors[M5.show ? M5.show(rt) : rt] : null; return c || '#808183'; };
+      var nowS = Date.now() / 1000, sc = z >= 16 ? 1 : .9;
+      TR.subD.trains.forEach(function(r){ var p = TR.subPos(r, nowS); if (!p) return;
+        var a = M.latLngToContainerPoint([p.la, p.lo]), b = M.latLngToContainerPoint([p.la2, p.lo2]);
+        var dx = b.x - a.x, dy = b.y - a.y, dl = Math.hypot(dx, dy) || 1; dx /= dl; dy /= dl;
+        var off = 4 * sc, x = (a.x - dy * off) * dpr, y = (a.y + dx * off) * dpr;           /* to the right of travel */
+        if (x < -30 || y < -30 || x > W + 30 || y > H + 30) return;
+        var dir = /N$/.test(r[10]) ? 'N' : 'S', al = TR.subAlert(r[0], dir), trouble = r[8] || r[9] || al;
+        if (trouble){ g.save(); g.shadowColor = 'rgba(245,165,36,.95)'; g.shadowBlur = 10 * dpr; g.fillStyle = 'rgba(245,165,36,.55)';
+          g.beginPath(); g.arc(x, y, 9 * dpr * sc, 0, 6.3); g.fill(); g.restore(); }
+        TR.carDraw(g, [x, y], Math.atan2(dy, dx), true, col(r[0]), dpr * sc, z);
+        if (z >= 15){ var lab = String(M5 && M5.show ? M5.show(r[0]) : r[0]).replace(/X$/, '');
+          g.font = '800 ' + (7.5 * dpr) + 'px system-ui,sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.lineWidth = 2.6 * dpr; g.strokeStyle = 'rgba(8,10,16,.9)';
+          g.strokeText(lab, x, y - 8.5 * dpr); g.fillStyle = '#fff'; g.fillText(lab, x, y - 8.5 * dpr);
+          if (r[8] || r[9]){ var tg = r[8] ? 'HELD' : 'LATE'; g.font = '800 ' + (7 * dpr) + 'px system-ui,sans-serif'; g.textAlign = 'left';
+            g.strokeText(tg, x + 11 * dpr, y); g.fillStyle = '#f5a524'; g.fillText(tg, x + 11 * dpr, y); } }
+        TR.subHits.push({ x: x / dpr, y: y / dpr, r: r, al: al }); }); window._bvTRsubHits = TR.subHits; };   /* window: read by the test sweeps */
+    TR.glTick = function(){ if (TR.lit !== true || !paneOn() || document.hidden || !M) return; var subOn = TR.show.rail && nycHere() && M.getZoom() >= 14;
+      if (TR.show.rr && Date.now() - TR.glWAt > 15000) TR.glW(); if (subOn && Date.now() - TR.subAt > 15000) TR.subW();
+      if (TR.show.rr || subOn || TR.subWas){ TR.subWas = subOn; TR.glDraw(); } };
     TR.draw = function(){
       if (!TR.lit || !M || !TR.cv) return;
       var cv = TR.cv, sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr);
@@ -108662,11 +109089,16 @@ function closeAlertModal(){
          timetable (THE BASIN's rail_sched.json). */
       TR.stHits = [];
       var phone = W / dpr < 600;
-      if (z >= 9 && TR.show.rail){ var RL = TR.railInView(); g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
+      if (z >= 9 && (TR.show.rail || (TR.show.rr && nycHere()))){ var RL = TR.railInView(); g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
+        /* ON SCREEN = THE LINE'S BOX MEETS THE VIEW (2026-10-19): "any point inside" dropped a line at street level, where a
+           straight run's two ends both lie off screen -- the 1 over 125th St vanished at z17 */
+        var onF = function(Q){ var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9; for (var qi = 0; qi < Q.length; qi++){ var q = Q[qi];
+            if (q[0] < x0) x0 = q[0]; if (q[0] > x1) x1 = q[0]; if (q[1] < y0) y0 = q[1]; if (q[1] > y1) y1 = q[1]; }
+          return !(x1 < -20 || y1 < -20 || x0 > W + 20 || y0 > H + 20); };
         var curve = function(Q){ g.beginPath(); g.moveTo(Q[0][0], Q[0][1]); for (var qi = 1; qi < Q.length - 1; qi++) g.quadraticCurveTo(Q[qi][0], Q[qi][1], (Q[qi][0] + Q[qi + 1][0]) / 2, (Q[qi][1] + Q[qi + 1][1]) / 2); g.lineTo(Q[Q.length - 1][0], Q[Q.length - 1][1]); };
-        RL.forEach(function(ln){ if (ln.la && z < 11) return; var Q = ln.p.map(P); if (Q.length < 2 || !Q.some(inF)) return; curve(Q);
+        RL.forEach(function(ln){ if (ln.la && z < 11) return; var Q = (z >= 16 && ln.ph ? ln.ph : ln.p).map(P); if (Q.length < 2 || !onF(Q)) return; curve(Q);
           g.globalAlpha = 1; g.lineWidth = ln.cw * dpr; g.strokeStyle = 'rgba(8,10,16,' + (ln.la ? .6 : .45) + ')'; g.stroke(); });
-        RL.forEach(function(ln){ if (ln.la && z < 11) return; var Q = ln.p.map(P); if (Q.length < 2 || !Q.some(inF)) return; curve(Q);
+        RL.forEach(function(ln){ if (ln.la && z < 11) return; var Q = (z >= 16 && ln.ph ? ln.ph : ln.p).map(P); if (Q.length < 2 || !onF(Q)) return; curve(Q);
           g.globalAlpha = ln.la ? 1 : .9; g.lineWidth = ln.bw * dpr; g.strokeStyle = ln.c; g.stroke(); });
         g.globalAlpha = 1;
         /* THE FERRIES, NYC ONLY (user 2026-10-17: "make the ferry routes show on the subway view too"): THE CITY's 31 routes
@@ -108680,7 +109112,15 @@ function closeAlertModal(){
             (rt.s || []).forEach(function(seg){ var Q = seg.map(function(c){ return P(c); }); if (!Q.some(inF)) return; g.beginPath(); Q.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); g.stroke(); }); }); });
           g.setLineDash([]);
         }
-        if (z >= 11) TR.stopsInView().forEach(function(st){ var q = P([st.lo, st.la]); if (!inF(q)) return;   /* from z11 (user 2026-10-17: "why dont we see subway station dots?") */
+        var rrBox = [];
+        if (z >= 10) TR.stopsInView().forEach(function(st){ if (st.k !== 'rr' && z < 11) return; var q = P([st.lo, st.la]); if (!inF(q)) return;   /* from z11 (user 2026-10-17: "why dont we see subway station dots?"); the railroads' from z10 */
+          if (st.k === 'rr'){ TR.stHits.push({ x: q[0] / dpr, y: q[1] / dpr, st: st }); var selR = TR.board && TR.board.st === st, rr0 = (phone ? 2 : 3) * (selR ? 1.4 : 1) * dpr;
+            g.beginPath(); g.arc(q[0], q[1], rr0, 0, 6.3); g.fillStyle = '#fff'; g.fill(); g.lineWidth = 1.6 * dpr; g.strokeStyle = st.c; g.stroke();
+            if (z >= 12 || /^(Penn Station|Grand Central|Jamaica|Atlantic Terminal|Stamford|Harlem-125 St|White Plains|Hicksville|Ronkonkoma|Babylon)$/.test(st.n)){
+              var fz = (z >= 14 ? 10 : 9) * dpr; g.font = '700 ' + fz + 'px system-ui,sans-serif'; var tw = g.measureText(st.n).width, bx0 = q[0] + 6 * dpr, box = [bx0, q[1] - fz * 0.6, bx0 + tw, q[1] + fz * 0.6];
+              if (!rrBox.some(function(r2){ return !(box[2] < r2[0] || box[0] > r2[2] || box[3] < r2[1] || box[1] > r2[3]); })){ rrBox.push(box);
+                g.textAlign = 'left'; g.textBaseline = 'middle'; g.lineWidth = 3 * dpr; g.strokeStyle = 'rgba(8,10,16,.88)'; g.strokeText(st.n, bx0, q[1]); g.fillStyle = '#eef2f8'; g.fillText(st.n, bx0, q[1]); } }
+            return; }
           TR.stHits.push({ x: q[0] / dpr, y: q[1] / dpr, st: st }); var sel = TR.board && TR.board.st === st;
           g.beginPath();
           if (st.k === 'la'){ var R0 = (phone ? 1.1 : 2.4) * (sel ? 1.5 : 1) * dpr; g.arc(q[0], q[1], R0, 0, 6.3); g.fillStyle = '#fff'; g.fill(); g.lineWidth = (phone ? .6 : 1.1) * dpr; g.strokeStyle = '#33383F'; g.stroke(); }
@@ -108701,17 +109141,41 @@ function closeAlertModal(){
         g.beginPath(); g.arc(q[0], q[1], cr, 0, 6.3); g.fillStyle = '#05DB32'; g.fill(); });
       /* the vehicles, over the incidents */
       var nVeh = 0, agencies = [];
-      (TR.show.veh ? TR.inView || [] : []).forEach(function(f){ var V = TR.veh[f.id]; if (!V) return; var shown = 0, rail = TR.kind(f) === 'rail', sc = rail ? 1.25 : .85;
+      var isRR = function(f){ return nycHere() && /lirr|long island|metro-north|mnr/i.test((f.n || '') + (f.u || '') + (f.id || '')); };
+      (TR.show.veh || (nycHere() && TR.show.rr) ? TR.inView || [] : []).forEach(function(f){ var V = TR.veh[f.id]; if (!V) return;
+        if (isRR(f) ? !TR.show.rr : !TR.show.veh) return;
+        var shown = 0, rail = TR.kind(f) === 'rail', sc = rail ? 1.25 : .85;
         /* commuter trains: larger, the site's light blue with "LIRR" / "MNR" beside them from z11; buses: smaller, white, route from z14 */
+        /* MINI TRAINS (user 2026-10-19: "update the icon for LIRR trains to be something other than a blue circle, its too similar to
+           the stations, are mini trains possible?"): a train is a small rail car -- a rounded body in its branch's color (light when
+           the feed names no branch), a dark window band, a bright cab at the front -- laid along its heading, or along the nearest
+           track when the feed gives none. A few canvas paths per train, as cheap as the dots were */
+        var trackAt = null;
+        if (rail){ var RLx = TR.railInView().map(function(ln){ return ln.p.map(P); });
+          trackAt = function(q){ var best = 1e9, ang = 0; RLx.forEach(function(Q){ for (var i = 1; i < Q.length; i++){ var a = Q[i - 1], b = Q[i];
+              if (Math.max(a[0], b[0]) < q[0] - 40 * dpr || Math.min(a[0], b[0]) > q[0] + 40 * dpr || Math.max(a[1], b[1]) < q[1] - 40 * dpr || Math.min(a[1], b[1]) > q[1] + 40 * dpr) continue;
+              var dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy || 1e-9, t = Math.max(0, Math.min(1, ((q[0] - a[0]) * dx + (q[1] - a[1]) * dy) / L2));
+              var d = Math.hypot(a[0] + t * dx - q[0], a[1] + t * dy - q[1]); if (d < best){ best = d; ang = Math.atan2(dy, dx); } } });
+            return best < 30 * dpr ? ang : null; }; }
         V.forEach(function(o){ var q = P([o.lo, o.la]); if (!inF(q)) return; shown++; nVeh++;
-          g.save(); g.translate(q[0], q[1]);
+          if (rail){ var rrK0 = /lirr|long island/i.test(f.n + f.u) ? 'LIRR' : /metro-north|mnr/i.test(f.n + f.u) ? 'MNR' : '';
+            if (rrK0 && isRR(f)) return;       /* the LIRR's and Metro-North's trains glide on their own layer (TR.glide) */
+            var brC = '#e2e8f0', hd = (isFinite(o.br) && o.br !== null) ? o.br : (isFinite(o.mv) ? o.mv : null), tAng = trackAt(q), ang = null;
+            if (hd != null){ ang = (hd - 90) * Math.PI / 180;
+              if (tAng != null){ var dA = Math.abs(((tAng - ang) % (2 * Math.PI) + 3 * Math.PI) % (2 * Math.PI) - Math.PI); ang = dA < Math.PI / 2 ? tAng : tAng + Math.PI; } }
+            else ang = tAng;
+            TR.carDraw(g, q, ang, hd != null, brC, dpr, z); }
+          else { g.save(); g.translate(q[0], q[1]);
           if (isFinite(o.br) && o.br !== null){ g.rotate(o.br * Math.PI / 180);
             g.beginPath(); g.moveTo(0, -6 * dpr * sc); g.lineTo(4.2 * dpr * sc, 4.5 * dpr * sc); g.lineTo(0, 2.4 * dpr * sc); g.lineTo(-4.2 * dpr * sc, 4.5 * dpr * sc); g.closePath(); }
           else { g.beginPath(); g.arc(0, 0, 3.4 * dpr * sc, 0, 6.3); }
-          g.fillStyle = rail ? '#7dd3fc' : '#f1f5f9'; g.fill(); g.lineWidth = 1.3 * dpr; g.strokeStyle = 'rgba(8,10,16,.9)'; g.stroke(); g.restore();
-          if (rail && z >= 11){ var tg = /lirr|long island/i.test(f.n + f.u) ? 'LIRR' : /metro-north|mnr/i.test(f.n + f.u) ? 'MNR' : '';
+          g.fillStyle = rail ? '#7dd3fc' : '#f1f5f9'; g.fill(); g.lineWidth = 1.3 * dpr; g.strokeStyle = 'rgba(8,10,16,.9)'; g.stroke(); g.restore(); }
+          if (rail && z >= 11){ var rrK = /lirr|long island/i.test(f.n + f.u) ? 'LIRR' : /metro-north|mnr/i.test(f.n + f.u) ? 'MNR' : '';
+            /* the branch, not the railroad over and over (user 2026-10-19): BABYLON, PORT WASHINGTON, NEW HAVEN; nothing when the feed names none */
+            var brN = rrK && TR.rrRt && TR.rrRt[rrK] && o.r != null && TR.rrRt[rrK][String(o.r)] ? TR.rrRt[rrK][String(o.r)][0] : '';
+            var tg = brN ? String(brN).replace(/ (Branch|Service|Line)$/i, '').toUpperCase() : '';
             if (tg){ g.font = '800 ' + (8 * dpr) + 'px system-ui,sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle';
-              g.lineWidth = 3 * dpr; g.strokeStyle = 'rgba(8,10,16,.85)'; g.strokeText(tg, q[0] + 8 * dpr, q[1]); g.fillStyle = '#bae6fd'; g.fillText(tg, q[0] + 8 * dpr, q[1]); return; } }
+              g.lineWidth = 3 * dpr; g.strokeStyle = 'rgba(8,10,16,.85)'; g.strokeText(tg, q[0] + 11 * dpr, q[1]); g.fillStyle = '#bae6fd'; g.fillText(tg, q[0] + 11 * dpr, q[1]); return; } return; }
           if (z >= 14 && o.r && o.r.length <= 6){ g.font = '800 ' + (8.5 * dpr) + 'px system-ui,sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle';
             g.lineWidth = 3 * dpr; g.strokeStyle = 'rgba(8,10,16,.85)'; g.strokeText(o.r, q[0] + 7 * dpr, q[1]); g.fillStyle = '#bae6fd'; g.fillText(o.r, q[0] + 7 * dpr, q[1]); }
         });
@@ -108799,17 +109263,20 @@ function closeAlertModal(){
     /* TRAFFIC'S SWITCHES (user 2026-10-17: "make toggles for the NYC traffic stuff like the cameras and subway"): ROAD
        TRAFFIC (TomTom's live colors and the jams), SUBWAY (lines, stations, delays, the home board; NYC and LA only),
        CAMERAS (NYC and LA only), BUSES & TRAINS (the live vehicles). Remembered on this device (bv_lc_traf). */
-    TR.show = { roads: true, rail: true, cams: true, veh: true };
+    TR.show = { roads: true, rail: true, cams: true, veh: true, rr: true };   /* rr: METRO NORTH & LIRR, New York's own switch (2026-10-19) */
     try { var _ts = JSON.parse(localStorage.getItem('bv_lc_traf') || 'null'); if (_ts) TR.show = Object.assign(TR.show, _ts); } catch(e){}
     TR.pills = function(){
       var city = nycHere() || laHere(), row = document.getElementById('lc-traf-pills');
       if (!row){ row = document.createElement('div'); row.id = 'lc-traf-pills'; row.style.cssText = 'padding:0 12px 6px;'; strip.parentNode.insertBefore(row, strip); }
       row.style.display = TR.lit === true ? '' : 'none';
-      var P2 = [['roads', 'ROAD TRAFFIC']].concat(city ? [['rail', nycHere() ? 'SUBWAY' : 'METRO RAIL']] : []).concat(city || LAX.ctD() ? [['cams', 'CAMERAS']] : []).concat([['veh', 'BUSES & TRAINS']]);   /* cameras: also any Caltrans district (LAX) */
+      /* BUSES / METRO NORTH & LIRR (user 2026-10-19: "separate METRO NORTH & LIRR from buses"): in New York the railroads have their
+         own switch -- their live trains and their track together; elsewhere one BUSES & TRAINS switch as before */
+      var P2 = [['roads', 'ROAD TRAFFIC']].concat(city ? [['rail', nycHere() ? 'SUBWAY' : 'METRO RAIL']] : []).concat(city || LAX.ctD() ? [['cams', 'CAMERAS']] : [])
+        .concat(nycHere() ? [['veh', 'BUSES'], ['rr', 'METRO NORTH & LIRR']] : [['veh', 'BUSES & TRAINS']]);   /* cameras: also any Caltrans district (LAX) */
       row.innerHTML = P2.map(function(q){ return '<button type="button" class="lc-pill' + (TR.show[q[0]] ? ' on' : '') + '" data-t="' + q[0] + '" style="margin:0 6px 0 0;">' + q[1] + '</button>'; }).join('');
       [].forEach.call(row.querySelectorAll('[data-t]'), function(b){ b.onclick = function(e){ e.stopPropagation(); var k = b.getAttribute('data-t'); TR.show[k] = !TR.show[k];
         try { localStorage.setItem('bv_lc_traf', JSON.stringify(TR.show)); } catch(e2){}
-        TR.applyShow(); TR.pills(); TR.draw(); }; }); };
+        TR.applyShow(); TR.pills(); TR.draw(); TR.transit(); if (TR.tcv && !TR.show.rr){ var gq = TR.tcv.getContext('2d'); gq.clearRect(0, 0, TR.tcv.width, TR.tcv.height); } }; }); };
     TR.applyShow = function(){
       if (!M) return;
       if (TR.lay){ if (TR.show.roads && TR.lit === true && !M.hasLayer(TR.lay)) TR.lay.addTo(M); else if (!TR.show.roads && M.hasLayer(TR.lay)) M.removeLayer(TR.lay); }
@@ -108820,7 +109287,10 @@ function closeAlertModal(){
       if (!M) return; TR.lit = true;
       if (!TR.cv){ var pn = M.getPane('lcTraf') || M.createPane('lcTraf'); pn.style.zIndex = 445; pn.style.pointerEvents = 'none';
         TR.cv = document.createElement('canvas'); TR.cv.style.position = 'absolute'; pn.appendChild(TR.cv);
-        M.on('zoomstart', function(){ if (TR.cv) TR.cv.style.visibility = 'hidden'; });
+        TR.tcv = document.createElement('canvas'); TR.tcv.style.position = 'absolute'; TR.tcv.style.pointerEvents = 'none'; pn.appendChild(TR.tcv);   /* the gliding trains */
+        M.on('zoomstart', function(){ if (TR.cv) TR.cv.style.visibility = 'hidden'; if (TR.tcv) TR.tcv.style.visibility = 'hidden'; });
+        M.on('move zoomend', function(){ TR.glTick(); });
+        if (!TR.glTimer) TR.glTimer = setInterval(TR.glTick, 100);
         /* TRAFFIC'S CANVAS OVER THE GROUND (user 2026-10-18 on the subway delay chips: "fix that" -- the lines cut through the
            bullets, THE CITY draws them on top). Every pane is flattened to z 400, so stacking is DOM order, and the panes made
            after this one -- the parks and ground fills (lcCityGround/lcCity, meant 396/397), the lidar shading (lcLidar, 398),
@@ -108832,7 +109302,7 @@ function closeAlertModal(){
         M.on('layeradd', TR.top);
         M.on('click', TR.camTap);
         M.on('moveend resize', function(){ if (TR.lit !== true) return; TR.draw(); clearTimeout(TR.deb); TR.deb = setTimeout(function(){ TR.read().then(TR.draw); TR.transit(); }, 600); }); }
-      TR.cv.style.display = ''; TR.top();
+      TR.cv.style.display = ''; if (TR.tcv) TR.tcv.style.display = ''; TR.top();
       /* the live layer is rebuilt when the place changes, so its box follows the search */
       var lk = (function(){ var L0 = window.LOCATION || {}; return (+L0.lat).toFixed(2) + ',' + (+L0.lon).toFixed(2); })();
       if (TR.lay && TR.layKey !== lk){ if (M.hasLayer(TR.lay)) M.removeLayer(TR.lay); TR.lay = null; }
@@ -108873,7 +109343,7 @@ function closeAlertModal(){
         if (TR.lit === true && TR.show.roads) TR.mesh.addTo(M);
       }).catch(function(){ TR.meshReq = 0; });
     };
-    TR.off = function(){ if (TR.lit !== true) return; TR.lit = false; TR.boardClose(); var tp = document.getElementById('lc-traf-pills'); if (tp) tp.style.display = 'none'; if (TR.lay && M && M.hasLayer(TR.lay)) M.removeLayer(TR.lay); if (TR.mesh && M && M.hasLayer(TR.mesh)) M.removeLayer(TR.mesh); if (TR.cv) TR.cv.style.display = 'none'; cvFree(TR.cv);
+    TR.off = function(){ if (TR.lit !== true) return; TR.lit = false; TR.boardClose(); var tp = document.getElementById('lc-traf-pills'); if (tp) tp.style.display = 'none'; if (TR.lay && M && M.hasLayer(TR.lay)) M.removeLayer(TR.lay); if (TR.mesh && M && M.hasLayer(TR.mesh)) M.removeLayer(TR.mesh); if (TR.cv) TR.cv.style.display = 'none'; cvFree(TR.cv); if (TR.tcv){ TR.tcv.style.display = 'none'; cvFree(TR.tcv); }
       if (TR.timer){ clearInterval(TR.timer); TR.timer = null; } if (TR.vtimer){ clearInterval(TR.vtimer); TR.vtimer = null; } };
     /* ---------------------------------------------------------------- ICE AGE -- */
     /* THE ICE SHEET ON GEOLOGY (user 2026-10-17: "can geology have glacial info like NYC did"). THE CITY draws where the ice
@@ -109586,7 +110056,7 @@ function closeAlertModal(){
       if (!M) return;
       var mapV = VIEW === 'map', on = function(k){ return !mapV || LAY.st[k]; };
       var op = function(l, show){ if (!l || !l.setOpacity) return; if (l._lcOp == null) l._lcOp = l.options.opacity == null ? 1 : l.options.opacity; l.setOpacity(show ? l._lcOp : 0); };
-      (M._lcLabs || []).forEach(function(l){ op(l, on('lab')); });
+      (M._lcLabs || []).forEach(function(l){ op(l, on('lab')); }); PKL.draw();   /* the park parts follow the names switch */
       if (M._bvNames){ if (on('lab') && !M.hasLayer(M._bvNames)) M._bvNames.addTo(M); else if (!on('lab') && M.hasLayer(M._bvNames)) M.removeLayer(M._bvNames); }
       [M._bvBathyLayer, M._bvBathyUnder, M._bvSeafloorLayer].forEach(function(l){ op(l, on('bath')); });
       M._bvSeaOff = !(VIEW === 'map' || tideOn()) || !on('sea'); if (M._bvSeaRedraw) M._bvSeaRedraw();
@@ -118246,11 +118716,24 @@ function closeAlertModal(){
       entries[i].target.classList.toggle('bv-offscreen', !entries[i].isIntersecting);
     }
   }, { rootMargin: '200px 0px' });
+  var io0 = new IntersectionObserver(function(entries){
+    for (var i = 0; i < entries.length; i++) entries[i].target.classList.toggle('bv-offscreen', !entries[i].isIntersecting);
+  }, { rootMargin: '0px' });
   var seen = new WeakSet();
   function scan(){
+    /* ...and the animated strips INSIDE a widget that is itself on screen (2026-10-20, measured on LOCAL's NYC traffic view): the
+       CLOUDS widget holds the map, so it never counts as off screen, and its tab bars' pulsing hazard counts, the LIVE dot and the
+       range's little storm (radar sweep + five pulsing cells) kept running 350-420 px above the fold -- ~7 s of main thread a
+       minute while the map was being looked at. Each is watched on its own now (.bv-anim-watch for any other such strip). */
     var els = document.querySelectorAll('.widget, .weather-card');
     for (var i = 0; i < els.length; i++){
       if (!seen.has(els[i])){ seen.add(els[i]); io.observe(els[i]); }
+    }
+    /* the strips pause the moment they leave the screen (no 200 px margin: with the station board folded the map rides up and
+       the bars sat 166-235 px above the fold, "near" enough to keep running) */
+    var st = document.querySelectorAll('#cira-tab-bar, #cira-tab-bar2, #fcast-range-radar-clone, .bv-anim-watch');
+    for (var j = 0; j < st.length; j++){
+      if (!seen.has(st[j])){ seen.add(st[j]); io0.observe(st[j]); }
     }
   }
   function start(){ scan(); setTimeout(scan, 5000); setTimeout(scan, 20000); setInterval(scan, 60000); }

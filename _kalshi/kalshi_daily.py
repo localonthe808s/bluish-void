@@ -198,6 +198,8 @@ BIAS_K  = int(os.environ.get('BV_BIAS_K', '30') or 30)   # days in the rolling b
 BIAS_MIN = 7                              # need this many before trusting it
 LOCK_HOUR = 12                            # noon ET: morning obs in hand, peak ahead
 EVE_HOUR = 17                             # the overnight plan is logged from 5 PM local
+TRAIL_FULL_DAYS, TRAIL_KEEP_DAYS = 14, 90     # history[].trail: full rows for 14 days, the core for 90
+TRAIL_CORE = ('h', 'pred', 'sd', 'obs', 'ours', 'mkt')
 FINAL_HOUR = 18                           # the actionable call, still 6 h before close
 
 # Five-model consensus.  Every one of these beats our old single source, and
@@ -2549,6 +2551,19 @@ def measured_cap():
 # as `shadow` beside the lock and grades it at settlement like any other -- the court reads both, so
 # a market earns its bets back on the record and not by anyone's say-so. Nothing here is typed to
 # fit: the two constants are a sample size and a window.
+#
+# RE-JUDGED 2026-10-19 ("do 1 2 3 and 4"), and LEFT AS IT IS. New York's noon court was shut 09-28..10-06 while the
+# bets it withheld won 6 of 7, which looked like a broken rule. It was not: replayed day by day on what each bake knew
+# (it matches the live trail's gate exactly), the court never mixed legs or cities and its window was current; it was
+# shut because the record only began 09-05 and half the days carry no bet, so n reached 20 on 10-05, and then sat at
+# 0.86 and 0.98 of its own margin for two days before opening 10-07. Six of the "13 withheld bets that went 10-3"
+# were never the court's: they were picks_agree (why='disagree', 4 won 2 lost). Causal alternatives on the same days
+# (lock leg, every graded bet): this rule 8 named +75c +- 34; ret > 0 at n >= 20, 10 named +62c +- 24; n >= 10 and
+# ret >= se, 9 named +54c +- 36; always open, 30 named +37c +- 19. A placebo -- random sets of bets of the same size
+# from the same days -- beats every rule's timing 13-42% of the time, so no gate is distinguishable from another at
+# 30 bets, and none is adopted. The evening leg, on ITS OWN record (named and withheld), has never reached its
+# margin: 37 graded, 18 won, -2c +- 16 per $1; the best its last 30 managed was +10c against a 17c margin (10-18).
+# It stays paused by this same rule and reopens only on that record, never on the noon leg's.
 EDGE_WINDOW, EDGE_MIN_N = 30, 20
 EDGE_GATE = {}          # (market key, leg) -> the court's ruling, set at the start of each run
 
@@ -5158,10 +5173,21 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
                 h['published'] = {'h': t['h'], 'twc': t.get('twc_fc'), 'nws': t.get('nws_fc'),
                                   'ours': t.get('pred')}
                 break
-    keep = sorted(hist, reverse=True)[:14]
+    # THE HOURLY TRAIL IS KEPT 90 DAYS (2026-10-19, was 14). It is the only per-hour record of ours against the
+    # market inside the public file, and 14 days was too short to measure anything hourly on (the morning-blend
+    # question needed 40). The newest TRAIL_FULL_DAYS keep every field; older days keep the core of each hour --
+    # h, pred, sd, obs, ours, mkt -- and drop what is either derivable (edge) or already kept once a day
+    # (twc_fc/nws_fc live on in `published`). Measured on the 10-19 file: 3.1 KB a day in full, 2.4 KB compact, so
+    # the steady state is about +180 KB raw (~+20 KB gzipped) over the 255 KB file. No positions or money are in it.
+    order = sorted(hist, reverse=True)
+    full, keep = set(order[:TRAIL_FULL_DAYS]), set(order[:TRAIL_KEEP_DAYS])
     for k, h in hist.items():
-        if k not in keep and 'trail' in h:
+        if 'trail' not in h:
+            continue
+        if k not in keep:
             del h['trail']
+        elif k not in full:
+            h['trail'] = [{f: t[f] for f in TRAIL_CORE if f in t} for t in h['trail']]
 
     doc = {
         # `now` is local_now(cfg) -- the clock where the market SETTLES, not
