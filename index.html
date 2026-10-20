@@ -745,6 +745,52 @@ window._bvManageRaster = function(map, rasterLayer){
    site's cityLbl list simply leaves them out. _maplab/index.html (THE BASIN) keeps the same list in labelsFor(). */
 window.BV_NO_PLACE = ['san francisco'];
 window._bvBannedPlace = function(f){ var p = (f && f.props) || {}, nm = String(p['name:en'] || p.name || '').toLowerCase(); return window.BV_NO_PLACE.indexOf(nm) >= 0; };
+/* NAMES ON OUR MAPS: NO STREETS, AND PARKS ONLY WHERE THE NAME FITS (user 2026-10-19: "we shouldnt be labeling streets / parks and
+   green spaces should be labeled and properly sized at all levels necessary, they shouldnt show from high up unless its a large
+   national park something that can fit the text properly but i dont want to see a flood of texts, id rather the text fit inside
+   them"). protomaps' road-name rules are dropped. The archive's park POLYGONS carry no names (measured: 0 of 112 at z10, 0 of
+   97 at z12 over New York) -- the name is on a POI point inside each. So, per tile, a first rule notes the park points (it
+   places nothing) and a second labels a park polygon only when one of those points falls inside it AND the name, set in at
+   most two lines, fits inside the polygon with a margin at that point's height. Small parks drop out by themselves as the view
+   widens; under z9 only national parks, preserves and protected land are tried. One name per park across tiles. */
+window._bvParkLabels = function(rules, F){
+  var P = protomapsL; if (!P || !P.CenteredTextSymbolizer) return rules;
+  var PARK = /^(park|national_park|nature_reserve|protected_area|garden|recreation_ground|golf_course|cemetery|forest|wood|village_green|common|zoo|conservation)$/;
+  var BIG = /^(national_park|nature_reserve|protected_area|forest|conservation)$/;
+  var pts = { z: -1, a: [] }, ST = window._bvParkStat = { noted: 0, tried: 0, hit: 0, fit: 0, placed: 0 };
+  var note = { place: function(layout, geom, f){ var z = layout.zoom, p = f.props || {}; if (!p.name || !PARK.test(p.kind || '')) return;
+      if (pts.z !== z || pts.a.length > 6000){ pts.z = z; pts.a = []; }
+      var q = geom && geom[0] && geom[0][0]; ST.noted++; if (q) pts.a.push({ x: q.x, y: q.y, name: String(p.name), kind: p.kind }); } };
+  var size = function(z){ return z >= 16 ? 11 : z >= 14 ? 10 : 9; };
+  var txt = new P.CenteredTextSymbolizer({ labelProps: ['_plab'], font: function(z){ return '600 ' + size(z) + 'px system-ui, -apple-system, sans-serif'; },
+    fill: F && F.desert ? 'rgba(178,232,180,.95)' : 'rgba(36,96,48,.95)', stroke: F && F.desert ? 'rgba(8,14,10,.85)' : 'rgba(255,255,255,.85)', width: 1.6,
+    letterSpacing: 0.3, lineHeight: 1.3, maxLineChars: 16 });
+  var inside = function(R, x, y){ var c = false; for (var i = 0, j = R.length - 1; i < R.length; j = i++){ var a = R[i], b = R[j];
+    if (((a.y > y) !== (b.y > y)) && (x < (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x)) c = !c; } return c; };
+  var span = function(R, x, y){ var xs = []; for (var i = 0, j = R.length - 1; i < R.length; j = i++){ var a = R[i], b = R[j];
+      if ((a.y > y) !== (b.y > y)) xs.push(a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y)); }
+    xs.sort(function(m, n){ return m - n; }); for (var k = 0; k + 1 < xs.length; k += 2) if (xs[k] <= x && x <= xs[k + 1]) return [xs[k], xs[k + 1]]; return null; };
+  var lab = { place: function(layout, geom, f){
+    var z = layout.zoom, k = (f.props || {}).kind || ''; if (!PARK.test(k) || (z < 9 && !BIG.test(k))) return;
+    var R = geom && geom[0]; ST.tried++; if (!R || R.length < 4 || pts.z !== z) return;
+    var hit = null; for (var i = 0; i < pts.a.length; i++){ var q = pts.a[i]; if (inside(R, q.x, q.y)){ hit = q; break; } }
+    if (!hit) return; ST.hit++;
+    var nm = hit.name.replace(/\s+/g, ' ').trim(); if (!nm || nm.length > 40) return;
+    /* the name in at most two lines of <= 16 characters; its box, with a margin, must sit inside the park at the point's height
+       (and a line above and below it) */
+    var words = nm.split(' '), lines = [''], fs = size(z);
+    words.forEach(function(w){ var L0 = lines[lines.length - 1]; if ((L0 + ' ' + w).trim().length > 16 && L0) lines.push(w); else lines[lines.length - 1] = (L0 + ' ' + w).trim(); });
+    if (lines.length > 2) return;
+    var w = Math.max.apply(null, lines.map(function(L1){ return L1.length; })) * fs * 0.62 + 14, h = lines.length * fs * 1.3 + 8;
+    var ok = [hit.y - h / 2, hit.y, hit.y + h / 2].every(function(y){ var sp = span(R, hit.x, y); return sp && sp[1] - sp[0] >= w && hit.x - sp[0] >= w / 2 - 2 && sp[1] - hit.x >= w / 2 - 2; });
+    if (!ok) return; ST.fit++;
+    f.props._plab = nm;
+    var at = { x: hit.x, y: hit.y, dist: function(b){ return Math.sqrt((this.x - b.x) * (this.x - b.x) + (this.y - b.y) * (this.y - b.y)); } };
+    var r = txt.place(layout, [[at]], f); if (!r) return; ST.placed++;
+    r.forEach(function(o){ o.deduplicationKey = 'park:' + nm; o.deduplicationDistance = 600; }); return r; } };
+  return rules.filter(function(r){ return r.dataLayer !== 'roads'; })
+    .concat([{ dataLayer: 'pois', symbolizer: note }, { dataLayer: 'landuse', symbolizer: lab }]);
+};
 window._bvPlaceFloor = function(rules, ourNames){
   var MIN = function(z){ return z <= 4 ? 250000 : (z <= 6 ? 100000 : 0); };
   return rules.map(function(r){
@@ -1485,7 +1531,7 @@ window._bvVectorBase = function(map, opts){
         minZoom: t.min, maxZoom: t.max,
         paintRules: opts.labels ? (map._bvBathyLayer ? window._bvBridgeRules(F) : [])
                                 : window._bvPaintPlus(protomapsL.paintRules(F), F),
-        labelRules: opts.labels ? _bvPlaceFloor(protomapsL.labelRules(F, 'en'), opts.ourNames !== false) : [],
+        labelRules: opts.labels ? window._bvParkLabels(_bvPlaceFloor(protomapsL.labelRules(F, 'en'), opts.ourNames !== false), F) : [],
         // ODbL: the tiles are ours to serve, the data is OpenStreetMap's to credit
         attribution: opts.labels ? '' : '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
       };
@@ -59041,7 +59087,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var W = 1024, H = Math.round(W * spanY / spanX);
       if (!isFinite(H) || H < 10 || H > 4000) { cb(null); return; }
       var F = flavor || window.BV_MAP_FLAVOR;
-      var lr = protomapsL.labelRules(F, 'en').map(function(r){   /* the never-labelled places (BV_NO_PLACE) */
+      var lr = protomapsL.labelRules(F, 'en').filter(function(r){ return r.dataLayer !== 'roads'; }).map(function(r){   /* the never-labelled places (BV_NO_PLACE); no street names (user 2026-10-19) */
         if (r.dataLayer !== 'places') return r;
         var b0 = r.filter, o0 = {}; for (var k0 in r) o0[k0] = r[k0];
         o0.filter = function(z, f){ if (window._bvBannedPlace(f)) return false; return b0 ? b0(z, f) : true; };
@@ -105147,6 +105193,14 @@ function closeAlertModal(){
       if (cn) cn(M, { themed: true });
       (labs || []).forEach(function(l){ var c = l.getContainer && l.getContainer(); if (c) M.getPane('lcLabels').appendChild(c); });   /* names over the radar and the rock */
       M._lcLabs = labs || [];
+      /* NAMES ABOVE THE GROUND LAYERS (2026-10-19, the park names): every pane is flattened to z 400, so this pane, made first,
+         sat under New York's parks and ground (lcCityGround / lcCity), the 1865 water, the lidar and the sea, and every name in
+         the city was hidden -- Central Park's included. It is kept just before the traffic, flood-gauge and castle panes (those
+         stay last, TR.top), after everything else, whenever a layer is added */
+      var labsUp = function(){ var lp = M.getPane('lcLabels'), par = lp && lp.parentNode; if (!par) return;
+        var before = null; [].some.call(par.children, function(k){ if (/leaflet-(lcTraf|lcLvDots|lcKx)-pane/.test(k.className)){ before = k; return true; } return false; });
+        if (before ? lp.nextSibling !== before : lp !== par.lastChild){ if (before) par.insertBefore(lp, before); else par.appendChild(lp); } };
+      M.on('layeradd', labsUp); labsUp();
       here = L.circleMarker([+L0.lat, +L0.lon], { radius: 5, color: '#fff', weight: 2, fillColor: '#2B22F4', fillOpacity: 1, pane: 'lcLabels' }).addTo(M);
       M.on('moveend', function(){ GH.sync(); CD.sync(); if (VIEW === 'radar') R.rebuild(); if (riverOn()){ clearTimeout(RV.deb); RV.deb = setTimeout(RV.fetch, 400); } if (VIEW === 'rock'){ clearTimeout(FQ.deb); FQ.deb = setTimeout(FQ.fetch, 500); } });
       M.on('click', function(e){ if (VIEW === 'rock' && !NG.tap(e)) rockTap(e.latlng); if (VIEW === 'leaf') LF.tap(e); if (VIEW === 'radar' && !(tideOn() && LV.csoTap(e))) FC.tap(e); });
