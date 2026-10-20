@@ -776,6 +776,8 @@ window._bvParkLabels = function(rules, F){
     var hit = null; for (var i = 0; i < pts.a.length; i++){ var q = pts.a[i]; if (inside(R, q.x, q.y)){ hit = q; break; } }
     if (!hit) return; ST.hit++;
     var nm = hit.name.replace(/\s+/g, ' ').trim(); if (!nm || nm.length > 40) return;
+    if (window._bvParkOwn && window._bvParkOwn[nm]) return;                        /* New York's parks name themselves and their parts (LOCAL) */
+    if (/\d/.test(nm) && !/[a-z]{3}/.test(nm)) return;                            /* a code, not a name ("Us-Tn-87-5") */
     /* the name in at most two lines of <= 16 characters; its box, with a margin, must sit inside the park at the point's height
        (and a line above and below it) */
     var words = nm.split(' '), lines = [''], fs = size(z);
@@ -910,9 +912,11 @@ window._bvPaintPlus = function(rules, F){
       var wa = r.symbolizer.width, g0 = wa.get.bind(wa); wa.get = function(z, f){ return g0(z, f) * roadK(z); }; r.symbolizer._bvThin = true; }
     if (r.dataLayer === 'water' && r.minzoom === 14 && r.symbolizer instanceof P.LineSymbolizer) return;    /* theirs, z14 only */
     var waterPoly = r.dataLayer === 'water' && r.symbolizer instanceof P.PolygonSymbolizer;
-    if (waterPoly && !wetDone){ if (parkRule) out.push(parkRule); out.push(wet); sandRules.forEach(function(x){ out.push(x); }); if (!F.desert) out.push(bigRiver); wetDone = true; }
+    /* RIVER LINES UNDER THE WATER (user 2026-10-19: "remove river lines, i dont want to see those" -- an OSM centerline drawn down
+       the middle of the Mississippi's own channel): the river and canal lines go in BEFORE the water polygons, so wherever a
+       river has its real channel drawn the fill covers its line, and the line shows only where it is the river itself */
+    if (waterPoly && !wetDone){ if (parkRule) out.push(parkRule); out.push(wet); sandRules.forEach(function(x){ out.push(x); }); if (!F.desert) out.push(bigRiver); lines.forEach(function(l){ out.push(l); }); wetDone = true; }
     out.push(r);
-    if (waterPoly) lines.forEach(function(l){ out.push(l); });
   });
   return out;
 };
@@ -105201,6 +105205,7 @@ function closeAlertModal(){
         var before = null; [].some.call(par.children, function(k){ if (/leaflet-(lcTraf|lcLvDots|lcKx)-pane/.test(k.className)){ before = k; return true; } return false; });
         if (before ? lp.nextSibling !== before : lp !== par.lastChild){ if (before) par.insertBefore(lp, before); else par.appendChild(lp); } };
       M.on('layeradd', labsUp); labsUp();
+      M.on('moveend', function(){ PKL.draw(); }); PKL.draw();   /* the parks' own parts, New York only */
       here = L.circleMarker([+L0.lat, +L0.lon], { radius: 5, color: '#fff', weight: 2, fillColor: '#2B22F4', fillOpacity: 1, pane: 'lcLabels' }).addTo(M);
       M.on('moveend', function(){ GH.sync(); CD.sync(); if (VIEW === 'radar') R.rebuild(); if (riverOn()){ clearTimeout(RV.deb); RV.deb = setTimeout(RV.fetch, 400); } if (VIEW === 'rock'){ clearTimeout(FQ.deb); FQ.deb = setTimeout(FQ.fetch, 500); } });
       M.on('click', function(e){ if (VIEW === 'rock' && !NG.tap(e)) rockTap(e.latlng); if (VIEW === 'leaf') LF.tap(e); if (VIEW === 'radar' && !(tideOn() && LV.csoTap(e))) FC.tap(e); });
@@ -107289,6 +107294,76 @@ function closeAlertModal(){
        ground they drained, /ghost-marsh.json, filled rgb(0,180,162) with a thin rgb(0,112,118) shore; the named ponds and
        brooks (/ghost_streams.json: the Collect, Minetta Brook...) win a tap. On the MAP view, inside the city only, an
        "1865 WATER" pill toggles it (remembered). Tap a stream for its name, story and traced length. */
+    /* THE PARKS' OWN PARTS, NAMED INSIDE THEM (user 2026-10-19: "at a low zoom where things fit, i want central park and prospect
+       park, flushing meadows corona park, to have all of their subsections labeled inside their parks"). city_park_parts.json
+       (_parkbake/bake.py, OpenStreetMap): 96 named areas -- The Great Lawn, Sheep Meadow, The Ramble, Harlem Meer, Long Meadow,
+       The Nethermead, Prospect Lake, Meadow Lake, the Unisphere -- each with its outline and the interior point with the most
+       room, plus the named hills, and the three parks themselves. New York only (the file is asked for inside the city).
+       A name is drawn only where it fits: in at most three lines, its box with a margin must sit inside the area's outline at the
+       label point and a half-line above and below; the bigger areas go first and a name never overlaps another. Hills, which
+       have no outline, from z16. Water in a blue, the rest in the park green, over a dark halo, like the basemap's park names. */
+    var PKL = window._bvPKL = { d: null, req: false, g: null };   /* window: read by the test sweeps */
+    PKL.draw = function(){
+      if (!M) return;
+      if (!PKL.g) PKL.g = L.layerGroup().addTo(M);
+      PKL.g.clearLayers();
+      var labOff = (M._lcLabs || [])[0] && M._lcLabs[0].options && M._lcLabs[0].options.opacity === 0;
+      if (!nycHere() || labOff || M.getZoom() < 13) return;
+      if (!PKL.d){ if (!PKL.req){ PKL.req = true; fetch('/city_park_parts.json').then(function(r){ return r.ok ? r.json() : []; }).then(function(d){
+          PKL.d = d || []; var own = {}; PKL.d.forEach(function(o){ own[o.n] = 1; }); window._bvParkOwn = own;
+          /* the basemap's park names were laid out before this list arrived: lay them out again so "Central Park" is not said twice */
+          (M._lcLabs || []).forEach(function(l){ try { if (l.clearLayout) l.clearLayout(); if (l.rerenderTiles) l.rerenderTiles(); } catch(e){} });
+          PKL.d.forEach(function(o){ if (!o.g) { o.ar = 0; return; } var a = 0; for (var i = 0, j = o.g.length - 1; i < o.g.length; j = i++) a += (o.g[j][0] + o.g[i][0]) * (o.g[j][1] - o.g[i][1]); o.ar = Math.abs(a); });
+          /* the parts first, biggest first; the parks' own names last, so they take what room is left instead of the middle of the
+             Great Lawn and the Long Meadow */
+          PKL.d.sort(function(a, b){ return (a.k === 'park') - (b.k === 'park') || b.ar - a.ar; }); PKL.draw(); }).catch(function(){}); } return; }
+      var z = M.getZoom(), fs = z >= 17 ? 11 : z >= 15 ? 10 : 9, B = M.getBounds().pad(0.1), placed = [];
+      var span = function(Q, x, y){ var xs = []; for (var i = 0, j = Q.length - 1; i < Q.length; j = i++){ var a = Q[i], b = Q[j];
+          if ((a.y > y) !== (b.y > y)) xs.push(a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y)); }
+        xs.sort(function(m, n){ return m - n; }); for (var k = 0; k + 1 < xs.length; k += 2) if (xs[k] <= x && x <= xs[k + 1]) return [xs[k], xs[k + 1]]; return null; };
+      PKL.d.forEach(function(o){
+        if (!B.contains([o.c[1], o.c[0]])) return;
+        var peak = o.k === 'peak'; if (peak && z < 16) return;
+        if (o.k === 'park' && z >= 15) return;                                  /* close in, the parts name the park */
+        var words = o.n.split(' '), lines = [''];
+        words.forEach(function(w){ var L0 = lines[lines.length - 1]; if ((L0 + ' ' + w).trim().length > 16 && L0) lines.push(w); else lines[lines.length - 1] = (L0 + ' ' + w).trim(); });
+        if (lines.length > 3) return;
+        var w = Math.max.apply(null, lines.map(function(x){ return x.length; })) * fs * 0.6 + 10, h = lines.length * fs * 1.25 + 6;
+        var c = M.latLngToContainerPoint([o.c[1], o.c[0]]), at = c, rot = 0;
+        if (!peak){
+          /* the baked point is the one farthest from every edge; a name is wide, so it is centred on the area's run at that height
+             (and at a few heights round it), then its top, middle and bottom rows must all fit */
+          var Q = o.g.map(function(p){ return M.latLngToContainerPoint([p[1], p[0]]); });
+          at = null;
+          [0, -0.5, 0.5, -1, 1, -1.6, 1.6].some(function(k){ var y = c.y + k * h, sp = span(Q, c.x, y); if (!sp) return false;
+            var x = (sp[0] + sp[1]) / 2;
+            if ([y - h / 2, y, y + h / 2].every(function(yy){ var s2 = span(Q, x, yy); return s2 && x - s2[0] >= w / 2 && s2[1] - x >= w / 2; })){ at = L.point(x, y); return true; }
+            return false; });
+          /* still no room: along the area's long axis (o.a, baked), the same test in the turned frame */
+          if (!at && o.a != null && Math.abs(o.a) > 8){
+            var t = -o.a * Math.PI / 180, ct = Math.cos(t), st = Math.sin(t);
+            var Rq = Q.map(function(q){ var dx = q.x - c.x, dy = q.y - c.y; return L.point(c.x + dx * ct - dy * st, c.y + dx * st + dy * ct); });
+            [0, -0.5, 0.5, -1, 1].some(function(k){ var y = c.y + k * h, sp = span(Rq, c.x, y); if (!sp) return false;
+              var x = (sp[0] + sp[1]) / 2;
+              if ([y - h / 2, y, y + h / 2].every(function(yy){ var s2 = span(Rq, x, yy); return s2 && x - s2[0] >= w / 2 && s2[1] - x >= w / 2; })){
+                var dx = x - c.x, dy = y - c.y; at = L.point(c.x + dx * ct + dy * st, c.y - dx * st + dy * ct); rot = o.a; return true; }
+              return false; });
+          }
+          if (!at) return;
+        }
+        c = at;
+        var rr = rot ? Math.abs(rot) * Math.PI / 180 : 0, bw = w * Math.cos(rr) + h * Math.sin(rr), bh = w * Math.sin(rr) + h * Math.cos(rr);   /* the turned name's own footprint */
+        var box = [c.x - bw / 2, c.y - bh / 2, c.x + bw / 2, c.y + bh / 2];
+        if (placed.some(function(b){ return !(box[2] < b[0] || box[0] > b[2] || box[3] < b[1] || box[1] > b[3]); })) return;
+        placed.push(box);
+        var wet = /^(natural:water|water:)/.test(o.k);
+        var col = wet ? 'rgba(160,205,245,.95)' : o.k === 'park' ? 'rgba(200,240,200,.97)' : 'rgba(178,232,180,.95)';
+        var html = '<div style="transform:translate(-50%,-50%)' + (rot ? ' rotate(' + rot + 'deg)' : '') + ';white-space:nowrap;text-align:center;font:' + (wet ? 'italic ' : '') + (o.k === 'park' ? '700 ' : '600 ') + fs + 'px/1.25 system-ui,-apple-system,sans-serif;'
+          + 'letter-spacing:.02em;color:' + col + ';text-shadow:0 0 2px rgba(8,14,10,.95),0 0 4px rgba(8,14,10,.85),0 1px 2px rgba(8,14,10,.9);">'
+          + lines.map(function(x){ return x.replace(/&/g, '&amp;').replace(/</g, '&lt;'); }).join('<br>') + '</div>';
+        L.marker(M.containerPointToLatLng(c), { pane: 'lcLabels', interactive: false, keyboard: false, icon: L.divIcon({ className: '', iconSize: [0, 0], html: html }) }).addTo(PKL.g);
+      });
+    };
     var GH = { on: true, lay: null, loading: false };
     try { GH.on = localStorage.getItem('bv_lc_1865') !== '0'; } catch(e){}
     var GH_BOX = [-74.30, 40.48, -73.65, 40.95];
@@ -109662,7 +109737,7 @@ function closeAlertModal(){
       if (!M) return;
       var mapV = VIEW === 'map', on = function(k){ return !mapV || LAY.st[k]; };
       var op = function(l, show){ if (!l || !l.setOpacity) return; if (l._lcOp == null) l._lcOp = l.options.opacity == null ? 1 : l.options.opacity; l.setOpacity(show ? l._lcOp : 0); };
-      (M._lcLabs || []).forEach(function(l){ op(l, on('lab')); });
+      (M._lcLabs || []).forEach(function(l){ op(l, on('lab')); }); PKL.draw();   /* the park parts follow the names switch */
       if (M._bvNames){ if (on('lab') && !M.hasLayer(M._bvNames)) M._bvNames.addTo(M); else if (!on('lab') && M.hasLayer(M._bvNames)) M.removeLayer(M._bvNames); }
       [M._bvBathyLayer, M._bvBathyUnder, M._bvSeafloorLayer].forEach(function(l){ op(l, on('bath')); });
       M._bvSeaOff = !(VIEW === 'map' || tideOn()) || !on('sea'); if (M._bvSeaRedraw) M._bvSeaRedraw();
