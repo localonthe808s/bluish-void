@@ -37,6 +37,41 @@ export default {
     if (url.pathname === '/rail/v1/nyc.json') return railRoute(url, ctx, cors);
     if (url.pathname === '/subway/v1/nyc.json') return subwayRoute(url, ctx, cors);   /* the subway's trains between stations (rail.js) */   /* the LIRR's and Metro-North's trains, on their track (rail.js) */
     if (url.pathname === '/' || url.pathname === '/health') return new Response(JSON.stringify({ ok: true, archives: Object.keys(ARCHIVES) }), { headers: { 'Content-Type': 'application/json', ...cors } });
+    /* GOES FRAMES, CACHED (2026-10-20, user: "can we cache or cloudflare these somehow so they play smoothly"). The LIVE CLOUDS
+       loop reads NESDIS STAR's sector frames (cdn.star.nesdis.noaa.gov), which answer `cache-control: off` -- so every visit
+       downloaded the whole loop again (6 h = 72 frames, ~64 MB at 1200 px), and their outage of 10-20 left it blank. A frame's
+       name carries its UTC time and never changes, so each is kept at the edge and in the browser for a year; the directory
+       listing is what changes (a frame every 5 min), so it is kept 60 s. Only the sector imagery paths are passed. */
+    const gm = url.pathname.match(/^\/goes\/(GOES1[6-9])\/(ABI|GLM)\/SECTOR\/([a-z]{2,4})\/([A-Za-z0-9]{2,32})\/(\d{11}_GOES1[6-9]-(?:ABI|GLM)-[a-z]{2,4}-[A-Za-z0-9]{2,32}-\d{3,4}x\d{3,4}\.jpg)?$/);
+    if (gm){
+      const file = gm[5] || '', listing = !file;
+      /* the listing's key carries the minute: a stored copy came back with the zone's 4 h TTL in place of the 60 s asked for,
+         so its freshness does not rest on the cache honouring max-age */
+      const cache = caches.default, key = new Request(url.origin + url.pathname + (listing ? '?m=' + Math.floor(Date.now() / 60000) : ''), { method: 'GET' });
+      let hit = await cache.match(key), tag = 'HIT';
+      if (!hit){
+        tag = 'MISS';
+        const up = await fetch('https://cdn.star.nesdis.noaa.gov/' + gm[1] + '/' + gm[2] + '/SECTOR/' + gm[3] + '/' + gm[4] + '/' + file, { headers: { 'User-Agent': 'bluishvoid.com satellite loop cache' } });
+        if (!up.ok) return new Response(null, { status: up.status === 404 ? 404 : 502, headers: { ...cors, 'Cache-Control': 'no-store' } });
+        let body = await up.arrayBuffer();
+        if (listing){
+          /* the listing runs ten days back (1.7 MB for one sector); the loop's longest choice is 48 h, so the frames of the
+             last 49 h are kept as bare links, the same href="<name>" the page reads */
+          const names = [...new Set((new TextDecoder().decode(body).match(/href="\d{11}_[^"]+\.jpg"/g) || []).map((h) => h.slice(6, -1)))].sort();
+          const t = (n) => Date.UTC(+n.slice(0, 4), 0, 1) + (+n.slice(4, 7) - 1) * 864e5 + (+n.slice(7, 9)) * 36e5 + (+n.slice(9, 11)) * 6e4;
+          const t1 = names.length ? t(names[names.length - 1]) : 0;
+          body = names.filter((n) => t(n) > t1 - 49 * 36e5).map((n) => '<a href="' + n + '"></a>').join('\n');
+        }
+        hit = new Response(body, { status: 200, headers: listing
+          ? { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'public, max-age=60' }
+          : { 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=31536000, immutable' } });
+        ctx.waitUntil(cache.put(key, hit.clone()));
+      }
+      hit = new Response(hit.body, hit); hit.headers.set('X-Tile-Cache', tag);
+      hit.headers.set('Cache-Control', listing ? 'public, max-age=60' : 'public, max-age=31536000, immutable');   /* a cache HIT came back at 4 h */
+      for (const k in cors) hit.headers.set(k, cors[k]);
+      return hit;
+    }
     /* MACROSTRAT, CACHED (2026-10-17, user: "do ... the macrostrat caching too"): /macrostrat/carto/{z}/{x}/{y}.png passes
        through to tiles.macrostrat.org (CC-BY, credited on the page) and keeps each tile at the edge for a week -- the geologic
        map changes rarely, and their server answers in ~300 ms where our edge answers in tens. */
