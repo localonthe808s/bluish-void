@@ -76,6 +76,16 @@ def settled_prob(ladder, bracket, field):
     return vals[k[0]] / sum(vals)
 
 
+# THE MARKET-BLEND SHADOW (2026-10-19). On the R2 trail, 40 New York days 09-08..10-18, blending our noon ladder with
+# the market's at 15% ours / 85% market beat ours alone on log loss leave-one-day-out (.915 -> .734, day-clustered
+# gain .20 +- .13) and on the second half when fit on the first; blending with a uniform ladder or another day's market
+# gained nothing (.912 / .898), so the gain is the market's information, not flattening. It did NOT lift the pick
+# (68% -> 70% LODO, 73% -> 68% on the second half) and at that weight no noon bet clears the edge floor (24 replayed
+# bets, +39c +- 20 per $1, become 0). So it is not in the ladder; it is scored here forward, from the day after it was
+# fit, on the lock's own ours/market columns, for a later ruling on a sample it was not fitted to.
+MKT_BLEND_W, MKT_BLEND_FROM = 0.15, '2026-10-19'
+
+
 def market_day(key, label, kind, h):
     """one market on one settled day"""
     L = h.get('lock') or {}
@@ -95,6 +105,17 @@ def market_day(key, label, kind, h):
             out['p_cal'] = settled_prob(lad, h['actual_bracket'], 'cal')
             br = lambda f: sum((float(r.get(f) or 0) - (1.0 if r.get('label') == h['actual_bracket'] else 0.0)) ** 2 for r in lad)
             out['brier_ours'], out['brier_cal'] = br('ours'), br('cal')
+        if (kind == 'high' and h.get('date', '') >= MKT_BLEND_FROM and lad
+                and all(r.get('ours') is not None and r.get('market') is not None for r in lad)):
+            mt = sum(float(r['market']) for r in lad) or 1.0
+            ot = sum(float(r['ours']) for r in lad) or 1.0
+            for r in lad:
+                r['_bl'] = MKT_BLEND_W * float(r['ours']) / ot + (1 - MKT_BLEND_W) * float(r['market']) / mt
+            out['p_blend'] = settled_prob(lad, h['actual_bracket'], '_bl')
+            top = max(lad, key=lambda r: r['_bl'])
+            out['blend_hit'] = top.get('label') == h['actual_bracket']
+            for r in lad:
+                r.pop('_bl', None)
     if h.get('eve'):
         out['eve_pick'] = h['eve'].get('pick')
         out['eve_hit'] = (h['eve'].get('pick') == h.get('actual_bracket'))
@@ -184,6 +205,13 @@ def tally(ms):
             'll_cal': round(sum(-math.log(m['p_cal']) for m in cs) / len(cs), 3),
             'brier_ours': round(sum(m['brier_ours'] for m in cs) / len(cs), 4),
             'brier_cal': round(sum(m['brier_cal'] for m in cs) / len(cs), 4)}
+    bl = [m for m in ms if m.get('p_blend') is not None and m.get('p_ours') is not None and m.get('p_mkt') is not None]
+    if bl:      # the market-blend shadow, forward only (MKT_BLEND_FROM)
+        out['blend_shadow'] = {'n': len(bl), 'w': MKT_BLEND_W, 'from': MKT_BLEND_FROM,
+            'll_ours': round(sum(-math.log(m['p_ours']) for m in bl) / len(bl), 3),
+            'll_blend': round(sum(-math.log(m['p_blend']) for m in bl) / len(bl), 3),
+            'll_mkt': round(sum(-math.log(m['p_mkt']) for m in bl) / len(bl), 3),
+            'hits_ours': sum(1 for m in bl if m['hit']), 'hits_blend': sum(1 for m in bl if m.get('blend_hit'))}
     out['bets'] = bet_tally([b for m in ms for b in m['bets']])
     legs = collections.OrderedDict()
     for m in ms:
