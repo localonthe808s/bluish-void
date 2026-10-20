@@ -122,12 +122,25 @@ async function buildSub(){
   for (const D of reads){ if (!D) continue; feeds++;
     for (const o of D.veh){
       if (!o.route || o.route === 'SI' || o.route === 'SS') continue;            // Staten Island stays off, as on the map
-      const U = D.tu[o.trip], sts = U ? U.sts : [];
-      let N = o.stop || (sts[0] && sts[0].stop); if (!N) continue;
+      const U = D.tu[o.trip], sts = U ? U.sts : [], nowS = now / 1000;
+      // PLACED BY THE PREDICTED TIMES, NOT THE STATUS (2026-10-20). The vehicle's STOPPED_AT outlives the stop: of 397 trains
+      // flagged so at 6:55 PM, 250 were past their predicted departure (median 12 s) and 104 no longer listed the stop at all --
+      // only 43 were standing at a platform, and the map pinned all 397 there ("they look stuck"). The train is between the last
+      // listed stop whose time has passed and the first whose time is still ahead: it leaves the one at tD and reaches the other
+      // at tA, and the page glides it between them (dwelling while tD is ahead).
+      const ar = (x) => x.a || x.d, dp = (x) => x.d || x.a;
+      const k = sts.findIndex((x) => ar(x) > nowS);
+      let N, tA, tD = 0;
+      if (k < 0){ N = o.stop || (sts.length ? sts[sts.length - 1].stop : ''); const x = sts.find((q) => q.stop === N); tA = x ? ar(x) : (o.t || nowS); }
+      else { N = sts[k].stop; tA = ar(sts[k]); if (k > 0) tD = dp(sts[k - 1]); }
+      if (!N) continue;
       const P0 = PR[o.route + '|' + N] || PR[o.route.replace(/X$/, '') + '|' + N]; if (!P0) continue;   // not yet left its first stop, or off its pattern
-      const u = sts.find((x) => x.stop === N), tA = u ? (u.a || u.d) : 0, t = o.t || Math.round(now / 1000);
-      const at = o.st === 1 && !(tA && tA > now / 1000 + 60), held = at && now / 1000 - t > 150, late = !at && tA && now / 1000 > tA + 90;
-      out.push([o.route, P0[0], P0[1], P0[2], P0[3], P0[4], tA || (at ? t : Math.round(now / 1000) + 60), at ? 1 : 0, held ? 1 : 0, late ? 1 : 0, N, sts.length ? sts[sts.length - 1].stop : N]);
+      if (!tD) tD = tA - P0[4];
+      const standing = k > 0 && o.st === 1 && o.stop === sts[k - 1].stop && tD > nowS;
+      const held = standing && o.t && nowS - o.t > 150, late = k < 0 && tA && nowS > tA + 90;
+      let h = 0; for (let i = 0; i < o.trip.length; i++) h = (h * 31 + o.trip.charCodeAt(i)) >>> 0;
+      out.push([o.route, P0[0], P0[1], P0[2], P0[3], P0[4], Math.round(tA), standing ? 1 : 0, held ? 1 : 0, late ? 1 : 0, N,
+                sts.length ? sts[sts.length - 1].stop : N, Math.round(tD), h.toString(36)]);
     } }
   return { at: now, feeds, trains: out };
 }
