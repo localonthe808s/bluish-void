@@ -798,10 +798,13 @@ window._bvPlaceFloor = function(rules, ourNames){
 window._bvPaintPlus = function(rules, F){
   var P = protomapsL, out = [], kind = function(f){ return (f && f.props && f.props.kind) || ''; };
   if (!P || !P.LineSymbolizer || !P.exp) return rules;
-  var riverW = P.exp(1.6, [[9, 0.6], [11, 1.1], [13, 1.8], [15, 3.5], [18, 10]]), streamW = P.exp(1.6, [[12, 0.4], [14, 0.8], [16, 1.6], [18, 3.5]]);
+  /* z10 picks up where the continental layer leaves z9 (~1.2-1.6 px for a mid-size river, 2026-10-19): 0.6 px there read as the
+     river thinning on a zoom in */
+  var riverW = P.exp(1.6, [[9, 1.0], [11, 1.4], [13, 2.0], [15, 3.5], [18, 10]]), streamW = P.exp(1.6, [[12, 0.4], [14, 0.8], [16, 1.6], [18, 3.5]]);
+  var riverC = F.desert ? '#1a3560' : (F.river || F.water);   /* dark maps: the same water-blue the continental rivers ease into at z9 */
   var wet = { dataLayer: 'landuse', symbolizer: new P.PolygonSymbolizer({ fill: F.wetland || F.park_a, opacity: function(z){ return z < 7 ? 0 : z === 7 ? 0.5 : 1; } }), filter: function(z, f){ return kind(f) === 'wetland'; } };
   var lines = [
-    { dataLayer: 'water', minzoom: 10, symbolizer: new P.LineSymbolizer({ color: F.river || F.water, width: function(z){ return riverW(z); }, lineCap: 'round' }), filter: function(z, f){ return f.geomType === 2 && /^(river|canal)$/.test(kind(f)); } },
+    { dataLayer: 'water', minzoom: 10, symbolizer: new P.LineSymbolizer({ color: riverC, width: function(z){ return riverW(z); }, lineCap: 'round', lineJoin: 'round' }), filter: function(z, f){ return f.geomType === 2 && /^(river|canal)$/.test(kind(f)); } },
     { dataLayer: 'water', minzoom: 12, symbolizer: new P.LineSymbolizer({ color: F.river || F.water, width: function(z){ return streamW(z); }, lineCap: 'round' }), filter: function(z, f){ return f.geomType === 2 && !/^(river|canal)$/.test(kind(f)); } }
   ];
   /* THINNER ROADS (user 2026-10-16: "refine roads, make them thinner on launch and zooming in"): every road line and its
@@ -1402,17 +1405,34 @@ window._bvRiverW = function(z, a){ return (0.4 + 0.38 * Math.pow(Math.max(a, 300
    every overlay. The bake (_riverbake/) has already cut them out of the lakes and smoothed their bends, so drawing on top
    costs nothing at a shore. Hierarchy: small reaches fainter, the big trunks brighter with a thin ink casing that lifts
    them off the hillshade. z3-9; at z10 the basemap's OSM river lines and channel polygons take over. */
+/* ONE RIVER ACROSS THE ZOOMS (user 2026-10-19: "improve how the rivers look across zoom levels ... make sure theyre detailed and
+   not crudely pasted ever, are there widths correct at each zoom level?"). Measured at the Mississippi (Memphis) and the Ohio
+   (Cincinnati), z4-14: this layer ran bright blue to z9 and the basemap's OSM water took over at z10 in its navy, so a river
+   changed color and jumped in width in one zoom step -- the lower Mississippi drawn 4.3 px at z9 against a ~1.2 km channel
+   (~6 px there) at z10. Now:
+   - WIDTH is never narrower than the real channel: hydraulic geometry gives width ~ sqrt(drainage area), w ~ 1 m x sqrt(km2)
+     (the Ohio at Cincinnati, 200,000 km2: ~450 m, measured 400-500; the Mississippi at Memphis, 2.4 M km2: ~1,550 m, measured
+     ~1,000-1,500); in pixels at the map's latitude, so from z8 the big rivers carry their real width into z10's polygons.
+   - COLOR stays the continental blue to z7, then eases into the basemap's water (#13294a, a step lighter so a ribbon still
+     reads over dark ground) through z8-9, so z10's OSM channels continue it rather than replace it. The ink casing goes at z9. */
+window._bvRiverTrueW = function(z, a, lat){ var mpp = 156543.03 * Math.cos((lat || 38) * Math.PI / 180) / Math.pow(2, z);
+  return Math.min(1800, Math.sqrt(Math.max(a, 1))) / mpp; };
 window._bvRivers = function(map){
   if (!map || map._bvRiverLayer || typeof protomapsL === 'undefined' || typeof L === 'undefined') return null;
   var P = protomapsL, A = function(f){ return +((f && f.props && f.props.a) || 300); };
   var tOf = function(a){ return Math.max(0, Math.min(1, Math.log(a / 300) / Math.LN10 / 3.5)); };
-  var ink = function(z, a){ var t = tOf(a); return z <= 7 ? (t > 0.55 ? '#3c70b8' : '#2f5d9e') : z === 8 ? (t > 0.55 ? '#33619f' : '#2a528c') : (t > 0.55 ? '#2a5089' : '#224577'); };
+  var lat = function(){ try { return map.getCenter().lat; } catch(e){ return 38; } };
+  var mix = function(c1, c2, k){ var h = function(c, i){ return parseInt(c.slice(1 + 2 * i, 3 + 2 * i), 16); };
+    return 'rgb(' + [0, 1, 2].map(function(i){ return Math.round(h(c1, i) + (h(c2, i) - h(c1, i)) * k); }).join(',') + ')'; };
+  var WATER = '#1a3560';                                     /* the dark flavor's water (#13294a), a step lighter */
+  var ink = function(z, a){ var t = tOf(a), c = t > 0.55 ? '#3c70b8' : '#2f5d9e'; return z <= 7 ? c : mix(c, WATER, z === 8 ? 0.45 : 0.85); };
+  var W = function(z, f){ var a = A(f); return Math.max(window._bvRiverW(z, a), window._bvRiverTrueW(z, a, lat())); };
   var rules = [
-    { dataLayer: 'rivers', filter: function(z, f){ return A(f) >= 20000; },
-      symbolizer: new P.LineSymbolizer({ color: 'rgba(5,7,12,.5)', lineCap: 'round', lineJoin: 'round', width: function(z, f){ return window._bvRiverW(z, A(f)) + 1.6; } }) },
+    { dataLayer: 'rivers', filter: function(z, f){ return z <= 8 && A(f) >= 20000; },
+      symbolizer: new P.LineSymbolizer({ color: 'rgba(5,7,12,.5)', lineCap: 'round', lineJoin: 'round', width: function(z, f){ return W(z, f) + 1.6; } }) },
     { dataLayer: 'rivers',
-      symbolizer: new P.LineSymbolizer({ color: function(z, f){ return ink(z, A(f)); }, opacity: function(z, f){ return 0.55 + 0.45 * tOf(A(f)); },
-        lineCap: 'round', lineJoin: 'round', width: function(z, f){ return window._bvRiverW(z, A(f)); } }) }
+      symbolizer: new P.LineSymbolizer({ color: function(z, f){ return ink(z, A(f)); }, opacity: function(z, f){ var t = tOf(A(f)); return z >= 9 ? 0.8 + 0.2 * t : 0.55 + 0.45 * t; },
+        lineCap: 'round', lineJoin: 'round', width: W }) }
   ];
   try {
     var lay = P.leafletLayer({ url: window._bvZxyQuiet(window.BV_RIVERS_URL), maxDataZoom: 8, minZoom: 3, maxZoom: 9, paintRules: rules, labelRules: [], zIndex: 3,
