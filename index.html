@@ -69627,6 +69627,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
             } else if (f3 === 2) stus.push([s3, e3]);
           });
           route = mtaRouteShow(route);
+          var seqA = [];   /* the trip's stops in order: each arrival keeps the NEXT one (LOCAL vs EXPRESS, 2026-10-19) */
           stus.forEach(function(se){
             var sid = '', tt = 0;
             mtaFields(b, se[0], se[1], function(f4, v4, s4, e4){
@@ -69635,8 +69636,9 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
                 mtaFields(b, s4, e4, function(f5, v5){ if (f5 === 2 && (f4 === 2 || !tt)) tt = v5; });
               }
             });
-            if (sid && tt) (by[sid] = by[sid] || []).push({ rt: route, t: tt });
+            if (sid && tt) seqA.push([sid, tt]);
           });
+          seqA.forEach(function(x, xi){ (by[x[0]] = by[x[0]] || []).push({ rt: route, t: x[1], nx: seqA[xi + 1] ? seqA[xi + 1][0] : null }); });
         });
       });
       for (var k in by) by[k].sort(function(a, c){ return a.t - c.t; });
@@ -69660,7 +69662,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       sfxs.forEach(function(sfx){
         mtaFeed(sfx, function(by){
           if (by) ['N','S'].forEach(function(d){
-            (by[st[0] + d] || []).forEach(function(a){ out.push({ rt: a.rt, dir: d, t: a.t }); });
+            (by[st[0] + d] || []).forEach(function(a){ out.push({ rt: a.rt, dir: d, t: a.t, nx: a.nx, pf: st[0] + d }); });
           });
           if (!--left){ out.sort(function(a, c){ return a.t - c.t; }); cb(out); }
         });
@@ -70030,7 +70032,15 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       });
     }
     /* THE CITY's subway machinery, shared with the national map's TRAFFIC view (2026-10-17, one map engine) */
-    window._bvMta = { stops: mtaStops, complex: function(st, cb){ mtaComplexArrivals(st, cb); }, chip: function(rt, px){ return mtaChip(rt, px); },
+    /* LOCAL OR EXPRESS, PER TRAIN (user 2026-10-19: "say UPTOWN LOCAL UPTOWN EXPRESS on mobile show the icons circle diamond"):
+       /_mta_local_next.json (_mtabake/local_next.py, the MTA's static GTFS) holds each platform's next LOCAL stop wherever both
+       kinds call; a live train whose own next stop is another one is running express past it. 'E' / 'L' there, null where the
+       platform has only one kind (no word needed) or the feed did not say */
+    var mtaLN = null, mtaLNp = null;
+    var mtaLocalNext = function(cb){ if (mtaLN){ cb(mtaLN); return; } if (!mtaLNp) mtaLNp = fetch('/_mta_local_next.json').then(function(r){ return r.ok ? r.json() : {}; }).catch(function(){ return {}; }).then(function(j){ mtaLN = j || {}; return mtaLN; });
+      mtaLNp.then(cb); };
+    var mtaKind = function(a){ if (!mtaLN || !a || !a.pf || !a.nx) return null; var ln = mtaLN[a.pf]; if (!ln) return null; return a.nx === ln ? 'L' : 'E'; };
+    window._bvMta = { stops: mtaStops, complex: function(st, cb){ mtaLocalNext(function(){ mtaComplexArrivals(st, cb); }); }, kind: mtaKind, chip: function(rt, px){ return mtaChip(rt, px); },
       dirLbl: function(d){ return mtaDirLbl(d); }, show: function(r){ return mtaRouteShow(r); }, colors: MTA_COLORS };
     function mtaPanelFill(st){
       mtaComplexArrivals(st, function(members, acc){ mtaPanelRender(st, members, acc); });
@@ -108377,8 +108387,13 @@ function closeAlertModal(){
       'A':'#0039A6','C':'#0039A6','E':'#0039A6','B':'#FF6319','D':'#FF6319','F':'#FF6319','FX':'#FF6319','M':'#FF6319','G':'#6CBE45','J':'#996633','Z':'#996633',
       'L':'#A7A9AC','N':'#FCCC0A','Q':'#FCCC0A','R':'#FCCC0A','W':'#FCCC0A','FS':'#808183','GS':'#808183','H':'#808183','SI':'#0039A6' };
     var RAILSRC = [
-      { k: 'nyc', box: [-74.30, 40.48, -73.65, 40.95], load: function(){ return fetch('/city_subway_lines.json').then(function(r){ return r.json(); }).then(function(j){ var out = [];
-          Object.keys(j).forEach(function(rt){ if (rt === 'SI') return; (j[rt] || []).forEach(function(seg){ out.push({ c: MTA_C[rt] || '#808183', cw: 2.6, bw: 1.4, p: (seg.p || []).map(function(q){ return [q[1], q[0]]; }) }); }); }); return out; }); } },
+      /* THE MTA'S OWN TRACK (user 2026-10-19: "are the subway lines accurately drawn at every level?" -> "yes do it, and fill in the
+         missing route colors"): city_subway_shapes.json (_mtabake/shapes.py) is every route's shapes from the MTA's static GTFS,
+         variants kept where they add track -- the 5 on the Flatbush branch, the A to Rockaway Park, the E's, F's, N's and R's
+         patterns that THE CITY's station-to-station file lacked -- at ~8 m for z<=15 (p) and ~1 m from z16 (ph), where the
+         old lines sat 3-7 px off an elevated line's curve */
+      { k: 'nyc', box: [-74.30, 40.48, -73.65, 40.95], load: function(){ return fetch('/city_subway_shapes.json').then(function(r){ return r.json(); }).then(function(j){ var out = [];
+          Object.keys(j).forEach(function(rt){ if (rt === 'SI') return; var R = j[rt] || {}; (R.lo || []).forEach(function(seg, i){ out.push({ c: MTA_C[rt] || '#808183', cw: 2.6, bw: 1.4, p: seg, ph: (R.hi || [])[i] }); }); }); return out; }); } },
       { k: 'la', box: [-119.0, 33.6, -117.0, 34.6], load: function(){ return fetch('/_maplab/la/rail_lines.json').then(function(r){ return r.json(); }).then(function(j){
           return (j.features || []).map(function(f){ var g2 = f.geometry || {}, pr = f.properties || {}, cm = pr.kind === 'commuter'; return { c: pr.colour || '#33383F', la: 1, cw: cm ? 2.4 : 4.2, bw: cm ? 1.1 : 2.2,
             p: g2.type === 'LineString' ? g2.coordinates : [].concat.apply([], g2.coordinates || []) }; }); }); } }
@@ -108480,8 +108495,9 @@ function closeAlertModal(){
           members.forEach(function(m){ String(m[4] || '').split(/\s+/).forEach(function(rt){ if (rt && !seen[rt]){ seen[rt] = 1; chips += M5.chip(rt, 13); } }); });
           members.forEach(function(m, mi){ var by = { N: {}, S: {} };
             (acc[mi] || []).forEach(function(a){ var mm = (a.t - nw) / 60; if (mm < -.5 || mm > 45) return; (by[a.dir][a.rt] = by[a.dir][a.rt] || []).push(a); });
-            [['N', m[5] || 'NORTHBOUND'], ['S', m[6] || 'SOUTHBOUND']].forEach(function(dd){ Object.keys(by[dd[0]]).sort().forEach(function(rt){
-              lines.push(row(M5.chip(rt), '<span style="opacity:.7;font-size:.85em;margin-right:5px;">' + esc(M5.dirLbl(dd[1])) + '</span>' + by[dd[0]][rt].slice(0, 3).map(function(a){ var mm = (a.t - nw) / 60; return mm < 1 ? NOW : Math.round(mm) + ' MIN'; }).join(SEP))); }); }); });
+            [['N', m[5] || 'NORTHBOUND'], ['S', m[6] || 'SOUTHBOUND']].forEach(function(dd){ Object.keys(by[dd[0]]).sort().forEach(function(rt){ var KS = kindSplit(M5, by[dd[0]][rt]);
+              ['L', '', 'E'].forEach(function(k){ if (!KS[k]) return;
+              lines.push(row(kindChip(M5, rt, k), '<span style="opacity:.7;font-size:.85em;margin-right:5px;">' + esc(kindWord(M5.dirLbl(dd[1]), k)) + '</span>' + KS[k].slice(0, 3).map(function(a){ var mm = (a.t - nw) / 60; return mm < 1 ? NOW : Math.round(mm) + ' MIN'; }).join(SEP))); }); }); }); });
           var walk = Math.max(1, Math.round(e2.d * 1.3 / 80));
           out[i] = '<div style="min-width:0;"><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;"><span style="font:800 11px system-ui,sans-serif;letter-spacing:.03em;">' + esc(String(e2.st[1]).toUpperCase()) + '</span>' + chips
             + '<span style="font:700 8px system-ui,sans-serif;letter-spacing:.08em;opacity:.7;">' + walk + ' MIN WALK</span></div>' + (lines.length ? lines.slice(0, 6).join('') : '<div style="font:600 10px system-ui,sans-serif;opacity:.7;margin-top:3px;">NO TRAINS DUE IN 45 MIN</div>') + '</div>';
@@ -108512,6 +108528,15 @@ function closeAlertModal(){
       + '<span style="display:inline-flex;gap:3px;align-items:center;">' + chips + '</span><span style="font:600 8px system-ui,sans-serif;color:rgba(255,255,255,.7);letter-spacing:.08em;">' + src + '</span>'
       + '<button type="button" id="lc-board-x" style="margin-left:auto;background:none;border:none;color:#fff;font:700 13px system-ui,sans-serif;cursor:pointer;">\u2715</button></div>'; };
     var NOW = '<span style="color:#5bf28f;font-weight:800;">NOW</span>', SEP = '<span style="opacity:.4;"> | </span>';
+    /* the LOCAL / EXPRESS split: arrivals of one route in one direction grouped by what each train is doing; on a phone the word
+       goes and the chip carries it -- a circle for the local, the MTA's diamond for the express */
+    var subPhone = function(){ return !!(window.matchMedia && matchMedia('(max-width: 560px)').matches); };
+    var kindSplit = function(M5, list){ var g = {}; list.forEach(function(a){ var k = (M5.kind && M5.kind(a)) || ''; (g[k] = g[k] || []).push(a); }); return g; };
+    var kindChip = function(M5, rt, k, px){ if (k !== 'E' || !subPhone()) return M5.chip(rt, px);
+      var col = (M5.colors || {})[M5.show ? M5.show(rt) : rt] || '#808183', dp = Math.round((px || 17) * 0.82), dark = /^[NQRW]$/.test(rt);
+      return '<span title="express" style="display:inline-flex;align-items:center;justify-content:center;width:' + dp + 'px;height:' + dp + 'px;background:' + col + ';color:' + (dark ? '#1b2340' : '#fff')
+        + ';transform:rotate(45deg);border-radius:2px;flex-shrink:0;vertical-align:middle;margin:0 2px;"><span style="transform:rotate(-45deg);font:700 ' + Math.round((px || 17) * 0.56) + 'px system-ui,sans-serif;">' + esc(rt) + '</span></span>'; };
+    var kindWord = function(lbl, k){ if (!k || subPhone()) return lbl; return String(lbl).replace(/^TO /, '') + (k === 'E' ? ' EXPRESS' : ' LOCAL'); };
     TR.boardRender = function(){
       var B = TR.board; if (!B) return; var el = TR.boardEl(), st = B.st, html;
       if (st.k === 'nyc'){
@@ -108519,10 +108544,12 @@ function closeAlertModal(){
         M5.complex(st.e, function(members, acc){ if (TR.board !== B) return; var nw = Date.now() / 1000, seen = {}, chips = '', groups = [];
           members.forEach(function(m){ String(m[4] || '').split(/\s+/).forEach(function(rt){ if (rt && !seen[rt]){ seen[rt] = 1; chips += M5.chip(rt, 15); } }); });
           members.forEach(function(m, mi){ var by = { N: {}, S: {} };
-            (acc[mi] || []).forEach(function(a){ var mm = (a.t - nw) / 60; if (mm < -.5 || mm > 60) return; (by[a.dir][a.rt] = by[a.dir][a.rt] || []).push({ mm: mm, t: a.t }); });
+            (acc[mi] || []).forEach(function(a){ var mm = (a.t - nw) / 60; if (mm < -.5 || mm > 60) return; (by[a.dir][a.rt] = by[a.dir][a.rt] || []).push({ mm: mm, t: a.t, nx: a.nx, pf: a.pf }); });
             [['N', m[5] || 'NORTHBOUND'], ['S', m[6] || 'SOUTHBOUND']].forEach(function(dd){ var rts = Object.keys(by[dd[0]]).sort(); if (!rts.length) return;
               var lbl = esc(M5.dirLbl(dd[1])); if (m[1] !== st.e[1]) lbl = esc(String(m[1]).toUpperCase()) + ' \u00b7 ' + lbl;
-              groups.push(grp(lbl, rts.map(function(rt){ return row(M5.chip(rt), by[dd[0]][rt].slice(0, 4).map(function(a){ return a.mm < 1 ? NOW : hmD(new Date(a.t * 1000)); }).join(SEP)); }).join(''))); }); });
+              groups.push(grp(lbl, rts.map(function(rt){ var KS = kindSplit(M5, by[dd[0]][rt]); return ['L', '', 'E'].filter(function(k){ return KS[k]; }).map(function(k){
+                return row(kindChip(M5, rt, k, 15), (k && !subPhone() ? '<span style="opacity:.7;font-size:.85em;margin-right:5px;">' + (k === 'E' ? 'EXPRESS' : 'LOCAL') + '</span>' : '')
+                  + KS[k].slice(0, 4).map(function(a){ return a.mm < 1 ? NOW : hmD(new Date(a.t * 1000)); }).join(SEP)); }).join(''); }).join(''))); }); });
           el.innerHTML = head(st.n, chips, 'LIVE \u00b7 MTA') + (groups.length ? '<div style="display:grid;align-items:start;gap:0 22px;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));">' + groups.join('') + '</div>'
             : '<div style="font:600 10px system-ui,sans-serif;opacity:.8;margin-top:6px;">NO TRAINS DUE IN THE NEXT HOUR</div>');
           el.style.display = ''; var x = document.getElementById('lc-board-x'); if (x) x.onclick = function(e){ e.stopPropagation(); TR.boardClose(); }; });
@@ -108854,10 +108881,15 @@ function closeAlertModal(){
       TR.stHits = [];
       var phone = W / dpr < 600;
       if (z >= 9 && TR.show.rail){ var RL = TR.railInView(); g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
+        /* ON SCREEN = THE LINE'S BOX MEETS THE VIEW (2026-10-19): "any point inside" dropped a line at street level, where a
+           straight run's two ends both lie off screen -- the 1 over 125th St vanished at z17 */
+        var onF = function(Q){ var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9; for (var qi = 0; qi < Q.length; qi++){ var q = Q[qi];
+            if (q[0] < x0) x0 = q[0]; if (q[0] > x1) x1 = q[0]; if (q[1] < y0) y0 = q[1]; if (q[1] > y1) y1 = q[1]; }
+          return !(x1 < -20 || y1 < -20 || x0 > W + 20 || y0 > H + 20); };
         var curve = function(Q){ g.beginPath(); g.moveTo(Q[0][0], Q[0][1]); for (var qi = 1; qi < Q.length - 1; qi++) g.quadraticCurveTo(Q[qi][0], Q[qi][1], (Q[qi][0] + Q[qi + 1][0]) / 2, (Q[qi][1] + Q[qi + 1][1]) / 2); g.lineTo(Q[Q.length - 1][0], Q[Q.length - 1][1]); };
-        RL.forEach(function(ln){ if (ln.la && z < 11) return; var Q = ln.p.map(P); if (Q.length < 2 || !Q.some(inF)) return; curve(Q);
+        RL.forEach(function(ln){ if (ln.la && z < 11) return; var Q = (z >= 16 && ln.ph ? ln.ph : ln.p).map(P); if (Q.length < 2 || !onF(Q)) return; curve(Q);
           g.globalAlpha = 1; g.lineWidth = ln.cw * dpr; g.strokeStyle = 'rgba(8,10,16,' + (ln.la ? .6 : .45) + ')'; g.stroke(); });
-        RL.forEach(function(ln){ if (ln.la && z < 11) return; var Q = ln.p.map(P); if (Q.length < 2 || !Q.some(inF)) return; curve(Q);
+        RL.forEach(function(ln){ if (ln.la && z < 11) return; var Q = (z >= 16 && ln.ph ? ln.ph : ln.p).map(P); if (Q.length < 2 || !onF(Q)) return; curve(Q);
           g.globalAlpha = ln.la ? 1 : .9; g.lineWidth = ln.bw * dpr; g.strokeStyle = ln.c; g.stroke(); });
         g.globalAlpha = 1;
         /* THE FERRIES, NYC ONLY (user 2026-10-17: "make the ferry routes show on the subway view too"): THE CITY's 31 routes
