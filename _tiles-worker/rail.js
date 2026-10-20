@@ -17,7 +17,7 @@ function walk(b, dv, s, e, cb){ let i = s; while (i < e){ let t; [t, i] = varint
   else if (w === 5){ cb(f, w, dv.getFloat32(i, true), 0, 0); i += 4; }
   else if (w === 1) i += 8; else return; } }
 const str = (b, s, e) => new TextDecoder().decode(b.subarray(s, e));
-function decode(buf){
+function decode(buf, keepAll){
   const b = new Uint8Array(buf), dv = new DataView(buf), veh = [], tu = {};
   walk(b, dv, 0, b.length, (f, w, v, s, e) => { if (f !== 2 || w !== 2) return;
     walk(b, dv, s, e, (f2, w2, v2, s2, e2) => {
@@ -30,7 +30,7 @@ function decode(buf){
           else if (f3 === 7 && w3 === 2) o.stop = str(b, s3, e3);
           else if (f3 === 8 && w3 === 2) walk(b, dv, s3, e3, (f4, w4, v4, s4, e4) => { if (f4 === 1 && w4 === 2) o.id = str(b, s4, e4); });
         });
-        if (isFinite(o.la) && isFinite(o.lo) && Math.abs(o.la) > 1) veh.push(o); }
+        if (keepAll || (isFinite(o.la) && isFinite(o.lo) && Math.abs(o.la) > 1)) veh.push(o); }
       else if (f2 === 3 && w2 === 2){ let trip = '', route = ''; const sts = [];
         walk(b, dv, s2, e2, (f3, w3, v3, s3, e3) => {
           if (f3 === 1 && w3 === 2) walk(b, dv, s3, e3, (f4, w4, v4, s4, e4) => { if (f4 === 1 && w4 === 2) trip = str(b, s4, e4); else if (f4 === 5 && w4 === 2) route = str(b, s4, e4); });
@@ -98,5 +98,47 @@ export async function railRoute(url, ctx, cors){
     ctx.waitUntil(cache.put(key, hit.clone()));
   }
   const h = new Headers(hit.headers); Object.entries(cors).forEach(([k, v]) => h.set(k, v)); h.set('Cache-Control', 'public, max-age=8');
+  return new Response(hit.body, { status: 200, headers: h });
+}
+
+
+// /subway/v1/nyc.json -- the subway's trains between stations (user 2026-10-20: "yes build it from zoom 14, have them be aware of
+// active delays and alerts"). The subway's feeds give no coordinates: each train's next station (its vehicle entity's stop_id)
+// and when it gets there (its trip update). city_subway_pairs.json (_mtabake/pairs.py) says, for that route and platform, the
+// station it comes from, the scheduled run, and both stations' places along the route's track; the page places it at
+// sN - (sN - sP) * (time to N) / run, so it glides and arrives on the feed's own prediction. Flags: held -- stopped at a platform
+// for 2.5+ min; late -- past its predicted arrival by 90+ s with the feed still saying it is coming.
+// Each train: [route, shapeRoute, line, sP, sN, run s, arrival (unix s), status 1 = at the platform, held, late, next stop, last stop]
+const SUB_FEEDS = ['', '-ace', '-bdfm', '-g', '-jz', '-nqrw', '-l'].map((s) => 'https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs' + s);
+const PAIRS_URL = 'https://bluishvoid.com/city_subway_pairs.json?v=1';
+let PAIRS = null, PAIRS_AT = 0;
+async function pairs(){
+  if (PAIRS && Date.now() - PAIRS_AT < 6 * 3600e3) return PAIRS;
+  PAIRS = await (await fetch(PAIRS_URL, { cf: { cacheTtl: 3600 } })).json(); PAIRS_AT = Date.now(); return PAIRS; }
+async function buildSub(){
+  const PR = await pairs(), now = Date.now(), out = [];
+  const reads = await Promise.all(SUB_FEEDS.map((u) => fetch(u, { cf: { cacheTtl: 10 } }).then((r) => r.ok ? r.arrayBuffer() : null).then((ab) => ab ? decode(ab, true) : null).catch(() => null)));
+  let feeds = 0;
+  for (const D of reads){ if (!D) continue; feeds++;
+    for (const o of D.veh){
+      if (!o.route || o.route === 'SI' || o.route === 'SS') continue;            // Staten Island stays off, as on the map
+      const U = D.tu[o.trip], sts = U ? U.sts : [];
+      let N = o.stop || (sts[0] && sts[0].stop); if (!N) continue;
+      const P0 = PR[o.route + '|' + N] || PR[o.route.replace(/X$/, '') + '|' + N]; if (!P0) continue;   // not yet left its first stop, or off its pattern
+      const u = sts.find((x) => x.stop === N), tA = u ? (u.a || u.d) : 0, t = o.t || Math.round(now / 1000);
+      const at = o.st === 1 && !(tA && tA > now / 1000 + 60), held = at && now / 1000 - t > 150, late = !at && tA && now / 1000 > tA + 90;
+      out.push([o.route, P0[0], P0[1], P0[2], P0[3], P0[4], tA || (at ? t : Math.round(now / 1000) + 60), at ? 1 : 0, held ? 1 : 0, late ? 1 : 0, N, sts.length ? sts[sts.length - 1].stop : N]);
+    } }
+  return { at: now, feeds, trains: out };
+}
+export async function subwayRoute(url, ctx, cors){
+  const cache = caches.default, key = new Request('https://tiles.bluishvoid.com/subway/v1/nyc.json', { method: 'GET' });
+  let hit = await cache.match(key);
+  if (!hit){
+    let body; try { body = JSON.stringify(await buildSub()); } catch (e){ return new Response(JSON.stringify({ error: String(e) }), { status: 502, headers: { 'Content-Type': 'application/json', ...cors } }); }
+    hit = new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=12' } });
+    ctx.waitUntil(cache.put(key, hit.clone()));
+  }
+  const h = new Headers(hit.headers); Object.entries(cors).forEach(([k, v]) => h.set(k, v)); h.set('Cache-Control', 'public, max-age=10');
   return new Response(hit.body, { status: 200, headers: h });
 }

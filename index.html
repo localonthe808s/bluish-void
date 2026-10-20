@@ -108632,6 +108632,7 @@ function closeAlertModal(){
          through its stations, so a tap on Jamaica opened the E's delay popup instead of the station's board above the map */
       var bs0 = null; (TR.stHits || []).forEach(function(h){ var d = Math.hypot(h.x - q0.x, h.y - q0.y); if (d < (h.st.k === 'la' ? 16 : 14) && (!bs0 || d < bs0.d)) bs0 = { d: d }; });
       if (bs0) sh = null;
+      /* trains are not tapped (user 2026-10-20: "trains dont need to be clickable, just the stations") */
       if (sh && window._bvSubDelays){ var al = sh.al, SD = window._bvSubDelays;
         L.popup({ maxWidth: 320, className: 'hz-popup' }).setLatLng(e.latlng).setContent('<div style="font:800 10px system-ui,sans-serif;letter-spacing:.04em;color:#fff;margin-bottom:4px;">'
           + al.routes.map(function(rt){ return '<span style="display:inline-grid;place-items:center;width:16px;height:16px;border-radius:50%;margin-right:3px;background:' + SD.col(rt) + ';color:' + (SD.dark(rt) ? '#111' : '#fff') + ';font:900 9px system-ui,sans-serif;">' + esc(SD.show(rt)) + '</span>'; }).join('')
@@ -108926,13 +108927,15 @@ function closeAlertModal(){
       return tgt(now) + (rec.from - tgt(rec.fromT)) * e; };
     TR.glDraw = function(){
       var cv = TR.tcv; if (!cv || !M) return; var g = cv.getContext('2d');
-      if (TR.lit !== true || !TR.show.rr || !nycHere() || M._animatingZoom){ if (!(TR.lit === true && M._animatingZoom)) g.clearRect(0, 0, cv.width, cv.height); return; }
+      var subOn = TR.show.rail && nycHere() && M.getZoom() >= 14;
+      if (TR.lit !== true || !(TR.show.rr || subOn) || !nycHere() || M._animatingZoom){ if (!(TR.lit === true && M._animatingZoom)) g.clearRect(0, 0, cv.width, cv.height); TR.subHits = []; return; }
       var sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr), z = M.getZoom();
       if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
       L.DomUtil.setPosition(cv, M.containerPointToLayerPoint([0, 0])); cv.style.visibility = ''; g.clearRect(0, 0, W, H);
       if (z < 9) return;
       var now = Date.now(), PL = function(la, lo){ var q = M.latLngToContainerPoint([la, lo]); return [q.x * dpr, q.y * dpr]; };
-      Object.keys(TR.gl.trains).forEach(function(k){ var rec = TR.gl.trains[k], q, ang = null;
+      if (subOn) TR.subDraw(g, dpr, z, W, H); else TR.subHits = [];
+      if (TR.show.rr) Object.keys(TR.gl.trains).forEach(function(k){ var rec = TR.gl.trains[k], q, ang = null;
         if (rec.off || !TR.gl.tr){ q = PL(rec.la, rec.lo); }
         else { var T = TR.gl.tr[rec.li], A = TR.glAt(T, TR.glS(rec, now)); q = PL(A.y / GY, A.x / GK); ang = -A.ang + (rec.dir < 0 ? Math.PI : 0); }
         if (q[0] < -30 || q[1] < -30 || q[0] > W + 30 || q[1] > H + 30) return;
@@ -108956,7 +108959,56 @@ function closeAlertModal(){
             from: cur != null ? cur : o.s, fromT: now, seen: now }; });
         Object.keys(TR.gl.trains).forEach(function(k){ if (!seen[k]) delete TR.gl.trains[k]; });
       }).catch(function(){}); };
-    TR.glTick = function(){ if (TR.lit === true && TR.show.rr && paneOn() && !document.hidden){ if (Date.now() - TR.glWAt > 15000) TR.glW(); TR.glDraw(); } };
+    /* SUBWAY TRAINS, FROM z14 (user 2026-10-20: "yes build it from zoom 14, have them be aware of active delays and alerts").
+       tiles.bluishvoid.com/subway/v1/nyc.json (_tiles-worker/rail.js) gives each train's route, the station it is coming from and
+       the one it is due at, both as places along the route's track (city_subway_shapes.json, metres at cos 40.7), the scheduled
+       run and the feed's predicted arrival; the train is drawn at sN - (sN - sP) * (time to arrival) / run, so it glides and
+       reaches the platform when the MTA says. Each direction rides its own side of the line (to the right of travel), in its
+       route's color with its letter from z15. AWARE OF TROUBLE: an amber glow when the train is held at a platform 2.5+ min,
+       running past its predicted arrival, or its route and direction carry an active alert or a measured delay (THE CITY's
+       _bvSubDelays); HELD / LATE written beside it from z15. Read every
+       15 s, and only while the map is at z14+ with SUBWAY on. */
+    TR.subAt = 0; TR.subD = null; TR.subTr = null; TR.subHits = [];
+    var SK = Math.cos(40.7 * Math.PI / 180) * 111320, SY = 111320;
+    TR.subTrack = function(){ if (TR.subTr) return TR.subTr; if (TR.subTrP) return null;
+      TR.subTrP = fetch('/city_subway_shapes.json').then(function(r){ return r.json(); }).then(function(j){ var T = {};
+        Object.keys(j).forEach(function(rt){ T[rt] = (j[rt].hi || []).map(function(g2){ var P = g2.map(function(c){ return [c[0] * SK, c[1] * SY]; }), S = [0];
+          for (var i = 1; i < P.length; i++) S.push(S[i - 1] + Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1])); return { P: P, S: S, len: S[S.length - 1] }; }); });
+        TR.subTr = T; }).catch(function(){ TR.subTrP = null; });
+      return null; };
+    TR.subW = function(){ TR.subAt = Date.now(); TR.subTrack();
+      fetch('https://tiles.bluishvoid.com/subway/v1/nyc.json').then(function(r){ return r.ok ? r.json() : null; }).then(function(D){ if (D && Array.isArray(D.trains)) TR.subD = D; }).catch(function(){}); };
+    TR.subAlert = function(rt, dir){ var SD = window._bvSubDelays; if (!SD) return null; var A = (SD.get() || {}).alerts || [], rs = SD.show ? SD.show(rt) : rt;
+      for (var i = 0; i < A.length; i++){ var al = A[i]; if (!al || !al.routes) continue;
+        if ((al.routes.indexOf(rt) >= 0 || al.routes.indexOf(rs) >= 0) && (!al.dir || al.dir === dir || (al.dir !== 'N' && al.dir !== 'S'))) return al; }
+      return null; };
+    TR.subPos = function(r, nowS){ var T = TR.subTr && TR.subTr[r[1]] && TR.subTr[r[1]][r[2]]; if (!T) return null;
+      var sP = r[3], sN = r[4], s;
+      if (r[7]) s = sN; else if (r[9] || nowS >= r[6]) s = sN - (sN - sP) * 0.04; else s = sN - (sN - sP) * Math.max(0, Math.min(1, (r[6] - nowS) / Math.max(20, r[5])));
+      var dir = sN >= sP ? 1 : -1, at = TR.glAt(T, s), ah = TR.glAt(T, s + dir * 6);
+      return { la: at.y / SY, lo: at.x / SK, la2: ah.y / SY, lo2: ah.x / SK }; };
+    TR.subDraw = function(g, dpr, z, W, H){
+      TR.subHits = []; if (!TR.subD || !TR.subTr) return;
+      var M5 = window._bvMta, col = function(rt){ var c = M5 && M5.colors ? M5.colors[M5.show ? M5.show(rt) : rt] : null; return c || '#808183'; };
+      var nowS = Date.now() / 1000, sc = z >= 16 ? 1 : .9;
+      TR.subD.trains.forEach(function(r){ var p = TR.subPos(r, nowS); if (!p) return;
+        var a = M.latLngToContainerPoint([p.la, p.lo]), b = M.latLngToContainerPoint([p.la2, p.lo2]);
+        var dx = b.x - a.x, dy = b.y - a.y, dl = Math.hypot(dx, dy) || 1; dx /= dl; dy /= dl;
+        var off = 4 * sc, x = (a.x - dy * off) * dpr, y = (a.y + dx * off) * dpr;           /* to the right of travel */
+        if (x < -30 || y < -30 || x > W + 30 || y > H + 30) return;
+        var dir = /N$/.test(r[10]) ? 'N' : 'S', al = TR.subAlert(r[0], dir), trouble = r[8] || r[9] || al;
+        if (trouble){ g.save(); g.shadowColor = 'rgba(245,165,36,.95)'; g.shadowBlur = 10 * dpr; g.fillStyle = 'rgba(245,165,36,.55)';
+          g.beginPath(); g.arc(x, y, 9 * dpr * sc, 0, 6.3); g.fill(); g.restore(); }
+        TR.carDraw(g, [x, y], Math.atan2(dy, dx), true, col(r[0]), dpr * sc, z);
+        if (z >= 15){ var lab = String(M5 && M5.show ? M5.show(r[0]) : r[0]).replace(/X$/, '');
+          g.font = '800 ' + (7.5 * dpr) + 'px system-ui,sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.lineWidth = 2.6 * dpr; g.strokeStyle = 'rgba(8,10,16,.9)';
+          g.strokeText(lab, x, y - 8.5 * dpr); g.fillStyle = '#fff'; g.fillText(lab, x, y - 8.5 * dpr);
+          if (r[8] || r[9]){ var tg = r[8] ? 'HELD' : 'LATE'; g.font = '800 ' + (7 * dpr) + 'px system-ui,sans-serif'; g.textAlign = 'left';
+            g.strokeText(tg, x + 11 * dpr, y); g.fillStyle = '#f5a524'; g.fillText(tg, x + 11 * dpr, y); } }
+        TR.subHits.push({ x: x / dpr, y: y / dpr, r: r, al: al }); }); window._bvTRsubHits = TR.subHits; };   /* window: read by the test sweeps */
+    TR.glTick = function(){ if (TR.lit !== true || !paneOn() || document.hidden || !M) return; var subOn = TR.show.rail && nycHere() && M.getZoom() >= 14;
+      if (TR.show.rr && Date.now() - TR.glWAt > 15000) TR.glW(); if (subOn && Date.now() - TR.subAt > 15000) TR.subW();
+      if (TR.show.rr || subOn || TR.subWas){ TR.subWas = subOn; TR.glDraw(); } };
     TR.draw = function(){
       if (!TR.lit || !M || !TR.cv) return;
       var cv = TR.cv, sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr);
