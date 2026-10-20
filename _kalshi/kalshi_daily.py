@@ -2549,6 +2549,19 @@ def measured_cap():
 # as `shadow` beside the lock and grades it at settlement like any other -- the court reads both, so
 # a market earns its bets back on the record and not by anyone's say-so. Nothing here is typed to
 # fit: the two constants are a sample size and a window.
+#
+# RE-JUDGED 2026-10-19 ("do 1 2 3 and 4"), and LEFT AS IT IS. New York's noon court was shut 09-28..10-06 while the
+# bets it withheld won 6 of 7, which looked like a broken rule. It was not: replayed day by day on what each bake knew
+# (it matches the live trail's gate exactly), the court never mixed legs or cities and its window was current; it was
+# shut because the record only began 09-05 and half the days carry no bet, so n reached 20 on 10-05, and then sat at
+# 0.86 and 0.98 of its own margin for two days before opening 10-07. Six of the "13 withheld bets that went 10-3"
+# were never the court's: they were picks_agree (why='disagree', 4 won 2 lost). Causal alternatives on the same days
+# (lock leg, every graded bet): this rule 8 named +75c +- 34; ret > 0 at n >= 20, 10 named +62c +- 24; n >= 10 and
+# ret >= se, 9 named +54c +- 36; always open, 30 named +37c +- 19. A placebo -- random sets of bets of the same size
+# from the same days -- beats every rule's timing 13-42% of the time, so no gate is distinguishable from another at
+# 30 bets, and none is adopted. The evening leg, on ITS OWN record (named and withheld), has never reached its
+# margin: 37 graded, 18 won, -2c +- 16 per $1; the best its last 30 managed was +10c against a 17c margin (10-18).
+# It stays paused by this same rule and reopens only on that record, never on the noon leg's.
 EDGE_WINDOW, EDGE_MIN_N = 30, 20
 EDGE_GATE = {}          # (market key, leg) -> the court's ruling, set at the start of each run
 
