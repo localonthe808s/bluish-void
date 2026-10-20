@@ -198,6 +198,8 @@ BIAS_K  = int(os.environ.get('BV_BIAS_K', '30') or 30)   # days in the rolling b
 BIAS_MIN = 7                              # need this many before trusting it
 LOCK_HOUR = 12                            # noon ET: morning obs in hand, peak ahead
 EVE_HOUR = 17                             # the overnight plan is logged from 5 PM local
+TRAIL_FULL_DAYS, TRAIL_KEEP_DAYS = 14, 90     # history[].trail: full rows for 14 days, the core for 90
+TRAIL_CORE = ('h', 'pred', 'sd', 'obs', 'ours', 'mkt')
 FINAL_HOUR = 18                           # the actionable call, still 6 h before close
 
 # Five-model consensus.  Every one of these beats our old single source, and
@@ -5171,10 +5173,21 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
                 h['published'] = {'h': t['h'], 'twc': t.get('twc_fc'), 'nws': t.get('nws_fc'),
                                   'ours': t.get('pred')}
                 break
-    keep = sorted(hist, reverse=True)[:14]
+    # THE HOURLY TRAIL IS KEPT 90 DAYS (2026-10-19, was 14). It is the only per-hour record of ours against the
+    # market inside the public file, and 14 days was too short to measure anything hourly on (the morning-blend
+    # question needed 40). The newest TRAIL_FULL_DAYS keep every field; older days keep the core of each hour --
+    # h, pred, sd, obs, ours, mkt -- and drop what is either derivable (edge) or already kept once a day
+    # (twc_fc/nws_fc live on in `published`). Measured on the 10-19 file: 3.1 KB a day in full, 2.4 KB compact, so
+    # the steady state is about +180 KB raw (~+20 KB gzipped) over the 255 KB file. No positions or money are in it.
+    order = sorted(hist, reverse=True)
+    full, keep = set(order[:TRAIL_FULL_DAYS]), set(order[:TRAIL_KEEP_DAYS])
     for k, h in hist.items():
-        if k not in keep and 'trail' in h:
+        if 'trail' not in h:
+            continue
+        if k not in keep:
             del h['trail']
+        elif k not in full:
+            h['trail'] = [{f: t[f] for f in TRAIL_CORE if f in t} for t in h['trail']]
 
     doc = {
         # `now` is local_now(cfg) -- the clock where the market SETTLES, not
