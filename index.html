@@ -108352,6 +108352,7 @@ function closeAlertModal(){
          (full city, box null). An error from the mode falls back to the plain raw url. */
       var vbIn = function(B){ return !B || (B[0] <= w && B[1] <= s2 && B[2] >= e && B[3] >= n); };
       TR.inView.forEach(function(f){
+        if (TR.show.rr && nycHere() && now - TR.glWok < 60000 && /lirr|long island|metro-north|mnr/i.test((f.n || '') + (f.u || '') + (f.id || ''))){ delete TR.veh[f.id]; return; }   /* our worker has them (TR.glW) */
         if (now - (TR.vehAt[f.id] || 0) < 28000 && (!f.vb || vbIn(TR.vehBox[f.id]))) return; TR.vehAt[f.id] = now;
         var raw = f.c ? f.u : 'https://proxy.bluishvoid.com/?url=' + encodeURIComponent(f.u) + '&ttl=15', u = raw, sq = TR.vehSeq[f.id] = (TR.vehSeq[f.id] || 0) + 1;
         if (f.vb && !f.c){ var pw = (e - w) / 4, ph = (n - s2) / 4;
@@ -108368,7 +108369,7 @@ function closeAlertModal(){
               if (pv){ var dy = (o.la - pv.la) * 111320, dx = (o.lo - pv.lo) * 111320 * Math.cos(o.la * Math.PI / 180);
                 o.mv = Math.hypot(dx, dy) >= 20 ? (Math.atan2(dx, dy) * 180 / Math.PI + 360) % 360 : pv.mv; }
               mem[k] = { la: o.la, lo: o.lo, mv: o.mv }; });
-            if (nycHere() && /lirr|long island|metro-north|mnr/i.test((f.n || '') + (f.u || '') + (f.id || ''))) try { TR.glIn(f.id, TR.veh[f.id]); } catch(e3){} }
+            if (nycHere() && Date.now() - TR.glWok > 60000 && /lirr|long island|metro-north|mnr/i.test((f.n || '') + (f.u || '') + (f.id || ''))) try { TR.glIn(f.id, TR.veh[f.id]); } catch(e3){} }
           TR.draw(); }).catch(function(){});
       });
     };
@@ -108913,8 +108914,12 @@ function closeAlertModal(){
       Object.keys(TR.gl.trains).forEach(function(k){ if (k.indexOf(fid + '|') === 0 && !seen[k]) delete TR.gl.trains[k]; }); };
     window._bvTRglS = function(rec, now){ return TR.glS(rec, now); };
     TR.glS = function(rec, now){ var T = TR.gl.tr[rec.li]; if (!T) return rec.s1;
-      var tgt = function(t){ var s1 = rec.s1 + rec.v * Math.min(Math.max(0, (t - rec.t1) / 1000), 45);
-        if (rec.v){ var nx = null; T.stops.forEach(function(st){ if (rec.v > 0 ? (st > rec.s1 + 30 && (nx == null || st < nx)) : (st < rec.s1 - 30 && (nx == null || st > nx))) nx = st; });
+      /* ARRIVING ON TIME: with the worker's next station and its predicted arrival, the train runs from its last fix so that it
+         reaches the platform exactly then, however old the fix (the feeds' positions run 10 s to minutes behind) */
+      var tgt = function(t){ if (rec.v && rec.nx != null && rec.na > rec.t1 + 1000) return rec.s1 + (rec.nx - rec.s1) * Math.max(0, Math.min(1, (t - rec.t1) / (rec.na - rec.t1)));
+        var s1 = rec.s1 + rec.v * Math.min(Math.max(0, (t - rec.t1) / 1000), 45);
+        if (rec.v && rec.nx != null) s1 = rec.v > 0 ? Math.min(s1, rec.nx) : Math.max(s1, rec.nx);    /* the worker's next station */
+        else if (rec.v){ var nx = null; T.stops.forEach(function(st){ if (rec.v > 0 ? (st > rec.s1 + 30 && (nx == null || st < nx)) : (st < rec.s1 - 30 && (nx == null || st > nx))) nx = st; });
           if (nx != null) s1 = rec.v > 0 ? Math.min(s1, nx) : Math.max(s1, nx); }
         return s1; };
       var e = Math.max(0, 1 - (now - rec.fromT) / 4000); e = e * e * (3 - 2 * e);
@@ -108931,8 +108936,27 @@ function closeAlertModal(){
         if (rec.off || !TR.gl.tr){ q = PL(rec.la, rec.lo); }
         else { var T = TR.gl.tr[rec.li], A = TR.glAt(T, TR.glS(rec, now)); q = PL(A.y / GY, A.x / GK); ang = -A.ang + (rec.dir < 0 ? Math.PI : 0); }
         if (q[0] < -30 || q[1] < -30 || q[0] > W + 30 || q[1] > H + 30) return;
-        TR.carDraw(g, q, ang, !rec.off && !!rec.dir, '#e2e8f0', dpr, z); }); };
-    TR.glTick = function(){ if (TR.lit === true && TR.show.rr && paneOn() && !document.hidden) TR.glDraw(); };
+        TR.carDraw(g, q, ang, !rec.off && !!rec.dir, rec.c || '#e2e8f0', dpr, z); }); };
+    /* FROM OUR WORKER (user 2026-10-20: "yes build and deploy it"): tiles.bluishvoid.com/rail/v1/nyc.json (_tiles-worker/rail.js)
+       reads both railroads' feeds once per ~10 s per edge and sends each train already on its track, with its next station's
+       place along it and when it gets there -- ~2.4 KB a read instead of ~27 KB of protobuf, and a train glides from the first
+       read (its speed is the feed's own prediction, not two reads apart). Read every 15 s; while it answers, the raw feeds are
+       not fetched (TR.transit) and their per-train reads are skipped; if it fails for a minute, they come back on their own. */
+    TR.glWAt = 0; TR.glWok = 0;
+    TR.glW = function(){ TR.glWAt = Date.now();
+      fetch('https://tiles.bluishvoid.com/rail/v1/nyc.json').then(function(r){ return r.ok ? r.json() : null; }).then(function(D){
+        if (!D || !Array.isArray(D.trains)) return; var tr = TR.glTrack(); if (!tr || D.n !== tr.length) return;   /* the track not loaded yet, or a different build of it */
+        var now = Date.now(), seen = {}; TR.glWok = now;
+        D.trains.forEach(function(o){ var k = o.id, prev = TR.gl.trains[k]; seen[k] = 1;
+          var R = TR.rrRt && TR.rrRt[o.rr], col = R && R[o.r] ? R[o.r][1] : null;
+          if (o.li == null){ TR.gl.trains[k] = { off: true, la: o.la, lo: o.lo, seen: now, dir: 0, c: col }; return; }
+          if (prev && !prev.off && prev.t1 === o.t && prev.li === o.li){ prev.seen = now; return; }     /* the same reading: keep gliding */
+          var cur = prev && !prev.off && prev.li === o.li ? TR.glS(prev, now) : null;
+          TR.gl.trains[k] = { li: o.li, s1: o.s, t1: o.t, v: o.v || 0, dir: o.dir || (prev ? prev.dir : 0), nx: o.nx, na: o.na, nd: o.nd, c: col,
+            from: cur != null ? cur : o.s, fromT: now, seen: now }; });
+        Object.keys(TR.gl.trains).forEach(function(k){ if (!seen[k]) delete TR.gl.trains[k]; });
+      }).catch(function(){}); };
+    TR.glTick = function(){ if (TR.lit === true && TR.show.rr && paneOn() && !document.hidden){ if (Date.now() - TR.glWAt > 15000) TR.glW(); TR.glDraw(); } };
     TR.draw = function(){
       if (!TR.lit || !M || !TR.cv) return;
       var cv = TR.cv, sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr);
