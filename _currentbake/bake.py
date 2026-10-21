@@ -25,6 +25,16 @@ def main(out):
     os.makedirs(os.path.join(out, 'currents'), exist_ok=True)
     tl = get(CO + 'mdapi/prod/webapi/stations.json?type=waterlevels') or {}
     ts = [[s['id'], s['name'], s.get('state') or '', round(float(s['lat']), 4), round(float(s['lng']), 4), s.get('shefcode') or ''] for s in tl.get('stations', []) if s.get('tidal') and not s.get('greatlakes')]
+    # A GAUGE CODE ONLY WHERE THE RIVER SERVICE HAS THE GAUGE (2026-10-20 review): the page asks NWPS for the station's
+    # stageflow by its SHEF code, and 50 of 238 codes are not NWPS gauges (Santa Monica's ICAC1: "could not find gauge ID"),
+    # one red 404 each time that station is the nearest. NWPS's full list (~13 MB) is read once here; if it fails, the codes stand.
+    nw = get('https://api.water.noaa.gov/nwps/v1/gauges')
+    lids = {g.get('lid', '').upper() for g in (nw or {}).get('gauges', [])}
+    if len(lids) > 5000:
+        gone = [r[5] for r in ts if r[5] and r[5].upper() not in lids]
+        for r in ts:
+            if r[5] and r[5].upper() not in lids: r[5] = ''
+        print('gauge codes not in NWPS, dropped', len(gone))
     json.dump(ts, open(os.path.join(out, 'tide_stations.json'), 'w'), separators=(',', ':')); print('tide stations', len(ts))
     cl = get(CO + 'mdapi/prod/webapi/stations.json?type=currentpredictions&units=english') or {}
     st = {}

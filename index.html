@@ -49680,8 +49680,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                 .catch(function(){ tryProxy(src,0); });
             }
 
+            /* OUR PROXY FIRST (2026-10-20 review): rss2json answers 403 to every request now, so each feed spent up to 6 s and a
+               red request there before falling through to proxy.bluishvoid.com, which reads all three. tryRss2Json stays unused. */
             function fetchRSS() {
-              RSS_SOURCES.forEach(function(src){ tryRss2Json(src); });
+              RSS_SOURCES.forEach(function(src){ tryProxy(src, 0); });
             }
 
             var renderFired=false;
@@ -49754,18 +49756,21 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
               }
 
               // HiPOD — featured image via RSS
-              fetch('https://api.rss2json.com/v1/api.json?rss_url='+encodeURIComponent('https://hirise.lpl.arizona.edu/togo/rss.php'))
-                .then(function(r){return r.json();})
-                .then(function(j){
-                  if(j.status!=='ok'||!j.items) return;
+              /* through our proxy, parsed here (2026-10-20 review): rss2json answers 403 now, and this had no fallback -- the
+                 gallery's HiPOD card was simply missing. The feed quotes its img src with ' -- the old pattern wanted ". */
+              fetch('https://proxy.bluishvoid.com/?url='+encodeURIComponent('https://hirise.lpl.arizona.edu/togo/rss.php'))
+                .then(function(r){ if(!r.ok) throw new Error('hipod '+r.status); return r.text(); })
+                .then(function(xml){
+                  var d=new DOMParser().parseFromString(xml,'text/xml'), tx=function(el,k){ var e=el.getElementsByTagName(k)[0]; return e?e.textContent:''; };
+                  var j={items:[].map.call(d.getElementsByTagName('item'),function(el){ return {title:tx(el,'title'),link:tx(el,'link'),pubDate:tx(el,'pubDate'),description:tx(el,'description')}; })};
                   j.items.forEach(function(it){
                     var desc=it.description||it.content||'';
-                    var imgMatch=desc.match(/<img[^>]+src="([^"]+)"/i);
+                    var imgMatch=desc.match(/<img[^>]+src=["']([^"']+)["']/i);
                     var img=imgMatch?imgMatch[1]:(it.thumbnail||'');
                     if(!img) return;
                     photos.push({source:'HiPOD',title:it.title||'Mars Surface',thumb:img,
                       link:it.link||'https://www.uahirise.org/',date:it.pubDate||new Date().toISOString(),
-                      dateLabel:it.pubDate?new Date(it.pubDate).toISOString().slice(0,10):'Featured'});
+                      dateLabel:it.pubDate&&!isNaN(new Date(it.pubDate))?new Date(it.pubDate).toISOString().slice(0,10):'Featured'});
                   });
                 }).catch(function(){}).finally(renderGallery);
 
@@ -59788,6 +59793,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     + 'var g=c.getContext("2d");g.drawImage(im,0,0);'
     + 'var id=g.getImageData(0,0,im.width,im.height);'
     + 'if(shut){var d=id.data;for(var j=3;j<d.length;j+=4)d[j]=0;} else scrub(id.data);'
+    + 'var G=ev.data&&ev.data.grid;if(G&&!shut){var D=id.data,W=im.width,H=im.height,gw=G.w,gh=G.h,gg=G.g;for(var y=0;y<H;y++){var gr=((y*gh/H)|0)*gw;for(var x=0;x<W;x++){if(!gg[gr+((x*gw/W)|0)])D[(y*W+x)*4+3]=0;}}}'
     + 'g.putImageData(id,0,0);return c.convertToBlob({type:"image/png"});})'
     + '.then(function(bl){self.postMessage({url:url,blob:bl});})'
     + '.catch(function(){self.postMessage({url:url});});};';
@@ -59866,25 +59872,57 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     return 'https://opengeo.ncep.noaa.gov/geoserver/conus/ows?service=WMS&version=1.1.0&request=GetMap'
       + '&layers=conus_bref_qcd&styles=&bbox=' + bb[1] + '&width=160&height=140&srs=EPSG:3857&format=image/png8&transparent=true&time=' + tm[1];
   }
-  function _despeckleWms(url, cb, mask){
+  /* THE MOSAIC AS A MASK, NOT ONLY A VOTE (LOCAL, 2026-10-20 review). The vote blanks a frame only when the QC'd mosaic is
+     dry over the WHOLE box; one echo anywhere (snow on a far peak) let everything through, and Boulder's map kept KFTG's
+     ground clutter -- teal speckles down the Front Range -- that the mosaic's own QC had removed. For LOCAL the mosaic's
+     160 x 140 picture of the same box and minute is a mask: a station pixel stays only where the mosaic has an echo within
+     two of its cells (~2-8 km at LOCAL's zooms), which keeps real rain (in both) and drops what QC calls clutter.
+     THE CITY keeps the vote alone. An unreadable mask masks nothing. */
+  var _dsGridCache = {};
+  function _dsMaskGrid(maskUrl){
+    if (!maskUrl) return Promise.resolve(null);
+    if (maskUrl in _dsGridCache) return Promise.resolve(_dsGridCache[maskUrl]);
+    return new Promise(function(res){
+      var im = new Image(); im.crossOrigin = 'anonymous';
+      im.onload = function(){
+        var out = null;
+        try {
+          var w = im.naturalWidth, h = im.naturalHeight, c = document.createElement('canvas'); c.width = w; c.height = h;
+          var g = c.getContext('2d'); g.drawImage(im, 0, 0);
+          var d = g.getImageData(0, 0, w, h).data, e = new Uint8Array(w * h), o = new Uint8Array(w * h), R2 = 2;
+          for (var i = 0; i < w * h; i++) e[i] = d[i * 4 + 3] > 60 ? 1 : 0;
+          for (var y = 0; y < h; y++) for (var x = 0; x < w; x++){ if (!e[y * w + x]) continue;
+            for (var yy = Math.max(0, y - R2); yy <= Math.min(h - 1, y + R2); yy++) for (var xx = Math.max(0, x - R2); xx <= Math.min(w - 1, x + R2); xx++) o[yy * w + xx] = 1; }
+          out = { w: w, h: h, g: o };
+        } catch(err){ out = null; }
+        _dsGridCache[maskUrl] = out; var ks = Object.keys(_dsGridCache); if (ks.length > 40) delete _dsGridCache[ks[0]];
+        res(out);
+      };
+      im.onerror = function(){ res(null); };
+      im.src = maskUrl;
+    });
+  }
+  function _despeckleWms(url, cb, mask, pix){
     if (_despeckleCache[url]) return cb(_despeckleCache[url]);
     if (_dsPend[url]){ _dsPend[url].push(cb); return; }
     /* settle the mosaic's vote first, then hand the frame off */
     _dsGate(mask).then(function(shut){
-      if (_despeckleCache[url]) return cb(_despeckleCache[url]);
-      var w = _dsGetWorker();
-      if (w){
-        if (_dsPend[url]){ _dsPend[url].push(cb); return; }
-        _dsPend[url] = [cb];
-        w.postMessage({ url: url, shut: shut });
-        return;
-      }
-      _dsMain(url, cb, shut);
+      return (pix && !shut ? _dsMaskGrid(mask) : Promise.resolve(null)).then(function(grid){
+        if (_despeckleCache[url]) return cb(_despeckleCache[url]);
+        var w = _dsGetWorker();
+        if (w){
+          if (_dsPend[url]){ _dsPend[url].push(cb); return; }
+          _dsPend[url] = [cb];
+          w.postMessage({ url: url, shut: shut, grid: grid });
+          return;
+        }
+        _dsMain(url, cb, shut, grid);
+      });
     });
   }
-  /* shared with the national map's LOCAL radar (2026-10-16, one map engine): THE CITY's palette scrub + mosaic gate */
-  window._bvDespeckle = function(url, cb){ _despeckleWms(url, cb, _localMaskUrl(url)); };
-  function _dsMain(url, cb, shut){
+  /* shared with the national map's LOCAL radar (2026-10-16, one map engine): THE CITY's palette scrub + mosaic gate, and the mask */
+  window._bvDespeckle = function(url, cb){ _despeckleWms(url, cb, _localMaskUrl(url), true); };
+  function _dsMain(url, cb, shut, grid){
     if (_despeckleCache[url]) return cb(_despeckleCache[url]);
     var im = new Image();
     im.crossOrigin = 'anonymous';
@@ -59897,6 +59935,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var id = g.getImageData(0, 0, c.width, c.height);
         if (shut){ var d0 = id.data; for (var j0 = 3; j0 < d0.length; j0 += 4) d0[j0] = 0; }
         else _dsScrub(id.data);
+        if (grid && !shut){ var D1 = id.data, W1 = c.width, H1 = c.height;
+          for (var y1 = 0; y1 < H1; y1++){ var gr1 = ((y1 * grid.h / H1) | 0) * grid.w; for (var x1 = 0; x1 < W1; x1++) if (!grid.g[gr1 + ((x1 * grid.w / W1) | 0)]) D1[(y1 * W1 + x1) * 4 + 3] = 0; } }
         g.putImageData(id, 0, 0);
         c.toBlob(function(bl){
           if (!bl) return cb(url);
@@ -110193,11 +110233,25 @@ function closeAlertModal(){
       M._bvSeaOff = !(VIEW === 'map' || tideOn()) || !on('sea'); if (M._bvSeaRedraw) M._bvSeaRedraw();
       if (OV.on) OV.draw();
     };
+    /* NO SEA, NO SEA SWITCHES (2026-10-20 review): Boulder's MAP view offered BATHYMETRY and CANYONS & SEAMOUNTS with no water
+       for hundreds of miles. Water is near when any z8 cell of the bathymetry's own cover index (BV_BATHY.cover) meets the
+       view and a margin of half a view round it; the two switches show only then (their settings are kept either way). */
+    LAY.seaHere = function(){
+      var B = window.BV_BATHY; if (!M || !B || !B.cover || !B.cover.size) return true;
+      var bb = M.getBounds().pad(0.5), T = function(la, lo){ var r = la * Math.PI / 180; return [Math.floor((lo + 180) / 360 * 256), Math.floor((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * 256)]; };
+      var a = T(Math.min(85, bb.getNorth()), Math.max(-180, bb.getWest())), b = T(Math.max(-85, bb.getSouth()), Math.min(180, bb.getEast()));
+      if ((b[0] - a[0] + 1) * (b[1] - a[1] + 1) > 2500) return true;
+      for (var x = a[0]; x <= b[0]; x++) for (var y = a[1]; y <= b[1]; y++) if (B.cover.has(x + '/' + y)) return true;
+      return false;
+    };
     LAY.pills = function(){
       var row = document.getElementById('lc-lay'); if (!row){ row = document.createElement('div'); row.id = 'lc-lay'; row.style.cssText = 'margin-top:5px;'; strip.appendChild(row); }
-      var b0 = LAY.bare();
+      var b0 = LAY.bare(), sea = LAY.seaHere(); LAY.seaWas = sea;
+      if (!LAY.seaHook && M){ LAY.seaHook = true;
+        M.on('moveend', function(){ if (VIEW === 'map' && LAY.seaHere() !== LAY.seaWas) LAY.pills(); });
+        var BB = window.BV_BATHY; if (BB && BB.coverP) BB.coverP.then(function(){ if (VIEW === 'map' && LAY.seaHere() !== LAY.seaWas) LAY.pills(); }); }
       row.innerHTML = '<button type="button" class="lc-pill' + (b0 ? ' on' : '') + '" data-k="bare" style="margin:0 6px 4px 0;">BARE</button>'
-        + LAY.KEYS.map(function(q){ return '<button type="button" class="lc-pill' + (LAY.st[q[0]] ? ' on' : '') + '" data-k="' + q[0] + '" style="margin:0 6px 4px 0;">' + q[1] + '</button>'; }).join('')
+        + LAY.KEYS.filter(function(q){ return sea || (q[0] !== 'bath' && q[0] !== 'sea'); }).map(function(q){ return '<button type="button" class="lc-pill' + (LAY.st[q[0]] ? ' on' : '') + '" data-k="' + q[0] + '" style="margin:0 6px 4px 0;">' + q[1] + '</button>'; }).join('')
         + (GH.inCity() ? '<button type="button" class="lc-pill' + (GH.on ? ' on' : '') + '" data-k="ghost" style="margin:0 6px 4px 0;">GHOST RIVERS</button>' : '');   /* with the others (user 2026-10-17) */
       [].forEach.call(row.querySelectorAll('.lc-pill'), function(b){ b.onclick = function(e){ e.stopPropagation(); var k = b.getAttribute('data-k');
         if (k === 'ghost'){ GH.on = !GH.on; try { localStorage.setItem('bv_lc_1865', GH.on ? '1' : '0'); } catch(e2){} GH.sync(); LAY.pills(); return; }
