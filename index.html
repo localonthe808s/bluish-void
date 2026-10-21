@@ -1273,8 +1273,15 @@ window._bvSatVeilPaint = function(g, W, H){
    three-hour pressure change. THE CITY's COAST view keeps its own reader (cwBuoyRead) for its fixed box. */
 window._bvBuoys = function(w, s, e, n){
   if (!window.bvProxyJSON) return Promise.resolve([]);
-  return window.bvProxyJSON('https://coastwatch.pfeg.noaa.gov/erddap/tabledap/cwwcNDBCMet.json?station,longitude,latitude,time,WD,WSPD,GST,BAR,PTDY,WVHT'
-      + '&time%3E=now-3hours&latitude%3E=' + s.toFixed(2) + '&latitude%3C=' + n.toFixed(2) + '&longitude%3E=' + w.toFixed(2) + '&longitude%3C=' + e.toFixed(2), { timeout: 15000 })
+  var u = 'https://coastwatch.pfeg.noaa.gov/erddap/tabledap/cwwcNDBCMet.json?station,longitude,latitude,time,WD,WSPD,GST,BAR,PTDY,WVHT'
+      + '&time%3E=now-3hours&latitude%3E=' + s.toFixed(2) + '&latitude%3C=' + n.toFixed(2) + '&longitude%3E=' + w.toFixed(2) + '&longitude%3C=' + e.toFixed(2);
+  /* ERDDAP ANSWERS 404 FOR "NO MATCHING ROWS" (2026-10-20 review): an inland view (Boulder) has no buoys, the 404 read as a
+     failure, and the proxy chain then asked twice more through our proxy and allorigins -- 12 red requests a visit for
+     nothing. ERDDAP sends CORS, so it is asked directly first: a 404 is an empty answer; only a network failure goes on to
+     the proxies. */
+  var ac = window.AbortController ? new AbortController() : null, to = ac ? setTimeout(function(){ ac.abort(); }, 12000) : 0;
+  return fetch(u, ac ? { signal: ac.signal } : {}).then(function(r){ clearTimeout(to); if (r.status === 404) return { table: { rows: [] } }; if (!r.ok) throw new Error('erddap ' + r.status); return r.json(); })
+    .catch(function(){ return window.bvProxyJSON(u, { timeout: 15000 }); })
     .then(function(j){
       var T = j && j.table; if (!T || !T.rows) return [];
       var C = T.columnNames, ix = function(k){ return C.indexOf(k); }, last = {};
@@ -106550,12 +106557,18 @@ function closeAlertModal(){
       var sw = L.CRS.EPSG3857.project(bb.getSouthWest()), ne = L.CRS.EPSG3857.project(bb.getNorthEast());
       if (!(sz.x > 0 && sz.y > 0)){ OV.satKey = ''; OV.satBB = null; return; }   /* no map size yet: a 0-high canvas cannot take the picture */
       var W = Math.round(Math.min(1650, sz.x * 1.5)), H = Math.round(W * sz.y / sz.x);
+      /* AT THE IMAGERY'S OWN RESOLUTION, SMOOTHED UP (2026-10-20 review): channel 13 is ~2 km a pixel (more off nadir), and the
+         WMS enlarges with hard squares -- past z8 the clouds drew as tan blocks 6-10 px wide over Los Angeles and the Front
+         Range. The picture is asked for at ~2.5 km a pixel (true ground size, mercator divided by cos lat) and the canvas
+         scales it up with smoothing; above that zoom it is asked for at the canvas size as before. */
+      var gm = (ne.x - sw.x) / W * Math.cos(c0.lat * Math.PI / 180), rq = gm < 2500 ? Math.max(8, Math.round(W * gm / 2500)) : W, rqH = Math.max(8, Math.round(rq * H / W));
       var im = new Image(); im.crossOrigin = 'anonymous';
       im.onload = function(){
         if (key !== OV.satKey || !OV.satOn) return;
         try {
           var c = document.createElement('canvas'); c.width = W; c.height = H;
-          var g2 = c.getContext('2d', { willReadFrequently: true }); g2.drawImage(im, 0, 0, W, H); window._bvSatVeilPaint(g2, W, H);
+          var g2 = c.getContext('2d', { willReadFrequently: true }); g2.imageSmoothingEnabled = true; g2.imageSmoothingQuality = 'high';
+          g2.drawImage(im, 0, 0, W, H); window._bvSatVeilPaint(g2, W, H);
           /* encoded off the main thread (toDataURL blocked it), shown from an object URL; the last one is let go */
           c.toBlob(function(bl){ if (!bl || key !== OV.satKey || !OV.satOn || !M) return;
             var u = URL.createObjectURL(bl), nl = L.imageOverlay(u, bb, { interactive: false, zIndex: 2 }).addTo(M);
@@ -106563,7 +106576,7 @@ function closeAlertModal(){
         } catch(e){}
       };
       im.src = 'https://mesonet.agron.iastate.edu/cgi-bin/wms/' + (west || lay !== 'conus_ch13' ? 'goes_west' : 'goes_east') + '.cgi?service=WMS&version=1.1.1&request=GetMap&layers=' + lay
-        + '&styles=&srs=EPSG:3857&bbox=' + [sw.x, sw.y, ne.x, ne.y].map(function(v){ return v.toFixed(0); }).join(',') + '&width=' + W + '&height=' + H + '&format=image/png&transparent=true&_=' + Math.floor(Date.now() / 300000);
+        + '&styles=&srs=EPSG:3857&bbox=' + [sw.x, sw.y, ne.x, ne.y].map(function(v){ return v.toFixed(0); }).join(',') + '&width=' + rq + '&height=' + rqH + '&format=image/png&transparent=true&_=' + Math.floor(Date.now() / 300000);
     };
     OV.start = function(mode){
       if (!M) return;
@@ -107825,6 +107838,12 @@ function closeAlertModal(){
       var b = M.getBounds(), c = M.getCenter(), now = Date.now(), cells = [];
       for (var la = Math.floor(b.getSouth() / 2) * 2; la <= b.getNorth(); la += 2) for (var lo = Math.floor(b.getWest() / 2) * 2; lo <= b.getEast(); lo += 2) cells.push('c_' + la + '_' + lo);
       if (cells.length > 24) cells = [];                                   /* a continent's worth of arrows says nothing */
+      /* only the cells the bake made (sea/currents/index.json): a view over open water or inland asked for cells that were
+         never written, a red 404 each (Los Angeles: two a visit; 2026-10-20 review) */
+      if (!SEA.idx){ if (!SEA.idxP) SEA.idxP = fetch('https://cdn.bluishvoid.com/sea/currents/index.json').then(function(r){ return r.ok ? r.json() : null; })
+          .then(function(j){ SEA.idx = {}; ((j && j.cells) || []).forEach(function(k){ SEA.idx[k] = 1; }); if (!j) SEA.idx = null; SEA.read(); }).catch(function(){ SEA.idxP = null; });
+        return; }
+      cells = cells.filter(function(k){ return SEA.idx[k]; });
       cells.forEach(function(k){ var C = SEA.cells[k]; if (C && (C === 'loading' || now - C < 3600e3)) return; SEA.cells[k] = 'loading';
         fetch('https://cdn.bluishvoid.com/sea/currents/' + k + '.json').then(function(r){ return r.ok ? r.json() : { s: [] }; }).then(function(j){
           (j.s || []).forEach(function(q){ var t0 = Date.parse(q.t0); SEA.all[q.i] = { i: q.i, b: q.b, la: q.la, lo: q.lo, n: q.n };
@@ -109220,14 +109239,14 @@ function closeAlertModal(){
             (rt.s || []).forEach(function(seg){ var Q = seg.map(function(c){ return P(c); }); if (!Q.some(inF)) return; g.beginPath(); Q.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); g.stroke(); }); }); });
           g.setLineDash([]);
         }
-        var rrBox = [];
+        var rrBox = [], rrLab = [];
         if (z >= 10) TR.stopsInView().forEach(function(st){ if (st.k !== 'rr' && z < 11) return; var q = P([st.lo, st.la]); if (!inF(q)) return;   /* from z11 (user 2026-10-17: "why dont we see subway station dots?"); the railroads' from z10 */
           if (st.k === 'rr'){ TR.stHits.push({ x: q[0] / dpr, y: q[1] / dpr, st: st }); var selR = TR.board && TR.board.st === st, rr0 = (phone ? 2 : 3) * (selR ? 1.4 : 1) * dpr;
             g.beginPath(); g.arc(q[0], q[1], rr0, 0, 6.3); g.fillStyle = '#fff'; g.fill(); g.lineWidth = 1.6 * dpr; g.strokeStyle = st.c; g.stroke();
             if (z >= 12 || /^(Penn Station|Grand Central|Jamaica|Atlantic Terminal|Stamford|Harlem-125 St|White Plains|Hicksville|Ronkonkoma|Babylon)$/.test(st.n)){
-              var fz = (z >= 14 ? 10 : 9) * dpr; g.font = '700 ' + fz + 'px system-ui,sans-serif'; var tw = g.measureText(st.n).width, bx0 = q[0] + 6 * dpr, box = [bx0, q[1] - fz * 0.6, bx0 + tw, q[1] + fz * 0.6];
-              if (!rrBox.some(function(r2){ return !(box[2] < r2[0] || box[0] > r2[2] || box[3] < r2[1] || box[1] > r2[3]); })){ rrBox.push(box);
-                g.textAlign = 'left'; g.textBaseline = 'middle'; g.lineWidth = 3 * dpr; g.strokeStyle = 'rgba(8,10,16,.88)'; g.strokeText(st.n, bx0, q[1]); g.fillStyle = '#eef2f8'; g.fillText(st.n, bx0, q[1]); } }
+              var fz = (z >= 14 ? 10 : 9) * dpr; g.font = '700 ' + fz + 'px system-ui,sans-serif'; var tw = g.measureText(st.n).width, bx0 = q[0] + 6 * dpr; if (bx0 + tw > g.canvas.width - 4 * dpr) bx0 = q[0] - 6 * dpr - tw;   /* past the right edge ("Hicks..."): the name goes left of its dot */
+              var box = [bx0, q[1] - fz * 0.6, bx0 + tw, q[1] + fz * 0.6];
+              if (!rrBox.some(function(r2){ return !(box[2] < r2[0] || box[0] > r2[2] || box[3] < r2[1] || box[1] > r2[3]); })){ rrBox.push(box); rrLab.push([st.n, bx0, q[1], fz]); } }
             return; }
           TR.stHits.push({ x: q[0] / dpr, y: q[1] / dpr, st: st }); var sel = TR.board && TR.board.st === st;
           g.beginPath();
@@ -109238,6 +109257,10 @@ function closeAlertModal(){
               g.fillStyle = '#fff'; g.font = '700 ' + ((rt.length > 1 ? 5.5 : 7) * dpr) + 'px system-ui,sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(rt.length > 3 ? rt.slice(0, 3) : rt, cx2, cy2 + .3 * dpr); });
             g.font = '700 ' + (10 * dpr) + 'px system-ui,sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle'; g.lineWidth = 2.8 * dpr; g.strokeStyle = 'rgba(8,10,16,.88)';
             g.strokeText(st.n, bx, by); g.fillStyle = '#eef2f8'; g.fillText(st.n, bx, by); } });
+        /* the railroads' station names LAST, over every dot (2026-10-20 review: the subway stations drawn after Penn Station's
+           name covered it -- "..n Station") */
+        rrLab.forEach(function(l){ g.font = '700 ' + l[3] + 'px system-ui,sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle'; g.lineWidth = 3 * dpr;
+          g.strokeStyle = 'rgba(8,10,16,.88)'; g.strokeText(l[0], l[1], l[2]); g.fillStyle = '#eef2f8'; g.fillText(l[0], l[1], l[2]); });
         g.restore(); }
       /* the city cameras (NYC, LA), small, under the vehicles */
       TR.camHits = [];
