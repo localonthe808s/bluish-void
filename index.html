@@ -56703,8 +56703,65 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (io) io.observe(w); else window.addEventListener('scroll', go, { passive: true });
     window.addEventListener('load', go);
   }
-  function _preloadGoesNow(){
+  /* THE LOOP AS ONE VIDEO (2026-10-20, user: "yes build it"). goes-video.yml (_goesvid/bake.py) bakes each sector's loop
+     into an MP4 on R2 every 10 minutes: 6 h at 1200 px for desktop (~10 MB against ~64 MB of frames), 2 h at 600 px for
+     phones (~1.3 MB). When the sector, band and length match a baked video no more than 20 min behind the frame list, the
+     video is loaded whole (a blob, so every seek is local) and handed to the SAME flipbook: frame i is the video at
+     (i + 0.5) / fps, so the time label, the overlay, the zoom and the hold at the end are unchanged. Anything else, or any
+     failure, falls through to the frames. */
+  var GOES_VID = { GOES19: ' ne se cgl umv smv sp nr sr eus taw pr ', GOES18: ' pnw psw np ep ' };
+  function _goesStampMs(n){ var m = /(\d{4})(\d{3})(\d{2})(\d{2})_/.exec(n || ''); return m ? Date.UTC(+m[1], 0, 1) + (+m[2] - 1) * 864e5 + (+m[3]) * 36e5 + (+m[4]) * 6e4 : NaN; }
+  function _goesVideoTry(onProgress, done){
+    var sat = goesCurrentSat === 'G18' ? 'GOES18' : 'GOES19', sec = goesCurrentSector, kind = _goesMobile ? 'm' : 'd';
+    if (goesCurrentBand !== 'GEOCOLOR' || (GOES_VID[sat] || '').indexOf(' ' + sec + ' ') < 0 || goesLengthLabel !== (_goesMobile ? '2h' : '6h')
+        || (window._goesMapMode && window._goesMapMode()) || !window.fetch || !window.URL || !URL.createObjectURL){ done(null); return; }
+    var base = 'https://cdn.bluishvoid.com/goes/video/' + sat + '/' + sec + '/GEOCOLOR/', ep = window._locEpoch || 0, fin = false;
+    var end = function(r){ if (fin) return; fin = true; clearTimeout(to); done(r); }, to = setTimeout(function(){ end(null); }, 25000);
+    fetch(base + 'latest.json?m=' + Math.floor(Date.now() / 60000)).then(function(r){ return r.ok ? r.json() : null; }).then(function(M){
+      var K = M && M[kind]; if (!K || !K.mp4 || !K.frames || K.frames.length < 2) return end(null);
+      var newest = goesFrames[goesFrames.length - 1] || '';
+      if (_goesStampMs(newest.split('/').pop()) - _goesStampMs(K.frames[K.frames.length - 1]) > 20 * 60e3) return end(null);
+      return fetch(base + K.mp4).then(function(r){
+        if (!r.ok) throw new Error('mp4 ' + r.status);
+        var tot = +(r.headers.get('content-length') || K.bytes || 0);
+        if (!r.body || !r.body.getReader || !tot) return r.blob();
+        var rd = r.body.getReader(), parts = [], got = 0;
+        return (function pump(){ return rd.read().then(function(x){ if (x.done) return new Blob(parts, { type: 'video/mp4' });
+          parts.push(x.value); got += x.value.length; try { onProgress(Math.min(99, Math.round(got / tot * 100))); } catch(e){} return pump(); }); })();
+      }).then(function(blob){
+        if (ep !== (window._locEpoch || 0)) return end(null);
+        var v = document.createElement('video');
+        v.muted = true; v.playsInline = true; v.preload = 'auto'; v.setAttribute('playsinline', ''); v.setAttribute('muted', '');
+        v.addEventListener('error', function(){ end(null); });
+        v.addEventListener('loadeddata', function(){
+          var fps = M.fps || 10, dir = 'https://tiles.bluishvoid.com/goes/' + sat + '/ABI/SECTOR/' + sec + '/GEOCOLOR/';
+          end({ frames: K.frames.map(function(n){ return dir + n; }),
+                images: K.frames.map(function(n, i){ return { vid: v, t: (i + 0.5) / fps, complete: true, naturalWidth: v.videoWidth, naturalHeight: v.videoHeight }; }) });
+        });
+        v.src = URL.createObjectURL(blob);
+      });
+    }).catch(function(){ end(null); });
+  }
+  var _goesVidTok = 0;
+  function _preloadGoesNow(noVid){
     if (!goesFrames.length) return;
+    if (!noVid){
+      var tok = ++_goesVidTok;
+      var ov0 = document.getElementById('goes-loading-overlay'), lt0 = document.getElementById('goes-loading-text'), shown0 = Date.now();
+      if (ov0){ ov0.style.opacity = '1'; ov0.style.display = 'flex'; }
+      _goesVideoTry(function(pct){ if (tok !== _goesVidTok) return; if (lt0) lt0.textContent = 'CHASING CLOUDS ' + pct + '%'; if (goesLiveEl) goesLiveEl.textContent = '\u2022 LOADING ' + pct + '%'; }, function(R){
+        if (tok !== _goesVidTok) return;                        /* a newer load (sector, length, location) took over */
+        if (!R){ _preloadGoesNow(true); return; }               /* no video for this view, or it failed: the frames */
+        goesFrames = R.frames; goesImages = R.images; window._goesVideoLoop = true;
+        if (goesLiveEl) goesLiveEl.textContent = '\u2022 LIVE';
+        if (lt0) lt0.textContent = '';
+        setTimeout(function(){ if (ov0){ ov0.style.opacity = '0'; setTimeout(function(){ ov0.style.display = 'none'; }, 600); } }, Math.max(0, 800 - (Date.now() - shown0)));
+        if (goesAnimId){ cancelAnimationFrame(goesAnimId); goesAnimId = null; }
+        startGoesCanvasAnim();
+      });
+      return;
+    }
+    window._goesVideoLoop = false;
     goesImages = [];
     var loaded = 0;
     var total = goesFrames.length;
@@ -56957,12 +57014,21 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
 
   function drawGoesFrame(ctx, img, w, h){
     if (!img || !img.complete || !img.naturalWidth) return;
+    if (img.vid){                                       /* a frame of the baked video: seek, and draw once it lands */
+      var v = img.vid;
+      if (Math.abs(v.currentTime - img.t) > 0.02){
+        v._want = [ctx, img, w, h];
+        if (!v._seekHook){ v._seekHook = true; v.addEventListener('seeked', function(){ var q = v._want; v._want = null; if (q) drawGoesFrame(q[0], q[1], q[2], q[3]); }); }
+        v.currentTime = img.t; return;
+      }
+      img = { _src: v, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight };
+    }
     // Cover the canvas (like object-fit:cover)
     var iw = img.naturalWidth, ih = img.naturalHeight;
     var scale = Math.max(w/iw, h/ih);
     var dw = iw * scale, dh = ih * scale;
     var dx = (w - dw) / 2, dy = (h - dh) / 2;
-    ctx.drawImage(img, dx, dy, dw, dh);
+    ctx.drawImage(img._src || img, dx, dy, dw, dh);
     /* our boundaries and names over the imagery, replacing the coastlines
        NESDIS bakes into its own pixels */
     if (window._goesOverlayCanvas && window._goesMapMode()){
@@ -57041,7 +57107,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         ctx = goesCanvas.getContext('2d');
       }
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.clearRect(0, 0, pw, ph);
+      if (!(goesImages[frame] && goesImages[frame].vid)) ctx.clearRect(0, 0, pw, ph);   /* a video frame covers the canvas once its seek lands */
       drawGoesFrame(ctx, goesImages[frame], pw, ph);
     }
 

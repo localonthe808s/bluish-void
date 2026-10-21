@@ -1536,6 +1536,12 @@ export default {
         })());
       });
     }
+    // THE LIVE CLOUDS VIDEOS (2026-10-20, user: "yes build it"). goes-video.yml bakes the satellite loops into MP4s on R2
+    // (_goesvid/bake.py); every 10 minutes at :03/:13/..., started here because GitHub's own schedule runs 10-30 min late.
+    if (minute % 10 === 3) ctx.waitUntil((async () => {
+      let r; try { r = await dispatch(env, 'goes-video.yml'); } catch (e) { r = { ok: false, status: 0, detail: String(e) }; }
+      if (!r.ok) console.log(`[goes-video] dispatch FAILED (http ${r.status}) ${r.detail}`);
+    })());
     // TWO LANES. The full 20-city bake on :05/:20/:35/:50; Central Park alone
     // on every other five-minute mark, so the New York sheet is never more
     // than a few minutes behind the newest report. Both merge into one file.
