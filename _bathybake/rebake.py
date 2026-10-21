@@ -4,7 +4,7 @@ the tile list is the union of the .webp files under the --from directories (the 
 Tiles are grouped into render.block_size(z) blocks (one NOAA request per block). Resumable: written tiles are skipped,
 tiles that came back empty go to empty.txt, blocks that failed after all retries go to err.txt (run again to retry them).
 
-    python3 rebake.py --out OUT --from DIR [--from DIR ...] [--workers 6] [--zooms 5-13]
+    python3 rebake.py --out OUT --from DIR [--from DIR ...] [--workers 6] [--zooms 5-13] [--only LIST]
 """
 import argparse, os, sys, threading, time
 from concurrent.futures import ThreadPoolExecutor
@@ -14,6 +14,7 @@ import render as RD
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument('--out', required=True); ap.add_argument('--from', dest='src', action='append', required=True)
     ap.add_argument('--workers', type=int, default=6); ap.add_argument('--zooms', default='5-13')
+    ap.add_argument('--only', help='a file of z/x/y lines: bake just those of the --from tiles (v2.1 seam re-bake)')
     A = ap.parse_args(); z0, z1 = (int(v) for v in A.zooms.split('-'))
     keys = set()
     for d in A.src:
@@ -24,6 +25,12 @@ def main():
                 if not x.isdigit(): continue
                 for f in os.listdir(os.path.join(zd, x)):
                     if f.endswith('.webp'): keys.add((z, int(x), int(f[:-5])))
+    if A.only:
+        want = set()
+        for ln in open(A.only):
+            t = ln.split()
+            if t: want.add(tuple(int(v) for v in t[0].replace('.webp', '').split('/')))
+        keys &= want
     path = lambda z, x, y: os.path.join(A.out, str(z), str(x), '%d.webp' % y)
     os.makedirs(A.out, exist_ok=True)
     ef = os.path.join(A.out, 'empty.txt'); empty = set(open(ef).read().split()) if os.path.exists(ef) else set()

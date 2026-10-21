@@ -106,6 +106,37 @@ LIT = np.array([168, 204, 238], np.float32); DARK = np.array([2, 6, 18], np.floa
 def exaggeration(z, p=None):
     p = p or P; return float(np.clip(p['e0'] * p['k'] ** (12 - z), p['emin'], p['emax']))
 
+# THE SURVEY-PATCH EDGES (v2.1, 2026-10-20). The Coastal Relief Model is itself a mosaic of surveys, and where a better one
+# sits inside a coarser one the floor steps by a few metres along the patch's edge -- a straight line exactly along the tile
+# axes (its box is in lat/lon, which mercator keeps straight). v1's flat light hid them; v2's hillshade drew the rectangles
+# (the Louisiana shelf at z9: 8-10 m over 3-4 px, ~200 px long). NOAA's service will not blend the mosaic (mosaicOperator is
+# fixed at First), and its catalog footprints do not show them (one CRM raster covers the tile), so they are found here: an
+# UNBROKEN straight run (>= L px) of slope anomaly that the parallel lines 10-20 px away do not share, joined across gaps and
+# followed while it stays above the background. There the slope is replaced by the median across the line. Measured on
+# 9/125/214: 98% of the rectangle's top edge caught, 2.7% of the tile touched; Hudson Canyon's near-vertical wall, 0.27%.
+# A wider net (no unbroken-run test) took 40-46% of the tile and flattened the salt domes; an FFT notch on the axes rang.
+def deseam(g, axis, L=61, ratio=3.0, pct=85, win=15, grow=4, gap=41, pct_follow=75, follow=200, offs=(10, 15, 20)):
+    """g: one (smoothed) slope component; axis=1 -> gx, seams are columns; axis=0 -> gy, rows."""
+    from scipy.ndimage import median_filter, uniform_filter, maximum_filter, minimum_filter
+    across, along = ((1, win), (L, 1)) if axis == 1 else ((win, 1), (1, L))
+    thin = (1, 3) if axis == 1 else (3, 1)
+    base = median_filter(g, size=across, mode='nearest')
+    s = uniform_filter(np.abs(g - base), thin, mode='nearest')                    # 3 px across: the edge is 3-4 px wide
+    run = maximum_filter(minimum_filter(s, along, mode='nearest'), along, mode='nearest')   # opening: runs >= L survive
+    mean = uniform_filter(s, along, mode='nearest')
+    nb = [np.roll(mean, (0, sg * o) if axis == 1 else (sg * o, 0), axis=(0, 1)) for o in offs for sg in (-1, 1)]
+    ref = np.median(np.stack(nb), axis=0) + 1e-9
+    m = (run / ref > ratio) & (run > np.percentile(s, pct))
+    gl = (gap, 1) if axis == 1 else (1, gap)
+    m = minimum_filter(maximum_filter(m, gl, mode='nearest'), gl, mode='nearest')
+    weak = s > np.percentile(s, pct_follow); ax = 0 if axis == 1 else 1
+    for _ in range(follow):
+        grown = m | ((np.roll(m, 1, ax) | np.roll(m, -1, ax)) & weak)
+        if (grown == m).all(): break
+        m = grown
+    m = maximum_filter(m, size=(1, 2 * grow + 1) if axis == 1 else (2 * grow + 1, 1))
+    return np.where(m, base, g)
+
 def shade_block(A, z, bx, by, B, p=None):
     """A: padded DEM block. Returns (lit alpha, dark alpha) for the unpadded block, 0..1"""
     from scipy.ndimage import gaussian_filter
@@ -117,6 +148,7 @@ def shade_block(A, z, bx, by, B, p=None):
     ym = b[3] + PAD * px - (np.arange(n) + 0.5) * px                            # each row's mercator y: ground metres per row,
     ground = px * np.cos(np.arctan(np.sinh(ym / R)))[:, None]                   # so a tile's top and bottom match its neighbours
     gy, gx = np.gradient(Z); ex = exaggeration(z, p)
+    gx, gy = deseam(gx, 1), deseam(gy, 0)                                       # v2.1: the survey-patch edges (see deseam)
     gx = gx / ground * ex; gy = gy / ground * ex
     slope = np.arctan(np.hypot(gx, gy)); aspect = np.arctan2(-gx, gy); alt = math.radians(45)
     hs = 0.0; ws = 0.0
