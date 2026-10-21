@@ -1197,6 +1197,25 @@ window._bvSeafloor = function(map){
   B.coverP.then(function(){ if (low) low.addTo(map); lay.addTo(map); });
   return lay;
 };
+/* CANVASES RIDE THE ZOOM (2026-10-21, user: "the map transitions weirdly when you zoom", with a recording): every overlay canvas
+   (the subway lines and trains, the radar marks, the terrain notes, the undersea names, the tidal flow...) hid at zoomstart and
+   came back at the end, so through the whole animation the map was bare and then everything popped in. Instead each is scaled
+   and moved with the zoom the way Leaflet moves its own image layers (_latLngBoundsToNewLayerBounds + getZoomScale, on
+   zoomanim, and on zoom for a pinch), from the view it was drawn for; its own redraw at the end puts it back sharp.
+   list(): the canvases, any may be null. */
+window._bvZoomCv = function(map, list){
+  if (!map || typeof L === 'undefined') return;
+  var cvs = function(){ return (list() || []).filter(function(c){ return c && c.style; }); };
+  if (!map._bvZoomFlag){ map._bvZoomFlag = true;            /* timed redraws (the trains every 100 ms) wait it out: they would undo the transform */
+    map.on('zoomstart', function(){ map._bvZooming = true; }); map.on('zoomend', function(){ map._bvZooming = false; }); }
+  map.on('zoomstart', function(){ var bb = map.getBounds(), z = map.getZoom();
+    cvs().forEach(function(c){ c._bvBB = bb; c._bvZ = z; L.DomUtil.addClass(c, 'leaflet-zoom-animated'); }); });
+  var tf = function(center, zoom){ cvs().forEach(function(c){ if (!c._bvBB) return;
+    try { L.DomUtil.setTransform(c, map._latLngBoundsToNewLayerBounds(c._bvBB, zoom, center).min, map.getZoomScale(zoom, c._bvZ)); } catch(e){} }); };
+  map.on('zoomanim', function(e){ tf(e.center, e.zoom); });
+  map.on('zoom', function(){ if (!map._animatingZoom) tf(map.getCenter(), map.getZoom()); });
+  map.on('zoomend', function(){ cvs().forEach(function(c){ c._bvBB = null; }); });
+};
 window._bvSeaNames = function(map){
   if (!map || map._bvSeaNamesOn || typeof L === 'undefined') return;
   map._bvSeaNamesOn = true;
@@ -1242,7 +1261,7 @@ window._bvSeaNames = function(map){
         g.fillStyle = (f.k === 'canyon' ? COL.canyon : COL[f.k]) + '.85)'; g.fillText(f.n, x, y);
       });
     };
-    map.on('zoomstart', function(){ cv.style.visibility = 'hidden'; });
+    window._bvZoomCv(map, function(){ return [cv]; });
     map.on('moveend zoomend resize', draw); draw(); map._bvSeaRedraw = draw;
   }).catch(function(){});
 };
@@ -105576,7 +105595,7 @@ function closeAlertModal(){
       if (!M) return;
       if (!ARC.cv){ var pn = M.getPane('lcArc') || M.createPane('lcArc'); pn.style.zIndex = 441; pn.style.pointerEvents = 'none';
         ARC.cv = document.createElement('canvas'); ARC.cv.style.position = 'absolute'; pn.appendChild(ARC.cv);
-        M.on('zoomstart', function(){ ARC.cv.style.visibility = 'hidden'; }); M.on('moveend resize', function(){ ARC.cv.style.visibility = ''; ARC.draw(); }); }
+        window._bvZoomCv(M, function(){ return [ARC.cv]; }); M.on('moveend resize', function(){ ARC.cv.style.visibility = ''; ARC.draw(); }); }
       var cv = ARC.cv, sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr);
       var L0 = window.LOCATION || {}, mo = OV.motion, o = R.ov && R.ov[R.i];
       /* ARCS ONLY FROM MEASURED MOTION (2026-10-19, as THE BASIN: no arcs from a guess): on a dry night the steering-wind fallback
@@ -105846,6 +105865,7 @@ function closeAlertModal(){
         im.src = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/' + z + '/' + k + '.png'; });
     };
     OV.draw = function(){
+      if (M && M._bvZooming) return;                         /* riding the zoom (window._bvZoomCv); redrawn at moveend */
       if (M && !M._bvLabRedraw) M._bvLabRedraw = function(){ if (OV.on) OV.draw(); };   /* the place names moved: their room changed */
       if (!OV.cv || !OV.on || !M) return;
       var cv = OV.cv, sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -106702,7 +106722,7 @@ function closeAlertModal(){
       if (!OV.cv){
         M.createPane('lcOv'); M.getPane('lcOv').style.zIndex = 440; M.getPane('lcOv').style.pointerEvents = 'none';
         OV.cv = document.createElement('canvas'); OV.cv.style.position = 'absolute'; M.getPane('lcOv').appendChild(OV.cv);
-        M.on('zoomstart', function(){ if (OV.cv) OV.cv.style.visibility = 'hidden'; });
+        window._bvZoomCv(M, function(){ return [OV.cv]; });
         M.on('moveend resize', function(){ if (!OV.on) return; OV.cv.style.visibility = ''; OV.draw(); clearTimeout(OV.deb);
           OV.deb = setTimeout(function(){ OV.liveRead(); if (OV.mode !== 'radar') return; OV.read(); OV.buoyRead(); OV.satSync(); OV.fnRead(); OV.mxRead(); if (window.bvLightning) window.bvLightning.want('local', true, OV.box()); }, 500); });
       }
@@ -106851,7 +106871,7 @@ function closeAlertModal(){
       NG.lit = true;
       if (!NG.cv){ var pn = M.getPane('lcNyGeo') || M.createPane('lcNyGeo'); pn.style.zIndex = 432; pn.style.pointerEvents = 'none';
         NG.cv = document.createElement('canvas'); NG.cv.style.position = 'absolute'; pn.appendChild(NG.cv);
-        M.on('zoomstart', function(){ if (NG.cv) NG.cv.style.visibility = 'hidden'; });
+        window._bvZoomCv(M, function(){ return [NG.cv]; });
         M.on('moveend resize', function(){ if (NG.lit) NG.draw(); }); }
       NG.cv.style.display = '';
       window._bvCwGeo.load(function(){ if (!NG.lit) return; NG.draw(); FQ.summary(); });
@@ -108011,7 +108031,7 @@ function closeAlertModal(){
     SEA.on = function(){ if (!M) return; SEA.lit = true;
       if (!SEA.cv){ var pn = M.getPane('lcSea') || M.createPane('lcSea'); pn.style.zIndex = 446; pn.style.pointerEvents = 'none';
         SEA.cv = document.createElement('canvas'); SEA.cv.style.position = 'absolute'; pn.appendChild(SEA.cv);
-        M.on('zoomstart', function(){ if (SEA.cv) SEA.cv.style.visibility = 'hidden'; });
+        window._bvZoomCv(M, function(){ return [SEA.cv]; });
         M.on('moveend resize', function(){ if (!SEA.lit) return; SEA.draw(); clearTimeout(SEA.deb); SEA.deb = setTimeout(SEA.read, 500); }); }
       SEA.cv.style.display = ''; SEA.read(); SEA.draw(); SWL.on();
       if (!SEA.timer) SEA.timer = setInterval(function(){ if (SEA.lit && paneOn() && !document.hidden){ SEA.read(); SEA.draw(); } }, 60000); };
@@ -108282,7 +108302,7 @@ function closeAlertModal(){
     SWL.on = function(){
       if (!M) return;
       if (!SWL.wired){ SWL.wired = true;
-        M.on('zoomstart', function(){ if (SWL.cv) SWL.cv.style.visibility = 'hidden'; });
+        window._bvZoomCv(M, function(){ return [SWL.cv]; });
         M.on('moveend resize', function(){ if (!SEA.lit) return; clearTimeout(SWL.deb); SWL.deb = setTimeout(SWL.build, 450); });
         document.addEventListener('visibilitychange', function(){ if (!document.hidden && SEA.lit && SWL.draw && !SWL.raf) SWL.build(); });
         if (!SWL.timer) SWL.timer = setInterval(function(){ if (SEA.lit && !document.hidden && paneOn()) SWL.build(); }, 10 * 60000); }
@@ -109165,7 +109185,7 @@ function closeAlertModal(){
       var e = Math.max(0, 1 - (now - rec.fromT) / 4000); e = e * e * (3 - 2 * e);
       return tgt(now) + (rec.from - tgt(rec.fromT)) * e; };
     TR.glDraw = function(){
-      var cv = TR.tcv; if (!cv || !M) return; var g = cv.getContext('2d');
+      var cv = TR.tcv; if (!cv || !M || M._bvZooming) return; var g = cv.getContext('2d');
       var subOn = TR.show.rail && nycHere() && M.getZoom() >= 14;
       if (TR.lit !== true || !(TR.show.rr || subOn) || !nycHere() || M._animatingZoom){ if (!(TR.lit === true && M._animatingZoom)) g.clearRect(0, 0, cv.width, cv.height); TR.subHits = []; return; }
       var sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr), z = M.getZoom();
@@ -109264,6 +109284,7 @@ function closeAlertModal(){
       if (TR.show.rr && Date.now() - TR.glWAt > 15000) TR.glW(); if (subOn && Date.now() - TR.subAt > 15000) TR.subW();
       if (TR.show.rr || subOn || TR.subWas){ TR.subWas = subOn; TR.glDraw(); } };
     TR.draw = function(){
+      if (M && M._bvZooming) return;                         /* riding the zoom (window._bvZoomCv); redrawn at moveend */
       if (!TR.lit || !M || !TR.cv) return;
       var cv = TR.cv, sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr);
       if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
@@ -109539,7 +109560,7 @@ function closeAlertModal(){
       if (!TR.cv){ var pn = M.getPane('lcTraf') || M.createPane('lcTraf'); pn.style.zIndex = 445; pn.style.pointerEvents = 'none';
         TR.cv = document.createElement('canvas'); TR.cv.style.position = 'absolute'; pn.appendChild(TR.cv);
         TR.tcv = document.createElement('canvas'); TR.tcv.style.position = 'absolute'; TR.tcv.style.pointerEvents = 'none'; pn.appendChild(TR.tcv);   /* the gliding trains */
-        M.on('zoomstart', function(){ if (TR.cv) TR.cv.style.visibility = 'hidden'; if (TR.tcv) TR.tcv.style.visibility = 'hidden'; });
+        window._bvZoomCv(M, function(){ return [TR.cv, TR.tcv]; });
         M.on('move zoomend', function(){ TR.glTick(); });
         if (!TR.glTimer) TR.glTimer = setInterval(TR.glTick, 100);
         /* TRAFFIC'S CANVAS OVER THE GROUND (user 2026-10-18 on the subway delay chips: "fix that" -- the lines cut through the
@@ -110777,7 +110798,7 @@ function closeAlertModal(){
           l.on('load', function(){ clearTimeout(OL.mdeb); OL.mdeb = setTimeout(function(){ OL.draw(true); if (CD.redraw) CD.redraw(); }, 120); });
           return l; });
       } catch(e){ OL.mask = []; }
-      M.on('zoomstart', function(){ if (OL.cv) OL.cv.style.visibility = 'hidden'; });
+      window._bvZoomCv(M, function(){ return [OL.cv]; });
       M.on('moveend resize', function(){ OL.draw(); }); };
     /* CUT TO THE LAND, DRAWN AROUND WHAT IS LEFT (user 2026-10-17: "make sure you have accurate outlined the area and coastline
        properly, there can be islands circled and rivers outlined but doesnt cross bodies of water randomly or have crude lines
@@ -111147,7 +111168,7 @@ function closeAlertModal(){
       X.draw = function(){
         if (!M) return;
         if (!X.lcv){ X.lcv = X.canvas('lcBasinNames', 449); X.mcv = X.canvas('lcBasinMach', 446);
-          M.on('zoomstart', function(){ X.lcv.style.visibility = 'hidden'; X.mcv.style.visibility = 'hidden'; });
+          window._bvZoomCv(M, function(){ return [X.lcv, X.mcv]; });
           M.on('moveend resize', function(){ X.draw(); }); }
         var g = X.fit(X.lcv), gm = X.fit(X.mcv), sz = M.getSize(), z = M.getZoom(), q = [];
         if (pane.style.display === 'none') return;
