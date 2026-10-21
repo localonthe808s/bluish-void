@@ -115,9 +115,16 @@ let PAIRS = null, PAIRS_AT = 0;
 async function pairs(){
   if (PAIRS && Date.now() - PAIRS_AT < 6 * 3600e3) return PAIRS;
   PAIRS = await (await fetch(PAIRS_URL, { cf: { cacheTtl: 3600 } })).json(); PAIRS_AT = Date.now(); return PAIRS; }
+// the seven subway feeds, decoded, shared by the trains (buildSub) and the measured delays (buildDelays) within ~10 s
+let SUBR = null, SUBR_AT = 0;
+async function subReads(){
+  if (SUBR && Date.now() - SUBR_AT < 10000) return SUBR;
+  const p = Promise.all(SUB_FEEDS.map((u) => fetch(u, { cf: { cacheTtl: 10 } }).then((r) => r.ok ? r.arrayBuffer() : null).then((ab) => ab ? decode(ab, true) : null).catch(() => null)));
+  SUBR = p; SUBR_AT = Date.now(); return p;
+}
 async function buildSub(){
   const PR = await pairs(), now = Date.now(), out = [];
-  const reads = await Promise.all(SUB_FEEDS.map((u) => fetch(u, { cf: { cacheTtl: 10 } }).then((r) => r.ok ? r.arrayBuffer() : null).then((ab) => ab ? decode(ab, true) : null).catch(() => null)));
+  const reads = await subReads();
   let feeds = 0;
   for (const D of reads){ if (!D) continue; feeds++;
     for (const o of D.veh){
@@ -153,5 +160,101 @@ export async function subwayRoute(url, ctx, cors){
     ctx.waitUntil(cache.put(key, hit.clone()));
   }
   const h = new Headers(hit.headers); Object.entries(cors).forEach(([k, v]) => h.set(k, v)); h.set('Cache-Control', 'public, max-age=10');
+  return new Response(hit.body, { status: 200, headers: h });
+}
+
+
+/* MEASURED SUBWAY DELAYS AT THE EDGE (2026-10-20, user: "do this"). THE CITY's cwMeasRun (index.html), moved here so the page
+   reads one small JSON instead of all seven raw feeds every 30 s (~80 KB a minute while the subway lines are on screen). Same
+   rules, same output objects:
+     HELD  STOPPED_AT the same station across reads for 4+ min AND its predictions slipped 3+ min (not at its first or last stop)
+     LATE  a predicted arrival slipped 5+ min since first seen
+     GAP   at a station with 3+ trains coming, one interval over max(12 min, 2.5 x scheduled headway, 2.2 x the line's live
+           median, 2.5 x the station's own median), and only where the hole is arriving within 15 min
+   HELD and LATE need minutes of watching: the per-train history lives in the colo's cache (one copy for every isolate there),
+   so it carries across visitors -- the page had to start from nothing on every visit. */
+const GRAPH_URL = 'https://bluishvoid.com/city_subway_graph.json?v=2';
+let GRAPH = null, GRAPH_AT = 0;
+async function subGraph(){
+  if (GRAPH && Date.now() - GRAPH_AT < 6 * 3600e3) return GRAPH;
+  const G = await (await fetch(GRAPH_URL, { cf: { cacheTtl: 3600 } })).json();
+  G._node = {}; G.n.forEach((n) => { G._node[n[0]] = n; });
+  G._in = {}; G.e.forEach((e) => { G._in[e[2] + e[3] + '|' + e[1]] = 1; });
+  G._srv = {}; G.e.forEach((e) => { [e[0], e[1]].forEach((id) => { const k = e[2] + e[3]; (G._srv[k] = G._srv[k] || {})[id] = 1; }); });
+  GRAPH = G; GRAPH_AT = Date.now(); return G;
+}
+const routeShow = (rt) => (rt === 'GS' || rt === 'FS' || rt === 'H') ? 'S' : (rt === 'SI' ? 'SIR' : rt);
+const HIST_KEY = 'https://tiles.bluishvoid.com/subway/v1/_hist';
+async function buildDelays(){
+  const cache = caches.default, G = await subGraph(), reads = await subReads(), now = Date.now() / 1000;
+  let M = { since: now, hist: {} };
+  try { const h = await cache.match(HIST_KEY); if (h){ const j = await h.json(); if (j && j.hist && now - (j.at || 0) < 600) M = j; } } catch (e) {}
+  const H = M.hist, ev = [], trips = {};
+  let feeds = 0;
+  for (const D of reads){ if (!D) continue; feeds++;
+    for (const [tid, U] of Object.entries(D.tu)){ const T = trips[tid] = trips[tid] || { rt: '', st: [], vs: null, vsid: '' };
+      if (U.route) T.rt = U.route; const st = U.sts.map((x) => [x.stop, x.a || x.d]).filter((x) => x[1]); if (st.length) T.st = st; }
+    for (const o of D.veh){ if (!o.trip) continue; const T = trips[o.trip] = trips[o.trip] || { rt: o.route, st: [], vs: null, vsid: '' };
+      if (o.st != null){ T.vs = o.st; T.vsid = o.stop; } } }
+  const base = (sid) => sid.replace(/[NS]$/, ''), rtOf = (rt) => rt === 'SS' ? 'SI' : rt, seen = {};
+  for (const tid of Object.keys(trips)){
+    const T = trips[tid], rt = rtOf(T.rt); if (!rt || rt === 'SI' || !T.st.length) continue;
+    const dir = /N$/.test(T.st[0][0]) ? 'N' : 'S', h = H[tid] = H[tid] || { sid: '', since: now, pred: {} };
+    seen[tid] = 1; let heldNow = 0, worst = 0, wsid = '';
+    for (const x of T.st){ if (x[1] < now || x[1] > now + 1800) continue;
+      const p0 = h.pred[x[0]]; if (!p0){ h.pred[x[0]] = [x[1], now]; continue; }
+      if (now - p0[1] >= 240){ const d = (x[1] - p0[0]) / 60; if (d > worst){ worst = d; wsid = x[0]; } } }
+    for (const k of Object.keys(h.pred)) if (h.pred[k][0] < now - 120) delete h.pred[k];   // stops it has passed: the stored history stays small
+    if (T.vs === 1 && T.vsid){
+      if (h.sid !== T.vsid){ h.sid = T.vsid; h.since = now; }
+      const held = (now - h.since) / 60, last = T.st[T.st.length - 1][0] === T.vsid, origin = !G._in[rt + dir + '|' + base(T.vsid)];
+      if (held >= 4 && worst >= 3 && !last && !origin && G._node[base(T.vsid)]){ ev.push({ k: 'held', rt, dir, sid: base(T.vsid), m: held }); heldNow = 1; }
+    } else h.sid = '';
+    if (!heldNow && worst >= 5 && G._node[base(wsid)]) ev.push({ k: 'late', rt, dir, sid: base(wsid), m: worst });
+  }
+  for (const tid of Object.keys(H)) if (!seen[tid]) delete H[tid];
+  const arr = {};
+  for (const tid of Object.keys(trips)){ const T = trips[tid], rt = rtOf(T.rt); if (!rt || rt === 'SI') continue;
+    for (const x of T.st){ if (x[1] < now - 30) continue; const k = rt + (/N$/.test(x[0]) ? 'N' : 'S'); ((arr[k] = arr[k] || {})[base(x[0])] = arr[k][base(x[0])] || []).push(x[1]); } }
+  for (const k of Object.keys(arr)){
+    const A = arr[k], srv = G._srv[k] || {}, gaps = [];
+    for (const sid of Object.keys(A)){ const L = A[sid].sort((a, b) => a - b); for (let i = 1; i < L.length; i++) gaps.push(L[i] - L[i - 1]); }
+    if (gaps.length < 6) continue;
+    gaps.sort((a, b) => a - b);
+    const med = gaps[gaps.length >> 1], hs = (G.h || {})[k] || 480, thr = Math.max(720, 2.5 * hs, 2.2 * med);
+    for (const sid of Object.keys(A)){ const L = A[sid]; if (L.length < 3 || !srv[sid] || !G._node[sid]) continue;
+      const g2 = []; for (let i = 1; i < L.length; i++) g2.push(L[i] - L[i - 1]);
+      const srt = g2.slice().sort((a, b) => a - b), md = srt[(srt.length - 1) >> 1], big = srt[srt.length - 1];
+      if (!(big > Math.max(thr, 2.5 * md))) continue;
+      const gi = g2.indexOf(big); if (L[gi] - now > 900) continue;
+      ev.push({ k: 'gap', rt: k.slice(0, -1), dir: k.slice(-1), sid, m: big / 60 }); }
+  }
+  const grp = {};
+  ev.forEach((e, ei) => { const key = e.k === 'gap' ? e.rt + e.dir + e.k : e.rt + e.dir + e.k + ei; const g = grp[key] = grp[key] || { rt: e.rt, dir: e.dir, k: e.k, sids: [], m: 0 }; g.sids.push(e.sid); if (e.m != null && e.m > g.m) g.m = e.m; });
+  const out = [];
+  for (const g of Object.values(grp)){
+    const pts = g.sids.map((id) => { const n = G._node[id]; return [n[2], n[3], n[1]]; });
+    const r = routeShow(g.rt), m = Math.round(g.m);
+    const short = g.k === 'held' ? (g.sids.length > 1 ? g.sids.length + ' TRAINS HELD' : 'TRAIN HELD ' + m + ' MIN') : g.k === 'late' ? 'RUNNING ' + m + ' MIN LATE' : m + ' MIN GAP';
+    const where = pts.length === 1 ? pts[0][2] : pts[0][2] + ' TO ' + pts[pts.length - 1][2];
+    const text = g.k === 'held' ? (g.sids.length > 1 ? g.sids.length + ' ' + r + ' trains are stopped at stations, the longest for ' + m + ' min (' + where + ').' : 'A ' + r + ' train has been stopped at ' + where + ' for ' + m + ' min.')
+      : g.k === 'late' ? 'A ' + r + ' train now arrives ' + m + ' min later than it was predicted to a few minutes ago (' + where + ').'
+      : 'Along ' + where + ' there is a ' + m + ' min hole between ' + r + ' trains, far longer than the spacing either side of it.';
+    out.push({ kind: 'Measured delay', measured: true, short, text: text + ' Measured from the MTA’s live train positions, not a posted alert.', routes: [g.rt], dir: g.dir, bor: [], pts, mins: g.m });
+  }
+  out.sort((a, b) => (b.mins || 0) - (a.mins || 0));
+  M.at = now;
+  await cache.put(HIST_KEY, new Response(JSON.stringify(M), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=900' } }));
+  return { at: Math.round(now), feeds, trips: Object.keys(trips).length, watchingMin: Math.round((now - M.since) / 60), list: out.slice(0, 10) };
+}
+export async function delaysRoute(url, ctx, cors){
+  const cache = caches.default, key = new Request('https://tiles.bluishvoid.com/subway/v1/delays.json?m=' + Math.floor(Date.now() / 25000), { method: 'GET' });
+  let hit = await cache.match(key);
+  if (!hit){
+    let body; try { body = JSON.stringify(await buildDelays()); } catch (e){ return new Response(JSON.stringify({ error: String(e) }), { status: 502, headers: { 'Content-Type': 'application/json', ...cors } }); }
+    hit = new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=25' } });
+    ctx.waitUntil(cache.put(key, hit.clone()));
+  }
+  const h = new Headers(hit.headers); Object.entries(cors).forEach(([k, v]) => h.set(k, v)); h.set('Cache-Control', 'public, max-age=20');
   return new Response(hit.body, { status: 200, headers: h });
 }

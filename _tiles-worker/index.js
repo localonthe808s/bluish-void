@@ -1,6 +1,6 @@
 // bluish-tiles: serves the R2 basemap archive as cached z/x/y vector tiles. See wrangler.toml for why.
 import { PMTiles, ResolvedValueCache } from 'pmtiles';
-import { railRoute, subwayRoute } from './rail.js';
+import { railRoute, subwayRoute, delaysRoute } from './rail.js';
 
 const ALLOWED_ORIGINS = ['https://bluishvoid.com', 'https://www.bluishvoid.com', 'http://localhost:8000', 'http://localhost:3000'];
 const ARCHIVES = { 'bluish-basemap-20260829': 'basemap/bluish-basemap-20260829.pmtiles' };   // URL name -> R2 key (add a new build here)
@@ -35,7 +35,8 @@ export default {
     if (request.method !== 'GET') return new Response('GET only', { status: 405, headers: cors });
     const url = new URL(request.url);
     if (url.pathname === '/rail/v1/nyc.json') return railRoute(url, ctx, cors);
-    if (url.pathname === '/subway/v1/nyc.json') return subwayRoute(url, ctx, cors);   /* the subway's trains between stations (rail.js) */   /* the LIRR's and Metro-North's trains, on their track (rail.js) */
+    if (url.pathname === '/subway/v1/nyc.json') return subwayRoute(url, ctx, cors);
+    if (url.pathname === '/subway/v1/delays.json') return delaysRoute(url, ctx, cors);   /* measured subway delays (rail.js) */   /* the subway's trains between stations (rail.js) */   /* the LIRR's and Metro-North's trains, on their track (rail.js) */
     if (url.pathname === '/' || url.pathname === '/health') return new Response(JSON.stringify({ ok: true, archives: Object.keys(ARCHIVES) }), { headers: { 'Content-Type': 'application/json', ...cors } });
     /* GOES FRAMES, CACHED (2026-10-20, user: "can we cache or cloudflare these somehow so they play smoothly"). The LIVE CLOUDS
        loop reads NESDIS STAR's sector frames (cdn.star.nesdis.noaa.gov), which answer `cache-control: off` -- so every visit
