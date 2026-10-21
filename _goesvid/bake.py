@@ -78,51 +78,70 @@ def bake(sat, sector, work):
             try: old = json.load(open(p))
             except Exception: old = None
     man = {'at': int(time.time()), 'sat': sat, 'sector': sector, 'band': BAND, 'fps': FPS}
+    D = KINDS['d']
+    sizes = sorted({re.search(r'-(\d+x\d+)\.jpg$', n).group(1) for n in names}, key=lambda z: int(z.split('x')[0]))
+    size = D['size'] if D['size'] in sizes else next((z for z in sizes if int(z.split('x')[0]) >= D['min']), sizes[-1] if sizes else None)
+    fr = [n for n in names if n.endswith('-%s.jpg' % size)]
+    if len(fr) < 2: return 'no frames'
+    t1 = stamp_ms(fr[-1]); fr = [n for n in fr if stamp_ms(n) > t1 - D['hours'] * 3600e3]
+    if old and (old.get('d') or {}).get('frames', [None])[-1:] == [fr[-1]] and old.get('m'):
+        return 'no new frame (kept)'                                # nothing new since the last run: the videos stand
+    # THE FRAMES BETWEEN RUNS (2026-10-20, user: "how can we downsize its cost"): the last run's frames are one tar per
+    # sector on R2 (read and written over the S3 API, not through the tiles worker), so a run fetches only the frames that
+    # are new -- one or two per sector -- instead of all 72 (~1,000 worker reads a run, ~4.5 M a month, down to ~30).
+    fd = os.path.join(work, 'frames'); os.makedirs(fd, exist_ok=True)
+    tar_key = '%s_frames/%s_%s.tar' % (PREFIX, sat, sector)
+    tar_local = os.path.join('/tmp/goesvid/_frames', '%s_%s.tar' % (sat, sector)) if DRY else os.path.join(work, 'frames.tar')
+    if DRY: os.makedirs(os.path.dirname(tar_local), exist_ok=True)
+    if (os.path.exists(tar_local) if DRY else r2('cp', 's3://%s/%s' % (BUCKET, tar_key), tar_local, check=False).returncode == 0):
+        subprocess.run(['tar', '-xf', tar_local, '-C', fd], check=False)
+    want = set(fr)
+    for f in os.listdir(fd):
+        if f not in want: os.remove(os.path.join(fd, f))       # out of the 6 h window, or another size
+    miss = [n for n in fr if not os.path.exists(os.path.join(fd, n))]
+    def dl(n):
+        for base in (EDGE, NESDIS):
+            try:
+                b = get('%s%s/ABI/SECTOR/%s/%s/%s' % (base, sat, sector, BAND, n))
+                if len(b) > 5000:
+                    open(os.path.join(fd, n), 'wb').write(b); return True
+            except Exception:
+                pass
+        return False
+    with ThreadPoolExecutor(8) as ex: fetched = sum(ex.map(dl, miss))
+    got = [n for n in fr if os.path.exists(os.path.join(fd, n))]
+    if len(got) < 2: return 'no frames'
+    if fetched:
+        subprocess.run(['tar', '-cf', tar_local, '-C', fd] + got, check=True)
+        if not DRY: r2('cp', tar_local, 's3://%s/%s' % (BUCKET, tar_key), '--content-type', 'application/x-tar', '--cache-control', 'no-store')
+    newest = got[-1][:11]
+    # the phone video is the last 2 h of the SAME frames, made smaller (no second set of 600 px downloads)
+    w0 = int(size.split('x')[0])
     for k, K in KINDS.items():
-        sizes = sorted({re.search(r'-(\d+)x(\d+)\.jpg$', n).group(0)[1:-4] for n in names}, key=lambda z: int(z.split('x')[0]))
-        size = K['size'] if K['size'] in sizes else next((z for z in sizes if int(z.split('x')[0]) >= K['min']), sizes[-1] if sizes else None)
-        fr = [n for n in names if n.endswith('-%s.jpg' % size)]
-        if len(fr) < 2: continue
-        t1 = stamp_ms(fr[-1]); fr = [n for n in fr if stamp_ms(n) > t1 - K['hours'] * 3600e3]
-        newest = fr[-1][:11]
-        if old and (old.get(k) or {}).get('frames', [None])[-1:] == [fr[-1]]:
-            man[k] = old[k]; continue                                   # no new frame since the last run: keep that video
-        d = os.path.join(work, k); os.makedirs(d, exist_ok=True)
-        def dl(ix):
-            i, n = ix
-            for base in (EDGE, NESDIS):
-                try:
-                    b = get('%s%s/ABI/SECTOR/%s/%s/%s' % (base, sat, sector, BAND, n))
-                    if len(b) > 5000:
-                        open(os.path.join(d, '%03d.jpg' % i), 'wb').write(b); return True
-                except Exception:
-                    pass
-            return False
-        with ThreadPoolExecutor(8) as ex: ok = list(ex.map(dl, enumerate(fr)))
-        got = [n for n, o in zip(fr, ok) if o]
-        if len(got) < 2: continue
-        # renumber without holes for ffmpeg's image2 pattern
-        for j, i in enumerate([i for i, o in enumerate(ok) if o]):
-            if i != j: os.replace(os.path.join(d, '%03d.jpg' % i), os.path.join(d, '%03d.jpg' % j))
+        use = [n for n in got if stamp_ms(n) > stamp_ms(got[-1]) - K['hours'] * 3600e3]
+        if len(use) < 2: continue
+        lst = os.path.join(work, 'list_%s.txt' % k)
+        open(lst, 'w').write(''.join("file '%s'\nduration %.3f\n" % (os.path.join(fd, n), 1.0 / FPS) for n in use) + "file '%s'\n" % os.path.join(fd, use[-1]))
+        vf = ['-vf', 'scale=600:-2'] if k == 'm' and w0 > 700 else []
         out = os.path.join(work, '%s_%s.mp4' % (newest, k))
-        subprocess.run(['ffmpeg', '-v', 'error', '-y', '-framerate', str(FPS), '-i', os.path.join(d, '%03d.jpg'),
-                        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', str(K['crf']), '-g', str(K['g']), '-pix_fmt', 'yuv420p',
+        subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', lst] + vf +
+                       ['-r', str(FPS), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', str(K['crf']), '-g', str(K['g']), '-pix_fmt', 'yuv420p',
                         '-movflags', '+faststart', '-an', out], check=True)
-        man[k] = {'mp4': os.path.basename(out), 'frames': got, 'size': size, 'bytes': os.path.getsize(out)}
+        man[k] = {'mp4': os.path.basename(out), 'frames': use, 'size': size if not vf else '600', 'bytes': os.path.getsize(out), 'fetched': fetched}
         if not DRY:
             r2('cp', out, 's3://%s/%s%s' % (BUCKET, key, os.path.basename(out)), '--content-type', 'video/mp4',
                '--cache-control', 'public, max-age=31536000, immutable')
     if not any(k in man for k in KINDS): return 'no frames'
     p = os.path.join(work, 'latest.json'); json.dump(man, open(p, 'w'), separators=(',', ':'))
     if DRY:
-        return 'dry: ' + ', '.join('%s %d frames %.1f MB' % (k, len(man[k]['frames']), man[k]['bytes'] / 1e6) for k in KINDS if k in man)
+        return ('dry, fetched %d; ' % fetched) + ', '.join('%s %d frames %.1f MB' % (k, len(man[k]['frames']), man[k]['bytes'] / 1e6) for k in KINDS if k in man)
     r2('cp', p, 's3://%s/%slatest.json' % (BUCKET, key), '--content-type', 'application/json', '--cache-control', 'public, max-age=60')
     # two generations kept: the current and the one before (old); anything else of ours under this key goes
     keep = {(man.get(k) or {}).get('mp4') for k in KINDS} | {((old or {}).get(k) or {}).get('mp4') for k in KINDS}
     ls = r2('ls', 's3://%s/%s' % (BUCKET, key), check=False).stdout.split()
     for f in [x for x in ls if x.endswith('.mp4') and x not in keep]:
         r2('rm', 's3://%s/%s%s' % (BUCKET, key, f), check=False)
-    return ', '.join('%s %d frames %.1f MB%s' % (k, len(man[k]['frames']), man[k]['bytes'] / 1e6, '' if man[k] is not (old or {}).get(k) else ' (kept)') for k in KINDS if k in man)
+    return ('fetched %d new; ' % fetched) + ', '.join('%s %d frames %.1f MB' % (k, len(man[k]['frames']), man[k]['bytes'] / 1e6) for k in KINDS if k in man)
 
 
 def main():
