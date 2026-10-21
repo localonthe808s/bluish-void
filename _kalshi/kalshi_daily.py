@@ -3765,6 +3765,11 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     if not fcm:
         print('no forecast models available')
         return 0
+    # the archive ends yesterday, so a failed live run leaves no model with today: the bake then centred on the
+    # running max with an open-day spread (2026-10-20 09:30: pred 58.7, p 1.0 on 64-or-below; settled 67)
+    if not any(f.get(tkey) for f in fcm.values()):
+        print('no model has today (%s); live run missing, not writing' % tkey)
+        return 0
     fc = fcm.get(MODELS[0]) or list(fcm.values())[0]
     # the observation window is deliberately wider than the model window: it also
     # has to score history entries (kept 120 days) and backfill against every
