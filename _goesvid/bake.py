@@ -29,19 +29,21 @@ SECTORS = [('GOES19', s) for s in ('ne', 'se', 'cgl', 'umv', 'smv', 'sp', 'nr', 
 BAND, FPS = 'GEOCOLOR', 10
 EDGE, NESDIS = 'https://tiles.bluishvoid.com/goes/', 'https://cdn.star.nesdis.noaa.gov/'
 BUCKET, PREFIX = 'bluishvoid-bg', 'goes/video/'
-KINDS = {'d': {'size': '1200x1200', 'hours': 6, 'crf': 22, 'g': 4, 'scale': None},
-         'm': {'size': '600x600', 'hours': 2, 'crf': 23, 'g': 1, 'scale': None}}
+# the size per kind: the square the page prefers when the sector has it, else the smallest at least `min` px wide (eus is
+# 250-4000 px squares, taw and np 450x270-7200x4320 wide frames)
+KINDS = {'d': {'size': '1200x1200', 'min': 900, 'hours': 6, 'crf': 22, 'g': 4},
+         'm': {'size': '600x600', 'min': 500, 'hours': 2, 'crf': 23, 'g': 1}}
 UA = {'User-Agent': 'bluishvoid.com satellite loop bake'}
 DRY = '--dry' in sys.argv
 
 
-def get(url, timeout=30):
-    for i in range(3):
+def get(url, timeout=20):
+    for i in range(2):
         try:
             return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout).read()
         except Exception:
-            if i == 2: raise
-            time.sleep(2 + 3 * i)
+            if i == 1: raise
+            time.sleep(2)
 
 
 def stamp_ms(name):
@@ -52,7 +54,7 @@ def stamp_ms(name):
 def listing(sat, sector):
     for base in (EDGE, NESDIS):
         try:
-            html = get('%s%s/ABI/SECTOR/%s/%s/' % (base, sat, sector, BAND)).decode('utf-8', 'replace')
+            html = get('%s%s/ABI/SECTOR/%s/%s/' % (base, sat, sector, BAND), 25).decode('utf-8', 'replace')
             names = sorted(set(re.findall(r'href="(\d{11}_%s-ABI-%s-%s-\d+x\d+\.jpg)"' % (sat, sector, BAND), html)))
             if names: return names
         except Exception as e:
@@ -77,7 +79,9 @@ def bake(sat, sector, work):
             except Exception: old = None
     man = {'at': int(time.time()), 'sat': sat, 'sector': sector, 'band': BAND, 'fps': FPS}
     for k, K in KINDS.items():
-        fr = [n for n in names if n.endswith('-%s.jpg' % K['size'])]
+        sizes = sorted({re.search(r'-(\d+)x(\d+)\.jpg$', n).group(0)[1:-4] for n in names}, key=lambda z: int(z.split('x')[0]))
+        size = K['size'] if K['size'] in sizes else next((z for z in sizes if int(z.split('x')[0]) >= K['min']), sizes[-1] if sizes else None)
+        fr = [n for n in names if n.endswith('-%s.jpg' % size)]
         if len(fr) < 2: continue
         t1 = stamp_ms(fr[-1]); fr = [n for n in fr if stamp_ms(n) > t1 - K['hours'] * 3600e3]
         newest = fr[-1][:11]
@@ -104,7 +108,7 @@ def bake(sat, sector, work):
         subprocess.run(['ffmpeg', '-v', 'error', '-y', '-framerate', str(FPS), '-i', os.path.join(d, '%03d.jpg'),
                         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', str(K['crf']), '-g', str(K['g']), '-pix_fmt', 'yuv420p',
                         '-movflags', '+faststart', '-an', out], check=True)
-        man[k] = {'mp4': os.path.basename(out), 'frames': got, 'size': K['size'], 'bytes': os.path.getsize(out)}
+        man[k] = {'mp4': os.path.basename(out), 'frames': got, 'size': size, 'bytes': os.path.getsize(out)}
         if not DRY:
             r2('cp', out, 's3://%s/%s%s' % (BUCKET, key, os.path.basename(out)), '--content-type', 'video/mp4',
                '--cache-control', 'public, max-age=31536000, immutable')
@@ -124,9 +128,8 @@ def bake(sat, sector, work):
 def main():
     only = sys.argv[sys.argv.index('--dry') + 1] if DRY and len(sys.argv) > sys.argv.index('--dry') + 1 else None
     secs = [s for s in SECTORS if not only or s[1] == only]
-    fails = 0
-    for sat, sector in secs:
-        t = time.time()
+    def one(ss):
+        sat, sector = ss; t = time.time()
         with tempfile.TemporaryDirectory(dir='/tmp/goesvid' if DRY and os.makedirs('/tmp/goesvid', exist_ok=True) is None else None) as work:
             try:
                 r = bake(sat, sector, work)
@@ -134,8 +137,12 @@ def main():
                     for f in os.listdir(work):
                         if f.endswith('.mp4') or f == 'latest.json': os.replace(os.path.join(work, f), os.path.join('/tmp/goesvid', f))
             except Exception as e:
-                r = 'FAILED %s' % e; fails += 1
+                r = 'FAILED %s' % e
         print('%s %-4s %s (%.0f s)' % (sat, sector, r, time.time() - t), flush=True)
+        return r
+    # five at a time: one slow sector (ep's listing hung 285 s on the first run) no longer holds up the rest
+    with ThreadPoolExecutor(5) as ex: res = list(ex.map(one, secs))
+    fails = sum(1 for r in res if str(r).startswith('FAILED') or r in ('no listing', 'no frames'))
     if fails == len(secs): sys.exit(1)
 
 
