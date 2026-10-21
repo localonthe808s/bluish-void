@@ -27,6 +27,10 @@ from concurrent.futures import ThreadPoolExecutor
 SECTORS = [('GOES19', s) for s in ('ne', 'se', 'cgl', 'umv', 'smv', 'sp', 'nr', 'sr', 'eus', 'taw', 'pr')] + \
           [('GOES18', s) for s in ('pnw', 'psw', 'np', 'ep')]          # the sectors index.html's areaToGoes and LOCATION open on
 BAND, FPS = 'GEOCOLOR', 10
+# GEOCOLOR CAN FREEZE ON ITS OWN (10-20: every sector's stopped at 15:11 UTC while the ABI bands kept coming): over an hour old,
+# and with NESDIS's Day Night Cloud Micro Combo fresher, the video is baked from that (the page falls back the same way) and
+# latest.json says which band it is
+FB_BAND = 'DayNightCloudMicroCombo'
 EDGE, NESDIS = 'https://tiles.bluishvoid.com/goes/', 'https://cdn.star.nesdis.noaa.gov/'
 BUCKET, PREFIX = 'bluishvoid-bg', 'goes/video/'
 # the size per kind: the square the page prefers when the sector has it, else the smallest at least `min` px wide (eus is
@@ -51,11 +55,11 @@ def stamp_ms(name):
     return (time.mktime((y, 1, 1, 0, 0, 0, 0, 0, 0)) - time.timezone + (d - 1) * 86400 + h * 3600 + m * 60) * 1000
 
 
-def listing(sat, sector):
+def listing(sat, sector, band=BAND):
     for base in (EDGE, NESDIS):
         try:
-            html = get('%s%s/ABI/SECTOR/%s/%s/' % (base, sat, sector, BAND), 25).decode('utf-8', 'replace')
-            names = sorted(set(re.findall(r'href="(\d{11}_%s-ABI-%s-%s-\d+x\d+\.jpg)"' % (sat, sector, BAND), html)))
+            html = get('%s%s/ABI/SECTOR/%s/%s/' % (base, sat, sector, band), 25).decode('utf-8', 'replace')
+            names = sorted(set(re.findall(r'href="(\d{11}_%s-ABI-%s-%s-\d+x\d+\.jpg)"' % (sat, sector, band), html)))
             if names: return names
         except Exception as e:
             print('  %s %s listing via %s failed: %s' % (sat, sector, base, e))
@@ -77,7 +81,11 @@ def bake(sat, sector, work):
         if r2('cp', 's3://%s/%slatest.json' % (BUCKET, key), p, check=False).returncode == 0:
             try: old = json.load(open(p))
             except Exception: old = None
-    man = {'at': int(time.time()), 'sat': sat, 'sector': sector, 'band': BAND, 'fps': FPS}
+    band = BAND
+    if names and time.time() * 1000 - stamp_ms(names[-1]) > 3600e3:
+        fb = listing(sat, sector, FB_BAND)
+        if fb and stamp_ms(fb[-1]) > stamp_ms(names[-1]) + 1800e3: names, band = fb, FB_BAND
+    man = {'at': int(time.time()), 'sat': sat, 'sector': sector, 'band': band, 'fps': FPS}
     D = KINDS['d']
     sizes = sorted({re.search(r'-(\d+x\d+)\.jpg$', n).group(1) for n in names}, key=lambda z: int(z.split('x')[0]))
     size = D['size'] if D['size'] in sizes else next((z for z in sizes if int(z.split('x')[0]) >= D['min']), sizes[-1] if sizes else None)
@@ -102,7 +110,7 @@ def bake(sat, sector, work):
     def dl(n):
         for base in (EDGE, NESDIS):
             try:
-                b = get('%s%s/ABI/SECTOR/%s/%s/%s' % (base, sat, sector, BAND, n))
+                b = get('%s%s/ABI/SECTOR/%s/%s/%s' % (base, sat, sector, band, n))
                 if len(b) > 5000:
                     open(os.path.join(fd, n), 'wb').write(b); return True
             except Exception:
