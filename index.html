@@ -1913,13 +1913,15 @@ window._bvContinentalNames = function(map, opts){
   };
   var declutter = function(){
     if (!map.hasLayer(g)){ pub([]); return; }
-    var placed = [];
-    mk.forEach(function(m){ var el = m.getElement && m.getElement(); if (!el) return;
-      el.style.visibility = '';
-      var b = el.querySelector('b'), r = (b || el).getBoundingClientRect(), p = map.latLngToContainerPoint(m.getLatLng());
-      if (!r.width){ return; }
-      var mr = map.getContainer().getBoundingClientRect(), x0 = Math.min(p.x - 4, r.left - mr.left) - 4, y0 = r.top - mr.top - 4, x1 = r.right - mr.left + 4, y1 = r.bottom - mr.top + 4;
-      if (placed.some(function(q){ return !(x1 < q[0] || x0 > q[2] || y1 < q[1] || y0 > q[3]); })){ el.style.visibility = 'hidden'; return; }
+    /* ONE LAYOUT, NOT ONE PER NAME (perf 2026-10-21, "the zoom lags"): showing a name and then measuring it made the browser
+       lay the page out again for every name, every zoom step. Now: all shown, all measured, then the losers hidden */
+    var placed = [], els = [];
+    mk.forEach(function(m){ var el = m.getElement && m.getElement(); if (el){ el.style.visibility = ''; els.push([m, el]); } });
+    var mr = map.getContainer().getBoundingClientRect();
+    var box = els.map(function(e){ var b = e[1].querySelector('b'); return (b || e[1]).getBoundingClientRect(); });
+    els.forEach(function(e, i){ var r = box[i]; if (!r.width) return;
+      var p = map.latLngToContainerPoint(e[0].getLatLng()), x0 = Math.min(p.x - 4, r.left - mr.left) - 4, y0 = r.top - mr.top - 4, x1 = r.right - mr.left + 4, y1 = r.bottom - mr.top + 4;
+      if (placed.some(function(q){ return !(x1 < q[0] || x0 > q[2] || y1 < q[1] || y0 > q[3]); })){ e[1].style.visibility = 'hidden'; return; }
       placed.push([x0, y0, x1, y1]); });
     pub(placed);
   };
@@ -110880,6 +110882,18 @@ function closeAlertModal(){
       L.DomUtil.setPosition(cv, M.containerPointToLayerPoint([-px, -py]));
       var x = cv.getContext('2d'); x.setTransform(1, 0, 0, 1, 0, 0); x.globalCompositeOperation = 'source-over'; x.clearRect(0, 0, W, H); cv.style.visibility = '';
       if (!OL.polys || !OL.polys.length || sz.x < 2 || sz.y < 2) return;
+      /* ONLY AROUND THE LINE (user 2026-10-21: "the zoom lags"): the scratch passes below -- four grows, the pocket flood fill --
+         ran over the whole view plus margin at full dpr (~3900 x 2600 on a 2x desktop) on every zoom step and every water tile,
+         even zoomed out to the continent where the outline is a few pixels: 100-380 ms a step, the freeze after each wheel
+         notch. They now run in a box around the outline (padded past every grow), drawn into place; a view filled by the
+         outline gets the whole canvas, as before. Off screen entirely: nothing to draw */
+      var FW = W, FH = H, bx0 = 1e9, by0 = 1e9, bx1 = -1e9, by1 = -1e9;
+      OL.polys.forEach(function(p){ p.forEach(function(r){ r.forEach(function(c){ var q = M.latLngToContainerPoint([c[1], c[0]]);
+        if (q.x < bx0) bx0 = q.x; if (q.x > bx1) bx1 = q.x; if (q.y < by0) by0 = q.y; if (q.y > by1) by1 = q.y; }); }); });
+      var PAD = 18; bx0 = Math.max(0, Math.floor((bx0 + px - PAD) * dpr)); by0 = Math.max(0, Math.floor((by0 + py - PAD) * dpr));
+      bx1 = Math.min(FW, Math.ceil((bx1 + px + PAD) * dpr)); by1 = Math.min(FH, Math.ceil((by1 + py + PAD) * dpr));
+      if (bx1 - bx0 < 2 || by1 - by0 < 2) return;
+      var OX = bx0, OY = by0; W = bx1 - bx0; H = by1 - by0;
       /* THINNER (user 2026-10-18: "improve your orange outlining further at the highest detail, be thinner to avoid overlap"): ~1.0 px of
          orange at a state's view to 1.6 px at the street, dark edges 0.6 px -- neighboring piers and islands no longer run together */
       var z = M.getZoom(), w = Math.max(1.0, Math.min(1.6, 0.9 + 0.07 * (z - 5))) * dpr, k = 0.6 * dpr;
@@ -110887,13 +110901,13 @@ function closeAlertModal(){
       if (B.height !== H) B = OL.B = OL.can(W, H); if (C.height !== H) C = OL.C = OL.can(W, H);
       /* T in A: the territory, grown a hair, less the water */
       var a = A.getContext('2d'); a.setTransform(1, 0, 0, 1, 0, 0); a.globalCompositeOperation = 'source-over'; a.clearRect(0, 0, W, H);
-      a.setTransform(dpr, 0, 0, dpr, 0, 0); a.fillStyle = '#fff'; a.strokeStyle = '#fff'; a.lineJoin = 'round'; a.lineWidth = 1.6;
+      a.setTransform(dpr, 0, 0, dpr, -OX, -OY); a.fillStyle = '#fff'; a.strokeStyle = '#fff'; a.lineJoin = 'round'; a.lineWidth = 1.6;
       OL.polys.forEach(function(p){ a.beginPath(); p.forEach(function(r){ r.forEach(function(c, i){ var q = M.latLngToContainerPoint([c[1], c[0]]); if (i) a.lineTo(q.x + px, q.y + py); else a.moveTo(q.x + px, q.y + py); }); a.closePath(); }); a.fill('evenodd'); a.stroke(); });
       a.setTransform(1, 0, 0, 1, 0, 0); a.globalCompositeOperation = 'destination-out';
       (OL.mask || []).forEach(function(l){ if (!M.hasLayer(l) || !l._tiles) return; Object.keys(l._tiles).forEach(function(key){ var t = l._tiles[key], el = t && t.el; if (!el || !t.loaded || !el.width) return;
         if (t.coords && t.coords.z !== l._tileZoom) return;
         var r = window._bvTileRect(M, l, t); if (!r || r.w < 1) return;
-        try { a.drawImage(el, (r.x + px) * dpr, (r.y + py) * dpr, r.w * dpr, r.h * dpr); } catch(e){} }); });
+        try { a.drawImage(el, (r.x + px) * dpr - OX, (r.y + py) * dpr - OY, r.w * dpr, r.h * dpr); } catch(e){} }); });
       a.globalCompositeOperation = 'source-over';
       /* WATER TOO THIN TO SEE IS NOT A SHORE: T is CLOSED by ~2.4 px (grown, then shrunk back -- the shrink is the grow of its
          inverse), so a creek, pond or reservoir under ~5 px wide at this zoom no longer cuts the line into dashes, while the Hudson, the
@@ -110931,8 +110945,8 @@ function closeAlertModal(){
           a.drawImage(fg, 0, 0, W, H); }
       } catch(e){}
       /* the bands, grown outward from T: outer casing, orange, inner casing; T itself erased */
-      var tint = function(mask, col){ var g = C.getContext('2d'); g.globalCompositeOperation = 'source-over'; g.clearRect(0, 0, W, H); g.drawImage(mask, 0, 0); g.globalCompositeOperation = 'source-in'; g.fillStyle = col; g.fillRect(0, 0, W, H); g.globalCompositeOperation = 'source-over'; x.drawImage(C, 0, 0); };
-      var cut = function(mask){ x.globalCompositeOperation = 'destination-out'; x.drawImage(mask, 0, 0); x.globalCompositeOperation = 'source-over'; };
+      var tint = function(mask, col){ var g = C.getContext('2d'); g.globalCompositeOperation = 'source-over'; g.clearRect(0, 0, W, H); g.drawImage(mask, 0, 0); g.globalCompositeOperation = 'source-in'; g.fillStyle = col; g.fillRect(0, 0, W, H); g.globalCompositeOperation = 'source-over'; x.drawImage(C, OX, OY); };
+      var cut = function(mask){ x.globalCompositeOperation = 'destination-out'; x.drawImage(mask, OX, OY); x.globalCompositeOperation = 'source-over'; };
       var D = OL.D && OL.D.width === W && OL.D.height === H ? OL.D : (OL.D = OL.can(W, H));
       OL.grow(A, 2 * k + w, B); tint(B, 'rgba(6,10,18,.5)');                                   /* the outer casing */
       OL.grow(A, k + w, D); cut(D); tint(D, 'rgba(234,88,12,.96)');                             /* the line, in the pane's own orange (user 2026-10-17: "make the location only theme orange") */
