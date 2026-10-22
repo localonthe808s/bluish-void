@@ -20,8 +20,6 @@ OUT = os.path.join(HERE, 'peak_stats.json')
 IEM = 'https://mesonet.agron.iastate.edu/cgi-bin/request/asos1min.py'
 CITIES = {
     'ny_high':  ('NYC', 'America/New_York'),
-    'las_high': ('LAS', 'America/Los_Angeles'),
-    'aus_high': ('AUS', 'America/Chicago'),
 }
 from active import ACTIVE                                   # noqa: E402  the traded markets (2026-10-06)
 CITIES = {k: v for k, v in CITIES.items() if k in ACTIVE}

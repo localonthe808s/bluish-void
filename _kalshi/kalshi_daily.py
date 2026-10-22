@@ -122,12 +122,6 @@ MARKETS = [
          'America/Chicago',     'CT', 'CLIMDW', 'highest-temperature-in-chicago', 'LOT'),
     _mkt('mia_high', 'KXHIGHMIA',  'Miami',        'MIA', 'FL_ASOS', 25.791,  -80.316,
          'America/New_York',    'ET', 'CLIMIA', 'highest-temperature-in-miami', 'MFL'),
-    # AUSTIN KEEPS THE EQUAL-WEIGHT MEAN, like New York: on 67 replayed days
-    # the skill weights scored Brier .495 / MAE .79 against .470 / .70 with
-    # every model weighted 1 (2026-09-06).
-    _mkt('aus_high', 'KXHIGHAUS',  'Austin',       'AUS', 'TX_ASOS', 30.183,  -97.680,
-         'America/Chicago',     'CT', 'CLIAUS', 'highest-temperature-in-austin', 'EWX',
-         skill=False),
     _mkt('den_high', 'KXHIGHDEN',  'Denver',       'DEN', 'CO_ASOS', 39.847, -104.656,
          'America/Denver',      'MT', 'CLIDEN', 'highest-temperature-in-denver', 'BOU'),
     _mkt('lax_high', 'KXHIGHLAX',  'Los Angeles',  'LAX', 'CA_ASOS', 33.938, -118.389,
@@ -148,15 +142,6 @@ MARKETS = [
          'America/Los_Angeles', 'PT', 'CLISFO', 'san-francisco-high-temperature-daily', 'MTR'),
     _mkt('sea_high', 'KXHIGHTSEA',  'Seattle',       'SEA', 'WA_ASOS', 47.4447, -122.3144,
          'America/Los_Angeles', 'PT', 'CLISEA', 'seattle-maximum-temperature-daily', 'SEW'),
-    # LAS VEGAS IS UNDERCONFIDENT: on 66 replayed days the Brier score falls
-    # monotonically as the residual spread is tightened (x1.0 .333, x0.85
-    # .314, x0.7 .301) with the hit rate unchanged; the calibration bands said
-    # the same (a 55% call came true 65% of the time). 0.75, not the best
-    # tested, because the test is in-sample and a rain day punishes
-    # overconfidence (2026-09-06).
-    _mkt('las_high', 'KXHIGHTLV',   'Las Vegas',     'LAS', 'NV_ASOS', 36.0719, -115.1634,
-         'America/Los_Angeles', 'PT', 'CLILAS', 'las-vegas-max-daily-temperature', 'VEF',
-         sd_mult=0.75),
     _mkt('bos_high', 'KXHIGHTBOS',  'Boston',        'BOS', 'MA_ASOS', 42.3606,  -71.0097,
          'America/New_York',    'ET', 'CLIBOS', 'boston-maximum-daily-temperature', 'BOX'),
     _mkt('dfw_high', 'KXHIGHTDAL',  'Dallas',        'DFW', 'TX_ASOS', 32.8968,  -97.0380,
@@ -181,9 +166,8 @@ MARKETS = [
 # cities except for the 3 we have now ... drop the rest of the baggage"). The
 # other seventeen configs stay above so any can be re-admitted by adding its
 # key here; their files stopped updating on 2026-09-06.
-# AUSTIN DROPPED 2026-10-06 (user: "lets drop austin from kalshi, its not going well there"). Its config stays above,
-# like the other seventeen; re-admit by adding 'aus_high' back here (and to kalshi_lows.py, report.py, the nightly
-# price study's --city list, the worker's OBS_MARKETS and index.html's CWK_CITIES).
+# AUSTIN DROPPED 2026-10-06 (user: "lets drop austin from kalshi, its not going well there"), and its config was
+# deleted outright on 2026-10-22 (user: "remove them from the python bake scripts too"), with Las Vegas's.
 # LAS VEGAS DROPPED THE SAME DAY (user: "lets remove vegas too if its not going well, we're going to focus on NY HIGH
 # and LOW"). The list now lives in active.py, which every study reads too.
 from active import ACTIVE                 # noqa: E402
@@ -1126,7 +1110,7 @@ SIX_THROUGH = {}         # per market: local hour (24+ past midnight) the newest
 # of those readings since 7 AM is an exact floor on the day's high -- the same
 # sensor the climate report is computed from, sampled every five minutes
 # instead of every hour (2026-09-06).
-OWN5 = {'las_high': 'KLAS', 'aus_high': 'KAUS'}
+OWN5 = {}   # was {'las_high': 'KLAS', 'aus_high': 'KAUS'}; both cities removed 2026-10-22, and New York's sensor has no public 5-minute feed
 LEAD_URL = 'https://bluish-void-kalshi-cron.junkyjunkjunkjunkjunk.workers.dev/obs/lead'
 _LEAD = []
 

@@ -33,8 +33,6 @@ API = 'https://api.elections.kalshi.com/trade-api/v2'
 UA = {'User-Agent': 'bluishvoid-insider-study'}
 CITIES = {
     'ny_high':  {'series': 'KXHIGHNY',  'station': 'NYC', 'network': 'NY_ASOS', 'cli': 'CLINYC', 'fcst': 'ZFPOKX,AFDOKX', 'tz': 'America/New_York',    'five_min_public': False, 'apts': ['LGA', 'EWR', 'JFK']},
-    'las_high': {'series': 'KXHIGHTLV', 'station': 'LAS', 'network': 'NV_ASOS', 'cli': 'CLILAS', 'fcst': 'ZFPVEF,AFDVEF', 'tz': 'America/Los_Angeles', 'five_min_public': True},
-    'aus_high': {'series': 'KXHIGHAUS', 'station': 'AUS', 'network': 'TX_ASOS', 'cli': 'CLIAUS', 'fcst': 'ZFPEWX,AFDEWX', 'tz': 'America/Chicago',     'five_min_public': True},
 }
 from active import ACTIVE                                   # noqa: E402  the traded markets (2026-10-06)
 CITIES = {k: v for k, v in CITIES.items() if k in ACTIVE}

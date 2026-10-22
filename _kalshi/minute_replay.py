@@ -38,13 +38,11 @@ IEM = 'https://mesonet.agron.iastate.edu/cgi-bin/request/asos1min.py'
 # the nearby stations to compare against, the climate product, the zone
 CITIES = {
     'ny_high':  {'park': 'NYC', 'apts': ['LGA', 'EWR', 'JFK'], 'cli': 'CLINYC', 'tz': 'America/New_York',    'utc_off': -4},
-    'las_high': {'park': 'LAS', 'apts': ['VGT'],               'cli': 'CLILAS', 'tz': 'America/Los_Angeles', 'utc_off': -7},
-    'aus_high': {'park': 'AUS', 'apts': ['ATT'],               'cli': 'CLIAUS', 'tz': 'America/Chicago',     'utc_off': -5},
 }
 from active import ACTIVE                                   # noqa: E402  the traded markets (2026-10-06)
 CITIES = {k: v for k, v in CITIES.items() if k in ACTIVE}
 
-NAMES = {'LGA': 'LaGuardia', 'EWR': 'Newark', 'JFK': 'JFK', 'VGT': 'North Las Vegas', 'ATT': 'Camp Mabry'}
+NAMES = {'LGA': 'LaGuardia', 'EWR': 'Newark', 'JFK': 'JFK'}
 WINDOW_DAYS = 45                          # how far back the replay reaches
 REFRESH_HOURS = 6                         # the archive moves ~daily; do not hammer IEM
 COMPLETE = 0.90                           # share of minutes present for a day to count
