@@ -105396,6 +105396,7 @@ function closeAlertModal(){
          the shared hz-popup shell is the site's light glass, and white type on it read as blank */
       + '#lc-map .lc-pop .leaflet-popup-content-wrapper, #lc-map .lc-pop .leaflet-popup-tip{ background:rgba(10,13,22,.92) !important; border-color:rgba(150,170,220,.22) !important; box-shadow:0 0 0 1px rgba(0,0,0,.35), 0 12px 40px rgba(0,0,0,.55) !important; color:#fff; }'
       + '#lc-map .lc-pop .leaflet-popup-content{ padding:11px 13px 12px; }'
+      + '#lc-map .lc-hrrr{ filter:blur(var(--hrrr-blur, 2px)); }'
       + '#lc-map .lc-engage{ position:absolute; left:50%; bottom:12px; transform:translateX(-50%); z-index:800; pointer-events:none; padding:4px 11px; border-radius:999px; background:rgba(13,22,38,.82); color:#fff; font:800 .58rem system-ui,sans-serif; letter-spacing:.08em; white-space:nowrap; transition:opacity .3s; }'
       + '#cw-pane-local #lc-map{ border-radius:0 0 18px 18px; }'
       + '#cw-pane-local #lc-tabs button.on{ background:rgba(255,255,255,.28) !important; border-color:rgba(255,255,255,.5) !important; }'
@@ -105753,8 +105754,9 @@ function closeAlertModal(){
       var tz = (window.LOCATION || {}).tz, w; try { w = new Date(o.t).toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }); } catch(e){ w = ''; }
       var nm = String((window.LOCATION || {}).radarName || '').toUpperCase();
       /* a forecast frame says so, in amber, with the motion it was moved along -- never a clock time it was not scanned at */
-      var when = o.fc ? '<span style="color:#ffd27a;">+' + o.fc + ' MIN FORECAST' + (o.src ? ' (' + esc(o.src) + ' MOTION)' : '') + '</span>' : esc(w) + ' SCAN';
-      var head = (R.prod === 'cref' ? 'MRMS COMPOSITE MOSAIC (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)' : R.prod === 'etop' ? 'MRMS ECHO TOPS (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)'
+      var when = o.model ? '<span style="color:#ffd27a;">' + esc(w) + ' · ' + o.model + ' FORECAST (' + ('0' + new Date(o.run).getUTCHours()).slice(-2) + 'Z RUN)</span>'
+        : o.fc ? '<span style="color:#ffd27a;">+' + o.fc + ' MIN FORECAST' + (o.src ? ' (' + esc(o.src) + ' MOTION)' : '') + '</span>' : esc(w) + ' SCAN';
+      var head = (o.model ? 'NOAA HRRR MODEL, SIMULATED RADAR' : R.prod === 'cref' ? 'MRMS COMPOSITE MOSAIC (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)' : R.prod === 'etop' ? 'MRMS ECHO TOPS (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)'
           : R.prod === 'ptyp' ? 'MRMS PRECIP TYPE (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)'
           : R.prod === 'bref' && !R.hi() ? 'MRMS RADAR MOSAIC (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)' : esc(R.sid.toUpperCase()) + (R.hi() ? ' SUPER-RES' : '') + (nm ? ' · ' + esc(nm) : '')) + ' · ' + when
         + (FUEL.t && /^(bref|cref|etop)$/.test(R.prod) ? ' · <span class="lc-fuel">' + esc(FUEL.t) + '</span>' : '');   /* THE CITY's fuel line (FUEL, below) */
@@ -105796,9 +105798,9 @@ function closeAlertModal(){
              should be consistent"): the loop was the last ten scans (1-2 min apart, ~18 min) and then the forecast at 10 min steps.
              Now the scans are 10 min apart too, the newest and one per 10 min back over the hour (the scan nearest each mark,
              within 4 min), so past and forecast run at one pace; the motion read off first-to-last gets a longer, steadier span */
-          var all = (R.times[R.key()] || []).filter(isFinite), ts = [];
+          var all = (R.times[R.key()] || []).filter(isFinite), ts = [], stp = R.hrrrOn() ? 900000 : 600000;   /* HRRR's 15 min when its frames follow */
           if (all.length){ var tN = all[all.length - 1];
-            for (var kk = 6; kk >= 0; kk--){ var mark = tN - kk * 600000, bt = null;
+            for (var kk = Math.round(3600000 / stp); kk >= 0; kk--){ var mark = tN - kk * stp, bt = null;
               all.forEach(function(t){ if (Math.abs(t - mark) <= 240000 && (bt === null || Math.abs(t - mark) < Math.abs(bt - mark))) bt = t; });
               if (bt !== null && ts.indexOf(bt) < 0) ts.push(bt); } }
           if (ts.length < 3) ts = all.slice(-10);           /* a station listing too few scans for the hour: its newest, as before */
@@ -105813,6 +105815,7 @@ function closeAlertModal(){
           R.nObs = R.ov.length; R.bb = bb;
           R.i = R.ov.length - 1; R.ov[R.i].l.setOpacity(.82); R.label();
           if (R.prod === 'bref' || R.prod === 'cref') OV.motionFrom(R.ov.slice(), bb);
+          if (R.hrrrOn()) R.hrrr();                                /* the model's next 3 hours after the scans */
           var hold = 0;
           R.timer = setInterval(function(){ if (document.hidden || !paneOn()) return;
             if (R.i === R.nObs - 1 && hold++ < 3) return; hold = 0;            /* rest on the newest scan (the forecast frames run after it) */
@@ -105828,7 +105831,45 @@ function closeAlertModal(){
        over the short range, so +10 to +60 minutes and no further, each frame a little fainter than the last and stamped
        "+N MIN FORECAST" in the strip rather than a clock time. The frames reuse the newest scan's own picture (the cached
        WMS image, or the despeckled data URL up close), so they cost no network: only their bounds move. */
+    /* THE MODEL AFTER THE SCANS (user 2026-10-21: "go in that order" -- the forecast on our own map): NOAA's HRRR simulated
+       reflectivity, tiled by the Iowa Environmental Mesonet (keyless, CORS), every 15 minutes to 18 hours. On reflectivity inside
+       the HRRR's domain (the lower 48) the loop is the past hour of scans at 15 min, then the HRRR's next 3 hours at 15 min --
+       one pace -- every frame from ONE run (the tiles are pinned to its init time, read from IEM's refd_0000.json), stamped with
+       its clock time and HRRR, in amber. A model, not a measurement: a little fainter than the scans. If the model cannot be
+       reached the measured-motion frames (below) stand in, as before. */
+    R.HR = { run: null, at: 0, bad: 0 };
+    R.hrrrOn = function(){ var L1 = window.LOCATION || {}, la = +L1.lat, lo = +L1.lon;
+      return (R.prod === 'bref' || R.prod === 'cref') && la > 21.5 && la < 52.5 && lo > -134 && lo < -61 && Date.now() - R.HR.bad > 600000; };
+    /* the blur is ~40% of a 3 km model cell on screen at the zoom, so the field reads soft at every zoom (a fixed blur left blocks) */
+    R.hrBlur = function(){ if (!M) return; var mpp = 156543.03 * Math.cos(M.getCenter().lat * Math.PI / 180) / Math.pow(2, M.getZoom());
+      mapEl.style.setProperty('--hrrr-blur', Math.max(1.5, Math.min(24, 0.4 * 3000 / mpp)).toFixed(1) + 'px');
+      if (!R.hrBlurOn){ R.hrBlurOn = true; M.on('zoomend', R.hrBlur); } };
+    R.hrrr = function(){
+      var n = R.nObs || 0; if (!M || VIEW !== 'radar' || !n || R.ov.length < n || !R.bb) return;
+      var gen = R.hrGen = (R.hrGen || 0) + 1, last = R.ov[n - 1];
+      var meta = R.HR.run && Date.now() - R.HR.at < 300000 ? Promise.resolve(R.HR.run)
+        : fetch('https://mesonet.agron.iastate.edu/data/gis/images/4326/hrrr/refd_0000.json', { cache: 'no-store' }).then(function(r){ return r.json(); })
+            .then(function(j){ var t = Date.parse(j.model_init_utc); if (!isFinite(t)) throw 0; R.HR.run = t; R.HR.at = Date.now(); return t; });
+      meta.then(function(init){
+        if (gen !== R.hrGen || R.nObs !== n || R.ov[n - 1] !== last || VIEW !== 'radar') return;
+        var d = new Date(init), stamp = d.getUTCFullYear() + ('0' + (d.getUTCMonth() + 1)).slice(-2) + ('0' + d.getUTCDate()).slice(-2) + ('0' + d.getUTCHours()).slice(-2) + '00';
+        var showing = R.i >= n;
+        R.ov.splice(n).forEach(function(o){ M.removeLayer(o.l); });
+        if (showing){ R.i = n - 1; last.l.setOpacity(.82); }
+        var v0 = Math.ceil((last.t + 60000) / 900000) * 900000;
+        for (var v = v0; v <= last.t + 3 * 3600000; v += 900000){
+          var fm = Math.round((v - init) / 60000); if (fm < 0 || fm > 1080 || fm % 15) continue;
+          var u = 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/hrrr::REFD-F' + ('000' + fm).slice(-4) + '-' + stamp + '/{z}/{x}/{y}.png';
+          /* SOFT, AS A MODEL SHOULD READ (memory: edges encode certainty): asked at z6, where a 3 km cell is ~1.5 px, and stretched
+             by the browser's own smoothing, plus a slight blur -- the z8 tiles drew every cell as a hard block */
+          var tl = L.tileLayer(u, { opacity: 0, zIndex: 3, maxNativeZoom: 6, maxZoom: 19, keepBuffer: 0, updateWhenIdle: true, className: 'lc-hrrr' }).addTo(M);
+          R.hrBlur();
+          R.ov.push({ l: tl, t: v, fc: Math.round((v - last.t) / 60000), op: .7, model: 'HRRR', run: init });
+        }
+      }).catch(function(){ if (gen !== R.hrGen) return; R.HR.bad = Date.now(); R.fc(); });   /* no model: the measured-motion frames */
+    };
     R.fc = function(){
+      if (R.hrrrOn()) return;                                       /* the HRRR's frames follow the scans instead */
       var mo = OV.motion, n = R.nObs || 0;
       if (!M || VIEW !== 'radar' || !(R.prod === 'bref' || R.prod === 'cref') || !mo || !n || R.ov.length < n || !R.bb) return;
       var last = R.ov[n - 1], el = last.l.getElement && last.l.getElement();
