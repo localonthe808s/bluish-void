@@ -111817,6 +111817,80 @@ function closeAlertModal(){
     sync();
   })();
 
+  /* DO THE MODELS AGREE? (user 2026-10-21, the third FORECASTS improvement: "go in that order"). One request to Open-Meteo for the
+     place: temperature and rain, hourly, the next 48 hours, from five independent models -- HRRR, GFS (gfs_global, not the
+     seamless blend, which IS the HRRR for its first hours), NAM, ECMWF, ICON. A card at the top of the FORECASTS info panel: the
+     five temperature lines over two days, each model's rain total, and one sentence on where they agree or split. Refreshed every
+     30 minutes and when the place moves; shown only while the panel is. */
+  (function(){
+    var panel = document.getElementById('fcast-info-panel'), hd = document.getElementById('fcast-info-header');
+    if (!panel || !hd || document.getElementById('fcast-agree')) return;
+    var box = document.createElement('div'); box.id = 'fcast-agree'; box.style.cssText = 'padding:10px 14px 4px;font-family:system-ui,sans-serif;color:rgba(43,34,244,.85);';
+    panel.insertBefore(box, hd);
+    var MODS = [['ncep_hrrr_conus', 'HRRR', '#ea580c'], ['gfs_global', 'GFS', '#2B22F4'], ['ncep_nam_conus', 'NAM', '#0d9488'], ['ecmwf_ifs025', 'ECMWF', '#16a34a'], ['icon_seamless', 'ICON', '#b45309']];
+    var st = { key: '', at: 0, busy: false };
+    var esc = function(x){ return String(x == null ? '' : x).replace(/[&<>"]/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+    var DAY = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+    var tparts = function(t){ var m = /^(\d{4})-(\d\d)-(\d\d)T(\d\d)/.exec(t || ''); if (!m) return null; var d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));   /* location-local, naive */
+      return { day: DAY[d.getUTCDay()], h: +m[4] }; };
+    var hr = function(h){ return (h % 12 || 12) + (h < 12 ? ' AM' : ' PM'); };
+    var render = function(j){
+      var H = j && j.hourly; if (!H || !H.time) { box.innerHTML = ''; return; }
+      var T = H.time, n = T.length, W = 600, Hh = 130, pl = 30, pr = 8, pt = 8, pb = 20;
+      var series = MODS.map(function(m){ return { k: m[0], nm: m[1], c: m[2], t: H['temperature_2m_' + m[0]] || [], p: H['precipitation_' + m[0]] || [] }; })
+        .filter(function(sr){ return sr.t.some(function(v){ return v != null; }); });
+      if (!series.length){ box.innerHTML = ''; return; }
+      var lo = 1e9, hi = -1e9; series.forEach(function(sr){ sr.t.forEach(function(v){ if (v != null){ if (v < lo) lo = v; if (v > hi) hi = v; } }); });
+      lo = Math.floor(lo - 1); hi = Math.ceil(hi + 1);
+      var X = function(i){ return pl + (W - pl - pr) * i / Math.max(1, n - 1); }, Y = function(v){ return pt + (Hh - pt - pb) * (hi - v) / Math.max(1, hi - lo); };
+      var svg = '<svg viewBox="0 0 ' + W + ' ' + Hh + '" style="width:100%;height:auto;display:block;">';
+      [lo, Math.round((lo + hi) / 2), hi].forEach(function(v){ svg += '<line x1="' + pl + '" x2="' + (W - pr) + '" y1="' + Y(v).toFixed(1) + '" y2="' + Y(v).toFixed(1) + '" stroke="rgba(43,34,244,.12)"/>'
+        + '<text x="' + (pl - 4) + '" y="' + (Y(v) + 3).toFixed(1) + '" text-anchor="end" font-size="9" font-weight="700" fill="rgba(43,34,244,.55)">' + v + '°</text>'; });
+      for (var i = 0; i < n; i++){ var tp = tparts(T[i]); if (!tp || (tp.h !== 0 && tp.h !== 12)) continue;
+        svg += '<line x1="' + X(i).toFixed(1) + '" x2="' + X(i).toFixed(1) + '" y1="' + pt + '" y2="' + (Hh - pb) + '" stroke="rgba(43,34,244,' + (tp.h ? '.07' : '.16') + ')"/>'
+          + '<text x="' + X(i).toFixed(1) + '" y="' + (Hh - 6) + '" text-anchor="middle" font-size="9" font-weight="800" fill="rgba(43,34,244,.6)">' + (tp.h ? 'NOON' : tp.day) + '</text>'; }
+      series.forEach(function(sr){ var d = '', pen = false;
+        sr.t.forEach(function(v, i){ if (v == null){ pen = false; return; } d += (pen ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(v).toFixed(1); pen = true; });
+        svg += '<path d="' + d + '" fill="none" stroke="' + sr.c + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" opacity=".9"/>'; });
+      svg += '</svg>';
+      /* rain: each model's total over the hours it covers */
+      var tot = series.map(function(sr){ var s0 = 0, hrs = 0; sr.p.forEach(function(v){ if (v != null){ s0 += v; hrs++; } }); return { nm: sr.nm, c: sr.c, in: s0, hrs: hrs }; });
+      var mx = Math.max(0.1, Math.max.apply(null, tot.map(function(q){ return q.in; })));
+      var bars = tot.map(function(q){ return '<div style="display:flex;align-items:center;gap:6px;font-size:.56rem;font-weight:800;letter-spacing:.06em;margin:2px 0;">'
+        + '<span style="width:44px;color:' + q.c + ';">' + q.nm + '</span>'
+        + '<span style="flex:1;height:7px;border-radius:4px;background:rgba(43,34,244,.08);overflow:hidden;"><span style="display:block;height:100%;width:' + (100 * q.in / mx).toFixed(1) + '%;background:' + q.c + ';opacity:.85;"></span></span>'
+        + '<span style="width:96px;text-align:right;color:rgba(43,34,244,.75);">' + (q.in < 0.01 ? 'DRY' : q.in.toFixed(2) + ' IN') + (q.hrs < n - 2 ? ' · ' + q.hrs + ' H' : '') + '</span></div>'; }).join('');
+      /* the words */
+      var spreads = []; for (var k = 0; k < n; k++){ var vs = series.map(function(sr){ return sr.t[k]; }).filter(function(v){ return v != null; }); if (vs.length >= 3) spreads.push({ i: k, s: Math.max.apply(null, vs) - Math.min.apply(null, vs) }); }
+      var med = spreads.map(function(q){ return q.s; }).sort(function(a, b){ return a - b; })[Math.floor(spreads.length / 2)] || 0, wide = spreads.reduce(function(a, b){ return b.s > a.s ? b : a; }, { s: 0 });
+      var wp = tparts(T[wide.i] || '');
+      var tSay = 'TEMPERATURES AGREE WITHIN ' + Math.round(med) + '°F MOST OF THE WAY' + (wide.s >= med + 3 && wp ? ', WIDEST ' + Math.round(wide.s) + '°F AROUND ' + wp.day + ' ' + hr(wp.h) : '');
+      var wet = tot.filter(function(q){ return q.in >= 0.05; }), dry = tot.filter(function(q){ return q.in < 0.05; });
+      var rSay = !wet.length ? 'ALL ' + tot.length + ' KEEP IT DRY' : !dry.length ? 'ALL ' + tot.length + ' BRING RAIN, ' + Math.min.apply(null, wet.map(function(q){ return q.in; })).toFixed(2) + ' TO ' + Math.max.apply(null, wet.map(function(q){ return q.in; })).toFixed(2) + ' IN'
+        : 'SPLIT ON RAIN: ' + wet.map(function(q){ return q.nm; }).join(', ') + (wet.length > 1 ? ' BRING' : ' BRINGS') + ' SOME, ' + dry.map(function(q){ return q.nm; }).join(', ') + (dry.length > 1 ? ' KEEP' : ' KEEPS') + ' IT DRY';
+      var place = String((window.LOCATION || {}).name || '').split(',')[0].toUpperCase();
+      box.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">'
+        + '<span style="font-size:.66rem;font-weight:900;letter-spacing:.1em;">DO THE MODELS AGREE?' + (place ? ' · ' + esc(place) : '') + ' · NEXT 48 HOURS</span>'
+        + '<span style="font-size:.52rem;font-weight:800;letter-spacing:.08em;">' + series.map(function(sr){ return '<span style="color:' + sr.c + ';margin-left:8px;">● ' + sr.nm + '</span>'; }).join('') + '</span></div>'
+        + '<div style="font-size:.58rem;font-weight:800;letter-spacing:.05em;margin:4px 0 6px;color:rgba(43,34,244,.8);">' + esc(tSay) + ' · ' + esc(rSay) + '</div>'
+        + '<div style="display:grid;grid-template-columns:minmax(0,2.2fr) minmax(0,1fr);gap:14px;align-items:center;" class="fa-grid">' + svg
+        + '<div><div style="font-size:.52rem;font-weight:900;letter-spacing:.1em;color:rgba(43,34,244,.6);margin-bottom:3px;">RAIN, 48 HOURS</div>' + bars + '</div></div>'
+        + '<div style="font-size:.5rem;font-weight:700;letter-spacing:.06em;color:rgba(43,34,244,.5);margin-top:4px;">EACH MODEL’S OWN FORECAST FOR THIS POINT, VIA <a href="https://open-meteo.com" target="_blank" rel="noopener" style="color:inherit;">OPEN-METEO</a>; HRRR REACHES 18 TO 48 HOURS DEPENDING ON ITS RUN</div>';
+    };
+    var css = document.createElement('style'); css.textContent = '@media (max-width:700px){ #fcast-agree .fa-grid{ grid-template-columns:1fr !important; } }'; document.head.appendChild(css);
+    var tick = function(){
+      if (!panel.offsetParent || getComputedStyle(panel).display === 'none') return;
+      var L1 = window.LOCATION || {}, la = +L1.lat, lo = +L1.lon; if (!isFinite(la) || !isFinite(lo)) return;
+      var key = la.toFixed(2) + ',' + lo.toFixed(2); if (st.busy || (key === st.key && Date.now() - st.at < 1800000)) return;
+      st.busy = true;
+      fetch('https://api.open-meteo.com/v1/forecast?latitude=' + la.toFixed(3) + '&longitude=' + lo.toFixed(3) + '&hourly=temperature_2m,precipitation&models=' + MODS.map(function(m){ return m[0]; }).join(',')
+        + '&forecast_hours=48&temperature_unit=fahrenheit&precipitation_unit=inch&timezone=auto')
+        .then(function(r){ return r.json(); }).then(function(j){ st.key = key; st.at = Date.now(); render(j); })
+        .catch(function(){ st.at = Date.now() - 1500000; }).then(function(){ st.busy = false; });
+    };
+    setInterval(tick, 4000); tick();
+  })();
+
   /* EARTH SYSTEMS (user 2026-09-20: "lets move these views into a new TAB on CLOUDS called EARTH SYSTEMS and then we can
      make a normal dropdown view that shows all the views were making - lets just leave hurricanes to hurricanes and
      monsoons"). The big, slow machinery behind the weather -- El Nino, the Gulf Stream, the Atlantic's overturning, the jet
