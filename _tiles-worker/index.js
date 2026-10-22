@@ -37,6 +37,37 @@ export default {
     if (url.pathname === '/rail/v1/nyc.json') return railRoute(url, ctx, cors);
     if (url.pathname === '/subway/v1/nyc.json') return subwayRoute(url, ctx, cors);
     if (url.pathname === '/subway/v1/delays.json') return delaysRoute(url, ctx, cors);   /* measured subway delays (rail.js) */   /* the subway's trains between stations (rail.js) */   /* the LIRR's and Metro-North's trains, on their track (rail.js) */
+    /* FORECAST MODEL FRAMES, CACHED (2026-10-21, user: "lets do cloudflare"). FORECASTS + MODELS reads NCEP MAG's GIFs
+       (mag.ncep.noaa.gov/data/...), which answer `no-cache, private` at ~0.3 s a frame, so every visit fetched every frame
+       again. MAG reuses a path for each day's run of that hour (hrrr/18/... is today's 18Z, then tomorrow's), so the page
+       adds the run's date (?r=YYYYMMDDHH) and the cache keys on it: a frame of one run never changes, kept a week at the edge
+       and a day in the browser. A frame not published yet (the run still coming in) is a 404 kept one minute, its key
+       carrying the minute so it does not outlive that whatever TTL the zone applies. Only MAG's model image paths pass. */
+    const mg = url.pathname.match(/^\/mag\/((?:gfs|nam|nam-hires|hrrr|href|nbm|gefs-mean-sprd)\/\d\d\/[A-Za-z0-9_.\-\/]{4,160}\.gif)$/);
+    if (mg && !mg[1].includes('..')){
+      const run = /^\d{10}$/.test(url.searchParams.get('r') || '') ? url.searchParams.get('r') : '';
+      const cache = caches.default, key = new Request(url.origin + url.pathname + '?r=' + (run || 'now-' + Math.floor(Date.now() / 600000)), { method: 'GET' });
+      let hit = await cache.match(key), tag = 'HIT';
+      if (!hit){
+        const miss = await cache.match(new Request(key.url + '&miss=' + Math.floor(Date.now() / 60000)));
+        if (miss) return new Response(null, { status: 404, headers: { ...cors, 'Cache-Control': 'no-store', 'X-Mag-Cache': 'MISS-404' } });
+        tag = 'MISS';
+        let up = null;
+        try { up = await fetch('https://mag.ncep.noaa.gov/data/' + mg[1], { headers: { 'User-Agent': 'bluishvoid.com forecast cache' } }); } catch (e) {}
+        if (!up || up.status === 404 || up.status === 403){
+          ctx.waitUntil(cache.put(new Request(key.url + '&miss=' + Math.floor(Date.now() / 60000)), new Response('', { status: 200, headers: { 'Cache-Control': 'public, max-age=60' } })));
+          return new Response(null, { status: 404, headers: { ...cors, 'Cache-Control': 'no-store', 'X-Mag-Cache': 'MISS' } });
+        }
+        const ct = up.headers.get('content-type') || '';
+        if (!up.ok || ct.indexOf('image') < 0) return new Response(null, { status: 502, headers: { ...cors, 'Cache-Control': 'no-store', 'X-Upstream': up.status + ' ' + ct.slice(0, 30) } });
+        hit = new Response(await up.arrayBuffer(), { status: 200, headers: { 'Content-Type': 'image/gif',
+          'Cache-Control': run ? 'public, max-age=86400, s-maxage=604800' : 'public, max-age=300, s-maxage=600' } });
+        ctx.waitUntil(cache.put(key, hit.clone()));
+      }
+      hit = new Response(hit.body, hit); hit.headers.set('X-Mag-Cache', tag);
+      for (const k in cors) hit.headers.set(k, cors[k]);
+      return hit;
+    }
     if (url.pathname === '/' || url.pathname === '/health') return new Response(JSON.stringify({ ok: true, archives: Object.keys(ARCHIVES) }), { headers: { 'Content-Type': 'application/json', ...cors } });
     /* GOES FRAMES, CACHED (2026-10-20, user: "can we cache or cloudflare these somehow so they play smoothly"). The LIVE CLOUDS
        loop reads NESDIS STAR's sector frames (cdn.star.nesdis.noaa.gov), which answer `cache-control: off` -- so every visit
