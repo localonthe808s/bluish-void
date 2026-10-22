@@ -342,8 +342,8 @@ const OBS_MARKETS = [
   // key,      ICAO,   IEM network, IEM station -- the three cities the sheet
   // trades (2026-09-06); the other four were dropped with the rest
   ['ny_high',  'KNYC', 'NY_ASOS', 'NYC']
-  // Austin, then Las Vegas, dropped 2026-10-06 ("we're going to focus on NY HIGH and LOW"). APT5 and ALERT_MARKETS keep
-  // both, so a position still open there gets its alerts until it settles.
+  // Austin, then Las Vegas, dropped 2026-10-06 ("we're going to focus on NY HIGH and LOW"). Both were taken out of APT5
+  // and ALERT_MARKETS too on 2026-10-22 (user: "remove las vegas and austin from the workers").
 ];
 // THE 5-MINUTE FEEDS, per market. New York's settlement sensor (Central Park)
 // has no public 5-minute stream, so the three airports stand in for it. Las
@@ -373,36 +373,36 @@ const OBS_MARKETS = [
 //     so the rest of the worker keeps seeing oldest-last readings stamped in
 //     the market's own zone, which is what every caller already assumes.
 const NWS_UA = 'bluishvoid-kalshi (nicolas7iana@outlook.com)';
-// MADIS, FIRST, FOR LAS VEGAS AND AUSTIN (2026-10-02). NOAA's MADIS public query serves the same 5-minute ASOS rows the
-// weather service does, and gets them out sooner: raced for two hours, the median reading reached MADIS 12.8 min after
-// it was taken at KLAS and 12.2 at KAUS, against 19.6 and 18.0 on api.weather.gov; MADIS was first on 15 of 19 and 19
-// of 22 readings, by 5-8 minutes. Central Park is not in MADIS's public data (its fast stream is government-only), so
-// New York is unchanged. MADIS is slow to answer (~12 s) and dropped 2 requests in 2 hours, so it runs ALONGSIDE the
-// weather service, never instead of it: readings from both are merged minute by minute. One station per query (a list
-// is ignored); the answer is kept 60 s in the edge cache so the sheet's minute poll does not wait on it each time.
-const MADIS_STATIONS = new Set(['KLAS', 'KAUS']);
-const MADIS_Q = 'https://madis-data.ncep.noaa.gov/madisPublic1/cgi-bin/madisXmlPublicDir?rdr=&time=0&minbck=-29&minfwd=0&recwin=4'
-  + '&timefilter=0&state=&dfltrsel=3&stasel=1&pvdrsel=0&varsel=2&qctype=0&qcsel=0&xml=5&csvmiss=0&stanam=';
-async function madisRecent(stid) {
-  const key = new Request(`https://madis-cache.bluishvoid.invalid/${stid}`);
+// IOWA STATE'S MESONET, ALONGSIDE (2026-10-22). On 10-22 api.weather.gov stopped updating every New York station at
+// 9:15 AM (KNYC's newest at 12:51Z, KLGA's 13:15Z) while IEM, which takes the same METARs and 5-minute rows off the
+// wire, had them through the afternoon -- the panel's lines stopped at 9 AM. IEM's obhistory carries the raw ob, so the
+// temperature is read from its T group (tenths of a degree C, the same digits the weather service hands back); a row
+// without one falls back to IEM's whole-degree tmpf. Merged like MADIS was: minute by minute, the weather service's
+// reading kept where both have one. Kept 60 s in the edge cache so the panel's minute poll does not refetch it.
+// (MADIS, which ran here for Las Vegas and Austin, went with those two cities on 10-22.)
+const IEM_NET = { KNYC: ['NYC', 'NY_ASOS'], KLGA: ['LGA', 'NY_ASOS'], KJFK: ['JFK', 'NY_ASOS'], KEWR: ['EWR', 'NJ_ASOS'] };
+async function iemRecent(stid, days) {
+  const nn = IEM_NET[stid]; if (!nn) return [];
+  const key = new Request(`https://iem-cache.bluishvoid.invalid/${stid}/${days.join(',')}`);
   let cache = null;
   try { cache = caches.default; const hit = await cache.match(key); if (hit) return await hit.json(); } catch (e) { /* no cache: fetch */ }
-  const ac = new AbortController(), timer = setTimeout(() => ac.abort(), 12000);   // 30 minutes back answers in ~4 s; 2 hours took 20
-  try {
-    const r = await fetch(MADIS_Q + stid, { signal: ac.signal,
-      headers: { 'Authorization': 'Basic ' + btoa('anonymous:anonymous'), 'User-Agent': 'bluishvoid-kalshi' } });
-    if (!r.ok) return [];
-    const rows = [];
-    for (const line of (await r.text()).split('\n')) {
-      const p = line.split(',').map((x) => x.trim());
-      if (p.length < 11 || p[0] !== stid || !/^ASOS/.test(p[3])) continue;
-      const m = /^(\d\d)\/(\d\d)\/(\d{4})$/.exec(p[1]), k = Number(p[9]);
-      if (!m || !/^\d\d:\d\d$/.test(p[2]) || !(k > 150 && k < 350)) continue;
-      rows.push([`${m[3]}-${m[1]}-${m[2]}T${p[2]}:00Z`, Math.round((k - 273.15) * 100) / 100]);
-    }
-    if (cache) { try { await cache.put(key, new Response(JSON.stringify(rows), { headers: { 'content-type': 'application/json', 'cache-control': 'max-age=60' } })); } catch (e) { /* fine */ } }
-    return rows;
-  } catch (e) { return []; } finally { clearTimeout(timer); }
+  const rows = [];
+  await Promise.all(days.map(async (day) => {
+    const ac = new AbortController(), timer = setTimeout(() => ac.abort(), 8000);
+    try {
+      const r = await fetch(`https://mesonet.agron.iastate.edu/api/1/obhistory.json?station=${nn[0]}&network=${nn[1]}&date=${day}`,
+        { signal: ac.signal, headers: { 'User-Agent': NWS_UA } });
+      if (!r.ok) return;
+      for (const o of ((await r.json()).data || [])) {
+        if (!o || !o.utc_valid) continue;
+        const t = /\bT([01])(\d{3})[01]\d{3}\b/.exec(o.raw || '');
+        const c = t ? (t[1] === '1' ? -1 : 1) * Number(t[2]) / 10 : (typeof o.tmpf === 'number' ? Math.round((o.tmpf - 32) * 50 / 9) / 10 : null);
+        if (c != null && isFinite(c)) rows.push([o.utc_valid, c]);
+      }
+    } catch (e) { /* the weather service alone */ } finally { clearTimeout(timer); }
+  }));
+  if (cache) { try { await cache.put(key, new Response(JSON.stringify(rows), { headers: { 'content-type': 'application/json', 'cache-control': 'max-age=60' } })); } catch (e) { /* fine */ } }
+  return rows;
 }
 async function readSensors(recentMin, withSeries) {
   const out = {};
@@ -412,12 +412,15 @@ async function readSensors(recentMin, withSeries) {
   await Promise.all(Object.keys(tzOf).map(async (stid) => {
     const tz = tzOf[stid];
     try {
-      // both sources at once; either can be missing
-      const [nws, mad] = await Promise.all([
+      // both sources at once; either can be missing. IEM is asked for the station's local today, and yesterday too when
+      // the window reaches back past midnight
+      const dFmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+      const iemDays = [...new Set([dFmt.format(new Date(start)), dFmt.format(new Date())])];
+      const [nws, iem] = await Promise.all([
         fetch(`https://api.weather.gov/stations/${stid}/observations?start=${start}`,
           { headers: { 'User-Agent': NWS_UA, 'Accept': 'application/geo+json' } })
           .then((r) => r.ok ? r.json() : null).catch(() => null),
-        MADIS_STATIONS.has(stid) ? madisRecent(stid) : Promise.resolve([])
+        iemRecent(stid, iemDays)
       ]);
       // Local calendar date and local HH:MM for a UTC stamp, in the station's
       // own zone -- the same two fields the Synoptic `obtimezone=local` form
@@ -433,11 +436,12 @@ async function readSensors(recentMin, withSeries) {
         const c = p.temperature && p.temperature.value;
         if (typeof c === 'number' && p.timestamp) obs.push([new Date(p.timestamp), c, 'nws']);
       }
-      for (const [t, c] of mad) obs.push([new Date(t), c, 'madis']);
+      const t0 = new Date(start);
+      for (const [t, c] of iem) { const d = new Date(t); if (d >= t0) obs.push([d, c, 'iem']); }   // the same window the weather service was asked for
       // Oldest first, so `last` ends on the newest reading the way the old
       // top-to-bottom Synoptic loop did.
       obs.sort((a, b) => a[0] - b[0] || (a[2] === 'nws' ? -1 : 1));
-      let mx = null, mxAt = null, last = null, lastAt = null, n = 0, nMadis = 0;
+      let mx = null, mxAt = null, last = null, lastAt = null, n = 0, nIem = 0;
       const series = [], seen = new Set();
       for (const [d, c, src] of obs) {
         if (isNaN(d)) continue;
@@ -455,14 +459,14 @@ async function readSensors(recentMin, withSeries) {
         // hourly METARs land on x.x6 and x.x8, not on a tenth of a degree F.
         const v = Math.round((c * 9 / 5 + 32) * 100) / 100;
         const hh = Number(hm.slice(0, 2));
-        n++; if (src === 'madis') nMadis++;
+        n++; if (src === 'iem') nIem++;
         if (day === today && hh >= 7 && (mx == null || v > mx)) { mx = v; mxAt = hm; }
         last = v; lastAt = hm;
         if (withSeries && day === today) series.push([hh * 60 + Number(hm.slice(3, 5)), v]);
       }
       if (!n) return;
       out[stid] = { max7: mx, maxAt: mxAt, last, at: lastAt, n };
-      if (MADIS_STATIONS.has(stid)) out[stid].madis = nMadis;     // readings only MADIS had
+      if (nIem) out[stid].iem = nIem;     // readings only IEM had
       if (withSeries) out[stid].series = series;
     } catch (e) { /* one dead station must not cost the read */ }
   }));
@@ -473,9 +477,8 @@ const APT5 = {
   // 5-minute stream is NWS-run and not in the FAA feed; MADIS is closed to us:
   // 1-minute ASOS is government-only and its public 5-minute feed lacks KNYC), so its
   // points are the hourly reports, drawn as such. Never OWN5 for NY.
-  ny_high:  { stids: 'KLGA,KJFK,KEWR,KNYC', tz: 'America/New_York' },
-  las_high: { stids: 'KLAS,KVGT',      tz: 'America/Los_Angeles' },
-  aus_high: { stids: 'KAUS,KATT',      tz: 'America/Chicago' }
+  ny_high:  { stids: 'KLGA,KJFK,KEWR,KNYC', tz: 'America/New_York' }
+  // Las Vegas and Austin removed 2026-10-22 (user: "remove las vegas and austin from the workers")
 };
 
 // THE STATION TRAP, and it cost a whole 45-day study before it was found.
@@ -597,7 +600,7 @@ function foldLead(sum, snap) {
     // TWC's since-7-AM field carries YESTERDAY'S maximum until 7 AM local, so
     // a night-time sighting of it is not a lead (it printed "led IEM by 1196
     // min" for a value set the day before, 2026-09-06). The market's zone:
-    const tz = { ny_high: 'America/New_York', las_high: 'America/Los_Angeles', aus_high: 'America/Chicago' }[r.key] || 'America/New_York';
+    const tz = 'America/New_York';   /* New York is the only market (Las Vegas and Austin removed 2026-10-22) */
     const lh = Number(new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', hour12: false }).format(new Date(r.t)));
     for (const src of LEAD_SOURCES) {
       const v = r[src];
@@ -659,9 +662,8 @@ const ALERT_SERIES = 'KXHIGHNY';   // kept for the status page
 // the markets the alerts watch: series prefix -> the settlement station TWC
 // reads (v3 current with the ICAO), its zone, and the name on the phone
 const ALERT_MARKETS = [
-  { series: 'KXHIGHNY',  icao: 'KNYC', tz: 'America/New_York',    name: 'Central Park' },
-  { series: 'KXHIGHTLV', icao: 'KLAS', tz: 'America/Los_Angeles', name: 'Las Vegas' },
-  { series: 'KXHIGHAUS', icao: 'KAUS', tz: 'America/Chicago',     name: 'Austin' }
+  { series: 'KXHIGHNY',  icao: 'KNYC', tz: 'America/New_York',    name: 'Central Park' }
+  // Las Vegas and Austin removed 2026-10-22
 ];
 const ALERT_COOLDOWN_MS = 30 * 60 * 1000;
 
@@ -975,7 +977,7 @@ async function alertTick(env, sched) {
   // the sensor the climate report is computed from, sampled twelve times an
   // hour. The market prices the hourly report; a reading here that crosses a
   // held rung's edge is known up to 55 minutes before that (2026-09-06).
-  const OWN5 = { KXHIGHTLV: 'KLAS', KXHIGHAUS: 'KAUS' };
+  const OWN5 = {};   // was Las Vegas (KLAS) and Austin (KAUS), removed 2026-10-22; New York's sensor has no 5-minute feed
   let sens = {};
   if (held.some((h) => OWN5[h.am.series])) {
     try { sens = await readSensors(720); } catch (e) { out.push('sensors err'); }
