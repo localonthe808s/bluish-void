@@ -95,6 +95,8 @@ def main():
         log = json.load(open(OUT))
     except Exception:
         log = {}
+    # cities dropped from active.py leave the log (2026-10-22)
+    log = {k: v for k, v in log.items() if k in {m['key'] for m in K.MARKETS}}
     try:
         courts = json.load(open(os.path.join(HERE, 'dayahead.json'))).get('cities') or {}
     except Exception:

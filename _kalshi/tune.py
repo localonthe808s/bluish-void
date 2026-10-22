@@ -304,6 +304,8 @@ def _tune(cfg, prev):
 
 def main():
     prev = json.load(open(OUT)) if os.path.exists(OUT) else {}
+    # cities dropped from active.py leave the file (2026-10-22)
+    prev = {k: v for k, v in prev.items() if k.startswith('_') or k in {m['key'] for m in K.MARKETS}}
     if '--live-court' in sys.argv:
         # the court alone, on the settings already chosen: no replays (seconds, not the search's half hour)
         for cfg in K.MARKETS:

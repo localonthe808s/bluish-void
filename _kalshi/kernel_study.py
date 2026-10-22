@@ -273,7 +273,7 @@ def main():
         try:
             old = json.load(open(OUT))
             for k, v in (old.get('cities') or {}).items():
-                if k not in doc['cities'] and isinstance(v, dict):
+                if k not in doc['cities'] and isinstance(v, dict) and k in {m['key'] for m in K.MARKETS}:  # cities dropped from active.py are not carried (2026-10-22)
                     doc['cities'][k] = dict(v, carried=v.get('carried') or old.get('built'))
                     print('%s: kept the ruling from %s' % (k, doc['cities'][k]['carried']))
         except Exception:

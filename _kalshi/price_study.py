@@ -448,7 +448,8 @@ def main():
         try:
             with open(os.path.join(HERE, 'price_rows.json')) as f:
                 all_rows = [r for r in json.load(f)
-                            if r.get('city') and not any(r['city'].startswith(o) for o in only)]
+                            if r.get('city') and not any(r['city'].startswith(o) for o in only)
+                            and r['city'] in {m['key'] for m in K.MARKETS}]  # dropped cities leave (2026-10-22)
             print('kept %d rows from markets not in this run' % len(all_rows))
         except Exception:
             all_rows = []
@@ -616,19 +617,32 @@ def afternoon_blend(rows, table_path=None, hours=(13, 14, 15, 16, 17)):
                                if (lo is None or t >= lo) and (hi is None or t <= hi)))
             tot = sum(emp) or 1.0
             emp = [x / tot for x in emp]
+            # BINDING AFTERNOONS GET THEIR OWN RULING (2026-10-22). Once the running
+            # max passes the forecast the ladder collapses to a narrow spread around
+            # the floor, and that day the park climbed 64 -> 67 after 1:51 PM while
+            # the sheet gave 67-68 0.6%. Scored on these binding rows alone (182
+            # hour-rows 08-10..10-16), w .5 cut Brier .429 -> .370 and log loss
+            # .767 -> .675, better in both halves and at every hour 13-17.
+            bind = r.get('pred') is not None and r['pred'] <= r['fl'] + 0.05
             for w in (0.0, 0.25, 0.5, 0.75):
                 p = [w * e + (1 - w) * o for e, o in zip(emp, r['ours'])]
                 sp = sum(p) or 1.0
                 b = sum((x / sp - (1.0 if t else 0.0)) ** 2 for x, t in zip(p, r['truth']))
                 acc[r['hour']][w].append(b)
+                if bind:
+                    acc[('bind', r['hour'])][w].append(b)
         out[city] = {}
         for h, ws in acc.items():
             if len(ws[0.0]) < 20:
                 continue
             sc = {('%.2f' % w): round(statistics.mean(v), 4) for w, v in ws.items()}
             best = min(ws, key=lambda w: statistics.mean(ws[w]))
-            out[city][str(h)] = {'n': len(ws[0.0]), 'brier': sc, 'best_w': best,
-                                 'gain': round(statistics.mean(ws[0.0]) - statistics.mean(ws[best]), 4)}
+            cell = {'n': len(ws[0.0]), 'brier': sc, 'best_w': best,
+                    'gain': round(statistics.mean(ws[0.0]) - statistics.mean(ws[best]), 4)}
+            if isinstance(h, tuple):
+                out[city].setdefault('bind', {})[str(h[1])] = cell
+            else:
+                out[city][str(h)] = cell
     return out or None
 
 

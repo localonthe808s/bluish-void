@@ -3354,7 +3354,7 @@ def measured_hours(cfg):
     return out or None
 
 
-def measured_emp_w(cfg, hour):
+def measured_emp_w(cfg, hour, binding=False):
     """THE AFTERNOON BLEND'S WEIGHT, measured nightly (price_study.afternoon_blend):
     for this city and hour, the weight on the empirical climb distribution that
     scored best on the real settled ladders -- taken only when the court had
@@ -3364,7 +3364,9 @@ def measured_emp_w(cfg, hour):
     if not _STUDY:
         measured_hours(cfg)
     d = _STUDY[0] if _STUDY else None
-    row = (((d or {}).get('afternoon_blend') or {}).get(cfg['key']) or {}).get(str(hour))
+    cell = ((d or {}).get('afternoon_blend') or {}).get(cfg['key']) or {}
+    # a binding afternoon reads its own ruling (price_study 'bind', 2026-10-22)
+    row = ((cell.get('bind') or {}) if binding else cell).get(str(hour))
     if not row or (row.get('n') or 0) < 20 or (row.get('gain') or 0) < 0.005:
         return 0.0
     try:
@@ -4319,11 +4321,14 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     # says, for this city, season and hour, how the official max actually ends
     # up relative to the running hourly max. Its weight is measured on the real
     # ladders by price_study.afternoon_blend and is zero until that court has
-    # ruled; a decided or binding day keeps its collapsed spread untouched.
+    # ruled; a decided day keeps its collapsed spread untouched.
     emp_w = 0.0
     _climb_now = climb_now(cfg, _day_obs, now)
-    if _climb_now and _climb_now.get('p1') is not None and not binding_now and not day_decided and now.hour >= 13:
-        emp_w = measured_emp_w(cfg, now.hour)
+    # A binding afternoon blends too, at its own measured weight (2026-10-22): the
+    # floor is where the day stands, not where it ends -- 10-22 read 64 at 1:51 PM,
+    # still rising, and settled 67 while the collapsed spread gave 67-68 0.6%.
+    if _climb_now and _climb_now.get('p1') is not None and not day_decided and now.hour >= 13:
+        emp_w = measured_emp_w(cfg, now.hour, binding=binding_now)
         if emp_w > 0:
             _R = int(round(_climb_now['run']))
             _p0, _p1, _p2 = _climb_now['p0'], _climb_now['p1'], _climb_now['p2']
