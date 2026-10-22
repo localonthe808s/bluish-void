@@ -742,7 +742,7 @@ def metar_regime(cfg):
 # malformed request -- it cost an hour here. `icaoCode` pins the station the
 # market's rules name; `geocode` snaps to a nearest-station blend and disagreed
 # on Denver and Los Angeles in that same sample.
-TWC_KEY = 'e1f10a1e78da46f5b10a1e78da96f525'   # the key weather.com's own site ships
+TWC_KEY = '5c241d89f91274015a577e3e17d43370'   # the key weather.com's own site ships
 
 
 # The running max is the right quantity but the WRONG FIELD ON ITS OWN.
@@ -797,7 +797,7 @@ def twc_history(cfg, day):
         j = get_json(u, timeout=45)
     except Exception as e:
         print('twc history: %s unavailable (%s)' % (icao, e))
-        return []
+        return twc_portal_history(cfg, day)
     out = []
     for o in (j or {}).get('observations') or []:
         t, v = o.get('temp'), o.get('valid_time_gmt')
@@ -910,6 +910,37 @@ def day_context(daily, fcm, biases, today, low=False):
     swing = round(statistics.mean(v for _, v in nxt) - statistics.mean(v for _, v in past[-2:]), 1)
     word = 'COOLING' if swing <= -4 else 'WARMING' if swing >= 4 else 'STEADY'
     return {'past': past, 'next': nxt, 'swing': swing, 'trend': word}
+
+
+def twc_portal_history(cfg, day):
+    """TWC's hourly series from the keyless settlement portal -> [degF].
+
+    THE KEYED API WENT 401 ON 2026-10-21 (~3 PM), and the key weather.com's own
+    page shipped the next day was refused too, with or without weather.com
+    headers. The Climate Data Portal (weather.com/kalshi, no key) publishes the
+    same station's hourly reports per local calendar day: /kalshi/api/metar,
+    weekStart = that week's MONDAY (any other date is a 400). One reading an
+    hour, so it stands in for the history only; max7 has no keyless source.
+    """
+    icao = cfg.get('icao') or ('K' + cfg['station'])
+    monday = day - datetime.timedelta(days=day.weekday())
+    try:
+        j = get_json('https://weather.com/kalshi/api/metar?primary=true&weekStart=%s'
+                     % monday.isoformat(), timeout=60)
+    except Exception as e:
+        print('twc portal history: %s unavailable (%s)' % (icao, e))
+        return []
+    out = []
+    for st in (j or {}).get('stations') or []:
+        if st.get('icaoId') != icao:
+            continue
+        for o in st.get('observations') or []:
+            t = o.get('tempF')
+            if isinstance(t, (int, float)) and o.get('localDate') == day.isoformat():
+                out.append(float(t))
+    if out:
+        print('twc history: %s from the keyless portal (%d hours)' % (icao, len(out)))
+    return out
 
 
 def twc_today(cfg, day):

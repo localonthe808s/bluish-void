@@ -488,7 +488,7 @@ const APT5 = {
 // apart. Only the v3 current form is used here. `language` is REQUIRED: without
 // it the answer is HTTP 400 with every field null, which reads like a station
 // outage rather than a malformed request.
-const TWC_KEY = 'e1f10a1e78da46f5b10a1e78da96f525';
+const TWC_KEY = '5c241d89f91274015a577e3e17d43370';
 
 async function obsSnapshot(env) {
   const t = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
