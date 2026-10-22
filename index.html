@@ -58097,15 +58097,40 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   };
 
   // Model area configs: which areas each model supports
+  /* MEASURED, NOT ASSUMED (audit 2026-10-21): every model x area x product requested from NCEP MAG (18Z run, +12 h): NAM 12 km has
+     no regional sectors (CONUS, N. America and the oceans only) -- it was offered on eleven and failed on all of them; HRRR and
+     HREF have no Hawaii / Puerto Rico (HRRR no Guam); NAM 3 km no Puerto Rico; GFS no Hawaii */
   var modelAreaConfig = {
-    'gfs':       {areas:['conus','namer','alaska','hawaii','north-pac','west-atl','atlantic','east-pac'], default:'conus'},
-    'nam':       {areas:['conus','namer','us-ne','us-se','us-nw','us-sw','us-nc','us-sc','upper-ms','south-ms','n-rockies','s-rockies','s-plains','north-pac','west-atl','east-pac'], default:'conus'},
-    'nam_hires': {areas:['conus','us-ne','us-se','us-nw','us-sw','us-nc','us-sc','alaska','hawaii','pr'], default:'us-ne'},
-    'hrrr':      {areas:['conus','us-ne','us-se','us-nw','us-sw','us-nc','us-sc','alaska','hawaii','pr','guam'], default:'us-ne'},
-    'href':      {areas:['conus','us-ne','us-se','us-nw','us-sw','us-nc','us-sc','alaska','hawaii','pr'], default:'us-ne'},
+    'gfs':       {areas:['conus','namer','alaska','north-pac','west-atl','atlantic','east-pac'], default:'conus'},
+    'nam':       {areas:['conus','namer','north-pac','west-atl','east-pac'], default:'conus'},
+    'nam_hires': {areas:['conus','us-ne','us-se','us-nw','us-sw','us-nc','us-sc','alaska','hawaii'], default:'us-ne'},
+    'hrrr':      {areas:['conus','us-ne','us-se','us-nw','us-sw','us-nc','us-sc','alaska'], default:'us-ne'},
+    'href':      {areas:['conus','us-ne','us-se','us-nw','us-sw','us-nc','us-sc'], default:'us-ne'},
     'nbm':       {areas:['conus','namer','alaska','hawaii','pr'], default:'conus'},
     'gefs':      {areas:['conus','namer','north-pac','west-atl','atlantic','east-pac','alaska','arctic','europe','asia','africa'], default:'conus'}
   };
+
+  /* products a model publishes on most of its areas but not these (measured 2026-10-21) */
+  function _fcastAreaGap(model, area){
+    var G = { 'nam_hires|alaska': ['precip_type','ceiling'],
+              'nam_hires|hawaii': ['sim_radar','precip_type','radar_1km','best_cape','updraft','max_wind','ceiling'] };
+    return G[model + '|' + area] || [];
+  }
+  /* a frame exists only where its product does (measured): NAM 12 km is 3-hourly; 6-hour totals start at +6 h and 24-hour at
+     +24 h; NBM's total and 6-hour precip are 6-hourly though its other frames are 3-hourly */
+  function _fcastFhrOk(model, product, h){
+    if (product === 'precip_6hr' && h < 6) return false;
+    if (product === 'precip_24hr' && h < 24) return false;
+    if (model === 'nbm' && (product === 'precip_total' || product === 'precip_6hr') && h % 6) return false;
+    return true;
+  }
+
+  /* an area change re-checks the product buttons where a model's products differ by area (NAM 3 km over Alaska and Hawaii) */
+  (function(){ var _sfa = switchFcastArea;
+    switchFcastArea = function(a){ var r = _sfa.apply(this, arguments);
+      if (fcastState.model === 'nam_hires' && fcastState.range !== 'live' && fcastState.range !== 'clouds') switchFcastModel('nam_hires');
+      return r; };
+    window.switchFcastArea = switchFcastArea; })();
 
   // Location-aware default area: map the user's radarRegion to the model's
   // regional sector when the model supports it, else the model's static
@@ -58130,11 +58155,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     for(var i = 1; i <= 48; i++) arr.push(i.toString().padStart(3, '0'));
     return arr;
   }
-  // NAM (regular): hourly to 36h, 3-hourly to 84h
+  // NAM (regular): 3-hourly to 84h -- MAG has no hourly NAM 12 km frames (002, 004, 037 404; measured 2026-10-21)
   function getNamFhrs(){
     var arr = [];
-    for(var i = 1; i <= 36; i++) arr.push(i.toString().padStart(3, '0'));
-    for(var i = 39; i <= 84; i += 3) arr.push(i.toString().padStart(3, '0'));
+    for(var i = 3; i <= 84; i += 3) arr.push(i.toString().padStart(3, '0'));
     return arr;
   }
   // HREF: hourly out to 48h
@@ -58162,12 +58186,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     var cycles = [0, 6, 12, 18];
     var bestCycle = '00';
     for(var i = cycles.length - 1; i >= 0; i--){
-      if(utcH >= cycles[i] + 4 || (utcH < cycles[0] + 4 && i === cycles.length - 1)){
+      if(utcH >= cycles[i] + 3 || (utcH < cycles[0] + 3 && i === cycles.length - 1)){
         bestCycle = cycles[i].toString().padStart(2,'0');
         break;
       }
     }
-    if(utcH < 4) bestCycle = '18';
+    if(utcH < 3) bestCycle = '18';
     return bestCycle;
   }
   function getNamHiresCycle(){
@@ -58271,6 +58295,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       }
     }
 
+    allFhrs = allFhrs.filter(function(f){ return _fcastFhrOk(fcastState.model, fcastState.product, parseInt(f, 10)); });
     // Apply range filter to ALL models
     if (fcastState.range === 'today'){
       // REST OF DAY: frames from now through midnight in the viewed location's tz
@@ -59855,7 +59880,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     return base + 'gfs/' + cycle + '/' + area + '/' + gfsProd + '/gfs_' + area + '_' + fhr + '_' + gfsProd + '.gif';
   }
 
-  function getFcastLabel(fhrIdx){
+  function getFcastLabel(fhrIdx, cyc){
     var fhrs = getActiveFhrs();
     
     // LIVE mode: show relative time
@@ -59870,29 +59895,42 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       return 'LIVE RADAR · ~' + minsAgo + ' MIN AGO';
     }
     
+    /* IN THE PLACE'S CLOCK, FROM THE RUN ON SCREEN (audit 2026-10-21, user: "is all this info correct and working?"): the valid
+       time was written in the BROWSER's zone -- 10 PM on a New York laptop for a West Hollywood frame valid at 7 PM there --
+       while REST OF DAY / TOMORROW were cut in the place's (fcastDayBounds); and a frame that fell back to an older run still
+       named the newer one. Now the place's zone (LOCATION.tz), and the run that actually loaded (cyc, from the image) */
     var h = parseInt(fhrs[fhrIdx], 10);
-    var cycleHour = parseInt(fcastState.cycle, 10);
+    var cycleHour = parseInt(cyc != null ? cyc : fcastState.cycle, 10);
     var now = new Date();
     var cycleDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), cycleHour));
     if (cycleDate > now) cycleDate.setUTCDate(cycleDate.getUTCDate() - 1);
+    if (cyc != null && fcastState.cycle != null && parseInt(cyc, 10) !== parseInt(fcastState.cycle, 10)){   /* an older run: same day or the one before */
+      var cur = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), parseInt(fcastState.cycle, 10)));
+      if (cur > now) cur.setUTCDate(cur.getUTCDate() - 1);
+      if (cycleDate > cur) cycleDate.setUTCDate(cycleDate.getUTCDate() - 1);
+    }
     var targetUTC = new Date(cycleDate.getTime() + h * 3600000);
-    var fullDays = ['SUNDAY','MONDAY','TUESDAY','WEDNESDAY','THURSDAY','FRIDAY','SATURDAY'];
-    var dayName = fullDays[targetUTC.getDay()];
-    var mon = targetUTC.getMonth() + 1;
-    var date = targetUTC.getDate();
-    var hr = targetUTC.getHours();
-    var ampm = hr >= 12 ? 'PM' : 'AM';
-    hr = hr % 12; if (hr === 0) hr = 12;
-    var today = new Date();
-    var isToday = targetUTC.toDateString() === today.toDateString();
-    var tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
-    var isTomorrow = targetUTC.toDateString() === tomorrow.toDateString();
-    var prefix = isToday ? 'TODAY' : (isTomorrow ? 'TOMORROW' : dayName);
+    var tz = (typeof LOCATION !== 'undefined' && LOCATION.tz) || undefined;
+    var fmt = function(d, o){ try { return new Intl.DateTimeFormat('en-US', Object.assign({ timeZone: tz }, o)).format(d); } catch(e){ return new Intl.DateTimeFormat('en-US', o).format(d); } };
+    var dkey = function(d){ return fmt(d, { year: 'numeric', month: 'numeric', day: 'numeric' }); };
+    var md = fmt(targetUTC, { month: 'numeric', day: 'numeric' });
+    var hrs = fmt(targetUTC, { hour: 'numeric' }).replace(/\s/g, '');
+    var isToday = dkey(targetUTC) === dkey(now), isTomorrow = dkey(targetUTC) === dkey(new Date(now.getTime() + 86400000));
+    var prefix = isToday ? 'TODAY' : (isTomorrow ? 'TOMORROW' : fmt(targetUTC, { weekday: 'long' }).toUpperCase());
     var pad2 = function(n){ return n < 10 ? '0' + n : '' + n; };
-    return 'VALID ' + prefix + ' ' + mon + '/' + date + ' · ' + hr + ampm + ' · +' + h + 'H FORECAST · ' + pad2(cycleHour) + 'Z RUN';
+    return 'VALID ' + prefix + ' ' + md + ' · ' + hrs + ' · +' + h + 'H FORECAST · ' + pad2(cycleHour) + 'Z RUN';
   }
 
   var lastGoodSrc = ''; // Last successfully loaded frame
+  window._fcastGap = function(on, txt){
+    var c = document.getElementById('fcast-img-container'); if (!c) return;
+    var g = document.getElementById('fcast-gap');
+    if (!on){ if (g) g.style.display = 'none'; return; }
+    if (!g){ g = document.createElement('div'); g.id = 'fcast-gap';
+      g.style.cssText = 'position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:6;max-width:80%;padding:10px 16px;border-radius:10px;background:rgba(8,12,22,.82);color:#fff;font:800 .62rem/1.5 system-ui,sans-serif;letter-spacing:.08em;text-align:center;pointer-events:none;';
+      c.appendChild(g); }
+    g.textContent = txt; g.style.display = '';
+  };
   var radarImgFront = true; // true = fcast-radar-img is front, false = fcast-radar-img-b is front
 
   /* THE CITY's clear-air problem: on a dry day KOKX runs in clear-air mode and
@@ -74539,7 +74577,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
     back.style.objectFit = (fcastState.range === 'live' && radarWideAreas.indexOf(fcastState.area) === -1) ? 'cover' : 'contain';
     back.style.objectPosition = 'center center';
 
-    var retryCount = 0;
+    var retryCount = 0, usedCycle = fcastState.cycle;
     back.onerror = function(){
       // Try previous cycle (up to 2 fallbacks)
       if (fcastState.range !== 'live' && retryCount < 2) {
@@ -74550,13 +74588,16 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         fcastState.cycle = prevCycle;
         var fallbackUrl = buildFcastUrl(fcastState.idx);
         fcastState.cycle = oldCycle; // restore so state isn't permanently changed
+        usedCycle = prevCycle;
         back.src = fallbackUrl;
         return;
       }
-      // All retries exhausted
-      if (lastGoodSrc && back.src !== lastGoodSrc) back.src = lastGoodSrc;
-      else back.style.opacity = '0';
-      if (loader) loader.style.opacity = '0';
+      /* NOTHING TO SHOW IS SAID (audit 2026-10-21): this put the LAST picture that loaded back up -- another model's, product's
+         or area's (the user's recording: NAM selected, HREF's precip on screen, the label ticking on) -- so a gap read as a
+         wrong map. Now the frame is cleared and a notice says NOAA has not published it */
+      back.style.opacity = '0'; front.style.opacity = '0';
+      if (window._fcastGap) window._fcastGap(true, fcastState.range === 'live' ? 'THIS RADAR FRAME DID NOT LOAD' : 'NOAA HAS NOT PUBLISHED THIS FRAME (' + String(fcastState.model).toUpperCase().replace('_HIRES', ' 3KM') + ', THIS AREA, +' + parseInt((getActiveFhrs()[fcastState.idx] || '0'), 10) + 'H)');
+      if (window._fcastHideLoader) window._fcastHideLoader(true); else if (loader) loader.style.opacity = '0';
     };
     // Timeout fallback — dismiss loader if image takes too long
     setTimeout(function(){
@@ -74573,6 +74614,8 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       setTimeout(function(){ front.style.opacity = '0'; }, 100);   // matches the 100ms fade above
       radarImgFront = !radarImgFront;
       lastGoodSrc = back.src;
+      if (window._fcastGap) window._fcastGap(false);
+      if (fcastState.range !== 'live' && label && back.src.indexOf('mag.ncep.noaa.gov') >= 0) label.textContent = getFcastLabel(fcastState.idx, usedCycle);   /* the run that loaded */
       /* the basemap may still be stitching; _fcastHideLoader holds the wall
          up until it lands, and the 10s timeout below forces it either way */
       if (window._fcastHideLoader) window._fcastHideLoader();
@@ -75590,14 +75633,15 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
     var validByModel = {
       gfs:       _base.concat(_gfsx),
       hrrr:      _base.concat(_hires),
-      nam_hires: _base.concat(_hires),
+      nam_hires: _base.concat(_hires).filter(function(p){ return ['snow_accum','max_ref','lightning','250wind'].indexOf(p) < 0; }),   /* MAG has none of these for NAM 3 km (measured) */
       nam:       ['precip_type','precip_total','snow_accum','temperature','wind','humidity','cape','precip_6hr','low_thick','mid_thick','wnd_temp','gfs_850temp','gfs_850vort','gfs_500wind','gfs_500rh','jet_stream','gfs_fourpanel','850temp','500vort','250wind'],
       href:      ['precip_total','snow_accum','precip_1hr'],
       nbm:       ['precip_total','precip_1hr','precip_6hr'],
       gefs:      ['precip_total','precip_6hr','500vort']
     };
-    var _valid = validByModel[model] || _base;
+    var _valid = (validByModel[model] || _base).filter(function(p){ return _fcastAreaGap(model, fcastState.area).indexOf(p) < 0; });
     Object.keys(prodTabMap).forEach(function(id){ setTabAvailable(id, _valid.indexOf(prodTabMap[id]) !== -1); });
+    if (_valid.indexOf(fcastState.product) < 0 && _valid.length && ['500mb','10mb'].indexOf(fcastState.product) < 0) fcastState.product = _valid[0];
 
     // Section dividers/labels are only meaningful for the hires (HRRR/NAM-HIRES) set.
     var _hiresGroup = (model === 'hrrr' || model === 'nam_hires');
