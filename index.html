@@ -105826,7 +105826,8 @@ function closeAlertModal(){
        Echo Tops", how DEEP the convection is (thousands of feet), which separates a line of showers from a line of supercells.
        Both are national mosaics, so they read from the conus workspace at every zoom, never a single station. */
     R.GRPS = [['RAIN', [['bref', 'REFLECTIVITY'], ['cref', 'COMPOSITE']]], ['STORMS', [['etop', 'ECHO TOPS'], ['bvel', 'VELOCITY']]],
-      ['TYPE', [['ptyp', 'PRECIP TYPE'], ['bdhc', 'HYDRO'], ['cc', 'CC']]], ['TOTALS', [['boha', '1-HR RAIN'], ['bdsa', 'STORM TOTAL']]]];
+      ['TYPE', [['ptyp', 'PRECIP TYPE'], ['bdhc', 'HYDRO'], ['cc', 'CC']]], ['TOTALS', [['boha', '1-HR RAIN'], ['bdsa', 'STORM TOTAL']]],
+      ['BIRDS', [['mig', 'MIGRATION']]]];
     R.MOS = { cref: 'conus_cref_qcd', etop: 'conus_neet_v18', ptyp: 'conus_pcpn_typ' };
     /* the flag's seven classes, colors read off the service's own GetLegendGraphic (WS S C H CS ST CT) */
     R.PT = [['4,80,164', 'WARM STRATIFORM RAIN'], ['110,255,255', 'COOL STRATIFORM RAIN'], ['255,50,50', 'CONVECTIVE RAIN'], ['0,249,0', 'TROPICAL STRATIFORM RAIN'],
@@ -105856,11 +105857,66 @@ function closeAlertModal(){
       if (R.prod === 'ptyp') return R.PT.map(function(c){ return chip(c[0], c[1]); }).join('') + '<span style="white-space:nowrap;opacity:.85;">MRMS SURFACE PRECIP FLAG</span>';
       if (R.prod === 'etop') return '<span style="white-space:nowrap;opacity:.85;">ECHO TOPS ON THE MAP\u2019S EDGES, THOUSANDS OF FEET \u00b7 OVER ~35: DEEP STORMS \u00b7 OVER ~50: SEVERE-LEVEL UPDRAFTS</span>';
       if (R.prod === 'boha' || R.prod === 'bdsa') return '';   /* the scale runs up the map's edges (LEG) */
+      if (R.prod === 'mig'){ var o2 = R.ov[R.i] || {}, hrL = (function(){ try { return +new Date().toLocaleString('en-US', { timeZone: (window.LOCATION || {}).tz, hour: 'numeric', hour12: false }); } catch(e){ return 12; } })();
+        var night = hrL >= 19 || hrL < 6;
+        return chip('255,214,150', 'LIGHT') + chip('255,170,70', 'MODERATE') + chip('255,128,20', 'HEAVY FLIGHT')
+          + '<span style="white-space:nowrap;opacity:.85;">' + (night ? 'AFTER DUSK IN CLEAR AIR THESE ECHOES ARE MOSTLY MIGRATING BIRDS' : 'BY DAY MOSTLY INSECTS AND DUST \u00b7 THE BIRDS LIFT OFF ABOUT AN HOUR AFTER SUNSET')
+          + ' \u00b7 RINGS AROUND EACH RADAR, THICKEST NEAR IT' + (o2.lit != null ? ' \u00b7 ECHO OVER ' + Math.max(1, Math.round(o2.lit * 100)) + '% OF THE VIEW' : '') + '</span>'; }
       if (R.prod === 'cc') return 'NEAR 1: PURE RAIN OR SNOW \u00b7 LOWER: HAIL, THE MELTING LAYER, LOFTED TORNADO DEBRIS \u00b7 ONLY WHERE THE ECHO IS 20 DBZ OR MORE' + (R.ccErr ? ' \u00b7 <span style="color:#ffd7a0;">THIS STATION\u2019S CC SCAN DID NOT LOAD</span>' : '');
       return ''; };
     R.l3 = function(){ var p = function(src){ return new Promise(function(res, rej){ if (document.querySelector('script[src="' + src + '"]')) return res();
         var sc = document.createElement('script'); sc.src = src; sc.onload = function(){ res(); }; sc.onerror = rej; document.head.appendChild(sc); }); };
       return p('/_radar/bunzip.js').then(function(){ return p('/_radar/level3.js'); }); };
+    /* MIGRATION ON RADAR (user 2026-10-22: "theres been a large migration of birds lately going south over the atlantic flyway,
+       do we have that tracked"). After dusk in clear air the radars fill with rings of echo around each site: birds aloft,
+       the same returns BirdCast counts. NOAA's MRMS mosaic (REFLECTIVITY above) is quality-controlled and REMOVES them; Iowa
+       State's national N0Q mosaic does not. So each frame is the unfiltered mosaic with every pixel the QC'd mosaic calls
+       rain taken out (grown 2 px so no rain fringe survives): what is left is biological -- birds at night, insects and dust
+       by day -- drawn in amber by strength (the N0Q ramp: dark blue ~0-8 dBZ light, light blue ~8-15 moderate, cyan-green
+       15+ heavy). Checked 2026-10-22 02:20Z: rings over the Southeast and Appalachians, none in the QC'd mosaic. Both
+       sources are CORS-open; IEM's time-enabled service gives a 5-minute frame for the loop. */
+    R.qcdTimes = function(){
+      if (R.qcdT && Date.now() - R.qcdT.at < 120000) return Promise.resolve(R.qcdT.t);
+      return fetch('https://opengeo.ncep.noaa.gov/geoserver/conus/ows?service=WMS&request=GetCapabilities').then(function(r){ return r.ok ? r.text() : ''; }).then(function(x){
+        var li = x.indexOf('<Name>conus_bref_qcd</Name>'), t = [];
+        if (li >= 0){ var di = x.indexOf('<Dimension name="time"', li), de = x.indexOf('</Dimension>', di);
+          if (di >= 0 && de >= 0) t = x.slice(x.indexOf('>', di) + 1, de).split(',').map(function(v){ return Date.parse(v.trim()); }).filter(isFinite).sort(function(a, b){ return a - b; }); }
+        R.qcdT = { at: Date.now(), t: t }; return t; }).catch(function(){ return []; });
+    };
+    R.migImg = function(u){ return new Promise(function(res, rej){ var im = new Image(); im.crossOrigin = 'anonymous'; im.onload = function(){ res(im); }; im.onerror = rej; im.src = u; }); };
+    R.migPaint = function(a, b, W, H){
+      var c = document.createElement('canvas'); c.width = W; c.height = H; var g = c.getContext('2d');
+      g.drawImage(a, 0, 0, W, H); var A = g.getImageData(0, 0, W, H), d = A.data, n = W * H, mask = new Uint8Array(n), m2 = new Uint8Array(n);
+      if (b){ g.clearRect(0, 0, W, H); g.drawImage(b, 0, 0, W, H); var B = g.getImageData(0, 0, W, H).data;
+        for (var i = 0; i < n; i++) if (B[i * 4 + 3] > 24) mask[i] = 1;
+        for (var y = 0; y < H; y++) for (var x = 0; x < W; x++){ var o = y * W + x, v = 0; for (var k = -2; k <= 2 && !v; k++){ var xx = x + k; if (xx >= 0 && xx < W && mask[o + k]) v = 1; } m2[o] = v; }
+        for (var y2 = 0; y2 < H; y2++) for (var x2 = 0; x2 < W; x2++){ var o2 = y2 * W + x2, v2 = 0; for (var k2 = -2; k2 <= 2 && !v2; k2++){ var yy = y2 + k2; if (yy >= 0 && yy < H && m2[o2 + k2 * W]) v2 = 1; } mask[o2] = v2; } }
+      var lit = 0;
+      for (var p = 0; p < n; p++){ var j = p * 4; if (!d[j + 3] || mask[p]){ d[j + 3] = 0; continue; }
+        var r = d[j], gg = d[j + 1], bb = d[j + 2], mx = Math.max(r, gg, bb), mn = Math.min(r, gg, bb), h = 0;
+        if (mx !== mn){ h = mx === r ? ((gg - bb) / (mx - mn)) % 6 : mx === gg ? (bb - r) / (mx - mn) + 2 : (r - gg) / (mx - mn) + 4; h *= 60; if (h < 0) h += 360; }
+        var lev = h > 205 ? 0 : h > 185 ? 1 : 2;
+        d[j] = 255; d[j + 1] = [214, 170, 128][lev]; d[j + 2] = [150, 70, 20][lev]; d[j + 3] = [120, 185, 235][lev]; lit++; }
+      g.putImageData(A, 0, 0);
+      return { url: c.toDataURL('image/png'), lit: lit / n };
+    };
+    R.migLoad = function(bb){
+      var sz = M.getSize(), fx = (bb.getEast() - bb.getWest()) / Math.max(1e-9, M.getBounds().getEast() - M.getBounds().getWest());
+      var k = Math.min(1, 1100 / Math.max(sz.x * fx, sz.y * fx)), W = Math.round(sz.x * fx * k), H = Math.round(sz.y * fx * k);
+      var sw = L.CRS.EPSG3857.project(bb.getSouthWest()), ne = L.CRS.EPSG3857.project(bb.getNorthEast());
+      var box = [sw.x, sw.y, ne.x, ne.y].map(function(v){ return v.toFixed(0); }).join(','), iso = function(t){ return new Date(t).toISOString().replace('.000', ''); };
+      var step = 300000, tN = Math.floor((Date.now() - 8 * 60000) / step) * step, ts = [];
+      for (var q = 6; q >= 0; q--) ts.push(tN - q * 600000);
+      return R.qcdTimes().then(function(qt){
+        return Promise.all(ts.map(function(t){
+          var near = null; qt.forEach(function(v){ if (Math.abs(v - t) <= 240000 && (near === null || Math.abs(v - t) < Math.abs(near - t))) near = v; });
+          var ui = 'https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi?service=WMS&version=1.1.1&request=GetMap&layers=nexrad-n0q-wmst&styles=&format=image/png&transparent=true&srs=EPSG:3857&bbox=' + box + '&width=' + W + '&height=' + H + '&time=' + iso(t);
+          var uq = 'https://opengeo.ncep.noaa.gov/geoserver/conus/ows?service=WMS&version=1.1.1&request=GetMap&layers=conus_bref_qcd&styles=&format=image/png&transparent=true&srs=EPSG:3857&bbox=' + box + '&width=' + W + '&height=' + H + (near ? '&time=' + iso(near) : '');
+          return Promise.all([R.migImg(ui), R.migImg(uq).catch(function(){ return null; })])
+            .then(function(two){ var o = R.migPaint(two[0], two[1], W, H); return { t: t, url: o.url, lit: o.lit, rainOk: !!two[1] }; }).catch(function(){ return null; });
+        })).then(function(L2){ return L2.filter(Boolean); });
+      });
+    };
     R.ccLoad = function(bb){
       var site = R.sid.slice(1).toUpperCase(), sz = M.getSize(), k = Math.min(1, 1400 / Math.max(sz.x, sz.y)), W = Math.round(sz.x * k), H = Math.round(sz.y * k);
       var nw = L.CRS.EPSG3857.project(bb.getNorthWest()), se = L.CRS.EPSG3857.project(bb.getSouthEast()), Rm = 6378137, D = Math.PI / 180;
@@ -106011,7 +106067,7 @@ function closeAlertModal(){
       /* a forecast frame says so, in amber, with the motion it was moved along -- never a clock time it was not scanned at */
       var when = o.model ? '<span style="color:#ffd27a;">' + esc(w) + ' · ' + o.model + ' FORECAST (' + ('0' + new Date(o.run).getUTCHours()).slice(-2) + 'Z RUN)</span>'
         : o.fc ? '<span style="color:#ffd27a;">+' + o.fc + ' MIN FORECAST' + (o.src ? ' (' + esc(o.src) + ' MOTION)' : '') + '</span>' : esc(w) + ' SCAN';
-      var head = (o.model ? 'NOAA HRRR MODEL, SIMULATED RADAR' : R.prod === 'cref' ? 'MRMS COMPOSITE MOSAIC (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)' : R.prod === 'etop' ? 'MRMS ECHO TOPS (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)'
+      var head = (R.prod === 'mig' ? 'BIRDS ON RADAR \u00b7 IOWA STATE UNFILTERED MOSAIC, RAIN REMOVED' : o.model ? 'NOAA HRRR MODEL, SIMULATED RADAR' : R.prod === 'cref' ? 'MRMS COMPOSITE MOSAIC (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)' : R.prod === 'etop' ? 'MRMS ECHO TOPS (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)'
           : R.prod === 'ptyp' ? 'MRMS PRECIP TYPE (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)'
           : R.prod === 'bref' && !R.hi() ? 'MRMS RADAR MOSAIC (' + esc(R.sid.toUpperCase()) + ' AND NEIGHBORS)' : esc(R.sid.toUpperCase()) + (R.hi() ? ' SUPER-RES' : '') + (nm ? ' · ' + esc(nm) : '')) + ' · ' + when
         + (FUEL.t && /^(bref|cref|etop)$/.test(R.prod) ? ' · <span class="lc-fuel">' + esc(FUEL.t) + '</span>' : '');   /* THE CITY's fuel line (FUEL, below) */
@@ -106043,6 +106099,24 @@ function closeAlertModal(){
       clearTimeout(R.deb);
       R.deb = setTimeout(function(){
         if (!M || VIEW !== 'radar') return;
+        if (R.prod === 'mig'){
+          /* the loop is kept while the view stays inside its box at the same zoom, for 5 minutes (one new mosaic) */
+          if (now !== true && R.migBB && R.ov.length && R.migZ === M.getZoom() && R.migBB.contains(M.getBounds()) && Date.now() - R.migAt < 300000){ ARC.draw(); return; }
+          R.clear(); var bbM = M.getBounds().pad(0.25), genM = R.migGen = (R.migGen || 0) + 1; R.migBB = bbM; R.migZ = M.getZoom(); R.migAt = Date.now();
+          strip.innerHTML = '<span class="lc-rhd">BIRDS ON RADAR \u00b7 LOADING THE LAST HOUR\u2026</span>' + (R.sPills || ''); R.sHd = null;
+          R.migLoad(bbM).then(function(fr){
+            if (genM !== R.migGen || R.prod !== 'mig' || VIEW !== 'radar') return;
+            R.ov.forEach(function(q){ M.removeLayer(q.l); });
+            R.ov = fr.map(function(f){ return { l: L.imageOverlay(f.url, bbM, { opacity: 0, interactive: false, zIndex: 3 }).addTo(M), t: f.t, op: .95, lit: f.lit }; });
+            if (!R.ov.length){ R.migAt = 0; strip.innerHTML = 'THE UNFILTERED MOSAIC DID NOT ANSWER \u00b7 TRY AGAIN IN A MINUTE'; return; }
+            R.nObs = R.ov.length; R.bb = bbM; R.i = R.ov.length - 1; R.ov[R.i].l.setOpacity(.95); R.label();
+            var hold = 0;
+            R.timer = setInterval(function(){ if (document.hidden || !paneOn()) return;
+              if (R.i === R.nObs - 1 && hold++ < 3) return; hold = 0;
+              R.ov[R.i].l.setOpacity(0); R.i = (R.i + 1) % R.ov.length; R.ov[R.i].l.setOpacity(R.ov[R.i].op || .95); R.label(); }, 650);
+          });
+          return;
+        }
         if (R.prod === 'cc'){
           R.clear(); var bb0 = M.getBounds(), gen = R.ccGen = (R.ccGen || 0) + 1;
           var once = function(){ R.ccLoad(bb0).then(function(o){ if (gen !== R.ccGen || R.prod !== 'cc' || VIEW !== 'radar') return; R.ccErr = false;
@@ -107038,6 +107112,12 @@ function closeAlertModal(){
           im.src = host + fr.path + '/' + ts + '/' + z + '/' + xy[0] + '/' + xy[1] + '/2/0_0.png'; });   /* 0_0: raw palette, THE CITY's reading form */
       }, function(){});
     };
+    /* the birds widget's MIGRATION tab opens this (2026-10-22) */
+    window._bvMigOpen = function(){
+      try { var sb = document.querySelector('#cw-secbar [data-sec="place"]'); if (sb) sb.click(); } catch(e){}
+      setTimeout(function(){ R.prod = 'mig'; var b = pane.querySelector('#lc-tabs button[data-v="radar"]');
+        if (VIEW !== 'radar' && b) b.click(); else R.rebuild(true);
+        try { mapEl.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch(e){} }, 300); };
     ALR.flag = function(){ var b = pane.querySelector('#lc-tabs button[data-v="radar"]'); if (b) b.classList.toggle('cw-tab-alert', !!ALR.hit && VIEW !== 'radar'); };
     /* one light timer: the flag follows the view at once, the readings every minute, only while LOCAL is on screen */
     setInterval(function(){ if (document.hidden || !paneOn()) return; ALR.flag(); if (Date.now() - CAP.tickAt > 6e4) CAP.tick(); else { if (OV.ncAt > CAP.hoodAt) CAP.hoodRead(); CAP.paint(); } }, 2000);   /* a fresh frame reading reaches the words at once */
@@ -118135,10 +118215,19 @@ function closeAlertModal(){
       + '<div class="bw-flight-why">' + esc(why) + ' ' + esc(sp) + '</div>';
   }
   /* BirdCast's own radar count of tonight's migrants, for the viewer's county (its numbers sit behind a private API: link, not fetch) */
+  /* the map builds lazily: open its section, then hand over once its radar code exists */
+  window._bvMigGo = function(){
+    if (window._bvMigOpen) return window._bvMigOpen();
+    try { var sb = document.querySelector('#cw-secbar [data-sec="place"]'); if (sb) sb.click(); var m = document.getElementById('lc-map'); if (m) m.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch(e){}
+    var n = 0, iv = setInterval(function(){ if (window._bvMigOpen){ clearInterval(iv); window._bvMigOpen(); } else if (++n > 60) clearInterval(iv); }, 250);
+  };
   function birdcastLink(){
     var rc = window._bvCountyRegion, u = 'https://dashboard.birdcast.org/' + (rc ? 'region/' + rc : '');
     return '<div class="bw-flight-why" style="margin-top:8px;"><a href="' + u + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="color:#1a8a4a;font-weight:800;text-decoration:none;letter-spacing:.04em;">'
-      + 'SEE TONIGHT\u2019S LIVE RADAR COUNT' + (rc ? ' FOR YOUR COUNTY' : '') + ' ON BIRDCAST \u2197</a></div>';
+      + 'SEE TONIGHT\u2019S LIVE RADAR COUNT' + (rc ? ' FOR YOUR COUNTY' : '') + ' ON BIRDCAST \u2197</a></div>'
+      /* the flyway itself, on our own radar (2026-10-22) */
+      + '<div class="bw-flight-why" style="margin-top:4px;"><a href="#" onclick="event.preventDefault();event.stopPropagation();window._bvMigGo();" style="color:#1a8a4a;font-weight:800;text-decoration:none;letter-spacing:.04em;">'
+        + 'WATCH THE FLYWAY: MIGRATION ON THE RADAR MAP \u2192</a></div>';
   }
 
   // WHEN each family actually crosses at night, by month. Family alone was
