@@ -45,6 +45,12 @@ def get(url, data=None, timeout=120, tries=3):
             req = urllib.request.Request(url, data=data, headers=UA)
             return urllib.request.urlopen(req, timeout=timeout).read()
         except Exception as e:
+            # NRAO REFUSES DATA CENTRES (found 2026-10-23: 403 to GitHub's runners and to our Cloudflare proxy, 200 from a home
+            # line -- its tab had silently frozen). Its pages come through r.jina.ai, whose X-Return-Format: html passes the
+            # source bytes (the RSS XML) through unchanged
+            if 'public.nrao.edu' in url and getattr(e, 'code', None) == 403 and data is None and not re.search(r'\.(?:jpe?g|png|webp|gif)(?:\?|$)', url, re.I):
+                req = urllib.request.Request('https://r.jina.ai/' + url, headers=dict(UA, **{'X-Return-Format': 'html'}))
+                return urllib.request.urlopen(req, timeout=timeout).read()
             if i == tries - 1: raise
             time.sleep(10 * (i + 1))
 
@@ -506,6 +512,11 @@ def _is_sky(src, it):
 _HASH = {}
 
 
+def _fam(th):
+    m = re.search(r'/archives/images/[a-z0-9]+/([a-z]+\d+)[a-z]?\.jpg', th or '')
+    return m.group(1) if m else None
+
+
 def _same_picture(th, kept):
     h = _HASH.get(th)
     return h is not None and any(_HASH.get(k) is not None and bin(h ^ _HASH[k]).count('1') <= 6 for k in kept)
@@ -637,6 +648,10 @@ def bake_media(prev_media=None):
                     th = _thumb(src, it['img'])
                     if not th or th in seen or it['title'] in seen or not _is_sky(src, it) or not _looks_like_sky(th): continue
                     if _same_picture(th, [p['thumb'] for p in photos]): continue
+                    # ONE PICTURE PER RELEASE (user 2026-10-23: "review latest and greatest", Webb's strip showed potm2610a and
+                    # potm2610b -- a crop and the wide view of one nebula -- side by side, and a deep field with and without
+                    # its inset): ESA/Webb, ESA/Hubble and NOIRLab name a release's images <id>a, <id>b...; the first stands
+                    if _fam(th) and any(_fam(q['thumb']) == _fam(th) for q in photos): continue
                     seen.add(th); seen.add(it['title'])      # ESA posts a release's image and its video under one title
                     full = th.replace('?w=640', '?w=2400') if th.endswith('?w=640') else _full_for(th)
                     # A STORY'S LEAD MEDIA CAN BE A MOVIE (2026-10-05: Parker's WISPR footage of comet 3I/ATLAS came through as
