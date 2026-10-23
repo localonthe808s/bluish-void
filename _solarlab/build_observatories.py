@@ -498,7 +498,7 @@ def is_artwork(it):
 
 # CHARTS ARE NOT THE SKY (user 2026-10-23: "james webb is showing two graphs"): ESA's release pages type each picture -- Chart
 # (a spectrum, a plot), Artwork, Simulation -- and only what a telescope took belongs in the strip. Titles catch the rest.
-CHART = re.compile(r"\bspectr(?:um|a)\b|\bcharts?\b|\bgraphs?\b|\bplots?\b|\bdiagram|infographic|across time|\btimeline\b|light curve", re.I)
+CHART = re.compile(r"\bposters?\b|\bspectr(?:um|a)\b|\bcharts?\b|\bgraphs?\b|\bplots?\b|\bdiagram|infographic|across time|\btimeline\b|light curve", re.I)
 _ESA_TYPE = {}
 
 
@@ -513,6 +513,24 @@ def esa_type(link):
         except Exception as e:
             print('  esa type failed', link[-40:], e); _ESA_TYPE[m.group(0)] = ''
     return _ESA_TYPE[m.group(0)]
+
+
+# A NASA STORY'S FIGURE CAPTION says what its picture is ("This animation shows ... iron-25's spectral line", XRISM in Chandra's
+# strip, 2026-10-23): the text right after the media file's last mention on the article page
+CHART_CAP = re.compile(r"spectral line|\bspectr(?:um|a)\b|\bgraphs?\b|\bcharts?\b|\bplot(?:ted|s)?\b|\bdiagram|infographic|\billustration\b|artist.s concept", re.I)
+_CAP = {}
+
+
+def nasa_caption(it, th):
+    link = it.get('link', ''); fn = re.sub(r'\?.*$', '', th or '').rsplit('/', 1)[-1].rsplit('.', 1)[0]
+    if 'science.nasa.gov' not in link or len(fn) < 6: return ''
+    if (link, fn) not in _CAP:
+        try:
+            t = get(link, timeout=40, tries=2).decode('utf-8', 'replace'); i = t.rfind(fn)
+            _CAP[(link, fn)] = re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', ' ', t[i:i + 1500]))).replace('To view this video please enable JavaScript, and consider upgrading to a web browser that supports HTML5 video', '')[:500] if i >= 0 else ''
+        except Exception as e:
+            print('  caption failed', link[-40:], e); _CAP[(link, fn)] = ''
+    return _CAP[(link, fn)]
 
 
 def _is_sky(src, it):
@@ -543,7 +561,7 @@ def _same_picture(th, kept):
     return h is not None and any(_HASH.get(k) is not None and bin(h ^ _HASH[k]).count('1') <= 6 for k in kept)
 
 
-def _looks_like_sky(th):
+def _looks_like_sky(th, maps_ok=False):
     """The picture itself: a text slide or banner is not the sky. Drops images wider than 3:1
     and near-white, colourless ones (measured on the "Hubble vs. Roman" quote card, 2026-09-24)."""
     try:
@@ -560,6 +578,11 @@ def _looks_like_sky(th):
         mean = sum(st.mean) / 3
         spread = sum(st.stddev) / 3
         if mean > 200 and spread < 45: return False
+        # A FIGURE, NOT THE SKY (user 2026-10-23: "check hubble and the other telescopes for graphs"): the sky is never white,
+        # a paper figure sits on white (Juno's Io maps with axes 48%/19%, SPHEREx's comet panels 44%, the Charon-light plate
+        # 53%; every sky picture in the strips measured 0-1%). NISAR's radar maps are its pictures and keep their legends
+        wf = sum(1 for r, g_, b in im.getdata() if r > 235 and g_ > 235 and b > 235) / (im.size[0] * im.size[1])
+        if wf > 0.12 and not maps_ok: return False
         # LOOKS BROKEN (user 2026-10-03: "some look incomplete"): a panel padded with a big flat mid-grey (Juno JIRAM's
         # half-grey frame: 48% one value). A near-empty dark frame (Juno's tiny Thebe) is NOT tested: by brightness it is
         # indistinguishable from Rubin's faint deep field (0.16% vs 0.09% bright pixels), so a rule would drop real data
@@ -667,7 +690,8 @@ def bake_media(prev_media=None):
                     if key == 'nrao' and not re.search(r'NRAO|ALMA|\bVLA\b|VLBA|Green Bank|GBT', it.get('credit', '')): continue
                     if key == 'nisar' and re.search(r'\bflights?\b|aircraft|C-20A|airborne|UAVSAR', it['title'] + ' ' + it.get('alt', ''), re.I): continue
                     th = _thumb(src, it['img'])
-                    if not th or th in seen or it['title'] in seen or not _is_sky(src, it) or not _looks_like_sky(th): continue
+                    if not th or th in seen or it['title'] in seen or not _is_sky(src, it) or not _looks_like_sky(th, key == 'nisar'): continue
+                    if src == 'nasa' and CHART_CAP.search(nasa_caption(it, th)): continue
                     if _same_picture(th, [p['thumb'] for p in photos]): continue
                     # ONE PICTURE PER RELEASE (user 2026-10-23: "review latest and greatest", Webb's strip showed potm2610a and
                     # potm2610b -- a crop and the wide view of one nebula -- side by side, and a deep field with and without
