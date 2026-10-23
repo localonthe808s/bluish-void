@@ -453,11 +453,25 @@ def bake(work, force=False):
     man['flow'] = flow
     # THE WHOLE NIGHT (user: "show their overall path"): every frame's birds summed into one soft map, and each radar's
     # average track weighted by how many birds were over it frame by frame
-    acc = None
+    acc = None; tw = None
+    tA, tB = fr[0][0], fr[-1][0]
     for t, nm in fr:
         a = np.asarray(frame_img(os.path.join(work, 'src_' + nm)))[:, :, 3].astype(np.float32) / 255
+        f = (t - tA) / max(1, tB - tA)
         acc = a if acc is None else acc + a
+        tw = a * f if tw is None else tw + a * f
     from scipy.ndimage import gaussian_filter
+    # WHEN THE BIRDS PASSED (2026-10-23, user: "this still looks cheap" of the painted flow): per cell, the bird-weighted mean
+    # moment of the night (0 = the first frame, 1 = the last) in red, how many birds in alpha -- data for the page's stipple,
+    # not a picture
+    accb = gaussian_filter(acc, 2.5); twb = gaussian_filter(tw, 2.5)
+    when = np.where(accb > 1e-4, twb / np.maximum(accb, 1e-4), 0)
+    qq = np.percentile(accb[accb > 0.002], 99) if (accb > 0.002).any() else 1
+    wimg = np.zeros(acc.shape + (4,), np.uint8)
+    wimg[..., 0] = (np.clip(when, 0, 1) * 255).astype(np.uint8)
+    wimg[..., 3] = (np.clip(accb / max(qq, 1e-6), 0, 1) ** 0.7 * 255).astype(np.uint8)
+    wp = os.path.join(work, '%s_%d_%d_when.png' % (start, len(fr), man['at'])); Image.fromarray(wimg).save(wp, 'PNG', optimize=True)
+    wk = 'mig/video/' + os.path.basename(wp); store_put(wp, wk, 'image/png', 'public, max-age=31536000, immutable'); man['when'] = wk
     acc = gaussian_filter(acc / max(1, len(fr)), 3)
     q = np.percentile(acc[acc > 0.002], 99) if (acc > 0.002).any() else 1
     lvl = np.clip(acc / max(q, 1e-6), 0, 1) ** 0.7
@@ -495,7 +509,7 @@ def bake(work, force=False):
     store_put(mp, 'mig/latest.json', 'application/json', 'public, max-age=120')
     # disposal: the previous generation stays (a viewer may have just read the old latest.json); older ones go
     if old:
-        keep = {man['d'], man['m'], man.get('total'), old.get('d'), old.get('m'), old.get('total')}
+        keep = {man['d'], man['m'], man.get('total'), man.get('when'), old.get('d'), old.get('m'), old.get('total'), old.get('when')}
         for nm in store_ls('mig/video/'):
             if 'mig/video/' + nm not in keep: store_rm('mig/video/' + nm)
 
