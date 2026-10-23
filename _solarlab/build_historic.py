@@ -225,6 +225,13 @@ def main():
                 subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-ss', '%.1f' % min(22, (float(b) - float(a)) / 2), '-i', str(OUT / f), '-frames:v', '1', str(png)], check=True)
                 save(png.read_bytes(), OUT / poster, 900); png.unlink()
                 src.unlink()
+                # THE CLIP LIVES ON R2 (user 2026-10-23: "should archive clips be saved on cloudflare" -> yes): uploaded under a
+                # versioned name with a year-long immutable cache (bump VER to replace one), then deleted here; only the
+                # poster stays in the repo
+                VER = 'v1'
+                subprocess.run(['rclone', 'copyto', str(OUT / f), 'r2:bluishvoid-bg/archive/%s-%s.mp4' % (f[:-4], VER), '--s3-no-check-bucket',
+                                '--header-upload', 'Cache-Control: public, max-age=31536000, immutable', '--header-upload', 'Content-Type: video/mp4'], check=True)
+                (OUT / f).unlink(); f = 'https://cdn.bluishvoid.com/archive/%s-%s.mp4' % (f[:-4], VER)
                 entries.append({'file': poster, 'video': f, 'title': title, 'date': date, 'target': 'Earth', 'instrument': inst,
                                 'credit': credit, 'source_url': q['descriptionurl']})
                 print(key, f, title); continue
