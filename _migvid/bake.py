@@ -34,6 +34,13 @@ UA = {'User-Agent': 'bluishvoid.com migration bake'}
 STEP = 600                                   # seconds between frames
 FPS = 10
 LOCAL = '/tmp/migvid'
+# ffmpeg: on the PATH locally; in CI the static binary pip's imageio-ffmpeg ships (Ubuntu's apt mirror crawled at a minute a
+# package on 10-23 and timed the step out twice)
+def ffmpeg_bin():
+    w = shutil.which('ffmpeg')
+    if w: return w
+    import imageio_ffmpeg
+    return imageio_ffmpeg.get_ffmpeg_exe()
 
 R = 6378137.0
 def merc(lon, lat):
@@ -477,7 +484,7 @@ def bake(work, force=False):
     man['mean'] = mean
     for kind, w, crf in (('d', WD, 21), ('m', WD // 2, 23)):
         out = os.path.join(work, '%s_%d_%d_%s.mp4' % (start, len(fr), man['at'], kind))   # a new name every bake: these are cached a year
-        subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-framerate', str(FPS), '-i', os.path.join(fd, '%04d.png'),
+        subprocess.run([ffmpeg_bin(), '-y', '-loglevel', 'error', '-framerate', str(FPS), '-i', os.path.join(fd, '%04d.png'),
                         '-vf', 'scale=%d:-2:flags=area' % w, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', str(crf),
                         '-g', '10', '-movflags', '+faststart', out], check=True)
         key = 'mig/video/' + os.path.basename(out)
