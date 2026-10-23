@@ -64,6 +64,41 @@ SETS = {
          'The Chesapeake Bay region, Sep 25, 1978', '1978-09-25', 'Seasat synthetic aperture radar', 'NASA/JPL (Library of Congress)'),
     ],
 }
+# MORE OF EACH (user 2026-10-23: "are there more photos and videos you can add to TIROS and LANDSAT/SEASAT")
+SETS.update({
+    'tiros_years': [
+        ('video:1960-11-24 Tiros II Weatherman Satellite.webm|0|83',
+         'The newsreel: TIROS II launches and sends its pictures down, November 1960', '1960-11-24', 'Universal-International News', 'Universal Newsreel (CC0)'),
+        ('Hurricane Esther by TIROS 3 (July 1961).jpg',
+         'Hurricane Esther: the first hurricane found from space, Sep 1961', '1961-09-10', 'TIROS-3 TV camera', 'NASA'),
+        ('Tiros 3 and Hurricane Anna (Jul. 17, 1961).jpg',
+         'The cloud mass that became Hurricane Anna, Jul 17, 1961', '1961-07-17', 'TIROS-3 TV camera', 'NOAA'),
+        ('Typhoon Ruth TIROS V 18 aug 1962.jpg',
+         'Typhoon Ruth and its eye, Aug 18, 1962', '1962-08-18', 'TIROS-5 TV camera', 'NOAA'),
+        ('TIROS 5 Eddy patterns (July 1962)-repair.jpg',
+         'Eddies in the clouds downwind of the Canary Islands, 1962', '1962-07', 'TIROS-5 TV camera', 'NOAA Photo Library'),
+        ('Jet stream clouds south of Cape Blanc, north Atlantic coast of Africa photographed by TIROS VIII (2268-162).jpg',
+         'Jet-stream clouds off West Africa', '1964', 'TIROS-8 TV camera', 'NOAA'),
+        ('Cloud streets in Gulf of Mexico after frontal passage TIROS X pass 3039-3038 (2268-306).jpg',
+         'Cloud streets over the Gulf of Mexico after a cold front', '1965', 'TIROS-10 TV camera', 'NOAA'),
+        ('TIROS 5 contrails (May 5, 1963)-repair.jpg',
+         'Jet contrails south of San Diego, May 5, 1963', '1963-05-05', 'TIROS-5 TV camera', 'NOAA Photo Library'),
+    ],
+    'landsat_world': [
+        ('Landsat 1 and 2 (mosaic of 75 false color photos).png',
+         'The Upper Midwest, hand-laid from 75 pictures', '1972-1976', 'Landsat 1 and 2 multispectral scanners', 'USGS EROS'),
+        ('Florida, satellite image mosaic - NASA ERTS-1 imagery-1973 LOC 79695190.jpg',
+         'The first satellite map of all of Florida, 1973', '1973', 'ERTS-1 multispectral scanner', 'USGS (Library of Congress)'),
+        ('Earth Shots – Cairo, Egypt (Landsat 1, 1972-08-31).png',
+         'Cairo and the Nile, Aug 31, 1972', '1972-08-31', 'Landsat 1 multispectral scanner', 'USGS'),
+        ('Earth Shots – Phoenix, Arizona (Landsat 1, 1972-10-16).png',
+         'Phoenix before the sprawl, Oct 16, 1972', '1972-10-16', 'Landsat 1 multispectral scanner', 'USGS'),
+        ('Earth Shots – Bahrain (Landsat 1, 1972-09-03).png',
+         'Bahrain, Sep 3, 1972', '1972-09-03', 'Landsat 1 multispectral scanner', 'USGS'),
+    ],
+})
+SETS['tiros9'].append(('Iceland with sea ice to the north (A), a frontal band to the south (E), and parallel bands of cumuliform clouds to the east (B) - TIROS IX photograph (2282-53).jpg',
+                       'Iceland, its sea ice, a front and cloud streets, Mar 22, 1965', '1965-03-22', 'TIROS-9 TV camera', 'NOAA'))
 HEROES = {'tiros1': 'TIROS-1 satellite.png', 'erts1': 'Landsat-1.jpg', 'tiros9': 'TIROS IX Spac0021-repair.jpg', 'seasat': 'Seasat in orbit.jpg'}
 
 
@@ -94,12 +129,32 @@ def save(raw, path, side):
 
 def main():
     man = json.loads((OUT / 'probes.json').read_text())
-    names = [t for s in SETS.values() for t, *_ in s if not t.startswith('url:')] + list(HEROES.values())
+    names = [t.split('|')[0][6:] if t.startswith('video:') else t for s in SETS.values() for t, *_ in s if not t.startswith('url:')] + list(HEROES.values())
     I = {}
     for k in range(0, len(names), 10): I.update(info(names[k:k + 10]))
     for key, rows in SETS.items():
+        have = man['sets'].get(key) or []
+        if len(have) == len(rows) and all((OUT / e['file']).exists() for e in have):
+            print(key, 'kept'); continue                              # already baked: Commons rate-limits quick bursts
         entries = []
         for n, (t, title, date, inst, credit) in enumerate(rows, 1):
+            if t.startswith('video:'):
+                # A NEWSREEL CLIP: the satellite's part only, silent H.264 (the panel's videos autoplay muted, with no controls)
+                import subprocess
+                name, a, b = t[6:].split('|')
+                q = json.load(urllib.request.urlopen(urllib.request.Request('https://commons.wikimedia.org/w/api.php?action=query&prop=imageinfo&iiprop=url&format=json&titles='
+                              + urllib.parse.quote('File:' + name), headers=UA), timeout=60))['query']['pages'].popitem()[1]['imageinfo'][0]
+                src = OUT / ('_' + key + '.webm'); src.write_bytes(fetch(q['url']))
+                f = '%s_%02d.mp4' % (key, n); poster = '%s_%02d.webp' % (key, n)
+                subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-ss', a, '-to', b, '-i', str(src), '-an', '-vf', 'scale=640:-2', '-c:v', 'libx264', '-crf', '26',
+                                '-pix_fmt', 'yuv420p', '-movflags', '+faststart', str(OUT / f)], check=True)
+                png = OUT / ('_' + key + '.png')
+                subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-ss', '22', '-i', str(OUT / f), '-frames:v', '1', str(png)], check=True)
+                save(png.read_bytes(), OUT / poster, 900); png.unlink()
+                src.unlink()
+                entries.append({'file': poster, 'video': f, 'title': title, 'date': date, 'target': 'Earth', 'instrument': inst,
+                                'credit': credit, 'source_url': q['descriptionurl']})
+                print(key, f, title); continue
             url, page = t[4:].split('|') if t.startswith('url:') else I[t]; f = '%s_%02d.webp' % (key, n)
             save(fetch(url), OUT / f, 900); time.sleep(3)
             entries.append({'file': f, 'title': title, 'date': date, 'target': 'Earth', 'instrument': inst,
@@ -107,6 +162,7 @@ def main():
             print(key, f, title)
         man['sets'][key] = entries
     for key, t in HEROES.items():
+        if (HERE / 'sprites' / (key + '.webp')).exists(): continue
         url, _ = I[t]; save(fetch(url), HERE / 'sprites' / (key + '.webp'), 700); time.sleep(3)
         print('hero', key)
     (OUT / 'probes.json').write_text(json.dumps(man, indent=1, ensure_ascii=False))
