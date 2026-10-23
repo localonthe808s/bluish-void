@@ -44,8 +44,27 @@ SETS = {
         ('Landsat 1 image of Los Angeles (PIA02988).jpg',
          'Los Angeles and its basin', '1972', 'ERTS-1 multispectral scanner', 'NASA/JPL'),
     ],
+    # (user 2026-10-23: "TIROS 9 first full world weather / LANDSAT / ERTS / SEASAT")
+    'tiros9': [
+        ("The World's Weather Spac0024-repair.jpg",
+         'The first complete view of the world\u2019s weather, Feb 13, 1965 \u2014 450 pictures in one', '1965-02-13', 'TIROS-9 TV cameras', 'NOAA Photo Library'),
+        ('Betsy from TIROS IX Spac0008-repair.jpg',
+         'Hurricane Betsy, 1965', '1965', 'TIROS-9 TV camera', 'NOAA Photo Library'),
+        ('TIROS IX Ross Sea Ice Shelf Spac0155-repair.jpg',
+         'Antarctica\u2019s Ross Ice Shelf, orbit 22', '1965-01-23', 'TIROS-9 TV camera', 'NOAA Photo Library'),
+        ('Cut-off North Pacific low as seen on pass 129 by TIROS-9 (2268-496).jpg',
+         'A cut-off low spinning over the North Pacific, pass 129', '1965-02-01', 'TIROS-9 TV camera', 'NOAA'),
+    ],
+    'seasat': [
+        ('url:https://images-assets.nasa.gov/image/PIA18137/PIA18137~medium.jpg|https://images.nasa.gov/details/PIA18137',
+         'The Massachusetts coast: waves and currents on the open sea, Aug 27, 1978', '1978-08-27', 'Seasat synthetic aperture radar', 'NASA/JPL-Caltech'),
+        ('Seasat picture of Los Angeles.jpg',
+         'Los Angeles by radar, 1978', '1978', 'Seasat synthetic aperture radar', 'NASA/JPL'),
+        ('Seasat - (Chesapeake Bay region) LOC 81694423.jpg',
+         'The Chesapeake Bay region, Sep 25, 1978', '1978-09-25', 'Seasat synthetic aperture radar', 'NASA/JPL (Library of Congress)'),
+    ],
 }
-HEROES = {'tiros1': 'TIROS-1 satellite.png', 'erts1': 'Landsat-1.jpg'}
+HEROES = {'tiros1': 'TIROS-1 satellite.png', 'erts1': 'Landsat-1.jpg', 'tiros9': 'TIROS IX Spac0021-repair.jpg', 'seasat': 'Seasat in orbit.jpg'}
 
 
 def info(titles):
@@ -75,13 +94,13 @@ def save(raw, path, side):
 
 def main():
     man = json.loads((OUT / 'probes.json').read_text())
-    names = [t for s in SETS.values() for t, *_ in s] + list(HEROES.values())
+    names = [t for s in SETS.values() for t, *_ in s if not t.startswith('url:')] + list(HEROES.values())
     I = {}
     for k in range(0, len(names), 10): I.update(info(names[k:k + 10]))
     for key, rows in SETS.items():
         entries = []
         for n, (t, title, date, inst, credit) in enumerate(rows, 1):
-            url, page = I[t]; f = '%s_%02d.webp' % (key, n)
+            url, page = t[4:].split('|') if t.startswith('url:') else I[t]; f = '%s_%02d.webp' % (key, n)
             save(fetch(url), OUT / f, 900); time.sleep(3)
             entries.append({'file': f, 'title': title, 'date': date, 'target': 'Earth', 'instrument': inst,
                             'credit': credit + ' · public domain', 'source_url': page})
