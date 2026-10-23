@@ -141,6 +141,34 @@ SETS.update({
 })
 SETS['tiros9'].append(('Iceland with sea ice to the north (A), a frontal band to the south (E), and parallel bands of cumuliform clouds to the east (B) - TIROS IX photograph (2282-53).jpg',
                        'Iceland, its sea ice, a front and cloud streets, Mar 22, 1965', '1965-03-22', 'TIROS-9 TV camera', 'NOAA'))
+# ARCHIVAL FILM (user 2026-10-23: "look for more cool archival footage"): one '<key>_film' set per tab, silent clips cut from
+# Commons films after a contact-sheet pass (_film sets show under THE ARCHIVE as ARCHIVAL FILM)
+SETS.update({
+    'ats3_film': [
+        ('video:The First Color Movie of the Planet Earth.webm|66|140', 'The first color movie of the whole Earth, 1967 \u00b7 the film has faded to red', '1967', 'ATS-3 color spin-scan camera', 'NCAR Archives (CC BY 3.0)'),
+    ],
+    'corona_film': [
+        ('video:CORONA lifecycle video.ogv|10|62', 'Launch, orbit and the film capsule\u2019s release', 'c. 1960s', 'NRO film', 'NRO \u00b7 public domain'),
+        ('video:CORONA lifecycle video.ogv|64|116', 'The capsule\u2019s parachute caught in midair by an Air Force plane', 'c. 1960s', 'NRO film', 'NRO \u00b7 public domain'),
+    ],
+    'lo1_film': [
+        ('video:The Lunar Orbiter- A Spacecraft to Advance Lunar Exploration.webm|270|330', 'How the pictures came home: film developed on board, scanned and radioed to Earth', '1966', 'NASA / Boeing film', 'NASA STI \u00b7 public domain'),
+        ('video:Close Up of the Moon, A Look at Lunar Orbiter (ca. 1966).webm|475|545', 'The Moon as Lunar Orbiter saw it', 'c. 1966', 'NASA film (National Archives)', 'NASA via National Archives \u00b7 public domain'),
+    ],
+    'erts1_film': [
+        ('video:Las Vegas 1972-2021.webm|0|68', 'Las Vegas and Lake Mead, 1972 to 2021', '1972-2021', 'Landsat 1 through 8', 'NASA Goddard \u00b7 public domain'),
+        ('video:Dalhart, Texas 1972-2011.ogv|0|42', 'Dalhart, Texas: square fields turn to irrigation circles, 1972 to 2011', '1972-2011', 'Landsat 1 through 7', 'NASA Goddard \u00b7 public domain'),
+        ('video:48 Years of Alaska\'s Glaciers E4Zc KuXMkA.webm|12|47', 'Alaska\u2019s glaciers since the 1970s', '1972-2019', 'Landsat 1 through 8', 'NASA Goddard \u00b7 public domain'),
+    ],
+    'cassini_film': [
+        ('video:PIA21047 - Saturn Rotation Cassini.ogv|0|41', 'Saturn turning, 44 hours in one stare, April 2016', '2016-04-25', 'Cassini wide-angle camera', 'NASA/JPL-Caltech/SSI \u00b7 public domain'),
+        ('video:PIA14947 Saturn Hurricane Movie.ogv|13|26', 'The hurricane at Saturn\u2019s north pole, Nov 27, 2012', '2012-11-27', 'Cassini narrow-angle camera', 'NASA/JPL-Caltech/SSI/Hampton \u00b7 public domain'),
+        ('video:PIA21441 - Cassini\'s \'Porthole\' Movie of Saturn, Figure 1.ogv|0|21', 'Diving over Saturn\u2019s clouds on the first Grand Finale orbit, Apr 26, 2017', '2017-04-26', 'Cassini wide-angle camera', 'NASA/JPL-Caltech/SSI/Hampton \u00b7 public domain'),
+    ],
+    'juno_film': [
+        ('video:Juno flyby of Jupiter, Perijove 16 (PIA22906).webm|0|54', 'A close pass over Jupiter, Oct 29, 2018', '2018-10-29', 'JunoCam', 'NASA/JPL-Caltech/SwRI/MSSS/Gerald Eichst\u00e4dt \u00b7 public domain'),
+    ],
+})
 HEROES = {'tiros1': 'TIROS-1 satellite.png', 'erts1': 'Landsat-1.jpg', 'tiros9': 'TIROS IX Spac0021-repair.jpg', 'seasat': 'Seasat in orbit.jpg',
           'explorer6': 'Explorer 6 paddles up.jpg', 'ats1': 'Applications Technology Satellite 1 (ATS 1).jpg', 'ats3': 'Applications Technology Satellite 3 (ATS 3).png',
           'lo1': 'Lunar Orbiter Spacecraft Model \u2014 1 8 Scale (50024117333).jpg', 'goes': 'SMS 1 satellite.jpg', 'nimbus7': 'Nimbus rendering.jpg', 'corona': 'Kh-4b corona.jpg'}
@@ -186,14 +214,15 @@ def main():
                 # A NEWSREEL CLIP: the satellite's part only, silent H.264 (the panel's videos autoplay muted, with no controls)
                 import subprocess
                 name, a, b = t[6:].split('|')
-                q = json.load(urllib.request.urlopen(urllib.request.Request('https://commons.wikimedia.org/w/api.php?action=query&prop=imageinfo&iiprop=url&format=json&titles='
-                              + urllib.parse.quote('File:' + name), headers=UA), timeout=60))['query']['pages'].popitem()[1]['imageinfo'][0]
-                src = OUT / ('_' + key + '.webm'); src.write_bytes(fetch(q['url']))
+                q = json.load(urllib.request.urlopen(urllib.request.Request('https://commons.wikimedia.org/w/api.php?action=query&prop=videoinfo&viprop=url|derivatives&format=json&titles='
+                              + urllib.parse.quote('File:' + name), headers=UA), timeout=60))['query']['pages'].popitem()[1]['videoinfo'][0]
+                ds = sorted([d for d in q.get('derivatives', []) if 'webm' in d.get('type', '') and 360 <= d.get('height', 0) <= 720], key=lambda d: d['height'])
+                src = OUT / ('_' + key + '.webm'); src.write_bytes(fetch(ds[-1]['src'] if ds else q['url']))
                 f = '%s_%02d.mp4' % (key, n); poster = '%s_%02d.webp' % (key, n)
                 subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-ss', a, '-to', b, '-i', str(src), '-an', '-vf', 'scale=640:-2', '-c:v', 'libx264', '-crf', '26',
                                 '-pix_fmt', 'yuv420p', '-movflags', '+faststart', str(OUT / f)], check=True)
                 png = OUT / ('_' + key + '.png')
-                subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-ss', '22', '-i', str(OUT / f), '-frames:v', '1', str(png)], check=True)
+                subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-ss', '%.1f' % min(22, (float(b) - float(a)) / 2), '-i', str(OUT / f), '-frames:v', '1', str(png)], check=True)
                 save(png.read_bytes(), OUT / poster, 900); png.unlink()
                 src.unlink()
                 entries.append({'file': poster, 'video': f, 'title': title, 'date': date, 'target': 'Earth', 'instrument': inst,
