@@ -912,6 +912,98 @@ def day_context(daily, fcm, biases, today, low=False):
     return {'past': past, 'next': nxt, 'swing': swing, 'trend': word}
 
 
+# THE STATION'S OWN RUNNING MAXIMUM, TO THE MINUTE (2026-10-22). The ASOS Daily Summary Message (DSMNYC) is
+# the instrument's max so far and the minute it was set, sent at 20:15Z (data through 3 PM standard time) and
+# 21:15Z (4 PM), the final at ~05:15Z, and corrections for older days at ~05:30Z (marked COR, so the date field
+# decides). 10-22: "KNYC DS 1500 22/10 671449/" -- 67 at 2:49 PM standard (3:49 EDT) -- while the hourly reports
+# topped out at 66.0 and the six-hour group carrying 67 came at 7:51 PM. Same sensor as the climate report,
+# which is computed from it, so it is an exact figure with an as-of time, exactly like the preliminary report.
+# Whole degrees F. Iowa State takes it off NOAAPort within seconds (api.weather.gov files it as RTP, not DSM).
+_DSM_RE = re.compile(r'(?m)^(K[A-Z0-9]{3}) DS (?:COR )?(?:(\d{4}) )?(\d{2})/(\d{2}) (M?\d{1,3})(\d{4})/')
+
+
+def dsm_today(cfg, day):
+    """{'max', 'at' (local HH:MM), 'asof' (local hour, 99 = final), 'raw'} for `day`, else None."""
+    pil = 'DSM' + (cfg.get('cli') or '')[3:]
+    icao = cfg.get('icao') or ('K' + cfg['station'])
+    if pil == 'DSM':
+        return None
+    try:
+        raw = get('https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil=%s&limit=8&fmt=text' % pil,
+                  timeout=30).decode('utf-8', 'replace')
+    except Exception as e:
+        print('dsm: %s unavailable (%s)' % (pil, e))
+        return None
+    from zoneinfo import ZoneInfo
+    z = ZoneInfo(cfg.get('tz', 'America/New_York'))
+    # standard-time clock: the message's times are LST all year
+    dst = 1 if datetime.datetime(day.year, day.month, day.day, 12, tzinfo=z).dst() else 0
+    best = None
+    for m in _DSM_RE.finditer(raw):
+        st, hhmm, dd, mm, t, at = m.groups()
+        if st != icao or int(dd) != day.day or int(mm) != day.month:
+            continue
+        v = -int(t[1:]) if t.startswith('M') else int(t)
+        asof = 99.0 if hhmm is None else int(hhmm[:2]) + dst + int(hhmm[2:]) / 60.0
+        h, mi = int(at[:2]) + dst, int(at[2:])
+        row = {'max': float(v), 'at': '%d:%02d' % (h, mi), 'asof': asof, 'raw': m.group(0)}
+        if best is None or asof > best['asof']:
+            best = row
+    return best
+
+
+# NYS MESONET "MANH" (2026-10-22): the nearest fast public sensor to Belvedere Castle -- a rooftop 1.3 km SSE
+# (40.7675, -73.9645), 5-minute air temperature about 5 minutes behind, keyless. NOT the settlement sensor:
+# siting class 5 (rooftop, artificial heat), and over 174 days (05-01..10-21) its daily max ran +0.65 F over
+# the settled high with an SD of 1.09 -- after the bias, 35% exact and 84% within a degree. So it is shown as
+# a "still climbing?" read with a rolling bias, never a floor and never in the pick until a study says so.
+# The bias drifts by season (+0.2 summer, +1.6 October), hence the trailing 30 days. The 5-minute series is
+# on EST, which is the climate day itself. Free for personal use; public use is licensed by NYSM.
+MANH_URL = ('https://api.nysmesonet.org/data/dynserv/coned/5min/nysm/%s/%s'
+            '?stations=MANH&timezone=EST&variables[]=tair@degF')
+
+
+def manh_read(cfg, day, daily):
+    """{'now', 'at', 'max', 'max_at', 'bias', 'n', 'adj', 'rising'} for `day` (New York only), else None."""
+    if not cfg['key'].startswith('ny_'):
+        return None
+    try:
+        raw = get(MANH_URL % ((day - datetime.timedelta(days=35)).isoformat(),
+                              (day + datetime.timedelta(days=1)).isoformat()), timeout=45).decode('utf-8', 'replace')
+    except Exception as e:
+        print('manh: unavailable (%s)' % e)
+        return None
+    from zoneinfo import ZoneInfo
+    z = ZoneInfo(cfg.get('tz', 'America/New_York'))
+    dst = 1 if datetime.datetime(day.year, day.month, day.day, 12, tzinfo=z).dst() else 0
+    per, today = {}, []
+    for line in raw.splitlines()[1:]:
+        f = line.strip().split(',')
+        if len(f) < 3 or not f[2]:
+            continue
+        try:
+            v = float(f[2]); d, hm = f[1].split()[0], f[1].split()[1]
+        except (ValueError, IndexError):
+            continue
+        per[d] = max(per.get(d, -999.0), v)
+        if d == day.isoformat():
+            today.append((hm, v))
+    diffs = [per[d] - daily[d] for d in sorted(per) if d < day.isoformat() and daily.get(d) is not None][-30:]
+    if not today:
+        return None
+    bias = round(statistics.mean(diffs), 2) if len(diffs) >= 10 else None
+    def loc(hm):
+        h, mi = map(int, hm.split(':'))
+        return '%d:%02d' % (h + dst, mi)
+    mx = max(today, key=lambda x: (x[1], x[0]))
+    now_hm, now_v = today[-1]
+    ago = [v for hm, v in today[-4:-2]]   # 15-20 minutes earlier
+    return {'now': now_v, 'at': loc(now_hm), 'max': mx[1], 'max_at': loc(mx[0]),
+            'bias': bias, 'n': len(diffs),
+            'adj': round(mx[1] - bias, 1) if bias is not None else None,
+            'rising': bool(ago) and now_v > max(ago) + 0.2}
+
+
 def twc_portal_history(cfg, day):
     """TWC's hourly series from the keyless settlement portal -> [degF].
 
@@ -3691,7 +3783,10 @@ def trail_row(doc, now):
                 'own5_at': o5.get('at') if isinstance(o5, dict) else None,
                 'twc': T.get('twc_max'), 'twc_now': T.get('twc_now'), 'twc_corr': bool(T.get('twc_corroborated')),
                 'apt': T.get('apt_max'), 'six': T.get('six_max'), 'six_win': T.get('six_window'),
-                'cli': T.get('cli_max'), 'cli_at': T.get('cli_at'), 'cli_final': bool(T.get('cli_final'))},
+                'cli': T.get('cli_max'), 'cli_at': T.get('cli_at'), 'cli_final': bool(T.get('cli_final')),
+                'dsm': (T.get('dsm') or {}).get('max'), 'dsm_asof': (T.get('dsm') or {}).get('asof'),
+                'manh': (T.get('manh') or {}).get('now'), 'manh_max': (T.get('manh') or {}).get('max'),
+                'manh_adj': (T.get('manh') or {}).get('adj')},
         'models': T.get('models') or None,
         'rg': T.get('regime') or None,
         'ladder': [[r.get('label'), r.get('ask'), r.get('ysize'), r.get('nask'), r.get('nsize'), r.get('market'), r.get('ours')]
@@ -3945,6 +4040,14 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     _six = metar_six_max(cfg, today)
     if _six is not None:
         print('%s six-hourly: %.1f degF from the ASOS max groups' % (cfg['key'], _six))
+    _dsm = dsm_today(cfg, today)
+    if _dsm is not None:
+        print('%s daily summary: %.0f at %s (through %s)' % (cfg['key'], _dsm['max'], _dsm['at'],
+              'the day' if _dsm['asof'] >= 99 else '%.0f:00' % _dsm['asof']))
+    _manh = manh_read(cfg, today, daily)
+    if _manh is not None:
+        print('%s MANH: %.1f at %s, max %.1f at %s, bias %s over %d days' % (
+            cfg['key'], _manh['now'], _manh['at'], _manh['max'], _manh['max_at'], _manh['bias'], _manh['n']))
     _own5 = own5_max(cfg, today)
     if _own5 is not None:
         print('%s own 5-minute feed: %.1f degF since 7 AM at %s' % (cfg['key'], _own5, OWN5[cfg['key']]))
@@ -4079,6 +4182,9 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     # earned it on 322 days instead of being assumed.
     if _six is not None:
         live = _six if live is None else max(live, _six)
+    # the station's daily summary: the same class of figure as the climate report (which is computed from it)
+    if _dsm is not None:
+        live = _dsm['max'] if live is None else max(live, _dsm['max'])
     # the settlement sensor's own 5-minute maximum: exact, and fresher than
     # the hourly report by up to 55 minutes
     _live_x = live          # the exact bounds alone: the 5-minute feed is whole-degree Celsius
@@ -4307,7 +4413,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         _crow = _cli.get(tkey) or {}
         _casof = 99.0 if _crow.get('final') else _crow.get('asof')
         _ex = decided_by_exact(now.hour, peak_done,
-                               ((_ctoday, _casof), (_six, SIX_THROUGH.get(cfg['key'])), (iem_today_floor(daily.get(tkey), obh.get(tkey) or {}, h0, rmax), None)),
+                               ((_ctoday, _casof), (_six, SIX_THROUGH.get(cfg['key'])),
+                                (_dsm['max'] if _dsm else None, _dsm['asof'] if _dsm else None), (iem_today_floor(daily.get(tkey), obh.get(tkey) or {}, h0, rmax), None)),
                                rmax, _own5, {h: v for h, v in (obh.get(tkey) or {}).items() if h0 <= h <= now.hour})
         if _ex is not None:
             day_decided = True
@@ -4323,7 +4430,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         _bs = boundary_straddle(cfg, today, obh, tkey, h0, rmax) if cfg['key'].endswith('high') else None
     except Exception as e:
         _bs = None; print('straddle check failed (%s)' % e)
-    if _bs is not None and _ctoday is None:
+    if _bs is not None and _ctoday is None and _dsm is None:
         day_decided = False
         pred = max(pred, _bs['est']); sd = max(sd, _bs['sd'])
         print('%s straddle holds the day open: centre %.1f, spread %.2f' % (cfg['key'], pred, sd))
@@ -4525,7 +4632,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         # boundary: on 10-17 the live call said 62-63 at 92% while the noon lock was written "61 or below, 100%". Until the
         # climate report is in, a lock on a front day is the boundary estimate -- unless the forecast for the rest of the
         # day comes within a degree of it, when the spread widens to let the afternoon win.
-        if _bs is not None and _ctoday is None:
+        if _bs is not None and _ctoday is None and _dsm is None:
             pf_s = point_forecast(fcm, biases, tkey, hour, yday)
             pr_s = max(_bs['est'], pf_s if pf_s is not None else -999.0)
             sd_s = _bs['sd'] if (pf_s is None or pf_s < _bs['est'] - 1.0) else max(_bs['sd'], 1.2)
@@ -5239,6 +5346,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             # and it is not small: Chicago ran +4.0 the day this was wired in,
             # New York +2.0 on the afternoon that made the case for it.
             'six_max': _six, 'six_window': SIX_WINDOW.get(cfg['key']),
+            'dsm': _dsm, 'manh': _manh,
             'own5_max': _own5, 'own5_station': OWN5.get(cfg['key']),
             'apt_max': _aptmax, 'twc_corroborated': _twc_corr,
             'model_resid': model_resid,
