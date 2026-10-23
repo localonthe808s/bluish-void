@@ -1079,6 +1079,9 @@ def twc_today(cfg, day):
     out = {}
     if use is not None:
         out['max'] = use
+        # where it came from: the keyed API's max7/history, or (since that went 401 on 2026-10-21) the keyless
+        # portal's hourly record -- the panel words the two differently
+        out['src'] = 'portal' if (not cur and m7 is None) else 'api'
     if now is not None:
         out['now'] = now
     if hmax is not None:
@@ -5363,7 +5366,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             'cli_max': (_cli.get(tkey) or {}).get('max'),
             'cli_final': (_cli.get(tkey) or {}).get('final'),
             'cli_at': (_cli.get(tkey) or {}).get('at'),
-            'twc_max': _twc.get('max'), 'twc_now': _twc.get('now'),
+            'twc_max': _twc.get('max'), 'twc_now': _twc.get('now'), 'twc_src': _twc.get('src'),
             'twc_fc': _twcf, 'nws_fc': _nwsf,
             'twc_gap': (round(_twc['max'] - rmax, 1)
                         if _twc.get('max') is not None and rmax is not None
