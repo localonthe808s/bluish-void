@@ -399,6 +399,39 @@ def nights(now):
     return fin, (fin[0] + 86400, fin[1] + 86400)
 
 
+def deflicker(work, fr):
+    """ONE-FRAME ECHOES OUT (2026-10-23, user: "is this playing properly?"). Birds build and fade over hours; an echo that is
+    in one frame with nothing near it in the frame before or after is a radar glitch -- 10-22's 04:50 UTC frame carried a
+    bright wedge of one sweep over the sea south of Nova Scotia, outside the MRMS rain mask, that flashed once a loop.
+    Each blob of a frame is weighed against its neighbours no more than 20 minutes away: the echo they hold around it (each
+    pixel the strongest neighbour echo within 8 px) must come to a quarter of the blob's own, or the blob goes. A plain
+    touch test was not enough -- the 04:40 frame had 34 faint speckles where the wedge would be. A frame with no such
+    neighbour (both sides of a capture hole) is left alone. Only the local copies are cleaned: the frames on R2 stay raw,
+    so the rule can change and the night be re-baked."""
+    from scipy.ndimage import label, maximum_filter, sum as nsum
+    al = [np.asarray(frame_img(os.path.join(work, 'src_' + nm)))[:, :, 3].astype(np.float32) for _, nm in fr]
+    grown = [None] * len(fr)
+    def grow(j):
+        if grown[j] is None: grown[j] = maximum_filter(al[j], size=17)
+        return grown[j]
+    for i, (t, nm) in enumerate(fr):
+        nb = [j for j in (i - 1, i + 1) if 0 <= j < len(fr) and abs(fr[j][0] - t) <= 2 * STEP]
+        on = al[i] > 0
+        if not nb or not on.any(): continue
+        near = np.max([grow(j) for j in nb], axis=0)
+        lab, n = label(maximum_filter(on.astype(np.uint8), size=5) > 0)
+        if not n: continue
+        lab = np.where(on, lab, 0); idx = np.arange(1, n + 1)
+        mass = np.asarray(nsum(al[i], lab, idx)); sup = np.asarray(nsum(np.minimum(near, al[i]), lab, idx))
+        bad = np.zeros(n + 1, bool); bad[1:] = (mass > 20000) & (sup < 0.25 * mass)
+        drop = bad[lab]
+        k = int(drop.sum())
+        if not k: continue
+        path = os.path.join(work, 'src_' + nm); a = np.asarray(frame_img(path)).copy(); a[drop] = 0
+        Image.fromarray(a).save(path)
+        print('deflicker: %s dropped %d px of one-frame echo' % (nm[:13], k))
+
+
 def bake(work, force=False):
     have = store_ls('mig/frames/')
     def stamps(a, b):
@@ -428,9 +461,12 @@ def bake(work, force=False):
     if not force and old and old.get('start') == start and old.get('n') == len(fr) and old.get('flow') and any(old['flow'][-3:]):
         print('bake: %s already baked with %d frames' % (start, len(fr))); return
     fd = os.path.join(work, 'f'); os.makedirs(fd, exist_ok=True)
-    for i, (t, nm) in enumerate(fr):
+    for t, nm in fr:
         src = os.path.join(work, 'src_' + nm)
         if not os.path.exists(src): store_get('mig/frames/' + nm, src)
+    deflicker(work, fr)
+    for i, (t, nm) in enumerate(fr):
+        src = os.path.join(work, 'src_' + nm)
         im = frame_img(src); bg = Image.new('RGBA', im.size, (0, 0, 0, 255)); bg.alpha_composite(im)
         bg.convert('RGB').save(os.path.join(fd, '%04d.png' % i))
     man = {'start': start, 'night': [iso(night[0]), iso(night[1])], 'n': len(fr), 'fps': FPS, 'step': STEP,
