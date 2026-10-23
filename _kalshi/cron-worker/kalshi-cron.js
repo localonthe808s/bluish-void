@@ -1544,6 +1544,14 @@ export default {
       let r; try { r = await dispatch(env, 'goes-video.yml'); } catch (e) { r = { ok: false, status: 0, detail: String(e) }; }
       if (!r.ok) console.log(`[goes-video] dispatch FAILED (http ${r.status}) ${r.detail}`);
     })());
+    // THE MIGRATION CAPTURE (2026-10-23, user: "is this playing properly? its BIRDS"). migration.yml captures the last two
+    // hours of bird-only frames; MRMS keeps only ~2 h, so a skipped run is a hole in the night for good. GitHub's own
+    // '7,37' schedule ran 8 times on 10-23 instead of ~40, and last night's loop came out 47 frames of 96 with 100- and
+    // 220-minute holes. Started from here at :07/:37 instead; the workflow's concurrency group queues any overlap.
+    if (minute === 7 || minute === 37) ctx.waitUntil((async () => {
+      let r; try { r = await dispatch(env, 'migration.yml'); } catch (e) { r = { ok: false, status: 0, detail: String(e) }; }
+      if (!r.ok) console.log(`[migration] dispatch FAILED (http ${r.status}) ${r.detail}`);
+    })());
     // TWO LANES. The full 20-city bake on :05/:20/:35/:50; Central Park alone
     // on every other five-minute mark, so the New York sheet is never more
     // than a few minutes behind the newest report. Both merge into one file.
