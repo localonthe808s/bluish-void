@@ -32,18 +32,34 @@ DRY = '--dry' in sys.argv
 BUCKET = 'bluishvoid-bg'
 UA = {'User-Agent': 'bluishvoid.com migration bake'}
 STEP = 600                                   # seconds between frames
-W_LON, E_LON, S_LAT, N_LAT = -126.0, -66.0, 23.0, 50.0
-WD = 1600                                    # desktop width; phones get half
 FPS = 10
 LOCAL = '/tmp/migvid'
 
 R = 6378137.0
 def merc(lon, lat):
     return R * math.radians(lon), R * math.log(math.tan(math.pi / 4 + math.radians(lat) / 2))
-X0, Y0 = merc(W_LON, S_LAT)
-X1, Y1 = merc(E_LON, N_LAT)
-HD = int(round(WD * (Y1 - Y0) / (X1 - X0)))
+def unmerc(x, y):
+    return math.degrees(x / R), math.degrees(2 * math.atan(math.exp(y / R)) - math.pi / 2)
+# THE CONTINENT (2026-10-23, user: "bake in canadian radar ... merge mutual views into full continental"). Frames were the lower
+# 48 (-126..-66, 23..50 N) at 1600 px; Canada's radars reach 59 N and from 130 W to 50 W, so the frame grows by whole pixels at
+# the SAME scale -- 100 px west, 440 east, 420 north -- and a frame captured before (1600 px wide) is pasted in at (100, 420).
+WD0 = 1600
+_X0o, _Y0o = merc(-126.0, 23.0); _X1o, _Y1o = merc(-66.0, 50.0)
+HD0 = int(round(WD0 * (_Y1o - _Y0o) / (_X1o - _X0o)))
+SC = WD0 / (_X1o - _X0o)                                   # px per metre
+PADL, PADT = 100, 420
+WD, HD = 2140, HD0 + PADT                                  # desktop size; phones get half
+X0, Y0 = _X0o - PADL / SC, _Y0o
+X1, Y1 = X0 + WD / SC, Y0 + HD / SC
+W_LON, S_LAT = unmerc(X0, Y0); E_LON, N_LAT = unmerc(X1, Y1)
 BOX = '%.0f,%.0f,%.0f,%.0f' % (X0, Y0, X1, Y1)
+
+
+def frame_img(path):
+    """a stored frame on the continental grid (frames from the lower-48 box padded in)"""
+    im = Image.open(path).convert('RGBA')
+    if im.size == (WD, HD): return im
+    bg = Image.new('RGBA', (WD, HD), (0, 0, 0, 0)); bg.paste(im, (PADL, PADT)); return bg
 
 
 def get(url, timeout=60):
@@ -145,8 +161,87 @@ def bird_frame(ts, qts):
     out[:, :, 1] = np.choose(lev, [214, 170, 128])
     out[:, :, 2] = np.choose(lev, [150, 70, 20])
     out[:, :, 3] = np.where(keep, np.choose(lev, [120, 185, 235]), 0)
+    try:
+        ca = canada(ts)
+    except Exception as e:
+        print('  canada failed: %s' % e); ca = None
+    if ca is not None:
+        m = ca[:, :, 3] > out[:, :, 3]                          # the radar that sees more birds wins where both do
+        out[m] = ca[m]
     buf = io.BytesIO(); Image.fromarray(out).save(buf, 'PNG', optimize=True)
-    return buf.getvalue(), float(keep.mean())
+    return buf.getvalue(), float((out[:, :, 3] > 0).mean())
+
+
+# ---- CANADA (2026-10-23). Environment Canada's ~31 S-band radars see the birds too, but its national composite is a filtered
+# rain/snow rate. Each radar's own CAPPI image (dd.weather.gc.ca, every 6 min, 480 x 480 at 1 km a pixel, the radar at (240, 239),
+# north up, a fixed 14-step palette) is NOT filtered: on a clear night it is all pale-blue speckle -- birds. Echo pixels are
+# placed on the grid by their km east / north of the radar; a grid cell gets the SHARE of its 1 km pixels that are lit (speckle
+# stays light, a solid flight goes solid) at the strongest palette step seen; whatever MSC's filtered rain composite
+# (RADAR_1KM_RRAI, 3 h of 6-min times, CORS-open) calls precipitation, grown 2 px, is removed.
+CA = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'radars_ca.json')))
+DD = 'https://dd.weather.gc.ca/today/radar/CAPPI/GIF/'
+CA_LEV = {(153, 204, 255): 0, (0, 153, 255): 1}               # 7 and 23 dBZ; every warmer palette colour is "heavy"
+CA_ECHO = [(153, 204, 255), (0, 153, 255), (0, 255, 102), (0, 204, 0), (0, 153, 0), (255, 255, 51), (255, 204, 0), (255, 153, 0),
+           (255, 102, 0), (255, 0, 0), (255, 0, 153), (153, 51, 204), (102, 0, 153)]
+_CA_LIST = {}
+
+
+def ca_names(site):
+    if site not in _CA_LIST:
+        try: _CA_LIST[site] = re.findall(r'href="(\d{12}_' + site + r'_CAPPI_1\.5_RAIN\.gif)"', get(DD + site + '/', 30).decode())
+        except Exception: _CA_LIST[site] = []
+    return _CA_LIST[site]
+
+
+def canada(ts):
+    want = datetime.fromtimestamp(ts, timezone.utc)
+    t6 = datetime.fromtimestamp(round(ts / 360) * 360, timezone.utc)
+    try:
+        rr = Image.open(io.BytesIO(get('https://geo.weather.gc.ca/geomet?service=WMS&version=1.3.0&request=GetMap&layers=RADAR_1KM_RRAI&styles='
+                                       '&crs=EPSG:3857&bbox=' + BOX + '&width=%d&height=%d&format=image/png&transparent=true&time=%s' % (WD, HD, t6.strftime('%Y-%m-%dT%H:%M:00Z')), 60))).convert('RGBA')
+        rain = np.asarray(rr)[:, :, 3] > 24
+    except Exception:
+        return None                                                 # no rain picture: cannot tell rain from birds
+    m = rain.copy()
+    for k in (1, 2):
+        m[:, k:] |= rain[:, :-k]; m[:, :-k] |= rain[:, k:]
+    rain = m.copy()
+    for k in (1, 2):
+        rain[k:, :] |= m[:-k, :]; rain[:-k, :] |= m[k:, :]
+    lit = np.zeros((HD, WD), np.float32); tot = np.zeros((HD, WD), np.float32); lev = np.zeros((HD, WD), np.int8) - 1
+    yy, xx = np.mgrid[2:478, 2:478]; rr2 = (xx - 240) ** 2 + (yy - 239) ** 2; inr = rr2 <= 238 ** 2
+    def one(site):
+        names = ca_names(site)
+        c = [(abs((datetime.strptime(n[:12], '%Y%m%d%H%M').replace(tzinfo=timezone.utc) - want).total_seconds()), n) for n in names]
+        c = [q for q in c if q[0] <= 360]
+        if not c: return None
+        try: im = Image.open(io.BytesIO(get(DD + site + '/' + min(c)[1], 30))).convert('RGB')
+        except Exception: return None
+        return site, np.asarray(im)[2:478, 2:478]
+    for res in POOL.map(one, list(CA)):
+        if not res: continue
+        site, a = res; lo0, la0 = CA[site]
+        dy = 239 - yy; dx = xx - 240
+        la = la0 + dy / 111.32; lo = lo0 + dx / (111.32 * np.cos(np.radians(la)))
+        gx = ((np.radians(lo) * R - X0) * SC).astype(int); gy = ((Y1 - R * np.log(np.tan(np.pi / 4 + np.radians(la) / 2))) * SC).astype(int)
+        ok = inr & (gx >= 0) & (gx < WD) & (gy >= 0) & (gy < HD)
+        flat = a.reshape(-1, 3)
+        code = np.full(flat.shape[0], -1, np.int8)
+        for ci, col in enumerate(CA_ECHO):
+            code[(flat[:, 0] == col[0]) & (flat[:, 1] == col[1]) & (flat[:, 2] == col[2])] = min(ci, 2)
+        code = code.reshape(a.shape[:2])
+        gxo, gyo, cd = gx[ok], gy[ok], code[ok]
+        np.add.at(tot, (gyo, gxo), 1)
+        e = cd >= 0
+        np.add.at(lit, (gyo[e], gxo[e]), 1)
+        np.maximum.at(lev, (gyo[e], gxo[e]), cd[e])
+    frac = np.where(tot > 0, lit / np.maximum(tot, 1), 0)
+    keep = (frac > 0.04) & (lev >= 0) & ~rain
+    out = np.zeros((HD, WD, 4), np.uint8)
+    L = np.clip(lev, 0, 2)
+    out[:, :, 0] = 255; out[:, :, 1] = np.choose(L, [214, 170, 128]); out[:, :, 2] = np.choose(L, [150, 70, 20])
+    out[:, :, 3] = np.where(keep, (np.choose(L, [120, 185, 235]) * np.clip(frac * 2.2, 0.35, 1)).astype(np.uint8), 0)
+    return out
 
 
 def capture(work):
@@ -155,10 +250,9 @@ def capture(work):
     end = math.floor((now - 8 * 60) / STEP) * STEP
     want = [end - k * STEP for k in range(11, -1, -1)]           # the last two hours MRMS can still answer for
     todo = [t for t in want if datetime.fromtimestamp(t, timezone.utc).strftime('%Y%m%dT%H%M') + '.png' not in have]
-    if not todo:
-        print('capture: nothing new'); return 0
-    qts = qcd_times()
-    print('capture: %d to fetch, MRMS keeps %s..%s' % (len(todo), iso(qts[0]) if qts else '-', iso(qts[-1]) if qts else '-'))
+    qts = qcd_times() if todo else []
+    if not todo: print('capture: nothing new')
+    if todo: print('capture: %d to fetch, MRMS keeps %s..%s' % (len(todo), iso(qts[0]) if qts else '-', iso(qts[-1]) if qts else '-'))
     n = 0
     for t in todo:
         name = datetime.fromtimestamp(t, timezone.utc).strftime('%Y%m%dT%H%M') + '.png'
@@ -170,7 +264,22 @@ def capture(work):
             print('  %s: no MRMS frame within 4 min' % name); continue
         p = os.path.join(work, name); open(p, 'wb').write(fr[0])
         store_put(p, 'mig/frames/' + name, 'image/png', 'public, max-age=31536000, immutable')
-        print('  %s  echo over %.1f%% of the lower 48' % (name, 100 * fr[1])); n += 1
+        print('  %s  echo over %.1f%% of the continent' % (name, 100 * fr[1])); n += 1
+    # frames captured on the lower-48 box: Canada added while MSC's rain composite still covers them (3 h)
+    for nm in sorted(have):
+        if not nm.endswith('.png'): continue
+        try: t = datetime.strptime(nm[:13], '%Y%m%dT%H%M').replace(tzinfo=timezone.utc).timestamp()
+        except ValueError: continue
+        if now - t > 2.8 * 3600: continue
+        p = os.path.join(work, 'up_' + nm); store_get('mig/frames/' + nm, p)
+        if Image.open(p).size == (WD, HD): continue
+        try: ca = canada(t)
+        except Exception: ca = None
+        if ca is None: continue
+        a = np.asarray(frame_img(p)).copy(); m = ca[:, :, 3] > a[:, :, 3]; a[m] = ca[m]
+        Image.fromarray(a).save(p, 'PNG', optimize=True)
+        store_put(p, 'mig/frames/' + nm, 'image/png', 'public, max-age=31536000, immutable')
+        print('  %s  Canada added' % nm); n += 1
     return n
 
 
@@ -283,7 +392,7 @@ def nights(now):
     return fin, (fin[0] + 86400, fin[1] + 86400)
 
 
-def bake(work):
+def bake(work, force=False):
     have = store_ls('mig/frames/')
     def stamps(a, b):
         out = []
@@ -309,13 +418,13 @@ def bake(work):
             old = None
     elif os.path.exists(os.path.join(LOCAL, 'mig/latest.json')):
         old = json.load(open(os.path.join(LOCAL, 'mig/latest.json')))
-    if old and old.get('start') == start and old.get('n') == len(fr) and old.get('flow') and any(old['flow'][-3:]):
+    if not force and old and old.get('start') == start and old.get('n') == len(fr) and old.get('flow') and any(old['flow'][-3:]):
         print('bake: %s already baked with %d frames' % (start, len(fr))); return
     fd = os.path.join(work, 'f'); os.makedirs(fd, exist_ok=True)
     for i, (t, nm) in enumerate(fr):
         src = os.path.join(work, 'src_' + nm)
         if not os.path.exists(src): store_get('mig/frames/' + nm, src)
-        im = Image.open(src).convert('RGBA'); bg = Image.new('RGBA', im.size, (0, 0, 0, 255)); bg.alpha_composite(im)
+        im = frame_img(src); bg = Image.new('RGBA', im.size, (0, 0, 0, 255)); bg.alpha_composite(im)
         bg.convert('RGB').save(os.path.join(fd, '%04d.png' % i))
     man = {'start': start, 'night': [iso(night[0]), iso(night[1])], 'n': len(fr), 'fps': FPS, 'step': STEP,
            'times': [iso(t) for t, _ in fr], 'bbox': [W_LON, S_LAT, E_LON, N_LAT], 'at': int(time.time()),
@@ -339,7 +448,7 @@ def bake(work):
     # average track weighted by how many birds were over it frame by frame
     acc = None
     for t, nm in fr:
-        a = np.asarray(Image.open(os.path.join(work, 'src_' + nm)).convert('RGBA'))[:, :, 3].astype(np.float32) / 255
+        a = np.asarray(frame_img(os.path.join(work, 'src_' + nm)))[:, :, 3].astype(np.float32) / 255
         acc = a if acc is None else acc + a
     from scipy.ndimage import gaussian_filter
     acc = gaussian_filter(acc / max(1, len(fr)), 3)
@@ -348,7 +457,7 @@ def bake(work):
     tot = np.zeros(acc.shape + (4,), np.uint8)
     tot[..., 0] = 255; tot[..., 1] = (200 - 90 * lvl).astype(np.uint8); tot[..., 2] = (110 - 90 * lvl).clip(0).astype(np.uint8)
     tot[..., 3] = (lvl * 235).astype(np.uint8)
-    tp = os.path.join(work, '%s_%d_total.png' % (start, len(fr))); Image.fromarray(tot).save(tp, 'PNG', optimize=True)
+    tp = os.path.join(work, '%s_%d_%d_total.png' % (start, len(fr), man['at'])); Image.fromarray(tot).save(tp, 'PNG', optimize=True)
     tk = 'mig/video/' + os.path.basename(tp); store_put(tp, tk, 'image/png', 'public, max-age=31536000, immutable'); man['total'] = tk
     mean = []
     H_, W_ = acc.shape
@@ -360,14 +469,14 @@ def bake(work):
         for j, (t, nm) in enumerate(fr):
             vec = next((r for r in flow[j] if r[0] == i), None)
             if not vec: continue
-            a = np.asarray(Image.open(os.path.join(work, 'src_' + nm)).convert('RGBA'))[max(0, py - 20):py + 21, max(0, px - 20):px + 21, 3]
+            a = np.asarray(frame_img(os.path.join(work, 'src_' + nm)))[max(0, py - 20):py + 21, max(0, px - 20):px + 21, 3]
             w = float(a.mean()) / 255
             if w < 0.02: continue
             u += w * vec[2] * math.sin(math.radians(vec[1])); v += w * vec[2] * math.cos(math.radians(vec[1])); wsum += w
         if wsum > 0.05: mean.append([i, int(round(math.degrees(math.atan2(u, v)) % 360)), int(round(math.hypot(u, v) / wsum)), round(wsum, 2)])
     man['mean'] = mean
     for kind, w, crf in (('d', WD, 21), ('m', WD // 2, 23)):
-        out = os.path.join(work, '%s_%d_%s.mp4' % (start, len(fr), kind))
+        out = os.path.join(work, '%s_%d_%d_%s.mp4' % (start, len(fr), man['at'], kind))   # a new name every bake: these are cached a year
         subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-framerate', str(FPS), '-i', os.path.join(fd, '%04d.png'),
                         '-vf', 'scale=%d:-2:flags=area' % w, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', str(crf),
                         '-g', '10', '-movflags', '+faststart', out], check=True)
@@ -395,9 +504,9 @@ def tidy():
 if __name__ == '__main__':
     work = tempfile.mkdtemp(prefix='migvid')
     try:
-        capture(work)
+        changed = capture(work)
         capture_vad(work)
-        bake(work)
+        bake(work, force=bool(changed))
         tidy()
     finally:
         shutil.rmtree(work, ignore_errors=True)
