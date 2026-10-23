@@ -21,7 +21,8 @@ show is the newest finished one; until a finished night has frames (the first da
     python3 _migvid/bake.py              # capture + bake (aws cli + R2 env in CI; the local rclone remote `r2:` otherwise)
     python3 _migvid/bake.py --dry        # capture into /tmp/migvid and bake there, nothing uploaded
 """
-import io, json, math, os, shutil, subprocess, sys, tempfile, time, urllib.request
+import io, json, math, os, re, shutil, struct, subprocess, sys, tempfile, time, urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -173,6 +174,105 @@ def capture(work):
     return n
 
 
+# ---- THE BIRDS' OWN DIRECTION (2026-10-22, user: "is there a way to show their overall path?"). Every NEXRAD publishes a VAD
+# wind profile (Level III NVW, ~every 9 min, Unidata's public bucket): the speed and direction the echoes aloft are moving,
+# by height. On a migration night the echoes ARE the birds, so the profile is their ground track -- the same measurement
+# BirdCast's flow maps are built on. Per radar and frame: the newest column of the profile within 12 min, the levels from
+# 1,000 to 5,000 ft (where most night migrants fly) averaged as vectors -> [heading TOWARD (deg), knots, levels].
+L3 = 'https://unidata-nexrad-level3.s3.amazonaws.com/'
+RADARS = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'radars.json')))
+POOL = ThreadPoolExecutor(24)
+
+
+def nvw_parse(b):
+    o = 20
+    while struct.unpack('>h', b[o:o + 2])[0] != 48: o += 1
+    sym = struct.unpack('>i', b[o + 18 + 90:o + 18 + 94])[0] * 2 + o
+    p = sym
+    if struct.unpack('>h', b[p:p + 2])[0] != -1: return None
+    nlay = struct.unpack('>h', b[p + 8:p + 10])[0]; p += 10
+    barbs, labs = [], []
+    for _ in range(nlay):
+        p += 2; ln = struct.unpack('>i', b[p:p + 4])[0]; p += 4; end = p + ln
+        while p < end:
+            code, plen = struct.unpack('>hh', b[p:p + 4]); body = b[p + 4:p + 4 + plen]
+            if code == 4:
+                for k in range(0, plen - 9, 10):
+                    c, x, y, d, sp = struct.unpack('>hhhhh', body[k:k + 10]); barbs.append((x, y, d, sp))
+            elif code == 8:
+                c, x, y = struct.unpack('>hhh', body[:6]); t = body[6:].decode('ascii', 'replace').strip()
+                if x < 60 and re.fullmatch(r'\d{1,2}', t): labs.append((y, int(t)))
+            p += 4 + plen
+    if not barbs or not labs: return None
+    xm = max(q[0] for q in barbs)
+    u = v = 0.0; n = 0
+    for x, y, d, sp in barbs:
+        if x != xm: continue
+        kft = min(labs, key=lambda L: abs(L[0] - y))
+        if abs(kft[0] - y) > 9 or not (1 <= kft[1] <= 5): continue
+        to = math.radians((d + 180) % 360); u += sp * math.sin(to); v += sp * math.cos(to); n += 1
+    if not n: return None
+    return [int(round(math.degrees(math.atan2(u, v)) % 360)), int(round(math.hypot(u, v) / n)), n]
+
+
+def nvw_keys(sid, t0, t1):
+    out = []
+    h = datetime.fromtimestamp(t0, timezone.utc).replace(minute=0, second=0)
+    while h.timestamp() <= t1:
+        pre = '%s_NVW_%s' % (sid[1:], h.strftime('%Y_%m_%d_%H'))
+        try:
+            x = get(L3 + '?list-type=2&prefix=' + pre, 30).decode()
+            out += re.findall(r'<Key>([^<]+)</Key>', x)
+        except Exception:
+            pass
+        h += timedelta(hours=1)
+    return out
+
+
+def vad_for(times):
+    """{frame time: {sid: [toward, kt, n]}} for the given frame times."""
+    t0, t1 = min(times) - 900, max(times) + 300
+    def one(sid):
+        res = {}
+        keys = nvw_keys(sid, t0, t1)
+        kt = []
+        for k in keys:
+            try: kt.append((datetime.strptime(k[-19:], '%Y_%m_%d_%H_%M_%S').replace(tzinfo=timezone.utc).timestamp(), k))
+            except ValueError: pass
+        cache = {}
+        for t in times:
+            c = [q for q in kt if t - 720 <= q[0] <= t + 120]
+            if not c: continue
+            k = max(c)[1]
+            if k not in cache:
+                try: cache[k] = nvw_parse(get(L3 + k, 30))
+                except Exception: cache[k] = None
+            if cache[k]: res[t] = cache[k]
+        return sid, res
+    out = {t: {} for t in times}
+    for sid, res in POOL.map(one, list(RADARS)):
+        for t, v in res.items(): out[t][sid] = v
+    return out
+
+
+def capture_vad(work):
+    have = set(store_ls('mig/frames/')); hv = set(store_ls('mig/vad/'))
+    need = []
+    for nm in have:
+        if nm.endswith('.png') and nm[:13] + '.json' not in hv:
+            try: need.append(datetime.strptime(nm[:13], '%Y%m%dT%H%M').replace(tzinfo=timezone.utc).timestamp())
+            except ValueError: pass
+    need = sorted(need)[-48:]                                      # a run catches up at most 8 hours
+    if not need:
+        print('vad: nothing new'); return
+    V = vad_for(need)
+    for t in need:
+        nm = datetime.fromtimestamp(t, timezone.utc).strftime('%Y%m%dT%H%M') + '.json'
+        p = os.path.join(work, 'vad_' + nm); json.dump(V[t], open(p, 'w'), separators=(',', ':'))
+        store_put(p, 'mig/vad/' + nm, 'application/json', 'public, max-age=31536000, immutable')
+    print('vad: %d frames, %s radars in the newest' % (len(need), len(V[need[-1]])))
+
+
 # ---- the night on show
 def nights(now):
     """[start, end) of the newest finished night and of the night in progress, as UTC seconds."""
@@ -209,7 +309,7 @@ def bake(work):
             old = None
     elif os.path.exists(os.path.join(LOCAL, 'mig/latest.json')):
         old = json.load(open(os.path.join(LOCAL, 'mig/latest.json')))
-    if old and old.get('start') == start and old.get('n') == len(fr):
+    if old and old.get('start') == start and old.get('n') == len(fr) and old.get('flow') and any(old['flow'][-3:]):
         print('bake: %s already baked with %d frames' % (start, len(fr))); return
     fd = os.path.join(work, 'f'); os.makedirs(fd, exist_ok=True)
     for i, (t, nm) in enumerate(fr):
@@ -220,6 +320,52 @@ def bake(work):
     man = {'start': start, 'night': [iso(night[0]), iso(night[1])], 'n': len(fr), 'fps': FPS, 'step': STEP,
            'times': [iso(t) for t, _ in fr], 'bbox': [W_LON, S_LAT, E_LON, N_LAT], 'at': int(time.time()),
            'finished': night == fin}
+    # THE FLOW: each frame's radar vectors, by index into man['radars']
+    hv = set(store_ls('mig/vad/'))
+    sids = sorted(RADARS); man['radars'] = [[s, RADARS[s][0], RADARS[s][1]] for s in sids]
+    flow = []
+    for t, nm in fr:
+        k = nm[:13] + '.json'; row = []
+        if k in hv:
+            p = os.path.join(work, 'v_' + k)
+            try:
+                store_get('mig/vad/' + k, p); V = json.load(open(p))
+                row = [[sids.index(s), v[0], v[1]] for s, v in V.items() if s in RADARS]
+            except Exception:
+                row = []
+        flow.append(row)
+    man['flow'] = flow
+    # THE WHOLE NIGHT (user: "show their overall path"): every frame's birds summed into one soft map, and each radar's
+    # average track weighted by how many birds were over it frame by frame
+    acc = None
+    for t, nm in fr:
+        a = np.asarray(Image.open(os.path.join(work, 'src_' + nm)).convert('RGBA'))[:, :, 3].astype(np.float32) / 255
+        acc = a if acc is None else acc + a
+    from scipy.ndimage import gaussian_filter
+    acc = gaussian_filter(acc / max(1, len(fr)), 3)
+    q = np.percentile(acc[acc > 0.002], 99) if (acc > 0.002).any() else 1
+    lvl = np.clip(acc / max(q, 1e-6), 0, 1) ** 0.7
+    tot = np.zeros(acc.shape + (4,), np.uint8)
+    tot[..., 0] = 255; tot[..., 1] = (200 - 90 * lvl).astype(np.uint8); tot[..., 2] = (110 - 90 * lvl).clip(0).astype(np.uint8)
+    tot[..., 3] = (lvl * 235).astype(np.uint8)
+    tp = os.path.join(work, '%s_%d_total.png' % (start, len(fr))); Image.fromarray(tot).save(tp, 'PNG', optimize=True)
+    tk = 'mig/video/' + os.path.basename(tp); store_put(tp, tk, 'image/png', 'public, max-age=31536000, immutable'); man['total'] = tk
+    mean = []
+    H_, W_ = acc.shape
+    for i, s in enumerate(sids):
+        lo, la = RADARS[s]; x, y = merc(lo, la)
+        px = int((x - X0) / (X1 - X0) * W_); py = int((Y1 - y) / (Y1 - Y0) * H_)
+        if not (0 <= px < W_ and 0 <= py < H_): continue
+        u = v = wsum = 0.0
+        for j, (t, nm) in enumerate(fr):
+            vec = next((r for r in flow[j] if r[0] == i), None)
+            if not vec: continue
+            a = np.asarray(Image.open(os.path.join(work, 'src_' + nm)).convert('RGBA'))[max(0, py - 20):py + 21, max(0, px - 20):px + 21, 3]
+            w = float(a.mean()) / 255
+            if w < 0.02: continue
+            u += w * vec[2] * math.sin(math.radians(vec[1])); v += w * vec[2] * math.cos(math.radians(vec[1])); wsum += w
+        if wsum > 0.05: mean.append([i, int(round(math.degrees(math.atan2(u, v)) % 360)), int(round(math.hypot(u, v) / wsum)), round(wsum, 2)])
+    man['mean'] = mean
     for kind, w, crf in (('d', WD, 21), ('m', WD // 2, 23)):
         out = os.path.join(work, '%s_%d_%s.mp4' % (start, len(fr), kind))
         subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-framerate', str(FPS), '-i', os.path.join(fd, '%04d.png'),
@@ -233,7 +379,7 @@ def bake(work):
     store_put(mp, 'mig/latest.json', 'application/json', 'public, max-age=120')
     # disposal: the previous generation stays (a viewer may have just read the old latest.json); older ones go
     if old:
-        keep = {man['d'], man['m'], old.get('d'), old.get('m')}
+        keep = {man['d'], man['m'], man.get('total'), old.get('d'), old.get('m'), old.get('total')}
         for nm in store_ls('mig/video/'):
             if 'mig/video/' + nm not in keep: store_rm('mig/video/' + nm)
 
@@ -242,12 +388,15 @@ def tidy():
     cut = (datetime.now(timezone.utc) - timedelta(days=3)).strftime('%Y%m%dT%H%M')
     for nm in store_ls('mig/frames/'):
         if nm[:13] < cut: store_rm('mig/frames/' + nm)
+    for nm in store_ls('mig/vad/'):
+        if nm[:13] < cut: store_rm('mig/vad/' + nm)
 
 
 if __name__ == '__main__':
     work = tempfile.mkdtemp(prefix='migvid')
     try:
         capture(work)
+        capture_vad(work)
         bake(work)
         tidy()
     finally:
