@@ -533,6 +533,30 @@ def nasa_caption(it, th):
     return _CAP[(link, fn)]
 
 
+# THE RIGHT MISSION (user 2026-10-23: "filter the wrong mission posts too"): NASA's category feeds and ESA's science feeds also carry
+# posts about other missions -- a Webb story in Hubble's strip, a TESS movie in SPHEREx's, IXPE in Chandra's, XMM-Newton in
+# Euclid's, the Io Volcano Observer proposal in New Horizons'. A post goes when its title names another mission and not this one,
+# when its picture's path or file name belongs to another mission, or when it is a roundup of several ("8 ... Missions").
+OWN = {'webb': r'webb|jwst', 'hubble': r'hubble', 'chandra': r'chandra', 'euclid': r'euclid', 'rubin': r'rubin', 'spherex': r'spherex',
+       'roman': r'roman', 'parker': r'parker', 'juno': r'juno', 'solo': r'solar orbiter', 'nrao': r'nrao|\bvla\b|vlba|alma|green bank|\bgbt\b',
+       'gaia': r'gaia', 'nisar': r'nisar', 'nh': r'new.horizons', 'voyager': r'voyager', 'inouye': r'inouye'}
+OTHER = (r'webb|jwst|hubble|chandra|euclid|spherex|\btess\b|ixpe|xrism|xmm|nustar|\bswift\b|fermi|neowise|\bwise\b|kepler|cheops|plato|lisa|'
+         r'io volcano observer|europa clipper|psyche|\blucy\b|osiris|\bdart\b|hera|juice|perseverance|curiosity|insight|maven|'
+         r'\bmro\b|cassini|messenger|bepicolombo|soho|\bsdo\b|stereo|punch|proba|smile|landsat|sentinel|goes|\bpace\b|swot|icesat|grace')
+
+
+def wrong_mission(key, it, th):
+    own = OWN.get(key)
+    if not own: return False
+    title = it.get('title', '')
+    if re.search(own, title, re.I): return False
+    m = re.search(r'/missions/([a-z0-9-]+)/', th or '')
+    if m and not re.search(own, m.group(1).replace('-', ' '), re.I): return True
+    fn = re.sub(r'[_\-]+', ' ', re.sub(r'\?.*$', '', th or '').rsplit('/', 1)[-1])
+    if re.search(OTHER, title, re.I) or re.search(OTHER, fn, re.I) and not re.search(own, fn, re.I): return True
+    return bool(re.search(r'\bmissions\b', title, re.I))
+
+
 def _is_sky(src, it):
     if CHART.search(it.get('title', '') + ' ' + it.get('alt', '')): return False
     if esa_type(it.get('link', '')) in ('Chart', 'Artwork', 'Simulation', 'Illustration'): return False
@@ -692,6 +716,7 @@ def bake_media(prev_media=None):
                     th = _thumb(src, it['img'])
                     if not th or th in seen or it['title'] in seen or not _is_sky(src, it) or not _looks_like_sky(th, key == 'nisar'): continue
                     if src == 'nasa' and CHART_CAP.search(nasa_caption(it, th)): continue
+                    if wrong_mission(key, it, th): continue
                     if _same_picture(th, [p['thumb'] for p in photos]): continue
                     # ONE PICTURE PER RELEASE (user 2026-10-23: "review latest and greatest", Webb's strip showed potm2610a and
                     # potm2610b -- a crop and the wide view of one nebula -- side by side, and a deep field with and without
