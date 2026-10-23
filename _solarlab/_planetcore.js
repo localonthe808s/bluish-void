@@ -2100,7 +2100,7 @@
       h += '<div style="display:flex;gap:6px;overflow-x:auto;scrollbar-width:thin;padding-bottom:4px;">' + _pbPick.slice(0, 12).map(function(x){
         var q = x.q, t = String(q.title || '').replace(/"/g, '&quot;');
         return '<a href="' + q.source_url + '" target="_blank" rel="noopener" title="' + t + '" style="flex:0 0 auto;">'
-          + '<img src="/_solarlab/probes/' + q.file + '" alt="' + t + '" style="height:96px;width:auto;border-radius:6px;display:block;background:#05070a;"></a>';
+          + '<img src="https://cdn.bluishvoid.com/probes/' + q.file + '" alt="' + t + '" style="height:96px;width:auto;border-radius:6px;display:block;background:#05070a;"></a>';
       }).join('') + '</div>';
       h += '<div style="font-size:9px;color:rgba(43,34,244,.5);line-height:1.4;margin-top:3px;">' + Object.keys(_pbCred).join(' · ') + '</div>';
     }

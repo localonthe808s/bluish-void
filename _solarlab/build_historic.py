@@ -174,6 +174,23 @@ HEROES = {'tiros1': 'TIROS-1 satellite.png', 'erts1': 'Landsat-1.jpg', 'tiros9':
           'lo1': 'Lunar Orbiter Spacecraft Model \u2014 1 8 Scale (50024117333).jpg', 'goes': 'SMS 1 satellite.jpg', 'nimbus7': 'Nimbus rendering.jpg', 'corona': 'Kh-4b corona.jpg'}
 
 
+def publish(path):
+    """PHOTOS LIVE ON R2 (user 2026-10-23: "move the other archive photos to cloudflare too"): the picture goes up as
+    probes/<name>-<sha1[:8]>.webp with a year-long immutable cache (a re-bake changes the hash, so never a stale copy), the
+    local file is deleted, and the manifest stores the hashed name (the page reads cdn.bluishvoid.com/probes/<file>)."""
+    import hashlib, subprocess
+    h = hashlib.sha1(path.read_bytes()).hexdigest()[:8]; name = path.stem + '-' + h + '.webp'
+    subprocess.run(['rclone', 'copyto', str(path), 'r2:bluishvoid-bg/probes/' + name, '--s3-no-check-bucket',
+                    '--header-upload', 'Cache-Control: public, max-age=31536000, immutable', '--header-upload', 'Content-Type: image/webp'], check=True)
+    path.unlink()
+    return name
+
+
+def uploaded(e):
+    import re
+    return bool(re.search(r'-[0-9a-f]{8}\.webp$', e.get('file', '')))
+
+
 def info(titles):
     u = ('https://commons.wikimedia.org/w/api.php?action=query&prop=imageinfo&iiprop=url&iiurlwidth=1280&format=json&titles='
          + urllib.parse.quote('|'.join('File:' + t for t in titles)))
@@ -206,7 +223,7 @@ def main():
     for k in range(0, len(names), 10): I.update(info(names[k:k + 10]))
     for key, rows in SETS.items():
         have = man['sets'].get(key) or []
-        if len(have) == len(rows) and all((OUT / e['file']).exists() for e in have):
+        if len(have) == len(rows) and all(uploaded(e) for e in have):
             print(key, 'kept'); continue                              # already baked: Commons rate-limits quick bursts
         entries = []
         for n, (t, title, date, inst, credit) in enumerate(rows, 1):
@@ -223,7 +240,7 @@ def main():
                                 '-pix_fmt', 'yuv420p', '-movflags', '+faststart', str(OUT / f)], check=True)
                 png = OUT / ('_' + key + '.png')
                 subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-ss', '%.1f' % min(22, (float(b) - float(a)) / 2), '-i', str(OUT / f), '-frames:v', '1', str(png)], check=True)
-                save(png.read_bytes(), OUT / poster, 900); png.unlink()
+                save(png.read_bytes(), OUT / poster, 900); png.unlink(); poster = publish(OUT / poster)
                 src.unlink()
                 # THE CLIP LIVES ON R2 (user 2026-10-23: "should archive clips be saved on cloudflare" -> yes): uploaded under a
                 # versioned name with a year-long immutable cache (bump VER to replace one), then deleted here; only the
@@ -236,7 +253,7 @@ def main():
                                 'credit': credit, 'source_url': q['descriptionurl']})
                 print(key, f, title); continue
             url, page = t[4:].split('|') if t.startswith('url:') else I[t]; f = '%s_%02d.webp' % (key, n)
-            save(fetch(url), OUT / f, 900); time.sleep(3)
+            save(fetch(url), OUT / f, 900); time.sleep(3); f = publish(OUT / f)
             entries.append({'file': f, 'title': title, 'date': date, 'target': 'Earth', 'instrument': inst,
                             'credit': credit + ' · public domain', 'source_url': page})
             print(key, f, title)

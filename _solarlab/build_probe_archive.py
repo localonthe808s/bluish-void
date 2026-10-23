@@ -411,6 +411,23 @@ SETS = [('cassini_finale', 'cassini_finale', build_cassini),
         ('venera_sites', 'venera_site', build_venera)]
 
 
+def publish(path):
+    """PHOTOS LIVE ON R2 (user 2026-10-23: "move the other archive photos to cloudflare too"): the picture goes up as
+    probes/<name>-<sha1[:8]>.webp with a year-long immutable cache (a re-bake changes the hash, so never a stale copy), the
+    local file is deleted, and the manifest stores the hashed name (the page reads cdn.bluishvoid.com/probes/<file>)."""
+    import hashlib, subprocess
+    h = hashlib.sha1(path.read_bytes()).hexdigest()[:8]; name = path.stem + '-' + h + '.webp'
+    subprocess.run(['rclone', 'copyto', str(path), 'r2:bluishvoid-bg/probes/' + name, '--s3-no-check-bucket',
+                    '--header-upload', 'Cache-Control: public, max-age=31536000, immutable', '--header-upload', 'Content-Type: image/webp'], check=True)
+    path.unlink()
+    return name
+
+
+def uploaded(e):
+    import re
+    return bool(re.search(r'-[0-9a-f]{8}\.webp$', e.get('file', '')))
+
+
 def main():
     args = sys.argv[1:]
     force = '--force' in args
@@ -420,7 +437,7 @@ def main():
     for key, prefix, fn in SETS:
         have = man['sets'].get(key)
         rebuild = force and (not only or key in only)
-        if have and not rebuild and all((OUT / e['file']).exists() for e in have):
+        if have and not rebuild and all(uploaded(e) for e in have):
             print('%s: kept %d (already baked)' % (key, len(have)))
             continue
         print('%s: building' % key)
@@ -442,17 +459,18 @@ def main():
                 print('  skip %s: %s' % (it['nasa_id_or_opusid'], e))
                 continue
             e = {k: v for k, v in it.items() if not k.startswith('_')}
-            entries.append(dict(file=name, **e))
+            entries.append(dict(file=publish(path), **e))
         man['sets'][key] = entries
         print('  %s: %d images' % (key, len(entries)))
     man['built'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    man['sets'] = {k: man['sets'].get(k, []) for k, _, _ in SETS}
+    # its own sets in its order, then every set it does not own (THE ARCHIVE's, build_historic.py) kept as they are
+    own = [k for k, _, _ in SETS]
+    man['sets'] = dict([(k, man['sets'].get(k, [])) for k in own] + [(k, v) for k, v in man['sets'].items() if k not in own])
     MANIFEST.write_text(json.dumps({'built': man['built'], 'sets': man['sets']}, indent=1, ensure_ascii=False))
-    tot = sum(f.stat().st_size for f in OUT.glob('*.webp'))
     print('\nSUMMARY')
     for k, v in man['sets'].items():
         print('  %-15s %3d' % (k, len(v)))
-    print('  total %d files, %.1f KB' % (len(list(OUT.glob('*.webp'))), tot / 1024))
+    print('  photos are on R2 under probes/')
 
 
 if __name__ == '__main__':
