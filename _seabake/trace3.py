@@ -19,7 +19,7 @@ Terrain Tiles z9, ~230 m a cell here):
 """
 import json, math, sys, os
 import numpy as np
-from scipy.ndimage import gaussian_filter, maximum_filter, minimum_filter, label, binary_fill_holes
+from scipy.ndimage import gaussian_filter, maximum_filter, minimum_filter, label, binary_fill_holes, distance_transform_edt
 from skimage.graph import route_through_array
 from skimage.measure import find_contours
 from shapely.geometry import Polygon, LineString
@@ -84,21 +84,14 @@ def canyon(f):
     span_km = math.hypot((yy.max() - yy.min()) * m, (xx.max() - xx.min()) * m) / 1000
     if edges >= 3 or span_km > 400 or len(yy) < 20: return None
     M = binary_fill_holes(M)
-    Ms = gaussian_filter(M.astype(float), 1.2)
-    cs = find_contours(Ms, 0.5)
-    if not cs: return None
-    out = {'p': [], 'l': None}
+    out = {'p': [], 'l': None, 'c': []}
     tol = 0.6 * m / 111320
-    for c in sorted(cs, key=len, reverse=True)[:3]:
-        if len(c) < 12: continue
-        p = poly_ll(c, x0, y0, tol)
-        if p and len(p) >= 6: out['p'].append(p)
-    if not out['p']: return None
-    # the floor, end to end: the shallowest and deepest body cells reached along the body
+    # the floor, end to end: the shallowest and deepest body cells, the least-cost path between them along the body
     Eb = np.where(M, E, np.nan)
     hy, hx = np.unravel_index(np.nanargmax(Eb), E.shape); dy_, dx_ = np.unravel_index(np.nanargmin(Eb), E.shape)
     lo, hi = np.nanmin(Eb), np.nanmax(Eb)
     cost = np.where(M, 1 + 30 * np.clip((E - lo) / max(hi - lo, 1), 0, 1) ** 1.5, 1e4)
+    path = None
     try:
         path, _ = route_through_array(cost, (hy, hx), (dy_, dx_), fully_connected=True, geometric=True)
         L = [T2.to_ll(y, x, x0, y0) for y, x in path]
@@ -106,7 +99,31 @@ def canyon(f):
         C = T2.chaikin(np.array(ls.coords), 2)
         if T2.km([tuple(q) for q in C]) >= 6: out['l'] = [[round(x, 4), round(y, 4)] for x, y in C]
     except Exception:
-        pass
+        path = None
+    # v5: THE CUT HUGS ITS FLOOR -- the body trimmed to within ~8 km of the floor line (Hudson's v4 outline spilled into the
+    # neighbouring slope halfway down), so a side valley or a slump scar beside it is not drawn as part of the canyon
+    if path:
+        P = np.ones(E.shape, bool); P[tuple(np.array(path).T)] = False
+        M = M & (distance_transform_edt(P) * m <= 8000)
+        lab2, _ = label(M); keep2 = {lab2[y, x] for y, x in path if lab2[y, x]}
+        if keep2: M = np.isin(lab2, list(keep2))
+    Ms = gaussian_filter(M.astype(float), 1.2)
+    cs = find_contours(Ms, 0.5)
+    if not cs: return None
+    for c in sorted(cs, key=len, reverse=True)[:3]:
+        if len(c) < 12: continue
+        p = poly_ll(c, x0, y0, tol)
+        if p and len(p) >= 6: out['p'].append(p)
+    if not out['p']: return None
+    # the deepest part of the cut: incision at least half the median along the floor
+    if path:
+        dep = np.array([inc[y, x] for y, x in path]); dmed = float(np.median(dep))
+        out['d'] = int(round(dmed * 3.281 / 10) * 10)                      # feet, for the label
+        Mi = M & (inc >= max(2 * thr, 0.5 * dmed))
+        for c in sorted(find_contours(gaussian_filter(Mi.astype(float), 1.0), 0.5), key=len, reverse=True)[:4]:
+            if len(c) < 10: continue
+            p = poly_ll(c, x0, y0, tol)
+            if p and len(p) >= 6: out['c'].append(p)
     out['len_km'] = round(span_km, 1); out['thr'] = round(thr)
     return out
 
@@ -136,7 +153,19 @@ def mount_outline(E, x0, y0, py, px, m, rel_min):
         if pg.geom_type != 'Polygon' or not pg.contains(__import__('shapely').geometry.Point(px - ox, py - oy)): continue
         if pg.area * (m / 1000) ** 2 > 6000: return None                        # a whole plateau, not a mount
         cont = [(q[0] + oy, q[1] + ox) for q in c]
-        return poly_ll(cont, x0, y0, 0.5 * m / 111320), round(float(rel)), (py, px)
+        base = poly_ll(cont, x0, y0, 0.5 * m / 111320)
+        # v5: THE MOUNTAIN DRAWN AS A MOUNTAIN -- nested rings 45 / 70 / 90% of the way up, each the contour round the peak
+        rings = []
+        for fr in (0.45, 0.7, 0.9):
+            for c2 in sorted(find_contours(win, floor + fr * rel), key=len, reverse=True):
+                if len(c2) < 6: continue
+                q2 = Polygon([(q[1], q[0]) for q in c2])
+                if not q2.is_valid: q2 = q2.buffer(0)
+                if q2.geom_type == 'Polygon' and q2.contains(__import__('shapely').geometry.Point(px - ox, py - oy)):
+                    pp = poly_ll([(q[0] + oy, q[1] + ox) for q in c2], x0, y0, 0.4 * m / 111320)
+                    if pp and len(pp) >= 5: rings.append([fr, pp])
+                    break
+        return base, round(float(rel)), (py, px), rings
     return None
 
 
@@ -149,21 +178,21 @@ def mounts(f):
     m = mpp_at(lat); py, px = T2.to_px(lon, lat, x0, y0)
     if not group:
         o = mount_outline(E, x0, y0, py, px, m, 100 if any(w in f['n'].upper() for w in ('KNOLL', 'HILL')) else 60)
-        return {'p': [o[0]], 'rel': o[1]} if o and o[0] else None
+        return {'p': [o[0]], 'rel': o[1], 'r': o[3]} if o and o[0] else None
     # every peak of 150 m or more within ~45 km
     rad = int(45000 / m); H, Wd = E.shape
     mx = maximum_filter(E, size=int(5000 / m) * 2 + 1)
     cand = np.argwhere((E == mx) & (E < -5))
     cand = [(y, x) for y, x in cand if (y - py) ** 2 + (x - px) ** 2 <= rad ** 2]
     cand.sort(key=lambda q: -E[q[0], q[1]])
-    polys, seen = [], []
+    polys, seen, rings, rels = [], [], [], []
     for y, x in cand[:40]:
         if any((y - a) ** 2 + (x - b) ** 2 < (8000 / m) ** 2 for a, b in seen): continue
         o = mount_outline(E, x0, y0, y, x, m, 150)
         if o and o[0]:
-            polys.append(o[0]); seen.append(o[2])
+            polys.append(o[0]); seen.append(o[2]); rings += o[3]; rels.append(o[1])
         if len(polys) >= 14: break
-    return {'p': polys} if polys else None
+    return {'p': polys, 'r': rings, 'rel': max(rels)} if polys else None
 
 
 def main(src, dst):
@@ -176,15 +205,20 @@ def main(src, dst):
                 o = canyon(f)
                 if o:
                     f['g'] = dict(g); f['g']['p'] = o['p']
+                    if o.get('c'): f['g']['c'] = o['c']
+                    if o.get('d'): f['d'] = o['d']
                     if o['l']: f['g']['l'] = [o['l']]; f.pop('crude', None)
                     nc += 1
                     print('canyon %-40s %5.0f km  thr %3d m  %d outline(s)%s' % (f['n'], o['len_km'], o['thr'], len(o['p']), '' if o['l'] else '  (no floor line)'), flush=True)
                 else:
                     print('canyon %-40s kept as charted' % f['n'], flush=True)
-            elif f['k'] == 'mount' and not g.get('p'):
+            elif f['k'] == 'mount':
                 o = mounts(f)
                 if o:
-                    f['g'] = dict(g); f['g']['p'] = o['p']; nm += 1
+                    f['g'] = dict(g)
+                    if not g.get('p'): f['g']['p'] = o['p']; nm += 1
+                    if o.get('r'): f['g']['r'] = o['r']
+                    if o.get('rel'): f['h'] = int(round(o['rel'] * 3.281 / 50) * 50)        # feet above the floor round it, for the label
                     print('mount  %-40s %d outline(s)' % (f['n'], len(o['p'])), flush=True)
                 else:
                     print('mount  %-40s kept as a point' % f['n'], flush=True)
@@ -204,6 +238,18 @@ def main(src, dst):
             g['p'] = ps
         if g.get('l'):
             g['l'] = [[[round(x, 3), round(y, 3)] for x, y in LineString(l).simplify(0.0015).coords] for l in g['l']]
+        for k in ('c',):
+            if g.get(k):
+                g[k] = [[[round(x, 3), round(y, 3)] for x, y in Polygon(p).simplify(0.0025, preserve_topology=True).exterior.coords] for p in g[k] if len(p) >= 4]
+        if g.get('r'):
+            rr = []
+            for fr, p in g['r']:
+                q = Polygon(p).simplify(0.002, preserve_topology=True)
+                if q.is_empty or q.geom_type != 'Polygon': continue
+                c = [[round(x, 3), round(y, 3)] for x, y in q.exterior.coords]
+                if len(c) >= 4: rr.append([fr, c])
+            g['r'] = rr
+    J['v'] = 5
     json.dump(J, open(dst, 'w'), separators=(',', ':'))
     print('canyons outlined %d, mounts newly outlined %d' % (nc, nm))
 
