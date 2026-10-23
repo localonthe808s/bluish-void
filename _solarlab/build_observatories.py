@@ -496,7 +496,28 @@ def is_artwork(it):
                 or ART_CREDIT.search(it.get('credit', '') or ''))
 
 
+# CHARTS ARE NOT THE SKY (user 2026-10-23: "james webb is showing two graphs"): ESA's release pages type each picture -- Chart
+# (a spectrum, a plot), Artwork, Simulation -- and only what a telescope took belongs in the strip. Titles catch the rest.
+CHART = re.compile(r"\bspectr(?:um|a)\b|\bcharts?\b|\bgraphs?\b|\bplots?\b|\bdiagram|infographic|across time|\btimeline\b|light curve", re.I)
+_ESA_TYPE = {}
+
+
+def esa_type(link):
+    m = re.match(r'https://(?:esawebb|esahubble)\.org/images/[^/]+/', link or '')
+    if not m: return ''
+    if m.group(0) not in _ESA_TYPE:
+        try:
+            t = re.sub(r'<[^>]+>', '\n', get(m.group(0), timeout=40, tries=2).decode('utf-8', 'replace'))
+            k = re.search(r'Type:\s*\n\s*([A-Za-z ]+?)\s*\n', t)
+            _ESA_TYPE[m.group(0)] = k.group(1).strip() if k else ''
+        except Exception as e:
+            print('  esa type failed', link[-40:], e); _ESA_TYPE[m.group(0)] = ''
+    return _ESA_TYPE[m.group(0)]
+
+
 def _is_sky(src, it):
+    if CHART.search(it.get('title', '') + ' ' + it.get('alt', '')): return False
+    if esa_type(it.get('link', '')) in ('Chart', 'Artwork', 'Simulation', 'Illustration'): return False
     if src == 'noirlab':
         blob = it.get('title', '') + ' ' + it.get('desc', '')
         if not RUBIN_ONLY.search(blob) or NOT_RUBIN_SKY.search(it.get('title', '') + ' ' + it.get('alt', '')): return False
