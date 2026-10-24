@@ -28,16 +28,24 @@ import io, json, math, os, re, subprocess, sys, tempfile, time, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import fdgeo
+import fdgeo, rawbands
 
 Image.MAX_IMAGE_PIXELS = None
-BAND, FPS, STEP = 'GEOCOLOR', 10, 10
+FPS, STEP = 10, 10
+# THE BANDS BAKED (user 2026-10-23: "add B13 and air mass"), each with the full-disk size it is read at: GeoColor at 10848
+# (its daytime visible is 1 km); band 13 and Air Mass are 2 km data, so their 5424 copy holds all of it at a quarter of the
+# pixels. The other bands stay on NESDIS's sector frames in the page.
+BANDS = {'GEOCOLOR': '10848x10848'}
+# B13 and Air Mass: NESDIS's full-disk pictures of these carry its state lines, so they are rendered from NOAA's own data
+# instead (rawbands.py): CONUS/PACUS every 5 min for the sectors inside them, the full disk every 10 for the rest
+RAW = ['13', 'AirMass']
+BUDGET_S = 420         # a run renders newest-first and stops starting new scans after this; the next run fills the rest
+BAND_ONLY = sys.argv[sys.argv.index('--band') + 1] if '--band' in sys.argv else None
 # GEOCOLOR CAN FREEZE ON ITS OWN (10-20: every sector's stopped at 15:11 UTC while the ABI bands kept coming): over an hour old,
 # and with NESDIS's Day Night Cloud Micro Combo fresher, the run is baked from that and latest.json says which band it is
 FB_BAND = 'DayNightCloudMicroCombo'
 EDGE, NESDIS = 'https://tiles.bluishvoid.com/goes/', 'https://cdn.star.nesdis.noaa.gov/'
 BUCKET, PREFIX = 'bluishvoid-bg', 'goes/video/'
-SIZE = '10848x10848'
 KINDS = {'d': {'hours': 6, 'crf': 22, 'g': 4, 'w': fdgeo.OUT_W},
          'm': {'hours': 2, 'crf': 23, 'g': 1, 'w': fdgeo.OUT_W // 2}}
 OVERLAY_V = 1          # /satmaps/<sat>-<sector>.png?v= -- bump with satmaps_bake.py
@@ -61,11 +69,11 @@ def stamp_ms(name):
     return (time.mktime((y, 1, 1, 0, 0, 0, 0, 0, 0)) - time.timezone + (d - 1) * 86400 + h * 3600 + m * 60) * 1000
 
 
-def fd_listing(sat, band):
+def fd_listing(sat, band, size):
     for base in (EDGE, NESDIS):
         try:
             html = get('%s%s/ABI/FD/%s/' % (base, sat, band), 40).decode('utf-8', 'replace')
-            names = sorted(set(re.findall(r'href="(\d{11}_%s-ABI-FD-%s-%s\.jpg)"' % (sat, band, SIZE), html)))
+            names = sorted(set(re.findall(r'href="(\d{11}_%s-ABI-FD-%s-%s\.jpg)"' % (sat, band, size), html)))
             if names: return names
         except Exception as e:
             print('  %s FD %s listing via %s failed: %s' % (sat, band, base, e))
@@ -85,25 +93,24 @@ def main():
     root = '/tmp/goesvid' if DRY else tempfile.mkdtemp()
     os.makedirs(root, exist_ok=True)
     sats = sorted({s for s, _ in SECTORS})
-    # 1. what each satellite's full disk offers over the longest window, and which band (the freeze fallback)
+    # 1. what each satellite's full disk offers per band over the longest window (and GeoColor's freeze fallback)
     plan = {}
     for sat in sats:
-        names, band = fd_listing(sat, BAND), BAND
-        if names and time.time() * 1000 - stamp_ms(names[-1]) > 3600e3:
-            fb = fd_listing(sat, FB_BAND)
-            if fb and stamp_ms(fb[-1]) > stamp_ms(names[-1]) + 1800e3: names, band = fb, FB_BAND
-        if not names: print('%s: no full-disk listing' % sat); continue
-        t1 = stamp_ms(names[-1])
-        plan[sat] = (band, [n for n in names if stamp_ms(n) > t1 - KINDS['d']['hours'] * 3600e3])
-    if not plan: sys.exit(1)
+        for BAND, size in BANDS.items():
+            if BAND_ONLY and BAND != BAND_ONLY: continue
+            names, band = fd_listing(sat, BAND, size), BAND
+            if BAND == 'GEOCOLOR' and names and time.time() * 1000 - stamp_ms(names[-1]) > 3600e3:
+                fb = fd_listing(sat, FB_BAND, size)
+                if fb and stamp_ms(fb[-1]) > stamp_ms(names[-1]) + 1800e3: names, band = fb, FB_BAND
+            if not names: print('%s %s: no full-disk listing' % (sat, BAND)); continue
+            t1 = stamp_ms(names[-1])
+            plan[(sat, BAND)] = (band, [n for n in names if stamp_ms(n) > t1 - KINDS['d']['hours'] * 3600e3], int(size.split('x')[0]))
     # 2. each sector's frames from the last run (one tar per sector on R2), and its last manifest
     state = {}
-    for sat, sector in SECTORS:
-        if sat not in plan: continue
-        band, fds = plan[sat]
-        work = os.path.join(root, '%s_%s' % (sat, sector)); fd = os.path.join(work, 'frames'); os.makedirs(fd, exist_ok=True)
+    def mkstate(sat, sector, BAND, band, want, step, src):
+        work = os.path.join(root, '%s_%s_%s' % (sat, sector, BAND)); fd = os.path.join(work, 'frames'); os.makedirs(fd, exist_ok=True)
         key = '%s%s/%s/%s/' % (PREFIX, sat, sector, BAND)
-        tar_key = '%s_frames/%s_%s_fd.tar' % (PREFIX, sat, sector)
+        tar_key = '%s_frames/%s_%s_fd.tar' % (PREFIX, sat, sector) if BAND == 'GEOCOLOR' else '%s_frames/%s_%s_%s_fd.tar' % (PREFIX, sat, sector, BAND)
         tar_local = os.path.join(work, 'frames.tar')
         old = None
         if not DRY:
@@ -113,29 +120,53 @@ def main():
                 except Exception: old = None
             if r2('cp', 's3://%s/%s' % (BUCKET, tar_key), tar_local, check=False).returncode == 0:
                 subprocess.run(['tar', '-xf', tar_local, '-C', fd], check=False)
-        want = [frame_name(n[:11], sat, sector, band) for n in fds]
         for f in os.listdir(fd):
             if f not in set(want): os.remove(os.path.join(fd, f))
-        state[(sat, sector)] = {'work': work, 'fd': fd, 'key': key, 'tar_key': tar_key, 'tar_local': tar_local, 'old': old,
-                                'want': want, 'band': band, 'new': 0}
+        state[(sat, sector, BAND)] = {'work': work, 'fd': fd, 'key': key, 'tar_key': tar_key, 'tar_local': tar_local, 'old': old,
+                                      'want': want, 'band': band, 'new': 0, 'step': step, 'src': src}
+    for (sat, BAND) in plan:
+        band, fds, _n = plan[(sat, BAND)]
+        for s2, sector in SECTORS:
+            if s2 == sat: mkstate(sat, sector, BAND, band, [frame_name(n[:11], sat, sector, band) for n in fds], STEP, 'fd')
+    raw_jobs = []
+    for sat in sats:
+        bands = [b for b in RAW if not BAND_ONLY or b == BAND_ONLY]
+        if not bands: continue
+        try: bounds = rawbands.grid_bounds(sat, 'C')
+        except Exception as e: print('%s: no CONUS grid (%s)' % (sat, e)); bounds = None
+        for prod in ('C', 'F'):
+            secs = [sc for s2, sc in SECTORS if s2 == sat and bool(bounds and rawbands.fits(sat, sc, bounds)) == (prod == 'C')]
+            if not secs: continue
+            for band in bands:
+                try: sc = rawbands.scenes(sat, prod, band, KINDS['d']['hours'] + 0.3)
+                except Exception as e: print('%s %s %s: no listing (%s)' % (sat, prod, band, e)); continue
+                if not sc: continue
+                t1 = stamp_ms(max(sc))
+                stamps = sorted(st for st in sc if stamp_ms(st) > t1 - KINDS['d']['hours'] * 3600e3)
+                for sector in secs: mkstate(sat, sector, band, band, [frame_name(st, sat, sector, band) for st in stamps], 5 if prod == 'C' else 10, 'raw')
+                for st in stamps:
+                    outs = [(sector, os.path.join(state[(sat, sector, band)]['fd'], frame_name(st, sat, sector, band))) for sector in secs]
+                    outs = [o for o in outs if not os.path.exists(o[1])]
+                    if outs: raw_jobs.append((st, (sat, band, sc[st], outs)))
+    if not state: sys.exit(1)
     # 3. the full disks any sector still lacks, each downloaded once and cut for every sector of its satellite
     def cut(job):
-        sat, n = job
-        band = plan[sat][0]
-        mine = [k for k in state if k[0] == sat and not os.path.exists(os.path.join(state[k]['fd'], frame_name(n[:11], sat, k[1], band)))]
+        sat, BAND, n = job
+        band, _f, N = plan[(sat, BAND)]
+        mine = [k for k in state if k[0] == sat and k[2] == BAND and not os.path.exists(os.path.join(state[k]['fd'], frame_name(n[:11], sat, k[1], band)))]
         if not mine: return 0
         raw = None
         for base in (EDGE, NESDIS):
             try:
                 raw = get('%s%s/ABI/FD/%s/%s' % (base, sat, band, n), 120)
-                if len(raw) > 200000: break
+                if len(raw) > 100000: break
             except Exception:
                 raw = None
         if not raw: print('  %s %s: full disk did not download' % (sat, n)); return 0
         im = Image.open(io.BytesIO(raw)); im.load(); im = im.convert('RGB')
         for k in mine:
             try:
-                l, t, r, b = fdgeo.crop(*k)
+                l, t, r, b = fdgeo.crop(sat, k[1], N)
                 if l < 0 or t < 0 or r > im.width or b > im.height:
                     # a wide sector (np, ep, taw) runs past the edge of the disk: cut with black beyond it, then scale
                     L, T = math.floor(l), math.floor(t)
@@ -148,22 +179,42 @@ def main():
             except Exception as e:
                 print('  %s %s %s: cut failed: %s' % (sat, k[1], n[:11], e))
         return 1
-    jobs = sorted({(sat, n) for sat in plan for n in plan[sat][1]}, key=lambda j: j[1], reverse=True)   # newest first
+    jobs = sorted({(k[0], k[1], n) for k in plan for n in plan[k][1]}, key=lambda j: j[2], reverse=True)   # newest first
     if os.environ.get('GV_MAXFD'): jobs = jobs[:int(os.environ['GV_MAXFD'])]   # a quick local test: only the newest few
+    t_start = time.time()
     with ThreadPoolExecutor(3) as ex: got = sum(ex.map(cut, jobs))
     print('full disks downloaded: %d' % got, flush=True)
+    # 3b. the raw scans (B13, Air Mass), newest first, in processes (netCDF4 is not thread-safe), within the time budget
+    raw_jobs.sort(key=lambda j: j[0], reverse=True)
+    if os.environ.get('GV_MAXFD'): raw_jobs = raw_jobs[:int(os.environ['GV_MAXFD'])]
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    done_n = skipped = 0
+    with ProcessPoolExecutor(4) as px:
+        futs = {px.submit(rawbands.cut_scene, j[1]): j[1] for j in raw_jobs}
+        for f in as_completed(futs):
+            sat, band, _k, outs = futs[f]
+            if f.cancelled(): continue
+            try:
+                f.result(); done_n += 1
+                for sector, _p in outs: state[(sat, sector, band)]['new'] += 1
+            except Exception as e:
+                print('  raw %s %s: %s' % (sat, band, e))
+            if time.time() - t_start > BUDGET_S:
+                for g in futs:
+                    if g.cancel(): skipped += 1
+    print('raw scans rendered: %d, left for the next run: %d' % (done_n, skipped), flush=True)
     # 4. per sector: the tar for next time, the videos, the poster, the manifest
     def finish(k):
-        S = state[k]; sat, sector = k; work, fd, key, old = S['work'], S['fd'], S['key'], S['old']
+        S = state[k]; sat, sector, BAND = k; work, fd, key, old = S['work'], S['fd'], S['key'], S['old']
         got = [f for f in S['want'] if os.path.exists(os.path.join(fd, f))]
         if len(got) < 2: return 'no frames'
-        if old and old.get('src') == 'fd' and (old.get('d') or {}).get('frames', [None])[-1:] == [got[-1]] and old.get('m') and not S['new']:
+        if old and old.get('src') == S['src'] and (old.get('d') or {}).get('frames', [None])[-1:] == [got[-1]] and old.get('m') and not S['new']:
             return 'no new frame (kept)'
         if S['new'] and not DRY:
             subprocess.run(['tar', '-cf', S['tar_local'], '-C', fd] + got, check=True)
             r2('cp', S['tar_local'], 's3://%s/%s' % (BUCKET, S['tar_key']), '--content-type', 'application/x-tar', '--cache-control', 'no-store')
         newest = got[-1][:11]
-        man = {'at': int(time.time()), 'sat': sat, 'sector': sector, 'band': S['band'], 'fps': FPS, 'src': 'fd', 'step': STEP,
+        man = {'at': int(time.time()), 'sat': sat, 'sector': sector, 'band': S['band'], 'fps': FPS, 'src': S['src'], 'step': S['step'],
                'overlay': '/satmaps/%s-%s.png?v=%d' % (sat, sector, OVERLAY_V), 'w': fdgeo.OUT_W, 'h': fdgeo.OUT_H}
         for kk, K in KINDS.items():
             use = [n for n in got if stamp_ms(n) > stamp_ms(got[-1]) - K['hours'] * 3600e3]
@@ -190,7 +241,7 @@ def main():
         p = os.path.join(work, 'latest.json'); json.dump(man, open(p, 'w'), separators=(',', ':'))
         if DRY:
             for f in [man[kk]['mp4'] for kk in KINDS if kk in man] + [man['poster'], 'latest.json']:
-                os.replace(os.path.join(work, f), os.path.join(root, '%s_%s_%s' % (sat, sector, f)))
+                os.replace(os.path.join(work, f), os.path.join(root, '%s_%s_%s_%s' % (sat, sector, BAND, f)))
             return 'dry, %d new; ' % S['new'] + ', '.join('%s %d frames %.1f MB' % (kk, len(man[kk]['frames']), man[kk]['bytes'] / 1e6) for kk in KINDS if kk in man)
         r2('cp', p, 's3://%s/%slatest.json' % (BUCKET, key), '--content-type', 'application/json', '--cache-control', 'public, max-age=60')
         keep = {(man.get(kk) or {}).get('mp4') for kk in KINDS} | {((old or {}).get(kk) or {}).get('mp4') for kk in KINDS} \
@@ -203,7 +254,7 @@ def main():
         t = time.time()
         try: r = finish(k)
         except Exception as e: r = 'FAILED %s' % e
-        print('%s %-4s %s (%.0f s)' % (k[0], k[1], r, time.time() - t), flush=True)
+        print('%s %-4s %-8s %s (%.0f s)' % (k[0], k[1], k[2], r, time.time() - t), flush=True)
         return r
     with ThreadPoolExecutor(4) as ex: res = list(ex.map(one, list(state)))
     if all(str(r).startswith('FAILED') or r == 'no frames' for r in res): sys.exit(1)

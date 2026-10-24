@@ -13,12 +13,12 @@ import math
 
 REQ, RPOL, H = 6378137.0, 6356752.31414, 42164160.0
 E2 = 0.0066943800229
-LON0 = {'GOES19': -75.2, 'GOES18': -137.0}
+LON0 = {'GOES19': -75.0, 'GOES18': -137.0}   # the grid's own reference (goes_imager_projection in NOAA's files), not the -75.2 the craft sits at
 N = 10848
 D = 0.000028                             # 28 urad: the 10848 grid's pixel spacing
 X0 = -0.151872                           # left EDGE of the full disk (pixel 0's left side), radians
 Y0 = 0.151872                            # top edge
-FIT = {'GOES19': (-16.0, 0.0), 'GOES18': (0.0, 0.0)}   # (dx, dy) in 10848 px: coastline fit on clear daytime disks 10-23 (G19 -16 in both the NE and the Gulf, matching SLIDER's CONUS; G18 0 on California and Hawaii)
+FIT = {'GOES19': (0.0, 0.0), 'GOES18': (0.0, 0.0)}   # (dx, dy) in 10848 px: coastline fit on clear daytime disks 10-23, 0 for both once LON0 is the grid's own -75.0 (with -75.2 it read a uniform -16 px)
 
 
 def geos(lat, lon, sat):
