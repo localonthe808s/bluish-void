@@ -51,7 +51,7 @@ EDGE, NESDIS = 'https://tiles.bluishvoid.com/goes/', 'https://cdn.star.nesdis.no
 BUCKET, PREFIX = 'bluishvoid-bg', 'goes/video/'
 KINDS = {'d': {'hours': 6, 'crf': 22, 'g': 4, 'w': fdgeo.OUT_W},
          'm': {'hours': 2, 'crf': 23, 'g': 1, 'w': fdgeo.OUT_W // 2}}
-OVERLAY_V = 3          # /satmaps/<sat>-<sector>.png?v= -- bump with satmaps_bake.py
+OVERLAY_V = 4          # /satmaps/<sat>-<sector>.png?v= -- bump with satmaps_bake.py
 UA = {'User-Agent': 'bluishvoid.com satellite loop bake'}
 DRY = '--dry' in sys.argv
 ONLY = sys.argv[sys.argv.index('--dry') + 1] if DRY and len(sys.argv) > sys.argv.index('--dry') + 1 else None

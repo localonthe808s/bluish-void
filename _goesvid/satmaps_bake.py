@@ -71,7 +71,8 @@ def main():
     coast = [carcs[i] for i in range(len(carcs)) if cuse.get(i) == 1]
     borders = [carcs[i] for i in range(len(carcs)) if cuse.get(i, 0) >= 2]
     states = [sarcs[i] for i in range(len(sarcs)) if suse.get(i, 0) >= 2]
-    names = [c for c in city_labels() if c[3] != 'water'] + [c + [None] for c in FAR]
+    # 2026-10-24: no names in the image any more -- the page draws our map's own names live, one size at any zoom
+    names = []
     # d: desktop, twice the frame; m: phones, which show the frame about 630 CSS px wide (cover-fit in a near-square box),
     # so the same frame size with type and lines about 2.5x heavier relative to it
     for var, S, FS, LW in (('', 2, 35, 1.0), ('-m', 1, 25, 2.2)):
