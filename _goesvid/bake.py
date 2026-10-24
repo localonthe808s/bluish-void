@@ -86,7 +86,10 @@ def fd_listing(sat, band, size):
 
 
 def r2(*args, check=True):
-    cmd = ['aws', 's3'] + list(args) + ['--endpoint-url', 'https://%s.r2.cloudflarestorage.com' % os.environ['R2_ACCOUNT_ID'], '--only-show-errors']
+    # (`s3 ls` rejects --only-show-errors: with it the disposal's listing failed silently and old videos piled up to the
+    #  bucket's one-day rule -- 34.6 GB under goes/video on 2026-10-24)
+    cmd = ['aws', 's3'] + list(args) + ['--endpoint-url', 'https://%s.r2.cloudflarestorage.com' % os.environ['R2_ACCOUNT_ID']] \
+        + ([] if args[0] == 'ls' else ['--only-show-errors'])
     return subprocess.run(cmd, check=check, capture_output=True, text=True)
 
 
