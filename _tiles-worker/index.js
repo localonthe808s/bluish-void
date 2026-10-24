@@ -74,7 +74,11 @@ export default {
        downloaded the whole loop again (6 h = 72 frames, ~64 MB at 1200 px), and their outage of 10-20 left it blank. A frame's
        name carries its UTC time and never changes, so each is kept at the edge and in the browser for a year; the directory
        listing is what changes (a frame every 5 min), so it is kept 60 s. Only the sector imagery paths are passed. */
-    const gm = url.pathname.match(/^\/goes\/(GOES1[6-9])\/(ABI|GLM)\/SECTOR\/([a-z]{2,4})\/([A-Za-z0-9]{2,32})\/(\d{11}_GOES1[6-9]-(?:ABI|GLM)-[a-z]{2,4}-[A-Za-z0-9]{2,32}-\d{3,4}x\d{3,4}\.jpg)?$/);
+    /* + THE FULL DISK (2026-10-23): the satellite loop's videos are now cut from NESDIS's full-disk GeoColor, which has no
+       state lines in it (_goesvid/bake.py); the GitHub runner cannot reach NESDIS, so it reads them through here too. The
+       21696 px rendition (~70 MB) is not passed. */
+    const gm = url.pathname.match(/^\/goes\/(GOES1[6-9])\/(ABI|GLM)\/(?:SECTOR\/([a-z]{2,4})|FD)\/([A-Za-z0-9]{2,32})\/(\d{11}_GOES1[6-9]-(?:ABI|GLM)-(?:[a-z]{2,4}|FD)-[A-Za-z0-9]{2,32}-\d{3,5}x\d{3,5}\.jpg)?$/);
+    if (gm && gm[5] && /-21696x/.test(gm[5])) return new Response(null, { status: 404, headers: { ...cors, 'Cache-Control': 'no-store' } });
     if (gm){
       const file = gm[5] || '', listing = !file;
       /* the listing's key carries the minute: a stored copy came back with the zone's 4 h TTL in place of the 60 s asked for,
@@ -83,7 +87,7 @@ export default {
       let hit = await cache.match(key), tag = 'HIT';
       if (!hit){
         tag = 'MISS';
-        const up = await fetch('https://cdn.star.nesdis.noaa.gov/' + gm[1] + '/' + gm[2] + '/SECTOR/' + gm[3] + '/' + gm[4] + '/' + file, { headers: { 'User-Agent': 'bluishvoid.com satellite loop cache' } });
+        const up = await fetch('https://cdn.star.nesdis.noaa.gov/' + gm[1] + '/' + gm[2] + (gm[3] ? '/SECTOR/' + gm[3] : '/FD') + '/' + gm[4] + '/' + file, { headers: { 'User-Agent': 'bluishvoid.com satellite loop cache' } });
         if (!up.ok) return new Response(null, { status: up.status === 404 ? 404 : 502, headers: { ...cors, 'Cache-Control': 'no-store' } });
         let body = await up.arrayBuffer();
         if (listing){
