@@ -1,0 +1,93 @@
+name: Map style re-bake
+
+# The LIVE radar views draw over baked maps: /radarmaps/*.jpg in the repo (NATIONWIDE and the far regions) and one JPEG per
+# NEXRAD station on the CDN (radarmaps/sta/<style>/, NEAREST). They are pictures of the style code fenced with MAPSTYLE in
+# index.html, so when that code changes they must be drawn again (user 2026-10-24: "Upkeep: the station maps are fixed
+# images..." -> do it automatically).
+#
+# On every push that touches index.html: _maplab/mapstyle.py hashes the fenced code. Same as window.BV_MAPSTYLE -> nothing to
+# do (a few seconds). Different -> serve the repo on localhost:8000, bake every map with the page's own stitcher
+# (_maplab/radarmaps_bake.py, _maplab/stamaps_bake.py), upload the stations to R2 under the new fingerprint, and commit the
+# regions plus the new BV_MAPSTYLE. The page keeps loading the old set until that commit lands, so it is never half-baked.
+#
+# Uses the same R2 secrets as goes-video.yml: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY.
+
+on:
+  push:
+    branches: [main]
+    paths: ['index.html', '_maplab/mapstyle.py', '_maplab/radarmaps_bake.py', '_maplab/stamaps_bake.py']
+  workflow_dispatch: {}
+
+concurrency:
+  group: mapstyle
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  bake:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Is a re-bake due?
+        id: check
+        run: |
+          if python3 _maplab/mapstyle.py --check; then echo "due=no" >> "$GITHUB_OUTPUT"; else echo "due=yes" >> "$GITHUB_OUTPUT"; fi
+          echo "fp=$(python3 _maplab/mapstyle.py)" >> "$GITHUB_OUTPUT"
+
+      - name: Browser
+        if: steps.check.outputs.due == 'yes'
+        run: |
+          pip3 install --quiet --break-system-packages playwright pillow
+          python3 -m playwright install --with-deps chromium >/dev/null
+
+      - name: Bake
+        if: steps.check.outputs.due == 'yes'
+        run: |
+          set -euo pipefail
+          python3 -m http.server 8000 >/dev/null 2>&1 &
+          sleep 2
+          python3 _maplab/radarmaps_bake.py | tee /tmp/regions.log
+          python3 _maplab/stamaps_bake.py /tmp/sta | tee /tmp/stations.log
+          n=$(ls /tmp/sta/*.jpg | wc -l)
+          want=$(python3 -c "import re;s=open('index.html').read();i=s.index('var RADAR_SITES = [');print(len(re.findall(r'id:\"([A-Z0-9]{4})\"',s[i:s.index('];',i)])))")
+          echo "stations baked: $n of $want"
+          if grep -q FAILED /tmp/regions.log /tmp/stations.log || [ "$n" -ne "$want" ]; then echo "incomplete bake, not publishing"; exit 1; fi
+
+      - name: Upload stations
+        if: steps.check.outputs.due == 'yes'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          aws s3 cp /tmp/sta "s3://bluishvoid-bg/radarmaps/sta/${{ steps.check.outputs.fp }}/" --recursive \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" --only-show-errors \
+            --content-type image/jpeg --cache-control "public, max-age=31536000, immutable"
+
+      - name: Commit the regions and the new style
+        if: steps.check.outputs.due == 'yes'
+        run: |
+          set -euo pipefail
+          fp="${{ steps.check.outputs.fp }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          tmp=$(mktemp -d); cp radarmaps/*.jpg "$tmp"/
+          for i in 1 2 3 4; do
+            python3 _maplab/mapstyle.py --write >/dev/null
+            git add radarmaps/*.jpg index.html
+            git diff --cached --quiet && { echo "nothing to commit"; exit 0; }
+            git commit -m "Map style $fp: re-baked the radar maps (regions + 156 stations)"
+            git push && exit 0
+            echo "push rejected, replaying onto origin/main (attempt $i)"
+            git fetch origin main
+            git reset --hard origin/main
+            # the style moved again meanwhile: leave it to the run that push started
+            [ "$(python3 _maplab/mapstyle.py)" = "$fp" ] || { echo "style changed upstream; skipping"; exit 0; }
+            cp "$tmp"/*.jpg radarmaps/
+          done
+          exit 1
