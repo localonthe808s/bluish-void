@@ -56998,14 +56998,18 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   window._paintContinental = window._paintSatButtons;
 
   // ── Reload GOES frames ──
+  /* A RELOAD DURING A FETCH IS QUEUED, NOT DROPPED (2026-10-24): fetchGoesFrames returns at once while one is in flight, so two quick
+     picks (Meteosat, then GeoColor) played the first pick's frames; the second now runs when the first lands */
+  var _goesReloadQ = false;
   function reloadGoes(){
+    if (_goesIsFetching){ _goesReloadQ = true; return; }
     if (goesAnimId) { cancelAnimationFrame(goesAnimId); goesAnimId = null; }
     var overlay = document.getElementById('goes-loading-overlay');
     if (overlay) { overlay.style.display = 'flex'; overlay.style.opacity = '1'; }
     goesFrames = [];
     goesImages = [];
     goesIdx = 0;
-    fetchGoesFrames().then(function(){ preloadGoesImages(); });
+    fetchGoesFrames().then(function(){ if (_goesReloadQ){ _goesReloadQ = false; reloadGoes(); return; } preloadGoesImages(); });
   }
 
   var _goesIsFetching = false;
@@ -57280,10 +57284,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
      video is loaded whole (a blob, so every seek is local) and handed to the SAME flipbook: frame i is the video at
      (i + 0.5) / fps, so the time label, the overlay, the zoom and the hold at the end are unchanged. Anything else, or any
      failure, falls through to the frames. */
-  var GOES_VID = { GOES19: ' conus ne se cgl umv smv sp nr sr eus taw pr ', GOES18: ' pnw psw np ep ', GOESV: ' na ' };
-  /* the satellite codes the page keeps (G19, G18, and GV: the merged East + West view, mergedisk.py) and the bake's names */
-  window._goesSatN = function(c){ return c === 'G18' ? 'GOES18' : c === 'GV' ? 'GOESV' : 'GOES19'; };
-  window._goesSatC = function(n){ return n === 'GOES18' ? 'G18' : n === 'GOESV' ? 'GV' : 'G19'; };
+  var GOES_VID = { GOES19: ' conus ne se cgl umv smv sp nr sr eus taw pr ', GOES18: ' pnw psw np ep ', GOESV: ' na ',
+    HIMAWARI: ' full_disk japan ', METEOSAT12: ' full_disk ' };      /* FORECASTS' Himawari / Meteosat GeoColor, sliderbake.py (2026-10-24) */
+  /* the satellite codes the page keeps (G19, G18, GV: the merged East + West view, mergedisk.py; H9 / M12: FORECASTS' Himawari-9 and
+     Meteosat-12) and the bake's names */
+  window._goesSatN = function(c){ return c === 'G18' ? 'GOES18' : c === 'GV' ? 'GOESV' : c === 'H9' ? 'HIMAWARI' : c === 'M12' ? 'METEOSAT12' : 'GOES19'; };
+  window._goesSatC = function(n){ return n === 'GOES18' ? 'G18' : n === 'GOESV' ? 'GV' : n === 'HIMAWARI' ? 'H9' : n === 'METEOSAT12' ? 'M12' : 'G19'; };
   function _goesStampMs(n){ var m = /(\d{4})(\d{3})(\d{2})(\d{2})_/.exec(n || ''); return m ? Date.UTC(+m[1], 0, 1) + (+m[2] - 1) * 864e5 + (+m[3]) * 36e5 + (+m[4]) * 6e4 : NaN; }
   function _goesVideoTry(onProgress, done){
     var tok0 = _goesVidTok;
@@ -57291,7 +57297,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     /* GeoColor, and since 2026-10-23 B13 and Air Mass (rendered from NOAA's own data, _goesvid/rawbands.py) and GLM
        lightning (our GeoColor with the flashes of each frame's 10 minutes drawn over it, _goesvid/glm.py) */
     var vBand = goesCurrentBand;
-    if (vBand !== 'GEOCOLOR' || (window._fcGoesOn && window._fcGoesOn())   /* LIVE is GeoColor only (2026-10-24): B13 + GLM no longer baked */ || (GOES_VID[sat] || '').indexOf(' ' + sec + ' ') < 0
+    var slv = (sat === 'HIMAWARI' || sat === 'METEOSAT12') && vBand === 'geocolor';   /* baked even in FORECASTS: SLIDER's own frames jump 10 min */
+    if ((!slv && (vBand !== 'GEOCOLOR' || (window._fcGoesOn && window._fcGoesOn())))   /* LIVE is GeoColor only (2026-10-24): B13 + GLM no longer baked */ || (GOES_VID[sat] || '').indexOf(' ' + sec + ' ') < 0
         || (window._goesMapMode && window._goesMapMode()) || !window.fetch || !window.URL || !URL.createObjectURL){
       window._goesFdLoop = false; window._goesCrop = null;   /* a NOAA loop: not on our full-disk grid (the flag outlived GEOCOLOR) */
       done(null); return; }
@@ -57304,11 +57311,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       /* CUT FROM THE FULL DISK (2026-10-23, bake.py): no NESDIS lines in the pixels, our map drawn over them from
          M.overlay, frames 10 min apart. NESDIS publishes the full disk ~20 min after its time (the sectors ~5), and the
          bake runs every 10, so it trails the sector listing by 15-35 min: allowed 45, not 20 */
-      var fd = M.src === 'fd' || M.src === 'raw';   /* raw: B13 / Air Mass from the L2 files, fresher than the pictures were */
+      var fd = M.src === 'fd' || M.src === 'raw' || M.src === 'slider';   /* raw: B13 / Air Mass from the L2 files; slider: Himawari / Meteosat (no grid, no map) */
+      if (M.src === 'slider') window._goesVidOverlay = null;           /* LIVE's map must not ride over Himawari */
       window._goesCrop = fd && M.crop ? M.crop : null;
       if (_goesStampMs(newest.split('/').pop()) - _goesStampMs(K.frames[K.frames.length - 1]) > (fd ? 45 : 20) * 60e3) return end(null);
       if (fd){
-        window._goesFdLoop = true; window._goesStepMin = M.step || 10;
+        window._goesFdLoop = true; window._goesStepMin = K.step || M.step || 10;   /* phones' loop has its own step (fewer in-betweens, 2026-10-24) */
         if (M.src === 'raw' && window._bvGoesSrc && window._bvSrc){
           try { window._bvLiveSrc = window._bvGoesSrc.concat([['NOAA GOES ' + (sat === 'GOES18' ? '18' : '19') + ' ABI L2 \u00b7 OPEN DATA', 'https://registry.opendata.aws/noaa-goes/']]); window._bvSrc(window._bvLiveSrc); } catch(e){}
         }
@@ -57765,7 +57773,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         if (ZV.v) ZV.v = _zvConv(ZV.v, satN0, satN);
         goesCurrentSat = newC; window._goesSat = newC; if (window._paintGoesSatBtns) window._paintGoesSatBtns(newC);
       }
-      goesCurrentSector = sec; window._goesCrop = R.M.crop; window._goesFdLoop = true; window._goesStepMin = R.M.step || 10;
+      goesCurrentSector = sec; window._goesCrop = R.M.crop; window._goesFdLoop = true; window._goesStepMin = R.K.step || R.M.step || 10;
       if (ZV.v && opt.widen){ var wx = (ZV.v[0] + ZV.v[2]) / 2, wy = (ZV.v[1] + ZV.v[3]) / 2, ww = (ZV.v[2] - ZV.v[0]) * opt.widen / 2, wh = (ZV.v[3] - ZV.v[1]) * opt.widen / 2; ZV.v = [wx - ww, wy - wh, wx + ww, wy + wh]; }
       if (ZV.v) _zvSet(ZV.v);         /* held inside the new loop's frame */
       var ovU = R.M.overlay && (_goesMobile ? R.M.overlay.replace(/\.png(\?|$)/, '-m.png$1') : R.M.overlay);
@@ -57935,7 +57943,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (window._goesVideoLoop && window._goesFdLoop && (window._goesStepMin || 5) > 5) FRAME_MS = Math.round(150 * Math.min(2, window._goesStepMin / 5 * 0.75));
     /* SMOOTHER (2026-10-24): GeoColor carries three computed in-betweens per 10 min (step 2.5): each shows a quarter as long, so the
        6 h still plays in the same ~8 s. 1.5x slower (user 2026-10-24: "every 10 minutes fly by"): 340 ms per 10 min, ~12 s a loop */
-    if (window._goesVideoLoop && window._goesFdLoop && (window._goesStepMin || 5) < 5) FRAME_MS = Math.max(40, Math.round(340 * window._goesStepMin / 10));
+    if (window._goesVideoLoop && window._goesFdLoop && (window._goesStepMin || 10) < 9) FRAME_MS = Math.max(40, Math.round(340 * window._goesStepMin / 10));   /* phones' 5-min step too (2026-10-24) */
     var HOLD_MS = 2000;       // hold last frame 2s (source player pauses too)
     var DIP_MS = 200;         // opacity dip duration on loop restart
     var holdStart = 0;
@@ -75505,6 +75513,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
   })();
 
   function loadFcastRadar(){
+    try { _fcastWarmAll(); } catch(e){}
     var fhrs = getActiveFhrs();
     var imgA = document.getElementById('fcast-radar-img');
     var imgB = document.getElementById('fcast-radar-img-b');
@@ -75693,6 +75702,24 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
     var fhrs = getActiveFhrs();
     fcastState.idx = Math.max(0, Math.min(fhrs.length - 1, fcastState.idx + dir));
     loadFcastRadar();
+  }
+
+  /* THE WHOLE LOOP AT ONCE (2026-10-24, user: "make the forecast videos ... play smoothly"): measured, every model frame was already
+     an edge HIT, but the player asked for one frame per tick, so the first pass waited on each (17 frames trickled in over 14 s,
+     2.5 s stalls). When a model loop opens (model / product / area / range / run), all its frames are fetched now, six at a time,
+     and held, so the browser has them by the time the loop gets there. The radar-now loop (live) keeps its own logic. */
+  var _fcastWarmKey = '', _fcastWarm = [];
+  function _fcastWarmAll(){
+    if (fcastState.range === 'live' || fcastState.range === 'clouds') return;
+    var fhrs = getActiveFhrs(); if (!fhrs || !fhrs.length) return;
+    var key = [fcastState.model, fcastState.product, fcastState.area, fcastState.range, fcastState.cycle, fhrs.length].join('|');
+    if (key === _fcastWarmKey) return;
+    _fcastWarmKey = key; _fcastWarm = [];
+    var old = fcastState.idx, urls = [];
+    for (var i = 0; i < fhrs.length; i++){ fcastState.idx = i; try { var u = buildFcastUrl(i); if (u) urls.push(u); } catch(e){} }
+    fcastState.idx = old;
+    var k = 0, next = function(){ if (key !== _fcastWarmKey || k >= urls.length) return; var im = new Image(); im.onload = im.onerror = next; im.src = urls[k++]; _fcastWarm.push(im); };
+    for (var j = 0; j < 6; j++) next();
   }
 
   // Preload next frame in background
