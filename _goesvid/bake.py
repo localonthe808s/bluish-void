@@ -24,7 +24,7 @@ who read the old latest.json a moment ago); an R2 lifecycle rule deletes anythin
     python3 _goesvid/bake.py            # all sectors (needs ffmpeg, Pillow, the aws cli and the R2 env: R2_ACCOUNT_ID, AWS_* keys)
     python3 _goesvid/bake.py --dry ne   # one sector, no upload: writes the videos to /tmp/goesvid
 """
-import io, json, math, os, re, subprocess, sys, tempfile, time, urllib.request
+import io, json, math, os, re, shutil, subprocess, sys, tempfile, time, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from PIL import Image
@@ -49,8 +49,10 @@ BAND_ONLY = sys.argv[sys.argv.index('--band') + 1] if '--band' in sys.argv else 
 FB_BAND = 'DayNightCloudMicroCombo'
 EDGE, NESDIS = 'https://tiles.bluishvoid.com/goes/', 'https://cdn.star.nesdis.noaa.gov/'
 BUCKET, PREFIX = 'bluishvoid-bg', 'goes/video/'
-KINDS = {'d': {'hours': 6, 'crf': 22, 'g': 4, 'w': fdgeo.OUT_W},
-         'm': {'hours': 2, 'crf': 23, 'g': 1, 'w': fdgeo.OUT_W // 2}}
+# keyframe spacing: the page PLAYS the video now (2026-10-24) instead of seeking every frame, so keyframes can sit further
+# apart (smaller files with 4x the frames); still close enough that a zoom swap or the seek fallback lands quickly
+KINDS = {'d': {'hours': 6, 'crf': 25, 'g': 12, 'w': fdgeo.OUT_W},   # crf 25: ~13 MB for 6 h with in-betweens (22 was ~18)
+         'm': {'hours': 2, 'crf': 23, 'g': 8, 'w': fdgeo.OUT_W // 2}}
 OVERLAY_V = 4          # /satmaps/<sat>-<sector>.png?v= -- bump with satmaps_bake.py
 UA = {'User-Agent': 'bluishvoid.com satellite loop bake'}
 DRY = '--dry' in sys.argv
@@ -86,6 +88,28 @@ def fd_listing(sat, band, size):
 def r2(*args, check=True):
     cmd = ['aws', 's3'] + list(args) + ['--endpoint-url', 'https://%s.r2.cloudflarestorage.com' % os.environ['R2_ACCOUNT_ID'], '--only-show-errors']
     return subprocess.run(cmd, check=check, capture_output=True, text=True)
+
+
+INTERP = 3              # computed frames between each pair of real GEOCOLOR frames (user 2026-10-24: "make it run smoother")
+
+
+def inbetweens(fd, a, b):
+    """motion-compensated frames between real frames a and b (ffmpeg minterpolate), saved as <a>_i1.._i3.jpg next to them.
+    Named with a's time, so the page's clock only ever shows real frame times. ~1 s a pair."""
+    outs = [os.path.join(fd, a[:-4] + '_i%d.jpg' % k) for k in range(1, INTERP + 1)]
+    if all(os.path.exists(o) for o in outs): return False
+    d = tempfile.mkdtemp()
+    try:
+        for i, src in enumerate((a, b, b)):
+            os.symlink(os.path.join(fd, src), os.path.join(d, '%d.jpg' % i))
+        subprocess.run(['ffmpeg', '-v', 'error', '-y', '-framerate', '1', '-i', os.path.join(d, '%d.jpg'), '-vf',
+                        'minterpolate=fps=%d:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1' % (INTERP + 1),
+                        '-fps_mode', 'passthrough', '-q:v', '3', os.path.join(d, 'o_%02d.jpg')], check=True, timeout=60)
+        for k in range(1, INTERP + 1):
+            os.replace(os.path.join(d, 'o_%02d.jpg' % (k + 1)), outs[k - 1])   # o_01 is a itself; o_02..o_04 the in-betweens
+        return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def frame_name(stamp, sat, sector, band):
@@ -128,8 +152,9 @@ def main():
                 except Exception: old = None
             if r2('cp', 's3://%s/%s' % (BUCKET, tar_key), tar_local, check=False).returncode == 0:
                 subprocess.run(['tar', '-xf', tar_local, '-C', fd], check=False)
+        wset = set(want)
         for f in os.listdir(fd):
-            if f not in set(want): os.remove(os.path.join(fd, f))
+            if f not in wset and re.sub(r'_i\d\.jpg$', '.jpg', f) not in wset: os.remove(os.path.join(fd, f))   # an in-between lives as long as its frame
         state[(sat, sector, BAND)] = {'work': work, 'fd': fd, 'key': key, 'tar_key': tar_key, 'tar_local': tar_local, 'old': old,
                                       'want': want, 'band': band, 'new': 0, 'step': step, 'src': src}
     pending = []           # every loop's state is fetched from R2 in parallel below (one by one it took ~2.5 min of a run)
@@ -262,10 +287,28 @@ def main():
         S = state[k]; sat, sector, BAND = k; work, fd, key, old = S['work'], S['fd'], S['key'], S['old']
         got = [f for f in S['want'] if os.path.exists(os.path.join(fd, f))]
         if len(got) < 2: return 'no frames'
-        if old and old.get('src') == S['src'] and (old.get('d') or {}).get('frames', [None])[-1:] == [got[-1]] and old.get('m') and not S['new']:
+        # SMOOTHER (2026-10-24): GeoColor's real frames are 10 min apart; three computed in-betweens per pair, newest pairs first,
+        # within the run's time budget (a pair left for later just plays without them)
+        made = 0
+        if BAND == 'GEOCOLOR' and S['src'] == 'fd':
+            for i in range(len(got) - 2, -1, -1):
+                if time.time() - t_start > BUDGET_S + 120: break
+                try:
+                    if inbetweens(fd, got[i], got[i + 1]): made += 1
+                except Exception as e:
+                    print('  %s %s in-between failed: %s' % (sat, sector, e)); break
+        def seq(names):
+            out = []
+            for i, n in enumerate(names):
+                out.append(n)
+                if i < len(names) - 1:
+                    ib = [n[:-4] + '_i%d.jpg' % k for k in range(1, INTERP + 1)]
+                    if all(os.path.exists(os.path.join(fd, x)) for x in ib): out += ib
+            return out
+        if old and old.get('src') == S['src'] and (old.get('d') or {}).get('frames', [None])[-1:] == [got[-1]] and old.get('m') and not S['new'] and not made:
             return 'no new frame (kept)'
-        if S['new'] and not DRY:
-            subprocess.run(['tar', '-cf', S['tar_local'], '-C', fd] + got, check=True)
+        if (S['new'] or made) and not DRY:
+            subprocess.run(['tar', '-cf', S['tar_local'], '-C', fd] + sorted(os.listdir(fd)), check=True)
             r2('cp', S['tar_local'], 's3://%s/%s' % (BUCKET, S['tar_key']), '--content-type', 'application/x-tar', '--cache-control', 'no-store')
         newest = got[-1][:11]
         man = {'at': int(time.time()), 'sat': sat, 'sector': sector, 'band': S['band'], 'fps': FPS, 'src': S['src'], 'step': S['step'],
@@ -273,8 +316,9 @@ def main():
                # where the loop sits on its satellite's full-disk grid (10848 px): the page zooms across loops with it
                'crop': [round(v, 1) for v in fdgeo.crop(sat, sector)]}
         for kk, K in KINDS.items():
-            use = [n for n in got if stamp_ms(n) > stamp_ms(got[-1]) - K['hours'] * 3600e3]
-            if len(use) < 2: continue
+            real = [n for n in got if stamp_ms(n) > stamp_ms(got[-1]) - K['hours'] * 3600e3]
+            if len(real) < 2: continue
+            use = seq(real)
             lst = os.path.join(work, 'list_%s.txt' % kk)
             open(lst, 'w').write(''.join("file '%s'\nduration %.3f\n" % (os.path.join(fd, n), 1.0 / FPS) for n in use) + "file '%s'\n" % os.path.join(fd, use[-1]))
             vf = ['-vf', 'scale=%d:-2' % K['w']] if K['w'] != fdgeo.OUT_W else []
@@ -282,7 +326,8 @@ def main():
             subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', lst] + vf +
                            ['-r', str(FPS), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', str(K['crf']), '-g', str(K['g']), '-pix_fmt', 'yuv420p',
                             '-movflags', '+faststart', '-an', out], check=True)
-            man[kk] = {'mp4': os.path.basename(out), 'frames': use, 'size': '%dx%d' % (K['w'], K['w'] * fdgeo.OUT_H // fdgeo.OUT_W),
+            man['step'] = round(S['step'] * (len(real) - 1) / max(1, len(use) - 1), 3)   # minutes a video frame stands for
+            man[kk] = {'mp4': os.path.basename(out), 'frames': use, 'real': len(real), 'size': '%dx%d' % (K['w'], K['w'] * fdgeo.OUT_H // fdgeo.OUT_W),
                        'bytes': os.path.getsize(out), 'fetched': S['new']}
             if not DRY:
                 r2('cp', out, 's3://%s/%s%s' % (BUCKET, key, os.path.basename(out)), '--content-type', 'video/mp4',

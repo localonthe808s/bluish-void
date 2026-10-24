@@ -57281,6 +57281,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         v.addEventListener('error', function(){ end(null); });
         v.addEventListener('loadeddata', function(){
           var fps = M.fps || 10, dir = 'https://tiles.bluishvoid.com/goes/' + sat + '/ABI/SECTOR/' + sec + '/' + vBand + '/';
+          window._goesVidFps = fps;
+        window._goesVidFps = fps;
           end({ frames: K.frames.map(function(n){ return dir + n; }),
                 images: K.frames.map(function(n, i){ return { vid: v, t: (i + 0.5) / fps, complete: true, naturalWidth: v.videoWidth, naturalHeight: v.videoHeight }; }) });
         });
@@ -57562,7 +57564,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   /* NO PLACE NAMES ON THE SATELLITE (user 2026-10-24: "just remove the location titles"): the overlay images carry lines only */
   function drawGoesFrame(ctx, img, w, h){
     if (!img || !img.complete || !img.naturalWidth) return;
-    var _fdOv = (img.vid || img._fdPoster) && window._goesFdLoop ? window._goesVidOverlay : null;   /* our map, over the full-disk loop only */
+    var _fdOv = (img.vid || img._fdPoster || img._fdVid) && window._goesFdLoop ? window._goesVidOverlay : null;   /* our map, over the full-disk loop only */
     if (img.vid){                                       /* a frame of the baked video: seek, and draw once it lands */
       var v = img.vid;
       if (Math.abs(v.currentTime - img.t) > 0.02){
@@ -57636,10 +57638,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     var satN = _zvSat(), band = goesCurrentBand, kind = _goesMobile ? 'm' : 'd', base = 'https://cdn.bluishvoid.com/goes/video/' + satN + '/' + sec + '/' + band + '/';
     return fetch(base + 'latest.json?m=' + Math.floor(Date.now() / 60000)).then(function(r){ return r.ok ? r.json() : null; }).then(function(M){
       var K = M && M[kind]; if (!K || !K.mp4 || !M.crop) throw new Error('no loop');
-      return fetch(base + K.mp4).then(function(r){ if (!r.ok) throw new Error('mp4'); return r.blob(); }).then(function(bl){
-        return new Promise(function(res, rej){ var v = document.createElement('video'); v.muted = true; v.playsInline = true; v.preload = 'auto';
-          v.setAttribute('playsinline', ''); v.setAttribute('muted', ''); v.addEventListener('error', function(){ rej(new Error('video')); });
-          v.addEventListener('loadeddata', function(){ res({ M: M, K: K, v: v, base: base }); }); v.src = URL.createObjectURL(bl); }); }); });
+      /* STREAMED (2026-10-24): the swap starts as soon as the first frames arrive (Cloudflare serves the MP4 by byte range from its
+         edge), instead of waiting for all ~7 MB */
+      return new Promise(function(res, rej){ var v = document.createElement('video'); v.muted = true; v.playsInline = true; v.preload = 'auto'; v.crossOrigin = 'anonymous';
+        v.setAttribute('playsinline', ''); v.setAttribute('muted', ''); v.addEventListener('error', function(){ rej(new Error('video')); });
+        v.addEventListener('loadeddata', function(){ res({ M: M, K: K, v: v, base: base }); }); v.src = base + K.mp4; }); });
   }
   function _zvSwap(sec){
     if (ZV.loading === sec || sec === goesCurrentSector) return;
@@ -57650,6 +57653,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var cur = String(goesFrames[window._goesShownFrame || 0] || '').split('/').pop().slice(0, 11), fps = R.M.fps || 10, idx = R.K.frames.length - 1;
       if (cur) R.K.frames.forEach(function(n, i){ if (n.slice(0, 11) <= cur) idx = i; });
       var old = goesImages[0] && goesImages[0].vid;
+      try { if (old && !old.paused) old.pause(); } catch(e){}
+      window._goesVidFps = fps; try { R.v.currentTime = (idx + 0.5) / fps; } catch(e){}
       goesFrames = R.K.frames.map(function(n){ return R.base + n; });
       goesImages = R.K.frames.map(function(n, i){ return { vid: R.v, t: (i + 0.5) / fps, complete: true, naturalWidth: R.v.videoWidth, naturalHeight: R.v.videoHeight }; });
       goesCurrentSector = sec; window._goesCrop = R.M.crop; window._goesFdLoop = true; window._goesStepMin = R.M.step || 10;
@@ -57664,7 +57669,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   }
   var _zvT = null;
   function _zvSettle(){ clearTimeout(_zvT); _zvT = setTimeout(function(){
-    if (!ZV.v || !_SJ) return; var S = _SJ.sectors && _SJ.sectors[_zvSat()]; if (!S) return;
+    if (!ZV.v) return;
+    if (!_SJ){ _zvSectors().then(function(j){ if (j) _zvSettle(); }); return; }   /* first zoom can settle before the list arrives */
+    var S = _SJ.sectors && _SJ.sectors[_zvSat()]; if (!S) return;
     var V = ZV.v, tol = (V[2] - V[0]) * 0.02, best = null, bw = 1e9;
     Object.keys(S).forEach(function(k){ var c = S[k]; if (V[0] >= c[0] - tol && V[1] >= c[1] - tol && V[2] <= c[2] + tol && V[3] <= c[3] + tol && c[2] - c[0] < bw){ bw = c[2] - c[0]; best = k; } });
     if (!best){ var ov = -1; Object.keys(S).forEach(function(k){ var c = S[k], a = Math.max(0, Math.min(V[2], c[2]) - Math.max(V[0], c[0])) * Math.max(0, Math.min(V[3], c[3]) - Math.max(V[1], c[1])); if (a > ov){ ov = a; best = k; } }); }
@@ -57763,6 +57770,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     /* the full-disk loop's frames are 10 minutes apart, not 5: each stays up longer so the 6 h still takes about as long
        to play, without the motion turning into a slideshow (1.5x, not 2x) */
     if (window._goesVideoLoop && window._goesFdLoop && (window._goesStepMin || 5) > 5) FRAME_MS = Math.round(150 * Math.min(2, window._goesStepMin / 5 * 0.75));
+    /* SMOOTHER (2026-10-24): GeoColor carries three computed in-betweens per 10 min (step 2.5): each shows a quarter as long, so the
+       6 h still plays in the same ~8 s */
+    if (window._goesVideoLoop && window._goesFdLoop && (window._goesStepMin || 5) < 5) FRAME_MS = Math.max(40, Math.round(225 * window._goesStepMin / 10));
     var HOLD_MS = 2000;       // hold last frame 2s (source player pauses too)
     var DIP_MS = 200;         // opacity dip duration on loop restart
     var holdStart = 0;
@@ -57770,7 +57780,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     var _goesLastDrawnFrame = -1;
 
     var _gftEl = null, _gftLast = -1;
-    function drawFrameN(frame){
+    function drawFrameN(frame, live){
       window._goesShownFrame = frame;      // the zoom needs to know what is on screen
       /* The scrub time of the frame ON SCREEN, shown on the playback bar under
          the image, beside LIVE RADAR.
@@ -57801,6 +57811,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       }
       var pw = window._goesDisplaySize.w || goesCanvas.width;
       var ph = window._goesDisplaySize.h || goesCanvas.height;
+      /* SHARP ON RETINA (2026-10-24): the canvas was sized in CSS pixels, so a 2x screen showed it upscaled and soft */
+      var _dpr = Math.min(2, window.devicePixelRatio || 1);
+      if (window._goesDisplaySize.w){ pw = Math.round(window._goesDisplaySize.w * _dpr); ph = Math.round(window._goesDisplaySize.h * _dpr); }
       if (goesCanvas.width !== pw || goesCanvas.height !== ph){
         goesCanvas.width = pw;
         goesCanvas.height = ph;
@@ -57808,15 +57821,42 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       }
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       if (!(goesImages[frame] && goesImages[frame].vid)) ctx.clearRect(0, 0, pw, ph);   /* a video frame covers the canvas once its seek lands */
-      drawGoesFrame(ctx, goesImages[frame], pw, ph);
+      var _im = goesImages[frame];
+      /* playing natively (below): draw whatever the video shows now, no seek */
+      if (live && _im && _im.vid) _im = { _src: _im.vid, _fdVid: true, complete: true, naturalWidth: _im.naturalWidth, naturalHeight: _im.naturalHeight };
+      drawGoesFrame(ctx, _im, pw, ph);
     }
-    window._goesRedraw = function(){ var f = window._goesShownFrame || 0; if (goesImages[f]) drawFrameN(f); };
+    window._goesRedraw = function(){ var f = window._goesShownFrame || 0; if (goesImages[f]) drawFrameN(f, !!_natVid() && window._goesNativeOK !== false); };
+    /* THE LOOP PLAYS AS A VIDEO (2026-10-24, user: "make it run smoother"): the flipbook seeked the video to every frame, which
+       forced a keyframe every few frames and work on every step. Now the video PLAYS at the loop's pace (playbackRate) and each
+       animation frame draws what it shows -- the browser's own decoder, any keyframe spacing. The end still holds 2 s. If play()
+       is refused or the picture does not move, it drops back to the seek flipbook for the rest of the visit. */
+    var NAT = { hold: 0, t0: 0, c0: 0 };
+    function _natVid(){ var g = goesImages[0]; return g && g.vid ? g.vid : null; }
+    function animateVid(ts, v){
+      var fps = window._goesVidFps || 10, n = goesImages.length, rate = (1000 / FRAME_MS) / fps;
+      var cur = function(){ return Math.max(0, Math.min(n - 1, Math.floor(v.currentTime * fps))); };
+      if (!s.playing || window._goesSleeping){ if (!v.paused) v.pause(); drawFrameN(cur(), true); goesAnimId = requestAnimationFrame(animate); return; }
+      if (Math.abs(v.playbackRate - rate) > 0.001) v.playbackRate = rate;
+      if (NAT.hold){
+        if (ts - NAT.hold < HOLD_MS){ goesAnimId = requestAnimationFrame(animate); return; }
+        NAT.hold = 0; v.currentTime = 0;
+      }
+      if (v.paused){ NAT.t0 = ts; NAT.c0 = v.currentTime; var pr = v.play(); if (pr && pr.catch) pr.catch(function(){ window._goesNativeOK = false; }); }
+      else if (NAT.t0 && ts - NAT.t0 > 1500){ if (v.currentTime === NAT.c0) window._goesNativeOK = false; NAT.t0 = 0; }   /* stuck: back to seeking */
+      var f = cur();
+      if (v.ended || (f >= n - 1 && v.currentTime >= (v.duration || 0) - 1 / fps)){ v.pause(); f = n - 1; NAT.hold = ts; }
+      drawFrameN(f, true);
+      goesAnimId = requestAnimationFrame(animate);
+    }
 
     function animate(timestamp){
       // Always keep this closure as the latest resume target.
       window._goesResumeFn = animate;
       // Full pause (no rAF reschedule) when tab is hidden or canvas off-screen.
-      if (document.hidden || !window._goesCanvasVisible) { return; }
+      if (document.hidden || !window._goesCanvasVisible) { var _pv = _natVid(); if (_pv && !_pv.paused) _pv.pause(); return; }
+      var _nv = _natVid();
+      if (_nv && window._goesNativeOK !== false) return animateVid(timestamp, _nv);
       if (!s.playing || window._goesSleeping) { goesAnimId = requestAnimationFrame(animate); return; }
 
       if (!s.lastTime) s.lastTime = timestamp;
