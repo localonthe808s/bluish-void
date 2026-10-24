@@ -53,8 +53,10 @@ EDGE, NESDIS = 'https://tiles.bluishvoid.com/goes/', 'https://cdn.star.nesdis.no
 BUCKET, PREFIX = 'bluishvoid-bg', 'goes/video/'
 # keyframe spacing: the page PLAYS the video now (2026-10-24) instead of seeking every frame, so keyframes can sit further
 # apart (smaller files with 4x the frames); still close enough that a zoom swap or the seek fallback lands quickly
-KINDS = {'d': {'hours': 6, 'crf': 25, 'g': 12, 'w': fdgeo.OUT_W},   # crf 25: ~13 MB for 6 h with in-betweens (22 was ~18)
-         'm': {'hours': 2, 'crf': 23, 'g': 8, 'w': fdgeo.OUT_W // 2}}
+# 12 HOURS (user 2026-10-24: "lets extend to the 12 hour loop now for clouds ... since we're only relying on one now"): GeoColor is the
+# only loop baked, so the window doubles for desktop and phones; a notch more compression keeps the files near their 6 h sizes x1.5
+KINDS = {'d': {'hours': 12, 'crf': 27, 'g': 12, 'w': fdgeo.OUT_W},
+         'm': {'hours': 12, 'crf': 26, 'g': 8, 'w': fdgeo.OUT_W // 2}}
 OVERLAY_V = 5          # /satmaps/<sat>-<sector>.png?v= -- bump with satmaps_bake.py
 UA = {'User-Agent': 'bluishvoid.com satellite loop bake'}
 DRY = '--dry' in sys.argv
@@ -224,6 +226,7 @@ def main():
     # 3. the full disks any sector still lacks, each downloaded once and cut for every sector of its satellite
     def cut(job):
         sat, BAND, n = job
+        if time.time() - t_start > BUDGET_S: return 0      # newest first: the oldest wait for the next run (a 12 h refill is ~140 disks)
         band, _f, N = plan[(sat, BAND)]
         mine = [k for k in state if k[0] == sat and k[2] == BAND and not os.path.exists(os.path.join(state[k]['fd'], frame_name(n[:11], sat, k[1], band)))]
         if not mine: return 0
