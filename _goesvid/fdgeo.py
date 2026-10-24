@@ -45,6 +45,7 @@ def px(lat, lon, sat, n=N):
 # THE SECTORS: the ones index.html's areaToGoes opens on, as lat/lon boxes close to what NESDIS's own sectors showed.
 # Each is cut as the bounding rectangle of its box on the disk, widened to OUT_W x OUT_H's shape.
 SECTORS = {
+    ('GOES19', 'conus'): (-125.0, -66.0, 23.5, 50.5),   # CONTINENTAL (user 2026-10-24: "can you make a continental geocolor view?")
     ('GOES19', 'ne'):  (-84.0, -64.5, 36.0, 48.0),
     ('GOES19', 'se'):  (-92.0, -74.0, 24.0, 37.0),
     ('GOES19', 'cgl'): (-95.0, -77.0, 37.0, 49.0),

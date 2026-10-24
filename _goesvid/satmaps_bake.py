@@ -24,7 +24,7 @@ FONT = '/System/Library/Fonts/Helvetica.ttc'
 FAR = [['Anchorage', 61.2181, -149.9003], ['Fairbanks', 64.8378, -147.7164], ['Juneau', 58.3019, -134.4197],
        ['Honolulu', 21.3069, -157.8583], ['Hilo', 19.7074, -155.0885], ['San Juan', 18.4655, -66.1057],
        ['Seattle', 47.6062, -122.3321], ['Portland', 45.5152, -122.6784], ['Denver', 39.7392, -104.9903],
-       ['Miami', 25.7617, -80.1918], ['Atlanta', 33.749, -84.388], ['Minneapolis', 44.9778, -93.265]]
+       ['Miami', 25.7617, -80.1918], ['Atlanta', 33.749, -84.388]]   # no Minneapolis: it sits on Cosmos at continental scale
 
 
 def topo(path):
