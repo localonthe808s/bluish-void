@@ -39,7 +39,7 @@ FPS, STEP = 10, 10
 BANDS = {'GEOCOLOR': '10848x10848'}
 # B13 and Air Mass: NESDIS's full-disk pictures of these carry its state lines, so they are rendered from NOAA's own data
 # instead (rawbands.py): CONUS/PACUS every 5 min for the sectors inside them, the full disk every 10 for the rest
-RAW = ['13', 'AirMass']
+RAW = ['13']           # Air Mass dropped 2026-10-24 (user): the page plays NOAA's own Air Mass loop in FORECASTS
 # GLM lightning (user 2026-10-23): our GeoColor frame with the flashes of the 10 minutes its full disk took drawn over it (glm.py)
 GLM_BAND = 'EXTENT3'
 BUDGET_S = 420         # a run renders newest-first and stops starting new scans after this; the next run fills the rest
