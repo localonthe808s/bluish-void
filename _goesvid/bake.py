@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from PIL import Image
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import fdgeo, rawbands, glm
+import fdgeo, rawbands, glm, nightblend
 
 Image.MAX_IMAGE_PIXELS = None
 FPS, STEP = 10, 10
@@ -39,9 +39,11 @@ FPS, STEP = 10, 10
 BANDS = {'GEOCOLOR': '10848x10848'}
 # B13 and Air Mass: NESDIS's full-disk pictures of these carry its state lines, so they are rendered from NOAA's own data
 # instead (rawbands.py): CONUS/PACUS every 5 min for the sectors inside them, the full disk every 10 for the rest
-RAW = ['13']           # Air Mass dropped 2026-10-24 (user): the page plays NOAA's own Air Mass loop in FORECASTS
+RAW = []               # B13 and Air Mass dropped 2026-10-24 (user): LIVE is GeoColor only; FORECASTS plays NOAA's own loops
 # GLM lightning (user 2026-10-23): our GeoColor frame with the flashes of the 10 minutes its full disk took drawn over it (glm.py)
 GLM_BAND = 'EXTENT3'
+GLM_ON = False         # off 2026-10-24 (user): LIVE is GeoColor only; FORECASTS plays NOAA's GLM picture
+NIGHT_MARK = 'night1'  # in a GeoColor sector's frame tar once its frames carry the night blend (nightblend.py)
 BUDGET_S = 420         # a run renders newest-first and stops starting new scans after this; the next run fills the rest
 BAND_ONLY = sys.argv[sys.argv.index('--band') + 1] if '--band' in sys.argv else None
 # GEOCOLOR CAN FREEZE ON ITS OWN (10-20: every sector's stopped at 15:11 UTC while the ABI bands kept coming): over an hour old,
@@ -174,7 +176,11 @@ def main():
             if r2('cp', 's3://%s/%s' % (BUCKET, tar_key), tar_local, check=False).returncode == 0:
                 subprocess.run(['tar', '-xf', tar_local, '-C', fd], check=False)
         wset = set(want)
+        if BAND == 'GEOCOLOR' and src == 'fd' and not os.path.exists(os.path.join(fd, NIGHT_MARK)):
+            for f in os.listdir(fd): os.remove(os.path.join(fd, f))      # frames from before the night blend: cut them all again
+            open(os.path.join(fd, NIGHT_MARK), 'w').close()
         for f in os.listdir(fd):
+            if f == NIGHT_MARK: continue
             if f not in wset and re.sub(r'_f\d\.jpg$', '.jpg', f) not in wset: os.remove(os.path.join(fd, f))   # an in-between lives as long as its frame
         state[(sat, sector, BAND)] = {'work': work, 'fd': fd, 'key': key, 'tar_key': tar_key, 'tar_local': tar_local, 'old': old,
                                       'want': want, 'band': band, 'new': 0, 'step': step, 'src': src}
@@ -200,7 +206,7 @@ def main():
                 stamps = sorted(st for st in sc if stamp_ms(st) > t1 - KINDS['d']['hours'] * 3600e3)
                 for sector in secs: pending.append((sat, sector, band, band, [frame_name(st, sat, sector, band) for st in stamps], 5 if prod == 'C' else 10, 'raw'))
                 raw_plan.append((sat, band, secs, sc, stamps))
-    want_glm = (not BAND_ONLY or BAND_ONLY == GLM_BAND)
+    want_glm = GLM_ON and (not BAND_ONLY or BAND_ONLY == GLM_BAND)
     if want_glm:
         for sat in sats:
             if (sat, 'GEOCOLOR') not in plan: continue
@@ -240,16 +246,45 @@ def main():
                                                                       box=(l - L, t - T, r - L, b - T))
                 else:
                     fr = im.resize((fdgeo.OUT_W, fdgeo.OUT_H), Image.LANCZOS, box=(l, t, r, b))
-                fr.save(os.path.join(state[k]['fd'], frame_name(n[:11], sat, k[1], band)), quality=92)
+                outp = os.path.join(state[k]['fd'], frame_name(n[:11], sat, k[1], band))
+                fr.save(outp, quality=92)
                 state[k]['new'] += 1
+                if band == 'GEOCOLOR' and nightblend.night_weight(sat, k[1], n[:11]).max() > 0:
+                    with nb_lock: to_blend.setdefault((sat, n[:11]), []).append((k[1], outp, k))
             except Exception as e:
                 print('  %s %s %s: cut failed: %s' % (sat, k[1], n[:11], e))
         return 1
+    import threading
+    to_blend, nb_lock = {}, threading.Lock()
     jobs = sorted({(k[0], k[1], n) for k in plan for n in plan[k][1]}, key=lambda j: j[2], reverse=True)   # newest first
     if os.environ.get('GV_MAXFD'): jobs = jobs[:int(os.environ['GV_MAXFD'])]   # a quick local test: only the newest few
     t_start = time.time()
     with ThreadPoolExecutor(3) as ex: got = sum(ex.map(cut, jobs))
     print('full disks downloaded: %d' % got, flush=True)
+    # 3a. THE NIGHT BLEND (nightblend.py): each scan's three infrared files read once, every night-side frame of it redrawn.
+    # A frame whose scan cannot be blended this run (files not up yet, out of time) is deleted, so the next run cuts it again:
+    # an unblended night frame never reaches the cache
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    nb_ok = nb_drop = 0
+    if to_blend:
+        def drop(outs):
+            for sector, path, k in outs:
+                try: os.remove(path); state[k]['new'] = max(0, state[k]['new'] - 1)
+                except OSError: pass
+        items = sorted(to_blend.items(), key=lambda kv: kv[0][1], reverse=True)
+        with ProcessPoolExecutor(4) as px:
+            futs = {px.submit(nightblend.blend_scene, (sat, st, [(o[0], o[1]) for o in outs])): outs for (sat, st), outs in items}
+            for f in as_completed(futs):
+                outs = futs[f]
+                if f.cancelled(): drop(outs); nb_drop += 1; continue
+                try: f.result(); nb_ok += 1
+                except Exception as e:
+                    drop(outs); nb_drop += 1
+                    print('  night blend %s %s: %s' % (outs[0][2][0], outs[0][1].split('/')[-1][:11], e))
+                if time.time() - t_start > BUDGET_S:
+                    for g in futs:
+                        if g.cancel(): drop(futs[g]); nb_drop += 1
+    print('night blend: %d scans, %d left for the next run' % (nb_ok, nb_drop), flush=True)
     # 3b. the raw scans (B13, Air Mass), newest first, in processes (netCDF4 is not thread-safe), within the time budget
     raw_jobs.sort(key=lambda j: j[0], reverse=True)
     if os.environ.get('GV_MAXFD'): raw_jobs = raw_jobs[:int(os.environ['GV_MAXFD'])]
