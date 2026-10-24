@@ -26,9 +26,10 @@ who read the old latest.json a moment ago); an R2 lifecycle rule deletes anythin
 """
 import io, json, math, os, re, subprocess, sys, tempfile, time, urllib.request
 from concurrent.futures import ThreadPoolExecutor
+import numpy as np
 from PIL import Image
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import fdgeo, rawbands
+import fdgeo, rawbands, glm
 
 Image.MAX_IMAGE_PIXELS = None
 FPS, STEP = 10, 10
@@ -39,6 +40,8 @@ BANDS = {'GEOCOLOR': '10848x10848'}
 # B13 and Air Mass: NESDIS's full-disk pictures of these carry its state lines, so they are rendered from NOAA's own data
 # instead (rawbands.py): CONUS/PACUS every 5 min for the sectors inside them, the full disk every 10 for the rest
 RAW = ['13', 'AirMass']
+# GLM lightning (user 2026-10-23): our GeoColor frame with the flashes of the 10 minutes its full disk took drawn over it (glm.py)
+GLM_BAND = 'EXTENT3'
 BUDGET_S = 420         # a run renders newest-first and stops starting new scans after this; the next run fills the rest
 BAND_ONLY = sys.argv[sys.argv.index('--band') + 1] if '--band' in sys.argv else None
 # GEOCOLOR CAN FREEZE ON ITS OWN (10-20: every sector's stopped at 15:11 UTC while the ABI bands kept coming): over an hour old,
@@ -87,6 +90,11 @@ def r2(*args, check=True):
 
 def frame_name(stamp, sat, sector, band):
     return '%s_%s-%s-%s.jpg' % (stamp, sat, sector, band)
+
+
+def _glm_one(a):
+    try: return glm.composite(*a)
+    except Exception as e: print('  GLM %s %s: %s' % (a[2], a[3], e)); return 0
 
 
 def main():
@@ -146,6 +154,13 @@ def main():
                 stamps = sorted(st for st in sc if stamp_ms(st) > t1 - KINDS['d']['hours'] * 3600e3)
                 for sector in secs: pending.append((sat, sector, band, band, [frame_name(st, sat, sector, band) for st in stamps], 5 if prod == 'C' else 10, 'raw'))
                 raw_plan.append((sat, band, secs, sc, stamps))
+    want_glm = (not BAND_ONLY or BAND_ONLY == GLM_BAND)
+    if want_glm:
+        for sat in sats:
+            if (sat, 'GEOCOLOR') not in plan: continue
+            stamps = [n[:11] for n in plan[(sat, 'GEOCOLOR')][1]]
+            for s2, sector in SECTORS:
+                if s2 == sat: pending.append((sat, sector, GLM_BAND, GLM_BAND, [frame_name(st, sat, sector, GLM_BAND) for st in stamps], STEP, 'raw'))
     with ThreadPoolExecutor(12) as ex: list(ex.map(lambda a: mkstate(*a), pending))
     raw_jobs = []
     for sat, band, secs, sc, stamps in raw_plan:
@@ -208,6 +223,40 @@ def main():
                 for g in futs:
                     if g.cancel(): skipped += 1
     print('raw scans rendered: %d, left for the next run: %d' % (done_n, skipped), flush=True)
+    # 3c. lightning: for each GeoColor frame some sector still lacks a lightning frame for, the flashes of its 10 minutes
+    if want_glm:
+        g_done = 0
+        for sat in sats:
+            if (sat, 'GEOCOLOR') not in plan or time.time() - t_start > BUDGET_S: continue
+            band = plan[(sat, 'GEOCOLOR')][0]
+            todo = {}
+            for st in sorted({n[:11] for n in plan[(sat, 'GEOCOLOR')][1]}, reverse=True):
+                if glm.stamp_s(st) + glm.WINDOW_S > time.time() - 60: continue      # its 10 minutes not over yet
+                outs = []
+                for k in state:
+                    if k[0] != sat or k[2] != GLM_BAND: continue
+                    base = os.path.join(state[(sat, k[1], 'GEOCOLOR')]['fd'], frame_name(st, sat, k[1], band))
+                    out = os.path.join(state[k]['fd'], frame_name(st, sat, k[1], GLM_BAND))
+                    if os.path.exists(base) and not os.path.exists(out): outs.append((k[1], base, out))
+                if outs: todo[st] = outs
+            if not todo: continue
+            t0 = min(glm.stamp_s(st) for st in todo); t1 = max(glm.stamp_s(st) for st in todo) + glm.WINDOW_S
+            try: fl = glm.files(sat, t0, t1)
+            except Exception as e: print('  %s GLM listing failed: %s' % (sat, e)); continue
+            for st, outs in todo.items():
+                if time.time() - t_start > BUDGET_S: break
+                a = glm.stamp_s(st)
+                keys = [(sat, k) for k, ts in fl.items() if a <= ts < a + glm.WINDOW_S]
+                if len(keys) < 20: continue                                          # a window with files missing: wait
+                with ProcessPoolExecutor(6) as px: res = [r for r in px.map(glm.read, keys) if r]
+                if not res: continue
+                lat, lon, area = (np.concatenate([r[i] for r in res]) for i in range(3))
+                with ProcessPoolExecutor(4) as px:
+                    list(px.map(_glm_one, [(o[1], o[2], sat, o[0], lat, lon, area) for o in outs]))
+                for sector, _b, out in outs:
+                    if os.path.exists(out): state[(sat, sector, GLM_BAND)]['new'] += 1
+                g_done += 1
+        print('lightning windows drawn: %d' % g_done, flush=True)
     # 4. per sector: the tar for next time, the videos, the poster, the manifest
     def finish(k):
         S = state[k]; sat, sector, BAND = k; work, fd, key, old = S['work'], S['fd'], S['key'], S['old']
