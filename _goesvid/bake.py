@@ -269,7 +269,9 @@ def main():
             r2('cp', S['tar_local'], 's3://%s/%s' % (BUCKET, S['tar_key']), '--content-type', 'application/x-tar', '--cache-control', 'no-store')
         newest = got[-1][:11]
         man = {'at': int(time.time()), 'sat': sat, 'sector': sector, 'band': S['band'], 'fps': FPS, 'src': S['src'], 'step': S['step'],
-               'overlay': '/satmaps/%s-%s.png?v=%d' % (sat, sector, OVERLAY_V), 'w': fdgeo.OUT_W, 'h': fdgeo.OUT_H}
+               'overlay': '/satmaps/%s-%s.png?v=%d' % (sat, sector, OVERLAY_V), 'w': fdgeo.OUT_W, 'h': fdgeo.OUT_H,
+               # where the loop sits on its satellite's full-disk grid (10848 px): the page zooms across loops with it
+               'crop': [round(v, 1) for v in fdgeo.crop(sat, sector)]}
         for kk, K in KINDS.items():
             use = [n for n in got if stamp_ms(n) > stamp_ms(got[-1]) - K['hours'] * 3600e3]
             if len(use) < 2: continue
@@ -311,6 +313,12 @@ def main():
         print('%s %-4s %-8s %s (%.0f s)' % (k[0], k[1], k[2], r, time.time() - t), flush=True)
         return r
     with ThreadPoolExecutor(6) as ex: res = list(ex.map(one, list(state)))
+    # EVERY LOOP'S PLACE ON THE DISK (2026-10-24, zoom while playing): the page picks the sharpest loop holding the view from this
+    sj = {}
+    for (sat, sector) in fdgeo.SECTORS: sj.setdefault(sat, {})[sector] = [round(v, 1) for v in fdgeo.crop(sat, sector)]
+    p = os.path.join(root, 'sectors.json'); json.dump({'grid': fdgeo.N, 'sectors': sj}, open(p, 'w'), separators=(',', ':'))
+    if not DRY:
+        r2('cp', p, 's3://%s/%ssectors.json' % (BUCKET, PREFIX), '--content-type', 'application/json', '--cache-control', 'public, max-age=3600')
     if all(str(r).startswith('FAILED') or r == 'no frames' for r in res): sys.exit(1)
 
 
