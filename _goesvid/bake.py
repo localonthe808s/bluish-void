@@ -55,8 +55,10 @@ BUCKET, PREFIX = 'bluishvoid-bg', 'goes/video/'
 # apart (smaller files with 4x the frames); still close enough that a zoom swap or the seek fallback lands quickly
 # 12 HOURS (user 2026-10-24: "lets extend to the 12 hour loop now for clouds ... since we're only relying on one now"): GeoColor is the
 # only loop baked, so the window doubles for desktop and phones; a notch more compression keeps the files near their 6 h sizes x1.5
-KINDS = {'d': {'hours': 12, 'crf': 27, 'g': 12, 'w': fdgeo.OUT_W},
-         'm': {'hours': 12, 'crf': 26, 'g': 8, 'w': fdgeo.OUT_W // 2}}
+KINDS = {'d': {'hours': 12, 'crf': 27, 'g': 12, 'w': fdgeo.OUT_W, 'ib': (1, 2, 3)},
+         # LIGHTER ON PHONES (user 2026-10-24: "make the phone loop lighter"): one in-between per pair (the middle one), not three,
+         # and a notch more compression -- half the frames of desktop; the page paces it by the kind's own step
+         'm': {'hours': 12, 'crf': 28, 'g': 8, 'w': fdgeo.OUT_W // 2, 'ib': (2,)}}
 OVERLAY_V = 5          # /satmaps/<sat>-<sector>.png?v= -- bump with satmaps_bake.py
 UA = {'User-Agent': 'bluishvoid.com satellite loop bake'}
 DRY = '--dry' in sys.argv
@@ -388,12 +390,12 @@ def main():
                     if inbetweens(fd, got[i], got[i + 1]): made += 1
                 except Exception as e:
                     print('  %s %s in-between failed: %s' % (sat, sector, e)); break
-        def seq(names):
+        def seq(names, which=(1, 2, 3)):
             out = []
             for i, n in enumerate(names):
                 out.append(n)
                 if i < len(names) - 1:
-                    ib = [n[:-4] + '_f%d.jpg' % k for k in range(1, INTERP + 1)]
+                    ib = [n[:-4] + '_f%d.jpg' % k for k in which]
                     if all(os.path.exists(os.path.join(fd, x)) for x in ib): out += ib
             return out
         if old and old.get('src') == S['src'] and (old.get('d') or {}).get('frames', [None])[-1:] == [got[-1]] and old.get('m') and not S['new'] and not made:
@@ -409,7 +411,7 @@ def main():
         for kk, K in KINDS.items():
             real = [n for n in got if stamp_ms(n) > stamp_ms(got[-1]) - K['hours'] * 3600e3]
             if len(real) < 2: continue
-            use = seq(real)
+            use = seq(real, K.get('ib', (1, 2, 3)))
             lst = os.path.join(work, 'list_%s.txt' % kk)
             open(lst, 'w').write(''.join("file '%s'\nduration %.3f\n" % (os.path.join(fd, n), 1.0 / FPS) for n in use) + "file '%s'\n" % os.path.join(fd, use[-1]))
             vf = ['-vf', 'scale=%d:-2' % K['w']] if K['w'] != fdgeo.OUT_W else []
@@ -418,8 +420,9 @@ def main():
                            ['-r', str(FPS), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', str(K['crf']), '-g', str(K['g']), '-bf', '0', '-pix_fmt', 'yuv420p',   # -bf 0: B-frames are stored softer, the fine cloud texture flickered every other frame
                            
                             '-movflags', '+faststart', '-an', out], check=True)
-            man['step'] = round(S['step'] * (len(real) - 1) / max(1, len(use) - 1), 3)   # minutes a video frame stands for
-            man[kk] = {'mp4': os.path.basename(out), 'frames': use, 'real': len(real), 'size': '%dx%d' % (K['w'], K['w'] * fdgeo.OUT_H // fdgeo.OUT_W),
+            kstep = round(S['step'] * (len(real) - 1) / max(1, len(use) - 1), 3)   # minutes a video frame stands for
+            if kk == 'd' or 'step' not in man or man['step'] == S['step']: man['step'] = kstep   # (older pages read this one)
+            man[kk] = {'mp4': os.path.basename(out), 'frames': use, 'real': len(real), 'step': kstep, 'size': '%dx%d' % (K['w'], K['w'] * fdgeo.OUT_H // fdgeo.OUT_W),
                        'bytes': os.path.getsize(out), 'fetched': S['new']}
             if not DRY:
                 r2('cp', out, 's3://%s/%s%s' % (BUCKET, key, os.path.basename(out)), '--content-type', 'video/mp4',
