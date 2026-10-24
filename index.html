@@ -59447,7 +59447,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                 ak:'alaska', hi:'hawaii', pr:'pr', gu:'guam' };
     if (v !== 'sat' && !map[v]) return;
     /* NATIONWIDE zoom (2026-10-24): picking NATIONWIDE again, or any other view, starts it from the whole country */
-    if (window._natZoomReset && (v === 'conus' || window._liveView === 'conus')) try { window._natZoomReset(v !== 'conus'); } catch(e){}
+    if (window._natZoomReset && (v === 'conus' || v === 'local' || window._liveView === 'conus' || window._liveView === 'local')) try { window._natZoomReset(v !== 'conus' && v !== 'local'); } catch(e){}
     window._liveView = v;
     var lp = document.getElementById('fcast-left-panel');
     var rp = document.getElementById('fcast-right-panel');
@@ -59588,11 +59588,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
          wash out. LOCAL keeps the screen blend - it has no terrain. */
       var isConusView = (mode === 'conus');
       if (bm){
-        bm.style.mixBlendMode = isConusView ? 'normal' : 'screen';
-        bm.style.opacity = isConusView ? '.38' : '.85';
+        /* NEAREST now has the terrain map too, so it takes the same contract: opaque under the echoes, ghosted over at .38 */
+        bm.style.mixBlendMode = 'normal';
+        bm.style.opacity = '.38';
       }
       var wantArea = fcastState.area;
-      if (wantArea === 'conus' && window._natPainted && window._natViewBM){ setSrc(window._natViewBM); show(true); lbox = null; }
+      if ((wantArea === 'conus' || wantArea === 'local') && window._natPainted && window._natViewBM){ setSrc(window._natViewBM); show(true); lbox = null; }
       var cached = lbox ? window._staBasemap[lbox.bm || lbox.sid] : null;
       if (!lbox){}
       else
@@ -59633,7 +59634,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           if (window._fcastHideLoader && lastGoodSrc) window._fcastHideLoader();
         };
         if (isConusView){ var _nb = {}; for (var _k in lbox) _nb[_k] = lbox[_k]; _nb.noLbl = true; if (wantArea === 'conus') _nb.bm = 'nat-conus'; lbox = _nb; }
-        var _stitchNow = function(){ _stitchBasemap(lbox, _bmDone, isConusView ? window.BV_MAP_FLAVOR_CONTINENTAL : null,
+        var _stitchNow = !isConusView ? function(){ _stitchLocalBM(lbox, _bmDone); } : function(){ _stitchBasemap(lbox, _bmDone, isConusView ? window.BV_MAP_FLAVOR_CONTINENTAL : null,
            isConusView ? [] : null,
            isConusView && window.BV_CONTINENTAL ? window.BV_CONTINENTAL.roads : null,
            isConusView && window.BV_CONTINENTAL ? window.BV_CONTINENTAL.bounds : null,
@@ -59644,7 +59645,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
            this stitcher draws, so a first visit is one ~250 KB image instead of the 4 MB terrain raster, ~50 vector tiles and a
            canvas render. A missing or failed file falls back to stitching; ?bakemaps=1 forces the stitch (that is how they
            are baked). */
-        var _baked = isConusView ? window._bvNatMapUrl(wantArea) : null;
+        var _baked = isConusView ? window._bvNatMapUrl(wantArea) : (mode === 'local' ? window._bvStaMapUrl(lbox.sid) : null);
         if (_baked){
           var _pre = new Image();
           _pre.onload = function(){ _bmDone(_baked); };
@@ -59736,8 +59737,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   function _radarStationId(){ return ((typeof LOCATION !== 'undefined' && LOCATION.radar) || 'KOKX').toLowerCase(); }
   function _mercXY(lon, lat){ var R = 6378137; return [lon*Math.PI/180*R, Math.log(Math.tan(Math.PI/4 + lat*Math.PI/360))*R]; }
   var _staBoxCache = {};
-  function _localBox(){
-    var sid = _radarStationId();
+  function _localBox(){ return _localBoxFor(_radarStationId()); }
+  window._bvLocalBoxFor = function(sid){ return _localBoxFor(String(sid).toLowerCase()); };   /* the station-map bake asks for any station's box */
+  function _localBoxFor(sid){
     if (_staBoxCache[sid]) return _staBoxCache[sid];
     var st = null;
     try{ RADAR_SITES.forEach(function(s2){ if (s2.id.toLowerCase() === sid) st = s2; }); }catch(e){}
@@ -59871,7 +59873,11 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   function _activeWmsBox(){
     if (fcastState.range !== 'live') return null;
     if (fcastState.area === 'city-nyc') return window._cityPainted || _cityBoxCfg();   // the PAINTED box — what the pixels on screen show
-    if (fcastState.area === 'local' && window._localWmsOn) return _localBox();
+    if (fcastState.area === 'local' && window._localWmsOn){
+      /* a zoom belongs to its station: a location switch to another station drops it */
+      if (window._natPainted && window._natPainted._sid && window._natPainted._sid !== _localBox().sid && window._natZoomReset) window._natZoomReset();
+      return window._natPainted || _localBox();
+    }
     if (_natOn()) return fcastState.area === 'conus' ? (window._natPainted || _conusBox()) : _natBox(fcastState.area);
     return null;
   }
@@ -59893,13 +59899,16 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var lon0 = m2lon(box.X0), lon1 = m2lon(box.X1), latMid = m2lat((box.Y0 + box.Y1) / 2);
       // same pixel box the raster path would have produced
       var spanX = box.X1 - box.X0, spanY = box.Y1 - box.Y0;
-      var W = box.bm === 'nat-conus' ? 2400 : box.bm ? 1600 : 1024, H = Math.round(W * spanY / spanX);   /* NATIONWIDE at 2400: it is the base every zoom crops */   /* a region is drawn larger: it fills the same width at 3-4x the scale */
+      var W = box.bm === 'nat-conus' ? 2400 : (box.bm || terrainUrl === 'na-tiles') ? 1600 : 1024, H = Math.round(W * spanY / spanX);   /* NATIONWIDE at 2400: it is the base every zoom crops */   /* a region is drawn larger: it fills the same width at 3-4x the scale */
       if (!isFinite(H) || H < 10 || H > 4000) { cb(null); return; }
       var F = flavor || window.BV_MAP_FLAVOR;
       var lr = protomapsL.labelRules(F, 'en').filter(function(r){ return r.dataLayer !== 'roads'; }).map(function(r){   /* the never-labelled places (BV_NO_PLACE); no street names (user 2026-10-19) */
         if (r.dataLayer !== 'places') return r;
         var b0 = r.filter, o0 = {}; for (var k0 in r) o0[k0] = r[k0];
-        o0.filter = function(z, f){ if (window._bvBannedPlace(f)) return false; return b0 ? b0(z, f) : true; };
+        o0.filter = function(z, f){ if (window._bvBannedPlace(f)) return false;
+          /* a floor on town size where the caller asks (NEAREST: 50,000 -- the archive names every township at this scale) */
+          if (box.minPop && f && f.props && f.props.kind === 'locality' && (+f.props.population || 0) < box.minPop) return false;
+          return b0 ? b0(z, f) : true; };
         return o0;
       });
       if (Array.isArray(labelNames)){
@@ -60009,7 +60018,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var st = new protomapsL.Static({
           url: window.BV_BASEMAP_URL,
           paintRules: pr2,
-          labelRules: lr,
+          labelRules: terrainUrl === 'na-tiles' ? [] : lr,   /* na-tiles: the names go on after the overlays, below */
           backgroundColor: gotTerrain ? undefined : F.background,
           maxDataZoom: 9
         });
@@ -60031,8 +60040,17 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
               var tx0 = Math.floor((box.X0 + E / 2) / ts), tx1 = Math.floor((box.X1 + E / 2) / ts);
               var ty0 = Math.floor((E / 2 - box.Y1) / ts), ty1 = Math.floor((E / 2 - box.Y0) / ts);
               var tiles = [];
-              for (var tx = tx0; tx <= tx1; tx++) for (var ty = ty0; ty <= ty1; ty++)
-                if (window._bvCovHas(B, z, tx, ty)) tiles.push([tx, ty]);
+              for (var tx = tx0; tx <= tx1; tx++) for (var ty = ty0; ty <= ty1; ty++){
+                if (!window._bvCovHas(B, z, tx, ty)) continue;
+                /* the coastal-depth layer covers only parts of the Great Lakes, and drawn flat at this scale it left a bright lake
+                   cut off by a straight tile edge (Chicago): leave the lakes to the map's own water there */
+                if (B === window.BV_BATHY){
+                  var clon = ((tx + 0.5) * ts - E / 2) / R * 180 / PI, cy2 = E / 2 - (ty + 0.5) * ts;
+                  var clat = (2 * Math.atan(Math.exp(cy2 / R)) - PI / 2) * 180 / PI;
+                  if (clon > -93 && clon < -75.6 && clat > 40.6 && clat < 49.5) continue;
+                }
+                tiles.push([tx, ty]);
+              }
               return Promise.all(tiles.map(function(t){
                 return new Promise(function(res){
                   var im = new Image(); im.crossOrigin = 'anonymous';
@@ -60059,7 +60077,35 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           if (BB) chain = chain.then(function(){ return layer(BB, 'https://cdn.bluishvoid.com/bathy/v3/cover.json', BB.url, 5, 9); });
           if (BR) chain = chain.then(function(){ return layer(BR, BR.url + '/cover.json', BR.url + '/{z}/{x}/{y}.webp?b=2', 3, 12); });
           if (BS) chain = chain.then(function(){ return layer(BS, BS.url + '/cover.json?v=4', BS.url + '/{z}/{x}/{y}.webp?b=2', 3, 9); });
-          return chain.catch(function(){});
+          return chain.catch(function(){}).then(function(){
+            if (!lr || !lr.length) return null;
+            /* THE NAMES BELOW ZOOM 8 (2026-10-24): from zoom 8 up the archive's place labels come back EMPTY (measured: 800 px over
+               4.6 deg draws 63k label pixels, 1024 or 1600 px over the same box none), and NEAREST sits at ~z9. So the pass is
+               drawn at z7.9 on a context scaled up to the map: the same places, type ~2x */
+            /* 7.9, not 8: the archive's places stop at data zoom 8, and a pass landing on 8.0001 (Denver) drew nothing while
+               7.9999 (New York) drew them all */
+            var zl = Math.log(W * 360 / ((lon1 - lon0) * 256)) / Math.LN2, sc = zl > 7.9 ? Math.pow(2, zl - 7.9) : 1;
+            /* on a FRESH canvas, then copied over: drawn straight onto the map's context the pass came back empty for some
+               boxes (Denver) though the same call on a clean canvas places every name */
+            var lc = document.createElement('canvas'); lc.width = W; lc.height = H;
+            var lx = lc.getContext('2d'); lx.scale(sc, sc);
+            /* ONE TYPE SIZE AT ANY ZOOM: the scale that moves the names to the map's zoom also blows the type up (2x at the
+               station view, 4-5x zoomed in). The context's font, stroke width and dot radius are shrunk by whatever the
+               scale exceeds 2, so a zoomed NEAREST sets names the size the station view does. Positions are untouched. */
+            var TS = 2, fk = sc > TS ? TS / sc : 1;
+            if (fk < 1){
+              try {
+                var P2 = CanvasRenderingContext2D.prototype, fD = Object.getOwnPropertyDescriptor(P2, 'font'), wD = Object.getOwnPropertyDescriptor(P2, 'lineWidth');
+                Object.defineProperty(lx, 'font', { get: function(){ return fD.get.call(this); },
+                  set: function(v){ fD.set.call(this, String(v).replace(/(\d+(?:\.\d+)?)px/, function(m, n){ return (+n * fk).toFixed(2) + 'px'; })); } });
+                Object.defineProperty(lx, 'lineWidth', { get: function(){ return wD.get.call(this); }, set: function(v){ wD.set.call(this, +v * fk); } });
+                var arc0 = lx.arc; lx.arc = function(x, y, r, a0, a1, ccw){ return arc0.call(this, x, y, r * fk, a0, a1, ccw); };
+              } catch(e){}
+            }
+            return new protomapsL.Static({ url: window.BV_BASEMAP_URL, paintRules: [], labelRules: lr, maxDataZoom: 9 })
+              .drawContextBounds(lx, { x: lon0, y: latMid }, { x: lon1, y: latMid }, W / sc, H / sc)
+              .catch(function(){}).then(function(){ ctx.drawImage(lc, 0, 0); });
+          });
         })
         .then(function(){
           /* OUR OWN NAMES, DRAWN (2026-09-04). cityLbl is the curated list —
@@ -60121,6 +60167,30 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         .catch(function(){ cb(null); });
     } catch(e){ cb(null); }
   }
+  /* NEAREST ON THE SAME MAP (user 2026-10-24: "what about the nearest"): the station view drew the plain flat flavour with the
+     whole road web, unlike NATIONWIDE and the regions. It now takes the continental flavour (motorways and trunks, state
+     lines, no counties) over the LOCAL map's relief, coastal depth and seafloor tiles, with the archive's own town names drawn
+     last so the shading cannot dim them. Used by the view and by its boot prewarm, so the cache never holds the old look. */
+  function _stitchLocalBM(box, cb){
+    var C = window.BV_CONTINENTAL;
+    /* parks green like NATIONWIDE's: there the terrain bake paints them (65,134,87 at ~.52 over the land); here no bake
+       covers the box, so the flavour does, in the same colour */
+    if (!window.BV_MAP_FLAVOR_LOCAL && window.BV_MAP_FLAVOR_CONTINENTAL){
+      var FL = {}, FC = window.BV_MAP_FLAVOR_CONTINENTAL; for (var k in FC) FL[k] = FC[k];
+      FL.park_a = FL.park_b = 'rgba(65,134,87,.52)';
+      window.BV_MAP_FLAVOR_LOCAL = FL;
+    }
+    var bx = {}; for (var kk in box) bx[kk] = box[kk]; bx.minPop = 50000;
+    _stitchBasemap(bx, cb, window.BV_MAP_FLAVOR_LOCAL || window.BV_MAP_FLAVOR_CONTINENTAL || null, null, C ? C.roads : null, C ? C.bounds : null, 'na-tiles');
+  }
+  window._stitchLocalBM = _stitchLocalBM;
+  /* BAKED TOO (2026-10-24): every station's NEAREST map is one JPEG on the CDN (_maplab/stamaps_bake.py, the same stitch),
+     so the view opens on a single image; a missing one falls back to stitching here. ?bakemaps=1 forces the stitch. */
+  var _STA_MAP_V = 1;
+  window._bvStaMapUrl = function(sid){
+    try { if (/[?&]bakemaps=1/.test(location.search)) return null; } catch(e){}
+    return sid ? 'https://cdn.bluishvoid.com/radarmaps/sta/v' + _STA_MAP_V + '/' + String(sid).toLowerCase() + '.jpg' : null;
+  };
   function _stitchBasemap(box, cb, flavor, labelNames, roadKinds, bKinds, terrainUrl){
     _stitchBasemapVector(box, function(u){
       if (u) { cb(u); return; }
@@ -60321,7 +60391,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var cw = Math.round(ch * wbox.ASPECT);
         /* zoomed THE CITY: the frames re-render server-side for exactly the
            visible box at full container resolution — crisp at any depth */
-        var vb = (isCity && window._cityView) ? window._cityView : (fcastState.area === 'conus' && window._natPainted) ? window._natPainted : wbox;
+        var vb = (isCity && window._cityView) ? window._cityView : ((fcastState.area === 'conus' || isLocal) && window._natPainted) ? window._natPainted : wbox;
         return 'https://opengeo.ncep.noaa.gov/geoserver/' + sid + '/ows?service=WMS&version=1.1.0&request=GetMap'
           + '&layers=' + _wmsLayerFor(sid, prod) + '&styles=&bbox=' + Math.round(vb.X0) + ',' + Math.round(vb.Y0) + ',' + Math.round(vb.X1) + ',' + Math.round(vb.Y1)
           + '&width=' + cw + '&height=' + ch + '&srs=EPSG:3857&format=image/png&transparent=true'
@@ -61174,8 +61244,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   var _natZ = { k:1, tx:0, ty:0 };
   window._natPainted = null; window._natView = null; window._natViewBM = null;
   var _natBusy = 0, _natBmCache = {};
-  function _natZoomLive(){ return fcastState.range === 'live' && fcastState.area === 'conus' && _natOn(); }
-  function _natPaintedV(){ return window._natPainted || _conusBox(); }
+  /* NEAREST zooms too (user 2026-10-24: "what about the nearest"): the same module over the station's box */
+  function _natZoomLive(){ return fcastState.range === 'live' && ((fcastState.area === 'conus' && _natOn()) || (fcastState.area === 'local' && window._localWmsOn)); }
+  function _zBase(){ return fcastState.area === 'local' ? _localBox() : _conusBox(); }
+  function _natPaintedV(){ return window._natPainted || _zBase(); }
   function _natApply(){
     var t = 'translate(-50%,-50%) translate(' + _natZ.tx.toFixed(1) + 'px,' + _natZ.ty.toFixed(1) + 'px) scale(' + _natZ.k.toFixed(3) + ')';
     _CITY_ZOOM_LAYERS.forEach(function(id){ var el = document.getElementById(id); if (el) el.style.transform = t; });
@@ -61205,6 +61277,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   var _NAT_SAT = { 'us-ne':['ne','G19'], 'us-se':['se','G19'], 'us-nc':['cgl','G19'], 'upper-ms':['umv','G19'], 'south-ms':['smv','G19'],
                    's-plains':['sp','G19'], 'n-rockies':['nr','G19'], 's-rockies':['sr','G19'], 'us-nw':['pnw','G18'], 'us-sw':['psw','G18'] };
   function _natFollow(v){
+    if (fcastState.area !== 'conus') return;      /* the satellite follows NATIONWIDE's zoom only */
     var B = _conusBox();
     if ((v.X1 - v.X0) > 0.62 * (B.X1 - B.X0)){ window._goesFollowPending = null; return; }   /* not zoomed enough to mean a region */
     var cx = (v.w + v.e) / 2, cy = (v.s + v.n) / 2, best = null, bd = 1e9;
@@ -61221,16 +61294,16 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     var fin = false, done = function(){ if (!fin){ fin = true; _natBusy--; } };
     var c = document.getElementById('fcast-img-container'), r = c ? c.getBoundingClientRect() : null;
     var dpr = Math.min(2, window.devicePixelRatio || 1);
-    var B = _conusBox();
+    var B = _zBase(), isLocal = fcastState.area === 'local';
     var W2 = Math.round(((r && r.width) || 1100) * dpr), H2 = Math.round(W2 / B.ASPECT);
     var src = null, sb = null;
     Object.keys(_NAT_AREAS).forEach(function(a){
-      if (src || _NAT_AREAS[a].ws !== 'conus') return;
+      if (isLocal || src || _NAT_AREAS[a].ws !== 'conus') return;
       var rb = _natBox(a);
       if (v.X0 >= rb.X0 && v.X1 <= rb.X1 && v.Y0 >= rb.Y0 && v.Y1 <= rb.Y1){ src = window._bvNatMapUrl(a); sb = rb; }
     });
     var zoomed = (v.X1 - v.X0) < 0.8 * (B.X1 - B.X0);
-    if (!src){ src = window._bvNatMapUrl('conus'); sb = B; }
+    if (!src){ src = isLocal ? (window._staBasemap[B.sid] || window._bvStaMapUrl(B.sid)) : window._bvNatMapUrl('conus'); sb = B; }
     var land = function(u){
       if (window._natView !== v){ done(); return; }
       if (window._natViewBM && /^blob:/.test(window._natViewBM)){ try { URL.revokeObjectURL(window._natViewBM); } catch(e){} }
@@ -61258,13 +61331,14 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         } catch(e){ cb(null); }
       };
       im.onerror = function(){ cb(null); };
+      if (/^https?:\/\/cdn\./.test(src)) im.crossOrigin = 'anonymous';   /* a station map off the CDN, read into a canvas */
       im.src = src;
     };
     crop(function(u){
       if (u) land(u); else if (!zoomed) land(null);
       /* straddling two regions and zoomed in: the national crop is soft, so a stitch for exactly this box follows */
       if (zoomed && sb === B){
-        var key = [v.X0, v.Y0, v.X1, v.Y1].map(function(n){ return Math.round(n / 2000); }).join(',');
+        var key = (isLocal ? B.sid + ':' : '') + [v.X0, v.Y0, v.X1, v.Y1].map(function(n){ return Math.round(n / 2000); }).join(',');
         var go = function(url){
           if (!url || window._natView !== v) return;
           if (window._natViewBM && /^blob:/.test(window._natViewBM)){ try { URL.revokeObjectURL(window._natViewBM); } catch(e){} }
@@ -61272,10 +61346,15 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           if (window._syncCityBasemap) try { _syncCityBasemap(); } catch(e){}
         };
         if (_natBmCache[key]){ go(_natBmCache[key]); if (!u) done(); return; }
+        if (isLocal){
+          _stitchLocalBM({ sid: 'lz-' + key, X0: v.X0, Y0: v.Y0, X1: v.X1, Y1: v.Y1, ASPECT: B.ASPECT, w: v.w, s: v.s, e: v.e, n: v.n },
+            function(url){ if (url) _natBmCache[key] = url; go(url); if (!u) done(); });
+        } else {
         var bx = { sid: 'conus', bm: 'natz-' + key, noLbl: true, X0: v.X0, Y0: v.Y0, X1: v.X1, Y1: v.Y1, ASPECT: B.ASPECT, w: v.w, s: v.s, e: v.e, n: v.n };
         _stitchBasemap(bx, function(url){ if (url) _natBmCache[key] = url; go(url); if (!u) done(); },
           window.BV_MAP_FLAVOR_CONTINENTAL, [], window.BV_CONTINENTAL ? window.BV_CONTINENTAL.roads : null,
           window.BV_CONTINENTAL ? window.BV_CONTINENTAL.bounds : null, '/city_terrain_conus.png?v=4');
+        }
       } else if (!u && zoomed) done();
     });
   }
@@ -61310,15 +61389,15 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       if (Object.keys(pts).length){ settleSoon(); return; }
       if (_natZ.k === 1 && !_natZ.tx && !_natZ.ty) return;
       var r = c.getBoundingClientRect(); if (!r.width) return;
-      var B = _conusBox(), cur = _natPaintedV();
+      var B = _zBase(), cur = _natPaintedV();
       var cXs = cur.X1 - cur.X0, cYs = cur.Y1 - cur.Y0, k = _natZ.k;
       var cx = (cur.X0 + cur.X1) / 2 - (_natZ.tx / k) * (cXs / r.width);
       var cy = (cur.Y0 + cur.Y1) / 2 + (_natZ.ty / k) * (cYs / r.height);
-      var BX = B.X1 - B.X0, ns = Math.max(BX / 7, Math.min(BX, cXs / k)), nY = ns / BX * (B.Y1 - B.Y0);
+      var BX = B.X1 - B.X0, ns = Math.max(BX / (fcastState.area === 'local' ? 5 : 7), Math.min(BX, cXs / k)), nY = ns / BX * (B.Y1 - B.Y0);
       cx = Math.max(B.X0 + ns / 2, Math.min(B.X1 - ns / 2, cx));
       cy = Math.max(B.Y0 + nY / 2, Math.min(B.Y1 - nY / 2, cy));
       if (ns >= BX * 0.999){ if (window._natPainted) window._natZoomReset(); else { _natZ.k = 1; _natZ.tx = 0; _natZ.ty = 0; _natApply(); } return; }
-      var v = _natLL({ X0: cx - ns / 2, Y0: cy - nY / 2, X1: cx + ns / 2, Y1: cy + nY / 2, ASPECT: B.ASPECT });
+      var v = _natLL({ X0: cx - ns / 2, Y0: cy - nY / 2, X1: cx + ns / 2, Y1: cy + nY / 2, ASPECT: B.ASPECT, _sid: B.sid });
       var p0 = _natPaintedV();
       if (Math.abs(v.X0 - p0.X0) < 1 && Math.abs(v.X1 - p0.X1) < 1 && Math.abs(v.Y0 - p0.Y0) < 1){ _natZ.k = 1; _natZ.tx = 0; _natZ.ty = 0; _natApply(); return; }
       window._natView = v;
@@ -61326,7 +61405,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     }
     function clamp(){
       var r = c.getBoundingClientRect(); if (!r.width) return;
-      var B = _conusBox(), P = _natPaintedV();
+      var B = _zBase(), P = _natPaintedV();
       var PX = P.X1 - P.X0, PY = P.Y1 - P.Y0, pcx = (P.X0 + P.X1) / 2, pcy = (P.Y0 + P.Y1) / 2;
       var k = _natZ.k, sX = PX / k, sY = PY / k;
       var cx = pcx - (_natZ.tx / k) * (PX / r.width), cy = pcy + (_natZ.ty / k) * (PY / r.height);
@@ -61337,9 +61416,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       _natZ.tx = (pcx - cx) * k * r.width / PX; _natZ.ty = (cy - pcy) * k * r.height / PY;
     }
     function zoomAt(px, py, f){
-      var B = _conusBox(), cur = _natPaintedV();
+      var B = _zBase(), cur = _natPaintedV();
       var ratio = (B.X1 - B.X0) / (cur.X1 - cur.X0);
-      var k2 = Math.max(1 / ratio, Math.min(7 / ratio, _natZ.k * f));
+      var k2 = Math.max(1 / ratio, Math.min((fcastState.area === 'local' ? 5 : 7) / ratio, _natZ.k * f));
       if (k2 === _natZ.k) return;
       var sc = k2 / _natZ.k;
       _natZ.tx = px - sc * (px - _natZ.tx); _natZ.ty = py - sc * (py - _natZ.ty); _natZ.k = k2;
@@ -76241,7 +76320,12 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
         _fetchScanTimes('conus');
         _fetchScanTimes(_radarStationId());
         if (_inNYCBox) _fetchScanTimes('kokx');
-        else _stitchBasemap(_localBox(), function(){});
+        else {
+          /* warm the station's baked map; the view finds it in the cache. No file: stitch it as before */
+          var _lb = _localBox(), _wu = window._bvStaMapUrl && window._bvStaMapUrl(_lb.sid);
+          if (_wu){ var _wi = new Image(); _wi.onload = function(){ window._staBasemap[_lb.sid] = _wu; }; _wi.onerror = function(){ if (window._stitchLocalBM) window._stitchLocalBM(_lb, function(){}); }; _wi.src = _wu; }
+          else if (window._stitchLocalBM) window._stitchLocalBM(_lb, function(){});
+        }
       }catch(e){}
     } else {
       // Fallback area if current area isn't valid for current model
