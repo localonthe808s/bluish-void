@@ -93,23 +93,41 @@ def r2(*args, check=True):
 INTERP = 3              # computed frames between each pair of real GEOCOLOR frames (user 2026-10-24: "make it run smoother")
 
 
+def _sharp(g):
+    import cv2
+    return cv2.Laplacian(g, cv2.CV_32F).var()
+
+
 def inbetweens(fd, a, b):
-    """motion-compensated frames between real frames a and b (ffmpeg minterpolate), saved as <a>_i1.._i3.jpg next to them.
-    Named with a's time, so the page's clock only ever shows real frame times. ~1 s a pair."""
-    outs = [os.path.join(fd, a[:-4] + '_i%d.jpg' % k) for k in range(1, INTERP + 1)]
+    """computed frames between real frames a and b, saved as <a>_f1.._f3.jpg next to them. Named with a's time, so the page's
+    clock only ever shows real frame times.
+    OPTICAL FLOW (2026-10-24, user: "the video transitions oddly"): ffmpeg's minterpolate matched 8-px blocks, which smeared fine
+    cloud fields into streaks and left the middle frame ~40% softer than the scans, so the loop pulsed soft-sharp every step.
+    Now: dense flow both ways (OpenCV DIS), smoothed (clouds move coherently), each scan warped toward the moment and blended;
+    then a light unsharp mask picked per frame so its sharpness matches the two scans around it. ~0.5 s a pair."""
+    import cv2, numpy as np
+    outs = [os.path.join(fd, a[:-4] + '_f%d.jpg' % k) for k in range(1, INTERP + 1)]
     if all(os.path.exists(o) for o in outs): return False
-    d = tempfile.mkdtemp()
-    try:
-        for i, src in enumerate((a, b, b)):
-            os.symlink(os.path.join(fd, src), os.path.join(d, '%d.jpg' % i))
-        subprocess.run(['ffmpeg', '-v', 'error', '-y', '-framerate', '1', '-i', os.path.join(d, '%d.jpg'), '-vf',
-                        'minterpolate=fps=%d:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1' % (INTERP + 1),
-                        '-fps_mode', 'passthrough', '-q:v', '3', os.path.join(d, 'o_%02d.jpg')], check=True, timeout=60)
-        for k in range(1, INTERP + 1):
-            os.replace(os.path.join(d, 'o_%02d.jpg' % (k + 1)), outs[k - 1])   # o_01 is a itself; o_02..o_04 the in-betweens
-        return True
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
+    A = cv2.imread(os.path.join(fd, a)); B = cv2.imread(os.path.join(fd, b))
+    if A is None or B is None or A.shape != B.shape: raise ValueError('unreadable pair')
+    ga = cv2.cvtColor(A, cv2.COLOR_BGR2GRAY); gb = cv2.cvtColor(B, cv2.COLOR_BGR2GRAY)
+    dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM)
+    fab = cv2.GaussianBlur(dis.calc(ga, gb, None), (0, 0), 6); fba = cv2.GaussianBlur(dis.calc(gb, ga, None), (0, 0), 6)
+    h, w = ga.shape; gx, gy = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    target = (_sharp(ga.astype(np.float32)) + _sharp(gb.astype(np.float32))) / 2
+    for k in range(1, INTERP + 1):
+        t = k / (INTERP + 1.0)
+        wa = cv2.remap(A, gx - t * fab[..., 0], gy - t * fab[..., 1], cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+        wb = cv2.remap(B, gx - (1 - t) * fba[..., 0], gy - (1 - t) * fba[..., 1], cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+        m = cv2.addWeighted(wa, 1 - t, wb, t, 0); bl = cv2.GaussianBlur(m, (0, 0), 1.0)
+        best, bd = m, 1e18
+        for amt in (0, .08, .16, .24, .32, .4):
+            c = cv2.addWeighted(m, 1 + amt, bl, -amt, 0) if amt else m
+            d = abs(_sharp(cv2.cvtColor(c, cv2.COLOR_BGR2GRAY).astype(np.float32)) - target)
+            if d < bd: best, bd = c, d
+        tmp = outs[k - 1] + '.tmp.jpg'
+        cv2.imwrite(tmp, best, [cv2.IMWRITE_JPEG_QUALITY, 92]); os.replace(tmp, outs[k - 1])
+    return True
 
 
 def frame_name(stamp, sat, sector, band):
@@ -154,7 +172,7 @@ def main():
                 subprocess.run(['tar', '-xf', tar_local, '-C', fd], check=False)
         wset = set(want)
         for f in os.listdir(fd):
-            if f not in wset and re.sub(r'_i\d\.jpg$', '.jpg', f) not in wset: os.remove(os.path.join(fd, f))   # an in-between lives as long as its frame
+            if f not in wset and re.sub(r'_f\d\.jpg$', '.jpg', f) not in wset: os.remove(os.path.join(fd, f))   # an in-between lives as long as its frame
         state[(sat, sector, BAND)] = {'work': work, 'fd': fd, 'key': key, 'tar_key': tar_key, 'tar_local': tar_local, 'old': old,
                                       'want': want, 'band': band, 'new': 0, 'step': step, 'src': src}
     pending = []           # every loop's state is fetched from R2 in parallel below (one by one it took ~2.5 min of a run)
@@ -302,7 +320,7 @@ def main():
             for i, n in enumerate(names):
                 out.append(n)
                 if i < len(names) - 1:
-                    ib = [n[:-4] + '_i%d.jpg' % k for k in range(1, INTERP + 1)]
+                    ib = [n[:-4] + '_f%d.jpg' % k for k in range(1, INTERP + 1)]
                     if all(os.path.exists(os.path.join(fd, x)) for x in ib): out += ib
             return out
         if old and old.get('src') == S['src'] and (old.get('d') or {}).get('frames', [None])[-1:] == [got[-1]] and old.get('m') and not S['new'] and not made:
