@@ -59549,19 +59549,37 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           window._bvBmPending = false;
           if (window._fcastHideLoader) window._fcastHideLoader(true);
         }, 12000);
-        show(false);
-        _stitchBasemap(lbox, function(u){
+        /* THE PREVIOUS MAP STAYS UNDER THE BLURRED LOADER (user 2026-10-23, "do all 4") rather than a bare black box: the
+           loader's 16 px blur keeps it from reading as the wrong map, and the new one swaps in whole once it is decoded.
+           Only between our own national/regional maps; anything else still clears first. */
+        var _keepOld = isConusView && bm && bm.style.display === 'block' && /\/radarmaps\/|^data:image/.test(bm.getAttribute('src') || '');
+        if (!_keepOld) show(false);
+        var _bmKey = lbox.bm || lbox.sid;
+        var _bmDone = function(u){
           window._bvBmPending = false;
           clearTimeout(window._bvBmWait);
-          if (u && fcastState.range === 'live' && fcastState.area === wantArea){ setSrc(u); show(true); }
-          if (window._fcastHideLoader) window._fcastHideLoader();
-        }, isConusView ? window.BV_MAP_FLAVOR_CONTINENTAL : null,
+          if (u && fcastState.range === 'live' && fcastState.area === wantArea){ window._staBasemap[_bmKey] = u; setSrc(u); show(true); }
+          /* the baked map lands before the radar now: the frame's onload lifts the loader, unless it is already in */
+          if (window._fcastHideLoader && lastGoodSrc) window._fcastHideLoader();
+        };
+        var _stitchNow = function(){ _stitchBasemap(lbox, _bmDone, isConusView ? window.BV_MAP_FLAVOR_CONTINENTAL : null,
            isConusView ? [] : null,
            isConusView && window.BV_CONTINENTAL ? window.BV_CONTINENTAL.roads : null,
            isConusView && window.BV_CONTINENTAL ? window.BV_CONTINENTAL.bounds : null,
            !isConusView ? null : fcastState.area === 'conus' ? '/city_terrain_natl.png?v=1'
              : lbox.sid === 'conus' ? '/city_terrain_conus.png?v=4'   /* a region crops the 4500 px bake, not the 2048 one */
-             : 'na-tiles');
+             : 'na-tiles'); };
+        /* BAKED (2026-10-23): NATIONWIDE and the 14 regions are one JPEG each from _maplab/radarmaps_bake.py, the same picture
+           this stitcher draws, so a first visit is one ~250 KB image instead of the 4 MB terrain raster, ~50 vector tiles and a
+           canvas render. A missing or failed file falls back to stitching; ?bakemaps=1 forces the stitch (that is how they
+           are baked). */
+        var _baked = isConusView ? window._bvNatMapUrl(wantArea) : null;
+        if (_baked){
+          var _pre = new Image();
+          _pre.onload = function(){ _bmDone(_baked); };
+          _pre.onerror = _stitchNow;
+          _pre.src = _baked;
+        } else _stitchNow();
       }
     }
     var srcName = mode === 'conus' ? 'NOAA MRMS composite'
@@ -59679,7 +59697,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     'us-ne':     { ws:'conus',  w:-85.5,  e:-64.1,  s:37.0, n:47.5 },
     'us-se':     { ws:'conus',  w:-94.0,  e:-73.0,  s:24.5, n:36.5 },
     'us-nc':     { ws:'conus',  w:-96.8,  e:-74.2,  s:37.5, n:48.5 },
-    'us-nw':     { ws:'conus',  w:-128.1, e:-108.9, s:40.5, n:49.5 },
+    'us-nw':     { ws:'conus',  w:-127.9, e:-108.7, s:40.5, n:49.5 },
     'us-sw':     { ws:'conus',  w:-126.9, e:-106.1, s:31.5, n:42.5 },
     'upper-ms':  { ws:'conus',  w:-104.9, e:-81.1,  s:37.5, n:49.0 },
     'south-ms':  { ws:'conus',  w:-99.5,  e:-80.5,  s:28.5, n:39.0 },
@@ -59692,6 +59710,40 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     'guam':      { ws:'guam',   w:142.0,  e:148.0,  s:11.8, n:16.3 }
   };
   var _NAT_WS = { conus:1, alaska:1, hawaii:1, carib:1, guam:1 };
+  var _NAT_MAP_V = 1;   /* bump with every re-bake of /radarmaps/ */
+  /* WARM A VIEW BEFORE IT IS PICKED (2026-10-23): its baked map and its workspace's scan list, on intent (hover, a press, the
+     AK/HI/PR/GU slide-out opening) and once at idle for the region the visitor is in. Pill keys or area names both work. */
+  var _NAT_PILL = { conus:'conus', ne:'us-ne', se:'us-se', gl:'us-nc', nw:'us-nw', sw:'us-sw', upms:'upper-ms', loms:'south-ms',
+                    nrock:'n-rockies', srock:'s-rockies', splains:'s-plains', ak:'alaska', hi:'hawaii', pr:'pr', gu:'guam' };
+  var _natWarmed = {}, _natWarmImgs = [];
+  window._bvWarmNat = function(list){
+    (list || []).forEach(function(k){
+      var a = _NAT_PILL[k] || k;
+      if (!_isNatArea(a) || _natWarmed[a]) return;
+      _natWarmed[a] = 1;
+      try {
+        var u = window._bvNatMapUrl(a);
+        if (u){ var im = new Image(); im.src = u; _natWarmImgs.push(im); }
+        _fetchScanTimes(_natBox(a).sid);
+      } catch(e){}
+    });
+  };
+  window._bvHomeNatArea = function(){
+    if (typeof LOCATION === 'undefined' || !isFinite(+LOCATION.lat)) return null;
+    var la = +LOCATION.lat, lo = +LOCATION.lon, best = null, bd = 1e9;
+    Object.keys(_NAT_AREAS).forEach(function(a){
+      var d = _NAT_AREAS[a];
+      if (la < d.s || la > d.n || lo < d.w || lo > d.e) return;
+      var c = Math.abs(la - (d.s + d.n) / 2) + Math.abs(lo - (d.w + d.e) / 2);   /* boxes overlap: the one centred nearest */
+      if (c < bd){ bd = c; best = a; }
+    });
+    return best;
+  };
+  window._bvNatMapUrl = function(area){
+    if (!_isNatArea(area)) return null;
+    try { if (/[?&]bakemaps=1/.test(location.search)) return null; } catch(e){}
+    return '/radarmaps/' + area + '.jpg?v=' + _NAT_MAP_V;
+  };
   function _isNatArea(a){ return a === 'conus' || !!_NAT_AREAS[a]; }
   window._bvIsNatArea = _isNatArea;
   var _natBoxMemo = {};
@@ -59914,12 +59966,16 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                   im.src = tmpl.replace('{z}', z).replace('{x}', t[0]).replace('{y}', t[1]);
                 });
               })).then(function(got){
-                got.forEach(function(g){
-                  if (!g) return;
-                  var x0 = (g[0][0] * ts - E / 2 - box.X0) / (box.X1 - box.X0) * W, y0 = (box.Y1 - (E / 2 - g[0][1] * ts)) / (box.Y1 - box.Y0) * H;
-                  var x1 = ((g[0][0] + 1) * ts - E / 2 - box.X0) / (box.X1 - box.X0) * W, y1 = (box.Y1 - (E / 2 - (g[0][1] + 1) * ts)) / (box.Y1 - box.Y0) * H;
-                  ctx.drawImage(g[1], Math.floor(x0), Math.floor(y0), Math.ceil(x1) - Math.floor(x0), Math.ceil(y1) - Math.floor(y0));
-                });
+                /* the layer is laid out on its own canvas at the tiles' native grid first (whole pixels, no overlap) and
+                   scaled in once: drawing each translucent tile scaled straight onto the map doubled the shading along
+                   every rounded seam and left a faint grid */
+                var lc = document.createElement('canvas');
+                lc.width = (tx1 - tx0 + 1) * 256; lc.height = (ty1 - ty0 + 1) * 256;
+                var lx = lc.getContext('2d');
+                got.forEach(function(g){ if (g) lx.drawImage(g[1], (g[0][0] - tx0) * 256, (g[0][1] - ty0) * 256, 256, 256); });
+                var gx0 = tx0 * ts - E / 2, gy1 = E / 2 - ty0 * ts;
+                ctx.drawImage(lc, (gx0 - box.X0) / (box.X1 - box.X0) * W, (box.Y1 - gy1) / (box.Y1 - box.Y0) * H,
+                  lc.width / 256 * ts / (box.X1 - box.X0) * W, lc.height / 256 * ts / (box.Y1 - box.Y0) * H);
               });
             });
           };
@@ -60084,6 +60140,9 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     loadFcastRadar();
   };
   function _fetchScanTimes(sid){
+    /* ONE FETCH A MINUTE PER WORKSPACE (2026-10-23): the LIVE view's prewarm runs on every region switch and asked for the
+       same lists again each time (three GetCapabilities per tap). Inside a minute the list we hold is the list. */
+    if (_staScansLast[sid] && Date.now() - _staScansLast[sid] < 60000) return;
     _staScansLast[sid] = Date.now();
     fetch('https://opengeo.ncep.noaa.gov/geoserver/' + sid + '/ows?service=WMS&request=GetCapabilities')
       .then(function(r){ return r.ok ? r.text() : null; })
@@ -75119,6 +75178,17 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       }
     }
 
+    /* THE WHOLE LOOP UP FRONT for NATIONWIDE and the regions (2026-10-23): the frames used to download one per tick as the
+       loop reached them, so the first pass stuttered at NOAA's ~0.65 s a frame. All of them are asked for at once, once per
+       view, product and newest scan; NOAA lets them be cached for two minutes. */
+    if (fcastState.range === 'live' && _natOn()){
+      var _fs = getActiveFhrs() || [], _nk = fcastState.area + '|' + (window._conusProduct || 'cref') + '|' + _liveFrameUrl('', '0');
+      if (window._natPrefetchKey !== _nk){
+        window._natPrefetchKey = _nk;
+        window._natPrefetchImgs = _fs.map(function(fh){ var u = _liveFrameUrl('', fh); if (!u) return null; var im = new Image(); im.src = u; return im; });
+      }
+    }
+
     // Update frame indicator
     updateFrameIndicator();
   }
@@ -75622,9 +75692,14 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
     // Clear stale images to prevent flash of previous mode
     var imgA = document.getElementById('fcast-radar-img');
     var imgB = document.getElementById('fcast-radar-img-b');
-    if (imgA) imgA.style.opacity = '0';
-    if (imgB) imgB.style.opacity = '0';
-    radarImgFront = true;
+    /* not when a region tap re-enters live from a national/regional view: switchFcastArea decides there (it keeps the last
+       frames under the loader between two of our maps) */
+    var _keepFrames = prevRange === 'live' && range === 'live' && window._bvIsNatArea && window._bvIsNatArea(fcastState.area);
+    if (!_keepFrames){
+      if (imgA) imgA.style.opacity = '0';
+      if (imgB) imgB.style.opacity = '0';
+      radarImgFront = true;
+    }
 
     // Default to the single-station LOCAL view when entering live radar from clouds
     if (range === 'live' && prevRange === 'clouds') {
@@ -76169,11 +76244,17 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
     window._bvSrc([[LB[m] + ' \u00b7 NCEP MAG', 'https://mag.ncep.noaa.gov/model-guidance-model-parameter.php?group=Model%20Guidance&model=' + slug + '&area=' + ar + '&ps=area']]);
   };
   function switchFcastArea(area){
+    var _prevArea = fcastState.area;
     lastGoodSrc = "";
     if (fcastState.range !== 'clouds' && fcastState.playing) fcastRadarTogglePlay();
     fcastState.area = area;
     if (fcastState.range !== 'clouds' && fcastState.range !== 'live' && window._fcastModelSrc) window._fcastModelSrc();
     fcastState.idx = 0;
+    /* NEWEST SCAN FIRST on the national and regional views (2026-10-23): the loop used to open on its oldest frame, ~36 min
+       old; it now opens on now and plays the hour from the start on the next tick */
+    if (fcastState.range === 'live' && window._bvIsNatArea && window._bvIsNatArea(area)){
+      try { var _fl = getActiveFhrs(); if (_fl && _fl.length) fcastState.idx = _fl.length - 1; } catch(e){}
+    }
     _frameDotCount = 0; // force dot rebuild
     allAreaIds.forEach(function(a){
       var btn = document.getElementById('fcast-area-' + a);
@@ -76218,7 +76299,10 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
     // Live area change: blank both crossfade imgs immediately — the front
     // img otherwise keeps showing the PREVIOUS area's map until the new
     // frame loads ("loads the wrong map before the correct one")
-    if (fcastState.range === 'live'){
+    /* except between two of our national/regional maps (2026-10-23): there the last view stays under the loader's blur
+       until the new frames land, instead of a black box */
+    var _natToNat = window._bvIsNatArea && window._bvIsNatArea(_prevArea) && window._bvIsNatArea(area);
+    if (fcastState.range === 'live' && !_natToNat){
       ['fcast-radar-img','fcast-radar-img-b'].forEach(function(id3){
         var im3 = document.getElementById(id3);
         if (im3) im3.style.opacity = '0';
@@ -120820,6 +120904,7 @@ function closeAlertModal(){
     if (!open){ g.classList.remove('open'); btn.setAttribute('aria-expanded', 'false'); return; }
     var pop = g.querySelector('.lv-pop');
     pop.style.setProperty('--lv-dx', '0px'); g.classList.add('open'); btn.setAttribute('aria-expanded', 'true');
+    try { if (window._bvWarmNat) window._bvWarmNat([].map.call(pop.querySelectorAll('[id^="lv-"]'), function(b){ return b.id.slice(3); })); } catch(e){}
     /* keep the slide-out on screen: nudge it sideways if it would run past the panel's edge */
     var host = g.closest('#goes-bands-panel, #radar-widget-body') || document.body, hr = host.getBoundingClientRect();
     var w = pop.offsetWidth, gr = g.getBoundingClientRect(), c = gr.left + gr.width / 2, lo = hr.left + 4, hi = hr.right - 4, dx = 0;
@@ -120833,6 +120918,24 @@ function closeAlertModal(){
       b.style.background = on ? '#fff' : '#05DB32'; b.style.color = on ? '#9a3412' : '#0b0d14'; });
   };
   document.addEventListener('click', function(e){ if (!e.target.closest || !e.target.closest('#live-sector-row .lv-grp')) close(null); }, true);
+  /* warm a view the moment a pointer settles on (or presses) its pill */
+  var warmPill = function(e){
+    var b = e.target && e.target.closest ? e.target.closest('#live-view-row [id^="lv-"]') : null;
+    if (b && window._bvWarmNat) window._bvWarmNat([b.id.slice(3)]);
+  };
+  document.addEventListener('mouseover', warmPill, { passive: true });
+  document.addEventListener('pointerdown', warmPill, { passive: true, capture: true });
+  /* and once, at idle, the region the visitor is in, as soon as the LIVE widget comes near the screen */
+  var home = document.getElementById('clouds-radar-widget');
+  if (home && 'IntersectionObserver' in window){
+    var io = new IntersectionObserver(function(ents){
+      if (!ents.some(function(x){ return x.isIntersecting; })) return;
+      io.disconnect();
+      var go = function(){ try { var a = window._bvHomeNatArea && window._bvHomeNatArea(); if (a && window._bvWarmNat) window._bvWarmNat([a]); } catch(e){} };
+      if (window.requestIdleCallback) requestIdleCallback(go, { timeout: 4000 }); else setTimeout(go, 2500);
+    }, { rootMargin: '600px 0px' });
+    io.observe(home);
+  }
 })();
 </script>
 <style id="obs-dark-css">
