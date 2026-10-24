@@ -108,6 +108,29 @@ export default {
       for (const k in cors) hit.headers.set(k, cors[k]);
       return hit;
     }
+    /* HIMAWARI-9 AND METEOSAT-12, CACHED (2026-10-24, user: "add himawari and meteosat" to FORECASTS' satellites). CIRA SLIDER
+       serves them keyless but without CORS, and the satellite player loads frames as crossOrigin images: the times list passes
+       through here (60 s, keyed by the minute like the GOES listing) and each frame (its path carries its time) is kept a year.
+       Only these two satellites, their full disks and Himawari's Japan sector, zoom 00-01. */
+    const sj = url.pathname.match(/^\/slider\/json\/(himawari|meteosat-12)\/(full_disk|japan)\/([a-z0-9_.-]{2,64})\/latest_times\.json$/);
+    const si = url.pathname.match(/^\/slider\/imagery\/(\d{4})\/(\d{2})\/(\d{2})\/(himawari|meteosat-12)---(full_disk|japan)\/([a-z0-9_.-]{2,64})\/(\d{14})\/(0[01])\/(\d{3}_\d{3})\.png$/);
+    if (sj || si){
+      const listing = !!sj, cache = caches.default, key = new Request(url.origin + url.pathname + (listing ? '?m=' + Math.floor(Date.now() / 60000) : ''), { method: 'GET' });
+      let hit = await cache.match(key), tag = 'HIT';
+      if (!hit){
+        tag = 'MISS';
+        const up = await fetch('https://slider.cira.colostate.edu/data' + url.pathname.slice(7), { headers: { 'User-Agent': 'bluishvoid.com satellite loop cache' } });
+        if (!up.ok) return new Response(null, { status: up.status === 404 ? 404 : 502, headers: { ...cors, 'Cache-Control': 'no-store' } });
+        hit = new Response(await up.arrayBuffer(), { status: 200, headers: listing
+          ? { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=60' }
+          : { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=31536000, immutable' } });
+        ctx.waitUntil(cache.put(key, hit.clone()));
+      }
+      hit = new Response(hit.body, hit); hit.headers.set('X-Tile-Cache', tag);
+      hit.headers.set('Cache-Control', listing ? 'public, max-age=60' : 'public, max-age=31536000, immutable');
+      for (const k in cors) hit.headers.set(k, cors[k]);
+      return hit;
+    }
     /* MACROSTRAT, CACHED (2026-10-17, user: "do ... the macrostrat caching too"): /macrostrat/carto/{z}/{x}/{y}.png passes
        through to tiles.macrostrat.org (CC-BY, credited on the page) and keeps each tile at the edge for a week -- the geologic
        map changes rarely, and their server answers in ~300 ms where our edge answers in tens. */
