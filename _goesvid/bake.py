@@ -342,7 +342,8 @@ def main():
             vf = ['-vf', 'scale=%d:-2' % K['w']] if K['w'] != fdgeo.OUT_W else []
             out = os.path.join(work, '%s_%s.mp4' % (newest, kk))
             subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', lst] + vf +
-                           ['-r', str(FPS), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', str(K['crf']), '-g', str(K['g']), '-pix_fmt', 'yuv420p',
+                           ['-r', str(FPS), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', str(K['crf']), '-g', str(K['g']), '-bf', '0', '-pix_fmt', 'yuv420p',   # -bf 0: B-frames are stored softer, the fine cloud texture flickered every other frame
+                           
                             '-movflags', '+faststart', '-an', out], check=True)
             man['step'] = round(S['step'] * (len(real) - 1) / max(1, len(use) - 1), 3)   # minutes a video frame stands for
             man[kk] = {'mp4': os.path.basename(out), 'frames': use, 'real': len(real), 'size': '%dx%d' % (K['w'], K['w'] * fdgeo.OUT_H // fdgeo.OUT_W),
