@@ -124,11 +124,12 @@ def main():
             if f not in set(want): os.remove(os.path.join(fd, f))
         state[(sat, sector, BAND)] = {'work': work, 'fd': fd, 'key': key, 'tar_key': tar_key, 'tar_local': tar_local, 'old': old,
                                       'want': want, 'band': band, 'new': 0, 'step': step, 'src': src}
+    pending = []           # every loop's state is fetched from R2 in parallel below (one by one it took ~2.5 min of a run)
     for (sat, BAND) in plan:
         band, fds, _n = plan[(sat, BAND)]
         for s2, sector in SECTORS:
-            if s2 == sat: mkstate(sat, sector, BAND, band, [frame_name(n[:11], sat, sector, band) for n in fds], STEP, 'fd')
-    raw_jobs = []
+            if s2 == sat: pending.append((sat, sector, BAND, band, [frame_name(n[:11], sat, sector, band) for n in fds], STEP, 'fd'))
+    raw_plan = []
     for sat in sats:
         bands = [b for b in RAW if not BAND_ONLY or b == BAND_ONLY]
         if not bands: continue
@@ -143,11 +144,15 @@ def main():
                 if not sc: continue
                 t1 = stamp_ms(max(sc))
                 stamps = sorted(st for st in sc if stamp_ms(st) > t1 - KINDS['d']['hours'] * 3600e3)
-                for sector in secs: mkstate(sat, sector, band, band, [frame_name(st, sat, sector, band) for st in stamps], 5 if prod == 'C' else 10, 'raw')
-                for st in stamps:
-                    outs = [(sector, os.path.join(state[(sat, sector, band)]['fd'], frame_name(st, sat, sector, band))) for sector in secs]
-                    outs = [o for o in outs if not os.path.exists(o[1])]
-                    if outs: raw_jobs.append((st, (sat, band, sc[st], outs)))
+                for sector in secs: pending.append((sat, sector, band, band, [frame_name(st, sat, sector, band) for st in stamps], 5 if prod == 'C' else 10, 'raw'))
+                raw_plan.append((sat, band, secs, sc, stamps))
+    with ThreadPoolExecutor(12) as ex: list(ex.map(lambda a: mkstate(*a), pending))
+    raw_jobs = []
+    for sat, band, secs, sc, stamps in raw_plan:
+        for st in stamps:
+            outs = [(sector, os.path.join(state[(sat, sector, band)]['fd'], frame_name(st, sat, sector, band))) for sector in secs]
+            outs = [o for o in outs if not os.path.exists(o[1])]
+            if outs: raw_jobs.append((st, (sat, band, sc[st], outs)))
     if not state: sys.exit(1)
     # 3. the full disks any sector still lacks, each downloaded once and cut for every sector of its satellite
     def cut(job):
@@ -256,7 +261,7 @@ def main():
         except Exception as e: r = 'FAILED %s' % e
         print('%s %-4s %-8s %s (%.0f s)' % (k[0], k[1], k[2], r, time.time() - t), flush=True)
         return r
-    with ThreadPoolExecutor(4) as ex: res = list(ex.map(one, list(state)))
+    with ThreadPoolExecutor(6) as ex: res = list(ex.map(one, list(state)))
     if all(str(r).startswith('FAILED') or r == 'no frames' for r in res): sys.exit(1)
 
 
