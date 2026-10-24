@@ -98,8 +98,7 @@ def main():
               for sgm in segs: d.line(sgm, fill=(0, 0, 0, halo), width=width + int(1.5 * SS * S * LW), joint='curve')
               for sgm in segs: d.line(sgm, fill=rgba, width=width, joint='curve')
           u = SS * S * LW
-          line(states, int(1.0 * u), (255, 255, 255, 120), 50)
-          line(borders, int(1.3 * u), (255, 255, 255, 170), 60)
+          # 2026-10-24 (user): no state or country lines -- most of them follow rivers, and the line hid the valley fog on them
           line(coast, int(1.2 * u), (255, 255, 255, 150), 55)
           im = im.resize((fdgeo.OUT_W * S, fdgeo.OUT_H * S), Image.LANCZOS)
           d = ImageDraw.Draw(im)

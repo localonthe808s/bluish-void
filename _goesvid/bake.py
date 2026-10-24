@@ -53,7 +53,7 @@ BUCKET, PREFIX = 'bluishvoid-bg', 'goes/video/'
 # apart (smaller files with 4x the frames); still close enough that a zoom swap or the seek fallback lands quickly
 KINDS = {'d': {'hours': 6, 'crf': 25, 'g': 12, 'w': fdgeo.OUT_W},   # crf 25: ~13 MB for 6 h with in-betweens (22 was ~18)
          'm': {'hours': 2, 'crf': 23, 'g': 8, 'w': fdgeo.OUT_W // 2}}
-OVERLAY_V = 4          # /satmaps/<sat>-<sector>.png?v= -- bump with satmaps_bake.py
+OVERLAY_V = 5          # /satmaps/<sat>-<sector>.png?v= -- bump with satmaps_bake.py
 UA = {'User-Agent': 'bluishvoid.com satellite loop bake'}
 DRY = '--dry' in sys.argv
 ONLY = sys.argv[sys.argv.index('--dry') + 1] if DRY and len(sys.argv) > sys.argv.index('--dry') + 1 else None
