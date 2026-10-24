@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from PIL import Image
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import fdgeo, rawbands, glm, nightblend
+import fdgeo, rawbands, glm, nightblend, mergedisk
 
 Image.MAX_IMAGE_PIXELS = None
 FPS, STEP = 10, 10
@@ -149,7 +149,8 @@ def _glm_one(a):
 def main():
     root = '/tmp/goesvid' if DRY else tempfile.mkdtemp()
     os.makedirs(root, exist_ok=True)
-    sats = sorted({s for s, _ in SECTORS})
+    MERGED = (mergedisk.SAT, mergedisk.SECTOR) in SECTORS and (not BAND_ONLY or BAND_ONLY == 'GEOCOLOR')
+    sats = sorted({s for s, _ in SECTORS if s != mergedisk.SAT} | (set(mergedisk.REAL) if MERGED else set()))   # the merged view needs both real disks
     # 1. what each satellite's full disk offers per band over the longest window (and GeoColor's freeze fallback)
     plan = {}
     for sat in sats:
@@ -191,6 +192,11 @@ def main():
         band, fds, _n = plan[(sat, BAND)]
         for s2, sector in SECTORS:
             if s2 == sat: pending.append((sat, sector, BAND, band, [frame_name(n[:11], sat, sector, band) for n in fds], STEP, 'fd'))
+    # EAST + WEST (mergedisk.py): the scans both satellites have, both in GeoColor (not the freeze fallback)
+    m_stamps = []
+    if MERGED and all((s0, 'GEOCOLOR') in plan and plan[(s0, 'GEOCOLOR')][0] == 'GEOCOLOR' for s0 in mergedisk.REAL):
+        m_stamps = sorted(set(n[:11] for n in plan[(mergedisk.REAL[0], 'GEOCOLOR')][1]) & set(n[:11] for n in plan[(mergedisk.REAL[1], 'GEOCOLOR')][1]))
+        if m_stamps: pending.append((mergedisk.SAT, mergedisk.SECTOR, 'GEOCOLOR', 'GEOCOLOR', [frame_name(st, mergedisk.SAT, mergedisk.SECTOR, 'GEOCOLOR') for st in m_stamps], STEP, 'fd'))
     raw_plan = []
     for sat in sats:
         bands = [b for b in RAW if not BAND_ONLY or b == BAND_ONLY]
@@ -288,6 +294,32 @@ def main():
                     for g in futs:
                         if g.cancel(): drop(futs[g]); nb_drop += 1
     print('night blend: %d scans, %d left for the next run' % (nb_ok, nb_drop), flush=True)
+    # 3a'. EAST + WEST: each scan both satellites have, newest first, within the time budget
+    mk = (mergedisk.SAT, mergedisk.SECTOR, 'GEOCOLOR')
+    if m_stamps and mk in state:
+        todo = [st for st in reversed(m_stamps) if not os.path.exists(os.path.join(state[mk]['fd'], frame_name(st, mk[0], mk[1], 'GEOCOLOR')))]
+        if os.environ.get('GV_MAXFD'): todo = todo[:int(os.environ['GV_MAXFD'])]
+        def disks(st):
+            out = {}
+            for s0 in mergedisk.REAL:
+                for base in (EDGE, NESDIS):
+                    try:
+                        raw = get('%s%s/ABI/FD/GEOCOLOR/%s_%s-ABI-FD-GEOCOLOR-%dx%d.jpg' % (base, s0, st, s0, mergedisk.SIZE, mergedisk.SIZE), 90)
+                        if len(raw) > 100000: out[s0] = raw; break
+                    except Exception: pass
+            return out if len(out) == len(mergedisk.REAL) else None
+        m_ok = m_left = 0
+        with ProcessPoolExecutor(4) as px:
+            futs = {}
+            for st in todo:
+                if time.time() - t_start > BUDGET_S: m_left += 1; continue
+                d = disks(st)
+                if not d: m_left += 1; continue
+                futs[px.submit(mergedisk.build, (st, os.path.join(state[mk]['fd'], frame_name(st, mk[0], mk[1], 'GEOCOLOR')), d))] = st
+            for f in as_completed(futs):
+                try: f.result(); m_ok += 1; state[mk]['new'] += 1
+                except Exception as e: m_left += 1; print('  east+west %s: %s' % (futs[f], e))
+        print('east + west: %d frames, %d left for the next run' % (m_ok, m_left), flush=True)
     # 3b. the raw scans (B13, Air Mass), newest first, in processes (netCDF4 is not thread-safe), within the time budget
     raw_jobs.sort(key=lambda j: j[0], reverse=True)
     if os.environ.get('GV_MAXFD'): raw_jobs = raw_jobs[:int(os.environ['GV_MAXFD'])]
