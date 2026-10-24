@@ -72,46 +72,49 @@ def main():
     borders = [carcs[i] for i in range(len(carcs)) if cuse.get(i, 0) >= 2]
     states = [sarcs[i] for i in range(len(sarcs)) if suse.get(i, 0) >= 2]
     names = [c for c in city_labels() if c[3] != 'water'] + [c + [None] for c in FAR]
-    W, H = fdgeo.OUT_W * S * SS, fdgeo.OUT_H * S * SS
-    for (sat, sector) in fdgeo.SECTORS:
-        im = Image.new('RGBA', (W, H), (0, 0, 0, 0))
-        d = ImageDraw.Draw(im)
-        def line(arcs, width, rgba, halo):
-            segs = []
-            w0, e0, s0, n0 = fdgeo.SECTORS[(sat, sector)]
-            pad = max(e0 - w0, n0 - s0) * 0.6
-            for a in arcs:
-                if not any(s0 - pad < la < n0 + pad and (w0 - pad < lo < e0 + pad or w0 - pad < lo - 360 < e0 + pad) for lo, la in a[::max(1, len(a) // 12)] + a[-1:]):
-                    continue
-                cur = []
-                for lo, la in a:
-                    p = fdgeo.to_out(la, lo, sat, sector, S * SS)
-                    if p is None or not (-W < p[0] < 2 * W and -H < p[1] < 2 * H):
-                        if len(cur) > 1: segs.append(cur)
-                        cur = []; continue
-                    cur.append(p)
-                if len(cur) > 1: segs.append(cur)
-            for sgm in segs: d.line(sgm, fill=(0, 0, 0, halo), width=width + 3 * SS * S // 2, joint='curve')
-            for sgm in segs: d.line(sgm, fill=rgba, width=width, joint='curve')
-        u = SS * S
-        line(states, int(1.0 * u), (255, 255, 255, 120), 50)
-        line(borders, int(1.3 * u), (255, 255, 255, 170), 60)
-        line(coast, int(1.2 * u), (255, 255, 255, 150), 55)
-        im = im.resize((fdgeo.OUT_W * S, fdgeo.OUT_H * S), Image.LANCZOS)
-        d = ImageDraw.Draw(im)
-        fs = int(11 * S * 1.6)
-        font = ImageFont.truetype(FONT, fs, index=1)
-        for nm, la, lo, _ in names:
-            p = fdgeo.to_out(la, lo, sat, sector, S)
-            if not p or not (8 < p[0] < im.width - 8 and 8 < p[1] < im.height - 8): continue
-            r = 2.2 * S
-            d.ellipse((p[0] - r - 1.5 * S, p[1] - r - 1.5 * S, p[0] + r + 1.5 * S, p[1] + r + 1.5 * S), fill=(8, 10, 16, 220))
-            d.ellipse((p[0] - r, p[1] - r, p[0] + r, p[1] + r), fill=(255, 255, 255, 255))
-            d.text((p[0] + r + 5 * S, p[1]), nm, font=font, fill=(255, 255, 255, 240), anchor='lm',
-                   stroke_width=int(1.6 * S), stroke_fill=(8, 10, 16, 215))
-        out = os.path.join(OUT, '%s-%s.png' % (sat, sector))
-        im.quantize(64, method=Image.FASTOCTREE).save(out, optimize=True)   # 64-colour palette PNG: 1/5 the bytes, the same look
-        print(sat, sector, os.path.getsize(out) // 1024, 'KB')
+    # d: desktop, twice the frame; m: phones, which show the frame about 630 CSS px wide (cover-fit in a near-square box),
+    # so the same frame size with type and lines about 2.5x heavier relative to it
+    for var, S, FS, LW in (('', 2, 35, 1.0), ('-m', 1, 25, 2.2)):
+      W, H = fdgeo.OUT_W * S * SS, fdgeo.OUT_H * S * SS
+      for (sat, sector) in fdgeo.SECTORS:
+          im = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+          d = ImageDraw.Draw(im)
+          def line(arcs, width, rgba, halo):
+              segs = []
+              w0, e0, s0, n0 = fdgeo.SECTORS[(sat, sector)]
+              pad = max(e0 - w0, n0 - s0) * 0.6
+              for a in arcs:
+                  if not any(s0 - pad < la < n0 + pad and (w0 - pad < lo < e0 + pad or w0 - pad < lo - 360 < e0 + pad) for lo, la in a[::max(1, len(a) // 12)] + a[-1:]):
+                      continue
+                  cur = []
+                  for lo, la in a:
+                      p = fdgeo.to_out(la, lo, sat, sector, S * SS)
+                      if p is None or not (-W < p[0] < 2 * W and -H < p[1] < 2 * H):
+                          if len(cur) > 1: segs.append(cur)
+                          cur = []; continue
+                      cur.append(p)
+                  if len(cur) > 1: segs.append(cur)
+              for sgm in segs: d.line(sgm, fill=(0, 0, 0, halo), width=width + int(1.5 * SS * S * LW), joint='curve')
+              for sgm in segs: d.line(sgm, fill=rgba, width=width, joint='curve')
+          u = SS * S * LW
+          line(states, int(1.0 * u), (255, 255, 255, 120), 50)
+          line(borders, int(1.3 * u), (255, 255, 255, 170), 60)
+          line(coast, int(1.2 * u), (255, 255, 255, 150), 55)
+          im = im.resize((fdgeo.OUT_W * S, fdgeo.OUT_H * S), Image.LANCZOS)
+          d = ImageDraw.Draw(im)
+          fs = FS
+          font = ImageFont.truetype(FONT, fs, index=1)
+          for nm, la, lo, _ in names:
+              p = fdgeo.to_out(la, lo, sat, sector, S)
+              if not p or not (8 < p[0] < im.width - 8 and 8 < p[1] < im.height - 8): continue
+              r = 2.2 * S * (1 + (LW - 1) * 0.6)
+              d.ellipse((p[0] - r - 1.5 * S, p[1] - r - 1.5 * S, p[0] + r + 1.5 * S, p[1] + r + 1.5 * S), fill=(8, 10, 16, 220))
+              d.ellipse((p[0] - r, p[1] - r, p[0] + r, p[1] + r), fill=(255, 255, 255, 255))
+              d.text((p[0] + r + 5 * S, p[1]), nm, font=font, fill=(255, 255, 255, 240), anchor='lm',
+                     stroke_width=max(2, int(1.6 * S * (1 + (LW - 1) * 0.6))), stroke_fill=(8, 10, 16, 215))
+          out = os.path.join(OUT, '%s-%s%s.png' % (sat, sector, var))
+          im.quantize(64, method=Image.FASTOCTREE).save(out, optimize=True)   # 64-colour palette PNG: 1/5 the bytes, the same look
+          print(sat, sector + var, os.path.getsize(out) // 1024, 'KB')
 
 
 if __name__ == '__main__':
