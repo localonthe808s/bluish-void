@@ -24,7 +24,7 @@ who read the old latest.json a moment ago); an R2 lifecycle rule deletes anythin
     python3 _goesvid/bake.py            # all sectors (needs ffmpeg, Pillow, the aws cli and the R2 env: R2_ACCOUNT_ID, AWS_* keys)
     python3 _goesvid/bake.py --dry ne   # one sector, no upload: writes the videos to /tmp/goesvid
 """
-import io, json, os, re, subprocess, sys, tempfile, time, urllib.request
+import io, json, math, os, re, subprocess, sys, tempfile, time, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -134,10 +134,19 @@ def main():
         if not raw: print('  %s %s: full disk did not download' % (sat, n)); return 0
         im = Image.open(io.BytesIO(raw)); im.load(); im = im.convert('RGB')
         for k in mine:
-            l, t, r, b = fdgeo.crop(*k)
-            fr = im.resize((fdgeo.OUT_W, fdgeo.OUT_H), Image.LANCZOS, box=(l, t, r, b))
-            fr.save(os.path.join(state[k]['fd'], frame_name(n[:11], sat, k[1], band)), quality=92)
-            state[k]['new'] += 1
+            try:
+                l, t, r, b = fdgeo.crop(*k)
+                if l < 0 or t < 0 or r > im.width or b > im.height:
+                    # a wide sector (np, ep, taw) runs past the edge of the disk: cut with black beyond it, then scale
+                    L, T = math.floor(l), math.floor(t)
+                    fr = im.crop((L, T, int(r) + 1, int(b) + 1)).resize((fdgeo.OUT_W, fdgeo.OUT_H), Image.LANCZOS,
+                                                                      box=(l - L, t - T, r - L, b - T))
+                else:
+                    fr = im.resize((fdgeo.OUT_W, fdgeo.OUT_H), Image.LANCZOS, box=(l, t, r, b))
+                fr.save(os.path.join(state[k]['fd'], frame_name(n[:11], sat, k[1], band)), quality=92)
+                state[k]['new'] += 1
+            except Exception as e:
+                print('  %s %s %s: cut failed: %s' % (sat, k[1], n[:11], e))
         return 1
     jobs = sorted({(sat, n) for sat in plan for n in plan[sat][1]}, key=lambda j: j[1], reverse=True)   # newest first
     if os.environ.get('GV_MAXFD'): jobs = jobs[:int(os.environ['GV_MAXFD'])]   # a quick local test: only the newest few
