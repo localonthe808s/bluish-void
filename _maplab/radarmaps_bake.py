@@ -40,7 +40,7 @@ async def main():
         await pg.evaluate("var t=document.querySelector('.cira-tab[data-tab=\"goes\"]'); t&&t.click(); 1")
         await pg.wait_for_timeout(4000)
         for v in (sys.argv[1:] or VIEWS):
-            key = 'conus' if v == 'conus' else 'nat-' + AREA[v]
+            key = 'nat-' + AREA[v]   # NATIONWIDE's stitch is keyed nat-conus since it is drawn at 2400 px
             await pg.evaluate("(k)=>{ if (window._staBasemap) delete window._staBasemap[k]; }", key)
             await pg.evaluate("(v)=>window._setLiveView(v)", v)
             u = None
