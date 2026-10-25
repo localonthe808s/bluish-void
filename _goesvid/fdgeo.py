@@ -61,6 +61,7 @@ SECTORS = {
     ('GOES18', 'psw'): (-127.0, -109.0, 30.0, 42.5),
     ('GOES18', 'np'):  (-180.0, -125.0, 40.0, 66.0),
     ('GOES18', 'ep'):  (-165.0, -110.0, 10.0, 35.0),
+    ('GOES18', 'wus'): (-130.0, -100.0, 27.0, 52.0),  # WESTERN US from GOES-WEST: the West's step between a region and EAST + WEST (2026-10-25)
     # EAST + WEST (user 2026-10-24: "can we merge goes west and east at the largest" ... "zoom all the way out"): an imaginary
     # satellite halfway between them, at 106 W, on the same fixed grid -- every point drawn from whichever real one sees it more
     # squarely (mergedisk.py). Alaska and Hawaii lie past GOES-East's horizon, so no real satellite's own view can hold both.
