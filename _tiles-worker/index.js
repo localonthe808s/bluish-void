@@ -3,7 +3,7 @@ import { PMTiles, ResolvedValueCache } from 'pmtiles';
 import { railRoute, subwayRoute, delaysRoute } from './rail.js';
 
 const ALLOWED_ORIGINS = ['https://bluishvoid.com', 'https://www.bluishvoid.com', 'http://localhost:8000', 'http://localhost:3000'];
-const ARCHIVES = { 'bluish-basemap-20260829': 'basemap/bluish-basemap-20260829.pmtiles', 'bluish-faults-20261025': 'faults/bluish-faults-20261025.pmtiles' };   // + the baked faults (_faultbake/build.py)   // URL name -> R2 key (add a new build here)
+const ARCHIVES = { 'bluish-basemap-20260829': 'basemap/bluish-basemap-20260829.pmtiles', 'bluish-faults-20261025': 'faults/bluish-faults-20261025.pmtiles', 'bluish-faults-20261025b': 'faults/bluish-faults-20261025b.pmtiles' };   // + the baked faults (_faultbake/build.py)   // URL name -> R2 key (add a new build here)
 const TILE = /^\/([\w.-]+)\/(\d{1,2})\/(\d+)\/(\d+)\.mvt$/;
 
 class R2Source {

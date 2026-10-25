@@ -3,6 +3,9 @@
 One line layer for the whole country, the most detailed public source winning wherever two cover the same ground:
   1. THE CITY's traced faults (USGS I-2306 / I-2003, 1:24,000)            -- Manhattan and the Bronx
   2. state bedrock maps: NJ (NJGWS 1:100,000), CT (Rodgers 1985)            -- fetch_states.py
+     NY: the State Museum's brittle structures (Isachsen & McKendree 1977, MCS #31, 1:250,000) -- NYS_Faults.* in the work dir
+         (nysm.nysed.gov/sites/default/files/2025-10/NYS_Faults.zip); SGMC has no New York faults beyond the Vermont map's spill
+         into the east, so this fills the state, kept off that strip, THE CITY and the Quaternary lines it would double
   3. USGS Quaternary faults (the active ones, 1:24,000 - 1:250,000)         -- everywhere, never thinned
   4. USGS State Geologic Map Compilation (1:50,000 - 1:1,000,000)           -- the rest; dropped inside 1-2, and
                                                                                where it doubles a Quaternary fault
@@ -57,6 +60,33 @@ for sr in r.iterShapeRecords():
 def nearQ(x, y):
     cx, cy = int(x // CELL), int(y // CELL)
     return any((cx + i, cy + j) in qcells for i in (-1, 0, 1) for j in (-1, 0, 1))
+# 2b. NEW YORK (after the Quaternary hash, so it can be kept off those lines too)
+NYKEEP = lambda t: ('fault' in t or 'shear zone' in t or 'mylonite' in t) and 'locality' not in t and 'location' not in t
+TR_NY = Transformer.from_crs('EPSG:26918', 'EPSG:4326', always_xy=True)      # no .prj; NAD83 fits SGMC's overlap a hair better than NAD27
+vcells = set()                                                                 # where SGMC's New York lines (the Vermont map) run
+r = shapefile.Reader(os.path.join(W, 'SGMC_Structure'))
+for sr in r.iterShapeRecords():
+    if sr.record['STATE'] != 'NY': continue
+    xs_, ys_ = TR.transform([p[0] for p in sr.shape.points], [p[1] for p in sr.shape.points])
+    for x, y in zip(xs_, ys_): vcells.add((int(x // CELL), int(y // CELL)))
+nearV = lambda x, y: any((int(x // CELL) + i, int(y // CELL) + j) in vcells for i in (-2, -1, 0, 1, 2) for j in (-2, -1, 0, 1, 2))
+nyd = {'kind': 0, 'nyc': 0, 'vt': 0, 'qdup': 0}
+if os.path.exists(os.path.join(W, 'NYS_Faults.shp')):
+    r = shapefile.Reader(os.path.join(W, 'NYS_Faults'))
+    for sr in r.iterShapeRecords():
+        t = (sr.record['Type'] or '').strip().lower()
+        if not NYKEEP(t): nyd['kind'] += 1; continue
+        pts = sr.shape.points
+        for i in range(len(sr.shape.parts)):
+            a = sr.shape.parts[i]; b = sr.shape.parts[i + 1] if i + 1 < len(sr.shape.parts) else len(pts)
+            xs_, ys_ = TR_NY.transform([p[0] for p in pts[a:b]], [p[1] for p in pts[a:b]]); seg = list(zip(xs_, ys_))
+            if len(seg) < 2: continue
+            mx, my = seg[len(seg) // 2]
+            if inNYC(mx, my): nyd['nyc'] += 1; continue
+            if sum(1 for x, y in seg if nearV(x, y)) > 0.5 * len(seg): nyd['vt'] += 1; continue
+            if sum(1 for x, y in seg if nearQ(x, y)) > 0.6 * len(seg): nyd['qdup'] += 1; continue
+            emit(seg, {'k': kind(t), 'u': 1 if ('infer' in t or 'subsurface' in t) else 0, 'q': 0}, 'NYSM Brittle Structures 1:250,000')
+    print('NY dropped', nyd)
 # 4. SGMC
 r = shapefile.Reader(os.path.join(W, 'SGMC_Structure')); dropped = {'state': 0, 'nyc': 0, 'qdup': 0}
 for sr in r.iterShapeRecords():
