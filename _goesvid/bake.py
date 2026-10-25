@@ -55,7 +55,9 @@ BUCKET, PREFIX = 'bluishvoid-bg', 'goes/video/'
 # apart (smaller files with 4x the frames); still close enough that a zoom swap or the seek fallback lands quickly
 # 12 HOURS (user 2026-10-24: "lets extend to the 12 hour loop now for clouds ... since we're only relying on one now"): GeoColor is the
 # only loop baked, so the window doubles for desktop and phones; a notch more compression keeps the files near their 6 h sizes x1.5
-KINDS = {'d': {'hours': 12, 'crf': 27, 'g': 12, 'w': fdgeo.OUT_W, 'ib': (1, 2, 3)},
+# LIGHTER ON DESKTOP TOO (2026-10-25, "do 9 5 6"): one in-between per pair, the middle one, as phones -- half the frames and about half
+# the bytes (NE: 15 MB -> ~8); the optical-flow middle frame carries most of the smoothing, the page paces by the kind's step
+KINDS = {'d': {'hours': 12, 'crf': 27, 'g': 12, 'w': fdgeo.OUT_W, 'ib': (2,)},
          # LIGHTER ON PHONES (user 2026-10-24: "make the phone loop lighter"): one in-between per pair (the middle one), not three,
          # and a notch more compression -- half the frames of desktop; the page paces it by the kind's own step
          'm': {'hours': 12, 'crf': 28, 'g': 8, 'w': fdgeo.OUT_W // 2, 'ib': (2,)}}
