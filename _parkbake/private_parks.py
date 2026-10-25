@@ -18,6 +18,6 @@ for lat in range(24, 50, 5):
         if el is None: print('FAILED block', lat, lon, flush=True); continue
         for x in el: ids.add(x['id'] + (W2 if x['type'] == 'way' else 3 * W2))
         print(lat, lon, len(el), 'total', len(ids), flush=True)
-        time.sleep(3)
+        time.sleep(25)   # gentle: Overpass throttles a fast run
 json.dump(sorted(ids), open(sys.argv[1], 'w'), separators=(',', ':'))
 print('done', len(ids))
