@@ -22,7 +22,7 @@ work on a phone), and the 3-hour loop six more of those at 30-minute steps, whic
 """
 import hashlib, io, json, math, os, re, shutil, subprocess, sys, tempfile, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import bake
+import bake, fdgeo, nightblend, rawbands
 import numpy as np
 from PIL import Image
 
@@ -35,7 +35,62 @@ HOURS, STEP_MIN, NEAR_MIN = 3, 10, 6        # a frame every 10 min over 3 h; a s
 KINDS = {'d': {'w': OW, 'crf': 25, 'g': 12, 'ib': (1, 2, 3)}, 'm': {'w': OW // 2, 'crf': 28, 'g': 8, 'ib': (2,)}}
 KEY = bake.PREFIX + 'WORLD/'
 TAR_KEY = bake.PREFIX + '_frames/WORLD.tar'
-BUDGET_S = 300
+BUDGET_S = 420
+# LIVE'S COLORS ON THE GLOBE (2026-10-25, user: "do ... the rest" -- the globe was bluer at night than LIVE's East + West): the two GOES
+# satellites come from what LIVE uses -- NOAA's full-disk GeoColor (5424 px, through our tiles worker) with nightblend.py's
+# infrared night from the scan's own Level 2 files -- and CIRA's picture only for Himawari, GK2A and Meteosat. VER in the frame tar:
+# frames made the old way are dropped and made again.
+GOES = {'goes-19': 'GOES19', 'goes-18': 'GOES18'}
+VER = 'v2'
+FD_N = 5424
+_DLL = {}
+
+
+def disk_latlon(sat):
+    """lat / lon of every pixel of a 5424 full disk (NaN off the Earth), the fixed-grid inverse (GOES-R PUG 5.1.2.8)"""
+    if sat in _DLL: return _DLL[sat]
+    d = (2 * fdgeo.Y0) / FD_N
+    xs = fdgeo.X0 + (np.arange(FD_N) + 0.5) * d; ys = fdgeo.Y0 - (np.arange(FD_N) + 0.5) * d
+    x, y = np.meshgrid(xs.astype(np.float64), ys.astype(np.float64))
+    req, rpol, H = fdgeo.REQ, fdgeo.RPOL, fdgeo.H
+    a = np.sin(x) ** 2 + np.cos(x) ** 2 * (np.cos(y) ** 2 + (req ** 2 / rpol ** 2) * np.sin(y) ** 2)
+    b = -2 * H * np.cos(x) * np.cos(y); c = H ** 2 - req ** 2; disc = b * b - 4 * a * c
+    rs = (-b - np.sqrt(np.maximum(disc, 0))) / (2 * a)
+    sx = rs * np.cos(x) * np.cos(y); sy = -rs * np.sin(x); sz = rs * np.cos(x) * np.sin(y)
+    lat = np.degrees(np.arctan((req ** 2 / rpol ** 2) * sz / np.sqrt((H - sx) ** 2 + sy ** 2)))
+    lon = fdgeo.LON0[sat] - np.degrees(np.arctan(sy / (H - sx)))
+    lat[disc < 0] = np.nan; lon[disc < 0] = np.nan
+    _DLL[sat] = (lat.astype(np.float32), lon.astype(np.float32)); return _DLL[sat]
+
+
+def disk_night(sat, stamp):
+    lat, lon = disk_latlon(sat)
+    dd, h, m = int(stamp[4:7]), int(stamp[7:9]), int(stamp[9:11])
+    g = 2 * math.pi / 365 * (dd - 1 + (h - 12) / 24)
+    dec = (0.006918 - 0.399912 * math.cos(g) + 0.070257 * math.sin(g) - 0.006758 * math.cos(2 * g) + 0.000907 * math.sin(2 * g)
+           - 0.002697 * math.cos(3 * g) + 0.00148 * math.sin(3 * g))
+    eqt = 229.18 * (0.000075 + 0.001868 * math.cos(g) - 0.032077 * math.sin(g) - 0.014615 * math.cos(2 * g) - 0.040849 * math.sin(2 * g))
+    ha = np.radians((h * 60 + m + eqt + 4 * lon) / 4 - 180); la = np.radians(lat)
+    cz = np.sin(la) * math.sin(dec) + np.cos(la) * math.cos(dec) * np.cos(ha)
+    return np.nan_to_num(nightblend._ss(0.21, 0.035, cz), nan=0.0).astype(np.float32)
+
+
+def goes_disk(sat, name):
+    """NOAA's 5424 GeoColor full disk for one scan, with LIVE's night blend; None if the image or (at night) its infrared is not up"""
+    raw = bake.get(bake.EDGE + '%s/ABI/FD/GEOCOLOR/%s' % (sat, name), 90)
+    gc = np.asarray(Image.open(io.BytesIO(raw)).convert('RGB'), np.float32)
+    if gc.shape[0] != FD_N: return None
+    stamp = name[:11]; night = disk_night(sat, stamp)
+    if night.max() > 0:
+        keys = nightblend.scan_keys(sat, stamp)
+        if not keys: return None
+        ch = {}
+        for c, k in keys.items():
+            v, x0, dx, y0, dy = rawbands.read(sat, k)
+            ch[c] = v if v.shape == (FD_N, FD_N) else None
+        if any(v is None for v in ch.values()): return None
+        gc = nightblend.blend(gc, ch['07'], ch['13'], ch['15'], night)
+    return np.clip(gc, 0, 255).round().astype(np.uint8)
 DRY = '--dry' in sys.argv
 
 
@@ -77,9 +132,12 @@ def compose(disks):
     import cv2
     G = geometry()
     acc = np.zeros((OH, OW, 3), np.float32); ws = np.zeros((OH, OW), np.float32); best = np.zeros((OH, OW), np.float32)
+    A_, B_, HS_ = 6378.137, 6356.752, 42164.16
     for k, im in disks.items():
         g = G[k]; h, w = im.shape[:2]
-        rx, ry = w * g['rf'], w * g['rf'] * 0.997
+        if k in GOES and w == FD_N:   # NOAA's disk spans the fixed grid exactly (+-X0 rad): the limb sits inside the image edge
+            rx = w / 2 * math.asin(A_ / HS_) / abs(fdgeo.X0); ry = h / 2 * math.asin(B_ / HS_) / abs(fdgeo.X0)
+        else: rx, ry = w * g['rf'], w * g['rf'] * 0.997
         mx = (w / 2 - 0.5 + g['u'] * rx).astype(np.float32); my = (h / 2 - 0.5 - g['v'] * ry).astype(np.float32)
         ok = g['cv'] >= 0.2
         mx[~ok] = -1; my[~ok] = -1
@@ -115,7 +173,14 @@ def main():
     if os.path.exists(mp) and Image.open(mp).mode != 'RGBA':       # a mask from before 2026-10-25 (grayscale): rebuilt with the newest frame
         os.remove(mp); nf = sorted(f for f in os.listdir(fd) if re.match(r'^\d{11}_WORLD\.jpg$', f))
         if nf: os.remove(os.path.join(fd, nf[-1]))
+    if not os.path.exists(os.path.join(fd, VER)):
+        for f in os.listdir(fd): os.remove(os.path.join(fd, f))
+        open(os.path.join(fd, VER), 'w').write('1')
     lists = {}
+    fdn = {}
+    for k, s2 in GOES.items():
+        try: fdn[k] = {bake.stamp_ms(n) / 1000: n for n in bake.fd_listing(s2, 'GEOCOLOR', '5424x5424')}
+        except Exception as e: print('  %s FD listing: %s' % (s2, e)); fdn[k] = {}
     for k, _, _ in SATS:
         try:
             ts = sorted(str(t) for t in json.loads(bake.get(EDGE + 'json/%s/full_disk/%s/latest_times.json' % (k, PROD), 30))['timestamps_int'])
@@ -131,7 +196,7 @@ def main():
     marks = [anchor - i * STEP_MIN * 60 for i in range(HOURS * 60 // STEP_MIN, -1, -1)]
     want = {stamp11(m) + '_WORLD.jpg': m for m in marks}
     for f in os.listdir(fd):
-        if re.sub(r'_f\d\.jpg$', '.jpg', f) not in want and f != 'mask.png': os.remove(os.path.join(fd, f))
+        if re.sub(r'_f\d\.jpg$', '.jpg', f) not in want and f not in ('mask.png', VER): os.remove(os.path.join(fd, f))
     newest_fn = max(want, key=lambda f: want[f])
     cache, new = {}, 0
     for fn, m in sorted(want.items(), key=lambda kv: -kv[1]):       # newest first
@@ -139,7 +204,18 @@ def main():
         if os.path.exists(p): continue
         if time.time() - t0 > BUDGET_S: break
         disks = {}
+        for k in GOES:                                          # NOAA's disk, LIVE's night
+            T0 = fdn.get(k) or {}
+            if not T0: continue
+            tt = min(T0, key=lambda t: abs(t - m))
+            if abs(tt - m) > NEAR_MIN * 60: continue
+            ck = 'noaa' + T0[tt]
+            if ck not in cache:
+                try: cache[ck] = goes_disk(GOES[k], T0[tt])
+                except Exception as e: print('  %s %s: %s' % (k, T0[tt], e)); cache[ck] = None
+            if cache[ck] is not None: disks[k] = cache[ck]
         for k, L in lists.items():
+            if k in disks: continue
             m2 = m - lag[k]
             near = min(L, key=lambda t: abs(tms(t) - m2))
             if abs(tms(near) - m2) > NEAR_MIN * 60: continue
@@ -153,6 +229,7 @@ def main():
             if cache[ck] is not None: disks[k] = cache[ck]
         if len(disks) < 3: print('  %s: %d disks, skipped' % (fn, len(disks))); continue
         rgb, best = compose(disks)
+        for ck in [x for x in cache if x.startswith('noaa')]: del cache[ck]   # 88 MB each: one frame's worth at a time
         Image.fromarray(rgb).save(p, quality=90); new += 1
         if fn == newest_fn or not os.path.exists(os.path.join(fd, 'mask.png')):
             am = alpha(best); Image.fromarray(np.dstack([np.full_like(am, 255)] * 3 + [am]), 'RGBA').save(os.path.join(fd, 'mask.png'), optimize=True)   # the page masks with destination-in, which reads ALPHA
@@ -194,7 +271,7 @@ def main():
     if DRY:
         json.dump(man, open(os.path.join(work, 'latest.json'), 'w'))
         print('dry run: files in', work); return
-    subprocess.run(['tar', '-cf', tar_local, '-C', fd] + sorted(os.listdir(fd)), check=True)
+    subprocess.run(['tar', '-cf', tar_local, '-C', fd] + sorted(os.listdir(fd)), check=True)   # (VER rides in the tar)
     bake.r2('cp', tar_local, 's3://%s/%s' % (bake.BUCKET, TAR_KEY), '--content-type', 'application/x-tar', '--cache-control', 'no-store')
     if not old or old.get('mask') != man['mask']:
         bake.r2('cp', os.path.join(fd, 'mask.png'), 's3://%s/%s%s' % (bake.BUCKET, KEY, man['mask']), '--content-type', 'image/png', '--cache-control', 'public, max-age=31536000, immutable')
