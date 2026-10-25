@@ -111,6 +111,10 @@ def main():
             except Exception: old = None
         if bake.r2('cp', 's3://%s/%s' % (bake.BUCKET, TAR_KEY), tar_local, check=False).returncode == 0:
             subprocess.run(['tar', '-xf', tar_local, '-C', fd], check=False)
+    mp = os.path.join(fd, 'mask.png')
+    if os.path.exists(mp) and Image.open(mp).mode != 'RGBA':       # a mask from before 2026-10-25 (grayscale): rebuilt with the newest frame
+        os.remove(mp); nf = sorted(f for f in os.listdir(fd) if re.match(r'^\d{11}_WORLD\.jpg$', f))
+        if nf: os.remove(os.path.join(fd, nf[-1]))
     lists = {}
     for k, _, _ in SATS:
         try:
