@@ -32,6 +32,7 @@ DRY = '--dry' in sys.argv
 BUCKET = 'bluishvoid-bg'
 UA = {'User-Agent': 'bluishvoid.com migration bake'}
 STEP = 600                                   # seconds between frames
+FILT = 2                                     # the cleaning rules' version (2: daylight + standing clutter); a night baked under another re-bakes
 FPS = 10
 LOCAL = '/tmp/migvid'
 # ffmpeg: on the PATH locally; in CI the static binary pip's imageio-ffmpeg ships (Ubuntu's apt mirror crawled at a minute a
@@ -432,6 +433,47 @@ def deflicker(work, fr):
         print('deflicker: %s dropped %d px of one-frame echo' % (nm[:13], k))
 
 
+def sun_alt(t, lat, lon):
+    """the sun's altitude in degrees at UTC unix time t over arrays of lat/lon (NOAA's low-precision formulas, ~0.5 deg)"""
+    d = t / 86400.0 + 2440587.5 - 2451545.0
+    g = math.radians((357.529 + 0.98560028 * d) % 360); q = (280.459 + 0.98564736 * d) % 360
+    lam = math.radians(q + 1.915 * math.sin(g) + 0.020 * math.sin(2 * g)); eps = math.radians(23.439 - 0.00000036 * d)
+    dec = math.asin(math.sin(eps) * math.sin(lam))
+    ra = math.degrees(math.atan2(math.cos(eps) * math.sin(lam), math.cos(lam))) % 360
+    gmst = (280.46061837 + 360.98564736629 * d) % 360
+    ha = np.radians(gmst + lon - ra); la = np.radians(lat)
+    return np.degrees(np.arcsin(np.sin(la) * math.sin(dec) + np.cos(la) * math.cos(dec) * np.cos(ha)))
+
+
+def daylight(work, fr):
+    """NO ECHO IN DAYLIGHT (2026-10-25, user: "yes fix both"). Birds migrate between dusk and dawn, so an echo with the sun up is
+    not them: (1) any echo where the sun is above the horizon at that pixel in that frame goes -- the cores that lingered an
+    hour past dawn round the Plains radars; (2) ground clutter -- Missoula's mountain echo sat in all 96 frames of 10-24's night, before sunset
+    too -- goes from every frame, grown 2 px: a pixel with echo in at least half of its EVENING daylight frames (2 or more,
+    before sunset, when no bird is up) and, if it has morning daylight frames, in half of those too. Morning frames alone
+    cannot tell: birds landing after dawn left whole rings in them, and a morning-only test erased the East's rings all night. Like deflicker, only the local copies are cleaned; the frames on R2 stay raw."""
+    from scipy.ndimage import maximum_filter
+    al0 = np.asarray(frame_img(os.path.join(work, 'src_' + fr[0][1])))
+    H, W = al0.shape[:2]
+    xs = X0 + (np.arange(W) + .5) / W * (X1 - X0); ys = Y1 - (np.arange(H) + .5) / H * (Y1 - Y0)
+    lon = np.degrees(xs / R)[None, :].repeat(H, 0); lat = np.degrees(2 * np.arctan(np.exp(ys / R)) - math.pi / 2)[:, None].repeat(W, 1)
+    day = []; mid = (fr[0][0] + fr[-1][0]) / 2
+    dn = {0: np.zeros((H, W), np.int16), 1: np.zeros((H, W), np.int16)}; hit = {0: np.zeros((H, W), np.int16), 1: np.zeros((H, W), np.int16)}
+    for t, nm in fr:
+        up = sun_alt(t, lat, lon) > 0; day.append(up); k = 0 if t < mid else 1      # 0 evening, 1 morning
+        on = np.asarray(frame_img(os.path.join(work, 'src_' + nm)))[:, :, 3] > 0
+        dn[k] += up; hit[k] += up & on
+    ev = (dn[0] >= 2) & (hit[0] * 2 >= dn[0]); mo = (dn[1] == 0) | (hit[1] * 2 >= dn[1])
+    clutter = maximum_filter((ev & mo).astype(np.uint8), size=5) > 0
+    print('daylight: %d px of standing clutter' % int(clutter.sum()))
+    for (t, nm), up in zip(fr, day):
+        path = os.path.join(work, 'src_' + nm); a = np.asarray(frame_img(path)).copy()
+        drop = (up | clutter) & (a[:, :, 3] > 0); k = int(drop.sum())
+        if not k: continue
+        a[drop] = 0; Image.fromarray(a).save(path)
+        print('daylight: %s dropped %d px' % (nm[:13], k))
+
+
 def bake(work, force=False):
     have = store_ls('mig/frames/')
     def stamps(a, b):
@@ -458,20 +500,21 @@ def bake(work, force=False):
             old = None
     elif os.path.exists(os.path.join(LOCAL, 'mig/latest.json')):
         old = json.load(open(os.path.join(LOCAL, 'mig/latest.json')))
-    if not force and old and old.get('start') == start and old.get('n') == len(fr) and old.get('flow') and any(old['flow'][-3:]):
+    if not force and old and old.get('filt') == FILT and old.get('start') == start and old.get('n') == len(fr) and old.get('flow') and any(old['flow'][-3:]):
         print('bake: %s already baked with %d frames' % (start, len(fr))); return
     fd = os.path.join(work, 'f'); os.makedirs(fd, exist_ok=True)
     for t, nm in fr:
         src = os.path.join(work, 'src_' + nm)
         if not os.path.exists(src): store_get('mig/frames/' + nm, src)
     deflicker(work, fr)
+    daylight(work, fr)
     for i, (t, nm) in enumerate(fr):
         src = os.path.join(work, 'src_' + nm)
         im = frame_img(src); bg = Image.new('RGBA', im.size, (0, 0, 0, 255)); bg.alpha_composite(im)
         bg.convert('RGB').save(os.path.join(fd, '%04d.png' % i))
     man = {'start': start, 'night': [iso(night[0]), iso(night[1])], 'n': len(fr), 'fps': FPS, 'step': STEP,
            'times': [iso(t) for t, _ in fr], 'bbox': [W_LON, S_LAT, E_LON, N_LAT], 'at': int(time.time()),
-           'finished': night == fin}
+           'finished': night == fin, 'filt': FILT}
     # THE FLOW: each frame's radar vectors, by index into man['radars']
     hv = set(store_ls('mig/vad/'))
     sids = sorted(RADARS); man['radars'] = [[s, RADARS[s][0], RADARS[s][1]] for s in sids]
