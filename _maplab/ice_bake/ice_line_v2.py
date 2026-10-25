@@ -65,6 +65,22 @@ def bridge(ls, gap=0.012):
             if joined: break
     return [LineString(c) for c in ls if len(c) > 1]
 NJ = bridge(outer_edge(mor, 40.0)); LI = bridge(LI0)
+# ONLY THE OUTERMOST (user 2026-10-25, "do all"): across central and eastern Long Island the Harbor Hill moraine (the North Fork) runs
+# north of the Ronkonkoma (the South Fork), both mapped 'tm'; where two lines share a longitude, the northern one is dropped
+def outermost(ls, tol=0.006):
+    pts = [(x, y) for l in ls for x, y in l.coords]
+    out = []
+    for l in ls:
+        run = []
+        for x, y in l.coords:
+            under = any(abs(x2 - x) < tol and y2 < y - 0.02 for x2, y2 in pts)
+            if under:
+                if len(run) > 1: out.append(LineString(run))
+                run = []
+            else: run.append((x, y))
+        if len(run) > 1: out.append(LineString(run))
+    return [l for l in out if l.length > 0.004]
+LI = outermost([l.simplify(0.0002) for l in LI])
 # ---- join with the old (NYC) lines
 old = json.load(open(sys.argv[2]))
 out = {'src': old['src'] + '; Long Island: same sheet, the outermost moraine edge (Harbor Hill, then Ronkonkoma to Montauk); New Jersey: NJGWS surficial geology 1:100,000, the Late Wisconsinan terminal moraine (Rahway and Netcong tills), south edge',
