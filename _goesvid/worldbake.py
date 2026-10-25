@@ -151,7 +151,7 @@ def main():
         rgb, best = compose(disks)
         Image.fromarray(rgb).save(p, quality=90); new += 1
         if fn == newest_fn or not os.path.exists(os.path.join(fd, 'mask.png')):
-            Image.fromarray(alpha(best)).save(os.path.join(fd, 'mask.png'), optimize=True)
+            am = alpha(best); Image.fromarray(np.dstack([np.full_like(am, 255)] * 3 + [am]), 'RGBA').save(os.path.join(fd, 'mask.png'), optimize=True)   # the page masks with destination-in, which reads ALPHA
     got = sorted(f for f in want if os.path.exists(os.path.join(fd, f)))
     if len(got) < 2: print('WORLD: %d frames, nothing to play' % len(got)); return
     made = 0
