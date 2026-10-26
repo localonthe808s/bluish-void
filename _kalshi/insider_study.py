@@ -197,7 +197,9 @@ def twc_bumps(key, d0=None, d1=None):
             d = (d0 + datetime.timedelta(days=k)).isoformat()
             settled = (today - datetime.date.fromisoformat(d)).days >= 2
             def fetch_r2(d=d):
-                try: txt = get_text('https://cdn.bluishvoid.com/kalshi/trail/%s_%s.jsonl' % (key, d))
+                # ?d=<today>: the edge pins a day's file at its first fetch (age seen 259k s against max-age=120), so the
+                # plain URL can be a morning copy; a key first fetched today is fetched after day d ended (2026-10-26)
+                try: txt = get_text('https://cdn.bluishvoid.com/kalshi/trail/%s_%s.jsonl?d=%s' % (key, d, today.isoformat()))
                 except Exception: return []
                 rows = []
                 for l in txt.splitlines():
