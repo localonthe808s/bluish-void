@@ -117352,8 +117352,20 @@ function closeAlertModal(){
           if (seq !== ENOWG.seq || CUR !== 'earthnow') return true;
           var W = ph ? 1024 : 2048, H = W / 2, cv = ENOWV.cv || (ENOWV.cv = document.createElement('canvas')); cv.width = W; cv.height = H;
           var g = cv.getContext('2d');
-          var paint = function(src){ g.globalCompositeOperation = 'copy'; g.drawImage(src, 0, 0, W, H); g.globalCompositeOperation = 'destination-in'; g.drawImage(A[0], 0, 0, W, H); g.globalCompositeOperation = 'source-over';
-            GLOBE.put(1, cv); GLOBE.on = [1 / 0.86, 0]; GLOBE.dirty = true; };
+          /* EACH FRAME DISSOLVES INTO THE NEXT (user 2026-10-26: "the full globe view is choppy"): the loop is 10 frames a second, so the
+             clouds used to step 10 times a second while the globe drew at 60. Frames now go to the two skins in turn and the newer one
+             fades in over the gap to the next, so the motion is spread over every screen frame; still one upload a frame. dur 0 = put
+             it up at once (the poster) */
+          var FULLv = 1 / 0.86, unit = 1, fadeTok = 0;
+          var paint = function(src, dur){ g.globalCompositeOperation = 'copy'; g.drawImage(src, 0, 0, W, H); g.globalCompositeOperation = 'destination-in'; g.drawImage(A[0], 0, 0, W, H); g.globalCompositeOperation = 'source-over';
+            var tok = ++fadeTok;
+            if (!dur){ unit = 1; GLOBE.put(1, cv); GLOBE.on = [FULLv, 0]; GLOBE.dirty = true; return; }
+            unit = unit === 1 ? 2 : 1; GLOBE.put(unit, cv);
+            var from = unit === 2 ? 0 : FULLv, to = FULLv - from, t0 = performance.now();
+            GLOBE.on = [FULLv, from]; GLOBE.dirty = true;
+            var go = function(now){ if (tok !== fadeTok || CUR !== 'earthnow') return; var u = Math.min(1, Math.max(0, (now - t0) / dur));
+              GLOBE.on = [FULLv, from + (to - from) * u]; GLOBE.dirty = true; if (u < 1) requestAnimationFrame(go); };
+            requestAnimationFrame(go); };
           paint(A[1]); globeNote(null);
           var label = function(i){ var n = (K.frames[Math.max(0, Math.min(K.frames.length - 1, i))] || '').slice(0, 11), y = +n.slice(0, 4), d = +n.slice(4, 7), h = +n.slice(7, 9), mi = +n.slice(9, 11);
             var t = Date.UTC(y, 0, 1) + (d - 1) * 864e5 + h * 36e5 + mi * 6e4; return isFinite(t) ? new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).toUpperCase() : ''; };
@@ -117363,19 +117375,25 @@ function closeAlertModal(){
           cap(label(K.frames.length - 1));
           if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) return true;
           enowVidStop();
-          var v = document.createElement('video'); v.crossOrigin = 'anonymous'; v.muted = true; v.loop = true; v.playsInline = true; v.preload = 'auto';
+          var v = document.createElement('video'); v.crossOrigin = 'anonymous'; v.muted = true; v.loop = false; v.playsInline = true; v.preload = 'auto';
           v.src = WCDN + K.mp4; ENOWV.v = v;
-          var lastT = -1, lastI = -1, fps = M.fps || 10;
+          var lastT = -1, lastI = -1, fps = M.fps || 10, fdur = 900 / fps, wrap = false;
+          /* THE WRAP (same day): three hours back to the start was one hard cut, the biggest jump in the loop (measured: 6x a normal
+             frame). The newest frame is held a second, the start dissolves in over most of another, then it plays on */
+          v.addEventListener('ended', function(){ if (ENOWV.v !== v) return; wrap = true;
+            setTimeout(function(){ if (ENOWV.v !== v) return; v.currentTime = 0; }, 1000); });
+          v.addEventListener('seeked', function(){ if (ENOWV.v !== v || !wrap) return; paint(v, 900); lastI = 0; cap(label(0));
+            setTimeout(function(){ if (ENOWV.v !== v) return; wrap = false; var pp = v.play(); if (pp && pp.catch) pp.catch(function(){}); }, 950); });
           var tick = function(){ ENOWV.raf = 0;
             if (seq !== ENOWG.seq || CUR !== 'earthnow' || ENOWV.v !== v){ return; }
             if (document.hidden || window._esVis === false){ if (!v.paused) v.pause(); ENOWV.raf = requestAnimationFrame(tick); return; }
-            if (v.paused && v.readyState >= 2){ var pp = v.play(); if (pp && pp.catch) pp.catch(function(){}); }
-            if (lastT !== 1e9 && v.readyState >= 2 && v.currentTime !== lastT){ lastT = v.currentTime; paint(v); var i = Math.floor(v.currentTime * fps + 0.01); if (i !== lastI){ lastI = i; cap(label(i)); } }
+            if (v.paused && !wrap && v.readyState >= 2){ var pp = v.play(); if (pp && pp.catch) pp.catch(function(){}); }
+            if (lastT !== 1e9 && !wrap && v.readyState >= 2 && v.currentTime !== lastT){ lastT = v.currentTime; paint(v, fdur); var i = Math.floor(v.currentTime * fps + 0.01); if (i !== lastI){ lastI = i; cap(label(i)); } }
             ENOWV.raf = requestAnimationFrame(tick); };
           /* only frames the decoder has PRESENTED are drawn (a frame grabbed mid-seek at the loop's wrap came out black: the dark
              crescent, user 2026-10-25) */
           if (v.requestVideoFrameCallback){ var vfc = function(){ if (ENOWV.v !== v || seq !== ENOWG.seq || CUR !== 'earthnow') return; var i = Math.floor(v.currentTime * fps + 0.01);
-              paint(v); if (i !== lastI){ lastI = i; cap(label(i)); } v.requestVideoFrameCallback(vfc); }; v.requestVideoFrameCallback(vfc); lastT = 1e9; }
+              if (!wrap){ paint(v, fdur); if (i !== lastI){ lastI = i; cap(label(i)); } } v.requestVideoFrameCallback(vfc); }; v.requestVideoFrameCallback(vfc); lastT = 1e9; }
           v.addEventListener('loadeddata', function(){ if (ENOWV.v === v && !ENOWV.raf) ENOWV.raf = requestAnimationFrame(tick); });
           var pl = v.play(); if (pl && pl.catch) pl.catch(function(){});
           return true; }); });

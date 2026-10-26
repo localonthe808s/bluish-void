@@ -77,6 +77,19 @@ def get(url, timeout=60):
             time.sleep(3)
 
 
+def fd_broken(im):
+    """A FULL DISK NOAA FILLED IN (2026-10-26): GOES-18's 14:50 UTC GeoColor came with the lower half of the scan missing,
+    painted flat black on the night side and flat saturated white on the day side, and it went into the loops as a flash.
+    A real disk never has much flat white: the share of the Earth lying in 16-px blocks of mean > 250 and spread < 1.5 read
+    0.237 for that file and at most 0.0005 for 27 good ones (GOES-18 and -19, 14:10-16:20). Over 1% is thrown out."""
+    l = np.asarray(im.convert('L') if hasattr(im, 'convert') else im, np.float32)
+    if l.ndim == 3: l = l.mean(2)
+    n = min(l.shape[:2]) // 16 * 16; b = l[:n, :n].reshape(n // 16, 16, n // 16, 16)
+    mu, sd = b.mean((1, 3)), b.std((1, 3)); k = mu.shape[0]; yy, xx = np.mgrid[0:k, 0:k]
+    disk = (xx - k / 2 + .5) ** 2 + (yy - k / 2 + .5) ** 2 < (0.47 * k) ** 2
+    return float(((mu > 250) & (sd < 1.5) & disk).sum() / max(1, disk.sum())) > 0.01
+
+
 def stamp_ms(name):
     y, d, h, m = int(name[:4]), int(name[4:7]), int(name[7:9]), int(name[9:11])
     return (time.mktime((y, 1, 1, 0, 0, 0, 0, 0, 0)) - time.timezone + (d - 1) * 86400 + h * 3600 + m * 60) * 1000
@@ -249,6 +262,8 @@ def main():
                 raw = None
         if not raw: print('  %s %s: full disk did not download' % (sat, n)); return 0
         im = Image.open(io.BytesIO(raw)); im.load(); im = im.convert('RGB')
+        if band == 'GEOCOLOR' and im.width == im.height and fd_broken(im):
+            print('  %s %s: full disk is partly filled in (a broken scan), skipped' % (sat, n)); return 0
         for k in mine:
             try:
                 l, t, r, b = fdgeo.crop(sat, k[1], N)

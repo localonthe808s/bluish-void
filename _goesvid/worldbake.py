@@ -32,6 +32,11 @@ PROD = 'cira_geoproxy'
 SATS = [('goes-19', -75.0, 0.5), ('goes-18', -137.0, 0.5), ('himawari', 140.7, 0.4942), ('meteosat-12', 0.0, 0.4885), ('gk2a', 128.2, 0.4927)]
 OW, OH = 2048, 1024
 HOURS, STEP_MIN, NEAR_MIN = 3, 10, 6        # a frame every 10 min over 3 h; a satellite's scan within 6 min of the mark joins it
+# A SATELLITE MISSING A MARK HOLDS ITS NEAREST SCAN (2026-10-26, user: "the full globe view is choppy"): a mark with no scan within
+# 6 min used to leave that satellite out, and the frame went black over its side of the world (Meteosat-12: Europe and Africa
+# dropped out of one frame and the optical-flow in-betweens smeared into and out of the hole -- measured 10x a normal frame's
+# change). Its nearest scan within 30 min stands in, so that side holds still a moment instead.
+HOLD_MIN = 30
 KINDS = {'d': {'w': OW, 'crf': 25, 'g': 12, 'ib': (1, 2, 3)}, 'm': {'w': OW // 2, 'crf': 28, 'g': 8, 'ib': (2,)}}
 KEY = bake.PREFIX + 'WORLD/'
 TAR_KEY = bake.PREFIX + '_frames/WORLD.tar'
@@ -41,7 +46,7 @@ BUDGET_S = 420
 # infrared night from the scan's own Level 2 files -- and CIRA's picture only for Himawari, GK2A and Meteosat. VER in the frame tar:
 # frames made the old way are dropped and made again.
 GOES = {'goes-19': 'GOES19', 'goes-18': 'GOES18'}
-VER = 'v2'
+VER = 'v3'   # v3 (10-26): frames rebuilt with the held scans (v2's had holes)
 FD_N = 5424
 _DLL = {}
 
@@ -80,6 +85,7 @@ def goes_disk(sat, name):
     raw = bake.get(bake.EDGE + '%s/ABI/FD/GEOCOLOR/%s' % (sat, name), 90)
     gc = np.asarray(Image.open(io.BytesIO(raw)).convert('RGB'), np.float32)
     if gc.shape[0] != FD_N: return None
+    if bake.fd_broken(gc): print('  %s %s: broken scan, skipped' % (sat, name[:11])); return None
     stamp = name[:11]; night = disk_night(sat, stamp)
     if night.max() > 0:
         keys = nightblend.scan_keys(sat, stamp)
@@ -207,26 +213,27 @@ def main():
         for k in GOES:                                          # NOAA's disk, LIVE's night
             T0 = fdn.get(k) or {}
             if not T0: continue
-            tt = min(T0, key=lambda t: abs(t - m))
-            if abs(tt - m) > NEAR_MIN * 60: continue
-            ck = 'noaa' + T0[tt]
-            if ck not in cache:
-                try: cache[ck] = goes_disk(GOES[k], T0[tt])
-                except Exception as e: print('  %s %s: %s' % (k, T0[tt], e)); cache[ck] = None
-            if cache[ck] is not None: disks[k] = cache[ck]
+            # the nearest good scan within the hold (a broken one gives way to the next): NOAA's own product all through the
+            # loop -- CIRA's GOES copy is another color, and swapping to it for one frame flashes
+            for tt in sorted((t for t in T0 if abs(t - m) <= HOLD_MIN * 60), key=lambda t: abs(t - m))[:3]:
+                ck = 'noaa' + T0[tt]
+                if ck not in cache:
+                    try: cache[ck] = goes_disk(GOES[k], T0[tt])
+                    except Exception as e: print('  %s %s: %s' % (k, T0[tt], e)); cache[ck] = None
+                if cache[ck] is not None: disks[k] = cache[ck]; break
         for k, L in lists.items():
             if k in disks: continue
             m2 = m - lag[k]
-            near = min(L, key=lambda t: abs(tms(t) - m2))
-            if abs(tms(near) - m2) > NEAR_MIN * 60: continue
-            ck = k + near
-            if ck not in cache:
-                try:
-                    raw = bake.get(EDGE + 'imagery/%s/%s/%s/%s---full_disk/%s/%s/00/000_000.png' % (near[:4], near[4:6], near[6:8], k, PROD, near), 60)
-                    cache[ck] = np.asarray(Image.open(io.BytesIO(raw)).convert('RGB'))
-                except Exception as e:
-                    print('  %s %s: %s' % (k, near, e)); cache[ck] = None
-            if cache[ck] is not None: disks[k] = cache[ck]
+            # the nearest scans first; one that will not download gives way to the next (up to three tries)
+            for near in sorted((t for t in L if abs(tms(t) - m2) <= HOLD_MIN * 60), key=lambda t: abs(tms(t) - m2))[:3]:
+                ck = k + near
+                if ck not in cache:
+                    try:
+                        raw = bake.get(EDGE + 'imagery/%s/%s/%s/%s---full_disk/%s/%s/00/000_000.png' % (near[:4], near[4:6], near[6:8], k, PROD, near), 60)
+                        cache[ck] = np.asarray(Image.open(io.BytesIO(raw)).convert('RGB'))
+                    except Exception as e:
+                        print('  %s %s: %s' % (k, near, e)); cache[ck] = None
+                if cache[ck] is not None: disks[k] = cache[ck]; break
         if len(disks) < 3: print('  %s: %d disks, skipped' % (fn, len(disks))); continue
         rgb, best = compose(disks)
         for ck in [x for x in cache if x.startswith('noaa')]: del cache[ck]   # 88 MB each: one frame's worth at a time
