@@ -45,7 +45,8 @@ const CACHE_RULES = {
   // ── forecasts / advisories (5–10 minutes) ──
   'api.weather.gov':              300,
   'water.noaa.gov':               300,
-  'coast.noaa.gov':               86400,  // Sea Level Rise Viewer flood-depth tiles (static; the LOCAL tide map recolors them)
+  'coast.noaa.gov':               86400,
+  'erddap.ifremer.fr':            3600,   // Argo: one float's year of profiles, on tap (WATER > ARGO FLOATS, 2026-10-25)  // Sea Level Rise Viewer flood-depth tiles (static; the LOCAL tide map recolors them)
   // ── transit agencies' GTFS-realtime vehicle positions (LOCAL TRAFFIC tab; _transitbake/hosts.txt, 2026-10-16) ──
   'api.cityofkingston.ca': 15,
   'api.nextlift.ca': 15,
