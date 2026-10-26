@@ -12,6 +12,7 @@ at or below 0 m is masked out -- the overlay stays clear over water, as before (
 Same shading and output as render.py; only the elevation fetch differs.
 """
 import io, math, urllib.request
+import os, threading
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from PIL import Image
@@ -19,14 +20,22 @@ import render as RD
 
 TT = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/%d/%d/%d.png'
 _pool = ThreadPoolExecutor(12)
+CACHE = os.environ.get('TT_CACHE')
 
 def _tile(z, x, y):
     n = 2 ** z
     if not (0 <= y < n): return None
     x %= n
+    cp = os.path.join(CACHE, str(z), str(x), '%d.png' % y) if CACHE else None   # TT_CACHE: the world bake's three passes read each tile once
+    if cp and os.path.exists(cp):
+        try:
+            a = np.asarray(Image.open(cp).convert('RGB'), np.float32); return a[..., 0] * 256 + a[..., 1] + a[..., 2] / 256 - 32768
+        except Exception: pass
     for attempt in range(4):
         try:
             raw = urllib.request.urlopen(urllib.request.Request(TT % (z, x, y), headers={'User-Agent': 'bluishvoid.com relief bake'}), timeout=60).read()
+            if cp:
+                os.makedirs(os.path.dirname(cp), exist_ok=True); tmp = cp + '.%d' % threading.get_ident(); open(tmp, 'wb').write(raw); os.replace(tmp, cp)
             a = np.asarray(Image.open(io.BytesIO(raw)).convert('RGB'), np.float32)
             return a[..., 0] * 256 + a[..., 1] + a[..., 2] / 256 - 32768
         except urllib.error.HTTPError as e:

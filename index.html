@@ -1003,6 +1003,26 @@ window._bvCovHas = function(B, z, x, y){
   if (!S){ S = U[z] = new Set(); var sh = 8 - z; cov.forEach(function(k){ var q = k.split('/'); S.add((q[0] >> sh) + '/' + (q[1] >> sh)); }); }
   return S.has(x + '/' + y);
 };
+/* THE WORLD, z3-8 (2026-10-26, user: "a high quality map for the rest of the world too ... a long bake"): _reliefbake/bake_world.py
+   baked the land relief and the sea-floor shading for the whole world to z8 into the same pyramids (relief/v1, seafloor/v1), and a
+   world depth tint (bathy/world1). Past z8 only North America has finer tiles, so each of those layers is split at its native depth:
+   cells North America baked (cover_na.json, the z8 index before the world) keep the deep pyramid; everywhere else a twin layer
+   stretches the world's z8 tiles (maxNativeZoom 8) instead of asking for tiles that do not exist. A later chunk (bake_world.py
+   --zmin 9) moves WORLD_Z. */
+window.BV_WORLD_Z = 8;
+window._bvNaCov = function(B){ if (!B.naP) B.naP = fetch(B.url + '/cover_na.json?v=1').then(function(r){ return r.ok ? r.json() : null; }).then(function(a){ B.na = a ? new Set(a) : null; return B.na; }).catch(function(){ B.na = null; return null; }); return B.naP; };
+window._bvNaHas = function(B, z, x, y){ if (!B.na) return true; return B.na.has((x >> (z - 8)) + '/' + (y >> (z - 8))); };   /* no list yet: the old behaviour */
+window._bvWorldTwin = function(map, B, Cls, url, o){
+  var W = L.TileLayer.extend({ createTile: function(c, done){
+    var z = c.z + (this.options.zoomOffset || 0);
+    if (!B.na || window._bvNaHas(B, z, c.x, c.y) || !window._bvCovHas(B, Math.min(z, 8), c.x >> Math.max(0, z - 8), c.y >> Math.max(0, z - 8))){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }
+    return L.TileLayer.prototype.createTile.call(this, c, done); } });
+  var tw = new W(url, L.extend({ minZoom: window.BV_WORLD_Z + 1, maxNativeZoom: window.BV_WORLD_Z, maxZoom: 12, keepBuffer: 1, updateWhenIdle: true,
+    errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', bounds: L.latLngBounds([[-85, -180], [85, 180]]) }, o || {}));
+  return tw;
+};
+/* a twin follows its main layer's opacity (views dim the relief / bathymetry through the main layer) */
+window._bvFollowOp = function(lay, tw){ var so = lay.setOpacity; lay.setOpacity = function(v){ so.call(lay, v); tw.setOpacity(v); return lay; }; };
 window._bvBathy = function(map){
   if (!map || map._bvBathyLayer || typeof L === 'undefined') return null;
   var B = window.BV_BATHY;
@@ -1022,7 +1042,17 @@ window._bvBathy = function(map){
   var under = new BL(B.url, { minZoom: 10, maxNativeZoom: 9, maxZoom: 19, zIndex: 2, opacity: 1, keepBuffer: 1, updateWhenIdle: true,
     errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', bounds: L.latLngBounds([[-10, -180], [72, 20]]) });
   map._bvBathyUnder = under;
-  B.coverP.then(function(){ under.addTo(map); lay.addTo(map); });
+  /* THE WORLD'S DEPTH UNDER IT (2026-10-26): bathy/world1, the same depth ramp on the AWS Terrain Tiles' global floor, z3-8,
+     cut to our map's water; added first so NOAA's finer tint (this layer, where it exists) draws over it */
+  var BW = window.BV_BATHY_W || (window.BV_BATHY_W = { url: 'https://cdn.bluishvoid.com/bathy/world1', cover: null, coverP: null });
+  if (!BW.coverP) BW.coverP = fetch(BW.url + '/cover.json').then(function(r){ return r.ok ? r.json() : []; }).then(function(a){ BW.cover = new Set(a || []); return BW.cover; }).catch(function(){ BW.cover = new Set(); return BW.cover; });
+  var WL = L.TileLayer.extend({ createTile: function(c, done){
+    if (!BW.cover || !BW.cover.size || !window._bvCovHas(BW, Math.min(c.z, 8), c.x >> Math.max(0, c.z - 8), c.y >> Math.max(0, c.z - 8))){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }
+    return L.TileLayer.prototype.createTile.call(this, c, done); } });
+  var world = new WL(BW.url + '/{z}/{x}/{y}.webp', { minZoom: 2, maxNativeZoom: window.BV_WORLD_Z, maxZoom: 19, zIndex: 2, opacity: 1, keepBuffer: 1, updateWhenIdle: true,
+    errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', bounds: L.latLngBounds([[-85, -180], [85, 180]]) });
+  map._bvBathyWorld = world; window._bvFollowOp(lay, world);
+  Promise.all([B.coverP, BW.coverP]).then(function(){ world.addTo(map); under.addTo(map); lay.addTo(map); });
   return lay;
 };
 /* LAND RELIEF (user 2026-10-16: "does the national map have topographical lidar data? it looks flat" -> "do 2"). _reliefbake/
@@ -1053,21 +1083,23 @@ window._bvRelief = function(map){
   try { q = new URLSearchParams(location.search).get('relief'); } catch(e){}
   if (q === '0') return null;
   if (q && /^https?:\/\//.test(q)) B.url = q.replace(/\/$/, '');
-  if (!B.coverP) B.coverP = fetch(B.url + '/cover.json').then(function(r){ return r.ok ? r.json() : []; }).then(function(a){ B.cover = new Set(a || []); return B.cover; }).catch(function(){ B.cover = new Set(); return B.cover; });
+  if (!B.coverP) B.coverP = fetch(B.url + '/cover.json?v=w1').then(function(r){ return r.ok ? r.json() : []; }).then(function(a){ B.cover = new Set(a || []); return B.cover; }).catch(function(){ B.cover = new Set(); return B.cover; });
   var RL = L.TileLayer.extend({
     createTile: function(c, done){
-      if (!window._bvCovHas(B, c.z + (this.options.zoomOffset || 0), c.x, c.y)){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }
+      var z = c.z + (this.options.zoomOffset || 0);
+      if (!window._bvCovHas(B, z, c.x, c.y) || (z > window.BV_WORLD_Z && !window._bvNaHas(B, z, c.x, c.y))){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }
       return L.TileLayer.prototype.createTile.call(this, c, done);
     }
   });
   /* bounds: all of North America and the Caribbean since the bake_na.py run (Panama to Ellesmere, the Aleutians to Greenland).
      From z3 since 2026-10-19 (_reliefbake/bake_low.py: z3-4 from the AWS Terrain Tiles, the exaggeration curve carried on below
      z5), so the continent the hazard map opens on has its ranges; z3-4 sit in the same pyramid, under the z8 index's cells */
-  var lay = new RL(B.url + '/{z}/{x}/{y}.webp?b=2', {   /* ?b=2: z3-4 were 204 at the edge before their upload */ minZoom: 3, maxNativeZoom: 12, maxZoom: 19, zIndex: 2, opacity: 1, keepBuffer: 1, updateWhenIdle: true,
-    errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', bounds: L.latLngBounds([[7, -180], [84, -10]]) });
+  var lay = new RL(B.url + '/{z}/{x}/{y}.webp?b=3', {   /* ?b=2: z3-4 were 204 at the edge before their upload */ minZoom: 2,   /* z2, the whole world, since 2026-10-26 */ maxNativeZoom: 12, maxZoom: 19, zIndex: 2, opacity: 1, keepBuffer: 1, updateWhenIdle: true,
+    errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', bounds: L.latLngBounds([[-85, -180], [85, 180]]) });   /* the world since 2026-10-26 */
   map._bvReliefLayer = lay;
-  var low = window._bvLowTwin(map, lay, RL, B.url + '/{z}/{x}/{y}.webp?b=2');
-  B.coverP.then(function(){ if (low) low.addTo(map); lay.addTo(map); });
+  var low = window._bvLowTwin(map, lay, RL, B.url + '/{z}/{x}/{y}.webp?b=3');
+  var wt = window._bvWorldTwin(map, B, RL, B.url + '/{z}/{x}/{y}.webp?b=3', { zIndex: 2 }); window._bvFollowOp(lay, wt);
+  Promise.all([B.coverP, window._bvNaCov(B)]).then(function(){ if (low) low.addTo(map); lay.addTo(map); wt.addTo(map); });
   return lay;
 };
 /* THE DESERT IS GROUND, NOT A HOLE, NATIONALLY (user 2026-10-19: "all deserts in the new map should be properly colored").
@@ -1231,12 +1263,12 @@ window.BV_SEAFLOOR = { url: 'https://cdn.bluishvoid.com/seafloor/v1', cover: nul
 window._bvSeafloor = function(map){
   if (!map || map._bvSeafloorLayer || typeof L === 'undefined') return null;
   var B = window.BV_SEAFLOOR;
-  if (!B.coverP) B.coverP = fetch(B.url + '/cover.json?v=4').then(function(r){ return r.ok ? r.json() : []; }).then(function(a){ B.cover = new Set(a || []); return B.cover; }).catch(function(){ B.cover = new Set(); return B.cover; });
+  if (!B.coverP) B.coverP = fetch(B.url + '/cover.json?v=5').then(function(r){ return r.ok ? r.json() : []; }).then(function(a){ B.cover = new Set(a || []); return B.cover; }).catch(function(){ B.cover = new Set(); return B.cover; });
   var SL = L.TileLayer.extend({
     createTile: function(c, done){
       var cov = B.cover;
       var z = c.z + (this.options.zoomOffset || 0);
-      if (z >= 8 && (!cov || !cov.has((c.x >> (z - 8)) + '/' + (c.y >> (z - 8))))){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }
+      if ((z >= 8 && (!cov || !cov.has((c.x >> (z - 8)) + '/' + (c.y >> (z - 8))))) || (z > window.BV_WORLD_Z && !window._bvNaHas(B, z, c.x, c.y))){ var e = document.createElement('div'); setTimeout(function(){ done(null, e); }, 0); return e; }
       return L.TileLayer.prototype.createTile.call(this, c, done);
     }
   });
@@ -1244,11 +1276,12 @@ window._bvSeafloor = function(map){
      (z-index 2) was extended across the whole Gulf and Atlantic that day, and its depth colors buried this shading -- the Sigsbee
      Escarpment, the salt domes, the Cayman Trench. So the relief draws above it (3: under the labels at 5, on water only) through
      z9, where its ~1 km source still holds up, and is gone from z10, where the bathymetry's own finer floor takes over */
-  var lay = new SL(B.url + '/{z}/{x}/{y}.webp?b=2', { minZoom: 3, maxNativeZoom: 9, maxZoom: 9, zIndex: 3, opacity: 1, keepBuffer: 1, updateWhenIdle: true,
-    errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', bounds: L.latLngBounds([[-10, -180], [80, 20]]) });   /* the whole Atlantic to 20 E and 10 S since 2026-10-19 (the hurricane map's reach) */
+  var lay = new SL(B.url + '/{z}/{x}/{y}.webp?b=3', { minZoom: 2, maxNativeZoom: 9, maxZoom: 9, zIndex: 3, opacity: 1, keepBuffer: 1, updateWhenIdle: true,
+    errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', bounds: L.latLngBounds([[-85, -180], [85, 180]]) });   /* the world since 2026-10-26 */   /* the whole Atlantic to 20 E and 10 S since 2026-10-19 (the hurricane map's reach) */
   map._bvSeafloorLayer = lay;
-  var low = window._bvLowTwin(map, lay, SL, B.url + '/{z}/{x}/{y}.webp?b=2');
-  B.coverP.then(function(){ if (low) low.addTo(map); lay.addTo(map); });
+  var low = window._bvLowTwin(map, lay, SL, B.url + '/{z}/{x}/{y}.webp?b=3');
+  var wt = window._bvWorldTwin(map, B, SL, B.url + '/{z}/{x}/{y}.webp?b=3', { zIndex: 3, maxZoom: 11 }); window._bvFollowOp(lay, wt);   /* abroad no finer bathymetry takes over, so the floor stays to z11 */
+  Promise.all([B.coverP, window._bvNaCov(B)]).then(function(){ if (low) low.addTo(map); lay.addTo(map); wt.addTo(map); });
   return lay;
 };
 /* CANVASES RIDE THE ZOOM (2026-10-21, user: "the map transitions weirdly when you zoom", with a recording): every overlay canvas
@@ -113019,6 +113052,7 @@ function closeAlertModal(){
       AR.req = fetch('https://cdn.bluishvoid.com/argo/latest.json?v=2-' + Math.floor(Date.now() / 36e5)).then(function(r){ if (!r.ok) throw 0; return r.json(); })
         .then(function(j){ AR.d = j; AR.sync(); WSUM.sync(); AR.row(); }).catch(function(){ AR.req = null; });
     };
+    AR.zk = function(){ var z = M ? M.getZoom() : 6; return z <= 2 ? 0.32 : z <= 3 ? 0.42 : z <= 4 ? 0.58 : z <= 5 ? 0.78 : 1; };
     AR.count = function(){ if (!AR.d || !M) { AR.n = 0; return; } var B = M.getBounds(); AR.n = AR.d.f.filter(function(f){ return B.contains([f[1], f[2]]); }).length; };
     AR.build = function(){
       [AR.lay, AR.tr, AR.cl, AR.sl].forEach(function(l){ if (l && M.hasLayer(l)) M.removeLayer(l); });
@@ -113032,6 +113066,7 @@ function closeAlertModal(){
         var r0 = MD.v ? (has ? 6 : 2.5) : 5, w0 = has || !MD.v ? 1.5 : 0.5, k = AR.zk();
         var mk = L.circleMarker([f[1], f[2]], { renderer: rd, radius: r0 * k, color: '#1b1300', weight: w0 * Math.max(.5, k), fillColor: c, fillOpacity: has || !MD.v ? 1 : 0.6 })
           .on('click', function(e){ L.DomEvent.stopPropagation(e); AR.card(f); }).addTo(AR.lay);
+        mk._r0 = r0; mk._w0 = w0;
       });
       /* DEEP CURRENTS: each arrow is a float's drift between two surfacings -- the current at its parking depth, ~3,300 ft */
       AR.cl = L.layerGroup();
@@ -113055,7 +113090,6 @@ function closeAlertModal(){
       if (!AR.hook){ AR.hook = true; M.on('moveend', function(){ if (VIEW === 'map' && AR.on){ AR.count(); WSUM.sync(); } });
         /* SMALLER AT WORLD SCALE (user 2026-10-26: "shrink the argo dots at world zoom"): 591 full-size dots piled into a block */
         M.on('zoomend', function(){ if (!AR.lay) return; var k = AR.zk(); AR.lay.eachLayer(function(m){ if (m._r0){ m.setRadius(m._r0 * k); m.setStyle({ weight: m._w0 * Math.max(.5, k) }); } }); }); }
-    AR.zk = function(){ var z = M ? M.getZoom() : 6; return z <= 2 ? 0.32 : z <= 3 ? 0.42 : z <= 4 ? 0.58 : z <= 5 ? 0.78 : 1; };
       [AR.tr, AR.cl, AR.sl, AR.lay].forEach(function(l){ if (!M.hasLayer(l)) l.addTo(M); });
       AR.count(); AR.row();
     };
@@ -113068,7 +113102,6 @@ function closeAlertModal(){
           if (b.hasAttribute('data-am')){ AR.mode = b.getAttribute('data-am'); }
           else if (b.hasAttribute('data-acur')) AR.cur = !AR.cur;
           else if (b.hasAttribute('data-asec')){ AR.sec = !AR.sec; if (AR.sec) AR.slice(); else INFO.hide(); }
-        mk._r0 = r0; mk._w0 = w0;
           AR.save(); AR.sync(); }); }
       var MD = AR.MODES[AR.mode], pill = function(attr, on, t){ return '<button type="button" class="lc-pill lc-tg' + (on ? ' on' : '') + '" ' + attr + '="1">' + t + '</button>'; };
       var key = '';
