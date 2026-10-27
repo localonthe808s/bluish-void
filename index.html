@@ -1421,18 +1421,40 @@ window._bvSatVeilPaint = function(g, W, H){
   }
   g.putImageData(d, 0, 0);
 };
-/* NDBC MOORED BUOYS, shared: the latest report of the last three hours in a lon/lat box, from NOAA's ERDDAP mirror
-   (cwwcNDBCMet) through the proxy (no CORS header there). Numbered moored buoys only (41/42/44/45 Atlantic, Gulf and
-   Lakes, 46 Pacific, 51 Hawaii): the C-MAN and harbour stations sit on land or in bays. Wind m/s -> knots; PTDY is the
-   three-hour pressure change. THE CITY's COAST view keeps its own reader (cwBuoyRead) for its fixed box. */
-window._bvBuoys = function(w, s, e, n){
+/* NDBC MOORED BUOYS, shared: the latest report (last three hours) of the numbered moored buoys in a lon/lat box (41/42/44/45
+   Atlantic, Gulf and Lakes, 46 Pacific, 51 Hawaii): the C-MAN and harbor stations sit on land or in bays. Wind m/s -> knots;
+   PTDY is the three-hour pressure change. THE CITY's COAST view reads through here too.
+   SOURCE (2026-10-27, user: "buoys and waves didn't load anything"): NOAA CoastWatch's ERDDAP mirror (cwwcNDBCMet) stopped
+   answering -- requests hung past two minutes. NDBC's own latest_obs.txt (every station's last report, ~100 KB, refreshed
+   every 10 min) is now read first, through the proxy (no CORS header), once per 10 minutes for every box; ERDDAP stays as
+   the fallback. */
+window._bvNdbcAt = 0; window._bvNdbcP = null;
+window._bvNdbcAll = function(){
+  if (window._bvNdbcP && Date.now() - window._bvNdbcAt < 10 * 6e4) return window._bvNdbcP;
+  window._bvNdbcAt = Date.now();
+  var u = 'https://www.ndbc.noaa.gov/data/latest_obs/latest_obs.txt', ac = window.AbortController ? new AbortController() : null,
+      to = ac ? setTimeout(function(){ ac.abort(); }, 15000) : 0;
+  var P = window._bvNdbcP = fetch('https://proxy.bluishvoid.com/?url=' + encodeURIComponent(u), ac ? { signal: ac.signal } : {})
+    .then(function(r){ clearTimeout(to); if (!r.ok) throw new Error('ndbc ' + r.status); return r.text(); })
+    .then(function(tx){
+      var out = [], cut = Date.now() - 3 * 36e5, n = function(v){ return v === 'MM' || v == null ? null : +v; };
+      tx.split('\n').forEach(function(ln){
+        if (!ln || ln.charAt(0) === '#') return; var c = ln.trim().split(/\s+/); if (c.length < 17) return;
+        var id = c[0]; if (!/^(4[1-6]|51)\d{3}$/.test(id)) return;
+        var t = Date.UTC(+c[3], +c[4] - 1, +c[5], +c[6], +c[7]); if (!(t > cut)) return;
+        var ws = n(c[9]), gs = n(c[10]);
+        out.push({ id: id, lat: +c[1], lon: +c[2], t: new Date(t).toISOString(), wd: n(c[8]), kt: ws != null ? ws * 1.944 : null, gkt: gs != null ? gs * 1.944 : null,
+          mb: n(c[15]), d3: n(c[16]), wv: n(c[11]) });
+      });
+      if (!out.length) throw new Error('ndbc empty'); return out; });
+  P.catch(function(){ if (window._bvNdbcP === P){ window._bvNdbcP = null; window._bvNdbcAt = 0; } });
+  return P;
+};
+window._bvBuoysErddap = function(w, s, e, n){
   if (!window.bvProxyJSON) return Promise.resolve([]);
   var u = 'https://coastwatch.pfeg.noaa.gov/erddap/tabledap/cwwcNDBCMet.json?station,longitude,latitude,time,WD,WSPD,GST,BAR,PTDY,WVHT'
       + '&time%3E=now-3hours&latitude%3E=' + s.toFixed(2) + '&latitude%3C=' + n.toFixed(2) + '&longitude%3E=' + w.toFixed(2) + '&longitude%3C=' + e.toFixed(2);
-  /* ERDDAP ANSWERS 404 FOR "NO MATCHING ROWS" (2026-10-20 review): an inland view (Boulder) has no buoys, the 404 read as a
-     failure, and the proxy chain then asked twice more through our proxy and allorigins -- 12 red requests a visit for
-     nothing. ERDDAP sends CORS, so it is asked directly first: a 404 is an empty answer; only a network failure goes on to
-     the proxies. */
+  /* ERDDAP answers 404 for "no matching rows" (an inland view): a 404 is an empty answer; only a network failure goes on to the proxies */
   var ac = window.AbortController ? new AbortController() : null, to = ac ? setTimeout(function(){ ac.abort(); }, 12000) : 0;
   return fetch(u, ac ? { signal: ac.signal } : {}).then(function(r){ clearTimeout(to); if (r.status === 404) return { table: { rows: [] } }; if (!r.ok) throw new Error('erddap ' + r.status); return r.json(); })
     .catch(function(){ return window.bvProxyJSON(u, { timeout: 15000 }); })
@@ -1448,6 +1470,11 @@ window._bvBuoys = function(w, s, e, n){
       });
       return Object.keys(last).map(function(k){ return last[k]; });
     }).catch(function(){ return []; });
+};
+window._bvBuoys = function(w, s, e, n){
+  return window._bvNdbcAll().then(function(all){
+    return all.filter(function(q){ return q.lat >= s && q.lat <= n && q.lon >= w && q.lon <= e; }); },
+    function(){ return window._bvBuoysErddap(w, s, e, n); });
 };
 /* ONE FETCH AND ONE DECODE PER TILE (perf 2026-10-18). Every protomaps layer builds its own ZxySource + TileCache, so LOCAL's
    base map, its labels copy and the outline's water mask (three tiers each) each fetched and decoded the SAME .mvt -- 3-4
@@ -67378,27 +67405,16 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       load();
       cwSatTimer = setInterval(load, 10 * 60000);
     }
-    /* BUOYS. NDBC's moored buoys in the box, the latest report of the last three hours, from NOAA's ERDDAP
-       mirror (cwwcNDBCMet) through the proxy -- it sends no CORS header. Only the numbered moored buoys
-       (41xxx/44xxx): the C-MAN and harbour stations are on land or in bays and would crowd the coast. Wind in
-       m/s -> knots; PTDY is the three-hour pressure change, the storm's own signature. */
+    /* BUOYS. NDBC's numbered moored buoys (41xxx/44xxx) in the box, via the shared window._bvBuoys: the C-MAN and harbor
+       stations are on land or in bays and would crowd the coast. PTDY is the three-hour pressure change, the storm's own signature. */
     var cwBuoyAt = 0;
     function cwBuoyRead(){
-      if (Date.now() - cwBuoyAt < 10 * 60000 || !window.bvProxyJSON) return;
+      if (Date.now() - cwBuoyAt < 10 * 60000 || !window._bvBuoys) return;
       cwBuoyAt = Date.now();
-      window.bvProxyJSON('https://coastwatch.pfeg.noaa.gov/erddap/tabledap/cwwcNDBCMet.json?station,longitude,latitude,time,WD,WSPD,GST,BAR,PTDY,WVHT'
-          + '&time%3E=now-3hours&latitude%3E=33&latitude%3C=44&longitude%3E=-79&longitude%3C=-64', { timeout: 15000 })
-        .then(function(j){
-          var T = j && j.table; if (!T || !T.rows) return;
-          var C = T.columnNames, ix = function(n){ return C.indexOf(n); }, last = {};
-          T.rows.forEach(function(r){
-            var id = String(r[ix('station')] || '');
-            if (!/^4\d{4}$/.test(id)) return;
-            if (!last[id] || r[ix('time')] > last[id].t) last[id] = { id: id, lon: r[ix('longitude')], lat: r[ix('latitude')], t: r[ix('time')],
-              wd: r[ix('WD')], kt: r[ix('WSPD')] != null ? r[ix('WSPD')] * 1.944 : null, gkt: r[ix('GST')] != null ? r[ix('GST')] * 1.944 : null,
-              mb: r[ix('BAR')], d3: r[ix('PTDY')], wv: r[ix('WVHT')] };
-          });
-          window._cwBuoys = Object.keys(last).map(function(k){ return last[k]; });
+      window._bvBuoys(-79, 33, -64, 44)
+        .then(function(list){
+          if (!list.length) throw new Error('no buoys');
+          window._cwBuoys = list.filter(function(q){ return /^4\d{4}$/.test(q.id); });
           if (cw.wide) cwDrawWideOv(cwWideDef());
         }).catch(function(){ cwBuoyAt = Date.now() - 8 * 60000; });   /* try again in two minutes */
     }
