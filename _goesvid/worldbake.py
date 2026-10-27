@@ -30,14 +30,21 @@ EDGE = 'https://tiles.bluishvoid.com/slider/'
 PROD = 'cira_geoproxy'
 # the page's ESAT: SLIDER name, sub-satellite longitude, the disk's equatorial radius as a share of the image width (measured)
 SATS = [('goes-19', -75.0, 0.5), ('goes-18', -137.0, 0.5), ('himawari', 140.7, 0.4942), ('meteosat-12', 0.0, 0.4885), ('gk2a', 128.2, 0.4927)]
-OW, OH = 2048, 1024
+# SHARPER (2026-10-26, user: "improve the clarity of the other satellites ... the clouds are grainy"): the frames are made at
+# 4096 x 2048 (~10 km a pixel at the equator) from CIRA's zoom-2 disks (4 x 4 tiles, ~2750 px across, ~4.6 km a pixel under the
+# satellite) instead of its one-tile overview (~690 px, ~18 km). Measured on one frame: 27x the fine detail over Japan, 55x over
+# Europe. The page plays the 2048 cut by default and swaps to the 4096 one ('hd') only when a computer zooms in.
+OW, OH = 4096, 2048
+CIRA = 'https://slider.cira.colostate.edu/data/'
+CIRA_Z = 2
 HOURS, STEP_MIN, NEAR_MIN = 3, 10, 6        # a frame every 10 min over 3 h; a satellite's scan within 6 min of the mark joins it
 # A SATELLITE MISSING A MARK HOLDS ITS NEAREST SCAN (2026-10-26, user: "the full globe view is choppy"): a mark with no scan within
 # 6 min used to leave that satellite out, and the frame went black over its side of the world (Meteosat-12: Europe and Africa
 # dropped out of one frame and the optical-flow in-betweens smeared into and out of the hole -- measured 10x a normal frame's
 # change). Its nearest scan within 30 min stands in, so that side holds still a moment instead.
 HOLD_MIN = 30
-KINDS = {'d': {'w': OW, 'crf': 25, 'g': 12, 'ib': (1, 2, 3)}, 'm': {'w': OW // 2, 'crf': 28, 'g': 8, 'ib': (2,)}}
+KINDS = {'d': {'w': 2048, 'crf': 25, 'g': 12, 'ib': (1, 2, 3)}, 'm': {'w': 1024, 'crf': 28, 'g': 8, 'ib': (2,)},
+         'hd': {'w': OW, 'crf': 29, 'g': 12, 'ib': (1, 2, 3)}}
 KEY = bake.PREFIX + 'WORLD/'
 TAR_KEY = bake.PREFIX + '_frames/WORLD.tar'
 BUDGET_S = 420
@@ -98,6 +105,20 @@ def goes_disk(sat, name):
         gc = nightblend.blend(gc, ch['07'], ch['13'], ch['15'], night)
     return np.clip(gc, 0, 255).round().astype(np.uint8)
 DRY = '--dry' in sys.argv
+
+
+def cira_disk(k, t):
+    """CIRA's full disk at zoom CIRA_Z, its tiles stitched (straight from CIRA: the tiles worker passes zooms 0-1 only)"""
+    from concurrent.futures import ThreadPoolExecutor
+    n = 2 ** CIRA_Z; base = CIRA + 'imagery/%s/%s/%s/%s---full_disk/%s/%s/%02d/' % (t[:4], t[4:6], t[6:8], k, PROD, t, CIRA_Z)
+    rc = [(r, c) for r in range(n) for c in range(n)]
+    with ThreadPoolExecutor(8) as ex:
+        tiles = list(ex.map(lambda q: np.asarray(Image.open(io.BytesIO(bake.get(base + '%03d_%03d.png' % q, 60))).convert('RGB')), rc))
+    s = tiles[0].shape[0]; im = np.zeros((s * n, s * n, 3), np.uint8)
+    for (r, c), a in zip(rc, tiles):
+        if a.shape[:2] != (s, s): raise ValueError('tile %d_%d is %s' % (r, c, a.shape))
+        im[r * s:(r + 1) * s, c * s:(c + 1) * s] = a
+    return im
 
 
 def tms(t14):
@@ -179,6 +200,12 @@ def main():
     if os.path.exists(mp) and Image.open(mp).mode != 'RGBA':       # a mask from before 2026-10-25 (grayscale): rebuilt with the newest frame
         os.remove(mp); nf = sorted(f for f in os.listdir(fd) if re.match(r'^\d{11}_WORLD\.jpg$', f))
         if nf: os.remove(os.path.join(fd, nf[-1]))
+    # frames from before the 4096 switch are scaled up in place: the loop stays whole, and they age out within its 3 hours
+    import cv2
+    for f in os.listdir(fd):
+        if f.endswith('.jpg'):
+            fp = os.path.join(fd, f); im = cv2.imread(fp)
+            if im is not None and im.shape[1] != OW: cv2.imwrite(fp, cv2.resize(im, (OW, OH), interpolation=cv2.INTER_CUBIC), [cv2.IMWRITE_JPEG_QUALITY, 92])
     if not os.path.exists(os.path.join(fd, VER)):
         for f in os.listdir(fd): os.remove(os.path.join(fd, f))
         open(os.path.join(fd, VER), 'w').write('1')
@@ -229,17 +256,21 @@ def main():
                 ck = k + near
                 if ck not in cache:
                     try:
-                        raw = bake.get(EDGE + 'imagery/%s/%s/%s/%s---full_disk/%s/%s/00/000_000.png' % (near[:4], near[4:6], near[6:8], k, PROD, near), 60)
-                        cache[ck] = np.asarray(Image.open(io.BytesIO(raw)).convert('RGB'))
+                        cache[ck] = cira_disk(k, near)
                     except Exception as e:
                         print('  %s %s: %s' % (k, near, e)); cache[ck] = None
                 if cache[ck] is not None: disks[k] = cache[ck]; break
         if len(disks) < 3: print('  %s: %d disks, skipped' % (fn, len(disks))); continue
         rgb, best = compose(disks)
         for ck in [x for x in cache if x.startswith('noaa')]: del cache[ck]   # 88 MB each: one frame's worth at a time
+        # CIRA's sharp disks are 22 MB each: the marks go newest first, so a scan newer than this mark by more than the hold is
+        # never wanted again (a full rebuild otherwise held ~45 of them; peak 6.3 GB)
+        for ck in [x for x in cache if not x.startswith('noaa')]:
+            kk = ck[:-14]
+            if kk in lag and tms(ck[-14:]) - (m - lag[kk]) > HOLD_MIN * 60: del cache[ck]
         Image.fromarray(rgb).save(p, quality=90); new += 1
         if fn == newest_fn or not os.path.exists(os.path.join(fd, 'mask.png')):
-            am = alpha(best); Image.fromarray(np.dstack([np.full_like(am, 255)] * 3 + [am]), 'RGBA').save(os.path.join(fd, 'mask.png'), optimize=True)   # the page masks with destination-in, which reads ALPHA
+            am = cv2.resize(alpha(best), (2048, 1024), interpolation=cv2.INTER_AREA); Image.fromarray(np.dstack([np.full_like(am, 255)] * 3 + [am]), 'RGBA').save(os.path.join(fd, 'mask.png'), optimize=True)   # the page masks with destination-in, which reads ALPHA
     got = sorted(f for f in want if os.path.exists(os.path.join(fd, f)))
     if len(got) < 2: print('WORLD: %d frames, nothing to play' % len(got)); return
     made = 0
@@ -252,7 +283,7 @@ def main():
     if old and (old.get('d') or {}).get('frames', [None])[-1:] == [got[-1]] and not new and not made:
         print('WORLD: no new frame (kept)'); return
     newest = got[-1][:11]
-    man = {'at': int(time.time()), 'sat': 'WORLD', 'w': OW, 'h': OH, 'fps': bake.FPS, 'step': STEP_MIN, 'sats': list(lists), 'src': 'CIRA SLIDER GeoProxy',
+    man = {'at': int(time.time()), 'sat': 'WORLD', 'w': OW, 'h': OH, 'fps': bake.FPS, 'step': STEP_MIN, 'sats': list(lists), 'src': 'CIRA SLIDER GeoProxy (zoom %d)' % CIRA_Z,
            'lag': {k: v // 60 for k, v in lag.items() if v}}
     man['mask'] = 'mask_%s.png' % hashlib.sha1(open(os.path.join(fd, 'mask.png'), 'rb').read()).hexdigest()[:10]
     for kk, K in KINDS.items():
@@ -272,7 +303,7 @@ def main():
         if kk == 'd': man['step'] = kstep
         man[kk] = {'mp4': os.path.basename(out), 'frames': use, 'real': len(got), 'step': kstep, 'bytes': os.path.getsize(out)}
     poster = os.path.join(work, '%s_p.jpg' % newest)
-    Image.open(os.path.join(fd, got[-1])).save(poster, quality=85); man['poster'] = os.path.basename(poster)
+    Image.open(os.path.join(fd, got[-1])).resize((2048, 1024), Image.LANCZOS).save(poster, quality=85)   # the poster stays the page's default size; man['poster'] = os.path.basename(poster)
     print('WORLD: %d new, %d in-betweens, %.0f s; ' % (new, made, time.time() - t0)
           + ', '.join('%s %d frames %.1f MB' % (kk, len(man[kk]['frames']), man[kk]['bytes'] / 1e6) for kk in KINDS), flush=True)
     if DRY:
