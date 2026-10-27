@@ -25,10 +25,11 @@ LAND = os.path.join(HERE, '..', '_sargbake', 'land50m.json')
 ERD = 'https://coastwatch.noaa.gov/erddap/griddap/'
 BUCKET = 'bluishvoid-bg'
 # the North Atlantic gyre with room round it: the Gulf Stream's whole run, the Azores and Canary currents, the equatorial return
-CW, CS, CE, CN = -100.0, 0.0, -5.0, 56.0
+CW, CS, CE, CN = -180.0, -70.0, 180.0, 70.0      # global since 2026-10-27 (WATER's OCEAN tab works from any coast)
 VMAX = 2.0                                   # m/s; the Gulf Stream's core peaks near 2
 # ocean color over the same water, a little tighter
-KW, KS, KE, KN = -98.0, 2.0, -8.0, 54.0
+KW, KS, KE, KN = -180.0, -70.0, 180.0, 75.0
+KSTRIDE = 3                                   # 9 km -> ~28 km: the world in ~1,440 columns
 # log10 chlorophyll (mg/m3) -> color. The open gyre runs 0.02-0.06; shelves and upwelling 1-10. No purple: deep blue to green
 RAMP = [(-1.75, (17, 52, 160)), (-1.3, (29, 90, 216)), (-0.9, (14, 150, 220)), (-0.5, (20, 184, 166)), (0.0, (34, 170, 90)),
         (0.5, (132, 204, 22)), (1.0, (202, 206, 40))]
@@ -83,7 +84,7 @@ def currents(tmp):
 
 
 def chlorophyll(tmp):
-    p = get(ERD + 'noaacwNPPN20VIIRSDINEOFDaily.nc?chlor_a[(last)][(0.0)][(%g):1:(%g)][(%g):1:(%g)]' % (KS, KN, KW, KE), os.path.join(tmp, 'chl.nc'))
+    p = get(ERD + 'noaacwNPPN20VIIRSDINEOFDaily.nc?chlor_a[(last)][(0.0)][(%g):%d:(%g)][(%g):%d:(%g)]' % (KS, KSTRIDE, KN, KW, KSTRIDE, KE), os.path.join(tmp, 'chl.nc'))
     f = netcdf_file(p, 'r', mmap=False)
     a, t = north_up(f, 'chlor_a')
     H, W = a.shape
@@ -94,7 +95,7 @@ def chlorophyll(tmp):
     for c in range(3): rgb[..., c] = np.interp(lg, xs, [r[1][c] for r in RAMP])
     # the box's edges fade out over ~3 deg instead of ending in a straight cut across the ocean
     fy = np.clip(np.minimum(np.arange(H), H - 1 - np.arange(H)) / (3.0 / (KN - KS) * H), 0, 1)
-    fx = np.clip(np.minimum(np.arange(W), W - 1 - np.arange(W)) / (3.0 / (KE - KW) * W), 0, 1)
+    fx = np.ones(W) if KE - KW >= 359 else np.clip(np.minimum(np.arange(W), W - 1 - np.arange(W)) / (3.0 / (KE - KW) * W), 0, 1)
     fade = (np.minimum(fy[:, None], fx[None, :]) ** 1.5)
     rgba = np.dstack([rgb.round().astype(np.uint8), (np.where(ok, 255, 0) * fade).round().astype(np.uint8)])
     my = lambda la: math.log(math.tan(math.pi / 4 + math.radians(la) / 2))
@@ -104,6 +105,63 @@ def chlorophyll(tmp):
     v = a[ok]
     print('chl', time.strftime('%Y-%m-%d', time.gmtime(t)), (H, W), 'median %.3f, p5 %.3f, p95 %.2f mg/m3' % (np.median(v), np.percentile(v, 5), np.percentile(v, 95)), os.path.getsize(out), 'bytes')
     return out, {'t': time.strftime('%Y-%m-%d', time.gmtime(t)), 'box': [KW, KS, KE, KN]}
+
+
+# SEA TEMPERATURE (2026-10-27, WATER's SEA tab): the world from NOAA OISST v2.1 (0.25 deg, with its anomaly against 1991-2020), and
+# North American waters sharp from JPL MUR (1 km, read at 0.05 deg, with its own anomaly). One F ramp for both; the site's colors
+TF = [(28, (30, 58, 138)), (39, (37, 99, 235)), (50, (14, 165, 233)), (61, (34, 211, 238)), (68, (34, 197, 94)), (75, (250, 204, 21)),
+      (82, (239, 68, 68)), (88, (153, 27, 27))]
+AF = [(-7, (29, 78, 216)), (-3.5, (96, 165, 250)), (-1, (226, 232, 240)), (0, (241, 245, 249)), (1, (254, 226, 226)), (3.5, (251, 146, 60)),
+      (7, (220, 38, 38)), (10, (127, 29, 29))]
+RW, RS, RE, RN = -130.0, 15.0, -50.0, 55.0     # the sharp box
+
+
+def ramp(v, stops, alpha=235):
+    xs = [q[0] for q in stops]; ok = np.isfinite(v)
+    rgb = np.zeros(v.shape + (3,), np.float32)
+    for c in range(3): rgb[..., c] = np.interp(np.nan_to_num(v), xs, [q[1][c] for q in stops])
+    return np.dstack([rgb.round().astype(np.uint8), np.where(ok, alpha, 0).astype(np.uint8)])
+
+
+def merc(rgba, S0, N0, name, tmp):
+    H = rgba.shape[0]; my = lambda la: math.log(math.tan(math.pi / 4 + math.radians(la) / 2))
+    Hm = int(round(H * (my(N0) - my(S0)) / math.radians(N0 - S0)))
+    rows = [min(H - 1, max(0, int((N0 - math.degrees(2 * math.atan(math.exp(my(N0) - (i + .5) / Hm * (my(N0) - my(S0)))) - math.pi / 2)) / (N0 - S0) * H))) for i in range(Hm)]
+    out = os.path.join(tmp, name); Image.fromarray(rgba[rows]).save(out, optimize=True); return out
+
+
+def seatemp(tmp):
+    f2c = lambda c: c * 9 / 5 + 32
+    q = '[(last)][(0.0)][(-75):1:(75)][(0):1:(359.875)]'
+    p = get('https://coastwatch.pfeg.noaa.gov/erddap/griddap/ncdcOisst21NrtAgg.nc?sst' + q + ',anom' + q, os.path.join(tmp, 'oisst.nc'))
+    f = netcdf_file(p, 'r', mmap=False)
+    sst, t = north_up(f, 'sst'); an, _ = north_up(f, 'anom')
+    sst = np.roll(sst, sst.shape[1] // 2, axis=1); an = np.roll(an, an.shape[1] // 2, axis=1)   # 0..360 -> -180..180
+    sst[(sst < -5) | (sst > 45)] = np.nan; an[~np.isfinite(sst)] = np.nan
+    F, A = f2c(sst), an * 9 / 5
+    # the world picture leaves North America's sharp box empty: its quarter-degree coasts and lakes showed round the sharp ones
+    la = 75 - (np.arange(F.shape[0]) + .5) * 150 / F.shape[0]; lo = -180 + (np.arange(F.shape[1]) + .5) * 360 / F.shape[1]
+    hole = ((la > RS + .3) & (la < RN - .3))[:, None] & ((lo > RW + .3) & (lo < RE - .3))[None, :]
+    gs, ga = ramp(F, TF), ramp(A, AF); gs[hole, 3] = 0; ga[hole, 3] = 0
+    out = {'g_sst': merc(gs, -75, 75, 'sst_g.png', tmp), 'g_anom': merc(ga, -75, 75, 'anom_g.png', tmp)}
+    # the numbers, for a tap: R,G = F x 100 + 1000 (16 bit), B = anomaly F x 20 + 128; 0,0 = no water
+    ok = np.isfinite(F); v = np.where(ok, np.clip(np.round(F * 100 + 1000), 1, 65535), 0).astype(np.uint32)
+    b = np.where(ok, np.clip(np.round(np.nan_to_num(A) * 20 + 128), 0, 255), 0).astype(np.uint8)
+    dp = os.path.join(tmp, 'sst_data.png'); Image.fromarray(np.dstack([(v >> 8).astype(np.uint8), (v & 255).astype(np.uint8), b])).save(dp, optimize=True); out['data'] = dp
+    tg = time.strftime('%Y-%m-%d', time.gmtime(t))
+    print('oisst', tg, F.shape, 'F %.0f..%.0f' % (np.nanmin(F), np.nanmax(F)), 'anom p1/p99 %.1f/%.1f F' % tuple(np.nanpercentile(A, [1, 99])))
+    # North America, sharp
+    q2 = '[(last)][(%g):5:(%g)][(%g):5:(%g)]' % (RS, RN, RW, RE)
+    p2 = get('https://coastwatch.pfeg.noaa.gov/erddap/griddap/jplMURSST41.nc?analysed_sst' + q2, os.path.join(tmp, 'mur.nc'))
+    p3 = get('https://coastwatch.pfeg.noaa.gov/erddap/griddap/jplMURSST41anom1day.nc?sstAnom' + q2, os.path.join(tmp, 'muranom.nc'))
+    f2 = netcdf_file(p2, 'r', mmap=False); m, tm = north_up(f2, 'analysed_sst')
+    if np.nanmedian(m) > 200: m = m - 273.15            # Kelvin in some versions
+    m[(m < -5) | (m > 45)] = np.nan
+    f3 = netcdf_file(p3, 'r', mmap=False); ma, ta = north_up(f3, 'sstAnom'); ma[(ma < -20) | (ma > 20)] = np.nan
+    out['r_sst'] = merc(ramp(f2c(m), TF), RS, RN, 'sst_r.png', tmp); out['r_anom'] = merc(ramp(ma * 9 / 5, AF), RS, RN, 'anom_r.png', tmp)
+    print('mur', time.strftime('%Y-%m-%d', time.gmtime(tm)), m.shape, 'anom', time.strftime('%Y-%m-%d', time.gmtime(ta)))
+    return out, {'t': tg, 'tr': time.strftime('%Y-%m-%d', time.gmtime(tm)), 'ta': time.strftime('%Y-%m-%d', time.gmtime(ta)),
+                 'g': [-180, -75, 180, 75], 'r': [RW, RS, RE, RN], 'dw': sst.shape[1], 'dh': sst.shape[0]}
 
 
 def put(src, key, ct, cache):
@@ -119,13 +177,16 @@ def main():
     tmp = tempfile.mkdtemp()
     cp, cm = currents(tmp)
     kp, km = chlorophyll(tmp)
+    sp, sm = seatemp(tmp)
     v = int(time.time())
-    meta = {'cur': cm, 'chl': km, 'at': v, 'v': v}
+    meta = {'cur': cm, 'chl': km, 'sst': sm, 'at': v, 'v': v}
     mp = os.path.join(tmp, 'latest.json'); json.dump(meta, open(mp, 'w'))
     print(meta)
     if '--dry' in sys.argv: print('dry run:', tmp); return
     put(cp, 'surf/currents.png', 'image/png', 'public, max-age=3600')
     put(kp, 'surf/chl.png', 'image/png', 'public, max-age=3600')
+    for k, key in (('g_sst', 'sst_g'), ('g_anom', 'anom_g'), ('r_sst', 'sst_r'), ('r_anom', 'anom_r'), ('data', 'sst_data')):
+        put(sp[k], 'surf/%s.png' % key, 'image/png', 'public, max-age=3600')
     put(mp, 'surf/latest.json', 'application/json', 'public, max-age=1800')
     print('uploaded')
 
