@@ -57442,7 +57442,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     var slv = (sat === 'HIMAWARI' || sat === 'METEOSAT12') && vBand === 'geocolor';   /* baked even in FORECASTS: SLIDER's own frames jump 10 min */
     if ((!slv && (vBand !== 'GEOCOLOR' || (window._fcGoesOn && window._fcGoesOn())))   /* LIVE is GeoColor only (2026-10-24): B13 + GLM no longer baked */ || (GOES_VID[sat] || '').indexOf(' ' + sec + ' ') < 0
         || (window._goesMapMode && window._goesMapMode()) || !window.fetch || !window.URL || !URL.createObjectURL){
-      window._goesFdLoop = false; window._goesCrop = null;   /* a NOAA loop: not on our full-disk grid (the flag outlived GEOCOLOR) */
+      window._goesFdLoop = false; window._goesCrop = null; if (window._goesChip) window._goesChip();   /* a NOAA loop: not on our full-disk grid (the flag outlived GEOCOLOR) */
       done(null); return; }
     var base = 'https://cdn.bluishvoid.com/goes/video/' + sat + '/' + sec + '/' + vBand + '/', ep = window._locEpoch || 0, fin = false;
     window._goesFdLoop = false;
@@ -57458,7 +57458,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       window._goesCrop = fd && M.crop ? M.crop : null;
       if (_goesStampMs(newest.split('/').pop()) - _goesStampMs(K.frames[K.frames.length - 1]) > (fd ? 45 : 20) * 60e3) return end(null);
       if (fd){
-        window._goesFdLoop = true; window._goesStepMin = K.step || M.step || 10;   /* phones' loop has its own step (fewer in-betweens, 2026-10-24) */
+        window._goesFdLoop = true; window._goesStepMin = K.step || M.step || 10; if (window._goesChip) setTimeout(window._goesChip, 0);   /* phones' loop has its own step (fewer in-betweens, 2026-10-24) */
         if (M.src === 'raw' && window._bvGoesSrc && window._bvSrc){
           try { window._bvLiveSrc = window._bvGoesSrc.concat([['NOAA GOES ' + (sat === 'GOES18' ? '18' : '19') + ' ABI L2 \u00b7 OPEN DATA', 'https://registry.opendata.aws/noaa-goes/']]); window._bvSrc(window._bvLiveSrc); } catch(e){}
         }
@@ -57874,10 +57874,31 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (S && S.conus && _zvSat() === 'GOES19') return (goesCurrentSector === 'taw' || goesCurrentSector === 'pr') ? (window._goesCrop || S.conus) : S.conus;
     if (S) Object.keys(S).forEach(function(k){ var c = S[k]; d = d ? [Math.min(d[0], c[0]), Math.min(d[1], c[1]), Math.max(d[2], c[2]), Math.max(d[3], c[3])] : c.slice(); });
     return d || window._goesCrop; }
-  /* FULL VIEW on the merged East + West loop is the whole globe (user 2026-10-26: "when i start scrolling and we show the FULL VIEW,
-     that should be full globe, not hemisphere"): there it shows even unzoomed and opens EARTH NOW facing the loop's centre */
-  function _zvChip(){ var c = document.getElementById('goes-zoom-full'), hemi = _zvSat() === 'GOESV' && !!window._bvToGlobe; if (c) c.style.display = ZV.v || hemi ? 'block' : 'none';
+  /* THE STEP-OUT BUTTON NAMES THE NEXT LEVEL (user 2026-10-26: "full view just resets my northeast view for a while, have the button
+     update with what youre looking at: local < northeast (region), region < full US, full US < full globe"). Zoomed inside a loop it
+     reads that loop's name and fits it; at a region's frame it reads FULL US (CONTINENTAL, when that holds the region; else the next
+     loop up); at FULL US or the merged East + West loop it reads FULL GLOBE and opens EARTH NOW facing the same spot */
+  function _zvNext(){
+    var sat = _zvSat(), sec = goesCurrentSector, S = _SJ && _SJ.sectors, nm = function(k){ return k === 'conus' ? 'FULL US' : window._goesSecName(k); };
+    var globe = window._bvToGlobe ? { t: 'FULL GLOBE', go: function(){ var V = ZV.v || _zvBase(), gs = _zvSat(), ll = V && _zgInv((V[0] + V[2]) / 2, (V[1] + V[3]) / 2, gs);
+      window._bvToGlobe(ll ? ll[0] : 35, ll ? ll[1] : -100); } } : null;
+    if (sat === 'GOESV') return globe;
+    var B = _zvBase();
+    if (ZV.v && B && (ZV.v[2] - ZV.v[0]) < (B[2] - B[0]) * 0.97) return { t: nm(sec), go: function(){ window._goesZoomReset(true); } };
+    var up = function(k, s2){ return { t: nm(k), go: function(){ if (!ZV.v) ZV.v = _zvBase(); _zvSwap(k, s2, { done: function(){ window._goesZoomReset(true); } }); } }; };
+    if (sec === 'conus') return globe;
+    var C = (S && S[sat] && S[sat][sec]) || window._goesCrop, cu = S && S.GOES19 && S.GOES19.conus;
+    if (C && cu){ var C2 = sat === 'GOES19' ? C : _zvConv(C, sat, 'GOES19'), tol = C2 ? (C2[2] - C2[0]) * 0.03 : 0;
+      if (C2 && cu[0] <= C2[0] + tol && cu[1] <= C2[1] + tol && cu[2] >= C2[2] - tol && cu[3] >= C2[3] - tol) return up('conus', 'GOES19'); }
+    var par = _zvParent(); if (par) return up(par[0], par[1]);
+    return globe;
+  }
+  function _zvChip(){ var c = document.getElementById('goes-zoom-full'), nx = null;
+    if (!_SJ){ if (c) c.style.display = 'none'; if (window._goesFdLoop) _zvSectors().then(function(j){ if (j) _zvChip(); }); return; }   /* the ladder needs the loop list */
+    if (window._goesFdLoop && window._goesCrop) try { nx = _zvNext(); } catch(e){}
+    if (c){ c.style.display = nx ? 'block' : 'none'; if (nx) c.textContent = '\u2922 ' + nx.t; }
     if (goesCanvas) goesCanvas.style.touchAction = ZV.v ? 'none' : 'pan-y'; }
+  window._goesChip = function(){ _zvChip(); };
   function _zvSet(v){
     var D = _zvDomain(), sz = _zvSize(), a = sz.w / sz.h; if (!v || !D) return;
     var w = v[2] - v[0], maxW = Math.min(D[2] - D[0], (D[3] - D[1]) * a), minW = 260;
@@ -58011,8 +58032,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       + 'font:800 9px system-ui,sans-serif;letter-spacing:.08em;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.35);';
     chip.addEventListener('pointerdown', function(e){ e.stopPropagation(); });
     chip.addEventListener('click', function(e){ e.stopPropagation();
-      if (_zvSat() === 'GOESV' && window._bvToGlobe){ var V = ZV.v || _zvBase(), ll = V && _zgInv((V[0] + V[2]) / 2, (V[1] + V[3]) / 2, 'GOESV'); window._bvToGlobe(ll ? ll[0] : 35, ll ? ll[1] : -100); return; }
-      window._goesZoomReset(); });
+      var nx = null; try { nx = _zvNext(); } catch(x){} if (nx) nx.go(); else window._goesZoomReset(); });
     host.appendChild(chip);
     var ok = function(){ return !!window._goesCrop && !!window._goesFdLoop; };
     /* CLICK TO SCROLL, SAID ON THE LOOP (user 2026-10-24: "add a click to scroll on geocolor"): the page keeps scrolling past
