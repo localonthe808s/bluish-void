@@ -107131,7 +107131,7 @@ function closeAlertModal(){
       + '#cw-pane-local .lc-lrow > .lc-pill.lc-tg::after{ display:none !important; content:none !important; }'
       /* ARGO's switches (2026-10-25): the LAYERS look -- equal outline pills, white when on -- and a color key under them */
       + '#lc-argo, #lc-surf{ padding:0 12px 8px; color:#fff; font:800 8.5px system-ui,sans-serif; letter-spacing:.07em; }'
-      + '#lc-surf .lc-agrid3{ grid-template-columns:repeat(3,minmax(0,1fr)); }'
+      + '#lc-surf .lc-agrid3{ grid-template-columns:repeat(3,minmax(0,1fr)); } #lc-surf .lc-agrid4{ grid-template-columns:repeat(4,minmax(0,1fr)); }'
       + '#lc-surf .lc-agrid-gp{ grid-template-columns:repeat(auto-fit,minmax(104px,1fr)); }'
       + '#lc-argo .lc-agrid, #lc-surf .lc-agrid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:6px; margin-top:4px; }'
       + '#lc-argo .lc-agrid2{ grid-template-columns:repeat(2,minmax(0,1fr)); }'
@@ -112953,9 +112953,83 @@ function closeAlertModal(){
          baked daily by _sargbake/bake.py to cdn sargassum/latest.{png,json}, coasts masked (shallow water reads as weed).
        - GARBAGE PATCHES: modeled, not mapped -- where floating plastic collects in the gyres (Lebreton et al. 2018 for the Pacific,
          van Sebille et al. 2015 / Law et al. 2010 for the Atlantic). No satellite can see it; drawn as soft clouds, no edge. */
-    var SF = { sea: true, sarg: true, gp: true, meta: null, img: null, cv: null };
-    try { var _sf = JSON.parse(localStorage.getItem('bv_lc_surf') || 'null'); if (_sf){ SF.sea = _sf.sea !== false; SF.sarg = _sf.sarg !== false; SF.gp = _sf.gp !== false; } } catch(e){}
-    SF.save = function(){ try { localStorage.setItem('bv_lc_surf', JSON.stringify({ sea: SF.sea, sarg: SF.sarg, gp: SF.gp })); } catch(e){} };
+    /* REAL DATA (user 2026-10-26: "we need to significantly improve our sargasso sea visual, what real sources can be used, garbage
+       patches are weak too"):
+       - SARGASSO SEA: the Convention on Biological Diversity's described area (EBSA WC_13, 2012, Bermuda's waters cut out), drawn crisp:
+         a designation. What really walls it in is drawn live under it: the surface currents from satellite altimetry (NOAA CoastWatch,
+         daily) as moving streaks -- the Gulf Stream and the gyre turning clockwise round the sea.
+       - OCEAN COLOR: chlorophyll, gap-filled (NOAA VIIRS DINEOF, daily): the Sargasso is the clear, plankton-poor "ocean desert", deep
+         blue in the middle of the Atlantic, green toward the coasts. A measurement, so it needs no outline.
+       - GARBAGE PATCHES: measured, where measured. 14,580 surface net samples from 67 studies (NOAA NCEI) as dots by concentration;
+         the Great Pacific patch from The Ocean Cleanup's survey (Lebreton et al. 2018, CC BY): its concentration field and the 10 / 1 /
+         0.1 kg per sq km rings. The others stay soft modeled clouds.
+       _surfbake/bake.py (daily) -> cdn surf/{currents,chl}.png + latest.json; _surfbake/static.py (by hand) -> surf/static.json, gpgp.png */
+    var SF = { sea: true, chl: false, sarg: true, gp: true, meta: null, img: null, cv: null, st: null, sm: null };
+    try { var _sf = JSON.parse(localStorage.getItem('bv_lc_surf') || 'null'); if (_sf){ SF.sea = _sf.sea !== false; SF.sarg = _sf.sarg !== false; SF.gp = _sf.gp !== false; SF.chl = !!_sf.chl; } } catch(e){}
+    SF.save = function(){ try { localStorage.setItem('bv_lc_surf', JSON.stringify({ sea: SF.sea, chl: SF.chl, sarg: SF.sarg, gp: SF.gp })); } catch(e){} };
+    SF.CDN = 'https://cdn.bluishvoid.com/surf/';
+    SF.loadSt = function(){ if (SF.stReq) return; SF.stReq = fetch(SF.CDN + 'static.json?v=' + Math.floor(Date.now() / 864e5)).then(function(r){ if (!r.ok) throw 0; return r.json(); })
+      .then(function(j){ SF.st = j; SF.sync(); }).catch(function(){ SF.stReq = null; }); };
+    SF.loadSm = function(){ if (SF.smReq) return; SF.smReq = fetch(SF.CDN + 'latest.json?v=' + Math.floor(Date.now() / 18e5)).then(function(r){ if (!r.ok) throw 0; return r.json(); })
+      .then(function(j){ SF.sm = j; SF.sync(); }).catch(function(){ SF.smReq = null; }); };
+    /* ---- THE CURRENTS THAT MAKE THE SEA: particles carried by the day's surface currents, drawn as fading streaks ---- */
+    SF.F = { cv: null, raf: 0, pts: null, uv: null, w: 0, h: 0, box: null, vmax: 2, n: 0, t0: 0 };
+    SF.flowLoad = function(){ var F = SF.F, m = SF.sm && SF.sm.cur; if (!m || F.uvReq === m.t) return; F.uvReq = m.t;
+      var im = new Image(); im.crossOrigin = 'anonymous';
+      im.onload = function(){ var c = document.createElement('canvas'); c.width = im.width; c.height = im.height; var g = c.getContext('2d'); g.drawImage(im, 0, 0);
+        F.uv = g.getImageData(0, 0, im.width, im.height).data; F.w = im.width; F.h = im.height; F.box = m.box; F.vmax = m.vmax || 2; F.pts = null; SF.flowGo(); };
+      im.src = SF.CDN + 'currents.png?v=' + SF.sm.v; };
+    /* m/s at a lat / lon (bilinear; null over land / no data) */
+    SF.uvAt = function(la, lo){ var F = SF.F, b = F.box; if (!F.uv) return null;
+      var x = (lo - b[0]) / (b[2] - b[0]) * F.w - .5, y = (b[3] - la) / (b[3] - b[1]) * F.h - .5; if (x < 0 || y < 0 || x >= F.w - 1 || y >= F.h - 1) return null;
+      var x0 = x | 0, y0 = y | 0, fx = x - x0, fy = y - y0, D = F.uv, W = F.w, u = 0, v = 0, wt = 0;
+      for (var k = 0; k < 4; k++){ var xx = x0 + (k & 1), yy = y0 + (k >> 1), i = (yy * W + xx) * 4; if (!D[i + 2]) continue;
+        var w = (k & 1 ? fx : 1 - fx) * (k >> 1 ? fy : 1 - fy); u += (D[i] - 128) / 127 * F.vmax * w; v += (D[i + 1] - 128) / 127 * F.vmax * w; wt += w; }
+      return wt > .5 ? [u / wt, v / wt] : null; };
+    SF.flowOn = function(){ return VIEW === 'map' && SF.sea && !!SF.F.uv && !!M && !document.hidden; };
+    SF.flowGo = function(){ var F = SF.F;
+      if (!SF.flowOn()){ if (F.cv){ F.cv.style.display = 'none'; cvFree(F.cv); } if (F.raf){ cancelAnimationFrame(F.raf); F.raf = 0; } return; }
+      if (!F.cv){ F.cv = document.createElement('canvas'); F.cv.style.position = 'absolute'; F.cv.style.pointerEvents = 'none'; M.getPane('lcSurfFlow').appendChild(F.cv);
+        M.on('movestart zoomstart', function(){ if (F.cv){ F.cv.style.display = 'none'; } F.moving = true; });
+        M.on('moveend', function(){ F.moving = false; F.pts = null; if (SF.flowOn()) SF.flowGo(); });
+        document.addEventListener('visibilitychange', function(){ if (!document.hidden) SF.flowGo(); }); }
+      var sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1);
+      F.cv.width = Math.round(sz.x * dpr); F.cv.height = Math.round(sz.y * dpr); F.cv.style.width = sz.x + 'px'; F.cv.style.height = sz.y + 'px';
+      L.DomUtil.setPosition(F.cv, M.containerPointToLayerPoint([0, 0])); F.cv.style.display = ''; F.dpr = dpr;
+      /* the view in world-pixel units at this zoom, and the part of the currents' box inside it */
+      var z = M.getZoom(), S = 256 * Math.pow(2, z), o = M.containerPointToLayerPoint([0, 0]).add(M.getPixelOrigin());
+      F.S = S; F.ox = o.x; F.oy = o.y; F.vw = sz.x; F.vh = sz.y;
+      var n = Math.round(Math.min(4200, Math.max(700, sz.x * sz.y / 260)));
+      F.n = n; F.pts = new Float32Array(n * 3);
+      for (var i = 0; i < n; i++) SF.flowSpawn(i, true);
+      if (!F.raf){ F.last = performance.now(); F.raf = requestAnimationFrame(SF.flowStep); } };
+    SF.flowSpawn = function(i, fresh){ var F = SF.F, P = F.pts;
+      for (var k = 0; k < 6; k++){ var x = F.ox + Math.random() * F.vw, y = F.oy + Math.random() * F.vh;
+        var lo = x / F.S * 360 - 180, la = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / F.S))) * 180 / Math.PI;
+        if (SF.uvAt(la, lo)){ P[i * 3] = x; P[i * 3 + 1] = y; P[i * 3 + 2] = fresh ? Math.random() * 90 : 60 + Math.random() * 90; return; } }
+      P[i * 3 + 2] = -1; };
+    SF.flowStep = function(now){ var F = SF.F; F.raf = 0;
+      if (!SF.flowOn() || !F.pts){ if (F.cv) F.cv.style.display = 'none'; return; }
+      F.raf = requestAnimationFrame(SF.flowStep);
+      if (F.moving || M._bvZooming) return;
+      if (!(F.k = (F.k || 0) + 1) || F.k % 30 === 1){ var rb = M.getContainer().getBoundingClientRect(); F.off = rb.bottom < 0 || rb.top > innerHeight || !rb.width; }
+      if (F.off){ F.last = now; return; }                                   /* scrolled away: no work */
+      var dt = Math.min(50, now - (F.last || now)); F.last = now; if (dt < 12) return;   /* ~60 fps cap, light on slow screens */
+      var g = F.cv.getContext('2d'), d = F.dpr, P = F.pts;
+      g.globalCompositeOperation = 'destination-in'; g.fillStyle = 'rgba(0,0,0,.93)'; g.fillRect(0, 0, F.cv.width, F.cv.height);   /* trails fade */
+      g.globalCompositeOperation = 'source-over'; g.lineWidth = 1.15 * d; g.lineCap = 'round';
+      /* a current of 1 m/s moves 0.9 px a frame at any zoom: the Gulf Stream races, the gyre's middle barely creeps -- as it does */
+      var K = 0.9 * dt / 16.7, buckets = [[], [], []];
+      for (var i = 0; i < F.n; i++){ var j = i * 3; if (P[j + 2] < 0){ if (Math.random() < .05) SF.flowSpawn(i); continue; }
+        var x = P[j], y = P[j + 1], lo = x / F.S * 360 - 180, la = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / F.S))) * 180 / Math.PI, q = SF.uvAt(la, lo);
+        if (!q || --P[j + 2] <= 0){ SF.flowSpawn(i); continue; }
+        var sp = Math.hypot(q[0], q[1]);
+        var nx = x + q[0] * K, ny = y - q[1] * K;
+        P[j] = nx; P[j + 1] = ny;
+        if (nx < F.ox || ny < F.oy || nx > F.ox + F.vw || ny > F.oy + F.vh){ SF.flowSpawn(i); continue; }
+        buckets[sp > .6 ? 2 : sp > .25 ? 1 : 0].push((x - F.ox) * d, (y - F.oy) * d, (nx - F.ox) * d, (ny - F.oy) * d); }
+      ['rgba(186,230,253,.38)', 'rgba(204,251,241,.62)', 'rgba(255,255,255,.9)'].forEach(function(col, b){ var L2 = buckets[b]; if (!L2.length) return;
+        g.strokeStyle = col; g.beginPath(); for (var k = 0; k < L2.length; k += 4){ g.moveTo(L2[k], L2[k + 1]); g.lineTo(L2[k + 2] + .01, L2[k + 3]); } g.stroke(); }); };
     SF.SEA = [[38, -72], [39.3, -66], [39.6, -59], [38.6, -51], [36.4, -45], [33, -42], [28.5, -41.5], [24.5, -44], [22, -50], [21.5, -58],
               [22.4, -65], [24, -70], [26.5, -74.5], [29.5, -76.6], [32.5, -76], [35.4, -74.4]];
     /* THE PATCHES (user 2026-10-25: "are there other garbage patches to track? make them a toggle"): the five subtropical gyres where
@@ -112993,8 +113067,20 @@ function closeAlertModal(){
       cv.style.display = ''; L.DomUtil.setPosition(cv, M.containerPointToLayerPoint([0, 0]));
       var g = cv.getContext('2d'); g.clearRect(0, 0, cv.width, cv.height);
       var P = function(la, lo){ var q = M.latLngToContainerPoint([la, lo]); return [q.x * dpr, q.y * dpr]; };
+      if (SF.gp && SF.st){
+        /* THE GREAT PACIFIC PATCH, SURVEYED: the 10 kg/sq km ring crisp-ish (the survey's own boundary), the 1 and 0.1 rings fainter */
+        if (SF.gpOn.gpe) SF.st.gpgp.forEach(function(r){ var Q = r.p.map(function(q){ return P(q[0], SF.lon(q[1])); });
+          g.beginPath(); Q.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); });
+          g.lineWidth = (r.kg >= 10 ? 1.8 : 1) * dpr; g.strokeStyle = r.kg >= 10 ? 'rgba(255,251,235,.95)' : r.kg >= 1 ? 'rgba(253,230,138,.6)' : 'rgba(203,213,225,.35)';
+          g.setLineDash(r.kg >= 10 ? [] : [4 * dpr, 4 * dpr]); g.stroke(); g.setLineDash([]); });
+        /* every surface net sample: very low slate, low pale, medium amber, high orange, very high red */
+        var b = M.getBounds().pad(.05), cl = SF.mpCol, sz2 = M.getZoom() < 3 ? 1.6 : M.getZoom() < 5 ? 2.2 : 3;
+        SF.mpVis = [];
+        SF.st.mp.forEach(function(r, i){ var lo = SF.lon(r[1]); if (!b.contains([r[0], lo])) return; var q = P(r[0], lo), c = SF.mpCls(r[2]);
+          g.fillStyle = cl[c]; g.beginPath(); g.arc(q[0], q[1], (sz2 + c * 0.35) * dpr, 0, 6.2832); g.fill(); if (SF.mpVis.length < 20000) SF.mpVis.push(i); });
+      }
       if (SF.gp) SF.GP.forEach(function(p){
-        if (!SF.gpOn[p.k]) return; var plo = SF.lon(p.c[1]);
+        if (!SF.gpOn[p.k] || (p.k === 'gpe' && SF.st)) return; var plo = SF.lon(p.c[1]);
         var c = P(p.c[0], plo), e = P(p.c[0], plo + p.rx), n = P(p.c[0] + p.ry, plo), rx = Math.abs(e[0] - c[0]), ry = Math.abs(n[1] - c[1]);
         if (rx < 2) return;
         g.save(); g.translate(c[0], c[1]); g.scale(1, ry / rx);
@@ -113007,7 +113093,15 @@ function closeAlertModal(){
         if (rx > 40 * dpr){ g.font = '800 ' + (9 * dpr) + 'px system-ui,sans-serif'; g.textAlign = 'center'; g.lineJoin = 'round'; g.lineWidth = 3 * dpr; g.strokeStyle = 'rgba(8,10,16,.8)';
           var lab = p.n.replace(/^THE /, '') + ' · MODELED'; g.strokeText(lab, c[0], c[1] + ry + 12 * dpr); g.fillStyle = '#f1f5f9'; g.fillText(lab, c[0], c[1] + ry + 12 * dpr); }
       });
-      if (SF.sea){
+      if (SF.sea && SF.st){
+        /* the CBD's described area: a designation, so a crisp line; Bermuda's waters cut out (even-odd) */
+        var rings = [SF.st.sea].concat(SF.st.seaHoles || []).map(function(R){ return R.map(function(q){ return P(q[0], q[1]); }); });
+        var path2 = function(){ g.beginPath(); rings.forEach(function(Q){ Q.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); g.closePath(); }); };
+        g.save(); path2(); g.fillStyle = SF.chl ? 'rgba(94,234,212,0)' : 'rgba(94,234,212,.06)'; g.fill('evenodd'); g.lineJoin = 'round';
+        g.lineWidth = 5 * dpr; g.strokeStyle = 'rgba(8,10,16,.45)'; path2(); g.stroke();
+        g.lineWidth = 2 * dpr; g.strokeStyle = 'rgba(204,251,241,.95)'; path2(); g.stroke();   /* pale mint: reads on the dark sea and on OCEAN COLOR's blues */
+        g.restore();
+      } else if (SF.sea){
         var Q = SF.SEA.map(function(q){ return P(q[0], q[1]); });
         var path = function(){ g.beginPath(); Q.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); g.closePath(); };
         g.save(); path(); g.fillStyle = 'rgba(94,234,212,.11)'; g.fill(); g.lineJoin = 'round';
@@ -113020,6 +113114,8 @@ function closeAlertModal(){
       if (!SF.cv){
         M.createPane('lcSurf'); M.getPane('lcSurf').style.zIndex = 444; M.getPane('lcSurf').style.pointerEvents = 'none';
         M.createPane('lcSurfImg'); M.getPane('lcSurfImg').style.zIndex = 446; M.getPane('lcSurfImg').style.pointerEvents = 'none';
+        M.createPane('lcChl'); M.getPane('lcChl').style.zIndex = 441; M.getPane('lcChl').style.pointerEvents = 'none';
+        M.createPane('lcSurfFlow'); M.getPane('lcSurfFlow').style.zIndex = 443; M.getPane('lcSurfFlow').style.pointerEvents = 'none';
         SF.cv = document.createElement('canvas'); SF.cv.style.position = 'absolute'; M.getPane('lcSurf').appendChild(SF.cv);
         window._bvZoomCv(M, function(){ return [SF.cv]; });
         M.on('moveend resize', SF.draw);
@@ -113034,21 +113130,54 @@ function closeAlertModal(){
           if (!M.hasLayer(SF.img)) SF.img.addTo(M);
         }
       } else if (SF.img && M.hasLayer(SF.img)) M.removeLayer(SF.img);
+      if (vis && (SF.sea || SF.gp) && !SF.st) SF.loadSt();
+      if (vis && (SF.sea || SF.chl) && !SF.sm) SF.loadSm();
+      /* ocean color */
+      if (vis && SF.chl && SF.sm){ var cb = SF.sm.chl.box, cu = SF.CDN + 'chl.png?v=' + SF.sm.v;
+        if (!SF.chlImg || SF.chlImg._u !== cu){ if (SF.chlImg && M.hasLayer(SF.chlImg)) M.removeLayer(SF.chlImg); SF.chlImg = L.imageOverlay(cu, [[cb[1], cb[0]], [cb[3], cb[2]]], { pane: 'lcChl', opacity: .82, interactive: false, crossOrigin: true }); SF.chlImg._u = cu; }
+        if (!M.hasLayer(SF.chlImg)) SF.chlImg.addTo(M);
+      } else if (SF.chlImg && M.hasLayer(SF.chlImg)) M.removeLayer(SF.chlImg);
+      /* the Great Pacific patch's surveyed concentration */
+      if (vis && SF.gp && SF.gpOn.gpe && SF.st){ var gb = SF.st.gpgpBox, gu = SF.CDN + 'gpgp.png?v=' + SF.st.v;
+        if (!SF.gpImg){ SF.gpImg = L.imageOverlay(gu, [[gb[1], gb[0]], [gb[3], gb[2]]], { pane: 'lcSurf', opacity: .85, interactive: false, crossOrigin: true }); }
+        if (!M.hasLayer(SF.gpImg)) SF.gpImg.addTo(M);
+      } else if (SF.gpImg && M.hasLayer(SF.gpImg)) M.removeLayer(SF.gpImg);
+      if (vis && SF.sea && SF.sm) SF.flowLoad();
+      SF.flowGo();
       SF.draw(); SF.row();
     };
-    SF.inSea = function(la, lo){ var c = false, R = SF.SEA; for (var i = 0, j = R.length - 1; i < R.length; j = i++) if (((R[i][0] > la) !== (R[j][0] > la)) && (lo < (R[j][1] - R[i][1]) * (la - R[i][0]) / (R[j][0] - R[i][0]) + R[i][1])) c = !c; return c; };
+    SF.mpCol = ['rgba(148,163,184,.75)', 'rgba(226,232,240,.85)', 'rgba(253,224,71,.9)', 'rgba(251,146,60,.95)', 'rgba(239,68,68,.98)'];
+    SF.mpCls = function(v){ return v >= 10 ? 4 : v >= 1 ? 3 : v >= 0.005 ? 2 : v >= 0.0005 ? 1 : 0; };
+    SF.inRing = function(R, la, lo){ var c = false; for (var i = 0, j = R.length - 1; i < R.length; j = i++) if (((R[i][0] > la) !== (R[j][0] > la)) && (lo < (R[j][1] - R[i][1]) * (la - R[i][0]) / (R[j][0] - R[i][0]) + R[i][1])) c = !c; return c; };
+    SF.inSea = function(la, lo){ if (SF.st){ return SF.inRing(SF.st.sea, la, lo) && !(SF.st.seaHoles || []).some(function(h){ return SF.inRing(h, la, lo); }); }
+      var c = false, R = SF.SEA; for (var i = 0, j = R.length - 1; i < R.length; j = i++) if (((R[i][0] > la) !== (R[j][0] > la)) && (lo < (R[j][1] - R[i][1]) * (la - R[i][0]) / (R[j][0] - R[i][0]) + R[i][1])) c = !c; return c; };
     SF.mi2 = function(km2){ return Math.round(km2 * 0.3861 / 100) * 100; };
     SF.sargLine = function(){ var m = SF.meta; if (!m) return '';
       var top = Object.keys(m.by).sort(function(a, b){ return m.by[b] - m.by[a]; })[0];
       return 'SARGASSUM SEEN IN THE 7 DAYS TO ' + new Date(m.t + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }).toUpperCase() + ' · ABOUT ' + SF.mi2(m.km2).toLocaleString('en-US') + ' SQ MI OF MATS, MOST IN THE ' + top
         + ' · CLOUDS HID ' + Math.round((1 - m.seen) * 100) + '% OF THE WATER, SO THERE IS MORE'; };
     SF.tap = function(e){
-      if (VIEW !== 'map' || !(SF.sea || SF.gp)) return;
+      if (VIEW !== 'map' || !(SF.sea || SF.gp || SF.chl)) return;
       var la = e.latlng.lat, lo = e.latlng.lng;
+      /* a net sample under the finger: what was measured, when, by whom */
+      if (SF.gp && SF.st && SF.mpVis){ var cp = e.containerPoint, best = -1, bd = 81;
+        SF.mpVis.forEach(function(i){ var r = SF.st.mp[i], q = M.latLngToContainerPoint([r[0], SF.lon(r[1])]), d2 = (q.x - cp.x) * (q.x - cp.x) + (q.y - cp.y) * (q.y - cp.y); if (d2 < bd){ bd = d2; best = i; } });
+        if (best >= 0){ var r = SF.st.mp[best], ref = SF.st.mpRefs[r[4]] || ['', ''], cls = ['VERY LOW', 'LOW', 'MEDIUM', 'HIGH', 'VERY HIGH'][SF.mpCls(r[2])];
+          var per = r[2] >= 1 ? r[2].toLocaleString('en-US', { maximumFractionDigits: 1 }) + ' pieces per cubic meter' : 'one piece per ' + Math.round(1 / r[2]).toLocaleString('en-US') + ' cubic meters';
+          setTimeout(function(){ INFO.show('MICROPLASTICS · ' + cls, 'MEASURED' + (r[3] ? ' IN ' + r[3] : '') + ' · ' + ref[0].toUpperCase(),
+            '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;color:rgba(255,255,255,.92);">A net towed through the surface water here caught ' + per + ' (plastic bits under 5 mm). '
+            + 'One of 14,580 surface samples in NOAA\u2019s Global Marine Microplastics Database.</div>', ref[1] || 'https://www.ncei.noaa.gov/products/microplastics'); }, 0); return; } }
+      if (SF.gp && SF.st && SF.gpOn.gpe){ var core = SF.st.gpgp.filter(function(r){ return r.kg >= 10; }).some(function(r){ return SF.inRing(r.p.map(function(q){ return [q[0], SF.lon(q[1])]; }), la, lo); });
+        var any = core || SF.st.gpgp.filter(function(r){ return r.kg >= 1; }).some(function(r){ return SF.inRing(r.p.map(function(q){ return [q[0], SF.lon(q[1])]; }), la, lo); });
+        if (any){ var gp0 = SF.GP[0]; setTimeout(function(){ INFO.show(gp0.n, 'SURVEYED · THE OCEAN CLEANUP · LEBRETON ET AL. 2018', '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;color:rgba(255,255,255,.92);">'
+          + (core ? 'Inside the patch: more than 10 kg of floating plastic per square kilometer. ' : 'Its fringe: 1 to 10 kg of plastic per square kilometer. ')
+          + 'Mapped from 652 net tows and two aerial surveys in 2015\u201316; the bright ring encloses 1.6 million sq km and about 80,000 tons. ' + gp0.t + '</div>', 'https://doi.org/10.1038/s41598-018-22939-w'); }, 0); return; } }
       if (SF.gp) for (var i = 0; i < SF.GP.length; i++){ var p = SF.GP[i]; if (!SF.gpOn[p.k]) continue; var dx = (lo - SF.lon(p.c[1])) / p.rx, dy = (la - p.c[0]) / p.ry;
         if (dx * dx + dy * dy <= 0.8){ (function(p){ setTimeout(function(){ INFO.show(p.n, 'MODELED · ' + p.src.toUpperCase(), '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;color:rgba(255,255,255,.92);">' + p.t + '</div>', ''); }, 0); })(p); return; } }
       if (SF.sea && SF.inSea(la, lo)) setTimeout(function(){
-        INFO.show('THE SARGASSO SEA', 'APPROXIMATE EDGE · SARGASSO SEA COMMISSION', '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;color:rgba(255,255,255,.92);">The only sea with no coast: its shores are four currents — the Gulf Stream to the west, the North Atlantic Current to the north, the Canary Current to the east and the North Atlantic Equatorial Current to the south — turning around it clockwise. The water inside is calm, warm, salty and some of the clearest on Earth, and it is named for the golden sargassum weed that floats on it, home to turtles, eels and fish found nowhere else. Every American and European eel is born here. The edge moves with the currents, so it is drawn soft.</div>'
+        var cq = SF.uvAt(la, lo), cur = cq ? ' Today the surface water here is moving ' + (Math.hypot(cq[0], cq[1]) * 2.237).toFixed(1) + ' mph toward the ' + ['north', 'northeast', 'east', 'southeast', 'south', 'southwest', 'west', 'northwest'][Math.round(((Math.atan2(cq[0], cq[1]) * 180 / Math.PI) + 360) % 360 / 45) % 8] + '.' : '';
+        INFO.show('THE SARGASSO SEA', SF.st ? 'THE CBD\u2019S DESCRIBED AREA (2012) · CURRENTS: NOAA COASTWATCH, ' + (SF.sm ? SF.sm.cur.t : '') : 'APPROXIMATE EDGE · SARGASSO SEA COMMISSION', '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;color:rgba(255,255,255,.92);">The only sea with no coast: its shores are four currents — the Gulf Stream to the west, the North Atlantic Current to the north, the Canary Current to the east and the North Atlantic Equatorial Current to the south — turning around it clockwise. The water inside is calm, warm, salty and some of the clearest on Earth, and it is named for the golden sargassum weed that floats on it, home to turtles, eels and fish found nowhere else. Every American and European eel is born here. The edge moves with the currents, so it is drawn soft.</div>'
+          + (cur ? '<div style="font:600 10.5px/1.5 system-ui,sans-serif;margin-top:5px;color:rgba(255,255,255,.92);">' + cur.trim() + '</div>' : '')
           + (SF.meta ? '<div style="font:700 8.5px/1.6 system-ui,sans-serif;letter-spacing:.06em;margin-top:5px;color:rgba(255,255,255,.8);">' + SF.sargLine() + '</div>' : ''), 'https://www.sargassoseacommission.org');
       }, 0);
     };
@@ -113066,10 +113195,12 @@ function closeAlertModal(){
       var pill = function(k, t){ return '<button type="button" class="lc-pill lc-tg' + (SF[k] ? ' on' : '') + '" data-sf="' + k + '">' + t + '</button>'; };
       var dt = function(c, ring){ return '<span style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;vertical-align:-1px;' + (ring ? 'border:2px solid ' + c + ';' : 'background:' + c + ';') + '"></span>'; };
       var key = [];
-      if (SF.sea) key.push(dt('#5eead4', true) + 'THE SARGASSO SEA · SOFT EDGE: CURRENTS, NOT A COAST');
+      if (SF.sea) key.push(dt('#5eead4', true) + (SF.st ? 'THE SARGASSO SEA · THE CBD\u2019S DESCRIBED AREA · STREAKS: TODAY\u2019S SURFACE CURRENTS' + (SF.sm ? ' (NOAA, ' + SF.sm.cur.t.slice(5).replace('-', '/') + ')' : '') + ', WHITE THE FASTEST' : 'THE SARGASSO SEA · SOFT EDGE: CURRENTS, NOT A COAST'));
+      if (SF.chl) key.push('<span style="display:inline-block;width:46px;height:8px;border-radius:4px;margin-right:6px;vertical-align:0;background:linear-gradient(90deg,#1134a0,#1d5ad8,#0e96dc,#14b8a6,#22aa5a,#84cc16);"></span>OCEAN COLOR · CHLOROPHYLL' + (SF.sm ? ' ' + SF.sm.chl.t.slice(5).replace('-', '/') : '') + ': DEEP BLUE CLEAR WATER, GREEN FULL OF PLANKTON');
       if (SF.sarg) key.push(dt('#ffa020') + (SF.meta ? SF.sargLine() : 'SARGASSUM · LOADING'));
-      if (SF.gp) key.push(dt('rgba(226,232,240,.8)') + 'GARBAGE PATCHES · MODELED, NOT SEEN: A THIN SOUP OF PLASTIC BITS, NOT AN ISLAND');
-      var h = '<div class="lc-agrid lc-agrid3">' + pill('sea', 'SARGASSO SEA') + pill('sarg', 'SARGASSUM · 7 DAYS') + pill('gp', 'GARBAGE PATCHES') + '</div>'
+      if (SF.gp) key.push(SF.st ? SF.mpCol.map(function(c){ return '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:2px;vertical-align:0;background:' + c + ';"></span>'; }).join('') + '&nbsp;MICROPLASTICS MEASURED BY NET, VERY LOW TO VERY HIGH (NOAA NCEI) · GREAT PACIFIC: SURVEYED, BRIGHT RING 10 KG/SQ KM · OTHERS MODELED'
+        : dt('rgba(226,232,240,.8)') + 'GARBAGE PATCHES · MODELED, NOT SEEN: A THIN SOUP OF PLASTIC BITS, NOT AN ISLAND');
+      var h = '<div class="lc-agrid lc-agrid4">' + pill('sea', 'SARGASSO SEA') + pill('chl', 'OCEAN COLOR') + pill('sarg', 'SARGASSUM · 7 DAYS') + pill('gp', 'GARBAGE PATCHES') + '</div>'
         + (SF.gp ? '<div class="lc-agrid lc-agrid-gp">' + SF.GP.map(function(p){ return '<button type="button" class="lc-pill lc-tg' + (SF.gpOn[p.k] ? ' on' : '') + '" data-gp="' + p.k + '">' + p.b + '</button>'; }).join('') + '</div>' : '')
         + (key.length ? '<div class="lc-akey" style="flex-direction:column;align-items:flex-start;gap:2px;">' + key.map(function(k){ return '<span>' + k + '</span>'; }).join('') + '</div>' : '');
       if (el.innerHTML !== h) el.innerHTML = h;
