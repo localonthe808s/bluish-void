@@ -109853,7 +109853,7 @@ function closeAlertModal(){
       Promise.all(['/ghost-marsh.json?v=2', '/ghost-rivers.json?v=2', '/ghost_streams.json'].map(function(u){ return fetch(u).then(function(r){ return r.json(); }).catch(function(){ return null; }); }))
         .then(function(R3){
           var pn = M.getPane('lcGhost') || M.createPane('lcGhost'); pn.style.zIndex = 420; GH.lidarUp();
-          var rd = GH.rd = L.canvas({ padding: .4, pane: 'lcGhost', tolerance: 6 }), g = L.layerGroup();
+          var rd = GH.rd = L.canvas({ padding: .15, pane: 'lcGhost', tolerance: 6 }), g = L.layerGroup();   /* .4 -> .15: a 4176 x 3092 canvas for a 1160 px map (perf, 2026-10-27) */
           var dash = function(){ var k = Math.max(.8, Math.min(1.35, Math.pow(M.getZoom() / 13, 1.4))); return (4.6 * k).toFixed(1) + ',' + (3 * k + 1.2).toFixed(1); };
           var tip = function(p, pond){ var ft = p.len_m ? Math.round(p.len_m * 3.281).toLocaleString() : null;
             return '<div style="font:800 10px system-ui,sans-serif;letter-spacing:.05em;color:#fff;">' + esc(String(p.name || 'UNNAMED WATERCOURSE').toUpperCase()) + '</div>'
@@ -110454,7 +110454,9 @@ function closeAlertModal(){
             if (stale() || !F) return;
             if (!SWL.cv){ var pn = M.getPane('lcSwell') || M.createPane('lcSwell'); pn.style.zIndex = 435; pn.style.pointerEvents = 'none';
               SWL.cv = document.createElement('canvas'); SWL.cv.style.position = 'absolute'; SWL.cv.style.pointerEvents = 'none'; pn.appendChild(SWL.cv); }
-            var cv = SWL.cv, dpr = Math.min(2, window.devicePixelRatio || 1);
+            /* 1.25x, not 2x (2026-10-27, COAST perf): the moving sea is soft shading drawn every frame over the whole map (2320 x 1718 on a
+               retina desktop); the GPU, not the script, was what held COAST under 20 fps */
+            var cv = SWL.cv, dpr = Math.min(1.25, window.devicePixelRatio || 1);
             cv.width = Math.round(sz.x * dpr); cv.height = Math.round(sz.y * dpr); cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px';
             var dr = null;
             try {
@@ -110542,7 +110544,9 @@ function closeAlertModal(){
     };
     var CF = { lit: false, raf: 0, V: null, H: null, cv: null, pc: null, hcv: null, gen: 0, hgen: 0, sv: null, n: 0, hN: 0, inView: false, pour: 0, pourAt: 0, timer: null };
     window._bvLcCityFlow = CF;      /* the harness reads CF.stat / CF.err / CF.ms */
-    var CF_R = 6378137, CF_PR = Math.PI * 6378137, CF_CAP = 4.2e6;
+    /* CF_CAP 4.2e6 -> 2.4e6 (2026-10-27, COAST perf): the harbor's dye ran 2382 x 1764 every frame and cost ~5 of the view's ~15 fps
+       on a retina desktop; the dye is soft by nature, so ~1.25x density reads the same */
+    var CF_R = 6378137, CF_PR = Math.PI * 6378137, CF_CAP = 2.4e6;
     var cfX = function(){ return window._bvCityWat; };
     var cfScale = function(){ return 256 * Math.pow(2, M.getZoom()) / (2 * CF_PR); };      /* layer px per mercator metre */
     var cfOverlap = function(){ var X = cfX(); if (!X || !M || !nycHere()) return false; var b = M.getBounds(), B = X.box;
@@ -112946,7 +112950,7 @@ function closeAlertModal(){
         + '<span style="margin-left:auto;display:inline-flex;gap:6px;flex:none;"><button type="button" data-wdet="1" class="lc-pill">' + (WSUM.open ? 'HIDE DETAILS \u25B4' : 'DETAILS \u25BE') + '</button></span>';
       if (el.innerHTML !== html) el.innerHTML = html;
       el.style.display = 'flex'; };
-    setInterval(function(){ if (VIEW === 'map' && paneOn()) WSUM.sync(); }, 3000);
+    setInterval(function(){ if (VIEW === 'map' && paneOn()){ WSUM.sync(); if (typeof WT !== 'undefined' && WT.sumSync) WT.sumSync(); } }, 3000);
     /* ---------------------------------------------------------------- ON THE SURFACE -- */
     /* THE SARGASSO SEA, SARGASSUM, THE GARBAGE PATCHES (user 2026-10-25: "can the water tab also highlight the sargasso sea / sargassum
        seaweed blobs location / ocean garbage patch"). Three switches on WATER, remembered (bv_lc_surf):
@@ -113091,7 +113095,20 @@ function closeAlertModal(){
           g.setLineDash(r.kg >= 10 ? [] : [4 * dpr, 4 * dpr]); g.stroke(); g.setLineDash([]); });
         /* every surface net sample: very low slate, low pale, medium amber, high orange, very high red */
         var b = M.getBounds().pad(.05), cl = SF.mpCol, sz2 = M.getZoom() < 3 ? 1.6 : M.getZoom() < 5 ? 2.2 : 3;
-        SF.mpVis = [];
+        SF.mpVis = []; SF.mpBins = null;
+        if (M.getZoom() <= 3){
+          /* AT BASIN SCALE THE SAMPLES GATHER (user 2026-10-27): 14,580 dots piled into speckle, so they bin into ~26 px cells, each a
+             disc sized by how many tows it holds and colored by their typical (geometric mean) concentration -- the gyres' patches
+             read as patches; a tap gives the cell's count, typical value and years */
+          var cs = 26 * dpr, bins = {};
+          SF.st.mp.forEach(function(r, i){ var lo = SF.lon(r[1]); if (!b.contains([r[0], lo])) return; var q = P(r[0], lo), k = Math.floor(q[0] / cs) + ':' + Math.floor(q[1] / cs);
+            var B = bins[k] || (bins[k] = { n: 0, lg: 0, x: 0, y: 0, y0: 9999, y1: 0, ix: [] }); B.n++; B.lg += Math.log10(Math.max(1e-6, r[2])); B.x += q[0]; B.y += q[1];
+            if (r[3]){ B.y0 = Math.min(B.y0, r[3]); B.y1 = Math.max(B.y1, r[3]); } if (B.ix.length < 400) B.ix.push(i); });
+          SF.mpBins = Object.keys(bins).map(function(k){ var B = bins[k]; B.x /= B.n; B.y /= B.n; B.gm = Math.pow(10, B.lg / B.n); return B; });
+          SF.mpBins.sort(function(a, c){ return SF.mpCls(a.gm) - SF.mpCls(c.gm); }).forEach(function(B){ var c = SF.mpCls(B.gm), rr = Math.min(13, 2.5 + Math.sqrt(B.n) * 0.9) * dpr;
+            g.fillStyle = cl[c]; g.globalAlpha = .9; g.beginPath(); g.arc(B.x, B.y, rr, 0, 6.2832); g.fill(); g.globalAlpha = 1;
+            g.lineWidth = 1 * dpr; g.strokeStyle = 'rgba(8,10,16,.55)'; g.stroke(); });
+        } else
         SF.st.mp.forEach(function(r, i){ var lo = SF.lon(r[1]); if (!b.contains([r[0], lo])) return; var q = P(r[0], lo), c = SF.mpCls(r[2]);
           g.fillStyle = cl[c]; g.beginPath(); g.arc(q[0], q[1], (sz2 + c * 0.35) * dpr, 0, 6.2832); g.fill(); if (SF.mpVis.length < 20000) SF.mpVis.push(i); });
       }
@@ -113143,9 +113160,10 @@ function closeAlertModal(){
         else {
           var b = SF.meta.box, u = 'https://cdn.bluishvoid.com/sargassum/latest.png?v=' + SF.meta.v;
           if (!SF.img || SF.img._u !== u){ if (SF.img && M.hasLayer(SF.img)) M.removeLayer(SF.img); SF.img = L.imageOverlay(u, [[b[1], b[0]], [b[3], b[2]]], { pane: 'lcSurfImg', opacity: 1, interactive: false, crossOrigin: true }); SF.img._u = u; }
-          if (!M.hasLayer(SF.img)) SF.img.addTo(M);
+          if (!M.hasLayer(SF.img) && !SGM.sel) SF.img.addTo(M);
         }
       } else if (SF.img && M.hasLayer(SF.img)) M.removeLayer(SF.img);
+      SGM.sync();
       if (vis && (SF.sea || SF.gp) && !SF.st) SF.loadSt();
       if (vis && (SF.cur || SF.chl || SF.sea) && !SF.sm) SF.loadSm();
       /* ocean color */
@@ -113177,7 +113195,13 @@ function closeAlertModal(){
       if (VIEW !== 'map' || WT.tab !== 'ocean' || !(SF.sea || SF.gp || SF.chl)) return;
       var la = e.latlng.lat, lo = e.latlng.lng;
       /* a net sample under the finger: what was measured, when, by whom */
-      if (SF.gp && SF.st && SF.mpVis){ var cp = e.containerPoint, best = -1, bd = 81;
+      if (SF.gp && SF.st && SF.mpBins){ var dpr2 = Math.min(2, window.devicePixelRatio || 1), cp2 = e.containerPoint, hit = null, hd = 1e9;
+        SF.mpBins.forEach(function(B){ var dx = B.x / dpr2 - cp2.x, dy = B.y / dpr2 - cp2.y, d2 = dx * dx + dy * dy, rr = Math.min(13, 2.5 + Math.sqrt(B.n) * 0.9) + 4; if (d2 < rr * rr && d2 < hd){ hd = d2; hit = B; } });
+        if (hit){ var cls2 = ['VERY LOW', 'LOW', 'MEDIUM', 'HIGH', 'VERY HIGH'][SF.mpCls(hit.gm)], gm = hit.gm;
+          var per2 = gm >= 1 ? gm.toLocaleString('en-US', { maximumFractionDigits: 1 }) + ' pieces per cubic meter' : 'one piece per ' + Math.round(1 / gm).toLocaleString('en-US') + ' cubic meters';
+          setTimeout(function(){ INFO.show(hit.n.toLocaleString('en-US') + ' NET SAMPLE' + (hit.n === 1 ? '' : 'S') + ' \u00b7 ' + cls2, 'NOAA NCEI MICROPLASTICS' + (hit.y1 ? ' \u00b7 ' + (hit.y0 === hit.y1 ? hit.y0 : hit.y0 + '\u2013' + hit.y1) : ''),
+            '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;color:rgba(255,255,255,.92);">Towed through the surface water around here: typically ' + per2 + ' (the geometric mean of the samples). Zoom in to see each one.</div>', 'https://www.ncei.noaa.gov/products/microplastics'); }, 0); return; } }
+      if (SF.gp && SF.st && SF.mpVis && SF.mpVis.length){ var cp = e.containerPoint, best = -1, bd = 81;
         SF.mpVis.forEach(function(i){ var r = SF.st.mp[i], q = M.latLngToContainerPoint([r[0], SF.lon(r[1])]), d2 = (q.x - cp.x) * (q.x - cp.x) + (q.y - cp.y) * (q.y - cp.y); if (d2 < bd){ bd = d2; best = i; } });
         if (best >= 0){ var r = SF.st.mp[best], ref = SF.st.mpRefs[r[4]] || ['', ''], cls = ['VERY LOW', 'LOW', 'MEDIUM', 'HIGH', 'VERY HIGH'][SF.mpCls(r[2])];
           var per = r[2] >= 1 ? r[2].toLocaleString('en-US', { maximumFractionDigits: 1 }) + ' pieces per cubic meter' : 'one piece per ' + Math.round(1 / r[2]).toLocaleString('en-US') + ' cubic meters';
@@ -113203,7 +113227,9 @@ function closeAlertModal(){
       var ws = document.getElementById('lc-wsum'), el = document.getElementById('lc-surf');
       if (VIEW !== 'map' || !ws || WT.tab === 'coast'){ if (el) el.style.display = 'none'; return; }
       if (!el){ el = document.createElement('div'); el.id = 'lc-surf'; ws.parentNode.insertBefore(el, ws.nextSibling);
-        el.addEventListener('click', function(e){ var b = e.target.closest('button'); if (!b) return; e.stopPropagation();
+        el.addEventListener('click', function(e){ var sm = e.target.closest('[data-sm]'); if (sm){ e.stopPropagation(); var mm = sm.getAttribute('data-sm');
+            if (mm === 'week' || (SGM.d && SGM.d.maps.indexOf(mm) >= 0)) SGM.pick(mm); return; }
+          var b = e.target.closest('button'); if (!b) return; e.stopPropagation();
           var g = b.getAttribute('data-gp');
           if (g){ SF.gpOn[g] = !SF.gpOn[g]; try { localStorage.setItem('bv_lc_gp', JSON.stringify(SF.gpOn)); } catch(x){}
             var p = SF.GP.filter(function(q){ return q.k === g; })[0];
@@ -113219,8 +113245,9 @@ function closeAlertModal(){
       if (false && WT.tab === 'ocean' && SF.sarg) key.push(dt('#ffa020') + (SF.meta ? SF.sargLine() : 'SARGASSUM · LOADING'));
       if (false && WT.tab === 'ocean' && SF.gp) key.push(SF.st ? SF.mpCol.map(function(c){ return '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:2px;vertical-align:0;background:' + c + ';"></span>'; }).join('') + '&nbsp;MICROPLASTICS MEASURED BY NET, VERY LOW TO VERY HIGH (NOAA NCEI) · GREAT PACIFIC: SURVEYED, BRIGHT RING 10 KG/SQ KM · OTHERS MODELED'
         : dt('rgba(226,232,240,.8)') + 'GARBAGE PATCHES · MODELED, NOT SEEN: A THIN SOUP OF PLASTIC BITS, NOT AN ISLAND');
-      if (!key.length && !(WT.tab === 'ocean' && SF.gp)){ el.style.display = 'none'; el.innerHTML = ''; return; }
-      var h = (WT.tab === 'ocean' && SF.gp ? '<div class="lc-agrid lc-agrid-gp">' + SF.GP.map(function(p){ return '<button type="button" class="lc-pill lc-tg' + (SF.gpOn[p.k] ? ' on' : '') + '" data-gp="' + p.k + '">' + p.b + '</button>'; }).join('') + '</div>' : '')
+      var sgm = WT.tab === 'ocean' && SF.sarg && !window._waterEs;
+      if (!key.length && !(WT.tab === 'ocean' && SF.gp) && !sgm){ el.style.display = 'none'; el.innerHTML = ''; return; }
+      var h = (sgm ? SGM.html() : '') + (WT.tab === 'ocean' && SF.gp ? '<div class="lc-agrid lc-agrid-gp">' + SF.GP.map(function(p){ return '<button type="button" class="lc-pill lc-tg' + (SF.gpOn[p.k] ? ' on' : '') + '" data-gp="' + p.k + '">' + p.b + '</button>'; }).join('') + '</div>' : '')
         + (key.length ? '<div class="lc-akey" style="flex-direction:column;align-items:flex-start;gap:2px;">' + key.map(function(k){ return '<span>' + k + '</span>'; }).join('') + '</div>' : '');
       if (el.innerHTML !== h) el.innerHTML = h;
       el.style.display = '';
@@ -113261,7 +113288,7 @@ function closeAlertModal(){
       WT.apply(); };
     WT.apply = function(){
       pane.classList.toggle('lc-wt-far', WT.tab !== 'coast');
-      SF.sync(); AR.sync(); WT.sstSync(); MZ.sync(); EK.sync(); if (OV.buoyRead) OV.buoyRead(true); if (OV.draw) OV.draw(); WSUM.sync(); SF.row(); WT.render();
+      SF.sync(); AR.sync(); WT.sstSync(); MZ.sync(); EK.sync(); WT.sumSync(); if (OV.buoyRead) OV.buoyRead(true); if (OV.draw) OV.draw(); WSUM.sync(); SF.row(); WT.render();
       if (window._cwSecSync) window._cwSecSync(); };
     WT.chip = function(k){
       if (k.indexOf('es:') === 0){ WT.toEs(k.slice(3)); return; }
@@ -113356,6 +113383,66 @@ function closeAlertModal(){
       var r = EK.el('r'), l = EK.el('l'), hr = R.join(''), hl = Lr.join('');
       if (r.innerHTML !== hr) r.innerHTML = hr; if (l.innerHTML !== hl) l.innerHTML = hl;
       r.style.display = hr ? '' : 'none'; l.style.display = hl ? '' : 'none'; };
+    /* ---------------------------------------------------------------- SEA / OCEAN SUMMARY LINES -- */
+    /* (user 2026-10-27, "fix 1 2 3" -- 1: the far tabs had no line like COAST's). SEA: the water offshore of the place, from our own
+       layers -- its temperature and how far from normal (OISST), the waves (CX), the marine zone's advisory (NWS), the Gulf Stream's
+       distance (today's currents). OCEAN: the place's basin -- its average departure from normal, its fastest current, sargassum */
+    WT.sea0 = function(){ var d = CX.d && CX.d.wv && CX.d.wv._p; if (d) return d; var h = WT.home(); return [h[0] - 0.4, h[1] + 0.6]; };
+    WT.basin = function(){ var lo = WT.home()[1]; return lo > -100 && lo < 25 ? { n: 'THE ATLANTIC', w: -80, e: 15, s: -55, nn: 62 } : lo >= 25 && lo < 100 ? { n: 'THE INDIAN OCEAN', w: 25, e: 115, s: -55, nn: 25 } : { n: 'THE PACIFIC', w: 120, e: 290, s: -55, nn: 60 }; };
+    WT.mi = function(a, b){ var dy = (a[0] - b[0]) * 69, dx = (a[1] - b[1]) * 69 * Math.cos(a[0] * Math.PI / 180); return Math.hypot(dx, dy); };
+    WT.sumSync = function(){
+      var el = document.getElementById('lc-wtsum'), ws = document.getElementById('lc-wsum');
+      if (VIEW !== 'map' || WT.tab === 'coast' || window._waterEs || !ws){ if (el) el.style.display = 'none'; return; }
+      if (!el){ el = document.createElement('div'); el.id = 'lc-wtsum'; ws.parentNode.insertBefore(el, ws.nextSibling); }
+      if (!WT.sd && SF.sm) WT.sdLoad(); if (!SF.F.uv && SF.sm) SF.flowLoad(); if (!SF.sm) SF.loadSm();
+      var o = [], h = WT.home();
+      if (WT.tab === 'sea'){
+        if (!MZ.z || Date.now() - MZ.at > 10 * 6e4) MZ.load();
+        var p = WT.sea0(), q = WT.sstAt(p[0], p[1]), dk = WT.mi(p, h);
+        if (q) o.push('SEA ' + Math.round(q.f) + '°F ' + (dk > 3 ? Math.round(dk) + ' MI OUT' : 'OFFSHORE') + (Math.abs(q.a) >= 0.5 ? ' · ' + Math.abs(q.a).toFixed(1) + '°F ' + (q.a > 0 ? 'ABOVE' : 'BELOW') + ' NORMAL' : ' · ABOUT NORMAL'));
+        var w = CX.waves(); if (w && w.now != null) o.push('WAVES ' + (w.now < 1 ? 'UNDER 1' : Math.round(w.now)) + ' FT');
+        var zid = MZ.hit(p[0], p[1]); if (zid){ var al = MZ.al[zid]; o.push(al && al.length ? String(al[0]).toUpperCase() : 'NO MARINE ADVISORY'); }
+        /* the Gulf Stream (or any current over 2.2 mph) nearest the place, within ~500 mi */
+        if (SF.F.uv){ var best = null, bd = 1e9; for (var la = h[0] - 7; la <= h[0] + 7; la += 0.25) for (var lo2 = h[1] - 9; lo2 <= h[1] + 9; lo2 += 0.25){ var u = SF.uvAt(la, lo2); if (u && Math.hypot(u[0], u[1]) > 1){ var dd = WT.mi([la, lo2], h); if (dd < bd){ bd = dd; best = [la, lo2]; } } }
+          if (best && bd < 520) o.push((h[1] > -82 && h[1] < -60 && h[0] > 25 ? 'GULF STREAM ' : 'FAST CURRENT ') + Math.round(bd / 10) * 10 + ' MI ' + CX.cmp(Math.atan2((best[1] - h[1]) * Math.cos(h[0] * Math.PI / 180), best[0] - h[0]) * 180 / Math.PI)); }
+      } else {
+        var B = WT.basin(), D = WT.sd;
+        if (D){ var sum = 0, n = 0; for (var y = 0; y < D.h; y += 2){ var la2 = 75 - (y + .5) * 150 / D.h; if (la2 < B.s || la2 > B.nn) continue;
+            for (var x = 0; x < D.w; x += 2){ var lo3 = -180 + (x + .5) * 360 / D.w, lw = lo3 < B.w - 360 + 360 && B.e > 180 ? lo3 + 360 : lo3; if (lw < B.w || lw > B.e) continue;
+              var i = (y * D.w + x) * 4; if (!(D.d[i] || D.d[i + 1])) continue; sum += ((D.d[i + 2] - 128) / 20) * Math.cos(la2 * Math.PI / 180); n += Math.cos(la2 * Math.PI / 180); } }
+          if (n) { var av = sum / n; o.push(B.n + ' ' + Math.abs(av).toFixed(1) + '°F ' + (av >= 0 ? 'WARMER' : 'COLDER') + ' THAN NORMAL'); } }
+        if (SF.F.uv){ var mx = 0; for (var la4 = -50; la4 <= 60; la4 += 0.5) for (var lo4 = B.w; lo4 <= B.e; lo4 += 0.5){ var u2 = SF.uvAt(la4, lo4 > 180 ? lo4 - 360 : lo4); if (u2){ var sp = Math.hypot(u2[0], u2[1]); if (sp > mx && sp < 2.4) mx = sp; } }
+          if (mx) o.push('FASTEST CURRENT ' + (mx * 2.237).toFixed(1) + ' MPH'); }
+        if (SF.meta && B.n === 'THE ATLANTIC') o.push('SARGASSUM ' + SF.mi2(SF.meta.km2).toLocaleString('en-US') + ' SQ MI THIS WEEK');
+        if (!SF.meta && B.n === 'THE ATLANTIC') SF.load();
+      }
+      var html = o.length ? '<span class="ws-t">' + o.map(function(x){ return esc(x); }).join('<span class="ws-d"> · </span>') + '</span>' : '<span class="ws-t ws-d">READING THE SEA…</span>';
+      if (el.innerHTML !== html) el.innerHTML = html; el.style.display = 'flex'; };
+    /* ---------------------------------------------------------------- SARGASSUM BY THE MONTH -- */
+    /* (user 2026-10-27, "3": the belt's seasons) _sargbake/monthly.py: every month since 2016 measured, the last 24 mapped. With
+       SARGASSUM on, a bar per month under the chips; a mapped month's bar shows its map, THIS WEEK goes back to the 7-day layer */
+    var SGM = { d: null, req: null, sel: null, img: null };
+    SGM.load = function(){ if (SGM.req) return; SGM.req = fetch('https://cdn.bluishvoid.com/sargassum/monthly.json?v=' + Math.floor(Date.now() / 36e5)).then(function(r){ if (!r.ok) throw 0; return r.json(); })
+      .then(function(j){ SGM.d = j; SF.row(); }).catch(function(){ SGM.req = null; }); };
+    SGM.html = function(){ var D = SGM.d; if (!D) { SGM.load(); return '<div class="lc-akey"><span>SARGASSUM BY THE MONTH · LOADING</span></div>'; }
+      var M2 = D.months, mx = Math.max.apply(null, M2.map(function(m){ return m.km2; }).concat([1])), mapped = {}; D.maps.forEach(function(m){ mapped[m] = 1; });
+      var W2 = M2.length * 7, H2 = 46, bars = M2.map(function(m, i){ var hh = Math.max(1, m.km2 / mx * (H2 - 12)), on = SGM.sel === m.m, mp = mapped[m.m];
+          return '<rect data-sm="' + m.m + '" x="' + (i * 7) + '" y="' + (H2 - 10 - hh) + '" width="5.5" height="' + hh + '" rx="1" fill="' + (on ? '#fff' : mp ? '#fdba74' : 'rgba(253,186,116,.55)') + '" style="cursor:' + (mp ? 'pointer' : 'default') + ';"><title>' + m.m + ' · ' + SF.mi2(m.km2).toLocaleString('en-US') + ' sq mi</title></rect>'; }).join('')
+        + M2.map(function(m, i){ return m.m.slice(5) === '01' ? '<text x="' + (i * 7) + '" y="' + (H2 - 1) + '" font-size="8" font-weight="800" fill="rgba(255,255,255,.75)">' + m.m.slice(0, 4) + '</text>' : ''; }).join('');
+      var cur = SGM.sel ? M2.filter(function(m){ return m.m === SGM.sel; })[0] : null, last = M2[M2.length - 1];
+      var yrAgo = cur ? M2.filter(function(m){ return m.m === (+cur.m.slice(0, 4) - 1) + cur.m.slice(4); })[0] : null;
+      var say = cur ? new Date(cur.m + '-15T12:00:00Z').toLocaleDateString('en-US', { month: 'long', year: 'numeric' }).toUpperCase() + ' · ABOUT ' + SF.mi2(cur.km2).toLocaleString('en-US') + ' SQ MI OF MATS SEEN' + (yrAgo ? ' (' + SF.mi2(yrAgo.km2).toLocaleString('en-US') + ' A YEAR BEFORE)' : '')
+        : 'EACH BAR A MONTH SINCE 2016 · TAP ONE OF THE LAST ' + D.maps.length + ' FOR ITS MAP · THE BELT GROWS EACH SPRING, PEAKS IN SUMMER';
+      return '<div class="lc-sgm"><button type="button" class="lc-pill lc-tg' + (SGM.sel ? '' : ' on') + '" data-sm="week">THIS WEEK</button>'
+        + '<svg viewBox="0 0 ' + W2 + ' ' + H2 + '" preserveAspectRatio="none" style="width:100%;max-width:' + W2 + 'px;height:' + H2 + 'px;">' + bars + '</svg></div>'
+        + '<div class="lc-akey" style="margin-top:2px;"><span>' + say + ' · NOAA AOML / USF, 7-DAY COMPOSITE NEAREST THE 15TH, SAMPLED</span></div>'; };
+    SGM.pick = function(m){ SGM.sel = m === 'week' ? null : m; SGM.sync(); SF.row(); };
+    SGM.sync = function(){ var want = VIEW === 'map' && WT.tab === 'ocean' && SF.sarg && SGM.sel && SGM.d;
+      if (SGM.img && (!want || SGM.img._m !== SGM.sel)){ if (M.hasLayer(SGM.img)) M.removeLayer(SGM.img); SGM.img = null; }
+      if (SF.img){ if (want && M.hasLayer(SF.img)) M.removeLayer(SF.img); }
+      if (!want) return;
+      var b = SGM.d.box; SGM.img = L.imageOverlay('https://cdn.bluishvoid.com/sargassum/m/' + SGM.sel + '.png?v=' + SGM.d.at, [[b[1], b[0]], [b[3], b[2]]], { pane: 'lcSurfImg', opacity: 1, interactive: false, crossOrigin: true });
+      SGM.img._m = SGM.sel; SGM.img.addTo(M); };
     /* ---------------------------------------------------------------- THE WATER HERE (COAST) -- */
     /* WHAT ELSE A COAST WANTS TO KNOW (user 2026-10-27, picked: gauge water temperature, waves + rip risk + marine forecast, sea-level
        trend): the tide gauge's own water thermometer (CO-OPS), the waves for three days (Open-Meteo's marine model at the gauge),
@@ -114494,6 +114581,7 @@ function closeAlertModal(){
         if (!X.lcv){ X.lcv = X.canvas('lcBasinNames', 449); X.mcv = X.canvas('lcBasinMach', 446);
           window._bvZoomCv(M, function(){ return [X.lcv, X.mcv]; });
           M.on('moveend resize', function(){ X.draw(); }); }
+        if (!laHere()){ [X.lcv, X.mcv].forEach(function(c){ if (c && (c.width || c.height)){ c.width = 0; c.height = 0; } }); return; }   /* away from LA: two empty full-screen canvases were composited every frame */
         var g = X.fit(X.lcv), gm = X.fit(X.mcv), sz = M.getSize(), z = M.getZoom(), q = [];
         if (pane.style.display === 'none') return;
         X.machDraw(gm, q);
@@ -115051,6 +115139,10 @@ function closeAlertModal(){
       + '#cw-waterbar .wt-chip.on{ color:#9a3412; background:#fff; border-color:#fff; }'
       + '@media (max-width:768px){ #cw-waterbar .wt-chips{ flex-wrap:nowrap; justify-content:flex-start; overflow-x:auto; scrollbar-width:none; } #cw-waterbar .wt-chips::-webkit-scrollbar{ display:none; } #cw-waterbar .wt-tab{ font-size:.54rem; letter-spacing:.06em; } }'
       + '#cw-pane-local.lc-water.lc-wt-far #lc-strip{ display:none !important; }'
+      + '#lc-wtsum{ display:none; align-items:center; gap:10px; padding:4px 12px 8px; color:#fff; font:800 .62rem/1.45 system-ui,sans-serif; letter-spacing:.06em; } #lc-wtsum .ws-d{ opacity:.6; }'
+      + '#lc-surf .lc-sgm{ display:flex; align-items:flex-end; gap:10px; } #lc-surf .lc-sgm > .lc-pill{ flex:none; padding:6px 12px !important; font-size:.52rem !important; border:1px solid rgba(255,255,255,.5) !important; border-radius:999px !important; margin:0 0 12px !important; }'
+      + '#lc-surf .lc-sgm > .lc-pill.on{ background:#fff !important; color:#9a3412 !important; } #lc-surf .lc-sgm svg{ flex:1 1 auto; min-width:0; overflow:visible; }'
+      + '@media (max-width:768px){ #lc-wtsum{ font-size:.56rem; } }'
       /* the keys on the map's edges (EK, 2026-10-27): scales as vertical bars at the right, swatches stacked at the lower left */
       + '.lc-ek{ position:absolute; z-index:700; pointer-events:none; display:flex; color:#fff; font:800 8.5px/1.25 system-ui,sans-serif; letter-spacing:.08em; text-shadow:0 1px 3px rgba(0,0,0,.9); }'
       + '.lc-ek-r{ right:10px; top:50%; transform:translateY(-50%); gap:14px; align-items:center; }'
