@@ -101,6 +101,31 @@ def microplastics():
     return rows, refs
 
 
+MZ = ['https://www.weather.gov/source/gis/Shapefiles/WSOM/mz16ap26.zip', 'https://www.weather.gov/source/gis/Shapefiles/WSOM/oz16ap26.zip']
+
+
+def marine_zones(tmp):
+    """NWS coastal + offshore marine forecast zones (WATER's SEA tab, MARINE FORECAST), simplified ~0.02 deg -> surf/marine.json
+    {id: [name, wfo, [[[lat, lon], ...] rings]]}"""
+    import shapefile
+    from shapely.geometry import shape
+    out = {}
+    for u in MZ:
+        d = os.path.join(tmp, os.path.basename(u)[:-4]); zipfile.ZipFile(io.BytesIO(get(u))).extractall(d)
+        shp = [f for f in os.listdir(d) if f.endswith('.shp')][0]
+        r = shapefile.Reader(os.path.join(d, shp)); names = [f[0] for f in r.fields[1:]]
+        for sr in r.iterShapeRecords():
+            a = dict(zip(names, sr.record)); zid = a.get('ID') or a.get('Id'); 
+            if not zid: continue
+            g = shape(sr.shape.__geo_interface__).simplify(0.02, preserve_topology=True)
+            polys = [g] if g.geom_type == 'Polygon' else list(getattr(g, 'geoms', []))
+            rings = [[[round(y, 3), round(x, 3)] for x, y in pg.exterior.coords] for pg in polys if pg.area > 1e-5]
+            if rings: out[zid] = [a.get('NAME') or a.get('Name') or '', a.get('WFO') or '', rings]
+    p = os.path.join(tmp, 'marine.json'); json.dump(out, open(p, 'w'), separators=(',', ':'))
+    print('marine zones', len(out), os.path.getsize(p), 'bytes')
+    return p
+
+
 def put(src, key, ct, cache):
     if os.environ.get('R2_ACCOUNT_ID'):
         subprocess.run(['aws', 's3', 'cp', src, 's3://%s/%s' % (BUCKET, key), '--content-type', ct, '--cache-control', cache,
@@ -118,10 +143,12 @@ def main():
     v = int(time.time())
     out = {'sea': sea, 'seaHoles': holes, 'seaKm2': area, 'gpgp': rings, 'gpgpBox': box, 'mp': mp, 'mpRefs': refs, 'at': v, 'v': v}
     jp = os.path.join(tmp, 'static.json'); json.dump(out, open(jp, 'w'), separators=(',', ':'))
+    mzp = marine_zones(tmp)
     print('static.json', os.path.getsize(jp), 'bytes')
     if '--dry' in sys.argv: print('dry run:', tmp); return
     put(png, 'surf/gpgp.png', 'image/png', 'public, max-age=86400')
     put(jp, 'surf/static.json', 'application/json', 'public, max-age=86400')
+    put(mzp, 'surf/marine.json', 'application/json', 'public, max-age=86400')
     print('uploaded')
 
 
