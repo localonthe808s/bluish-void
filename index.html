@@ -56704,6 +56704,14 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
   var goesRefreshTimer = null;
   var goesFrames = [];
   var goesImages = []; // preloaded Image objects
+  /* ONE LIVE LOOP VIDEO AT A TIME (2026-10-26, user: "i went from the globe back down to NYC and the quality didnt update"): each loop
+     swap left its old <video> holding a media player; after a run of zooms Chrome made no new ones (NORTHEAST's loop sat at
+     readyState 0 in that tab, 282 ms in a fresh one) and the view stayed on the coarser loop. The one on screen is tracked; the one
+     before it is unloaded a moment after the swap */
+  var _gvRelease = function(v){ try { v.pause(); v.removeAttribute('src'); v.load(); } catch(e){} };
+  window._goesVidActive = function(v){ var o = window._goesVidCur; window._goesVidCur = v;
+    if (o && o !== v) setTimeout(function(){ if (window._goesVidCur !== o) _gvRelease(o); }, 3000); };
+  window._goesVidRelease = _gvRelease;
   var goesIdx = 0;
   // Mobile defaults to a shorter loop (2h / 24 frames) so the live-clouds
   // animation fully loads ~3x faster and uses far less cellular data. First
@@ -57515,6 +57523,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         if (tok !== _goesVidTok) return;                        /* a newer load (sector, length, location) took over */
         if (!R){ if (ov0) ov0.style.background = 'rgba(0,0,0,.6)'; _preloadGoesNow(true); return; }               /* no video for this view, or it failed: the frames */
         goesFrames = R.frames; goesImages = R.images; window._goesVideoLoop = true;
+        if (R.images && R.images[0] && R.images[0].vid) window._goesVidActive(R.images[0].vid);
         /* no flash at the hand-off (the CLOUDS review "do all"): the veil used to snap back to its 60% dark over the poster before
            fading; it now fades from wherever it is and is reset only once hidden */
         if (goesLiveEl) goesLiveEl.textContent = '\u2022 LIVE';
@@ -57926,7 +57935,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       /* STREAMED (2026-10-24): the swap starts as soon as the first frames arrive (Cloudflare serves the MP4 by byte range from its
          edge), instead of waiting for all ~7 MB */
       return new Promise(function(res, rej){ var v = document.createElement('video'); v.muted = true; v.playsInline = true; v.preload = 'auto'; v.crossOrigin = 'anonymous';
-        v.setAttribute('playsinline', ''); v.setAttribute('muted', ''); v.addEventListener('error', function(){ rej(new Error('video')); });
+        v.setAttribute('playsinline', ''); v.setAttribute('muted', ''); v.addEventListener('error', function(){ if (window._goesVidRelease) window._goesVidRelease(v); rej(new Error('video')); });
         v.addEventListener('loadeddata', function(){ res({ M: M, K: K, v: v, base: base }); }); v.src = base + K.mp4; }); });
   }
   function _zvSwap(sec, satN, opt){
@@ -57939,7 +57948,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     if (sec === goesCurrentSector && satN === _zvSat()){ if (opt.done) opt.done(); return; }
     ZV.loading = key; var band0 = goesCurrentBand, sat0 = goesCurrentSat, satN0 = _zvSat();
     _zvLoad(sec, satN).then(function(R){
-      if (ZV.loading !== key || goesCurrentBand !== band0 || goesCurrentSat !== sat0) return;
+      if (ZV.loading !== key || goesCurrentBand !== band0 || goesCurrentSat !== sat0){ if (R && R.v && R.v !== window._goesVidCur) window._goesVidRelease(R.v); return; }   /* overtaken: let its player go */
       ZV.loading = null;
       var cur = String(goesFrames[window._goesShownFrame || 0] || '').split('/').pop().slice(0, 11), fps = R.M.fps || 10, idx = R.K.frames.length - 1;
       if (cur) R.K.frames.forEach(function(n, i){ if (n.slice(0, 11) <= cur) idx = i; });
@@ -57948,6 +57957,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       window._goesVidFps = fps; try { R.v.currentTime = (idx + 0.5) / fps; } catch(e){}
       goesFrames = R.K.frames.map(function(n){ return R.base + n; });
       goesImages = R.K.frames.map(function(n, i){ return { vid: R.v, t: (i + 0.5) / fps, complete: true, naturalWidth: R.v.videoWidth, naturalHeight: R.v.videoHeight }; });
+      window._goesVidActive(R.v);
       /* another satellite's grid (East / West / the merged view): the view comes along, converted through lat / lon */
       var newC = window._goesSatC(satN);
       if (ZV.want){ ZV.v = ZV.want; ZV.want = null; }      /* the wider view asked for while this loop loaded */
@@ -57987,7 +57997,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         var sc = (c[2] - c[0]) / cz; if (sc < bw){ bw = sc; best = [k, sat]; } }); });
     return best;
   }
-  window._zvDbg = function(){ return { sat: _zvSat(), sec: goesCurrentSector, crop: window._goesCrop, sj: !!_SJ, wus: !!(_SJ && _SJ.sectors && _SJ.sectors.GOES18 && _SJ.sectors.GOES18.wus), parent: _zvParent(), v: ZV.v }; };   /* for tests */
+  window._zvDbg = function(){ return { sat: _zvSat(), sec: goesCurrentSector, crop: window._goesCrop, sj: !!_SJ, wus: !!(_SJ && _SJ.sectors && _SJ.sectors.GOES18 && _SJ.sectors.GOES18.wus), parent: _zvParent(), v: ZV.v, want: ZV.want, loading: ZV.loading }; };   /* for tests */
   var _zvT = null;
   function _zvSettle(ms){ clearTimeout(_zvT); _zvT = setTimeout(function(){
     if (!ZV.v) return;
@@ -117469,10 +117479,13 @@ function closeAlertModal(){
           var label = function(i){ var n = (K.frames[Math.max(0, Math.min(K.frames.length - 1, i))] || '').slice(0, 11), y = +n.slice(0, 4), d = +n.slice(4, 7), h = +n.slice(7, 9), mi = +n.slice(9, 11);
             var t = Date.UTC(y, 0, 1) + (d - 1) * 864e5 + h * 36e5 + mi * 6e4; return isFinite(t) ? new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).toUpperCase() : ''; };
           var lagTxt = M.lag && M.lag['meteosat-12'] ? ' \u00b7 EUROPE AND AFRICA RUN ~' + Math.round(M.lag['meteosat-12'] / 60 * 10) / 10 + ' H BEHIND (METEOSAT-12)' : '';
-          /* the clock sits in a fixed-width slot with even-width digits: 7:10 PM and 12:40 PM no longer push the line around (user
-             2026-10-26: "the text bounces around because the text updates") */
-          var cap = function(t){ line('<div style="text-align:center;letter-spacing:.04em;font-variant-numeric:tabular-nums;">THE WHOLE EARTH \u00b7 THE LAST 3 HOURS \u00b7 <span style="display:inline-block;min-width:4.9em;text-align:center;">' + (t || '\u2014') + '</span>' + lagTxt
-            + ' \u00b7 DAYLIGHT IN TRUE COLOR, NIGHT AS INFRARED CLOUD OVER CITY LIGHTS \u00b7 THE POLES ARE BEYOND EVERY GEOSTATIONARY SATELLITE \u00b7 DRAG TO SPIN</div>'); };
+          /* the clock keeps one width (user 2026-10-26: "the text bounces around because the text updates"): even-width digits and a
+             figure space before a one-digit hour, so 7:10 PM and 12:40 PM take the same room and the line never reflows. "position this
+             better": THE WHOLE EARTH dropped, the lines balanced, DRAG TO SPIN on its own line under them */
+          var fixT = function(t){ return t && /^\d:/.test(t) ? '\u2007' + t : (t || '\u2014'); };
+          var cap = function(t){ line('<div style="text-align:center;letter-spacing:.04em;font-variant-numeric:tabular-nums;text-wrap:balance;">THE LAST 3 HOURS \u00b7 ' + fixT(t) + lagTxt
+            + ' \u00b7 DAYLIGHT IN TRUE COLOR, NIGHT AS INFRARED CLOUD OVER CITY LIGHTS \u00b7 THE POLES ARE BEYOND EVERY GEOSTATIONARY SATELLITE</div>'
+            + '<div style="text-align:center;letter-spacing:.12em;opacity:.8;margin-top:3px;font-size:.92em;">DRAG TO SPIN</div>'); };
           cap(label(K.frames.length - 1));
           if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) return true;
           enowVidStop();
