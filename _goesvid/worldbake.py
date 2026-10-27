@@ -303,7 +303,7 @@ def main():
         if kk == 'd': man['step'] = kstep
         man[kk] = {'mp4': os.path.basename(out), 'frames': use, 'real': len(got), 'step': kstep, 'bytes': os.path.getsize(out)}
     poster = os.path.join(work, '%s_p.jpg' % newest)
-    Image.open(os.path.join(fd, got[-1])).resize((2048, 1024), Image.LANCZOS).save(poster, quality=85)   # the poster stays the page's default size; man['poster'] = os.path.basename(poster)
+    Image.open(os.path.join(fd, got[-1])).resize((2048, 1024), Image.LANCZOS).save(poster, quality=85); man['poster'] = os.path.basename(poster)   # the poster stays the page's default size
     print('WORLD: %d new, %d in-betweens, %.0f s; ' % (new, made, time.time() - t0)
           + ', '.join('%s %d frames %.1f MB' % (kk, len(man[kk]['frames']), man[kk]['bytes'] / 1e6) for kk in KINDS), flush=True)
     if DRY:
