@@ -70,8 +70,10 @@ def currents(tmp):
     f = netcdf_file(p, 'r', mmap=False)
     u, t = north_up(f, 'u_current'); v, _ = north_up(f, 'v_current')
     lat = CN - (np.arange(u.shape[0]) + .5) / u.shape[0] * (CN - CS)
-    # geostrophy fails near the equator (the Coriolis term goes to zero): the altimetry speeds there are not currents
-    ok = np.isfinite(u) & np.isfinite(v) & (np.abs(u) < 50) & (np.abs(v) < 50) & (np.abs(lat) >= 5)[:, None]
+    # the equator stays (2026-10-27): NOAA's blend treats it -- measured, the median speed within 1 deg of it (0.34 m/s) matches 5 deg
+    # out, so the old +-5 deg cut only hid the equatorial currents. Lone spikes over 3 m/s (seen at every latitude, mostly coastal)
+    # are dropped instead: no daily surface current runs that fast
+    ok = np.isfinite(u) & np.isfinite(v) & (np.abs(u) < 50) & (np.abs(v) < 50) & (np.hypot(np.nan_to_num(u), np.nan_to_num(v)) <= 3.0)
     # the grid is filled over land too, and altimetry is unreliable within a cell of the coast (a Haitian bay read 2.8 m/s)
     from scipy.ndimage import binary_dilation
     ok &= ~binary_dilation(land_mask(CW - .125, CS - .125, CE + .125, CN + .125, u.shape[1], u.shape[0]), iterations=1)
