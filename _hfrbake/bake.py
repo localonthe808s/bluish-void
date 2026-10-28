@@ -18,6 +18,7 @@ from PIL import Image
 DAP = 'https://dods.ndbc.noaa.gov/thredds/dodsC/hfradar_%s_6km'
 REGIONS = ['usegc', 'uswc', 'gak', 'ushi', 'prvi', 'glna']   # East + Gulf, West, Gulf of Alaska, Hawaii, Puerto Rico + USVI, Great Lakes
 HOURS = 3
+LOOP = 12                                                    # the last 12 hours, one frame each, for COAST's PLAY (the tide turning)
 VMAX = 2.0
 HDOP = 1.25
 BUCKET = 'bluishvoid-bg'
@@ -52,25 +53,32 @@ def region(k):
     base = DAP % k
     dds = fetch(base + '.dds')
     nt = int(re.search(r'Int32 time\[time = (\d+)\]', dds).group(1)); ny = int(re.search(r'lat\[lat = (\d+)\]', dds).group(1)); nx = int(re.search(r'lon\[lon = (\d+)\]', dds).group(1))
-    i0, i1 = nt - HOURS, nt - 1
+    i0, i1 = nt - LOOP, nt - 1
     sl = '%%5B%d:1:%d%%5D%%5B0:1:%d%%5D%%5B0:1:%d%%5D' % (i0, i1, ny - 1, nx - 1)
     a = arrays(fetch(base + '.ascii?u' + sl + ',v' + sl + ',hdop' + sl + ',lat,lon,time%%5B%d:1:%d%%5D' % (i0, i1)))
-    u = a['u.u'].reshape(HOURS, ny, nx); v = a['v.v'].reshape(HOURS, ny, nx); h = a['hdop.hdop'].reshape(HOURS, ny, nx)
+    u = a['u.u'].reshape(LOOP, ny, nx); v = a['v.v'].reshape(LOOP, ny, nx); h = a['hdop.hdop'].reshape(LOOP, ny, nx)
     lat, lon, t = a['lat'], a['lon'], a['time']
     good = (u > -32000) & (v > -32000) & (h > -32000) & (h * 0.01 <= HDOP)
+    enc = lambda q: np.clip(np.round(np.nan_to_num(q) / VMAX * 127 + 128), 1, 255).astype(np.uint8)
+    frames = []
+    for i in range(LOOP):                                     # each hour as measured, holes and all
+        fu = np.where(good[i], u[i] * 0.01, np.nan); fv = np.where(good[i], v[i] * 0.01, np.nan)
+        if lat[0] < lat[-1]: fu, fv = fu[::-1], fv[::-1]
+        fo = np.isfinite(fu) & (np.hypot(np.nan_to_num(fu), np.nan_to_num(fv)) <= 2.5)
+        frames.append((np.dstack([enc(fu), enc(fv), np.where(fo, 255, 0).astype(np.uint8)]), int(t[i]), int(fo.sum())))
+    good, u, v, t = good[-HOURS:], u[-HOURS:], v[-HOURS:], t[-HOURS:]
     n = good.sum(0)
     with np.errstate(invalid='ignore', divide='ignore'):
         U = np.where(n > 0, np.where(good, u * 0.01, 0).sum(0) / n, np.nan); V = np.where(n > 0, np.where(good, v * 0.01, 0).sum(0) / n, np.nan)
     if lat[0] < lat[-1]: U, V = U[::-1], V[::-1]                      # north up
     ok = np.isfinite(U) & (np.hypot(np.nan_to_num(U), np.nan_to_num(V)) <= 2.5)
-    enc = lambda q: np.clip(np.round(np.nan_to_num(q) / VMAX * 127 + 128), 1, 255).astype(np.uint8)
     rgb = np.dstack([enc(U), enc(V), np.where(ok, 255, 0).astype(np.uint8)])
     dy = abs(lat[1] - lat[0]) / 2; dx = abs(lon[1] - lon[0]) / 2
     lo0, lo1 = float(lon.min() - dx), float(lon.max() + dx)
     if lo0 > 180: lo0 -= 360; lo1 -= 360
     meta = {'k': k, 'box': [round(lo0, 4), round(float(lat.min() - dy), 4), round(lo1, 4), round(float(lat.max() + dy), 4)], 'w': nx, 'h': ny,
-            't0': int(t[0]), 't1': int(t[-1]), 'cells': int(ok.sum())}
-    return rgb, meta
+            't0': int(t[0]), 't1': int(t[-1]), 'cells': int(ok.sum()), 'loop': [f[1] for f in frames]}
+    return rgb, meta, frames
 
 
 def put(src, key, ct, cache):
@@ -86,11 +94,13 @@ def main():
     tmp = tempfile.mkdtemp(); regs = []; ups = []
     for k in REGIONS:
         try:
-            rgb, m = region(k)
+            rgb, m, frames = region(k)
         except Exception as e:
             print('skip', k, e); continue
         if not m['cells']: print('skip', k, 'no cells'); continue
         p = os.path.join(tmp, k + '.png'); Image.fromarray(rgb).save(p, optimize=True); ups.append((p, 'hfr/%s.png' % k)); regs.append(m)
+        for i, f in enumerate(frames):
+            fp = os.path.join(tmp, '%s_%d.png' % (k, i)); Image.fromarray(f[0]).save(fp, optimize=True); ups.append((fp, 'hfr/loop/%s_%d.png' % (k, i)))
         print(k, m['cells'], 'cells', time.strftime('%H:%M', time.gmtime(m['t0'])), '-', time.strftime('%H:%M UTC', time.gmtime(m['t1'])), os.path.getsize(p), 'bytes')
     if not regs: raise SystemExit('no region answered')
     v = int(time.time()); meta = {'regions': regs, 'vmax': VMAX, 'hours': HOURS, 'v': v}

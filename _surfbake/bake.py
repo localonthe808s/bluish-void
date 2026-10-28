@@ -111,11 +111,21 @@ def currents_rtofs(tmp):
     sys.path.insert(0, HERE); import rtofs
     os.environ.setdefault('RTOFS_CACHE', os.path.join(tmp, 'rtofs'))
     day, tags, kind, valid = rtofs_pick()
-    U = V = None
+    U = V = None; frames = []
+    r0 = int((RBOX[1] + 90) / .25); r1 = int((RBOX[3] + 90) / .25)
+    enc = lambda a: np.clip(np.round(np.nan_to_num(a) / RVMAX * 127 + 128), 1, 255).astype(np.uint8)
     for t in tags:
         lon, lat, u, v = rtofs.surface(day, t); a, b = rtofs.regrid(lon, lat, u, v)
         U = a if U is None else U + a; V = b if V is None else V + b; print('  rtofs', day, t)
+        # THE DAY, HOUR BY HOUR (2026-10-28): each snapshot at half a degree, for the globe's PLAY (cdn surf/fc/<i>.png)
+        h = int(t[1:]) if t[0] == 'f' else -int(t[2:]) if t.startswith('n-') else 0
+        ua = a[r0:r1][::-1].reshape((r1 - r0) // 2, 2, 720, 2); va = b[r0:r1][::-1].reshape((r1 - r0) // 2, 2, 720, 2)
+        with np.errstate(all='ignore'): us = np.nanmean(ua, axis=(1, 3)); vs = np.nanmean(va, axis=(1, 3))
+        okf = np.isfinite(us) & np.isfinite(vs)
+        fp = os.path.join(tmp, 'fc%d.png' % len(frames)); Image.fromarray(np.dstack([enc(us), enc(vs), np.where(okf, 255, 0).astype(np.uint8)])).save(fp, optimize=True)
+        frames.append((fp, __import__('calendar').timegm(time.strptime(day, '%Y%m%d')) + h * 3600))
     U /= len(tags); V /= len(tags)                                         # rows south -> north
+    global LAST_UV; LAST_UV = (U, V, kind, valid)
     H = U.shape[0]; r0 = int((RBOX[1] + 90) / .25); r1 = int((RBOX[3] + 90) / .25)
     u = U[r0:r1][::-1]; v = V[r0:r1][::-1]                                 # north up, the box
     sp = np.hypot(u, v); ok = np.isfinite(sp) & (sp <= 3.0)
@@ -124,7 +134,9 @@ def currents_rtofs(tmp):
     out = os.path.join(tmp, 'currents.png'); Image.fromarray(rgb).save(out, optimize=True)
     d = '%s-%s-%s' % (valid[:4], valid[4:6], valid[6:])
     print('currents RTOFS', day, kind, rgb.shape, 'max %.2f m/s, p99 %.2f' % (sp[ok].max(), np.percentile(sp[ok], 99)), os.path.getsize(out), 'bytes')
-    return out, {'t': d, 'box': list(RBOX), 'vmax': RVMAX, 'w': rgb.shape[1], 'h': rgb.shape[0], 'src': 'rtofs', 'kind': kind, 'run': day}
+    global FRAMES; FRAMES = frames
+    return out, {'t': d, 'box': list(RBOX), 'vmax': RVMAX, 'w': rgb.shape[1], 'h': rgb.shape[0], 'src': 'rtofs', 'kind': kind, 'run': day,
+                 'frames': [int(f[1]) for f in frames], 'fw': 720, 'fh': (r1 - r0) // 2}
 
 
 def chlorophyll(tmp):
@@ -174,12 +186,54 @@ def merc(rgba, S0, N0, name, tmp):
     out = os.path.join(tmp, name); Image.fromarray(rgba[rows]).save(out, optimize=True); return out
 
 
-def seatemp(tmp):
+_PFEG = None
+def pfeg_up():
+    """one quick look at the West Coast ERDDAP: when it is down, its four slow retries per file cost ~10 minutes a run"""
+    global _PFEG
+    if _PFEG is None:
+        try: urllib.request.urlopen('https://coastwatch.pfeg.noaa.gov/erddap/index.html', timeout=20); _PFEG = True
+        except Exception as e: print('pfeg ERDDAP down:', e); _PFEG = False
+    return _PFEG
+
+
+def oisst_ncei(tmp):
+    """THE SAME OISST, FROM NCEI (2026-10-28: the West Coast ERDDAP was down for a day and the sea went stale): the day's own
+    netCDF4 file (~1.5 MB), newest of the last five days. Returns sst, anom north-up over -75..75, lon 0..360, and the time"""
+    import h5py, calendar
+    for back in range(1, 6):
+        d = time.strftime('%Y%m%d', time.gmtime(time.time() - back * 86400))
+        for kind in ('_preliminary', ''):
+            url = 'https://www.ncei.noaa.gov/data/sea-surface-temperature-optimum-interpolation/v2.1/access/avhrr/%s/oisst-avhrr-v02r01.%s%s.nc' % (d[:6], d, kind)
+            pth = os.path.join(tmp, 'ncei.nc')
+            try:
+                urllib.request.urlretrieve(url, pth)
+            except Exception:
+                continue
+            h = h5py.File(pth, 'r'); lat = h['lat'][:]
+            def g(n):
+                v = h[n]; a = v[0, 0].astype(np.float32); fv = v.attrs.get('_FillValue'); sc = v.attrs.get('scale_factor'); of = v.attrs.get('add_offset')
+                if fv is not None: a[v[0, 0] == fv[0]] = np.nan
+                if sc is not None: a = a * float(sc[0])
+                if of is not None: a = a + float(of[0])
+                return a
+            sst, an = g('sst'), g('anom'); keep = (lat >= -75) & (lat <= 75)
+            sst, an = sst[keep], an[keep]
+            if lat[0] < lat[-1]: sst, an = sst[::-1], an[::-1]
+            print('oisst from NCEI', d, kind or 'final')
+            return sst, an, calendar.timegm(time.strptime(d, '%Y%m%d')) + 43200
+    raise RuntimeError('no OISST day at NCEI either')
+
+
+def seatemp(tmp, old=None):
     f2c = lambda c: c * 9 / 5 + 32
     q = '[(last)][(0.0)][(-75):1:(75)][(0):1:(359.875)]'
-    p = get('https://coastwatch.pfeg.noaa.gov/erddap/griddap/ncdcOisst21NrtAgg.nc?sst' + q + ',anom' + q, os.path.join(tmp, 'oisst.nc'))
-    f = netcdf_file(p, 'r', mmap=False)
-    sst, t = north_up(f, 'sst'); an, _ = north_up(f, 'anom')
+    try:
+        if not pfeg_up(): raise RuntimeError('pfeg down')
+        p = get('https://coastwatch.pfeg.noaa.gov/erddap/griddap/ncdcOisst21NrtAgg.nc?sst' + q + ',anom' + q, os.path.join(tmp, 'oisst.nc'))
+        f = netcdf_file(p, 'r', mmap=False)
+        sst, t = north_up(f, 'sst'); an, _ = north_up(f, 'anom')
+    except BaseException as e:
+        print('OISST via ERDDAP failed, NCEI instead:', e); sst, an, t = oisst_ncei(tmp)
     sst = np.roll(sst, sst.shape[1] // 2, axis=1); an = np.roll(an, an.shape[1] // 2, axis=1)   # 0..360 -> -180..180
     sst[(sst < -5) | (sst > 45)] = np.nan; an[~np.isfinite(sst)] = np.nan
     F, A = f2c(sst), an * 9 / 5
@@ -194,7 +248,15 @@ def seatemp(tmp):
     dp = os.path.join(tmp, 'sst_data.png'); Image.fromarray(np.dstack([(v >> 8).astype(np.uint8), (v & 255).astype(np.uint8), b])).save(dp, optimize=True); out['data'] = dp
     tg = time.strftime('%Y-%m-%d', time.gmtime(t))
     print('oisst', tg, F.shape, 'F %.0f..%.0f' % (np.nanmin(F), np.nanmax(F)), 'anom p1/p99 %.1f/%.1f F' % tuple(np.nanpercentile(A, [1, 99])))
-    # North America, sharp
+    # North America, sharp -- kept from the last run when its server is down
+    try: return seatemp_na(tmp, out, tg, sst, f2c)
+    except BaseException as e:
+        print('MUR (North America) kept from the last run:', e); o = (old or {}).get('sst') or {}
+        return out, {'t': tg, 'tr': o.get('tr', ''), 'ta': o.get('ta', ''), 'g': [-180, -75, 180, 75], 'r': [RW, RS, RE, RN], 'dw': sst.shape[1], 'dh': sst.shape[0], 'rkept': True}
+
+
+def seatemp_na(tmp, out, tg, sst, f2c):
+    if not pfeg_up(): raise RuntimeError('pfeg down')
     q2 = '[(last)][(%g):5:(%g)][(%g):5:(%g)]' % (RS, RN, RW, RE)
     p2 = get('https://coastwatch.pfeg.noaa.gov/erddap/griddap/jplMURSST41.nc?analysed_sst' + q2, os.path.join(tmp, 'mur.nc'))
     p3 = get('https://coastwatch.pfeg.noaa.gov/erddap/griddap/jplMURSST41anom1day.nc?sstAnom' + q2, os.path.join(tmp, 'muranom.nc'))
@@ -217,6 +279,49 @@ def put(src, key, ct, cache):
                         '--header-upload', 'Content-Type: ' + ct, '--header-upload', 'Cache-Control: ' + cache], check=True)
 
 
+LAST_UV = None
+FRAMES = []
+
+
+def score_day(tmp, old_score):
+    """THE ACCURACY, KEPT HONEST (2026-10-28): each morning the model's last 24 hours are scored against what the drifting buoys did that
+    day (_surfbake/validate.py), and the satellite currents beside it; 60 days kept in surf/score.json, the caption quotes the last 30"""
+    sys.path.insert(0, HERE); import validate as VA
+    U, V, kind, valid = LAST_UV
+    if kind != 'last24': return None
+    day = '%s-%s-%s' % (valid[:4], valid[4:6], valid[6:])
+    nxt = time.strftime('%Y-%m-%d', time.gmtime(__import__('calendar').timegm(time.strptime(day, '%Y-%m-%d')) + 86400))
+    dp = os.path.join(tmp, 'drift.csv')
+    t0 = time.strftime('%Y-%m-%dT21:00:00Z', time.gmtime(__import__('calendar').timegm(time.strptime(day, '%Y-%m-%d')) - 86400))
+    urllib.request.urlretrieve('https://osmc.noaa.gov/erddap/tabledap/OSMC_30day.csv?platform_code,time,latitude,longitude&platform_type=%22DRIFTING%20BUOYS%20(GENERIC)%22'
+                               '&time%3E=' + t0 + '&time%3C=' + nxt + 'T03:00:00Z', dp)
+    D = VA.drifters(dp, day)
+    def one(F):
+        A = VA.score(D, F)
+        if len(A) < 30: return None
+        la, u, v, fu, fv = A.T; e = np.hypot(fu - u, fv - v); z = np.hypot(u, v); good = z > .15
+        ang = np.degrees(np.angle((fu + 1j * fv) / np.where((u + 1j * v) == 0, 1e-9, u + 1j * v)))
+        return {'n': int(len(A)), 'skill': round(float(100 * (1 - np.mean(e ** 2) / np.mean(z ** 2))), 1), 'dir': round(float(np.median(np.abs(ang[good]))), 1),
+                'rms': round(float(np.sqrt(np.mean(e ** 2))), 3), 'speed': round(float(np.median(np.hypot(fu, fv)[good]) / np.median(z[good])), 2)}
+    row = {'d': day, 'rtofs': one((U, V))}
+    try:                                                                   # the satellite currents, same day, for comparison
+        q = '[(%sT12:00:00Z)][(-89.875):(89.875)][(-179.875):(179.875)]' % day
+        pth = get(ERD + 'noaacwBLENDEDNRTcurrentsDaily.nc?u_current' + q + ',v_current' + q, os.path.join(tmp, 'cw_score.nc'))
+        f = netcdf_file(pth, 'r', mmap=False); la = f.variables['latitude'][:]
+        def g(n):
+            v = f.variables[n]; a = v[:][0].astype(np.float32); fv = getattr(v, '_FillValue', None)
+            if fv is not None: a[a == fv] = np.nan
+            a[np.abs(a) > 10] = np.nan; return a[::-1] if la[0] > la[-1] else a
+        row['sat'] = one((g('u_current'), g('v_current')))
+    except BaseException as e: print('satellite score skipped:', e)
+    days = [r for r in (old_score or {}).get('days', []) if r.get('d') != day] + [row]
+    days = sorted(days, key=lambda r: r['d'])[-60:]
+    last = [r['rtofs'] for r in days[-30:] if r.get('rtofs')]
+    roll = {'days': len(last), 'buoys': sum(x['n'] for x in last), 'skill': round(float(np.median([x['skill'] for x in last])), 0), 'dir': round(float(np.median([x['dir'] for x in last])), 0)} if last else None
+    print('score', row, 'rolling', roll)
+    return {'days': days, 'roll': roll}
+
+
 def old_meta():
     """the last published latest.json: a layer whose source is down this run keeps its last picture"""
     try: return json.loads(subprocess.run(['curl', '-s', '-m', '30', 'https://cdn.bluishvoid.com/surf/latest.json?x=%d' % time.time()], capture_output=True, text=True).stdout)
@@ -229,12 +334,25 @@ def main():
     except Exception as e:                                                 # the satellite currents stay the fallback
         print('RTOFS failed, satellite currents instead:', e); cp, cm = currents(tmp); cm['src'] = 'altimetry'
     ups.append((cp, 'surf/currents.png'))
+    if cm.get('src') == 'rtofs':
+        for i, (fp, _) in enumerate(FRAMES): ups.append((fp, 'surf/fc/%d.png' % i))
+    sc = None
+    try:
+        osc = json.loads(subprocess.run(['curl', '-s', '-m', '30', 'https://cdn.bluishvoid.com/surf/score.json?x=%d' % time.time()], capture_output=True, text=True).stdout or '{}')
+    except Exception: osc = {}
+    if LAST_UV:
+        try: sc = score_day(tmp, osc)
+        except BaseException as e: print('score skipped:', e)
+    if sc:
+        scp = os.path.join(tmp, 'score.json'); json.dump(sc, open(scp, 'w')); cm['score'] = sc['roll']
+    elif osc.get('roll'): cm['score'] = osc['roll']
     # one slow server no longer sinks the run (2026-10-28: the OISST host timed out and nothing was published)
     try: kp, km = chlorophyll(tmp); ups.append((kp, 'surf/chl.png'))
     except BaseException as e: print('chlorophyll kept from the last run:', e); km = old.get('chl')
     try:
-        sp, sm = seatemp(tmp)
-        for k, key in (('g_sst', 'sst_g'), ('g_anom', 'anom_g'), ('r_sst', 'sst_r'), ('r_anom', 'anom_r'), ('data', 'sst_data')): ups.append((sp[k], 'surf/%s.png' % key))
+        sp, sm = seatemp(tmp, old)
+        for k, key in (('g_sst', 'sst_g'), ('g_anom', 'anom_g'), ('r_sst', 'sst_r'), ('r_anom', 'anom_r'), ('data', 'sst_data')):
+            if k in sp: ups.append((sp[k], 'surf/%s.png' % key))
     except BaseException as e: print('sea temperature kept from the last run:', e); sm = old.get('sst')
     v = int(time.time())
     meta = {'cur': cm, 'chl': km, 'sst': sm, 'at': v, 'v': v}
@@ -242,6 +360,7 @@ def main():
     print(meta)
     if '--dry' in sys.argv: print('dry run:', tmp); return
     for src, key in ups: put(src, key, 'image/png', 'public, max-age=3600')
+    if sc: put(scp, 'surf/score.json', 'application/json', 'public, max-age=3600')
     put(mp, 'surf/latest.json', 'application/json', 'public, max-age=1800')
     print('uploaded')
 
