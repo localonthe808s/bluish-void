@@ -4476,6 +4476,11 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             _p3 = _climb_now.get('p3') or 0.0
             _mass = {_R: _p0, _R + 1: max(0.0, _p1 - _p2), _R + 2: max(0.0, _p2 - _p3),
                      _R + 3: 0.6 * _p3, _R + 4: 0.3 * _p3, _R + 5: 0.1 * _p3}
+            # THE CLIMB TABLE OBEYS THE CUT (2026-10-28). It starts from the hourly running max, which an exact figure
+            # can sit above: 10-27 at 2:55 PM the 2-8 AM group read 60.08 and the hourly max 59, and the blend put
+            # 0.75 x p0 = 45% on "59 or below", a bracket the cut had already deleted (settled 61).
+            if cut_far is not None:
+                _mass = {t: v for t, v in _mass.items() if t > cut_far - 1.0}
             _emp = [sum(v for t, v in _mass.items()
                         if (r['lo'] is None or t >= r['lo']) and (r['hi'] is None or t <= r['hi']))
                     for r in rows]
