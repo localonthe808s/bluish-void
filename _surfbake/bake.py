@@ -85,6 +85,48 @@ def currents(tmp):
     return out, {'t': time.strftime('%Y-%m-%d', time.gmtime(t)), 'box': [CW, CS, CE, CN], 'vmax': VMAX, 'w': rgb.shape[1], 'h': rgb.shape[0]}
 
 
+# ---- THE MODEL'S CURRENTS (2026-10-28): NOAA RTOFS-Global, the day's mean surface current. Scored against the drifters
+# (_surfbake/validate.py, 158 + 157 buoys, Oct 25 and 26): the RTOFS daily mean 57-63 % better than "no current", direction off
+# 18-23 deg (median); the satellite currents above 45-46 %, 28-30 deg. A snapshot scores worse than the day's mean (35 %): the
+# hour's inertial swirl is real, but a day's drift is what the buoys measure and what the streaks show. Morning bake (after the
+# nowcast lands ~06:50 UTC): the LAST 24 HOURS to 00Z; afternoon (the forecast to +24 h lands ~12:50 UTC): TODAY, forecast.
+RBOX = (-180.0, -80.0, 180.0, 85.0)          # to 85 N: the Arctic is in the model (the satellites stop at the ice); 90 breaks mercator
+RVMAX = 2.5
+
+
+def rtofs_pick():
+    import urllib.request as U
+    def have(day, tag):
+        try:
+            U.urlopen(U.Request('https://noaa-nws-rtofs-pds.s3.amazonaws.com/rtofs.%s/rtofs_glo.t00z.%s.archs.b' % (day, tag), method='HEAD'), timeout=30); return True
+        except Exception: return False
+    for back in range(3):
+        day = time.strftime('%Y%m%d', time.gmtime(time.time() - back * 86400))
+        if have(day, 'f24') and have(day, 'n00'): return day, ['n00', 'f06', 'f12', 'f18', 'f24'], 'today', day
+        if have(day, 'n00'): return day, ['n-24', 'n-18', 'n-12', 'n-06', 'n00'], 'last24', time.strftime('%Y%m%d', time.gmtime(time.mktime(time.strptime(day, '%Y%m%d')) - 86400))
+    raise RuntimeError('no RTOFS run in 3 days')
+
+
+def currents_rtofs(tmp):
+    sys.path.insert(0, HERE); import rtofs
+    os.environ.setdefault('RTOFS_CACHE', os.path.join(tmp, 'rtofs'))
+    day, tags, kind, valid = rtofs_pick()
+    U = V = None
+    for t in tags:
+        lon, lat, u, v = rtofs.surface(day, t); a, b = rtofs.regrid(lon, lat, u, v)
+        U = a if U is None else U + a; V = b if V is None else V + b; print('  rtofs', day, t)
+    U /= len(tags); V /= len(tags)                                         # rows south -> north
+    H = U.shape[0]; r0 = int((RBOX[1] + 90) / .25); r1 = int((RBOX[3] + 90) / .25)
+    u = U[r0:r1][::-1]; v = V[r0:r1][::-1]                                 # north up, the box
+    sp = np.hypot(u, v); ok = np.isfinite(sp) & (sp <= 3.0)
+    enc = lambda a: np.clip(np.round(np.nan_to_num(a) / RVMAX * 127 + 128), 1, 255).astype(np.uint8)
+    rgb = np.dstack([enc(u), enc(v), np.where(ok, 255, 0).astype(np.uint8)])
+    out = os.path.join(tmp, 'currents.png'); Image.fromarray(rgb).save(out, optimize=True)
+    d = '%s-%s-%s' % (valid[:4], valid[4:6], valid[6:])
+    print('currents RTOFS', day, kind, rgb.shape, 'max %.2f m/s, p99 %.2f' % (sp[ok].max(), np.percentile(sp[ok], 99)), os.path.getsize(out), 'bytes')
+    return out, {'t': d, 'box': list(RBOX), 'vmax': RVMAX, 'w': rgb.shape[1], 'h': rgb.shape[0], 'src': 'rtofs', 'kind': kind, 'run': day}
+
+
 def chlorophyll(tmp):
     p = get(ERD + 'noaacwNPPN20VIIRSDINEOFDaily.nc?chlor_a[(last)][(0.0)][(%g):%d:(%g)][(%g):%d:(%g)]' % (KS, KSTRIDE, KN, KW, KSTRIDE, KE), os.path.join(tmp, 'chl.nc'))
     f = netcdf_file(p, 'r', mmap=False)
@@ -175,20 +217,31 @@ def put(src, key, ct, cache):
                         '--header-upload', 'Content-Type: ' + ct, '--header-upload', 'Cache-Control: ' + cache], check=True)
 
 
+def old_meta():
+    """the last published latest.json: a layer whose source is down this run keeps its last picture"""
+    try: return json.loads(subprocess.run(['curl', '-s', '-m', '30', 'https://cdn.bluishvoid.com/surf/latest.json?x=%d' % time.time()], capture_output=True, text=True).stdout)
+    except Exception: return {}
+
+
 def main():
-    tmp = tempfile.mkdtemp()
-    cp, cm = currents(tmp)
-    kp, km = chlorophyll(tmp)
-    sp, sm = seatemp(tmp)
+    tmp = tempfile.mkdtemp(); old = old_meta(); ups = []
+    try: cp, cm = currents_rtofs(tmp)
+    except Exception as e:                                                 # the satellite currents stay the fallback
+        print('RTOFS failed, satellite currents instead:', e); cp, cm = currents(tmp); cm['src'] = 'altimetry'
+    ups.append((cp, 'surf/currents.png'))
+    # one slow server no longer sinks the run (2026-10-28: the OISST host timed out and nothing was published)
+    try: kp, km = chlorophyll(tmp); ups.append((kp, 'surf/chl.png'))
+    except BaseException as e: print('chlorophyll kept from the last run:', e); km = old.get('chl')
+    try:
+        sp, sm = seatemp(tmp)
+        for k, key in (('g_sst', 'sst_g'), ('g_anom', 'anom_g'), ('r_sst', 'sst_r'), ('r_anom', 'anom_r'), ('data', 'sst_data')): ups.append((sp[k], 'surf/%s.png' % key))
+    except BaseException as e: print('sea temperature kept from the last run:', e); sm = old.get('sst')
     v = int(time.time())
     meta = {'cur': cm, 'chl': km, 'sst': sm, 'at': v, 'v': v}
     mp = os.path.join(tmp, 'latest.json'); json.dump(meta, open(mp, 'w'))
     print(meta)
     if '--dry' in sys.argv: print('dry run:', tmp); return
-    put(cp, 'surf/currents.png', 'image/png', 'public, max-age=3600')
-    put(kp, 'surf/chl.png', 'image/png', 'public, max-age=3600')
-    for k, key in (('g_sst', 'sst_g'), ('g_anom', 'anom_g'), ('r_sst', 'sst_r'), ('r_anom', 'anom_r'), ('data', 'sst_data')):
-        put(sp[k], 'surf/%s.png' % key, 'image/png', 'public, max-age=3600')
+    for src, key in ups: put(src, key, 'image/png', 'public, max-age=3600')
     put(mp, 'surf/latest.json', 'application/json', 'public, max-age=1800')
     print('uploaded')
 
