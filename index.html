@@ -113039,7 +113039,7 @@ function closeAlertModal(){
       var cx = typeof CX !== 'undefined' && CX.summary ? CX.summary() : [];
       var lvE = pane.querySelector('#lc-lv-line'), lv = lvE ? [].map.call(lvE.children, function(d){ return d.textContent.replace(/\s+/g, ' ').trim(); }) : [];
       var nws = pick(lv, /^NWS /) || flood, st = pick(lv, /^STREET SENSORS /).replace(/\s*\(.*$/, '');
-      var parts = WT.tab === 'flood' ? [nws, st, riv] : [tide].concat(cx);   /* FLOODING: warnings, streets, rivers; COAST: the tide, water, waves */
+      var parts = WT.tab === 'flood' ? [nws, st, riv] : [tide].concat(cx).concat(WT.hfr && SF.HR.regs.length ? ['RADAR CURRENTS ' + SF.hrHours()] : []);   /* FLOODING: warnings, streets, rivers; COAST: the tide, water, waves */
       var html = '<span class="ws-t">' + parts.filter(Boolean).map(function(x){ return x.replace(/[&<>]/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }).join('<span class="ws-d"> · </span>') + '</span>'
         + '<span style="margin-left:auto;display:inline-flex;gap:6px;flex:none;"><button type="button" data-wdet="1" class="lc-pill">' + (WSUM.open ? 'HIDE DETAILS \u25B4' : 'DETAILS \u25BE') + '</button></span>';
       if (el.innerHTML !== html) el.innerHTML = html;
@@ -113107,13 +113107,36 @@ function closeAlertModal(){
         F.uv = g.getImageData(0, 0, im.width, im.height).data; F.w = im.width; F.h = im.height; F.box = m.box; F.vmax = m.vmax || 2; F.pts = null; SF.flowGo(); };
       im.src = SF.CDN + 'currents.png?v=' + SF.sm.v; };
     /* m/s at a lat / lon (bilinear; null over land / no data) */
-    SF.uvAt = function(la, lo){ var F = SF.F, b = F.box; if (!F.uv) return null;
+    SF.uvAt = function(la, lo){ return SF.fAt(SF.F, la, lo); };
+    SF.fAt = function(F, la, lo){ var b = F.box; if (!F.uv) return null;
       if (b[2] - b[0] >= 359) lo = ((lo - b[0]) % 360 + 360) % 360 + b[0];            /* a world grid: any longitude, any copy of the map */
       var x = (lo - b[0]) / (b[2] - b[0]) * F.w - .5, y = (b[3] - la) / (b[3] - b[1]) * F.h - .5; if (x < 0 || y < 0 || x >= F.w - 1 || y >= F.h - 1) return null;
       var x0 = x | 0, y0 = y | 0, fx = x - x0, fy = y - y0, D = F.uv, W = F.w, u = 0, v = 0, wt = 0;
       for (var k = 0; k < 4; k++){ var xx = x0 + (k & 1), yy = y0 + (k >> 1), i = (yy * W + xx) * 4; if (!D[i + 2]) continue;
         var w = (k & 1 ? fx : 1 - fx) * (k >> 1 ? fy : 1 - fy); u += (D[i] - 128) / 127 * F.vmax * w; v += (D[i + 1] - 128) / 127 * F.vmax * w; wt += w; }
       return wt > .5 ? [u / wt, v / wt] : null; };
+    /* MEASURED NEAR SHORE (user 2026-10-28, "yes do all"): the US HF radar network's last 3 hours, per region (_hfrbake/bake.py ->
+       cdn hfr/<region>.png + hfr/latest.json, hourly). SEA's CURRENTS draws it bright where it exists and the model (RTOFS) faint
+       beyond; COAST's RADAR CURRENTS draws only what the radar measured. A measurement is crisp, a model soft */
+    SF.HR = { meta: null, regs: [], at: 0, req: null };
+    SF.hrLoad = function(){ var H = SF.HR; if (H.req || (H.meta && Date.now() - H.at < 15 * 6e4)) return;
+      H.req = fetch('https://cdn.bluishvoid.com/hfr/latest.json?v=' + Math.floor(Date.now() / 6e5)).then(function(r){ if (!r.ok) throw 0; return r.json(); }).then(function(j){
+        return Promise.all(j.regions.map(function(m){ return new Promise(function(res){ var im = new Image(); im.crossOrigin = 'anonymous';
+          im.onload = function(){ var c = document.createElement('canvas'); c.width = im.width; c.height = im.height; var g = c.getContext('2d'); g.drawImage(im, 0, 0);
+            res({ k: m.k, uv: g.getImageData(0, 0, im.width, im.height).data, w: im.width, h: im.height, box: m.box, vmax: j.vmax || 2, t0: m.t0, t1: m.t1 }); };
+          im.onerror = function(){ res(null); }; im.src = 'https://cdn.bluishvoid.com/hfr/' + m.k + '.png?v=' + j.v; }); })).then(function(R){ H.meta = j; H.regs = R.filter(Boolean); H.at = Date.now(); H.req = null; WT.render(); SF.flowGo(); WT.sumSync(); WSUM.sync(); }); })
+        .catch(function(){ H.req = null; }); };
+    SF.hrAt = function(la, lo){ var R = SF.HR.regs; for (var i = 0; i < R.length; i++){ var b = R[i].box; if (lo < b[0] || lo > b[2] || la < b[1] || la > b[3]) continue; var q = SF.fAt(R[i], la, lo); if (q) return q; } return null; };
+    SF.hrHours = function(){ var h = WT.home(), R0 = SF.HR.regs, R = R0.filter(function(r){ var b = r.box; return h[1] >= b[0] && h[1] <= b[2] && h[0] >= b[1] && h[0] <= b[3]; }); if (!R.length) R = R0; if (!R.length) return ''; var t0 = Math.min.apply(null, R.map(function(r){ return r.t0; })), t1 = Math.max.apply(null, R.map(function(r){ return r.t1; }));
+      var f = function(t){ try { return new Date(t * 1000).toLocaleTimeString('en-US', { hour: 'numeric', timeZone: (window.LOCATION || {}).tz }).replace(' ', '').toUpperCase(); } catch(e){ return ''; } };
+      return f(t0) + '\u2013' + f(t1 + 3600); };
+    /* what the streaks ride, and from where: [u, v, 1] measured by radar, [u, v, 0] the model */
+    SF.flowAt = function(la, lo){ var t = WT.tab;
+      if ((t === 'sea' && WT.scur) || (t === 'coast' && WT.hfr)){ var r = SF.hrAt(la, lo); if (r) return [r[0], r[1], 1]; }
+      if (t === 'ocean' || (t === 'sea' && WT.scur)){ var m = SF.uvAt(la, lo); if (m) return [m[0], m[1], 0]; }
+      return null; };
+    SF.CUR_HR = ['rgba(165,243,252,.78)', 'rgba(94,234,212,.92)', 'rgba(204,251,241,1)', 'rgba(255,255,255,1)'];   /* measured: coastal water is slow, so even its slowest reads */
+    SF.CUR_DIM = ['rgba(125,211,252,.14)', 'rgba(45,212,191,.30)', 'rgba(165,243,252,.38)', 'rgba(255,255,255,.42)'];   /* the model beside a measurement: the same ramp, faint */
     /* the streaks' four speeds: under 0.6 mph a faint blue, to 1.2 teal, to 2.2 pale cyan, over 2.2 white -- one ramp with the
        underlay and the key */
     SF.CUR_COL = ['rgba(125,211,252,.35)', 'rgba(45,212,191,.75)', 'rgba(165,243,252,.92)', 'rgba(255,255,255,1)'];
@@ -113136,7 +113159,7 @@ function closeAlertModal(){
         if (!M.getPane('lcCurBg')){ var pn = M.createPane('lcCurBg'); pn.style.zIndex = 442; pn.style.pointerEvents = 'none'; }
         SF.curBgL = [-360, 0, 360].map(function(sh){ return L.imageOverlay(SF.curBgUrl, [[S0, b[0] + sh], [N0, b[2] + sh]], { pane: 'lcCurBg', interactive: false, opacity: 1 }); });
         SF.curSync(); }, 'image/png'); };
-    SF.curSync = function(){ var on = SF.flowOn() || (VIEW === 'map' && WT.tab === 'ocean' && SF.cur && !!M);
+    SF.curSync = function(){ var on = VIEW === 'map' && WT.tab === 'ocean' && window._waterEs !== 'ocur' && SF.cur && !!M;   /* the world glow is OCEAN's only */
       if (on && SF.F.uv && !SF.curBgFor) SF.curBg();
       (SF.curBgL || []).forEach(function(l){ if (on && !M.hasLayer(l)) l.addTo(M); else if (!on && M.hasLayer(l)) M.removeLayer(l); }); };
     /* THE NAMED CURRENTS: where each runs, roughly (a label's spot, not a measured axis), the way it flows and one line on it */
@@ -113172,7 +113195,9 @@ function closeAlertModal(){
         '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;color:rgba(255,255,255,.92);">' + (named ? named[4] + ' ' : '')
         + 'Today the surface water here is moving ' + (mph < 0.1 ? 'hardly at all' : mph.toFixed(1) + ' mph (' + (sp * 1.944).toFixed(1) + ' knots) toward the ' + dir) + '. '
         + 'Read from the sea’s height, measured by satellites: water runs around the bumps and dips of the surface, so this is the steady current, not the tide or the wind’s ripple.</div>', 'https://coastwatch.noaa.gov/'); return true; };
-    SF.flowOn = function(){ return VIEW === 'map' && WT.tab === 'ocean' && window._waterEs !== 'ocur' && SF.cur && !!SF.F.uv && !!M && !document.hidden; };
+    SF.flowOn = function(){ var t = WT.tab, hr = SF.HR.regs.length > 0;
+      var want = (t === 'ocean' && window._waterEs !== 'ocur' && SF.cur && !!SF.F.uv) || (t === 'sea' && WT.scur && (!!SF.F.uv || hr)) || (t === 'coast' && WT.hfr && hr);
+      return VIEW === 'map' && want && !!M && !document.hidden; };
     SF.flowGo = function(){ var F = SF.F; SF.curSync();
       if (!SF.flowOn()){ if (F.cv){ F.cv.style.display = 'none'; cvFree(F.cv); } if (F.raf){ cancelAnimationFrame(F.raf); F.raf = 0; } return; }
       if (!F.cv){ F.cv = document.createElement('canvas'); F.cv.style.position = 'absolute'; F.cv.style.pointerEvents = 'none'; M.getPane('lcSurfFlow').appendChild(F.cv);
@@ -113194,7 +113219,7 @@ function closeAlertModal(){
          the speed there, so the Gulf Stream, the Kuroshio, the Agulhas and the Southern Ocean's belt fill in and the still middles
          of the gyres stay quiet -- an even scatter read as noise everywhere */
       for (var k = 0; k < 14; k++){ var x = F.ox + Math.random() * F.vw, y = F.oy + Math.random() * F.vh;
-        var lo = x / F.S * 360 - 180, la = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / F.S))) * 180 / Math.PI, q0 = SF.uvAt(la, lo);
+        var lo = x / F.S * 360 - 180, la = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / F.S))) * 180 / Math.PI, q0 = SF.flowAt(la, lo);
         if (q0 && Math.random() < 0.1 + 0.9 * Math.min(1, Math.hypot(q0[0], q0[1]) / 0.55)){ P[i * 3] = x; P[i * 3 + 1] = y; P[i * 3 + 2] = fresh ? Math.random() * 90 : 60 + Math.random() * 90; return; } }
       P[i * 3 + 2] = -1; };
     SF.flowStep = function(now){ var F = SF.F; F.raf = 0;
@@ -113209,16 +113234,16 @@ function closeAlertModal(){
       var lowZ = M.getZoom() <= 4;                                              /* at basin scale the streaks are few px long: wider and brighter */
       g.globalCompositeOperation = 'source-over'; g.lineWidth = (lowZ ? 1.6 : 1.15) * d; g.lineCap = 'round';
       /* a current of 1 m/s moves 0.9 px a frame at any zoom: the Gulf Stream races, the gyre's middle barely creeps -- as it does */
-      var K = (M.getZoom() <= 4 ? 1.3 : 0.9) * dt / 16.7, buckets = [[], [], [], []];
+      var K = (M.getZoom() <= 4 ? 1.3 : 0.9) * dt / 16.7, buckets = [[], [], [], [], [], [], [], [], [], [], [], []], dimM = WT.tab !== 'ocean';
       for (var i = 0; i < F.n; i++){ var j = i * 3; if (P[j + 2] < 0){ if (Math.random() < .05) SF.flowSpawn(i); continue; }
-        var x = P[j], y = P[j + 1], lo = x / F.S * 360 - 180, la = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / F.S))) * 180 / Math.PI, q = SF.uvAt(la, lo);
+        var x = P[j], y = P[j + 1], lo = x / F.S * 360 - 180, la = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / F.S))) * 180 / Math.PI, q = SF.flowAt(la, lo);
         if (!q || --P[j + 2] <= 0){ SF.flowSpawn(i); continue; }
         var sp = Math.hypot(q[0], q[1]);
         var nx = x + q[0] * K, ny = y - q[1] * K;
         P[j] = nx; P[j + 1] = ny;
         if (nx < F.ox || ny < F.oy || nx > F.ox + F.vw || ny > F.oy + F.vh){ SF.flowSpawn(i); continue; }
-        buckets[sp > 1 ? 3 : sp > .55 ? 2 : sp > .25 ? 1 : 0].push((x - F.ox) * d, (y - F.oy) * d, (nx - F.ox) * d, (ny - F.oy) * d); }
-      SF.CUR_COL.forEach(function(col, b){ var L2 = buckets[b]; if (!L2.length) return;
+        buckets[(sp > 1 ? 3 : sp > .55 ? 2 : sp > .25 ? 1 : 0) + (q[2] ? 8 : dimM ? 4 : 0)].push((x - F.ox) * d, (y - F.oy) * d, (nx - F.ox) * d, (ny - F.oy) * d); }
+      SF.CUR_COL.concat(SF.CUR_DIM, SF.CUR_HR).forEach(function(col, b){ var L2 = buckets[b]; if (!L2.length) return;
         g.strokeStyle = col; g.beginPath(); for (var k = 0; k < L2.length; k += 4){ g.moveTo(L2[k], L2[k + 1]); g.lineTo(L2[k + 2] + .01, L2[k + 3]); } g.stroke(); }); };
     SF.SEA = [[38, -72], [39.3, -66], [39.6, -59], [38.6, -51], [36.4, -45], [33, -42], [28.5, -41.5], [24.5, -44], [22, -50], [21.5, -58],
               [22.4, -65], [24, -70], [26.5, -74.5], [29.5, -76.6], [32.5, -76], [35.4, -74.4]];
@@ -113349,6 +113374,7 @@ function closeAlertModal(){
         if (!M.hasLayer(SF.gpImg)) SF.gpImg.addTo(M);
       } else if (SF.gpImg && M.hasLayer(SF.gpImg)) M.removeLayer(SF.gpImg);
       if (vis && SF.cur && SF.sm) SF.flowLoad();
+      if (VIEW === 'map' && ((WT.tab === 'sea' && WT.scur) || (WT.tab === 'coast' && WT.hfr))){ SF.hrLoad(); if (WT.tab === 'sea'){ if (!SF.sm) SF.loadSm(); else SF.flowLoad(); } }
       if (typeof WT !== 'undefined' && WT.sstSync) WT.sstSync();
       SF.flowGo();
       SF.draw(); SF.row();
@@ -113435,8 +113461,8 @@ function closeAlertModal(){
     try { var _co = JSON.parse(localStorage.getItem('bv_lc_coast') || 'null'); if (_co) Object.keys(WT.co).forEach(function(k){ if (k in _co) WT.co[k] = !!_co[k]; }); } catch(e){}
     WT.CHIPS = function(){
       if (WT.tab === 'flood') return [['co:flood', 'FLOOD MAP'], ['co:river', 'RIVER GAUGES']].concat(GH.inCity() ? [['ghost', '1865 WATER']] : []);
-      if (WT.tab === 'coast') return [['co:cur', 'TIDAL CURRENTS'], ['co:waves', 'WAVES']].concat(nycHere() ? [['co:harbor', 'HARBOR FLOW']] : []).concat([['smt', 'SEAMOUNTS']]);
-      if (WT.tab === 'sea') return [['seg:sst', ''], ['mz', 'MARINE FORECAST'], ['buoy', 'BUOYS'], ['argo', 'ARGO FLOATS'], ['smt', 'SEAMOUNTS'], ['v:gulf', 'GULF STREAM']];
+      if (WT.tab === 'coast') return [['co:cur', 'TIDAL CURRENTS'], ['co:waves', 'WAVES']].concat(nycHere() ? [['co:harbor', 'HARBOR FLOW']] : []).concat(WT.hfrHere() ? [['hfr', 'RADAR CURRENTS']] : []).concat([['smt', 'SEAMOUNTS']]);
+      if (WT.tab === 'sea') return [['seg:sst', ''], ['scur', 'CURRENTS'], ['mz', 'MARINE FORECAST'], ['buoy', 'BUOYS'], ['argo', 'ARGO FLOATS'], ['smt', 'SEAMOUNTS'], ['v:gulf', 'GULF STREAM']];
       return (WT.globeOn() ? [['seg:look', '']] : []).concat([['cur', 'CURRENTS'], ['chl', 'OCEAN COLOR'], ['sea', 'SARGASSO SEA'], ['sarg', 'SARGASSUM'], ['gp', 'GARBAGE PATCHES'], ['smt', 'SEAMOUNTS'], ['v:enso', 'EL NIÑO'], ['v:amoc', 'ATLANTIC OVERTURNING']]); };
     /* STREAKS | DYE (user 2026-10-28, "yes do all"): how the globe draws the currents, remembered (bv_lc_look) */
     WT.look = 'streaks'; try { if (localStorage.getItem('bv_lc_look') === 'dye') WT.look = 'dye'; } catch(e){}
@@ -113445,6 +113471,17 @@ function closeAlertModal(){
        world's named ones beyond North America (cdn seafloor/mounts_world_v1.json). Turned on where none are in view (the harbor),
        the map backs out to take in the nearest ones */
     WT.smt = false; try { WT.smt = localStorage.getItem('bv_lc_smt') === '1'; } catch(e){}
+    WT.scur = false; WT.hfr = false; try { WT.scur = localStorage.getItem('bv_lc_scur') === '1'; WT.hfr = localStorage.getItem('bv_lc_hfr') === '1'; } catch(e){}
+    /* the US radar regions, roughly: the switch is offered where one could reach the place */
+    WT.HFRBOX = [[-98, 21.7, -57.2, 46.6], [-130.4, 30.2, -115.8, 49.9], [-157, 53, -130, 62], [-160.5, 18.5, -154.5, 22.5], [-68.5, 17, -64, 19.5], [-93, 41, -75, 49.5]];
+    WT.hfrHere = function(){ var h = WT.home(); return WT.HFRBOX.some(function(b){ return h[1] >= b[0] && h[1] <= b[2] && h[0] >= b[1] && h[0] <= b[3]; }); };
+    /* turned on where none of it is in view (a harbor the radar does not reach): back out to take in the nearest measured water */
+    WT.hfrFind = function(){ if (!M || !SF.HR.regs.length) return; var b = M.getBounds(), h = WT.home(), best = [], seen = 0;
+      SF.HR.regs.forEach(function(R){ for (var y = 0; y < R.h; y += 2) for (var x = 0; x < R.w; x += 2){ if (!R.uv[(y * R.w + x) * 4 + 2]) continue;
+        var la = R.box[3] - (y + .5) / R.h * (R.box[3] - R.box[1]), lo = R.box[0] + (x + .5) / R.w * (R.box[2] - R.box[0]);
+        if (b.contains([la, lo])) seen++; best.push([la, lo, Math.pow(la - h[0], 2) + Math.pow((lo - h[1]) * Math.cos(h[0] * Math.PI / 180), 2)]); } });
+      if (seen > 20 || !best.length) return; best.sort(function(a, c){ return a[2] - c[2]; });
+      M.flyToBounds(L.latLngBounds([h].concat(best.slice(0, 60).map(function(q){ return [q[0], q[1]]; }))), { duration: 1.3, padding: [30, 30], maxZoom: 10 }); };
     WT.smtSync = function(){ if (!M) return;
       var on = VIEW === 'map' && WT.smt && WT.tab !== 'flood' && !window._waterEs;
       if (on && !window._bvSmtWorld && !WT.smtReq) WT.smtReq = fetch('https://cdn.bluishvoid.com/seafloor/mounts_world_v1.json').then(function(r){ if (!r.ok) throw 0; return r.json(); })
@@ -113500,7 +113537,7 @@ function closeAlertModal(){
     LCRES.push(function(){ if (WT.esk) WT.hostSync(); });   /* back from the globe the pane counts as unseen until its observer fires */
     WT.isOn = function(k){ if (k.indexOf('es:') === 0) return window._waterEs === k.slice(3); if (window._waterEs && window._waterEs !== 'ocur') return false;   /* a story is up: the map's layers are not */
       if (k.indexOf('co:') === 0) return !!WT.co[k.slice(3)]; if (k === 'ghost') return !!GH.on; if (k.indexOf('v:') === 0) return WT.esk === k.slice(2);
-      if (k === 'sst' || k === 'anom') return WT.sst === k; if (k === 'buoy') return WT.buoy; if (k === 'mz') return MZ.on; if (k === 'argo') return AR.on; if (k === 'smt') return WT.smt; if (k.indexOf('lk:') === 0) return WT.look === k.slice(3); return !!SF[k]; };
+      if (k === 'sst' || k === 'anom') return WT.sst === k; if (k === 'buoy') return WT.buoy; if (k === 'mz') return MZ.on; if (k === 'argo') return AR.on; if (k === 'smt') return WT.smt; if (k === 'scur') return WT.scur; if (k === 'hfr') return WT.hfr; if (k.indexOf('lk:') === 0) return WT.look === k.slice(3); return !!SF[k]; };
     WT.menu = null;                                            /* 'argo' | 'gp' while its menu is open */
     WT.el = function(){ var b = document.getElementById('cw-waterbar'); if (b) return b;
       var pb = document.getElementById('cw-placebar'); if (!pb) return null;
@@ -113592,6 +113629,9 @@ function closeAlertModal(){
       else if (k === 'buoy') WT.buoy = !WT.buoy;
       else if (k === 'mz'){ MZ.on = !MZ.on; if (!MZ.on) INFO.hide(); }
       else if (k === 'argo'){ AR.on = !AR.on; AR.save(); if (!AR.on) INFO.hide(); }
+      else if (k === 'scur'){ WT.scur = !WT.scur; try { localStorage.setItem('bv_lc_scur', WT.scur ? '1' : '0'); } catch(e){} }
+      else if (k === 'hfr'){ WT.hfr = !WT.hfr; try { localStorage.setItem('bv_lc_hfr', WT.hfr ? '1' : '0'); } catch(e){}
+        if (WT.hfr){ var gof = function(){ if (WT.hfr && WT.tab === 'coast') WT.hfrFind(); }; if (SF.HR.regs.length) gof(); else setTimeout(function(){ SF.hrLoad(); var w0 = Date.now(), iv = setInterval(function(){ if (SF.HR.regs.length || Date.now() - w0 > 8000){ clearInterval(iv); gof(); } }, 300); }, 0); } }
       else if (k === 'smt'){ WT.smt = !WT.smt; try { localStorage.setItem('bv_lc_smt', WT.smt ? '1' : '0'); } catch(e){}
         if (WT.smt && !onGlobe){ var go = function(){ WT.smtFind(); }; if (window._bvSmtWorld) go(); else setTimeout(function(){ WT.smtSync(); (WT.smtReq || Promise.resolve()).then(go); }, 0); } }
       else { SF[k] = !SF[k]; if (SF[k] && !onGlobe) SF.goTo(k); if (SF[k] && onGlobe && (k === 'sea' || k === 'sarg') && window._esOceanFace) window._esOceanFace(28, -55); }
@@ -113715,6 +113755,7 @@ function closeAlertModal(){
         var p = WT.sea0(), q = WT.sstAt(p[0], p[1]), dk = WT.mi(p, h);
         if (q) o.push('SEA ' + Math.round(q.f) + '°F ' + (dk > 3 ? Math.round(dk) + ' MI OUT' : 'OFFSHORE') + (Math.abs(q.a) >= 0.5 ? ' · ' + Math.abs(q.a).toFixed(1) + '°F ' + (q.a > 0 ? 'ABOVE' : 'BELOW') + ' NORMAL' : ' · ABOUT NORMAL'));
         var w = CX.waves(); if (w && w.now != null) o.push('WAVES ' + (w.now < 1 ? 'UNDER 1' : Math.round(w.now)) + ' FT');
+        if (WT.scur) o.push(SF.HR.regs.length ? 'CURRENTS: RADAR-MEASURED ' + SF.hrHours() + ' (BRIGHT), MODEL BEYOND (FAINT)' : 'CURRENTS: MODEL (RTOFS)');
         var zid = MZ.hit(p[0], p[1]); if (zid){ var al = MZ.al[zid]; o.push(al && al.length ? String(al[0]).toUpperCase() : 'NO MARINE ADVISORY'); }
         /* the Gulf Stream (or any current over 2.2 mph) nearest the place, within ~500 mi */
         if (SF.F.uv){ var best = null, bd = 1e9; for (var la = h[0] - 7; la <= h[0] + 7; la += 0.25) for (var lo2 = h[1] - 9; lo2 <= h[1] + 9; lo2 += 0.25){ var u = SF.uvAt(la, lo2); if (u && Math.hypot(u[0], u[1]) > 1){ var dd = WT.mi([la, lo2], h); if (dd < bd){ bd = dd; best = [la, lo2]; } } }
