@@ -1317,21 +1317,34 @@ window._bvSeaNames = function(map){
       var sz = map.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.round(sz.x * dpr), H = Math.round(sz.y * dpr), z = map.getZoom();
       if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = sz.x + 'px'; cv.style.height = sz.y + 'px'; }
       L.DomUtil.setPosition(cv, map.containerPointToLayerPoint([0, 0])); cv.style.visibility = '';
-      var g = cv.getContext('2d'); g.clearRect(0, 0, W, H); if (z < 3) return;
-      var P = function(c){ var q = map.latLngToContainerPoint([c[1], c[0]]); return [q.x * dpr, q.y * dpr]; };
+      var g = cv.getContext('2d'); g.clearRect(0, 0, W, H); var HI = !!map._bvSmtHi; if (z < (HI ? 1 : 3)) return;
+      /* nearest copy of the world to the view's center, so a world map (WATER's OCEAN) draws them wherever it is centered */
+      var c0 = map.getCenter().lng, wl = function(lo){ while (lo - c0 > 180) lo -= 360; while (c0 - lo > 180) lo += 360; return lo; };
+      var P = function(c){ var q = map.latLngToContainerPoint([c[1], z < 5 ? wl(c[0]) : c[0]]); return [q.x * dpr, q.y * dpr]; };
+      /* an outline or a course moves as ONE piece: its first point picks the world copy, each next point stays within 180 of the
+         last -- point by point, a shape across the date line drew a line round the whole map */
+      var PL = function(c){ if (z >= 5) return c.map(P); var prev = null;
+        return c.map(function(p){ var lo = prev == null ? wl(p[0]) : p[0]; if (prev != null){ while (lo - prev > 180) lo -= 360; while (prev - lo > 180) lo += 360; } prev = lo;
+          var q = map.latLngToContainerPoint([p[1], lo]); return [q.x * dpr, q.y * dpr]; }); };
       var inV = function(q, m){ return q[0] > -m && q[1] > -m && q[0] < W + m && q[1] < H + m; };
       var COL = { canyon: 'rgba(255,206,140,', ridge: 'rgba(170,205,240,', mount: 'rgba(170,205,240,', basin: 'rgba(150,180,215,' };
+      /* SEAMOUNTS, HIGHLIGHTED (user 2026-10-27, WATER's COAST / SEA / OCEAN): the underwater mountains in a bright sea-green, outlined
+         and peaked from further out, the rest of the undersea drawing dimmed under them; beyond North America's traced set, the
+         world's named ones (seafloor/mounts_world_v1.json, outline where the gazetteer has one) */
+      var SMT = 'rgba(110,240,205,';
+      if (HI) g.globalAlpha = .45;
       g.lineJoin = 'round'; g.lineCap = 'round';
       J.f.forEach(function(f){
-        if (z < f.z - 1 || !f.g) return;
-        var line = function(c){ var Q = c.map(P); if (!Q.some(function(q){ return inV(q, 40); })) return null; g.beginPath(); Q.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); return Q; };
+        if (HI) g.globalAlpha = f.k === 'mount' ? 1 : .45;
+        if (z < f.z - (HI && f.k === 'mount' ? 3 : 1) || !f.g) return;
+        var line = function(c){ var Q = PL(c); if (!Q.some(function(q){ return inV(q, 40); })) return null; g.beginPath(); Q.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); return Q; };
         /* v5 (2026-10-22, user: "imrpve your canyon and seamount drawings further"), from _seabake/trace3.py:
            SEAMOUNTS drawn as mountains -- the base outline, then rings 45 / 70 / 90% of the way to the summit, each a little
            brighter, like a topographic summit;
            CANYONS drawn as cuts -- the outline, short hachures along the rims pointing down into the cut (from zoom 6), the
            deepest part of the cut a brighter band, and the floor line thickening from head to mouth with small chevrons
            showing which way it runs downslope (only where the floor was re-run head to mouth: f.d is set) */
-        var ring = function(c){ var Q = c.map(P); if (!Q.some(function(q){ return inV(q, 40); })) return null; g.beginPath(); Q.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); g.closePath(); return Q; };
+        var ring = function(c){ var Q = PL(c); if (!Q.some(function(q){ return inV(q, 40); })) return null; g.beginPath(); Q.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); g.closePath(); return Q; };
         var hach = function(Q){
           var STP = 7 * dpr, LEN = 3.6 * dpr, acc = 0, sgn = 0;
           g.lineWidth = .8 * dpr; g.strokeStyle = COL.canyon + '.50)'; g.beginPath();
@@ -1346,10 +1359,11 @@ window._bvSeaNames = function(map){
               d0 += STP; }
             acc = (acc + Ln) % STP; }
           g.stroke(); };
-        if (f.k === 'mount' && f.g.p && z >= f.z - 1){
-          f.g.p.forEach(function(c){ if (!ring(c)) return; g.fillStyle = COL.mount + '.11)'; g.fill(); g.lineWidth = 1 * dpr; g.strokeStyle = COL.mount + '.58)'; g.stroke(); });
-          if (z >= f.z) (f.g.r || []).forEach(function(r){ if (!ring(r[1])) return; g.fillStyle = COL.mount + (0.06 + 0.10 * r[0]).toFixed(3) + ')'; g.fill();
-            g.lineWidth = .8 * dpr; g.strokeStyle = COL.mount + (0.32 + 0.5 * r[0]).toFixed(2) + ')'; g.stroke(); });
+        if (f.k === 'mount' && f.g.p && (z >= f.z - 1 || (HI && z >= f.z - 3))){
+          var MC = HI ? SMT : COL.mount, mf = HI ? 2.4 : 1;
+          f.g.p.forEach(function(c){ if (!ring(c)) return; g.fillStyle = MC + (.11 * mf).toFixed(3) + ')'; g.fill(); g.lineWidth = (HI ? 1.4 : 1) * dpr; g.strokeStyle = MC + (HI ? '.95)' : '.58)'); g.stroke(); });
+          if (z >= f.z - (HI ? 1 : 0)) (f.g.r || []).forEach(function(r){ if (!ring(r[1])) return; g.fillStyle = MC + ((0.06 + 0.10 * r[0]) * mf).toFixed(3) + ')'; g.fill();
+            g.lineWidth = .8 * dpr; g.strokeStyle = MC + Math.min(1, (0.32 + 0.5 * r[0]) * (HI ? 1.5 : 1)).toFixed(2) + ')'; g.stroke(); });
         } else if (f.g.p && z >= f.z - 1){
           f.g.p.forEach(function(c){ var Q = ring(c); if (!Q) return; var cv2 = f.k === 'canyon' ? COL.canyon : COL[f.k];
             g.fillStyle = cv2 + '.10)'; g.fill(); g.lineWidth = 1 * dpr; g.strokeStyle = cv2 + '.55)'; g.stroke();
@@ -1376,13 +1390,22 @@ window._bvSeaNames = function(map){
       });
       /* names: biggest first, one per spot; mountains get a small peak at their point. The space-themed place names are already
          there (map._bvNameBoxes, 2026-10-20): an undersea name that would sit on one is left out */
+      g.globalAlpha = 1;
+      var WM = HI && window._bvSmtWorld ? window._bvSmtWorld.f : [];
+      var ringW = function(c){ var Q = PL(c); if (!Q.some(function(q){ return inV(q, 40); })) return null; g.beginPath(); Q.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); g.closePath(); return Q; };
+      WM.forEach(function(f){ if (!f.p || z < f.z - 3) return;
+        f.p.forEach(function(c){ if (!ringW(c)) return; g.fillStyle = SMT + '.22)'; g.fill(); g.lineWidth = 1.2 * dpr; g.strokeStyle = SMT + '.9)'; g.stroke(); }); });
       var placed = (map._bvNameBoxes || []).map(function(q){ return q.map(function(v){ return v * dpr; }); });
       g.textBaseline = 'middle';
-      J.f.forEach(function(f){
-        if (z < f.z) return;
+      var peak = function(q){ var s = (HI ? (z < 4 ? 3 : 4.4) : 3.2) * dpr; g.beginPath(); g.moveTo(q[0] - s, q[1] + s * .7); g.lineTo(q[0], q[1] - s); g.lineTo(q[0] + s, q[1] + s * .7); g.closePath();
+        if (HI){ g.lineWidth = 1.6 * dpr; g.strokeStyle = 'rgba(6,20,30,.85)'; g.stroke(); g.fillStyle = SMT + '1)'; } else g.fillStyle = COL.mount + '.75)'; g.fill(); };
+      J.f.concat(WM.map(function(f){ return { n: f.n, k: 'mount', z: f.z, c: f.c, w: 1 }; })).forEach(function(f){
+        var mt = f.k === 'mount', nz = HI && mt ? f.z - 2 : f.z;
+        if (HI) g.globalAlpha = mt ? 1 : .5;
+        if (z < (HI && mt ? Math.min(nz, 3) : nz)) return;                      /* highlighted: every peak shows from the world view */
         var q = P(f.c); if (!inV(q, -10)) return;
-        if (f.k === 'mount'){ var s = 3.2 * dpr; g.beginPath(); g.moveTo(q[0] - s, q[1] + s * .7); g.lineTo(q[0], q[1] - s); g.lineTo(q[0] + s, q[1] + s * .7); g.closePath(); g.fillStyle = COL.mount + '.75)'; g.fill(); }
-        if (map._bvSeaNoNames) return;
+        if (mt) peak(q);
+        if (map._bvSeaNoNames || z < nz) return;
         var fz = (f.z <= 4 ? 8.6 : 7.8) * dpr; g.font = 'italic 700 ' + fz + 'px system-ui,sans-serif';
         /* its size, once zoomed in (v5): the canyon's median cut along its floor, the mount's rise above the floor round it */
         var nm = f.n + (z >= f.z + 2 ? (f.k === 'canyon' && f.d ? ' · CUT ' + f.d.toLocaleString('en-US') + ' FT' : f.k === 'mount' && f.h ? ' · RISES ' + f.h.toLocaleString('en-US') + ' FT' : '') : '');
@@ -1392,8 +1415,9 @@ window._bvSeaNames = function(map){
         if (placed.some(function(p){ return r[0] < p[2] && r[2] > p[0] && r[1] < p[3] && r[3] > p[1]; })) return;
         placed.push(r);
         g.lineWidth = 3 * dpr; g.strokeStyle = 'rgba(8,14,28,.8)'; g.strokeText(nm, x, y);
-        g.fillStyle = (f.k === 'canyon' ? COL.canyon : COL[f.k]) + '.85)'; g.fillText(nm, x, y);
+        g.fillStyle = (f.k === 'canyon' ? COL.canyon : HI && mt ? SMT : COL[f.k]) + (HI && mt ? '1)' : '.85)'); g.fillText(nm, x, y);
       });
+      g.globalAlpha = 1;
     };
     window._bvZoomCv(map, function(){ return [cv]; });
     map.on('moveend zoomend resize', draw); draw(); map._bvSeaRedraw = draw;
@@ -112993,7 +113017,13 @@ function closeAlertModal(){
           if (e.target.closest('[data-ocean]')){ e.stopPropagation(); SF.panel = !SF.panel; SF.row(); WSUM.sync(); return; }
           if (e.target.closest('[data-argo]')){ e.stopPropagation(); AR.on = !AR.on; try { localStorage.setItem('bv_lc_argo', AR.on ? '1' : '0'); } catch(x){} if (!AR.on) INFO.hide(); AR.sync(); WSUM.sync(); return; }
           if (!e.target.closest('[data-wdet]')) return; e.stopPropagation(); WSUM.open = !WSUM.open;
-          try { localStorage.setItem('bv_lc_wdet', WSUM.open ? '1' : '0'); } catch(x){} WSUM.sync(); }); }
+          try { localStorage.setItem('bv_lc_wdet', WSUM.open ? '1' : '0'); } catch(x){} WSUM.sync();
+          /* the panels open UNDER the map, out of sight of the button (user 2026-10-27: "hide details / show details doesnt do anything"):
+             bring them up into view */
+          if (WSUM.open) setTimeout(function(){ var P = ['lc-lv-line', 'lc-sg-line', 'lc-tide', 'lc-river', 'lc-tstrip'].map(function(i){ return pane.querySelector('#' + i); })
+              .filter(function(d){ return d && d.offsetHeight > 0; }).sort(function(a, b){ return a.getBoundingClientRect().top - b.getBoundingClientRect().top; });
+            if (P.length){ var last = P[P.length - 1], top = P[0].getBoundingClientRect().top, bot = last.getBoundingClientRect().bottom, vh = window.innerHeight;
+              if (top > vh - 80 || bot > vh) (bot - top < vh - 120 ? last : P[0]).scrollIntoView({ block: bot - top < vh - 120 ? 'end' : 'start', behavior: 'smooth' }); } }, 60); }); }
       pane.classList.toggle('lc-wopen', WSUM.open && WT.loc());
       if (VIEW !== 'map' || !WT.loc()){ el.style.display = 'none'; return; }
       /* the panels are hidden while folded (innerText then loses its line breaks): read their smallest blocks, one line each */
@@ -113396,9 +113426,26 @@ function closeAlertModal(){
     try { var _co = JSON.parse(localStorage.getItem('bv_lc_coast') || 'null'); if (_co) Object.keys(WT.co).forEach(function(k){ if (k in _co) WT.co[k] = !!_co[k]; }); } catch(e){}
     WT.CHIPS = function(){
       if (WT.tab === 'flood') return [['co:flood', 'FLOOD MAP'], ['co:river', 'RIVER GAUGES']].concat(GH.inCity() ? [['ghost', '1865 WATER']] : []);
-      if (WT.tab === 'coast') return [['co:cur', 'TIDAL CURRENTS'], ['co:waves', 'WAVES']].concat(nycHere() ? [['co:harbor', 'HARBOR FLOW']] : []);
-      if (WT.tab === 'sea') return [['seg:sst', ''], ['mz', 'MARINE FORECAST'], ['buoy', 'BUOYS'], ['argo', 'ARGO FLOATS'], ['v:gulf', 'GULF STREAM']];
-      return [['cur', 'CURRENTS'], ['chl', 'OCEAN COLOR'], ['sea', 'SARGASSO SEA'], ['sarg', 'SARGASSUM'], ['gp', 'GARBAGE PATCHES'], ['v:enso', 'EL NIÑO'], ['v:amoc', 'ATLANTIC OVERTURNING']]; };
+      if (WT.tab === 'coast') return [['co:cur', 'TIDAL CURRENTS'], ['co:waves', 'WAVES']].concat(nycHere() ? [['co:harbor', 'HARBOR FLOW']] : []).concat([['smt', 'SEAMOUNTS']]);
+      if (WT.tab === 'sea') return [['seg:sst', ''], ['mz', 'MARINE FORECAST'], ['buoy', 'BUOYS'], ['argo', 'ARGO FLOATS'], ['smt', 'SEAMOUNTS'], ['v:gulf', 'GULF STREAM']];
+      return [['cur', 'CURRENTS'], ['chl', 'OCEAN COLOR'], ['sea', 'SARGASSO SEA'], ['sarg', 'SARGASSUM'], ['gp', 'GARBAGE PATCHES'], ['smt', 'SEAMOUNTS'], ['v:enso', 'EL NIÑO'], ['v:amoc', 'ATLANTIC OVERTURNING']]; };
+    /* SEAMOUNTS (user 2026-10-27: "can we show the highlight seamounts on COAST / SEA / OCEAN"): one switch on all three, remembered
+       (bv_lc_smt). It brightens the underwater mountains on the undersea canvas (window._bvSeaNames, map._bvSmtHi) and adds the
+       world's named ones beyond North America (cdn seafloor/mounts_world_v1.json). Turned on where none are in view (the harbor),
+       the map backs out to take in the nearest ones */
+    WT.smt = false; try { WT.smt = localStorage.getItem('bv_lc_smt') === '1'; } catch(e){}
+    WT.smtSync = function(){ if (!M) return;
+      var on = VIEW === 'map' && WT.smt && WT.tab !== 'flood' && !window._waterEs;
+      if (on && !window._bvSmtWorld && !WT.smtReq) WT.smtReq = fetch('https://cdn.bluishvoid.com/seafloor/mounts_world_v1.json').then(function(r){ if (!r.ok) throw 0; return r.json(); })
+        .then(function(j){ window._bvSmtWorld = j; if (M._bvSeaRedraw) M._bvSeaRedraw(); }).catch(function(){ WT.smtReq = null; });
+      if (!!M._bvSmtHi === on) return; M._bvSmtHi = on; if (M._bvSeaRedraw) M._bvSeaRedraw(); };
+    WT.smtAll = function(){ var A = []; ((window._bvSeaNamesData || {}).f || []).forEach(function(f){ if (f.k === 'mount') A.push(f.c); });
+      ((window._bvSmtWorld || {}).f || []).forEach(function(f){ A.push(f.c); }); return A; };
+    WT.smtFind = function(){ if (!M) return; var b = M.getBounds(), A = WT.smtAll();
+      if (!A.length || A.some(function(c){ return b.contains([c[1], c[0]]); })) return;
+      var h = WT.home(), d = function(c){ var dx = (c[0] - h[1]) * Math.cos(h[0] * Math.PI / 180), dy = c[1] - h[0]; return dx * dx + dy * dy; };
+      var near = A.slice().sort(function(a, c){ return d(a) - d(c); }).slice(0, 4);
+      M.flyToBounds(L.latLngBounds([h].concat(near.map(function(c){ return [c[1], c[0]]; }))), { duration: 1.4, padding: [30, 30], maxZoom: 8 }); };
     /* THE OCEAN'S STORIES ON THIS MAP (user 2026-10-27: "does it need its own map? ... do we need these views anymore? keep all the
        info"): GULF STREAM, EL NINO and ATLANTIC OVERTURNING are switches like the rest -- EARTH SYSTEMS draws its view on WATER's map
        (window._esHost) and its caption and panel, every chart and button, sit under the map in #lc-esp. One at a time */
@@ -113441,7 +113488,7 @@ function closeAlertModal(){
       var bar = document.getElementById('lc-esbar'); if (bar && !want) bar.innerHTML = ''; };
     WT.isOn = function(k){ if (k.indexOf('es:') === 0) return window._waterEs === k.slice(3); if (window._waterEs) return false;   /* a story is up: the map's layers are not */
       if (k.indexOf('co:') === 0) return !!WT.co[k.slice(3)]; if (k === 'ghost') return !!GH.on; if (k.indexOf('v:') === 0) return WT.esk === k.slice(2);
-      if (k === 'sst' || k === 'anom') return WT.sst === k; if (k === 'buoy') return WT.buoy; if (k === 'mz') return MZ.on; if (k === 'argo') return AR.on; return !!SF[k]; };
+      if (k === 'sst' || k === 'anom') return WT.sst === k; if (k === 'buoy') return WT.buoy; if (k === 'mz') return MZ.on; if (k === 'argo') return AR.on; if (k === 'smt') return WT.smt; return !!SF[k]; };
     WT.menu = null;                                            /* 'argo' | 'gp' while its menu is open */
     WT.el = function(){ var b = document.getElementById('cw-waterbar'); if (b) return b;
       var pb = document.getElementById('cw-placebar'); if (!pb) return null;
@@ -113487,8 +113534,11 @@ function closeAlertModal(){
     WT.home = function(){ var L0 = window.LOCATION || {}; return [+L0.lat || 40.7, +L0.lon || -74]; };
     WT.frame = function(tab){ var h = WT.home(), lo = h[1];
       if (tab === 'sea') return { c: [h[0] - 1.2, lo + 2.5 * (lo > -100 ? 1 : -1)], z: 6 };                 /* offshore of the place */
+      /* OCEAN IS THE WORLD (user 2026-10-27: "can the ocean TAB be a global map?"): every ocean at once, the place's own in the middle --
+         zoom 2 is one whole world across a desktop map, zoom 1 on a phone */
       var basin = lo > -100 && lo < 25 ? -45 : lo >= 25 && lo < 100 ? 75 : -150;                              /* the place's ocean */
-      return { c: [24, SF.lon(basin)], z: 3 }; };
+      var w = M ? M.getSize().x : 1000;
+      return { c: [18, SF.lon(basin)], z: w >= 760 ? 2 : 1 }; };
     WT.set = function(tab){
       var wasEs = !!window._waterEs; window._waterEs = null;
       if (WT.loc() && !WT.loc(tab) && M && !wasEs) WT.coastV = { c: M.getCenter(), z: M.getZoom() };
@@ -113506,7 +113556,7 @@ function closeAlertModal(){
       pane.classList.toggle('lc-wt-far', !WT.loc()); pane.classList.toggle('lc-wt-flood', WT.tab === 'flood'); pane.classList.toggle('lc-wt-coast', WT.tab === 'coast');
       Object.keys(WT.co).forEach(function(k){ pane.classList.toggle('lc-co-no-' + k, !WT.co[k] || WT.OWN[k] !== WT.tab); });   /* each layer on its own tab only */
       window._wHarborOff = !WT.co.harbor || WT.tab !== 'coast'; GH.sync();
-      WT.hostSync(); SF.sync(); AR.sync(); WT.sstSync(); MZ.sync(); EK.sync(); WT.sumSync(); if (OV.buoyRead) OV.buoyRead(true); if (OV.draw) OV.draw(); WSUM.sync(); SF.row(); WT.render();
+      WT.hostSync(); SF.sync(); AR.sync(); WT.sstSync(); WT.smtSync(); MZ.sync(); EK.sync(); WT.sumSync(); if (OV.buoyRead) OV.buoyRead(true); if (OV.draw) OV.draw(); WSUM.sync(); SF.row(); WT.render();
       if (window._cwSecSync) window._cwSecSync(); };
     WT.chip = function(k){
       if (k.indexOf('es:') === 0){ WT.menu = null; WT.toEs(k.slice(3)); return; }
@@ -113521,6 +113571,8 @@ function closeAlertModal(){
       else if (k === 'buoy') WT.buoy = !WT.buoy;
       else if (k === 'mz'){ MZ.on = !MZ.on; if (!MZ.on) INFO.hide(); }
       else if (k === 'argo'){ AR.on = !AR.on; AR.save(); if (!AR.on) INFO.hide(); }
+      else if (k === 'smt'){ WT.smt = !WT.smt; try { localStorage.setItem('bv_lc_smt', WT.smt ? '1' : '0'); } catch(e){}
+        if (WT.smt){ var go = function(){ WT.smtFind(); }; if (window._bvSmtWorld) go(); else setTimeout(function(){ WT.smtSync(); (WT.smtReq || Promise.resolve()).then(go); }, 0); } }
       else { SF[k] = !SF[k]; if (SF[k]) SF.goTo(k); }
       WT.apply(); };
     /* the ocean's slow stories live in EARTH SYSTEMS' machinery; here they open in CLOUDS' EARTH SYSTEMS pane under WATER's row */
@@ -114005,6 +114057,7 @@ function closeAlertModal(){
       if (FLD.compact) FLD.compact();
       if (typeof WT !== 'undefined' && WT.hostSync) WT.hostSync();
       if (v === 'map' && typeof WT !== 'undefined' && WT.apply && !window._waterEs) try { WT.apply(); } catch(e){}   /* each tab's own layers from the first look */
+      if (v !== 'map' && M) M._bvSmtHi = false;                 /* the seamount highlight is WATER's */
       pane.classList.toggle('lc-norain', v !== 'radar');   /* the rain line on RADAR only (user 2026-10-25: off TRAFFIC too) */ WSUM.sync(); AR.sync(); SF.sync();   /* the street-tree line on FOLIAGE only */
       KX.sync();
       if (v === 'leaf') LF.on(); else LF.off();
