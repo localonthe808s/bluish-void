@@ -15,7 +15,11 @@ from PIL import Image
 Z = 10; BL = 8; LO = 20   # BL = 2^(Z-7): one block ends as one z7 tile
 W0, S0, E0, N0 = -125.0, 24.3, -66.8, 49.5
 R = 6378137.0
-def ogc(t): return (round(200 - 200 * t), round(246 - 56 * t), 255)   # the page's SPX.ogC
+# BAND=4 cuts MATURE forest instead (user 2026-10-29, "do mature forest ..."): the same file's band 4, in blue beside old growth's cyan
+BAND = int(os.environ.get('BAND', '5'))
+def ogc(t):
+    if BAND == 4: return (round(175 - 145 * t), round(195 - 115 * t), round(255 - 25 * t))   # the page's SPX.mtC
+    return (round(200 - 200 * t), round(246 - 56 * t), 255)   # the page's SPX.ogC
 def palette():
     pal = np.zeros((256, 3), np.int32); seen = set()
     for p in range(LO, 101):
@@ -45,7 +49,7 @@ def main(src, out):
             X0, Y0 = bx * BL, by * BL
             l, r_ = merc(X0, Z), merc(X0 + BL, Z); t, b = -merc(Y0, Z), -merc(Y0 + BL, Z)
             a = np.full((P, P), 255, np.uint8)
-            reproject(rasterio.band(ds, 5), a, src_nodata=255, dst_nodata=255, dst_crs='EPSG:3857', dst_transform=from_origin(l, t, (r_ - l) / P, (t - b) / P), resampling=Resampling.nearest)
+            reproject(rasterio.band(ds, BAND), a, src_nodata=255, dst_nodata=255, dst_crs='EPSG:3857', dst_transform=from_origin(l, t, (r_ - l) / P, (t - b) / P), resampling=Resampling.nearest)
             m = np.where(a == 255, 0, a).astype(np.uint8); m[m < LO] = 0; m[m > 100] = 100
             if not m.any(): continue
             lv = m
