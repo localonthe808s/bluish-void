@@ -38,7 +38,10 @@ def main(out):
                     spc = (re.search(r' - ([A-Z]{4}) - ITRDB', nm) or [None, ''])[1]
                     try: y0, y1 = int(s.get('earliestYearCE')), int(s.get('mostRecentYearCE'))
                     except Exception: continue
-                    rows[code] = {'c': code, 'n': st.get('siteName', '').strip(), 'la': round(lat, 3), 'lo': round(lon, 3), 'sp': SP.get(spc, spc), 'y0': y0, 'y1': y1,
+                    # TIMBERS, NOT TREES THAT GREW HERE (2026-10-29): beams from buildings and wrecks were cut elsewhere and record that place's weather
+                    txt = ' '.join([nm, st.get('siteName', ''), (s.get('studyNotes') or '')[:600]])
+                    hist = bool(re.search(r'\b(building|warehouse|barn|house|church|mill|hall|timbers?|historic(al)?|archaeolog\w*|beams?|structure|cabin|fort|tavern|shipwreck|ship|log ?cabin|bridge|courthouse|homestead|farmstead)\b', txt, re.I))
+                    rows[code] = {'h': 1 if hist else 0, 'c': code, 'n': st.get('siteName', '').strip(), 'la': round(lat, 3), 'lo': round(lon, 3), 'sp': SP.get(spc, spc), 'y0': y0, 'y1': y1,
                                   'u': crn.replace('https://www.ncei.noaa.gov/pub/data/paleo/treering/', ''), 'by': (s.get('investigators') or '').split(';')[0].strip()}
             time.sleep(0.3)
         print(la, len(rows), flush=True)
