@@ -374,11 +374,28 @@ async function firesNear(lat, lon) {
 }
 async function airNow(lat, lon, now) {
   if (now.h < 7 || now.h >= 22) return null;   /* quiet hours (user 2026-10-14): unhealthy air waits for 7 AM; the day's key lets the morning tick send it */
+  const lvlOf = (a) => (a >= 301 ? 'hazardous' : a >= 201 ? 'very unhealthy' : 'unhealthy');
+  /* MEASURED first (user 2026-10-29: "switch the air alert to measured too"): EPA AirNow monitors within 25 miles, through the proxy's
+     /airnow route (it holds the key, caches 15 min per ~5 km). The highest pollutant AQI is the AQI, AirNow's own rule. Only where no
+     monitor reports does the CAMS model (Open-Meteo) decide, and the alert then says it is a model estimate. */
+  try {
+    const r = await fetch(`https://proxy.bluishvoid.com/airnow?kind=obs&lat=${(+lat).toFixed(2)}&lon=${(+lon).toFixed(2)}`, { headers: { 'User-Agent': 'bluish-wx-alerts' } });
+    const rows = r.ok ? await r.json() : null;
+    if (Array.isArray(rows)) {
+      let top = null;
+      for (const x of rows) { const a = x.nowcastAQI; if (a != null && a >= 0 && (!top || a > top.nowcastAQI)) top = x; }
+      if (top) {
+        const a = top.nowcastAQI; if (a < 151) return null;
+        const p = String(top.parameterName || '').toUpperCase() === 'OZONE' ? 'ozone' : String(top.parameterName || '');
+        return { key: `air:${now.date}`, title: 'Unhealthy air', urg: a >= 201 ? 'high' : 'normal',
+          body: `US AQI ${a} (${lvlOf(a)}) measured${top.siteName ? ` at ${top.siteName}` : ''}, from ${p}.` };
+      }
+    }
+  } catch (_) { /* no measured reading: the model below */ }
   const r = await fetch(`https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&current=us_aqi,pm2_5,ozone`); if (!r.ok) return null;
   const c = (await r.json()).current || {}; const a = c.us_aqi; if (a == null || a < 151) return null;
-  const lvl = a >= 301 ? 'hazardous' : a >= 201 ? 'very unhealthy' : 'unhealthy';
   return { key: `air:${now.date}`, title: 'Unhealthy air', urg: a >= 201 ? 'high' : 'normal',
-    body: `US AQI ${a} (${lvl}) right now${c.pm2_5 != null ? `, PM2.5 ${Math.round(c.pm2_5)} \u00b5g/m\u00b3` : ''}.` };
+    body: `US AQI ${a} (${lvlOf(a)}), model estimate (no air monitor nearby)${c.pm2_5 != null ? `, PM2.5 ${Math.round(c.pm2_5)} \u00b5g/m\u00b3` : ''}.` };
 }
 
 /* ---------------------------------------------------------------- sunset ------------------------------------------- */
