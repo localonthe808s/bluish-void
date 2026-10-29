@@ -10,7 +10,9 @@ from PIL import Image
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rangefile import RangeFile
 URL = 'https://dap.ceda.ac.uk/neodc/esacci/biomass/data/agb/maps/v7.0/netcdf/ESACCI-BIOMASS-L4-AGB-MERGED-1000m-fv7.0.nc'
-Z = 8; W0, S0, E0, N0 = -125.0, 24.3, -66.8, 49.5; STEP = 6
+Z = 8; STEP = 6
+# the lower 48 first (2026-10-29), then North America with Canada and Mexico (user 2026-10-29, "go for it"): BOX=na
+W0, S0, E0, N0 = (-141.0, 14.5, -52.0, 70.0) if os.environ.get('BOX') == 'na' else (-125.0, 24.3, -66.8, 49.5)
 STOPS = [(2, (236, 226, 190)), (8, (204, 204, 140)), (16, (150, 180, 100)), (26, (80, 150, 95)), (38, (30, 115, 100)), (50, (15, 80, 85)), (63, (8, 50, 60))]
 def palette():
     pal = np.zeros((256, 3), np.int32); seen = set()

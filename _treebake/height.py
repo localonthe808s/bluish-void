@@ -11,7 +11,9 @@ from rasterio.windows import from_bounds
 from rasterio.enums import Resampling
 from PIL import Image
 Z = 11; BL = 16; RES = 0.0005
-W0, S0, E0, N0 = -125.0, 24.3, -66.8, 49.5
+# the lower 48 first; then North America with Canada and Mexico (user 2026-10-29, "go for it"): BOX=na, SRC_DIR may list several dirs
+# joined by ':' (Canada and Mexico come from height_half.py, at half resolution -- ~55 m, still finer than z11 at their latitudes)
+W0, S0, E0, N0 = (-141.0, 14.5, -52.0, 70.0) if os.environ.get('BOX') == 'na' else (-125.0, 24.3, -66.8, 49.5)
 STOPS = [(3, (229, 245, 192)), (8, (181, 223, 138)), (14, (116, 196, 118)), (20, (49, 163, 84)), (27, (17, 130, 59)), (35, (0, 100, 50)), (48, (11, 61, 44)), (63, (6, 40, 30))]
 def palette():
     pal = np.zeros((256, 3), np.int32)
@@ -29,7 +31,7 @@ def ty(la, z): r = math.radians(la); return (1 - math.log(math.tan(r) + 1 / math
 def lat_of(y, z): return math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / 2 ** z))))
 def main(src, out):
     files = {}
-    for p in glob.glob(os.path.join(src, '*_avg.tif')):
+    for p in [q for d in src.split(':') for q in glob.glob(os.path.join(d, '*_avg.tif'))]:
         m = re.search(r'lat=(-?[\d.]+)_lon=(-?[\d.]+)_avg', p); files[(float(m.group(1)), float(m.group(2)))] = rasterio.open(p)
     pal = palette(); flat = []; [flat.extend(int(v) for v in pal[i]) for i in range(256)]
     trns = bytes([0, 0, 0] + [255] * 61 + [0] * 192)
