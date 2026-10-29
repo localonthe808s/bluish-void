@@ -345,6 +345,34 @@ async function vehicleBox(targetUrl, box, ttl, cors, ctx) {
   return withCors(new Response(body, { status: 200, headers: sh }), cors, state, Math.max(0, Math.floor((Date.now() - rawAt) / 1000)));
 }
 
+// AIRNOW (2026-10-29): EPA's measured AQI. The key lives in the worker secret AIRNOW_KEY (wrangler secret put AIRNOW_KEY), never in the
+// page. /airnow?kind=obs|fc&lat=&lon= -> AirNow's current observation (the 2026 'ziplatlong' service; the old latLong one is retired) or the
+// agencies' forecast. Points round to 0.05 deg (~5 km) so nearby visitors share one cached answer (AirNow allows 500 calls an hour per key).
+async function airnow(reqUrl, env, cors, ctx) {
+  if (!env || !env.AIRNOW_KEY) return json({ error: 'AIRNOW_KEY not set' }, 503, cors);
+  const kind = reqUrl.searchParams.get('kind') === 'fc' ? 'fc' : 'obs';
+  const lat = Math.round(parseFloat(reqUrl.searchParams.get('lat')) * 20) / 20, lon = Math.round(parseFloat(reqUrl.searchParams.get('lon')) * 20) / 20;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return json({ error: 'bad lat/lon' }, 400, cors);
+  const ttl = kind === 'fc' ? 3600 : 900;
+  const key = new Request(`https://proxy.bluishvoid.com/__airnow/${kind}/${lat}/${lon}`, { method: 'GET' });
+  const cache = caches.default;
+  let hit = null;
+  try { hit = await cache.match(key); } catch (e) { hit = null; }
+  if (hit) { const a = (Date.now() - Number(hit.headers.get('X-BV-Cached-At') || 0)) / 1000; if (a >= 0 && a < ttl) return withCors(hit, cors, 'HIT', Math.floor(a)); }
+  const path = kind === 'fc' ? 'aq/forecast/current/' : 'aq/observation/current/ziplatlong/';
+  const up = `https://www.airnowapi.org/${path}?format=application/json&latitude=${lat}&longitude=${lon}&distance=${kind === 'fc' ? 50 : 25}&API_KEY=${encodeURIComponent(env.AIRNOW_KEY)}`;
+  let r = null;
+  try { r = await fetch(up, { headers: { 'User-Agent': 'bluishvoid-edge/1.0 (+https://bluishvoid.com)' } }); } catch (e) { r = null; }
+  const body = r && r.ok ? await r.text() : null;
+  if (!body || body.charAt(0) !== '[') {   // AirNow answers errors as an object; serve the last good copy if there is one
+    if (hit) return withCors(hit, cors, 'STALE-ERR', null);
+    return json({ error: 'AirNow fetch failed', status: r ? r.status : 0 }, 502, cors);
+  }
+  const h = { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${ttl}`, 'X-BV-Cached-At': String(Date.now()), 'X-BV-Upstream': 'www.airnowapi.org' };
+  try { ctx.waitUntil(cache.put(key, new Response(body, { status: 200, headers: h }))); } catch (e) { /* best-effort */ }
+  return withCors(new Response(body, { status: 200, headers: h }), cors, hit ? 'REVALIDATED' : 'MISS', 0);
+}
+
 export default {
   async fetch(request, env, ctx) {
     const reqUrl = new URL(request.url);
@@ -361,6 +389,7 @@ export default {
       return new Response('Method not allowed', { status: 405, headers: cors });
     }
 
+    if (reqUrl.pathname === '/airnow') return airnow(reqUrl, env, cors, ctx);
     const target = reqUrl.searchParams.get('url');
     if (!target) {
       // health check / no target

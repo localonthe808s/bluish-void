@@ -46219,6 +46219,32 @@ function dayRangeAround(d, days){
   }
 
 
+  /* AIRNOW (user 2026-10-29, key in hand): the AQI EPA's monitors MEASURED this hour, in place of the CAMS model's number wherever a
+     monitor reports within 25 miles (US, plus the Canadian and Mexican sites AirNow carries). Through proxy.bluishvoid.com/airnow, which
+     holds the key. Only the AQI values change: the overall AQI becomes the highest measured pollutant AQI (AirNow's own rule), PM2.5 /
+     PM10 / ozone take their measured AQI; the hourly forecast and the pollutant amounts stay the model's. No monitor -> the model stays. */
+  function bvAirNowMerge(ep, aqiEl){
+    var la = +LOCATION.lat, lo = +LOCATION.lon;
+    if (!(la > 14 && la < 72 && lo > -170 && lo < -50)) return;
+    fetchWithTimeout('https://proxy.bluishvoid.com/airnow?kind=obs&lat=' + la.toFixed(2) + '&lon=' + lo.toFixed(2), null, 8000)
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(rows){
+        if (ep !== (window._locEpoch || 0) || !Array.isArray(rows) || !rows.length) return;
+        var c = window._aqData && window._aqData.current; if (!c) return;
+        var mx = null, sites = {}, params = [], when = '';
+        var model = { us_aqi: c.us_aqi, pm25: c.us_aqi_pm2_5, pm10: c.us_aqi_pm10, o3: c.us_aqi_ozone };
+        rows.forEach(function(r){ var a = r.nowcastAQI; if (a == null || a < 0) return; var p = String(r.parameterName || '').toUpperCase();
+          if (p === 'PM2.5') c.us_aqi_pm2_5 = a; else if (p === 'PM10') c.us_aqi_pm10 = a; else if (p === 'OZONE' || p === 'O3') c.us_aqi_ozone = a; else return;
+          if (mx == null || a > mx) mx = a; if (r.siteName) sites[r.siteName] = 1; params.push((p === 'OZONE' ? 'OZONE' : p) + ' ' + a);
+          if (!when && r.hourObserved){ var hh = parseInt(r.hourObserved, 10); when = (hh % 12 || 12) + ' ' + (hh < 12 ? 'AM' : 'PM') + (r.localTimeZone ? ' ' + r.localTimeZone : ''); } });
+        if (mx == null) return;
+        c.us_aqi = mx;
+        window._aqData.measured = { aqi: mx, model: model, sites: Object.keys(sites), params: params, when: when, agency: rows[0].reportingAgency || '', area: rows[0].reportingAreaName || '' };
+        if (aqiEl){ var inf = classifyAqi(mx); aqiEl.textContent = inf.label; aqiEl.className = 'ap-val ' + inf.cls; aqiEl.title = 'Measured by EPA monitor' + (Object.keys(sites).length > 1 ? 's ' : ' ') + Object.keys(sites).join(', ') + (when ? ' at ' + when : ''); }
+      })
+      .catch(function(){});
+  }
+
   function loadAirQuality(){
     var _ep = window._locEpoch || 0;   // stale-location guard epoch
     var aqiEl = document.getElementById("aqi-val");
@@ -46244,6 +46270,7 @@ function dayRangeAround(d, days){
 
           // Store full AQ data for detail modal
           window._aqData = { current: current, hourly: data.hourly, time: data.current_units };
+          bvAirNowMerge(_ep, aqiEl);
 
           // AQI
           if (aqiEl){
@@ -46968,6 +46995,9 @@ function dayRangeAround(d, days){
     var _FS = function(t,c){return '<div style="font-weight:800;font-size:11px;color:'+(c||'#2B22F4')+';text-transform:uppercase;letter-spacing:.04em;margin-top:10px;margin-bottom:4px;padding-bottom:3px;border-bottom:1px solid rgba(43,34,244,.08);">'+t+'</div>';};
     // === HEADER: AQI + Health + Wind — compact ===
     h+=_FS('Current Air Quality', ac(c.us_aqi));
+    var _ms = window._aqData && window._aqData.measured;
+    if (_ms) h+='<div style="font-size:.7rem;color:rgba(43,34,244,.6);line-height:1.45;margin-bottom:6px;"><b style="color:#2B22F4;">Measured</b> by EPA monitor' + (_ms.sites.length > 1 ? 's ' : ' ') + _ms.sites.join(', ') + (_ms.when ? ' at ' + _ms.when : '') + ' (' + _ms.params.join(', ') + ')' + (_ms.model.us_aqi != null ? ' · the CAMS model says ' + Math.round(_ms.model.us_aqi) : '') + ' · <a href="https://www.airnow.gov" target="_blank" rel="noopener" style="color:inherit;">AirNow</a></div>';
+    else h+='<div style="font-size:.7rem;color:rgba(43,34,244,.45);margin-bottom:6px;">Modeled (CAMS via Open-Meteo): no EPA monitor reports near here.</div>';
     h+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid rgba(43,34,244,.08);">';
     // Health text
     h+='<div style="flex:1;min-width:0;">';
@@ -47464,7 +47494,7 @@ function dayRangeAround(d, days){
       h+='<div style="flex:1;min-width:0;">';
       h+='<div style="height:3px;background:rgba(43,34,244,.06);border-radius:2px;overflow:hidden;margin-bottom:2px;">';
       h+='<div style="height:100%;width:'+barW+'%;background:'+pc+';border-radius:2px;"></div></div>';
-      h+='<div style="font-size:9px;color:rgba(43,34,244,.35);">'+(p.v!=null?(Math.round(p.v*10)/10)+' '+p.u:'--');
+      h+='<div style="font-size:9px;color:rgba(43,34,244,.35);">'+(_ms&&p.v!=null?'model ':'')+(p.v!=null?(Math.round(p.v*10)/10)+' '+p.u:'--');   /* with AirNow on, the AQI at right is measured, the amount here is still CAMS */
       if(whoRatio!=null) h+=' · WHO '+(whoRatio<=1?'<span style="color:#05DB32;font-weight:700;">OK</span>':'<span style="color:#f97316;font-weight:700;">'+whoRatio.toFixed(1)+'×</span>');
       h+='</div>';
       h+='</div>';
