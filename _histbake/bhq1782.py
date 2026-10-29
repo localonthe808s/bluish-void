@@ -72,7 +72,9 @@ def main(work, out):
     # filled since 1782: today's Manhattan minus 1782 land
     hi = json.load(open(os.path.join(HERE, '..', 'city_boroughs.json')))['hi']
     man = unary_union([Polygon(r).buffer(0) for b in hi if b['n'] == 'Manhattan' for r in b['r'] if len(r) > 3])
-    filled = man.difference(L).buffer(-0.00018).buffer(0.00018)   # piers (20-30 m wide) are not filled water
+    # only fill wider than ~220 m, twice the map's placement error, survives (user 2026-10-28, on the 1782 lines: "idk if we need the british
+    # lines" -- they ran down the middle of Roosevelt Island, the ~110 m error drawn as if it were history). The shore runs are no longer drawn.
+    filled = man.difference(L).buffer(-0.00133).buffer(0.00133).buffer(-0.00018).buffer(0.00018)
     fp = [[[[round(x, 5), round(y, 5)] for x, y in g.exterior.coords]] for g in (filled.geoms if hasattr(filled, 'geoms') else [filled]) if g.area > 3e-7]
     km2 = sum(Polygon(r[0]).area for r in fp) * 111.32 * 111.32 * np.cos(np.radians(40.75))
     json.dump({'src': 'British Headquarters map of New York, 1782 (B.F. Stevens facsimile, 1900; NYPL via Wikimedia Commons), georeferenced from Map Warper 13702',
