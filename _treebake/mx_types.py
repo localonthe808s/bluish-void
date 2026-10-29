@@ -16,29 +16,34 @@ from rasterio.transform import from_bounds as tfb
 from shapely.geometry import shape, mapping
 from shapely.ops import transform as stransform
 from pyproj import Transformer
-GROUPS = [   # name, what it is, rgb
-    ('PINE', 'THE HIGH SIERRAS', (80, 140, 80)),
-    ('PINE-OAK', 'THE SIERRA MADRES, THE COMMONEST FOREST', (128, 138, 62)),
-    ('OAK', 'FOOTHILLS AND PLATEAUS', (156, 104, 62)),
-    ('FIR, CYPRESS, JUNIPER', 'SACRED FIR (WHERE THE MONARCHS WINTER), CYPRESS, JUNIPER', (22, 74, 52)),
-    ('CLOUD FOREST', 'MISTY MOUNTAINSIDES: SWEETGUM, OAK, TREE FERNS', (38, 128, 138)),
-    ('RAINFOREST', 'EVERGREEN, THE SOUTHEAST', (14, 104, 66)),
-    ('SEASONAL FOREST', 'SHEDS SOME LEAVES IN THE DRY SEASON', (128, 172, 80)),
-    ('DRY FOREST', 'BARE IN THE DRY SEASON, GREEN IN THE RAINS', (200, 172, 92)),
-    ('MANGROVE', 'THE COASTS', (56, 146, 168)),
-    ('MESQUITE', 'THE DRY NORTH', (176, 150, 112)),
-    ('RIVERSIDE', 'ALONG THE RIVERS', (214, 186, 70)),
+# COLORS MATCH THE US AND CANADA (user 2026-10-29: "Does Canada/US/Mexico's tree color match? Make sure species match colors"): where
+# the trees are the same, the group IS the US fall-color group's color (_foliagebake/na_species.py SPECIES, ca_species.py RGB); pine-oak is
+# woven from the pine and oak colors (2 px checks); the tropical types the US maps do not have get colors >= 27 CIE76 Delta E from every
+# US color, each other and the old-growth cyan (picked by search over hue windows that keep each type's sense; no purples).
+GROUPS = [   # name, what it is, rgb[, second rgb for a weave]
+    ('PINE', 'THE HIGH SIERRAS (AS PINE IN THE US)', (80, 140, 80)),
+    ('PINE-OAK', 'WOVEN PINE AND OAK: THE SIERRA MADRES, THE COMMONEST FOREST', (80, 140, 80), (135, 100, 75)),
+    ('OAK', 'FOOTHILLS AND PLATEAUS (AS WHITE OAK IN THE US)', (135, 100, 75)),
+    ('FIR, CYPRESS', 'SACRED FIR, WHERE THE MONARCHS WINTER (AS SPRUCE, FIR IN THE US)', (22, 74, 52)),
+    ('JUNIPER', 'THE DRY EDGES (AS JUNIPER, PINYON IN THE US)', (110, 130, 90)),
+    ('CLOUD FOREST', 'MISTY MOUNTAINSIDES: SWEETGUM, OAK, TREE FERNS', (38, 191, 176)),
+    ('RAINFOREST', 'EVERGREEN, THE SOUTHEAST', (0, 153, 51)),
+    ('SEASONAL FOREST', 'SHEDS SOME LEAVES IN THE DRY SEASON', (145, 217, 22)),
+    ('DRY FOREST', 'BARE IN THE DRY SEASON, GREEN IN THE RAINS', (242, 235, 182)),
+    ('MANGROVE', 'THE COASTS', (22, 103, 217)),
+    ('MESQUITE', 'THE DRY NORTH', (173, 168, 160)),
+    ('RIVERSIDE', 'ALONG THE RIVERS (AS COTTONWOOD IN THE US)', (215, 185, 70)),
 ]
 TYPES = [   # INEGI CLAVE, English, group index
     ('BP', 'pine forest', 0), ('BPQ', 'pine-oak forest', 1), ('BQP', 'oak-pine forest', 1), ('BQ', 'oak forest', 2),
-    ('BA', 'sacred fir (oyamel) forest', 3), ('BS', 'ayarin (Douglas-fir) forest', 3), ('BB', 'cypress (cedro) forest', 3), ('BJ', 'juniper (tascate) forest', 3),
-    ('BM', 'cloud forest', 4),
-    ('SAP', 'tall evergreen rainforest', 5), ('SAQ', 'tall semi-evergreen rainforest', 5), ('SMQ', 'medium semi-evergreen forest', 5),
-    ('SMP', 'medium evergreen forest', 5), ('SBP', 'low evergreen forest', 5), ('SBQP', 'low semi-evergreen forest', 5), ('PT', 'peten (forest islands in the wetlands)', 5),
-    ('SMS', 'medium semi-deciduous forest', 6), ('SMC', 'medium deciduous forest', 6), ('SBS', 'low semi-deciduous forest', 6),
-    ('SBC', 'low deciduous forest', 7), ('SBK', 'low thorny deciduous forest', 7), ('SBQ', 'low thorny semi-evergreen forest', 7),
-    ('VM', 'mangrove', 8), ('MK', 'mesquite forest', 9), ('MKE', 'tropical mesquite', 9),
-    ('BG', 'gallery forest', 10), ('SG', 'tropical gallery forest', 10), ('VG', 'riverside woodland', 10),
+    ('BA', 'sacred fir (oyamel) forest', 3), ('BS', 'ayarin (Douglas-fir) forest', 3), ('BB', 'cypress (cedro) forest', 3), ('BJ', 'juniper (tascate) forest', 4),
+    ('BM', 'cloud forest', 5),
+    ('SAP', 'tall evergreen rainforest', 6), ('SAQ', 'tall semi-evergreen rainforest', 6), ('SMQ', 'medium semi-evergreen forest', 6),
+    ('SMP', 'medium evergreen forest', 6), ('SBP', 'low evergreen forest', 6), ('SBQP', 'low semi-evergreen forest', 6), ('PT', 'peten (forest islands in the wetlands)', 6),
+    ('SMS', 'medium semi-deciduous forest', 7), ('SMC', 'medium deciduous forest', 7), ('SBS', 'low semi-deciduous forest', 7),
+    ('SBC', 'low deciduous forest', 8), ('SBK', 'low thorny deciduous forest', 8), ('SBQ', 'low thorny semi-evergreen forest', 8),
+    ('VM', 'mangrove', 9), ('MK', 'mesquite forest', 10), ('MKE', 'tropical mesquite', 10),
+    ('BG', 'gallery forest', 11), ('SG', 'tropical gallery forest', 11), ('VG', 'riverside woodland', 11),
 ]
 Z = 9; W0, S0, E0, N0 = -118.5, 14.4, -86.6, 32.8
 CLA0, CLO0 = 24.0, -125.0
@@ -56,16 +61,22 @@ def main(src, out):
     x0, x1 = int(tx(W0, Z)), int(tx(E0, Z)) + 1; y0, y1 = int(ty(N0, Z)), int(ty(S0, Z)) + 1; PW, PH = (x1 - x0) * 256, (y1 - y0) * 256
     R = 20037508.342789244; mx0 = x0 / 2 ** Z * 2 * R - R; mx1 = x1 / 2 ** Z * 2 * R - R; my0 = R - y0 / 2 ** Z * 2 * R; my1 = R - y1 / 2 ** Z * 2 * R
     mos = rasterize(shapes, out_shape=(PH, PW), transform=tfb(mx0, my1, mx1, my0, PW, PH), fill=0, dtype='uint8')
-    # palette: each type its group's color, regrowing a touch paler; every index a distinct color so a tap can read it back
-    pal = np.zeros((256, 3), np.int32); seen = set()
-    rank = {}
+    # palette (idx: 1-28 type, +32 regrowing, +64 the weave's oak pixels of a pine-oak type): the group's exact color, nudged a few
+    # blue steps only where needed so every index is a distinct color a tap can read back; pi maps index -> [type, regrowing]
+    pal = np.zeros((256, 3), np.int32); seen = set(); pi = {}
+    def put(ix, c, ti, reg):
+        c = list(c)
+        while tuple(c) in seen: c[2] = (c[2] + 1) % 256
+        seen.add(tuple(c)); pal[ix] = c; pi[str(ix)] = [ti, reg]
+    for sec in (0, 1):
+        for i, (_, _, g) in enumerate(TYPES):
+            put(i + 1 + 32 * sec, GROUPS[g][2], i + 1, sec)
+            if len(GROUPS[g]) > 3: put(i + 1 + 32 * sec + 64, GROUPS[g][3], i + 1, sec)
+    weave = np.zeros(256, bool)
     for i, (_, _, g) in enumerate(TYPES):
-        rk = rank[g] = rank.get(g, -1) + 1   # types of one group 6 shades apart in blue: the same color to the eye, apart to a tap
-        for sec in (0, 1):
-            c = np.array(GROUPS[g][2], float); c = c + (255 - c) * .22 if sec else c; c[2] = min(255, c[2] + 6 * rk); c = tuple(int(round(v)) for v in c)
-            while c in seen: c = (c[0], c[1], (c[2] + 1) % 256)
-            seen.add(c); pal[i + 1 + 32 * sec] = c
-    flat = [int(v) for v in pal.ravel()]; trns = bytes([0] + [225] * 63)
+        if len(GROUPS[g]) > 3: weave[i + 1] = weave[i + 33] = True
+    flat = [int(v) for v in pal.ravel()]; trns = bytes([0] + [218] * 127)   # the US and Canada maps' alpha
+    ck = ((np.arange(256)[:, None] // 2 + np.arange(256)[None, :] // 2) % 2).astype(bool)   # 2 px checks
     n = 0; lv, ox, oy = mos, x0, y0
     for z in range(Z, 2, -1):
         if z < Z:   # halve by the commoner type of each 2x2
@@ -80,18 +91,19 @@ def main(src, out):
             for i in range(lv.shape[1] // 256):
                 tl = lv[j * 256:(j + 1) * 256, i * 256:(i + 1) * 256]
                 if not tl.any(): continue
+                tl = np.where(weave[tl] & ck, tl + 64, tl).astype(np.uint8)   # pine-oak: every other 2 px check in the oak color
                 dd = os.path.join(out, 'mx', str(z), str(ox + i)); os.makedirs(dd, exist_ok=True)
                 im = Image.fromarray(tl, 'P'); im.putpalette(flat); im.save(os.path.join(dd, '%d.png' % (oy + j)), optimize=True, transparency=trns); n += 1
         print('z%d, %d tiles so far' % (z, n), flush=True)
-    json.dump({'src': 'INEGI Uso de suelo y vegetacion, Serie VII (1:250,000), via CONAFOR IDEFOR', 'groups': [[a, b, list(c)] for a, b, c in GROUPS],
-               'types': {str(i + 1): [c, e, g] for i, (c, e, g) in enumerate(TYPES)}, 'pal': {str(i): list(map(int, pal[i])) for i in range(64) if pal[i].any()},
+    json.dump({'src': 'INEGI Uso de suelo y vegetacion, Serie VII (1:250,000), via CONAFOR IDEFOR', 'groups': [[q[0], q[1]] + [list(c) for c in q[2:]] for q in GROUPS],
+               'types': {str(i + 1): [c, e, g] for i, (c, e, g) in enumerate(TYPES)}, 'pal': {k: list(map(int, pal[int(k)])) for k in pi}, 'pi': pi,
                'zmax': Z}, open(os.path.join(out, 'mx_types.json'), 'w'), separators=(',', ':'))
     # the cells: each group's share of the 0.25 deg cell's land (every pixel counts, forest or not; water too -- close enough)
     px = (x0 * 256 + np.arange(PW) + .5) / (2 ** Z * 256) * 360 - 180
     py = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y0 * 256 + np.arange(PH) + .5) / (2 ** Z * 256)))))
     cj = np.floor((px - CLO0) / .25).astype(np.int64); ci = np.floor((py - CLA0) / .25).astype(np.int64)
-    gi = np.zeros(64, np.int64) - 1
-    for i, (_, _, g) in enumerate(TYPES): gi[i + 1] = g; gi[i + 33] = g
+    gi = np.zeros(256, np.int64) - 1
+    for i, (_, _, g) in enumerate(TYPES): gi[i + 1] = g; gi[i + 33] = g; gi[i + 65] = g; gi[i + 97] = g
     ci0, cj0 = ci.min(), cj.min(); NI, NJ = ci.max() - ci0 + 1, cj.max() - cj0 + 1; NG = len(GROUPS)
     cnt = np.zeros((NI * NJ, NG)); tot = np.zeros(NI * NJ)
     for r in range(PH):
