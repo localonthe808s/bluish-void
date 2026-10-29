@@ -871,3 +871,16 @@ Consequences already baked into the ground layers:
   survive in echo-free ground, which is where that explanation is read.
 - **Quiet by value.** Every ground layer is a translucent veil over paper or navy, so
   nothing in the backdrop competes with reflectivity for attention.
+
+---
+
+# The ink-line streams (2026-10-28)
+
+The gap above -- reaches Viele drew as a bare line with no marsh wash -- is now filled, by colour rather than by thinness: his
+stream ink is a dark GREEN (lum < 100, G-R >= 14, G > B+8) where the street ruling and hill hachure are grey (G-R ~ 11). Measured
+on the Saw Kill patch: real courses G-R 15-19 / lum 89-95, false hits 11-13 / 107-110. `viele_lines_build.py`: z16 mosaic (1,035
+Map Warper tiles) -> that ink, minus a 55 m band along the river shading -> skeleton, ticks pruned (14 endpoint peels) -> each
+component's longest paths (networkx; a two-bank stream skeletonizes to a ladder, so cutting at junctions shattered it) -> smoothed
+-> dropped if under 120 m, outside Manhattan, already traced (6 of 11 points within 35 m of an old course), tangled (length >
+3.6x its span), crowded (more than 5 courses in one ~210 m cell) or a winding outline inside the wet ground. **113 new courses,
+32.8 km**, src 'Viele 1865', `line: 1`. The Saw Kill now runs to the East River; Minetta Brook to Fifth Avenue.
