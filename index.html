@@ -112712,6 +112712,72 @@ function closeAlertModal(){
          PLAY steps through the years; a tap names the class there (read from the tile itself);
        CROPS: USDA NASS Cropland Data Layer, what was planted in each 30 m field, by year (CropScape's map service);
        FIRE HISTORY: MTBS burned-area boundaries, every large US fire since 1984 (USFS map service), tap for the fire */
+    /* ---------------------------------------------------------------- NASA GIBS, STACKED -- */
+    /* NASA'S OWN TILES (user 2026-10-29: "start with the 3 yeses" -- GPM rain over the ocean, the Landsat/Sentinel photo with OPERA's
+       plant-loss alerts, SMAP soil moisture). GIBS serves each as keyless map tiles, CORS open. The satellite ones come a DAY at a
+       time and each day holds only the strips the satellite passed over, so NG.Stack layers recent days, newest first: every
+       pixel is filled from the newest day that has a usable reading (the photo skips cloud), and the tile stops asking once full.
+       opts: n (sources), url(i, z, x, y), maxNative, pick(r,g,b,a) -> 0 skip / 1 seen but clear / 2 draw, map(r,g,b,a) -> rgba */
+    var GB = { B: 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/' };
+    GB.day = function(back){ var d = new Date(Date.now() - back * 864e5); return d.toISOString().slice(0, 10); };
+    GB.u = function(layer, mx, t, z, x, y){ return GB.B + layer + '/default/' + t + '/GoogleMapsCompatible_Level' + mx + '/' + z + '/' + y + '/' + x + '.png'; };
+    GB.Stack = L.GridLayer.extend({
+      createTile: function(c, done){ var o = this.options, self = this, cv = document.createElement('canvas'); cv.width = cv.height = 256;
+        var g = cv.getContext('2d'), out = g.createImageData(256, 256), od = out.data, src = cv._src = new Uint8Array(65536), left = 65536, i = 0, sent = false;
+        var z = Math.min(c.z, o.maxNative), k = Math.pow(2, c.z - z), px = Math.floor(c.x / k), py = Math.floor(c.y / k), sz = 256 / k, ox = (c.x - px * k) * sz, oy = (c.y - py * k) * sz;
+        var fin = function(){ if (!sent){ sent = true; done(null, cv); } };
+        var next = function(){
+          if (cv._dead || left < 330 || i >= o.n || !self._map){ fin(); return; }
+          var ii = i++, u = o.url(ii, z, px, py); if (!u){ next(); return; }
+          /* fetched, not an <img>: a tile without GIBS's layer-time-actual header is not the layer (some days come back as another
+             product's striped imagery, 2026-10-29), and only fetch can read the header */
+          fetch(u).then(function(r){ if (!r.ok || !r.headers.get('layer-time-actual')) throw 0; return r.blob(); }).then(function(bl){ return createImageBitmap(bl); }).then(function(im){ try { var c2 = document.createElement('canvas'); c2.width = c2.height = 256; var g2 = c2.getContext('2d'); g2.imageSmoothingEnabled = false;
+              g2.drawImage(im, ox, oy, sz, sz, 0, 0, 256, 256); var d = g2.getImageData(0, 0, 256, 256).data, add = 0;
+              for (var p = 0; p < 65536; p++){ if (src[p]) continue; var q = p * 4; if (!d[q + 3]) continue;
+                var v = o.pick ? o.pick(d[q], d[q + 1], d[q + 2], d[q + 3]) : 2; if (!v) continue;
+                src[p] = ii + 1; left--; if (v !== 2) continue;
+                var m = o.map ? o.map(d[q], d[q + 1], d[q + 2], d[q + 3]) : null;
+                od[q] = m ? m[0] : d[q]; od[q + 1] = m ? m[1] : d[q + 1]; od[q + 2] = m ? m[2] : d[q + 2]; od[q + 3] = m ? m[3] : d[q + 3]; add++; }
+              if (add) g.putImageData(out, 0, 0); } catch(e){}
+            fin(); next(); }).catch(function(){ next(); }); };
+        next(); return cv; } });
+    GB.mk = function(o){ var l = new GB.Stack(Object.assign({ tileSize: 256, minZoom: 1, maxZoom: 19, updateWhenIdle: true, keepBuffer: 1 }, o));
+      l.on('tileunload', function(e){ e.tile._dead = true; }); return l; };
+    /* what a stacked layer drew at a point: the pixel and which source (day) it came from */
+    GB.at = function(l, ll){ if (!l || !l._map) return null; var z = l._tileZoom, P = l._map.project(ll, z), x = Math.floor(P.x / 256), y = Math.floor(P.y / 256);
+      var t = l._tiles[x + ':' + y + ':' + z]; if (!t || !t.el.getContext) return null; var fx = Math.floor(P.x - x * 256), fy = Math.floor(P.y - y * 256);
+      var d = t.el.getContext('2d').getImageData(fx, fy, 1, 1).data, s0 = t.el._src ? t.el._src[fy * 256 + fx] : 0; return { p: d, i: s0 ? s0 - 1 : -1 }; };
+    GB.near = function(tab, p){ var best = null, bd = 1e9; tab.forEach(function(q){ var d = Math.abs(q[0] - p[0]) + Math.abs(q[1] - p[1]) + Math.abs(q[2] - p[2]); if (d < bd){ bd = d; best = q; } }); return bd <= 14 ? best : null; };
+    GB.cm = function(str){ return str.split(',').map(function(e){ return [parseInt(e.substr(0, 2), 16), parseInt(e.substr(2, 2), 16), parseInt(e.substr(4, 2), 16), parseFloat(e.slice(6))]; }); };
+    GB.dfmt = function(iso){ var d = new Date(iso + (iso.length === 10 ? 'T12:00:00Z' : '')); return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }).toUpperCase(); };
+    GB.key = function(c, n){ return '<span style="display:inline-flex;align-items:center;gap:4px;margin-right:9px;white-space:nowrap;"><span style="width:10px;height:10px;border-radius:2px;background:' + c + ';"></span>' + n + '</span>'; };
+    GB.ramp = function(stops){ return '<span style="display:inline-block;width:120px;height:9px;border-radius:2px;vertical-align:-1px;margin:0 5px;background:linear-gradient(90deg,' + stops.join(',') + ');"></span>'; };
+    /* the key strip over the map, shared by WATER's two switches */
+    GB.el = function(){ var e = document.getElementById('lc-ngkey'); if (!e){ e = document.createElement('div'); e.id = 'lc-ngkey'; e.style.cssText = 'padding:4px 12px 6px;font:700 9px/1.6 system-ui,sans-serif;letter-spacing:.06em;color:#fff;'; mapEl.parentNode.insertBefore(e, mapEl); } return e; };
+    /* SATELLITE PHOTO: HLS, Landsat 8/9 + Sentinel-2A/B/C at 30 m, the newest clear pass of the last two weeks at each spot */
+    GB.photo = function(){ return GB.mk({ pane: 'lcLand', maxNative: 12, n: 30, opacity: 1,
+      url: function(i, z, x, y){ var d = (i >> 1) + 1; return GB.u(i & 1 ? 'HLS_L30_Nadir_BRDF_Adjusted_Reflectance' : 'HLS_S30_Nadir_BRDF_Adjusted_Reflectance', 12, GB.day(d), z, x, y); },
+      pick: function(r, g, b){ var lo = Math.min(r, g, b), hi = Math.max(r, g, b); if (lo > 165 && hi - lo < 40) return 0; if (hi < 6) return 0; return 2; } }); };   /* white and gray-white: cloud */
+    GB.photoSrc = function(i){ return GB.dfmt(GB.day((i >> 1) + 1)) + ' · ' + (i & 1 ? 'LANDSAT' : 'SENTINEL-2'); };
+    /* PLANT LOSS: OPERA DIST-ALERT, each spot's vegetation-loss status as of its latest pass (the last three weeks of passes);
+       "no loss" is clear here (NASA paints it near-black) and the one-pass first sightings are left out as too noisy */
+    GB.DIST = [[224, 27, 7, 'CONFIRMED · OVER HALF THE PLANTS GONE'], [222, 224, 67, 'CONFIRMED · LESS THAN HALF'], [228, 135, 39, 'LIKELY · OVER HALF, BEING CHECKED'], [137, 127, 78, 'LIKELY · LESS THAN HALF'],
+      [221, 221, 221, 'OVER · A CONFIRMED LOSS THAT HAS ENDED'], [119, 119, 119, 'OVER · SMALLER, ENDED']];
+    GB.loss = function(){ return GB.mk({ pane: 'lcLand', maxNative: 12, n: 21, opacity: 1,
+      url: function(i, z, x, y){ return GB.u('OPERA_L3_DIST-ALERT-HLS_Color_Index', 12, GB.day(i + 1), z, x, y); },
+      pick: function(r, g, b){ if (r < 30 && g < 30 && b < 30) return 1; if (r === 0 && (g === 85 || g === 136)) return 1; return GB.near(GB.DIST, [r, g, b]) ? 2 : 1; } }); };
+    /* SOAKED GROUND: SMAP enhanced 9 km, morning and evening passes of the last week, newest first */
+    GB.SM = GB.cm('ffa2001,ffa5004,ffa7006,ffaa008,ffac0010,ffae0013,ffb10016,ffb30018,ffb50020,ffb80022,ffba0025,ffbd0027,ffbf0030,ffc10032,ffc40034,ffc60037,ffc80039,ffcb0041,ffcd0044,ffd00046,ffd20048,ffd40051,ffd70053,ffd90056,ffdb0058,ffde0060,ffe00062,ffe30065,ffe50068,ffe70070,ffea0072,ffec0074,ffee0077,fff10079,fff30082,fff60084,fff80086,fff90088,fffa0091,fffb0093,fffd0096,ffff0098,fffe00100,f9fc00103,f3f900105,edf600108,e7f300110,e1f000112,dbed00114,d5ea00117,d0e700119,cae400122,c4e100124,bede00126,b8db00129,b2d800131,acd500134,a6d200136,a0cf00138,9acc00140,94c900143,8ec600145,88c300148,82c100150,7dbe00152,77bb00155,71b800157,6bb500160,65b200162,5faf00164,59ac00166,53a900169,4da600171,47a300174,41a000176,3b9d00178,359a00181,2f9700183,2a9400186,249100188,1e8e00190,188b00192,128800195,0c8500197,068200200,008200202,008206205,00850c207,008813209,008b19212,008f1f214,009225216,00952c218,009832221,009b38223,009e3e226,00a144228,00a44b230,00a851232,00ab57235,00ae5d238,00b164240,00b46a242,00b770244,00ba76247,00bd7c249,00c183252,00c489254,00c78f256,00ca95258,00cd9b261,00d0a2264,00d3a8266,00d6ae268,00dab4270,00ddbb273,00e0c1275,00e3c7278,00e6cd280,00e9d3282,00ecda284,00efe0287,00f3e6290,00f6ec292,00f9f3294,00fcf9296,00feff299,00ffff301,00fdff304,00f9ff306,00f3ff308,00edff310,00e7ff313,00e1ff316,00dbff318,00d5ff320,00d0ff322,00caff325,00c4ff327,00beff330,00b8ff332,00b2ff334,00acff336,00a6ff339,00a0ff342,009aff344,0094ff346,008eff348,0088ff351,0082ff353,007dff356,0077ff358,0071ff360,006bff362,0065ff365,005fff368,0059ff370,0053ff372,004dff374,0047ff377,0041ff379,003bff382,0035ff384,002fff386,002aff388,0024ff391,001eff393,0018ff396,0012ff398,000cff400,0006ff403,0000ff405,0000fb408,0000f8410,0000f4412,0000f1414,0000ed417,0000e9419,0000e6422,0000e2424,0000df426,0000db429,0000d7431,0000d4434,0000d0436,0000cd438,0000c9440,0000c5443,0000c2445,0000be448,0000bb450,0000b7452,0000b3455,0000b0457,0000ac460,0000a8462,0000a5464,0000a1466,00009e469,00009a471,000096474,000093476,00008f478,00008c481,000088483,000084486,000081488,00007d490,00007a492,000076495,000072497,00006f500,00006b502,000068504,000064507,020264509,040464512,060664514,080864516,0a0a64518,0c0c64521,0e0e64523,101064526,121264528,141464530,161664532,181864535,1a1a64538,1c1c64540,1e1e64542,202064544,22225a547,24245a549,26265a552,28285a554,2a2a5a556,2c2c5a558,2e2e5a561,30305a564,32325a566,34345a568,36365a570,38385a573,3a3a5a575,3c3c50577,3e3e50580,404050582,424250584,444450587,464650589,484850592,4a4a50594,4c4c50596,4e4e50599');
+    GB.soil = function(){ return GB.mk({ pane: 'lcNgSoil', maxNative: 6, n: 16, opacity: .8,
+      url: function(i, z, x, y){ return GB.u(i & 1 ? 'SMAP_L3_Passive_Enhanced_Night_Soil_Moisture' : 'SMAP_L3_Passive_Enhanced_Day_Soil_Moisture', 6, GB.day((i >> 1) + 1), z, x, y); } }); };
+    /* RAIN FROM SPACE: GPM IMERG Early, the latest half hour (rain and snow have their own ramps) */
+    GB.RN = GB.cm('00764e0.1,00784b0.106,007b480.112,007e450.119,0081420.126,00833e0.133,00863a0.141,0089360.15,008c320.159,008e2e0.168,0091290.178,0094240.188,00971f0.2,00991a0.211,009c140.224,009f0f0.237,00a2090.251,00a5030.266,03a7000.282,09aa000.298,10ad000.316,17b0000.335,1eb2000.355,26b5000.376,2db8000.398,35bb000.422,3dbd000.447,45c0000.473,4ec3000.501,56c6000.531,5fc8000.562,68cb000.596,72ce000.631,7bd1000.668,85d4000.708,8fd6000.75,99d9000.794,a3dc000.841,aedf000.891,b8e1000.944,c3e4001,cfe7001.06,daea001.12,e6ec001.19,efed001.26,f2e6001.33,f5e0001.41,f7d9001.5,fad2001.58,fdca001.68,ffc2011.78,ffb9041.88,ffb0062,ffa8092.11,ffa00c2.24,ff980f2.37,ff90112.51,ff88142.66,ff81172.82,ff7a1a2.99,ff731c3.16,ff6c1f3.35,ff65223.55,ff5f253.76,ff59273.98,ff532a4.22,ff4d2d4.47,ff47304.73,ff42335.01,ff342c5.31,ff26265.62,ff20205.96,ff1a1a6.31,ff13136.68,ff0d0d7.08,ff07077.5,ff01017.94,fa00008.41,f300008.91,ed00009.44,e7000010,e1000010.6,da000011.2,d4000011.9,ce000012.6,c8000013.3,c2000014.1,bb000015,b5000015.8,af000016.8,a9000017.8,a2000018.8,9c000020,96000021.1,90000022.4,8a000023.7,83000025.1,7d000026.6,77000028.2,71000029.9,6a000031.6,64000033.5,5e000035.5,58000037.6,52000039.8,4b000042.2,45000044.7,3f000047.3,39000050.1'); GB.SN = GB.cm('b1faee0.1,aefaef0.106,aaf9ef0.112,a7f8f00.119,a4f8f10.126,a1f7f20.133,9ef6f30.141,9bf5f40.15,98f4f40.159,95f1f30.168,92eef20.178,8febf10.188,8ce7f00.2,89e4ef0.211,86e0ee0.224,84dded0.237,81d9ec0.251,7ed5ea0.266,7cd1e90.282,79cde80.298,76c9e60.316,74c5e50.335,71c1e40.355,6fbde20.376,6db8e10.398,6ab4df0.422,68b0dd0.447,66abdc0.473,63a7da0.501,61a2d80.531,5f9ed70.562,5d99d50.596,5b95d30.631,5990d10.668,578ccf0.708,5587cd0.75,5383cb0.794,517ec90.841,4f7ac70.891,4d75c50.944,4f73c41,4d70c51.06,4c6dc61.12,4b6ac71.19,4a66c91.26,4963ca1.33,485fcb1.41,465ccc1.5,4558cd1.58,4454ce1.68,4350d01.78,424cd11.88,4048d22,3f44d32.11,3e40d42.24,3f3dd52.37,413cd72.51,433bd82.66,4539d92.82,4838da2.99,4a37db3.16,4d36dc3.35,5035de3.55,5334df3.76,5632e03.98,5931e14.22,5c30e24.47,5f2fe44.73,632ee55.01,662de65.31,6a2be75.62,6a25e85.96,6a1fe86.31,6b19e96.68,6d14e97.08,6f12e57.5,7010e17.94,720fdd8.41,740dd98.91,750cd59.44,770bd110,780acc10.6,790ac711.2,7a0ac111.9,7a09bc12.6,7b09b713.3,7b09b214.1,7b09ac15,7a08a715.8,7a08a216.8,79089d17.8,78089818.8,77079220,76078d21.1,74078822.4,72068323.7,70067d25.1,6e067826.6,6c067328.2,69056e29.9,66056931.6,63056333.5,5e045d35.5,59045637.6,54044f39.8,4f044842.2,49034244.7,44033c47.3,3f033650.1');
+    GB.rainT = null;
+    GB.rain = function(){ var l = L.tileLayer(GB.u('IMERG_Precipitation_Rate_30min', 6, 'default', '{z}', '{x}', '{y}'), { pane: 'lcNgRain', maxNativeZoom: 6, maxZoom: 19, opacity: .85, crossOrigin: 'anonymous' });
+      fetch(GB.u('IMERG_Precipitation_Rate_30min', 6, 'default', 0, 0, 0)).then(function(r){ var t = r.headers.get('layer-time-actual'); if (t){ GB.rainT = t; if (l._map) l.setUrl(GB.u('IMERG_Precipitation_Rate_30min', 6, t.replace(/\.\d+Z$/, 'Z'), '{z}', '{x}', '{y}')); WT.ngSync(); } }).catch(function(){});
+      return l; };
+    GB.pane = function(n, zi){ if (!M.getPane(n)){ var pn = M.createPane(n); pn.style.zIndex = zi; pn.style.pointerEvents = 'none'; } };
+    GB.ago = function(iso){ var h = (Date.now() - Date.parse(iso)) / 36e5; return h < 1 ? 'UNDER AN HOUR AGO' : Math.round(h) + ' HOURS AGO'; };
     var LND = { mode: 'cover', yr: 2024, cy: 2025, fy: 'all', lit: false, lay: {}, play: 0 };
     try { var _ld = JSON.parse(localStorage.getItem('bv_lc_land') || 'null'); if (_ld) Object.assign(LND, { mode: _ld.mode || 'cover', yr: _ld.yr || 2024, cy: _ld.cy || 2025, fy: _ld.fy || 'all' }); } catch(e){}
     LND.save = function(){ try { localStorage.setItem('bv_lc_land', JSON.stringify({ mode: LND.mode, yr: LND.yr, cy: LND.cy, fy: LND.fy })); } catch(e){} };
@@ -112734,8 +112800,9 @@ function closeAlertModal(){
           LND.save(); LND.sync(); }); }
       var chips = LND.mode === 'cover' ? LND.YRS.map(function(y){ return '<button type="button" class="wt-chip' + (LND.yr === y ? ' on' : '') + '" data-ly="' + y + '">' + y + '</button>'; }).join('') + '<button type="button" class="wt-chip' + (LND.play ? ' on' : '') + '" data-lp="1">' + (LND.play ? 'PAUSE' : 'PLAY 1985–2024') + '</button>'
         : LND.mode === 'crops' ? LND.CYRS.map(function(y){ return '<button type="button" class="wt-chip' + (LND.cy === y ? ' on' : '') + '" data-lcy="' + y + '">' + y + '</button>'; }).join('')
+        : LND.mode === 'photo' || LND.mode === 'loss' ? ''
         : LND.FY.map(function(q){ return '<button type="button" class="wt-chip' + (LND.fy === q[0] ? ' on' : '') + '" data-lfy="' + q[0] + '">' + q[1] + '</button>'; }).join('');
-      var h = '<div class="trb-tabs">' + [['cover', 'LAND COVER'], ['crops', 'CROPS'], ['fire', 'FIRE HISTORY']].map(function(q){ return '<button type="button" class="wt-tab' + (LND.mode === q[0] ? ' on' : '') + '" data-lm="' + q[0] + '">' + q[1] + '</button>'; }).join('') + '</div><div class="trb-chips">' + chips + '</div>';
+      var h = '<div class="trb-tabs">' + [['cover', 'LAND COVER'], ['crops', 'CROPS'], ['fire', 'FIRE HISTORY'], ['photo', 'SATELLITE PHOTO'], ['loss', 'PLANT LOSS']].map(function(q){ return '<button type="button" class="wt-tab' + (LND.mode === q[0] ? ' on' : '') + '" data-lm="' + q[0] + '">' + q[1] + '</button>'; }).join('') + '</div><div class="trb-chips">' + chips + '</div>';
       if (b.innerHTML !== h) b.innerHTML = h; return b; };
     LND.go = function(){ LND.stop(); var i = LND.YRS.indexOf(LND.yr); LND.play = setInterval(function(){ i = (i + 1) % LND.YRS.length; LND.yr = LND.YRS[i]; LND.sync(); }, 1300); };
     LND.stop = function(){ if (LND.play){ clearInterval(LND.play); LND.play = 0; } };
@@ -112752,6 +112819,8 @@ function closeAlertModal(){
           errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==' }); l.on('tileload', function(e){ e.tile.style.imageRendering = 'pixelated'; }); return l; }); }
       else if (LND.mode === 'crops'){ k = 'cdl' + LND.cy; want[k] = 1;
         LND.layer(k, function(){ return L.tileLayer.wms('https://nassgeodata.gmu.edu/CropScapeService/wms_cdlall.cgi', { layers: 'cdl_' + LND.cy, format: 'image/png', transparent: true, version: '1.1.1', crs: L.CRS.EPSG4326, pane: LND.pn(), opacity: .85, minZoom: 4, maxZoom: 19 }); }); }
+      else if (LND.mode === 'photo'){ k = 'photo'; want[k] = 1; LND.pn(); LND.layer(k, GB.photo); }
+      else if (LND.mode === 'loss'){ k = 'loss'; want[k] = 1; LND.pn(); LND.layer(k, GB.loss); }
       else { k = 'fire' + LND.fy; want[k] = 1;
         LND.layer(k, function(){ var F = LND.FY.filter(function(q){ return q[0] === LND.fy; })[0], ids = [];
           if (!F[2]) ids = [63]; else for (var y = F[2][0]; y <= F[2][1]; y++){ var id = LND.FID(y); if (id != null) ids.push(id); }
@@ -112767,10 +112836,20 @@ function closeAlertModal(){
         + '<div style="opacity:.8;">THIS MAP IS 240 M A PIXEL (THE SOURCE IS 30 M) · ' + bvA('USGS ANNUAL NLCD', 'https://www.usgs.gov/centers/eros/science/annual-national-land-cover-database') + '</div>' + (LND.info || '');
       else if (LND.mode === 'crops') h = '<div><b>CROPS ' + LND.cy + '</b> · WHAT WAS PLANTED IN EACH 30 M FIELD THAT YEAR, FROM SATELLITE AND FARM SURVEYS · THE LOWER 48</div><div>' + LND.CROPK.map(function(q){ return key(q[0], q[1]); }).join('') + '</div>'
         + '<div style="opacity:.8;">' + bvA('USDA NASS CROPLAND DATA LAYER (CROPSCAPE)', 'https://nassgeodata.gmu.edu/CropScape/') + ' · SLOW SERVER: TILES CAN TAKE A FEW SECONDS</div>';
+      else if (LND.mode === 'photo') h = '<div><b>SATELLITE PHOTO</b> · THE NEWEST CLEAR PASS OF THE LAST TWO WEEKS AT EACH SPOT, 30 M A PIXEL · NEIGHBORING STRIPS CAN BE DAYS APART · CLOUD IS SKIPPED, SO SNOW CAN BE TOO · TAP FOR THE DATE</div>'
+        + '<div style="opacity:.8;">' + bvA('NASA HARMONIZED LANDSAT AND SENTINEL-2 (HLS), VIA GIBS', 'https://www.earthdata.nasa.gov/data/projects/hls') + '</div>' + (LND.info || '');
+      else if (LND.mode === 'loss') h = '<div><b>PLANT LOSS</b> · WHERE TREES, CROPS OR GRASS HAVE RECENTLY GONE (CLEARING, FIRE, STORMS, HARVEST, BUILDING), SPOTTED BY COMPARING EACH NEW LANDSAT AND SENTINEL-2 PASS WITH THE YEARS BEFORE · EACH SPOT AS OF ITS LATEST CLEAR PASS · TAP ONE</div><div>'
+        + GB.DIST.map(function(q){ return key('rgb(' + q[0] + ',' + q[1] + ',' + q[2] + ')', q[3]); }).join('') + '</div>'
+        + '<div style="opacity:.8;">' + bvA('NASA OPERA DIST-ALERT, VIA GIBS', 'https://www.jpl.nasa.gov/go/opera/products/dist-product/') + ' · 30 M · A ONE-PASS FIRST SIGHTING IS NOT SHOWN</div>' + (LND.info || '');
       else h = '<div><b>FIRE HISTORY · ' + LND.FY.filter(function(q){ return q[0] === LND.fy; })[0][1] + '</b> · THE BURNED AREA OF EVERY LARGE US FIRE SINCE 1984 (OVER 1,000 ACRES IN THE WEST, 500 IN THE EAST), MAPPED FROM LANDSAT · DARKER ORANGE BURNED MORE THAN ONCE · TAP ONE FOR THE FIRE</div>'
         + '<div style="opacity:.8;">' + bvA('MONITORING TRENDS IN BURN SEVERITY (USGS / USFS)', 'https://www.mtbs.gov/') + '</div>' + (LND.info || '');
       E.innerHTML = h; };
     LND.tap = function(e){ if (VIEW !== 'land') return; var la = e.latlng.lat, lo = e.latlng.lng;
+      if (LND.mode === 'photo'){ var a = GB.at(LND.lay.photo, e.latlng); if (a && a.i >= 0 && a.p[3]) INFO.show('PHOTO FROM ' + GB.photoSrc(a.i), 'NASA HLS · 30 M', '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;">The newest pass here without cloud over this spot. Landsat 8 and 9 and Sentinel-2 each pass every few days; together, about every two to three.</div>'); return; }
+      if (LND.mode === 'loss'){ var b0 = GB.at(LND.lay.loss, e.latlng), q0 = b0 && b0.p[3] ? GB.near(GB.DIST, b0.p) : null; if (!b0 || b0.i < 0) return;
+        INFO.show(q0 ? q0[3].split(' · ')[0] + ' PLANT LOSS' : 'NO LOSS SEEN HERE', 'NASA OPERA DIST-ALERT · PASS OF ' + GB.dfmt(GB.day(b0.i + 1)), '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;">'
+          + (q0 ? q0[3].replace(/^[A-Z]+ · /, '').replace(/^./, function(c){ return c; }) + '. ' : 'The latest clear pass found the plants here about as they have been in past years. ')
+          + 'CONFIRMED means the loss showed on several passes in a row; LIKELY, seen more than once but not yet confirmed; OVER, a confirmed loss that is no longer growing.</div>'); return; }
       if (LND.mode === 'cover'){ var z = 9, n = Math.pow(2, z), xf = (lo + 180) / 360 * n, r = la * Math.PI / 180, yf = (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * n, X = Math.floor(xf), Y = Math.floor(yf);
         var im = new Image(); im.crossOrigin = 'anonymous'; im.onload = function(){ try { var c = document.createElement('canvas'); c.width = c.height = 256; var g = c.getContext('2d'); g.drawImage(im, 0, 0);
             var p = g.getImageData(Math.floor((xf - X) * 256), Math.floor((yf - Y) * 256), 1, 1).data, best = null, bd = 1e9;
@@ -114217,13 +114296,35 @@ function closeAlertModal(){
        and the flood map on for other areas"): in the five boroughs SEWER OUTFALLS + HISTORICAL WATERS; anywhere else FLOOD MAP. RIVER
        GAUGES starts off. The flood map follows the place until it is switched by hand (WT.coHand) */
     WT.co = { flood: false, cur: true, waves: true, river: false, harbor: true, sewer: true }; WT.coHand = {};
+    /* RAIN FROM SPACE (SEA) and SOAKED GROUND (FLOODING): NASA's tiles through NG, their key over the map, a tap reads the value */
+    WT.rain = false; WT.soil = false; WT.ngL = {};
+    WT.ngSync = function(){ if (!M) return;
+      var want = { rain: VIEW === 'map' && WT.tab === 'sea' && WT.rain && !window._waterEs, soil: VIEW === 'map' && WT.tab === 'flood' && WT.soil };
+      Object.keys(want).forEach(function(k){ if (want[k] && !WT.ngL[k]){ GB.pane(k === 'rain' ? 'lcNgRain' : 'lcNgSoil', k === 'rain' ? 447 : 432); WT.ngL[k] = GB[k](); }
+        var l = WT.ngL[k]; if (!l) return; if (want[k] && !M.hasLayer(l)) l.addTo(M); else if (!want[k] && M.hasLayer(l)) M.removeLayer(l); });
+      if (!WT.ngHook){ WT.ngHook = true; M.on('click', WT.ngTap); }
+      var h = '';
+      if (want.rain) h += '<div>RAIN FROM SPACE · ' + (GB.rainT ? 'THE HALF HOUR ENDING ' + GB.ago(GB.rainT) : 'THE LATEST HALF HOUR') + ' · RAIN, INCHES AN HOUR: 0.004' + GB.ramp(['rgb(0,118,78)', 'rgb(61,189,0)', 'rgb(184,225,0)', 'rgb(255,176,6)', 'rgb(255,83,42)', 'rgb(243,0,0)', 'rgb(82,0,0)']) + '2+'
+        + ' · SNOW' + GB.ramp(['rgb(177,250,238)', 'rgb(104,176,221)', 'rgb(64,72,210)', 'rgb(120,8,152)']) + ' · WHERE RADAR CANNOT REACH: THE OPEN OCEAN · TAP FOR THE RATE · '
+        + bvA('NASA GPM IMERG EARLY, VIA GIBS', 'https://gpm.nasa.gov/data/imerg') + '</div>';
+      if (want.soil) h += '<div>SOAKED GROUND · WATER IN THE TOP 2 INCHES OF SOIL, BY VOLUME: DRY' + GB.ramp(['rgb(255,162,0)', 'rgb(255,236,0)', 'rgb(136,195,0)', 'rgb(0,152,50)', 'rgb(0,249,243)', 'rgb(0,95,255)', 'rgb(0,0,201)']) + 'SOAKED · WET GROUND FLOODS SOONER: RAIN RUNS OFF INSTEAD OF SINKING IN'
+        + ' · EACH SQUARE ABOUT 6 MI ACROSS, THE NEWEST PASS OF THE LAST WEEK (CITIES AND WATER ARE LEFT BLANK) · TAP FOR THE READING · ' + bvA('NASA SMAP, VIA GIBS', 'https://smap.jpl.nasa.gov/') + '</div>';
+      var e = GB.el(); if (e.innerHTML !== h) e.innerHTML = h; e.style.display = h ? '' : 'none'; };
+    WT.ngTap = function(e){ if (VIEW !== 'map') return;
+      if (WT.tab === 'flood' && WT.soil && WT.ngL.soil){ var a = GB.at(WT.ngL.soil, e.latlng), q = a && a.p[3] ? GB.near(GB.SM, a.p) : null; if (!q) return;
+        var pc = Math.round(q[3] / 10), w = pc < 10 ? 'DRY' : pc < 20 ? 'ON THE DRY SIDE' : pc < 30 ? 'MOIST' : pc < 40 ? 'WET' : 'SOAKED';
+        INFO.show(w + ' · ABOUT ' + pc + '% WATER', 'NASA SMAP · ' + GB.dfmt(GB.day((a.i >> 1) + 1)) + (a.i & 1 ? ' EVENING' : ' MORNING') + ' PASS', '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;">Water in the top 2 inches of soil over this 6-mile square, by volume. Most soils hold about 40-50% when fully soaked; over about 35%, a heavy rain mostly runs off.</div>'); return; }
+      if (WT.tab === 'sea' && WT.rain && WT.ngL.rain){ var z = Math.max(0, Math.min(6, Math.round(M.getZoom()))), t = FLS.tile(e.latlng.lat, e.latlng.lng, z);
+        FLS.px(GB.u('IMERG_Precipitation_Rate_30min', 6, GB.rainT ? GB.rainT.replace(/\.\d+Z$/, 'Z') : 'default', z, t.x, t.y), t.fx, t.fy).then(function(p){ if (!p || !p[3]) return;
+          var r = GB.near(GB.RN, p), s0 = GB.near(GB.SN, p), q = r || s0; if (!q) return; var inch = q[3] / 25.4;
+          INFO.show((s0 && !r ? 'SNOW' : 'RAIN') + ' · ' + (inch < .01 ? 'UNDER 0.01' : inch.toFixed(inch < .1 ? 2 : 1)) + ' IN AN HOUR', 'NASA GPM IMERG EARLY' + (GB.rainT ? ' · ' + GB.ago(GB.rainT) : ''), '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;">The rate over this 7-mile square for that half hour, estimated from the microwave and infrared sensors of a fleet of satellites. Light rain is under 0.1 in an hour; heavy, over 0.3.</div>'); }); } };
     WT.coAuto = function(){ if (WT.coHand.flood) return false;
       var nyc = nycHere() || (nybBox() && !NYB), f = !nyc;          /* the borough outlines still loading: the NYC box decides */
       if (WT.co.flood === f) return false; WT.co.flood = f; return true; };
     WT.CHIPS = function(){
-      if (WT.tab === 'flood') return [['co:flood', 'FLOOD MAP'], ['co:river', 'RIVER GAUGES']].concat(nycHere() ? [['co:sewer', 'SEWER OUTFALLS']] : []).concat(GH.inCity() ? [['ghost', 'HISTORICAL WATERS']] : []);
+      if (WT.tab === 'flood') return [['co:flood', 'FLOOD MAP'], ['co:river', 'RIVER GAUGES'], ['soil', 'SOAKED GROUND']].concat(nycHere() ? [['co:sewer', 'SEWER OUTFALLS']] : []).concat(GH.inCity() ? [['ghost', 'HISTORICAL WATERS']] : []);
       if (WT.tab === 'coast') return [['co:cur', 'TIDAL CURRENTS'], ['co:waves', 'WAVES']].concat(nycHere() ? [['co:harbor', 'HARBOR FLOW']] : []).concat(WT.hfrHere() ? [['hfr', 'RADAR CURRENTS']].concat(WT.hfr ? [['hplay', 'PLAY 12 H']] : []) : []).concat([['smt', 'SEAMOUNTS']]);
-      if (WT.tab === 'sea') return [['seg:sst', ''], ['scur', 'CURRENTS'], ['mz', 'MARINE FORECAST'], ['buoy', 'BUOYS'], ['argo', 'ARGO FLOATS'], ['smt', 'SEAMOUNTS'], ['v:gulf', 'GULF STREAM']];
+      if (WT.tab === 'sea') return [['seg:sst', ''], ['scur', 'CURRENTS'], ['rain', 'RAIN FROM SPACE'], ['mz', 'MARINE FORECAST'], ['buoy', 'BUOYS'], ['argo', 'ARGO FLOATS'], ['smt', 'SEAMOUNTS'], ['v:gulf', 'GULF STREAM']];
       return [].concat(WT.globeOn() || window._waterEs === 'enso' ? [['play', 'PLAY THE DAY']] : []).concat([['cur', 'CURRENTS'], ['gsst', 'SEA TEMPERATURE'], ['chl', 'OCEAN COLOR'], ['sarg', 'SARGASSUM'], ['gp', 'GARBAGE PATCHES'], ['smt', 'SEAMOUNTS'], ['v:enso', 'EL NIÑO'], ['v:amoc', 'ATLANTIC OVERTURNING']]); };
     /* STREAKS | DYE (user 2026-10-28, "yes do all"): how the globe draws the currents, remembered (bv_lc_look) */
     SF.sea = false;                                              /* SARGASSO SEA removed (user 2026-10-28: "its just a circle") */
@@ -114300,7 +114401,7 @@ function closeAlertModal(){
     LCRES.push(function(){ if (WT.esk) WT.hostSync(); });   /* back from the globe the pane counts as unseen until its observer fires */
     WT.isOn = function(k){ if (k.indexOf('es:') === 0) return window._waterEs === k.slice(3); if (k.indexOf('v:') === 0 && window._waterEs === k.slice(2)) return true; if (window._waterEs && window._waterEs !== 'ocur') return false;   /* a story is up: the map's layers are not */
       if (k.indexOf('co:') === 0) return !!WT.co[k.slice(3)]; if (k === 'ghost') return !!GH.on; if (k.indexOf('v:') === 0) return WT.esk === k.slice(2) || window._waterEs === k.slice(2);
-      if (k === 'sst' || k === 'anom') return WT.sst === k; if (k === 'buoy') return WT.buoy; if (k === 'mz') return MZ.on; if (k === 'argo') return AR.on; if (k === 'smt') return WT.smt; if (k === 'scur') return WT.scur; if (k === 'hfr') return WT.hfr; if (k === 'play') return WT.play; if (k === 'hplay') return WT.hplay; if (k === 'gsst') return WT.gsst; if (k.indexOf('lk:') === 0) return WT.look === k.slice(3); return !!SF[k]; };
+      if (k === 'sst' || k === 'anom') return WT.sst === k; if (k === 'buoy') return WT.buoy; if (k === 'mz') return MZ.on; if (k === 'argo') return AR.on; if (k === 'smt') return WT.smt; if (k === 'scur') return WT.scur; if (k === 'rain') return WT.rain; if (k === 'soil') return WT.soil; if (k === 'hfr') return WT.hfr; if (k === 'play') return WT.play; if (k === 'hplay') return WT.hplay; if (k === 'gsst') return WT.gsst; if (k.indexOf('lk:') === 0) return WT.look === k.slice(3); return !!SF[k]; };
     WT.menu = null;                                            /* 'argo' | 'gp' while its menu is open */
     WT.el = function(){ var b = document.getElementById('cw-waterbar'); if (b) return b;
       var pb = document.getElementById('cw-placebar'); if (!pb) return null;
@@ -114383,7 +114484,7 @@ function closeAlertModal(){
          the harbor's layer -- shown on FLOODING by SEWER OUTFALLS, and on COAST with HARBOR FLOW as before */
       pane.classList.toggle('lc-pipes-off', !((WT.tab === 'coast' && WT.co.harbor) || (WT.tab === 'flood' && WT.co.sewer)));
       window._wHarborOff = !WT.co.harbor || WT.tab !== 'coast'; GH.sync();
-      WT.hostSync(); SF.sync(); AR.sync(); WT.sstSync(); WT.smtSync(); MZ.sync(); EK.sync(); WT.sumSync(); if (OV.buoyRead) OV.buoyRead(true); if (OV.draw) OV.draw(); WSUM.sync(); SF.row(); WT.render();
+      WT.hostSync(); SF.sync(); AR.sync(); WT.sstSync(); WT.ngSync(); WT.smtSync(); MZ.sync(); EK.sync(); WT.sumSync(); if (OV.buoyRead) OV.buoyRead(true); if (OV.draw) OV.draw(); WSUM.sync(); SF.row(); WT.render();
       if (window._cwSecSync) window._cwSecSync(); };
     WT.chip = function(k){
       if (k.indexOf('es:') === 0){ WT.menu = null; WT.toEs(k.slice(3)); return; }
@@ -114408,6 +114509,8 @@ function closeAlertModal(){
       else if (k === 'play'){ WT.play = !WT.play; if (WT.play && window._waterEs === 'enso') WT.toEs('ocur'); }
       else if (k === 'gsst'){ WT.gsst = !WT.gsst; }
       else if (k === 'hplay'){ WT.hplay = !WT.hplay; SF.hrPlay(WT.hplay); }
+      else if (k === 'rain') WT.rain = !WT.rain;
+      else if (k === 'soil'){ WT.soil = !WT.soil; if (WT.soil && M && M.getZoom() > 8) M.setZoom(8); }   /* 9 km squares: back out to see the pattern */
       else if (k === 'scur'){ WT.scur = !WT.scur; try { localStorage.setItem('bv_lc_scur', WT.scur ? '1' : '0'); } catch(e){} }
       else if (k === 'hfr'){ WT.hfr = !WT.hfr; if (!WT.hfr && WT.hplay){ WT.hplay = false; SF.hrPlay(false); } try { localStorage.setItem('bv_lc_hfr', WT.hfr ? '1' : '0'); } catch(e){}
         if (WT.hfr){ var gof = function(){ if (WT.hfr && WT.tab === 'coast') WT.hfrFind(); }; if (SF.HR.regs.length) gof(); else setTimeout(function(){ SF.hrLoad(); var w0 = Date.now(), iv = setInterval(function(){ if (SF.HR.regs.length || Date.now() - w0 > 8000){ clearInterval(iv); gof(); } }, 300); }, 0); } }
@@ -114878,6 +114981,7 @@ function closeAlertModal(){
     var view = function(v){
       if (v === 'radar' && VIEW !== 'radar'){ OV.satOn = false; if (OV.mlOff) OV.mlOff(); }   /* entering RADAR: no satellite or marine layer until a pill asks */
       VIEW = v; build(); if (!M) return; INFO.hide(); ARC.draw(); try { LEG.set(); } catch(e){}
+      try { WT.ngSync(); } catch(e){}   /* NASA's rain / soil layers and their key leave with WATER */
       [].forEach.call(pane.querySelectorAll('#lc-tabs button'), function(b){ var dv = b.getAttribute('data-v'); b.classList.toggle('on', dv === v || (dv === 'map' && WAT.inMap(v))); });
       WAT.sub();
       LAY.apply();
