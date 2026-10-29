@@ -884,3 +884,12 @@ component's longest paths (networkx; a two-bank stream skeletonizes to a ladder,
 -> dropped if under 120 m, outside Manhattan, already traced (6 of 11 points within 35 m of an old course), tangled (length >
 3.6x its span), crowded (more than 5 courses in one ~210 m cell) or a winding outline inside the wet ground. **113 new courses,
 32.8 km**, src 'Viele 1865', `line: 1`. The Saw Kill now runs to the East River; Minetta Brook to Fifth Avenue.
+
+# The island swept, on the David Rumsey scan (2026-10-29)
+
+David Rumsey's scan (IIIF, 19,894 x 6,358, public domain) was registered to the georeferenced Map Warper mosaic by SIFT features
+(18,647 matches, a cubic polynomial, median residual 0.9 m), cut into 30 overlapping views, and every view read by eye against what
+was traced. 51 missing streams were placed by hand and snapped to the darkest ink within ~15 m on the full-resolution scan
+(`viele_sweep/`): the Hamilton Heights runs to the Hudson, the Manhattanville branches, the streams under the upper Central Park
+(the Harlem Meer feeders), Bloomingdale's 100s, the Hell's Kitchen feeders, the East Harlem flats, the Inwood branches; 13.4 km.
+Lower Manhattan, the Village waterfront and the Lower East Side had nothing missing.
