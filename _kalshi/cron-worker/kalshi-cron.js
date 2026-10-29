@@ -1014,6 +1014,15 @@ async function alertTick(env, sched) {
         { headers: { 'Accept': 'application/json', 'User-Agent': 'bluishvoid-alerts' } })).json()).market;
     } catch (e) { out.push(`${h.ticker} err`); continue; }
     if (!m) continue;
+    /* NO ALERTS ON A DAY THAT IS OVER (user 2026-10-28, 11 PM: "i just got a notification on my bet on NY highs today, that was settled
+       hours ago"). The position stays in the portfolio until Kalshi settles it the next morning, and every hourly report kept pushing --
+       6:32 PM, 11 PM, 7 AM the next day. A market whose local day has ended, or that is no longer trading, gets nothing here; the
+       settlement itself is the portal alert's job */
+    const mDay = (() => { const t = /-(\d{2})([A-Z]{3})(\d{2})-/.exec(h.ticker); if (!t) return null;
+      const mo = { JAN: '01', FEB: '02', MAR: '03', APR: '04', MAY: '05', JUN: '06', JUL: '07', AUG: '08', SEP: '09', OCT: '10', NOV: '11', DEC: '12' }[t[2]];
+      return mo ? `20${t[1]}-${mo}-${t[3]}` : null; })();
+    const today0 = new Intl.DateTimeFormat('en-CA', { timeZone: h.am.tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+    if ((mDay && mDay < today0) || (m.status && !/^(active|open)$/i.test(m.status))) { out.push(`${h.ticker} day over, quiet`); continue; }
     const b = rungBounds(m), label = rungLabel(b), side = h.n > 0 ? 'YES' : 'NO';
     const bid = Number(m.yes_bid_dollars), ask = Number(m.yes_ask_dollars);
     const mid = (isFinite(bid) && isFinite(ask) && ask > 0) ? (bid + ask) / 2 : null;
@@ -1042,9 +1051,14 @@ async function alertTick(env, sched) {
         state.mkt[h.ticker] = mid;
       }
     }
-    // 1a. a new hourly (or special) report from the settlement station
+    // 1a. a new hourly (or special) report from the settlement station -- only one that can still matter: a DAILY HIGH is set by the
+    // warmest reading, so a report below the day's high so far changes nothing (2026-10-28: the evening reports were all noise)
     const rp = rep[h.am.icao];
-    if (rp && state.metar[h.am.icao] !== rp.at) {
+    state.dayHi = state.dayHi || {};
+    const dh = state.dayHi[h.ticker], runHi = Math.max(dh && dh.d === mDay ? dh.v : -999, max7 != null ? max7 : -999);
+    const newHigh = rp && rp.f >= runHi - 0.5;
+    if (rp) state.dayHi[h.ticker] = { d: mDay, v: Math.max(runHi, rp.f) };
+    if (rp && state.metar[h.am.icao] !== rp.at && newHigh) {
       const inNow = inRung(rp.f, b), above = b[1] != null && rp.f > b[1] + 0.5, below = b[0] != null && rp.f < b[0] - 0.5;
       const bad = (side === 'YES') ? (above) : (inNow);
       const local = new Date(rp.at).toLocaleTimeString('en-US', { timeZone: h.am.tz, hour: 'numeric', minute: '2-digit' });
@@ -1112,6 +1126,7 @@ async function alertTick(env, sched) {
       }
     }
   }
+  if (state.dayHi) for (const k of Object.keys(state.dayHi)) if (!held.some((h) => h.ticker === k)) delete state.dayHi[k];   /* settled markets leave */
   for (const k of Object.keys(max7by)) if (max7by[k] != null) state.max7by[k] = max7by[k];
   for (const k of Object.keys(rep)) state.metar[k] = rep[k].at;
   // KV allows 1,000 writes a day on this plan; a minute cadence is 1,020 ticks.
