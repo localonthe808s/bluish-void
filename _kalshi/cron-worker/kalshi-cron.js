@@ -991,13 +991,18 @@ async function alertTick(env, sched) {
   const icaos = [...new Set(held.map((h) => h.am.icao))];
   if (icaos.length) {
     try {
-      const r = await fetch(`https://aviationweather.gov/api/data/metar?ids=${icaos.join(',')}&format=json&hours=2`,
+      const r = await fetch(`https://aviationweather.gov/api/data/metar?ids=${icaos.join(',')}&format=json&hours=26`,
         { headers: { 'User-Agent': 'bluishvoid-alerts' } });
       if (r.ok) {
         for (const m of await r.json()) {
           if (!m || m.temp == null || !m.icaoId) continue;
           const cur = rep[m.icaoId];
-          if (!cur || m.reportTime > cur.at) rep[m.icaoId] = { at: m.reportTime, f: Math.round((m.temp * 9 / 5 + 32) * 10) / 10, raw: (m.rawOb || '').slice(0, 5) };
+          const f0 = Math.round((m.temp * 9 / 5 + 32) * 10) / 10;
+          if (!cur || m.reportTime > cur.at) rep[m.icaoId] = Object.assign({ hiBy: (cur && cur.hiBy) || {} }, { at: m.reportTime, f: f0, raw: (m.rawOb || '').slice(0, 5) });
+          /* the day's warmest report, per local date (2026-10-28: the high has to come from the reports themselves -- TWC's running max is
+             not there every hour, and seeding from the latest report alone set "the day's high" to an 11 PM reading) */
+          const am0 = ALERT_MARKETS.find((a) => a.icao === m.icaoId), dl = am0 ? new Intl.DateTimeFormat('en-CA', { timeZone: am0.tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(m.reportTime)) : null;
+          const hb = rep[m.icaoId].hiBy; if (dl && (hb[dl] == null || f0 > hb[dl])) hb[dl] = f0;
         }
       }
     } catch (e) { out.push('metar err'); }
@@ -1055,8 +1060,10 @@ async function alertTick(env, sched) {
     // warmest reading, so a report below the day's high so far changes nothing (2026-10-28: the evening reports were all noise)
     const rp = rep[h.am.icao];
     state.dayHi = state.dayHi || {};
-    const dh = state.dayHi[h.ticker], runHi = Math.max(dh && dh.d === mDay ? dh.v : -999, max7 != null ? max7 : -999);
-    const newHigh = rp && rp.f >= runHi - 0.5;
+    const dh = state.dayHi[h.ticker], rpHi = rp && rp.hiBy && mDay ? rp.hiBy[mDay] : null;
+    const runHi = Math.max(dh && dh.d === mDay ? dh.v : -999, max7 != null ? max7 : -999, rpHi != null ? rpHi : -999);
+    const isLatestTop = rp && rpHi != null && rp.f >= rpHi;   /* the latest report IS the day's top so far */
+    const newHigh = rp && (isLatestTop ? rp.f >= Math.max(dh && dh.d === mDay ? dh.v : -999, max7 != null ? max7 : -999) - 0.5 : false);
     if (rp) state.dayHi[h.ticker] = { d: mDay, v: Math.max(runHi, rp.f) };
     if (rp && state.metar[h.am.icao] !== rp.at && newHigh) {
       const inNow = inRung(rp.f, b), above = b[1] != null && rp.f > b[1] + 0.5, below = b[0] != null && rp.f < b[0] - 0.5;
