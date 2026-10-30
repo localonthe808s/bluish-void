@@ -111966,6 +111966,7 @@ function closeAlertModal(){
       chips.forEach(function(f){ try { f(); } catch (e){} });
       drawTags();
       strip.insertAdjacentHTML('beforeend', AB.say());
+      if (TR.show.bike && nycHere()) strip.insertAdjacentHTML('beforeend', CB.line());
       /* PLAN A TO B JOINS THE SWITCHES (user 2026-10-23, clouds review: it sat alone on a line under the delays): while the planner is
          closed its button rides at the end of the pill row; open, the planner keeps its own line in the strip. Moved before wiring
          (AB.wire looks the button up by id) */
@@ -111976,8 +111977,42 @@ function closeAlertModal(){
     /* TRAFFIC'S SWITCHES (user 2026-10-17: "make toggles for the NYC traffic stuff like the cameras and subway"): ROAD
        TRAFFIC (TomTom's live colors and the jams), SUBWAY (lines, stations, delays, the home board; NYC and LA only),
        CAMERAS (NYC and LA only), BUSES & TRAINS (the live vehicles). Remembered on this device (bv_lc_traf). */
-    TR.show = { roads: true, rail: true, cams: true, veh: true, rr: true };   /* rr: METRO NORTH & LIRR, New York's own switch (2026-10-19) */
+    TR.show = { roads: true, rail: true, cams: true, veh: true, rr: true, bike: false };   /* rr: METRO NORTH & LIRR, New York's own switch (2026-10-19); bike: CITI BIKE (2026-10-30) */
     try { var _ts = JSON.parse(localStorage.getItem('bv_lc_traf') || 'null'); if (_ts) TR.show = Object.assign(TR.show, _ts); } catch(e){}
+    /* CITI BIKE (user 2026-10-30: "add citi bike"): every dock from Citi Bike's public GBFS feed (gbfs.citibikenyc.com, CORS *, no key):
+       where the docks are once a visit, how full they are every minute while the switch is on. A dot per dock, colored by the bikes
+       waiting there -- red none, amber a few, green five or more; gray not renting. A tap reads its classic bikes, e-bikes and open docks */
+    var CB = { info: null, st: null, at: 0, L: null, req: null, timer: 0 };
+    CB.U = 'https://gbfs.citibikenyc.com/gbfs/en/';
+    CB.col = function(q){ if (!q || !q.is_renting) return '#94a3b8'; var n = q.num_bikes_available || 0; return n === 0 ? '#ef4444' : n < 5 ? '#f59e0b' : '#22c55e'; };
+    CB.load = function(){ if (CB.req) return CB.req;
+      var inf = CB.info ? Promise.resolve(CB.info) : fetch(CB.U + 'station_information.json').then(function(r){ return r.json(); }).then(function(j){ CB.info = {}; ((j.data || {}).stations || []).forEach(function(s2){ CB.info[s2.station_id] = s2; }); return CB.info; });
+      CB.req = Promise.all([inf, fetch(CB.U + 'station_status.json').then(function(r){ return r.json(); })]).then(function(R){ CB.st = {}; ((R[1].data || {}).stations || []).forEach(function(q){ CB.st[q.station_id] = q; });
+        CB.at = (R[1].last_updated || Date.now() / 1000) * 1000; CB.req = null; CB.draw(); TR.draw(); }).catch(function(){ CB.req = null; });
+      return CB.req; };
+    CB.sync = function(){ var on = TR.lit === true && TR.show.bike && nycHere() && M;
+      if (!on){ if (CB.L && M && M.hasLayer(CB.L)) M.removeLayer(CB.L); if (CB.timer){ clearInterval(CB.timer); CB.timer = 0; } return; }
+      if (!CB.st || Date.now() - CB.at > 60000) CB.load(); else CB.draw();
+      if (!CB.timer) CB.timer = setInterval(function(){ if (TR.lit === true && TR.show.bike && !document.hidden) CB.load(); }, 60000); };
+    CB.draw = function(){ if (!M || !CB.info || !CB.st || !(TR.lit === true && TR.show.bike)) return;
+      if (!M.getPane('lcBike')){ var pn = M.createPane('lcBike'); pn.style.zIndex = 446; }
+      var bp = M.getPane('lcBike'), tp = M.getPane('lcTraf'); if (tp && bp.nextSibling !== tp) tp.parentNode.insertBefore(bp, tp);   /* under TRAFFIC's canvas: the subway chips stay on top (panes are flattened, DOM order decides) */
+      if (!CB.rd) CB.rd = L.canvas({ pane: 'lcBike', padding: .3 });
+      if (CB.L) CB.L.clearLayers(); else CB.L = L.layerGroup();
+      var n = 0, b = 0, e = 0, d = 0, empty = 0;
+      Object.keys(CB.info).forEach(function(id){ var s2 = CB.info[id], q = CB.st[id]; if (!q || !q.is_installed || !isFinite(s2.lat)) return; n++;
+        b += q.num_bikes_available || 0; e += q.num_ebikes_available || 0; d += q.num_docks_available || 0; if (q.is_renting && !(q.num_bikes_available > 0)) empty++;
+        L.circleMarker([s2.lat, s2.lon], { renderer: CB.rd, pane: 'lcBike', radius: 3.6, weight: 1, color: 'rgba(8,10,16,.7)', fillColor: CB.col(q), fillOpacity: .95 })
+          .on('click', function(ev){ L.DomEvent.stop(ev); CB.tap(s2, CB.st[id] || q); }).addTo(CB.L); });
+      CB.sum = { n: n, b: b, e: e, d: d, empty: empty };
+      if (!M.hasLayer(CB.L)) CB.L.addTo(M); };
+    CB.tap = function(s2, q){ var bikes = q.num_bikes_available || 0, eb = q.num_ebikes_available || 0, ago = Math.max(0, Math.round((Date.now() / 1000 - (q.last_reported || 0)) / 60));
+      INFO.show(s2.name, 'CITI BIKE · ' + (ago <= 1 ? 'REPORTED JUST NOW' : 'REPORTED ' + ago + ' MIN AGO'), '<div style="font:700 11px/1.6 system-ui,sans-serif;margin-top:5px;">'
+        + (q.is_renting ? (bikes ? (bikes - eb) + ' CLASSIC ' + (bikes - eb === 1 ? 'BIKE' : 'BIKES') + ' · ' + eb + ' E-' + (eb === 1 ? 'BIKE' : 'BIKES') : 'NO BIKES RIGHT NOW') : 'NOT RENTING RIGHT NOW')
+        + ' · ' + (q.is_returning ? (q.num_docks_available || 0) + ' OPEN ' + ((q.num_docks_available || 0) === 1 ? 'DOCK' : 'DOCKS') : 'NOT TAKING RETURNS') + '</div>', 'https://citibikenyc.com/explore'); };
+    CB.line = function(){ var k = function(c, t){ return '<span class="lr-k"><span class="lr-dot" style="background:' + c + ';"></span>' + t + '</span> '; }, S2 = CB.sum;
+      return '<div style="margin-top:3px;">CITI BIKE' + (S2 ? ' · ' + S2.b.toLocaleString('en-US') + ' BIKES (' + S2.e.toLocaleString('en-US') + ' ELECTRIC) AT ' + S2.n.toLocaleString('en-US') + ' DOCKS · ' + S2.empty + ' EMPTY' : ' · READING THE DOCKS…')
+        + ' · ' + k('#22c55e', '5+ BIKES') + k('#f59e0b', '1–4') + k('#ef4444', 'NONE') + k('#94a3b8', 'CLOSED') + '· TAP ONE · ' + bvA('CITI BIKE GBFS', 'https://citibikenyc.com/system-data') + '</div>'; };
     TR.pills = function(){
       var city = nycHere() || laHere(), row = document.getElementById('lc-traf-pills');
       if (!row){ row = document.createElement('div'); row.id = 'lc-traf-pills'; row.style.cssText = 'padding:0 12px 6px;'; strip.parentNode.insertBefore(row, strip); }
@@ -111985,7 +112020,7 @@ function closeAlertModal(){
       /* BUSES / METRO NORTH & LIRR (user 2026-10-19: "separate METRO NORTH & LIRR from buses"): in New York the railroads have their
          own switch -- their live trains and their track together; elsewhere one BUSES & TRAINS switch as before */
       var P2 = [['roads', 'ROAD TRAFFIC']].concat(city ? [['rail', nycHere() ? 'SUBWAY' : 'METRO RAIL']] : []).concat(city || LAX.ctD() ? [['cams', 'CAMERAS']] : [])
-        .concat(nycHere() ? [['veh', 'BUSES'], ['rr', 'METRO NORTH & LIRR']] : [['veh', 'BUSES & TRAINS']]);   /* cameras: also any Caltrans district (LAX) */
+        .concat(nycHere() ? [['veh', 'BUSES'], ['bike', 'CITI BIKE'], ['rr', 'METRO NORTH & LIRR']] : [['veh', 'BUSES & TRAINS']]);   /* cameras: also any Caltrans district (LAX) */
       row.innerHTML = P2.map(function(q){ return '<button type="button" class="lc-pill' + (TR.show[q[0]] ? ' on' : '') + '" data-t="' + q[0] + '" style="margin:0;">' + q[1] + '</button>'; }).join('');
       row.style.display = TR.lit === true ? 'flex' : 'none'; row.style.flexWrap = 'wrap'; row.style.gap = '6px';   /* even gaps when it wraps (user 2026-10-23) */
       [].forEach.call(row.querySelectorAll('[data-t]'), function(b){ b.onclick = function(e){ e.stopPropagation(); var k = b.getAttribute('data-t'); TR.show[k] = !TR.show[k];
@@ -111995,6 +112030,7 @@ function closeAlertModal(){
       if (!M) return;
       if (TR.lay){ if (TR.show.roads && TR.lit === true && !M.hasLayer(TR.lay)) TR.lay.addTo(M); else if (!TR.show.roads && M.hasLayer(TR.lay)) M.removeLayer(TR.lay); }
       if (TR.lit === true) TR.meshOn();
+      try { CB.sync(); } catch(e){}
       if (!TR.show.rail){ TR.boardClose(); var el = document.getElementById('lc-board'); if (el){ el.style.display = 'none'; el.innerHTML = ''; el.removeAttribute('data-home'); } }
       else if (!TR.board) TR.home(); };
     TR.on = function(){
@@ -112057,7 +112093,7 @@ function closeAlertModal(){
         if (TR.lit === true && TR.show.roads) TR.mesh.addTo(M);
       }).catch(function(){ TR.meshReq = 0; });
     };
-    TR.off = function(){ if (TR.lit !== true) return; TR.lit = false; TR.boardClose(); var tp = document.getElementById('lc-traf-pills'); if (tp) tp.style.display = 'none'; if (TR.lay && M && M.hasLayer(TR.lay)) M.removeLayer(TR.lay); if (TR.mesh && M && M.hasLayer(TR.mesh)) M.removeLayer(TR.mesh); if (TR.cv) TR.cv.style.display = 'none'; cvFree(TR.cv); if (TR.tcv){ TR.tcv.style.display = 'none'; cvFree(TR.tcv); }
+    TR.off = function(){ if (TR.lit !== true) return; TR.lit = false; try { CB.sync(); } catch(e){} TR.boardClose(); var tp = document.getElementById('lc-traf-pills'); if (tp) tp.style.display = 'none'; if (TR.lay && M && M.hasLayer(TR.lay)) M.removeLayer(TR.lay); if (TR.mesh && M && M.hasLayer(TR.mesh)) M.removeLayer(TR.mesh); if (TR.cv) TR.cv.style.display = 'none'; cvFree(TR.cv); if (TR.tcv){ TR.tcv.style.display = 'none'; cvFree(TR.tcv); }
       if (TR.timer){ clearInterval(TR.timer); TR.timer = null; } if (TR.vtimer){ clearInterval(TR.vtimer); TR.vtimer = null; } };
     /* ---------------------------------------------------------------- YOU'RE FLOCKED -- */
     /* LICENSE-PLATE READERS ON TRAFFIC (user 2026-10-25: "are you able to show tracked flock cameras on traffic?" -> "yes build it -
