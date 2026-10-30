@@ -197,7 +197,8 @@ def twc_bumps(key, d0=None, d1=None):
             d = (d0 + datetime.timedelta(days=k)).isoformat()
             settled = (today - datetime.date.fromisoformat(d)).days >= 2
             def fetch_r2(d=d):
-                try: txt = get_text('https://cdn.bluishvoid.com/kalshi/trail/%s_%s.jsonl' % (key, d))
+                # ?v= busts the cdn edge, which serves a stale morning copy of a day's trail for days (2026-10-30 review)
+                try: txt = get_text('https://cdn.bluishvoid.com/kalshi/trail/%s_%s.jsonl?v=%d' % (key, d, time.time()))
                 except Exception: return []
                 rows = []
                 for l in txt.splitlines():
@@ -206,7 +207,7 @@ def twc_bumps(key, d0=None, d1=None):
                     v = (r.get('obs') or {}).get('twc')
                     if isinstance(v, (int, float)): rows.append([r['t'], v])
                 return rows
-            got = cached('trail_%s_%s.json' % (key, d), fetch_r2) if settled else (None if OFFLINE else fetch_r2())
+            got = cached('trail2_%s_%s.json' % (key, d), fetch_r2) if settled else (None if OFFLINE else fetch_r2())
             r2 += [(ts(t), d, v) for t, v in (got or [])]
             if key == 'ny_high':
                 def fetch_wk(d=d):
