@@ -112755,10 +112755,12 @@ function closeAlertModal(){
     /* the key strip over the map, shared by WATER's two switches */
     GB.el = function(){ var e = document.getElementById('lc-ngkey'); if (!e){ e = document.createElement('div'); e.id = 'lc-ngkey'; e.style.cssText = 'padding:4px 12px 6px;font:700 9px/1.6 system-ui,sans-serif;letter-spacing:.06em;color:#fff;'; mapEl.parentNode.insertBefore(e, mapEl); } return e; };
     /* SATELLITE PHOTO: HLS, Landsat 8/9 + Sentinel-2A/B/C at 30 m, the newest clear pass of the last two weeks at each spot */
-    GB.photo = function(){ return GB.mk({ pane: 'lcLand', maxNative: 12, n: 30, opacity: 1,
-      url: function(i, z, x, y){ var d = (i >> 1) + 1; return GB.u(i & 1 ? 'HLS_L30_Nadir_BRDF_Adjusted_Reflectance' : 'HLS_S30_Nadir_BRDF_Adjusted_Reflectance', 12, GB.day(d), z, x, y); },
+    GB.dstr = function(ms){ return new Date(ms).toISOString().slice(0, 10); };
+    /* end: the newest day to use (ms; default yesterday) -- the fifteen days up to it; pane: where to draw (BEFORE/AFTER's left side) */
+    GB.photo = function(end, pane){ end = end || Date.now() - 864e5; return GB.mk({ pane: pane || 'lcLand', maxNative: 12, n: 30, opacity: 1, end: end,
+      url: function(i, z, x, y){ return GB.u(i & 1 ? 'HLS_L30_Nadir_BRDF_Adjusted_Reflectance' : 'HLS_S30_Nadir_BRDF_Adjusted_Reflectance', 12, GB.dstr(end - (i >> 1) * 864e5), z, x, y); },
       pick: function(r, g, b){ var lo = Math.min(r, g, b), hi = Math.max(r, g, b); if (lo > 165 && hi - lo < 40) return 0; if (hi < 6) return 0; return 2; } }); };   /* white and gray-white: cloud */
-    GB.photoSrc = function(i){ return GB.dfmt(GB.day((i >> 1) + 1)) + ' · ' + (i & 1 ? 'LANDSAT' : 'SENTINEL-2'); };
+    GB.photoSrc = function(i, end){ var d = GB.dstr((end || Date.now() - 864e5) - (i >> 1) * 864e5); return GB.dfmt(d) + (d.slice(0, 4) !== String(new Date().getFullYear()) ? ', ' + d.slice(0, 4) : '') + ' \u00b7 ' + (i & 1 ? 'LANDSAT' : 'SENTINEL-2'); };
     /* PLANT LOSS: OPERA DIST-ALERT, each spot's vegetation-loss status as of its latest pass (the last three weeks of passes);
        "no loss" is clear here (NASA paints it near-black) and the one-pass first sightings are left out as too noisy */
     GB.DIST = [[224, 27, 7, 'CONFIRMED · OVER HALF THE PLANTS GONE'], [222, 224, 67, 'CONFIRMED · LESS THAN HALF'], [228, 135, 39, 'LIKELY · OVER HALF, BEING CHECKED'], [137, 127, 78, 'LIKELY · LESS THAN HALF'],
@@ -112778,7 +112780,46 @@ function closeAlertModal(){
       return l; };
     GB.pane = function(n, zi){ if (!M.getPane(n)){ var pn = M.createPane(n); pn.style.zIndex = zi; pn.style.pointerEvents = 'none'; } };
     GB.ago = function(iso){ var h = (Date.now() - Date.parse(iso)) / 36e5; return h < 1 ? 'UNDER AN HOUR AGO' : Math.round(h) + ' HOURS AGO'; };
-    var LND = { mode: 'cover', yr: 2024, cy: 2025, fy: 'all', lit: false, lay: {}, play: 0 };
+    var LND = { mode: 'cover', yr: 2024, cy: 2025, fy: 'all', lit: false, lay: {}, play: 0, pEnd: null, cmp: false, bEnd: null, swipe: .5, ytd: true };
+    /* SATELLITE PHOTO'S DATES (user 2026-10-29, "do them all"): LATEST, a month or a year back, any day since 2013 from the picker, and
+       BEFORE/AFTER -- an earlier date on the left of a divider you drag, the chosen one on the right */
+    LND.pKey = function(ms){ return ms ? GB.dstr(ms) : 'latest'; };
+    LND.dIn = function(attr, ms){ return '<input type="date" ' + attr + ' min="2013-04-11" max="' + GB.dstr(Date.now() - 864e5) + '" value="' + GB.dstr(ms || Date.now() - 864e5) + '" style="font:800 .52rem system-ui,sans-serif;padding:3px 6px;border-radius:999px;border:1px solid rgba(255,255,255,.75);background:none;color:#fff;color-scheme:dark;flex:0 0 auto;">'; };
+    LND.swEl = function(on){ var e = document.getElementById('lc-swipe');
+      if (!on){ if (e) e.style.display = 'none'; return null; }
+      if (!e){ e = document.createElement('div'); e.id = 'lc-swipe'; e.style.cssText = 'position:absolute;top:0;bottom:0;width:0;z-index:700;pointer-events:none;';
+        var tag = 'position:absolute;top:8px;white-space:nowrap;font:800 9px system-ui,sans-serif;letter-spacing:.08em;color:#fff;background:rgba(0,0,0,.55);padding:3px 6px;border-radius:4px;';
+        e.innerHTML = '<div style="position:absolute;top:0;bottom:0;left:-1px;width:2px;background:#fff;box-shadow:0 0 4px rgba(0,0,0,.6);"></div><div class="lc-swh" style="position:absolute;top:50%;left:-17px;width:34px;height:34px;margin-top:-17px;border-radius:50%;background:#fff;color:#9a3412;font:900 13px/34px system-ui,sans-serif;text-align:center;pointer-events:auto;cursor:ew-resize;touch-action:none;box-shadow:0 1px 6px rgba(0,0,0,.5);">\u2194</div>'
+          + '<div class="lc-swl" style="' + tag + 'right:8px;"></div><div class="lc-swr" style="' + tag + 'left:8px;"></div>';
+        mapEl.appendChild(e);
+        var h = e.querySelector('.lc-swh'), drag = false;
+        h.addEventListener('pointerdown', function(ev){ drag = true; h.setPointerCapture(ev.pointerId); ev.stopPropagation(); ev.preventDefault(); if (M.dragging) M.dragging.disable(); });
+        h.addEventListener('pointermove', function(ev){ if (!drag) return; var r = mapEl.getBoundingClientRect(); LND.swipe = Math.max(.02, Math.min(.98, (ev.clientX - r.left) / r.width)); LND.clip(); });
+        var up = function(){ drag = false; if (M.dragging) M.dragging.enable(); }; h.addEventListener('pointerup', up); h.addEventListener('pointercancel', up);
+        M.on('move zoom resize', function(){ if (LND.cmp && LND.mode === 'photo' && VIEW === 'land') LND.clip(); }); }
+      e.style.display = ''; return e; };
+    LND.clip = function(){ var pn = M.getPane('lcLandB'); if (!pn) return; var e = LND.swEl(true), sz = M.getSize(), x = Math.round(sz.x * LND.swipe);
+      var nw = M.containerPointToLayerPoint([0, 0]), se = M.containerPointToLayerPoint([sz.x, sz.y]), cx = M.containerPointToLayerPoint([x, 0]).x;
+      pn.style.clip = 'rect(' + nw.y + 'px,' + cx + 'px,' + se.y + 'px,' + nw.x + 'px)'; e.style.left = x + 'px';
+      var lab = function(ms){ return ms ? GB.dfmt(GB.dstr(ms)) + ', ' + GB.dstr(ms).slice(0, 4) : 'LATEST'; };
+      e.querySelector('.lc-swl').textContent = lab(LND.bEnd); e.querySelector('.lc-swr').textContent = lab(LND.pEnd); };
+    /* FIRE HISTORY, THIS YEAR (user 2026-10-29, "do them all": MTBS runs a year or two behind): NIFC's year-to-date perimeters (WFIGS)
+       over whichever decade is chosen, read for the map's view, the largest 1,000 */
+    LND.YTD = 'https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Interagency_Perimeters_YearToDate/FeatureServer/0/query';
+    LND.ytdSync = function(){ var on = LND.lit && VIEW === 'land' && LND.mode === 'fire' && LND.ytd;
+      if (!on){ if (LND.ytdL && M.hasLayer(LND.ytdL)) M.removeLayer(LND.ytdL); return; }
+      if (!LND.ytdL){ LND.pn(); LND.ytdL = L.geoJSON(null, { pane: 'lcLand', style: function(){ return { color: '#fde047', weight: 1.2, fillColor: '#dc2626', fillOpacity: .55 }; },
+          onEachFeature: function(f, l){ l.on('click', function(ev){ L.DomEvent.stop(ev); var p = f.properties || {}, d = p.attr_FireDiscoveryDateTime ? new Date(p.attr_FireDiscoveryDateTime).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).toUpperCase() : '';
+            INFO.show(esc(String(p.poly_IncidentName || 'UNNAMED').toUpperCase()) + ' FIRE', 'THIS YEAR \u00b7 NIFC', '<div style="font:700 10px/1.5 system-ui,sans-serif;margin-top:4px;">' + (d ? 'STARTED ' + d + ' \u00b7 ' : '') + (p.poly_GISAcres ? Math.round(p.poly_GISAcres).toLocaleString('en-US') + ' ACRES' : '')
+              + (p.attr_IncidentTypeCategory === 'RX' ? ' \u00b7 PRESCRIBED BURN' : '') + (p.attr_FireCause ? ' \u00b7 CAUSE: ' + esc(String(p.attr_FireCause).toUpperCase()) : '') + '</div>'); }); } }); }
+      if (!M.hasLayer(LND.ytdL)) LND.ytdL.addTo(M);
+      if (!LND.ytdHook){ LND.ytdHook = true; M.on('moveend', function(){ if (LND.lit && VIEW === 'land' && LND.mode === 'fire' && LND.ytd) LND.ytdLoad(); }); }
+      LND.ytdLoad(); };
+    LND.ytdLoad = function(){ var b = M.getBounds(), sz = M.getSize(), tol = (b.getEast() - b.getWest()) / sz.x * 1.5, seq = LND.ytdSeq = (LND.ytdSeq || 0) + 1;
+      var q = 'where=' + encodeURIComponent('poly_GISAcres>=' + (M.getZoom() < 7 ? 1000 : M.getZoom() < 9 ? 100 : 1)) + '&geometry=' + [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].map(function(v){ return v.toFixed(4); }).join(',')
+        + '&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=poly_IncidentName,poly_GISAcres,attr_FireDiscoveryDateTime,attr_IncidentTypeCategory,attr_FireCause&orderByFields=poly_GISAcres%20DESC&resultRecordCount=1000'
+        + '&returnGeometry=true&maxAllowableOffset=' + tol.toFixed(5) + '&geometryPrecision=4&outSR=4326&f=geojson';
+      fetch(LND.YTD + '?' + q).then(function(r){ return r.json(); }).then(function(j){ if (seq !== LND.ytdSeq || !LND.ytdL) return; LND.ytdL.clearLayers(); LND.ytdL.addData(j); LND.ytdN = (j.features || []).length; LND.text(); }).catch(function(){}); };
     try { var _ld = JSON.parse(localStorage.getItem('bv_lc_land') || 'null'); if (_ld) Object.assign(LND, { mode: _ld.mode || 'cover', yr: _ld.yr || 2024, cy: _ld.cy || 2025, fy: _ld.fy || 'all' }); } catch(e){}
     LND.save = function(){ try { localStorage.setItem('bv_lc_land', JSON.stringify({ mode: LND.mode, yr: LND.yr, cy: LND.cy, fy: LND.fy })); } catch(e){} };
     LND.YRS = [1985, 1990, 1995, 2000, 2005, 2010, 2015, 2020, 2024];
@@ -112788,6 +112829,13 @@ function closeAlertModal(){
     LND.NLCD = [[11, '#466b9f', 'OPEN WATER'], [12, '#d1def8', 'ICE, SNOW'], [21, '#dec5c5', 'DEVELOPED, OPEN SPACE'], [22, '#d99282', 'DEVELOPED, LOW'], [23, '#eb0000', 'DEVELOPED, MEDIUM'], [24, '#ab0000', 'DEVELOPED, HIGH'],
       [31, '#b3ac9f', 'BARREN'], [41, '#68ab5f', 'DECIDUOUS FOREST'], [42, '#1c5f2c', 'EVERGREEN FOREST'], [43, '#b5c58f', 'MIXED FOREST'], [52, '#ccb879', 'SHRUB'], [71, '#dfdfc2', 'GRASSLAND'],
       [81, '#dcd939', 'PASTURE, HAY'], [82, '#ab6c28', 'CROPS'], [90, '#b8d9eb', 'WOODY WETLAND'], [95, '#6c9fb8', 'EMERGENT WETLAND']];
+    /* PAST THE BORDER (user 2026-10-29, "do them all"): Canada, Mexico and Alaska from the CEC's 2020 North American map (_landbake/nalcms.py,
+       cdn land/nalcms/2020), drawn in each class's NLCD twin color under the lower 48's yearly NLCD; index = NALCMS class */
+    LND.NA = [null, 'NEEDLELEAF FOREST', 'TAIGA NEEDLELEAF FOREST', 'TROPICAL EVERGREEN FOREST', 'TROPICAL DRY FOREST', 'BROADLEAF DECIDUOUS FOREST', 'MIXED FOREST', 'TROPICAL SHRUB',
+      'SHRUB', 'TROPICAL GRASSLAND', 'GRASSLAND', 'TUNDRA SHRUB, LICHEN AND MOSS', 'TUNDRA GRASS, LICHEN AND MOSS', 'BARREN TUNDRA, LICHEN AND MOSS', 'WETLAND', 'CROPS', 'BARREN', 'BUILT UP', null, 'SNOW AND ICE'];
+    LND.NAC = { 1: '1c5f2c', 2: '1c5f2c', 3: '1c5f2c', 4: '68ab5f', 5: '68ab5f', 6: 'b5c58f', 7: 'ccb879', 8: 'ccb879', 9: 'dfdfc2', 10: 'dfdfc2', 11: 'ccb879', 12: 'dfdfc2', 13: 'b3ac9f', 14: 'b8d9eb', 15: 'ab6c28', 16: 'b3ac9f', 17: 'eb0000', 19: 'd1def8' };
+    LND.naPal = function(){ if (LND._np) return LND._np; var seen = {}, P = []; Object.keys(LND.NAC).map(Number).sort(function(a, b){ return a - b; }).forEach(function(k){ var h = LND.NAC[k], c = [parseInt(h.substr(0, 2), 16), parseInt(h.substr(2, 2), 16), parseInt(h.substr(4, 2), 16)];
+        while (seen[c.join()]) c = [c[0], c[1], (c[2] + 3) % 256]; seen[c.join()] = 1; P.push([c[0], c[1], c[2], k]); }); return (LND._np = P); };   /* nalcms.py palette() */
     LND.CROPK = [['#ffd300', 'CORN'], ['#267000', 'SOYBEANS'], ['#a87000', 'WINTER WHEAT'], ['#d8b56b', 'SPRING WHEAT'], ['#ff2626', 'COTTON'], ['#00a8e2', 'RICE'], ['#ffa8e3', 'ALFALFA'], ['#e8ffbf', 'GRASS, PASTURE'], ['#93cc93', 'FOREST'], ['#9c9c9c', 'DEVELOPED']];
     LND.bar = function(){ var b = document.getElementById('cw-landbar'); if (!b){ var pb = document.getElementById('cw-placebar'); if (!pb) return null;
         b = document.createElement('div'); b.id = 'cw-landbar'; var tb = document.getElementById('cw-treebar') || document.getElementById('cw-waterbar'); pb.parentNode.insertBefore(b, (tb || pb).nextSibling);
@@ -112796,13 +112844,20 @@ function closeAlertModal(){
           else if (t.hasAttribute('data-ly')){ LND.yr = +t.getAttribute('data-ly'); LND.stop(); }
           else if (t.hasAttribute('data-lcy')) LND.cy = +t.getAttribute('data-lcy');
           else if (t.hasAttribute('data-lfy')) LND.fy = t.getAttribute('data-lfy');
+          else if (t.hasAttribute('data-lytd')) LND.ytd = !LND.ytd;
+          else if (t.hasAttribute('data-lpd')){ var v0 = t.getAttribute('data-lpd'); LND.pEnd = v0 ? Date.parse(v0 + 'T12:00:00Z') : null; }
+          else if (t.hasAttribute('data-lcmp')){ LND.cmp = !LND.cmp; if (LND.cmp && !LND.bEnd) LND.bEnd = (LND.pEnd || Date.now() - 864e5) - 365 * 864e5; }
           else if (t.hasAttribute('data-lp')){ if (LND.play) LND.stop(); else LND.go(); }
-          LND.save(); LND.sync(); }); }
+          LND.save(); LND.sync(); });
+        b.addEventListener('change', function(e){ var t = e.target; if (!t.value) return; var ms = Date.parse(t.value + 'T12:00:00Z'); if (!isFinite(ms)) return;
+          if (t.hasAttribute('data-lpi')) LND.pEnd = ms; else if (t.hasAttribute('data-lbi')) LND.bEnd = ms; else return; LND.sync(); }); }
       var chips = LND.mode === 'cover' ? LND.YRS.map(function(y){ return '<button type="button" class="wt-chip' + (LND.yr === y ? ' on' : '') + '" data-ly="' + y + '">' + y + '</button>'; }).join('') + '<button type="button" class="wt-chip' + (LND.play ? ' on' : '') + '" data-lp="1">' + (LND.play ? 'PAUSE' : 'PLAY 1985–2024') + '</button>'
         : LND.mode === 'crops' ? LND.CYRS.map(function(y){ return '<button type="button" class="wt-chip' + (LND.cy === y ? ' on' : '') + '" data-lcy="' + y + '">' + y + '</button>'; }).join('')
-        : LND.mode === 'photo' || LND.mode === 'loss' ? ''
-        : LND.FY.map(function(q){ return '<button type="button" class="wt-chip' + (LND.fy === q[0] ? ' on' : '') + '" data-lfy="' + q[0] + '">' + q[1] + '</button>'; }).join('');
-      var h = '<div class="trb-tabs">' + [['cover', 'LAND COVER'], ['crops', 'CROPS'], ['fire', 'FIRE HISTORY'], ['photo', 'SATELLITE PHOTO'], ['loss', 'PLANT LOSS']].map(function(q){ return '<button type="button" class="wt-tab' + (LND.mode === q[0] ? ' on' : '') + '" data-lm="' + q[0] + '">' + q[1] + '</button>'; }).join('') + '</div><div class="trb-chips">' + chips + '</div>';
+        : LND.mode === 'photo' ? [[null, 'LATEST'], [Date.now() - 31 * 864e5, '1 MONTH AGO'], [Date.now() - 366 * 864e5, '1 YEAR AGO']].map(function(q){ var on = q[0] ? LND.pEnd && Math.abs(LND.pEnd - q[0]) < 864e5 * 2 : !LND.pEnd; return '<button type="button" class="wt-chip' + (on ? ' on' : '') + '" data-lpd="' + (q[0] ? GB.dstr(q[0]) : '') + '">' + q[1] + '</button>'; }).join('')
+            + LND.dIn('data-lpi', LND.pEnd) + '<button type="button" class="wt-chip' + (LND.cmp ? ' on' : '') + '" data-lcmp="1">BEFORE / AFTER</button>' + (LND.cmp ? '<span style="font:800 .5rem system-ui,sans-serif;letter-spacing:.1em;align-self:center;flex:0 0 auto;color:#fff;">BEFORE</span>' + LND.dIn('data-lbi', LND.bEnd) : '')
+        : LND.mode === 'loss' ? ''
+        : '<button type="button" class="wt-chip' + (LND.ytd ? ' on' : '') + '" data-lytd="1">THIS YEAR</button>' + LND.FY.map(function(q){ return '<button type="button" class="wt-chip' + (LND.fy === q[0] ? ' on' : '') + '" data-lfy="' + q[0] + '">' + q[1] + '</button>'; }).join('');
+      var h = '<div class="trb-tabs">' + [['cover', '<span class="bv-lg">LAND COVER</span><span class="bv-sm">COVER</span>'], ['crops', 'CROPS'], ['fire', '<span class="bv-lg">FIRE HISTORY</span><span class="bv-sm">FIRES</span>'], ['photo', '<span class="bv-lg">SATELLITE PHOTO</span><span class="bv-sm">PHOTO</span>'], ['loss', '<span class="bv-lg">PLANT LOSS</span><span class="bv-sm">LOSS</span>']].map(function(q){ return '<button type="button" class="wt-tab' + (LND.mode === q[0] ? ' on' : '') + '" data-lm="' + q[0] + '">' + q[1] + '</button>'; }).join('') + '</div><div class="trb-chips">' + chips + '</div>';
       if (b.innerHTML !== h) b.innerHTML = h; return b; };
     LND.go = function(){ LND.stop(); var i = LND.YRS.indexOf(LND.yr); LND.play = setInterval(function(){ i = (i + 1) % LND.YRS.length; LND.yr = LND.YRS[i]; LND.sync(); }, 1300); };
     LND.stop = function(){ if (LND.play){ clearInterval(LND.play); LND.play = 0; } };
@@ -112810,16 +112865,23 @@ function closeAlertModal(){
     LND.on = function(){ if (!M) return; if (!LND.lit){ LND.lit = true; var L0 = window.LOCATION || {}; if (isFinite(+L0.lat)) M.setView([+L0.lat, +L0.lon], 9, { animate: false });
         if (!LND.hook){ LND.hook = true; M.on('click', LND.tap); } }
       strip.textContent = ''; LND.sync(); };
-    LND.off = function(){ LND.lit = false; LND.stop(); Object.keys(LND.lay).forEach(function(k){ if (M && M.hasLayer(LND.lay[k])) M.removeLayer(LND.lay[k]); }); var e = document.getElementById('lc-land'); if (e) e.style.display = 'none'; };
+    LND.off = function(){ LND.lit = false; LND.stop(); LND.swEl(false); if (LND.ytdL && M && M.hasLayer(LND.ytdL)) M.removeLayer(LND.ytdL); Object.keys(LND.lay).forEach(function(k){ if (M && M.hasLayer(LND.lay[k])) M.removeLayer(LND.lay[k]); }); var e = document.getElementById('lc-land'); if (e) e.style.display = 'none'; };
     LND.pn = function(){ if (!M.getPane('lcLand')){ var pn = M.createPane('lcLand'); pn.style.zIndex = 442; } return 'lcLand'; };
     LND.layer = function(key, mk){ if (!LND.lay[key]) LND.lay[key] = mk(); return LND.lay[key]; };
     LND.sync = function(){ if (!M || VIEW !== 'land') return; LND.bar(); var want = {}, k;
-      if (LND.mode === 'cover'){ k = 'nlcd' + LND.yr; want[k] = 1;
+      if (LND.mode === 'cover'){ want.na2020 = 1;
+        LND.layer('na2020', function(){ var l = L.tileLayer('https://cdn.bluishvoid.com/land/nalcms/2020/{z}/{x}/{y}.png?v=1', { pane: LND.pn(), minZoom: 3, maxNativeZoom: 9, maxZoom: 19, opacity: .85, crossOrigin: 'anonymous', bounds: L.latLngBounds([[14, -170], [72, -52]]), errorTileUrl: LF_GIF });
+          l.on('tileload', function(e){ e.tile.style.imageRendering = 'pixelated'; }); return l; });
+        k = 'nlcd' + LND.yr; want[k] = 1;
         LND.layer(k, function(){ var l = L.tileLayer('https://cdn.bluishvoid.com/land/nlcd/' + LND.yr + '/{z}/{x}/{y}.png?v=1', { pane: LND.pn(), minZoom: 3, maxNativeZoom: 9, maxZoom: 19, opacity: .85, crossOrigin: 'anonymous', bounds: L.latLngBounds([[24, -125.5], [49.7, -66.5]]),
           errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==' }); l.on('tileload', function(e){ e.tile.style.imageRendering = 'pixelated'; }); return l; }); }
       else if (LND.mode === 'crops'){ k = 'cdl' + LND.cy; want[k] = 1;
-        LND.layer(k, function(){ return L.tileLayer.wms('https://nassgeodata.gmu.edu/CropScapeService/wms_cdlall.cgi', { layers: 'cdl_' + LND.cy, format: 'image/png', transparent: true, version: '1.1.1', crs: L.CRS.EPSG4326, pane: LND.pn(), opacity: .85, minZoom: 4, maxZoom: 19 }); }); }
-      else if (LND.mode === 'photo'){ k = 'photo'; want[k] = 1; LND.pn(); LND.layer(k, GB.photo); }
+        /* OUR OWN TILES (user 2026-10-29, "do them all": CropScape's map service was slow): _landbake/cdl.py, 240 m, z3-9 */
+        LND.layer(k, function(){ var l = L.tileLayer('https://cdn.bluishvoid.com/land/cdl/' + LND.cy + '/{z}/{x}/{y}.png?v=1', { pane: LND.pn(), minZoom: 3, maxNativeZoom: 9, maxZoom: 19, opacity: .9, crossOrigin: 'anonymous', bounds: L.latLngBounds([[24, -125.5], [49.7, -66.5]]), errorTileUrl: LF_GIF });
+          l.on('tileload', function(e){ e.tile.style.imageRendering = 'pixelated'; }); return l; }); }
+      else if (LND.mode === 'photo'){ k = 'photo' + LND.pKey(LND.pEnd); want[k] = 1; LND.pn(); LND.layer(k, function(){ return GB.photo(LND.pEnd); }); LND.photoL = LND.lay[k];
+        if (LND.cmp && LND.bEnd){ if (!M.getPane('lcLandB')){ var pb = M.createPane('lcLandB'); pb.style.zIndex = 443; pb.style.pointerEvents = 'none'; }
+          var kb = 'photoB' + LND.pKey(LND.bEnd); want[kb] = 1; LND.layer(kb, function(){ return GB.photo(LND.bEnd, 'lcLandB'); }); LND.photoB = LND.lay[kb]; } }
       else if (LND.mode === 'loss'){ k = 'loss'; want[k] = 1; LND.pn(); LND.layer(k, GB.loss); }
       else { k = 'fire' + LND.fy; want[k] = 1;
         LND.layer(k, function(){ var F = LND.FY.filter(function(q){ return q[0] === LND.fy; })[0], ids = [];
@@ -112830,22 +112892,30 @@ function closeAlertModal(){
             return 'https://apps.fs.usda.gov/arcx/rest/services/EDW/EDW_MTBS_01/MapServer/export?bbox=' + [x0, y1 - sz, x0 + sz, y1].join(',') + '&bboxSR=3857&imageSR=3857&size=256,256&format=png32&transparent=true&f=image&dynamicLayers=' + DL; } });
           return new T('', { pane: LND.pn(), opacity: 1, minZoom: 3, maxZoom: 19 }); }); }
       Object.keys(LND.lay).forEach(function(q){ var l = LND.lay[q]; if (want[q] && !M.hasLayer(l)) l.addTo(M); else if (!want[q] && M.hasLayer(l)) M.removeLayer(l); });
-      LND.text(); };
+      Object.keys(LND.lay).forEach(function(q){ if (/^photo/.test(q) && !want[q]) delete LND.lay[q]; });   /* a photo date no longer shown is dropped: each holds its canvases */
+      var sw = LND.mode === 'photo' && LND.cmp && LND.bEnd; LND.swEl(sw); if (sw) LND.clip(); else { var pb0 = M.getPane('lcLandB'); if (pb0) pb0.style.clip = ''; }
+      LND.ytdSync(); LND.text(); };
     LND.text = function(){ var E = LND.el(); E.style.display = ''; var key = function(c, n){ return '<span class="lk"><i style="background:' + c + ';"></i>' + n + '</span>'; }, h;
       if (LND.mode === 'cover') h = '<div><b>LAND COVER ' + LND.yr + '</b> · WHAT COVERS THE GROUND, FROM LANDSAT · THE LOWER 48 · TAP THE MAP FOR WHAT IS THERE</div><div>' + LND.NLCD.filter(function(q){ return q[0] !== 11; }).map(function(q){ return key(q[1], q[2]); }).join('') + '</div>'
-        + '<div style="opacity:.8;">THIS MAP IS 240 M A PIXEL (THE SOURCE IS 30 M) · ' + bvA('USGS ANNUAL NLCD', 'https://www.usgs.gov/centers/eros/science/annual-national-land-cover-database') + '</div>' + (LND.info || '');
+        + '<div style="opacity:.8;">THIS MAP IS 240 M A PIXEL (THE SOURCE IS 30 M) · ' + bvA('USGS ANNUAL NLCD', 'https://www.usgs.gov/centers/eros/science/annual-national-land-cover-database')
+        + ' · CANADA, MEXICO AND ALASKA: 2020 ONLY, THE SAME COLORS (' + bvA('CEC NORTH AMERICAN LAND CHANGE MONITORING SYSTEM', 'https://www.cec.org/north-american-environmental-atlas/land-cover-30m-2020/') + ')</div>' + (LND.info || '');
       else if (LND.mode === 'crops') h = '<div><b>CROPS ' + LND.cy + '</b> · WHAT WAS PLANTED IN EACH 30 M FIELD THAT YEAR, FROM SATELLITE AND FARM SURVEYS · THE LOWER 48</div><div>' + LND.CROPK.map(function(q){ return key(q[0], q[1]); }).join('') + '</div>'
-        + '<div style="opacity:.8;">' + bvA('USDA NASS CROPLAND DATA LAYER (CROPSCAPE)', 'https://nassgeodata.gmu.edu/CropScape/') + ' · SLOW SERVER: TILES CAN TAKE A FEW SECONDS</div>';
-      else if (LND.mode === 'photo') h = '<div><b>SATELLITE PHOTO</b> · THE NEWEST CLEAR PASS OF THE LAST TWO WEEKS AT EACH SPOT, 30 M A PIXEL · NEIGHBORING STRIPS CAN BE DAYS APART · CLOUD IS SKIPPED, SO SNOW CAN BE TOO · TAP FOR THE DATE</div>'
+        + '<div style="opacity:.8;">' + bvA('USDA NASS CROPLAND DATA LAYER', 'https://www.nass.usda.gov/Research_and_Science/Cropland/SARS1a.php') + ' · 240 M A PIXEL (THE SOURCE IS 30 M) · TAP A FIELD FOR THE CROP</div>' + (LND.info || '');
+      else if (LND.mode === 'photo') h = '<div><b>SATELLITE PHOTO' + (LND.pEnd ? ' · ' + GB.dfmt(GB.dstr(LND.pEnd)) + ', ' + GB.dstr(LND.pEnd).slice(0, 4) : '') + '</b>' + (LND.cmp ? ' · BEFORE ON THE LEFT, DRAG THE DIVIDER' : '') + ' · THE NEWEST CLEAR PASS OF THE TWO WEEKS UP TO THE DATE AT EACH SPOT, 30 M A PIXEL · NEIGHBORING STRIPS CAN BE DAYS APART · CLOUD IS SKIPPED, SO SNOW CAN BE TOO · TAP FOR THE DATE</div>'
         + '<div style="opacity:.8;">' + bvA('NASA HARMONIZED LANDSAT AND SENTINEL-2 (HLS), VIA GIBS', 'https://www.earthdata.nasa.gov/data/projects/hls') + '</div>' + (LND.info || '');
       else if (LND.mode === 'loss') h = '<div><b>PLANT LOSS</b> · WHERE TREES, CROPS OR GRASS HAVE RECENTLY GONE (CLEARING, FIRE, STORMS, HARVEST, BUILDING), SPOTTED BY COMPARING EACH NEW LANDSAT AND SENTINEL-2 PASS WITH THE YEARS BEFORE · EACH SPOT AS OF ITS LATEST CLEAR PASS · TAP ONE</div><div>'
         + GB.DIST.map(function(q){ return key('rgb(' + q[0] + ',' + q[1] + ',' + q[2] + ')', q[3]); }).join('') + '</div>'
         + '<div style="opacity:.8;">' + bvA('NASA OPERA DIST-ALERT, VIA GIBS', 'https://www.jpl.nasa.gov/go/opera/products/dist-product/') + ' · 30 M · A ONE-PASS FIRST SIGHTING IS NOT SHOWN</div>' + (LND.info || '');
-      else h = '<div><b>FIRE HISTORY · ' + LND.FY.filter(function(q){ return q[0] === LND.fy; })[0][1] + '</b> · THE BURNED AREA OF EVERY LARGE US FIRE SINCE 1984 (OVER 1,000 ACRES IN THE WEST, 500 IN THE EAST), MAPPED FROM LANDSAT · DARKER ORANGE BURNED MORE THAN ONCE · TAP ONE FOR THE FIRE</div>'
-        + '<div style="opacity:.8;">' + bvA('MONITORING TRENDS IN BURN SEVERITY (USGS / USFS)', 'https://www.mtbs.gov/') + '</div>' + (LND.info || '');
+      else h = (LND.ytd ? '<div><b>THIS YEAR</b> · RED: ' + new Date().getFullYear() + '\u2019S FIRES SO FAR, OUTLINED IN YELLOW (NIFC, UPDATED DAILY' + (LND.ytdN === 1000 ? '; THE LARGEST 1,000 IN VIEW' : '') + ', US ONLY) · TAP ONE</div>' : '') + '<div><b>FIRE HISTORY · ' + LND.FY.filter(function(q){ return q[0] === LND.fy; })[0][1] + '</b> · THE BURNED AREA OF EVERY LARGE US FIRE SINCE 1984 (OVER 1,000 ACRES IN THE WEST, 500 IN THE EAST), MAPPED FROM LANDSAT · DARKER ORANGE BURNED MORE THAN ONCE · TAP ONE FOR THE FIRE</div>'
+        + '<div style="opacity:.8;">' + bvA('MONITORING TRENDS IN BURN SEVERITY (USGS / USFS)', 'https://www.mtbs.gov/') + (LND.ytd ? ' · ' + bvA('NIFC WFIGS INTERAGENCY PERIMETERS, YEAR TO DATE', 'https://data-nifc.opendata.arcgis.com/') : '') + '</div>' + (LND.info || '');
       E.innerHTML = h; };
+    LND.naTap = function(la, lo){ var t = FLS.tile(la, lo, 9);
+      FLS.px('https://cdn.bluishvoid.com/land/nalcms/2020/9/' + t.x + '/' + t.y + '.png?v=1', t.fx, t.fy).then(function(p){ if (!p || !p[3]){ INFO.show('WATER OR NO DATA', 'LAND COVER', ''); return; }
+        var q = null, bd = 1e9; LND.naPal().forEach(function(c){ var d = Math.abs(c[0] - p[0]) + Math.abs(c[1] - p[1]) + Math.abs(c[2] - p[2]); if (d < bd){ bd = d; q = c; } });
+        if (q && bd <= 8) INFO.show(LND.NA[q[3]], 'LAND COVER 2020 \u00b7 CEC NALCMS', '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;">At ' + la.toFixed(3) + ', ' + lo.toFixed(3) + '. Outside the lower 48 the map has one year, 2020 (Canada and Mexico 2020, Alaska 2021).</div>'); }); };
     LND.tap = function(e){ if (VIEW !== 'land') return; var la = e.latlng.lat, lo = e.latlng.lng;
-      if (LND.mode === 'photo'){ var a = GB.at(LND.lay.photo, e.latlng); if (a && a.i >= 0 && a.p[3]) INFO.show('PHOTO FROM ' + GB.photoSrc(a.i), 'NASA HLS · 30 M', '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;">The newest pass here without cloud over this spot. Landsat 8 and 9 and Sentinel-2 each pass every few days; together, about every two to three.</div>'); return; }
+      if (LND.mode === 'photo'){ var left = LND.cmp && LND.photoB && M.latLngToContainerPoint(e.latlng).x < M.getSize().x * LND.swipe, PL = left ? LND.photoB : LND.photoL, a = GB.at(PL, e.latlng);
+        if (a && a.i >= 0 && a.p[3]) INFO.show('PHOTO FROM ' + GB.photoSrc(a.i, PL.options.end), 'NASA HLS · 30 M', '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;">The newest pass here without cloud over this spot. Landsat 8 and 9 and Sentinel-2 each pass every few days; together, about every two to three.</div>'); return; }
       if (LND.mode === 'loss'){ var b0 = GB.at(LND.lay.loss, e.latlng), q0 = b0 && b0.p[3] ? GB.near(GB.DIST, b0.p) : null; if (!b0 || b0.i < 0) return;
         INFO.show(q0 ? q0[3].split(' · ')[0] + ' PLANT LOSS' : 'NO LOSS SEEN HERE', 'NASA OPERA DIST-ALERT · PASS OF ' + GB.dfmt(GB.day(b0.i + 1)), '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;">'
           + (q0 ? q0[3].replace(/^[A-Z]+ · /, '').replace(/^./, function(c){ return c; }) + '. ' : 'The latest clear pass found the plants here about as they have been in past years. ')
@@ -112854,8 +112924,15 @@ function closeAlertModal(){
         var im = new Image(); im.crossOrigin = 'anonymous'; im.onload = function(){ try { var c = document.createElement('canvas'); c.width = c.height = 256; var g = c.getContext('2d'); g.drawImage(im, 0, 0);
             var p = g.getImageData(Math.floor((xf - X) * 256), Math.floor((yf - Y) * 256), 1, 1).data, best = null, bd = 1e9;
             if (p[3]) LND.NLCD.forEach(function(q){ var h = q[1], d = Math.abs(parseInt(h.substr(1, 2), 16) - p[0]) + Math.abs(parseInt(h.substr(3, 2), 16) - p[1]) + Math.abs(parseInt(h.substr(5, 2), 16) - p[2]); if (d < bd){ bd = d; best = q; } });
+            if (!p[3]){ LND.naTap(la, lo); return; }   /* outside the lower 48 */
             INFO.show(best ? best[2] : 'WATER OR NO DATA', 'LAND COVER ' + LND.yr + ' · USGS ANNUAL NLCD', '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;">At ' + la.toFixed(3) + ', ' + lo.toFixed(3) + ' in ' + LND.yr + '. Step through the years to see when it changed.</div>'); } catch(x){} };
+        im.onerror = function(){ LND.naTap(la, lo); };
         im.src = 'https://cdn.bluishvoid.com/land/nlcd/' + LND.yr + '/' + z + '/' + X + '/' + Y + '.png?v=1'; return; }
+      if (LND.mode === 'crops'){ var t3 = FLS.tile(la, lo, 9);
+        Promise.all([LND.cdlC || (LND.cdlC = fetch('https://cdn.bluishvoid.com/land/cdl/classes.json?v=1').then(function(r){ return r.json(); }).catch(function(){ LND.cdlC = null; return {}; })),
+          FLS.px('https://cdn.bluishvoid.com/land/cdl/' + LND.cy + '/9/' + t3.x + '/' + t3.y + '.png?v=1', t3.fx, t3.fy)]).then(function(r){ var C = r[0] || {}, p = r[1]; if (!p || !p[3]) return;
+          var best = null, bd = 1e9; Object.keys(C).forEach(function(k){ var c = C[k][1], d = Math.abs(c[0] - p[0]) + Math.abs(c[1] - p[1]) + Math.abs(c[2] - p[2]); if (d < bd){ bd = d; best = C[k]; } });
+          if (best && bd <= 6) INFO.show(esc(String(best[0]).toUpperCase().replace(/^DBL CROP /, 'DOUBLE CROP: ')), 'CROPS ' + LND.cy + ' \u00b7 USDA CROPLAND DATA LAYER', '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;">What was growing on most of this 240 m square in ' + LND.cy + '. Step through the years to see the rotation (corn and soybeans often trade places).</div>'); }); return; }
       if (LND.mode === 'fire'){ var b = M.getBounds(), sz = M.getSize();
         fetch('https://apps.fs.usda.gov/arcx/rest/services/EDW/EDW_MTBS_01/MapServer/identify?geometry=' + lo + ',' + la + '&geometryType=esriGeometryPoint&sr=4326&layers=all:63&tolerance=4&mapExtent=' + [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(',') + '&imageDisplay=' + sz.x + ',' + sz.y + ',96&returnGeometry=false&f=json')
           .then(function(r){ return r.json(); }).then(function(j){ var R0 = (j.results || []).map(function(q){ return q.attributes || {}; }); if (!R0.length) return;
@@ -112870,7 +112947,7 @@ function closeAlertModal(){
          place's quarter-degree cell, its trees by share, each a button that draws where that tree grows across the lower 48;
        - OLD GROWTH: ORNL DAAC's 100 m old-growth probability map (all land; see SPX.ogSync);
        - NOTABLE TREES: named individual trees with a place, from Wikidata (CC0) -- the Survivor Tree, Hangman's Elm, General Sherman */
-    var SPX = { nyc: true, here: true, og: false, mt: false, age: false, nt: false, meta: null, packs: {}, pick: null, img: null, ogL: null, mtL: null, ntL: null };
+    var SPX = { nyc: true, here: !nybBox(), og: false, mt: false, age: false, nt: false, meta: null, packs: {}, pick: null, img: null, ogL: null, mtL: null, ntL: null };
     try { var _sx = JSON.parse(localStorage.getItem('bv_lc_spx') || 'null'); if (_sx){ SPX.here = !!_sx.here; SPX.og = !!_sx.og; SPX.nt = !!_sx.nt; if ('nyc' in _sx) SPX.nyc = !!_sx.nyc; } } catch(e){}
     SPX.save = function(){ try { localStorage.setItem('bv_lc_spx', JSON.stringify({ nyc: SPX.nyc, here: SPX.here, og: SPX.og, nt: SPX.nt })); } catch(e){} };
     SPX.CDN = 'https://cdn.bluishvoid.com/trees/';
@@ -112926,7 +113003,7 @@ function closeAlertModal(){
       if (SPX.mt) h += SPX.mtKey();
       if (SPX.og) h += SPX.ogKey();
       if (SPX.nyc && nycHere() && SPX.nycD){ h += '<div>NYC STREET TREES \u00b7 EACH NEIGHBORHOOD BY ITS LEADING STREET TREE, DEEPER WHERE IT DOMINATES \u00b7 TAP ONE FOR ITS MIX: '
-          + SPX.nycD.lead.slice(0, 9).map(function(q){ return '<span style="display:inline-flex;align-items:center;gap:4px;margin-right:9px;white-space:nowrap;"><span style="width:9px;height:9px;border-radius:2px;background:' + SPX.nycC(q[0]) + ';"></span>' + SPX.cap(q[0]) + ' (' + q[1] + ')</span>'; }).join('') + '</div>'; }
+          + SPX.nycD.lead.slice(0, 6).map(function(q){ return '<span style="display:inline-flex;align-items:center;gap:4px;margin-right:9px;white-space:nowrap;"><span style="width:9px;height:9px;border-radius:2px;background:' + SPX.nycC(q[0]) + ';"></span>' + SPX.cap(q[0]) + ' (' + q[1] + ')</span>'; }).join('') + '</div>'; }
       /* how much at most: the US maps count trunk area, Canada's wood volume (m3/ha -> cubic feet an acre, x14.29) */
       if (pk) h += '<div><b>' + SPX.cap(pk.n) + '</b> <i style="opacity:.75;">' + esc(pk.sci) + '</i> · ' + (M.getZoom() <= 9 ? 'WHERE IT GROWS, DARKER = MORE OF IT ('
           + [pk.us !== 0 && pk.p99 ? 'UP TO ' + pk.p99 + ' SQ FT OF TRUNK AN ACRE' + (pk.ca ? ' IN THE US' : '') : '', pk.ca && pk.cp99 ? 'UP TO ' + Math.round(pk.cp99 * 14.29).toLocaleString('en-US') + ' CU FT OF WOOD AN ACRE IN CANADA' : ''].filter(Boolean).join(', ') + ')'
@@ -112936,7 +113013,8 @@ function closeAlertModal(){
         if (!C || !(C.sp || C.ft)){ E.innerHTML = h + '<div style="opacity:.85;">WHAT GROWS HERE: THE SPECIES MAPS COVER THE LOWER 48, CANADA AND MEXICO</div>' + SPX.src(); SPX.bind(); return; }
         /* the US cells count trunk area, Canada's wood volume; a border cell mixes the two */
         if (C.sp) h += '<div style="margin-top:2px;">WHAT GROWS HERE · SHARE OF THE TREES (' + (C.ca ? (C.ba != null ? 'BY TRUNK AREA AND WOOD VOLUME' : 'BY WOOD VOLUME') : 'BY TRUNK AREA') + ') WITHIN ~15 MI · TAP ONE FOR WHERE IT GROWS:</div><div>'
-          + C.sp.map(function(q){ var m = SPX.byC[q[0]]; return m ? '<button type="button" data-spp="' + q[0] + '" class="' + (SPX.pick === q[0] ? 'on' : '') + '">' + SPX.cap(m.n) + ' ' + Math.round(q[1]) + '%</button>' : ''; }).join('') + '</div>';
+          + C.sp.filter(function(q, i){ return SPX.all || i < 6 || SPX.pick === q[0]; }).map(function(q){ var m = SPX.byC[q[0]]; return m ? '<button type="button" data-spp="' + q[0] + '" class="' + (SPX.pick === q[0] ? 'on' : '') + '">' + SPX.cap(m.n) + ' ' + Math.round(q[1]) + '%</button>' : ''; }).join('')
+          + (C.sp.length > 6 ? '<button type="button" data-spall="1">' + (SPX.all ? 'FEWER \u25b4' : 'ALL ' + C.sp.length + ' \u25be') + '</button>' : '') + '</div>';   /* the top six; the rest a tap away (phones) */
         /* Mexico maps forest types, not species: each type's share of the land within ~15 mi */
         if (C.ft){ var G = LF.mx && LF.mx.groups;
           h += '<div style="margin-top:2px;">' + (C.sp ? 'SOUTH OF THE BORDER, ' : 'WHAT GROWS HERE · ') + 'MEXICO\u2019S FOREST TYPES, SHARE OF THE LAND WITHIN ~15 MI (MEXICO MAPS FOREST TYPES, NOT SPECIES):</div><div>'
@@ -112955,7 +113033,8 @@ function closeAlertModal(){
       + (C && C.ft ? ' \u00b7 ' + bvA('INEGI LAND USE AND VEGETATION, SERIE VII', 'https://www.inegi.org.mx/temas/usosuelo/') : '')
       + (SPX.nyc && nycHere() ? ' \u00b7 ' + bvA('2015 STREET TREE CENSUS, NYC PARKS', 'https://data.cityofnewyork.us/Environment/2015-Street-Tree-Census-Tree-Data/uvpi-gqnh') : '')
       + (SPX.age ? ' · ' + bvA('FOREST AGE: ORNL DAAC (PAN ET AL. 2011)', 'https://doi.org/10.3334/ORNLDAAC/1096') : '') + (SPX.og || SPX.mt ? ' · ' + bvA((SPX.mt && SPX.og ? 'MATURE AND OLD GROWTH' : SPX.mt ? 'MATURE FOREST' : 'OLD GROWTH') + ': ORNL DAAC (BRUENING ET AL. 2026)', 'https://doi.org/10.3334/ORNLDAAC/2498') : '') + (SPX.nt ? ' · ' + bvA('WIKIDATA', 'https://www.wikidata.org') : '') + '</div>'; };
-    SPX.bind = function(){ [].forEach.call(SPX.el().querySelectorAll('[data-spp]'), function(b){ b.onclick = function(e){ e.stopPropagation(); var c = +b.getAttribute('data-spp'); SPX.pick = c && SPX.pick !== c ? c : null; SPX.sync(); }; }); };
+    SPX.bind = function(){ var al = SPX.el().querySelector('[data-spall]'); if (al) al.onclick = function(e){ e.stopPropagation(); SPX.all = !SPX.all; SPX.text(); };
+      [].forEach.call(SPX.el().querySelectorAll('[data-spp]'), function(b){ b.onclick = function(e){ e.stopPropagation(); var c = +b.getAttribute('data-spp'); SPX.pick = c && SPX.pick !== c ? c : null; SPX.sync(); }; }); };
     /* OLD GROWTH, WHERE IT STANDS (user 2026-10-29: "Don't do county shapes for the old forest"): the fireshed shares gave way to ORNL
        DAAC's 100 m map (Bruening et al. 2026) -- each pixel's probability of being old-growth forest, all land ownership, about 2022.
        Our tiles (_treebake/oldgrowth.py, cdn trees/oldgrowth/v1, z3-10): palette index = percent, clear under 20%, pale cyan to deep
@@ -112965,6 +113044,7 @@ function closeAlertModal(){
         return '<span style="display:inline-flex;align-items:center;gap:4px;margin-right:9px;white-space:nowrap;"><span style="width:10px;height:10px;border-radius:2px;background:' + SPX.ogC(t) + ';"></span>' + q[1] + '</span>'; }).join('') + ' · TAP FOR THE ODDS THERE</div>'; };
     /* MATURE FOREST (user 2026-10-29: "do mature forest ..."): band 4 of the same ORNL DAAC file -- old, closed forest that is not (yet)
        old growth; most of the East's good forest is this. Blue under old growth's cyan (cdn trees/mature/v1, same cut: index = percent) */
+    SPX.fcNow = function(){ return SPX.age ? 'age' : SPX.mt ? 'mt' : SPX.og ? 'og' : 'sp'; };
     SPX.mtC = function(t){ return 'rgb(' + Math.round(175 - 145 * t) + ',' + Math.round(195 - 115 * t) + ',' + Math.round(255 - 25 * t) + ')'; };
     SPX.mtKey = function(){ return '<div style="margin-top:2px;">MATURE FOREST · CHANCE EACH 100 M SQUARE IS MATURE FOREST: ' + [[20, '20%'], [40, '40%'], [60, '60%'], [80, '80%+']].map(function(q){ var t = Math.min(1, (q[0] - 20) / 60);
         return '<span style="display:inline-flex;align-items:center;gap:4px;margin-right:9px;white-space:nowrap;"><span style="width:10px;height:10px;border-radius:2px;background:' + SPX.mtC(t) + ';"></span>' + q[1] + '</span>'; }).join('') + ' · TAP FOR THE ODDS THERE</div>'; };
@@ -113049,15 +113129,19 @@ function closeAlertModal(){
           var hv = e.target.closest('[data-fhv],[data-fhy]'); if (hv){ e.stopPropagation(); if (hv.hasAttribute('data-fhv')) FHT.v = hv.getAttribute('data-fhv'); else FHT.yr = +hv.getAttribute('data-fhy'); if (INFO.hide) INFO.hide(); TRG.bar(); FHT.sync(); return; }
           var py = e.target.closest('[data-pyr]'); if (py){ e.stopPropagation(); PST.yr = +py.getAttribute('data-pyr'); TRG.bar(); PST.sync(); return; }
           var fl = e.target.closest('[data-fls]'); if (fl){ e.stopPropagation(); FLS.span = +fl.getAttribute('data-fls'); TRG.bar(); FLS.redraw(); return; }
+          var fc = e.target.closest('[data-sfc]'); if (fc){ e.stopPropagation(); var v = fc.getAttribute('data-sfc'); SPX.age = v === 'age'; SPX.mt = v === 'mt'; SPX.og = v === 'og'; if (INFO.hide) INFO.hide(); TRG.bar(); SPX.sync(); return; }
           var x = e.target.closest('[data-sx]'); if (x){ e.stopPropagation(); var k = x.getAttribute('data-sx'); SPX[k] = !SPX[k]; SPX.save(); TRG.bar(); SPX.sync(); return; }
           var t = e.target.closest('[data-tm]'); if (!t) return; e.stopPropagation(); TRG.set(t.getAttribute('data-tm')); }); }
-      var h = '<div class="trb-tabs">' + [['foliage', 'FOLIAGE'], ['species', 'SPECIES'], ['rings', 'TREE RINGS'], ['height', 'HEIGHT'], ['loss', 'FOREST LOSS'], ['pests', 'PESTS']].map(function(q){ return '<button type="button" class="wt-tab' + (TRG.mode === q[0] || (q[0] === 'foliage' && TRG.mode === 'spring') ? ' on' : '') + '" data-tm="' + q[0] + '">' + q[1] + '</button>'; }).join('') + '</div>'
+      var h = '<div class="trb-tabs">' + [['foliage', 'FOLIAGE'], ['species', 'SPECIES'], ['rings', '<span class="bv-lg">TREE RINGS</span><span class="bv-sm">RINGS</span>'], ['height', 'HEIGHT'], ['loss', '<span class="bv-lg">FOREST LOSS</span><span class="bv-sm">LOSS</span>'], ['pests', 'PESTS']].map(function(q){ return '<button type="button" class="wt-tab' + (TRG.mode === q[0] || (q[0] === 'foliage' && TRG.mode === 'spring') ? ' on' : '') + '" data-tm="' + q[0] + '">' + q[1] + '</button>'; }).join('') + '</div>'
         + (TRG.mode === 'foliage' || TRG.mode === 'spring' ? '<div class="trb-chips trb-yr">' + [['foliage', 'FALL COLOR'], ['spring', 'SPRING LEAF-OUT']].map(function(q){ return '<button type="button" class="wt-chip' + (TRG.mode === q[0] ? ' on' : '') + '" data-tm="' + q[0] + '">' + q[1] + '</button>'; }).join('') + '</div>' : '')
         + (TRG.mode === 'loss' ? '<div class="trb-chips trb-yr">' + FLS.SP.map(function(q, i){ return '<button type="button" class="wt-chip' + (FLS.span === i ? ' on' : '') + '" data-fls="' + i + '">' + q[2] + '</button>'; }).join('') + '<button type="button" class="wt-chip' + (FLS.cause ? ' on' : '') + '" data-flc="1">WHY IT WENT</button><button type="button" class="wt-chip' + (FLS.gain ? ' on' : '') + '" data-flg="1">REGROWTH</button></div>' : '')
         + (TRG.mode === 'height' ? '<div class="trb-chips trb-yr">' + [['h', 'CANOPY HEIGHT'], ['c', 'WOOD AND CARBON']].map(function(q){ return '<button type="button" class="wt-chip' + (FHT.v === q[0] ? ' on' : '') + '" data-fhv="' + q[0] + '">' + q[1] + '</button>'; }).join('')
           + (FHT.v === 'c' ? '<span style="width:10px;"></span>' + FHT.BYRS.map(function(y){ return '<button type="button" class="wt-chip' + (FHT.yr === y ? ' on' : '') + '" data-fhy="' + y + '">' + y + '</button>'; }).join('') : '') + '</div>' : '')
         + (TRG.mode === 'pests' ? '<div class="trb-chips trb-yr">' + PST.YRS.map(function(y){ return '<button type="button" class="wt-chip' + (PST.yr === y ? ' on' : '') + '" data-pyr="' + y + '">' + (y || 'ALL 2021\u20132025') + '</button>'; }).join('') + '</div>' : '')
-        + (TRG.mode === 'species' ? '<div class="trb-chips">' + (nycHere() ? [['nyc', 'NYC STREET TREES']] : []).concat([['here', 'WHAT GROWS HERE'], ['age', 'FOREST AGE'], ['mt', 'MATURE FOREST'], ['og', 'OLD GROWTH'], ['nt', 'NOTABLE TREES']]).map(function(q){ return '<button type="button" class="wt-chip' + (SPX[q[0]] ? ' on' : '') + '" data-sx="' + q[0] + '">' + q[1] + '</button>'; }).join('') + '</div>' : '');
+        /* TWO ROWS (user 2026-10-29, "do them all": SPECIES pushed the map off a phone; AGE, MATURE and OLD GROWTH painted over each other):
+           the layers that sit on top, each on or off; then ONE way to color the forest */
+        + (TRG.mode === 'species' ? '<div class="trb-chips">' + (nycHere() ? [['nyc', '<span class="bv-lg">NYC STREET TREES</span><span class="bv-sm">STREET TREES</span>']] : []).concat([['here', '<span class="bv-lg">WHAT GROWS HERE</span><span class="bv-sm">GROWS HERE</span>'], ['nt', '<span class="bv-lg">NOTABLE TREES</span><span class="bv-sm">NOTABLE</span>']]).map(function(q){ return '<button type="button" class="wt-chip' + (SPX[q[0]] ? ' on' : '') + '" data-sx="' + q[0] + '">' + q[1] + '</button>'; }).join('') + '</div>'
+          + '<div class="trb-chips trb-fc"><span class="trb-lab">COLOR THE FOREST BY</span><span class="trb-seg">' + [['sp', '<span class="bv-lg">LEADING TREE</span><span class="bv-sm">TREE</span>'], ['age', 'AGE'], ['mt', 'MATURE'], ['og', 'OLD GROWTH']].map(function(q){ return '<button type="button" class="wt-chip' + (SPX.fcNow() === q[0] ? ' on' : '') + '" data-sfc="' + q[0] + '">' + q[1] + '</button>'; }).join('') + '</span></div>' : '');
       if (b.innerHTML !== h) b.innerHTML = h; return b; };
     /* SPECIES (user 2026-10-29: "move THE FOREST out of FOLIAGE to be its own tab"): FOLIAGE's own forest look -- the USFS species map,
        its key and its taps -- shown as a tab of its own; FOLIAGE keeps the color */
@@ -116420,6 +116504,11 @@ function closeAlertModal(){
       + '#cw-landbar .wt-tab{ flex:1 1 0; padding:7px 6px; border-radius:7px; border:1px solid transparent; background:none; color:rgba(255,255,255,.85); cursor:pointer; font:900 .62rem system-ui,sans-serif; letter-spacing:.14em; } #cw-landbar .wt-tab.on{ color:#9a3412; background:#fff; border-color:#fff; }'
       + '#cw-landbar .wt-chip, #cw-treebar .trb-yr .wt-chip{ padding:5px 10px; border-radius:999px; border:1px solid rgba(255,255,255,.75); background:none; color:#fff; font:800 .52rem system-ui,sans-serif; letter-spacing:.1em; cursor:pointer; } #cw-landbar .wt-chip.on{ background:#fff; color:#9a3412; border-color:#fff; }'
       + '@media (max-width:768px){ #cw-landbar .trb-chips{ flex-wrap:nowrap; justify-content:flex-start; overflow-x:auto; scrollbar-width:none; } }'
+      /* phones (2026-10-29): short tab names so every tab shows; chips keep their width in a scrolling row (they had squeezed into circles) */
+      + '.bv-sm{ display:none; } @media (max-width:600px){ .bv-lg{ display:none; } .bv-sm{ display:inline; } #cw-landbar .wt-tab, #cw-treebar .wt-tab{ letter-spacing:.04em; padding:7px 1px; font-size:.54rem; } #cw-treebar .trb-tabs{ gap:2px; } #cw-treebar .trb-tabs .wt-tab{ flex:1 1 auto; min-width:0; } }'
+      + '#cw-landbar .wt-chip, #cw-treebar .wt-chip{ flex:0 0 auto; white-space:nowrap; }'
+      + '#cw-treebar .trb-fc{ align-items:center; } #cw-treebar .trb-lab{ font:800 .5rem system-ui,sans-serif; letter-spacing:.12em; color:rgba(255,255,255,.85); margin-right:2px; }'
+      + '#cw-treebar .trb-seg{ display:inline-flex; gap:0; } #cw-treebar .trb-seg .wt-chip{ border-radius:0; margin-left:-1px; } #cw-treebar .trb-seg .wt-chip:first-child{ border-radius:999px 0 0 999px; } #cw-treebar .trb-seg .wt-chip:last-child{ border-radius:0 999px 999px 0; }'
       + '#lc-land{ padding:2px 12px 8px; color:#fff; font:800 .56rem/1.6 system-ui,sans-serif; letter-spacing:.06em; } #lc-land a{ color:inherit; } #lc-land .lk{ display:inline-flex; align-items:center; gap:4px; margin-right:10px; white-space:nowrap; } #lc-land .lk i{ display:inline-block; width:10px; height:10px; border-radius:2px; }'
       + '#cw-treebar{ display:none; flex-direction:column; gap:6px; padding:2px 8px 8px; background:rgb(234,88,12); } #clouds-radar-widget.cw-trees > #cw-treebar{ display:flex; }'
       + '#cw-treebar .trb-tabs{ display:flex; gap:6px; } #cw-treebar .trb-chips{ display:flex; gap:6px; flex-wrap:wrap; justify-content:center; }'
