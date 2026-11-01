@@ -197,7 +197,7 @@ def twc_bumps(key, d0=None, d1=None):
             d = (d0 + datetime.timedelta(days=k)).isoformat()
             settled = (today - datetime.date.fromisoformat(d)).days >= 2
             def fetch_r2(d=d):
-                try: txt = get_text('https://cdn.bluishvoid.com/kalshi/trail/%s_%s.jsonl' % (key, d))
+                try: txt = get_text('https://cdn.bluishvoid.com/kalshi/trail/%s_%s.jsonl?t=%d' % (key, d, time.time() // 300))   # cdn edge holds ~24 h; see trail_rows in kalshi_daily.py
                 except Exception: return []
                 rows = []
                 for l in txt.splitlines():

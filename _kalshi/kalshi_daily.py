@@ -3749,7 +3749,9 @@ def trail_rows(key, day):
         return _TRAIL_CACHE[k]
     rows = []
     try:
-        req = urllib.request.Request(TRAIL_URL % (key, day), headers={'User-Agent': 'bluishvoid.com bake'})
+        # ?t= per 5 minutes: since ~10-26 the cdn edge holds each day's file ~24 h from its first read (age 86579 s on
+        # 11-01), ignoring max-age=120, so an unbusted read of a finished day got the 06:00 ET copy (73 of 290 rows)
+        req = urllib.request.Request(TRAIL_URL % (key, day) + '?t=%d' % (time.time() // 300), headers={'User-Agent': 'bluishvoid.com bake'})
         txt = urllib.request.urlopen(req, timeout=20).read().decode('utf-8', 'replace')
         for line in txt.splitlines():
             try:
