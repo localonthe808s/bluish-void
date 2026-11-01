@@ -3821,9 +3821,30 @@ def restore_globals(saved):
         globals()[name] = v
 
 
+# THE PUBLIC-FORECAST PULL (2026-11-01, user: "wire it into the tuner"). The model's de-bias takes each run's trailing
+# warm error off it -- about 1.7 degF in New York all autumn -- and on the days the runs were NOT warm that left us 2-4
+# degF under both NWS and NBM, which were right: 4 of 10 on 10-13..10-22, our noon pred 1.0 cold while NWS ran +0.05.
+# So when the morning NWS forecast and NBM's day-ahead peak (their mean; NWS required) sit more than PUB_PULL_T above
+# our forecast, the forecast moves up pub_pull x the excess. It never pulls down. Backtested on the 58 live NY locks
+# (09-04..10-31): w 0.5 -> Brier .516 -> .480, hits 39 -> 42, both halves; a constant warm shift does no better than
+# .508; shuffled gaps matched it in 6 of 500; picked walk-forward from earlier days only, .473 -> .439.
+# Default 0 (off): only the live pull court in tune.py turns it on, from the live locks, and the replays cannot see a
+# morning NWS forecast, so the search never tries it.
+PUB_PULL_T = 1.5
+
+
+def pub_pull_lift(w, pf, nws, nbm):
+    """-> degF to add to forecast `pf` (0 when off, NWS missing, or within PUB_PULL_T)"""
+    if not w or pf is None or nws is None:
+        return 0.0
+    ref = (nws + nbm) / 2.0 if nbm is not None else nws
+    return max(0.0, float(w) * (ref - pf - PUB_PULL_T))
+
+
 def params_of(cfg):
     p = {'skill': bool(cfg.get('skill', True)), 'bias_hl': cfg.get('bias_hl'), 'sd_mult': cfg.get('sd_mult', 1.0),
-         'drop_worst': int(cfg.get('drop_worst') or 0), 'wind_regime': bool(cfg.get('wind_regime'))}
+         'drop_worst': int(cfg.get('drop_worst') or 0), 'wind_regime': bool(cfg.get('wind_regime')),
+         'pub_pull': float(cfg.get('pub_pull') or 0.0)}
     p.update({k: v for k, v in (cfg.get('_globals') or {}).items() if k in TUNABLE_GLOBALS})
     return p
 
@@ -4289,6 +4310,31 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             print('%s TWC forecast joins the consensus (%.2f vs ours %.2f over %d mornings)' % (cfg['key'], _pt['mae'], _po['mae'], _pt['n']))
     except Exception as e:
         print('twc roster check skipped (%s)' % e)
+    try:
+        fresh_peaks = fresh_runs(cfg, hr0)
+    except Exception as e:
+        fresh_peaks = None
+        print('fresh runs unavailable: %s' % e)
+
+    # THE PUBLIC-FORECAST PULL on the live call (see PUB_PULL_T); snapshot() applies the same to every lock.
+    # NWS as published this morning (the 7-9 AM trail row of this day in the last bake), else the forecast now.
+    _pull_nws = None
+    try:
+        for _h in (load_log(OUT).get('history') or []):
+            if _h.get('date') == tkey:
+                _pull_nws = next((float(t['nws_fc']) for t in (_h.get('trail') or [])
+                                  if 7 <= (t.get('h') or -1) <= 9 and t.get('nws_fc') is not None), None)
+    except Exception as e:
+        print('pull: morning NWS unread (%s)' % e)
+    if _pull_nws is None and _nwsf is not None:
+        _pull_nws = float(_nwsf)
+    _pull_nbm = (fresh_peaks or {}).get('ncep_nbm_conus')
+    _pull_on = cfg['key'].endswith('_high') and '--backfill' not in sys.argv
+    if _pull_on and fadj is not None:
+        _l = pub_pull_lift(cfg.get('pub_pull'), fadj, _pull_nws, _pull_nbm)
+        if _l:
+            print('%s public-forecast pull: +%.2f (ours %.2f, NWS %s, NBM %s, w %s)' % (cfg['key'], _l, fadj, _pull_nws, _pull_nbm, cfg.get('pub_pull')))
+            fadj = round(fadj + _l, 2)
     cands = [x for x in (obs_far, fadj) if x is not None]
     if not cands:
         print('no forecast and no observations yet')
@@ -4440,11 +4486,6 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     res_lock = residuals(fcm, bias_of, daily, obh, LOCK_HOUR, tkey, h0_of)
     sd_lock, _ = spread(res_lock, LOCK_HOUR, binding_now)
 
-    try:
-        fresh_peaks = fresh_runs(cfg, hr0)
-    except Exception as e:
-        fresh_peaks = None
-        print('fresh runs unavailable: %s' % e)
 
     # THE CUT IS WHAT WAS MEASURED, NOT WHAT WAS ESTIMATED (2026-09-30). The ladder deletes every outcome under
     # its floor, and that floor was max(hourly max + the mean gap to the true peak, 5-minute max + its gap, exact
@@ -4622,6 +4663,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     if entry is None:
         entry = {'date': tkey, 'event': event_ticker(cfg, today)}
         hist[tkey] = entry
+    _pull_at = {}
+
     def snapshot(hour):
         """Our call AS OF `hour` today, however late the job actually runs.
 
@@ -4660,10 +4703,17 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
                                  or (peak_h is not None and peak_h <= hour)):
             fl = live if fl is None else max(fl, live)
         pf = point_forecast(fcm, biases, tkey, hour, yday)
+        # the public-forecast pull (see PUB_PULL_T): this morning's NWS from the trail, NBM's day-ahead peak
+        _pn, _pb = _pull_nws, _pull_nbm
+        _lift = pub_pull_lift(cfg.get('pub_pull'), pf, _pn, _pb) if _pull_on else 0.0
+        _pr0 = max([x for x in (fl, pf) if x is not None] or [None])
+        if _lift:
+            pf += _lift
         cand = [x for x in (fl, pf) if x is not None]
         if not cand:
             return None
         pr = max(cand)
+        _pull_at[hour] = {'w': float(cfg.get('pub_pull') or 0.0), 'nws': _pn, 'nbm': _pb, 'lift': round(pr - _pr0, 2) if _pr0 is not None else 0.0}
         # NO REMAINING HOURS IS THE STRONGEST BINDING CASE, NOT A MISSING ONE.
         # point_forecast returns None once no forecast hour is left in the day,
         # and `fl >= pf` then failed against None -- so the most finished day
@@ -4720,6 +4770,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             'p': round(ps[best], 4), 'pred': round(pred, 2), 'sd': round(sd, 2),
             'as_of': '%02d:00 %s' % (hour, cfg.get('tzlabel', 'ET')),
             'params': params_of(cfg),
+            # what the public-forecast pull did: the court in tune.py replays other strengths from pred - lift
+            'pull': _pull_at.get(hour),
             # the hour the PRICES were read. A lock is rebuilt as-of its own
             # hour, but the market quotes can only ever be live ones -- so if the
             # run happens well after the lock hour the forecast is honest and the
@@ -5560,7 +5612,7 @@ def main():
         for cfg in RUN:
             a = (_tuned.get(cfg['key']) or {}).get('active')
             if a and (_tuned.get(cfg['key']) or {}).get('n', 0) >= 45:
-                cfg.update({k: a[k] for k in ('skill', 'bias_hl', 'sd_mult', 'drop_worst', 'wind_regime') if k in a})
+                cfg.update({k: a[k] for k in ('skill', 'bias_hl', 'sd_mult', 'drop_worst', 'wind_regime', 'pub_pull') if k in a})
                 g = {k: a[k] for k in TUNABLE_GLOBALS if k in a}
                 if g:
                     cfg['_globals'] = g

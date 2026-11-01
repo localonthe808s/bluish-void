@@ -229,8 +229,111 @@ def live_spread_court(cfg, chosen, cands, last_step=None):
     return ruled, out
 
 
+# ------------------------------------------------ the live pull court ----
+# THE PUBLIC-FORECAST PULL IS JUDGED ON THE LIVE LOCKS ONLY (2026-11-01, see PUB_PULL_T in kalshi_daily.py). The
+# replays cannot see a morning NWS forecast, so the search would score every strength the same. Each live lock
+# carries what the pull did (lock.pull: w, nws, nbm, lift); older locks have the NWS in `published` and NBM in
+# dayahead_peaks and no lift. A strength is scored by re-applying it to pred - lift and reading the ladder as a
+# normal on the lock's own spread -- the same arithmetic the spread court trusts. The search's guardrails apply:
+# MIN_DAYS live locks, a Brier gain of MIN_GAIN, a win on BOTH halves, at most one bracket hit lost; and at most
+# one change per PULL_COOLDOWN_D days.
+PULL_GRID, PULL_COOLDOWN_D = [0.0, 0.25, 0.5, 0.75, 1.0], 7
+
+
+def pull_rows(cfg):
+    try:
+        doc = json.load(open(os.path.join(HERE, '..', cfg['out'])))
+    except Exception:
+        return []
+    rows = []
+    for h in sorted(doc.get('history') or [], key=lambda x: x.get('date') or ''):
+        L = h.get('lock') or {}
+        lad = L.get('ladder') or []
+        if h.get('backtest') or h.get('actual') is None or not lad or not L.get('sd') or L.get('pred') is None:
+            continue
+        k = [i for i, r in enumerate(lad) if (r.get('lo') is None or h['actual'] >= r['lo'])
+             and (r.get('hi') is None or h['actual'] <= r['hi'])]
+        if len(k) != 1:
+            continue
+        pu = L.get('pull') or {}
+        nws = pu['nws'] if pu.get('nws') is not None else (h.get('published') or {}).get('nws')
+        nbm = pu['nbm'] if 'nbm' in pu else (L.get('dayahead_peaks') or {}).get('ncep_nbm_conus')
+        rows.append({'date': h['date'], 'raw': float(L['pred']) - float(pu.get('lift') or 0.0), 'sd': float(L['sd']),
+                     'lad': lad, 'k': k[0], 'nws': nws, 'nbm': nbm})
+    return rows
+
+
+def pull_score(rows, w):
+    import math
+    phi = lambda z: 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+    hits, br = 0, 0.0
+    for r in rows:
+        pred = r['raw'] + K.pub_pull_lift(w, r['raw'], r['nws'], r['nbm'])
+        sd = max(0.05, r['sd'])
+        ps = []
+        for b in r['lad']:
+            lo = -1e9 if b.get('lo') is None else b['lo'] - 0.5
+            hi = 1e9 if b.get('hi') is None else b['hi'] + 0.5
+            ps.append(max(0.0, phi((hi - pred) / sd) - phi((lo - pred) / sd)))
+        t = sum(ps) or 1.0
+        ps = [p / t for p in ps]
+        hits += ps.index(max(ps)) == r['k']
+        br += sum((p - (1.0 if i == r['k'] else 0.0)) ** 2 for i, p in enumerate(ps))
+    return {'n': len(rows), 'hits': hits, 'brier': br / len(rows) if rows else None}
+
+
+def live_pull_court(cfg, cur, last_change=None):
+    cur = float(cur or 0.0)
+    rows = pull_rows(cfg)
+    out = {'n': len(rows), 'was': cur, 'ruled': cur, 'why': 'too few live locks: %s stands' % cur}
+    if not cfg['key'].endswith('_high') or len(rows) < MIN_DAYS:
+        return cur, out
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    half = len(rows) // 2
+    sc = lambda w, R=rows: pull_score(R, w)
+    base, b_old, b_new = sc(cur), sc(cur, rows[:half]), sc(cur, rows[half:])
+    out['scores'] = {str(w): {'brier': round(sc(w)['brier'], 4), 'hits': sc(w)['hits']} for w in PULL_GRID}
+    best = None
+    for w in PULL_GRID:
+        if abs(w - cur) < 1e-9:
+            continue
+        c = sc(w)
+        gain = base['brier'] - c['brier']
+        if gain >= MIN_GAIN and sc(w, rows[:half])['brier'] < b_old['brier'] and sc(w, rows[half:])['brier'] < b_new['brier'] \
+                and c['hits'] >= base['hits'] - 1 and (best is None or gain > best[1]):
+            best = (w, gain, c)
+    if best is None:
+        out['why'] = '%s stands on %d live locks (Brier %.4f, %d hits): nothing clears the guardrails' % (cur, len(rows), base['brier'], base['hits'])
+    elif last_change and (today - datetime.date.fromisoformat(last_change)).days < PULL_COOLDOWN_D:
+        out['why'] = '%s -> %s waits: the last change was %s' % (cur, best[0], last_change)
+    else:
+        out.update({'ruled': best[0], 'changed_at': today.isoformat(),
+                    'why': 'pub_pull %s -> %s: Brier %.4f -> %.4f, hits %d -> %d on %d live locks, wins both halves'
+                           % (cur, best[0], base['brier'], best[2]['brier'], base['hits'], best[2]['hits'], len(rows))})
+    if 'changed_at' not in out and last_change:
+        out['changed_at'] = last_change
+    return out['ruled'], out
+
+
+def pull_apply(cfg, r, prev_r):
+    """run the pull court and write its ruling into r['active'] (kept across the search, which drops unknown knobs)"""
+    a = r.get('active')
+    if not a or not cfg['key'].endswith('_high'):
+        return
+    pc = (prev_r or {}).get('pull_court') or {}
+    cur = ((prev_r or {}).get('active') or {}).get('pub_pull', 0.0)
+    ruled, rep_ = live_pull_court(cfg, cur, pc.get('changed_at'))
+    a['pub_pull'] = ruled
+    r['pull_court'] = rep_
+    if abs(float(ruled) - float(cur or 0.0)) > 1e-9:
+        r['why'] = (r.get('why') or '') + ' | PULL COURT: ' + rep_['why']
+        r['chosen_at'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+    print('  pull court: %s' % rep_['why'], flush=True)
+
+
 def tune(cfg, prev):
     r = _tune(cfg, prev)
+    pull_apply(cfg, r, prev.get(cfg['key']))
     a = r.get('active')
     if a and a.get('sd_mult') is not None:
         ruled, rep_ = live_spread_court(cfg, a['sd_mult'], (r.get('lists') or {}).get('sd_mult') or KNOBS['sd_mult'],
@@ -322,6 +425,7 @@ def main():
                 r['chosen_at'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
             print('%s live court (%d live locks, made with %s): %s' % (cfg['key'], rep_['n'], rep_['made_with'], rep_['why']))
             print('    log-loss by multiplier: %s' % rep_.get('ll'))
+            pull_apply(cfg, r, copy.deepcopy(r))
         prev['_built'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
         if '--dry' not in sys.argv:
             json.dump(prev, open(OUT, 'w'), indent=1)
