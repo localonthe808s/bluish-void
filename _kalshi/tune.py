@@ -540,11 +540,100 @@ def mkt_apply(cfg, r, prev_r):
     print('  market court: %s' % rep_['why'], flush=True)
 
 
+# ------------------------------------------------ the evening market court ----
+# THE EVENING WEIGHT IS JUDGED ON THE TRAIL (2026-11-01; see MKT_PM_HOUR / mkt_w in kalshi_daily.py). Rows at PM_HOURS
+# from each settled day's trail: raw = pred - mps (the shift the pull made), the market centre from the row's mids, the
+# floor from the row's running estimate less the default offset, the lock's ladder bounds. Brier/hits as the lock
+# courts, both halves, at most one hit lost, PM_MIN_DAYS distinct days (the trail carries ladders only since 10-07),
+# one change per PM_COOLDOWN_D days. The incumbent is mkt_pull_pm, or the noon weight when none was ever set.
+PM_GRID, PM_COOLDOWN_D, PM_HOURS, PM_MIN_DAYS = [0.65, 0.85, 1.0], 7, (17, 18), 20
+
+
+def pm_rows(cfg):
+    try:
+        doc = json.load(open(os.path.join(HERE, '..', cfg['out'])))
+    except Exception:
+        return []
+    rows = []
+    for h in sorted(doc.get('history') or [], key=lambda x: x.get('date') or ''):
+        L = h.get('lock') or {}
+        lad = L.get('ladder') or []
+        if h.get('backtest') or h.get('actual') is None or not lad or not h.get('trail'):
+            continue
+        k = [i for i, r in enumerate(lad) if (r.get('lo') is None or h['actual'] >= r['lo'])
+             and (r.get('hi') is None or h['actual'] <= r['hi'])]
+        if len(k) != 1:
+            continue
+        for t in h['trail']:
+            if t.get('h') not in PM_HOURS or t.get('pred') is None or not t.get('sd') or not t.get('mkt') or len(t['mkt']) != len(lad):
+                continue
+            mk = K.market_centre([{'mid': m, 'lo': r.get('lo'), 'hi': r.get('hi')} for m, r in zip(t['mkt'], lad)])
+            if mk is None:
+                continue
+            obs = t.get('obs')
+            rows.append({'date': h['date'], 'h': t['h'], 'raw': float(t['pred']) - float(t.get('mps') or 0.0), 'sd': float(t['sd']),
+                         'lad': lad, 'k': k[0], 'mk': float(mk), 'floor': (float(obs) - K.OFFSET_DEFAULT) if obs is not None else None})
+    return rows
+
+
+def live_pm_court(cfg, cur, last_change=None):
+    cur = float(cur or 0.0)
+    rows = pm_rows(cfg)
+    days = sorted({r['date'] for r in rows})
+    out = {'n': len(rows), 'days': len(days), 'was': cur, 'ruled': cur, 'why': 'too few trail days: %s stands' % cur}
+    if not cfg['key'].endswith('_high') or len(days) < PM_MIN_DAYS:
+        return cur, out
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    mid = days[len(days) // 2]
+    old, new = [r for r in rows if r['date'] < mid], [r for r in rows if r['date'] >= mid]
+    sc = lambda w, R=rows: mkt_score(R, w)
+    base, b_old, b_new = sc(cur), sc(cur, old), sc(cur, new)
+    out['scores'] = {str(w): {'brier': round(sc(w)['brier'], 4), 'hits': sc(w)['hits']} for w in sorted(set(PM_GRID + [cur]))}
+    best = None
+    for w in PM_GRID:
+        if abs(w - cur) < 1e-9:
+            continue
+        c = sc(w)
+        gain = base['brier'] - c['brier']
+        if gain >= MIN_GAIN and sc(w, old)['brier'] < b_old['brier'] and sc(w, new)['brier'] < b_new['brier'] \
+                and c['hits'] >= base['hits'] - 1 and (best is None or gain > best[1]):
+            best = (w, gain, c)
+    if best is None:
+        out['why'] = '%s stands on %d evening rows over %d days (Brier %.4f, %d hits): nothing clears the guardrails' % (cur, len(rows), len(days), base['brier'], base['hits'])
+    elif last_change and (today - datetime.date.fromisoformat(last_change)).days < PM_COOLDOWN_D:
+        out['why'] = '%s -> %s waits: the last change was %s' % (cur, best[0], last_change)
+    else:
+        out.update({'ruled': best[0], 'changed_at': today.isoformat(),
+                    'why': 'mkt_pull_pm %s -> %s: Brier %.4f -> %.4f, hits %d -> %d on %d evening rows over %d days, wins both halves'
+                           % (cur, best[0], base['brier'], best[2]['brier'], base['hits'], best[2]['hits'], len(rows), len(days))})
+    if 'changed_at' not in out and last_change:
+        out['changed_at'] = last_change
+    return out['ruled'], out
+
+
+def pm_apply(cfg, r, prev_r):
+    """run the evening court and write its ruling into r['active']['mkt_pull_pm'] (None = the noon weight stands)"""
+    a = r.get('active')
+    if not a or not cfg['key'].endswith('_high'):
+        return
+    pc = (prev_r or {}).get('pm_court') or {}
+    prev_a = ((prev_r or {}).get('active') or {})
+    cur = prev_a.get('mkt_pull_pm') or a.get('mkt_pull') or 0.0
+    ruled, rep_ = live_pm_court(cfg, cur, pc.get('changed_at'))
+    a['mkt_pull_pm'] = ruled if abs(float(ruled) - float(a.get('mkt_pull') or 0.0)) > 1e-9 else None
+    r['pm_court'] = rep_
+    if abs(float(ruled) - float(cur or 0.0)) > 1e-9:
+        r['why'] = (r.get('why') or '') + ' | EVENING COURT: ' + rep_['why']
+        r['chosen_at'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+    print('  evening court: %s' % rep_['why'], flush=True)
+
+
 def tune(cfg, prev):
     r = _tune(cfg, prev)
     pull_apply(cfg, r, prev.get(cfg['key']))
     tail_apply(cfg, r, prev.get(cfg['key']))
     mkt_apply(cfg, r, prev.get(cfg['key']))
+    pm_apply(cfg, r, prev.get(cfg['key']))
     a = r.get('active')
     if a and a.get('sd_mult') is not None:
         ruled, rep_ = live_spread_court(cfg, a['sd_mult'], (r.get('lists') or {}).get('sd_mult') or KNOBS['sd_mult'],
@@ -641,6 +730,8 @@ def main():
             print('    tail scores: %s' % (r.get('tail_court') or {}).get('scores'))
             mkt_apply(cfg, r, copy.deepcopy(r))
             print('    market scores: %s' % (r.get('mkt_court') or {}).get('scores'))
+            pm_apply(cfg, r, copy.deepcopy(r))
+            print('    evening scores: %s' % (r.get('pm_court') or {}).get('scores'))
         prev['_built'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
         if '--dry' not in sys.argv:
             json.dump(prev, open(OUT, 'w'), indent=1)

@@ -835,43 +835,7 @@ async function jobWatch(env) {
   if (JSON.stringify(state) !== before) await env.OBS.put(ALERT_KEY, JSON.stringify(state));
   return out.join(' | ');
 }
-// THE MORNING REVIEW DIGEST (2026-10-02, "it should improve itself daily overnight"). A cloud Claude session
-// (routine "Kalshi nightly review", 10:00Z) reviews the settled day, hunts for bugs and pushes its findings --
-// and any proposed fix -- to the branch claude/kalshi-review-<date>, never to main. At 12:00Z (8 AM ET) this
-// reads that branch's _kalshi/reviews/latest.json and pages a short summary, or says the review never landed.
-// Its own KV key (review:<date>): alert:state is shared by two other jobs in the same minute.
-async function reviewDigest(env) {
-  if (!env.VAPID_JWK || !env.OBS) return 'digest off';
-  const day = localDate(0);
-  const key = `review:${day}`;
-  if (await env.OBS.get(key)) return 'already sent';
-  const branch = `claude/kalshi-review-${day}`;
-  let doc = null, why = '';
-  try {
-    // the repo is public: raw needs no token, so the GH token's scope does not matter here
-    const r = await fetch(`https://raw.githubusercontent.com/${OWNER}/${REPO}/${branch}/_kalshi/reviews/latest.json?t=${Date.now()}`,
-      { headers: { 'User-Agent': 'bluishvoid-kalshi-cron' } });
-    if (r.ok) doc = await r.json(); else why = `no review on ${branch} (http ${r.status})`;
-  } catch (e) { why = String(e).slice(0, 80); }
-  let title, body, pri = 'default';
-  if (!doc || doc.date !== day) {
-    // SILENT (2026-11-01): the review routine last landed 10-02 and this paged "nothing landed" at high priority every
-    // morning for a month. A missing review is the normal case now; only a review that exists is worth a phone.
-    await env.OBS.put(key, '1', { expirationTtl: 60 * 60 * 48 });
-    return `no review landed (${why || 'file is for ' + (doc && doc.date)}), no page`;
-  } else {
-    const f = doc.findings || [];
-    const fixes = f.filter((x) => x.fix);
-    title = `Kalshi review: ${f.length} finding${f.length === 1 ? '' : 's'}, ${fixes.length} fix${fixes.length === 1 ? '' : 'es'} proposed`;
-    body = [doc.headline || ''].concat(f.slice(0, 5).map((x) => `- [${x.severity || 'note'}] ${x.title}${x.fix ? ' (fix on branch)' : ''}`))
-      .concat(fixes.length ? [`Branch ${branch} -- nothing ships until you merge it.`] : []).join('\n');
-    if (f.some((x) => x.severity === 'high')) pri = 'high';
-  }
-  // the day's mark goes in BEFORE the post, like notify(): a put that fails after a post would repeat the digest
-  await env.OBS.put(key, '1', { expirationTtl: 60 * 60 * 48 });
-  const pu = await pushAll(env, { title, body, tag: 'review', url: '/#go=kalshi' }, pri === 'high' ? 'high' : 'normal', 'owner').catch(() => ({ sent: 0 }));
-  return `${title} (push ${pu.sent})`;
-}
+// the morning review digest left 2026-11-01: the cloud review routine it reported on last landed 10-02
 async function alertTick(env, sched) {
   if (!env.VAPID_JWK || !env.OBS) return 'alerts off';
   const state = (await env.OBS.get(ALERT_KEY, { type: 'json' })) || {};
@@ -1481,10 +1445,6 @@ export default {
       ctx.waitUntil((async () => {
         try { console.log(`[watchdog] :${minute} ${new Date().toISOString()} ${await jobWatch(env)}`); }
         catch (e) { console.log(`[watchdog] FAILED ${e}`); }
-      })());
-      if (new Date(event.scheduledTime || Date.now()).getUTCHours() === 12) ctx.waitUntil((async () => {
-        try { console.log(`[review] ${new Date().toISOString()} ${await reviewDigest(env)}`); }
-        catch (e) { console.log(`[review] FAILED ${e}`); }
       })());
     }
     // THE SUNSET TRUTH (2026-09-26). Two minutes before New York's sunset, start sunset-truth.yml: it photographs the

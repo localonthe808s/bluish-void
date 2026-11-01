@@ -791,6 +791,23 @@ def metar_regime(cfg):
 # market's rules name; `geocode` snaps to a nearest-station blend and disagreed
 # on Denver and Los Angeles in that same sample.
 TWC_KEY = '5c241d89f91274015a577e3e17d43370'   # the key weather.com's own site ships
+# THE KEYED API, BACKED OFF (2026-11-01): it has answered 401 since 10-21, and every five-minute bake still spent
+# ~20 s and 15 requests (with retries) asking it three times. After a refusal the keyed calls are skipped for
+# TWC_BACKOFF_H; the stamp rides in the head file (twc_dead) so a fresh CI checkout remembers it. The keyless
+# portal is untouched and recovery is automatic: one call a day.
+TWC_BACKOFF_H = 24
+_TWC_DEAD = {}
+
+
+def twc_keyed_ok():
+    at = _TWC_DEAD.get('at')
+    return not at or (time.time() - float(at)) > TWC_BACKOFF_H * 3600
+
+
+def twc_keyed_refused(e):
+    s = str(e)
+    if '401' in s or '403' in s:
+        _TWC_DEAD.update({'at': time.time(), 'why': s[:80]})
 
 
 # The running max is the right quantity but the WRONG FIELD ON ITS OWN.
@@ -841,9 +858,12 @@ def twc_history(cfg, day):
         u = ('https://api.weather.com/v1/location/%s:9:US/observations/'
              'historical.json?apiKey=%s&units=e&startDate=%s'
              % (icao, TWC_KEY, day.strftime('%Y%m%d')))
+    if not twc_keyed_ok():
+        return twc_portal_history(cfg, day)
     try:
         j = get_json(u, timeout=45)
     except Exception as e:
+        twc_keyed_refused(e)
         print('twc history: %s unavailable (%s)' % (icao, e))
         return twc_portal_history(cfg, day)
     out = []
@@ -1094,12 +1114,15 @@ def twc_today(cfg, day):
     icao = cfg.get('icao') or ('K' + cfg['station'])
     cur = {}
     try:
+        if not twc_keyed_ok():
+            raise RuntimeError('keyed API refused within the last %d h, skipped' % TWC_BACKOFF_H)
         j = get_json('https://api.weather.com/v3/wx/observations/current'
                      '?icaoCode=%s&units=e&language=en-US&format=json&apiKey=%s'
                      % (icao, TWC_KEY), timeout=45)
         if isinstance(j, dict):
             cur = j
     except Exception as e:
+        twc_keyed_refused(e)
         print('twc: %s unavailable (%s)' % (icao, e))
     hist = twc_history(cfg, day)
     hmax = max(hist) if hist else None
@@ -1187,11 +1210,14 @@ NWS_GRID = {}
 def twc_forecast(cfg, day):
     """TWC's forecast max for `day` at the market's station -> degF, or None."""
     icao = cfg.get('icao') or ('K' + cfg['station'])
+    if not twc_keyed_ok():
+        return None
     try:
         j = get_json('https://api.weather.com/v3/wx/forecast/daily/3day?icaoCode=%s'
                      '&units=e&language=en-US&format=json&apiKey=%s' % (icao, TWC_KEY),
                      timeout=30)
     except Exception as e:
+        twc_keyed_refused(e)
         print('twc forecast: %s unavailable (%s)' % (icao, e))
         return None
     times = j.get('validTimeLocal') or []
@@ -3611,6 +3637,26 @@ def measured_hours(cfg):
     return out or None
 
 
+LIVE_HOURS_MIN_DAYS = 30
+
+
+def live_hours_curve(cfg):
+    """The LIVE hour curve (live_hours.py: the trail's own ladders at the quotes of the hour, graded), in the shape the
+    sheet draws, once it rests on LIVE_HOURS_MIN_DAYS days; else None and the replay curve stands."""
+    try:
+        d = json.load(open(os.path.join(HERE, 'live_hours.json')))
+    except Exception:
+        return None
+    c = (d.get('cities') or {}).get(cfg['key']) or {}
+    if (c.get('days') or 0) < LIVE_HOURS_MIN_DAYS:
+        return None
+    out = [{'h': e['h'], 'ret': e['ret'], 'winrate': e.get('winrate'), 'bets': e.get('bets'), 'se': e.get('se'),
+            'pool': e.get('pool'), 'days': c['days'],
+            'acc': int(round(100 * (e.get('winrate') or 0))), 'sd': SD_FALLBACK.get(e['h'])}
+           for e in (c.get('by_hour') or []) if e.get('ret') is not None]
+    return out or None
+
+
 def measured_emp_w(cfg, hour, binding=False):
     """THE AFTERNOON BLEND'S WEIGHT, measured nightly (price_study.afternoon_blend):
     for this city and hour, the weight on the empirical climb distribution that
@@ -3814,6 +3860,18 @@ def compose_run_review(cfg, record):
         else:
             s_ += word(gap)
         R.append(s_ + '.')
+    # THE SHAPE OF THE ODDS (2026-11-01): the rungs we rate 10-30% land about half as often as said, the ones we rate
+    # 60-80% more often -- a ladder too flat in the middle, which no court has yet fixed. Said here so it stays watched.
+    cb = (record.get('calibration') or {}).get('bins') or []
+    lo_ = [b for b in cb if b.get('lo') in (0.1, 0.2) and b.get('n')]
+    hi_ = [b for b in cb if b.get('lo') in (0.6, 0.7) and b.get('n')]
+    if sum(b['n'] for b in lo_) >= 30 and sum(b['n'] for b in hi_) >= 20:
+        wavg = lambda bs, k: sum(b[k] * b['n'] for b in bs) / float(sum(b['n'] for b in bs))
+        ls, lh, hs, hh = wavg(lo_, 'said'), wavg(lo_, 'happened'), wavg(hi_, 'said'), wavg(hi_, 'happened')
+        shape = ('the middle rungs carry too much and the top too little' if (lh < 0.7 * ls and hh > 1.1 * hs)
+                 else 'the top rung is under-rated' if hh > 1.1 * hs else 'the shape holds')
+        R.append('By rung: ranges we rate 10-30%% have landed %d%% of the time, ranges we rate 60-80%% %d%% -- %s.'
+                 % (round(100 * lh), round(100 * hh), shape))
     return R
 
 
@@ -4007,6 +4065,23 @@ def mkt_pull_shift(w, pred, mk, floor):
     return new - pred
 
 
+# THE EVENING WEIGHT (2026-11-01). The market pull was judged at the noon lock, where 0.65 is right from 7 AM to
+# 3 PM (it beats the market's own ladder at every one of those hours on the trail). From 5 PM the market is simply
+# right: at 5 PM, 25 trail days, our recorded ladder scored Brier .197 / 20 hits, the market's .081 / 24, and the
+# centre at full market weight .100 / 24 -- winning both halves at 5 and 6 PM, while 3-4 PM split. So from
+# MKT_PM_HOUR the weight is `mkt_pull_pm`, judged by tune.py's evening court on the trail rows (hours 17-18); unset,
+# the noon weight stands. It changes the sheet's evening odds, not a bet: none is named after 2 PM.
+MKT_PM_HOUR = 17
+
+
+def mkt_w(cfg, hour):
+    """the market pull's weight at `hour`: mkt_pull_pm from MKT_PM_HOUR when the evening court set one, else mkt_pull"""
+    pm = cfg.get('mkt_pull_pm')
+    if hour is not None and hour >= MKT_PM_HOUR and pm:
+        return float(pm)
+    return float(cfg.get('mkt_pull') or 0.0)
+
+
 def tuner_summary(cfg):
     """What the nightly tuner has in force for this market and what its courts last said, for the sheet's TUNER row."""
     try:
@@ -4038,6 +4113,7 @@ def tuner_summary(cfg):
             'sd_stepped': lc.get('stepped_at'),
             'pub_pull': a.get('pub_pull', 0.0), 'pull_since': (r.get('pull_court') or {}).get('changed_at'),
             'mkt_pull': a.get('mkt_pull', 0.0), 'mkt_since': (r.get('mkt_court') or {}).get('changed_at'),
+            'mkt_pull_pm': a.get('mkt_pull_pm'), 'pm_since': (r.get('pm_court') or {}).get('changed_at'),
             'tail_margin': a.get('tail_margin', 0.0), 'bias_hl': a.get('bias_hl'), 'wind_regime': a.get('wind_regime'),
             'ladder': ladder, 'chosen_at': r.get('chosen_at')}
 
@@ -4046,7 +4122,8 @@ def params_of(cfg):
     p = {'skill': bool(cfg.get('skill', True)), 'bias_hl': cfg.get('bias_hl'), 'sd_mult': cfg.get('sd_mult', 1.0),
          'drop_worst': int(cfg.get('drop_worst') or 0), 'wind_regime': bool(cfg.get('wind_regime')),
          'pub_pull': float(cfg.get('pub_pull') or 0.0), 'tail_margin': float(cfg.get('tail_margin') or 0.0),
-         'mkt_pull': float(cfg.get('mkt_pull') or 0.0)}
+         'mkt_pull': float(cfg.get('mkt_pull') or 0.0),
+         'mkt_pull_pm': (float(cfg['mkt_pull_pm']) if cfg.get('mkt_pull_pm') else None)}
     p.update({k: v for k, v in (cfg.get('_globals') or {}).items() if k in TUNABLE_GLOBALS})
     return p
 
@@ -4072,6 +4149,12 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         _h0 = load_log(OUT).get('history') or []
     except Exception:
         _h0 = []
+    try:
+        _td = load_log(OUT).get('twc_dead') or {}
+        if _td.get('at') and not _TWC_DEAD.get('at'):
+            _TWC_DEAD.update(_td)
+    except Exception:
+        pass
     for _leg, _ag in (('lock', False), ('lock-against', True), ('eve', False), ('eve-against', True)):
         EDGE_GATE[(cfg['key'], _leg)] = edge_court(_h0, _leg.split('-')[0], _ag)
         _g = EDGE_GATE[(cfg['key'], _leg)]
@@ -4557,9 +4640,9 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
                    and ((fadj is not None and obs_far >= fadj) or over_now))
     # THE MARKET PULL on the live call (see market_centre); snapshot() applies the same to every lock
     _mk_centre = market_centre(rows) if _pull_on else None
-    _mp_live = mkt_pull_shift(cfg.get('mkt_pull'), pred, _mk_centre, obs_far) if (_pull_on and not binding_now) else 0.0
+    _mp_live = mkt_pull_shift(mkt_w(cfg, now.hour), pred, _mk_centre, obs_far) if (_pull_on and not binding_now) else 0.0
     if abs(_mp_live) > 0.005:
-        print('%s market pull: %+.2f (ours %.2f, market centre %.2f, w %s)' % (cfg['key'], _mp_live, pred, _mk_centre, cfg.get('mkt_pull')))
+        print('%s market pull: %+.2f (ours %.2f, market centre %.2f, w %s)' % (cfg['key'], _mp_live, pred, _mk_centre, mkt_w(cfg, now.hour)))
         pred = round(pred + _mp_live, 2)
     # the centre, in parts, for the sheet (user 2026-11-01: explain the number now that two pulls move it)
     _centre = {'models': (round(_fadj0, 2) if _fadj0 is not None else None), 'pull': _pull_lift_live,
@@ -4858,7 +4941,11 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             e2['eve'] = {'at': now.strftime('%H:%M'), 'pred': tom.get('pred'), 'sd': tom.get('sd'),
                          'pick': tom.get('pick'), 'p': tom.get('p'),
                          'market_pick': tom.get('market_pick'), 'market_p': tom.get('market_p'),
-                         'bet': tom.get('bet'), 'book': tom.get('book'), 'shadow': tom.get('shadow')}
+                         'bet': tom.get('bet'), 'book': tom.get('book'), 'shadow': tom.get('shadow'),
+                         # the ladder with the market's own odds, so the centre blend can be judged on this leg
+                         # once enough evenings are in (none was stored before 2026-11-01)
+                         'ladder': [{'label': r['label'], 'lo': r['lo'], 'hi': r['hi'], 'ours': r.get('ours'), 'market': r.get('market')}
+                                    for r in (tom.get('ladder') or [])]}
             hist[tom['date']] = e2
             _b = tom.get('bet') or tom['shadow']
             print('%s overnight plan logged for %s: %s%s %s at %.2f' % (
@@ -4942,10 +5029,10 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         bind = (fl is not None and ((pf is not None and fl >= pf) or over))
         # the market pull (see market_centre): the lock's centre moves toward the market's, never on a binding hour;
         # the court in tune.py replays other weights from pred - shift
-        _ms = mkt_pull_shift(cfg.get('mkt_pull'), pr, _mk_centre, fl) if (_pull_on and not bind) else 0.0
+        _ms = mkt_pull_shift(mkt_w(cfg, hour), pr, _mk_centre, fl) if (_pull_on and not bind) else 0.0
         if abs(_ms) > 0.005:
             pr = round(pr + _ms, 2)
-        _mpull_at[hour] = {'w': float(cfg.get('mkt_pull') or 0.0), 'mk': (round(_mk_centre, 2) if _mk_centre is not None else None), 'shift': round(_ms, 2)}
+        _mpull_at[hour] = {'w': mkt_w(cfg, hour), 'mk': (round(_mk_centre, 2) if _mk_centre is not None else None), 'shift': round(_ms, 2)}
         _res_h = residuals(fcm, bias_of, daily, obh, hour, tkey, h0_of)
         sdh, _ = spread(_res_h, hour, bind)
         # ONCE THE FLOOR BINDS, THE DAY IS OVER.  `bind` means no remaining hour
@@ -5045,6 +5132,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             # the size of the best available edge at this hour. Prices alone
             # cannot answer "when should the bet go on" -- this can.
             'edge': (lambda b: round(b['ev'], 4) if b else None)(best_bet(rows, ps)),
+            # the market pull's shift and weight at this hour (the evening court replays other weights from pred - mps)
+            'mps': round(_mp_live, 2), 'mw': mkt_w(cfg, now.hour),
             # the published forecasts as of this hour, judged forward
             'twc_fc': _twcf, 'nws_fc': _nwsf,
         })
@@ -5614,6 +5703,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         'updated_utc': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
         # when the run STARTED, so the panel can measure dispatch-to-landing
         'started_utc': RUN_STARTED,
+        # the keyed TWC API's last refusal, so the next run skips it for TWC_BACKOFF_H (see twc_keyed_ok)
+        'twc_dead': (dict(_TWC_DEAD) if _TWC_DEAD.get('at') else None),
         'today': {
             'date': tkey, 'event': event_ticker(cfg, today),
             'tz': cfg.get('tzlabel', 'ET'), 'market': cfg.get('label', ''),
@@ -5727,6 +5818,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             # whether the hour study above is this market's own or a fallback
             # (price_study by_market), so the panel can label it honestly
             'hours_own': bool(((_STUDY[0] if _STUDY else None) or {}).get('by_market', {}).get(cfg['key'])),
+            # the live record's own hour curve, once it has LIVE_HOURS_MIN_DAYS days (live_hours.json); the sheet prefers it
+            'by_hour_live': live_hours_curve(cfg),
             'by_hour': measured_hours(cfg) or [
                 {'h': h, 'acc': HOUR_ACC[h], 'sd': SD_FALLBACK.get(h)}
                 for h in sorted(HOUR_ACC)],
@@ -5847,7 +5940,7 @@ def main():
         for cfg in RUN:
             a = (_tuned.get(cfg['key']) or {}).get('active')
             if a and (_tuned.get(cfg['key']) or {}).get('n', 0) >= 45:
-                cfg.update({k: a[k] for k in ('skill', 'bias_hl', 'sd_mult', 'drop_worst', 'wind_regime', 'pub_pull', 'tail_margin', 'mkt_pull') if k in a})
+                cfg.update({k: a[k] for k in ('skill', 'bias_hl', 'sd_mult', 'drop_worst', 'wind_regime', 'pub_pull', 'tail_margin', 'mkt_pull', 'mkt_pull_pm') if k in a})
                 g = {k: a[k] for k in TUNABLE_GLOBALS if k in a}
                 if g:
                     cfg['_globals'] = g
