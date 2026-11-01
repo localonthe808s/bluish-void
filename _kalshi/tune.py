@@ -331,9 +331,113 @@ def pull_apply(cfg, r, prev_r):
     print('  pull court: %s' % rep_['why'], flush=True)
 
 
+# ------------------------------------------------ the live tail court ----
+# THE TAIL MARGIN IS JUDGED ON THE LIVE LOCKS, ON LOG LOSS (2026-11-01; see tail_mix in kalshi_daily.py). Brier hardly
+# moves with a margin -- it is the confident misses that log loss punishes and the margin exists for -- so this court
+# reads log loss, with the spread court's LIVE_GAIN, a win on both halves, at most one bracket hit lost, MIN_DAYS live
+# locks and one change per TAIL_COOLDOWN_D days. A lock's stored ladder is un-mixed with its own lock.tail (e and the
+# brackets reached); locks from before it existed take the brackets above obs_at_lock less the default offset.
+TAIL_GRID, TAIL_COOLDOWN_D = [0.0, 0.02, 0.05, 0.08, 0.12], 7
+
+
+def tail_rows(cfg):
+    try:
+        doc = json.load(open(os.path.join(HERE, '..', cfg['out'])))
+    except Exception:
+        return []
+    rows = []
+    for h in sorted(doc.get('history') or [], key=lambda x: x.get('date') or ''):
+        L = h.get('lock') or {}
+        lad = L.get('ladder') or []
+        if h.get('backtest') or h.get('actual') is None or not lad or any(r.get('ours') is None for r in lad):
+            continue
+        k = [i for i, r in enumerate(lad) if (r.get('lo') is None or h['actual'] >= r['lo'])
+             and (r.get('hi') is None or h['actual'] <= r['hi'])]
+        if len(k) != 1:
+            continue
+        ps = [float(r['ours']) for r in lad]
+        t = L.get('tail') or {}
+        if t.get('e') and t.get('open'):
+            e, op = float(t['e']), t['open']
+            ps = [max(0.0, (p - e / len(op)) / (1.0 - e)) if i in op else 0.0 for i, p in enumerate(ps)]
+            fl = None
+        else:
+            fl = (float(L['obs_at_lock']) - K.OFFSET_DEFAULT) if L.get('obs_at_lock') is not None else None
+            op = None
+        tot = sum(ps) or 1.0
+        rows.append({'date': h['date'], 'ps': [p / tot for p in ps], 'lad': lad, 'k': k[0], 'open': op, 'fl': fl})
+    return rows
+
+
+def tail_score(rows, e):
+    import math
+    hits, ll = 0, 0.0
+    for r in rows:
+        if r['open'] is not None:
+            op = r['open']
+            ps = [((1.0 - e) * p + e / len(op)) if i in op else 0.0 for i, p in enumerate(r['ps'])] if e else r['ps']
+        else:
+            ps, _ = K.tail_mix(r['lad'], r['ps'], r['fl'], False, e)
+        t = sum(ps) or 1.0
+        ps = [p / t for p in ps]
+        hits += ps.index(max(ps)) == r['k']
+        ll += -math.log(max(1e-3, ps[r['k']]))
+    return {'n': len(rows), 'hits': hits, 'll': ll / len(rows) if rows else None}
+
+
+def live_tail_court(cfg, cur, last_change=None):
+    cur = float(cur or 0.0)
+    rows = tail_rows(cfg)
+    out = {'n': len(rows), 'was': cur, 'ruled': cur, 'why': 'too few live locks: %s stands' % cur}
+    if not cfg['key'].endswith('_high') or len(rows) < MIN_DAYS:
+        return cur, out
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    half = len(rows) // 2
+    sc = lambda e, R=rows: tail_score(R, e)
+    base, b_old, b_new = sc(cur), sc(cur, rows[:half]), sc(cur, rows[half:])
+    out['scores'] = {str(e): {'ll': round(sc(e)['ll'], 4), 'old': round(sc(e, rows[:half])['ll'], 4),
+                              'new': round(sc(e, rows[half:])['ll'], 4), 'hits': sc(e)['hits']} for e in TAIL_GRID}
+    best = None
+    for e in TAIL_GRID:
+        if abs(e - cur) < 1e-9:
+            continue
+        c = sc(e)
+        gain = base['ll'] - c['ll']
+        if gain >= LIVE_GAIN and sc(e, rows[:half])['ll'] < b_old['ll'] and sc(e, rows[half:])['ll'] < b_new['ll'] \
+                and c['hits'] >= base['hits'] - 1 and (best is None or gain > best[1]):
+            best = (e, gain, c)
+    if best is None:
+        out['why'] = '%s stands on %d live locks (log loss %.4f, %d hits): nothing clears the guardrails' % (cur, len(rows), base['ll'], base['hits'])
+    elif last_change and (today - datetime.date.fromisoformat(last_change)).days < TAIL_COOLDOWN_D:
+        out['why'] = '%s -> %s waits: the last change was %s' % (cur, best[0], last_change)
+    else:
+        out.update({'ruled': best[0], 'changed_at': today.isoformat(),
+                    'why': 'tail_margin %s -> %s: log loss %.4f -> %.4f, hits %d -> %d on %d live locks, wins both halves'
+                           % (cur, best[0], base['ll'], best[2]['ll'], base['hits'], best[2]['hits'], len(rows))})
+    if 'changed_at' not in out and last_change:
+        out['changed_at'] = last_change
+    return out['ruled'], out
+
+
+def tail_apply(cfg, r, prev_r):
+    a = r.get('active')
+    if not a or not cfg['key'].endswith('_high'):
+        return
+    tc = (prev_r or {}).get('tail_court') or {}
+    cur = ((prev_r or {}).get('active') or {}).get('tail_margin', 0.0)
+    ruled, rep_ = live_tail_court(cfg, cur, tc.get('changed_at'))
+    a['tail_margin'] = ruled
+    r['tail_court'] = rep_
+    if abs(float(ruled) - float(cur or 0.0)) > 1e-9:
+        r['why'] = (r.get('why') or '') + ' | TAIL COURT: ' + rep_['why']
+        r['chosen_at'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+    print('  tail court: %s' % rep_['why'], flush=True)
+
+
 def tune(cfg, prev):
     r = _tune(cfg, prev)
     pull_apply(cfg, r, prev.get(cfg['key']))
+    tail_apply(cfg, r, prev.get(cfg['key']))
     a = r.get('active')
     if a and a.get('sd_mult') is not None:
         ruled, rep_ = live_spread_court(cfg, a['sd_mult'], (r.get('lists') or {}).get('sd_mult') or KNOBS['sd_mult'],
@@ -426,6 +530,8 @@ def main():
             print('%s live court (%d live locks, made with %s): %s' % (cfg['key'], rep_['n'], rep_['made_with'], rep_['why']))
             print('    log-loss by multiplier: %s' % rep_.get('ll'))
             pull_apply(cfg, r, copy.deepcopy(r))
+            tail_apply(cfg, r, copy.deepcopy(r))
+            print('    tail scores: %s' % (r.get('tail_court') or {}).get('scores'))
         prev['_built'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
         if '--dry' not in sys.argv:
             json.dump(prev, open(OUT, 'w'), indent=1)

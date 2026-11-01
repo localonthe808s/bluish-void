@@ -2223,17 +2223,43 @@ def kernel_distribution(rows, pred, pool, obs_floor, k):
     return [p / s for p in ps]
 
 
+# THE TAIL MARGIN (2026-11-01, user: "add the tail margin too"). The 11-01 audit: four noon locks that gave the settled
+# bracket under 5% carry 35% of New York's log loss (09-10, 09-21, 10-17, 10-22). Each bracket the day can still reach
+# gets (1 - e) p + e / n; brackets the observed high has already passed stay at zero (a margin there would be the
+# 09-04 Denver bug, odds on a day that already happened), and a binding day -- the high is in -- gets none. Highs only:
+# the lows' locks are mostly binding at 8 AM, and their worst tail (09-19, 100% on a bracket that lost) is not one a
+# margin reaches. e defaults to 0; the live tail court in tune.py sets it from the live locks on log loss.
+def tail_mix(rows, ps, obs_floor, binding, e):
+    """-> (ps with the margin, indices it spread over); (ps, None) when off"""
+    if not e or binding or not ps:
+        return ps, None
+    cut = (obs_floor - 0.5) if obs_floor is not None else None
+    open_ = [i for i, r in enumerate(rows) if cut is None or r['hi'] is None or r['hi'] + 0.5 > cut]
+    if len(open_) < 2:
+        return ps, None
+    e = float(e)
+    out = [((1.0 - e) * p + e / len(open_)) if i in open_ else 0.0 for i, p in enumerate(ps)]
+    t = sum(out) or 1.0
+    return [p / t for p in out], open_
+
+
 def ladder_probs(cfg, rows, pred, sd, obs_floor, res, binding):
     """The live ladder: the city's kernel over its residual pool when the
     court ruled for it and the day is still open; the normal otherwise (a
     binding floor keeps the exact-figure spread logic, which the kernel study
-    did not replay)."""
+    did not replay). Then the tail margin, where the tail court has set one."""
     kc = kernel_court(cfg)
+    ps = None
     if kc and not binding:
         pool = spread_pool(res, binding)[-int(kc['pool']):]
         if len(pool) >= 20:
-            return kernel_distribution(rows, pred, pool, obs_floor, float(kc['k']))
-    return distribution(rows, pred, sd, obs_floor)
+            ps = kernel_distribution(rows, pred, pool, obs_floor, float(kc['k']))
+    if ps is None:
+        ps = distribution(rows, pred, sd, obs_floor)
+    e = float(cfg.get('tail_margin') or 0.0) if cfg.get('kind') != 'low' else 0.0
+    ps, open_ = tail_mix(rows, ps, obs_floor, binding, e)
+    _TL.tail_last = {'e': e, 'open': open_} if open_ else None   # stamped on the lock (make_lock reads it)
+    return ps
 
 
 def distribution(rows, pred, sd, obs_floor):
@@ -3872,7 +3898,7 @@ def pub_pull_lift(w, pf, nws, nbm):
 def params_of(cfg):
     p = {'skill': bool(cfg.get('skill', True)), 'bias_hl': cfg.get('bias_hl'), 'sd_mult': cfg.get('sd_mult', 1.0),
          'drop_worst': int(cfg.get('drop_worst') or 0), 'wind_regime': bool(cfg.get('wind_regime')),
-         'pub_pull': float(cfg.get('pub_pull') or 0.0)}
+         'pub_pull': float(cfg.get('pub_pull') or 0.0), 'tail_margin': float(cfg.get('tail_margin') or 0.0)}
     p.update({k: v for k, v in (cfg.get('_globals') or {}).items() if k in TUNABLE_GLOBALS})
     return p
 
@@ -4777,9 +4803,11 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         return pr, sdh, ladder_probs(cfg, rows, pr, sdh, cut_h if cut_h is not None else fl, _res_h, bind), fl
 
     def make_lock(hour):
+        _TL.tail_last = None
         snap = snapshot(hour)
         if snap is None:
             return None
+        _tail = getattr(_TL, 'tail_last', None)
         pred, sd, ps, fl = snap
         best = max(range(len(rows)), key=lambda i: ps[i])
         fresh = fresh_peaks or {}
@@ -4800,6 +4828,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             'params': params_of(cfg),
             # what the public-forecast pull did: the court in tune.py replays other strengths from pred - lift
             'pull': _pull_at.get(hour),
+            # the tail margin in force and the brackets it reached; the court un-mixes 'ours' with these
+            'tail': _tail,
             # the hour the PRICES were read. A lock is rebuilt as-of its own
             # hour, but the market quotes can only ever be live ones -- so if the
             # run happens well after the lock hour the forecast is honest and the
@@ -5642,7 +5672,7 @@ def main():
         for cfg in RUN:
             a = (_tuned.get(cfg['key']) or {}).get('active')
             if a and (_tuned.get(cfg['key']) or {}).get('n', 0) >= 45:
-                cfg.update({k: a[k] for k in ('skill', 'bias_hl', 'sd_mult', 'drop_worst', 'wind_regime', 'pub_pull') if k in a})
+                cfg.update({k: a[k] for k in ('skill', 'bias_hl', 'sd_mult', 'drop_worst', 'wind_regime', 'pub_pull', 'tail_margin') if k in a})
                 g = {k: a[k] for k in TUNABLE_GLOBALS if k in a}
                 if g:
                     cfg['_globals'] = g
