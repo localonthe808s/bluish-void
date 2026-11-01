@@ -2784,6 +2784,34 @@ def shadow_bet(rows, ps):
     return best
 
 
+# THE BLEND BETS, SHADOW ONLY (2026-11-01, user: "yes start on the blend"). The 11-01 audit: the market's ladder beats
+# ours on log loss at every hour, yet a blend carrying 30-45% of ours beat the market alone from 7 AM to 1 PM on the
+# 25 trail days (noon .74 against .77) -- ours adds information, the market adds calibration. The 10-19 study fit 15%
+# by leave-one-day-out and found no noon bet cleared the edge floor at that weight. So both weights are written on
+# every high's lock: the bet shadow_bet would name off the blended ladder, at the same asks, fee, edge floor and cap.
+# Never named, never staked, never read by the edge court; report.py grades them forward as their own legs. A ruling
+# needs EDGE_MIN_N graded bets on a weight, judged the way the edge court judges a leg.
+BLEND_SHADOW_WS = (0.15, 0.35)
+
+
+def blend_bets(rows, ps):
+    """{weight on ours: the bet off that blend, or None for no bet}; None when the market is not fully priced"""
+    cfg = getattr(_TL, 'cfg', None) or {}
+    if cfg.get('kind') == 'low' or not rows or ps is None:
+        return None
+    mids = [_mkt_p(r) for r in rows]
+    if any(m is None for m in mids) or any(p is None for p in ps):
+        return None
+    mt, ot = (sum(mids) or 1.0), (sum(ps) or 1.0)
+    out = {}
+    for w in BLEND_SHADOW_WS:
+        bl = [w * p / ot + (1.0 - w) * m / mt for p, m in zip(ps, mids)]
+        b = shadow_bet(rows, bl)
+        out['%.2f' % w] = dict(b, top=rows[max(range(len(bl)), key=lambda i: bl[i])]['label']) if b else \
+            {'none': True, 'top': rows[max(range(len(bl)), key=lambda i: bl[i])]['label']}
+    return out
+
+
 def shadow_book(rows, ps):
     """Every bet the plan names at lock -- the headline and the ALSOs -- so the
     record can grade the whole plan, not just its first line. 2026-09-05's plan
@@ -4795,6 +4823,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             'book': lock_book(rows, ps),
             # what the plan would have been, graded at settlement for the edge court
             'shadow': withheld(rows, ps, 'lock'),
+            # the blended ladders' bets, shadow only (see BLEND_SHADOW_WS)
+            'blend_bets': blend_bets(rows, ps),
         }
 
     # INTRADAY PRICE TRAIL.  Kalshi's candlestick endpoint 404s, so there is no

@@ -116,6 +116,15 @@ def market_day(key, label, kind, h):
             out['blend_hit'] = top.get('label') == h['actual_bracket']
             for r in lad:
                 r.pop('_bl', None)
+    # the blend bets (kalshi_daily.BLEND_SHADOW_WS, from 2026-11-01): shadow only, graded apart from the real bets
+    out['blend_bets'] = []
+    for w, b in sorted(((L.get('blend_bets') or {}) if kind == 'high' else {}).items()):
+        if not isinstance(b, dict):
+            continue
+        g = None if b.get('none') else grade(b, h.get('actual_bracket'))
+        out['blend_bets'].append({'w': w, 'named': False, 'top_hit': b.get('top') == h.get('actual_bracket'),
+                                  'dir': b.get('dir'), 'label': b.get('label'), 'price': b.get('price'), 'q': b.get('q'),
+                                  'won': g[0] if g else None, 'ret': g[1] if g else None})
     if h.get('eve'):
         out['eve_pick'] = h['eve'].get('pick')
         out['eve_hit'] = (h['eve'].get('pick') == h.get('actual_bracket'))
@@ -213,6 +222,13 @@ def tally(ms):
             'll_mkt': round(sum(-math.log(m['p_mkt']) for m in bl) / len(bl), 3),
             'hits_ours': sum(1 for m in bl if m['hit']), 'hits_blend': sum(1 for m in bl if m.get('blend_hit'))}
     out['bets'] = bet_tally([b for m in ms for b in m['bets']])
+    bw = collections.OrderedDict()
+    for m in ms:
+        for b in m.get('blend_bets') or []:
+            bw.setdefault(b['w'], []).append(b)
+    if bw:      # per blend weight: days recorded, its top pick's hits, and the bets it would have named
+        out['blend_bets'] = {w: dict(bet_tally([b for b in v if b['ret'] is not None]), days=len(v),
+                                     top_hits=sum(1 for b in v if b['top_hit'])) for w, v in bw.items()}
     legs = collections.OrderedDict()
     for m in ms:
         for b in m['bets']:
