@@ -113,7 +113,7 @@ def truth_of(cfg, since):
         # IEM's daily row for today is the running max, not the day: skip it
         if v not in (None, '', 'M', 'None') and since <= r['day'] < today:
             truth[r['day']] = float(v)
-    return truth
+    return K.overlay_cli(truth, cfg, CACHE)       # the climate report, not the hourly maximum (2026-11-01; see K.cli_highs)
 
 
 def peaks_of(cfg, since, until):

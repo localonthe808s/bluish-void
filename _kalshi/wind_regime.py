@@ -34,6 +34,8 @@ it goes live only if it clears the guardrails on the real settled ladders.
 import csv, datetime, json, math, os, statistics as st, sys, time, urllib.parse, urllib.request, collections
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import kalshi_daily as K                                   # noqa: E402  cli_highs / overlay_cli (2026-11-01)
 OUT = os.path.join(HERE, 'wind_regime.json')
 CACHE = os.path.join(HERE, '_study'); os.makedirs(CACHE, exist_ok=True)
 
@@ -95,6 +97,7 @@ def build(key, m):
         v = r.get('max_temp_f')
         if v not in (None, '', 'M', 'None'):
             truth[r['day']] = float(v)
+    truth = K.overlay_cli(truth, {'station': stn, 'key': key}, CACHE)   # the climate report, not the hourly maximum (2026-11-01)
     ob = collections.defaultdict(list)
     for r in csv.DictReader(open(fetch('wr_%s_wind.csv' % key,
             'https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station=%s&data=drct&data=sknt&year1=%s&month1=%s&day1=%s'

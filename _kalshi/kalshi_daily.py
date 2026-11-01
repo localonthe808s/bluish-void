@@ -628,6 +628,54 @@ def daily_series(cfg, start, end):
     return out
 
 
+# THE OFFICIAL HIGH, FOR THE STUDIES (2026-11-01). IEM's daily summary above is the climate report's high in 2026
+# (0 of 267 New York days differ) but for 2024-2025 it is the maximum of the HOURLY readings on most days (189 of
+# 306 differ in 2024, 158 of 363 in 2025), which sits a degree under the settlement about half the time. Every table
+# fitted on those years learned a truth ~0.55 F too cold and noisier than the real one: re-run on the climate
+# reports, the kernel's noon gain fell from 0.027 to 0.005 Brier and its ruling flipped to NORMAL, while the wind
+# regime's table survived within 0.04 F. The reports themselves are on IEM's cli.py, one keyless call per year.
+def cli_highs(cfg, since_year, cache_dir):
+    """{'YYYY-MM-DD': degF} from the NWS climate reports (what settles) for cfg's station, since_year to today.
+    Past years are cached for good in cache_dir; the current year is refreshed after 20 hours."""
+    icao = cfg.get('icao') or ('K' + cfg['station'])      # KNYC; cfg['cli'] is the product id (CLINYC), which cli.py rejects
+    this_year = int(time.strftime('%Y'))
+    out = {}
+    for y in range(int(since_year), this_year + 1):
+        p = os.path.join(cache_dir, 'cli_%s_%d.json' % (icao, y))
+        fresh = os.path.exists(p) and (y < this_year or time.time() - os.path.getmtime(p) < 20 * 3600)
+        if not fresh:
+            try:
+                raw = get('https://mesonet.agron.iastate.edu/json/cli.py?station=%s&year=%d' % (icao, y), timeout=120)
+                json.loads(raw)                      # whole, before it is written
+                with open(p, 'wb') as fh:
+                    fh.write(raw)
+            except Exception as e:
+                if not os.path.exists(p):
+                    print('cli_highs: %s %d unavailable (%s)' % (icao, y, e))
+                    continue
+        for r in (json.load(open(p)).get('results') or []):
+            if r.get('high') is not None:
+                try:
+                    out[r['valid']] = float(r['high'])
+                except (ValueError, TypeError):
+                    pass
+    return out
+
+
+def overlay_cli(truth, cfg, cache_dir, since_year=None):
+    """`truth` with every day a climate report covers replaced by the report's high. Days without one (today's
+    running value, a missing report) keep what they had. Prints how many days moved, so the log shows it."""
+    if not truth:
+        return truth
+    cli = cli_highs(cfg, since_year or min(truth)[:4], cache_dir)
+    moved = sum(1 for d in truth if d in cli and cli[d] != truth[d])
+    for d in list(truth):
+        if d in cli:
+            truth[d] = cli[d]
+    print('%s truth: %d of %d days corrected to the climate report' % (cfg.get('key') or cfg['station'], moved, len(truth)))
+    return truth
+
+
 # THE LIVE OBSERVATION, AHEAD OF IEM.
 #
 # IEM is the archive and the settlement truth, but it publishes each :51 report

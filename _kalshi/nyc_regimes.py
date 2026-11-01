@@ -32,6 +32,8 @@ fetch('nyc_arch.json', 'https://historical-forecast-api.open-meteo.com/v1/foreca
 fetch('nyc_daily.csv', 'https://mesonet.agron.iastate.edu/cgi-bin/request/daily.py?network=NY_ASOS&stations=NYC&year1=2025&month1=1&day1=1&year2=%s&month2=%s&day2=%s&format=comma' % (y, m, d))
 fetch('nyc_hourly.csv', 'https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station=NYC&data=tmpf,drct,sknt,skyc1&year1=2025&month1=1&day1=1&year2=%s&month2=%s&day2=%s&tz=America%%2FNew_York&format=onlycomma&latlon=no&elev=no&missing=M&trace=T&direct=no&report_type=3' % (y, m, d))
 fetch('lga_hourly.csv', 'https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station=LGA&data=tmpf&year1=2025&month1=1&day1=1&year2=%s&month2=%s&day2=%s&tz=America%%2FNew_York&format=onlycomma&latlon=no&elev=no&missing=M&trace=T&direct=no&report_type=3' % (y, m, d))
+sys.path.insert(0, HERE)
+import kalshi_daily as K                                   # noqa: E402  overlay_cli (2026-11-01)
 os.chdir(D)
 print('=' * 30, 'BIAS SCHEMES AND REGIMES')
 import json, csv, math, statistics as st, collections, datetime
@@ -51,6 +53,7 @@ truth={}
 for r in csv.DictReader(open('nyc_daily.csv')):
     v=r.get('max_temp_f')
     if v not in (None,'','M','None'): truth[r['day']]=float(v)
+truth=K.overlay_cli(truth, {'station':'NYC','key':'ny_high'}, D)   # the climate report, not the hourly maximum (2026-11-01)
 # hourly obs: max through 11:51, hour of max, stream max, afternoon wind
 obs=collections.defaultdict(list)
 for r in csv.DictReader(open('nyc_hourly.csv')):
@@ -171,6 +174,7 @@ truth={}
 for r in csv.DictReader(open('nyc_daily.csv')):
     v=r.get('max_temp_f')
     if v not in (None,'','M','None'): truth[r['day']]=float(v)
+truth=K.overlay_cli(truth, {'station':'NYC','key':'ny_high'}, D)   # the climate report, not the hourly maximum (2026-11-01)
 obs=collections.defaultdict(dict)
 for r in csv.DictReader(open('nyc_hourly.csv')):
     if r['tmpf'] in ('M',''): continue

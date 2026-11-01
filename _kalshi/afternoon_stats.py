@@ -88,6 +88,7 @@ def inputs(cfg):
         v = r.get('max_temp_f')
         if v not in (None, '', 'M', 'None'):
             truth[r['day']] = float(v)
+    truth = K.overlay_cli(truth, cfg, CACHE)      # the climate report, not the hourly maximum (2026-11-01; see K.cli_highs)
     obs = collections.defaultdict(dict)
     for r in csv.DictReader(io.StringIO(hourly)):
         if r.get('tmpf') in ('M', '', None):

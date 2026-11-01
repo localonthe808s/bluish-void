@@ -115,6 +115,7 @@ def load(city):
         v = r.get('max_temp_f')
         if v not in (None, '', 'M', 'None'):
             truth[r['day']] = float(v)
+    truth = K.overlay_cli(truth, cfg, D)      # the climate report, not the hourly maximum (2026-11-01; see K.cli_highs)
     obh = collections.defaultdict(dict)
     for r in csv.DictReader(open(hcsv)):
         if r['tmpf'] in ('M', ''):
