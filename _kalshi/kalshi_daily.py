@@ -2752,7 +2752,20 @@ EDGE_WINDOW, EDGE_MIN_N = 30, 20
 EDGE_GATE = {}          # (market key, leg) -> the court's ruling, set at the start of each run
 
 
-def edge_court(history, leg='lock'):
+# AGAINST OUR OWN PICK, ITS OWN COURT (2026-11-01, user: "do them all"). A bet can agree with the market's pick and
+# still run against OUR pick: 11-01 at 1:55 PM the sheet named NO on 59 or below while its own pick was 59 or below,
+# because the market had it at 78% and we at 55%. On the record such bets are 8 graded, 3 won, +0.09 per $1; the
+# bets that back the pick are 32 graded, 24 won, +0.22. So the lock leg is two courts: `lock` for bets with the pick
+# and `lock-against` for bets against it, each opening on its own record under the same rule. A bet withheld by the
+# against-court is written as a shadow marked why='against', so the report keeps grading it.
+def against_pick(b, pick):
+    """whether bet `b` runs against the pick `pick` (NO on it, or YES on another range)"""
+    if not isinstance(b, dict) or not pick or not b.get('label'):
+        return False
+    return (b.get('dir') == 'against') == (b['label'] == pick)
+
+
+def edge_court(history, leg='lock', against=None):
     rows = []
     for h in sorted((x for x in (history or []) if not x.get('backtest') and x.get('actual_bracket') is not None),
                     key=lambda x: x['date']):
@@ -2762,14 +2775,16 @@ def edge_court(history, leg='lock'):
             continue
         if b.get('why') == 'disagree':          # withheld by picks_agree, not by this court: not its evidence
             continue
+        if against is not None and against_pick(b, blk.get('pick')) != against:
+            continue
         won = (b['label'] == h['actual_bracket']) if b.get('dir') == 'for' else (b['label'] != h['actual_bracket'])
         price = float(b['price'])
         fee = float(b['fee']) if b.get('fee') is not None else fee_of(price)
         rows.append((h['date'], price, ((1.0 - price) if won else -price) - fee, bool(won)))
     rows = rows[-EDGE_WINDOW:]
     n = len(rows)
-    out = {'open': False, 'leg': leg, 'n': n, 'won': sum(1 for r in rows if r[3]), 'ret': None, 'se': None,
-           'need_n': EDGE_MIN_N, 'window': EDGE_WINDOW}
+    out = {'open': False, 'leg': leg + ('-against' if against else ''), 'n': n, 'won': sum(1 for r in rows if r[3]),
+           'ret': None, 'se': None, 'need_n': EDGE_MIN_N, 'window': EDGE_WINDOW}
     if n:
         stake = sum(r[1] for r in rows)
         ret = sum(r[2] for r in rows) / stake
@@ -2804,18 +2819,32 @@ def picks_agree(rows, ps):
     return max(ours)[1] == max(mkt)[1]
 
 
-def bet_allowed(rows, ps, leg='lock'):
-    return gate_open(leg) and picks_agree(rows, ps)
+def our_pick(rows, ps):
+    ours = [(p, r['label']) for r, p in zip(rows, ps) if p is not None]
+    return max(ours)[1] if ours else None
+
+
+def gate_leg(b, rows, ps, leg='lock'):
+    """the court a bet answers to: `leg`, or `leg-against` when it runs against our own pick"""
+    return leg + '-against' if against_pick(b, our_pick(rows, ps)) else leg
+
+
+def bet_allowed(rows, ps, leg='lock', b=None):
+    if not picks_agree(rows, ps):
+        return False
+    if b is None:
+        b = shadow_bet(rows, ps)
+    return gate_open(gate_leg(b, rows, ps, leg)) if b else gate_open(leg)
 
 
 def withheld(rows, ps, leg='lock'):
-    """The bet the sheet would have named and did not -- by the court or by picks_agree -- for the record."""
-    if bet_allowed(rows, ps, leg):
-        return None
+    """The bet the sheet would have named and did not -- by a court or by picks_agree -- for the record."""
     b = shadow_bet(rows, ps)
-    if b and gate_open(leg):
-        b = dict(b, why='disagree')
-    return b
+    if not b or bet_allowed(rows, ps, leg, b):
+        return None
+    if not picks_agree(rows, ps):
+        return dict(b, why='disagree') if gate_open(gate_leg(b, rows, ps, leg)) else b
+    return dict(b, why='against') if gate_leg(b, rows, ps, leg).endswith('-against') else b
 
 
 def best_bet(rows, ps, leg='lock'):
@@ -3978,6 +4007,41 @@ def mkt_pull_shift(w, pred, mk, floor):
     return new - pred
 
 
+def tuner_summary(cfg):
+    """What the nightly tuner has in force for this market and what its courts last said, for the sheet's TUNER row."""
+    try:
+        t = json.load(open(os.path.join(HERE, 'tuned.json')))
+    except Exception:
+        return None
+    r = t.get(cfg['key']) or {}
+    a = r.get('active') or {}
+    if not a:
+        return None
+    lc = r.get('live_court') or {}
+    nxt, asked = None, lc.get('asked')
+    # the court's own ask is in its ruling text when a step is only waiting on the cooldown ("step to 1.25 waits")
+    _m = re.search(r'step to ([\d.]+) waits', str(lc.get('why') or ''))
+    if _m:
+        asked = float(_m.group(1))
+    if asked is not None and lc.get('ruled') is not None and abs(float(asked) - float(lc['ruled'])) > 1e-9 and lc.get('stepped_at'):
+        try:
+            nxt = (datetime.date.fromisoformat(lc['stepped_at']) + datetime.timedelta(days=7)).isoformat()
+        except ValueError:
+            nxt = None
+    ladder = None
+    try:
+        kc = (json.load(open(os.path.join(HERE, 'kernel.json'))).get('cities') or {}).get(cfg['key']) or {}
+        ladder = 'kernel' if kc.get('use') else 'normal'
+    except Exception:
+        pass
+    return {'built': t.get('_built'), 'sd_mult': a.get('sd_mult'), 'sd_asked': asked, 'sd_next': nxt,
+            'sd_stepped': lc.get('stepped_at'),
+            'pub_pull': a.get('pub_pull', 0.0), 'pull_since': (r.get('pull_court') or {}).get('changed_at'),
+            'mkt_pull': a.get('mkt_pull', 0.0), 'mkt_since': (r.get('mkt_court') or {}).get('changed_at'),
+            'tail_margin': a.get('tail_margin', 0.0), 'bias_hl': a.get('bias_hl'), 'wind_regime': a.get('wind_regime'),
+            'ladder': ladder, 'chosen_at': r.get('chosen_at')}
+
+
 def params_of(cfg):
     p = {'skill': bool(cfg.get('skill', True)), 'bias_hl': cfg.get('bias_hl'), 'sd_mult': cfg.get('sd_mult', 1.0),
          'drop_worst': int(cfg.get('drop_worst') or 0), 'wind_regime': bool(cfg.get('wind_regime')),
@@ -4008,8 +4072,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         _h0 = load_log(OUT).get('history') or []
     except Exception:
         _h0 = []
-    for _leg in ('lock', 'eve'):
-        EDGE_GATE[(cfg['key'], _leg)] = edge_court(_h0, _leg)
+    for _leg, _ag in (('lock', False), ('lock-against', True), ('eve', False), ('eve-against', True)):
+        EDGE_GATE[(cfg['key'], _leg)] = edge_court(_h0, _leg.split('-')[0], _ag)
         _g = EDGE_GATE[(cfg['key'], _leg)]
         print('%s edge court, %s: %s -- %d graded bets, %d won, return %s per $1 (needs %d and at least %s)'
               % (cfg['key'], _leg, 'OPEN' if _g['open'] else 'closed, no bet is named', _g['n'], _g['won'],
@@ -4456,6 +4520,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
 
     # THE PUBLIC-FORECAST PULL on the live call (see PUB_PULL_T); snapshot() applies the same to every lock.
     # NWS as published this morning (the 7-9 AM trail row of this day in the last bake), else the forecast now.
+    _fadj0, _pull_lift_live = fadj, 0.0        # the consensus before either pull, for the sheet's centre line
     _pull_nws = None
     try:
         for _h in (load_log(OUT).get('history') or []):
@@ -4473,6 +4538,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         if _l:
             print('%s public-forecast pull: +%.2f (ours %.2f, NWS %s, NBM %s, w %s)' % (cfg['key'], _l, fadj, _pull_nws, _pull_nbm, cfg.get('pub_pull')))
             fadj = round(fadj + _l, 2)
+            _pull_lift_live = round(_l, 2)
     cands = [x for x in (obs_far, fadj) if x is not None]
     if not cands:
         print('no forecast and no observations yet')
@@ -4495,6 +4561,12 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     if abs(_mp_live) > 0.005:
         print('%s market pull: %+.2f (ours %.2f, market centre %.2f, w %s)' % (cfg['key'], _mp_live, pred, _mk_centre, cfg.get('mkt_pull')))
         pred = round(pred + _mp_live, 2)
+    # the centre, in parts, for the sheet (user 2026-11-01: explain the number now that two pulls move it)
+    _centre = {'models': (round(_fadj0, 2) if _fadj0 is not None else None), 'pull': _pull_lift_live,
+               'pull_ref': ({'nws': _pull_nws, 'nbm': _pull_nbm} if _pull_lift_live else None),
+               'mkt': round(_mp_live, 2), 'mkt_centre': (round(_mk_centre, 2) if _mk_centre is not None else None),
+               'floor': (round(obs_far, 2) if obs_far is not None else None), 'binding': bool(binding_now),
+               'pred': round(pred, 2)}
     sd, nsd = spread(res, now.hour, binding_now)
     if binding_now:
         exact_now = (live is not None and obs_far <= live + 1e-9)
@@ -5561,6 +5633,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             # New York +2.0 on the afternoon that made the case for it.
             'six_max': _six, 'six_window': SIX_WINDOW.get(cfg['key']),
             'dsm': _dsm, 'manh': _manh,
+            # the centre in parts (models, the NWS/NBM pull, the market pull, the floor) and the tuner's standing
+            'centre': _centre, 'tuner': tuner_summary(cfg),
             'own5_max': _own5, 'own5_station': OWN5.get(cfg['key']),
             'apt_max': _aptmax, 'twc_corroborated': _twc_corr,
             'model_resid': model_resid,
@@ -5627,6 +5701,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             'bet': best_bet(rows, ps),
             # the edge court's ruling, and the bet it is withholding (see edge_court)
             'edge_gate': EDGE_GATE.get((cfg['key'], 'lock')),
+            # the court for bets against our own pick (see against_pick)
+            'edge_gate_against': EDGE_GATE.get((cfg['key'], 'lock-against')),
             'shadow_bet': withheld(rows, ps, 'lock'),
             'picks_agree': picks_agree(rows, ps),
             'calib': _CALIB.get(cfg['key']) or None,

@@ -136,9 +136,11 @@ def market_day(key, label, kind, h):
         for named, b in ((True, blk.get('bet')), (False, blk.get('shadow'))):
             g = grade(b, h.get('actual_bracket'))
             if g:
-                out['bets'].append({'leg': LEG_NAME[(kind, leg)], 'named': named, 'dir': b.get('dir'),
-                                    'label': b.get('label'), 'price': b.get('price'), 'q': b.get('q'),
-                                    'won': g[0], 'ret': g[1]})
+                # a bet against the leg's own pick is graded on its own row (kalshi_daily.against_pick, 2026-11-01)
+                against = bool(blk.get('pick')) and ((b.get('dir') == 'against') == (b.get('label') == blk.get('pick')))
+                out['bets'].append({'leg': LEG_NAME[(kind, leg)] + (', against our pick' if against else ''), 'named': named,
+                                    'dir': b.get('dir'), 'label': b.get('label'), 'price': b.get('price'), 'q': b.get('q'),
+                                    'won': g[0], 'ret': g[1], 'against': against})
     return out
 
 
