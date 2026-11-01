@@ -855,9 +855,10 @@ async function reviewDigest(env) {
   } catch (e) { why = String(e).slice(0, 80); }
   let title, body, pri = 'default';
   if (!doc || doc.date !== day) {
-    title = 'Kalshi nightly review: nothing landed';
-    body = `${why || 'the review file is for ' + (doc && doc.date)}. The routine is at claude.ai/code/routines; the bake and the nightly tune ran on their own.`;
-    pri = 'high';
+    // SILENT (2026-11-01): the review routine last landed 10-02 and this paged "nothing landed" at high priority every
+    // morning for a month. A missing review is the normal case now; only a review that exists is worth a phone.
+    await env.OBS.put(key, '1', { expirationTtl: 60 * 60 * 48 });
+    return `no review landed (${why || 'file is for ' + (doc && doc.date)}), no page`;
   } else {
     const f = doc.findings || [];
     const fixes = f.filter((x) => x.fix);
@@ -909,8 +910,8 @@ async function alertTick(env, sched) {
       const was = state.portal[day];
       if (st !== 'no_report' && st !== was) {
         await notify(env, state, `portal:${day}:${st}`,
-          `Central Park ${day.slice(5).replace('-', '/')} high ${v}° \u00b7 ${st}`,
-          st === 'official' ? 'Official. The market settles on this.' : 'Not final yet; the official number can still change.',
+          `Central Park high ${v}° \u00b7 ${String(st).toUpperCase()} (${day.slice(5).replace('-', '/')})`,
+          st === 'official' ? 'Settles the market.' : 'Can still change.',
           st === 'official' ? 'high' : 'default');
         out.push(`portal ${day} ${st} ${v}`);
       }
@@ -945,9 +946,8 @@ async function alertTick(env, sched) {
         const b = T.bet, rung = b && (T.ladder || []).find((x) => x.label === b.label);
         if (T.date === day && b && !T.locked && b.price != null && !(rung && held.some((h) => h.ticker === rung.ticker))) {
           const side = b.dir === 'against' ? 'NO' : 'YES', lab = b.label;
-          await notify(env, state, `early:${day}`, `Morning bet · ${side} ${lab} at ${Math.round(b.price * 100)}¢`,
-            `Model ${Math.round(b.q * 100)}% on ${side}, edge ${Math.round(b.ev * 100)}¢ after the fee. The noon lock may be too late: ` +
-            `bets first named before 9 AM won 13 of 18; on 12 of 39 days the bet was gone by noon.`, 'high');
+          await notify(env, state, `early:${day}`, `Bet now · ${side} ${lab} at ${Math.round(b.price * 100)}¢`,
+            `Model ${Math.round(b.q * 100)}% against a ${Math.round(b.price * 100)}¢ price, +${Math.round(b.ev * 100)}¢ after the fee. Named ahead of the noon lock.`, 'high');
           out.push(`early bet ${side} ${lab} ${b.price}`);
         }
       } catch (e) { out.push('early bet err'); }
@@ -1035,7 +1035,9 @@ async function alertTick(env, sched) {
        bare range): how far a reading is from the range, the other live number (TWC's high or the last report), and what
        the position is worth right now at the bid. */
     const sideBid = side === 'YES' ? bid : (isFinite(ask) ? 1 - ask : NaN);
-    const holdTxt = `You hold ${Math.abs(h.n)} ${side} on ${label}` + (isFinite(sideBid) && sideBid > 0 ? `, bid ${Math.round(sideBid * 100)}¢` : '') + '.';
+    /* ONE SHAPE (2026-11-01, user: "look at the messaging and wording"): title = the subject and the fact, body = what it
+       means for the position first ("Bad for your YES: 231 held, bid 76c"), then one line of context, no stale statistics */
+    const holdTxt = `${Math.abs(h.n)} held` + (isFinite(sideBid) && sideBid > 0 ? `, bid ${Math.round(sideBid * 100)}¢` : '');
     const rp0 = rep[h.am.icao];
     const repTxt = rp0 ? `Last report ${rp0.f}° at ${new Date(rp0.at).toLocaleTimeString('en-US', { timeZone: h.am.tz, hour: 'numeric', minute: '2-digit' })}` : '';
     const gap = (v) => { const r = Math.round(v);
@@ -1043,12 +1045,16 @@ async function alertTick(env, sched) {
     // 3. the market moved on your rung
     if (mid != null) {
       const anchor = state.mkt[h.ticker];
-      if (anchor != null && Math.abs(mid - anchor) >= 0.25) {
-        const dir = mid > anchor ? 'up' : 'down';
+      // QUIET HOURS (2026-11-01): from 8 PM the high is set on 97% of days and the evening tape just drifts; the anchor
+      // follows it silently so the morning does not open with a page about an overnight move
+      const lh = Number(new Intl.DateTimeFormat('en-US', { timeZone: h.am.tz, hour: 'numeric', hour12: false }).format(new Date()).replace(/\D/g, '')) % 24;
+      if (anchor != null && Math.abs(mid - anchor) >= 0.25 && (lh < 7 || lh >= 20)) {
+        state.mkt[h.ticker] = mid;
+      } else if (anchor != null && Math.abs(mid - anchor) >= 0.25) {
         const good = (side === 'YES') === (mid > anchor);
         await notify(env, state, `mkt:${h.ticker}:${Math.round(mid * 4)}`,
-          `${label} ${dir} ${Math.round(anchor * 100)}¢ → ${Math.round(mid * 100)}¢`,
-          `${good ? 'Good' : 'Bad'} for your ${side}. ${repTxt ? repTxt + (max7 != null ? ', TWC high ' + max7 + '°' : '') + '. ' : ''}${holdTxt}`,
+          `${label} ${Math.round(anchor * 100)}¢ → ${Math.round(mid * 100)}¢`,
+          `${good ? 'Good' : 'Bad'} for your ${side}: ${holdTxt}.${repTxt ? ' ' + repTxt + '.' : ''}`,
           good ? 'default' : 'high');
         out.push(`${h.ticker} ${anchor}->${mid}`);
         state.mkt[h.ticker] = mid;
@@ -1070,68 +1076,13 @@ async function alertTick(env, sched) {
       const bad = (side === 'YES') ? (above) : (inNow);
       const local = new Date(rp.at).toLocaleTimeString('en-US', { timeZone: h.am.tz, hour: 'numeric', minute: '2-digit' });
       await notify(env, state, `metar:${h.ticker}:${rp.at}`,
-        `${h.am.name} ${rp.f}° \u00b7 ${local}${rp.raw.trim() === 'SPECI' ? ' special' : ''}`,
-        `${gap(rp.f)}${bad ? ', bad for your ' + side : ''}. ${max7 != null ? 'TWC high so far ' + max7 + '°. ' : ''}${holdTxt}`,
+        `${h.am.name} ${rp.f}° at ${local}${rp.raw.trim() === 'SPECI' ? ' (special)' : ''} \u00b7 ${gap(rp.f).replace(/^In /, 'in ')}`,
+        `${bad ? 'Bad' : 'Good'} for your ${side}: ${holdTxt}.`,
         bad ? 'urgent' : 'default');
       out.push(`metar ${h.am.icao} ${rp.f}`);
     }
-    // 1b. the settlement sensor itself crossed, or is about to cross, an edge
-    const ownSt = OWN5[h.am.series], own = ownSt && sens[ownSt];
-    if (own && own.max7 != null) {
-      // A DAY'S RUNNING MAXIMUM ONLY EVER RISES, and this holds it to that.
-      //
-      // api.weather.gov is served from an edge cache that does not always hand
-      // back the same window twice: sampled a minute apart it returned newest
-      // rows of 01:05, then 01:10, then 01:05 again (2026-09-09). So the row
-      // carrying the day's peak can drop out for a tick and come back. Taken at
-      // face value that reads as the sensor FALLING out of the rung -- an
-      // urgent alert, on a cache artifact, and a second one when it returned.
-      // Synoptic answered from one response and never did this; the guard is
-      // the cost of the free feed, and it is the right shape anyway.
-      //
-      // Keyed by the market's own local day so the peak resets at midnight
-      // rather than pinning yesterday's high forever. A stored bare number is
-      // the pre-2026-09-09 shape and is read as "no usable previous".
-      const ownDay = new Intl.DateTimeFormat('en-CA',
-        { timeZone: h.am.tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
-      const rec = state.own5[ownSt];
-      const prevOk = rec && typeof rec === 'object' && rec.d === ownDay && typeof rec.v === 'number';
-      const prevOwn = prevOk ? rec.v : null;
-      // The dip is discarded, not alerted on; only a genuine new high moves it.
-      const ownMax = (prevOwn != null && prevOwn > own.max7) ? prevOwn : own.max7;
-      const ownAt = (ownMax === own.max7) ? own.maxAt : rec.at;
-      const wasIn = prevOwn != null ? inRung(prevOwn, b) : null, nowIn = inRung(ownMax, b);
-      const wasAbove = prevOwn != null && b[1] != null && prevOwn > b[1] + 0.5;
-      const nowAbove = b[1] != null && ownMax > b[1] + 0.5;
-      if (prevOwn != null && (wasIn !== nowIn || wasAbove !== nowAbove)) {
-        const bad = (side === 'YES') ? !nowIn : nowIn;
-        await notify(env, state, `own5:${h.ticker}:${Math.round(ownMax)}`,
-          `${h.am.name} sensor ${ownMax}° \u00b7 ${ownAt}`,
-          `New high, ${nowIn ? 'inside' : nowAbove ? 'above' : 'below'} ${label} \u00b7 ${bad ? 'bad' : 'good'} for your ${side}. The market sees it at the next hourly report.`,
-          bad ? 'urgent' : 'high');
-        out.push(`own5 ${ownSt} ${prevOwn}->${ownMax}`);
-      } else if (b[1] != null && ownMax <= b[1] + 0.5 && ownMax >= b[1] - 0.4 && (prevOwn == null || prevOwn < b[1] - 0.4)) {
-        // within half a degree of the top edge: one warning, before it crosses
-        await notify(env, state, `own5near:${h.ticker}`,
-          `${h.am.name} sensor ${ownMax}° \u00b7 ${ownAt}`,
-          `Within 0.5° of the top of ${label} \u00b7 you hold ${side}.`, 'high');
-        out.push(`own5 near ${ownSt} ${ownMax}`);
-      }
-      state.own5[ownSt] = { d: ownDay, v: ownMax, at: ownAt };
-    }
-    // 2. TWC's running max crossed an edge of your rung
-    if (max7 != null && prevMax7 != null && max7 !== prevMax7) {
-      const wasIn = inRung(prevMax7, b), nowIn = inRung(max7, b);
-      const wasAbove = b[1] != null && prevMax7 > b[1] + 0.5, nowAbove = b[1] != null && max7 > b[1] + 0.5;
-      if (wasIn !== nowIn || wasAbove !== nowAbove) {
-        const bad = (side === 'YES') ? !nowIn : nowIn;
-        await notify(env, state, `max7:${h.ticker}:${max7}`,
-          `${h.am.name} TWC high ${max7}°`,
-          `Up from ${prevMax7}°: ${gap(max7).replace(/^In /, 'in ')}${bad ? ', bad for your ' + side : ''}. ${repTxt ? repTxt + '. ' : ''}${holdTxt}`,
-          bad ? 'high' : 'default');
-        out.push(`max7 ${h.am.series} ${prevMax7}->${max7}`);
-      }
-    }
+    // the sensor (own5) and TWC running-max alerts left 2026-11-01: Central Park has no public 5-minute feed and TWC's
+    // keyed feed has refused since 10-21, so neither could fire; their state keys are left to expire
   }
   if (state.dayHi) for (const k of Object.keys(state.dayHi)) if (!held.some((h) => h.ticker === k)) delete state.dayHi[k];   /* settled markets leave */
   for (const k of Object.keys(max7by)) if (max7by[k] != null) state.max7by[k] = max7by[k];
@@ -1315,18 +1266,8 @@ async function darkTick(env, sched) {
     /* PUSHED ONLY WHEN IT GOES AGAINST WHAT YOU HOLD (2026-10-16). Over 41 days dark bursts did not predict the next
        report (+0.06c +- 0.54) or beat their price, so a dark burst on its own is not news; one leaning against your
        position is the case worth a look. darkpos: keys go to the owner's phones only (notify's audience rule). */
-    let mine = null;
-    if (cls === 'dark' && bb.usd >= DARK_ALERT_USD && env.VAPID_JWK) {
-      if (heldNow === null) heldNow = ((await env.OBS.get(ALERT_KEY, { type: 'json' })) || {}).held || [];
-      mine = heldNow.find((x) => x.tk === mk.tk && ((x.n > 0 && side === 'no') || (x.n < 0 && side === 'yes'))) || null;
-    }
-    if (mine) {
-      const hm = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }).format(new Date(Date.parse(bb.t)));
-      const last = rec.releases.filter((r) => Date.parse(r.t) <= mm).map((r) => Date.parse(r.t)).sort().pop();
-      const since = last ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }).format(new Date(last)) : 'this morning';
-      await notify(env, await alertState(), `darkpos:${mk.tk}:${side}`, `Dark flow against your ${mine.n > 0 ? 'YES' : 'NO'} · ${mk.lab}`,
-        `$${bb.usd.toLocaleString('en-US')} ${side.toUpperCase()}${bb.px == null ? '' : ' at ' + Math.round((side === 'yes' ? bb.px : 1 - bb.px) * 100) + '¢'} \u00b7 ${hm} \u00b7 no reading since ${since}.`, undefined, 'dark:alerts');
-    }
+    // the 'dark flow against your position' page left 2026-11-01: graded on 486 forward bursts, dark money moves the
+    // price 0.8c AGAINST itself within five minutes and copying it returns zero, so it was an urgent page about noise
     }
   }
   if (state && JSON.stringify(state) !== sBefore) await env.OBS.put('dark:alerts', JSON.stringify(state));
@@ -1463,7 +1404,7 @@ async function pushRoute(request, env, url) {
     /* the test goes to the asking phone only, never to everyone */
     const mine = subs.find((x) => x.endpoint === b.endpoint);
     if (!mine) return J({ error: 'this phone is not signed up' }, 404);
-    const r = await pushAll(env, { title: 'BLUISH alerts are on', body: mine.role === 'viewer' ? 'This phone will get the Kalshi market alerts: dark flow and the Central Park settlement.' : 'This phone will get your Kalshi alerts from now on.', tag: 'push-test', url: '/' }, 'high', b.endpoint);
+    const r = await pushAll(env, { title: 'BLUISH alerts are on', body: mine.role === 'viewer' ? 'This phone will get the Central Park settlement alerts.' : 'This phone will get your Kalshi alerts from now on.', tag: 'push-test', url: '/' }, 'high', b.endpoint);
     return J({ ok: r.sent > 0, ...r });
   }
   return J({ error: 'not found' }, 404);
