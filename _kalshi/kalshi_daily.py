@@ -3943,10 +3943,46 @@ def pub_pull_lift(w, pf, nws, nbm):
     return max(0.0, float(w) * (ref - pf - PUB_PULL_T))
 
 
+# THE MARKET PULL (2026-11-01, user: "i really want to see progress on kalshi"). At the noon lock the market's implied
+# mean high beats our centre (MAE 0.85 vs 0.97 on the 58 live days) and the two miss in opposite directions: ours
+# 0.51 cold, the market's 0.41 warm, in both halves and in both months. The average of the two misses 0.74 with no
+# bias. Replayed through the lock's own ladder (its sd, the floor cut), a centre of (1 - w) ours + w market gives
+# Brier .515 -> .424 and 39 -> 43 top-bracket hits at w .65, winning both halves; the market's own ladder scored
+# .426 / 42. It costs bets: the noon bets the edge rules name fall from 38 to 18 at .65 (28 at .35), their returns
+# too few to tell apart. The centre moves toward the market, never below the floor, never on a binding day; the
+# ladder keeps our shape. Default 0 (off): only the live market court in tune.py sets it, from the live locks.
+def market_centre(rows):
+    """The market's implied mean high from the rungs' mids, or None when the quotes carry too little mass.
+    Open-ended rungs count half a degree inside their edge, as the audit's replay did."""
+    tot, acc = 0.0, 0.0
+    for r in rows or []:
+        m = r.get('mid')
+        if m is None or m <= 0:
+            continue
+        lo, hi = r.get('lo'), r.get('hi')
+        if lo is None and hi is None:
+            continue
+        c = (hi - 0.5) if lo is None else (lo + 0.5) if hi is None else (lo + hi) / 2.0
+        tot += m
+        acc += m * c
+    return (acc / tot) if tot >= 0.5 else None
+
+
+def mkt_pull_shift(w, pred, mk, floor):
+    """-> degF to add to `pred` (0 when off or no market centre); the result never sits under the floor"""
+    if not w or pred is None or mk is None:
+        return 0.0
+    new = (1.0 - float(w)) * pred + float(w) * mk
+    if floor is not None:
+        new = max(new, floor)
+    return new - pred
+
+
 def params_of(cfg):
     p = {'skill': bool(cfg.get('skill', True)), 'bias_hl': cfg.get('bias_hl'), 'sd_mult': cfg.get('sd_mult', 1.0),
          'drop_worst': int(cfg.get('drop_worst') or 0), 'wind_regime': bool(cfg.get('wind_regime')),
-         'pub_pull': float(cfg.get('pub_pull') or 0.0), 'tail_margin': float(cfg.get('tail_margin') or 0.0)}
+         'pub_pull': float(cfg.get('pub_pull') or 0.0), 'tail_margin': float(cfg.get('tail_margin') or 0.0),
+         'mkt_pull': float(cfg.get('mkt_pull') or 0.0)}
     p.update({k: v for k, v in (cfg.get('_globals') or {}).items() if k in TUNABLE_GLOBALS})
     return p
 
@@ -4453,6 +4489,12 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     over_now = bool(fc.get(tkey)) and not [h for h in (fc.get(tkey) or {}) if h >= hr0]
     binding_now = (obs_far is not None
                    and ((fadj is not None and obs_far >= fadj) or over_now))
+    # THE MARKET PULL on the live call (see market_centre); snapshot() applies the same to every lock
+    _mk_centre = market_centre(rows) if _pull_on else None
+    _mp_live = mkt_pull_shift(cfg.get('mkt_pull'), pred, _mk_centre, obs_far) if (_pull_on and not binding_now) else 0.0
+    if abs(_mp_live) > 0.005:
+        print('%s market pull: %+.2f (ours %.2f, market centre %.2f, w %s)' % (cfg['key'], _mp_live, pred, _mk_centre, cfg.get('mkt_pull')))
+        pred = round(pred + _mp_live, 2)
     sd, nsd = spread(res, now.hour, binding_now)
     if binding_now:
         exact_now = (live is not None and obs_far <= live + 1e-9)
@@ -4766,6 +4808,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         entry = {'date': tkey, 'event': event_ticker(cfg, today)}
         hist[tkey] = entry
     _pull_at = {}
+    _mpull_at = {}
 
     def snapshot(hour):
         """Our call AS OF `hour` today, however late the job actually runs.
@@ -4825,6 +4868,12 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         hours_left = len([h for h in (fc.get(tkey) or {}) if h >= hour])
         over = day_has_fc and hours_left == 0
         bind = (fl is not None and ((pf is not None and fl >= pf) or over))
+        # the market pull (see market_centre): the lock's centre moves toward the market's, never on a binding hour;
+        # the court in tune.py replays other weights from pred - shift
+        _ms = mkt_pull_shift(cfg.get('mkt_pull'), pr, _mk_centre, fl) if (_pull_on and not bind) else 0.0
+        if abs(_ms) > 0.005:
+            pr = round(pr + _ms, 2)
+        _mpull_at[hour] = {'w': float(cfg.get('mkt_pull') or 0.0), 'mk': (round(_mk_centre, 2) if _mk_centre is not None else None), 'shift': round(_ms, 2)}
         _res_h = residuals(fcm, bias_of, daily, obh, hour, tkey, h0_of)
         sdh, _ = spread(_res_h, hour, bind)
         # ONCE THE FLOOR BINDS, THE DAY IS OVER.  `bind` means no remaining hour
@@ -4876,6 +4925,8 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             'params': params_of(cfg),
             # what the public-forecast pull did: the court in tune.py replays other strengths from pred - lift
             'pull': _pull_at.get(hour),
+            # what the market pull did: w, the market's centre, the shift (the court replays other weights)
+            'mpull': _mpull_at.get(hour),
             # the tail margin in force and the brackets it reached; the court un-mixes 'ours' with these
             'tail': _tail,
             # the hour the PRICES were read. A lock is rebuilt as-of its own
@@ -5720,7 +5771,7 @@ def main():
         for cfg in RUN:
             a = (_tuned.get(cfg['key']) or {}).get('active')
             if a and (_tuned.get(cfg['key']) or {}).get('n', 0) >= 45:
-                cfg.update({k: a[k] for k in ('skill', 'bias_hl', 'sd_mult', 'drop_worst', 'wind_regime', 'pub_pull', 'tail_margin') if k in a})
+                cfg.update({k: a[k] for k in ('skill', 'bias_hl', 'sd_mult', 'drop_worst', 'wind_regime', 'pub_pull', 'tail_margin', 'mkt_pull') if k in a})
                 g = {k: a[k] for k in TUNABLE_GLOBALS if k in a}
                 if g:
                     cfg['_globals'] = g

@@ -434,10 +434,117 @@ def tail_apply(cfg, r, prev_r):
     print('  tail court: %s' % rep_['why'], flush=True)
 
 
+# ------------------------------------------------ the live market court ----
+# THE MARKET PULL IS JUDGED ON THE LIVE LOCKS (2026-11-01; see market_centre in kalshi_daily.py). Like the pull court:
+# Brier of a normal ladder on the lock's own sd and floor cut, MIN_GAIN, a win on both halves, at most one hit lost,
+# MIN_DAYS live locks, one change per MKT_COOLDOWN_D days. A lock made with the pull in force is un-shifted with its
+# own lock.mpull; locks from before it existed take the market centre from their stored market ladder.
+MKT_GRID, MKT_COOLDOWN_D = [0.0, 0.25, 0.35, 0.5, 0.65], 7
+
+
+def mkt_rows(cfg):
+    try:
+        doc = json.load(open(os.path.join(HERE, '..', cfg['out'])))
+    except Exception:
+        return []
+    rows = []
+    for h in sorted(doc.get('history') or [], key=lambda x: x.get('date') or ''):
+        L = h.get('lock') or {}
+        lad = L.get('ladder') or []
+        if h.get('backtest') or h.get('actual') is None or not lad or not L.get('sd') or L.get('pred') is None:
+            continue
+        k = [i for i, r in enumerate(lad) if (r.get('lo') is None or h['actual'] >= r['lo'])
+             and (r.get('hi') is None or h['actual'] <= r['hi'])]
+        if len(k) != 1:
+            continue
+        mp = L.get('mpull') or {}
+        mk = mp.get('mk')
+        if mk is None:
+            mk = K.market_centre([{'mid': r.get('market'), 'lo': r.get('lo'), 'hi': r.get('hi')} for r in lad])
+        if mk is None:
+            continue
+        obs = L.get('obs_at_lock')
+        rows.append({'date': h['date'], 'raw': float(L['pred']) - float(mp.get('shift') or 0.0), 'sd': float(L['sd']),
+                     'lad': lad, 'k': k[0], 'mk': float(mk),
+                     'floor': (float(obs) - K.OFFSET_DEFAULT) if obs is not None else None})
+    return rows
+
+
+def mkt_score(rows, w):
+    import math
+    phi = lambda z: 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+    hits, br = 0, 0.0
+    for r in rows:
+        pred = r['raw'] + K.mkt_pull_shift(w, r['raw'], r['mk'], r['floor'])
+        sd = max(0.05, r['sd'])
+        ps = []
+        for b in r['lad']:
+            lo = -1e9 if b.get('lo') is None else b['lo'] - 0.5
+            hi = 1e9 if b.get('hi') is None else b['hi'] + 0.5
+            if r['floor'] is not None:
+                lo = max(lo, r['floor'] - 0.5)
+            ps.append(max(0.0, phi((hi - pred) / sd) - phi((lo - pred) / sd)) if hi > lo else 0.0)
+        t = sum(ps) or 1.0
+        ps = [p / t for p in ps]
+        hits += ps.index(max(ps)) == r['k']
+        br += sum((p - (1.0 if i == r['k'] else 0.0)) ** 2 for i, p in enumerate(ps))
+    return {'n': len(rows), 'hits': hits, 'brier': br / len(rows) if rows else None}
+
+
+def live_mkt_court(cfg, cur, last_change=None):
+    cur = float(cur or 0.0)
+    rows = mkt_rows(cfg)
+    out = {'n': len(rows), 'was': cur, 'ruled': cur, 'why': 'too few live locks: %s stands' % cur}
+    if not cfg['key'].endswith('_high') or len(rows) < MIN_DAYS:
+        return cur, out
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    half = len(rows) // 2
+    sc = lambda w, R=rows: mkt_score(R, w)
+    base, b_old, b_new = sc(cur), sc(cur, rows[:half]), sc(cur, rows[half:])
+    out['scores'] = {str(w): {'brier': round(sc(w)['brier'], 4), 'hits': sc(w)['hits']} for w in MKT_GRID}
+    best = None
+    for w in MKT_GRID:
+        if abs(w - cur) < 1e-9:
+            continue
+        c = sc(w)
+        gain = base['brier'] - c['brier']
+        if gain >= MIN_GAIN and sc(w, rows[:half])['brier'] < b_old['brier'] and sc(w, rows[half:])['brier'] < b_new['brier'] \
+                and c['hits'] >= base['hits'] - 1 and (best is None or gain > best[1]):
+            best = (w, gain, c)
+    if best is None:
+        out['why'] = '%s stands on %d live locks (Brier %.4f, %d hits): nothing clears the guardrails' % (cur, len(rows), base['brier'], base['hits'])
+    elif last_change and (today - datetime.date.fromisoformat(last_change)).days < MKT_COOLDOWN_D:
+        out['why'] = '%s -> %s waits: the last change was %s' % (cur, best[0], last_change)
+    else:
+        out.update({'ruled': best[0], 'changed_at': today.isoformat(),
+                    'why': 'mkt_pull %s -> %s: Brier %.4f -> %.4f, hits %d -> %d on %d live locks, wins both halves'
+                           % (cur, best[0], base['brier'], best[2]['brier'], base['hits'], best[2]['hits'], len(rows))})
+    if 'changed_at' not in out and last_change:
+        out['changed_at'] = last_change
+    return out['ruled'], out
+
+
+def mkt_apply(cfg, r, prev_r):
+    """run the market court and write its ruling into r['active'] (kept across the search, which drops unknown knobs)"""
+    a = r.get('active')
+    if not a or not cfg['key'].endswith('_high'):
+        return
+    mc = (prev_r or {}).get('mkt_court') or {}
+    cur = ((prev_r or {}).get('active') or {}).get('mkt_pull', 0.0)
+    ruled, rep_ = live_mkt_court(cfg, cur, mc.get('changed_at'))
+    a['mkt_pull'] = ruled
+    r['mkt_court'] = rep_
+    if abs(float(ruled) - float(cur or 0.0)) > 1e-9:
+        r['why'] = (r.get('why') or '') + ' | MARKET COURT: ' + rep_['why']
+        r['chosen_at'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+    print('  market court: %s' % rep_['why'], flush=True)
+
+
 def tune(cfg, prev):
     r = _tune(cfg, prev)
     pull_apply(cfg, r, prev.get(cfg['key']))
     tail_apply(cfg, r, prev.get(cfg['key']))
+    mkt_apply(cfg, r, prev.get(cfg['key']))
     a = r.get('active')
     if a and a.get('sd_mult') is not None:
         ruled, rep_ = live_spread_court(cfg, a['sd_mult'], (r.get('lists') or {}).get('sd_mult') or KNOBS['sd_mult'],
@@ -532,6 +639,8 @@ def main():
             pull_apply(cfg, r, copy.deepcopy(r))
             tail_apply(cfg, r, copy.deepcopy(r))
             print('    tail scores: %s' % (r.get('tail_court') or {}).get('scores'))
+            mkt_apply(cfg, r, copy.deepcopy(r))
+            print('    market scores: %s' % (r.get('mkt_court') or {}).get('scores'))
         prev['_built'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
         if '--dry' not in sys.argv:
             json.dump(prev, open(OUT, 'w'), indent=1)
