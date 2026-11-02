@@ -30,6 +30,8 @@ os.makedirs(FR, exist_ok=True); os.makedirs(CACHE, exist_ok=True)
 UA = {'User-Agent': 'bluishvoid-deeptime-bake (https://bluishvoid.com)'}
 PALEODEM_URL = 'https://zenodo.org/records/5460860/files/PaleoDEMS_long_lat_elev_csv_v2.zip?download=1'
 GWS = 'https://gws.gplates.org/reconstruct/coastlines/?time=%d&model=CAO2024'
+GWS_B = 'https://gws.gplates.org/topology/plate_boundaries/?time=%d&model=CAO2024'
+GWS_P = 'https://gws.gplates.org/topology/plate_polygons/?time=%d&model=CAO2024'
 
 
 def fetch(url, name, tries=3):
@@ -205,19 +207,62 @@ def schematic_frames():
     return out
 
 
+# ---------------------------------------------------------------- PLATE BOUNDARIES 1800 - 0 Ma (2026-11-02, after the Howtown review)
+# The Cao et al. 2024 model carries typed, named plate boundaries with the subduction polarity, and the plate outlines; the
+# service gives them per age. Baked small: deeptime/bounds/<age>.json = [[type, name, polarity, [[lon,lat],...]], ...] at 0.1 deg,
+# and a per-age tally in the index (km of subduction, ridge and transform, the plate count) -- the paper's own measure of the
+# planet's tectonic pulse.
+BTYPE = {'SubductionZone': 'S', 'MidOceanRidge': 'R', 'Transform': 'T'}
+
+
+def boundary_frames(ages):
+    os.makedirs(os.path.join(OUT, 'deeptime', 'bounds'), exist_ok=True)
+    stats = {}
+    for age in ages:
+        try:
+            j = json.loads(fetch(GWS_B % age, 'cao2024_b_%04d.json' % age))
+        except Exception as e:
+            print('  bounds', age, 'failed', e); continue
+        rows, km = [], {'S': 0.0, 'R': 0.0, 'T': 0.0, 'O': 0.0}
+        for f in j.get('features', []):
+            pr = f.get('properties') or {}; gm = f.get('geometry') or {}
+            t = BTYPE.get(pr.get('type'), 'O'); km[t] += (pr.get('length') or 0) * 6371
+            if t == 'O':
+                continue
+            lines = [gm['coordinates']] if gm.get('type') == 'LineString' else gm.get('coordinates', []) if gm.get('type') == 'MultiLineString' else []
+            for ln in lines:
+                pts = [[round(p[0], 1), round(p[1], 1)] for p in ln]
+                keep = [pts[0]] + [p for k, p in enumerate(pts[1:], 1) if p != pts[k - 1]]
+                if len(keep) >= 2:
+                    rows.append([t, str(pr.get('name') or '')[:60], (str(pr.get('polarity') or '')[:1] or ''), keep])
+        try:
+            pj = json.loads(fetch(GWS_P % age, 'cao2024_p_%04d.json' % age)); nplates = len(pj.get('features', []))
+        except Exception:
+            nplates = None
+        with open(os.path.join(OUT, 'deeptime', 'bounds', '%04d.json' % age), 'w') as fh:
+            json.dump(rows, fh, separators=(',', ':'))
+        stats[str(age)] = {'sub': int(km['S']), 'ridge': int(km['R']), 'trans': int(km['T']), 'plates': nplates, 'n': len(rows)}
+        if age % 100 == 0:
+            print('  bounds %4d Ma: %3d lines, subduction %6d km, ridges %6d km, plates %s' % (age, len(rows), km['S'], km['R'], nplates))
+    return stats
+
+
 # ---------------------------------------------------------------- chapters
 CHAPTERS = [
     (4500, 'HADEAN', 'The planet forms'), (4450, 'HADEAN', 'The Moon is born'), (4400, 'HADEAN', 'The first crust'), (4000, 'ARCHEAN', 'Oceans'),
-    (3700, 'ARCHEAN', 'The first life'), (3400, 'ARCHEAN', 'The first cratons'), (2800, 'ARCHEAN', 'Kenorland'), (2400, 'PROTEROZOIC', 'The Great Oxidation'),
-    (2000, 'PROTEROZOIC', 'Columbia'), (1800, 'PROTEROZOIC', 'Plates can be tracked'), (1100, 'PROTEROZOIC', 'Rodinia'), (720, 'PROTEROZOIC', 'Snowball Earth'),
-    (600, 'PROTEROZOIC', 'Pannotia and the first animals'), (540, 'PALEOZOIC', 'The Cambrian explosion'), (420, 'PALEOZOIC', 'Life walks onto land'),
-    (300, 'PALEOZOIC', 'Pangaea'), (252, 'PALEOZOIC', 'The Great Dying'), (200, 'MESOZOIC', 'Pangaea splits'), (145, 'MESOZOIC', 'The Atlantic opens'),
-    (66, 'CENOZOIC', 'The dinosaurs end'), (35, 'CENOZOIC', 'Antarctica freezes'), (3, 'CENOZOIC', 'The Ice Ages'), (0, 'CENOZOIC', 'Today'),
+    (3700, 'ARCHEAN', 'The first life'), (3400, 'ARCHEAN', 'The first cratons'), (3200, 'ARCHEAN', 'Vaalbara'), (2800, 'ARCHEAN', 'Kenorland'), (2400, 'PROTEROZOIC', 'The Great Oxidation'),
+    (2000, 'PROTEROZOIC', 'Columbia'), (1800, 'PROTEROZOIC', 'Plates can be tracked'), (1600, 'PROTEROZOIC', 'Nuna stands'), (1300, 'PROTEROZOIC', 'Nuna breaks up'),
+    (1100, 'PROTEROZOIC', 'Rodinia and the Grenville mountains'), (750, 'PROTEROZOIC', 'Rodinia breaks up'), (717, 'PROTEROZOIC', 'Snowball Earth: the Sturtian'),
+    (650, 'PROTEROZOIC', 'Snowball Earth: the Marinoan'), (600, 'PROTEROZOIC', 'Pannotia and the first animals'), (540, 'PALEOZOIC', 'The Cambrian explosion'),
+    (480, 'PALEOZOIC', 'The Great Unconformity is buried'), (420, 'PALEOZOIC', 'The Caledonian mountains, life walks onto land'), (375, 'PALEOZOIC', 'Laurussia and the Acadian mountains'),
+    (320, 'PALEOZOIC', 'The coal forests'), (300, 'PALEOZOIC', 'Pangaea'), (252, 'PALEOZOIC', 'The Great Dying'), (200, 'MESOZOIC', 'Pangaea splits'), (145, 'MESOZOIC', 'The Atlantic opens'),
+    (66, 'CENOZOIC', 'The dinosaurs end'), (50, 'CENOZOIC', 'India hits Asia'), (35, 'CENOZOIC', 'Antarctica freezes'), (3, 'CENOZOIC', 'The Ice Ages'), (0, 'CENOZOIC', 'Today'),
 ]
 SOURCES = [
     ['PALEOMAP PaleoDEMs (Scotese & Wright 2018), CC BY 4.0', 'https://doi.org/10.5281/zenodo.5460860'],
     ['Cao et al. 2024, a 1.8-billion-year plate model, CC BY 4.0', 'https://doi.org/10.5281/zenodo.13628813'],
     ['GPlates Web Service (EarthByte)', 'https://gws.gplates.org/'],
+    ['Howtown, 4 billion years of tectonics in 17 minutes (the review that added the boundaries and chapters)', 'https://www.youtube.com/watch?v=t1hOdm0RJlY'],
 ]
 
 
@@ -291,13 +336,14 @@ def main():
         plate_ages = [1800, 1100, 600]
     print('schematic frames'); frames = schematic_frames() if not QUICK else [f for f in schematic_frames() if f[0] in (4500, 4000, 2400)]
     print('plate frames (GPlates Web Service, Cao 2024)'); frames += plate_frames(plate_ages)
+    print('plate boundaries and the tectonic tally (GPlates Web Service, Cao 2024)'); bstats = boundary_frames([1800, 1100, 300, 0] if QUICK else list(range(1800, -1, -10)))
     print('PaleoDEM frames'); dem = dem_frames()
     if QUICK:
         dem = [f for f in dem if f[0] in (540, 300, 66, 0)]
     frames += dem
     frames.sort(key=lambda f: -f[0])
     index = {'built': time.strftime('%Y-%m-%dT%H:%MZ', time.gmtime()), 'w': W, 'h': H, 'frames': [], 'chapters': [{'ma': c[0], 'era': c[1], 'title': c[2]} for c in CHAPTERS],
-             'notes': {str(a): n for a, s, n in SCHEMATIC}, 'sources': SOURCES, 'video': None if NOVID else {'d': 'deeptime/globe_d.mp4', 'm': 'deeptime/globe_m.mp4', 'seconds': 64}}
+             'notes': {str(a): n for a, s, n in SCHEMATIC}, 'sources': SOURCES, 'bounds': {'every': 10, 'from': 1800, 'stats': bstats}, 'video': None if NOVID else {'d': 'deeptime/globe_d.mp4', 'm': 'deeptime/globe_m.mp4', 'seconds': 64}}
     for age, kind, tex, note in frames:
         fn = '%04d.jpg' % age
         Image.fromarray(tex).save(os.path.join(FR, fn), quality=84)

@@ -15,7 +15,7 @@ import json, os, sys, datetime
 
 SRC = sys.argv[1] if len(sys.argv) > 1 else "/tmp"
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_tle.js")
-GROUPS = ["stations", "visual", "gps-ops", "galileo", "glo-ops", "beidou",
+GROUPS = ["stations", "visual", "geodetic", "gps-ops", "galileo", "glo-ops", "beidou",
           "geo", "starlink",
           "oneweb", "kuiper", "qianfan",
           "cosmos-2251-debris", "iridium-33-debris", "fengyun-1c-debris",
