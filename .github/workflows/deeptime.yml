@@ -1,0 +1,51 @@
+# DEEP TIME (2026-11-01). Bakes the GEOLOGY tab's 4.5-billion-year globe: ~230 equirectangular frames (PALEOMAP PaleoDEMs
+# for 540-0 Ma, the Cao et al. 2024 plate model through the GPlates Web Service for 1800-550 Ma, schematic frames before
+# that), an index with the chapters and sources, and the turning-globe videos. One-off: run it by hand; the data does not
+# change. See _maplab/deeptime_bake.py. Same R2 secrets as foliage.yml.
+name: Deep time bake
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deeptime
+  cancel-in-progress: false
+
+jobs:
+  bake:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: ffmpeg
+        # apt's mirror has hung this step before (goes-video.yml, 2026-10-24): time-boxed, retried
+        run: |
+          which ffmpeg && exit 0
+          for i in 1 2 3; do
+            sudo timeout 90 apt-get update -qq && sudo timeout 180 apt-get install -y -qq ffmpeg && exit 0
+            echo "apt attempt $i timed out or failed"; sleep 5
+          done
+          exit 1
+      - name: Libraries
+        run: pip3 install --quiet --break-system-packages numpy pillow
+      - name: Bake the frames, the index and the videos
+        run: python3 -u _maplab/deeptime_bake.py out
+      - name: Upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          EP="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 cp out/deeptime/frames "s3://bluishvoid-bg/deeptime/frames" --recursive --endpoint-url "$EP" \
+            --content-type image/jpeg --cache-control "public, max-age=604800"
+          for f in globe_d.mp4 globe_m.mp4; do
+            [ -f "out/deeptime/$f" ] && aws s3 cp "out/deeptime/$f" "s3://bluishvoid-bg/deeptime/$f" --endpoint-url "$EP" \
+              --content-type video/mp4 --cache-control "public, max-age=604800"
+          done
+          aws s3 cp out/deeptime/index.json "s3://bluishvoid-bg/deeptime/index.json" --endpoint-url "$EP" \
+            --content-type application/json --cache-control "public, max-age=3600"
