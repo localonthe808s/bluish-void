@@ -138,6 +138,9 @@ def noise(seed, scale, octaves=4):
         small = rng.normal(0, 1, (max(2, int(H / s)), max(2, int(W / s))))
         big = np.asarray(Image.fromarray(small.astype(np.float32)).resize((W, H), Image.BICUBIC), float)
         acc += big * amp; amp *= 0.5; s = max(2, s / 2)
+    # seamless in longitude: blend with a half-turn copy under a window that is 0 at the dateline, so column W-1 meets column 0
+    w = 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(W) / W)[None, :]
+    acc = acc * w + np.roll(acc, W // 2, axis=1) * (1 - w)
     acc = (acc - acc.min()) / (acc.max() - acc.min() + 1e-9)
     return acc
 
