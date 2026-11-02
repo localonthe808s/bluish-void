@@ -70,7 +70,7 @@ def tint_dem(elev):
     lnd = np.where((e < 600)[..., None], low, np.where((e < 2400)[..., None], mid, high))
     img[land] = lnd[land]
     # hillshade from the gradient, light from the north-west
-    gy, gx = np.gradient(np.maximum(e, 0) / 900.0)
+    ew = np.pad(np.maximum(e, 0) / 900.0, ((0, 0), (1, 1)), mode='wrap'); gy, gx = np.gradient(ew); gy, gx = gy[:, 1:-1], gx[:, 1:-1]   # the shade wraps at the dateline too
     shade = 1 + 0.35 * (-gx * 0.7 - gy * 0.7)
     shade = np.clip(shade, 0.72, 1.18)
     img = img * np.where(land, shade, 1.0)[..., None]
@@ -102,9 +102,21 @@ def dem_frames():
         lon, lat, el = a[:, 0], a[:, 1], a[:, 2]
         g = np.full((181, 361), np.nan)
         g[((90 - lat)).astype(int), ((lon + 180)).astype(int)] = el
-        g = np.where(np.isnan(g), 0, g)
-        im = Image.fromarray(g.astype(np.float32)).resize((W, H), Image.BICUBIC)
-        e = np.asarray(im, float)
+        # the seam: lon 180 is lon -180 again; a missing cell takes its neighbours' mean, never a 0 that tints as shelf (2026-11-02:
+        # "theres a line in the ocean on the backside")
+        g[:, 360] = np.where(np.isnan(g[:, 360]), g[:, 0], g[:, 360]); g[:, 0] = np.where(np.isnan(g[:, 0]), g[:, 360], g[:, 0])
+        for _ in range(4):
+            nan = np.isnan(g)
+            if not nan.any():
+                break
+            pad = np.pad(g, 1, mode='edge'); nb = np.stack([pad[:-2, 1:-1], pad[2:, 1:-1], pad[1:-1, :-2], pad[1:-1, 2:]])
+            fill = np.nanmean(np.where(np.isnan(nb), np.nan, nb), axis=0)
+            g = np.where(nan & ~np.isnan(fill), fill, g)
+        g = np.where(np.isnan(g), -4000.0, g)[:, :360]            # whatever is still blank is deep ocean; the duplicate column goes
+        # resize on a wrapped grid so the dateline is interpolated like any other meridian, then crop the wings
+        PADC = 8; gp = np.concatenate([g[:, -PADC:], g, g[:, :PADC]], axis=1); padpx = int(round(PADC * W / 360.0))
+        im = Image.fromarray(gp.astype(np.float32)).resize((W + 2 * padpx, H), Image.BICUBIC)
+        e = np.asarray(im, float)[:, padpx:padpx + W]
         out.append((age, 'dem', tint_dem(e), None))
     return out
 
