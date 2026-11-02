@@ -30,6 +30,24 @@ ROSTER = [
 ]
 
 
+def roster():
+    """The page's BV_RARE is the one list; this copy is the fallback if index.html cannot be read (2026-11-01)."""
+    import re
+    try:
+        html = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'index.html'), encoding='utf-8').read()
+        blk = html[html.index('var BV_RARE = ['):]
+        blk = blk[:blk.index('\n  ];')]
+        rows = re.findall(r"\['(\w+)', '((?:[^'\\]|\\.)+)', '(?:[^'\\]|\\.)*', '(\w+)'\]", blk)
+        rows = [(c, n.replace("\\'", "'").replace('\\u2019', '\u2019'), t) for c, n, t in rows]
+        if len(rows) >= 30:
+            print('roster: %d species read from index.html' % len(rows))
+            return rows
+        print('roster: index.html gave %d rows, using the fallback' % len(rows))
+    except Exception as e:
+        print('roster: fallback (%s)' % e)
+    return ROSTER
+
+
 def get(url, tries=3):
     for k in range(tries):
         try:
@@ -46,7 +64,7 @@ def bake(out, only=None):
     today = datetime.date.today()
     os.makedirs(os.path.join(out, 'rare'), exist_ok=True)
     index = {'built': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%MZ'), 'back': BACK, 'regions': REGIONS, 'species': {}}
-    for code, name, typ in ROSTER:
+    for code, name, typ in roster():
         if only and code not in only:
             continue
         pts, seen, failed = [], set(), 0
