@@ -286,6 +286,19 @@ def ortho(tex, lat0, lon0, N):
     return outp
 
 
+def land_centre(tex):
+    """The mean direction of the non-ocean pixels, cos(lat)-weighted -> (lat, lon) or None for an all-ocean or molten frame."""
+    a = tex[::4, ::4].astype(float); H2, W2 = a.shape[:2]
+    R, G, B = a[..., 0], a[..., 1], a[..., 2]
+    land = ~((B > R + 18) & (B > G + 6))
+    lat = np.radians(90 - (np.arange(H2) + 0.5) / H2 * 180)[:, None]; lon = np.radians((np.arange(W2) + 0.5) / W2 * 360 - 180)[None, :]
+    w = np.cos(lat) * land
+    x = (w * np.cos(lat) * np.cos(lon)).sum(); y = (w * np.cos(lat) * np.sin(lon)).sum(); z = (w * np.sin(lat)).sum(); n = w.sum()
+    if n < 60 or math.hypot(x, y, z) / n < 0.08:
+        return None
+    return (math.degrees(math.atan2(z, math.hypot(x, y))), math.degrees(math.atan2(y, x)))
+
+
 def video(frames, N, path, fps=24, seconds=64):
     """frames: [(age, kind, tex, note)] oldest first. The schedule gives the young, data-rich ages the most screen time."""
     ages = np.array([f[0] for f in frames], float)
@@ -302,12 +315,21 @@ def video(frames, N, path, fps=24, seconds=64):
             font = ImageFont.truetype(fp, max(14, N // 34)); break
     tmp = os.path.join(OUT, '_vid_%d' % N); os.makedirs(tmp, exist_ok=True)
     order = np.argsort(-ages); ages_s = ages[order]
+    cen = [land_centre(f[2]) for f in frames]
+    cam_lon, cam_lat = -40.0, 12.0
     for i, age in enumerate(sched):
         k = np.searchsorted(-ages_s, -age)   # first frame with age <= wanted
         k = min(max(k, 1), len(ages_s) - 1); older, younger = frames[order[k - 1]], frames[order[k]]
         t = 0.0 if older[0] == younger[0] else (older[0] - age) / (older[0] - younger[0])
         tex = (older[2].astype(float) * (1 - t) + younger[2].astype(float) * t).astype(np.uint8)
-        lon0 = (i * 360.0 / (fps * 36)) % 360 - 180; lat0 = 12 * math.sin(i / (fps * 40))
+        # the camera eases toward where the land is (the nearer frame's centre), with a slow swing so it still turns
+        c = cen[order[k]] or cen[order[k - 1]]
+        if c:
+            dl = ((c[1] - cam_lon + 540) % 360) - 180; cam_lon = ((cam_lon + dl * 0.03 + 540) % 360) - 180
+            cam_lat += (max(-45.0, min(45.0, c[0])) - cam_lat) * 0.02
+        else:
+            cam_lon = ((cam_lon + 0.18 + 540) % 360) - 180
+        lon0 = cam_lon + 28 * math.sin(i / (fps * 11.0)); lat0 = cam_lat + 8 * math.sin(i / (fps * 17.0))
         disc = ortho(tex, lat0, lon0, N)
         im = Image.new('RGB', (N, N), (4, 6, 12)); im.paste(Image.fromarray(disc[..., :3]), (0, 0), Image.fromarray(disc[..., 3]))
         if font:
