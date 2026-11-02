@@ -16,19 +16,20 @@ all of it (1080 / 540 px), ages crossfaded, the age burned in.
     python3 _maplab/deeptime_bake.py out --quick         # a few ages of each kind, no video (a render check)
     python3 _maplab/deeptime_bake.py out --no-video
 """
-import io, json, math, os, subprocess, sys, time, urllib.request, zipfile
+import io, json, math, os, re, subprocess, sys, time, urllib.request, zipfile
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-W, H = 1024, 512
+W, H = 2048, 1024          # 2048 since 2026-11-02 (the 6-arc-minute PaleoDEMs; the user: "can we improve the resolution")
 OUT = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith('--') else 'out'
 QUICK = '--quick' in sys.argv
-NOVID = '--no-video' in sys.argv or QUICK
+NOVID = '--video' not in sys.argv   # the page draws the globe itself now; the mp4 is opt-in (it holds every frame in memory)
 CACHE = os.environ.get('DEEPTIME_CACHE') or os.path.join(OUT, '_cache')
 FR = os.path.join(OUT, 'deeptime', 'frames')
 os.makedirs(FR, exist_ok=True); os.makedirs(CACHE, exist_ok=True)
 UA = {'User-Agent': 'bluishvoid-deeptime-bake (https://bluishvoid.com)'}
-PALEODEM_URL = 'https://zenodo.org/records/5460860/files/PaleoDEMS_long_lat_elev_csv_v2.zip?download=1'
+PALEODEM_URL = 'https://zenodo.org/api/records/5460860/files/Scotese_Wright_2018_Maps_1-88_6minX6min_PaleoDEMS_nc.zip/content'   # 207 MB, netCDF, 0.1 deg
+GWS_PTS = 'https://gws.gplates.org/reconstruct/reconstruct_points/?points=%s&time=%d&model=CAO2024'
 GWS = 'https://gws.gplates.org/reconstruct/coastlines/?time=%d&model=CAO2024'
 GWS_B = 'https://gws.gplates.org/topology/plate_boundaries/?time=%d&model=CAO2024'
 GWS_P = 'https://gws.gplates.org/topology/plate_polygons/?time=%d&model=CAO2024'
@@ -70,7 +71,8 @@ def tint_dem(elev):
     lnd = np.where((e < 600)[..., None], low, np.where((e < 2400)[..., None], mid, high))
     img[land] = lnd[land]
     # hillshade from the gradient, light from the north-west
-    ew = np.pad(np.maximum(e, 0) / 900.0, ((0, 0), (1, 1)), mode='wrap'); gy, gx = np.gradient(ew); gy, gx = gy[:, 1:-1], gx[:, 1:-1]   # the shade wraps at the dateline too
+    ew = np.pad(np.maximum(e, 0) / 450.0, ((0, 0), (1, 1)), mode='wrap')   # per-pixel slope at 2048 is half the 1024 one
+    gy, gx = np.gradient(ew); gy, gx = gy[:, 1:-1], gx[:, 1:-1]            # the shade wraps at the dateline too
     shade = 1 + 0.35 * (-gx * 0.7 - gy * 0.7)
     shade = np.clip(shade, 0.72, 1.18)
     img = img * np.where(land, shade, 1.0)[..., None]
@@ -85,39 +87,36 @@ def ocean_base():
 
 # ---------------------------------------------------------------- PALEODEM 540 - 0 Ma
 def dem_frames():
-    z = zipfile.ZipFile(io.BytesIO(fetch(PALEODEM_URL, 'paleodem_csv.zip')))
-    names = sorted(n for n in z.namelist() if n.endswith('.csv'))
+    """The 6-arc-minute PaleoDEMs (1801 x 3601 netCDF, lon -180..180 with the dateline column twice) -> (age, 'dem', tex)."""
+    import netCDF4, tempfile
+    z = zipfile.ZipFile(io.BytesIO(fetch(PALEODEM_URL, 'paleodem_6min.zip')))
+    names = sorted(n for n in z.namelist() if n.endswith('.nc') and '__MACOSX' not in n and not os.path.basename(n).startswith('._'))   # the zip carries resource forks
     out = []
     for n in names:
-        age = int(n.split('_')[-1].replace('Ma.csv', ''))
-        txt = z.read(n).decode('utf-8', 'replace').splitlines()
-        rows = []
-        for l in txt:                                   # some maps head with '# lon,lat,elev', others with 'longitude,latitude,...'
-            parts = l.split(',')
-            try:
-                rows.append([float(parts[0]), float(parts[1]), float(parts[2])])
-            except (ValueError, IndexError):
-                continue
-        a = np.array(rows)
-        lon, lat, el = a[:, 0], a[:, 1], a[:, 2]
-        g = np.full((181, 361), np.nan)
-        g[((90 - lat)).astype(int), ((lon + 180)).astype(int)] = el
-        # the seam: lon 180 is lon -180 again; a missing cell takes its neighbours' mean, never a 0 that tints as shelf (2026-11-02:
-        # "theres a line in the ocean on the backside")
-        g[:, 360] = np.where(np.isnan(g[:, 360]), g[:, 0], g[:, 360]); g[:, 0] = np.where(np.isnan(g[:, 0]), g[:, 360], g[:, 0])
-        for _ in range(4):
+        age = int(re.search(r'_(\d+)Ma\.nc$', n).group(1))
+        with tempfile.NamedTemporaryFile(suffix='.nc', delete=False) as tf:
+            tf.write(z.read(n)); path = tf.name
+        try:
+            d = netCDF4.Dataset(path); zv = d.variables['z']; lat = d.variables['latitude'][:]
+            g = np.array(zv[:], float)
+            if lat[0] < lat[-1]:
+                g = g[::-1]                                  # north up
+            g = np.where(np.isfinite(g), g, np.nan)[:, :3600]    # the duplicate dateline column goes
+            d.close()
+        finally:
+            os.remove(path)
+        for _ in range(3):
             nan = np.isnan(g)
             if not nan.any():
                 break
             pad = np.pad(g, 1, mode='edge'); nb = np.stack([pad[:-2, 1:-1], pad[2:, 1:-1], pad[1:-1, :-2], pad[1:-1, 2:]])
-            fill = np.nanmean(np.where(np.isnan(nb), np.nan, nb), axis=0)
-            g = np.where(nan & ~np.isnan(fill), fill, g)
-        g = np.where(np.isnan(g), -4000.0, g)[:, :360]            # whatever is still blank is deep ocean; the duplicate column goes
-        # resize on a wrapped grid so the dateline is interpolated like any other meridian, then crop the wings
-        PADC = 8; gp = np.concatenate([g[:, -PADC:], g, g[:, :PADC]], axis=1); padpx = int(round(PADC * W / 360.0))
+            fill = np.nanmean(np.where(np.isnan(nb), np.nan, nb), axis=0); g = np.where(nan & ~np.isnan(fill), fill, g)
+        g = np.where(np.isnan(g), -4000.0, g)
+        PADC = 40; gp = np.concatenate([g[:, -PADC:], g, g[:, :PADC]], axis=1); padpx = int(round(PADC * W / 3600.0))
         im = Image.fromarray(gp.astype(np.float32)).resize((W + 2 * padpx, H), Image.BICUBIC)
         e = np.asarray(im, float)[:, padpx:padpx + W]
         out.append((age, 'dem', tint_dem(e), None))
+        print('  dem', age, 'Ma')
     return out
 
 
@@ -198,6 +197,9 @@ def schematic_frame(age, stage, k):
     n = noise(100 + (3 if stage in ('kenor', 'kenor2', 'goe', 'huron') else 5 if stage in ('columbia', 'columbia2') else k), 64 if cover > 0.1 else 20, 4)
     thr = np.quantile(n, 1 - cover)
     m = np.clip((n - thr) / 0.02, 0, 1)
+    # the poles: an equirectangular noise pinches to a star at the pole on the globe (seen 2026-11-02); the schematic land fades out above 72 deg
+    latw = np.clip((84 - np.abs(np.linspace(90, -90, H)[:, None])) / 12.0, 0, 1)
+    m = m * latw
     land = lerp([110, 96, 70], [150, 130, 96], noise(200 + k, 16, 3))
     img = base * (1 - m[..., None]) + land * m[..., None]
     if stage in ('water', 'islands'):
@@ -257,6 +259,40 @@ def boundary_frames(ages):
         if age % 100 == 0:
             print('  bounds %4d Ma: %3d lines, subduction %6d km, ridges %6d km, plates %s' % (age, len(rows), km['S'], km['R'], nplates))
     return stats
+
+
+# ---------------------------------------------------------------- THE LANDS (2026-11-02: "add the names of these earlier bodies of land")
+# Each ancient landmass is anchored to a point on it today; the GPlates service carries the point back through the Cao 2024
+# model, one call per age. Tier 1 = supercontinents, tier 2 = cratons and continents. 999.99 = not on a tracked plate: skipped.
+LANDS = [   # (name, lon, lat, from Ma, to Ma, tier)
+    ('Nuna', -85, 60, 1800, 1300, 1), ('Rodinia', -85, 60, 1100, 750, 1), ('Pannotia', 20, 0, 620, 560, 1), ('Gondwana', 20, 0, 550, 180, 1),
+    ('Laurussia', -85, 60, 420, 340, 1), ('Pangaea', -5, 15, 335, 180, 1), ('Laurasia', -85, 60, 180, 66, 1),
+    ('Laurentia', -85, 60, 1800, 420, 2), ('Baltica', 37, 55, 1800, 420, 2), ('Siberia', 100, 60, 1800, 250, 2), ('Amazonia', -60, -5, 1800, 550, 2),
+    ('West Africa', -5, 15, 1800, 550, 2), ('Congo', 20, 0, 1800, 550, 2), ('Kalahari', 23, -25, 1800, 550, 2), ('India', 78, 22, 1800, 550, 2),
+    ('Australia', 135, -25, 1800, 550, 2), ('North China', 115, 38, 1800, 250, 2), ('South China', 110, 28, 1000, 250, 2), ('Avalonia', -64, 45, 500, 420, 2),
+    ('Antarctica', -20, -80, 600, 550, 2),
+    ('North America', -100, 45, 180, 0, 2), ('Europe', 15, 50, 180, 0, 2), ('Asia', 100, 50, 180, 0, 2), ('Africa', 20, 5, 180, 0, 2),
+    ('South America', -60, -10, 130, 0, 2), ('India', 78, 22, 130, 0, 2), ('Australia', 135, -25, 100, 0, 2), ('Antarctica', -20, -80, 100, 0, 2),
+]
+
+
+def lands_by_age(ages):
+    out = {}
+    for age in ages:
+        want = [L for L in LANDS if L[3] >= age >= L[4]]
+        if not want:
+            continue
+        pts = ','.join('%s,%s' % (L[1], L[2]) for L in want)
+        try:
+            j = json.loads(fetch(GWS_PTS % (pts, age), 'cao2024_lands_%04d.json' % age))
+        except Exception as e:
+            print('  lands', age, 'failed', e); continue
+        rows = []
+        for L, c in zip(want, j.get('coordinates') or []):
+            if c and c[0] < 400 and c[1] < 400:
+                rows.append([L[0], round(c[0], 1), round(c[1], 1), L[5]])
+        out[str(age)] = rows
+    return out
 
 
 # ---------------------------------------------------------------- chapters
@@ -371,16 +407,17 @@ def main():
     print('schematic frames'); frames = schematic_frames() if not QUICK else [f for f in schematic_frames() if f[0] in (4500, 4000, 2400)]
     print('plate frames (GPlates Web Service, Cao 2024)'); frames += plate_frames(plate_ages)
     print('plate boundaries and the tectonic tally (GPlates Web Service, Cao 2024)'); bstats = boundary_frames([1800, 1100, 300, 0] if QUICK else list(range(1800, -1, -10)))
+    print('the lands by age'); lands = lands_by_age([1800, 1100, 300, 0] if QUICK else list(range(1800, -1, -10)))
     print('PaleoDEM frames'); dem = dem_frames()
     if QUICK:
         dem = [f for f in dem if f[0] in (540, 300, 66, 0)]
     frames += dem
     frames.sort(key=lambda f: -f[0])
     index = {'built': time.strftime('%Y-%m-%dT%H:%MZ', time.gmtime()), 'w': W, 'h': H, 'frames': [], 'chapters': [{'ma': c[0], 'era': c[1], 'title': c[2]} for c in CHAPTERS],
-             'notes': {str(a): n for a, s, n in SCHEMATIC}, 'sources': SOURCES, 'bounds': {'every': 10, 'from': 1800, 'stats': bstats}, 'video': None if NOVID else {'d': 'deeptime/globe_d.mp4', 'm': 'deeptime/globe_m.mp4', 'seconds': 64}}
+             'notes': {str(a): n for a, s, n in SCHEMATIC}, 'sources': SOURCES, 'bounds': {'every': 10, 'from': 1800, 'stats': bstats}, 'lands': lands, 'video': None if NOVID else {'d': 'deeptime/globe_d.mp4', 'm': 'deeptime/globe_m.mp4', 'seconds': 64}}
     for age, kind, tex, note in frames:
         fn = '%04d.jpg' % age
-        Image.fromarray(tex).save(os.path.join(FR, fn), quality=84)
+        Image.fromarray(tex).save(os.path.join(FR, fn), quality=86)
         index['frames'].append({'ma': age, 'kind': kind, 'file': 'deeptime/frames/' + fn})
     json.dump(index, open(os.path.join(OUT, 'deeptime', 'index.json'), 'w'), separators=(',', ':'))
     print('%d frames in %.0f s' % (len(frames), time.time() - t0))
