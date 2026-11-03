@@ -106,6 +106,7 @@ def main():
             t = html.unescape(ti.group(1)).strip(); m = re.match(r'(.*?) \((.*?)\) - Report for (.*?) - (.*)$', t)
             la, lo = [float(q) for q in pt.group(1).split()]
             txt = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', '', html.unescape(d.group(1) if d else ''))).strip()
+            txt = re.sub(r"(?<=\w)\?(?=s\b)", "\u2019", txt)          # the feed's own lost apostrophes ("Etna?s")
             doc['week'].append({'name': m.group(1) if m else t, 'country': m.group(2) if m else '', 'period': m.group(3) if m else '', 'status': m.group(4) if m else '', 'lat': la, 'lon': lo, 'text': txt[:600], 'url': ln.group(1).strip() if ln else ''})
     print(len(doc['week']), 'in the weekly report')
     # usgs alerts
