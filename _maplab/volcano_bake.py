@@ -61,6 +61,15 @@ def get(url, binary=False, tries=3):
     return None
 
 
+def whole(t, cap=900):
+    # the report text cut at a sentence, never mid-word (the card shows whole sentences)
+    t = re.sub(r'\s+', ' ', t or '').strip()
+    if len(t) <= cap:
+        return t
+    s = t[:cap]; k = max(s.rfind('. '), s.rfind('.) '))
+    return s[:k + 1] if k > cap * 0.35 else s.rsplit(' ', 1)[0] + '…'
+
+
 def first_sentences(t, n=2, cap=320):
     t = re.sub(r'\s+', ' ', t or '').strip()
     parts = re.split(r'(?<=[.!?])\s+', t)
@@ -107,7 +116,7 @@ def main():
             la, lo = [float(q) for q in pt.group(1).split()]
             txt = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', '', html.unescape(d.group(1) if d else ''))).strip()
             txt = re.sub(r"(?<=\w)\?(?=s\b)", "\u2019", txt)          # the feed's own lost apostrophes ("Etna?s")
-            doc['week'].append({'name': m.group(1) if m else t, 'country': m.group(2) if m else '', 'period': m.group(3) if m else '', 'status': m.group(4) if m else '', 'lat': la, 'lon': lo, 'text': txt[:600], 'url': ln.group(1).strip() if ln else ''})
+            doc['week'].append({'name': m.group(1) if m else t, 'country': m.group(2) if m else '', 'period': m.group(3) if m else '', 'status': m.group(4) if m else '', 'lat': la, 'lon': lo, 'text': whole(txt), 'url': ln.group(1).strip() if ln else ''})
     print(len(doc['week']), 'in the weekly report')
     # usgs alerts
     u = get(USGS)
