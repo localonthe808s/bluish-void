@@ -46,7 +46,16 @@ def get(url, binary=False, tries=3):
     for k in range(tries):
         try:
             with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=120) as r:
-                b = r.read(); return b if binary else b.decode('utf-8', 'replace')
+                b = r.read()
+                if binary:
+                    return b
+                # the weekly RSS declares ISO-8859-1 (its accents, "Geología", came through as U+FFFD when read as UTF-8)
+                m = re.match(rb'<\?xml[^>]*encoding="([\w-]+)"', b[:200])
+                enc = m.group(1).decode() if m else 'utf-8'
+                try:
+                    return b.decode(enc)
+                except (UnicodeDecodeError, LookupError):
+                    return b.decode('utf-8', 'replace')
         except Exception as e:
             print('  retry', k + 1, url[:70], e); time.sleep(5 * (k + 1))
     return None
