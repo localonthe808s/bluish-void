@@ -62,8 +62,18 @@ def get_json(url, tries=6):
             raise
 
 
-def get_text(url):
-    return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=120).read().decode('utf-8', 'replace')
+def get_text(url, tries=6):
+    # same backoff as get_json: IEM answers bursts with 429 (nightly 2026-11-04 died on one)
+    for i in range(tries):
+        try:
+            return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=120).read().decode('utf-8', 'replace')
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and i < tries - 1:
+                time.sleep(3 * (2 ** i)); continue
+            raise
+        except Exception:
+            if i < tries - 1: time.sleep(3 * (2 ** i)); continue
+            raise
 
 
 def ts(s):
