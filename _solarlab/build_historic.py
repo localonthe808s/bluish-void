@@ -19,7 +19,7 @@ from PIL import Image
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE / 'probes'
-UA = {'User-Agent': 'bluishvoid.com historic satellites (nicolas7iana@outlook.com)'}
+UA = {'User-Agent': 'bluishvoid.com historic satellites (https://bluishvoid.com)'}   # the project only, never a personal contact
 
 SETS = {
     'tiros1': [
@@ -169,7 +169,16 @@ SETS.update({
         ('video:Juno flyby of Jupiter, Perijove 16 (PIA22906).webm|0|54', 'A close pass over Jupiter, Oct 29, 2018', '2018-10-29', 'JunoCam', 'NASA/JPL-Caltech/SwRI/MSSS/Gerald Eichst\u00e4dt \u00b7 public domain'),
     ],
 })
-HEROES = {'tiros1': 'TIROS-1 satellite.png', 'erts1': 'Landsat-1.jpg', 'tiros9': 'TIROS IX Spac0021-repair.jpg', 'seasat': 'Seasat in orbit.jpg',
+# LAGEOS (user 2026-11-04: "can we make an archive tab for the LAGEOS satellite?"): the mirror ball, its launch, Sagan's plaque, LAGEOS 2
+SETS['lageos'] = [
+    ('LAGEOS-1 encapsulation.jpg', 'LAGEOS 1 in the nose of its Delta rocket, Vandenberg, 1976', '1976', 'NASA photograph', 'NASA'),
+    ('LAGEOS-NASA.jpg', 'The satellite: 426 mirrors on a two-foot ball', '1976', 'NASA photograph', 'NASA'),
+    ('LAGEOS-FILE.jpg', 'Carl Sagan\u2019s plaque on board: the continents 268 million years ago, today, and 8.4 million years ahead', '1976', 'plaque by Carl Sagan', 'Carl Sagan / NASA \u00b7 copyrighted free use'),
+    ('STS-52 LAGEOS-II deployment.jpg', 'LAGEOS 2 leaves Space Shuttle Columbia, Oct 1992', '1992-10-23', 'STS-52 crew photograph', 'NASA'),
+    ('STS052-80-044 - STS-052 - STS-52 LAGEOS-IRIS spacecraft drifting over the Earth - DPLA - e62214e86d42e80b7c9865e8c93792ed.jpg',
+     'LAGEOS 2 on its booster, the speck drifting away over Earth', '1992-10-23', 'STS-52 crew photograph', 'NASA'),
+]
+HEROES = {'lageos': 'Laser Geodynamics Satellite I (5278072466).jpg', 'tiros1': 'TIROS-1 satellite.png', 'erts1': 'Landsat-1.jpg', 'tiros9': 'TIROS IX Spac0021-repair.jpg', 'seasat': 'Seasat in orbit.jpg',
           'explorer6': 'Explorer 6 paddles up.jpg', 'ats1': 'Applications Technology Satellite 1 (ATS 1).jpg', 'ats3': 'Applications Technology Satellite 3 (ATS 3).png',
           'lo1': 'Lunar Orbiter Spacecraft Model \u2014 1 8 Scale (50024117333).jpg', 'goes': 'SMS 1 satellite.jpg', 'nimbus7': 'Nimbus rendering.jpg', 'corona': 'Kh-4b corona.jpg'}
 
@@ -255,7 +264,7 @@ def main():
             url, page = t[4:].split('|') if t.startswith('url:') else I[t]; f = '%s_%02d.webp' % (key, n)
             save(fetch(url), OUT / f, 900); time.sleep(3); f = publish(OUT / f)
             entries.append({'file': f, 'title': title, 'date': date, 'target': 'Earth', 'instrument': inst,
-                            'credit': credit + ' · public domain', 'source_url': page})
+                            'credit': credit if '\u00b7' in credit else credit + ' · public domain', 'source_url': page})   # a credit naming its own licence keeps it
             print(key, f, title)
         man['sets'][key] = entries
     for key, t in HEROES.items():
