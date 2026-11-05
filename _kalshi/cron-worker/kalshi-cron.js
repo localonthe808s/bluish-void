@@ -823,6 +823,9 @@ async function jobWatch(env) {
     catch (e) { out.push(`${w.name}: ok, log unread (${String(e).slice(0, 40)})`); continue; }
     if (scan.err) { out.push(`${w.name}: ok, log unread (${scan.err})`); continue; }
     if (!scan.hits.length) { out.push(`${w.name}: ok`); continue; }
+    // ONE PAGE PER RUN (user 2026-11-05: "the insider study just failed again" -- it had not: the day key rolled over at
+    // midnight UTC and the same 11-04 run paged a second time). A run already paged stays quiet on later days.
+    if ((state.pagedRun || {})[w.wf] === r.id) { out.push(`${w.name}: green but ${scan.hits.map((h) => h.key).join('/')} FAILED (already paged)`); continue; }
     const what = scan.hits.map((h) => `${h.key}: ${h.err}`).join('\n');
     // keyed by day like the rest, so a market that fails every five minutes
     // pages once and the message names every market that died in that run
@@ -830,6 +833,7 @@ async function jobWatch(env) {
       `Kalshi ${w.name}: ${scan.hits.map((h) => h.key).join(', ')} failing`,
       `The run passed but ${scan.hits.length} market(s) threw inside it:\n${what}\n${r.html_url}\nThat city's file stops updating -- no lock, no score -- while the job still reports success.`,
       'high');
+    state.pagedRun = state.pagedRun || {}; state.pagedRun[w.wf] = r.id;
     out.push(`${w.name}: green but ${scan.hits.map((h) => h.key).join('/')} FAILED (paged)`);
   }
   if (JSON.stringify(state) !== before) await env.OBS.put(ALERT_KEY, JSON.stringify(state));
