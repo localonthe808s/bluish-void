@@ -336,7 +336,9 @@ SRC = {'nasa':    {'from': 'NASA',     'credit': 'NASA',                  'lic':
 # NOIRLab's feeds cover all of its telescopes and its outreach: Rubin items only, and no event photos
 RUBIN_ONLY = re.compile(r'\brubin\b', re.I)
 NOT_RUBIN_SKY = re.compile(r'visitor|activit|colou?ring|workshop|panel|celebrat|graduat|recognition|career|student|school|outreach|construction|summit road|dome|mirror|camera|lsstcam', re.I)
-EUCLID_FEED = 'https://www.esa.int/rssfeed/Science_Exploration/Space_Science/Euclid'
+# ESA's NEW SITE (2026-11-04): the rssfeed/ URLs and the /var/esa/storage/ pictures went 404 the day esa.int relaunched; the mission
+# search API (www.esa.int/api/search) lists each mission's pictures and articles, read by esa_new_items below
+EUCLID_FEED = 'esanew:img:158558'   # ESA subject ids: Euclid 158558, Solar Orbiter 158549, Gaia 158540
 FEEDS = {
     'webb':   {'photos': [('esa', 'https://esawebb.org/images/feed/')],
                'news':   [('nasa', 'https://science.nasa.gov/blogs/webb/feed/'), ('esa', 'https://esawebb.org/news/feed/')]},
@@ -348,7 +350,7 @@ FEEDS = {
     'parker': {'photos': [('nasa', 'https://science.nasa.gov/blogs/parker-solar-probe/feed/')],
                'news':   [('nasa', 'https://science.nasa.gov/blogs/parker-solar-probe/feed/')]},
     # added 2026-09-24 (user: "add them"): Euclid, Rubin, SPHEREx, Chandra, Voyager
-    'euclid':  {'photos': [('esaint', EUCLID_FEED)], 'news': [('esaint', EUCLID_FEED)]},
+    'euclid':  {'photos': [('esaint', 'esanew:img:158558')], 'news': [('esaint', 'esanew:news:158558')]},
     'rubin':   {'photos': [('noirlab', 'https://noirlab.edu/public/images/feed/'), ('noirlab', 'https://noirlab.edu/public/news/feed/')],
                 'news':   [('noirlab', 'https://noirlab.edu/public/news/feed/')]},
     'spherex': {'photos': [('nasa', 'https://science.nasa.gov/category/missions/spherex/feed/')],
@@ -361,16 +363,16 @@ FEEDS = {
     'juno':    {'photos': [('nasa', 'https://science.nasa.gov/category/missions/juno/feed/')],
                 'news':   [('nasa', 'https://science.nasa.gov/category/missions/juno/feed/')]},
     # added 2026-10-03 (user: "more on satellites - ... NRAO, SOLAR ORBITER"): NRAO's own gallery is CC BY 4.0
-    'solo':    {'photos': [('esasolo', 'https://www.esa.int/rssfeed/Science_Exploration/Space_Science/Solar_Orbiter')],
-                'news':   [('esasolo', 'https://www.esa.int/rssfeed/Science_Exploration/Space_Science/Solar_Orbiter'),
+    'solo':    {'photos': [('esasolo', 'esanew:img:158549')],
+                'news':   [('esasolo', 'esanew:news:158549'),
                            ('nasa', 'https://science.nasa.gov/category/missions/solar-orbiter/feed/')]},
     # NRAO's gallery is site photography and illustrations (dropped 2026-10-03); its NEWS posts lead with the radio maps
     'nrao':    {'photos': [('nrao', 'https://public.nrao.edu/news/feed/')],
                 'news':   [('nrao', 'https://public.nrao.edu/news/feed/')]},
     'inouye':  {'photos': [], 'news': [('nso', 'https://nso.edu/feed/')]},
     # added 2026-10-03 (user: "retired GAIA data / INSAR / NISAR volcanos?")
-    'gaia':    {'photos': [('esagaia', 'https://www.esa.int/rssfeed/Science_Exploration/Space_Science/Gaia')],
-                'news':   [('esagaia', 'https://www.esa.int/rssfeed/Science_Exploration/Space_Science/Gaia')]},
+    'gaia':    {'photos': [('esagaia', 'esanew:img:158540')],
+                'news':   [('esagaia', 'esanew:news:158540')]},
     'nisar':   {'photos': [('nasa', 'https://science.nasa.gov/category/missions/nisar/feed/')],
                 'news':   [('nasa', 'https://science.nasa.gov/category/missions/nisar/feed/')]},
     'nh':      {'photos': [('nasa', 'https://science.nasa.gov/category/missions/new-horizons/feed/')],
@@ -378,8 +380,49 @@ FEEDS = {
 }
 
 
+ESA_MON = {m: i + 1 for i, m in enumerate(('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'))}
+
+
+def esa_new_items(spec):
+    """ESA's relaunched site has no feeds; its own search API does the job: www.esa.int/api/search?category=multimedia&
+    contentType=image&subjects[]=<mission id> (or category=news) returns the newest first, each with title, description, date
+    ("30 Sep. 2025") and a resized thumbnail at its natural shape (~660 px; the originals run to 65 MB). spec is 'img:<id>' or
+    'news:<id>'. For a picture's zoom the media page names a Micrio deep-zoom id; its IIIF service hands a 2400 px copy."""
+    import html as _h
+    kind, sid = spec.split(':', 1)
+    q = 'category=multimedia&contentType=image' if kind == 'img' else 'category=news'
+    j = json.loads(get('https://www.esa.int/api/search?%s&subjects%%5B%%5D=%s&pageSize=%d' % (q, sid, 48 if kind == 'img' else 12)).decode('utf-8'))
+    res = next(iter((j.get('hits') or {}).values()), {}).get('results') or []
+    out = []
+    for r in res:
+        link = next((c['url'] for c in r.get('cta') or [] if c.get('url', '').startswith('/')), '')
+        if not link or not r.get('title'): continue
+        link = 'https://www.esa.int' + link
+        desc = re.sub(r'\s+', ' ', _h.unescape(re.sub(r'<[^>]+>', ' ', r.get('description') or ''))).strip()
+        d = re.match(r'(\d{1,2}) (\w{3})\w*\.? (\d{4})', r.get('date') or '')
+        when = ms(dt.datetime(int(d.group(3)), ESA_MON[d.group(2)], int(d.group(1)), 12, tzinfo=dt.timezone.utc)) if d and d.group(2) in ESA_MON else None
+        th = ((r.get('thumbnail') or {}).get('single') or {}).get('url', '')
+        cr = re.search(r'Credit[s]?:\s*([^.;]{3,160})', desc)
+        out.append({'title': _h.unescape(r['title']).strip(), 'link': link, 't': when, 'lead': first_sentence(desc), 'img': th,
+                    'credit': cr.group(1).strip() if cr else '', 'alt': '', 'desc': desc[:600], 'esa_zoom': kind == 'img'})
+    return out
+
+
+def esa_zoom(it):
+    """The 2400 px copy for a picture that made the strip (one page read each, only for those): Micrio IIIF, else the thumb."""
+    try:
+        y = get(it['link'], timeout=40, tries=2).decode('utf-8', 'replace')
+        mi = re.search(r'<micr-io id="([A-Za-z0-9]+)"', y)
+        if mi: return 'https://iiif.micr.io/%s/full/2400,/0/default.jpg' % mi.group(1)
+        fl = [u for u in re.findall(r'https://media\.esa\.int/[^"\' ]+?/image-thumb__\d+__fit_large/[^"\' ]+?\.webp', y) if '~-~' not in u and '@2x' not in u]
+        if fl: return fl[0]
+    except Exception as e: print('  esa zoom failed', it['link'][-50:], e)
+    return it['img']
+
+
 def _items(url):
     import html as _h
+    if url.startswith('esanew:'): return esa_new_items(url[7:])
     x = get(url).decode('utf-8', 'replace')
     out = []
     for it in re.findall(r'<item>(.*?)</item>', x, re.S)[:30]:
@@ -447,7 +490,9 @@ NOT_SKY = re.compile(r'launch|rocket|falcon|booster|lift-?off|launch ?pad|clean 
                      r'trajectory animation|mid-course|artist.s (?:concept|illustration|rendering) of (?:the )?(?:roman|parker|webb|hubble)|'
                      # 2026-10-10 (user: "hubble has a model of itself in the latest photos, i dont want that for any of them, just space photos"):
                      # NASA's education turntable of two telescopes, a citizen-science cartoon, a bridge, an infographic
-                     r'turntable|/education/|transparent background|\bvs\.? |citizen scien|\bbridges?\b|infographic|checks? in\b', re.I)
+                     r'turntable|/education/|transparent background|\bvs\.? |citizen scien|\bbridges?\b|infographic|checks? in\b|'
+                     # ESA's new search API (2026-11-04) names its infographics and control-room shots plainly: a fleet chart, a journey diagram, a stats card
+                     r'science fleet|final commands|sky-scanning complete|journey around|in numbers|by the numbers', re.I)
 IS_SKY = re.compile(r'galax|nebula|cluster|supernova|\bstars?\b|stellar|planet|exoplanet|\bmoons?\b|jupiter|saturn|uranus|neptune|'
                     r'volcan|erupt|lava|comet|asteroid|kuiper|\bio\b|europa|ganymede|callisto|pluto|charon|arrokoth|aurora|\bsun\b|solar wind|corona|\bcme\b|wispr|flare|spectr|light curve|\bdata\b|chart|graph|'
                     r'\bplot\b|\bmap\b|visuali|simulat|deep field|universe|cosmic|\bdust\b|black hole|quasar|lens|potm|infrared|'
@@ -723,7 +768,7 @@ def bake_media(prev_media=None):
                     # its inset): ESA/Webb, ESA/Hubble and NOIRLab name a release's images <id>a, <id>b...; the first stands
                     if _fam(th) and any(_fam(q['thumb']) == _fam(th) for q in photos): continue
                     seen.add(th); seen.add(it['title'])      # ESA posts a release's image and its video under one title
-                    full = th.replace('?w=640', '?w=2400') if th.endswith('?w=640') else _full_for(th)
+                    full = (esa_zoom(it) if it.get('esa_zoom') else None) or (th.replace('?w=640', '?w=2400') if th.endswith('?w=640') else _full_for(th))
                     # A STORY'S LEAD MEDIA CAN BE A MOVIE (2026-10-05: Parker's WISPR footage of comet 3I/ATLAS came through as
                     # .../Parker-atlas_3i_WISPR_Processed.mp4?w=640 and the page put it in an <img> -- a broken picture). Mark it
                     # so the page draws a muted looping <video>; the ?w= resize means nothing to a movie, so it goes.
