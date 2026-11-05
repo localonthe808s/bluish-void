@@ -171,12 +171,29 @@ SETS.update({
 })
 # LAGEOS (user 2026-11-04: "can we make an archive tab for the LAGEOS satellite?"): the mirror ball, its launch, Sagan's plaque, LAGEOS 2
 SETS['lageos'] = [
-    ('LAGEOS-1 encapsulation.jpg', 'LAGEOS 1 in the nose of its Delta rocket, Vandenberg, 1976', '1976', 'NASA photograph', 'NASA'),
+    # the satellite itself, not the people (user 2026-11-04: "dont show the astronauts, show more of the satellite itself, the old ones are cool and scifi")
+    ('url:https://nssdc.gsfc.nasa.gov/planetary/image/lageos_illus.jpg|https://nssdc.gsfc.nasa.gov/nmc/spacecraft/display.action?id=1976-039A', 'Marshall\u2019s 1974 painting: a laser from Earth lighting the mirror ball', '1974', 'NASA illustration MSFC-74-PD-3300', 'NASA/Marshall'),
     ('LAGEOS-NASA.jpg', 'The satellite: 426 mirrors on a two-foot ball', '1976', 'NASA photograph', 'NASA'),
-    ('LAGEOS-FILE.jpg', 'Carl Sagan\u2019s plaque on board: the continents 268 million years ago, today, and 8.4 million years ahead', '1976', 'plaque by Carl Sagan', 'Carl Sagan / NASA \u00b7 copyrighted free use'),
-    ('STS-52 LAGEOS-II deployment.jpg', 'LAGEOS 2 leaves Space Shuttle Columbia, Oct 1992', '1992-10-23', 'STS-52 crew photograph', 'NASA'),
+    ('url:https://nssdc.gsfc.nasa.gov/planetary/image/lageos.jpg|https://nssdc.gsfc.nasa.gov/nmc/spacecraft/display.action?id=1976-039A', 'Setting the mirrors, one by one, in the clean room', '1976', 'NASA photograph', 'NASA'),
+    ('url:https://nssdc.gsfc.nasa.gov/planetary/image/lageos_1_plaque.jpg|https://nssdc.gsfc.nasa.gov/nmc/spacecraft/display.action?id=1976-039A', 'Carl Sagan\u2019s plaque on board: the continents 268 million years ago, today, and 8.4 million years ahead', '1976', 'plaque by Carl Sagan', 'NASA NSSDCA'),
+    ('LAGEOS-1 encapsulation.jpg', 'LAGEOS 1 in the nose of its Delta rocket, Vandenberg, 1976', '1976', 'NASA photograph', 'NASA'),
+]
+# MORE (user 2026-11-04: "can you find more photos for LAGEOS"): LAGEOS 2 and its flight; the stations that range it
+SETS['lageos2'] = [
+    ('url:https://ilrs.gsfc.nasa.gov/images/lageosII.jpg|https://ilrs.gsfc.nasa.gov/missions/satellite_missions/current_missions/lag2_general.html', 'LAGEOS 2 on its mount before flight', '1992', 'NASA photograph', 'NASA ILRS'),
+    ("STS052-80-008 - STS-052 - STS-52 deployment of LAGEOS-IRIS spacecraft from OV-102's payload bay - DPLA - cb8debdf995c92d10077a3422a6cd869.jpg",
+     'Raised out of Columbia\u2019s payload bay on its Italian booster', '1992-10-23', 'STS-52 crew photograph', 'NASA'),
+    ('STS-52 LAGEOS-II deployment.jpg', 'Released: LAGEOS 2 leaves Columbia', '1992-10-23', 'STS-52 crew photograph', 'NASA'),
+    ("STS052-80-033 - STS-052 - STS-52 deployment of LAGEOS-IRIS spacecraft from OV-102's payload bay - DPLA - 9a8cf17a0f5c4cf2aa4429d106fedc92.jpg",
+     'Climbing away above the shuttle', '1992-10-23', 'STS-52 crew photograph', 'NASA'),
     ('STS052-80-044 - STS-052 - STS-52 LAGEOS-IRIS spacecraft drifting over the Earth - DPLA - e62214e86d42e80b7c9865e8c93792ed.jpg',
-     'LAGEOS 2 on its booster, the speck drifting away over Earth', '1992-10-23', 'STS-52 crew photograph', 'NASA'),
+     'The speck drifting away over Earth, bound for 3,600 miles up', '1992-10-23', 'STS-52 crew photograph', 'NASA'),
+]
+SETS['lageos_ground'] = [
+    ('Goddard Spaceflight Center Laser Ranging Facility.jpg', 'NASA Goddard\u2019s laser ranging station, Greenbelt, Maryland', '2010-09-27', 'NASA photograph', 'NASA'),
+    ('Milky Way and NASA Satellite Laser Ranging at HartRAO - Gauteng, South Africa - 11 Aug. 2013.jpg', 'NASA\u2019s laser at HartRAO, South Africa, crossing the Milky Way', '2013-08-11', 'photograph', 'Meraj Chhaya \u00b7 CC BY 2.0'),
+    ('Wettzell Laser Ranging System.jpg', 'The Wettzell laser ranging telescope, Bavaria', '2008-09-13', 'photograph', 'H. Raab \u00b7 CC BY-SA 3.0'),
+    ('Mount Stromlo satellite laser ranging facility 02.jpg', 'Mount Stromlo laser ranging, Canberra', '2014-09-17', 'photograph', 'Mitch Ames \u00b7 CC BY-SA 4.0'),
 ]
 HEROES = {'lageos': 'Laser Geodynamics Satellite I (5278072466).jpg', 'tiros1': 'TIROS-1 satellite.png', 'erts1': 'Landsat-1.jpg', 'tiros9': 'TIROS IX Spac0021-repair.jpg', 'seasat': 'Seasat in orbit.jpg',
           'explorer6': 'Explorer 6 paddles up.jpg', 'ats1': 'Applications Technology Satellite 1 (ATS 1).jpg', 'ats3': 'Applications Technology Satellite 3 (ATS 3).png',
