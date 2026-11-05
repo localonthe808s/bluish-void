@@ -333,7 +333,16 @@ window._bvPmHeal = function(){
   var P0 = window.protomapsL; if (!P0 || P0._bvHealed || typeof P0.leafletLayer !== 'function') return;
   var P1 = {}; Object.keys(P0).forEach(function(k){ P1[k] = P0[k]; });
   var make = P0.leafletLayer;
-  P1.leafletLayer = function(){
+  P1.leafletLayer = function(o){
+    /* PHONE MEMORY (user 2026-11-04, a screen recording of iPhone Safari killing the page on SEVERE, then "A problem repeatedly
+       occurred" on GEOLOGY): every protomaps tile is its own canvas at window.devicePixelRatio -- 768 x 768 x 4 bytes = 2.4 MB on a
+       3x phone, 50-70 of them live across the basemap, its unseen water mask and the overlays (measured in WebKit: the page went
+       247 -> 476 MB opening SEVERE). Tiles paint at 2x at most, as the site's own canvases already do (2.25x less per tile), and on
+       a phone each layer keeps one ring of off-screen tiles, not two. A layer that sets either itself keeps its own. */
+    if (o && typeof o === 'object'){
+      if (o.devicePixelRatio == null) o.devicePixelRatio = Math.min(2, window.devicePixelRatio || 1);
+      if (o.keepBuffer == null && window.matchMedia && matchMedia('(max-width:768px)').matches) o.keepBuffer = 1;
+    }
     var lay = make.apply(this, arguments), rt = lay.renderTile, stuck = {};
     var live = function(it){ var t = lay._tiles && lay._tiles[it.o]; return !!(lay._map && t && t.el === it.a && t.current && it.a.key === it.o && lay._tileZoom === it.r.z); };
     var again = function(it){ delete stuck[it.o]; if (it.n < 6) lay.renderTile(it.r, it.a, it.o, it.s, it.n + 1); };
@@ -95227,9 +95236,23 @@ function closeAlertModal(){
       var b = M.getBounds().pad(0.15), w = b.getWest(), s = b.getSouth(), e = b.getEast(), n = b.getNorth();
       return Object.keys(OV.states).filter(function(k){ var q = OV.states[k]; return /^[A-Z]{2}$/.test(k) && q[0] <= e && q[2] >= w && q[1] <= n && q[3] >= s; }).sort();
     };
+    /* ONLY THE ZONES IN FORCE (user 2026-11-04, iPhone Safari killing the page on SEVERE): a state's file holds every county and
+       forecast zone it has -- Alaska's is 4 MB, California's 2.7, and opening SEVERE read ~11 MB of them, parsed into objects
+       several times that size and kept for good. The alerts name the few they need: those are kept and the rest of the file is
+       let go. A later alert naming a zone not kept reads the file again (the browser's cache has it). */
+    var ovNeed = function(st){ var n = {}; OV.al.forEach(function(a){ if (!a.rings) a.ugc.forEach(function(u){ if (u.slice(0, 2) === st) n[u] = 1; }); }); return n; };
+    OV.zMiss = {};
     var ovZones = function(st){
-      if (OV.zones[st] || OV.zReq[st]) return; OV.zReq[st] = 1;
-      fetch(OVZ + st + '.json').then(function(r){ return r.ok ? r.json() : null; }).then(function(j){ if (j){ OV.zones[st] = j; OV.draw(); } }).catch(function(){});
+      if (OV.zReq[st]) return;
+      var have = OV.zones[st];
+      if (have && Object.keys(ovNeed(st)).every(function(u){ return have[u] || OV.zMiss[u]; })) return;
+      OV.zReq[st] = 1;
+      fetch(OVZ + st + '.json').then(function(r){ return r.ok ? r.json() : null; }).then(function(j){
+        OV.zReq[st] = 0; if (!j) return;
+        var keep = OV.zones[st] || {};
+        Object.keys(ovNeed(st)).forEach(function(u){ if (j[u]) keep[u] = j[u]; else OV.zMiss[u] = 1; });
+        OV.zones[st] = keep; OV.draw();
+      }).catch(function(){ OV.zReq[st] = 0; });
     };
     OV.read = function(force){
       var go = function(){
