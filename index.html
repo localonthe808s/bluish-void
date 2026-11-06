@@ -20095,7 +20095,8 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
         var h0 = ov.hasAttribute('data-h0') ? +ov.getAttribute('data-h0') : 7, nH = +ov.getAttribute('data-n') || 16, gap = 2;
         var OW = Math.max(200, ov.clientWidth || 600), OH = 84, PT = 9, PB = 6;
         var colW = (OW - gap * (nH - 1)) / nH;
-        var xOf = function(min){ var hh = min / 60 - h0; if (hh < 0 || hh > nH) return null;
+        var xOf = function(min){ var hh = min / 60 - h0; if (hh < -0.25 || hh > nH) return null;
+          if (hh < 0) return hh * colW;   /* last night's final report, just left of the day's first column (see bvSensors) */
           var i = Math.min(nH - 1, Math.floor(hh)), f = hh - i; return i * (colW + gap) + f * colW; };
         var ser = order.map(function(k){ var a = d.s[k]; if (!a || !a.series) return null;
           var pts = a.series.filter(function(p){ return p[1] != null && xOf(p[0]) != null; });
@@ -20121,7 +20122,7 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
           if (q.k === 'KNYC') q.pts.forEach(function(p){ g += '<circle cx="' + xOf(p[0]).toFixed(1) + '" cy="' + yOf(p[1]).toFixed(1) + '" r="2" fill="#0d1117" stroke="#fff" stroke-width="1.3"/>'; });
           var last = q.pts[q.pts.length - 1];
           g += '<circle cx="' + xOf(last[0]).toFixed(1) + '" cy="' + yOf(last[1]).toFixed(1) + '" r="' + (isOwn ? 2.4 : 1.8) + '" fill="' + col + '"/>';
-          if (isOwn) own0 = { last: last, a: q.a };
+          if (isOwn) own0 = { last: last, a: q.a, pts: q.pts };
           q.pts.forEach(function(p){
             var on = sel && sel.k === q.k && sel.m === p[0], x = xOf(p[0]).toFixed(1), y = yOf(p[1]).toFixed(1);
             if (on) g += '<line x1="' + x + '" x2="' + x + '" y1="2" y2="' + OH + '" stroke="rgba(255,255,255,.3)" stroke-width="1"/>'
@@ -20133,7 +20134,12 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
         if (own0){
           var lx = xOf(own0.last[0]), ly = yOf(own0.last[1]), la = lx > OW * 0.78 ? 'end' : 'start';
           g += '<text x="' + (la === 'end' ? lx - 5 : lx + 5).toFixed(1) + '" y="' + (ly < 14 ? ly + 10 : ly - 4).toFixed(1) + '" font-size="7.5" font-weight="800" fill="#fff" text-anchor="' + la + '"' + HALO + '>'
-            + (SENS_SHORT[own] || 'CENTRAL PARK') + ' ' + D1(own0.last[1]) + '°' + (own0.a.max7 != null ? ' · HIGH SINCE 7 AM ' + D1(own0.a.max7) + '°' : '') + '</text>';
+            + (SENS_SHORT[own] || 'CENTRAL PARK') + ' ' + D1(own0.last[1]) + '°' + (function(){
+              /* THE NIGHT COUNTS (user 2026-11-06, a warm night before a cold front): the settled high is the whole climate day's, so when a
+                 reading after the day began beats the since-7-AM high, the label says the day's high and its clock */
+              var ds = window._cwDayStartMin || 0, best = null; own0.pts.forEach(function(p){ if (p[0] >= ds && (best == null || p[1] > best[1])) best = p; });
+              if (best && (own0.a.max7 == null || best[1] > own0.a.max7 + 0.05)) return ' · HIGH TODAY ' + D1(best[1]) + '° AT ' + t12(('0' + Math.floor(best[0] / 60)).slice(-2) + ':' + ('0' + (best[0] % 60)).slice(-2));
+              return own0.a.max7 != null ? ' · HIGH SINCE 7 AM ' + D1(own0.a.max7) + '°' : ''; })() + '</text>';
         }
         if (dayTag) g += '<text x="' + (OW - 2) + '" y="8" font-size="7" font-weight="800" letter-spacing=".08em" fill="#63dbb6" text-anchor="end"' + HALO + '>' + dayTag + '</text>';
         ov.innerHTML = '<svg viewBox="0 0 ' + OW + ' ' + OH + '" width="' + OW + '" height="' + OH + '" style="display:block;width:100%;height:' + OH + 'px;overflow:visible;">' + g + '</svg>';
@@ -20226,6 +20232,34 @@ window.showPlanetInsight = function(k,c) { window._planetInsightQueue.push([k,c]
               window._cwSensSel = { k: t.getAttribute('data-k'), m: +t.getAttribute('data-m') };
               paint();
             };
+            /* LAST NIGHT'S FINAL REPORT (user 2026-11-06: "kalshi should show 1151 from the night before just incase that peak happens at
+               1201"): the feed starts at the day's first report (12:51 AM in standard time), so a high set in the first minutes after midnight had
+               nothing before it on the chart. The station's last report before the climate day began (11:51 PM, or 12:51 AM under daylight time,
+               when the day starts at 1 AM) comes from api.weather.gov (keyless) once a day and leads the line, a quarter hour left of 12 AM. It
+               belongs to yesterday: drawn for the slope into the day, never counted in today's high. */
+            (function(){
+              var pk = rows.filter(function(k){ return k === own || k === 'KNYC'; })[0]; if (!pk || !d.s[pk].series) return;
+              try {
+                var now = new Date(), parts = new Intl.DateTimeFormat('en-US', { timeZone: CITY.tz, year: 'numeric', month: '2-digit', day: '2-digit', timeZoneName: 'shortOffset' }).formatToParts(now).reduce(function(o, x){ o[x.type] = x.value; return o; }, {});
+                var offOf = function(dt){ var z = new Intl.DateTimeFormat('en-US', { timeZone: CITY.tz, timeZoneName: 'shortOffset' }).formatToParts(dt).filter(function(x){ return x.type === 'timeZoneName'; })[0].value.match(/GMT([+-]\d+)?(?::(\d+))?/); return z && z[1] ? (+z[1]) * 60 + (z[1].charAt(0) === '-' ? -1 : 1) * (+(z[2] || 0)) : 0; };
+                var off = offOf(now), std = Math.min(offOf(new Date(now.getFullYear(), 0, 15)), offOf(new Date(now.getFullYear(), 6, 15))), dst = off !== std;
+                var ds = dst ? 60 : 0; window._cwDayStartMin = ds;
+                var startUTC = Date.UTC(+parts.year, +parts.month - 1, +parts.day, 0, 0) - off * 6e4 + ds * 6e4, key = pk + '|' + parts.year + parts.month + parts.day;
+                var PN = window._cwPN || (window._cwPN = {});
+                var apply = function(){ var q = PN[key], ser = d.s[pk].series; if (!q || !ser) return false; if (!(ser.length && ser[0][0] < ds)) ser.unshift([q.m, q.v]); return true; };
+                if (apply()) return;
+                if (PN[key + '?']) return; PN[key + '?'] = 1;
+                /* IEM's ASOS archive, not api.weather.gov: on 11-06 weather.gov's list skipped the 11:51 PM report the archive had (68°) */
+                var a0 = new Date(startUTC - 80 * 6e4), a1 = new Date(startUTC), U = function(dt, n){ return '&year' + n + '=' + dt.getUTCFullYear() + '&month' + n + '=' + (dt.getUTCMonth() + 1) + '&day' + n + '=' + dt.getUTCDate() + '&hour' + n + '=' + dt.getUTCHours() + '&minute' + n + '=' + dt.getUTCMinutes(); };
+                fetch('https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station=' + pk.replace(/^K/, '') + '&data=tmpf' + U(a0, 1) + U(a1, 2) + '&tz=Etc/UTC&format=onlycomma&latlon=no&report_type=3&report_type=4')
+                  .then(function(r){ return r.ok ? r.text() : ''; })
+                  .then(function(txt){ var best = null; String(txt).split('\n').slice(1).forEach(function(ln){ var c = ln.split(','), t = Date.parse((c[1] || '').replace(' ', 'T') + 'Z'), v = parseFloat(c[2]);
+                      if (!isFinite(t) || !isFinite(v) || t >= startUTC) return; if (!best || t > best.t) best = { t: t, v: v }; });
+                    if (!best) return; PN[key] = { m: Math.round(ds + (best.t - startUTC) / 6e4), v: best.v };
+                    if (apply()) paint(); })
+                  .catch(function(){});
+              } catch (e){}
+            })();
             paint();
             el2.setAttribute('data-live', '1');
             /* the header's NOW: the settlement sensor's newest 5-minute sample
