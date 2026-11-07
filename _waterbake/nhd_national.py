@@ -99,12 +99,17 @@ def store(work):
 
 def fetch(url, path):
     if os.path.exists(path): return
-    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=300) as r, open(path + '.part', 'wb') as f:
-        while True:
-            b = r.read(1 << 20)
-            if not b: break
-            f.write(b)
-    os.replace(path + '.part', path)
+    for attempt in range(6):   # USGS resets a connection now and then (Missouri, 2026-11-07, killed the whole run): retry with backoff
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=300) as r, open(path + '.part', 'wb') as f:
+                while True:
+                    b = r.read(1 << 20)
+                    if not b: break
+                    f.write(b)
+            os.replace(path + '.part', path); return
+        except Exception as e:
+            print('download retry', attempt + 1, os.path.basename(path), e, flush=True); time.sleep(15 * (attempt + 1))
+    raise RuntimeError('download failed: ' + url)
 
 def do_state(name, work):
     global TREE
@@ -185,6 +190,9 @@ if __name__ == '__main__':
     a = sys.argv[1:]
     if a[0] == 'state': do_state(a[1], a[2])
     elif a[0] == 'all':
-        for s in STATES: do_state(s, a[1]); G.clear(); P.clear()
+        for s in STATES:
+            try: do_state(s, a[1])
+            except Exception as e: print('SKIPPED', s, e, flush=True)   # one state failing no longer ends the run; rerun 'all' picks it up
+            G.clear(); P.clear()
     elif a[0] == 'build': do_build(a[1], a[2], a[3], a[4])
     elif a[0] == 'cover': do_cover(a[1].split(','), a[2], a[3])
