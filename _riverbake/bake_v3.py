@@ -106,9 +106,12 @@ def extract(work):
         os.remove(sp); os.remove(lp)
         print('vpu %d: %d reaches, %d lakes, %.0f s' % (v, n, len(lakes), time.time() - t0), flush=True)
 
-def tiles(work, out):
+def tiles(work, out, zmin=3, zmax=9):
+    # BV_THR="3:10000,4:5000" overrides the cutoffs for a re-cut (2026-11-06: the continental zooms lowered to show more tributaries)
+    for kv in filter(None, os.environ.get('BV_THR', '').split(',')):
+        k, v = kv.split(':'); THR[int(k)] = int(v)
     c = db(work)
-    for z in range(3, 10):
+    for z in range(zmin, zmax + 1):
         n = 2 ** z; ts = S / n; tol = ts / 256 * TOL; pad = ts / 256 * 8
         # the kept reaches' extent, in tiles
         x0, x1, y0, y1 = c.execute('select min(minx), max(maxx), min(miny), max(maxy) from ri').fetchone()
@@ -137,4 +140,4 @@ def tiles(work, out):
 
 if __name__ == '__main__':
     if sys.argv[1] == 'extract': extract(sys.argv[2])
-    elif sys.argv[1] == 'tiles': tiles(sys.argv[2], sys.argv[3])
+    elif sys.argv[1] == 'tiles': tiles(sys.argv[2], sys.argv[3], *[int(a) for a in sys.argv[4:6]])
