@@ -7,6 +7,12 @@ holds exactly what visitors were shown, at every lead time, with the full breakd
 Rows are appended to out/rows.jsonl; the workflow merges them into R2 sunset/log.jsonl.
 
 The OUTCOME side (what the sky actually did) is a separate collector -- see sunset_truth.py when a source is chosen.
+
+RAINBOWS TOO (user 2026-11-07, after a rainbow and a quick deep-orange sunset over New York the night before: "yes start logging the
+rainbow and golden hour calls"). The same page load asks the site's own window.predictRainbows for every hour of the next 48: each
+hour with any score is kept (score, type, direction, sun altitude, the top factors), plus a per-day summary with the two calls the
+page shows -- the hour strip's RAINBOW badge (a run of hours >= 30) and the card's chance line (best >= 50). Rows go to
+out/rainbow.jsonl; the workflow appends them to R2 sky/rainbow_log.jsonl.
 """
 import json, os, sys, time, datetime
 from playwright.sync_api import sync_playwright
@@ -37,6 +43,26 @@ JS = r"""
 }
 """
 
+RB_JS = r"""
+() => {
+  const h = window._hourlyData || window._wxHourly, d = window._dailyData;
+  if (!h || !h.time || !window.predictRainbows || !window.LOCATION) return null;
+  const all = window.predictRainbows(h, d, LOCATION.lat, LOCATION.lon) || [];
+  const now = Date.now(), off = (typeof locNowNaive === 'function') ? (locNowNaive().getTime() - now) : 0, hours = [], days = {};
+  all.forEach(r => {
+    const t = new Date(r.time).getTime() - off; if (t < now - 36e5 || t > now + 48 * 36e5) return;
+    const day = String(r.time).slice(0, 10), sc = Math.round(r.score || 0);
+    const D = days[day] || (days[day] = { day: day, best: 0, best_at: null, best_type: null, badge_hours: 0 });
+    if (sc > D.best){ D.best = sc; D.best_at = r.time; D.best_type = r.type; }
+    if (sc >= 30) D.badge_hours++;
+    if (sc > 0) hours.push({ local: r.time, lead_h: Math.round((t - now) / 36e5 * 10) / 10, score: sc, type: r.type, dir: r.direction,
+      sunAlt: r.sunAlt == null ? null : Math.round(r.sunAlt * 10) / 10, factors: (r.factors || []).slice(0, 4) });
+  });
+  Object.values(days).forEach(D => { D.badge = D.badge_hours > 0; D.card = D.best >= 50; });
+  return { hours: hours, days: Object.values(days) };
+}
+"""
+
 CITIES = {   # the site boots wherever bv_lastLoc_v4 says (the location-switch harness trick)
     'nyc': None,
     'la': {'lat': 34.0522, 'lon': -118.2437, 'name': 'Los Angeles', 'tz': 'America/Los_Angeles'},
@@ -60,7 +86,15 @@ def run(city):
                 res = pg.evaluate(JS)
             except Exception as e:
                 print('not ready:', e)
+        rb = None
+        try: rb = pg.evaluate(RB_JS)
+        except Exception as e: print('rainbow read failed:', e)
         b.close()
+    if rb:
+        stamp0 = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%MZ')
+        with open(os.path.join(OUT, 'rainbow.jsonl'), 'a') as f:
+            f.write(json.dumps({'city': city, 'logged': stamp0, 'days': rb['days'], 'hours': rb['hours']}) + '\n')
+        for D in rb['days']: print(city, 'rainbow', D['day'], 'best', D['best'], D['best_type'], 'at', D['best_at'], 'badge' if D['badge'] else '', 'card' if D['card'] else '')
     if not res or not res['rows']:
         print(city, 'no rows'); return 0
     stamp = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%MZ')
@@ -73,7 +107,7 @@ def run(city):
     return len(res['rows'])
 
 def main():
-    open(os.path.join(OUT, 'rows.jsonl'), 'w').close()
+    open(os.path.join(OUT, 'rows.jsonl'), 'w').close(); open(os.path.join(OUT, 'rainbow.jsonl'), 'w').close()
     n = sum(run(c) for c in CITIES)
     if not n: sys.exit(1)
 
