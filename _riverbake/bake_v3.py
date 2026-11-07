@@ -27,7 +27,10 @@ from shapely.strtree import STRtree
 import mapbox_vector_tile
 
 VPUS = list(range(701, 719)) + list(range(801, 805))
-THR = {3: 30000, 4: 15000, 5: 6000, 6: 2500, 7: 1000, 8: 300, 9: 100}   # km2 drained to be drawn at that tile zoom
+THR = {3: 30000, 4: 15000, 5: 6000, 6: 2500, 7: 1000, 8: 300, 9: 100, 10: 100}   # km2 drained to be drawn at that tile zoom
+# BV_THR="3:10000,4:5000" overrides the cutoffs (read at import, so the block cut's worker processes see it too: 2026-11-07, they did not)
+for _kv in filter(None, os.environ.get('BV_THR', '').split(',')):
+    _k, _v = _kv.split(':'); THR[int(_k)] = int(_v)
 TOL = 0.15                       # of a 256-px tile's pixel
 PRE = 10.0                       # m, the extract's trim
 LAKE_MIN = 0.5e6                 # m2
@@ -55,7 +58,8 @@ def fetch(url, path):
     os.replace(tmp, path)
 
 def db(work):
-    c = sqlite3.connect(os.path.join(work, 'reaches.sqlite'))
+    # BV_DB names the database (reaches_full.sqlite for the EVERY RIVER cut, 2026-11-06); BV_FLOOR its smallest reach in km2
+    c = sqlite3.connect(os.path.join(work, os.environ.get('BV_DB', 'reaches.sqlite')))
     c.execute('create table if not exists r(id integer primary key, a integer, vpu integer, g blob)')
     c.execute('create virtual table if not exists ri using rtree(id, minx, maxx, miny, maxy)')
     c.execute('create table if not exists done(vpu integer primary key)')
@@ -83,7 +87,8 @@ def extract(work):
         ltree = STRtree(lakes) if lakes else None
         sc = sqlite3.connect(sp); st = sc.execute('select table_name from gpkg_contents').fetchone()[0]
         n = 0; rows = []
-        for b, a in sc.execute('select geom, DSContArea from "%s" where DSContArea >= ?' % st, (THR[9] * 1e6,)):
+        floor = float(os.environ.get('BV_FLOOR', THR[9]))
+        for b, a in sc.execute('select geom, DSContArea from "%s" where DSContArea >= ?' % st, (floor * 1e6,)):
             g = gpkg_geom(b)
             if g is None or g.is_empty: continue
             if ltree is not None:
@@ -108,8 +113,6 @@ def extract(work):
 
 def tiles(work, out, zmin=3, zmax=9):
     # BV_THR="3:10000,4:5000" overrides the cutoffs for a re-cut (2026-11-06: the continental zooms lowered to show more tributaries)
-    for kv in filter(None, os.environ.get('BV_THR', '').split(',')):
-        k, v = kv.split(':'); THR[int(k)] = int(v)
     c = db(work)
     for z in range(zmin, zmax + 1):
         n = 2 ** z; ts = S / n; tol = ts / 256 * TOL; pad = ts / 256 * 8
@@ -138,6 +141,54 @@ def tiles(work, out, zmin=3, zmax=9):
                 cnt += 1
         print('z%d: %d tiles, %.0f s' % (z, cnt, time.time() - t0), flush=True)
 
+def _block(args):
+    """one z6 block: its reaches read ONCE, then every tile of zooms zmin..zmax inside it cut from memory (2026-11-07: the per-tile
+    database reads re-parsed a long river thousands of times; the 1.1 M-reach EVERY RIVER cut ran ~2 h at z10 that way)"""
+    work, out, zmin, zmax, bx, by = args
+    c = db(work); B = 6; n = 2 ** B; ts6 = S / n
+    x0 = -S / 2 + bx * ts6; x1 = x0 + ts6; y1 = S / 2 - by * ts6; y0 = y1 - ts6
+    pad6 = ts6 / 256 * 8
+    amin = min(THR[z] for z in range(zmin, zmax + 1))
+    rows = c.execute('select r.a, r.g from ri join r on r.id = ri.id where ri.maxx >= ? and ri.minx <= ? and ri.maxy >= ? and ri.miny <= ? and r.a >= ?',
+                     (x0 - pad6, x1 + pad6, y0 - pad6, y1 + pad6, amin)).fetchall()
+    c.close()
+    if not rows: return 0
+    A = [a for a, _ in rows]; G = [wkb.loads(g) for _, g in rows]; tree = STRtree(G); cnt = 0
+    for z in range(zmin, zmax + 1):
+        k = 2 ** (z - B); ts = S / 2 ** z; tol = ts / 256 * TOL; pad = ts / 256 * 8
+        for tx in range(bx * k, bx * k + k):
+            for ty in range(by * k, by * k + k):
+                tx0 = -S / 2 + tx * ts; tx1 = tx0 + ts; ty1 = S / 2 - ty * ts; ty0 = ty1 - ts
+                bb = box(tx0 - pad, ty0 - pad, tx1 + pad, ty1 + pad); fs = []
+                for i in tree.query(bb):
+                    if A[i] < THR[z]: continue
+                    g = G[i]
+                    if not g.intersects(bb): continue
+                    g = g.intersection(bb).simplify(tol, preserve_topology=False)
+                    if g.is_empty or g.length < tol: continue
+                    fs.append({'geometry': g.wkb, 'properties': {'a': A[i]}})
+                if not fs: continue
+                data = mapbox_vector_tile.encode([{'name': 'rivers', 'features': fs}],
+                                                 default_options={'quantize_bounds': (tx0, ty0, tx1, ty1), 'extents': 4096, 'y_coord_down': False})
+                d = os.path.join(out, str(z), str(tx)); os.makedirs(d, exist_ok=True)
+                with open(os.path.join(d, '%d.mvt' % ty), 'wb') as f: f.write(data)
+                cnt += 1
+    return cnt
+
+def tiles_blocks(work, out, zmin, zmax, procs=4):
+    c = db(work); n = 2 ** 6; ts6 = S / n
+    x0, x1, y0, y1 = c.execute('select min(minx), max(maxx), min(miny), max(maxy) from ri').fetchone(); c.close()
+    jobs = [(work, out, zmin, zmax, bx, by) for bx in range(int((x0 + S / 2) // ts6), int((x1 + S / 2) // ts6) + 1)
+            for by in range(int((S / 2 - y1) // ts6), int((S / 2 - y0) // ts6) + 1)]
+    import multiprocessing as mp
+    t0 = time.time(); done = 0; tot = 0
+    with mp.Pool(procs) as pool:
+        for k in pool.imap_unordered(_block, jobs):
+            done += 1; tot += k
+            if done % 25 == 0: print('blocks %d/%d, tiles %d, %.0f s' % (done, len(jobs), tot, time.time() - t0), flush=True)
+    print('z%d-%d: %d tiles, %.0f s' % (zmin, zmax, tot, time.time() - t0), flush=True)
+
 if __name__ == '__main__':
     if sys.argv[1] == 'extract': extract(sys.argv[2])
+    elif sys.argv[1] == 'blocks': tiles_blocks(sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5]))
     elif sys.argv[1] == 'tiles': tiles(sys.argv[2], sys.argv[3], *[int(a) for a in sys.argv[4:6]])
