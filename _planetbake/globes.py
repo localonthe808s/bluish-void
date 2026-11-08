@@ -7,6 +7,7 @@ Science Center's planetary WMS (planetarymaps.usgs.gov, public domain NASA/USGS 
   mars_color   Viking MDIM 2.1 colorized mosaic (NASA/JPL/USGS), shaded by the HRSC-MOLA blended hillshade (NASA/GSFC MOLA, ESA/DLR/FU
                Berlin HRSC, USGS): color x (0.35 + 0.65 x hillshade / its median, clipped 0.55-1.45), so the relief reads on the photo
   mars_elev    MOLA colorized elevation (NASA/GSFC), as USGS colors it
+  mars_themis  Mars Odyssey THEMIS daytime infrared mosaic (NASA/JPL/ASU), grayscale
   venus_radar  Magellan synthetic-aperture radar, colorized mosaic (NASA/JPL/USGS) -- the gap-free one (the raw mosaic has holes)
   venus_elev   Magellan topography, as USGS colors it
 
@@ -36,7 +37,10 @@ def poles(a):
         if k < 3: continue
         k = min(k | 1, w - 1)
         row = np.concatenate([a[r, -k:], a[r], a[r, :k]], 0).astype(np.float32)[None]
-        out[r] = cv2.blur(row, (k, 1))[0, k:k + w].clip(0, 255).astype(np.uint8)
+        sm = cv2.blur(row, (k, 1))[0, k:k + w]
+        if abs(lat) > 78:   # the last 12 degrees ease into the row's own mean: no pinched wedges where the meridians meet (v4)
+            t = ((abs(lat) - 78) / 12) ** 1.5; sm = sm * (1 - t) + a[r].reshape(-1, a.shape[2]).mean(0) * t
+        out[r] = sm.clip(0, 255).astype(np.uint8)
     return out
 
 
@@ -45,6 +49,7 @@ def main(out, up):
     c = get('mars', 'MDIM21_color').astype(np.float32); hs = get('mars', 'HRSC_MOLA_Blend_Hillshade').mean(2)
     sh = np.clip(hs / np.median(hs), 0.55, 1.45)[..., None]
     maps = {'mars_color': np.clip(c * (0.35 + 0.65 * sh), 0, 255).astype(np.uint8), 'mars_elev': get('mars', 'MOLA_color'),
+            'mars_themis': get('mars', 'THEMIS'),   # Mars Odyssey THEMIS daytime infrared (ASU/NASA), the zoom's sharpest Mars layer (100 m)
             'venus_radar': get('venus', 'MAGELLAN_color'), 'venus_elev': get('venus', 'MAGELLAN_topography')}
     for k, a in maps.items():
         a = poles(a)

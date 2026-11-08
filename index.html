@@ -116669,81 +116669,162 @@ body.bv-past-hero #bluishvoid-nav{ opacity:0 !important; pointer-events:none !im
     + 'void main(){float r=length(v);if(r>1.){discard;}vec3 n=vec3(v,sqrt(max(0.,1.-r*r)));vec3 w=R*n;float lat=asin(clamp(w.y,-1.,1.));float lon=atan(w.x,w.z);'
     + 'vec2 uv=vec2(lon/6.2831853+.5,.5-lat/3.1415927);vec2 u2=vec2(fract(uv.x+.5)-.5,uv.y);vec3 c=textureGrad(T,uv,dFdx(u2),dFdy(u2)).rgb;'
     + 'float l=max(dot(n,Ld),0.);vec3 col=c*(.3+.85*l)*mix(.7,1.,pow(n.z,.35))+atm*pow(1.-n.z,3.)*rim;float e=smoothstep(1.,1.-1.5*fwidth(r),r);o=vec4(col,e);}';
+  /* ZOOM WITH FULL DETAIL (user 2026-11-08: "are these the best detail?" -> "yes build the zoom with full detail"). Click the globe, then
+     scroll to zoom (the site's click fence: the popup still scrolls until you do); pinch on a phone. Past twice the whole-planet view, the
+     part of the planet in view is fetched sharp from USGS Astrogeology's map server (planetarymaps.usgs.gov, CORS open) at the screen's
+     own resolution, down to each source's finest: Mars Viking color 232 m, THEMIS infrared 100 m, MOLA elevation 463 m; Venus
+     Magellan radar 200 m (its full-resolution strips, capped where the radar's speckle starts to read as grain, tinted to the global map's orange; the gaps between strips fall back to it).
+     The sharp patch is laid over the globe where it falls, fading in at its edges, and asked for again when the view settles. */
+  var WMS = 'https://planetarymaps.usgs.gov/cgi-bin/mapserv?service=WMS&request=GetMap&version=1.1.1&srs=EPSG:4326&styles=&format=image/jpeg';
+  var RKM = { mars: 3389.5, venus: 6051.8 };
+  var D2 = { mars: { color: ['MDIM21_color', 0.232, 'VIKING COLOR'], infra: ['THEMIS', 0.1, 'THEMIS INFRARED'], elev: ['MOLA_color', 0.463, 'MOLA ELEVATION'] },
+             venus: { radar: ['MAGELLAN', 0.2, 'MAGELLAN RADAR', 'mgn'], elev: [null, 4.6, 'MAGELLAN ELEVATION'] } };
+  P.mars.maps = [['color', 'COLOR', 'mars_color'], ['infra', 'INFRARED', 'mars_themis'], ['elev', 'ELEVATION', 'mars_elev']];
+  P.mars.note.infra = 'Mars Odyssey’s THEMIS camera in daytime infrared: warm sunlit slopes bright, cold shadow dark. The sharpest global map of Mars, 100 m a pixel when you zoom in.';
+  var FSZ = '#version 300 es\nprecision highp float;in vec2 v;out vec4 o;uniform sampler2D T,D;uniform mat3 R;uniform vec3 Ld,atm;uniform float rim,z,dOn;uniform vec4 bb;'
+    + 'void main(){vec2 q=v/z;float r=length(q);if(r>1.){discard;}vec3 n=vec3(q,sqrt(max(0.,1.-r*r)));vec3 w=R*n;float lat=asin(clamp(w.y,-1.,1.));float lon=atan(w.x,w.z);'
+    + 'vec2 uv=vec2(lon/6.2831853+.5,.5-lat/3.1415927);vec2 u2=vec2(fract(uv.x+.5)-.5,uv.y);vec3 c=textureGrad(T,uv,dFdx(u2),dFdy(u2)).rgb;'
+    + 'if(dOn>0.){float ld=degrees(lon),la=degrees(lat);vec2 du=vec2((ld-bb.x)/(bb.y-bb.x),(bb.z-la)/(bb.z-bb.w));'
+    + 'if(du.x>0.&&du.x<1.&&du.y>0.&&du.y<1.){vec4 d=texture(D,du);float e=min(min(du.x,1.-du.x),min(du.y,1.-du.y));c=mix(c,d.rgb,smoothstep(0.,.03,e)*dOn*d.a);}}'
+    + 'float l=max(dot(n,Ld),0.);float zf=clamp((z-1.)/3.,0.,1.);vec3 col=c*mix(.3+.85*l,.95,zf*.6)*mix(mix(.7,1.,pow(n.z,.35)),1.,zf)+atm*pow(1.-n.z,3.)*rim*(1.-zf);'
+    + 'float e=smoothstep(1.,1.-1.5*fwidth(r),r);o=vec4(col,e);}';
   window._bvPlanetGlobe = function(host, key){
     var cfg = P[key]; if (!cfg || !host) return null;
-    var big = !matchMedia('(pointer:coarse)').matches && Math.min(window.innerWidth, 9999) > 700;
+    var big = !matchMedia('(pointer:coarse)').matches && window.innerWidth > 700;
     var wrap = document.createElement('div'); wrap.className = 'pg-wrap';
-    var chips = '<div class="pg-chips">' + cfg.maps.map(function(m, i){ return '<button type="button" class="pg-chip' + (i ? '' : ' on') + '" data-pg="' + m[0] + '">' + m[1] + '</button>'; }).join('') + '</div>';
-    wrap.innerHTML = chips + '<div class="pg-stage"><canvas class="pg-cv"></canvas><div class="pg-ov"></div><div class="pg-load">LOADING THE MAP…</div></div><div class="pg-note"></div><div class="pg-cr">DRAG TO TURN · ' + cfg.credit + '</div>';
+    wrap.innerHTML = '<div class="pg-chips">' + cfg.maps.map(function(m, i){ return '<button type="button" class="pg-chip' + (i ? '' : ' on') + '" data-pg="' + m[0] + '">' + m[1] + '</button>'; }).join('') + '</div>'
+      + '<div class="pg-stage"><canvas class="pg-cv"></canvas><div class="pg-ov"></div><div class="pg-load">LOADING THE MAP…</div><div class="pg-res"></div></div><div class="pg-note"></div>'
+      + '<div class="pg-cr">DRAG TO TURN · ' + (matchMedia('(pointer:coarse)').matches ? 'PINCH TO ZOOM' : 'CLICK, THEN SCROLL TO ZOOM') + ' · ' + cfg.credit + '</div>';
     host.innerHTML = ''; host.appendChild(wrap);
-    var cv = wrap.querySelector('.pg-cv'), ov = wrap.querySelector('.pg-ov'), ld = wrap.querySelector('.pg-load'), note = wrap.querySelector('.pg-note');
+    var stage = wrap.querySelector('.pg-stage'), cv = wrap.querySelector('.pg-cv'), ov = wrap.querySelector('.pg-ov'), ld = wrap.querySelector('.pg-load'), note = wrap.querySelector('.pg-note'), resEl = wrap.querySelector('.pg-res');
     var gl = cv.getContext('webgl2', { premultipliedAlpha: false, antialias: true }), v2 = !!gl;
     if (!gl) gl = cv.getContext('webgl', { premultipliedAlpha: false, antialias: true });
-    var cur = cfg.maps[0][0];
-    var setNote = function(){ note.textContent = cfg.note[cur] || ''; };
-    if (!gl){ wrap.querySelector('.pg-stage').innerHTML = '<img src="' + C + cfg.maps[0][2] + '_2k.jpg" alt="" style="width:100%;border-radius:6px;">'; setNote(); return null; }
-    var sh = function(t, s){ var o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o); return o; };
-    var pr = gl.createProgram(); gl.attachShader(pr, sh(gl.VERTEX_SHADER, v2 ? VS2 : VS1)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, v2 ? FS2 : FS1)); gl.linkProgram(pr);
+    var cur = cfg.maps[0][0], setNote = function(){ note.textContent = cfg.note[cur] || ''; };
+    if (!gl){ stage.innerHTML = '<img src="' + C + cfg.maps[0][2] + '_2k.jpg?v=4" alt="" style="width:100%;border-radius:6px;">'; setNote(); return null; }
+    var sh = function(t, s){ var o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o); if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) console.warn('[planet globe]', gl.getShaderInfoLog(o)); return o; };
+    var FS1z = FS1.replace('uniform float rim;', 'uniform float rim,z;').replace('float r=length(v);', 'vec2 q=v/z;float r=length(q);').replace('vec3 n=vec3(v,', 'vec3 n=vec3(q,');
+    var pr = gl.createProgram(); gl.attachShader(pr, sh(gl.VERTEX_SHADER, v2 ? VS2 : VS1)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, v2 ? FSZ : FS1z)); gl.linkProgram(pr);
     if (!gl.getProgramParameter(pr, gl.LINK_STATUS)){ console.warn('[planet globe]', gl.getProgramInfoLog(pr)); return null; }
     gl.useProgram(pr);
     var b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
     var lp = gl.getAttribLocation(pr, 'p'); gl.enableVertexAttribArray(lp); gl.vertexAttribPointer(lp, 2, gl.FLOAT, false, 0, 0);
-    var U = {}; ['T', 'R', 'Ld', 'atm', 'rim'].forEach(function(k){ U[k] = gl.getUniformLocation(pr, k); });
+    var U = {}; ['T', 'D', 'R', 'Ld', 'atm', 'rim', 'z', 'dOn', 'bb'].forEach(function(k){ U[k] = gl.getUniformLocation(pr, k); });
     var L0 = [-0.45, 0.38, 0.81], ln = Math.hypot(L0[0], L0[1], L0[2]); gl.uniform3f(U.Ld, L0[0] / ln, L0[1] / ln, L0[2] / ln);
-    gl.uniform3f(U.atm, cfg.atm[0], cfg.atm[1], cfg.atm[2]); gl.uniform1f(U.rim, cfg.rim); gl.uniform1i(U.T, 0);
+    gl.uniform3f(U.atm, cfg.atm[0], cfg.atm[1], cfg.atm[2]); gl.uniform1f(U.rim, cfg.rim); gl.uniform1i(U.T, 0); if (U.D) gl.uniform1i(U.D, 1);
     gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    var tex = null, TX = {}, dirty = true;
-    var load = function(k){ var m = cfg.maps.filter(function(q){ return q[0] === k; })[0]; if (!m) return; cur = k; setNote();
-      if (TX[k]){ tex = TX[k]; dirty = true; return; } ld.style.display = '';
+    var tex = null, TX = {}, TXI = {}, dirty = true;
+    var mkTex = function(src, rgba){ var t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); var f = rgba ? gl.RGBA : gl.RGB;
+      gl.texImage2D(gl.TEXTURE_2D, 0, f, f, gl.UNSIGNED_BYTE, src);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, rgba ? gl.CLAMP_TO_EDGE : gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      if (v2){ gl.generateMipmap(gl.TEXTURE_2D); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); } else gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); return t; };
+    var V = { lat: key === 'venus' ? 12 : 6, lon: key === 'venus' ? 95 : -88, z: 1, vlon: 0, vlat: 0, drag: false, idle: 0 };
+    var DT = { t: null, bb: null, a: 0, seq: 0, timer: 0, dpp: 0, k: null };
+    var maxZ = function(){ var d = (D2[key] || {})[cur], res = d ? d[1] : 5; return Math.max(2, Math.min(400, RKM[key] / (res * 0.8 * (size / 2) * Math.min(2, window.devicePixelRatio || 1)))); };
+    var load = function(k){ var m = cfg.maps.filter(function(q){ return q[0] === k; })[0]; if (!m) return; cur = k; setNote(); V.z = Math.min(V.z, maxZ());
+      if (DT.t){ gl.deleteTexture(DT.t); DT.t = null; DT.bb = null; DT.a = 0; } DT.seq++;
+      if (TX[k]){ tex = TX[k]; dirty = true; detail(); return; } ld.style.display = '';
       var im = new Image(); im.crossOrigin = 'anonymous';
-      im.onload = function(){ var t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, im);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        if (v2){ gl.generateMipmap(gl.TEXTURE_2D); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); }
-        else gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-        TX[k] = t; if (cur === k){ tex = t; dirty = true; } ld.style.display = 'none'; };
+      im.onload = function(){ gl.activeTexture(gl.TEXTURE0); TX[k] = mkTex(im, false); TXI[k] = im; if (cur === k){ tex = TX[k]; dirty = true; } ld.style.display = 'none'; detail(); };
       im.onerror = function(){ ld.textContent = 'THE MAP DID NOT LOAD'; };
-      var mx = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 2048;
-      im.src = C + m[2] + (big && mx >= 4096 ? '_4k' : '_2k') + '.jpg?v=3'; };   /* v=3: the poles smoothed (2026-11-08) */
-    /* the view: center latitude / longitude, a slow spin when left alone */
-    var V = { lat: key === 'venus' ? 12 : 6, lon: key === 'venus' ? 95 : -88, vlon: 0, vlat: 0, drag: false, idle: 0 };
+      var mx = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 2048; im.src = C + m[2] + (big && mx >= 4096 ? '_4k' : '_2k') + '.jpg?v=4'; };
     var labs = cfg.labels.map(function(q){ var e = document.createElement('div'); e.className = 'pg-lab'; e.innerHTML = '<i></i><span>' + q[2] + '</span>'; e.title = q[3]; ov.appendChild(e);
       var la = q[0] * Math.PI / 180, lo = q[1] * Math.PI / 180; return { e: e, w: [Math.cos(la) * Math.sin(lo), Math.sin(la), Math.cos(la) * Math.cos(lo)] }; });
-    var size = 0, R = [1, 0, 0, 0, 1, 0, 0, 0, 1];
-    var resize = function(){ var w = Math.round(wrap.querySelector('.pg-stage').clientWidth); if (!w || w === size) return; size = w; var d = Math.min(2, window.devicePixelRatio || 1); cv.width = cv.height = Math.round(w * d); cv.style.width = cv.style.height = w + 'px'; gl.viewport(0, 0, cv.width, cv.height); dirty = true; };
+    var size = 0, R = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+    var resize = function(){ var w = Math.round(stage.clientWidth); if (!w || w === size) return; size = w; var d = Math.min(2, window.devicePixelRatio || 1); cv.width = cv.height = Math.round(w * d); cv.style.width = cv.style.height = w + 'px'; gl.viewport(0, 0, cv.width, cv.height); dirty = true; };
     var mat = function(){ var a = -V.lat * Math.PI / 180, f = V.lon * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a), cf = Math.cos(f), sf = Math.sin(f);
-      /* R = Ry(lon) Rx(-lat), column-major for GL */
-      var m = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
-      var Rx = [[1, 0, 0], [0, ca, -sa], [0, sa, ca]], Ry = [[cf, 0, sf], [0, 1, 0], [-sf, 0, cf]];
+      var Rx = [[1, 0, 0], [0, ca, -sa], [0, sa, ca]], Ry = [[cf, 0, sf], [0, 1, 0], [-sf, 0, cf]], m = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
       for (var i = 0; i < 3; i++) for (var j = 0; j < 3; j++){ var s = 0; for (var k = 0; k < 3; k++) s += Ry[i][k] * Rx[k][j]; m[i][j] = s; }
       R = m; return [m[0][0], m[1][0], m[2][0], m[0][1], m[1][1], m[2][1], m[0][2], m[1][2], m[2][2]]; };
+    /* screen point (-1..1) -> lat / lon in degrees, or null off the planet */
+    var unproj = function(x, y){ var qx = x / V.z, qy = y / V.z, r2 = qx * qx + qy * qy; if (r2 >= 1) return null; var n = [qx, qy, Math.sqrt(1 - r2)];
+      var w = [R[0][0] * n[0] + R[0][1] * n[1] + R[0][2] * n[2], R[1][0] * n[0] + R[1][1] * n[1] + R[1][2] * n[2], R[2][0] * n[0] + R[2][1] * n[1] + R[2][2] * n[2]];
+      return [Math.asin(Math.max(-1, Math.min(1, w[1]))) * 180 / Math.PI, Math.atan2(w[0], w[2]) * 180 / Math.PI]; };
+    var resTxt = function(){ var d = (D2[key] || {})[cur], dpr = Math.min(2, window.devicePixelRatio || 1), kmpp = RKM[key] / (V.z * (size / 2) * dpr);
+      var src = DT.t && DT.a > .5 && d ? Math.max(d[1], DT.kmpp || 0) : (RKM[key] * 2 * Math.PI) / ((big ? 4096 : 2048));
+      var show = Math.max(kmpp, src); resEl.textContent = V.z > 1.05 ? (show < 1 ? Math.round(show * 1000 / 10) * 10 + ' M' : (show < 10 ? show.toFixed(1) : Math.round(show)) + ' KM') + ' A PIXEL' + (DT.t && DT.a > .5 && d ? ' · ' + d[2] : '') : ''; };
     var draw = function(){ resize(); if (!tex) return; gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.uniformMatrix3fv(U.R, false, new Float32Array(mat())); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      if (v2){ gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, DT.t || tex); gl.uniform1f(U.dOn, DT.t ? DT.a : 0); if (DT.bb) gl.uniform4f(U.bb, DT.bb[0], DT.bb[1], DT.bb[2], DT.bb[3]); }
+      gl.uniform1f(U.z, V.z); gl.uniformMatrix3fv(U.R, false, new Float32Array(mat())); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       var boxes = [];
-      labs.forEach(function(l){ var w = l.w, n = [R[0][0] * w[0] + R[1][0] * w[1] + R[2][0] * w[2], R[0][1] * w[0] + R[1][1] * w[1] + R[2][1] * w[2], R[0][2] * w[0] + R[1][2] * w[1] + R[2][2] * w[2]];   /* R^T w: the view direction */
-        var vis = Math.max(0, Math.min(1, (n[2] - 0.12) / 0.25)), X = (n[0] * 0.5 + 0.5) * size, Y = (0.5 - n[1] * 0.5) * size, bw = l.e.textContent.length * 5.6 + 10;
-        if (vis > 0 && boxes.some(function(q){ return X < q[2] && X + bw > q[0] && Y - 7 < q[3] && Y + 7 > q[1]; })) vis = 0;   /* the list's order is its priority */
+      labs.forEach(function(l){ var w = l.w, n = [R[0][0] * w[0] + R[1][0] * w[1] + R[2][0] * w[2], R[0][1] * w[0] + R[1][1] * w[1] + R[2][1] * w[2], R[0][2] * w[0] + R[1][2] * w[1] + R[2][2] * w[2]];
+        var vis = Math.max(0, Math.min(1, (n[2] - 0.12) / 0.25)), X = (n[0] * V.z * 0.5 + 0.5) * size, Y = (0.5 - n[1] * V.z * 0.5) * size, bw = l.e.textContent.length * 5.6 + 10;
+        if (X < -4 || Y < 4 || X > size - 20 || Y > size - 4) vis = 0;
+        if (vis > 0 && boxes.some(function(q){ return X < q[2] && X + bw > q[0] && Y - 7 < q[3] && Y + 7 > q[1]; })) vis = 0;
         if (vis > 0) boxes.push([X, Y - 7, X + bw, Y + 7]);
         l.e.style.opacity = vis.toFixed(2); l.e.style.display = vis > 0 ? '' : 'none';
-        if (vis > 0) l.e.style.transform = 'translate(' + ((n[0] * 0.5 + 0.5) * size).toFixed(1) + 'px,' + ((0.5 - n[1] * 0.5) * size).toFixed(1) + 'px)'; }); };
-    var raf = 0, last = 0, seen = true;
+        if (vis > 0) l.e.style.transform = 'translate(' + X.toFixed(1) + 'px,' + Y.toFixed(1) + 'px)'; });
+      resTxt(); };
+    /* THE SHARP PATCH: what is in view, from the map server, at the screen's resolution (never finer than the source) */
+    var detail = function(){ clearTimeout(DT.timer); DT.timer = setTimeout(fetchDetail, 280); };
+    var fetchDetail = function(){ var d = (D2[key] || {})[cur]; if (!v2 || !d || !d[0] || V.z < 1.9 || !size) return;
+      var c0 = unproj(0, 0); if (!c0) return; var la0 = 90, la1 = -90, dmin = 360, dmax = -360, any = 0;
+      for (var i = 0; i <= 10; i++) for (var j = 0; j <= 10; j++){ var g = unproj(-1 + i / 5, -1 + j / 5); if (!g) continue; any++;
+        la0 = Math.min(la0, g[0]); la1 = Math.max(la1, g[0]); var dl = ((g[1] - c0[1] + 540) % 360) - 180; dmin = Math.min(dmin, dl); dmax = Math.max(dmax, dl); }
+      if (!any) return;
+      if (la1 > 85 || la0 < -85){ dmin = -180; dmax = 180; }
+      var padA = (la1 - la0) * 0.08, padO = (dmax - dmin) * 0.08; la0 = Math.max(-90, la0 - padA); la1 = Math.min(90, la1 + padA);
+      var lo0 = c0[1] + dmin - padO, lo1 = c0[1] + dmax + padO;
+      if (lo1 - lo0 >= 300){ lo0 = -180; lo1 = 180; } else if (lo0 < -180 || lo1 > 180){ var sh2 = lo0 < -180 ? -180 - lo0 : 180 - lo1; lo0 += sh2; lo1 += sh2; }   /* across the date line: slid to fit (a sliver of the view stays soft) */
+      var dpr = Math.min(2, window.devicePixelRatio || 1), degpp = (180 / Math.PI) / (V.z * (size / 2) * dpr), minDeg = d[1] / (RKM[key] * Math.PI / 180);
+      degpp = Math.max(degpp, minDeg); var W = Math.round((lo1 - lo0) / degpp), H = Math.round((la1 - la0) / degpp), s = Math.max(1, W / 4096, H / 4096);
+      W = Math.max(64, Math.round(W / s)); H = Math.max(64, Math.round(H / s)); degpp *= s;
+      if (DT.bb && DT.k === cur && lo0 >= DT.bb[0] && lo1 <= DT.bb[1] && la1 <= DT.bb[2] && la0 >= DT.bb[3] && DT.dpp <= degpp * 1.35) return;   /* the patch on screen still covers it sharply */
+      var seq = ++DT.seq, im = new Image(); im.crossOrigin = 'anonymous'; ld.textContent = 'SHARPENING…'; ld.style.display = '';
+      im.onload = function(){ if (seq !== DT.seq) return; var src = im, rgba = false;
+        if (d[3] === 'mgn'){ /* Magellan's full-resolution strips: tinted to the global map's orange; the white gaps between strips let the global map through */
+          var c = document.createElement('canvas'); c.width = im.naturalWidth; c.height = im.naturalHeight; var g2 = c.getContext('2d', { willReadFrequently: true }); g2.drawImage(im, 0, 0);
+          var id = g2.getImageData(0, 0, c.width, c.height), a = id.data;
+          /* the gaps: near-white (JPEG leaves a speckled rim around the pure white fill), widened 2 px both ways */
+          var Wd = c.width, Hd = c.height, gap = new Uint8Array(Wd * Hd), g3 = new Uint8Array(Wd * Hd);
+          for (var p = 0, q = 0; p < a.length; p += 4, q++) gap[q] = (a[p] >= 232 && a[p + 1] >= 232 && a[p + 2] >= 232) ? 1 : 0;
+          for (var y = 0; y < Hd; y++) for (var x = 0; x < Wd; x++){ var i0 = y * Wd + x; if (!gap[i0]) continue; for (var dx = -2; dx <= 2; dx++){ var xx = x + dx; if (xx >= 0 && xx < Wd) g3[y * Wd + xx] = 1; } }
+          for (var x2 = 0; x2 < Wd; x2++) for (var y2 = 0; y2 < Hd; y2++){ if (!g3[y2 * Wd + x2]) continue; for (var dy = -2; dy <= 2; dy++){ var yy = y2 + dy; if (yy >= 0 && yy < Hd) gap[yy * Wd + x2] = 1; } }
+          /* COLOR FROM THE GLOBAL MAP, DETAIL FROM THE RADAR (2026-11-08): the global colorized mosaic under the patch, upsampled, times
+             the radar's brightness over its own local mean (a 1/16-scale copy blurred back up), so the colors match the globe exactly */
+          var bI = TXI[cur], bc = document.createElement('canvas'); bc.width = Wd; bc.height = Hd; var bg = bc.getContext('2d', { willReadFrequently: true });
+          if (bI){ var BW = bI.naturalWidth, BH = bI.naturalHeight; bg.imageSmoothingEnabled = true;
+            bg.drawImage(bI, (lo0 + 180) / 360 * BW, (90 - la1) / 180 * BH, (lo1 - lo0) / 360 * BW, (la1 - la0) / 180 * BH, 0, 0, Wd, Hd); }
+          var bd = bg.getImageData(0, 0, Wd, Hd).data;
+          var sc2 = document.createElement('canvas'); sc2.width = Math.max(4, Wd >> 4); sc2.height = Math.max(4, Hd >> 4); var sg = sc2.getContext('2d'); sg.imageSmoothingEnabled = true; sg.drawImage(c, 0, 0, sc2.width, sc2.height);
+          var mc = document.createElement('canvas'); mc.width = Wd; mc.height = Hd; var mg = mc.getContext('2d', { willReadFrequently: true }); mg.imageSmoothingEnabled = true; mg.filter = 'blur(6px)'; mg.drawImage(sc2, 0, 0, Wd, Hd); var md = mg.getImageData(0, 0, Wd, Hd).data;
+          for (var p2 = 0, q2 = 0; p2 < a.length; p2 += 4, q2++){ if (gap[q2] || !bI){ a[p2 + 3] = gap[q2] ? 0 : 255; continue; }
+            var rt = Math.max(0.35, Math.min(2.2, (a[p2] + 4) / (md[p2] + 4)));
+            a[p2] = Math.min(255, bd[p2] * rt); a[p2 + 1] = Math.min(255, bd[p2 + 1] * rt); a[p2 + 2] = Math.min(255, bd[p2 + 2] * rt); a[p2 + 3] = 255; }
+          g2.putImageData(id, 0, 0); src = c; rgba = true; }
+        gl.activeTexture(gl.TEXTURE1); var nt = mkTex(src, true || rgba); if (DT.t) gl.deleteTexture(DT.t);
+        DT.t = nt; DT.bb = [lo0, lo1, la1, la0]; DT.dpp = degpp; DT.kmpp = degpp * RKM[key] * Math.PI / 180; DT.k = cur; DT.a = 0; ld.style.display = 'none'; ld.textContent = 'LOADING THE MAP…';
+        var t0 = performance.now(), fade = function(t){ if (seq !== DT.seq) return; DT.a = Math.min(1, (t - t0) / 350); dirty = true; if (DT.a < 1) requestAnimationFrame(fade); }; requestAnimationFrame(fade); };
+      im.onerror = function(){ if (seq === DT.seq){ ld.style.display = 'none'; ld.textContent = 'LOADING THE MAP…'; } };
+      im.src = WMS + '&map=/maps/' + key + '/' + key + '_simp_cyl.map&layers=' + d[0] + '&bbox=' + [lo0, la0, lo1, la1].map(function(x){ return x.toFixed(5); }).join(',') + '&width=' + W + '&height=' + H; };
+    var raf = 0, last = 0, seen = true, zoomFence = false;
     var tick = function(t){ if (!host.isConnected){ cancelAnimationFrame(raf); try { gl.getExtension('WEBGL_lose_context').loseContext(); } catch(e){} return; }
       raf = requestAnimationFrame(tick); var dt = last ? Math.min(50, t - last) : 16; last = t; if (!seen || document.hidden) return;
-      if (!V.drag){ if (Math.abs(V.vlon) > 0.01 || Math.abs(V.vlat) > 0.01){ V.lon += V.vlon; V.lat = Math.max(-75, Math.min(75, V.lat + V.vlat)); V.vlon *= 0.94; V.vlat *= 0.94; dirty = true; }
-        else if (t - V.idle > 2500){ V.lon += dt * 0.004; dirty = true; } }
+      if (!V.drag && !pin){ if (Math.abs(V.vlon) > 0.002 / V.z || Math.abs(V.vlat) > 0.002 / V.z){ V.lon += V.vlon; V.lat = Math.max(-89, Math.min(89, V.lat + V.vlat)); V.vlon *= 0.92; V.vlat *= 0.92; dirty = true; if (Math.abs(V.vlon) + Math.abs(V.vlat) < 0.004 / V.z) detail(); }
+        else if (t - V.idle > 2500 && V.z < 1.3){ V.lon += dt * 0.004; dirty = true; } }
       if (dirty){ dirty = false; draw(); } };
     raf = requestAnimationFrame(tick);
     if (window.IntersectionObserver) new IntersectionObserver(function(es){ seen = es[0].isIntersecting; }).observe(cv);
-    var px, py;
-    cv.addEventListener('pointerdown', function(e){ V.drag = true; px = e.clientX; py = e.clientY; V.vlon = V.vlat = 0; try { cv.setPointerCapture(e.pointerId); } catch(_){} e.preventDefault(); });
-    cv.addEventListener('pointermove', function(e){ if (!V.drag) return; var k = 180 / Math.max(120, size), dx = (e.clientX - px) * k, dy = (e.clientY - py) * k; px = e.clientX; py = e.clientY;
-      V.lon -= dx; V.lat = Math.max(-75, Math.min(75, V.lat + dy)); V.vlon = -dx; V.vlat = dy; dirty = true; });
-    var up = function(){ V.drag = false; V.idle = performance.now(); }; cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+    var ptrs = {}, pin = null, px, py;
+    var zoomBy = function(f){ var nz = Math.max(1, Math.min(maxZ(), V.z * f)); if (nz === V.z) return; V.z = nz; dirty = true; detail(); };
+    cv.addEventListener('pointerdown', function(e){ ptrs[e.pointerId] = [e.clientX, e.clientY]; zoomFence = true; stage.classList.add('pg-live');
+      var ids = Object.keys(ptrs); if (ids.length === 2){ var a = ptrs[ids[0]], c = ptrs[ids[1]]; pin = { d: Math.hypot(a[0] - c[0], a[1] - c[1]), z: V.z }; V.drag = false; }
+      else { V.drag = true; px = e.clientX; py = e.clientY; V.vlon = V.vlat = 0; }
+      try { cv.setPointerCapture(e.pointerId); } catch(_){} e.preventDefault(); });
+    cv.addEventListener('pointermove', function(e){ if (!ptrs[e.pointerId]) return; ptrs[e.pointerId] = [e.clientX, e.clientY];
+      if (pin){ var ids = Object.keys(ptrs); if (ids.length < 2) return; var a = ptrs[ids[0]], c = ptrs[ids[1]], dd = Math.hypot(a[0] - c[0], a[1] - c[1]); V.z = Math.max(1, Math.min(maxZ(), pin.z * dd / Math.max(10, pin.d))); dirty = true; return; }
+      if (!V.drag) return; var k = 180 / Math.max(120, size) / V.z, dx = (e.clientX - px) * k, dy = (e.clientY - py) * k; px = e.clientX; py = e.clientY;
+      V.lon -= dx; V.lat = Math.max(-89, Math.min(89, V.lat + dy)); V.vlon = -dx; V.vlat = dy; dirty = true; });
+    var up = function(e){ delete ptrs[e.pointerId]; if (pin && Object.keys(ptrs).length < 2){ pin = null; detail(); var ids = Object.keys(ptrs); if (ids.length === 1){ px = ptrs[ids[0]][0]; py = ptrs[ids[0]][1]; V.drag = true; return; } }
+      if (!Object.keys(ptrs).length){ V.drag = false; V.idle = performance.now(); detail(); } };
+    cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+    cv.addEventListener('wheel', function(e){ if (!zoomFence) return; e.preventDefault(); zoomBy(Math.exp(-e.deltaY * 0.0022)); }, { passive: false });
+    stage.addEventListener('pointerleave', function(){ zoomFence = false; stage.classList.remove('pg-live'); });
+    cv.addEventListener('dblclick', function(e){ e.preventDefault(); zoomBy(2); });
     cv.style.touchAction = 'none';
     wrap.querySelectorAll('[data-pg]').forEach(function(bt){ bt.onclick = function(e){ e.stopPropagation(); wrap.querySelectorAll('[data-pg]').forEach(function(x){ x.classList.toggle('on', x === bt); }); load(bt.getAttribute('data-pg')); }; });
     window.addEventListener('resize', function(){ dirty = true; });
-    load(cur); return { load: load };
+    load(cur); return { load: load, view: V, zoom: zoomBy };
   };
   /* the GLOBE tab, added to the Mars and Venus popups once they are built (and the planet's disc opens it) */
   var add = function(key, tries){ if (!P[key]) return; var pp = document.getElementById('planet-insight-popup'); if (!pp) return;
@@ -116777,6 +116858,8 @@ body.bv-past-hero #bluishvoid-nav{ opacity:0 !important; pointer-events:none !im
 #planet-insight-popup .pg-lab i{ position:absolute; left:-2.5px; top:-2.5px; width:5px; height:5px; border-radius:50%; background:#fff; box-shadow:0 0 0 1px rgba(0,0,0,.6); }
 #planet-insight-popup .pg-lab span{ position:absolute; left:6px; top:-6px; font:800 8.5px/1 system-ui,sans-serif; letter-spacing:.08em; color:#fff; text-shadow:0 0 2px #000,0 0 3px #000,0 1px 4px rgba(0,0,0,.9); }
 #planet-insight-popup .pg-load{ position:absolute; left:0; right:0; top:48%; text-align:center; font:800 10px system-ui,sans-serif; letter-spacing:.14em; color:#2b22f4; opacity:.7; }
+#planet-insight-popup .pg-res{ position:absolute; left:50%; bottom:6px; transform:translateX(-50%); font:800 9px/1 system-ui,sans-serif; letter-spacing:.12em; color:#fff; background:rgba(20,16,60,.55); padding:4px 8px; border-radius:6px; pointer-events:none; white-space:nowrap; }
+#planet-insight-popup .pg-res:empty{ display:none; }
 #planet-insight-popup .pg-note{ font:500 12px/1.5 system-ui,sans-serif; color:#1b2340; margin:10px 2px 4px; }
 #planet-insight-popup .pg-cr{ font:700 9px/1.4 system-ui,sans-serif; letter-spacing:.08em; color:rgba(27,35,64,.6); margin:0 2px; }
 </style>
