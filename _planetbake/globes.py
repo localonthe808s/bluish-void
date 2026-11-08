@@ -19,12 +19,53 @@ import io, math, os, subprocess, sys, urllib.request
 import numpy as np
 from PIL import Image
 W = ('https://planetarymaps.usgs.gov/cgi-bin/mapserv?service=WMS&request=GetMap&version=1.1.1&srs=EPSG:4326&styles=&bbox=-180,-90,180,90'
-     '&width=4096&height=2048&format=image/jpeg&map=/maps/{p}/{p}_simp_cyl.map&layers={l}')
+     '&width=4096&height=2048&format=image/jpeg&map=/maps/{m}_simp_cyl.map&layers={l}')
 UA = {'User-Agent': 'Mozilla/5.0 (bluishvoid.com planet globes)'}
 
+MAPF = {'mars': 'mars/mars', 'venus': 'venus/venus', 'mercury': 'mercury/mercury', 'moon': 'earth/moon', 'io': 'jupiter/io', 'europa': 'jupiter/europa',
+        'ganymede': 'jupiter/ganymede', 'callisto': 'jupiter/callisto', 'titan': 'saturn/titan'}
+
 def get(p, l):
-    b = urllib.request.urlopen(urllib.request.Request(W.format(p=p, l=l), headers=UA), timeout=300).read()
+    b = urllib.request.urlopen(urllib.request.Request(W.format(m=MAPF[p], l=l), headers=UA), timeout=300).read()
     return np.asarray(Image.open(io.BytesIO(b)).convert('RGB'))
+
+def fill(a):
+    """where nothing was imaged (pure black, mostly toward the poles): the row's own mean, or the nearest row that has one"""
+    import cv2
+    miss0 = (a.astype(np.int32).sum(2) < 10).astype(np.uint8)
+    # narrow seams (a few px, e.g. the 0-degree join in the Galileo/Voyager mosaics) are painted from their neighbors; only the wide
+    # unimaged areas (mostly the poles) take the row mean below (2026-11-08: the mean drew a dashed line down Io, Ganymede, Callisto)
+    big = cv2.dilate(cv2.erode(miss0, np.ones((1, 15), np.uint8)), np.ones((1, 15), np.uint8))
+    small = (miss0 & (1 - big)).astype(np.uint8)
+    if small.any(): a = cv2.inpaint(np.ascontiguousarray(a), cv2.dilate(small, np.ones((3, 3), np.uint8)), 4, cv2.INPAINT_TELEA)
+    a = a.astype(np.float32); miss = a.sum(2) < 10; h = a.shape[0]; means = [None] * h
+    for r in range(h):
+        ok = ~miss[r]
+        if ok.sum() > a.shape[1] * 0.02: means[r] = a[r][ok].mean(0)
+    for r in range(h):
+        if not miss[r].any(): continue
+        m = means[r]
+        if m is None:
+            near = [q for q in range(h) if means[q] is not None]
+            if not near: continue
+            m = means[min(near, key=lambda q: abs(q - r))]
+        a[r][miss[r]] = m
+    return a.clip(0, 255).astype(np.uint8)
+
+
+def stretch(a):
+    """a gray mosaic's levels, 1st to 99.5th percentile, to the full range (MESSENGER's was very dark)"""
+    lo, hi = np.percentile(a, 1), np.percentile(a, 99.5)
+    return ((a.astype(np.float32) - lo) / max(1, hi - lo) * 255).clip(0, 255).astype(np.uint8)
+
+
+def seams(a):
+    """single columns far darker or brighter than both neighbours (mosaic joins, e.g. Ganymede's at 0 degrees): replaced by their neighbours' mean"""
+    f = a.astype(np.float32); col = f.mean((0, 2)); d = np.abs(col - (np.roll(col, 1) + np.roll(col, -1)) / 2)
+    for c in np.nonzero(d > 6)[0]:
+        f[:, c] = (f[:, c - 1] + f[:, (c + 1) % f.shape[1]]) / 2
+    return f.clip(0, 255).astype(np.uint8)
+
 
 def poles(a):
     """the mosaics smear radially toward the poles (a pixel row near 90 degrees is a few km of ground stretched round the whole map):
@@ -46,11 +87,20 @@ def poles(a):
 
 def main(out, up):
     os.makedirs(out, exist_ok=True)
-    c = get('mars', 'MDIM21_color').astype(np.float32); hs = get('mars', 'HRSC_MOLA_Blend_Hillshade').mean(2)
-    sh = np.clip(hs / np.median(hs), 0.55, 1.45)[..., None]
-    maps = {'mars_color': np.clip(c * (0.35 + 0.65 * sh), 0, 255).astype(np.uint8), 'mars_elev': get('mars', 'MOLA_color'),
+    ONLY = [a for a in sys.argv[2:] if not a.startswith('--')]
+    if not ONLY:
+        c = get('mars', 'MDIM21_color').astype(np.float32); hs = get('mars', 'HRSC_MOLA_Blend_Hillshade').mean(2)
+        sh = np.clip(hs / np.median(hs), 0.55, 1.45)[..., None]
+    maps = {} if ONLY else {'mars_color': np.clip(c * (0.35 + 0.65 * sh), 0, 255).astype(np.uint8), 'mars_elev': get('mars', 'MOLA_color'),
             'mars_themis': get('mars', 'THEMIS'),   # Mars Odyssey THEMIS daytime infrared (ASU/NASA), the zoom's sharpest Mars layer (100 m)
             'venus_radar': get('venus', 'MAGELLAN_color'), 'venus_elev': get('venus', 'MAGELLAN_topography')}
+    # MERCURY, THE MOON, THE BIG MOONS (2026-11-08, "yes do mercury and the moon, then the big moons")
+    MORE = [('mercury_gray', 'mercury', 'MESSENGER', 1), ('mercury_color', 'mercury', 'MESSENGER_Color', 0), ('moon_wac', 'moon', 'LROC_WAC', 0), ('moon_elev', 'moon', 'LOLA_color', 0),
+            ('io_color', 'io', 'SSI_color', 0), ('europa', 'europa', 'GALILEO_VOYAGER', 1), ('ganymede', 'ganymede', 'GALILEO_VOYAGER', 1), ('callisto', 'callisto', 'GALILEO_VOYAGER', 1),
+            ('titan', 'titan', 'CASSINI', 1)]
+    for k, body, layer, st in MORE:
+        if ONLY and body not in ONLY: continue
+        a = seams(fill(get(body, layer))); maps[k] = stretch(a) if st else a
     for k, a in maps.items():
         a = poles(a)
         im = Image.fromarray(a)
@@ -61,4 +111,4 @@ def main(out, up):
             print(p, os.path.getsize(p) // 1024, 'KB')
 
 if __name__ == '__main__':
-    main(sys.argv[1], '--upload' in sys.argv)
+    main(sys.argv[1], '--upload' in sys.argv)   # extra args: only these bodies (mercury moon io europa ganymede callisto titan)
