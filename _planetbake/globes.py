@@ -85,6 +85,27 @@ def poles(a):
     return out
 
 
+def trek_hillshade(body, layer, level=3):
+    """a global hillshade from NASA Trek's tiles (256 px, level n = 2^(n+1) x 2^n tiles), stitched to 4096 x 2048 at level 3"""
+    n = 2 ** level; out = np.zeros((n * 256, 2 * n * 256), np.float32)
+    for r in range(n):
+        for c in range(2 * n):
+            u = 'https://trek.nasa.gov/tiles/%s/EQ/%s/1.0.0//default/default028mm/%d/%d/%d.png' % (body, layer, level, r, c)
+            b = urllib.request.urlopen(urllib.request.Request(u, headers=UA), timeout=120).read()
+            out[r * 256:(r + 1) * 256, c * 256:(c + 1) * 256] = np.asarray(Image.open(io.BytesIO(b)).convert('L'), np.float32)
+    return out
+
+
+def relief(a, hs, k):
+    """RELIEF ON THE PHOTO (2026-11-08, "is this the best they can be?"): the mosaic times its laser / stereo hillshade over the
+    hillshade's median, so crater rims and ridges stand up as they do on Mars; k = how much (0.55 Moon and Mercury)"""
+    import cv2
+    if hs.shape != a.shape[:2]: hs = cv2.resize(hs, (a.shape[1], a.shape[0]), interpolation=cv2.INTER_AREA)
+    ok = hs > 4; med = np.median(hs[ok]) if ok.any() else 128
+    sh = np.where(ok, np.clip(hs / med, 0.5, 1.5), 1.0)[..., None]
+    return np.clip(a.astype(np.float32) * ((1 - k) + k * sh), 0, 255).astype(np.uint8)
+
+
 def main(out, up):
     os.makedirs(out, exist_ok=True)
     ONLY = [a for a in sys.argv[2:] if not a.startswith('--')]
@@ -95,12 +116,18 @@ def main(out, up):
             'mars_themis': get('mars', 'THEMIS'),   # Mars Odyssey THEMIS daytime infrared (ASU/NASA), the zoom's sharpest Mars layer (100 m)
             'venus_radar': get('venus', 'MAGELLAN_color'), 'venus_elev': get('venus', 'MAGELLAN_topography')}
     # MERCURY, THE MOON, THE BIG MOONS (2026-11-08, "yes do mercury and the moon, then the big moons")
-    MORE = [('mercury_gray', 'mercury', 'MESSENGER', 1), ('mercury_color', 'mercury', 'MESSENGER_Color', 0), ('moon_wac', 'moon', 'LROC_WAC', 0), ('moon_elev', 'moon', 'LOLA_color', 0),
+    MORE = [('mercury_gray', 'mercury', 'MESSENGER', 1), ('mercury_color', 'mercury', 'MESSENGER_Color', 0), ('moon_wac', 'moon', 'LROC_WAC', 1), ('moon_elev', 'moon', 'LOLA_color', 0),
             ('io_color', 'io', 'SSI_color', 0), ('europa', 'europa', 'GALILEO_VOYAGER', 1), ('ganymede', 'ganymede', 'GALILEO_VOYAGER', 1), ('callisto', 'callisto', 'GALILEO_VOYAGER', 1),
             ('titan', 'titan', 'CASSINI', 1)]
     for k, body, layer, st in MORE:
         if ONLY and body not in ONLY: continue
-        a = seams(fill(get(body, layer))); maps[k] = stretch(a) if st else a
+        a = seams(fill(get(body, layer))); a = stretch(a) if st else a
+        if k == 'moon_wac':   # LRO laser-altimeter (LOLA) grayscale hillshade, whole Moon, poles included
+            a = relief(a, get('moon', 'LOLA_bw').mean(2), 0.55)
+        elif k in ('mercury_gray', 'mercury_color'):   # MESSENGER stereo DEM hillshade (USGS, 665 m), from NASA Trek
+            if 'mhs' not in globals(): globals()['mhs'] = trek_hillshade('Mercury', 'Mercury_Messenger_USGS_DEM_665m_v2_Hillshade')
+            a = relief(a, mhs, 0.55)
+        maps[k] = a
     for k, a in maps.items():
         a = poles(a)
         im = Image.fromarray(a)
