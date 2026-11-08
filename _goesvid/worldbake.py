@@ -181,6 +181,37 @@ def compose(disks):
     return np.clip(rgb, 0, 255).round().astype(np.uint8), best
 
 
+POLAR_VER = 'polar1'
+
+
+def polar_caps(work):
+    """polarbake.py's two strips (RGBA, 4096 x 455 each), or None; read from the bucket, not the CDN (an hour-old copy is fine)"""
+    caps = {}
+    for k in ('n', 's'):
+        p = os.path.join(work, 'polar_%s.png' % k)
+        if DRY: continue
+        if bake.r2('cp', 's3://%s/%spolar_%s.png' % (bake.BUCKET, KEY, k), p, check=False).returncode != 0: continue
+        try:
+            a = np.asarray(Image.open(p).convert('RGBA')).astype(np.float32)
+            if a.shape[1] == OW: caps[k] = a
+        except Exception: pass
+    return caps or None
+
+
+def with_caps(rgb, ga, caps):
+    """the caps under the satellites: where the stitched picture fades out (ga, 0-1), the polar strips take over; returns the frame's
+    color (un-premultiplied: the page multiplies by the mask) and the combined alpha"""
+    out = rgb.astype(np.float32); A = ga.astype(np.float32).copy()
+    if not caps: return rgb, A
+    for k, cap in caps.items():
+        nr = cap.shape[0]; sl = slice(0, nr) if k == 'n' else slice(OH - nr, OH)
+        g = ga[sl][..., None]; ca = cap[..., 3:4] / 255.0
+        tot = g + (1 - g) * ca
+        col = (out[sl] * g + cap[..., :3] * ca * (1 - g)) / np.maximum(tot, 1e-6)
+        out[sl] = np.where(tot > 1e-4, col, out[sl]); A[sl] = tot[..., 0]
+    return np.clip(out, 0, 255).round().astype(np.uint8), A
+
+
 def alpha(best):
     a = np.clip((best - 0.2) / 0.12, 0, 1)
     return (a * a * (3 - 2 * a) * 255).round().astype(np.uint8)
@@ -197,6 +228,7 @@ def main():
         if bake.r2('cp', 's3://%s/%s' % (bake.BUCKET, TAR_KEY), tar_local, check=False).returncode == 0:
             subprocess.run(['tar', '-xf', tar_local, '-C', fd], check=False)
     mp = os.path.join(fd, 'mask.png')
+    import cv2
     if os.path.exists(mp) and Image.open(mp).mode != 'RGBA':       # a mask from before 2026-10-25 (grayscale): rebuilt with the newest frame
         os.remove(mp); nf = sorted(f for f in os.listdir(fd) if re.match(r'^\d{11}_WORLD\.jpg$', f))
         if nf: os.remove(os.path.join(fd, nf[-1]))
@@ -209,6 +241,17 @@ def main():
     if not os.path.exists(os.path.join(fd, VER)):
         for f in os.listdir(fd): os.remove(os.path.join(fd, f))
         open(os.path.join(fd, VER), 'w').write('1')
+    caps = polar_caps(work)
+    if caps and os.path.exists(mp) and not os.path.exists(os.path.join(fd, POLAR_VER)):
+        # THE POLES ON FRAMES ALREADY MADE (2026-11-08): the loop's older frames get the caps once, under the satellites' own fade
+        # (the mask they were made with), so the 3-hour loop does not flicker between capped and bare frames
+        mk = np.asarray(Image.open(mp))[..., 3].astype(np.float32) / 255; mk = cv2.resize(mk, (OW, OH), interpolation=cv2.INTER_LINEAR)
+        for f in os.listdir(fd):
+            if not f.endswith('.jpg'): continue
+            fp = os.path.join(fd, f); im = cv2.imread(fp)
+            if im is None or im.shape[1] != OW: continue
+            rgb2, _ = with_caps(im[..., ::-1], mk, caps); cv2.imwrite(fp, rgb2[..., ::-1].copy(), [cv2.IMWRITE_JPEG_QUALITY, 90])
+        open(os.path.join(fd, POLAR_VER), 'w').write('1'); print('  caps added to the frames already made', flush=True)
     lists = {}
     fdn = {}
     for k, s2 in GOES.items():
@@ -229,7 +272,7 @@ def main():
     marks = [anchor - i * STEP_MIN * 60 for i in range(HOURS * 60 // STEP_MIN, -1, -1)]
     want = {stamp11(m) + '_WORLD.jpg': m for m in marks}
     for f in os.listdir(fd):
-        if re.sub(r'_f\d\.jpg$', '.jpg', f) not in want and f not in ('mask.png', VER): os.remove(os.path.join(fd, f))
+        if re.sub(r'_f\d\.jpg$', '.jpg', f) not in want and f not in ('mask.png', VER, POLAR_VER): os.remove(os.path.join(fd, f))
     newest_fn = max(want, key=lambda f: want[f])
     cache, new = {}, 0
     for fn, m in sorted(want.items(), key=lambda kv: -kv[1]):       # newest first
@@ -262,6 +305,7 @@ def main():
                 if cache[ck] is not None: disks[k] = cache[ck]; break
         if len(disks) < 3: print('  %s: %d disks, skipped' % (fn, len(disks))); continue
         rgb, best = compose(disks)
+        rgb, comb = with_caps(rgb, alpha(best).astype(np.float32) / 255, caps)   # the poles (polarbake.py)
         for ck in [x for x in cache if x.startswith('noaa')]: del cache[ck]   # 88 MB each: one frame's worth at a time
         # CIRA's sharp disks are 22 MB each: the marks go newest first, so a scan newer than this mark by more than the hold is
         # never wanted again (a full rebuild otherwise held ~45 of them; peak 6.3 GB)
@@ -270,7 +314,7 @@ def main():
             if kk in lag and tms(ck[-14:]) - (m - lag[kk]) > HOLD_MIN * 60: del cache[ck]
         Image.fromarray(rgb).save(p, quality=90); new += 1
         if fn == newest_fn or not os.path.exists(os.path.join(fd, 'mask.png')):
-            am = cv2.resize(alpha(best), (2048, 1024), interpolation=cv2.INTER_AREA); Image.fromarray(np.dstack([np.full_like(am, 255)] * 3 + [am]), 'RGBA').save(os.path.join(fd, 'mask.png'), optimize=True)   # the page masks with destination-in, which reads ALPHA
+            am = cv2.resize((comb * 255).round().astype(np.uint8), (2048, 1024), interpolation=cv2.INTER_AREA); Image.fromarray(np.dstack([np.full_like(am, 255)] * 3 + [am]), 'RGBA').save(os.path.join(fd, 'mask.png'), optimize=True)   # the page masks with destination-in, which reads ALPHA
     got = sorted(f for f in want if os.path.exists(os.path.join(fd, f)))
     if len(got) < 2: print('WORLD: %d frames, nothing to play' % len(got)); return
     made = 0
