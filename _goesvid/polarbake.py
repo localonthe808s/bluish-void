@@ -111,7 +111,7 @@ def south(day):
     al = tc[..., 3].astype(np.float32) / 255 if tc is not None else np.zeros((NR, OW), np.float32)
     if ir is not None:
         c = np.clip((ir.astype(np.float32) - 105) / 95, 0, 1); c = c * c * (3 - 2 * c)      # cloud cover from cold tops
-        sea = np.array([14, 30, 58], np.float32); cloud = np.dstack([ir.astype(np.float32) * 0.92 + 20] * 3).clip(0, 255)
+        sea = np.array([25, 47, 68], np.float32)   # the satellites' own open ocean at 52-56 S (measured 2026-11-08); cloud = np.dstack([ir.astype(np.float32) * 0.92 + 20] * 3).clip(0, 255)
         cur = sea * (1 - c[..., None]) + cloud * c[..., None]
         has = (ir > 0).astype(np.float32)
         wsea = (1 - solid) * has                         # open sea with an infrared reading: today's clouds
