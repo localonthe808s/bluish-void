@@ -31,6 +31,7 @@ THR = {3: 30000, 4: 15000, 5: 6000, 6: 2500, 7: 1000, 8: 300, 9: 100, 10: 100}  
 # BV_THR="3:10000,4:5000" overrides the cutoffs (read at import, so the block cut's worker processes see it too: 2026-11-07, they did not)
 for _kv in filter(None, os.environ.get('BV_THR', '').split(',')):
     _k, _v = _kv.split(':'); THR[int(_k)] = int(_v)
+BASIN = os.environ.get('BV_BASIN') == '1'   # 2026-11-08: also write b, where each reach ends up (basins.py tags the extract)
 TOL = 0.15                       # of a 256-px tile's pixel
 PRE = 10.0                       # m, the extract's trim
 LAKE_MIN = 0.5e6                 # m2
@@ -126,13 +127,13 @@ def tiles(work, out, zmin=3, zmax=9):
                 by1 = S / 2 - ty * ts; by0 = by1 - ts
                 bb = box(bx0 - pad, by0 - pad, bx1 + pad, by1 + pad)
                 fs = []
-                for a, gb in c.execute('select r.a, r.g from ri join r on r.id = ri.id where ri.maxx >= ? and ri.minx <= ? and ri.maxy >= ? and ri.miny <= ? and r.a >= ?',
+                for a, gb, bb2 in c.execute('select r.a, r.g, ' + ('r.b' if BASIN else '0') + ' from ri join r on r.id = ri.id where ri.maxx >= ? and ri.minx <= ? and ri.maxy >= ? and ri.miny <= ? and r.a >= ?',
                                        (bx0 - pad, bx1 + pad, by0 - pad, by1 + pad, THR[z])):
                     g = wkb.loads(gb)
                     if not g.intersects(bb): continue
                     g = g.intersection(bb).simplify(tol, preserve_topology=False)
                     if g.is_empty or g.length < tol: continue
-                    fs.append({'geometry': g.wkb, 'properties': {'a': a}})
+                    fs.append({'geometry': g.wkb, 'properties': dict({'a': a}, **({'b': bb2 or 0} if BASIN else {}))})
                 if not fs: continue
                 data = mapbox_vector_tile.encode([{'name': 'rivers', 'features': fs}],
                                                  default_options={'quantize_bounds': (bx0, by0, bx1, by1), 'extents': 4096, 'y_coord_down': False})
@@ -149,11 +150,11 @@ def _block(args):
     x0 = -S / 2 + bx * ts6; x1 = x0 + ts6; y1 = S / 2 - by * ts6; y0 = y1 - ts6
     pad6 = ts6 / 256 * 8
     amin = min(THR[z] for z in range(zmin, zmax + 1))
-    rows = c.execute('select r.a, r.g from ri join r on r.id = ri.id where ri.maxx >= ? and ri.minx <= ? and ri.maxy >= ? and ri.miny <= ? and r.a >= ?',
+    rows = c.execute('select r.a, r.g, ' + ('r.b' if BASIN else '0') + ' from ri join r on r.id = ri.id where ri.maxx >= ? and ri.minx <= ? and ri.maxy >= ? and ri.miny <= ? and r.a >= ?',
                      (x0 - pad6, x1 + pad6, y0 - pad6, y1 + pad6, amin)).fetchall()
     c.close()
     if not rows: return 0
-    A = [a for a, _ in rows]; G = [wkb.loads(g) for _, g in rows]; tree = STRtree(G); cnt = 0
+    A = [r[0] for r in rows]; G = [wkb.loads(r[1]) for r in rows]; Bs = [r[2] or 0 for r in rows]; tree = STRtree(G); cnt = 0
     for z in range(zmin, zmax + 1):
         k = 2 ** (z - B); ts = S / 2 ** z; tol = ts / 256 * TOL; pad = ts / 256 * 8
         for tx in range(bx * k, bx * k + k):
@@ -166,7 +167,7 @@ def _block(args):
                     if not g.intersects(bb): continue
                     g = g.intersection(bb).simplify(tol, preserve_topology=False)
                     if g.is_empty or g.length < tol: continue
-                    fs.append({'geometry': g.wkb, 'properties': {'a': A[i]}})
+                    fs.append({'geometry': g.wkb, 'properties': dict({'a': A[i]}, **({'b': Bs[i]} if BASIN else {}))})
                 if not fs: continue
                 data = mapbox_vector_tile.encode([{'name': 'rivers', 'features': fs}],
                                                  default_options={'quantize_bounds': (tx0, ty0, tx1, ty1), 'extents': 4096, 'y_coord_down': False})
