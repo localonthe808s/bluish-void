@@ -104199,7 +104199,9 @@ function closeAlertModal(){
        NOHRSC snowfall, SNODAS snow on the ground); the resorts from _snowbake/resorts_v1.json (cdn snow/resorts_v1.json); the forecast map
        is NOAA WPC's day 1-3 chance of 4 inches or more, and each mountain's own forecast is the hourly model at its summit's elevation. ===== */
     var SNW = { p: 'depth', day: 1, d: null, R: null, fc: null, L: {}, lit: false, sel: null, at: 0 };
-    try { var _sp0 = localStorage.getItem('bv_lc_snowp'); if (_sp0) SNW.p = _sp0; } catch(e){}
+    try { var _sp0 = localStorage.getItem('bv_lc_snowp'); if (_sp0) SNW.p = _sp0; SNW.pass = localStorage.getItem('bv_lc_snowpass') || null; } catch(e){}
+    SNW.vis = function(r){ return !SNW.pass || (r.passes || []).some(function(x){ return String(x).toUpperCase() === SNW.pass; }); };   /* the pass chips (2026-11-08) */
+    SNW.powder = function(r){ var v = (SNW.d && SNW.d.r && SNW.d.r[r.id]) || {}, f = SNW.fc && SNW.fc[r.id]; return (v['24h'] || 0) >= 6 || (f && f.n3 >= 12); };   /* 6 in in a day, or 12 in coming in 3 */
     SNW.C = 'https://cdn.bluishvoid.com/snow/';
     SNW.P = [['depth', 'ON THE GROUND'], ['24h', '24 HOURS'], ['72h', '72 HOURS'], ['7d', '7 DAYS'], ['season', 'SEASON'], ['fc', 'FORECAST']];
     SNW.WPC = 'https://mapservices.weather.noaa.gov/vector/rest/services/precip/wpc_prob_winter_precip/MapServer/';
@@ -104215,21 +104217,28 @@ function closeAlertModal(){
       return west ? { c: [41.8, -120.8], z: w < 700 ? 5 : 6 } : { c: [43.3, -73.2], z: w < 700 ? 5 : 6 }; };
     SNW.load = function(){ if (SNW.pl) return SNW.pl; var nc = '?t=' + Math.floor(Date.now() / 9e5);
       SNW.pl = Promise.all([fetch(SNW.C + 'v1/latest.json' + nc).then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; }),
-        fetch(SNW.C + 'resorts_v1.json' + nc).then(function(r){ return r.ok ? r.json() : []; }).catch(function(){ return []; })]).then(function(A){
-        SNW.d = A[0]; SNW.R = (A[1] || []).filter(function(r){ return isFinite(+r.lat) && isFinite(+r.lon); }); SNW.at = Date.now(); SNW.fcLoad(); return SNW; });
+        fetch(SNW.C + 'resorts_v1.json' + nc).then(function(r){ return r.ok ? r.json() : []; }).catch(function(){ return []; }),
+        fetch(SNW.C + 'v1/history.json' + nc).then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; })]).then(function(A){
+        SNW.H = A[2]; SNW.d = A[0]; SNW.R = (A[1] || []).filter(function(r){ return isFinite(+r.lat) && isFinite(+r.lon); }); SNW.at = Date.now(); SNW.fcLoad(); return SNW; });
       return SNW.pl; };
     /* each mountain's next 7 days of snowfall at its summit (Open-Meteo, one request for all of them) */
-    SNW.fcLoad = function(){ var R = SNW.R || []; if (!R.length || SNW.fcP) return; var la = [], lo = [], el = [];
-      R.forEach(function(r){ la.push((+r.lat).toFixed(4)); lo.push((+r.lon).toFixed(4)); el.push(r.summit_ft ? Math.round(r.summit_ft * 0.3048) : 'nan'); });
-      SNW.fcP = fetch('https://api.open-meteo.com/v1/forecast?latitude=' + la.join(',') + '&longitude=' + lo.join(',') + '&elevation=' + el.join(',') + '&daily=snowfall_sum&precipitation_unit=inch&timezone=auto&forecast_days=7')
-        .then(function(r){ return r.ok ? r.json() : null; }).then(function(j){ if (!j) return; var A = Array.isArray(j) ? j : [j], F = {};
-          A.forEach(function(q, i){ var s = q && q.daily && q.daily.snowfall_sum; if (!s || !R[i]) return; var n3 = 0, n7 = 0; s.forEach(function(v, k){ v = +v || 0; if (k < 3) n3 += v; n7 += v; });
-            F[R[i].id] = { n3: Math.round(n3 * 10) / 10, n7: Math.round(n7 * 10) / 10, days: q.daily.time, s: s }; });
-          SNW.fc = F; if (SNW.lit){ SNW.resorts(); SNW.block(); } }).catch(function(){}); };
+    SNW.fcLoad = function(){ var R = SNW.R || []; if (!R.length || SNW.fcP) return;
+      /* the summit AND the base (2026-11-08): the forecast's commonest miss for a ski day is snow up top and rain at the bottom */
+      var q = function(elev){ var la = [], lo = [], el = []; R.forEach(function(r){ la.push((+r.lat).toFixed(4)); lo.push((+r.lon).toFixed(4)); var e = elev(r); el.push(e ? Math.round(e * 0.3048) : 'nan'); });
+        return fetch('https://api.open-meteo.com/v1/forecast?latitude=' + la.join(',') + '&longitude=' + lo.join(',') + '&elevation=' + el.join(',') + '&daily=snowfall_sum,rain_sum&precipitation_unit=inch&timezone=auto&forecast_days=7')
+          .then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; }); };
+      SNW.fcP = Promise.all([q(function(r){ return r.summit_ft || r.base_ft; }), q(function(r){ return r.base_ft || null; })]).then(function(J){ if (!J[0]) return;
+        var A = Array.isArray(J[0]) ? J[0] : [J[0]], B = J[1] ? (Array.isArray(J[1]) ? J[1] : [J[1]]) : [], F = {}, sum = function(a, n){ var t = 0; (a || []).slice(0, n).forEach(function(v){ t += +v || 0; }); return Math.round(t * 10) / 10; };
+        A.forEach(function(x, i){ var dd = x && x.daily; if (!dd || !R[i]) return; var b = B[i] && B[i].daily;
+          F[R[i].id] = { n3: sum(dd.snowfall_sum, 3), n7: sum(dd.snowfall_sum, 7), r3: sum(dd.rain_sum, 3), days: dd.time, s: dd.snowfall_sum,
+            b3: b ? sum(b.snowfall_sum, 3) : null, br3: b ? sum(b.rain_sum, 3) : null, bs: b ? b.snowfall_sum : null }; });
+        SNW.fc = F; if (SNW.lit){ SNW.resorts(); SNW.block(); } }); };
     SNW.chips = function(){ return SNW.P.map(function(x){ return '<button type="button" class="wt-chip' + (SNW.p === x[0] ? ' on' : '') + '" data-wc="sn:p:' + x[0] + '">' + x[1] + '</button>'; }).join('')
       + (SNW.p === 'fc' ? '<span class="wt-div"></span>' + [1, 2, 3].map(function(d){ return '<button type="button" class="wt-chip' + (SNW.day === d ? ' on' : '') + '" data-wc="sn:d:' + d + '">' + ['', 'DAY 1', 'DAY 2', 'DAY 3'][d] + '</button>'; }).join('') : '')
+      + '<span class="wt-div"></span>' + ['EPIC', 'IKON', 'INDY'].map(function(x){ return '<button type="button" class="wt-chip' + (SNW.pass === x ? ' on' : '') + '" data-wc="sn:pass:' + x + '">' + x + '</button>'; }).join('')
       + '<span class="wt-div"></span>' + [['ne', 'NORTHEAST'], ['west', 'WEST COAST']].map(function(x){ return '<button type="button" class="wt-chip" data-wc="sn:go:' + x[0] + '">' + x[1] + '</button>'; }).join(''); };
-    SNW.chip = function(k){ if (k.indexOf('p:') === 0){ SNW.p = k.slice(2); try { localStorage.setItem('bv_lc_snowp', SNW.p); } catch(e){} }
+    SNW.chip = function(k){ if (k.indexOf('pass:') === 0){ var ps = k.slice(5); SNW.pass = SNW.pass === ps ? null : ps; try { if (SNW.pass) localStorage.setItem('bv_lc_snowpass', SNW.pass); else localStorage.removeItem('bv_lc_snowpass'); } catch(e){} }
+      else if (k.indexOf('p:') === 0){ SNW.p = k.slice(2); try { localStorage.setItem('bv_lc_snowp', SNW.p); } catch(e){} }
       else if (k.indexOf('d:') === 0) SNW.day = +k.slice(2);
       else if (k.indexOf('go:') === 0 && M){ var w = M.getSize().x < 700; try { if (k === 'go:ne') M.flyTo([43.3, -73.2], w ? 5 : 6, { duration: 1 }); else M.flyTo([41.8, -120.8], w ? 5 : 6, { duration: 1 }); } catch(e){} return; }
       SNW.sync(); WT.render(); EK.sync(); };
@@ -104244,13 +104253,38 @@ function closeAlertModal(){
           (g.features || []).sort(function(a, b){ return (a.properties.dn || 0) - (b.properties.dn || 0); });
           L0.fc = L.geoJSON(g, { pane: 'lcSnow', interactive: false, style: function(f){ var q = SNW.FCC[f.properties.dn] || SNW.FCC[1]; return { stroke: true, color: q[0], weight: 1, opacity: .8, fillColor: q[0], fillOpacity: .28 }; } });
           L0.fc._d = dd; L0.fc.addTo(M); SNW.block(); }).catch(function(){}); } };
-    SNW.resorts = function(){ var R = SNW.R || [], L0 = SNW.L; if (L0.res && M.hasLayer(L0.res)) M.removeLayer(L0.res);
-      var rd = SNW.rd || (SNW.rd = L.canvas({ padding: .3 })), G = L.layerGroup(), depth = SNW.p === 'depth';
-      R.forEach(function(r){ var v = SNW.val(r), c = SNW.col(v, depth), big = (r.vertical_ft || 0) >= 2000, none = v == null || v < (depth ? 0.5 : 0.1);   /* no snow: a hollow ring */
-        L.circleMarker([+r.lat, +r.lon], { renderer: rd, radius: big ? 7 : 5.5, color: none ? 'rgba(255,255,255,.7)' : '#fff', weight: none ? 1.4 : 1.8, fillColor: none ? '#0b1220' : SNW.lift(c), fillOpacity: none ? .55 : .95 })
-          .bindTooltip(esc(r.name) + ' · ' + (v == null ? 'no reading' : SNW.inch(v) + ' in'), { direction: 'top', className: 'hz-vol-tip' })
-          .on('click', function(e){ L.DomEvent.stop(e); SNW.pick(r); }).addTo(G); });
-      L0.res = G; G.addTo(M); };
+    SNW.resorts = function(){ var R = (SNW.R || []).filter(SNW.vis), L0 = SNW.L; if (L0.res && M.hasLayer(L0.res)) M.removeLayer(L0.res); if (L0.lab && M.hasLayer(L0.lab)) M.removeLayer(L0.lab);
+      var rd = SNW.rd || (SNW.rd = L.canvas({ padding: .3 })), G = L.layerGroup(), T = L.layerGroup(), depth = SNW.p === 'depth';
+      R.forEach(function(r){ var v = SNW.val(r), c = SNW.col(v, depth), big = (r.vertical_ft || 0) >= 2000, none = v == null || v < (depth ? 0.5 : 0.1), pw = SNW.powder(r), rad = big ? 7 : 5.5;
+        if (pw) L.circleMarker([+r.lat, +r.lon], { renderer: rd, radius: rad + 4.5, color: '#fde047', weight: 2.2, opacity: .95, fill: false, interactive: false }).addTo(G);   /* POWDER: a gold ring */
+        L.circleMarker([+r.lat, +r.lon], { renderer: rd, radius: rad, color: none ? 'rgba(255,255,255,.7)' : '#fff', weight: none ? 1.4 : 1.8, fillColor: none ? '#0b1220' : SNW.lift(c), fillOpacity: none ? .55 : .95 })
+          .bindTooltip(esc(r.name) + ' \u00b7 ' + (v == null ? 'no reading' : SNW.inch(v) + ' in') + (pw ? ' \u00b7 POWDER' : ''), { direction: 'top', className: 'hz-vol-tip' })
+          .on('click', function(e){ L.DomEvent.stop(e); SNW.pick(r); }).addTo(G);
+        /* the names, from regional zoom in, decluttered (biggest mountains first) */
+        var mk = L.marker([+r.lat, +r.lon], { icon: L.divIcon({ className: 'sn-lab', html: '<span>' + esc(String(r.name).replace(/ (Ski Resort|Ski Area|Ski Bowl|Resort)$/i, '').replace(/ Mountain Resort$/i, ' Mountain')) + '</span>', iconSize: null, iconAnchor: [-(rad + 4), 7] }), interactive: false, keyboard: false });
+        mk._snR = r; mk.addTo(T); });
+      L0.res = G; G.addTo(M); L0.lab = T; T.addTo(M); SNW.declutter();
+      if (!SNW.dcOn){ SNW.dcOn = true; M.on('zoomend moveend', function(){ if (SNW.lit) SNW.declutter(); }); } };
+    SNW.declutter = function(){ var T = SNW.L.lab; if (!T || !M) return; var z = M.getZoom(), boxes = [], ms = [];
+      T.eachLayer(function(m){ ms.push(m); }); ms.sort(function(a, b){ return (b._snR.vertical_ft || 0) - (a._snR.vertical_ft || 0); });
+      ms.forEach(function(m){ var el = m.getElement && m.getElement(); if (!el) return; if (z < 7){ el.style.display = 'none'; return; }
+        var p = M.latLngToContainerPoint(m.getLatLng()), w = (el.textContent.length * 6.6) + 12, bx = [p.x + 7, p.y - 8, p.x + 7 + w, p.y + 8];
+        var hit = boxes.some(function(q){ return !(bx[2] < q[0] || bx[0] > q[2] || bx[3] < q[1] || bx[1] > q[3]); });
+        el.style.display = hit ? 'none' : ''; if (!hit) boxes.push(bx); }); };
+    /* the season, day by day, then the next 7 days (2026-11-08): history.json's 24-hour analyses, the forecast lighter */
+    SNW.chart = function(r){ var H = SNW.H, past = H && H.r && H.r[r.id], f = SNW.fc && SNW.fc[r.id]; if (!past || !past.length) return '';
+      var fut = f && f.s ? f.s.map(function(v){ return +v || 0; }) : [], all = past.map(function(v){ return v || 0; }).concat(fut), mx = Math.max.apply(null, all.concat([2])), n = all.length, W = 300, Hh = 46, bw = W / n;
+      var bars = all.map(function(v, k){ var h = Math.max(v > 0 ? 1.5 : 0, v / mx * (Hh - 10)), fc = k >= past.length; return v > 0 ? '<rect x="' + (k * bw + bw * 0.12).toFixed(1) + '" y="' + (Hh - h).toFixed(1) + '" width="' + Math.max(0.8, bw * 0.76).toFixed(1) + '" height="' + h.toFixed(1) + '" fill="' + (fc ? 'rgba(255,255,255,.45)' : '#fff') + '"/>' : ''; }).join('');
+      var ticks = H.days.map(function(d, k){ return d.slice(8) === '01' ? '<text x="' + (k * bw).toFixed(1) + '" y="8" fill="rgba(255,255,255,.7)" font-size="7" font-weight="800">' + ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'][+d.slice(5, 7) - 1] + '</text>' : ''; }).join('');
+      var sep = fut.length ? '<line x1="' + (past.length * bw).toFixed(1) + '" x2="' + (past.length * bw).toFixed(1) + '" y1="10" y2="' + Hh + '" stroke="rgba(255,255,255,.6)" stroke-dasharray="2 2"/>' : '';
+      var tot = past.reduce(function(a, v){ return a + (v || 0); }, 0), big = Math.max.apply(null, past.map(function(v){ return v || 0; })), bi = past.indexOf(big);
+      return '<svg viewBox="0 0 ' + W + ' ' + Hh + '" width="100%" height="' + Hh + '" preserveAspectRatio="none" style="display:block;max-width:420px;">' + ticks + bars + sep + '</svg>'
+        + '<div style="margin-top:2px;"><b>' + SNW.inch(tot) + '"</b> in ' + past.length + ' days' + (big > 0 ? ' \u00b7 biggest day <b>' + SNW.inch(big) + '"</b> on ' + new Date(H.days[bi] + 'T12:00:00').toLocaleDateString([], { month: 'short', day: 'numeric' }) : '') + (fut.length ? ' \u00b7 <i>lighter bars: the next 7 days</i>' : '') + '</div>'; };
+    /* THE SNOWPACK AGAINST NORMAL (West Coast): the nearest USDA SNOTEL station, its snow water against that date's median */
+    SNW.snotel = function(o){ if (!o) return ''; var pct = o.med >= 1 ? Math.round(o.swe / o.med * 100) : null, dd = o.on ? new Date(o.on + 'T12:00:00').toLocaleDateString([], { month: 'short', day: 'numeric' }) : '';
+      return (pct != null ? '<b>' + pct + '% of normal</b> \u00b7 ' : '') + '<b>' + SNW.inch(o.swe) + '"</b> of water in the snow' + (o.snwd != null ? ', ' + SNW.inch(o.snwd) + '" deep' : '')
+        + (pct == null && o.med != null ? ' \u00b7 typical for ' + dd + ': ' + SNW.inch(o.med) + '"' : '')
+        + ' <i>(' + esc(String(o.n)) + ' SNOTEL, ' + Math.round(o.e).toLocaleString() + ' ft, ' + (o.km < 1 ? 'at the resort' : Math.round(o.km) + ' km away') + ', ' + dd + '; normal = the 1991-2020 median)</i>'; };
     SNW.pick = function(r){ SNW.sel = r; var v = (SNW.d && SNW.d.r && SNW.d.r[r.id]) || {}, f = SNW.fc && SNW.fc[r.id], i = SNW.inch;
       var row = function(k, x){ return x ? '<div class="cv-r"><span>' + k + '</span><div>' + x + '</div></div>' : ''; }, ft = function(x){ return x ? Math.round(x).toLocaleString() + ' ft' : null; };
       var days = f && f.days ? f.days.map(function(d, k){ var dt0 = new Date(d + 'T12:00:00'); return '<span style="display:inline-block;margin-right:9px;white-space:nowrap;"><b>' + dt0.toLocaleDateString([], { weekday: 'short' }).toUpperCase() + '</b> ' + i(+f.s[k] || 0) + '"</span>'; }).join('') : '';
@@ -104259,7 +104293,11 @@ function closeAlertModal(){
         + row('NEW SNOW', [v['24h'] != null ? '<b>' + i(v['24h']) + '"</b> in 24 hours' : null, v['72h'] != null ? '<b>' + i(v['72h']) + '"</b> in 72' : null, v['7d'] != null ? '<b>' + i(v['7d']) + '"</b> in 7 days' : null].filter(Boolean).join(' · '))
         + row('SEASON', v.season != null ? '<b>' + i(v.season) + '"</b> since Sept 30' : '')
         + row('ON THE GROUND', [v.du != null ? '<b>' + i(v.du) + '"</b> up the mountain' : null, v.db != null ? '<b>' + i(v.db) + '"</b> at the base' : null].filter(Boolean).join(' · '))
-        + row('COMING', f ? '<b>' + i(f.n3) + '"</b> next 3 days · <b>' + i(f.n7) + '"</b> next 7 <i>(at the summit)</i><div style="margin-top:3px;">' + days + '</div>' : '')
+        + row('COMING', f ? '<b>' + i(f.n3) + '"</b> next 3 days · <b>' + i(f.n7) + '"</b> next 7 <i>(at the summit)</i>'
+          + (f.b3 != null ? '<div style="margin-top:2px;">At the base: <b>' + i(f.b3) + '"</b> of snow' + (f.br3 >= 0.05 ? ' and <b>' + i(f.br3) + '"</b> of rain' : '') + ' in 3 days' + (f.br3 >= 0.1 && f.n3 >= 1 ? ' <i>(snow up top, rain at the bottom)</i>' : '') + '</div>' : '')
+          + '<div style="margin-top:3px;">' + days + '</div>' : '')
+        + row('THIS SEASON', SNW.chart(r))
+        + row('SNOWPACK', SNW.snotel(v.sn))
         + row('MOUNTAIN', [ft(r.summit_ft) ? 'summit ' + ft(r.summit_ft) : null, ft(r.base_ft) ? 'base ' + ft(r.base_ft) : null, ft(r.vertical_ft) ? ft(r.vertical_ft) + ' vertical' : null].filter(Boolean).join(' · '))
         + row('TERRAIN', [r.trails ? r.trails + ' trails' : null, r.lifts ? r.lifts + ' lifts' : null, r.acres ? Math.round(r.acres).toLocaleString() + ' acres' : null, r.night_skiing ? 'night skiing' : null].filter(Boolean).join(' · '))
         + row('HOURS', r.hours ? esc(r.hours) + (r.hours_note ? ' <i>(' + esc(r.hours_note) + ')</i>' : '') : '')
@@ -104267,22 +104305,25 @@ function closeAlertModal(){
         + '<div class="cv-story" style="opacity:.8;">Snow numbers are NOAA’s analyses at the mountain (the 4-km snowfall grid, the 1-km snow model), not the resort’s own report; the forecast is the hourly model at the summit’s height.</div>'
         + '<div class="cv-links">' + [r.website ? '<a href="' + esc(r.website) + '" target="_blank" rel="noopener">WEBSITE ↗</a>' : null, r.tickets ? '<a href="' + esc(r.tickets) + '" target="_blank" rel="noopener">TICKETS ↗</a>' : null, r.hours_src ? '<a href="' + esc(r.hours_src) + '" target="_blank" rel="noopener">HOURS ↗</a>' : null].filter(Boolean).join(' · ') + '</div></div>';
       PICK.show(h, function(){ SNW.sel = null; }); };
-    SNW.block = function(){ var el = SNW.el(); if (!SNW.lit){ el.style.display = 'none'; return; } el.style.display = ''; var D = SNW.d, R = SNW.R || [], V = window._bvViz, k = SNW.p;
+    SNW.block = function(){ var el = SNW.el(); if (!SNW.lit){ el.style.display = 'none'; return; } el.style.display = ''; var D = SNW.d, R = (SNW.R || []).filter(SNW.vis), V = window._bvViz, k = SNW.p;
       if (!D){ el.innerHTML = '<div class="dt-note">READING THE SNOW…</div>'; return; }
       var lab = (SNW.P.filter(function(x){ return x[0] === k; })[0] || [0, ''])[1];
       var pick = function(reg){ return R.filter(function(r){ return r.region === reg && SNW.val(r) != null; }).sort(function(a, b){ return SNW.val(b) - SNW.val(a); }); };
       var ne = pick('northeast'), we = pick('west'), dayStr = function(s){ var d = new Date(s + 'T12:00:00'); return d.toLocaleDateString([], { month: 'short', day: 'numeric' }).toUpperCase(); };
       var unit = k === 'fc' ? 'NEXT 3 DAYS, AT THE SUMMIT' : k === 'depth' ? 'ON THE GROUND' : lab === 'SEASON' ? 'SINCE SEPT 30' : 'IN THE LAST ' + lab;
       var bars = function(t, L1){ return V.bars(t, L1.slice(0, 8).map(function(r){ var v = SNW.val(r); return [String(r.name).toUpperCase(), Math.max(v, 0.05), SNW.col(v, k === 'depth') || '#5a6b85', null, SNW.inch(v) + '"']; }), null); };
-      var top = (ne.concat(we)).sort(function(a, b){ return SNW.val(b) - SNW.val(a); })[0];
+      var pw = R.filter(SNW.powder); var top = (ne.concat(we)).sort(function(a, b){ return SNW.val(b) - SNW.val(a); })[0];
       var fcM = k === 'fc' && SNW.fcMeta ? ' · NOAA WPC, CHANCE OF 4 IN OR MORE, ' + esc(String(SNW.fcMeta.valid_time || '')) : '';
-      var stats = V.stats([['RESORTS MAPPED', R.length ? String(R.length) : '…', '#fff', 'NORTHEAST AND WEST COAST'], top ? ['MOST ' + (k === 'fc' ? 'COMING' : k === 'depth' ? 'ON THE GROUND' : k === 'season' ? 'THIS SEASON' : 'NEW SNOW'), SNW.inch(SNW.val(top)) + '"', '#fff', String(top.name).toUpperCase()] : null,
+      var stats = V.stats([['RESORTS MAPPED', R.length ? String(R.length) : '…', '#fff', SNW.pass ? 'ON THE ' + SNW.pass + ' PASS' : 'NORTHEAST AND WEST COAST'], top ? ['MOST ' + (k === 'fc' ? 'COMING' : k === 'depth' ? 'ON THE GROUND' : k === 'season' ? 'THIS SEASON' : 'NEW SNOW'), SNW.inch(SNW.val(top)) + '"', '#fff', String(top.name).toUpperCase()] : null,
         ['NORTHEAST WITH SNOW', ne.filter(function(r){ return SNW.val(r) >= (k === 'depth' ? 1 : 0.5); }).length + ' OF ' + R.filter(function(r){ return r.region === 'northeast'; }).length, '#fff', unit],
         ['WEST COAST WITH SNOW', we.filter(function(r){ return SNW.val(r) >= (k === 'depth' ? 1 : 0.5); }).length + ' OF ' + R.filter(function(r){ return r.region === 'west'; }).length, '#fff', unit]]);
       el.innerHTML = '<div class="dt-vtop"><div><div class="dt-vbig">' + (top && SNW.val(top) >= 0.5 ? esc(String(top.name).toUpperCase()) + ' · ' + SNW.inch(SNW.val(top)) + '" ' + (k === 'fc' ? 'COMING' : k === 'depth' ? 'ON THE GROUND' : lab === 'SEASON' ? 'THIS SEASON' : 'IN ' + lab) : 'SNOW · ' + lab) + '</div>'
         + '<div class="dt-vsub">' + (k === 'depth' ? 'NOAA SNODAS, ' + (D.depth_day ? dayStr(D.depth_day) : '') : k === 'fc' ? 'EACH MOUNTAIN: THE HOURLY MODEL AT ITS SUMMIT' + fcM : 'NOAA NOHRSC SNOWFALL ANALYSIS, TO ' + dayStr(D.day) + ' 7 AM ET') + '</div>'
-        + stats + '<div class="dt-text">Every circle is a ski area, colored by the snow at it; tap one for its numbers, hours, website and tickets. The shading is ' + (k === 'fc' ? 'the Weather Prediction Center’s chance of 4 inches or more on day ' + SNW.day + '.' : k === 'depth' ? 'how deep the snow is now, from NOAA’s snow model run on station, satellite and airborne reports.' : 'snowfall measured by observers and stations, blended with radar.') + ' Brighter means more.</div></div>'
-        + '<div class="dt-vside"><div class="sn-two">' + '<div>' + (ne.length ? bars('NORTHEAST · ' + unit, ne) : '') + '</div><div>' + (we.length ? bars('WEST COAST · ' + unit, we) : '') + '</div></div></div></div>'; };
+        + stats + '<div class="dt-text">Every circle is a ski area, colored by the snow at it; tap one for its numbers, hours, website and tickets. The shading is ' + (k === 'fc' ? 'the Weather Prediction Center’s chance of 4 inches or more on day ' + SNW.day + '.' : k === 'depth' ? 'how deep the snow is now, from NOAA’s snow model run on station, satellite and airborne reports.' : 'snowfall measured by observers and stations, blended with radar.') + ' Brighter means more.</div>' + (pw.length ? '<div class="dt-text" style="margin-top:6px;"><b style="color:#fde047;">POWDER</b> \u00b7 ' + pw.slice(0, 6).map(function(r){ var v = (D.r && D.r[r.id]) || {}, f = SNW.fc && SNW.fc[r.id]; return esc(r.name) + ' (' + ((v['24h'] || 0) >= 6 ? SNW.inch(v['24h']) + '" in 24 hours' : SNW.inch(f.n3) + '" coming in 3 days') + ')'; }).join(', ') + (pw.length > 6 ? ' and ' + (pw.length - 6) + ' more' : '') + '. Gold rings on the map.</div>' : '') + '</div>'
+        + '<div class="dt-vside"><div class="sn-two">' + '<div data-sncol="ne">' + (ne.length ? bars('NORTHEAST · ' + unit, ne) : '') + '</div><div data-sncol="we">' + (we.length ? bars('WEST COAST · ' + unit, we) : '') + '</div></div></div></div>';
+      [['ne', ne], ['we', we]].forEach(function(q){ var col = el.querySelector('[data-sncol="' + q[0] + '"]'); if (!col) return; var bl = col.querySelectorAll('.hz-bl'), bt = col.querySelectorAll('.hz-bt'), bn = col.querySelectorAll('.hz-bn');
+        q[1].slice(0, 8).forEach(function(r, n){ [bl[n], bt[n], bn[n]].forEach(function(x){ if (!x) return; x.style.cursor = 'pointer'; x.onclick = function(e){ e.stopPropagation(); try { M.flyTo([+r.lat, +r.lon], Math.max(M.getZoom(), 9), { duration: 1 }); } catch(e2){} SNW.pick(r); }; }); }); }); };   /* a bar opens its mountain (2026-11-08) */
+
     SNW.sync = function(){ if (!SNW.lit || !M) return; SNW.picture(); SNW.resorts(); SNW.block(); };
     SNW.enter = function(){ if (!M) return; if (SNW.lit){ if (Date.now() - SNW.at > 30 * 60000){ SNW.pl = null; SNW.fcP = null; SNW.load().then(SNW.sync); } return; }
       SNW.lit = true; SNW.block(); SNW.load().then(function(){ if (SNW.lit) SNW.sync(); EK.sync(); }); };
@@ -105115,7 +105156,7 @@ function closeAlertModal(){
     WT.mi = function(a, b){ var dy = (a[0] - b[0]) * 69, dx = (a[1] - b[1]) * 69 * Math.cos(a[0] * Math.PI / 180); return Math.hypot(dx, dy); };
     WT.sumSync = function(){
       var el = document.getElementById('lc-wtsum'), ws = document.getElementById('lc-wsum');
-      if (VIEW !== 'map' || WT.loc() || window._waterEs || !ws){ if (el) el.style.display = 'none'; return; }
+      if (VIEW !== 'map' || WT.loc() || WT.tab === 'snow' || window._waterEs || !ws){ if (el) el.style.display = 'none'; return; }   /* not on SNOW: the ocean's line (2026-11-08) */
       if (!el){ el = document.createElement('div'); el.id = 'lc-wtsum'; ws.parentNode.insertBefore(el, ws.nextSibling); }
       if (!WT.sd && SF.sm) WT.sdLoad(); if (!SF.F.uv && SF.sm) SF.flowLoad(); if (!SF.sm) SF.loadSm();
       var o = [], h = WT.home();
@@ -107128,6 +107169,7 @@ function closeAlertModal(){
       /* FLOODS NOW on WATER (2026-11-03): the floods block borrows the same rules; FLOODING's own dots and panes stay off the country view */
       + '#cw-pane-local.lc-wt-riv .leaflet-lcLvDots-pane, #cw-pane-local.lc-wt-riv .leaflet-lcSgDots-pane, #cw-pane-local.lc-wt-riv .leaflet-lcFloodProne-pane, #cw-pane-local.lc-wt-riv .leaflet-lcCityWat-pane, #cw-pane-local.lc-wt-riv .leaflet-lcRiv-pane, #cw-pane-local.lc-wt-riv .leaflet-bvSea-pane, #cw-pane-local.lc-wt-riv .leaflet-lcSea-pane, #cw-pane-local.lc-wt-riv #lc-wtsum{ display:none !important; }'   /* the sea-floor names and seamounts are the ocean's, not the rivers' (seen on production 2026-11-03) */
       + '#lc-floods{ margin:0 10px 6px; padding:2px 12px 10px; color:#fff; } #lc-floods .dt-wk.on{ background:#fff; color:#9a3412; }'
+      + '.sn-lab{ background:none !important; border:0 !important; } .sn-lab span{ display:inline-block; font:800 8.5px/1 system-ui,sans-serif; letter-spacing:.06em; text-transform:uppercase; color:#fff; white-space:nowrap; text-shadow:0 1px 2px rgba(0,0,0,.95),0 0 4px rgba(0,0,0,.8); pointer-events:none; }'
       + '#lc-snow .sn-two{ display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:6px 16px; } @media (max-width:700px){ #lc-snow .sn-two{ grid-template-columns:1fr; } }'
       + '#lc-rivers{ margin:0 10px 6px; padding:2px 12px 10px; color:#fff; } #lc-rivers .dt-vbig{ font:800 .95rem/1.1 system-ui,sans-serif; letter-spacing:.04em; } #lc-rivers .dt-vsub{ font:800 .5rem system-ui,sans-serif; letter-spacing:.12em; opacity:.85; margin-top:3px; } #lc-rivers .dt-text{ font:500 .62rem/1.45 system-ui,sans-serif; margin-top:4px; opacity:.95; }'
       + '#lc-floods .dt-vtop{ display:grid; grid-template-columns:minmax(0,1.1fr) minmax(0,1fr); gap:8px 24px; align-items:start; } @media (max-width:700px){ #lc-floods .dt-vtop{ grid-template-columns:1fr; } }'
