@@ -116632,5 +116632,154 @@ body.bv-past-hero #bluishvoid-nav{ opacity:0 !important; pointer-events:none !im
   html body #bv-tier#bv-tier .bvt-tab { font: 900 10.56px/1 system-ui, sans-serif !important; letter-spacing: .14em !important; padding: 6px 12px !important; }
   html body #bv-tier ~ .bv-tier-row :is(.ot-tab, .geo-tab, .solar-tab) { font-size: 10.56px !important; font-weight: 900 !important; letter-spacing: .14em !important; }
 </style>
+<script>
+/* THE MARS AND VENUS GLOBES (user 2026-11-08: "are there global maps of mars and venus?" -> "yes build both globes"). A GLOBE tab in
+   each planet's popup: a WebGL sphere you can drag, spinning slowly when left alone, its major features named, and a choice of maps
+   (_planetbake/globes.py: USGS Astrogeology's whole-planet mosaics, cdn planets/globe/). One fragment shader draws the sphere: each
+   pixel's direction is turned into latitude / longitude and the map is sampled there, with gradients taken from a seam-free copy of the
+   longitude so the 180th meridian does not draw a line. Lit from the upper left. WebGL1 browsers get it without mipmaps. */
+(function(){
+  var C = 'https://cdn.bluishvoid.com/planets/globe/';
+  var P = {
+    mars: { maps: [['color', 'COLOR', 'mars_color'], ['elev', 'ELEVATION', 'mars_elev']], atm: [0.95, 0.55, 0.35], rim: .22,
+      note: { color: 'NASA Viking orbiter photos (USGS mosaic), shaded by the laser-altimeter relief so the volcanoes and canyons stand up.', elev: 'Height from Mars Global Surveyor’s laser altimeter: blue is low ground, then green, yellow, red, and white for the highest volcanoes. The north is a smooth low plain; the south old high cratered ground.' },
+      credit: 'NASA/JPL/USGS (Viking MDIM 2.1), NASA/GSFC (MOLA), ESA/DLR/FU Berlin (HRSC), via USGS Astrogeology',
+      labels: [[18.65, -133.8, 'OLYMPUS MONS', 'The tallest volcano in the solar system, about 13 mi high'], [-14, -59.2, 'VALLES MARINERIS', 'A canyon system 2,500 mi long, up to 4 mi deep'],
+        [-42.4, 70.5, 'HELLAS', 'An impact basin 1,400 mi across, the lowest ground on Mars'], [-49.7, -44, 'ARGYRE', 'An impact basin ringed by mountains'],
+        [0, -112, 'THARSIS', 'A volcanic plateau with three giant volcanoes in a row'], [24.8, 146.9, 'ELYSIUM MONS', 'The second great volcanic region'],
+        [49.7, 117.5, 'UTOPIA PLANITIA', 'A vast northern plain; Viking 2 landed here in 1976'], [-5.4, 137.8, 'GALE · CURIOSITY', 'NASA’s Curiosity rover, climbing Mount Sharp since 2012'],
+        [18.4, 77.5, 'JEZERO · PERSEVERANCE', 'An old river delta where Perseverance has explored since 2021'], [8.4, 69.5, 'SYRTIS MAJOR', 'A dark volcanic plain, the first feature seen from Earth'],
+        [86, 0, 'NORTH POLAR CAP', 'Water ice under seasonal carbon dioxide frost'], [-86, 0, 'SOUTH POLAR CAP', 'Water ice under a permanent cap of dry ice']] },
+    venus: { maps: [['radar', 'RADAR', 'venus_radar'], ['elev', 'ELEVATION', 'venus_elev']], atm: [1.0, 0.85, 0.55], rim: .5,
+      note: { radar: 'The surface under the clouds, mapped by Magellan’s radar 1990-1994 and colored orange (radar sees no color): brighter is rougher ground, lava flows, ridges and craters.', elev: 'Height from Magellan’s radar altimeter: purple and blue are the lowland plains, green the rolling uplands, red and pink the high plateaus and mountains.' },
+      credit: 'NASA/JPL (Magellan), via USGS Astrogeology',
+      labels: [[65.2, 3.3, 'MAXWELL MONTES', 'The highest mountains on Venus, about 7 mi high'], [70.4, 27.5, 'ISHTAR TERRA', 'A northern highland the size of Australia'],
+        [68.6, -20.7, 'LAKSHMI PLANUM', 'A high lava plateau ringed by mountains'], [-5.8, 104.8, 'APHRODITE TERRA', 'The largest highland, along the equator'],
+        [25.3, -77.3, 'BETA REGIO', 'A volcanic rise split by a rift valley'], [9.2, -160.4, 'ATLA REGIO', 'A volcanic rise where rifts meet'],
+        [0.5, -165.4, 'MAAT MONS', 'The highest volcano, about 5 mi high'], [-22, 4.7, 'ALPHA REGIO', 'Rugged tessera: some of the oldest ground on Venus'],
+        [-60, 20, 'LADA TERRA', 'A southern highland'], [-7.5, -56.3, 'VENERA 13', 'The Soviet lander that sent the first color photos from the surface, 1982']] }
+  };
+  var VS1 = 'attribute vec2 p;varying vec2 v;void main(){v=p;gl_Position=vec4(p,0.,1.);}';
+  var FS1 = 'precision highp float;varying vec2 v;uniform sampler2D T;uniform mat3 R;uniform vec3 Ld,atm;uniform float rim;'
+    + 'void main(){float r=length(v);if(r>1.){discard;}vec3 n=vec3(v,sqrt(max(0.,1.-r*r)));vec3 w=R*n;float lat=asin(clamp(w.y,-1.,1.));float lon=atan(w.x,w.z);'
+    + 'vec2 uv=vec2(lon/6.2831853+.5,.5-lat/3.1415927);vec3 c=texture2D(T,uv).rgb;float l=max(dot(n,Ld),0.);vec3 col=c*(.3+.85*l)*mix(.7,1.,pow(n.z,.35))+atm*pow(1.-n.z,3.)*rim;'
+    + 'float e=smoothstep(1.,.985,r);gl_FragColor=vec4(col,e);}';
+  var VS2 = '#version 300 es\nin vec2 p;out vec2 v;void main(){v=p;gl_Position=vec4(p,0.,1.);}';
+  var FS2 = '#version 300 es\nprecision highp float;in vec2 v;out vec4 o;uniform sampler2D T;uniform mat3 R;uniform vec3 Ld,atm;uniform float rim;'
+    + 'void main(){float r=length(v);if(r>1.){discard;}vec3 n=vec3(v,sqrt(max(0.,1.-r*r)));vec3 w=R*n;float lat=asin(clamp(w.y,-1.,1.));float lon=atan(w.x,w.z);'
+    + 'vec2 uv=vec2(lon/6.2831853+.5,.5-lat/3.1415927);vec2 u2=vec2(fract(uv.x+.5)-.5,uv.y);vec3 c=textureGrad(T,uv,dFdx(u2),dFdy(u2)).rgb;'
+    + 'float l=max(dot(n,Ld),0.);vec3 col=c*(.3+.85*l)*mix(.7,1.,pow(n.z,.35))+atm*pow(1.-n.z,3.)*rim;float e=smoothstep(1.,1.-1.5*fwidth(r),r);o=vec4(col,e);}';
+  window._bvPlanetGlobe = function(host, key){
+    var cfg = P[key]; if (!cfg || !host) return null;
+    var big = !matchMedia('(pointer:coarse)').matches && Math.min(window.innerWidth, 9999) > 700;
+    var wrap = document.createElement('div'); wrap.className = 'pg-wrap';
+    var chips = '<div class="pg-chips">' + cfg.maps.map(function(m, i){ return '<button type="button" class="pg-chip' + (i ? '' : ' on') + '" data-pg="' + m[0] + '">' + m[1] + '</button>'; }).join('') + '</div>';
+    wrap.innerHTML = chips + '<div class="pg-stage"><canvas class="pg-cv"></canvas><div class="pg-ov"></div><div class="pg-load">LOADING THE MAP…</div></div><div class="pg-note"></div><div class="pg-cr">DRAG TO TURN · ' + cfg.credit + '</div>';
+    host.innerHTML = ''; host.appendChild(wrap);
+    var cv = wrap.querySelector('.pg-cv'), ov = wrap.querySelector('.pg-ov'), ld = wrap.querySelector('.pg-load'), note = wrap.querySelector('.pg-note');
+    var gl = cv.getContext('webgl2', { premultipliedAlpha: false, antialias: true }), v2 = !!gl;
+    if (!gl) gl = cv.getContext('webgl', { premultipliedAlpha: false, antialias: true });
+    var cur = cfg.maps[0][0];
+    var setNote = function(){ note.textContent = cfg.note[cur] || ''; };
+    if (!gl){ wrap.querySelector('.pg-stage').innerHTML = '<img src="' + C + cfg.maps[0][2] + '_2k.jpg" alt="" style="width:100%;border-radius:6px;">'; setNote(); return null; }
+    var sh = function(t, s){ var o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o); return o; };
+    var pr = gl.createProgram(); gl.attachShader(pr, sh(gl.VERTEX_SHADER, v2 ? VS2 : VS1)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, v2 ? FS2 : FS1)); gl.linkProgram(pr);
+    if (!gl.getProgramParameter(pr, gl.LINK_STATUS)){ console.warn('[planet globe]', gl.getProgramInfoLog(pr)); return null; }
+    gl.useProgram(pr);
+    var b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    var lp = gl.getAttribLocation(pr, 'p'); gl.enableVertexAttribArray(lp); gl.vertexAttribPointer(lp, 2, gl.FLOAT, false, 0, 0);
+    var U = {}; ['T', 'R', 'Ld', 'atm', 'rim'].forEach(function(k){ U[k] = gl.getUniformLocation(pr, k); });
+    var L0 = [-0.45, 0.38, 0.81], ln = Math.hypot(L0[0], L0[1], L0[2]); gl.uniform3f(U.Ld, L0[0] / ln, L0[1] / ln, L0[2] / ln);
+    gl.uniform3f(U.atm, cfg.atm[0], cfg.atm[1], cfg.atm[2]); gl.uniform1f(U.rim, cfg.rim); gl.uniform1i(U.T, 0);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    var tex = null, TX = {}, dirty = true;
+    var load = function(k){ var m = cfg.maps.filter(function(q){ return q[0] === k; })[0]; if (!m) return; cur = k; setNote();
+      if (TX[k]){ tex = TX[k]; dirty = true; return; } ld.style.display = '';
+      var im = new Image(); im.crossOrigin = 'anonymous';
+      im.onload = function(){ var t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, im);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        if (v2){ gl.generateMipmap(gl.TEXTURE_2D); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); }
+        else gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        TX[k] = t; if (cur === k){ tex = t; dirty = true; } ld.style.display = 'none'; };
+      im.onerror = function(){ ld.textContent = 'THE MAP DID NOT LOAD'; };
+      var mx = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 2048;
+      im.src = C + m[2] + (big && mx >= 4096 ? '_4k' : '_2k') + '.jpg?v=3'; };   /* v=3: the poles smoothed (2026-11-08) */
+    /* the view: center latitude / longitude, a slow spin when left alone */
+    var V = { lat: key === 'venus' ? 12 : 6, lon: key === 'venus' ? 95 : -88, vlon: 0, vlat: 0, drag: false, idle: 0 };
+    var labs = cfg.labels.map(function(q){ var e = document.createElement('div'); e.className = 'pg-lab'; e.innerHTML = '<i></i><span>' + q[2] + '</span>'; e.title = q[3]; ov.appendChild(e);
+      var la = q[0] * Math.PI / 180, lo = q[1] * Math.PI / 180; return { e: e, w: [Math.cos(la) * Math.sin(lo), Math.sin(la), Math.cos(la) * Math.cos(lo)] }; });
+    var size = 0, R = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+    var resize = function(){ var w = Math.round(wrap.querySelector('.pg-stage').clientWidth); if (!w || w === size) return; size = w; var d = Math.min(2, window.devicePixelRatio || 1); cv.width = cv.height = Math.round(w * d); cv.style.width = cv.style.height = w + 'px'; gl.viewport(0, 0, cv.width, cv.height); dirty = true; };
+    var mat = function(){ var a = -V.lat * Math.PI / 180, f = V.lon * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a), cf = Math.cos(f), sf = Math.sin(f);
+      /* R = Ry(lon) Rx(-lat), column-major for GL */
+      var m = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+      var Rx = [[1, 0, 0], [0, ca, -sa], [0, sa, ca]], Ry = [[cf, 0, sf], [0, 1, 0], [-sf, 0, cf]];
+      for (var i = 0; i < 3; i++) for (var j = 0; j < 3; j++){ var s = 0; for (var k = 0; k < 3; k++) s += Ry[i][k] * Rx[k][j]; m[i][j] = s; }
+      R = m; return [m[0][0], m[1][0], m[2][0], m[0][1], m[1][1], m[2][1], m[0][2], m[1][2], m[2][2]]; };
+    var draw = function(){ resize(); if (!tex) return; gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.uniformMatrix3fv(U.R, false, new Float32Array(mat())); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      var boxes = [];
+      labs.forEach(function(l){ var w = l.w, n = [R[0][0] * w[0] + R[1][0] * w[1] + R[2][0] * w[2], R[0][1] * w[0] + R[1][1] * w[1] + R[2][1] * w[2], R[0][2] * w[0] + R[1][2] * w[1] + R[2][2] * w[2]];   /* R^T w: the view direction */
+        var vis = Math.max(0, Math.min(1, (n[2] - 0.12) / 0.25)), X = (n[0] * 0.5 + 0.5) * size, Y = (0.5 - n[1] * 0.5) * size, bw = l.e.textContent.length * 5.6 + 10;
+        if (vis > 0 && boxes.some(function(q){ return X < q[2] && X + bw > q[0] && Y - 7 < q[3] && Y + 7 > q[1]; })) vis = 0;   /* the list's order is its priority */
+        if (vis > 0) boxes.push([X, Y - 7, X + bw, Y + 7]);
+        l.e.style.opacity = vis.toFixed(2); l.e.style.display = vis > 0 ? '' : 'none';
+        if (vis > 0) l.e.style.transform = 'translate(' + ((n[0] * 0.5 + 0.5) * size).toFixed(1) + 'px,' + ((0.5 - n[1] * 0.5) * size).toFixed(1) + 'px)'; }); };
+    var raf = 0, last = 0, seen = true;
+    var tick = function(t){ if (!host.isConnected){ cancelAnimationFrame(raf); try { gl.getExtension('WEBGL_lose_context').loseContext(); } catch(e){} return; }
+      raf = requestAnimationFrame(tick); var dt = last ? Math.min(50, t - last) : 16; last = t; if (!seen || document.hidden) return;
+      if (!V.drag){ if (Math.abs(V.vlon) > 0.01 || Math.abs(V.vlat) > 0.01){ V.lon += V.vlon; V.lat = Math.max(-75, Math.min(75, V.lat + V.vlat)); V.vlon *= 0.94; V.vlat *= 0.94; dirty = true; }
+        else if (t - V.idle > 2500){ V.lon += dt * 0.004; dirty = true; } }
+      if (dirty){ dirty = false; draw(); } };
+    raf = requestAnimationFrame(tick);
+    if (window.IntersectionObserver) new IntersectionObserver(function(es){ seen = es[0].isIntersecting; }).observe(cv);
+    var px, py;
+    cv.addEventListener('pointerdown', function(e){ V.drag = true; px = e.clientX; py = e.clientY; V.vlon = V.vlat = 0; try { cv.setPointerCapture(e.pointerId); } catch(_){} e.preventDefault(); });
+    cv.addEventListener('pointermove', function(e){ if (!V.drag) return; var k = 180 / Math.max(120, size), dx = (e.clientX - px) * k, dy = (e.clientY - py) * k; px = e.clientX; py = e.clientY;
+      V.lon -= dx; V.lat = Math.max(-75, Math.min(75, V.lat + dy)); V.vlon = -dx; V.vlat = dy; dirty = true; });
+    var up = function(){ V.drag = false; V.idle = performance.now(); }; cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+    cv.style.touchAction = 'none';
+    wrap.querySelectorAll('[data-pg]').forEach(function(bt){ bt.onclick = function(e){ e.stopPropagation(); wrap.querySelectorAll('[data-pg]').forEach(function(x){ x.classList.toggle('on', x === bt); }); load(bt.getAttribute('data-pg')); }; });
+    window.addEventListener('resize', function(){ dirty = true; });
+    load(cur); return { load: load };
+  };
+  /* the GLOBE tab, added to the Mars and Venus popups once they are built (and the planet's disc opens it) */
+  var add = function(key, tries){ if (!P[key]) return; var pp = document.getElementById('planet-insight-popup'); if (!pp) return;
+    var bar = pp.querySelector('.planet-tab-bar'); if (!bar){ if ((tries || 0) < 30) setTimeout(function(){ add(key, (tries || 0) + 1); }, 100); return; }
+    if (bar.querySelector('[data-tab="pglobe"]')) return;
+    var btns = bar.querySelectorAll('.planet-tab'), first = btns[0];
+    var bt = document.createElement('button'); bt.className = 'planet-tab'; bt.setAttribute('data-tab', 'pglobe'); bt.textContent = 'GLOBE';
+    if (first && first.nextSibling) bar.insertBefore(bt, first.nextSibling); else bar.appendChild(bt);
+    var panels = pp.querySelectorAll('.planet-tab-panel'), pn = document.createElement('div'); pn.className = 'planet-tab-panel'; pn.setAttribute('data-tab', 'pglobe');
+    var fp = panels[0]; if (fp && fp.nextSibling) fp.parentNode.insertBefore(pn, fp.nextSibling); else (fp ? fp.parentNode : pp).appendChild(pn);
+    var made = false, open = function(){ pp.querySelectorAll('.planet-tab').forEach(function(x){ x.classList.toggle('active', x === bt); }); pp.querySelectorAll('.planet-tab-panel').forEach(function(x){ x.classList.toggle('active', x === pn); });
+      if (!made){ made = true; window._bvPlanetGlobe(pn, key); } };
+    bt.addEventListener('click', function(e){ e.stopPropagation(); open(); });
+    btns.forEach(function(x){ x.addEventListener('click', function(){ bt.classList.remove('active'); pn.classList.remove('active'); }); });
+    var disc = pp.querySelector('.planet-hero-img'); if (disc){ disc.style.cursor = 'pointer'; disc.title = 'Open the globe'; disc.addEventListener('click', function(e){ e.stopPropagation(); open(); }); } };
+  var wrapIt = function(){ var prev = window.showPlanetInsight; if (typeof prev !== 'function' || prev._pg) return; var w = function(key){ var r = prev.apply(this, arguments); setTimeout(function(){ add(key, 0); }, 60); return r; }; w._pg = true; window.showPlanetInsight = w; };
+  if (document.readyState === 'complete') wrapIt(); else window.addEventListener('load', wrapIt);
+  setTimeout(wrapIt, 4000);   /* the popup's own wrappers install on DOMContentLoaded; this one goes outermost */
+})();
+</script>
+<style>
+#planet-insight-popup .pg-wrap{ padding:4px 0 6px; }
+#planet-insight-popup .pg-chips{ display:flex; gap:6px; justify-content:center; margin:2px 0 8px; }
+#planet-insight-popup .pg-chip{ border:0; background:rgba(43,34,244,.07); color:#2b22f4; font:800 10px/1 system-ui,sans-serif; letter-spacing:.12em; padding:7px 12px; border-radius:8px; cursor:pointer; }
+#planet-insight-popup .pg-chip.on{ background:#2b22f4; color:#fff; }
+#planet-insight-popup .pg-stage{ position:relative; width:100%; max-width:440px; margin:0 auto; aspect-ratio:1/1; border-radius:50%; background:radial-gradient(circle at 50% 50%, rgba(20,16,60,.12), rgba(20,16,60,0) 72%); }
+#planet-insight-popup .pg-cv{ display:block; cursor:grab; }
+#planet-insight-popup .pg-cv:active{ cursor:grabbing; }
+#planet-insight-popup .pg-ov{ position:absolute; inset:0; pointer-events:none; }
+#planet-insight-popup .pg-lab{ position:absolute; left:0; top:0; white-space:nowrap; pointer-events:auto; }
+#planet-insight-popup .pg-lab i{ position:absolute; left:-2.5px; top:-2.5px; width:5px; height:5px; border-radius:50%; background:#fff; box-shadow:0 0 0 1px rgba(0,0,0,.6); }
+#planet-insight-popup .pg-lab span{ position:absolute; left:6px; top:-6px; font:800 8.5px/1 system-ui,sans-serif; letter-spacing:.08em; color:#fff; text-shadow:0 0 2px #000,0 0 3px #000,0 1px 4px rgba(0,0,0,.9); }
+#planet-insight-popup .pg-load{ position:absolute; left:0; right:0; top:48%; text-align:center; font:800 10px system-ui,sans-serif; letter-spacing:.14em; color:#2b22f4; opacity:.7; }
+#planet-insight-popup .pg-note{ font:500 12px/1.5 system-ui,sans-serif; color:#1b2340; margin:10px 2px 4px; }
+#planet-insight-popup .pg-cr{ font:700 9px/1.4 system-ui,sans-serif; letter-spacing:.08em; color:rgba(27,35,64,.6); margin:0 2px; }
+</style>
+
 </body>
 </html>
