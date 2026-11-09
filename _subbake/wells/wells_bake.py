@@ -36,7 +36,7 @@ CREDIT = {
     'wi': ('Wisconsin Geological and Natural History Survey, wiscLITH', 'public records', 'https://wgnhs.wisc.edu/'),
     'or': ('Oregon Water Resources Department, GWIS', 'public records', 'https://apps.wrd.state.or.us/apps/gw/gw_info/gw_info_report/'),
 }
-SKIP = ('co', 'ma', 'ne')   # co: staff aquifer picks only, API blocks; ma: ~58 h of PDF parsing, held back; ne: CSD licence forbids redistribution without permission
+SKIP = ('co', 'ma', 'ne')   # co: staff aquifer picks only, API blocks; ma: ~58 h of PDF parsing, held back; ne: never (user 2026-11-08: "dont use nebraskas for wells"; its licence forbids redistribution); adapter removed
 
 
 def load(code):

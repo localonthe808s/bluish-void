@@ -21,3 +21,6 @@ Cache: `$WELLS_CACHE` (default /Users/vvvaa/.claude/jobs/9395741e/tmp/wells_cach
 | az | ADWR GWSI | unverified | - | azwater.gov/gis 403s; GWSI may hold lithology | - | - |
 | pa, oh, in, il, mi | Midwest-east survey | PENDING | adapters present: src_pa, src_in, src_il, src_mi (not yet reported/verified) | - | - | - |
 | ks, ksog, mn, ia, wi, ne | Plains survey | PENDING | adapters present: src_ks, src_ksog, src_mn, src_ia (not yet reported/verified) | - | - | - |
+
+
+**Nebraska (CSD test holes): not used, by the user's decision (2026-11-08). The adapter was removed; the licence also forbids redistribution without permission.**
