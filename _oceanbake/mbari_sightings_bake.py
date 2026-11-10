@@ -2,7 +2,7 @@
 """MBARI DEEP-SEA SIGHTINGS (user 2026-11-09: "build the mbari sightings layer").
 
 The public VARS annotation database behind MBARI's Deep-Sea Guide (calypso.mbari.org/anno/v1, the annosaurus API; snake_case
-query fields): every annotation from MBARI's ROV dives since 2024-01-01 with its place, depth and water (temperature, oxygen,
+query fields): every annotation from MBARI's ROV dives since 2022-01-01 that has a frame grab with its place, depth and water (temperature, oxygen,
 salinity). The public set runs well behind the dives (11-09: the newest public annotation was from Oct 2024), so the layer
 says "latest annotated dives", never "now". One point per animal per spot (0.01 degree) and 50 m of depth; the frame grab is
 linked, not copied (MBARI material: non-commercial educational use, credit MBARI). Common names from the knowledge base (kb/v1).
@@ -48,11 +48,11 @@ def classify(name):
 
 
 def main(out, up):
-    since = '2024-01-01T00:00:00Z'; until = time.strftime('%Y-%m-%dT00:00:00Z', time.gmtime(time.time() + 86400)); off = 0; rows = []
+    since = '2022-01-01T00:00:00Z'; until = time.strftime('%Y-%m-%dT00:00:00Z', time.gmtime(time.time() + 86400)); off = 0; rows = []
     while True:
         page = post({'min_timestamp': since, 'max_timestamp': until, 'limit': 5000, 'offset': off, 'data': True})
         rows += page; print('page', off // 5000, len(page), flush=True)
-        if len(page) < 5000 or off >= 5000 * 60: break
+        if len(page) < 5000 or off >= 5000 * 120: break
         off += 5000; time.sleep(2)
     keep = {}
     for r in rows:
@@ -60,12 +60,15 @@ def main(out, up):
         d = r.get('ancillary_data') or {}; la, lo, z = d.get('latitude'), d.get('longitude'), d.get('depth_meters')
         if la is None or lo is None or z is None or not (-90 < la < 90 and -180 <= lo <= 180) or (abs(la) < 0.01 and abs(lo) < 0.01): continue   # 0, 0 = no position
         k = (r['concept'], round(la, 2), round(lo, 2), int(z // 50))
-        if k in keep: keep[k]['n'] += 1; continue
         img = next((i['url'] for i in r.get('image_references') or [] if (i.get('format') or '').endswith('jpeg')), None) or next((i['url'] for i in r.get('image_references') or []), None)
+        if k in keep:
+            keep[k]['n'] += 1
+            if img and not keep[k].get('im'): keep[k]['im'] = img   # any repeat's frame grab will do
+            continue
         keep[k] = {'c': r['concept'], 'la': round(la, 4), 'lo': round(lo, 4), 'z': round(z), 't': (r.get('recorded_timestamp') or '')[:10],
                    'tc': None if d.get('temperature_celsius') is None else round(d['temperature_celsius'], 1), 'o2': None if d.get('oxygen_ml_l') is None else round(d['oxygen_ml_l'], 2),
                    'im': img, 'n': 1}
-    pts = list(keep.values()); names = {}
+    pts = [p for p in keep.values() if p.get('im')]; names = {}   # only sightings with MBARI's frame grab (user 2026-11-09: "only use ones that have photos")
     for c in sorted({p['c'] for p in pts}):
         names[c] = classify(c); time.sleep(0.8)
     pts = [p for p in pts if names.get(p['c'], (None,))[0]]   # animals only (the knowledge base puts rocks, trash and gear outside Animalia)
