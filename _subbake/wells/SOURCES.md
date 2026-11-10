@@ -24,3 +24,5 @@ Cache: `$WELLS_CACHE` (default /Users/vvvaa/.claude/jobs/9395741e/tmp/wells_cach
 
 
 **Nebraska (CSD test holes): not used, by the user's decision (2026-11-08). The adapter was removed; the licence also forbids redistribution without permission.**
+
+**Second bake (2026-11-09): live, 3,669,438 wells, 29,326 log cells, 211 MB pmtiles.** Added mi (1,172,061, EGLE Wellogic, "no restrictions on the use, reproduction, or distribution"), ia (19,512, IGS GeoSam crawl, credit IGS), or (6,329, OWRD GWIS). PA / IN / IL / KS / KSOG / MN / WI verified (rows above marked PENDING are done). NGWMN still has 5,594 logs unfetched (www.usgs.gov blocked this machine's IP on 11-08): fetch them from GitHub Actions, 2 workers, then rebake.
