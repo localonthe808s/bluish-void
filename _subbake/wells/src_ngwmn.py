@@ -10,6 +10,7 @@ WFS = 'https://www.usgs.gov/apps/ngwmn/geoserver/wfs?service=WFS&version=1.0.0&r
 LOG = 'https://www.usgs.gov/apps/ngwmn/ngwmn_cache/data/%s/%s/LOG'
 
 
+SKIP_AGENCY = ('UNLCSD',)   # University of Nebraska-Lincoln CSD: never (user 2026-11-08: "dont use nebraskas for wells"; its licence forbids redistribution)
 OFFLINE = os.environ.get('NGWMN_OFFLINE') == '1'   # cache only (2026-11-08: 12 threads got this machine's address blocked by www.usgs.gov's firewall)
 WORKERS = int(os.environ.get('NGWMN_WORKERS', '2'))
 PAUSE = float(os.environ.get('NGWMN_PAUSE', '0.6'))
@@ -53,6 +54,7 @@ def wells():
     sites = json.loads(get(WFS, os.path.join(CACHE, 'sites.json'), 300))['features']
     def one(f):
         p = f['properties']; a, s = p['AGENCY_CD'], p['SITE_NO']
+        if a in SKIP_AGENCY: return None
         b = get(LOG % (a, s), os.path.join(CACHE, '%s_%s.xml' % (a, re.sub(r'\W', '_', s))))
         if not b: return None
         log = parse(b.decode('utf-8', 'replace'))
