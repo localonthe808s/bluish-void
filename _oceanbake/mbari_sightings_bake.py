@@ -37,14 +37,47 @@ def lineage(name):
     return out
 
 
+_LC = {}
+def _lc_load():
+    import os
+    f = os.environ.get('MBARI_KB_CACHE')
+    if f and os.path.exists(f) and not _LC: _LC.update(json.load(open(f)))
+def _lc_save():
+    import os
+    f = os.environ.get('MBARI_KB_CACHE')
+    if f: json.dump(_LC, open(f, 'w'))
+
+
 def classify(name):
+    _lc_load()
+    if name in _LC: return tuple(_LC[name])
     L = lineage(name); names = [x[0] for x in L]
     grp = next((g for k, g in GROUPS if k in names), None)
     cn = None
     for nm, rk, alt in reversed(L):   # the most specific common name: the concept's own, else its nearest ancestor's
         low = [a for a in alt if a and a == a.lower() and '-' not in a and len(a) > 3]
         if low: cn = low[0] if nm == name else (low[0] if not cn else cn); break
+    if L: _LC[name] = [grp, cn]; _lc_save()   # cached when MBARI_KB_CACHE is set (a local rerun skips the ~670 lookups)
     return grp, cn
+
+
+def frame_box(r):
+    """(jpeg url, [x, y, w, h] as fractions of the frame or None): the annotator's (or the detector's, verified) box around the animal"""
+    refs = r.get('image_references') or []
+    box = None
+    for a in r.get('associations') or []:
+        if (a.get('link_name') or '').lower() == 'bounding box':
+            try: box = json.loads(a.get('link_value') or '{}'); break
+            except Exception: pass
+    pick = None
+    if box and box.get('image_reference_uuid'): pick = next((i for i in refs if i.get('uuid') == box['image_reference_uuid']), None)
+    jpg = next((i for i in refs if (i.get('format') or '').endswith('jpeg')), None)   # JPEG only: every PNG frame grab checked 11-09 was missing (176 of 176, 404)
+    if not jpg: return None, None
+    ref = pick or jpg
+    url = (jpg or ref)['url']; W, H = ref.get('width_pixels') or (jpg or {}).get('width_pixels'), ref.get('height_pixels') or (jpg or {}).get('height_pixels')
+    if box and W and H and all(k in box for k in ('x', 'y', 'width', 'height')):
+        return url, [round(box['x'] / W, 4), round(box['y'] / H, 4), round(box['width'] / W, 4), round(box['height'] / H, 4)]
+    return url, None
 
 
 def main(out, up):
@@ -60,14 +93,14 @@ def main(out, up):
         d = r.get('ancillary_data') or {}; la, lo, z = d.get('latitude'), d.get('longitude'), d.get('depth_meters')
         if la is None or lo is None or z is None or not (-90 < la < 90 and -180 <= lo <= 180) or (abs(la) < 0.01 and abs(lo) < 0.01): continue   # 0, 0 = no position
         k = (r['concept'], round(la, 2), round(lo, 2), int(z // 50))
-        img = next((i['url'] for i in r.get('image_references') or [] if (i.get('format') or '').endswith('jpeg')), None) or next((i['url'] for i in r.get('image_references') or []), None)
+        img, bb = frame_box(r)
         if k in keep:
-            keep[k]['n'] += 1
-            if img and not keep[k].get('im'): keep[k]['im'] = img   # any repeat's frame grab will do
+            q = keep[k]; q['n'] += 1
+            if img and (not q.get('im') or (bb and not q.get('bb'))): q['im'] = img; q['bb'] = bb   # prefer a frame with a box around the animal (user 2026-11-09)
             continue
         keep[k] = {'c': r['concept'], 'la': round(la, 4), 'lo': round(lo, 4), 'z': round(z), 't': (r.get('recorded_timestamp') or '')[:10],
                    'tc': None if d.get('temperature_celsius') is None else round(d['temperature_celsius'], 1), 'o2': None if d.get('oxygen_ml_l') is None else round(d['oxygen_ml_l'], 2),
-                   'im': img, 'n': 1}
+                   'im': img, 'bb': bb, 'n': 1}
     pts = [p for p in keep.values() if p.get('im')]; names = {}   # only sightings with MBARI's frame grab (user 2026-11-09: "only use ones that have photos")
     for c in sorted({p['c'] for p in pts}):
         names[c] = classify(c); time.sleep(0.8)

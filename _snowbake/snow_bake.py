@@ -246,7 +246,7 @@ def main():
     except Exception as e: print('snotel failed', e, flush=True)
     out['r'] = rs
     # the page's copy of the resort list: only what the map and cards use (the sources stay in the repo's file)
-    KEEP = ('id', 'name', 'region', 'state', 'lat', 'lon', 'summit_ft', 'base_ft', 'vertical_ft', 'trails', 'lifts', 'acres', 'website', 'tickets',
+    KEEP = ('id', 'name', 'region', 'state', 'lat', 'lon', 'summit_ft', 'base_ft', 'vertical_ft', 'trails', 'lifts', 'acres', 'website', 'tickets', 'lift_status',
             'passes', 'hours', 'hours_note', 'hours_src', 'season', 'night_skiing', 'status')
     if R:
         slim = [{k: r[k] for k in KEEP if r.get(k) not in (None, '', [])} for r in R]
