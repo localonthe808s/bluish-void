@@ -327,6 +327,39 @@ window._bvTileRect = function(M, ly, t){
 </script>
 <script src="https://cdn.bluishvoid.com/vendor/leaflet/leaflet.js"></script>
 <script>
+/* EVERY MAP DOT GLOWS (user 2026-11-10: "make all map dots glow like this now across the site", after THE ROCK's dots got the
+   faults' glow): two soft halos in the dot's own color under every filled dot, in proportion to the dot (r x 1.9 + 1 at 11%, r x 1.4
+   + .6 at 26%), thinning zoomed out. Done once, in how the site draws a dot, so every map gets it:
+     Leaflet canvas circle markers  L.Canvas.prototype._updateCircle draws the halos first
+     Leaflet SVG circle markers     L.SVG.prototype._updateStyle adds a drop-shadow in the dot's color
+     protomaps circles              CircleSymbolizer.prototype.draw (patched as soon as protomaps-leaflet loads)
+   Unfilled rings (fill off or 0 opacity) and divIcon markers are left alone. */
+(function(){
+  var K = function(z){ return z == null ? 1 : z < 6 ? .3 : z < 8 ? .6 : 1; };
+  var halos = function(r, k){ return [[r * (1 + .9 * k) + 1, .11], [r * (1 + .4 * k) + .6, .26]]; };
+  window._bvGlowK = K; window._bvGlowHalos = halos;
+  try { if (window.L && L.Canvas && !L.Canvas.prototype._bvGlow){ var up = L.Canvas.prototype._updateCircle; L.Canvas.prototype._bvGlow = true;
+    L.Canvas.prototype._updateCircle = function(layer){ try { var c = this._ctx, p = layer._point, o = layer.options || {}, col = o.fillColor || o.color, r = Math.max(layer._radius || 0, 1);
+        if (c && p && col && o.fill !== false && o.fillOpacity !== 0 && o.glow !== false && !(layer._empty && layer._empty())){ var k = K(this._map ? this._map.getZoom() : null), op = o.fillOpacity == null ? 1 : Math.min(1, o.fillOpacity * 1.2);
+          c.save(); c.fillStyle = col; halos(r, k).forEach(function(h){ c.globalAlpha = h[1] * op; c.beginPath(); c.arc(p.x, p.y, h[0], 0, 6.2832); c.fill(); }); c.restore(); } } catch(e){}
+      return up.apply(this, arguments); }; } } catch(e){}
+  try { if (window.L && L.SVG && !L.SVG.prototype._bvGlow){ var us = L.SVG.prototype._updateStyle; L.SVG.prototype._bvGlow = true;
+    L.SVG.prototype._updateStyle = function(layer){ var out = us.apply(this, arguments);
+      try { if (layer instanceof L.CircleMarker && layer._path){ var o = layer.options || {}, col = o.fillColor || o.color;
+          if (col && o.fill !== false && o.fillOpacity !== 0 && o.glow !== false){ var r = Math.max(o.radius || 0, 1), a = /^#[0-9a-f]{6}$/i.test(col) ? col + '73' : col;
+            layer._path.style.filter = 'drop-shadow(0 0 ' + (r * .7 + 1.5).toFixed(1) + 'px ' + a + ')'; } else layer._path.style.filter = ''; } } catch(e){}
+      return out; }; } } catch(e){}
+  var pm = function(){ var P = window.protomapsL; if (!P || !P.CircleSymbolizer) return false; if (P.CircleSymbolizer.prototype._bvGlow) return true;
+    var dr = P.CircleSymbolizer.prototype.draw; P.CircleSymbolizer.prototype._bvGlow = true;
+    P.CircleSymbolizer.prototype.draw = function(ctx, geom, z, f){ try { var rad = this.radius && this.radius.get(z, f), col = this.fill && this.fill.get(z, f), op = this.opacity ? this.opacity.get(z, f) : 1;
+        if (rad && col && op !== 0){ var k = K(z); ctx.save(); ctx.fillStyle = col;
+          halos(rad, k).forEach(function(h){ ctx.globalAlpha = h[1] * (op == null ? 1 : op); ctx.beginPath(); (geom || []).forEach(function(ring){ (ring || []).forEach(function(pt){ ctx.moveTo(pt.x + h[0], pt.y); ctx.arc(pt.x, pt.y, h[0], 0, 6.2832); }); }); ctx.fill(); });
+          ctx.restore(); } } catch(e){}
+      return dr.apply(this, arguments); }; return true; };
+  if (!pm()){ var n = 0, t = setInterval(function(){ if (pm() || ++n > 240) clearInterval(t); }, 250); }
+})();
+</script>
+<script>
 /* STUCK TILES (user 2026-10-21: "geology isnt loading", a block of the GEOLOGY map left empty). protomaps-leaflet 5.1.0's
    renderTile quits WITHOUT painting or telling Leaflet the tile is done whenever its data lands after any other zoom was asked
    for (its lastRequestedZ check). Zoom away and back before Leaflet prunes the tile and Leaflet keeps that never-finished tile:
@@ -97453,23 +97486,9 @@ function closeAlertModal(){
       G: { P: ['#f2c14e', 'PRECIOUS METALS'], B: ['#e07b39', 'BASE METALS'], F: ['#c0563b', 'IRON AND ALLOYS'], C: ['#2dd4bf', 'CRITICAL MINERALS'], E: ['#9bd34a', 'ENERGY (URANIUM, GEOTHERMAL)'], G: ['#7dd3fc', 'GEMS'], I: ['#c9b99a', 'INDUSTRIAL (STONE, SAND, CLAY, SALT)'], O: ['#e5e7eb', 'OTHER'] },
       S: { P: 'PRODUCING', X: 'PAST PRODUCER', R: 'PROSPECT', O: 'OCCURRENCE', L: 'PROCESSING PLANT', U: 'STATUS UNKNOWN' } };
     try { MN.on = localStorage.getItem('bv_geo_min') === '1'; MN.oil = localStorage.getItem('bv_geo_oil') === '1'; } catch(e){}
-    /* DOTS THAT GLOW LIKE THE FAULTS (user 2026-11-10: "can our dots glow like our fault lines are? the glow is clean"): under every dot
-       on THE ROCK two soft halos in the dot's own color (wide and faint, then tight and brighter, both in proportion to the dot: fixed-width halos turned dense well fields into haze), the same layered-stroke recipe as the
-       fault lines, thinning when zoomed out as the faults' does. Tiled layers: a halo rule added before each circle rule (it reads the
-       circle's own radius and color). Canvas layers: the underground renderer draws the halos before each circle. */
-    var GLOWK = function(z){ return z < 6 ? .3 : z < 8 ? .6 : 1; };
-    window._bvGlowRules = function(rules){ var out = []; (rules || []).forEach(function(r){ var sy = r.symbolizer;
-        if (sy && sy.radius && sy.fill && typeof sy.radius.get === 'function' && sy instanceof protomapsL.CircleSymbolizer){
-          out.push({ dataSource: r.dataSource, dataLayer: r.dataLayer, filter: r.filter, symbolizer: { draw: function(ctx, geom, z, f){ var rad = sy.radius.get(z, f), col = sy.fill.get(z, f); if (!rad || !col) return; var k = GLOWK(z);
-            ctx.save(); ctx.fillStyle = col;
-            [[rad * (1 + .9 * k) + 1, .11], [rad * (1 + .4 * k) + .6, .26]].forEach(function(h){ ctx.globalAlpha = h[1]; ctx.beginPath(); (geom || []).forEach(function(ring){ (ring || []).forEach(function(pt){ ctx.moveTo(pt.x + h[0], pt.y); ctx.arc(pt.x, pt.y, h[0], 0, 6.2832); }); }); ctx.fill(); });
-            ctx.restore(); } } }); }
-        out.push(r); }); return out; };
-    window._bvGlowCanvas = function(rd){ if (!rd || rd._bvGlow) return rd; rd._bvGlow = true; var up = rd._updateCircle;
-      rd._updateCircle = function(layer){ try { if (!layer._empty || !layer._empty()){ var c = this._ctx, p = layer._point, r = Math.max(layer._radius || 0, 1), o = layer.options, col = o.fillColor || o.color, k = GLOWK(this._map ? this._map.getZoom() : 10);
-            if (c && p && col && o.fill !== false && o.fillOpacity !== 0){ c.save(); c.fillStyle = col; [[r * (1 + .9 * k) + 1, .11], [r * (1 + .4 * k) + .6, .26]].forEach(function(h){ c.globalAlpha = h[1]; c.beginPath(); c.arc(p.x, p.y, h[0], 0, 6.2832); c.fill(); }); c.restore(); } } } catch(e){}
-        return up.apply(this, arguments); };
-      return rd; };
+    /* THE ROCK's dots glow through the site-wide glow (see EVERY MAP DOT GLOWS, beside Leaflet's script); these two stay as pass-throughs for their callers */
+    window._bvGlowRules = function(rules){ return rules; };   /* superseded by the site-wide glow at Leaflet's load (2026-11-10) */
+    window._bvGlowCanvas = function(rd){ return rd; };   /* superseded by the site-wide glow */
     MN.make = function(){ var P = protomapsL, pr = function(f){ return (f && f.props) || {}; };
       if (!M.getPane('lcMinerals')){ var pn = M.createPane('lcMinerals'); pn.style.zIndex = 447; pn.style.pointerEvents = 'none'; }
       var rad = function(z, f){ var st = pr(f).s, k = st === 'P' ? 1.6 : st === 'X' || st === 'L' ? 1.15 : .85; return Math.max(1.4, Math.min(6.5, (z <= 5 ? 2 : z <= 8 ? 2.6 : z <= 11 ? 3.3 : 4.2) * k)); };
