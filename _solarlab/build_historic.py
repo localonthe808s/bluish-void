@@ -119,6 +119,53 @@ SETS.update({
         ('First View of Earth from Moon - reprocessed wide.jpg', 'The same frame, restored from the original tapes in 2008', '1966-08-23', 'Lunar Orbiter 1 camera', 'NASA / LOIRP'),
         ('Earthrise 23 Aug 1966.jpg', 'Earthrise over the Moon\u2019s limb, the full strip', '1966-08-23', 'Lunar Orbiter 1 camera', 'NASA'),
     ],
+    'planck': [   # user 2026-11-12: "do soviet ones with enough photos, same with ESA"
+        ('Plank Molecular Clouds.jpg', 'The first all-sky map of carbon monoxide: the Milky Way’s molecular clouds', '2012-02-13', 'HFI', 'ESA/NASA/Planck Collaboration, public domain'),
+        ('Galaxy clusters connected by gas bridge node full image 2.jpg', 'A bridge of hot gas linking two galaxy clusters, in orange', '2012-11-20', 'HFI/LFI', 'ESA Planck Collaboration, CC BY-SA 3.0'),
+        ('Cosmic Microwave Background (CMB).jpeg', 'The whole sky in the oldest light: the cosmic microwave background', '2013-03-21', 'HFI/LFI', 'ESA and the Planck Collaboration, CC BY 4.0'),
+        ('The core of the Shapley Supercluster.jpg', 'Gas between the galaxy clusters of the Shapley Supercluster, in blue', '2013-10-21', 'HFI/LFI with ROSAT and DSS', 'ESA & Planck Collaboration / ROSAT / DSS, CC BY-SA 3.0'),
+    ],
+    'herschel': [   # user 2026-11-12: "do soviet ones with enough photos, same with ESA"
+        ('Infrared Image of Dark Cloud in Aquila.jpg', 'Some 700 forming stars in dusty filaments of a dark cloud in Aquila', '2009-12-16', 'PACS + SPIRE', 'ESA / SPIRE / PACS / P. André (CEA Saclay), public domain'),
+        ('Embryonic Stars in the Rosette Nebula.jpg', 'Dusty cocoons of massive embryonic stars in the Rosette cloud', '2010-04-12', 'PACS + SPIRE', 'ESA and the PACS, SPIRE & HSC Consortia, public domain'),
+        ('The Galactic Bubble RCW 120.jpg', 'The bubble RCW 120, a newborn giant star in its wall', '2010-05-06', 'PACS + SPIRE', 'ESA/PACS/SPIRE/HOBYS, public domain'),
+        ('Herschel Image of Andromeda Galaxy.jpg', 'Cold dust tracing the rings of star birth in Andromeda', '2011-01-05', 'PACS + SPIRE', 'ESA/Herschel/PACS/SPIRE/J. Fritz, U. Gent, public domain'),
+        ('Herschel’s view of a star nursery ESA384009.jpg', 'A tangle of filaments in Rho Ophiuchi, 440 light-years away', '2017-09-18', 'PACS + SPIRE', 'ESA/Herschel/NASA/JPL-Caltech, CC BY-SA 3.0 IGO'),
+    ],
+    'smart1': [   # user 2026-11-12: "do soviet ones with enough photos, same with ESA"
+        ('SMART-1’s view of a waning Earth ESA213471.jpg', 'Earth, turning and waning, from about 124,000 miles', '2004-11-01', 'AMIE', 'ESA/Space-X (Space Exploration Institute), CC BY-SA 3.0 IGO'),
+        ('SMART-1 approaches the Moon ESA232678.jpg', 'The Moon on approach, from 373,000 and then 37,000 miles', '2004-11-12', 'AMIE', 'ESA/Space-X, CC BY-SA 3.0 IGO'),
+        ('Pythagoras impact crater ESA213440.jpg', 'Pythagoras, a 75-mile crater with a central peak', '2004-12-29', 'AMIE', 'ESA/Space-X, CC BY-SA 3.0 IGO'),
+        ('The lunar north pole - SMART-1 mosaic ESA226382.jpg', 'About 30 frames stitched into a mosaic of the Moon’s north pole', '2007-12-10', 'AMIE', 'ESA/Space-X, CC BY-SA 3.0 IGO'),
+    ],
+    'rosetta': [   # user 2026-11-12: "do soviet ones with enough photos, same with ESA"
+        ('Comet 67P True color.jpg', 'Comet 67P in natural color, nearly coal-black, from 75 miles', '2014-08-06', 'OSIRIS narrow-angle camera', 'ESA/Rosetta/MPS for OSIRIS Team, CC BY-SA 4.0'),
+        ('Comet 67P on 19 September 2014 NavCam mosaic.jpg', 'The two-lobed “rubber duck” nucleus from 17.8 miles', '2014-09-19', 'NAVCAM', 'ESA/Rosetta/NAVCAM, CC BY-SA 3.0 IGO'),
+        ('OSIRIS spots Philae drifting across the comet - Flickr - europeanspaceagency.jpg', 'Philae drifting across the comet after its first touchdown', '2014-11-12', 'OSIRIS narrow-angle camera', 'ESA/Rosetta/MPS for OSIRIS Team, CC BY-SA 4.0'),
+        ('Comet 67P on 12 August 2015 (20300571683).jpg', 'Jets streaming from the nucleus a day before perihelion', '2015-08-12', 'NAVCAM', 'ESA/Rosetta/NAVCAM, CC BY-SA 2.0'),
+        ('Philae found (36151637845).jpg', 'Philae found, wedged in a dark crack, from 1.7 miles', '2016-09-02', 'OSIRIS narrow-angle camera', 'ESA/Rosetta/MPS for OSIRIS Team; ESA/Rosetta/NavCam, CC BY-SA 2.0'),
+        ('Comet from 16 km (29902697052).jpg', 'Cliffs and boulders from 10 miles up, on the final descent', '2016-09-30', 'OSIRIS narrow-angle camera', 'ESA/Rosetta/MPS for OSIRIS Team, CC BY-SA 4.0'),
+    ],
+    'huygens': [   # user 2026-11-12: "do soviet ones with enough photos, same with ESA"
+        ('Mercator region by huygens.jpg', 'Titan’s ridges and channels, flattened panorama from 6 miles up', '2005-01-14', 'DISR descent imager', 'ESA/NASA/JPL/University of Arizona, public domain'),
+        ('Huygens shoreline.jpg', 'Bright uplands cut by channels meet a dark plain', '2005-01-14', 'DISR descent imager', 'NASA/JPL/ESA/University of Arizona, public domain'),
+        ('HRICoastLineMoasic H.jpg', 'Branching channels draining off a high ridge', '2005-01-14', 'DISR descent imager', 'ESA/NASA/JPL/University of Arizona, public domain'),
+        ('Huygens fish-eye view of Titan.jpg', 'Fish-eye view of the landing region from about 3 miles up', '2005-01-14', 'DISR descent imager', 'ESA/NASA/JPL/University of Arizona, public domain'),
+        ('Huygens surface color.jpg', 'The surface of Titan: rounded pebbles under an orange sky', '2005-01-14', 'DISR descent imager', 'ESA/NASA/JPL/University of Arizona, public domain'),
+    ],
+    'mir': [   # user 2026-11-12: "do soviet ones with enough photos, same with ESA"
+        ('Astronaut Gibson Shakes Hands with Cosmonaut Dezhurov - GPN-2002-000062.jpg', 'Gibson and Dezhurov shake hands at the first shuttle docking', '1995-06-29', '35 mm camera, STS-71 crew', 'NASA, public domain'),
+        ('Atlantis docked to MIR - GPN-2000-001315.jpg', 'Atlantis docked to Mir, seen from a Soyuz fly-around', '1995-07-04', 'Mir-19 crew, from their Soyuz', 'NASA, public domain'),
+        ('Interior of Mir Core Module.jpg', 'Yury Onufrienko floats through the core module', '1996-03-25', '35 mm camera, STS-76 crew aboard Mir', 'NASA, public domain'),
+        ('Fernandina NM22-723-69.jpg', 'The Galapagos volcanoes, photographed from Mir', '1996-10-16', 'Hasselblad, 250 mm lens, Mir-22 crew', 'NASA, public domain'),
+        ('Christmas 1997 on the Mir Space Station.jpg', 'Solovyev, Wolf and Vinogradov at Christmas aboard Mir', '1997-12-25', 'Mir-24 crew', 'NASA, public domain'),
+        ('Mir space station 12 June 1998.jpg', 'Mir from Discovery on the last shuttle fly-around', '1998-06-08', 'STS-91 crew aboard Discovery', 'NASA, public domain'),
+    ],
+    'luna': [   # user 2026-11-12: "do soviet ones with enough photos, same with ESA"
+        ('Luna 3 moon.jpg', 'The first full view of the Moon’s far side', '1959-10-07', 'Yenisey-2 camera', 'OKB-1 / USSR via NASA NSSDCA, public domain'),
+        ('Close-up of the far side of the Moon from Luna 3.png', 'A narrow-angle frame of the far side, near Mare Smythii', '1959-10-07', 'Yenisey-2 camera, narrow-angle lens', 'OKB-1 / USSR via NASA NSSDCA, public domain'),
+        ('First Photo from the Surface of the Moon.jpg', 'Luna 9: the first photo from the Moon’s surface, Ocean of Storms', '1966-02-04', 'Luna 9 panoramic camera', 'USSR via NASA NSSDCA, public domain'),
+    ],
     'venera': [   # user 2026-11-12: "our mission archives doesnt show the VENERA missions"
         ('Foto de Venera 9.png', 'The first photograph from the surface of another planet, Oct 22, 1975', '1975-10-22', 'Venera 9 lander camera', 'Reprocessed by Ted Stryk, public domain'),
         ('Venera10surface.gif', 'Venera 10 on Venus, three days later', '1975-10-25', 'Venera 10 lander camera', 'USSR Academy of Sciences, public domain'),
@@ -200,7 +247,7 @@ SETS['lageos_ground'] = [
     ('Wettzell Laser Ranging System.jpg', 'The Wettzell laser ranging telescope, Bavaria', '2008-09-13', 'photograph', 'H. Raab \u00b7 CC BY-SA 3.0'),
     ('Mount Stromlo satellite laser ranging facility 02.jpg', 'Mount Stromlo laser ranging, Canberra', '2014-09-17', 'photograph', 'Mitch Ames \u00b7 CC BY-SA 4.0'),
 ]
-HEROES = {'venera': 'Cut-away model of a Soviet Venera 12 lander.jpg', 'lageos': 'Laser Geodynamics Satellite I (5278072466).jpg', 'tiros1': 'TIROS-1 satellite.png', 'erts1': 'Landsat-1.jpg', 'tiros9': 'TIROS IX Spac0021-repair.jpg', 'seasat': 'Seasat in orbit.jpg',
+HEROES = {'planck': 'Model of the Planck Satellite.jpg', 'herschel': 'Model of the Herschel space telescope.jpg', 'smart1': 'SMART-1 is packed as it will be for launch ESA228534.jpg', 'rosetta': 'Rosetta Electrical Qualification Model at ESOC.jpg', 'huygens': 'Huygens Titan Lander (5951413737).jpg', 'mir': 'Mir STS-89.jpg', 'luna': 'Luna-9 (Memorial Museum of Astronautics).JPG', 'venera': 'Cut-away model of a Soviet Venera 12 lander.jpg', 'lageos': 'Laser Geodynamics Satellite I (5278072466).jpg', 'tiros1': 'TIROS-1 satellite.png', 'erts1': 'Landsat-1.jpg', 'tiros9': 'TIROS IX Spac0021-repair.jpg', 'seasat': 'Seasat in orbit.jpg',
           'explorer6': 'Explorer 6 paddles up.jpg', 'ats1': 'Applications Technology Satellite 1 (ATS 1).jpg', 'ats3': 'Applications Technology Satellite 3 (ATS 3).png',
           'lo1': 'Lunar Orbiter.jpg', 'goes': 'SMS 1 satellite.jpg', 'nimbus7': 'Nimbus rendering.jpg', 'corona': 'Kh-4b corona.jpg'}
 
@@ -243,7 +290,10 @@ def fetch(url):
 
 
 def save(raw, path, side):
-    im = Image.open(io.BytesIO(raw)).convert('RGB'); im.thumbnail((side, side), Image.LANCZOS)
+    im = Image.open(io.BytesIO(raw))
+    if im.mode in ('I;16', 'I;16B', 'I'):   # 16-bit grayscale: convert('RGB') clips it to white (Luna 3 close-up, 11-12)
+        im = im.point(lambda v: v / 256).convert('L')
+    im = im.convert('RGB'); im.thumbnail((side, side), Image.LANCZOS)
     im.save(path, 'WEBP', quality=82, method=6)
 
 
