@@ -197,7 +197,7 @@ SETS['lageos_ground'] = [
 ]
 HEROES = {'lageos': 'Laser Geodynamics Satellite I (5278072466).jpg', 'tiros1': 'TIROS-1 satellite.png', 'erts1': 'Landsat-1.jpg', 'tiros9': 'TIROS IX Spac0021-repair.jpg', 'seasat': 'Seasat in orbit.jpg',
           'explorer6': 'Explorer 6 paddles up.jpg', 'ats1': 'Applications Technology Satellite 1 (ATS 1).jpg', 'ats3': 'Applications Technology Satellite 3 (ATS 3).png',
-          'lo1': 'Lunar Orbiter Spacecraft Model \u2014 1 8 Scale (50024117333).jpg', 'goes': 'SMS 1 satellite.jpg', 'nimbus7': 'Nimbus rendering.jpg', 'corona': 'Kh-4b corona.jpg'}
+          'lo1': 'Lunar Orbiter.jpg', 'goes': 'SMS 1 satellite.jpg', 'nimbus7': 'Nimbus rendering.jpg', 'corona': 'Kh-4b corona.jpg'}
 
 
 def publish(path):
