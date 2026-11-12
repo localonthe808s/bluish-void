@@ -119,6 +119,11 @@ SETS.update({
         ('First View of Earth from Moon - reprocessed wide.jpg', 'The same frame, restored from the original tapes in 2008', '1966-08-23', 'Lunar Orbiter 1 camera', 'NASA / LOIRP'),
         ('Earthrise 23 Aug 1966.jpg', 'Earthrise over the Moon\u2019s limb, the full strip', '1966-08-23', 'Lunar Orbiter 1 camera', 'NASA'),
     ],
+    'venera': [   # user 2026-11-12: "our mission archives doesnt show the VENERA missions"
+        ('Foto de Venera 9.png', 'The first photograph from the surface of another planet, Oct 22, 1975', '1975-10-22', 'Venera 9 lander camera', 'Reprocessed by Ted Stryk, public domain'),
+        ('Venera10surface.gif', 'Venera 10 on Venus, three days later', '1975-10-25', 'Venera 10 lander camera', 'USSR Academy of Sciences, public domain'),
+        ('V13 vg261 262.tif', 'The first color pictures from Venus, Mar 1, 1982', '1982-03-01', 'Venera 13 lander camera', 'USSR / NASA, public domain'),
+    ],
     'goes': [
         ('First image from GOES Spac0041.jpg', 'The first picture from a GOES satellite, Oct 25, 1975', '1975-10-25', 'GOES-1 VISSR', 'NOAA Photo Library'),
         ('SMS-II full disc infrared image showing parade of tropical storms marching tothe west across the eastern Pacific Ocean (2268-406).jpg', 'A parade of storms across the eastern Pacific, in infrared', '1975-09-26', 'SMS-2 VISSR, infrared', 'NOAA'),
@@ -195,7 +200,7 @@ SETS['lageos_ground'] = [
     ('Wettzell Laser Ranging System.jpg', 'The Wettzell laser ranging telescope, Bavaria', '2008-09-13', 'photograph', 'H. Raab \u00b7 CC BY-SA 3.0'),
     ('Mount Stromlo satellite laser ranging facility 02.jpg', 'Mount Stromlo laser ranging, Canberra', '2014-09-17', 'photograph', 'Mitch Ames \u00b7 CC BY-SA 4.0'),
 ]
-HEROES = {'lageos': 'Laser Geodynamics Satellite I (5278072466).jpg', 'tiros1': 'TIROS-1 satellite.png', 'erts1': 'Landsat-1.jpg', 'tiros9': 'TIROS IX Spac0021-repair.jpg', 'seasat': 'Seasat in orbit.jpg',
+HEROES = {'venera': 'Cut-away model of a Soviet Venera 12 lander.jpg', 'lageos': 'Laser Geodynamics Satellite I (5278072466).jpg', 'tiros1': 'TIROS-1 satellite.png', 'erts1': 'Landsat-1.jpg', 'tiros9': 'TIROS IX Spac0021-repair.jpg', 'seasat': 'Seasat in orbit.jpg',
           'explorer6': 'Explorer 6 paddles up.jpg', 'ats1': 'Applications Technology Satellite 1 (ATS 1).jpg', 'ats3': 'Applications Technology Satellite 3 (ATS 3).png',
           'lo1': 'Lunar Orbiter.jpg', 'goes': 'SMS 1 satellite.jpg', 'nimbus7': 'Nimbus rendering.jpg', 'corona': 'Kh-4b corona.jpg'}
 
