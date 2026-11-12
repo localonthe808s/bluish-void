@@ -444,6 +444,14 @@ def main():
         # not throw it away, which overwriting price_rows.json used to do).
         only = [x.strip() for x in sys.argv[sys.argv.index('--city') + 1].split(',') if x.strip()]
     all_rows, per = [], {}
+    # A FAILED RUN KEEPS LAST NIGHT'S ROWS (2026-11-12 review). On 11-11 the ny study raised, its rows were already
+    # dropped above, and an empty price_rows.json / price_study.json was committed: the bake lost its blend weights,
+    # band haircuts, afternoon blend and (via live_hours.py) the live hour curve until the next good night.
+    try:
+        with open(os.path.join(HERE, 'price_rows.json')) as f:
+            prev = json.load(f)
+    except Exception:
+        prev = []
     if only:
         try:
             with open(os.path.join(HERE, 'price_rows.json')) as f:
@@ -461,6 +469,11 @@ def main():
             r = study(cfg)
         except Exception as e:
             print('%s FAILED: %s: %s' % (cfg['key'], type(e).__name__, e))
+            r = None
+        if not r:
+            old = [x for x in prev if x.get('city') == cfg['key']]
+            print('%s: no new rows, kept %d from the last run' % (cfg['key'], len(old)))
+            all_rows += old
             continue
         all_rows += r
         print('  -> %d hour-rows | %s' % (len(r), K.timing_report()))
