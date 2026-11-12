@@ -1035,9 +1035,12 @@
     var FS = function(t){return '<div style="font-weight:800;font-size:9px;color:'+color+';text-transform:uppercase;letter-spacing:.04em;margin-top:8px;margin-bottom:4px;padding-bottom:3px;border-bottom:1px solid rgba(255,255,255,.08);">'+t+'</div>';};
 
     // NASA/JPL planet images (public domain) — NASA Image and Video Library CDN
+    /* TRUE COLOR (user 2026-11-11: "is mercury and venus honestly depictions of them?"): Mercury was PIA19216 (an enhanced-color Caloris mosaic)
+       and Venus PIA00104 (Magellan radar, computer-simulated, Venera-tinted). Now Mercury = PIA11364's top-right panel (480/560/630 nm,
+       one shared stretch: the nearest MESSENGER gives to the eye) and Venus = PIA23791 figure A (Mariner 10, natural color, 2020 reprocessing). */
     var planetImgs = {
-      mercury:'https://cdn.bluishvoid.com/planets/PIA19216.webp',
-      venus:'https://cdn.bluishvoid.com/planets/PIA00104.webp',
+      mercury:'https://cdn.bluishvoid.com/planets/PIA11364_tr.webp',
+      venus:'https://cdn.bluishvoid.com/planets/PIA23791_a.webp',
       moon: (window._moonPreload && window._moonPreload.url) || '',
       mars:'https://cdn.bluishvoid.com/planets/PIA00407.webp',
       jupiter:'https://cdn.bluishvoid.com/planets/PIA22946.webp',
@@ -1076,8 +1079,8 @@
     var _MOON_FILL = window._MOON_FILL = 1.16, _SUN_FILL = window._SUN_FILL = 1.46;
     /* Every planet's disc, already on the CDN for the timeline legend. */
     window._IMG_PLANET = {
-      mercury:'https://cdn.bluishvoid.com/planet-8fc30b7a.jpg',
-      venus:'https://cdn.bluishvoid.com/planet-2e98fa2c.jpg',
+      mercury:'https://cdn.bluishvoid.com/planet-mercury-tc.jpg',
+      venus:'https://cdn.bluishvoid.com/planet-venus-tc.jpg',
       mars:'https://cdn.bluishvoid.com/planet-35430401.jpg',
       jupiter:'https://cdn.bluishvoid.com/planet-b52f3e86.jpg',
       saturn:'https://cdn.bluishvoid.com/planet-4d8062c8.jpg',
@@ -1782,8 +1785,8 @@
       var _surfD = 'M '+cx+' '+cy+' L '+_sx1.toFixed(2)+' '+_sy1.toFixed(2)
                  + ' A '+svgR+' '+svgR+' 0 1 1 '+_sx2.toFixed(2)+' '+_sy2.toFixed(2)+' Z';
       var _icSurfImg = ({
-        mercury:'https://cdn.bluishvoid.com/planet-8fc30b7a.jpg',
-        venus:'https://cdn.bluishvoid.com/planet-2e98fa2c.jpg',
+        mercury:'https://cdn.bluishvoid.com/planet-mercury-tc.jpg',
+        venus:'https://cdn.bluishvoid.com/planet-venus-tc.jpg',
         mars:'https://cdn.bluishvoid.com/planet-35430401.jpg',
         jupiter:'https://cdn.bluishvoid.com/planet-b52f3e86.jpg',
         saturn:'https://cdn.bluishvoid.com/planet-4d8062c8.jpg',
