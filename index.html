@@ -336,6 +336,18 @@ window._bvTileRect = function(M, ly, t){
 </script>
 <script src="https://cdn.bluishvoid.com/vendor/leaflet/leaflet.js"></script>
 <script>
+/* NO WHITE RINGS ON MAP DOTS (user 2026-11-13: "remove the white rings from all dots on maps, we only did that for macrostrat originally,
+   i dont want white rings, just color with glow"): every circle marker drawn with a white outline gets a soft halo in its own fill color
+   instead -- a wide, faint stroke, so it works on the canvas renderers too. Hollow dots (no fill) keep their outline, it is the dot. */
+(function(){ if (!window.L || !L.circleMarker) return;
+  var white = function(c){ c = String(c || '').replace(/\s+/g, '').toLowerCase(); return c === '#fff' || c === '#ffffff' || c === 'white' || /^rgba?\(255,255,255/.test(c); };
+  var clear = function(c){ c = String(c || '').replace(/\s+/g, '').toLowerCase(); return !c || c === 'transparent' || /rgba\([^)]*,0\)$/.test(c); };
+  var glow = function(o){ if (!o || o.stroke === false || !white(o.color) || clear(o.fillColor) || o.fill === false) return o;
+    var n = {}; for (var k in o) n[k] = o[k]; n.color = o.fillColor; n.opacity = .32; n.weight = Math.max(3, (o.weight || 1) * 2.4); return n; };
+  var mk = L.circleMarker; L.circleMarker = function(ll, o){ return mk(ll, glow(o)); };
+})();
+</script>
+<script>
 /* EVERY MAP DOT GLOWS (user 2026-11-10: "make all map dots glow like this now across the site", after THE ROCK's dots got the
    faults' glow): two soft halos in the dot's own color under every filled dot, in proportion to the dot (r x 1.9 + 1 at 11%, r x 1.4
    + .6 at 26%), thinning zoomed out. Done once, in how the site draws a dot, so every map gets it:
@@ -87616,21 +87628,28 @@ function initNowMicroTabs(){
   var _smokeCanvas = null;
   var _smokeMapListenerAdded = false;
 
+  /* THE PLUMES ON LAND › WILDFIRES NOW (user 2026-11-13: "did we lose some of our smoke transport visualization on the wildfire tab?"):
+     the per-fire plume raster drew only onto the hazards pane's map, which went with that pane on 11-03, so it has drawn nowhere
+     since. It now draws on the lens map while WILDFIRES NOW is open with SMOKE on (window._bzPlume, set by BZ). */
+  function _plumeMap(){ if (fireMap && hazardActiveTab === 'fire') return fireMap; var z = window._bzPlume; return z && z.on && z.on() ? z.map() : null; }
+  window._renderSmokeTransport = function(){ try { renderSmokeTransport(); } catch(e){} };
+  window._clearSmokeTransport = function(){ var m = window._bzPlume && window._bzPlume.map && window._bzPlume.map(); if (_smokeTransportLayer && m && m.hasLayer(_smokeTransportLayer)) m.removeLayer(_smokeTransportLayer); };
   function renderSmokeTransport(){
+    var FM = _plumeMap();
     // Only render while the fire tab is showing. Tab switches pan the map,
     // and the moveend re-render (gated only on _smokeTransportVisible) was
     // recomputing the whole plume raster on every OTHER hazard tab — the one
     // recurring cost profiling found on quake/flood/tornado/etc. Returning to
     // the fire tab re-renders via startSmokeAnimation (switchHazardTab).
-    if (typeof hazardActiveTab !== 'undefined' && hazardActiveTab !== 'fire') return;
+    if (!FM) return;
     // Remove old overlay
-    if(_smokeTransportLayer && fireMap && fireMap.hasLayer(_smokeTransportLayer)){
-      fireMap.removeLayer(_smokeTransportLayer);
+    if(_smokeTransportLayer && FM.hasLayer(_smokeTransportLayer)){
+      FM.removeLayer(_smokeTransportLayer);
     }
     _smokeTransportLayer = null;
 
     var intel = window._smokeIntel;
-    if(!intel || !fireMap) return;
+    if(!intel || !FM) return;
 
     var fires = (intel.upwindFires || []).concat(intel.crosswindFires || []).concat(intel.downwindFires || []);
 
@@ -87893,7 +87912,7 @@ function initNowMicroTabs(){
     // ── Canvas resolution — adaptive for quality + performance ──
     var geoDeltaLat = maxLat - minLat;
     var geoDeltaLon = maxLon - minLon;
-    var zoomLevel = fireMap.getZoom ? fireMap.getZoom() : 6;
+    var zoomLevel = FM.getZoom ? FM.getZoom() : 6;
     var isMobile = navigator.maxTouchPoints > 0 || window.innerWidth < 768;
     // The FIRST render starts on the reduced tier so the smoke paints fast on
     // arrival — the full-res first pass was a ~470ms main-thread hit during
@@ -88346,15 +88365,15 @@ function initNowMicroTabs(){
       zIndex: 450
     });
 
-    if(_smokeTransportVisible && fireMap && hazardActiveTab === 'fire'){
-      _smokeTransportLayer.addTo(fireMap);
+    if(_smokeTransportVisible && FM === _plumeMap()){
+      _smokeTransportLayer.addTo(FM);
     }
 
     // ── Re-render on map move/zoom for alignment ──
-    if(!_smokeMapListenerAdded && fireMap){
-      _smokeMapListenerAdded = true;
+    if(!FM._bvSmokeListen){
+      FM._bvSmokeListen = true;
       var _smokeRenderTimer = null;
-      fireMap.on('moveend zoomend', function(){
+      FM.on('moveend zoomend', function(){ if (FM !== _plumeMap()) return;
         if(_smokeTransportVisible){
           clearTimeout(_smokeRenderTimer);
           _smokeRenderTimer = setTimeout(renderSmokeTransport, 300);
@@ -101512,20 +101531,21 @@ function closeAlertModal(){
         for (var i = 1; i < lines.length; i++){ var c = lines[i].split(','); var la = +c[iLa], lo = +c[iLo]; if (!isFinite(la) || !isFinite(lo)) continue; var frp = +c[iF] || 0; n++;
           L.circleMarker([la, lo], { renderer: R, radius: frp > 50 ? 3 : 2, stroke: false, fillColor: frp > 50 ? '#ef4444' : '#f97316', fillOpacity: .6, interactive: false }).addTo(G); } });
       G._n = n; return G; };
-    BZ.sync = function(){ if (!M || !BZ.lit) return; var get = function(k, on, mk){ if (on){ if (BZ.L[k]){ if (!M.hasLayer(BZ.L[k])) BZ.L[k].addTo(M); } else if (!BZ.P[k]){ BZ.P[k] = mk().then(function(lay){ BZ.L[k] = lay; BZ.P[k] = null; BZ.sync(); }).catch(function(){ BZ.P[k] = null; }); } }
+    BZ.sync = function(){ if (!M || !BZ.lit) return; if (BZ.sw.smoke){ if (window._renderSmokeTransport) window._renderSmokeTransport(); } else if (window._clearSmokeTransport) window._clearSmokeTransport(); var get = function(k, on, mk){ if (on){ if (BZ.L[k]){ if (!M.hasLayer(BZ.L[k])) BZ.L[k].addTo(M); } else if (!BZ.P[k]){ BZ.P[k] = mk().then(function(lay){ BZ.L[k] = lay; BZ.P[k] = null; BZ.sync(); }).catch(function(){ BZ.P[k] = null; }); } }
         else if (BZ.L[k] && M.hasLayer(BZ.L[k])) M.removeLayer(BZ.L[k]); };
       get('smoke', BZ.sw.smoke, function(){ return fetch(BZ.HMS).then(function(r){ if (!r.ok) throw 0; return r.json(); }).then(function(j){ BZ.hms = j; if (BZ.sel) BZ.pick(BZ.sel); return BZ.hmsLayer(j); }); });
       get('outlook', BZ.sw.outlook, function(){ return fetch(BZ.SPC).then(function(r){ if (!r.ok) throw 0; return r.json(); }).then(function(j){ BZ.otl = j; if (BZ.sel) BZ.pick(BZ.sel); return BZ.otlLayer(j); }); });
       get('model', BZ.sw.model, function(){ return Promise.resolve(BZ.modelLayer()); });
       get('sat', BZ.sw.sat, function(){ var bb = '-140,25,-50,75'; return Promise.all(['VIIRS_SNPP_NRT', 'VIIRS_NOAA20_NRT'].map(function(s){ return fetch(BZ.FIRMS + s + '/' + bb + '/2').then(function(r){ return r.ok ? r.text() : ''; }).catch(function(){ return ''; }); })).then(BZ.satLayer); });
       if (BZ.L.fires && M.hasLayer(BZ.L.fires)) try { BZ.L.fires.eachLayer(function(l){ if (l.bringToFront) l.bringToFront(); }); } catch(e){} };
-    BZ.enter = function(){ if (!M) return; BZ.lit = true; BZ.block();
+    window._bzPlume = { on: function(){ return BZ.lit && BZ.sw && BZ.sw.smoke; }, map: function(){ return M; } };
+    BZ.enter = function(){ if (!M) return; BZ.lit = true; BZ.block(); setTimeout(function(){ if (window._renderSmokeTransport) window._renderSmokeTransport(); }, 400);
       M._bvNameCap = function(){ return 0; }; if (M._bvNameDeclutter) try { M._bvNameDeclutter(); } catch(e){}
       if (!BZ.prev){ BZ.prev = { c: M.getCenter(), z: M.getZoom(), loc: (window.LOCATION || {}).name }; try { M.invalidateSize(); M.fitBounds([[24.3, -125.0], [49.5, -66.8]], { padding: [6, 6], animate: false }); if (M.getZoom() < 2) M.setZoom(2); } catch(e){} }   /* the lower 48, as the hazards tab opened */
       BZ.load(function(d){ if (!d){ BZ.failed = true; BZ.block(); return; } BZ.failed = false; if (!BZ.lit) return; BZ.block();
         if (!BZ.L.fires || BZ.L.fires._built !== d.built){ if (BZ.L.fires && M.hasLayer(BZ.L.fires)) M.removeLayer(BZ.L.fires); BZ.L.fires = BZ.fireLayer(d.F); BZ.L.fires._built = d.built; }
         if (!M.hasLayer(BZ.L.fires)) BZ.L.fires.addTo(M); BZ.sync(); try { LND.text(); } catch(e){} }); };
-    BZ.leave = function(){ if (!BZ.lit) return; BZ.lit = false; BZ.el().style.display = 'none'; if (!M) return;
+    BZ.leave = function(){ if (!BZ.lit) return; BZ.lit = false; if (window._clearSmokeTransport) window._clearSmokeTransport(); BZ.el().style.display = 'none'; if (!M) return;
       Object.keys(BZ.L).forEach(function(k){ if (BZ.L[k] && M.hasLayer(BZ.L[k])) M.removeLayer(BZ.L[k]); });
       M._bvNameCap = function(z){ return (VIEW === 'leaf' && z < 8) ? 6 : Infinity; }; if (M._bvNameDeclutter) try { M._bvNameDeclutter(); } catch(e){}
       if (BZ.prev){ var p = BZ.prev; BZ.prev = null; if (p.loc === (window.LOCATION || {}).name) try { M.setView(p.c, p.z, { animate: false }); } catch(e){} } };
@@ -102856,7 +102876,7 @@ function closeAlertModal(){
       return 0; };
     CV.zonePick = function(z){ var q = CV.ZN[z] || CV.ZN[1], n = 0; (CV.sinkF || []).forEach(function(x){ if (x.properties.zn === z) n++; });
       PICK.show('<div class="dt-vbig">' + q[1] + '</div><div class="dt-vsub">SINKHOLE TYPE AREA ' + ['', 'I', 'II', 'III', 'IV'][z] + ' \u00b7 FLORIDA GEOLOGICAL SURVEY, AFTER USGS 1985</div><div class="dt-vrow"><div class="dt-vtext"><div class="dt-text">' + q[2] + '</div><div class="dt-text" style="opacity:.8;">' + n.toLocaleString() + ' reports fall in this kind of ground, about ' + Math.round(n / q[3] * 1000) + ' per 1,000 square miles.</div></div></div>', function(){}); };
-    CV.sdot = function(c){ return '<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:' + c + ';box-shadow:0 0 0 1.5px #fff;margin:0 6px 1px 1px;vertical-align:middle;"></span>'; };
+    CV.sdot = function(c){ return '<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:' + c + ';box-shadow:0 0 6px ' + c + ';margin:0 6px 1px 1px;vertical-align:middle;"></span>'; };
     /* one report, every field the state keeps that says something about the hole (names, addresses and comments are never baked) */
     CV.sinkPick = function(p){ var k = CV.SNK[p.v] || CV.SNK.u, ver = p.v === 'y', row = function(a, b){ return b ? '<div class="cv-r"><span>' + a + '</span><div>' + b + '</div></div>' : ''; };
       var M3 = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'], dd = String(p.d || ''), when = dd ? (dd.slice(5) === '01-01' ? dd.slice(0, 4) + ' <i>(only the year is known)</i>' : M3[+dd.slice(5, 7) - 1] + ' ' + (+dd.slice(8, 10)) + ', ' + dd.slice(0, 4)) : '';
@@ -108512,7 +108532,7 @@ function closeAlertModal(){
       + '#lc-deeptime .dt-vbig{ font:800 .95rem/1.1 system-ui,sans-serif; letter-spacing:.04em; } #lc-deeptime .dt-vsub{ font:800 .5rem system-ui,sans-serif; letter-spacing:.12em; opacity:.85; margin-top:3px; } #lc-deeptime .dt-vlab{ font:800 .44rem system-ui,sans-serif; letter-spacing:.14em; color:#05DB32; margin:6px 0 4px; }'
       + '#lc-deeptime .dt-week{ display:flex; flex-wrap:wrap; gap:4px 6px; max-height:118px; overflow:auto; } #lc-deeptime .dt-wk{ border:1px solid rgba(255,255,255,.4); border-radius:999px; padding:3px 8px; background:none; color:#fff; font:700 .44rem system-ui,sans-serif; letter-spacing:.08em; cursor:pointer; white-space:nowrap; } #lc-deeptime .dt-wk b{ font-weight:900; } #lc-deeptime .dt-wk:hover{ background:rgba(255,255,255,.15); }'
       + '#lc-deeptime .dt-greats{ display:flex; flex-wrap:wrap; gap:5px; } #lc-deeptime .dt-gr{ margin:0; font-size:.46rem !important; }'
-      + '#lc-deeptime .dt-vkey{ display:flex; flex-wrap:wrap; gap:2px 12px; margin-top:8px; font:800 .4rem system-ui,sans-serif; letter-spacing:.14em; opacity:.8; } #lc-deeptime .dt-vkey i{ display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; vertical-align:-1px; box-sizing:border-box; box-shadow:0 0 0 1.5px rgba(255,255,255,.85); }'
+      + '#lc-deeptime .dt-vkey{ display:flex; flex-wrap:wrap; gap:2px 12px; margin-top:8px; font:800 .4rem system-ui,sans-serif; letter-spacing:.14em; opacity:.8; } #lc-deeptime .dt-vkey i{ display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; vertical-align:-1px; box-sizing:border-box; box-shadow:none; }'
       + '#lc-deeptime .dt-insar img{ height:auto !important; max-height:360px; object-fit:contain !important; background:#04060c; }'
       + ':is(#lc-deeptime,#lc-blaze,#lc-storms,#lc-snow,#lc-severe,#lc-pests) .hz-st{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px 14px; margin:0 0 8px; } :is(#lc-deeptime,#lc-blaze,#lc-storms,#lc-snow,#lc-severe,#lc-pests) .hz-st>div{ min-width:0; } :is(#lc-deeptime,#lc-blaze,#lc-storms,#lc-snow,#lc-severe,#lc-pests) .hz-stl{ display:block; font:800 .4rem system-ui,sans-serif; letter-spacing:.14em; opacity:.7; } :is(#lc-deeptime,#lc-blaze,#lc-storms,#lc-snow,#lc-severe,#lc-pests) .hz-st b{ display:block; font:800 .95rem/1.15 system-ui,sans-serif; letter-spacing:.02em; margin-top:2px; } :is(#lc-deeptime,#lc-blaze,#lc-storms,#lc-snow,#lc-severe,#lc-pests) .hz-st em{ display:block; font:700 .4rem/1.3 system-ui,sans-serif; letter-spacing:.1em; opacity:.65; font-style:normal; margin-top:1px; } @media (max-width:700px){ :is(#lc-deeptime,#lc-blaze,#lc-storms,#lc-snow,#lc-severe,#lc-pests) .hz-st{ grid-template-columns:repeat(2,minmax(0,1fr)); } }'
       + ':is(#lc-deeptime,#lc-blaze,#lc-storms,#lc-snow,#lc-severe,#lc-pests) .hz-bars{ margin:0 0 8px; } #lc-severe .hz-tl{ display:flex; flex-direction:column; gap:2px; margin-top:4px; } #lc-severe .hz-tl.hz-tl2{ display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:3px 10px; } @media (max-width:640px){ #lc-severe .hz-tl.hz-tl2{ grid-template-columns:minmax(0, 1fr); } } #lc-severe .hz-tlw{ margin:4px 0 6px; } #lc-severe .hz-g3{ display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:4px 26px; margin:6px 0 4px; } #lc-severe .hz-g3 > div:empty{ display:none; } @media (max-width:1100px){ #lc-severe .hz-g3{ grid-template-columns:repeat(2, minmax(0, 1fr)); } } @media (max-width:640px){ #lc-severe .hz-g3{ grid-template-columns:minmax(0, 1fr); } } #lc-severe .hz-rc{ display:flex; align-items:center; gap:8px; width:100%; padding:5px 8px; border:0; border-radius:8px; background:rgba(255,255,255,.12); color:#fff; text-align:left; cursor:pointer; font:inherit; } #lc-severe .hz-rc:hover, #lc-severe .hz-rc.on{ background:rgba(255,255,255,.26); } #lc-severe .hz-rc em{ flex:none; width:10px; height:10px; border-radius:50%; box-shadow:0 0 0 1.5px #fff; } #lc-severe .hz-rc span{ display:flex; flex-direction:column; min-width:0; } #lc-severe .hz-rc b{ font:800 .62rem/1.25 system-ui,sans-serif; letter-spacing:.05em; } #lc-severe .hz-rc small{ font:700 .5rem/1.35 system-ui,sans-serif; letter-spacing:.08em; opacity:.85; } :is(#lc-deeptime,#lc-blaze,#lc-storms,#lc-snow,#lc-severe,#lc-pests) .hz-bg{ display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:3px 8px; margin-top:3px; } :is(#lc-deeptime,#lc-blaze,#lc-storms,#lc-snow,#lc-severe,#lc-pests) .hz-bl{ font:800 .42rem system-ui,sans-serif; letter-spacing:.1em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:160px; padding:2px 0 2px 2px; } :is(#lc-deeptime,#lc-blaze,#lc-storms,#lc-snow,#lc-severe,#lc-pests) .hz-bt{ position:relative; height:7px; background:rgba(0,0,0,.2); border-radius:2px; } :is(#lc-deeptime,#lc-blaze,#lc-storms,#lc-snow,#lc-severe,#lc-pests) .hz-bt>i{ position:absolute; left:0; top:0; bottom:0; border-radius:2px; background:#fff; opacity:.92; } :is(#lc-deeptime,#lc-blaze,#lc-storms,#lc-snow,#lc-severe,#lc-pests) .hz-bt>u{ position:absolute; top:-3px; bottom:-3px; width:2px; margin-left:-1px; background:#1b1b1b; opacity:.85; } :is(#lc-deeptime,#lc-blaze,#lc-storms,#lc-snow,#lc-severe,#lc-pests) .hz-bl em{ display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; vertical-align:-1px; box-shadow:0 0 0 1px rgba(0,0,0,.4); } :is(#lc-deeptime,#lc-blaze,#lc-storms,#lc-snow,#lc-severe,#lc-pests) .hz-bars>.dt-vlab{ color:#fff; opacity:.95; } :is(#lc-deeptime,#lc-blaze,#lc-storms,#lc-snow,#lc-severe,#lc-pests) .hz-bn{ font:800 .42rem system-ui,sans-serif; letter-spacing:.08em; text-align:right; white-space:nowrap; } :is(#lc-deeptime,#lc-blaze,#lc-storms,#lc-snow,#lc-severe,#lc-pests) .hz-bn s{ text-decoration:none; opacity:.55; } :is(#lc-deeptime,#lc-blaze,#lc-storms,#lc-snow,#lc-severe,#lc-pests) .hz-note{ font:600 .46rem/1.45 system-ui,sans-serif; opacity:.72; margin-top:5px; letter-spacing:.02em; }'
