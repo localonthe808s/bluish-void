@@ -390,8 +390,45 @@ def ladder_out(rows, rows_neg, ps):
     return out
 
 
-def best_line(lad):
-    """The plan: one line, by edge after the fee, under the highs' rules."""
+# THE LOW'S OWN RULES (2026-11-13): low_study.py measures the edge floor and the disagreement cap on the low's own
+# replayed hours, per betting window (the evening before, the morning). A measured value replaces the typed one;
+# an unmeasured one leaves it. The cap needs CAP_MIN_N priced lines before it may move, so a thin record cannot
+# tighten the plan to nothing. RULES is filled once per bake by load_study().
+RULES = {'eve': {}, 'lock': {}}
+CAP_MIN_N = 200
+STUDY = {}
+
+
+def load_study(key):
+    """Read low_study.json and dayahead.json for this market; fills RULES and returns (tune, court)."""
+    global STUDY
+    try:
+        STUDY = (json.load(open(os.path.join(HERE, 'low_study.json'))).get('markets') or {}).get(key) or {}
+    except Exception:
+        STUDY = {}
+    for leg in ('eve', 'lock'):
+        w = (STUDY.get('price') or {}).get(leg) or {}
+        f, c, r = w.get('floor') or {}, w.get('cap') or {}, {}
+        if f.get('cheap_measured'):
+            r['edge_min'] = float(f['cheap'])
+        if f.get('priced_measured'):
+            r['edge_priced'] = float(f['priced'])
+        if c.get('n', 0) >= CAP_MIN_N and c.get('cap') is not None:
+            r['max_disagree'] = max(0.3, min(0.6, float(c['cap'])))
+        RULES[leg] = r
+    court = None
+    try:
+        court = (json.load(open(os.path.join(HERE, 'dayahead.json'))).get('cities') or {}).get(key)
+    except Exception:
+        pass
+    return STUDY.get('tune'), court
+
+
+def best_line(lad, leg='lock'):
+    """The plan: one line, by edge after the fee, under the low's measured rules where they exist (RULES[leg]),
+    the highs' typed ones otherwise."""
+    R = RULES.get(leg) or {}
+    e_min, e_priced, cap = R.get('edge_min', EDGE_MIN), R.get('edge_priced', EDGE_PRICED), R.get('max_disagree', MAX_DISAGREE)
     best, book = None, []
     for r in lad:
         if r.get('ours') is None:
@@ -400,11 +437,11 @@ def best_line(lad):
                                ('against', (None if r.get('bid') is None else round(1 - r['bid'], 2)), 1 - r['ours'])):
             if price is None or not (MIN_PRICE <= price < 1):
                 continue
-            if r.get('market') is not None and abs(r['ours'] - r['market']) > MAX_DISAGREE:
+            if r.get('market') is not None and abs(r['ours'] - r['market']) > cap:
                 continue
             fee = K.fee_of(price)
             ev = q - price - fee
-            if ev < EDGE_MIN and not (ev >= EDGE_PRICED and price >= EDGE_PRICE):
+            if ev < e_min and not (ev >= e_priced and price >= EDGE_PRICE):
                 continue
             line = {'dir': dirn, 'label': r['label'], 'price': price, 'q': round(q, 4),
                     'ev': round(ev, 4), 'fee': round(fee, 4), 'ticker': r.get('ticker')}
@@ -412,6 +449,33 @@ def best_line(lad):
             if best is None or ev > best['ev']:
                 best = line
     return best, book
+
+
+def court_ps(cfg, fcm_raw, h0_of, tkey, rows, court):
+    """Tomorrow priced the day-ahead court's way, when the court has ruled for it (dayahead_study.low_eve_court):
+    the bias-corrected mean of the runs' climate-day troughs plus the residual list through the kernel. Positive
+    rows in their own order, or None."""
+    if not court or not court.get('eve_use') or not court.get('resid') or not rows:
+        return None
+    k = 0.5
+    tr = {}
+    for m, b in (court.get('bias') or {}).items():
+        day = (fcm_raw.get(m) or {}).get(tkey) or {}
+        vals = [v for h, v in day.items() if h >= h0_of(tkey)]
+        if len(vals) >= 12 and b is not None:
+            tr[m] = min(vals) + b
+    if len(tr) < max(3, len(court.get('bias') or {}) - 1):
+        return None
+    pred = statistics.mean(tr.values())
+    res = court['resid'][-90:]
+    phi = lambda x: 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))     # noqa: E731
+    ps = []
+    for r in rows:
+        lo = (r['lo'] - 0.5) if r.get('lo') is not None else -1e9
+        hi = (r['hi'] + 0.5) if r.get('hi') is not None else 1e9
+        ps.append(statistics.mean(phi((hi - pred - e) / k) - phi((lo - pred - e) / k) for e in res))
+    s = sum(ps) or 1.0
+    return [p / s for p in ps], pred
 
 
 def grade(bet, truth_label):
@@ -469,6 +533,16 @@ def run_market(cfg, dry_dir=None):
     if hour < K.climate_day_start(cfg, today - datetime.timedelta(days=1)):
         today, hour = today - datetime.timedelta(days=1), hour + 24
     tkey = today.isoformat()
+    tuned, court = load_study(cfg['key'])
+    # the low's tuned settings (low_study.tune_low), applied only on a full record; stamped on the document
+    params = {'bias_hl': cfg.get('bias_hl'), 'sd_mult': K.SD_MULT, 'bias_k': K.BIAS_K, 'sd_floor': K.SD_FLOOR, 'tuned': False}
+    if tuned and tuned.get('active') and (tuned.get('n') or 0) >= 45:
+        a = tuned['active']
+        cfg = dict(cfg, bias_hl=a.get('bias_hl', cfg.get('bias_hl')))
+        K.SD_MULT, K.BIAS_K, K.SD_FLOOR = float(a.get('sd_mult', K.SD_MULT)), int(a.get('bias_k', K.BIAS_K)), float(a.get('sd_floor', K.SD_FLOOR))
+        params = {'bias_hl': cfg.get('bias_hl'), 'sd_mult': K.SD_MULT, 'bias_k': K.BIAS_K, 'sd_floor': K.SD_FLOOR, 'tuned': True}
+    print('%s settings %s | rules eve %s lock %s | day-ahead court %s' % (cfg['key'], params, RULES['eve'] or 'typed', RULES['lock'] or 'typed',
+                                                                          'RULES' if (court or {}).get('eve_use') else 'the bake stands'))
     out_path = os.path.join(HERE, '..', cfg['out'])
     prev = K.load_log(out_path) if os.path.exists(out_path) else {'history': []}
     hist = {h['date']: h for h in (prev.get('history') or []) if h.get('date')}
@@ -629,7 +703,7 @@ def run_market(cfg, dry_dir=None):
                   'bias': {m: (round(-b, 2) if b is not None else None) for m, b in s['biases'].items()}})
         # a six-hour group we could not believe: the low is not known well enough to price (see metar_six_min),
         # unless the climate report has since printed a minimum of its own
-        bet, book = (None, []) if (T['day_over'] or (six_sus and cmin is None)) else best_line(lad)
+        bet, book = (None, []) if (T['day_over'] or (six_sus and cmin is None)) else best_line(lad, 'lock')
         shadow = None
         if not gate_lock['open']:
             shadow, bet, book = bet, None, []
@@ -659,14 +733,20 @@ def run_market(cfg, dry_dir=None):
         st = snapshot(fcm, bias_of, daily, obh, h0_of, tkey2, 0, trows_neg, floor_on=False) if trows else None
         if st:
             tl = ladder_out(trows, trows_neg, st['ps'])
+            priced_by, tpred = 'bake', round(-st['pred'], 2)
+            cp = court_ps(cfg, fcm_raw, h0_of, tkey2, trows, court)
+            if cp:
+                for r, p in zip(tl, cp[0]):
+                    r['ours'] = round(p, 4)
+                priced_by, tpred = 'court', round(cp[1], 2)
             tb = max(range(len(tl)), key=lambda i: tl[i]['ours'] or 0)
             tm = max(range(len(tl)), key=lambda i: tl[i]['market'] or 0)
-            tbet, tbook = best_line(tl)
+            tbet, tbook = best_line(tl, 'eve')
             tshadow = None
             if not gate_eve['open']:
                 tshadow, tbet, tbook = tbet, None, []
             tom = {'date': tkey2, 'event': K.event_ticker(cfg, tdate), 'state': K.market_state(cfg, trows, now),
-                   'pred': round(-st['pred'], 2), 'sd': round(st['sd'], 3), 'pick': tl[tb]['label'], 'p': tl[tb]['ours'],
+                   'pred': tpred, 'sd': round(st['sd'], 3), 'priced_by': priced_by, 'pick': tl[tb]['label'], 'p': tl[tb]['ours'],
                    'market_pick': tl[tm]['label'], 'market_p': tl[tm]['market'], 'ladder': tl, 'bet': tbet, 'book': tbook,
                    'shadow': tshadow, 'edge_gate': gate_eve,
                    'models': {m: (round(-(max(fcm[m][tkey2].values()) - b), 1) if fcm[m].get(tkey2) and b is not None else None)
@@ -711,6 +791,8 @@ def run_market(cfg, dry_dir=None):
            'updated': now.strftime('%Y-%m-%d %H:%M ') + cfg['tzlabel'],
            'updated_utc': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
            'today': T, 'record': record,
+           'study': {'params': params, 'rules': RULES, 'court': bool((court or {}).get('eve_use')),
+                     'study_days': (STUDY.get('price') or {}).get('days')},
            'history': sorted(hist.values(), key=lambda h: h['date'], reverse=True)}
     if dry_dir:
         p = os.path.join(dry_dir, cfg['out'])
@@ -727,6 +809,9 @@ def run_market(cfg, dry_dir=None):
             row['obs'].update({'hourly': T.get('obs_hourly'), 'six': T.get('six_min'), 'six_win': T.get('six_window'),
                                'six_suspect': bool(T.get('six_suspect')), 'cli': T.get('cli_min'), 'cli_at': T.get('cli_min_at'),
                                'binding': T.get('binding')})
+            # tomorrow's shadow too (2026-11-13): the evening plan is followed back by trail_study.study_low
+            if T.get('tomorrow') and row.get('tom') is not None:
+                row['tom']['sbet'] = T['tomorrow'].get('shadow')
             tdir = os.path.join(HERE, 'trail_out'); os.makedirs(tdir, exist_ok=True)
             with open(os.path.join(tdir, '%s_%s.jsonl' % (cfg['key'], T['date'])), 'a') as tf:
                 tf.write(json.dumps(row, separators=(',', ':')) + '\n')

@@ -134,6 +134,102 @@ def peaks_of(cfg, since, until):
     return {d: {m: max(v) for m, v in r.items() if len(v) >= 12} for d, r in days.items()}
 
 
+# ------------------------------------------------------------- THE LOWS ----
+# THE DAY-AHEAD COURT FOR A LOW (2026-11-13, user: "yes wire them in"). A low is bet the evening before, on
+# tomorrow's ladder, and the bake prices that view from its own same-day machinery with the floor off. This court
+# asks whether the previous-day runs priced the way the highs' TOMORROW block is priced -- the bias-corrected mean of
+# the five runs' TROUGHS over the climate day, plus the trailing residual list through the kernel -- would have scored
+# better on the settled integer than the bake's own evening view did (history[].eve: pred and sd, a normal). Truth is
+# the exchange's own expiration_value where the bake recorded it, IEM's min_temp_f otherwise (identical on 67/67 days
+# when the lows were built). `eve_use` is ruled only on EVE_MIN common days, winning on both halves.
+EVE_MIN = 40
+
+
+def low_truth_of(cfg, since):
+    y, m, d = time.strftime('%Y-%m-%d').split('-')
+    txt = fetch('%s_daily.csv' % cfg['station'],
+                'https://mesonet.agron.iastate.edu/cgi-bin/request/daily.py?network=%s&stations=%s'
+                '&year1=2025&month1=1&day1=1&year2=%s&month2=%s&day2=%s&format=comma' % (cfg['network'], cfg['station'], y, m, d))
+    today = time.strftime('%Y-%m-%d')
+    truth = {}
+    for r in csv.DictReader(io.StringIO(txt)):
+        v = r.get('min_temp_f')
+        if v not in (None, '', 'M', 'None') and since <= r['day'] < today:
+            truth[r['day']] = float(v)
+    try:
+        for h in json.load(open(os.path.join(HERE, '..', 'kalshi_low_%s.json' % cfg['key'].split('_')[0]))).get('history', []):
+            if h.get('actual') is not None and h.get('date', '') >= since:
+                truth[h['date']] = float(h['actual'])
+    except Exception:
+        pass
+    return truth
+
+
+def troughs_of(cfg, since, until):
+    """{date: {model: the previous day's run's minimum over that CLIMATE day}} -- under daylight time the climate day
+    runs 1 AM to 1 AM local, and a low can sit in that last hour."""
+    url = ('https://previous-runs-api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f'
+           '&hourly=temperature_2m_previous_day1&models=%s&temperature_unit=fahrenheit'
+           '&timezone=%s&start_date=%s&end_date=%s'
+           % (cfg['lat'], cfg['lon'], ','.join(MODELS), urllib.parse.quote(cfg['tz']), since, until))
+    h = json.loads(fetch('%s_prev1_%s.json' % (cfg['station'], until), url, max_age_h=6)).get('hourly') or {}
+    T = h.get('time') or []
+    days = {}
+    for i, t in enumerate(T):
+        d0 = datetime.date(*map(int, t[:10].split('-')))
+        hr = int(t[11:13])
+        if hr < K.climate_day_start(cfg, d0):
+            d0 -= datetime.timedelta(days=1)             # the 00:xx hour belongs to yesterday's climate day
+        r = days.setdefault(d0.isoformat(), {m: [] for m in MODELS})
+        for m in MODELS:
+            v = (h.get('temperature_2m_previous_day1_' + m) or [None] * len(T))[i]
+            if v is not None:
+                r[m].append(v)
+    return {d: {m: min(v) for m, v in r.items() if len(v) >= 12} for d, r in days.items()}
+
+
+def _phi_n(x, mu, sd):
+    return 0.5 * (1.0 + math.erf((x - mu) / (sd * math.sqrt(2.0))))
+
+
+def low_eve_court(cfg, c, truth, troughs):
+    """The court's walk-forward log score on each graded day against the bake's evening view on the same days."""
+    try:
+        hist = {h['date']: h for h in json.load(open(os.path.join(HERE, '..', 'kalshi_low_%s.json' % cfg['key'].split('_')[0]))).get('history', [])}
+    except Exception:
+        hist = {}
+    days = sorted(d for d in troughs if d in truth and len(troughs[d]) == len(MODELS))
+    graded = []
+    for i, d in enumerate(days):
+        prior = days[max(0, i - WINDOW):i]
+        if len(prior) < MIN_BIAS_N:
+            continue
+        bias = {m: statistics.mean(truth[p] - troughs[p][m] for p in prior) for m in MODELS}
+        pred = statistics.mean(troughs[d][m] + bias[m] for m in MODELS)
+        graded.append((d, truth[d] - pred))
+    rows = []
+    for i, (d, r) in enumerate(graded):
+        pool = [x for _, x in graded[max(0, i - 90):i]]
+        ours = _logscore(pool, r)
+        e = (hist.get(d) or {}).get('eve') or {}
+        if ours is None or e.get('pred') is None or not e.get('sd'):
+            continue
+        v = math.floor(truth[d] + 0.5)
+        pb = _phi_n(v + 0.5, e['pred'], e['sd']) - _phi_n(v - 0.5, e['pred'], e['sd'])
+        rows.append((d, ours, math.log(max(pb, 1e-6))))
+    if not rows:
+        return {'eve_use': False, 'eve_n': 0}
+    half = len(rows) // 2
+    def m(rs, j):
+        return statistics.mean(x[j] for x in rs) if rs else None
+    old, new = rows[:half], rows[half:]
+    gain = m(rows, 1) - m(rows, 2)
+    both = bool(old) and bool(new) and m(old, 1) > m(old, 2) and m(new, 1) > m(new, 2)
+    return {'eve_use': bool(gain > 0 and both and len(rows) >= EVE_MIN), 'eve_n': len(rows),
+            'eve_score': [round(m(rows, 2), 4), round(m(rows, 1), 4)], 'eve_gain': round(gain, 4),
+            'eve_halves': [[round(m(old, 2), 4), round(m(old, 1), 4)], [round(m(new, 2), 4), round(m(new, 1), 4)]] if old and new else None}
+
+
 def court(truth, peaks):
     days = sorted(d for d in peaks if d in truth and len(peaks[d]) == len(MODELS))
     resid, graded, spread = [], [], []
@@ -216,12 +312,30 @@ def main():
                      'BINNED' if c.get('spread_use') else 'pooled'))
         except Exception as e:
             print('%s: day-ahead court failed (%s)' % (cfg['key'], e))
+    from active import ACTIVE
+    for cfg in K.MARKETS:
+        if cfg['key'] not in ACTIVE:
+            continue
+        lkey = cfg['key'].replace('_high', '_low')
+        try:
+            truth = low_truth_of(cfg, since)
+            tr = troughs_of(cfg, since, today.isoformat())
+            c = court(truth, tr)
+            c.update(low_eve_court(cfg, c, truth, tr))
+            c['kind'] = 'low'
+            doc['cities'][lkey] = c
+            print('%-9s n %3d (%s..%s)  SD %.2f  MAE %.2f  within 1: %.2f  bias now %s'
+                  % (lkey, c['n'], c['from'], c['to'], c.get('sd') or 0, c.get('mae') or 0, c.get('p_within1') or 0, c['bias']))
+            print('          against the bake\'s evening view on %s days: log score bake/court %s, gain %s, halves %s -> %s'
+                  % (c.get('eve_n'), c.get('eve_score'), c.get('eve_gain'), c.get('eve_halves'), 'COURT' if c.get('eve_use') else 'the bake stands'))
+        except Exception as e:
+            print('%s: day-ahead court failed (%s)' % (lkey, e))
     # A CITY THAT FAILED KEEPS LAST NIGHT'S RULING (2026-10-02): dropping it left the bake with no ruling at all for
     # that city (Las Vegas, 10-01 and 10-02, an IEM 503). Marked 'carried' with the night it was really made.
     try:
         old = json.load(open(OUT))
         for k, v in (old.get('cities') or {}).items():
-            if k not in doc['cities'] and isinstance(v, dict) and k in {m['key'] for m in K.MARKETS}:  # cities dropped from active.py are not carried (2026-10-22)
+            if k not in doc['cities'] and isinstance(v, dict) and (k in {m['key'] for m in K.MARKETS} or k in {m['key'].replace('_high', '_low') for m in K.MARKETS}):  # cities dropped from active.py are not carried (2026-10-22)
                 doc['cities'][k] = dict(v, carried=v.get('carried') or old.get('built'))
                 print('%s: kept the ruling from %s' % (k, doc['cities'][k]['carried']))
     except Exception:
