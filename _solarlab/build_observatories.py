@@ -618,6 +618,74 @@ def _is_sky(src, it):
 
 
 _HASH = {}
+_GRAY = {}      # th -> a small grayscale copy, for the crop-tolerant test below
+
+
+# THE SAME PICTURE, CROPPED OR REHOSTED (2026-11-13, user: "the satellite has a lot of duplicate photos" -> "check the other
+# observatories for duplicates too"). SPHEREx's strip showed its Cygnus X ice map twice (NASA ran it full and cropped under two
+# headlines) and three GREATEST HITS pictures again: the 8x8 hash cannot see a crop, and the hits are rehosted .webp copies
+# whose titles and links differ from the feed's. Test: fine detail only (each image minus a 2.5 px blur, so a bright blob on
+# black is not "the same" as another), one image slid over the other at seven scales (a crop down to 40% of the width), best
+# normalised cross-correlation. Measured over every observatory's strip and hits, 2026-11-13: the real repeats 0.91-1.00; the
+# closest DIFFERENT pair 0.77 (Voyager's Io and Triton); Webb's and Hubble's highest 0.45 and 0.60. Cut at 0.86.
+SAME_CUT = 0.86
+
+
+def _detail(im, w):
+    from PIL import Image, ImageFilter
+    import numpy as np
+    h = max(8, round(im.size[1] * w / im.size[0]))
+    a = im.resize((w, h), Image.BILINEAR)
+    return np.asarray(a, float) - np.asarray(a.filter(ImageFilter.GaussianBlur(2.5)), float)
+
+
+def _crop_score(A, B, W=96):
+    import numpy as np
+    from numpy.lib.stride_tricks import sliding_window_view as swv
+    best = 0.0
+    for X, Y in ((A, B), (B, A)):
+        big = _detail(Y, W)
+        for sc in (1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4):
+            sm = _detail(X, int(W * sc))[:big.shape[0]]
+            hh, ww = sm.shape
+            if hh > big.shape[0] or ww > big.shape[1]: continue
+            win = swv(big, (hh, ww))[::2, ::2]
+            s0 = sm - sm.mean(); ns = math.sqrt(float((s0 * s0).sum()))
+            wm = win - win.mean(axis=(2, 3), keepdims=True); nw = np.sqrt((wm * wm).sum(axis=(2, 3)))
+            den = nw * ns
+            if ns <= 0: continue
+            v = np.einsum('ijkl,kl->ij', wm, s0) / np.maximum(den, 1e-9)
+            best = max(best, float(v.max()))
+            if best >= SAME_CUT: return best
+    return best
+
+
+def _same_crop(th, kept, extra=()):
+    """(True, what) when the picture at `th` repeats a kept thumb or one of `extra` (title, grayscale image) -- a crop counts."""
+    a = _GRAY.get(th)
+    if a is None: return False, None
+    try:
+        for k in kept:
+            b = _GRAY.get(k)
+            if b is not None and _crop_score(a, b) >= SAME_CUT: return True, k
+        for t, b in extra:
+            if _crop_score(a, b) >= SAME_CUT: return True, t
+    except Exception as e:
+        print('  crop test skipped', e)
+    return False, None
+
+
+def _classic_grays(cl):
+    out = []
+    try:
+        from PIL import Image
+        for c in cl:
+            p = ROOT / c.get('img', '').lstrip('/')
+            if c.get('img') and p.exists():
+                g = Image.open(p).convert('L'); g.thumbnail((320, 320)); out.append(('GREATEST HITS: ' + c.get('title', ''), g))
+    except Exception as e:
+        print('  classics not loaded for the crop test', e)
+    return out
 
 
 def _fam(th):
@@ -639,6 +707,7 @@ def _looks_like_sky(th, maps_ok=False):
         im = Image.open(_io.BytesIO(get(th, timeout=40, tries=2))).convert('RGB')
         w, h = im.size
         if w > 3 * h or h > 3 * w: return False
+        _g = im.convert('L'); _g.thumbnail((320, 320)); _GRAY[th] = _g
         g = im.convert('L').resize((8, 8))
         px = list(g.getdata()); avg = sum(px) / 64
         _HASH[th] = sum(1 << i for i, v in enumerate(px) if v > avg)
@@ -721,6 +790,7 @@ def bake_media(prev_media=None):
             try: cl = json.loads((ROOT / '_solarlab/classics.json').read_text()).get(key, [])
             except Exception: cl = []
             clk = set(re.sub(r'\W+', '', c.get('title', '').lower()) for c in cl) | set(c.get('link', '') for c in cl)
+            clg = _classic_grays(cl)        # and by the picture itself: the hits are rehosted copies
             page_items = []
             for src, url in pages:
                 try: page_items.append((src, _items(url)))
@@ -763,6 +833,9 @@ def bake_media(prev_media=None):
                     if src == 'nasa' and CHART_CAP.search(nasa_caption(it, th)): continue
                     if wrong_mission(key, it, th): continue
                     if _same_picture(th, [p['thumb'] for p in photos]): continue
+                    dup, what = _same_crop(th, [p['thumb'] for p in photos], clg)
+                    if dup:
+                        print('  %s: same picture as %s, dropped: %s' % (key, (what or '')[:60], it['title'][:60])); continue
                     # ONE PICTURE PER RELEASE (user 2026-10-23: "review latest and greatest", Webb's strip showed potm2610a and
                     # potm2610b -- a crop and the wide view of one nebula -- side by side, and a deep field with and without
                     # its inset): ESA/Webb, ESA/Hubble and NOIRLab name a release's images <id>a, <id>b...; the first stands
