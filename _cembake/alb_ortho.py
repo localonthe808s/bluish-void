@@ -1,8 +1,9 @@
 import math, os, sys, time, urllib.request
 OUT=sys.argv[1]; R=6378137
+BB=[float(v) for v in sys.argv[2].split(',')] if len(sys.argv)>2 else [-73.7432,42.6977,-73.7227,42.7150]   # W,S,E,N (default: Albany Rural)
 mx=lambda lon: math.radians(lon)*R; my=lambda lat: R*math.log(math.tan(math.pi/4+math.radians(lat)/2))
-X0,X1=mx(-73.7432),mx(-73.7227); Y0,Y1=my(42.6977),my(42.7150)
-RES=0.25/math.cos(math.radians(42.706))   # 25 cm ground = this many mercator m
+X0,X1=mx(BB[0]),mx(BB[2]); Y0,Y1=my(BB[1]),my(BB[3])
+RES=0.25/math.cos(math.radians((BB[1]+BB[3])/2))   # 25 cm ground = this many mercator m
 T=2000; tm=T*RES
 nx=math.ceil((X1-X0)/tm); ny=math.ceil((Y1-Y0)/tm); print(nx,ny,'tiles', RES)
 open(os.path.join(OUT,'grid.txt'),'w').write('%f %f %f %d %d %d\n'%(X0,Y1,RES,T,nx,ny))

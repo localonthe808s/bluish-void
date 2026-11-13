@@ -47,10 +47,26 @@ for (y, x) in cyx:
   win = L[max(0, yi - 7):yi + 1, max(0, xi - 7):xi + 1]
   if win.size and win.min() < loc[yi, xi] - DM: cx.append(x); cy.append(y)
 cx, cy = np.array(cx), np.array(cy); n_sh = n
+# MODE "lawn" (St. Agnes, 2026-11-12): a newer lawn cemetery -- polished DARK granite stones and rows of small WHITE flat markers on bright
+# mowed grass, beside woods. Any small mark clearly brighter OR darker than the grass around it counts, but only where its 4 m surroundings are
+# green lawn (G above R and B), which drops the woods, the brush and the dirt. Tree shadows: large, so they fail the size cut.
+if os.environ.get('CEM_MODE') == 'lawn':
+  g7 = nd.uniform_filter(f[..., 1], 31); r7 = nd.uniform_filter(f[..., 0], 31); b7 = nd.uniform_filter(f[..., 2], 31)
+  med = nd.median_filter(L, size=15)
+  lawn = (g7 > r7 + 4) & (g7 > b7 + 3) & (med > 80)
+  th2 = L - nd.grey_opening(L, footprint=np.ones((9, 9)))
+  dark = (L < 68) & (med - L > 35)                     # polished granite: truly dark on bright mowed grass
+  bright = (th2 > 24) & (S < .22) & (L > 140)           # white flat markers and pale stones
+  mk = inside & lawn & (dark | bright)
+  lab2, n2 = nd.label(mk); ar2 = nd.sum(mk, lab2, np.arange(1, n2 + 1))
+  ok2 = np.where((ar2 >= 2) & (ar2 <= 60))[0] + 1
+  yx = np.array(nd.center_of_mass(mk, lab2, ok2)) if len(ok2) else np.zeros((0, 2))
+  cy, cx = yx[:, 0], yx[:, 1]; print('lawn mode: marks', n2, 'sized', len(ok2))
 print('pale spots', n, 'sized', len(ok), 'with a shadow NW', len(cx))
 np.save(os.path.join(OUT, 'stones_px.npy'), np.vstack([cx, cy]).T)
 # a check crop over the sample area: red dots on the photo
-sx0, sy0 = px(-73.7338, 42.7066); sx1, sy1 = px(-73.7318, 42.7056)
+CK = [float(v) for v in sys.argv[6].split(',')] if len(sys.argv) > 6 else [-73.7338, 42.7066, -73.7318, 42.7056]   # check crop: W,N,E,S
+sx0, sy0 = px(CK[0], CK[1]); sx1, sy1 = px(CK[2], CK[3])
 crop = Image.fromarray(img[int(sy0):int(sy1), int(sx0):int(sx1)]).convert('RGB'); crop = crop.resize((crop.width * 3, crop.height * 3), Image.NEAREST); dc = ImageDraw.Draw(crop)
 for x, y in zip(cx, cy):
   if sx0 <= x < sx1 and sy0 <= y < sy1: X, Y = (x - sx0) * 3, (y - sy0) * 3; dc.rectangle([X - 4, Y - 4, X + 4, Y + 4], outline=(255, 40, 40), width=2)
