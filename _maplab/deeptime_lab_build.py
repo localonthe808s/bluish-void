@@ -20,18 +20,18 @@ code = '\n'.join([
 meta = {m['name']: m for m in json.load(open(os.path.join(ROOT, '_maplab', 'deeptime_lab', 'meta.json')))}
 # approximate figures for the proposals: how long, the range then (≈) and now, and where New York stands on it
 FACTS = {
-  'Grenville orogeny': ['1,250-980 Ma', 'roots under the whole east', 'Mt Marcy, Adirondacks, 1,629 m (a young uplift of old rock)', 'The Fordham gneiss of the Bronx and the bedrock under the boroughs is Grenville crust.'],
-  'Rodinia breaks up': ['780-600 Ma', '', 'the Pacific edge of North America begins', 'Far from New York: the west coast of Laurentia.'],
-  'The Iapetus Ocean opens': ['620-550 Ma', '', 'the old coastline is buried under the Appalachians', 'The Inwood marble (Inwood Hill, Marble Hill) is limestone from this new coast\u2019s shallow sea floor.'],
-  'Taconic orogeny': ['470-440 Ma', 'perhaps Andes-high (\u2248 4-5 km)', 'Mt Equinox, Taconic Range, 1,163 m', 'Manhattan schist and Cameron\u2019s Line -- the suture where the arc was welded on -- run through Manhattan and the Bronx.'],
-  'Caledonian orogeny': ['490-390 Ma', 'Himalaya-scale in places', 'Ben Nevis, Scotland, 1,345 m', 'The same belt as the Appalachians, continued across what became the Atlantic: Newfoundland, Ireland, Scotland, Norway.'],
-  'Acadian orogeny': ['420-350 Ma', '\u2248 4-6 km', 'Mt Washington, 1,917 m', 'New England\u2019s granites and the Catskills (the sediment shed off this range).'],
-  'Alleghanian and Variscan orogenies': ['325-260 Ma', 'Himalaya-high (\u2248 6-8 km)', 'Mt Mitchell, 2,037 m: the Appalachians\u2019 highest today', 'The last collision that finished Pangaea; New York sat in its interior.'],
-  'The Newark rift and the Palisades': ['230-190 Ma', '', 'Palisades cliffs, 160 m, across the Hudson', 'The Palisades are the sill itself, seen from Riverside Drive.'],
+  'Grenville orogeny': ['1,250-980 Ma', 'a plateau \u2248 3-5 km (Rivers 2012)', 'Mt Marcy, Adirondacks, 1,629 m (a young uplift of old rock)', 'The Fordham gneiss of the Bronx and the bedrock under the boroughs is Grenville crust.'],
+  'Rodinia breaks up': ['780-540 Ma', '', 'the Pacific edge of North America begins', 'Far from New York: the west coast of Laurentia.'],
+  'The Iapetus Ocean opens': ['615-550 Ma', '', 'the old coastline is buried under the Appalachians', 'The Inwood marble (Inwood Hill, Marble Hill) is limestone from this new coast\u2019s shallow sea floor.'],
+  'Taconic orogeny': ['490-445 Ma', 'not measured', 'Mt Equinox, Taconic Range, 1,163 m', 'Manhattan schist and Cameron\u2019s Line -- a Taconic fault, long read as the suture where the arc was welded on -- run through Manhattan and the Bronx.'],
+  'Caledonian orogeny': ['490-390 Ma', 'not measured (Himalaya-scale shortening)', 'Ben Nevis, Scotland, 1,345 m', 'The same belt as the Appalachians, continued across what became the Atlantic: Newfoundland, Ireland, Scotland, Norway.'],
+  'Acadian orogeny': ['421-350 Ma', 'a plateau \u2248 5 km (Hillenbrand & Williams 2021)', 'Mt Washington, 1,917 m', 'New England\u2019s granites and the Catskills (the sediment shed off this range).'],
+  'Alleghanian and Variscan orogenies': ['325-260 Ma', '\u2248 3-4 km (Variscan: Duss\u00e9aux 2021)', 'Mt Mitchell, 2,037 m: the Appalachians\u2019 highest today', 'The last collision that finished Pangaea; New York sat in its interior.'],
+  'The Newark rift and the Palisades': ['230-195 Ma', '', 'Palisades cliffs, 160 m, across the Hudson', 'The Palisades are the sill itself, seen from Riverside Drive.'],
   'The Atlantic opens': ['200 Ma-today', '', 'the Mid-Atlantic Ridge, still spreading \u2248 2.5 cm a year', 'New York\u2019s harbor and continental shelf sit on the margin this opening left.'],
-  'Laramide orogeny': ['80-55 Ma', '', 'Mt Elbert, 4,401 m', 'The Rockies; New York is untouched.'],
-  'The Himalaya begin': ['50 Ma-today', 'still rising', 'Everest, 8,849 m', 'The modern example of what the Alleghanian Appalachians were.'],
-  'Alpine orogeny': ['65 Ma-today', 'still rising', 'Mont Blanc, 4,806 m', 'The same belt as the Himalaya.'],
+  'Laramide orogeny': ['80-50 Ma', '', 'Mt Elbert, 4,401 m', 'The Rockies; New York is untouched.'],
+  'The Himalaya begin': ['55 Ma-today', 'still rising', 'Everest, 8,849 m', 'The modern example of what the Alleghanian Appalachians were.'],
+  'Alpine orogeny': ['35 Ma-today', 'still rising', 'Mont Blanc, 4,806 m', 'The same belt as the Himalaya.'],
 }
 STORIES = [
   ['THE APPALACHIANS: AN OCEAN OPENS AND CLOSES (A WILSON CYCLE)', 'The range was built in three collisions, on rock from a fourth, then torn by the rift that opened the Atlantic. New York stands on every stage.',
@@ -45,7 +45,7 @@ STORIES = [
 ]
 PROPOSALS = [
   ['BUILT 2026-11-13: ALL FIVE BELOW ARE LIVE IN DEEP TIME.', ''],
-  ['THEN AND NOW, TO SCALE', 'A height ruler in each cross-section: the range at its height (\u2248, e.g. the Alleghanian Appalachians near Himalaya-high) against what is left today (Mt Mitchell 2,037 m) and Everest for reference. The worn-down stump is the point.'],
+  ['THEN AND NOW, TO SCALE', 'A height ruler in each cross-section: the range at its height (\u2248, sourced where a height is published, labelled NOT MEASURED where none is) against what is left today (Mt Mitchell 2,037 m) and Everest for reference. The worn-down stump is the point.'],
   ['ITS FOOTPRINT ON THE GLOBE', 'Light the whole belt along the model\u2019s boundary, not a dot, with its length (\u2248 km) and a familiar modern range drawn to the same scale beside it.'],
   ['HOW LONG IT TOOK', 'A duration bar on the timeline (Taconic \u2248 30 Myr, Alleghanian \u2248 65 Myr): mountain building is slow, the frame is a snapshot of it.'],
   ['WHERE YOU CAN STAND ON IT', 'The rock in New York each event made: Fordham gneiss (Grenville), Inwood marble (Iapetus coast), Manhattan schist and Cameron\u2019s Line (Taconic), the Palisades (Newark). Tap through to THE ROCK map at that spot.'],
