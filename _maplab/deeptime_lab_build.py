@@ -13,6 +13,7 @@ def grab(start, end):
 code = '\n'.join([
     grab("    DT.EVENTS = [", "\n    ];"),
     grab("    DT.EVKIND = {", "};"),
+    grab("    DT.SCALE = {", "\n    };"),
     grab("    DT.TECT = {", "\n    };"),
     grab("    DT.plateScene = function(cv, o, t){", "\n      g.globalAlpha = 1; };"),
 ])
@@ -43,6 +44,7 @@ STORIES = [
    ['Rodinia breaks up', 'Laramide orogeny']],
 ]
 PROPOSALS = [
+  ['BUILT 2026-11-13: ALL FIVE BELOW ARE LIVE IN DEEP TIME.', ''],
   ['THEN AND NOW, TO SCALE', 'A height ruler in each cross-section: the range at its height (\u2248, e.g. the Alleghanian Appalachians near Himalaya-high) against what is left today (Mt Mitchell 2,037 m) and Everest for reference. The worn-down stump is the point.'],
   ['ITS FOOTPRINT ON THE GLOBE', 'Light the whole belt along the model\u2019s boundary, not a dot, with its length (\u2248 km) and a familiar modern range drawn to the same scale beside it.'],
   ['HOW LONG IT TOOK', 'A duration bar on the timeline (Taconic \u2248 30 Myr, Alleghanian \u2248 65 Myr): mountain building is slow, the frame is a snapshot of it.'],
@@ -80,7 +82,7 @@ section{max-width:1240px;margin:0 auto 34px;padding:0 24px} h2{font-size:.9rem;l
 ''' + code + '''
 (function(){ var cvs = [].slice.call(document.querySelectorAll('canvas[data-ev]')), t0 = performance.now(), last = 0;
   var loop = function(now){ requestAnimationFrame(loop); if (now - last < 33) return; last = now;
-    cvs.forEach(function(cv){ var r = cv.getBoundingClientRect(); if (r.bottom < -40 || r.top > innerHeight + 40) return; try { DT.plateScene(cv, DT.TECT[cv.getAttribute('data-ev')][3], (now - t0) / 1000); } catch(e){} }); };
+    cvs.forEach(function(cv){ var r = cv.getBoundingClientRect(); if (r.bottom < -40 || r.top > innerHeight + 40) return; try { DT.plateScene(cv, Object.assign({ F: DT.SCALE[cv.getAttribute('data-ev')] }, DT.TECT[cv.getAttribute('data-ev')][3]), (now - t0) / 1000); } catch(e){} }); };
   requestAnimationFrame(loop); })();
 </script></body></html>'''
 open(os.path.join(ROOT, '_maplab', 'deeptime_lab.html'), 'w').write(html)
