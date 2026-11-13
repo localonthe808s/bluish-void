@@ -62,6 +62,7 @@ if os.environ.get('CEM_MODE') == 'lawn':
   ok2 = np.where((ar2 >= 2) & (ar2 <= 60))[0] + 1
   yx = np.array(nd.center_of_mass(mk, lab2, ok2)) if len(ok2) else np.zeros((0, 2))
   cy, cx = yx[:, 0], yx[:, 1]; print('lawn mode: marks', n2, 'sized', len(ok2))
+  keepm = np.isin(lab2, ok2); np.save(os.path.join(OUT, 'stones_mask_idx.npy'), np.flatnonzero(keepm)); np.save(os.path.join(OUT, 'stones_mask_shape.npy'), np.array(keepm.shape))
 print('pale spots', n, 'sized', len(ok), 'with a shadow NW', len(cx))
 np.save(os.path.join(OUT, 'stones_px.npy'), np.vstack([cx, cy]).T)
 # a check crop over the sample area: red dots on the photo
