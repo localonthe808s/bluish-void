@@ -350,6 +350,44 @@ window._bvTileRect = function(M, ly, t){
 </script>
 <script src="https://cdn.bluishvoid.com/vendor/leaflet/leaflet.js"></script>
 <script>
+/* YOU ARE HERE (user 2026-11-14: "im on PVs location right now and i have no idea where i am, we need a location indicator for user
+   locations on maps, can we use our location star icon on the map? lets use this on all maps"). Every Leaflet map the site makes gets a
+   small star button (the header's green star); the first tap asks the browser for this device's position, and from then the star marks
+   where you stand on every map, following you, with a faint circle when the fix is loose. If the browser already allows it, no tap is
+   needed. The position never leaves the page: not sent, not stored; watching pauses while the tab is hidden. */
+(function(){
+  if (typeof L === 'undefined' || !navigator.geolocation) return;
+  var Y = window._bvYou = { pos: null, maps: [], watch: null, state: 'idle' };
+  var css = document.createElement('style');
+  css.textContent = '.bv-you{ position:relative; width:30px; height:30px; pointer-events:none; } .bv-you s{ position:absolute; left:50%; top:50%; width:26px; height:26px; margin:-13px 0 0 -13px; border-radius:50%; background:rgba(8,10,16,.82); border:2px solid #fff; box-shadow:0 1px 6px rgba(0,0,0,.6); } .bv-you b{ position:absolute; left:50%; top:50%; transform:translate(-50%,-54%); font:400 19px/1 system-ui,sans-serif; color:#05DB32; text-shadow:0 0 5px rgba(5,219,50,.9); } .bv-you i{ position:absolute; left:50%; top:50%; width:30px; height:30px; margin:-15px 0 0 -15px; border-radius:50%; border:2px solid rgba(255,255,255,.85); animation:bvYouRing 2.2s ease-out infinite; } @keyframes bvYouRing{ 0%{ transform:scale(.4); opacity:.9; } 100%{ transform:scale(1.9); opacity:0; } }'
+    + ' .bv-you-btn{ position:absolute; right:12px; bottom:12px; z-index:850; width:40px; height:40px; border-radius:50%; border:1px solid rgba(255,255,255,.35); background:rgba(8,10,16,.82); color:#05DB32; font:400 21px/38px system-ui,sans-serif; text-align:center; cursor:pointer; padding:0; text-shadow:0 0 6px rgba(5,219,50,.75); box-shadow:0 2px 8px rgba(0,0,0,.4); } .bv-you-btn.wait{ animation:bvYouWait 1s ease-in-out infinite; } @keyframes bvYouWait{ 50%{ opacity:.4; } } .bv-you-btn.off{ display:none; }';
+  document.head.appendChild(css);
+  var icon = L.divIcon({ className: '', html: '<div class="bv-you"><i></i><s></s><b>✦</b></div>', iconSize: [30, 30], iconAnchor: [15, 15] });
+  var paint = function(E){ var m = E.map; if (!Y.pos || !m._loaded && !m._size){ return; } var ll = [Y.pos.lat, Y.pos.lon];
+    if (!E.mk){ E.mk = L.marker(ll, { icon: icon, interactive: false, keyboard: false, zIndexOffset: 9000 }); E.ac = L.circle(ll, { radius: Y.pos.acc, interactive: false, stroke: true, color: '#05DB32', weight: 1, opacity: .5, fillColor: '#05DB32', fillOpacity: .08 }); }
+    E.mk.setLatLng(ll); E.ac.setLatLng(ll); E.ac.setRadius(Y.pos.acc);
+    try { if (!m.hasLayer(E.mk)) E.mk.addTo(m); if (Y.pos.acc > 25){ if (!m.hasLayer(E.ac)) E.ac.addTo(m); } else if (m.hasLayer(E.ac)) m.removeLayer(E.ac); } catch(e){} };
+  var all = function(){ Y.maps = Y.maps.filter(function(E){ return E.map._container && document.body.contains(E.map._container); }); Y.maps.forEach(paint);
+    Y.maps.forEach(function(E){ if (E.btn) E.btn.classList.toggle('wait', Y.state === 'asking'); }); };
+  var start = function(){ if (Y.watch != null) return; Y.state = Y.pos ? 'on' : 'asking'; all();
+    Y.watch = navigator.geolocation.watchPosition(function(p){ Y.pos = { lat: p.coords.latitude, lon: p.coords.longitude, acc: p.coords.accuracy || 0, t: p.timestamp }; var first = Y.state !== 'on'; Y.state = 'on'; all();
+        if (first && Y.want){ var E = Y.want; Y.want = null; try { E.map.setView([Y.pos.lat, Y.pos.lon], Math.max(E.map.getZoom(), 15)); } catch(e){} } },
+      function(err){ if (err && err.code === 1){ Y.state = 'denied'; Y.maps.forEach(function(E){ if (E.btn) E.btn.classList.add('off'); }); } else Y.state = Y.pos ? 'on' : 'idle'; stop(); all(); },
+      { enableHighAccuracy: true, maximumAge: 15000, timeout: 30000 }); };
+  var stop = function(){ if (Y.watch != null){ navigator.geolocation.clearWatch(Y.watch); Y.watch = null; } };
+  Y.start = start;
+  document.addEventListener('visibilitychange', function(){ if (document.hidden) stop(); else if (Y.state === 'on') start(); });   /* no fixes while hidden: battery */
+  try { navigator.permissions && navigator.permissions.query({ name: 'geolocation' }).then(function(st){ if (st.state === 'granted') start(); else if (st.state === 'denied') Y.state = 'denied';
+      st.onchange = function(){ if (st.state === 'granted') start(); }; }).catch(function(){}); } catch(e){}
+  L.Map.addInitHook(function(){ var m = this, E = { map: m }; Y.maps.push(E);
+    m.whenReady(function(){ var c = m.getContainer(); if (!c || c.clientWidth < 220 || m.options.bvNoYou) return;   /* thumbnails and insets get no button */
+      var b = E.btn = document.createElement('button'); b.type = 'button'; b.className = 'bv-you-btn' + (Y.state === 'denied' ? ' off' : ''); b.textContent = '✦'; b.title = 'Show where I am'; b.setAttribute('aria-label', 'Show where I am');
+      ['click', 'dblclick', 'mousedown', 'touchstart', 'pointerdown', 'wheel'].forEach(function(ev){ b.addEventListener(ev, function(e){ e.stopPropagation(); }); });
+      b.addEventListener('click', function(e){ e.preventDefault(); if (Y.pos){ m.setView([Y.pos.lat, Y.pos.lon], Math.max(m.getZoom(), 15)); return; } Y.want = E; start(); });
+      c.appendChild(b); paint(E); }); });
+})();
+</script>
+<script>
 /* NO WHITE RINGS ON MAP DOTS (user 2026-11-13: "remove the white rings from all dots on maps, we only did that for macrostrat originally,
    i dont want white rings, just color with glow"): every circle marker drawn with a white outline gets a soft halo in its own fill color
    instead -- a wide, faint stroke, so it works on the canvas renderers too. Hollow dots (no fill) keep their outline, it is the dot. */
