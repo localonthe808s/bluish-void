@@ -367,7 +367,7 @@ window._bvTileRect = function(M, ly, t){
   var paint = function(E){ var m = E.map; if (!Y.pos || !m._loaded && !m._size){ return; } var ll = [Y.pos.lat, Y.pos.lon];
     if (!E.mk){ E.mk = L.marker(ll, { icon: icon, interactive: false, keyboard: false, zIndexOffset: 9000 }); E.ac = L.circle(ll, { radius: Y.pos.acc, interactive: false, stroke: true, color: '#05DB32', weight: 1, opacity: .5, fillColor: '#05DB32', fillOpacity: .08 }); }
     E.mk.setLatLng(ll); E.ac.setLatLng(ll); E.ac.setRadius(Y.pos.acc);
-    try { if (!m.hasLayer(E.mk)) E.mk.addTo(m); if (Y.pos.acc > 25){ if (!m.hasLayer(E.ac)) E.ac.addTo(m); } else if (m.hasLayer(E.ac)) m.removeLayer(E.ac); } catch(e){} };
+    try { if (!m.hasLayer(E.mk)){ E.mk.addTo(m); E.col = null; setTimeout(function(){ try { recolor(E); } catch(e){} }, 400); } if (Y.pos.acc > 25){ if (!m.hasLayer(E.ac)) E.ac.addTo(m); } else if (m.hasLayer(E.ac)) m.removeLayer(E.ac); } catch(e){} };
   var all = function(){ Y.maps = Y.maps.filter(function(E){ return E.map._container && document.body.contains(E.map._container); }); Y.maps.forEach(paint);
     Y.maps.forEach(function(E){ if (E.btn) E.btn.classList.toggle('wait', Y.state === 'asking'); }); };
   var start = function(){ if (Y.watch != null) return; Y.state = Y.pos ? 'on' : 'asking'; all();
@@ -377,6 +377,41 @@ window._bvTileRect = function(M, ly, t){
       { enableHighAccuracy: true, maximumAge: 15000, timeout: 30000 }); };
   var stop = function(){ if (Y.watch != null){ navigator.geolocation.clearWatch(Y.watch); Y.watch = null; } };
   Y.start = start;
+  /* A COLOR THAT SHOWS (user 2026-11-14: "lets make the color dynamic and always a color that can be seen against its back color"): the map
+     under the star is sampled -- every tile and canvas the browser stacks at that point, in its own layer order, each at its opacity -- and
+     the star takes the color furthest from it (Lab distance): the site green whenever it shows, else yellow, orange, cyan or white. Images
+     the browser will not let the page read (no CORS) are skipped; the rest decide. */
+  var PAL = [['#05DB32', [5, 219, 50]], ['#FFD60A', [255, 214, 10]], ['#FF7A1A', [255, 122, 26]], ['#3ED8FF', [62, 216, 255]], ['#FFFFFF', [255, 255, 255]]];
+  var lab = function(c){ var f = function(v){ v /= 255; return v > .04045 ? Math.pow((v + .055) / 1.055, 2.4) : v / 12.92; }, r = f(c[0]), g = f(c[1]), b = f(c[2]);
+    var x = (r * .4124 + g * .3576 + b * .1805) / .95047, y = r * .2126 + g * .7152 + b * .0722, z = (r * .0193 + g * .1192 + b * .9505) / 1.08883, h = function(t){ return t > .008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116; };
+    return [116 * h(y) - 16, 500 * (h(x) - h(y)), 200 * (h(y) - h(z))]; };
+  /* a fresh 5x5 canvas for each layer read: one unreadable (cross-origin) image taints a canvas for good, and every read after it fails */
+  var fresh = function(){ var c = document.createElement('canvas'); c.width = c.height = 5; return c.getContext('2d', { willReadFrequently: true }); };
+  var zkey = function(el, top){ var k = []; for (var n = el; n && n !== top; n = n.parentElement){ var z = parseInt(getComputedStyle(n).zIndex, 10); k.unshift(isFinite(z) ? z : 0); } return k; };
+  var opac = function(el, top){ var o = 1; for (var n = el; n && n !== top; n = n.parentElement) o *= +getComputedStyle(n).opacity; return o; };
+  var under = function(E){ var m = E.map, c = m.getContainer(); if (!Y.pos || !c) return null; var p = m.latLngToContainerPoint([Y.pos.lat, Y.pos.lon]), R = c.getBoundingClientRect(), X = R.left + p.x, Yy = R.top + p.y;
+    if (p.x < 0 || p.y < 0 || p.x > R.width || p.y > R.height) return null;
+    var bgc = getComputedStyle(c).backgroundColor.match(/[\d.]+/g), col = bgc && +((bgc[3] == null) ? 1 : bgc[3]) > 0 ? [+bgc[0], +bgc[1], +bgc[2]] : [20, 24, 32];
+    var els = [].slice.call(c.querySelectorAll('img.leaflet-tile, img.leaflet-image-layer, canvas')).filter(function(el){ if (el.closest('.leaflet-marker-pane, .bv-you')) return false; var r = el.getBoundingClientRect(); return r.width && X >= r.left && X <= r.right && Yy >= r.top && Yy <= r.bottom; });
+    els.map(function(el, i){ return { el: el, k: zkey(el, c), i: i }; }).sort(function(a, b){ for (var j = 0; j < Math.max(a.k.length, b.k.length); j++){ var d = (a.k[j] || 0) - (b.k[j] || 0); if (d) return d; } return a.i - b.i; }).forEach(function(q){
+      var el = q.el, r = el.getBoundingClientRect(), nw = el.naturalWidth || el.width, nh = el.naturalHeight || el.height; if (!nw || !nh) return;
+      var sx = (X - r.left) / r.width * nw, sy = (Yy - r.top) / r.height * nh, rad = Math.max(1, 6 * nw / r.width);
+      if (el.tagName === 'IMG' && !el.crossOrigin) return;   /* drawn without CORS: unreadable */
+      try { var SG = fresh(); SG.drawImage(el, sx - rad, sy - rad, rad * 2, rad * 2, 0, 0, 5, 5); var d = SG.getImageData(0, 0, 5, 5).data, a = 0, s3 = [0, 0, 0];
+        for (var i = 0; i < 100; i += 4){ var w = d[i + 3] / 255; a += w; s3[0] += d[i] * w; s3[1] += d[i + 1] * w; s3[2] += d[i + 2] * w; }
+        if (a < .05) return; var A = Math.min(1, a / 25) * opac(el, c); col = col.map(function(v, j){ return v * (1 - A) + (s3[j] / a) * A; }); } catch(e){} });   /* a tainted image throws: skipped */
+    return col; };
+  var recolor = function(E){ if (!E.mk || !E.mk.getElement()) return; var bg = under(E); if (!bg) return; var L0 = lab(bg), best = null;
+    /* distance with brightness weighted up: green on a green map is "different" in saturation alone, which the eye does not see */
+    var dist = function(l){ return Math.hypot(1.6 * (l[0] - L0[0]), l[1] - L0[1], l[2] - L0[2]); };
+    PAL.forEach(function(c){ var d = dist(lab(c[1])); if (!best || d > best.d) best = { d: d, c: c }; });
+    if (dist(lab(PAL[0][1])) >= 85) best = { c: PAL[0] };   /* the site green whenever it clearly shows */
+    if (E.col === best.c[0]) return; E.col = best.c[0]; var rgb = best.c[1].join(','), b = E.mk.getElement().querySelector('b'); if (!b) return;
+    b.style.color = best.c[0]; b.style.textShadow = '0 0 1.5px #04140a, 0 0 1.5px #04140a, 0 0 8px rgba(' + rgb + ',1), 0 0 16px rgba(' + rgb + ',.8), 0 0 28px rgba(' + rgb + ',.55)';
+    if (E.ac) E.ac.setStyle({ color: best.c[0], fillColor: best.c[0] }); };
+  Y.under = function(i){ return under(Y.maps[i || 0]); };   /* the harness reads what the star sits on */
+  Y.recolor = function(){ Y.maps.forEach(function(E){ try { recolor(E); } catch(e){} }); };
+  setInterval(function(){ if (!document.hidden && Y.pos) Y.recolor(); }, 2000);
   document.addEventListener('visibilitychange', function(){ if (document.hidden) stop(); else if (Y.state === 'on') start(); });   /* no fixes while hidden: battery */
   try { navigator.permissions && navigator.permissions.query({ name: 'geolocation' }).then(function(st){ if (st.state === 'granted') start(); else if (st.state === 'denied') Y.state = 'denied';
       st.onchange = function(){ if (st.state === 'granted') start(); }; }).catch(function(){}); } catch(e){}
@@ -385,7 +420,7 @@ window._bvTileRect = function(M, ly, t){
       var b = E.btn = document.createElement('button'); b.type = 'button'; b.className = 'bv-you-btn' + (Y.state === 'denied' ? ' off' : ''); b.textContent = '✦'; b.title = 'Show where I am'; b.setAttribute('aria-label', 'Show where I am');
       ['click', 'dblclick', 'mousedown', 'touchstart', 'pointerdown', 'wheel'].forEach(function(ev){ b.addEventListener(ev, function(e){ e.stopPropagation(); }); });
       b.addEventListener('click', function(e){ e.preventDefault(); if (Y.pos){ m.setView([Y.pos.lat, Y.pos.lon], Math.max(m.getZoom(), 15)); return; } Y.want = E; start(); });
-      c.appendChild(b); paint(E); }); });
+      c.appendChild(b); paint(E); m.on('moveend zoomend layeradd', function(){ clearTimeout(E.rt); E.rt = setTimeout(function(){ try { recolor(E); } catch(e){} }, 700); }); }); });
 })();
 </script>
 <script>
