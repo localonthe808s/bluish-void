@@ -64185,26 +64185,36 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var NS = 28, t0 = o.at || Date.now();
       var resamp = function(L){ if (!L || L.length < 2) return null; var cum = [0], i; for (i = 1; i < L.length; i++) cum.push(cum[i - 1] + Math.hypot(L[i][0] - L[i - 1][0], L[i][1] - L[i - 1][1]));
         var tot = cum[cum.length - 1] || 1e-6, R = [], j = 1; for (var k = 0; k < NS; k++){ var want = tot * k / (NS - 1); while (j < L.length - 1 && cum[j] < want) j++; var u = (want - cum[j - 1]) / ((cum[j] - cum[j - 1]) || 1e-6); R.push([L[j - 1][0] + (L[j][0] - L[j - 1][0]) * u, L[j - 1][1] + (L[j][1] - L[j - 1][1]) * u]); } return R; };
-      var FRM = [{ t: t0, low: hubLL, cold: cold, warm: warm, occl: occl, fr: FR.map(function(f){ return f.p; }) }];
-      var progs = (o.progs || window._cwFrontProgs || []).filter(function(q){ return q.t > t0 + 36e5 && q.t - t0 <= 48 * 36e5; });
-      if (hubLL && progs.length){ var last = FRM[0];
-        progs.some(function(Pg){ var dtH = (Pg.t - last.t) / 36e5, b = null;
-          (Pg.lows || []).forEach(function(q){ var dd = gkm([q.lon, q.lat], last.low); if (dd <= 60 * dtH + 250 && (!b || dd < b.d)) b = { d: dd, q: q }; });
-          if (!b) return (Pg.t - last.t) / 36e5 > 24; var lowP = [b.q.lon, b.q.lat], fr = { t: Pg.t, low: lowP }, F2 = Pg.f || [];   /* a chart that misses the low is skipped, up to a day */
-          var hang = function(k, a, maxKm, not){ var best = null; F2.forEach(function(f){ if (f.k !== k || f === not || !f.p || f.p.length < 2) return; var e = Math.min(gkm(f.p[0], a), gkm(f.p[f.p.length - 1], a)); if (e <= maxKm && (!best || e < best.e)) best = { e: e, f: f }; }); return best ? outFrom(best.f.p, a) : null; };
-          if (PAIR){ fr.occl = hang('OCFNT', lowP, 450); var an = fr.occl ? fr.occl[fr.occl.length - 1] : lowP; fr.cold = hang('COLD', an, 500); fr.warm = hang('WARM', an, 500); if (!fr.cold || !fr.warm) return (Pg.t - last.t) / 36e5 > 24; }
-          else { var mv = [lowP[0] - last.low[0], lowP[1] - last.low[1]];
-            fr.fr = FR.map(function(f, i){ var pl = last.fr[i]; if (!pl) return null; var pm = pl[Math.floor(pl.length / 2)], want = [pm[0] + mv[0], pm[1] + mv[1]], best = null;
-              F2.forEach(function(q){ if (!q.p || q.p.length < 2) return; var qm = q.p[Math.floor(q.p.length / 2)], e = gkm(qm, want) + (q.k === f.k ? 0 : 250); if (e <= 650 && (!best || e < best.e)) best = { e: e, q: q }; });
-              return best ? (d2(best.q.p[0], pl[0]) <= d2(best.q.p[best.q.p.length - 1], pl[0]) ? best.q.p : best.q.p.slice().reverse()) : null; }); }
-          FRM.push(fr); last = fr; return false; }); }
+      var HI = (o.highs || []).slice(0, 3);
+      var FRM = [{ t: t0, low: hubLL, cold: cold, warm: warm, occl: occl, fr: FR.map(function(f){ return f.p; }), hi: HI.map(function(h){ return [h.lon, h.lat]; }) }];
+      /* one chart, read against the frame next to it in time: the low followed, its fronts found where they hang off it, the
+         highs followed too (6: they move with everything else) */
+      var chartFrame = function(Pg, last){ var dtH = Math.abs(Pg.t - last.t) / 36e5, b = null;
+        (Pg.lows || []).forEach(function(q){ var dd = gkm([q.lon, q.lat], last.low); if (dd <= 60 * dtH + 250 && (!b || dd < b.d)) b = { d: dd, q: q }; });
+        if (!b) return null; var lowP = [b.q.lon, b.q.lat], fr = { t: Pg.t, low: lowP }, F2 = Pg.f || [];
+        var hang = function(k, a, maxKm){ var best = null; F2.forEach(function(f){ if (f.k !== k || !f.p || f.p.length < 2) return; var e = Math.min(gkm(f.p[0], a), gkm(f.p[f.p.length - 1], a)); if (e <= maxKm && (!best || e < best.e)) best = { e: e, f: f }; }); return best ? outFrom(best.f.p, a) : null; };
+        /* the cold and warm fronts part at the triple point (the occlusion's far end) or, as often on the chart, at the low itself */
+        var hang2 = function(k, A2, B2){ var x1 = hang(k, A2, 500), x2 = B2 ? hang(k, B2, 500) : null; if (!x1) return x2; if (!x2) return x1;
+          var e1 = Math.min(gkm(x1[0], A2), gkm(x1[x1.length - 1], A2)), e2 = Math.min(gkm(x2[0], B2), gkm(x2[x2.length - 1], B2)); return e1 <= e2 ? x1 : x2; };
+        if (PAIR){ fr.occl = hang('OCFNT', lowP, 450); var an = fr.occl ? fr.occl[fr.occl.length - 1] : lowP; fr.cold = hang2('COLD', an, fr.occl ? lowP : null); fr.warm = hang2('WARM', an, fr.occl ? lowP : null); if (!fr.cold || !fr.warm) return null; }
+        else { var mv = [lowP[0] - last.low[0], lowP[1] - last.low[1]];
+          fr.fr = FR.map(function(f, i){ var pl = last.fr && last.fr[i]; if (!pl) return null; var pm = pl[Math.floor(pl.length / 2)], want = [pm[0] + mv[0], pm[1] + mv[1]], best = null;
+            F2.forEach(function(q){ if (!q.p || q.p.length < 2) return; var qm = q.p[Math.floor(q.p.length / 2)], e = gkm(qm, want) + (q.k === f.k ? 0 : 250); if (e <= 650 && (!best || e < best.e)) best = { e: e, q: q }; });
+            return best ? (d2(best.q.p[0], pl[0]) <= d2(best.q.p[best.q.p.length - 1], pl[0]) ? best.q.p : best.q.p.slice().reverse()) : null; }); }
+        fr.hi = (last.hi || []).map(function(h0){ if (!h0) return null; var bh = null; (Pg.highs || []).forEach(function(q){ var dd = gkm([q.lon, q.lat], h0); if (dd <= 60 * dtH + 400 && (!bh || dd < bh.d)) bh = { d: dd, q: q }; }); return bh ? [bh.q.lon, bh.q.lat] : h0; });
+        return fr; };
+      var follow = function(list, dir){ var last = FRM[dir > 0 ? FRM.length - 1 : 0];
+        list.some(function(Pg){ var fr = chartFrame(Pg, last); if (!fr) return Math.abs(Pg.t - last.t) / 36e5 > 24; if (dir > 0) FRM.push(fr); else FRM.unshift(fr); last = fr; return false; }); };
+      /* forward through the forecasters' progs; and (2) BACK through the last day of analyses, so a storm the progs lose still
+         moves -- every frame a real chart */
+      if (hubLL){ follow((o.progs || window._cwFrontProgs || []).filter(function(q){ return q.t > t0 + 36e5 && q.t - t0 <= 48 * 36e5; }), 1);
+        follow((o.runs || window._cwFrontRunsAll || []).filter(function(q){ return q.t < t0 - 36e5 && t0 - q.t <= 24 * 36e5; }).sort(function(x, y){ return y.t - x.t; }), -1); }
       FRM.forEach(function(f){ f.Rc = resamp(f.cold); f.Rw = resamp(f.warm); f.Ro = resamp(f.occl); f.Rf = (f.fr || []).map(resamp); });
 
       /* the frame holds the whole forecast: what the storm covers on every chart, the city, and a close high */
       var all = [];
       FRM.forEach(function(f){ all = all.concat(f.cold || [], f.warm || [], f.occl || [], f.low ? [f.low] : []); if (o.lead != null && f.fr && f.fr[o.lead]) all = all.concat(f.fr[o.lead]); else if (!PAIR && f.fr) f.fr.forEach(function(p){ if (p) all = all.concat(p); }); });
       if (o.home) all.push(o.home);
-      var HI = (o.highs || []).slice(0, 3);
       if (o.home) HI.forEach(function(h){ if (Math.hypot((h.lon - o.home[0]) * Math.cos(o.home[1] * Math.PI / 180) * 111, (h.lat - o.home[1]) * 111) <= 900) all.push([h.lon, h.lat]); });
       if (o.home){ var kk = Math.cos(o.home[1] * Math.PI / 180) * 111, nearPts = all.filter(function(p){ return Math.hypot((p[0] - o.home[0]) * kk, (p[1] - o.home[1]) * 111) <= 2400; }); if (nearPts.length >= 3) all = nearPts; }
       var la0 = 0; all.forEach(function(p){ la0 += p[1]; }); la0 /= all.length;
@@ -64213,7 +64223,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       var pad = 15, s = Math.min((W - 2 * pad) / Math.max(1e-6, x1 - x0), (H - 2 * pad) / Math.max(1e-6, y1 - y0));
       var P = function(p){ return [W / 2 + (p[0] * c0 - (x0 + x1) / 2) * s, H / 2 - (p[1] - (y0 + y1) / 2) * s]; };
       var inv = function(x, y){ return [((x - W / 2) / s + (x0 + x1) / 2) / c0, (y0 + y1) / 2 - (y - H / 2) / s]; };
-      var home = o.home ? P(o.home) : null, HIc = HI.map(function(h){ return P([h.lon, h.lat]); });
+      var home = o.home ? P(o.home) : null;
       var trackXY = FRM.map(function(f){ return P(f.low || hubLL || [0, 0]); });
 
       /* THE GEOMETRY OF ONE MOMENT: the storm eased between the two charts either side of time h (hours after the analysis) */
@@ -64230,32 +64240,41 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           G.WP = G.C.slice().reverse().concat([G.join], G.Wm);
           var e = G.C[G.C.length - 1], ex = G.hub[0] - e[0], ey = G.hub[1] - e[1], el = Math.hypot(ex, ey) || 1; G.uC = [ex / el, ey / el];
           G.nC = [Math.cos(G.aC + 1.5708), -Math.sin(G.aC + 1.5708)]; G.nW = [Math.cos(G.aW - 1.5708), -Math.sin(G.aW - 1.5708)]; }
+        G.HIc = HI.map(function(h, k){ var a = A.hi && A.hi[k], b = B.hi && B.hi[k]; a = a || [h.lon, h.lat]; b = b || a; return P([a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u]); });
         G.F = FR.map(function(f, k){ var a = A.Rf[k], b = B.Rf[k]; if (!a && !b) return null; return { L: lerpL(a || b, b || a, u).map(P), al: (a ? 1 - u : 0) + (b ? u : 0), k: f.k }; });
         return G; };
       var inPoly = function(x, y){ var WP = GM.WP; if (!WP) return false; var c = false; for (var i = 0, j = WP.length - 1; i < WP.length; j = i++){ var a = WP[i], b = WP[j]; if ((a[1] > y) !== (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]) c = !c; } return c; };
-      var HRS = (FRM[FRM.length - 1].t - t0) / 36e5;
+      var HRS = (FRM[FRM.length - 1].t - t0) / 36e5, HP = (t0 - FRM[0].t) / 36e5;
 
-      /* MODEL WIND (2): the air the streaks ride is the forecast wind near the ground, not a drawing -- Open-Meteo's best-match
-         model at 10 m on a 9 x 6 grid over this map, hourly through the forecast, one request, kept half an hour. Speeds are to
-         scale (a calm high is slow, the push behind a cold front fast). Until it arrives, or if it fails, the diagram flow below
-         stands in, and the card's words say which it is. */
-      var NX = 9, NY = 6, WK = 0.85;   /* canvas units a second per m/s */
+      /* THE MODEL'S AIR (2-4): the wind the streaks ride, the temperature that colors them, and the cloud and rain on the map are
+         Open-Meteo's best-match forecast on a 14 x 10 grid over this map, hourly from a day before the analysis to two days after,
+         one request kept half an hour. Wind is to scale (a calm high is slow, the push behind a cold front fast); a streak is warm
+         or cold by the air it is actually in (its temperature against the map's own spread), so a front that is weak in fact
+         looks weak; cloud cover and rain move with the forecast hour. Until it arrives, or if it fails, the diagram flow, the
+         wedge coloring and the drawn comma stand in, and the clock line says which it is. */
+      var NX = 14, NY = 10, WK = 0.85;   /* canvas units a second per m/s */
       var WCACHE = bvStormPlan.wind || (bvStormPlan.wind = {}), wkey = (o.site || '') + ':' + [x0, x1, y0, y1].map(function(v){ return v.toFixed(1); }).join(','), WD = WCACHE[wkey];
       var gLL = function(i, j){ return inv(-6 + (W + 12) * i / (NX - 1), -6 + (H + 12) * j / (NY - 1)); };
       if (!WD || Date.now() - WD.at > 18e5){ WD = WCACHE[wkey] = { at: Date.now(), d: null };
         var la = [], lo = []; for (var jj = 0; jj < NY; jj++) for (var ii = 0; ii < NX; ii++){ var q = gLL(ii, jj); la.push(q[1].toFixed(2)); lo.push(q[0].toFixed(2)); }
-        var ac = typeof AbortController === 'function' ? new AbortController() : null; if (ac) setTimeout(function(){ ac.abort(); }, 9000);
-        fetch('https://api.open-meteo.com/v1/forecast?latitude=' + la.join(',') + '&longitude=' + lo.join(',') + '&hourly=wind_speed_10m,wind_direction_10m&wind_speed_unit=ms&timeformat=unixtime&past_hours=12&forecast_hours=54', ac ? { signal: ac.signal } : {})
+        var pastH = Math.min(92, Math.max(12, Math.ceil((Date.now() - (t0 - HP * 36e5)) / 36e5) + 2));
+        var ac = typeof AbortController === 'function' ? new AbortController() : null; if (ac) setTimeout(function(){ ac.abort(); }, 12000);
+        fetch('https://api.open-meteo.com/v1/forecast?latitude=' + la.join(',') + '&longitude=' + lo.join(',') + '&hourly=wind_speed_10m,wind_direction_10m,temperature_2m,cloud_cover,precipitation&wind_speed_unit=ms&timeformat=unixtime&past_hours=' + pastH + '&forecast_hours=54', ac ? { signal: ac.signal } : {})
           .then(function(r){ return r.ok ? r.json() : null; }).then(function(j){ if (!j) return; var arr = Array.isArray(j) ? j : [j]; if (arr.length !== NX * NY) return;
-            var T = arr[0].hourly.time.map(function(x){ return x * 1000; });
-            WD.d = { T: T, U: arr.map(function(r){ return r.hourly.wind_speed_10m.map(function(sp, k){ var dd = r.hourly.wind_direction_10m[k] * Math.PI / 180; return [-sp * Math.sin(dd), -sp * Math.cos(dd)]; }); }) };
-            if (o.onWind) o.onWind(true); }).catch(function(){}); }
-      var WF = null;   /* the field at the moment drawn: [node] -> canvas-unit velocity */
-      var windAt = function(tt){ var D = WD && WD.d; if (!D) return null; var T = D.T, k = 0; while (k < T.length - 2 && T[k + 1] < tt) k++; var u = Math.max(0, Math.min(1, (tt - T[k]) / ((T[k + 1] - T[k]) || 1)));
-        return D.U.map(function(row){ var a = row[k], b = row[Math.min(row.length - 1, k + 1)]; return [(a[0] + (b[0] - a[0]) * u) * WK, -(a[1] + (b[1] - a[1]) * u) * WK]; }); };
-      var Vwind = function(x, y){ var fx = (x + 6) / (W + 12) * (NX - 1), fy = (y + 6) / (H + 12) * (NY - 1); fx = Math.max(0, Math.min(NX - 1.001, fx)); fy = Math.max(0, Math.min(NY - 1.001, fy));
-        var i = Math.floor(fx), j = Math.floor(fy), u = fx - i, v = fy - j, n = function(a, b){ return WF[b * NX + a]; }, A = n(i, j), B = n(i + 1, j), C2 = n(i, j + 1), D2 = n(i + 1, j + 1);
+            WD.d = { T: arr[0].hourly.time.map(function(x){ return x * 1000; }),
+              U: arr.map(function(r){ return r.hourly.wind_speed_10m.map(function(sp, k){ var dd = r.hourly.wind_direction_10m[k] * Math.PI / 180; return [-sp * Math.sin(dd), -sp * Math.cos(dd)]; }); }),
+              Tm: arr.map(function(r){ return r.hourly.temperature_2m; }), Cc: arr.map(function(r){ return r.hourly.cloud_cover; }), Pr: arr.map(function(r){ return r.hourly.precipitation; }) }; }).catch(function(){}); }
+      var WF = null, TMP = null, TMm = 0, TMs = 1, CCg = null, PRg = null;   /* the fields at the moment drawn, one value a grid node */
+      var fieldsAt = function(tt){ var D = WD && WD.d; if (!D){ WF = TMP = CCg = PRg = null; return; } var T = D.T, k = 0; while (k < T.length - 2 && T[k + 1] < tt) k++; var u = Math.max(0, Math.min(1, (tt - T[k]) / ((T[k + 1] - T[k]) || 1)));
+        var li = function(row){ var a = row[k], b = row[Math.min(row.length - 1, k + 1)]; if (a == null) a = b; if (b == null) b = a; return a == null ? 0 : a + (b - a) * u; };
+        WF = D.U.map(function(row){ var a = row[k], b = row[Math.min(row.length - 1, k + 1)]; return [(a[0] + (b[0] - a[0]) * u) * WK, -(a[1] + (b[1] - a[1]) * u) * WK]; });
+        TMP = D.Tm.map(li); CCg = D.Cc.map(li); PRg = D.Pr.map(li);
+        var sm = 0; TMP.forEach(function(v){ sm += v; }); TMm = sm / TMP.length; var sq = 0; TMP.forEach(function(v){ sq += (v - TMm) * (v - TMm); }); TMs = Math.max(2.5, Math.sqrt(sq / TMP.length)); };
+      var bil = function(Fv, x, y){ var fx = (x + 6) / (W + 12) * (NX - 1), fy = (y + 6) / (H + 12) * (NY - 1); fx = Math.max(0, Math.min(NX - 1.001, fx)); fy = Math.max(0, Math.min(NY - 1.001, fy));
+        var i = Math.floor(fx), j = Math.floor(fy), u = fx - i, v = fy - j, A = Fv[j * NX + i], B = Fv[j * NX + i + 1], C2 = Fv[(j + 1) * NX + i], D2 = Fv[(j + 1) * NX + i + 1];
+        if (typeof A === 'number') return (A * (1 - u) + B * u) * (1 - v) + (C2 * (1 - u) + D2 * u) * v;
         return [(A[0] * (1 - u) + B[0] * u) * (1 - v) + (C2[0] * (1 - u) + D2[0] * u) * v, (A[1] * (1 - u) + B[1] * u) * (1 - v) + (C2[1] * (1 - u) + D2[1] * u) * v]; };
+      var Vwind = function(x, y){ return bil(WF, x, y); };
       /* THE DIAGRAM FLOW, when there is no model wind: spiralling in about the low, the warm conveyor up the wedge, cold air
          pushing in behind the cold front, clockwise out of each high */
       var Vdiag = function(x, y){ var vx = 0, vy = 0, hub = GM.hub;
@@ -64263,7 +64282,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           if (PAIR){ var a = Math.atan2(-dy, dx), d = ((a - GM.aC) % 6.2832 + 6.2832) % 6.2832;
             if (inPoly(x, y)){ var f = Math.max(0.35, 1 - r / 110); vx += GM.uC[0] * 7 * f; vy += GM.uC[1] * 7 * f; }
             else if (d > 6.2832 - 1.3){ vx += GM.nC[0] * 6 - GM.uC[0] * 2; vy += GM.nC[1] * 6 - GM.uC[1] * 2; } } }
-        HIc.forEach(function(c){ var dx = x - c[0], dy = y - c[1], r = Math.hypot(dx, dy) + 0.01, m = 7 * Math.min(1.2, 16 / (r + 5)); vx += (-dy / r + 0.45 * dx / r) * m; vy += (dx / r + 0.45 * dy / r) * m; });
+        GM.HIc.forEach(function(c){ var dx = x - c[0], dy = y - c[1], r = Math.hypot(dx, dy) + 0.01, m = 7 * Math.min(1.2, 16 / (r + 5)); vx += (-dy / r + 0.45 * dx / r) * m; vy += (dx / r + 0.45 * dy / r) * m; });
         return [vx, vy]; };
       var V = function(x, y){ return WF ? Vwind(x, y) : Vdiag(x, y); };
 
@@ -64273,7 +64292,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
       GM = geom(0);
       /* THE STREAKS' LIFE (4): they fade in, take the color of the air they are in, and where they near the low they spiral
          tighter and dissolve -- the low reads as a drain, not a wall they vanish at */
-      var spawn = function(p){ var R = st.rnd; if (HIc.length && R() < 0.2){ var h = HIc[Math.floor(R() * HIc.length)], a = R() * 6.2832, rr = 4 + R() * 12; p.x = h[0] + Math.cos(a) * rr; p.y = h[1] + Math.sin(a) * rr; }
+      var spawn = function(p){ var R = st.rnd, HIc = GM.HIc || []; if (HIc.length && R() < 0.2){ var h = HIc[Math.floor(R() * HIc.length)], a = R() * 6.2832, rr = 4 + R() * 12; p.x = h[0] + Math.cos(a) * rr; p.y = h[1] + Math.sin(a) * rr; }
         else { var wantW = PAIR && R() < 0.33; for (var tries = 0; tries < 12; tries++){ p.x = -4 + R() * (W + 8); p.y = -4 + R() * (H + 8); if (!wantW || inPoly(p.x, p.y)) break; } }
         p.age = 0; p.life = 3 + R() * 3; p.tr = []; p.w = PAIR ? (inPoly(p.x, p.y) ? 1 : 0) : 0.5; p.rise = 0; return p; };
       var stepAir = function(dt){ var hub = GM.hub; if (!hub) return;
@@ -64285,12 +64304,13 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           p.x += v[0] * dt; p.y += v[1] * dt; p.age += dt;
           var inW = PAIR && inPoly(p.x, p.y);
           if (PAIR){ if (p.w > 0.6 && !inW && !p.rise){ var a3 = Math.atan2(-(p.y - hub[1]), p.x - hub[0]), dW = Math.abs(((a3 - GM.aW) % 6.2832 + 9.4248) % 6.2832 - 3.1416); if (dW < 0.7) p.rise = 0.001; }
-            if (!p.rise) p.w += ((inW ? 1 : 0) - p.w) * Math.min(1, dt * 2.5); }
+            if (!p.rise) p.w += ((TMP ? Math.max(0, Math.min(1, 0.5 + 0.5 * (bil(TMP, p.x, p.y) - TMm) / TMs)) : (inW ? 1 : 0)) - p.w) * Math.min(1, dt * 2.5); }
+          else if (TMP && !p.rise) p.w += (Math.max(0, Math.min(1, 0.5 + 0.5 * (bil(TMP, p.x, p.y) - TMm) / TMs)) - p.w) * Math.min(1, dt * 2.5);
           if (p.rise) p.rise += dt * 0.7;
           p.tr.push([p.x, p.y]); if (p.tr.length > 24) p.tr.shift();
           var rh = Math.hypot(p.x - hub[0], p.y - hub[1]);
           if (p.age > p.life || p.rise > 1 || rh < 4 || p.x < -8 || p.x > W + 8 || p.y < -8 || p.y > H + 8) spawn(p); }); };
-      if (GM.hub && !st.q.length){ for (var iq = 0; iq < 130; iq++){ var pq = spawn({}); pq.age = st.rnd() * pq.life * 0.7; st.q.push(pq); } for (iq = 0; iq < 24; iq++) stepAir(0.033); }
+      if (GM.hub && !st.q.length){ for (var iq = 0; iq < (W * SC < 420 ? 95 : 130); iq++){ var pq = spawn({}); pq.age = st.rnd() * pq.life * 0.7; st.q.push(pq); } for (iq = 0; iq < 24; iq++) stepAir(0.033); }
 
       var line = function(L){ g.beginPath(); g.moveTo(L[0][0], L[0][1]); for (var i = 1; i < L.length - 1; i++) g.quadraticCurveTo(L[i][0], L[i][1], (L[i][0] + L[i + 1][0]) / 2, (L[i][1] + L[i + 1][1]) / 2); g.lineTo(L[L.length - 1][0], L[L.length - 1][1]); };
       var part = function(L, f){ if (f >= 1) return L; var n = Math.max(2, Math.round(L.length * f)); return L.slice(0, n); };   /* (6) a line drawn out from the low */
@@ -64354,30 +64374,51 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         for (var py = 0; py < N; py++) for (var px = 0; px < N; px++){ var n = 0.5 * vn(px, py, 4, 1) + 0.28 * vn(px, py, 8, 2) + 0.14 * vn(px, py, 16, 3) + 0.08 * vn(px, py, 32, 4), a = Math.max(0, Math.min(1, (n - 0.3) * 2.4));
           var k = (py * N + px) * 4; im.data[k] = im.data[k + 1] = im.data[k + 2] = 255; im.data[k + 3] = Math.round(255 * (0.18 + 0.82 * a)); }
         x.putImageData(im, 0, 0); return c; })());
-      var MK = document.createElement('canvas'); MK.width = W * dpr; MK.height = H * dpr; var mk = MK.getContext('2d');
+      var MR = dpr / 2, MK = document.createElement('canvas'); MK.width = Math.ceil(W * MR); MK.height = Math.ceil(H * MR); var mk = MK.getContext('2d');   /* the cloud layer at half resolution: it is soft anyway, and it was the costliest pass */
+      var SMALL = [document.createElement('canvas'), document.createElement('canvas')]; SMALL[0].width = NX; SMALL[0].height = NY; SMALL[1].width = NX * 6; SMALL[1].height = NY * 6; SMALL.push(document.createElement('canvas')); SMALL[2].width = NX * 6; SMALL[2].height = NY * 6;
 
       /* (6) THE OPENING: fronts drawn out from the low, then the warm wedge, then the cloud, then the air -- the order a reader
          needs -- before the forecast starts to play. (1) THE LOOP: the analysis held, the forecast played at ~1.4 s per 6 h,
          the last chart held, then a quick rewind to now. */
       var intro = 0, clk = 0, hNow = 0, pulse = null, wasNear = {};
-      var HOLD0 = 2.6, HOLD1 = 1.8, REW = 1.4, PLAY = HRS / 6 * 1.4, LOOP = HOLD0 + PLAY + HOLD1 + REW;
-      var hOf = function(c){ if (HRS <= 0) return 0; c = c % LOOP; if (c < HOLD0) return 0; c -= HOLD0; if (c < PLAY) return HRS * c / PLAY; c -= PLAY; if (c < HOLD1) return HRS; c -= HOLD1; var u = c / REW; u = u * u * (3 - 2 * u); return HRS * (1 - u); };
-      var whenTxt = function(hh){ if (hh < 0.5) return 'NOW'; var tt = t0 + hh * 36e5; if (typeof bvFrontWhen === 'function') return bvFrontWhen(tt, o.tz || 'America/New_York', true);
+      /* THE LOOP: NOW held; then (2) a quick wind back through the last day's analyses and a play up to NOW; then the forecast
+         played and its last chart held; then back to NOW. Each leg is there only if the charts carry the storm that far. */
+      var KF = [[0, 0, 0]], addK = function(dur, h, e2){ KF.push([KF[KF.length - 1][0] + dur, h, e2 ? 1 : 0]); };
+      addK(2.6, 0); if (HP > 0){ addK(1.0, -HP, 1); addK(0.4, -HP); addK(HP / 6 * 1.4, 0); addK(1.2, 0); } if (HRS > 0){ addK(HRS / 6 * 1.4, HRS); addK(1.8, HRS); addK(1.4, 0, 1); }
+      var LOOP = KF[KF.length - 1][0];
+      var hOf = function(c){ if (KF.length < 3) return 0; c = c % LOOP; for (var i = 0; i < KF.length - 1; i++) if (c < KF[i + 1][0]){ var u = (c - KF[i][0]) / ((KF[i + 1][0] - KF[i][0]) || 1); if (KF[i + 1][2]) u = u * u * (3 - 2 * u); return KF[i][1] + (KF[i + 1][1] - KF[i][1]) * u; } return 0; };
+      var clkFor = function(h){ for (var i = 1; i < KF.length - 1; i++){ var a = KF[i][1], b = KF[i + 1][1]; if (a !== b && !KF[i + 1][2] && h >= Math.min(a, b) && h <= Math.max(a, b)) return KF[i][0] + (KF[i + 1][0] - KF[i][0]) * (h - a) / (b - a); } return 0; };
+      var paused = false, hP = 0;
+      var whenTxt = function(hh){ if (Math.abs(hh) < 0.5) return 'NOW'; var tt = t0 + hh * 36e5; if (typeof bvFrontWhen === 'function') return bvFrontWhen(tt, o.tz || 'America/New_York', true);
         return new Date(tt).toLocaleString('en-US', { timeZone: o.tz || 'America/New_York', weekday: 'short', hour: 'numeric' }).toUpperCase(); };
       var ez = function(x){ x = x < 0 ? 0 : x > 1 ? 1 : x; return x * x * (3 - 2 * x); };
 
       var draw = function(dt){
         st.t += dt; intro += dt;
         var ripe = still ? 1 : ez((intro - 2.3) / 0.01);   /* the clock starts once the opening is done */
-        if (!still && intro > 2.3) clk += dt;
-        hNow = still ? 0 : hOf(clk); GM = geom(hNow); WF = windAt(t0 + hNow * 36e5);
+        if (!still && intro > 2.3 && !paused) clk += dt;
+        hNow = still ? 0 : (paused ? hP : hOf(clk)); GM = geom(hNow); fieldsAt(t0 + hNow * 36e5);
         var aF = still ? 1 : ez(intro / 0.9), aWd = still ? 1 : ez((intro - 0.5) / 0.6), aCl = still ? 1 : ez((intro - 0.9) / 0.8), aSt = still ? 1 : ez((intro - 1.4) / 0.8);
-        var hub = GM.hub, C = GM.C, Wm = GM.Wm, Oc = GM.Oc, join = GM.join, playing = hNow > 0.05;
+        var hub = GM.hub, C = GM.C, Wm = GM.Wm, Oc = GM.Oc, join = GM.join, playing = Math.abs(hNow) > 0.05;
         g.setTransform(dpr, 0, 0, dpr, 0, 0);
         try { g.letterSpacing = '0px'; } catch(e){}
         if (!bg && BASE.d) paintBase();
         if (bg){ g.setTransform(1, 0, 0, 1, 0, 0); g.drawImage(bg, 0, 0); g.setTransform(dpr, 0, 0, dpr, 0, 0); }
         else { g.fillStyle = '#0e2956'; g.fillRect(0, 0, W, H); }
+        /* (4) THE MODEL'S CLOUD AND RAIN at this hour: the grid drawn small, smoothed up in two steps, the cloud torn by the same
+           fibrous texture; rain teal to green to amber by rate */
+        if (CCg && aCl > 0.02){ var paint = function(fn, dest){ var c1 = SMALL[0].getContext('2d'), id = c1.createImageData(NX, NY); for (var k = 0; k < NX * NY; k++){ var px = fn(k); id.data[k * 4] = px[0]; id.data[k * 4 + 1] = px[1]; id.data[k * 4 + 2] = px[2]; id.data[k * 4 + 3] = px[3]; } c1.putImageData(id, 0, 0);
+              var tgt = SMALL[dest || 1], c2 = tgt.getContext('2d'); c2.clearRect(0, 0, tgt.width, tgt.height); c2.imageSmoothingEnabled = true; c2.imageSmoothingQuality = 'high'; c2.drawImage(SMALL[0], 0, 0, tgt.width, tgt.height); };
+            var cw2 = (W + 12) / (NX - 1), ch2 = (H + 12) / (NY - 1), gx = (-6 - cw2 / 2), gy = (-6 - ch2 / 2), gw = cw2 * NX, gh = ch2 * NY;
+            st.ccN = (st.ccN || 0) + 1; var fresh = st.ccN % 3 === 1 || paused;   /* the model's cloud and rain change slowly: rebuilt every third frame */
+            if (fresh){ paint(function(k){ var a = Math.max(0, Math.min(1, (CCg[k] - 45) / 55)); return [246, 248, 252, Math.round(255 * Math.pow(a, 1.5) * 0.8)]; });   /* only thick cloud: a November overcast otherwise buries the map */
+              mk.setTransform(MR, 0, 0, MR, 0, 0); mk.globalCompositeOperation = 'source-over'; mk.clearRect(-20, -20, W + 40, H + 40); mk.imageSmoothingEnabled = true; mk.imageSmoothingQuality = 'high'; mk.drawImage(SMALL[1], gx, gy, gw, gh);
+              mk.globalCompositeOperation = 'destination-in'; var patM = mk.createPattern(NOISE, 'repeat');
+              try { patM.setTransform(new DOMMatrix().translate(st.t * 1.2, st.t * 0.3).rotate(-25).scale(0.55 / Math.max(0.5, MF), 0.22 / Math.max(0.5, MF))); } catch(e){}
+              mk.fillStyle = patM; mk.fillRect(-10, -10, W + 20, H + 20); mk.globalCompositeOperation = 'source-over'; }
+            g.save(); g.globalAlpha = 0.6 * aCl; g.imageSmoothingEnabled = true; g.drawImage(MK, 0, 0, W, H);
+            if (fresh) paint(function(k){ var r = PRg[k]; if (r < 0.2) return [45, 212, 191, 0]; var a = Math.min(0.8, 0.15 + 0.3 * Math.log(1 + r) / Math.LN2); return r < 1 ? [45, 212, 191, Math.round(255 * a)] : r < 4 ? [74, 222, 128, Math.round(255 * a)] : [250, 204, 21, Math.round(255 * a)]; }, 2);
+            g.globalAlpha = 0.7 * aCl; g.imageSmoothingQuality = 'high'; g.drawImage(SMALL[2], gx, gy, gw, gh); g.restore(); }
         if (PAIR){
           g.save(); g.globalAlpha = aWd;
           g.fillStyle = 'rgba(96,165,250,.10)'; g.fillRect(0, 0, W, H);
@@ -64397,7 +64438,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             var frame = function(L, u, away){ var q = at(L, u), q2 = at(L, Math.min(1, u + 0.02)), q1 = at(L, Math.max(0, u - 0.02)), tx = q2[0] - q1[0], ty = q2[1] - q1[1], tl = Math.hypot(tx, ty) || 1; tx /= tl; ty /= tl; var nx = -ty, ny = tx;
               if (inPoly(q[0] + nx * 3, q[1] + ny * 3) === away){ nx = -nx; ny = -ny; } return [q, nx, ny]; };
             var spanH = 6.2832 - GM.span - 0.9, Rh = Math.max(8, Math.min(16, Math.hypot(We[0] - hub[0], We[1] - hub[1]) * 0.3));
-            mk.setTransform(1, 0, 0, 1, 0, 0); mk.globalCompositeOperation = 'source-over'; mk.clearRect(0, 0, MK.width, MK.height); mk.setTransform(dpr, 0, 0, dpr, 0, 0);
+            if (!CCg){   /* the drawn comma, only until the model's cloud is in */
+            mk.setTransform(1, 0, 0, 1, 0, 0); mk.globalCompositeOperation = 'source-over'; mk.clearRect(0, 0, MK.width, MK.height); mk.setTransform(MR, 0, 0, MR, 0, 0);
             st.cl.forEach(function(c){ var x, y, rad, fz;
               if (c.b === 0){ c.u = (c.u + dt * 0.018) % 1; var F0 = frame(WLc, c.u, true), off = 3 + (c.v + 0.5) * 15 * (1 - 0.4 * c.u); x = F0[0][0] + F0[1] * off; y = F0[0][1] + F0[2] * off; rad = (6 + 3 * c.r) * (1 - 0.25 * c.u); fz = 0.9; }
               else if (c.b === 1){ c.u = (c.u - dt * 0.02 + 1) % 1; var F1 = frame(CLc, c.u, false), off1 = 1 + c.v * 3; x = F1[0][0] + F1[1] * off1; y = F1[0][1] + F1[2] * off1; rad = 3 + 1.4 * c.r; fz = 1 - 0.55 * c.u; }
@@ -64408,7 +64450,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             mk.globalCompositeOperation = 'destination-in'; var pat = mk.createPattern(NOISE, 'repeat');
             try { pat.setTransform(new DOMMatrix().translate(st.t * 1.2, st.t * 0.3).rotate(-GM.aW * 180 / Math.PI).scale(0.55 / Math.max(0.5, MF), 0.2 / Math.max(0.5, MF))); } catch(e){}
             mk.fillStyle = pat; mk.fillRect(-10, -10, W + 20, H + 20); mk.globalCompositeOperation = 'source-over';
-            g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 0.85 * aCl; g.drawImage(MK, 0, 0); g.restore();
+            g.save(); g.globalAlpha = 0.85 * aCl; g.imageSmoothingEnabled = true; g.drawImage(MK, 0, 0, W, H); g.restore(); }
             /* (3) along the cold front the cold air shoves the warm air up: small towers bubble up on the warm side and go */
             if (!still){ if (st.tw.length < 9 && st.rnd() < dt * 5) st.tw.push({ u: 0.08 + st.rnd() * 0.8, a: 0, L: 1.2 + st.rnd() * 0.8 });
               st.tw = st.tw.filter(function(w){ w.a += dt; return w.a < w.L; });
@@ -64421,15 +64463,17 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         if (hub && aSt > 0.02){ stepAir(dt); g.lineCap = 'round'; g.lineJoin = 'round';
           st.q.forEach(function(p){ if (p.tr.length < 3) return; var rh = Math.hypot(p.x - hub[0], p.y - hub[1]);
             var al = aSt * Math.min(1, p.age / 0.9) * Math.min(1, (p.life - p.age) / 1.2) * (1 - (p.rise || 0)) * Math.min(1, (rh - 4) / 12); if (al < 0.03) return;
-            var wr = Math.min(1, (p.rise || 0) * 2.2), base = !PAIR ? [190, 200, 220] : [110 + 145 * p.w, 170 - 10 * p.w, 255 - 175 * p.w];
+            var wr = Math.min(1, (p.rise || 0) * 2.2), base = (!PAIR && !TMP) ? [190, 200, 220] : [110 + 145 * p.w, 170 - 10 * p.w, 255 - 175 * p.w];
             var col = Math.round(base[0] + (250 - base[0]) * wr) + ',' + Math.round(base[1] + (250 - base[1]) * wr) + ',' + Math.round(base[2] + (252 - base[2]) * wr);   /* rising air whitens into cloud */
-            var n = p.tr.length; for (var k = 1; k < n; k++){ g.strokeStyle = 'rgba(' + col + ',' + (0.75 * al * k / n).toFixed(3) + ')'; g.lineWidth = (0.35 + 0.85 * k / n) * (1 + 0.8 * wr) * MF * 1.25; g.beginPath(); g.moveTo(p.tr[k - 1][0], p.tr[k - 1][1]); g.lineTo(p.tr[k][0], p.tr[k][1]); g.stroke(); } }); }
+            var n = p.tr.length, PC = 4;   /* PERF (2026-11-13, measured 77 ms a frame on a 4x-slowed phone): four fading pieces a streak, not one stroke a point */
+            for (var pc = 0; pc < PC; pc++){ var i0 = Math.floor((n - 1) * pc / PC), i1 = Math.floor((n - 1) * (pc + 1) / PC); if (i1 <= i0) continue; var fk = (pc + 1) / PC;
+              g.strokeStyle = 'rgba(' + col + ',' + (0.75 * al * fk).toFixed(3) + ')'; g.lineWidth = (0.35 + 0.85 * fk) * (1 + 0.8 * wr) * MF * 1.25; g.beginPath(); g.moveTo(p.tr[i0][0], p.tr[i0][1]); for (var k = i0 + 1; k <= i1; k++) g.lineTo(p.tr[k][0], p.tr[k][1]); g.stroke(); } }); }
         else if (hub) stepAir(dt);
         /* where the low goes: its positions on every chart, a faint dotted path */
         if (FRM.length > 1 && hub){ g.save(); g.globalAlpha = 0.55 * aWd; g.setLineDash([1.2, 2.4]); g.strokeStyle = '#e8eefc'; g.lineWidth = 1 * MF; g.beginPath(); trackXY.forEach(function(q, i){ i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); g.stroke(); g.setLineDash([]);
           g.fillStyle = '#e8eefc'; trackXY.forEach(function(q, i){ if (i){ g.beginPath(); g.arc(q[0], q[1], 1.1 * MF, 0, 6.3); g.fill(); } }); g.restore(); }
         /* the cut, where the side view is taken: it belongs to the analysis, so it shows only at NOW */
-        var A = null, ex = 0, ey = 0, cutA = (1 - ez(hNow / 1.5)) * aWd;
+        var A = null, ex = 0, ey = 0, cutA = (1 - ez(Math.abs(hNow) / 1.5)) * aWd;
         if (PAIR){ A = at(C, 0.45); var B = at(Wm, 0.55); ex = (B[0] - A[0]) * 0.28; ey = (B[1] - A[1]) * 0.28;
           if (cutA > 0.02){ g.save(); g.globalAlpha = cutA; g.setLineDash([3, 2.5]); g.strokeStyle = 'rgba(240,244,252,.85)'; g.lineWidth = 1; g.beginPath(); g.moveTo(A[0] - ex, A[1] - ey); g.lineTo(B[0] + ex, B[1] + ey); g.stroke(); g.setLineDash([]); g.restore(); } }
         /* the fronts themselves */
@@ -64454,7 +64498,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           g.lineWidth = 2.4 * MF; g.strokeStyle = '#3b82f6'; line(CLf); g.stroke(); g.strokeStyle = '#ef4444'; line(WLf); g.stroke();
           if (Oc && Oc.length > 1 && Math.hypot(Oc[Oc.length - 1][0] - Oc[0][0], Oc[Oc.length - 1][1] - Oc[0][1]) > 0.8){ g.strokeStyle = '#2B22F4'; g.lineWidth = 2.4 * MF; line(part([hub].concat(Oc), aF)); g.stroke(); } }
         /* where the low is going, on the forecasters' next chart: shown at NOW; while the forecast plays the low itself moves */
-        var trkA = (1 - ez(hNow / 1.5)) * aWd;
+        var trkA = (1 - ez(Math.abs(hNow) / 1.5)) * aWd;
         if (hub && o.track && trkA > 0.02){ var T = P(o.track), tx = T[0] - hub[0], ty = T[1] - hub[1], tl = Math.hypot(tx, ty);
           if (tl > 3){ var L2 = Math.max(14, Math.min(30, tl)); tx /= tl; ty /= tl; var ex2 = hub[0] + tx * L2, ey2 = hub[1] + ty * L2; g.save(); g.globalAlpha = trkA;
             g.strokeStyle = '#e8eefc'; g.fillStyle = '#e8eefc'; g.lineWidth = 1.4; g.beginPath(); g.moveTo(hub[0] + tx * 7, hub[1] + ty * 7); g.lineTo(ex2, ey2); g.stroke();
@@ -64466,10 +64510,10 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           placed.push(bx);
           g.fillStyle = 'rgba(255,252,244,.8)'; g.fillRect(x - 1.5 * TF, y - 6.5 * TF, w + 3 * TF, 8.5 * TF); g.fillStyle = col; g.fillText(sx, x, y); g.restore(); };
         if (hub && o.low && !playing) word(o.low.mb + ' MB', hub[0] - 10 * TF, hub[1] + 16 * MF, '#7f1d1d', '800 ' + (6 * TF) + 'px system-ui,sans-serif');
-        HIc.forEach(function(c, hi){ var h = HI[hi]; if (c[0] < 4 || c[0] > W - 4 || c[1] < 6 || c[1] > H - 4) return;
+        GM.HIc.forEach(function(c, hi){ var h = HI[hi]; if (c[0] < 4 || c[0] > W - 4 || c[1] < 6 || c[1] > H - 4) return;
           g.fillStyle = '#fffcf4'; g.beginPath(); g.arc(c[0], c[1], 5.5 * MF, 0, 6.3); g.fill();
           g.font = '900 ' + (9 * TF) + 'px system-ui,sans-serif'; g.fillStyle = '#1d4ed8'; g.fillText('H', c[0] - 3.2 * TF, c[1] + 3.2 * TF);
-          word(h.mb + '', c[0] - 7 * TF, c[1] + 14 * MF, '#1e3a8a', '800 ' + (6 * TF) + 'px system-ui,sans-serif', 1 - ez(hNow / 1.5)); });
+          word(h.mb + '', c[0] - 7 * TF, c[1] + 14 * MF, '#1e3a8a', '800 ' + (6 * TF) + 'px system-ui,sans-serif', 1 - ez(Math.abs(hNow) / 1.5)); });
         if (PAIR){
           /* name the two airs where they are: warm in the wedge, cold behind the cold front */
           var aC = GM.aC, aW = GM.aW, span = GM.span, aM = aC + span / 2, aB = aC - 0.85, rr = Math.max(16, Math.min(40, Math.hypot(C[C.length - 1][0] - hub[0], C[C.length - 1][1] - hub[1]) * 0.62));
@@ -64496,15 +64540,26 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         if (home){ g.fillStyle = '#fff'; g.beginPath(); g.arc(home[0], home[1], 3.4 * MF, 0, 6.3); g.fill(); g.fillStyle = '#2B22F4'; g.beginPath(); g.arc(home[0], home[1], 2.3 * MF, 0, 6.3); g.fill();
           g.font = '800 ' + (6.5 * TF) + 'px system-ui,sans-serif'; word(o.name || '', home[0] - g.measureText(o.name || '').width / 2, home[1] + ((!hub || hub[1] <= home[1]) && !(hub && Math.hypot(hub[0] - home[0], hub[1] + 14 - home[1]) < 34) ? 12 : -6), '#2B22F4'); }
         /* THE CLOCK: whose chart and when, and a thin track of the forecast with a marker riding it */
-        if (o.at){ var ts = (hNow < 0.5 ? 'WPC ' + new Date(o.at).toLocaleTimeString('en-US', { timeZone: o.tz || 'America/New_York', hour: 'numeric' }) + ' · NOW' : 'WPC FORECAST · ' + whenTxt(hNow)) + (WF ? ' · MODEL WIND' : '');
+        if (o.at){ var ts = (Math.abs(hNow) < 0.5 ? 'WPC ' + new Date(o.at).toLocaleTimeString('en-US', { timeZone: o.tz || 'America/New_York', hour: 'numeric' }) + ' · NOW' : (hNow < 0 ? 'WPC ANALYSIS · ' : 'WPC FORECAST · ') + whenTxt(hNow)) + (WF ? ' · MODEL AIR' : '') + (paused ? ' · PAUSED' : '');
           g.font = '800 ' + (5.8 * TF) + 'px system-ui,sans-serif'; try { g.letterSpacing = '0px'; } catch(e){} g.fillStyle = 'rgba(220,228,245,.85)'; g.fillText(ts, 3 * TF, H - 5 * TF);
-          if (HRS > 0){ var bx0 = 3 * TF, bx1 = W - 3 * TF, by = H - 2 * TF; g.strokeStyle = 'rgba(220,228,245,.3)'; g.lineWidth = 0.8 * MF; g.beginPath(); g.moveTo(bx0, by); g.lineTo(bx1, by); g.stroke();
-            g.fillStyle = 'rgba(220,228,245,.55)'; FRM.forEach(function(f){ var xq = bx0 + (bx1 - bx0) * ((f.t - t0) / 36e5) / HRS; g.beginPath(); g.arc(xq, by, 0.8 * MF, 0, 6.3); g.fill(); });
-            g.fillStyle = '#fff'; g.beginPath(); g.arc(bx0 + (bx1 - bx0) * hNow / HRS, by, 1.5 * MF, 0, 6.3); g.fill(); } }
+          if (HRS + HP > 0){ var bx0 = 3 * TF, bx1 = W - 3 * TF, by = H - 2 * TF, bxOf = function(h){ return bx0 + (bx1 - bx0) * (h + HP) / (HRS + HP); };
+            g.strokeStyle = 'rgba(220,228,245,.3)'; g.lineWidth = 0.8 * MF; g.beginPath(); g.moveTo(bx0, by); g.lineTo(bx1, by); g.stroke();
+            g.fillStyle = 'rgba(220,228,245,.55)'; FRM.forEach(function(f){ g.beginPath(); g.arc(bxOf((f.t - t0) / 36e5), by, 0.8 * MF, 0, 6.3); g.fill(); });
+            g.strokeStyle = 'rgba(220,228,245,.8)'; g.lineWidth = 0.8 * MF; g.beginPath(); g.moveTo(bxOf(0), by - 2 * MF); g.lineTo(bxOf(0), by + 1 * MF); g.stroke();   /* NOW */
+            g.fillStyle = '#fff'; g.beginPath(); g.arc(bxOf(hNow), by, (paused ? 2 : 1.5) * MF, 0, 6.3); g.fill(); } }
+        if (paused) word('PAUSED · TAP TO PLAY · DRAG THE BAR', 3 * TF, 9 * TF, '#1b2340', '800 ' + (5.6 * TF) + 'px system-ui,sans-serif');
         g.font = '800 ' + (6 * TF) + 'px system-ui,sans-serif'; g.fillStyle = 'rgba(220,228,245,.75)'; g.fillText('N', W - 9 * TF, 9 * TF); g.strokeStyle = 'rgba(220,228,245,.75)'; g.lineWidth = 1 * MF; g.beginPath(); g.moveTo(W - 6.8 * TF, 11 * TF); g.lineTo(W - 6.8 * TF, 18 * TF); g.stroke();
       };
       var alive = true, last = 0, raf = 0, still = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
       if (typeof bvFrontScene === 'function'){ var stopMe = function(){ alive = false; cancelAnimationFrame(raf); }; stopMe._cv = cv; (bvFrontScene.live || (bvFrontScene.live = [])).push(stopMe); }
+      /* (5) TAP TO PAUSE, DRAG THE BAR TO SCRUB: the air keeps moving at the hour held; pan-y keeps a phone's page scroll */
+      if (HP + HRS > 0){ var downAt = null, scrub = false; cv.style.touchAction = 'pan-y'; cv.style.cursor = 'pointer';
+        var uxy = function(e){ var r = cv.getBoundingClientRect(); return [(e.clientX - r.left) / r.width * W, (e.clientY - r.top) / r.height * H]; };
+        var hAtX = function(x){ var bx0 = 3 * TF, bx1 = W - 3 * TF; return -HP + Math.max(0, Math.min(1, (x - bx0) / (bx1 - bx0))) * (HP + HRS); };
+        cv.addEventListener('pointerdown', function(e){ var q = uxy(e); downAt = q; if (q[1] > H - 12){ scrub = true; paused = true; hP = hAtX(q[0]); try { cv.setPointerCapture(e.pointerId); } catch(x){} if (still) draw(0); } });
+        cv.addEventListener('pointermove', function(e){ if (scrub){ hP = hAtX(uxy(e)[0]); if (still) draw(0); } });
+        cv.addEventListener('pointerup', function(e){ var q = uxy(e); if (scrub){ scrub = false; downAt = null; return; }
+          if (downAt && Math.hypot(q[0] - downAt[0], q[1] - downAt[1]) < 3){ if (paused){ paused = false; clk = clkFor(hNow); } else { paused = true; hP = hNow; } if (still) draw(0); } downAt = null; }); }
       if (still){ draw(0.05); BASE.p.then(function(){ if (alive && cv.isConnected) draw(0); }); return; }
       var tick = function(now){
         if (!alive) return; if (!cv.isConnected){ alive = false; return; }
@@ -64783,7 +64838,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             var para = '<div class="bvfr-w" style="margin-top:' + (phone ? 6 : 2) + 'px;margin-bottom:4px;">One storm, from above and from the side. Air turns counter-clockwise around the low: on its east side warm air streams north and rides up over cooler air (the warm front); behind it cold air sweeps south and digs under (the cold front). <b style="font-weight:700;">In its path: long steady rain, a spell of warm air, then a short hard line of showers. The cold front is the faster arm, so the warm wedge narrows until the two zip together and the storm winds down.</b></div>';
             var ttl = '<div class="bvfr-t" style="color:' + INK + ';">ONE STORM <span style="color:#3b82f6;">· COLD FRONT</span> <span style="color:#ef4444;">+ WARM FRONT</span><span style="color:' + DIM + ';font-weight:700;"> &nbsp;'
                 + (low ? 'HINGED ON A ' + low.mb + ' MB LOW ~' + miOf(low.km) + ' MI ' + AB[Math.round(low.az / 45) % 8] + ' OF ' + X.name : 'THEIR ENDS MEET ON THE FORECASTERS’ CHART') + '</span></div>';   // on a phone the name of the thing comes before its pictures
-            return '<div class="bvfr bvfr-st"><div style="flex:none;' + (phone ? '' : 'width:' + picsW + 'px;') + '">' + (phone ? '<div style="margin-bottom:6px;">' + ttl + '</div>' : '') + picTabs(ci) + picBox(ci, 'plan', '<canvas class="bvfr-plan" data-i="' + ci + '" style="display:inline-block;vertical-align:top;flex:none;border-radius:7px;box-shadow:0 0 0 1px rgba(27,35,64,.22);"></canvas>')
+            return '<div class="bvfr bvfr-st"><div style="flex:none;' + (phone ? '' : 'width:' + picsW + 'px;') + '">' + (phone ? '<div style="margin-bottom:6px;">' + ttl + '</div>' : '') + picTabs(ci) + picBox(ci, 'plan', '<canvas class="bvfr-plan" data-i="' + ci + '" style="display:inline-block;vertical-align:top;flex:none;border-radius:12px;background:#0d1626;box-shadow:0 6px 18px rgba(0,0,0,.28),0 0 0 1px rgba(255,255,255,.08);"></canvas>')
               + picBox(ci, 'cut', '<div class="bvfr-storm" style="display:inline-flex;flex:none;border-radius:7px;overflow:hidden;box-shadow:0 0 0 1px rgba(27,35,64,.22);">'
               + '<canvas class="bvfr-cv" data-i="' + ci + '" data-k="COLD" data-storm="L" style="display:block;flex:none;"></canvas><canvas class="bvfr-cv" data-i="' + ci + '" data-k="WARM" data-storm="R" style="display:block;flex:none;"></canvas></div>') + (phone ? para : '') + '</div><div style="flex:1;min-width:0;">'
               + (phone ? '' : ttl + para)
@@ -64792,7 +64847,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
               + M(c.prw)
               + M('WARM FRONT · ~' + miOf(S2.w.km) + ' MI' + (S2.w.off ? ' · BEYOND THIS MAP' : '') + (c.whenW ? ' · ' + c.whenW : '') + (nowW ? ' · ' + nowW : ''))
               + M('COLD FRONT · ~' + miOf(S2.c.km) + ' MI' + (S2.c.off ? ' · BEYOND THIS MAP' : '') + (c.whenC ? ' · ' + c.whenC : '') + (nowC ? ' · ' + nowC : ''))
-              + '<div class="bvfr-m">FRONTS, THE LOW AND THE TIMES ARE THE WEATHER PREDICTION CENTER’S ANALYSIS AND FORECAST CHARTS · RAIN IS RADAR · THE MAP PLAYS THE FORECASTERS’ NEXT CHARTS · THE MOVING AIR IS MODEL WIND NEAR THE GROUND (A DIAGRAM UNTIL IT LOADS) · THE CLOUD AND THE CUT (DASHED) ARE DIAGRAMS</div>' + (side ? tailH('left') : '') + '</div></div>';
+              + '<div class="bvfr-m">FRONTS, THE LOW AND THE TIMES ARE THE WEATHER PREDICTION CENTER’S ANALYSIS AND FORECAST CHARTS · RAIN IN THE CUT IS RADAR · THE MAP PLAYS THE LAST DAY OF ANALYSES AND THE FORECASTERS’ NEXT CHARTS (TAP TO PAUSE, DRAG ITS BAR) · ON IT, WIND, TEMPERATURE, CLOUD AND RAIN ARE MODEL FORECASTS · THE CUT (DASHED) IS A DIAGRAM</div>' + (side ? tailH('left') : '') + '</div></div>';
           }
           var k = c.ln.k, T = BV_FRONT_TXT[k], dT = DT[c.ln.idx] || null, cnt = lines.filter(function(L){ return L.k === k; }).length;
           var mi = Math.round(c.ln.km * 0.621 / 10) * 10;
@@ -64804,7 +64859,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
           var cvH = '<canvas class="bvfr-cv" data-i="' + ci + '" data-k="' + k + '" style="display:block;flex:none;border-radius:7px;box-shadow:0 0 0 1px rgba(27,35,64,.22);"></canvas>';
           return '<div class="bvfr' + (c.plan ? ' bvfr-st' : '') + '">' + (c.plan
               ? '<div style="flex:none;' + (phoneC ? '' : 'width:' + PW + 'px;') + '">' + picTabs(ci)
-                + picBox(ci, 'plan', '<canvas class="bvfr-plan" data-i="' + ci + '" style="display:inline-block;vertical-align:top;flex:none;border-radius:7px;box-shadow:0 0 0 1px rgba(27,35,64,.22);"></canvas>')
+                + picBox(ci, 'plan', '<canvas class="bvfr-plan" data-i="' + ci + '" style="display:inline-block;vertical-align:top;flex:none;border-radius:12px;background:#0d1626;box-shadow:0 6px 18px rgba(0,0,0,.28),0 0 0 1px rgba(255,255,255,.08);"></canvas>')
                 + picBox(ci, 'cut', cvH) + '</div>'
               : cvH) + '<div style="flex:1;min-width:0;">'
             + '<div class="bvfr-t" style="color:' + KCOL(k) + ';">' + T[0] + '<span style="color:' + DIM + ';font-weight:700;"> &nbsp;' + why + (cnt > 1 ? ' · ' + cnt + ' ON THE MAP' : '') + '</span></div>'
@@ -67133,7 +67188,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                   var Pp = bvFrontsParse(sec), fp = Pp.f.filter(function(q){ return q.k !== 'TROF'; });
                   if (!fp.length && !Pp.lows.length) return;
                   var vp = validOf(sec, d.t);
-                  if (!progs[vp] || issued > progs[vp].issued) progs[vp] = { t: vp, f: fp, lows: Pp.lows, issued: issued };
+                  if (!progs[vp] || issued > progs[vp].issued) progs[vp] = { t: vp, f: fp, lows: Pp.lows, highs: Pp.highs, issued: issued };
                 });
                 return;
               }
