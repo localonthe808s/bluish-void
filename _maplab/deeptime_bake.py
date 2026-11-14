@@ -172,7 +172,7 @@ SCHEMATIC = [  # (age Ma, stage, the note the page shows)
     (2800, 'kenor', 'The cratons gather into Kenorland, a supercontinent of the late Archean.'),
     (2600, 'kenor2', 'Kenorland stands; oxygen from photosynthesis begins to leak into the oceans.'),
     (2400, 'goe', 'The Great Oxidation Event: oxygen reaches the air, iron rusts out of the seas, and the first global ice age follows.'),
-    (2200, 'huron', 'The Huronian glaciations: the planet freezes to the tropics several times.'),
+    (2200, 'huron', 'The Huronian glaciations, 2.45 to 2.22 billion years ago: the planet froze to the tropics several times.'),
     (2000, 'columbia', 'The pieces gather again: Columbia (Nuna), the first supercontinent whose outline is reconstructed.'),
     (1900, 'columbia2', 'Columbia assembles; from 1.8 billion years on the plates can be tracked.'),
 ]
@@ -265,7 +265,8 @@ def boundary_frames(ages):
 # Each ancient landmass is anchored to a point on it today; the GPlates service carries the point back through the Cao 2024
 # model, one call per age. Tier 1 = supercontinents, tier 2 = cratons and continents. 999.99 = not on a tracked plate: skipped.
 LANDS = [   # (name, lon, lat, from Ma, to Ma, tier)
-    ('Nuna', -85, 60, 1800, 1300, 1), ('Rodinia', -85, 60, 1100, 750, 1), ('Pannotia', 20, 0, 620, 560, 1), ('Gondwana', 20, 0, 550, 180, 1),
+    ('Nuna', -85, 60, 1800, 1300, 1), ('Rodinia', -85, 60, 1100, 750, 1), ('Pannotia', 20, 0, 620, 560, 1), ('Gondwana', 20, 0, 550, 180, 1), ('Gondwana', -45, -10, 170, 140, 1),   # 170-140 on its South American side, which has no name until 130 (review 2026-11-14)
+   
     ('Laurussia', -85, 60, 420, 340, 1), ('Pangaea', -5, 15, 335, 180, 1), ('Laurasia', -85, 60, 180, 66, 1),
     ('Laurentia', -85, 60, 1800, 420, 2), ('Baltica', 37, 55, 1800, 420, 2), ('Siberia', 100, 60, 1800, 250, 2), ('Amazonia', -60, -5, 1800, 550, 2),
     ('West Africa', -5, 15, 1800, 550, 2), ('Congo', 20, 0, 1800, 550, 2), ('Kalahari', 23, -25, 1800, 550, 2), ('India', 78, 22, 1800, 550, 2),
@@ -407,6 +408,7 @@ def main():
     print('schematic frames'); frames = schematic_frames() if not QUICK else [f for f in schematic_frames() if f[0] in (4500, 4000, 2400)]
     print('plate frames (GPlates Web Service, Cao 2024)'); frames += plate_frames(plate_ages)
     print('plate boundaries and the tectonic tally (GPlates Web Service, Cao 2024)'); bstats = boundary_frames([1800, 1100, 300, 0] if QUICK else list(range(1800, -1, -10)))
+    # after a re-bake of the frames, re-make the WebP set the page loads first: deeptime/frames_w/<name>.webp, 2048x1024 q86 (see index.html getTex)
     print('the lands by age'); lands = lands_by_age([1800, 1100, 300, 0] if QUICK else list(range(1800, -1, -10)))
     print('PaleoDEM frames'); dem = dem_frames()
     if QUICK:
