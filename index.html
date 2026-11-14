@@ -64238,15 +64238,50 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
          view is first drawn, then painted ONCE per view onto an offscreen canvas. */
       var BASE = bvStormPlan.base || (bvStormPlan.base = { d: null, p: null }), bg = null;
       if (!BASE.p) BASE.p = fetch(o.baseUrl || '/_maplab/front_base.json').then(function(r){ return r.json(); }).then(function(j){ BASE.d = j; }).catch(function(){});
+      /* ON THEME (user 2026-11-13: "can you improve the base map to be on theme? it doesnt need to be our highly detailed map but
+         atleast similar"). The site's maps are the dark family: near-black land, the deep blue sea, the same baked relief on the
+         land and depth tint and sea-floor shading on the sea. Those pyramids are fetched here at a low zoom (only tiles their own
+         indexes list, so no 404s), each laid out whole on its own canvas -- translucent tiles drawn one by one doubled the shading
+         on every seam -- and then laid onto this map in thin strips, which bends Mercator rows onto the plan's flat latitude. No
+         pixel is read back, so the images need no CORS. Natural Earth still gives the land, lakes and state lines on top. */
+      var CDN = 'https://cdn.bluishvoid.com';
+      var lyr = function(key, url, cq){ var B = window[key] || (window[key] = { url: url, cover: null, coverP: null });
+        if (!B.coverP) B.coverP = fetch(B.url + '/cover.json' + cq).then(function(r){ return r.ok ? r.json() : []; }).then(function(a){ B.cover = new Set(a || []); return B.cover; }).catch(function(){ B.cover = new Set(); return B.cover; });
+        return B; };
+      var covHas = function(B, z, x, y){ var cov = B.cover; if (!cov || !cov.size) return true; var U = B.upP || (B.upP = {}), S2 = U[z];
+        if (!S2){ S2 = U[z] = new Set(); var sh = 8 - z; cov.forEach(function(k){ var q = k.split('/'); S2.add((q[0] >> sh) + '/' + (q[1] >> sh)); }); } return S2.has(x + '/' + y); };
+      var LAYERS = [{ B: lyr('BV_BATHY_W', CDN + '/bathy/world1', ''), max: 8, op: 1 }, { B: lyr('BV_SEAFLOOR', CDN + '/seafloor/v1', '?v=5'), max: 8, op: 0.85 }, { B: lyr('BV_RELIEF', CDN + '/relief/v1', '?v=w1'), max: 8, op: 1, land: true }];
+      var inv = function(x, y){ return [((x - W / 2) / s + (x0 + x1) / 2) / c0, (y0 + y1) / 2 - (y - H / 2) / s]; };
+      var lonA = inv(-4, 0)[0] - 1, lonB = inv(W + 4, 0)[0] + 1, latN = Math.min(84, inv(0, -4)[1] + 1), latS = Math.max(-84, inv(0, H + 4)[1] - 1);
+      var mx = function(lon, z){ return (lon + 180) / 360 * Math.pow(2, z); }, my = function(lat, z){ var r = lat * Math.PI / 180; return (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * Math.pow(2, z); };
+      var myInv = function(ty, z){ return Math.atan(Math.sinh(Math.PI * (1 - 2 * ty / Math.pow(2, z)))) * 180 / Math.PI; };
+      var tz = Math.max(3, Math.min(7, Math.floor(Math.log(Math.max(1, c0 * s * dpr) * 360 / 256) / Math.LN2 - 0.3)));
+      while (tz > 3 && (Math.floor(mx(lonB, tz)) - Math.floor(mx(lonA, tz)) + 1) * (Math.floor(my(latS, tz)) - Math.floor(my(latN, tz)) + 1) > 30) tz--;
+      var TX0 = Math.floor(mx(lonA, tz)), TX1 = Math.floor(mx(lonB, tz)), TY0 = Math.max(0, Math.floor(my(latN, tz))), TY1 = Math.min(Math.pow(2, tz) - 1, Math.floor(my(latS, tz)));
+      var MOS = [];
+      if (BASE.d !== undefined) LAYERS.forEach(function(L, li){ L.B.coverP.then(function(){
+        var jobs = [];
+        for (var tx = TX0; tx <= TX1; tx++) for (var ty = TY0; ty <= TY1; ty++){ var xw = ((tx % Math.pow(2, tz)) + Math.pow(2, tz)) % Math.pow(2, tz);
+          if (!covHas(L.B, Math.min(tz, 8), xw >> Math.max(0, tz - 8), ty >> Math.max(0, tz - 8))) continue;
+          jobs.push(new Promise(function(res){ var t3 = [tx, ty], im = new Image(); im.onload = function(){ res([t3, im]); }; im.onerror = function(){ res(null); }; im.src = L.B.url + '/' + tz + '/' + xw + '/' + ty + '.webp'; })); }
+        return Promise.all(jobs).then(function(got){ var lc = document.createElement('canvas'); lc.width = (TX1 - TX0 + 1) * 256; lc.height = (TY1 - TY0 + 1) * 256; var lx = lc.getContext('2d');
+          got.forEach(function(q){ if (q) lx.drawImage(q[1], (q[0][0] - TX0) * 256, (q[0][1] - TY0) * 256, 256, 256); });
+          MOS[li] = lc; bg = null; if (still && alive && cv.isConnected) draw(0); }); }).catch(function(){}); });
+      var lay = function(b, li){ var lc = MOS[li]; if (!lc) return; var L = LAYERS[li]; b.save(); b.globalAlpha = L.op; b.imageSmoothingQuality = 'high';
+        var xl = P([TX0 / Math.pow(2, tz) * 360 - 180, 0])[0], xr = P([(TX1 + 1) / Math.pow(2, tz) * 360 - 180, 0])[0];
+        for (var r = 0; r < lc.height; r += 4){ var yt = P([0, myInv(TY0 + r / 256, tz)])[1], yb = P([0, myInv(TY0 + (r + 4) / 256, tz)])[1]; if (yb < -2 || yt > H + 2) continue; b.drawImage(lc, 0, r, lc.width, 4, xl, yt, xr - xl, yb - yt + 0.25); }
+        b.restore(); };
       var paintBase = function(){
         bg = document.createElement('canvas'); bg.width = W * dpr; bg.height = H * dpr;
         var b = bg.getContext('2d'); b.setTransform(dpr, 0, 0, dpr, 0, 0);
-        b.fillStyle = '#d6e2f3'; b.fillRect(0, 0, W, H);
         var ring = function(r){ b.beginPath(); for (var i = 0; i < r.length; i += 2){ var q = P([r[i], r[i + 1]]); i ? b.lineTo(q[0], q[1]) : b.moveTo(q[0], q[1]); } };
-        b.fillStyle = '#f4f0e6'; BASE.d.land.forEach(function(r){ ring(r); b.closePath(); b.fill(); });
-        b.fillStyle = '#d6e2f3'; BASE.d.lakes.forEach(function(r){ ring(r); b.closePath(); b.fill(); });
-        b.strokeStyle = 'rgba(27,35,64,.20)'; b.lineWidth = 0.6; BASE.d.lines.forEach(function(r){ ring(r); b.stroke(); });
-        b.strokeStyle = 'rgba(27,35,64,.30)'; b.lineWidth = 0.6; BASE.d.land.forEach(function(r){ ring(r); b.stroke(); });
+        b.fillStyle = '#0e2956'; b.fillRect(0, 0, W, H);   /* the deep sea */
+        lay(b, 0); lay(b, 1);   /* its depth, then the shape of the floor */
+        b.fillStyle = '#07080b'; BASE.d.land.forEach(function(r){ ring(r); b.closePath(); b.fill(); });   /* near-black land */
+        lay(b, 2);   /* the land's relief */
+        b.fillStyle = '#174580'; BASE.d.lakes.forEach(function(r){ ring(r); b.closePath(); b.fill(); });
+        b.strokeStyle = 'rgba(150,164,190,.38)'; b.lineWidth = 0.5; BASE.d.lines.forEach(function(r){ ring(r); b.stroke(); });
+        b.strokeStyle = 'rgba(150,164,190,.55)'; b.lineWidth = 0.55; BASE.d.land.forEach(function(r){ ring(r); b.stroke(); });
       };
       var draw = function(dt){
         st.t += dt;
@@ -64254,19 +64289,19 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         try { g.letterSpacing = '0px'; } catch(e){}
         if (!bg && BASE.d) paintBase();
         if (bg){ g.setTransform(1, 0, 0, 1, 0, 0); g.drawImage(bg, 0, 0); g.setTransform(dpr, 0, 0, dpr, 0, 0); }
-        else { g.fillStyle = '#e6edf8'; g.fillRect(0, 0, W, H); }
+        else { g.fillStyle = '#0e2956'; g.fillRect(0, 0, W, H); }
         /* THE REST OF THE MAP IS AIR TOO (user 2026-09-20: "can you color the rest of that map too"): outside
            the warm wedge it is the cooler air. One even tint: a deeper sector behind the cold front drew a hard
            diagonal edge across the map that means nothing; the COLD / COOL words carry the difference. */
         if (PAIR){
-          g.fillStyle = 'rgba(96,165,250,.16)'; g.fillRect(0, 0, W, H);
+          g.fillStyle = 'rgba(96,165,250,.10)'; g.fillRect(0, 0, W, H);
           /* WARMTH AS A GRADIENT (5): the coldest air is the fresh air just behind the cold front, the warmest the far, southern end
              of the wedge, cooling toward the low where the fronts close in */
           var wp = function(){ g.moveTo(WP[0][0], WP[0][1]); for (var i = 1; i < WP.length; i++) g.lineTo(WP[i][0], WP[i][1]); g.closePath(); };
           g.save(); g.beginPath(); g.rect(-5, -5, W + 10, H + 10); wp(); g.clip('evenodd'); g.lineCap = 'butt'; g.lineJoin = 'round';
           g.translate(0, -2000); g.shadowOffsetY = 2000 * dpr; g.shadowColor = 'rgba(37,99,235,.42)'; g.shadowBlur = 16 * dpr * Math.max(1, SC) * 0.6; g.strokeStyle = '#000'; g.lineWidth = 20; line([join].concat(C)); g.stroke(); g.restore();   /* a blurred shadow, drawn from off-canvas: soft edges, a soft end */
           var Ce = C[C.length - 1], We = Wm[Wm.length - 1], wg = g.createLinearGradient(join[0], join[1], (Ce[0] + We[0]) / 2, (Ce[1] + We[1]) / 2);
-          wg.addColorStop(0, 'rgba(251,146,60,.14)'); wg.addColorStop(1, 'rgba(234,88,12,.42)'); g.beginPath(); wp(); g.fillStyle = wg; g.fill();
+          wg.addColorStop(0, 'rgba(251,146,60,.20)'); wg.addColorStop(1, 'rgba(249,115,22,.50)'); g.beginPath(); wp(); g.fillStyle = wg; g.fill();
           /* THE COMMA CLOUD (4): what this storm looks like from a satellite. A broad shield on the cool side of the warm front, where the
              warm air rides up and cools; a narrow band along the cold front; and the head curling round the low from the warm front side
              over its north and west. The clear wedge just south of the low is the dry slot. Drawn from the fronts, not observed; the puffs
@@ -64279,7 +64314,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
             if (c.b === 0){ c.u = (c.u + dt * 0.018) % 1; var F0 = frame(WLc, c.u, true), off = 3 + (c.v + 0.5) * 15 * (1 - 0.4 * c.u); x = F0[0][0] + F0[1] * off; y = F0[0][1] + F0[2] * off; rad = (6 + 3 * c.r) * (1 - 0.25 * c.u); fz = 1; }
             else if (c.b === 1){ c.u = (c.u - dt * 0.02 + 1) % 1; var F1 = frame(CLc, c.u, false), off1 = 1 + c.v * 3; x = F1[0][0] + F1[1] * off1; y = F1[0][1] + F1[2] * off1; rad = 3 + 1.4 * c.r; fz = 1 - 0.55 * c.u; }
             else { c.u = (c.u + dt * 0.015) % 1; var ah = aW + 0.25 + c.u * spanH, rr = Rh * (1 - 0.4 * c.u) + c.v * 5; x = hub[0] + Math.cos(ah) * rr; y = hub[1] - Math.sin(ah) * rr; rad = 5 + 2 * c.r; fz = 1; }
-            var al = 0.62 * Math.sin(Math.PI * c.u) * fz; if (al < 0.02) return;
+            var al = 0.36 * Math.sin(Math.PI * c.u) * fz; rad *= 1.4; if (al < 0.02) return;   /* softer and larger: on the dark map single puffs read as cotton balls */
             var cg = g.createRadialGradient(x, y, 0, x, y, rad); cg.addColorStop(0, 'rgba(255,255,255,' + al.toFixed(3) + ')'); cg.addColorStop(0.55, 'rgba(255,255,255,' + (al * 0.55).toFixed(3) + ')'); cg.addColorStop(1, 'rgba(255,255,255,0)');
             g.fillStyle = cg; g.fillRect(x - rad, y - rad, rad * 2, rad * 2); });
         }
@@ -64287,12 +64322,12 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         if (hub){ stepAir(dt); g.lineCap = 'round'; g.lineJoin = 'round';
           st.q.forEach(function(p){ if (p.tr.length < 3) return; var rh = Math.hypot(p.x - hub[0], p.y - hub[1]);
             var al = Math.min(1, p.age / 0.6) * Math.min(1, (p.life - p.age) / 0.8) * (1 - (p.rise || 0)) * Math.min(1, (rh - 4.5) / 6); if (al < 0.03) return;
-            var col = !PAIR ? '51,65,85' : Math.round(37 + 180 * p.w) + ',' + Math.round(99 - 16 * p.w) + ',' + Math.round(235 - 221 * p.w);
+            var col = !PAIR ? '190,200,220' : Math.round(110 + 145 * p.w) + ',' + Math.round(170 - 10 * p.w) + ',' + Math.round(255 - 175 * p.w);   /* light blue to amber: legible on the dark map */
             var n = p.tr.length; for (var k = 1; k < n; k++){ g.strokeStyle = 'rgba(' + col + ',' + (0.75 * al * k / n).toFixed(3) + ')'; g.lineWidth = (0.35 + 0.85 * k / n) * (1 - 0.6 * (p.rise || 0)) * MF * 1.25; g.beginPath(); g.moveTo(p.tr[k - 1][0], p.tr[k - 1][1]); g.lineTo(p.tr[k][0], p.tr[k][1]); g.stroke(); } }); }
         /* where the side cut is taken */
         var A = null, ex = 0, ey = 0;
         if (PAIR){ A = at(C, 0.45); var B = at(Wm, 0.55); ex = (B[0] - A[0]) * 0.28; ey = (B[1] - A[1]) * 0.28;
-          g.setLineDash([3, 2.5]); g.strokeStyle = '#1b2340'; g.lineWidth = 1; g.beginPath(); g.moveTo(A[0] - ex, A[1] - ey); g.lineTo(B[0] + ex, B[1] + ey); g.stroke(); g.setLineDash([]); }
+          g.setLineDash([3, 2.5]); g.strokeStyle = 'rgba(240,244,252,.85)'; g.lineWidth = 1; g.beginPath(); g.moveTo(A[0] - ex, A[1] - ey); g.lineTo(B[0] + ex, B[1] + ey); g.stroke(); g.setLineDash([]); }
         /* the fronts themselves: every line the chart joins into this system, the card's own drawn heavier */
         var COL = { COLD: '#3b82f6', WARM: '#ef4444', STNRY: '#3b82f6', OCFNT: '#2B22F4' };
         g.lineJoin = 'round'; g.lineCap = 'round';
@@ -64317,7 +64352,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         /* where the low is going, on the forecasters' next chart */
         if (hub && o.track){ var T = P(o.track), tx = T[0] - hub[0], ty = T[1] - hub[1], tl = Math.hypot(tx, ty);
           if (tl > 3){ var L2 = Math.max(14, Math.min(30, tl)); tx /= tl; ty /= tl; var ex2 = hub[0] + tx * L2, ey2 = hub[1] + ty * L2;
-            g.strokeStyle = '#1b2340'; g.fillStyle = '#1b2340'; g.lineWidth = 1.4; g.beginPath(); g.moveTo(hub[0] + tx * 7, hub[1] + ty * 7); g.lineTo(ex2, ey2); g.stroke();
+            g.strokeStyle = '#e8eefc'; g.fillStyle = '#e8eefc'; g.lineWidth = 1.4; g.beginPath(); g.moveTo(hub[0] + tx * 7, hub[1] + ty * 7); g.lineTo(ex2, ey2); g.stroke();
             g.beginPath(); g.moveTo(ex2 + tx * 4, ey2 + ty * 4); g.lineTo(ex2 - ty * 3, ey2 + tx * 3); g.lineTo(ex2 + ty * 3, ey2 - tx * 3); g.closePath(); g.fill(); } }
         var word = function(sx, x, y, col, font){ g.font = font || '800 ' + (6.5 * TF) + 'px system-ui,sans-serif'; var w = g.measureText(sx).width; x = Math.max(2, Math.min(W - w - 2, x)); y = Math.max(8, Math.min(H - 3, y));
           g.fillStyle = 'rgba(255,252,244,.8)'; g.fillRect(x - 1.5 * TF, y - 6.5 * TF, w + 3 * TF, 8.5 * TF); g.fillStyle = col; g.fillText(sx, x, y); };
@@ -64342,8 +64377,8 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
         if (home){ g.fillStyle = '#fff'; g.beginPath(); g.arc(home[0], home[1], 3.4 * MF, 0, 6.3); g.fill(); g.fillStyle = '#2B22F4'; g.beginPath(); g.arc(home[0], home[1], 2.3 * MF, 0, 6.3); g.fill();
           g.font = '800 ' + (6.5 * TF) + 'px system-ui,sans-serif'; word(o.name || '', home[0] - g.measureText(o.name || '').width / 2, home[1] + ((!hub || hub[1] <= home[1]) && !(hub && Math.hypot(hub[0] - home[0], hub[1] + 14 - home[1]) < 34) ? 12 : -6), '#2B22F4'); }
         /* WHOSE CHART, AND WHEN (2026-09-25): the analysis time, where the map is quietest */
-        if (o.at){ var ts = 'WPC ' + new Date(o.at).toLocaleTimeString('en-US', { timeZone: o.tz || 'America/New_York', hour: 'numeric' }).replace(' ', ' '); g.font = '700 ' + (5.6 * TF) + 'px system-ui,sans-serif'; try { g.letterSpacing = '0px'; } catch(e){} g.fillStyle = 'rgba(27,35,64,.55)'; g.fillText(ts, 3 * TF, H - 3 * TF); }
-        g.font = '800 ' + (6 * TF) + 'px system-ui,sans-serif'; g.fillStyle = '#6b7389'; g.fillText('N', W - 9 * TF, 9 * TF); g.strokeStyle = '#6b7389'; g.lineWidth = 1 * MF; g.beginPath(); g.moveTo(W - 6.8 * TF, 11 * TF); g.lineTo(W - 6.8 * TF, 18 * TF); g.stroke();
+        if (o.at){ var ts = 'WPC ' + new Date(o.at).toLocaleTimeString('en-US', { timeZone: o.tz || 'America/New_York', hour: 'numeric' }).replace(' ', ' '); g.font = '700 ' + (5.6 * TF) + 'px system-ui,sans-serif'; try { g.letterSpacing = '0px'; } catch(e){} g.fillStyle = 'rgba(220,228,245,.65)'; g.fillText(ts, 3 * TF, H - 3 * TF); }
+        g.font = '800 ' + (6 * TF) + 'px system-ui,sans-serif'; g.fillStyle = 'rgba(220,228,245,.75)'; g.fillText('N', W - 9 * TF, 9 * TF); g.strokeStyle = 'rgba(220,228,245,.75)'; g.lineWidth = 1 * MF; g.beginPath(); g.moveTo(W - 6.8 * TF, 11 * TF); g.lineTo(W - 6.8 * TF, 18 * TF); g.stroke();
       };
       var alive = true, last = 0, raf = 0, still = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
       if (typeof bvFrontScene === 'function'){ var stopMe = function(){ alive = false; cancelAnimationFrame(raf); }; stopMe._cv = cv; (bvFrontScene.live || (bvFrontScene.live = [])).push(stopMe); }
