@@ -1419,8 +1419,8 @@ window._bvDesert = function(map){
    resampling already smooths real ground). Where planar pixels are dense (a 9 px box, soft knee 20-40%) the grey gives way
    to a ~40 m blur of itself: the facets go, a building on a hillside keeps the hill. Everywhere else the tile is untouched,
    so Prospect Park's ridges, the waterfront bulkheads and the bridge ramps stay crisp. */
-window._bvLidarDefacet = function(a, z, ty){
-  var N = 256, n = N * N, g = new Uint8Array(n), o8 = new Float32Array(n), ok = new Uint8Array(n), c = new Float32Array(n), i, j, k, x, y, d;
+window._bvLidarDefacet = function(a, z, ty, N0){
+  var N = N0 || 256, n = N * N, g = new Uint8Array(n), o8 = new Float32Array(n), ok = new Uint8Array(n), c = new Float32Array(n), i, j, k, x, y, d;
   for (i = 0; i < n; i++){ g[i] = o8[i] = a[i * 4]; ok[i] = a[i * 4 + 3] >= 128 ? 1 : 0; }
   var t = z >= 15 ? 2 : 1, L = 4, S = 2 * L + 1, DX = [], DY = [], DI = [], ord = [0];
   for (k = 1; k <= L; k++) ord.push(k, -k);   /* center outward: a textured pixel fails within a sample or two */
@@ -1472,22 +1472,28 @@ window._bvLidar = function(map){
   var q = null; try { q = new URLSearchParams(location.search).get('lidar'); } catch(e){}
   if (q === '0') return null;
   var W = 2 * Math.PI * 6378137;
-  var src = function(c){
+  var src = function(c, x2){
     /* v2 (2026-10-19): png32 -- plain png marked gray 253 transparent, holes on the brightest slopes */
-    if (q !== 'usgs') return 'https://tiles.bluishvoid.com/lidar/v2/' + c.z + '/' + c.x + '/' + c.y + '.png';
+    if (q !== 'usgs') return 'https://tiles.bluishvoid.com/lidar/v2/' + c.z + '/' + c.x + '/' + c.y + (x2 ? '@2x' : '') + '.png';
     var sz = W / Math.pow(2, c.z), bb = [-W / 2 + c.x * sz, W / 2 - (c.y + 1) * sz, -W / 2 + (c.x + 1) * sz, W / 2 - c.y * sz].map(function(v){ return v.toFixed(2); }).join(',');
     return 'https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage?f=image&format=png32&bbox=' + bb
-      + '&bboxSR=3857&imageSR=3857&size=256,256&interpolation=RSP_BilinearInterpolation&renderingRule=' + encodeURIComponent('{"rasterFunction":"Hillshade Gray"}');
+      + '&bboxSR=3857&imageSR=3857&size=' + (x2 ? '512,512' : '256,256') + '&interpolation=RSP_BilinearInterpolation&renderingRule=' + encodeURIComponent('{"rasterFunction":"Hillshade Gray"}');
   };
   var LL = L.GridLayer.extend({
+    /* SHARPER ONLY CLOSE IN (user 2026-11-14: "could there be a threshold it has to start under so its z17 until you scroll into a
+       county/neighborhood level? keeping the requested area low"): the same 1 m USGS data rendered at twice the pixels is visibly sharper
+       than z17 stretched. Close in -- map zoom 17 on a high-density screen, 18 on a regular one, a view about a kilometer across -- each
+       z17 tile is asked for at 512 px (@2x): the sharpness of four z18 tiles for one USGS call (z18 tiles took a median 27 s to first
+       load, 17 of 94 failing once). Further out it is z13-17 at 256 px as before */
     createTile: function(c, done){
-      var cv = document.createElement('canvas'); cv.width = cv.height = 256;
+      var x2 = c.z === 17 && hiRes(), S = x2 ? 512 : 256;
+      var cv = document.createElement('canvas'); cv.width = cv.height = S;
       var im = new Image(); im.crossOrigin = 'anonymous';
       im.onload = function(){
         try {
-          var g = cv.getContext('2d', { willReadFrequently: true }); g.drawImage(im, 0, 0, 256, 256);
-          var d = g.getImageData(0, 0, 256, 256), a = d.data, gv = null;
-          if (c.z >= 14 && q !== 'facets'){ var t0 = performance.now(); gv = window._bvLidarDefacet(a, c.z, c.y); var ms = window._bvLidarMs = window._bvLidarMs || []; ms.push(performance.now() - t0); if (ms.length > 64) ms.shift(); }   /* ?lidar=facets shows the raw TIN, for comparison */
+          var g = cv.getContext('2d', { willReadFrequently: true }); g.drawImage(im, 0, 0, S, S);
+          var d = g.getImageData(0, 0, S, S), a = d.data, gv = null;
+          if (c.z >= 14 && q !== 'facets'){ var t0 = performance.now(); gv = x2 ? window._bvLidarDefacet(a, c.z + 1, c.y * 2, 512) : window._bvLidarDefacet(a, c.z, c.y); var ms = window._bvLidarMs = window._bvLidarMs || []; ms.push(performance.now() - t0); if (ms.length > 64) ms.shift(); }   /* ?lidar=facets shows the raw TIN, for comparison */
           for (var i = 0; i < a.length; i += 4){
             var v = gv ? gv[i >> 2] : a[i], al = a[i + 3];
             if (al < 128){ a[i + 3] = 0; continue; }
@@ -1515,19 +1521,21 @@ window._bvLidar = function(map){
           var R = window.BV_RELIEF, k = c.z - 12; if (!R || k < 1){ done(null, cv); return; }
           var px = c.x >> k, py = c.y >> k, s = 256 >> k, ox = (c.x - (px << k)) * s, oy = (c.y - (py << k)) * s;
           var ri = new Image(); ri.crossOrigin = 'anonymous';
-          ri.onload = function(){ try { var g = cv.getContext('2d'); g.globalAlpha = 0.65; g.imageSmoothingQuality = 'high'; g.drawImage(ri, ox, oy, s, s, 0, 0, 256, 256); } catch(e){} done(null, cv); };
+          ri.onload = function(){ try { var g = cv.getContext('2d'); g.globalAlpha = 0.65; g.imageSmoothingQuality = 'high'; g.drawImage(ri, ox, oy, s, s, 0, 0, S, S); } catch(e){} done(null, cv); };
           ri.onerror = function(){ done(null, cv); };
           ri.src = R.url + '/12/' + px + '/' + py + '.webp?b=3';
         } catch(e){ done(null, cv); }
       };
-      im.onerror = function(){ if (++tries <= WAIT.length) setTimeout(function(){ im.src = src(c) + (q === 'usgs' ? '' : '?r=' + tries); }, WAIT[tries - 1]); else fallback(); };
-      im.src = src(c);
+      im.onerror = function(){ if (++tries <= WAIT.length) setTimeout(function(){ im.src = src(c, x2) + (q === 'usgs' ? '' : '?r=' + tries); }, WAIT[tries - 1]); else fallback(); };
+      im.src = src(c, x2);
       return cv;
     }
   });
+  var hiRes = function(){ var z = map.getZoom(); return z >= ((window.devicePixelRatio || 1) >= 1.5 ? 17 : 18) - 0.01; };
   var lay = new LL({ minZoom: 13, maxNativeZoom: 17, maxZoom: 19, zIndex: 3, opacity: 1, keepBuffer: 1, updateWhenIdle: true, tileSize: 256,
     bounds: L.latLngBounds([[17, -180], [72, -64]]) });
   map._bvLidarLayer = lay; lay.addTo(map);
+  var hi0 = hiRes(); map.on('zoomend', function(){ var h = hiRes(); if (h !== hi0){ hi0 = h; if (Math.round(map.getZoom()) >= 17) try { lay.redraw(); } catch(e){} } });   /* crossing the threshold at z17-18 keeps the same z17 grid, so redraw it at the other size */
   var fade = function(){ var r = map._bvReliefLayer; if (r && r.setOpacity) r.setOpacity(map.getZoom() >= 13 ? 0.35 : 1); };
   map.on('zoomend', fade); fade();
   return lay;

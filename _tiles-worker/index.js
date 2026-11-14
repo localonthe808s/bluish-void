@@ -161,11 +161,11 @@ export default {
     /* v2 (2026-10-19, user: "deploy"): format=png32. Plain png comes back as 8-bit gray with gray 253 marked transparent, so
        the brightest sunlit slopes (Santa Monica Mountains, Honolulu's ridges, the Grand Canyon's lit walls) came out as holes
        -- 104, 90 and 224 px a tile measured; png32 has none, at ~45% more bytes. v1 stays as it was for cached pages */
-    const ml = url.pathname.match(/^\/lidar\/(v1|v2)\/(\d{1,2})\/(\d+)\/(\d+)\.png$/);
+    const ml = url.pathname.match(/^\/lidar\/(v1|v2)\/(\d{1,2})\/(\d+)\/(\d+)(@2x)?\.png$/);   /* @2x: the same tile at 512 px (2026-11-14), one USGS call for the sharpness of four z18 tiles */
     if (ml){
-      const ver = ml[1], z = +ml[2], x = +ml[3], y = +ml[4];
-      if (z < 12 || z > 17 || x >= 2 ** z || y >= 2 ** z) return new Response('bad tile', { status: 400, headers: cors });
-      const cache = caches.default, key = new Request(url.origin + url.pathname, { method: 'GET' }), rk = 'lidar/' + ver + '/' + z + '/' + x + '/' + y + '.png';
+      const ver = ml[1], z = +ml[2], x = +ml[3], y = +ml[4], x2 = !!ml[5], px = x2 ? 512 : 256;
+      if (z < 12 || z > 18 || x >= 2 ** z || y >= 2 ** z) return new Response('bad tile', { status: 400, headers: cors });   /* z18 since 2026-11-14: fetched only once the map is zoomed in close (see _bvLidar in index.html), from the same 1 m data, rendered sharper */
+      const cache = caches.default, key = new Request(url.origin + url.pathname, { method: 'GET' }), rk = 'lidar/' + ver + '/' + z + '/' + x + '/' + y + (x2 ? '@2x' : '') + '.png';
       let hit = await cache.match(key), tag = 'EDGE';
       if (!hit){
         const ob = await env.BUCKET.get(rk);
@@ -173,7 +173,7 @@ export default {
         else {
           tag = 'USGS';
           const W = 2 * Math.PI * 6378137, sz = W / 2 ** z, bb = [-W / 2 + x * sz, W / 2 - (y + 1) * sz, -W / 2 + (x + 1) * sz, W / 2 - y * sz].map((v) => v.toFixed(2)).join(',');
-          const q = 'f=image&format=' + (ver === 'v2' ? 'png32' : 'png') + '&bbox=' + bb + '&bboxSR=3857&imageSR=3857&size=256,256&interpolation=RSP_BilinearInterpolation&renderingRule='
+          const q = 'f=image&format=' + (ver === 'v2' ? 'png32' : 'png') + '&bbox=' + bb + '&bboxSR=3857&imageSR=3857&size=' + px + ',' + px + '&interpolation=RSP_BilinearInterpolation&renderingRule='
             + encodeURIComponent(JSON.stringify({ rasterFunction: 'Hillshade Gray' }));
           /* USGS turns away about one first request in three from the edge, fast (~0.4 s), and serves the same tile on
              the next try: three tries, a short backoff between */
