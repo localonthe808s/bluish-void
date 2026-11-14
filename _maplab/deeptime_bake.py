@@ -163,8 +163,8 @@ SCHEMATIC = [  # (age Ma, stage, the note the page shows)
     (4450, 'impact', 'Theia strikes: a Mars-sized body hits the young Earth; the Moon forms from the debris and the surface melts again.'),
     (4400, 'crust', 'A thin dark crust skins the magma ocean. The oldest surviving minerals, the Jack Hills zircons, date from now.'),
     (4200, 'crust2', 'The crust thickens and cracks; volcanoes vent the first atmosphere of steam and carbon dioxide.'),
-    (4000, 'water', 'The steam rains out: a water world with a few volcanic islands. The Late Heavy Bombardment is ending.'),
-    (3800, 'islands', 'Island arcs and the first slivers of continental crust; the oldest rocks (Acasta, Isua) form now.'),
+    (4000, 'water', 'The steam rains out: a water world with a few volcanic islands. A late bombardment, now debated, may still be under way.'),
+    (3800, 'islands', 'Island arcs and the first slivers of continental crust; Isua’s rocks form now; Acasta’s, at 4.03 billion years, are already old.'),
     (3600, 'islands2', 'Life is already here: microbial mats leave the first stromatolites in shallow water.'),
     (3400, 'cratons', 'The first cratons, the stable cores of the continents, harden; plate tectonics may be starting.'),
     (3200, 'cratons2', 'Cratons grow by collision; the Kaapvaal and Pilbara blocks, perhaps joined, form the earliest supercontinent argued for, Vaalbara.'),
@@ -265,13 +265,15 @@ def boundary_frames(ages):
 # Each ancient landmass is anchored to a point on it today; the GPlates service carries the point back through the Cao 2024
 # model, one call per age. Tier 1 = supercontinents, tier 2 = cratons and continents. 999.99 = not on a tracked plate: skipped.
 LANDS = [   # (name, lon, lat, from Ma, to Ma, tier)
-    ('Nuna', -85, 60, 1800, 1300, 1), ('Rodinia', -85, 60, 1100, 750, 1), ('Pannotia', 20, 0, 620, 560, 1), ('Gondwana', 20, 0, 550, 180, 1), ('Gondwana', -45, -10, 170, 140, 1),   # 170-140 on its South American side, which has no name until 130 (review 2026-11-14)
-   
-    ('Laurussia', -85, 60, 420, 340, 1), ('Pangaea', -5, 15, 335, 180, 1), ('Laurasia', -85, 60, 180, 66, 1),
-    ('Laurentia', -85, 60, 1800, 420, 2), ('Baltica', 37, 55, 1800, 420, 2), ('Siberia', 100, 60, 1800, 250, 2), ('Amazonia', -60, -5, 1800, 550, 2),
-    ('West Africa', -5, 15, 1800, 550, 2), ('Congo', 20, 0, 1800, 550, 2), ('Kalahari', 23, -25, 1800, 550, 2), ('India', 78, 22, 1800, 550, 2),
-    ('Australia', 135, -25, 1800, 550, 2), ('North China', 115, 38, 1800, 250, 2), ('South China', 110, 28, 1000, 250, 2), ('Avalonia', -64, 45, 500, 420, 2),
-    ('Antarctica', -20, -80, 600, 550, 2),
+    # (review 2026-11-14) supercontinents anchored off their member cratons' points so the names never sit on each other; a craton's name
+    # stops one frame before the supercontinent that swallows it takes over (560 / 430); Avalonia anchored in central Newfoundland (Ganderia, which
+    # travelled with it: Cao 2024 tracks no point on Avalon proper, Boston, Wales or the Minas Basin -- all 999.99); Pangaea from 320; North China to 190 so the Tethys label has its northern shore
+    ('Nuna', -40, 72, 1800, 1300, 1), ('Rodinia', -40, 72, 1100, 750, 1), ('Pannotia', 35, 15, 620, 560, 1), ('Gondwana', 20, 0, 550, 180, 1), ('Gondwana', -45, -10, 170, 140, 1),
+    ('Laurussia', -85, 60, 420, 340, 1), ('Pangaea', -5, 15, 320, 180, 1), ('Laurasia', -85, 60, 180, 66, 1),
+    ('Laurentia', -85, 60, 1800, 430, 2), ('Baltica', 37, 55, 1800, 430, 2), ('Siberia', 100, 60, 1800, 250, 2), ('Amazonia', -60, -5, 1800, 560, 2),
+    ('West Africa', -5, 15, 1800, 560, 2), ('Congo', 20, 0, 1800, 560, 2), ('Kalahari', 23, -25, 1800, 560, 2), ('India', 78, 22, 1800, 560, 2),
+    ('Australia', 135, -25, 1800, 560, 2), ('North China', 115, 38, 1800, 190, 2), ('South China', 110, 28, 1000, 250, 2), ('Avalonia', -56.0, 48.5, 500, 430, 2),
+    ('Antarctica', -20, -80, 600, 560, 2),
     ('North America', -100, 45, 180, 0, 2), ('Europe', 15, 50, 180, 0, 2), ('Asia', 100, 50, 180, 0, 2), ('Africa', 20, 5, 180, 0, 2),
     ('South America', -60, -10, 130, 0, 2), ('India', 78, 22, 130, 0, 2), ('Australia', 135, -25, 100, 0, 2), ('Antarctica', -20, -80, 100, 0, 2),
 ]
@@ -302,9 +304,10 @@ CHAPTERS = [
     (3700, 'ARCHEAN', 'The first life'), (3400, 'ARCHEAN', 'The first cratons'), (3200, 'ARCHEAN', 'Vaalbara'), (2800, 'ARCHEAN', 'Kenorland'), (2400, 'PROTEROZOIC', 'The Great Oxidation'),
     (2000, 'PROTEROZOIC', 'Columbia'), (1800, 'PROTEROZOIC', 'Plates can be tracked'), (1600, 'PROTEROZOIC', 'Nuna stands'), (1300, 'PROTEROZOIC', 'Nuna breaks up'),
     (1100, 'PROTEROZOIC', 'Rodinia and the Grenville mountains'), (750, 'PROTEROZOIC', 'Rodinia breaks up'), (717, 'PROTEROZOIC', 'Snowball Earth: the Sturtian'),
-    (650, 'PROTEROZOIC', 'Snowball Earth: the Marinoan'), (600, 'PROTEROZOIC', 'Pannotia and the first animals'), (540, 'PALEOZOIC', 'The Cambrian explosion'),
+    (650, 'PROTEROZOIC', 'Snowball Earth: the Marinoan'), (570, 'PROTEROZOIC', 'Pannotia and the first large animals'), (535, 'PALEOZOIC', 'The Cambrian explosion'),   # 535: 540 still reads Ediacaran (review 2026-11-14)
+    
     (480, 'PALEOZOIC', 'The Great Unconformity is buried'), (420, 'PALEOZOIC', 'The Caledonian mountains, life walks onto land'), (375, 'PALEOZOIC', 'Laurussia and the Acadian mountains'),
-    (320, 'PALEOZOIC', 'The coal forests'), (300, 'PALEOZOIC', 'Pangaea'), (252, 'PALEOZOIC', 'The Great Dying'), (200, 'MESOZOIC', 'Pangaea splits'), (145, 'MESOZOIC', 'The Atlantic opens'),
+    (320, 'PALEOZOIC', 'The coal forests'), (300, 'PALEOZOIC', 'Pangaea'), (252, 'PALEOZOIC', 'The Great Dying'), (200, 'MESOZOIC', 'Pangaea splits'), (130, 'MESOZOIC', 'The South Atlantic opens'),
     (66, 'CENOZOIC', 'The dinosaurs end'), (50, 'CENOZOIC', 'India hits Asia'), (35, 'CENOZOIC', 'Antarctica freezes'), (3, 'CENOZOIC', 'The Ice Ages'), (0, 'CENOZOIC', 'Today'),
 ]
 SOURCES = [
