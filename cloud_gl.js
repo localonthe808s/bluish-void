@@ -50,7 +50,7 @@ window.bvGpuGuard = window.bvGpuGuard || (function(){
   var FS = [
     'precision highp float;',
     'varying vec2 v;',
-    'uniform float uRag, uAnvT, uAnvK, uAnvS, uShelf, uStrat, uT2d; uniform vec4 uT2;',   /* uAnvT: anvil thickness scale (the sky art is ~2x the scenes; they keep 1) */
+    'uniform float uRag, uAnvT, uAnvK, uAnvS, uShelf, uShelfL, uStrat, uT2d; uniform vec4 uT2;',   /* uAnvT: anvil thickness scale (the sky art is ~2x the scenes; they keep 1) */
     'uniform vec2 uWH; uniform float uT, uCx, uBase, uH, uHW, uLean, uAnv, uAnvR, uAnvL, uRain, uNight, uFlash, uGround, uDens, uMode, uN;',
     'uniform vec4 uP[48];',
     'uniform vec2 uSunDir; uniform vec3 uSunCol; uniform vec3 uShdCol; uniform float uShdSet; uniform vec4 uBand; uniform float uNS;',
@@ -132,7 +132,9 @@ window.bvGpuGuard = window.bvGpuGuard || (function(){
     /* side view of a real shelf: a WEDGE whose sloping top continues the storm's leading flank down to the lip, and whose
        underside runs nearly level back under the base toward the rain -- thickest at the storm, thinning to the lip (a
        constant-thickness shape read as a pipe) */
-    'vec3 shelfGeo(float x){ float drop = uShelf * .9, xr = uCx + uHW * .45, L = uShelf * 1.7, x0 = uCx - uHW * .5, xl = xr + L;',
+    /* uShelfL (2026-11-13, user: "what cloud is that?" -- the short wedge read as a fin): the shelf's length per unit of drop.
+       1.7 is the old wedge (the sky art keeps it); the fronts' storm passes ~3.6 -- a long, low shelf along the gust front */
+    'vec3 shelfGeo(float x){ float LK = uShelfL > 0. ? uShelfL : 1.7, drop = uShelf * (uShelfL > 0. ? 1.45 : .9), xr = uCx + uHW * .45, L = uShelf * LK, x0 = uCx - uHW * .5, xl = xr + L;',
     '  float sx = (x - x0) / max(xl - x0, 1.), u = clamp((x - xr) / max(L, 1.), 0., 1.);',
     '  float top = mix(uBase + uHW * .45, uBase - drop * .88, pow(u, .85));   /* continuous at the root (a switch there drew a seam) */',
     '  float bot = mix(uBase + .5, uBase - drop * (.72 + .28 * u), smoothstep(x0, xr + L * .15, x));',   /* the underside lowers gradually from under the base -- no block */
@@ -269,7 +271,7 @@ window.bvGpuGuard = window.bvGpuGuard || (function(){
       g.useProgram(pr);
       var b = g.createBuffer(); g.bindBuffer(g.ARRAY_BUFFER, b); g.bufferData(g.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), g.STATIC_DRAW);
       var loc = g.getAttribLocation(pr, 'a'); g.enableVertexAttribArray(loc); g.vertexAttribPointer(loc, 2, g.FLOAT, false, 0, 0);
-      var U = {}; ['uT2', 'uT2d', 'uStrat', 'uShelf', 'uAnvK', 'uAnvS', 'uAnvT', 'uRag', 'uWH', 'uT', 'uCx', 'uBase', 'uH', 'uHW', 'uLean', 'uAnv', 'uAnvR', 'uAnvL', 'uRain', 'uNight', 'uFlash', 'uGround', 'uDens', 'uMode', 'uN', 'uP', 'uSunDir', 'uSunCol', 'uShdCol', 'uShdSet', 'uBand', 'uNS', 'uTex', 'uTexB', 'uTexP', 'uTexQ'].forEach(function(n){ U[n] = g.getUniformLocation(pr, n); });
+      var U = {}; ['uT2', 'uT2d', 'uStrat', 'uShelf', 'uShelfL', 'uAnvK', 'uAnvS', 'uAnvT', 'uRag', 'uWH', 'uT', 'uCx', 'uBase', 'uH', 'uHW', 'uLean', 'uAnv', 'uAnvR', 'uAnvL', 'uRain', 'uNight', 'uFlash', 'uGround', 'uDens', 'uMode', 'uN', 'uP', 'uSunDir', 'uSunCol', 'uShdCol', 'uShdSet', 'uBand', 'uNS', 'uTex', 'uTexB', 'uTexP', 'uTexQ'].forEach(function(n){ U[n] = g.getUniformLocation(pr, n); });
       GL = { ok: true, c: c, g: g, U: U };
     } catch (e){ GL = { ok: false, err: String(e) }; if (window.console) console.warn('bvCloudGL off:', e); return null; }
     return GL;
@@ -297,7 +299,7 @@ window.bvGpuGuard = window.bvGpuGuard || (function(){
     var sd = o.sunDir || [-0.5, 0.75], sc = o.sunCol || [1.04 - 0.52 * (o.night || 0), 0.98 - 0.42 * (o.night || 0), 0.90 - 0.22 * (o.night || 0)];
     g.uniform2f(U.uSunDir, sd[0], sd[1]); g.uniform3f(U.uSunCol, sc[0], sc[1], sc[2]);
     var sh = o.shdCol; g.uniform1f(U.uShdSet, sh ? 1 : 0); g.uniform3f(U.uShdCol, sh ? sh[0] : 0, sh ? sh[1] : 0, sh ? sh[2] : 0);
-    var bd = o.band || [58, 82, 30, 46]; g.uniform4f(U.uBand, bd[0], bd[1], bd[2], bd[3]); g.uniform1f(U.uNS, o.ns || 1); g.uniform1f(U.uRag, o.rag || 0); g.uniform1f(U.uAnvT, o.anvT || 1); g.uniform1f(U.uAnvK, o.anvK || o.anvT || 1); g.uniform1f(U.uAnvS, o.anvS || 1); g.uniform1f(U.uShelf, o.shelf || 0); g.uniform1f(U.uStrat, o.strat || 0); var t2 = o.t2 || [0, 0, 0, 0]; g.uniform4f(U.uT2, t2[0], t2[1], t2[2], t2[3]); g.uniform1f(U.uT2d, o.t2 ? (o.t2d == null ? 1 : o.t2d) : 0);   /* altitude bands: ice from bd0..bd1 up, rain cloud below bd2..bd3 */
+    var bd = o.band || [58, 82, 30, 46]; g.uniform4f(U.uBand, bd[0], bd[1], bd[2], bd[3]); g.uniform1f(U.uNS, o.ns || 1); g.uniform1f(U.uRag, o.rag || 0); g.uniform1f(U.uAnvT, o.anvT || 1); g.uniform1f(U.uAnvK, o.anvK || o.anvT || 1); g.uniform1f(U.uAnvS, o.anvS || 1); g.uniform1f(U.uShelf, o.shelf || 0); g.uniform1f(U.uShelfL, o.shelfL || 0); g.uniform1f(U.uStrat, o.strat || 0); var t2 = o.t2 || [0, 0, 0, 0]; g.uniform4f(U.uT2, t2[0], t2[1], t2[2], t2[3]); g.uniform1f(U.uT2d, o.t2 ? (o.t2d == null ? 1 : o.t2d) : 0);   /* altitude bands: ice from bd0..bd1 up, rain cloud below bd2..bd3 */
     var tp = o.texP || [22, 6, 0.6, 0.02]; g.uniform1f(U.uTex, o.tex ? 1 : 0); g.uniform1f(U.uTexB, o.texB == null ? -1000 : o.texB); g.uniform4f(U.uTexP, tp[0], tp[1], tp[2], tp[3]); var tq = o.texQ || [13, 2.8, 1.3, 1.3]; g.uniform4f(U.uTexQ, tq[0], tq[1], tq[2], tq[3]);
     g.uniform1f(U.uMode, P.length ? 1 : 0); g.uniform1f(U.uN, Math.min(48, P.length)); g.uniform4fv(U.uP, arr);
     /* the box, in scene units: a tower from its base to above its anvil, or the puffs' extent, with room for the lobes */
