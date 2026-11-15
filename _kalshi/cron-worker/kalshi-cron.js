@@ -1341,6 +1341,57 @@ async function darkRead(request, env) {
    POST /push/subscribe, /push/unsubscribe, /push/test -- gated by the same PANEL_TOKEN as /positions: the alerts carry
    your positions, so only a browser that already holds the token can sign a phone up. GET /push/status -- the last
    delivery (gated too). */
+async function sampleAlerts(env) {
+  const day = localDate(0), md = day.slice(5).replace('-', '/'), tz = 'America/New_York';
+  const dayName = ['SUNDAY','MONDAY','TUESDAY','WEDNESDAY','THURSDAY','FRIDAY','SATURDAY'][new Date(day + 'T12:00:00Z').getUTCDay()];
+  const ev = `KXHIGHNY-${day.slice(2, 4)}${['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][+day.slice(5, 7) - 1]}${day.slice(8, 10)}`;
+  const usd = (x) => '$' + Math.round(Math.abs(x)).toLocaleString('en-US'), c = (x) => Math.round(x * 100) + '¢';
+  const notes = [];
+  /* today's ladder, positions, account, reports */
+  let mk = [], held = [], acct = null, rep = null, hi = null;
+  try { mk = (await (await fetch(`${KALSHI}/trade-api/v2/markets?event_ticker=${ev}&limit=50`, { headers: { 'Accept': 'application/json', 'User-Agent': 'bluishvoid-alerts' } })).json()).markets || []; } catch (e) { notes.push('ladder err'); }
+  try { const pos = await kalshiGet(env, '/trade-api/v2/portfolio/positions', '?count_filter=position&limit=200');
+    held = (pos.market_positions || []).map((m) => ({ ticker: m.ticker, n: Number(m.position_fp != null ? m.position_fp : m.position), cost: Number(m.market_exposure_dollars) || 0 })).filter((h) => h.n !== 0); } catch (e) { notes.push('positions err'); }
+  try { const bal = await kalshiGet(env, '/trade-api/v2/portfolio/balance', '');
+    const cash = bal.balance_dollars != null ? Number(bal.balance_dollars) : Number(bal.balance || 0) / 100;
+    const pv = bal.portfolio_value_dollars != null ? Number(bal.portfolio_value_dollars) : bal.portfolio_value != null ? Number(bal.portfolio_value) / 100 : null;
+    acct = cash + (pv != null && isFinite(pv) ? pv : held.reduce((a, h) => a + h.cost, 0)); notes.push(`acct ${acct.toFixed(2)} (pv ${pv == null ? 'missing' : pv})`); } catch (e) { notes.push('balance err'); }
+  try { const ms = await (await fetch('https://aviationweather.gov/api/data/metar?ids=KNYC&format=json&hours=20', { headers: { 'User-Agent': 'bluishvoid-alerts' } })).json();
+    for (const m of ms || []) { if (m.temp == null) continue; const f = Math.round((m.temp * 9 / 5 + 32) * 10) / 10;
+      const dl = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(m.reportTime)); if (dl !== day) continue;
+      if (!rep || m.reportTime > rep.at) rep = { at: m.reportTime, f, raw: (m.rawOb || '').slice(0, 5) }; if (hi == null || f > hi) hi = f; } } catch (e) { notes.push('metar err'); }
+  const mine = held.filter((h) => h.ticker.startsWith(ev + '-'));
+  const hiR = hi != null ? Math.round(hi) : null, winM = hiR != null ? mk.find((m) => inRung(hiR, rungBounds(m))) : null;
+  const pick = mine.length ? mk.find((m) => m.ticker === mine[0].ticker) : winM;   // the range the samples talk about
+  const msgs = [];
+  /* 1+2. the preliminary high (today's high so far stands in for it) */
+  if (hiR != null && winM) {
+    const lines = mine.length ? mine.map((h) => { const m = mk.find((x) => x.ticker === h.ticker); if (!m) return null; const b = rungBounds(m), yes = h.n > 0, good = yes === inRung(hiR, b), pl = good ? Math.abs(h.n) - h.cost : -h.cost;
+        return `${yes ? '' : 'NO '}${rungDeg(b)} ${good ? 'WINS ' + (mine.length > 1 ? '+' : '') + usd(pl) : 'LOSS -' + usd(pl)}`; }).filter(Boolean)
+      : [`${rungDeg(rungBounds(winM))} WINS +$0 (no bet held today)`];
+    msgs.push({ title: `TEST · ${dayName} ${md}` + (acct != null && isFinite(acct) ? ` | ${usd(acct)}` : ''), body: lines.join('\n') });
+    msgs.push({ title: `TEST · ${dayName} ${md} | HIGH ${hiR}°`, body: `${rungDeg(rungBounds(winM))} WINS \u00b7 PRELIMINARY (viewers see this one)` });
+  } else notes.push('no high yet today');
+  /* 3. a report against the range */
+  if (rep && pick) {
+    const b = rungBounds(pick), lab = rungShort(b), h = mine.find((x) => x.ticker === pick.ticker), side = h && h.n < 0 ? 'NO' : 'YES';
+    const bid = Number(pick.yes_bid_dollars), ask = Number(pick.yes_ask_dollars), sideBid = side === 'YES' ? bid : 1 - ask;
+    const inNow = inRung(rep.f, b), bad = side === 'YES' ? (b[1] != null && rep.f > b[1] + 0.5) : inNow;
+    const where = inNow ? `IN ${lab}` : (b[1] != null && rep.f > b[1]) ? `ABOVE ${lab}` : `BELOW ${lab}`;
+    const local = new Date(rep.at).toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }).replace(/\s+/g, '');
+    msgs.push({ title: `TEST · ${bad ? 'BAD BET' : 'GOOD BET'}: ${rep.f}° at ${local} \u00b7 ${where}` + (isFinite(sideBid) && sideBid > 0 ? ` / ${c(sideBid)}` : ''), body: h ? `Your ${side}: ${Math.abs(h.n)} held.` : `Your YES: no bet held today (example).` });
+    /* 4. the price moving on it: yesterday's close against now */
+    const mid = isFinite(bid) && isFinite(ask) && ask > 0 ? (bid + ask) / 2 : null, prev = Number(pick.previous_price_dollars);
+    if (mid != null && isFinite(prev) && prev > 0) {
+      const good = (side === 'YES') === (mid > prev);
+      msgs.push({ title: `TEST · ${good ? 'GOOD NEWS' : 'BAD NEWS'}: "${lab}" is ${mid > prev ? 'rising' : 'dropping'} from ${c(prev)} to ${c(mid)}`,
+        body: (h ? `Your ${side}: ${Math.abs(h.n)} held, bid ${c(sideBid)}.` : 'No bet held today (example).') + ` Last report ${rep.f}° at ${new Date(rep.at).toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' })}.` });
+    } else notes.push('no price move sample');
+  }
+  let sent = 0;
+  for (const [i, m] of msgs.entries()) { const r = await pushAll(env, { title: m.title, body: m.body, tag: 'sample-' + i + '-' + Date.now(), url: '/#go=kalshi' }, 'high', 'owner').catch(() => ({ sent: 0 })); sent += r.sent || 0; }
+  return { ok: sent > 0, sent, messages: msgs, notes };
+}
 async function pushRoute(request, env, url) {
   const H = { 'content-type': 'application/json', ...cors(ALLOWED) };
   const J = (o, st) => new Response(JSON.stringify(o), { status: st || 200, headers: H });
@@ -1375,6 +1426,12 @@ async function pushRoute(request, env, url) {
     const keep = subs.filter((x) => x.endpoint !== (b.endpoint || ''));
     await env.OBS.put(PUSH_KEY, JSON.stringify(keep));
     return J({ ok: true, phones: keep.length });
+  }
+  /* TODAY'S ALERTS, AS SAMPLES (user 2026-11-15: "send me a test notifications for today"): every Kalshi alert shape, built from
+     today's live numbers (your account, today's Central Park reports and ladder, what you hold), marked TEST, owner phones only */
+  if (url.pathname === '/push/sample') {
+    if (role !== 'owner') return J({ error: 'owner only' }, 403);
+    return J(await sampleAlerts(env));
   }
   if (url.pathname === '/push/test') {
     /* the test goes to the asking phone only, never to everyone */
