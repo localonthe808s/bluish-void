@@ -682,6 +682,8 @@ function rungLabel(b) {
   return `${b[0]} to ${b[1]}`;
 }
 /* the alerts' short form (user 2026-11-15: "65-66 wins"); rungLabel stays as stored in the dark records */
+/* the preliminary's form: 65° - 66°, 64° & BELOW, 67° & ABOVE */
+function rungDeg(b) { return b[0] == null ? `${b[1]}° & BELOW` : b[1] == null ? `${b[0]}° & ABOVE` : `${b[0]}° - ${b[1]}°`; }
 function rungShort(b) { return b[0] != null && b[1] != null ? `${b[0]}-${b[1]}` : rungLabel(b); }
 function inRung(v, b) {
   const r = Math.round(v);
@@ -870,7 +872,7 @@ async function alertTick(env, sched) {
     const pos = await kalshiGet(env, '/trade-api/v2/portfolio/positions',
                                 '?count_filter=position&limit=200');
     held = (pos.market_positions || [])
-      .map((m) => ({ ticker: m.ticker, n: Number(m.position_fp != null ? m.position_fp : m.position) }))
+      .map((m) => ({ ticker: m.ticker, n: Number(m.position_fp != null ? m.position_fp : m.position), cost: Number(m.market_exposure_dollars) || 0 }))
       .map((h) => ({ ...h, am: ALERT_MARKETS.find((a) => h.ticker.startsWith(a.series + '-')) }))
       .filter((h) => h.n !== 0 && h.am);
   } catch (e) { out.push('positions err'); }
@@ -895,18 +897,22 @@ async function alertTick(env, sched) {
          day; viewers, who hold nothing, get the same line without it. */
       if (st && st !== was && /prelim/i.test(st) && v != null) {
         const md = day.slice(5).replace('-', '/'), ev = `KXHIGHNY-${day.slice(2, 4)}${['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][+day.slice(5, 7) - 1]}${day.slice(8, 10)}`;
-        let win = null, verdict = null, mine = [];
+        let win = null, winDeg = null, verdict = null, mine = [];
         try {
           const mk = (await (await fetch(`${KALSHI}/trade-api/v2/markets?event_ticker=${ev}&limit=50`, { headers: { 'Accept': 'application/json', 'User-Agent': 'bluishvoid-alerts' } })).json()).markets || [];
-          const w = mk.find((m) => inRung(Number(v), rungBounds(m))); if (w) win = rungShort(rungBounds(w));
-          mine = held.filter((h) => h.ticker.startsWith(ev + '-')).map((h) => { const m = mk.find((x) => x.ticker === h.ticker); if (!m) return null; const b = rungBounds(m), yes = h.n > 0;
-            return { good: yes === inRung(Number(v), b), side: yes ? 'YES' : 'NO', n: Math.abs(h.n), label: rungShort(b) }; }).filter(Boolean);
+          const w = mk.find((m) => inRung(Number(v), rungBounds(m))); if (w){ win = rungShort(rungBounds(w)); winDeg = rungDeg(rungBounds(w)); }
+          mine = held.filter((h) => h.ticker.startsWith(ev + '-')).map((h) => { const m = mk.find((x) => x.ticker === h.ticker); if (!m) return null; const b = rungBounds(m), yes = h.n > 0, good = yes === inRung(Number(v), b);
+            /* what each range pays if the preliminary stands: $1 a contract on the winning side, less what it cost (market_exposure_dollars) */
+            return { good: good, side: yes ? 'YES' : 'NO', n: Math.abs(h.n), cost: h.cost, pl: good ? Math.abs(h.n) - h.cost : -h.cost, label: rungDeg(b) }; }).filter(Boolean);
           if (mine.length) verdict = mine.every((x) => x.good) ? 'GOOD' : mine.every((x) => !x.good) ? 'BAD' : 'MIXED';
         } catch (e) { out.push(`portal ${day} rungs err`); }
-        const line = `HIGH ${v}°` + (win ? ` | ${win} wins` : '');
-        if (verdict) await notify(env, state, `portalown:${day}:${st}`, `${verdict} | ${line}`,
-          `Preliminary for ${md}. ` + mine.map((x) => `Your ${x.side} ${x.label}: ${x.n} held.`).join(' '), verdict === 'BAD' ? 'high' : 'default');
-        await notify(env, state, `${verdict ? 'portalview' : 'portal'}:${day}:${st}`, line, `Preliminary for ${md}. Can still change.`, 'default');
+        /* user 2026-11-15: "SUNDAY 11/15 | $231 / 65° - 66° WINS +$200 / 64° & BELOW LOSS -$40" -- the day and what is riding on it,
+           then each range you hold and what it pays; one range alone drops the plus sign */
+        const dayName = ['SUNDAY','MONDAY','TUESDAY','WEDNESDAY','THURSDAY','FRIDAY','SATURDAY'][new Date(day + 'T12:00:00Z').getUTCDay()];
+        const usd = (x) => '$' + Math.round(Math.abs(x)).toLocaleString('en-US');
+        if (verdict) await notify(env, state, `portalown:${day}:${st}`, `${dayName} ${md} | ${usd(mine.reduce((a, x) => a + x.cost, 0))}`,
+          mine.map((x) => `${x.side === 'NO' ? 'NO ' : ''}${x.label} ${x.good ? 'WINS ' + (mine.length > 1 ? '+' : '') + usd(x.pl) : 'LOSS -' + usd(x.pl)}`).join('\n'), verdict === 'BAD' ? 'high' : 'default');
+        await notify(env, state, `${verdict ? 'portalview' : 'portal'}:${day}:${st}`, `${dayName} ${md} | HIGH ${v}°`, (winDeg ? `${winDeg} WINS \u00b7 ` : '') + 'PRELIMINARY', 'default');
         out.push(`portal ${day} ${st} ${v}${verdict ? ' ' + verdict : ''}`);
       }
       state.portal[day] = st;
