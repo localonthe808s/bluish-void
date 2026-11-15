@@ -11,7 +11,7 @@ Each zoom descends only under tiles that held land (or sea). CHUNKS: --zmin/--zm
 has-file (no rendering) to find z9's tiles, and --box limits a region. Resumable: <mode>_has.txt / <mode>_done.txt in OUT.
     TT_CACHE=/Users/vvvaa/relief_bake/tt_cache python3 bake_world.py --mode land --out OUT --zmax 8 [--workers 6]
 """
-import argparse, math, os, sys, threading, time
+import argparse, functools, math, os, sys, threading, time
 from concurrent.futures import ThreadPoolExecutor
 import urllib.request
 import numpy as np
@@ -29,10 +29,10 @@ def ramp(d):
     return np.stack([np.interp(ld, lds, cs[:, c]) for c in range(3)], -1)
 
 MVT = 'https://tiles.bluishvoid.com/bluish-basemap-20260829/{z}/{x}/{y}.mvt'
-def water_mask(z, x, y, n=256):
-    """the basemap's own water polygons for a tile: below sea level is not sea (the Netherlands' polders, the Caspian lowland, Death
-    Valley, Qattara), so the depth tint and the sea-floor shading are cut to our map's water (_bathybake/render.py water_mask)"""
-    req = urllib.request.Request(MVT.format(z=z, x=x, y=y), headers={'Origin': 'https://bluishvoid.com', 'User-Agent': 'bluish-world-bake'})
+@functools.lru_cache(maxsize=128)
+def _mvt(z, x, y):
+    """decoded basemap tile, or None when the archive has none (204): outside North America the basemap stops at z9"""
+    req = urllib.request.Request(MVT.format(z=z, x=x, y=y), headers={'Origin': 'https://bluishvoid.com', 'User-Agent': 'bluishvoid.com relief bake'})
     raw = b''
     for k in range(4):
         try: raw = urllib.request.urlopen(req, timeout=60).read(); break
@@ -40,15 +40,25 @@ def water_mask(z, x, y, n=256):
             if e.code in (204, 404): break
             time.sleep(3 * (k + 1))
         except Exception: time.sleep(3 * (k + 1))
+    return mvt.decode(raw) if raw else None
+def water_mask(z, x, y, n=256):
+    """the basemap's own water polygons for a tile: below sea level is not sea (the Netherlands' polders, the Caspian lowland, Death
+    Valley, Qattara), so the depth tint and the sea-floor shading are cut to our map's water (_bathybake/render.py water_mask).
+    z10+ outside North America (2026-11-14): the archive's world tier ends at z9, so the tile's z9 ancestor is overzoomed -- the
+    same water the map itself draws there."""
+    t, k = None, 0
+    for k in range(0, z - 8 if z > 9 else 1):
+        t = _mvt(z - k, x >> k, y >> k)
+        if t is not None or z - k <= 9: break
     im = Image.new('L', (n, n), 0)
-    if raw:
-        t = mvt.decode(raw); ext = 4096; sc = n / ext; d = ImageDraw.Draw(im)
+    if t:
+        ext = 4096; sc = n * (1 << k) / ext; ox = (x - ((x >> k) << k)) * n; oy = (y - ((y >> k) << k)) * n; d = ImageDraw.Draw(im)
         for f in t.get('water', {}).get('features', []):
             g = f['geometry']
             if g['type'] not in ('Polygon', 'MultiPolygon'): continue
             for poly in ([g['coordinates']] if g['type'] == 'Polygon' else g['coordinates']):
                 for i, ring in enumerate(poly):
-                    pts = [(q[0] * sc, (ext - q[1]) * sc) for q in ring]
+                    pts = [(q[0] * sc - ox, (ext - q[1]) * sc - oy) for q in ring]
                     if len(pts) > 2: d.polygon(pts, fill=255 if i == 0 else 0)
     return np.asarray(im) > 127
 
