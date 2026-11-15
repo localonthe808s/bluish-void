@@ -14,6 +14,7 @@ for a person in the city -- the user's sightings and (later) east-facing webcams
 
     python3 rainbow_truth.py [YYYY-MM-DD] [OUT.jsonl]      (default: today in New York)
 """
+import re
 import datetime as dt, io, json, math, os, sys, urllib.request
 from PIL import Image
 
@@ -110,7 +111,9 @@ def day_check(date):
 
 if __name__ == '__main__':
     import zoneinfo
-    d = dt.date.fromisoformat(sys.argv[1]) if len(sys.argv) > 1 else dt.datetime.now(zoneinfo.ZoneInfo('America/New_York')).date()
+    # the scheduled run passes no date, so argv[1] is the output file (it failed every night 11-08..11-15 reading 'row.jsonl' as a date)
+    args = sys.argv[1:]; ds = [a for a in args if re.match(r'^\d{4}-\d{2}-\d{2}$', a)]; outs = [a for a in args if a not in ds]
+    d = dt.date.fromisoformat(ds[0]) if ds else dt.datetime.now(zoneinfo.ZoneInfo('America/New_York')).date()
     r = day_check(d); print(json.dumps(r))
-    if len(sys.argv) > 2:
-        with open(sys.argv[2], 'a') as fo: fo.write(json.dumps(r) + '\n')
+    if outs:
+        with open(outs[0], 'a') as fo: fo.write(json.dumps(r) + '\n')

@@ -68,6 +68,11 @@ import json, math, os, statistics, sys, urllib.parse, urllib.request, urllib.err
 import io, csv, re, base64, collections, datetime, time
 import threading, concurrent.futures as cf
 RUN_STARTED = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+# IF IT HANGS ANYWAY, SAY WHERE: the workflows set BV_HANG_DUMP_S a few minutes under their own time limit, and every
+# thread's stack is printed to the log before GitHub kills the job (2026-11-15: two kills said only "operation was canceled")
+if os.environ.get('BV_HANG_DUMP_S'):
+    import faulthandler
+    faulthandler.dump_traceback_later(int(os.environ['BV_HANG_DUMP_S']), exit=False)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -326,8 +331,23 @@ def get(url, timeout=90, tries=3):
     while True:
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'bluishvoid/1.0'})
+            # A WHOLE-REQUEST DEADLINE (2026-11-15). `timeout` bounds each socket read, not the download: a host that
+            # trickles bytes kept one request alive for the full 25-minute job limit, and while it held one of
+            # kalshi.com's two slots every other market queued behind it (10 five-minute bakes and the nightly refit
+            # killed on 11-15, after "tuned:" / "settled days"). Read in chunks; past the deadline it is a timeout
+            # like any other and goes round the retry loop.
+            deadline = time.time() + max(60, min(240, timeout * 2))
             with _host_sem(host):
-                body = urllib.request.urlopen(req, timeout=timeout).read()
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    parts = []
+                    while True:
+                        if time.time() > deadline:
+                            raise TimeoutError('whole-request deadline passed (%s)' % host)
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        parts.append(chunk)
+                    body = b''.join(parts)
             e = _timing()[host]
             e[0] += time.time() - t0
             e[1] += 1
