@@ -681,6 +681,8 @@ function rungLabel(b) {
   if (b[1] == null) return `${b[0]} or above`;
   return `${b[0]} to ${b[1]}`;
 }
+/* the alerts' short form (user 2026-11-15: "65-66 wins"); rungLabel stays as stored in the dark records */
+function rungShort(b) { return b[0] != null && b[1] != null ? `${b[0]}-${b[1]}` : rungLabel(b); }
 function inRung(v, b) {
   const r = Math.round(v);
   return (b[0] == null || r >= b[0]) && (b[1] == null || r <= b[1]);
@@ -730,7 +732,7 @@ async function notify(env, state, key, title, body, priority, stateKey) {
      both outcomes are kept in KV (push:last) so a silent failure shows up on the sheet instead of nowhere. */
   /* who sees it: dark flow and the settlement read are about the market, so every subscribed phone; everything else
      (your positions, your jobs) only your own phones */
-  const aud = /^(dark|portal):/.test(key) ? 'all' : 'owner';
+  const aud = /^portalview:/.test(key) ? 'viewer' : /^(dark|portal):/.test(key) ? 'all' : 'owner';
   const pu = await pushAll(env, { title, body, tag: key, url: /^wxdown:/.test(key) ? '/' : '/#go=kalshi' }, priority === 'urgent' || priority === 'high' ? 'high' : 'normal', aud).catch((e) => ({ sent: 0, failed: 1, note: String(e) }));
   /* ntfy dropped (user 2026-10-14): it refused every post with its daily-limit 429 since 10-03; BLUISH's own push carries them */
   try { await env.OBS.put('push:last', JSON.stringify({ at: new Date().toISOString(), title, push: pu })); } catch (_) {}
@@ -862,6 +864,18 @@ async function alertTick(env, sched) {
       out.push(`wx watchdog: ${age == null ? why || 'no beat' : Math.round(age) + ' min'}`);
     }
   }
+  // 2+3 need the held rungs
+  let held = [];
+  try {
+    const pos = await kalshiGet(env, '/trade-api/v2/portfolio/positions',
+                                '?count_filter=position&limit=200');
+    held = (pos.market_positions || [])
+      .map((m) => ({ ticker: m.ticker, n: Number(m.position_fp != null ? m.position_fp : m.position) }))
+      .map((h) => ({ ...h, am: ALERT_MARKETS.find((a) => h.ticker.startsWith(a.series + '-')) }))
+      .filter((h) => h.n !== 0 && h.am);
+  } catch (e) { out.push('positions err'); }
+  /* what you hold, for darkTick: a dark burst is pushed only when it goes against one of these (2026-10-16) */
+  state.held = held.map((h) => ({ tk: h.ticker, n: h.n }));
   // 1. the portal, yesterday and today -- EVERY FIVE MINUTES (2026-10-06), not every minute: two fetches a minute for a
   // status that changes a couple of times a day were a sixth of the tick's outbound requests against a 10 ms CPU budget
   // (see THE CPU BUDGET). Minute 2 of each five, off the bake and obs minutes.
@@ -876,51 +890,29 @@ async function alertTick(env, sched) {
       if (!row) continue;
       const st = row.status, v = row.data && row.data.maxTemp;
       const was = state.portal[day];
-      if (st !== 'no_report' && st !== was) {
-        await notify(env, state, `portal:${day}:${st}`,
-          `Central Park high ${v}° \u00b7 ${String(st).toUpperCase()} (${day.slice(5).replace('-', '/')})`,
-          st === 'official' ? 'Settles the market.' : 'Can still change.',
-          st === 'official' ? 'high' : 'default');
-        out.push(`portal ${day} ${st} ${v}`);
+      /* THE PRELIMINARY HIGH ONLY (user 2026-11-15: "remove official settlement notifications ... kalshi already does that";
+         "GOOD | HIGH 65.1° | 65-66 wins ... based on the existing bet"). Your phones get GOOD or BAD for what you hold on that
+         day; viewers, who hold nothing, get the same line without it. */
+      if (st && st !== was && /prelim/i.test(st) && v != null) {
+        const md = day.slice(5).replace('-', '/'), ev = `KXHIGHNY-${day.slice(2, 4)}${['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][+day.slice(5, 7) - 1]}${day.slice(8, 10)}`;
+        let win = null, verdict = null, mine = [];
+        try {
+          const mk = (await (await fetch(`${KALSHI}/trade-api/v2/markets?event_ticker=${ev}&limit=50`, { headers: { 'Accept': 'application/json', 'User-Agent': 'bluishvoid-alerts' } })).json()).markets || [];
+          const w = mk.find((m) => inRung(Number(v), rungBounds(m))); if (w) win = rungShort(rungBounds(w));
+          mine = held.filter((h) => h.ticker.startsWith(ev + '-')).map((h) => { const m = mk.find((x) => x.ticker === h.ticker); if (!m) return null; const b = rungBounds(m), yes = h.n > 0;
+            return { good: yes === inRung(Number(v), b), side: yes ? 'YES' : 'NO', n: Math.abs(h.n), label: rungShort(b) }; }).filter(Boolean);
+          if (mine.length) verdict = mine.every((x) => x.good) ? 'GOOD' : mine.every((x) => !x.good) ? 'BAD' : 'MIXED';
+        } catch (e) { out.push(`portal ${day} rungs err`); }
+        const line = `HIGH ${v}°` + (win ? ` | ${win} wins` : '');
+        if (verdict) await notify(env, state, `portalown:${day}:${st}`, `${verdict} | ${line}`,
+          `Preliminary for ${md}. ` + mine.map((x) => `Your ${x.side} ${x.label}: ${x.n} held.`).join(' '), verdict === 'BAD' ? 'high' : 'default');
+        await notify(env, state, `${verdict ? 'portalview' : 'portal'}:${day}:${st}`, line, `Preliminary for ${md}. Can still change.`, 'default');
+        out.push(`portal ${day} ${st} ${v}${verdict ? ' ' + verdict : ''}`);
       }
       state.portal[day] = st;
     } catch (e) { out.push(`portal ${day} err`); }
   }
-  // 2+3 need the held rungs
-  let held = [];
-  try {
-    const pos = await kalshiGet(env, '/trade-api/v2/portfolio/positions',
-                                '?count_filter=position&limit=200');
-    held = (pos.market_positions || [])
-      .map((m) => ({ ticker: m.ticker, n: Number(m.position_fp != null ? m.position_fp : m.position) }))
-      .map((h) => ({ ...h, am: ALERT_MARKETS.find((a) => h.ticker.startsWith(a.series + '-')) }))
-      .filter((h) => h.n !== 0 && h.am);
-  } catch (e) { out.push('positions err'); }
-  /* what you hold, for darkTick: a dark burst is pushed only when it goes against one of these (2026-10-16) */
-  state.held = held.map((h) => ({ tk: h.ticker, n: h.n }));
-  /* 1b. THE NOON LOCK CAN BE TOO LATE (2026-10-16, user: "the high was hit really early today ... a notification when the
-     noon lock may be too late"). 10-16 named YES 74 or below at 82-88c with a 10-17c edge from 7 AM; at 10:45 the price ran
-     to 93c and the bet was gone an hour before the lock. Measured on 39 days of the trail: 12 days had a morning bet and
-     none at noon; bets first named BEFORE 9 AM won 13 of 18 (+40% a bet), those first named 9 AM-noon 5 of 8 (-2%), and
-     chasing the last morning sighting lost (-8.5%). So: once a day, 7-9 AM ET, every five minutes (minute 3, after the
-     bake lands), read the five-minute bake; a bet named before the lock on a market you do not already hold is pushed. */
-  const nyNow = new Date(sched || Date.now()), nyH = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false }).format(nyNow)) % 24;
-  if (nyH >= 7 && nyH < 9 && nyNow.getUTCMinutes() % 5 === 3) {
-    const day = localDate(0);
-    if (!(state.sent || {})[`early:${day}`]) {
-      try {
-        const r = await fetch(`https://raw.githubusercontent.com/${OWNER}/${REPO}/main/kalshi_ny.json?t=${Date.now()}`, { headers: { 'User-Agent': 'bluishvoid-kalshi-cron' } });
-        const T = r.ok ? ((await r.json()).today || {}) : {};
-        const b = T.bet, rung = b && (T.ladder || []).find((x) => x.label === b.label);
-        if (T.date === day && b && !T.locked && b.price != null && !(rung && held.some((h) => h.ticker === rung.ticker))) {
-          const side = b.dir === 'against' ? 'NO' : 'YES', lab = b.label;
-          await notify(env, state, `early:${day}`, `Bet now · ${side} ${lab} at ${Math.round(b.price * 100)}¢`,
-            `Model ${Math.round(b.q * 100)}% against a ${Math.round(b.price * 100)}¢ price, +${Math.round(b.ev * 100)}¢ after the fee. Named ahead of the noon lock.`, 'high');
-          out.push(`early bet ${side} ${lab} ${b.price}`);
-        }
-      } catch (e) { out.push('early bet err'); }
-    }
-  }
+  /* 1b. the morning-bet push left 2026-11-15 (user: "remove morning bet notifications ... kalshi already does that") */
   if (!held.length) {
     state.mkt = {}; state.max7 = null; state.max7by = {};
     if (JSON.stringify(state) !== before) await env.OBS.put(ALERT_KEY, JSON.stringify(state));
@@ -996,7 +988,7 @@ async function alertTick(env, sched) {
       return mo ? `20${t[1]}-${mo}-${t[3]}` : null; })();
     const today0 = new Intl.DateTimeFormat('en-CA', { timeZone: h.am.tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
     if ((mDay && mDay < today0) || (m.status && !/^(active|open)$/i.test(m.status))) { out.push(`${h.ticker} day over, quiet`); continue; }
-    const b = rungBounds(m), label = rungLabel(b), side = h.n > 0 ? 'YES' : 'NO';
+    const b = rungBounds(m), label = rungShort(b), side = h.n > 0 ? 'YES' : 'NO';
     const bid = Number(m.yes_bid_dollars), ask = Number(m.yes_ask_dollars);
     const mid = (isFinite(bid) && isFinite(ask) && ask > 0) ? (bid + ask) / 2 : null;
     /* THE CONTEXT EVERY POSITION ALERT CARRIES (user 2026-10-16: "that's not enough info" after the bodies were cut to a

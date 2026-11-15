@@ -92,7 +92,7 @@ export async function pushAll(env, msg, urgency, audience) {
   if (!subs.length) return { sent: 0, failed: 0, note: 'no phones subscribed' };
   let sent = 0, failed = 0; const keep = [], errs = [];
   const aud = audience || 'owner';
-  const wants = (x) => aud === 'all' ? true : aud === 'owner' ? (x.role || 'owner') === 'owner' : x.endpoint === aud;
+  const wants = (x) => aud === 'all' ? true : aud === 'owner' ? (x.role || 'owner') === 'owner' : aud === 'viewer' ? x.role === 'viewer' : x.endpoint === aud;
   for (const s of subs) {
     if (!wants(s)) { keep.push(s); continue; }
     try {
