@@ -910,7 +910,14 @@ async function alertTick(env, sched) {
            then each range you hold and what it pays; one range alone drops the plus sign */
         const dayName = ['SUNDAY','MONDAY','TUESDAY','WEDNESDAY','THURSDAY','FRIDAY','SATURDAY'][new Date(day + 'T12:00:00Z').getUTCDay()];
         const usd = (x) => '$' + Math.round(Math.abs(x)).toLocaleString('en-US');
-        if (verdict) await notify(env, state, `portalown:${day}:${st}`, `${dayName} ${md} | ${usd(mine.reduce((a, x) => a + x.cost, 0))}`,
+        /* the $ in the title is the ACCOUNT's total now, as the Kalshi app shows it (user 2026-11-15: "the $231 is the total in my
+           kalshi account now"): cash plus what the positions are worth (portfolio_value); without that field, cash plus their cost */
+        let acct = null;
+        if (verdict) try { const bal = await kalshiGet(env, '/trade-api/v2/portfolio/balance', '');
+          const cash = bal.balance_dollars != null ? Number(bal.balance_dollars) : Number(bal.balance || 0) / 100;
+          const pv = bal.portfolio_value_dollars != null ? Number(bal.portfolio_value_dollars) : bal.portfolio_value != null ? Number(bal.portfolio_value) / 100 : null;
+          acct = cash + (pv != null && isFinite(pv) ? pv : held.reduce((a, h) => a + h.cost, 0)); } catch (e) { out.push('balance err'); }
+        if (verdict) await notify(env, state, `portalown:${day}:${st}`, `${dayName} ${md}` + (acct != null && isFinite(acct) ? ` | ${usd(acct)}` : ''),
           mine.map((x) => `${x.side === 'NO' ? 'NO ' : ''}${x.label} ${x.good ? 'WINS ' + (mine.length > 1 ? '+' : '') + usd(x.pl) : 'LOSS -' + usd(x.pl)}`).join('\n'), verdict === 'BAD' ? 'high' : 'default');
         await notify(env, state, `${verdict ? 'portalview' : 'portal'}:${day}:${st}`, `${dayName} ${md} | HIGH ${v}°`, (winDeg ? `${winDeg} WINS \u00b7 ` : '') + 'PRELIMINARY', 'default');
         out.push(`portal ${day} ${st} ${v}${verdict ? ' ' + verdict : ''}`);
