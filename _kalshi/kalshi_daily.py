@@ -372,7 +372,12 @@ def get(url, timeout=90, tries=3):
                     wait = float(e.headers.get('Retry-After'))
                 except Exception:
                     pass
-                time.sleep(wait if wait else 3.0 * (2 ** a))
+                # A LONG "COME BACK LATER" IS A NO FOR THIS RUN (2026-11-15): Open-Meteo answered 429 with a Retry-After
+                # past the job's 25-minute limit and this slept into the kill (stack dump of run 43755107293, line 375).
+                # Over a minute: stop now, the caller falls back, the next run asks again.
+                if wait and wait > 60:
+                    break
+                time.sleep(min(wait, 30) if wait else 3.0 * (2 ** a))
             else:
                 time.sleep(1.5 * (2 ** a))
             a += 1
@@ -1843,6 +1848,38 @@ def obs_hourly_range(cfg, start, end, sink=None):
 
 
 # ------------------------------------------------------------- forecast ----
+_OFC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '_cache')
+
+
+def _archive_json(u, fresh_s=6 * 3600, stale_s=72 * 3600):
+    import hashlib
+    path = os.path.join(_OFC_DIR, 'ofc_' + hashlib.sha1(u.encode()).hexdigest()[:16] + '.json')
+    have = None
+    try:
+        with open(path) as f:
+            have = json.load(f)
+    except Exception:
+        pass
+    age = time.time() - have['at'] if have else None
+    if have and age < fresh_s:
+        return have['j']
+    try:
+        j = get_json(u, timeout=40)
+        try:
+            os.makedirs(_OFC_DIR, exist_ok=True)
+            with open(path + '.tmp', 'w') as f:
+                json.dump({'at': time.time(), 'j': j}, f)
+            os.replace(path + '.tmp', path)
+        except Exception:
+            pass
+        return j
+    except Exception as e:
+        if have and age < stale_s:
+            print('forecast archive refused (%s); using the copy from %.1f h ago' % (str(e)[:60], age / 3600))
+            return have['j']
+        raise
+
+
 def forecast_runs(cfg, past_days, model=None, today=None):
     """Hourly forecast per day -> {'YYYY-MM-DD': {hour: degF}}.
 
@@ -1901,7 +1938,11 @@ def forecast_runs(cfg, past_days, model=None, today=None):
             (today - datetime.timedelta(days=1)).isoformat(), tz) + mq)
     # 40 s, not 180: on the runner these sockets hang and then succeed at once on
     # retry (13:35Z run: 183 s and 215 s on three cities). The timeout is the cost.
-    absorb(get_json(u, timeout=40)['hourly'])
+    # THE ARCHIVE, KEPT (2026-11-15). This request is weeks of six models, which Open-Meteo bills as dozens of calls,
+    # and the five-minute bake made it 288 times a day for data that changes once a day: the free daily limit ran out by
+    # afternoon and every later run met 429s (10 runs killed on 11-15). A copy is kept in _kalshi/_cache (carried between
+    # runs by the workflow's cache) and reused for 6 hours; when the host refuses, a copy up to 3 days old stands in.
+    absorb(_archive_json(u))
     # today comes from the live run, which is fresher than anything archived
     # two days: today drives the live call, tomorrow drives the plan
     u2 = ('https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f'
