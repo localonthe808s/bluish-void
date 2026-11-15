@@ -1020,9 +1020,10 @@ async function alertTick(env, sched) {
         state.mkt[h.ticker] = mid;
       } else if (anchor != null && Math.abs(mid - anchor) >= 0.25) {
         const good = (side === 'YES') === (mid > anchor);
+        /* user 2026-11-15: 'BAD NEWS: "63-64" is dropping from 78¢ to 45¢' */
         await notify(env, state, `mkt:${h.ticker}:${Math.round(mid * 4)}`,
-          `${label} ${Math.round(anchor * 100)}¢ → ${Math.round(mid * 100)}¢`,
-          `${good ? 'Good' : 'Bad'} for your ${side}: ${holdTxt}.${repTxt ? ' ' + repTxt + '.' : ''}`,
+          `${good ? 'GOOD NEWS' : 'BAD NEWS'}: "${label}" is ${mid > anchor ? 'rising' : 'dropping'} from ${Math.round(anchor * 100)}¢ to ${Math.round(mid * 100)}¢`,
+          `Your ${side}: ${holdTxt}.${repTxt ? ' ' + repTxt + '.' : ''}`,
           good ? 'default' : 'high');
         out.push(`${h.ticker} ${anchor}->${mid}`);
         state.mkt[h.ticker] = mid;
@@ -1042,10 +1043,12 @@ async function alertTick(env, sched) {
     if (rp && state.metar[h.am.icao] !== rp.at && newHigh) {
       const inNow = inRung(rp.f, b), above = b[1] != null && rp.f > b[1] + 0.5, below = b[0] != null && rp.f < b[0] - 0.5;
       const bad = (side === 'YES') ? (above) : (inNow);
-      const local = new Date(rp.at).toLocaleTimeString('en-US', { timeZone: h.am.tz, hour: 'numeric', minute: '2-digit' });
+      const local = new Date(rp.at).toLocaleTimeString('en-US', { timeZone: h.am.tz, hour: 'numeric', minute: '2-digit' }).replace(/\s+/g, '');
+      /* user 2026-11-15: "GOOD BET: 61.2° at 2:51PM · BELOW 63-64 / 83¢" -- where the report sits against the range, and what your side is worth now */
+      const where = inNow ? `IN ${label}` : (b[1] != null && rp.f > b[1]) ? `ABOVE ${label}` : `BELOW ${label}`;
       await notify(env, state, `metar:${h.ticker}:${rp.at}`,
-        `${h.am.name} ${rp.f}° at ${local}${rp.raw.trim() === 'SPECI' ? ' (special)' : ''} \u00b7 ${gap(rp.f).replace(/^In /, 'in ')}`,
-        `${bad ? 'Bad' : 'Good'} for your ${side}: ${holdTxt}.`,
+        `${bad ? 'BAD BET' : 'GOOD BET'}: ${rp.f}° at ${local}${rp.raw.trim() === 'SPECI' ? ' (special)' : ''} \u00b7 ${where}${isFinite(sideBid) && sideBid > 0 ? ` / ${Math.round(sideBid * 100)}¢` : ''}`,
+        `Your ${side}: ${Math.abs(h.n)} held.`,
         bad ? 'urgent' : 'default');
       out.push(`metar ${h.am.icao} ${rp.f}`);
     }
