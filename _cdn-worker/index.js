@@ -16,7 +16,8 @@ export default {
     const r = await fetch(request, { cf: { cacheTtlByStatus: { '200-299': 31536000, '404': 86400 } } });
     if (r.status === 200){
       const h = new Headers(r.headers);
-      h.set('Cache-Control', 'public, max-age=31536000, immutable');
+      // no-transform on images (2026-11-15): WebP/PNG/JPG are already compressed, and the edge was brotli-wrapping them anyway
+      h.set('Cache-Control', 'public, max-age=31536000, immutable' + (/\.(webp|png|jpg)$/.test(url.pathname) ? ', no-transform' : ''));
       return new Response(r.body, { status: 200, headers: h });
     }
     if (r.status !== 404) return r;

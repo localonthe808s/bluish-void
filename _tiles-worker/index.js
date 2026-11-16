@@ -214,7 +214,8 @@ export default {
       }
       hit = new Response(body, { status, headers: {
         'Content-Type': 'application/x-protobuf',
-        'Cache-Control': 'public, max-age=86400, s-maxage=31536000, immutable'
+        // a year in the browser too (2026-11-15): every archive is named by its build (bluish-basemap-20261114), so a tile under it never changes
+        'Cache-Control': 'public, max-age=31536000, s-maxage=31536000, immutable'
       } });
       ctx.waitUntil(cache.put(key, hit.clone()));
       hit = new Response(hit.body, hit);

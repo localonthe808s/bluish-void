@@ -94,6 +94,27 @@ window._bvTileRect = function(M, ly, t){
 })();
 </script>
 <script>
+/* OFF-SCREEN ANIMATIONS SLEEP (2026-11-15, the basemap performance review): scrolled away, 16 CSS animations kept running (the hourly
+   strip's 11 icon twinkles, the GOES loading spinner), each one style and paint work every frame for nothing on screen. A widget or the
+   weather card more than a quarter screen away from the viewport gets .bv-off, which pauses every animation inside it; it resumes where it was when it comes back.
+   Widgets made later are picked up on the next passes. */
+(function(){
+  if (!('IntersectionObserver' in window)) return;
+  var io = new IntersectionObserver(function(es){ es.forEach(function(e){
+    var off = !e.isIntersecting; e.target.classList.toggle('bv-off', off);
+    /* the CSS pause loses to rules like the hourly strip's "#id ... { animation: ... !important }", so the running ones are also paused
+       through the Web Animations API (which overrides any stylesheet) and played again, the same ones, on the way back */
+    var A = []; try { A = e.target.getAnimations ? e.target.getAnimations({ subtree: true }) : []; } catch(err){}
+    A.forEach(function(a){ if (off && a.playState === 'running'){ a.pause(); a._bvOff = 1; } else if (!off && a._bvOff){ a._bvOff = 0; a.play(); } });
+  }); }, { rootMargin: '25% 0px' });
+  var seen = typeof WeakSet === 'function' ? new WeakSet() : null;
+  var scan = function(){ [].forEach.call(document.querySelectorAll('.widget, .weather-card'), function(w){ if (seen && seen.has(w)) return; if (seen) seen.add(w); io.observe(w); }); };
+  var st = document.createElement('style'); st.textContent = '.bv-off, .bv-off *{ animation-play-state: paused !important; }'; document.head.appendChild(st);
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', scan); else scan();
+  [3000, 10000, 30000].forEach(function(t){ setTimeout(scan, t); });
+})();
+</script>
+<script>
 /* ── ?perfdebug=1 : live performance HUD ─────────────────────────────────
    A corner overlay that measures the site as it actually runs — no build
    step, no extension. Registered first so its longtask/layout-shift
@@ -1312,6 +1333,58 @@ window._bvWorldTwin = function(map, B, Cls, url, o){
 };
 /* a twin follows its main layer's opacity (views dim the relief / bathymetry through the main layer) */
 window._bvFollowOp = function(lay, tw){ var so = lay.setOpacity; lay.setOpacity = function(v){ so.call(lay, v); tw.setOpacity(v); return lay; }; };
+/* ONLY THE LAYERS THAT CAN DRAW HERE (2026-11-15, user: "do 2 3 4 5" of the basemap performance review). Measured at Pleasant Valley
+   z15 on a 4x-throttled phone: 19 layers stacked, 42 tiles and 6.3 megapixels composited per frame, 18 of those tiles sea layers over
+   dry land (their indexes are z8-coarse, and the stretched z8/z9 tiles span the whole view), Leaflet's per-zoom bookkeeping 11% of the
+   zoom cost. A gated layer is taken OFF the map while it cannot draw -- outside its zoom range, or (sea layers, z11 and in, inside
+   North America where the basemap has street detail) with no basemap water in view -- and put back when it can. Water is read from
+   the basemap tiles the map already holds (shared cache, _bvShareViews); any doubt keeps the layers on. Only layers this gate took
+   off are put back, so a view that removed one itself keeps it removed. */
+window._bvSeaView = null;
+window._bvSeaInView = function(map){
+  var P = window.protomapsL; if (!P || !window.BV_BASEMAP_URL) return Promise.resolve(true);
+  var c = map.getCenter(); if (c.lat < 7 || c.lat > 72 || c.lng < -170 || c.lng > -52) return Promise.resolve(true);   /* street-level basemap only here (BV_BASEMAP_TIERS) */
+  if (!window._bvSeaView){ try { var vs = P.sourcesToViews({ url: window.BV_BASEMAP_URL, maxDataZoom: 14 }); window._bvShareViews(vs, { url: window.BV_BASEMAP_URL }); window._bvSeaView = vs.get(''); } catch(e){ return Promise.resolve(true); } }
+  var view = window._bvSeaView, z = Math.min(14, Math.round(map.getZoom())), b = map.getPixelBounds(), k = Math.pow(2, z - map.getZoom());
+  var x0 = Math.floor(b.min.x * k / 256), x1 = Math.floor(b.max.x * k / 256), y0 = Math.floor(b.min.y * k / 256), y1 = Math.floor(b.max.y * k / 256), jobs = [];
+  if ((x1 - x0 + 1) * (y1 - y0 + 1) > 25) return Promise.resolve(true);
+  for (var x = x0; x <= x1; x++) for (var y = y0; y <= y1; y++) (function(tx, ty){
+    jobs.push(view.getDisplayTile({ z: z, x: tx, y: ty }).then(function(pt){
+      /* SEA-SIZED WATER ONLY: the depth layers cover the sea, estuaries and big lakes. A neighborhood's ponds and Wappingers Creek kept
+         them all on at Pleasant Valley, and the basemap calls the creek and the Hudson the same thing ("water", "river"), so it goes by
+         AREA within each tile in view: the ocean always counts; other water counts past ~0.5 km^2 (the Hudson's ~2 km^2 in a tile, a
+         creek's or pond's under 0.1). Units: z <= 14 here, so the tile is the data tile itself, pt.dim units across 256 px. */
+      var W = (pt.data && pt.data.get('water')) || [], u = 156543.03 * Math.cos(c.lat * Math.PI / 180) / Math.pow(2, z) * 256 / (pt.dim || 256), u2 = u * u;
+      var area = function(f){ var A = 0; (f.geom || []).forEach(function(ring){ for (var i = 0, n = ring.length, j = n - 1; i < n; j = i++) A += (ring[j].x + ring[i].x) * (ring[j].y - ring[i].y); }); return Math.abs(A) / 2 * u2; };
+      return W.some(function(f){ return f.geomType === 3 && ((f.props && f.props.kind === 'ocean') || area(f) > 5e5); });
+    }));
+  })(x, y);
+  return Promise.all(jobs).then(function(r){ return r.some(Boolean); });
+};
+window._bvGate = function(map, lay, sea){
+  if (!map || !lay) return;
+  (map._bvGated = map._bvGated || []).push({ l: lay, sea: !!sea });
+  if (map._bvGateOn) return; map._bvGateOn = true;
+  var run = function(){
+    /* a map with no zoom limits of its own takes Leaflet's from its layers: freeze them first, so taking a layer off never lowers
+       the ceiling (LOCAL sets none) */
+    if (map.options.maxZoom == null) map.options.maxZoom = map.getMaxZoom();
+    if (map.options.minZoom == null) map.options.minZoom = map.getMinZoom();
+    var z = map.getZoom(), seq = map._bvGateSeq = (map._bvGateSeq || 0) + 1;
+    var go = function(seaHere){
+      if (seq !== map._bvGateSeq) return;   /* a later move has asked again */
+      map._bvGated.forEach(function(g){
+        var o = g.l.options, inR = z >= (o.minZoom || 0) && z <= (o.maxZoom == null ? 99 : o.maxZoom), want = inR && (!g.sea || seaHere);
+        if (want && g.l._bvGatedOff){ g.l._bvGatedOff = false; g.l.addTo(map); }
+        else if (!want && map.hasLayer(g.l)){ g.l._bvGatedOff = true; map.removeLayer(g.l); }
+      });
+    };
+    if (z < 11 || !map._bvGated.some(function(g){ return g.sea; })) return go(true);
+    window._bvSeaInView(map).then(go, function(){ go(true); });
+  };
+  map.on('zoomend moveend', function(){ clearTimeout(map._bvGateT); map._bvGateT = setTimeout(run, 150); });
+  map.whenReady(function(){ setTimeout(run, 400); });
+};
 window._bvBathy = function(map){
   if (!map || map._bvBathyLayer || typeof L === 'undefined') return null;
   var B = window.BV_BATHY;
@@ -1354,7 +1427,8 @@ window._bvBathy = function(map){
   var deep = new DL(B.url, { minZoom: 14, maxNativeZoom: 15, maxZoom: 19, zIndex: 2, opacity: 1, keepBuffer: 1, updateWhenIdle: true,
     errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', bounds: L.latLngBounds([[-10, -180], [72, 20]]) });
   map._bvBathyDeep = deep; window._bvFollowOp(lay, deep);
-  Promise.all([B.coverP, BW.coverP, BD.coverP]).then(function(){ world.addTo(map); under.addTo(map); lay.addTo(map); deep.addTo(map); });
+  Promise.all([B.coverP, BW.coverP, BD.coverP]).then(function(){ world.addTo(map); under.addTo(map); lay.addTo(map); deep.addTo(map);
+    [world, under, lay, deep].forEach(function(l){ window._bvGate(map, l, true); }); });
   return lay;
 };
 /* LAND RELIEF (user 2026-10-16: "does the national map have topographical lidar data? it looks flat" -> "do 2"). _reliefbake/
@@ -1401,7 +1475,8 @@ window._bvRelief = function(map){
   map._bvReliefLayer = lay;
   var low = window._bvLowTwin(map, lay, RL, B.url + '/{z}/{x}/{y}.webp?b=3');
   var wt = window._bvWorldTwin(map, B, RL, B.url + '/{z}/{x}/{y}.webp?b=3', { zIndex: 2, zw: window.BV_WORLD_ZR }); window._bvFollowOp(lay, wt);
-  Promise.all([B.coverP, window._bvNaCov(B)]).then(function(){ if (low) low.addTo(map); lay.addTo(map); wt.addTo(map); });
+  Promise.all([B.coverP, window._bvNaCov(B)]).then(function(){ if (low) low.addTo(map); lay.addTo(map); wt.addTo(map);
+    [low, wt].forEach(function(l){ window._bvGate(map, l, false); }); });   /* the main relief draws at every zoom; its twins only in their ranges */
   return lay;
 };
 /* THE DESERT IS GROUND, NOT A HOLE, NATIONALLY (user 2026-10-19: "all deserts in the new map should be properly colored").
@@ -1606,7 +1681,8 @@ window._bvSeafloor = function(map){
   map._bvSeafloorLayer = lay;
   var low = window._bvLowTwin(map, lay, SL, B.url + '/{z}/{x}/{y}.webp?b=3');
   var wt = window._bvWorldTwin(map, B, SL, B.url + '/{z}/{x}/{y}.webp?b=3', { zIndex: 3, maxZoom: 11 }); window._bvFollowOp(lay, wt);   /* abroad no finer bathymetry takes over, so the floor stays to z11 */
-  Promise.all([B.coverP, window._bvNaCov(B)]).then(function(){ if (low) low.addTo(map); lay.addTo(map); wt.addTo(map); });
+  Promise.all([B.coverP, window._bvNaCov(B)]).then(function(){ if (low) low.addTo(map); lay.addTo(map); wt.addTo(map);
+    [low, lay, wt].forEach(function(l){ window._bvGate(map, l, true); }); });
   return lay;
 };
 /* CANVASES RIDE THE ZOOM (2026-10-21, user: "the map transitions weirdly when you zoom", with a recording): every overlay canvas
