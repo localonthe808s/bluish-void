@@ -1942,7 +1942,7 @@ def forecast_runs(cfg, past_days, model=None, today=None):
     # and the five-minute bake made it 288 times a day for data that changes once a day: the free daily limit ran out by
     # afternoon and every later run met 429s (10 runs killed on 11-15). A copy is kept in _kalshi/_cache (carried between
     # runs by the workflow's cache) and reused for 6 hours; when the host refuses, a copy up to 3 days old stands in.
-    absorb(_archive_json(u))
+    absorb(_archive_json(u)['hourly'])
     # today comes from the live run, which is fresher than anything archived
     # two days: today drives the live call, tomorrow drives the plan
     u2 = ('https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f'
