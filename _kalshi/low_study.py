@@ -46,8 +46,9 @@ KNOBS = collections.OrderedDict([
     ('sd_mult',  [0.75, 1.0, 1.25, 1.5]),
     ('bias_k',   [21, 30, 45]),
     ('sd_floor', [0.25, 0.40]),
+    ('drop_worst', [0, 1, 2]),            # the highs' knob (2026-11-16): leave the worst runs by 45-day MAE out of the mean
 ])
-DEFAULTS = {'bias_hl': 7, 'sd_mult': 1.0, 'bias_k': 30, 'sd_floor': 0.25}    # what the bake ran before this study
+DEFAULTS = {'bias_hl': 7, 'sd_mult': 1.0, 'bias_k': 30, 'sd_floor': 0.25, 'drop_worst': 0}    # what the bake ran before this study
 OTHER_LEG_SLACK = 0.003
 
 
@@ -116,7 +117,7 @@ class settings(object):
 
 
 def bias_of_for(I, st):
-    return K.biases_factory(I['fcm'], I['daily'], False, st['bias_hl'])
+    return K.biases_factory(I['fcm'], I['daily'], False, st['bias_hl'], int(st.get('drop_worst') or 0))
 
 
 def ours_positive(lad, rows_neg, ps):
@@ -325,6 +326,232 @@ def tune_low(I, days, prev):
             'chosen_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d') if changes else (prev or {}).get('chosen_at')}
 
 
+# ------------------------------------------------------------ 3. the courts ----
+# THE LOW'S LIVE COURTS (2026-11-16; user: "do them all ... consider that lows happen at different times"). The highs
+# judge their market pull, evening weight and tail margin on LIVE locks in tune.py; the low gets the same courts here,
+# on its own clock. A low's information arrives at the other end of the day, so its two legs are the EVENING BEFORE
+# (the 8 PM lock on tomorrow's ladder, no floor -- the leg a low is bet on) and the MORNING (the 8 AM lock, where the
+# pre-dawn minimum is usually in hand; the pull only matters on the non-binding mornings). Each court replays its
+# knob over the rows the bake actually locked (raw = the lock's centre less the shift the pull made), with the market
+# centre from the stored ladder's mids, or -- for the evening locks written before the ladder was kept -- from the
+# candle cache at the lock's own hour. The guardrails are tune.py's: a gain that holds on both halves of the record,
+# at most one hit lost, a cooldown between changes; the row floor is COURT_MIN_ROWS rather than 45, because the
+# evening leg has 63 live rows and the non-binding mornings 28. Everything runs in the negated frame so the highs'
+# scorer (tune.mkt_score) reads as-is; a floor there is the low's ceiling.
+COURT_MIN_ROWS, COURT_COOLDOWN_D = 20, 7
+MKT_GRID = [0.0, 0.25, 0.35, 0.5, 0.65, 0.85, 1.0]
+TAIL_GRID, TAIL_MIN_GAIN = [0.0, 0.02, 0.05, 0.08, 0.12], 0.02     # log loss, as the highs' tail court
+COURT_KNOBS = ('mkt_pull', 'mkt_pull_eve', 'tail_margin', 'drop_table')
+
+
+def live_rows(cfg):
+    try:
+        doc = json.load(open(os.path.join(HERE, '..', cfg['out'])))
+    except Exception:
+        return []
+    return sorted([h for h in (doc.get('history') or []) if not h.get('backtest') and h.get('actual') is not None and h.get('date')],
+                  key=lambda h: h['date'])
+
+
+def neg_court_row(lad_pos, actual, pred_pos, sd, mk_pos, floor_pos, offset):
+    """one court row in the negated frame, or None: lad with lo/hi, k = the settled rung, raw centre, market centre, floor"""
+    rows_neg = L.neg_rows(lad_pos)
+    k = [i for i, r in enumerate(rows_neg) if (r['lo'] is None or -actual >= r['lo']) and (r['hi'] is None or -actual <= r['hi'])]
+    if len(k) != 1 or pred_pos is None or not sd or mk_pos is None:
+        return None
+    return {'lad': [{'lo': r['lo'], 'hi': r['hi'], 'label': r.get('label')} for r in rows_neg], 'k': k[0],
+            'raw': -float(pred_pos), 'sd': float(sd), 'mk': -float(mk_pos),
+            'floor': ((-float(floor_pos) + offset) if floor_pos is not None else None)}
+
+
+def centre_of(lad):
+    return K.market_centre([{'mid': r.get('market'), 'lo': r.get('lo'), 'hi': r.get('hi')} for r in lad])
+
+
+def morning_rows(cfg, offset):
+    """the non-binding 8 AM locks: the pull is off on a binding morning, so only these can judge it"""
+    out = []
+    for h in live_rows(cfg):
+        Lk = h.get('lock') or {}
+        lad = Lk.get('ladder') or []
+        if not lad or Lk.get('binding') or Lk.get('emp') or Lk.get('drop'):
+            continue
+        mp = Lk.get('mpull') or {}
+        mk = mp.get('mk') if mp.get('mk') is not None else centre_of(lad)
+        r = neg_court_row(lad, h['actual'], (float(Lk['pred']) - float(mp.get('shift') or 0.0)) if Lk.get('pred') is not None else None,
+                          Lk.get('sd'), mk, Lk.get('obs_at_lock'), offset)
+        if r:
+            r['date'] = h['date']
+            out.append(r)
+    return out
+
+
+def eve_rows(cfg, days, cache, newest):
+    """the evening-before locks: the stored ladder's mids when the lock kept one (from 2026-11-16), else the candle
+    cache at the lock's own hour on the evening it was written"""
+    out = []
+    for h in live_rows(cfg):
+        E = h.get('eve') or {}
+        if not E or E.get('pred') is None or not E.get('sd') or E.get('priced_by') == 'court':
+            continue
+        lad = E.get('ladder') or []
+        mk = ((E.get('mpull') or {}).get('mk'))
+        if lad and mk is None:
+            mk = centre_of(lad)
+        if not lad:
+            d = days.get(h['date'])
+            at = str(E.get('at') or '')
+            if not d or len(at) < 13:
+                continue
+            try:
+                eday, ehr = datetime.date.fromisoformat(at[:10]), int(at[11:13])
+            except ValueError:
+                continue
+            lad = []
+            for r in d['lad']:
+                q = (candles_cached(cache, cfg, r['ticker'], eday, newest) or {}).get(ehr)
+                mid = ((q[0] + q[1]) / 2.0) if q and q[0] is not None and q[1] is not None else None
+                lad.append({'label': r['label'], 'lo': r['lo'], 'hi': r['hi'], 'market': mid})
+            if sum(1 for r in lad if r['market'] is not None) < 3:
+                continue
+            mk = centre_of(lad)
+        r = neg_court_row(lad, h['actual'], float(E['pred']) - float((E.get('mpull') or {}).get('shift') or 0.0), E['sd'], mk, None, 0.0)
+        if r:
+            r['date'] = h['date']
+            out.append(r)
+    return out
+
+
+def halves(rows):
+    ds = sorted({r['date'] for r in rows})
+    mid = ds[len(ds) // 2] if ds else ''
+    return [r for r in rows if r['date'] < mid], [r for r in rows if r['date'] >= mid]
+
+
+def rule(name, knob, cur, grid, rows, score, metric, min_gain, prev, hits=True):
+    """the ruling: the grid value that beats the incumbent by min_gain on `metric` (lower is better), on both halves,
+    losing at most one hit; one change per COURT_COOLDOWN_D days"""
+    cur = float(cur or 0.0) if not isinstance(cur, bool) else cur
+    out = {'knob': knob, 'n': len(rows), 'days': len({r['date'] for r in rows}), 'was': cur, 'ruled': cur,
+           'why': 'too few live rows (%d): %s stands' % (len(rows), cur)}
+    if len(rows) < COURT_MIN_ROWS:
+        if prev.get('changed_at'):
+            out['changed_at'] = prev['changed_at']
+        return out
+    old, new = halves(rows)
+    base, b_old, b_new = score(rows, cur), score(old, cur), score(new, cur)
+    out['scores'] = {str(v): {metric: round(score(rows, v)[metric], 4), 'hits': score(rows, v)['hits']} for v in grid}
+    best = None
+    for v in grid:
+        if v == cur:
+            continue
+        c = score(rows, v)
+        gain = base[metric] - c[metric]
+        if gain >= min_gain and score(old, v)[metric] < b_old[metric] and score(new, v)[metric] < b_new[metric] \
+                and (not hits or c['hits'] >= base['hits'] - 1) and (best is None or gain > best[1]):
+            best = (v, gain, c)
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    last = prev.get('changed_at')
+    if best is None:
+        out['why'] = '%s stands on %d live rows (%s %.4f, %d hits): nothing clears the guardrails' % (cur, len(rows), metric, base[metric], base['hits'])
+    elif last and (today - datetime.date.fromisoformat(last)).days < COURT_COOLDOWN_D:
+        out['why'] = '%s -> %s waits: the last change was %s' % (cur, best[0], last)
+    else:
+        out.update({'ruled': best[0], 'changed_at': today.isoformat(),
+                    'why': '%s %s -> %s: %s %.4f -> %.4f, hits %d -> %d on %d live rows, wins both halves'
+                           % (knob, cur, best[0], metric, base[metric], best[2][metric], base['hits'], best[2]['hits'], len(rows))})
+    if 'changed_at' not in out and last:
+        out['changed_at'] = last
+    print('  %s court: %s' % (name, out['why']), flush=True)
+    return out
+
+
+def tail_score(rows, e):
+    """mean log loss of the settled rung after the margin, over rows in the negated frame"""
+    ll, hits = 0.0, 0
+    for r in rows:
+        ps = K.distribution(r['lad'], r['raw'] + K.mkt_pull_shift(r.get('w') or 0.0, r['raw'], r['mk'], r['floor']), max(0.05, r['sd']), r['floor'])
+        ps, _ = K.tail_mix(r['lad'], ps, r['floor'], False, float(e))
+        ll += -math.log(max(1e-6, ps[r['k']]))
+        hits += ps.index(max(ps)) == r['k']
+    return {'n': len(rows), 'hits': hits, 'll': ll / len(rows) if rows else None}
+
+
+def drop_court(I, days, st, prev):
+    """REPLAY, not live: the non-binding table (kalshi_lows.drop_table) against the normal on every settled day's 8 AM
+    view, walk-forward, under the settings in force. Brier on the non-binding mornings; Brier gain .006 on both halves,
+    at most one hit lost. Rules cfg['drop_table'] on or off."""
+    cur = bool(((prev.get('active') or {}).get('drop_table')) if isinstance(prev, dict) else False)
+    with settings(st):
+        bias_of = bias_of_for(I, st)
+        ents = L.drop_entries(I['fcm'], bias_of, I['daily'], I['obh'], I['obh_raw'], I['daily_raw'], I['h0_of'], L.LOCK_HOUR, I['today'].isoformat())
+        rows = []
+        for d in sorted(days):
+            lad = days[d]['lad']
+            rows_neg = L.neg_rows(lad)
+            k = next((i for i, r in enumerate(lad) if r['won']), None)
+            a = lock_snap(I, bias_of, d, rows_neg, L.LOCK_HOUR)
+            if not a or a['bind'] or k is None:
+                continue
+            b = L.snapshot(I['fcm'], bias_of, I['daily'], I['obh'], I['h0_of'], d, L.LOCK_HOUR, rows_neg,
+                           gaps=(I['obh_raw'], I['daily_raw']), drops=(lambda kk, E=ents: [e for e in E if e[0] < kk]))
+            if not b or not b.get('drop'):
+                continue
+            rows.append({'date': d, 'k': k, 'normal': ours_positive(lad, rows_neg, a['ps']), 'table': ours_positive(lad, rows_neg, b['ps'])})
+
+    def score(R, on):
+        key = 'table' if on else 'normal'
+        br, hits = 0.0, 0
+        for r in R:
+            ps = r[key]
+            br += sum((p - (1.0 if i == r['k'] else 0.0)) ** 2 for i, p in enumerate(ps))
+            hits += ps.index(max(ps)) == r['k']
+        return {'n': len(R), 'hits': hits, 'brier': br / len(R) if R else None}
+    out = rule('drop table', 'drop_table', cur, [False, True], rows, score, 'brier', TU.MIN_GAIN, prev.get('drop') or {} if isinstance(prev, dict) else {})
+    out['entries'] = len(ents)
+    out['replay'] = True
+    return out
+
+
+def courts(cfg, I, days, st, prev_courts, prev_active):
+    """every court, in order; -> ({court name: ruling}, {knob: value in force})"""
+    pc = prev_courts or {}
+    pa = prev_active or {}
+    offset = K.HOURLY_PEAK_OFFSET
+    cache = load_cache()
+    newest = (I['today'] - datetime.timedelta(days=2)).isoformat()
+    C, A = {}, {}
+    # the morning pull, non-binding 8 AM locks
+    mr = morning_rows(cfg, offset)
+    C['mkt'] = rule('morning pull', 'mkt_pull', pa.get('mkt_pull', 0.0), MKT_GRID, mr, lambda R, w: TU.mkt_score(R, w), 'brier', TU.MIN_GAIN, pc.get('mkt') or {})
+    A['mkt_pull'] = C['mkt']['ruled']
+    # the evening weight, the evening-before locks
+    er = eve_rows(cfg, days, cache, newest)
+    C['eve'] = rule('evening pull', 'mkt_pull_eve', pa.get('mkt_pull_eve', 0.0), MKT_GRID, er, lambda R, w: TU.mkt_score(R, w), 'brier', TU.MIN_GAIN, pc.get('eve') or {})
+    A['mkt_pull_eve'] = C['eve']['ruled']
+    # the tail margin, log loss over both legs with the pulls in force
+    for r in mr:
+        r['w'] = A['mkt_pull']
+    for r in er:
+        r['w'] = A['mkt_pull_eve']
+    C['tail'] = rule('tail', 'tail_margin', pa.get('tail_margin', 0.0), TAIL_GRID, mr + er, tail_score, 'll', TAIL_MIN_GAIN, pc.get('tail') or {})
+    A['tail_margin'] = C['tail']['ruled']
+    # the non-binding table (replay)
+    try:
+        C['drop'] = drop_court(I, days, st, {'active': pa, 'drop': pc.get('drop')})
+        A['drop_table'] = bool(C['drop']['ruled'])
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        C['drop'] = dict(pc.get('drop') or {}, why='drop court failed (%s); last ruling kept' % e)
+        A['drop_table'] = bool(pa.get('drop_table'))
+    try:
+        json.dump(cache, open(CANDLE_CACHE, 'w'), separators=(',', ':'))
+    except Exception:
+        pass
+    return C, A
+
+
 # ------------------------------------------------------------------- main ----
 def main():
     prev = {}
@@ -352,7 +579,24 @@ def main():
                 entry['tune'] = pk.get('tune')
             st = dict(DEFAULTS)
             if entry.get('tune') and entry['tune'].get('active') and (entry['tune'].get('n') or 0) >= TU.MIN_DAYS:
-                st.update(entry['tune']['active'])
+                st.update({k: v for k, v in entry['tune']['active'].items() if k in KNOBS})
+            # the live courts (2026-11-16): their rulings ride in tune.active, which the bake applies once n >= 45;
+            # the search above rebuilds `active` from KNOBS alone, so they are laid back on here every night
+            try:
+                prev_active = ((pk.get('tune') or {}).get('active') or {})
+                C, A = courts(cfg, I, days, st, pk.get('courts'), prev_active)
+                entry['courts'] = C
+                if entry.get('tune') and isinstance(entry['tune'].get('active'), dict):
+                    entry['tune']['active'].update(A)
+                elif entry.get('tune') is not None:
+                    entry['tune']['active'] = dict(DEFAULTS, **A)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print('  courts failed (%s); last rulings kept' % e)
+                entry['courts'] = pk.get('courts')
+                if entry.get('tune') and isinstance(entry['tune'].get('active'), dict):
+                    entry['tune']['active'].update({k: v for k, v in prev_active.items() if k in COURT_KNOBS})
             rows = price_rows(I, days, st)
             entry['price'] = price_report(rows)
             entry['price']['settings'] = st

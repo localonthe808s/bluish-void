@@ -105,7 +105,7 @@ def market_day(key, label, kind, h):
             out['p_cal'] = settled_prob(lad, h['actual_bracket'], 'cal')
             br = lambda f: sum((float(r.get(f) or 0) - (1.0 if r.get('label') == h['actual_bracket'] else 0.0)) ** 2 for r in lad)
             out['brier_ours'], out['brier_cal'] = br('ours'), br('cal')
-        if (kind == 'high' and h.get('date', '') >= MKT_BLEND_FROM and lad
+        if (h.get('date', '') >= MKT_BLEND_FROM and lad
                 and all(r.get('ours') is not None and r.get('market') is not None for r in lad)):
             mt = sum(float(r['market']) for r in lad) or 1.0
             ot = sum(float(r['ours']) for r in lad) or 1.0
@@ -118,11 +118,14 @@ def market_day(key, label, kind, h):
                 r.pop('_bl', None)
     # the blend bets (kalshi_daily.BLEND_SHADOW_WS, from 2026-11-01): shadow only, graded apart from the real bets
     out['blend_bets'] = []
-    for w, b in sorted(((L.get('blend_bets') or {}) if kind == 'high' else {}).items()):
+    # the low keeps blend shadows on both its legs (kalshi_lows.blend_bets, 2026-11-16); each leg is tallied apart
+    srcs = [('', L.get('blend_bets'))] if kind == 'high' else [(' 8am', L.get('blend_bets')), (' eve', (h.get('eve') or {}).get('blend_bets'))]
+    for sfx, bb in srcs:
+      for w, b in sorted((bb or {}).items()):
         if not isinstance(b, dict):
             continue
         g = None if b.get('none') else grade(b, h.get('actual_bracket'))
-        out['blend_bets'].append({'w': w, 'named': False, 'top_hit': b.get('top') == h.get('actual_bracket'),
+        out['blend_bets'].append({'w': w + sfx, 'named': False, 'top_hit': b.get('top') == h.get('actual_bracket'),
                                   'dir': b.get('dir'), 'label': b.get('label'), 'price': b.get('price'), 'q': b.get('q'),
                                   'won': g[0] if g else None, 'ret': g[1] if g else None})
     if h.get('eve'):

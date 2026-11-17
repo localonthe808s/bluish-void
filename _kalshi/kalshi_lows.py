@@ -72,6 +72,8 @@ def low_cfg(base_key, series, out, label, slug):
     c.update({'key': base_key.replace('_high', '_low'), 'series': series, 'out': out,
               'label': label, 'field': 'min_temp_f', 'kind': 'low', 'skill': False,
               'bias_hl': 7, 'sd_mult': 1.0,
+              # THE LOW'S OWN COURTS (2026-11-16): every one of these is 0 / off until low_study.py's live courts rule for it
+              'drop_worst': 0, 'mkt_pull': 0.0, 'mkt_pull_eve': 0.0, 'tail_margin': 0.0, 'drop_table': False,
               'url': 'https://kalshi.com/markets/%s/%s' % (series.lower(), slug)})
     return c
 
@@ -296,7 +298,7 @@ def gap_table(obh_raw, daily_raw, h0_of, hour, before=None, min_n=40):
     return {g: c / float(n) for g, c in cnt.items()}, n
 
 
-def empirical_ps(rows_neg, run_neg, table, cap=None):
+def empirical_ps(rows_neg, run_neg, table, cap=None, shift=0.0):
     """Bracket probabilities from the gap table: the settled low is the running
     minimum plus k, with the table's weight on each k.
 
@@ -311,8 +313,10 @@ def empirical_ps(rows_neg, run_neg, table, cap=None):
     reading above a bracket's top edge lost its k = 0 mass this way.
 
     `cap`, when given, is an exact ceiling (positive degF): outcomes above its
-    whole degree are impossible and carry no weight."""
-    run = -run_neg
+    whole degree are impossible and carry no weight. `shift` (positive degF)
+    moves every outcome: the market pull's move, applied to the table's shape
+    rather than to a bell curve (see drop_table)."""
+    run = -run_neg + float(shift or 0.0)
     top = math.floor(cap + 0.5) if cap is not None else None
     ps = []
     for r in rows_neg:
@@ -332,13 +336,85 @@ def empirical_ps(rows_neg, run_neg, table, cap=None):
     return [p / s for p in ps]
 
 
-def snapshot(fcm, bias_of, daily, obh, h0_of, k, hour, rows_neg, floor_on=True, gaps=None, exact=None):
+# THE NON-BINDING MORNING (2026-11-16; user: "do them all"). The gap table above only speaks when the floor binds --
+# the pre-dawn minimum is in hand and the forecast agrees. On the other mornings (28 of 64 live locks) the low was
+# still "ahead" on the forecast and a normal on the remaining-hours minimum priced it: we hit 14, the market 19, and
+# we said "the low is already in" on 22% of them when it happened on 52%. The models forecast evening drops that do
+# not come. So those mornings get their own table: settled - running minimum, measured on this station's own days
+# at the same hour, CONDITIONED ON HOW FAR THE FORECAST STILL EXPECTED THE LOW TO FALL (pf under the floor, in
+# degrees). The "already in" share, the whole-degree dips and the real drops all come out of the history instead of
+# a bell curve centred on a forecast that is wrong in one direction. Walk-forward (before=k); the bucket widens to its
+# neighbours until it holds DROP_MIN_N days. Gated by low_study's drop court (cfg['drop_table']).
+DROP_EDGES = (1.0, 2.0, 3.5)       # expected further fall, degF: [0,1) [1,2) [2,3.5) [3.5,inf)
+DROP_MIN_N = 15        # 29 non-binding mornings in the archive on 11-16; the court waits for 20 replayed rows anyway
+
+
+def pf_at(fcm, bias_of, daily, k, hour):
+    """the bias-corrected consensus forecast of day k's remaining minimum at `hour`, negated space, or None"""
+    fc = fcm.get(K.MODELS[0]) or list(fcm.values())[0]
+    prior = sorted(x for x in fc if x < k and x in daily and len(fc[x]) >= 20)[-K.BIAS_K:]
+    if len(prior) < K.BIAS_MIN:
+        return None
+    yk = (datetime.date(*map(int, k.split('-'))) - datetime.timedelta(days=1)).isoformat()
+    return K.point_forecast(fcm, bias_of(prior), k, hour, daily.get(yk))
+
+
+def drop_entries(fcm, bias_of, daily, obh, obh_raw, daily_raw, h0_of, hour, before):
+    """[(k, drop, g)] for this station's days before `before` that were NOT binding at `hour`: drop = how far the
+    forecast then expected the low to fall under the floor (degF), g = round(settled - running min)."""
+    out = []
+    for k in sorted(obh_raw):
+        if k >= before or daily_raw.get(k) is None or k not in obh:
+            continue
+        h0 = h0_of(k)
+        vals = [v for h, v in obh_raw[k].items() if h0 <= h <= hour]
+        if len(vals) < max(3, hour - h0 - 1):
+            continue
+        r = K.running_max(obh, k, hour, h0)
+        pf = pf_at(fcm, bias_of, daily, k, hour)
+        if r is None or pf is None:
+            continue
+        fl = r + K.HOURLY_PEAK_OFFSET
+        drop = pf - fl
+        if drop <= 0:
+            continue                                  # binding: the gap table's day
+        g = int(round(daily_raw[k] - min(vals)))
+        if -12 <= g <= 1:
+            out.append((k, round(drop, 2), g))
+    return out
+
+
+def drop_table(entries, drop, min_n=DROP_MIN_N):
+    """{g: share}, n, bucket for the day's expected fall `drop`; None when even the widened bucket is thin"""
+    b = sum(1 for e in DROP_EDGES if drop >= e)
+    bins = [[] for _ in range(len(DROP_EDGES) + 1)]
+    for k, d, g in entries:
+        bins[sum(1 for e in DROP_EDGES if d >= e)].append(g)
+    lo = hi = b
+    while True:
+        pool = [g for i in range(lo, hi + 1) for g in bins[i]]
+        if len(pool) >= min_n:
+            cnt = collections.Counter(pool)
+            n = float(len(pool))
+            return {g: c / n for g, c in cnt.items()}, len(pool), [lo, hi]
+        if lo == 0 and hi == len(bins) - 1:
+            return None
+        lo, hi = max(0, lo - 1), min(len(bins) - 1, hi + 1)
+
+
+def snapshot(fcm, bias_of, daily, obh, h0_of, k, hour, rows_neg, floor_on=True, gaps=None, exact=None,
+             mk=None, w=0.0, tail=0.0, drops=None):
     """One decision in negated space: (pred, sd, floor, pf, binding, ps) or None.
     `gaps` = (obh_raw, daily_raw) enables the empirical gap distribution when
     the floor binds. `exact` is the negated exact ceiling (six-hour group or
     climate report), today only -- handled as the highs handle `live`: it
     joins the floor with no offset, and when it IS the floor the spread is the
-    exact-figure one and the hourly gap table has nothing left to say."""
+    exact-figure one and the hourly gap table has nothing left to say.
+    `mk` is the market's implied centre (negated) and `w` the pull toward it
+    (kalshi_daily.mkt_pull_shift, never on a binding hour, never under the
+    floor); `tail` the uniform margin over the reachable rungs
+    (kalshi_daily.tail_mix); `drops` the non-binding table's entries
+    (drop_entries) -- each is off at 0 / None."""
     fc = fcm.get(K.MODELS[0]) or list(fcm.values())[0]
     prior = sorted(x for x in fc if x < k and x in daily and len(fc[x]) >= 20)[-K.BIAS_K:]
     if len(prior) < K.BIAS_MIN:
@@ -357,6 +433,14 @@ def snapshot(fcm, bias_of, daily, obh, h0_of, k, hour, rows_neg, floor_on=True, 
     day = fc.get(k) or {}
     over = bool(day) and not [h for h in day if h >= hour]
     bind = fl is not None and ((pf is not None and fl >= pf) or over)
+    # THE MARKET PULL (2026-11-16; the highs' since 11-01): the centre moves toward the market's implied mean, in the
+    # negated frame, so "never under the floor" reads "never above the ceiling". Off on a binding hour: there the
+    # running minimum, not a forecast, is the centre.
+    mpull = None
+    if w and mk is not None and not bind:
+        sh = K.mkt_pull_shift(w, pred, mk, fl)
+        mpull = {'w': float(w), 'mk': round(-mk, 2), 'shift': round(-sh, 2)}
+        pred = pred + sh
     sd, _ = K.spread(K.residuals(fcm, bias_of, daily, obh, hour, k, h0_of), hour, bind)
     is_exact = bind and live is not None and fl <= live + 1e-9
     if bind:
@@ -370,8 +454,21 @@ def snapshot(fcm, bias_of, daily, obh, h0_of, k, hour, rows_neg, floor_on=True, 
         if e:
             ps = e
             emp = {'n': t[1], 'table': {str(g): round(w, 3) for g, w in sorted(t[0].items())}}
+    drop = None
+    if not bind and floor_on and drops and r is not None and pf is not None and not over:
+        t = drop_table(drops(k), pf - fl)
+        e = empirical_ps(rows_neg, r, t[0], cap=(-live if live is not None else None),
+                         shift=(mpull['shift'] if mpull else 0.0)) if t else None
+        if e:
+            ps = e
+            drop = {'n': t[1], 'bucket': t[2], 'drop': round(pf - fl, 2),
+                    'table': {str(g): round(x, 3) for g, x in sorted(t[0].items())}}
+    tl = None
+    if tail and not bind:
+        ps, open_ = K.tail_mix(rows_neg, ps, fl, bind, float(tail))
+        tl = {'e': float(tail), 'open': open_} if open_ else None
     return {'pred': pred, 'sd': sd, 'fl': fl, 'run': r, 'pf': pf, 'bind': bind, 'over': over, 'exact': is_exact,
-            'ps': ps, 'emp': emp, 'biases': {m: biases.get(m) for m in fcm}}
+            'ps': ps, 'emp': emp, 'mpull': mpull, 'drop': drop, 'tail': tl, 'biases': {m: biases.get(m) for m in fcm}}
 
 
 def ladder_out(rows, rows_neg, ps):
@@ -449,6 +546,30 @@ def best_line(lad, leg='lock'):
             if best is None or ev > best['ev']:
                 best = line
     return best, book
+
+
+BLEND_WS = K.BLEND_SHADOW_WS
+
+
+def blend_bets(lad, leg):
+    """{weight on ours: the bet off that blend under this leg's rules, or {'none': True}}, each with the blend's top rung;
+    None when the market is not fully priced. Shadows only (the highs' since 11-01), graded apart by report.py."""
+    if not lad or any(r.get('ours') is None or r.get('market') is None for r in lad):
+        return None
+    mt, ot = (sum(float(r['market']) for r in lad) or 1.0), (sum(float(r['ours']) for r in lad) or 1.0)
+    out = {}
+    for w in BLEND_WS:
+        bl = [dict(r, ours=round(w * float(r['ours']) / ot + (1.0 - w) * float(r['market']) / mt, 4)) for r in lad]
+        top = bl[max(range(len(bl)), key=lambda i: bl[i]['ours'])]['label']
+        b, _ = best_line(bl, leg)
+        out['%.2f' % w] = dict({k: b[k] for k in ('dir', 'label', 'price', 'q', 'ev')}, top=top) if b else {'none': True, 'top': top}
+    return out
+
+
+def neg_centre(rows):
+    """the market's implied centre from the positive rows' mids, negated for the lens; None when thin"""
+    mc = K.market_centre(rows)
+    return (-mc) if mc is not None else None
 
 
 def court_ps(cfg, fcm_raw, h0_of, tkey, rows, court):
@@ -535,12 +656,17 @@ def run_market(cfg, dry_dir=None):
     tkey = today.isoformat()
     tuned, court = load_study(cfg['key'])
     # the low's tuned settings (low_study.tune_low), applied only on a full record; stamped on the document
+    COURT_KNOBS = ('drop_worst', 'mkt_pull', 'mkt_pull_eve', 'tail_margin', 'drop_table')
     params = {'bias_hl': cfg.get('bias_hl'), 'sd_mult': K.SD_MULT, 'bias_k': K.BIAS_K, 'sd_floor': K.SD_FLOOR, 'tuned': False}
     if tuned and tuned.get('active') and (tuned.get('n') or 0) >= 45:
         a = tuned['active']
         cfg = dict(cfg, bias_hl=a.get('bias_hl', cfg.get('bias_hl')))
+        # the live courts' rulings ride in the same `active` (low_study.courts); each stays at its off value until ruled
+        cfg.update({k: a[k] for k in COURT_KNOBS if k in a})
         K.SD_MULT, K.BIAS_K, K.SD_FLOOR = float(a.get('sd_mult', K.SD_MULT)), int(a.get('bias_k', K.BIAS_K)), float(a.get('sd_floor', K.SD_FLOOR))
         params = {'bias_hl': cfg.get('bias_hl'), 'sd_mult': K.SD_MULT, 'bias_k': K.BIAS_K, 'sd_floor': K.SD_FLOOR, 'tuned': True}
+    params.update({k: cfg.get(k) for k in COURT_KNOBS})
+    W_AM, W_EVE, TAIL = float(cfg.get('mkt_pull') or 0.0), float(cfg.get('mkt_pull_eve') or 0.0), float(cfg.get('tail_margin') or 0.0)
     print('%s settings %s | rules eve %s lock %s | day-ahead court %s' % (cfg['key'], params, RULES['eve'] or 'typed', RULES['lock'] or 'typed',
                                                                           'RULES' if (court or {}).get('eve_use') else 'the bake stands'))
     out_path = os.path.join(HERE, '..', cfg['out'])
@@ -566,7 +692,7 @@ def run_market(cfg, dry_dir=None):
             obh_raw[dk][h] = min(obh_raw[dk].get(h, 999.0), v)
     fold_midnight(obh_raw, h0_of)
     obh = {d: {h: -v for h, v in hrs.items()} for d, hrs in obh_raw.items()}
-    bias_of = K.biases_factory(fcm, daily, cfg.get('skill', False), cfg.get('bias_hl'))
+    bias_of = K.biases_factory(fcm, daily, cfg.get('skill', False), cfg.get('bias_hl'), int(cfg.get('drop_worst') or 0))
 
     # the floor offset for THIS station's minima, measured; the highs' 0.70 is a fallback
     off = K.measure_offset(cfg, obh, daily, h0_of)
@@ -575,6 +701,16 @@ def run_market(cfg, dry_dir=None):
     else:
         K.HOURLY_PEAK_OFFSET, K.OFFSET_SD = K.OFFSET_DEFAULT, K.OFFSET_SD_DEFAULT
     offset = {'mean': K.HOURLY_PEAK_OFFSET, 'sd': K.OFFSET_SD, 'n': (off[2] if off else 0)}
+    # the non-binding table's days, one list per hour, filtered walk-forward at use (drop_entries / drop_table)
+    _drop_cache = {}
+
+    def drops_for(hour_):
+        if not cfg.get('drop_table'):
+            return None
+        if hour_ not in _drop_cache:
+            _drop_cache[hour_] = drop_entries(fcm, bias_of, daily, obh, obh_raw, daily_raw, h0_of, min(hour_, 23), tkey)
+        ents = _drop_cache[hour_]
+        return lambda k: [e for e in ents if e[0] < k]
 
     # ---- settled days: the truth, and the ladder each traded
     settled = K.fetch_settled(cfg)
@@ -597,7 +733,8 @@ def run_market(cfg, dry_dir=None):
             continue
         rows = by_date[d]['rows']
         rows_neg = neg_rows(rows)
-        s = snapshot(fcm, bias_of, daily, obh, h0_of, d, LOCK_HOUR, rows_neg, gaps=(obh_raw, daily_raw))
+        s = snapshot(fcm, bias_of, daily, obh, h0_of, d, LOCK_HOUR, rows_neg, gaps=(obh_raw, daily_raw),
+                     tail=TAIL, drops=drops_for(LOCK_HOUR))
         if not s:
             continue
         lad = ladder_out(rows, rows_neg, s['ps'])
@@ -609,7 +746,7 @@ def run_market(cfg, dry_dir=None):
                             'binding': s['bind'], 'emp': bool(s.get('emp')), 'ladder': lad,
                             'market_pick': None, 'market_p': None}}
         # the evening-before view of the same day, no floor
-        se = snapshot(fcm, bias_of, daily, obh, h0_of, d, 0, rows_neg, floor_on=False)
+        se = snapshot(fcm, bias_of, daily, obh, h0_of, d, 0, rows_neg, floor_on=False, tail=TAIL)
         if se:
             lad_e = ladder_out(rows, rows_neg, se['ps'])
             be = max(range(len(lad_e)), key=lambda i: lad_e[i]['ours'] or 0)
@@ -665,7 +802,13 @@ def run_market(cfg, dry_dir=None):
     if cap is not None:
         print('%s ceiling %.2f (six-hour %s, climate report %s)' % (cfg['key'], cap, six, cmin))
     s = snapshot(fcm, bias_of, daily, obh, h0_of, tkey, hour, rows_neg, gaps=(obh_raw, daily_raw),
-                 exact=(-cap if cap is not None else None)) if rows else None
+                 exact=(-cap if cap is not None else None), mk=neg_centre(rows), w=W_AM, tail=TAIL,
+                 drops=drops_for(hour)) if rows else None
+    if s and s.get('mpull') and abs(s['mpull']['shift']) > 0.005:
+        print('%s market pull: %+.2f (ours %.2f, market centre %.2f, w %s)' % (cfg['key'], s['mpull']['shift'],
+                                                                              -s['pred'] - s['mpull']['shift'], s['mpull']['mk'], W_AM))
+    if s and s.get('drop'):
+        print('%s non-binding table: %d days, bucket %s, forecast fall %.2f' % (cfg['key'], s['drop']['n'], s['drop']['bucket'], s['drop']['drop']))
     T = {'date': tkey, 'event': K.event_ticker(cfg, today), 'kind': 'low', 'key': cfg['key'],
          'label': cfg['label'], 'city': cfg.get('city'), 'station': cfg['station'],
          'as_of': now.strftime('%H:%M ') + cfg['tzlabel'], 'tz': cfg['tz'],
@@ -694,6 +837,7 @@ def run_market(cfg, dry_dir=None):
         T['context'] = K.day_context(daily, fcm, s['biases'], today, low=True)
         T.update({'pred': round(-s['pred'], 2), 'sd': round(s['sd'], 3), 'fc_low': (round(-s['pf'], 2) if s['pf'] is not None else None),
                   'binding': s['bind'], 'exact': s['exact'], 'gap_table': s.get('emp'),
+                  'mpull': s.get('mpull'), 'drop': s.get('drop'), 'tail': s.get('tail'),
                   'day_over': bool(s['over']), 'day_decided': False,
                   'pick': lad[best]['label'], 'p': lad[best]['ours'],
                   'market_pick': lad[mbest]['label'], 'market_p': lad[mbest]['market'],
@@ -715,7 +859,8 @@ def run_market(cfg, dry_dir=None):
                          'pred': T['pred'], 'sd': T['sd'], 'obs_at_lock': T['obs_so_far'], 'binding': s['bind'],
                          'ladder': [{'label': r['label'], 'lo': r['lo'], 'hi': r['hi'], 'ours': r['ours'], 'market': r['market']} for r in lad],
                          'market_pick': T['market_pick'], 'market_p': T['market_p'], 'bet': bet, 'book': book,
-                         'shadow': shadow, 'priced_at': hour}
+                         'shadow': shadow, 'priced_at': hour, 'mpull': s.get('mpull'), 'drop': s.get('drop'), 'tail': s.get('tail'),
+                         'emp': bool(s.get('emp')), 'params': params, 'blend_bets': blend_bets(lad, 'lock')}
             print('%s LOCKED %s: %s (%.0f%%), market %s (%.0f%%)' % (cfg['key'], tkey, T['pick'], 100 * (T['p'] or 0),
                                                                     T['market_pick'], 100 * (T['market_p'] or 0)))
         T['locked'] = h.get('lock')
@@ -730,7 +875,10 @@ def run_market(cfg, dry_dir=None):
         tkey2 = tdate.isoformat()
         trows = K.fetch_market(cfg, K.event_ticker(cfg, tdate))
         trows_neg = neg_rows(trows) if trows else []
-        st = snapshot(fcm, bias_of, daily, obh, h0_of, tkey2, 0, trows_neg, floor_on=False) if trows else None
+        st = snapshot(fcm, bias_of, daily, obh, h0_of, tkey2, 0, trows_neg, floor_on=False,
+                      mk=neg_centre(trows), w=W_EVE, tail=TAIL) if trows else None
+        if st and st.get('mpull') and abs(st['mpull']['shift']) > 0.005:
+            print('%s evening pull: %+.2f (market centre %.2f, w %s)' % (cfg['key'], st['mpull']['shift'], st['mpull']['mk'], W_EVE))
         if st:
             tl = ladder_out(trows, trows_neg, st['ps'])
             priced_by, tpred = 'bake', round(-st['pred'], 2)
@@ -747,6 +895,7 @@ def run_market(cfg, dry_dir=None):
                 tshadow, tbet, tbook = tbet, None, []
             tom = {'date': tkey2, 'event': K.event_ticker(cfg, tdate), 'state': K.market_state(cfg, trows, now),
                    'pred': tpred, 'sd': round(st['sd'], 3), 'priced_by': priced_by, 'pick': tl[tb]['label'], 'p': tl[tb]['ours'],
+                   'mpull': (st.get('mpull') if priced_by == 'bake' else None), 'tail': st.get('tail'),
                    'market_pick': tl[tm]['label'], 'market_p': tl[tm]['market'], 'ladder': tl, 'bet': tbet, 'book': tbook,
                    'shadow': tshadow, 'edge_gate': gate_eve,
                    'models': {m: (round(-(max(fcm[m][tkey2].values()) - b), 1) if fcm[m].get(tkey2) and b is not None else None)
@@ -754,9 +903,14 @@ def run_market(cfg, dry_dir=None):
             # the EVE lock for tomorrow, once, from EVE_HOUR on
             h2 = hist.setdefault(tkey2, {'date': tkey2, 'event': tom['event']})
             if hour >= EVE_HOUR and 'eve' not in h2:
+                # THE EVENING LADDER IS KEPT (2026-11-16): ours and the market's mids at the lock, so the evening market court
+                # (low_study.py) can replay other weights off real quotes -- the highs' eve blocks have carried it since 11-01
                 h2['eve'] = {'at': now.strftime('%Y-%m-%dT%H:%M ') + cfg['tzlabel'], 'pick': tom['pick'], 'p': tom['p'],
                              'pred': tom['pred'], 'sd': tom['sd'], 'market_pick': tom['market_pick'],
-                             'market_p': tom['market_p'], 'bet': tbet, 'book': tbook, 'shadow': tshadow}
+                             'market_p': tom['market_p'], 'bet': tbet, 'book': tbook, 'shadow': tshadow,
+                             'priced_at': hour, 'priced_by': priced_by, 'mpull': tom.get('mpull'), 'tail': tom.get('tail'),
+                             'params': params, 'blend_bets': blend_bets(tl, 'eve'),
+                             'ladder': [{'label': r['label'], 'lo': r['lo'], 'hi': r['hi'], 'ours': r['ours'], 'market': r['market']} for r in tl]}
                 print('%s EVE %s: %s (%.0f%%), market %s' % (cfg['key'], tkey2, tom['pick'], 100 * (tom['p'] or 0), tom['market_pick']))
         elif trows:
             tom = {'date': tkey2, 'event': K.event_ticker(cfg, tdate), 'state': K.market_state(cfg, trows, now)}
@@ -792,7 +946,7 @@ def run_market(cfg, dry_dir=None):
            'updated_utc': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
            'today': T, 'record': record,
            'study': {'params': params, 'rules': RULES, 'court': bool((court or {}).get('eve_use')),
-                     'study_days': (STUDY.get('price') or {}).get('days')},
+                     'study_days': (STUDY.get('price') or {}).get('days'), 'courts': STUDY.get('courts')},
            'history': sorted(hist.values(), key=lambda h: h['date'], reverse=True)}
     if dry_dir:
         p = os.path.join(dry_dir, cfg['out'])
@@ -812,6 +966,9 @@ def run_market(cfg, dry_dir=None):
             # tomorrow's shadow too (2026-11-13): the evening plan is followed back by trail_study.study_low
             if T.get('tomorrow') and row.get('tom') is not None:
                 row['tom']['sbet'] = T['tomorrow'].get('shadow')
+                row['tom']['mps'] = ((T['tomorrow'].get('mpull') or {}).get('shift'))
+            mp = T.get('mpull') or {}
+            row['mps'], row['mw'] = mp.get('shift'), mp.get('w')
             tdir = os.path.join(HERE, 'trail_out'); os.makedirs(tdir, exist_ok=True)
             with open(os.path.join(tdir, '%s_%s.jsonl' % (cfg['key'], T['date'])), 'a') as tf:
                 tf.write(json.dumps(row, separators=(',', ':')) + '\n')
