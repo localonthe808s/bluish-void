@@ -72690,7 +72690,32 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
        the Rockaway and Sandy Hook channels); the subordinate ones publish only slack and strength
        times, interpolated on the tide's own cosine. */
     var cwFlowField = null;
+    /* THE FIELD IN A WORKER (perf 2026-11-17): the per-station distance sweeps below held a phone's WATER switch for ~0.9 s. With a
+       worker, a build asks for the field once per key and returns null until it is in (both callers already skip a frame on null and
+       ask again with the same key); the worker runs this very function's source with the mask and stations handed in. No worker,
+       or a worker that fails: the sweep runs here as before. */
+    var cwFlowW = { w: null, dead: !window.Worker, key: null, res: null, pend: null };
     function cwFlowFieldBuild(W, H, v){
+      var M = cwFlowMask; if (!M || !cwCur.stations) return null;
+      if (!cwFlowW.dead){
+        var key = M.src + '|' + M.w + 'x' + M.h + '|' + W + 'x' + H + '|' + v.X0 + ',' + v.X1 + ',' + v.Y0 + ',' + v.Y1 + '|' + cwCur.at + '|' + cwCur.stations.length;
+        if (cwFlowW.res && cwFlowW.key === key){ var R0 = cwFlowW.res; cwFlowW.res = null; return R0; }
+        if (cwFlowW.pend === key) return null;
+        try {
+          if (!cwFlowW.w){ var src = 'var cwFlowMask, cwCur;\n' + cwFlowFieldBuildSync.toString().replace('cwFlowFieldBuildSync', 'cwFlowFieldBuild') + '\n'
+              + 'onmessage = function(e){ var d = e.data; try { cwFlowMask = d.M; cwCur = { stations: d.stations, series: d.series, at: d.at }; var r = cwFlowFieldBuild(d.W, d.H, d.v); if (!r){ postMessage({ id: d.id, r: null }); return; } postMessage({ id: d.id, r: r }, [r.top.buffer, r.tix.buffer, r.u.buffer, r.v.buffer, r.fade.buffer]); } catch(x){ postMessage({ id: d.id, err: String(x) }); } };';
+            var w = cwFlowW.w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+            w.onmessage = function(e){ var d = e.data; if (d.id !== cwFlowW.pend) return; cwFlowW.pend = null; if (d.err || !d.r){ cwFlowW.dead = true; return; } cwFlowW.res = d.r; cwFlowW.key = d.id; };
+            w.onerror = function(){ cwFlowW.dead = true; cwFlowW.pend = null; try { w.terminate(); } catch(e){} cwFlowW.w = null; }; }
+          var series = {}; cwCur.stations.forEach(function(st){ if (cwCur.series[st.id]) series[st.id] = 1; });
+          cwFlowW.pend = key;
+          cwFlowW.w.postMessage({ id: key, M: { w: M.w, h: M.h, m: M.m }, stations: cwCur.stations.map(function(st){ return { id: st.id, lat: st.lat, lon: st.lon, name: st.name }; }), series: series, at: cwCur.at, W: W, H: H, v: { X0: v.X0, X1: v.X1, Y0: v.Y0, Y1: v.Y1 } });
+          return null;
+        } catch(e){ cwFlowW.dead = true; }
+      }
+      return cwFlowFieldBuildSync(W, H, v);
+    }
+    function cwFlowFieldBuildSync(W, H, v){
       var M = cwFlowMask; if (!M || !cwCur.stations) return null;
       var dw = Math.min(M.w, 200), dh = Math.max(8, Math.round(dw * M.h / M.w)), n = dw * dh;
       var wet = new Uint8Array(n);
@@ -100256,6 +100281,19 @@ function closeAlertModal(){
     };
     SWL.swell = swlSwell;
     var swlHide = function(){ cancelAnimationFrame(SWL.raf); SWL.raf = 0; SWL.draw = null; if (SWL.cv) SWL.cv.style.visibility = 'hidden'; };
+    /* the worker and its mailbox (see the build): one worker, one request at a time per key, a promise each */
+    var swlWorkerField = function(fo, geo){
+      return new Promise(function(res, rej){
+        var W = SWL.W;
+        if (!W){ try { W = SWL.W = new Worker('/_maplab/swell_worker.js?v=1'); W._q = {}; W._n = 0;
+            W.onmessage = function(e){ var d = e.data, cb = W._q[d.id]; delete W._q[d.id]; if (!cb) return; if (d.err) cb[1](new Error(d.err)); else cb[0](d.F); };
+            W.onerror = function(){ var q = W._q; W._q = {}; Object.keys(q).forEach(function(k){ q[k][1](new Error('worker')); }); try { W.terminate(); } catch(e){} SWL.W = null; };
+          } catch(e){ return rej(e); } }
+        var id = ++W._n; W._q[id] = [res, rej];
+        var D0 = fo.D, D = { w: D0.w, h: D0.h, W: D0.W, E: D0.E, N: D0.N, S: D0.S, step: D0.step, depth: D0.depth };   /* no functions, no solve cache */
+        W.postMessage({ id: id, o: { D: D, ctx: fo.ctx, RW: fo.RW, RH: fo.RH, water: fo.water, mpp: fo.mpp, lead: fo.lead, second: fo.second, geo: geo } });
+      });
+    };
     SWL.build = function(){
       if (!SEA.lit || !M) return;
       var gen = ++SWL.gen, stale = function(){ return gen !== SWL.gen || !SEA.lit; };
@@ -100324,8 +100362,19 @@ function closeAlertModal(){
               if (!second || dd + dt * 5 > second.score) second = { dir: q.dir, tp: q.tp, hs: q.hs, score: dd + dt * 5 };
             });
             var tF = Date.now();
-            var F = window.bvSwellField({ D: D, ctx: { w: cw, h: ch, W: cW, N: cN, cell: cell, land: land }, RW: RW, RH: RH, lonAt: lonAt, latAt: latAt,
-              water: water, mpp: mpp, lead: { dir: lead.dir, tp: lead.tp, hs: lead.hs }, second: second });
+            var fo = { D: D, ctx: { w: cw, h: ch, W: cW, N: cN, cell: cell, land: land }, RW: RW, RH: RH, lonAt: lonAt, latAt: latAt,
+              water: water, mpp: mpp, lead: { dir: lead.dir, tp: lead.tp, hs: lead.hs }, second: second };
+            /* IN A WORKER WHEN THERE IS ONE (perf 2026-11-17; _maplab/swell_worker.js): the solve held a phone's WATER switch for over a
+               second. The field for this view and swell is asked of the worker once; this build ends here, and runs again -- its
+               inputs are cached -- when the field is in. Without a worker, or if it fails, the solve runs here as before. */
+            var fk = [z, G.w, G.e, G.n, G.s, RW, RH, lead.dir, lead.tp, lead.hs, second ? second.dir + '/' + second.tp : ''].join('|');
+            var F = (SWL.wF && SWL.wF.k === fk) ? SWL.wF.F : null;
+            if (!F && !SWL.wDead && window.Worker){
+              if (SWL.wPend !== fk){ SWL.wPend = fk;
+                swlWorkerField(fo, { w: G.w, e: G.e, n: G.n, s: G.s }).then(function(F2){ SWL.wPend = null; if (F2) SWL.wF = { k: fk, F: F2 }; else SWL.wDead = true; if (!stale()) SWL.build(); },
+                  function(){ SWL.wPend = null; SWL.wDead = true; if (!stale()) SWL.build(); }); }
+              return; }
+            if (!F) F = window.bvSwellField(fo);
             if (stale() || !F) return;
             if (!SWL.cv){ var pn = M.getPane('lcSwell') || M.createPane('lcSwell'); pn.style.zIndex = 435; pn.style.pointerEvents = 'none';
               SWL.cv = document.createElement('canvas'); SWL.cv.style.position = 'absolute'; SWL.cv.style.pointerEvents = 'none'; pn.appendChild(SWL.cv); }
