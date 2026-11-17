@@ -537,14 +537,25 @@ window._bvTileRect = function(M, ly, t){
   /* HTML MARKER DOTS (user 2026-11-10: "make the storm centers and city markers glow too"): a marker built from HTML (a storm's
      center, a city's dot beside its name) gets the same glow on its small round colored element: a glow in the dot's own color,
      two soft rings like the halos. Found once per marker when it is added: round (border-radius at least half), at most 24 px, filled. */
-  var glowEl = function(el){ try { var cs = getComputedStyle(el), w = el.offsetWidth, h = el.offsetHeight, bg = cs.backgroundColor;
-      if (!w || w > 24 || Math.abs(w - h) > 2 || !bg || bg === 'transparent' || /rgba\(.*,\s*0\)$/.test(bg) || parseFloat(cs.borderTopLeftRadius) < w / 2 - .5 || el._bvGlow) return; el._bvGlow = 1;
-      var m = bg.match(/rgba?\(([^)]+)\)/), c = m ? m[1].split(',').slice(0, 3).join(',') : null; if (!c) return; var r = Math.max(3, w / 2);   /* a tiny city dot still shows its glow */
-      el.style.boxShadow = (cs.boxShadow && cs.boxShadow !== 'none' ? cs.boxShadow + ', ' : '') + '0 0 ' + (r * .9 + 1).toFixed(1) + 'px ' + (r * .3).toFixed(1) + 'px rgba(' + c + ',.42), 0 0 ' + (r * 1.9 + 2).toFixed(1) + 'px ' + (r * .5).toFixed(1) + 'px rgba(' + c + ',.18)'; } catch(e){} };
+  /* ONE PASS, ONCE PER ELEMENT (perf 2026-11-17): this ran per marker as each was added, reading computed style and size before
+     it looked at the "seen" flag -- a forced layout per element, 0.5 s per zoom on desktop and 2 s of a WATER switch at phone
+     speed, mostly over label markers that can never qualify. Now: the seen flag first; every marker added in a frame is read in
+     one pass (one layout), then written; an element that does not qualify is marked so it is never read again. */
+  var glowRead = function(el){ try { var cs = getComputedStyle(el), w = el.offsetWidth, h = el.offsetHeight, bg = cs.backgroundColor;
+      if (!w || w > 24 || Math.abs(w - h) > 2 || !bg || bg === 'transparent' || /rgba\(.*,\s*0\)$/.test(bg) || parseFloat(cs.borderTopLeftRadius) < w / 2 - .5) return null;
+      var m = bg.match(/rgba?\(([^)]+)\)/), c = m ? m[1].split(',').slice(0, 3).join(',') : null; if (!c) return null;
+      return { c: c, r: Math.max(3, w / 2), sh: (cs.boxShadow && cs.boxShadow !== 'none') ? cs.boxShadow + ', ' : '' }; } catch(e){ return null; } };   /* a tiny city dot still shows its glow */
+  var glowWrite = function(el, g){ el.style.boxShadow = g.sh + '0 0 ' + (g.r * .9 + 1).toFixed(1) + 'px ' + (g.r * .3).toFixed(1) + 'px rgba(' + g.c + ',.42), 0 0 ' + (g.r * 1.9 + 2).toFixed(1) + 'px ' + (g.r * .5).toFixed(1) + 'px rgba(' + g.c + ',.18)'; };
+  var glowEl = function(el){ if (!el || el._bvGlow) return; el._bvGlow = 1; var g = glowRead(el); if (g) glowWrite(el, g); };
   window._bvGlowEl = glowEl;
+  var GQ = [], gRaf = 0;
+  var glowFlush = function(){ gRaf = 0; var q = GQ; GQ = []; var els = [];
+    q.forEach(function(me){ var ic = me._icon; if (!ic || !ic.querySelector) return; if (!ic._bvGlow) els.push(ic); ic.querySelectorAll('span,div,i,b').forEach(function(e){ if (!e._bvGlow) els.push(e); }); });
+    var R = els.map(function(e){ e._bvGlow = 1; return glowRead(e); });      /* every read first: one layout for the whole frame */
+    els.forEach(function(e, i){ if (R[i]) glowWrite(e, R[i]); }); };
   try { if (window.L && L.Marker && !L.Marker.prototype._bvGlow){ var ii = L.Marker.prototype._initIcon; L.Marker.prototype._bvGlow = true;
-    L.Marker.prototype._initIcon = function(){ var out = ii.apply(this, arguments), icon = this._icon, me = this;
-      if (icon && icon.querySelector && !(this.options && this.options.glow === false)) requestAnimationFrame(function(){ if (!me._icon) return; glowEl(me._icon); me._icon.querySelectorAll('span,div,i,b').forEach(glowEl); });
+    L.Marker.prototype._initIcon = function(){ var out = ii.apply(this, arguments), icon = this._icon;
+      if (icon && icon.querySelector && !icon._bvGlow && !(this.options && this.options.glow === false)){ GQ.push(this); if (!gRaf) gRaf = requestAnimationFrame(glowFlush); }
       return out; }; } } catch(e){}
   var pm = function(){ var P = window.protomapsL; if (!P || !P.CircleSymbolizer) return false; if (P.CircleSymbolizer.prototype._bvGlow) return true;
     var dr = P.CircleSymbolizer.prototype.draw; P.CircleSymbolizer.prototype._bvGlow = true;
@@ -2558,7 +2569,7 @@ window._bvContinentalNames = function(map, opts){
   if (opts.themed && window.BV_THEMED_NA) list = list.concat(window.BV_THEMED_NA);
   var mk = [];
   list.forEach(function(c){
-    mk.push(L.marker([c[1], c[2]], {
+    mk.push(L.marker([c[1], c[2]], { glow: false,   /* a name, never a dot: skip the glow scan (perf 2026-11-17) */
       interactive: false, keyboard: false, pane: opts.pane || 'markerPane',   /* LOCAL: its labels pane, kept over the overlays (2026-10-29) */
       icon: L.divIcon({
         className: cls + (c[3] === 'water' ? ' bv-conus-name-wa' : ''),
@@ -99591,7 +99602,7 @@ function closeAlertModal(){
         var html = '<div style="transform:translate(-50%,-50%)' + (rot ? ' rotate(' + rot + 'deg)' : '') + ';white-space:nowrap;text-align:center;font:' + (wet ? 'italic ' : '') + (o.k === 'park' ? '700 ' : '600 ') + fs + 'px/1.25 system-ui,-apple-system,sans-serif;'
           + 'letter-spacing:.02em;color:' + col + ';text-shadow:0 0 2px rgba(8,14,10,.95),0 0 4px rgba(8,14,10,.85),0 1px 2px rgba(8,14,10,.9);">'
           + lines.map(function(x){ return x.replace(/&/g, '&amp;').replace(/</g, '&lt;'); }).join('<br>') + '</div>';
-        L.marker(M.containerPointToLatLng(c), { pane: 'lcLabels', interactive: false, keyboard: false, icon: L.divIcon({ className: '', iconSize: [0, 0], html: html }) }).addTo(PKL.g);
+        L.marker(M.containerPointToLatLng(c), { pane: 'lcLabels', interactive: false, keyboard: false, glow: false, icon: L.divIcon({ className: '', iconSize: [0, 0], html: html }) }).addTo(PKL.g);
       });
     };
     var GH = { on: true, lay: null, loading: false };
