@@ -1080,24 +1080,35 @@ window._bvParkLabels = function(rules, F){
   var span = function(R, x, y){ var xs = []; for (var i = 0, j = R.length - 1; i < R.length; j = i++){ var a = R[i], b = R[j];
       if ((a.y > y) !== (b.y > y)) xs.push(a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y)); }
     xs.sort(function(m, n){ return m - n; }); for (var k = 0; k + 1 < xs.length; k += 2) if (xs[k] <= x && x <= xs[k + 1]) return [xs[k], xs[k + 1]]; return null; };
+  /* THE FIT IS REMEMBERED (perf 2026-11-17): every repaint of the labels copy -- each tab switch, each roads toggle -- ran the
+     point-in-polygon search and the width test again for every park polygon in every tile (250-360 ms a switch). The same tile at
+     the same zoom gives the same polygon and the same points, so the answer is kept by the polygon's shape (zoom, vertex count,
+     first and middle vertex, how many points the tile noted): a hit with its name, or a miss. */
+  var MEMO = new Map(), MEMO_MAX = 3000;
   var lab = { place: function(layout, geom, f){
     var z = layout.zoom, k = (f.props || {}).kind || ''; if (!PARK.test(k) || (z < 9 && !BIG.test(k))) return;
     var R = geom && geom[0]; ST.tried++; if (!R || R.length < 4 || pts.z !== z) return;
-    var hit = null; for (var i = 0; i < pts.a.length; i++){ var q = pts.a[i]; if (inside(R, q.x, q.y)){ hit = q; break; } }
-    if (!hit) return; ST.hit++;
-    var nm = hit.name.replace(/\s+/g, ' ').trim(); if (!nm || nm.length > 40) return;
-    if (window._bvParkOwn && window._bvParkOwn[nm]) return;                        /* New York's parks name themselves and their parts (LOCAL) */
-    if (/\d/.test(nm) && !/[a-z]{3}/.test(nm)) return;                            /* a code, not a name ("Us-Tn-87-5") */
-    /* the name in at most two lines of <= 16 characters; its box, with a margin, must sit inside the park at the point's height
-       (and a line above and below it) */
-    var words = nm.split(' '), lines = [''], fs = size(z);
-    words.forEach(function(w){ var L0 = lines[lines.length - 1]; if ((L0 + ' ' + w).trim().length > 16 && L0) lines.push(w); else lines[lines.length - 1] = (L0 + ' ' + w).trim(); });
-    if (lines.length > 2) return;
-    var w = Math.max.apply(null, lines.map(function(L1){ return L1.length; })) * fs * 0.62 + 14, h = lines.length * fs * 1.3 + 8;
-    var ok = [hit.y - h / 2, hit.y, hit.y + h / 2].every(function(y){ var sp = span(R, hit.x, y); return sp && sp[1] - sp[0] >= w && hit.x - sp[0] >= w / 2 - 2 && sp[1] - hit.x >= w / 2 - 2; });
-    if (!ok) return; ST.fit++;
-    f.props._plab = nm;
-    var at = { x: hit.x, y: hit.y, dist: function(b){ return Math.sqrt((this.x - b.x) * (this.x - b.x) + (this.y - b.y) * (this.y - b.y)); } };
+    var mk = z + ':' + R.length + ':' + R[0].x + ',' + R[0].y + ':' + R[R.length >> 1].x + ',' + R[R.length >> 1].y + ':' + pts.a.length, mo = MEMO.get(mk);
+    if (mo === null) return;
+    if (!mo){
+      var miss = function(){ if (MEMO.size >= MEMO_MAX) MEMO.clear(); MEMO.set(mk, null); };
+      var hit = null; for (var i = 0; i < pts.a.length; i++){ var q = pts.a[i]; if (inside(R, q.x, q.y)){ hit = q; break; } }
+      if (!hit){ miss(); return; } ST.hit++;
+      var nm = hit.name.replace(/\s+/g, ' ').trim(); if (!nm || nm.length > 40){ miss(); return; }
+      if (window._bvParkOwn && window._bvParkOwn[nm]){ miss(); return; }           /* New York's parks name themselves and their parts (LOCAL) */
+      if (/\d/.test(nm) && !/[a-z]{3}/.test(nm)){ miss(); return; }               /* a code, not a name ("Us-Tn-87-5") */
+      /* the name in at most two lines of <= 16 characters; its box, with a margin, must sit inside the park at the point's height
+         (and a line above and below it) */
+      var words = nm.split(' '), lines = [''], fs = size(z);
+      words.forEach(function(w){ var L0 = lines[lines.length - 1]; if ((L0 + ' ' + w).trim().length > 16 && L0) lines.push(w); else lines[lines.length - 1] = (L0 + ' ' + w).trim(); });
+      if (lines.length > 2){ miss(); return; }
+      var w = Math.max.apply(null, lines.map(function(L1){ return L1.length; })) * fs * 0.62 + 14, h = lines.length * fs * 1.3 + 8;
+      var ok = [hit.y - h / 2, hit.y, hit.y + h / 2].every(function(y){ var sp = span(R, hit.x, y); return sp && sp[1] - sp[0] >= w && hit.x - sp[0] >= w / 2 - 2 && sp[1] - hit.x >= w / 2 - 2; });
+      if (!ok){ miss(); return; } ST.fit++;
+      if (MEMO.size >= MEMO_MAX) MEMO.clear(); mo = { x: hit.x, y: hit.y, nm: nm }; MEMO.set(mk, mo);
+    }
+    var nm = mo.nm; f.props._plab = nm;
+    var at = { x: mo.x, y: mo.y, dist: function(b){ return Math.sqrt((this.x - b.x) * (this.x - b.x) + (this.y - b.y) * (this.y - b.y)); } };
     var r = txt.place(layout, [[at]], f); if (!r) return; ST.placed++;
     r.forEach(function(o){ o.deduplicationKey = 'park:' + nm; o.deduplicationDistance = 600; }); return r; } };
   return rules.filter(function(r){ return r.dataLayer !== 'roads'; })
@@ -1372,9 +1383,9 @@ window._bvSeaInView = function(map){
   })(x, y);
   return Promise.all(jobs).then(function(r){ return r.some(Boolean); });
 };
-window._bvGate = function(map, lay, sea){
+window._bvGate = function(map, lay, sea, pred){
   if (!map || !lay) return;
-  (map._bvGated = map._bvGated || []).push({ l: lay, sea: !!sea });
+  (map._bvGated = map._bvGated || []).push({ l: lay, sea: !!sea, pred: pred || null });   /* pred(z, map) -> false takes the layer off too (perf 2026-11-17) */
   if (map._bvGateOn) return; map._bvGateOn = true;
   var run = function(){
     /* a map with no zoom limits of its own takes Leaflet's from its layers: freeze them first, so taking a layer off never lowers
@@ -1386,6 +1397,7 @@ window._bvGate = function(map, lay, sea){
       if (seq !== map._bvGateSeq) return;   /* a later move has asked again */
       map._bvGated.forEach(function(g){
         var o = g.l.options, inR = z >= (o.minZoom || 0) && z <= (o.maxZoom == null ? 99 : o.maxZoom), want = inR && (!g.sea || seaHere);
+        if (want && g.pred){ try { want = !!g.pred(z, map); } catch(e){} }
         if (want && g.l._bvGatedOff){ g.l._bvGatedOff = false; g.l.addTo(map); }
         else if (!want && map.hasLayer(g.l)){ g.l._bvGatedOff = true; map.removeLayer(g.l); }
       });
@@ -1522,7 +1534,12 @@ window._bvDesert = function(map){
   var low = window._bvLowTwin(map, lay, DL, B.url + '/{z}/{x}/{y}.png?v=1');
   var under = function(L1){ try { var c = L1.getContainer(), pn = c && c.parentNode; if (!pn) return;
     var first = [].filter.call(pn.children, function(k){ return k !== c && k.style.zIndex === '2' && !(low && k === low.getContainer()) && k !== lay.getContainer(); })[0]; if (first) pn.insertBefore(c, first); } catch(e){} };
-  B.coverP.then(function(){ lay.addTo(map); under(lay); if (low){ low.addTo(map); under(low); } });
+  B.coverP.then(function(){ lay.addTo(map); under(lay); if (low){ low.addTo(map); under(low); }
+    /* OFF THE MAP WHEN ITS BOX IS OFF SCREEN (perf 2026-11-17): the pair drew nothing at New York (bounds end at 93 W) yet each still
+       paid Leaflet's level bookkeeping on every zoom (~37 ms apiece on a desktop, four times that on a phone). The gate takes them
+       off while the view and the desert box do not meet, and puts them back the moment they do. */
+    var inBox = function(z, m){ try { return m.getBounds().intersects(lay.options.bounds); } catch(e){ return true; } };
+    [lay, low].forEach(function(l){ if (l) window._bvGate(map, l, false, inBox); }); });
   return lay;
 };
 /* 1 M LIDAR (user 2026-10-17: "add lidar 1m to the national basemap bake"). From z13 in, USGS 3DEP's best available elevation
@@ -1540,6 +1557,24 @@ window._bvDesert = function(map){
    resampling already smooths real ground). Where planar pixels are dense (a 9 px box, soft knee 20-40%) the grey gives way
    to a ~40 m blur of itself: the facets go, a building on a hillside keeps the hill. Everywhere else the tile is untouched,
    so Prospect Park's ridges, the waterfront bulkheads and the bridge ramps stay crisp. */
+/* OFF THE MAIN THREAD (perf 2026-11-17): the smoothing below took 0.3 s a zoom step at street level, on the thread that draws.
+   A worker is built from these two functions' own source (no other file to ship); each tile posts a copy of its pixels and gets
+   the smoothed greys back. No worker, or a worker that fails: the tile runs the same function here, as before. */
+window._bvLidarDefacetAsync = function(a, z, ty, N0){
+  var W = window._bvLidarW;
+  if (W === null) return Promise.reject(new Error('no worker'));
+  if (!W){
+    try {
+      var src = 'var box = ' + box.toString() + ';\nvar defacet = ' + window._bvLidarDefacet.toString() + ';\n'
+        + 'onmessage = function(e){ var d = e.data; try { var r = defacet(new Uint8ClampedArray(d.a), d.z, d.ty, d.N); postMessage({ id: d.id, r: r }, [r.buffer]); } catch(x){ postMessage({ id: d.id, err: String(x) }); } };';
+      W = window._bvLidarW = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+      W._q = {}; W._n = 0;
+      W.onmessage = function(e){ var d = e.data, cb = W._q[d.id]; delete W._q[d.id]; if (!cb) return; if (d.err) cb[1](new Error(d.err)); else cb[0](d.r); };
+      W.onerror = function(){ var q = W._q; W._q = {}; Object.keys(q).forEach(function(k){ q[k][1](new Error('worker')); }); try { W.terminate(); } catch(e){} window._bvLidarW = null; };
+    } catch(e){ window._bvLidarW = null; return Promise.reject(e); }
+  }
+  return new Promise(function(res, rej){ var id = ++W._n; W._q[id] = [res, rej]; var cp = new Uint8ClampedArray(a); W.postMessage({ id: id, a: cp.buffer, z: z, ty: ty, N: N0 }, [cp.buffer]); });
+};
 window._bvLidarDefacet = function(a, z, ty, N0){
   var N = N0 || 256, n = N * N, g = new Uint8Array(n), o8 = new Float32Array(n), ok = new Uint8Array(n), c = new Float32Array(n), i, j, k, x, y, d;
   for (i = 0; i < n; i++){ g[i] = o8[i] = a[i * 4]; ok[i] = a[i * 4 + 3] >= 128 ? 1 : 0; }
@@ -1614,7 +1649,7 @@ window._bvLidar = function(map){
         try {
           var g = cv.getContext('2d', { willReadFrequently: true }); g.drawImage(im, 0, 0, S, S);
           var d = g.getImageData(0, 0, S, S), a = d.data, gv = null;
-          if (c.z >= 14 && q !== 'facets'){ var t0 = performance.now(); gv = x2 ? window._bvLidarDefacet(a, c.z + 1, c.y * 2, 512) : window._bvLidarDefacet(a, c.z, c.y); var ms = window._bvLidarMs = window._bvLidarMs || []; ms.push(performance.now() - t0); if (ms.length > 64) ms.shift(); }   /* ?lidar=facets shows the raw TIN, for comparison */
+          var finish = function(gv){ try {
           for (var i = 0; i < a.length; i += 4){
             var v = gv ? gv[i >> 2] : a[i], al = a[i + 3];
             if (al < 128){ a[i + 3] = 0; continue; }
@@ -1627,8 +1662,13 @@ window._bvLidar = function(map){
             else a[i + 3] = 0;
           }
           g.putImageData(d, 0, 0);
-        } catch(e){}
-        done(null, cv);
+          } catch(e){}
+          done(null, cv); };
+          if (c.z >= 14 && q !== 'facets'){ var zD = x2 ? c.z + 1 : c.z, tyD = x2 ? c.y * 2 : c.y, nD = x2 ? 512 : undefined, t0 = performance.now();
+            var tally = function(){ var ms = window._bvLidarMs = window._bvLidarMs || []; ms.push(performance.now() - t0); if (ms.length > 64) ms.shift(); };   /* ?lidar=facets shows the raw tile */
+            window._bvLidarDefacetAsync(a, zD, tyD, nD).then(function(gv){ tally(); finish(gv); }, function(){ var gv = null; try { gv = window._bvLidarDefacet(a, zD, tyD, nD); } catch(e){} tally(); finish(gv); }); }
+          else finish(null);
+        } catch(e){ done(null, cv); }
       };
       /* USGS's own gateway answers 502 now and then for a tile it serves a moment later: retries at 1.5, 4, 9 and 15 s (four since
          2026-11-07) */
@@ -2596,10 +2636,18 @@ window._bvContinentalNames = function(map, opts){
     /* a view may cap the count (map._bvNameCap(zoom) -> n): the list order is the rank, so the top-ranked survive (TREES, 2026-11-01) */
     var cap = (typeof map._bvNameCap === 'function') ? map._bvNameCap(map.getZoom()) : Infinity, shown = 0;
     mk.forEach(function(m){ var el = m.getElement && m.getElement(); if (el){ el.style.visibility = ''; els.push([m, el]); } });
-    var mr = map.getContainer().getBoundingClientRect();
-    var box = els.map(function(e){ var b = e[1].querySelector('b'); return (b || e[1]).getBoundingClientRect(); });
-    els.forEach(function(e, i){ var r = box[i]; if (!r.width) return;
-      var p = map.latLngToContainerPoint(e[0].getLatLng()), x0 = Math.min(p.x - 4, r.left - mr.left) - 4, y0 = r.top - mr.top - 4, x1 = r.right - mr.left + 4, y1 = r.bottom - mr.top + 4;
+    /* A LABEL'S BOX IS REMEMBERED PER ZOOM (perf 2026-11-17): the measure after the visibility writes forced a page layout on every
+       move and tab switch (165 ms at phone speed). A label's size and its offset from its anchor do not change between moves at one
+       zoom, so each is measured once per zoom and text; later passes are pure arithmetic from the anchor's container point. */
+    var zc = map.getZoom(), fresh = els.some(function(e){ var c = e[1]._bvLb; return !(c && c.z === zc && c.t === e[1].textContent); });
+    var mr = fresh ? map.getContainer().getBoundingClientRect() : null;
+    var box = els.map(function(e){ var el = e[1], c = el._bvLb, p = map.latLngToContainerPoint(e[0].getLatLng());
+      if (c && c.z === zc && c.t === el.textContent) return { l: p.x + c.dx, t: p.y + c.dy, r: p.x + c.dx + c.w, b: p.y + c.dy + c.h, w: c.w, p: p };
+      var b = el.querySelector('b'), r = (b || el).getBoundingClientRect(), l = r.left - mr.left, tp = r.top - mr.top;
+      if (r.width) el._bvLb = { z: zc, t: el.textContent, dx: l - p.x, dy: tp - p.y, w: r.width, h: r.height };
+      return { l: l, t: tp, r: l + r.width, b: tp + r.height, w: r.width, p: p }; });
+    els.forEach(function(e, i){ var r = box[i]; if (!r.w) return;
+      var p = r.p, x0 = Math.min(p.x - 4, r.l) - 4, y0 = r.t - 4, x1 = r.r + 4, y1 = r.b + 4;
       if (shown >= cap || placed.some(function(q){ return !(x1 < q[0] || x0 > q[2] || y1 < q[1] || y0 > q[3]); })){ e[1].style.visibility = 'hidden'; return; }
       placed.push([x0, y0, x1, y1]); shown++; });
     pub(placed);
@@ -99474,7 +99522,10 @@ function closeAlertModal(){
     RV.chart = function(){
       var svg = document.getElementById('lc-river-svg'), C = RV.cur; if (!svg || !C) return; var box0 = document.getElementById('lc-rv-card') || riverEl;
       /* charts 150 -> 90 px tall (user 2026-10-27: "the tide charts ... were too big") */
-      var sw0 = svg.getBoundingClientRect().width, now = Date.now(), Wd = Math.max(260, sw0 > 50 ? sw0 : box0.clientWidth - 24), Hh = 90, padL = 30, padR = 6, padT = 8, padB = 18;
+      /* the box is measured once per map width (perf 2026-11-17: a forced layout, 140 ms at phone speed, on every chart) */
+      var mwk = (M ? M.getSize().x : 0) + 'x' + window.innerWidth, sw0;
+      if (RV._cw && RV._cw.k === mwk) sw0 = RV._cw.w; else { sw0 = svg.getBoundingClientRect().width; if (sw0 > 50) RV._cw = { k: mwk, w: sw0 }; }
+      var now = Date.now(), Wd = Math.max(260, sw0 > 50 ? sw0 : box0.clientWidth - 24), Hh = 90, padL = 30, padR = 6, padT = 8, padB = 18;
       var t0 = now - 10 * 864e5, t1 = C.fc.length ? Math.min(C.fc[C.fc.length - 1][0], now + 10 * 864e5) : now + 864e5 * 0.5;
       var ob = C.ob.filter(function(x){ return x[0] >= t0; }), vals = ob.concat(C.fc).map(function(x){ return x[1]; }); if (!vals.length){ svg.style.display = 'none'; return; }
       var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
@@ -100114,7 +100165,11 @@ function closeAlertModal(){
             var px = Math.min(255, Math.floor((fx - tx) * 256)), py = Math.min(255, Math.floor((fy - ty) * 256)), o = (py * 256 + px) * 4;
             if (d[o + 3] < 128) continue;
             todo[k] = 0; ok[k] = 1; a[k] = d[o + 2] >= 128 ? 1 : -(d[o] * 256 + d[o + 1]) / 10; } }); };
-      var zs = []; for (var zz = z; zz >= 8; zz--) zs.push(zz); if (z > 7) zs.push(7);
+      /* A WIDE GRID READS ITS OWN LEVEL (perf 2026-11-17): the nine far-field context grids (2 degrees across, 167 px) resolve to
+         z7, and this list held nothing for them -- z8 and up, then 7 only "if z > 7" -- so they never read a depth tile, reported
+         no coverage, and fell back to NOAA's image server on every view: 18 requests, 1.8 MB a zoom step, on the live site.
+         The pyramid runs z5-12; a grid at z7 or under reads its own level. */
+      var zs = []; for (var zz = z; zz >= 8; zz--) zs.push(zz); if (z > 7) zs.push(7); else zs.push(z);
       return zs.reduce(function(p, zz){ return p.then(function(){ for (var k = 0; k < N; k++) if (todo[k]) return pass(zz); }); }, Promise.resolve())
         .then(function(){ var c = 0; for (var k = 0; k < N; k++) c += ok[k]; return { a: a, ok: ok, w: w, h: h, cov: c / N }; });
     };
@@ -100594,7 +100649,10 @@ function closeAlertModal(){
         var prev = e.lastElementChild, inline = !!(prev && prev.classList.contains('lc-hd') && !prev.classList.contains('lc-hd2'));   /* a separator only when it follows a heading on the same line, not a key block */
         x.innerHTML = (k === 'hd' && inline ? ' \u00b7 ' : '') + LCTOP.extra[k]; e.appendChild(x); LCTOP.extraNodes.push(x); }); }
       LCTOP.sync(); };
-    LCTOP.sync = function(){ var e = LCTOP.el(), info = document.getElementById('lc-info'), open = !!(info && info.style.display !== 'none');
+    /* ONE SYNC A FRAME (perf 2026-11-17): a tab switch called this five times, and each read the strip's height after writing its
+       display -- a forced page layout each, 167 ms apiece at phone speed. Calls inside a frame now collapse into one. */
+    LCTOP.sync = function(){ if (LCTOP._raf) return; LCTOP._raf = requestAnimationFrame(function(){ LCTOP._raf = 0; try { LCTOP.syncNow(); } catch(e){} }); };
+    LCTOP.syncNow = function(){ var e = LCTOP.el(), info = document.getElementById('lc-info'), open = !!(info && info.style.display !== 'none');
       if (!open){ var fb = document.getElementById('lc-board'); if (fb && fb.classList.contains('lc-float') && fb.style.display !== 'none'){ info = fb; open = true; } }
       var landKey = VIEW === 'land' && typeof LND !== 'undefined' && LND.mode !== 'photo';   /* LAND's legend is its own element; the same pill drives it */
       var hasKey = landKey || !!e.querySelector('.lc-key'), pill = e.querySelector('#lc-keypill'), keyOn = landKey ? !!LND.key : LCTOP.key;
