@@ -238,10 +238,11 @@ const SHAPES = {
     return JSON.stringify({ data });
   },
   // NWPS gauge stageflow (2026-11-17): a month of six-minute observations rides along with every forecast -- 1.1 MB a gauge,
-  // and THE CITY's live gauges read a dozen every ten minutes (14 MB). Keep the last 48 hours of observations and every
-  // forecast row, only validTime and primary, in the same {observed:{data}, forecast:{data, issuedTime}} shape the page parses.
+  // and THE CITY's live gauges read a dozen every ten minutes (14 MB). Keep the last FOUR DAYS of observations (the rivers
+  // panel's chart draws three) and every forecast row, only validTime and primary, in the same {observed:{data},
+  // forecast:{data, issuedTime}} shape the page parses. Every stageflow reader on the page comes through here (_bvStageflow).
   stageflow(text) {
-    const j = JSON.parse(text), cut = Date.now() - 48 * 3600e3;
+    const j = JSON.parse(text), cut = Date.now() - 96 * 3600e3;
     const slim = (rows, keepAll) => (rows || []).map(d => ({ validTime: d.validTime, primary: d.primary }))
       .filter(d => d.validTime && (keepAll || Date.parse(d.validTime) >= cut));
     const o = j.observed || {}, f = j.forecast || {};
