@@ -1921,9 +1921,12 @@ window._bvTileShare = function(url, ts){
     /* A PHONE HOLDS 16 (2026-11-04, iPhone Safari reloading the page after any long enough session): the library keeps 64
        decoded tiles per cache, ~3 MB each here -- up to ~190 MB for the basemap alone, filled a little more by every pan and
        view and never let go. Phones keep the 16 most recently used: a screen plus its margin. */
-    if (window.matchMedia && matchMedia('(max-width:768px)').matches){
-      var tc0 = sh.tc, g0 = tc0.get; tc0._bvCap = 1;
-      var trim0 = function(){ var c = tc0.cache; while (c && c.size > 16){ var lo = Infinity, kk = null; c.forEach(function(en, key){ if (en.used < lo){ lo = en.used; kk = key; } }); if (kk === null) break; c.delete(kk); } };
+    /* DESKTOP HOLDS 32 (perf 2026-11-17: the heap climbed 109 -> 327 MB over nine tab switches and 287 MB survived a forced
+       collection; three basemap copies x 64 decoded tiles was most of it). A screen and its margin at any zoom is under 30 tiles. */
+    var _cap = (window.matchMedia && matchMedia('(max-width:768px)').matches) ? 16 : 32;
+    {
+      var tc0 = sh.tc, g0 = tc0.get; tc0._bvCap = _cap;
+      var trim0 = function(){ var c = tc0.cache; while (c && c.size > _cap){ var lo = Infinity, kk = null; c.forEach(function(en, key){ if (en.used < lo){ lo = en.used; kk = key; } }); if (kk === null) break; c.delete(kk); } };
       tc0.get = function(){ var pr = g0.apply(this, arguments); if (pr && pr.then) pr.then(trim0, function(){}); return pr; };
     }
   }
@@ -109068,6 +109071,7 @@ function closeAlertModal(){
       if (v === 'traffic') TR.on(); else TR.off();
       mapEl.classList.toggle('lc-traf', v === 'traffic');
       mapEl.classList.toggle('lc-rock', v === 'rock');   /* GEOLOGY: no place outline (user 2026-10-25) */
+      try { OL.maskOn(v !== 'rock'); } catch(e){}          /* and no hidden water copies painted for it (perf 2026-11-17) */
       pane.classList.toggle('lc-water', v === 'map'); pane.classList.toggle('lc-nbv', v === 'leaf'); pane.setAttribute('data-lv', v);   /* the shared tab-info layout keys on it (2026-10-30) */
       if (FLD.compact) FLD.compact();
       if (typeof WT !== 'undefined' && WT.hostSync) WT.hostSync();
@@ -109459,13 +109463,13 @@ function closeAlertModal(){
                                                                                    never fetched, baf48df88, and this wait had kept every other place's outline from loading) */
       var kind = OL.kind(), name = String(L1.name || '').split(',')[0].trim(), key = kind + '|' + la.toFixed(3) + ',' + lo.toFixed(3) + '|' + name.toLowerCase();
       if (key === OL.key && (OL.polys || OL.req || Date.now() - OL.failAt < 12e4)) return;    /* a miss is asked again after 2 min */
-      if (key !== OL.key){ OL.key = key; OL.polys = null; OL.draw(); }
+      if (key !== OL.key){ OL.key = key; OL.polys = null; OL.maskBox(); OL.draw(); }
       var ck = 'bv_outline_v2_' + key;
-      try { var c0 = JSON.parse(localStorage.getItem(ck) || 'null'); if (c0 && c0.p){ OL.polys = c0.p; OL.draw(); OL.fit(key, kind); return; } } catch(e){}
+      try { var c0 = JSON.parse(localStorage.getItem(ck) || 'null'); if (c0 && c0.p){ OL.polys = c0.p; OL.maskBox(); OL.draw(); OL.fit(key, kind); return; } } catch(e){}
       OL.req = 1;
       OL.fetch(kind, la, lo, name).then(function(p){ OL.req = 0; if (OL.key !== key) return;
         if (!p){ OL.failAt = Date.now(); return; }
-        OL.polys = p; OL.draw(); OL.fit(key, kind);
+        OL.polys = p; OL.maskBox(); OL.draw(); OL.fit(key, kind);
         if (kind !== 'la') try { var s = JSON.stringify({ p: p, at: Date.now() });   /* THE BASIN's footprint (LAX) is a file the browser caches: not copied to the device */
           if (s.length < 900000){ var idx = JSON.parse(localStorage.getItem('bv_outline_v2_idx') || '[]').filter(function(k){ return k !== ck; });
             idx.push(ck); while (idx.length > 5) localStorage.removeItem(idx.shift());
@@ -109525,6 +109529,7 @@ function closeAlertModal(){
           l.on('load', function(){ clearTimeout(OL.mdeb); OL.mdeb = setTimeout(function(){ OL.draw(true); if (CD.redraw) CD.redraw(); }, 120); });
           return l; });
       } catch(e){ OL.mask = []; }
+      OL.maskBox();
       window._bvZoomCv(M, function(){ return [OL.cv]; });
       M.on('moveend resize', function(){ OL.draw(); }); };
     /* CUT TO THE LAND, DRAWN AROUND WHAT IS LEFT (user 2026-10-17: "make sure you have accurate outlined the area and coastline
@@ -109544,6 +109549,16 @@ function closeAlertModal(){
       for (var i = 0; i < n; i++){ var a = 2 * Math.PI * i / n; g.drawImage(src, Math.round(Math.cos(a) * r * 4) / 4, Math.round(Math.sin(a) * r * 4) / 4); }
       if (r > 2.2) for (var i2 = 0; i2 < 8; i2++){ var a2 = 2 * Math.PI * (i2 + .5) / 8; g.drawImage(src, Math.cos(a2) * r * .55, Math.sin(a2) * r * .55); }
       return tmp; };
+    /* THE HIDDEN WATER ONLY WHERE THE OUTLINE CAN CROSS IT (perf 2026-11-17): the three mask copies painted the basemap's water for
+       every tile in view -- 30 canvases, a third of the basemap's paint work -- though the outline is cut only inside the place's own
+       box. The mask layers are bounded to that box (a little padding) once the polygons are in, and not drawn at all on GEOLOGY,
+       where the outline is hidden. */
+    OL.maskBox = function(){ if (!M || !OL.mask || !OL.mask.length) return; var b = null;
+      if (OL.polys){ var w = 1e3, so = 90, e = -1e3, n = -90;
+        OL.polys.forEach(function(p){ (p[0] || []).forEach(function(c){ if (c[0] < w) w = c[0]; if (c[0] > e) e = c[0]; if (c[1] < so) so = c[1]; if (c[1] > n) n = c[1]; }); });
+        if (e > w && n > so && e - w < 180) b = L.latLngBounds([so, w], [n, e]).pad(0.08); }
+      OL.mask.forEach(function(l){ var had = l.options.bounds; l.options.bounds = b; if (M.hasLayer(l) && (had || b)) try { l.redraw(); } catch(err){} }); };
+    OL.maskOn = function(on){ if (!M || !OL.mask) return; OL.mask.forEach(function(l){ if (on){ if (!M.hasLayer(l)) l.addTo(M); } else if (M.hasLayer(l)) M.removeLayer(l); }); };
     OL.draw = function(force){
       var cv = OL.cv; if (!cv || !M) return; var t0 = performance.now();
       var sz = M.getSize(), px = Math.round(sz.x * 0.15), py = Math.round(sz.y * 0.15), Wd = sz.x + 2 * px, Ht = sz.y + 2 * py, dpr = Math.min(window.devicePixelRatio || 1, 3);   /* a phone's full 3x: the line is drawn at the screen's own pixels */
@@ -120632,9 +120647,16 @@ body.bv-past-hero #bluishvoid-nav{ opacity:0 !important; pointer-events:none !im
    Measured from the text's own box (a Range over the button), refreshed when a tab is added, resized or its text changes. */
 (function(){ try {
   var SEL = '.cw-sec, .cw-pv, .cira-tab, .wt-tab, .geo-tab, .ot-tab, .bvt-tab, .solar-tab, .bw-tab, .wt-chip, .lc-pill, .dt-wk, .lc-gl', OUT = 10, REACH = 3;   /* REACH: how far a ring may stick out past its own button (tight phone rows) */
-  var fit = function(b){ if (!b.isConnected){ if (ro) ro.unobserve(b); return; } var br = b.getBoundingClientRect(); if (!br.width) return;
-    var r = document.createRange(); r.selectNodeContents(b); var tr = r.getBoundingClientRect(); if (!tr.width) return;
-    b.style.setProperty('--bvl', Math.max(-REACH, tr.left - br.left - OUT).toFixed(1) + 'px'); b.style.setProperty('--bvr', Math.max(-REACH, br.right - tr.right - OUT).toFixed(1) + 'px'); };
+  /* ONE LAYOUT FOR ALL OF THEM (perf 2026-11-17): a tab switch re-fit 30-43 buttons one at a time -- read, write, read -- and every
+     read after a write made the browser lay the whole page out again (50-70 ms each here): 0.5-0.9 s of a switch's frozen time was
+     this script. Now a fit is queued; one animation frame reads every queued button and its text (one layout), then writes them all. */
+  var Q = new Set(), raf = 0;
+  var flush = function(){ raf = 0; var list = []; Q.forEach(function(b){ list.push(b); }); Q.clear();
+    var R = list.map(function(b){ if (!b.isConnected){ if (ro) ro.unobserve(b); return null; } if (!b.offsetParent && getComputedStyle(b).position !== 'fixed') return null;   /* hidden: fit when it shows (the resize observer fires then) */
+      var br = b.getBoundingClientRect(); if (!br.width) return null; var r = document.createRange(); r.selectNodeContents(b); var tr = r.getBoundingClientRect(); return tr.width ? [br, tr] : null; });
+    list.forEach(function(b, i){ var x = R[i]; if (!x) return; var br = x[0], tr = x[1];
+      b.style.setProperty('--bvl', Math.max(-REACH, tr.left - br.left - OUT).toFixed(1) + 'px'); b.style.setProperty('--bvr', Math.max(-REACH, br.right - tr.right - OUT).toFixed(1) + 'px'); }); };
+  var fit = function(b){ Q.add(b); if (!raf) raf = requestAnimationFrame(flush); };
   var ro = window.ResizeObserver ? new ResizeObserver(function(es){ es.forEach(function(e){ fit(e.target); }); }) : null;
   var take = function(b){ if (b._bvRing){ fit(b); return; } b._bvRing = 1; if (ro) ro.observe(b); else fit(b); };
   var scan = function(n){ if (!n || n.nodeType !== 1) return; if (n.matches(SEL)) take(n); if (n.firstElementChild) n.querySelectorAll(SEL).forEach(take); };
