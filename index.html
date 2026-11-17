@@ -73072,7 +73072,45 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
     /* which moment is drawn: the user's pick, else NOW if the water is on the land now, else the coming crest */
     function cwLiveMode(){ return cwLive.mode || (cwLive.fill && cwLive.fill.auto) || 'now'; }
     /* THE FILL: water surface from the tide gauges, flooded land by breadth-first search from open water */
+    /* THE FILL IN A WORKER (perf 2026-11-17): the flood search below held a phone's WATER switch for ~0.75 s. With a worker the fill
+       for a mode is asked once per two-minute key; until it is in, the last fill drawn stands (or nothing, the first time) and every
+       consumer -- THE CITY's bars and sensors, LOCAL's tide layer (onFill) -- is told when it lands. The worker runs this very
+       function's source with the gauges' constants and helpers, and a canvas stand-in whose pixels come back to a real one here.
+       No worker, or a worker that fails: the search runs here as before. */
+    var cwLiveW = { w: null, dead: !window.Worker, res: {}, keys: [], pend: {}, last: {} };
     function cwLiveFill(mode){
+      var D = cwLive.dem, G = cwLive.g; if (!D || !G) return null;
+      if (cwLiveW.dead) return cwLiveFillSync(mode);
+      var key = mode + '|' + cwLive.at + '|' + Math.floor(Date.now() / 120000);
+      if (cwLiveW.res[key]) return cwLiveW.res[key];
+      if (!cwLiveW.pend[key]){
+        try {
+          if (!cwLiveW.w){
+            var src = 'var CW_TG = ' + JSON.stringify(CW_TG) + ', CW_TG_POS = ' + JSON.stringify(CW_TG_POS) + ', CW_VIEW = ' + JSON.stringify(CW_VIEW) + ', cwLive = {};\n'
+              + [cwLiveHH, cwLiveAt, cwLiveNow, cwLiveCrest, cwLiveTrend].map(function(f){ return f.toString(); }).join('\n') + '\n'
+              + 'var document = { createElement: function(){ var c = { width: 0, height: 0, _img: null, getContext: function(){ return { createImageData: function(w, h){ return { width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }; }, putImageData: function(img){ c._img = img; } }; } }; return c; } };\n'
+              + cwLiveFillSync.toString().replace('cwLiveFillSync', 'cwLiveFill') + '\n'
+              + 'onmessage = function(e){ var d = e.data; try { cwLive.dem = d.D; cwLive.g = d.G; var F = cwLiveFill(d.mode); if (!F){ postMessage({ id: d.id, F: null }); return; } var px = F.cv && F.cv._img ? F.cv._img.data : null;'
+              + ' var out = { mode: F.mode, px: px, tex: F.tex, dist: F.dist, wet: F.wet, cells: new Int32Array(F.cells), km2: F.km2, deep: F.deep, rising: F.rising, crestT: F.crestT, W: F.W, H: F.H };'
+              + ' postMessage({ id: d.id, F: out }, [out.tex.buffer, out.dist.buffer, out.wet.buffer, out.cells.buffer].concat(px ? [px.buffer] : [])); } catch(x){ postMessage({ id: d.id, err: String(x) }); } };';
+            var w = cwLiveW.w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+            w.onmessage = function(e){ var d = e.data; delete cwLiveW.pend[d.id]; if (d.err || !d.F){ cwLiveW.dead = !!d.err; cwLiveSettle(); return; }
+              var F = d.F, cv = document.createElement('canvas'); cv.width = F.W; cv.height = F.H;
+              try { if (F.px) cv.getContext('2d').putImageData(new ImageData(F.px, F.W, F.H), 0, 0); } catch(x){}
+              F.cv = cv; F.cells = Array.prototype.slice.call(F.cells); delete F.px;
+              cwLiveW.res[d.id] = F; cwLiveW.last[F.mode] = F; cwLiveW.keys.push(d.id); while (cwLiveW.keys.length > 6) delete cwLiveW.res[cwLiveW.keys.shift()];
+              cwLiveSettle(); };
+            w.onerror = function(){ cwLiveW.dead = true; cwLiveW.pend = {}; try { w.terminate(); } catch(e){} cwLiveW.w = null; cwLiveSettle(); };
+          }
+          cwLiveW.pend[key] = 1;
+          cwLiveW.w.postMessage({ id: key, mode: mode, D: { w: D.w, h: D.h, e: D.e, f: D.f }, G: G });
+        } catch(e){ cwLiveW.dead = true; return cwLiveFillSync(mode); }
+      }
+      return cwLiveW.last[mode] || null;
+    }
+    /* the fill landed (or the worker died): every consumer asks again */
+    function cwLiveSettle(){ cwLive.key = null; try { cwLiveEnsure(); } catch(e){} try { cwDrawSensors(); } catch(e){} try { if (window._bvLiveFlood && window._bvLiveFlood.onFill) window._bvLiveFlood.onFill(); } catch(e){} }
+    function cwLiveFillSync(mode){
       var D = cwLive.dem, G = cwLive.g; if (!D || !G) return null;
       var pts = [];
       Object.keys(CW_TG).forEach(function(lid){ var g = G[lid]; if (!g) return;
@@ -73135,6 +73173,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
        TIDES in NYC. load() starts THE CITY's loader; fill('now'|'peak') returns its canvas over CW_VIEW, the area, the trend
        and the crest; gauges() the levels for the dots. */
     window._bvLiveFlood = { load: function(){ cwLiveLoad(); }, ready: function(){ return !!(cwLive.dem && cwLive.g); }, at: function(){ return cwLive.at; },
+      busy: function(){ return !!Object.keys(cwLiveW.pend).length; }, onFill: null,   /* the worker's fill lands later (2026-11-17): LOCAL's tide layer sets onFill */
       fill: function(mode){ return cwLiveFill(mode); }, gauges: function(){ return cwLive.g; }, now: function(g){ return cwLiveNow(g); }, crest: function(g){ return cwLiveCrest(g); },
       trend: function(g){ return cwLiveTrend(g); }, cat: function(lid, v){ return cwLiveCat(lid, v); }, lvl: CW_LVL, box: CW_VIEW,
       /* a gauge's card curve, recolored by pal (cwLiveCurve), and its flood stages (user 2026-10-17: "add the flooding taps") */
@@ -73162,6 +73201,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       var F;
       if (cwLive.mode) F = cwLiveFill(cwLive.mode);
       else { F = cwLiveFill('now'); if (F && F.km2 < 0.05){ var fp = cwLiveFill('peak'); if (fp && fp.km2 >= 0.05) F = fp; } if (F) F.auto = F.mode; }
+      if (Object.keys(cwLiveW.pend).length){ if (F) cwLive.fill = F; return cwLive.fill; }   /* the worker is still at it: keep what is drawn, settle later */
       cwLive.key = key; cwLive.fill = F; cwLive.P = []; cwLiveBars();
       return F;
     }
@@ -103449,6 +103489,7 @@ function closeAlertModal(){
       var LF2 = window._bvLiveFlood;
       if (!M || !tideOn() || !nycHere() || !LF2){ LV.off(); return; }
       LF2.load();
+      if (!LF2.onFill) LF2.onFill = function(){ LV.key = null; if (tideOn()) LV.sync(); };   /* the fill comes from a worker now: draw it when it lands */
       if (!LV.timer) LV.timer = setInterval(function(){ if (tideOn() && !document.hidden && paneOn()) LV.sync(); }, 60000);
       /* NOAA'S GAUGES ARE NOT FLOODNET (2026-11-12, a downpour): api.water.noaa.gov answered 429 with no CORS header, the tide grid
          never came ready, and this returned here -- so the street sensors and the NWS line vanished too while 41 corners were flooding.
@@ -103458,7 +103499,7 @@ function closeAlertModal(){
       var key = tideOK ? LF2.at() + '|' + LV.mode : LV.key;
       var B = LF2.box, R2 = 6378137, ll = function(X, Y){ return [(2 * Math.atan(Math.exp(Y / R2)) - Math.PI / 2) * 180 / Math.PI, X / R2 * 180 / Math.PI]; };
       if (LV.key !== key){
-        LV.key = key; var F = LF2.fill(LV.mode); LV.F = F;
+        LV.key = key; var F = LF2.fill(LV.mode); LV.F = F; if (!F && LF2.busy && LF2.busy()) LV.key = null;   /* nothing yet: ask again when it lands */
         if (LV.lay){ M.removeLayer(LV.lay); LV.lay = null; }
         if (F && F.cells && F.cells.length){ var pn = M.getPane('lcLiveFlood') || M.createPane('lcLiveFlood'); pn.style.zIndex = 434; pn.style.pointerEvents = 'none';
           var P = LV.paint(F), cX = (B.X1 - B.X0) / F.W, cY = (B.Y1 - B.Y0) / F.H;
