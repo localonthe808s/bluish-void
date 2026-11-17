@@ -1565,7 +1565,7 @@ window._bvLidarDefacetAsync = function(a, z, ty, N0){
   if (W === null) return Promise.reject(new Error('no worker'));
   if (!W){
     try {
-      var src = 'var box = ' + box.toString() + ';\nvar defacet = ' + window._bvLidarDefacet.toString() + ';\n'
+      var src = 'var defacet = ' + window._bvLidarDefacet.toString() + ';\n'   /* `box` is a local of the function itself, so it travels in its source */
         + 'onmessage = function(e){ var d = e.data; try { var r = defacet(new Uint8ClampedArray(d.a), d.z, d.ty, d.N); postMessage({ id: d.id, r: r }, [r.buffer]); } catch(x){ postMessage({ id: d.id, err: String(x) }); } };';
       W = window._bvLidarW = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
       W._q = {}; W._n = 0;
@@ -100334,6 +100334,7 @@ function closeAlertModal(){
         W.postMessage({ id: id, o: { D: D, ctx: fo.ctx, RW: fo.RW, RH: fo.RH, water: fo.water, mpp: fo.mpp, lead: fo.lead, second: fo.second, geo: geo } });
       });
     };
+    SWL.workerField = swlWorkerField; window._bvSwl = SWL;   /* the harness reads SWL.wF / wDead / wErr and can call workerField on lastFo */
     SWL.build = function(){
       if (!SEA.lit || !M) return;
       var gen = ++SWL.gen, stale = function(){ return gen !== SWL.gen || !SEA.lit; };
@@ -100408,13 +100409,14 @@ function closeAlertModal(){
                second. The field for this view and swell is asked of the worker once; this build ends here, and runs again -- its
                inputs are cached -- when the field is in. Without a worker, or if it fails, the solve runs here as before. */
             var fk = [z, G.w, G.e, G.n, G.s, RW, RH, lead.dir, lead.tp, lead.hs, second ? second.dir + '/' + second.tp : ''].join('|');
-            var F = (SWL.wF && SWL.wF.k === fk) ? SWL.wF.F : null;
-            if (!F && !SWL.wDead && window.Worker){
+            var hit = (SWL.wF && SWL.wF.k === fk) ? SWL.wF : null, F = hit ? hit.F : null;
+            SWL.lastFo = fo; SWL.lastGeo = { w: G.w, e: G.e, n: G.n, s: G.s };   /* the harness compares the worker's field with the page's */
+            if (!hit && !SWL.wDead && window.Worker){
               if (SWL.wPend !== fk){ SWL.wPend = fk;
-                swlWorkerField(fo, { w: G.w, e: G.e, n: G.n, s: G.s }).then(function(F2){ SWL.wPend = null; if (F2) SWL.wF = { k: fk, F: F2 }; else SWL.wDead = true; if (!stale()) SWL.build(); },
-                  function(){ SWL.wPend = null; SWL.wDead = true; if (!stale()) SWL.build(); }); }
+                swlWorkerField(fo, SWL.lastGeo).then(function(F2){ SWL.wPend = null; SWL.wF = { k: fk, F: F2 }; if (!stale()) SWL.build(); },   /* a null field is an answer too (no sea in view) */
+                  function(e){ SWL.wPend = null; SWL.wDead = true; SWL.wErr = String(e && e.message || e); if (!stale()) SWL.build(); }); }
               return; }
-            if (!F) F = window.bvSwellField(fo);
+            if (!hit && !F) F = window.bvSwellField(fo);
             if (stale() || !F) return;
             if (!SWL.cv){ var pn = M.getPane('lcSwell') || M.createPane('lcSwell'); pn.style.zIndex = 435; pn.style.pointerEvents = 'none';
               SWL.cv = document.createElement('canvas'); SWL.cv.style.position = 'absolute'; SWL.cv.style.pointerEvents = 'none'; pn.appendChild(SWL.cv); }
@@ -120819,14 +120821,18 @@ body.bv-past-hero #bluishvoid-nav{ opacity:0 !important; pointer-events:none !im
   /* ONE LAYOUT FOR ALL OF THEM (perf 2026-11-17): a tab switch re-fit 30-43 buttons one at a time -- read, write, read -- and every
      read after a write made the browser lay the whole page out again (50-70 ms each here): 0.5-0.9 s of a switch's frozen time was
      this script. Now a fit is queued; one animation frame reads every queued button and its text (one layout), then writes them all. */
-  var Q = new Set(), raf = 0;
-  var flush = function(){ raf = 0; var list = []; Q.forEach(function(b){ list.push(b); }); Q.clear();
+  var Q = new Set(), tmr = 0;
+  var flush = function(){ tmr = 0; var list = []; Q.forEach(function(b){ list.push(b); }); Q.clear();
     var R = list.map(function(b){ if (!b.isConnected){ if (ro) ro.unobserve(b); return null; } if (!b.offsetParent && getComputedStyle(b).position !== 'fixed') return null;   /* hidden: fit when it shows (the resize observer fires then) */
-      var br = b.getBoundingClientRect(); if (!br.width) return null; var r = document.createRange(); r.selectNodeContents(b); var tr = r.getBoundingClientRect(); return tr.width ? [br, tr] : null; });
-    list.forEach(function(b, i){ var x = R[i]; if (!x) return; var br = x[0], tr = x[1];
+      var br = b.getBoundingClientRect(); if (!br.width) return null;
+      var sig = br.width.toFixed(1) + '|' + b.textContent; if (b._bvFitSig === sig) return null;   /* same width, same letters: the ring already fits */
+      var r = document.createRange(); r.selectNodeContents(b); var tr = r.getBoundingClientRect(); return tr.width ? [br, tr, sig] : null; });
+    list.forEach(function(b, i){ var x = R[i]; if (!x) return; var br = x[0], tr = x[1]; b._bvFitSig = x[2];
       b.style.setProperty('--bvl', Math.max(-REACH, tr.left - br.left - OUT).toFixed(1) + 'px'); b.style.setProperty('--bvr', Math.max(-REACH, br.right - tr.right - OUT).toFixed(1) + 'px'); }); };
-  var fit = function(b){ Q.add(b); if (!raf) raf = requestAnimationFrame(flush); };
-  var ro = window.ResizeObserver ? new ResizeObserver(function(es){ es.forEach(function(e){ fit(e.target); }); }) : null;
+  /* a burst of re-rendered rows (a tab switch rebuilds its chip rows several times) yields one fit, 120 ms after the last change,
+     not one per frame -- each frame's fit was a page layout of its own (perf 2026-11-17, 0.9 s at phone speed) */
+  var fit = function(b){ Q.add(b); if (!tmr) tmr = setTimeout(function(){ requestAnimationFrame(flush); }, 120); };
+  var ro = window.ResizeObserver ? new ResizeObserver(function(es){ es.forEach(function(e){ var b = e.target, w = e.contentRect && e.contentRect.width; if (w != null && b._bvFitW === w) return; b._bvFitW = w; fit(b); }); }) : null;
   var take = function(b){ if (b._bvRing){ fit(b); return; } b._bvRing = 1; if (ro) ro.observe(b); else fit(b); };
   var scan = function(n){ if (!n || n.nodeType !== 1) return; if (n.matches(SEL)) take(n); if (n.firstElementChild) n.querySelectorAll(SEL).forEach(take); };
   new MutationObserver(function(R){ R.forEach(function(m){

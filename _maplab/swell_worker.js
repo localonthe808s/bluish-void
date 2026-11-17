@@ -15,8 +15,8 @@ onmessage = function(e){
     if (o.D && !o.D.solved) o.D.solved = {};
     var F = self.bvSwellField(o);
     if (!F){ postMessage({ id: d.id, F: null }); return; }
-    var tr = [], seen = [];
-    Object.keys(F).forEach(function(k){ var v = F[k]; if (v && v.buffer instanceof ArrayBuffer && seen.indexOf(v.buffer) < 0){ seen.push(v.buffer); tr.push(v.buffer); } });
-    postMessage({ id: d.id, F: F }, tr);
+    /* cloned, not transferred: some of the field's arrays are views on one buffer (transferring it twice detached it, 2026-11-17),
+       and a clone of ~5 MB is a few milliseconds against a solve of over a second */
+    postMessage({ id: d.id, F: F });
   } catch (x){ postMessage({ id: d.id, err: String(x) }); }
 };
