@@ -45,6 +45,7 @@ const CACHE_RULES = {
   // ── forecasts / advisories (5–10 minutes) ──
   'api.weather.gov':              300,
   'water.noaa.gov':               300,
+  'api.water.noaa.gov':           600,     // NWPS gauges (2026-11-17): THE CITY's live gauges read stageflow through &shape=stageflow
   'coast.noaa.gov':               86400,
   'erddap.ifremer.fr':            3600,   // Argo: one float's year of profiles, on tap (WATER > ARGO FLOATS, 2026-10-25)  // Sea Level Rise Viewer flood-depth tiles (static; the LOCAL tide map recolors them)
   // ── transit agencies' GTFS-realtime vehicle positions (LOCAL TRAFFIC tab; _transitbake/hosts.txt, 2026-10-16) ──
@@ -235,6 +236,19 @@ const SHAPES = {
         imageData: { static: { currentImageURL: S.currentImageURL, currentImageUpdateFrequency: S.currentImageUpdateFrequency } } } };
     });
     return JSON.stringify({ data });
+  },
+  // NWPS gauge stageflow (2026-11-17): a month of six-minute observations rides along with every forecast -- 1.1 MB a gauge,
+  // and THE CITY's live gauges read a dozen every ten minutes (14 MB). Keep the last 48 hours of observations and every
+  // forecast row, only validTime and primary, in the same {observed:{data}, forecast:{data, issuedTime}} shape the page parses.
+  stageflow(text) {
+    const j = JSON.parse(text), cut = Date.now() - 48 * 3600e3;
+    const slim = (rows, keepAll) => (rows || []).map(d => ({ validTime: d.validTime, primary: d.primary }))
+      .filter(d => d.validTime && (keepAll || Date.parse(d.validTime) >= cut));
+    const o = j.observed || {}, f = j.forecast || {};
+    return JSON.stringify({
+      observed: { issuedTime: o.issuedTime, primaryName: o.primaryName, primaryUnits: o.primaryUnits, data: slim(o.data, false) },
+      forecast: { issuedTime: f.issuedTime, primaryName: f.primaryName, primaryUnits: f.primaryUnits, data: slim(f.data, true) }
+    });
   }
 };
 
