@@ -4689,6 +4689,12 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     if not cands:
         print('no forecast and no observations yet')
         return 0
+    # NO LIVE RUN, NO CALL (2026-11-17). Today's hours come only from the live run (the archive ends yesterday), so
+    # when it times out no model has today and the call above was the floor alone: 01:20 ET on 11-17 put 100% on
+    # "54 or below" off a 44.8 overnight reading, the market at 63% on 57-58. Keep the last bake instead.
+    if not any(f.get(tkey) for f in fcm.values()):
+        print('%s: no forecast hour for today (live run unavailable) -- not writing, the last bake stands' % cfg['key'])
+        return 0
     pred = max(cands)
     if not (-40.0 < pred < 130.0):
         print('%s: implausible prediction %.1f -- refusing to write' % (cfg['key'], pred))
