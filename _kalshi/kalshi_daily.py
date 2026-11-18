@@ -4161,6 +4161,12 @@ MKT_PM_HOUR = 17
 # 1.0), and in November is best at 1.0 (.230 at .65 -> .149, 7 -> 8 of 8). So the months in MKT_COLD_MONTHS have their
 # own knob, `mkt_pull_cold`, judged by tune.py's cold court on those months' non-binding locks; unset, mkt_pull stands.
 MKT_COLD_MONTHS = (11, 12, 1, 2, 3, 4, 5, 6)
+# FROM 11 AM ONLY (2026-11-18, the same day). The cold court judges NOON locks, and the weight it set was running at
+# every hour before 5 PM. On the bake trail's November mornings (forecast still above the reading) the full weight
+# is not what 8-10 AM wants: Brier at .65 / 1.0 -- 8 AM .465 / .474 (13 days), 9 AM .480 / .497, 10 AM .417 / .435,
+# 11 AM .349 / .349, noon .174 / .157. (October wants .35-.65 at every hour: 1.0 costs .09-.15.) Before
+# MKT_COLD_FROM the noon weight mkt_pull stands, which is also where the sheet's morning bets are named.
+MKT_COLD_FROM = 11
 
 
 # THE FAST-MORNING WEIGHT (2026-11-18, user: "yes build it and let the court rule"). A morning is FAST when the park
@@ -4192,7 +4198,7 @@ def mkt_w(cfg, hour, month=None, climb=None):
     if hour is not None and hour >= MKT_PM_HOUR and pm:
         return float(pm)
     cold = cfg.get('mkt_pull_cold')
-    if month in MKT_COLD_MONTHS and cold:
+    if month in MKT_COLD_MONTHS and cold and hour is not None and hour >= MKT_COLD_FROM:
         return float(cold)
     fast = cfg.get('mkt_pull_fast')
     if fast and climb is not None and climb >= MKT_FAST_CLIMB:
