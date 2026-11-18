@@ -1040,8 +1040,8 @@ async function alertTick(env, sched) {
         /* user 2026-11-15: 'BAD NEWS: "63-64" is dropping from 78¢ to 45¢' */
         /* user 2026-11-18: "the title just say GOOD or BAD", the rest in the body */
         mktQ.push({ g: h.am.series + ':' + mDay, key: `${h.ticker}:${Math.round(mid * 4)}`, good,
-          line: `"${label}" is ${mid > anchor ? 'rising' : 'dropping'} from ${Math.round(anchor * 100)}¢ to ${Math.round(mid * 100)}¢`,
-          mine: `Your ${side}: ${holdTxt}.`, tail: repTxt ? repTxt + '.' : '' });
+          line: `${label} · ${Math.round(anchor * 100)}¢ → ${Math.round(mid * 100)}¢ · ${side} ${Math.abs(h.n)}`,
+          tail: repTxt ? repTxt.toUpperCase().replace(/\s+(AM|PM)$/, '$1') : '' });
         out.push(`${h.ticker} ${anchor}->${mid}`);
         state.mkt[h.ticker] = mid;
       } else if (anchor == null) {
@@ -1065,9 +1065,8 @@ async function alertTick(env, sched) {
       const where = inNow ? `IN ${label}` : (b[1] != null && rp.f > b[1]) ? `ABOVE ${label}` : `BELOW ${label}`;
       /* user 2026-11-18: "just say GOOD or BAD instead of GOOD BET and move more of it into the body" */
       repQ.push({ g: h.am.series + ':' + mDay, key: `${h.ticker}:${rp.at}`, good: !bad,
-        head: `${rp.f}° at ${local}${rp.raw.trim() === 'SPECI' ? ' (special)' : ''}`,
-        line: `${where}${isFinite(sideBid) && sideBid > 0 ? ` / ${Math.round(sideBid * 100)}¢` : ''}`,
-        mine: `Your ${side}: ${Math.abs(h.n)} held.` });
+        head: `${rp.f}° AT ${local}${rp.raw.trim() === 'SPECI' ? ' · SPECIAL' : ''}`,
+        line: `${where}${isFinite(sideBid) && sideBid > 0 ? ` · ${Math.round(sideBid * 100)}¢` : ''} · ${side} ${Math.abs(h.n)}` });
       out.push(`metar ${h.am.icao} ${rp.f}`);
     }
     // the sensor (own5) and TWC running-max alerts left 2026-11-01: Central Park has no public 5-minute feed and TWC's
@@ -1078,13 +1077,15 @@ async function alertTick(env, sched) {
   for (const g of [...new Set(repQ.map((x) => x.g))]) {
     const q = repQ.filter((x) => x.g === g), v = verdictOf(q);
     await notify(env, state, q.length === 1 ? `metar:${q[0].key}` : `metar:${g}:${q.map((x) => x.key).join('|')}`, v,
-      q.length === 1 ? `${q[0].head} · ${q[0].line}\n${q[0].mine}` : `${q[0].head}\n` + q.map((x) => `${x.line} · ${x.mine}`).join('\n'),
+      /* ONE GRAMMAR (user 2026-11-18: "position the text so its cleaner"): capitals like the settlement push, the fact on its
+         own line, then one line per bet -- WHERE · WORTH · SIDE COUNT -- the same whether one bet or five */
+      `${q[0].head}\n` + q.map((x) => x.line).join('\n'),
       v === 'GOOD' ? 'default' : 'urgent');
   }
   for (const g of [...new Set(mktQ.map((x) => x.g))]) {
     const q = mktQ.filter((x) => x.g === g), v = verdictOf(q);
     await notify(env, state, q.length === 1 ? `mkt:${q[0].key}` : `mkt:${g}:${q.map((x) => x.key).join('|')}`, v,
-      q.length === 1 ? `${q[0].line}\n${q[0].mine}${q[0].tail ? ' ' + q[0].tail : ''}` : q.map((x) => `${x.line}\n${x.mine}`).join('\n') + (q[0].tail ? '\n' + q[0].tail : ''),
+      q.map((x) => x.line).join('\n') + (q[0].tail ? '\n' + q[0].tail : ''),
       v === 'GOOD' ? 'default' : 'high');
   }
   if (state.dayHi) for (const k of Object.keys(state.dayHi)) if (!held.some((h) => h.ticker === k)) delete state.dayHi[k];   /* settled markets leave */
@@ -1406,13 +1407,13 @@ async function sampleAlerts(env) {
     const inNow = inRung(rep.f, b), bad = side === 'YES' ? (b[1] != null && rep.f > b[1] + 0.5) : inNow;
     const where = inNow ? `IN ${lab}` : (b[1] != null && rep.f > b[1]) ? `ABOVE ${lab}` : `BELOW ${lab}`;
     const local = new Date(rep.at).toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }).replace(/\s+/g, '');
-    msgs.push({ title: `TEST · ${bad ? 'BAD' : 'GOOD'}`, body: `${rep.f}° at ${local} \u00b7 ${where}` + (isFinite(sideBid) && sideBid > 0 ? ` / ${c(sideBid)}` : '') + '\n' + (h ? `Your ${side}: ${Math.abs(h.n)} held.` : `Your YES: no bet held today (example).`) });
+    msgs.push({ title: `TEST · ${bad ? 'BAD' : 'GOOD'}`, body: `${rep.f}° AT ${local}\n${where}` + (isFinite(sideBid) && sideBid > 0 ? ` · ${c(sideBid)}` : '') + ` · ${side} ${h ? Math.abs(h.n) : '0 (EXAMPLE)'}` });
     /* 4. the price moving on it: yesterday's close against now */
     const mid = isFinite(bid) && isFinite(ask) && ask > 0 ? (bid + ask) / 2 : null, prev = Number(pick.previous_price_dollars);
     if (mid != null && isFinite(prev) && prev > 0) {
       const good = (side === 'YES') === (mid > prev);
       msgs.push({ title: `TEST · ${good ? 'GOOD' : 'BAD'}`,
-        body: `"${lab}" is ${mid > prev ? 'rising' : 'dropping'} from ${c(prev)} to ${c(mid)}\n` + (h ? `Your ${side}: ${Math.abs(h.n)} held, bid ${c(sideBid)}.` : 'No bet held today (example).') + ` Last report ${rep.f}° at ${new Date(rep.at).toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' })}.` });
+        body: `${lab} · ${c(prev)} → ${c(mid)} · ${side} ${h ? Math.abs(h.n) : '0 (EXAMPLE)'}\nLAST REPORT ${rep.f}° AT ${new Date(rep.at).toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }).replace(/\s+/g, '')}` });
     } else notes.push('no price move sample');
   }
   let sent = 0;
