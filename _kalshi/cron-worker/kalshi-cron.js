@@ -1390,7 +1390,7 @@ async function sampleAlerts(env) {
     const inNow = inRung(rep.f, b), bad = side === 'YES' ? (b[1] != null && rep.f > b[1] + 0.5) : inNow;
     const where = inNow ? `IN ${lab}` : (b[1] != null && rep.f > b[1]) ? `ABOVE ${lab}` : `BELOW ${lab}`;
     const local = new Date(rep.at).toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }).replace(/\s+/g, '');
-    msgs.push({ title: `TEST · ${bad ? 'BAD BET' : 'GOOD BET'}: ${rep.f}° at ${local} \u00b7 ${where}` + (isFinite(sideBid) && sideBid > 0 ? ` / ${c(sideBid)}` : ''), body: h ? `Your ${side}: ${Math.abs(h.n)} held.` : `Your YES: no bet held today (example).`) });
+    msgs.push({ title: `TEST · ${bad ? 'BAD' : 'GOOD'}`, body: `${rep.f}° at ${local} \u00b7 ${where}` + (isFinite(sideBid) && sideBid > 0 ? ` / ${c(sideBid)}` : '') + '\n' + (h ? `Your ${side}: ${Math.abs(h.n)} held.` : `Your YES: no bet held today (example).`) });
     /* 4. the price moving on it: yesterday's close against now */
     const mid = isFinite(bid) && isFinite(ask) && ask > 0 ? (bid + ask) / 2 : null, prev = Number(pick.previous_price_dollars);
     if (mid != null && isFinite(prev) && prev > 0) {
