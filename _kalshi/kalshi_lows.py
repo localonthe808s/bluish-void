@@ -402,6 +402,9 @@ def drop_table(entries, drop, min_n=DROP_MIN_N):
         lo, hi = max(0, lo - 1), min(len(bins) - 1, hi + 1)
 
 
+BIND_MARGIN, BIND_MARGIN_BEFORE = 0.0, 14      # degF of forecast fall under the reading in hand (0 = OFF, see snapshot); local hour
+
+
 def snapshot(fcm, bias_of, daily, obh, h0_of, k, hour, rows_neg, floor_on=True, gaps=None, exact=None,
              mk=None, w=0.0, tail=0.0, drops=None):
     """One decision in negated space: (pred, sd, floor, pf, binding, ps) or None.
@@ -433,6 +436,27 @@ def snapshot(fcm, bias_of, daily, obh, h0_of, k, hour, rows_neg, floor_on=True, 
     day = fc.get(k) or {}
     over = bool(day) and not [h for h in day if h >= hour]
     bind = fl is not None and ((pf is not None and fl >= pf) or over)
+    # THE BINDING MARGIN (2026-11-18, user: "look for more improvements in LOWS"). A morning was NOT binding whenever the
+    # runs put the rest of the day's low anywhere under the reading in hand, and the centre then went to that forecast.
+    # On the 28 such live 8 AM locks the day did one of two things: it settled on the low already in hand, or it fell
+    # 3 to 9 degrees on an evening front -- and the size of the forecast fall told them apart. Under 2 F (17 locks): the
+    # low was already in on 15, a real fall came on none, and the sheet was right on 10. 2 F or more (11): a real fall
+    # on 9. A fall under BIND_MARGIN is the runs' noise, not a front, so such an hour is BINDING: the centre is the
+    # reading and the gap table speaks. Walk-forward on those 28: 14 -> 17 right, log loss 1.55 -> 1.29, both halves
+    # (margins 1.5-2.5 all gain; 3 loses); on the 17 it beats the market pull that has run there since 11-16
+    # (13 right / .67 against 11 / .93; the market 13 / .53). Only before BIND_MARGIN_BEFORE: in the evening a small
+    # forecast fall is an hour or two away and real.
+    # OFF (BIND_MARGIN = 0) UNTIL THE USER RULES: the archive replay disagrees. low_study.replay over the same 68 settled
+    # days at 8 AM: margin 0 -> 49 right, log loss .877; 2.0 -> 47, .906 (10-05 and 10-14 turn from hits to misses: days
+    # that settled 1-2 under the reading). The replay is already right on the days the live sheet missed -- the archive's
+    # runs do not show the small falls the LIVE 8 AM run did -- so it cannot see the class this fixes, only its cost.
+    # Replays (low_study) read the same constant, so turning it on changes the nightly studies too.
+    bind_m = False
+    if (not bind and floor_on and BIND_MARGIN and fl is not None and pf is not None and not over
+            and hour < BIND_MARGIN_BEFORE):
+        base = max(x for x in (r, live) if x is not None)        # the lowest reading in hand (negated), no offset
+        if pf - base < BIND_MARGIN:
+            bind, bind_m, pred = True, True, fl
     # THE MARKET PULL (2026-11-16; the highs' since 11-01): the centre moves toward the market's implied mean, in the
     # negated frame, so "never under the floor" reads "never above the ceiling". Off on a binding hour: there the
     # running minimum, not a forecast, is the centre.
@@ -467,7 +491,7 @@ def snapshot(fcm, bias_of, daily, obh, h0_of, k, hour, rows_neg, floor_on=True, 
     if tail and not bind:
         ps, open_ = K.tail_mix(rows_neg, ps, fl, bind, float(tail))
         tl = {'e': float(tail), 'open': open_} if open_ else None
-    return {'pred': pred, 'sd': sd, 'fl': fl, 'run': r, 'pf': pf, 'bind': bind, 'over': over, 'exact': is_exact,
+    return {'pred': pred, 'sd': sd, 'fl': fl, 'run': r, 'pf': pf, 'bind': bind, 'bind_m': bind_m, 'over': over, 'exact': is_exact,
             'ps': ps, 'emp': emp, 'mpull': mpull, 'drop': drop, 'tail': tl, 'biases': {m: biases.get(m) for m in fcm}}
 
 
@@ -680,6 +704,12 @@ def run_market(cfg, dry_dir=None):
     h0_of = lambda k: K.climate_day_start(cfg, datetime.date(*map(int, k.split('-'))))   # noqa: E731
     for m in fcm_raw:
         fold_midnight(fcm_raw[m], h0_of)
+    # NO LIVE RUN, NO CALL (2026-11-18; the highs' guard in kalshi_daily._run_market). Today's hours come only from the
+    # live forecast call; when it is refused and no kept copy is young enough, no run has today, and the sheet would be
+    # rewritten with no call at all (the trail's rows with no prediction). The last bake stands instead.
+    if not any(v.get(tkey) for v in fcm_raw.values()):
+        print('%s: no forecast hour for today (live run unavailable) -- not writing, the last bake stands' % cfg['key'])
+        return None
     fcm = neg_fcm(fcm_raw)
     daily_raw = K.daily_series(cfg, today - datetime.timedelta(days=SPAN + 60), today)
     daily = {d: -v for d, v in daily_raw.items()}
@@ -836,7 +866,7 @@ def run_market(cfg, dry_dir=None):
         mbest = max(range(len(lad)), key=lambda i: lad[i]['market'] or 0)
         T['context'] = K.day_context(daily, fcm, s['biases'], today, low=True)
         T.update({'pred': round(-s['pred'], 2), 'sd': round(s['sd'], 3), 'fc_low': (round(-s['pf'], 2) if s['pf'] is not None else None),
-                  'binding': s['bind'], 'exact': s['exact'], 'gap_table': s.get('emp'),
+                  'binding': s['bind'], 'bind_margin': (BIND_MARGIN if s.get('bind_m') else None), 'exact': s['exact'], 'gap_table': s.get('emp'),
                   'mpull': s.get('mpull'), 'drop': s.get('drop'), 'tail': s.get('tail'),
                   'day_over': bool(s['over']), 'day_decided': False,
                   'pick': lad[best]['label'], 'p': lad[best]['ours'],
