@@ -1076,16 +1076,16 @@ async function alertTick(env, sched) {
   const verdictOf = (q) => q.every((x) => x.good) ? 'GOOD' : q.every((x) => !x.good) ? 'BAD' : 'MIXED';
   for (const g of [...new Set(repQ.map((x) => x.g))]) {
     const q = repQ.filter((x) => x.g === g), v = verdictOf(q);
-    await notify(env, state, q.length === 1 ? `metar:${q[0].key}` : `metar:${g}:${q.map((x) => x.key).join('|')}`, v,
+    await notify(env, state, q.length === 1 ? `metar:${q[0].key}` : `metar:${g}:${q.map((x) => x.key).join('|')}`, '',   /* no title (user 2026-11-18: "remove titles and move them into the body"): the phone shows BLUISH, the verdict leads the body */
       /* ONE GRAMMAR (user 2026-11-18: "position the text so its cleaner"): capitals like the settlement push, the fact on its
          own line, then one line per bet -- WHERE · WORTH · SIDE COUNT -- the same whether one bet or five */
-      `${q[0].head}\n` + q.map((x) => x.line).join('\n'),
+      `${v}\n${q[0].head}\n` + q.map((x) => x.line).join('\n'),
       v === 'GOOD' ? 'default' : 'urgent');
   }
   for (const g of [...new Set(mktQ.map((x) => x.g))]) {
     const q = mktQ.filter((x) => x.g === g), v = verdictOf(q);
-    await notify(env, state, q.length === 1 ? `mkt:${q[0].key}` : `mkt:${g}:${q.map((x) => x.key).join('|')}`, v,
-      q.map((x) => x.line).join('\n') + (q[0].tail ? '\n' + q[0].tail : ''),
+    await notify(env, state, q.length === 1 ? `mkt:${q[0].key}` : `mkt:${g}:${q.map((x) => x.key).join('|')}`, '',
+      v + '\n' + q.map((x) => x.line).join('\n') + (q[0].tail ? '\n' + q[0].tail : ''),
       v === 'GOOD' ? 'default' : 'high');
   }
   if (state.dayHi) for (const k of Object.keys(state.dayHi)) if (!held.some((h) => h.ticker === k)) delete state.dayHi[k];   /* settled markets leave */
@@ -1407,13 +1407,13 @@ async function sampleAlerts(env) {
     const inNow = inRung(rep.f, b), bad = side === 'YES' ? (b[1] != null && rep.f > b[1] + 0.5) : inNow;
     const where = inNow ? `IN ${lab}` : (b[1] != null && rep.f > b[1]) ? `ABOVE ${lab}` : `BELOW ${lab}`;
     const local = new Date(rep.at).toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }).replace(/\s+/g, '');
-    msgs.push({ title: `TEST · ${bad ? 'BAD' : 'GOOD'}`, body: `${rep.f}° AT ${local}\n${where}` + (isFinite(sideBid) && sideBid > 0 ? ` · ${c(sideBid)}` : '') + ` · ${side} ${h ? Math.abs(h.n) : '0 (EXAMPLE)'}` });
+    msgs.push({ title: '', body: `TEST · ${bad ? 'BAD' : 'GOOD'}\n${rep.f}° AT ${local}\n${where}` + (isFinite(sideBid) && sideBid > 0 ? ` · ${c(sideBid)}` : '') + ` · ${side} ${h ? Math.abs(h.n) : '0 (EXAMPLE)'}` });
     /* 4. the price moving on it: yesterday's close against now */
     const mid = isFinite(bid) && isFinite(ask) && ask > 0 ? (bid + ask) / 2 : null, prev = Number(pick.previous_price_dollars);
     if (mid != null && isFinite(prev) && prev > 0) {
       const good = (side === 'YES') === (mid > prev);
-      msgs.push({ title: `TEST · ${good ? 'GOOD' : 'BAD'}`,
-        body: `${lab} · ${c(prev)} → ${c(mid)} · ${side} ${h ? Math.abs(h.n) : '0 (EXAMPLE)'}\nLAST REPORT ${rep.f}° AT ${new Date(rep.at).toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }).replace(/\s+/g, '')}` });
+      msgs.push({ title: '',
+        body: `TEST · ${good ? 'GOOD' : 'BAD'}\n${lab} · ${c(prev)} → ${c(mid)} · ${side} ${h ? Math.abs(h.n) : '0 (EXAMPLE)'}\nLAST REPORT ${rep.f}° AT ${new Date(rep.at).toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }).replace(/\s+/g, '')}` });
     } else notes.push('no price move sample');
   }
   let sent = 0;
