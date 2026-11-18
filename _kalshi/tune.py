@@ -612,6 +612,13 @@ def bind_apply(cfg, r, prev_r):
 # Same guardrails as the other pulls. The bar is 8 locks, not 15: the season is the claim of a 1,684-day study, and
 # these rows only have to agree with it -- they do not have to establish it.
 COLD_GRID, COLD_COOLDOWN_D, COLD_MIN_DAYS = [0.5, 0.65, 0.8, 1.0], 7, 8
+# MEASURED, NOT APPLIED (2026-11-18, the same day; user: "lower the cold pull so i still see bets in winter"). The court
+# rules on Brier, and a full pull is the market's own centre: nothing left to disagree with, so no bet is named. A
+# bet simulation on the 58 non-binding live locks (mid + 1c, 2c fee, edge floor .05) says what that costs: pull .5
+# 49 bets +6.48, .65 43 bets +5.18, .8 36 bets +3.40, .9 27 bets -0.03, 1.0 27 bets -2.13. Picks want more pull, bets
+# want less, and the sheet exists for the bets. So the court still runs and its ruling is kept in cold_court for the
+# record, but with COLD_APPLY False the knob stays unset and the noon weight (mkt_pull) stands all year.
+COLD_APPLY = False
 
 
 def live_cold_court(cfg, cur, last_change=None):
@@ -659,9 +666,10 @@ def cold_apply(cfg, r, prev_r):
     cc = (prev_r or {}).get('cold_court') or {}
     cur = prev_a.get('mkt_pull_cold') or a.get('mkt_pull') or 0.0
     ruled, rep_ = live_cold_court(cfg, cur, cc.get('changed_at'))
-    a['mkt_pull_cold'] = ruled if abs(float(ruled) - float(a.get('mkt_pull') or 0.0)) > 1e-9 else None
+    a['mkt_pull_cold'] = (ruled if abs(float(ruled) - float(a.get('mkt_pull') or 0.0)) > 1e-9 else None) if COLD_APPLY else None
+    rep_['applied'] = COLD_APPLY
     r['cold_court'] = rep_
-    if abs(float(ruled) - float(cur or 0.0)) > 1e-9:
+    if COLD_APPLY and abs(float(ruled) - float(cur or 0.0)) > 1e-9:
         r['why'] = (r.get('why') or '') + ' | COLD COURT: ' + rep_['why']
         r['chosen_at'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
     print('  cold court: %s' % rep_['why'], flush=True)
