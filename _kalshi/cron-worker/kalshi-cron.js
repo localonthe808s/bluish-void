@@ -1063,11 +1063,11 @@ async function alertTick(env, sched) {
       const local = new Date(rp.at).toLocaleTimeString('en-US', { timeZone: h.am.tz, hour: 'numeric', minute: '2-digit' }).replace(/\s+/g, '');
       /* user 2026-11-15: "GOOD BET: 61.2° at 2:51PM · BELOW 63-64 / 83¢" -- where the report sits against the range, and what your side is worth now */
       const where = inNow ? `IN ${label}` : (b[1] != null && rp.f > b[1]) ? `ABOVE ${label}` : `BELOW ${label}`;
-      await notify(env, state, `metar:${h.ticker}:${rp.at}`,
-        /* user 2026-11-18: "just say GOOD or BAD instead of GOOD BET and move more of it into the body" */
-        bad ? 'BAD' : 'GOOD',
-        `${rp.f}° at ${local}${rp.raw.trim() === 'SPECI' ? ' (special)' : ''} \u00b7 ${where}${isFinite(sideBid) && sideBid > 0 ? ` / ${Math.round(sideBid * 100)}¢` : ''}\nYour ${side}: ${Math.abs(h.n)} held.`,
-        bad ? 'urgent' : 'default');
+      /* user 2026-11-18: "just say GOOD or BAD instead of GOOD BET and move more of it into the body" */
+      repQ.push({ g: h.am.series + ':' + mDay, key: `${h.ticker}:${rp.at}`, good: !bad,
+        head: `${rp.f}° at ${local}${rp.raw.trim() === 'SPECI' ? ' (special)' : ''}`,
+        line: `${where}${isFinite(sideBid) && sideBid > 0 ? ` / ${Math.round(sideBid * 100)}¢` : ''}`,
+        mine: `Your ${side}: ${Math.abs(h.n)} held.` });
       out.push(`metar ${h.am.icao} ${rp.f}`);
     }
     // the sensor (own5) and TWC running-max alerts left 2026-11-01: Central Park has no public 5-minute feed and TWC's
