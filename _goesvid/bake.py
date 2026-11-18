@@ -111,7 +111,14 @@ def r2(*args, check=True):
     #  bucket's one-day rule -- 34.6 GB under goes/video on 2026-10-24)
     cmd = ['aws', 's3'] + list(args) + ['--endpoint-url', 'https://%s.r2.cloudflarestorage.com' % os.environ['R2_ACCOUNT_ID']] \
         + ([] if args[0] == 'ls' else ['--only-show-errors'])
-    return subprocess.run(cmd, check=check, capture_output=True, text=True)
+    if not check: return subprocess.run(cmd, check=False, capture_output=True, text=True)   # a miss is an answer there
+    # a write that must land is tried three times: one R2 hiccup on WORLD.tar failed a whole run on 2026-11-17
+    for i in range(3):
+        r = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        if r.returncode == 0: return r
+        print('r2 %s failed (try %d): %s' % (args[0], i + 1, (r.stderr or '').strip()[-300:]), flush=True)
+        if i < 2: time.sleep(5 + 15 * i)
+    raise subprocess.CalledProcessError(r.returncode, cmd, r.stdout, r.stderr)
 
 
 INTERP = 3              # computed frames between each pair of real GEOCOLOR frames (user 2026-10-24: "make it run smoother")
