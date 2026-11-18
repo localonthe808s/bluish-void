@@ -49,6 +49,14 @@ OUT = os.path.join(HERE, 'dayahead.json')
 CACHE = os.path.join(HERE, '_study')
 MODELS = ['ncep_nbm_conus', 'ecmwf_ifs025', 'gfs_seamless', 'icon_seamless', 'gem_seamless']
 WINDOW = 45          # days of bias memory
+# THE HIGHS' BIAS MEMORY IS SHORTER (2026-11-18). Through a cooling autumn a 45-day mean lags the models' drift: on the
+# 75 graded days 09-04..11-17 the corrected day-ahead mean ran 0.64 F cold (1.06 F cold since 10-15), RMSE 1.58. At
+# 14 days: 0.33 F cold, RMSE 1.47, better in both halves (1.39/1.74 -> 1.38/1.54); 21 and 30 sit between, 10 scored
+# 1.40 and 7 1.48, so 14 is the stable side of the dip. For scale, the market's centre at 11 AM the day before scored
+# 1.40 on the same days. Over all 106 graded days from 08-04 it is a wash (SD 1.71 both, MAE 1.33 -> 1.31): August, a
+# steady month, liked the long memory. court() serves the lows' day-ahead too, which gained (SD 1.99 -> 1.95, MAE
+# 1.65 -> 1.55); low_eve_court keeps WINDOW.
+HIGH_WINDOW = 14
 MIN_BIAS_N = 14      # fewer scored days than this and a day is not graded
 DAYS = 120           # how far back the archive is asked for
 SPREAD_SPLIT = 5.0   # degF between the warmest and coldest corrected peak
@@ -233,6 +241,7 @@ def low_eve_court(cfg, c, truth, troughs):
 def court(truth, peaks):
     days = sorted(d for d in peaks if d in truth and len(peaks[d]) == len(MODELS))
     resid, graded, spread = [], [], []
+    WINDOW = HIGH_WINDOW
     for i, d in enumerate(days):
         prior = days[max(0, i - WINDOW):i]
         if len(prior) < MIN_BIAS_N:
