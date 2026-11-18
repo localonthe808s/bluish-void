@@ -993,6 +993,9 @@ async function alertTick(env, sched) {
   state.own5 = state.own5 || {};
   state.mkt = state.mkt || {};
   state.max7by = state.max7by || {};
+  /* ONE NOTIFICATION, HOWEVER MANY BETS (user 2026-11-18: "i have two bets open for HIGHS but i dont want 2 notifications"):
+     each held range queues its line here; after the loop one push goes out per market day, a line per range */
+  const mktQ = [], repQ = [];
   for (const h of held) {
     const max7 = max7by[h.am.series], prevMax7 = state.max7by[h.am.series];
     let m;
@@ -1035,11 +1038,10 @@ async function alertTick(env, sched) {
       } else if (anchor != null && Math.abs(mid - anchor) >= 0.25) {
         const good = (side === 'YES') === (mid > anchor);
         /* user 2026-11-15: 'BAD NEWS: "63-64" is dropping from 78¢ to 45¢' */
-        await notify(env, state, `mkt:${h.ticker}:${Math.round(mid * 4)}`,
-          /* user 2026-11-18: "the title just say GOOD or BAD", the rest in the body */
-          good ? 'GOOD' : 'BAD',
-          `"${label}" is ${mid > anchor ? 'rising' : 'dropping'} from ${Math.round(anchor * 100)}¢ to ${Math.round(mid * 100)}¢\nYour ${side}: ${holdTxt}.${repTxt ? ' ' + repTxt + '.' : ''}`,
-          good ? 'default' : 'high');
+        /* user 2026-11-18: "the title just say GOOD or BAD", the rest in the body */
+        mktQ.push({ g: h.am.series + ':' + mDay, key: `${h.ticker}:${Math.round(mid * 4)}`, good,
+          line: `"${label}" is ${mid > anchor ? 'rising' : 'dropping'} from ${Math.round(anchor * 100)}¢ to ${Math.round(mid * 100)}¢`,
+          mine: `Your ${side}: ${holdTxt}.`, tail: repTxt ? repTxt + '.' : '' });
         out.push(`${h.ticker} ${anchor}->${mid}`);
         state.mkt[h.ticker] = mid;
       } else if (anchor == null) {
@@ -1070,6 +1072,20 @@ async function alertTick(env, sched) {
     }
     // the sensor (own5) and TWC running-max alerts left 2026-11-01: Central Park has no public 5-minute feed and TWC's
     // keyed feed has refused since 10-21, so neither could fire; their state keys are left to expire
+  }
+  /* the queued lines go out: one bet reads as before; several share one push titled GOOD, BAD or MIXED */
+  const verdictOf = (q) => q.every((x) => x.good) ? 'GOOD' : q.every((x) => !x.good) ? 'BAD' : 'MIXED';
+  for (const g of [...new Set(repQ.map((x) => x.g))]) {
+    const q = repQ.filter((x) => x.g === g), v = verdictOf(q);
+    await notify(env, state, q.length === 1 ? `metar:${q[0].key}` : `metar:${g}:${q.map((x) => x.key).join('|')}`, v,
+      q.length === 1 ? `${q[0].head} · ${q[0].line}\n${q[0].mine}` : `${q[0].head}\n` + q.map((x) => `${x.line} · ${x.mine}`).join('\n'),
+      v === 'GOOD' ? 'default' : 'urgent');
+  }
+  for (const g of [...new Set(mktQ.map((x) => x.g))]) {
+    const q = mktQ.filter((x) => x.g === g), v = verdictOf(q);
+    await notify(env, state, q.length === 1 ? `mkt:${q[0].key}` : `mkt:${g}:${q.map((x) => x.key).join('|')}`, v,
+      q.length === 1 ? `${q[0].line}\n${q[0].mine}${q[0].tail ? ' ' + q[0].tail : ''}` : q.map((x) => `${x.line}\n${x.mine}`).join('\n') + (q[0].tail ? '\n' + q[0].tail : ''),
+      v === 'GOOD' ? 'default' : 'high');
   }
   if (state.dayHi) for (const k of Object.keys(state.dayHi)) if (!held.some((h) => h.ticker === k)) delete state.dayHi[k];   /* settled markets leave */
   for (const k of Object.keys(max7by)) if (max7by[k] != null) state.max7by[k] = max7by[k];
