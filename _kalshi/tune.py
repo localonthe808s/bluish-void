@@ -467,7 +467,7 @@ def mkt_rows(cfg):
         raw = float(L['pred']) - float(mp.get('shift') or 0.0)
         # binding at the lock: stamped `b` from 2026-11-18; before that, the lock's centre WAS its floor reading
         bind = bool(mp.get('b')) if 'b' in mp else (obs is not None and abs(float(obs) - raw) < 0.06)
-        rows.append({'date': h['date'], 'raw': raw, 'sd': float(L['sd']),
+        rows.append({'date': h['date'], 'raw': raw, 'sd': float(L['sd']), 'c3': mp.get('c3'),
                      'lad': lad, 'k': k[0], 'mk': float(mk), 'bind': bind,
                      'floor': (float(obs) - K.OFFSET_DEFAULT) if obs is not None else None})
     return rows
@@ -667,6 +667,84 @@ def cold_apply(cfg, r, prev_r):
     print('  cold court: %s' % rep_['why'], flush=True)
 
 
+# ------------------------------------------------ the fast-morning court ----
+# THE NOON PULL ON A FAST MORNING, OUTSIDE THE COLD MONTHS (2026-11-18; see MKT_FAST_CLIMB / mkt_w in kalshi_daily.py).
+# Rows: non-binding live locks dated outside MKT_COLD_MONTHS whose three-hour climb to the lock was MKT_FAST_CLIMB or
+# more -- stamped on the lock (mpull.c3) from 11-18, read off the station's hourly record before that. The incumbent
+# is mkt_pull_fast or, unset, the noon weight. Same guardrails as the other pulls, FAST_MIN_DAYS rows.
+FAST_GRID, FAST_COOLDOWN_D, FAST_MIN_DAYS = [0.35, 0.5, 0.65, 0.8, 1.0], 7, 20
+
+
+def fast_rows(cfg):
+    rows = [r for r in mkt_rows(cfg) if not r.get('bind') and int(r['date'][5:7]) not in K.MKT_COLD_MONTHS]
+    need = [r for r in rows if r.get('c3') is None]
+    if need:
+        try:
+            d0 = datetime.date.fromisoformat(min(r['date'] for r in need))
+            d1 = datetime.date.fromisoformat(max(r['date'] for r in need)) + datetime.timedelta(days=1)
+            obh = K.obs_hourly_range(cfg, d0, d1)
+            for r in need:
+                r['c3'] = K.climb_of(obh.get(r['date']), 12)
+        except Exception as e:
+            print('  fast court: hourly record unread (%s)' % str(e)[:60], flush=True)
+    return [r for r in rows if r.get('c3') is not None and r['c3'] >= K.MKT_FAST_CLIMB]
+
+
+def live_fast_court(cfg, cur, last_change=None):
+    cur = float(cur or 0.0)
+    out = {'n': 0, 'need': FAST_MIN_DAYS, 'was': cur, 'ruled': cur, 'why': 'not a highs market'}
+    if not cfg['key'].endswith('_high'):
+        return cur, out
+    rows = fast_rows(cfg)
+    out.update({'n': len(rows), 'why': '%d fast-morning locks of the %d it needs: %s stands' % (len(rows), FAST_MIN_DAYS, cur)})
+    if not rows:
+        return cur, out
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    half = len(rows) // 2
+    sc = lambda w, R=rows: mkt_score(R, w)
+    out['scores'] = {str(w): {'brier': round(sc(w)['brier'], 4), 'hits': sc(w)['hits']} for w in FAST_GRID}
+    if len(rows) < FAST_MIN_DAYS:
+        return cur, out
+    base, b_old, b_new = sc(cur), sc(cur, rows[:half]), sc(cur, rows[half:])
+    best = None
+    for w in FAST_GRID:
+        if abs(w - cur) < 1e-9:
+            continue
+        c = sc(w)
+        gain = base['brier'] - c['brier']
+        if gain >= MIN_GAIN and sc(w, rows[:half])['brier'] < b_old['brier'] and sc(w, rows[half:])['brier'] < b_new['brier'] \
+                and c['hits'] >= base['hits'] - 1 and (best is None or gain > best[1]):
+            best = (w, gain, c)
+    if best is None:
+        out['why'] = '%s stands on %d fast-morning locks (Brier %.4f, %d hits): nothing clears the guardrails' % (cur, len(rows), base['brier'], base['hits'])
+    elif last_change and (today - datetime.date.fromisoformat(last_change)).days < FAST_COOLDOWN_D:
+        out['why'] = '%s -> %s waits: the last change was %s' % (cur, best[0], last_change)
+    else:
+        out.update({'ruled': best[0], 'changed_at': today.isoformat(),
+                    'why': 'mkt_pull_fast %s -> %s: Brier %.4f -> %.4f, hits %d -> %d on %d fast-morning locks, wins both halves'
+                           % (cur, best[0], base['brier'], best[2]['brier'], base['hits'], best[2]['hits'], len(rows))})
+    if 'changed_at' not in out and last_change:
+        out['changed_at'] = last_change
+    return out['ruled'], out
+
+
+def fast_apply(cfg, r, prev_r):
+    """run the fast-morning court and write its ruling into r['active']['mkt_pull_fast'] (None = the noon weight stands)"""
+    a = r.get('active')
+    if not a or not cfg['key'].endswith('_high'):
+        return
+    prev_a = (prev_r or {}).get('active') or {}
+    fc_ = (prev_r or {}).get('fast_court') or {}
+    cur = prev_a.get('mkt_pull_fast') or a.get('mkt_pull') or 0.0
+    ruled, rep_ = live_fast_court(cfg, cur, fc_.get('changed_at'))
+    a['mkt_pull_fast'] = ruled if abs(float(ruled) - float(a.get('mkt_pull') or 0.0)) > 1e-9 else None
+    r['fast_court'] = rep_
+    if abs(float(ruled) - float(cur or 0.0)) > 1e-9:
+        r['why'] = (r.get('why') or '') + ' | FAST COURT: ' + rep_['why']
+        r['chosen_at'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+    print('  fast court: %s' % rep_['why'], flush=True)
+
+
 # ------------------------------------------------ the evening market court ----
 # THE EVENING WEIGHT IS JUDGED ON THE TRAIL (2026-11-01; see MKT_PM_HOUR / mkt_w in kalshi_daily.py). Rows at PM_HOURS
 # from each settled day's trail: raw = pred - mps (the shift the pull made), the market centre from the row's mids, the
@@ -762,6 +840,7 @@ def tune(cfg, prev):
     mkt_apply(cfg, r, prev.get(cfg['key']))
     bind_apply(cfg, r, prev.get(cfg['key']))
     cold_apply(cfg, r, prev.get(cfg['key']))
+    fast_apply(cfg, r, prev.get(cfg['key']))
     pm_apply(cfg, r, prev.get(cfg['key']))
     a = r.get('active')
     if a and a.get('sd_mult') is not None:
@@ -863,6 +942,8 @@ def main():
             print('    binding scores: %s' % (r.get('bind_court') or {}).get('scores'))
             cold_apply(cfg, r, copy.deepcopy(r))
             print('    cold scores: %s' % (r.get('cold_court') or {}).get('scores'))
+            fast_apply(cfg, r, copy.deepcopy(r))
+            print('    fast scores: %s' % (r.get('fast_court') or {}).get('scores'))
             pm_apply(cfg, r, copy.deepcopy(r))
             print('    evening scores: %s' % (r.get('pm_court') or {}).get('scores'))
         prev['_built'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
