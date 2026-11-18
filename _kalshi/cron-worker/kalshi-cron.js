@@ -1036,8 +1036,9 @@ async function alertTick(env, sched) {
         const good = (side === 'YES') === (mid > anchor);
         /* user 2026-11-15: 'BAD NEWS: "63-64" is dropping from 78¢ to 45¢' */
         await notify(env, state, `mkt:${h.ticker}:${Math.round(mid * 4)}`,
-          `${good ? 'GOOD NEWS' : 'BAD NEWS'}: "${label}" is ${mid > anchor ? 'rising' : 'dropping'} from ${Math.round(anchor * 100)}¢ to ${Math.round(mid * 100)}¢`,
-          `Your ${side}: ${holdTxt}.${repTxt ? ' ' + repTxt + '.' : ''}`,
+          /* user 2026-11-18: "the title just say GOOD or BAD", the rest in the body */
+          good ? 'GOOD' : 'BAD',
+          `"${label}" is ${mid > anchor ? 'rising' : 'dropping'} from ${Math.round(anchor * 100)}¢ to ${Math.round(mid * 100)}¢\nYour ${side}: ${holdTxt}.${repTxt ? ' ' + repTxt + '.' : ''}`,
           good ? 'default' : 'high');
         out.push(`${h.ticker} ${anchor}->${mid}`);
         state.mkt[h.ticker] = mid;
@@ -1061,8 +1062,9 @@ async function alertTick(env, sched) {
       /* user 2026-11-15: "GOOD BET: 61.2° at 2:51PM · BELOW 63-64 / 83¢" -- where the report sits against the range, and what your side is worth now */
       const where = inNow ? `IN ${label}` : (b[1] != null && rp.f > b[1]) ? `ABOVE ${label}` : `BELOW ${label}`;
       await notify(env, state, `metar:${h.ticker}:${rp.at}`,
-        `${bad ? 'BAD BET' : 'GOOD BET'}: ${rp.f}° at ${local}${rp.raw.trim() === 'SPECI' ? ' (special)' : ''} \u00b7 ${where}${isFinite(sideBid) && sideBid > 0 ? ` / ${Math.round(sideBid * 100)}¢` : ''}`,
-        `Your ${side}: ${Math.abs(h.n)} held.`,
+        /* user 2026-11-18: "just say GOOD or BAD instead of GOOD BET and move more of it into the body" */
+        bad ? 'BAD' : 'GOOD',
+        `${rp.f}° at ${local}${rp.raw.trim() === 'SPECI' ? ' (special)' : ''} \u00b7 ${where}${isFinite(sideBid) && sideBid > 0 ? ` / ${Math.round(sideBid * 100)}¢` : ''}\nYour ${side}: ${Math.abs(h.n)} held.`,
         bad ? 'urgent' : 'default');
       out.push(`metar ${h.am.icao} ${rp.f}`);
     }
@@ -1388,13 +1390,13 @@ async function sampleAlerts(env) {
     const inNow = inRung(rep.f, b), bad = side === 'YES' ? (b[1] != null && rep.f > b[1] + 0.5) : inNow;
     const where = inNow ? `IN ${lab}` : (b[1] != null && rep.f > b[1]) ? `ABOVE ${lab}` : `BELOW ${lab}`;
     const local = new Date(rep.at).toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }).replace(/\s+/g, '');
-    msgs.push({ title: `TEST · ${bad ? 'BAD BET' : 'GOOD BET'}: ${rep.f}° at ${local} \u00b7 ${where}` + (isFinite(sideBid) && sideBid > 0 ? ` / ${c(sideBid)}` : ''), body: h ? `Your ${side}: ${Math.abs(h.n)} held.` : `Your YES: no bet held today (example).` });
+    msgs.push({ title: `TEST · ${bad ? 'BAD BET' : 'GOOD BET'}: ${rep.f}° at ${local} \u00b7 ${where}` + (isFinite(sideBid) && sideBid > 0 ? ` / ${c(sideBid)}` : ''), body: h ? `Your ${side}: ${Math.abs(h.n)} held.` : `Your YES: no bet held today (example).`) });
     /* 4. the price moving on it: yesterday's close against now */
     const mid = isFinite(bid) && isFinite(ask) && ask > 0 ? (bid + ask) / 2 : null, prev = Number(pick.previous_price_dollars);
     if (mid != null && isFinite(prev) && prev > 0) {
       const good = (side === 'YES') === (mid > prev);
-      msgs.push({ title: `TEST · ${good ? 'GOOD NEWS' : 'BAD NEWS'}: "${lab}" is ${mid > prev ? 'rising' : 'dropping'} from ${c(prev)} to ${c(mid)}`,
-        body: (h ? `Your ${side}: ${Math.abs(h.n)} held, bid ${c(sideBid)}.` : 'No bet held today (example).') + ` Last report ${rep.f}° at ${new Date(rep.at).toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' })}.` });
+      msgs.push({ title: `TEST · ${good ? 'GOOD' : 'BAD'}`,
+        body: `"${lab}" is ${mid > prev ? 'rising' : 'dropping'} from ${c(prev)} to ${c(mid)}\n` + (h ? `Your ${side}: ${Math.abs(h.n)} held, bid ${c(sideBid)}.` : 'No bet held today (example).') + ` Last report ${rep.f}° at ${new Date(rep.at).toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' })}.` });
     } else notes.push('no price move sample');
   }
   let sent = 0;
