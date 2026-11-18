@@ -39,6 +39,8 @@ ROWS = [
     ('surf/latest.json',              'surf.yml',          30,  54, None),
     ('sea/tide_stations.json',        'currents.yml',      30,  54, None),
     ('snow/resorts_v1.json',          'snow.yml',          30,  54, None),
+    ('mig/latest.json',               'migration.yml',     30,  54, None),   # runs every 30 min but rewrites this only for a new night or new frames
+    ('birds/rare/index.json',         'birds-rare.yml',    30,  54, None),
     ('foliage/latest.json',           'foliage.yml',       30,  54, (9, 10, 11)),
     ('ocean/mbari_sightings_v1.json', 'mbari-sightings.yml', 192, 360, None),   # weekly
     ('under/mines_active_v1.json',    'mines.yml',        192, 360, None),   # weekly
