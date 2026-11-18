@@ -4154,11 +4154,24 @@ def mkt_pull_shift(w, pred, mk, floor):
 MKT_PM_HOUR = 17
 
 
-def mkt_w(cfg, hour):
-    """the market pull's weight at `hour`: mkt_pull_pm from MKT_PM_HOUR when the evening court set one, else mkt_pull"""
+# THE COLD-SEASON WEIGHT (2026-11-18, user: "do all 3, start with the first"). A study of this market over 1,684 New
+# York days (Crosier, arXiv 2609.23969) found the market's lead over every public forecast is 10-16% from November to
+# June and 1-4% from July to October. Our live noon locks say the same on what little they hold: on non-binding locks
+# the pull did nothing in September (Brier .56 -> .54 at any weight), was best at .5-.65 in October (.357; .465 at
+# 1.0), and in November is best at 1.0 (.230 at .65 -> .149, 7 -> 8 of 8). So the months in MKT_COLD_MONTHS have their
+# own knob, `mkt_pull_cold`, judged by tune.py's cold court on those months' non-binding locks; unset, mkt_pull stands.
+MKT_COLD_MONTHS = (11, 12, 1, 2, 3, 4, 5, 6)
+
+
+def mkt_w(cfg, hour, month=None):
+    """the market pull's weight at `hour`: mkt_pull_pm from MKT_PM_HOUR when the evening court set one, else
+    mkt_pull_cold in MKT_COLD_MONTHS when the cold court set one, else mkt_pull"""
     pm = cfg.get('mkt_pull_pm')
     if hour is not None and hour >= MKT_PM_HOUR and pm:
         return float(pm)
+    cold = cfg.get('mkt_pull_cold')
+    if month in MKT_COLD_MONTHS and cold:
+        return float(cold)
     return float(cfg.get('mkt_pull') or 0.0)
 
 
@@ -4217,6 +4230,8 @@ def tuner_summary(cfg):
             'mkt_pull_pm': a.get('mkt_pull_pm'), 'pm_since': (r.get('pm_court') or {}).get('changed_at'),
             'mkt_pull_bind': a.get('mkt_pull_bind', 0.0), 'bind_n': (r.get('bind_court') or {}).get('n'),
             'bind_since': (r.get('bind_court') or {}).get('changed_at'),
+            'mkt_pull_cold': a.get('mkt_pull_cold'), 'cold_n': (r.get('cold_court') or {}).get('n'),
+            'cold_since': (r.get('cold_court') or {}).get('changed_at'),
             'tail_margin': a.get('tail_margin', 0.0), 'bias_hl': a.get('bias_hl'), 'wind_regime': a.get('wind_regime'),
             'ladder': ladder, 'chosen_at': r.get('chosen_at')}
 
@@ -4227,7 +4242,8 @@ def params_of(cfg):
          'pub_pull': float(cfg.get('pub_pull') or 0.0), 'tail_margin': float(cfg.get('tail_margin') or 0.0),
          'mkt_pull': float(cfg.get('mkt_pull') or 0.0),
          'mkt_pull_pm': (float(cfg['mkt_pull_pm']) if cfg.get('mkt_pull_pm') else None),
-         'mkt_pull_bind': float(cfg.get('mkt_pull_bind') or 0.0)}
+         'mkt_pull_bind': float(cfg.get('mkt_pull_bind') or 0.0),
+         'mkt_pull_cold': (float(cfg['mkt_pull_cold']) if cfg.get('mkt_pull_cold') else None)}
     p.update({k: v for k, v in (cfg.get('_globals') or {}).items() if k in TUNABLE_GLOBALS})
     return p
 
@@ -4750,7 +4766,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
                    and ((fadj is not None and obs_far >= fadj) or over_now))
     # THE MARKET PULL on the live call (see market_centre); snapshot() applies the same to every lock
     _mk_centre = market_centre(rows) if _pull_on else None
-    _mw_live = mkt_bind_w(cfg, now.hour, over_now) if binding_now else mkt_w(cfg, now.hour)   # a binding hour has its own weight, 0 until its court rules
+    _mw_live = mkt_bind_w(cfg, now.hour, over_now) if binding_now else mkt_w(cfg, now.hour, now.month)   # a binding hour has its own weight, 0 until its court rules
     _mp_live = mkt_pull_shift(_mw_live, pred, _mk_centre, obs_far) if _pull_on else 0.0
     if abs(_mp_live) > 0.005:
         print('%s market pull: %+.2f (ours %.2f, market centre %.2f, w %s%s)' % (cfg['key'], _mp_live, pred, _mk_centre, _mw_live, ', binding' if binding_now else ''))
@@ -5140,7 +5156,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         bind = (fl is not None and ((pf is not None and fl >= pf) or over))
         # the market pull (see market_centre): the lock's centre moves toward the market's, never on a binding hour;
         # the court in tune.py replays other weights from pred - shift
-        _mw = mkt_bind_w(cfg, hour, over) if bind else mkt_w(cfg, hour)   # binding: its own weight (mkt_pull_bind), 0 until the binding court rules
+        _mw = mkt_bind_w(cfg, hour, over) if bind else mkt_w(cfg, hour, int(tkey[5:7]))   # binding: its own weight (mkt_pull_bind), 0 until the binding court rules
         _ms = mkt_pull_shift(_mw, pr, _mk_centre, fl) if _pull_on else 0.0
         if abs(_ms) > 0.005:
             pr = round(pr + _ms, 2)
@@ -5247,7 +5263,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             # cannot answer "when should the bet go on" -- this can.
             'edge': (lambda b: round(b['ev'], 4) if b else None)(best_bet(rows, ps)),
             # the market pull's shift and weight at this hour (the evening court replays other weights from pred - mps)
-            'mps': round(_mp_live, 2), 'mw': mkt_w(cfg, now.hour),
+            'mps': round(_mp_live, 2), 'mw': mkt_w(cfg, now.hour, now.month),
             # the published forecasts as of this hour, judged forward
             'twc_fc': _twcf, 'nws_fc': _nwsf,
         })
@@ -6054,7 +6070,7 @@ def main():
         for cfg in RUN:
             a = (_tuned.get(cfg['key']) or {}).get('active')
             if a and (_tuned.get(cfg['key']) or {}).get('n', 0) >= 45:
-                cfg.update({k: a[k] for k in ('skill', 'bias_hl', 'sd_mult', 'drop_worst', 'wind_regime', 'pub_pull', 'tail_margin', 'mkt_pull', 'mkt_pull_pm', 'mkt_pull_bind') if k in a})
+                cfg.update({k: a[k] for k in ('skill', 'bias_hl', 'sd_mult', 'drop_worst', 'wind_regime', 'pub_pull', 'tail_margin', 'mkt_pull', 'mkt_pull_pm', 'mkt_pull_bind', 'mkt_pull_cold') if k in a})
                 g = {k: a[k] for k in TUNABLE_GLOBALS if k in a}
                 if g:
                     cfg['_globals'] = g

@@ -551,7 +551,7 @@ def mkt_apply(cfg, r, prev_r):
 # and this court judges it on the binding locks alone, by the market court's own test: Brier of the normal ladder
 # on the lock's sd and floor cut, MIN_GAIN, a win on both halves, at most one hit lost, one change per
 # BIND_COOLDOWN_D days -- and BIND_MIN_DAYS binding locks before it rules at all.
-BIND_GRID, BIND_COOLDOWN_D, BIND_MIN_DAYS = [0.0, 0.35, 0.65], 7, 15   # 25 at first; the user lowered it the same day ("lower the bar, switch it on now")
+BIND_GRID, BIND_COOLDOWN_D, BIND_MIN_DAYS = [0.0, 0.35, 0.65, 0.8, 0.9], 7, 15   # 25 at first; the user lowered it the same day ("lower the bar, switch it on now")
 
 
 def live_bind_court(cfg, cur, last_change=None):
@@ -604,6 +604,67 @@ def bind_apply(cfg, r, prev_r):
         r['why'] = (r.get('why') or '') + ' | BINDING COURT: ' + rep_['why']
         r['chosen_at'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
     print('  binding court: %s' % rep_['why'], flush=True)
+
+
+# ------------------------------------------------ the cold-season court ----
+# THE NOON PULL IN THE COLD MONTHS HAS ITS OWN KNOB (2026-11-18; see MKT_COLD_MONTHS / mkt_w in kalshi_daily.py). Judged
+# on the NON-BINDING live locks dated in those months, the incumbent being mkt_pull_cold or, unset, the noon weight.
+# Same guardrails as the other pulls. The bar is 8 locks, not 15: the season is the claim of a 1,684-day study, and
+# these rows only have to agree with it -- they do not have to establish it.
+COLD_GRID, COLD_COOLDOWN_D, COLD_MIN_DAYS = [0.5, 0.65, 0.8, 1.0], 7, 8
+
+
+def live_cold_court(cfg, cur, last_change=None):
+    cur = float(cur or 0.0)
+    rows = [r for r in mkt_rows(cfg) if not r.get('bind') and int(r['date'][5:7]) in K.MKT_COLD_MONTHS]
+    out = {'n': len(rows), 'need': COLD_MIN_DAYS, 'was': cur, 'ruled': cur,
+           'why': '%d cold-season locks of the %d it needs: %s stands' % (len(rows), COLD_MIN_DAYS, cur)}
+    if not cfg['key'].endswith('_high') or not rows:
+        return cur, out
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    half = len(rows) // 2
+    sc = lambda w, R=rows: mkt_score(R, w)
+    out['scores'] = {str(w): {'brier': round(sc(w)['brier'], 4), 'hits': sc(w)['hits']} for w in COLD_GRID}
+    if len(rows) < COLD_MIN_DAYS:
+        return cur, out
+    base, b_old, b_new = sc(cur), sc(cur, rows[:half]), sc(cur, rows[half:])
+    best = None
+    for w in COLD_GRID:
+        if abs(w - cur) < 1e-9:
+            continue
+        c = sc(w)
+        gain = base['brier'] - c['brier']
+        if gain >= MIN_GAIN and sc(w, rows[:half])['brier'] < b_old['brier'] and sc(w, rows[half:])['brier'] < b_new['brier'] \
+                and c['hits'] >= base['hits'] - 1 and (best is None or gain > best[1]):
+            best = (w, gain, c)
+    if best is None:
+        out['why'] = '%s stands on %d cold-season locks (Brier %.4f, %d hits): nothing clears the guardrails' % (cur, len(rows), base['brier'], base['hits'])
+    elif last_change and (today - datetime.date.fromisoformat(last_change)).days < COLD_COOLDOWN_D:
+        out['why'] = '%s -> %s waits: the last change was %s' % (cur, best[0], last_change)
+    else:
+        out.update({'ruled': best[0], 'changed_at': today.isoformat(),
+                    'why': 'mkt_pull_cold %s -> %s: Brier %.4f -> %.4f, hits %d -> %d on %d cold-season locks, wins both halves'
+                           % (cur, best[0], base['brier'], best[2]['brier'], base['hits'], best[2]['hits'], len(rows))})
+    if 'changed_at' not in out and last_change:
+        out['changed_at'] = last_change
+    return out['ruled'], out
+
+
+def cold_apply(cfg, r, prev_r):
+    """run the cold-season court and write its ruling into r['active']['mkt_pull_cold'] (None = the noon weight stands)"""
+    a = r.get('active')
+    if not a or not cfg['key'].endswith('_high'):
+        return
+    prev_a = (prev_r or {}).get('active') or {}
+    cc = (prev_r or {}).get('cold_court') or {}
+    cur = prev_a.get('mkt_pull_cold') or a.get('mkt_pull') or 0.0
+    ruled, rep_ = live_cold_court(cfg, cur, cc.get('changed_at'))
+    a['mkt_pull_cold'] = ruled if abs(float(ruled) - float(a.get('mkt_pull') or 0.0)) > 1e-9 else None
+    r['cold_court'] = rep_
+    if abs(float(ruled) - float(cur or 0.0)) > 1e-9:
+        r['why'] = (r.get('why') or '') + ' | COLD COURT: ' + rep_['why']
+        r['chosen_at'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+    print('  cold court: %s' % rep_['why'], flush=True)
 
 
 # ------------------------------------------------ the evening market court ----
@@ -700,6 +761,7 @@ def tune(cfg, prev):
     tail_apply(cfg, r, prev.get(cfg['key']))
     mkt_apply(cfg, r, prev.get(cfg['key']))
     bind_apply(cfg, r, prev.get(cfg['key']))
+    cold_apply(cfg, r, prev.get(cfg['key']))
     pm_apply(cfg, r, prev.get(cfg['key']))
     a = r.get('active')
     if a and a.get('sd_mult') is not None:
@@ -799,6 +861,8 @@ def main():
             print('    market scores: %s' % (r.get('mkt_court') or {}).get('scores'))
             bind_apply(cfg, r, copy.deepcopy(r))
             print('    binding scores: %s' % (r.get('bind_court') or {}).get('scores'))
+            cold_apply(cfg, r, copy.deepcopy(r))
+            print('    cold scores: %s' % (r.get('cold_court') or {}).get('scores'))
             pm_apply(cfg, r, copy.deepcopy(r))
             print('    evening scores: %s' % (r.get('pm_court') or {}).get('scores'))
         prev['_built'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
