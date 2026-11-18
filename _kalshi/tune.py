@@ -464,8 +464,11 @@ def mkt_rows(cfg):
         if mk is None:
             continue
         obs = L.get('obs_at_lock')
-        rows.append({'date': h['date'], 'raw': float(L['pred']) - float(mp.get('shift') or 0.0), 'sd': float(L['sd']),
-                     'lad': lad, 'k': k[0], 'mk': float(mk),
+        raw = float(L['pred']) - float(mp.get('shift') or 0.0)
+        # binding at the lock: stamped `b` from 2026-11-18; before that, the lock's centre WAS its floor reading
+        bind = bool(mp.get('b')) if 'b' in mp else (obs is not None and abs(float(obs) - raw) < 0.06)
+        rows.append({'date': h['date'], 'raw': raw, 'sd': float(L['sd']),
+                     'lad': lad, 'k': k[0], 'mk': float(mk), 'bind': bind,
                      'floor': (float(obs) - K.OFFSET_DEFAULT) if obs is not None else None})
     return rows
 
@@ -538,6 +541,69 @@ def mkt_apply(cfg, r, prev_r):
         r['why'] = (r.get('why') or '') + ' | MARKET COURT: ' + rep_['why']
         r['chosen_at'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
     print('  market court: %s' % rep_['why'], flush=True)
+
+
+# ------------------------------------------------ the binding court ----
+# THE MARKET PULL ON BINDING LOCKS HAS ITS OWN KNOB AND ITS OWN COURT (2026-11-18; see mkt_bind_w in kalshi_daily.py).
+# The bake skips the pull when the lock is binding, and those locks are the highs' weakest class. On the 17 there were
+# when this was written, a pull of .35-.65 won the first half (log loss 1.71 -> .48-.98) and not the second (.59 ->
+# .53-.65, a hit lost at .35), and 11-13 shows the risk (the market's centre was 4.5 F high). So `mkt_pull_bind` is 0
+# and this court judges it on the binding locks alone, by the market court's own test: Brier of the normal ladder
+# on the lock's sd and floor cut, MIN_GAIN, a win on both halves, at most one hit lost, one change per
+# BIND_COOLDOWN_D days -- and BIND_MIN_DAYS binding locks before it rules at all.
+BIND_GRID, BIND_COOLDOWN_D, BIND_MIN_DAYS = [0.0, 0.35, 0.65], 7, 25
+
+
+def live_bind_court(cfg, cur, last_change=None):
+    cur = float(cur or 0.0)
+    rows = [r for r in mkt_rows(cfg) if r.get('bind')]
+    out = {'n': len(rows), 'need': BIND_MIN_DAYS, 'was': cur, 'ruled': cur,
+           'why': '%d binding locks of the %d it needs: %s stands' % (len(rows), BIND_MIN_DAYS, cur)}
+    if not cfg['key'].endswith('_high') or not rows:
+        return cur, out
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    half = len(rows) // 2
+    sc = lambda w, R=rows: mkt_score(R, w)
+    out['scores'] = {str(w): {'brier': round(sc(w)['brier'], 4), 'hits': sc(w)['hits']} for w in BIND_GRID}
+    if len(rows) < BIND_MIN_DAYS:
+        return cur, out
+    base, b_old, b_new = sc(cur), sc(cur, rows[:half]), sc(cur, rows[half:])
+    best = None
+    for w in BIND_GRID:
+        if abs(w - cur) < 1e-9:
+            continue
+        c = sc(w)
+        gain = base['brier'] - c['brier']
+        if gain >= MIN_GAIN and sc(w, rows[:half])['brier'] < b_old['brier'] and sc(w, rows[half:])['brier'] < b_new['brier'] \
+                and c['hits'] >= base['hits'] - 1 and (best is None or gain > best[1]):
+            best = (w, gain, c)
+    if best is None:
+        out['why'] = '%s stands on %d binding locks (Brier %.4f, %d hits): nothing clears the guardrails' % (cur, len(rows), base['brier'], base['hits'])
+    elif last_change and (today - datetime.date.fromisoformat(last_change)).days < BIND_COOLDOWN_D:
+        out['why'] = '%s -> %s waits: the last change was %s' % (cur, best[0], last_change)
+    else:
+        out.update({'ruled': best[0], 'changed_at': today.isoformat(),
+                    'why': 'mkt_pull_bind %s -> %s: Brier %.4f -> %.4f, hits %d -> %d on %d binding locks, wins both halves'
+                           % (cur, best[0], base['brier'], best[2]['brier'], base['hits'], best[2]['hits'], len(rows))})
+    if 'changed_at' not in out and last_change:
+        out['changed_at'] = last_change
+    return out['ruled'], out
+
+
+def bind_apply(cfg, r, prev_r):
+    """run the binding court and write its ruling into r['active']['mkt_pull_bind'] (kept across the search, which drops unknown knobs)"""
+    a = r.get('active')
+    if not a or not cfg['key'].endswith('_high'):
+        return
+    bc = (prev_r or {}).get('bind_court') or {}
+    cur = ((prev_r or {}).get('active') or {}).get('mkt_pull_bind', 0.0)
+    ruled, rep_ = live_bind_court(cfg, cur, bc.get('changed_at'))
+    a['mkt_pull_bind'] = ruled
+    r['bind_court'] = rep_
+    if abs(float(ruled) - float(cur or 0.0)) > 1e-9:
+        r['why'] = (r.get('why') or '') + ' | BINDING COURT: ' + rep_['why']
+        r['chosen_at'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+    print('  binding court: %s' % rep_['why'], flush=True)
 
 
 # ------------------------------------------------ the evening market court ----
@@ -633,6 +699,7 @@ def tune(cfg, prev):
     pull_apply(cfg, r, prev.get(cfg['key']))
     tail_apply(cfg, r, prev.get(cfg['key']))
     mkt_apply(cfg, r, prev.get(cfg['key']))
+    bind_apply(cfg, r, prev.get(cfg['key']))
     pm_apply(cfg, r, prev.get(cfg['key']))
     a = r.get('active')
     if a and a.get('sd_mult') is not None:
@@ -730,6 +797,8 @@ def main():
             print('    tail scores: %s' % (r.get('tail_court') or {}).get('scores'))
             mkt_apply(cfg, r, copy.deepcopy(r))
             print('    market scores: %s' % (r.get('mkt_court') or {}).get('scores'))
+            bind_apply(cfg, r, copy.deepcopy(r))
+            print('    binding scores: %s' % (r.get('bind_court') or {}).get('scores'))
             pm_apply(cfg, r, copy.deepcopy(r))
             print('    evening scores: %s' % (r.get('pm_court') or {}).get('scores'))
         prev['_built'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%MZ')

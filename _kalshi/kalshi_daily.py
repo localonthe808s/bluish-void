@@ -4162,6 +4162,27 @@ def mkt_w(cfg, hour):
     return float(cfg.get('mkt_pull') or 0.0)
 
 
+# THE BINDING-MORNING WEIGHT (2026-11-18, user: "add the court"). A lock is BINDING when the park has already read at or
+# past what the runs forecast for the rest of the day: the centre is then the running high plus its offset, a narrow
+# spread, and the market pull above is skipped. That class is the highs' weakest: 17 of 75 live noon locks (8 of the
+# last 12, November's early peaks), ours right 12, the market 15, stated 83% and landed 71%, and two of the three
+# misses since 11-02 were binding days that kept climbing (11-11, 11-14). Pulling them toward the market won the
+# first half of the record and not the second, so it is NOT on: `mkt_pull_bind` starts at 0 and tune.py's binding
+# court (live_bind_court) turns it on when it clears the same guardrails as the other pulls. It acts only before
+# MKT_BIND_BEFORE (from 1 PM a binding hour has the climb table's blend) and never on a day with no forecast hour left.
+MKT_BIND_BEFORE = 13
+
+
+def mkt_bind_w(cfg, hour, over=False):
+    """the market pull's weight on a binding hour: mkt_pull_bind before MKT_BIND_BEFORE, 0 otherwise"""
+    if over or hour is None or hour >= MKT_BIND_BEFORE:
+        return 0.0
+    try:
+        return float(cfg.get('mkt_pull_bind') or 0.0)
+    except Exception:
+        return 0.0
+
+
 def tuner_summary(cfg):
     """What the nightly tuner has in force for this market and what its courts last said, for the sheet's TUNER row."""
     try:
@@ -4194,6 +4215,8 @@ def tuner_summary(cfg):
             'pub_pull': a.get('pub_pull', 0.0), 'pull_since': (r.get('pull_court') or {}).get('changed_at'),
             'mkt_pull': a.get('mkt_pull', 0.0), 'mkt_since': (r.get('mkt_court') or {}).get('changed_at'),
             'mkt_pull_pm': a.get('mkt_pull_pm'), 'pm_since': (r.get('pm_court') or {}).get('changed_at'),
+            'mkt_pull_bind': a.get('mkt_pull_bind', 0.0), 'bind_n': (r.get('bind_court') or {}).get('n'),
+            'bind_since': (r.get('bind_court') or {}).get('changed_at'),
             'tail_margin': a.get('tail_margin', 0.0), 'bias_hl': a.get('bias_hl'), 'wind_regime': a.get('wind_regime'),
             'ladder': ladder, 'chosen_at': r.get('chosen_at')}
 
@@ -4203,7 +4226,8 @@ def params_of(cfg):
          'drop_worst': int(cfg.get('drop_worst') or 0), 'wind_regime': bool(cfg.get('wind_regime')),
          'pub_pull': float(cfg.get('pub_pull') or 0.0), 'tail_margin': float(cfg.get('tail_margin') or 0.0),
          'mkt_pull': float(cfg.get('mkt_pull') or 0.0),
-         'mkt_pull_pm': (float(cfg['mkt_pull_pm']) if cfg.get('mkt_pull_pm') else None)}
+         'mkt_pull_pm': (float(cfg['mkt_pull_pm']) if cfg.get('mkt_pull_pm') else None),
+         'mkt_pull_bind': float(cfg.get('mkt_pull_bind') or 0.0)}
     p.update({k: v for k, v in (cfg.get('_globals') or {}).items() if k in TUNABLE_GLOBALS})
     return p
 
@@ -4726,9 +4750,10 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
                    and ((fadj is not None and obs_far >= fadj) or over_now))
     # THE MARKET PULL on the live call (see market_centre); snapshot() applies the same to every lock
     _mk_centre = market_centre(rows) if _pull_on else None
-    _mp_live = mkt_pull_shift(mkt_w(cfg, now.hour), pred, _mk_centre, obs_far) if (_pull_on and not binding_now) else 0.0
+    _mw_live = mkt_bind_w(cfg, now.hour, over_now) if binding_now else mkt_w(cfg, now.hour)   # a binding hour has its own weight, 0 until its court rules
+    _mp_live = mkt_pull_shift(_mw_live, pred, _mk_centre, obs_far) if _pull_on else 0.0
     if abs(_mp_live) > 0.005:
-        print('%s market pull: %+.2f (ours %.2f, market centre %.2f, w %s)' % (cfg['key'], _mp_live, pred, _mk_centre, mkt_w(cfg, now.hour)))
+        print('%s market pull: %+.2f (ours %.2f, market centre %.2f, w %s%s)' % (cfg['key'], _mp_live, pred, _mk_centre, _mw_live, ', binding' if binding_now else ''))
         pred = round(pred + _mp_live, 2)
     # the centre, in parts, for the sheet (user 2026-11-01: explain the number now that two pulls move it)
     _centre = {'models': (round(_fadj0, 2) if _fadj0 is not None else None), 'pull': _pull_lift_live,
@@ -5115,10 +5140,13 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         bind = (fl is not None and ((pf is not None and fl >= pf) or over))
         # the market pull (see market_centre): the lock's centre moves toward the market's, never on a binding hour;
         # the court in tune.py replays other weights from pred - shift
-        _ms = mkt_pull_shift(mkt_w(cfg, hour), pr, _mk_centre, fl) if (_pull_on and not bind) else 0.0
+        _mw = mkt_bind_w(cfg, hour, over) if bind else mkt_w(cfg, hour)   # binding: its own weight (mkt_pull_bind), 0 until the binding court rules
+        _ms = mkt_pull_shift(_mw, pr, _mk_centre, fl) if _pull_on else 0.0
         if abs(_ms) > 0.005:
             pr = round(pr + _ms, 2)
-        _mpull_at[hour] = {'w': mkt_w(cfg, hour), 'mk': (round(_mk_centre, 2) if _mk_centre is not None else None), 'shift': round(_ms, 2)}
+        _mpull_at[hour] = {'w': _mw, 'mk': (round(_mk_centre, 2) if _mk_centre is not None else None), 'shift': round(_ms, 2)}
+        if bind:
+            _mpull_at[hour]['b'] = 1   # the lock was binding: the binding court's rows
         _res_h = residuals(fcm, bias_of, daily, obh, hour, tkey, h0_of)
         sdh, _ = spread(_res_h, hour, bind)
         # ONCE THE FLOOR BINDS, THE DAY IS OVER.  `bind` means no remaining hour
@@ -6026,7 +6054,7 @@ def main():
         for cfg in RUN:
             a = (_tuned.get(cfg['key']) or {}).get('active')
             if a and (_tuned.get(cfg['key']) or {}).get('n', 0) >= 45:
-                cfg.update({k: a[k] for k in ('skill', 'bias_hl', 'sd_mult', 'drop_worst', 'wind_regime', 'pub_pull', 'tail_margin', 'mkt_pull', 'mkt_pull_pm') if k in a})
+                cfg.update({k: a[k] for k in ('skill', 'bias_hl', 'sd_mult', 'drop_worst', 'wind_regime', 'pub_pull', 'tail_margin', 'mkt_pull', 'mkt_pull_pm', 'mkt_pull_bind') if k in a})
                 g = {k: a[k] for k in TUNABLE_GLOBALS if k in a}
                 if g:
                     cfg['_globals'] = g
