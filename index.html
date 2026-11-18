@@ -370,6 +370,37 @@ window._bvTileRect = function(M, ly, t){
 })();
 </script>
 <script src="https://cdn.bluishvoid.com/vendor/leaflet/leaflet.js"></script>
+<style>.bv-cv-blank{ visibility:hidden !important; }</style>
+<script>
+/* A PHONE'S MAP HOLDS LESS (user 2026-11-17: "zooming in or out on the map is now predictably crashing mobile" -> "do 1 and 2").
+   Measured in the iPhone WebKit harness (vmmap on the graphics process): every overlay canvas is its own layer with a backing
+   store at its CSS box x 3 x 3 -- 9.3 MB a buffer for one that carries Leaflet's pan margin (485 x 531 for a 373 x 409 map),
+   5.5 MB without -- two or three buffers each while it repaints, and a zoom repaints them all. On a phone:
+   1. an overlay canvas with nothing drawn on it is hidden until something is (_bvBlankScan: a quarter-scale copy is read after
+      the view settles, and every 15 s so late data shows); the outline's invisible water mask is hidden at its pane (OL);
+   2. no pan margin: Leaflet's canvas and svg renderers get padding 0 (so does the outline, OL.draw). The cost: a drag shows
+      vector overlays only to the old view's edge until the finger lifts. */
+(function(){ if (typeof L === 'undefined') return; var phone = false; try { phone = !!(window.matchMedia && matchMedia('(max-width:768px)').matches); } catch(e){}
+  window._bvPhoneMap = phone; if (!phone) return;
+  try { var ri = L.Renderer.prototype.initialize; L.Renderer.include({ initialize: function(o){ ri.call(this, o); this.options.padding = 0; } });
+    var ic = L.Canvas.prototype._initContainer; L.Canvas.include({ _initContainer: function(){ ic.call(this); if (this._container) this._container._bvScan = 1; } }); } catch(e){}
+  var SC = null, SX = null, PANES = { lcOv: 1, bvSea: 1, lcCityWat: 1, lcOutline: 1 };   /* 2D canvases by construction; a WebGL one must never be read this way */
+  var blank = function(c){ try { var w = Math.max(8, c.width >> 2), h = Math.max(8, c.height >> 2);
+      if (!SC){ SC = document.createElement('canvas'); SX = SC.getContext('2d', { willReadFrequently: true }); }
+      if (SC.width !== w || SC.height !== h){ SC.width = w; SC.height = h; } else SX.clearRect(0, 0, w, h);
+      SX.imageSmoothingEnabled = true; SX.imageSmoothingQuality = 'high'; SX.drawImage(c, 0, 0, w, h);
+      var d = new Uint32Array(SX.getImageData(0, 0, w, h).data.buffer); for (var i = 0; i < d.length; i++) if (d[i] >>> 24) return false; return true;
+    } catch(e){ return false; } };   /* any doubt (a tainted canvas, a failed read) = not blank = shown */
+  window._bvBlankScan = function(map){ if (!map || map._bvBlankOn) return; map._bvBlankOn = 1; var T = [];
+    var run = function(){ try { if (document.hidden || map._bvZooming) return; var mp = map.getPane('mapPane'); if (!mp || !mp.offsetParent) return;
+        var cs = mp.querySelectorAll('canvas'); for (var i = 0; i < cs.length; i++){ var c = cs[i]; if (c.classList.contains('leaflet-tile')) continue;
+          var q = c.parentNode, nm = q && typeof q.className === 'string' ? (/leaflet-([A-Za-z]+)-pane/.exec(q.className) || [])[1] : '';
+          if ((!c._bvScan && !PANES[nm]) || !c.width || !c.height) continue;
+          var b = blank(c); if (b !== !!c._bvBlank){ c._bvBlank = b; c.classList.toggle('bv-cv-blank', b); } } } catch(e){} };
+    var kick = function(){ T.forEach(clearTimeout); T = [setTimeout(run, 900), setTimeout(run, 3500)]; };
+    map.on('moveend zoomend layeradd layerremove', kick); setInterval(run, 15000); kick(); window._bvBlankRun = run; };
+})();
+</script>
 <script>
 /* JUST THE STAR (user 2026-11-14: "i should just be the star" -> "make it have the glow"): no disc or ring, the header star with a strong green glow and a hairline dark edge so it holds on green maps */
 /* YOU ARE HERE (user 2026-11-14: "im on PVs location right now and i have no idea where i am, we need a location indicator for user
@@ -98411,7 +98442,7 @@ function closeAlertModal(){
     NG.draw = function(){
       if (!NG.lit || !M || !NG.cv) return;
       /* drawn a quarter of a view wider on every side (THE CITY's overscan), so a pan does not slide bare map in at the edge */
-      var cv = NG.cv, sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), ox = Math.round(sz.x * .25), oy = Math.round(sz.y * .25);
+      var cv = NG.cv, sz = M.getSize(), dpr = Math.min(2, window.devicePixelRatio || 1), ox = Math.round(sz.x * (window._bvPhoneMap ? 0 : .25)), oy = Math.round(sz.y * (window._bvPhoneMap ? 0 : .25));   /* a phone: no pan margin (2026-11-17) */
       var cw2 = sz.x + 2 * ox, ch2 = sz.y + 2 * oy, W = Math.round(cw2 * dpr), H = Math.round(ch2 * dpr);
       if (cv.width !== W || cv.height !== H){ cv.width = W; cv.height = H; cv.style.width = cw2 + 'px'; cv.style.height = ch2 + 'px'; }
       L.DomUtil.setPosition(cv, M.containerPointToLayerPoint([-ox, -oy])); cv.style.visibility = '';
@@ -99948,7 +99979,7 @@ function closeAlertModal(){
     CD.want = function(){ return !!M && (WAT.inMap(VIEW) || VIEW === 'traffic') && (GH.inCity() || CD.albany()); };
     CD.redraw = function(){ if (CD.raf || !CD.lay || !M || !M.hasLayer(CD.lay)) return; CD.raf = requestAnimationFrame(function(){ CD.raf = 0; try { CD.lay._draw(); } catch(e){ window._lcCityErr = String(e); } }); };
     CD.make = function(){
-      var PAD = 0.15;
+      var PAD = window._bvPhoneMap ? 0 : 0.15;   /* a phone: no pan margin (2026-11-17, see _bvPhoneMap) */
       var Lay = L.Layer.extend({
         onAdd: function(map){
           var mk = function(name, z, blend){ var pn = map.getPane(name) || map.createPane(name); pn.style.zIndex = z; pn.style.pointerEvents = 'none'; if (blend) pn.style.mixBlendMode = blend;
@@ -109765,6 +109796,7 @@ function closeAlertModal(){
          ~9 px across at that zoom are left out -- a ring around every pond read as specks */
       try {
         var mp = M.getPane('lcOlMask') || M.createPane('lcOlMask'); mp.style.zIndex = 1; mp.style.opacity = '0'; mp.style.pointerEvents = 'none';
+        mp.style.visibility = 'hidden';   /* read by drawImage only: hidden, its tiles hold no layers of their own (2026-11-17) */
         var NOPE = { swimming_pool: 1, fountain: 1, basin: 1, dock: 1, wastewater: 1, playa: 1, reef: 1, stream: 1, ditch: 1, drain: 1 };
         var big = function(f){ var g = f.geom, x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
           for (var i = 0; i < g.length; i++) for (var j = 0; j < g[i].length; j++){ var q = g[i][j]; if (q.x < x0) x0 = q.x; if (q.x > x1) x1 = q.x; if (q.y < y0) y0 = q.y; if (q.y > y1) y1 = q.y; }
@@ -109779,7 +109811,7 @@ function closeAlertModal(){
           return l; });
       } catch(e){ OL.mask = []; }
       OL.maskBox();
-      window._bvZoomCv(M, function(){ return [OL.cv]; });
+      window._bvZoomCv(M, function(){ return [OL.cv]; }); if (window._bvBlankScan) window._bvBlankScan(M);
       M.on('moveend resize', function(){ OL.draw(); }); };
     /* CUT TO THE LAND, DRAWN AROUND WHAT IS LEFT (user 2026-10-17: "make sure you have accurate outlined the area and coastline
        properly, there can be islands circled and rivers outlined but doesnt cross bodies of water randomly or have crude lines
@@ -109810,7 +109842,8 @@ function closeAlertModal(){
     OL.maskOn = function(on){ if (!M || !OL.mask) return; OL.mask.forEach(function(l){ if (on){ if (!M.hasLayer(l)) l.addTo(M); } else if (M.hasLayer(l)) M.removeLayer(l); }); };
     OL.draw = function(force){
       var cv = OL.cv; if (!cv || !M) return; var t0 = performance.now();
-      var sz = M.getSize(), px = Math.round(sz.x * 0.15), py = Math.round(sz.y * 0.15), Wd = sz.x + 2 * px, Ht = sz.y + 2 * py, dpr = Math.min(window.devicePixelRatio || 1, 3);   /* a phone's full 3x: the line is drawn at the screen's own pixels */
+      var _mg = window._bvPhoneMap ? 0 : 0.15;   /* a phone: no pan margin, the canvas is the view (a third fewer pixels in its layer) */
+      var sz = M.getSize(), px = Math.round(sz.x * _mg), py = Math.round(sz.y * _mg), Wd = sz.x + 2 * px, Ht = sz.y + 2 * py, dpr = Math.min(window.devicePixelRatio || 1, 3);   /* a phone's full 3x: the line is drawn at the screen's own pixels */
       /* A PAN INSIDE THE MARGIN KEEPS THE LAST DRAW (perf 2026-10-18: a full redraw was 220-350 ms a move in NYC): the canvas sits in
          a map pane 15% past the view on every side, so it rides along with a drag. Redrawn only when the zoom, size, pixel origin or
          outline changes, the view leaves the margin, or the water tiles land (force) */
