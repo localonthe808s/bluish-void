@@ -551,7 +551,7 @@ def mkt_apply(cfg, r, prev_r):
 # and this court judges it on the binding locks alone, by the market court's own test: Brier of the normal ladder
 # on the lock's sd and floor cut, MIN_GAIN, a win on both halves, at most one hit lost, one change per
 # BIND_COOLDOWN_D days -- and BIND_MIN_DAYS binding locks before it rules at all.
-BIND_GRID, BIND_COOLDOWN_D, BIND_MIN_DAYS = [0.0, 0.35, 0.65], 7, 25
+BIND_GRID, BIND_COOLDOWN_D, BIND_MIN_DAYS = [0.0, 0.35, 0.65], 7, 15   # 25 at first; the user lowered it the same day ("lower the bar, switch it on now")
 
 
 def live_bind_court(cfg, cur, last_change=None):
