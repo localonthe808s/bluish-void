@@ -4179,6 +4179,8 @@ MKT_COLD_FROM = 11
 # September and October the fast mornings do not want more than .65. So the season keeps its knob and comes first;
 # `mkt_pull_fast` covers a fast morning outside MKT_COLD_MONTHS, judged by tune.py's fast court; unset, mkt_pull stands.
 MKT_FAST_CLIMB, MKT_FAST_HOURS = 6.0, 3
+# what THE CONTROL switches off (see the lock): the three pulls added 2026-11-18
+BASE_OFF = {'mkt_pull_bind': 0.0, 'mkt_pull_cold': None, 'mkt_pull_fast': None}
 
 
 def climb_of(oh, hour):
@@ -5232,6 +5234,26 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
         _tail = getattr(_TL, 'tail_last', None)
         pred, sd, ps, fl = snap
         best = max(range(len(rows)), key=lambda i: ps[i])
+        # THE CONTROL (2026-11-18, user: "take a step back and recognize if youre actually making improvements"). The
+        # pulls added on 11-18 (binding, cold-season, fast-morning) were each ruled on 8-26 locks that had already been
+        # looked at many ways -- they cannot prove themselves on those days. So every lock from now on also carries
+        # what the 11-17 settings would have said, BASE_OFF applied and nothing else changed, and report.py can grade
+        # the two side by side on days neither has seen. Remove a key from BASE_OFF only when its change is retired.
+        _base = None
+        _kp = {k: cfg.get(k) for k in BASE_OFF}
+        _sv = (dict(_pull_at), dict(_mpull_at), getattr(_TL, 'tail_last', None))
+        try:
+            cfg.update(BASE_OFF)
+            _bs = snapshot(hour)
+            if _bs is not None:
+                _bb = max(range(len(rows)), key=lambda i: _bs[2][i])
+                _base = {'pick': rows[_bb]['label'], 'p': round(_bs[2][_bb], 4), 'pred': round(_bs[0], 2), 'sd': round(_bs[1], 2),
+                         'ours': [round(x, 4) for x in _bs[2]], 'bet': best_bet(rows, _bs[2]), 'off': sorted(BASE_OFF)}
+        except Exception as e:
+            print('%s control lock failed: %s' % (cfg['key'], str(e)[:80]))
+        finally:
+            cfg.update(_kp)
+            _pull_at.clear(); _pull_at.update(_sv[0]); _mpull_at.clear(); _mpull_at.update(_sv[1]); _TL.tail_last = _sv[2]
         fresh = fresh_peaks or {}
         fadj_fresh = None
         if fresh:
@@ -5248,6 +5270,7 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
             'p': round(ps[best], 4), 'pred': round(pred, 2), 'sd': round(sd, 2),
             'as_of': '%02d:00 %s' % (hour, cfg.get('tzlabel', 'ET')),
             'params': params_of(cfg),
+            'base': _base,     # the same lock under the 11-17 settings (see THE CONTROL)
             # what the public-forecast pull did: the court in tune.py replays other strengths from pred - lift
             'pull': _pull_at.get(hour),
             # what the market pull did: w, the market's centre, the shift (the court replays other weights)

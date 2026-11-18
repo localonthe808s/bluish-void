@@ -924,7 +924,26 @@ def run_market(cfg, dry_dir=None):
         # the morning lock, once, at the first bake at or after LOCK_HOUR
         h = hist.setdefault(tkey, {'date': tkey, 'event': T['event']})
         if hour >= LOCK_HOUR and 'lock' not in h:
-            h['lock'] = {'at': now.strftime('%Y-%m-%dT%H:%M ') + cfg['tzlabel'], 'pick': T['pick'], 'p': T['p'],
+            # THE CONTROL (2026-11-18, as the highs'): the same lock without the two changes of 11-18 -- the timing rule
+            # (BIND_EVE_FROM) and the gap table off our own locks (live_gaps) -- so they can be graded on unseen days
+            base = None
+            global BIND_EVE_FROM
+            _keep = BIND_EVE_FROM
+            try:
+                BIND_EVE_FROM = None
+                sb = snapshot(fcm, bias_of, daily, obh, h0_of, tkey, hour, rows_neg, gaps=(obh_raw, daily_raw),
+                              exact=(-cap if cap is not None else None), mk=neg_centre(rows), w=W_AM, tail=TAIL,
+                              drops=drops_for(hour))
+                if sb:
+                    lb = ladder_out(rows, rows_neg, sb['ps'])
+                    bb = max(range(len(lb)), key=lambda i: lb[i]['ours'] or 0)
+                    base = {'pick': lb[bb]['label'], 'p': lb[bb]['ours'], 'pred': round(-sb['pred'], 2), 'binding': sb['bind'],
+                            'ours': [r['ours'] for r in lb], 'off': ['timing rule', 'live gap table']}
+            except Exception as e:
+                print('%s control lock failed: %s' % (cfg['key'], str(e)[:80]))
+            finally:
+                BIND_EVE_FROM = _keep
+            h['lock'] = {'base': base, 'at': now.strftime('%Y-%m-%dT%H:%M ') + cfg['tzlabel'], 'pick': T['pick'], 'p': T['p'],
                          'pred': T['pred'], 'sd': T['sd'], 'obs_at_lock': T['obs_so_far'], 'binding': s['bind'],
                          'ladder': [{'label': r['label'], 'lo': r['lo'], 'hi': r['hi'], 'ours': r['ours'], 'market': r['market']} for r in lad],
                          'market_pick': T['market_pick'], 'market_p': T['market_p'], 'bet': bet, 'book': book,
