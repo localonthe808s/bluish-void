@@ -801,14 +801,23 @@ async function jobWatch(env) {
   const out = [];
   for (const w of WATCHED) {
     if (w.weekday != null && dow !== w.weekday) continue;
-    let r = null;
-    try {
-      const res = await fetch(`https://api.github.com/repos/${OWNER}/${REPO}/actions/workflows/${w.wf}/runs?per_page=1`,
-        { headers: { 'Authorization': `Bearer ${env.GH_TOKEN}`, 'Accept': 'application/vnd.github+json',
-                     'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'bluishvoid-kalshi-cron' } });
-      if (!res.ok) { out.push(`${w.name}: api ${res.status}`); continue; }
-      r = ((await res.json()).workflow_runs || [])[0] || null;
-    } catch (e) { out.push(`${w.name}: ${String(e).slice(0, 60)}`); continue; }
+    // ONE EMPTY ANSWER IS NOT "NEVER RAN" (2026-11-18, user: "i got a notification the kalshi bake didnt run"). The 13:00Z
+    // pass paged "five-minute bake: never ran" while the bake had run every five minutes for 33 hours, 12:55Z and
+    // 13:00:23Z included: GitHub answered 200 with an empty list, once. Asked up to three times, four seconds apart;
+    // only three empty lists in a row page. A real stop is still caught by the age test on the next pass.
+    let r = null, apiErr = null;
+    for (let k = 0; k < 3 && !r; k++) {
+      if (k) await new Promise((ok) => setTimeout(ok, 4000));
+      try {
+        const res = await fetch(`https://api.github.com/repos/${OWNER}/${REPO}/actions/workflows/${w.wf}/runs?per_page=1`,
+          { headers: { 'Authorization': `Bearer ${env.GH_TOKEN}`, 'Accept': 'application/vnd.github+json',
+                       'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'bluishvoid-kalshi-cron' } });
+        if (!res.ok) { apiErr = `api ${res.status}`; continue; }
+        apiErr = null;
+        r = ((await res.json()).workflow_runs || [])[0] || null;
+      } catch (e) { apiErr = String(e).slice(0, 60); }
+    }
+    if (!r && apiErr) { out.push(`${w.name}: ${apiErr}`); continue; }
     const ageH = r ? (Date.now() - Date.parse(r.created_at)) / 36e5 : Infinity;
     const bad = !r ? 'never ran'
       : (r.status === 'completed' && r.conclusion !== 'success') ? `last run ${r.conclusion}`
