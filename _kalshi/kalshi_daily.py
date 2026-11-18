@@ -1851,9 +1851,9 @@ def obs_hourly_range(cfg, start, end, sink=None):
 _OFC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '_cache')
 
 
-def _archive_json(u, fresh_s=6 * 3600, stale_s=72 * 3600):
+def _archive_json(u, fresh_s=6 * 3600, stale_s=72 * 3600, cache_dir=None, tag='', what='forecast archive'):
     import hashlib
-    path = os.path.join(_OFC_DIR, 'ofc_' + hashlib.sha1(u.encode()).hexdigest()[:16] + '.json')
+    path = os.path.join(cache_dir or _OFC_DIR, 'ofc_' + hashlib.sha1((u + tag).encode()).hexdigest()[:16] + '.json')
     have = None
     try:
         with open(path) as f:
@@ -1866,7 +1866,7 @@ def _archive_json(u, fresh_s=6 * 3600, stale_s=72 * 3600):
     try:
         j = get_json(u, timeout=40)
         try:
-            os.makedirs(_OFC_DIR, exist_ok=True)
+            os.makedirs(cache_dir or _OFC_DIR, exist_ok=True)
             with open(path + '.tmp', 'w') as f:
                 json.dump({'at': time.time(), 'j': j}, f)
             os.replace(path + '.tmp', path)
@@ -1875,9 +1875,24 @@ def _archive_json(u, fresh_s=6 * 3600, stale_s=72 * 3600):
         return j
     except Exception as e:
         if have and age < stale_s:
-            print('forecast archive refused (%s); using the copy from %.1f h ago' % (str(e)[:60], age / 3600))
+            print('%s refused (%s); using the copy from %s ago'
+                  % (what, str(e)[:60], ('%.0f min' % (age / 60)) if age < 5400 else ('%.1f h' % (age / 3600))))
             return have['j']
         raise
+
+
+# THE LIVE RUN, KEPT TOO (2026-11-18). Today's hours come only from the live forecast call, and from 11-12 Open-Meteo
+# refused it (HTTP 429, or a timeout) on 16-27% of the five-minute bakes -- 234 of 2,835 trail rows 11-07..11-18, none
+# before 11-12 -- each of them a bake with no model for today (first a floor-only call, since 11-18 a bake that writes
+# nothing). The models behind it change hourly at most, so the answer is kept in _kalshi/_cache_live (carried between
+# runs by the workflow's quarter-hour cache) and reused for 13 minutes: one live call a quarter hour instead of three,
+# shared by the high and the low. When the host refuses, a copy up to 90 minutes old stands in, so the noon lock has
+# its models; past that the no-model guard in _run_market still holds the last bake.
+_LIVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '_cache_live')
+
+
+def _live_json(u, tag='', fresh_s=13 * 60, stale_s=90 * 60):
+    return _archive_json(u, fresh_s=fresh_s, stale_s=stale_s, cache_dir=_LIVE_DIR, tag=tag, what='live run')
 
 
 def forecast_runs(cfg, past_days, model=None, today=None):
@@ -1949,7 +1964,7 @@ def forecast_runs(cfg, past_days, model=None, today=None):
           '&hourly=temperature_2m&forecast_days=2&temperature_unit=fahrenheit'
           '&timezone=%s' % (cfg['lat'], cfg['lon'], tz) + mq)
     try:
-        absorb(get_json(u2, timeout=40)['hourly'])
+        absorb(_live_json(u2)['hourly'])
     except Exception as e:
         print('live run unavailable (%s); today falls back to archive' % e)
     return out
@@ -1974,8 +1989,10 @@ def fresh_runs(cfg, hour):
     # +1retry" on nine of twenty cities and 186s on two -- every one of them
     # exactly the 90 s timeout plus the backoff, never a slow answer. A hung
     # socket costs whatever the timeout is, so the timeout is the cost.
-    h = get_json(u, timeout=30)['hourly']
+    # kept for three hours a day (2026-11-18): yesterday's run for today does not change, and this was a third
+    # six-model call on every bake. Tagged with the date so a copy never answers for another day.
     today = local_now(cfg).date().isoformat()
+    h = _live_json(u, tag='#' + today, fresh_s=3 * 3600, stale_s=20 * 3600)['hourly']
     out = {}
     for m in models_for(cfg):
         key = 'temperature_2m_previous_day1_' + m
