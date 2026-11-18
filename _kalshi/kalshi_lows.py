@@ -298,6 +298,37 @@ def gap_table(obh_raw, daily_raw, h0_of, hour, before=None, min_n=40):
     return {g: c / float(n) for g, c in cnt.items()}, n
 
 
+# THE GAP TABLE FROM OUR OWN LOCKS (2026-11-18, user: "look for more improvements in LOWS"). gap_table() is measured on
+# the archive's hourly readings, where the settled low sits a degree under the hourly minimum on a quarter of days --
+# so with the low in hand at the bottom of its bracket the lock said 49% (10-08, 10-10, 10-15, 10-18, 11-14 ...). The
+# reading the LIVE bake holds is better than the archive's (specials, the six-hour group), and against it the
+# settled low was round(reading) on 30 of the 38 binding live locks -- 21 of 23 since October, the other two being
+# day's-end drops -- while the market priced those days at 88% and we at 75%. So from LOCK_HOUR on, a binding hour
+# reads its table off the record's own binding locks: g = settled - round(reading in hand), the last LIVE_GAP_N of
+# them, once there are LIVE_GAP_MIN. Walk-forward on the locks that had 20 before them (16): log loss .466 -> .319,
+# Brier .238 -> .134, same 15 picks, better in both halves; the market on the same days .288 / .136. Before
+# LOCK_HOUR the minimum is still being made and the archive table stands; replays (low_study) keep the archive too.
+LIVE_GAP_N, LIVE_GAP_MIN = 30, 20
+
+
+def live_gap_table(hist, before, n=LIVE_GAP_N, min_n=LIVE_GAP_MIN):
+    """({g: share}, n) from the settled live binding locks dated before `before`, or None when there are too few"""
+    gs = []
+    for d in sorted(hist):
+        h = hist[d]
+        L_ = h.get('lock') or {}
+        if d >= before or h.get('backtest') or h.get('actual') is None or not L_.get('binding') or L_.get('obs_at_lock') is None:
+            continue
+        g = int(round(float(h['actual']) - math.floor(float(L_['obs_at_lock']) + 0.5)))
+        if -6 <= g <= 1:
+            gs.append(g)
+    gs = gs[-n:]
+    if len(gs) < min_n:
+        return None
+    cnt = collections.Counter(gs)
+    return {g: c / float(len(gs)) for g, c in cnt.items()}, len(gs)
+
+
 def empirical_ps(rows_neg, run_neg, table, cap=None, shift=0.0):
     """Bracket probabilities from the gap table: the settled low is the running
     minimum plus k, with the table's weight on each k.
@@ -406,7 +437,7 @@ BIND_EVE_FROM, BIND_WHEN_BEFORE = 18, 14       # the local hour an evening low s
 
 
 def snapshot(fcm, bias_of, daily, obh, h0_of, k, hour, rows_neg, floor_on=True, gaps=None, exact=None,
-             mk=None, w=0.0, tail=0.0, drops=None):
+             mk=None, w=0.0, tail=0.0, drops=None, live_gaps=None):
     """One decision in negated space: (pred, sd, floor, pf, binding, ps) or None.
     `gaps` = (obh_raw, daily_raw) enables the empirical gap distribution when
     the floor binds. `exact` is the negated exact ceiling (six-hour group or
@@ -480,11 +511,12 @@ def snapshot(fcm, bias_of, daily, obh, h0_of, k, hour, rows_neg, floor_on=True, 
     ps = K.distribution(rows_neg, pred, sd, fl)
     emp = None
     if bind and gaps and r is not None and not is_exact:
-        t = gap_table(gaps[0], gaps[1], h0_of, min(hour, 23), before=k)
+        own = live_gaps if (live_gaps and hour >= LOCK_HOUR) else None      # the record's own table (see live_gap_table)
+        t = own or gap_table(gaps[0], gaps[1], h0_of, min(hour, 23), before=k)
         e = empirical_ps(rows_neg, r, t[0], cap=(-live if live is not None else None)) if t else None
         if e:
             ps = e
-            emp = {'n': t[1], 'table': {str(g): round(w, 3) for g, w in sorted(t[0].items())}}
+            emp = {'n': t[1], 'table': {str(g): round(w, 3) for g, w in sorted(t[0].items())}, 'src': 'live' if own else 'archive'}
     drop = None
     if not bind and floor_on and drops and r is not None and pf is not None and not over:
         t = drop_table(drops(k), pf - fl)
@@ -840,7 +872,7 @@ def run_market(cfg, dry_dir=None):
         print('%s ceiling %.2f (six-hour %s, climate report %s)' % (cfg['key'], cap, six, cmin))
     s = snapshot(fcm, bias_of, daily, obh, h0_of, tkey, hour, rows_neg, gaps=(obh_raw, daily_raw),
                  exact=(-cap if cap is not None else None), mk=neg_centre(rows), w=W_AM, tail=TAIL,
-                 drops=drops_for(hour)) if rows else None
+                 drops=drops_for(hour), live_gaps=live_gap_table(hist, tkey)) if rows else None
     if s and s.get('mpull') and abs(s['mpull']['shift']) > 0.005:
         print('%s market pull: %+.2f (ours %.2f, market centre %.2f, w %s)' % (cfg['key'], s['mpull']['shift'],
                                                                               -s['pred'] - s['mpull']['shift'], s['mpull']['mk'], W_AM))
