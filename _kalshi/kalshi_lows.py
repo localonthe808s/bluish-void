@@ -402,7 +402,7 @@ def drop_table(entries, drop, min_n=DROP_MIN_N):
         lo, hi = max(0, lo - 1), min(len(bins) - 1, hi + 1)
 
 
-BIND_MARGIN, BIND_MARGIN_BEFORE = 0.0, 14      # degF of forecast fall under the reading in hand (0 = OFF, see snapshot); local hour
+BIND_EVE_FROM, BIND_WHEN_BEFORE = 18, 14       # the local hour an evening low starts (None = OFF, see snapshot); the rule's last hour
 
 
 def snapshot(fcm, bias_of, daily, obh, h0_of, k, hour, rows_neg, floor_on=True, gaps=None, exact=None,
@@ -436,26 +436,33 @@ def snapshot(fcm, bias_of, daily, obh, h0_of, k, hour, rows_neg, floor_on=True, 
     day = fc.get(k) or {}
     over = bool(day) and not [h for h in day if h >= hour]
     bind = fl is not None and ((pf is not None and fl >= pf) or over)
-    # THE BINDING MARGIN (2026-11-18, user: "look for more improvements in LOWS"). A morning was NOT binding whenever the
-    # runs put the rest of the day's low anywhere under the reading in hand, and the centre then went to that forecast.
-    # On the 28 such live 8 AM locks the day did one of two things: it settled on the low already in hand, or it fell
-    # 3 to 9 degrees on an evening front -- and the size of the forecast fall told them apart. Under 2 F (17 locks): the
-    # low was already in on 15, a real fall came on none, and the sheet was right on 10. 2 F or more (11): a real fall
-    # on 9. A fall under BIND_MARGIN is the runs' noise, not a front, so such an hour is BINDING: the centre is the
-    # reading and the gap table speaks. Walk-forward on those 28: 14 -> 17 right, log loss 1.55 -> 1.29, both halves
-    # (margins 1.5-2.5 all gain; 3 loses); on the 17 it beats the market pull that has run there since 11-16
-    # (13 right / .67 against 11 / .93; the market 13 / .53). Only before BIND_MARGIN_BEFORE: in the evening a small
-    # forecast fall is an hour or two away and real.
-    # OFF (BIND_MARGIN = 0) UNTIL THE USER RULES: the archive replay disagrees. low_study.replay over the same 68 settled
-    # days at 8 AM: margin 0 -> 49 right, log loss .877; 2.0 -> 47, .906 (10-05 and 10-14 turn from hits to misses: days
-    # that settled 1-2 under the reading). The replay is already right on the days the live sheet missed -- the archive's
-    # runs do not show the small falls the LIVE 8 AM run did -- so it cannot see the class this fixes, only its cost.
-    # Replays (low_study) read the same constant, so turning it on changes the nightly studies too.
+    # WHEN THE REST OF THE DAY'S LOW IS DUE (2026-11-18, user: "that should depend on when lows happen"). At Central
+    # Park the day's low comes in the morning (by 9 AM on 46 of 66 live days) or at the very end of the day (6 PM to
+    # midnight on 19, an evening front or a clear evening) and never between (1). So an hour that is "not binding"
+    # -- the runs put the rest of the day's low under the reading in hand -- is one of two different things, told
+    # apart by the HOUR the runs put that low:
+    #   in the evening (22 of the 28 such live 8 AM locks): a real question. A forecast fall of 2 F or more came true
+    #     on 9 of 9; under 2 F the low was already in on 8 and the day's end slipped 1-2 under on 5. Left as it is
+    #     (the forecast centre, the market pull).
+    #   before the evening (6 of 28): the "low" the runs see is only the next hour or two of the same morning, read
+    #     through a bias fitted on whole-day lows -- noise. The low was already in on 5 of the 6 (1 under on the
+    #     other), whatever the size of the fall (two of them were 2.7 and 4.0 F), and the sheet was right on 3.
+    #     Such an hour is BINDING: the centre is the reading and the gap table speaks.
+    # A flat 2 F margin on the fall was tried first and split its two tests (live locks +3 right; the archive replay
+    # -2, on evening-low days): the timing is what separates them, not the size. THIS rule, both tests: the 28 live
+    # locks walk-forward 14 -> 17 right, log loss 1.55 -> 1.18, both halves (the 9 it touches: 5 -> 8 right, 1.58 ->
+    # .43; the market 8, .33; one day lost, 10-01, which settled 1 under and the market missed too); the archive
+    # replay of the same 68 days changes no pick (49 right, log loss .877 -> .884). BIND_EVE_FROM = None turns it
+    # off; replays (low_study) read the same. Only before BIND_WHEN_BEFORE, when the morning is what is in hand.
     bind_m = False
-    if (not bind and floor_on and BIND_MARGIN and fl is not None and pf is not None and not over
-            and hour < BIND_MARGIN_BEFORE):
-        base = max(x for x in (r, live) if x is not None)        # the lowest reading in hand (negated), no offset
-        if pf - base < BIND_MARGIN:
+    if (not bind and floor_on and BIND_EVE_FROM is not None and fl is not None and pf is not None and not over
+            and hour < BIND_WHEN_BEFORE):
+        hrs = []
+        for _m, _v in fcm.items():                               # each run's hour of the rest-of-day low (negated: its max)
+            _d = {h: t for h, t in (_v.get(k) or {}).items() if h >= hour}
+            if _d:
+                hrs.append(max(_d, key=lambda h: (_d[h], h)))
+        if len(hrs) >= 3 and sorted(hrs)[len(hrs) // 2] < BIND_EVE_FROM:
             bind, bind_m, pred = True, True, fl
     # THE MARKET PULL (2026-11-16; the highs' since 11-01): the centre moves toward the market's implied mean, in the
     # negated frame, so "never under the floor" reads "never above the ceiling". Off on a binding hour: there the
@@ -866,7 +873,7 @@ def run_market(cfg, dry_dir=None):
         mbest = max(range(len(lad)), key=lambda i: lad[i]['market'] or 0)
         T['context'] = K.day_context(daily, fcm, s['biases'], today, low=True)
         T.update({'pred': round(-s['pred'], 2), 'sd': round(s['sd'], 3), 'fc_low': (round(-s['pf'], 2) if s['pf'] is not None else None),
-                  'binding': s['bind'], 'bind_margin': (BIND_MARGIN if s.get('bind_m') else None), 'exact': s['exact'], 'gap_table': s.get('emp'),
+                  'binding': s['bind'], 'bind_when': (True if s.get('bind_m') else None), 'exact': s['exact'], 'gap_table': s.get('emp'),
                   'mpull': s.get('mpull'), 'drop': s.get('drop'), 'tail': s.get('tail'),
                   'day_over': bool(s['over']), 'day_decided': False,
                   'pick': lad[best]['label'], 'p': lad[best]['ours'],
