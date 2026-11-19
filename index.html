@@ -96542,7 +96542,7 @@ function closeAlertModal(){
         + A('OPENSTREETMAP', 'https://www.openstreetmap.org/copyright') + A('PROTOMAPS', 'https://protomaps.com'); },
       land: function(){ return A('USGS ANNUAL NLCD (LAND COVER, LOWER 48)', 'https://www.usgs.gov/centers/eros/science/annual-national-land-cover-database') + A('CEC NORTH AMERICAN LAND CHANGE MONITORING SYSTEM 2020 (CANADA, MEXICO, ALASKA)', 'https://www.cec.org/north-american-environmental-atlas/land-cover-30m-2020/')
         + A('USDA NASS CROPLAND DATA LAYER (VIA SOURCE COOPERATIVE)', 'https://www.nass.usda.gov/Research_and_Science/Cropland/SARS1a.php') + A('MONITORING TRENDS IN BURN SEVERITY (USGS / USFS)', 'https://www.mtbs.gov/') + A('NIFC WFIGS INTERAGENCY PERIMETERS, YEAR TO DATE', 'https://data-nifc.opendata.arcgis.com/')
-        + A('NASA HARMONIZED LANDSAT AND SENTINEL-2 (HLS), VIA GIBS', 'https://www.earthdata.nasa.gov/data/projects/hls') + A('NASA OPERA DIST-ALERT (PLANT LOSS), VIA GIBS', 'https://www.jpl.nasa.gov/go/opera/products/dist-product/')
+        + A('NASA HARMONIZED LANDSAT AND SENTINEL-2 (HLS), VIA GIBS', 'https://www.earthdata.nasa.gov/data/projects/hls') + A('NASA VIIRS / MODIS 8-DAY SURFACE REFLECTANCE, VIA GIBS', 'https://www.earthdata.nasa.gov/data/instruments/viirs') + A('NASA OPERA DIST-ALERT (PLANT LOSS), VIA GIBS', 'https://www.jpl.nasa.gov/go/opera/products/dist-product/')
         + A('OPENSTREETMAP', 'https://www.openstreetmap.org/copyright') + A('PROTOMAPS', 'https://protomaps.com'); },
       leaf: function(){ return A('NASA MODIS NDVI 8-DAY (GIBS)', 'https://gibs.earthdata.nasa.gov') + A('MODIS IGBP LAND COVER', 'https://lpdaac.usgs.gov/products/mcd12q1v061/') + A('USA NATIONAL PHENOLOGY NETWORK (SPRING INDEX, FALL REPORTS)', 'https://www.usanpn.org')
         + A('USFS LIVE TREE SPECIES BASAL AREA (WILSON ET AL. 2013)', 'https://doi.org/10.2737/RDS-2013-0013') + A('USFS FOREST ATLAS, FOREST TYPE GROUPS', 'https://data.fs.usda.gov/geodata/rastergateway/forest_type/')
@@ -102921,7 +102921,7 @@ function closeAlertModal(){
         var z = Math.min(c.z, o.maxNative), k = Math.pow(2, c.z - z), px = Math.floor(c.x / k), py = Math.floor(c.y / k), sz = 256 / k, ox = (c.x - px * k) * sz, oy = (c.y - py * k) * sz;
         var fin = function(){ if (!sent){ sent = true; done(null, cv); } };
         var next = function(){
-          if (cv._dead || left < 330 || i >= o.n || !self._map){ fin(); return; }
+          if (cv._dead || left < 330 || i >= o.n || !self._map){ if (o.tidy && !cv._dead && !cv._tidy){ cv._tidy = 1; try { o.tidy(od); g.putImageData(out, 0, 0); } catch(e){} } fin(); return; }
           var ii = i++, u = o.url(ii, z, px, py); if (!u){ next(); return; }
           /* fetched, not an <img>: a tile without GIBS's layer-time-actual header is not the layer (some days come back as another
              product's striped imagery, 2026-10-29), and only fetch can read the header */
@@ -102949,12 +102949,114 @@ function closeAlertModal(){
     GB.ramp = function(stops){ return '<span style="display:inline-block;width:120px;height:9px;border-radius:2px;vertical-align:-1px;margin:0 5px;background:linear-gradient(90deg,' + stops.join(',') + ');"></span>'; };
     /* the key strip over the map, shared by WATER's two switches */
     GB.el = function(){ var e = document.getElementById('lc-ngkey'); if (!e){ e = document.createElement('div'); e.id = 'lc-ngkey'; e.style.cssText = 'padding:4px 12px 6px;font:700 9px/1.6 system-ui,sans-serif;letter-spacing:.06em;color:#fff;'; mapEl.parentNode.insertBefore(e, mapEl); } return e; };
+    /* A CLEANER PICTURE (2026-11-18, user: "can we improve satellite photo in land cover?"). The stack above took each PIXEL from
+       the newest pass that was not white: at regional zooms that is a quilt of passes in different light, salted with every thin
+       cloud, cloud edge and shadow the white test let through. Measured on the Northeast, 15 days of passes: 16.8% of the drawn
+       pixels were speckle and 7.8% still cloud. Two layers now:
+       UNDER (GB.under): NASA's own 8-day composite from VIIRS (NOAA-20 surface reflectance, true color, ~1 km) -- one seamless,
+         current picture; cloud and snow left over in it fall through to the 8 days before, water is left to the map's own.
+       OVER, from zoom 9 (GB.photo): the 30 m passes, cleaned -- cloud AND haze out, each grown two pixels, dark ground beside
+         cloud (its shadow) out; a pass that is mostly cloud over a tile waits until the clear ones have filled it (the three
+         clearest are kept); every pass is toned to the composite (one fixed tone for all, so tiles do not checker); a pass whose
+         color balance is off against the composite -- a haze or smoke scene -- waits too; water is not drawn; what no pass
+         filled is the composite itself, in the same tile; lone outlier pixels are smoothed. Same area, same passes: speckle 0.6-1.1%, cloud left 0.1-0.6%. */
+    GB.LIFT = (function(){ var t = new Uint8Array(256); for (var i = 0; i < 256; i++) t[i] = Math.round(255 * Math.pow(i / 255, .72)); return t; })();
+    GB.TONE = [.55, .46, .37];            /* a 30 m pass against the composite, typical clear scene (red, green, blue) */
+    GB.SHAPE = [1.22, 1.0, .78];          /* that tone's balance; a pass more than .14 off it is hazy or tinted */
+    GB.grow = function(m, n){ var t = new Uint8Array(65536); for (var it = 0; it < n; it++){ t.set(m);
+        for (var p = 0; p < 65536; p++){ if (t[p]) continue; var x = p & 255; if ((p >= 256 && t[p - 256]) || (p < 65280 && t[p + 256]) || (x && t[p - 1]) || (x < 255 && t[p + 1])) m[p] = 1; } } return m; };
+    GB.per8 = function(end, i){ return GB.dstr(end - i * 8 * 864e5); };   /* GIBS answers any day with the 8-day period it falls in */
+    GB.uLayer = function(end){ return new Date(end).getUTCFullYear() < 2019 ? 'MODIS_Terra_L3_SurfaceReflectance_Bands143_8Day' : 'VIIRS_NOAA20_L3_SurfaceReflectance_BandsM5-M4-M3_8Day'; };
+    GB.uUrl = function(end, i, z, x, y){ return GB.B + GB.uLayer(end) + '/default/' + GB.per8(end, i) + '/GoogleMapsCompatible_Level8/' + z + '/' + y + '/' + x + '.jpg'; };
+    GB.uCloud = function(r, g, b){ var lo = Math.min(r, g, b), hi = Math.max(r, g, b); return lo > 150 && hi - lo < 50; };
+    GB.uWater = function(r, g, b){ return b > r + 4 && b >= g - 6 && Math.max(r, g, b) < 120; };
+    /* what the cloud test leaves behind over open water is a scatter of small bright patches: every drawn patch under 40 pixels
+       (joined by their sides) is cleared -- at the composite's zooms that is smaller than any island the map would miss */
+    GB.lone = function(od){ var lab = new Uint8Array(65536), st = new Int32Array(65536), p, q, n, top, k, i, c;
+      for (p = 0; p < 65536; p++){ if (lab[p] || !od[p * 4 + 3]) continue; top = 0; st[top++] = p; lab[p] = 1; n = 0; var mem = [];
+        while (top){ q = st[--top]; n++; if (n <= 40) mem.push(q); var x = q & 255;
+          c = q - 256; if (c >= 0 && !lab[c] && od[c * 4 + 3]){ lab[c] = 1; st[top++] = c; }
+          c = q + 256; if (c < 65536 && !lab[c] && od[c * 4 + 3]){ lab[c] = 1; st[top++] = c; }
+          if (x){ c = q - 1; if (!lab[c] && od[c * 4 + 3]){ lab[c] = 1; st[top++] = c; } }
+          if (x < 255){ c = q + 1; if (!lab[c] && od[c * 4 + 3]){ lab[c] = 1; st[top++] = c; } } }
+        if (n < 40) for (i = 0; i < mem.length; i++) od[mem[i] * 4 + 3] = 0; } };
+    GB.under = function(end, pane){ end = end || Date.now() - 864e5; return GB.mk({ pane: pane || 'lcLand', zIndex: 1, maxNative: 8, maxZoom: 8, n: 4, opacity: 1, end: end, smooth: true, under: true, tidy: GB.lone,
+      url: function(i, z, x, y){ return GB.uUrl(end, i, z, x, y); },
+      pick: function(r, g, b){ if (GB.uCloud(r, g, b) || Math.max(r, g, b) < 14) return 0; return GB.uWater(r, g, b) ? 1 : 2; },   /* near-black: no reading there, or open sea */
+      map: function(r, g, b){ return [GB.LIFT[r], GB.LIFT[g], GB.LIFT[b], 255]; } }); };
+    /* the composite under one tile, for toning: its pixels and which of them are clear land (cached per composite tile) */
+    GB.refC = {};
+    GB.ref = function(end, c){ var z = Math.min(c.z, 8), k = Math.pow(2, c.z - z), px = Math.floor(c.x / k), py = Math.floor(c.y / k), sz = 256 / k, ox = (c.x - px * k) * sz, oy = (c.y - py * k) * sz;
+      var key = GB.dstr(end) + '/' + z + '/' + px + '/' + py, im = GB.refC[key];
+      if (!im){ var ks = Object.keys(GB.refC); if (ks.length > 40) delete GB.refC[ks[0]];
+        var tryI = function(i){ return i >= 3 ? Promise.resolve(null) : fetch(GB.uUrl(end, i, z, px, py)).then(function(r){ if (!r.ok || !r.headers.get('layer-time-actual')) throw 0; return r.blob(); }).then(function(b){ return createImageBitmap(b); }).catch(function(){ return tryI(i + 1); }); };
+        im = GB.refC[key] = tryI(0); }
+      return im.then(function(bm){ if (!bm) return null; var c2 = document.createElement('canvas'); c2.width = c2.height = 256; var g2 = c2.getContext('2d'); g2.imageSmoothingEnabled = true;
+        g2.drawImage(bm, ox, oy, sz, sz, 0, 0, 256, 256); var d = g2.getImageData(0, 0, 256, 256).data, ok = new Uint8Array(65536), w = new Uint8Array(65536);
+        for (var p = 0; p < 65536; p++){ var q = p * 4; if (!GB.uCloud(d[q], d[q + 1], d[q + 2]) && !GB.uWater(d[q], d[q + 1], d[q + 2]) && Math.max(d[q], d[q + 1], d[q + 2]) >= 14) ok[p] = 1; else if (!GB.uCloud(d[q], d[q + 1], d[q + 2])) w[p] = 1; }   /* w: the composite has water or open sea here */
+        return { d: d, ok: ok, w: w }; }).catch(function(){ return null; }); };
+    GB.Photo = L.GridLayer.extend({
+      createTile: function(c, done){ var o = this.options, self = this, cv = document.createElement('canvas'); cv.width = cv.height = 256;
+        var g = cv.getContext('2d'), out = g.createImageData(256, 256), od = out.data, src = cv._src = new Uint8Array(65536), left = 65536, i = 0, sent = false, stash = [], ref = null, LIFT = GB.LIFT;
+        var z = Math.min(c.z, o.maxNative), k = Math.pow(2, c.z - z), px = Math.floor(c.x / k), py = Math.floor(c.y / k), sz = 256 / k, ox = (c.x - px * k) * sz, oy = (c.y - py * k) * sz;
+        var fin = function(){ if (!sent){ sent = true; done(null, cv); } };
+        /* one pass over this tile -> what is usable in it, how clear it is, and its tone against the composite */
+        var read = function(d, ii){ var val = new Uint8Array(65536), hard = new Uint8Array(65536), bad = new Uint8Array(65536), wat = new Uint8Array(65536), nv = 0, nh = 0, nb = 0, p, q, r, gg, b, lo, hi;
+          for (p = 0; p < 65536; p++){ q = p * 4; if (!d[q + 3]) continue; r = d[q]; gg = d[q + 1]; b = d[q + 2]; lo = Math.min(r, gg, b); hi = Math.max(r, gg, b); if (hi < 6) continue;
+            val[p] = 1; nv++; if (lo > 165 && hi - lo < 40){ hard[p] = 1; bad[p] = 1; nh++; } else if (lo > 120 && hi - lo < 45) bad[p] = 1; else if (b >= r + 6 && hi < 70) wat[p] = 1; }
+          if (nv < 200) return null;
+          /* pale gray where the composite has water is cloud or glint over the sea, in any pass: seen, not drawn */
+          if (ref) for (p = 0; p < 65536; p++){ if (bad[p] && ref.w[p]){ bad[p] = 0; if (hard[p]){ hard[p] = 0; nh--; } wat[p] = 1; } }
+          /* IS THERE CLOUD IN THIS PASS AT ALL? White and pale gray are also roofs, concrete, sand. A pass counts as cloudy when 9% of it
+             is white, or 4% and the white is smooth (cloud tops are; a city's roofs are not: mean step 20-60 against 85-125). Only then
+             are its pale pixels thrown out, with a two-pixel margin and the dark ground beside them (shadow). */
+          var rough = 0, nr = 0; for (p = 0; p < 65279; p++){ if (!hard[p] || (p & 255) === 255) continue; q = p * 4; var l0 = d[q] + d[q + 1] + d[q + 2]; rough += Math.abs(l0 - d[q + 4] - d[q + 5] - d[q + 6]) + Math.abs(l0 - d[q + 1024] - d[q + 1025] - d[q + 1026]); nr++; }
+          rough = nr ? rough / nr / 3 : 0; var hf = nh / nv, cloudy = hf >= .09 || (hf >= .04 && rough < 70);
+          if (!cloudy) bad = new Uint8Array(65536);
+          else { GB.grow(bad, 2);
+            var near = GB.grow(new Uint8Array(bad), 4), sl = 0, nl = 0;
+            for (p = 0; p < 65536; p += 3){ if (val[p] && !bad[p] && !wat[p]){ q = p * 4; sl += d[q] + d[q + 1] + d[q + 2]; nl++; } }
+            var dark = nl ? .6 * sl / nl : 0;
+            for (p = 0; p < 65536; p++){ if (near[p] && !bad[p] && val[p] && !wat[p]){ q = p * 4; if (d[q] + d[q + 1] + d[q + 2] < dark) bad[p] = 1; } }
+            for (p = 0; p < 65536; p++) if (bad[p] && val[p]) nb++; }
+          var S = { d: d, ii: ii, val: val, bad: bad, hard: cloudy ? hard : bad, wat: wat, clear: 1 - nb / nv, odd: false };
+          if (ref){ var a = [0, 0, 0], u = [0, 0, 0], n = 0, rd = ref.d;
+            for (p = 0; p < 65536; p += 2){ if (val[p] && !bad[p] && !wat[p] && ref.ok[p]){ q = p * 4; a[0] += d[q]; a[1] += d[q + 1]; a[2] += d[q + 2]; u[0] += rd[q]; u[1] += rd[q + 1]; u[2] += rd[q + 2]; n++; } }
+            if (n >= 400){ var t = [u[0] / Math.max(1, a[0]), u[1] / Math.max(1, a[1]), u[2] / Math.max(1, a[2])], m = (t[0] + t[1] + t[2]) / 3;
+              S.odd = m < .36 || Math.max(Math.abs(t[0] / m - GB.SHAPE[0]), Math.abs(t[1] / m - GB.SHAPE[1]), Math.abs(t[2] / m - GB.SHAPE[2])) > .14; } }   /* m < .36: the whole pass far brighter than the composite -- thin cloud over it */
+          return S; };
+        var put = function(S, relaxed){ var d = S.d, T = GB.TONE, M0 = relaxed ? S.hard : S.bad, add = 0, p, q;
+          for (p = 0; p < 65536; p++){ if (src[p] || !S.val[p] || M0[p]) continue; src[p] = S.ii + 1; left--; if (S.wat[p]) continue; q = p * 4;
+            od[q] = LIFT[Math.min(255, d[q] * T[0]) | 0]; od[q + 1] = LIFT[Math.min(255, d[q + 1] * T[1]) | 0]; od[q + 2] = LIFT[Math.min(255, d[q + 2] * T[2]) | 0]; od[q + 3] = 255; add++; }
+          return add; };
+        /* a lone pixel far brighter or darker than all eight round it is what the masks missed: it takes their mean */
+        var smooth = function(){ var p, q, x, y, j, n, lm = new Float32Array(65536); for (p = 0; p < 65536; p++){ q = p * 4; lm[p] = od[q + 3] ? od[q] + od[q + 1] + od[q + 2] : -1; }
+          for (y = 1; y < 255; y++) for (x = 1; x < 255; x++){ p = y * 256 + x; if (lm[p] < 0) continue; var mn = 1e9, mx = -1, sr = 0, sg = 0, sb = 0; n = 0;
+            for (j = 0; j < 9; j++){ if (j === 4) continue; var pp = p + ((j / 3 | 0) - 1) * 256 + (j % 3) - 1, v = lm[pp]; if (v < 0) continue; if (v < mn) mn = v; if (v > mx) mx = v; q = pp * 4; sr += od[q]; sg += od[q + 1]; sb += od[q + 2]; n++; }
+            if (n >= 5 && (lm[p] > mx + 54 || lm[p] < mn - 54)){ q = p * 4; od[q] = sr / n; od[q + 1] = sg / n; od[q + 2] = sb / n; } } };
+        /* the end of a tile: the passes that waited; then, where it is still empty, those passes again with only their white cores
+           left out (a hazy look beats a blur); then the 8-day composite itself (source 255), never over water a pass saw */
+        var close = function(){ stash.forEach(function(S){ put(S); }); stash.forEach(function(S){ put(S, true); }); stash = [];
+          if (ref){ var rd = ref.d, p, q; for (p = 0; p < 65536; p++){ if (src[p] || !ref.ok[p]) continue; q = p * 4; src[p] = 255; od[q] = LIFT[rd[q]]; od[q + 1] = LIFT[rd[q + 1]]; od[q + 2] = LIFT[rd[q + 2]]; od[q + 3] = 255; } }
+          smooth(); GB.lone(od); g.putImageData(out, 0, 0); fin(); };   /* lone: the small patches left over the sea */
+        var next = function(){
+          if (cv._dead || !self._map){ stash = []; fin(); return; }
+          if (left < 330 || i >= o.n){ close(); return; }
+          var ii = i++, u = o.url(ii, z, px, py); if (!u){ next(); return; }
+          fetch(u).then(function(r){ if (!r.ok || !r.headers.get('layer-time-actual')) throw 0; return r.blob(); }).then(function(bl){ return createImageBitmap(bl); }).then(function(im){ try { var c2 = document.createElement('canvas'); c2.width = c2.height = 256; var g2 = c2.getContext('2d'); g2.imageSmoothingEnabled = false;
+              g2.drawImage(im, ox, oy, sz, sz, 0, 0, 256, 256); var S = read(g2.getImageData(0, 0, 256, 256).data, ii);
+              if (S){ if (S.clear >= .6 && !S.odd){ if (put(S)) g.putImageData(out, 0, 0); }
+                else { S.rank = S.clear - (S.odd ? 1 : 0); stash.push(S); stash.sort(function(A, B){ return B.rank - A.rank; }); if (stash.length > 3) stash.length = 3; } } } catch(e){}
+            fin(); next(); }).catch(function(){ next(); }); };
+        (o.ref ? o.ref(c) : Promise.resolve(null)).then(function(R){ ref = R; next(); });
+        return cv; } });
     /* SATELLITE PHOTO: HLS, Landsat 8/9 + Sentinel-2A/B/C at 30 m, the newest clear pass of the last two weeks at each spot */
     GB.dstr = function(ms){ return new Date(ms).toISOString().slice(0, 10); };
     /* end: the newest day to use (ms; default yesterday) -- the fifteen days up to it; pane: where to draw (BEFORE/AFTER's left side) */
-    GB.photo = function(end, pane){ end = end || Date.now() - 864e5; return GB.mk({ pane: pane || 'lcLand', maxNative: 12, n: 30, opacity: 1, end: end,
-      url: function(i, z, x, y){ return GB.u(i & 1 ? 'HLS_L30_Nadir_BRDF_Adjusted_Reflectance' : 'HLS_S30_Nadir_BRDF_Adjusted_Reflectance', 12, GB.dstr(end - (i >> 1) * 864e5), z, x, y); },
-      pick: function(r, g, b){ var lo = Math.min(r, g, b), hi = Math.max(r, g, b); if (lo > 165 && hi - lo < 40) return 0; if (hi < 6) return 0; return 2; } }); };   /* white and gray-white: cloud */
+    GB.photo = function(end, pane){ end = end || Date.now() - 864e5; var l = new GB.Photo({ pane: pane || 'lcLand', zIndex: 2, tileSize: 256, minZoom: 9, maxZoom: 19, updateWhenIdle: true, keepBuffer: 1, maxNative: 12, n: 30, opacity: 1, end: end,
+      ref: function(c){ return GB.ref(end, c); },
+      url: function(i, z, x, y){ return GB.u(i & 1 ? 'HLS_L30_Nadir_BRDF_Adjusted_Reflectance' : 'HLS_S30_Nadir_BRDF_Adjusted_Reflectance', 12, GB.dstr(end - (i >> 1) * 864e5), z, x, y); } });
+      l.on('tileunload', function(e){ e.tile._dead = true; }); return l; };
     GB.photoSrc = function(i, end){ var d = GB.dstr((end || Date.now() - 864e5) - (i >> 1) * 864e5); return GB.dfmt(d) + (d.slice(0, 4) !== String(new Date().getFullYear()) ? ', ' + d.slice(0, 4) : '') + ' \u00b7 ' + (i & 1 ? 'LANDSAT' : 'SENTINEL-2'); };
     /* PLANT LOSS: OPERA DIST-ALERT, each spot's vegetation-loss status as of its latest pass (the last three weeks of passes);
        "no loss" is clear here (NASA paints it near-black) and the one-pass first sightings are left out as too noisy */
@@ -103230,8 +103332,10 @@ function closeAlertModal(){
         LND.layer(k, function(){ var l = L.tileLayer('https://cdn.bluishvoid.com/land/cdl/' + LND.cy + '/{z}/{x}/{y}.png?v=1', { pane: LND.pn(), minZoom: 3, maxNativeZoom: 9, maxZoom: 19, opacity: .9, crossOrigin: 'anonymous', bounds: L.latLngBounds([[24, -125.5], [49.7, -66.5]]), errorTileUrl: LF_GIF });
           l.on('tileload', function(e){ e.tile.style.imageRendering = 'pixelated'; }); return l; }); }
       else if (LND.mode === 'photo'){ k = 'photo' + LND.pKey(LND.pEnd); want[k] = 1; LND.pn(); LND.layer(k, function(){ return GB.photo(LND.pEnd); }); LND.photoL = LND.lay[k];
+        var ku = 'photoU' + LND.pKey(LND.pEnd); want[ku] = 1; LND.layer(ku, function(){ return GB.under(LND.pEnd); }); LND.photoU = LND.lay[ku];   /* the 8-day composite beneath (see A CLEANER PICTURE) */
         if (LND.cmp && LND.bEnd){ if (!M.getPane('lcLandB')){ var pb = M.createPane('lcLandB'); pb.style.zIndex = 443; pb.style.pointerEvents = 'none'; }
-          var kb = 'photoB' + LND.pKey(LND.bEnd); want[kb] = 1; LND.layer(kb, function(){ return GB.photo(LND.bEnd, 'lcLandB'); }); LND.photoB = LND.lay[kb]; } }
+          var kb = 'photoB' + LND.pKey(LND.bEnd); want[kb] = 1; LND.layer(kb, function(){ return GB.photo(LND.bEnd, 'lcLandB'); }); LND.photoB = LND.lay[kb];
+          var kbu = 'photoUB' + LND.pKey(LND.bEnd); want[kbu] = 1; LND.layer(kbu, function(){ return GB.under(LND.bEnd, 'lcLandB'); }); LND.photoUB = LND.lay[kbu]; } }
       else if (LND.mode === 'loss'){ k = 'loss'; want[k] = 1; LND.pn(); LND.layer(k, GB.loss); }
       else if (LND.mode === 'blaze'){ BZ.enter(); }
       else { k = 'fire' + LND.fy; want[k] = 1;
@@ -103269,7 +103373,9 @@ function closeAlertModal(){
         if (q && bd <= 8) INFO.show(LND.NA[q[3]], 'LAND COVER 2020 \u00b7 CEC NALCMS', '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;">At ' + la.toFixed(3) + ', ' + lo.toFixed(3) + '. Outside the lower 48 the map has one year, 2020 (Canada and Mexico 2020, Alaska 2021).</div>'); }); };
     LND.tap = function(e){ if (VIEW !== 'land' || LND.mode === 'blaze') return; var la = e.latlng.lat, lo = e.latlng.lng;
       if (LND.mode === 'photo'){ var left = LND.cmp && LND.photoB && M.latLngToContainerPoint(e.latlng).x < M.getSize().x * LND.swipe, PL = left ? LND.photoB : LND.photoL, a = GB.at(PL, e.latlng);
-        if (a && a.i >= 0 && a.p[3]) INFO.show('PHOTO FROM ' + GB.photoSrc(a.i, PL.options.end), 'NASA HLS · 30 M', '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;">The newest pass here without cloud over this spot. Landsat 8 and 9 and Sentinel-2 each pass every few days; together, about every two to three.</div>'); return; }
+        if (a && a.i >= 0 && a.i < 254 && a.p[3]) INFO.show('PHOTO FROM ' + GB.photoSrc(a.i, PL.options.end), 'NASA HLS · 30 M', '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;">The newest pass here without cloud over this spot. Landsat 8 and 9 and Sentinel-2 each pass every few days; together, about every two to three.</div>');
+        else { var UL = left ? LND.photoUB : LND.photoU, ua = a && a.i === 254 && a.p[3] ? { i: 0, p: a.p } : GB.at(UL, e.latlng);
+          if (ua && ua.i >= 0 && ua.p[3]) INFO.show('8-DAY PICTURE' + (a && a.i === 254 ? '' : ' FROM THE WEEK OF ' + GB.dfmt(GB.per8(UL.options.end, ua.i))), 'NASA ' + (/VIIRS/.test(GB.uLayer(UL.options.end)) ? 'VIIRS' : 'MODIS') + ' · ABOUT 1 KM', '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;">' + (M.getZoom() < 9 ? 'At this zoom the picture is NASA\'s eight-day composite: the clearest look at each spot over eight days. Zoom in for the 30 m passes.' : 'No clear 30 m pass here in the last two weeks, so the eight-day composite shows through.') + '</div>'); } return; }
       if (LND.mode === 'loss'){ var b0 = GB.at(LND.lay.loss, e.latlng), q0 = b0 && b0.p[3] ? GB.near(GB.DIST, b0.p) : null; if (!b0 || b0.i < 0) return;
         INFO.show(q0 ? q0[3].split(' · ')[0] + ' PLANT LOSS' : 'NO LOSS SEEN HERE', 'NASA OPERA DIST-ALERT · PASS OF ' + GB.dfmt(GB.day(b0.i + 1)), '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;">'
           + (q0 ? q0[3].replace(/^[A-Z]+ · /, '').replace(/^./, function(c){ return c; }) + '. ' : 'The latest clear pass found the plants here about as they have been in past years. ')
