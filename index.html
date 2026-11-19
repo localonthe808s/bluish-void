@@ -100936,21 +100936,46 @@ function closeAlertModal(){
        - only the base map flies. Every other pane fades out at takeoff and its tile layers are held still (no fetching or drawing for
          places merely passed over), then they load where the map lands and fade back in;
        - the star arrives when the map does, with a small pop, not before. */
+    /* SMOOTHER STILL (user 2026-11-18, with a recording of New York -> Los Angeles on TREES: "this looks great but how would you improve its
+       smoothness further?"). Read frame by frame, that flight ran at 40-56 frames a second for 2.7 s and showed three faults:
+       1. the foliage tiles never faded: they live in the base map's own pane, so they shrank to a bright rectangle as the map zoomed out;
+       2. at the top of the arc the ground was a void -- the continental tiles had not been asked for until the map got there;
+       3. the picture froze for 400 ms on landing, every held layer waking in the same frame.
+       So: a data layer is told from the ground by its address (MAPGO.GROUND) wherever it sits, and fades and holds like the rest; the
+       ground's low-zoom tiles along the way are fetched at takeoff, so they are in the browser's cache when the arc needs them; the
+       layers wake one per frame and the fade-in starts after the last; and a long trip may take 4.2 s, not 3.6. */
+    MAPGO.GROUND = /\/(relief|bathy|seafloor|depth|desert|rivers|lidar|hillshade)\//;
+    MAPGO.warm = function(ll, z){ try { var b = L.latLngBounds([M.getCenter(), ll]).pad(.35), zt = Math.max(2, Math.min(Math.floor(Math.min(M.getZoom(), z)) - 1, Math.floor(M.getBoundsZoom(b)))), n = 0;
+        M.eachLayer(function(l){ if (!(l instanceof L.TileLayer) || !l._url || !MAPGO.GROUND.test(l._url)) return; var o = l.options;
+          for (var zz = zt; zz <= zt + 2; zz++){ if ((o.minZoom != null && zz < o.minZoom) || (o.maxNativeZoom != null && zz > o.maxNativeZoom)) continue;
+            var k = Math.pow(2, zz), q0 = M.project(b.getNorthWest(), zz).divideBy(256).floor(), q1 = M.project(b.getSouthEast(), zz).divideBy(256).floor();
+            for (var x = q0.x; x <= q1.x; x++) for (var y = Math.max(0, q0.y); y <= Math.min(k - 1, q1.y); y++){ if (n++ > 160) return;
+              var im = new Image(); if (o.crossOrigin != null && o.crossOrigin !== false) im.crossOrigin = o.crossOrigin === true ? '' : o.crossOrigin;
+              im.src = L.Util.template(l._url, L.Util.extend({ s: l._getSubdomain ? l._getSubdomain({ x: x, y: y }) : '', r: '', x: ((x % k) + k) % k, y: o.tms ? k - 1 - y : y, z: zz }, o)); } } }); } catch(x){} };
     MAPGO.go = function(o){ if (!o || !M || !isFinite(o.lat) || !isFinite(o.lon)) return; MAPGO.shut(); KEEP.mark();
       var z = Math.max(M.getMinZoom() || 0, Math.min(M.getMaxZoom() || 19, o.z || 12)), ll = L.latLng(o.lat, o.lon), z0 = M.getZoom(), sz = M.getSize();
-      var span = M.project(M.getCenter(), z0).distanceTo(M.project(ll, z0)) / Math.max(1, Math.max(sz.x, sz.y)), dur = Math.max(1.0, Math.min(3.6, .9 + .55 * Math.log(1 + span) / Math.LN2 + .16 * Math.abs(z - z0)));
+      var span = M.project(M.getCenter(), z0).distanceTo(M.project(ll, z0)) / Math.max(1, Math.max(sz.x, sz.y)), dur = Math.max(1.0, Math.min(4.2, .9 + .6 * Math.log(1 + span) / Math.LN2 + .16 * Math.abs(z - z0)));
       if (MAPGO.land) MAPGO.land(true);                       /* a flight already under way hands over */
       try { if (MAPGO.mk){ M.removeLayer(MAPGO.mk); MAPGO.mk = null; } } catch(x){}
-      var held = []; try { M.eachLayer(function(l){ if (l instanceof L.GridLayer && l.options.pane && l.options.pane !== 'tilePane' && l._update && !l._bvHeld){ l._bvHeld = l._update; l._update = function(){}; held.push(l); } }); } catch(x){}
+      if (span > 1.5) MAPGO.warm(ll, z);
+      var held = [], faded = [];
+      try { M.eachLayer(function(l){ if (!(l instanceof L.GridLayer) || !l._update || l._bvHeld) return;
+          var base = !l.options.pane || l.options.pane === 'tilePane', data = !base || (l._url && !MAPGO.GROUND.test(l._url));
+          if (!data) return; l._bvHeld = l._update; l._update = function(){}; held.push(l);
+          if (base){ var c = l.getContainer && l.getContainer(); if (c){ c.style.transition = 'opacity .22s ease'; c.style.opacity = '0'; faded.push([c, l.options.opacity != null ? l.options.opacity : 1]); } } }); } catch(x){}
       mapEl.classList.remove('lc-landed'); mapEl.classList.add('lc-flying');
       var over = false, tm = 0;
       MAPGO.land = function(cut){ if (over) return; over = true; MAPGO.land = null; clearTimeout(tm); M.off('moveend', onEnd);
-        held.forEach(function(l){ try { l._update = l._bvHeld; l._bvHeld = null; if (l._map && !cut) l._resetView(); } catch(x){} });
-        mapEl.classList.remove('lc-flying'); if (cut) return;
-        mapEl.classList.add('lc-landed'); setTimeout(function(){ mapEl.classList.remove('lc-landed'); }, 900);
-        /* the spot: the site's star, orange and glowing (user 2026-11-18: "use an glowing orange star icon instead of the circle"), 20 s */
-        try { MAPGO.mk = L.marker(ll, { interactive: false, keyboard: false, zIndexOffset: 900, icon: L.divIcon({ className: 'lc-go-star', iconSize: [34, 34], iconAnchor: [17, 17], html: '<span>✦</span>' }) }).addTo(M);
-          var mk = MAPGO.mk; setTimeout(function(){ if (MAPGO.mk === mk){ try { M.removeLayer(mk); } catch(x){} MAPGO.mk = null; } }, 20000); } catch(x){} };
+        var show = function(){ faded.forEach(function(f){ f[0].style.transition = 'opacity .6s ease'; f[0].style.opacity = String(f[1]); setTimeout(function(){ f[0].style.transition = ''; }, 800); });
+          mapEl.classList.remove('lc-flying'); if (cut) return;
+          mapEl.classList.add('lc-landed'); setTimeout(function(){ mapEl.classList.remove('lc-landed'); }, 900);
+          /* the spot: the site's star, orange and glowing (user 2026-11-18: "use an glowing orange star icon instead of the circle"), 20 s */
+          try { MAPGO.mk = L.marker(ll, { interactive: false, keyboard: false, zIndexOffset: 900, icon: L.divIcon({ className: 'lc-go-star', iconSize: [34, 34], iconAnchor: [17, 17], html: '<span>✦</span>' }) }).addTo(M);
+            var mk = MAPGO.mk; setTimeout(function(){ if (MAPGO.mk === mk){ try { M.removeLayer(mk); } catch(x){} MAPGO.mk = null; } }, 20000); } catch(x){} };
+        if (cut){ held.forEach(function(l){ try { l._update = l._bvHeld; l._bvHeld = null; } catch(x){} }); show(); return; }
+        /* one layer wakes per frame (all at once froze the landing for 400 ms); the fade-in follows the last */
+        var i = 0, wake = function(){ if (i >= held.length){ show(); return; } var l = held[i++]; try { l._update = l._bvHeld; l._bvHeld = null; if (l._map) l._resetView(); } catch(x){} requestAnimationFrame(wake); };
+        requestAnimationFrame(wake); };
       var onEnd = function(){ if (MAPGO.land) MAPGO.land(); };
       M.on('moveend', onEnd); tm = setTimeout(onEnd, dur * 1000 + 1600);                                  /* the timer: a flight that never reports its end */
       try { M.flyTo(ll, z, { duration: dur, easeLinearity: .12 }); } catch(x){ M.setView(ll, z); onEnd(); } };
