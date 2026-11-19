@@ -102972,14 +102972,15 @@ function closeAlertModal(){
     GB.uWater = function(r, g, b){ return b > r + 4 && b >= g - 6 && Math.max(r, g, b) < 120; };
     /* what the cloud test leaves behind over open water is a scatter of small bright patches: every drawn patch under 40 pixels
        (joined by their sides) is cleared -- at the composite's zooms that is smaller than any island the map would miss */
-    GB.lone = function(od){ var lab = new Uint8Array(65536), st = new Int32Array(65536), p, q, n, top, k, i, c;
-      for (p = 0; p < 65536; p++){ if (lab[p] || !od[p * 4 + 3]) continue; top = 0; st[top++] = p; lab[p] = 1; n = 0; var mem = [];
-        while (top){ q = st[--top]; n++; if (n <= 40) mem.push(q); var x = q & 255;
-          c = q - 256; if (c >= 0 && !lab[c] && od[c * 4 + 3]){ lab[c] = 1; st[top++] = c; }
-          c = q + 256; if (c < 65536 && !lab[c] && od[c * 4 + 3]){ lab[c] = 1; st[top++] = c; }
-          if (x){ c = q - 1; if (!lab[c] && od[c * 4 + 3]){ lab[c] = 1; st[top++] = c; } }
-          if (x < 255){ c = q + 1; if (!lab[c] && od[c * 4 + 3]){ lab[c] = 1; st[top++] = c; } } }
-        if (n < 40) for (i = 0; i < mem.length; i++) od[mem[i] * 4 + 3] = 0; } };
+    GB.small = function(a, min){ var lab = new Uint8Array(65536), st = new Int32Array(65536), p, q, n, top, i, c;   /* a: 0/1 per pixel; patches under `min` are zeroed */
+      for (p = 0; p < 65536; p++){ if (lab[p] || !a[p]) continue; top = 0; st[top++] = p; lab[p] = 1; n = 0; var mem = [];
+        while (top){ q = st[--top]; n++; if (n <= min) mem.push(q); var x = q & 255;
+          c = q - 256; if (c >= 0 && !lab[c] && a[c]){ lab[c] = 1; st[top++] = c; }
+          c = q + 256; if (c < 65536 && !lab[c] && a[c]){ lab[c] = 1; st[top++] = c; }
+          if (x){ c = q - 1; if (!lab[c] && a[c]){ lab[c] = 1; st[top++] = c; } }
+          if (x < 255){ c = q + 1; if (!lab[c] && a[c]){ lab[c] = 1; st[top++] = c; } } }
+        if (n < min) for (i = 0; i < mem.length; i++) a[mem[i]] = 0; } return a; };
+    GB.lone = function(od){ var a = new Uint8Array(65536), p; for (p = 0; p < 65536; p++) a[p] = od[p * 4 + 3] ? 1 : 0; GB.small(a, 40); for (p = 0; p < 65536; p++) if (!a[p]) od[p * 4 + 3] = 0; };
     GB.under = function(end, pane){ end = end || Date.now() - 864e5; return GB.mk({ pane: pane || 'lcLand', zIndex: 1, maxNative: 8, maxZoom: 8, n: 4, opacity: 1, end: end, smooth: true, under: true, tidy: GB.lone,
       url: function(i, z, x, y){ return GB.uUrl(end, i, z, x, y); },
       pick: function(r, g, b){ if (GB.uCloud(r, g, b) || Math.max(r, g, b) < 14) return 0; return GB.uWater(r, g, b) ? 1 : 2; },   /* near-black: no reading there, or open sea */
@@ -102990,11 +102991,28 @@ function closeAlertModal(){
       var key = GB.dstr(end) + '/' + z + '/' + px + '/' + py, im = GB.refC[key];
       if (!im){ var ks = Object.keys(GB.refC); if (ks.length > 40) delete GB.refC[ks[0]];
         var tryI = function(i){ return i >= 3 ? Promise.resolve(null) : fetch(GB.uUrl(end, i, z, px, py)).then(function(r){ if (!r.ok || !r.headers.get('layer-time-actual')) throw 0; return r.blob(); }).then(function(b){ return createImageBitmap(b); }).catch(function(){ return tryI(i + 1); }); };
-        im = GB.refC[key] = tryI(0); }
-      return im.then(function(bm){ if (!bm) return null; var c2 = document.createElement('canvas'); c2.width = c2.height = 256; var g2 = c2.getContext('2d'); g2.imageSmoothingEnabled = true;
-        g2.drawImage(bm, ox, oy, sz, sz, 0, 0, 256, 256); var d = g2.getImageData(0, 0, 256, 256).data, ok = new Uint8Array(65536), w = new Uint8Array(65536);
+        /* OPEN SEA, from the whole composite tile (so a tile's edge is not mistaken for a shore): water or no reading, more than
+           GB.SEA composite pixels (~1 km each) from anything else. Kept as a small mask canvas beside the bitmap. */
+        im = GB.refC[key] = tryI(0).then(function(bm){ if (!bm) return null; var c0 = document.createElement('canvas'); c0.width = c0.height = 256; var g0 = c0.getContext('2d'); g0.drawImage(bm, 0, 0);
+          var id = g0.getImageData(0, 0, 256, 256), d = id.data, dl = new Uint16Array(65536), dw = new Uint16Array(65536), wt = new Uint8Array(65536), p, q, x;
+          /* dl: steps from clear land; dw: steps from water. A cloudy cell seeds neither -- it is sea only if it lies far from land
+             AND next to water (cloud over the ocean), so a snowfield or a week of cloud inland is never taken for sea */
+          for (p = 0; p < 65536; p++){ q = p * 4; var r = d[q], g = d[q + 1], b = d[q + 2], cl = GB.uCloud(r, g, b), wa = !cl && (GB.uWater(r, g, b) || Math.max(r, g, b) < 14);
+            wt[p] = wa ? 1 : 0; dl[p] = (!cl && !wa) ? 1 : 0; }
+          /* a speck of "land" in open water (noise the color tests let through) is water: it would otherwise plant a shore out there */
+          var land = GB.small(new Uint8Array(dl), 40); for (p = 0; p < 65536; p++){ if (dl[p] && !land[p]) wt[p] = 1; dl[p] = land[p] ? 0 : 999; dw[p] = wt[p] ? 0 : 999; }
+          var sweep = function(a){ var v; for (p = 0; p < 65536; p++){ if (!a[p]) continue; x = p & 255; v = a[p]; if (p >= 256 && a[p - 256] + 1 < v) v = a[p - 256] + 1; if (x && a[p - 1] + 1 < v) v = a[p - 1] + 1; a[p] = v; }
+            for (p = 65535; p >= 0; p--){ if (!a[p]) continue; x = p & 255; v = a[p]; if (p < 65280 && a[p + 256] + 1 < v) v = a[p + 256] + 1; if (x < 255 && a[p + 1] + 1 < v) v = a[p + 1] + 1; a[p] = v; } };
+          sweep(dl); sweep(dw);
+          for (p = 0; p < 65536; p++){ q = p * 4; d[q] = d[q + 1] = d[q + 2] = 0; d[q + 3] = (dl[p] > GB.SEA && (wt[p] || dw[p] <= 2)) ? 255 : 0; }
+          g0.putImageData(id, 0, 0); return { bm: bm, sea: c0 }; }).catch(function(){ return null; }); }
+      return im.then(function(R){ if (!R) return null; var c2 = document.createElement('canvas'); c2.width = c2.height = 256; var g2 = c2.getContext('2d', { willReadFrequently: true }); g2.imageSmoothingEnabled = true;
+        g2.drawImage(R.bm, ox, oy, sz, sz, 0, 0, 256, 256); var d = g2.getImageData(0, 0, 256, 256).data, ok = new Uint8Array(65536), w = new Uint8Array(65536), sea = new Uint8Array(65536);
         for (var p = 0; p < 65536; p++){ var q = p * 4; if (!GB.uCloud(d[q], d[q + 1], d[q + 2]) && !GB.uWater(d[q], d[q + 1], d[q + 2]) && Math.max(d[q], d[q + 1], d[q + 2]) >= 14) ok[p] = 1; else if (!GB.uCloud(d[q], d[q + 1], d[q + 2])) w[p] = 1; }   /* w: the composite has water or open sea here */
-        return { d: d, ok: ok, w: w }; }).catch(function(){ return null; }); };
+        g2.clearRect(0, 0, 256, 256); g2.drawImage(R.sea, ox, oy, sz, sz, 0, 0, 256, 256);   /* smoothed, then cut at half: a rounded edge, not a staircase */ var sd = g2.getImageData(0, 0, 256, 256).data;
+        for (p = 0; p < 65536; p++) sea[p] = sd[p * 4 + 3];   /* 0 = not sea .. 255 = open sea; between, the edge of it: a pass fades out across that band */
+        return { d: d, ok: ok, w: w, sea: sea }; }).catch(function(){ return null; }); };
+    GB.SEA = 5;   /* composite pixels, ~1 km each: New York's Upper Bay stays the satellite's, the middle of the Sound is the map's */
     GB.Photo = L.GridLayer.extend({
       createTile: function(c, done){ var o = this.options, self = this, cv = document.createElement('canvas'); cv.width = cv.height = 256;
         var g = cv.getContext('2d'), out = g.createImageData(256, 256), od = out.data, src = cv._src = new Uint8Array(65536), left = 65536, i = 0, sent = false, stash = [], ref = null, LIFT = GB.LIFT;
@@ -103003,10 +103021,16 @@ function closeAlertModal(){
         /* one pass over this tile -> what is usable in it, how clear it is, and its tone against the composite */
         var read = function(d, ii){ var val = new Uint8Array(65536), hard = new Uint8Array(65536), bad = new Uint8Array(65536), wat = new Uint8Array(65536), nv = 0, nh = 0, nb = 0, p, q, r, gg, b, lo, hi;
           for (p = 0; p < 65536; p++){ q = p * 4; if (!d[q + 3]) continue; r = d[q]; gg = d[q + 1]; b = d[q + 2]; lo = Math.min(r, gg, b); hi = Math.max(r, gg, b); if (hi < 6) continue;
-            val[p] = 1; nv++; if (lo > 165 && hi - lo < 40){ hard[p] = 1; bad[p] = 1; nh++; } else if (lo > 120 && hi - lo < 45) bad[p] = 1; else if (b >= r + 6 && hi < 70) wat[p] = 1; }
+            val[p] = 1; nv++; if (lo > 165 && hi - lo < 40){ hard[p] = 1; bad[p] = 1; nh++; } else if (lo > 120 && hi - lo < 45) bad[p] = 1;
+            /* THE SATELLITE'S OWN WATER, EXCEPT THE OPEN SEA (user 2026-11-18: "would it just be easier to let satellite show the water if they
+               do and avoid having to trim the edges"). Cutting every dark-blue pixel so the map's water showed also cut shadow and dark
+               woods and left a ragged hole round every pond. Now a pass draws its water as it saw it -- rivers, lakes, harbors, the
+               shore and about 5 km out. Past that (ref.sea, from the composite) nothing of a pass is drawn at all: out there the
+               passes end in straight edges, with cloud holes and glint, and the map's own sea is the cleaner picture. */
+            if (ref && ref.sea[p] > 245){ bad[p] = 0; if (hard[p]){ hard[p] = 0; nh--; } wat[p] = 1; } }
           if (nv < 200) return null;
-          /* pale gray where the composite has water is cloud or glint over the sea, in any pass: seen, not drawn */
-          if (ref) for (p = 0; p < 65536; p++){ if (bad[p] && ref.w[p]){ bad[p] = 0; if (hard[p]){ hard[p] = 0; nh--; } wat[p] = 1; } }
+          /* pale gray out in the sea's edge band is cloud or glint, in any pass: seen, not drawn (in harbors and bays it is judged as on land) */
+          if (ref) for (p = 0; p < 65536; p++){ if (bad[p] && ref.sea[p] > 127){ bad[p] = 0; if (hard[p]){ hard[p] = 0; nh--; } wat[p] = 1; } }
           /* IS THERE CLOUD IN THIS PASS AT ALL? White and pale gray are also roofs, concrete, sand. A pass counts as cloudy when 9% of it
              is white, or 4% and the white is smooth (cloud tops are; a city's roofs are not: mean step 20-60 against 85-125). Only then
              are its pale pixels thrown out, with a two-pixel margin and the dark ground beside them (shadow). */
@@ -103027,7 +103051,7 @@ function closeAlertModal(){
           return S; };
         var put = function(S, relaxed){ var d = S.d, T = GB.TONE, M0 = relaxed ? S.hard : S.bad, add = 0, p, q;
           for (p = 0; p < 65536; p++){ if (src[p] || !S.val[p] || M0[p]) continue; src[p] = S.ii + 1; left--; if (S.wat[p]) continue; q = p * 4;
-            od[q] = LIFT[Math.min(255, d[q] * T[0]) | 0]; od[q + 1] = LIFT[Math.min(255, d[q + 1] * T[1]) | 0]; od[q + 2] = LIFT[Math.min(255, d[q + 2] * T[2]) | 0]; od[q + 3] = 255; add++; }
+            od[q] = LIFT[Math.min(255, d[q] * T[0]) | 0]; od[q + 1] = LIFT[Math.min(255, d[q + 1] * T[1]) | 0]; od[q + 2] = LIFT[Math.min(255, d[q + 2] * T[2]) | 0]; od[q + 3] = ref ? 255 - ref.sea[p] : 255; add++; }
           return add; };
         /* a lone pixel far brighter or darker than all eight round it is what the masks missed: it takes their mean */
         var smooth = function(){ var p, q, x, y, j, n, lm = new Float32Array(65536); for (p = 0; p < 65536; p++){ q = p * 4; lm[p] = od[q + 3] ? od[q] + od[q + 1] + od[q + 2] : -1; }
