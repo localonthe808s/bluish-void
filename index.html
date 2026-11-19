@@ -103617,15 +103617,53 @@ function closeAlertModal(){
        zoom 9, hidden under CHANGES ONLY), and a tap names both: the field's acres and the crop at that spot. Past the lower 48,
        where USDA has no crop map, the fields stand alone in wheat gold with their coverage grid when zoomed out. Which of the two
        is drawn follows the middle of the map (LND.us48), since a tile feature does not know what country it is in. */
+    /* EACH FIELD IN ITS CROP'S COLOR (user 2026-11-19: "how can you improve them being drawn together" -> "the concept is great").
+       Stacked, the two did not fit: crop colors in 240 m blocks spilling across outlines true to 10 m. Now the field IS the crop:
+       as each outline is painted, LND.fsym reads the crop map under it (five spots, the commonest wins; LND.cpx holds the crop
+       tiles' pixels) and fills the whole shape with that color, a thin dark edge around it, fainter where the model trusts its
+       outline less. The blocky map stays beneath at half strength for land with no outlined field. A field over woods, town,
+       water or wetland is not drawn. Where the crop map has nothing (past the border) the field is plain wheat gold.
+       How a painter knows where it is: the library paints straight onto the Leaflet tile, whose `key` is "x:y:z", and the
+       context's transform places the feature on that tile -- so tile + pixel gives the spot on Earth, then the crop pixel. */
+    LND.FZ = 10; LND.cpx = {}; LND.fcol = {}; LND.fsel = null;
+    LND.SKIP = /^(forest|shrubland|barren|developed|wetlands|aquaculture|perennial ice|deciduous|evergreen|mixed forest|woody|herbaceous|open water|water|clouds|nodata|background)/i;
+    LND.cdlKey = function(){ if (LND.cdlC && !LND.cdlC.then && !LND._ck){ var K = {}; Object.keys(LND.cdlC).forEach(function(k){ var c = LND.cdlC[k][1]; K[(c[0] >> 2) + ',' + (c[1] >> 2) + ',' + (c[2] >> 2)] = LND.SKIP.test(LND.cdlC[k][0]) ? 1 : 0; }); LND._ck = K; } return LND._ck; };
+    LND.cdlLoad = function(){ if (!LND.cdlC) LND.cdlC = fetch('https://cdn.bluishvoid.com/land/cdl/classes.json?v=1').then(function(r){ return r.json(); }).then(function(j){ LND.cdlC = j; LND.fredo(); return j; }).catch(function(){ LND.cdlC = null; return {}; }); return LND.cdlC; };
+    LND.fredo = function(){ clearTimeout(LND._frt); LND._frt = setTimeout(function(){ var l = LND.lay.fline; try { if (l && M.hasLayer(l)) l.rerenderTiles(); } catch(x){} }, 180); };
+    /* the crop pixel at a spot on Earth (u, v = 0..1 across the mercator world): [r, g, b, a], 0 = not loaded yet, -1 = no crop map here */
+    LND.cat = function(u, v){ var n = 512, tx = Math.floor(u * n), ty = Math.floor(v * n), k = LND.cy + '/' + tx + '/' + ty, T = LND.cpx[k];
+      if (T === undefined){ LND.cpx[k] = 0; var im = new Image(); im.crossOrigin = 'anonymous';
+        im.onload = function(){ try { var c = document.createElement('canvas'); c.width = c.height = 256; var g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(im, 0, 0, 256, 256); LND.cpx[k] = g.getImageData(0, 0, 256, 256).data; } catch(x){ LND.cpx[k] = -1; } LND.fredo(); };
+        im.onerror = function(){ LND.cpx[k] = -1; LND.fredo(); }; im.src = 'https://cdn.bluishvoid.com/land/cdl/' + LND.cy + '/9/' + tx + '/' + ty + '.png?v=1'; return 0; }
+      if (!T || T === -1) return T;
+      var i = 4 * (Math.min(255, Math.floor((v * n - ty) * 256)) * 256 + Math.min(255, Math.floor((u * n - tx) * 256))); return T[i + 3] ? [T[i], T[i + 1], T[i + 2]] : -1; };
+    LND.fsym = { draw: function(ctx, geom, z, f){ var pr = (f && f.props) || {}, id = LND.cy + pr.id, col = LND.fcol[id], ring = geom[0]; if (!ring || ring.length < 3) return;
+      if (col === undefined){ var el = ctx.canvas, kk = String(el.key || '').split(':'), K = LND.cdlKey(); if (kk.length < 3 || !K){ LND.cdlLoad(); col = null; }
+        else { var m = ctx.getTransform(), W = el.width || 256, sc = Math.pow(2, +kk[2]), tx0 = +kk[0], ty0 = +kk[1], cx = 0, cy = 0, n = ring.length, j;
+          for (j = 0; j < n; j++){ cx += ring[j].x; cy += ring[j].y; } cx /= n; cy /= n;
+          var pts = [[cx, cy]], st = Math.max(1, Math.floor(n / 4)); for (j = 0; j < n && pts.length < 5; j += st) pts.push([cx + .4 * (ring[j].x - cx), cy + .4 * (ring[j].y - cy)]);
+          var tally = {}, best = null, bn = 0, wait = false, none = 0;
+          pts.forEach(function(q, qi){ var c = LND.cat((tx0 + (m.a * q[0] + m.e) / W) / sc, (ty0 + (m.d * q[1] + m.f) / W) / sc);
+            if (c === 0){ wait = true; return; } if (c === -1){ none++; return; }
+            var key = c.join(','), t = tally[key] = (tally[key] || 0) + (qi ? 1 : 1.5); if (t > bn){ bn = t; best = c; } });
+          if (wait) col = null;                                                     /* the crop tile is still coming: an edge only, for now */
+          else { col = best ? (K[(best[0] >> 2) + ',' + (best[1] >> 2) + ',' + (best[2] >> 2)] === 1 ? 0 : best) : -1; LND.fcol[id] = col; } } }
+      if (col === 0) return;                                                        /* woods, town, water: not a field */
+      var sc2 = Math.max(0, Math.min(100, +pr.score || 0)) / 100, sel = LND.fsel != null && pr.id === LND.fsel, i, k;
+      ctx.beginPath(); for (i = 0; i < geom.length; i++){ var rg = geom[i]; for (k = 0; k < rg.length; k++){ if (k) ctx.lineTo(rg[k].x, rg[k].y); else ctx.moveTo(rg[k].x, rg[k].y); } ctx.closePath(); }
+      if (col && col !== -1){ ctx.globalAlpha = .96; ctx.fillStyle = 'rgb(' + col[0] + ',' + col[1] + ',' + col[2] + ')'; ctx.fill('evenodd'); }
+      else if (col === -1){ ctx.globalAlpha = .3 + sc2 * .3; ctx.fillStyle = '#f2c14e'; ctx.fill('evenodd'); }
+      ctx.globalAlpha = 1;
+      if (sel){ ctx.lineJoin = 'round'; ctx.strokeStyle = 'rgba(8,10,16,.9)'; ctx.lineWidth = 4.2; ctx.stroke(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.2; ctx.stroke(); }
+      else if (z >= 11 || !col || col === -1){ ctx.strokeStyle = 'rgba(8,10,16,' + (.22 + sc2 * .5).toFixed(2) + ')'; ctx.lineWidth = z >= 13 ? 1.1 : z >= 12 ? .8 : .55; ctx.stroke(); } } };
     LND.us48 = function(){ var c = M.getCenter(); return c.lat > 24 && c.lat < 49.7 && c.lng > -125.5 && c.lng < -66.5; };
     LND.fwatch = function(){ if (LND._fz) return; LND._fz = 1; var st = '';
-      M.on('moveend zoomend', function(){ if (VIEW !== 'land' || LND.mode !== 'crops') return; var s2 = (M.getZoom() < 9 ? 'a' : 'b') + (LND.us48() ? 1 : 0); if (s2 !== st){ var first = !st; st = s2; if (!first) LND.sync(); } }); };
+      M.on('moveend zoomend', function(){ if (VIEW !== 'land' || LND.mode !== 'crops') return; var s2 = (M.getZoom() < LND.FZ ? 'a' : 'b') + (LND.us48() ? 1 : 0); if (s2 !== st){ var first = !st; st = s2; if (!first) LND.sync(); } }); };
     LND.fpane = function(){ if (!M.getPane('lcLandF')){ var pn = M.createPane('lcLandF'); pn.style.zIndex = 444; pn.style.pointerEvents = 'none'; } return 'lcLandF'; };
     LND.fields = function(lines){ var P = protomapsL, pr = function(f){ return (f && f.props) || {}; };
       var share = function(f){ return Math.max(0, Math.min(100, +pr(f).pct_covered || 0)); };
-      return P.leafletLayer({ sources: { f: { url: LND.FTW, maxDataZoom: 13 } }, pane: LND.fpane(), minZoom: lines ? 9 : 2, maxZoom: 19, attribution: '', labelRules: [], paintRules: lines ? [
-        { dataSource: 'f', dataLayer: 'fields', symbolizer: new P.LineSymbolizer({ color: 'rgba(8,10,16,.55)', width: function(z){ return z >= 13 ? 2.4 : z >= 11 ? 1.7 : 1.1; } }) },
-        { dataSource: 'f', dataLayer: 'fields', symbolizer: new P.LineSymbolizer({ color: 'rgba(255,244,214,.95)', width: function(z){ return z >= 13 ? 1.2 : z >= 11 ? .8 : .45; } }) } ] : [
+      return P.leafletLayer({ sources: { f: { url: LND.FTW, maxDataZoom: 13 } }, pane: LND.fpane(), minZoom: lines ? LND.FZ : 2, maxZoom: 19, attribution: '', labelRules: [], paintRules: lines ? [
+        { dataSource: 'f', dataLayer: 'fields', symbolizer: LND.fsym } ] : [
         { dataSource: 'f', dataLayer: 'cells', filter: function(z, f){ return share(f) >= 1; }, symbolizer: new P.PolygonSymbolizer({ fill: '#f2c14e', opacity: function(z, f){ return Math.min(.82, .1 + share(f) / 75); } }) },
         { dataSource: 'f', dataLayer: 'fields', symbolizer: new P.PolygonSymbolizer({ fill: '#f2c14e', opacity: function(z, f){ var sc = +pr(f).score || 0; return z >= 12 ? .16 + sc / 500 : .3 + sc / 400; },
             stroke: 'rgba(255,236,170,.95)', width: function(z){ return z >= 13 ? 1.2 : z >= 11 ? .8 : .45; } }) } ] }); };
@@ -103646,7 +103684,9 @@ function closeAlertModal(){
         /* OUR OWN TILES (user 2026-10-29, "do them all": CropScape's map service was slow): _landbake/cdl.py, 240 m, z3-9 */
         LND.layer(k, function(){ var l = L.tileLayer('https://cdn.bluishvoid.com/land/cdl/' + LND.cy + '/{z}/{x}/{y}.png?v=1', { pane: LND.pn(), minZoom: 3, maxNativeZoom: 9, maxZoom: 19, opacity: .9, crossOrigin: 'anonymous', bounds: L.latLngBounds([[24, -125.5], [49.7, -66.5]]), errorTileUrl: LF_GIF });
           l.on('tileload', function(e){ e.tile.style.imageRendering = 'pixelated'; }); return l; });
-        LND.fwatch(); if (LND.fo && !LND.chg){ var kf = LND.us48() ? 'fline' : 'ffill'; want[kf] = 1; LND.layer(kf, function(){ return LND.fields(kf === 'fline'); }); } }
+        LND.fwatch(); var kf = null; if (LND.fo && !LND.chg){ kf = LND.us48() ? 'fline' : 'ffill'; want[kf] = 1; LND.cdlLoad(); LND.layer(kf, function(){ return LND.fields(kf === 'fline'); }); }
+        try { LND.lay[k].setOpacity(kf === 'fline' && M.getZoom() >= LND.FZ ? .5 : .9); } catch(x){}                /* the blocky map steps back under the fields */
+        if (LND._fcy !== LND.cy){ if (LND._fcy != null) LND.fredo(); LND._fcy = LND.cy; } }
       else if (LND.mode === 'photo'){ LND.pn(); var cmpOn = LND.pk !== 'air' && LND.cmp && LND.bEnd, mkP = LND.pk === 's2' ? GB.s2 : GB.photo, kp = LND.pk === 's2' ? 'photoS' : 'photo';
         if (LND.pk === 'air'){ want.photoAir = 1; LND.layer('photoAir', function(){ return GB.air(); }); LND.photoL = null; LND.photoU = null; }
         else { k = kp + LND.pKey(LND.pEnd); want[k] = 1; LND.layer(k, function(){ return mkP(LND.pEnd); }); LND.photoL = LND.lay[k];
@@ -103676,7 +103716,7 @@ function closeAlertModal(){
       var hd = function(t){ LND.rest(t); return ''; }, row = function(t){ return '<div class="lc-tk">' + t + '</div>'; };
       if (LND.mode === 'cover') h = hd('<b>LAND COVER ' + LND.yr + '</b> · ' + (LND.chg ? (LND.yr === LND.YRS[0] ? 'CHANGES ONLY: PICK A LATER YEAR' : 'CHANGES ONLY · BRIGHT: DIFFERENT FROM ' + LND.YRS[0] + ', IN WHAT IT BECAME · FAINT: THE SAME') : 'WHAT COVERS THE GROUND') + ' · CANADA, MEXICO AND ALASKA: 2020 ONLY' + (LND.chg && LND.yr !== LND.YRS[0] ? ', FAINT (NO CHANGE KNOWN)' : '') + ' · TAP THE MAP')
           + row(LND.NLCD.filter(function(q){ return q[0] !== 11; }).map(function(q){ return key(q[1], q[2]); }).join('')) + (LND.info || '');
-      else if (LND.mode === 'crops') h = hd('<b>CROPS ' + LND.cy + '</b> · ' + (LND.chg ? (LND.cy === LND.CYRS[0] ? 'CHANGES ONLY: PICK A LATER YEAR' : 'CHANGES ONLY · BRIGHT: A DIFFERENT CROP OR COVER THAN ' + LND.CYRS[0] + ' (CORN AND SOYBEANS TRADE PLACES) · FAINT: THE SAME') : 'WHAT WAS PLANTED IN EACH FIELD THAT YEAR') + (LND.fo && !LND.chg ? (LND.us48() ? (M.getZoom() >= 9 ? ' · FIELD OUTLINES FROM ' + LND.FTWY : ' · ZOOM IN FOR FIELD OUTLINES') : ' · NO CROP MAP PAST THE LOWER 48: FIELDS ONLY, ' + LND.FTWY) : '') + (LND.fo && !LND.chg && !LND.us48() ? '' : ' · THE LOWER 48') + ' · TAP A FIELD')
+      else if (LND.mode === 'crops') h = hd('<b>CROPS ' + LND.cy + '</b> · ' + (LND.chg ? (LND.cy === LND.CYRS[0] ? 'CHANGES ONLY: PICK A LATER YEAR' : 'CHANGES ONLY · BRIGHT: A DIFFERENT CROP OR COVER THAN ' + LND.CYRS[0] + ' (CORN AND SOYBEANS TRADE PLACES) · FAINT: THE SAME') : 'WHAT WAS PLANTED IN EACH FIELD THAT YEAR') + (LND.fo && !LND.chg ? (LND.us48() ? (M.getZoom() >= LND.FZ ? ' · EACH FIELD IN ITS CROP\u2019S COLOR · OUTLINES FROM ' + LND.FTWY : ' · ZOOM IN FOR EACH FIELD') : ' · NO CROP MAP PAST THE LOWER 48: FIELDS ONLY, ' + LND.FTWY) : '') + (LND.fo && !LND.chg && !LND.us48() ? '' : ' · THE LOWER 48') + ' · TAP A FIELD')
           + row(LND.CROPK.map(function(q){ return key(q[0], q[1]); }).join('')) + (LND.info || '');
       else if (LND.mode === 'photo' && LND.pk === 'air') h = hd('<b>AERIAL PHOTO</b> \u00b7 ABOUT 1 M \u00b7 <span class="bv-lg">FLOWN FROM AIRCRAFT EVERY TWO TO THREE SUMMERS, SO NOT A CURRENT PICTURE \u00b7 UNITED STATES</span><span class="bv-sm">NOT A CURRENT PICTURE</span>') + (LND.info || '');
       else if (LND.mode === 'photo' && LND.pk === 's2') h = hd('<b>SATELLITE PHOTO' + (LND.pEnd ? ' \u00b7 ' + GB.dfmt(GB.dstr(LND.pEnd)) + ', ' + GB.dstr(LND.pEnd).slice(0, 4) : '') + '</b>' + (LND.cmp ? ' \u00b7 BEFORE ON THE LEFT, DRAG THE DIVIDER' : '') + ' \u00b7 SENTINEL-2, 10 M \u00b7 <span class="bv-lg">THE NEWEST PASS WITH LITTLE CLOUD IN THE 30 DAYS UP TO THE DATE \u00b7 CLOUD IS NOT REMOVED \u00b7 ZOOM IN PAST THE REGIONAL VIEW FOR IT</span><span class="bv-sm">NEWEST LOW-CLOUD PASS IN 30 DAYS</span>') + (LND.info || '');
@@ -103708,13 +103748,15 @@ function closeAlertModal(){
           else if (cell && FL === LND.lay.ffill) INFO.show(num(cell.pct_covered, 1) + '% OF THIS LAND IS IN FIELDS', 'FIELDS OF THE WORLD · ' + LND.FTWY, box(num(cell.count) + ' fields in this square, ' + num((+cell.area_ha || 0) * 2.47105) + ' acres together. Zoom in to see each one.')); };
         if (!(la > 24 && la < 49.7 && lo > -125.5 && lo < -66.5)){ alone(); return; }
         var t3 = FLS.tile(la, lo, 9);
-        Promise.all([LND.cdlC || (LND.cdlC = fetch('https://cdn.bluishvoid.com/land/cdl/classes.json?v=1').then(function(r){ return r.json(); }).catch(function(){ LND.cdlC = null; return {}; })),
+        Promise.all([LND.cdlLoad(),
           FLS.px('https://cdn.bluishvoid.com/land/cdl/' + LND.cy + '/9/' + t3.x + '/' + t3.y + '.png?v=1', t3.fx, t3.fy).catch(function(){ return null; })]).then(function(r){ var C = r[0] || {}, p = r[1], best = null, bd = 1e9;
+          var fc = hit ? LND.fcol[LND.cy + hit.id] : null; if (fc && fc.length){ p = [fc[0], fc[1], fc[2], 255]; }
+          if (hit && FL === LND.lay.fline){ LND.fsel = hit.id; try { FL.rerenderTiles(); } catch(x){} }
           if (p && p[3]) Object.keys(C).forEach(function(k){ var c = C[k][1], d = Math.abs(c[0] - p[0]) + Math.abs(c[1] - p[1]) + Math.abs(c[2] - p[2]); if (d < bd){ bd = d; best = C[k]; } });
           if (!(best && bd <= 6)){ alone(); return; }
           var nm = esc(String(best[0]).toUpperCase().replace(/^DBL CROP /, 'DOUBLE CROP: '));
           INFO.show(hit ? acres + ' · ' + nm : nm, 'CROPS ' + LND.cy + ' · USDA CROPLAND DATA LAYER' + (hit ? ' · FIELDS OF THE WORLD ' + LND.FTWY : ''),
-            box('What was growing on most of the 240 m square under your tap in ' + LND.cy + '. Step through the years to see the rotation (corn and soybeans often trade places).' + (hit ? '<br><br>' + ftxt : ''))); }, alone); return; }
+            box((hit && fc && fc.length ? 'The crop map\u2019s reading for this field in ' + LND.cy + ' (USDA, in 240 m squares, so a small field can borrow its neighbor\u2019s crop)' : 'What was growing on most of the 240 m square under your tap in ' + LND.cy) + '. Step through the years to see the rotation (corn and soybeans often trade places).' + (hit ? '<br><br>' + ftxt : ''))); }, alone); return; }
       if (LND.mode === 'loss'){ var b0 = GB.at(LND.lay.loss, e.latlng), q0 = b0 && b0.p[3] ? GB.near(GB.DIST, b0.p) : null; if (!b0 || b0.i < 0) return;
         INFO.show(q0 ? q0[3].split(' · ')[0] + ' PLANT LOSS' : 'NO LOSS SEEN HERE', 'NASA OPERA DIST-ALERT · PASS OF ' + GB.dfmt(GB.day(b0.i + 1)), '<div style="font:500 11px/1.5 system-ui,sans-serif;margin-top:5px;">'
           + (q0 ? q0[3].replace(/^[A-Z]+ · /, '').replace(/^./, function(c){ return c; }) + '. ' : 'The latest clear pass found the plants here about as they have been in past years. ')
