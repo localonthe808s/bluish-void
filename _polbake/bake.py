@@ -17,7 +17,7 @@ Brownfields (47k) and discharge pipes (300k) are read live by the page, a map vi
 
 Run: python3 _polbake/bake.py OUTDIR [fast]     (no keys; fast = blooms and spills only, a minute; all = several minutes)
 """
-import sys, os, re, csv, io, json, time, datetime, subprocess, urllib.request, urllib.parse
+import sys, os, re, csv, io, json, math, time, datetime, subprocess, urllib.request, urllib.parse
 
 A = 'https://services.arcgis.com/cJ9YHowT8TU7DUyn/arcgis/rest/services/'
 G = 'https://gispub.epa.gov/arcgis/rest/services/'
@@ -100,7 +100,7 @@ def save(outdir, name, doc):
     doc['built'] = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%MZ')
     p = os.path.join(outdir, name)
     json.dump(doc, open(p, 'w'), separators=(',', ':'))
-    print(name, os.path.getsize(p) // 1024, 'KB', {k: len(v) for k, v in doc.items() if isinstance(v, list)}, flush=True)
+    print(name, os.path.getsize(p) // 1024, 'KB', {k: len(v) for k, v in doc.items() if isinstance(v, (list, dict))}, flush=True)
 
 
 # ---------- algal blooms ----------
@@ -209,19 +209,199 @@ def pfx(outdir):
     save(outdir, 'pfx_v1.json', {'sf': sf, 'sp': sp, 'fed': fed, 'dm': dm})
 
 
+# ---------- algae seen from space ----------
+# Viridis, as EPA renders CyAN (sampled from matplotlib once; kept here so the bake needs only numpy and Pillow)
+VIR = [[68, 1, 84], [71, 13, 96], [72, 24, 106], [72, 35, 116], [71, 46, 124], [69, 56, 130], [66, 65, 134], [62, 74, 137], [58, 84, 140], [54, 93, 141], [50, 101, 142], [46, 109, 142], [43, 117, 142], [40, 125, 142], [37, 132, 142], [34, 140, 141], [31, 148, 140], [30, 156, 137], [32, 163, 134], [37, 171, 130], [46, 179, 124], [58, 186, 118], [72, 193, 110], [88, 199, 101], [108, 205, 90], [127, 211, 78], [147, 215, 65], [168, 219, 52], [192, 223, 37], [213, 226, 26], [234, 229, 26], [253, 231, 37]]
+CY_COL = {1: (253, 230, 138, 190), 2: (255, 159, 28, 225), 3: (255, 59, 48, 240), 4: (193, 18, 31, 255)}
+
+
+def cyan(outdir):
+    """ALGAE SEEN FROM SPACE: EPA CyAN's daily picture of the lower 48 (Sentinel-3 OLCI, 300 m, web mercator, its bounds in the
+    PNG), the last seven days stacked newest first, each pixel sorted into four levels by the World Health Organization's
+    recreational lines (about 20,000 and 100,000 cells per mL), cut into tiles z4-9 under OUT/cyan/ plus cyan_v1.json"""
+    import numpy as np
+    from PIL import Image
+    Image.MAX_IMAGE_PIXELS = None
+    V = np.array(VIR, float)
+    # 32 samples of viridis cover 0..255; position on the scale -> level (calibrated against CyAN's own point readings, 2026-11-20:
+    # about 20,000 cells/mL near position 70, 100,000 near 135; EPA paints the worst blooms past viridis in gold and orange)
+    C, B, days, seen = None, None, [], set()
+    for back in range(1, 8):
+        d = TODAY - datetime.timedelta(days=back)
+        u = 'https://cyan.epa.gov/waterbody/conus_image/?year=%d&day=%d&daily=True' % (d.year, d.timetuple().tm_yday)
+        try:
+            raw = fetch(u, tries=2, timeout=300)
+        except Exception as e:
+            print('  cyan', d, 'failed', e, flush=True); continue
+        if raw[:4] != b'\x89PNG':
+            print('  cyan', d, 'none', flush=True); continue
+        h = hash(raw)
+        if h in seen:          # the service hands back the nearest day it has when a day is missing
+            print('  cyan', d, 'same picture as a later day', flush=True); continue
+        seen.add(h)
+        im = Image.open(io.BytesIO(raw))
+        dd0 = '%s-%s' % (im.info.get('Year', ''), im.info.get('Day', ''))
+        try:
+            d = datetime.date(int(im.info['Year']), 1, 1) + datetime.timedelta(days=int(im.info['Day']) - 1)
+        except Exception:
+            pass
+        b = eval(im.info.get('Bounds', 'None'), {'__builtins__': {}}) if im.info.get('Bounds') else None
+        a = np.asarray(im.convert('RGBA'))
+        if b is None or (B is not None and (a.shape[:2] != C.shape or b != B)):
+            print('  cyan', d, 'other grid, skipped', flush=True); continue
+        m = a[..., 3] > 0
+        lv = np.zeros(a.shape[:2], np.uint8)
+        px = a[m][:, :3].astype(float)
+        dd = ((px[:, None, :] - V[None]) ** 2).sum(-1)
+        pos = dd.argmin(1) * (255 / 31.0)
+        off = np.sqrt(dd.min(1)) > 30
+        lv[m] = np.where(off, 4, np.where(pos < 70, 1, np.where(pos < 135, 2, 3)))
+        if C is None:
+            C, B = lv, b
+        else:
+            C = np.where(C == 0, lv, C)
+        days.append(d.isoformat())
+        print('  cyan', d, int(m.sum()), 'px', flush=True)
+    if C is None:
+        save(outdir, 'cyan_v1.json', {'days': [], 'tiles': 0}); return
+    H, W = C.shape
+    my = lambda la: math.log(math.tan(math.pi / 4 + math.radians(la) / 2))
+    Y0, Y1 = my(B['top']), my(B['bottom'])
+    root = os.path.join(outdir, 'cyan')
+    import shutil
+    shutil.rmtree(root, ignore_errors=True)
+    # z9 tiles: every tile holding a level-coded pixel, sampled nearest
+    Z = 9; N = 256 * 2 ** Z
+    ys, xs = np.nonzero(C)
+    lon = B['left'] + (xs + .5) / W * (B['right'] - B['left'])
+    yy = Y0 + (ys + .5) / H * (Y1 - Y0)
+    gx = ((lon + 180) / 360 * N).astype(int); gy = ((1 - yy / math.pi) / 2 * N).astype(int)
+    T = {}
+    for tx, ty in set(zip((gx // 256).tolist(), (gy // 256).tolist())):
+        jx = np.arange(256) + tx * 256 + .5; jy = np.arange(256) + ty * 256 + .5
+        lo = jx / N * 360 - 180; my2 = math.pi * (1 - 2 * jy / N)
+        ix = np.floor((lo - B['left']) / (B['right'] - B['left']) * W).astype(int); iy = np.floor((Y0 - my2) / (Y0 - Y1) * H).astype(int)
+        okx = (ix >= 0) & (ix < W); oky = (iy >= 0) & (iy < H)
+        t = np.zeros((256, 256), np.uint8)
+        t[np.ix_(oky, okx)] = C[np.ix_(iy[oky], ix[okx])]
+        if t.any():
+            T[(tx, ty)] = t
+    n = 0
+    for z in range(Z, 3, -1):
+        if z < Z:     # parents: 2x2 max of the children, so a small lake stays visible zoomed out
+            P = {}
+            for (tx, ty), t in T.items():
+                q = P.setdefault((tx // 2, ty // 2), np.zeros((256, 256), np.uint8))
+                h = t.reshape(128, 2, 128, 2).max(axis=(1, 3))
+                ox, oy = (tx % 2) * 128, (ty % 2) * 128
+                q[oy:oy + 128, ox:ox + 128] = np.maximum(q[oy:oy + 128, ox:ox + 128], h)
+            T = P
+        for (tx, ty), t in T.items():
+            rgba = np.zeros((256, 256, 4), np.uint8)
+            for k, c in CY_COL.items():
+                rgba[t == k] = c
+            pth = os.path.join(root, str(z), str(tx)); os.makedirs(pth, exist_ok=True)
+            Image.fromarray(rgba, 'RGBA').save(os.path.join(pth, '%d.png' % ty), optimize=True); n += 1
+    save(outdir, 'cyan_v1.json', {'days': days, 'tiles': n, 'levels': [int((C == k).sum()) for k in (1, 2, 3, 4)]})
+
+
 # ---------- toxic releases ----------
+TRI_URL = 'https://data.epa.gov/efservice/downloads/tri/mv_tri_basic_download/%d_US/csv'
+
+
+def tri_year(y, tmp):
+    """one year's TRI basic file (every chemical at every plant, ~60 MB), streamed to disk and read row by row"""
+    p = os.path.join(tmp, 'tri_%d.csv' % y)
+    if not os.path.exists(p):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(TRI_URL % y, headers=UA), timeout=600) as r, open(p + '.part', 'wb') as f:
+                while True:
+                    b = r.read(1 << 20)
+                    if not b:
+                        break
+                    f.write(b)
+        except Exception:
+            subprocess.run(['curl', '-sS', '-L', '-m', '900', '-A', UA['User-Agent'], '-o', p + '.part', TRI_URL % y], check=True)
+        os.replace(p + '.part', p)
+    with open(p, encoding='utf-8', errors='replace', newline='') as f:
+        R = csv.reader(f)
+        H = [h.split('. ', 1)[-1].strip() for h in next(R)]
+        ix = {h: i for i, h in enumerate(H)}
+        for row in R:
+            if len(row) == len(H):
+                yield {h: row[i] for h, i in ix.items()}
+
+
 def tri(outdir):
-    out, yr = [], None
-    for a in rows(G + 'OCSPP/TRI_Reporting_Facilities/MapServer/0', fields='OBJECTID,FACILITY_NAME,CITY_NAME,STATE_ABBR,INDUSTRY_CODE,ONSITE_AIR,ONSITE_WATER,ONSITE_LAND,TOTAL_OFFSITE_RELEASE,TOT_ONOFF_REL_GROSS,TRI_FACILITY_ID,EPA_REGISTRY_ID,REPORTING_YEAR', geom=True, page=2000):
-        p = ll(a, '_y', '_x')
+    """TOXIC RELEASES from the TRI basic files: per plant the latest year's pounds by where they went, its top chemicals with
+    the cancer / PBT / PFAS flags, the pounds of cancer-causing chemicals, and the total for each of the four years before"""
+    tmp = os.path.join(outdir, '_tri')
+    os.makedirs(tmp, exist_ok=True)
+    yr = None
+    for y in range(TODAY.year - 1, TODAY.year - 4, -1):      # the newest year EPA has published (it lands each summer/fall)
+        try:
+            if sum(1 for _ in zip(range(20000), tri_year(y, tmp))) >= 20000:
+                yr = y
+                break
+        except Exception as e:
+            print('  TRI', y, 'not ready:', e, flush=True)
+    if not yr:
+        raise RuntimeError('no TRI year')
+    lbs = lambda a, k: num(a.get(k)) * (1 / 453.59237 if (a.get('UNIT OF MEASURE') or '').lower().startswith('gram') else 1)
+    F = {}
+    for a in tri_year(yr, tmp):
+        p = ll(a, 'LATITUDE', 'LONGITUDE')
         if not p:
             continue
-        yr = yr or a.get('REPORTING_YEAR')
-        out.append([p[0], p[1], s(a.get('FACILITY_NAME')), s(a.get('CITY_NAME'), 40), s(a.get('STATE_ABBR'), 2), s(a.get('INDUSTRY_CODE'), 8),
-                    round(num(a.get('ONSITE_AIR'))), round(num(a.get('ONSITE_WATER'))), round(num(a.get('ONSITE_LAND'))), round(num(a.get('TOTAL_OFFSITE_RELEASE'))),
-                    round(num(a.get('TOT_ONOFF_REL_GROSS'))), s(a.get('TRI_FACILITY_ID'), 16), s(a.get('EPA_REGISTRY_ID'), 14)])
+        k = a['TRIFD']
+        f = F.setdefault(k, {'p': p, 'n': s(a.get('FACILITY NAME')), 'c': s(a.get('CITY'), 40), 'st': s(a.get('ST'), 2), 'sec': s(a.get('INDUSTRY SECTOR'), 40),
+                             'frs': s(a.get('FRS ID'), 14), 'air': 0.0, 'wat': 0.0, 'lnd': 0.0, 'off': 0.0, 'tot': 0.0, 'carc': 0.0, 'ch': {}})
+        air = lbs(a, '5.1 - FUGITIVE AIR') + lbs(a, '5.2 - STACK AIR')
+        wat = lbs(a, '5.3 - WATER')
+        on = lbs(a, 'ON-SITE RELEASE TOTAL')
+        off = lbs(a, 'OFF-SITE RELEASE TOTAL')
+        tot = lbs(a, 'TOTAL RELEASES')
+        f['air'] += air; f['wat'] += wat; f['lnd'] += max(0.0, on - air - wat); f['off'] += off; f['tot'] += tot
+        carc = (a.get('CARCINOGEN') or '').upper() == 'YES'
+        if carc:
+            f['carc'] += tot
+        nm = re.sub(r'\s+', ' ', a.get('CHEMICAL') or '').strip()
+        fl = ('C' if carc else '') + ('B' if (a.get('PBT') or '').upper() == 'YES' else '') + ('F' if (a.get('PFAS') or '').upper() == 'YES' else '')
+        c = f['ch'].setdefault(nm, [0.0, fl])
+        c[0] += tot
+    trend = {}
+    for y in range(yr - 4, yr):
+        T = {}
+        try:
+            for a in tri_year(y, tmp):
+                T[a['TRIFD']] = T.get(a['TRIFD'], 0.0) + lbs(a, 'TOTAL RELEASES')
+        except Exception as e:
+            print('  TRI trend', y, 'skipped:', e, flush=True)
+        trend[y] = T
+    out = []
+    for k, f in F.items():
+        ch = sorted(f['ch'].items(), key=lambda kv: -kv[1][0])
+        top = [[n[:44], round(v[0], 1 if v[0] < 10 else 0), v[1]] for n, v in ch[:5] if v[0] > 0]
+        cx = [[n[:44], round(v[0], 1 if v[0] < 10 else 0)] for n, v in ch if 'C' in v[1] and v[0] > 0][:3]
+        tr = [round(trend[y][k]) if k in trend[y] else None for y in range(yr - 4, yr)] + [round(f['tot'])]
+        out.append([f['p'][0], f['p'][1], f['n'][:60], f['c'], f['st'], f['sec'][:30], round(f['air']), round(f['wat']), round(f['lnd']), round(f['off']), round(f['tot']),
+                    k, f['frs'], top, round(f['carc']), tr, len(ch), cx])
     out.sort(key=lambda r: r[10])          # smallest first: the big ones paint on top
-    save(outdir, 'tri_v1.json', {'year': yr, 'f': out})
+    save(outdir, 'tri_v1.json', {'year': yr, 'years': list(range(yr - 4, yr + 1)), 'f': out})
+
+
+# ---------- discharge permits over their limits ----------
+def exc(outdir):
+    """ECHO: every water permit whose own test results went over a permit limit in the last 13 quarters, with how many times"""
+    out = {}
+    for a in rows(A + 'ECHO_All_Media_Facilities/FeatureServer/0', 'cwa_13qtrs_efflnt_exceedances > 0', 'OBJECTID,npdes_ids,cwa_13qtrs_efflnt_exceedances,cwa_qtrs_with_nc'):
+        n = int(num(a.get('cwa_13qtrs_efflnt_exceedances')))
+        if n <= 0:
+            continue
+        for pid in re.split(r'[\s,]+', str(a.get('npdes_ids') or '')):
+            if pid:
+                out[pid] = [n, int(num(a.get('cwa_qtrs_with_nc')))]
+    save(outdir, 'exc_v1.json', {'p': out})
 
 
 # ---------- serious violators ----------
@@ -266,7 +446,7 @@ def rmp(outdir):
 def main():
     outdir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), 'out')
     os.makedirs(outdir, exist_ok=True)
-    jobs = [hab, spill] + ([] if len(sys.argv) > 2 and sys.argv[2] == 'fast' else [pfx, tri, snc, lf, rmp])
+    jobs = [hab, spill, cyan] + ([] if len(sys.argv) > 2 and sys.argv[2] == 'fast' else [pfx, tri, exc, snc, lf, rmp])
     bad = 0
     for j in jobs:
         try:
