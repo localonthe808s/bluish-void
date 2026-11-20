@@ -43,9 +43,9 @@ def stations():
         off += 2000
 
 
-def results(org):
-    """{site id: {day: [worst value, kind]}} for one organization"""
-    q = [('organization', org), ('characteristicName', 'Enterococcus'), ('characteristicName', 'Escherichia coli'),
+def results(org, sites=None):
+    """{site id: {day: [worst value, kind]}} for one organization, or for a list of site ids"""
+    q = ([('siteid', x) for x in sites] if sites else [('organization', org)]) + [('characteristicName', 'Enterococcus'), ('characteristicName', 'Escherichia coli'),
          ('startDateLo', SINCE.strftime('%m-%d-%Y')), ('mimeType', 'csv'), ('dataProfile', 'narrowResult')]
     try:
         raw = get(WQP + '?' + urllib.parse.urlencode(q), timeout=900).decode('utf-8', 'replace')
@@ -71,6 +71,71 @@ def results(org):
     return org, by
 
 
+def near_sites(job):
+    """the portal's own sites (any organization) with bacteria results inside one box: [[id, lat, lon], ...]"""
+    org, box = job
+    q = [('bBox', '%.4f,%.4f,%.4f,%.4f' % box), ('characteristicName', 'Enterococcus'), ('characteristicName', 'Escherichia coli'),
+         ('startDateLo', SINCE.strftime('%m-%d-%Y')), ('mimeType', 'csv')]
+    try:
+        raw = get('https://www.waterqualitydata.us/data/Station/search?' + urllib.parse.urlencode(q), timeout=600).decode('utf-8', 'replace')
+    except Exception as e:
+        print('  FAILED sites', org, e, flush=True)
+        return org, []
+    out = []
+    for r in csv.DictReader(io.StringIO(raw)):
+        try:
+            out.append([r['MonitoringLocationIdentifier'], float(r['LatitudeMeasure']), float(r['LongitudeMeasure'])])
+        except (KeyError, ValueError):
+            pass
+    return org, out
+
+
+def meters(a, b, c, d):
+    import math
+    return math.hypot((a - c) * 111320.0, (b - d) * 111320.0 * math.cos(math.radians(a)))
+
+
+def by_place(S, R):
+    """A STATION WITH NO RESULT UNDER ITS OWN NAME (user 2026-11-19: half the map was gray). The EPA list and the portal do not
+    always agree on who a station belongs to (EPA: 'NJDEP'; the portal: 'NJDEP_BFBM') or what it is called. So a station
+    with nothing under its EPA id borrows the portal site standing within NEAR meters of it, the nearest one.
+    Returns {index in S: {day: [value, kind]}}."""
+    NEAR = 150.0
+    own = lambda s: (R.get(s['org_id']) or {}).get('%s-%s' % (s['org_id'], s['mloc_id']))
+    lone = [i for i, s in enumerate(S) if not own(s)]
+    boxes = {}
+    for i in lone:
+        s = S[i]
+        b = boxes.setdefault(s['org_id'], [180.0, 90.0, -180.0, -90.0])
+        b[0] = min(b[0], s['mloc_longitude']); b[1] = min(b[1], s['mloc_latitude']); b[2] = max(b[2], s['mloc_longitude']); b[3] = max(b[3], s['mloc_latitude'])
+    jobs = [(o, (b[0] - .01, b[1] - .01, b[2] + .01, b[3] + .01)) for o, b in boxes.items() if b[2] - b[0] < 40]      # a box round the world is a bad coordinate
+    grid = {}
+    with cf.ThreadPoolExecutor(4) as ex:
+        for org, sites in ex.map(near_sites, jobs):
+            print('  near %-22s %5d portal sites in its box' % (org, len(sites)), flush=True)
+            for sid, la, lo in sites:
+                grid.setdefault((int(la * 200), int(lo * 200)), {})[sid] = (la, lo)
+    want = {}
+    for i in lone:
+        s = S[i]; la, lo = s['mloc_latitude'], s['mloc_longitude']; best = None; bd = NEAR
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                for sid, (a, b) in (grid.get((int(la * 200) + dy, int(lo * 200) + dx)) or {}).items():
+                    d = meters(la, lo, a, b)
+                    if d <= bd:
+                        bd = d; best = sid
+        if best:
+            want[i] = best
+    ids = sorted(set(want.values()))
+    print('  %d lone stations, %d have a portal site within %d m (%d sites to read)' % (len(lone), len(want), NEAR, len(ids)), flush=True)
+    got = {}
+    chunks = [ids[k:k + 40] for k in range(0, len(ids), 40)]
+    with cf.ThreadPoolExecutor(4) as ex:
+        for _, by in ex.map(lambda c: results('by place', c), chunks):
+            got.update(by or {})
+    return {i: got[sid] for i, sid in want.items() if got.get(sid)}
+
+
 def main():
     out_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), 'beaches_v1.json')
     S = [s for s in stations() if s.get('mloc_latitude') and s.get('mloc_longitude')]
@@ -85,8 +150,10 @@ def main():
             R[org] = by
             print('  %-22s %5d sites with results' % (org, len(by)), flush=True)
     rows = []
-    for s in S:
-        days = (R.get(s['org_id']) or {}).get('%s-%s' % (s['org_id'], s['mloc_id'])) or {}
+    P = by_place(S, R)
+    print('  matched by place:', len(P), flush=True)
+    for i, s in enumerate(S):
+        days = (R.get(s['org_id']) or {}).get('%s-%s' % (s['org_id'], s['mloc_id'])) or P.get(i) or {}
         name = (s.get('mloc_name') or '').strip()
         if not name or name.upper() == 'UNKNOWN':
             name = s['mloc_id']
