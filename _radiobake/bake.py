@@ -5,7 +5,7 @@ The global layer: every station in Radio Browser (radio-browser.info, a communit
 a working HTTPS stream (its last check passed). UK LISTENERS are the line, not UK stations: the file answers 451 in the UK. The page plays each station's OWN stream URL in an
 <audio> element: the listener's browser connects straight to the station, nothing is relayed, recorded or re-hosted (the
 directory model). Out: OUT/stations_v1.json {built, n, src, rows: [[lat, lon, name, url, homepage, cc, place, tags, codec,
-bitrate, votes, 0, '', licensee, city of license]]} (the last two from the FCC, US call-sign stations only).
+bitrate, votes, 0, '', licensee, city of license, campus, campus domain, 'tag' if the stream's own tag confirmed it]]}.
 Run: python3 _radiobake/bake.py OUT
 """
 import sys, os, re, json, math, socket, random, urllib.request, datetime
@@ -128,6 +128,100 @@ def name_genres(nm):
     return out[:2]
 
 
+# ON CAMPUS (user 2026-11-21: "how could we confirm the location of these stations another way" -> "yes do 1 and 2").
+# 1) The Department of Education's IPEDS directory (public domain: every US college, its campus coordinates and web address). A
+#    school-held station moves to the campus of the school whose name matches its licensee -- at least half the licensee's
+#    distinctive words in the campus name, the same state, within 80 km of where the station was -- nearest wins; the card names the
+#    campus ("Keene State College", not "University System of New Hampshire"). No match (a school board, a far transmitter): it stays.
+# 2) The stream's own name tag (icy-name / icy-url, read from the first response, no audio kept): it confirms a station when it
+#    carries the call sign or the school's web domain; a tag naming a DIFFERENT licensed call sign drops a station we placed by call
+#    sign alone, since the directory's name was then wrong.
+IP_STOP = set('THE OF AND AT IN FOR ON UNIVERSITY COLLEGE COLLEGES BOARD TRUSTEES REGENTS GOVERNORS SUPERVISORS VISITORS RECTOR PRESIDENT FELLOWS SYSTEM INC CORPORATION FOUNDATION DISTRICT COMMONWEALTH HIGHER EDUCATION STUDENT STUDENTS BROADCASTING RADIO MAIN CAMPUS'.split())
+
+
+def ipeds():
+    y = datetime.date.today().year
+    for yr in (y - 1, y - 2, y - 3):
+        try:
+            import zipfile, io, csv
+            b = urllib.request.urlopen(urllib.request.Request('https://nces.ed.gov/ipeds/datacenter/data/HD%d.zip' % yr, headers={'User-Agent': 'Mozilla/5.0'}), timeout=120).read()
+            z = zipfile.ZipFile(io.BytesIO(b)); n = [x for x in z.namelist() if x.lower().endswith('.csv')][0]
+            rows = list(csv.DictReader(z.read(n).decode('latin-1').splitlines()))
+            print('ipeds', yr, len(rows))
+            return rows
+        except Exception as e:
+            print('ipeds', yr, 'unavailable', e)
+    return []
+
+
+def sig(t):
+    return {w for w in re.findall(r'[A-Z0-9&]+', (t or '').upper().replace('-', ' ')) if w not in IP_STOP and len(w) > 2}
+
+
+def campus(rows, SCH):
+    I = ipeds()
+    if not I:
+        return
+    by = {}
+    for x in I:
+        try:
+            by.setdefault(x['STABBR'], []).append((sig(x['INSTNM']), float(x['LATITUDE']), float(x['LONGITUD']), x['INSTNM'], x.get('WEBADDR', ''), sig(x.get('CITY', ''))))
+        except (ValueError, KeyError):
+            pass
+    moved = 0
+    for r in rows:
+        if r[5] != 'US' or not SCH.search(r[13] or '') or not r[14]:
+            continue
+        # every distinctive word of the licensee in the campus name, and the campus name adding nothing but its own city's words
+        # (2026-11-21: half-overlap sent Texas State to Texas Lutheran and Wayne State to Wayne County CC)
+        st, ls, fc = r[14][-2:], sig(r[13]), sig(r[14][:-4])
+        if not ls:
+            continue
+        best = None
+        for s_, la, lo, nm, web, ic in by.get(st, []):
+            if not ls <= s_ or (s_ - ls - fc):   # only the station's OWN city of license may add words (WKNH Keene went to UNH Manchester)
+                continue
+            d = km(r[0], r[1], la, lo)
+            if d <= 80 and (best is None or d < best[0]):
+                best = (d, la, lo, nm, web)
+        if best:
+            r[0], r[1] = round(best[1], 4), round(best[2], 4)
+            r[15], r[16] = best[3][:80], re.sub(r'^(https?://)?(www\.)?', '', (best[4] or '').lower()).split('/')[0]
+            moved += 1
+    print('campus: placed on campus', moved)
+
+
+def icy_check(rows, SCH, F):
+    import concurrent.futures as cf
+    todo = [r for r in rows if r[5] == 'US' and SCH.search(r[13] or '')]
+    def tag(u):
+        try:
+            q = urllib.request.urlopen(urllib.request.Request(u, headers={'User-Agent': 'Mozilla/5.0', 'Icy-MetaData': '1', 'Range': 'bytes=0-1023'}), timeout=8)
+            h = {k.lower(): v for k, v in q.headers.items()}; q.close()
+            return ' '.join(h.get(k, '') for k in ('icy-name', 'icy-url', 'icy-description', 'ice-name')).upper()
+        except Exception:
+            return None
+    with cf.ThreadPoolExecutor(16) as ex:
+        T = list(ex.map(tag, [r[3] for r in todo]))
+    ok = none = bad = 0; drop = set()
+    for r, t in zip(todo, T):
+        calls = {m.group(1) for m in CALL.finditer(r[2].upper())}
+        doms = {d.upper() for d in (r[16], re.sub(r'^(https?://)?(www\.)?', '', r[4].lower()).split('/')[0]) if d}
+        if not t or not t.strip():
+            none += 1; r[17] = ''
+            continue
+        if any(c in t for c in calls) or any(d and d in t for d in doms):
+            ok += 1; r[17] = 'tag'
+            continue
+        other = {m.group(1) for m in CALL.finditer(t)} & set(F)
+        if other and not (other & calls) and r[6] == '':
+            drop.add(id(r)); bad += 1
+        else:
+            none += 1; r[17] = ''
+    rows[:] = [r for r in rows if id(r) not in drop]
+    print('stream tags: confirmed', ok, '| no usable tag', none, '| contradicted and dropped', bad)
+
+
 CALL = re.compile(r'\b([KW][A-Z]{2,3})(?:-?(?:FM|AM|LP|LPFM|HD\d?))?\b')
 
 
@@ -157,7 +251,7 @@ def main():
         hp = (s.get('homepage') or '').strip()
         hp = hp if hp.startswith('http') else ''
         rows.append([round(la, 3), round(lo, 3), nm, u, hp[:200], (s.get('countrycode') or '').upper(), place, tags,
-                     (s.get('codec') or '').upper()[:6], int(s.get('bitrate') or 0), int(s.get('votes') or 0), 0, '', '', ''])
+                     (s.get('codec') or '').upper()[:6], int(s.get('bitrate') or 0), int(s.get('votes') or 0), 0, '', '', '', '', '', ''])
     # US stations whose name carries a call sign: the licensee and city of license, if the FCC's transmitter is within 150 km
     F, nf = fcc(), 0
     for r in rows:
@@ -202,9 +296,11 @@ def main():
             hp = (s.get('homepage') or '').strip()
             rows.append([round(c[3], 3), round(c[4], 3), nm, u, hp[:200] if hp.startswith('http') else '', 'US', '', tags,
                          (s.get('codec') or '').upper()[:6], int(s.get('bitrate') or 0), int(s.get('votes') or 0), 0, '',
-                         ' '.join(c[2].split())[:80], (c[0].title() + ', ' + c[1])[:50]])
+                         ' '.join(c[2].split())[:80], (c[0].title() + ', ' + c[1])[:50], '', '', ''])
             added += 1
     print('college stations placed from the FCC', added)
+    campus(rows, SCH)
+    icy_check(rows, SCH, F)
     nn = nc = 0
     for r in rows:
         g = genres(r[7])
