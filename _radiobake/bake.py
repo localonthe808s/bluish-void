@@ -74,6 +74,60 @@ def km(a, b, c, d):
     return 12742 * math.asin(math.sqrt(math.sin((c - a) * p / 2) ** 2 + math.cos(a * p) * math.cos(c * p) * math.sin((d - b) * p / 2) ** 2))
 
 
+# GENRES (user 2026-11-21: "do not all stations have a genre?" -> "yes do 1 and 2"): 1) the volunteers' free tags are mapped onto one
+# vocabulary -- place names, frequencies and filler ("music", "hits", "am") dropped, spellings merged ("80's", "80er", "1980s" -> 80S;
+# "hiphop" -> HIP-HOP) -- up to three; 2) a station left with none gets the genres its NAME states ("Jazz FM", "Classic Rock 101"),
+# and a school-held FCC license makes it COLLEGE RADIO. A station whose name names nothing keeps none (the card says LIVE RADIO).
+G = [
+    ('CLASSIC ROCK', r'classic rock'), ('ALTERNATIVE', r'alternative|alt rock'), ('INDIE', r'\bindie'), ('METAL', r'metal'), ('PUNK', r'\bpunk'),
+    ('SMOOTH JAZZ', r'smooth jazz'), ('JAZZ', r'\bjazz'), ('BLUES', r'\bblues'), ('SOUL', r'\bsoul\b'), ('R&B', r'\br ?& ?b\b|\brnb\b|rhythm and blues'),
+    ('FUNK', r'\bfunk\b'), ('DISCO', r'\bdisco\b'), ('HIP-HOP', r'hip[- ]?hop'), ('RAP', r'\brap\b'), ('REGGAETON', r'reggaeton'), ('REGGAE', r'\breggae\b'),
+    ('DANCEHALL', r'dancehall'), ('DEEP HOUSE', r'deep house'), ('HOUSE', r'\bhouse\b'), ('TECHNO', r'\btechno'), ('TRANCE', r'\btrance\b'),
+    ('DRUM AND BASS', r'drum ?(and|&|n) ?bass|\bdnb\b'), ('DUBSTEP', r'dubstep'), ('DUB', r'^dub$'), ('AMBIENT', r'\bambient'), ('CHILLOUT', r'chill'),
+    ('LOUNGE', r'lounge'), ('DOWNTEMPO', r'downtempo'), ('EXPERIMENTAL', r'experimental|avant'), ('ELECTRONIC', r'electronic|electronica|\belectro\b|\bedm\b'),
+    ('DANCE', r'\bdance\b|eurodance'), ('CLASSICAL', r'classical|klassik|cl[aá]sica\b|\bopera\b|baroque|symphon|classic fm|classic radio'), ('CLASSIC COUNTRY', r'classic country'),
+    ('BLUEGRASS', r'bluegrass'), ('COUNTRY', r'\bcountry\b'), ('AMERICANA', r'americana'), ('FOLK', r'\bfolk'), ('WORLD', r'world music|\bworld\b'),
+    ('AFROBEATS', r'afrobeat'), ('SALSA', r'\bsalsa\b'), ('CUMBIA', r'cumbia'), ('BACHATA', r'bachata'), ('MERENGUE', r'merengue'), ('BANDA', r'^banda$'),
+    ('REGIONAL MEXICAN', r'regional mexican|grupera|norte[ñn]a'), ('SERTANEJO', r'sertanej'), ('MPB', r'^mpb$'), ('SAMBA', r'\bsamba\b'), ('SCHLAGER', r'schlager'),
+    ('BOLLYWOOD', r'bollywood'), ('LATIN', r'\blatin|latino'), ('GOSPEL', r'gospel'), ('CATHOLIC', r'catholic|cat[oó]lic'),
+    ('CHRISTIAN', r'christian|cristian|worship|praise|\bhymns?\b'), ('ISLAMIC', r'islam|quran'), ('OLDIES', r'oldies|golden'),
+    ('TOP 40', r'top ?40|top hits|\bcharts?\b|contemporary hits'), ('ADULT CONTEMPORARY', r'adult contemporary|\bac\b'), ('EASY LISTENING', r'easy listening|soft hits'),
+    ('BIG BAND', r'big band|swing'), ('SOUNDTRACKS', r'soundtrack|film score'), ('INSTRUMENTAL', r'instrumental'), ('KIDS', r'\bkids\b|children'),
+    ('CHRISTMAS', r'christmas|navidad'), ('COMEDY', r'comedy'), ('OLD TIME RADIO', r'old time radio|\botr\b'), ('NEWS', r'\bnews\b|noticias|nachrichten|informa'),
+    ('TALK', r'\btalk\b|spoken'), ('SPORTS', r'sport|deportes|futebol|f[uú]tbol'), ('PUBLIC RADIO', r'\bnpr\b|public radio'),
+    ('COMMUNITY RADIO', r'community'), ('COLLEGE RADIO', r'college|campus|student radio|university radio'), ('ECLECTIC', r'eclectic|ecl[eé]tica|variety|various|freeform'),
+    ('ROCK', r'\brock\b'), ('POP', r'\bpop\b'), ('BALLADS', r'balada|ballad'), ('CLASSIC HITS', r'^classic hits$|^adult hits$'),
+]
+G = [(n, re.compile(p, re.I)) for n, p in G]
+DEC = re.compile(r"^(?:19)?([5-9]0)(?:'?s|er)$|^(?:20)?(00|10|20)(?:'?s|er)$", re.I)
+
+
+def genres(tags):
+    out = []
+    for t in [x.strip() for x in tags.split(',') if x.strip()]:
+        m = DEC.match(t.replace(' ', ''))
+        hit = (m.group(1) + 'S') if m and m.group(1) else ('20' + m.group(2) + 'S') if m else None
+        if not hit:
+            hit = next((n for n, rx in G if rx.search(t)), None)
+        if hit and hit not in out:
+            out.append(hit)
+    return out[:3]
+
+
+def name_genres(nm):
+    nm = re.sub(r'little rock|rockford|rockland|rockville|rock hill|round rock|rocky', ' ', nm, flags=re.I)
+    out = []
+    for n, rx in G:
+        if n in ('HITS', 'DUB', 'BANDA', 'MPB', 'WORLD', 'ADULT CONTEMPORARY', 'COMMUNITY RADIO', 'KIDS', 'GOSPEL') and n != 'GOSPEL':
+            continue
+        if rx.search(nm) and n not in out:
+            out.append(n)
+    m = re.search(r"\b(?:19)?([5-9]0)'?s\b", nm)
+    if m and len(out) < 3:
+        out.append(m.group(1) + 'S')
+    return out[:2]
+
+
 CALL = re.compile(r'\b([KW][A-Z]{2,3})(?:-?(?:FM|AM|LP|LPFM|HD\d?))?\b')
 
 
@@ -118,6 +172,17 @@ def main():
         if best:
             c = best[1]; r[13] = ' '.join(c[2].split())[:80]; r[14] = (c[0].title() + ', ' + c[1])[:50]; nf += 1
     print('fcc matched', nf)
+    SCH = re.compile(r'COLLEGE|UNIVERSITY|INSTITUTE OF|SCHOOL|ACADEMY|SEMINARY|REGENTS')
+    nn = nc = 0
+    for r in rows:
+        g = genres(r[7])
+        if not g:
+            g = name_genres(r[2]); nn += bool(g)
+        if SCH.search(r[13] or '') and 'COLLEGE RADIO' not in g:
+            g = (g + ['COLLEGE RADIO'])[:3]
+        nc += not g
+        r[7] = ','.join(g)
+    print('genres: from names', nn, '| still none', nc)
     meta = {'built': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%MZ'), 'n': len(rows), 'src': host, 'rows': rows}
     json.dump(meta, open(os.path.join(out, 'stations_v1.json'), 'w'), separators=(',', ':'), ensure_ascii=False)
     print('stations', len(S), '-> kept', len(rows), 'from', host, os.path.getsize(os.path.join(out, 'stations_v1.json')) // 1024, 'KB')
