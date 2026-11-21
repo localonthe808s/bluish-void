@@ -65,7 +65,7 @@ def fcc():
             except ValueError:
                 continue
             call = re.sub(r'-(FM|LP|AM|TV)$', '', f[1])
-            out.setdefault(call, []).append((f[10], f[11], f[27], la, lo))
+            out.setdefault(call, []).append((f[10], f[11], f[27], la, lo, re.sub(r'\s*(MHz|kHz)\s*$', '', f[2]).strip()))   # + frequency, for fcc_fix
     print('fcc calls', len(out))
     return out
 
@@ -435,6 +435,11 @@ def countries(rows):
             if b[0] <= lo <= b[2] and b[1] <= la <= b[3] and inr(lo, la, poly[0]) and not any(inr(lo, la, h) for h in poly[1:]):
                 return iso
         return None
+    global WHERE, LABEL
+    WHERE = where; LABEL = {}
+    for f in G:
+        p = f['properties']; iso = p.get('ISO_A2_EH') if p.get('ISO_A2_EH') not in (None, '-99') else p.get('ISO_A2'); b = f.get('bbox') or None
+        LABEL[iso] = (p.get('LABEL_Y'), p.get('LABEL_X'))
     fam = lambda c: {c, PARENT.get(c, c)}
     fixed = gone = 0; drop = set()
     for r in rows:
@@ -485,6 +490,85 @@ def dedupe(rows):
         seen.add(k); out.append(r)
     print('same stream listed twice: dropped', len(rows) - len(out))
     rows[:] = out
+
+
+WHERE = None
+LABEL = {}
+
+
+# PLACEMENT AUDIT (user 2026-11-21: "audit the dot locations and make sure theyre placed correctly ... fix their database data a bit").
+# 1) A US station whose name carries a call sign AND that license's frequency or city of license, but whose dot is more than 150 km from
+#    the licensed transmitter (KJYO 102.7 Oklahoma City sat in Ohio): it moves to the transmitter. Call signs are unique; the frequency or
+#    city in the name guards against words that look like call signs ("WILD", "KISS").
+def fcc_fix(rows, F, FPOS):
+    n = 0
+    for r in rows:
+        if r[5] != 'US' or r[13]:
+            continue
+        nm = r[2].upper()
+        for m in CALL.finditer(nm):
+            hit = [c for c in F.get(m.group(1), []) if (c[5] and re.search(r'(?<![\d.])' + re.escape(c[5].rstrip('0').rstrip('.') if '.' in c[5] else c[5]) + r'(?![\d])', nm)) or (c[0] and c[0].upper() in nm)]
+            if len({(c[0], c[2]) for c in hit}) == 1 and km(r[0], r[1], hit[0][3], hit[0][4]) > 150:   # one license (its main record first; boosters share city and holder)
+                c = hit[0]; r[0], r[1] = round(c[3], 4), round(c[4], 4); r[13] = ' '.join(c[2].split())[:80]; r[14] = (c[0].title() + ', ' + c[1])[:50]; FPOS[id(r)] = (c[3], c[4]); n += 1
+                break
+    print('placement: US stations moved to their licensed transmitter', n)
+
+
+# 2) A dot more than ~50 km out to sea, and 3) a dot on a larger country's center point (a "somewhere in Germany" placeholder): moved to a
+#    town the station's name or listing names, in its own country (Natural Earth populated places, the largest of that name); a dot at
+#    sea with no such town is left off. Tiny countries keep their center -- it is near enough.
+def places_fix(rows):
+    if not WHERE:
+        print('placement: country shapes unavailable, skipped'); return
+    try:
+        P = json.load(urllib.request.urlopen(urllib.request.Request(NE_PLACES, headers={'User-Agent': 'BluishVoid/1.0'}), timeout=120))['features']
+    except Exception as e:
+        print('placement: places unavailable', e); return
+    import collections
+    pl = collections.defaultdict(list)
+    for f in P:
+        q = f['properties']
+        for nm in {q.get('name'), q.get('nameascii')}:
+            if nm and len(nm) >= 4:
+                pl[(_norm(nm), q.get('iso_a2'))].append((q['latitude'], q['longitude'], q.get('pop_max') or 0))
+    def town(r):
+        best = None
+        for w in set(re.findall(r'[^\W\d_]{4,}(?:[ -][^\W\d_]{3,})?', r[2] + ' ' + (r[6] or ''))) | set(re.findall(r'[^\W\d_]{4,}', r[2] + ' ' + (r[6] or ''))):
+            for la, lo, pop in pl.get((_norm(w), r[5]), []):
+                if pop >= 20000 and (best is None or pop > best[2]):
+                    best = (la, lo, pop)
+        return best
+    def at_sea(la, lo):
+        if WHERE(la, lo):
+            return False
+        for dd in (.1, .25, .5):
+            for k in range(8):
+                a = k * math.pi / 4
+                if WHERE(la + dd * math.sin(a), lo + dd * math.cos(a) / max(.2, math.cos(math.radians(la)))):
+                    return False
+        return True
+    sea = moved = cen = 0; drop = set()
+    for r in rows:
+        if r[15] or r[13]:
+            continue                                            # placed by campus or FCC already
+        if at_sea(r[0], r[1]):
+            t = town(r)
+            if t:
+                r[0], r[1] = round(t[0], 4), round(t[1], 4); moved += 1
+            else:
+                drop.add(id(r))
+            sea += 1
+            continue
+        lb = LABEL.get(r[5])
+        if lb and lb[0] is not None and km(r[0], r[1], lb[0], lb[1]) < 25 and r[5] not in SMALL:
+            t = town(r)
+            if t and km(r[0], r[1], t[0], t[1]) > 25:
+                r[0], r[1] = round(t[0], 4), round(t[1], 4); cen += 1
+    rows[:] = [r for r in rows if id(r) not in drop]
+    print('placement: out at sea', sea, '(moved to their named town', moved, ', left off', len(drop), ') | country-center placeholders moved', cen)
+
+
+SMALL = set('SG LU LI MC SM VA AD MT BH BB LC GD VC KN AG DM MU SC MV CV KY BM FO GI IM JE GG AW CW SX BQ TC VG VI AI MS BL MF PM WF TO WS NR TV KI MH FM PW BN QA KW CY JM TT HK MO PS'.split())
 
 
 def tiers(rows, META):
@@ -575,6 +659,8 @@ def main():
             added += 1
     print('college stations placed from the FCC', added)
     countries(rows)
+    fcc_fix(rows, F, FPOS)
+    places_fix(rows)
     tokens(rows)
     dedupe(rows)
     campus(rows, SCH)
