@@ -82,17 +82,17 @@ def km(a, b, c, d):
 G = [
     ('CLASSIC ROCK', r'classic rock'), ('ALTERNATIVE', r'alternative|alt rock'), ('INDIE', r'\bindie'), ('METAL', r'metal'), ('PUNK', r'\bpunk'),
     ('SMOOTH JAZZ', r'smooth jazz'), ('JAZZ', r'\bjazz'), ('BLUES', r'\bblues'), ('SOUL', r'\bsoul\b'), ('R&B', r'\br ?& ?b\b|\brnb\b|rhythm and blues'),
-    ('FUNK', r'\bfunk\b'), ('DISCO', r'\bdisco\b'), ('HIP-HOP', r'hip[- ]?hop'), ('RAP', r'\brap\b'), ('REGGAETON', r'reggaeton'), ('REGGAE', r'\breggae\b'),
+    ('FUNK', r'\bfunk\b'), ('DISCO', r'\bdisco\b'), ('HIP-HOP', r'hip[- ]?hop|\bphonk\b'), ('RAP', r'\brap\b'), ('REGGAETON', r'reggaeton'), ('REGGAE', r'\breggae\b'),
     ('DANCEHALL', r'dancehall'), ('DEEP HOUSE', r'deep house'), ('HOUSE', r'\bhouse\b'), ('TECHNO', r'\btechno'), ('TRANCE', r'\btrance\b'),
     ('DRUM AND BASS', r'drum ?(and|&|n) ?bass|\bdnb\b'), ('DUBSTEP', r'dubstep'), ('DUB', r'^dub$'), ('AMBIENT', r'\bambient'), ('CHILLOUT', r'chill'),
     ('LOUNGE', r'lounge'), ('DOWNTEMPO', r'downtempo'), ('EXPERIMENTAL', r'experimental|avant'), ('ELECTRONIC', r'electronic|electronica|\belectro\b|\bedm\b'),
-    ('DANCE', r'\bdance\b|eurodance'), ('CLASSICAL', r'classical|klassik|cl[aá]sica\b|\bopera\b|baroque|symphon|classic fm|classic radio'), ('CLASSIC COUNTRY', r'classic country'),
+    ('DANCE', r'\bdance\b|eurodance'), ('CLASSICAL', r'classical|klassik|cl[aá]sica\b|\bclasic\b|\bopera\b|baroque|symphon|classic fm|classic radio'), ('CLASSIC COUNTRY', r'classic country'),
     ('BLUEGRASS', r'bluegrass'), ('COUNTRY', r'\bcountry\b'), ('AMERICANA', r'americana'), ('FOLK', r'\bfolk'), ('WORLD', r'world music|\bworld\b'),
     ('AFROBEATS', r'afrobeat'), ('SALSA', r'\bsalsa\b'), ('CUMBIA', r'cumbia'), ('BACHATA', r'bachata'), ('MERENGUE', r'merengue'), ('BANDA', r'^banda$'),
     ('REGIONAL MEXICAN', r'regional mexican|grupera|norte[ñn]a'), ('SERTANEJO', r'sertanej'), ('MPB', r'^mpb$'), ('SAMBA', r'\bsamba\b'), ('SCHLAGER', r'schlager'),
     ('BOLLYWOOD', r'bollywood'), ('LATIN', r'\blatin|latino'), ('GOSPEL', r'gospel'), ('CATHOLIC', r'catholic|cat[oó]lic'),
     ('CHRISTIAN', r'christian|cristian|worship|praise|\bhymns?\b'), ('ISLAMIC', r'islam|quran'), ('OLDIES', r'oldies|golden'),
-    ('TOP 40', r'top ?40|top hits|\bcharts?\b|contemporary hits'), ('ADULT CONTEMPORARY', r'adult contemporary|\bac\b'), ('EASY LISTENING', r'easy listening|soft hits'),
+    ('TOP 40', r'top ?40|top hits|\bcharts?\b|contemporary hits|^chr$'), ('ADULT CONTEMPORARY', r'adult contemporary|\bac\b'), ('EASY LISTENING', r'easy listening|soft hits'),
     ('BIG BAND', r'big band|swing'), ('SOUNDTRACKS', r'soundtrack|film score'), ('INSTRUMENTAL', r'instrumental'), ('KIDS', r'\bkids\b|children'),
     ('CHRISTMAS', r'christmas|navidad'), ('COMEDY', r'comedy'), ('OLD TIME RADIO', r'old time radio|\botr\b'), ('NEWS', r'\bnews\b|noticias|nachrichten|informa'),
     ('TALK', r'\btalk\b|spoken'), ('SPORTS', r'sport|deportes|futebol|f[uú]tbol'), ('PUBLIC RADIO', r'\bnpr\b|public radio'),
@@ -283,6 +283,7 @@ CALL = re.compile(r'\b([KW][A-Z]{2,3})(?:-?(?:FM|AM|LP|LPFM|HD\d?))?\b')
 # under the same name. The run's summary also lists stations whose own stream address changed since last week.
 # State: radio/health_v1.json on R2 {built, fails: {url: weeks in a row}, uuid: {station uuid: url}} (HEALTH_PREV = last week's copy).
 CODE = {}
+GENRE = {}   # the genre each stream announces about itself (icy-genre), read by the health check
 
 
 def probe(u):
@@ -290,7 +291,7 @@ def probe(u):
         # asked as a browser's <audio> asks: Shoutcast servers hand a browser their HTML status page at "/" -- Chrome then cannot play
         # it (checked 2026-11-21), so that counts as a failure, as it is for a listener
         q = urllib.request.urlopen(urllib.request.Request(u, headers={'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36', 'Accept': '*/*', 'Range': 'bytes=0-'}), timeout=12)
-        ct = (q.headers.get('Content-Type') or '').lower(); b = q.read(2048); q.close()
+        ct = (q.headers.get('Content-Type') or '').lower(); GENRE[u] = (q.headers.get('icy-genre') or q.headers.get('ice-genre') or '').strip()[:80]; b = q.read(2048); q.close()
         if re.search(r'\.m3u8(\?|$)', u) or 'mpegurl' in ct:
             return b.lstrip().startswith(b'#EXTM3U')
         return bool(b) and 'text/html' not in ct
@@ -581,16 +582,20 @@ def main():
     icy_check(rows, SCH, F)
     health(rows, META, out)
     tiers(rows, META)
-    nn = nc = 0
+    # GENRES FROM THE STREAM ITSELF (user 2026-11-21: "yeah do 1"): a station the directory left untagged takes the genre its own stream
+    # announces (icy-genre, read by the weekly health check) -- "Pop / Rock", "Christian Contemporary" -- before its name is tried
+    nn = nc = ni = 0
     for r in rows:
         g = genres(r[7])
+        if not g:
+            g = genres(re.sub(r'[/;|]+', ',', GENRE.get(r[3], ''))); ni += bool(g)
         if not g:
             g = name_genres(r[2]); nn += bool(g)
         if SCH.search(r[13] or '') and 'COLLEGE RADIO' not in g:
             g = (g + ['COLLEGE RADIO'])[:3]
         nc += not g
         r[7] = ','.join(g)
-    print('genres: from names', nn, '| still none', nc)
+    print('genres: from the stream itself', ni, '| from names', nn, '| still none', nc)
     # LOCAL TIME AT THE STATION (user 2026-11-21: "do ... 4"): each row's time zone (timezonefinder, from the world's tz boundaries, offline),
     # as an index r[19] into meta['tz'] so the names are stored once; the card shows the station's clock
     TZ, tzi = [], {}
