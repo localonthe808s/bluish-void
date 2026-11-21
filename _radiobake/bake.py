@@ -592,6 +592,18 @@ def places_fix(rows):
 SMALL = set('SG LU LI MC SM VA AD MT BH BB LC GD VC KN AG DM MU SC MV CV KY BM FO GI IM JE GG AW CW SX BQ TC VG VI AI MS BL MF PM WF TO WS NR TV KI MH FM PW BN QA KW CY JM TT HK MO PS'.split())
 
 
+# PUBLIC BROADCASTERS BY WEB ADDRESS (2026-11-21): stations the directory lists with no position and no city, placed at their studios; only
+# studio cities we are sure of
+BROADCASTER_HQ = {
+    '5fm.co.za': (-26.183, 28.006, 'Johannesburg'), 'metrofm.co.za': (-26.183, 28.006, 'Johannesburg'),
+    'ukhozifm.co.za': (-29.858, 31.022, 'Durban'), 'lotusfm.co.za': (-29.858, 31.022, 'Durban'),
+    'lesedifm.co.za': (-29.121, 26.214, 'Bloemfontein'), 'umhlobowenenefm.co.za': (-33.961, 25.602, 'Gqeberha'),
+    'phalaphalafm.co.za': (-23.904, 29.469, 'Polokwane'),
+    'ebc.et': (9.030, 38.740, 'Addis Ababa'), 'rm.co.mz': (-25.966, 32.573, 'Maputo'),
+}
+CNAME = {'MZ': 'Mocambique', 'MX': 'Mexico'}   # a small town that shares its country's name: 'Radio Mocambique' is national, not from Ilha de Mocambique
+
+
 def tiers(rows, META):
     """how much each station is listened to, as the directory counts it (clicks in the last day, plus votes), ranked into four faint
     dot sizes: 3 = top 3%, 2 = top 15%, 1 = top half, 0 = the rest"""
@@ -696,7 +708,7 @@ def main():
         q = f['properties']
         for nm0 in {q.get('name'), q.get('nameascii')}:
             if nm0 and len(nm0) >= 3:
-                pidx[(_norm(nm0), q.get('iso_a2'))].append((q['latitude'], q['longitude'], q.get('pop_max') or 0))
+                pidx[(_norm(nm0), q.get('iso_a2'))].append((q['latitude'], q['longitude'], q.get('pop_max') or 0, q.get('name') or nm0))
     byc = 0
     for s in N:
         u = (s.get('url_resolved') or '').strip(); cc = (s.get('countrycode') or '').upper()
@@ -704,12 +716,29 @@ def main():
             continue
         city = (s.get('state') or '').split(',')[0].strip()
         hit = pidx.get((_norm(city), cc)) if city else None
-        if not hit:
-            continue
-        la, lo, _p = max(hit, key=lambda t: t[2])
         nm = ' '.join((s.get('name') or '').split())[:80]
         if not nm:
             continue
+        # ... or (user 2026-11-21: "review the countries of africa for more public radio") the town its NAME gives ("Radio Cotonou", "Love FM
+        # 107.3 Dakar": a whole word, a place of 50,000+ in its own country, never the country's own name), or a public broadcaster's
+        # studio city by its web address (BROADCASTER_HQ)
+        if not hit:
+            cn = _norm(CNAME.get(cc, ''))
+            for w in set(re.findall(r'[^\W\d_]+(?:[ -][^\W\d_]+)?', _norm(nm))) | set(re.findall(r'[^\W\d_]{4,}', _norm(nm))):
+                if w == cn:
+                    continue
+                c2 = [t for t in pidx.get((w, cc), []) if t[2] >= 50000]
+                if c2 and (not hit or max(c2, key=lambda t: t[2])[2] > max(hit, key=lambda t: t[2])[2]):
+                    hit = c2
+            if hit:
+                city = max(hit, key=lambda t: t[2])[3] if len(max(hit, key=lambda t: t[2])) > 3 else city
+        if not hit:
+            hd = re.sub(r'^https?://(www\.)?', '', (s.get('homepage') or '').lower()).split('/')[0]
+            if hd in BROADCASTER_HQ:
+                b0 = BROADCASTER_HQ[hd]; hit = [(b0[0], b0[1], 1)]; city = b0[2]
+        if not hit:
+            continue
+        la, lo = max(hit, key=lambda t: t[2])[:2]
         seen.add(u)
         tags = ','.join([t.strip() for t in (s.get('tags') or '').split(',') if t.strip()][:3])[:60]
         hp = (s.get('homepage') or '').strip()
