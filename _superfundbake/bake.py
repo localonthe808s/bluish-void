@@ -148,6 +148,11 @@ def main():
         if b.get('FEDERAL_FACILITY_DETER_CODE') == 'Y':
             fed[b['EPA_ID']] = 1
     reuse = {str(r.get('Site_ID') or '').lstrip('0') for r in layer('Superfund_Sites_In_Reuse/FeatureServer/0', 'Site_ID')}
+    # EPA's site-wide human exposure indicator (Y under control, N not under control, U insufficient data), from Cleanups in My Community
+    he = {}
+    for r in layer('Cleanups_in_my_Community_Sites/FeatureServer/0', 'EPA_ID,SF_EI_HE_CODE', "SF_EI_HE_CODE<>''"):
+        if r.get('EPA_ID') and r.get('SF_EI_HE_CODE') in ('Y', 'N', 'U'):
+            he[r['EPA_ID']] = r['SF_EI_HE_CODE']
     coc = collections.defaultdict(lambda: collections.defaultdict(collections.Counter))
     for r in report(r'Contaminant of Concern Data for Decision Documents by Media'):
         nm = family((r.get('Contaminant Name') or '').strip())
@@ -183,6 +188,8 @@ def main():
             s['fed'] = 1
         if str(a.get('SEMS_ID') or '').lstrip('0') in reuse:
             s['reuse'] = 1
+        if he.get(eid):
+            s['he'] = he[eid]
         if m:
             s['m'] = m
         if rr:
@@ -190,7 +197,7 @@ def main():
         sites.append(s)
     json.dump({'built': datetime.date.today().isoformat(), 'n': len(sites), 'sites': sites}, open(out, 'w'), separators=(',', ':'))
     print('wrote', out, os.path.getsize(out) // 1024, 'KB |', len(sites), 'sites | with contaminants', sum(1 for s in sites if s.get('m')), '| with remedies',
-          sum(1 for s in sites if s.get('r')), '| with acreage', sum(1 for s in sites if s.get('ac')), '| in reuse', sum(1 for s in sites if s.get('reuse')), '| federal', sum(1 for s in sites if s.get('fed')))
+          sum(1 for s in sites if s.get('r')), '| with acreage', sum(1 for s in sites if s.get('ac')), '| in reuse', sum(1 for s in sites if s.get('reuse')), '| federal', sum(1 for s in sites if s.get('fed')), '| exposure status', collections.Counter(s.get('he') for s in sites))
 
 
 if __name__ == '__main__':
