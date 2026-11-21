@@ -1,0 +1,52 @@
+name: Air from toxic releases (EPA RSEI)
+
+# _rseibake/bake.py -> R2 pol/air/{all,cx}/{z}/{x}/{y}.png + pol/air_v1.json for LAND > POLLUTION > TOXIC RELEASES. EPA publishes a
+# new RSEI run about once a year; this checks monthly and bakes only when the newest aggregated grid file differs from the one on R2.
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Bake even if the version is unchanged'
+        required: false
+        default: 'no'
+  schedule:
+    - cron: '17 12 3 * *'
+
+jobs:
+  bake:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: _rseibake
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: New run?
+        id: chk
+        run: |
+          B=https://gaftp.epa.gov/rsei/Current_Version/
+          V=$(curl -s -A "Mozilla/5.0" "$B" | grep -oE 'V[0-9]+_RY[0-9]{4}' | sort | tail -1)
+          F=$(curl -s -A "Mozilla/5.0" "$B$V/Aggregated_Grid_Cell/" | grep -oE 'aggmicro[0-9]{4}_[0-9]{4}\.csv\.gz' | sort -t_ -k2 | tail -1)
+          HAVE=$(curl -s "https://cdn.bluishvoid.com/pol/air_v1.json?x=$(date +%s)" | python3 -c "import json,sys; d=json.load(sys.stdin); print('aggmicro%s_%s.csv.gz' % (d['version'], d['year']))" 2>/dev/null || echo none)
+          echo "newest $F, on R2 $HAVE"
+          echo "url=$B$V/Aggregated_Grid_Cell/$F" >> "$GITHUB_OUTPUT"
+          if [ "$F" != "$HAVE" ] || [ "${{ github.event.inputs.force }}" = "yes" ]; then echo "go=yes" >> "$GITHUB_OUTPUT"; fi
+      - name: Bake
+        if: steps.chk.outputs.go == 'yes'
+        run: |
+          pip install --quiet numpy pandas pillow scipy
+          python _rseibake/bake.py out "${{ steps.chk.outputs.url }}"
+      - name: Upload
+        if: steps.chk.outputs.go == 'yes'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          E="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 sync out/air "s3://bluishvoid-bg/pol/air" --endpoint-url "$E" --content-type image/png --cache-control "public, max-age=86400" --delete --only-show-errors
+          aws s3 cp out/air_v1.json "s3://bluishvoid-bg/pol/air_v1.json" --endpoint-url "$E" --content-type application/json --cache-control "public, max-age=3600" --only-show-errors
