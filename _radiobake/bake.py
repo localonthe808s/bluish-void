@@ -173,6 +173,38 @@ def main():
             c = best[1]; r[13] = ' '.join(c[2].split())[:80]; r[14] = (c[0].title() + ', ' + c[1])[:50]; nf += 1
     print('fcc matched', nf)
     SCH = re.compile(r'COLLEGE|UNIVERSITY|INSTITUTE OF|SCHOOL|ACADEMY|SEMINARY|REGENTS')
+    # COLLEGE STATIONS THE DIRECTORY NEVER PLACED (user 2026-11-21: "are there more college stations out there? like new paltz ny?" ->
+    # "i only want playable ones right now"): US stations with a working HTTPS stream but no map position, whose name carries the call
+    # sign of a school-held FCC license, are placed at that license's transmitter. Checks: the call sign must be in the name; the
+    # license must be held by a school; if the directory gives a state it must be the license's state; one license per stream.
+    ST = {'AL': 'alabama', 'AK': 'alaska', 'AZ': 'arizona', 'AR': 'arkansas', 'CA': 'california', 'CO': 'colorado', 'CT': 'connecticut', 'DE': 'delaware', 'DC': 'district of columbia', 'FL': 'florida', 'GA': 'georgia', 'HI': 'hawaii', 'ID': 'idaho', 'IL': 'illinois', 'IN': 'indiana', 'IA': 'iowa', 'KS': 'kansas', 'KY': 'kentucky', 'LA': 'louisiana', 'ME': 'maine', 'MD': 'maryland', 'MA': 'massachusetts', 'MI': 'michigan', 'MN': 'minnesota', 'MS': 'mississippi', 'MO': 'missouri', 'MT': 'montana', 'NE': 'nebraska', 'NV': 'nevada', 'NH': 'new hampshire', 'NJ': 'new jersey', 'NM': 'new mexico', 'NY': 'new york', 'NC': 'north carolina', 'ND': 'north dakota', 'OH': 'ohio', 'OK': 'oklahoma', 'OR': 'oregon', 'PA': 'pennsylvania', 'RI': 'rhode island', 'SC': 'south carolina', 'SD': 'south dakota', 'TN': 'tennessee', 'TX': 'texas', 'UT': 'utah', 'VT': 'vermont', 'VA': 'virginia', 'WA': 'washington', 'WV': 'west virginia', 'WI': 'wisconsin', 'WY': 'wyoming', 'PR': 'puerto rico'}
+    added = 0
+    if F:
+        try:
+            U, _ = get('/json/stations/search?countrycode=US&is_https=true&hidebroken=true&limit=100000')
+        except SystemExit:
+            U = []
+        for s in U:
+            u = (s.get('url_resolved') or '').strip()
+            if s.get('geo_lat') is not None or not u.startswith('https://') or s.get('lastcheckok') != 1 or s.get('hls') == 1 or u in seen:
+                continue
+            nm = ' '.join((s.get('name') or '').split())[:80]
+            st = (s.get('state') or '').strip().lower()
+            cands = [c for m in CALL.finditer(nm.upper()) for c in F.get(m.group(1), []) if SCH.search(c[2])]
+            if st:
+                cands = [c for c in cands if ST.get(c[1]) == st or c[1].lower() == st]
+            lic = {c[2] for c in cands}
+            if len(lic) != 1:
+                continue
+            c = cands[0]
+            seen.add(u)
+            tags = ','.join([t.strip() for t in (s.get('tags') or '').split(',') if t.strip()][:3])[:60]
+            hp = (s.get('homepage') or '').strip()
+            rows.append([round(c[3], 3), round(c[4], 3), nm, u, hp[:200] if hp.startswith('http') else '', 'US', '', tags,
+                         (s.get('codec') or '').upper()[:6], int(s.get('bitrate') or 0), int(s.get('votes') or 0), 0, '',
+                         ' '.join(c[2].split())[:80], (c[0].title() + ', ' + c[1])[:50]])
+            added += 1
+    print('college stations placed from the FCC', added)
     nn = nc = 0
     for r in rows:
         g = genres(r[7])
