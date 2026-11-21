@@ -11,6 +11,17 @@ const TILE = /\/\d{1,2}\/\d+\/\d+\.(webp|png|jpg|mvt|pbf)$/;
 export default {
   async fetch(request) {
     const url = new URL(request.url);
+    // RADIO is not offered in the UK (2026-11-21): the station list answers 451 there; the country is Cloudflare's own edge reading, not stored
+    if (url.pathname.startsWith('/radio/')){
+      const cc = (request.cf && request.cf.country) || '';
+      if (cc === 'GB' || cc === 'IM' || cc === 'JE' || cc === 'GG'){
+        const origin = request.headers.get('Origin') || '';
+        const h = new Headers({ 'Cache-Control': 'private, no-store', 'Content-Type': 'text/plain' });
+        if (ALLOWED_ORIGINS.includes(origin)) h.set('Access-Control-Allow-Origin', origin);
+        return new Response('Not available in the United Kingdom.', { status: 451, headers: h });
+      }
+      return fetch(request);
+    }
     // only a tile path keeps its miss for a day; an index (cover.json) fetched before its upload must not stick as a 404
     if (!TILE.test(url.pathname)) return fetch(request);
     const r = await fetch(request, { cf: { cacheTtlByStatus: { '200-299': 31536000, '404': 86400 } } });
