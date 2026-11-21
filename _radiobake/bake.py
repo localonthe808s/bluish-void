@@ -222,6 +222,56 @@ def icy_check(rows, SCH, F):
     print('stream tags: confirmed', ok, '| no usable tag', none, '| contradicted and dropped', bad)
 
 
+# STACKS (user 2026-11-21: "explain to me what a larger circle is" -> "do 3 and do the rest you cant fix as 1"). Many directory stations share
+# one exact point (a city center, a host's address); their glows stack into one big circle. Where a REAL location exists, a stacked station
+# moves to it: a US station with an FCC license goes to its licensed transmitter; a station whose own listing names a different town than
+# the rest of its stack goes to that town (Natural Earth populated places, public domain, same country, exact name). The rest -- mostly one
+# broadcaster's channels, which genuinely share a place -- stay, and the page draws each shared point once (1).
+NE_PLACES = 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_populated_places_simple.geojson'
+
+
+def _norm(t):
+    import unicodedata
+    return ''.join(c for c in unicodedata.normalize('NFKD', (t or '').lower()) if not unicodedata.combining(c)).strip()
+
+
+def relocate(rows, FPOS):
+    import collections
+    st = collections.defaultdict(list)
+    for r in rows:
+        st[(round(r[0], 3), round(r[1], 3))].append(r)
+    stacks = [v for v in st.values() if len(v) > 1]
+    try:
+        P = json.load(urllib.request.urlopen(urllib.request.Request(NE_PLACES, headers={'User-Agent': 'BluishVoid/1.0'}), timeout=120))['features']
+    except Exception as e:
+        print('places unavailable', e); P = []
+    places = collections.defaultdict(list)
+    for f in P:
+        q = f['properties']
+        for nm in {q.get('name'), q.get('nameascii'), q.get('namealt')}:
+            if nm:
+                places[(_norm(nm), q.get('iso_a2'))].append((q['latitude'], q['longitude']))
+    nf = nt = 0
+    for v in stacks:
+        common = collections.Counter(_norm(x[6]) for x in v).most_common(1)[0][0]
+        for r in v:
+            if r[15]:                                            # already on its campus
+                continue
+            if id(r) in FPOS:
+                la, lo = FPOS[id(r)]
+                if km(r[0], r[1], la, lo) > 3:
+                    r[0], r[1] = round(la, 4), round(lo, 4); nf += 1
+                continue
+            town = _norm((r[6] or '').split(',')[0])
+            if not town or town == common:
+                continue
+            hit = places.get((town, r[5])) or []
+            if len(hit) == 1 and km(r[0], r[1], hit[0][0], hit[0][1]) > 3:
+                r[0], r[1] = round(hit[0][0], 4), round(hit[0][1], 4); nt += 1
+    left = collections.Counter((round(r[0], 3), round(r[1], 3)) for r in rows)
+    print('stacks: moved to FCC transmitter', nf, '| to their named town', nt, '| still sharing a point', sum(c for c in left.values() if c > 1))
+
+
 CALL = re.compile(r'\b([KW][A-Z]{2,3})(?:-?(?:FM|AM|LP|LPFM|HD\d?))?\b')
 
 
@@ -254,6 +304,7 @@ def main():
                      (s.get('codec') or '').upper()[:6], int(s.get('bitrate') or 0), int(s.get('votes') or 0), 0, '', '', '', '', '', ''])
     # US stations whose name carries a call sign: the licensee and city of license, if the FCC's transmitter is within 150 km
     F, nf = fcc(), 0
+    FPOS = {}
     for r in rows:
         if r[5] != 'US':
             continue
@@ -264,7 +315,7 @@ def main():
                 if d <= 150 and (best is None or d < best[0]):
                     best = (d, c)
         if best:
-            c = best[1]; r[13] = ' '.join(c[2].split())[:80]; r[14] = (c[0].title() + ', ' + c[1])[:50]; nf += 1
+            c = best[1]; r[13] = ' '.join(c[2].split())[:80]; r[14] = (c[0].title() + ', ' + c[1])[:50]; nf += 1; FPOS[id(r)] = (c[3], c[4])
     print('fcc matched', nf)
     SCH = re.compile(r'COLLEGE|UNIVERSITY|INSTITUTE OF|SCHOOL|ACADEMY|SEMINARY|REGENTS')
     # COLLEGE STATIONS THE DIRECTORY NEVER PLACED (user 2026-11-21: "are there more college stations out there? like new paltz ny?" ->
@@ -300,6 +351,7 @@ def main():
             added += 1
     print('college stations placed from the FCC', added)
     campus(rows, SCH)
+    relocate(rows, FPOS)
     icy_check(rows, SCH, F)
     nn = nc = 0
     for r in rows:
