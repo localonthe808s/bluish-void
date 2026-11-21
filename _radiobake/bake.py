@@ -315,7 +315,13 @@ def health(rows, META, out):
     with cf.ThreadPoolExecutor(48) as ex:
         ok = dict(zip(urls, ex.map(probe, urls)))
     bad = [u for u in urls if not ok[u]]
-    fails = {u: pf.get(u, 0) + 1 for u in bad}
+    # a WEEK counts only when last week's check is 5+ days old: a second run the same day (2026-11-21: 484 stations dropped after two
+    # runs 30 minutes apart) keeps the count it had instead of adding to it
+    try:
+        age = (datetime.datetime.utcnow() - datetime.datetime.strptime(prev.get('built', ''), '%Y-%m-%dT%H:%MZ')).days
+    except ValueError:
+        age = 99
+    fails = {u: pf.get(u, 0) + 1 if age >= 5 else max(1, pf.get(u, 0)) for u in bad}
     rate = len(bad) / max(1, len(urls))
     sick = rate > .25
     gone = [r for r in rows if fails.get(r[3], 0) >= 2] if not sick else []
