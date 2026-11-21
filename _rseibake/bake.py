@@ -78,8 +78,13 @@ def grids(d):
     return out, x0, y0
 
 
-EDGE = [(245, 158, 11), (253, 186, 116), (255, 237, 213)]          # amber, light orange, near-white: the top 3%, 1%, 0.1%
-FILL = [(245, 158, 11, 30), (253, 186, 116, 48), (255, 237, 213, 70)]
+# COLORS (user 2026-11-21: "are they color categorized the best the can be?" -> "go for it"): amber / light orange / near-white were too
+# alike (ΔE 8.4 between the first two) and borrowed the map's own colors (orange air dots, yellow Superfund, white "sent away" dots).
+# A pink ramp nothing else on LAND uses, adjacent steps ΔE 19.7 normal / 16.1 deutan (dataviz validator), and a thicker edge per level
+# so the levels read apart without color too
+EDGE = [(236, 72, 153), (249, 168, 212), (253, 242, 248)]          # #ec4899, #f9a8d4, #fdf2f8: the top 3%, 1%, 0.1%
+FILL = [(236, 72, 153, 26), (249, 168, 212, 40), (253, 242, 248, 58)]
+WIDTH = [1, 2, 2]; GLOW = [1.3, 1.6, 1.9]
 PAD = 8
 
 
@@ -106,8 +111,8 @@ def tile(G, x0, y0, lev, z, tx, ty):
         m = K >= i + 1
         if not m.any():
             continue
-        e = m & ~ND.binary_erosion(m, iterations=1, border_value=1)
-        glow = np.clip(ND.gaussian_filter(e.astype(np.float32), 1.6) * 2.2, 0, 1)
+        e = m & ~ND.binary_erosion(m, iterations=WIDTH[i], border_value=1)
+        glow = np.clip(ND.gaussian_filter(e.astype(np.float32), GLOW[i]) * 2.2, 0, 1)
         a = np.maximum(e * 235.0, glow * 120.0)
         for c in range(3):
             out[..., c] = np.where(a > out[..., 3], EDGE[i][c], out[..., c])
