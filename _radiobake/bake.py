@@ -615,8 +615,7 @@ def main():
             continue
         if not u.startswith('https://') or s.get('lastcheckok') != 1 or not (-90 < la < 90 and -180 <= lo <= 180) or (la == 0 and lo == 0):
             continue
-        if s.get('hls') == 1:
-            continue                                                # HLS needs a JS player, not <audio> everywhere
+        # HLS streams are in since 2026-11-21: the page plays them through hls.js (Safari natively); they were the big national broadcasters
         if u in seen:
             continue
         seen.add(u)
@@ -659,7 +658,7 @@ def main():
             U = []
         for s in U:
             u = (s.get('url_resolved') or '').strip()
-            if s.get('geo_lat') is not None or not u.startswith('https://') or s.get('lastcheckok') != 1 or s.get('hls') == 1 or u in seen:
+            if s.get('geo_lat') is not None or not u.startswith('https://') or s.get('lastcheckok') != 1 or u in seen:
                 continue
             nm = ' '.join((s.get('name') or '').split())[:80]
             st = (s.get('state') or '').strip().lower()
@@ -679,6 +678,46 @@ def main():
             META[id(rows[-1])] = (s.get('stationuuid') or '', int(s.get('clickcount') or 0), int(s.get('votes') or 0))
             added += 1
     print('college stations placed from the FCC', added)
+    # STATIONS THE DIRECTORY NEVER PLACED, BY THEIR CITY (user 2026-11-21: "theres no reachable radio in tokyo or seoul? radio garden has a lot
+    # of pop from those cities"): a working HTTPS station with no map position whose listing's city ("Seoul", "Tokyo", "Kobe") is a Natural
+    # Earth populated place in its own country goes to that place (the largest of the name). No city, no placement: a capital would be a
+    # guess (every .fr station in Paris), and a foreign-hosted channel would land in the wrong country. Every later check still applies.
+    try:
+        N, _ = get('/json/stations/search?is_https=true&hidebroken=true&has_geo_info=false&limit=100000')
+    except SystemExit:
+        N = []
+    import collections
+    try:
+        PP = json.load(urllib.request.urlopen(urllib.request.Request(NE_PLACES, headers={'User-Agent': 'BluishVoid/1.0'}), timeout=120))['features']
+    except Exception as e:
+        print('places unavailable', e); PP = []
+    pidx = collections.defaultdict(list)
+    for f in PP:
+        q = f['properties']
+        for nm0 in {q.get('name'), q.get('nameascii')}:
+            if nm0 and len(nm0) >= 3:
+                pidx[(_norm(nm0), q.get('iso_a2'))].append((q['latitude'], q['longitude'], q.get('pop_max') or 0))
+    byc = 0
+    for s in N:
+        u = (s.get('url_resolved') or '').strip(); cc = (s.get('countrycode') or '').upper()
+        if s.get('geo_lat') is not None or not u.startswith('https://') or s.get('lastcheckok') != 1 or u in seen:
+            continue
+        city = (s.get('state') or '').split(',')[0].strip()
+        hit = pidx.get((_norm(city), cc)) if city else None
+        if not hit:
+            continue
+        la, lo, _p = max(hit, key=lambda t: t[2])
+        nm = ' '.join((s.get('name') or '').split())[:80]
+        if not nm:
+            continue
+        seen.add(u)
+        tags = ','.join([t.strip() for t in (s.get('tags') or '').split(',') if t.strip()][:3])[:60]
+        hp = (s.get('homepage') or '').strip()
+        rows.append([round(la, 3), round(lo, 3), nm, u, hp[:200] if hp.startswith('http') else '', cc, city[:40], tags,
+                     (s.get('codec') or '').upper()[:6], int(s.get('bitrate') or 0), int(s.get('votes') or 0), 0, '', '', '', '', '', ''])
+        META[id(rows[-1])] = (s.get('stationuuid') or '', int(s.get('clickcount') or 0), int(s.get('votes') or 0))
+        byc += 1
+    print('placed by their listed city', byc)
     countries(rows)
     fcc_fix(rows, F, FPOS)
     places_fix(rows)
