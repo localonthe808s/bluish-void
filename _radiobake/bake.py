@@ -547,10 +547,31 @@ def places_fix(rows):
                 if WHERE(la + dd * math.sin(a), lo + dd * math.cos(a) / max(.2, math.cos(math.radians(la)))):
                     return False
         return True
-    sea = moved = cen = 0; drop = set()
+    # 4) NEAR-SHORE WATER (user 2026-11-21: Mo's Place Radio sat in Long Island Sound -> "fix the near-shore water dots"): a dot in the water
+    #    but within ~50 km of land moves to the town its name or listing names, if that is within 60 km, else to the nearest land. A dot
+    #    within ~3 km of the shore stays: the country shapes are coarse at the coast, and waterfront stations sit there rightly.
+    def nearest_land(la, lo, cc):
+        cl = max(.2, math.cos(math.radians(la))); own = {cc, PARENT.get(cc, cc)}
+        for dd in (.03, .05, .08, .12, .18):                      # ~20 km at most: farther than that only to a town it names
+            for k in range(16):
+                a = k * math.pi / 8; y, x = la + dd * math.sin(a), lo + dd * math.cos(a) / cl
+                w = WHERE(y, x)
+                if w and (w in own or PARENT.get(w) in own):                    # its own country's land only: a small island the coarse
+                    return y + .01 * math.sin(a), x + .01 * math.cos(a) / cl   # shapes leave out (Alderney) must not land in France
+        return None
+    sea = moved = cen = shore = 0; drop = set()
     for r in rows:
         if r[15] or r[13]:
             continue                                            # placed by campus or FCC already
+        if not WHERE(r[0], r[1]) and not at_sea(r[0], r[1]):
+            cl = max(.2, math.cos(math.radians(r[0])))
+            if any(WHERE(r[0] + .025 * math.sin(k * math.pi / 8), r[1] + .025 * math.cos(k * math.pi / 8) / cl) for k in range(16)):
+                continue                                        # within ~3 km of the shore: leave it
+            t = town(r)
+            p = (t[0], t[1]) if t and km(r[0], r[1], t[0], t[1]) <= 60 else nearest_land(r[0], r[1], r[5])
+            if p:
+                r[0], r[1] = round(p[0], 4), round(p[1], 4); shore += 1
+            continue
         if at_sea(r[0], r[1]):
             t = town(r)
             if t:
@@ -565,7 +586,7 @@ def places_fix(rows):
             if t and km(r[0], r[1], t[0], t[1]) > 25:
                 r[0], r[1] = round(t[0], 4), round(t[1], 4); cen += 1
     rows[:] = [r for r in rows if id(r) not in drop]
-    print('placement: out at sea', sea, '(moved to their named town', moved, ', left off', len(drop), ') | country-center placeholders moved', cen)
+    print('placement: out at sea', sea, '(moved to their named town', moved, ', left off', len(drop), ') | near-shore water moved ashore', shore, '| country-center placeholders moved', cen)
 
 
 SMALL = set('SG LU LI MC SM VA AD MT BH BB LC GD VC KN AG DM MU SC MV CV KY BM FO GI IM JE GG AW CW SX BQ TC VG VI AI MS BL MF PM WF TO WS NR TV KI MH FM PW BN QA KW CY JM TT HK MO PS'.split())
