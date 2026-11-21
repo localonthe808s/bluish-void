@@ -110880,6 +110880,50 @@ function closeAlertModal(){
       return esc(a.join(' · ')); };
     RAD.place = function(r){ var c = r[14] ? String(r[14]).replace(/, ([A-Z]{2})$/, function(m, s2){ return ', ' + (RAD.ST[s2] || s2); }) : r[6]; return [c, RAD.cc(r[5])].filter(Boolean).join(', '); };
     RAD.lic = function(r){ var l = String(r[13] || ''); if (!l || RAD.school(r)) return ''; return 'Licensed to ' + l.toLowerCase().replace(/\b([a-z])/g, function(m){ return m.toUpperCase(); }).replace(/\b(Llc|Inc|Fm|Am|Npr|Kexp)\b/g, function(m){ return m.toUpperCase(); }).replace(/ (Of|The|And|For|In|At|De|La)\b/g, function(m){ return m.toLowerCase(); }) + '.'; };
+    /* ON NOW (user 2026-11-21: "the night is typically broken up with a schedule of DJs or programs ... curious if that data was
+       available to show" -> "yes build the ON NOW line"). What the station itself publishes, read when its card is open (again every
+       minute while it stays open), nothing stored:
+         NTS 1/2 -- nts.live/api/v2/live (now + next);  Airtime stations (Reform, any *.out.airtime.pro stream) -- live-info-v2;
+         Radio Cult stations (Noods, Worldwide FM, Subtle, N10.AS, any *.radiocult.fm stream) -- schedule/live;
+         LYL -- its site's GraphQL onair;  any Icecast server that shares it -- status-json.xsl, the current song (NOW PLAYING).
+       All answer CORS for our origin. A station with none of these shows no line. */
+    RAD.feed = function(r){ var u = String(r[3] || ''), m;
+      if (/ntslive\.net\/stream2/.test(u)) return { k: 'nts', ch: 1 }; if (/ntslive\.net\/stream/.test(u)) return { k: 'nts', ch: 0 };
+      if ((m = u.match(/^https:\/\/([a-z0-9-]+)\.out\.airtime\.pro\//))) return { k: 'air', s: m[1] };
+      if ((m = u.match(/^https:\/\/([a-z0-9-]+)\.radiocult\.fm\//))) return { k: 'rc', s: m[1] };
+      if (/radio\.lyl\.live/.test(u)) return { k: 'lyl' };
+      if (/\.m3u8(\?|$)/.test(u)) return null;
+      return { k: 'ice' }; };
+    RAD.clock = function(t){ try { return new Date(t).toLocaleTimeString('en-US', { timeZone: (window.LOCATION || {}).tz, hour: 'numeric', minute: '2-digit' }).replace(':00', '').toUpperCase(); } catch(e){ return ''; } };
+    RAD.J = function(u, o){ return Promise.race([fetch(u, o).then(function(x){ if (!x.ok) throw 0; return x.json(); }), new Promise(function(_, rej){ setTimeout(rej, 6000); })]); };
+    RAD.ntsP = null;
+    RAD.get = function(r){ var f = RAD.feed(r); if (!f) return Promise.resolve(null);
+      if (f.k === 'nts'){ if (!RAD.ntsP || Date.now() - RAD.ntsAt > 55000){ RAD.ntsAt = Date.now(); RAD.ntsP = RAD.J('https://www.nts.live/api/v2/live'); }
+        return RAD.ntsP.then(function(j){ var c = (j.results || [])[f.ch] || {}, n = c.now || {}, x = c.next || {}, d = ((n.embeds || {}).details || {});
+          return { now: d.name || n.broadcast_title, end: n.end_timestamp, next: (((x.embeds || {}).details || {}).name) || x.broadcast_title, at: x.start_timestamp }; }); }
+      if (f.k === 'air') return RAD.J('https://' + f.s + '.airtime.pro/api/live-info-v2').then(function(j){ var sh = j.shows || {}, c = sh.current, x = (sh.next || [])[0];
+          /* Airtime gives the station's local clock with no zone: the offset is its scheduler time against ours */
+          var off = Math.round((Date.parse(String((j.station || {}).schedulerTime || '').replace(' ', 'T') + 'Z') - Date.now()) / 9e5) * 9e5, t = function(s){ return s ? Date.parse(String(s).replace(' ', 'T') + 'Z') - off : null; };
+          return c ? { now: c.name, end: t(c.ends), next: x && x.name, at: x && t(x.starts) } : null; });
+      if (f.k === 'rc') return RAD.J('https://api.radiocult.fm/api/station/' + f.s + '/schedule/live').then(function(j){ var r2 = j.result || {}, c = r2.content || {};
+          return r2.status === 'schedule' && c.title ? { now: c.title, end: c.endDateUtc } : null; });
+      if (f.k === 'lyl') return RAD.J('https://strapi.lyl.live/graphql', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: '{ onair { title } }' }) })
+          .then(function(j){ var t = (((j || {}).data || {}).onair || {}).title; return t ? { now: t } : null; });
+      /* Icecast: the status file beside the mount; once per station a session if the server does not share it */
+      var key = r[3]; RAD.noIce = RAD.noIce || {}; if (RAD.noIce[key]) return Promise.resolve(null);
+      var su = String(r[3]).replace(/[^\/]*([?#].*)?$/, 'status-json.xsl'), mount = (String(r[3]).match(/\/([^\/?#]*)(?:[?#]|$)/) || [])[1];
+      return RAD.J(su).then(function(j){ var s = ((j || {}).icestats || {}).source; s = Array.isArray(s) ? s : s ? [s] : [];
+          var hit = s.filter(function(q){ return mount && String(q.listenurl || '').split('/').pop() === mount; })[0] || (s.length === 1 ? s[0] : null);
+          return hit && hit.title ? { song: String(hit.title) } : null; }).catch(function(){ RAD.noIce[key] = 1; return null; }); };
+    RAD.nowFor = function(i){ clearInterval(RAD.nowT); var go = function(){ var r = RAD.rows[i]; if (!r || RAD.cardOf !== i) return clearInterval(RAD.nowT);
+        RAD.get(r).then(function(o){ var el = document.querySelector('#lc-info [data-radnow="' + i + '"]'); if (!el) return;
+          if (!o || !(o.now || o.song)){ el.style.display = 'none'; return; }
+          var lab = function(t){ return '<span style="font:800 .52rem system-ui,sans-serif;letter-spacing:.14em;opacity:.8;margin-right:7px;">' + t + '</span>'; };
+          el.innerHTML = o.song ? lab('NOW PLAYING') + '<b style="font-weight:800;">' + esc(o.song) + '</b>'
+            : lab('ON NOW') + '<b style="font-weight:800;">' + esc(o.now) + '</b>' + (o.end ? '<span style="opacity:.8;"> · until ' + RAD.clock(o.end) + '</span>' : '')
+              + (o.next ? '<span style="margin-left:14px;">' + lab('NEXT') + esc(o.next) + (o.at ? '<span style="opacity:.8;"> · ' + RAD.clock(o.at) + '</span>' : '') + '</span>' : '');
+          el.style.display = ''; }, function(){}); };
+      go(); RAD.nowT = setInterval(go, 60000); };
     /* TAP TO LISTEN (user 2026-11-21: "remove the need to click play when you click on a station? keep an option to STOP"): a tap that
        lands on one station (a dot, a list row, a pick) plays it at once; the card keeps STOP, and PLAY LIVE to start it again */
     RAD.card = function(ids, auto){ if (auto && ids.length === 1 && ids[0] !== RAD.cur) RAD.play(ids[0]); var r0 = RAD.rows[ids[0]];
@@ -110890,6 +110934,7 @@ function closeAlertModal(){
       if (ids.length === 1){ var r = r0, on = ids[0] === RAD.cur;
         var body = '<div data-radtr="1" style="position:absolute;top:7px;right:34px;max-width:62%;display:flex;gap:10px;align-items:center;justify-content:flex-end;">'
           + (r[4] ? '<a href="' + esc(r[4]) + '" target="_blank" rel="noopener" title="the station\u2019s own site" style="flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 9px;border-radius:999px;border:1px solid rgba(255,255,255,.55);color:#fff;text-decoration:none;font:800 .52rem/1.2 system-ui,sans-serif;letter-spacing:.1em;">' + esc(r[2].toUpperCase()) + ' \u2197</a>' : '') + '</div>'
+          + '<div data-radnow="' + ids[0] + '" style="display:none;margin-top:5px;font:600 11px/1.35 system-ui,sans-serif;"></div>'
           + '<div style="display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;justify-content:space-between;margin:6px 0 -4px;">'   /* centered, one line-height; and grounded (user 2026-11-21: "the bottom row is not touching the bottom and looks like its hovering"): the 22 px STOP row put its text ~15 px off the card's edge against the title's 10 px from the top; -4 px evens them */
           + '<div style="flex:1 1 180px;font:800 10.5px/1.3 system-ui,sans-serif;letter-spacing:.06em;">' + RAD.about(r) + '</div>'
           + '<div style="flex:0 0 auto;display:flex;gap:10px;align-items:center;"><span data-radst="' + ids[0] + '" style="font:800 .56rem system-ui,sans-serif;letter-spacing:.12em;opacity:.9;">' + (on ? esc(RAD.st || '') : '') + '</span>'
@@ -110901,7 +110946,7 @@ function closeAlertModal(){
         /* a narrow card (phones): the stream line drops below the player and the note reads from the left; the tab stays top right */
         if (e1 && e1.clientWidth < 640 && tb){
           var nt = e1.querySelector('[data-radst]'); nt = nt && nt.parentNode && nt.parentNode.nextElementSibling; if (nt) nt.style.textAlign = 'left'; } if (tb && e1.firstChild) e1.firstChild.style.paddingRight = (tb.offsetWidth + 6) + 'px';
-        INFO.onHide = function(){ RAD.cardOf = -1; RAD.pill(); }; RAD.pill(); }
+        INFO.onHide = function(){ RAD.cardOf = -1; clearInterval(RAD.nowT); RAD.pill(); }; RAD.pill(); RAD.nowFor(ids[0]); }
       else { var list = ids.slice(0, 40).map(function(i){ var r = RAD.rows[i];
           return '<button type="button" data-ropen="' + i + '" style="display:flex;width:100%;gap:8px;align-items:baseline;text-align:left;background:rgba(255,255,255,' + (i === RAD.cur ? '.24' : '.1') + ');border:0;border-radius:7px;color:#fff;padding:5px 8px;margin-top:4px;cursor:pointer;"><span style="font:800 11px system-ui,sans-serif;">' + (i === RAD.cur ? '▶ ' : '') + esc(r[2]) + '</span><span style="font:600 9.5px system-ui,sans-serif;opacity:.85;">' + esc(RAD.tags(r)) + '</span></button>'; }).join('');
         RAD.cardOf = -1; INFO.show(ids.length + ' STATIONS', RAD.place(r0) + ' · TAP ONE', '<div style="margin-top:2px;">' + list + '</div>' + (ids.length > 40 ? '<div style="font:600 9.5px system-ui,sans-serif;margin-top:5px;opacity:.85;">Zoom in on the globe to see the rest.</div>' : ''), ''); }
