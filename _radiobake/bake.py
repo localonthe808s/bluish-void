@@ -591,7 +591,20 @@ def main():
         nc += not g
         r[7] = ','.join(g)
     print('genres: from names', nn, '| still none', nc)
-    meta = {'built': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%MZ'), 'n': len(rows), 'src': host, 'rows': rows}
+    # LOCAL TIME AT THE STATION (user 2026-11-21: "do ... 4"): each row's time zone (timezonefinder, from the world's tz boundaries, offline),
+    # as an index r[19] into meta['tz'] so the names are stored once; the card shows the station's clock
+    TZ, tzi = [], {}
+    try:
+        from timezonefinder import TimezoneFinder
+        tf = TimezoneFinder()
+        for r in rows:
+            z = tf.timezone_at(lat=r[0], lng=r[1]) or ''
+            if z not in tzi:
+                tzi[z] = len(TZ); TZ.append(z)
+            r.append(tzi[z])
+    except Exception as e:
+        print('time zones unavailable', e)
+    meta = {'built': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%MZ'), 'n': len(rows), 'src': host, 'tz': TZ, 'rows': rows}
     json.dump(meta, open(os.path.join(out, 'stations_v1.json'), 'w'), separators=(',', ':'), ensure_ascii=False)
     print('stations', len(S), '-> kept', len(rows), 'from', host, os.path.getsize(os.path.join(out, 'stations_v1.json')) // 1024, 'KB')
 
