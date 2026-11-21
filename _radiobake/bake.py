@@ -313,7 +313,7 @@ def tokens(rows):
     fix = {}
     for r in rows:
         p = up.urlsplit(r[3]); q = up.parse_qsl(p.query, keep_blank_values=True)
-        bad = {k for k, v in q if k.lower() in TOKQ or v.startswith('eyJ')}
+        bad = {k for k, v in q if k.lower().split(';')[-1] in TOKQ or v.startswith('eyJ')}   # 'amp;rj-tok': an &amp; saved into the address
         if not bad:
             continue
         if 'tid' in {k.lower() for k in bad}:
