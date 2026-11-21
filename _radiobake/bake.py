@@ -282,6 +282,9 @@ CALL = re.compile(r'\b([KW][A-Z]{2,3})(?:-?(?:FM|AM|LP|LPFM|HD\d?))?\b')
 # index.html) are checked too but never dropped: a dead pick is a ::warning:: in the run, with any working stream the directory lists
 # under the same name. The run's summary also lists stations whose own stream address changed since last week.
 # State: radio/health_v1.json on R2 {built, fails: {url: weeks in a row}, uuid: {station uuid: url}} (HEALTH_PREV = last week's copy).
+CODE = {}
+
+
 def probe(u):
     try:
         # asked as a browser's <audio> asks: Shoutcast servers hand a browser their HTML status page at "/" -- Chrome then cannot play
@@ -291,8 +294,44 @@ def probe(u):
         if re.search(r'\.m3u8(\?|$)', u) or 'mpegurl' in ct:
             return b.lstrip().startswith(b'#EXTM3U')
         return bool(b) and 'text/html' not in ct
+    except urllib.error.HTTPError as e:
+        CODE[u] = e.code; return False
     except Exception:
         return False
+
+
+# NO ACCESS CODES (user 2026-11-21: a "Sign in to access this site" box from f100.fabricahost.com.br). Some listings saved a stream address
+# with the host's short-lived access code in it (?zt=, ?rj-tok=, ?f=&tid=, ?token= ...); once it expires the server asks for a password.
+# Our rule is the station's own PUBLIC stream, never a token. Where the host's public address hands every listener a fresh code itself
+# (Zeno, Revma: checked 2026-11-21), that public address is used; where it does not (Fabricahost answers 401), the station is left off.
+TOKQ = {'zt', 'zs', 'rj-tok', 'rj-ttl', 'token', 'tid', 'jwt', 'sig', 'signature', 'expires', 'hdnts', 'hdnea', 'policy', 'key-pair-id',
+        'wmsauthsign', 'playsessionid', 'session-id', 'listenerid', 'access_token', 'auth'}
+
+
+def tokens(rows):
+    import urllib.parse as up
+    fix = {}
+    for r in rows:
+        p = up.urlsplit(r[3]); q = up.parse_qsl(p.query, keep_blank_values=True)
+        bad = {k for k, v in q if k.lower() in TOKQ or v.startswith('eyJ')}
+        if not bad:
+            continue
+        if 'tid' in {k.lower() for k in bad}:
+            bad |= {k for k, v in q if k.lower() == 'f'}
+        host = 'stream.zeno.fm' if re.fullmatch(r'stream-\d+\.(zeno\.fm|surfernetwork\.com)', p.hostname or '') else p.netloc
+        fix[r[3]] = up.urlunsplit((p.scheme, host, p.path, up.urlencode([(k, v) for k, v in q if k not in bad]), ''))
+    import concurrent.futures as cf
+    with cf.ThreadPoolExecutor(32) as ex:
+        ok = dict(zip(fix.values(), ex.map(probe, list(fix.values()))))
+    kept = gone = 0; drop = set()
+    for r in rows:
+        if r[3] in fix:
+            if ok.get(fix[r[3]]):
+                r[3] = fix[r[3]]; kept += 1
+            else:
+                drop.add(id(r)); gone += 1
+    rows[:] = [r for r in rows if id(r) not in drop]
+    print('access codes: moved to the public address', kept, '| left off (no public address)', gone)
 
 
 def picks():
@@ -324,7 +363,8 @@ def health(rows, META, out):
     fails = {u: pf.get(u, 0) + 1 if age >= 5 else max(1, pf.get(u, 0)) for u in bad}
     rate = len(bad) / max(1, len(urls))
     sick = rate > .25
-    gone = [r for r in rows if fails.get(r[3], 0) >= 2] if not sick else []
+    # a stream that answers with a login request (401/407) is access-controlled, not public: off at once, whatever the weeks
+    gone = [r for r in rows if (fails.get(r[3], 0) >= 2 and not sick) or CODE.get(r[3]) in (401, 407)]
     gid = {id(r) for r in gone}
     rows[:] = [r for r in rows if id(r) not in gid]
     uu = {META[id(r)][0]: r[3] for r in rows if id(r) in META and META[id(r)][0]}
@@ -534,6 +574,7 @@ def main():
             added += 1
     print('college stations placed from the FCC', added)
     countries(rows)
+    tokens(rows)
     dedupe(rows)
     campus(rows, SCH)
     relocate(rows, FPOS)
