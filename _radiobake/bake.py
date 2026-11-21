@@ -350,6 +350,96 @@ def health(rows, META, out):
     print('health: checked', len(urls), '| failed', len(bad), '| dropped', len(gone), '| address changed', len(moved), '| picks down', len(deadp))
 
 
+# WRONG COUNTRY (user 2026-11-21: "this is in south america but it says its playing in Australia ... theyre located in austria"): a
+# volunteer's dot and country can disagree (Live Radio Tirol: AU, pinned in the Amazon). Each dot is tested against Natural Earth's
+# country shapes (public domain). A dot on ANOTHER country's land, more than ~50 km from its own country (borders: Tijuana heard in San
+# Diego) and not a territory of it (Reunion is France), is wrong in one of the two fields; the station's own web address decides: a
+# domain of the country under the dot keeps the dot and takes that country, anything else leaves the station off the map.
+NE_A0 = 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_admin_0_countries.geojson'
+PARENT = {k: 'FR' for k in 'RE MQ GP GF YT TF PM NC PF WF BL MF'.split()}
+PARENT.update({k: 'US' for k in 'UM PR GU VI AS MP'.split()})
+PARENT.update({'VA': 'IT', 'SM': 'IT', 'PS': 'IL', 'IL': 'PS', 'XK': 'RS', 'AX': 'FI', 'GG': 'GB', 'JE': 'GB', 'IM': 'GB', 'GI': 'GB', 'HK': 'CN', 'MO': 'CN',
+               'SJ': 'NO', 'BQ': 'NL', 'CW': 'NL', 'SX': 'NL', 'AW': 'NL', 'GL': 'DK', 'FO': 'DK'})
+TLD = {'uk': 'GB'}
+
+
+def countries(rows):
+    try:
+        G = json.load(urllib.request.urlopen(urllib.request.Request(NE_A0, headers={'User-Agent': 'BluishVoid/1.0'}), timeout=120))['features']
+    except Exception as e:
+        print('countries unavailable, check skipped', e); return
+    C = []
+    for f in G:
+        p = f['properties']; iso = p.get('ISO_A2_EH') if p.get('ISO_A2_EH') not in (None, '-99') else p.get('ISO_A2')
+        g = f['geometry']
+        for poly in ([g['coordinates']] if g['type'] == 'Polygon' else g['coordinates']):
+            xs = [c[0] for c in poly[0]]; ys = [c[1] for c in poly[0]]
+            C.append((iso, (min(xs), min(ys), max(xs), max(ys)), poly))
+    def inr(x, y, ring):
+        c = False; j = len(ring) - 1
+        for i in range(len(ring)):
+            xi, yi = ring[i]; xj, yj = ring[j]
+            if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+                c = not c
+            j = i
+        return c
+    def where(la, lo):
+        for iso, b, poly in C:
+            if b[0] <= lo <= b[2] and b[1] <= la <= b[3] and inr(lo, la, poly[0]) and not any(inr(lo, la, h) for h in poly[1:]):
+                return iso
+        return None
+    fam = lambda c: {c, PARENT.get(c, c)}
+    fixed = gone = 0; drop = set()
+    for r in rows:
+        cc = r[5]; w = where(r[0], r[1]) if cc else None
+        if not w or w == '-99' or w in fam(cc) or cc in fam(w):
+            continue
+        near = False
+        for dd in (.15, .3, .45):
+            for k in range(8):
+                a = k * math.pi / 4; q = where(r[0] + dd * math.sin(a), r[1] + dd * math.cos(a) / max(.2, math.cos(math.radians(r[0]))))
+                if q and (q in fam(cc) or cc in fam(q)):
+                    near = True; break
+            if near:
+                break
+        if near:
+            continue
+        host = re.sub(r'^(https?://)?', '', (r[4] or '').lower()).split('/')[0].split(':')[0]
+        tld = host.rsplit('.', 1)[-1] if '.' in host else ''
+        if tld and TLD.get(tld, tld.upper()) in fam(w):
+            r[5] = w; r[6] = ''; fixed += 1
+        else:
+            drop.add(id(r)); gone += 1
+    rows[:] = [r for r in rows if id(r) not in drop]
+    print('countries: dot on another country -> country corrected from its web address', fixed, '| left off the map', gone)
+
+
+# ONE STREAM, ONE DOT: the same stream listed twice with only tracking or cache-busting extras (?ref=, ?nocache=, /link, a trailing ;)
+# keeps the first (the most voted). Run AFTER the country check, so a misplaced copy cannot win over the right one.
+JUNK_Q = {'ref', 'nocache', 'type', 'origem', 'aggregator', 'uid', '_', 't', 'ts', 'cb', 'source', 'from'}
+
+
+def skey(u):
+    import urllib.parse as up
+    p = up.urlsplit(u.strip())
+    q = [(k, v) for k, v in up.parse_qsl(p.query, keep_blank_values=True) if k.lower() not in JUNK_Q and not k.isdigit()]
+    if re.fullmatch(r'\d+', p.query or ''):
+        q = []
+    path = re.sub(r'(/link|/;|;)?/*$', '', p.path)
+    return (p.hostname or '').lower() + ':' + str(p.port or 443) + path + ('?' + up.urlencode(sorted(q)) if q else '')
+
+
+def dedupe(rows):
+    seen, out = set(), []
+    for r in rows:
+        k = skey(r[3])
+        if k in seen and not r[11]:
+            continue
+        seen.add(k); out.append(r)
+    print('same stream listed twice: dropped', len(rows) - len(out))
+    rows[:] = out
+
+
 def tiers(rows, META):
     """how much each station is listened to, as the directory counts it (clicks in the last day, plus votes), ranked into four faint
     dot sizes: 3 = top 3%, 2 = top 15%, 1 = top half, 0 = the rest"""
@@ -437,6 +527,8 @@ def main():
             META[id(rows[-1])] = (s.get('stationuuid') or '', int(s.get('clickcount') or 0), int(s.get('votes') or 0))
             added += 1
     print('college stations placed from the FCC', added)
+    countries(rows)
+    dedupe(rows)
     campus(rows, SCH)
     relocate(rows, FPOS)
     icy_check(rows, SCH, F)
