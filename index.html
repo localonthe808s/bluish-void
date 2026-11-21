@@ -110728,6 +110728,10 @@ function closeAlertModal(){
         .catch(function(e){ RAD.P = null; throw e; });
       return RAD.P; };
     RAD.pick = function(r){ return r[11] === 1; };
+    /* HOW MUCH IT IS LISTENED TO (user 2026-11-21, "do 2"): the bake's tier r[18] from the directory's own listen counts and votes --
+       0 the quiet half, 1 the next third, 2 the top ~15%, 3 the top ~3% -- sizes the dot faintly; an older file without it draws all at 1 */
+    RAD.POPK = [.85, 1, 1.12, 1.25];
+    RAD.popK = function(r){ var t = r[18]; return t == null ? 1 : (RAD.POPK[t] || 1); };
     /* THE GLOBE (user 2026-11-21: "lets make the map a globe/ball view and ungroup the dots so theyre all showing small orange glowing
        dots"): RADIO draws its own night globe over the map -- a WebGL orthographic Earth from our dark Natural Earth texture
        (_radiobake/globe_tex.py -> R2 radio/globe2_{8k,4k}.webp: OUR map's depth tint, sea-floor shading and land relief) and, on a 2D canvas over it, every station as one small additive
@@ -110752,16 +110756,19 @@ function closeAlertModal(){
     GLB.initGL = function(){ var gl = null; try { gl = GLB.cg.getContext('webgl', { antialias: true, premultipliedAlpha: false }); } catch(e){} if (!gl) return;
       var sh = function(t, s){ var o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o); return o; }, pr = gl.createProgram();
       gl.attachShader(pr, sh(gl.VERTEX_SHADER, 'attribute vec2 p;varying vec2 v;void main(){v=p;gl_Position=vec4(p,0.,1.);}'));
-      gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, 'precision highp float;varying vec2 v;uniform sampler2D T;uniform vec2 S;uniform float R,la0,lo0,has;'
+      /* DAY AND NIGHT (user 2026-11-21: "try 7"): the sunlit half lifted, the night half dimmed, a soft dusk band (~6 deg) between --
+         the real sun for this minute, so the stations broadcasting in the dark read at a glance */
+      gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, 'precision highp float;varying vec2 v;uniform sampler2D T;uniform vec2 S;uniform vec3 SUN;uniform float R,la0,lo0,has;'
         + 'void main(){vec2 q=v*S/R;float d=dot(q,q);vec3 bg=vec3(.012,.02,.043);'
         + 'if(d>1.){float g=smoothstep(1.16,1.,sqrt(d));gl_FragColor=vec4(bg+vec3(.16,.3,.62)*g*g*.32,1.);return;}'
         + 'float z=sqrt(1.-d);float lat=asin(clamp(z*sin(la0)+q.y*cos(la0),-1.,1.));float lon=lo0+atan(q.x,z*cos(la0)-q.y*sin(la0));'
         + 'vec2 uv=vec2(fract(lon/6.2831853+.5),.5-lat/3.14159265);vec3 c=has>.5?texture2D(T,uv).rgb:vec3(.05,.07,.11);'
+        + 'float sd=dot(vec3(cos(lat)*cos(lon),cos(lat)*sin(lon),sin(lat)),SUN);float day=smoothstep(-.1,.06,sd);c*=mix(.6,1.55,day);c+=vec3(.012,.022,.045)*day;'
         + 'c*=.5+.5*z;c+=vec3(.1,.18,.38)*pow(1.-z,3.)*.7;gl_FragColor=vec4(c,1.);}'));
       gl.linkProgram(pr); if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) return; gl.useProgram(pr);
       var b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
       var a = gl.getAttribLocation(pr, 'p'); gl.enableVertexAttribArray(a); gl.vertexAttribPointer(a, 2, gl.FLOAT, false, 0, 0);
-      GLB.gl = gl; GLB.U = {}; ['S', 'R', 'la0', 'lo0', 'has', 'T'].forEach(function(n){ GLB.U[n] = gl.getUniformLocation(pr, n); });
+      GLB.gl = gl; GLB.U = {}; ['S', 'R', 'la0', 'lo0', 'has', 'T', 'SUN'].forEach(function(n){ GLB.U[n] = gl.getUniformLocation(pr, n); });
       /* the texture: 8k where the screen and the GPU take it, 4k on phones */
       /* SHARPER (user 2026-11-21: "the world ... feel blurry"): the 4k image first so the globe shows at once, then the sharpest the GPU
          and screen take -- 16k (our z6 tiles, JPEG: WebP stops at 16383) on big screens, 8k elsewhere off phones */
@@ -110790,10 +110797,14 @@ function closeAlertModal(){
       GLB.dup = new Uint8Array(RAD.rows.length); var seen = {};
       RAD.rows.forEach(function(r, i){ var k = r[0].toFixed(3) + ',' + r[1].toFixed(3); if (seen[k] == null) seen[k] = i; else if (RAD.pick(r) && !RAD.pick(RAD.rows[seen[k]])){ GLB.dup[seen[k]] = 1; seen[k] = i; } else GLB.dup[i] = 1; });
       GLB.dirty = true; };
+    /* where the sun is overhead now (the almanac's low-precision formulas, well under a degree): its unit vector, earth-fixed */
+    GLB.sun = function(){ var D = Math.PI / 180, d = Date.now() / 864e5 - 10957.5, g = (357.529 + .98560028 * d) * D, q = 280.459 + .98564736 * d,
+        Ls = (q + 1.915 * Math.sin(g) + .02 * Math.sin(2 * g)) * D, e = (23.439 - 3.6e-7 * d) * D, ra = Math.atan2(Math.cos(e) * Math.sin(Ls), Math.cos(Ls)), dec = Math.asin(Math.sin(e) * Math.sin(Ls)),
+        lon = ra - (280.46061837 + 360.98564736629 * d) * D; return [Math.cos(dec) * Math.cos(lon), Math.cos(dec) * Math.sin(lon), Math.sin(dec)]; };
     GLB.size = function(){ var dp = Math.min(2, window.devicePixelRatio || 1), w = GLB.el.clientWidth, h = GLB.el.clientHeight; if (!w || !h) return false;
       if (w !== GLB.w || h !== GLB.h || dp !== GLB.dp){ GLB.w = w; GLB.h = h; GLB.dp = dp; [GLB.cg, GLB.cd].forEach(function(c){ c.width = Math.round(w * dp); c.height = Math.round(h * dp); }); GLB.dirty = true; } return true; };
     GLB.draw = function(){ if (!GLB.size()) return; var w = GLB.w, h = GLB.h, dp = GLB.dp, R = GLB.R(), gl = GLB.gl;
-      if (gl){ gl.viewport(0, 0, GLB.cg.width, GLB.cg.height); gl.uniform2f(GLB.U.S, w / 2, h / 2); gl.uniform1f(GLB.U.R, R); gl.uniform1f(GLB.U.la0, GLB.la); gl.uniform1f(GLB.U.lo0, GLB.lo); gl.uniform1f(GLB.U.has, GLB.has); gl.uniform1i(GLB.U.T, 0); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); }
+      if (gl){ gl.viewport(0, 0, GLB.cg.width, GLB.cg.height); gl.uniform2f(GLB.U.S, w / 2, h / 2); gl.uniform1f(GLB.U.R, R); gl.uniform1f(GLB.U.la0, GLB.la); gl.uniform1f(GLB.U.lo0, GLB.lo); gl.uniform1f(GLB.U.has, GLB.has); gl.uniform1i(GLB.U.T, 0); var su = GLB.sun(); gl.uniform3f(GLB.U.SUN, su[0], su[1], su[2]); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); }
       var g = GLB.dc; g.setTransform(dp, 0, 0, dp, 0, 0); g.clearRect(0, 0, w, h);
       if (!gl){ g.fillStyle = '#03050b'; g.fillRect(0, 0, w, h); g.beginPath(); g.arc(w / 2, h / 2, R, 0, Math.PI * 2); g.fillStyle = '#121a2a'; g.fill(); }
       if (!RAD.rows || !GLB.sf) return; var s0 = Math.sin(GLB.la), c0 = Math.cos(GLB.la), cx = w / 2, cy = h / 2, n = RAD.rows.length, sz = Math.min(12, 7.5 + 3 * (GLB.k - 1)), fa = Math.min(.9, .72 + .12 * (GLB.k - 1)), P = [];   /* smaller and softer whole-globe, so dense regions stay points */
@@ -110805,7 +110816,7 @@ function closeAlertModal(){
         var x = cx + GLB.cf[i] * Math.sin(dl) * R, y = cy - (c0 * GLB.sf[i] - s0 * GLB.cf[i] * cd) * R; if (x < -20 || y < -20 || x > w + 20 || y > h + 20) continue;
         if (RAD.hidden(RAD.rows[i])) continue; GLB.px[i] = x; GLB.py[i] = y; if (i === RAD.cardOf) continue; if (GLB.dup[i] && i !== RAD.cur) continue;
         if (i !== RAD.cur && !RAD.pick(RAD.rows[i])){ var rw = RAD.rows[i], ck = Math.round(rw[0] / st) + ',' + Math.round(rw[1] * GLB.cf[i] / st); if (occ[ck]) continue; occ[ck] = 1; }   /* the same 1.5-px spot draws once: no stacked big circles (user 2026-11-21) */ if (RAD.pick(RAD.rows[i]) || i === RAD.cur){ P.push(i); continue; }
-        g.globalAlpha = Math.min(1, cc * 5) * fa; g.drawImage(RAD.spriteOf(RAD.rows[i]), x - sz / 2, y - sz / 2, sz, sz); }
+        var zq = sz * RAD.popK(RAD.rows[i]); g.globalAlpha = Math.min(1, cc * 5) * fa; g.drawImage(RAD.spriteOf(RAD.rows[i]), x - zq / 2, y - zq / 2, zq, zq); }
       /* OUR PICKS: theme green, normal size, drawn last so they sit on top (user 2026-11-21); the playing station stays the bigger white */
       g.globalCompositeOperation = 'source-over';
       P.forEach(function(i){ var c = i === RAD.cur, q = c ? sz * 2.2 : sz; g.globalAlpha = 1; g.drawImage(c ? GLB.spC : GLB.dotOf('#22c55e'), GLB.px[i] - q / 2, GLB.py[i] - q / 2, q, q); });
@@ -110814,6 +110825,7 @@ function closeAlertModal(){
     GLB.loop = function(t){ GLB.raf = 0; if (!GLB.live) return; var dt = GLB.t0 ? Math.min(100, t - GLB.t0) : 16; GLB.t0 = t;
       if (GLB.fl){ var f = GLB.fl, u = Math.min(1, (t - f.t) / f.d), e = u < .5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2; GLB.la = f.a0 + (f.a1 - f.a0) * e; GLB.lo = f.o0 + (f.o1 - f.o0) * e; GLB.k = f.k0 * Math.pow(f.k1 / f.k0, e); GLB.dirty = true; if (u >= 1) GLB.fl = null; }
       else if (GLB.spin && !document.hidden){ GLB.lo -= dt * 0.000035; GLB.dirty = true; }
+      if (t - (GLB.sunT || 0) > 60000){ GLB.sunT = t; GLB.dirty = true; }   /* the night line creeps a quarter degree a minute */
       if (GLB.dirty && GLB.vis !== false && !document.hidden){ GLB.dirty = false; GLB.draw(); }
       GLB.raf = requestAnimationFrame(GLB.loop); };
     GLB.start = function(){ GLB.build(); GLB.el.style.display = ''; GLB.live = true; GLB.dirty = true; GLB.t0 = 0; if (!GLB.raf) GLB.raf = requestAnimationFrame(GLB.loop);
@@ -110861,11 +110873,11 @@ function closeAlertModal(){
       GLB.k = Math.max(.9, Math.min(14, (256 * Math.pow(2, z) / (2 * Math.PI * Math.cos(GLB.la))) / (0.46 * Math.min(GLB.w, GLB.h)))); GLB.eng = true; GLB.say(); GLB.dirty = true; };
     /* the map's dots: the globe's sprites on canvas tiles, every station, additive */
     RAD.Grid = L.GridLayer.extend({ createTile: function(c){ var cv = document.createElement('canvas'), dp = Math.min(2, window.devicePixelRatio || 1); cv.width = cv.height = 256 * dp; cv.style.width = cv.style.height = '256px';
-        var g = cv.getContext('2d'); g.scale(dp, dp); if (!RAD.rows || !GLB.sp) return cv; var z = c.z, ox = c.x * 256, oy = c.y * 256, m = this._map, sz = z >= 9 ? 14 : z >= 8 ? 13 : 12, P = [];
+        var g = cv.getContext('2d'); g.scale(dp, dp); if (!RAD.rows || !GLB.sp) return cv; var z = c.z, ox = c.x * 256, oy = c.y * 256, m = this._map, sz = z >= 13 ? 18 : z >= 11 ? 16 : z >= 9 ? 14 : z >= 8 ? 13 : 12, P = [];   /* a touch bigger at street level, so a genre's color reads between the streets (2026-11-21) */
         var occ = {}, b = L.latLngBounds(m.unproject([ox + 280, oy + 280], z), m.unproject([ox - 24, oy - 24], z)); g.globalCompositeOperation = RAD.col ? 'source-over' : 'lighter';   /* by genre, dots keep their own color instead of adding up to white */
         RAD.rows.forEach(function(r, i){ if (r[0] < b.getSouth() || r[0] > b.getNorth() || r[1] < b.getWest() || r[1] > b.getEast()) return; var p = m.project([r[0], r[1]], z), x = p.x - ox, y = p.y - oy;
           if (RAD.hidden(r)) return; if (i === RAD.cardOf) return; if (GLB.dup && GLB.dup[i] && i !== RAD.cur) return;
-          if (i !== RAD.cur && !RAD.pick(r)){ var ck = Math.round(x / 1.5) + ',' + Math.round(y / 1.5); if (occ[ck]) return; occ[ck] = 1; } if (RAD.pick(r) || i === RAD.cur){ P.push([i, x, y]); return; } g.globalAlpha = .9; g.drawImage(RAD.spriteOf(r), x - sz / 2, y - sz / 2, sz, sz); });
+          if (i !== RAD.cur && !RAD.pick(r)){ var ck = Math.round(x / 1.5) + ',' + Math.round(y / 1.5); if (occ[ck]) return; occ[ck] = 1; } if (RAD.pick(r) || i === RAD.cur){ P.push([i, x, y]); return; } var zq = sz * RAD.popK(r); g.globalAlpha = .9; g.drawImage(RAD.spriteOf(r), x - zq / 2, y - zq / 2, zq, zq); });
         g.globalCompositeOperation = 'source-over';
         P.forEach(function(q){ var cu = q[0] === RAD.cur, s = cu ? sz * 2.2 : sz; g.globalAlpha = 1; g.drawImage(cu ? GLB.spC : GLB.dotOf('#22c55e'), q[1] - s / 2, q[2] - s / 2, s, s); });
         return cv; } });
@@ -111009,7 +111021,7 @@ function closeAlertModal(){
     RAD.play = function(i){ var r = RAD.rows[i]; if (!r) return; if (!RAD.au){ RAD.au = new Audio(); RAD.au.preload = 'none';
         RAD.au.addEventListener('playing', function(){ RAD.st = 'LIVE'; RAD.pill(); }); RAD.au.addEventListener('waiting', function(){ if (RAD.cur >= 0){ RAD.st = 'BUFFERING'; RAD.pill(); } });
         RAD.au.addEventListener('error', function(){ if (RAD.cur >= 0 && RAD.au.getAttribute('src')){ RAD.st = 'NOT ANSWERING'; RAD.pill(); } }); }
-      RAD.cur = i; RAD.st = 'TUNING IN'; RAD.hlsOff();
+      RAD.cur = i; RAD.last = i; RAD.st = 'TUNING IN'; RAD.hlsOff(); RAD.curPoll();
       var fail = function(){ if (RAD.cur === i && RAD.st !== 'LIVE'){ RAD.st = 'NOT ANSWERING'; RAD.pill(); } };
       /* HLS (The Lot Radio): Safari plays it natively; elsewhere hls.js (cdnjs, loaded only for such a station) feeds the same <audio> */
       if (/\.m3u8(\?|$)/.test(r[3]) && !RAD.au.canPlayType('application/vnd.apple.mpegurl')){
@@ -111021,16 +111033,36 @@ function closeAlertModal(){
       RAD.hlsP = new Promise(function(res, rej){ var sc = document.createElement('script'); sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.17/hls.min.js'; sc.async = true;
         sc.onload = function(){ res(window.Hls); }; sc.onerror = function(){ RAD.hlsP = null; rej(); }; document.head.appendChild(sc); }); return RAD.hlsP; };
     RAD.hlsOff = function(){ if (RAD.hls){ try { RAD.hls.destroy(); } catch(e){} RAD.hls = null; } };
-    RAD.stop = function(){ RAD.hlsOff(); if (RAD.au){ RAD.au.pause(); RAD.au.removeAttribute('src'); try { RAD.au.load(); } catch(e){} } RAD.cur = -1; RAD.pill(); RAD.redraw(); };
+    RAD.stop = function(){ clearInterval(RAD.curT); RAD.curNow = ''; RAD.hlsOff(); if (RAD.au){ RAD.au.pause(); RAD.au.removeAttribute('src'); try { RAD.au.load(); } catch(e){} } RAD.cur = -1; RAD.pill(); RAD.redraw(); };
     RAD.pill = function(){ var b = document.getElementById('lc-radpill'), r = RAD.rows && RAD.rows[RAD.cur];
       if (!b){ b = document.createElement('div'); b.id = 'lc-radpill'; b.style.cssText = 'position:absolute;left:50%;bottom:12px;transform:translateX(-50%);z-index:800;display:flex;gap:8px;align-items:center;max-width:calc(100% - 24px);padding:5px 6px 5px 12px;border-radius:999px;background:rgba(234,88,12,.96);border:1.5px solid #fff;color:#fff;box-shadow:0 2px 10px rgba(0,0,0,.45);font:800 .56rem system-ui,sans-serif;letter-spacing:.08em;white-space:nowrap;';
         mapEl.appendChild(b); if (L.DomEvent){ L.DomEvent.disableClickPropagation(b); } }
       var cs = document.querySelector('#lc-info [data-radst="' + RAD.cur + '"]'); if (cs) cs.textContent = r ? (RAD.st || '') : '';
-      if (!r || !RAD.lit || (RAD.cardOf === RAD.cur && cs)){ b.style.display = 'none'; return; }
+      RAD.media(r);
+      /* KEEPS PLAYING (user 2026-11-21: "do ... 3"): the pill stays on every map tab while a station plays -- what is on now beside the
+         name; the name brings RADIO back with the station's card; STOP anywhere. Hidden only while that station's own card is open */
+      if (!r || (RAD.lit && RAD.cardOf === RAD.cur && cs)){ b.style.display = 'none'; return; }
       b.style.display = 'flex';
-      b.innerHTML = '<span style="opacity:.85;">' + esc(RAD.st || '') + '</span><button type="button" data-rgo="1" style="background:none;border:0;color:#fff;font:inherit;cursor:pointer;overflow:hidden;text-overflow:ellipsis;max-width:46vw;padding:0;">' + esc(r[2].toUpperCase()) + ' · ' + esc(RAD.place(r).toUpperCase()) + '</button><button type="button" data-rstop="1" style="background:#fff;color:#ea580c;border:0;border-radius:999px;font:inherit;padding:3px 9px;cursor:pointer;">■ STOP</button>';
-      b.querySelector('[data-rstop]').onclick = function(e){ e.stopPropagation(); RAD.stop(); var el = document.getElementById('lc-info'); if (el && el.style.display !== 'none' && el.querySelector('[data-rplay]')) RAD.card([+el.querySelector('[data-rplay]').getAttribute('data-rplay')]); };
-      b.querySelector('[data-rgo]').onclick = function(e){ e.stopPropagation(); var i = RAD.cur; RAD.goTo(i); RAD.card([i]); }; };
+      b.innerHTML = '<span style="opacity:.85;">' + esc(RAD.st || '') + '</span><button type="button" data-rgo="1" style="background:none;border:0;color:#fff;font:inherit;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:' + (GLB.touch ? 52 : 46) + 'vw;padding:0;">' + esc(r[2].toUpperCase())
+        + '<span style="font-weight:600;opacity:.9;"> · ' + esc((RAD.curNow || RAD.place(r)).toUpperCase()) + '</span></button><button type="button" data-rstop="1" style="flex:0 0 auto;background:#fff;color:#ea580c;border:0;border-radius:999px;font:inherit;padding:3px 9px;cursor:pointer;">■ STOP</button>';
+      b.querySelector('[data-rstop]').onclick = function(e){ e.stopPropagation(); RAD.stop(); var el = document.getElementById('lc-info'); if (RAD.lit && el && el.style.display !== 'none' && el.querySelector('[data-rplay]')) RAD.card([+el.querySelector('[data-rplay]').getAttribute('data-rplay')]); };
+      b.querySelector('[data-rgo]').onclick = function(e){ e.stopPropagation(); var i = RAD.cur;
+        if (VIEW !== 'radio'){ RAD.want = i; var pb = document.querySelector('.cw-pv[data-pv="radio"]'); if (pb) pb.click(); return; }
+        RAD.goTo(i); RAD.card([i]); }; };
+    /* WHAT'S ON, WHILE IT PLAYS: the station's own ON NOW / NOW PLAYING feed (RAD.get), once a minute, for the pill and the lock screen */
+    RAD.curPoll = function(){ clearInterval(RAD.curT); RAD.curNow = ''; var i = RAD.cur; if (i < 0) return;
+      var go = function(){ var r = RAD.rows[i]; if (RAD.cur !== i || !r) return clearInterval(RAD.curT);
+        RAD.get(r).then(function(o){ if (RAD.cur !== i) return; var t = o ? (o.song || o.now || '') : ''; if (t !== RAD.curNow){ RAD.curNow = t; RAD.pill(); } }, function(){}); };
+      go(); RAD.curT = setInterval(go, 60000); };
+    /* THE LOCK SCREEN (iPhone, Android, desktop media keys): the station, what is on, the site's icon; pause or stop drops the stream
+       (it is live -- nothing to resume), play tunes back in */
+    RAD.media = function(r){ var ms = navigator.mediaSession; if (!ms) return;
+      try { if (!r){ ms.metadata = null; ms.playbackState = 'none'; return; }
+        var k = r[3] + '|' + (RAD.curNow || ''); if (RAD.msK !== k && window.MediaMetadata){ RAD.msK = k;
+          ms.metadata = new MediaMetadata({ title: RAD.curNow || r[2], artist: RAD.curNow ? r[2] : RAD.place(r), album: 'BLUISH VOID RADIO', artwork: [{ src: location.origin + '/apple-touch-icon.png', sizes: '180x180', type: 'image/png' }] }); }
+        ms.playbackState = 'playing';
+        if (!RAD.msH){ RAD.msH = true; var off = function(){ RAD.stop(); }, on = function(){ if (RAD.last >= 0) RAD.play(RAD.last); };
+          [['pause', off], ['stop', off], ['play', on]].forEach(function(a){ try { ms.setActionHandler(a[0], a[1]); } catch(e){} }); } } catch(e){} };
     /* COLOR BY GENRE (user 2026-11-21: "add a toggle that color coordinates the dots ... explain a color system before you start ...
        reserve theme green for the listed PICKED stations, talk / news stations can be light grey" -> "split college stations out as its
        own color" -> "this toggle should be off by default but load easily when pressed"). One family per station: a pick, else a
@@ -111087,8 +111119,9 @@ function closeAlertModal(){
       if (!GLB.el){ var H = window.LOCATION || {}; if (isFinite(+H.lon)) GLB.lo = (+H.lon + 15) * Math.PI / 180; }
       if (!RAD.hook){ RAD.hook = true; M.on('click', RAD.tap); M.on('zoomend', function(){ if (VIEW === 'radio' && RAD.lit && RAD.mode === 'map' && M.getZoom() <= 4) RAD.toGlobe(); }); }
       RAD.mode = 'globe'; GLB.start(); RAD.err = false; RAD.head();
-      RAD.load().then(function(){ if (!RAD.lit) return; RAD.redraw(); RAD.head(); RAD.pill(); }, function(){ RAD.err = !RAD.uk; RAD.head(); }); };
-    RAD.off = function(){ if (!RAD.lit) return; RAD.lit = false; RAD.stop(); GLB.stop(); if (RAD.L && M && M.hasLayer(RAD.L)) M.removeLayer(RAD.L); RAD.mode = 'globe'; RAD.pill(); RAD.starSync(); };
+      RAD.load().then(function(){ if (!RAD.lit) return; RAD.redraw(); RAD.head(); RAD.pill(); if (RAD.want >= 0){ var w = RAD.want; RAD.want = -1; RAD.goTo(w); RAD.card([w]); } }, function(){ RAD.err = !RAD.uk; RAD.head(); }); };
+    RAD.off = function(){ if (!RAD.lit) return; RAD.lit = false; GLB.stop();   /* the station keeps playing on the other tabs (user 2026-11-21); the pill carries STOP */
+      if (RAD.L && M && M.hasLayer(RAD.L)) M.removeLayer(RAD.L); RAD.mode = 'globe'; RAD.pill(); RAD.starSync(); };
     RAD.src = function(){ return A('STATIONS: RADIO BROWSER, THE COMMUNITY STATION DIRECTORY', 'https://www.radio-browser.info/') + RAD.PICKS.map(function(p){ return p[4] ? A(p[2].toUpperCase(), p[4]) : ''; }).join(''); };
     SRC.radio = function(){ return RAD.src(); };
     var view = function(v){

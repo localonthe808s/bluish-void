@@ -5,7 +5,8 @@ The global layer: every station in Radio Browser (radio-browser.info, a communit
 a working HTTPS stream (its last check passed). UK LISTENERS are the line, not UK stations: the file answers 451 in the UK. The page plays each station's OWN stream URL in an
 <audio> element: the listener's browser connects straight to the station, nothing is relayed, recorded or re-hosted (the
 directory model). Out: OUT/stations_v1.json {built, n, src, rows: [[lat, lon, name, url, homepage, cc, place, tags, codec,
-bitrate, votes, 0, '', licensee, city of license, campus, campus domain, 'tag' if the stream's own tag confirmed it]]}.
+bitrate, votes, 0, '', licensee, city of license, campus, campus domain, 'tag' if the stream's own tag confirmed it, listening tier 0-3]]}
+plus OUT/health_v1.json and OUT/health.md (the weekly stream check, see health()).
 Run: python3 _radiobake/bake.py OUT
 """
 import sys, os, re, json, math, socket, random, urllib.request, datetime
@@ -275,11 +276,95 @@ def relocate(rows, FPOS):
 CALL = re.compile(r'\b([KW][A-Z]{2,3})(?:-?(?:FM|AM|LP|LPFM|HD\d?))?\b')
 
 
+# HEALTH (user 2026-11-21: "do 2 ... 10"). Every week each kept stream is asked for its first few KB, as a listener's browser would (no
+# audio kept). A station whose stream failed THIS week and LAST week is left off the map -- one bad week is forgiven (a station down for
+# maintenance). If more than a quarter fail, the checker's own network is the likelier fault and nothing is dropped. OUR PICKS (in
+# index.html) are checked too but never dropped: a dead pick is a ::warning:: in the run, with any working stream the directory lists
+# under the same name. The run's summary also lists stations whose own stream address changed since last week.
+# State: radio/health_v1.json on R2 {built, fails: {url: weeks in a row}, uuid: {station uuid: url}} (HEALTH_PREV = last week's copy).
+def probe(u):
+    try:
+        # asked as a browser's <audio> asks: Shoutcast servers hand a browser their HTML status page at "/" -- Chrome then cannot play
+        # it (checked 2026-11-21), so that counts as a failure, as it is for a listener
+        q = urllib.request.urlopen(urllib.request.Request(u, headers={'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36', 'Accept': '*/*', 'Range': 'bytes=0-'}), timeout=12)
+        ct = (q.headers.get('Content-Type') or '').lower(); b = q.read(2048); q.close()
+        if re.search(r'\.m3u8(\?|$)', u) or 'mpegurl' in ct:
+            return b.lstrip().startswith(b'#EXTM3U')
+        return bool(b) and 'text/html' not in ct
+    except Exception:
+        return False
+
+
+def picks():
+    try:
+        h = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'index.html'), encoding='utf-8').read()
+        return json.loads(re.search(r'RAD\.PICKS = (\[\[.*?\]\]);', h).group(1))
+    except Exception as e:
+        print('picks unreadable', e); return []
+
+
+def health(rows, META, out):
+    import concurrent.futures as cf
+    try:
+        prev = json.load(open(os.environ.get('HEALTH_PREV', ''))) if os.environ.get('HEALTH_PREV') else {}
+    except Exception:
+        prev = {}
+    pf, pu = prev.get('fails') or {}, prev.get('uuid') or {}
+    P = picks()
+    urls = sorted({r[3] for r in rows} | {p[3] for p in P})
+    with cf.ThreadPoolExecutor(48) as ex:
+        ok = dict(zip(urls, ex.map(probe, urls)))
+    bad = [u for u in urls if not ok[u]]
+    fails = {u: pf.get(u, 0) + 1 for u in bad}
+    rate = len(bad) / max(1, len(urls))
+    sick = rate > .25
+    gone = [r for r in rows if fails.get(r[3], 0) >= 2] if not sick else []
+    gid = {id(r) for r in gone}
+    rows[:] = [r for r in rows if id(r) not in gid]
+    uu = {META[id(r)][0]: r[3] for r in rows if id(r) in META and META[id(r)][0]}
+    moved = [(u, pu[u], v) for u, v in uu.items() if u in pu and pu[u] != v]
+    nm = {META[id(r)][0]: r[2] for r in rows if id(r) in META}
+    deadp = [p for p in P if not ok.get(p[3], True)]
+    L = ['## Radio health %s' % datetime.date.today().isoformat(), '',
+         '- streams checked: **%d**, failed this week: **%d** (%.1f%%)%s' % (len(urls), len(bad), rate * 100, ' -- too many, so the checker is suspect and NOTHING was dropped' if sick else ''),
+         '- left off the map (failed two weeks running): **%d**' % len(gone),
+         '- stream address changed since last week: **%d**' % len(moved), '']
+    if deadp:
+        L += ['### OUR PICKS not answering', '']
+        for p in deadp:
+            alt = []
+            try:
+                S, _ = get('/json/stations/byname/' + urllib.request.quote(p[2]))
+                alt = sorted({s['url_resolved'] for s in S if s.get('lastcheckok') == 1 and (s.get('url_resolved') or '').startswith('https://') and s['url_resolved'] != p[3]})[:3]
+            except BaseException:
+                pass
+            L.append('- **%s** `%s` (%s week%s in a row)%s' % (p[2], p[3], fails.get(p[3], 1), '' if fails.get(p[3], 1) == 1 else 's', (' -- the directory lists: ' + ', '.join('`%s`' % a for a in alt)) if alt else ''))
+            print('::warning::RADIO PICK NOT ANSWERING: %s %s%s' % (p[2], p[3], (' | directory has ' + ' '.join(alt)) if alt else ''))
+        L.append('')
+    if gone:
+        L += ['### Left off the map', ''] + ['- %s (%s) `%s`' % (r[2], r[5], r[3]) for r in gone[:60]] + (['- ...and %d more' % (len(gone) - 60)] if len(gone) > 60 else []) + ['']
+    if moved:
+        L += ['### Stream address changed', ''] + ['- %s: `%s` -> `%s`' % (nm.get(u, u), a, b) for u, a, b in moved[:60]] + (['- ...and %d more' % (len(moved) - 60)] if len(moved) > 60 else []) + ['']
+    open(os.path.join(out, 'health.md'), 'w').write('\n'.join(L))
+    json.dump({'built': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%MZ'), 'fails': fails, 'uuid': uu}, open(os.path.join(out, 'health_v1.json'), 'w'), separators=(',', ':'))
+    print('health: checked', len(urls), '| failed', len(bad), '| dropped', len(gone), '| address changed', len(moved), '| picks down', len(deadp))
+
+
+def tiers(rows, META):
+    """how much each station is listened to, as the directory counts it (clicks in the last day, plus votes), ranked into four faint
+    dot sizes: 3 = top 3%, 2 = top 15%, 1 = top half, 0 = the rest"""
+    sc = sorted(((math.log1p(META.get(id(r), ('', 0, 0))[1]) + .3 * math.log1p(META.get(id(r), ('', 0, 0))[2]), i) for i, r in enumerate(rows)), reverse=True)
+    n = max(1, len(sc))
+    for k, (_, i) in enumerate(sc):
+        f = k / n
+        rows[i].append(3 if f < .03 else 2 if f < .15 else 1 if f < .5 else 0)
+
+
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else 'out'
     os.makedirs(out, exist_ok=True)
     S, host = get('/json/stations/search?has_geo_info=true&is_https=true&hidebroken=true&limit=200000&order=votes&reverse=true')
-    rows, seen = [], set()
+    rows, seen, META = [], set(), {}
     for s in S:
         u = (s.get('url_resolved') or '').strip()
         try:
@@ -302,6 +387,7 @@ def main():
         hp = hp if hp.startswith('http') else ''
         rows.append([round(la, 3), round(lo, 3), nm, u, hp[:200], (s.get('countrycode') or '').upper(), place, tags,
                      (s.get('codec') or '').upper()[:6], int(s.get('bitrate') or 0), int(s.get('votes') or 0), 0, '', '', '', '', '', ''])
+        META[id(rows[-1])] = (s.get('stationuuid') or '', int(s.get('clickcount') or 0), int(s.get('votes') or 0))
     # US stations whose name carries a call sign: the licensee and city of license, if the FCC's transmitter is within 150 km
     F, nf = fcc(), 0
     FPOS = {}
@@ -348,11 +434,14 @@ def main():
             rows.append([round(c[3], 3), round(c[4], 3), nm, u, hp[:200] if hp.startswith('http') else '', 'US', '', tags,
                          (s.get('codec') or '').upper()[:6], int(s.get('bitrate') or 0), int(s.get('votes') or 0), 0, '',
                          ' '.join(c[2].split())[:80], (c[0].title() + ', ' + c[1])[:50], '', '', ''])
+            META[id(rows[-1])] = (s.get('stationuuid') or '', int(s.get('clickcount') or 0), int(s.get('votes') or 0))
             added += 1
     print('college stations placed from the FCC', added)
     campus(rows, SCH)
     relocate(rows, FPOS)
     icy_check(rows, SCH, F)
+    health(rows, META, out)
+    tiers(rows, META)
     nn = nc = 0
     for r in rows:
         g = genres(r[7])
