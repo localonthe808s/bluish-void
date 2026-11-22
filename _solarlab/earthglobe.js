@@ -45,7 +45,7 @@
     var N = o.size || 512, cx = (o.cx == null ? 0.5 : o.cx) * N, rr = (o.r || 0.392) * N;
     var cv = document.createElement('canvas'); cv.width = cv.height = N; var g = cv.getContext('2d');
     var img = g.createImageData(N, N), px = img.data;
-    var grid = null, gridLat = null, idx = [], lastLon = null, lastLat = null, want = null, wantAng = 0, busy = false, lastT = 0, POLE = !!o.pole;
+    var grid = null, gridLat = null, idx = [], lastLon = null, lastLat = null, want = null, wantAng = 0, busy = false, lastT = 0, POLE = !!o.pole, base = null;
     /* per disc pixel: latitude and longitude offset for the current centre latitude (changes slowly: rebuild at 0.25 deg) */
     function build(lat0){
       if (POLE){ gridLat = lat0; idx = []; grid = [];   /* from over the north pole: rho = cos(lat), angle = longitude offset */
@@ -71,18 +71,24 @@
         px[d] = TEX[s] * sh; px[d + 1] = TEX[s + 1] * sh; px[d + 2] = TEX[s + 2] * sh; px[d + 3] = 255;
       }
       g.putImageData(img, 0, 0);
-      lastLon = off; lastLat = sub.lat;
+      lastLon = off; lastLat = sub.lat; if (base == null) base = off;
       o.onframe && o.onframe(cv.toDataURL('image/jpeg', 0.86), POLE ? { lat: 90, lon: sub.lon - wantAng - 90, sub: sub } : sub);
     }
     function pump(){
       if (busy || want == null || !TEX) return;
+      /* SPIN MODE (o.spin, pole view only; 2026-11-22): seen from over the pole the turning Earth is the same picture rotated,
+         so it is drawn ONCE and the lab turns it by delta() every frame -- smooth at the screen's rate, where re-rendering and
+         re-encoding the disc held it to 15 frames a second */
+      if (o.spin && POLE && base != null) return;
       var sub = subsolar(want), off = POLE ? sub.lon - wantAng : sub.lon;
       if (lastLon != null && Math.abs(((off - lastLon + 540) % 360) - 180) < 0.2 && (POLE || Math.abs(sub.lat - lastLat) < 0.05)) return;
       var wait = Math.max(0, 66 - (Date.now() - lastT)); busy = true;
       setTimeout(function(){ busy = false; lastT = Date.now(); draw(subsolar(want)); }, wait);
     }
     if (!TEX){ waiting.push(pump); if (waiting.length === 1) loadTex(0); }
-    return { set: function(ms, ang){ want = ms; if (ang != null) wantAng = ang; pump(); }, subsolar: subsolar };
+    return { set: function(ms, ang){ want = ms; if (ang != null) wantAng = ang; pump(); }, subsolar: subsolar,
+             /* spin mode: degrees to turn the drawn disc (SVG rotate, clockwise positive) to show the face for ms */
+             delta: function(ms, ang){ if (base == null) return null; return (subsolar(ms).lon - (ang != null ? ang : wantAng)) - base; } };
   }
   window.BVGlobe = { make: make, subsolar: subsolar };
 })();
