@@ -9,7 +9,7 @@ bitrate, votes, 0, '', licensee, city of license, campus, campus domain, 'tag' i
 plus OUT/health_v1.json and OUT/health.md (the weekly stream check, see health()).
 Run: python3 _radiobake/bake.py OUT
 """
-import sys, os, re, json, math, socket, random, urllib.request, datetime
+import sys, os, re, json, math, socket, random, time, urllib.request, datetime
 
 UA = {'User-Agent': 'BluishVoid/1.0'}
 FALLBACK = ['de1.api.radio-browser.info', 'de2.api.radio-browser.info', 'fi1.api.radio-browser.info', 'nl1.api.radio-browser.info']
