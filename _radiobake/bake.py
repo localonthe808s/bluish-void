@@ -604,6 +604,39 @@ BROADCASTER_HQ = {
 CNAME = {'MZ': 'Mocambique', 'MX': 'Mexico'}   # a small town that shares its country's name: 'Radio Mocambique' is national, not from Ilha de Mocambique
 
 
+# NO TUNEIN (user 2026-11-21: "dont use any tunein links"): TuneIn's own channels and streams it serves are left off; a station's own stream
+# carrying TuneIn's tag (?source=TuneIn, environment=tunein, aggregator=tunein -- it credits the listen to TuneIn) keeps only its plain
+# address, if that plays, else it is left off; a TuneIn page given as a station's website is dropped from the card.
+TI = re.compile(r'tunein|radiotime', re.I)
+
+
+def no_tunein(rows):
+    import urllib.parse as up
+    drop, fix = set(), {}
+    for r in rows:
+        if TI.search(r[4] or ''):
+            r[4] = ''
+        p = up.urlsplit(r[3])
+        if TI.search(p.hostname or '') or TI.search(p.path or '') or TI.search(r[2] or '') and not r[11]:   # TuneIn in the host, the path or the name
+            drop.add(id(r)); continue
+        if TI.search(p.query or ''):
+            q = [(k, v) for k, v in up.parse_qsl(p.query, keep_blank_values=True) if not TI.search(k) and not TI.search(v)]
+            fix[id(r)] = up.urlunsplit((p.scheme, p.netloc, p.path, up.urlencode(q), ''))
+    import concurrent.futures as cf
+    ids = list(fix); urls = [fix[i] for i in ids]
+    with cf.ThreadPoolExecutor(24) as ex:
+        ok = dict(zip(ids, ex.map(probe, urls)))
+    kept = 0
+    for r in rows:
+        if id(r) in fix:
+            if ok.get(id(r)):
+                r[3] = fix[id(r)]; kept += 1
+            else:
+                drop.add(id(r))
+    n0 = len(rows); rows[:] = [r for r in rows if id(r) not in drop]
+    print('tunein: tag stripped and kept', kept, '| left off', n0 - len(rows))
+
+
 def tiers(rows, META):
     """how much each station is listened to, as the directory counts it (clicks in the last day, plus votes), ranked into four faint
     dot sizes: 3 = top 3%, 2 = top 15%, 1 = top half, 0 = the rest"""
@@ -747,6 +780,7 @@ def main():
         META[id(rows[-1])] = (s.get('stationuuid') or '', int(s.get('clickcount') or 0), int(s.get('votes') or 0))
         byc += 1
     print('placed by their listed city', byc)
+    no_tunein(rows)
     countries(rows)
     fcc_fix(rows, F, FPOS)
     places_fix(rows)
