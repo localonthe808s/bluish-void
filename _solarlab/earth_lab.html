@@ -44,6 +44,8 @@
   html.fixed-map body{height:auto;min-height:0;}
   html.fixed-map #stage{flex:none;}
   #map{position:absolute;inset:0;width:100%;height:100%;display:block;}
+  #sky{position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none;}
+  #sky, #map{ will-change:transform; }   /* each its own layer: the moving map never re-rasterises the still sky */
   #map text{font-family:'QelliaRegular','Bodoni Moda',Georgia,serif;}
   #map text.data{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}
 
@@ -431,7 +433,7 @@
         <rect x="-64" y="-64" width="128" height="128" fill="url(#dayGlowGrad)"/>
       </mask>
       <linearGradient id="umbraFade" x1="0" y1="0" x2="1" y2="0">
-        <stop offset="0%"  stop-color="#02040c" stop-opacity=".55"/>
+        <stop offset="0%"  stop-color="#02040c" stop-opacity=".66"/>
         <stop offset="35%" stop-color="#02040c" stop-opacity=".3"/>
         <stop offset="100%" stop-color="#02040c" stop-opacity="0"/>
       </linearGradient>
@@ -648,7 +650,22 @@ var SH_LEN = R_GEO + 55, SH_HW = 43;
 var gShadow = document.getElementById('gShadow');
 mk('path', {d:'M0 -46 L' + SH_LEN + ' -30 L' + SH_LEN + ' 30 L0 46 Z',
             fill:'url(#umbraFade)', filter:'url(#umbraSoft)'}, gShadow);
+/* EARTH'S SHADOW, READABLE (user 2026-11-22, item 4): its two edges as faint dashed lines and its name along the axis, so the
+   dimming of the satellites inside it has a visible cause */
+[-1, 1].forEach(function(sg){ mk('path', {d:'M20 ' + (sg * 44.6).toFixed(1) + ' L' + SH_LEN + ' ' + (sg * 31).toFixed(1), fill:'none',
+  stroke:'rgba(160,180,225,.22)', 'stroke-width':.9, 'stroke-dasharray':'3 5', 'vector-effect':'non-scaling-stroke'}, gShadow); });
+var shLab = mk('text', {x:(R_GPS * .78).toFixed(0), y:3, 'text-anchor':'middle', 'class':'data',
+  style:'font-size:.5em;font-weight:900;letter-spacing:.3em;fill:rgba(170,190,235,.42);'}, gShadow);
+shLab.textContent = "EARTH'S SHADOW";
 var shUx = 1, shUy = 0;                     // anti-solar unit vector, set per frame
+/* 0..1 how deep in the shadow: a soft 7-unit edge across the sides, so a satellite fades as it crosses instead of switching */
+function shadowDepth(x, y){
+  var t = x*shUx + y*shUy;
+  if (t < 14 || t > SH_LEN + 20) return 0;
+  var c = Math.abs(x*shUy - y*shUx), side = Math.min(1, Math.max(0, (SH_HW + 7 - c) / 14));
+  var along = Math.min(1, Math.max(0, (t - 14) / 12)) * Math.min(1, Math.max(0, (SH_LEN + 20 - t) / 30));
+  return side * along;
+}
 function inShadow(x, y){
   var t = x*shUx + y*shUy;
   if (t < 20 || t > SH_LEN) return false;
@@ -682,6 +699,11 @@ var sunLab = mk('text', {y:56, 'text-anchor':'middle',
 sunLab.textContent = 'SUN';
 
 /* moon: real orbit ring at the current true distance + a half-lit disc */
+/* THE MOON'S WAKE (user 2026-11-22, item 6): while playing, a fading arc of the orbit just travelled, longer the faster the clock */
+var moonTrailGrad = mk('linearGradient', {id:'moonTrailGrad', gradientUnits:'userSpaceOnUse'}, svgEl.querySelector('defs'));
+mk('stop', {offset:0, 'stop-color':'#e8d6b4', 'stop-opacity':0}, moonTrailGrad); mk('stop', {offset:1, 'stop-color':'#f3e6c8', 'stop-opacity':.75}, moonTrailGrad);
+var moonTrail = mk('path', {fill:'none', stroke:'url(#moonTrailGrad)', 'stroke-width':2.2, 'stroke-linecap':'round', 'vector-effect':'non-scaling-stroke', display:'none', 'pointer-events':'none'}, gMoon);
+gMoon.insertBefore(moonTrail, gMoon.firstChild);
 var moonRing = mk('circle', {r:395, fill:'none', stroke:'rgba(232,214,180,.3)', 'stroke-width':1,
                              'vector-effect':'non-scaling-stroke'}, gMoon);
 var moonG = mk('g', {}, gMoon);
@@ -798,10 +820,45 @@ mk('circle', {r:58, fill:'url(#atmoGlow)'}, earthGlowG);
 mk('circle', {r:47.5, fill:'none', stroke:'#b8d8c8', 'stroke-width':.5, opacity:.08}, gEarth);
 mk('circle', {r:46, fill:'url(#earthGrad)'}, gEarth);
 var earthImgG = mk('g', {'clip-path':'url(#earthClip)'}, gEarth);
+/* THE SPIN (item 5): seen from over the pole the turning Earth is the same picture rotated, so the globe is drawn once and this
+   group turns it every frame (render) -- it re-rendered at 15 fps before */
+var earthSpinG = mk('g', {}, earthImgG);
 var earthImg = null;   // attached on EPIC success
 var earthNightG = mk('g', {'clip-path':'url(#earthClip)'}, gEarth);
 var earthNightP = mk('path', {d:'M0,-46 A46,46 0 0 0 0,46 L0,-46 Z', fill:'url(#nightSide)',
                               filter:'url(#softTerm)'}, earthNightG);
+/* CITY LIGHTS ON THE NIGHT SIDE (user 2026-11-22, item 2): NASA Black Marble seen from over the pole (_lightsbake.py), turned to
+   the globe's orientation each frame and shown only through the night half (a soft mask turned with the Sun), screened on top */
+(function(){ var df = svgEl.querySelector('defs');
+  var lg = mk('linearGradient', {id:'nlGrad', x1:0, y1:0, x2:1, y2:0}, df);
+  [[0,'#fff'],[.42,'#fff'],[.53,'#000'],[1,'#000']].forEach(function(st){ mk('stop', {offset:st[0], 'stop-color':st[1]}, lg); });
+  var mm = mk('mask', {id:'nightLightsMask', maskUnits:'userSpaceOnUse', x:-50, y:-50, width:100, height:100}, df);
+  window._nlRect = mk('rect', {x:-50, y:-50, width:100, height:100, fill:'url(#nlGrad)'}, mm); })();
+/* THE LIVE AURORA (user 2026-11-22, item 3): NOAA SWPC's OVATION forecast (every few minutes, CORS-open), drawn into the same
+   over-the-pole view as a green glow on the night side. The oval is tied to the Sun, not the ground, so it holds the forecast's
+   orientation while the Earth turns under it; shown only while the map's time is within 12 h of now (a live forecast says
+   nothing about another date). */
+var auroraG = mk('g', {'clip-path':'url(#earthClip)', mask:'url(#nightLightsMask)', style:'mix-blend-mode:screen;', 'pointer-events':'none', display:'none'}, gEarth);
+var auroraImg = mk('image', {x:-46, y:-46, width:92, height:92, preserveAspectRatio:'none'}, auroraG), _auroraT = null;
+function loadAurora(){
+  fetch('https://services.swpc.noaa.gov/json/ovation_aurora_latest.json').then(function(r){ return r.json(); }).then(function(j){
+    var A = new Float32Array(360 * 181); (j.coordinates || []).forEach(function(c){ A[((c[0] % 360) + 360) % 360 * 181 + (c[1] + 90)] = c[2]; });
+    var N = 320, cv = document.createElement('canvas'); cv.width = cv.height = N; var g = cv.getContext('2d'), im = g.createImageData(N, N), px = im.data;
+    for (var y = 0; y < N; y++) for (var x = 0; x < N; x++){
+      var u = (x + .5 - N / 2) / (N / 2), v = (N / 2 - y - .5) / (N / 2), rho = Math.sqrt(u * u + v * v); if (rho >= 1) continue;
+      var lat = Math.round(Math.acos(rho) / DEG), lon = ((Math.round(Math.atan2(v, u) / DEG) % 360) + 360) % 360, val = A[lon * 181 + lat + 90];
+      if (val < 3) continue; var a = Math.min(.62, Math.pow(val / 34, .9)), k = (y * N + x) * 4;   /* a glow, not a band */
+      px[k] = 60 + 140 * Math.max(0, a - .7); px[k + 1] = 255; px[k + 2] = 140; px[k + 3] = Math.round(235 * a);
+    }
+    g.putImageData(im, 0, 0);
+    var c2 = document.createElement('canvas'); c2.width = c2.height = N; var g2 = c2.getContext('2d'); g2.filter = 'blur(5px)'; g2.drawImage(cv, 0, 0); g2.filter = 'blur(1.5px)'; g2.globalAlpha = .5; g2.drawImage(cv, 0, 0); g2.filter = 'none';
+    auroraImg.setAttribute('href', c2.toDataURL('image/png')); _auroraT = Date.parse(j['Forecast Time'] || j['Observation Time']) || Date.now(); render();
+  }).catch(function(){});
+}
+loadAurora(); setInterval(function(){ if (!document.hidden) loadAurora(); }, 15 * 60000);
+var lightsG = mk('g', {'clip-path':'url(#earthClip)', mask:'url(#nightLightsMask)', style:'mix-blend-mode:screen;', 'pointer-events':'none'}, gEarth);
+var lightsSpin = mk('g', {}, lightsG);
+mk('image', {href:'https://cdn.bluishvoid.com/earth/lights_pole_v1.jpg', x:-46, y:-46, width:92, height:92, preserveAspectRatio:'none'}, lightsSpin);
 var earthRim = mk('circle', {r:44.6, fill:'none', stroke:'url(#dayRim)', 'stroke-width':2.6, opacity:.9}, gEarth);
 mk('circle', {r:46.9, fill:'none', stroke:'#cfe8ff', 'stroke-width':.55, opacity:.5}, earthGlowG);
 mk('circle', {r:48.4, fill:'none', stroke:'#7fb2ff', 'stroke-width':1.7, opacity:.13}, earthGlowG);
@@ -837,7 +894,7 @@ var eclSpot   = mk('circle', {r:6, fill:'url(#eclSpotGrad)', display:'none',
     var half = 46 / 0.392;
     earthImg = mk('image', {href:url, x:-half, y:-half, width:half*2, height:half*2,
                             preserveAspectRatio:'xMidYMid slice', opacity:0,
-                            style:'transition:opacity .8s ease;'}, earthImgG);
+                            style:'transition:opacity .8s ease;'}, earthSpinG);
     earthImg.addEventListener('load', function(){
       earthImg.setAttribute('opacity', 1);
       /* the blue dot only goes on once the real photo is up — never on
@@ -856,9 +913,9 @@ var eclSpot   = mk('circle', {r:6, fill:'url(#eclSpotGrad)', display:'none',
 var _epicMeta = null, _locHost = null;
 /* THE SPINNING GLOBE (2026-10-11): the EPIC map turned to the true sunward face for the timeline's minute (see
    earthglobe.js); replaces the single EPIC still as soon as the map loads, and follows curMs in render() */
-var _glb = window.BVGlobe ? BVGlobe.make({ size: 560, cx: 0.5, r: 0.392, pole: true, onframe: function(url, sub){
+var _glb = window.BVGlobe ? BVGlobe.make({ size: 560, cx: 0.5, r: 0.392, pole: true, spin: true, onframe: function(url, sub){
   var half = 46 / 0.392;
-  if (!earthImg){ earthImg = mk('image', {x:-half, y:-half, width:half*2, height:half*2, preserveAspectRatio:'xMidYMid slice'}, earthImgG); }
+  if (!earthImg){ earthImg = mk('image', {x:-half, y:-half, width:half*2, height:half*2, preserveAspectRatio:'xMidYMid slice'}, earthSpinG); }
   window._bvGlobeLive = true; earthImg.setAttribute('href', url); earthImg.setAttribute('opacity', 1);
   var c0 = _epicMeta && _epicMeta.centroid_coordinates, moved = !c0 || Math.abs(c0.lon - sub.lon) > 0.4 || Math.abs(c0.lat - sub.lat) > 0.4;
   _epicMeta = { centroid_coordinates: { lat: sub.lat, lon: sub.lon }, globe: true }; if (moved) placeLocPin(); } }) : null;
@@ -876,6 +933,7 @@ function placeLocPin(){
      in applyView so it keeps a constant on-screen size at any zoom
      (circles don't ride the root-font trick the way text does) */
   var hg = mk('g', {transform:'translate(' + hx.toFixed(1) + ',' + (-hy).toFixed(1) + ')'}, gEarth);
+  window._pinXY = [hx, -hy];   /* render() carries it round the pole with the spin, upright */
   _locHost = hg;
   _locMark = mk('g', {}, hg);
   /* a proper pin: ground pulse at the tip, soft ground shadow, teardrop
@@ -1819,6 +1877,12 @@ var fleet = [];
                   grp === 'stations' ? 1.15 : 1);
         var bodyC = (feat || canClick) ? st.c : shade(st.c, (jit(ji, 1) - 0.5) * 0.34);
         var wingC = shade(st.c, -0.34);
+        /* ON THE CANVAS (item 1): a bird nobody can tap is pure motion -- it is painted on #satcv each frame instead of being
+           three SVG shapes moved one by one (1,900 of them held playback at ~7 fps; the canvas paints them in a couple of ms) */
+        if (!feat && !canClick){
+          rec.cv = { one: one, sc: sc, body: bodyC, wing: wingC, op: st.op * (0.75 + jit(ji, 2) * 0.35) }; rec.gl = true;
+          fleet.push(rec); return;
+        }
         var gg = mk('g', {opacity: feat ? 1 : (st.op * (0.75 + jit(ji, 2) * 0.35)).toFixed(2),
                           style: canClick ? 'cursor:pointer;' : 'pointer-events:none;'}, g);
         if (canClick) mk('circle', {r: 6, fill: 'rgba(0,0,0,0)'}, gg);
@@ -1836,6 +1900,7 @@ var fleet = [];
       } else {
       var rr = feat ? 3.2 : st.r * (0.72 + jit(ji) * 0.72);
       var fill = (feat || canClick) ? st.c : shade(st.c, (jit(ji, 1) - 0.5) * 0.44);
+      if (!feat && !canClick){ rec.cv = { dot: true, r: rr, fill: fill, op: st.op * (0.7 + jit(ji, 2) * 0.42) }; fleet.push(rec); return; }
       rec.el = mk('circle', {r: rr.toFixed(2), fill: fill,
                              opacity: feat ? 1 : (st.op * (0.7 + jit(ji, 2) * 0.42)).toFixed(2),
                              stroke: feat ? '#fff' : (canClick ? 'rgba(0,0,0,0)' : 'none'),
@@ -1867,10 +1932,34 @@ var fleet = [];
     });
   });
 })();
+/* the satellite canvas: just behind #map (Earth and the Moon still cover what passes behind them), mapped to the same viewBox */
+var satCv = (function(){ var c = document.createElement('canvas'); c.id = 'satcv';
+  c.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;';
+  svgEl.parentNode.insertBefore(c, svgEl); return c; })(), satCtx = satCv.getContext('2d');
+window.addEventListener('resize', function(){ try { renderFleet(curMs); } catch(_){} });
+function satCvFrame(){
+  var dpr = Math.min(2, window.devicePixelRatio || 1), r = svgEl.getBoundingClientRect(), W = Math.round(r.width * dpr), H = Math.round(r.height * dpr);
+  if (satCv.width !== W || satCv.height !== H){ satCv.width = W; satCv.height = H; }
+  var vw = view.w, vh = vbH(view.w), sc = Math.min(r.width / vw, r.height / vh), ox = (r.width - vw * sc) / 2, oy = (r.height - vh * sc) / 2;
+  satCtx.setTransform(1, 0, 0, 1, 0, 0); satCtx.clearRect(0, 0, W, H);
+  return { k: sc * dpr, x0: (ox - view.x * sc) * dpr, y0: (oy - view.y * sc) * dpr };
+}
 function renderFleet(ms){
+  var T = satCvFrame(), cx = satCtx;
   for (var i = 0; i < fleet.length; i++){
     var f = fleet[i], p = junkXY(f, ms);
     var sh = inShadow(p[0], p[1]);
+    if (f.cv){
+      var v = f.cv; cx.globalAlpha = Math.min(1, v.op * (1 - 0.72 * shadowDepth(p[0], p[1])));
+      var px = T.x0 + p[0] * T.k, py = T.y0 + p[1] * T.k;
+      if (v.dot){ cx.setTransform(1, 0, 0, 1, 0, 0); cx.fillStyle = v.fill; cx.beginPath(); cx.arc(px, py, Math.max(.6, v.r * T.k), 0, 6.2832); cx.fill(); continue; }
+      var th = Math.atan2(-p[1], p[0]), rot = Math.atan2(-Math.cos(th), -Math.sin(th)), u = v.sc * T.k;
+      cx.setTransform(Math.cos(rot) * u, Math.sin(rot) * u, -Math.sin(rot) * u, Math.cos(rot) * u, px, py);
+      cx.fillStyle = v.wing;
+      if (v.one){ cx.globalAlpha *= .92; cx.fillRect(0.55, -0.45, 2.35, 0.9); cx.globalAlpha /= .92; cx.fillStyle = v.body; cx.fillRect(-1.05, -0.6, 1.55, 1.2); }
+      else { cx.globalAlpha *= .92; cx.fillRect(-2.9, -0.55, 1.75, 1.1); cx.fillRect(1.15, -0.55, 1.75, 1.1); cx.globalAlpha /= .92; cx.fillStyle = v.body; cx.fillRect(-1.0, -0.75, 2.0, 1.5); }
+      continue;
+    }
     if (sh !== f.sh){
       f.sh = sh;
       if (f.op0 === undefined) f.op0 = parseFloat(f.el.getAttribute('opacity') || 1);
@@ -2161,9 +2250,21 @@ var BASE_VB = {x:-660, y:-640, w:1320, h:1180};
 var view = {x:BASE_VB.x, y:BASE_VB.y, w:BASE_VB.w};
 var MIN_W = 90;
 function vbH(w){ return w * BASE_VB.h / BASE_VB.w; }
+/* THE STILL SKY, ITS OWN LAYER (user 2026-11-22, item 1: playback ran ~12 fps): the space backdrop and the 5,200-node starfield
+   shared one drawing with 1,900 moving satellites, so every frame re-rasterised all of it. They move to #sky, a sibling drawn
+   behind #map at the same viewBox (applyView keeps them together), which paints once; #map keeps what moves. */
+var skyEl = (function(){
+  var NS = 'http://www.w3.org/2000/svg', sk = document.createElementNS(NS, 'svg');
+  sk.id = 'sky'; sk.setAttribute('preserveAspectRatio', svgEl.getAttribute('preserveAspectRatio') || 'xMidYMid meet');
+  sk.setAttribute('viewBox', svgEl.getAttribute('viewBox')); sk.setAttribute('aria-hidden', 'true');
+  svgEl.parentNode.insertBefore(sk, svgEl);
+  var bg = svgEl.querySelector(':scope > rect'); if (bg) sk.appendChild(bg);
+  var st = document.getElementById('gStars'); if (st) sk.appendChild(st);
+  return sk; })();
 function applyView(){
   svgEl.setAttribute('viewBox', view.x.toFixed(1) + ' ' + view.y.toFixed(1) + ' ' +
                      view.w.toFixed(1) + ' ' + vbH(view.w).toFixed(1));
+  if (skyEl){ skyEl.setAttribute('viewBox', svgEl.getAttribute('viewBox')); skyEl.style.fontSize = (16 * view.w / BASE_VB.w).toFixed(2) + 'px'; }
   svgEl.style.fontSize = (16 * view.w / BASE_VB.w).toFixed(2) + 'px';
   if (_locMark){
     var lk = view.w / BASE_VB.w * 1.55;
@@ -2174,6 +2275,7 @@ function applyView(){
   if (rb) rb.style.display = view.w < BASE_VB.w - 1 ? '' : 'none';
   svgEl.style.cursor = view.w < BASE_VB.w - 1 ? 'grab' : '';
   syncSprites();
+  if (typeof curMs !== 'undefined' && typeof renderFleet === 'function') try { renderFleet(curMs); } catch(_){}   /* the satellite canvas follows a zoom or pan */
 }
 function clampView(){
   view.w = Math.min(BASE_VB.w, Math.max(MIN_W, view.w));
@@ -2314,6 +2416,20 @@ function render(){
 
   /* the true night halves swing with the sun; the umbra swings with them */
   var rot = 'rotate(' + (-sunLonDeg).toFixed(2) + ')';
+  /* spin + lights + pin follow the Earth's true orientation for curMs */
+  if (window.BVGlobe){
+    var _off = BVGlobe.subsolar(curMs).lon - sunLonDeg;
+    lightsSpin.setAttribute('transform', 'rotate(' + (_off % 360).toFixed(2) + ')');
+    var _dl = (_glb && _glb.delta && window._bvGlobeLive) ? _glb.delta(curMs, sunLonDeg) : null;
+    if (_dl != null){ earthSpinG.setAttribute('transform', 'rotate(' + (_dl % 360).toFixed(2) + ')');
+      if (_locHost && window._pinXY) _locHost.setAttribute('transform', 'rotate(' + (_dl % 360).toFixed(2) + ') translate(' + window._pinXY[0].toFixed(1) + ',' + window._pinXY[1].toFixed(1) + ') rotate(' + (-(_dl % 360)).toFixed(2) + ')'); }
+  }
+  if (window._nlRect) window._nlRect.setAttribute('transform', rot);
+  if (_auroraT != null && window.BVGlobe){
+    var _live = Math.abs(curMs - Date.now()) < 12 * 3600000;
+    auroraG.setAttribute('display', _live ? '' : 'none');
+    if (_live) auroraImg.setAttribute('transform', 'rotate(' + ((BVGlobe.subsolar(_auroraT).lon - sunLonDeg) % 360).toFixed(2) + ')');
+  }
   var shA = s.lon + Math.PI;
   shUx = Math.cos(shA); shUy = -Math.sin(shA);
   gShadow.setAttribute('transform', 'rotate(' + (-(sunLonDeg + 180)).toFixed(2) + ')');
@@ -2325,6 +2441,14 @@ function render(){
   moonRing.setAttribute('r', mR.toFixed(1));
   var mp = dirXY(m.lon*DEG, mR);
   moonG.setAttribute('transform', 'translate(' + mp[0].toFixed(1) + ',' + mp[1].toFixed(1) + ')');
+  if (playing){
+    var _sp = (+speedSel.value) || .00694, _span = Math.min(80, Math.max(9, 13.2 * _sp * 3.5)) * DEG, _ml = m.lon * DEG, _d = '';
+    for (var _k = 0; _k <= 18; _k++){ var _t = _ml - _span + _span * _k / 18, _q = dirXY(_t, mR); _d += (_k ? 'L' : 'M') + _q[0].toFixed(1) + ',' + _q[1].toFixed(1); }
+    moonTrail.setAttribute('d', _d); var _q0 = dirXY(_ml - _span, mR);
+    moonTrailGrad.setAttribute('x1', _q0[0].toFixed(1)); moonTrailGrad.setAttribute('y1', _q0[1].toFixed(1));
+    moonTrailGrad.setAttribute('x2', mp[0].toFixed(1)); moonTrailGrad.setAttribute('y2', mp[1].toFixed(1));
+    if (moonTrail.getAttribute('display')) moonTrail.removeAttribute('display');
+  } else if (moonTrail.getAttribute('display') !== 'none') moonTrail.setAttribute('display', 'none');
   moonNightP.setAttribute('transform', rot);
   var mlp = dirXY(m.lon*DEG, mR + 34);
   moonLab.setAttribute('x', mlp[0].toFixed(1)); moonLab.setAttribute('y', mlp[1].toFixed(1));
