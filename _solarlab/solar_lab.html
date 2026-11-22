@@ -5972,40 +5972,76 @@ function txDome(){
   (document.getElementById('stage') || document.body).appendChild(d); TX.dome = d; TX.dyn = d.querySelector('.tx-dyn'); return d;
 }
 function txXY(aa){ var r = (90 - deg(aa.alt)) / 90 * 92; return [-r * Math.sin(aa.az), -r * Math.cos(aa.az)]; }
+/* THE CHART MOVES SMOOTHLY (user 2026-11-22: "improve the motion in small view"): it was rebuilt from scratch 5 times a second,
+   so the sky stepped and the names jumped between spots. Now the elements persist and are moved every frame; each name keeps the
+   spot it holds (beside its dot) and glides when it must move, clear of other names AND of other dots; and each body's path across
+   your sky tonight (sunset to sunrise, 10-minute steps) is drawn faintly, so you can see where it is heading. */
+var TXD = null;
+function txBodies(){ var B = [{ id: 'sun', name: '', col: '#ffd24a', r: 6 }, { id: 'moon', name: 'MOON', col: '#f2efe6', r: 5.5 }];
+  PLANETS.forEach(function(p){ if (p.id !== 'earth' && p.id !== 'neptune') B.push({ id: p.id, name: p.name, col: p.accent || '#cfe0ff', r: 3.2 }); }); return B; }
+function txAltAzOf(id, dt){ var rd = id === 'sun' ? sunRaDecAt(dt.getTime()) : id === 'moon' ? moonRaDec(dt) : planetRaDec(id, dt); return altAz(rd.ra, rd.dec, dt, LOCATION.lat, LOCATION.lon); }
+function txDomeBuild(){
+  var d = txDome(), NS = 'http://www.w3.org/2000/svg', g = TXD = { stars: [], bodies: {}, pathsFor: null };
+  var mkE = function(tag, at, par){ var e = document.createElementNS(NS, tag); for (var k in at) e.setAttribute(k, at[k]); par.appendChild(e); return e; };
+  TX.dyn.innerHTML = '';
+  g.paths = mkE('g', {}, TX.dyn); g.starG = mkE('g', {}, TX.dyn); g.bodyG = mkE('g', {}, TX.dyn);
+  TX_STARS.forEach(function(st){ if (st.m > 3.6) return; var c = st.bv > 1 ? '#ffd9b0' : st.bv > .4 ? '#fff4e0' : '#dce8ff';
+    g.stars.push({ s: st, el: mkE('circle', { r: Math.max(.6, 2.2 - st.m * .45).toFixed(2), fill: c }, g.starG) }); });
+  txBodies().forEach(function(b){ var o = { b: b, path: mkE('path', { fill: 'none', stroke: b.col, 'stroke-width': .7, 'stroke-dasharray': '1.2 2.2', opacity: .45 }, g.paths) };
+    o.dot = mkE('circle', { r: b.r, fill: b.col, stroke: b.id === 'sun' || b.id === 'moon' ? 'none' : 'rgba(0,0,0,.5)', 'stroke-width': .6 }, g.bodyG);
+    if (b.name){ o.lab = mkE('text', { class: 'tx-p' }, g.bodyG); o.lab.textContent = b.name; }
+    g.bodies[b.id] = o; });
+  return g;
+}
+function txDomePaths(){
+  if (!(ngSunrise > ngSunset) || !TXD || TXD.pathsFor === ngSunset) return; TXD.pathsFor = ngSunset;
+  Object.keys(TXD.bodies).forEach(function(id){ var o = TXD.bodies[id], dd = '', pen = false;
+    for (var t = ngSunset - 3600000; t <= ngSunrise + 3600000; t += 600000){ var aa = txAltAzOf(id, new Date(t)); if (aa.alt <= 0){ pen = false; continue; }
+      var q = txXY(aa); dd += (pen ? 'L' : 'M') + q[0].toFixed(1) + ',' + q[1].toFixed(1); pen = true; }
+    o.path.setAttribute('d', dd); });
+}
 function txDrawDome(t){
-  var d = txDome(), dt = new Date(t), lm = txLimitAt(t), sa = sunAltAt(t), h = '', boxes = [];
-  /* a name that would sit on another steps down a line (or up, if that is clear first) */
-  var lab = function(x, y, txt){ var w = txt.length * 4.1 + 2, yy = y, tries = [0, 8, -8, 16, -16];
-    for (var k = 0; k < tries.length; k++){ var cy = y + tries[k], hit = boxes.some(function(b){ return x < b[0] + b[2] && x + w > b[0] && cy - 6 < b[1] && cy > b[1] - 6; }); if (!hit){ yy = cy; break; } }
-    boxes.push([x, yy, w]); return '<text x="' + x.toFixed(1) + '" y="' + yy.toFixed(1) + '" class="tx-p">' + txt + '</text>'; };
+  var d = txDome(), g = TXD || txDomeBuild(), dt = new Date(t), lm = txLimitAt(t), sa = sunAltAt(t);
   var col = sa > 0 ? 'rgba(52,110,205,.62)' : sa > -6 ? 'rgba(70,72,150,.66)' : sa > -12 ? 'rgba(28,32,82,.72)' : sa > -18 ? 'rgba(12,16,44,.76)' : 'rgba(5,8,20,.8)';
   d.querySelector('.tx-sky').setAttribute('fill', col);
-  d.querySelector('.tx-h').textContent = 'LOOK UP · ' + fmtT(t);
-  TX_STARS.forEach(function(st){ if (st.m > Math.min(lm, 3.6)) return; var aa = altAz(st.ra, st.dec, dt, LOCATION.lat, LOCATION.lon); if (aa.alt <= 0) return;
-    var q = txXY(aa), r = Math.max(.6, 2.2 - st.m * .45), c = st.bv > 1 ? '#ffd9b0' : st.bv > .4 ? '#fff4e0' : '#dce8ff';
-    h += '<circle cx="' + q[0].toFixed(1) + '" cy="' + q[1].toFixed(1) + '" r="' + r.toFixed(2) + '" fill="' + c + '" opacity="' + (sa > -6 ? .35 : .9) + '"/>'; });
-  PLANETS.forEach(function(p){ if (p.id === 'earth' || p.id === 'neptune') return; if (p.id === 'uranus' && lm < 5.8) return;
-    var rd = planetRaDec(p.id, dt), aa = altAz(rd.ra, rd.dec, dt, LOCATION.lat, LOCATION.lon); if (aa.alt <= 0) return; var q = txXY(aa);
-    h += '<circle cx="' + q[0].toFixed(1) + '" cy="' + q[1].toFixed(1) + '" r="3.2" fill="' + (p.accent || '#cfe0ff') + '" stroke="rgba(0,0,0,.5)" stroke-width=".6"/>' +
-         lab(q[0] + 5, q[1] + 2.6, p.name); });
-  var mr = moonRaDec(dt), ma = altAz(mr.ra, mr.dec, dt, LOCATION.lat, LOCATION.lon);
-  if (ma.alt > 0){ var mq = txXY(ma), ill = moonPhaseAt(t).illum;
-    h += '<circle cx="' + mq[0].toFixed(1) + '" cy="' + mq[1].toFixed(1) + '" r="5.5" fill="#f2efe6" opacity="' + (0.35 + 0.65 * ill).toFixed(2) + '"/>' + lab(mq[0] + 8, mq[1] + 2.6, 'MOON ' + Math.round(ill * 100) + '%'); }
-  /* the Sun, when it is up: its position from the solar core, as RA/Dec */
-  var srd2 = sunRaDecAt(t), saa = altAz(srd2.ra, srd2.dec, dt, LOCATION.lat, LOCATION.lon);
-  if (saa.alt > 0){ var sq = txXY(saa); h += '<circle cx="' + sq[0].toFixed(1) + '" cy="' + sq[1].toFixed(1) + '" r="6" fill="#ffd24a"/>'; }
-  TX.dyn.innerHTML = h;
+  var hd = 'LOOK UP · ' + fmtT(t), he = d.querySelector('.tx-h'); if (he.textContent !== hd) he.textContent = hd;
+  txDomePaths();
+  /* stars: shown above the horizon and within your sky's limit (fainter in twilight) */
+  var lst = localSiderealTime(dt, LOCATION.lon), lat = LOCATION.lat * DEG, sl = Math.sin(lat), cl = Math.cos(lat), sop = sa > -6 ? '.35' : '.9';
+  g.stars.forEach(function(o){ var st = o.s; if (st.m > Math.min(lm, 3.6)){ if (o.vis !== 0){ o.el.setAttribute('display', 'none'); o.vis = 0; } return; }
+    var H = lst - st.ra, sinAlt = Math.sin(st.dec) * sl + Math.cos(st.dec) * cl * Math.cos(H); if (sinAlt <= 0){ if (o.vis !== 0){ o.el.setAttribute('display', 'none'); o.vis = 0; } return; }
+    var alt = Math.asin(sinAlt), az = Math.atan2(-Math.cos(st.dec) * Math.sin(H), Math.sin(st.dec) * cl - Math.cos(st.dec) * sl * Math.cos(H)), r = (90 - alt / DEG) / 90 * 92;
+    o.el.setAttribute('cx', (-r * Math.sin(az)).toFixed(1)); o.el.setAttribute('cy', (-r * Math.cos(az)).toFixed(1));
+    if (o.vis !== 1){ o.el.removeAttribute('display'); o.vis = 1; } if (o.op !== sop){ o.el.setAttribute('opacity', sop); o.op = sop; } });
+  /* bodies: dot positions first, so names can steer clear of every dot */
+  var dots = [], shown = [];
+  Object.keys(g.bodies).forEach(function(id){ var o = g.bodies[id], b = o.b, hide = (id === 'uranus' && lm < 5.8) || (id === 'sun' && false), aa = txAltAzOf(id, dt);
+    if (hide || aa.alt <= 0){ o.dot.setAttribute('display', 'none'); if (o.lab) o.lab.setAttribute('display', 'none'); o.path.setAttribute('display', hide ? 'none' : ''); o.up = false; return; }
+    o.path.removeAttribute('display'); var q = txXY(aa); o.q = q; o.up = true; o.dot.removeAttribute('display');
+    o.dot.setAttribute('cx', q[0].toFixed(2)); o.dot.setAttribute('cy', q[1].toFixed(2));
+    if (id === 'moon') o.dot.setAttribute('opacity', (0.35 + 0.65 * moonPhaseAt(t).illum).toFixed(2));
+    dots.push([q[0] - b.r - 1, q[1] - b.r - 1, b.r * 2 + 2, b.r * 2 + 2]); if (o.lab) shown.push(o); });
+  /* names: sticky slot (right, left, above, below), clear of dots and earlier names; glide toward a new slot */
+  var boxes = dots.slice(), hit = function(x, y, w, h){ return boxes.some(function(bx){ return x < bx[0] + bx[2] && x + w > bx[0] && y < bx[1] + bx[3] && y + h > bx[1]; }); };
+  shown.sort(function(a, b){ return a.b.r === b.b.r ? 0 : b.b.r - a.b.r; });
+  shown.forEach(function(o){ var txt = o.b.id === 'moon' ? 'MOON ' + Math.round(moonPhaseAt(t).illum * 100) + '%' : o.b.name; if (o.lab.textContent !== txt) o.lab.textContent = txt;
+    var w = txt.length * 4.1 + 2, R = o.b.r + 3, slots = [[R, 2.4], [-R - w, 2.4], [-w / 2, -R - 1], [-w / 2, R + 6.5]], order = [0, 1, 2, 3];
+    if (o.slot != null){ order.splice(o.slot, 1); order.unshift(o.slot); }
+    var pick = order[0]; for (var k = 0; k < order.length; k++){ var sl2 = slots[order[k]]; if (!hit(o.q[0] + sl2[0], o.q[1] + sl2[1] - 6, w, 7)){ pick = order[k]; break; } }
+    o.slot = pick; var tg = slots[pick]; o.ox = o.ox == null ? tg[0] : o.ox + (tg[0] - o.ox) * .25; o.oy = o.oy == null ? tg[1] : o.oy + (tg[1] - o.oy) * .25;
+    boxes.push([o.q[0] + tg[0], o.q[1] + tg[1] - 6, w, 7]);
+    o.lab.setAttribute('x', (o.q[0] + o.ox).toFixed(1)); o.lab.setAttribute('y', (o.q[1] + o.oy).toFixed(1)); o.lab.removeAttribute('display'); });
 }
 var _txT = 0;
 function txUpdate(t){
   if (!tonightOn || t == null){ txHide(); return; }
   txLoadClouds(); txIssEls(); if (TX.bortle == null && !TX._darkAsk){ TX._darkAsk = 1; txLoadDark(); }
   txBuildEvents();
+  txDome().style.display = 'block'; if (TX.strip) TX.strip.style.display = ''; if (TX.cv) TX.cv.style.display = '';
+  txDrawDome(t);   /* every frame: the chart's elements persist and only move */
   var now = performance.now(); if (now - _txT < 200) return; _txT = now;
   /* the three shown move on as the night passes them */
   var _nk = TX.events.filter(function(e){ return e.t >= t; }).length + '|' + !!TX.allEv; if (_nk !== TX._nk){ TX._nk = _nk; txRenderStrip(); }
-  txDome().style.display = 'block'; if (TX.strip) TX.strip.style.display = ''; if (TX.cv) TX.cv.style.display = '';
-  txDrawDome(t);
 }
 function txHide(){ if (TX.dome) TX.dome.style.display = 'none'; if (TX.strip) TX.strip.style.display = 'none'; if (TX.cv) TX.cv.style.display = 'none'; }
 var _tpT = 0, _tpRise = {};
