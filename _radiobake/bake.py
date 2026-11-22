@@ -637,6 +637,20 @@ def no_tunein(rows):
     print('tunein: tag stripped and kept', kept, '| left off', n0 - len(rows))
 
 
+EXTRA = [
+    (-1.2803, 36.8167, 'KBC Radio Taifa', 'https://stream.zeno.fm/ud2u96xst5quv', 'https://www.kbc.co.ke/radio/', 'KE', 'Nairobi', 'public radio'),
+    (-1.2803, 36.8167, 'KBC English Service', 'https://stream.zeno.fm/mhmwnyyst5quv', 'https://www.kbc.co.ke/radio/', 'KE', 'Nairobi', 'public radio,news'),
+    (-15.404, 28.312, 'ZNBC Radio 1', 'https://eu6.fastcast4u.com/proxy/radio1?mp=/1', 'https://znbc.co.zm', 'ZM', 'Lusaka', 'public radio'),
+    (-15.404, 28.312, 'ZNBC Radio 2', 'https://eu6.fastcast4u.com/proxy/radio2?mp=/1', 'https://znbc.co.zm', 'ZM', 'Lusaka', 'public radio'),
+    (-15.404, 28.312, 'ZNBC Radio 4', 'https://eu6.fastcast4u.com/proxy/radio4?mp=/1', 'https://znbc.co.zm', 'ZM', 'Lusaka', 'public radio'),
+    (-6.770, 39.248, 'TBC Taifa', 'https://a7.asurahosting.com/listen/tbc_taifa/radio.mp3', 'https://www.tbc.go.tz', 'TZ', 'Dar es Salaam', 'public radio'),
+    (-6.770, 39.248, 'TBC Bongo FM', 'https://a7.asurahosting.com/listen/bongo_fm/radio.mp3', 'https://www.tbc.go.tz', 'TZ', 'Dar es Salaam', 'public radio,pop'),
+    (9.030, 7.490, 'Radio Nigeria Kapital FM', 'https://cast4.asurahosting.com/proxy/radioni1/stream', 'https://radionigeria.gov.ng', 'NG', 'Abuja', 'public radio'),
+    (36.813, 10.179, 'Radio Tunisienne Nationale', 'https://radio.radiotunisienne.tn/nationale', 'https://www.radiotunisienne.tn', 'TN', 'Tunis', 'public radio'),
+    (36.813, 10.179, 'Radio Tunisienne RTCI', 'https://radio.radiotunisienne.tn/rtci', 'https://www.radiotunisienne.tn', 'TN', 'Tunis', 'public radio'),
+]
+
+
 def tiers(rows, META):
     """how much each station is listened to, as the directory counts it (clicks in the last day, plus votes), ranked into four faint
     dot sizes: 3 = top 3%, 2 = top 15%, 1 = top half, 0 = the rest"""
@@ -780,6 +794,15 @@ def main():
         META[id(rows[-1])] = (s.get('stationuuid') or '', int(s.get('clickcount') or 0), int(s.get('votes') or 0))
         byc += 1
     print('placed by their listed city', byc)
+    # PUBLIC BROADCASTERS THE DIRECTORY LACKS (user 2026-11-21: "review the countries of africa for more public radio"): each stream taken from
+    # the broadcaster's own site or player, untokenized, probed 2026-11-21; placed at its headquarters. They take every later check like
+    # any other station (health, tokens, duplicates), so one that goes dark drops by itself.
+    ext = 0
+    for la, lo, nm, u, hp, cc, place, tags in EXTRA:
+        if u in seen:
+            continue
+        seen.add(u); rows.append([la, lo, nm, u, hp, cc, place, tags, 'MP3', 128, 0, 0, '', '', '', '', '', '']); META[id(rows[-1])] = ('', 0, 0); ext += 1
+    print('public broadcasters added by hand', ext)
     no_tunein(rows)
     countries(rows)
     fcc_fix(rows, F, FPOS)
