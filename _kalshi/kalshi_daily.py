@@ -4785,6 +4785,21 @@ def _run_market(cfg, ticker_cache=TICKER_CACHE):
     # when it times out no model has today and the call above was the floor alone: 01:20 ET on 11-17 put 100% on
     # "54 or below" off a 44.8 overnight reading, the market at 63% on 57-58. Keep the last bake instead.
     if not any(f.get(tkey) for f in fcm.values()):
+        # A REPLAY STILL SCORES THE PAST (2026-11-22). The tuner's replay (rescore.replay, --backfill) grades only settled
+        # days, which come from the archive, not today's live run. On 11-21 one 429 on today's forecast made this branch
+        # return before the replay file was written, the tuner logged "incumbent replay failed", and NY high went a day
+        # untuned. A live bake still keeps the last one; a replay writes its history without today.
+        if '--backfill' in sys.argv and not dry:
+            _res = residuals(fcm, bias_of, daily, obh, LOCK_HOUR, tkey, h0_of)
+            _sdl, _ = spread(_res, LOCK_HOUR, False)
+            _hist = {h['date']: h for h in load_log(OUT).get('history', [])}
+            for h in backfill(fcm, bias_of, daily, obh, (_settled or fetch_settled(cfg)), _sdl,
+                              cfg=cfg, h0_of=h0_of, res=_res):
+                _hist.setdefault(h['date'], h)
+            with open(OUT, 'w') as f:
+                json.dump({'history': sorted(_hist.values(), key=lambda h: h['date'], reverse=True)[:120]}, f, separators=(',', ':'))
+            print('%s: no forecast hour for today -- replay wrote %d past day(s) without today' % (cfg['key'], len(_hist)))
+            return 0
         print('%s: no forecast hour for today (live run unavailable) -- not writing, the last bake stands' % cfg['key'])
         return 0
     pred = max(cands)
