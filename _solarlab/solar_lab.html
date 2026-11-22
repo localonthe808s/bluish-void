@@ -274,7 +274,23 @@
     border-radius:999px;padding:4px 15px;cursor:pointer;
   }
   #cal-pop .cal-now:hover{background:rgba(43,34,244,.15);}
-  #night-slider-wrap{display:flex;align-items:center;gap:7px;padding-top:14px;padding-bottom:13px;}   /* room for the sunrise mark under the track, clear of the photo row */
+  #night-slider-wrap{display:flex;align-items:center;gap:7px;padding-top:14px;padding-bottom:13px;}
+  /* TONIGHT, ANSWERED: the LOOK UP chart, the slider overlay and the strip under it */
+  #tx-dome{ position:absolute; left:14px; top:46px; width:190px; z-index:5; pointer-events:none; display:none; }
+  #tx-dome svg{ display:block; width:190px; height:190px; overflow:visible; filter:drop-shadow(0 4px 14px rgba(0,0,0,.45)); }
+  #tx-dome .tx-h{ text-align:center; font:800 .5rem system-ui,sans-serif; letter-spacing:.2em; color:rgba(205,222,255,.85); margin-bottom:4px; }
+  #tx-dome .tx-c{ font:800 9px system-ui,sans-serif; fill:rgba(205,222,255,.8); text-anchor:middle; letter-spacing:.1em; }
+  #tx-dome .tx-p{ font:800 6.5px system-ui,sans-serif; fill:rgba(240,244,255,.92); letter-spacing:.08em; paint-order:stroke; stroke:rgba(4,6,18,.7); stroke-width:1.6px; }
+  #tx-slider-cv{ position:absolute; left:0; top:-11px; pointer-events:none; }
+  #tx-strip{ flex-basis:100%; display:flex; flex-wrap:wrap; justify-content:center; gap:4px 12px; margin:2px 0 4px; font:800 .5rem system-ui,sans-serif; letter-spacing:.08em; color:rgba(5,219,50,.78); }
+  #tx-strip .tx-ev, #tx-strip .tx-best{ cursor:pointer; white-space:nowrap; display:inline-flex; align-items:center; gap:5px; }
+  #tx-strip .tx-ev i{ width:6px; height:6px; border-radius:2px; display:inline-block; }
+  #tx-strip .tx-best{ color:#05DB32; border-bottom:2px solid #05DB32; padding-bottom:1px; }
+  #tx-strip .tx-best.tx-none{ color:rgba(5,219,50,.6); border-bottom-color:transparent; cursor:default; }
+  #tx-strip .tx-ev:hover, #tx-strip .tx-best:hover{ color:#fff; }
+  #tx-strip .tx-line{ flex-basis:100%; text-align:center; color:rgba(5,219,50,.62); }
+  @media (max-width:768px){ #tx-dome{ width:130px; top:40px; left:8px; } #tx-dome svg{ width:130px; height:130px; } }
+   /* room for the sunrise mark under the track, clear of the photo row */
   #ns-track{position:relative;display:flex;align-items:center;}
   #ns-now{
     position:absolute;top:-21px;transform:translateX(-50%);
@@ -5786,10 +5802,204 @@ function updateNightLoop(){
      renderMoons decides per moon which of those apply. */
   renderMoons();
   tpLive(tNight);
+  txUpdate(tNight);
 }
 /* THE ROW FOLLOWS THE SLIDER (user 2026-11-22, item 6): while the night plays or is scrubbed, each photo says where that body is at
    the clock's minute -- UP · SE · 35 deg HIGH, or when it next rises -- and a body under the horizon steps back. Out of the loop the
    row returns to its whole-night summary. Recomputed at most 5x a second; next-rise searches are cached per body. */
+
+/* ════ TONIGHT, ANSWERED (user 2026-11-22: "do 1 2 3 4 5") ═══════════════════════════════════════════════════════════════════
+   1 LOOK UP -- a sky chart of YOUR sky at the slider's minute: horizon as the rim, overhead at the centre, N up / E left as a chart
+     held overhead; the Sun, the Moon (its phase), the naked-eye planets and the bright stars your sky can show, tinted by darkness.
+   2 CLOUDS + BEST WINDOW -- tonight's hourly cloud cover (Open-Meteo, keyless) as a strip over the slider, and the longest stretch
+     that is dark, clear and moonless (or the darkest clear one if the Moon is up all night) underlined in green and named.
+   3 EVENTS -- twilight stages, moon/planet rise and set, and tonight's VISIBLE ISS passes (CelesTrak elements, the EARTH VIEW
+     propagator) as ticks on the slider and a tappable list under it; a tap jumps the night there.
+   4 METEORS -- the showers active tonight with an honest hourly rate: ZHR x sin(radiant altitude) x 2.2^(limiting mag - 6.5),
+     the limiting magnitude cut by your sky glow and by a risen Moon; "about", never a promise.
+   5 YOUR SKY'S DARKNESS -- zenith brightness from the Lorenz 2024 atlas pixel (the DARK SKY widget's own reading when it has one),
+     its approximate class, and the naked-eye limit it implies; the planet row flags what that sky cannot show. Lorenz asks that his
+     map not be conflated with the Bortle scale: the class is shown as approximate ("~"), the zenith brightness is the measure. */
+var TX = { dome: null, dyn: null, clouds: null, cloudsAt: 0, cv: null, strip: null, iss: null, issEl: null, sqm: null, bortle: null, lm: null, evKey: '', events: [], best: null };
+var TX_BORTLE = [[1,'excellent dark',21.95],[2,'truly dark',21.80],[3,'rural',21.55],[4,'rural/suburban',21.10],[5,'suburban',20.30],[6,'bright suburban',19.40],[7,'suburban/urban',18.60],[8,'city',18.00],[9,'inner city',17.30]];
+var TX_LP = [[0,0,0,21.98],[34,34,34,21.95],[66,66,66,21.91],[20,47,114,21.85],[33,84,216,21.75],[15,87,20,21.61],[31,161,42,21.39],[110,100,30,21.09],[184,166,37,20.71],[191,100,30,20.26],[253,150,80,19.76],[251,90,73,19.23],[251,153,138,18.67],[160,160,160,18.09],[242,242,242,17.51]];
+function txSqmFromPixel(R, G, B){ var best = 1e18, sq = 21.98;
+  for (var i = 0; i < TX_LP.length - 1; i++){ var a = TX_LP[i], c = TX_LP[i + 1], dx = c[0] - a[0], dy = c[1] - a[1], dz = c[2] - a[2], l2 = dx*dx + dy*dy + dz*dz || 1;
+    var t = Math.max(0, Math.min(1, ((R - a[0])*dx + (G - a[1])*dy + (B - a[2])*dz) / l2)), px = a[0] + t*dx, py = a[1] + t*dy, pz = a[2] + t*dz, dd = (R-px)*(R-px) + (G-py)*(G-py) + (B-pz)*(B-pz);
+    if (dd < best){ best = dd; sq = a[3] + t*(c[3] - a[3]); } } return sq; }
+function txBortle(sqm){ var p = TX_BORTLE; if (sqm >= p[0][2]) return 1; if (sqm <= p[8][2]) return 9;
+  for (var i = 0; i < 8; i++) if (sqm <= p[i][2] && sqm >= p[i + 1][2]) return p[i][0] + (p[i][2] - sqm) / (p[i][2] - p[i + 1][2]); return 9; }
+function txLoadDark(){
+  try { var hb = window.parent && window.parent !== window && window.parent._locBortle; if (hb != null){ TX.bortle = +hb; TX.lm = 7.6 - 0.45 * (TX.bortle - 1); txEventsSoon(); return; } } catch(_){}
+  var z = 6, n = 64, xt = (LOCATION.lon + 180) / 360 * n, lr = LOCATION.lat * DEG, yt = (1 - Math.log(Math.tan(lr) + 1 / Math.cos(lr)) / Math.PI) / 2 * n, x = Math.floor(xt), y = Math.floor(yt);
+  var im = new Image(); im.crossOrigin = 'anonymous';
+  im.onload = function(){ try { var c = document.createElement('canvas'); c.width = c.height = 3; var g = c.getContext('2d');
+    g.drawImage(im, Math.floor((xt - x) * 1024) - 1, Math.floor((yt - y) * 1024) - 1, 3, 3, 0, 0, 3, 3); var d = g.getImageData(0, 0, 3, 3).data, R = 0, G = 0, B = 0, A = 0;
+    for (var i = 0; i < d.length; i += 4){ R += d[i]; G += d[i + 1]; B += d[i + 2]; A += d[i + 3]; }
+    TX.sqm = (A / 9 < 50) ? 21.95 : txSqmFromPixel(R / 9, G / 9, B / 9); TX.bortle = txBortle(TX.sqm); TX.lm = 7.6 - 0.45 * (TX.bortle - 1); txEventsSoon(); } catch(_){} };
+  im.src = 'https://djlorenz.github.io/astronomy/image_tiles/tiles2024/tile_' + z + '_' + x + '_' + y + '.png';
+}
+function txLoadClouds(){
+  if (TX.cloudsAt && Date.now() - TX.cloudsAt < 3600000) return; TX.cloudsAt = Date.now();
+  fetch('https://api.open-meteo.com/v1/forecast?latitude=' + LOCATION.lat.toFixed(3) + '&longitude=' + LOCATION.lon.toFixed(3) + '&hourly=cloud_cover&forecast_days=3&timezone=GMT')
+    .then(function(r){ return r.json(); }).then(function(j){ var h = j && j.hourly; if (!h) return;
+      TX.clouds = h.time.map(function(t, i){ return [Date.parse(t + 'Z'), h.cloud_cover[i]]; }); txEventsSoon(); }).catch(function(){ TX.cloudsAt = 0; });
+}
+function txCloudAt(t){ var C = TX.clouds; if (!C || !C.length) return null; if (t <= C[0][0]) return C[0][1];
+  for (var i = 1; i < C.length; i++) if (C[i][0] >= t){ var f = (t - C[i - 1][0]) / (C[i][0] - C[i - 1][0]); return C[i - 1][1] + f * (C[i][1] - C[i - 1][1]); } return null; }
+/* ISS: the EARTH VIEW propagator (Kepler + J2 node/perigee drift + decay), passes over the window */
+function txIssEls(){
+  if (TX.issEl || TX._issAsk) return; TX._issAsk = 1;
+  fetch('https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=json').then(function(r){ return r.json(); }).then(function(j){ var o = j && j[0]; if (!o) return;
+    TX.issEl = { ep: Date.parse(o.EPOCH + 'Z'), n: o.MEAN_MOTION, nd: o.MEAN_MOTION_DOT || 0, e: o.ECCENTRICITY, i: o.INCLINATION * DEG, O: o.RA_OF_ASC_NODE * DEG, w: o.ARG_OF_PERICENTER * DEG, M: o.MEAN_ANOMALY * DEG };
+    TX.iss = null; txEventsSoon(); }).catch(function(){});
+}
+function txIssEci(el, ms){ var MU = 398600.4418, Re = 6378.137, dd = (ms - el.ep) / 864e5, nrd = el.n * 2 * Math.PI, a = Math.pow(MU / Math.pow(nrd / 86400, 2), 1 / 3), e = el.e;
+  var pp = a * (1 - e*e), f = 1.5 * 1.08263e-3 * Math.pow(Re / pp, 2) * nrd, si = Math.sin(el.i), O = el.O - f * Math.cos(el.i) * dd, w = el.w + f * (2 - 2.5 * si * si) * dd;
+  var M = el.M + nrd * dd + 2 * Math.PI * el.nd * dd * dd, E = M; for (var k = 0; k < 6; k++) E = M + e * Math.sin(E);
+  var nu = Math.atan2(Math.sqrt(1 - e*e) * Math.sin(E), Math.cos(E) - e), r = a * (1 - e * Math.cos(E)), u = w + nu, cO = Math.cos(O), sO = Math.sin(O), cu = Math.cos(u), su = Math.sin(u), ci = Math.cos(el.i);
+  return [r * (cO*cu - sO*su*ci), r * (sO*cu + cO*su*ci), r * su * si]; }
+function txIssPasses(t0, t1){
+  var el = TX.issEl; if (!el) return [];
+  var lat = LOCATION.lat * DEG, lon = LOCATION.lon * DEG, Re = 6378.137, out = [], cur = null, eps = 23.4393 * DEG;
+  for (var t = t0; t <= t1; t += 30000){
+    var d = t / 864e5 + 2440587.5 - 2451545, th = (280.46061837 + 360.98564736629 * d) * DEG + lon, up = [Math.cos(lat) * Math.cos(th), Math.cos(lat) * Math.sin(th), Math.sin(lat)];
+    var srd = sunRaDecAt(t), sh = [Math.cos(srd.dec) * Math.cos(srd.ra), Math.cos(srd.dec) * Math.sin(srd.ra), Math.sin(srd.dec)];
+    var vis = false, elv = -90;
+    if (Math.asin(sh[0]*up[0] + sh[1]*up[1] + sh[2]*up[2]) / DEG < -6){
+      var X = txIssEci(el, t), rel = [X[0] - Re*up[0], X[1] - Re*up[1], X[2] - Re*up[2]], rl = Math.hypot(rel[0], rel[1], rel[2]);
+      elv = Math.asin((rel[0]*up[0] + rel[1]*up[1] + rel[2]*up[2]) / rl) / DEG;
+      if (elv > 10){ var dt2 = X[0]*sh[0] + X[1]*sh[1] + X[2]*sh[2]; if (dt2 > 0 || Math.hypot(X[0] - dt2*sh[0], X[1] - dt2*sh[1], X[2] - dt2*sh[2]) > Re) vis = true; } }
+    if (vis){ if (!cur) cur = { t: t, max: elv, tm: t }; if (elv > cur.max){ cur.max = elv; cur.tm = t; } cur.t1 = t; }
+    else if (cur){ out.push(cur); cur = null; }
+  }
+  if (cur) out.push(cur); return out;
+}
+function txEventsSoon(){ TX.evKey = ''; if (tonightOn && tNight != null) try { txBuildEvents(); } catch(_){} }   /* data arriving late (clouds, ISS, darkness) rebuilds at once, not on the next tick */
+function txCrossings(fn, t0, t1, step, levels){   /* times fn(t) crosses each level, with direction */
+  var out = [], prev = fn(t0);
+  for (var t = t0 + step; t <= t1; t += step){ var v = fn(t);
+    levels.forEach(function(L){ if ((prev - L) * (v - L) < 0){ var f = (L - prev) / (v - prev); out.push({ t: t - step + f * step, level: L, up: v > prev }); } }); prev = v; }
+  return out;
+}
+function txBuildEvents(){
+  if (!(ngSunrise > ngSunset)) return;
+  var key = ngSunset + '|' + !!TX.clouds + '|' + !!TX.issEl + '|' + (TX.lm != null); if (key === TX.evKey) return; TX.evKey = key;
+  var t0 = ngSunset - 30 * 60000, t1 = ngSunrise + 30 * 60000, ev = [];
+  txCrossings(sunAltAt, t0, t1, 120000, [-6, -12, -18]).forEach(function(c){
+    var nm = { '-6': c.up ? 'DAWN' : 'CIVIL DUSK', '-12': c.up ? 'NAUTICAL DAWN' : 'NAUTICAL DUSK', '-18': c.up ? 'FIRST LIGHT' : 'FULL DARK' }[String(c.level)];
+    ev.push({ t: c.t, k: 'tw', c: '#7aa2ff', label: nm }); });
+  txCrossings(moonAltAt, t0, t1, 300000, [0]).forEach(function(c){ ev.push({ t: c.t, k: 'moon', c: '#e9e5da', label: 'MOON ' + (c.up ? 'RISES' : 'SETS') }); });
+  ['mercury', 'venus', 'mars', 'jupiter', 'saturn'].forEach(function(id){ var pl = PLANETS.filter(function(p){ return p.id === id; })[0];
+    txCrossings(function(t){ return planetAltAt(id, t); }, t0, t1, 600000, [0]).forEach(function(c){ ev.push({ t: c.t, k: 'pl', c: (pl && pl.accent) || '#ddd', label: id.toUpperCase() + ' ' + (c.up ? 'RISES' : 'SETS') }); }); });
+  if (TX.issEl){ TX.iss = txIssPasses(ngSunset, ngSunrise);
+    TX.iss.forEach(function(P){ ev.push({ t: P.tm, k: 'iss', c: '#fb923c', label: 'ISS PASS · ' + Math.round(P.max) + '° HIGH · ' + Math.max(1, Math.round((P.t1 - P.t) / 60000)) + ' MIN' }); }); }
+  ev.sort(function(a, b){ return a.t - b.t; }); TX.events = ev;
+  /* the best window: dark (Sun < -15), Moon down or a slim one, clear (< 35%); else the darkest clear stretch */
+  var STEP = 600000, runs = [], cur = null, moonFree = false;
+  for (var t = ngSunset; t <= ngSunrise; t += STEP){
+    var cc = txCloudAt(t), dark = sunAltAt(t) < -15, mUp = moonAltAt(t) > 0, ill = moonPhaseAt(t).illum, ok = dark && (cc == null || cc < 35);
+    var good = ok && (!mUp || ill < .25);
+    if (good){ if (!cur) cur = { a: t }; cur.b = t; } else if (cur){ runs.push(cur); cur = null; } }
+  if (cur) runs.push(cur);
+  if (!runs.length){ cur = null; for (var t2 = ngSunset; t2 <= ngSunrise; t2 += STEP){ var cc2 = txCloudAt(t2), ok2 = sunAltAt(t2) < -15 && (cc2 == null || cc2 < 35);
+      if (ok2){ if (!cur) cur = { a: t2, moon: true }; cur.b = t2; } else if (cur){ runs.push(cur); cur = null; } } if (cur) runs.push(cur); }
+  runs.sort(function(a, b){ return (b.b - b.a) - (a.b - a.a); });
+  TX.best = runs[0] && runs[0].b - runs[0].a >= 30 * 60000 ? runs[0] : null;
+  txPaintSlider(); txRenderStrip();
+}
+function txSliderX(t, w){ var v = (t <= ngSunrise) ? (t - ngSunset) / (ngSunrise - ngSunset) * 700 : 700 + (t - ngSunrise) / (ngSunset + 86400000 - ngSunrise) * 300; return 7.5 + Math.max(0, Math.min(1000, v)) / 1000 * (w - 15); }
+function txPaintSlider(){
+  var sl = document.getElementById('night-slider'), tr = document.getElementById('ns-track'); if (!sl || !tr || !(ngSunrise > ngSunset)) return;
+  if (!TX.cv){ TX.cv = document.createElement('canvas'); TX.cv.id = 'tx-slider-cv'; tr.appendChild(TX.cv); }
+  var w = sl.offsetWidth, dpr = Math.min(2, window.devicePixelRatio || 1), H = 26; TX.cv.width = w * dpr; TX.cv.height = H * dpr; TX.cv.style.width = w + 'px'; TX.cv.style.height = H + 'px';
+  var g = TX.cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, H);
+  /* clouds: a strip just above the track, grey as thick as the cover */
+  if (TX.clouds) for (var x = 0; x < w; x++){ var v = Math.max(0, Math.min(1000, (x - 7.5) / (w - 15) * 1000)), t = sliderToTime(v), cc = txCloudAt(t);
+    if (cc != null && cc > 3){ g.fillStyle = 'rgba(205,214,232,' + (0.12 + 0.75 * cc / 100).toFixed(3) + ')'; g.fillRect(x, 4, 1, 4); } }
+  /* event ticks over the cloud strip */
+  TX.events.forEach(function(e){ var x2 = txSliderX(e.t, w); g.fillStyle = e.c; g.fillRect(Math.round(x2) - .5, e.k === 'iss' ? 0 : 1, e.k === 'tw' ? 1 : 2, e.k === 'tw' ? 8 : 9); });
+  /* the best window, underlined below the track */
+  if (TX.best){ var xa = txSliderX(TX.best.a, w), xb = txSliderX(TX.best.b, w); g.fillStyle = '#05DB32'; g.beginPath(); if (g.roundRect) g.roundRect(xa, 20, Math.max(3, xb - xa), 3, 1.5); else g.rect(xa, 20, Math.max(3, xb - xa), 3); g.fill(); }
+}
+function txLimitAt(t){ var lm = TX.lm != null ? TX.lm : 6.0; if (moonAltAt(t) > 0) lm -= 1.6 * moonPhaseAt(t).illum; if (sunAltAt(t) > -18) lm -= (sunAltAt(t) + 18) / 6; return lm; }
+function txShowers(){
+  if (typeof METEOR_SHOWERS === 'undefined' || !(ngSunrise > ngSunset)) return [];
+  var out = []; METEOR_SHOWERS.forEach(function(sh){
+    if (!showerActive(sh, ngSunset + 6 * 3600000)) return;
+    var best = null; for (var t = ngSunset; t <= ngSunrise; t += 600000){ var dt = new Date(t), aa = altAz(sh.ra * DEG, sh.dec * DEG, dt, LOCATION.lat, LOCATION.lon), alt = deg(aa.alt);
+      if (alt <= 5 || sunAltAt(t) > -12) continue; var hr = sh.zhr * Math.sin(aa.alt) * Math.pow(2.2, txLimitAt(t) - 6.5); if (!best || hr > best.hr) best = { hr: hr, t: t, alt: alt }; }
+    var peak = showerNearPeak(sh, ngSunset + 6 * 3600000);
+    out.push({ s: sh, best: best, peak: peak }); });
+  return out;
+}
+function txRenderStrip(){
+  var wrap = document.getElementById('night-slider-wrap'); if (!wrap) return;
+  if (!TX.strip){ TX.strip = document.createElement('div'); TX.strip.id = 'tx-strip'; wrap.parentNode.insertBefore(TX.strip, wrap.nextSibling);
+    TX.strip.addEventListener('click', function(e){ var c = e.target.closest('[data-t]'); if (!c) return; e.stopPropagation();
+      tNight = +c.getAttribute('data-t'); tNightLive = false; updateNightLoop(); if (!playing) render(); }); }
+  var h = '';
+  if (TX.best){ h += '<span class="tx-best" data-t="' + (TX.best.a + (TX.best.b - TX.best.a) / 2) + '">BEST ' + fmtT(TX.best.a) + '–' + fmtT(TX.best.b) + ' · ' + (TX.best.moon ? 'CLEAR, DARK (MOON UP)' : 'CLEAR, DARK, MOON DOWN') + (TX.clouds ? '' : ' · CLOUDS UNKNOWN') + '</span>'; }
+  else if (TX.clouds){ var _cs = [], _tt; for (_tt = ngSunset; _tt <= ngSunrise; _tt += 3600000){ var _c = txCloudAt(_tt); if (_c != null) _cs.push(_c); }
+    var _avg = _cs.length ? _cs.reduce(function(a, b){ return a + b; }, 0) / _cs.length : 0;
+    h += '<span class="tx-best tx-none">NO CLEAR DARK WINDOW TONIGHT' + (_avg > 85 ? ' \u00b7 OVERCAST ALL NIGHT' : _avg > 50 ? ' \u00b7 MOSTLY CLOUDY' : '') + '</span>'; }
+  TX.events.forEach(function(e){ h += '<span class="tx-ev" data-t="' + e.t + '"><i style="background:' + e.c + '"></i>' + fmtT(e.t) + ' ' + e.label + '</span>'; });
+  var sh = txShowers();
+  if (sh.length) h += '<div class="tx-line">' + sh.map(function(x){ var r = x.best ? Math.round(x.best.hr) : 0;
+      return 'METEORS · ' + x.s.name.toUpperCase() + (x.peak ? ' (PEAK)' : '') + ' · ' + (x.best && r >= 1 ? 'ABOUT ' + r + ' AN HOUR AT BEST, ' + fmtT(x.best.t) : 'UNDER 1 AN HOUR FROM YOUR SKY'); }).join(' &nbsp;&middot;&nbsp; ') + '</div>';
+  if (TX.bortle != null){ var b = Math.max(1, Math.min(9, Math.round(TX.bortle))), nm = TX_BORTLE[b - 1][1];
+    h += '<div class="tx-line">YOUR SKY · ' + nm.toUpperCase() + ' (~CLASS ' + TX.bortle.toFixed(1) + (TX.sqm ? ', ' + TX.sqm.toFixed(1) + ' MAG/ARCSEC² OVERHEAD' : '') + ') · FAINTEST STAR ~' + TX.lm.toFixed(1) + ' MAG' +
+         (TX.lm < 5.8 ? ' · URANUS NEEDS BINOCULARS' : '') + ' · NEPTUNE NEEDS A TELESCOPE</div>'; }
+  TX.strip.innerHTML = h;
+}
+/* the LOOK UP chart */
+var TX_STARS = (typeof STARS !== 'undefined' ? STARS.slice(0, 90) : []).map(function(st){ var l = st[0] * DEG, b = st[1] * DEG, e = 23.4393 * DEG, x = Math.cos(b) * Math.cos(l), y = Math.cos(b) * Math.sin(l), z = Math.sin(b);
+  return { ra: Math.atan2(y * Math.cos(e) - z * Math.sin(e), x), dec: Math.asin(y * Math.sin(e) + z * Math.cos(e)), m: st[2], bv: st[3] }; });
+function txDome(){
+  if (TX.dome) return TX.dome;
+  var d = document.createElement('div'); d.id = 'tx-dome';
+  d.innerHTML = '<div class="tx-h"></div><svg viewBox="-104 -104 208 208"><circle class="tx-sky" r="92"/>' +
+    '<circle r="61.3" fill="none" stroke="rgba(255,255,255,.12)" stroke-width=".7"/><circle r="30.7" fill="none" stroke="rgba(255,255,255,.12)" stroke-width=".7"/>' +
+    '<line x1="0" y1="-92" x2="0" y2="92" stroke="rgba(255,255,255,.07)" stroke-width=".7"/><line x1="-92" y1="0" x2="92" y2="0" stroke="rgba(255,255,255,.07)" stroke-width=".7"/>' +
+    '<g class="tx-dyn"></g><circle r="92" fill="none" stroke="rgba(190,215,255,.55)" stroke-width="1.2"/>' +
+    '<text x="0" y="-96" class="tx-c">N</text><text x="-98" y="3" class="tx-c">E</text><text x="0" y="102" class="tx-c">S</text><text x="98" y="3" class="tx-c">W</text></svg>';
+  (document.getElementById('stage') || document.body).appendChild(d); TX.dome = d; TX.dyn = d.querySelector('.tx-dyn'); return d;
+}
+function txXY(aa){ var r = (90 - deg(aa.alt)) / 90 * 92; return [-r * Math.sin(aa.az), -r * Math.cos(aa.az)]; }
+function txDrawDome(t){
+  var d = txDome(), dt = new Date(t), lm = txLimitAt(t), sa = sunAltAt(t), h = '', boxes = [];
+  /* a name that would sit on another steps down a line (or up, if that is clear first) */
+  var lab = function(x, y, txt){ var w = txt.length * 4.1 + 2, yy = y, tries = [0, 8, -8, 16, -16];
+    for (var k = 0; k < tries.length; k++){ var cy = y + tries[k], hit = boxes.some(function(b){ return x < b[0] + b[2] && x + w > b[0] && cy - 6 < b[1] && cy > b[1] - 6; }); if (!hit){ yy = cy; break; } }
+    boxes.push([x, yy, w]); return '<text x="' + x.toFixed(1) + '" y="' + yy.toFixed(1) + '" class="tx-p">' + txt + '</text>'; };
+  var col = sa > 0 ? 'rgba(52,110,205,.62)' : sa > -6 ? 'rgba(70,72,150,.66)' : sa > -12 ? 'rgba(28,32,82,.72)' : sa > -18 ? 'rgba(12,16,44,.76)' : 'rgba(5,8,20,.8)';
+  d.querySelector('.tx-sky').setAttribute('fill', col);
+  d.querySelector('.tx-h').textContent = 'LOOK UP · ' + fmtT(t);
+  TX_STARS.forEach(function(st){ if (st.m > Math.min(lm, 3.6)) return; var aa = altAz(st.ra, st.dec, dt, LOCATION.lat, LOCATION.lon); if (aa.alt <= 0) return;
+    var q = txXY(aa), r = Math.max(.6, 2.2 - st.m * .45), c = st.bv > 1 ? '#ffd9b0' : st.bv > .4 ? '#fff4e0' : '#dce8ff';
+    h += '<circle cx="' + q[0].toFixed(1) + '" cy="' + q[1].toFixed(1) + '" r="' + r.toFixed(2) + '" fill="' + c + '" opacity="' + (sa > -6 ? .35 : .9) + '"/>'; });
+  PLANETS.forEach(function(p){ if (p.id === 'earth' || p.id === 'neptune') return; if (p.id === 'uranus' && lm < 5.8) return;
+    var rd = planetRaDec(p.id, dt), aa = altAz(rd.ra, rd.dec, dt, LOCATION.lat, LOCATION.lon); if (aa.alt <= 0) return; var q = txXY(aa);
+    h += '<circle cx="' + q[0].toFixed(1) + '" cy="' + q[1].toFixed(1) + '" r="3.2" fill="' + (p.accent || '#cfe0ff') + '" stroke="rgba(0,0,0,.5)" stroke-width=".6"/>' +
+         lab(q[0] + 5, q[1] + 2.6, p.name); });
+  var mr = moonRaDec(dt), ma = altAz(mr.ra, mr.dec, dt, LOCATION.lat, LOCATION.lon);
+  if (ma.alt > 0){ var mq = txXY(ma), ill = moonPhaseAt(t).illum;
+    h += '<circle cx="' + mq[0].toFixed(1) + '" cy="' + mq[1].toFixed(1) + '" r="5.5" fill="#f2efe6" opacity="' + (0.35 + 0.65 * ill).toFixed(2) + '"/>' + lab(mq[0] + 8, mq[1] + 2.6, 'MOON ' + Math.round(ill * 100) + '%'); }
+  /* the Sun, when it is up: its position from the solar core, as RA/Dec */
+  var srd2 = sunRaDecAt(t), saa = altAz(srd2.ra, srd2.dec, dt, LOCATION.lat, LOCATION.lon);
+  if (saa.alt > 0){ var sq = txXY(saa); h += '<circle cx="' + sq[0].toFixed(1) + '" cy="' + sq[1].toFixed(1) + '" r="6" fill="#ffd24a"/>'; }
+  TX.dyn.innerHTML = h;
+}
+var _txT = 0;
+function txUpdate(t){
+  if (!tonightOn || t == null){ txHide(); return; }
+  txLoadClouds(); txIssEls(); if (TX.bortle == null && !TX._darkAsk){ TX._darkAsk = 1; txLoadDark(); }
+  txBuildEvents();
+  var now = performance.now(); if (now - _txT < 200) return; _txT = now;
+  txDome().style.display = 'block'; if (TX.strip) TX.strip.style.display = ''; if (TX.cv) TX.cv.style.display = '';
+  txDrawDome(t);
+}
+function txHide(){ if (TX.dome) TX.dome.style.display = 'none'; if (TX.strip) TX.strip.style.display = 'none'; if (TX.cv) TX.cv.style.display = 'none'; }
 var _tpT = 0, _tpRise = {};
 function tpLive(t){
   var items = document.querySelectorAll('#tonight-photos .tp-item[data-body]'); if (!items.length) return;
@@ -5805,6 +6015,7 @@ function tpLive(t){
       var c = _tpRise[id]; if (!c || t < c.from || t > c.at){ var r = null; for (var u = t; u < t + 86400000; u += 10 * 60000){ if (it._altFn(u) > 0){ r = u; break; } } c = _tpRise[id] = { from: t, at: r || t + 86400000, r: r }; }
       txt = c.r ? 'rises ' + fmtT(c.r) : 'below the horizon'; it.style.opacity = '.5';
     }
+    if (id === 'neptune') txt += ' \u00b7 telescope'; else if (id === 'uranus' && TX.lm != null && TX.lm < 5.8) txt += ' \u00b7 binoculars';
     if (sb.textContent !== txt) sb.textContent = txt;
   });
 }
@@ -5822,6 +6033,7 @@ function hideNightLoop(){
   gShowers.style.opacity = '';
   ngClock.setAttribute('display','none');
   tpLive(null);
+  txHide();
 }
 function updateNightVisibility(){
   var show = tonightOn && viewMode !== 'moons';
