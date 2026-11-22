@@ -606,7 +606,7 @@ BROADCASTER_HQ = {
     'radionacional.com.ar': (-34.602, -58.378, 'Buenos Aires'),
 }
 # a public network's own streams with no town in the name: its headquarters (Radio Nacional Argentina's stream network)
-STREAM_HQ = {'sa.mp3.icecast.magma.edge-access.net': (-34.602, -58.378, 'Buenos Aires', 'https://www.radionacional.com.ar/', r'nacional')}
+STREAM_HQ = {'sa.mp3.icecast.magma.edge-access.net': (-34.602, -58.378, 'Buenos Aires', 'https://www.radionacional.com.ar/', r'^(?!.*\bL[RTUV] ?\d).*nacional')}   # national channels only: a local station (LRA 16 ...) is never moved to Buenos Aires
 # public networks name real local stations ("LRA 16 Radio Nacional La Quiaca"): their towns count down to 5,000 people
 PUBNET = re.compile(r'radio nacional|\bLRA ?\d|\bL[TUV] ?\d+ radio nacional|\bRTS\b|\bKBC\b|\bZNBC\b|\bSABC\b|radio uruguay', re.I)
 CNAME = {'MZ': 'Mocambique', 'MX': 'Mexico'}   # a small town that shares its country's name: 'Radio Mocambique' is national, not from Ilha de Mocambique
