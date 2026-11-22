@@ -600,7 +600,15 @@ BROADCASTER_HQ = {
     'lesedifm.co.za': (-29.121, 26.214, 'Bloemfontein'), 'umhlobowenenefm.co.za': (-33.961, 25.602, 'Gqeberha'),
     'phalaphalafm.co.za': (-23.904, 29.469, 'Polokwane'),
     'ebc.et': (9.030, 38.740, 'Addis Ababa'), 'rm.co.mz': (-25.966, 32.573, 'Maputo'),
+    # South America (2026-11-21: "review south america for more public radio")
+    'radionacional.co': (4.635, -74.083, 'Bogotá'), 'radiouruguay.uy': (-34.906, -56.186, 'Montevideo'),
+    'rnv.gob.ve': (10.501, -66.913, 'Caracas'), 'radiomundial.com.ve': (10.501, -66.913, 'Caracas'),
+    'radionacional.com.ar': (-34.602, -58.378, 'Buenos Aires'),
 }
+# a public network's own streams with no town in the name: its headquarters (Radio Nacional Argentina's stream network)
+STREAM_HQ = {'sa.mp3.icecast.magma.edge-access.net': (-34.602, -58.378, 'Buenos Aires', 'https://www.radionacional.com.ar/', r'nacional')}
+# public networks name real local stations ("LRA 16 Radio Nacional La Quiaca"): their towns count down to 5,000 people
+PUBNET = re.compile(r'radio nacional|\bLRA ?\d|\bL[TUV] ?\d+ radio nacional|\bRTS\b|\bKBC\b|\bZNBC\b|\bSABC\b|radio uruguay', re.I)
 CNAME = {'MZ': 'Mocambique', 'MX': 'Mexico'}   # a small town that shares its country's name: 'Radio Mocambique' is national, not from Ilha de Mocambique
 
 
@@ -774,7 +782,7 @@ def main():
             for w in set(re.findall(r'[^\W\d_]+(?:[ -][^\W\d_]+)?', _norm(nm))) | set(re.findall(r'[^\W\d_]{4,}', _norm(nm))):
                 if w == cn:
                     continue
-                c2 = [t for t in pidx.get((w, cc), []) if t[2] >= 50000]
+                c2 = [t for t in pidx.get((w, cc), []) if t[2] >= (5000 if PUBNET.search(nm) else 50000)]
                 if c2 and (not hit or max(c2, key=lambda t: t[2])[2] > max(hit, key=lambda t: t[2])[2]):
                     hit = c2
             if hit:
@@ -783,12 +791,19 @@ def main():
             hd = re.sub(r'^https?://(www\.)?', '', (s.get('homepage') or '').lower()).split('/')[0]
             if hd in BROADCASTER_HQ:
                 b0 = BROADCASTER_HQ[hd]; hit = [(b0[0], b0[1], 1)]; city = b0[2]
+            else:
+                sh = re.sub(r'^https?://', '', u).split('/')[0].split(':')[0]
+                if sh in STREAM_HQ and re.search(STREAM_HQ[sh][4], nm, re.I):
+                    b0 = STREAM_HQ[sh]; hit = [(b0[0], b0[1], 1)]; city = b0[2]
         if not hit:
             continue
         la, lo = max(hit, key=lambda t: t[2])[:2]
         seen.add(u)
         tags = ','.join([t.strip() for t in (s.get('tags') or '').split(',') if t.strip()][:3])[:60]
         hp = (s.get('homepage') or '').strip()
+        sh = re.sub(r'^https?://', '', u).split('/')[0].split(':')[0]
+        if sh in STREAM_HQ and re.search(STREAM_HQ[sh][4], nm, re.I) and 'radioarg.net' in hp:
+            hp = STREAM_HQ[sh][3]                                # the network's own site, not a third-party directory
         rows.append([round(la, 3), round(lo, 3), nm, u, hp[:200] if hp.startswith('http') else '', cc, city[:40], tags,
                      (s.get('codec') or '').upper()[:6], int(s.get('bitrate') or 0), int(s.get('votes') or 0), 0, '', '', '', '', '', ''])
         META[id(rows[-1])] = (s.get('stationuuid') or '', int(s.get('clickcount') or 0), int(s.get('votes') or 0))
