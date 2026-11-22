@@ -701,10 +701,15 @@ def wp_formats(titles):
     return out
 
 
+# 2026-11-21 ("do 1 2 4"): a call sign ANYWHERE in the name when it carries its band -- the directory's Mexican stations read
+# "La Comadre Orizaba - 100.3 FM - XHPP-FM - ..." -- and English Wikipedia has an article (with a format) for most of them
+CALL2 = re.compile(r'\b((?:[KW][A-Z]{2,3}|C[FHIJK][A-Z]{2}|X[EH][A-Z]{2,4}))-(?:FM|AM)\b')
+
+
 def wiki_formats(rows):
     want = {}
     for r in rows:
-        m = CALL.match(r[2] or '')
+        m = CALL.match(r[2] or '') or CALL2.search(r[2] or '')
         if m:
             want.setdefault(m.group(1), []).append(r)
     titles = sorted({t for c, rs in want.items() for t in (c + '-FM', c, c + ' (AM)', c + '-AM')})
@@ -712,12 +717,48 @@ def wiki_formats(rows):
     n = 0
     for c, rs in want.items():
         for r in rs:
-            fm = 'FM' in (r[2] or '')[:16].upper()
+            fm = (c + '-FM') in (r[2] or '') or ((c + '-AM') not in (r[2] or '') and 'FM' in (r[2] or '')[:16].upper())
             order = (c + '-FM', c, c + '-AM', c + ' (AM)') if fm else (c, c + '-AM', c + ' (AM)', c + '-FM')
             v = next((f[t] for t in order if t in f), '')
             r[20] = v; n += bool(v)
     print('formats from Wikipedia', n, 'of', sum(len(v) for v in want.values()), 'call-sign stations')
 
+
+
+# ONE-ARTIST CHANNELS (2026-11-21, "do ... 4"): "Exclusively - Kasabian" and its kind play one artist all day; that artist's genres
+# from Wikidata (CC0; a human or a group whose English label is the name, the best-known first) go in r[20] as "artist: <genres>",
+# which the page reads like a format. Keyless SPARQL, one query for all of them.
+ARTIST = re.compile(r'^ex[c]?lusively\s*[-:]?\s*(.+)$', re.I)
+
+
+def artist_genres(rows):
+    import urllib.parse, urllib.request
+    want = {}
+    for r in rows:
+        m = ARTIST.match((r[2] or '').strip())
+        if m and not r[20]:
+            want.setdefault(m.group(1).strip().replace('Artic Monkeys', 'Arctic Monkeys'), []).append(r)
+    if not want:
+        return
+    vals = ' '.join('"%s"@en' % n.replace('"', '') for n in want)
+    q = """SELECT ?name (GROUP_CONCAT(DISTINCT ?gl; separator=", ") AS ?g) (MAX(?sl) AS ?n) WHERE { VALUES ?name { %s }
+      ?a rdfs:label ?name; wdt:P136 ?gn; wikibase:sitelinks ?sl. { ?a wdt:P31 wd:Q5 } UNION { ?a wdt:P31/wdt:P279* wd:Q215380 }
+      ?gn rdfs:label ?gl FILTER(lang(?gl) = "en") } GROUP BY ?name ?a ORDER BY DESC(?n)""" % vals
+    try:
+        j = json.load(urllib.request.urlopen(urllib.request.Request('https://query.wikidata.org/sparql?format=json&query=' + urllib.parse.quote(q),
+            headers={'User-Agent': 'bluish-radio-bake/1.0 (https://bluishvoid.com)', 'Accept': 'application/sparql-results+json'}), timeout=120))
+    except Exception as e:
+        print('artist genres unavailable', e); return
+    got = {}
+    for b in j['results']['bindings']:
+        got.setdefault(b['name']['value'], b['g']['value'])   # the best-known match first
+    n = 0
+    for name, rs in want.items():
+        g = got.get(name)
+        if g:
+            for r in rs:
+                r[20] = ('artist: ' + g)[:60]; n += 1
+    print('one-artist channels with a genre', n, 'of', sum(len(v) for v in want.values()))
 
 def tiers(rows, META):
     """how much each station is listened to, as the directory counts it (clicks in the last day, plus votes), ranked into four faint
@@ -927,6 +968,10 @@ def main():
         wiki_formats(rows)
     except Exception as e:
         print('wikipedia formats unavailable', e)
+    try:
+        artist_genres(rows)
+    except Exception as e:
+        print('artist genres unavailable', e)
     meta = {'built': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%MZ'), 'n': len(rows), 'src': host, 'tz': TZ, 'rows': rows}
     json.dump(meta, open(os.path.join(out, 'stations_v1.json'), 'w'), separators=(',', ':'), ensure_ascii=False)
     print('stations', len(S), '-> kept', len(rows), 'from', host, os.path.getsize(os.path.join(out, 'stations_v1.json')) // 1024, 'KB')
