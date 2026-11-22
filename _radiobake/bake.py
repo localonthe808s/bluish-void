@@ -665,6 +665,60 @@ EXTRA = [
 ]
 
 
+# FORMAT FROM WIKIPEDIA (user 2026-11-21: "do 1 2 3 4" -- break up EVERYTHING ELSE). Licensed stations named by their call sign (US K/W,
+# Canada C, Mexico XE/XH) take the format their Wikipedia article's infobox states ("Adult contemporary", "Community radio") as r[20];
+# the page maps it to a genre family only when the directory, the stream and the name gave none. Wikidata was tried first and holds a
+# format for almost none of them. Keyless MediaWiki API, 50 titles a request; a failure leaves r[20] empty, never stops the bake.
+CALL = re.compile(r'^((?:[KW][A-Z]{2,3}|C[FHIJK][A-Z]{2}|X[EH][A-Z]{2,4}))(?:-(FM|AM|LP|LPFM|HD\d))?\b')
+
+
+def wp_formats(titles):
+    import urllib.parse, urllib.request
+    out = {}
+    for i in range(0, len(titles), 50):
+        p = {'action': 'query', 'format': 'json', 'prop': 'revisions', 'rvprop': 'content', 'rvslots': 'main', 'redirects': '1', 'titles': '|'.join(titles[i:i + 50])}
+        try:
+            j = json.load(urllib.request.urlopen(urllib.request.Request('https://en.wikipedia.org/w/api.php?' + urllib.parse.urlencode(p),
+                headers={'User-Agent': 'bluish-radio-bake/1.0 (https://bluishvoid.com)'}), timeout=60))['query']
+        except Exception as e:
+            print('wikipedia batch failed', e); continue
+        back = {}
+        for n in j.get('normalized', []) + j.get('redirects', []):
+            back[n['to']] = back.get(n['from'], n['from'])
+        for pg in j.get('pages', {}).values():
+            try:
+                txt = pg['revisions'][0]['slots']['main']['*']
+            except Exception:
+                continue
+            m = re.search(r'\|[ \t]*format[ \t]*=[ \t]*([^\n]+)', txt)
+            if not m:
+                continue
+            f = re.sub(r'\[\[(?:[^|\]]*\|)?([^\]]*)\]\]', r'\1', m.group(1))
+            f = re.sub(r'<[^>]+>|\{\{[^}]*\}\}|\[\d+\]', '', f).strip(' ;,|')
+            if f and not f.startswith(('|', '{', 'Defunct', 'defunct')):
+                out[back.get(pg['title'], pg['title'])] = f[:48]
+        time.sleep(.5)
+    return out
+
+
+def wiki_formats(rows):
+    want = {}
+    for r in rows:
+        m = CALL.match(r[2] or '')
+        if m:
+            want.setdefault(m.group(1), []).append(r)
+    titles = sorted({t for c, rs in want.items() for t in (c + '-FM', c, c + ' (AM)', c + '-AM')})
+    f = wp_formats(titles)
+    n = 0
+    for c, rs in want.items():
+        for r in rs:
+            fm = 'FM' in (r[2] or '')[:16].upper()
+            order = (c + '-FM', c, c + '-AM', c + ' (AM)') if fm else (c, c + '-AM', c + ' (AM)', c + '-FM')
+            v = next((f[t] for t in order if t in f), '')
+            r[20] = v; n += bool(v)
+    print('formats from Wikipedia', n, 'of', sum(len(v) for v in want.values()), 'call-sign stations')
+
+
 def tiers(rows, META):
     """how much each station is listened to, as the directory counts it (clicks in the last day, plus votes), ranked into four faint
     dot sizes: 3 = top 3%, 2 = top 15%, 1 = top half, 0 = the rest"""
@@ -865,6 +919,14 @@ def main():
             r.append(tzi[z])
     except Exception as e:
         print('time zones unavailable', e)
+    for r in rows:   # r[19] time zone (0 when the zones failed), r[20] Wikipedia's format
+        while len(r) < 20:
+            r.append(0)
+        r.append('')
+    try:
+        wiki_formats(rows)
+    except Exception as e:
+        print('wikipedia formats unavailable', e)
     meta = {'built': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%MZ'), 'n': len(rows), 'src': host, 'tz': TZ, 'rows': rows}
     json.dump(meta, open(os.path.join(out, 'stations_v1.json'), 'w'), separators=(',', ':'), ensure_ascii=False)
     print('stations', len(S), '-> kept', len(rows), 'from', host, os.path.getsize(os.path.join(out, 'stations_v1.json')) // 1024, 'KB')
