@@ -656,6 +656,12 @@ EXTRA = [
     (9.030, 7.490, 'Radio Nigeria Kapital FM', 'https://cast4.asurahosting.com/proxy/radioni1/stream', 'https://radionigeria.gov.ng', 'NG', 'Abuja', 'public radio'),
     (36.813, 10.179, 'Radio Tunisienne Nationale', 'https://radio.radiotunisienne.tn/nationale', 'https://www.radiotunisienne.tn', 'TN', 'Tunis', 'public radio'),
     (36.813, 10.179, 'Radio Tunisienne RTCI', 'https://radio.radiotunisienne.tn/rtci', 'https://www.radiotunisienne.tn', 'TN', 'Tunis', 'public radio'),
+    # South America (2026-11-21: "review south america for more public radio"), each from the broadcaster's own player, probed that day
+    (-33.430, -70.618, 'Radio Universidad de Chile', 'https://sonic-us.arkeo.cl/8094/stream/1/', 'https://radio.uchile.cl/', 'CL', 'Santiago', 'public radio,college radio'),
+    (-25.296, -57.634, 'Radio Nacional del Paraguay 95.1', 'https://audio2.radionacional.gov.py/951fm', 'https://www.radionacional.gov.py/', 'PY', 'Asunción', 'public radio'),
+    (-26.857, -58.300, 'Radio Nacional del Paraguay ZP12 Pilar', 'https://audio.radionacional.gov.py/700am', 'https://www.radionacional.gov.py/', 'PY', 'Pilar', 'public radio'),
+    (-0.180, -78.470, 'Pública FM', 'https://comep.radioca.st/stream', 'https://www.publicafm.ec/', 'EC', 'Quito', 'public radio'),
+    (5.827, -55.160, 'Radio SRS', 'https://surilive.com:8060/stream', 'https://radiosrs.sr/', 'SR', 'Paramaribo', 'public radio'),
 ]
 
 
