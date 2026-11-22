@@ -31,11 +31,11 @@ def servers():
     return hs
 
 
-def get(path):
+def get(path, timeout=180):
     err = None
     for h in servers():
         try:
-            return json.load(urllib.request.urlopen(urllib.request.Request('https://' + h + path, headers=UA), timeout=180)), h
+            return json.load(urllib.request.urlopen(urllib.request.Request('https://' + h + path, headers=UA), timeout=timeout)), h
         except Exception as e:
             err = e
     raise SystemExit('radio-browser unreachable: %s' % err)
@@ -749,10 +749,13 @@ def main():
     # of pop from those cities"): a working HTTPS station with no map position whose listing's city ("Seoul", "Tokyo", "Kobe") is a Natural
     # Earth populated place in its own country goes to that place (the largest of the name). No city, no placement: a capital would be a
     # guess (every .fr station in Paris), and a foreign-hosted channel would land in the wrong country. Every later check still applies.
-    try:
-        N, _ = get('/json/stations/search?is_https=true&hidebroken=true&has_geo_info=false&limit=100000')
-    except SystemExit:
-        N = []
+    N = []
+    for attempt in range(2):                                     # the biggest request; a busy directory times out (2026-11-22: 0 placed)
+        try:
+            N, _ = get('/json/stations/search?is_https=true&hidebroken=true&has_geo_info=false&limit=100000', timeout=420); break
+        except SystemExit as e:
+            print('no-position stations: attempt', attempt + 1, 'failed', e)
+            import time as _t; _t.sleep(60)
     import collections
     try:
         PP = json.load(urllib.request.urlopen(urllib.request.Request(NE_PLACES, headers={'User-Agent': 'BluishVoid/1.0'}), timeout=120))['features']
