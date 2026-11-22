@@ -885,7 +885,9 @@ def _tune(cfg, prev):
 
     base = scored(cur)
     if not base:
-        return {'active': prev.get(key, {}).get('active'), 'why': 'incumbent replay failed'}
+        # keep the last good entry whole (its n too): without n the bake's n >= 45 gate drops every tuned
+        # value and runs on the typed defaults (no market or publish pull), as on 11-16 and 11-21
+        return dict(prev.get(key, {}), why='incumbent replay failed')
     if len(base) < MIN_DAYS:
         return {'active': prev.get(key, {}).get('active'), 'why': 'only %d days' % len(base), 'n': len(base)}
     for p in range(PASSES):
