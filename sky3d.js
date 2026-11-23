@@ -139,7 +139,7 @@ var FS = [
 '  if (STORM){ vec2 rx = rd.xz; float l2 = dot(rx, rx), tc = dot(SC.xz, rx) / l2, hw = 40.0 / sqrt(l2); t0 = max(0.05, tc - hw); t1 = min(tc + hw, 15.5 / rd.y); N = 80; }',
 '  else if (FOG){ t0 = 0.0; t1 = min(uB1 / rd.y, 5.0); N = 40; }',
 '  else if (isT(6.0)){ t0 = 0.0; t1 = 0.0; N = 0; }   /* clear: no clouds at all */',
-'  else { float lo = uB0 - 0.3 * (uB1 - uB0); t0 = max(lo, 0.05) / rd.y; t1 = uB1 / rd.y; t1 = t0 + min(t1 - t0, DECK ? 9.0 : 14.0); N = DECK ? 36 : 48; }',
+'  else { float lo = uB0 - 0.3 * (uB1 - uB0); t0 = max(lo, 0.05) / rd.y; t1 = uB1 / rd.y; t1 = t0 + min(t1 - t0, DECK ? 9.0 : isT(1.0) ? 26.0 : 14.0); N = DECK ? 36 : isT(1.0) ? 64 : 48; }   /* cumulus reach 26 km: at 14 the low clouds were cut on straight lines */',
 '  float len = max(t1 - t0, 0.0), dt = len / float(N);',
 '  float jit = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453 + uFrame * 0.618034);',
 '  float T = 1.0; vec3 C = vec3(0.0);',
@@ -241,7 +241,7 @@ var R = {
   'mainly':      [{ type: 1, B0: 1.2, B1: 3.1, cover: .05, glow: 0, az: -0.5, px: 0, atmo: 1 }, null],
   'clear-night': [null, { type: 6, B0: 1.2, B1: 3.1, cover: 0, glow: 0, az: 0.3, px: 0, twi: 1 }],
   'overcast':    [{ type: 0, B0: 1.1, B1: 2.4, cover: .86, glow: 0, az: -0.45, px: 0 }, { type: 0, B0: 1.1, B1: 2.4, cover: .8, glow: .25, el: 34, az: 0.42, px: 0 }],
-  'partly':      [{ type: 1, B0: 1.2, B1: 3.1, cover: .33, glow: 0, az: -0.55, px: 0 }, { type: 1, B0: 1.2, B1: 3.1, cover: .33, glow: .3, el: 38, az: 0.38, px: 0 }],
+  'partly':      [{ type: 1, B0: 1.2, B1: 3.1, cover: .33, glow: 0, az: -0.55, px: 0, atmo: 1 },   /* the scattering sky + palette: at sunset the plain sky went grey */ { type: 1, B0: 1.2, B1: 3.1, cover: .33, glow: .3, el: 38, az: 0.38, px: 0 }],
   'fog':         [{ type: 4, B0: 0, B1: 0.24, cover: 1, glow: 0, az: -0.3, px: 0 }, { type: 4, B0: 0, B1: 0.24, cover: 1, glow: .5, el: 24, az: 0.35, px: 0 }],
   'drizzle':     [{ type: 2, B0: 0.45, B1: 1.9, cover: .8, glow: 0, az: -0.4, px: 3 }, { type: 2, B0: 0.45, B1: 1.9, cover: .8, glow: .35, el: 34, az: 0.42, px: 3 }],
   'rain':        [{ type: 2, B0: 0.6, B1: 3.4, cover: .92, glow: 0, az: -0.4, px: 2 }, { type: 2, B0: 0.6, B1: 3.4, cover: .92, glow: .35, el: 34, az: 0.42, px: 2 }],
@@ -270,7 +270,7 @@ function frame(now){
   if (!REDUCED) S.t += dt / 1000;
   placeC(); var sc = S.sc, cw = cv.clientWidth || 1, ch = cv.clientHeight || 1;
   /* the hero is big: the cloud layer renders at a capped resolution and is scaled up (clouds are soft); phones lower */
-  var k = Math.min(PHONE ? 0.35 : 0.5, (PHONE ? 380 : 620) / cw) * S.auto, w = Math.max(64, Math.round(cw * k)), h = Math.max(24, Math.round(ch * k));
+  var lite = sc.atmo && sc.type !== 0, k = Math.min(PHONE ? 0.35 : (lite ? 0.75 : 0.5), (PHONE ? 380 : (lite ? 900 : 620)) / cw) * Math.max(S.auto, lite ? 0.8 : 0),   /* the clear family is cheap: sharper (small cumulus went blocky) */ w = Math.max(64, Math.round(cw * k)), h = Math.max(24, Math.round(ch * k));
   var twiOff = sc.twi && S.sunAlt < -18.5;                                  /* full night: no twilight left to draw */
   if (cv.width !== w || cv.height !== h){ cv.width = w; cv.height = h; S.fresh = 1; }
   S.frame++;
