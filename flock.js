@@ -311,10 +311,11 @@
           var ex = px[j] - px[lead], ey = py[j] - py[lead]; if (ex * ex + ey * ey < 3600 * S * S){ role[j] = 2; got++; } }
         if (swapping) FORM.swap = got ? Math.max(0, FORM.swap - got) : 0;
       }
+      if (pop.launch && c0 >= tg) pop.launch = false;   /* whole: from here on the ordinary comings and goings */
       if (c0 < tg && (pop.arrive -= dt) <= 0){   /* (not else: during a swap they go in and come out at once) */
-        var burst = m === 'emerge';
-        pop.arrive = burst ? 0.9 + R() * 1.4 : 0.6 + R() * 1.0;
-        var g = Math.min(tg - c0, burst ? 25 + (R() * 40 | 0) : 8 + (R() * 22 | 0), MAX - N);
+        var burst = m === 'emerge', lau = !!pop.launch;
+        pop.arrive = lau ? 0.35 + R() * 0.4 : burst ? 0.9 + R() * 1.4 : 0.6 + R() * 1.0;
+        var g = Math.min(tg - c0, (burst || lau) ? 30 + (R() * 35 | 0) : 8 + (R() * 22 | 0), MAX - N);
         /* out from behind the disc, heading into the open sky (down and left of it) */
         var ang = Math.PI * (0.62 + R() * 0.3), sp = 110 * S;
         for (var k = 0; k < g; k++){
@@ -743,9 +744,12 @@
     (function(){ var k = knotHome(); KN.x = KN.tx = k[0]; KN.y = KN.ty = k[1]; LD.x = KN.x; LD.y = KN.y - 40 * S; LD.vx = 100 * S; for (var h = 0; h < 300; h++){ LD.hx[h] = LD.x; LD.hy[h] = LD.y; } LD.hn = 300; FORM.motion = ''; nextMotion(); })();   /* the first motion is a random one too */
     /* the sky opens already in its state: the flock that should be up is up and formed (a roosting or dawn sky starts
        with what is left or nothing, and plays out from there) */
-    setN(plan.mode === 'emerge' ? 0 : target());
+    /* THE FLOCK COMES OUT OF THE MOON (user 2026-11-23: "can the birds launch by flying out from behind the moon?"): it starts empty and
+       pours out from behind the disc in quick groups until it is whole (pop.launch); it used to open fully formed in the sky */
+    setN(0); pop.launch = true; pop.arrive = 1e9;   /* held through the unseen warm-up below, so the first birds come out on screen */
     var jetWas = o.jet; o.jet = false;
     for (var w0 = 0; w0 < 150; w0++) step(1 / 60);
+    pop.arrive = 0.2;
     o.jet = jetWas; jet.next = t + o.jetFirst;
     cv.style.opacity = '0'; cv.style.transition = 'opacity .8s ease';
     kick();
