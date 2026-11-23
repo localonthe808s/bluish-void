@@ -14,12 +14,16 @@ Smithsonian GVP Volcanoes of the World (free with credit).
 
 Run: python3 _slabbake/slab_world_bake.py <out>        (cache: _slabbake/cache; Slab2 tarball unpacked there)
 """
-import datetime, json, os, sys, time, urllib.request
+import csv, datetime, io, json, os, sys, time, urllib.request
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__)); CACHE = os.path.join(HERE, 'cache')
 SLAB = os.path.join(CACHE, 'Slab2Distribute_Mar2018')
 EPOCH = datetime.datetime(1973, 1, 1, tzinfo=datetime.timezone.utc)
+TRENCH = { 'alu': 'ALEUTIAN TRENCH', 'cal': 'CALABRIAN ARC', 'cam': 'MIDDLE AMERICA TRENCH', 'car': 'LESSER ANTILLES TRENCH', 'cas': 'CASCADIA SUBDUCTION ZONE',
+  'cot': 'COTABATO TRENCH', 'hel': 'HELLENIC TRENCH', 'izu': 'MARIANA TRENCH', 'ker': 'TONGA TRENCH', 'kur': 'JAPAN TRENCH', 'mak': 'MAKRAN TRENCH', 'man': 'MANILA TRENCH',
+  'mue': 'MUERTOS TROUGH', 'phi': 'PHILIPPINE TRENCH', 'png': 'NEW GUINEA TRENCH', 'puy': 'PUYSEGUR TRENCH', 'ryu': 'RYUKYU TRENCH', 'sam': 'PERU-CHILE TRENCH',
+  'sco': 'SOUTH SANDWICH TRENCH', 'sol': 'NEW BRITAIN TRENCH', 'sul': 'NORTH SULAWESI TRENCH', 'sum': 'SUNDA TRENCH', 'van': 'NEW HEBRIDES TRENCH' }
 NAMES = { 'alu': 'ALASKA-ALEUTIANS', 'cal': 'CALABRIA', 'cam': 'CENTRAL AMERICA', 'car': 'LESSER ANTILLES', 'cas': 'CASCADIA', 'cot': 'COTABATO',
   'hal': 'HALMAHERA', 'hel': 'HELLENIC ARC', 'him': 'HIMALAYA', 'hin': 'HINDU KUSH', 'izu': 'IZU-BONIN-MARIANA', 'ker': 'TONGA-KERMADEC',
   'kur': 'KURILS-KAMCHATKA-JAPAN', 'mak': 'MAKRAN', 'man': 'MANILA TRENCH', 'mue': 'MUERTOS TROUGH', 'pam': 'PAMIR', 'phi': 'PHILIPPINE TRENCH',
@@ -54,14 +58,16 @@ def quakes(tag, box, minmag):
         recent = b.year >= yr
         d = fetch('https://earthquake.usgs.gov/fdsnws/event/1/query?format=csv&orderby=time-asc&' + geo + '&starttime=%s&endtime=%s' % (a, b),
                   os.path.join(CACHE, 'q_%s_%s_%s.csv' % (tag, a, b)), 86400 if recent else None)
-        for r in d.strip().split('\n')[1:]:
-            c = r.split(',')
+        for r in csv.DictReader(io.StringIO(d)):   # a real CSV reader: place names carry commas
             try:
-                t = datetime.datetime.strptime(c[0][:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=datetime.timezone.utc)
-                lat, lon, dep, mag = float(c[1]), float(c[2]), float(c[3] or 0), float(c[4])
+                t = datetime.datetime.strptime(r['time'][:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=datetime.timezone.utc)
+                lat, lon, dep, mag = float(r['latitude']), float(r['longitude']), float(r['depth'] or 0), float(r['mag'])
             except Exception: continue
             if box and lon < w: lon += 360
-            out.append((lon, lat, max(0.0, dep), mag, int((t - EPOCH).total_seconds())))
+            # FIXED DEPTHS (2026-11-23): solutions that could not resolve depth are pinned at 0, 5, 10, 33 or 35 km -- a default, not a
+            # measurement; they stack into flat stripes. Flagged so the page draws them soft.
+            fx = 1 if round(dep, 1) in (0.0, 5.0, 10.0, 33.0, 35.0) else 0
+            out.append((lon, lat, max(0.0, dep), mag, int((t - EPOCH).total_seconds()), fx))
     out.sort(key=lambda q: q[4]); print(tag, len(out), 'quakes in', len(spans), 'requests'); return out
 
 class Buf:
@@ -71,12 +77,13 @@ class Buf:
         s.off[k] = len(s.b); s.b.extend(np.ascontiguousarray(arr).tobytes())
 
 def pack_quakes(B, Q, lon0, lat0, scale):
-    a = np.array(Q, dtype=np.float64).reshape(-1, 5)
+    a = np.array(Q, dtype=np.float64).reshape(-1, 6)
     B.put('lon', np.clip(np.round((a[:, 0] - lon0) * scale), 0, 65535).astype('<u2'))
     B.put('lat', np.clip(np.round((a[:, 1] - lat0) * scale), 0, 65535).astype('<u2'))
     B.put('dep', np.clip(np.round(a[:, 2] * 10), 0, 65535).astype('<u2'))
     B.put('mag', np.clip(np.round(a[:, 3] * 10), 0, 255).astype('u1'))
     B.put('t', a[:, 4].astype('<u4'))
+    B.put('fx', a[:, 5].astype('u1'))
     return a
 
 def grid(z):
@@ -112,6 +119,10 @@ def main():
     out = os.path.join(sys.argv[1] if len(sys.argv) > 1 else 'out', 'slab'); os.makedirs(out, exist_ok=True)
     only = sys.argv[2].split(',') if len(sys.argv) > 2 else None
     zones = sorted(NAMES)
+    # ---- cities (Natural Earth populated places, public domain): the biggest few in each zone's box
+    pp = os.path.join(CACHE, 'ne_10m_populated_places_simple.geojson')
+    if not os.path.exists(pp): urllib.request.urlretrieve('https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_10m_populated_places_simple.geojson', pp)
+    PLACES = [(f['properties'].get('scalerank', 10), f['properties'].get('pop_max') or 0, f['properties']['name'], f['geometry']['coordinates']) for f in json.load(open(pp, encoding='utf-8'))['features']]
     # ---- the zones
     ZM = {}; ov = Buf()
     for z in zones:
@@ -121,7 +132,16 @@ def main():
         mid = d[np.argsort(d[:, 1])[len(d) // 2]]
         g5 = resample(d, box[0], box[1], box[2], box[3], 0.5); ov.put(z, g5.astype('<i2'))
         ZM[z] = dict(name=NAMES[z], box=box, ov=dict(nx=g5.shape[1], ny=g5.shape[0], st=0.5), maxdep=int(-d[:, 2].min()),
-                     trench=[round(float(tp[0]), 2), round(float(tp[1]), 2)], mid=[round(float(mid[0]), 2), round(float(mid[1]), 2)])
+                     trench=[round(float(tp[0]), 2), round(float(tp[1]), 2)], mid=[round(float(mid[0]), 2), round(float(mid[1]), 2)], tname=TRENCH.get(z))
+        cs = []
+        for rk, pop, nm, (x, y) in PLACES:
+            xx = x + 360 if x < box[0] else x
+            if box[0] <= xx <= box[2] and box[1] <= y <= box[3]: cs.append((-pop, rk, nm.upper(), round(xx, 2), round(y, 2)))
+        pick = []   # Natural Earth's own importance first (scalerank), then size; nothing within 80 km of a city already picked (no suburbs)
+        for c in sorted(cs, key=lambda c: (c[1], c[0])):
+            if all(np.hypot((c[3] - q[1]) * np.cos(np.radians(c[4])), c[4] - q[2]) * 111 > 80 for q in pick): pick.append([c[2], c[3], c[4]])
+            if len(pick) >= 8: break
+        ZM[z]['cities'] = pick
         if only and z not in only: continue
         Q = quakes(z, box, 4.0); B = Buf(); a = pack_quakes(B, Q, box[0], box[1], 1000)
         g = resample(d, box[0], box[1], box[2], box[3], 0.1); B.put('slab', g.astype('<i2'))
@@ -142,7 +162,7 @@ def main():
     json.dump(dict(zones=ZM, off=ov.off, built=time.strftime('%Y-%m-%d')), open(os.path.join(out, 'zones_v1.json'), 'w'), separators=(',', ':'))
     if only: return
     # ---- the world, M5+
-    Q = quakes('world', None, 5.0); B = Buf(); a = np.array(Q)
+    Q = quakes('world', None, 5.0); B = Buf(); a = np.array(Q).reshape(-1, 6)
     a[:, 0] = np.where(a[:, 0] < -180, a[:, 0] + 360, a[:, 0])
     pack_quakes(B, [tuple(r) for r in a], -180, -90, 100)
     open(os.path.join(out, 'world_v1.bin'), 'wb').write(bytes(B.b))

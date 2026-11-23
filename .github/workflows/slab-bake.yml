@@ -1,0 +1,49 @@
+name: Bake subduction zones
+
+# GEOLOGY > SUBDUCTION: _slabbake/slab_world_bake.py rebuilds the quake files (USGS ComCat, M4+ per zone and M5+ worldwide since
+# 1973), the Slab2 grids, coasts, cities and the subduction volcanoes, and uploads them to R2 geo/slab/. Monthly, so the catalog never
+# goes stale (user 2026-11-23: "do 1 ..."). The sea-floor age, plate speeds and tomography are fixed models and are not rebaked here.
+# Requires the same three repo secrets as helio.yml: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY.
+
+on:
+  schedule:
+    - cron: '17 6 2 * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: slab-bake
+  cancel-in-progress: false
+
+jobs:
+  bake:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: _slabbake/slab_world_bake.py
+          sparse-checkout-cone-mode: false
+      - name: Slab2 (USGS ScienceBase, public domain)
+        run: |
+          set -euo pipefail
+          mkdir -p _slabbake/cache && cd _slabbake/cache
+          curl -sL --retry 4 -o slab2.tar.gz "https://www.sciencebase.gov/catalog/file/get/5aa1b00ee4b0b1c392e86467?f=__disk__d5%2F91%2F39%2Fd591399bf4f249ab49ffec8a366e5070fe96e0ba"
+          tar xzf slab2.tar.gz $(tar tzf slab2.tar.gz | grep "Slab2_TXT/.*_dep_")
+          test "$(ls Slab2Distribute_Mar2018/Slab2_TXT | grep -c dep)" -eq 27
+      - name: Bake
+        run: |
+          set -euo pipefail
+          pip install --quiet numpy
+          python3 _slabbake/slab_world_bake.py out
+          python3 -c "import json; z=json.load(open('out/slab/zones_v1.json'))['zones']; assert len(z)==27 and z['ker']['n'] > 60000, z['ker']; w=json.load(open('out/slab/world_v1.json')); assert w['n'] > 85000, w['n']"
+      - name: Upload
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          E="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 cp out/slab/ s3://bluishvoid-bg/geo/slab/ --recursive --exclude "*" --include "*_v1.bin" --include "*_v1.json" --endpoint-url "$E" --cache-control "public, max-age=86400" --only-show-errors
+          echo "Published $(ls out/slab | wc -l) files to geo/slab/"
