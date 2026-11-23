@@ -194,7 +194,17 @@ function load(f){
   if (DATA[f]) return Promise.resolve(DATA[f]);
   return fetch('galaxy/' + FRAMES[f].file + '?v=' + GAL_BUILD).then(function(r){ return r.json(); }).then(function(j){ DATA[f] = j; return j; });
 }
+/* MEMORY (perf 2026-11-22, item 1): after visiting every frame the cached canvases held ~234 MB on a retina screen, past what a
+   phone's Safari allows (it then blanks canvases). Each frame now keeps only its own: switching frees the others' layers and big
+   textures; coming back rebuilds them (each in well under a second). The shared starfield ('sky') stays. */
+var FRAME_LAYERS = { milkyway: ['mwdisc'], universe: ['cwg'], localgroup: [], laniakea: [], observable: [], neighborhood: [] };
+function freeOtherFrames(f){
+  Object.keys(LAYERS).forEach(function(k){ if (k === 'sky') return; if ((FRAME_LAYERS[f] || []).indexOf(k) < 0) delete LAYERS[k]; });
+  if (f !== 'laniakea'){ LN_PLANE = null; } if (f !== 'observable'){ OB_PL = null; OB_SH = null; OB_CONE = null; }
+  if (f !== 'milkyway'){ MW_IMG.off = null; }
+}
 function show(f, viaHost){
+  if (f !== cur) freeOtherFrames(f); ACT = performance.now();
   if (!FRAMES[f]) return;
   var prev = cur; cur = f;
   document.querySelectorAll('#ladder button').forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-f') === f); });
@@ -253,7 +263,7 @@ window.addEventListener('message', function(e){
   window.n3Idle = function(){ var id = N3.loopId = (N3.loopId || 0) + 1; var last = performance.now(), drawn = 0;
     (function tick(now){ if (id !== N3.loopId) return; if (cur !== 'neighborhood'){ N3.loopId++; return; }
       var dt = Math.min(.1, (now - last) / 1000); last = now;
-      if (vis && !document.hidden && !N3.drag && now - (N3.touched || 0) > 10000 && document.getElementById('gx-pick').style.display !== 'block'){
+      if (vis && !document.hidden && awake(now) && !N3.drag && now - (N3.touched || 0) > 10000 && document.getElementById('gx-pick').style.display !== 'block'){
         N3.yaw += dt * Math.PI * 2 / 180; if (now - drawn > 32){ drawn = now; render(); } }
       requestAnimationFrame(tick); })(last); };
 })();
@@ -423,6 +433,9 @@ function gxy(v, x, y, s){ s = s || v.s; return [v.cx - y * s, v.cy - x * s]; }
 /* THE NEIGHBORHOOD IN 3D (user 2026-11-22, item 1): every star sits at its measured x, y, z, so the frame can turn. yaw spins about
    the Galactic pole, tilt leans the plane away (0 = the old face-on view). Screen: centre up, l=90 left, as gxy at 0/0. */
 var N3 = { yaw: 0, tilt: 0, introDone: false, drag: null };
+var ACT = performance.now();   /* the last interaction (perf item 5): idle orbits stop two minutes after it */
+['pointerdown', 'pointermove', 'wheel', 'keydown'].forEach(function(ev){ window.addEventListener(ev, function(){ ACT = performance.now(); }, { passive: true }); });
+function awake(now){ return now - ACT < 120000; }
 var M3 = { yaw: 0, tilt: 0 }, MWTAP = null, L3 = { yaw: 0, tilt: 0, zoom: 1, focus: null }, LN3 = { yaw: 0, tilt: 0, zoom: 1, focus: null }, CW = { zoom: 1, fx: 0, fy: 0 }, CWTAP = null, OB3 = { yaw: 0, tilt: 0, mt: 0, cone: 0, dip: 0, play: null }, OBTAP = null, LNTAP = null, LF = { t: 0, on: false, last: 0 };
 function edgeBtn(){ var b = document.getElementById('edge'); if (!b) return; var on = M3.tilt > .7; b.classList.toggle('on', on); b.textContent = on ? 'BACK TO FACE-ON' : 'SEE IT EDGE-ON'; }
 /* SEE IT EDGE-ON: eases the disc to 85 deg (and back), so a phone, which cannot drag a tilt, sees it too */
@@ -847,7 +860,7 @@ var _mwVis = true; try { new IntersectionObserver(function(es){ _mwVis = es[0].i
 function mwIdle(){ var id = M3.loopId = (M3.loopId || 0) + 1, last = performance.now(), drawn = 0;
   (function tick(now){ if (id !== M3.loopId) return; if (cur !== 'milkyway'){ M3.loopId++; return; }
     var dt = Math.min(.1, (now - last) / 1000); last = now;
-    if (_mwVis && !document.hidden && !N3.drag && !GT.on && now - (N3.touched || 0) > 10000 && M3.tilt > .2 && M3.tilt < 1.1 && document.getElementById('gx-pick').style.display !== 'block'){
+    if (_mwVis && !document.hidden && awake(now) && !N3.drag && !GT.on && now - (N3.touched || 0) > 10000 && M3.tilt > .2 && M3.tilt < 1.1 && document.getElementById('gx-pick').style.display !== 'block'){
       M3.yaw += dt * Math.PI * 2 / 240; if (now - drawn > 32){ drawn = now; render(); } }
     requestAnimationFrame(tick); })(last); }
 function drawMilkyWay(d, v){
@@ -869,7 +882,7 @@ function drawMilkyWay(d, v){
   var blitDisc = function(c, z){ ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.translate(v.cx * DPR, (v.cy - (z || 0) * s * st) * DPR); ctx.scale(1, ct); ctx.rotate(ga + yaw); ctx.translate(-v.cx * DPR, -v.cy * DPR); ctx.drawImage(c, 0, 0); ctx.restore(); };
   var ellipse = function(r, col, w, a, dash, still){ ctx.save(); ctx.globalAlpha = a; ctx.strokeStyle = col; ctx.lineWidth = w; if (dash) ctx.setLineDash(dash); ctx.beginPath();
     for (var k = 0; k <= 120; k++){ var t = k / 120 * Math.PI * 2, q = P(v.cx + r * Math.cos(t), v.cy + r * Math.sin(t), 0, still); if (k) ctx.lineTo(q[0], q[1]); else ctx.moveTo(q[0], q[1]); } ctx.stroke(); ctx.restore(); };
-  blit(layer('mwsky|' + W + 'x' + H + '@' + DPR, function(){ starfield(20261010, Math.round(W * H / 420)); }));   /* behind the picture: it shows past the disc's feathered edge */
+  blit(layer('sky|' + W + 'x' + H + '@' + DPR, function(){ starfield(20261010, Math.round(W * H / 480)); }));   /* behind the picture: it shows past the disc's feathered edge */
   var pic = milkyWayPicture();
   if (pic){ var k = (R0 * s) / MW_IMG.sunDy, side = MW_IMG.px * k;        /* picture px -> screen px, pinned by the Sun's distance */
     /* composited ADDITIVELY: the picture's black is then transparent, so the starfield behind shows wherever the
@@ -911,18 +924,21 @@ function drawMilkyWay(d, v){
     ctx.fillStyle = bg; ctx.beginPath(); ctx.arc(0, 0, rx, 0, Math.PI * 2); ctx.fill(); ctx.restore(); }
   /* WHERE NO ONE HAS MAPPED (item 4): cells with no maser or Gaia cluster within ~1.8 kpc are veiled, soft-edged (an estimate), so
      the painted far side reads as a model; cached face-on and turned with the disc */
-  blitDisc(layer('mwun|' + W + 'x' + H + '@' + DPR + ':' + s.toFixed(5), function(){
+  /* ONE TURNING LAYER (perf 2026-11-22, item 4): the unmapped veil, the Gaia clusters and the masers always turn together, so they
+     share one cached canvas -- three full-screen layers were 54 MB and three draws a frame; while the galaxy turns back, the veil alone */
+  blitDisc(layer('mwdisc|' + W + 'x' + H + '@' + DPR + ':' + s.toFixed(5) + (GT.yrs ? ':v' : ':all'), function(){
     var m = document.createElement('canvas'); m.width = Math.round(W * DPR); m.height = Math.round(H * DPR); var mg = m.getContext('2d'); mg.setTransform(DPR, 0, 0, DPR, 0, 0); mg.fillStyle = '#000';
     for (var X = -15.5; X <= 15.5; X += .5) for (var Y = -15.5; Y <= 15.5; Y += .5){ var R = Math.hypot(X, Y); if (R > 15.5 || R < 1.6 || !mwUnmapped(X, Y)) continue; mg.beginPath(); mg.arc(v.cx - Y * s, v.cy - X * s, .42 * s, 0, Math.PI * 2); mg.fill(); }
-    ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.filter = 'blur(' + Math.round(.9 * s * DPR) + 'px)'; ctx.drawImage(m, 0, 0); ctx.filter = 'none'; ctx.globalCompositeOperation = 'source-in'; ctx.fillStyle = 'rgba(3,5,14,.62)'; ctx.fillRect(0, 0, m.width, m.height); ctx.restore(); }));
+    ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.filter = 'blur(' + Math.round(.9 * s * DPR) + 'px)'; ctx.drawImage(m, 0, 0); ctx.filter = 'none'; ctx.globalCompositeOperation = 'source-in'; ctx.fillStyle = 'rgba(3,5,14,.62)'; ctx.fillRect(0, 0, m.width, m.height); ctx.restore(); 
+    if (!GT.yrs){ [[true, .42, '#bfe0ff', 1.05], [false, .2, '#f2e7cf', .8]].forEach(function(gp){ ctx.globalAlpha = gp[1]; ctx.fillStyle = gp[2]; ctx.beginPath();
+    d.clusters.forEach(function(c){ if ((c[2] < 7.6) !== gp[0]) return; var x = v.cx - c[1] * s, y = v.cy - c[0] * s; ctx.moveTo(x + gp[3], y); ctx.arc(x, y, gp[3], 0, Math.PI*2); }); ctx.fill(); }); ctx.globalAlpha = 1; 
+ d.masers.forEach(function(m){ var x = v.cx - m[2] * s, y = v.cy - m[1] * s; glow(x, y, 3.5, 'rgba(255,190,90,', .35); dot(x, y, 1.45, '#ffc46a', .9); });  }
+  }));
   /* THE ARMS AS MEASURED (item 3): log spirals fitted to the masers (Reid+ 2019 form), solid over the span the masers cover, dashed
      where the fit is carried on as a model -- laid over the painting, so where they agree and where the painting guesses shows */
   /* the maser-fitted arm lines are gone (user 2026-11-22: "remove the remaining grey ring lines in the milky way") */
   /* the measurements, crisp on top: Gaia clusters pale (blue when young), masers gold -- each drawn once, face-on, turned with the disc */
-  if (!GT.yrs) blitDisc(layer('mwcl|' + W + 'x' + H + '@' + DPR + ':' + s.toFixed(5), function(){ [[true, .42, '#bfe0ff', 1.05], [false, .2, '#f2e7cf', .8]].forEach(function(gp){ ctx.globalAlpha = gp[1]; ctx.fillStyle = gp[2]; ctx.beginPath();
-    d.clusters.forEach(function(c){ if ((c[2] < 7.6) !== gp[0]) return; var x = v.cx - c[1] * s, y = v.cy - c[0] * s; ctx.moveTo(x + gp[3], y); ctx.arc(x, y, gp[3], 0, Math.PI*2); }); ctx.fill(); }); ctx.globalAlpha = 1; }));
-  /* masers in amber, not the accent: they are measurements, and the accent means 'us' (user: "whats the green?") */
-  if (!GT.yrs) blitDisc(layer('mwms|' + W + 'x' + H + '@' + DPR + ':' + s.toFixed(5), function(){ d.masers.forEach(function(m){ var x = v.cx - m[2] * s, y = v.cy - m[1] * s; glow(x, y, 3.5, 'rgba(255,190,90,', .35); dot(x, y, 1.45, '#ffc46a', .9); }); }));
+  /* (clusters and masers now live in the one turning layer above) */
   d.masers.forEach(function(m){ var q = G(m[1], m[2]);
     var dly = Math.round(Math.hypot(m[1] + R0, m[2]) * LY_KPC / 100) * 100;
     PICKS.push({ x: q[0], y: q[1], html: '<span class="k">' + (m[3] ? String(m[3]).toUpperCase() + ' ARM · ' : '') + 'MEASURED BY RADIO PARALLAX</span><b>' + m[0] + '</b>' + dly.toLocaleString() + ' LIGHT-YEARS FROM US<br>A STAR-FORMING CLOUD WHOSE WATER OR METHANOL GLOWS LIKE A RADIO LASER: ITS DISTANCE IS MEASURED, NOT DRAWN' }); });
@@ -1072,7 +1088,7 @@ function lgIntro(){ if (L3.introDone) return; L3.introDone = true; var t0 = perf
 function lgIdle(){ var id = L3.loopId = (L3.loopId || 0) + 1, last = performance.now(), drawn = 0;
   (function tick(now){ if (id !== L3.loopId) return; if (cur !== 'localgroup'){ L3.loopId++; return; }
     var dt = Math.min(.1, (now - last) / 1000); last = now;
-    if (_mwVis && !document.hidden && !N3.drag && !LF.on && now - (N3.touched || 0) > 10000 && L3.tilt > .2 && document.getElementById('gx-pick').style.display !== 'block'){
+    if (_mwVis && !document.hidden && awake(now) && !N3.drag && !LF.on && now - (N3.touched || 0) > 10000 && L3.tilt > .2 && document.getElementById('gx-pick').style.display !== 'block'){
       L3.yaw += dt * Math.PI * 2 / 240; if (now - drawn > 32){ drawn = now; render(); } }
     requestAnimationFrame(tick); })(last); }
 function drawLocalGroup(d, v0){
@@ -1096,7 +1112,7 @@ function drawLocalGroup(d, v0){
     if (g[0] === 'LMC' || g[0] === 'SMC') p = [0, 1, 2].map(function(i){ return p[i] + (mwT[i] - p[i]) * cloudF; }); return p; };
   /* a quiet starfield behind everything, as the other space frames have (user 2026-11-22: "whered the stars go?") -- scenery, cached;
      the data on top stays real */
-  blit(layer('lgsky|' + W + 'x' + H + '@' + DPR, function(){ starfield(20261012, Math.round(W * H / 520)); }));
+  blit(layer('sky|' + W + 'x' + H + '@' + DPR, function(){ starfield(20261010, Math.round(W * H / 480)); }));
   /* THE REAL BACKGROUND (item 5): galaxies 1.1-5 Mpc away from the Local Volume Database, in 3D, coloured by their motion; the
      random smudges that stood in for them are gone. The next groups out get a pointer at the frame's edge. */
   var MO = lgMotion();
@@ -1278,7 +1294,7 @@ var _lnLast = 0;
 function lnAnim(){ var id = LN3.loopId = (LN3.loopId || 0) + 1, last = performance.now(), drawn = 0;
   (function tick(now){ if (id !== LN3.loopId) return; if (cur !== 'laniakea'){ LN3.loopId++; return; }
     var dt = Math.min(.1, (now - last) / 1000); last = now;
-    if (_mwVis && !document.hidden && DATA.laniakea){ if (!N3.drag && now - (N3.touched || 0) > 10000 && LN3.tilt > .2 && LN3.introDone && document.getElementById('gx-pick').style.display !== 'block') LN3.yaw += dt * Math.PI * 2 / 300;
+    if (_mwVis && !document.hidden && DATA.laniakea){ if (awake(now) && !N3.drag && now - (N3.touched || 0) > 10000 && LN3.tilt > .2 && LN3.introDone && document.getElementById('gx-pick').style.display !== 'block') LN3.yaw += dt * Math.PI * 2 / 300;
       lnStep(lnField(DATA.laniakea), dt); render(); }   /* every frame, real time: it was held to 30 fps and stepped */
     requestAnimationFrame(tick); })(last); }
 function lnIntro(){ if (LN3.introDone) return; LN3.introDone = true; var t0 = performance.now();
@@ -1286,7 +1302,10 @@ function lnIntro(){ if (LN3.introDone) return; LN3.introDone = true; var t0 = pe
     LN3.tilt = .72 * e; LN3.yaw = -.3 * e; if (k < 1) requestAnimationFrame(step); })(); }
 var LN_CARDS = {}, LN_PLANE = null, LN_GR = null;
 /* everything that lies on the supergalactic plane, drawn once face-on (x right, y up), 8 px per Mpc */
-function lnPlaneCanvas(d, F){ if (LN_PLANE) return LN_PLANE; var N = 2400, k = N / (2 * F.L), c = document.createElement('canvas'); c.width = c.height = N; var g = c.getContext('2d');
+/* sized to what the screen shows (perf item 3): ~1.1 px of texture per screen px at this zoom, in power-of-two steps of the zoom so
+   flying in re-sharpens it a few times rather than every frame (it was 2,400 px square, 23 MB, at every size) */
+function lnPlaneCanvas(d, F){ var zs = Math.pow(2, Math.ceil(Math.log(Math.max(1, LN3.zoom || 1)) / Math.LN2)), want = Math.max(900, Math.min(3200, Math.round(2 * F.L * view('laniakea').s * zs * DPR * 1.1)));
+  if (LN_PLANE && LN_PLANE.width === want) return LN_PLANE; var N = want, k = N / (2 * F.L), c = document.createElement('canvas'); c.width = c.height = N; var g = c.getContext('2d');
   var X = function(x){ return (x + F.L) * k; }, Y = function(y){ return (F.L - y) * k; };
   g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
   g.globalAlpha = .32; g.drawImage(F.dens, 0, 0, N, N);
@@ -1542,8 +1561,13 @@ var OB_SH = null;
 /* OUR MOTION (item 2): the dipole maps normally subtract -- 3,362 microkelvin, toward RA 167.94, Dec -6.94 (Planck 2018), the Sun's
    369.8 km/s against the afterglow -- blended in on a scale wide enough that it, not the ripples, sets the colour */
 var OB_APEX = (function(){ var D = Math.PI / 180, ra = 167.94 * D, de = -6.94 * D; return [Math.cos(de) * Math.cos(ra), Math.cos(de) * Math.sin(ra), Math.sin(de)]; })();
-function obShell(cpY, spY, ct, st){ var T = OBS.tex; if (!T) return null; var dip = OB3.dip, TP = OBS.temp; if (dip > .001 && !TP) dip = 0; var key = cpY.toFixed(4) + spY.toFixed(4) + ct.toFixed(4) + ':' + dip.toFixed(2); if (OB_SH && OB_SH.key === key) return OB_SH;
-  var N = 340, mk = function(){ var c = document.createElement('canvas'); c.width = c.height = N; return c; }, F = OB_SH && OB_SH.f || mk(), B = OB_SH && OB_SH.b || mk(), fg = F.getContext('2d'), bg = B.getContext('2d'), fi = fg.createImageData(N, N), bi = bg.createImageData(N, N), tw = T.width, th = T.height, td = T.data;
+/* while the view turns the shell is redone each frame (~8 ms at 340 px): moving, it is drawn at 220 (less than half the work) and
+   sharpened to 340 once it has rested 300 ms (perf item 6) */
+var OB_MOVE = 0, OB_LASTANG = '';
+function obShell(cpY, spY, ct, st){ var T = OBS.tex; if (!T) return null; var dip = OB3.dip, TP = OBS.temp; if (dip > .001 && !TP) dip = 0;
+  var ang = cpY.toFixed(4) + spY.toFixed(4) + ct.toFixed(4) + ':' + dip.toFixed(2), now = performance.now(); if (ang !== OB_LASTANG){ OB_LASTANG = ang; OB_MOVE = now; }
+  var N = now - OB_MOVE < 300 ? 220 : 340, key = ang + ':' + N; if (OB_SH && OB_SH.key === key) return OB_SH;
+  var mk = function(){ var c = document.createElement('canvas'); c.width = c.height = N; return c; }, F = OB_SH && OB_SH.f && OB_SH.f.width === N ? OB_SH.f : mk(), B = OB_SH && OB_SH.b && OB_SH.b.width === N ? OB_SH.b : mk(), fg = F.getContext('2d'), bg = B.getContext('2d'), fi = fg.createImageData(N, N), bi = bg.createImageData(N, N), tw = T.width, th = T.height, td = T.data;
   for (var py = 0; py < N; py++) for (var px = 0; px < N; px++){ var u = (px + .5) / N * 2 - 1, w = 1 - (py + .5) / N * 2, r2 = u * u + w * w; if (r2 >= 1) continue; var dp0 = Math.sqrt(1 - r2), o = (py * N + px) * 4;
     for (var side = 0; side < 2; side++){ var dp = side ? -dp0 : dp0, y1 = w * ct - dp * st, Zc = w * st + dp * ct, X = u * cpY + y1 * spY, Y = -u * spY + y1 * cpY;
       var ra = Math.atan2(Y, X); if (ra < 0) ra += Math.PI * 2; var dec = Math.asin(Math.max(-1, Math.min(1, Zc))), tx = Math.min(tw - 1, Math.floor(ra / (Math.PI * 2) * tw)), ty = Math.min(th - 1, Math.floor((Math.PI / 2 - dec) / Math.PI * th)), q = (ty * tw + tx) * 4;
@@ -1556,21 +1580,22 @@ function obShell(cpY, spY, ct, st){ var T = OBS.tex; if (!T) return null; var di
   fg.putImageData(fi, 0, 0); bg.putImageData(bi, 0, 0); OB_SH = { key: key, f: F, b: B }; return OB_SH; }
 /* the slice -- galaxies and quasars -- drawn once face-on per radius mode, with a bloom; laid on the turned plane each frame */
 var OB_PL = null;
-function obPlane(d, mt){ var key = mt.toFixed(3) + (DATA.universe ? 'g' : ''); if (OB_PL && OB_PL.key === key) return OB_PL;
-  var C9 = obCosmo(), RM = 48, N = 2600, k = N / (2 * RM), c = OB_PL && OB_PL.c || document.createElement('canvas'); c.width = c.height = N; var g = c.getContext('2d'); g.clearRect(0, 0, N, N);
+function obPlane(d, mt){ var N = Math.max(900, Math.min(2600, Math.round(2 * 48 * view('observable').s * DPR * 1.1))), key = mt.toFixed(3) + (DATA.universe ? 'g' : '') + ':' + N; if (OB_PL && OB_PL.key === key) return OB_PL;   /* sized to the screen (perf item 3; it was 2,600 px, 27 MB) */
+  var C9 = obCosmo(), RM = 48, k = N / (2 * RM), c = OB_PL && OB_PL.c || document.createElement('canvas'); c.width = c.height = N; var g = c.getContext('2d'); g.clearRect(0, 0, N, N);
   var put = function(ra, z, buckets){ var r = obR(z, mt), a = ra * Math.PI / 180, x = (RM + r * Math.cos(a)) * k, y = (RM - r * Math.sin(a)) * k, bi = Math.min(9, Math.floor(Math.log(1 + z) / Math.log(8) * 10)); buckets[bi].push(x, y); };
   var BK = []; for (var b = 0; b < 10; b++) BK.push([]);
   if (DATA.universe) DATA.universe.galaxies.forEach(function(gg){ put(gg[0], gg[1], BK); });
   d.quasars.forEach(function(q){ put(q[0], q[1], BK); });
   g.globalCompositeOperation = 'lighter';
-  BK.forEach(function(B, bi){ g.fillStyle = obColor(Math.pow(8, (bi + .5) / 10) - 1); g.globalAlpha = .55; g.beginPath(); for (var m = 0; m < B.length; m += 2) g.rect(B[m] - 1.4, B[m + 1] - 1.4, 2.8, 2.8); g.fill(); });
-  var bl = document.createElement('canvas'); bl.width = bl.height = N; var bg2 = bl.getContext('2d'); bg2.filter = 'blur(6px)'; bg2.drawImage(c, 0, 0); g.globalAlpha = .9; g.drawImage(bl, 0, 0); g.globalAlpha = 1;
+  var dsz = Math.max(1.2, 2.8 * N / 2600); BK.forEach(function(B, bi){ g.fillStyle = obColor(Math.pow(8, (bi + .5) / 10) - 1); g.globalAlpha = .55; g.beginPath(); for (var m = 0; m < B.length; m += 2) g.rect(B[m] - dsz / 2, B[m + 1] - dsz / 2, dsz, dsz); g.fill(); });
+  var bl = document.createElement('canvas'); bl.width = bl.height = N; var bg2 = bl.getContext('2d'); bg2.filter = 'blur(' + Math.max(2, Math.round(6 * N / 2600)) + 'px)'; bg2.drawImage(c, 0, 0); g.globalAlpha = .9; g.drawImage(bl, 0, 0); g.globalAlpha = 1;
   OB_PL = { key: key, c: c, RM: RM }; return OB_PL; }
 function obIntro(){ if (OB3.introDone) return; OB3.introDone = true; var t0 = performance.now();
   (function step(){ if (N3.drag || cur !== 'observable') return; var k = Math.min(1, (performance.now() - t0) / 2600), e = k < .5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2; OB3.tilt = .62 * e; OB3.yaw = -.35 * e; render(); if (k < 1) requestAnimationFrame(step); })(); }
-function obAnim(){ var id = OB3.loopId = (OB3.loopId || 0) + 1, last = performance.now();
+function obAnim(){ var id = OB3.loopId = (OB3.loopId || 0) + 1, last = performance.now(), drawn = 0, sharp = true;
   (function tick(now){ if (id !== OB3.loopId) return; if (cur !== 'observable'){ OB3.loopId++; return; } var dt = Math.min(.1, (now - last) / 1000); last = now;
-    if (_mwVis && !document.hidden && OB3.introDone && !N3.drag && now - (N3.touched || 0) > 10000 && OB3.tilt > .2 && document.getElementById('gx-pick').style.display !== 'block'){ OB3.yaw += dt * Math.PI * 2 / 300; render(); }
+    if (_mwVis && !document.hidden && awake(now) && OB3.introDone && !N3.drag && now - (N3.touched || 0) > 10000 && OB3.tilt > .2 && document.getElementById('gx-pick').style.display !== 'block'){ OB3.yaw += dt * Math.PI * 2 / 300; sharp = false; if (now - drawn > 32){ drawn = now; render(); } }   /* 30 fps is plenty for a turn this slow */
+    else if (OB_SH && OB_SH.f.width < 340 && now - OB_MOVE > 320 && now - drawn > 200){ drawn = now; render(); }   /* once it rests (after a drag too), one more draw sharpens the shell */
     requestAnimationFrame(tick); })(last); }
 /* eras, by redshift: [z from, z to, name, detail, tint] */
 var OB_ERAS = [[20, 1090, 'THE DARK AGES', 'AFTER THE AFTERGLOW, BEFORE THE FIRST STARS LIT UP', 'rgba(120,95,70,'], [6, 20, 'THE FIRST GALAXIES', 'THE FIRST STARS LIGHT UP AND CLEAR THE FOG', 'rgba(255,190,110,'], [1, 3, 'COSMIC NOON', 'QUASARS AND NEW STARS AT THEIR PEAK', 'rgba(255,220,150,']];
@@ -1584,7 +1609,7 @@ function drawObservable(d, v){
   var e1 = [cp * s, -sp * ct * s], e2 = [-sp * s, -cp * ct * s];
   if (OB3.play) return obPlayback(d, v, PJ, e1, e2);
   if (OB3.cone > .999) return obCone(d, v, 1);
-  blit(layer('obsky|' + W + 'x' + H + '@' + DPR, function(){ starfield(20261013, Math.round(W * H / 700)); }));
+  blit(layer('sky|' + W + 'x' + H + '@' + DPR, function(){ starfield(20261010, Math.round(W * H / 480)); }));
   /* beyond the rim: space continues, a darker field */
   var Rs = Rc * s;
   /* 1: the back of the shell, behind everything inside */
@@ -1679,7 +1704,7 @@ function obCone(d, v, a){
    then (the particle horizon, a x the comoving horizon) as a ring; the clock and the era read out */
 function obPlayback(d, v, PJ, e1, e2){
   var C9 = obCosmo(), t = OB3.play.t, z = C9.zAt(t), a = 1 / (1 + z), eta = C9.dcInf - C9.dc(z), PL = obPlane(d, 0), kp = 2 * PL.RM / PL.c.width * a;
-  blit(layer('obsky|' + W + 'x' + H + '@' + DPR, function(){ starfield(20261013, Math.round(W * H / 700)); }));
+  blit(layer('sky|' + W + 'x' + H + '@' + DPR, function(){ starfield(20261010, Math.round(W * H / 480)); }));
   var op = PJ(-PL.RM * a, PL.RM * a, 0); ctx.save(); ctx.imageSmoothingEnabled = true; ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = Math.min(1, Math.max(.15, (t - .3) / 1.5));
   ctx.transform(e1[0] * kp, e1[1] * kp, e2[0] * -kp, e2[1] * -kp, op[0], op[1]); ctx.drawImage(PL.c, 0, 0); ctx.restore();
   var Rh = a * eta * v.s; ctx.save(); ctx.strokeStyle = 'rgba(255,210,150,.7)'; ctx.lineWidth = 1.4; ctx.beginPath(); ctx.arc(v.cx, v.cy, Math.max(1.5, Rh), 0, Math.PI * 2); ctx.stroke();
