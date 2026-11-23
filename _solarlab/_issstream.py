@@ -8,13 +8,20 @@ confirmed stream is found -- the workflow then keeps the last good file, and the
 
 Run: python3 _issstream.py <out dir>
 """
-import json, os, re, sys, time, urllib.request
+import json, os, re, sys, time, urllib.parse, urllib.request
 
 UA = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36',
       'Accept-Language': 'en-US,en;q=0.9'}
 
+PROXY = 'https://proxy.bluishvoid.com/?url='   # YouTube answers GitHub's runners with 429; the site's Cloudflare proxy reads it instead
+
 def get(url):
-    return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=40).read().decode('utf-8', 'replace')
+    try:
+        return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=40).read().decode('utf-8', 'replace')
+    except Exception as e:
+        print('direct read failed (%s); trying the proxy' % e)
+        h = dict(UA, Origin='https://bluishvoid.com')
+        return urllib.request.urlopen(urllib.request.Request(PROXY + urllib.parse.quote(url, safe=''), headers=h), timeout=40).read().decode('utf-8', 'replace')
 
 def candidates():
     h = get('https://www.youtube.com/@NASA/streams')
@@ -36,8 +43,13 @@ def confirm(vid):
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else '.'
     os.makedirs(out, exist_ok=True)
-    for vid in candidates():
-        good, title = confirm(vid)
+    try:
+        found = candidates()
+    except Exception as e:
+        print('could not read NASA\'s streams page: %s' % e); return 3
+    for vid in found:
+        try: good, title = confirm(vid)
+        except Exception as e: print(vid, 'unreadable:', e); continue
         print(vid, good, title[:90])
         if good:
             json.dump({'vid': vid, 'title': title, 'checked': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}, open(os.path.join(out, 'iss_stream.json'), 'w'))
