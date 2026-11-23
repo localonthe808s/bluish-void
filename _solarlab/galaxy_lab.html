@@ -120,6 +120,22 @@
   <div id="credit"></div>
 </div>
 <script>
+/* SLEEP WHEN UNSEEN (perf 2026-11-22, user: "do 1 2 3 4 5"): measured in the dashboard, this frame kept animating at ~55-60 frames
+   a second while another SPACE tab was showing or the widget was scrolled off-screen. Every requestAnimationFrame now waits while
+   the frame is not on screen (an IntersectionObserver against the page's viewport, or a hidden browser tab) and is released the
+   moment it is seen again -- so every loop in this frame sleeps without each one having to know. */
+(function(){
+  var R = window.requestAnimationFrame.bind(window), C = window.cancelAnimationFrame.bind(window), held = [], asleep = false, seen = true;
+  window.requestAnimationFrame = function(f){ if (asleep){ held.push(f); return -held.length; } return R(f); };
+  window.cancelAnimationFrame = function(id){ if (id < 0){ held[-id - 1] = null; return; } return C(id); };
+  function set(){ var s = !seen || document.hidden; if (s === asleep) return; asleep = s; if (!s){ var q = held; held = []; q.forEach(function(f){ if (f) R(f); }); } }
+  window.__bvAsleep = function(){ return asleep; };
+  function watch(){ try { new IntersectionObserver(function(es){ seen = es[es.length - 1].isIntersecting; set(); }, { rootMargin: '120px' }).observe(document.documentElement); } catch(_){} }
+  document.addEventListener('visibilitychange', set);
+  if (document.documentElement) watch(); else document.addEventListener('DOMContentLoaded', watch);
+})();
+</script>
+<script>
 'use strict';
 var EMBEDDED = window.self !== window.top;
 var GAL_BUILD = '2026-11-22q';                      /* bump when galaxy/*.json changes, so browsers refetch */
@@ -261,7 +277,7 @@ window.addEventListener('message', function(e){
   var vis = true; try { new IntersectionObserver(function(es){ vis = es[0].isIntersecting; }).observe(st); } catch(_){}
   /* one loop only: each start takes a new id and any older loop stops on its next frame */
   window.n3Idle = function(){ var id = N3.loopId = (N3.loopId || 0) + 1; var last = performance.now(), drawn = 0;
-    (function tick(now){ if (id !== N3.loopId) return; if (cur !== 'neighborhood'){ N3.loopId++; return; }
+    (function tick(now){ if (id !== N3.loopId) return; if (cur !== 'neighborhood'){ N3.loopId++; return; } if (idleSleep(now)){ N3.loopId++; return; }
       var dt = Math.min(.1, (now - last) / 1000); last = now;
       if (vis && !document.hidden && awake(now) && !N3.drag && now - (N3.touched || 0) > 10000 && document.getElementById('gx-pick').style.display !== 'block'){
         N3.yaw += dt * Math.PI * 2 / 180; if (now - drawn > 32){ drawn = now; render(); } }
@@ -434,8 +450,13 @@ function gxy(v, x, y, s){ s = s || v.s; return [v.cx - y * s, v.cy - x * s]; }
    the Galactic pole, tilt leans the plane away (0 = the old face-on view). Screen: centre up, l=90 left, as gxy at 0/0. */
 var N3 = { yaw: 0, tilt: 0, introDone: false, drag: null };
 var ACT = performance.now();   /* the last interaction (perf item 5): idle orbits stop two minutes after it */
-['pointerdown', 'pointermove', 'wheel', 'keydown'].forEach(function(ev){ window.addEventListener(ev, function(){ ACT = performance.now(); }, { passive: true }); });
+/* asleep (two minutes untouched) the loops below stop asking for frames at all; the next touch restarts this frame's loop */
+var IDLE_SLEEPING = false;
+function idleWake(){ if (!IDLE_SLEEPING) return; IDLE_SLEEPING = false; setTimeout(function(){
+  if (cur === 'neighborhood' && N3.introDone && window.n3Idle) window.n3Idle(); else if (cur === 'milkyway' && M3.introDone) mwIdle(); else if (cur === 'localgroup' && L3.introDone) lgIdle(); else if (cur === 'laniakea') lnAnim(); else if (cur === 'observable') obAnim(); }, 0); }
+['pointerdown', 'pointermove', 'wheel', 'keydown'].forEach(function(ev){ window.addEventListener(ev, function(){ ACT = performance.now(); idleWake(); }, { passive: true }); });
 function awake(now){ return now - ACT < 120000; }
+function idleSleep(now){ if (awake(now)) return false; IDLE_SLEEPING = true; return true; }
 var M3 = { yaw: 0, tilt: 0 }, MWTAP = null, L3 = { yaw: 0, tilt: 0, zoom: 1, focus: null }, LN3 = { yaw: 0, tilt: 0, zoom: 1, focus: null }, CW = { zoom: 1, fx: 0, fy: 0 }, CWTAP = null, OB3 = { yaw: 0, tilt: 0, mt: 0, cone: 0, dip: 0, play: null }, OBTAP = null, LNTAP = null, LF = { t: 0, on: false, last: 0 };
 function edgeBtn(){ var b = document.getElementById('edge'); if (!b) return; var on = M3.tilt > .7; b.classList.toggle('on', on); b.textContent = on ? 'BACK TO FACE-ON' : 'SEE IT EDGE-ON'; }
 /* SEE IT EDGE-ON: eases the disc to 85 deg (and back), so a phone, which cannot drag a tilt, sees it too */
@@ -858,7 +879,7 @@ function mwIntro(){ if (M3.introDone) return; M3.introDone = true; var t0 = perf
    any touch stops it. Not while the galaxy turns, near edge-on (the edge render holds one view), with a card open, or off screen. */
 var _mwVis = true; try { new IntersectionObserver(function(es){ _mwVis = es[0].isIntersecting; }).observe(document.getElementById('stage')); } catch(_){}
 function mwIdle(){ var id = M3.loopId = (M3.loopId || 0) + 1, last = performance.now(), drawn = 0;
-  (function tick(now){ if (id !== M3.loopId) return; if (cur !== 'milkyway'){ M3.loopId++; return; }
+  (function tick(now){ if (id !== M3.loopId) return; if (cur !== 'milkyway'){ M3.loopId++; return; } if (idleSleep(now)){ M3.loopId++; return; }
     var dt = Math.min(.1, (now - last) / 1000); last = now;
     if (_mwVis && !document.hidden && awake(now) && !N3.drag && !GT.on && now - (N3.touched || 0) > 10000 && M3.tilt > .2 && M3.tilt < 1.1 && document.getElementById('gx-pick').style.display !== 'block'){
       M3.yaw += dt * Math.PI * 2 / 240; if (now - drawn > 32){ drawn = now; render(); } }
@@ -1086,7 +1107,7 @@ function lgIntro(){ if (L3.introDone) return; L3.introDone = true; var t0 = perf
   (function step(){ if (N3.drag || cur !== 'localgroup') return; var k = Math.min(1, (performance.now() - t0) / 2600), e = k < .5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
     L3.tilt = .78 * e; L3.yaw = -.42 * e; render(); if (k < 1) requestAnimationFrame(step); else lgIdle(); })(); }
 function lgIdle(){ var id = L3.loopId = (L3.loopId || 0) + 1, last = performance.now(), drawn = 0;
-  (function tick(now){ if (id !== L3.loopId) return; if (cur !== 'localgroup'){ L3.loopId++; return; }
+  (function tick(now){ if (id !== L3.loopId) return; if (cur !== 'localgroup'){ L3.loopId++; return; } if (idleSleep(now)){ L3.loopId++; return; }
     var dt = Math.min(.1, (now - last) / 1000); last = now;
     if (_mwVis && !document.hidden && awake(now) && !N3.drag && !LF.on && now - (N3.touched || 0) > 10000 && L3.tilt > .2 && document.getElementById('gx-pick').style.display !== 'block'){
       L3.yaw += dt * Math.PI * 2 / 240; if (now - drawn > 32){ drawn = now; render(); } }
@@ -1292,7 +1313,7 @@ function lnStep(F, dt){ if (!LNP){ LNP = []; for (var k = 0; k < 1800; k++){ var
     p.m = m; p.x += v[0] * .02 * dt; p.y += v[1] * .02 * dt; p.h.push([p.x, p.y]); if (p.h.length > 10) p.h.shift(); }); }
 var _lnLast = 0;
 function lnAnim(){ var id = LN3.loopId = (LN3.loopId || 0) + 1, last = performance.now(), drawn = 0;
-  (function tick(now){ if (id !== LN3.loopId) return; if (cur !== 'laniakea'){ LN3.loopId++; return; }
+  (function tick(now){ if (id !== LN3.loopId) return; if (cur !== 'laniakea'){ LN3.loopId++; return; } if (idleSleep(now)){ LN3.loopId++; return; }   /* asleep: the specks freeze until a touch */
     var dt = Math.min(.1, (now - last) / 1000); last = now;
     if (_mwVis && !document.hidden && DATA.laniakea){ if (awake(now) && !N3.drag && now - (N3.touched || 0) > 10000 && LN3.tilt > .2 && LN3.introDone && document.getElementById('gx-pick').style.display !== 'block') LN3.yaw += dt * Math.PI * 2 / 300;
       lnStep(lnField(DATA.laniakea), dt); render(); }   /* every frame, real time: it was held to 30 fps and stepped */
@@ -1593,7 +1614,7 @@ function obPlane(d, mt){ var N = Math.max(900, Math.min(2600, Math.round(2 * 48 
 function obIntro(){ if (OB3.introDone) return; OB3.introDone = true; var t0 = performance.now();
   (function step(){ if (N3.drag || cur !== 'observable') return; var k = Math.min(1, (performance.now() - t0) / 2600), e = k < .5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2; OB3.tilt = .62 * e; OB3.yaw = -.35 * e; render(); if (k < 1) requestAnimationFrame(step); })(); }
 function obAnim(){ var id = OB3.loopId = (OB3.loopId || 0) + 1, last = performance.now(), drawn = 0, sharp = true;
-  (function tick(now){ if (id !== OB3.loopId) return; if (cur !== 'observable'){ OB3.loopId++; return; } var dt = Math.min(.1, (now - last) / 1000); last = now;
+  (function tick(now){ if (id !== OB3.loopId) return; if (cur !== 'observable'){ OB3.loopId++; return; } if (idleSleep(now) && !(OB_SH && OB_SH.f.width < 340)){ OB3.loopId++; return; } var dt = Math.min(.1, (now - last) / 1000); last = now;
     if (_mwVis && !document.hidden && awake(now) && OB3.introDone && !N3.drag && now - (N3.touched || 0) > 10000 && OB3.tilt > .2 && document.getElementById('gx-pick').style.display !== 'block'){ OB3.yaw += dt * Math.PI * 2 / 300; sharp = false; if (now - drawn > 32){ drawn = now; render(); } }   /* 30 fps is plenty for a turn this slow */
     else if (OB_SH && OB_SH.f.width < 340 && now - OB_MOVE > 320 && now - drawn > 200){ drawn = now; render(); }   /* once it rests (after a drag too), one more draw sharpens the shell */
     requestAnimationFrame(tick); })(last); }

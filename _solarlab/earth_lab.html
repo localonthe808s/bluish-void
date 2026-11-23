@@ -533,6 +533,22 @@
   </div>
 </div>
 
+<script>
+/* SLEEP WHEN UNSEEN (perf 2026-11-22, user: "do 1 2 3 4 5"): measured in the dashboard, this frame kept animating at ~55-60 frames
+   a second while another SPACE tab was showing or the widget was scrolled off-screen. Every requestAnimationFrame now waits while
+   the frame is not on screen (an IntersectionObserver against the page's viewport, or a hidden browser tab) and is released the
+   moment it is seen again -- so every loop in this frame sleeps without each one having to know. */
+(function(){
+  var R = window.requestAnimationFrame.bind(window), C = window.cancelAnimationFrame.bind(window), held = [], asleep = false, seen = true;
+  window.requestAnimationFrame = function(f){ if (asleep){ held.push(f); return -held.length; } return R(f); };
+  window.cancelAnimationFrame = function(id){ if (id < 0){ held[-id - 1] = null; return; } return C(id); };
+  function set(){ var s = !seen || document.hidden; if (s === asleep) return; asleep = s; if (!s){ var q = held; held = []; q.forEach(function(f){ if (f) R(f); }); } }
+  window.__bvAsleep = function(){ return asleep; };
+  function watch(){ try { new IntersectionObserver(function(es){ seen = es[es.length - 1].isIntersecting; set(); }, { rootMargin: '120px' }).observe(document.documentElement); } catch(_){} }
+  document.addEventListener('visibilitychange', set);
+  if (document.documentElement) watch(); else document.addEventListener('DOMContentLoaded', watch);
+})();
+</script>
 <script src="_planetcore.js?v=8"></script>
 <script src="_planetglobe.js?v=5"></script>
 <script src="earthglobe.js?v=2"></script>
@@ -2992,15 +3008,19 @@ fetch('https://services.swpc.noaa.gov/products/noaa-scales.json')
     renderFacts();
   }).catch(function(){});
 
+/* only while playing (perf 2026-11-22): it used to ask for every display frame forever and do nothing unless playing */
+var _frameOn = false;
 function frame(ts){
-  if (playing){
-    if (lastFrame !== null) curMs += (ts - lastFrame) * (+speedSel.value) * 86400;
-    lastFrame = ts;
-    render();
-  }
+  if (!playing){ _frameOn = false; lastFrame = null; return; }
+  /* 30 fps (perf 2026-11-22): the clock still advances by real elapsed time, so the motion keeps its speed at half the draws */
+  if (lastFrame !== null && ts - lastFrame < 30){ requestAnimationFrame(frame); return; }
+  if (lastFrame !== null) curMs += (ts - lastFrame) * (+speedSel.value) * 86400;
+  lastFrame = ts;
+  render();
   requestAnimationFrame(frame);
 }
-function syncPlayBtn(){
+function kickFrame(){ if (playing && !_frameOn){ _frameOn = true; lastFrame = null; requestAnimationFrame(frame); } }
+function syncPlayBtn(){ kickFrame();
   document.getElementById('btn-play').innerHTML =
     playing ? '&#10073;&#10073;&#xFE0E; PAUSE' : '&#9654;&#xFE0E; PLAY';
 }
@@ -3093,7 +3113,14 @@ render();
 renderFacts();
 setInterval(function(){ if (!playing && hostVisible){ curMs = Date.now(); render(); } }, 30000);
 setInterval(renderFacts, 60000);
-requestAnimationFrame(frame);
+kickFrame();
+/* THE ISS STREAM, KEPT CURRENT: a job checks NASA's YouTube streams every six hours and publishes the live id
+   (_issstream.py / .github/workflows/iss-stream.yml); the built-in id above stays as the fallback */
+fetch('https://cdn.bluishvoid.com/space/iss_stream.json?h=' + Math.floor(Date.now() / 1800000)).then(function(r){ return r.ok ? r.json() : null; }).then(function(j){
+  if (!j || !/^[A-Za-z0-9_-]{11}$/.test(j.vid || '') || j.vid === ISS_LIVE_VID) return;
+  var old = ISS_LIVE_VID; ISS_LIVE_VID = j.vid;
+  [].forEach.call(document.querySelectorAll('iframe[src*="' + old + '"], a[href*="' + old + '"]'), function(el){ var at = el.tagName === 'A' ? 'href' : 'src'; el.setAttribute(at, el.getAttribute(at).split(old).join(j.vid)); });
+}).catch(function(){});
 </script>
 </body>
 </html>

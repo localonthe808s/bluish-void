@@ -1,0 +1,40 @@
+name: ISS live stream id
+
+# EARTH VIEW embeds NASA's ISS camera stream from YouTube. NASA ends it and restarts it under a new video id every few
+# months (awQzjn72bI0 ended 2026-10-22 and the page showed "Video unavailable"). _solarlab/_issstream.py finds the current
+# one on NASA's /streams page and confirms it is LIVE NOW and owned by NASA; the result goes to space/iss_stream.json on R2,
+# which earth_lab.html reads (falling back to its built-in id). When nothing is confirmed, the last good file stays.
+# Same three secrets as helio.yml.
+
+on:
+  schedule:
+    - cron: '41 */6 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: iss-stream
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: _solarlab/_issstream.py
+          sparse-checkout-cone-mode: false
+      - name: Find the current stream and publish it
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          set -uo pipefail
+          python3 _solarlab/_issstream.py out; rc=$?
+          if [ "$rc" = "3" ]; then echo "::warning::No confirmed NASA ISS live stream found; keeping the last published id"; exit 0; fi
+          [ "$rc" = "0" ] || exit "$rc"
+          python3 -c "import json,re; d=json.load(open('out/iss_stream.json')); assert re.fullmatch(r'[A-Za-z0-9_-]{11}', d['vid']), d"
+          E="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 cp out/iss_stream.json s3://bluishvoid-bg/space/iss_stream.json --endpoint-url "$E" --content-type application/json --cache-control "public, max-age=1800" --only-show-errors
+          echo "Published space/iss_stream.json: $(cat out/iss_stream.json)"
