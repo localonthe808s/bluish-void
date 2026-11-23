@@ -141,6 +141,15 @@
        arc, pour. */
     var LD = { x: 0, y: 0, vx: 0, vy: 0, wp: [], hx: new Float32Array(300), hy: new Float32Array(300), hn: 0, hh: 0, ht: 0 };
     var KN = { x: 0, y: 0, tx: 0, ty: 0, dx: 0, dy: 0 }, SH = { cth: 1, sth: 0, ctl: 1, stl: 0, morph: 1 };
+    /* TURNS TRAVEL AS A WAVE (LIVE 2026-11-23, user: "make the new birds live"; user: "see if you could improve the birds motion further, research more bird flight
+       and murmurations"). Attanasi et al. 2014 (Nature Physics): a turn starts with a few birds and sweeps across the flock like
+       sound, 20-40 m/s against the birds' 7-12 m/s, barely damped. Hemelrijk & Hildenbrandt (StarDisplay): starlings hold their
+       speed, so they turn on banked arcs, and a flat wide flock comes out of a 90 degree turn long and narrow. So the knot now
+       FLIES -- its long axis along where it is going -- and each bird takes the heading the front had a moment ago (delay =
+       its distance back from the front / the wave speed): mid-turn the body bends into a comma, then stretches. The old knot
+       spun as one rigid plate, which read as a swarm of gnats. */
+    var KH = { a: new Float32Array(120), n: 0, hh: 0, ht: 0, h: 0, px: 0, py: 0, init: false };
+    function headAt(delay){ var k = Math.min(KH.n - 1, Math.max(0, Math.round(delay * 30))); return KH.n ? KH.a[(KH.hh - k + 120) % 120] : KH.h; }
     var FORM = { swap: 0, i: 0, t: 0, D: 0.5, kf: 0.6, Dt: 0.5, kft: 0.6, name: 'ball', w: 1, wt: 1, mAmp: 0.35, mAmpT: 0.35, drift: 1, driftT: 1, sat: 0.15, motion: 'clip' };
     /* THE REPERTOIRE (user 2026-10-05: "my video should be just one of its motions"). Each motion is a phrase list; the
        flock plays them in a shuffled order, never the same twice running.
@@ -208,11 +217,16 @@
       FORM.loose = 1 + 0.4 * (0.5 + 0.5 * Math.sin(t * 0.1 + 2.2));
       if (FORM.name === 'free'){ roostAt(t); }
       KN.x += (KN.tx - KN.x) * Math.min(1, dt * 0.35); KN.y += (KN.ty - KN.y) * Math.min(1, dt * 0.35);
+      /* the knot's heading: from its real motion (position + drift), turned at a bird-like rate, held when it hangs still */
+      var kx2 = KN.x + KN.dx, ky2 = KN.y + KN.dy; if (!KH.init){ KH.px = kx2; KH.py = ky2; KH.init = true; }
+      var mvx = kx2 - KH.px, mvy = ky2 - KH.py; KH.px = kx2; KH.py = ky2;
+      if (mvx * mvx + mvy * mvy > 0.0004 * S * S){ var ta2 = Math.atan2(mvy, mvx), dh = wrap(ta2 - KH.h); KH.h += Math.max(-1.6 * dt, Math.min(1.6 * dt, dh)); }
+      KH.ht += dt; while (KH.ht >= 1 / 30){ KH.ht -= 1 / 30; KH.hh = (KH.hh + 1) % 120; KH.a[KH.hh] = KH.h; if (KH.n < 120) KH.n++; }
       /* the sheet's turn, tilt and breathing, once a step (formTarget reads them per bird) */
-      var th0 = 1.25 * Math.sin(t * 0.21) + 0.55 * Math.sin(t * 0.37 + 1.7), tl0 = 0.35 * Math.sin(t * 0.29 + 0.5);
+      var th0 = 0.9 * Math.sin(t * 0.13) + 0.35 * Math.sin(t * 0.27 + 1.7), tl0 = 0.35 * Math.sin(t * 0.29 + 0.5);   /* lab: a slower roll toward edge-on */
       SH.cth = Math.cos(th0); SH.sth = Math.sin(th0); SH.ctl = Math.cos(tl0); SH.stl = Math.sin(tl0); SH.morph = 1 + FORM.mAmp * Math.sin(t * 0.15 * (FORM.mAmp > 0.5 ? 2.2 : 1) + 0.8);   /* blob: bigger, faster morphs */
       /* and the ball keeps travelling: a slow drift on top of where it is headed */
-      var bb = box(), dr = FORM.drift; KN.dx = (bb.x1 - bb.x0) * 0.14 * dr * Math.sin(t * 0.17 * dr + 1.1); KN.dy = (bb.y1 - bb.y0) * 0.12 * dr * Math.sin(t * 0.23 * dr + 0.3);
+      var bb = box(), dr = Math.max(1.5, FORM.drift); KN.dx = (bb.x1 - bb.x0) * 0.2 * Math.sin(t * 0.17 * dr + 1.1); KN.dy = (bb.y1 - bb.y0) * 0.14 * Math.sin(t * 0.23 * dr + 0.3);   /* lab: it flies, it does not hover */
       /* the leader: to its waypoints with a limited turn, then a slow wander round the knot until the next phrase */
       var b = box();
       if (!LD.wp.length) LD.wp = FORM.name === 'pour' || FORM.name === 'ball' ? [[KN.x + (R() - 0.5) * 120 * S, KN.y - R() * 50 * S]] : [P(R(), R() * 0.5)];
@@ -260,9 +274,13 @@
          pattern in the Rome falcon films -- and opens back out as it turns away. The ellipse also breathes between
          pancake and egg. */
       /* the ball scales with how many birds are in it (sqrt of the share) and breathes with the looseness */
-      var bs = Math.sqrt(Math.max(0.15, FORM.kf * (1 - FORM.sat)) * Math.max(1, N) / 350) * L;
+      var bs = Math.sqrt(Math.max(0.15, FORM.kf * (1 - FORM.sat)) * Math.max(1, N) / 350) * L * 1.18;   /* x1.18: sparse enough to see sky through it (Pearce et al. 2014: marginally opaque) */
       var an = ka[i] + wob * 0.6, pa = kr[i] * Math.cos(an) * 64 * S * SH.morph * bs, qb = kr[i] * Math.sin(an) * 30 * S / SH.morph * bs;
-      return [KN.x + KN.dx + pa * SH.cth, KN.y + KN.dy + dodge + qb * SH.ctl + pa * SH.sth * SH.stl * 0.4, pa * SH.sth];
+      /* the sheet still turns about the vertical (edge-on = the dark band), but more slowly; and in the plane of the sky its
+         long axis follows the heading, each bird with the heading the front had (front - pa) / cs ago */
+      var a3 = pa * SH.cth, z3 = pa * SH.sth, front = 64 * S * SH.morph * bs, cs = 330 * S, h = headAt(Math.max(0, (front - pa) / cs));
+      var ch = Math.cos(h), shh = Math.sin(h), bx3 = a3 * ch - qb * shh, by3 = a3 * shh + qb * ch;
+      return [KN.x + KN.dx + bx3, KN.y + KN.dy + dodge + by3 * SH.ctl, z3];
     }
     function init(i, x, y, z, ux, uy, r){
       px[i] = x; py[i] = y; pz[i] = z; vx[i] = ux; vy[i] = uy; vz[i] = (R() - 0.5) * 20 * S;

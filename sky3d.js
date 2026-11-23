@@ -263,12 +263,12 @@ function extinction(){ var h = 160, g = ext.getContext('2d'); ext.width = 1; ext
 function frame(now){
   raf = 0; if (!S.sc) return;
   /* the hero rebuilds its box (the clear-day builder waits for layout, then rewrites it): put the layers back */
-  if (!cv.isConnected || ((S.sc.px || S.sc.type === 3) && (!px.isConnected || px.previousSibling !== S.host))){ var h2 = (S.host && S.host.isConnected) ? S.host : document.getElementById('hero-wx'); if (!h2) return; S.host = h2; attach(); }
+  if (!cv.isConnected || (!S.sc.atmo && !S.sc.twi && cv.nextSibling !== S.host) || ((S.sc.px || S.sc.type === 3) && (!px.isConnected || px.previousSibling !== S.host))){ var h2 = (S.host && S.host.isConnected) ? S.host : document.getElementById('hero-wx'); if (!h2) return; S.host = h2; attach(); }
   if (document.hidden || !S.seen) return;                                   /* asleep while hidden or scrolled away */
   raf = requestAnimationFrame(frame);
   if (now - last < 32) return; var dt = Math.min(100, now - last); last = now;   /* 30 fps */
   if (!REDUCED) S.t += dt / 1000;
-  var sc = S.sc, cw = cv.clientWidth || 1, ch = cv.clientHeight || 1;
+  placeC(); var sc = S.sc, cw = cv.clientWidth || 1, ch = cv.clientHeight || 1;
   /* the hero is big: the cloud layer renders at a capped resolution and is scaled up (clouds are soft); phones lower */
   var k = Math.min(PHONE ? 0.35 : 0.5, (PHONE ? 380 : 620) / cw) * S.auto, w = Math.max(64, Math.round(cw * k)), h = Math.max(24, Math.round(ch * k));
   var twiOff = sc.twi && S.sunAlt < -18.5;                                  /* full night: no twilight left to draw */
@@ -315,8 +315,14 @@ function attach(){ var host = S.host, sc = S.sc; if (!host || !sc) return;
     if (svg){ if (ext.parentNode !== host || ext.previousSibling !== svg) host.insertBefore(ext, svg.nextSibling); if (cv.parentNode !== host || cv.previousSibling !== ext) host.insertBefore(cv, ext.nextSibling); }
     else { if (cv.parentNode !== host) host.appendChild(cv); }
     requestAnimationFrame(extinction);
+  } else if (!sc.atmo && host.parentNode){
+    /* CLOUDY SKIES RUN ON BELOW THE HERO (user 2026-11-23: "a mirroring horizon is still happening"): the cloud canvas sits just
+       before the hero box (under its svg) and continues EXT px below its edge, fading -- the real sky, not a reflection */
+    cv.style.mixBlendMode = ''; if (ext.parentNode) ext.parentNode.removeChild(ext);
+    if (cv.parentNode !== host.parentNode || cv.nextSibling !== host) host.parentNode.insertBefore(cv, host); S.ct = null; placeC();
   } else {
     cv.style.mixBlendMode = ''; if (ext.parentNode) ext.parentNode.removeChild(ext);
+    cv.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:0;'; S.ct = null;
     if (cv.parentNode !== host || host.firstChild !== cv) host.insertBefore(cv, host.firstChild);
   }
   /* PRECIPITATION OUTSIDE THE MIRROR (user 2026-11-23: the hero's -webkit-box-reflect reflected the rain, which then fell upward): it
@@ -326,6 +332,9 @@ function attach(){ var host = S.host, sc = S.sc; if (!host || !sc) return;
   else if (px.parentNode) px.parentNode.removeChild(px);
 }
 var EXT = 120;   /* = the mirror's fade (FADE in index.html's _bvHorizonMask) */
+function placeC(){ var host = S.host; if (!host || cv.parentNode !== host.parentNode) return; var t = host.offsetTop, h = host.offsetHeight; if (S.ct === t && S.ch === h) return; S.ct = t; S.ch = h;
+  var m = 'linear-gradient(to bottom,#000 0,#000 ' + h + 'px,transparent ' + (h + EXT) + 'px)';
+  cv.style.cssText = 'position:absolute;left:0;right:0;top:' + t + 'px;height:' + (h + EXT) + 'px;width:100%;pointer-events:none;z-index:0;-webkit-mask-image:' + m + ';mask-image:' + m + ';' + (cv.style.filter ? 'filter:' + cv.style.filter + ';' : ''); }
 function place(){ var host = S.host; if (!host) return; var t = host.offsetTop, h = host.offsetHeight; if (S.pt === t && S.ph === h) return; S.pt = t; S.ph = h;
   var m = 'linear-gradient(to bottom,#000 0,#000 ' + h + 'px,transparent ' + (h + EXT) + 'px)';
   px.style.cssText = 'position:absolute;left:0;right:0;top:' + t + 'px;height:' + (h + EXT) + 'px;width:100%;pointer-events:none;z-index:0;-webkit-mask-image:' + m + ';mask-image:' + m + ';'; }
