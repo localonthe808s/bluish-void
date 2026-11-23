@@ -334,4 +334,6 @@ function sync(host, o){
   kick(); return true;
 }
 window.bvSky3D = { ok: function(){ return build(); }, sync: sync, stop: stop, stats: function(){ return { fps: S.fps, w: cv.width, h: cv.height, scene: S.key, auto: S.auto }; } };
+/* this file loads after the page's inline scripts: once it is here, have the hero lay itself out again (full panel, new sky) */
+try { if (typeof window._updateHeroWx === 'function' && window._lastWxCode != null) setTimeout(function(){ try { window._updateHeroWx(window._lastWxCode, window._lastWxNight); } catch(e){} }, 0); } catch(e){}
 })();
