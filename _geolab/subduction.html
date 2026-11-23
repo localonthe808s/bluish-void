@@ -186,8 +186,11 @@ var EARTH = prog('#version 300 es\nout vec2 vN; void main(){ vec2 p = vec2(float
 '  bool inCut = uCut > 0.0 && tin < tout && t0 > tin && t0 < tout; vec3 col; float td;\n' +
 '  if (inCut){ if (tout >= t1) discard; vec3 p = e + dd * tout; float edge; col = layer(length(p), edge); float shd = 0.62 + 0.38 * max(0.0, dot(wn, uL)); col *= shd; col = mix(col, vec3(1.0, 0.95, 0.85), edge * 0.55); td = tout; }\n' +
 '  else { vec3 p = e + dd * t0, n = p / uR; float lon = atan(n.y, n.x), lat = asin(clamp(n.z, -1.0, 1.0)); vec2 uv = vec2(lon / 6.2831853 + 0.5, 0.5 - lat / 3.1415927);\n' +
-'    col = texture(uTex, uv).rgb; if (uAge > 0.0){ vec4 ag = texture(uAgeT, uv); col = mix(col * 0.45, ag.rgb, ag.a * uAge); }\n' +
-'    float lam = 0.42 + 0.58 * max(0.0, dot(n, uL)); float rim = pow(1.0 - max(0.0, dot(n, -dd)), 3.0); col = col * lam * 0.82 + vec3(0.30, 0.55, 0.95) * rim * 0.45;\n' +
+'    vec2 gx = dFdx(uv), gy = dFdy(uv); gx.x -= floor(gx.x + 0.5); gy.x -= floor(gy.x + 0.5); gx *= 1.8; gy *= 1.8;   /* a touch softer: at grazing angles the abyssal-hill fabric read as noise */   /* derivatives that ignore the dateline seam */\n' +
+'    col = textureGrad(uTex, uv, gx, gy).rgb; if (uAge > 0.0){ vec4 ag = textureGrad(uAgeT, uv, gx, gy); col = mix(col * 0.45, ag.rgb, ag.a * uAge); }\n' +
+'    float lam = 0.42 + 0.58 * max(0.0, dot(n, uL)); float rim = pow(1.0 - max(0.0, dot(n, -dd)), 3.0); col = col * lam * 0.95 + vec3(0.30, 0.55, 0.95) * rim * 0.45;\n' +
+'    float rc = 3480.0, Dc = B * B - (dot(e, e) - rc * rc); if (Dc > 0.0){ float th = sqrt(Dc) / rc; col = mix(col, vec3(1.0, 0.62, 0.2), 0.13 * smoothstep(0.0, 0.35, th)); }\n' +
+'    float rs = uR - 660.0, Ds = B * B - (dot(e, e) - rs * rs); if (Ds > 0.0){ float ts = sqrt(Ds) / rs; col += vec3(0.25, 0.5, 0.75) * 0.10 * (1.0 - smoothstep(0.0, 0.08, ts)); }\n' +
 '    float r2 = uR - uShell, C2 = dot(e, e) - r2 * r2, D2 = B * B - C2; td = D2 > 0.0 ? (-B - sqrt(D2)) : t1;\n' +
 '    if (uCut > 0.0 && tin < tout && td > tin && td < tout) td = min(td, tin); }\n' +
 '  vec4 c = uVP * vec4(e + dd * td, 1.0); gl_FragDepth = clamp(c.z / c.w * 0.5 + 0.5, 0.0, 1.0); o = vec4(col, 1.0); }');
@@ -214,7 +217,8 @@ function lineBuf(arr){ var va = gl.createVertexArray(); gl.bindVertexArray(va); 
   gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0); gl.bindVertexArray(null); return { va: va, n: arr.length / 3, b: b }; }
 function freeBuf(o){ if (!o) return; gl.deleteVertexArray(o.va); (o.b instanceof Array ? o.b : [o.b]).forEach(function(b){ gl.deleteBuffer(b); }); }
 function tex(url, cb){ var im = new Image(); im.crossOrigin = 'anonymous'; im.onload = function(){ var t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, im); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, im); gl.generateMipmap(gl.TEXTURE_2D); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  var an = gl.getExtension('EXT_texture_filter_anisotropic'); if (an) gl.texParameterf(gl.TEXTURE_2D, an.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, gl.getParameter(an.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));   /* mipmaps: the sea-floor hillshade sparkled at grazing angles */ gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); cb(t, im); dirty = true; kick(); }; im.onerror = function(){ cb(null); }; im.src = url; }
 
 /* quakes: a decoded set keeps its CPU copy for picking, slicing and rings */
@@ -245,7 +249,7 @@ Promise.all([fetch(BASE + 'zones_v1.json').then(function(r){ return r.json(); })
   $('#load').style.display = 'none'; zoneChips(); legend(); words();
   var start = HOME ? nearestZone(HOME) : null; begin(start ? start.z : 'ker');
 }).catch(function(e){ $('#load').textContent = 'COULD NOT LOAD THE EARTHQUAKES'; console.error(e); });
-tex('slab/earth_v1.jpg', function(t){ EARTHTEX = t; });
+tex(BASE + 'earth_v2.webp', function(t){ if (t) EARTHTEX = t; else tex('slab/earth_v1.jpg', function(t2){ EARTHTEX = t2; }); });   /* OUR MAP (2026-11-23): the dashboard's world depth tint + sea-floor + land relief pyramids (_slabbake/globe_tex_bake.py); the old PaleoDEM frame is the fallback */
 fetch(BASE + 'volc_v1.json').then(function(r){ return r.json(); }).then(function(j){ VOLC = j.volcanoes.map(function(v){ v.p = ll(v.lat, v.lon, RE); v.q = v.slab != null ? ll(v.lat, v.lon, RE - v.slab) : null; return v; }); }).catch(function(){});
 fetch(BASE + 'motion_v1.json').then(function(r){ return r.ok ? r.json() : null; }).then(function(j){ MOTION = j; words(); }).catch(function(){});
 function loadAge(){ if (AGETEX !== null) return; AGETEX = 0; tex(BASE + 'age_color.png', function(t){ AGETEX = t || 0; }); }
