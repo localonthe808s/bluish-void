@@ -263,7 +263,7 @@ function extinction(){ var h = 160, g = ext.getContext('2d'); ext.width = 1; ext
 function frame(now){
   raf = 0; if (!S.sc) return;
   /* the hero rebuilds its box (the clear-day builder waits for layout, then rewrites it): put the layers back */
-  if (!cv.isConnected || (S.sc.px && !px.isConnected)){ var h2 = (S.host && S.host.isConnected) ? S.host : document.getElementById('hero-wx'); if (!h2) return; S.host = h2; attach(); }
+  if (!cv.isConnected || ((S.sc.px || S.sc.type === 3) && (!px.isConnected || px.previousSibling !== S.host))){ var h2 = (S.host && S.host.isConnected) ? S.host : document.getElementById('hero-wx'); if (!h2) return; S.host = h2; attach(); }
   if (document.hidden || !S.seen) return;                                   /* asleep while hidden or scrolled away */
   raf = requestAnimationFrame(frame);
   if (now - last < 32) return; var dt = Math.min(100, now - last); last = now;   /* 30 fps */
@@ -301,9 +301,10 @@ function precip(){ var sc = S.sc, k = sc.px || 0;
   var dpr = Math.min(1.5, window.devicePixelRatio || 1), w = Math.round((px.clientWidth || 1) * dpr), h = Math.round((px.clientHeight || 1) * dpr); if (px.width !== w || px.height !== h){ px.width = w; px.height = h; }
   gp.viewport(0, 0, w, h); gp.clearColor(0, 0, 0, 0); gp.clear(gp.COLOR_BUFFER_BIT); gp.useProgram(PP);
   gp.uniform2f(PU.uRes, w, h); gp.uniform1f(PU.uTime, S.t); gp.uniform1f(PU.uKind, k); gp.uniform1f(PU.uNight, S.night); gp.uniform1f(PU.uWind, 0.6);
-  var tH = 0.66, asp = (px.clientWidth || 1) / (px.clientHeight || 1), tV = tH / asp, e0 = 0.009 + Math.atan(tV), sxp = function(X, Z){ return 0.5 + (X / Z) / (2 * tH); }, syp = function(Y, Z){ return 0.5 + Math.tan(Math.atan2(Y, Z) - e0) / (2 * tV); };
+  place(); var Hh = (S.host && S.host.offsetHeight) || px.clientHeight || 1, Ht = Hh + EXT, toC = function(yh){ return (EXT + yh * Hh) / Ht; };   /* hero-frame height fraction -> this taller canvas */
+  var tH = 0.66, asp = (px.clientWidth || 1) / Hh, tV = tH / asp, e0 = 0.009 + Math.atan(tV), sxp = function(X, Z){ return 0.5 + (X / Z) / (2 * tH); }, syp = function(Y, Z){ return toC(0.5 + Math.tan(Math.atan2(Y, Z) - e0) / (2 * tV)); };
   if (sc.type === 3 && k !== 7) gp.uniform3f(PU.uMask, sxp(-33, 40), sxp(-1, 40), syp(2.0, 40)); else gp.uniform3f(PU.uMask, 0, 0, -1);
-  var bz = [0, 0, 0, 0]; if (sc.type === 3 && S.fl && S.flv > 0.05){ var X = S.fl.p[0] + 2, Z = S.fl.p[2], el = Math.atan2(3.5, Z) - e0; bz = [0.5 + (X / Z) / (2 * tH), Math.max(0.05, 0.5 + Math.tan(el) / (2 * tV)), S.flv, S.fl.seed]; }
+  var bz = [0, 0, 0, 0]; if (sc.type === 3 && S.fl && S.flv > 0.05){ var X = S.fl.p[0] + 2, Z = S.fl.p[2], el = Math.atan2(3.5, Z) - e0; bz = [0.5 + (X / Z) / (2 * tH), toC(Math.max(0.05, 0.5 + Math.tan(el) / (2 * tV))), S.flv, S.fl.seed]; }
   gp.uniform4f(PU.uBolt, bz[0], bz[1], bz[2], bz[3]); gp.drawArrays(gp.TRIANGLES, 0, 3); }
 function attach(){ var host = S.host, sc = S.sc; if (!host || !sc) return;
   /* the layers: clouds at the bottom of the hero (the clear night: screen-blended over its photo, extinction under it);
@@ -318,9 +319,16 @@ function attach(){ var host = S.host, sc = S.sc; if (!host || !sc) return;
     cv.style.mixBlendMode = ''; if (ext.parentNode) ext.parentNode.removeChild(ext);
     if (cv.parentNode !== host || host.firstChild !== cv) host.insertBefore(cv, host.firstChild);
   }
-  if (sc.px || sc.type === 3){ var after = svg || cv; if (px.parentNode !== host || px.previousSibling !== after) host.insertBefore(px, after.nextSibling); }
+  /* PRECIPITATION OUTSIDE THE MIRROR (user 2026-11-23: the hero's -webkit-box-reflect reflected the rain, which then fell upward): it
+     sits just after the hero box, over it, and runs EXT px below its edge with a fade -- the rain falls on into the hours */
+  var par = host.parentNode;
+  if ((sc.px || sc.type === 3) && par){ if (px.parentNode !== par || px.previousSibling !== host) par.insertBefore(px, host.nextSibling); place(); }
   else if (px.parentNode) px.parentNode.removeChild(px);
 }
+var EXT = 120;   /* = the mirror's fade (FADE in index.html's _bvHorizonMask) */
+function place(){ var host = S.host; if (!host) return; var t = host.offsetTop, h = host.offsetHeight; if (S.pt === t && S.ph === h) return; S.pt = t; S.ph = h;
+  var m = 'linear-gradient(to bottom,#000 0,#000 ' + h + 'px,transparent ' + (h + EXT) + 'px)';
+  px.style.cssText = 'position:absolute;left:0;right:0;top:' + t + 'px;height:' + (h + EXT) + 'px;width:100%;pointer-events:none;z-index:0;-webkit-mask-image:' + m + ';mask-image:' + m + ';'; }
 function stop(){ S.sc = null; S.key = ''; [cv, px, ext].forEach(function(c){ if (c.parentNode) c.parentNode.removeChild(c); }); if (raf){ cancelAnimationFrame(raf); raf = 0; } }
 function sync(host, o){
   if (!host || !o || !build()){ stop(); return false; }
