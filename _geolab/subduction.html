@@ -219,9 +219,10 @@ var EARTH = prog('#version 300 es\nout vec2 vN; void main(){ vec2 p = vec2(float
 'vec3 tomo(vec3 p, vec3 col){ if (uTomo < 0.5 && uTomoG < 0.5) return col; vec3 n = normalize(p); float lon = degrees(atan(n.y, n.x)), lat = degrees(asin(n.z)), d = uR - length(p); float raw = 0.0, edge = 1.0;\n' +
 '  float lz = lon; if (lz < uTB.x) lz += 360.0; vec3 t = vec3((lz - uTB.x) / (uTB.z - uTB.x), (lat - uTB.y) / (uTB.w - uTB.y), (d - 50.0) / 2800.0);\n' +
 '  bool inZ = uTomo > 0.5 && all(greaterThanEqual(t, vec3(0.0))) && all(lessThanEqual(t, vec3(1.0)));\n' +
-'  if (inZ){ raw = texture(uTV, t).r * 255.0; edge = smoothstep(0.0, 0.2, min(min(t.x, 1.0 - t.x), min(t.y, 1.0 - t.y))); }\n' +
+'  if (inZ){ raw = texture(uTV, t).r * 255.0; edge = smoothstep(0.0, 0.2, min(min(t.x, 1.0 - t.x), min(t.y, 1.0 - t.y))); if (raw < 0.5){ inZ = false; edge = 1.0; } }   /* a no-data voxel in the zone box falls back to the global model, not to no tint (Cascadia\'s pale box, 11-23) */\n' +
 '  if (uTomoG > 0.5 && (!inZ || edge < 1.0)){ float g = texture(uTG, vec3(((lon + 180.0) / 2.0 + 0.5) / 180.0, ((lat + 90.0) / 2.0 + 0.5) / 91.0, clamp(((d - 100.0) / 100.0 + 0.5) / 28.0, 0.0, 1.0))).r * 255.0;\n' +
-'    raw = inZ ? mix(g, raw, edge) : g; edge = smoothstep(60.0, 140.0, d) * (1.0 - smoothstep(2860.0, 2895.0, d)); }\n' +
+'    raw = inZ ? mix(g, raw, edge) : g; }\n' +
+'  edge = smoothstep(60.0, 140.0, d) * (1.0 - smoothstep(2860.0, 2895.0, d));   /* ONE depth fade inside and outside a zone box: no corner where they meet */\n' +
 '  if (raw < 0.5) return col; float dv = clamp((raw - 128.0) / 64.0, -1.0, 1.0);\n' +
 '  float f = clamp(dv / 0.5, 0.0, 1.0), sl = clamp(-dv / 0.6, 0.0, 1.0);   /* cold (fast) stretched to +0.5%, hot (slow) to -0.6% */\n' +
 '  return dv > 0.0 ? mix(col, vec3(0.20, 0.55, 1.0), f * 0.95 * edge) : mix(col, vec3(1.0, 0.90, 0.55), sl * 0.6 * edge); }\n' +
@@ -478,12 +479,18 @@ function draw(){
 
 /* the 2D layer: labels, the shaft's layer names, rings, live quakes, volcano marks, the slice plane, the pick */
 function txt(s, x, y, col, size, weight){ oc.font = (weight || 800) + ' ' + (size || 9) * DPR + 'px system-ui,sans-serif'; oc.lineWidth = 3 * DPR; oc.strokeStyle = 'rgba(3,5,10,.85)'; oc.lineJoin = 'round'; oc.strokeText(s, x, y); oc.fillStyle = col; oc.fillText(s, x, y); }
+/* ONE LABEL LIST (2026-11-23, iPhone check): wall layers, ruler, names and quake labels all test the same boxes; labels stop above the caption */
+var OB = [], BOT = 0;
+function hitOB(b){ return OB.some(function(o){ return b[0] < o[0] + o[2] && o[0] < b[0] + b[2] && b[1] < o[1] + o[3] && o[1] < b[1] + b[3]; }); }
+var BOTC = { t: 0, v: 0 };
+function botEdge(){ var now = performance.now(); if (now - BOTC.t < 500 && BOTC.v) return BOTC.v; BOTC.t = now; BOTC.v = botEdge0(); return BOTC.v; }
+function botEdge0(){ var y = 1e9, cv = document.getElementById('gl').getBoundingClientRect(); ['#cap', '#legend', '#ctl'].forEach(function(q){ var e = document.querySelector(q); if (!e || !e.offsetParent || !e.textContent.trim()) return; var r = e.getBoundingClientRect(); if (r.height) y = Math.min(y, r.top - cv.top); }); return y < 1e8 ? (y - 10) * DPR : H - 120 * DPR; }
 function overlay(){
-  oc.setTransform(1, 0, 0, 1, 0, 0); oc.clearRect(0, 0, W, H); oc.textAlign = 'center'; oc.textBaseline = 'middle';
+  oc.setTransform(1, 0, 0, 1, 0, 0); oc.clearRect(0, 0, W, H); oc.textAlign = 'center'; oc.textBaseline = 'middle'; OB = []; BOT = botEdge(); var RL = [];
   var focus = ZONE && ZONE.z === cur && FOCK > 0.5, now = performance.now();
   if (!focus && ZJ && FOCK < 0.3){ Object.keys(ZJ.zones).forEach(function(z){ var m = ZJ.zones[z], p = ll(m.mid[1], m.mid[0], RE); if (dot(v3(p), v3(add(EYE, p, -1))) < 0.15) return; proj(p, _p); txt(m.name, _p[0], _p[1] - 12 * DPR, z === cur ? '#fff' : 'rgba(255,255,255,.78)', 8); }); }
   /* the shaft's layer names, placed on its far wall */
-  if (focus && CUT > 0.6 && G){ var LB = [], ph = W < 640 * DPR, lay = [
+  if (focus && CUT > 0.6 && G){ var LB = OB, ph = W < 640 * DPR, lay = [
       [660, '660 KM · NO EARTHQUAKE GOES DEEPER'],
       [250, ph ? 'UPPER MANTLE' : 'UPPER MANTLE · SOLID ROCK THAT FLOWS A FEW CM A YEAR · ~1,300\u20131,450\u00b0C'],
       [535, ph ? 'TRANSITION ZONE' : 'TRANSITION ZONE · 410\u2013660 KM · ITS CRYSTALS REPACK DENSER WITH DEPTH'],
@@ -493,7 +500,7 @@ function overlay(){
       [5750, ph ? 'INNER CORE · SOLID IRON' : 'INNER CORE · SOLID IRON · ~5,400\u00b0C, ABOUT AS HOT AS THE SUN\u2019S SURFACE']];
     var sw = G.sw * RE, u = v3(add(G.M, G.S, -dot(G.M, G.S))), u2 = v3(add(u, G.D, 0.55));
     lay.forEach(function(L){ var r = RE - L[0], h = r * r - sw * sw; if (h <= 0) return; var p = add(G.S.map(function(x){ return x * sw; }), u2, Math.sqrt(h) - (L[0] < 700 ? 0 : 0));
-      proj(p, _p); if (_p[2] <= 0) return; oc.font = '800 ' + 8.5 * DPR + 'px system-ui,sans-serif'; var hw = oc.measureText(L[1]).width / 2 + 8 * DPR; _p[0] = Math.max(hw, Math.min(W - hw, _p[0])); if (_p[1] < 0 || _p[1] > H - 120 * DPR) return;
+      proj(p, _p); if (_p[2] <= 0) return; oc.font = '800 ' + 8.5 * DPR + 'px system-ui,sans-serif'; var hw = oc.measureText(L[1]).width / 2 + 8 * DPR; _p[0] = Math.max(hw, Math.min(W - hw, _p[0])); if (_p[1] < 0 || _p[1] > BOT) return;
       var lb = [_p[0] - hw, _p[1] - 7 * DPR, hw * 2, 14 * DPR]; if (LB.some(function(o){ return lb[0] < o[0] + o[2] && o[0] < lb[0] + lb[2] && lb[1] < o[1] + o[3] && o[1] < lb[1] + lb[3]; })) return; LB.push(lb); txt(L[1], _p[0], _p[1], L[0] === 660 ? 'rgba(186,230,253,.95)' : 'rgba(255,237,213,.85)', 8.5, 800); }); }
   if (focus && ZONE.coast){ oc.strokeStyle = 'rgba(186,230,253,.55)'; oc.lineWidth = 1 * DPR; ZONE.coast.forEach(function(r){ oc.beginPath(); var on = false; r.forEach(function(p){ if (!seen(p) || removed(p)){ on = false; return; } proj(p, _p); if (on) oc.lineTo(_p[0], _p[1]); else { oc.moveTo(_p[0], _p[1]); on = true; } }); oc.stroke(); }); }
   if (OPT.volc && VOLC){ VOLC.forEach(function(v){ if (!seen(v.p) || removed(v.p)) return; proj(v.p, _p); var s = 3.2 * DPR; oc.beginPath(); oc.moveTo(_p[0], _p[1] - s); oc.lineTo(_p[0] + s, _p[1] + s * 0.8); oc.lineTo(_p[0] - s, _p[1] + s * 0.8); oc.closePath(); oc.fillStyle = 'rgba(255,115,64,.95)'; oc.fill(); }); }
@@ -501,28 +508,29 @@ function overlay(){
   var ringSet = focus ? ZONE : WORLD, minM = focus ? 7 : 8, rbox = [];
   if (ringSet){ for (var i = 0; i < ringSet.n; i++){ var M = ringSet.MAG[i]; if (M < minM || ringSet.T[i] > cutT || ringSet.T[i] < cutLo) continue; var p = [ringSet.P[3*i], ringSet.P[3*i+1], ringSet.P[3*i+2]]; if (!seen(p)) continue; if (focus && CUT > 0.5 && G && Math.abs(dot(p, G.S) - G.sw * RE) > 150) continue; proj(p, _p);
       var r = (focus ? 3.2 : 1.6) * DPR * Math.pow(10, 0.75 * (M - 7)) * Math.max(0.6, Math.min(1.4, Math.sqrt(CAM.zoom) * 0.6)); oc.beginPath(); oc.arc(_p[0], _p[1], r, 0, 6.2832); oc.strokeStyle = 'rgba(255,255,255,' + (M >= 8 ? .75 : .4) + ')'; oc.lineWidth = (M >= 8 ? 1.4 : 1) * DPR; oc.stroke();
-      if (M >= 8 && (focus || M >= 8.5)){ var ly = _p[1] - r - 8 * DPR, bx = [_p[0] - 34 * DPR, ly - 6 * DPR, 68 * DPR, 12 * DPR]; if (!rbox.some(function(o){ return bx[0] < o[0] + o[2] && o[0] < bx[0] + bx[2] && bx[1] < o[1] + o[3] && o[1] < bx[1] + bx[3]; })){ rbox.push(bx); txt('M' + M.toFixed(1) + ' · ' + yearOf(ringSet.T[i]), _p[0], ly, 'rgba(255,255,255,.9)', 8); } } } }
+      if (M >= 8 && (focus || M >= 8.5)){ var ly = _p[1] - r - 8 * DPR, bx = [_p[0] - 34 * DPR, ly - 6 * DPR, 68 * DPR, 12 * DPR]; if (!rbox.some(function(o){ return bx[0] < o[0] + o[2] && o[0] < bx[0] + bx[2] && bx[1] < o[1] + o[3] && o[1] < bx[1] + bx[3]; })){ rbox.push(bx); RL.push(['M' + M.toFixed(1) + ' · ' + yearOf(ringSet.T[i]), _p[0], ly, bx]); } } } }
   if (OPT.live && LIVE){ var ph = (now % 1600) / 1600; LIVE.forEach(function(q){ if (!seen(q.p)) return; proj(q.p, _p); var r = (2.5 + (q.mag - 2.5) * 1.6) * DPR; oc.beginPath(); oc.arc(_p[0], _p[1], r * (1 + ph * 1.4), 0, 6.2832); oc.strokeStyle = 'rgba(255,255,255,' + (0.9 * (1 - ph)).toFixed(2) + ')'; oc.lineWidth = 1.4 * DPR; oc.stroke(); oc.beginPath(); oc.arc(_p[0], _p[1], 1.6 * DPR, 0, 6.2832); oc.fillStyle = '#fff'; oc.fill(); }); }
   if (OPT.slice && focus && SLC){ oc.setLineDash([4 * DPR, 3 * DPR]); oc.strokeStyle = 'rgba(255,255,255,.9)'; oc.lineWidth = 1.4 * DPR; oc.beginPath();
     [[SLC.x0, 0], [SLC.x1, 0], [SLC.x1, 700], [SLC.x0, 700]].forEach(function(c, i){ var p = slicePt(c[0], c[1]); proj(p, _p); if (i) oc.lineTo(_p[0], _p[1]); else oc.moveTo(_p[0], _p[1]); }); oc.closePath(); oc.stroke(); oc.setLineDash([]); }
-  /* NAMES (2026-11-23, item 4): the zone's biggest cities (Natural Earth) and its trench, on the surface that is still there */
-  if (focus && ZJ && ZJ.zones[cur]){ var zm = ZJ.zones[cur], nb = [], put = function(txt0, p, col, sz){ if (!seen(p) || removed(p)) return; proj(p, _p); if (_p[2] <= 0) return; oc.font = '800 ' + sz * DPR + 'px system-ui,sans-serif'; var tw = oc.measureText(txt0).width, bx = [_p[0] - tw / 2 - 3, _p[1] - 16 * DPR, tw + 6, 12 * DPR];
-      if (nb.some(function(o){ return bx[0] < o[0] + o[2] && o[0] < bx[0] + bx[2] && bx[1] < o[1] + o[3] && o[1] < bx[1] + bx[3]; })) return; nb.push(bx); oc.beginPath(); oc.arc(_p[0], _p[1], 1.8 * DPR, 0, 6.2832); oc.fillStyle = col; oc.fill(); txt(txt0, _p[0], _p[1] - 10 * DPR, col, sz); };
-    if (zm.tname) put(zm.tname, ll(zm.trench[1], zm.trench[0], RE), 'rgba(253,186,116,.95)', 8.5);
-    (zm.cities || []).forEach(function(c){ put(c[0], ll(c[2], c[1], RE), 'rgba(255,255,255,.9)', 8); }); }
   /* THE DEPTH RULER (item 5): ticks every 100 km down the cut wall, under the trench */
   if (focus && CUT > 0.6 && G && ZJ && ZJ.zones[cur]){ var tz = ZJ.zones[cur].trench, Tv = v3(ll(tz[1], tz[0], 1)), wv = v3(add(Tv, G.S, -dot(Tv, G.S))), swk = G.sw * RE;
     oc.strokeStyle = 'rgba(255,255,255,.6)'; oc.lineWidth = 1 * DPR; oc.beginPath(); var first = true;
     for (var dd = 0; dd <= 700; dd += 100){ var rr = RE - dd, hh = rr * rr - swk * swk; if (hh <= 0) continue; var pp = add(G.S.map(function(x){ return x * swk; }), wv, Math.sqrt(hh)); proj(pp, _p); if (_p[2] <= 0) continue;
       if (first){ oc.moveTo(_p[0], _p[1]); first = false; } else oc.lineTo(_p[0], _p[1]); oc.moveTo(_p[0] - 5 * DPR, _p[1]); oc.lineTo(_p[0] + 5 * DPR, _p[1]); oc.moveTo(_p[0], _p[1]);
-      if (dd) { oc.textAlign = 'right'; txt(dd + ' KM', _p[0] - 8 * DPR, _p[1], 'rgba(255,255,255,.85)', 7.5); oc.textAlign = 'center'; oc.strokeStyle = 'rgba(255,255,255,.6)'; oc.lineWidth = 1 * DPR; } }
+      if (dd) { oc.font = '800 ' + 7.5 * DPR + 'px system-ui,sans-serif'; var rw = oc.measureText(dd + ' KM').width; OB.push([_p[0] - 10 * DPR - rw, _p[1] - 6 * DPR, rw + 16 * DPR, 12 * DPR]); oc.textAlign = 'right'; txt(dd + ' KM', _p[0] - 8 * DPR, _p[1], 'rgba(255,255,255,.85)', 7.5); oc.textAlign = 'center'; oc.strokeStyle = 'rgba(255,255,255,.6)'; oc.lineWidth = 1 * DPR; } }
     oc.strokeStyle = 'rgba(255,255,255,.6)'; oc.lineWidth = 1 * DPR; oc.stroke(); }
+  /* NAMES (2026-11-23, item 4): the zone's biggest cities (Natural Earth) and its trench, on the surface that is still there */
+  if (focus && ZJ && ZJ.zones[cur]){ var zm = ZJ.zones[cur], nb = OB, put = function(txt0, p, col, sz){ if (!seen(p) || removed(p)) return; proj(p, _p); if (_p[2] <= 0) return; oc.font = '800 ' + sz * DPR + 'px system-ui,sans-serif'; var tw = oc.measureText(txt0).width, bx = [_p[0] - tw / 2 - 3, _p[1] - 16 * DPR, tw + 6, 12 * DPR];
+      if (nb.some(function(o){ return bx[0] < o[0] + o[2] && o[0] < bx[0] + bx[2] && bx[1] < o[1] + o[3] && o[1] < bx[1] + bx[3]; })) return; nb.push(bx); oc.beginPath(); oc.arc(_p[0], _p[1], 1.8 * DPR, 0, 6.2832); oc.fillStyle = col; oc.fill(); txt(txt0, _p[0], _p[1] - 10 * DPR, col, sz); };
+    if (zm.tname) put(zm.tname, ll(zm.trench[1], zm.trench[0], RE), 'rgba(253,186,116,.95)', 8.5);
+    (zm.cities || []).forEach(function(c){ put(c[0], ll(c[2], c[1], RE), 'rgba(255,255,255,.9)', 8); }); }
   if (OPT.motion && focus && MPATH.length){ var kms = mrate() * 1e-5 * 2e5, tt = (now - MT0) / 1000 * kms;   /* cm/yr -> km/yr, x 200,000 years per second */
     oc.fillStyle = 'rgba(255,255,255,.9)';
     MPATH.forEach(function(P, pi){ for (var m = 0; m < 8; m++){ var u = ((tt + m * P.len / 8 + pi * 37) % P.len + P.len) % P.len, q = 1; while (q < P.L.length - 1 && P.L[q] < u) q++;
       var f = (u - P.L[q - 1]) / Math.max(1e-6, P.L[q] - P.L[q - 1]), a = P.p[q - 1], c = P.p[q], p = [a[0] + (c[0] - a[0]) * f, a[1] + (c[1] - a[1]) * f, a[2] + (c[2] - a[2]) * f];
       if (removed(p) || !seen(p)) continue; proj(p, _p); var fade = Math.min(1, u / 150, (P.len - u) / 150); oc.globalAlpha = Math.max(0, fade); oc.beginPath(); oc.arc(_p[0], _p[1], 2 * DPR, 0, 6.2832); oc.fill(); } }); oc.globalAlpha = 1; }
-  if (HOME){ var hp = ll(HOME.lat, HOME.lon, RE); if (seen(hp)){ proj(hp, _p); oc.beginPath(); oc.arc(_p[0], _p[1], 3.5 * DPR, 0, 6.2832); oc.fillStyle = '#fbbf24'; oc.fill(); if (HOME.name && _p[1] < H - 130 * DPR) txt(HOME.name, _p[0], _p[1] - 11 * DPR, '#fbbf24', 8.5); } }
+  RL.forEach(function(l){ if (l[2] > BOT || hitOB(l[3])) return; OB.push(l[3]); txt(l[0], l[1], l[2], 'rgba(255,255,255,.9)', 8); });
+  if (HOME){ var hp = ll(HOME.lat, HOME.lon, RE); if (seen(hp)){ proj(hp, _p); oc.beginPath(); oc.arc(_p[0], _p[1], 3.5 * DPR, 0, 6.2832); oc.fillStyle = '#fbbf24'; oc.fill(); var hb = [_p[0] - 30 * DPR, _p[1] - 17 * DPR, 60 * DPR, 12 * DPR]; if (HOME.name && _p[1] < BOT && !hitOB(hb)) txt(HOME.name, _p[0], _p[1] - 11 * DPR, '#fbbf24', 8.5); } }
   if (pickI){ var pp = pickI.p; if (seen(pp)){ proj(pp, _p); oc.strokeStyle = '#fff'; oc.lineWidth = 2 * DPR; oc.beginPath(); oc.arc(_p[0], _p[1], 9 * DPR, 0, 6.2832); oc.stroke(); } }
 }
 
