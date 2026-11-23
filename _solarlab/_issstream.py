@@ -15,13 +15,16 @@ UA = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit
 
 PROXY = 'https://proxy.bluishvoid.com/?url='   # YouTube answers GitHub's runners with 429; the site's Cloudflare proxy reads it instead
 
+def via_proxy(url):
+    h = dict(UA, Origin='https://bluishvoid.com')
+    return urllib.request.urlopen(urllib.request.Request(PROXY + urllib.parse.quote(url, safe=''), headers=h), timeout=40).read().decode('utf-8', 'replace')
+
 def get(url):
     try:
         return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=40).read().decode('utf-8', 'replace')
     except Exception as e:
         print('direct read failed (%s); trying the proxy' % e)
-        h = dict(UA, Origin='https://bluishvoid.com')
-        return urllib.request.urlopen(urllib.request.Request(PROXY + urllib.parse.quote(url, safe=''), headers=h), timeout=40).read().decode('utf-8', 'replace')
+        return via_proxy(url)
 
 def candidates():
     h = get('https://www.youtube.com/@NASA/streams')
@@ -34,6 +37,9 @@ def candidates():
 
 def confirm(vid):
     h = get('https://www.youtube.com/watch?v=' + vid)
+    if '"playabilityStatus"' not in h or '"ownerChannelName"' not in h:
+        print(vid, 'watch page came back stripped (bot check on the runner); reading it through the proxy')
+        h = via_proxy('https://www.youtube.com/watch?v=' + vid)
     live = '"isLiveNow":true' in h
     owner = re.search(r'"ownerChannelName":"([^"]+)"', h)
     title = re.search(r'"title":"([^"]*International Space Station[^"]*)"', h)
