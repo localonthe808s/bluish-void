@@ -1088,10 +1088,21 @@
   window._bvFlockSync = function(st, hw){
     try {
       var sb = hw && hw.parentNode && hw.parentNode.classList && hw.parentNode.classList.contains('today-tl-sky-bar') ? hw.parentNode : null;
-      if (st !== 'clear-day' || !sb || window.BV_LITE || C.slow || reduced() || typeof window.bvFlock !== 'function'){ off(); return; }
+      if (st !== 'clear-day' || !sb || window.BV_LITE || C.slow || reduced() || typeof window.bvFlock !== 'function'){ C.clearSince = 0; C.last = st; off(); return; }
       if (document.getElementById('site-loading-screen')){
         if (!C.wait) C.wait = setTimeout(function(){ C.wait = 0; var h = document.getElementById('hero-wx'); window._bvFlockSync(C.last, h); }, 400);
         C.last = st; return;
+      }
+      /* WAIT FOR THE OBSERVED SKY (user 2026-11-23: "whats going on with the birds", a recording of them flashing in at load and
+         vanishing): the hero is first drawn from the model's hour (clear), then ~1.5 s later the airport reports land and the
+         observed cover can turn it overcast (_heroSkyCode, only upward). Launching on the model's clear sky put the flock up for a
+         moment and took it down again. So the flock waits until the observed clouds are in -- or 6 s, if they never come */
+      if (!C.f){
+        if (!C.clearSince) C.clearSince = performance.now();
+        if (performance.now() - C.clearSince < 2500){   /* the sky must STAY clear 2.5 s: the observed/radar re-reads turn it within ~2 s */
+          if (!C.wait) C.wait = setTimeout(function(){ C.wait = 0; var h = document.getElementById('hero-wx'); window._bvFlockSync(C.last, h); }, 600);
+          C.last = st; return;
+        }
       }
       C.last = st;
       if (!C.cv){ C.cv = document.createElement('canvas'); C.cv.id = 'hero-flock'; C.cv.style.cssText = 'position:absolute;left:0;top:0;z-index:0;pointer-events:none;'; }
