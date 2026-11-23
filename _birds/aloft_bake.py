@@ -77,6 +77,7 @@ def night(code, day):
         seen.add(k); prof.setdefault(r['datetime'], []).append(r)
     times = sorted(prof)
     tr = 0.0; vids = []; su = sv = sw = sh = 0.0; n = 0; hr = {}; dark0 = None
+    T0 = dt.datetime(day.year, day.month, day.day, 15, tzinfo=dt.timezone.utc); HB = {}   # the shared clock: hourly bins from 15:00Z to 08:00Z
     for i, ts in enumerate(times):
         t = dt.datetime.strptime(ts, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=dt.timezone.utc)
         if t.date() == day and t.hour < 10: continue            # the morning before this night
@@ -87,7 +88,7 @@ def night(code, day):
         if i + 1 < len(times):
             t2 = dt.datetime.strptime(times[i + 1], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=dt.timezone.utc)
             dtm = max(1, min(30, (t2 - t).total_seconds() / 60.0)) / 60.0
-        vid = mtr = 0.0
+        vid = mtr = pu = pv = 0.0
         for r in prof[ts]:
             h = fnum(r['height'])
             if h is None or h < H0 or h >= H1 or r.get('gap', '').upper() == 'TRUE': continue
@@ -96,20 +97,25 @@ def night(code, day):
             w = de * 0.2                                         # birds/km^2 in this 200 m bin
             vid += w
             if ff is not None: mtr += w * ff * 3.6               # birds per km of front per hour
-            if u is not None and v is not None: su += w * u; sv += w * v
+            if u is not None and v is not None: su += w * u; sv += w * v; pu += w * u; pv += w * v
             sw += w; sh += w * (h + 100)
         vids.append(vid); tr += mtr * dtm; n += 1
         k = int((t - dark0).total_seconds() // 3600); hr.setdefault(k, []).append(vid)
+        b = int((t - T0).total_seconds() // 3600)
+        if 0 <= b < 17: e = HB.setdefault(b, [0.0, 0.0, 0.0, 0]); e[0] += mtr; e[1] += pu; e[2] += pv; e[3] += 1
     if n < 24: return None                                       # less than two hours of dark profiles
     hd = (math.degrees(math.atan2(su, sv)) + 360) % 360 if sw > 0 else None
     ff = math.hypot(su, sv) / sw if sw > 0 else None
     hours = [round(sum(hr[k]) / len(hr[k]), 1) for k in sorted(hr)]
     hrs = n * 5 / 60.0
+    um = [None] * 17; ud = [None] * 17   # per UTC hour from 15:00Z: mean traffic (birds/km/h) and heading; None = daylight or no data
+    for b, e in HB.items():
+        um[b] = round(e[0] / e[3]); ud[b] = round((math.degrees(math.atan2(e[1], e[2])) + 360) % 360) if (e[1] or e[2]) else None
     # q = 1 trusted; q = 0: the echoes drifted slower than birds fly (a night-mean ground speed under 5 m/s), more likely insects or clutter
     # q = 2: faster than birds travel over a whole night (mean over 20 m/s, ~70 km/h): more likely weather moving through
     q = 0 if (ff is not None and ff < 5 and tr > 500) else 2 if (ff is not None and ff > 20 and tr > 500) else 1
     return dict(c=code, lat=round(lat, 4), lon=round(lon, 4), tr=round(tr), mtr=round(tr / max(hrs, 0.1)), vid=round(max(vids), 1),
-                hd=None if hd is None else round(hd), ff=None if ff is None else round(ff, 1), h=round(sh / sw) if sw > 0 else None, hr=hours, q=q)
+                hd=None if hd is None else round(hd), ff=None if ff is None else round(ff, 1), h=round(sh / sw) if sw > 0 else None, hr=hours, q=q, um=um, ud=ud)
 
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else 'out'; lim = int(sys.argv[2]) if len(sys.argv) > 2 else 0
@@ -147,7 +153,7 @@ def main():
     R.sort(key=lambda r: -r['tr'])
     os.makedirs(os.path.join(out, 'aloft'), exist_ok=True)
     doc = dict(night=day.isoformat(), made=dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%MZ'), n=len(R),
-               source='Aloft (aloftdata.eu), BALTRAD vertical profiles of birds, CC0', heights='%d-%d m' % (H0, H1), radars=R)
+               source='Aloft (aloftdata.eu), BALTRAD vertical profiles of birds, CC0', heights='%d-%d m' % (H0, H1), clock='um/ud: hourly from %sT15:00Z' % day.isoformat(), radars=R)
     json.dump(doc, open(os.path.join(out, 'aloft', 'latest.json'), 'w'), separators=(',', ':'))
     print('night of', day, '->', last, ':', len(R), 'radars of', len(todo), '; busiest', [(r['n'], r['tr']) for r in R[:5]])
 
