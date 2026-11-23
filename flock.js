@@ -1088,7 +1088,11 @@
   window._bvFlockSync = function(st, hw){
     try {
       var sb = hw && hw.parentNode && hw.parentNode.classList && hw.parentNode.classList.contains('today-tl-sky-bar') ? hw.parentNode : null;
-      if (st !== 'clear-day' || !sb || window.BV_LITE || C.slow || reduced() || typeof window.bvFlock !== 'function'){ C.clearSince = 0; C.last = st; off(); return; }
+      /* THE BIRDS FLY UNDER CLOUD TOO (user 2026-11-23: "yeah add them to partly cloudy and overcast"): starlings murmurate under grey
+         skies (the big winter displays often are); they fly far below the deck, so they are drawn over it. Daytime only -- partly and
+         overcast are the same hero states by night -- and never in rain, snow, storms or fog (they shelter) */
+      var flyOK = st === 'clear-day' || ((st === 'partly' || st === 'overcast') && (function(){ try { return sun().alt > -2; } catch(e){ return false; } })());
+      if (!flyOK || !sb || window.BV_LITE || C.slow || reduced() || typeof window.bvFlock !== 'function'){ C.clearSince = 0; C.last = st; off(); return; }
       if (document.getElementById('site-loading-screen')){
         if (!C.wait) C.wait = setTimeout(function(){ C.wait = 0; var h = document.getElementById('hero-wx'); window._bvFlockSync(C.last, h); }, 400);
         C.last = st; return;
