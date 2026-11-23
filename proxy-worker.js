@@ -47,6 +47,7 @@ const CACHE_RULES = {
   'water.noaa.gov':               300,
   'api.water.noaa.gov':           600,     // NWPS gauges (2026-11-17): THE CITY's live gauges read stageflow through &shape=stageflow
   'coast.noaa.gov':               86400,
+  'www.youtube.com':              1800,   // ISS stream check (2026-11-22): YouTube 429s GitHub runners; _issstream.py reads NASA's /streams + watch pages through here
   'erddap.ifremer.fr':            3600,   // Argo: one float's year of profiles, on tap (WATER > ARGO FLOATS, 2026-10-25)  // Sea Level Rise Viewer flood-depth tiles (static; the LOCAL tide map recolors them)
   // ── transit agencies' GTFS-realtime vehicle positions (LOCAL TRAFFIC tab; _transitbake/hosts.txt, 2026-10-16) ──
   'api.cityofkingston.ca': 15,
