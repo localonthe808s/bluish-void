@@ -84,7 +84,7 @@ var FS = [
 '    float lump = oct > 1 ? nz((p + w * 1.15) * vec3(0.42, 0.42, 0.42)) : 0.5;',
 '    float fine = oct > 3 ? nz((p + w * 1.3) * vec3(1.4, 1.4, 1.4)) : 0.5;',
 '    float foot = cells * 1.25 + big * 0.35 - mix(1.12, 0.62, uCover);',
-'    float d = foot * 1.9 - h * h * 0.9 - (lump - 0.5) * (0.35 + 0.5 * h) - (fine - 0.5) * 0.08;',
+'    float d = foot * 1.9 - pow(h, 1.35) * 1.25 - (lump - 0.5) * (0.55 + 0.7 * h) - (fine - 0.5) * 0.1;   /* tapering to a rounded dome, deep billows on the sides: big ones read as blocks with straight walls (user 2026-11-23: "fix the rectangular cloud near the moon") */',
 '    return smoothstep(0.0, 0.1, d) * smoothstep(0.0, 0.03, h); }',
 /* 2 rain and 5 snow: the nimbostratus deck */
 '  float big = nz((p + w) * vec3(0.03, 0.05, 0.03));',
@@ -241,7 +241,7 @@ var R = {
   'mainly':      [{ type: 1, B0: 1.2, B1: 3.1, cover: .05, glow: 0, az: -0.5, px: 0, atmo: 1 }, null],
   'clear-night': [null, { type: 6, B0: 1.2, B1: 3.1, cover: 0, glow: 0, az: 0.3, px: 0, twi: 1 }],
   'overcast':    [{ type: 0, B0: 1.1, B1: 2.4, cover: .86, glow: 0, az: -0.45, px: 0 }, { type: 0, B0: 1.1, B1: 2.4, cover: .8, glow: .25, el: 34, az: 0.42, px: 0 }],
-  'partly':      [{ type: 1, B0: 1.2, B1: 3.1, cover: .33, glow: 0, az: -0.55, px: 0, atmo: 1 },   /* the scattering sky + palette: at sunset the plain sky went grey */ { type: 1, B0: 1.2, B1: 3.1, cover: .33, glow: .3, el: 38, az: 0.38, px: 0 }],
+  'partly':      [{ type: 1, B0: 1.2, B1: 3.1, cover: .46, glow: 0, az: -0.55, px: 0, atmo: 1 },   /* the scattering sky + palette: at sunset the plain sky went grey */ { type: 1, B0: 1.2, B1: 3.1, cover: .46, glow: .3, el: 38, az: 0.38, px: 0 }],   /* .46: the rounder cumulus hold less cloud each */
   'fog':         [{ type: 4, B0: 0, B1: 0.24, cover: 1, glow: 0, az: -0.3, px: 0 }, { type: 4, B0: 0, B1: 0.24, cover: 1, glow: .5, el: 24, az: 0.35, px: 0 }],
   'drizzle':     [{ type: 2, B0: 0.45, B1: 1.9, cover: .8, glow: 0, az: -0.4, px: 3 }, { type: 2, B0: 0.45, B1: 1.9, cover: .8, glow: .35, el: 34, az: 0.42, px: 3 }],
   'rain':        [{ type: 2, B0: 0.6, B1: 3.4, cover: .92, glow: 0, az: -0.4, px: 2 }, { type: 2, B0: 0.6, B1: 3.4, cover: .92, glow: .35, el: 34, az: 0.42, px: 2 }],
