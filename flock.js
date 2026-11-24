@@ -776,7 +776,7 @@
       playMotion: function(k){ if (MOTIONS[k]){ FORM.motion = k; SEQ = MOTIONS[k]; FORM.i = 0; FORM.t = 0; startPhrase(SEQ[0][0]); } kick(); },
       form: function(){ return { motion: FORM.motion, sat: FORM.sat, loose: FORM.loose, phrase: FORM.name, i: FORM.i, D: FORM.D, kf: FORM.kf, knot: [KN.x, KN.y], leader: [LD.x, LD.y] }; },
       stats: function(){ var hot = 0, gh = 0, my = 0; for (var i = 0; i < N; i++){ if (sk[i] > 0.4) hot++; if (role[i]) gh++; if (py[i] > my) my = py[i]; }
-        return { n: N, target: target(), mode: plan.mode, home: gh, fps: st.fps, sim: st.sim, draw: st.draw, steps: st.steps,
+        return { moon: o.moon, n: N, target: target(), mode: plan.mode, home: gh, fps: st.fps, sim: st.sim, draw: st.draw, steps: st.steps,
                  falcon: hawk.on ? ['stoop', 'pull-out', 'circling', 'leaving'][hawk.phase] : '', hawkRoll: hawk.roll, hawkX: hawk.x, hawkY: hawk.y, jet: jet.on, trail: TR.t.length, startled: hot,
                  jetX: jet.x, jetY: jet.y, dodge: dodge, maxY: my, floor: floorY() }; },
       destroy: function(){ alive = false; if (raf) cancelAnimationFrame(raf); if (io) io.disconnect(); document.removeEventListener('visibilitychange', onVis); }
@@ -1061,6 +1061,11 @@
     if (pt){ var pr = pt.getBoundingClientRect(); if (pr.height > 0 && H > 0){ var f = (pr.top - sr.top - 10) / H; if (f > 0.3 && f < 0.98) fl = f; } }
     var moon = null, me = document.querySelector('#panel-hero-row .hero-moon canvas, #panel-hero-row .hero-moon .moon-img') || document.querySelector('#panel-hero-row .hero-moon');
     if (me){ var mr = me.getBoundingClientRect(); if (mr.width > 10 && mr.height > 10) moon = { x: (mr.left + mr.right) / 2 - sr.left, y: (mr.top + mr.bottom) / 2 - sr.top, r: Math.min(mr.width, mr.height) / 2 }; }
+    /* NO MOON ROOST ON THE NEW SKIES (user 2026-11-24: "i just want to make sure we no longer have the rule about birds appearing and exiting
+       from the moon since they fly in front now"): the moon is drawn IN the v8 sky, under this canvas, so a bird 'going home' into it
+       vanished on its face. Without a moon the flock's own default holds -- birds arrive and leave just past the top-right corner -- and
+       every keep-clear-of-the-disc rule (forms, falcon, coast birds) switches off with it */
+    if (window.bvSky3D7 && window.bvSky3D8) moon = null;
     /* the top: below the summary (#conditions-briefing) -- the panel reaches the card top, under the date bar and the
        briefing text, and the flock flew through the words */
     var top = 0.08, bf = sb.querySelector('#conditions-briefing');
