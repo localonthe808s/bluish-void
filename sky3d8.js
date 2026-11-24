@@ -462,7 +462,7 @@ var cv = document.createElement('canvas'), px = document.createElement('canvas')
    below it -- the stretch is the blur -- fading out toward the hourly artwork. Its being in the sky bar switches the page's mirror off */
 /* THE HORIZON HAZE (11-24, user: the hard line at the hero's bottom): the clouds fade into the glow's flat colour over the hero's bottom
    HZ px, so the hero runs into the strip with no edge. It sits right after the cloud canvas (under the hero's text) */
-var haze = document.createElement('div'); haze.className = 'hero-s3d-haze'; var HZ = 150;
+var haze = document.createElement('div'); haze.className = 'hero-s3d-haze'; haze.style.opacity = '0';   /* starts hidden: it used to start at 1, fade out, then back in */ var HZ = 150;
 var glow = document.createElement('canvas'); glow.className = 'hero-s3d hero-s3d-glow'; glow.width = 32; glow.height = 4; var gctx = glow.getContext('2d', { willReadFrequently: true });
 /* 11-24 (user: "take the clouds out of the mirrored view, just match the sky color and rain type animation if there"): the glow is ONE flat
    sky colour for every sky (the bluest half of the hero's bottom band, so cloud pixels drop out); clouds stop at the hero's edge; the rain
@@ -700,7 +700,7 @@ function frame(now){
   var deck = sc.lay[0] && sc.lay[0][3] > 0.75, dim = (!S.lt.nt && deck) ? (sc.key === 'fog' ? 0.72 : 0.85) : 1, fl = dim < 1 ? 'brightness(' + dim + ')' : ''; if (cv.style.filter !== fl) cv.style.filter = fl;
   /* 1 + 6: reveal once the history has settled (12 frames); then keep a snapshot of this sky for the next visit */
   S.conv = (S.conv || 0) + 1;
-  if (S.conv === 12){ SNAP.revealAt = now; cv.style.opacity = '1'; glow.style.opacity = '1'; haze.style.opacity = '1'; if (SNAP.shown){ snapImg.style.opacity = '0'; } var ee = document.getElementById('hero-snap-early'); if (ee){ ee.style.opacity = '0'; setTimeout(function(){ if (ee.parentNode) ee.parentNode.removeChild(ee); }, 700); } }   /* and the page's own early snapshot (index.html) */
+  if (S.conv === 12){ S.shown = true; SNAP.revealAt = now; cv.style.opacity = '1'; glow.style.opacity = '1'; haze.style.opacity = '1'; if (SNAP.shown){ snapImg.style.opacity = '0'; } var ee = document.getElementById('hero-snap-early'); if (ee){ ee.style.opacity = '0'; setTimeout(function(){ if (ee.parentNode) ee.parentNode.removeChild(ee); }, 700); } }   /* and the page's own early snapshot (index.html) */
   if (S.conv === 40 || S.conv === 900) snapSave();
   if (glow.parentNode && S.host){ var gt2 = (S.host.offsetTop + S.host.offsetHeight - 2) + 'px'; if (glow.style.top !== gt2){ glow.style.top = gt2; hazePlace(); } }
   if (sc.inside && S.frame % 15 === 0) rectHide(true);   /* the hero re-renders its SVG */
@@ -741,7 +741,7 @@ function placeC(){ var host = S.host; if (!host) return; var t = host.offsetTop,
 function place(){ var host = S.host; if (!host) return; var t = host.offsetTop, h = host.offsetHeight; if (S.pt === t && S.ph === h) return; S.pt = t; S.ph = h;
   var m = 'linear-gradient(to bottom,#000 0,#000 ' + h + 'px,transparent ' + (h + EXT) + 'px)', css = 'position:absolute;left:0;right:0;top:' + t + 'px;height:' + (h + EXT) + 'px;width:100%;pointer-events:none;z-index:0;-webkit-mask-image:' + m + ';mask-image:' + m + ';';
   px.style.cssText = css; lxc.style.cssText = css; if (LX && LXS){ LXS.W = px.clientWidth || LXS.W; LXS.H = px.clientHeight || LXS.H; LX.scene(LXS); } }
-function stop(){ rectHide(false); if (glow.parentNode) glow.parentNode.removeChild(glow); if (haze.parentNode) haze.parentNode.removeChild(haze); S.sc = null; S.key = ''; [cv, px, lxc, snapImg].forEach(function(c){ if (c.parentNode) c.parentNode.removeChild(c); }); if (raf){ cancelAnimationFrame(raf); raf = 0; } lxLive(false); LX = null; LXS = null; }
+function stop(){ S.shown = false; rectHide(false); if (glow.parentNode) glow.parentNode.removeChild(glow); if (haze.parentNode) haze.parentNode.removeChild(haze); S.sc = null; S.key = ''; [cv, px, lxc, snapImg].forEach(function(c){ if (c.parentNode) c.parentNode.removeChild(c); }); if (raf){ cancelAnimationFrame(raf); raf = 0; } lxLive(false); LX = null; LXS = null; }
 
 /* ---------------- the page's API ---------------- */
 function sync(host, o){
@@ -749,7 +749,8 @@ function sync(host, o){
   var sc = scene(o); if (!sc){ stop(); return false; }
   sc.inside = /^(clear-day|clear-night|mainly|partly)$/.test(o.state === 'clear-day' && o.code === 1 ? 'mainly' : o.state);
   var key = sc.key + '|' + (o.night ? 1 : 0);
-  if (S.key !== key){ S.key = key; RT.cal = 1; RT.fill = 4; S.conv = 0; if (!(SNAP.shown && !S.sc)) SNAP.shown = false; SNAP.revealAt = 0; cv.style.opacity = '0'; JET.J = null; }   /* an early snapshot stays up through the first sync */
+  if (S.key !== key && S.shown && S.sc && !!S.sc.inside === !!sc.inside){ S.key = key; JET.J = null; }   /* ONE CLEAN LAUNCH (user 11-24: the fade bar "bounces around a lot" on launch): once the sky has appeared it never fades out again -- a new scene (the cloud reading arriving, the weather changing) morphs in through the frame history instead of a fade to empty and back */
+  else if (S.key !== key){ S.key = key; RT.cal = 1; RT.fill = 4; S.conv = 0; if (!(SNAP.shown && !S.sc)) SNAP.shown = false; SNAP.revealAt = 0; cv.style.opacity = '0'; JET.J = null; }   /* an early snapshot stays up through the first sync */
   S.sc = sc; S.host = host; S.sunAlt = +o.sunAlt; S.eve = !!o.eve; S.night = o.night ? 1 : 0; S.pal = o.pal || null; S.lt = light();
   windFetch(); starLoad(); attach(); if (!READY || S.conv < 12) snapShow(); lxSync(sc);
   kick(); return true; }
