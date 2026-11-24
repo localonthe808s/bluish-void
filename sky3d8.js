@@ -669,7 +669,7 @@ document.addEventListener('visibilitychange', function(){ if (!document.hidden) 
 function kick(){ if (!raf && S.sc) raf = requestAnimationFrame(frame); }
 function frame(now){
   raf = 0; if (!S.sc) return;
-  if (!cv.isConnected || (!S.sc.inside && cv.nextSibling !== S.host) || !px.isConnected){ var h2 = (S.host && S.host.isConnected) ? S.host : document.getElementById('hero-wx'); if (!h2) return; S.host = h2; attach(); }
+  if (!cv.isConnected || (!S.sc.inside && cv.nextSibling !== S.host) || !px.isConnected || (S.host && !S.host.classList.contains('hero-s3d-bg'))){ var h2 = (S.host && S.host.isConnected) ? S.host : document.getElementById('hero-wx'); if (!h2) return; S.host = h2; attach(); }
   if (document.hidden || !S.seen) return;
   raf = requestAnimationFrame(frame);
   if (!READY){ tryReady(); return; }
@@ -697,7 +697,9 @@ function frame(now){
 
 /* ---------------- placement (as v7: cloudy skies run on below the hero box; clear-ish skies sit inside it) ---------------- */
 var EXT = 120;
+var BGCSS = document.createElement('style'); BGCSS.textContent = '#hero-wx.hero-s3d-bg{background:transparent !important;}';   /* the hero box paints its own sky gradient on clear days (the old sky's): over the canvas, now under the box, it hid the clouds (user 11-24 screenshot "that broke it") */
 function attach(){ var host = S.host, sc = S.sc; if (!host || !sc) return;
+  if (!BGCSS.parentNode) document.head.appendChild(BGCSS); if (!host.classList.contains('hero-s3d-bg')) host.classList.add('hero-s3d-bg');
   var par = host.parentNode;
   if (!sc.inside && par){ if (cv.parentNode !== par || cv.nextSibling !== host) par.insertBefore(cv, host); S.ct = null; placeC(); }
   else { cv.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:0;transition:opacity .6s ease;opacity:' + (S.conv >= 12 ? 1 : 0) + ';'; S.ct = null; if (cv.parentNode !== host || host.firstChild !== cv) host.insertBefore(cv, host.firstChild); }
@@ -714,7 +716,7 @@ function placeC(){ var host = S.host; if (!host) return; var t = host.offsetTop,
 function place(){ var host = S.host; if (!host) return; var t = host.offsetTop, h = host.offsetHeight; if (S.pt === t && S.ph === h) return; S.pt = t; S.ph = h;
   var m = 'linear-gradient(to bottom,#000 0,#000 ' + h + 'px,transparent ' + (h + EXT) + 'px)', css = 'position:absolute;left:0;right:0;top:' + t + 'px;height:' + (h + EXT) + 'px;width:100%;pointer-events:none;z-index:0;-webkit-mask-image:' + m + ';mask-image:' + m + ';';
   px.style.cssText = css; lxc.style.cssText = css; if (LX && LXS){ LXS.W = px.clientWidth || LXS.W; LXS.H = px.clientHeight || LXS.H; LX.scene(LXS); } }
-function stop(){ S.sc = null; S.key = ''; [cv, px, lxc, snapImg].forEach(function(c){ if (c.parentNode) c.parentNode.removeChild(c); }); if (raf){ cancelAnimationFrame(raf); raf = 0; } lxLive(false); LX = null; LXS = null; }
+function stop(){ if (S.host) S.host.classList.remove('hero-s3d-bg'); S.sc = null; S.key = ''; [cv, px, lxc, snapImg].forEach(function(c){ if (c.parentNode) c.parentNode.removeChild(c); }); if (raf){ cancelAnimationFrame(raf); raf = 0; } lxLive(false); LX = null; LXS = null; }
 
 /* ---------------- the page's API ---------------- */
 function sync(host, o){
