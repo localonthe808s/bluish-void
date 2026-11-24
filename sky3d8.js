@@ -720,7 +720,7 @@ function stop(){ S.sc = null; S.key = ''; [cv, px, lxc, snapImg].forEach(functio
 function sync(host, o){
   if (!host || !o || o.state === 'clear-night' || !start()){ stop(); return false; }
   var sc = scene(o); if (!sc){ stop(); return false; }
-  sc.inside = /^(clear-day|mainly|partly)$/.test(o.state === 'clear-day' && o.code === 1 ? 'mainly' : o.state);
+  sc.inside = false;   /* EVERY SKY RUNS ON BELOW THE HERO (user 11-24: "improve the bottoms so the mirroring isnt so obvious and trippy"): clear and partly skies sat inside the hero box, where _bvHorizonMask mirrored their bottom edge -- reflected clouds. Outside, in the sky bar, the mirror switches itself off and the real sky continues EXT px and fades */
   var key = sc.key + '|' + (o.night ? 1 : 0);
   if (S.key !== key){ S.key = key; RT.cal = 1; RT.fill = 4; S.conv = 0; if (!(SNAP.shown && !S.sc)) SNAP.shown = false; SNAP.revealAt = 0; cv.style.opacity = '0'; JET.J = null; }   /* an early snapshot stays up through the first sync */
   S.sc = sc; S.host = host; S.sunAlt = +o.sunAlt; S.eve = !!o.eve; S.night = o.night ? 1 : 0; S.pal = o.pal || null; S.lt = light();
