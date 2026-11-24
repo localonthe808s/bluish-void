@@ -462,7 +462,7 @@ var cv = document.createElement('canvas'), px = document.createElement('canvas')
    below it -- the stretch is the blur -- fading out toward the hourly artwork. Its being in the sky bar switches the page's mirror off */
 /* THE HORIZON HAZE (11-24, user: the hard line at the hero's bottom): the clouds fade into the glow's flat colour over the hero's bottom
    HZ px, so the hero runs into the strip with no edge. It sits right after the cloud canvas (under the hero's text) */
-var haze = document.createElement('div'); haze.className = 'hero-s3d-haze'; var HZ = 110;
+var haze = document.createElement('div'); haze.className = 'hero-s3d-haze'; var HZ = 150;
 var glow = document.createElement('canvas'); glow.className = 'hero-s3d hero-s3d-glow'; glow.width = 32; glow.height = 4; var gctx = glow.getContext('2d', { willReadFrequently: true });
 /* 11-24 (user: "take the clouds out of the mirrored view, just match the sky color and rain type animation if there"): the glow is ONE flat
    sky colour for every sky (the bluest half of the hero's bottom band, so cloud pixels drop out); clouds stop at the hero's edge; the rain
@@ -721,7 +721,7 @@ function attach(){ var host = S.host, sc = S.sc; if (!host || !sc) return;
   if (snapImg.parentNode !== cv.parentNode || snapImg.nextSibling !== cv) cv.parentNode.insertBefore(snapImg, cv);
   if (haze.parentNode !== cv.parentNode || haze.previousSibling !== cv) cv.parentNode.insertBefore(haze, cv.nextSibling); hazePlace(); rectHide(!!sc.inside);
   if (par){ var gt = host.offsetTop + host.offsetHeight - 2,   /* 2 px into the hero: its fractional bottom row showed the box's dark background */
-    m = 'linear-gradient(to bottom,#000 0,rgba(0,0,0,.55) 45%,transparent 100%)', gb = glow.style.backgroundColor;
+    m = 'linear-gradient(to bottom,#000 0,rgba(0,0,0,.97) 12%,rgba(0,0,0,.86) 28%,rgba(0,0,0,.62) 46%,rgba(0,0,0,.36) 64%,rgba(0,0,0,.14) 82%,transparent 100%)', gb = glow.style.backgroundColor;
     glow.style.cssText = 'position:absolute;left:0;top:' + gt + 'px;width:100%;height:' + EXT + 'px;pointer-events:none;z-index:0;opacity:' + (S.conv >= 12 ? 1 : 0) + ';transition:opacity .6s ease,background-color 2s linear;-webkit-mask-image:' + m + ';mask-image:' + m + ';' + (gb ? 'background-color:' + gb + ';' : '');
     if (glow.parentNode !== par || glow.previousSibling !== host) par.insertBefore(glow, host.nextSibling);
     if (px.parentNode !== par || px.previousSibling !== glow) par.insertBefore(px, glow.nextSibling); if (lxc.parentNode !== par || lxc.previousSibling !== px) par.insertBefore(lxc, px.nextSibling); S.pt = null; place(); }
@@ -729,7 +729,7 @@ function attach(){ var host = S.host, sc = S.sc; if (!host || !sc) return;
 /* the clear-sky hero SVG paints the OLD sky gradient (one full-size rect) over our canvas inside the box: a pale panel and a step at the
    bottom edge. Hidden while v8 draws an inside sky, restored otherwise */
 function rectHide(on){ var sv = S.host && S.host.querySelector(':scope > svg'); if (sv) Array.prototype.forEach.call(sv.querySelectorAll(':scope > rect'), function(r){ if (on && /^url\(/.test(r.getAttribute('fill') || '')){ if (r.style.display !== 'none'){ r.style.display = 'none'; r.setAttribute('data-s3d-hid', '1'); } } else if (!on && r.hasAttribute('data-s3d-hid')){ r.style.display = ''; r.removeAttribute('data-s3d-hid'); } }); }
-function hazePlace(){ var host = S.host; if (!host) return; var h = host.offsetHeight, f = Math.min(HZ, Math.round(h * 0.3)), top = (haze.parentNode === host ? 0 : host.offsetTop) + h - f, bg = haze.style.backgroundColor, m = 'linear-gradient(to bottom,transparent 0,rgba(0,0,0,.5) 55%,#000 100%)';
+function hazePlace(){ var host = S.host; if (!host) return; var h = host.offsetHeight, f = Math.min(HZ, Math.round(h * 0.34)), top = (haze.parentNode === host ? 0 : host.offsetTop) + h - f, bg = haze.style.backgroundColor, m = 'linear-gradient(to bottom,transparent 0,rgba(0,0,0,.03) 12%,rgba(0,0,0,.12) 25%,rgba(0,0,0,.3) 40%,rgba(0,0,0,.55) 55%,rgba(0,0,0,.78) 70%,rgba(0,0,0,.93) 84%,#000 100%)';   /* smoothstep: flat at both ends, so no kink where it meets the glow */
   haze.style.cssText = 'position:absolute;left:0;top:' + top + 'px;width:100%;height:' + f + 'px;pointer-events:none;z-index:0;opacity:' + (S.conv >= 12 ? 1 : 0) + ';transition:opacity .6s ease,background-color 2s linear;-webkit-mask-image:' + m + ';mask-image:' + m + ';' + (bg ? 'background-color:' + bg + ';' : ''); }
 function placeC(){ var host = S.host; if (!host) return; var t = host.offsetTop, h = host.offsetHeight;
   var inS = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:0;';
