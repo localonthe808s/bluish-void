@@ -674,25 +674,35 @@ function drawLay(sc, w, h, LT){ gl.viewport(0, 0, w, h); gl.useProgram(P2); var 
    loads the very image the page shows, at the element's place and size and inside its clip circle, then fades the element out; it
    comes back whenever the engine is not drawing it (stopped, clear nights -- whose photo sky lies over the clouds -- or no image) */
 var MOON = { tex: null, src: '', loading: '', on: false, off: false, x: 0, y: 0, r: 0, d: 0.936, el: null, hid: false };
-var MOONCSS = document.createElement('style'); MOONCSS.textContent = '#moon-mini-img{transition:opacity .6s ease;} #moon-mini-img.s3d-moon-in-sky{opacity:0 !important;}';
+var MOONCSS = document.createElement('style'); MOONCSS.textContent = '#moon-mini-img.s3d-moon-in-sky, html.s3d-moon-wait #moon-mini-img{opacity:0 !important;} #moon-mini-img.s3d-moon-fade{transition:opacity .6s ease;}';
+/* NO FLASH (user 11-24: "they still flash on launch"): the page's moon showed at full strength until the engine had loaded the photo, then
+   dropped to its veiled look. Now it waits hidden from launch until the sky is known -- shown at once on a clear night (its photo sky
+   keeps the page's moon), never shown when the engine draws it; 8 s is the fallback if the engine never starts. No fade either way */
+function moonWait(on){ var d = document.documentElement; if (on){ if (!MOONCSS.parentNode) document.head.appendChild(MOONCSS); d.classList.add('s3d-moon-wait'); clearTimeout(MOON.wt); MOON.wt = setTimeout(function(){ moonWait(false); }, 8000); } else { d.classList.remove('s3d-moon-wait'); clearTimeout(MOON.wt); } }
 function moonHi(sc){ return !!(MOON.on && MOON.tex && !MOON.off && sc && !sc.cb); }
 function moonEl(){ var e = document.getElementById('moon-mini-img'); return (e && e.tagName === 'IMG') ? e : null; }
 function moonSync(){ var e = moonEl(); MOON.el = e; MOON.on = false;
-  if (!e || !S.sc || S.sc.hold || !e.isConnected){ moonShow(true); return; }
-  var src = e.currentSrc || e.src || '', cs = getComputedStyle(e); if (!src || cs.display === 'none' || cs.visibility === 'hidden' || !e.complete){ moonShow(true); return; }
+  var src = e ? (e.currentSrc || e.src || '') : '', cs = e ? getComputedStyle(e) : null;
+  if (e && src && gl){
   if (src !== MOON.src && src !== MOON.loading){ MOON.loading = src; var im = new Image(); im.crossOrigin = 'anonymous';
-    im.onload = function(){ if (MOON.loading !== src) return; try { var t = MOON.tex || gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, im); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-      gl.generateMipmap(gl.TEXTURE_2D); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      MOON.tex = t; MOON.src = src; } catch(err){ MOON.off = true; } MOON.loading = ''; };
-    im.onerror = function(){ if (MOON.loading === src) MOON.loading = ''; MOON.src = ''; }; im.src = src; }
-  if (!MOON.tex || MOON.src !== src){ moonShow(true); return; }   /* until this image is in the engine the page's moon stays */
+      im.onload = function(){ if (MOON.loading !== src) return; try { var t = MOON.tex || gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, im); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        gl.generateMipmap(gl.TEXTURE_2D); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        MOON.tex = t; MOON.src = src; } catch(err){ MOON.off = true; } MOON.loading = ''; };
+      im.onerror = function(){ if (MOON.loading === src) MOON.loading = ''; MOON.src = ''; }; im.src = src; }
+  }   /* loaded even on a clear night: a switch to a cloudy sky then has the photo ready (waiting for it showed the page's moon) */
+  if (!e || !S.sc || S.sc.hold || !e.isConnected){ moonShow(true); moonWait(false); return; }
+  if (!src || cs.display === 'none' || cs.visibility === 'hidden'){ moonShow(true); moonWait(false); return; }
+  if (!MOON.tex){ moonShow(true); if (!MOON.loading) moonWait(false); return; }   /* nothing to draw yet: the page's moon (still hidden while the first photo loads) */
+  /* a new photo (another day) still loading: keep drawing the one we have -- showing the page's moon in between was the flash */
   var r = e.getBoundingClientRect(), c = cv.getBoundingClientRect(); if (r.width < 8 || c.width < 8 || c.height < 8){ moonShow(true); return; }
   MOON.x = (r.left + r.width / 2 - c.left) / c.width; MOON.y = 1 - (r.top + r.height / 2 - c.top) / c.height; MOON.r = (r.height / 2) / c.height;
   var clip = /circle\(([\d.]+)%/.exec(cs.clipPath || ''); MOON.d = clip ? Math.min(1, 2 * parseFloat(clip[1]) / 100) : 0.936;   /* circle(46.8%) of the side = 0.936 of the half-side */
   if (MOON.y < -0.2 || MOON.y > 1.2){ moonShow(true); return; }
-  MOON.on = !MOON.off; moonShow(!(MOON.on && S.shown)); }
+  MOON.on = !MOON.off; var show = MOON.on && S.shown && S.conv >= 12, fading = show && performance.now() - (SNAP.revealAt || 0) < 700;   /* hand over once the sky is up; while a new sky fades in, the page's moon fades out with it (no gap, no jump) */
+  if (e.classList.contains('s3d-moon-fade') !== fading) e.classList.toggle('s3d-moon-fade', fading); moonShow(!show); if (show) moonWait(false); }
 function moonShow(page){ var e = MOON.el || moonEl(); if (!e) return; if (!MOONCSS.parentNode) document.head.appendChild(MOONCSS);
   if (page){ if (e.classList.contains('s3d-moon-in-sky')) e.classList.remove('s3d-moon-in-sky'); } else if (!e.classList.contains('s3d-moon-in-sky')) e.classList.add('s3d-moon-in-sky'); }
+
 
 /* ---------------- precipitation in depth (the lab's FSP3) ---------------- */
 function precip(){ var sc = S.sc, k = sc.wx || 0;
@@ -818,13 +828,14 @@ function placeC(){ var host = S.host; if (!host) return; var t = host.offsetTop,
 function place(){ var host = S.host; if (!host) return; var t = host.offsetTop, h = host.offsetHeight; if (S.pt === t && S.ph === h) return; S.pt = t; S.ph = h;
   var m = 'linear-gradient(to bottom,#000 0,#000 ' + h + 'px,transparent ' + (h + EXT) + 'px)', css = 'position:absolute;left:0;right:0;top:' + t + 'px;height:' + (h + EXT) + 'px;width:100%;pointer-events:none;z-index:0;-webkit-mask-image:' + m + ';mask-image:' + m + ';';
   px.style.cssText = css; lxc.style.cssText = css; if (LX && LXS){ LXS.W = px.clientWidth || LXS.W; LXS.H = px.clientHeight || LXS.H; LX.scene(LXS); } }
-function stop(){ S.glowReady = false; MOON.on = false; moonShow(true); clearTimeout(S.holdT); S.holdAt = 0; S.shown = false; rectHide(false); if (glow.parentNode) glow.parentNode.removeChild(glow); if (haze.parentNode) haze.parentNode.removeChild(haze); S.sc = null; S.key = ''; [cv, px, lxc, snapImg].forEach(function(c){ if (c.parentNode) c.parentNode.removeChild(c); }); if (raf){ cancelAnimationFrame(raf); raf = 0; } lxLive(false); LX = null; LXS = null; }
+function stop(){ S.glowReady = false; MOON.on = false; moonShow(true); moonWait(false); clearTimeout(S.holdT); S.holdAt = 0; S.shown = false; rectHide(false); if (glow.parentNode) glow.parentNode.removeChild(glow); if (haze.parentNode) haze.parentNode.removeChild(haze); S.sc = null; S.key = ''; [cv, px, lxc, snapImg].forEach(function(c){ if (c.parentNode) c.parentNode.removeChild(c); }); if (raf){ cancelAnimationFrame(raf); raf = 0; } lxLive(false); LX = null; LXS = null; }
 
 /* ---------------- the page's API ---------------- */
 function sync(host, o){
   if (!host || !o || !start()){ stop(); return false; }
   var sc = scene(o); if (!sc){ stop(); return false; }
   sc.hold = o.state === 'clear-night';   /* PERF 1 */
+  if (sc.hold){ MOON.on = false; moonShow(true); moonWait(false); }   /* clear night: the page's moon, at once */
   sc.inside = /^(clear-day|clear-night|mainly|partly)$/.test(o.state === 'clear-day' && o.code === 1 ? 'mainly' : o.state);
   var key = sc.key + '|' + (o.night ? 1 : 0);
   var _newSky = S.key !== key;
@@ -832,7 +843,7 @@ function sync(host, o){
   else if (S.key !== key){ S.key = key; RT.cal = 1; RT.fill = 4; S.conv = 0; S.glowReady = false; glow.style.opacity = '0'; if (!(SNAP.shown && !S.sc)) SNAP.shown = false; SNAP.revealAt = 0; cv.style.opacity = '0'; JET.J = null; }   /* an early snapshot stays up through the first sync */
   if (_newSky || !S.sc || !S.sc.hold){ S.holdF = null; S.holdAt = 0; }   /* a new sky (or a new hold): settle and read again before holding */
   S.sc = sc; S.host = host; S.sunAlt = +o.sunAlt; S.eve = !!o.eve; S.night = o.night ? 1 : 0; S.pal = o.pal || null; S.lt = light();
-  windFetch(); starLoad(); attach(); if (!READY || S.conv < 12) snapShow(); lxSync(sc);
+  windFetch(); starLoad(); attach(); try { moonSync(); } catch(e){}   /* the moon hands over the moment a new sky arrives */ if (!READY || S.conv < 12) snapShow(); lxSync(sc);
   kick(); return true; }
 /* ---------------- STILLS for other views (11-24, user: "i dont think golden hour is useing the new clouds yet") ----------------
    One converged image of a sky from classifyClouds() types and a sun altitude, for SKY > GOLDEN HOUR's two panels (and any other
@@ -880,8 +891,8 @@ function stillNext(){ var it = STILLQ.shift(); if (!it){ STILLBUSY = false; retu
   requestAnimationFrame(step); }
 
 window.bvSky3D8 = { ok: function(){ return start(); }, ready: function(){ return READY; }, sync: sync, stop: stop, still: still,
-  early: snapEarly,
-  stats: function(){ return { hold: !!(S.sc && S.sc.hold), cad: RT.cad, glowDone: GLOW.done, wind: WND.v.map(function(v){ return Math.round(Math.hypot(v[0], v[1])); }), fps: S.fps, w: cv.width, h: cv.height, shaded: RT.L ? RT.L.w + 'x' + RT.L.h : '', q: RT.q, ms: RT.ms, scene: S.key, ready: READY, snap: SNAP.shown, lightning: LX ? LX.stats() : null }; } };
+  early: function(){ var e = moonEl(); if (!(e && e.complete && e.naturalWidth > 0)) moonWait(true); return snapEarly(); },   /* only while the page's moon is not on screen yet: hiding one already shown was a blink */
+  stats: function(){ return { moon: { on: MOON.on, tex: !!MOON.tex, src: (MOON.src || '').slice(-28), loading: (MOON.loading || '').slice(-28), off: MOON.off, x: +MOON.x.toFixed(3), y: +MOON.y.toFixed(3) }, hold: !!(S.sc && S.sc.hold), cad: RT.cad, glowDone: GLOW.done, wind: WND.v.map(function(v){ return Math.round(Math.hypot(v[0], v[1])); }), fps: S.fps, w: cv.width, h: cv.height, shaded: RT.L ? RT.L.w + 'x' + RT.L.h : '', q: RT.q, ms: RT.ms, scene: S.key, ready: READY, snap: SNAP.shown, lightning: LX ? LX.stats() : null }; } };
 /* nothing starts until the page switches v8 on (below): visitors on v7 pay only the download */
 })();
 
