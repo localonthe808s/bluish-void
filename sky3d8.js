@@ -526,7 +526,7 @@ function layersFromTypes(types){ var L = [null, null, null];
   return L; }
 function weatherScene(st){ var k = { drizzle: 's-st-dz', rain: 's-ns-rn', 'rain-heavy': 's-ns-rn', freezing: 's-ns-fz', snow: 's-ns-sn', sleet: 's-ns-sl', storm: 's-cb-ov', 'storm-hail': 's-cb-hl' }[st];
   var r = k && row(k); if (!r) return null; return { lay: [r[2], r[3], r[4]], wx: st === 'rain-heavy' ? 5 : (r[6] || 0), cb: r[7] || 0, wxShow: r[8] == null ? 0.2 : r[8], tilt: r[7] === 1 ? 0.008 : 0, key: k + (st === 'rain-heavy' ? '+heavy' : '') }; }
-function scene(o){ var st = o.state;
+function scene(o){ var st = o.state === 'clear-night' ? 'clear-day' : o.state;   /* clear nights (11-24): the clear sky, lit by the night light + the month's stars */
   var w = weatherScene(st); if (w) return w;
   if (st === 'fog') return { lay: [[7.0, 0.04, 0.6, 1.0], null, null], wx: 0, cb: 0, tilt: 0, key: 'fog' };
   var L = layersFromTypes(window._bvCloudNow), any = L[0] || L[1] || L[2];
@@ -543,7 +543,7 @@ function sunAt(lat, lon, d){ var rad = Math.PI / 180, jd = d.getTime() / 864e5 +
   var el = Math.asin(Math.sin(la) * Math.sin(dec) + Math.cos(la) * Math.cos(dec) * Math.cos(ha)), az = Math.atan2(-Math.sin(ha), Math.tan(dec) * Math.cos(la) - Math.sin(la) * Math.cos(ha));
   return { el: el / rad, az: ((az / rad) + 360) % 360 }; }
 function azElVec(az, el){ var a = az * Math.PI / 180, e = el * Math.PI / 180; return [Math.cos(e) * Math.cos(a), Math.sin(e), -Math.cos(e) * Math.sin(a)]; }   /* view faces WEST: x north (screen right), y up, z west */
-function light(){ var Lc = window.LOCATION || {}, lat = isFinite(+Lc.lat) ? +Lc.lat : 40.7, lon = isFinite(+Lc.lon) ? +Lc.lon : -74.0, now = new Date(), s = sunAt(lat, lon, now);
+function light(){ var Lc = window.LOCATION || {}, lat = isFinite(+Lc.lat) ? +Lc.lat : 40.7, lon = isFinite(+Lc.lon) ? +Lc.lon : -74.0, now = window.BV_S3D_NOW ? new Date(window.BV_S3D_NOW) : new Date(), s = sunAt(lat, lon, now);   /* BV_S3D_NOW: a preview hook (test a night by day) */
   var doy = Math.floor((now - new Date(now.getFullYear(), 0, 0)) / 864e5), sea = 0.5 + 0.5 * Math.cos(2 * Math.PI * (doy - 172) / 365) * (lat < 0 ? -1 : 1);
   if (s.el > -7) return { L: azElVec(s.az, Math.max(s.el, -6)), el: s.el, nt: 0, sea: sea, lat: lat, lon: lon };
   var m = sunAt(lat, lon, new Date(now.getTime() + 12 * 3600e3)), mel = Math.max(-s.el * 0.6, 4);   /* night: a moon-like light high opposite the sun */
@@ -745,9 +745,9 @@ function stop(){ rectHide(false); if (glow.parentNode) glow.parentNode.removeChi
 
 /* ---------------- the page's API ---------------- */
 function sync(host, o){
-  if (!host || !o || o.state === 'clear-night' || !start()){ stop(); return false; }
+  if (!host || !o || !start()){ stop(); return false; }
   var sc = scene(o); if (!sc){ stop(); return false; }
-  sc.inside = /^(clear-day|mainly|partly)$/.test(o.state === 'clear-day' && o.code === 1 ? 'mainly' : o.state);
+  sc.inside = /^(clear-day|clear-night|mainly|partly)$/.test(o.state === 'clear-day' && o.code === 1 ? 'mainly' : o.state);
   var key = sc.key + '|' + (o.night ? 1 : 0);
   if (S.key !== key){ S.key = key; RT.cal = 1; RT.fill = 4; S.conv = 0; if (!(SNAP.shown && !S.sc)) SNAP.shown = false; SNAP.revealAt = 0; cv.style.opacity = '0'; JET.J = null; }   /* an early snapshot stays up through the first sync */
   S.sc = sc; S.host = host; S.sunAlt = +o.sunAlt; S.eve = !!o.eve; S.night = o.night ? 1 : 0; S.pal = o.pal || null; S.lt = light();
@@ -763,6 +763,6 @@ window.bvSky3D8 = { ok: function(){ return start(); }, ready: function(){ return
    (the photo sky + twilight) either way. Once v8 is verified on the live site, this becomes the default. */
 (function(){ var on = /[?&]s3d8=1/.test(location.search) || window.BV_SKY3D8; if (!on || !window.bvSky3D8) return; var v7 = window.bvSky3D, v8 = window.bvSky3D8; window.bvSky3D7 = v7; v8.ok(); v8.early();   /* LAUNCH STEPS 2 + 3: start compiling and building the noise now, in the background */
   window.bvSky3D = { ok: function(){ return v8.ok() || !!(v7 && v7.ok()); },
-    sync: function(h, o){ if (o && o.state === 'clear-night'){ v8.stop(); return v7 ? v7.sync(h, o) : false; } if (v7) v7.stop(); return v8.sync(h, o); },
+    sync: function(h, o){ if (v7) v7.stop(); return v8.sync(h, o); },   /* clear nights too, since 11-24 */
     stop: function(){ v8.stop(); if (v7) v7.stop(); }, stats: function(){ return v8.stats(); } };
   try { if (typeof window._updateHeroWx === 'function' && window._lastWxCode != null) setTimeout(function(){ try { window._updateHeroWx(window._lastWxCode, window._lastWxNight); } catch(e){} }, 0); } catch(e){} })();
