@@ -333,7 +333,43 @@ function sync(host, o){
   S.sc = sc; S.host = host; S.sunAlt = +o.sunAlt; S.eve = !!o.eve; S.night = o.night ? 1 : 0; S.pal = o.pal || null; S.lt = light();
   windFetch(); starLoad(); attach(); if (!READY || S.conv < 12) snapShow(); lxSync(sc);
   kick(); return true; }
-window.bvSky3D8 = { ok: function(){ return start(); }, ready: function(){ return READY; }, sync: sync, stop: stop,
+/* ---------------- STILLS for other views (11-24, user: "i dont think golden hour is useing the new clouds yet") ----------------
+   One converged image of a sky from classifyClouds() types and a sun altitude, for SKY > GOLDEN HOUR's two panels (and any other
+   view that wants one). o: { w, h (px), hzF (the horizon's height as a fraction of h, from the bottom), sa (sun altitude, deg),
+   types, az (sun azimuth, deg: 270 = straight ahead) }. Six jittered frames, one per animation frame (no stall), averaged on
+   the CPU; the hero's own targets and history are not touched. cb(canvas) on success, cb(null) if it cannot draw. */
+var STILLQ = [], STILLBUSY = false;
+function still(o, cb){ if (!READY || !gl){ cb(null); return false; } STILLQ.push([o, cb]); if (!STILLBUSY) stillNext(); return true; }
+function stillNext(){ var it = STILLQ.shift(); if (!it){ STILLBUSY = false; return; } STILLBUSY = true; var o = it[0], cb = it[1];
+  var w = Math.max(32, Math.round(o.w)), h = Math.max(32, Math.round(o.h)), N = 10, acc = new Float32Array(w * h * 3), px8 = new Uint8Array(w * h * 4), k = 0;
+  var L = layersFromTypes(o.types || []), sc = { lay: L, wx: 0, cb: 0, tilt: 0 };
+  var asp = w / h, tH = 0.7, tV = tH / asp, f = Math.max(0.02, Math.min(0.9, o.hzF == null ? 0.27 : o.hzF));
+  sc.tilt = -Math.atan(tV) - Math.atan((f - 0.5) * 2 * tV);   /* the bottom ray's elevation that puts the horizon at row f */
+  var sa = o.sa == null ? 3 : +o.sa, Lc = window.LOCATION || {}, lat = isFinite(+Lc.lat) ? +Lc.lat : 40.7, doy = Math.floor((Date.now() - new Date(new Date().getFullYear(), 0, 0)) / 864e5), sea = 0.5 + 0.5 * Math.cos(2 * Math.PI * (doy - 172) / 365) * (lat < 0 ? -1 : 1);
+  var az = o.az == null ? 285 : o.az, LT = sa > -7 ? { L: azElVec(az, Math.max(sa, -6)), el: sa, nt: 0, sea: sea } : { L: azElVec((az + 180) % 360, Math.max(-sa * 0.6, 4)), el: 4, nt: 1, sea: sea };
+  var tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  var fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  function fin(ok){ try { gl.deleteFramebuffer(fb); gl.deleteTexture(tex); } catch(e){}
+    var out = null; if (ok){ out = document.createElement('canvas'); out.width = w; out.height = h; var c2 = out.getContext('2d'), im = c2.createImageData(w, h), d = im.data;
+      var rowL = function(yt){ var gl0 = h - 1 - yt, sm = 0, n = 0; for (var xx = 0; xx < w; xx += Math.max(1, w >> 4)){ var q = (gl0 * w + xx) * 3; sm += acc[q] + acc[q + 1] + acc[q + 2]; n++; } return sm / n; };
+      var geo = Math.round(h * (1 - f)), hzRow = Math.max(1, geo - 2);   /* the ground's top edge: the sharp step down from sky to ground near the geometric horizon (it sits a little above it) */
+      for (var yt = Math.max(1, geo - 24); yt < Math.min(h, geo + 6); yt++){ var pv = rowL(yt - 1), cu = rowL(yt); if (cu < pv * 0.8){ hzRow = yt - 2; break; } }   /* below the horizon the sky carries on down (the view's own skyline stands there; the engine's ground showed as a grey band between the buildings) */
+      var hr = new Float32Array(w * 3), R = Math.max(2, Math.round(w / 10)), base = (h - 1 - hzRow) * w * 3;   /* the horizon row blurred sideways: copied straight down it left streaks */
+      for (var x0 = 0; x0 < w; x0++){ var s0 = 0, s1 = 0, s2 = 0, nn = 0; for (var dx = -R; dx <= R; dx++){ var xs = Math.max(0, Math.min(w - 1, x0 + dx)), q = base + xs * 3; s0 += acc[q]; s1 += acc[q + 1]; s2 += acc[q + 2]; nn++; } hr[x0 * 3] = s0 / nn; hr[x0 * 3 + 1] = s1 / nn; hr[x0 * 3 + 2] = s2 / nn; }
+      for (var y = 0; y < h; y++){ var sy = (h - 1 - Math.min(y, hzRow)) * w, below = y > hzRow; for (var x = 0; x < w; x++){ var a = (sy + x) * 3, b = (y * w + x) * 4, src = below ? hr : acc, o3 = below ? x * 3 : a; d[b] = src[o3] / N; d[b + 1] = src[o3 + 1] / N; d[b + 2] = src[o3 + 2] / N; d[b + 3] = 255; } }   /* flipped: GL rows run bottom-up */
+      c2.putImageData(im, 0, 0); }
+    try { cb(out); } catch(e){} setTimeout(stillNext, 0); }
+  function step(){ try {
+      var pal = S.pal, fr = S.frame, jit = JIT; S.pal = null; S.frame = 7 * k + 3; JIT = [((k * 0.618034) % 1) - 0.5, ((k * 0.754878 + 0.31) % 1) - 0.5];   /* a low-discrepancy spread of sub-pixel offsets */
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb); drawLay(sc, w, h, LT); gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px8); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      S.pal = pal; S.frame = fr; JIT = jit;
+      for (var i = 0, j = 0; i < px8.length; i += 4, j += 3){ acc[j] += px8[i]; acc[j + 1] += px8[i + 1]; acc[j + 2] += px8[i + 2]; }
+      if (++k < N) requestAnimationFrame(step); else fin(true);
+    } catch(e){ fin(false); } }
+  requestAnimationFrame(step); }
+
+window.bvSky3D8 = { ok: function(){ return start(); }, ready: function(){ return READY; }, sync: sync, stop: stop, still: still,
   early: snapEarly,
   stats: function(){ return { fps: S.fps, w: cv.width, h: cv.height, shaded: RT.L ? RT.L.w + 'x' + RT.L.h : '', q: RT.q, ms: RT.ms, scene: S.key, ready: READY, snap: SNAP.shown, lightning: LX ? LX.stats() : null }; } };
 /* nothing starts until the page switches v8 on (below): visitors on v7 pay only the download */
