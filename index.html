@@ -13702,6 +13702,7 @@ window._heroSkyCode = function(code, modelCover){
     if (typeof window._cloudCon === 'function'){
       cover = Math.max(cover, window._cloudCon('low'), window._cloudCon('mid'), window._cloudCon('high'));
     }
+    if (typeof window._bvCloudNowCover === 'number' && Date.now() - (window._bvCloudNowCoverAt || 0) < 3 * 3600e3) cover = Math.max(cover, window._bvCloudNowCover);   /* ONE SKY: the layers the hero draws */
     // the same sky-cover buckets WMO 0-3 already encodes (clear / mainly clear /
     // partly cloudy / overcast), so a blended cover just re-derives its own code
     window._heroSkyCover = cover; window._heroSkyCoverAt = Date.now();   /* the cover the hero went by: the summary words its sky from the same number */
@@ -13709,6 +13710,26 @@ window._heroSkyCode = function(code, modelCover){
     return Math.max(code, derived);
   }catch(e){ return code; }
 };
+/* ONE SKY, EVERYWHERE (user 2026-11-24: "everything should follow the same readings from the heros to the hourlys to golden hour and
+   the summary, i dont want things to conflict"). The hero's code (_heroSkyCode: the model's cover blended with the airports, the cloud
+   consensus and radar) is the reading; this words it once, and the summary, GOLDEN HOUR's NOW heading and the hourly strip's
+   current hour all take their sky from here. Today only (another day has no "now"). */
+window._bvSkyNow = function(){
+  var c = window._lastWxCode; if (c == null || (window._tlDayOffset || 0) !== 0) return null;
+  var cv = window._heroSkyCover;
+  var w = c === 0 ? 'clear' : c === 1 ? 'mostly clear' : c === 2 ? 'partly cloudy' : c === 3 ? ((typeof cv === 'number' && cv < 88) ? 'mostly cloudy' : 'overcast')
+    : (c === 45 || c === 48) ? 'fog' : (c >= 51 && c <= 57) ? 'drizzle' : ((c >= 61 && c <= 67) || (c >= 80 && c <= 82)) ? 'rain'
+    : ((c >= 71 && c <= 77) || c === 85 || c === 86) ? 'snow' : c >= 95 ? 'thunderstorms' : null;
+  return w ? { code: c, word: w } : null;
+};
+window._bvSkyNowTitle = function(){ var s = window._bvSkyNow(); if (!s) return null;
+  return { rain: 'Raining', snow: 'Snowing', drizzle: 'Drizzle', thunderstorms: 'Thunderstorms', fog: 'Fog' }[s.word] || (s.word.charAt(0).toUpperCase() + s.word.slice(1)); };
+/* the hourly strip's current hour wears the same sky (it was the hour's forecast code) -- redrawn when the hero's code changes */
+window._bvSyncNowHourIcon = function(){ try {
+  var s = window._bvSkyNow(), el = document.querySelector('.today-tl-weather-icon[data-now="1"]'); if (!s || !el || !window.weatherIconSVG) return;
+  if (el.getAttribute('data-code') === String(s.code)) return;
+  el.innerHTML = window.weatherIconSVG(s.code, el.getAttribute('data-night') === '1', +el.getAttribute('data-h')); el.setAttribute('data-code', String(s.code));
+} catch(e){} };
 /* build/refresh the full-bleed hero weather layer inside #panel-hero-row */
 window._updateHeroWx = function(code, night){
   try{
@@ -36444,7 +36465,8 @@ function dayRangeAround(d, days){
         }catch(e){}
         var cnTypes = classifyClouds(cn);
         /* THE HERO DRAWS THESE TYPES (sky3d8.js, 2026-11-24): the classification of the sky now, for the volumetric hero; when the types change the hero re-syncs */
-        try { window._bvCloudNow = cnTypes; var _cnKey = (cnTypes || []).map(function(t){ return t.genus + ':' + t.species + ':' + Math.round((t.cover || 0) / 10); }).join('|'); if (_cnKey !== window._bvCloudKey){ window._bvCloudKey = _cnKey; if (window.bvSky3D7 && typeof window._updateHeroWx === 'function' && window._lastWxCode != null) setTimeout(function(){ try { window._updateHeroWx(window._lastWxCode, window._lastWxNight); } catch(e){} }, 0); } } catch(e){}
+        try { window._bvCloudNowCover = Math.max(cn.cL || 0, cn.cM || 0, cn.cH || 0); window._bvCloudNowCoverAt = Date.now(); } catch(e){}   /* ONE SKY: the layers the hero DRAWS feed the code it is WORDED by (they read two datasets: 15% cirrus drawn under a 0% 'clear') */
+        try { window._bvCloudNow = cnTypes; var _cnKey = (cnTypes || []).map(function(t){ return t.genus + ':' + t.species + ':' + Math.round((t.cover || 0) / 10); }).join('|'); if (_cnKey !== window._bvCloudKey){ window._bvCloudKey = _cnKey; setTimeout(function(){ try { if (window._lastWxCodeRaw != null && (window._tlDayOffset || 0) === 0 && window._heroSkyCode){ var _hc = window._heroSkyCode(window._lastWxCodeRaw, window._lastWxCover); if (_hc !== window._lastWxCode){ window._lastWxCode = _hc; try { if (window.updateConditionsBriefing) window.updateConditionsBriefing(); } catch(e){} } } if (typeof window._updateHeroWx === 'function' && window._lastWxCode != null) window._updateHeroWx(window._lastWxCode, window._lastWxNight); window._bvSyncNowHourIcon && window._bvSyncNowHourIcon(); } catch(e){} }, 0); } } catch(e){}
         var fcTypes = classifyClouds(fc);
 
         // ── SHARE THE HERO'S CLOUD ARTWORK ────────────────────────────────
@@ -38000,6 +38022,7 @@ function dayRangeAround(d, days){
           else if(cn.snow>0)d='Snowing';else if(cn.cL>85)d='Overcast';
           else if(cn.cL>50)d='Mostly cloudy';else if(cn.cT>50)d='Partly cloudy';
           else d='Clear';
+          if(saNow>=-2 && window._bvSkyNowTitle){ var _st=window._bvSkyNowTitle(); if(_st) d=_st; }   /* ONE SKY: the hero's word, not its own thresholds */
           nSub.textContent=fmt12s(now)+' \u00b7 '+d;
         }
         // Cloud source tag under the NOW time: OBS (+ station) when a live
@@ -39057,7 +39080,7 @@ function dayRangeAround(d, days){
                 window._nowcastRate = (here && !window._bioScatterNow && tiers[0]) ? { inhr: tiers[0].mm / 25.4, label: lbl, floodNow: !!floodNow, at: Date.now() } : { inhr: 0, label: null, floodNow: false, at: Date.now() };
                 /* the hero follows the radar's reading the moment it lands (it was skinned from the model before this ran) */
                 try { if (window._lastWxCodeRaw != null && (window._tlDayOffset || 0) === 0 && window._updateHeroWx){
-                  var _hc = window._heroSkyCode(window._lastWxCodeRaw, window._lastWxCover); if (_hc !== window._lastWxCode){ window._lastWxCode = _hc; window._updateHeroWx(_hc, window._lastWxNight); try { if (window.updateConditionsBriefing) window.updateConditionsBriefing(); } catch(e2){} } } } catch(e){}   /* ...and the summary with it */
+                  var _hc = window._heroSkyCode(window._lastWxCodeRaw, window._lastWxCover); if (_hc !== window._lastWxCode){ window._lastWxCode = _hc; window._updateHeroWx(_hc, window._lastWxNight); try { window._bvSyncNowHourIcon(); } catch(e){} try { if (window.updateConditionsBriefing) window.updateConditionsBriefing(); } catch(e2){} } } } catch(e){}   /* ...and the summary with it */
                 var el = document.getElementById('forecast-row');
                 // Live radar (when active) REPLACES the "REST OF DAY · MAX %" chance;
                 // the rain window (UNTIL/BURST) + storm flag always trail.
@@ -42328,6 +42351,9 @@ function dayRangeAround(d, days){
         var hPrecipAmt = (matchIdx >= 0 && hourly.precipitation) ? (hourly.precipitation[matchIdx] || 0) : 0;
         var hSnowAmt = (matchIdx >= 0 && hourly.snowfall) ? (hourly.snowfall[matchIdx] || 0) : 0;
         
+        /* ONE SKY: the current hour takes the hero's code (its forecast code could disagree with the hero beside it) */
+        var _isNowCol = (matchIdx >= 0 && matchIdx === nearestIndex && (window._tlDayOffset || 0) === 0);
+        if (_isNowCol && window._lastWxCode != null) weatherCode = window._lastWxCode;
         var weatherInfo = getWeatherAnimClass(weatherCode, isNightHour);
         var precipClass = precip >= 50 ? "active" : "";
         
@@ -42421,7 +42447,7 @@ function dayRangeAround(d, days){
         }
         weatherHtml += '<div class="' + hourClass + '">' +
           '<span class="today-tl-weather-time">' + timeLabel + '</span>' +
-          '<span class="today-tl-weather-icon" data-ani="' + ((weatherCode<=1) ? (isNightHour ? 'tw' : 'bob') : (weatherCode<=3 ? 'drift' : (weatherCode>=45&&weatherCode<=48 ? 'drift' : 'bob'))) + '">' + (window.weatherIconSVG ? window.weatherIconSVG(weatherCode, isNightHour, h) : weatherInfo.emoji) + '</span>' +
+          '<span class="today-tl-weather-icon"' + (_isNowCol ? ' data-now="1" data-h="' + h + '" data-night="' + (isNightHour ? 1 : 0) + '" data-code="' + weatherCode + '"' : '') + ' data-ani="' + ((weatherCode<=1) ? (isNightHour ? 'tw' : 'bob') : (weatherCode<=3 ? 'drift' : (weatherCode>=45&&weatherCode<=48 ? 'drift' : 'bob'))) + '">' + (window.weatherIconSVG ? window.weatherIconSVG(weatherCode, isNightHour, h) : weatherInfo.emoji) + '</span>' +
           '<span class="today-tl-weather-temp"' + _tempStyle + '>' + temp + '</span>' +
           '<span style="font-size:1rem;font-weight:400;color:' + feelsColor + ';text-shadow:0 1px 2px rgba(0,0,0,.4);">' + feelsLike + '</span>' +
           '<span style="font-size:.55rem;font-weight:600;color:' + windColor + ';text-shadow:0 1px 2px rgba(0,0,0,.4);display:block;text-align:center;width:100%;text-transform:uppercase;letter-spacing:.3px;">' + windStr + '</span>' +
@@ -44635,7 +44661,9 @@ function dayRangeAround(d, days){
        clear" under an overcast hero. Today it words the sky from the cover the hero went by */
     try { if ((window._tlDayOffset || 0) === 0 && typeof window._heroSkyCover === 'number' && Date.now() - (window._heroSkyCoverAt || 0) < 3 * 3600e3)
       wx.cloudCover = Math.max(wx.cloudCover == null ? 0 : wx.cloudCover, window._heroSkyCover); } catch(e){}
-    if(wx.cloudCover != null){
+    var _skyNow = window._bvSkyNow ? window._bvSkyNow() : null;   /* ONE SKY: the hero's reading, worded once */
+    if(_skyNow && _skyNow.code <= 3){ sky = _skyNow.word + ' skies'; }
+    else if(wx.cloudCover != null){
       if(wx.cloudCover <= 10) sky = 'clear skies';
       else if(wx.cloudCover <= 30) sky = 'mostly clear skies';
       else if(wx.cloudCover <= 60) sky = 'partly cloudy skies';
@@ -93479,6 +93507,7 @@ function initNowMicroTabs(){
         else if(sn3>0)d2='Snowing';else if(cL2>85)d2='Overcast';
         else if(cL2>50)d2='Mostly cloudy';else if((cL2+cM2+cH2)/3>50)d2='Partly cloudy';
         else d2='Clear';
+        if(sa>=-2 && window._bvSkyNowTitle){ var _st2=window._bvSkyNowTitle(); if(_st2) d2=_st2; }   /* ONE SKY */
         try{nSub2.textContent=now.toLocaleTimeString('en-US',{timeZone:typeof TZ!=='undefined'?TZ:undefined,hour:'numeric',minute:'2-digit',hour12:true})+' \u00b7 '+d2;}catch(e){}
       }
     }catch(e){}
