@@ -696,6 +696,7 @@ function glowPoll(){ if (!GLOW.fence) return; try {
   var m = Math.max(1, pxs.length >> 1), r = 0, g = 0, b = 0; for (i = 0; i < m; i++){ r += pxs[i][0]; g += pxs[i][1]; b += pxs[i][2]; }
   var dim = parseFloat((/brightness\(([\d.]+)\)/.exec(cv.style.filter || '') || [0, 1])[1]);   /* the canvas's legibility dimming applies to what shows */
   glow.style.backgroundColor = haze.style.backgroundColor = 'rgb(' + Math.round(Math.min(255, r / m * dim)) + ',' + Math.round(Math.min(255, g / m * dim)) + ',' + Math.round(Math.min(255, b / m * dim)) + ')'; GLOW.done++;
+  if (S.conv >= 6){ S.glowReady = true; if (S.conv >= 12 && glow.style.opacity !== '1') glow.style.opacity = '1'; }   /* the colour is this sky's: the band may show (in one step) */
 } catch(e){ GLOW.fence = null; } }
 function glowTop(){ if (glow.parentNode && S.host){ var gt2 = (S.host.offsetTop + S.host.offsetHeight - 2) + 'px'; if (glow.style.top !== gt2){ glow.style.top = gt2; hazePlace(); } } }
 
@@ -734,11 +735,11 @@ function frame(now){
   var deck = sc.lay[0] && sc.lay[0][3] > 0.75, dim = (!S.lt.nt && deck) ? (sc.key === 'fog' ? 0.72 : 0.85) : 1, fl = dim < 1 ? 'brightness(' + dim + ')' : ''; if (cv.style.filter !== fl) cv.style.filter = fl;
   /* 1 + 6: reveal once the history has settled (12 frames); then keep a snapshot of this sky for the next visit */
   S.conv = (S.conv || 0) + 1;
-  if (S.conv === 12){ S.shown = true; SNAP.revealAt = now; cv.style.opacity = '1'; glow.style.opacity = '1'; haze.style.opacity = '1'; if (SNAP.shown){ snapImg.style.opacity = '0'; } var ee = document.getElementById('hero-snap-early'); if (ee){ ee.style.opacity = '0'; setTimeout(function(){ if (ee.parentNode) ee.parentNode.removeChild(ee); }, 700); } }   /* and the page's own early snapshot (index.html) */
+  if (S.conv === 12){ S.shown = true; SNAP.revealAt = now; cv.style.opacity = '1'; if (S.glowReady) glow.style.opacity = '1'; haze.style.opacity = '1'; if (SNAP.shown){ snapImg.style.opacity = '0'; } var ee = document.getElementById('hero-snap-early'); if (ee){ ee.style.opacity = '0'; setTimeout(function(){ if (ee.parentNode) ee.parentNode.removeChild(ee); }, 700); } }   /* and the page's own early snapshot (index.html) */
   if (S.conv === 40 || S.conv === 900) snapSave();
   glowTop();
   if (sc.inside && S.frame % 15 === 0) rectHide(true);   /* the hero re-renders its SVG */
-  if (S.conv === 13 || now - GLOW.at > 1000) glowRequest();   /* once a second, async (PERF 3) */
+  if (S.conv === 6 || S.conv === 10 || now - GLOW.at > 1000) glowRequest();   /* reads at frames 6 and 10: the colour is in before the reveal at 12 */   /* once a second, async (PERF 3) */
   fr++; if (now - f0 > 1000){ S.fps = fr; fr = 0; f0 = now; if (sc.cb) lxLive(true); }
 }
 
@@ -752,7 +753,7 @@ function attach(){ var host = S.host, sc = S.sc; if (!host || !sc) return;
   if (haze.parentNode !== cv.parentNode || haze.previousSibling !== cv) cv.parentNode.insertBefore(haze, cv.nextSibling); hazePlace(); rectHide(!!sc.inside);
   if (par){ var gt = host.offsetTop + host.offsetHeight - 2,   /* 2 px into the hero: its fractional bottom row showed the box's dark background */
     m = 'linear-gradient(to bottom,#000 0,rgba(0,0,0,.97) 12%,rgba(0,0,0,.86) 28%,rgba(0,0,0,.62) 46%,rgba(0,0,0,.36) 64%,rgba(0,0,0,.14) 82%,transparent 100%)', gb = glow.style.backgroundColor;
-    glow.style.cssText = 'position:absolute;left:0;top:' + gt + 'px;width:100%;height:' + EXT + 'px;pointer-events:none;z-index:0;opacity:' + (S.conv >= 12 ? 1 : 0) + ';transition:opacity .6s ease,background-color 2s linear;-webkit-mask-image:' + m + ';mask-image:' + m + ';' + (gb ? 'background-color:' + gb + ';' : '');
+    glow.style.cssText = 'position:absolute;left:0;top:' + gt + 'px;width:100%;height:' + EXT + 'px;pointer-events:none;z-index:0;opacity:' + (S.conv >= 12 && S.glowReady ? 1 : 0) + ';-webkit-mask-image:' + m + ';mask-image:' + m + ';' + (gb ? 'background-color:' + gb + ';' : '');   /* NO fade (user 11-24: "i dont want an intial animated fade, i just want the end result"): it appears once, already its colour */
     if (glow.parentNode !== par || glow.previousSibling !== host) par.insertBefore(glow, host.nextSibling);
     if (px.parentNode !== par || px.previousSibling !== glow) par.insertBefore(px, glow.nextSibling); if (lxc.parentNode !== par || lxc.previousSibling !== px) par.insertBefore(lxc, px.nextSibling); S.pt = null; place(); }
 }
@@ -760,7 +761,7 @@ function attach(){ var host = S.host, sc = S.sc; if (!host || !sc) return;
    bottom edge. Hidden while v8 draws an inside sky, restored otherwise */
 function rectHide(on){ var sv = S.host && S.host.querySelector(':scope > svg'); if (sv) Array.prototype.forEach.call(sv.querySelectorAll(':scope > rect'), function(r){ if (on && /^url\(/.test(r.getAttribute('fill') || '')){ if (r.style.display !== 'none'){ r.style.display = 'none'; r.setAttribute('data-s3d-hid', '1'); } } else if (!on && r.hasAttribute('data-s3d-hid')){ r.style.display = ''; r.removeAttribute('data-s3d-hid'); } }); }
 function hazePlace(){ var host = S.host; if (!host) return; var h = host.offsetHeight, f = Math.min(HZ, Math.round(h * 0.34)), top = (haze.parentNode === host ? 0 : host.offsetTop) + h - f, bg = haze.style.backgroundColor, m = 'linear-gradient(to bottom,transparent 0,rgba(0,0,0,.03) 12%,rgba(0,0,0,.12) 25%,rgba(0,0,0,.3) 40%,rgba(0,0,0,.55) 55%,rgba(0,0,0,.78) 70%,rgba(0,0,0,.93) 84%,#000 100%)';   /* smoothstep: flat at both ends, so no kink where it meets the glow */
-  haze.style.cssText = 'position:absolute;left:0;top:' + top + 'px;width:100%;height:' + f + 'px;pointer-events:none;z-index:0;opacity:' + (S.conv >= 12 ? 1 : 0) + ';transition:opacity .6s ease,background-color 2s linear;-webkit-mask-image:' + m + ';mask-image:' + m + ';' + (bg ? 'background-color:' + bg + ';' : ''); }
+  haze.style.cssText = 'position:absolute;left:0;top:' + top + 'px;width:100%;height:' + f + 'px;pointer-events:none;z-index:0;opacity:' + (S.conv >= 12 ? 1 : 0) + ';transition:opacity .6s ease;-webkit-mask-image:' + m + ';mask-image:' + m + ';' + (bg ? 'background-color:' + bg + ';' : ''); }
 function placeC(){ var host = S.host; if (!host) return; var t = host.offsetTop, h = host.offsetHeight;
   var inS = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:0;';
   if (S.sc && S.sc.inside){ snapImg.style.cssText = inS + 'object-fit:cover;transition:opacity .6s ease;opacity:' + (SNAP.shown && !SNAP.revealAt ? 1 : 0) + ';'; return; }
@@ -771,7 +772,7 @@ function placeC(){ var host = S.host; if (!host) return; var t = host.offsetTop,
 function place(){ var host = S.host; if (!host) return; var t = host.offsetTop, h = host.offsetHeight; if (S.pt === t && S.ph === h) return; S.pt = t; S.ph = h;
   var m = 'linear-gradient(to bottom,#000 0,#000 ' + h + 'px,transparent ' + (h + EXT) + 'px)', css = 'position:absolute;left:0;right:0;top:' + t + 'px;height:' + (h + EXT) + 'px;width:100%;pointer-events:none;z-index:0;-webkit-mask-image:' + m + ';mask-image:' + m + ';';
   px.style.cssText = css; lxc.style.cssText = css; if (LX && LXS){ LXS.W = px.clientWidth || LXS.W; LXS.H = px.clientHeight || LXS.H; LX.scene(LXS); } }
-function stop(){ clearTimeout(S.holdT); S.holdAt = 0; S.shown = false; rectHide(false); if (glow.parentNode) glow.parentNode.removeChild(glow); if (haze.parentNode) haze.parentNode.removeChild(haze); S.sc = null; S.key = ''; [cv, px, lxc, snapImg].forEach(function(c){ if (c.parentNode) c.parentNode.removeChild(c); }); if (raf){ cancelAnimationFrame(raf); raf = 0; } lxLive(false); LX = null; LXS = null; }
+function stop(){ S.glowReady = false; clearTimeout(S.holdT); S.holdAt = 0; S.shown = false; rectHide(false); if (glow.parentNode) glow.parentNode.removeChild(glow); if (haze.parentNode) haze.parentNode.removeChild(haze); S.sc = null; S.key = ''; [cv, px, lxc, snapImg].forEach(function(c){ if (c.parentNode) c.parentNode.removeChild(c); }); if (raf){ cancelAnimationFrame(raf); raf = 0; } lxLive(false); LX = null; LXS = null; }
 
 /* ---------------- the page's API ---------------- */
 function sync(host, o){
@@ -782,7 +783,7 @@ function sync(host, o){
   var key = sc.key + '|' + (o.night ? 1 : 0);
   var _newSky = S.key !== key;
   if (S.key !== key && S.shown && S.sc && !!S.sc.inside === !!sc.inside){ S.key = key; JET.J = null; }   /* ONE CLEAN LAUNCH (user 11-24: the fade bar "bounces around a lot" on launch): once the sky has appeared it never fades out again -- a new scene (the cloud reading arriving, the weather changing) morphs in through the frame history instead of a fade to empty and back */
-  else if (S.key !== key){ S.key = key; RT.cal = 1; RT.fill = 4; S.conv = 0; if (!(SNAP.shown && !S.sc)) SNAP.shown = false; SNAP.revealAt = 0; cv.style.opacity = '0'; JET.J = null; }   /* an early snapshot stays up through the first sync */
+  else if (S.key !== key){ S.key = key; RT.cal = 1; RT.fill = 4; S.conv = 0; S.glowReady = false; glow.style.opacity = '0'; if (!(SNAP.shown && !S.sc)) SNAP.shown = false; SNAP.revealAt = 0; cv.style.opacity = '0'; JET.J = null; }   /* an early snapshot stays up through the first sync */
   if (_newSky || !S.sc || !S.sc.hold){ S.holdF = null; S.holdAt = 0; }   /* a new sky (or a new hold): settle and read again before holding */
   S.sc = sc; S.host = host; S.sunAlt = +o.sunAlt; S.eve = !!o.eve; S.night = o.night ? 1 : 0; S.pal = o.pal || null; S.lt = light();
   windFetch(); starLoad(); attach(); if (!READY || S.conv < 12) snapShow(); lxSync(sc);
