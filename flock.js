@@ -217,6 +217,7 @@
       FORM.loose = 1 + 0.4 * (0.5 + 0.5 * Math.sin(t * 0.1 + 2.2));
       if (FORM.name === 'free'){ roostAt(t); }
       KN.x += (KN.tx - KN.x) * Math.min(1, dt * 0.35); KN.y += (KN.ty - KN.y) * Math.min(1, dt * 0.35);
+      if (o.drift){ KN.x += o.drift[0] * 0.3 * dt; KN.y += o.drift[1] * 0.3 * dt; }   /* the gathering point leans downwind */
       /* the knot's heading: from its real motion (position + drift), turned at a bird-like rate, held when it hangs still */
       var kx2 = KN.x + KN.dx, ky2 = KN.y + KN.dy; if (!KH.init){ KH.px = kx2; KH.py = ky2; KH.init = true; }
       var mvx = kx2 - KH.px, mvy = ky2 - KH.py; KH.px = kx2; KH.py = ky2;
@@ -564,7 +565,8 @@
         if (!gl[i]) ph[i] += fr[i] * (1 + 0.6 * s) * dt;
       }
       var tmp = sk; sk = sk2; sk2 = tmp; ALL[12] = sk;
-      for (var p = 0; p < N; p++){ px[p] += vx[p] * dt; py[p] += vy[p] * dt; pz[p] += vz[p] * dt; if (py[p] > fl) py[p] = fl; }
+      var DX = (o.drift && o.drift[0]) || 0, DY = (o.drift && o.drift[1]) || 0;   /* THE WIND (2026-11-24, from the cloud lab): the air carries every bird */
+      for (var p = 0; p < N; p++){ px[p] += (vx[p] + DX) * dt; py[p] += (vy[p] + DY) * dt; pz[p] += vz[p] * dt; if (py[p] > fl) py[p] = fl; }
       populate(dt);
       st.steps++;
     }
@@ -759,7 +761,7 @@
         if (p.W != null || p.H != null){ var ow = W, oh = H; dims(p.W || W, p.H || H);
           for (var i = 0; i < N; i++){ px[i] *= W / ow; py[i] *= H / oh; } }
         if (p.sun) applySun(p.sun);
-        ['fps', 'falcon', 'showFalcon', 'size', 'band', 'floor', 'moon', 'jet', 'wind', 'trail', 'spread', 'contrail', 'n', 'zoom'].forEach(function(k){ if (p[k] !== undefined) o[k] = p[k]; });
+        ['fps', 'falcon', 'showFalcon', 'size', 'band', 'floor', 'moon', 'jet', 'wind', 'trail', 'spread', 'contrail', 'n', 'zoom', 'drift'].forEach(function(k){ if (p[k] !== undefined) o[k] = p[k]; });
         if (!o.sun && p.n != null) setN(o.n);
         if (!o.jet && jet.on){ jet.on = false; jet.next = t + 5; }
         if (!o.contrail){ TR.x.length = TR.y.length = TR.t.length = 0; }
@@ -1039,13 +1041,13 @@
   };
 
   var C = { f: null, cv: null, wait: 0, bad: 0, slow: false, airKey: '', airT: 0, tick: 0, last: null };
-  function off(){ if (C.f){ try { C.f.destroy(); } catch(e){} C.f = null; } if (C.cv && C.cv.parentNode) C.cv.parentNode.removeChild(C.cv); C.cv = null;
+  function off(){ if (C.f){ try { C.f.destroy(); } catch(e){} C.f = null; } if (C.cv && C.cv.parentNode) C.cv.parentNode.removeChild(C.cv); C.cv = null; if (C.g){ try { C.g.destroy(); } catch(e){} C.g = null; } if (C.gc && C.gc.parentNode) C.gc.parentNode.removeChild(C.gc); C.gc = null;
     if (C.tick){ clearInterval(C.tick); C.tick = 0; } }
   /* the sun's altitude at lat/lon now -- OWN COPY: the site's _sunAltNow lives inside the wx-icons script's IIFE and is
      not reachable from here (found live 10-05: every call threw, the flock sat at its midday fallback). Same low-
      precision formula, plus the equation of time (_sunAltNow leaves it out: sunset ~11 min late in October). */
-  function sunAltAt(lat, lon){
-    var d = new Date(), rad = Math.PI / 180, n = Math.floor((d - new Date(Date.UTC(d.getUTCFullYear(), 0, 0))) / 864e5), B = rad * 360 / 365 * (n - 81);
+  function sunAltAt(lat, lon, at){
+    var d = at || new Date(), rad = Math.PI / 180, n = Math.floor((d - new Date(Date.UTC(d.getUTCFullYear(), 0, 0))) / 864e5), B = rad * 360 / 365 * (n - 81);
     var eot = 9.87 * Math.sin(2 * B) - 7.53 * Math.cos(B) - 1.5 * Math.sin(B);
     var decl = -23.44 * Math.cos(rad * (360 / 365) * (n + 10)), solT = d.getUTCHours() + d.getUTCMinutes() / 60 + d.getUTCSeconds() / 3600 + lon / 15 + eot / 60, ha = (solT - 12) * 15;
     var s = Math.sin(rad * lat) * Math.sin(rad * decl) + Math.cos(rad * lat) * Math.cos(rad * decl) * Math.cos(rad * ha);
@@ -1065,8 +1067,36 @@
     if (bf){ var br = bf.getBoundingClientRect(); if (br.height > 0 && H > 0){ var tf = (br.bottom - sr.top + 16) / H; if (tf > 0 && tf < fl - 0.25) top = tf; } }
     return { W: W, H: H, floor: fl, moon: moon, band: [top, Math.max(top + 0.2, fl - 0.12)] };
   }
+  /* THE NEW SKIES' BIRDS (2026-11-24, from the cloud lab; only while the volumetric sky v8 is on -- window.bvSky3D7 is set by its
+     switch): they come out after FIRST SONG and are home by LAST SONG (the BIRDS widget's own detections, window._bvSongCues, as
+     sun angles; fallback the dawn chorus at -9 deg and the last song at -4 deg), the flock's own day plan stretched to that window;
+     fewer in strong wind or hard cold, lower under a heavy deck; carried by the surface wind; and geese skeins (geese in sky3d8.js) */
+  function v8(){ return !!(window.bvSky3D7 && window.bvSky3D8); }
+  function locMin(){ var d = new Date(); try { if (window.locNowNaive) d = window.locNowNaive(); } catch(e){} return d.getHours() * 60 + d.getMinutes() + d.getSeconds() / 60; }
+  function atMin(m){ return new Date(Date.now() + (m - locMin()) * 60e3); }
+  function songTH(){ var L = window.LOCATION, th = { first: -9, last: -4, fm: null, lm: null }; if (!L) return th;
+    try { var d = window.locNowNaive ? window.locNowNaive() : new Date(), k = d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2), c = (window._bvSongCues || {})[k] || {};
+      if (c.first && isFinite(c.first.m)){ th.fm = c.first.m; th.first = Math.max(-14, Math.min(-2, sunAltAt(L.lat, L.lon, atMin(c.first.m)))); }
+      if (c.last && isFinite(c.last.m)){ th.lm = c.last.m; th.last = Math.max(-12, Math.min(1, sunAltAt(L.lat, L.lon, atMin(c.last.m)))); } } catch(e){}
+    return th; }
+  function songOpen(){ var s = sun(), th = songTH(); return s.eve ? s.alt > th.last : s.alt > th.first; }
+  function stretched(s){ if (!v8()) return s; var th = songTH(), a = s.alt;
+    if (s.eve){ if (a < 2) a = -0.3 + Math.max(a - th.last, 0) * (2.3 / (2 - th.last)); } else if (a < 1.5) a = -0.8 + Math.max(a - th.first, 0) * (2.3 / (1.5 - th.first));
+    return { alt: a, eve: s.eve, month: s.month }; }
+  function mood(g, st){ var W = window._bvSkyWind, v = W ? W.surface() : [0, 0], spd = Math.hypot(v[0], v[1]), tc = W ? W.tempC() : null, S = Math.max(0.45, Math.min(1, g.W / 1180));
+    var fW = spd < 8 ? 1 : spd > 16 ? 0.3 : 1 - 0.7 * (spd - 8) / 8, fT = tc == null || tc > 0 ? 1 : tc < -12 ? 0.45 : 1 + 0.55 * tc / 12;
+    var band = st === 'overcast' ? [Math.max(g.band[0], 0.32), Math.max(g.band[1], 0.86)] : spd > 12 ? [Math.max(g.band[0], 0.16), g.band[1]] : g.band;
+    return { n: Math.round((phone() ? 380 : 650) * fW * fT), band: band, drift: [v[0] * 4 * S * 0.7, 0], wind: v }; }
+  function geese(sb, hw, g){ if (!v8() || typeof window.bvGeese !== 'function'){ if (C.g){ C.g.destroy(); C.g = null; } if (C.gc && C.gc.parentNode) C.gc.parentNode.removeChild(C.gc); C.gc = null; return; }
+    if (!C.gc){ C.gc = document.createElement('canvas'); C.gc.id = 'hero-geese'; C.gc.style.cssText = 'position:absolute;left:0;top:0;z-index:0;pointer-events:none;'; }
+    if (C.gc.parentNode !== sb || C.gc.nextSibling !== C.cv) sb.insertBefore(C.gc, C.cv);
+    var L = window.LOCATION || {}, d = new Date(); try { if (window.locNowNaive) d = window.locNowNaive(); } catch(e){}
+    var th = songTH(), rise = null, set = null, prev = null; for (var m = 0; m < 1440; m += 4){ var a = sunAltAt(L.lat, L.lon, atMin(m)); if (prev != null){ if (prev <= -0.83 && a > -0.83) rise = m; if (prev > -0.83 && a <= -0.83) set = m; } prev = a; }
+    var sn = { el: sun().alt, min: locMin(), month: d.getMonth() + 1, first: th.fm != null ? th.fm : (rise != null ? rise - 45 : null), last: th.lm != null ? th.lm : (set != null ? set + 20 : null), rise: rise, set: set }, md = mood(g, C.last);
+    if (!C.g) C.g = window.bvGeese(C.gc, { W: g.W, H: g.H, tH: 0.7, tilt: 0.03, lat: +L.lat || 40, sun: sn, wind: md.wind, seed: (Date.now() / 864e5) | 0 });
+    else C.g.set({ W: g.W, H: g.H, sun: sn, wind: md.wind, on: songOpen() }); }
   /* what to hand set(): the size only when it changed (setting it resizes the canvas), the rest always */
-  function box(g){ var p = { floor: g.floor, moon: g.moon, band: g.band, sun: sun() }; if (g.W !== C.gw || g.H !== C.gh){ p.W = g.W; p.H = g.H; C.gw = g.W; C.gh = g.H; } return p; }
+  function box(g){ var p = { floor: g.floor, moon: g.moon, band: g.band, sun: stretched(sun()) }; if (v8()){ var md = mood(g, C.last); p.n = md.n; p.band = md.band; p.drift = md.drift; p.jet = false; } if (g.W !== C.gw || g.H !== C.gh){ p.W = g.W; p.H = g.H; C.gw = g.W; C.gh = g.H; } return p; }
   function sun(){
     var today = (window._tlDayOffset || 0) === 0, alt = 45, d = new Date();
     try { if (today && window.LOCATION) alt = sunAltAt(LOCATION.lat, LOCATION.lon); } catch(e){}
@@ -1095,7 +1125,7 @@
       /* THE BIRDS FLY UNDER CLOUD TOO (user 2026-11-23: "yeah add them to partly cloudy and overcast"): starlings murmurate under grey
          skies (the big winter displays often are); they fly far below the deck, so they are drawn over it. Daytime only -- partly and
          overcast are the same hero states by night -- and never in rain, snow, storms or fog (they shelter) */
-      var flyOK = st === 'clear-day' || ((st === 'partly' || st === 'overcast') && (function(){ try { return sun().alt > -2; } catch(e){ return false; } })());
+      var flyOK = v8() ? (/^(clear-day|partly|overcast)$/.test(st) && songOpen()) : (st === 'clear-day' || ((st === 'partly' || st === 'overcast') && (function(){ try { return sun().alt > -2; } catch(e){ return false; } })()));
       if (!flyOK || !sb || window.BV_LITE || C.slow || reduced() || typeof window.bvFlock !== 'function'){ C.clearSince = 0; C.last = st; off(); return; }
       if (document.getElementById('site-loading-screen')){
         if (!C.wait) C.wait = setTimeout(function(){ C.wait = 0; var h = document.getElementById('hero-wx'); window._bvFlockSync(C.last, h); }, 400);
@@ -1126,7 +1156,7 @@
         var ph = phone();
         C.gw = g.W; C.gh = g.H; C.kind = kind;
         C.f = la ? bvCoast(C.cv, { W: g.W, H: g.H, floor: g.floor, moon: g.moon, band: g.band, sun: sun(), seed: (Date.now() / 864e5) | 0 })
-                 : bvFlock(C.cv, { W: g.W, H: g.H, floor: g.floor, moon: g.moon, band: g.band, sun: sun(), n: ph ? 380 : 650, jet: !ph, falcon: nyc, seed: (Date.now() / 864e5) | 0 });
+                 : bvFlock(C.cv, { W: g.W, H: g.H, floor: g.floor, moon: g.moon, band: g.band, sun: stretched(sun()), n: ph ? 380 : 650, jet: !ph && !v8(), falcon: nyc, seed: (Date.now() / 864e5) | 0 });   /* v8 draws the 3-D jet */
         air();
         /* the sun moves, the moon and the panel settle: re-read every 20 s; the watchdog every 2 s */
         var n = 0;
@@ -1137,11 +1167,12 @@
             if (s.fps > 5){ if (s.sim + s.draw > 9) C.bad++; else C.bad = Math.max(0, C.bad - 1); }
             if (C.bad >= 4){ C.slow = true; off(); return; }
           }
-          if (++n % 10 === 0){ var h2 = document.getElementById('hero-wx'); if (h2 && h2.parentNode){ var g2 = geom(h2.parentNode, h2); C.f.set(box(g2)); } air(); }
+          if (++n % 10 === 0 || v8()){ var h2 = document.getElementById('hero-wx'); if (h2 && h2.parentNode){ var g2 = geom(h2.parentNode, h2); C.f.set(box(g2)); geese(h2.parentNode, h2, g2); if (v8() && !songOpen()){ C.f.set({ n: 0 }); } } if (n % 10 === 0) air(); }
         }, 2000);
       } else {
         C.f.set(box(g));
       }
+      geese(sb, hw, g);
     } catch(e){}
   };
   window.addEventListener('resize', function(){ var h = document.getElementById('hero-wx'); if (C.f && h) window._bvFlockSync(C.last, h); });
