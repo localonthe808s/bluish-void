@@ -759,9 +759,9 @@ window.bvSky3D8 = { ok: function(){ return start(); }, ready: function(){ return
 /* nothing starts until the page switches v8 on (below): visitors on v7 pay only the download */
 })();
 
-/* THE SWITCH: v8 runs where ?s3d8=1 is in the address (or window.BV_SKY3D8 is set); everyone else keeps v7. Clear nights stay with v7
-   (the photo sky + twilight) either way. Once v8 is verified on the live site, this becomes the default. */
-(function(){ var on = /[?&]s3d8=1/.test(location.search) || window.BV_SKY3D8; if (!on || !window.bvSky3D8) return; var v7 = window.bvSky3D, v8 = window.bvSky3D8; window.bvSky3D7 = v7; v8.ok(); v8.early();   /* LAUNCH STEPS 2 + 3: start compiling and building the noise now, in the background */
+/* THE SWITCH: v8 is THE DEFAULT for everyone, phones included, since 2026-11-24 (user: "go for it"). ?s3d8=0 in the address turns it off
+   (v7 again). Where v8 cannot run (no WebGL2), v7 keeps every sky. */
+(function(){ var on = !/[?&]s3d8=0/.test(location.search); if (!on || !window.bvSky3D8 || !window.bvSky3D8.ok()) return; var v7 = window.bvSky3D, v8 = window.bvSky3D8; window.bvSky3D7 = v7; v8.early();   /* LAUNCH STEPS 2 + 3: start compiling and building the noise now, in the background */
   window.bvSky3D = { ok: function(){ return v8.ok() || !!(v7 && v7.ok()); },
     sync: function(h, o){ if (v7) v7.stop(); return v8.sync(h, o); },   /* clear nights too, since 11-24 */
     stop: function(){ v8.stop(); if (v7) v7.stop(); }, stats: function(){ return v8.stats(); } };

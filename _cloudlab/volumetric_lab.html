@@ -1,0 +1,1134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>BLUISH · CLOUD LAB</title>
+<!--
+  CLOUD LAB (2026-11-23; user: "build the lab for 4 but dont reinvent everything yet, show me as they are with a new example added",
+  with the overcast night hero as "one of the worst ones"). Top: the overcast night as the dashboard draws it today, and the same sky
+  rendered by a real-time volumetric shader (rays marched through a 3D cloud deck, light scattered from the moon above and the city
+  below). Below: every hero sky as it is now, drawn by the dashboard's own weatherHeroSVG in a hidden same-origin frame.
+  Local only (_cloudlab is git-excluded). Open http://localhost:8000/_cloudlab/volumetric_lab.html
+-->
+<style>
+  :root{ --bg:#0b0f1a; --ink:#e6edf7; --mut:#93a0b8; --acc:rgb(234,88,12); }
+  html, body{ margin:0; background:var(--bg); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  .lab-wrap{ max-width:1500px; margin:0 auto; padding:18px 16px 40px; }
+  .lab-h1{ font:850 1rem/1.2 system-ui,sans-serif; letter-spacing:.12em; margin:0 0 4px; }
+  .lab-sub{ font:700 .62rem/1.5 system-ui,sans-serif; letter-spacing:.1em; color:var(--mut); margin:0 0 16px; }
+  .lab-h2{ font:850 .72rem/1.2 system-ui,sans-serif; letter-spacing:.14em; margin:26px 0 10px; color:#fdba74; }
+  .lab-pair{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .lab-cell{ position:relative; border-radius:12px; overflow:hidden; background:#0f1626; }
+  .lab-cell .lab-lab{ position:absolute; left:10px; top:8px; z-index:3; font:850 .58rem/1 system-ui,sans-serif; letter-spacing:.14em; color:#fff; text-shadow:0 1px 4px rgba(0,0,0,.8); }
+  .lab-hero{ position:relative; width:100%; aspect-ratio:660/215; }
+  .lab-hero > svg, .lab-hero > canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+  .lab-ctl{ display:flex; flex-wrap:wrap; gap:10px 18px; align-items:center; margin:10px 0 0; font:800 .58rem/1 system-ui,sans-serif; letter-spacing:.12em; color:var(--mut); }
+  .lab-ctl input[type=range]{ accent-color:var(--acc); width:150px; vertical-align:middle; }
+  .lab-ctl button{ border:0; border-radius:8px; padding:7px 11px; font:800 .58rem/1 system-ui,sans-serif; letter-spacing:.12em; color:#9a3412; background:#fff; cursor:pointer; }
+  .lab-hero > div > svg{ position:absolute; inset:0; width:100%; height:100%; }
+  .lab-ctl button.on{ background:var(--acc); color:#fff; box-shadow:inset 0 0 0 1.6px #fff; }
+  #fps{ color:#fff; }
+  .lab-grid{ display:grid; grid-template-columns:repeat(auto-fill, minmax(340px, 1fr)); gap:10px; }
+  @media (max-width:760px){ .lab-pair{ grid-template-columns:1fr; } }
+  .lab-pair.solo{ grid-template-columns:1fr; } .lab-pair.solo > .lab-cell:first-child{ display:none; }   /* new types have no hero to compare: the viewer takes the full width */
+  .ty-sec{ font:850 .6rem/1 system-ui,sans-serif; letter-spacing:.16em; color:#9fb3cf; margin:18px 0 8px; }
+  .ty-grid{ display:grid; grid-template-columns:repeat(auto-fill, minmax(210px, 1fr)); gap:8px; }
+  .ty-tile{ position:relative; border-radius:9px; overflow:hidden; background:#0f1626; cursor:pointer; aspect-ratio:300/118; outline:2px solid transparent; outline-offset:-2px; }
+  .ty-tile canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; opacity:0; transition:opacity .4s; } .ty-tile.ok canvas{ opacity:1; }
+  .ty-tile span{ position:absolute; left:8px; bottom:6px; right:8px; font:850 .52rem/1.25 system-ui,sans-serif; letter-spacing:.12em; color:#fff; text-shadow:0 1px 4px rgba(0,0,0,.85); }
+  .ty-tile.on{ outline-color:#fb923c; }
+  details.old{ margin-top:34px; } details.old summary{ cursor:pointer; font:850 .62rem/1 system-ui,sans-serif; letter-spacing:.14em; color:#7d8aa3; }
+  #srcframe{ position:absolute; width:1400px; height:900px; left:-99999px; top:0; border:0; visibility:hidden; }
+</style>
+</head>
+<body>
+<div class="lab-wrap">
+  <div class="lab-h1">CLOUD LAB</div>
+  <div class="lab-sub">THE NEW VOLUMETRIC CLOUDS: EVERY TYPE AND SUBTYPE THE GOLDEN HOUR NAMES, LAYERED SKIES AND LOW-SUN SCENES. TAP A TILE TO WATCH IT LIVE.</div>
+
+  <div class="lab-h2" id="pair-h">TODAY VS VOLUMETRIC</div>
+  <div class="lab-pair">
+    <div class="lab-cell"><div class="lab-lab" id="now-lab">AS IT IS</div><div class="lab-hero" id="now-oc" style="aspect-ratio:660/260;"></div></div>
+    <div class="lab-cell"><div class="lab-lab">NEW · VOLUMETRIC WEBGL</div><div class="lab-hero" style="aspect-ratio:660/260;"><div id="vol-base" style="position:absolute;inset:0;display:none;"></div><canvas id="vol-ext" style="position:absolute;inset:0;width:100%;height:100%;display:none;mix-blend-mode:multiply;pointer-events:none;"></canvas><canvas id="vol"></canvas><canvas id="vol-px" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;"></canvas><div id="vol-ov" style="position:absolute;inset:0;pointer-events:none;"></div></div></div>
+  </div>
+  <div class="lab-ctl">
+    <span>COVER <input id="c-cover" type="range" min="40" max="100" value="80"></span>
+    <span id="w-glow">CITY GLOW <input id="c-glow" type="range" min="0" max="100" value="25"></span>
+    <span><b id="l-moon">MOON</b> HEIGHT <input id="c-moon" type="range" min="5" max="70" value="34"></span>
+        <button type="button" id="c-play" class="on">DRIFTING</button>
+    <button type="button" id="c-pal">LOW SUN: PHYSICS</button>
+    <span>MAX RESOLUTION <input id="c-scale" type="range" min="40" max="100" value="100"></span>
+    <span>TIME <input id="c-time" type="range" min="0" max="1439" value="720"></span>
+    <span>DATE <input id="c-date" type="range" min="1" max="365" value="172"></span>
+    <button type="button" id="c-clock">CLOCK: OFF</button>
+    <button type="button" id="c-day">PLAY DAY</button>
+    <button type="button" id="c-wind">WIND: LIVE</button>
+    <button type="button" id="c-sky">NIGHT SKY: MONTHLY</button>
+    <span id="clock-l"></span>
+    <span id="wind-l"></span>
+    <span id="bird-l"></span>
+    <span id="fps"></span>
+  </div>
+
+  <div id="types"></div>
+
+  <details class="old"><summary>TODAY'S HEROES (OLD RENDERERS)</summary>
+    <div class="lab-ctl" id="scenes"></div>
+    <div class="lab-h2">EVERY HERO SKY AS IT IS NOW</div>
+    <div class="lab-grid" id="grid"></div>
+  </details>
+</div>
+<script src="../flock.js?v=lab"></script>
+<script>window.bvFlockLive = window.bvFlock;</script>
+<script src="flock_lab.js?v=1"></script>
+<script>window.bvFlockNew = window.bvFlock; window.bvFlock = window.bvFlockLive;   /* left: today\u2019s flock; right: the lab copy (turns as waves) */</script>
+<script src="flock_vol.js?v=1"></script>
+<script>window.bvFlockVol = window.bvFlock; window.bvFlock = window.bvFlockLive;   /* the volumetric skies: the flock with the wind (flock.js stays the live copy) */</script>
+<script src="geese.js?v=1"></script>
+<script src="lightning.js?v=1"></script>
+<script src="bvlightning_lab.js?v=1"></script>
+<iframe id="srcframe" src="../index.html" title="source"></iframe>
+
+<script>
+/* ===================== the new example: a volumetric cloud deck ===================== */
+(function(){
+'use strict';
+var cv = document.getElementById('vol'), gl = cv.getContext('webgl2', { antialias: false, premultipliedAlpha: false, preserveDrawingBuffer: true });
+if (!gl){ cv.parentNode.insertAdjacentHTML('beforeend', '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:800 .7rem system-ui;letter-spacing:.14em;">NEEDS WEBGL 2</div>'); return; }
+var VS = '#version 300 es\nout vec2 vUV; void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); vUV = p; gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }';
+var FS = [
+'#version 300 es',
+'precision highp float;',
+'in vec2 vUV; out vec4 o;',
+'uniform vec2 uRes; uniform float uTime, uCover, uGlow, uNight, uB0, uB1, uType, uPit, uFrame, uFlash, uE0, uAtmo, uPalK, uTwi, uHail; uniform vec3 uP0, uP1, uP2, uP3; uniform vec3 uL, uFP; uniform highp sampler3D uN;',
+'float nz(vec3 p){ return texture(uN, p).r; }',
+'bool isT(float k){ return abs(uType - k) < 0.5; }',
+/* ONE RENDERER, A RECIPE PER CLOUD TYPE (uType): 0 stratocumulus deck (overcast); 1 cumulus (partly cloudy); 2 nimbostratus (rain);
+   3 cumulonimbus (thunderstorm: one tower and its anvil); 4 fog (the camera inside it); 5 snow deck (nimbostratus, paler) */
+'float smin(float a, float b, float k){ float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0); return mix(b, a, h) - k * h * (1.0 - h); }',
+'float sdRC(vec3 q, float r, float h0, float h1, float rr){ vec2 d = vec2(length(q.xz) - r + rr, max(h0 - q.y, q.y - h1) + rr); return min(max(d.x, d.y), 0.0) + length(max(d, 0.0)) - rr; }   /* a rounded cylinder */',
+'const vec3 SC = vec3(-7.0, 0.0, 40.0);   /* centered on the whole cloud (flanking line left, anvil right), close enough to fill the panel */   /* the storm cell: left of center, 60 km away, so its anvil streams off to the right */',
+'float dens(vec3 p, int oct){',
+'  vec3 w = vec3(uTime * 0.03, 0.0, uTime * 0.01);',
+/* THE THUNDERSTORM, BUILT FROM SHAPES (user 2026-11-23: "improve thunderstorm shapes"): the main updraft tower with an overshooting
+   dome punching above the anvil; a flanking line of smaller towers stepping down on the side away from the anvil; a wedge anvil
+   with a flat top at the tropopause, thinning downwind, lumpy underneath; a flat dark base; rain shaft under the core, downwind.
+   Rounded cylinders merged with a smooth union; big rounded billows (cauliflower) carved into the surface, not fine fuzz */
+'  if (isT(3.0)){',
+'    float y = p.y; if (y < 0.0 || y > 15.5) return 0.0; vec3 q = p - SC;',
+'    float b1 = nz((p + w) * 0.07), b2 = oct > 1 ? nz((p + w) * 0.16) : 0.5, b3 = oct > 3 ? nz((p + w) * 0.5) : 0.5;',
+'    float s1 = smoothstep(0.25, 0.75, b1), s2 = smoothstep(0.3, 0.7, b2);',
+'    float bil = s1 * s1 * 3.2 + s2 * 1.0 + (b3 - 0.5) * 0.3;   /* smooth rounded lumps (ridged noise made a crest of spikes) */',
+'    float s = sdRC(q, 6.0, 1.2, 9.8, 4.6);                                         /* the main updraft: heavily rounded, a domed top, no straight edges */',
+'    s = smin(s, sdRC(q - vec3(2.6, 0.0, -1.5), 4.6, 1.2, 11.2, 3.8), 2.2);        /* a second turret beside it, rising higher */',
+'    s = smin(s, length(q - vec3(1.8, 12.9, -0.8)) - 3.4, 1.8);                     /* the overshooting top, a dome clear above the anvil */',
+'    s = smin(s, sdRC(q - vec3(-10.5, 0.0, 2.0), 4.2, 1.2, 8.2, 2.6), 1.8);        /* the flanking line, stepping down away from the anvil */',
+'    s = smin(s, sdRC(q - vec3(-17.5, 0.0, 3.5), 3.3, 1.2, 6.0, 2.2), 1.5);',
+'    s = smin(s, sdRC(q - vec3(-23.0, 0.0, 4.5), 2.5, 1.2, 4.2, 1.8), 1.2);',
+'    float ax = q.x - 2.0, top = 12.0 - max(ax, 0.0) * 0.03, bot = 9.0 + max(ax, 0.0) * 0.08;   /* the anvil: flat top, thinning and its underside rising downwind */',
+'    float wid = (5.5 + max(ax, 0.0) * 0.2) * (1.0 - 0.45 * smoothstep(10.0, 19.0, ax)), zc = max(ax, 0.0) * 0.18;   /* thinning toward its end */               /* it fans out AWAY from us (+z), so perspective does not lift its far end */',
+'    float an = max(max(abs(q.z - zc) - wid, y - top), max(bot - y, max(-ax - 4.0, ax - 19.0 + (b1 - 0.5) * 7.0)));   /* a frayed, uneven end, not a square cut */',
+'    an += (b2 - 0.5) * 1.0 * smoothstep(top - 0.6, bot, y);                       /* lumpy underneath, flat on top */',
+'    s = smin(s, an, 1.6);',
+'    float am = smoothstep(8.6, 9.6, y) * smoothstep(1.0, 5.0, ax);                 /* in the anvil the billows are gentle: it is one smooth sheet */',
+'    float d = mix(-s + bil - 1.5, -s * 1.6 + 0.5 + (b2 - 0.5) * 0.8 + (b3 - 0.5) * 0.3, am);   /* the anvil: a dense smooth sheet */',
+'    float body = smoothstep(0.0, 0.9, d) * smoothstep(1.1, 1.35, y);',
+'    float shaft = y < 1.6 ? smoothstep(6.5, 2.0, length(q.xz - vec2(3.0, 0.0))) * (0.16 + 0.22 * uHail) * (0.5 + 0.9 * b3) : 0.0;   /* hail: a denser, whiter curtain */   /* rain under the core, downwind */',
+'    return max(body, shaft); }',
+'  float h = (p.y - uB0) / (uB1 - uB0);',
+'  if (isT(4.0)){',
+'    if (p.y < 0.0 || p.y > uB1) return 0.0;',
+'    float wisp = nz((p + w * 2.5) * vec3(0.3, 1.5, 0.3)), fine = nz((p + w * 3.0) * vec3(1.1, 3.0, 1.1));',
+'    return smoothstep(1.0, 0.1, h) * (0.12 + 1.1 * wisp * wisp + 0.3 * fine) * 0.7; }   /* wisps you can see drift by */',
+'  if (h < -0.3 || h > 1.0) return 0.0;',
+'  if (isT(0.0)){',
+'    float cells = nz((p + w) * vec3(0.06, 0.12, 0.06));',
+'    float lump = oct > 1 ? nz((p + w * 1.2) * vec3(0.24, 0.4, 0.24)) : 0.5;',
+'    float fine = oct > 3 ? nz((p + w * 1.5) * vec3(0.8, 1.2, 0.8)) : 0.5;',
+'    float hb = h + (lump - 0.5) * 0.45;',
+'    float shape = smoothstep(0.0, 0.18, hb) * smoothstep(1.0, 0.45, h);',
+'    float c = cells * 0.72 + lump * 0.38 + fine * 0.14 - 0.12;',
+'    float big = nz((p + w * 0.6) * vec3(0.012, 0.02, 0.012));',
+'    float thr = mix(0.66, 0.36, uCover) + (0.5 - big) * 0.28;',
+'    return smoothstep(thr, thr + 0.1, c) * shape; }',
+'  if (isT(1.0)){',
+'    if (h < 0.0) return 0.0;',
+'    float cells = nz((p + w) * vec3(0.085, 0.035, 0.085));',
+'    float big = nz((p + w * 0.5) * vec3(0.018, 0.01, 0.018));',
+'    float lump = oct > 1 ? nz((p + w * 1.15) * vec3(0.42, 0.42, 0.42)) : 0.5;',
+'    float fine = oct > 3 ? nz((p + w * 1.3) * vec3(1.4, 1.4, 1.4)) : 0.5;',
+'    float foot = cells * 1.25 + big * 0.35 - mix(1.12, 0.62, uCover);',
+'    float d = foot * 1.9 - pow(h, 1.35) * 1.25 - (lump - 0.5) * (0.55 + 0.7 * h) - (fine - 0.5) * 0.1;   /* tapering to a rounded dome, deep billows on the sides: big ones read as blocks with straight walls (user 2026-11-23: "fix the rectangular cloud near the moon") */',
+'    return smoothstep(0.0, 0.1, d) * smoothstep(0.0, 0.03, h); }',
+/* 2 rain and 5 snow: the nimbostratus deck */
+'  float big = nz((p + w) * vec3(0.03, 0.05, 0.03));',
+'  float lump = oct > 1 ? nz((p + w * 1.3) * vec3(0.15, 0.3, 0.15)) : 0.5;',
+'  float fine = oct > 3 ? nz((p + w * 1.6) * vec3(0.6, 0.9, 0.6)) : 0.5;',
+'  if (h < 0.0){ float sc = smoothstep(0.6, 0.72, fine * 0.55 + lump * 0.6) * smoothstep(-0.3, -0.08, h) * smoothstep(0.08, -0.02, h); return sc * 0.7 * (isT(5.0) ? 0.5 : 1.0); }',
+'  float hb = h + (lump - 0.5) * 0.22 + (fine - 0.5) * 0.12;',
+'  float shape = smoothstep(0.0, 0.08, hb) * smoothstep(1.0, 0.55, h);',
+'  float c = big * 0.95 + lump * 0.4 + 0.02;',
+'  return clamp((c - (1.0 - uCover) * 0.8 - 0.35) * 2.4, 0.0, 1.0) * shape * 0.9; }',
+/* ATMOSPHERIC SCATTERING (user 2026-11-23, for clear day): single scattering through a real atmosphere -- Rayleigh (air: blue
+   scatters most) and Mie (haze: a bright forward glow around the sun) -- marched from the ground to space, each step lit by sunlight
+   that has itself crossed the air. Deep blue overhead, paler toward the horizon, reddening on its own as the sun gets low */
+'const float RE = 6360.0, RA = 6420.0, HR = 7.994, HM = 1.2, BM = 3.5e-3;   /* clean air: the textbook 21e-3 haze read as a milky, polluted day */ const vec3 BR = vec3(5.8e-3, 13.5e-3, 33.1e-3), BO = vec3(0.65e-3, 1.881e-3, 0.085e-3);   /* BO: ozone absorbs orange -- without it the sky turns greenish, worst near sunset */',
+'vec2 rsi(vec3 o, vec3 d, float r){ float b = dot(o, d), c = dot(o, o) - r * r, h = b * b - c; if (h < 0.0) return vec2(1e9, -1e9); h = sqrt(h); return vec2(-b - h, -b + h); }',
+'vec3 trans(vec3 p, vec3 L){ vec2 eh = rsi(p, L, RE); if (eh.x > 0.0 && eh.x < 1e8) return vec3(0.0);   /* the Earth\u2019s shadow: after sunset the low air is unlit, the high air still lit -- twilight */\n' +
+'  float ln = rsi(p, L, RA).y, ds = ln / 8.0, oR = 0.0, oM = 0.0; for (int j = 0; j < 8; j++){ float hh = length(p + L * (ds * (float(j) + 0.5))) - RE; oR += exp(-hh / HR) * ds; oM += exp(-hh / HM) * ds; } return exp(-((BR + BO) * oR + BM * 1.1 * oM)); }',
+'vec3 atmo(vec3 rd, vec3 L){ vec3 o = vec3(0.0, RE + 0.05, 0.0); float ln = rsi(o, rd, RA).y, ds = ln / 16.0, oR = 0.0, oM = 0.0; vec3 sR = vec3(0.0), sM = vec3(0.0);',
+'  for (int i = 0; i < 16; i++){ vec3 p = o + rd * (ds * (float(i) + 0.5)); float hh = length(p) - RE, dR = exp(-hh / HR) * ds, dM = exp(-hh / HM) * ds; oR += dR; oM += dM;',
+'    vec3 T = exp(-((BR + BO) * oR + BM * 1.1 * oM)) * trans(p, L); sR += T * dR; sM += T * dM; }',
+'  float mu = dot(rd, L), g = 0.76, pR = 3.0 / (16.0 * 3.14159) * (1.0 + mu * mu), pM = 3.0 / (8.0 * 3.14159) * ((1.0 - g * g) * (1.0 + mu * mu)) / ((2.0 + g * g) * pow(1.0 + g * g - 2.0 * g * mu, 1.5));',
+'  return 15.0 * (sR * BR * pR + sM * BM * pM); }',
+'float hg(float c, float g){ float g2 = g * g; return (1.0 - g2) / (12.566 * pow(1.0 + g2 - 2.0 * g * c, 1.5)); }',
+'void main(){',
+'  bool DECK = isT(2.0) || isT(5.0), STORM = isT(3.0), FOG = isT(4.0), SNOW = isT(5.0);',
+'  vec2 uv = vUV;',
+/* A TRUE PERSPECTIVE (user 2026-11-23: "partly cloudy looks a little squished horizontally ... too tall"): the old mapping spread
+   83 degrees across the width but as little as 17 up the height, so clouds stood twice too tall. Now a pinhole camera: 80 degrees
+   across, the height from the panel's own shape, tilted up so the bottom edge sits 2 degrees above the horizon */
+'  float asp = uRes.x / uRes.y, tH = uPit, tV = tH / asp, e0 = uE0 + atan(tV);   /* uE0: the bottom edge above the horizon (lower for the storm, so its base shows) */   /* uPit: tan of half the width\u2019s view, per scene (a longer lens for cumulus and the storm) */',
+'  vec3 dc = normalize(vec3((uv.x - 0.5) * 2.0 * tH, (uv.y - 0.5) * 2.0 * tV, 1.0));',
+'  float ce = cos(e0), se = sin(e0); vec3 rd = vec3(dc.x, dc.y * ce + dc.z * se, -dc.y * se + dc.z * ce);',
+'  vec3 L = normalize(uL); float mu = dot(rd, L);',
+/* TWILIGHT for the clear night (user 2026-11-23): only the light of the sky after sunset, from the same scattering as the day,
+   added over the night photo (the canvas is screen-blended); black = no change, so it fades out by itself as the sun sinks */
+'  if (uTwi > 0.5){ vec3 c = atmo(rd, L) * 9.0;',
+'    float se = max(rd.y, 0.02), X = 1.0 / (se + 0.025 * exp(-11.0 * se)); c += vec3(0.0016, 0.002, 0.003) * min(X, 12.0);   /* the horizon is brighter at night: more air glowing and scattering */',
+'    c = 1.0 - exp(-c * 1.4); c = pow(c, vec3(1.0 / 2.2)); o = vec4(c, 1.0); return; }',
+/* the sky behind */
+'  vec3 skyN = mix(vec3(0.03, 0.042, 0.075), vec3(0.01, 0.015, 0.035), uv.y) + vec3(0.08, 0.05, 0.025) * uGlow * pow(1.0 - uv.y, 3.0);',
+'  vec3 skyD = DECK ? (SNOW ? mix(vec3(0.62, 0.64, 0.68), vec3(0.50, 0.53, 0.58), uv.y) : mix(vec3(0.46, 0.49, 0.54), vec3(0.36, 0.39, 0.45), uv.y))',
+'           : STORM ? mix(vec3(0.36, 0.42, 0.50), vec3(0.14, 0.22, 0.36), uv.y) : mix(vec3(0.68, 0.78, 0.90), vec3(0.30, 0.48, 0.78), uv.y);',
+'  vec3 sky = mix(skyD, skyN, uNight) + vec3(0.55, 0.6, 0.8) * uFlash * 0.08;',
+'  vec3 Lc = mix(vec3(1.0, 0.97, 0.92) * 2.6, vec3(0.62, 0.70, 0.85) * 0.55, uNight);',
+/* NO MOON OR SUN IN THE SKY (user 2026-11-23: "our photos should not have a moon, we already feature the moon in a predictable spot on
+   the page"): the page draws its own moon and sun; here they only light the clouds. A faint broad brightening toward the sun by day stays */
+'  sky += (DECK ? 0.0 : 1.0) * (1.0 - uNight) * Lc * pow(max(mu, 0.0), 12.0) * 0.06;',
+'  bool AT = uAtmo > 0.5 && uNight < 0.5; vec3 hzA = vec3(0.0);',
+'  if (AT){ sky = atmo(rd, L); Lc = 3.0 * trans(vec3(0.0, RE + 1.8, 0.0), L); hzA = atmo(normalize(vec3(rd.x, 0.03, rd.z)), L); }   /* the sky, the sunlight that reaches the clouds, and the haze, all from the same air */',
+/* where to march */
+'  float t0, t1; int N;',
+'  if (STORM){ vec2 rx = rd.xz; float l2 = dot(rx, rx), tc = dot(SC.xz, rx) / l2, hw = 40.0 / sqrt(l2); t0 = max(0.05, tc - hw); t1 = min(tc + hw, 15.5 / rd.y); N = 80; }',
+'  else if (FOG){ t0 = 0.0; t1 = min(uB1 / rd.y, 5.0); N = 40; }',
+'  else if (isT(6.0)){ t0 = 0.0; t1 = 0.0; N = 0; }   /* clear: no clouds at all */',
+'  else { float lo = uB0 - 0.3 * (uB1 - uB0); t0 = max(lo, 0.05) / rd.y; t1 = uB1 / rd.y; t1 = t0 + min(t1 - t0, DECK ? 9.0 : isT(1.0) ? 26.0 : 14.0); N = DECK ? 36 : isT(1.0) ? 64 : 48; }   /* cumulus reach 26 km: at 14 the low clouds were cut on straight lines */',
+'  float len = max(t1 - t0, 0.0), dt = len / float(N);',
+'  float jit = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453 + uFrame * 0.618034);',
+'  float T = 1.0; vec3 C = vec3(0.0);',
+'  vec3 glowC = (SNOW ? vec3(1.0, 0.76, 0.64) : vec3(1.0, 0.74, 0.52))   /* a clean warm glow: the deeper orange read as mud-brown at night */ * (FOG ? 0.32 : DECK ? 0.2 : 0.07) * uGlow * uNight;   /* fog and low decks catch the city light; snow reflects it pinker */',
+'  vec3 ambTop = STORM ? mix(vec3(0.42, 0.47, 0.56), vec3(0.03, 0.045, 0.08), uNight) : mix(DECK ? (SNOW ? vec3(0.50, 0.52, 0.56) : vec3(0.30, 0.32, 0.36)) : FOG ? vec3(0.62, 0.66, 0.72) : vec3(0.55, 0.62, 0.75), vec3(0.03, 0.045, 0.08), uNight);',
+'  float dk = uCover > 0.97 && isT(2.0) ? 0.7 : 1.0;   /* heavy rain: the thickest, darkest deck */',
+'  vec3 ambBot = STORM ? mix(vec3(0.09, 0.10, 0.13), vec3(0.008, 0.01, 0.016), uNight) + glowC : mix(DECK ? (SNOW ? vec3(0.36, 0.37, 0.40) : vec3(0.17, 0.18, 0.21)) : FOG ? vec3(0.50, 0.52, 0.56) : vec3(0.30, 0.33, 0.40), vec3(0.012, 0.015, 0.024), uNight) + glowC;',
+'  float ls = STORM ? 0.3 : FOG ? 0.06 : isT(1.0) ? 0.09 : DECK ? 0.35 : 0.12, sg = STORM ? 7.0 : FOG ? 3.2 : DECK ? 16.0 : 12.0;',
+'  if (len > 0.0) for (int i = 0; i < 80; i++){ if (i >= N) break;',
+'    float t = t0 + (float(i) + jit) * dt; vec3 p = rd * t; float d = dens(p, 5); if (d < 0.003) continue;',
+'    float od = 0.0; for (int j = 1; j <= 3; j++){ od += dens(p + L * (ls * float(j * j)), 2); }',
+'    float sig = sg * d, powder = 1.0 - exp(-3.0 * d);',
+'    float hh = STORM ? clamp((p.y - 1.0) / 10.0, 0.0, 1.0) : FOG ? 0.5 : clamp((p.y - uB0) / (uB1 - uB0), 0.0, 1.0);',
+'    vec3 ms = vec3(0.0); float aa = 1.0, bb = 1.0, cc = 1.0; for (int k = 0; k < 3; k++){ ms += aa * Lc * mix(hg(mu * cc, 0.6), hg(mu * cc, -0.25), 0.3) * exp(-od * 2.2 * bb); aa *= 0.55; bb *= 0.45; cc *= 0.6; }',
+'    float thick = DECK ? (0.35 + 0.95 * exp(-od * 1.6)) : (0.55 + 0.45 * exp(-od * 0.8));',
+'    float scud = (DECK && p.y < uB0) ? 0.6 : 1.0;',
+'    vec3 S = dk * (ms * powder * mix(6.0, 2.6, uNight) * (DECK ? 0.35 : FOG ? 0.45 : 1.0) + mix(ambBot, ambTop, hh) * thick) * scud;',
+'    if (STORM) S += vec3(0.75, 0.82, 1.0) * uFlash * 9.0 * exp(-length(p - uFP) * 0.55);   /* lightning lights the cloud from inside */',
+'    float a = exp(-sig * dt); C += T * (1.0 - a) * S; T *= a; if (T < 0.02) break; }',
+'  if (!STORM && !FOG && len > 0.0 && t1 - t0 < (uB1 / rd.y - t0) - 0.01 && !isT(1.0)) T *= 0.35;',
+/* haze toward the horizon */
+'  float fog = 1.0 - exp(-max(t0, 0.0) * (SNOW ? 0.2 : DECK ? 0.16 : STORM ? 0.006 : 0.045));   /* a storm 60 km off is seen through clean air: keep its contrast */',
+'  vec3 hz = mix(SNOW ? vec3(0.70, 0.72, 0.76) : DECK ? vec3(0.40, 0.43, 0.48) : vec3(0.58, 0.63, 0.70), vec3(0.035, 0.042, 0.058) + vec3(0.05, 0.03, 0.015) * uGlow, uNight);',
+'  if (AT) hz = hzA;',
+'  vec3 col = C + T * sky; col = mix(col, hz, fog * (AT ? 0.6 : 0.85));',
+'  col = 1.0 - exp(-col * mix(1.35, 2.4, uNight)); col = pow(col, vec3(1.0 / 2.2));',
+'  if (AT){ float lu = dot(col, vec3(0.299, 0.587, 0.114)); col = clamp(mix(vec3(lu), col, 1.45), 0.0, 1.0);',
+'    if (uPalK > 0.5){ float y = 1.0 - uv.y; vec3 pal = y < 0.42 ? mix(uP0, uP1, y / 0.42) : y < 0.72 ? mix(uP1, uP2, (y - 0.42) / 0.3) : mix(uP2, uP3, (y - 0.72) / 0.28);',
+'      col = mix(col, pal + max(col - vec3(lu), 0.0) * 0.6, 0.78 * T); } }   /* PALETTE: the dashboard\u2019s colors in the open sky, the physics\u2019 glow kept */   /* beauty over textbook: the physics gives the shape of the sky, the grade gives it the color */',
+'  o = vec4(col, 1.0); }'
+].join('\n');
+function sh(t, s){ var x = gl.createShader(t); gl.shaderSource(x, s); gl.compileShader(x); if (!gl.getShaderParameter(x, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(x)); return x; }
+var P = gl.createProgram(); gl.attachShader(P, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(P, sh(gl.FRAGMENT_SHADER, FS)); gl.linkProgram(P);
+if (!gl.getProgramParameter(P, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(P));
+/* the tiling noise volume: 4 octaves of value noise, wrapped at 64 */
+var NS = 64, vol = new Float32Array(NS * NS * NS);   /* float, not 8-bit: thresholds on 8-bit noise drew terraced contour rings (user 11-23: intortus, uncinus) */
+(function(){ var sd = 0x9E3779B9, rnd = function(){ sd |= 0; sd = sd + 0x6D2B79F5 | 0; var t = Math.imul(sd ^ sd >>> 15, 1 | sd); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };   /* seeded: every load the same sky, so before/after compare */
+  function lat(o){ var a = new Float32Array(o * o * o); for (var i = 0; i < a.length; i++) a[i] = rnd(); return a; }
+  var oct = [[4, .5], [8, .27], [16, .15], [32, .08]].map(function(q){ return { n: q[0], w: q[1], g: lat(q[0]) }; });
+  function smp(L, x, y, z){ var n = L.n, fx = x * n, fy = y * n, fz = z * n, x0 = Math.floor(fx), y0 = Math.floor(fy), z0 = Math.floor(fz), tx = fx - x0, ty = fy - y0, tz = fz - z0;
+    tx = tx * tx * (3 - 2 * tx); ty = ty * ty * (3 - 2 * ty); tz = tz * tz * (3 - 2 * tz); var g = L.g, I = function(a, b, c){ return g[((a % n + n) % n) + ((b % n + n) % n) * n + ((c % n + n) % n) * n * n]; };
+    var c00 = I(x0, y0, z0) + (I(x0 + 1, y0, z0) - I(x0, y0, z0)) * tx, c10 = I(x0, y0 + 1, z0) + (I(x0 + 1, y0 + 1, z0) - I(x0, y0 + 1, z0)) * tx,
+        c01 = I(x0, y0, z0 + 1) + (I(x0 + 1, y0, z0 + 1) - I(x0, y0, z0 + 1)) * tx, c11 = I(x0, y0 + 1, z0 + 1) + (I(x0 + 1, y0 + 1, z0 + 1) - I(x0, y0 + 1, z0 + 1)) * tx;
+    var c0 = c00 + (c10 - c00) * ty, c1 = c01 + (c11 - c01) * ty; return c0 + (c1 - c0) * tz; }
+  for (var z = 0; z < NS; z++) for (var y = 0; y < NS; y++) for (var x = 0; x < NS; x++){ var s = 0; oct.forEach(function(L){ s += L.w * smp(L, x / NS, y / NS, z / NS); }); vol[x + y * NS + z * NS * NS] = Math.max(0, Math.min(1, s)); } })();
+var NT = gl.createTexture(); gl.bindTexture(gl.TEXTURE_3D, NT); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texImage3D(gl.TEXTURE_3D, 0, gl.R16F, NS, NS, NS, 0, gl.RED, gl.FLOAT, vol);
+['TEXTURE_WRAP_S', 'TEXTURE_WRAP_T', 'TEXTURE_WRAP_R'].forEach(function(k){ gl.texParameteri(gl.TEXTURE_3D, gl[k], gl.REPEAT); });
+gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+var U = {}; ['uRes', 'uTime', 'uCover', 'uGlow', 'uNight', 'uL', 'uN', 'uB0', 'uB1', 'uType', 'uPit', 'uFrame', 'uFlash', 'uFP', 'uE0', 'uAtmo', 'uTwi', 'uHail', 'uPalK', 'uP0', 'uP1', 'uP2', 'uP3'].forEach(function(k){ U[k] = gl.getUniformLocation(P, k); });
+
+/* ===================== CLOUD TYPES, LAYERED (user 2026-11-23: "build the missing recipes and layering in lab") =====================
+   A second program: up to three layers in one sky -- LOW (0 Sc, 1 Cu, 7 St), MID (8 Ac, 9 As), HIGH (10 Ci, 11 Cc, 12 Cs, a thin sheet
+   at 9 km drawn analytically) -- marched separately and composited front to back (from the ground the lower layer hides the higher).
+   Every layer is lit by sunlight that has crossed the air to it (the scattering sky's transmittance, the Earth's shadow included),
+   so at golden hour the high clouds stay pink after the low ones have gone grey. Sky = the single-scattering atmosphere. */
+var FS2 = [
+'#version 300 es',
+'precision highp float;',
+'in vec2 vUV; out vec4 o;',
+'uniform vec2 uRes; uniform float uTime, uFrame, uPit, uE0, uK0, uB00, uB01, uC0, uK1, uB10, uB11, uC1, uK2, uC2, uPalK, uNt, uSea; uniform vec4 uFl, uFlB, uJT; uniform float uFlG, uNoJit; uniform vec2 uJit; uniform vec2 uWV[6], uWO[6]; uniform float uWA, uStOn, uSkOn; uniform sampler2D uSt, uSk, uMw; uniform mat3 uEq; uniform vec3 uJP, uJV, uJW; uniform vec3 uP0, uP1, uP2, uP3; uniform vec3 uL; uniform highp sampler3D uN;',
+'float nz(vec3 p){ return texture(uN, p).r; }',
+'float WA = 2.09; vec3 gW = vec3(0.0), gSky = vec3(0.0), gLx = vec3(0.0), gHor = vec3(0.0); float gGnd = 0.0; vec2 gVm = vec2(0.0), gDm = vec2(0.0);',   /* WA: set from the live upper wind in main; gW / gVm: the current layer's drift offset and mid-height wind */
+'vec2 wInt(float h, bool off){ float z[6] = float[6](0.01, 1.5, 3.0, 5.6, 9.2, 10.4); vec2 a = off ? uWO[0] : uWV[0]; if (h <= z[0]) return a; for (int i = 1; i < 6; i++){ vec2 b = off ? uWO[i] : uWV[i]; if (h <= z[i]) return mix(a, b, (h - z[i - 1]) / (z[i] - z[i - 1])); a = b; } return a; }',   /* the wind (m/s) or the integrated drift (km) at height h, linear between the six levels */   /* keep every derived angle away from 0 and pi/2: the noise lattice is axis-aligned, and an aligned sample shows it as a grid */   /* THE WIND (user 11-23: "these views will always be looking west so motion flow and direction ... should reflect that"): westerlies aloft blow from the western horizon toward and over the viewer: WA 2.09 = from the WSW, ~30 deg off the view axis: the southwesterly flow cirrus uncinus runs in ahead of warm fronts, and streaks rise to the right with the hooked heads up-right, as in the user's photos (11-23); due west they were end-on lines. Streaks lie along it and converge on the horizon; uncinus heads lead downwind (near, high), tails trail west toward the horizon */
+'vec2 wDrift(float b, float y, float wr){ vec2 v0 = wInt(b, false), a = vec2(0.0); float dz = max(y - b, 0.0) * 0.25; for (int i = 0; i < 4; i++) a += wInt(b + dz * (float(i) + 0.5), false) - v0; return a * dz / wr; }',   /* how far a parcel rising at wr m/s from the base b has drifted by height y (km): the shear integrated, so a sharp jump between two levels bends a tower smoothly instead of kinking it (user 11-24 live wind tore holes and flags) */
+'float nzc(vec3 p){ vec3 c = p * 64.0 - 0.5, i = floor(c), f = c - i, f2 = f * f, f3 = f2 * f;',   /* B-SPLINE sampling in 8 linear taps: smooth outlines, no facets (trilinear draws large shapes as polygons; user 11-23: the Sc lenses) */
+'  vec3 w0 = (-f3 + 3.0 * f2 - 3.0 * f + 1.0) / 6.0, w1 = (3.0 * f3 - 6.0 * f2 + 4.0) / 6.0, w2 = (-3.0 * f3 + 3.0 * f2 + 3.0 * f + 1.0) / 6.0, w3 = f3 / 6.0;',
+'  vec3 g0 = w0 + w1, h0 = (i - 1.0 + w1 / g0 + 0.5) / 64.0, h1 = (i + 1.0 + w3 / (w2 + w3) + 0.5) / 64.0;',
+'  float a0 = mix(texture(uN, vec3(h1.x, h0.y, h0.z)).r, texture(uN, h0).r, g0.x), a1 = mix(texture(uN, vec3(h1.x, h1.y, h0.z)).r, texture(uN, vec3(h0.x, h1.y, h0.z)).r, g0.x);',
+'  float b0 = mix(texture(uN, vec3(h1.x, h0.y, h1.z)).r, texture(uN, vec3(h0.x, h0.y, h1.z)).r, g0.x), b1 = mix(texture(uN, h1).r, texture(uN, vec3(h0.x, h1.y, h1.z)).r, g0.x);',
+'  return mix(mix(b1, b0, g0.y), mix(a1, a0, g0.y), g0.z); }',
+'const float RE = 6360.0, RA = 6420.0, HR = 7.994, HM = 1.2, BM = 3.5e-3; const vec3 BR = vec3(5.8e-3, 13.5e-3, 33.1e-3), BO = vec3(0.65e-3, 1.881e-3, 0.085e-3);',
+'vec2 rsi(vec3 o, vec3 d, float r){ float b = dot(o, d), c = dot(o, o) - r * r, h = b * b - c; if (h < 0.0) return vec2(1e9, -1e9); h = sqrt(h); return vec2(-b - h, -b + h); }',
+'vec3 trans(vec3 p, vec3 L){ vec2 eh = rsi(p, L, RE); if (eh.x > 0.0 && eh.x < 1e8) return vec3(0.0); float ln = rsi(p, L, RA).y, ds = ln / 8.0, oR = 0.0, oM = 0.0;',
+'  for (int j = 0; j < 8; j++){ float hh = length(p + L * (ds * (float(j) + 0.5))) - RE; oR += exp(-hh / HR) * ds; oM += exp(-hh / HM) * ds; } return exp(-((BR + BO) * oR + BM * 1.1 * oM)); }',
+'vec3 atmo(vec3 rd, vec3 L){ vec3 o = vec3(0.0, RE + 0.05, 0.0); float ln = rsi(o, rd, RA).y, ds = ln / 16.0, oR = 0.0, oM = 0.0; vec3 sR = vec3(0.0), sM = vec3(0.0);',
+'  for (int i = 0; i < 16; i++){ vec3 p = o + rd * (ds * (float(i) + 0.5)); float hh = length(p) - RE, dR = exp(-hh / HR) * ds, dM = exp(-hh / HM) * ds; oR += dR; oM += dM;',
+'    vec3 T = exp(-((BR + BO) * oR + BM * 1.1 * oM)) * trans(p, L); sR += T * dR; sM += T * dM; }',
+'  float mu = dot(rd, L), g = 0.76, pR = 3.0 / (16.0 * 3.14159) * (1.0 + mu * mu), pM = 3.0 / (8.0 * 3.14159) * ((1.0 - g * g) * (1.0 + mu * mu)) / ((2.0 + g * g) * pow(1.0 + g * g - 2.0 * g * mu, 1.5));',
+'  return 15.0 * (sR * BR * pR + sM * BM * pM); }',
+'float hg(float c, float g){ float g2 = g * g; return (1.0 - g2) / (12.566 * pow(1.0 + g2 - 2.0 * g * c, 1.5)); }',
+'vec2 rot(vec2 v, float a){ float c = cos(a), s = sin(a); return vec2(c * v.x + s * v.y, -s * v.x + c * v.y); }',
+'float hs(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }',   /* a hash per cell: where each cirrus element sits, its size and turn */
+'vec3 rx(vec3 q, float a){ vec2 r = rot(q.xz, a); return vec3(r.x, q.y, r.y); }',   /* each noise term sampled at its own angle: the value-noise lattice creases never line up with the view (the rays) */
+'vec3 wrp(vec3 q){ return q + vec3(nz(vec3(q.x * 0.071, 0.21, q.z * 0.067)) - 0.5, 0.0, nz(vec3(q.x * 0.063, 0.69, q.z * 0.077)) - 0.5) * 1.7 + vec3(nz(vec3(q.x * 0.23, 0.41, q.z * 0.19)) - 0.5, 0.0, nz(vec3(q.x * 0.21, 0.93, q.z * 0.24)) - 0.5) * 0.35; }',   /* domain warp: no lattice survives it (the grid) */
+'vec3 aoff(vec3 p){ return vec3(0.0, nz(vec3(p.x * 0.004, 0.5, p.z * 0.004)) * 0.9 + nz(vec3(p.x * 0.019, 0.13, p.z * 0.019)) * 0.3, 0.0); }   /* the noise slice wanders across the sky */',
+'float dens(vec3 p, int oct, float K, float B0, float B1, float cov){ float h = (p.y - B0) / (B1 - B0); if (h < -0.3 || h > 1.0) return 0.0; vec3 w = gW;   /* f(p + w): the pattern moves -w, with the live wind at this layer */ if ((K > 0.5 && K < 1.5) || (K > 5.5 && K < 6.5)) p.xz -= K > 5.5 ? clamp(wDrift(B0, p.y, 45.0) - gDm, -2.0, 2.0) : clamp(wDrift(B0, p.y, 20.0) - gDm, -1.2, 1.2);',   /* SHEAR: a tower leans downwind with height by the wind difference from its middle (Cu 200 s of shear, max 3 km; Cb 60 s, max 2.5 km: a storm tilts as one column, at 200 s a live 25 m/s jump tore its towers into flags): a calm day stands upright, a jet aloft tilts the tops and drags the anvil */
+'  if (K < 0.5){ if (h < 0.0) return 0.0; vec3 pw = (p + w) * vec3(0.45, 1.0, 0.45), q = mix(pw, wrp(pw), 0.7), o = aoff(p) + vec3(0.0, nz(vec3(p.x * 0.05, 0.77, p.z * 0.05)) * 0.6 + nz(vec3(p.x * 0.17, 0.29, p.z * 0.17)) * 0.25, 0.0);',   /* STRATOCUMULUS REBUILT FROM THE APPROVED ALTOCUMULUS (user 11-23: "some of stratocumulus doesnt look like it can match with altocumulus"): the same puffs, rafts and fine detail at 2.2x the size (horizontal 0.45), a flat base and a domed top, cells merging at lower threshold. Subtypes are changes to this one recipe */
+'    float fd = smoothstep(12.0, 32.0, length(p.xz)), big = nz(rx(q, 0.29) * vec3(0.011, 0.02, 0.013) + o * 0.3), puff = nz(rx(q, 0.71) * vec3(0.5, 0.9, 0.5) + o * 1.9), puff2 = nz(rx(q, 1.93) * vec3(0.83, 1.3, 0.77) + o * 2.7 + 0.37), fine = oct > 3 ? mix(nz(rx(q, 2.57) * vec3(1.6) + o * 3.1), 0.5, fd) : 0.5, lump = puff;',
+'    float sp = floor(fract(K + 0.001) * 10.0 + 0.5), lensM = 1.0; if (sp > 0.5 && sp < 1.5){ float str = nz(rx(q, 0.15) * vec3(0.3, 2.2, 1.8) + o) * 0.6 + nz(rx(q, 0.15) * vec3(0.9, 4.5, 4.0) + o * 1.7) * 0.4, hp = h * 3.0 + (big - 0.5) * 0.9 + (puff - 0.5) * 0.3, pid = floor(hp), e = nzc(rx(q + vec3(pid * 0.75, 0.0, pid * 0.45), 0.15) * vec3(0.085, 0.08, 0.36) + o * 0.5) * 0.8 + big * 0.3 + (str - 0.5) * 0.12, core = smoothstep(mix(0.7, 0.52, cov), 0.84, e); float plate = smoothstep(0.08, 0.36, 0.5 - abs(fract(hp) - 0.5)), dl = core - abs(h - 0.45) * 1.2 - (1.0 - core) * 0.4; return smoothstep(0.0, 0.16, dl) * plate * (0.45 + 0.55 * smoothstep(0.3, 0.75, str)) * 0.42; }   /* Sc LENTICULARIS after the user photos (11-23): a pile of thin plates with gaps, translucent and bright, silky striations along the length that fray the ends into wisps (an opaque lens hid any texture and read as plastic) */   /* stacked plates (the approved Ac lenticularis) + fine striations along the lens, in shape and density (user 11-23: "lack detail and texture") */',   /* Sc LENTICULARIS: a few smooth lenses lying across the wind; crisper edge (the wide soft one showed the march jitter as sand), gentle lobes along the top */
+'    float cv = sp > 2.5 && sp < 3.5 ? max(cov, 0.8) : (sp > 1.5 && sp < 2.5 ? max(cov, 0.7) : (sp > 0.5 && sp < 1.5 ? max(cov, 0.82) : cov));',   /* opacus: merged, no gaps; perlucidus: a sheet with holes */
+'    float pz = mix(puff, puff2, smoothstep(0.3, 0.7, nzc(rx(q, 0.4) * vec3(0.03, 0.05, 0.03) + o * 0.2 + 0.61))), raft = nzc(rx(q, 1.1) * vec3(0.045, 0.06, 0.04) + o * 0.3), c = mix(pz, 0.5, smoothstep(20.0, 40.0, length(p.xz))) * 0.8 + (raft - 0.5) * 0.4 + big * 0.45 - mix(0.86, 0.3, cv) + (sp > 3.5 ? sin(rx(q, 0.2).z * 5.4 + (big - 0.5) * 5.0) * 0.2 - 0.04 : 0.0);',   /* undulatus: rolls across the wind, same 2.6 km wavelength as before */
+'    float hb = h + (pz - 0.5) * 0.25, d = c * 2.2 - pow(max(h - 0.35, 0.0) / 0.65, 2.0) * 2.6 - (fine - 0.5) * 0.24 * smoothstep(0.05, 0.3, h) - (mix(nz(rx(p + w, 2.9) * vec3(1.6, 2.0, 1.6) + o * 3.3), 0.5, fd) - 0.5) * 0.2 * smoothstep(0.08, 0.35, h); float rr = smoothstep(0.0, 0.1 + 0.22 * fd, d) * smoothstep(0.0, 0.1, hb) * (1.0 - 0.3 * fd); if (sp > 1.5 && sp < 2.5) rr *= mix(smoothstep(0.32, 0.42, nz(rx(q, 1.1) * vec3(0.9, 0.2, 0.9) + o)), 1.0, fd * 0.7); return rr * lensM; }',   /* flat lobed base (fine detail kept off it: no veins), domed tops; perlucidus punches holes */
+'  if (K < 1.5){ if (h < 0.0) return 0.0; float cells = nz((p + w) * vec3(0.085, 0.035, 0.085)), big = nz((p + w * 0.5) * vec3(0.018, 0.01, 0.018)), lump = oct > 1 ? nz((p + w * 1.15) * vec3(0.42)) : 0.5, fine = oct > 3 ? nz((p + w * 1.3) * vec3(1.4)) : 0.5;',
+'    float sp = floor(fract(K + 0.001) * 10.0 + 0.5); vec3 qc = p + w, oc = aoff(p) + vec3(0.0, nz(vec3(p.x * 0.05, 0.77, p.z * 0.05)) * 0.6, 0.0); float lob = (nz(rx(qc, 0.71) * vec3(0.6, 0.9, 0.6) + oc * 1.9) + nz(rx(qc, 1.93) * vec3(0.95, 1.3, 0.9) + oc * 2.7 + 0.37)) * 0.5, fz = oct > 3 ? nz(rx(qc, 2.57) * vec3(2.2) + oc * 3.1) : 0.5, clu = (nzc(vec3(p.x * 0.009, 0.31, p.z * 0.011)) - 0.5) * 0.7 + (nz(vec3(p.x * 0.03, 0.57, p.z * 0.03)) - 0.5) * 0.2;',   /* CLUSTERING (user 11-23: humilis rows "too uniform in the distance"): clouds crowd in some regions and leave gaps in others; perspective turns an even scatter into ranks */   /* CUMULUS gets the approved Ac vocabulary (user 11-23: humilis "feel different like that stratocumulus earlier"): rounded lobes of two sizes (two angles averaged) and fine cauliflower on tops and sides, never at the flat base */
+'    if (sp > 0.5 && sp < 1.5){ float sel = smoothstep(0.3, 0.7, nzc(vec3(p.x * 0.014, 0.71, p.z * 0.014))), c2 = mix(nz((p + w) * vec3(0.16, 0.06, 0.16)), nz(rx(p + w, 0.9) * vec3(0.125, 0.055, 0.125) + 0.43), sel), f2 = c2 * 1.25 + big * 0.3 - mix(1.12, 0.66, cov) + clu * 0.8, h2 = h * 2.6 * mix(1.2, 0.8, nz(vec3(p.x * 0.05, 0.13, p.z * 0.05)));   /* sizes and heights vary region to region */ float dh = f2 * 2.2 - pow(h2, 1.6) * 1.4 - (lump - 0.5) * (0.4 + 0.5 * h2) - (fine - 0.5) * 0.1 + (lob - 0.5) * 1.0 * smoothstep(0.02, 0.12, h) - (fz - 0.5) * 0.32 * smoothstep(0.04, 0.18, h); return smoothstep(0.0, 0.06, dh) * smoothstep(0.0, 0.03, h); }',   /* HUMILIS: small, flat, wider than tall */
+'    if (sp > 1.5 && sp < 2.5){ float c3 = nz((p + w) * vec3(0.055, 0.02, 0.055)), f3 = c3 * 1.3 + big * 0.35 - mix(1.2, 0.72, cov) + clu; float dc = f3 * 2.6 - (0.3 * h + 6.5 * pow(max(h - 0.6, 0.0), 2.0)) - (lump - 0.5) * (0.7 + 0.6 * h) - (fine - 0.5) * 0.14 + (lob - 0.5) * 0.8 * smoothstep(0.03, 0.15, h) - (fz - 0.5) * 0.25 * smoothstep(0.05, 0.25, h); return smoothstep(0.0, 0.06, dc) * smoothstep(0.0, 0.02, h); }',   /* CONGESTUS: few broad towers, columns that barely taper to ~60 % of their height, then a ROUNDED dome (user 11-24: the linear taper drew sheared triangles) */
+'    if (sp > 2.5){ float c4 = nz(rx(p + w, 0.4) * vec3(0.12, 0.08, 0.2)), f4 = c4 * 1.2 + big * 0.3 - mix(1.12, 0.7, cov) + clu; float dr = f4 * 1.7 - abs(h - 0.35) * 1.3 - (lump - 0.5) * 0.9 - (fine - 0.5) * 0.55 + (lob - 0.5) * 0.5 - (fz - 0.5) * 0.25; return smoothstep(0.0, 0.1, dr) * 0.7; }',   /* FRACTUS: ragged torn shreds, no flat base */
+'    float foot = cells * 1.25 + big * 0.35 - mix(1.12, 0.62, cov) + clu, d = foot * 1.9 - pow(h, 1.35) * 1.25 - (lump - 0.5) * (0.55 + 0.7 * h) - (fine - 0.5) * 0.1 + (lob - 0.5) * 0.75 * smoothstep(0.03, 0.2, h) - (fz - 0.5) * 0.22 * smoothstep(0.06, 0.3, h); return smoothstep(0.0, 0.06, d) * smoothstep(0.0, 0.03, h); }',   /* MEDIOCRIS (the hero recipe + the lobes) */
+'  if (K < 5.5){ vec3 q = p + w, o = aoff(p); float nsp = floor(fract(K + 0.001) * 10.0 + 0.5), big = nzc(rx(q, 0.6) * vec3(0.02, 0.05, 0.02) + o * 0.2), mid = nz(rx(q, 0.6) * vec3(0.08, 0.2, 0.08) + o), lb = (nz(rx(q, 0.71) * vec3(0.3, 0.4, 0.3) + o) + nz(rx(q, 1.93) * vec3(0.5, 0.6, 0.47) + o * 1.3)) * 0.5, base = 0.04 + (mid - 0.5) * 0.06 + (nsp > 1.5 ? (lb - 0.5) * 0.22 : 0.0);',   /* nsp 2: the STORM BASE overhead, a lumpier base */   /* NIMBOSTRATUS (WMO: grey, often dark, rendered diffuse by more or less continuously falling rain or snow, thick enough to blot out the sun; low ragged clouds frequently below): a thick dark deck, its base blurred by the rain hanging out of it, dark pannus scud underneath */
+'    float body = smoothstep(base, base + 0.12, h) * smoothstep(1.0, 0.8, h + (big - 0.5) * 0.2), shaft = smoothstep(base + 0.05, -0.3, h) * 0.22 * (0.6 + 0.4 * nz(rx(q, 0.3) * vec3(0.15, 0.02, 0.15) + o));',
+'    float pann = smoothstep(0.56, 0.72, nz(rx(q, 0.9) * vec3(0.22, 0.5, 0.32) + o) * 0.8 + nz(rx(q, 2.1) * vec3(0.7, 1.0, 0.7)) * 0.2) * smoothstep(-0.27, -0.15, h) * smoothstep(-0.02, -0.1, h); return clamp(body * (0.8 + 0.2 * mid) + shaft + pann, 0.0, 1.0); }',
+'  if (K < 6.5){ float sp = floor(fract(K + 0.001) * 10.0 + 0.5); vec3 q = p + w * 0.5; vec2 dw = vec2(cos(WA), sin(WA)); float hk = p.y; bool cal = sp > 0.5 && sp < 1.5, near = sp > 2.5;',   /* STORM FRONT (user 11-24: "wouldnt storms be wider? i dont feel like i ever see a single pillared storm cloud"; "we should draw storm fronts"): a line of cells SSW-NNE across the western horizon at different stages, bodies merging into a wall, ONE shared anvil fanning downwind, rain shafts under the mature cells. sp 0: the front ~60 km west; sp 2: the same amid fair-weather cumulus; sp 3: the front APPROACHING ~22 km, a shelf cloud along its leading edge; sp 1 calvus: one young storm, no anvil */
+'    vec2 L0 = vec2(-4.0, near ? 30.0 : (cal ? 42.0 : 60.0)), ld = normalize(vec2(1.0, 0.22)), ln = vec2(-ld.y, ld.x), lp = p.xz - L0; float al = dot(lp, ld), sd = -dot(lp - ld * al, dw);',   /* al: km along the line; sd: km downwind of it (toward the viewer) */
+'    if (!cal && !(sp > 1.5 && sp < 2.5) && (abs(al) > 48.0 || sd > 35.0 || sd < -24.0 || hk > 13.4)) return 0.0;',   /* STORM COST (user 11-24 "sharper storms"): outside the storm's box (line, anvil, rain, scud) nothing exists; leave before any noise is fetched */
+'    float lob = (nz(rx(q, 0.71) * vec3(0.09, 0.12, 0.09)) + nz(rx(q, 1.93) * vec3(0.15, 0.2, 0.14) + 0.37)) * 0.5, fn = oct > 2 ? nz(rx(q, 2.57) * vec3(0.1)) : 0.5, tur = oct > 2 ? nz(rx(q, 1.2) * vec3(0.06, 0.03, 0.06) + 0.2) : 0.5;',   /* the shadow taps (oct 2) skip the fine noise: a shadow does not need it */,
+'    float body = 0.0, ov = 0.0, shaft = 0.0, mi = 0.0;',
+'    for (int k = 0; k < 6; k++){ if (cal && k > 4) break; float fk = float(k), h1 = hs(vec2(fk, 3.1)), h2 = hs(vec2(fk, 7.7)), h3 = hs(vec2(fk, 1.3));',
+'      vec2 ck = cal ? (k == 0 ? L0 : L0 + ld * (h1 - 0.5) * 34.0 + ln * (h2 - 0.5) * 16.0) : L0 + ld * ((fk - 2.5) * 12.5 + (h1 - 0.5) * 11.0) + ln * (h2 - 0.5) * 12.0; float h4 = fract(h2 * 3.7 + 0.35), Rk = cal ? (k == 0 ? 5.5 : 2.4 + 2.0 * h3) : (h4 > 0.3 ? 7.0 + 3.0 * h3 : 3.5 + 3.0 * h3), Tk = cal ? (k == 0 ? 9.6 : 4.5 + 3.0 * h4) : (h4 > 0.3 ? 11.9 + 0.4 * h4 : mix(5.5, 9.0, h4 / 0.3));   /* most cells mature, broad, feeding the anvil; a few younger towers below it */   /* mature cells reach and feed the anvil; younger towers stay below it as domes */   /* uneven spacing, sizes and stages: no row of matching pillars */',
+'      vec2 dk = p.xz - ck; float tw = Rk * (1.0 - (Tk > 11.0 ? 0.15 : 0.35) * smoothstep(1.5, Tk, hk)) + (lob - 0.5) * Rk * 0.75 + (fn - 0.5) * 1.2 + (tur - 0.5) * 3.0, tk = Tk + (lob - 0.5) * (Tk > 11.0 ? 1.6 : 3.2) + (tur - 0.5) * 1.0 + (fn - 0.5) * (Tk > 11.0 ? 0.0 : 1.4) - pow(length(dk) / Rk, 2.0) * (Tk - 1.0) * (Tk > 11.0 ? 0.25 : (cal && k == 0 ? 0.4 : 0.75));   /* calvus: a tall tower with a soft rounded top */   /* towers taper; younger ones round off into domes (they were boxes) */',
+'      body = max(body, smoothstep(0.0, 1.5, tw - length(dk)) * smoothstep(0.85, 1.6, hk + (fn - 0.5) * (cal ? 0.35 : 0.9) + (lob - 0.5) * (cal ? 0.15 : 0.7)) * smoothstep(tk + 0.6, tk - 0.8, hk));   /* a ragged base, not a ruler line (user 11-24: "would you improve the bottom") */',
+'      if (cal && k == 0) shaft = max(shaft, smoothstep(Rk * 1.1, Rk * 0.4, length(dk + dw * 1.5)));',   /* the calvus shower */   /* calvus keeps the flat base of a cumulus: the fronts ragged base noise arched a lone tower (a hole under it, user screenshots 11-24) */
+'      if (Tk > 10.5){ ov = max(ov, smoothstep(2.6, 1.3, length(vec3(dk + dw * 1.2, (hk - 12.0) * 2.2))) * (0.7 + 0.3 * lob) * step(0.5, h1)); shaft = max(shaft, smoothstep(Rk * 1.25, Rk * 0.5, length(dk + dw * 2.0))); mi = max(mi, smoothstep(Rk * 1.7, Rk * 0.7, length(dk))); } }',
+'    float an = 0.0;',
+'    if (!cal){ float fib = oct > 2 ? nz(rx(q, WA) * vec3(0.03, 0.3, 0.5)) * 0.55 + nz(rx(q, WA + 0.6) * vec3(0.09, 0.25, 0.22)) * 0.45 : 0.5, bot = 9.6 + 0.06 * max(sd, 0.0) - mi * 1.6 + (lob - 0.5) * 1.1 + (fn - 0.5) * 0.4 - (oct > 2 ? nz(rx(q, 0.4) * vec3(0.35, 0.6, 0.35)) - 0.4 : 0.1) * 0.7 * smoothstep(22.0, 4.0, sd) * smoothstep(-4.0, 2.0, sd);',   /* the shared anvil; mammatus under it near the line */
+'      an = smoothstep(bot - 0.7, bot + 0.7, hk) * smoothstep(12.5, 11.9, hk + (lob - 0.5) * 0.5) * smoothstep(40.0, 30.0, abs(al) + (lob - 0.5) * 8.0) * smoothstep(-9.0, -4.0, sd) * smoothstep(30.0, 14.0, sd + (lob - 0.5) * 8.0 + (fib - 0.5) * 2.5) * mix(1.0, 0.7 + 0.3 * fib, smoothstep(4.0, 22.0, sd)); }',
+'    float shelf = 0.0; if (near){ float lead = sd - 7.0 - (lob - 0.5) * 2.0, tierN = nz(rx(q, WA + 1.57) * vec3(0.02, 1.6, 0.4));',   /* the SHELF CLOUD: a low wedge along the leading edge, its underside rising back toward the storm, layered tiers along its face */
+'      shelf = smoothstep(0.5, -1.0, lead) * smoothstep(-6.0, -2.0, lead) * smoothstep(0.45, 0.65, hk) * smoothstep(0.8 + 0.22 * max(-lead, 0.0) + 0.3 * smoothstep(0.4, 0.6, tierN), 0.6 + 0.22 * max(-lead, 0.0), hk) * smoothstep(42.0, 32.0, abs(al)) * (0.75 + 0.25 * tierN); }',
+'    if (!cal) shaft = max(shaft, 0.42 * smoothstep(44.0, 30.0, abs(al)) * smoothstep(9.0, 2.0, abs(sd + 1.5)) * (0.6 + 0.4 * lob));',   /* THE RAIN WALL: a broad grey curtain along the whole front under its base, not only shafts under the mature cells (the gaps showed bright open sky) */
+'    shaft *= smoothstep(cal ? 1.5 : 1.4, 0.7, hk + (lob - 0.5) * 0.4) * (0.45 + 0.55 * nz(rx(q, WA) * vec3(0.035, 0.004, 0.05) + vec3(0.0, uTime * 0.006, 0.0))) * (near ? 1.25 : (cal ? 1.5 : 0.55));   /* the lone calvus shower reads as a grey curtain, not a window to the bright horizon */',   /* rain curtains hang to the ground and grey out the horizon under the storm */
+'    float scud = oct < 3 ? 0.0 : smoothstep(0.58, 0.8, nz(rx(q, 0.9) * vec3(0.06, 0.18, 0.08)) * 0.75 + nz(rx(q, 1.7) * vec3(0.13)) * 0.25) * smoothstep(0.35, 0.6, hk) * smoothstep(1.15, 0.8, hk) * smoothstep(16.0, 6.0, abs(dot(lp, ln))) * smoothstep(44.0, 32.0, abs(al)) * (cal ? 0.0 : 0.8);',   /* ragged scud under the base (the storm fronts only) */
+'    float cu = 0.0; if (oct > 2 && ((sp > 1.5 && sp < 2.5) || cal)){ float hc = (p.y - 1.2) / 1.9; if (hc > 0.0 && hc < 1.0){ vec3 qq = p + w; float cel = nz(qq * vec3(0.085, 0.035, 0.085)), bc = nz((p + w * 0.5) * vec3(0.018, 0.01, 0.018)), lu = nz(qq * vec3(0.42)), ft = cel * 1.25 + bc * 0.35 - (cal ? 1.02 : 0.9) + (nzc(vec3(p.x * 0.009, 0.31, p.z * 0.011)) - 0.5) * 0.5;',
+'      float dd = ft * 1.9 - hc * hc * 1.7 - (lu - 0.5) * (0.5 + 0.5 * hc) - (lob - 0.5) * 0.4;   /* domed tops, not pyramids */ cu = smoothstep(0.0, 0.08, dd) * smoothstep(0.0, 0.03, hc) * smoothstep(12.0, 22.0, abs(dot(lp, ln))); if (cal){ vec2 Ln = normalize(L0); cu *= smoothstep(6.0, 10.0, abs(p.x * Ln.y - p.z * Ln.x)); } } }',   /* calvus: no fair-weather puff between the viewer and the tower: a pale one in front read as a HOLE through it (user screenshots 11-24) */   /* fair-weather cumulus, thinning near the line */
+'    return clamp(max(max(body, ov), max(cu, max(shelf, scud))) + an + shaft, 0.0, 1.0); }',
+'  if (K < 7.5){ float big = nz((p + w) * vec3(0.02, 0.05, 0.02)), lump = oct > 1 ? nz((p + w * 1.2) * vec3(0.1, 0.4, 0.1)) : 0.5;',
+'    float shape = smoothstep(0.0, 0.15, h + (lump - 0.5) * 0.15) * smoothstep(1.0, 0.75, h), sbase = clamp((big * 0.5 + 0.55 - (1.0 - cov) * 0.9) * 2.0, 0.0, 1.0) * shape * (0.62 + 0.38 * lump);',
+'    if (fract(K + 0.001) > 0.05){ vec3 q = wrp(p + w * 1.6); float sh = nz(rx(q, 0.5) * vec3(0.22, 0.5, 0.3) + aoff(p)) * 0.75 + nz(rx(q, 1.7) * vec3(0.7, 1.2, 0.7)) * 0.25 + (big - 0.5) * 0.4; return smoothstep(mix(0.66, 0.42, cov), mix(0.66, 0.42, cov) + 0.14, sh) * smoothstep(0.0, 0.3, h) * smoothstep(1.0, 0.5, h) * (0.5 + 0.5 * lump); }',   /* STRATUS FRACTUS: ragged scud, sky between the shreds */
+'    return sbase; }',
+'  if (K < 8.5){ vec3 q = mix(p + w, wrp(p + w), 0.7), o = aoff(p) + vec3(0.0, nz(vec3(p.x * 0.11, 0.77, p.z * 0.11)) * 0.6 + nz(vec3(p.x * 0.37, 0.29, p.z * 0.37)) * 0.25, 0.0);',   /* the slice now changes every few km: the puff noise repeats every 2 km, and a slowly wandering slice left neighbouring tiles identical (user 11-23: "they all feel too grid like") */,   /* ALTOCUMULUS: puffs of two sizes, patches and clearings, faint rows; aoff() slides the noise slice so the 64^3 tile never repeats in view (user 11-23: "a bit repetitive") */
+'    float fd = smoothstep(16.0, 45.0, length(p.xz)), big = nz(rx(q, 0.29) * vec3(0.011, 0.02, 0.013) + o * 0.3), rows = nz(rx(q, 0.83) * vec3(0.22, 0.5, 0.16) + o), puff = nz(rx(q, 0.71) * vec3(0.5, 0.9, 0.5) + o * 1.9), puff2 = nz(rx(q, 1.93) * vec3(0.83, 1.3, 0.77) + o * 2.7 + 0.37), fine = oct > 3 ? mix(nz(rx(q, 2.57) * vec3(1.6) + o * 3.1), 0.5, fd) : 0.5;',
+'    float pz = mix(puff, puff2, smoothstep(0.3, 0.7, nzc(rx(q, 0.4) * vec3(0.03, 0.05, 0.03) + o * 0.2 + 0.61))), raft = nzc(rx(q, 1.1) * vec3(0.045, 0.06, 0.04) + o * 0.3), c = mix(pz, 0.5, smoothstep(9.0, 26.0, length(p.xz))) * 0.8 + (raft - 0.5) * 0.35 + big * 0.45 - mix(0.92, 0.46, cov), hh = h - 0.5, d = c * 2.2 - hh * hh * 2.6 - (fine - 0.5) * 0.24, sp = floor(fract(K + 0.001) * 10.0 + 0.5);',
+'    if (sp > 0.5 && sp < 1.5){ float cf = c - 0.1, tuft = cf * 2.4 - max(-hh, 0.0) * max(-hh, 0.0) * 1.2 * (1.0 + 2.5 * (fine - 0.3)) - max(hh, 0.0) * max(hh, 0.0) * 3.4 - (fine - 0.5) * 0.3;',   /* FLOCCUS: tufts, round tops, ragged bottoms */
+'      float vg = smoothstep(0.02, 0.2, cf * 2.4) * smoothstep(-0.3, 0.02, h) * smoothstep(0.25, 0.0, h) * smoothstep(0.35, 0.65, nz(rx(q, 0.7) * vec3(1.4, 0.06, 0.3) + o)) * 0.22;',   /* virga: fall streaks hanging under the tufts */
+'      return max(smoothstep(0.0, 0.1 + 0.2 * fd, tuft) * (1.0 - 0.3 * fd), vg * (1.0 - fd)); }',
+'    if (sp > 1.5 && sp < 2.5){ float tur = nzc(rx(q, 1.21) * vec3(0.022, 0.05, 0.026) + o * 0.3), tw = smoothstep(0.5, 0.7, tur + (pz - 0.5) * 0.18), top = 0.32 + 0.66 * tw;',   /* CASTELLANUS (user 11-24: it read as a Sc deck; the turret noise was 50 m cells, invisible): turrets ~0.6 km across rise from a thin common base */
+'      float db = c * 2.2 - 0.12 - max(h - 0.2, 0.0) * 9.0, dt3 = (tw - 0.3) * 1.8 - smoothstep(top - 0.2, top, h) * 2.2 - (fine - 0.5) * 0.16 - (pz - 0.5) * 0.35 * h + (c - 0.5) * 0.4;',   /* base: only the lowest fifth; turrets: rounded cauliflower tops at their own heights */
+'      return smoothstep(0.0, 0.17 + 0.2 * fd, max(db, dt3 * step(0.12, h))) * smoothstep(0.0, 0.05, h) * (1.0 - 0.3 * fd); }',
+'    if (sp > 2.5 && sp < 3.5){ float e = nzc(rx(q, 0.2) * vec3(0.02, 0.04, 0.055) + o * 0.3) * 0.8 + big * 0.35, core = smoothstep(mix(0.64, 0.47, cov), 0.8, e);',   /* LENTICULARIS: smooth lenses, stacked like plates (duplicatus) */
+'      float pl = 0.8 + 0.2 * smoothstep(-0.3, 0.7, sin(h * 18.85)), dl = core * pl - abs(hh) * 1.8 - (1.0 - core) * 0.4; return smoothstep(0.0, 0.26, dl) * 0.9; }',   /* softer (user 11-23: "this could be softer too") */,
+'    if (sp > 3.5){ float rg = nzc(rx(q, 0.4) * vec3(0.022, 0.03, 0.018) + o * 0.2), ht = 0.36 + 0.16 * rg, hole = smoothstep(ht, ht + 0.12, mix(puff, puff2, rg) + (nz(rx(q, 2.2) * vec3(0.25, 0.4, 0.25) + o) - 0.5) * 0.3), sheet = 0.6 + big * 0.45 + (rg - 0.5) * 0.3 - mix(0.75, 0.3, cov) - hole * 0.9 * (1.0 - fd), dn = sheet * 2.2 - hh * hh * 3.0 - (fine - 0.5) * 0.2; return smoothstep(0.0, 0.1 + 0.2 * fd, dn) * (1.0 - 0.3 * fd); }',   /* LACUNOSUS: a net with round holes */
+'    return smoothstep(0.0, 0.12 + 0.2 * fd, d) * (1.0 - 0.3 * fd); }',   /* cauliflower edges near; far, a soft mass instead of speckles */
+'  vec3 pa = p + w; float big = nzc(pa * vec3(0.0045, 0.02, 0.0055) + 0.37), mid = nz(rx(pa, 0.7) * vec3(0.016, 0.05, 0.02)), opa = fract(K + 0.001) > 0.05 ? 1.0 : 0.0;',   /* ALTOSTRATUS REBUILT (user 11-24: "we havent improved these 3"): a broad sheet whose thickness varies in soft patches tens of km across, not a striped slab */
+'  float th = clamp(0.55 + (big - 0.5) * 1.3 + (mid - 0.5) * 0.35 - (1.0 - cov) * 0.6, 0.0, 1.0), base = 0.18 + 0.12 * (1.0 - th) + (nz(rx(pa, 1.3) * vec3(0.08, 0.2, 0.09)) - 0.5) * 0.08 * opa;',   /* thin patches lift the base, the underside is a little uneven */
+'  return th * smoothstep(base - 0.08, base + 0.12, h) * smoothstep(1.0, 0.65, h) * mix(0.23, 1.1, opa); }',   /* translucidus thin enough for the sun to show through as through frosted glass; opacus hides it */   /* As OPACUS: thick enough to hide the sun; translucidus lets it glow through */
+'vec4 layer(vec3 rd, vec3 L, vec3 amb, float K, float B0, float B1, float cov, int N, float jit, out float tz){',
+'  tz = 1e9; if (K < -0.5 || rd.y < 0.005) return vec4(0.0, 0.0, 0.0, 1.0); float hm = 0.5 * (B0 + B1); vec2 om = wInt(hm, true); gW = vec3(-om.x, 0.0, -om.y); gVm = wInt(hm, false); gDm = K > 5.5 ? wDrift(B0, hm, 45.0) : wDrift(B0, hm, 20.0); float lo = B0 - 0.3 * (B1 - B0), t0 = max(lo, 0.05) / rd.y, t1 = B1 / rd.y, len = min(t1 - t0, K > 7.5 ? 40.0 : (K > 5.5 && K < 6.5 ? 130.0 : 26.0)); int NN = K > 5.5 && K < 6.5 ? 64 : N; float dt = len / float(NN);',
+'  float mu = dot(rd, L), T = 1.0; vec3 C = vec3(0.0); float sg = K > 8.5 ? 7.0 : K < 0.5 ? 13.0 : (K > 6.5 && K < 7.5) ? 22.0 : (K > 4.5 && K < 5.5) ? 20.0 : (K > 5.5 && K < 6.5) ? 16.0 : 12.0;',   /* Sc opaque water cloud; stratus thick enough to hide the sun disk */
+'  float zw = 0.0, zs = 0.0; for (int i = 0; i < 64; i++){ if (i >= NN) break; float t = t0 + (float(i) + jit) * dt; vec3 p = rd * t; float d = dens(p, 5, K, B0, B1, cov); if (d < 0.003) continue;',
+'    vec3 Lc = 3.0 * trans(vec3(0.0, RE, 0.0) + p, L);',
+'    float sst = K > 7.5 && K < 8.5 ? 0.045 : (K < 0.5 ? 0.09 : (K < 1.5 ? 0.06 : (K > 5.5 && K < 6.5 ? 0.35 : 0.12))), sok = K > 7.5 && K < 8.5 ? mix(1.0, 1.5, smoothstep(0.05, 0.35, L.y)) : 1.0, od = 0.0; for (int j = 1; j <= 3; j++){ od += dens(p + L * (sst * float(j * j)), 2, K, B0, B1, cov); } od *= sok;',   /* Ac: short strong shadow steps, grey undersides */
+'    vec3 ms = vec3(0.0); float aa = 1.0, bb = 1.0, cc = 1.0; for (int k = 0; k < 3; k++){ ms += aa * Lc * mix(hg(mu * cc, 0.6), hg(mu * cc, -0.25), 0.3) * exp(-od * 2.2 * bb); aa *= 0.55; bb *= 0.45; cc *= 0.6; }',
+'    float hh = clamp((p.y - B0) / (B1 - B0), 0.0, 1.0), gk = K > 8.5 ? 0.4 : (K > 6.5 && K < 7.5 ? 0.22 * smoothstep(0.03, 0.3, L.y) : (K > 4.5 && K < 5.5 ? 0.1 : 1.0)); vec3 ag = (K > 6.5 && K < 7.5) || (K > 8.5 && K < 9.5) || K < 0.5 || (K > 4.5 && K < 5.5) ? mix(vec3(dot(amb, vec3(0.33))) * vec3(0.9, 0.95, 1.06), amb, mix(0.2, 0.55, smoothstep(0.02, 0.25, L.y))) : amb;   /* a sheet goes blue-grey at a blocked sunset, not brown */',
+'    if (K > 5.5 && K < 6.5 && p.y < 9.8){ float spc = floor(fract(K + 0.001) * 10.0 + 0.5); bool cl2 = spc > 0.5 && spc < 1.5; vec2 L0c = vec2(-4.0, spc > 2.5 ? 30.0 : (cl2 ? 42.0 : 60.0)), ldc = normalize(vec2(1.0, 0.22)), dwc = vec2(cos(WA), sin(WA));',   /* UNDER THE STORM (user 11-24 recordings: "improve below the cumulonimbus"): the 3-step shadow march reaches ~3 km, never the anvil 8-12 km up, so everything under the base was lit as in sunshine (bright beige rain and scud). The storm footprint is geometry (the line of cells, the anvil fanning downwind): look up it toward the sun for direct light and straight up for skylight */
+'      vec2 pb = (p + gW * 0.5).xz, ls = L.xz / max(L.y, 0.15), pd = pb + ls * (10.6 - p.y), pm = pb + ls * max(5.5 - p.y, 0.0), pu = pb; float ad = dot(pd - L0c, ldc), sdd = -dot(pd - L0c - ldc * ad, dwc), am = dot(pm - L0c, ldc), sdm = -dot(pm - L0c - ldc * am, dwc), au = dot(pu - L0c, ldc), sdu = -dot(pu - L0c - ldc * au, dwc);',   /* look up the sun path at the anvil height AND mid-tower: with the sun low beyond the front the path crosses the towers, not the anvil (the rain under the approaching front glowed) */
+'      float cvd = cl2 ? smoothstep(9.0, 4.0, length(pd - L0c)) : max(smoothstep(40.0, 30.0, abs(ad)) * smoothstep(-12.0, -6.0, sdd) * smoothstep(30.0, 14.0, sdd), smoothstep(40.0, 30.0, abs(am)) * smoothstep(11.0, 6.0, abs(sdm))), cvu = cl2 ? smoothstep(9.0, 4.0, length(pu - L0c)) : smoothstep(40.0, 30.0, abs(au)) * smoothstep(-12.0, -6.0, sdu) * smoothstep(30.0, 14.0, sdu);',
+'      float dep = smoothstep(2.8, 1.4, p.y); ms *= mix(1.0, 0.12, cvd * dep); ag *= mix(1.0, 0.55, cvu * dep); }',   /* only under the base (rain, scud, the base itself): applied to the whole tower it painted dark blotches on the sunlit faces */
+'    ag += gHor * (K < 1.5 ? 0.55 : 0.35) * mix(1.0, 0.6, hh); ms += Lc * hg(mu, 0.86) * 0.55 * exp(-od * 1.8) * (1.0 - smoothstep(0.02, 0.3, d)) * smoothstep(-0.02, 0.06, L.y);',   /* SILVER LINING (user 11-24 "bright edges at sunset"): the thin edges of a cloud backlit by the sun glow in forward scatter */
+'    float tone = 1.0; if (K > 6.5 && K < 7.5) tone = 0.5 + 1.0 * nz(rx(p + gW, 0.4) * vec3(0.09, 0.3, 0.2) + aoff(p)) * (0.6 + 0.4 * nz(rx(p, 1.1) * vec3(0.35, 0.5, 0.5)));',   /* stratus: soft darker and lighter patches */
+'    if (K < 0.5) tone = 0.86 + 0.28 * (nz(rx(p + gW, 0.9) * vec3(0.6, 0.8, 0.6)) * 0.6 + nz(rx(p + gW, 2.3) * vec3(1.7)) * 0.4);',   /* Sc: light varies lump to lump, the way real cells catch it; a smooth gradient read as plastic (user 11-23: "cartoonish") */
+'    if (K > 4.5 && K < 5.5) tone = fract(K + 0.001) > 0.15 ? 0.5 : 0.8;',   /* Ns: dim grey; the storm base darker still */
+'    if (K > 8.5 && K < 9.5){ vec3 pt = p + gW; vec2 wd = vec2(cos(WA), sin(WA)); float fib = nz(rx(pt, WA - 0.05) * vec3(0.012, 0.15, 0.22) + aoff(p)), pat = nzc(pt * vec3(0.009, 0.05, 0.011) + 0.21), rol = sin(dot(pt.xz, vec2(-wd.y, wd.x)) * 3.4 + 4.0 * nz(pt * vec3(0.01, 0.1, 0.01))); tone = 0.86 + (pat - 0.5) * 0.42 + (fib - 0.5) * 0.16 + rol * 0.035; }',   /* altostratus: soft lighter and darker patches, a faint fibrous grain along the wind and very gentle rolls across it (the old high-contrast stripes fanned out from the horizon like brush strokes) */
+'    vec3 S = (ms * (1.0 - exp(-3.0 * d)) * 6.0 * gk + ag * (K > 7.5 && K < 8.5 ? mix(0.9, 1.15, hh) : (K < 0.5 ? mix(0.7, 1.05, hh) : (K < 1.5 ? mix(0.66, 1.0, hh) : mix(0.45, 0.85, hh)))) * (K > 7.5 && K < 8.5 ? 0.72 + 0.28 * exp(-od * 0.8) : (K < 0.5 ? 0.62 + 0.38 * exp(-od * 0.8) : (K < 1.5 ? 0.66 + 0.34 * exp(-od * 0.8) : 0.55 + 0.45 * exp(-od * 0.8))))) * tone;',   /* Ac: lighter grey cores, no slate blotches (user 11-23: "looks odd at points") */,
+'    S += uNt * vec3(1.0, 0.62, 0.32) * 0.3 * (1.0 - hh) * (K < 9.5 ? 1.0 : 0.4) ;',   /* LIGHTNING: a LINE light along the channel or the crawl path (lightning.js), not a point */   /* LIGHTNING lights the storm from inside */   /* NIGHT: the city lights the cloud bases from below, warm (the dashboard is New York) */
+'    float a = exp(-sg * d * dt); C += T * (1.0 - a) * S; zw += T * (1.0 - a) * t; zs += T * (1.0 - a); T *= a; if (tz > 1e8 && T < 0.85) tz = t; if (T < 0.02) break; }',   /* tz: where this layer first shows, for the depth sort */
+'  if (tz > 1e8 && zs > 0.02) tz = zw / zs;',
+'  if (uFl.w > 0.003 && zs > 0.02){ vec3 pl = rd * (zw / zs), ab = uFlB.xyz - uFl.xyz; float dl = length((pl - uFl.xyz) - ab * clamp(dot(pl - uFl.xyz, ab) / max(dot(ab, ab), 1e-4), 0.0, 1.0)); gLx += (1.0 - T) * vec3(0.85, 0.9, 1.0) * uFl.w * 6.5 * exp(-dl / max(uFlB.w, 0.5)); }',   /* LIGHTNING lights the cloud ONCE per pixel, at its opacity-weighted depth: per march sample, the jittered samples never averaged out within a flash of a few frames and showed as grain */   /* a thin layer still has a depth (its weighted mean): with none, the cirrus sorted in front of a storm edge */
+'  float fog = 1.0 - exp(-max(t0 - 6.0, 0.0) * 0.03); return vec4(mix(C, (1.0 - T) * gSky, fog * 0.8), T); }',   /* distance haze turns a far cloud toward the sky colour but keeps it OPAQUE: fading its alpha let whatever is behind (a contrail at 10 km, cirrus) show through the deck (user 11-24 screenshot) */
+'vec2 ciBend(vec2 r, float zz){ return vec2(r.x, r.y + (nzc(vec3(r.x * 0.018, zz + 0.71, r.y * 0.012)) - 0.5) * 7.0 + (nz(vec3(r.x * 0.06, zz + 0.93, r.y * 0.04)) - 0.5) * 2.4 + (nz(vec3(r.x * 0.15, zz + 0.37, r.y * 0.1)) - 0.5) * 0.5); }',   /* fibres curve gently over 14-55 km (user 11-23: "too many straight lines", "lines a little too pronounced perfectly"); slow and broad, never the tight crossing warp that read as oil */
+'float ciTex(vec2 r, float zz, float fa, float fb){ vec2 b = ciBend(r, zz); return 0.25 + 0.5 * mix(nz(vec3(b.x * 0.09, zz + 0.4, b.y * 1.1)), 0.5, fb) + 0.3 * mix(nz(vec3(b.x * 0.25, zz + 0.6, b.y * 2.7)), 0.5, fa); }',   /* along-fibre frequency up (0.05 -> 0.09, 0.13 -> 0.25): fibres break into segments of varied length, not endless ruled lines */   /* THE FIBRATUS FIBRE TEXTURE, shared: uncinus, intortus and vertebratus are built from it, not drawn (user 11-23: "you are so accurate on all others but these are hallucinating"; drawn strokes, cells and polylines read as illustration, the noise field reads as ice) */
+'float ciBand(vec2 r, float zz, float th){ r = ciBend(r, zz); return smoothstep(th, th + 0.18, nz(vec3(r.x * 0.012, zz, r.y * 0.06)) * 0.75 + nz(vec3(r.x * 0.03, zz + 0.2, r.y * 0.16)) * 0.35 - 0.05); }',   /* the fibratus streak mask */
+'float ciHead(vec2 r, float zz, float cov){ return smoothstep(mix(0.74, 0.6, cov), mix(0.74, 0.6, cov) + 0.14, nzc(vec3(r.x * 0.05, zz + 0.13, r.y * 0.08)) * 0.8 + nz(vec3(r.x * 0.2, zz + 0.31, r.y * 0.25)) * 0.25); }',   /* uncinus tufts: sparse rounder dense patches */
+'float ciHeadU(vec2 r, float zz, float cov){ float t0 = mix(0.75, 0.62, cov) - (nzc(vec3(r.x * 0.007, zz + 0.29, r.y * 0.011)) - 0.5) * 0.75 - (nz(vec3(r.x * 0.03, zz + 0.61, r.y * 0.04)) - 0.5) * 0.12;   /* strong clustering: groups with real gaps; perspective turns an even scatter into horizontal ranks */ return smoothstep(t0, t0 + 0.1, nzc(vec3(r.x * 0.07, zz + 0.13, r.y * 0.1)) * 0.8 + nz(vec3(r.x * 0.32, zz + 0.31, r.y * 0.4)) * 0.25); }',   /* uncinus crests: smaller and more numerous than the generic tuft, with clear sky between (the Arizona photo) */
+'float ccGrain(vec2 q, float zz, float t, float th){ vec2 r = rot(q, WA + 0.5), r2 = rot(q, WA - 1.0); float pf = t * 0.0022, zg = zz + nz(vec3(q.x * 0.13, 0.47, q.y * 0.13)) * 0.5 + nz(vec3(q.x * 0.41, 0.91, q.y * 0.41)) * 0.2;',   /* CIRROCUMULUS GRAIN FROM THE APPROVED ALTOCUMULUS (user 11-23: Cc "really bad ... the texture pattern isnt realistic"): the same rounded puffs of two sizes in rafts, at Cc scale (~0.35 km, ~2 deg overhead: a little larger than the atlas <1 deg, so they read instead of speckling); grains narrower than a pixel fade into a soft veil */
+'  vec2 r4 = rot(q, WA - 1.57), r5 = rot(q, WA + 1.58); float p1 = (nz(vec3(r.x * 0.7, zg + 0.7, r.y * 0.7)) + nz(vec3(r4.x * 0.66, zg + 0.17, r4.y * 0.66))) * 0.5, p2 = (nz(vec3(r2.x * 1.15, zg + 0.35, r2.y * 1.15)) + nz(vec3(r5.x * 1.2, zg + 0.83, r5.y * 1.2))) * 0.5,   /* each grain field is two value-noise copies at different angles averaged: the blocky axis-aligned features of one copy cancel, the grains come out round */ pz = mix(p1, p2, smoothstep(0.25, 0.75, nzc(vec3(q.x * 0.03, zz + 0.65, q.y * 0.03)))), raft = nzc(vec3(r.x * 0.05, zz + 0.4, r.y * 0.07)), p3 = (nz(vec3(r.x * 0.42, zg + 0.55, r.y * 0.42)) + nz(vec3(r4.x * 0.4, zg + 0.05, r4.y * 0.4))) * 0.5; pz = mix(pz, p3, smoothstep(0.5, 0.8, nzc(vec3(q.x * 0.022, zz + 0.95, q.y * 0.022))));   /* VARIETY (user 11-23: "the pattern is too uniform"): larger merged clumps in some regions, fine grains in others */',
+'  float m2 = (nz(vec3(r.x * 0.16, zg + 0.27, r.y * 0.16)) + nz(vec3(r2.x * 0.15, zg + 0.61, r2.y * 0.15))) * 0.5, c = (pz - 0.5) * 1.35 + 0.5 + (raft - 0.5) * 0.55 + (m2 - 0.5) * 0.45 + 0.04, sw = 0.17 + pf * 0.8;   /* clumps a few grains across: grains join into clusters and chains, a network not confetti; softer rims (user 11-23: "this area still feels a bit uniform") */ return mix(smoothstep(th - 0.2 - sw * 0.5, th - 0.2 + sw * 0.5, c), 0.45, smoothstep(0.08, 0.2, pf)); }',
+'float hiH(){ return uK0 > 5.5 && uK0 < 6.5 ? 12.8 : 9.0; }',   /* the high sheet sits ABOVE a storm anvil (tops ~12.3 km): at 9 km it was under the anvil base and its swirls showed on the underside (user 11-24: "would this situation really have a ring") */
+'vec4 high(vec3 rd, vec3 L, vec3 amb, float K, float cov){ if (K < 9.5 || rd.y < 0.01) return vec4(0.0, 0.0, 0.0, 1.0);',
+'  float t = hiH() / rd.y; vec2 q = (rd * t).xz - wInt(hiH(), true);   /* along the wind axis (cos WA, sin WA): drifts out of the WSW toward the viewer and north (screen right) */ float a = 0.0, shd = 1.0;',
+'  float zz = 0.37 + nz(vec3(q.x * 0.004, 0.21, q.y * 0.004)) * 0.6 + nz(vec3(q.x * 0.03, 0.83, q.y * 0.03)) * 0.25;',   /* the slice wanders: no tile repeats (the "repeating line" at the back, the grid) */
+'  float th = mix(0.68, 0.42, cov), fa = smoothstep(25.0, 90.0, t), fb = smoothstep(60.0, 220.0, t);',   /* fine detail fades into its average with distance: no moire toward the horizon */
+'  float sp = floor(fract(K + 0.001) * 10.0 + 0.5);',
+'  if (K < 10.5 && sp > 0.5 && sp < 1.5){ vec2 r = rot(q, WA); r.y += (nz(vec3(r.x * 0.015, 0.55, r.y * 0.01)) - 0.5) * 4.0; float hd = ciHeadU(r, zz, cov), tl = 0.0;',   /* UNCINUS from the fibratus field, matched to the user's reference photos (11-23): many small separate commas; a bright tufted crest at the head; a fibrous tail trailing upwind of it, hooking sharply at the head */
+'    float vA = nzc(vec3(r.x * 0.045, zz + 0.55, r.y * 0.06)), vB = nzc(vec3(r.x * 0.025, zz + 0.15, r.y * 0.02)), vC = nz(vec3(r.x * 0.03, zz + 0.85, r.y * 0.035)), vE = nzc(vec3(r.x * 0.05, zz + 0.35, r.y * 0.07)), hook = mix(0.1, 1.6, vA), tlen = mix(2.2, 9.0, vB), droop = mix(-0.008, 0.024, vC), tang = (vE - 0.5) * 0.55;',   /* VARIETY (user 11-23: "they just look a little repetitive now, in straight lines"): hook strength, tail length, droop and tail direction change across the sky, so no two commas match and the streaks are not parallel */
+'    float jt = fract(sin(dot(gl_FragCoord.xy, vec2(39.3468, 11.135))) * 43758.5453 + uFrame * 0.381966); for (int k = 1; k <= 15; k++){ float d = (float(k) - jt) * 0.7 + (nz(vec3(r.x * 0.3, zz + 0.9, r.y * 0.3)) - 0.5) * 0.6; vec2 o = rot(vec2(d, -hook * (1.0 - exp(-d / 1.0)) + droop * d * d), tang); tl = max(tl, ciHeadU(r - o, zz, cov) * exp(-d / tlen)); }',   /* tail samples dithered per pixel and frame so the 0.7 km stamps join into one tail. The hook SCOOPS UP at the head (user 11-23: "they scoop up not down"); its sign is tied to which side of west WA is on */
+'    float wp = 0.0, jh = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453 + uFrame * 0.618034), cv2 = nz(vec3(r.x * 0.35, zz + 0.61, r.y * 0.2));',   /* THE UPWARD WISPS: short fuzzy flicks rising mostly off the crest, curling over downwind, each different (photos: not a comb of long clean arcs) */
+'    for (int k = 1; k <= 7; k++){ float d = (float(k) - jh) * 0.25; vec2 u = rot(vec2((cv2 - 0.5) * 1.2 * d * d + (nz(vec3(r.x * 0.9, zz + 0.47, r.y * 0.9)) - 0.5) * 0.35 * d, -0.94 * d * (0.6 + 0.8 * cv2)), WA), ps = r - u;   /* screen-up is toward the viewer (-z) in world space, turned into the wind frame */',
+'      float src = max(ciHeadU(ps, zz, cov), ciHeadU(ps - vec2(1.4, -0.75), zz, cov) * 0.3); wp = max(wp, src * smoothstep(0.38, 0.6, nz(vec3(ps.x * 0.8, zz + 0.77, ps.y * 0.25))) * (0.55 + 0.45 * nz(vec3(ps.x * 1.6, zz + 0.19, ps.y * 1.6))) * exp(-d / 0.9)); }',
+'    float tx = ciTex(r, zz, fa, fb), tw = ciTex(rot(r, -1.15), zz + 0.3, fa, fb); a = min(0.92, max(max(hd * (0.7 + 0.3 * tx) * 1.2, tl * tx * 1.05), wp * tw * 1.2)); }',
+'  else if (K < 10.5 && sp > 1.5 && sp < 2.5){ vec2 r = rot(q, WA); r.y += (nz(vec3(r.x * 0.015, 0.55, r.y * 0.01)) - 0.5) * 10.0;',   /* SPISSATUS: dense grey patches, fibrous only at their edges */
+'    float n = nz(vec3(r.x * 0.01, zz, r.y * 0.03)) * 0.7 + nz(vec3(r.x * 0.03, zz + 0.2, r.y * 0.08)) * 0.3, fib = mix(nz(vec3(r.x * 0.05, zz + 0.4, r.y * 1.1)), 0.5, fb), m = smoothstep(th - 0.04, th + 0.08, n);',
+'    a = min(0.95, m * mix(0.3 + 0.7 * fib, 1.0, smoothstep(0.35, 0.9, m)) * 0.95); }',
+'  else if (K < 10.5 && sp > 2.5 && sp < 3.5){ float ang = nzc(vec3(q.x * 0.012, zz + 0.7, q.y * 0.012)) * 5.0, acc = 0.0, ws = 0.0;',   /* INTORTUS from the fibratus field: six fibre families at different angles, a slowly varying direction field choosing among them; where it turns, fibres of two directions overlap and tangle. No drawn curves */
+'    for (int k = 0; k < 6; k++){ float th6 = float(k) * 0.5236, dd = abs(mod(ang - th6 + 1.5708, 3.1416) - 1.5708), wk = max(0.0, 1.0 - dd / 0.75); if (wk <= 0.0) continue; vec2 rk = rot(q, WA + 0.26 + th6); rk.y += (nz(vec3(rk.x * 0.02, 0.55 + float(k) * 0.1, rk.y * 0.02)) - 0.5) * 6.0;',
+'      acc += wk * ciBand(rk, zz + float(k) * 0.13, th) * ciTex(rk, zz + float(k) * 0.07, fa, fb); ws += wk; }',
+'    a = min(0.9, acc / max(ws, 0.001) * 1.1); }',
+'  else if (K < 10.5 && sp > 3.5){ vec2 r = rot(q, WA); r.y += (nz(vec3(r.x * 0.015, 0.55, r.y * 0.01)) - 0.5) * 4.0; r = ciBend(r, zz + 0.5); float n = nzc(vec3(r.x * 0.008, zz + 0.45, r.y * 0.045)), dv = n - 0.5, sd = dv > 0.0 ? 1.0 : -1.0;',   /* VERTEBRATUS from the fibratus field: narrow streaks are the spines (where a broad field crosses its middle); the fibres either side are turned to opposite angles, the herringbone, carrying the same ice texture. No drawn ribs */
+'    float bw = 0.07 + 0.05 * nz(vec3(r.x * 0.03, zz + 0.25, r.y * 0.03)), band = smoothstep(bw, bw * 0.3, abs(dv)) * smoothstep(th - 0.1, th + 0.12, nz(vec3(r.x * 0.01, zz + 0.85, r.y * 0.02)) + 0.05);',
+'    vec2 rr = rot(q, WA + 0.85 * sd); vec2 rb = ciBend(rr, zz + 0.2); float rib = smoothstep(0.3, 0.85, mix(nz(vec3(rb.x * 0.07, zz + 0.4 + sd * 0.1, rb.y * 0.7)) * 0.7 + nz(vec3(rb.x * 0.18, zz + 0.7, rb.y * 1.8)) * 0.3, 0.5, fb)) * ciTex(rr, zz + 0.2, fa, fb);',
+'    a = min(0.85, band * (rib * 0.8 + 0.12 + smoothstep(0.025, 0.0, abs(dv)) * 0.25) * ciTex(r, zz, fa, fb) * 1.1); }',
+'  else if (K < 10.5){ vec2 r = rot(q, WA); r.y += (nz(vec3(r.x * 0.015, 0.55, r.y * 0.01)) - 0.5) * (sp > 0.5 ? 14.0 : 4.0);',   /* FIBRATUS (sp 0): near-straight parallel fibers, no hooks */   /* CIRRUS: streaks that curve and hook, fibers inside them, thin wisps across (user 11-23: "add a little more detail") */
+'    vec2 rB = ciBend(r, zz); float n = nz(vec3(rB.x * 0.012, zz, rB.y * 0.06)), n2 = nz(vec3(rB.x * 0.03, zz + 0.2, rB.y * 0.16)), fib = mix(nz(vec3(ciBend(r, zz).x * 0.09, zz + 0.4, ciBend(r, zz).y * 1.1)), 0.5, fb), fib2 = mix(nz(vec3(ciBend(r, zz).x * 0.25, zz + 0.6, ciBend(r, zz).y * 2.7)), 0.5, fa);',
+'    a = smoothstep(th, th + 0.18, n * 0.75 + n2 * 0.35 - 0.05) * (0.25 + 0.5 * fib + 0.3 * fib2);',
+'    vec2 r2 = rot(q, WA - 1.0); float w2 = nz(vec3(r2.x * 0.02, zz + 0.1, r2.y * 0.22)); a = min(0.9, a + smoothstep(th + 0.06, th + 0.24, w2) * 0.22 * (0.4 + 0.6 * fib2)); }',
+'  else if (K < 11.5 && sp > 0.5){ vec2 rl = rot(q, WA - 0.1); rl.y += (nzc(vec3(rl.x * 0.008, zz + 0.33, rl.y * 0.008)) - 0.5) * 4.0;',   /* Cc LENTICULARIS after the user's reference (11-23): several narrower lens and wave bands that flow and stack, silky smooth inside, the grain only as fine ripples along their edges */
+'    float e = nzc(vec3(rl.x * 0.007, zz + 0.15, rl.y * 0.045)) * 0.85 + nzc(vec3(rl.x * 0.02, zz + 0.25, rl.y * 0.09)) * 0.15, e0 = mix(0.56, 0.47, cov), gn = (nz(vec3(rl.x * 0.7, zz + 0.7, rl.y * 0.7)) + nz(vec3(rl.y * 0.66, zz + 0.17, -rl.x * 0.66))) * 0.5, lens = smoothstep(e0, e0 + 0.08, e + (gn - 0.5) * 0.06 * mix(1.0, 0.3, smoothstep(0.08, 0.2, t * 0.0022))), core = smoothstep(0.0, 0.12, e - e0 - 0.03);   /* the edge itself scallops with smooth noise: no grain specks floating off it (user 11-23: "improve that speckling / dots") */',
+'    a = lens * (0.3 + 0.38 * core) * (0.85 + 0.15 * nz(vec3(rl.x * 0.08, zz + 0.6, rl.y * 0.5))) * (0.9 + 0.1 * gn); shd = mix(0.9, 1.04, core); }',
+'  else if (K < 11.5){ float m = nzc(vec3(q.x * 0.015, zz, q.y * 0.015)) * 0.7 + nz(vec3(q.x * 0.05, zz + 0.3, q.y * 0.05)) * 0.3 + 0.06, pt = smoothstep(th - 0.2, th + 0.12, m);',   /* CIRROCUMULUS STRATIFORMIS after the user's reference (11-23): an extensive sheet of small rounded cloudlets packed into a mottled net, narrow blue gaps, soft grey hollows; looser and broken at the sheet's edges */
+'    float g = ccGrain(q, zz, t, mix(0.97, 0.8, pt) + (nzc(vec3(q.x * 0.035, zz + 0.27, q.y * 0.05)) - 0.5) * 0.3); a = pt * (0.12 + 0.82 * g) * (0.72 + 0.28 * (nz(vec3(q.x * 0.45, zz + 0.4, q.y * 0.45)) * 0.6 + nz(vec3(q.x * 0.12, zz + 0.9, q.y * 0.12)) * 0.4)); shd = mix(0.78, 1.06, g); }   /* brightness differs grain to grain and region to region */',
+'  else { vec2 r = rot(q, WA - 0.05); float v = nzc(vec3(q.x * 0.008, zz, q.y * 0.008)); if (sp > 0.5){ r.y += (nz(vec3(r.x * 0.015, 0.55, r.y * 0.01)) - 0.5) * 4.0; vec2 b = ciBend(r, zz + 0.3); float band = ciBand(r, zz + 0.2, th - 0.03), tx = ciTex(r, zz + 0.1, fa, fb), hair = mix(nz(vec3(b.x * 0.16, zz + 0.83, b.y * 5.0)) * 0.6 + nz(vec3(b.x * 0.4, zz + 0.29, b.y * 9.0)) * 0.4, 0.5, max(fa, smoothstep(10.0, 30.0, t)));',   /* Cs FIBRATUS from the approved cirrus fibratus (user 11-23 + reference photos): a faint milky veil densely filled with fine hair-like fibres, near-parallel with gentle bends, patchy in brightness; the strong 25 km warp read as smoke and is gone. Hairline fibres fade to their mean with distance (no speckle) */
+'    a = clamp(0.015 + 0.05 * v + 0.4 * band * tx * (0.5 + 0.5 * v) + 0.24 * smoothstep(0.45, 0.8, hair) * (0.2 + 0.8 * band), 0.0, 1.0) * cov; } else { float fs = mix(nz(vec3(r.x * 0.02, zz + 0.45, r.y * 0.3)), 0.5, fb); a = clamp(0.08 + 0.16 * v + 0.14 * (fs - 0.3), 0.0, 1.0) * cov; } }',
+'  a *= smoothstep(0.02, 0.14, rd.y);',
+'  vec3 Lc = 3.0 * trans(vec3(0.0, RE + 9.0, 0.0), L); float mu = dot(rd, L); vec3 col = Lc * (hg(mu, 0.75) * (K > 11.5 ? 0.9 : 2.2) + 0.12) + amb * 0.8; if (K < 10.5 && sp > 1.5 && sp < 2.5) col *= mix(1.0, 0.62, smoothstep(0.4, 0.95, a)); col *= shd;',   /* spissatus: thick enough to go grey in its middle */
+'  if (K > 11.5){ float ang = acos(clamp(mu, -1.0, 1.0)); col += Lc * (sp > 0.5 ? 0.4 : 0.9) * exp(-pow((ang - 0.384) / 0.014, 2.0)) * cov; a = max(a, 0.15 * cov * exp(-pow((ang - 0.384) / 0.02, 2.0))); }',
+'  return vec4(col * a, 1.0 - a); }',
+'vec4 jetC(vec3 rd, vec3 L, vec3 amb, out float zj){ zj = 1e9; if (uJT.w < 0.5 || rd.y < 0.003) return vec4(0.0, 0.0, 0.0, 1.0);',   /* THE JET AND ITS CONTRAIL IN 3D (user 11-24: "upgrade our flying plane"; then "the contrail just feels like a single stroke"). SCALE TRAP: nz() repeats every 1.0 = 64 cells, so a factor k on age a gives features 1/(64k) s long (x0.6 km): k 0.2 drew 40 m beads; lumps ~0.007, wisps 0.02-0.05, breaks 0.0025: the plane at cruise height on a real heading; the trail found per ray by closest approach to its path (no march), then given a real life along its length -- a clear gap behind the engines, two engine trails merging, then spreading, meandering with the air, lumpy, pinching into the regular puffs of the Crow instability, breaking into segments, its edges wispy and fibrous; lit like a cylinder of ice */
+'  vec3 P = uJP, U = uJW - uJV - vec3(0.0, 0.0012, 0.0); float b = dot(rd, U), c = dot(U, U), d = -dot(rd, P), e = -dot(U, P), den = max(c - b * b, 1e-7), a = clamp((e - b * d) / den, 0.0, uJT.x);',
+'  vec3 sd2 = normalize(vec3(-uJV.z, 0.0, uJV.x)), up = vec3(0.0, 1.0, 0.0); float pxa = 2.0 * uPit / uRes.x, r = 0.03 + uJT.z * a, age = smoothstep(4.0, 60.0, a);',
+'  vec3 C0 = P + a * U + (sd2 * (nz(vec3(a * 0.0022, 0.23, 0.61)) - 0.5) + up * (nz(vec3(a * 0.003, 0.71, 0.13)) - 0.5) * 0.6) * r * 2.2 * age;',   /* the older trail meanders with the air, it is no ruler line */
+'  float s = dot(C0, rd); vec3 Lc = 3.0 * trans(vec3(0.0, RE + P.y, 0.0), L); float mu = dot(rd, L), al = 0.0; vec3 col = vec3(0.0);',
+'  if (s > 0.0){ float pix = s * pxa * 0.8, sep = 0.028 * exp(-a / 9.0), x = a * 0.6;',   /* x: km of trail behind the plane (the lab jet flies 0.6 km/s) */
+'    float re = r * (1.0 + 0.9 * (nzc(vec3(a * 0.0045, 0.4, 0.8)) - 0.5) * smoothstep(20.0, 70.0, a)) * (0.7 + 0.6 * nz(vec3(a * 0.007, 0.15, 0.45)));',   /* irregular swellings a few km long as it ages, plus lumps (a regular 1.4 km Crow sine read as a zipper under perspective) */
+'    vec3 q = C0 - rd * s, q1 = q + sd2 * sep, q2 = q - sd2 * sep; float R = max(re, pix), rho = min(length(q1 - rd * dot(q1, rd)), length(q2 - rd * dot(q2, rd))) / R;',
+'    float cs = dot(q, sd2) / R, cu = dot(q, up) / R, res = smoothstep(1.0, 3.0, re / pix), n3 = nz(vec3(a * 0.02, cs * 0.05 + 0.3, cu * 0.05 + 0.7)) * 0.65 + nz(vec3(a * 0.05, cs * 0.12 + 0.1, cu * 0.12 + 0.5)) * 0.35;',
+'    float dens = mix(exp(-rho * rho * 2.2), smoothstep(1.05, 0.15, rho + (n3 - 0.5) * 0.9 * age), res) * (0.6 + 0.8 * nz(vec3(a * 0.006, cs * 0.16, cu * 0.16 + 0.2)) * age + 0.4 * (1.0 - age));',   /* soft wispy edges and fibres once it has spread */
+'    float brk = mix(1.0, smoothstep(0.28, 0.5, nz(vec3(a * 0.0025 + 5.0, 0.55, 0.35))), smoothstep(30.0, 140.0, a));',   /* old trails break into segments */
+'    float op = smoothstep(0.35, 1.6, a) * exp(-a / uJT.y);',   /* a clear gap behind the engines while the exhaust cools and freezes */
+'    al = clamp(op * dens * brk * pow(re / R, 0.45) * pow(0.03 / re, 0.3), 0.0, 0.92);',
+'    vec3 nrm = normalize(-q + rd * 0.001); float lit = mix(1.0, 0.72 + 0.4 * max(dot(nrm, L), 0.0), res);',   /* the sunlit side of the cylinder brighter, the far side in its own shade */
+'    col = (Lc * (hg(mu, 0.7) * 1.6 + 0.15) * lit + amb * 0.85) * al; if (al > 0.01) zj = s; }',
+'  float th = P.y / rd.y; vec3 hp = rd * th - P; vec3 fw = normalize(uJV); float hf = dot(hp, fw) * 1000.0, hw = dot(hp, sd2) * 1000.0, pm = max(th * pxa * 900.0, 1.0), aw = abs(hw);',   /* THE PLANE: its planform (m) where this ray crosses the cruise height, as seen from below */
+'  float sf = max(aw - 2.6, abs(hf) - 35.0), sw = max(aw - 30.0, abs(hf + 0.55 * aw - 3.0) - 4.0), st = max(aw - 9.5, abs(hf + 30.0 + 0.5 * aw) - 2.8), sdf = min(sf, min(sw, st));',   /* fuselage, swept wings, tailplane */
+'  float bd = smoothstep(pm, -pm, sdf) * min(1.0, 22.0 / pm);',
+'  if (bd > 0.002 && th > 0.0){ vec3 hv = normalize(L + normalize(-P)); float gl = (exp(-pow(dot(hv, fw), 2.0) / 0.0005) * 0.7 + exp(-pow(1.0 - abs(hv.y), 2.0) / 0.0004)) * smoothstep(0.0, 0.08, L.y);',   /* the glint: when sun, fuselage (or wing) and eye line up */
+'    vec3 pc = Lc * (0.2 + 3.0 * gl) + amb * 0.5; col = col * (1.0 - bd) + pc * bd; al = max(al, bd); zj = min(zj, length(P)); }',   /* the underside, in its own shadow: a grey silhouette */
+'  return vec4(col, 1.0 - al); }',
+'vec3 gradeC(vec3 col, vec3 L, vec2 uv, float Tsky){',   /* the tonemap and grade, as a function: a lightning frame grades twice (with and without the flash) */
+'  col = 1.0 - exp(-col * 1.35 * mix(1.0, 3.2, smoothstep(0.1, -0.05, L.y))); col = pow(col, vec3(1.0 / 2.2)); float lu = dot(col, vec3(0.299, 0.587, 0.114)); col = clamp(mix(vec3(lu), col, mix(1.08, 1.42, uSea)), 0.0, 1.0); col = mix(col, vec3(lu) * 1.02 + 0.02, (1.0 - uSea) * 0.1 * (1.0 - uNt));',   /* SEASON (user 11-23: "vivid summers and paler winters"): saturation follows the date, winter a touch hazier */
+'  if (uPalK > 0.5){ float y = 1.0 - uv.y; vec3 pal = y < 0.42 ? mix(uP0, uP1, y / 0.42) : y < 0.72 ? mix(uP1, uP2, (y - 0.42) / 0.3) : mix(uP2, uP3, (y - 0.72) / 0.28);',
+'    col = mix(col, pal + max(col - vec3(lu), 0.0) * 0.6, 0.78 * Tsky); }   /* PALETTE, as the hero: the dashboard\u2019s sky colors in the open sky */',
+'  return col; }',
+'void main(){ WA = uWA; vec2 uv = vUV + uJit / uRes; float asp = uRes.x / uRes.y, tH = uPit, tV = tH / asp, e0 = uE0 + atan(tV);',
+'  vec3 dc = normalize(vec3((uv.x - 0.5) * 2.0 * tH, (uv.y - 0.5) * 2.0 * tV, 1.0)); float ce = cos(e0), se = sin(e0); vec3 rd = vec3(dc.x, dc.y * ce + dc.z * se, -dc.y * se + dc.z * ce);',
+'  vec3 L = normalize(uL); vec3 sky = atmo(rd, L), amb = atmo(normalize(vec3(0.3, 1.0, 0.2)), L) * 0.9 + vec3(0.004, 0.005, 0.008); gSky = sky; if (uNt < 0.5 && L.y < 0.3) gHor = atmo(normalize(vec3(L.x, 0.05, L.z) + vec3(0.0001)), L) * smoothstep(0.3, 0.02, L.y);',   /* the glowing horizon under a low sun: light from the west lights the clouds facing it (after sunset they were near black) */   /* the layers haze toward it (computing atmo per layer cost half the frame rate) */
+'  float jit = mix(fract(52.9829189 * fract(dot(gl_FragCoord.xy + 5.588238 * uFrame, vec2(0.06711056, 0.00583715)))), 0.5, uNoJit);   /* interleaved gradient noise (Jimenez), its TEMPORAL form: the pixel shifts by 5.588238 per frame (adding a value offset froze the diagonal pattern into a hatching on dim night towers); the white hash read as speckle */   /* lightning strokes blend fast: those frames march without jitter (no grain; a little banding hidden under the flash) */',
+'  float zA, zB; vec4 A = layer(rd, L, amb, uK0, uB00, uB01, uC0, 40, jit, zA), B = layer(rd, L, amb, uK1, uB10, uB11, uC1, 28, jit, zB), Hi = high(rd, L, amb, uK2, uC2); float zH = Hi.a < 0.995 ? hiH() / max(rd.y, 0.01) : 1e9, zJ; vec4 J = jetC(rd, L, amb, zJ); if (zJ < zH) Hi = vec4(J.rgb + J.a * Hi.rgb, J.a * Hi.a); else Hi = vec4(Hi.rgb + Hi.a * J.rgb, Hi.a * J.a); zH = min(zH, zJ);',   /* the jet joins the high item, ordered by depth with the cirrus */
+'  vec4 X0 = A, X1 = B, X2 = Hi, Tm; float z0 = zA, z1 = zB, z2 = zH, zt; if (z1 < z0){ Tm = X0; X0 = X1; X1 = Tm; zt = z0; z0 = z1; z1 = zt; } if (z2 < z1){ Tm = X1; X1 = X2; X2 = Tm; zt = z1; z1 = z2; z2 = zt; } if (z1 < z0){ Tm = X0; X0 = X1; X1 = Tm; }',   /* DEPTH SORT: a storm 60 km off reaches 12 km, so nearer altocumulus or cirrus must cover its upper parts; the layers stack nearest first per pixel */
+'  float Tall = A.a * B.a * Hi.a; vec3 col = X0.rgb + X0.a * (X1.rgb + X1.a * (X2.rgb + X2.a * sky));   /* no sun disk (user 11-23: it would clash with the moon\u2019s standard size); the sunlight on the clouds and the glow around the sun stay */',
+'  { float ea = asin(clamp(rd.y, -1.0, 1.0)), xa = atan(rd.x, rd.z), sk = 0.0095 + 0.0035 * nzc(vec3(xa * 0.9, 0.53, 0.21)) + 0.0018 * step(0.62, nz(vec3(xa * 9.0, 0.31, 0.77))) * step(0.4, nz(vec3(xa * 2.0, 0.11, 0.4))) + 0.0009 * nz(vec3(xa * 38.0, 0.71, 0.13));',   /* THE GROUND LINE: a low, hazy line of trees and rooftops along the western horizon. Only the storm views tilt low enough to see it (their frame starts 0.46 deg up; the skyline reaches 0.3-0.75 deg): under a far storm the horizon was a smear of sky. Far, so mostly haze: a dark slate a little lighter than the base */
+'    float gnd = smoothstep(sk, sk - 0.00045, ea); col = mix(col, mix(amb * 0.14 + vec3(0.01, 0.011, 0.014), vec3(dot(sky, vec3(0.33))) * vec3(0.78, 0.82, 0.9) * 0.55, 0.3), gnd); gGnd = gnd; }',   /* grey-blue haze, not the sunset colour of the sky behind */
+'  if (uNt > 0.0){ float ml = dot(col, vec3(0.3, 0.55, 0.15)); col = mix(col, mix(col, vec3(ml) * vec3(0.72, 0.84, 1.12), 0.6) * 0.075, uNt);',   /* NIGHT: L is the moon; its light is ~0.075 of the lit-sky render and bluer (rod vision) */
+'    vec2 sa = vec2(atan(rd.z, rd.x), asin(clamp(rd.y, -1.0, 1.0))) * 260.0, sc = floor(sa); float sh = hs(sc), sb = smoothstep(0.9965, 1.0, sh) * smoothstep(0.42, 0.0, length(fract(sa) - 0.5)) * (0.4 + 0.6 * hs(sc + 7.1));',
+'    vec3 stx = vec3(sb * 0.9); if (uStOn > 0.5){ stx = texture(uSt, uv).rgb * (0.78 + 0.44 * nz(vec3(uv.x * 7.0, uTime * 0.06, uv.y * 2.8))); }',
+'    if (uSkOn > 0.5){ vec3 e = uEq * rd; vec2 su = vec2(fract(0.5 - atan(e.y, e.x) / 6.2831853), (0.5 - asin(clamp(e.z, -1.0, 1.0)) / 3.14159265) / 0.77783), gx = dFdx(su), gy = dFdy(su); gx.x -= floor(gx.x + 0.5); gy.x -= floor(gy.x + 0.5);',   /* RA/Dec of this ray at the lab clock; gradients fixed across the RA wrap so the mipmaps leave no seam */
+'      vec2 sv = textureGrad(uSk, su, gx, gy).rg; float sl = pow(sv.r, 2.2), vis = smoothstep(0.03, 0.09, sl) * sl * 3.0, X = 1.0 / (max(rd.y, 0.0) + 0.025 * exp(-11.0 * max(rd.y, 0.0))), ext = exp(-0.28 * (min(X, 12.0) - 1.0));',   /* the moon and the city wash out the faint ones (a soft limiting magnitude: the star haze in the Milky Way read as sand); airmass dims everything low down */
+'      vec3 sc2 = mix(vec3(1.0, 0.72, 0.5), vec3(0.68, 0.8, 1.0), sv.g), mw = textureGrad(uMw, su, gx, gy).rgb; float ml = dot(mw, vec3(0.33));',
+'      stx = (sc2 * pow(vis, 0.55) * 1.25 * (0.8 + 0.4 * nz(vec3(su.x * 900.0, uTime * 0.05, su.y * 300.0))) + smoothstep(0.07, 0.42, ml) * mix(vec3(ml), mw, 0.5) / max(ml, 0.01) * vec3(0.86, 0.93, 1.06) * 0.3) * ext; }',   /* real stars, real colours, a slow twinkle; the Milky Way faint, as a moonlit city sky allows */   /* the clear-night hero sky (stars + Milky Way), a slow twinkle */
+'    col += uNt * Tall * (stx * smoothstep(0.02, 0.15, rd.y) + vec3(0.055, 0.034, 0.02) * exp(-max(rd.y, 0.0) * 7.0)); }',   /* stars through the clear gaps; the city light dome low in the west */   /* stars through the clear gaps; the city light dome low in the west */
+'  vec3 lxc = (gLx * mix(1.0, 0.55, uNt) + uFlG * vec3(0.72, 0.78, 0.95) * (0.015 + 0.05 * uNt) * (0.06 + 0.94 * exp(-(1.0 - dot(rd, normalize(uFl.xyz + vec3(0.0, 2.0, 0.0) + vec3(0.0, 0.0, 0.001)))) / 0.03)) * (1.0 - 0.5 * Tall)) * (1.0 - gGnd); float Tsk = A.a * B.a * Hi.a; vec3 c0 = gradeC(col, L, uv, Tsk), c1 = (lxc.x + lxc.y + lxc.z) > 1e-4 ? gradeC(col + lxc, L, uv, Tsk) : c0;',
+'  float sF = max(dot(c1 - c0, vec3(0.333)), 0.0); o = vec4(c0, 1.0 / (1.0 + sF * 4.0)); }'
+].join('\n');
+window._labFS2 = FS2; window._labVS = VS;   /* lab: the shader sources, for compile timing and the port */
+var P2 = null, U2 = {};
+try { P2 = gl.createProgram(); gl.attachShader(P2, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(P2, sh(gl.FRAGMENT_SHADER, FS2)); gl.linkProgram(P2); if (!gl.getProgramParameter(P2, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(P2));
+  ['uRes', 'uTime', 'uFrame', 'uPit', 'uE0', 'uK0', 'uB00', 'uB01', 'uC0', 'uK1', 'uB10', 'uB11', 'uC1', 'uK2', 'uC2', 'uL', 'uN', 'uPalK', 'uP0', 'uP1', 'uP2', 'uP3', 'uNt', 'uSea', 'uFl', 'uJT', 'uJP', 'uJV', 'uJW', 'uWV', 'uWO', 'uWA', 'uSt', 'uStOn', 'uSkOn', 'uSk', 'uMw', 'uEq', 'uFlB', 'uFlG', 'uNoJit', 'uJit'].forEach(function(k){ U2[k] = gl.getUniformLocation(P2, k); }); } catch(e){ console.error('[types]', e); P2 = null; }
+window._labTypesOK = !!P2;
+/* EVERY CLOUDY HERO STATE, DAY AND NIGHT (user 2026-11-23: "finish the rest but dont touch clear day clear night yet"). px = the
+   precipitation drawn in depth: 1 snow, 2 rain, 3 drizzle, 4 sleet, 5 heavy rain, 6 freezing rain; 0 none. The storms keep the
+   dashboard's own SVG on top for the bolts (and the hail) */
+var SCENES = [
+  { k: 'cl-d', label: 'CLEAR \u00b7 DAY', code: 0, night: 0, type: 6, B0: 1.2, B1: 3.1, cover: 0, glow: 0, el: 35, az: -0.5, px: 0, atmo: 1 },
+  { k: 'cl-n', label: 'CLEAR \u00b7 NIGHT', code: 0, night: 1, type: 6, B0: 1.2, B1: 3.1, cover: 0, glow: 0, el: -6, az: 0.3, px: 0, twi: 1 },
+  { k: 'mc-d', label: 'MAINLY CLEAR \u00b7 DAY', code: 1, night: 0, type: 1, B0: 1.2, B1: 3.1, cover: .05, glow: 0, el: 35, az: -0.5, px: 0, atmo: 1 },
+  { k: 'oc-d', label: 'OVERCAST \u00b7 DAY', code: 3, night: 0, type: 0, B0: 1.1, B1: 2.4, cover: .86, glow: 0, el: 30, az: -0.45, px: 0 },
+  { k: 'oc-n', label: 'OVERCAST \u00b7 NIGHT', code: 3, night: 1, type: 0, B0: 1.1, B1: 2.4, cover: .8, glow: .25, el: 34, az: 0.42, px: 0 },
+  { k: 'pc-d', label: 'PARTLY CLOUDY \u00b7 DAY', code: 2, night: 0, type: 1, B0: 1.2, B1: 3.1, cover: .46, glow: 0, el: 40, az: -0.55, px: 0 },
+  { k: 'pc-n', label: 'PARTLY CLOUDY \u00b7 NIGHT', code: 2, night: 1, type: 1, B0: 1.2, B1: 3.1, cover: .46, glow: .3, el: 38, az: 0.38, px: 0 },
+  { k: 'fg-d', label: 'FOG \u00b7 DAY', code: 45, night: 0, type: 4, B0: 0, B1: 0.24, cover: 1, glow: 0, el: 18, az: -0.3, px: 0 },
+  { k: 'fg-n', label: 'FOG \u00b7 NIGHT', code: 45, night: 1, type: 4, B0: 0, B1: 0.24, cover: 1, glow: .5, el: 24, az: 0.35, px: 0 },
+  { k: 'dz-d', label: 'DRIZZLE \u00b7 DAY', code: 51, night: 0, type: 2, B0: 0.45, B1: 1.9, cover: .8, glow: 0, el: 30, az: -0.4, px: 3 },
+  { k: 'dz-n', label: 'DRIZZLE \u00b7 NIGHT', code: 51, night: 1, type: 2, B0: 0.45, B1: 1.9, cover: .8, glow: .35, el: 34, az: 0.42, px: 3 },
+  { k: 'rn-d', label: 'RAIN \u00b7 DAY', code: 61, night: 0, type: 2, B0: 0.6, B1: 3.4, cover: .92, glow: 0, el: 32, az: -0.4, px: 2 },
+  { k: 'rn-n', label: 'RAIN \u00b7 NIGHT', code: 61, night: 1, type: 2, B0: 0.6, B1: 3.4, cover: .92, glow: .35, el: 34, az: 0.42, px: 2 },
+  { k: 'rh-d', label: 'HEAVY RAIN \u00b7 DAY', code: 65, night: 0, type: 2, B0: 0.4, B1: 4.0, cover: 1, glow: 0, el: 32, az: -0.4, px: 5 },
+  { k: 'rh-n', label: 'HEAVY RAIN \u00b7 NIGHT', code: 65, night: 1, type: 2, B0: 0.4, B1: 4.0, cover: 1, glow: .4, el: 34, az: 0.42, px: 5 },
+  { k: 'fz-d', label: 'FREEZING RAIN \u00b7 DAY', code: 66, night: 0, type: 2, B0: 0.5, B1: 3.2, cover: .95, glow: 0, el: 28, az: -0.4, px: 6 },
+  { k: 'fz-n', label: 'FREEZING RAIN \u00b7 NIGHT', code: 66, night: 1, type: 2, B0: 0.5, B1: 3.2, cover: .95, glow: .35, el: 34, az: 0.42, px: 6 },
+  { k: 'sn-d', label: 'SNOW \u00b7 DAY', code: 71, night: 0, type: 5, B0: 0.7, B1: 3.2, cover: .9, glow: 0, el: 22, az: -0.4, px: 1 },
+  { k: 'sn-n', label: 'SNOW \u00b7 NIGHT', code: 71, night: 1, type: 5, B0: 0.7, B1: 3.2, cover: .9, glow: .3, el: 30, az: 0.4, px: 1 },
+  { k: 'sl-d', label: 'SLEET \u00b7 DAY', code: 77, night: 0, type: 5, B0: 0.6, B1: 3.0, cover: .92, glow: 0, el: 24, az: -0.4, px: 4 },
+  { k: 'sl-n', label: 'SLEET \u00b7 NIGHT', code: 77, night: 1, type: 5, B0: 0.6, B1: 3.0, cover: .92, glow: .3, el: 30, az: 0.4, px: 4 },
+  { k: 'ts-d', label: 'THUNDERSTORM \u00b7 DAY', code: 95, night: 0, type: 3, B0: 1, B1: 12, cover: 1, glow: 0, el: 28, az: -0.75, px: 2 },
+  { k: 'ts-n', label: 'THUNDERSTORM \u00b7 NIGHT', code: 95, night: 1, type: 3, B0: 1, B1: 12, cover: 1, glow: .3, el: 30, az: -0.6, px: 2 },
+  { k: 'th-d', label: 'HAIL STORM \u00b7 DAY', code: 96, night: 0, type: 3, B0: 1, B1: 12, cover: 1, glow: 0, el: 26, az: -0.7, px: 7, hail: 1 },
+  { k: 'th-n', label: 'HAIL STORM \u00b7 NIGHT', code: 96, night: 1, type: 3, B0: 1, B1: 12, cover: 1, glow: .3, el: 30, az: -0.6, px: 7, hail: 1 },
+  /* CLOUD TYPES, LAYERED: lay = [low, mid, high]; each [kind, base km, top km, cover] (high: [kind, cover]); kinds as in FS2 */
+  { k: 't-st', label: 'TYPE \u00b7 STRATUS', lay: [[7, 0.35, 0.9, 0.95], null, null], el: 25, az: -0.4 },
+  { k: 't-ac', label: 'TYPE \u00b7 ALTOCUMULUS', lay: [null, [8, 3.6, 4.1, 0.55], null], el: 30, az: -0.5 },
+  { k: 't-as', label: 'TYPE \u00b7 ALTOSTRATUS', lay: [null, [9, 3.0, 4.6, 0.85], null], el: 30, az: -0.5 },
+  { k: 't-ci', label: 'TYPE \u00b7 CIRRUS', lay: [null, null, [10, 0.6]], el: 35, az: -0.5 },
+  { k: 't-cc', label: 'TYPE \u00b7 CIRROCUMULUS', lay: [null, null, [11, 0.6]], el: 35, az: -0.5 },
+  { k: 't-cs', label: 'TYPE \u00b7 CIRROSTRATUS + HALO', lay: [null, null, [12, 0.8]], el: 28, az: -0.15 },
+  { k: 'l-ci-ac', label: 'LAYERS \u00b7 CI OVER AC', lay: [null, [8, 3.6, 4.1, 0.45], [10, 0.42]], el: 32, az: -0.5 },
+  { k: 'l-ci-cu', label: 'LAYERS \u00b7 CI OVER CU', lay: [[1, 1.2, 3.1, 0.3], null, [10, 0.5]], el: 38, az: -0.55 },
+  { k: 'l-ac-sc', label: 'LAYERS \u00b7 AC OVER SC', lay: [[0, 1.1, 2.0, 0.55], [8, 3.8, 4.3, 0.5], null], el: 30, az: -0.45 },
+  /* STORMS IN COMPANY (user 11-23: "show me layered views with the cumulonimbus cloud with other cloud types in a normal situation"): storm 60 km west, camera tilted down so it stands on the horizon */
+  { k: 'l-cb-acc', label: 'LAYERS \u00b7 STORM, AC CASTELLANUS, CIRRUS', lay: [[6.0, 1.0, 12.0, 1.0], [8.2, 3.5, 4.6, 0.3], [10.0, 0.35]], el: 30, az: -0.5, cb: 1, wx: 0, tilt: 0.008 },
+  { k: 'l-cb-cs', label: 'LAYERS \u00b7 STORM UNDER A CIRROSTRATUS VEIL', lay: [[6.0, 1.0, 12.0, 1.0], null, [12.1, 0.55]], el: 32, az: -0.5, cb: 1, wx: 0, tilt: 0.008 },
+  { k: 'l-cb-cu', label: 'LAYERS \u00b7 AFTERNOON STORM AMID CUMULUS', lay: [[6.2, 1.0, 12.0, 1.0], null, [10.0, 0.25]], el: 45, az: -0.5, cb: 1, wx: 0, tilt: 0.008 },
+  { k: 'l-cb-acs', label: 'LAYERS \u00b7 STORM BEYOND ALTOCUMULUS', lay: [[6.0, 1.0, 12.0, 1.0], [8.0, 3.6, 4.1, 0.38], null], el: 30, az: -0.5, cb: 1, wx: 0, tilt: 0.008 },
+  { k: 'l-cb-sun', label: 'LAYERS \u00b7 STORM AT SUNSET, CIRRUS', lay: [[6.0, 1.0, 12.0, 1.0], null, [10.0, 0.3]], el: 2, az: -0.15, cb: 1, wx: 0, tilt: 0.008 },
+  { k: 'g-ci', label: 'GOLDEN \u00b7 CIRRUS FIRE', lay: [null, null, [10, 0.65]], el: -2.5, az: -0.15 },
+  { k: 'g-ac', label: 'GOLDEN \u00b7 MACKEREL (AC)', lay: [null, [8, 3.6, 4.1, 0.55], null], el: 1.5, az: -0.2 },
+  { k: 'g-mix', label: 'GOLDEN \u00b7 CI OVER AC', lay: [null, [8, 3.6, 4.1, 0.4], [10, 0.5]], el: -1.0, az: -0.15 },
+  { k: 'g-st', label: 'GOLDEN \u00b7 BLOCKED (ST)', lay: [[7, 0.4, 1.0, 0.98], null, null], el: 1.0, az: -0.2 }].concat([
+  /* SUBTYPES: the golden hour's species, one scene each; the tenths digit of the kind is the species (FS2 reads fract(K)) */
+  ['s-ci-fib', 'CIRRUS \u00b7 FIBRATUS', null, null, [10.0, 0.6], 35], ['s-ci-unc', 'CIRRUS \u00b7 UNCINUS', null, null, [10.1, 0.6], 35], ['s-ci-spi', 'CIRRUS \u00b7 SPISSATUS', null, null, [10.2, 0.6], 35],
+  ['s-ci-int', 'CIRRUS \u00b7 INTORTUS', null, null, [10.3, 0.6], 35], ['s-ci-ver', 'CIRRUS \u00b7 VERTEBRATUS', null, null, [10.4, 0.6], 35],
+  ['s-cs-neb', 'CIRROSTRATUS \u00b7 NEBULOSUS', null, null, [12.0, 0.8], 28], ['s-cs-fib', 'CIRROSTRATUS \u00b7 FIBRATUS', null, null, [12.1, 0.8], 28],
+  ['s-cc-str', 'CIRROCUMULUS \u00b7 STRATIFORMIS', null, null, [11.0, 0.6], 35], ['s-cc-len', 'CIRROCUMULUS \u00b7 LENTICULARIS', null, null, [11.1, 0.6], 35],
+  ['s-as-tra', 'ALTOSTRATUS \u00b7 TRANSLUCIDUS', null, [9.0, 3.0, 4.6, 0.85], null, 30], ['s-as-opa', 'ALTOSTRATUS \u00b7 OPACUS', null, [9.1, 3.0, 4.6, 0.95], null, 30],
+  ['s-ac-str', 'ALTOCUMULUS \u00b7 STRATIFORMIS', null, [8.0, 3.6, 4.1, 0.6], null, 30], ['s-ac-flo', 'ALTOCUMULUS \u00b7 FLOCCUS', null, [8.1, 3.6, 4.2, 0.66], null, 30],
+  ['s-ac-cas', 'ALTOCUMULUS \u00b7 CASTELLANUS', null, [8.2, 3.5, 5.8, 0.42], null, 25], ['s-ac-len', 'ALTOCUMULUS \u00b7 LENTICULARIS', null, [8.3, 3.6, 4.4, 0.55], null, 25],
+  ['s-ac-lac', 'ALTOCUMULUS \u00b7 LACUNOSUS', null, [8.4, 3.6, 4.0, 0.65], null, 30],
+  ['s-sc-str', 'STRATOCUMULUS \u00b7 STRATIFORMIS', [0.0, 1.1, 2.0, 0.55], null, null, 30], ['s-sc-len', 'STRATOCUMULUS \u00b7 LENTICULARIS', [0.1, 1.2, 2.0, 0.45], null, null, 25],
+  ['s-sc-per', 'STRATOCUMULUS \u00b7 PERLUCIDUS', [0.2, 1.1, 2.0, 0.6], null, null, 30], ['s-sc-opa', 'STRATOCUMULUS \u00b7 OPACUS', [0.3, 1.1, 2.0, 0.7], null, null, 30],
+  ['s-sc-und', 'STRATOCUMULUS \u00b7 UNDULATUS', [0.4, 1.1, 2.0, 0.6], null, null, 30],
+  ['s-st-neb', 'STRATUS \u00b7 NEBULOSUS', [7.0, 0.35, 0.9, 0.95], null, null, 25], ['s-st-fra', 'STRATUS \u00b7 FRACTUS', [7.1, 0.3, 0.9, 0.6], null, null, 25],
+  ['s-cu-hum', 'CUMULUS \u00b7 HUMILIS', [1.1, 1.0, 2.4, 0.6], null, null, 30], ['s-cu-med', 'CUMULUS \u00b7 MEDIOCRIS', [1.0, 1.2, 3.1, 0.52], null, null, 30],
+  ['s-cu-con', 'CUMULUS \u00b7 CONGESTUS', [1.2, 1.2, 6.5, 0.55], null, null, 22], ['s-cu-fra', 'CUMULUS \u00b7 FRACTUS', [1.3, 0.8, 1.7, 0.65], null, null, 30]
+].map(function(r){ return { k: r[0], label: 'SUBTYPE \u00b7 ' + r[1], lay: [r[2], r[3], r[4]], el: r[5], az: -0.5 }; })).concat([
+  /* WEATHER (user 11-23): the types that bring precipitation to the ground (WMO praecipitatio: As, Ns, Sc, St, Cu, Cb), each with its animation; wx = the rain/snow layer kind (1 snow, 2 rain, 3 drizzle, 4 sleet, 5 heavy rain, 6 freezing rain, 7 hail); cb = a storm (lightning, rain only under it) */
+  ['s-ns-rn', 'NIMBOSTRATUS \u00b7 RAIN', [5.0, 0.7, 4.2, 1.0], null, null, 24, 2, 0, 0.15], ['s-ns-sn', 'NIMBOSTRATUS \u00b7 SNOW', [5.0, 0.7, 4.2, 1.0], null, null, 24, 1],
+  ['s-ns-sl', 'NIMBOSTRATUS \u00b7 SLEET', [5.0, 0.7, 4.2, 1.0], null, null, 24, 4], ['s-ns-fz', 'NIMBOSTRATUS \u00b7 FREEZING RAIN', [5.0, 0.7, 4.2, 1.0], null, null, 24, 6],
+  ['s-cb-cap', 'CUMULONIMBUS \u00b7 CAPILLATUS, STORM FRONT IN THE WEST', [6.0, 1.0, 12.0, 1.0], null, null, 22, 0, 1], ['s-cb-apr', 'CUMULONIMBUS \u00b7 STORM FRONT APPROACHING, SHELF CLOUD', [6.3, 0.5, 12.0, 1.0], null, null, 22, 0, 1], ['s-cb-cal', 'CUMULONIMBUS \u00b7 CALVUS, SHOWER IN THE WEST', [6.1, 1.0, 12.0, 1.0], null, null, 22, 0, 1],
+  ['s-cb-ov', 'CUMULONIMBUS \u00b7 STORM OVERHEAD, HEAVY RAIN', [5.2, 0.6, 5.0, 1.0], null, null, 24, 5, 2, 0.45], ['s-cb-hl', 'CUMULONIMBUS \u00b7 STORM OVERHEAD, HAIL', [5.2, 0.6, 5.0, 1.0], null, null, 24, 7, 2, 0.45],
+  ['s-st-dz', 'STRATUS \u00b7 DRIZZLE', [7.0, 0.3, 0.8, 0.98], null, null, 25, 3], ['s-sc-lr', 'STRATOCUMULUS \u00b7 OPACUS, LIGHT RAIN', [0.3, 1.0, 1.9, 0.75], null, null, 30, 3, 0, 0.55],
+  ['s-as-sn', 'ALTOSTRATUS \u00b7 OPACUS, LIGHT SNOW', [null, [9.1, 2.6, 4.6, 0.97], null][0], [9.1, 2.6, 4.6, 0.97], null, 30, 1]
+].map(function(r){ return { k: r[0], label: 'SUBTYPE \u00b7 ' + r[1], lay: [r[2], r[3], r[4]], el: r[5], az: -0.5, wx: r[6], cb: r[7] || 0, wxShow: r[8], tilt: r[7] === 1 ? 0.008 : 0, front: r[0] === 's-cb-apr' ? 'near' : '' }; }));
+window._labScenes = SCENES;
+var PHONE = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches) || window.innerWidth < 700;   /* phones start at a lower resolution */
+var S = { auto: 1, cover: .8, glow: .25, moon: 34, night: 1, play: true, scale: PHONE ? .6 : 1, t: 40, sc: SCENES[0] }, last = 0, fr = 0, f0 = performance.now(), T0 = performance.now();
+function $(id){ return document.getElementById(id); }
+$('c-cover').oninput = function(){ S.cover = this.value / 100; S.coverK = S.cover / 0.6; S.fresh = 1; };
+$('c-glow').oninput = function(){ S.glow = this.value / 100; };
+$('c-moon').oninput = function(){ S.moon = +this.value; };
+$('c-scale').oninput = function(){ S.scale = this.value / 100; };
+function nightLayers(sc){ var base = $('vol-base'), ext = $('vol-ext'), on = !!sc.twi;
+  cv.style.mixBlendMode = on ? 'screen' : ''; base.style.display = ext.style.display = on ? 'block' : 'none';
+  var mn = $('c-moon'); if (on){ mn.min = -18; mn.max = 0; } else { mn.min = 5; mn.max = 70; }
+  if (!on) return;
+  /* ATMOSPHERIC EXTINCTION: starlight through X airmasses, X from each row's height above the horizon (the same camera as the
+     clouds); city-air coefficients in magnitudes per airmass (red 0.14, green 0.22, blue 0.36): dimmer and redder low down */
+  var h = 160, g = ext.getContext('2d'); ext.width = 1; ext.height = h; var tH = 0.84, tV = tH / ((ext.clientWidth || 700) / (ext.clientHeight || 275)), e0 = 0.035 + Math.atan(tV);
+  for (var y = 0; y < h; y++){ var v = 1 - (y + 0.5) / h, el = e0 + Math.atan((v - 0.5) * 2 * tV), se = Math.max(0.02, Math.sin(el)), X = 1 / (se + 0.025 * Math.exp(-11 * se));
+    var c = [0.14, 0.22, 0.36].map(function(k){ return Math.round(255 * (0.5 + 0.5 * Math.pow(10, -0.4 * k * (Math.min(X, 8) - 1)))); });   /* softened: on the photo it dims the sky as well as the stars, and the real low sky is not dark */ g.fillStyle = 'rgb(' + c.join(',') + ')'; g.fillRect(0, y, 1, 1); } }
+var _starsJs = 1;
+/* STARS FROM THE CLEAR-NIGHT HERO (user 11-24: "these stars are really weak, we've already built stars for clear night, lets use
+   that"): the dashboard's own clear-night SVG (power-law glow stars, the ESO Milky Way photo, planets) rasterized ONCE into a
+   texture; FS2 draws it behind the clouds, scaled by their transmittance, so thick cloud hides it and thin edges dim it. Images
+   inside an SVG drawn to a canvas only load as data URIs, so the hrefs are inlined first. */
+window._labStarsFrom = function(svg){
+  if (!svg || window._labStarsBusy) return; window._labStarsBusy = 1;
+  var c = svg.cloneNode(true), W = 1320, H = 520, imgs = c.querySelectorAll('image');
+  c.setAttribute('width', W); c.setAttribute('height', H); c.setAttribute('preserveAspectRatio', 'xMidYMid slice');
+  c.querySelectorAll('animate, animateTransform, animateMotion').forEach(function(a){ a.remove(); });
+  c.querySelectorAll('[class*="meteor"]').forEach(function(a){ a.remove(); });
+  var PL = []; c.querySelectorAll('circle').forEach(function(a){ if (parseFloat(a.getAttribute('r') || 0) >= 5){ PL.push([+a.getAttribute('cx'), +a.getAttribute('cy')]); a.remove(); } }); c.querySelectorAll('circle').forEach(function(a){ var x = +a.getAttribute('cx'), y = +a.getAttribute('cy'); if (PL.some(function(q){ return Math.abs(q[0] - x) < 1 && Math.abs(q[1] - y) < 1; })) a.remove(); });   /* the hero's planet glows (r 5.5-8.3) read as two big blobs behind the clouds (user 11-24: "remove these two stars"); the star field keeps r <= 3.4 */   /* a frozen shooting star reads as a scratch */
+  [].forEach.call(imgs, function(im){ im.setAttribute('opacity', String(0.45 * parseFloat(im.getAttribute('opacity') || '1'))); });   /* the photo layers (Milky Way, deep sky) at 45%: moonlight and the city wash them out; the stars stay full */
+  Promise.all([].map.call(imgs, function(im){ var h = im.getAttribute('href') || im.getAttribute('xlink:href'); if (!h || /^data:/.test(h)) return null;
+    return fetch(new URL(h, location.origin + '/').href).then(function(r){ return r.blob(); }).then(function(b){ return new Promise(function(res){ var fr = new FileReader(); fr.onload = function(){ im.setAttribute('href', fr.result); im.removeAttribute('xlink:href'); res(); }; fr.readAsDataURL(b); }); }).catch(function(e){ console.warn('stars img', h, e); });
+  })).then(function(){
+    var s = new XMLSerializer().serializeToString(c); if (!/xmlns=/.test(s)) s = s.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
+    var img = new Image(); img.onload = function(){ var cv = document.createElement('canvas'); cv.width = W; cv.height = H; cv.getContext('2d').drawImage(img, 0, 0, W, H);
+      gl.activeTexture(gl.TEXTURE1); var T = window._labHeroStarTex || gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, T); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.activeTexture(gl.TEXTURE0); window._labHeroStarTex = T; window._labStarsBusy = 0; if (window._vol) window._vol.fresh = 1; };
+    img.onerror = function(e){ console.warn('stars raster failed', e); window._labStarsBusy = 0; };
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(s); });
+};
+window._labNightBase = function(svgHtml){ $('vol-base').innerHTML = svgHtml || ''; };
+function pick(sc){ S.sc = sc; S.fresh = 1; if (typeof RT !== 'undefined') RT.cal = 1; S.coverK = 1; if (sc.lay){ sc.night = 0; sc.cover = 0.6; sc.glow = 0; sc.type = -1; sc.px = sc.wx || 0; sc.code = sc.code || 1; } $('c-moon').min = sc.lay ? -6 : 5; nightLayers(sc); S.night = sc.night; S.cover = sc.cover; S.glow = sc.glow; S.moon = sc.el; $('c-cover').value = Math.round(sc.cover * 100); $('c-glow').value = Math.round(sc.glow * 100); $('c-moon').value = sc.el;
+  $('l-moon').textContent = sc.twi ? 'SUN (BELOW HORIZON)' : sc.night ? 'MOON' : 'SUN'; $('w-glow').style.display = sc.night ? '' : 'none'; $('pair-h').textContent = sc.label + ' \u00b7 TODAY VS VOLUMETRIC';
+  document.querySelectorAll('#scenes button, .ty-tile').forEach(function(b){ b.classList.toggle('on', b.getAttribute('data-k') === sc.k); }); document.querySelector('.lab-pair').classList.toggle('solo', !!sc.lay); $('pair-h').textContent = sc.lay ? sc.label.replace(/^SUBTYPE · /, '') : sc.label + ' · TODAY VS VOLUMETRIC'; if (window._labShowNow) window._labShowNow(sc); if (typeof flockSync === 'function') flockSync(); }
+SCENES.forEach(function(sc){ if (sc.lay) return; var b = document.createElement('button'); b.type = 'button'; b.textContent = sc.label; b.setAttribute('data-k', sc.k); b.onclick = function(){ pick(sc); }; $('scenes').appendChild(b); });
+window._labPick = function(k){ pick(SCENES.filter(function(x){ return x.k === k; })[0]); };
+/* THE CLOCK (user 11-23: "show all 24 hours and all year ... vivid summers and paler winters then night views ... sunrise in the morning
+   hitting the clouds from the front and then sunset from the west"; "we need this for them to work properly as heros"; "there wouldnt be
+   a real sun but this is about the lighting"). NOAA solar position for New York (40.7 N, 74.0 W, Eastern time with daylight saving).
+   The view faces WEST (+z west, +x north, -z east): sunrise sits behind the viewer and lights the faces we see; sunset is ahead, backlit.
+   Night: once the sun is 7 deg down the light is the moon (a full moon, opposite the sun: high on winter nights, low in summer). */
+function sunPos(doy, mins, lat, lon){
+  lat = lat == null ? 40.7 : lat; lon = lon == null ? -74.0 : lon;
+  var tz = (doy >= 70 && doy <= 308) ? -4 : -5, g = 2 * Math.PI / 365 * (doy - 1 + (mins / 60 - 12) / 24);
+  var eqt = 229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g) - 0.014615 * Math.cos(2 * g) - 0.040849 * Math.sin(2 * g));
+  var dec = 0.006918 - 0.399912 * Math.cos(g) + 0.070257 * Math.sin(g) - 0.006758 * Math.cos(2 * g) + 0.000907 * Math.sin(2 * g) - 0.002697 * Math.cos(3 * g) + 0.00148 * Math.sin(3 * g);
+  var tst = mins + eqt + 4 * lon - 60 * tz, ha = (tst / 4 - 180) * Math.PI / 180, la = lat * Math.PI / 180;
+  var cz = Math.sin(la) * Math.sin(dec) + Math.cos(la) * Math.cos(dec) * Math.cos(ha), el = Math.asin(Math.max(-1, Math.min(1, cz)));
+  var az = Math.atan2(Math.sin(ha), Math.cos(ha) * Math.sin(la) - Math.tan(dec) * Math.cos(la)) + Math.PI;   /* from north, clockwise */
+  return { el: el * 180 / Math.PI, az: az * 180 / Math.PI };
+}
+function azElVec(az, el){ var a = az * Math.PI / 180, e = el * Math.PI / 180; return [Math.cos(e) * Math.cos(a), Math.sin(e), -Math.cos(e) * Math.sin(a)]; }
+function clockLight(){
+  var sp = sunPos(S.doy, S.mins), sea = 0.5 + 0.5 * Math.cos(2 * Math.PI * (S.doy - 172) / 365);
+  if (sp.el > -7) return { L: azElVec(sp.az, sp.el), el: sp.el, nt: 0, sea: sea, sun: sp };
+  var mp = sunPos((S.doy + 182) % 365 + 1, (S.mins + 720) % 1440), mel = Math.max(mp.el, 4);   /* moon below the horizon: a dim high-sky fill */
+  return { L: azElVec(mp.az, mel), el: mel, nt: 1, sea: sea, sun: sp, moon: mp };
+}
+(function(){
+  var MON = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'], ML = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  S.doy = 172; S.mins = 720; S.clock = false; S.dayPlay = false;
+  function md(doy){ var m = 0; while (doy > ML[m]) { doy -= ML[m]; m++; } return MON[m] + ' ' + doy; }
+  function comp(az){ return ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(az / 45) % 8]; }
+  window._labClockLabel = function(){ var el = document.getElementById('clock-l'); if (!el) return; if (!S.clock){ el.textContent = 'CLOCK OFF: SCENE SUN'; return; }
+    var h = Math.floor(S.mins / 60), m = Math.floor(S.mins % 60), CK = clockLight(), t = ((h + 11) % 12 + 1) + ':' + (m < 10 ? '0' : '') + m + (h < 12 ? ' AM' : ' PM');
+    el.textContent = t + ' · ' + md(S.doy) + ' · ' + (CK.nt ? 'NIGHT, MOON ' + Math.round(CK.moon.el) + '° ' + comp(CK.moon.az) : 'SUN ' + Math.round(CK.sun.el) + '° ' + comp(CK.sun.az)); };
+  function on(){ S.clock = true; S.fresh = 1; var b = $('c-clock'); b.classList.add('on'); b.textContent = 'CLOCK: ON'; window._labClockLabel(); }
+  $('c-time').oninput = function(){ S.mins = +this.value; on(); };
+  $('c-date').oninput = function(){ S.doy = +this.value; on(); };
+  $('c-clock').onclick = function(){ S.clock = !S.clock; S.fresh = 1; this.classList.toggle('on', S.clock); this.textContent = 'CLOCK: ' + (S.clock ? 'ON' : 'OFF'); window._labClockLabel(); };
+  $('c-day').onclick = function(){ S.dayPlay = !S.dayPlay; this.classList.toggle('on', S.dayPlay); this.textContent = S.dayPlay ? 'PLAYING DAY' : 'PLAY DAY'; if (S.dayPlay) on(); };
+  window._labClockTick = function(dt){ if (!S.dayPlay) return; S.mins = (S.mins + dt / 1000 * 24) % 1440; $('c-time').value = Math.floor(S.mins); window._labClockLabel(); };   /* a full day in 60 s */
+  window._labClock = function(doy, mins){ S.doy = doy; S.mins = mins; $('c-date').value = doy; $('c-time').value = mins; on(); };
+  window._labClockLabel();
+})();
+/* THE NIGHT SKY, BAKED MONTHLY (user 11-24: "we dont need a truly accurate real star sky, lets update weekly or monthly"; "bake or cache
+   these new animations so they trigger fastly on launch"): sky/m01..m12.webp (10-38 KB each, sky/sky_month.py) are the finished west
+   view on the 15th of each month at 9 PM from NASA/Goddard SVS 4851 Deep Star Maps 2020 (public domain; Gaia DR2 + Hipparcos/Tycho-2),
+   through this camera and tone mapping. The sky repeats every year, so they never need re-baking. Drawn through the screen-space star
+   slot (uSt) the hero art used; the clouds hide it by their transmittance. Only the month on the DATE slider loads. SKY button:
+   MONTHLY / HERO ART. (The 8k live-sky path, uSkOn, stays off: 15 MB + 330 ms upload, and nobody needs the stars to wheel.) */
+(function(){
+  var R = { on: true, tex: {}, busy: {} }, ML = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  function month(){ var d = S.doy || 172, m = 0; while (m < 11 && d > ML[m]){ d -= ML[m]; m++; } return m + 1; }
+  function load(m){ if (R.tex[m] || R.busy[m]) return; R.busy[m] = 1; var im = new Image(); im.onload = function(){ gl.activeTexture(gl.TEXTURE1); var T = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, T);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB8, gl.RGB, gl.UNSIGNED_BYTE, im); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.activeTexture(gl.TEXTURE0); R.tex[m] = T; if (window._vol) window._vol.fresh = 1; }; im.onerror = function(e){ R.busy[m] = 0; console.warn('sky month', m, e); }; im.src = 'sky/m' + (m < 10 ? '0' : '') + m + '.webp'; }
+  window._labSkyTex = function(){ if (!R.on) return null; var m = month(); load(m); return R.tex[m] || null; };
+  window._labRealSky = function(U2){ gl.uniform1f(U2.uSkOn, 0); gl.uniform1i(U2.uSk, 2); gl.uniform1i(U2.uMw, 3); };
+  load(month());
+  var b = document.getElementById('c-sky'); if (b){ b.textContent = 'NIGHT SKY: MONTHLY'; b.onclick = function(){ R.on = !R.on; this.textContent = 'NIGHT SKY: ' + (R.on ? 'MONTHLY' : 'HERO ART'); if (window._vol) window._vol.fresh = 1; }; }
+})();
+
+/* LIVE WIND AND SHEAR (user 11-24: "can our layering show live shearing from the live wind direction and speeds"): winds at six
+   heights (10 m, 850, 700, 500, 300, 250 hPa) for New York from Open-Meteo. Each layer drifts with the wind at its own height,
+   towers (Cu, Cb) lean with the shear between their base and top, the anvil streams down the upper wind, cirrus fibers lie along
+   it, the rain slants with the surface wind and the contrail drifts with the wind at cruise. Offsets are INTEGRATED frame by frame
+   (not wind x time), so an hourly update never makes a layer jump. Vectors are the direction the air goes, in the lab's frame:
+   x = north (screen right), z = west (away from the viewer); m/s. The lab runs drift at 2.5x real. */
+(function(){
+  var LV = ['SFC', '850', '700', '500', '300', '250'], ZK = [0.01, 1.5, 3.0, 5.6, 9.2, 10.4];
+  function vec(spd, from){ var b = (from + 180) * Math.PI / 180; return [spd * Math.cos(b), -spd * Math.sin(b)]; }
+  var PRE = {
+    DEFAULT: [[6, 240], [12, 240], [12, 240], [12, 240], [24, 240], [24, 240]],   /* the lab's old fixed drift: WSW, 12 m/s low, 24 aloft */
+    'STRONG SHEAR': [[6, 170], [12, 200], [18, 225], [28, 250], [45, 265], [50, 270]],   /* veering from a southerly at the ground to a 50 m/s westerly jet */
+    CALM: [[1.5, 270], [2, 270], [2.5, 260], [3, 260], [4, 255], [4, 255]] };
+  var W = { mode: 'LIVE', raw: PRE.DEFAULT, live: null, v: [], off: [[0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0]], at: '' };
+  function apply(){ var r = W.mode === 'LIVE' ? (W.live || PRE.DEFAULT) : PRE[W.mode]; W.raw = r; W.v = r.map(function(a){ return vec(a[0], a[1]); }); label(); }
+  function card(d){ return ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'][Math.round(((d % 360) + 360) % 360 / 22.5) % 16]; }
+  function label(){ var el = document.getElementById('wind-l'); if (!el) return;
+    el.textContent = (W.mode === 'LIVE' ? (W.live ? 'LIVE ' + W.at + ': ' : 'LIVE (LOADING, DEFAULT FOR NOW): ') : W.mode + ': ') +
+      W.raw.map(function(a, i){ return LV[i] + ' ' + card(a[1]) + ' ' + Math.round(a[0] * 2.237) + ' mph'; }).join(' · '); }
+  function fetchLive(){
+    var lv = ['10m', '850hPa', '700hPa', '500hPa', '300hPa', '250hPa'], q = [];
+    lv.forEach(function(l){ q.push('wind_speed_' + l, 'wind_direction_' + l); }); q.push('temperature_2m');
+    fetch('https://api.open-meteo.com/v1/forecast?latitude=40.71&longitude=-74.01&hourly=' + q.join(',') + '&wind_speed_unit=ms&timezone=America%2FNew_York&forecast_days=2')
+      .then(function(r){ return r.json(); }).then(function(j){
+        var H = j.hourly, now = new Date(), key = now.toLocaleString('sv-SE', { timeZone: 'America/New_York' }).slice(0, 13).replace(' ', 'T'), k = Math.max(0, H.time.findIndex(function(t){ return t.slice(0, 13) === key; }));
+        W.live = lv.map(function(l){ return [H['wind_speed_' + l][k], H['wind_direction_' + l][k]]; });
+        if (W.live.some(function(a){ return a[0] == null || a[1] == null; })) { W.live = null; return; }
+        W.at = H.time[k].slice(11, 16); W.tC = H.temperature_2m ? H.temperature_2m[k] : null; apply(); S.fresh = 1;
+      }).catch(function(e){ console.warn('wind', e); });
+  }
+  function at(h, arr){ if (h <= ZK[0]) return arr[0]; for (var i = 1; i < 6; i++) if (h <= ZK[i]){ var f = (h - ZK[i - 1]) / (ZK[i] - ZK[i - 1]); return [arr[i - 1][0] + (arr[i][0] - arr[i - 1][0]) * f, arr[i - 1][1] + (arr[i][1] - arr[i - 1][1]) * f]; } return arr[5]; }
+  window._labWind = {
+    tick: function(dt){ for (var i = 0; i < 6; i++){ W.off[i][0] += W.v[i][0] * 0.0025 * dt; W.off[i][1] += W.v[i][1] * 0.0025 * dt; } },   /* dt in lab seconds; offsets in km */
+    V: function(){ return [].concat.apply([], W.v); }, O: function(){ return [].concat.apply([], W.off); },
+    WA: function(){ var a = at(9.8, W.v), A = Math.atan2(-a[1], -a[0]), q = Math.PI / 2, m = ((A % q) + q) % q;   /* fibers along the upper wind; kept 0.35 rad off the noise lattice axes (the grid trap) */
+      if (m < 0.35) A += 0.35 - m; else if (m > q - 0.35) A -= m - (q - 0.35); return A; },
+    rain: function(){ return W.v[0]; }, at: function(h){ return at(h, W.v); }, tempC: function(){ return W.mode === 'LIVE' ? (W.tC == null ? null : W.tC) : null; } };
+  apply(); fetchLive(); setInterval(fetchLive, 30 * 60 * 1000);
+  var b = document.getElementById('c-wind'); if (b) b.onclick = function(){ var M = ['LIVE', 'DEFAULT', 'STRONG SHEAR', 'CALM']; W.mode = M[(M.indexOf(W.mode) + 1) % M.length]; this.textContent = 'WIND: ' + W.mode; apply(); S.fresh = 1; if (window._labTilesRedo) window._labTilesRedo(); };
+})();
+
+/* THE JET (user 11-24: "do 1 2 and 4 only if it looks good"; "we arent showing planes at night"): a real path in the cloud world.
+   Cruise 10.4-11.8 km, headings of the real flows over New York (east-west transcontinental, some north-south), passing 18-45 km
+   west of the viewer; 0.6 km/s (about 2.5x real, like the cloud drift) so a crossing takes ~90 s. The contrail's life follows the
+   air aloft: here from the scene (cirrus present = moist aloft, persistent and spreading; mid cloud = a minute; else short); on the
+   hero it comes from bvFlock.contrail(tC, rhIce). Wind aloft from the WSW (toward the viewer and north). */
+(function(){
+  var J = null, nextAt = 6, V = 0.6;
+  function life(){ var L = S.sc.lay || []; return L[2] ? { life: 240, spread: 0.004 } : (L[1] ? { life: 60, spread: 0.002 } : { life: 6, spread: 0.0006 }); }
+  function launch(t, back){ var hs = [75, 95, 265, 285, 20, 200], hd = (hs[Math.floor(Math.random() * hs.length)] + (Math.random() - 0.5) * 24) * Math.PI / 180;
+    var dir = [Math.cos(hd), 0, -Math.sin(hd)], C = [(Math.random() - 0.5) * 30, 10.4 + Math.random() * 1.4, 12 + Math.random() * 23], T = 70 / V, lf = life();
+    J = { t0: t - (back || 0), tc: t - (back || 0) + T, T: T, dir: dir, C: C, life: lf.life, spread: lf.spread }; }
+  window._labJet = function(back){ launch(S.t, back || 0); };   /* for captures: a jet already in flight */
+  window._labJetU = function(t){
+    if (!S.sc || !S.sc.lay || S.night || S.sc.noJet) return null;
+    if (!J && t > nextAt) launch(t);
+    if (!J) return null;
+    var age = t - J.t0, end = 2 * J.T;
+    if (t < J.t0 || age > end + J.life * 3){ J = null; nextAt = t + 25 + Math.random() * 20; return null; }
+    var k = Math.min(age, end) - J.T, P = [J.C[0] + J.dir[0] * V * k, J.C[1], J.C[2] + J.dir[2] * V * k], A = Math.min(age, end);
+    if (age > end){ var dt = age - end; P = [P[0] - 0.035 * 0 , P[1], P[2]]; }
+    return { P: age > end ? [P[0] + J.dir[0] * V * (age - end), P[1], P[2] + J.dir[2] * V * (age - end)] : P, V: [J.dir[0] * V, 0, J.dir[2] * V], W: (function(){ var a = window._labWind ? window._labWind.at(J.C[1]) : [12, -20.8]; return [a[0] * 0.0017, 0, a[1] * 0.0017]; })(),   /* the trail drifts with the live wind at cruise */ A: Math.min(age, J.life * 3), life: J.life, spread: J.spread };
+  };
+})();
+
+
+/* THE TYPES GRID (user 11-23: "its hard to scan all the new types ... going one by one in these tabs"): every new scene as a still tile,
+   grouped by genus; a tile opens the scene live in the viewer above. Tiles render one per frame through the same program (drawLay) */
+var THQ = []; (function(){ var box = $('types'), groups = [], by = {};
+  function grp(name){ if (!by[name]){ by[name] = { name: name, list: [] }; groups.push(by[name]); } return by[name]; }
+  SCENES.forEach(function(sc){ if (!sc.lay || /^t-/.test(sc.k)) return;   /* TYPE scenes are the subtypes' first entries now */
+    var m = sc.label.split(' · '), g = /^s-/.test(sc.k) ? m[1] : /^l-/.test(sc.k) ? 'LAYERED SKIES' : 'LOW SUN', nm = /^s-/.test(sc.k) ? m[2] : m.slice(1).join(' · ');
+    grp(g).list.push({ sc: sc, name: nm }); });
+  groups.sort(function(a, b){ return (/ /.test(a.name) ? 1 : 0) - (/ /.test(b.name) ? 1 : 0); });   /* genera first, then layered and low-sun skies */
+  groups.forEach(function(G){ var h = document.createElement('div'); h.className = 'ty-sec'; h.textContent = G.name + (G.list.length > 1 ? ' · ' + G.list.length : ''); box.appendChild(h);
+    var gr = document.createElement('div'); gr.className = 'ty-grid'; box.appendChild(gr);
+    G.list.forEach(function(it){ var t = document.createElement('div'); t.className = 'ty-tile'; t.setAttribute('data-k', it.sc.k); var c = document.createElement('canvas'); c.width = 300; c.height = 118; var s = document.createElement('span'); s.textContent = it.name;
+      t.appendChild(c); t.appendChild(s); t.onclick = function(){ pick(it.sc); window.scrollTo({ top: 0, behavior: 'smooth' }); }; gr.appendChild(t); THQ.push({ sc: it.sc, cv: c }); }); }); })();
+$('c-pal').onclick = function(){ S.pal = !S.pal; this.classList.toggle('on', S.pal); this.textContent = 'LOW SUN: ' + (S.pal ? 'PALETTE' : 'PHYSICS'); S.fresh = 1; };
+$('c-play').onclick = function(){ S.play = !S.play; this.classList.toggle('on', S.play); this.textContent = S.play ? 'DRIFTING' : 'STILL'; };
+/* RESOLUTION AND PACING (user 11-24: "can you improve the resolution of all these now? and smooth out its framerate speeds").
+   The new skies render into an OFFSCREEN target (RGBA16F where the GPU allows: dark night gradients do not band) and accumulate there;
+   a PRESENT pass draws it to a full-resolution canvas (device pixels) with Catmull-Rom bicubic filtering and a light sharpen. The
+   target's size is DYNAMIC: it moves between 40 % and the MAX RESOLUTION slider to hold the clouds' 30 fps (GPU timer where the
+   browser has one, else the measured frame interval); on a resize the old image is scaled into the new target, so it never resets to
+   grain. PACING: the clouds draw on an even 33.3 ms cadence (not "at least 32 ms since the last", which slipped whole vsyncs), and the
+   light layers -- rain and snow, lightning -- draw every display frame (60 Hz), so fast motion stays smooth while the clouds drift. */
+var JIT = [0, 0];   /* the sub-pixel shift of this frame's rays (low-res pixels); 0 for the tiles */
+/* TEMPORAL UPSAMPLING (2x2): the march renders a QUARTER-size image (LOW) each frame, every ray shifted to one of the four positions of
+   its 2x2 block in turn (JIT); a resolve pass writes each sample into the exact full-size pixel it stands for (HI, the history), and
+   heals the other three from a bilinear fill at a low rate. Over four frames HI holds real detail at 4x the shaded pixels: the march
+   sustains ~0.2 Mpx at 30 fps for cumulus and far less for storms, so shading every pixel of a 2736-wide panel was 8-12 fps.
+   Lightning strokes refresh all four (bilinear) so a flash never shows as a checkerboard. HI is presented with Catmull-Rom. */
+var RT = { f16: !!gl.getExtension('EXT_color_buffer_float'), tq: null, Q: [], gpu: 0, iv: 33, cool: 0, last: 0, q: 0.22, F: 2, ph: 0, fill: 0, L: null, H: null, cal: 1, slow: 0 };   /* the GPU timer is NOT used: it counts the compositor and the other canvases too (read 20 ms for 11) */
+function rtTarget(w, h, old){ var tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, RT.f16 ? gl.RGBA16F : gl.RGBA8, w, h, 0, gl.RGBA, RT.f16 ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  var fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  var T = { fb: fb, tex: tex, w: w, h: h, kept: false };
+  if (old){ gl.bindFramebuffer(gl.READ_FRAMEBUFFER, old.fb); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, fb); gl.blitFramebuffer(0, 0, old.w, old.h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.LINEAR); T.kept = true; gl.deleteFramebuffer(old.fb); gl.deleteTexture(old.tex); }   /* the old image, scaled: the history carries over a resize */
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null); return T; }
+function rtSize(lw, lh){ if (RT.L && RT.L.w === lw && RT.L.h === lh && RT.H.w === lw * RT.F) return; if (RT.L){ gl.deleteFramebuffer(RT.L.fb); gl.deleteTexture(RT.L.tex); } RT.L = rtTarget(lw, lh, null);
+  var keep = RT.H; RT.H = rtTarget(lw * RT.F, lh * RT.F, keep); if (RT.H2){ gl.deleteFramebuffer(RT.H2.fb); gl.deleteTexture(RT.H2.tex); } RT.H2 = rtTarget(lw * RT.F, lh * RT.F, null); if (!RT.H.kept) RT.fill = RT.F * RT.F; }   /* two histories: read one, write the other */
+var PRS = null, PRU = {}, RSV = null, RSU = {};
+try { PRS = gl.createProgram(); gl.attachShader(PRS, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(PRS, sh(gl.FRAGMENT_SHADER, ['#version 300 es', 'precision highp float;', 'in vec2 vUV; out vec4 o; uniform sampler2D uT, uLo; uniform vec2 uSrc; uniform float uSharp;',
+  'vec3 cr(vec2 uv){ vec2 sp = uv * uSrc, tp = floor(sp - 0.5) + 0.5, f = sp - tp, w0 = f * (-0.5 + f * (1.0 - 0.5 * f)), w1 = 1.0 + f * f * (-2.5 + 1.5 * f), w2 = f * (0.5 + f * (2.0 - 1.5 * f)), w3 = f * f * (-0.5 + 0.5 * f), w12 = w1 + w2, o12 = w2 / w12;',   /* Catmull-Rom in 5 bilinear taps */
+  '  vec2 t0 = (tp - 1.0) / uSrc, t3 = (tp + 2.0) / uSrc, t12 = (tp + o12) / uSrc; vec3 r = texture(uT, vec2(t12.x, t0.y)).rgb * w12.x * w0.y + texture(uT, vec2(t0.x, t12.y)).rgb * w0.x * w12.y + texture(uT, t12).rgb * w12.x * w12.y + texture(uT, vec2(t3.x, t12.y)).rgb * w3.x * w12.y + texture(uT, vec2(t12.x, t3.y)).rgb * w12.x * w3.y;',
+  '  return r / (w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y); }',
+  'void main(){ vec2 d = 1.0 / uSrc; vec3 c = cr(vUV), b = (texture(uT, vUV + vec2(d.x, 0.0)).rgb + texture(uT, vUV - vec2(d.x, 0.0)).rgb + texture(uT, vUV + vec2(0.0, d.y)).rgb + texture(uT, vUV - vec2(0.0, d.y)).rgb) * 0.25;',
+  '  vec2 lt = 1.0 / vec2(textureSize(uLo, 0)); float sF = 0.0; for (int j = -2; j <= 2; j++) for (int i = -2; i <= 2; i++) sF += (1.0 / max(texture(uLo, vUV + vec2(float(i), float(j)) * lt * 0.9).a, 0.001) - 1.0) * 0.25 * (j == 0 && i == 0 ? 1.0 : 1.0); sF /= 25.0;',   /* the flash is soft light: blurred over ~4 shaded pixels, the raw frame noise (a dotted dither) is gone */   /* the flash, decoded from this frame (not the history): instant, and the clouds keep their smoothing */
+  '  o = vec4(clamp(c + (c - b) * uSharp + vec3(0.93, 0.97, 1.08) * sF, 0.0, 1.0), 1.0); }'].join('\n'))); gl.linkProgram(PRS); if (!gl.getProgramParameter(PRS, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(PRS));
+  ['uT', 'uLo', 'uSrc', 'uSharp'].forEach(function(k){ PRU[k] = gl.getUniformLocation(PRS, k); });
+  RSV = gl.createProgram(); gl.attachShader(RSV, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(RSV, sh(gl.FRAGMENT_SHADER, ['#version 300 es', 'precision highp float;', 'in vec2 vUV; out vec4 o; uniform sampler2D uL, uH; uniform vec2 uLR; uniform ivec2 uJ; uniform int uF; uniform float uAH, uAM;',
+  'void main(){ ivec2 hp = ivec2(gl_FragCoord.xy), bl = hp / uF, sb = hp - bl * uF, mx = ivec2(uLR) - 1; bool hit = sb.x == uJ.x && sb.y == uJ.y;',
+  '  vec2 lc = vec2(hp - uJ) / float(uF), lu = (lc + 0.5) / uLR; vec3 cur = texture(uL, lu).rgb; ivec2 b0 = clamp(ivec2(floor(lc)), ivec2(0), mx), b1 = clamp(b0 + 1, ivec2(0), mx);',
+  '  vec3 m1 = vec3(0.0), m2 = vec3(0.0); for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++){ vec3 q = texelFetch(uL, clamp(ivec2(floor(lc + 0.5)) + ivec2(i, j), ivec2(0), mx), 0).rgb; m1 += q; m2 += q * q; }',
+  '  m1 /= 9.0; vec3 sg = sqrt(max(m2 / 9.0 - m1 * m1, 0.0)), mn = m1 - sg * 1.25 - 0.015, mxc = m1 + sg * 1.25 + 0.015;',   /* VARIANCE CLIPPING (mean +- 1.25 sigma of 3x3): a min/max box of four noisy samples pinned the history to the noise */
+  '  vec3 h = clamp(texelFetch(uH, hp, 0).rgb, mn, mxc), s = hit ? texelFetch(uL, clamp(bl, ivec2(0), mx), 0).rgb : cur;',
+  '  o = vec4(mix(h, s, hit ? uAH : uAM), 1.0); }'].join('\n'))); gl.linkProgram(RSV); if (!gl.getProgramParameter(RSV, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(RSV));
+  ['uL', 'uH', 'uLR', 'uJ', 'uF', 'uAH', 'uAM'].forEach(function(k){ RSU[k] = gl.getUniformLocation(RSV, k); }); } catch(e){ console.error('present/resolve', e); PRS = null; }
+var SEQ = { 2: [[0, 0], [1, 1], [1, 0], [0, 1]], 3: [[0, 0], [2, 1], [1, 2], [2, 0], [0, 2], [1, 1], [2, 2], [0, 1], [1, 0]] };   /* spread orders: neighbours fill early */
+/* NEIGHBOURHOOD CLAMP (TAA): the history may not stray outside what this frame shows around the pixel, so drifting edges neither lag nor ghost (blended blind they formed a sawtooth); ping-pong histories so the resolve can read the last one */
+function resolve(fast){ var J = SEQ[RT.F][RT.ph], aH = fast ? 0.6 : 0.15, aM = fast ? 0.6 : 0.025;   /* ~7 samples per pixel averaged (the old low-res blend averaged ~10); the variance clamp keeps drifting edges from lagging */   /* a lightning stroke refreshes every pixel alike */
+  if (RT.fill > 0){ aH = 1; aM = RT.fill === RT.F * RT.F ? 1 : 0; RT.fill--; }   /* a fresh history fills in one cycle */
+  gl.bindFramebuffer(gl.FRAMEBUFFER, RT.H2.fb); gl.viewport(0, 0, RT.H2.w, RT.H2.h); gl.disable(gl.BLEND); gl.useProgram(RSV);
+  gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, RT.L.tex); gl.uniform1i(RSU.uL, 4); gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, RT.H.tex); gl.uniform1i(RSU.uH, 5); gl.uniform2f(RSU.uLR, RT.L.w, RT.L.h); gl.uniform2i(RSU.uJ, J[0], J[1]); gl.uniform1i(RSU.uF, RT.F); gl.uniform1f(RSU.uAH, aH); gl.uniform1f(RSU.uAM, aM);
+  gl.drawArrays(gl.TRIANGLES, 0, 3); gl.activeTexture(gl.TEXTURE0); var tmp = RT.H; RT.H = RT.H2; RT.H2 = tmp; }
+function present(W, H){ gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, W, H); gl.disable(gl.BLEND); gl.useProgram(PRS); gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, RT.H.tex);
+  gl.uniform1i(PRU.uT, 4); gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, RT.L.tex); gl.uniform1i(PRU.uLo, 5); gl.uniform2f(PRU.uSrc, RT.H.w, RT.H.h); gl.uniform1f(PRU.uSharp, RT.H.w < W * 0.5 ? 0.06 : 0.1);   /* a big upscale magnifies residual grain: sharpen less */ gl.drawArrays(gl.TRIANGLES, 0, 3); gl.activeTexture(gl.TEXTURE0); }
+/* lab diagnostics: wall time of each pass, finished on the GPU (gl.finish), 10 runs each */
+window.__passTime = function(){ var out = {}, CW = cv.width, CH = cv.height, CK = S.clock ? clockLight() : null;
+  var px1 = RT.f16 ? new Float32Array(4) : new Uint8Array(4); function sync(){ gl.bindFramebuffer(gl.FRAMEBUFFER, RT.L.fb); gl.readPixels(0, 0, 1, 1, gl.RGBA, RT.f16 ? gl.FLOAT : gl.UNSIGNED_BYTE, px1); }   /* finish() does not wait in Chrome; a readback does */
+  function tm(f){ sync(); var t0 = performance.now(); for (var i = 0; i < 10; i++) f(); sync(); return +((performance.now() - t0) / 10).toFixed(1); }
+  [[0.12, 'march 12%'], [0.25, 'march 25%'], [0.5, 'march 50%']].forEach(function(q){ var w = Math.round(CW * q[0]), h = Math.round(CH * q[0]); rtSize(w, h); out[q[1] + ' ' + w + 'x' + h] = tm(function(){ gl.bindFramebuffer(gl.FRAMEBUFFER, RT.L.fb); drawLay(S.sc, w, h, S.t, S.frame, CK ? CK.el : S.moon, 1, true, S.pal, CK && CK.L, CK ? CK.nt : 0, 0.75); }); });
+  out['resolve'] = tm(function(){ resolve(false); }); out['present ' + CW + 'x' + CH] = (function(){ var pb = new Uint8Array(4); gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pb); var t0 = performance.now(); for (var i = 0; i < 10; i++) present(CW, CH); gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pb); return +((performance.now() - t0) / 10).toFixed(1); })();
+  if (window._labPrecip){ var t0 = performance.now(); for (var i = 0; i < 10; i++){ window._labPrecip(); } var gp2 = document.getElementById('vol-px').getContext('webgl2'), pb = new Uint8Array(4); gp2.readPixels(0, 0, 1, 1, gp2.RGBA, gp2.UNSIGNED_BYTE, pb); out['precip pass ' + document.getElementById('vol-px').width + 'x' + document.getElementById('vol-px').height] = +((performance.now() - t0) / 10).toFixed(1); }
+  return JSON.stringify(out); };
+function gpuBegin(){ if (!RT.tq) return null; var q = gl.createQuery(); gl.beginQuery(RT.tq.TIME_ELAPSED_EXT, q); return q; }
+function gpuEnd(q){ if (!q) return; gl.endQuery(RT.tq.TIME_ELAPSED_EXT); RT.Q.push(q); while (RT.Q.length){ var a = RT.Q[0]; if (!gl.getQueryParameter(a, gl.QUERY_RESULT_AVAILABLE)) break; RT.Q.shift();
+    if (!gl.getParameter(RT.tq.GPU_DISJOINT_EXT)){ var ms = gl.getQueryParameter(a, gl.QUERY_RESULT) / 1e6; RT.gpu = RT.gpu ? RT.gpu * 0.85 + ms * 0.15 : ms; } gl.deleteQuery(a); } }
+/* CALIBRATE on a scene change or resize: time the march itself (three runs, a readback forces the wait; ~70 ms once) and pick the shaded
+   size for ~22 ms of march. Cost grows with the pixel count, so q = q0 * sqrt(22 / ms). Below 20 % of the canvas, upsample 3x3 (built =
+   3 x shaded) instead of 2x2. After that only a slip lowers it: cloud frames late for 2 s -> 8 % smaller */
+function calibrate(CW, CH, CK){ var q0 = 0.2, w = Math.round(CW * q0), h = Math.round(CH * q0), pb = RT.f16 ? new Float32Array(4) : new Uint8Array(4); RT.F = 2; rtSize(w, h);
+  function sync(){ gl.bindFramebuffer(gl.FRAMEBUFFER, RT.L.fb); gl.readPixels(0, 0, 1, 1, gl.RGBA, RT.f16 ? gl.FLOAT : gl.UNSIGNED_BYTE, pb); }
+  sync(); var t0 = performance.now(); for (var i = 0; i < 3; i++){ gl.bindFramebuffer(gl.FRAMEBUFFER, RT.L.fb); drawLay(S.sc, w, h, S.t, S.frame, CK ? CK.el : S.moon, 1, true, S.pal, CK && CK.L, CK ? CK.nt : 0, CK ? CK.sea : 0.75); } sync();
+  var ms = (performance.now() - t0) / 3, q = Math.max(0.15, Math.min(S.scale / 2, q0 * Math.sqrt(15 / Math.max(ms, 4))));   /* floor 15 %: below it the image goes too soft; heavy storms run a little under 30 fps instead */
+  RT.q = q; RT.F = 2;   /* 3x3 tried: on storms at ~12 % it showed a block mosaic; 2x2 only */ RT.ms = ms; RT.cal = 0; RT.slow = 0; RT.fill = RT.F * RT.F; }
+function adapt(now){ if (S.lock) return; if (RT.iv > 40) RT.slow++; else RT.slow = Math.max(0, RT.slow - 1); RT.good = RT.iv < 34.5 ? (RT.good || 0) + 1 : 0;
+  if (RT.slow > 60 && RT.q > 0.15){ RT.q = Math.max(0.15, RT.q * 0.92); RT.F = 2; RT.slow = 0; RT.good = 0; }   /* frames late for ~2 s: 8 % smaller */
+  else if (RT.good > 150 && RT.q < S.scale / 2){ RT.q = Math.min(S.scale / 2, RT.q * 1.05); RT.F = 2; RT.good = 0; } }   /* on time for ~5 s: probe 5 % larger (the one-shot calibration is noisy under load) */
+function frame(now){
+  requestAnimationFrame(frame);
+  if (document.hidden || (!S.seen && !THQ.length)) return;   /* tiles still render with the viewer scrolled away; nothing else drawn while the tab is hidden or the panel is scrolled away */
+  var dtk = Math.min(100, now - (S.tick || now)); S.tick = now;
+  if (S.play){ S.t += dtk / 1000; if (window._labWind) window._labWind.tick(dtk / 1000); } if (window._labClockTick) window._labClockTick(dtk);
+  var lay = !!(S.sc.lay && P2 && PRS);
+  if (lay && !THQ.length){ if (S.sc.cb && window._labLX){ window._labLX.frame(now); S.flv = window._labLX.u().I; } else S.flv = 0; if (window._labPrecip) window._labPrecip(); }   /* the light layers every display frame */
+  if (S.nf && now < S.nf - 4) return; S.nf = (S.nf && now - S.nf < 60) ? S.nf + 33.333 : now + 33.333;   /* the clouds: an even 30 Hz cadence */
+  var dt = Math.min(100, now - last); last = now; if (RT.last) RT.iv = RT.iv * 0.8 + (now - RT.last) * 0.2; RT.last = now;
+  var dpr = Math.min(2, window.devicePixelRatio || 1);
+  S.frame = (S.frame || 0) + 1;
+  if (P2 && THQ.length && !S.sc.lay || P2 && THQ.length && S.frame % 2 === 0){ var tq = THQ.shift(), tw = 300, th = 118; gl.bindFramebuffer(gl.FRAMEBUFFER, null); cv.width = tw; cv.height = th;   /* ONE TILE per frame: render small, 14 frames blended, copy to the tile */
+    for (var ti = 0; ti < 14; ti++) drawLay(tq.sc, tw, th, 40, ti, tq.sc.el, 1, ti === 0, false);
+    tq.cv.getContext('2d').drawImage(cv, 0, 0, tw, th); tq.cv.parentNode.classList.add('ok'); cv.width = 1; S.fresh = 1; return; }
+  if (lay){ var CW = Math.max(64, Math.round(cv.clientWidth * dpr)), CH = Math.max(24, Math.round(cv.clientHeight * dpr)); if (cv.width !== CW || cv.height !== CH){ cv.width = CW; cv.height = CH; }
+    var CK = S.clock ? clockLight() : null; S.night = CK ? CK.nt : 0; var iw = Math.max(48, Math.round(CW * RT.q)), ih = Math.max(20, Math.round(CH * RT.q)); rtSize(iw, ih); if (S.fresh){ RT.fill = RT.F * RT.F; S.fresh = 0; }
+    if (RT.cal || RT.cw !== CW){ RT.cw = CW; calibrate(CW, CH, CK); iw = Math.max(48, Math.round(CW * RT.q)); ih = Math.max(20, Math.round(CH * RT.q)); rtSize(iw, ih); RT.fill = RT.F * RT.F; }
+    (window.__ft = window.__ft || []).push(now); if (window.__ft.length > 300) window.__ft.shift();   /* lab: cloud frame times, for the pacing measure */
+    RT.ph = (RT.ph + 1) % (RT.F * RT.F); var J = SEQ[RT.F][RT.ph]; JIT = [(J[0] + 0.5) / RT.F - 0.5, (J[1] + 0.5) / RT.F - 0.5];   /* this frame's rays sit on one sub-position of each FxF block */
+    gl.bindFramebuffer(gl.FRAMEBUFFER, RT.L.fb); var gq = gpuBegin();
+    drawLay(S.sc, iw, ih, S.t, S.frame, CK ? CK.el : S.moon, S.coverK || 1, true, S.pal, CK && CK.L, CK ? CK.nt : 0, CK ? CK.sea : 0.75); JIT = [0, 0];
+    resolve(false);   /* strokes no longer overwrite the history (that showed the raw grain as a checker on every flash) */ present(CW, CH); gpuEnd(gq); adapt(now);
+    S.fc = (S.fc || 0) + 1; if (now - (S.f0 || 0) > 1000){ $('fps').textContent = S.fc + ' FPS · ' + iw + '×' + ih + ' → ' + CW + '×' + CH + ' (SHADED ' + iw + '\u00d7' + ih + ', BUILT ' + RT.H.w + '\u00d7' + RT.H.h + ', MARCH ' + (RT.ms || 0).toFixed(0) + ' MS AT 20 %, ' + RT.F + '\u00d7' + RT.F + ')'; window._labFps = S.fc; S.fc = 0; S.f0 = now; } return; }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  var k = S.scale * S.auto * dpr, w = Math.max(64, Math.round(cv.clientWidth * k)), h = Math.max(24, Math.round(cv.clientHeight * k));
+  if (cv.width !== w || cv.height !== h){ cv.width = w; cv.height = h; S.fresh = 1; }
+  drawOld(w, h, now); }
+function drawLay(sc, w, h, tSec, fno, moon, cK, fresh, pal, LV, nt, sea){
+  { gl.viewport(0, 0, w, h); gl.useProgram(P2); var LY = sc.lay, lw = LY[0] || [-1, 0, 1, 0], md = LY[1] || [-1, 0, 1, 0], hg2 = LY[2] || [-1, 0];
+    var elT = moon * Math.PI / 180, azT = sc.az;
+    gl.uniform2f(U2.uRes, w, h); gl.uniform1f(U2.uTime, tSec); if (window._labWind){ gl.uniform2fv(U2.uWV, window._labWind.V()); gl.uniform2fv(U2.uWO, window._labWind.O()); gl.uniform1f(U2.uWA, window._labWind.WA()); } gl.uniform1f(U2.uFrame, fno % 64); gl.uniform1f(U2.uPit, 0.7); gl.uniform1f(U2.uE0, sc.tilt || 0.03);   /* storms tilt down so they stand on the horizon (user 11-23: "are these two too low?") */
+    gl.uniform1f(U2.uK0, lw[0]); gl.uniform1f(U2.uB00, lw[1]); gl.uniform1f(U2.uB01, lw[2]); gl.uniform1f(U2.uC0, Math.min(1, lw[3] * cK));
+    gl.uniform1f(U2.uK1, md[0]); gl.uniform1f(U2.uB10, md[1]); gl.uniform1f(U2.uB11, md[2]); gl.uniform1f(U2.uC1, Math.min(1, md[3] * cK));
+    gl.uniform1f(U2.uK2, hg2[0]); gl.uniform1f(U2.uC2, Math.min(1, hg2[1] * cK)); gl.uniform1f(U2.uPalK, pal ? 1 : 0);
+    if (pal){ var TB2 = window._labSkyTab || {}, c2 = TB2[Math.max(-6, Math.min(90, Math.round(moon)))] || ['#2d63b8', '#4a7fd0', '#6f9de0', '#a8c6ee'], hx2 = function(h){ return [parseInt(h.slice(1, 3), 16) / 255, parseInt(h.slice(3, 5), 16) / 255, parseInt(h.slice(5, 7), 16) / 255]; };
+      gl.uniform3fv(U2.uP0, hx2(c2[0])); gl.uniform3fv(U2.uP1, hx2(c2[1])); gl.uniform3fv(U2.uP2, hx2(c2[2])); gl.uniform3fv(U2.uP3, hx2(c2[3])); }
+    if (LV) gl.uniform3f(U2.uL, LV[0], LV[1], LV[2]); else gl.uniform3f(U2.uL, Math.sin(azT) * Math.cos(elT), Math.sin(elT), Math.cos(azT) * Math.cos(elT)); gl.uniform1f(U2.uNt, nt || 0); gl.uniform1f(U2.uSea, sea == null ? 0.75 : sea); var LU = (sc === S.sc && sc.cb && window._labLX) ? window._labLX.u() : null; if (LU && LU.I > 0.003){ gl.uniform4f(U2.uFl, LU.A[0], LU.A[1], LU.A[2], LU.I); gl.uniform4f(U2.uFlB, LU.B[0], LU.B[1], LU.B[2], LU.R); } else { gl.uniform4f(U2.uFl, 0, 0, 0, 0); gl.uniform4f(U2.uFlB, 0, 1, 0, 2); } gl.uniform1f(U2.uFlG, LU ? LU.G : 0); gl.uniform1f(U2.uNoJit, 0); gl.uniform2f(U2.uJit, JIT[0], JIT[1]);   /* jitter stays on: a frozen-jitter frame shows horizontal banding (tried 11-24) */ var JJ = (sc === S.sc && window._labJetU) ? window._labJetU(tSec) : null; if (JJ){ gl.uniform3fv(U2.uJP, JJ.P); gl.uniform3fv(U2.uJV, JJ.V); gl.uniform3fv(U2.uJW, JJ.W); gl.uniform4f(U2.uJT, JJ.A, JJ.life, JJ.spread, 1); } else gl.uniform4f(U2.uJT, 0, 1, 0, 0); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_3D, NT); gl.uniform1i(U2.uN, 0);
+    if (fresh){ gl.disable(gl.BLEND); } else { gl.enable(gl.BLEND); gl.blendColor(0, 0, 0, (sc === S.sc && window._labLX && window._labLX.u().fast) ? 0.45 : 0.18);   /* 0.8 showed the raw march grain on night towers */   /* a 40 ms stroke must not be averaged away: blend fast while lightning is live */ gl.blendFunc(gl.CONSTANT_ALPHA, gl.ONE_MINUS_CONSTANT_ALPHA); }   /* 18% new per frame: the march jitter (the sand at the edges) averages out; the drift is slow enough not to smear */
+    var STX = (window._labSkyTex && window._labSkyTex()) || window._labHeroStarTex; if (STX){ gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, STX); gl.uniform1f(U2.uStOn, 1); gl.activeTexture(gl.TEXTURE0); } else gl.uniform1f(U2.uStOn, 0); if (window._labRealSky) window._labRealSky(U2); else { gl.uniform1f(U2.uSkOn, 0); gl.uniform1i(U2.uSk, 2); gl.uniform1i(U2.uMw, 3); } gl.uniform1i(U2.uSt, 1);   /* always its own unit: left at 0 it collides with the 3D noise and every draw fails */
+    gl.drawArrays(gl.TRIANGLES, 0, 3); } }
+function drawOld(w, h, now){
+  gl.viewport(0, 0, w, h); gl.useProgram(P);
+  var el = S.moon * Math.PI / 180, az = S.sc.az;   /* the moon right of center like the hero's; the sun left */
+  gl.uniform2f(U.uRes, w, h); gl.uniform1f(U.uTime, S.t); gl.uniform1f(U.uCover, S.cover); gl.uniform1f(U.uGlow, S.glow); gl.uniform1f(U.uNight, S.night); gl.uniform1f(U.uB0, S.sc.B0); gl.uniform1f(U.uB1, S.sc.B1); gl.uniform1f(U.uType, S.sc.type); gl.uniform1f(U.uPit, S.sc.type === 1 ? 0.6 : S.sc.type === 3 ? 0.66 : 0.84); gl.uniform1f(U.uE0, S.sc.type === 3 ? 0.009 : 0.035); gl.uniform1f(U.uAtmo, S.sc.atmo ? 1 : 0); gl.uniform1f(U.uTwi, S.sc.twi ? 1 : 0); gl.uniform1f(U.uHail, S.sc.hail ? 1 : 0); gl.uniform1f(U.uPalK, S.pal ? 1 : 0);
+  if (S.pal){ var TB = window._labSkyTab || {}, cc = TB[Math.max(-6, Math.min(90, Math.round(S.moon)))] || ['#2d63b8', '#4a7fd0', '#6f9de0', '#a8c6ee'], hx = function(h){ return [parseInt(h.slice(1, 3), 16) / 255, parseInt(h.slice(3, 5), 16) / 255, parseInt(h.slice(5, 7), 16) / 255]; };
+    gl.uniform3fv(U.uP0, hx(cc[0])); gl.uniform3fv(U.uP1, hx(cc[1])); gl.uniform3fv(U.uP2, hx(cc[2])); gl.uniform3fv(U.uP3, hx(cc[3])); }
+  /* lightning: a flash every 3-9 s somewhere inside the storm's tower, flickering out over ~0.4 s */
+  if (S.sc.type === 3){ if (!S.fl || S.t > S.fl.next){ S.fl = { seed: Math.random() * 100, t0: S.t, next: S.t + 3 + Math.random() * 6, p: [-7 + (Math.random() - .5) * 8, 2.5 + Math.random() * 7, 40 + (Math.random() - .5) * 8] }; }
+    var fa = S.t - S.fl.t0, fv = fa < 0.45 ? Math.max(0, 1 - fa / 0.45) * (0.6 + 0.4 * Math.abs(Math.sin(fa * 47))) : 0; gl.uniform1f(U.uFlash, fv); S.flv = fv; gl.uniform3f(U.uFP, S.fl.p[0], S.fl.p[1], S.fl.p[2]); S.fast = fv > 0 ? 6 : Math.max(0, (S.fast || 0) - 1); }   /* a flash: blend faster (not a fresh frame -- an unblended frame is raw grain, which flickered as a glitch after every flash) */
+  else gl.uniform1f(U.uFlash, 0); gl.uniform1f(U.uFrame, S.frame % 64);
+  if (S.fresh){ gl.disable(gl.BLEND); S.fresh = 0; } else { gl.enable(gl.BLEND); gl.blendColor(0, 0, 0, S.fast > 0 ? 0.6 : 0.3); gl.blendFunc(gl.CONSTANT_ALPHA, gl.ONE_MINUS_CONSTANT_ALPHA); }   /* 30% new frame over the last: the grain averages out */
+  gl.uniform3f(U.uL, Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el)); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_3D, NT); gl.uniform1i(U.uN, 0); gl.drawArrays(gl.TRIANGLES, 0, 3);
+  fr++; if (now - f0 > 1000){ $('fps').textContent = fr + ' FPS AT ' + w + '×' + h + (S.auto < 1 ? ' (AUTO SCALE ' + Math.round(S.scale * S.auto * 100) + '%)' : '');
+    S.slow = fr < 18 ? (S.slow || 0) + 1 : 0; if (!S.lock){ if (S.slow >= 3 && S.auto > 0.5){ S.auto *= 0.85; S.slow = 0; } else if (fr > 28 && S.auto < 1) S.auto = Math.min(1, S.auto * 1.1); }   /* three slow seconds in a row drop the resolution (never below half), so a slow GPU does not freeze the page; one stalled frame does not */
+    fr = 0; f0 = now; }
+  if (window._labPrecip) window._labPrecip();
+}
+S.seen = true; try { new IntersectionObserver(function(es){ S.seen = es[0].isIntersecting; }).observe(cv); } catch(e){}
+/* PRECIPITATION IN DEPTH (user 2026-11-23: "the snow animation feels cheap, its just a randomly starting line for the snow"): the
+   dashboard's SVG snow and rain start on one line (the old cloud's base). Here they fill the whole sky in layers -- near flakes big,
+   fast and soft, far ones small, slow, dense and fading into the haze; rain as slanted streaks. Own canvas, drawn fresh each frame,
+   so the clouds' frame blending does not smear them into trails */
+var px = document.getElementById('vol-px'), gp = px.getContext('webgl2', { premultipliedAlpha: true, alpha: true });
+var FSP = ['#version 300 es', 'precision highp float;', 'in vec2 vUV; out vec4 o;', 'uniform vec2 uRes; uniform float uTime, uKind, uNight, uWind; uniform vec4 uBolt;   /* x, top y (0..1 of the panel), strength, seed */\n' +
+'uniform vec3 uMask;   /* storms: precipitation only between x0 and x1 (0..1), below y; z<0 = everywhere */',
+'bool K(float k){ return abs(uKind - k) < 0.5; }',
+'float h21(vec2 p){ p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }',
+'float n1(float x, float sd){ float i = floor(x), f = fract(x); return mix(h21(vec2(i, sd)), h21(vec2(i + 1.0, sd)), f); }   /* piecewise straight: jagged */',
+'float bolt(vec2 u, float x0, float y0, float sd, float w){ if (u.y > y0) return 0.0; float k = (y0 - u.y) / max(y0, 0.01);',
+'  float x = x0 + (n1(u.y * 14.0, sd) - 0.5) * 0.05 + (n1(u.y * 45.0, sd + 3.0) - 0.5) * 0.018 + k * (n1(sd, 9.0) - 0.5) * 0.05;',
+'  float d = abs(u.x - x) * uRes.x / uRes.y; return smoothstep(w, 0.0, d) + 0.35 * smoothstep(w * 7.0, 0.0, d); }   /* a bright core and its glow */',
+'void main(){ vec2 fc = gl_FragCoord.xy / uRes.y; float acc = 0.0, accS = 0.0; bool SN = K(1.0), DZ = K(3.0), SL = K(4.0), HV = K(5.0), FZ = K(6.0), HL = K(7.0);',
+'  int NL = K(9.0) ? 0 : SN ? 7 : SL ? 6 : DZ ? 6 : HL ? 4 : 5;',   /* kind 9: no particles, the bolt only (a storm seen from afar) */
+'  for (int L = 0; L < 7; L++){ if (L >= NL) break; float fl = float(L), near = 1.0 - fl / float(NL);',
+'    float sc = HL ? 6.0 + fl * 4.0 : SN ? 5.0 + fl * 4.5 : DZ ? 16.0 + fl * 9.0 : HV ? 7.0 + fl * 5.0 : 9.0 + fl * 7.0;   /* cells per screen height: far layers smaller */',
+'    bool pel = SL && mod(fl, 2.0) < 0.5;                                   /* sleet: ice pellets in alternate layers, rain in the others */',
+'    float v = HL ? 1.6 + 1.6 * near : SN ? 0.10 + 0.20 * near : pel ? 0.55 + 0.6 * near : DZ ? 0.45 + 0.5 * near : 1.1 + 1.4 * near;   /* fall speed, screen heights per second */',
+'    float dr = uWind * (SN ? 0.08 + 0.1 * near : 0.25);',
+'    vec2 q = fc * sc; q.y += uTime * v * sc; q.x += uTime * dr * sc;',
+'    if (!SN && !pel) q.x += q.y * (HL ? 0.06 : DZ ? 0.1 : HV ? 0.24 : 0.18);              /* rain slants with the wind */',
+'    vec2 id = floor(q), f = fract(q) - 0.5; float h = h21(id + fl * 19.7);',
+'    if (h > (HL ? 0.22 : SN ? 0.55 + 0.25 * (1.0 - near) : DZ ? 0.6 : HV ? 0.62 : pel ? 0.4 : 0.35)) continue;',
+'    vec2 off = (vec2(h21(id + 3.1), h21(id + 7.7)) - 0.5) * 0.6;',
+'    if (SN) off.x += sin(uTime * (0.8 + h) + h * 6.283) * 0.16;            /* each flake sways */',
+'    vec2 d = f - off; float a;',
+'    if (SN){ float r = (0.05 + 0.07 * h21(id + 1.3)) * (0.7 + 0.5 * near); a = smoothstep(r, r * (0.2 + 0.5 * near), length(d)); a *= 0.45 + 0.55 * near; }',
+/* HAIL (user 2026-11-23: "fix hail, idk if that should look like rain and sleet"): big white stones, a mix of sizes, sparse, falling
+   faster than rain -- each a bright core with a short streak above it (motion), across the whole view: it is hailing here */
+'    else if (HL){ float r = (0.045 + 0.05 * h21(id + 1.3)) * (0.6 + 0.6 * near);',
+'      float core = smoothstep(r, r * 0.55, length(d));                                              /* a round stone, not a teardrop */',
+'      float st = smoothstep(r * 0.32, 0.0, abs(d.x)) * smoothstep(r * 5.0, r, d.y) * step(0.0, d.y) * 0.22;   /* a faint thin streak above it: its speed */',
+'      a = max(core, st) * (0.55 + 0.45 * near); accS += a; a = 0.0; }',
+'    else if (pel){ float r = (0.03 + 0.03 * h21(id + 1.3)) * (0.8 + 0.4 * near); a = smoothstep(r, r * 0.5, length(vec2(d.x, d.y * 0.7))) * (0.5 + 0.45 * near); accS += a; a = 0.0; }   /* small hard pellets */',
+'    else if (DZ){ float k = length(vec2(d.x * 10.0, d.y * 2.4)); a = smoothstep(0.42, 0.0, k) * (0.2 + 0.32 * near); }   /* drizzle: fine short streaks */',
+'    else { float k = length(vec2(d.x * (HV ? 11.0 : 14.0), d.y * (HV ? 0.7 : 0.9))); a = smoothstep(0.42, 0.0, k) * (HV ? 0.26 + 0.38 * near : 0.18 + 0.3 * near); }',
+'    acc += a; }',
+'  acc = clamp(acc, 0.0, 1.0); accS = clamp(accS, 0.0, 1.0);',
+'  if (uMask.z > 0.0){ float m = smoothstep(uMask.x - 0.04, uMask.x + 0.03, vUV.x) * smoothstep(uMask.y + 0.04, uMask.y - 0.03, vUV.x) * smoothstep(uMask.z + 0.02, uMask.z - 0.05, vUV.y); acc *= m; accS *= m; }   /* rain falls only under the storm */',
+'  vec3 c = SN ? mix(vec3(0.97, 0.98, 1.0), vec3(0.78, 0.80, 0.86), uNight) : FZ ? mix(vec3(0.86, 0.94, 1.0), vec3(0.62, 0.70, 0.80), uNight) : mix(vec3(0.85, 0.88, 0.93), vec3(0.55, 0.58, 0.66), uNight);   /* freezing rain: an icy blue-white cast */',
+'  vec3 cs = HL ? mix(vec3(0.97, 0.98, 1.0), vec3(0.80, 0.83, 0.90), uNight) : mix(vec3(0.93, 0.96, 1.0), vec3(0.72, 0.76, 0.84), uNight);',
+'  float B = uBolt.z > 0.0 ? clamp(bolt(vUV, uBolt.x, uBolt.y, uBolt.w, 0.0022) + 0.6 * bolt(vUV, uBolt.x, uBolt.y * 0.8, uBolt.w + 5.0, 0.0014) * step(0.5, fract(uBolt.w * 0.37)), 0.0, 1.0) * uBolt.z : 0.0;   /* sometimes a branch */',
+'  vec3 cb = vec3(0.86, 0.9, 1.0);',
+'  float A = clamp(acc + accS + B, 0.0, 1.0); o = vec4(c * acc + cs * accS + cb * B, A); }'].join('\n');
+var PP = null, PU = {};
+if (gp){ try { var PS = function(t, src){ var x = gp.createShader(t); gp.shaderSource(x, src); gp.compileShader(x); if (!gp.getShaderParameter(x, gp.COMPILE_STATUS)) throw new Error(gp.getShaderInfoLog(x)); return x; };
+  PP = gp.createProgram(); gp.attachShader(PP, PS(gp.VERTEX_SHADER, VS)); gp.attachShader(PP, PS(gp.FRAGMENT_SHADER, FSP)); gp.linkProgram(PP);
+  ['uRes', 'uTime', 'uKind', 'uNight', 'uWind', 'uBolt', 'uMask'].forEach(function(k){ PU[k] = gp.getUniformLocation(PP, k); }); } catch(e){ console.error(e); PP = null; } }
+/* PRECIPITATION IN 3D (user 11-23: "the rain feels grid locked in straight lines it also feels 2D, rain wont always block out all of the sky
+   ... make the rain events feel 3D"; "improve the animations for storm ... heavy rain and hail too"). World space through the cloud camera
+   (pitch 0.7, tilt 0.03, facing west): near drops on 9 planes 1.4-33 m ahead (metres, random per cell, so no screen grid; vertical in the
+   world, so the streaks converge in perspective), far curtains on 6 planes 150 m-6 km hanging below the cloud base with a moving streak
+   texture, their weight from a drifting field over the ground (widespread rain stays even, showers and storms break into shafts with
+   gaps of sky). Wind leans everything (WSW: toward the viewer and north, screen right). Drops never thinner than a pixel: they fade. */
+var FSP3 = ['#version 300 es', 'precision highp float;', 'in vec2 vUV; out vec4 o;',
+'uniform vec2 uRes, uWv; uniform float uTime, uKind, uNight, uInt, uShow, uBase, uTilt; uniform vec4 uBolt;',
+'bool K(float k){ return abs(uKind - k) < 0.5; }',
+'float h21(vec2 p){ p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }',
+'float n1(float x, float sd){ float i = floor(x), f = fract(x); return mix(h21(vec2(i, sd)), h21(vec2(i + 1.0, sd)), f); }',
+'float vn(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f); return mix(mix(h21(i), h21(i + vec2(1.0, 0.0)), f.x), mix(h21(i + vec2(0.0, 1.0)), h21(i + vec2(1.0, 1.0)), f.x), f.y); }',
+'float bolt(vec2 u, float x0, float y0, float sd, float w){ if (u.y > y0) return 0.0; float k = (y0 - u.y) / max(y0, 0.01);',
+'  float x = x0 + (n1(u.y * 14.0, sd) - 0.5) * 0.05 + (n1(u.y * 45.0, sd + 3.0) - 0.5) * 0.018 + k * (n1(sd, 9.0) - 0.5) * 0.05;',
+'  float d = abs(u.x - x) * uRes.x / uRes.y; return smoothstep(w, 0.0, d) + 0.35 * smoothstep(w * 7.0, 0.0, d); }',
+'float shaft(vec2 g){ float n = vn(g * 0.45 + vec2(uTime * 0.004, -uTime * 0.007)) * 0.65 + vn(g * 1.4 + 7.1 + vec2(uTime * 0.006, 0.0)) * 0.35; return mix(0.72 + 0.4 * n, smoothstep(0.42, 0.72, n) * 1.2, uShow); }',   /* how hard it rains at a point on the ground (km): even for widespread rain, shafts and gaps for showers */
+'void main(){ float asp = uRes.x / uRes.y, tH = 0.7, tV = tH / asp, e0 = uTilt + atan(tV); vec2 uv = gl_FragCoord.xy / uRes;',
+'  vec3 dc = normalize(vec3((uv.x - 0.5) * 2.0 * tH, (uv.y - 0.5) * 2.0 * tV, 1.0)); float ce = cos(e0), se = sin(e0); vec3 rd = vec3(dc.x, dc.y * ce + dc.z * se, -dc.y * se + dc.z * ce);',
+'  bool SN = K(1.0), DZ = K(3.0), SL = K(4.0), HV = K(5.0), FZ = K(6.0), HL = K(7.0), NO = K(9.0); float vf = SN ? 1.1 : DZ ? 3.5 : HL ? 16.0 : HV ? 8.5 : 7.0, lean = uWv.x / vf, pxa = 2.0 * tH / uRes.x, fl = uBolt.z;',
+'  vec3 curC = SN ? vec3(0.86, 0.88, 0.92) : HL ? vec3(0.84, 0.88, 0.9) : vec3(0.62, 0.66, 0.72); curC = mix(curC, curC * 0.32, uNight) * (1.0 + fl * 1.6);',   /* curtains: grey veils, snow and hail whiter; a flash lights them */
+'  vec3 cc = vec3(0.0); float ca = 0.0;',
+'  if (!NO) for (int i = 0; i < 6; i++){ float Z = 150.0 * pow(2.1, float(i)), t = Z / max(rd.z, 0.001); vec3 P = rd * t; if (P.y < -1.7) continue;',
+'    float top = uBase * 1000.0, m = smoothstep(top, top * 0.75, P.y), sx = SN ? P.x - uWv.x * uTime : P.x - lean * P.y, k = 1.0 / (Z * pxa * 5.0);',
+'    float st = vn(vec2(sx * 0.0016, P.y * 0.004 + uTime * 0.01) + float(i) * 3.7) * 0.6 + vn(vec2(sx * 0.005 + 5.0, P.y * 0.01 - uTime * 0.02)) * 0.4; if (SN) st = 0.5 + (st - 0.5) * 0.35;',   /* snow haze: even, only a gentle variation (user 11-23: "refine the snow") */   /* FAR RAIN IS A VEIL (user 11-23: "i dont like how the streaks stay in the back, thats not real"): past a few tens of metres drops are far too small to resolve, so the curtains carry only soft drifting density, no streaks; streaks belong to the near drops */
+'    float a = m * shaft(vec2(P.x, Z) / 1000.0) * uInt * (0.05 + 0.12 * st) * (HV || HL ? 1.5 : SN ? 1.1 : DZ ? 0.8 : 1.0) * (1.0 + uShow * 1.6); a = clamp(a, 0.0, 1.0); cc += (1.0 - ca) * a * curC; ca += (1.0 - ca) * a; }',
+'  vec3 dcol = vec3(0.0); float da = 0.0;',
+'  if (!NO) for (int i = 0; i < 9; i++){ float Z = 1.4 * pow(1.48, float(i)), t = Z / max(rd.z, 0.001); vec3 P = rd * t; float fi = float(i), pw = t * pxa;',
+'    float c = SN ? 0.3 : HL ? 0.6 : DZ ? 0.22 : 0.28, ch = SN ? c : c * 2.4, X = (SN ? P.x - uWv.x * 0.25 * uTime : P.x - lean * P.y) + fi * 7.31, Y = P.y + vf * uTime * (SN ? 0.72 + 0.56 * h21(vec2(fi, 4.2)) : 1.0) + fi * 3.17;',   /* snow: each depth falls at its own speed (per column split flakes that wandered across a column edge) */   /* snow keeps round: it drifts with the wind instead of slanting */
+'    if (SN) X += sin(uTime * (0.7 + 0.4 * h21(vec2(floor(Y / ch), fi))) + floor(Y / ch) * 1.7 + fi) * 0.2 + sin(uTime * 2.3 + floor(Y / ch) * 0.6 + fi * 2.1) * 0.035;',   /* a slow wander plus a quick flutter */   /* flakes wander */
+'    vec2 id = floor(vec2(X / c, Y / ch)), f = vec2(X - (id.x + 0.5) * c, Y - (id.y + 0.5) * ch); float h = h21(id + fi * 19.7);',
+'    bool pel = SL && h21(id + 5.5) < 0.5, hs = HL && h21(id + 6.6) < 0.72;',   /* sleet: pellets among the drops; hail: stones among heavy rain */
+'    float dens = (SN ? 0.78 : DZ ? 0.7 : HL ? 0.68 : HV ? 0.75 : 0.45) * clamp(shaft(vec2(P.x, Z) / 1000.0), 0.0, 1.2) * uInt; if (h > dens) continue;',
+'    vec2 d = f - (vec2(h21(id + 3.1), h21(id + 7.7)) - 0.5) * vec2(c, ch) * 0.7; float a, near = 1.0 - fi / 8.0; vec3 col;',
+'    if (SN || pel || hs){ float hr = h21(id + 1.3), r = SN ? 0.005 + 0.011 * hr : pel ? 0.003 + 0.002 * hr   : 0.011 + 0.013 * hr, blur = SN ? 0.012 * smoothstep(2.2, 1.4, Z) : 0.0, rr = max(r + blur, pw * 0.8);',   /* snow: a continuous range of flake sizes, out-of-focus blur only on the nearest plane */
+'      vec2 dd = (pel || hs) ? vec2(d.x, max(d.y, 0.0) * 0.25 + min(d.y, 0.0)) : d; float ang = atan(dd.y, dd.x), irr = SN && blur < 0.002 ? 1.0 + 0.07 * sin(ang * 5.0 + hr * 20.0 + uTime * (1.0 + hr)) + 0.05 * sin(ang * 6.0 + hr * 7.0) : 1.0;',   /* in-focus flakes: an irregular, slowly turning outline */
+'      a = smoothstep(rr * irr, rr * irr * 0.3, length(dd)) * min(1.0, (r * r) / (rr * rr) * 2.5 + 0.15) * (SN ? 0.7 + 0.3 * sin(uTime * (2.0 + 3.0 * hr) + hr * 20.0) : 1.0);',   /* tumbling: brightness flickers */   /* flakes round (near ones out of focus); pellets and stones with a short motion streak above */
+'      if (hs) a = max(a, smoothstep(max(0.004, pw * 0.7), 0.0, abs(d.x)) * smoothstep(0.55, 0.0, d.y) * step(0.0, d.y) * 0.5);',   /* a hailstone: bright core, a long thin streak above (16 m/s) */
+'      col = mix(vec3(0.98, 0.99, 1.0), vec3(0.8, 0.83, 0.9), uNight); a *= SN ? 0.55 + 0.45 * near : hs ? 1.0 : 0.7 + 0.3 * near; }',
+'    else { float L = vf * (DZ ? 0.022 : 0.034), w = DZ ? 0.0008 : 0.0013 * (HV ? 1.3 : 1.0), wp = max(w, pw * 0.7);',   /* rain: a motion-blurred streak, length = fall speed x shutter */
+'      a = smoothstep(wp, 0.0, abs(d.x)) * smoothstep(L * 0.5, L * 0.3, abs(d.y)) * (w / wp) * (DZ ? 0.55 : HV ? 0.85 : 0.7) * (0.6 + 0.4 * near);',
+'      col = FZ ? mix(vec3(0.86, 0.94, 1.0), vec3(0.62, 0.7, 0.8), uNight) : mix(vec3(0.86, 0.89, 0.94), vec3(0.55, 0.58, 0.66), uNight); }',
+'    col *= 1.0 + fl * 1.2; a = clamp(a, 0.0, 1.0); dcol += (1.0 - da) * a * col; da += (1.0 - da) * a; }',
+'  float B = uBolt.z > 0.0 ? clamp(bolt(vUV, uBolt.x, uBolt.y, uBolt.w, 0.0022) + 0.6 * bolt(vUV, uBolt.x, uBolt.y * 0.8, uBolt.w + 5.0, 0.0014) * step(0.5, fract(uBolt.w * 0.37)), 0.0, 1.0) * uBolt.z : 0.0;',
+'  vec3 C = dcol + (1.0 - da) * cc; float A = da + (1.0 - da) * ca; C = C * (1.0 - B) + vec3(0.86, 0.9, 1.0) * B; A = max(A, B); o = vec4(C, A); }'].join('\n');
+var PP3 = null, PU3 = {};
+if (gp){ try { PP3 = gp.createProgram(); gp.attachShader(PP3, PS(gp.VERTEX_SHADER, VS)); gp.attachShader(PP3, PS(gp.FRAGMENT_SHADER, FSP3)); gp.linkProgram(PP3); if (!gp.getProgramParameter(PP3, gp.LINK_STATUS)) throw new Error(gp.getProgramInfoLog(PP3));
+  ['uRes', 'uWv', 'uTime', 'uKind', 'uNight', 'uInt', 'uShow', 'uBase', 'uTilt', 'uBolt'].forEach(function(k){ PU3[k] = gp.getUniformLocation(PP3, k); }); } catch(e){ console.error('FSP3', e); PP3 = null; } }
+
+window._labPrecip = function(){ var k = S.sc.px || 0; if (!PP || (!k && S.sc.type !== 3 && !S.sc.cb)){ if (gp){ gp.clearColor(0, 0, 0, 0); gp.clear(gp.COLOR_BUFFER_BIT); } return; }
+  var dpr = Math.min(2, window.devicePixelRatio || 1), w = Math.round(px.clientWidth * dpr), h = Math.round(px.clientHeight * dpr); if (px.width !== w || px.height !== h){ px.width = w; px.height = h; }
+  gp.viewport(0, 0, w, h); gp.clearColor(0, 0, 0, 0); gp.clear(gp.COLOR_BUFFER_BIT); gp.useProgram(PP);
+  gp.uniform2f(PU.uRes, w, h); gp.uniform1f(PU.uTime, S.t); gp.uniform1f(PU.uKind, k || 9); gp.uniform1f(PU.uNight, S.night); gp.uniform1f(PU.uWind, 0.6);
+  /* the bolt: from the storm's base above the flash to the ground, while the flash lasts (the same camera as the cloud shader) */
+  var tH = S.sc.lay ? 0.7 : 0.66, asp = px.clientWidth / px.clientHeight, tV = tH / asp, e0 = (S.sc.lay ? (S.sc.tilt || 0.03) : 0.009) + Math.atan(tV),   /* the new scenes use their own camera (pitch 0.7, tilt 0.03) */ sxp = function(X, Z){ return 0.5 + (X / Z) / (2 * tH); }, syp = function(Y, Z){ return 0.5 + Math.tan(Math.atan2(Y, Z) - e0) / (2 * tV); };
+  if (S.sc.type === 3 && k !== 7) gp.uniform3f(PU.uMask, sxp(-7 - 26, 40), sxp(-7 + 6, 40), syp(2.0, 40)); else gp.uniform3f(PU.uMask, 0, 0, -1);   /* the old storm: rain under the flanking line and the core, below the base; the new overhead storms rain everywhere, the storm in the west shows its rain as a shaft in the cloud shader */
+  var bz = [0, 0, 0, 0]; if (S.sc.lay && S.sc.cb && window._labLX){ bz = [-5, 0.5, window._labLX.u().rain, 0]; } else if ((S.sc.type === 3 || S.sc.cb) && S.fl && S.flv > 0.05){   /* the new storms draw their bolts in 3-D (lightning.js); the rain layer only takes the flash's light */ var X = S.fl.p[0] + (S.sc.cb ? 0 : 2), Z = S.fl.p[2];
+    var el = Math.atan2(S.sc.cb === 2 ? 0.7 : (S.sc.cb ? 1.2 : 3.5), Z) - e0, xs = 0.5 + (X / Z) / (2 * tH), ys = 0.5 + Math.tan(el) / (2 * tV); bz = [xs, Math.max(0.05, ys), S.flv, S.fl.seed]; }
+  if (S.sc.lay && PP3){ var L0 = S.sc.lay[0] || S.sc.lay[1] || [0, 1.0]; gp.useProgram(PP3);   /* the new scenes: precipitation in 3D */
+    gp.uniform2f(PU3.uRes, w, h); var RW = window._labWind ? window._labWind.rain() : [2.6, -4.4]; gp.uniform2f(PU3.uWv, RW[0], RW[1]);   /* the rain slants with the live surface wind */ gp.uniform1f(PU3.uTime, S.t); gp.uniform1f(PU3.uKind, k || 9); gp.uniform1f(PU3.uNight, S.night || 0);
+    gp.uniform1f(PU3.uInt, S.sc.wxI || (k === 3 ? 0.75 : k === 5 || k === 7 ? 1.0 : 0.85)); gp.uniform1f(PU3.uShow, S.sc.wxShow == null ? 0.2 : S.sc.wxShow); gp.uniform1f(PU3.uBase, L0[1] || 1.0); gp.uniform1f(PU3.uTilt, S.sc.tilt || 0.03);
+    gp.uniform4f(PU3.uBolt, bz[0], bz[1], bz[2], bz[3]); gp.drawArrays(gp.TRIANGLES, 0, 3); return; }
+  gp.uniform4f(PU.uBolt, bz[0], bz[1], bz[2], bz[3]); gp.drawArrays(gp.TRIANGLES, 0, 3); };
+/* YOUR BIRDS, UNCHANGED: the dashboard's own flock.js (murmuration, jet, peregrine) over both panels for the clear-day scenes,
+   so the new sky is judged with the real birds on it. Only the lab creates these; flock.js is not modified */
+var FL = [];
+/* LIGHTNING GLUE (lightning.js): one engine and one canvas over the storm views. The cells are the shader's own (same hash, same layout,
+   moved by the same wind drift), so scheduled strikes come down under the mature towers; live strikes from the dashboard's Blitzortung
+   client (window.bvLightning in the hidden dashboard frame) are added at their true direction while a storm view is up */
+var LXC = null, LXS = null, LXlast = Date.now();
+function lxHash(x, y){ var v = Math.sin(x * 127.1 + y * 311.7) * 43758.5453; return v - Math.floor(v); }
+function lxCells(sc){ var K = sc.lay[0] ? sc.lay[0][0] : 6, sp = Math.round((K % 1) * 10), near = sp === 3, cal = sp === 1, cells = [];
+  if (sc.cb === 2){ for (var i = 0; i < 6; i++) cells.push({ x: (lxHash(i, 9.1) - 0.5) * 20, z: 5 + lxHash(i, 4.3) * 16, R: 4, mature: true }); return { cells: cells, base: (sc.lay[0] && sc.lay[0][1]) || 0.8, near: false, cal: false }; }
+  var L0 = [-4, near ? 30 : (cal ? 42 : 60)], ld = [1 / Math.hypot(1, 0.22), 0.22 / Math.hypot(1, 0.22)], ln = [-ld[1], ld[0]], O = window._labWind ? window._labWind.O() : null, om = O ? [O[6] + (O[8] - O[6]) * 0.25, O[7] + (O[9] - O[7]) * 0.25] : [0, 0];
+  for (var k = 0; k < 6; k++){ if (cal && k > 4) break; var h1 = lxHash(k, 3.1), h2 = lxHash(k, 7.7), h3 = lxHash(k, 1.3), h4 = (h2 * 3.7 + 0.35) % 1, c, Rk, Tk;
+    if (cal){ c = k === 0 ? L0 : [L0[0] + ld[0] * (h1 - 0.5) * 34 + ln[0] * (h2 - 0.5) * 16, L0[1] + ld[1] * (h1 - 0.5) * 34 + ln[1] * (h2 - 0.5) * 16]; Rk = k === 0 ? 5.5 : 2.4 + 2 * h3; Tk = k === 0 ? 9.6 : 4.5 + 3 * h4; }
+    else { var al = (k - 2.5) * 12.5 + (h1 - 0.5) * 11, sd = (h2 - 0.5) * 12; c = [L0[0] + ld[0] * al + ln[0] * sd, L0[1] + ld[1] * al + ln[1] * sd]; Rk = h4 > 0.3 ? 7 + 3 * h3 : 3.5 + 3 * h3; Tk = h4 > 0.3 ? 11.9 + 0.4 * h4 : 5.5 + 3.5 * h4 / 0.3; }
+    cells.push({ x: c[0] + om[0] * 0.5, z: c[1] + om[1] * 0.5, R: Rk, mature: Tk > 9.0 }); }   /* p = cell + drift/2: the shader samples the storm at p + gW/2 */
+  return { cells: cells, base: 1.3, near: near, cal: cal }; }
+function lxSync(){ if (LXC){ LXC.remove(); LXC = null; } window._labLX = null; LXS = null; if (!S.sc.lay || !S.sc.cb || !window.bvSkyLightning) return;
+  var host = cv.parentNode; LXC = document.createElement('canvas'); LXC.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none;z-index:2;'; host.insertBefore(LXC, document.getElementById('vol-px'));
+  var L = window.bvSkyLightning(LXC, { seed: 20261124 }), cc = lxCells(S.sc), WA = window._labWind ? window._labWind.WA() : 2.09;
+  LXS = { cb: S.sc.cb, cells: cc.cells, base: cc.base, near: cc.near, cal: cc.cal, night: S.night, W: host.clientWidth, H: host.clientHeight, tH: 0.7, tilt: S.sc.tilt || 0.03, dw: [-Math.cos(WA), -Math.sin(WA)] };
+  L.scene(LXS); window._labLX = L; window._labLXS = LXS; }
+setInterval(function(){ if (!LXS || !S.sc.cb) { lxLive(false); return; } var cc = lxCells(S.sc); LXS.cells = cc.cells; LXS.night = S.night; lxLive(true); }, 1000);
+function lxLive(on){ var BL = window.bvLightning; if (!BL) return;   /* the lab copy of the dashboard's one client (bvlightning_lab.js); on the hero, the dashboard's own */ try { BL.want('volsky', !!on); } catch(e){ return; } if (!on || !window._labLX) return;
+  var A = BL.since(-76.2, 39.4, -73.4, 42.0, 120000) || [], n = 0;   /* ~150 km west of the city */
+  A.forEach(function(s){ if (s[2] <= LXlast) return; var x = (s[1] - 40.71) * 111.2, z = -(s[0] + 74.0) * 84.3; if (z > 8 && Math.abs(x / z) < 0.77 && n < 3){ window._labLX.live(x, z); n++; } });   /* in view to the west: its true direction */
+  A.forEach(function(s){ if (s[2] > LXlast) LXlast = s[2]; }); }
+function flockSync(){ FL.forEach(function(x){ try { x.f.destroy(); } catch(e){} x.cv.remove(); if (x.g){ try { x.g.destroy(); } catch(e){} x.gcv.remove(); } }); FL = []; lxSync();
+  if (typeof window.bvFlock !== 'function') return;
+  if (S.sc.lay){ if (!layBirds(S.sc)) return;
+    /* THE NEW SKIES GET THE BIRDS (user 11-24: "bring in the birds ... out on several views but they only appear after first song and go away
+       after last song everyday (this doesnt need to be accurate it can be a cheaper estimate)"): the dashboard's own flock.js over the
+       volumetric view on the dry, fair-weather types; its 2D jet off (the 3D jet flies here). Gated by birdGate(): fades in and out */
+    var host = cv.parentNode, c = document.createElement('canvas'); c.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none;z-index:2;opacity:0;transition:opacity 4s ease;';
+    host.insertBefore(c, document.getElementById('vol-px')); var W = host.clientWidth, H = host.clientHeight;
+    var gc = document.createElement('canvas'); gc.style.cssText = c.style.cssText; host.insertBefore(gc, c);   /* the geese under the starlings: they fly farther out */
+    try { var md = birdMood(W), f = (window.bvFlockVol || window.bvFlockLive)(c, { W: W, H: H, floor: 0.96, band: md.band, sun: birdSun(), n: md.n, drift: md.drift, jet: false, falcon: true, seed: 20261124 + S.sc.k.split('').reduce(function(a, ch){ return (a * 31 + ch.charCodeAt(0)) % 100000; }, 7) }), g = window.bvGeese ? window.bvGeese(gc, { W: W, H: H, tH: 0.7, tilt: S.sc.tilt || 0.03, lat: 40.7, sun: geeseSun(), wind: md.wind, seed: 11 + S.sc.k.length * 7 + S.sc.k.charCodeAt(2) }) : null; FL.push({ f: f, cv: c, lay: 1, g: g, gcv: gc }); birdGate(true); } catch(e){ console.error(e); c.remove(); gc.remove(); }
+    return; }
+
+  /* the birds fly on clear and mainly clear days, and now under partly cloudy and overcast days too (user 2026-11-23: "could we add the
+     birds to more scenes?"); not in rain, snow, storms, fog or at night -- they shelter and roost then */
+  var BIRDS = !!S.sc.atmo || S.sc.k === 'pc-d' || S.sc.k === 'oc-d';
+  if (!BIRDS) return;
+  [document.getElementById('now-oc'), cv.parentNode].forEach(function(host, i){ var c = document.createElement('canvas'); c.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none;z-index:2;';
+    if (i === 1) host.insertBefore(c, document.getElementById('vol-px')); else host.appendChild(c);
+    var W = host.clientWidth, H = host.clientHeight;
+    try { var f = (i === 1 ? window.bvFlockNew : window.bvFlockLive)(c, { W: W, H: H, floor: 0.96, moon: { x: W * 0.86, y: H * 0.3, r: H * 0.16 }, band: [0.06, 0.8], sun: { alt: S.moon, eve: true, month: 11 }, n: 650, jet: true, falcon: true, seed: 20261123 }); FL.push({ f: f, cv: c }); } catch(e){ console.error(e); c.remove(); } }); }
+/* which volumetric scenes get birds: dry fair-weather skies; none in rain, snow, drizzle, storms or nimbostratus (they shelter) */
+function layBirds(sc){ var k = (sc.lay[0] || [-1])[0]; return !sc.wx && !sc.cb && !(k > 4.5 && k < 6.5); }
+/* FIRST AND LAST SONG, a cheap estimate: the dawn chorus starts when the sun is ~9 deg below the horizon (~45 min before sunrise in New
+   York), the last song when it sinks ~4 deg below (~20 min after sunset). Clock off: the scene sun is up, birds on */
+function songNow(){ if (!S.clock) return true; var el = sunPos(S.doy, S.mins).el; return S.mins < 720 ? el > TH.first : el > TH.last; }
+function birdSun(){ var el = S.clock ? sunPos(S.doy, S.mins).el : (S.sc.el || 30), ML = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31], d = S.doy || 172, m = 0; while (m < 11 && d > ML[m]){ d -= ML[m]; m++; }
+  var eve = S.clock ? S.mins >= 720 : true, pa = el;
+  if (S.clock){ if (eve){ if (el < 2) pa = -0.3 + Math.max(el - TH.last, 0) * (2.3 / (2 - TH.last)); } else if (el < 1.5) pa = -0.8 + Math.max(el - TH.first, 0) * (2.3 / (1.5 - TH.first)); }
+  return { alt: pa, eve: eve, month: m + 1 }; }   /* the flock's own day plan STRETCHED to the song window: it emerges from first song (sun -9) as it would from -0.8, and its evening roost runs out by last song (sun -4) instead of at -0.3, so the birds fly home in groups rather than the whole flock fading in mid-air */
+function birdGate(now){ FL.forEach(function(x){ if (!x.lay) return; var on = songNow(), md = birdMood(x.cv.clientWidth || 684); [x.cv, x.gcv].forEach(function(cc){ if (!cc) return; if (now) cc.style.transition = 'none'; cc.style.opacity = on ? '1' : '0'; if (now){ void cc.offsetWidth; cc.style.transition = 'opacity 4s ease'; } });
+    try { x.f.set({ sun: birdSun(), n: md.n, band: md.band, drift: md.drift }); } catch(e){} if (x.g) try { x.g.set({ on: on, sun: geeseSun(), wind: md.wind }); } catch(e){} }); birdLabel(); }
+/* FIRST AND LAST SONG FROM REAL BIRDS (user 11-24: "yes i just figured it would be slower"): BirdWeather's first avian detection
+   after astronomical dawn and its last after sunset near New York (keyless GraphQL, CORS open; the same query the BIRDS widget
+   uses: 20-min slices from astro dawn because the API caps at 500 newest-first). Each time becomes a SUN ANGLE, which replaces the
+   -9 / -4 guesses for every date on the clock. A handful of small requests once per load. Falls back to the estimate. */
+var TH = { first: -9, last: -4, src: 'ESTIMATE', fm: null, lm: null };
+function dayTimes(doy){ var T = {}, prev = sunPos(doy, 0).el; for (var m = 2; m < 1440; m += 2){ var el = sunPos(doy, m).el;
+    if (m < 720){ if (prev <= -18 && el > -18) T.astro = m; if (prev <= TH.first && el > TH.first) T.first = m; if (prev <= -0.83 && el > -0.83) T.rise = m; }
+    else { if (prev > -0.83 && el <= -0.83) T.set = m; if (prev > TH.last && el <= TH.last) T.last = m; } prev = el; } return T; }
+(function(){
+  var BW = 'https://app.birdweather.com/graphql', LAT = 40.71, LON = -74.0, BOX = 0.3;
+  function hhmm(m){ m = Math.max(0, Math.min(1439, Math.round(m))); return Math.floor(m / 60) * 100 + m % 60; }
+  var WATER = /brant|goose|duck|teal|dunlin|gull|heron|egret|owl|plover|sandpiper|killdeer|scaup|merganser|bufflehead|wigeon|mallard|loon|grebe|cormorant|swan|coot|rail|snipe|woodcock|yellowlegs|sanderling|turnstone|tern/i;
+  function q(ymd, g, l){ var s = '{ detections(first: 500, ne: {lat: ' + (LAT + BOX) + ', lon: ' + (LON + BOX) + '}, sw: {lat: ' + (LAT - BOX) + ', lon: ' + (LON - BOX) + '}, classifications: ["avian"], confidenceGte: 0.7, timeOfDayGte: ' + hhmm(g) + ', timeOfDayLte: ' + hhmm(l) + ', period: {from: "' + ymd + '", to: "' + ymd + '"}) { nodes { timestamp species { commonName } } } }';
+    return fetch(BW, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: s }) }).then(function(r){ return r.json(); }).then(function(j){
+      return ((((j || {}).data || {}).detections || {}).nodes || []).filter(function(n){ return !WATER.test((n.species || {}).commonName || ''); }).map(function(n){ return +n.timestamp.slice(11, 13) * 60 + +n.timestamp.slice(14, 16); }); }); }
+  /* SONG, NOT CALLS: waterfowl, shorebirds, gulls and owls call in flight all night (11-23 dawn: Brant and Dunlin from 5:00, the real chorus
+     from 6:00; dusk: songbirds 40-55 per 10 min to 5:00 PM, then a scatter of geese, pigeons and teal to 7). So a slice only counts
+     with >= 8 songbird detections: first song = the first such 10-min slice from astronomical dawn, last song = the end of the run of
+     such slices from sunset */
+  var MIN = 8;
+  function doyOf(ymd){ var d = new Date(ymd + 'T12:00:00Z'), y0 = new Date(ymd.slice(0, 4) + '-01-01T12:00:00Z'); return Math.round((d - y0) / 864e5) + 1; }
+  var now = new Date(), ny = now.toLocaleString('sv-SE', { timeZone: 'America/New_York' }), today = ny.slice(0, 10), nowM = +ny.slice(11, 13) * 60 + +ny.slice(14, 16);
+  var yest = new Date(Date.parse(today + 'T12:00:00Z') - 864e5).toISOString().slice(0, 10), Tt = dayTimes(doyOf(today));
+  var dDawn = nowM > (Tt.rise || 400) + 30 ? today : yest, dDusk = nowM > (Tt.set || 1000) + 100 ? today : yest;
+  var Td = dayTimes(doyOf(dDawn)), Tk = dayTimes(doyOf(dDusk));
+  (function walk(g){ if (g > (Td.rise || 420) + 30) return; q(dDawn, g, g + 9).then(function(ms){ if (ms.length < MIN) return walk(g + 10); var m = Math.min.apply(null, ms), el = sunPos(doyOf(dDawn), m).el;
+      TH.first = Math.max(-14, Math.min(-2, el)); TH.fm = m; TH.src = 'LIVE'; }).catch(function(e){ console.warn('first song', e); }); })(Td.astro || 300);
+  (function dusk(g, lastM){ if (g > (Tk.set || 1000) + 110) return done(lastM); q(dDusk, g, g + 9).then(function(ms){ if (ms.length < MIN) return done(lastM); dusk(g + 10, Math.max.apply(null, ms)); }).catch(function(e){ console.warn('last song', e); done(lastM); }); })((Tk.set || 1000) - 10, null);
+  function done(m){ if (m == null) return; var el = sunPos(doyOf(dDusk), m).el; TH.last = Math.max(-12, Math.min(1, el)); TH.lm = m; TH.src = 'LIVE'; }
+})();
+/* WEATHER MOOD (user 11-24: "yes"): fewer starlings in strong wind or hard cold; under a heavy low overcast they fly lower. The flock
+   rides the live surface wind (x = north = screen right; ~4 px/s per m/s at full panel scale) */
+function birdMood(W){ var v = window._labWind ? window._labWind.rain() : [0, 0], spd = Math.hypot(v[0], v[1]), tc = window._labWind && window._labWind.tempC ? window._labWind.tempC() : null, Sc = Math.max(0.45, Math.min(1, W / 1180));
+  var fW = spd < 8 ? 1 : spd > 16 ? 0.3 : 1 - 0.7 * (spd - 8) / 8, fT = tc == null || tc > 0 ? 1 : tc < -12 ? 0.45 : 1 + 0.55 * tc / 12;
+  var lw = S.sc.lay && S.sc.lay[0], md2 = S.sc.lay && S.sc.lay[1], heavy = (lw && lw[3] >= 0.9 && (lw[0] > 6.5 && lw[0] < 7.5 || lw[0] < 0.5)) || (md2 && md2[0] > 9.05 && md2[0] < 9.5);
+  var band = heavy ? [0.32, 0.86] : spd > 12 ? [0.16, 0.84] : [0.06, 0.8];
+  return { n: Math.round(650 * fW * fT), band: band, drift: [v[0] * 4 * Sc * 0.7, 0], wind: [v[0], v[1]], spd: spd, tc: tc, heavy: heavy }; }
+function geeseSun(){ var T = dayTimes(S.doy || 172), el = S.clock ? sunPos(S.doy, S.mins).el : (S.sc.el || 30), ML = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31], d = S.doy || 172, m = 0; while (m < 11 && d > ML[m]){ d -= ML[m]; m++; }
+  return { el: el, min: S.clock ? S.mins : 720, month: m + 1, first: T.first, last: T.last, rise: T.rise, set: T.set }; }
+function birdLabel(){ var el = document.getElementById('bird-l'); if (!el) return; function hm(m){ if (m == null) return '--'; var h = Math.floor(m / 60), mm = m % 60; return ((h + 11) % 12 + 1) + ':' + (mm < 10 ? '0' : '') + mm; }
+  var x = FL.filter(function(f){ return f.lay; })[0], md = birdMood(684), gs = x && x.g ? x.g.stats() : null, fs = x ? x.f.stats() : null;
+  el.textContent = 'BIRDS (' + TH.src + '): FIRST SONG ' + (TH.fm != null ? hm(TH.fm) + ' ' : '') + 'AT SUN ' + TH.first.toFixed(1) + '° · LAST SONG ' + (TH.lm != null ? hm(TH.lm) + ' ' : '') + 'AT ' + TH.last.toFixed(1) + '° · FLOCK ' + (fs ? fs.n + '/' + md.n : '-') + (md.heavy ? ' LOW' : '') + ' · GEESE ' + (gs ? gs.birds + ' IN ' + gs.skeins + ' SKEIN' + (gs.skeins === 1 ? '' : 'S') : '-'); }
+setInterval(function(){ birdGate(false); }, 1500);
+window._labFlock = function(){ return FL; };
+$('c-moon').addEventListener('input', function(){ if (S.sc.atmo){ if (window._labShowNow) window._labShowNow(S.sc); FL.forEach(function(x){ try { x.f.set({ sun: { alt: S.moon, eve: true, month: 11 } }); } catch(e){} }); } });
+pick(SCENES.filter(function(x){ return x.k === 's-ac-str'; })[0]); requestAnimationFrame(frame);
+window._vol = S;
+})();
+
+/* ===================== the skies as they are: the dashboard's own renderer ===================== */
+(function(){
+var CODES = [[0, 'CLEAR'], [1, 'MAINLY CLEAR'], [2, 'PARTLY CLOUDY'], [3, 'OVERCAST'], [45, 'FOG'], [51, 'DRIZZLE'], [61, 'RAIN'], [65, 'HEAVY RAIN'], [71, 'SNOW'], [80, 'SHOWERS'], [95, 'THUNDERSTORM']];
+var fr = document.getElementById('srcframe'), tries = 0;
+function go(){ var w = fr.contentWindow; if (!w || !w.weatherHeroSVG){ if (++tries < 120) return setTimeout(go, 500); document.getElementById('grid').textContent = 'THE DASHBOARD DID NOT LOAD'; return; }
+  /* the hero's CSS (animations, filters) lives in the dashboard's <style>: bring it over, scoped to the hero boxes by the site's own selectors */
+  var d = w.document; [].slice.call(d.querySelectorAll('style')).forEach(function(s){ var c = document.createElement('style'); c.textContent = s.textContent; document.head.appendChild(c); });
+  var fix = document.createElement('style'); fix.textContent = 'html,body{background:#0b0f1a !important;color:#e6edf7 !important;overflow:auto !important;height:auto !important;} body *{cursor:auto;}'; document.head.appendChild(fix);
+  /* each sky composed the way the dashboard's _bvHeroGpu does it: bvHeroGL paints the lit clouds into a canvas, and the SVG on top
+     is re-rendered without its clouds (only rain, snow, lightning). Scenes bvHeroGL does not draw keep their SVG */
+  function heroState(code, night){ if (code === 0 || code === 1) return night ? 'clear-night' : 'clear-day'; if (code === 2) return 'partly'; if (code === 3) return 'overcast'; if (code === 45 || code === 48) return 'fog';
+    if (code >= 51 && code <= 55) return 'drizzle'; if (code === 56 || code === 57 || code === 66 || code === 67) return 'freezing'; if (code === 65 || code === 82) return 'rain-heavy'; if ((code >= 61 && code <= 63) || code === 80 || code === 81) return 'rain';
+    if ((code >= 71 && code <= 75) || code === 85 || code === 86) return 'snow'; if (code === 77) return 'sleet'; if (code === 95) return 'storm'; if (code === 96 || code === 99) return 'storm-hail'; return 'overcast'; }
+  var GPU = /^(partly|overcast|fog|drizzle|rain|rain-heavy|freezing|snow|sleet|storm|storm-hail)$/;
+  function sky(host, code, night, tall, Wf, vbF){ var vb = vbF || (tall ? 300 : 215), W = Wf || host.clientWidth || 700, H = Math.round(W * vb / 660), st = '';
+    st = heroState(code, night);   /* index.html's heroState is inside a closure; mirrored here */
+    /* composed by the dashboard itself: a hero box inside its frame, _bvHeroGpu (which reaches the closure's _HERO_NOCLOUD), then the
+       finished canvas and SVG copied over */
+    if (GPU.test(st) && w._bvHeroGpu){ var d = w.document, hw = d.createElement('div'); hw.style.cssText = 'position:absolute;left:0;top:0;width:' + W + 'px;height:' + H + 'px;'; d.body.appendChild(hw);
+      try { w._bvHeroKeep = null; hw.innerHTML = w.weatherHeroSVG(code, night, vb); w._bvHeroGpu(hw, st, code, night); } catch(e){ console.error(e); }
+      var gc = hw.querySelector('canvas.hero-gl'), sv = hw.querySelector('svg');
+      if (gc){ var cv = document.createElement('canvas'); cv.width = gc.width; cv.height = gc.height; cv.style.background = gc.style.background; cv.getContext('2d').drawImage(gc, 0, 0); host.appendChild(cv);
+        if (sv) host.appendChild(document.importNode(sv, true)); hw.remove(); return st + ' · GPU'; }
+      hw.remove(); }
+    host.innerHTML = w.weatherHeroSVG(code, night, 215); return st + ' · SVG'; }
+  var G = document.getElementById('grid'), oc = document.getElementById('now-oc'), OW = oc.clientWidth, HOLD = {};
+  (window._labScenes || []).forEach(function(sc){ if (sc.lay) return; var h = document.createElement('div'); h.style.cssText = 'position:absolute;inset:0;display:none;'; oc.appendChild(h); HOLD[sc.k] = { el: h, how: sky(h, sc.code, !!sc.night, false, OW, 260) }; });
+  window._labShowNow = function(sc){ Object.keys(HOLD).forEach(function(k){ HOLD[k].el.style.display = k === sc.k ? 'block' : 'none'; }); var H0 = HOLD[sc.k]; if (!H0){ document.getElementById('now-lab').textContent = 'AS IT IS \u00b7 NO HERO EQUIVALENT (GOLDEN HOUR AND CLOUD DETAILS DRAW THESE TODAY)'; document.getElementById('vol-ov').innerHTML = ''; return; }
+    if (sc.twi && window._labNightBase){ var sv0 = H0.el.querySelector('svg'); window._labNightBase(sv0 ? sv0.outerHTML : ''); }
+    if (sc.atmo){ var T = window._labSkyTab || {}, a = Math.max(-6, Math.min(90, Math.round((window._vol && window._vol.moon) || sc.el))), c = T[a] || ['#2d63b8', '#4a7fd0', '#6f9de0', '#a8c6ee'];
+      H0.el.style.background = 'linear-gradient(to bottom,' + c[0] + ' 0%,' + c[1] + ' 42%,' + c[2] + ' 72%,' + c[3] + ' 100%)'; }   /* exactly as the dashboard paints clear day (_curSkyBg) */
+    document.getElementById('now-lab').textContent = 'AS IT IS \u00b7 ' + H0.how.toUpperCase();
+    var ov = document.getElementById('vol-ov'), sv = null;   /* every scene draws its own precipitation and lightning now */   /* rain and snow are drawn by the lab now; the storm keeps the dashboard's bolts */ ov.innerHTML = ''; if (sv){ var c2 = sv.cloneNode(true); c2.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;'; ov.appendChild(c2); } };   /* the dashboard's own rain, falling over the new cloud */
+  var cur = ((window._vol && window._vol.sc) || {}).k || 's-ac-str'; window._labPick(cur); if (HOLD['cl-n'] && window._labStarsFrom) window._labStarsFrom(HOLD['cl-n'].el.querySelector('svg'));
+  CODES.forEach(function(c){ [false, true].forEach(function(night){ var cell = document.createElement('div'); cell.className = 'lab-cell';
+    cell.innerHTML = '<div class="lab-lab"></div><div class="lab-hero" style="aspect-ratio:660/300;"></div>'; G.appendChild(cell); var how = sky(cell.querySelector('.lab-hero'), c[0], night, true);   /* the hero's real height: a short box leaves a gap the hero stretches into streaks */
+    cell.querySelector('.lab-lab').textContent = c[1] + ' · ' + (night ? 'NIGHT' : 'DAY') + ' · ' + how; }); });
+  /* today's clear-day backdrop: the dashboard's own sky color engine, saved for every sun height before the frame goes */
+  window._labSkyTab = {}; try { for (var a = -6; a <= 90; a++) window._labSkyTab[a] = w._tlSkyColors ? w._tlSkyColors(a, { cL: 0, cM: 0, cH: 0, pr: 0, rh: 50, vis: 30000, sn: 0 }, true) : null;   /* called the way the hourly sky calls it */ } catch(e){}
+  if (window._labPick) window._labPick(((window._vol && window._vol.sc) || {}).k || 's-ac-str');
+  setTimeout(function(){ fr.remove(); }, 400);   /* the dashboard is not needed once the skies are drawn: stop it competing for the GPU */
+}
+fr.addEventListener('load', function(){ setTimeout(go, 1500); });
+})();
+</script>
+</body>
+</html>
