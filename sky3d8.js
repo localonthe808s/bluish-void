@@ -690,7 +690,7 @@ function frame(now){
   var deck = sc.lay[0] && sc.lay[0][3] > 0.75, dim = (!S.lt.nt && deck) ? (sc.key === 'fog' ? 0.72 : 0.85) : 1, fl = dim < 1 ? 'brightness(' + dim + ')' : ''; if (cv.style.filter !== fl) cv.style.filter = fl;
   /* 1 + 6: reveal once the history has settled (12 frames); then keep a snapshot of this sky for the next visit */
   S.conv = (S.conv || 0) + 1;
-  if (S.conv === 12){ SNAP.revealAt = now; cv.style.opacity = '1'; if (SNAP.shown){ snapImg.style.opacity = '0'; } }
+  if (S.conv === 12){ SNAP.revealAt = now; cv.style.opacity = '1'; if (SNAP.shown){ snapImg.style.opacity = '0'; } var ee = document.getElementById('hero-snap-early'); if (ee){ ee.style.opacity = '0'; setTimeout(function(){ if (ee.parentNode) ee.parentNode.removeChild(ee); }, 700); } }   /* and the page's own early snapshot (index.html) */
   if (S.conv === 120) snapSave();
   fr++; if (now - f0 > 1000){ S.fps = fr; fr = 0; f0 = now; if (sc.cb) lxLive(true); }
 }
