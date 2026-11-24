@@ -199,7 +199,9 @@ function resolve(){ var J = SEQ[RT.ph], aH = 0.15, aM = 0.025; if (RT.fill > 0){
   gl.drawArrays(gl.TRIANGLES, 0, 3); gl.activeTexture(gl.TEXTURE0); var tmp = RT.H; RT.H = RT.H2; RT.H2 = tmp; }
 function present(W, H){ gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, W, H); gl.disable(gl.BLEND); gl.useProgram(PRS);
   gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, RT.H.tex); gl.uniform1i(ul(gl, PRS, PRU, 'uT'), 4); gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, RT.L.tex); gl.uniform1i(ul(gl, PRS, PRU, 'uLo'), 5);
-  gl.uniform2f(ul(gl, PRS, PRU, 'uSrc'), RT.H.w, RT.H.h); gl.uniform1f(ul(gl, PRS, PRU, 'uSharp'), RT.H.w < W * 0.4 ? -0.22 : RT.H.w < W * 0.5 ? 0.0 : 0.1);   /* stretched more than 2.5x (a slow page): a slight SOFTEN, not a sharpen -- the 2x2 build showed as a faint mesh on bright clouds */ gl.drawArrays(gl.TRIANGLES, 0, 3); gl.activeTexture(gl.TEXTURE0); }
+  gl.uniform2f(ul(gl, PRS, PRU, 'uSrc'), RT.H.w, RT.H.h); gl.uniform1i(ul(gl, PRS, PRU, 'uMoonT'), 7);
+  if (moonHi(S.sc)){ gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, MOON.tex); gl.uniform1f(ul(gl, PRS, PRU, 'uMoonOn'), 1); gl.uniform2f(ul(gl, PRS, PRU, 'uMoonP'), MOON.x, MOON.y); gl.uniform1f(ul(gl, PRS, PRU, 'uMoonR'), MOON.r); gl.uniform1f(ul(gl, PRS, PRU, 'uMoonD'), MOON.d); gl.uniform1f(ul(gl, PRS, PRU, 'uMoonNt'), (S.lt && S.lt.nt) ? 1 : 0); gl.uniform1f(ul(gl, PRS, PRU, 'uAsp'), W / Math.max(1, H)); }
+  else gl.uniform1f(ul(gl, PRS, PRU, 'uMoonOn'), 0); gl.uniform1f(ul(gl, PRS, PRU, 'uSharp'), RT.H.w < W * 0.4 ? -0.22 : RT.H.w < W * 0.5 ? 0.0 : 0.1);   /* stretched more than 2.5x (a slow page): a slight SOFTEN, not a sharpen -- the 2x2 build showed as a faint mesh on bright clouds */ gl.drawArrays(gl.TRIANGLES, 0, 3); gl.activeTexture(gl.TEXTURE0); }
 /* size the shaded image for ~15 ms of march: time it once per sky (a readback forces the wait), then only nudge on slips / spare time */
 function calibrate(CW, CH, sc, LT){ var q0 = 0.2, w = Math.max(48, Math.round(CW * q0)), h = Math.max(20, Math.round(CH * q0)), pb = RT.f16 ? new Float32Array(4) : new Uint8Array(4); rtSize(w, h);
   function sync(){ gl.bindFramebuffer(gl.FRAMEBUFFER, RT.L.fb); gl.readPixels(0, 0, 1, 1, gl.RGBA, RT.f16 ? gl.FLOAT : gl.UNSIGNED_BYTE, pb); }
@@ -226,7 +228,36 @@ function drawLay(sc, w, h, LT){ gl.viewport(0, 0, w, h); gl.useProgram(P2); var 
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_3D, NT); gl.uniform1i(u2('uN'), 0);
   if (STAR.tex){ gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, STAR.tex); gl.uniform1f(u2('uStOn'), 1); gl.activeTexture(gl.TEXTURE0); } else gl.uniform1f(u2('uStOn'), 0);
   gl.uniform1i(u2('uSt'), 1); gl.uniform1f(u2('uSkOn'), 0); gl.uniform1i(u2('uSk'), 2); gl.uniform1i(u2('uMw'), 3);
+  gl.uniform1i(u2('uMoonT'), 7); if (MOON.on && MOON.tex && !MOON.off){ gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, MOON.tex); gl.activeTexture(gl.TEXTURE0);
+    gl.uniform2f(u2('uMoonP'), MOON.x, MOON.y); gl.uniform1f(u2('uMoonR'), MOON.r); gl.uniform1f(u2('uMoonD'), MOON.d); gl.uniform1f(u2('uMoonOn'), 1); } else gl.uniform1f(u2('uMoonOn'), 0);
+  gl.uniform1f(u2('uMoonHi'), moonHi(sc) ? 1 : 0);   /* the sharp moon is drawn in present(); storms keep their alpha for lightning and the soft moon here */
   gl.disable(gl.BLEND); gl.drawArrays(gl.TRIANGLES, 0, 3); }
+
+/* ---------------- THE MOON BEHIND THE CLOUDS (11-24, user: "take it to the site"; "i still want the moon to have its accurate moon phases") ----------------
+   The hero's moon (#moon-mini-img: NASA's Dial-A-Moon frame for this hour -- phase, libration, apparent size -- refreshed on R2 every
+   4 h, or the browsed day's frame) is drawn IN the sky, behind every cloud layer: thin cloud veils it, thick cloud hides it. The engine
+   loads the very image the page shows, at the element's place and size and inside its clip circle, then fades the element out; it
+   comes back whenever the engine is not drawing it (stopped, clear nights -- whose photo sky lies over the clouds -- or no image) */
+var MOON = { tex: null, src: '', loading: '', on: false, off: false, x: 0, y: 0, r: 0, d: 0.936, el: null, hid: false };
+var MOONCSS = document.createElement('style'); MOONCSS.textContent = '#moon-mini-img{transition:opacity .6s ease;} #moon-mini-img.s3d-moon-in-sky{opacity:0 !important;}';
+function moonHi(sc){ return !!(MOON.on && MOON.tex && !MOON.off && sc && !sc.cb); }
+function moonEl(){ var e = document.getElementById('moon-mini-img'); return (e && e.tagName === 'IMG') ? e : null; }
+function moonSync(){ var e = moonEl(); MOON.el = e; MOON.on = false;
+  if (!e || !S.sc || S.sc.hold || !e.isConnected){ moonShow(true); return; }
+  var src = e.currentSrc || e.src || '', cs = getComputedStyle(e); if (!src || cs.display === 'none' || cs.visibility === 'hidden' || !e.complete){ moonShow(true); return; }
+  if (src !== MOON.src && src !== MOON.loading){ MOON.loading = src; var im = new Image(); im.crossOrigin = 'anonymous';
+    im.onload = function(){ if (MOON.loading !== src) return; try { var t = MOON.tex || gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, im); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.generateMipmap(gl.TEXTURE_2D); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      MOON.tex = t; MOON.src = src; } catch(err){ MOON.off = true; } MOON.loading = ''; };
+    im.onerror = function(){ if (MOON.loading === src) MOON.loading = ''; MOON.src = ''; }; im.src = src; }
+  if (!MOON.tex || MOON.src !== src){ moonShow(true); return; }   /* until this image is in the engine the page's moon stays */
+  var r = e.getBoundingClientRect(), c = cv.getBoundingClientRect(); if (r.width < 8 || c.width < 8 || c.height < 8){ moonShow(true); return; }
+  MOON.x = (r.left + r.width / 2 - c.left) / c.width; MOON.y = 1 - (r.top + r.height / 2 - c.top) / c.height; MOON.r = (r.height / 2) / c.height;
+  var clip = /circle\(([\d.]+)%/.exec(cs.clipPath || ''); MOON.d = clip ? Math.min(1, 2 * parseFloat(clip[1]) / 100) : 0.936;   /* circle(46.8%) of the side = 0.936 of the half-side */
+  if (MOON.y < -0.2 || MOON.y > 1.2){ moonShow(true); return; }
+  MOON.on = !MOON.off; moonShow(!(MOON.on && S.shown)); }
+function moonShow(page){ var e = MOON.el || moonEl(); if (!e) return; if (!MOONCSS.parentNode) document.head.appendChild(MOONCSS);
+  if (page){ if (e.classList.contains('s3d-moon-in-sky')) e.classList.remove('s3d-moon-in-sky'); } else if (!e.classList.contains('s3d-moon-in-sky')) e.classList.add('s3d-moon-in-sky'); }
 
 /* ---------------- precipitation in depth (the lab's FSP3) ---------------- */
 function precip(){ var sc = S.sc, k = sc.wx || 0;
@@ -297,7 +328,7 @@ function frame(now){
     if (S.frame === S.holdF){ S.holdDone = GLOW.done; GLOW.at = 0; }
     if (S.frame > S.holdF && GLOW.done > S.holdDone){
       if (!S.holdAt) S.holdAt = now;
-      if (now - S.holdAt < 60000){ glowTop(); cancelAnimationFrame(raf); raf = 0; clearTimeout(S.holdT); S.holdT = setTimeout(kick, 500); S.tick = 0; S.fps = 0; fr = 0; return; }
+      if (now - S.holdAt < 60000){ glowTop(); if (MOON.on || (MOON.el && MOON.el.classList.contains('s3d-moon-in-sky'))){ MOON.on = false; moonShow(true); } cancelAnimationFrame(raf); raf = 0; clearTimeout(S.holdT); S.holdT = setTimeout(kick, 500); S.tick = 0; S.fps = 0; fr = 0; return; }
       S.holdAt = 0; S.holdF = S.frame + 3; } }   /* a minute on: three frames, a fresh read, hold again */
   /* PERF 2 (11-24): calm, dry skies redraw at 15 Hz instead of 30 (rain, snow, lightning and fast winds stay at 30) */
   var wf = Math.hypot(WND.v[1][0], WND.v[1][1]);   /* the 850 hPa wind (~1.5 km): what the low clouds visibly move with; the high winds move far-off cloud slowly on screen */
@@ -318,7 +349,8 @@ function frame(now){
   if (S.conv === 40 || S.conv === 900) snapSave();
   glowTop();
   if (sc.inside && S.frame % 15 === 0) rectHide(true);   /* the hero re-renders its SVG */
-  if (S.conv === 6 || S.conv === 10 || now - GLOW.at > 1000) glowRequest();   /* reads at frames 6 and 10: the colour is in before the reveal at 12 */   /* once a second, async (PERF 3) */
+  if (S.conv === 6 || S.conv === 10 || now - GLOW.at > 1000) glowRequest();
+  if (S.frame % 6 === 0 || S.conv === 12) moonSync();   /* the moon's image, place and size follow the page's */   /* reads at frames 6 and 10: the colour is in before the reveal at 12 */   /* once a second, async (PERF 3) */
   fr++; if (now - f0 > 1000){ S.fps = fr; fr = 0; f0 = now; if (sc.cb) lxLive(true); }
 }
 
@@ -351,7 +383,7 @@ function placeC(){ var host = S.host; if (!host) return; var t = host.offsetTop,
 function place(){ var host = S.host; if (!host) return; var t = host.offsetTop, h = host.offsetHeight; if (S.pt === t && S.ph === h) return; S.pt = t; S.ph = h;
   var m = 'linear-gradient(to bottom,#000 0,#000 ' + h + 'px,transparent ' + (h + EXT) + 'px)', css = 'position:absolute;left:0;right:0;top:' + t + 'px;height:' + (h + EXT) + 'px;width:100%;pointer-events:none;z-index:0;-webkit-mask-image:' + m + ';mask-image:' + m + ';';
   px.style.cssText = css; lxc.style.cssText = css; if (LX && LXS){ LXS.W = px.clientWidth || LXS.W; LXS.H = px.clientHeight || LXS.H; LX.scene(LXS); } }
-function stop(){ S.glowReady = false; clearTimeout(S.holdT); S.holdAt = 0; S.shown = false; rectHide(false); if (glow.parentNode) glow.parentNode.removeChild(glow); if (haze.parentNode) haze.parentNode.removeChild(haze); S.sc = null; S.key = ''; [cv, px, lxc, snapImg].forEach(function(c){ if (c.parentNode) c.parentNode.removeChild(c); }); if (raf){ cancelAnimationFrame(raf); raf = 0; } lxLive(false); LX = null; LXS = null; }
+function stop(){ S.glowReady = false; MOON.on = false; moonShow(true); clearTimeout(S.holdT); S.holdAt = 0; S.shown = false; rectHide(false); if (glow.parentNode) glow.parentNode.removeChild(glow); if (haze.parentNode) haze.parentNode.removeChild(haze); S.sc = null; S.key = ''; [cv, px, lxc, snapImg].forEach(function(c){ if (c.parentNode) c.parentNode.removeChild(c); }); if (raf){ cancelAnimationFrame(raf); raf = 0; } lxLive(false); LX = null; LXS = null; }
 
 /* ---------------- the page's API ---------------- */
 function sync(host, o){
