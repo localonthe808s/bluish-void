@@ -669,7 +669,7 @@ document.addEventListener('visibilitychange', function(){ if (!document.hidden) 
 function kick(){ if (!raf && S.sc) raf = requestAnimationFrame(frame); }
 function frame(now){
   raf = 0; if (!S.sc) return;
-  if (!cv.isConnected || (!S.sc.inside && cv.nextSibling !== S.host) || !px.isConnected || (S.host && (!S.host.classList.contains('hero-s3d-bg') || (S.host.querySelector(':scope > svg > rect') && !S.host.querySelector(':scope > svg > rect[data-s3d-hid]') && S.sc && S.host.querySelector(':scope > svg').children.length <= 3)))){   /* the hero re-renders its SVG: hide its sky rect again */ var h2 = (S.host && S.host.isConnected) ? S.host : document.getElementById('hero-wx'); if (!h2) return; S.host = h2; attach(); }
+  if (!cv.isConnected || (!S.sc.inside && cv.nextSibling !== S.host) || !px.isConnected){ var h2 = (S.host && S.host.isConnected) ? S.host : document.getElementById('hero-wx'); if (!h2) return; S.host = h2; attach(); }
   if (document.hidden || !S.seen) return;
   raf = requestAnimationFrame(frame);
   if (!READY){ tryReady(); return; }
@@ -697,13 +697,7 @@ function frame(now){
 
 /* ---------------- placement (as v7: cloudy skies run on below the hero box; clear-ish skies sit inside it) ---------------- */
 var EXT = 120;
-var BGCSS = document.createElement('style'); BGCSS.textContent = '#hero-wx.hero-s3d-bg{background:transparent !important;}';   /* the hero box paints its own sky gradient on clear days (the old sky's): over the canvas, now under the box, it hid the clouds (user 11-24 screenshot "that broke it") */
 function attach(){ var host = S.host, sc = S.sc; if (!host || !sc) return;
-  if (!BGCSS.parentNode) document.head.appendChild(BGCSS); if (!host.classList.contains('hero-s3d-bg')) host.classList.add('hero-s3d-bg');
-  /* the clear-day hero SVG is one full-size rect filled with the old sky gradient: over the clouds, inside the box only, it left a pale
-     panel with a hard seam at the box's bottom edge (user 11-24: "its not blended"). Full-size gradient rects are hidden while v8 draws */
-  var sv = host.querySelector(':scope > svg'); if (sv){ var vb = sv.viewBox && sv.viewBox.baseVal; Array.prototype.forEach.call(sv.children, function(r){ if (r.tagName !== 'rect' || r.hasAttribute('data-s3d-hid')) return; var f = r.getAttribute('fill') || '', w = parseFloat(r.getAttribute('width')) || 0, W = vb ? vb.width : 0;
-    if (/^url\(/.test(f) && (r.getAttribute('width') === '100%' || (W && w >= W * 0.9))){ r.setAttribute('data-s3d-hid', '1'); r.style.display = 'none'; } }); }
   var par = host.parentNode;
   if (!sc.inside && par){ if (cv.parentNode !== par || cv.nextSibling !== host) par.insertBefore(cv, host); S.ct = null; placeC(); }
   else { cv.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:0;transition:opacity .6s ease;opacity:' + (S.conv >= 12 ? 1 : 0) + ';'; S.ct = null; if (cv.parentNode !== host || host.firstChild !== cv) host.insertBefore(cv, host.firstChild); }
@@ -720,13 +714,13 @@ function placeC(){ var host = S.host; if (!host) return; var t = host.offsetTop,
 function place(){ var host = S.host; if (!host) return; var t = host.offsetTop, h = host.offsetHeight; if (S.pt === t && S.ph === h) return; S.pt = t; S.ph = h;
   var m = 'linear-gradient(to bottom,#000 0,#000 ' + h + 'px,transparent ' + (h + EXT) + 'px)', css = 'position:absolute;left:0;right:0;top:' + t + 'px;height:' + (h + EXT) + 'px;width:100%;pointer-events:none;z-index:0;-webkit-mask-image:' + m + ';mask-image:' + m + ';';
   px.style.cssText = css; lxc.style.cssText = css; if (LX && LXS){ LXS.W = px.clientWidth || LXS.W; LXS.H = px.clientHeight || LXS.H; LX.scene(LXS); } }
-function stop(){ if (S.host){ S.host.classList.remove('hero-s3d-bg'); Array.prototype.forEach.call(S.host.querySelectorAll('[data-s3d-hid]'), function(r){ r.removeAttribute('data-s3d-hid'); r.style.display = ''; }); } S.sc = null; S.key = ''; [cv, px, lxc, snapImg].forEach(function(c){ if (c.parentNode) c.parentNode.removeChild(c); }); if (raf){ cancelAnimationFrame(raf); raf = 0; } lxLive(false); LX = null; LXS = null; }
+function stop(){ S.sc = null; S.key = ''; [cv, px, lxc, snapImg].forEach(function(c){ if (c.parentNode) c.parentNode.removeChild(c); }); if (raf){ cancelAnimationFrame(raf); raf = 0; } lxLive(false); LX = null; LXS = null; }
 
 /* ---------------- the page's API ---------------- */
 function sync(host, o){
   if (!host || !o || o.state === 'clear-night' || !start()){ stop(); return false; }
   var sc = scene(o); if (!sc){ stop(); return false; }
-  sc.inside = false;   /* EVERY SKY RUNS ON BELOW THE HERO (user 11-24: "improve the bottoms so the mirroring isnt so obvious and trippy"): clear and partly skies sat inside the hero box, where _bvHorizonMask mirrored their bottom edge -- reflected clouds. Outside, in the sky bar, the mirror switches itself off and the real sky continues EXT px and fades */
+  sc.inside = /^(clear-day|mainly|partly)$/.test(o.state === 'clear-day' && o.code === 1 ? 'mainly' : o.state);
   var key = sc.key + '|' + (o.night ? 1 : 0);
   if (S.key !== key){ S.key = key; RT.cal = 1; RT.fill = 4; S.conv = 0; if (!(SNAP.shown && !S.sc)) SNAP.shown = false; SNAP.revealAt = 0; cv.style.opacity = '0'; JET.J = null; }   /* an early snapshot stays up through the first sync */
   S.sc = sc; S.host = host; S.sunAlt = +o.sunAlt; S.eve = !!o.eve; S.night = o.night ? 1 : 0; S.pal = o.pal || null; S.lt = light();
