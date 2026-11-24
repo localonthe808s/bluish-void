@@ -460,7 +460,10 @@ var cv = document.createElement('canvas'), px = document.createElement('canvas')
 /* THE GLOW UNDER THE HERO (user 11-24: "i dont think we should be showing clouds down here, i want a natural gradient blur that reaches the artwork"):
    for the skies drawn inside the hero box, the box's mirror is replaced by the hero's bottom band of sky shrunk to 32 x 4 px and stretched
    below it -- the stretch is the blur -- fading out toward the hourly artwork. Its being in the sky bar switches the page's mirror off */
-var glow = document.createElement('canvas'); glow.className = 'hero-s3d hero-s3d-glow'; glow.width = 32; glow.height = 4; var gctx = glow.getContext('2d');
+var glow = document.createElement('canvas'); glow.className = 'hero-s3d hero-s3d-glow'; glow.width = 32; glow.height = 4; var gctx = glow.getContext('2d', { willReadFrequently: true });
+/* 11-24 (user: "take the clouds out of the mirrored view, just match the sky color and rain type animation if there"): the glow is ONE flat
+   sky colour for every sky (the bluest half of the hero's bottom band, so cloud pixels drop out); clouds stop at the hero's edge; the rain
+   canvas (px) still runs below. The canvas itself stays transparent; its background carries the colour */
 cv.className = 'hero-s3d'; px.className = 'hero-s3d-px'; lxc.className = 'hero-s3d-lx'; snapImg.className = 'hero-s3d-snap';
 var gl = null, gp = null, OK = false, BROKEN = false, READY = false;
 try { gl = cv.getContext('webgl2', { antialias: false, premultipliedAlpha: false, preserveDrawingBuffer: false, alpha: false }); gp = px.getContext('webgl2', { premultipliedAlpha: true, alpha: true }); } catch(e){}
@@ -696,8 +699,12 @@ function frame(now){
   S.conv = (S.conv || 0) + 1;
   if (S.conv === 12){ SNAP.revealAt = now; cv.style.opacity = '1'; glow.style.opacity = '1'; if (SNAP.shown){ snapImg.style.opacity = '0'; } var ee = document.getElementById('hero-snap-early'); if (ee){ ee.style.opacity = '0'; setTimeout(function(){ if (ee.parentNode) ee.parentNode.removeChild(ee); }, 700); } }   /* and the page's own early snapshot (index.html) */
   if (S.conv === 40 || S.conv === 900) snapSave();
-  if (sc.inside && glow.parentNode && S.host){ var gt2 = (S.host.offsetTop + S.host.offsetHeight) + 'px'; if (glow.style.top !== gt2) glow.style.top = gt2; }
-  if (sc.inside && (S.frame % 10 === 0 || S.conv === 13)){ try { gctx.setTransform(1, 0, 0, -1, 0, 4); gctx.drawImage(cv, 0, Math.round(CH * 0.82), CW, Math.round(CH * 0.18), 0, 0, 32, 4); } catch(e){} }   /* the bottom band, flipped: its edge row meets the hero's   /* ~3-4 s in at the page's real frame rate (120 frames was 10-15 s: short visits never saved one); refreshed after ~a minute */
+  if (glow.parentNode && S.host){ var gt2 = (S.host.offsetTop + S.host.offsetHeight) + 'px'; if (glow.style.top !== gt2) glow.style.top = gt2; }
+  if (S.frame % 10 === 0 || S.conv === 13){ try { var bh = sc.inside ? CH : Math.min(CH, Math.round(cv.height * ((S.host && S.host.offsetHeight) || 1) / Math.max(1, cv.clientHeight || 1)));   /* the bottom band of the HERO part of the canvas */
+    gctx.clearRect(0, 0, 32, 4); gctx.drawImage(cv, 0, Math.round(bh * 0.8), cv.width, Math.round(bh * 0.2), 0, 0, 32, 4); var d = gctx.getImageData(0, 0, 32, 4).data, pxs = [];
+    for (var q = 0; q < d.length; q += 4) pxs.push([d[q], d[q + 1], d[q + 2]]); pxs.sort(function(u, v){ return (v[2] - v[0]) - (u[2] - u[0]); });   /* bluest first: sky, not cloud */
+    var n = Math.max(1, pxs.length >> 1), r = 0, g = 0, bb = 0; for (q = 0; q < n; q++){ r += pxs[q][0]; g += pxs[q][1]; bb += pxs[q][2]; }
+    glow.style.backgroundColor = 'rgb(' + Math.round(r / n) + ',' + Math.round(g / n) + ',' + Math.round(bb / n) + ')'; gctx.clearRect(0, 0, 32, 4); } catch(e){} }
   fr++; if (now - f0 > 1000){ S.fps = fr; fr = 0; f0 = now; if (sc.cb) lxLive(true); }
 }
 
@@ -708,17 +715,16 @@ function attach(){ var host = S.host, sc = S.sc; if (!host || !sc) return;
   if (!sc.inside && par){ if (cv.parentNode !== par || cv.nextSibling !== host) par.insertBefore(cv, host); S.ct = null; placeC(); }
   else { cv.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:0;transition:opacity .6s ease;opacity:' + (S.conv >= 12 ? 1 : 0) + ';'; S.ct = null; if (cv.parentNode !== host || host.firstChild !== cv) host.insertBefore(cv, host.firstChild); }
   if (snapImg.parentNode !== cv.parentNode || snapImg.nextSibling !== cv) cv.parentNode.insertBefore(snapImg, cv);
-  if (sc.inside && par){ var gt = host.offsetTop + host.offsetHeight, m = 'linear-gradient(to bottom,#000 0,rgba(0,0,0,.55) 45%,transparent 100%)';
-    glow.style.cssText = 'position:absolute;left:0;top:' + gt + 'px;width:100%;height:' + EXT + 'px;pointer-events:none;z-index:0;opacity:' + (S.conv >= 12 ? 1 : 0) + ';transition:opacity .6s ease;-webkit-mask-image:' + m + ';mask-image:' + m + ';';
-    if (glow.parentNode !== par || glow.previousSibling !== host) par.insertBefore(glow, host.nextSibling); }
-  else if (glow.parentNode) glow.parentNode.removeChild(glow);
-  if (par){ if (px.parentNode !== par || px.previousSibling !== host) par.insertBefore(px, host.nextSibling); if (lxc.parentNode !== par || lxc.previousSibling !== px) par.insertBefore(lxc, px.nextSibling); S.pt = null; place(); }
+  if (par){ var gt = host.offsetTop + host.offsetHeight, m = 'linear-gradient(to bottom,#000 0,rgba(0,0,0,.55) 45%,transparent 100%)', gb = glow.style.backgroundColor;
+    glow.style.cssText = 'position:absolute;left:0;top:' + gt + 'px;width:100%;height:' + EXT + 'px;pointer-events:none;z-index:0;opacity:' + (S.conv >= 12 ? 1 : 0) + ';transition:opacity .6s ease,background-color 2s linear;-webkit-mask-image:' + m + ';mask-image:' + m + ';' + (gb ? 'background-color:' + gb + ';' : '');
+    if (glow.parentNode !== par || glow.previousSibling !== host) par.insertBefore(glow, host.nextSibling);
+    if (px.parentNode !== par || px.previousSibling !== glow) par.insertBefore(px, glow.nextSibling); if (lxc.parentNode !== par || lxc.previousSibling !== px) par.insertBefore(lxc, px.nextSibling); S.pt = null; place(); }
 }
 function placeC(){ var host = S.host; if (!host) return; var t = host.offsetTop, h = host.offsetHeight;
   var inS = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:0;';
   if (S.sc && S.sc.inside){ snapImg.style.cssText = inS + 'object-fit:cover;transition:opacity .6s ease;opacity:' + (SNAP.shown && !SNAP.revealAt ? 1 : 0) + ';'; return; }
   if (cv.parentNode !== host.parentNode) return; if (S.ct === t && S.ch === h) return; S.ct = t; S.ch = h;
-  var m = 'linear-gradient(to bottom,#000 0,#000 ' + h + 'px,transparent ' + (h + EXT) + 'px)', base = 'position:absolute;left:0;right:0;top:' + t + 'px;height:' + (h + EXT) + 'px;width:100%;pointer-events:none;z-index:0;-webkit-mask-image:' + m + ';mask-image:' + m + ';';
+  var m = 'linear-gradient(to bottom,#000 0,#000 ' + (h - 1) + 'px,transparent ' + h + 'px)', base = 'position:absolute;left:0;right:0;top:' + t + 'px;height:' + (h + EXT) + 'px;width:100%;pointer-events:none;z-index:0;-webkit-mask-image:' + m + ';mask-image:' + m + ';';
   cv.style.cssText = base + 'transition:opacity .6s ease;opacity:' + (S.conv >= 12 ? 1 : 0) + ';' + (cv.style.filter ? 'filter:' + cv.style.filter + ';' : '');
   snapImg.style.cssText = base + 'object-fit:cover;transition:opacity .6s ease;opacity:' + (SNAP.shown && !SNAP.revealAt ? 1 : 0) + ';'; }
 function place(){ var host = S.host; if (!host) return; var t = host.offsetTop, h = host.offsetHeight; if (S.pt === t && S.ph === h) return; S.pt = t; S.ph = h;
