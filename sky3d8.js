@@ -460,6 +460,9 @@ var cv = document.createElement('canvas'), px = document.createElement('canvas')
 /* THE GLOW UNDER THE HERO (user 11-24: "i dont think we should be showing clouds down here, i want a natural gradient blur that reaches the artwork"):
    for the skies drawn inside the hero box, the box's mirror is replaced by the hero's bottom band of sky shrunk to 32 x 4 px and stretched
    below it -- the stretch is the blur -- fading out toward the hourly artwork. Its being in the sky bar switches the page's mirror off */
+/* THE HORIZON HAZE (11-24, user: the hard line at the hero's bottom): the clouds fade into the glow's flat colour over the hero's bottom
+   HZ px, so the hero runs into the strip with no edge. It sits right after the cloud canvas (under the hero's text) */
+var haze = document.createElement('div'); haze.className = 'hero-s3d-haze'; var HZ = 110;
 var glow = document.createElement('canvas'); glow.className = 'hero-s3d hero-s3d-glow'; glow.width = 32; glow.height = 4; var gctx = glow.getContext('2d', { willReadFrequently: true });
 /* 11-24 (user: "take the clouds out of the mirrored view, just match the sky color and rain type animation if there"): the glow is ONE flat
    sky colour for every sky (the bluest half of the hero's bottom band, so cloud pixels drop out); clouds stop at the hero's edge; the rain
@@ -697,14 +700,15 @@ function frame(now){
   var deck = sc.lay[0] && sc.lay[0][3] > 0.75, dim = (!S.lt.nt && deck) ? (sc.key === 'fog' ? 0.72 : 0.85) : 1, fl = dim < 1 ? 'brightness(' + dim + ')' : ''; if (cv.style.filter !== fl) cv.style.filter = fl;
   /* 1 + 6: reveal once the history has settled (12 frames); then keep a snapshot of this sky for the next visit */
   S.conv = (S.conv || 0) + 1;
-  if (S.conv === 12){ SNAP.revealAt = now; cv.style.opacity = '1'; glow.style.opacity = '1'; if (SNAP.shown){ snapImg.style.opacity = '0'; } var ee = document.getElementById('hero-snap-early'); if (ee){ ee.style.opacity = '0'; setTimeout(function(){ if (ee.parentNode) ee.parentNode.removeChild(ee); }, 700); } }   /* and the page's own early snapshot (index.html) */
+  if (S.conv === 12){ SNAP.revealAt = now; cv.style.opacity = '1'; glow.style.opacity = '1'; haze.style.opacity = '1'; if (SNAP.shown){ snapImg.style.opacity = '0'; } var ee = document.getElementById('hero-snap-early'); if (ee){ ee.style.opacity = '0'; setTimeout(function(){ if (ee.parentNode) ee.parentNode.removeChild(ee); }, 700); } }   /* and the page's own early snapshot (index.html) */
   if (S.conv === 40 || S.conv === 900) snapSave();
-  if (glow.parentNode && S.host){ var gt2 = (S.host.offsetTop + S.host.offsetHeight) + 'px'; if (glow.style.top !== gt2) glow.style.top = gt2; }
+  if (glow.parentNode && S.host){ var gt2 = (S.host.offsetTop + S.host.offsetHeight - 2) + 'px'; if (glow.style.top !== gt2){ glow.style.top = gt2; hazePlace(); } }
+  if (sc.inside && S.frame % 15 === 0) rectHide(true);   /* the hero re-renders its SVG */
   if (S.frame % 10 === 0 || S.conv === 13){ try { var bh = sc.inside ? CH : Math.min(CH, Math.round(cv.height * ((S.host && S.host.offsetHeight) || 1) / Math.max(1, cv.clientHeight || 1)));   /* the bottom band of the HERO part of the canvas */
     gctx.clearRect(0, 0, 32, 4); gctx.drawImage(cv, 0, Math.round(bh * 0.8), cv.width, Math.round(bh * 0.2), 0, 0, 32, 4); var d = gctx.getImageData(0, 0, 32, 4).data, pxs = [];
     for (var q = 0; q < d.length; q += 4) pxs.push([d[q], d[q + 1], d[q + 2]]); pxs.sort(function(u, v){ return (v[2] - v[0]) - (u[2] - u[0]); });   /* bluest first: sky, not cloud */
     var n = Math.max(1, pxs.length >> 1), r = 0, g = 0, bb = 0; for (q = 0; q < n; q++){ r += pxs[q][0]; g += pxs[q][1]; bb += pxs[q][2]; }
-    glow.style.backgroundColor = 'rgb(' + Math.round(r / n) + ',' + Math.round(g / n) + ',' + Math.round(bb / n) + ')'; gctx.clearRect(0, 0, 32, 4); } catch(e){} }
+    glow.style.backgroundColor = haze.style.backgroundColor = 'rgb(' + Math.round(r / n) + ',' + Math.round(g / n) + ',' + Math.round(bb / n) + ')'; gctx.clearRect(0, 0, 32, 4); } catch(e){} }
   fr++; if (now - f0 > 1000){ S.fps = fr; fr = 0; f0 = now; if (sc.cb) lxLive(true); }
 }
 
@@ -715,11 +719,18 @@ function attach(){ var host = S.host, sc = S.sc; if (!host || !sc) return;
   if (!sc.inside && par){ if (cv.parentNode !== par || cv.nextSibling !== host) par.insertBefore(cv, host); S.ct = null; placeC(); }
   else { cv.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:0;transition:opacity .6s ease;opacity:' + (S.conv >= 12 ? 1 : 0) + ';'; S.ct = null; if (cv.parentNode !== host || host.firstChild !== cv) host.insertBefore(cv, host.firstChild); }
   if (snapImg.parentNode !== cv.parentNode || snapImg.nextSibling !== cv) cv.parentNode.insertBefore(snapImg, cv);
-  if (par){ var gt = host.offsetTop + host.offsetHeight, m = 'linear-gradient(to bottom,#000 0,rgba(0,0,0,.55) 45%,transparent 100%)', gb = glow.style.backgroundColor;
+  if (haze.parentNode !== cv.parentNode || haze.previousSibling !== cv) cv.parentNode.insertBefore(haze, cv.nextSibling); hazePlace(); rectHide(!!sc.inside);
+  if (par){ var gt = host.offsetTop + host.offsetHeight - 2,   /* 2 px into the hero: its fractional bottom row showed the box's dark background */
+    m = 'linear-gradient(to bottom,#000 0,rgba(0,0,0,.55) 45%,transparent 100%)', gb = glow.style.backgroundColor;
     glow.style.cssText = 'position:absolute;left:0;top:' + gt + 'px;width:100%;height:' + EXT + 'px;pointer-events:none;z-index:0;opacity:' + (S.conv >= 12 ? 1 : 0) + ';transition:opacity .6s ease,background-color 2s linear;-webkit-mask-image:' + m + ';mask-image:' + m + ';' + (gb ? 'background-color:' + gb + ';' : '');
     if (glow.parentNode !== par || glow.previousSibling !== host) par.insertBefore(glow, host.nextSibling);
     if (px.parentNode !== par || px.previousSibling !== glow) par.insertBefore(px, glow.nextSibling); if (lxc.parentNode !== par || lxc.previousSibling !== px) par.insertBefore(lxc, px.nextSibling); S.pt = null; place(); }
 }
+/* the clear-sky hero SVG paints the OLD sky gradient (one full-size rect) over our canvas inside the box: a pale panel and a step at the
+   bottom edge. Hidden while v8 draws an inside sky, restored otherwise */
+function rectHide(on){ var sv = S.host && S.host.querySelector(':scope > svg'); if (sv) Array.prototype.forEach.call(sv.querySelectorAll(':scope > rect'), function(r){ if (on && /^url\(/.test(r.getAttribute('fill') || '')){ if (r.style.display !== 'none'){ r.style.display = 'none'; r.setAttribute('data-s3d-hid', '1'); } } else if (!on && r.hasAttribute('data-s3d-hid')){ r.style.display = ''; r.removeAttribute('data-s3d-hid'); } }); }
+function hazePlace(){ var host = S.host; if (!host) return; var h = host.offsetHeight, f = Math.min(HZ, Math.round(h * 0.3)), top = (haze.parentNode === host ? 0 : host.offsetTop) + h - f, bg = haze.style.backgroundColor, m = 'linear-gradient(to bottom,transparent 0,rgba(0,0,0,.5) 55%,#000 100%)';
+  haze.style.cssText = 'position:absolute;left:0;top:' + top + 'px;width:100%;height:' + f + 'px;pointer-events:none;z-index:0;opacity:' + (S.conv >= 12 ? 1 : 0) + ';transition:opacity .6s ease,background-color 2s linear;-webkit-mask-image:' + m + ';mask-image:' + m + ';' + (bg ? 'background-color:' + bg + ';' : ''); }
 function placeC(){ var host = S.host; if (!host) return; var t = host.offsetTop, h = host.offsetHeight;
   var inS = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:0;';
   if (S.sc && S.sc.inside){ snapImg.style.cssText = inS + 'object-fit:cover;transition:opacity .6s ease;opacity:' + (SNAP.shown && !SNAP.revealAt ? 1 : 0) + ';'; return; }
@@ -730,7 +741,7 @@ function placeC(){ var host = S.host; if (!host) return; var t = host.offsetTop,
 function place(){ var host = S.host; if (!host) return; var t = host.offsetTop, h = host.offsetHeight; if (S.pt === t && S.ph === h) return; S.pt = t; S.ph = h;
   var m = 'linear-gradient(to bottom,#000 0,#000 ' + h + 'px,transparent ' + (h + EXT) + 'px)', css = 'position:absolute;left:0;right:0;top:' + t + 'px;height:' + (h + EXT) + 'px;width:100%;pointer-events:none;z-index:0;-webkit-mask-image:' + m + ';mask-image:' + m + ';';
   px.style.cssText = css; lxc.style.cssText = css; if (LX && LXS){ LXS.W = px.clientWidth || LXS.W; LXS.H = px.clientHeight || LXS.H; LX.scene(LXS); } }
-function stop(){ if (glow.parentNode) glow.parentNode.removeChild(glow); S.sc = null; S.key = ''; [cv, px, lxc, snapImg].forEach(function(c){ if (c.parentNode) c.parentNode.removeChild(c); }); if (raf){ cancelAnimationFrame(raf); raf = 0; } lxLive(false); LX = null; LXS = null; }
+function stop(){ rectHide(false); if (glow.parentNode) glow.parentNode.removeChild(glow); if (haze.parentNode) haze.parentNode.removeChild(haze); S.sc = null; S.key = ''; [cv, px, lxc, snapImg].forEach(function(c){ if (c.parentNode) c.parentNode.removeChild(c); }); if (raf){ cancelAnimationFrame(raf); raf = 0; } lxLive(false); LX = null; LXS = null; }
 
 /* ---------------- the page's API ---------------- */
 function sync(host, o){
