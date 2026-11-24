@@ -653,7 +653,7 @@ var SNAP = { name: 'bv-hero-snap-v1', shown: false, saved: {}, revealAt: 0 };
 function snapKey(){ return '/__hero_snap/' + (S.sc ? S.sc.key.split('|')[0] : 'x') + '-' + (S.lt && S.lt.nt ? 'n' : 'd'); }
 function snapShow(){ if (!window.caches || SNAP.shown) return; var key = snapKey(); caches.open(SNAP.name).then(function(c){ return c.match(key); }).then(function(r){ return r && r.blob(); }).then(function(b){
     if (!b || !S.sc || SNAP.revealAt) return; snapImg.src = URL.createObjectURL(b); snapImg.style.opacity = '1'; SNAP.shown = true; }).catch(function(){}); }
-function snapSave(){ if (!window.caches || SNAP.saved[snapKey()]) return; var key = snapKey(); SNAP.saved[key] = 1;
+function snapSave(){ if (!window.caches) return; var key = snapKey(); SNAP.saved[key] = 1;
   try { cv.toBlob(function(b){ if (!b) return; caches.open(SNAP.name).then(function(c){ var h = { headers: { 'content-type': 'image/webp' } }; return Promise.all([c.put(key, new Response(b, h)), c.put('/__hero_snap/last', new Response(b, h))]); }).catch(function(){}); }, 'image/webp', 0.82); } catch(e){} }
 /* 1, SOONER: the hero only syncs once the weather is in (~2 s). The last sky seen is put into the hero box the moment the box exists, and
    handed over to the live sky (or its own weather's snapshot) when that arrives */
@@ -691,7 +691,7 @@ function frame(now){
   /* 1 + 6: reveal once the history has settled (12 frames); then keep a snapshot of this sky for the next visit */
   S.conv = (S.conv || 0) + 1;
   if (S.conv === 12){ SNAP.revealAt = now; cv.style.opacity = '1'; if (SNAP.shown){ snapImg.style.opacity = '0'; } var ee = document.getElementById('hero-snap-early'); if (ee){ ee.style.opacity = '0'; setTimeout(function(){ if (ee.parentNode) ee.parentNode.removeChild(ee); }, 700); } }   /* and the page's own early snapshot (index.html) */
-  if (S.conv === 120) snapSave();
+  if (S.conv === 40 || S.conv === 900) snapSave();   /* ~3-4 s in at the page's real frame rate (120 frames was 10-15 s: short visits never saved one); refreshed after ~a minute */
   fr++; if (now - f0 > 1000){ S.fps = fr; fr = 0; f0 = now; if (sc.cb) lxLive(true); }
 }
 
