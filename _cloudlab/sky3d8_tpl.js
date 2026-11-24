@@ -206,7 +206,7 @@ function calibrate(CW, CH, sc, LT){ var q0 = 0.2, w = Math.max(48, Math.round(CW
   gl.bindFramebuffer(gl.FRAMEBUFFER, RT.L.fb); drawLay(sc, w, h, LT); sync();   /* a warm-up draw first: the first draw pays the driver's one-time setup (timed, it read 136 ms) */
   var t0 = performance.now(); for (var i = 0; i < 2; i++){ gl.bindFramebuffer(gl.FRAMEBUFFER, RT.L.fb); drawLay(sc, w, h, LT); } sync();
   var ms = (performance.now() - t0) / 2, qmax = PHONE ? 0.32 : 0.5; RT.q = Math.max(PHONE ? 0.12 : 0.15, Math.min(qmax, q0 * Math.sqrt(15 / Math.max(ms, 4)))); RT.ms = ms; RT.cal = 0; RT.fill = 4; }
-function adapt(){ if (RT.iv > 40) RT.slow++; else RT.slow = Math.max(0, RT.slow - 1); RT.good = RT.iv < 34.5 ? RT.good + 1 : 0; var qmax = PHONE ? 0.32 : 0.5;
+function adapt(){ var cd = RT.cad || 33.333; if (RT.iv > cd * 1.2) RT.slow++; else RT.slow = Math.max(0, RT.slow - 1); RT.good = RT.iv < cd * 1.035 ? RT.good + 1 : 0;   /* judged against the cadence in force */ var qmax = PHONE ? 0.32 : 0.5;
   if (RT.slow > 60 && RT.q > 0.12){ RT.q = Math.max(0.12, RT.q * 0.92); RT.slow = 0; RT.good = 0; } else if (RT.good > 150 && RT.q < qmax){ RT.q = Math.min(qmax, RT.q * 1.05); RT.good = 0; } }
 
 /* ---------------- one frame of the clouds (the lab's drawLay) ---------------- */
@@ -256,6 +256,28 @@ var S = { sc: null, host: null, t: 40, frame: 0, sunAlt: 35, night: 0, pal: null
 try { new IntersectionObserver(function(es){ S.seen = es[es.length - 1].isIntersecting; if (S.seen) kick(); }).observe(cv); } catch(e){}   /* the cloud canvas: the rain canvas is display:none in dry skies, which read as scrolled away and stalled the loop */
 document.addEventListener('visibilitychange', function(){ if (!document.hidden) kick(); });
 function kick(){ if (!raf && S.sc) raf = requestAnimationFrame(frame); }
+/* PERF 3 (11-24): the colour under the hero is read back ASYNC: a small readPixels of the hero's bottom band from the history target
+   into a pixel-pack buffer, fenced; collected a frame or more later when the GPU says it is done. It used to drawImage() the whole
+   WebGL canvas into a 2D canvas every 10 frames, which made the CPU wait for the GPU each time */
+var GLOW = { pbo: null, fence: null, size: 0, w: 0, h: 0, f: false, at: 0, done: 0 };
+function glowRequest(){ if (GLOW.fence || !RT.H || !S.sc) return; try {
+  var W = RT.H.w, H = RT.H.h, sc = S.sc, hf = sc.inside ? 1 : Math.min(1, ((S.host && S.host.offsetHeight) || 1) / Math.max(1, cv.clientHeight || 1));
+  var y0 = Math.max(0, Math.floor(H * (1 - hf))), bh = Math.max(2, Math.round(H * hf * 0.2)), f = RT.f16, bpp = f ? 16 : 4, size = W * bh * bpp;
+  if (!GLOW.pbo) GLOW.pbo = gl.createBuffer(); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, GLOW.pbo); if (GLOW.size !== size){ gl.bufferData(gl.PIXEL_PACK_BUFFER, size, gl.STREAM_READ); GLOW.size = size; }
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, RT.H.fb); gl.readPixels(0, y0, W, bh, gl.RGBA, f ? gl.FLOAT : gl.UNSIGNED_BYTE, 0); gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null); GLOW.fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); gl.flush(); GLOW.w = W; GLOW.h = bh; GLOW.f = f; GLOW.at = performance.now();
+} catch(e){ GLOW.fence = null; } }
+function glowPoll(){ if (!GLOW.fence) return; try {
+  var st = gl.clientWaitSync(GLOW.fence, 0, 0); if (st === gl.TIMEOUT_EXPIRED) return; gl.deleteSync(GLOW.fence); GLOW.fence = null; if (st === gl.WAIT_FAILED) return;
+  var n = GLOW.w * GLOW.h * 4, a = GLOW.f ? new Float32Array(n) : new Uint8Array(n), k = GLOW.f ? 255 : 1; gl.bindBuffer(gl.PIXEL_PACK_BUFFER, GLOW.pbo); gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, a); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+  var pxs = [], step = Math.max(1, Math.floor((GLOW.w * GLOW.h) / 160)); for (var i = 0; i < GLOW.w * GLOW.h; i += step){ var q = i * 4; pxs.push([a[q] * k, a[q + 1] * k, a[q + 2] * k]); }
+  pxs.sort(function(u, v){ return (v[2] - v[0]) - (u[2] - u[0]); });   /* bluest half: sky, not cloud */
+  var m = Math.max(1, pxs.length >> 1), r = 0, g = 0, b = 0; for (i = 0; i < m; i++){ r += pxs[i][0]; g += pxs[i][1]; b += pxs[i][2]; }
+  var dim = parseFloat((/brightness\(([\d.]+)\)/.exec(cv.style.filter || '') || [0, 1])[1]);   /* the canvas's legibility dimming applies to what shows */
+  glow.style.backgroundColor = haze.style.backgroundColor = 'rgb(' + Math.round(Math.min(255, r / m * dim)) + ',' + Math.round(Math.min(255, g / m * dim)) + ',' + Math.round(Math.min(255, b / m * dim)) + ')'; GLOW.done++;
+} catch(e){ GLOW.fence = null; } }
+function glowTop(){ if (glow.parentNode && S.host){ var gt2 = (S.host.offsetTop + S.host.offsetHeight - 2) + 'px'; if (glow.style.top !== gt2){ glow.style.top = gt2; hazePlace(); } } }
+
 function frame(now){
   raf = 0; if (!S.sc) return;
   if (!cv.isConnected || (!S.sc.inside && cv.nextSibling !== S.host) || !px.isConnected){ var h2 = (S.host && S.host.isConnected) ? S.host : document.getElementById('hero-wx'); if (!h2) return; S.host = h2; attach(); }
@@ -266,8 +288,20 @@ function frame(now){
   if (!REDUCED){ S.t += dtk / 1000; windTick(dtk / 1000); }
   var sc = S.sc;
   if (sc.cb && LX){ LX.frame(now); }
-  precip();
-  if (S.nf && now < S.nf - 4) return; S.nf = (S.nf && now - S.nf < 60) ? S.nf + 33.333 : now + 33.333;   /* the clouds on an even 30 Hz cadence */
+  precip(); glowPoll();
+  /* PERF 1 (11-24): CLEAR NIGHTS -- the photo night sky covers the hero, so the clouds under it are never seen; they only give the colour
+     under the hero. Once that colour is in, the engine holds (2 checks a second, no drawing) and redraws for a fresh colour each minute */
+  if (sc.hold){
+    if (S.holdF == null) S.holdF = S.frame + 16;   /* let the new sky settle, then take ONE fresh colour read of it, then hold */
+    if (S.frame === S.holdF){ S.holdDone = GLOW.done; GLOW.at = 0; }
+    if (S.frame > S.holdF && GLOW.done > S.holdDone){
+      if (!S.holdAt) S.holdAt = now;
+      if (now - S.holdAt < 60000){ glowTop(); cancelAnimationFrame(raf); raf = 0; clearTimeout(S.holdT); S.holdT = setTimeout(kick, 500); S.tick = 0; S.fps = 0; fr = 0; return; }
+      S.holdAt = 0; S.holdF = S.frame + 3; } }   /* a minute on: three frames, a fresh read, hold again */
+  /* PERF 2 (11-24): calm, dry skies redraw at 15 Hz instead of 30 (rain, snow, lightning and fast winds stay at 30) */
+  var wf = Math.hypot(WND.v[1][0], WND.v[1][1]);   /* the 850 hPa wind (~1.5 km): what the low clouds visibly move with; the high winds move far-off cloud slowly on screen */
+  RT.cad = (sc.wx || sc.cb || wf > 15) ? 33.333 : 66.667;
+  if (S.nf && now < S.nf - 4) return; S.nf = (S.nf && now - S.nf < RT.cad * 1.8) ? S.nf + RT.cad : now + RT.cad;   /* the clouds on an even cadence (30 Hz, or 15 Hz when calm) */
   if (RT.last) RT.iv = RT.iv * 0.8 + (now - RT.last) * 0.2; RT.last = now;
   placeC(); var CW = Math.max(64, Math.round((cv.clientWidth || 1) * DPR)), CH = Math.max(24, Math.round((cv.clientHeight || 1) * DPR)); if (cv.width !== CW || cv.height !== CH){ cv.width = CW; cv.height = CH; }
   S.lt = light(); S.frame++;
@@ -281,13 +315,9 @@ function frame(now){
   S.conv = (S.conv || 0) + 1;
   if (S.conv === 12){ S.shown = true; SNAP.revealAt = now; cv.style.opacity = '1'; glow.style.opacity = '1'; haze.style.opacity = '1'; if (SNAP.shown){ snapImg.style.opacity = '0'; } var ee = document.getElementById('hero-snap-early'); if (ee){ ee.style.opacity = '0'; setTimeout(function(){ if (ee.parentNode) ee.parentNode.removeChild(ee); }, 700); } }   /* and the page's own early snapshot (index.html) */
   if (S.conv === 40 || S.conv === 900) snapSave();
-  if (glow.parentNode && S.host){ var gt2 = (S.host.offsetTop + S.host.offsetHeight - 2) + 'px'; if (glow.style.top !== gt2){ glow.style.top = gt2; hazePlace(); } }
+  glowTop();
   if (sc.inside && S.frame % 15 === 0) rectHide(true);   /* the hero re-renders its SVG */
-  if (S.frame % 10 === 0 || S.conv === 13){ try { var bh = sc.inside ? CH : Math.min(CH, Math.round(cv.height * ((S.host && S.host.offsetHeight) || 1) / Math.max(1, cv.clientHeight || 1)));   /* the bottom band of the HERO part of the canvas */
-    gctx.clearRect(0, 0, 32, 4); gctx.drawImage(cv, 0, Math.round(bh * 0.8), cv.width, Math.round(bh * 0.2), 0, 0, 32, 4); var d = gctx.getImageData(0, 0, 32, 4).data, pxs = [];
-    for (var q = 0; q < d.length; q += 4) pxs.push([d[q], d[q + 1], d[q + 2]]); pxs.sort(function(u, v){ return (v[2] - v[0]) - (u[2] - u[0]); });   /* bluest first: sky, not cloud */
-    var n = Math.max(1, pxs.length >> 1), r = 0, g = 0, bb = 0; for (q = 0; q < n; q++){ r += pxs[q][0]; g += pxs[q][1]; bb += pxs[q][2]; }
-    glow.style.backgroundColor = haze.style.backgroundColor = 'rgb(' + Math.round(r / n) + ',' + Math.round(g / n) + ',' + Math.round(bb / n) + ')'; gctx.clearRect(0, 0, 32, 4); } catch(e){} }
+  if (S.conv === 13 || now - GLOW.at > 1000) glowRequest();   /* once a second, async (PERF 3) */
   fr++; if (now - f0 > 1000){ S.fps = fr; fr = 0; f0 = now; if (sc.cb) lxLive(true); }
 }
 
@@ -320,16 +350,19 @@ function placeC(){ var host = S.host; if (!host) return; var t = host.offsetTop,
 function place(){ var host = S.host; if (!host) return; var t = host.offsetTop, h = host.offsetHeight; if (S.pt === t && S.ph === h) return; S.pt = t; S.ph = h;
   var m = 'linear-gradient(to bottom,#000 0,#000 ' + h + 'px,transparent ' + (h + EXT) + 'px)', css = 'position:absolute;left:0;right:0;top:' + t + 'px;height:' + (h + EXT) + 'px;width:100%;pointer-events:none;z-index:0;-webkit-mask-image:' + m + ';mask-image:' + m + ';';
   px.style.cssText = css; lxc.style.cssText = css; if (LX && LXS){ LXS.W = px.clientWidth || LXS.W; LXS.H = px.clientHeight || LXS.H; LX.scene(LXS); } }
-function stop(){ S.shown = false; rectHide(false); if (glow.parentNode) glow.parentNode.removeChild(glow); if (haze.parentNode) haze.parentNode.removeChild(haze); S.sc = null; S.key = ''; [cv, px, lxc, snapImg].forEach(function(c){ if (c.parentNode) c.parentNode.removeChild(c); }); if (raf){ cancelAnimationFrame(raf); raf = 0; } lxLive(false); LX = null; LXS = null; }
+function stop(){ clearTimeout(S.holdT); S.holdAt = 0; S.shown = false; rectHide(false); if (glow.parentNode) glow.parentNode.removeChild(glow); if (haze.parentNode) haze.parentNode.removeChild(haze); S.sc = null; S.key = ''; [cv, px, lxc, snapImg].forEach(function(c){ if (c.parentNode) c.parentNode.removeChild(c); }); if (raf){ cancelAnimationFrame(raf); raf = 0; } lxLive(false); LX = null; LXS = null; }
 
 /* ---------------- the page's API ---------------- */
 function sync(host, o){
   if (!host || !o || !start()){ stop(); return false; }
   var sc = scene(o); if (!sc){ stop(); return false; }
+  sc.hold = o.state === 'clear-night';   /* PERF 1 */
   sc.inside = /^(clear-day|clear-night|mainly|partly)$/.test(o.state === 'clear-day' && o.code === 1 ? 'mainly' : o.state);
   var key = sc.key + '|' + (o.night ? 1 : 0);
+  var _newSky = S.key !== key;
   if (S.key !== key && S.shown && S.sc && !!S.sc.inside === !!sc.inside){ S.key = key; JET.J = null; }   /* ONE CLEAN LAUNCH (user 11-24: the fade bar "bounces around a lot" on launch): once the sky has appeared it never fades out again -- a new scene (the cloud reading arriving, the weather changing) morphs in through the frame history instead of a fade to empty and back */
   else if (S.key !== key){ S.key = key; RT.cal = 1; RT.fill = 4; S.conv = 0; if (!(SNAP.shown && !S.sc)) SNAP.shown = false; SNAP.revealAt = 0; cv.style.opacity = '0'; JET.J = null; }   /* an early snapshot stays up through the first sync */
+  if (_newSky || !S.sc || !S.sc.hold){ S.holdF = null; S.holdAt = 0; }   /* a new sky (or a new hold): settle and read again before holding */
   S.sc = sc; S.host = host; S.sunAlt = +o.sunAlt; S.eve = !!o.eve; S.night = o.night ? 1 : 0; S.pal = o.pal || null; S.lt = light();
   windFetch(); starLoad(); attach(); if (!READY || S.conv < 12) snapShow(); lxSync(sc);
   kick(); return true; }
@@ -338,10 +371,13 @@ function sync(host, o){
    view that wants one). o: { w, h (px), hzF (the horizon's height as a fraction of h, from the bottom), sa (sun altitude, deg),
    types, az (sun azimuth, deg: 270 = straight ahead) }. Six jittered frames, one per animation frame (no stall), averaged on
    the CPU; the hero's own targets and history are not touched. cb(canvas) on success, cb(null) if it cannot draw. */
-var STILLQ = [], STILLBUSY = false;
+var STILLQ = [], STILLBUSY = false, CPY = null;   /* PERF 4: frames are averaged on the GPU (a blended copy into a float target), read once */
+function cpyProg(){ if (CPY) return CPY; var o = program(gl, '#version 300 es\nprecision highp float; in vec2 vUV; out vec4 o; uniform sampler2D uT; void main(){ o = vec4(texture(uT, vUV).rgb, 1.0); }'); CPY = linked(o); return CPY; }
 function still(o, cb){ if (!READY || !gl){ cb(null); return false; } STILLQ.push([o, cb]); if (!STILLBUSY) stillNext(); return true; }
 function stillNext(){ var it = STILLQ.shift(); if (!it){ STILLBUSY = false; return; } STILLBUSY = true; var o = it[0], cb = it[1];
-  var w = Math.max(32, Math.round(o.w)), h = Math.max(32, Math.round(o.h)), N = 10, acc = new Float32Array(w * h * 3), px8 = new Uint8Array(w * h * 4), k = 0;
+  var w = Math.max(32, Math.round(o.w)), h = Math.max(32, Math.round(o.h)), N = 10, acc = new Float32Array(w * h * 3), px8 = new Uint8Array(w * h * 4), k = 0, F = RT.f16;
+  var at = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, at); gl.texImage2D(gl.TEXTURE_2D, 0, F ? gl.RGBA16F : gl.RGBA8, w, h, 0, gl.RGBA, F ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE, null); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  var afb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, afb); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, at, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   var L = layersFromTypes(o.types || []), sc = { lay: L, wx: 0, cb: 0, tilt: 0 };
   var asp = w / h, tH = 0.7, tV = tH / asp, f = Math.max(0.02, Math.min(0.9, o.hzF == null ? 0.27 : o.hzF));
   sc.tilt = -Math.atan(tV) - Math.atan((f - 0.5) * 2 * tV);   /* the bottom ray's elevation that puts the horizon at row f */
@@ -350,7 +386,11 @@ function stillNext(){ var it = STILLQ.shift(); if (!it){ STILLBUSY = false; retu
   var tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
   var fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  function fin(ok){ try { gl.deleteFramebuffer(fb); gl.deleteTexture(tex); } catch(e){}
+  function fin(ok){
+    if (ok){ try { var rb = F ? new Float32Array(w * h * 4) : new Uint8Array(w * h * 4), sk = F ? 255 * N : N; gl.bindFramebuffer(gl.FRAMEBUFFER, afb); gl.readPixels(0, 0, w, h, gl.RGBA, F ? gl.FLOAT : gl.UNSIGNED_BYTE, rb); gl.bindFramebuffer(gl.FRAMEBUFFER, null);   /* the ONE read (a float target reads back as FLOAT: an 8-bit read of it is refused and came back black) */
+      if (gl.getError() !== gl.NO_ERROR) throw new Error('still read');
+      for (var i = 0, j = 0; i < rb.length; i += 4, j += 3){ acc[j] = Math.min(255, rb[i] * (F ? 255 : 1)) * N; acc[j + 1] = Math.min(255, rb[i + 1] * (F ? 255 : 1)) * N; acc[j + 2] = Math.min(255, rb[i + 2] * (F ? 255 : 1)) * N; } } catch(e){ ok = false; } }   /* acc keeps its old meaning (sum of N frames) for the code below */
+    try { gl.deleteFramebuffer(fb); gl.deleteTexture(tex); gl.deleteFramebuffer(afb); gl.deleteTexture(at); } catch(e){}
     var out = null; if (ok){ out = document.createElement('canvas'); out.width = w; out.height = h; var c2 = out.getContext('2d'), im = c2.createImageData(w, h), d = im.data;
       var rowL = function(yt){ var gl0 = h - 1 - yt, sm = 0, n = 0; for (var xx = 0; xx < w; xx += Math.max(1, w >> 4)){ var q = (gl0 * w + xx) * 3; sm += acc[q] + acc[q + 1] + acc[q + 2]; n++; } return sm / n; };
       var geo = Math.round(h * (1 - f)), hzRow = Math.max(1, geo - 2);   /* the ground's top edge: the sharp step down from sky to ground near the geometric horizon (it sits a little above it) */
@@ -362,15 +402,16 @@ function stillNext(){ var it = STILLQ.shift(); if (!it){ STILLBUSY = false; retu
     try { cb(out); } catch(e){} setTimeout(stillNext, 0); }
   function step(){ try {
       var pal = S.pal, fr = S.frame, jit = JIT; S.pal = null; S.frame = 7 * k + 3; JIT = [((k * 0.618034) % 1) - 0.5, ((k * 0.754878 + 0.31) % 1) - 0.5];   /* a low-discrepancy spread of sub-pixel offsets */
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fb); drawLay(sc, w, h, LT); gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px8); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb); drawLay(sc, w, h, LT);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, afb); gl.viewport(0, 0, w, h); gl.useProgram(cpyProg()); gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(gl.getUniformLocation(CPY, 'uT'), 6);
+      gl.enable(gl.BLEND); gl.blendColor(0, 0, 0, 1 / (k + 1)); gl.blendFunc(gl.CONSTANT_ALPHA, gl.ONE_MINUS_CONSTANT_ALPHA); gl.drawArrays(gl.TRIANGLES, 0, 3); gl.disable(gl.BLEND); gl.activeTexture(gl.TEXTURE0); gl.bindFramebuffer(gl.FRAMEBUFFER, null);   /* running mean */
       S.pal = pal; S.frame = fr; JIT = jit;
-      for (var i = 0, j = 0; i < px8.length; i += 4, j += 3){ acc[j] += px8[i]; acc[j + 1] += px8[i + 1]; acc[j + 2] += px8[i + 2]; }
       if (++k < N) requestAnimationFrame(step); else fin(true);
     } catch(e){ fin(false); } }
   requestAnimationFrame(step); }
 
 window.bvSky3D8 = { ok: function(){ return start(); }, ready: function(){ return READY; }, sync: sync, stop: stop, still: still,
   early: snapEarly,
-  stats: function(){ return { fps: S.fps, w: cv.width, h: cv.height, shaded: RT.L ? RT.L.w + 'x' + RT.L.h : '', q: RT.q, ms: RT.ms, scene: S.key, ready: READY, snap: SNAP.shown, lightning: LX ? LX.stats() : null }; } };
+  stats: function(){ return { hold: !!(S.sc && S.sc.hold), cad: RT.cad, glowDone: GLOW.done, wind: WND.v.map(function(v){ return Math.round(Math.hypot(v[0], v[1])); }), fps: S.fps, w: cv.width, h: cv.height, shaded: RT.L ? RT.L.w + 'x' + RT.L.h : '', q: RT.q, ms: RT.ms, scene: S.key, ready: READY, snap: SNAP.shown, lightning: LX ? LX.stats() : null }; } };
 /* nothing starts until the page switches v8 on (below): visitors on v7 pay only the download */
 })();
