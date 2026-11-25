@@ -114,7 +114,7 @@ export default {
        Only these two satellites, their full disks and Himawari's Japan sector, zoom 00-01. */
     /* + GOES-19, GOES-18, GK2A full disks (2026-10-25, the baked world map: _goesvid/worldbake.py stitches all five) */
     const sj = url.pathname.match(/^\/slider\/json\/(himawari|meteosat-12|goes-19|goes-18|gk2a)\/(full_disk|japan)\/([a-z0-9_.-]{2,64})\/latest_times\.json$/);
-    const si = url.pathname.match(/^\/slider\/imagery\/(\d{4})\/(\d{2})\/(\d{2})\/(himawari|meteosat-12|goes-19|goes-18|gk2a)---(full_disk|japan)\/([a-z0-9_.-]{2,64})\/(\d{14})\/(0[01])\/(\d{3}_\d{3})\.png$/);
+    const si = url.pathname.match(/^\/slider\/imagery\/(\d{4})\/(\d{2})\/(\d{2})\/(himawari|meteosat-12|goes-19|goes-18|gk2a)---(full_disk|japan)\/([a-z0-9_.-]{2,64})\/(\d{14})\/(0[0-3])\/(\d{3}_\d{3})\.png$/);   /* zoom 02-03 since 2026-11-25: the close-up around a place outside the Americas */
     if (sj || si){
       const listing = !!sj, cache = caches.default, key = new Request(url.origin + url.pathname + (listing ? '?m=' + Math.floor(Date.now() / 60000) : ''), { method: 'GET' });
       let hit = await cache.match(key), tag = 'HIT';
