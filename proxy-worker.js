@@ -35,6 +35,12 @@ const CACHE_RULES = {
   'aviationweather.gov': 300,
   // AIRPLANES on RADAR (2026-11-25): adsb.fi open-data ADS-B, no CORS; 10 s so every viewer of a snapped box shares one read (their limit is ~1 req/s)
   'opendata.adsb.fi': 10,
+  // SECURITY WAIT TIMES (2026-11-25): airports' own public wait widgets, no CORS; a minute so one read serves everyone
+  'www.portseattle.org': 60,
+  'www.phl.org': 60,
+  'www.flypdx.com': 60,
+  'www.flysfo.com': 120,
+  'www.mspairport.com': 120,
   // ── 1-minute space-weather feeds ──
   'services.swpc.noaa.gov':       60,
   // ── live imagery loops / model graphics (a few minutes) ──
