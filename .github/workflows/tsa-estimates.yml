@@ -1,0 +1,57 @@
+name: Bake TSA security estimates
+
+# SECURITY WAIT TIMES (user 2026-11-25: "yes make it weekly"): the weather map's search shows an ESTIMATE range for any US airport
+# without a live feed, from TSA's weekly FOIA throughput PDFs (people screened per checkpoint per hour). _tsabake/fetch.py keeps the
+# newest 8 weeks, parse.py reads only the new one (the parsed weeks ride in the actions cache), bake.py writes tsa/estimates_v1.json.
+# TSA posts a week some days after it ends, so this runs twice a week; an unchanged set of weeks re-uploads the same file.
+
+on:
+  schedule:
+    - cron: '41 13 * * 2,5'
+  workflow_dispatch: {}
+
+concurrency:
+  group: tsa-estimates
+  cancel-in-progress: false
+
+jobs:
+  bake:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: _tsabake
+          sparse-checkout-cone-mode: false
+      - uses: actions/cache@v4
+        with:
+          path: |
+            _tsabake/pdf
+            _tsabake/out
+          key: tsa-weeks-${{ github.run_id }}
+          restore-keys: tsa-weeks-
+      - name: Fetch, parse, bake, upload
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          pip install --quiet pypdf timezonefinder
+          mkdir -p _tsabake/ref
+          curl -sfL -o _tsabake/ref/airports.csv https://davidmegginson.github.io/ourairports-data/airports.csv
+          python3 _tsabake/fetch.py
+          python3 _tsabake/parse.py _tsabake/pdf/*.pdf
+          python3 _tsabake/bake.py
+          python3 - <<'PY'
+          import json
+          j = json.load(open('_tsabake/out/estimates_v1.json'))
+          assert j['weeks'] == 8, j['weeks']
+          assert len(j['ap']) >= 300, len(j['ap'])
+          for c in ('LGA', 'JFK', 'EWR', 'ATL', 'ORD'): assert c in j['ap'], c
+          print('weeks', j['from'], 'to', j['to'], len(j['ap']), 'airports')
+          PY
+          E="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 cp _tsabake/out/estimates_v1.json s3://bluishvoid-bg/tsa/estimates_v1.json --endpoint-url "$E" --content-type application/json --cache-control "public, max-age=21600" --only-show-errors
+          echo "Published tsa/estimates_v1.json"

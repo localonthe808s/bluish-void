@@ -98,5 +98,8 @@ def week(path):
 
 
 if __name__ == '__main__':
+    todo = [p for p in sys.argv[1:] if not os.path.exists(os.path.join(OUT, 'rows_' + os.path.basename(p).replace('.pdf', '') + '.json'))]   # weeks already parsed are kept
+    if not todo: print('every week already parsed'); sys.exit(0)
+    sys.argv = sys.argv[:1] + todo
     with Pool(min(8, len(sys.argv) - 1)) as P:
         for name, n, hrs, left in P.imap_unordered(week, sys.argv[1:]): print(name, n, 'rows', hrs, 'hours', left, 'unassigned', flush=True)
