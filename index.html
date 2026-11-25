@@ -15440,6 +15440,7 @@ html body :is(#bv-tier, .bv-tier-row) :is(.geo-tab, .ot-tab, .solar-tab, .bvt-ta
                 <div id="live-view-row" style="position:absolute;top:52px;left:10px;right:10px;z-index:30;display:flex;flex-wrap:wrap;gap:5px;pointer-events:auto;">
                   <div id="live-primary-row" style="flex:1 1 100%;display:flex;flex-wrap:wrap;justify-content:center;gap:5px;">
                   <button id="lv-sat" onclick="window._setLiveView&&_setLiveView('sat');event.stopPropagation();" style="padding:5px 16px;border-radius:8px;border:none;backdrop-filter:blur(12px);font-size:.58rem;font-weight:700;letter-spacing:.5px;cursor:pointer;font-family:system-ui,sans-serif;text-transform:uppercase;white-space:nowrap;background:#fff;color:#9a3412;display:inline-flex;align-items:center;gap:7px;">SATELLITE<span id="lv-sat-detail" style="font-weight:600;opacity:.72;"></span></button>
+                  <button id="lv-ground" onclick="window._bvGround&&_bvGround();event.stopPropagation();" style="padding:5px 14px;border-radius:8px;border:none;backdrop-filter:blur(12px);font-size:.58rem;font-weight:700;letter-spacing:.5px;cursor:pointer;font-family:system-ui,sans-serif;text-transform:uppercase;white-space:nowrap;background:rgb(0,122,255);color:#fff;">GROUND</button>
                   <button id="lv-city" onclick="window._setLiveView&&_setLiveView('city');event.stopPropagation();" style="display:none;padding:5px 14px;border-radius:8px;border:none;backdrop-filter:blur(12px);font-size:.58rem;font-weight:700;letter-spacing:.5px;cursor:pointer;font-family:system-ui,sans-serif;text-transform:uppercase;white-space:nowrap;background:rgb(0,122,255);color:#fff;">THE CITY</button>
                   
                   <!-- AK · HI · PR retired 2026-10-24 (user: "remove AK HI PR"): zooming out reaches Alaska and Hawaii (EAST + WEST) -->
@@ -58141,6 +58142,104 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
     var d = document.getElementById('lv-local-detail'); if (d) d.textContent = ' | ' + window._goesSecName(near);
   };
   window._paintContinental = window._paintSatButtons;
+  /* GROUND (user 2026-11-25: "add sentinel-2 close-ups for location", "do 1, satellite view should offer the best satellite source
+     for a places location", 18 km wide). The newest clear Sentinel-2 picture of the place, 10 m to the pixel, over the live loop.
+     The scene: Element 84's Earth Search catalog of the public Sentinel-2 archive on AWS (STAC, open CORS), newest first with under
+     15% cloud in the last 90 days. The pixels: its true-color COG (TCI.tif, open CORS, byte ranges), read with geotiff.js for only
+     the box round the place, at the overview that fits (about 1-2 MB). The scene's UTM grid comes from its proj:epsg. A scene whose
+     box falls off its tile edge (more than 6% empty) gives way to the next. -/+ step 7.5 / 18 / 40 km; SATELLITE goes back to the loop.
+     Credit: Copernicus Sentinel data (ESA), in SOURCES. */
+  (function(){
+    var G = { on: false, w: 18, key: '', busy: false, items: null, itemsFor: '' }, WIDTHS = [7.5, 18, 40];
+    var MON = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+    var utm = function(lat, lon, zone, south){   /* WGS84 -> UTM (Snyder) */
+      var a = 6378137, f = 1 / 298.257223563, e2 = f * (2 - f), ep2 = e2 / (1 - e2), k0 = 0.9996, r = Math.PI / 180;
+      var la = lat * r, lo = lon * r, l0 = ((zone - 1) * 6 - 180 + 3) * r, N = a / Math.sqrt(1 - e2 * Math.sin(la) * Math.sin(la)), T = Math.tan(la) * Math.tan(la),
+        C = ep2 * Math.cos(la) * Math.cos(la), A = Math.cos(la) * (lo - l0);
+      var M = a * ((1 - e2 / 4 - 3 * e2 * e2 / 64 - 5 * e2 * e2 * e2 / 256) * la - (3 * e2 / 8 + 3 * e2 * e2 / 32 + 45 * e2 * e2 * e2 / 1024) * Math.sin(2 * la)
+        + (15 * e2 * e2 / 256 + 45 * e2 * e2 * e2 / 1024) * Math.sin(4 * la) - (35 * e2 * e2 * e2 / 3072) * Math.sin(6 * la));
+      var x = k0 * N * (A + (1 - T + C) * A * A * A / 6 + (5 - 18 * T + T * T + 72 * C - 58 * ep2) * Math.pow(A, 5) / 120) + 500000;
+      var y = k0 * (M + N * Math.tan(la) * (A * A / 2 + (5 - T + 9 * C + 4 * C * C) * Math.pow(A, 4) / 24 + (61 - 58 * T + T * T + 600 * C - 330 * ep2) * Math.pow(A, 6) / 720));
+      return [x, south ? y + 10000000 : y]; };
+    var lib = null, loadLib = function(){ if (lib) return lib; lib = new Promise(function(ok, no){ if (window.GeoTIFF) return ok(window.GeoTIFF);
+      var sc = document.createElement('script'); sc.src = 'https://cdn.jsdelivr.net/npm/geotiff@2.1.3/dist-browser/geotiff.js'; sc.async = true;
+      sc.onload = function(){ window.GeoTIFF ? ok(window.GeoTIFF) : no(); }; sc.onerror = function(){ lib = null; no(); }; document.head.appendChild(sc); }); return lib; };
+    var box = null, cv = null, chip = null, msg = null, cred = null;
+    var ui = function(){
+      if (box) return box; var gc = document.getElementById('goes-canvas'); if (!gc || !gc.parentNode) return null;
+      box = document.createElement('div'); box.id = 'lv-ground-view';
+      box.style.cssText = 'display:none;position:absolute;inset:0;z-index:25;background:#05070f;overflow:hidden;';
+      cv = document.createElement('canvas'); cv.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;';
+      chip = document.createElement('div'); chip.style.cssText = 'position:absolute;left:10px;bottom:10px;z-index:2;padding:4px 10px;border-radius:7px;background:rgba(255,255,255,.94);color:#9a3412;font:800 .5rem system-ui,sans-serif;letter-spacing:.08em;white-space:nowrap;pointer-events:none;';
+      msg = document.createElement('div'); msg.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font:800 .6rem system-ui,sans-serif;letter-spacing:.12em;';
+      var zb = document.createElement('div'); zb.style.cssText = 'position:absolute;right:10px;bottom:10px;z-index:2;display:flex;gap:5px;';
+      [['−', 1], ['+', -1]].forEach(function(q){ var b = document.createElement('button'); b.type = 'button'; b.textContent = q[0];
+        b.style.cssText = 'width:30px;height:30px;border:none;border-radius:8px;background:rgba(255,255,255,.94);color:#9a3412;font:900 .9rem system-ui,sans-serif;cursor:pointer;';
+        b.addEventListener('click', function(e){ e.stopPropagation(); var i = WIDTHS.indexOf(G.w) + q[1]; if (i < 0 || i >= WIDTHS.length) return; G.w = WIDTHS[i]; draw(); }); zb.appendChild(b); });
+      cred = document.createElement('span'); cred.className = 'obs-credit'; cred.style.display = 'none';
+      box.appendChild(cv); box.appendChild(msg); box.appendChild(chip); box.appendChild(zb); box.appendChild(cred);
+      gc.parentNode.appendChild(box); return box; };
+    var paint = function(){ var b = document.getElementById('lv-ground'), s0 = document.getElementById('lv-sat');
+      if (b){ b.style.background = G.on ? '#fff' : 'rgb(0,122,255)'; b.style.color = G.on ? '#9a3412' : '#fff'; }
+      if (s0 && G.on){ s0.style.background = 'rgb(0,122,255)'; s0.style.color = '#fff'; } else if (s0){ s0.style.background = '#fff'; s0.style.color = '#9a3412'; } };
+    var search = function(la, lo){
+      var k = la.toFixed(3) + ',' + lo.toFixed(3); if (G.items && G.itemsFor === k) return Promise.resolve(G.items);
+      var since = new Date(Date.now() - 90 * 864e5).toISOString();
+      return fetch('https://earth-search.aws.element84.com/v1/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+        collections: ['sentinel-2-l2a'], intersects: { type: 'Point', coordinates: [lo, la] }, datetime: since + '/..', limit: 8,
+        query: { 'eo:cloud_cover': { lt: 15 } }, sortby: [{ field: 'properties.datetime', direction: 'desc' }] }) })
+        .then(function(r){ return r.ok ? r.json() : null; }).then(function(j){ G.items = (j && j.features) || []; G.itemsFor = k; return G.items; }); };
+    var draw = function(){
+      if (!ui()) return; var L0 = window.LOCATION || {}, la = +L0.lat, lo = +L0.lon; if (!isFinite(la) || !isFinite(lo)) return;
+      var key = la.toFixed(3) + ',' + lo.toFixed(3) + '@' + G.w; if (G.busy || key === G.key) return; G.busy = true;
+      msg.textContent = 'FINDING A CLEAR DAY'; msg.style.display = 'flex';
+      Promise.all([loadLib(), search(la, lo)]).then(function(R){
+        var GT = R[0], items = R[1] || []; if (!items.length){ msg.textContent = 'NO CLEAR SENTINEL-2 PASS IN 90 DAYS'; return; }
+        /* the scene's own cloud figure is for its whole 110 km tile: the box is judged by itself -- bright white pixels (cloud) and
+           empty ones (off the tile) -- across up to three passes; the first nearly clean one wins, else the cleanest */
+        var W = 1200, H = 800, best = null, N = Math.min(items.length, 3), show = function(b){
+          if (!b){ msg.textContent = 'NO CLEAR SENTINEL-2 PASS IN 90 DAYS'; return; }
+          /* a low winter sun leaves the picture dim (London in November): lift it so its brightest 2% of land sits near 235, at most x2.2;
+             a bright scene is left alone */
+          var d = b.im.data, hist = new Uint32Array(256), cnt = 0; for (var q = 0; q < d.length; q += 16){ var y0 = (d[q] * 3 + d[q + 1] * 6 + d[q + 2]) / 10 | 0; if (y0 > 2){ hist[y0]++; cnt++; } }
+          var acc = 0, p98 = 255; for (var k = 255; k >= 0; k--){ acc += hist[k]; if (acc >= cnt * 0.02){ p98 = k; break; } }
+          var gain = Math.min(2.2, Math.max(1, 235 / Math.max(1, p98)));
+          if (gain > 1.05) for (var q2 = 0; q2 < d.length; q2 += 4){ d[q2] = Math.min(255, d[q2] * gain); d[q2 + 1] = Math.min(255, d[q2 + 1] * gain); d[q2 + 2] = Math.min(255, d[q2 + 2] * gain); }
+          cv.width = W; cv.height = H; cv.getContext('2d').putImageData(b.im, 0, 0); msg.style.display = 'none'; G.key = key;
+          var dt = new Date(b.it.properties.datetime), yr = dt.getUTCFullYear();
+          chip.textContent = 'SENTINEL-2 · ' + MON[dt.getUTCMonth()] + ' ' + dt.getUTCDate() + ', ' + yr + ' · ' + G.w + ' KM ACROSS';
+          cred.textContent = 'Contains modified Copernicus Sentinel data ' + yr;
+          try { if (window._bvSrc) window._bvSrc([['COPERNICUS SENTINEL-2 · ESA', 'https://dataspace.copernicus.eu/'], ['EARTH SEARCH · ELEMENT 84', 'https://element84.com/earth-search/']]); } catch(e){} };
+        var tryAt = function(i){
+          if (i >= N) return show(best);
+          var it = items[i], as = it.assets && (it.assets.visual || it.assets.TCI), href = as && as.href, ep = +(it.properties['proj:epsg'] || 0);
+          if (!href || !(ep > 32600 && ep < 32800)) return tryAt(i + 1);
+          var xy = utm(la, lo, ep % 100, ep > 32700), hw = G.w * 500, hh = hw * H / W;
+          msg.textContent = 'READING SENTINEL-2 · ' + (it.properties.datetime || '').slice(0, 10);
+          return GT.fromUrl(href, { allowFullFile: false }).then(function(t){ return t.readRasters({ bbox: [xy[0] - hw, xy[1] - hh, xy[0] + hw, xy[1] + hh], width: W, height: H, interleave: true, fillValue: 0 }); })
+            .then(function(px){
+              if ((window.LOCATION || {}).lat !== L0.lat) return;
+              var n = W * H, empty = 0, cloud = 0, im = new ImageData(W, H), d = im.data;
+              for (var q = 0; q < n; q++){ var rr = px[q * 3], gg = px[q * 3 + 1], bb = px[q * 3 + 2];
+                if (!rr && !gg && !bb) empty++; else if (rr > 200 && gg > 200 && bb > 200) cloud++;
+                d[q * 4] = rr; d[q * 4 + 1] = gg; d[q * 4 + 2] = bb; d[q * 4 + 3] = 255; }
+              var bad = (empty + cloud * 1.5) / n, c = { it: it, im: im, bad: bad };
+              if (!best || bad < best.bad) best = c;
+              if (bad < 0.02 && empty / n < 0.06) return show(c);
+              return tryAt(i + 1);
+            }, function(){ return tryAt(i + 1); });
+        };
+        return tryAt(0);
+      }).catch(function(){ msg.textContent = 'SENTINEL-2 DID NOT ANSWER'; }).then(function(){ G.busy = false; });
+    };
+    var off = function(){ if (!G.on) return; G.on = false; if (box) box.style.display = 'none'; paint();
+      try { if (window._bvSrc && window._bvLiveSrc) window._bvSrc(window._bvLiveSrc); } catch(e){} };
+    window._bvGround = function(){
+      if (G.on){ off(); return; }
+      if (window._liveView && window._liveView !== 'sat' && window._setLiveView) window._setLiveView('sat');
+      if (!ui()) return; G.on = true; box.style.display = ''; paint(); draw(); };
+    window._bvGroundOff = off;
+  })();
 
   // ── Reload GOES frames ──
   /* A RELOAD DURING A FETCH IS QUEUED, NOT DROPPED (2026-10-24): fetchGoesFrames returns at once while one is in flight, so two quick
@@ -61184,6 +61283,7 @@ var dayName = dayDate.toLocaleDateString([], { weekday:"short" }).toUpperCase() 
                 srock:'s-rockies', splains:'s-plains',
                 ak:'alaska', hi:'hawaii', pr:'pr', gu:'guam' };
     if (v !== 'sat' && !map[v]) return;
+    try { if (window._bvGroundOff) window._bvGroundOff(); } catch(e){}   /* any LIVE view (SATELLITE included) closes GROUND */
     window._liveView = v;
     var lp = document.getElementById('fcast-left-panel');
     var rp = document.getElementById('fcast-right-panel');
@@ -84039,6 +84139,7 @@ var CW_EWR = [[[-73.935,40.849],[-73.9342,40.8486],[-73.9347,40.848],[-73.9369,4
       try{ window._loadTides(LOCATION.lat, LOCATION.lon); }catch(e){}   /* was a bare loadTides: out of scope here, threw into the catch, and the tide table never followed a switch */
       switchRadarMode("reflectivity");
       startRadarNwsLoop();
+      try { if (window._bvGroundOff) window._bvGroundOff(); } catch(e){}   /* GROUND belongs to the old place */
       // Update GOES satellite and sector from new location
       if (LOCATION.goes) {
         goesCurrentSector = LOCATION.goes.sector || goesCurrentSector;
