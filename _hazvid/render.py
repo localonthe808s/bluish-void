@@ -14,6 +14,8 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 HERE = os.path.dirname(os.path.abspath(__file__)); C = os.path.join(HERE, 'cache'); OUT = os.path.join(HERE, 'out'); os.makedirs(OUT, exist_ok=True)
+STORMS = '--storms' in sys.argv   # storms only (user 2026-11-25: "do storms only, put it in hurricanes") -> out/storms_v1*.mp4
+TAG = 'storms_v1' if STORMS else 'restless_v1'
 Y0, Y1 = 1980, 2024   # 2025 left out: its storm tracks are provisional and the year is not over in the quake catalog
 W, MAPH = 1280, 512            # the map: lat 72N .. 58S, equirectangular
 LAT_N, LAT_S = 72.0, -58.0
@@ -52,7 +54,7 @@ print(len(named), 'storms', flush=True)
 
 print('reading quakes', flush=True)
 quakes = []
-for f in sorted(glob.glob(os.path.join(C, 'q_*.csv'))):
+for f in ([] if STORMS else sorted(glob.glob(os.path.join(C, 'q_*.csv')))):
     for q in csv.DictReader(open(f)):
         try: quakes.append((q['time'][:7], float(q['latitude']), float(q['longitude']), float(q['mag'])))
         except ValueError: pass
@@ -103,7 +105,7 @@ def wrap_segments(pts):
 mem = np.zeros((MAPH, W, 3), np.float32); DECAY = 0.993
 live_q = []    # (frames_left, x, y, r)
 live_s = []    # (frames_left, kind, [xy..], width)
-ymax_q = max(yr_quake.values()); ymax_s = max(sum(c.values()) for c in yr_storm.values())
+ymax_q = max(yr_quake.values()) if yr_quake else 1; ymax_s = max(sum(c.values()) for c in yr_storm.values())
 frames_dir = os.path.join(OUT, 'frames'); os.makedirs(frames_dir, exist_ok=True)
 for f in glob.glob(os.path.join(frames_dir, '*.png')): os.remove(f)
 
@@ -152,23 +154,25 @@ for fi, mo in enumerate(months):
     MN = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
     d.text((18, 14), str(y), font=FB, fill=(255, 255, 255)); d.text((18 + d.textlength(str(y), font=FB) + 8, 28), MN[m - 1], font=FM, fill=(200, 205, 220))
     lx = 18; ly = MAPH - 22
-    for k in ('q', 'hu', 'ty', 'cy'):
+    for k in (('hu', 'ty', 'cy') if STORMS else ('q', 'hu', 'ty', 'cy')):
         d.ellipse((lx, ly + 2, lx + 9, ly + 11), fill=COL[k]); d.text((lx + 14, ly), NAME[k], font=FS, fill=(230, 232, 240)); lx += 36 + d.textlength(NAME[k], font=FS)
     # yearly bars: quakes on the left half, storms (stacked by kind) on the right half
-    n = Y1 - Y0 + 1; pad = 18; half = (W - pad * 3) / 2; bw2 = half / n; by0 = MAPH + 26; bh2 = BAR_H - 40
-    d.text((pad, MAPH + 8), 'EARTHQUAKES M5+ A YEAR', font=FS, fill=(253, 230, 138)); d.text((pad * 2 + half, MAPH + 8), 'TROPICAL STORMS A YEAR', font=FS, fill=(230, 232, 240))
+    n = Y1 - Y0 + 1; pad = 18; half = (W - pad * 2) if STORMS else (W - pad * 3) / 2; bw2 = half / n; by0 = MAPH + 26; bh2 = BAR_H - 40
+    sx = pad if STORMS else pad * 2 + half
+    if not STORMS: d.text((pad, MAPH + 8), 'EARTHQUAKES M5+ A YEAR', font=FS, fill=(253, 230, 138))
+    d.text((sx, MAPH + 8), 'TROPICAL STORMS A YEAR', font=FS, fill=(230, 232, 240))
     for i, yy2 in enumerate(range(Y0, Y1 + 1)):
         if yy2 > y: break
         cur = yy2 == y; f = (m / 12.0) if cur else 1.0
         hq = bh2 * yr_quake[yy2] / ymax_q * f; x0 = pad + i * bw2
-        d.rectangle((x0, by0 + bh2 - hq, x0 + bw2 - 1.5, by0 + bh2), fill=COL['q'] if cur else (150, 135, 90))
-        x1 = pad * 2 + half + i * bw2; acc = 0
+        if not STORMS: d.rectangle((x0, by0 + bh2 - hq, x0 + bw2 - 1.5, by0 + bh2), fill=COL['q'] if cur else (150, 135, 90))
+        x1 = sx + i * bw2; acc = 0
         for k in ('hu', 'ty', 'cy'):
             v = bh2 * yr_storm[yy2][k] / ymax_s * f
             c = COL[k] if cur else tuple(int(cc * .6) for cc in COL[k])
             d.rectangle((x1, by0 + bh2 - acc - v, x1 + bw2 - 1.5, by0 + bh2 - acc), fill=c); acc += v
     for i, yy2 in enumerate(range(Y0, Y1 + 1, 10)):
-        for xb in (pad, pad * 2 + half):
+        for xb in ((sx,) if STORMS else (pad, pad * 2 + half)):
             d.text((xb + (yy2 - Y0) * bw2, by0 + bh2 + 3), str(yy2), font=FS, fill=(130, 136, 155))
     full.save(os.path.join(frames_dir, '%04d.png' % fi))
     if fi % 60 == 0: print(mo, flush=True)
@@ -177,8 +181,8 @@ for fi, mo in enumerate(months):
 last = os.path.join(frames_dir, '%04d.png' % (len(months) - 1))
 for j in range(FPS * 2):
     Image.open(last).save(os.path.join(frames_dir, '%04d.png' % (len(months) + j)))
-for name, scale, crf in (('restless_v1.mp4', W, 27), ('restless_v1_m.mp4', 720, 28)):
+for name, scale, crf in ((TAG + '.mp4', W, 27), (TAG + '_m.mp4', 720, 28)):
     subprocess.run(['ffmpeg', '-y', '-v', 'error', '-framerate', str(FPS), '-i', os.path.join(frames_dir, '%04d.png'), '-vf', 'scale=%d:-2' % scale,
                     '-c:v', 'libx264', '-preset', 'slow', '-crf', str(crf), '-pix_fmt', 'yuv420p', '-movflags', '+faststart', os.path.join(OUT, name)], check=True)
     print(name, os.path.getsize(os.path.join(OUT, name)) // 1024, 'KB')
-subprocess.run(['ffmpeg', '-y', '-v', 'error', '-i', os.path.join(frames_dir, '%04d.png' % (len(months) - 1)), '-q:v', '4', os.path.join(OUT, 'restless_v1_poster.jpg')], check=True)
+subprocess.run(['ffmpeg', '-y', '-v', 'error', '-i', os.path.join(frames_dir, '%04d.png' % (len(months) - 1)), '-q:v', '4', os.path.join(OUT, TAG + '_poster.jpg')], check=True)
