@@ -61,7 +61,7 @@ KINDS = {'d': {'hours': 12, 'crf': 27, 'g': 12, 'w': fdgeo.OUT_W, 'ib': (2,)},
          # LIGHTER ON PHONES (user 2026-10-24: "make the phone loop lighter"): one in-between per pair (the middle one), not three,
          # and a notch more compression -- half the frames of desktop; the page paces it by the kind's own step
          'm': {'hours': 12, 'crf': 28, 'g': 8, 'w': fdgeo.OUT_W // 2, 'ib': (2,)}}
-OVERLAY_V = 5          # /satmaps/<sat>-<sector>.png?v= -- bump with satmaps_bake.py
+OVERLAY_V = 6          # /satmaps/<sat>-<sector>.png?v= -- bump with satmaps_bake.py
 UA = {'User-Agent': 'bluishvoid.com satellite loop bake'}
 DRY = '--dry' in sys.argv
 ONLY = sys.argv[sys.argv.index('--dry') + 1] if DRY and len(sys.argv) > sys.argv.index('--dry') + 1 else None

@@ -7,7 +7,8 @@ Census 1:10m via us-atlas, the shared edges only, so the coast is not drawn twic
 cityLbl list in index.html's BV_CONTINENTAL, plus the far regions' towns). One transparent PNG per sector at twice the
 frame size, /satmaps/<sat>-<sector>.png, projected through fdgeo.py -- the same crops the frames are cut with.
 
-    python3 _goesvid/satmaps_bake.py DATA_DIR      # DATA_DIR holds countries-10m.json and states-10m.json
+    python3 _goesvid/satmaps_bake.py DATA_DIR      # DATA_DIR holds countries-10m.json, states-10m.json and lakes-10m.geojson
+    (world-atlas@2.0.2, us-atlas@3.0.1 from jsdelivr; natural-earth-vector geojson/ne_10m_lakes.geojson)
 Re-run after changing a crop in fdgeo.py or the names, and bump OVERLAY_V in bake.py and the page's ?v=.
 """
 import json, os, re, sys
@@ -69,6 +70,19 @@ def main():
     cuse = arc_uses(ct['objects']['countries']['geometries'])
     suse = arc_uses(st['objects']['states']['geometries'])
     coast = [carcs[i] for i in range(len(carcs)) if cuse.get(i) == 1]
+    # LAKE SHORES (2026-11-25, user: "SKY LIVE CLOUDS isnt correcting when i zoom over the great lakes, its only attaching for the NE"):
+    # the countries' coast leaves the lakes out (the polygons run across them), so the Great Lakes and the Upper Midwest had no lines
+    # at all. Natural Earth 10m lakes (public domain), scalerank 0-3: the Great Lakes, Winnipeg, Great Salt Lake, Okeechobee, Champlain...
+    lakes = []
+    lp = os.path.join(data, 'lakes-10m.geojson')
+    if os.path.exists(lp):
+        for f in json.load(open(lp))['features']:
+            sr = f['properties'].get('scalerank'); sr = 9 if sr is None else sr
+            if sr > 3 or not f.get('geometry'): continue
+            g = f['geometry']; polys = [g['coordinates']] if g['type'] == 'Polygon' else g['coordinates'] if g['type'] == 'MultiPolygon' else []
+            for poly in polys:
+                for ring in poly: lakes.append([(pt[0], pt[1]) for pt in ring])
+    print(len(lakes), 'lake rings')
     borders = [carcs[i] for i in range(len(carcs)) if cuse.get(i, 0) >= 2]
     states = [sarcs[i] for i in range(len(sarcs)) if suse.get(i, 0) >= 2]
     # 2026-10-24: no names in the image any more -- the page draws our map's own names live, one size at any zoom
@@ -100,6 +114,7 @@ def main():
           u = SS * S * LW
           # 2026-10-24 (user): no state or country lines -- most of them follow rivers, and the line hid the valley fog on them
           line(coast, int(1.2 * u), (255, 255, 255, 150), 55)
+          line(lakes, int(1.2 * u), (255, 255, 255, 150), 55)
           im = im.resize((fdgeo.OUT_W * S, fdgeo.OUT_H * S), Image.LANCZOS)
           d = ImageDraw.Draw(im)
           fs = FS
