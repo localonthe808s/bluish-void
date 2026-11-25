@@ -31,6 +31,8 @@ const ALLOWED_ORIGINS = [
 // Per-host cache TTL in seconds. Hosts NOT listed here are rejected (403) — the
 // keys are the upstream allowlist. Tune freely.
 const CACHE_RULES = {
+  // world METARs for the observed cloud blend outside the US (2026-11-25): the Aviation Weather Center's data API sends no CORS
+  'aviationweather.gov': 300,
   // ── 1-minute space-weather feeds ──
   'services.swpc.noaa.gov':       60,
   // ── live imagery loops / model graphics (a few minutes) ──
@@ -389,6 +391,94 @@ async function airnow(reqUrl, env, cors, ctx) {
   return withCors(new Response(body, { status: 200, headers: h }), cors, hit ? 'REVALIDATED' : 'MISS', 0);
 }
 
+// WORLD ALERTS (2026-11-25, user: "yes for Hero alerts" -- the hero's warnings outside the US). /wxalerts?lat=&lon= answers with the
+// warnings in force at the point, as NWS-shaped GeoJSON features (event, severity, headline, description, instruction, onset,
+// expires, areaDesc, senderName), so the page reads them through its one alerts door unchanged.
+//  - Europe: EUMETNET MeteoAlarm country feeds (feeds.meteoalarm.org, keyless, no CORS). Most countries name their areas by
+//    EMMA_ID code only; the outlines are baked to cdn.bluishvoid.com/alerts/emma/<CC>.json (_alertsbake/emma_bake.py).
+//    The level color sets the severity: yellow Moderate, orange Severe, red Extreme; green (no warning) is dropped.
+//  - Canada: Environment Canada's OGC API (api.weather.gc.ca weather-alerts), polygons, asked for a small box round the point.
+// The answer is cached 5 minutes per 0.05-degree point; each country feed 5 minutes; the outlines a day.
+const MA_FEED = { AT: 'austria', BE: 'belgium', BA: 'bosnia-herzegovina', BG: 'bulgaria', HR: 'croatia', CY: 'cyprus', CZ: 'czechia', DK: 'denmark',
+  EE: 'estonia', FI: 'finland', FR: 'france', DE: 'germany', GR: 'greece', HU: 'hungary', IS: 'iceland', IE: 'ireland', IL: 'israel', IT: 'italy',
+  LV: 'latvia', LT: 'lithuania', LU: 'luxembourg', MT: 'malta', MD: 'moldova', ME: 'montenegro', NL: 'netherlands', NO: 'norway', PL: 'poland',
+  PT: 'portugal', RO: 'romania', RS: 'serbia', SK: 'slovakia', SI: 'slovenia', ES: 'spain', SE: 'sweden', CH: 'switzerland', UA: 'ukraine', UK: 'united-kingdom', GB: 'united-kingdom' };
+const _mem = {};
+async function cachedJson(url, ttl, ctx, ua) {
+  const now = Date.now(), m = _mem[url]; if (m && now - m.t < ttl * 1000) return m.v;
+  const key = new Request('https://proxy.bluishvoid.com/__wx/' + encodeURIComponent(url), { method: 'GET' }), cache = caches.default;
+  try { const hit = await cache.match(key); if (hit) { const a = (now - Number(hit.headers.get('X-BV-Cached-At') || 0)) / 1000; if (a >= 0 && a < ttl) { const v = await hit.json(); _mem[url] = { t: now - a * 1000, v }; return v; } } } catch (e) {}
+  const r = await fetch(url, { headers: { 'User-Agent': ua || 'bluishvoid-edge/1.0 (+https://bluishvoid.com)', 'Accept': 'application/json' } });
+  if (!r.ok) throw new Error(url + ' ' + r.status);
+  const txt = await r.text(), v = JSON.parse(txt);
+  try { ctx.waitUntil(cache.put(key, new Response(txt, { headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${ttl}`, 'X-BV-Cached-At': String(now) } }))); } catch (e) {}
+  _mem[url] = { t: now, v }; return v;
+}
+function inRing(x, y, R) { let c = false; for (let i = 0, j = R.length - 1; i < R.length; j = i++) { const xi = R[i][0], yi = R[i][1], xj = R[j][0], yj = R[j][1];
+  if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / ((yj - yi) || 1e-12) + xi)) c = !c; } return c; }
+const inBox = (x, y, b) => x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3];
+async function maAlerts(lat, lon, ctx) {
+  const idx = await cachedJson('https://cdn.bluishvoid.com/alerts/emma/index.json', 86400, ctx);
+  const ccs = Object.keys(idx).filter((cc) => inBox(lon, lat, idx[cc]) && MA_FEED[cc]);
+  const out = [], now = Date.now(), dup = new Set();
+  for (const cc of ccs) {
+    let areas, feed;
+    try { [areas, feed] = await Promise.all([cachedJson('https://cdn.bluishvoid.com/alerts/emma/' + cc + '.json', 86400, ctx),
+      cachedJson('https://feeds.meteoalarm.org/api/v1/warnings/feeds-' + MA_FEED[cc], 300, ctx)]); } catch (e) { continue; }
+    const mine = new Set(); for (const code in areas) { const a = areas[code]; if (inBox(lon, lat, a[0]) && a[1].some((R) => inRing(lon, lat, R))) mine.add(code); }
+    for (const w of (feed.warnings || [])) {
+      const A = w.alert || {}; if (String(A.status || '').toLowerCase() !== 'actual') continue;
+      const infos = A.info || []; const info = infos.find((i) => /^en/i.test(i.language || '')) || infos[0]; if (!info) continue;
+      if (info.expires && Date.parse(info.expires) < now) continue;
+      const hit = (info.area || []).find((ar) => (ar.geocode || []).some((g) => g.valueName === 'EMMA_ID' && mine.has(g.value))
+        || (ar.polygon || []).some((pg) => { const R = String(pg).trim().split(/\s+/).map((q) => { const t = q.split(','); return [+t[1], +t[0]]; }); return R.length > 2 && inRing(lon, lat, R); }));
+      if (!hit) continue;
+      const par = {}; (info.parameter || []).forEach((q) => { par[q.valueName] = q.value; });
+      const lvl = String(par.awareness_level || '').split(';').map((x) => x.trim()), col = (lvl[1] || '').toLowerCase();
+      if (col === 'green' || col === 'white' || (!col && !info.severity)) continue;
+      const typ = (String(par.awareness_type || '').split(';')[1] || '').trim();
+      const sev = col === 'red' ? 'Extreme' : col === 'orange' ? 'Severe' : col === 'yellow' ? 'Moderate' : (info.severity || 'Moderate');
+      const ev = col && typ ? col.charAt(0).toUpperCase() + col.slice(1) + ' ' + typ.toLowerCase().replace(/(^|[\s-])\w/g, (m) => m.toUpperCase()) + ' Warning' : (info.event || 'Weather Warning');
+      const dk = ev + '|' + (info.onset || '') + '|' + (info.expires || ''); if (dup.has(dk)) continue; dup.add(dk);   /* one warning per language copy / area */
+      out.push({ type: 'Feature', geometry: null, properties: { id: A.identifier, event: ev, severity: sev, level: col, headline: info.headline || ev, description: info.description || '',
+        instruction: info.instruction || '', onset: info.onset || info.effective || A.sent, effective: info.effective || A.sent, expires: info.expires, sent: A.sent,
+        areaDesc: hit.areaDesc || '', senderName: info.senderName || 'MeteoAlarm', status: 'Actual', messageType: 'Alert', web: info.web || 'https://meteoalarm.org', source: 'meteoalarm' } });
+    }
+  }
+  return out;
+}
+async function ecccAlerts(lat, lon, ctx) {
+  if (!(lat > 41.5 && lat < 84 && lon > -142 && lon < -52)) return [];
+  const d = 0.02, u = `https://api.weather.gc.ca/collections/weather-alerts/items?f=json&lang=en&limit=50&bbox=${(lon - d).toFixed(3)},${(lat - d).toFixed(3)},${(lon + d).toFixed(3)},${(lat + d).toFixed(3)}`;
+  let j; try { j = await cachedJson(u, 300, ctx); } catch (e) { return []; }
+  const seen = new Set(), out = [], now = Date.now();
+  for (const f of (j.features || [])) {
+    const p = f.properties || {}, g = f.geometry || {};
+    const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
+    if (polys.length && !polys.some((P) => inRing(lon, lat, P[0]))) continue;
+    if (p.expiration_datetime && Date.parse(p.expiration_datetime) < now) continue;
+    const nm = String(p.alert_name_en || p.alert_short_name_en || 'weather alert'), k = nm + '|' + (p.alert_text_en || '').slice(0, 80); if (seen.has(k)) continue; seen.add(k);
+    const t = String(p.alert_type || '').toLowerCase(), sev = t === 'warning' ? 'Severe' : t === 'watch' ? 'Moderate' : 'Minor';
+    const ev = nm.replace(/(^|\s)\w/g, (m) => m.toUpperCase());
+    const txt = String(p.alert_text_en || ''), first = txt.split('\n').filter(Boolean)[0] || ev;
+    out.push({ type: 'Feature', geometry: null, properties: { id: p.feature_id + ':' + nm, event: ev, severity: sev, headline: first, description: txt, instruction: '',
+      onset: p.validity_datetime || p.publication_datetime, effective: p.publication_datetime, expires: p.event_end_datetime || p.expiration_datetime, sent: p.publication_datetime,
+      areaDesc: p.feature_name_en || '', senderName: 'Environment Canada', status: 'Actual', messageType: 'Alert', web: 'https://weather.gc.ca/warnings/', source: 'eccc' } });
+  }
+  return out;
+}
+async function wxAlerts(reqUrl, cors, ctx) {
+  const lat = Math.round(parseFloat(reqUrl.searchParams.get('lat')) * 20) / 20, lon = Math.round(parseFloat(reqUrl.searchParams.get('lon')) * 20) / 20;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return json({ error: 'bad lat/lon' }, 400, cors);
+  const key = new Request(`https://proxy.bluishvoid.com/__wxalerts/${lat}/${lon}`, { method: 'GET' }), cache = caches.default;
+  try { const hit = await cache.match(key); if (hit) { const a = (Date.now() - Number(hit.headers.get('X-BV-Cached-At') || 0)) / 1000; if (a >= 0 && a < 300) return withCors(hit, cors, 'HIT', Math.floor(a)); } } catch (e) {}
+  const [ma, ec] = await Promise.all([maAlerts(lat, lon, ctx).catch(() => []), ecccAlerts(lat, lon, ctx).catch(() => [])]);
+  const body = JSON.stringify({ type: 'FeatureCollection', features: ma.concat(ec) });
+  const h = { 'Content-Type': 'application/geo+json', 'Cache-Control': 'public, max-age=300', 'X-BV-Cached-At': String(Date.now()) };
+  try { ctx.waitUntil(cache.put(key, new Response(body, { status: 200, headers: h }))); } catch (e) {}
+  return withCors(new Response(body, { status: 200, headers: h }), cors, 'MISS', 0);
+}
+
 export default {
   async fetch(request, env, ctx) {
     const reqUrl = new URL(request.url);
@@ -406,6 +496,7 @@ export default {
     }
 
     if (reqUrl.pathname === '/airnow') return airnow(reqUrl, env, cors, ctx);
+    if (reqUrl.pathname === '/wxalerts') return wxAlerts(reqUrl, cors, ctx);
     const target = reqUrl.searchParams.get('url');
     if (!target) {
       // health check / no target
