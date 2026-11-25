@@ -33,6 +33,8 @@ const ALLOWED_ORIGINS = [
 const CACHE_RULES = {
   // world METARs for the observed cloud blend outside the US (2026-11-25): the Aviation Weather Center's data API sends no CORS
   'aviationweather.gov': 300,
+  // AIRPLANES on RADAR (2026-11-25): adsb.fi open-data ADS-B, no CORS; 10 s so every viewer of a snapped box shares one read (their limit is ~1 req/s)
+  'opendata.adsb.fi': 10,
   // ── 1-minute space-weather feeds ──
   'services.swpc.noaa.gov':       60,
   // ── live imagery loops / model graphics (a few minutes) ──
