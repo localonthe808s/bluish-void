@@ -13705,6 +13705,13 @@ window._bvRadarCode = function(){
     return (t != null && t <= 33) ? (heavy ? 75 : mod ? 73 : 71) : (heavy ? 65 : mod ? 63 : 61);
   }catch(e){ return null; }
 };
+/* HOW FAR AN AIRPORT'S SKY REACHES (user 2026-11-27, Charleston under blue skies drawn overcast: "its blue skies in charleston right now").
+   The blend takes the cloudiest of the five nearest stations, because a ceilometer is a point sensor and scattered cumulus that misses one
+   beam catches another. But a DECK is not missed by the beam under it: that morning the two airports at the city read CLR and FEW while
+   Moncks Corner (45 km inland) read OVC and Summerville (35 km) BKN, and the cloudiest won. So: the nearest reporting station and any within
+   25 km count in full; one 25-40 km out can add scattered cloud (capped at SCT, 44%) but not a deck; beyond 40 km it adds nothing.
+   Returns the most cover (%) a station that far may contribute; idx = its rank among the stations that reported. */
+window._bvObsReach = function(km, idx){ return (idx === 0 || km == null || km <= 25) ? 100 : km <= 40 ? 44 : 0; };
 window._heroSkyCode = function(code, modelCover){
   try{
     var rc = window._bvRadarCode();
@@ -14817,7 +14824,7 @@ html body :is(#bv-tier, .bv-tier-row) :is(.geo-tab, .ot-tab, .solar-tab, .bvt-ta
 
 <video class="bg-video" id="bgVideo" autoplay muted loop playsinline preload="metadata"></video>
 <script src="/bg-videos.js"></script>
-<script src="/cloud_gl.js?v=54" defer></script><script src="/sky3d.js?v=7" defer></script><script src="/sky3d8.js?v=31" defer></script><script src="/flock.js?v=15" defer></script><script src="/nightsats.js?v=3" defer></script><script src="/sky2_gl.js?v=5" defer></script><script src="/hero_gl.js?v=4" defer></script>   <!-- the GPU cloud for the front scenes (2026-09-26); scenes paint their own when it is missing -->
+<script src="/cloud_gl.js?v=54" defer></script><script src="/sky3d.js?v=7" defer></script><script src="/sky3d8.js?v=32" defer></script><script src="/flock.js?v=15" defer></script><script src="/nightsats.js?v=3" defer></script><script src="/sky2_gl.js?v=5" defer></script><script src="/hero_gl.js?v=4" defer></script>   <!-- the GPU cloud for the front scenes (2026-09-26); scenes paint their own when it is missing -->
 <script>
   // Random pick from the shared BG_VIDEOS list on each page load.
   // Skip the ~200MB bg video download on slow/data-saver connections; the page still works
@@ -38796,10 +38803,12 @@ function dayRangeAround(d, days){
               .map(function(m){ m._d = Math.hypot((m.lon - lo0) * kx, m.lat - la0) * 111.2; return m; }).filter(function(m){ return m._d <= 80; })
               .sort(function(a, b){ return a._d - b._d; }).slice(0, 5);
             var low = 0, mid = 0, high = 0, seen = false, newest = 0, used = [];
+            var nRep0 = 0;
             near.forEach(function(m){
               var cl = Array.isArray(m.clouds) ? m.clouds : [], cv = String(m.cover || '').toUpperCase();
               if (!cl.length && !/^(CLR|SKC|CAVOK|NSC|NCD)$/.test(cv)) return;   /* a report that says nothing about the sky */
-              cl.forEach(function(l){ var pct = AMT[String(l.cover || '').toUpperCase()] || 0, base = (+l.base || 0) * 0.3048;   /* feet AGL */
+              var cap0 = window._bvObsReach(m._d, nRep0++);
+              cl.forEach(function(l){ var pct = Math.min(cap0, AMT[String(l.cover || '').toUpperCase()] || 0), base = (+l.base || 0) * 0.3048;   /* feet AGL */
                 if (base < 2000) low = Math.max(low, pct); else if (base < 6000) mid = Math.max(mid, pct); else high = Math.max(high, pct); });
               seen = true; newest = Math.max(newest, m.obsTime * 1000); used.push(m.icaoId); });
             if (!seen) return;
@@ -38817,27 +38826,31 @@ function dayRangeAround(d, days){
             // and reports CLR for anything above ~12k ft — scattered cumulus
             // that misses one beam usually catches another ~10mi away
             // (2026-07-04: LGA+TEB read CLR while NYC/JFK/EWR all saw SCT+).
-            var sts = ((d && d.features) || []).slice(0, 5).map(function(f){
-              return f.properties && f.properties.stationIdentifier;
-            }).filter(Boolean);
+            var _ft = ((d && d.features) || []).slice(0, 5).filter(function(f){ return f.properties && f.properties.stationIdentifier; });
+            var sts = _ft.map(function(f){ return f.properties.stationIdentifier; });
+            /* how far each station is from the place (see _bvObsReach below) */
+            var _kx = Math.cos((+loc.lat || 0) * Math.PI / 180), dkm = _ft.map(function(f){ var g = f.geometry && f.geometry.coordinates;
+              return (g && isFinite(g[0]) && isFinite(g[1]) && isFinite(+loc.lat)) ? Math.hypot((g[0] - loc.lon) * _kx, g[1] - loc.lat) * 111.2 : null; });
             if (!sts.length) throw new Error('no station');
             return Promise.all(sts.map(function(st){
               return fetchWithTimeout('https://api.weather.gov/stations/' + st + '/observations/latest', null, 10000)
                 .then(function(r){ return r.json(); })
                 .catch(function(){ return null; });
-            })).then(function(os){ return { sts: sts, os: os }; });
+            })).then(function(os){ return { sts: sts, os: os, dkm: dkm }; });
           })
           .then(function(res){
             var AMT = { FEW:15, SCT:44, BKN:75, OVC:95, VV:100 };
             var low=0, mid=0, high=0, seen=false, newest=0, used=[];
+            if ((window.LOCATION || {}).lat !== loc.lat || (window.LOCATION || {}).lon !== loc.lon) return;   /* the place changed while the stations answered */
+            var nRep = 0;
             res.os.forEach(function(o, oi){
               var p = o && o.properties; if (!p) return;
               var ts = p.timestamp ? new Date(p.timestamp).getTime() : 0;
               if (!ts || Date.now() - ts > 2 * 3600000) return; // stale
-              var had = false;
+              var had = false, cap = (p.cloudLayers || []).length ? window._bvObsReach(res.dkm[oi], nRep++) : 100;
               (p.cloudLayers || []).forEach(function(l){
                 had = true;
-                var pct = AMT[(l.amount || '').toUpperCase()] || 0;
+                var pct = Math.min(cap, AMT[(l.amount || '').toUpperCase()] || 0);
                 var base = (l.base && l.base.value != null) ? l.base.value : 0; // meters AGL
                 if (base < 2000) low = Math.max(low, pct);
                 else if (base < 6000) mid = Math.max(mid, pct);

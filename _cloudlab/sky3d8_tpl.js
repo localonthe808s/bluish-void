@@ -215,7 +215,7 @@ function adapt(){ var cd = RT.cad || 33.333; if (RT.iv > cd * 1.2) RT.slow++; el
 function hx(h){ h = String(h || '#000000'); return [parseInt(h.slice(1, 3), 16) / 255, parseInt(h.slice(3, 5), 16) / 255, parseInt(h.slice(5, 7), 16) / 255]; }
 function drawLay(sc, w, h, LT){ gl.viewport(0, 0, w, h); gl.useProgram(P2); var LY = sc.lay, lw = LY[0] || [-1, 0, 1, 0], md = LY[1] || [-1, 0, 1, 0], hg2 = LY[2] || [-1, 0];
   gl.uniform2f(u2('uRes'), w, h); gl.uniform1f(u2('uTime'), S.t); var V = [], O = []; for (var i = 0; i < 6; i++){ V.push(WND.v[i][0], WND.v[i][1]); O.push(WND.off[i][0], WND.off[i][1]); }
-  gl.uniform2fv(u2('uWV'), V); gl.uniform2fv(u2('uWO'), O); gl.uniform1f(u2('uWA'), WA()); gl.uniform1f(u2('uFrame'), S.frame % 64); gl.uniform1f(u2('uPit'), 0.7); gl.uniform1f(u2('uE0'), sc.tilt || 0.03);
+  gl.uniform2fv(u2('uWV'), V); gl.uniform2fv(u2('uWO'), O); gl.uniform1f(u2('uWA'), WA()); gl.uniform1f(u2('uFrame'), S.frame % 64); gl.uniform1f(u2('uPit'), 0.7); gl.uniform1f(u2('uE0'), sc.tilt || 0.03); gl.uniform1f(u2('uDkL'), sc.dk || 0);
   gl.uniform1f(u2('uK0'), lw[0]); gl.uniform1f(u2('uB00'), lw[1]); gl.uniform1f(u2('uB01'), lw[2]); gl.uniform1f(u2('uC0'), Math.min(1, lw[3]));
   gl.uniform1f(u2('uK1'), md[0]); gl.uniform1f(u2('uB10'), md[1]); gl.uniform1f(u2('uB11'), md[2]); gl.uniform1f(u2('uC1'), Math.min(1, md[3]));
   gl.uniform1f(u2('uK2'), hg2[0]); gl.uniform1f(u2('uC2'), Math.min(1, hg2[1]));
@@ -416,6 +416,7 @@ function sync(host, o){
   if (!host || !o || !start()){ stop(); return false; }
   var sc = scene(o); if (!sc){ stop(); return false; }
   sc.hold = o.state === 'clear-night';   /* PERF 1 */
+  sc.dk = o.state === 'overcast' ? 2.4 : 0;   /* AN OVERCAST DAY IS NOT NIGHT (user 2026-11-27: "it 11am and too dark"): under a full deck the sky rendered at ~70/255 at solar noon, barely above its night value (46). The exposure opens up under the deck by day, as an eye or a camera does (x3.4, eased in with the sun's height in gradeC; nights unchanged) */
   if (sc.hold){ MOON.on = false; moonShow(true); moonWait(false); }   /* clear night: the page's moon, at once */
   sc.inside = /^(clear-day|clear-night|mainly|partly)$/.test(o.state === 'clear-day' && o.code === 1 ? 'mainly' : o.state);
   var key = sc.key + '|' + (o.night ? 1 : 0);
