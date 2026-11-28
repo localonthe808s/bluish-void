@@ -13712,27 +13712,41 @@ window._bvRadarCode = function(){
    25 km count in full; one 25-40 km out can add scattered cloud (capped at SCT, 44%) but not a deck; beyond 40 km it adds nothing.
    Returns the most cover (%) a station that far may contribute; idx = its rank among the stations that reported. */
 window._bvObsReach = function(km, idx){ return (idx === 0 || km == null || km <= 25) ? 100 : km <= 40 ? 44 : 0; };
+/* THE SKY IN BANDS (user 2026-11-27: "the heroes werent correct today"). Two faults in taking the most cloud any source reports:
+   1. HIGH CLOUD IS NOT A DECK. A model's "100% high cloud" is cirrus, mostly thin; it was worded overcast and drawn as a dark low deck
+      (Los Angeles under CLR / SCT240, Charleston under BKN200). High cloud now counts at about half and can reach "partly cloudy" at most.
+   2. A STATION SEES BELOW 12,000 FT. With a fresh report from an airport at the place (within 25 km, under 75 min old) the models'
+      low and mid cloud may stand one category above what it reports, no more: a sky that cleared no longer stays cloudy on the models.
+   Takes the model's bands (%), returns the blended bands and the lids. Observations and the multi-model median still add cloud. */
+window._bvSkyBlend = function(mL, mM, mH){
+  var loc = window.LOCATION || {}, oc = window._obsClouds, now = Date.now();
+  var ok = !!(oc && (now - oc.ts) < 90*60000 && loc.lat != null && Math.abs(oc.lat - loc.lat) < 1 && Math.abs(oc.lon - loc.lon) < 1);
+  var oL = ok ? (oc.low||0) : 0, oM = ok ? (oc.mid||0) : 0, oH = ok ? (oc.high||0) : 0;
+  var cf = (typeof window._cloudCon === 'function'), cc = function(k){ var v = cf ? +window._cloudCon(k) : 0; return isFinite(v) ? v : 0; };
+  var near = ok && oc.near != null && oc.near <= 25 && (now - oc.ts) < 75*60000;
+  var lidL = near ? oL + 30 : 100, lidM = (near && oL < 75) ? oM + 30 : 100;   /* under a low deck the station cannot see the mid level */
+  return { L: Math.max(oL, Math.min(Math.max(mL||0, cc('low')), lidL)), M: Math.max(oM, Math.min(Math.max(mM||0, cc('mid')), lidM)),
+           H: Math.max(mH||0, oH, cc('high')), lidL: lidL, lidM: lidM, obs: ok };
+};
 window._heroSkyCode = function(code, modelCover){
   try{
     var rc = window._bvRadarCode();
     if (rc != null && (code == null || code < 51 || (code >= 51 && code <= 55) || ((code === 61 || code === 63 || code === 80 || code === 81) && rc === 65))) return rc;
     if (code == null || code < 0 || code > 3) return code;
     var loc = window.LOCATION || {};
-    var cover = (typeof modelCover === 'number') ? modelCover : 0;
-    var oc = window._obsClouds;
-    if (oc && (Date.now() - oc.ts) < 90*60000 && loc.lat != null &&
-        Math.abs(oc.lat - loc.lat) < 1 && Math.abs(oc.lon - loc.lon) < 1){
-      cover = Math.max(cover, oc.low||0, oc.mid||0, oc.high||0);
-    }
-    if (typeof window._cloudCon === 'function'){
-      cover = Math.max(cover, window._cloudCon('low'), window._cloudCon('mid'), window._cloudCon('high'));
-    }
-    if (typeof window._bvCloudNowCover === 'number' && Date.now() - (window._bvCloudNowCoverAt || 0) < 3 * 3600e3) cover = Math.max(cover, window._bvCloudNowCover);   /* ONE SKY: the layers the hero draws */
+    var tot = (typeof modelCover === 'number') ? modelCover : 0;
+    /* the model's bands for this hour, as GOLDEN HOUR read them (ONE SKY: the layers the hero draws) */
+    var nb = window._bvCloudNowBands, have = !!(nb && Date.now() - nb.at < 3 * 3600e3 && nb.lat === loc.lat && nb.lon === loc.lon);
+    var bl = window._bvSkyBlend(have ? nb.L : 0, have ? nb.M : 0, have ? nb.H : 0);
+    var opaque = Math.max(bl.L, bl.M);
+    /* the model's total cover names no height: it counts as a deck unless its own high band explains it */
+    if (!(have && nb.H >= tot - 10 && Math.max(nb.L, nb.M) < tot)) opaque = Math.max(opaque, Math.min(tot, Math.min(bl.lidL, bl.lidM)));
+    var cover = Math.max(opaque, Math.min(60, bl.H * 0.55));
     // the same sky-cover buckets WMO 0-3 already encodes (clear / mainly clear /
     // partly cloudy / overcast), so a blended cover just re-derives its own code
     window._heroSkyCover = cover; window._heroSkyCoverAt = Date.now();   /* the cover the hero went by: the summary words its sky from the same number */
     var derived = cover >= 75 ? 3 : cover >= 40 ? 2 : cover >= 12 ? 1 : 0;
-    return Math.max(code, derived);
+    return (have || bl.lidL < 100) ? derived : Math.max(code, derived);   /* with the bands or a station at the place in hand, the model's own code (worded off total cover, cirrus included) no longer holds the sky up */
   }catch(e){ return code; }
 };
 /* ONE SKY, EVERYWHERE (user 2026-11-24: "everything should follow the same readings from the heros to the hourlys to golden hour and
@@ -14824,7 +14838,7 @@ html body :is(#bv-tier, .bv-tier-row) :is(.geo-tab, .ot-tab, .solar-tab, .bvt-ta
 
 <video class="bg-video" id="bgVideo" autoplay muted loop playsinline preload="metadata"></video>
 <script src="/bg-videos.js"></script>
-<script src="/cloud_gl.js?v=54" defer></script><script src="/sky3d.js?v=7" defer></script><script src="/sky3d8.js?v=32" defer></script><script src="/flock.js?v=15" defer></script><script src="/nightsats.js?v=3" defer></script><script src="/sky2_gl.js?v=5" defer></script><script src="/hero_gl.js?v=4" defer></script>   <!-- the GPU cloud for the front scenes (2026-09-26); scenes paint their own when it is missing -->
+<script src="/cloud_gl.js?v=54" defer></script><script src="/sky3d.js?v=7" defer></script><script src="/sky3d8.js?v=33" defer></script><script src="/flock.js?v=15" defer></script><script src="/nightsats.js?v=3" defer></script><script src="/sky2_gl.js?v=5" defer></script><script src="/hero_gl.js?v=4" defer></script>   <!-- the GPU cloud for the front scenes (2026-09-26); scenes paint their own when it is missing -->
 <script>
   // Random pick from the shared BG_VIDEOS list on each page load.
   // Skip the ~200MB bg video download on slow/data-saver connections; the page still works
@@ -36470,8 +36484,10 @@ function dayRangeAround(d, days){
           var _oL=_ocOk?(_oc.low||0):0, _oM=_ocOk?(_oc.mid||0):0, _oH=_ocOk?(_oc.high||0):0;
           var _cf=(typeof window._cloudCon === 'function');
           var _cL=_cf?window._cloudCon('low'):0, _cM=_cf?window._cloudCon('mid'):0, _cH=_cf?window._cloudCon('high'):0;
-          cn.cL=Math.max(_mL,_oL,_cL); cn.cM=Math.max(_mM,_oM,_cM); cn.cH=Math.max(_mH,_oH,_cH);
-          cn.cT=Math.max(cn.cT||0, cn.cL, cn.cM, cn.cH);
+          var _bl=window._bvSkyBlend?window._bvSkyBlend(_mL,_mM,_mH):null;   /* the same blend the hero is worded by (a station at the place lids the models' low and mid cloud) */
+          window._bvCloudNowModel={L:_mL,M:_mM,H:_mH,at:Date.now(),lat:LOCATION.lat,lon:LOCATION.lon};
+          if(_bl){ cn.cL=_bl.L; cn.cM=_bl.M; cn.cH=_bl.H; } else { cn.cL=Math.max(_mL,_oL,_cL); cn.cM=Math.max(_mM,_oM,_cM); cn.cH=Math.max(_mH,_oH,_cH); }
+          cn.cT=(_bl&&(_bl.lidL<100||_bl.lidM<100))?Math.max(cn.cL,cn.cM,cn.cH):Math.max(cn.cT||0, cn.cL, cn.cM, cn.cH);
           // Source of the dominant (max-coverage) band: observation drives it if a
           // fresh station's value reaches the final; otherwise it's model-driven.
           var _dom=[[cn.cL,_oL],[cn.cM,_oM],[cn.cH,_oH]].sort(function(a,b){return b[0]-a[0];})[0];
@@ -36522,8 +36538,8 @@ function dayRangeAround(d, days){
         }catch(e){}
         var cnTypes = classifyClouds(cn);
         /* THE HERO DRAWS THESE TYPES (sky3d8.js, 2026-11-24): the classification of the sky now, for the volumetric hero; when the types change the hero re-syncs */
-        try { window._bvCloudNowCover = Math.max(cn.cL || 0, cn.cM || 0, cn.cH || 0); window._bvCloudNowCoverAt = Date.now(); } catch(e){}   /* ONE SKY: the layers the hero DRAWS feed the code it is WORDED by (they read two datasets: 15% cirrus drawn under a 0% 'clear') */
-        try { window._bvCloudNow = cnTypes; var _cnKey = (cnTypes || []).map(function(t){ return t.genus + ':' + t.species + ':' + Math.round((t.cover || 0) / 10); }).join('|'); if (_cnKey !== window._bvCloudKey){ window._bvCloudKey = _cnKey; setTimeout(function(){ try { if (window._lastWxCodeRaw != null && (window._tlDayOffset || 0) === 0 && window._heroSkyCode){ var _hc = window._heroSkyCode(window._lastWxCodeRaw, window._lastWxCover); if (_hc !== window._lastWxCode){ window._lastWxCode = _hc; try { if (window.updateConditionsBriefing) window.updateConditionsBriefing(); } catch(e){} } } if (typeof window._updateHeroWx === 'function' && window._lastWxCode != null) window._updateHeroWx(window._lastWxCode, window._lastWxNight); window._bvSyncNowHourIcon && window._bvSyncNowHourIcon(); } catch(e){} }, 0); } } catch(e){}
+        try { window._bvCloudNowCover = Math.max(cn.cL || 0, cn.cM || 0, cn.cH || 0); window._bvCloudNowCoverAt = Date.now(); if (window._bvCloudNowModel) window._bvCloudNowBands = window._bvCloudNowModel; } catch(e){}   /* ONE SKY: the layers the hero DRAWS feed the code it is WORDED by (they read two datasets: 15% cirrus drawn under a 0% 'clear') */
+        try { window._bvCloudNow = cnTypes; var _cnKey = (cnTypes || []).map(function(t){ return t.genus + ':' + t.species + ':' + Math.round((t.cover || 0) / 10); }).join('|') + '@' + LOCATION.lat + ',' + LOCATION.lon; if (_cnKey !== window._bvCloudKey){ window._bvCloudKey = _cnKey; setTimeout(function(){ try { if (window._lastWxCodeRaw != null && (window._tlDayOffset || 0) === 0 && window._heroSkyCode){ var _hc = window._heroSkyCode(window._lastWxCodeRaw, window._lastWxCover); if (_hc !== window._lastWxCode){ window._lastWxCode = _hc; try { if (window.updateConditionsBriefing) window.updateConditionsBriefing(); } catch(e){} } } if (typeof window._updateHeroWx === 'function' && window._lastWxCode != null) window._updateHeroWx(window._lastWxCode, window._lastWxNight); window._bvSyncNowHourIcon && window._bvSyncNowHourIcon(); } catch(e){} }, 0); } } catch(e){}
         var fcTypes = classifyClouds(fc);
 
         // ── SHARE THE HERO'S CLOUD ARTWORK ────────────────────────────────
@@ -38803,16 +38819,16 @@ function dayRangeAround(d, days){
               .map(function(m){ m._d = Math.hypot((m.lon - lo0) * kx, m.lat - la0) * 111.2; return m; }).filter(function(m){ return m._d <= 80; })
               .sort(function(a, b){ return a._d - b._d; }).slice(0, 5);
             var low = 0, mid = 0, high = 0, seen = false, newest = 0, used = [];
-            var nRep0 = 0;
+            var nRep0 = 0, nearKm0 = null;
             near.forEach(function(m){
               var cl = Array.isArray(m.clouds) ? m.clouds : [], cv = String(m.cover || '').toUpperCase();
               if (!cl.length && !/^(CLR|SKC|CAVOK|NSC|NCD)$/.test(cv)) return;   /* a report that says nothing about the sky */
-              var cap0 = window._bvObsReach(m._d, nRep0++);
+              if (!nRep0) nearKm0 = m._d; var cap0 = window._bvObsReach(m._d, nRep0++);
               cl.forEach(function(l){ var pct = Math.min(cap0, AMT[String(l.cover || '').toUpperCase()] || 0), base = (+l.base || 0) * 0.3048;   /* feet AGL */
                 if (base < 2000) low = Math.max(low, pct); else if (base < 6000) mid = Math.max(mid, pct); else high = Math.max(high, pct); });
               seen = true; newest = Math.max(newest, m.obsTime * 1000); used.push(m.icaoId); });
             if (!seen) return;
-            window._obsClouds = { low: low, mid: mid, high: high, ts: newest, lat: loc.lat, lon: loc.lon, station: used.join('+') };
+            window._obsClouds = { low: low, mid: mid, high: high, ts: newest, lat: loc.lat, lon: loc.lon, station: used.join('+'), near: nearKm0 };
             window._lastGHRenderKey = null; clearTimeout(window._ghObsRefreshTo);
             window._ghObsRefreshTo = setTimeout(function(){ try{ if (typeof tlRenderForOffset === 'function') (window._tlRenderSoon || tlRenderForOffset)(); }catch(e){} }, 800);
           }).catch(function(){});
@@ -38842,7 +38858,7 @@ function dayRangeAround(d, days){
             var AMT = { FEW:15, SCT:44, BKN:75, OVC:95, VV:100 };
             var low=0, mid=0, high=0, seen=false, newest=0, used=[];
             if ((window.LOCATION || {}).lat !== loc.lat || (window.LOCATION || {}).lon !== loc.lon) return;   /* the place changed while the stations answered */
-            var nRep = 0;
+            var nRep = 0, nearKm = null;
             res.os.forEach(function(o, oi){
               var p = o && o.properties; if (!p) return;
               var ts = p.timestamp ? new Date(p.timestamp).getTime() : 0;
@@ -38856,10 +38872,10 @@ function dayRangeAround(d, days){
                 else if (base < 6000) mid = Math.max(mid, pct);
                 else high = Math.max(high, pct);
               });
-              if (had){ seen = true; newest = Math.max(newest, ts); used.push(res.sts[oi]); }
+              if (had){ if (!seen) nearKm = res.dkm[oi]; seen = true; newest = Math.max(newest, ts); used.push(res.sts[oi]); }
             });
             if (!seen) return; // no station reported layer data — don't blend
-            window._obsClouds = { low:low, mid:mid, high:high, ts:newest, lat:loc.lat, lon:loc.lon, station:used.join('+') };
+            window._obsClouds = { low:low, mid:mid, high:high, ts:newest, lat:loc.lat, lon:loc.lon, station:used.join('+'), near:nearKm };
             /* point the header's METAR/NWS credits at the station actually blended and this location's forecast */
             try {
               var _ghM = document.getElementById('gh-src-metar'), _ghN = document.getElementById('gh-src-nws');
